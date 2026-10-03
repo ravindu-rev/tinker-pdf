@@ -293,15 +293,17 @@ were before any other was added
 (`the_seven_first_subtypes_are_drawn_exactly_as_they_were`). Since October
 2026 a **`Line`** (12.5.6.7) is drawn too: `/L` in `/C` at the `/BS` width
 and dash, Table 176's ten endings filled with `/IC`, and Figure 60's leader
-lines from `/LL`, `/LLE` and `/LLO`. Table 176 names each ending's shape and
+lines from `/LL`, `/LLE` and `/LLO`; the endings go at the ends of the line
+proper, which the leader lines lift off `/L`, and with no leader lines `/LLO`
+— the gap before they begin — offsets nothing. Table 176 names each ending's shape and
 not its size; each is drawn three line widths (at least three points) from
 its point, so a square ending is six widths across and an arrowhead six
 widths long. An absent `/C` strokes a line-like annotation black, as
 `Underline` always has; an empty one is 12.5.2's "transparent". A
 **`Square`** or **`Circle`** (12.5.6.8) is drawn inside Table 177's `/RD`
 when it has one — the left, top, right and bottom differences between
-`/Rect` and the shape, read only when each is at least zero and they leave
-the shape a width and a height — and its border is dashed as a line's is. A
+`/Rect` and the shape, each at least zero and together leaving the shape a
+width and a height — and its border is dashed as a line's is. A
 **`Polygon`** (12.5.6.9) is its `/Vertices` joined, closed and filled with
 `/IC`; a **`PolyLine`** is the same path left open, with a line's `/LE`
 endings at its first and last vertex, facing along its end segments (past a
@@ -369,7 +371,22 @@ Table 174's `/CL` callout is stroked as the border is, from the point it
 calls out to the box, with `/LE`'s ending at that point. Every
 synthesised appearance carries 12.5.6.2's `/CA` (and ISO 32000-2's `/ca` for
 what is filled) as the `ExtGState` it selects, since a renderer reads
-opacity from the content and not from the annotation. Constructors for the common
+opacity from the content and not from the annotation.
+An entry is read only when it is what its table says it is: one that is
+present and is not — `/L`, `/Vertices`, an `/InkList` path, `/CL`, `/RD` or a
+squiggly's `/QuadPoints` holding anything but finite numbers, or the wrong
+count of them; an `/RD` Table 177 forbids; a dash 8.4.3.6 refuses (a
+negative or non-finite element, or every one zero) or a `/BS /S` Table 166
+does not name; an `/LE` that is not names Table 176 lists; a negative
+`/LLE` or `/LLO`; a `/CA`, `/ca`, `/LL` that is not a number; a `/Q` other
+than 0, 1 or 2; a negative `/DA` size — declines the appearance rather than
+being read past (`a_malformed_entry_declines_the_appearance`). Until the
+October 2026 review a bad element was dropped and the rest re-paired, so
+`/L [10 (x) 50 90 50]` drew a line from (10, 50) to (90, 50) that is
+nowhere in the data, and an unlisted ending, a refused dash and a forbidden
+`/RD` were each drawn as something the producer did not write. Declining
+repairs nothing, so it is not a leniency with a warning to emit; the
+annotation is left as it came, as one of an unknown subtype is. Constructors for the common
 shapes live in `tinker_pdf_cos::annot`: `highlight(doc, quads, color)`, `square(doc, rect,
 color, width)`, `text_note(doc, rect, contents, open)` and `link(doc, rect,
 page)`. `flatten_annotations(page)` paints every annotation's normal
@@ -782,6 +799,7 @@ a quarter (`rotate_page` refuses it) and an empty owner password (the user's,
 | Appearance synthesis for the subtypes whose appearance no dictionary determines — `Stamp`, `FileAttachment`, `Sound`, `Movie`, `Screen`, `3D`, `RichMedia`, `Popup`, `Widget`, `PrinterMark`, `TrapNet`, `Watermark`, `Redact` and `Projection` (`appearance::UNDETERMINED_SUBTYPES`) | `add_annotation` inserts the dictionary and synthesises no `/AP`, so the annotation renders only if it carries its own (`the_subtypes_no_dictionary_determines_are_declined_by_name`; `every_subtype_of_12_5_6_is_drawn_or_declined_by_name` fails if a subtype is in neither list) | what each would show is not in its dictionary: a stamp's, a file attachment's and a sound's `/Name` names an icon — `Approved`, `PushPin`, `Speaker` — that 12.5.6 gives no outline; a movie, a screen, a 3D annotation and rich media show their medium; a pop-up is the viewer's window for its parent's text; a widget's appearance is its field's, which the form filler builds from the value (`fill.rs`); a printer's mark, a trap network and a watermark exist only as the `/AP` their producer wrote; a redaction's entries say what replaces the content once it is applied and not what the mark looks like before; and a projection adds no entry at all. Inventing a picture is worse than drawing none | 12.5.6 |
 | A line's caption (`/Cap`, `/CP`, `/CO`) | the line is drawn, its caption is not | a caption is text, and a line annotation names no font to draw it in | 12.5.6.7 |
 | A caret's paragraph symbol (`/Sy /P`) | the caret is drawn and the symbol is not, exactly as for `/Sy /None` | 12.5.6.11 says a ¶ "shall be associated with the caret" and says nothing of where it goes or how large it is; a symbol put somewhere is an invention, and a producer that wants one writes its own `/AP` | 12.5.6.11 |
+| An annotation without `/AP` whose dictionary has an entry that is present and not what its table says — coordinates that are not finite numbers or not the count Table 175, 177, 178, 180 or 182 asks for, an `/RD` Table 177 forbids, a dash 8.4.3.6 refuses, a `/BS /S` Table 166 does not name, an `/LE` name Table 176 does not list, a negative `/LLE` or `/LLO`, a `/CA`, `/ca` or `/LL` that is not a number, a `/Q` other than 0, 1 or 2, a negative `/DA` size | no appearance is synthesised (`a_malformed_entry_declines_the_appearance`) | what would be drawn from what is left is a shape the producer did not write: one bad element of `/L` re-paired moves every later coordinate, and a forbidden `/RD` read past puts the shape somewhere else. Declining repairs nothing, so no warning is emitted; the annotation is left as it came | 12.5.6 |
 | A synthesised border's **effect** (`/BE /S /C`, cloudy, on a square, circle, polygon or free text) and the **beveled, inset and underline** border styles (`/BS /S /B`, `/I`, `/U`) | the border is drawn solid, at its width and in its colour, as though `/BE` were absent and `/S` were `/S` | 12.5.4 says a cloudy border "shall appear cloudy" at an intensity from 0 to 2 and gives no geometry for a cloud; Table 166's beveled and inset styles are "simulated" embossing in shades nothing names, and the underline style draws a widget's bottom edge, which is not what a shape is. A producer that wants one of them writes its own `/AP`, and one it wrote is kept | 12.5.4 |
 | Rewriting a Type 3 glyph's procedure when it draws under a rectangle | the **use** is removed whole and the procedure is left byte for byte (`a_glyph_whose_procedure_shows_text_under_a_rectangle_is_removed_at_that_use`), so a procedure that shows the covered words still says them in `/CharProcs` while any use of it is left; once none is, `subset::apply` — the default save — empties it (`a_procedure_whose_last_use_was_redacted_is_emptied_by_the_default_save`) | the procedure is the font's: every use of the glyph on every page runs it, so cutting it would cut every use, and there is no copy to give the uncovered ones short of a new glyph in the font. This is a substitute for the ROADMAP Editing row's "glyph-procedure streams rewritten", chosen here and not yet ruled on: the row stays open until the owner accepts it or it is replaced | 9.6.5 |
 | Redacting a run in a font **the editor allocated** — through `import_page`, or a form or resources a caller wrote with new font objects | left whole, `UnknownFont`, like any font not in scope | fonts and glyph procedures are read through the file (`cos_font::from_resources` and `stream_decoded` over `DocumentEditor::document`) while pages, resources and XObjects are read through the editor, so a font object only the editor holds does not resolve. Named rather than silent; reading fonts through the editor is a change to `tinker-pdf-cos`'s font loader, owed in the ROADMAP's Editing row | — |
@@ -840,7 +858,8 @@ a quarter (`rotate_page` refuses it) and an empty owner password (the user's,
   A line along `/L` at its width and no further; its arrowhead and square
   endings filled with `/IC` and bordered with `/C`; a dash from its first
   point; leader lines that lift the line proper off its points by `/LLO`
-  and `/LL` and run `/LLE` past it; and half opacity reaching the page as
+  and `/LL` and run `/LLE` past it, its square endings filled where the
+  line proper ends and nothing at the points in `/L`; and half opacity reaching the page as
   half the colour. A square bordered inside its `/Rect` and filled, moved
   inside it by `/RD`, and dashed from its lower-left corner; a circle
   inscribed in its `/Rect`, its corners left white, and its fill at half
@@ -861,10 +880,11 @@ a quarter (`rotate_page` refuses it) and an empty owner password (the user's,
   set against the right side by `/Q 2`; and a callout from the box to the
   point it calls out, drawn only under `/IT /FreeTextCallout`.
   `appearance.rs`'s own tests pin the seven first subtypes byte for byte and
-  each ending's path, decline by name every subtype whose appearance no
-  dictionary determines, fail if a subtype of 12.5.6 is in neither list,
-  and put 768 dictionaries of hostile numbers — none, too few, enormous,
-  infinite, not a number — through every subtype without a panic
+  each ending's path, decline every subtype whose appearance no dictionary
+  determines and every dictionary with a malformed entry, fail if a subtype
+  of 12.5.6 is in neither list, and put 768 dictionaries of hostile numbers
+  — none, too few, enormous, infinite, not a number — and `/DA` strings of
+  arbitrary bytes through every subtype without a panic
   (`synthesis_never_panics_whatever_the_numbers`).
 - `crates/tinker-pdf/tests/editor_docops.rs` — the document operations, from
   outside the crate: each setter's output saved **incrementally and as a

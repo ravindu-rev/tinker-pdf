@@ -287,6 +287,33 @@ fn leader_lines_lift_the_line_proper_off_its_points() {
     );
 }
 
+/// The endings go where the line proper ends, not at `/L`'s points: the
+/// line of the test above with a square at each end, filled blue. At width
+/// 2 a square reaches six points from its centre, so the one at the first
+/// end covers x 14 to 26 and y 48 to 60 — around (20, 54), where the leader
+/// lifts the line to — and nothing is drawn around (20, 30), the point in
+/// `/L`.
+#[test]
+fn a_lines_endings_move_with_the_line_proper() {
+    let page = synthesized(
+        "<< /Type /Annot /Subtype /Line /Rect [0 0 100 100] /L [20 30 80 30] \
+         /LL -20 /LLE 5 /LLO 4 /BS << /W 2 >> /C [1 0 0] /IC [0 0 1] \
+         /LE [/Square /Square] >>",
+    );
+    assert_points(
+        &page.bitmap,
+        "blue, inside each square, clear of the line and the leader",
+        &[(16.5, 50.5), (23.5, 57.5), (76.5, 50.5), (83.5, 57.5)],
+        is_blue,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, around the points in /L",
+        &[(16.5, 30.5), (23.5, 27.5), (76.5, 30.5), (83.5, 27.5)],
+        is_white,
+    );
+}
+
 /// 12.5.6.2's `/CA`: a red line at half opacity over white is half red.
 #[test]
 fn a_lines_opacity_reaches_the_page() {

@@ -40,6 +40,13 @@
 //! Each carries 12.5.6.2's `/CA` in the graphics state it selects, and each
 //! stroked border or line its `/BS` (or `/Border`) dash.
 //!
+//! An entry is read only when it is what its table says it is. One that is
+//! present and is not — a coordinate array holding something other than
+//! finite numbers or the wrong count of them, an `/RD` Table 177 forbids, a
+//! dash 8.4.3.6 refuses, an `/LE` name Table 176 does not list — declines the
+//! appearance ([`Malformed`]) rather than being read past, because what is
+//! drawn from what is left is a shape the producer never wrote.
+//!
 //! Every other subtype is declined: by name when 12.5.6 gives it an
 //! appearance its dictionary does not determine ([`UNDETERMINED_SUBTYPES`]),
 //! and as unknown otherwise.
@@ -150,58 +157,107 @@ fn op(out: &mut Vec<u8>, values: &[f64], operator: &[u8]) {
 /// A point in default user space.
 type Point = (f64, f64);
 
-/// The finite numbers of an array entry, in order; empty when the entry is
-/// absent or not an array. A non-number element is dropped rather than read
-/// as zero, so a malformed array shortens instead of growing a point at the
-/// origin.
-fn numbers_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Vec<f64> {
-    doc.resolve_key(dict, doc.intern(key))
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Object::as_number)
-                .filter(|v| v.is_finite())
-                .collect()
-        })
-        .unwrap_or_default()
+/// An entry that is present and is not what its table says it is.
+///
+/// Every reader below that can meet one returns it rather than reading past
+/// it, and the subtype being drawn then declines the appearance: dropping one
+/// bad element of `/L` and pairing what is left moves every later
+/// coordinate, an `/RD` that is not read draws the shape somewhere its
+/// producer did not put it, and an ending Table 176 does not list drawn as
+/// none is an arrow left off. A wrong appearance is worse than none, and
+/// declining repairs nothing, so nothing here is a leniency to warn about
+/// (ruling 10): the annotation is left as it came, as an unknown subtype is.
+#[derive(Debug, PartialEq)]
+struct Malformed;
+
+/// What a strict reader makes of an optional entry: absent (`None`), read,
+/// or [`Malformed`].
+type Entry<T> = Result<Option<T>, Malformed>;
+
+/// An entry that is an array of finite numbers, each element a number or a
+/// reference to one (7.3.10). An absent or null entry is `Ok(None)`; one
+/// that is not an array, or holds an element that is not a finite number,
+/// is [`Malformed`].
+fn numbers_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Entry<Vec<f64>> {
+    let value = doc.resolve_key(dict, doc.intern(key));
+    if value.is_null() {
+        return Ok(None);
+    }
+    numbers_in(doc, &value).map(Some)
 }
 
-/// A finite number entry.
-fn number_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Option<f64> {
-    doc.resolve_key(dict, doc.intern(key))
-        .as_number()
-        .filter(|v| v.is_finite())
+/// The finite numbers an array object holds, or [`Malformed`] when it is
+/// not an array or one of them is not a finite number.
+fn numbers_in(doc: &CosDocument, array: &Object) -> Result<Vec<f64>, Malformed> {
+    array
+        .as_array()
+        .ok_or(Malformed)?
+        .iter()
+        .map(|item| {
+            doc.resolve(item)
+                .as_number()
+                .filter(|v| v.is_finite())
+                .ok_or(Malformed)
+        })
+        .collect()
+}
+
+/// A number entry: absent or null is `Ok(None)`, and anything but a finite
+/// number is [`Malformed`].
+fn number_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Entry<f64> {
+    let value = doc.resolve_key(dict, doc.intern(key));
+    if value.is_null() {
+        return Ok(None);
+    }
+    match value.as_number() {
+        Some(v) if v.is_finite() => Ok(Some(v)),
+        _ => Err(Malformed),
+    }
+}
+
+/// A name entry: absent or null is `Ok(None)`, and anything but a name is
+/// [`Malformed`].
+fn name_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Entry<Vec<u8>> {
+    let value = doc.resolve_key(dict, doc.intern(key));
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_name()
+        .and_then(|name| doc.name_bytes(name))
+        .map(|name| Some(name.to_vec()))
+        .ok_or(Malformed)
 }
 
 /// The rectangle a shape is drawn in: `/Rect` less `/RD` (12.5.6.8
 /// Table 177, and the caret's and free text's tables), whose four numbers
 /// are the differences at the left, top, right and bottom.
 ///
-/// Table 177 asks each to be at least zero and each pair to leave the shape
-/// some width and height. A `/RD` that breaks either — a negative or
-/// non-finite difference, or two that meet across the rectangle — is not
-/// read, and the shape is drawn in the whole of `/Rect`: a border effect is
-/// what makes a producer write `/RD`, and a shape drawn a little large is a
-/// better guess than one drawn inside out.
-fn drawn_rect(doc: &CosDocument, dict: &Dict, rect: Rect) -> Rect {
-    let rd = numbers_of(doc, dict, b"RD");
-    let [left, top, right, bottom] = match rd.get(..4) {
-        Some(&[l, t, r, b]) => [l, t, r, b],
-        _ => return rect,
+/// No `/RD` is the whole of `/Rect`. Table 177 asks for four differences,
+/// each at least zero, that leave the shape some width and height; an `/RD`
+/// that is anything else — a count other than four, an element that is not
+/// a finite number, a negative difference, two that meet across the
+/// rectangle — is [`Malformed`], since the shape it puts somewhere is a
+/// guess at where its producer meant.
+fn drawn_rect(doc: &CosDocument, dict: &Dict, rect: Rect) -> Result<Rect, Malformed> {
+    let Some(rd) = numbers_of(doc, dict, b"RD")? else {
+        return Ok(rect);
+    };
+    let &[left, top, right, bottom] = rd.as_slice() else {
+        return Err(Malformed);
     };
     let valid = [left, top, right, bottom].iter().all(|v| *v >= 0.0)
         && left + right < rect.x1 - rect.x0
         && top + bottom < rect.y1 - rect.y0;
     if !valid {
-        return rect;
+        return Err(Malformed);
     }
-    Rect {
+    Ok(Rect {
         x0: rect.x0 + left,
         y0: rect.y0 + bottom,
         x1: rect.x1 - right,
         y1: rect.y1 - top,
-    }
+    })
 }
 
 /// The colour a line-like annotation strokes with: `/C`, or black when the
@@ -216,43 +272,44 @@ fn stroke_color_of(doc: &CosDocument, dict: &Dict) -> Option<[f64; 3]> {
 
 /// The dash pattern a border is drawn with (12.5.4 Table 166): `/BS /D` when
 /// `/BS /S` is `/D`, defaulting to `[3]`; otherwise the legacy `/Border`'s
-/// optional fourth element. `None` is a solid line.
+/// optional fourth element. `Ok(None)` is a solid line, and so is an empty
+/// pattern, as 8.4.3.6's `[] 0 d` is.
 ///
-/// A pattern 8.4.3.6 would refuse — a negative or non-finite element, or
-/// every element zero — is drawn solid: a viewer handed `[0 0] 0 d` draws
-/// nothing at all, which is the one thing a border must not become.
-fn dash_of(doc: &CosDocument, dict: &Dict) -> Option<Vec<f64>> {
-    let pattern = if let Some(style) = doc.resolve_key(dict, doc.intern(b"BS")).as_dict() {
-        let dashed = style
-            .get_name(doc.intern(b"S"))
-            .and_then(|name| doc.name_bytes(name))
-            .is_some_and(|name| name.as_ref() == b"D");
-        if !dashed {
-            return None;
+/// [`Malformed`]: a `/BS` that is not a dictionary, a `/BS /S` that is not one
+/// of Table 166's five names, a `/Border` that is not an array, and a pattern
+/// 8.4.3.6 refuses — an element that is not a finite number, a negative one,
+/// or every one zero, which a viewer handed `[0 0] 0 d` draws as nothing at
+/// all. `/S /B`, `/I` and `/U` — beveled, inset and underline — are drawn
+/// solid, a refusal the feature doc's table names.
+fn dash_of(doc: &CosDocument, dict: &Dict) -> Entry<Vec<f64>> {
+    let style = doc.resolve_key(dict, doc.intern(b"BS"));
+    let pattern = if !style.is_null() {
+        let style = style.as_dict().ok_or(Malformed)?;
+        match name_of(doc, style, b"S")?.as_deref() {
+            None | Some(b"S" | b"B" | b"I" | b"U") => return Ok(None),
+            Some(b"D") => {}
+            Some(_) => return Err(Malformed),
         }
-        match doc.resolve_key(style, doc.intern(b"D")).as_array() {
-            Some(items) => items
-                .iter()
-                .map(Object::as_number)
-                .collect::<Option<Vec<f64>>>()?,
-            None => vec![3.0],
-        }
+        numbers_of(doc, style, b"D")?.unwrap_or_else(|| vec![3.0])
     } else {
         let border = doc.resolve_key(dict, doc.intern(b"Border"));
-        let items = border.as_array()?.get(3)?;
-        let items = match items {
-            Object::Ref(r) => doc.get(*r).ok()?.as_array()?.to_vec(),
-            other => other.as_array()?.to_vec(),
-        };
-        items
-            .iter()
-            .map(Object::as_number)
-            .collect::<Option<Vec<f64>>>()?
+        if border.is_null() {
+            return Ok(None);
+        }
+        match border.as_array().ok_or(Malformed)?.get(3) {
+            None => return Ok(None),
+            Some(items) => numbers_in(doc, &doc.resolve(items))?,
+        }
     };
-    let valid = !pattern.is_empty()
-        && pattern.iter().all(|v| v.is_finite() && *v >= 0.0)
-        && pattern.iter().any(|v| *v > 0.0);
-    valid.then_some(pattern)
+    if pattern.is_empty() {
+        return Ok(None);
+    }
+    let valid = pattern.iter().all(|v| *v >= 0.0) && pattern.iter().any(|v| *v > 0.0);
+    if valid {
+        Ok(Some(pattern))
+    } else {
+        Err(Malformed)
+    }
 }
 
 /// Writes `[a b ...] phase d`.
@@ -277,10 +334,14 @@ fn dash(out: &mut Vec<u8>, pattern: &[f64], phase: f64) {
 /// annotation. It is applied per operator, so where a fill and a stroke
 /// overlap (the inner half of a border) the two compose; that is the same
 /// appearance every producer that writes `/CA` into a `gs` makes.
-fn opacity_of(doc: &CosDocument, dict: &Dict) -> Option<(f64, f64)> {
-    let stroking = number_of(doc, dict, b"CA").map_or(1.0, |v| v.clamp(0.0, 1.0));
-    let filling = number_of(doc, dict, b"ca").map_or(stroking, |v| v.clamp(0.0, 1.0));
-    (stroking < 1.0 || filling < 1.0).then_some((stroking, filling))
+///
+/// A value outside 0 to 1 is clamped into it, as a colour component is: it
+/// is the value a renderer handed it would use. One that is not a number is
+/// [`Malformed`].
+fn opacity_of(doc: &CosDocument, dict: &Dict) -> Entry<(f64, f64)> {
+    let stroking = number_of(doc, dict, b"CA")?.map_or(1.0, |v| v.clamp(0.0, 1.0));
+    let filling = number_of(doc, dict, b"ca")?.map_or(stroking, |v| v.clamp(0.0, 1.0));
+    Ok((stroking < 1.0 || filling < 1.0).then_some((stroking, filling)))
 }
 
 /// A unit vector along `(dx, dy)`, or `None` for one too short to have a
@@ -313,10 +374,10 @@ enum Ending {
 }
 
 impl Ending {
-    /// A name Table 176 does not list draws nothing at that end: an ending
-    /// is a decoration, and inventing one is worse than leaving it off.
-    fn from_name(name: &[u8]) -> Ending {
-        match name {
+    /// The ending Table 176 names, or `None` for a name it does not list.
+    fn from_name(name: &[u8]) -> Option<Ending> {
+        Some(match name {
+            b"None" => Ending::None,
             b"Square" => Ending::Square,
             b"Circle" => Ending::Circle,
             b"Diamond" => Ending::Diamond,
@@ -326,8 +387,8 @@ impl Ending {
             b"ROpenArrow" => Ending::ROpenArrow,
             b"RClosedArrow" => Ending::RClosedArrow,
             b"Slash" => Ending::Slash,
-            _ => Ending::None,
-        }
+            _ => return None,
+        })
     }
 
     /// The endings Table 176 fills with the interior colour.
@@ -343,20 +404,26 @@ impl Ending {
     }
 }
 
-/// `/LE`: the endings at the first and the last point, `None` by default.
-fn endings_of(doc: &CosDocument, dict: &Dict) -> (Ending, Ending) {
+/// `/LE` (Tables 175 and 178): the endings at the first and the last point,
+/// `None` at both when it is absent. Anything but an array of two names
+/// Table 176 lists is [`Malformed`]: an ending is a decoration, but an arrow
+/// left off a line that asked for one is a different line.
+fn endings_of(doc: &CosDocument, dict: &Dict) -> Result<(Ending, Ending), Malformed> {
     let value = doc.resolve_key(dict, doc.intern(b"LE"));
-    let Some(items) = value.as_array() else {
-        return (Ending::None, Ending::None);
-    };
-    let at = |index: usize| {
-        items
-            .get(index)
-            .and_then(Object::as_name)
+    if value.is_null() {
+        return Ok((Ending::None, Ending::None));
+    }
+    let ending = |item: &Object| {
+        doc.resolve(item)
+            .as_name()
             .and_then(|name| doc.name_bytes(name))
-            .map_or(Ending::None, |name| Ending::from_name(&name))
+            .and_then(|name| Ending::from_name(&name))
+            .ok_or(Malformed)
     };
-    (at(0), at(1))
+    match value.as_array().ok_or(Malformed)? {
+        [first, last] => Ok((ending(first)?, ending(last)?)),
+        _ => Err(Malformed),
+    }
 }
 
 /// How a line-like annotation is painted: its stroke, its interior and its
@@ -479,11 +546,16 @@ fn ending(out: &mut Vec<u8>, kind: Ending, at: Point, out_dir: Point, line: Poin
 ///
 /// `/LL` is the leader lines' length, measured from `/LLO` past each point —
 /// clockwise of the line's direction when positive — and the line proper is
-/// drawn between their far ends, `/LLE` short of where they stop. `/Cap`'s
-/// caption is not drawn: text needs a font the dictionary does not name.
+/// drawn between their far ends, `/LLE` short of where they stop; with no
+/// leader lines, `/LLO` — the gap before they begin — has nothing to offset,
+/// and the line proper is `/L`. `/Cap`'s caption is not drawn: text needs a
+/// font the dictionary does not name.
+///
+/// `/L` must be four finite numbers, and `/LLE` and `/LLO` at least zero
+/// (Table 175); anything else declines the line ([`Malformed`]).
 fn line(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
-    let points = numbers_of(doc, annotation, b"L");
-    let [x1, y1, x2, y2] = *points.get(..4)? else {
+    let points = numbers_of(doc, annotation, b"L").ok()??;
+    let &[x1, y1, x2, y2] = points.as_slice() else {
         return None;
     };
     let along = unit(x2 - x1, y2 - y1)?;
@@ -492,25 +564,32 @@ fn line(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
         fill: color_of(doc, annotation, b"IC"),
         width: border_width(doc, annotation),
     };
-    let (first, last) = endings_of(doc, annotation);
+    let (first, last) = endings_of(doc, annotation).ok()?;
     let fills_an_end = paint.fill.is_some() && (first.is_closed() || last.is_closed());
     if !paint.strokes() && !fills_an_end {
         return None;
     }
 
-    let leader = number_of(doc, annotation, b"LL").unwrap_or(0.0);
-    let extension = number_of(doc, annotation, b"LLE").unwrap_or(0.0).max(0.0);
-    let offset = number_of(doc, annotation, b"LLO").unwrap_or(0.0).max(0.0);
+    let leader = number_of(doc, annotation, b"LL").ok()?.unwrap_or(0.0);
+    let extension = number_of(doc, annotation, b"LLE").ok()?.unwrap_or(0.0);
+    let offset = number_of(doc, annotation, b"LLO").ok()?.unwrap_or(0.0);
+    if extension < 0.0 || offset < 0.0 {
+        return None;
+    }
     // Clockwise of the direction of travel, for a positive /LL.
     let side = if leader < 0.0 { -1.0 } else { 1.0 };
     let (cx, cy) = (along.1 * side, -along.0 * side);
-    let reach = offset + leader.abs();
+    let reach = if leader == 0.0 {
+        0.0
+    } else {
+        offset + leader.abs()
+    };
     let (p1, p2) = (
         (x1 + cx * reach, y1 + cy * reach),
         (x2 + cx * reach, y2 + cy * reach),
     );
 
-    let dashed = set_up(doc, annotation, &paint, out);
+    let dashed = set_up(doc, annotation, &paint, out)?;
     if paint.strokes() {
         if leader != 0.0 {
             let far = reach + extension;
@@ -536,8 +615,9 @@ fn line(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
 /// Sets up a line-like annotation's paint: the stroke colour, the fill
 /// colour, and, when it strokes at all, the width and the dash. Returns
 /// whether a dash was set, so that what is drawn after the path — an
-/// ending — can be drawn solid.
-fn set_up(doc: &CosDocument, annotation: &Dict, paint: &Paint, out: &mut Vec<u8>) -> bool {
+/// ending — can be drawn solid; `None` when the dash is [`Malformed`].
+fn set_up(doc: &CosDocument, annotation: &Dict, paint: &Paint, out: &mut Vec<u8>) -> Option<bool> {
+    let pattern = dash_of(doc, annotation).ok()?;
     if let Some(stroke) = paint.stroke {
         op(out, &stroke, b"RG");
     }
@@ -545,23 +625,27 @@ fn set_up(doc: &CosDocument, annotation: &Dict, paint: &Paint, out: &mut Vec<u8>
         op(out, &fill, b"rg");
     }
     if !paint.strokes() {
-        return false;
+        return Some(false);
     }
     op(out, &[paint.width], b"w");
-    match dash_of(doc, annotation) {
+    match pattern {
         Some(pattern) => {
             dash(out, &pattern, 0.0);
-            true
+            Some(true)
         }
-        None => false,
+        None => Some(false),
     }
 }
 
 /// An array of alternating x and y coordinates, as points (12.5.6.9's
-/// `/Vertices`, and each path of 12.5.6.13's `/InkList`). A last number
-/// with no partner names no point and is dropped.
-fn points_of(numbers: &[f64]) -> Vec<Point> {
-    numbers.chunks_exact(2).map(|c| (c[0], c[1])).collect()
+/// `/Vertices`, each path of 12.5.6.13's `/InkList`, and Table 174's `/CL`).
+/// An odd count is [`Malformed`]: its last number names no point, and which
+/// number is the one too many is not knowable.
+fn points_of(numbers: &[f64]) -> Result<Vec<Point>, Malformed> {
+    if numbers.len() % 2 != 0 {
+        return Err(Malformed);
+    }
+    Ok(numbers.chunks_exact(2).map(|c| (c[0], c[1])).collect())
 }
 
 /// The direction a path leaves `from` by: towards the first of `rest` that
@@ -580,9 +664,10 @@ fn leaving(from: Point, rest: impl Iterator<Item = Point>) -> Option<Point> {
 ///
 /// An absent `/C` strokes black, as a line's does — the outline is what a
 /// polygon is, where a square's border is optional. Fewer than two
-/// distinct vertices join nothing, and draw nothing.
+/// distinct vertices join nothing, and draw nothing; `/Vertices` that are
+/// not an even count of finite numbers decline the shape ([`Malformed`]).
 fn polygon(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>, closed: bool) -> Option<()> {
-    let points = points_of(&numbers_of(doc, annotation, b"Vertices"));
+    let points = points_of(&numbers_of(doc, annotation, b"Vertices").ok()??).ok()?;
     let (&first, &last) = (points.first()?, points.last()?);
     let start = leaving(first, points.iter().copied())?;
     let paint = Paint {
@@ -593,7 +678,7 @@ fn polygon(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>, closed: bool
     let (first_end, last_end) = if closed {
         (Ending::None, Ending::None)
     } else {
-        endings_of(doc, annotation)
+        endings_of(doc, annotation).ok()?
     };
     let painter: &[u8] = if closed {
         paint.closed()?
@@ -605,7 +690,7 @@ fn polygon(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>, closed: bool
         b"S\n"
     };
 
-    let dashed = set_up(doc, annotation, &paint, out);
+    let dashed = set_up(doc, annotation, &paint, out)?;
     if closed || paint.strokes() {
         op(out, &[first.0, first.1], b"m");
         for (x, y) in points.iter().skip(1) {
@@ -698,9 +783,15 @@ fn quad_frame(quad: &[f64; 8]) -> Option<QuadFrame> {
 fn squiggly(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
     const K: f64 = std::f64::consts::FRAC_1_SQRT_2;
     let color = color_of(doc, annotation, b"C").unwrap_or([0.0, 0.0, 0.0]);
-    let frames: Vec<QuadFrame> = quads_of(doc, annotation)
-        .iter()
-        .filter_map(quad_frame)
+    // `/QuadPoints` read strictly: a count that is not a whole number of
+    // quads, or an element that is not a finite number, declines.
+    let numbers = numbers_of(doc, annotation, b"QuadPoints").ok()??;
+    if numbers.len() % 8 != 0 {
+        return None;
+    }
+    let frames: Vec<QuadFrame> = numbers
+        .chunks_exact(8)
+        .filter_map(|c| quad_frame(&[c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
         .collect();
     if frames.is_empty() {
         return None;
@@ -770,7 +861,7 @@ fn squiggly(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<(
 /// and the feature doc's refusal table names it.
 fn caret(doc: &CosDocument, annotation: &Dict, rect: Rect, out: &mut Vec<u8>) -> Option<()> {
     let color = stroke_color_of(doc, annotation)?;
-    let caret = drawn_rect(doc, annotation, rect);
+    let caret = drawn_rect(doc, annotation, rect).ok()?;
     let middle = (caret.x0 + caret.x1) / 2.0;
     let half = (caret.y0 + caret.y1) / 2.0;
     op(out, &color, b"rg");
@@ -797,27 +888,26 @@ fn caret(doc: &CosDocument, annotation: &Dict, rect: Rect, out: &mut Vec<u8>) ->
 /// small file can ask for to what it holds — `[5 0 R 5 0 R ...]` would
 /// otherwise draw one large array as many times as the list names it, and
 /// under `/CA` a stroke drawn twice over itself is darker than one.
-fn ink_paths(doc: &CosDocument, dict: &Dict) -> Vec<Vec<Point>> {
+///
+/// A list that is not an array, or holds a path that is not an even count
+/// of finite numbers, is [`Malformed`]; an empty path draws nothing.
+fn ink_paths(doc: &CosDocument, dict: &Dict) -> Result<Vec<Vec<Point>>, Malformed> {
     let list = doc.resolve_key(dict, doc.intern(b"InkList"));
-    let Some(items) = list.as_array() else {
-        return Vec::new();
-    };
+    if list.is_null() {
+        return Ok(Vec::new());
+    }
     let mut seen = std::collections::HashSet::new();
-    items
-        .iter()
-        .filter(|item| item.as_objref().is_none_or(|r| seen.insert(r)))
-        .filter_map(|item| {
-            let path = doc.resolve(item);
-            let numbers: Vec<f64> = path
-                .as_array()?
-                .iter()
-                .filter_map(Object::as_number)
-                .filter(|v| v.is_finite())
-                .collect();
-            let points = points_of(&numbers);
-            (!points.is_empty()).then_some(points)
-        })
-        .collect()
+    let mut paths = Vec::new();
+    for item in list.as_array().ok_or(Malformed)? {
+        if item.as_objref().is_some_and(|r| !seen.insert(r)) {
+            continue;
+        }
+        let points = points_of(&numbers_in(doc, &doc.resolve(item))?)?;
+        if !points.is_empty() {
+            paths.push(points);
+        }
+    }
+    Ok(paths)
 }
 
 /// An ink annotation (12.5.6.13): each of `/InkList`'s paths stroked in
@@ -829,7 +919,7 @@ fn ink_paths(doc: &CosDocument, dict: &Dict) -> Vec<Vec<Point>> {
 /// joins, the shape a pen leaves; a path of one point is a dot. An absent
 /// `/C` strokes black, as a line's does.
 fn ink(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
-    let paths = ink_paths(doc, annotation);
+    let paths = ink_paths(doc, annotation).ok()?;
     let paint = Paint {
         stroke: stroke_color_of(doc, annotation),
         fill: None,
@@ -838,7 +928,7 @@ fn ink(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
     if paths.is_empty() || !paint.strokes() {
         return None;
     }
-    set_up(doc, annotation, &paint, out);
+    set_up(doc, annotation, &paint, out)?;
     out.extend_from_slice(b"1 J\n1 j\n");
     for path in paths {
         let mut points = path.iter();
@@ -938,9 +1028,13 @@ fn default_appearance(da: &[u8]) -> Option<DefaultAppearance> {
         match operator {
             b"Tf" => {
                 if let [.., Operand::Name(name), Operand::Number(size)] = operands.as_slice() {
-                    if size.is_finite() {
-                        font = Some((name.clone(), size.max(0.0)));
+                    // 12.7.3.3 gives a size of zero a meaning, auto-sizing,
+                    // and a negative one none: read as zero it would be a
+                    // size the producer did not ask for.
+                    if !size.is_finite() || *size < 0.0 {
+                        return None;
                     }
+                    font = Some((name.clone(), *size));
                 }
             }
             b"g" => {
@@ -1129,7 +1223,16 @@ fn free_text(
         return None;
     }
 
-    let boxed = drawn_rect(doc, annotation, rect);
+    // Every entry is read before anything is drawn, and one that is
+    // malformed declines the whole appearance (`Malformed`).
+    let boxed = drawn_rect(doc, annotation, rect).ok()?;
+    let quadding = match doc.resolve_key(annotation, doc.intern(b"Q")).as_ref() {
+        Object::Null => 0,
+        // 12.7.3.3: left, centred, right.
+        Object::Int(q @ 0..=2) => *q,
+        _ => return None,
+    };
+    let callout = callout_of(doc, annotation).ok()?;
     let paint = Paint {
         stroke: Some(da.color),
         fill: color_of(doc, annotation, b"C"),
@@ -1152,7 +1255,7 @@ fn free_text(
             ..paint
         },
         out,
-    );
+    )?;
     if paint.strokes() {
         let border = inset(boxed, paint.width / 2.0);
         op(
@@ -1166,7 +1269,13 @@ fn free_text(
             b"re",
         );
         out.extend_from_slice(b"S\n");
-        callout(doc, annotation, &paint, dashed, out);
+        if let Some((points, kind)) = &callout {
+            let ending_paint = Paint {
+                fill: color_of(doc, annotation, b"IC"),
+                ..paint
+            };
+            draw_callout(points, *kind, &ending_paint, dashed, out);
+        }
     }
 
     let inner = inset(boxed, paint.width + 2.0);
@@ -1208,10 +1317,6 @@ fn free_text(
             .unwrap_or(4.0)
     };
 
-    let quadding = doc
-        .resolve_key(annotation, doc.intern(b"Q"))
-        .as_int()
-        .unwrap_or(0);
     out.extend_from_slice(b"q\n");
     op(out, &[inner.x0, inner.y0, inner_w, inner_h], b"re");
     out.extend_from_slice(b"W n\nBT\n");
@@ -1263,21 +1368,33 @@ fn free_text(
 }
 
 /// A free text callout (12.5.6.6 Table 174 `/CL`): two or three points from
-/// the point called out to the box, stroked as the border is, with `/LE`'s
-/// ending at the first point. Table 174 makes `/CL` meaningful only under
-/// `/IT /FreeTextCallout`, and it is drawn only then.
-fn callout(doc: &CosDocument, annotation: &Dict, paint: &Paint, dashed: bool, out: &mut Vec<u8>) {
-    let intent = annotation
-        .get_name(doc.intern(b"IT"))
-        .and_then(|name| doc.name_bytes(name));
-    if intent.as_deref() != Some(b"FreeTextCallout".as_slice()) {
-        return;
+/// the point called out to the box, and `/LE`'s ending at the first. Table
+/// 174 makes `/CL` meaningful only under `/IT /FreeTextCallout`, and it is
+/// read only then; `Ok(None)` when the intent is another or `/CL` is absent.
+///
+/// [`Malformed`]: an `/IT` that is not a name, a `/CL` that is not four or
+/// six finite numbers, and an `/LE` that is not a name Table 176 lists.
+fn callout_of(doc: &CosDocument, annotation: &Dict) -> Entry<(Vec<Point>, Ending)> {
+    if name_of(doc, annotation, b"IT")?.as_deref() != Some(b"FreeTextCallout".as_slice()) {
+        return Ok(None);
     }
-    let numbers = numbers_of(doc, annotation, b"CL");
-    let points = match numbers.len() {
-        4 | 6 => points_of(&numbers),
-        _ => return,
+    let Some(numbers) = numbers_of(doc, annotation, b"CL")? else {
+        return Ok(None);
     };
+    if !matches!(numbers.len(), 4 | 6) {
+        return Err(Malformed);
+    }
+    let kind = match name_of(doc, annotation, b"LE")? {
+        None => Ending::None,
+        Some(name) => Ending::from_name(&name).ok_or(Malformed)?,
+    };
+    Ok(Some((points_of(&numbers)?, kind)))
+}
+
+/// Strokes a callout's points as the border is stroked, and draws its
+/// ending, filled with `paint`'s fill, at the first. A callout whose points
+/// all coincide has no direction to draw in, and draws nothing.
+fn draw_callout(points: &[Point], kind: Ending, paint: &Paint, dashed: bool, out: &mut Vec<u8>) {
     let (Some(&first), Some(start)) = (
         points.first(),
         points
@@ -1294,18 +1411,10 @@ fn callout(doc: &CosDocument, annotation: &Dict, paint: &Paint, dashed: bool, ou
     if dashed {
         out.extend_from_slice(b"[] 0 d\n");
     }
-    let kind = annotation
-        .get_name(doc.intern(b"LE"))
-        .and_then(|name| doc.name_bytes(name))
-        .map_or(Ending::None, |name| Ending::from_name(&name));
-    let ending_paint = Paint {
-        fill: color_of(doc, annotation, b"IC"),
-        ..*paint
-    };
-    if let Some(fill) = ending_paint.fill.filter(|_| kind.is_closed()) {
+    if let Some(fill) = paint.fill.filter(|_| kind.is_closed()) {
         op(out, &fill, b"rg");
     }
-    ending(out, kind, first, (-start.0, -start.1), start, &ending_paint);
+    ending(out, kind, first, (-start.0, -start.1), start, paint);
 }
 
 /// The subtypes whose appearance their dictionary does not determine
@@ -1423,15 +1532,16 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
                 return None;
             }
 
-            let box_ = inset(drawn_rect(doc, annotation, rect), width / 2.0);
+            let box_ = inset(drawn_rect(doc, annotation, rect).ok()?, width / 2.0);
+            let pattern = dash_of(doc, annotation).ok()?;
             if let Some(fill) = fill {
                 op(&mut content, &fill, b"rg");
             }
             if let Some(stroke) = stroke {
                 op(&mut content, &stroke, b"RG");
                 op(&mut content, &[width], b"w");
-                if let Some(pattern) = dash_of(doc, annotation) {
-                    dash(&mut content, &pattern, 0.0);
+                if let Some(pattern) = &pattern {
+                    dash(&mut content, pattern, 0.0);
                 }
             }
             op(
@@ -1453,7 +1563,8 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
                 return None;
             }
 
-            let box_ = inset(drawn_rect(doc, annotation, rect), width / 2.0);
+            let box_ = inset(drawn_rect(doc, annotation, rect).ok()?, width / 2.0);
+            let pattern = dash_of(doc, annotation).ok()?;
             let (cx, cy) = ((box_.x0 + box_.x1) / 2.0, (box_.y0 + box_.y1) / 2.0);
             let (rx, ry) = ((box_.x1 - box_.x0) / 2.0, (box_.y1 - box_.y0) / 2.0);
             // The constant that makes four cubics approximate an ellipse to
@@ -1467,8 +1578,8 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
             if let Some(stroke) = stroke {
                 op(&mut content, &stroke, b"RG");
                 op(&mut content, &[width], b"w");
-                if let Some(pattern) = dash_of(doc, annotation) {
-                    dash(&mut content, &pattern, 0.0);
+                if let Some(pattern) = &pattern {
+                    dash(&mut content, pattern, 0.0);
                 }
             }
             op(&mut content, &[cx - rx, cy], b"m");
@@ -1550,7 +1661,7 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
     // 12.5.6.2's constant opacity, in the one graphics state this appearance
     // selects. A highlight already selects it for its blend mode, so the
     // opacity joins that state rather than adding a second.
-    let opacity = opacity_of(doc, annotation);
+    let opacity = opacity_of(doc, annotation).ok()?;
     if opacity.is_some() && !needs_multiply {
         let mut selected = b"/GS0 gs\n".to_vec();
         selected.extend_from_slice(&content);
@@ -2184,6 +2295,139 @@ mod tests {
         }
     }
 
+    /// An entry that is present and not what its table says declines the
+    /// appearance rather than being read past. Each base dictionary draws;
+    /// each variant, one entry spoiled, draws nothing. Before October 2026's
+    /// review a bad element was dropped and the rest re-paired, so
+    /// `/L [10 (x) 50 90 50]` drew a horizontal line from (10, 50) to
+    /// (90, 50) that is nowhere in the data.
+    #[test]
+    fn a_malformed_entry_declines_the_appearance() {
+        let doc = helvetica_form();
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "/Subtype /Line /L [10 50 90 50]",
+                &[
+                    "/L [10 (x) 50 90 50]",
+                    "/L [10 50 90 50 7]",
+                    "/L [10 50 90 null]",
+                    "/LL (x)",
+                    "/LL 10 /LLE -1",
+                    "/LL 10 /LLO -1",
+                    "/LLO [4]",
+                    "/CA (x)",
+                    "/ca /Half",
+                ],
+            ),
+            (
+                "/Subtype /Polygon /Vertices [10 10 20 30 40 50]",
+                &[
+                    "/Vertices [10 10 (x) 20 30 40 50 60]",
+                    "/Vertices [10 10 20 30 40]",
+                ],
+            ),
+            (
+                "/Subtype /PolyLine /Vertices [10 10 20 30 40 50]",
+                &["/Vertices [10 10 20 30 40 50 60]", "/LE [/Butt /Bogus]"],
+            ),
+            (
+                "/Subtype /Ink /InkList [[10 10 20 30 40 50]]",
+                &[
+                    "/InkList [[10 10 null 20 30 40]]",
+                    "/InkList [[10 10 20 30 40 50] (x)]",
+                ],
+            ),
+            (
+                "/Subtype /Squiggly /QuadPoints [10 80 90 80 10 20 90 20]",
+                &[
+                    "/QuadPoints [10 80 90 80 10 20 90 (x) 20]",
+                    "/QuadPoints [10 80 90 80 10 20 90 20 5]",
+                ],
+            ),
+            ("/Subtype /Caret", &["/RD [-1 0 0 0]", "/RD [1 1 1]"]),
+            (
+                "/Subtype /Circle /C [1 0 0]",
+                &["/RD [1 1 1 (x)]", "/BS << /S /D /D [0 0] >>", "/CA (x)"],
+            ),
+            (
+                "/Subtype /Highlight /QuadPoints [10 80 90 80 10 20 90 20]",
+                &["/CA (x)"],
+            ),
+            (
+                "/Subtype /FreeText /DA (/Helv 10 Tf 0 g) /Contents (hi) \
+                 /IT /FreeTextCallout /CL [10 10 20 20] /LE /Butt",
+                &[
+                    "/Q 3",
+                    "/Q (x)",
+                    "/Q 1.5",
+                    "/CL [10 10 (x) 20]",
+                    "/CL [10 10 20]",
+                    "/CL [10 10 20 20 30 30 40 40]",
+                    "/LE /Bogus",
+                    "/LE [/Butt]",
+                    "/IT (FreeTextCallout)",
+                    "/RD [0 0 200 0]",
+                    "/BS << /S /D /D [-1] >>",
+                ],
+            ),
+        ];
+        for (base, variants) in cases {
+            let annotation = |extra: &str| format!("<< /Rect [0 0 100 100] {base} {extra} >>");
+            assert!(
+                content_of(&doc, &annotation("")).is_some(),
+                "<< {base} >> draws"
+            );
+            for variant in *variants {
+                assert_eq!(
+                    content_of(&doc, &annotation(variant)),
+                    None,
+                    "<< {base} >> with {variant} declines"
+                );
+            }
+        }
+    }
+
+    /// Figure 60: leader lines move the line proper off `/L`, and its
+    /// endings go with it — at the line proper's ends, not at `/L`'s points.
+    /// `/LL 20` from a line travelling east is clockwise of it, down, so the
+    /// line proper runs along y = 30 and its butts cross it there.
+    #[test]
+    fn leader_lines_move_a_lines_endings_with_the_line_proper() {
+        let doc = doc();
+        let content = content_of(
+            &doc,
+            "<< /Subtype /Line /Rect [0 0 100 100] /L [10 50 90 50] /LL 20 /C [1 0 0] \
+             /LE [/Butt /Butt] >>",
+        )
+        .expect("a line");
+        assert_eq!(
+            content,
+            "1 0 0 RG\n1 w\n10 50 m\n10 30 l\n90 50 m\n90 30 l\n10 30 m\n90 30 l\nS\n\
+             10 27 m\n10 33 l\nS\n90 33 m\n90 27 l\nS\n"
+        );
+    }
+
+    /// Table 175's `/LLO` is the gap before the leader lines begin; with no
+    /// leader lines it offsets nothing, and the line is drawn along `/L`.
+    #[test]
+    fn with_no_leader_lines_the_offset_moves_nothing() {
+        let doc = doc();
+        for ll in ["", "/LL 0"] {
+            assert_eq!(
+                content_of(
+                    &doc,
+                    &format!(
+                        "<< /Subtype /Line /Rect [0 0 100 100] /L [10 50 90 50] {ll} /LLO 10 \
+                         /LLE 5 /C [1 0 0] >>"
+                    ),
+                )
+                .as_deref(),
+                Some("1 0 0 RG\n1 w\n10 50 m\n90 50 l\nS\n"),
+                "{ll:?}"
+            );
+        }
+    }
+
     /// A line with no stroke colour still fills a closed ending with `/IC`,
     /// and an open ending — which only a stroke can draw — writes nothing at
     /// all. A path left unpainted would be painted by the next operator,
@@ -2233,7 +2477,25 @@ mod tests {
             after
         };
         assert_eq!(ending("None"), "");
-        assert_eq!(ending("Bogus"), "", "an unlisted name draws nothing");
+        for declined in [
+            "[/None /Bogus]",
+            "[/Butt]",
+            "[/Butt /Butt /Butt]",
+            "/Butt",
+            "[/Butt 3]",
+        ] {
+            assert_eq!(
+                content_of(
+                    &doc,
+                    &format!(
+                        "<< /Subtype /Line /Rect [0 0 100 100] /L [10 50 90 50] /C [1 0 0] \
+                         /LE {declined} >>"
+                    )
+                ),
+                None,
+                "/LE {declined} is not two names Table 176 lists"
+            );
+        }
         assert_eq!(ending("Butt"), "90 53 m\n90 47 l\nS\n");
         assert_eq!(
             ending("Diamond"),
@@ -2302,13 +2564,38 @@ mod tests {
             "the legacy /Border's dash"
         );
         for solid in [
-            "/BS << /W 2 /S /D /D [0 0] >>",
-            "/BS << /W 2 /S /D /D [4 -1] >>",
             "/BS << /W 2 /S /D /D [] >>",
             "/BS << /W 2 /S /S /D [6 4] >>",
+            "/BS << /W 2 /S /B >>",
             "/BS << /W 2 >> /Border [0 0 2 [5 1]]",
+            "/Border [0 0 2]",
         ] {
             assert!(!line(solid).contains(" d\n"), "{solid} is drawn solid");
+        }
+        // A pattern 8.4.3.6 refuses, a style Table 166 does not name, and a
+        // border entry of the wrong type are not read past: the line has no
+        // appearance rather than a solid one its producer did not ask for.
+        for declined in [
+            "/BS << /W 2 /S /D /D [0 0] >>",
+            "/BS << /W 2 /S /D /D [4 -1] >>",
+            "/BS << /W 2 /S /D /D [4 (x)] >>",
+            "/BS << /W 2 /S /D /D 4 >>",
+            "/BS << /W 2 /S /Q >>",
+            "/BS 2",
+            "/Border [0 0 2 [0 0]]",
+            "/Border (x)",
+        ] {
+            assert_eq!(
+                content_of(
+                    &doc,
+                    &format!(
+                        "<< /Subtype /Line /Rect [0 0 100 100] /L [10 50 90 50] /C [1 0 0] \
+                         {declined} >>"
+                    ),
+                ),
+                None,
+                "{declined} declines"
+            );
         }
     }
 
@@ -2366,7 +2653,7 @@ mod tests {
 
     /// 12.5.6.8's `/RD` insets the drawn shape within `/Rect` — left, top,
     /// right, bottom — before the border is inset by half its width; one
-    /// Table 177 forbids is not read.
+    /// Table 177 forbids declines the shape.
     #[test]
     fn a_shape_is_drawn_inside_its_rect_differences() {
         let doc = doc();
@@ -2383,16 +2670,26 @@ mod tests {
             square("/RD [5 4 3 2]"),
             "1 0 0 RG\n2 w\n16 23 90 32 re\nS\n"
         );
-        for ignored in [
+        assert_eq!(square(""), "1 0 0 RG\n2 w\n11 21 98 38 re\nS\n");
+        for declined in [
             "/RD [60 0 50 0]",
             "/RD [0 20 0 20]",
             "/RD [-1 0 0 0]",
             "/RD [1 2 3]",
+            "/RD [1 2 3 4 5]",
+            "/RD [5 4 (x) 3]",
+            "/RD 4",
         ] {
             assert_eq!(
-                square(ignored),
-                "1 0 0 RG\n2 w\n11 21 98 38 re\nS\n",
-                "{ignored} is not read"
+                content_of(
+                    &doc,
+                    &format!(
+                        "<< /Subtype /Square /Rect [10 20 110 60] /C [1 0 0] /BS << /W 2 >> \
+                         {declined} >>"
+                    ),
+                ),
+                None,
+                "{declined} declines"
             );
         }
 
@@ -2486,6 +2783,8 @@ mod tests {
                 "/Vertices [10 10 10 10 10 10]",
                 "/Vertices [10 10 20]",
                 "/Vertices 4",
+                "/Vertices [10 10 20 20 30]",
+                "/Vertices [10 10 (x) 20 30 40 50 60]",
             ] {
                 assert_eq!(
                     content_of(
@@ -2497,15 +2796,6 @@ mod tests {
                 );
             }
         }
-        assert_eq!(
-            content_of(
-                &doc,
-                "<< /Subtype /PolyLine /Rect [0 0 100 100] /Vertices [10 10 20 20 30] >>"
-            )
-            .as_deref(),
-            Some("0 0 0 RG\n1 w\n10 10 m\n20 20 l\nS\n"),
-            "a last number with no partner is dropped"
-        );
     }
 
     /// A polyline's endings face away along its first and last segments,
@@ -2684,8 +2974,10 @@ mod tests {
             )
         };
         assert_eq!(
-            ink("/InkList [[10 20 50 60 90 20] [] [10 80 90 80 7] [40 40]] /C [0 0 1] /BS << /W 3 >>")
-                .as_deref(),
+            ink(
+                "/InkList [[10 20 50 60 90 20] [] [10 80 90 80] [40 40]] /C [0 0 1] /BS << /W 3 >>"
+            )
+            .as_deref(),
             Some(
                 "0 0 1 RG\n3 w\n1 J\n1 j\n10 20 m\n50 60 l\n90 20 l\n10 80 m\n90 80 l\n\
                  40 40 m\n40 40 l\nS\n"
@@ -2702,6 +2994,9 @@ mod tests {
             "/InkList []",
             "/InkList [[] [7]]",
             "/InkList [10 20 50 60]",
+            "/InkList [[10 20 50 60] [10 80 90 80 7]]",
+            "/InkList [[10 10 null 20 30 40]]",
+            "/InkList 7",
             "",
         ] {
             assert_eq!(ink(nothing), None, "{nothing} draws nothing");
@@ -2771,7 +3066,11 @@ mod tests {
             Some((b"F1".to_vec(), 12.0, [0.0; 3])),
             "a colour this does not read is black"
         );
-        assert_eq!(read(b"/F1 -3 Tf"), Some((b"F1".to_vec(), 0.0, [0.0; 3])));
+        assert_eq!(
+            read(b"/F1 -3 Tf"),
+            None,
+            "a negative size is not 12.7.3.3's zero"
+        );
         for none in [&b"0 g"[..], b"Tf", b"12 Tf", b"/F1 x Tf", b""] {
             assert!(default_appearance(none).is_none(), "{none:?} names no font");
         }
