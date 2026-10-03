@@ -852,19 +852,28 @@ fn infer(
     // head across the page is not taken for a spanner.
     let bands = Bands::of(frame);
     let compared = neighbours.iter().filter(|(_, m)| m.has_text).count();
-    let mut running: Vec<(usize, Role, bool)> = Vec::new(); // (line, role, top)
+    let (mut margin_at, mut margin_lines) = (Vec::new(), Vec::new());
     for at in &across {
         let Some(line) = lines.get(*at) else { continue };
-        let Some(here) = MarginLine::of(line.source, line.bounds, &bands) else {
-            continue;
-        };
-        if let Some(role) = here.role(neighbours, em) {
+        if let Some(here) = MarginLine::of(line.source, line.bounds, &bands) {
+            margin_at.push(*at);
+            margin_lines.push(here);
+        }
+    }
+    let mut running: Vec<(usize, Role, bool)> = Vec::new(); // (line, role, top)
+    let mut furniture_line = vec![false; lines.len()];
+    let roles = margin_roles(&margin_lines, neighbours, em);
+    for ((at, here), role) in margin_at.iter().zip(&margin_lines).zip(roles) {
+        if let Some(role) = role {
             running.push((*at, role, here.top));
+            if let Some(slot) = furniture_line.get_mut(*at) {
+                *slot = true;
+            }
         }
     }
     let body: Vec<&Line<'_>> = across
         .iter()
-        .filter(|at| !running.iter().any(|(r, _, _)| r == *at))
+        .filter(|at| !furniture_line.get(**at).copied().unwrap_or(false))
         .filter_map(|at| lines.get(*at))
         .collect();
 
@@ -1786,46 +1795,199 @@ impl MarginLine {
         })
     }
 
-    /// What this line is, judged against the same band of `neighbours`, each
-    /// at its offset in pages from this one: a page number when a neighbour
-    /// carries the numeral this one's value plus the offset at the same
-    /// height, a running head or foot when [`RUNNING_REPEATS`] neighbours carry
-    /// the same masked text at the same place, and `None` otherwise.
-    fn role(&self, neighbours: &[(i64, &Margins)], em: f64) -> Option<Role> {
-        let middle = |b: (f64, f64, f64, f64)| (b.1 + b.3) / 2.0;
-        let level = |other: &MarginLine| {
-            other.top == self.top && (middle(other.bounds) - middle(self.bounds)).abs() <= em
-        };
-        if let Some(value) = self.numeral {
-            let counts = neighbours.iter().any(|(offset, margins)| {
-                margins
-                    .lines
-                    .iter()
-                    .any(|other| level(other) && other.numeral == value.checked_add(*offset))
-            });
-            if counts {
-                return Some(Role::PageNumber);
+    /// Halfway up the line: the height two margin lines are compared at.
+    fn middle(&self) -> f64 {
+        (self.bounds.1 + self.bounds.3) / 2.0
+    }
+}
+
+/// Where along `x` two margin lines are compared: a left edge, a right edge,
+/// or a centre — written as the sum of the two edges, so its reach is two ems.
+#[derive(Clone, Copy)]
+enum Edge {
+    Left,
+    Right,
+    Centre,
+}
+
+impl Edge {
+    fn of(self, (x0, _, x1, _): (f64, f64, f64, f64)) -> f64 {
+        match self {
+            Edge::Left => x0,
+            Edge::Right => x1,
+            Edge::Centre => x0 + x1,
+        }
+    }
+
+    fn reach(self, em: f64) -> f64 {
+        match self {
+            Edge::Left | Edge::Right => em,
+            Edge::Centre => 2.0 * em,
+        }
+    }
+}
+
+/// What each of `here` is, judged against the same band of `neighbours`, each
+/// at its offset in pages from this page: a page number when a neighbour
+/// carries the numeral its value plus the offset at the same height, a
+/// running head or foot when [`RUNNING_REPEATS`] neighbours carry the same
+/// masked text at the same place, and `None` otherwise. The same height is
+/// middles within an em; the same place is that and a left edge, a right edge
+/// or a centre within an em.
+///
+/// Asked a neighbour at a time as sweeps ([`within_reach`]), not line against
+/// line. Every line of a page against every line of sixteen neighbours was
+/// quadratic in the page's margin lines, and those are bounded only by what a
+/// content stream decodes to: thousands of one-glyph lines in a band, a few
+/// bytes each, cost seconds a page. A sweep costs each neighbour's lines and
+/// this page's, times a logarithm.
+fn margin_roles(here: &[MarginLine], neighbours: &[(i64, &Margins)], em: f64) -> Vec<Option<Role>> {
+    let mut numbered = vec![false; here.len()];
+    let mut recurs = vec![0usize; here.len()];
+    for (offset, margins) in neighbours {
+        let queries = here
+            .iter()
+            .enumerate()
+            .filter_map(|(at, line)| {
+                let value = line.numeral?.checked_add(*offset)?;
+                Some(((line.top, value), line.middle(), 0.0, at))
+            })
+            .collect();
+        let points = margins
+            .lines
+            .iter()
+            .filter_map(|line| Some(((line.top, line.numeral?), line.middle(), 0.0)))
+            .collect();
+        for at in within_reach(queries, points, (em, em)) {
+            if let Some(slot) = numbered.get_mut(at) {
+                *slot = true;
             }
         }
-        let (x0, _, x1, _) = self.bounds;
-        let placed = |other: &MarginLine| {
-            let (a, _, b, _) = other.bounds;
-            (a - x0).abs() <= em || (b - x1).abs() <= em || ((a + b) - (x0 + x1)).abs() <= 2.0 * em
-        };
-        let recurs = neighbours
-            .iter()
-            .filter(|(_, margins)| {
-                margins
-                    .lines
-                    .iter()
-                    .any(|other| level(other) && placed(other) && other.masked == self.masked)
-            })
-            .count();
-        (recurs >= RUNNING_REPEATS).then_some(if self.top {
-            Role::RunningHead
-        } else {
-            Role::RunningFoot
+
+        let mut seen = vec![false; here.len()];
+        for edge in [Edge::Left, Edge::Right, Edge::Centre] {
+            let queries = here
+                .iter()
+                .enumerate()
+                .map(|(at, line)| {
+                    let key = (line.top, line.masked.as_str());
+                    (key, line.middle(), edge.of(line.bounds), at)
+                })
+                .collect();
+            let points = margins
+                .lines
+                .iter()
+                .map(|line| {
+                    let key = (line.top, line.masked.as_str());
+                    (key, line.middle(), edge.of(line.bounds))
+                })
+                .collect();
+            for at in within_reach(queries, points, (em, edge.reach(em))) {
+                if let Some(slot) = seen.get_mut(at) {
+                    *slot = true;
+                }
+            }
+        }
+        for (count, seen) in recurs.iter_mut().zip(seen) {
+            *count += usize::from(seen);
+        }
+    }
+    here.iter()
+        .zip(numbered)
+        .zip(recurs)
+        .map(|((line, numbered), recurs)| {
+            if numbered {
+                Some(Role::PageNumber)
+            } else if recurs >= RUNNING_REPEATS {
+                Some(if line.top {
+                    Role::RunningHead
+                } else {
+                    Role::RunningFoot
+                })
+            } else {
+                None
+            }
         })
+        .collect()
+}
+
+/// The tags of the `queries`, each `(key, m, x, tag)`, that some point
+/// `(key, m, x)` with the same key lies within reach of: its `m` within the
+/// first reach of the query's, its `x` within the second.
+///
+/// Both lists are sorted by key and `m` and swept along `m`, the points
+/// within reach held in an ordered set by `x` that each query asks for one
+/// range of, so the cost is the queries and the points times a logarithm
+/// where comparing each query with each point was their product. A
+/// coordinate that is not finite is within reach of nothing, as
+/// `(a - b).abs() <= reach` says of it, and nothing is within a reach that is
+/// not a number.
+fn within_reach<K: Ord + Copy>(
+    mut queries: Vec<(K, f64, f64, usize)>,
+    mut points: Vec<(K, f64, f64)>,
+    (reach_m, reach_x): (f64, f64),
+) -> Vec<usize> {
+    let mut out = Vec::new();
+    if !(reach_m >= 0.0 && reach_x >= 0.0) {
+        return out;
+    }
+    queries.retain(|(_, m, x, _)| m.is_finite() && x.is_finite());
+    points.retain(|(_, m, x)| m.is_finite() && x.is_finite());
+    queries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    points.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    let mut rest: &[(K, f64, f64, usize)] = &queries;
+    while let Some(first) = rest.first() {
+        let key = first.0;
+        let same = rest.partition_point(|q| q.0 == key).max(1);
+        let (group, after) = rest.split_at(same.min(rest.len()));
+        rest = after;
+        let from = points.partition_point(|p| p.0 < key);
+        let to = points.partition_point(|p| p.0 <= key);
+        let near = points.get(from..to).unwrap_or_default();
+        // The points of `near` within reach along `m` of the query, by `x`,
+        // each `x` with how many hold it.
+        let mut window: BTreeMap<u64, usize> = BTreeMap::new();
+        let (mut low, mut high) = (0usize, 0usize);
+        for (_, m, x, tag) in group {
+            while let Some((_, pm, px)) = near.get(high) {
+                if pm - m > reach_m {
+                    break;
+                }
+                *window.entry(ordered(*px)).or_default() += 1;
+                high += 1;
+            }
+            while low < high {
+                let Some((_, pm, px)) = near.get(low) else {
+                    break;
+                };
+                if pm - m >= -reach_m {
+                    break;
+                }
+                let gone = ordered(*px);
+                if let Some(count) = window.get_mut(&gone) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        window.remove(&gone);
+                    }
+                }
+                low += 1;
+            }
+            let (lo, hi) = (ordered(x - reach_x), ordered(x + reach_x));
+            if lo <= hi && window.range(lo..=hi).next().is_some() {
+                out.push(*tag);
+            }
+        }
+    }
+    out
+}
+
+/// `value` as an integer that orders as the number does, `-0` with `0`.
+fn ordered(value: f64) -> u64 {
+    let bits = (value + 0.0).to_bits();
+    if bits >> 63 == 1 {
+        !bits
+    } else {
+        bits | 1 << 63
     }
 }
 
@@ -2298,7 +2460,88 @@ impl Extents {
 
 #[cfg(test)]
 mod tests {
-    use super::{numeral, roman};
+    use super::{margin_roles, numeral, roman, MarginLine, Margins, Role};
+
+    /// A one-line margin entry in the top band, `width` wide from `x`, its
+    /// middle at `y`.
+    fn margin(text: &str, x: f64, width: f64, y: f64) -> MarginLine {
+        MarginLine {
+            top: true,
+            masked: text.replace(|c: char| c.is_ascii_digit(), "#"),
+            numeral: numeral(text),
+            bounds: (x, y - 4.0, x + width, y + 4.0),
+        }
+    }
+
+    /// **A page of margin lines beside sixteen neighbours of the same is
+    /// judged in bounded work.** Every line of this page against every line
+    /// of every neighbour was `16 × 16 000²` comparisons, from content a few
+    /// bytes a line; each line here shares its text and height with every
+    /// line of every neighbour and its place with none, the shape that leaves
+    /// no question answered early. Then lines planted to be answered: a head
+    /// on both facing pages, one on only the next, a page number its next
+    /// page carries one higher, heads that recur by their left edge alone,
+    /// their right edge alone and their centre alone, and a head and a page
+    /// number the facing pages carry two ems lower.
+    #[test]
+    fn margin_lines_are_judged_in_bounded_work() {
+        const LINES: usize = 16_000;
+        let em = 10.0;
+        let spread = |shift: f64| -> Vec<MarginLine> {
+            (0..LINES)
+                .map(|at| margin("o", 1_000.0 + at as f64 * 30.0 + shift, 5.0, 750.0))
+                .collect()
+        };
+        let mut here = spread(0.0);
+        let planted = [
+            (
+                margin("Chapter 2", 72.0, 60.0, 750.0),
+                Some(Role::RunningHead),
+            ),
+            (margin("Draft", 300.0, 30.0, 750.0), None),
+            (margin("7", 500.0, 5.0, 750.0), Some(Role::PageNumber)),
+            (margin("Left", 600.0, 40.0, 750.0), Some(Role::RunningHead)),
+            (margin("Right", 700.0, 40.0, 750.0), Some(Role::RunningHead)),
+            (
+                margin("Centre", 800.0, 40.0, 750.0),
+                Some(Role::RunningHead),
+            ),
+            (margin("Low", 900.0, 40.0, 750.0), None),
+            (margin("9", 950.0, 5.0, 750.0), None),
+        ];
+        here.extend(planted.iter().map(|(line, _)| line.clone()));
+        let neighbours: Vec<(i64, Margins)> = (-8i64..=8)
+            .filter(|offset| *offset != 0)
+            .map(|offset| {
+                let mut lines = spread(15.0);
+                if offset.abs() == 1 {
+                    lines.push(margin("Chapter 2", 72.0, 60.0, 751.0));
+                    lines.push(margin("Left", 600.0, 80.0, 750.0));
+                    lines.push(margin("Right", 660.0, 80.0, 750.0));
+                    lines.push(margin("Centre", 785.0, 70.0, 750.0));
+                    lines.push(margin("Low", 900.0, 40.0, 730.0));
+                }
+                if offset == 1 {
+                    lines.push(margin("Draft", 300.0, 30.0, 750.0));
+                    lines.push(margin("8", 500.0, 5.0, 750.0));
+                    lines.push(margin("10", 950.0, 5.0, 730.0));
+                }
+                (
+                    offset,
+                    Margins {
+                        lines,
+                        has_text: true,
+                    },
+                )
+            })
+            .collect();
+        let neighbours: Vec<(i64, &Margins)> = neighbours.iter().map(|(o, m)| (*o, m)).collect();
+        let roles = margin_roles(&here, &neighbours, em);
+        assert_eq!(roles.len(), LINES + planted.len());
+        assert!(roles.iter().take(LINES).all(Option::is_none));
+        let expected: Vec<Option<Role>> = planted.iter().map(|(_, role)| *role).collect();
+        assert_eq!(roles.get(LINES..), Some(&expected[..]));
+    }
 
     /// The page numbers a foot carries, and the near misses that are not one.
     #[test]

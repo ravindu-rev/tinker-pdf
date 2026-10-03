@@ -415,7 +415,13 @@ each page's margins once for a whole range; `Page::inferred_order`,
 role. With fewer than two other pages to compare — a one-page document — a
 block wholly in a band is `Unplaced` where it stands and
 `InferenceWarning::NoCrossPageEvidence` says why; nothing is called a running
-head on no evidence.
+head on no evidence. Each neighbour is asked as a sweep along the lines'
+heights, the lines within an em held in an ordered set by edge, and not line
+against line: the review of this lane found every margin line compared with
+every margin line of sixteen neighbours, quadratic in lines a stream draws
+for a few bytes each, and a page of sixteen thousand one-glyph lines beside
+sixteen neighbours of the same went from 73 seconds unoptimised to under one
+(`margin_lines_are_judged_in_bounded_work`, in `reading_order.rs`).
 
 Measured, first-party: a six-page builder book with a verso and a recto head,
 a numbered foot and two interleaved columns between them, its furniture
