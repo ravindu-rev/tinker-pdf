@@ -180,7 +180,7 @@ func DefaultWriteOptions() (WriteOptions, error) {
 func (e *Editor) Save(options WriteOptions) ([]byte, error) {
 	raw := (*C.TpdfWriteOptions)(C.calloc(1, C.sizeof_TpdfWriteOptions))
 	defer C.free(unsafe.Pointer(raw))
-	raw.mode = C.enum_TpdfWriteMode(options.Mode)
+	raw.mode = C.int(options.Mode)
 	raw.linearize = flag(options.Linearize)
 	raw.version_major = C.uint32_t(options.VersionMajor)
 	raw.version_minor = C.uint32_t(options.VersionMinor)
@@ -251,7 +251,7 @@ func nullable(value C.double) *float64 {
 
 func (v View) raw() C.TpdfDestination {
 	return C.TpdfDestination{
-		kind:   C.enum_TpdfDestKind(v.Kind),
+		kind:   C.int(v.Kind),
 		left:   nanFor(v.Left),
 		bottom: nanFor(v.Bottom),
 		right:  nanFor(v.Right),
@@ -413,7 +413,7 @@ func (b *Builder) AddImage(resource []byte, kind ImageKind, width, height uint32
 	samples := C.CBytes(data)
 	defer C.free(samples)
 	image := C.TpdfImage{
-		kind:     C.enum_TpdfImageKind(kind),
+		kind:     C.int(kind),
 		width:    C.uint32_t(width),
 		height:   C.uint32_t(height),
 		data:     (*C.uint8_t)(samples),

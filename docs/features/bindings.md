@@ -33,6 +33,30 @@ rather than by somebody remembering. A third pins every discriminant of the
 six signature enums and the three write ones, because those are transcribed
 by hand into `bindings/dotnet/TinkerPdf.cs`.
 
+**Every enum a caller hands over is an `int`, and is checked.** The
+seventeen enums a caller supplies — `TpdfPixelFormat`, `TpdfWriteMode`,
+`TpdfDestKind`, `TpdfTargetKind`, `TpdfImageKind`, `TpdfInfoKey`,
+`TpdfTrapped`, `TpdfLabelStyle`, `TpdfPageBoundary`, `TpdfSanitiseList`,
+`TpdfFieldValueKind`, `TpdfBlendMode`, `TpdfSoftMask`, `TpdfMaskKind`,
+`TpdfDeviceSpace`, `TpdfTilingType` and `TpdfTagText` — cross as an `int`
+parameter or struct field, with the enum still in the header naming the
+numbers, and a number the enum does not declare is `BadArgument` with a
+message naming the enum and the number, exactly as a null pointer is. The
+reason is Rust's, not C's: a `#[repr(C)] enum` holding a number it does not
+declare is undefined behaviour the moment it exists, before any `match`
+could refuse it, and Ruby and Go pass whatever integer their caller gives
+them. Before this, `Document#info(8)` from Ruby read past the end of a jump
+table and the process died in `tpdf_document_info` (review of lane 7C).
+Enums only the engine writes — the status, out pointers, fields of a struct
+it fills — keep their enum type, since every value written is declared.
+Two details follow from "checked" rather than invented: a field the call
+does not read is not judged (a blend mode whose `has_blend_mode` is 0, a
+mask kind under a soft mask that is not a group), and
+`tpdf_sanitise_report_count`, which returns a count rather than a status,
+answers 0 for a list number that names no list while the two report
+accessors refuse it. `src/raw_enum_tests.rs` pins every enum's range and
+every entry point's refusal.
+
 The threading rule differs on the two halves, and it is not a caveat but a
 consequence. A `TpdfDocument` may be used from any thread because every read
 borrows an immutable, shared `Document`. A `TpdfEditor`, `TpdfBuilder` or

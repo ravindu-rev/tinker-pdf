@@ -164,29 +164,37 @@ fn same_number(abi: f64, facade: Option<f64>) -> bool {
 fn same_view(abi: &TpdfDestination, facade: &DestKind) -> bool {
     match *facade {
         DestKind::Xyz { left, top, zoom } => {
-            abi.kind == TpdfDestKind::Xyz
+            abi.kind == TpdfDestKind::Xyz as c_int
                 && same_number(abi.left, left)
                 && same_number(abi.top, top)
                 && same_number(abi.zoom, zoom)
         }
-        DestKind::Fit => abi.kind == TpdfDestKind::Fit,
-        DestKind::FitH { top } => abi.kind == TpdfDestKind::FitH && same_number(abi.top, top),
-        DestKind::FitV { left } => abi.kind == TpdfDestKind::FitV && same_number(abi.left, left),
+        DestKind::Fit => abi.kind == TpdfDestKind::Fit as c_int,
+        DestKind::FitH { top } => {
+            abi.kind == TpdfDestKind::FitH as c_int && same_number(abi.top, top)
+        }
+        DestKind::FitV { left } => {
+            abi.kind == TpdfDestKind::FitV as c_int && same_number(abi.left, left)
+        }
         DestKind::FitR {
             left,
             bottom,
             right,
             top,
         } => {
-            abi.kind == TpdfDestKind::FitR
+            abi.kind == TpdfDestKind::FitR as c_int
                 && abi.left == left
                 && abi.bottom == bottom
                 && abi.right == right
                 && abi.top == top
         }
-        DestKind::FitB => abi.kind == TpdfDestKind::FitB,
-        DestKind::FitBH { top } => abi.kind == TpdfDestKind::FitBH && same_number(abi.top, top),
-        DestKind::FitBV { left } => abi.kind == TpdfDestKind::FitBV && same_number(abi.left, left),
+        DestKind::FitB => abi.kind == TpdfDestKind::FitB as c_int,
+        DestKind::FitBH { top } => {
+            abi.kind == TpdfDestKind::FitBH as c_int && same_number(abi.top, top)
+        }
+        DestKind::FitBV { left } => {
+            abi.kind == TpdfDestKind::FitBV as c_int && same_number(abi.left, left)
+        }
     }
 }
 
@@ -251,7 +259,7 @@ fn info_through_the_abi(doc: *const TpdfDocument) -> Vec<Option<String>> {
         .map(|key| {
             let mut out = ptr::null_mut();
             assert_eq!(
-                unsafe { tpdf_document_info(doc, *key, &mut out) },
+                unsafe { tpdf_document_info(doc, *key as c_int, &mut out) },
                 TpdfStatus::Ok
             );
             take(out)
@@ -669,7 +677,7 @@ fn null_handles_across_the_read_surface_are_refused() {
     let mut kind = TpdfActionKind::Absent;
     unsafe {
         assert_eq!(
-            tpdf_document_info(null_doc, TpdfInfoKey::Title, &mut text),
+            tpdf_document_info(null_doc, TpdfInfoKey::Title as c_int, &mut text),
             TpdfStatus::BadArgument
         );
         assert_eq!(
@@ -813,7 +821,7 @@ fn null_handles_across_the_read_surface_are_refused() {
     let doc = open(&bytes);
     unsafe {
         assert_eq!(
-            tpdf_document_info(doc, TpdfInfoKey::Title, ptr::null_mut()),
+            tpdf_document_info(doc, TpdfInfoKey::Title as c_int, ptr::null_mut()),
             TpdfStatus::BadArgument
         );
         assert_eq!(

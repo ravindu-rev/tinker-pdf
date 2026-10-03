@@ -46,6 +46,15 @@ pub enum TpdfLabelStyle {
     None = 5,
 }
 
+raw_enum!(TpdfLabelStyle {
+    Decimal,
+    RomanUpper,
+    RomanLower,
+    LettersUpper,
+    LettersLower,
+    None
+});
+
 impl TpdfLabelStyle {
     fn to_facade(self) -> LabelStyle {
         match self {
@@ -65,8 +74,9 @@ impl TpdfLabelStyle {
 pub struct TpdfPageLabelRange {
     /// The zero-based index of the range's first page.
     pub first_page: u32,
-    /// How the number is written.
-    pub style: TpdfLabelStyle,
+    /// How the number is written: a [`TpdfLabelStyle`]. Any other number is
+    /// [`TpdfStatus::BadArgument`].
+    pub style: c_int,
     /// `/P`, null-terminated UTF-8, or null for no `/P` -- which reads the
     /// same as an empty one and is not the same file.
     pub prefix: *const c_char,
@@ -184,6 +194,14 @@ pub enum TpdfPageBoundary {
     ArtBox = 4,
 }
 
+raw_enum!(TpdfPageBoundary {
+    MediaBox,
+    CropBox,
+    BleedBox,
+    TrimBox,
+    ArtBox
+});
+
 impl TpdfPageBoundary {
     fn to_facade(self) -> PageBoundary {
         match self {
@@ -263,6 +281,8 @@ pub enum TpdfSanitiseList {
     Deleted = 1,
 }
 
+raw_enum!(TpdfSanitiseList { Removed, Deleted });
+
 /// Everything a sanitise took out. Opaque to callers.
 pub struct TpdfSanitiseReport {
     inner: SanitiseReport,
@@ -328,9 +348,13 @@ pub unsafe extern "C" fn tpdf_editor_set_page_labels(
             Ok(prefix) => prefix,
             Err(status) => return status,
         };
+        let style = match TpdfLabelStyle::checked(range.style, "page-label style") {
+            Ok(style) => style.to_facade(),
+            Err(status) => return status,
+        };
         facade.push(PageLabelRange {
             first_page: range.first_page,
-            style: range.style.to_facade(),
+            style,
             prefix,
             start: range.start,
         });
@@ -464,9 +488,10 @@ pub unsafe extern "C" fn tpdf_editor_set_outline(
 /// `set_author`, `set_subject`, `set_keywords`, `set_creator` and
 /// `set_producer` -- creating `/Info` when there is none.
 ///
-/// The two date keys are [`tpdf_editor_set_info_date`]'s, and passing one
-/// here is [`TpdfStatus::BadArgument`]. What the write did to the XMP packet
-/// is written through `out_sync`, which may be null.
+/// `key` is a [`TpdfInfoKey`]; the two date keys are
+/// [`tpdf_editor_set_info_date`]'s, and passing one here, or a number that is
+/// not a key, is [`TpdfStatus::BadArgument`]. What the write did to the XMP
+/// packet is written through `out_sync`, which may be null.
 ///
 /// # Safety
 ///
@@ -474,7 +499,7 @@ pub unsafe extern "C" fn tpdf_editor_set_outline(
 #[no_mangle]
 pub unsafe extern "C" fn tpdf_editor_set_info(
     editor: *mut TpdfEditor,
-    key: TpdfInfoKey,
+    key: c_int,
     value: *const c_char,
     out_sync: *mut TpdfMetadataSync,
 ) -> TpdfStatus {
@@ -484,6 +509,10 @@ pub unsafe extern "C" fn tpdf_editor_set_info(
     };
     let value = match unsafe { required_str(value, "value") } {
         Ok(value) => value,
+        Err(status) => return status,
+    };
+    let key = match TpdfInfoKey::checked(key, "info key") {
+        Ok(key) => key,
         Err(status) => return status,
     };
     let sync = match key {
@@ -511,7 +540,7 @@ pub unsafe extern "C" fn tpdf_editor_set_info(
 #[no_mangle]
 pub unsafe extern "C" fn tpdf_editor_set_info_date(
     editor: *mut TpdfEditor,
-    key: TpdfInfoKey,
+    key: c_int,
     date: *const TpdfDate,
     out_sync: *mut TpdfMetadataSync,
 ) -> TpdfStatus {
@@ -525,6 +554,10 @@ pub unsafe extern "C" fn tpdf_editor_set_info_date(
     };
     let date = match date.to_facade() {
         Ok(date) => date,
+        Err(status) => return status,
+    };
+    let key = match TpdfInfoKey::checked(key, "info key") {
+        Ok(key) => key,
         Err(status) => return status,
     };
     let sync = match key {
@@ -541,9 +574,9 @@ pub unsafe extern "C" fn tpdf_editor_set_info_date(
     }
 }
 
-/// Sets `/Info /Trapped` (Table 349). [`TpdfTrapped::Absent`] is
-/// [`TpdfStatus::BadArgument`]: the facade sets a value, it does not remove
-/// one.
+/// Sets `/Info /Trapped` (Table 349). `trapped` is a [`TpdfTrapped`];
+/// [`TpdfTrapped::Absent`] is [`TpdfStatus::BadArgument`] -- the facade sets a
+/// value, it does not remove one -- and so is a number that is not one.
 ///
 /// # Safety
 ///
@@ -551,11 +584,15 @@ pub unsafe extern "C" fn tpdf_editor_set_info_date(
 #[no_mangle]
 pub unsafe extern "C" fn tpdf_editor_set_trapped(
     editor: *mut TpdfEditor,
-    trapped: TpdfTrapped,
+    trapped: c_int,
     out_sync: *mut TpdfMetadataSync,
 ) -> TpdfStatus {
     let editor = match unsafe { editor_mut(editor) } {
         Ok(editor) => editor,
+        Err(status) => return status,
+    };
+    let trapped = match TpdfTrapped::checked(trapped, "trapped") {
+        Ok(trapped) => trapped,
         Err(status) => return status,
     };
     let value = match trapped {
@@ -599,8 +636,9 @@ pub unsafe extern "C" fn tpdf_editor_set_xmp_metadata(
 
 /// Sets one of a page's boundaries (14.11.2) -- `set_page_boundary`, and
 /// with it `set_bleed_box`, `set_trim_box` and `set_art_box`, which are that
-/// call with the boundary named. Refused for a rectangle with no area, a
-/// non-finite number, or a page that does not exist.
+/// call with the boundary named. `boundary` is a [`TpdfPageBoundary`]; any
+/// other number is [`TpdfStatus::BadArgument`]. Refused for a rectangle with
+/// no area, a non-finite number, or a page that does not exist.
 ///
 /// # Safety
 ///
@@ -609,7 +647,7 @@ pub unsafe extern "C" fn tpdf_editor_set_xmp_metadata(
 pub unsafe extern "C" fn tpdf_editor_set_page_boundary(
     editor: *mut TpdfEditor,
     index: u32,
-    boundary: TpdfPageBoundary,
+    boundary: c_int,
     x0: f64,
     y0: f64,
     x1: f64,
@@ -617,6 +655,10 @@ pub unsafe extern "C" fn tpdf_editor_set_page_boundary(
 ) -> TpdfStatus {
     let editor = match unsafe { editor_mut(editor) } {
         Ok(editor) => editor,
+        Err(status) => return status,
+    };
+    let boundary = match TpdfPageBoundary::checked(boundary, "page boundary") {
+        Ok(boundary) => boundary,
         Err(status) => return status,
     };
     if editor.set_page_boundary(index, boundary.to_facade(), x0, y0, x1, y1) {
@@ -630,7 +672,8 @@ pub unsafe extern "C" fn tpdf_editor_set_page_boundary(
 }
 
 /// A page's boundary as the reader resolves it -- its own entry, or the
-/// default 14.11.2 gives an absent one -- as `x0 y0 x1 y1`.
+/// default 14.11.2 gives an absent one -- as `x0 y0 x1 y1`. `boundary` is a
+/// [`TpdfPageBoundary`]; any other number is [`TpdfStatus::BadArgument`].
 ///
 /// # Safety
 ///
@@ -639,7 +682,7 @@ pub unsafe extern "C" fn tpdf_editor_set_page_boundary(
 pub unsafe extern "C" fn tpdf_page_boundary(
     doc: *const TpdfDocument,
     index: u32,
-    boundary: TpdfPageBoundary,
+    boundary: c_int,
     out_x0: *mut f64,
     out_y0: *mut f64,
     out_x1: *mut f64,
@@ -648,6 +691,10 @@ pub unsafe extern "C" fn tpdf_page_boundary(
     let Some(doc) = (unsafe { doc.as_ref() }) else {
         set_error("null document");
         return TpdfStatus::BadArgument;
+    };
+    let boundary = match TpdfPageBoundary::checked(boundary, "page boundary") {
+        Ok(boundary) => boundary,
+        Err(status) => return status,
     };
     let Some(page) = doc.inner.page(index) else {
         set_error("no such page");
@@ -696,7 +743,10 @@ pub unsafe extern "C" fn tpdf_editor_sanitise(
     TpdfStatus::Ok
 }
 
-/// How many entries one of the report's lists holds, or zero for null.
+/// How many entries one of the report's lists holds, or zero for null --
+/// and zero for a `list` that is not a [`TpdfSanitiseList`], which names no
+/// list and so holds nothing; [`tpdf_sanitise_report_entry`] refuses the same
+/// number with [`TpdfStatus::BadArgument`].
 ///
 /// # Safety
 ///
@@ -704,21 +754,20 @@ pub unsafe extern "C" fn tpdf_editor_sanitise(
 #[no_mangle]
 pub unsafe extern "C" fn tpdf_sanitise_report_count(
     report: *const TpdfSanitiseReport,
-    list: TpdfSanitiseList,
+    list: c_int,
 ) -> u32 {
-    match unsafe { report.as_ref() } {
-        Some(report) => count(match list {
-            TpdfSanitiseList::Removed => report.inner.removed.len(),
-            TpdfSanitiseList::Deleted => report.inner.deleted.len(),
-        }),
-        None => 0,
+    match (unsafe { report.as_ref() }, TpdfSanitiseList::from_raw(list)) {
+        (Some(report), Some(TpdfSanitiseList::Removed)) => count(report.inner.removed.len()),
+        (Some(report), Some(TpdfSanitiseList::Deleted)) => count(report.inner.deleted.len()),
+        _ => 0,
     }
 }
 
 /// One entry: why it was removed, and where. For [`TpdfSanitiseList::Removed`]
 /// the object is the holder the entry was removed from, and
 /// `out_has_object` is 0 when that holder is the trailer; for
-/// [`TpdfSanitiseList::Deleted`] it is the deleted object.
+/// [`TpdfSanitiseList::Deleted`] it is the deleted object. A `list` that is
+/// not a [`TpdfSanitiseList`] is [`TpdfStatus::BadArgument`].
 ///
 /// # Safety
 ///
@@ -726,7 +775,7 @@ pub unsafe extern "C" fn tpdf_sanitise_report_count(
 #[no_mangle]
 pub unsafe extern "C" fn tpdf_sanitise_report_entry(
     report: *const TpdfSanitiseReport,
-    list: TpdfSanitiseList,
+    list: c_int,
     index: u32,
     out_what: *mut TpdfRemoval,
     out_has_object: *mut c_int,
@@ -736,6 +785,10 @@ pub unsafe extern "C" fn tpdf_sanitise_report_entry(
     let Some(report) = (unsafe { report.as_ref() }) else {
         set_error("null sanitise report");
         return TpdfStatus::BadArgument;
+    };
+    let list = match TpdfSanitiseList::checked(list, "sanitise list") {
+        Ok(list) => list,
+        Err(status) => return status,
     };
     let (what, object) = match list {
         TpdfSanitiseList::Removed => match report.inner.removed.get(index as usize) {
@@ -776,7 +829,8 @@ fn no_such_entry(index: u32) -> TpdfStatus {
 }
 
 /// The `/S` of an [`TpdfRemoval::Action`] removal, borrowed until the report
-/// is freed; null on `Ok` for any other removal.
+/// is freed; null on `Ok` for any other removal. A `list` that is not a
+/// [`TpdfSanitiseList`] is [`TpdfStatus::BadArgument`].
 ///
 /// # Safety
 ///
@@ -784,7 +838,7 @@ fn no_such_entry(index: u32) -> TpdfStatus {
 #[no_mangle]
 pub unsafe extern "C" fn tpdf_sanitise_report_action(
     report: *const TpdfSanitiseReport,
-    list: TpdfSanitiseList,
+    list: c_int,
     index: u32,
     out_data: *mut *const u8,
     out_len: *mut usize,
@@ -797,6 +851,10 @@ pub unsafe extern "C" fn tpdf_sanitise_report_action(
         set_error("null pointer");
         return TpdfStatus::BadArgument;
     }
+    let list = match TpdfSanitiseList::checked(list, "sanitise list") {
+        Ok(list) => list,
+        Err(status) => return status,
+    };
     let what = match list {
         TpdfSanitiseList::Removed => report.inner.removed.get(index as usize).map(|e| &e.what),
         TpdfSanitiseList::Deleted => report.inner.deleted.get(index as usize).map(|e| &e.what),

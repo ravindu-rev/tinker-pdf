@@ -59,6 +59,15 @@ begin
 rescue TinkerPdf::Error => e
   fail!("a page past the end is #{e.message}, not NO_SUCH_PAGE") unless e.status == TinkerPdf::Status::NO_SUCH_PAGE
 end
+# So is a number its enum does not declare: an Integer crosses as a C int, and
+# the engine checks it, where it once read past a jump table and killed the
+# process (review of lane 7C).
+[[8, -> { document.info(8) }], [4, -> { document.render(0, format: 4) }]].each do |number, call|
+  call.call
+  fail!("#{number} is not an enum number and must be refused")
+rescue TinkerPdf::Error => e
+  fail!("an enum number of #{number} is #{e.message}") unless e.status == TinkerPdf::Status::BAD_ARGUMENT
+end
 fail!('an unencrypted document is not encrypted') if document.encrypted?
 fail!('an unencrypted document may be printed') unless document.may_print?
 fail!('a document opened from bytes is not streamed') if document.streamed?

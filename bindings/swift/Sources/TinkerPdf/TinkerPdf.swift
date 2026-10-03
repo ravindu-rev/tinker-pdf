@@ -4,8 +4,10 @@
 // UNVERIFIED. No Swift toolchain was available where this was written, so it
 // has never been compiled, let alone run; it is written to the C importer's
 // documented rules (an opaque `struct T *` is an OpaquePointer, a C enum is a
-// RawRepresentable struct with one constant per case, `size_t` is Int) and to
-// nothing that was observed. It covers the core of the header -- open, text,
+// RawRepresentable struct with one constant per case, `int` is Int32, `size_t`
+// is Int) and to nothing that was observed. An enum the caller hands over
+// crosses as an `int`, and the engine refuses a number its enum does not
+// declare with BadArgument rather than reading it. It covers the core of the header -- open, text,
 // render, validate, the form fill and save, and the builder -- and not the
 // read surface, document operations, signatures or streaming, which the Go,
 // Ruby and Java bindings carry. docs/features/bindings.md says what is owed.
@@ -146,7 +148,7 @@ public final class Document {
     /// Draws a page at a scale, 1.0 being 72 dots per inch, as RGB.
     public func render(_ index: UInt32, scale: Double = 1.0) throws -> Bitmap {
         var out: OpaquePointer? = nil
-        try check(tpdf_page_render(pointer, index, scale, TPDF_PIXEL_FORMAT_RGB8, &out))
+        try check(tpdf_page_render(pointer, index, scale, Int32(TPDF_PIXEL_FORMAT_RGB8.rawValue), &out))
         return Bitmap(pointer: out!)
     }
 
@@ -165,10 +167,11 @@ public final class Document {
         }
     }
 
-    /// One /Info text entry by its TpdfInfoKey number; nil when absent.
-    public func info(_ key: UInt32) throws -> String? {
+    /// One /Info text entry by its TpdfInfoKey number; nil when absent. A
+    /// number that is not a key throws BadArgument.
+    public func info(_ key: Int32) throws -> String? {
         var out: UnsafeMutablePointer<CChar>? = nil
-        try check(tpdf_document_info(pointer, TpdfInfoKey(rawValue: key), &out))
+        try check(tpdf_document_info(pointer, key, &out))
         return take(out)
     }
 
@@ -248,11 +251,12 @@ public final class Editor {
     }
 
     /// Saves with the engine's default options (tpdf_write_options_init) but
-    /// the mode: 0 rewrite, 1 incremental, as TpdfWriteMode numbers them.
-    public func save(mode: UInt32) throws -> [UInt8] {
+    /// the mode: 0 rewrite, 1 incremental, as TpdfWriteMode numbers them; any
+    /// other number throws BadArgument.
+    public func save(mode: Int32) throws -> [UInt8] {
         var options = TpdfWriteOptions()
         try check(tpdf_write_options_init(&options))
-        options.mode = TpdfWriteMode(rawValue: mode)
+        options.mode = mode
         var out: OpaquePointer? = nil
         try check(tpdf_editor_save(pointer, &options, &out))
         return take(buffer: out) ?? []

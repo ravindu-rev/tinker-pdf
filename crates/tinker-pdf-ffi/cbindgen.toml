@@ -26,3 +26,29 @@ prefix_with_name = true
 
 [parse]
 parse_deps = false
+
+# Every enum a caller hands over crosses as an `int`, read through a checked
+# conversion (`raw_enum!` in src/lib.rs), because a Rust enum holding a number
+# it does not declare is undefined behaviour. Nothing in a signature then
+# names these, so cbindgen would drop them; they are listed so the header
+# still carries the names of the numbers.
+[export]
+include = [
+    "TpdfPixelFormat",
+    "TpdfWriteMode",
+    "TpdfDestKind",
+    "TpdfTargetKind",
+    "TpdfImageKind",
+    "TpdfInfoKey",
+    "TpdfTrapped",
+    "TpdfLabelStyle",
+    "TpdfPageBoundary",
+    "TpdfSanitiseList",
+    "TpdfFieldValueKind",
+    "TpdfBlendMode",
+    "TpdfSoftMask",
+    "TpdfMaskKind",
+    "TpdfDeviceSpace",
+    "TpdfTilingType",
+    "TpdfTagText",
+]

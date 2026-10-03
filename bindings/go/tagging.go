@@ -49,7 +49,7 @@ func (t *Tag) Close() {
 func (t *Tag) SetText(which TagText, text string) error {
 	ctext := cString(text)
 	defer C.free(unsafe.Pointer(ctext))
-	return call(func() C.enum_TpdfStatus { return C.tpdf_tag_set_text(t.ptr, C.enum_TpdfTagText(which), ctext) })
+	return call(func() C.enum_TpdfStatus { return C.tpdf_tag_set_text(t.ptr, C.int(which), ctext) })
 }
 
 // SetID sets /ID.

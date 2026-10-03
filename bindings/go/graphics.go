@@ -155,10 +155,10 @@ func (b *Builder) AddExtGState(resource []byte, state ExtGState) error {
 	}
 	if state.BlendMode != nil {
 		raw.has_blend_mode = 1
-		raw.blend_mode = C.enum_TpdfBlendMode(*state.BlendMode)
+		raw.blend_mode = C.int(*state.BlendMode)
 	}
-	raw.soft_mask = C.enum_TpdfSoftMask(state.SoftMask)
-	raw.mask_kind = C.enum_TpdfMaskKind(state.MaskKind)
+	raw.soft_mask = C.int(state.SoftMask)
+	raw.mask_kind = C.int(state.MaskKind)
 	if state.MaskForm != nil {
 		form := C.CBytes(state.MaskForm)
 		defer C.free(form)
@@ -187,7 +187,7 @@ func (b *Builder) AddForm(resource []byte, x0, y0, x1, y1 float64, matrix *Matri
 	var rawGroup *C.TpdfTransparencyGroup
 	if group != nil {
 		rawGroup = &C.TpdfTransparencyGroup{
-			color_space: C.enum_TpdfDeviceSpace(group.ColorSpace),
+			color_space: C.int(group.ColorSpace),
 			isolated:    C.int32_t(flag(group.Isolated)),
 			knockout:    C.int32_t(flag(group.Knockout)),
 		}
@@ -210,7 +210,7 @@ func (b *Builder) AddTilingPattern(resource []byte, x0, y0, x1, y1, xStep, yStep
 		r, rl := bytesArg(resource)
 		c, cl := bytesArg(content)
 		return C.tpdf_builder_add_tiling_pattern(b.ptr, r, rl, C.double(x0), C.double(y0), C.double(x1), C.double(y1),
-			C.double(xStep), C.double(yStep), m, C.enum_TpdfTilingType(tiling), c, cl)
+			C.double(xStep), C.double(yStep), m, C.int(tiling), c, cl)
 	})
 	_ = keep
 	return err

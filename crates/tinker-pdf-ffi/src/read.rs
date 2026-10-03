@@ -53,6 +53,17 @@ pub enum TpdfInfoKey {
     ModificationDate = 7,
 }
 
+raw_enum!(TpdfInfoKey {
+    Title,
+    Author,
+    Subject,
+    Keywords,
+    Creator,
+    Producer,
+    CreationDate,
+    ModificationDate
+});
+
 /// `/Trapped` (Table 349), with its absence spelled out.
 ///
 /// The facade's `Option<Trapped>` carries two facts that a three-arm enum
@@ -70,6 +81,13 @@ pub enum TpdfTrapped {
     /// `/Unknown`, or a name that is not one of the three.
     Unknown = 3,
 }
+
+raw_enum!(TpdfTrapped {
+    Absent,
+    True,
+    False,
+    Unknown
+});
 
 /// Which `Destination` arm an outline entry or a link names (12.3.2).
 ///
@@ -157,7 +175,7 @@ fn nullable(value: Option<f64>) -> f64 {
 /// same struct in both directions.
 fn view_of(kind: &DestKind) -> TpdfDestination {
     let mut view = TpdfDestination {
-        kind: TpdfDestKind::Fit,
+        kind: TpdfDestKind::Fit as c_int,
         left: f64::NAN,
         bottom: f64::NAN,
         right: f64::NAN,
@@ -166,18 +184,18 @@ fn view_of(kind: &DestKind) -> TpdfDestination {
     };
     match *kind {
         DestKind::Xyz { left, top, zoom } => {
-            view.kind = TpdfDestKind::Xyz;
+            view.kind = TpdfDestKind::Xyz as c_int;
             view.left = nullable(left);
             view.top = nullable(top);
             view.zoom = nullable(zoom);
         }
         DestKind::Fit => {}
         DestKind::FitH { top } => {
-            view.kind = TpdfDestKind::FitH;
+            view.kind = TpdfDestKind::FitH as c_int;
             view.top = nullable(top);
         }
         DestKind::FitV { left } => {
-            view.kind = TpdfDestKind::FitV;
+            view.kind = TpdfDestKind::FitV as c_int;
             view.left = nullable(left);
         }
         DestKind::FitR {
@@ -186,19 +204,19 @@ fn view_of(kind: &DestKind) -> TpdfDestination {
             right,
             top,
         } => {
-            view.kind = TpdfDestKind::FitR;
+            view.kind = TpdfDestKind::FitR as c_int;
             view.left = left;
             view.bottom = bottom;
             view.right = right;
             view.top = top;
         }
-        DestKind::FitB => view.kind = TpdfDestKind::FitB,
+        DestKind::FitB => view.kind = TpdfDestKind::FitB as c_int,
         DestKind::FitBH { top } => {
-            view.kind = TpdfDestKind::FitBH;
+            view.kind = TpdfDestKind::FitBH as c_int;
             view.top = nullable(top);
         }
         DestKind::FitBV { left } => {
-            view.kind = TpdfDestKind::FitBV;
+            view.kind = TpdfDestKind::FitBV as c_int;
             view.left = nullable(left);
         }
     }
@@ -320,7 +338,8 @@ unsafe fn put<T>(out: *mut T, value: T) {
 
 // ---- /Info, the version, page labels, XMP -----------------------------------
 
-/// One `/Info` text entry (14.3.3), decoded.
+/// One `/Info` text entry (14.3.3), decoded. `key` is a [`TpdfInfoKey`]; any
+/// other number is [`TpdfStatus::BadArgument`].
 ///
 /// **Null on `Ok` means the entry is absent**, and an empty string means the
 /// producer wrote an empty one — the facade keeps those apart because a
@@ -333,11 +352,15 @@ unsafe fn put<T>(out: *mut T, value: T) {
 #[no_mangle]
 pub unsafe extern "C" fn tpdf_document_info(
     doc: *const TpdfDocument,
-    key: TpdfInfoKey,
+    key: c_int,
     out: *mut *mut c_char,
 ) -> TpdfStatus {
     let doc = match unsafe { document(doc) } {
         Ok(doc) => doc,
+        Err(status) => return status,
+    };
+    let key = match TpdfInfoKey::checked(key, "info key") {
+        Ok(key) => key,
         Err(status) => return status,
     };
     let metadata = doc.metadata();

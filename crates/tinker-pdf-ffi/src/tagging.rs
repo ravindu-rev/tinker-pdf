@@ -11,7 +11,7 @@
 //! nothing is written. A table's attributes, a namespace and associated
 //! files on an element are not here: each is a shape of its own.
 
-use std::ffi::c_char;
+use std::ffi::{c_char, c_int};
 
 use tinker_pdf::Tag;
 
@@ -36,6 +36,14 @@ pub enum TpdfTagText {
     /// `/E`, the expansion of an abbreviation.
     Expansion = 4,
 }
+
+raw_enum!(TpdfTagText {
+    Title,
+    Lang,
+    Alt,
+    ActualText,
+    Expansion
+});
 
 /// A structure element to open: its type and properties. Opaque.
 pub struct TpdfTag {
@@ -88,7 +96,8 @@ pub unsafe extern "C" fn tpdf_tag_new(
 
 /// Sets one of the element's text properties -- `Tag::title`, `lang`,
 /// `alt`, `actual_text` or `expansion`, as `which` names. Setting one twice
-/// keeps the second.
+/// keeps the second. `which` is a [`TpdfTagText`]; any other number is
+/// [`TpdfStatus::BadArgument`].
 ///
 /// # Safety
 ///
@@ -96,11 +105,15 @@ pub unsafe extern "C" fn tpdf_tag_new(
 #[no_mangle]
 pub unsafe extern "C" fn tpdf_tag_set_text(
     tag: *mut TpdfTag,
-    which: TpdfTagText,
+    which: c_int,
     text: *const c_char,
 ) -> TpdfStatus {
     let tag = match unsafe { tag_mut(tag) } {
         Ok(tag) => tag,
+        Err(status) => return status,
+    };
+    let which = match TpdfTagText::checked(which, "tag text") {
+        Ok(which) => which,
         Err(status) => return status,
     };
     let text = match unsafe { required_str(text, "text") } {

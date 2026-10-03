@@ -43,6 +43,13 @@ pub enum TpdfFieldValueKind {
     Many = 3,
 }
 
+raw_enum!(TpdfFieldValueKind {
+    None,
+    Text,
+    State,
+    Many
+});
+
 /// What a form-data reader met and did not read, or read leniently
 /// (ruling 10).
 #[repr(C)]
@@ -507,7 +514,8 @@ pub unsafe extern "C" fn tpdf_form_data_new(out: *mut *mut TpdfFormData) -> Tpdf
 /// Appends one field: its fully qualified name and its value, given as
 /// `count` strings -- none for [`TpdfFieldValueKind::None`], exactly one for
 /// `Text` and `State`, any number for `Many`. A count that does not fit the
-/// kind is [`TpdfStatus::BadArgument`].
+/// kind is [`TpdfStatus::BadArgument`], and so is a `kind` that is not a
+/// [`TpdfFieldValueKind`].
 ///
 /// # Safety
 ///
@@ -517,7 +525,7 @@ pub unsafe extern "C" fn tpdf_form_data_new(out: *mut *mut TpdfFormData) -> Tpdf
 pub unsafe extern "C" fn tpdf_form_data_add_field(
     handle: *mut TpdfFormData,
     name: *const c_char,
-    kind: TpdfFieldValueKind,
+    kind: c_int,
     values: *const *const c_char,
     count: usize,
 ) -> TpdfStatus {
@@ -527,6 +535,10 @@ pub unsafe extern "C" fn tpdf_form_data_add_field(
     };
     let name = match unsafe { required_str(name, "field name") } {
         Ok(name) => name,
+        Err(status) => return status,
+    };
+    let kind = match TpdfFieldValueKind::checked(kind, "field value kind") {
+        Ok(kind) => kind,
         Err(status) => return status,
     };
     let mut values = match unsafe { strings(values, count, "value") } {

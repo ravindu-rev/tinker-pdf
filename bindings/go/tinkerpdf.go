@@ -234,7 +234,7 @@ func (d *Document) Render(index uint32, scale float64, format PixelFormat) (*Bit
 	var out *C.TpdfBitmap
 	err := call(func() C.enum_TpdfStatus {
 		return C.tpdf_page_render(d.ptr, C.uint32_t(index), C.double(scale),
-			C.enum_TpdfPixelFormat(format), &out)
+			C.int(format), &out)
 	})
 	if err != nil {
 		return nil, err

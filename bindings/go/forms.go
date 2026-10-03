@@ -231,7 +231,7 @@ func (f *FormData) AddField(name string, kind FieldValueKind, values ...string) 
 	array, free := cStrings(values)
 	defer free()
 	return call(func() C.enum_TpdfStatus {
-		return C.tpdf_form_data_add_field(f.ptr, cname, C.enum_TpdfFieldValueKind(kind), array, C.size_t(len(values)))
+		return C.tpdf_form_data_add_field(f.ptr, cname, C.int(kind), array, C.size_t(len(values)))
 	})
 }
 

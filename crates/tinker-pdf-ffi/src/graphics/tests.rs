@@ -108,7 +108,7 @@ fn through_the_abi() -> Vec<u8> {
         )
     });
     let group = TpdfTransparencyGroup {
-        color_space: TpdfDeviceSpace::Gray,
+        color_space: TpdfDeviceSpace::Gray as c_int,
         isolated: 1,
         knockout: 0,
     };
@@ -148,9 +148,9 @@ fn through_the_abi() -> Vec<u8> {
     state.fill_alpha = 0.5;
     state.stroke_alpha = 0.25;
     state.has_blend_mode = 1;
-    state.blend_mode = TpdfBlendMode::Multiply;
-    state.soft_mask = TpdfSoftMask::Group;
-    state.mask_kind = TpdfMaskKind::Luminosity;
+    state.blend_mode = TpdfBlendMode::Multiply as c_int;
+    state.soft_mask = TpdfSoftMask::Group as c_int;
+    state.mask_kind = TpdfMaskKind::Luminosity as c_int;
     state.mask_form = b"Fm0".as_ptr();
     state.mask_form_len = 3;
     state.backdrop = BACKDROP.as_ptr();
@@ -159,7 +159,7 @@ fn through_the_abi() -> Vec<u8> {
     let mut off = std::mem::MaybeUninit::<TpdfExtGState>::uninit();
     ok(unsafe { tpdf_ext_gstate_init(off.as_mut_ptr()) });
     let mut off = unsafe { off.assume_init() };
-    off.soft_mask = TpdfSoftMask::None;
+    off.soft_mask = TpdfSoftMask::None as c_int;
     ok(unsafe { tpdf_builder_add_ext_gstate(builder, b"GS1".as_ptr(), 3, &off) });
     ok(unsafe {
         tpdf_builder_add_tiling_pattern(
@@ -173,13 +173,13 @@ fn through_the_abi() -> Vec<u8> {
             8.0,
             8.0,
             PATTERN_MATRIX.as_ptr(),
-            TpdfTilingType::NoDistortion,
+            TpdfTilingType::NoDistortion as c_int,
             CELL.as_ptr(),
             CELL.len(),
         )
     });
     let image = TpdfImage {
-        kind: TpdfImageKind::Gray8,
+        kind: TpdfImageKind::Gray8 as c_int,
         width: 2,
         height: 2,
         data: GREY.as_ptr(),
@@ -350,7 +350,7 @@ fn the_initialised_state_is_the_facades_default() {
     let state = unsafe { state.assume_init() };
     assert!(state.fill_alpha.is_nan() && state.stroke_alpha.is_nan());
     assert_eq!(state.has_blend_mode, 0);
-    assert_eq!(state.soft_mask, TpdfSoftMask::Absent);
+    assert_eq!(state.soft_mask, TpdfSoftMask::Absent as c_int);
     assert!(state.mask_form.is_null() && state.backdrop.is_null());
 
     let mut builder = ptr::null_mut();
@@ -445,7 +445,7 @@ fn a_refused_call_registers_nothing_and_says_why() {
         )
     });
     state.fill_alpha = f64::NAN;
-    state.soft_mask = TpdfSoftMask::Group;
+    state.soft_mask = TpdfSoftMask::Group as c_int;
     state.mask_form = b"Fm".as_ptr();
     state.mask_form_len = 2;
     assert_eq!(
@@ -486,7 +486,7 @@ fn a_refused_call_registers_nothing_and_says_why() {
                 0.0,
                 8.0,
                 ptr::null(),
-                TpdfTilingType::ConstantSpacing,
+                TpdfTilingType::ConstantSpacing as c_int,
                 CELL.as_ptr(),
                 CELL.len(),
             )
@@ -608,7 +608,7 @@ fn null_and_spent_handles_are_refused_not_dereferenced() {
                 1.0,
                 1.0,
                 ptr::null(),
-                TpdfTilingType::ConstantSpacing,
+                TpdfTilingType::ConstantSpacing as c_int,
                 CELL.as_ptr(),
                 CELL.len(),
             )

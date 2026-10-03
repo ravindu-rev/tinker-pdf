@@ -141,7 +141,7 @@ func (e *Editor) SetPageLabels(ranges []PageLabelRange) error {
 	for i, r := range ranges {
 		raw[i] = C.TpdfPageLabelRange{
 			first_page: C.uint32_t(r.FirstPage),
-			style:      C.enum_TpdfLabelStyle(r.Style),
+			style:      C.int(r.Style),
 			start:      C.uint32_t(r.Start),
 		}
 		if r.Prefix != nil {
@@ -221,7 +221,7 @@ func (e *Editor) SetInfo(key InfoKey, value string) (MetadataSync, error) {
 	defer C.free(unsafe.Pointer(cvalue))
 	var sync C.enum_TpdfMetadataSync
 	err := call(func() C.enum_TpdfStatus {
-		return C.tpdf_editor_set_info(e.ptr, C.enum_TpdfInfoKey(key), cvalue, &sync)
+		return C.tpdf_editor_set_info(e.ptr, C.int(key), cvalue, &sync)
 	})
 	return MetadataSync(sync), err
 }
@@ -231,7 +231,7 @@ func (e *Editor) SetInfoDate(key InfoKey, date Date) (MetadataSync, error) {
 	raw := date.raw()
 	var sync C.enum_TpdfMetadataSync
 	err := call(func() C.enum_TpdfStatus {
-		return C.tpdf_editor_set_info_date(e.ptr, C.enum_TpdfInfoKey(key), &raw, &sync)
+		return C.tpdf_editor_set_info_date(e.ptr, C.int(key), &raw, &sync)
 	})
 	return MetadataSync(sync), err
 }
@@ -240,7 +240,7 @@ func (e *Editor) SetInfoDate(key InfoKey, date Date) (MetadataSync, error) {
 func (e *Editor) SetTrapped(trapped Trapped) (MetadataSync, error) {
 	var sync C.enum_TpdfMetadataSync
 	err := call(func() C.enum_TpdfStatus {
-		return C.tpdf_editor_set_trapped(e.ptr, C.enum_TpdfTrapped(trapped), &sync)
+		return C.tpdf_editor_set_trapped(e.ptr, C.int(trapped), &sync)
 	})
 	return MetadataSync(sync), err
 }
@@ -260,7 +260,7 @@ func (e *Editor) SetXMPMetadata(packet []byte) (MetadataSync, error) {
 // boundary named.
 func (e *Editor) SetPageBoundary(index uint32, boundary PageBoundary, x0, y0, x1, y1 float64) error {
 	return call(func() C.enum_TpdfStatus {
-		return C.tpdf_editor_set_page_boundary(e.ptr, C.uint32_t(index), C.enum_TpdfPageBoundary(boundary),
+		return C.tpdf_editor_set_page_boundary(e.ptr, C.uint32_t(index), C.int(boundary),
 			C.double(x0), C.double(y0), C.double(x1), C.double(y1))
 	})
 }
@@ -270,7 +270,7 @@ func (e *Editor) SetPageBoundary(index uint32, boundary PageBoundary, x0, y0, x1
 func (d *Document) PageBox(index uint32, boundary PageBoundary) (x0, y0, x1, y1 float64, err error) {
 	var a, b, c, e C.double
 	err = call(func() C.enum_TpdfStatus {
-		return C.tpdf_page_boundary(d.ptr, C.uint32_t(index), C.enum_TpdfPageBoundary(boundary), &a, &b, &c, &e)
+		return C.tpdf_page_boundary(d.ptr, C.uint32_t(index), C.int(boundary), &a, &b, &c, &e)
 	})
 	return float64(a), float64(b), float64(c), float64(e), err
 }
@@ -291,7 +291,7 @@ func (e *Editor) Sanitise(what Sanitise) (*SanitiseReport, error) {
 
 	out := &SanitiseReport{}
 	for list := 0; list < 2; list++ {
-		which := C.enum_TpdfSanitiseList(list)
+		which := C.int(list)
 		count := uint32(C.tpdf_sanitise_report_count(report, which))
 		for i := uint32(0); i < count; i++ {
 			index := C.uint32_t(i)

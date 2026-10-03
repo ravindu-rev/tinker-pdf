@@ -18,7 +18,7 @@
 //! `Function`, which is recursive (a stitching function holds functions) and
 //! has a PostScript calculator arm, and is a sub-surface of its own.
 
-use std::ffi::c_char;
+use std::ffi::{c_char, c_int};
 
 use tinker_pdf::{
     BlendMode, DeviceSpace, DocumentBuilder, ExtGState, FormXObject, MaskKind, StateMask,
@@ -68,6 +68,25 @@ pub enum TpdfBlendMode {
     Luminosity = 15,
 }
 
+raw_enum!(TpdfBlendMode {
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    ColorDodge,
+    ColorBurn,
+    HardLight,
+    SoftLight,
+    Difference,
+    Exclusion,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity
+});
+
 /// Which `/SMask` a graphics state writes (11.6.5.2), if any.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +101,12 @@ pub enum TpdfSoftMask {
     Group = 2,
 }
 
+raw_enum!(TpdfSoftMask {
+    Absent,
+    None,
+    Group
+});
+
 /// What a soft mask derives its alpha from (11.6.5.2).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +116,8 @@ pub enum TpdfMaskKind {
     /// `/S /Luminosity`.
     Luminosity = 1,
 }
+
+raw_enum!(TpdfMaskKind { Alpha, Luminosity });
 
 /// A device colour space (8.6.4).
 #[repr(C)]
@@ -103,6 +130,8 @@ pub enum TpdfDeviceSpace {
     /// `/DeviceCMYK`.
     Cmyk = 2,
 }
+
+raw_enum!(TpdfDeviceSpace { Gray, Rgb, Cmyk });
 
 /// `/TilingType` (Table 75). Counted from zero, as every enum on this
 /// boundary is: `ConstantSpacing` writes `/TilingType 1`.
@@ -117,8 +146,18 @@ pub enum TpdfTilingType {
     FasterTiling = 2,
 }
 
+raw_enum!(TpdfTilingType {
+    ConstantSpacing,
+    NoDistortion,
+    FasterTiling
+});
+
 /// Graphics state parameters, for [`tpdf_builder_add_ext_gstate`] (Table
 /// 58). Start from [`tpdf_ext_gstate_init`], which is every override absent.
+///
+/// The three enum fields are `int`s holding a [`TpdfBlendMode`], a
+/// [`TpdfSoftMask`] and a [`TpdfMaskKind`]; a number the enum does not
+/// declare, in a field the call reads, is [`TpdfStatus::BadArgument`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct TpdfExtGState {
@@ -128,12 +167,14 @@ pub struct TpdfExtGState {
     pub stroke_alpha: f64,
     /// Non-zero writes `/BM blend_mode`.
     pub has_blend_mode: i32,
-    /// `/BM`, when `has_blend_mode` says so.
-    pub blend_mode: TpdfBlendMode,
-    /// Which `/SMask`, if any.
-    pub soft_mask: TpdfSoftMask,
-    /// `/S` of a [`TpdfSoftMask::Group`] mask.
-    pub mask_kind: TpdfMaskKind,
+    /// `/BM`, a [`TpdfBlendMode`], when `has_blend_mode` says so; ignored
+    /// otherwise.
+    pub blend_mode: c_int,
+    /// Which `/SMask`, if any: a [`TpdfSoftMask`].
+    pub soft_mask: c_int,
+    /// `/S` of a [`TpdfSoftMask::Group`] mask, a [`TpdfMaskKind`]; ignored for
+    /// the other two arms.
+    pub mask_kind: c_int,
     /// `/G` of a group mask: the resource name of a form registered with a
     /// transparency group. Ignored for the other two arms.
     pub mask_form: *const u8,
@@ -151,8 +192,9 @@ pub struct TpdfExtGState {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct TpdfTransparencyGroup {
-    /// `/CS`.
-    pub color_space: TpdfDeviceSpace,
+    /// `/CS`, a [`TpdfDeviceSpace`]. Any other number is
+    /// [`TpdfStatus::BadArgument`].
+    pub color_space: c_int,
     /// `/I`, non-zero for isolated.
     pub isolated: i32,
     /// `/K`, non-zero for knockout.
@@ -367,9 +409,9 @@ pub unsafe extern "C" fn tpdf_ext_gstate_init(out: *mut TpdfExtGState) -> TpdfSt
         fill_alpha: f64::NAN,
         stroke_alpha: f64::NAN,
         has_blend_mode: 0,
-        blend_mode: TpdfBlendMode::Normal,
-        soft_mask: TpdfSoftMask::Absent,
-        mask_kind: TpdfMaskKind::Alpha,
+        blend_mode: TpdfBlendMode::Normal as c_int,
+        soft_mask: TpdfSoftMask::Absent as c_int,
+        mask_kind: TpdfMaskKind::Alpha as c_int,
         mask_form: std::ptr::null(),
         mask_form_len: 0,
         backdrop: std::ptr::null(),
@@ -384,6 +426,8 @@ pub unsafe extern "C" fn tpdf_ext_gstate_init(out: *mut TpdfExtGState) -> TpdfSt
 /// Refused, [`TpdfStatus::EditRefused`] with nothing registered, for an
 /// alpha outside 11.6.4.4's range, a non-finite backdrop component, or a
 /// group mask naming a form that is not registered or carries no `/Group`.
+/// An enum field the call reads holding a number its enum does not declare
+/// is [`TpdfStatus::BadArgument`], also with nothing registered.
 ///
 /// # Safety
 ///
@@ -408,10 +452,27 @@ pub unsafe extern "C" fn tpdf_builder_add_ext_gstate(
         set_error("null graphics state");
         return TpdfStatus::BadArgument;
     };
-    let soft_mask = match state.soft_mask {
+    let soft_mask = match TpdfSoftMask::checked(state.soft_mask, "soft mask") {
+        Ok(soft_mask) => soft_mask,
+        Err(status) => return status,
+    };
+    let blend_mode = if state.has_blend_mode == 0 {
+        None
+    } else {
+        match TpdfBlendMode::checked(state.blend_mode, "blend mode") {
+            Ok(mode) => Some(blend(mode)),
+            Err(status) => return status,
+        }
+    };
+    let soft_mask = match soft_mask {
         TpdfSoftMask::Absent => None,
         TpdfSoftMask::None => Some(StateMask::None),
         TpdfSoftMask::Group => {
+            let kind = match TpdfMaskKind::checked(state.mask_kind, "mask kind") {
+                Ok(TpdfMaskKind::Alpha) => MaskKind::Alpha,
+                Ok(TpdfMaskKind::Luminosity) => MaskKind::Luminosity,
+                Err(status) => return status,
+            };
             let Ok(form) =
                 (unsafe { required_bytes(state.mask_form, state.mask_form_len, "mask form") })
             else {
@@ -423,10 +484,7 @@ pub unsafe extern "C" fn tpdf_builder_add_ext_gstate(
                 Some(unsafe { std::slice::from_raw_parts(state.backdrop, state.backdrop_len) })
             };
             Some(StateMask::Group {
-                kind: match state.mask_kind {
-                    TpdfMaskKind::Alpha => MaskKind::Alpha,
-                    TpdfMaskKind::Luminosity => MaskKind::Luminosity,
-                },
+                kind,
                 form,
                 backdrop,
             })
@@ -435,7 +493,7 @@ pub unsafe extern "C" fn tpdf_builder_add_ext_gstate(
     let facade = ExtGState {
         fill_alpha: present(state.fill_alpha),
         stroke_alpha: present(state.stroke_alpha),
-        blend_mode: (state.has_blend_mode != 0).then(|| blend(state.blend_mode)),
+        blend_mode,
         soft_mask,
     };
     if builder.add_ext_gstate(resource, &facade) {
@@ -448,7 +506,8 @@ pub unsafe extern "C" fn tpdf_builder_add_ext_gstate(
 /// Registers a form XObject under a resource name (8.10) --
 /// `DocumentBuilder::add_form`. Its `/Resources` are the document's at this
 /// moment. `matrix` is six doubles or null for the identity; `group` is the
-/// transparency group or null for none.
+/// transparency group or null for none, and a group whose `color_space` is
+/// not a [`TpdfDeviceSpace`] is [`TpdfStatus::BadArgument`].
 ///
 /// Refused, [`TpdfStatus::EditRefused`] with nothing registered, for a
 /// degenerate `/BBox` or a non-finite `/Matrix`.
@@ -482,14 +541,21 @@ pub unsafe extern "C" fn tpdf_builder_add_form(
     ) else {
         return TpdfStatus::BadArgument;
     };
+    let group = match unsafe { group.as_ref() } {
+        None => None,
+        Some(group) => match TpdfDeviceSpace::checked(group.color_space, "group colour space") {
+            Ok(space) => Some(TransparencyGroup {
+                color_space: device_space(space),
+                isolated: group.isolated != 0,
+                knockout: group.knockout != 0,
+            }),
+            Err(status) => return status,
+        },
+    };
     let form = FormXObject {
         bbox: [x0, y0, x1, y1],
         matrix: unsafe { self::matrix(matrix) },
-        group: unsafe { group.as_ref() }.map(|group| TransparencyGroup {
-            color_space: device_space(group.color_space),
-            isolated: group.isolated != 0,
-            knockout: group.knockout != 0,
-        }),
+        group,
         content,
     };
     if builder.add_form(resource, &form) {
@@ -504,7 +570,9 @@ pub unsafe extern "C" fn tpdf_builder_add_form(
 
 /// Registers a coloured tiling pattern under a resource name (8.7.3) --
 /// `DocumentBuilder::add_tiling_pattern`. The cell's `/Resources` are the
-/// document's at this moment; `matrix` is six doubles or null.
+/// document's at this moment; `matrix` is six doubles or null; `tiling_type`
+/// is a [`TpdfTilingType`], and any other number is
+/// [`TpdfStatus::BadArgument`].
 ///
 /// Refused, [`TpdfStatus::EditRefused`] with nothing registered, for a
 /// degenerate `/BBox`, a zero or non-finite step, or a non-finite `/Matrix`.
@@ -526,12 +594,18 @@ pub unsafe extern "C" fn tpdf_builder_add_tiling_pattern(
     x_step: f64,
     y_step: f64,
     matrix: *const f64,
-    tiling_type: TpdfTilingType,
+    tiling_type: c_int,
     content: *const u8,
     content_len: usize,
 ) -> TpdfStatus {
     let builder = match unsafe { builder_mut(builder, "add_tiling_pattern") } {
         Ok(builder) => builder,
+        Err(status) => return status,
+    };
+    let tiling_type = match TpdfTilingType::checked(tiling_type, "tiling type") {
+        Ok(TpdfTilingType::ConstantSpacing) => TilingType::ConstantSpacing,
+        Ok(TpdfTilingType::NoDistortion) => TilingType::NoDistortion,
+        Ok(TpdfTilingType::FasterTiling) => TilingType::FasterTiling,
         Err(status) => return status,
     };
     let (Ok(resource), Ok(content)) = (
@@ -545,11 +619,7 @@ pub unsafe extern "C" fn tpdf_builder_add_tiling_pattern(
         x_step,
         y_step,
         matrix: unsafe { self::matrix(matrix) },
-        tiling_type: match tiling_type {
-            TpdfTilingType::ConstantSpacing => TilingType::ConstantSpacing,
-            TpdfTilingType::NoDistortion => TilingType::NoDistortion,
-            TpdfTilingType::FasterTiling => TilingType::FasterTiling,
-        },
+        tiling_type,
         content,
     };
     if builder.add_tiling_pattern(resource, &pattern) {

@@ -153,18 +153,6 @@ typedef enum TpdfAuthLevel {
   TPDF_AUTH_LEVEL_OWNER = 2,
 } TpdfAuthLevel;
 
-// How a bitmap stores its pixels.
-typedef enum TpdfPixelFormat {
-  // One byte of grey.
-  TPDF_PIXEL_FORMAT_GRAY8 = 0,
-  // Grey and alpha.
-  TPDF_PIXEL_FORMAT_GRAY_A8 = 1,
-  // Red, green, blue.
-  TPDF_PIXEL_FORMAT_RGB8 = 2,
-  // Red, green, blue, alpha.
-  TPDF_PIXEL_FORMAT_RGBA8 = 3,
-} TpdfPixelFormat;
-
 // What a signature's `/ByteRange` covers, checked against the file.
 //
 // The facade's `Coverage` carries a revision index on one arm and a named
@@ -268,16 +256,6 @@ typedef enum TpdfWeakness {
   TPDF_WEAKNESS_OUTSIDE_VALIDITY = 5,
 } TpdfWeakness;
 
-// Which shape of output a save produces (7.5.6).
-typedef enum TpdfWriteMode {
-  // Emit every object afresh, renumbering from one.
-  TPDF_WRITE_MODE_REWRITE = 0,
-  // Append changed objects to the original bytes, so the original survives
-  // as a prefix and a signature over it still covers what it covered
-  // (12.8.1).
-  TPDF_WRITE_MODE_INCREMENTAL = 1,
-} TpdfWriteMode;
-
 // What is wrong with a widget an appearance could not be written for.
 typedef enum TpdfWidgetDefect {
   // 12.5.2 Table 164: `/Rect` is required for every annotation and this one
@@ -285,97 +263,6 @@ typedef enum TpdfWidgetDefect {
   // the value out in and nowhere on the page to draw it.
   TPDF_WIDGET_DEFECT_RECT_MISSING = 0,
 } TpdfWidgetDefect;
-
-// How a destination positions the page it names (12.3.2.2 Table 151).
-typedef enum TpdfDestKind {
-  // `/XYZ left top zoom`.
-  TPDF_DEST_KIND_XYZ = 0,
-  // `/Fit`: fit the whole page.
-  TPDF_DEST_KIND_FIT = 1,
-  // `/FitH top`: fit the width.
-  TPDF_DEST_KIND_FIT_H = 2,
-  // `/FitV left`: fit the height.
-  TPDF_DEST_KIND_FIT_V = 3,
-  // `/FitR left bottom right top`: fit a rectangle.
-  TPDF_DEST_KIND_FIT_R = 4,
-  // `/FitB`: fit the bounding box of the page's contents.
-  TPDF_DEST_KIND_FIT_B = 5,
-  // `/FitBH top`: fit the bounding box's width.
-  TPDF_DEST_KIND_FIT_BH = 6,
-  // `/FitBV left`: fit the bounding box's height.
-  TPDF_DEST_KIND_FIT_BV = 7,
-} TpdfDestKind;
-
-// Which of `ImageData`'s arms a [`TpdfImage`] carries.
-//
-// `ImageData::Compressed` does **not** cross, and that is a decision rather
-// than an omission: it carries a `CompressedImage` with a nested colour space
-// that itself holds a palette slice and a filter with its own parameters, so
-// projecting it is a sub-surface rather than a struct. It exists because a
-// CBZ synthesises every page at open and must not decode each one
-// (`docs/features/*`, gap 29); that is an engine-internal path with no host
-// on the other end. A host with already-compressed bytes has
-// [`TpdfImageKind::Jpeg`], which is the same idea for the one codec hosts
-// actually hold bytes in.
-typedef enum TpdfImageKind {
-  // JPEG bytes, placed **as they are** and never re-encoded, because
-  // recompression is generational quality loss the caller cannot undo.
-  // `width` and `height` are read from the bytes and the struct's are
-  // ignored.
-  TPDF_IMAGE_KIND_JPEG = 0,
-  // Eight-bit RGB, three bytes per pixel, row-major from the top.
-  TPDF_IMAGE_KIND_RGB8 = 1,
-  // Eight-bit greyscale, one byte per pixel.
-  TPDF_IMAGE_KIND_GRAY8 = 2,
-} TpdfImageKind;
-
-// Where a link or an outline entry goes.
-typedef enum TpdfTargetKind {
-  // A page in this document, positioned as `view` says.
-  TPDF_TARGET_KIND_PAGE = 0,
-  // A URI, written as the `/URI` action of 12.6.4.7. 7-bit ASCII per that
-  // clause; anything else is refused by the writer rather than mangled.
-  TPDF_TARGET_KIND_URI = 1,
-} TpdfTargetKind;
-
-// How a page-label range writes its number (12.4.2, Table 159).
-typedef enum TpdfLabelStyle {
-  // `/D`: 1, 2, 3.
-  TPDF_LABEL_STYLE_DECIMAL = 0,
-  // `/R`: I, II, III.
-  TPDF_LABEL_STYLE_ROMAN_UPPER = 1,
-  // `/r`: i, ii, iii.
-  TPDF_LABEL_STYLE_ROMAN_LOWER = 2,
-  // `/A`: A, B, ... Z, AA.
-  TPDF_LABEL_STYLE_LETTERS_UPPER = 3,
-  // `/a`: a, b, ... z, aa.
-  TPDF_LABEL_STYLE_LETTERS_LOWER = 4,
-  // No number: every page of the range is labelled with the prefix alone.
-  TPDF_LABEL_STYLE_NONE = 5,
-} TpdfLabelStyle;
-
-// Which `/Info` entry to read (14.3.3, Table 349).
-//
-// `/Trapped` is not here because it is a name rather than a text string; it
-// has [`tpdf_document_trapped`] and its own enum.
-typedef enum TpdfInfoKey {
-  // `/Title`.
-  TPDF_INFO_KEY_TITLE = 0,
-  // `/Author`.
-  TPDF_INFO_KEY_AUTHOR = 1,
-  // `/Subject`.
-  TPDF_INFO_KEY_SUBJECT = 2,
-  // `/Keywords`.
-  TPDF_INFO_KEY_KEYWORDS = 3,
-  // `/Creator`: the application that authored the original document.
-  TPDF_INFO_KEY_CREATOR = 4,
-  // `/Producer`: the application that wrote the PDF.
-  TPDF_INFO_KEY_PRODUCER = 5,
-  // `/CreationDate`, as written rather than parsed.
-  TPDF_INFO_KEY_CREATION_DATE = 6,
-  // `/ModDate`, as written rather than parsed.
-  TPDF_INFO_KEY_MODIFICATION_DATE = 7,
-} TpdfInfoKey;
 
 // What a metadata write did to the other statement of the same metadata.
 typedef enum TpdfMetadataSync {
@@ -385,44 +272,6 @@ typedef enum TpdfMetadataSync {
   // old value.
   TPDF_METADATA_SYNC_OTHER_HALF_UNCHANGED = 1,
 } TpdfMetadataSync;
-
-// `/Trapped` (Table 349), with its absence spelled out.
-//
-// The facade's `Option<Trapped>` carries two facts that a three-arm enum
-// would merge: `Absent` is the key missing, and `Unknown` is the document
-// answering `/Unknown` (or a name outside the three, which reads the same).
-typedef enum TpdfTrapped {
-  // No `/Trapped` entry, or no `/Info` at all.
-  TPDF_TRAPPED_ABSENT = 0,
-  // `/True`.
-  TPDF_TRAPPED_TRUE = 1,
-  // `/False`.
-  TPDF_TRAPPED_FALSE = 2,
-  // `/Unknown`, or a name that is not one of the three.
-  TPDF_TRAPPED_UNKNOWN = 3,
-} TpdfTrapped;
-
-// One of a page's five boundaries (14.11.2).
-typedef enum TpdfPageBoundary {
-  // `/MediaBox`.
-  TPDF_PAGE_BOUNDARY_MEDIA_BOX = 0,
-  // `/CropBox`.
-  TPDF_PAGE_BOUNDARY_CROP_BOX = 1,
-  // `/BleedBox`.
-  TPDF_PAGE_BOUNDARY_BLEED_BOX = 2,
-  // `/TrimBox`.
-  TPDF_PAGE_BOUNDARY_TRIM_BOX = 3,
-  // `/ArtBox`.
-  TPDF_PAGE_BOUNDARY_ART_BOX = 4,
-} TpdfPageBoundary;
-
-// Which of a sanitise report's two lists an accessor reads.
-typedef enum TpdfSanitiseList {
-  // Entries removed from objects that stay, and from the trailer.
-  TPDF_SANITISE_LIST_REMOVED = 0,
-  // Objects deleted because only removed entries reached them.
-  TPDF_SANITISE_LIST_DELETED = 1,
-} TpdfSanitiseList;
 
 // Why [`tpdf_editor_sanitise`] removed something, as C sees `Removal`.
 typedef enum TpdfRemoval {
@@ -477,6 +326,199 @@ typedef enum TpdfFormDataWarningKind {
   // it is not read.
   TPDF_FORM_DATA_WARNING_KIND_UNNAMED = 3,
 } TpdfFormDataWarningKind;
+
+// `/Trapped` (Table 349), with its absence spelled out.
+//
+// The facade's `Option<Trapped>` carries two facts that a three-arm enum
+// would merge: `Absent` is the key missing, and `Unknown` is the document
+// answering `/Unknown` (or a name outside the three, which reads the same).
+typedef enum TpdfTrapped {
+  // No `/Trapped` entry, or no `/Info` at all.
+  TPDF_TRAPPED_ABSENT = 0,
+  // `/True`.
+  TPDF_TRAPPED_TRUE = 1,
+  // `/False`.
+  TPDF_TRAPPED_FALSE = 2,
+  // `/Unknown`, or a name that is not one of the three.
+  TPDF_TRAPPED_UNKNOWN = 3,
+} TpdfTrapped;
+
+// Which `Destination` arm an outline entry or a link names (12.3.2).
+//
+// Ruling 6 is why three arms cross rather than a page number: a named
+// destination is not flattened to the page it resolves to, and a URI is
+// never read as a name.
+typedef enum TpdfDestinationKind {
+  // No destination at all: an outline heading that points nowhere, or an
+  // action that carries none.
+  TPDF_DESTINATION_KIND_ABSENT = 0,
+  // A page in this document and a view of it.
+  TPDF_DESTINATION_KIND_EXPLICIT = 1,
+  // A name to look up in the document's own tables; the bytes cross
+  // through the `_destination_bytes` accessor.
+  TPDF_DESTINATION_KIND_NAMED = 2,
+  // A URI destination; the bytes cross through the `_destination_bytes`
+  // accessor.
+  TPDF_DESTINATION_KIND_URI = 3,
+} TpdfDestinationKind;
+
+// Which `Action` arm a link carries (12.6.4).
+typedef enum TpdfActionKind {
+  // A `/Link` with neither `/Dest` nor a usable `/A` — legal, useless, and
+  // reported rather than hidden.
+  TPDF_ACTION_KIND_ABSENT = 0,
+  // `/GoTo`: the destination is filled in.
+  TPDF_ACTION_KIND_GO_TO = 1,
+  // `/GoToR`: the destination is filled in when the action carried one,
+  // and the target file crosses through [`tpdf_link_action_bytes`].
+  TPDF_ACTION_KIND_GO_TO_R = 2,
+  // `/URI`; the URI crosses through [`tpdf_link_action_bytes`].
+  TPDF_ACTION_KIND_URI = 3,
+  // `/Named`, a viewer command; its name crosses through
+  // [`tpdf_link_action_bytes`].
+  TPDF_ACTION_KIND_NAMED = 4,
+  // `/Launch`: reported, never executed. The file crosses through
+  // [`tpdf_link_action_bytes`].
+  TPDF_ACTION_KIND_LAUNCH = 5,
+  // Any other action type, kept rather than dropped; its `/S` crosses
+  // through [`tpdf_link_action_bytes`].
+  TPDF_ACTION_KIND_OTHER = 6,
+} TpdfActionKind;
+
+// How a bitmap stores its pixels.
+typedef enum TpdfPixelFormat {
+  // One byte of grey.
+  TPDF_PIXEL_FORMAT_GRAY8 = 0,
+  // Grey and alpha.
+  TPDF_PIXEL_FORMAT_GRAY_A8 = 1,
+  // Red, green, blue.
+  TPDF_PIXEL_FORMAT_RGB8 = 2,
+  // Red, green, blue, alpha.
+  TPDF_PIXEL_FORMAT_RGBA8 = 3,
+} TpdfPixelFormat;
+
+// Which shape of output a save produces (7.5.6).
+typedef enum TpdfWriteMode {
+  // Emit every object afresh, renumbering from one.
+  TPDF_WRITE_MODE_REWRITE = 0,
+  // Append changed objects to the original bytes, so the original survives
+  // as a prefix and a signature over it still covers what it covered
+  // (12.8.1).
+  TPDF_WRITE_MODE_INCREMENTAL = 1,
+} TpdfWriteMode;
+
+// How a destination positions the page it names (12.3.2.2 Table 151).
+typedef enum TpdfDestKind {
+  // `/XYZ left top zoom`.
+  TPDF_DEST_KIND_XYZ = 0,
+  // `/Fit`: fit the whole page.
+  TPDF_DEST_KIND_FIT = 1,
+  // `/FitH top`: fit the width.
+  TPDF_DEST_KIND_FIT_H = 2,
+  // `/FitV left`: fit the height.
+  TPDF_DEST_KIND_FIT_V = 3,
+  // `/FitR left bottom right top`: fit a rectangle.
+  TPDF_DEST_KIND_FIT_R = 4,
+  // `/FitB`: fit the bounding box of the page's contents.
+  TPDF_DEST_KIND_FIT_B = 5,
+  // `/FitBH top`: fit the bounding box's width.
+  TPDF_DEST_KIND_FIT_BH = 6,
+  // `/FitBV left`: fit the bounding box's height.
+  TPDF_DEST_KIND_FIT_BV = 7,
+} TpdfDestKind;
+
+// Where a link or an outline entry goes.
+typedef enum TpdfTargetKind {
+  // A page in this document, positioned as `view` says.
+  TPDF_TARGET_KIND_PAGE = 0,
+  // A URI, written as the `/URI` action of 12.6.4.7. 7-bit ASCII per that
+  // clause; anything else is refused by the writer rather than mangled.
+  TPDF_TARGET_KIND_URI = 1,
+} TpdfTargetKind;
+
+// Which of `ImageData`'s arms a [`TpdfImage`] carries.
+//
+// `ImageData::Compressed` does **not** cross, and that is a decision rather
+// than an omission: it carries a `CompressedImage` with a nested colour space
+// that itself holds a palette slice and a filter with its own parameters, so
+// projecting it is a sub-surface rather than a struct. It exists because a
+// CBZ synthesises every page at open and must not decode each one
+// (`docs/features/*`, gap 29); that is an engine-internal path with no host
+// on the other end. A host with already-compressed bytes has
+// [`TpdfImageKind::Jpeg`], which is the same idea for the one codec hosts
+// actually hold bytes in.
+typedef enum TpdfImageKind {
+  // JPEG bytes, placed **as they are** and never re-encoded, because
+  // recompression is generational quality loss the caller cannot undo.
+  // `width` and `height` are read from the bytes and the struct's are
+  // ignored.
+  TPDF_IMAGE_KIND_JPEG = 0,
+  // Eight-bit RGB, three bytes per pixel, row-major from the top.
+  TPDF_IMAGE_KIND_RGB8 = 1,
+  // Eight-bit greyscale, one byte per pixel.
+  TPDF_IMAGE_KIND_GRAY8 = 2,
+} TpdfImageKind;
+
+// Which `/Info` entry to read (14.3.3, Table 349).
+//
+// `/Trapped` is not here because it is a name rather than a text string; it
+// has [`tpdf_document_trapped`] and its own enum.
+typedef enum TpdfInfoKey {
+  // `/Title`.
+  TPDF_INFO_KEY_TITLE = 0,
+  // `/Author`.
+  TPDF_INFO_KEY_AUTHOR = 1,
+  // `/Subject`.
+  TPDF_INFO_KEY_SUBJECT = 2,
+  // `/Keywords`.
+  TPDF_INFO_KEY_KEYWORDS = 3,
+  // `/Creator`: the application that authored the original document.
+  TPDF_INFO_KEY_CREATOR = 4,
+  // `/Producer`: the application that wrote the PDF.
+  TPDF_INFO_KEY_PRODUCER = 5,
+  // `/CreationDate`, as written rather than parsed.
+  TPDF_INFO_KEY_CREATION_DATE = 6,
+  // `/ModDate`, as written rather than parsed.
+  TPDF_INFO_KEY_MODIFICATION_DATE = 7,
+} TpdfInfoKey;
+
+// How a page-label range writes its number (12.4.2, Table 159).
+typedef enum TpdfLabelStyle {
+  // `/D`: 1, 2, 3.
+  TPDF_LABEL_STYLE_DECIMAL = 0,
+  // `/R`: I, II, III.
+  TPDF_LABEL_STYLE_ROMAN_UPPER = 1,
+  // `/r`: i, ii, iii.
+  TPDF_LABEL_STYLE_ROMAN_LOWER = 2,
+  // `/A`: A, B, ... Z, AA.
+  TPDF_LABEL_STYLE_LETTERS_UPPER = 3,
+  // `/a`: a, b, ... z, aa.
+  TPDF_LABEL_STYLE_LETTERS_LOWER = 4,
+  // No number: every page of the range is labelled with the prefix alone.
+  TPDF_LABEL_STYLE_NONE = 5,
+} TpdfLabelStyle;
+
+// One of a page's five boundaries (14.11.2).
+typedef enum TpdfPageBoundary {
+  // `/MediaBox`.
+  TPDF_PAGE_BOUNDARY_MEDIA_BOX = 0,
+  // `/CropBox`.
+  TPDF_PAGE_BOUNDARY_CROP_BOX = 1,
+  // `/BleedBox`.
+  TPDF_PAGE_BOUNDARY_BLEED_BOX = 2,
+  // `/TrimBox`.
+  TPDF_PAGE_BOUNDARY_TRIM_BOX = 3,
+  // `/ArtBox`.
+  TPDF_PAGE_BOUNDARY_ART_BOX = 4,
+} TpdfPageBoundary;
+
+// Which of a sanitise report's two lists an accessor reads.
+typedef enum TpdfSanitiseList {
+  // Entries removed from objects that stay, and from the trailer.
+  TPDF_SANITISE_LIST_REMOVED = 0,
+  // Objects deleted because only removed entries reached them.
+  TPDF_SANITISE_LIST_DELETED = 1,
+} TpdfSanitiseList;
 
 // 11.3.5's sixteen blend modes, in Tables 136 and 137's order.
 typedef enum TpdfBlendMode {
@@ -554,48 +596,6 @@ typedef enum TpdfTilingType {
   // 3: constant spacing and faster tiling.
   TPDF_TILING_TYPE_FASTER_TILING = 2,
 } TpdfTilingType;
-
-// Which `Destination` arm an outline entry or a link names (12.3.2).
-//
-// Ruling 6 is why three arms cross rather than a page number: a named
-// destination is not flattened to the page it resolves to, and a URI is
-// never read as a name.
-typedef enum TpdfDestinationKind {
-  // No destination at all: an outline heading that points nowhere, or an
-  // action that carries none.
-  TPDF_DESTINATION_KIND_ABSENT = 0,
-  // A page in this document and a view of it.
-  TPDF_DESTINATION_KIND_EXPLICIT = 1,
-  // A name to look up in the document's own tables; the bytes cross
-  // through the `_destination_bytes` accessor.
-  TPDF_DESTINATION_KIND_NAMED = 2,
-  // A URI destination; the bytes cross through the `_destination_bytes`
-  // accessor.
-  TPDF_DESTINATION_KIND_URI = 3,
-} TpdfDestinationKind;
-
-// Which `Action` arm a link carries (12.6.4).
-typedef enum TpdfActionKind {
-  // A `/Link` with neither `/Dest` nor a usable `/A` — legal, useless, and
-  // reported rather than hidden.
-  TPDF_ACTION_KIND_ABSENT = 0,
-  // `/GoTo`: the destination is filled in.
-  TPDF_ACTION_KIND_GO_TO = 1,
-  // `/GoToR`: the destination is filled in when the action carried one,
-  // and the target file crosses through [`tpdf_link_action_bytes`].
-  TPDF_ACTION_KIND_GO_TO_R = 2,
-  // `/URI`; the URI crosses through [`tpdf_link_action_bytes`].
-  TPDF_ACTION_KIND_URI = 3,
-  // `/Named`, a viewer command; its name crosses through
-  // [`tpdf_link_action_bytes`].
-  TPDF_ACTION_KIND_NAMED = 4,
-  // `/Launch`: reported, never executed. The file crosses through
-  // [`tpdf_link_action_bytes`].
-  TPDF_ACTION_KIND_LAUNCH = 5,
-  // Any other action type, kept rather than dropped; its `/S` crosses
-  // through [`tpdf_link_action_bytes`].
-  TPDF_ACTION_KIND_OTHER = 6,
-} TpdfActionKind;
 
 // Which text property [`tpdf_tag_set_text`] sets (14.7.2 Table 323, 14.9).
 typedef enum TpdfTagText {
@@ -811,8 +811,9 @@ typedef struct TpdfEncryption {
 // mean, rather than zeroing it: a zeroed struct is a *rewrite* at version
 // 0.0, which is not the facade's default and not a version any reader knows.
 typedef struct TpdfWriteOptions {
-  // Rewrite or incremental.
-  enum TpdfWriteMode mode;
+  // Rewrite or incremental: a [`TpdfWriteMode`]. Any other number is
+  // [`TpdfStatus::BadArgument`].
+  int mode;
   // Lay the file out for the first page to arrive first (Annex F). A
   // request rather than a guarantee: it is quietly dropped for an
   // incremental update and for a document with no catalog or no pages,
@@ -848,8 +849,9 @@ typedef struct TpdfWriteOptions {
 // legitimate destination in which NaN means a coordinate. Fields the named
 // kind does not use are ignored, so a caller may leave them at anything.
 typedef struct TpdfDestination {
-  // Which of the eight.
-  enum TpdfDestKind kind;
+  // Which of the eight: a [`TpdfDestKind`]. Any other number is
+  // [`TpdfStatus::BadArgument`] where a destination is taken.
+  int kind;
   // `/XYZ`'s and `/FitV`'s and `/FitBV`'s left edge.
   double left;
   // `/FitR`'s bottom edge.
@@ -864,8 +866,9 @@ typedef struct TpdfDestination {
 
 // An image to register, as C sees `ImageData`.
 typedef struct TpdfImage {
-  // Which arm.
-  enum TpdfImageKind kind;
+  // Which arm: a [`TpdfImageKind`]. Any other number is
+  // [`TpdfStatus::BadArgument`].
+  int kind;
   // Width in pixels; ignored for [`TpdfImageKind::Jpeg`].
   uint32_t width;
   // Height in pixels; ignored for [`TpdfImageKind::Jpeg`].
@@ -879,8 +882,9 @@ typedef struct TpdfImage {
 
 // A target, as C sees `Target`.
 typedef struct TpdfTarget {
-  // Which of the two.
-  enum TpdfTargetKind kind;
+  // Which of the two: a [`TpdfTargetKind`]. Any other number is
+  // [`TpdfStatus::BadArgument`].
+  int kind;
   // The zero-based page index, for [`TpdfTargetKind::Page`].
   uint32_t page_index;
   // How that page is positioned, for [`TpdfTargetKind::Page`].
@@ -894,8 +898,9 @@ typedef struct TpdfTarget {
 typedef struct TpdfPageLabelRange {
   // The zero-based index of the range's first page.
   uint32_t first_page;
-  // How the number is written.
-  enum TpdfLabelStyle style;
+  // How the number is written: a [`TpdfLabelStyle`]. Any other number is
+  // [`TpdfStatus::BadArgument`].
+  int style;
   // `/P`, null-terminated UTF-8, or null for no `/P` -- which reads the
   // same as an empty one and is not the same file.
   const char *prefix;
@@ -985,6 +990,10 @@ typedef struct TpdfRadioButton {
 
 // Graphics state parameters, for [`tpdf_builder_add_ext_gstate`] (Table
 // 58). Start from [`tpdf_ext_gstate_init`], which is every override absent.
+//
+// The three enum fields are `int`s holding a [`TpdfBlendMode`], a
+// [`TpdfSoftMask`] and a [`TpdfMaskKind`]; a number the enum does not
+// declare, in a field the call reads, is [`TpdfStatus::BadArgument`].
 typedef struct TpdfExtGState {
   // `/ca`, the non-stroking alpha; NaN writes none.
   double fill_alpha;
@@ -992,12 +1001,14 @@ typedef struct TpdfExtGState {
   double stroke_alpha;
   // Non-zero writes `/BM blend_mode`.
   int32_t has_blend_mode;
-  // `/BM`, when `has_blend_mode` says so.
-  enum TpdfBlendMode blend_mode;
-  // Which `/SMask`, if any.
-  enum TpdfSoftMask soft_mask;
-  // `/S` of a [`TpdfSoftMask::Group`] mask.
-  enum TpdfMaskKind mask_kind;
+  // `/BM`, a [`TpdfBlendMode`], when `has_blend_mode` says so; ignored
+  // otherwise.
+  int blend_mode;
+  // Which `/SMask`, if any: a [`TpdfSoftMask`].
+  int soft_mask;
+  // `/S` of a [`TpdfSoftMask::Group`] mask, a [`TpdfMaskKind`]; ignored for
+  // the other two arms.
+  int mask_kind;
   // `/G` of a group mask: the resource name of a form registered with a
   // transparency group. Ignored for the other two arms.
   const uint8_t *mask_form;
@@ -1013,8 +1024,9 @@ typedef struct TpdfExtGState {
 // A form's `/Group` (11.6.6): a transparency group, for
 // [`tpdf_builder_add_form`].
 typedef struct TpdfTransparencyGroup {
-  // `/CS`.
-  enum TpdfDeviceSpace color_space;
+  // `/CS`, a [`TpdfDeviceSpace`]. Any other number is
+  // [`TpdfStatus::BadArgument`].
+  int color_space;
   // `/I`, non-zero for isolated.
   int32_t isolated;
   // `/K`, non-zero for knockout.
@@ -1210,7 +1222,9 @@ enum TpdfStatus tpdf_document_set_fonts(struct TpdfDocument *doc,
 
 // Renders a page.
 //
-// The caller frees the result with [`tpdf_bitmap_free`].
+// `format` is a [`TpdfPixelFormat`]; any other number is
+// [`TpdfStatus::BadArgument`]. The caller frees the result with
+// [`tpdf_bitmap_free`].
 //
 // # Safety
 //
@@ -1218,7 +1232,7 @@ enum TpdfStatus tpdf_document_set_fonts(struct TpdfDocument *doc,
 enum TpdfStatus tpdf_page_render(const struct TpdfDocument *doc,
                                  uint32_t index,
                                  double scale,
-                                 enum TpdfPixelFormat format,
+                                 int format,
                                  struct TpdfBitmap **out);
 
 // A bitmap's width in pixels.
@@ -2569,15 +2583,16 @@ enum TpdfStatus tpdf_editor_set_outline(struct TpdfEditor *editor,
 // `set_author`, `set_subject`, `set_keywords`, `set_creator` and
 // `set_producer` -- creating `/Info` when there is none.
 //
-// The two date keys are [`tpdf_editor_set_info_date`]'s, and passing one
-// here is [`TpdfStatus::BadArgument`]. What the write did to the XMP packet
-// is written through `out_sync`, which may be null.
+// `key` is a [`TpdfInfoKey`]; the two date keys are
+// [`tpdf_editor_set_info_date`]'s, and passing one here, or a number that is
+// not a key, is [`TpdfStatus::BadArgument`]. What the write did to the XMP
+// packet is written through `out_sync`, which may be null.
 //
 // # Safety
 //
 // `editor` must be a live handle and `value` a null-terminated UTF-8 string.
 enum TpdfStatus tpdf_editor_set_info(struct TpdfEditor *editor,
-                                     enum TpdfInfoKey key,
+                                     int key,
                                      const char *value,
                                      enum TpdfMetadataSync *out_sync);
 
@@ -2589,19 +2604,19 @@ enum TpdfStatus tpdf_editor_set_info(struct TpdfEditor *editor,
 //
 // `editor` must be a live handle and `date` a valid pointer.
 enum TpdfStatus tpdf_editor_set_info_date(struct TpdfEditor *editor,
-                                          enum TpdfInfoKey key,
+                                          int key,
                                           const struct TpdfDate *date,
                                           enum TpdfMetadataSync *out_sync);
 
-// Sets `/Info /Trapped` (Table 349). [`TpdfTrapped::Absent`] is
-// [`TpdfStatus::BadArgument`]: the facade sets a value, it does not remove
-// one.
+// Sets `/Info /Trapped` (Table 349). `trapped` is a [`TpdfTrapped`];
+// [`TpdfTrapped::Absent`] is [`TpdfStatus::BadArgument`] -- the facade sets a
+// value, it does not remove one -- and so is a number that is not one.
 //
 // # Safety
 //
 // `editor` must be a live handle.
 enum TpdfStatus tpdf_editor_set_trapped(struct TpdfEditor *editor,
-                                        enum TpdfTrapped trapped,
+                                        int trapped,
                                         enum TpdfMetadataSync *out_sync);
 
 // Makes `packet` the document's XMP metadata (14.3.2), written verbatim and
@@ -2617,29 +2632,31 @@ enum TpdfStatus tpdf_editor_set_xmp_metadata(struct TpdfEditor *editor,
 
 // Sets one of a page's boundaries (14.11.2) -- `set_page_boundary`, and
 // with it `set_bleed_box`, `set_trim_box` and `set_art_box`, which are that
-// call with the boundary named. Refused for a rectangle with no area, a
-// non-finite number, or a page that does not exist.
+// call with the boundary named. `boundary` is a [`TpdfPageBoundary`]; any
+// other number is [`TpdfStatus::BadArgument`]. Refused for a rectangle with
+// no area, a non-finite number, or a page that does not exist.
 //
 // # Safety
 //
 // `editor` must be a live handle.
 enum TpdfStatus tpdf_editor_set_page_boundary(struct TpdfEditor *editor,
                                               uint32_t index,
-                                              enum TpdfPageBoundary boundary,
+                                              int boundary,
                                               double x0,
                                               double y0,
                                               double x1,
                                               double y1);
 
 // A page's boundary as the reader resolves it -- its own entry, or the
-// default 14.11.2 gives an absent one -- as `x0 y0 x1 y1`.
+// default 14.11.2 gives an absent one -- as `x0 y0 x1 y1`. `boundary` is a
+// [`TpdfPageBoundary`]; any other number is [`TpdfStatus::BadArgument`].
 //
 // # Safety
 //
 // `doc` must be a live handle; any out pointer may be null.
 enum TpdfStatus tpdf_page_boundary(const struct TpdfDocument *doc,
                                    uint32_t index,
-                                   enum TpdfPageBoundary boundary,
+                                   int boundary,
                                    double *out_x0,
                                    double *out_y0,
                                    double *out_x1,
@@ -2659,24 +2676,27 @@ enum TpdfStatus tpdf_editor_sanitise(struct TpdfEditor *editor,
                                      const struct TpdfSanitise *what,
                                      struct TpdfSanitiseReport **out);
 
-// How many entries one of the report's lists holds, or zero for null.
+// How many entries one of the report's lists holds, or zero for null --
+// and zero for a `list` that is not a [`TpdfSanitiseList`], which names no
+// list and so holds nothing; [`tpdf_sanitise_report_entry`] refuses the same
+// number with [`TpdfStatus::BadArgument`].
 //
 // # Safety
 //
 // `report` must be a live handle or null.
-uint32_t tpdf_sanitise_report_count(const struct TpdfSanitiseReport *report,
-                                    enum TpdfSanitiseList list);
+uint32_t tpdf_sanitise_report_count(const struct TpdfSanitiseReport *report, int list);
 
 // One entry: why it was removed, and where. For [`TpdfSanitiseList::Removed`]
 // the object is the holder the entry was removed from, and
 // `out_has_object` is 0 when that holder is the trailer; for
-// [`TpdfSanitiseList::Deleted`] it is the deleted object.
+// [`TpdfSanitiseList::Deleted`] it is the deleted object. A `list` that is
+// not a [`TpdfSanitiseList`] is [`TpdfStatus::BadArgument`].
 //
 // # Safety
 //
 // `report` must be a live handle; any out pointer may be null.
 enum TpdfStatus tpdf_sanitise_report_entry(const struct TpdfSanitiseReport *report,
-                                           enum TpdfSanitiseList list,
+                                           int list,
                                            uint32_t index,
                                            enum TpdfRemoval *out_what,
                                            int *out_has_object,
@@ -2684,13 +2704,14 @@ enum TpdfStatus tpdf_sanitise_report_entry(const struct TpdfSanitiseReport *repo
                                            uint16_t *out_generation);
 
 // The `/S` of an [`TpdfRemoval::Action`] removal, borrowed until the report
-// is freed; null on `Ok` for any other removal.
+// is freed; null on `Ok` for any other removal. A `list` that is not a
+// [`TpdfSanitiseList`] is [`TpdfStatus::BadArgument`].
 //
 // # Safety
 //
 // `report` must be a live handle and both out pointers valid.
 enum TpdfStatus tpdf_sanitise_report_action(const struct TpdfSanitiseReport *report,
-                                            enum TpdfSanitiseList list,
+                                            int list,
                                             uint32_t index,
                                             const uint8_t **out_data,
                                             size_t *out_len);
@@ -2876,7 +2897,8 @@ enum TpdfStatus tpdf_form_data_new(struct TpdfFormData **out);
 // Appends one field: its fully qualified name and its value, given as
 // `count` strings -- none for [`TpdfFieldValueKind::None`], exactly one for
 // `Text` and `State`, any number for `Many`. A count that does not fit the
-// kind is [`TpdfStatus::BadArgument`].
+// kind is [`TpdfStatus::BadArgument`], and so is a `kind` that is not a
+// [`TpdfFieldValueKind`].
 //
 // # Safety
 //
@@ -2884,7 +2906,7 @@ enum TpdfStatus tpdf_form_data_new(struct TpdfFormData **out);
 // valid for `count` null-terminated UTF-8 strings.
 enum TpdfStatus tpdf_form_data_add_field(struct TpdfFormData *handle,
                                          const char *name,
-                                         enum TpdfFieldValueKind kind,
+                                         int kind,
                                          const char *const *values,
                                          size_t count);
 
@@ -3075,6 +3097,8 @@ enum TpdfStatus tpdf_ext_gstate_init(struct TpdfExtGState *out);
 // Refused, [`TpdfStatus::EditRefused`] with nothing registered, for an
 // alpha outside 11.6.4.4's range, a non-finite backdrop component, or a
 // group mask naming a form that is not registered or carries no `/Group`.
+// An enum field the call reads holding a number its enum does not declare
+// is [`TpdfStatus::BadArgument`], also with nothing registered.
 //
 // # Safety
 //
@@ -3089,7 +3113,8 @@ enum TpdfStatus tpdf_builder_add_ext_gstate(struct TpdfBuilder *builder,
 // Registers a form XObject under a resource name (8.10) --
 // `DocumentBuilder::add_form`. Its `/Resources` are the document's at this
 // moment. `matrix` is six doubles or null for the identity; `group` is the
-// transparency group or null for none.
+// transparency group or null for none, and a group whose `color_space` is
+// not a [`TpdfDeviceSpace`] is [`TpdfStatus::BadArgument`].
 //
 // Refused, [`TpdfStatus::EditRefused`] with nothing registered, for a
 // degenerate `/BBox` or a non-finite `/Matrix`.
@@ -3112,7 +3137,9 @@ enum TpdfStatus tpdf_builder_add_form(struct TpdfBuilder *builder,
 
 // Registers a coloured tiling pattern under a resource name (8.7.3) --
 // `DocumentBuilder::add_tiling_pattern`. The cell's `/Resources` are the
-// document's at this moment; `matrix` is six doubles or null.
+// document's at this moment; `matrix` is six doubles or null; `tiling_type`
+// is a [`TpdfTilingType`], and any other number is
+// [`TpdfStatus::BadArgument`].
 //
 // Refused, [`TpdfStatus::EditRefused`] with nothing registered, for a
 // degenerate `/BBox`, a zero or non-finite step, or a non-finite `/Matrix`.
@@ -3131,7 +3158,7 @@ enum TpdfStatus tpdf_builder_add_tiling_pattern(struct TpdfBuilder *builder,
                                                 double x_step,
                                                 double y_step,
                                                 const double *matrix,
-                                                enum TpdfTilingType tiling_type,
+                                                int tiling_type,
                                                 const uint8_t *content,
                                                 size_t content_len);
 
@@ -3212,7 +3239,8 @@ enum TpdfStatus tpdf_page_builder_set_stroke_pattern(struct TpdfPageBuilder *pag
                                                      const uint8_t *resource,
                                                      size_t resource_len);
 
-// One `/Info` text entry (14.3.3), decoded.
+// One `/Info` text entry (14.3.3), decoded. `key` is a [`TpdfInfoKey`]; any
+// other number is [`TpdfStatus::BadArgument`].
 //
 // **Null on `Ok` means the entry is absent**, and an empty string means the
 // producer wrote an empty one — the facade keeps those apart because a
@@ -3222,9 +3250,7 @@ enum TpdfStatus tpdf_page_builder_set_stroke_pattern(struct TpdfPageBuilder *pag
 // # Safety
 //
 // `doc` must be a live handle and `out` a valid pointer.
-enum TpdfStatus tpdf_document_info(const struct TpdfDocument *doc,
-                                   enum TpdfInfoKey key,
-                                   char **out);
+enum TpdfStatus tpdf_document_info(const struct TpdfDocument *doc, int key, char **out);
 
 // `/Info /Trapped` (Table 349), with absence as its own answer.
 //
@@ -3573,12 +3599,13 @@ enum TpdfStatus tpdf_tag_new(const uint8_t *kind, size_t kind_len, struct TpdfTa
 
 // Sets one of the element's text properties -- `Tag::title`, `lang`,
 // `alt`, `actual_text` or `expansion`, as `which` names. Setting one twice
-// keeps the second.
+// keeps the second. `which` is a [`TpdfTagText`]; any other number is
+// [`TpdfStatus::BadArgument`].
 //
 // # Safety
 //
 // `tag` must be a live handle and `text` null-terminated UTF-8.
-enum TpdfStatus tpdf_tag_set_text(struct TpdfTag *tag, enum TpdfTagText which, const char *text);
+enum TpdfStatus tpdf_tag_set_text(struct TpdfTag *tag, int which, const char *text);
 
 // Sets `/ID`, the element's identifier -- `Tag::id`. The first element in
 // the tree's order to carry an identifier keeps it.

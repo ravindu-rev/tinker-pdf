@@ -95,13 +95,13 @@ fn operate_through_the_abi(bytes: &[u8]) -> Vec<u8> {
     let ranges = [
         TpdfPageLabelRange {
             first_page: 0,
-            style: TpdfLabelStyle::RomanLower,
+            style: TpdfLabelStyle::RomanLower as c_int,
             prefix: ptr::null(),
             start: 1,
         },
         TpdfPageLabelRange {
             first_page: 2,
-            style: TpdfLabelStyle::Decimal,
+            style: TpdfLabelStyle::Decimal as c_int,
             prefix: prefix.as_ptr(),
             start: 1,
         },
@@ -139,7 +139,14 @@ fn operate_through_the_abi(bytes: &[u8]) -> Vec<u8> {
     let author = CString::new("tinker-pdf").expect("no nul");
     let mut sync = TpdfMetadataSync::OtherHalfUnchanged;
     assert_eq!(
-        unsafe { tpdf_editor_set_info(editor, TpdfInfoKey::Title, title.as_ptr(), &mut sync) },
+        unsafe {
+            tpdf_editor_set_info(
+                editor,
+                TpdfInfoKey::Title as c_int,
+                title.as_ptr(),
+                &mut sync,
+            )
+        },
         TpdfStatus::Ok
     );
     assert_eq!(sync, TpdfMetadataSync::Alone, "no XMP packet yet");
@@ -147,7 +154,7 @@ fn operate_through_the_abi(bytes: &[u8]) -> Vec<u8> {
         unsafe {
             tpdf_editor_set_info(
                 editor,
-                TpdfInfoKey::Author,
+                TpdfInfoKey::Author as c_int,
                 author.as_ptr(),
                 ptr::null_mut(),
             )
@@ -156,12 +163,17 @@ fn operate_through_the_abi(bytes: &[u8]) -> Vec<u8> {
     );
     assert_eq!(
         unsafe {
-            tpdf_editor_set_info_date(editor, TpdfInfoKey::CreationDate, &CREATED, ptr::null_mut())
+            tpdf_editor_set_info_date(
+                editor,
+                TpdfInfoKey::CreationDate as c_int,
+                &CREATED,
+                ptr::null_mut(),
+            )
         },
         TpdfStatus::Ok
     );
     assert_eq!(
-        unsafe { tpdf_editor_set_trapped(editor, TpdfTrapped::False, ptr::null_mut()) },
+        unsafe { tpdf_editor_set_trapped(editor, TpdfTrapped::False as c_int, ptr::null_mut()) },
         TpdfStatus::Ok
     );
     assert_eq!(
@@ -178,7 +190,7 @@ fn operate_through_the_abi(bytes: &[u8]) -> Vec<u8> {
             tpdf_editor_set_page_boundary(
                 editor,
                 0,
-                TpdfPageBoundary::TrimBox,
+                TpdfPageBoundary::TrimBox as c_int,
                 10.0,
                 10.0,
                 585.0,
@@ -192,7 +204,7 @@ fn operate_through_the_abi(bytes: &[u8]) -> Vec<u8> {
             tpdf_editor_set_page_boundary(
                 editor,
                 1,
-                TpdfPageBoundary::BleedBox,
+                TpdfPageBoundary::BleedBox as c_int,
                 0.0,
                 0.0,
                 595.0,
@@ -209,10 +221,10 @@ fn operate_through_the_abi(bytes: &[u8]) -> Vec<u8> {
         TpdfStatus::Ok
     );
     let target = TpdfTarget {
-        kind: TpdfTargetKind::Page,
+        kind: TpdfTargetKind::Page as c_int,
         page_index: 3,
         view: TpdfDestination {
-            kind: TpdfDestKind::FitH,
+            kind: TpdfDestKind::FitH as c_int,
             left: f64::NAN,
             bottom: f64::NAN,
             right: f64::NAN,
@@ -341,7 +353,15 @@ fn a_page_boundary_reads_back_through_the_abi() {
             let (mut x0, mut y0, mut x1, mut y1) = (0.0, 0.0, 0.0, 0.0);
             assert_eq!(
                 unsafe {
-                    tpdf_page_boundary(doc, index, boundary, &mut x0, &mut y0, &mut x1, &mut y1)
+                    tpdf_page_boundary(
+                        doc,
+                        index,
+                        boundary as c_int,
+                        &mut x0,
+                        &mut y0,
+                        &mut x1,
+                        &mut y1,
+                    )
                 },
                 TpdfStatus::Ok
             );
@@ -357,7 +377,7 @@ fn a_page_boundary_reads_back_through_the_abi() {
             tpdf_page_boundary(
                 doc,
                 99,
-                TpdfPageBoundary::MediaBox,
+                TpdfPageBoundary::MediaBox as c_int,
                 ptr::null_mut(),
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -377,7 +397,7 @@ fn each_refusal_writes_nothing_and_says_why() {
     // 12.4.2: the tree shall include page 0.
     let ranges = [TpdfPageLabelRange {
         first_page: 1,
-        style: TpdfLabelStyle::Decimal,
+        style: TpdfLabelStyle::Decimal as c_int,
         prefix: ptr::null(),
         start: 1,
     }];
@@ -425,7 +445,7 @@ fn each_refusal_writes_nothing_and_says_why() {
         unsafe {
             tpdf_editor_set_info_date(
                 editor,
-                TpdfInfoKey::ModificationDate,
+                TpdfInfoKey::ModificationDate as c_int,
                 &bad_month,
                 ptr::null_mut(),
             )
@@ -438,7 +458,7 @@ fn each_refusal_writes_nothing_and_says_why() {
         unsafe {
             tpdf_editor_set_info(
                 editor,
-                TpdfInfoKey::CreationDate,
+                TpdfInfoKey::CreationDate as c_int,
                 value.as_ptr(),
                 ptr::null_mut(),
             )
@@ -446,16 +466,31 @@ fn each_refusal_writes_nothing_and_says_why() {
         TpdfStatus::BadArgument
     );
     assert_eq!(
-        unsafe { tpdf_editor_set_info_date(editor, TpdfInfoKey::Title, &CREATED, ptr::null_mut()) },
+        unsafe {
+            tpdf_editor_set_info_date(
+                editor,
+                TpdfInfoKey::Title as c_int,
+                &CREATED,
+                ptr::null_mut(),
+            )
+        },
         TpdfStatus::BadArgument
     );
     assert_eq!(
-        unsafe { tpdf_editor_set_trapped(editor, TpdfTrapped::Absent, ptr::null_mut()) },
+        unsafe { tpdf_editor_set_trapped(editor, TpdfTrapped::Absent as c_int, ptr::null_mut()) },
         TpdfStatus::BadArgument
     );
     assert_eq!(
         unsafe {
-            tpdf_editor_set_page_boundary(editor, 0, TpdfPageBoundary::ArtBox, 5.0, 5.0, 5.0, 9.0)
+            tpdf_editor_set_page_boundary(
+                editor,
+                0,
+                TpdfPageBoundary::ArtBox as c_int,
+                5.0,
+                5.0,
+                5.0,
+                9.0,
+            )
         },
         TpdfStatus::EditRefused,
         "a rectangle with no area"
@@ -467,7 +502,15 @@ fn each_refusal_writes_nothing_and_says_why() {
     );
     assert_eq!(
         unsafe {
-            tpdf_editor_set_page_boundary(editor, 99, TpdfPageBoundary::ArtBox, 0.0, 0.0, 9.0, 9.0)
+            tpdf_editor_set_page_boundary(
+                editor,
+                99,
+                TpdfPageBoundary::ArtBox as c_int,
+                0.0,
+                0.0,
+                9.0,
+                9.0,
+            )
         },
         TpdfStatus::EditRefused
     );
@@ -533,11 +576,11 @@ fn a_sanitise_reports_through_the_abi_what_the_facade_reports() {
 
     let expected = &facade.0;
     assert_eq!(
-        unsafe { tpdf_sanitise_report_count(report, TpdfSanitiseList::Removed) } as usize,
+        unsafe { tpdf_sanitise_report_count(report, TpdfSanitiseList::Removed as c_int) } as usize,
         expected.removed.len()
     );
     assert_eq!(
-        unsafe { tpdf_sanitise_report_count(report, TpdfSanitiseList::Deleted) } as usize,
+        unsafe { tpdf_sanitise_report_count(report, TpdfSanitiseList::Deleted as c_int) } as usize,
         expected.deleted.len()
     );
     for (index, entry) in expected.removed.iter().enumerate() {
@@ -547,7 +590,7 @@ fn a_sanitise_reports_through_the_abi_what_the_facade_reports() {
             unsafe {
                 tpdf_sanitise_report_entry(
                     report,
-                    TpdfSanitiseList::Removed,
+                    TpdfSanitiseList::Removed as c_int,
                     index,
                     &mut what,
                     &mut has,
@@ -597,7 +640,7 @@ fn a_sanitise_reports_through_the_abi_what_the_facade_reports() {
             unsafe {
                 tpdf_sanitise_report_action(
                     report,
-                    TpdfSanitiseList::Removed,
+                    TpdfSanitiseList::Removed as c_int,
                     index,
                     &mut data,
                     &mut len,
@@ -621,7 +664,7 @@ fn a_sanitise_reports_through_the_abi_what_the_facade_reports() {
             unsafe {
                 tpdf_sanitise_report_entry(
                     report,
-                    TpdfSanitiseList::Deleted,
+                    TpdfSanitiseList::Deleted as c_int,
                     index as u32,
                     &mut what,
                     &mut has,
@@ -639,7 +682,7 @@ fn a_sanitise_reports_through_the_abi_what_the_facade_reports() {
         unsafe {
             tpdf_sanitise_report_entry(
                 report,
-                TpdfSanitiseList::Removed,
+                TpdfSanitiseList::Removed as c_int,
                 past,
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -679,7 +722,7 @@ fn null_handles_across_the_document_operations_are_refused() {
         assert_eq!(
             tpdf_editor_set_info(
                 null_editor,
-                TpdfInfoKey::Title,
+                TpdfInfoKey::Title as c_int,
                 value.as_ptr(),
                 ptr::null_mut()
             ),
@@ -688,14 +731,14 @@ fn null_handles_across_the_document_operations_are_refused() {
         assert_eq!(
             tpdf_editor_set_info_date(
                 null_editor,
-                TpdfInfoKey::CreationDate,
+                TpdfInfoKey::CreationDate as c_int,
                 &date,
                 ptr::null_mut()
             ),
             TpdfStatus::BadArgument
         );
         assert_eq!(
-            tpdf_editor_set_trapped(null_editor, TpdfTrapped::True, ptr::null_mut()),
+            tpdf_editor_set_trapped(null_editor, TpdfTrapped::True as c_int, ptr::null_mut()),
             TpdfStatus::BadArgument
         );
         assert_eq!(
@@ -706,7 +749,7 @@ fn null_handles_across_the_document_operations_are_refused() {
             tpdf_editor_set_page_boundary(
                 null_editor,
                 0,
-                TpdfPageBoundary::TrimBox,
+                TpdfPageBoundary::TrimBox as c_int,
                 0.0,
                 0.0,
                 1.0,
@@ -718,7 +761,7 @@ fn null_handles_across_the_document_operations_are_refused() {
             tpdf_page_boundary(
                 ptr::null(),
                 0,
-                TpdfPageBoundary::TrimBox,
+                TpdfPageBoundary::TrimBox as c_int,
                 ptr::null_mut(),
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -731,13 +774,13 @@ fn null_handles_across_the_document_operations_are_refused() {
             TpdfStatus::BadArgument
         );
         assert_eq!(
-            tpdf_sanitise_report_count(ptr::null(), TpdfSanitiseList::Removed),
+            tpdf_sanitise_report_count(ptr::null(), TpdfSanitiseList::Removed as c_int),
             0
         );
         assert_eq!(
             tpdf_sanitise_report_entry(
                 ptr::null(),
-                TpdfSanitiseList::Deleted,
+                TpdfSanitiseList::Deleted as c_int,
                 0,
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -750,7 +793,7 @@ fn null_handles_across_the_document_operations_are_refused() {
         assert_eq!(
             tpdf_sanitise_report_action(
                 ptr::null(),
-                TpdfSanitiseList::Removed,
+                TpdfSanitiseList::Removed as c_int,
                 0,
                 &mut data,
                 &mut len
@@ -785,7 +828,12 @@ fn null_handles_across_the_document_operations_are_refused() {
             TpdfStatus::BadArgument
         );
         assert_eq!(
-            tpdf_editor_set_info(editor, TpdfInfoKey::Title, ptr::null(), ptr::null_mut()),
+            tpdf_editor_set_info(
+                editor,
+                TpdfInfoKey::Title as c_int,
+                ptr::null(),
+                ptr::null_mut()
+            ),
             TpdfStatus::BadArgument
         );
         assert_eq!(

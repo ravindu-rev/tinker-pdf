@@ -101,6 +101,12 @@ func main() {
 	} else if e, ok := err.(*tp.Error); !ok || e.Status != tp.StatusNoSuchPage {
 		fail("a page past the end is %v, not NoSuchPage", err)
 	}
+	// So is a number its enum does not declare: a Go enum is an int, it
+	// crosses as a C int, and the engine checks it (review of lane 7C).
+	expectStatus(func() error { _, err := document.Info(tp.InfoKey(8)); return err }, tp.StatusBadArgument,
+		"an info key of 8")
+	expectStatus(func() error { _, err := document.Render(0, 1.0, tp.PixelFormat(4)); return err },
+		tp.StatusBadArgument, "a pixel format of 4")
 	if document.IsEncrypted() || !document.MayPrint() || document.IsStreamed() {
 		fail("simple-text.pdf is unencrypted, printable and opened from bytes")
 	}

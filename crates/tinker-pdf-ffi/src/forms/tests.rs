@@ -523,7 +523,7 @@ fn data_built_a_field_at_a_time_is_the_facades() {
             tpdf_form_data_add_field(
                 handle,
                 notes.as_ptr(),
-                TpdfFieldValueKind::Text,
+                TpdfFieldValueKind::Text as c_int,
                 values.as_ptr(),
                 1,
             )
@@ -537,7 +537,7 @@ fn data_built_a_field_at_a_time_is_the_facades() {
             tpdf_form_data_add_field(
                 handle,
                 agree.as_ptr(),
-                TpdfFieldValueKind::State,
+                TpdfFieldValueKind::State as c_int,
                 states.as_ptr(),
                 1,
             )
@@ -551,7 +551,7 @@ fn data_built_a_field_at_a_time_is_the_facades() {
             tpdf_form_data_add_field(
                 handle,
                 list.as_ptr(),
-                TpdfFieldValueKind::Many,
+                TpdfFieldValueKind::Many as c_int,
                 many.as_ptr(),
                 2,
             )
@@ -564,7 +564,7 @@ fn data_built_a_field_at_a_time_is_the_facades() {
             tpdf_form_data_add_field(
                 handle,
                 empty.as_ptr(),
-                TpdfFieldValueKind::None,
+                TpdfFieldValueKind::None as c_int,
                 ptr::null(),
                 0,
             )
@@ -577,7 +577,7 @@ fn data_built_a_field_at_a_time_is_the_facades() {
             tpdf_form_data_add_field(
                 handle,
                 empty.as_ptr(),
-                TpdfFieldValueKind::Text,
+                TpdfFieldValueKind::Text as c_int,
                 ptr::null(),
                 0,
             )
@@ -589,7 +589,7 @@ fn data_built_a_field_at_a_time_is_the_facades() {
             tpdf_form_data_add_field(
                 handle,
                 empty.as_ptr(),
-                TpdfFieldValueKind::None,
+                TpdfFieldValueKind::None as c_int,
                 many.as_ptr(),
                 2,
             )
@@ -831,7 +831,7 @@ fn bytes_that_are_not_form_data_are_refused_with_the_readers_reason() {
             tpdf_form_data_add_field(
                 handle,
                 name.as_ptr(),
-                TpdfFieldValueKind::Text,
+                TpdfFieldValueKind::Text as c_int,
                 values.as_ptr(),
                 1,
             )
@@ -871,7 +871,15 @@ fn null_and_out_of_range_are_refused_not_dereferenced() {
         TpdfStatus::BadArgument
     );
     assert_eq!(
-        unsafe { tpdf_form_data_add_field(ptr::null_mut(), name.as_ptr(), kind, ptr::null(), 0) },
+        unsafe {
+            tpdf_form_data_add_field(
+                ptr::null_mut(),
+                name.as_ptr(),
+                kind as c_int,
+                ptr::null(),
+                0,
+            )
+        },
         TpdfStatus::BadArgument
     );
     assert_eq!(

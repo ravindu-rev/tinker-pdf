@@ -62,7 +62,7 @@ fn tag(kind: &[u8]) -> *mut TpdfTag {
 
 fn set(tag: *mut TpdfTag, which: TpdfTagText, value: &str) {
     let value = CString::new(value).expect("no nul");
-    ok(unsafe { tpdf_tag_set_text(tag, which, value.as_ptr()) });
+    ok(unsafe { tpdf_tag_set_text(tag, which as c_int, value.as_ptr()) });
 }
 
 /// Opens `tag` on `page` and frees the handle: the page holds its own copy.
@@ -259,7 +259,7 @@ fn null_handles_are_refused_not_dereferenced() {
     );
     let value = CString::new("x").expect("no nul");
     assert_eq!(
-        unsafe { tpdf_tag_set_text(ptr::null_mut(), TpdfTagText::Title, value.as_ptr()) },
+        unsafe { tpdf_tag_set_text(ptr::null_mut(), TpdfTagText::Title as c_int, value.as_ptr()) },
         TpdfStatus::BadArgument
     );
     assert_eq!(
@@ -277,7 +277,7 @@ fn null_handles_are_refused_not_dereferenced() {
     unsafe { tpdf_tag_free(ptr::null_mut()) };
     let live = tag(b"P");
     assert_eq!(
-        unsafe { tpdf_tag_set_text(live, TpdfTagText::Lang, ptr::null()) },
+        unsafe { tpdf_tag_set_text(live, TpdfTagText::Lang as c_int, ptr::null()) },
         TpdfStatus::BadArgument
     );
     assert_eq!(

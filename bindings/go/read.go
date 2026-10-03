@@ -94,7 +94,7 @@ func destinationOf(raw C.TpdfDestinationRead, bytes []byte) *Destination {
 func (d *Document) Info(key InfoKey) (*string, error) {
 	var out *C.char
 	err := call(func() C.enum_TpdfStatus {
-		return C.tpdf_document_info(d.ptr, C.enum_TpdfInfoKey(key), &out)
+		return C.tpdf_document_info(d.ptr, C.int(key), &out)
 	})
 	if err != nil {
 		return nil, err
