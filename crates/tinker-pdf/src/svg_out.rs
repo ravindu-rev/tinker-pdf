@@ -80,9 +80,12 @@
 //! # What is refused, by name
 //!
 //! The writer never emits a `<mask>`, a `<pattern>` or a `<filter>`, the
-//! three elements `tinker-pdf-svg` refuses — so a file this writes is one this
-//! repository can read back whole. Where a page needs one, the writer says so
-//! instead of dropping it silently (ruling 10):
+//! three elements `tinker-pdf-svg` refused when it was written — so a file
+//! this writes is one this repository can read back whole. The reader has
+//! since learnt `<mask>` and `<pattern>`, so the first and last items below
+//! are now this writer's own choice rather than the reader's limit. Where a
+//! page needs one, the writer says so instead of dropping it silently
+//! (ruling 10):
 //!
 //! - a **soft mask** (SVG 1.1's `<mask>`) is declined, and what it masked is
 //!   drawn unmasked — [`SvgWarning::SoftMaskRefused`];
@@ -300,8 +303,8 @@ pub enum Rasterised {
     /// A shading painted by `sh` or as a shading pattern, whose function,
     /// colour space, extension or geometry no SVG gradient states exactly.
     Shading,
-    /// A tiling pattern (8.7.3), whose SVG spelling is the `<pattern>` that
-    /// `tinker-pdf-svg` refuses.
+    /// A tiling pattern (8.7.3), whose SVG spelling is the `<pattern>` this
+    /// writer does not emit.
     TilingPattern,
     /// A stroke painted with a pattern.
     PatternedStroke,

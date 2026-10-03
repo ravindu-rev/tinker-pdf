@@ -44,6 +44,8 @@
 //! | a mask's colours are not turned to their grey | 1 |
 //! | the mask region is not clipped | 1 |
 //! | a masked group is drawn unmasked | 4 |
+//! | a pattern's tile does not carry the page mapping | 1 |
+//! | a pattern is painted as nothing | 1 |
 //! | the reader ignores a container's `clip-path`, as it did until groups | 1 |
 //!
 //! The form row fired **zero** the first time: its fixture's shapes covered
@@ -613,6 +615,48 @@ fn a_groups_clip_path_reaches_the_page() {
     );
 }
 
+// ---- §13.3's patterns ---------------------------------------------------------
+
+/// **A pattern reaches the page as tiles**: a checkerboard twenty units a
+/// tile, black in its top-left and bottom-right quarters.
+///
+/// Sampled in the first tile and in the next one along and the next one
+/// down, so a tile that did not repeat, repeated at the wrong step, or came
+/// out upside down — the page mapping composed twice, or not at all — each
+/// puts black where white is asserted.
+#[test]
+fn a_pattern_fills_a_shape_with_its_tiles() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <pattern id="p" patternUnits="userSpaceOnUse" width="20" height="20">
+                <rect width="10" height="10" fill="#000000"/>
+                <rect x="10" y="10" width="10" height="10" fill="#000000"/>
+              </pattern>
+              <rect width="200" height="200" fill="url(#p)"/>
+            </svg>"##,
+    );
+    let at = |x: f64, y: f64| rgb_at(&doc, x / 200.0, y / 200.0)[0];
+    for (x, y, black) in [
+        (5.0, 5.0, true),
+        (15.0, 5.0, false),
+        (5.0, 15.0, false),
+        (15.0, 15.0, true),
+        (25.0, 5.0, true),
+        (35.0, 5.0, false),
+        (5.0, 25.0, true),
+        (125.0, 185.0, true),
+        (135.0, 185.0, false),
+        (135.0, 195.0, true),
+    ] {
+        let value = at(x, y);
+        if black {
+            assert!(value < 0x20, "black at ({x}, {y}): {value}");
+        } else {
+            assert!(value > 0xE0, "white at ({x}, {y}): {value}");
+        }
+    }
+}
+
 // ---- §14.4's masks ------------------------------------------------------------
 
 /// **A mask reaches the page**: what is under its white is kept, what is under
@@ -751,7 +795,7 @@ fn a_marker_is_drawn_at_the_end_of_its_line() {
 fn every_refusal_travels_out_named_with_its_item() {
     let doc = open(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
-             <filter id="f"/><pattern id="p"/>
+             <filter id="f"/>
              <foreignObject width="1" height="1"/><animate/><script/>
              <rect width="10" height="10" fill="#000"/>
            </svg>"##,
@@ -768,7 +812,6 @@ fn every_refusal_travels_out_named_with_its_item() {
         .collect();
     for expected in [
         tinker_pdf_svg::Warning::FilterUnsupported,
-        tinker_pdf_svg::Warning::PatternUnsupported,
         tinker_pdf_svg::Warning::ForeignObjectUnsupported,
         tinker_pdf_svg::Warning::AnimationIgnored,
         tinker_pdf_svg::Warning::ScriptIgnored,

@@ -6,7 +6,8 @@ draws that list onto a page instead of filling a grey rectangle and calling it a
 chapter. `SpineDefect::SvgContentDocument` stops existing, the six SVG spine
 items in the fetched corpus become six pages that carry ink, and what still
 refuses refuses for a **narrower named reason** than "no SVG renderer": a filter,
-a mask, an animation, a `<foreignObject>`, a `<pattern>` used as a paint. The
+a mask, an animation, a `<foreignObject>`, a `<pattern>` used as a paint (the
+mask and the pattern have since been drawn; see *As built*). The
 refusal row in [features/epub.md](../features/epub.md) is narrowed to those and
 kept, because deleting a row whose exit criterion is not green is how a
 refusal table stops meaning anything.
@@ -59,9 +60,9 @@ A picture that quietly drops one of these looks finished.
 - **`<foreignObject>`** (§23). Its content is a different document language;
   reading it here would be a second XHTML reader.
   `Warning::ForeignObjectUnsupported`.
-- **`<pattern>` as a paint** (§13.3). A tiling paint server is a form XObject
-  and a `/Pattern` colour space, and it has no corpus behind it (ruling 3).
-  `Warning::PatternUnsupported`.
+- ~~**`<pattern>` as a paint** (§13.3)~~ — **drawn since the milestones**;
+  see *As built*. A tiling paint server is 8.7.3's tiling pattern, cell for
+  cell.
 - ~~**`<marker>`** (§11.6)~~ — **drawn since the milestones**; see *As built*.
   Arrowheads on a path's vertices, thirty-two of them in the fetched corpus,
   all on paths that also fill.
@@ -314,6 +315,26 @@ renderer defect a long way from SVG — a group under a soft mask was masked
 twice, through the form's `/BBox` clip and again at its composite
 (`soft_mask_clips.rs`) — and that an `<image>`'s `clip-path`, like a `<g>`'s
 before groups, was dropped without a word.
+
+**After the milestones: §13.3's patterns.** `Paint::Pattern` is a `Tile`: a
+cell, a matrix and a node list, so a pattern is the display list again, one
+level down. The leaf resolves the tile — `patternUnits` (initially
+`objectBoundingBox`, a fraction of the painted element's box),
+`patternContentUnits`, a `viewBox` fitted into the cell, `patternTransform`
+composed inside the element's matrix, and every attribute and the content
+inherited along `xlink:href` as a gradient's are — and walks the content into
+nodes in pattern space, styled down the pattern's **own** ancestry (§13.3), so
+a tile does not take the stroke of the shape it fills. The facade writes the
+cell as an 8.7.3 tiling pattern, `/XStep` and `/YStep` the tile's size and
+`/BBox` the tile, which is the clip §13.3's `overflow: hidden` asks for; the
+cell's stream has no page mapping of its own, the pattern's `/Matrix` carrying
+pattern space into the default space as a gradient's does. A tile with no
+area paints nothing — not the fallback, because the server was found — and a
+pattern that paints itself, directly or along its chain, is
+`Refusal::TooManyUses`, the `<use>` bomb's fourth spelling. Each tile's nodes
+are charged against `max_nodes` once per shape it fills, so a pattern painted
+on a thousand shapes is a thousand tiles' worth of the budget, as the same
+`<use>` a thousand times is.
 
 **What this cannot reach**, stated rather than absorbed: nothing outside this
 repository adjudicates a rendering (ruling 13), so every expected value here is

@@ -139,7 +139,22 @@ fn sweep_paint(paint: &Paint, out: &mut Vec<f64>) {
             out.extend_from_slice(matrix);
             out.extend(stops.iter().flat_map(|stop| [stop.offset, stop.opacity]));
         }
+        // A tile's cell reaches a `/BBox` and `/XStep`, its matrix a
+        // `/Matrix`, and its nodes a cell's content stream.
+        Paint::Pattern(tile) => {
+            out.extend_from_slice(&tile.cell);
+            out.extend_from_slice(&tile.matrix);
+            sweep_nodes(&tile.nodes, out);
+        }
         _ => {}
+    }
+}
+
+/// The nodes a paint's tile holds, at every depth.
+fn count_paint(paint: &Paint) -> usize {
+    match paint {
+        Paint::Pattern(tile) => count(&tile.nodes),
+        _ => 0,
     }
 }
 
@@ -162,6 +177,11 @@ fn count(nodes: &[Node]) -> usize {
         .map(|node| match node {
             Node::Group { nodes, mask, .. } => {
                 1 + count(nodes) + mask.as_ref().map_or(0, |mask| count(&mask.nodes))
+            }
+            // A pattern's tile is charged as it is built, once per shape it
+            // paints.
+            Node::Path { fill, stroke, .. } | Node::Text { fill, stroke, .. } => {
+                1 + count_paint(fill) + stroke.as_ref().map_or(0, |s| count_paint(&s.paint))
             }
             _ => 1,
         })

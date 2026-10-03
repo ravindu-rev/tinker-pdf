@@ -58,7 +58,8 @@ use std::collections::HashMap;
 
 use tinker_pdf_cos::build::{
     CalculatorOp, DeviceSpace, DocumentBuilder, ExtGState, FormXObject, Function, ImageData,
-    MaskKind, PageBuilder, Shading, ShadingPattern, StateMask, TransparencyGroup,
+    MaskKind, PageBuilder, Shading, ShadingPattern, StateMask, TilingPattern, TilingType,
+    TransparencyGroup,
 };
 use tinker_pdf_css::property::{Color, FontFamily, FontStyle, FontVariant, TextDecoration};
 use tinker_pdf_filters::Limits as FilterLimits;
@@ -605,6 +606,9 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
     /// Registers a gradient as a `/Pattern`, or `None` for a paint that is not
     /// one.
     fn pattern(&mut self, paint: &Paint, space: Space) -> Option<Vec<u8>> {
+        if let Paint::Pattern(tile) = paint {
+            return self.tiling(tile, space);
+        }
         // 8.7.3.1: pattern space is the stream's **default** coordinate
         // system, so the `cm` in force does not reach it and the space's
         // mapping has to be composed in here. This is the one place the flip
@@ -631,6 +635,38 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
                 &ShadingPattern {
                     shading,
                     matrix: Some(matrix),
+                },
+            )
+            .then_some(name)
+    }
+
+    /// §13.3's pattern as 8.7.3's tiling pattern: one cell, the tile's nodes
+    /// drawn in pattern space, repeated at the tile's width and height.
+    ///
+    /// The cell's content stream is pattern space with no mapping of its
+    /// own — the nodes are already in it — and its `/BBox` is the tile, which
+    /// is the clip §13.3's `overflow: hidden` asks for. The pattern's
+    /// `/Matrix` carries pattern space into the stream's default space,
+    /// 8.7.3.1's rule and the gradient's.
+    fn tiling(&mut self, tile: &tinker_pdf_svg::Tile, space: Space) -> Option<Vec<u8>> {
+        let [x, y, width, height] = tile.cell;
+        let cell = Space {
+            base: transform::IDENTITY,
+            extent: [x, y, x + width, y + height],
+            grey: space.grey,
+        };
+        let content = self.stream(&tile.nodes, cell);
+        let name = self.name("T");
+        self.builder
+            .add_tiling_pattern(
+                &name,
+                &TilingPattern {
+                    bbox: cell.extent,
+                    x_step: width,
+                    y_step: height,
+                    matrix: Some(transform::concat(tile.matrix, space.base)),
+                    tiling_type: TilingType::ConstantSpacing,
+                    content: &content,
                 },
             )
             .then_some(name)
@@ -780,7 +816,7 @@ fn set_paint(
             out.extend_from_slice(format!("{} {} {} {op}\n", c(r), c(g), c(b)).as_bytes());
             true
         }
-        Paint::Linear { .. } | Paint::Radial { .. } => match pattern {
+        Paint::Linear { .. } | Paint::Radial { .. } | Paint::Pattern(_) => match pattern {
             // A gradient whose pattern the builder refused paints **nothing**
             // rather than falling back to a colour. §13.2's fallback is for a
             // paint server the *document* did not supply; inventing one here

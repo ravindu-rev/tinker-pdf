@@ -173,8 +173,6 @@ pub enum Warning {
     /// ruling 2's answer and the one that keeps a picture rather than losing
     /// it; the alternative reading of §14.3.1 would clip everything away.
     ClipPathUnsupported,
-    /// `<pattern>` used as a paint.
-    PatternUnsupported,
     /// Something whose coordinates, once every transform above it was
     /// composed, are past a double's range — `scale(1e300)` inside
     /// `scale(1e300)`, or a `markerWidth` of `1e308` under a view box.
@@ -306,6 +304,27 @@ pub enum Paint {
         /// What happens past the circle.
         spread: Spread,
     },
+    /// §13.3's `<pattern>`: a tile of nodes, repeated.
+    Pattern(Box<Tile>),
+}
+
+/// §13.3's pattern tile, which is 8.7.3's tiling pattern by another name.
+///
+/// The content is in **pattern space** — the referencing element's user
+/// space with `patternTransform` applied — so a consumer draws `nodes` once,
+/// clips them to `cell`, and repeats the result at every multiple of the
+/// cell's width and height, all through `matrix`. A tile carries no matrix
+/// of its own inside it for the reason a scene carries none: every transform
+/// below pattern space is composed into the nodes already.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tile {
+    /// The tile's content, in pattern space.
+    pub nodes: Vec<Node>,
+    /// The tile, as `x y width height` in pattern space, which is also the
+    /// spacing: §13.3's tiles abut.
+    pub cell: [f64; 4],
+    /// Pattern space to the scene's.
+    pub matrix: [f64; 6],
 }
 
 /// §10.9's `text-anchor`.

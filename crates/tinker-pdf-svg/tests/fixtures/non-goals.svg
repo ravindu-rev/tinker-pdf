@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Every subsystem this build refuses, one element each, so that the refusal
-     list is a file rather than a paragraph. §15 filters, §13.3 patterns,
+     list is a file rather than a paragraph. §15 filters,
      §23 foreignObject, §19 SMIL, §18 scripting — and one name SVG does not define at all, which is a
      different fact and gets a different warning. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
@@ -13,6 +13,7 @@
        which is `<defs>`'s rule. An element that warned here again would mean
        the walk had started rendering it. -->
   <clipPath id="crop"/>
+  <!-- A `<pattern>` is a paint server, reached by reference: silent here. -->
   <pattern id="tiles"/>
   <foreignObject width="10" height="10"/>
   <animate attributeName="x" from="0" to="10" dur="1s"/>

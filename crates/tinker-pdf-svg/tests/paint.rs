@@ -20,7 +20,7 @@
 //! | a `url(#…)` paint drops its fallback | 2 |
 //! | an at-rule in a `<style>` element is read as a qualified rule | 1 |
 //! | `fill-opacity` is not multiplied by `opacity` | 3 |
-//! | a `<pattern>` paint reports as merely unresolved | 1 |
+//! | a pattern with no tile falls through to the fallback | 1 |
 //!
 //! Seventeen injections and **no zeros**: every check here has a defect that
 //! reaches it. The three that fire more than twice are the ones whose defect
@@ -472,30 +472,25 @@ fn a_dash_pattern_that_never_advances_is_no_pattern() {
     assert_eq!(stroke.as_ref().expect("a stroke").dashes, vec![4.0, 2.0]);
 }
 
-/// A `<pattern>` named as a paint is refused **as a pattern**, not as a
-/// missing server.
+/// A `<pattern>` whose tile has no area **paints nothing** — §13.3's
+/// *"a value of zero disables rendering"* — and the fallback is not used,
+/// because the server was found: the gradient's rule, and a different fact
+/// from a reference that names nothing.
 ///
-/// The two are different facts and a caller can act on the difference: one
-/// says the document referenced something that is not there, the other says
-/// this build declines a paint server that is. A single warning for both would
-/// report a complete file as a broken one.
+/// *Since patterns are drawn*: this test used to assert the pattern was
+/// refused by name and the fallback drawn instead.
 #[test]
-fn a_pattern_paint_is_refused_under_its_own_name() {
+fn a_pattern_with_no_tile_paints_nothing() {
     let markup = b"<svg xmlns=\"http://www.w3.org/2000/svg\">        <defs><pattern id=\"tiles\"/></defs>        <rect fill=\"url(#tiles) green\" width=\"1\" height=\"1\"/></svg>";
     let scene = scene(markup);
     assert!(
-        scene.warnings.contains(&Warning::PatternUnsupported),
-        "{:?}",
-        scene.warnings
-    );
-    assert!(
         !scene.warnings.contains(&Warning::PaintServerUnresolved),
-        "the server is there; this build declines it: {:?}",
+        "the server is there: {:?}",
         scene.warnings
     );
     assert_eq!(
         fill_of(&scene, 0),
-        rgb(0, 128, 0),
-        "and §13.2's fallback is what the file said to use instead"
+        Paint::None,
+        "and a tile of no area is no paint, not the fallback"
     );
 }

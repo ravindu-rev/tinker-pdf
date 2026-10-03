@@ -484,6 +484,11 @@ fn sweep_nodes(nodes: &[crate::Node], out: &mut Vec<f64>) {
             out.extend(focus);
             out.extend(matrix);
         }
+        crate::Paint::Pattern(tile) => {
+            out.extend(tile.cell);
+            out.extend(tile.matrix);
+            sweep_nodes(&tile.nodes, out);
+        }
         _ => {}
     };
     for node in nodes {

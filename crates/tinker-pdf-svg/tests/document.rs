@@ -344,7 +344,6 @@ fn every_named_non_goal_is_a_warning_that_says_which() {
     let scene = scene(NON_GOALS, Some((100.0, 100.0)));
     let expected = [
         Warning::FilterUnsupported,
-        Warning::PatternUnsupported,
         Warning::ForeignObjectUnsupported,
         Warning::AnimationIgnored,
         Warning::ScriptIgnored,

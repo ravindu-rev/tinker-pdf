@@ -333,9 +333,13 @@ impl Walk<'_> {
             style,
             depth: frame.depth + 1,
         };
+        // A `<text>` inside the mask starts a text position of its own, and
+        // the one in force belongs to the run that is being masked.
+        let text = std::mem::take(&mut self.text);
         self.expanding.push(at);
         let drawn = self.collect(|walk| walk.children(at, &inner));
         self.expanding.pop();
+        self.text = text;
         let nodes = drawn?;
         let rectangle = Outline {
             segments: vec![
@@ -556,10 +560,9 @@ impl Walk<'_> {
                 self.warn(Warning::TextLayoutUnsupported);
                 Ok(())
             }
-            "pattern" => {
-                self.warn(Warning::PatternUnsupported);
-                Ok(())
-            }
+            // §13.3: a `<pattern>` is a paint server, reached by reference and
+            // never rendered where it stands.
+            "pattern" => Ok(()),
             // §11.6.2: a `<marker>` is drawn at the vertices of whatever
             // references it and never where it stands — `<defs>`'s rule, and
             // the reason `<clipPath>` is beside it.
@@ -621,8 +624,8 @@ impl Walk<'_> {
         if !style.visible {
             return Ok(());
         }
-        let fill = self.paint(&style.fill, style, matrix, bounds);
-        let stroke_paint = self.paint(&style.stroke, style, matrix, bounds);
+        let fill = self.paint(&style.fill, style, matrix, bounds, frame)?;
+        let stroke_paint = self.paint(&style.stroke, style, matrix, bounds, frame)?;
         // §14.3's clip, resolved against the same two numbers a gradient uses.
         // A `clip-path` naming nothing is **not** a clip: §14.3.1 makes a
         // reference to a non-existent element an error, and ruling 2 draws the
@@ -1013,8 +1016,9 @@ impl Walk<'_> {
         style: &Style,
         matrix: [f64; 6],
         bounds: [f64; 4],
-    ) -> Paint {
-        match spec {
+        frame: &Frame,
+    ) -> Result<Paint, Refusal> {
+        Ok(match spec {
             PaintSpec::None => Paint::None,
             PaintSpec::Solid(colour) => Paint::Solid(*colour),
             PaintSpec::Current => Paint::Solid(style.colour),
@@ -1024,20 +1028,164 @@ impl Walk<'_> {
                 if let (Some(at), Some("linearGradient" | "radialGradient")) = (target, kind) {
                     if let Some(resolved) = gradient::resolve(self.tree, at, matrix, bounds, style)
                     {
-                        return resolved.paint;
+                        return Ok(resolved.paint);
                     }
                     // §13.2.4: a gradient with no stops paints **as if `none`
                     // were specified** — which is not the same as falling
                     // through to the fallback, because the server was found.
-                    return Paint::None;
+                    return Ok(Paint::None);
                 }
-                match kind {
-                    Some("pattern") => self.warn(Warning::PatternUnsupported),
-                    _ => self.warn(Warning::PaintServerUnresolved),
+                if let (Some(at), Some("pattern")) = (target, kind) {
+                    // §13.3: a pattern whose tile has no area paints nothing,
+                    // which — the server having been found — is `none` and not
+                    // the fallback, the gradient's rule.
+                    return Ok(self
+                        .pattern_of(at, matrix, bounds, frame)?
+                        .unwrap_or(Paint::None));
                 }
-                self.paint(fallback, style, matrix, bounds)
+                self.warn(Warning::PaintServerUnresolved);
+                return self.paint(fallback, style, matrix, bounds, frame);
             }
+        })
+    }
+
+    /// §13.3's `<pattern>` as a paint, for one element: the tile, and its
+    /// content walked into nodes of its own in **pattern space**.
+    ///
+    /// Pattern space is the referencing element's user space with
+    /// `patternTransform` applied, and the tile at `x`, `y`, `width`,
+    /// `height` in it repeats at every multiple of its own size — which is
+    /// 8.7.3's tiling pattern exactly, so that is what [`crate::Tile`]
+    /// describes. Every attribute and the content follow the `xlink:href`
+    /// chain as a gradient's do (§13.3: *"any attributes which are defined on
+    /// the referenced element which are not defined on this element are
+    /// inherited by this element"*, and the children likewise when this one
+    /// has none).
+    ///
+    /// `None` for a tile with no area, which §13.3 says disables the paint.
+    fn pattern_of(
+        &mut self,
+        at: usize,
+        matrix: [f64; 6],
+        bounds: [f64; 4],
+        frame: &Frame,
+    ) -> Result<Option<Paint>, Refusal> {
+        let tree = self.tree;
+        let mut chain = vec![at];
+        while chain.len() < 10 {
+            let Some(next) = chain
+                .last()
+                .and_then(|last| tree.nodes.get(*last))
+                .and_then(Node::href)
+                .and_then(|href| href.trim().strip_prefix('#'))
+                .and_then(|name| tree.by_id(name))
+                .filter(|next| tree.nodes[*next].is_svg() && tree.nodes[*next].name == "pattern")
+            else {
+                break;
+            };
+            chain.push(next);
         }
+        let along = |name: &str| {
+            chain
+                .iter()
+                .find_map(|index| tree.nodes[*index].attr(name))
+                .map(str::trim)
+        };
+        let length = |name: &str, basis: f64, default: f64| {
+            along(name)
+                .and_then(|text| document::length(text, Some(basis)))
+                .unwrap_or(default)
+        };
+        let [min_x, min_y, max_x, max_y] = bounds;
+        let (box_width, box_height) = (max_x - min_x, max_y - min_y);
+        let box_area = box_width > 0.0 && box_height > 0.0;
+        // §13.3's initial `patternUnits` is `objectBoundingBox`, and its
+        // initial `patternContentUnits` is `userSpaceOnUse`.
+        let cell = if along("patternUnits") == Some("userSpaceOnUse") {
+            let (vw, vh) = frame.viewport;
+            [
+                length("x", vw, 0.0),
+                length("y", vh, 0.0),
+                length("width", vw, 0.0),
+                length("height", vh, 0.0),
+            ]
+        } else {
+            if !box_area {
+                return Ok(None);
+            }
+            [
+                min_x + length("x", 1.0, 0.0) * box_width,
+                min_y + length("y", 1.0, 0.0) * box_height,
+                length("width", 1.0, 0.0) * box_width,
+                length("height", 1.0, 0.0) * box_height,
+            ]
+        };
+        let [x, y, width, height] = cell;
+        if !(width > 0.0 && height > 0.0 && cell.iter().all(|v| v.is_finite())) {
+            return Ok(None);
+        }
+        // The content's own space, into pattern space: a `viewBox` fitted into
+        // the tile (which makes `patternContentUnits` moot, §13.3 says), or
+        // the tile's corner as the origin, scaled by the box under
+        // `objectBoundingBox`.
+        let view = along("viewBox")
+            .and_then(transform::numbers)
+            .filter(|numbers| numbers.len() == 4);
+        let content = match view {
+            Some(numbers) => {
+                let Some(fit) = transform::view_box(
+                    [numbers[0], numbers[1], numbers[2], numbers[3]],
+                    width,
+                    height,
+                    along("preserveAspectRatio"),
+                ) else {
+                    return Ok(None);
+                };
+                transform::concat(fit, [1.0, 0.0, 0.0, 1.0, x, y])
+            }
+            None if along("patternContentUnits") == Some("objectBoundingBox") => {
+                if !box_area {
+                    return Ok(None);
+                }
+                [box_width, 0.0, 0.0, box_height, x, y]
+            }
+            None => [1.0, 0.0, 0.0, 1.0, x, y],
+        };
+        let own = along("patternTransform")
+            .and_then(transform::list)
+            .unwrap_or(IDENTITY);
+        let source = chain
+            .iter()
+            .copied()
+            .find(|index| tree.element_children(*index).next().is_some())
+            .unwrap_or(at);
+        // A pattern whose tile is painted with itself is the `<use>` bomb's
+        // fourth spelling.
+        if self.expanding.contains(&source) {
+            return Err(Refusal::TooManyUses);
+        }
+        // §13.3: properties inherit into a `<pattern>` from its ancestors and
+        // not from the element it paints.
+        let style = self.style_of(source)?;
+        let inner = Frame {
+            matrix: content,
+            viewport: frame.viewport,
+            style,
+            depth: frame.depth + 1,
+        };
+        // The text position belongs to the run that asked for this paint, and
+        // a `<text>` inside the tile would start its own.
+        let text = std::mem::take(&mut self.text);
+        self.expanding.push(source);
+        let drawn = self.collect(|walk| walk.children(source, &inner));
+        self.expanding.pop();
+        self.text = text;
+        let nodes = drawn?;
+        Ok(Some(Paint::Pattern(Box::new(crate::Tile {
+            nodes,
+            cell,
+            matrix: transform::concat(own, matrix),
+        }))))
     }
 
     /// Whether §11.5's `display: none` applies, from either place it is
@@ -1414,8 +1562,8 @@ impl Walk<'_> {
         } else {
             frame.matrix
         };
-        let fill = self.paint(&style.fill, style, matrix, [0.0, 0.0, 0.0, 0.0]);
-        let stroke_paint = self.paint(&style.stroke, style, matrix, [0.0, 0.0, 0.0, 0.0]);
+        let fill = self.paint(&style.fill, style, matrix, [0.0, 0.0, 0.0, 0.0], frame)?;
+        let stroke_paint = self.paint(&style.stroke, style, matrix, [0.0, 0.0, 0.0, 0.0], frame)?;
         let stroke = if stroke_paint == Paint::None || style.stroke_width <= 0.0 {
             None
         } else {
@@ -1640,6 +1788,7 @@ fn finite(node: &crate::Node) -> bool {
     }
     fn paint(paint: &Paint) -> bool {
         match paint {
+            Paint::Pattern(tile) => numbers(&tile.cell) && numbers(&tile.matrix),
             Paint::Linear {
                 from, to, matrix, ..
             } => numbers(from) && numbers(to) && numbers(matrix),
