@@ -1971,6 +1971,12 @@ pub struct PageBuilder {
     page_intents: bool,
     /// The page's own `/OutputIntents`, in the order given.
     output_intents: Vec<NewOutputIntent>,
+    /// Whether the document may carry associated files; see
+    /// [`DocumentBuilder::associate_file`]. Copied at
+    /// [`DocumentBuilder::begin_page`].
+    associated_allowed: bool,
+    /// The page's `/AF`, in the order given.
+    associated: Vec<NewAssociatedFile>,
 }
 
 /// One structure element under construction, and what it claims.
@@ -2280,6 +2286,8 @@ struct ElementProps {
     table: Option<TableAttributes>,
     /// `/NS` (ISO 32000-2 Table 355): the namespace the element's type is in.
     namespace: Option<NamespaceId>,
+    /// `/AF` (ISO 32000-2 14.13): files associated with the element.
+    files: Vec<NewAssociatedFile>,
 }
 
 impl ElementProps {
@@ -2295,7 +2303,11 @@ impl ElementProps {
             id,
             table,
             namespace,
+            files,
         } = other;
+        if self.files.is_empty() {
+            self.files.clone_from(files);
+        }
         fill(&mut self.title, title);
         fill(&mut self.lang, lang);
         fill(&mut self.alt, alt);
@@ -2320,6 +2332,7 @@ impl ElementProps {
             id,
             table,
             namespace: _,
+            files,
         } = self;
         title.is_some()
             || lang.is_some()
@@ -2328,6 +2341,7 @@ impl ElementProps {
             || expansion.is_some()
             || id.is_some()
             || table.is_some()
+            || !files.is_empty()
     }
 }
 
@@ -2442,6 +2456,23 @@ impl Tag {
     #[must_use]
     pub fn namespace(mut self, namespace: NamespaceId) -> Tag {
         self.props.namespace = Some(namespace);
+        self
+    }
+
+    /// `/AF` (ISO 32000-2 14.13): associates `file` with the element — the
+    /// data a table was drawn from, the source a formula was typeset from.
+    /// Each call adds one, in order.
+    ///
+    /// A file [`NewAssociatedFile::is_writable`] refuses is not added. In a
+    /// document that may not carry associated files — see
+    /// [`DocumentBuilder::associate_file`] — the element is opened without
+    /// them, and under an archival profile [`PageBuilder::open_tag`] records
+    /// [`ArchivalRefusal::AssociatedFile`].
+    #[must_use]
+    pub fn associated_file(mut self, file: NewAssociatedFile) -> Tag {
+        if file.is_writable() {
+            self.props.files.push(file);
+        }
         self
     }
 
@@ -2715,12 +2746,25 @@ impl PageBuilder {
             self.close_marked();
         }
 
+        // Associated files where the document may not carry them are dropped
+        // here, where a profile's refusal can still be recorded.
+        let mut props = tag.boxed_props();
+        if let Some(held) = props.as_mut() {
+            if !held.files.is_empty() && !self.associated_allowed {
+                held.files.clear();
+                if self.archival_space.is_some() {
+                    self.refusals.push(ArchivalRefusal::AssociatedFile);
+                }
+            }
+        }
+        let props = props.filter(|held| **held != ElementProps::default());
+
         let mcid = self.open_marked(&tag.kind);
         self.tag_stack.push(TaggedNode {
             tag: tag.kind.clone(),
             key: tag.key.map(NodeKey::Caller),
             order: tag.order,
-            props: tag.boxed_props(),
+            props,
             keep: tag.keep,
             // **The element's own first sequence is seeded from `order`**, and
             // that is why no separate "say where this content sits" call is
@@ -2872,6 +2916,26 @@ impl PageBuilder {
         // split it.
         let order = parent.next_order();
         parent.kids.push(TaggedKid::Content { mcid, order });
+    }
+
+    /// Associates `file` with this page: the page's `/AF` (ISO 32000-2
+    /// 14.13; the Arlington model lists the page among `/AF`'s holders).
+    ///
+    /// Returns false, adding nothing, where [`DocumentBuilder::associate_file`]
+    /// would, and for the same reasons; under a profile that refuses it the
+    /// refusal is recorded as [`ArchivalRefusal::AssociatedFile`].
+    pub fn associate_file(&mut self, file: NewAssociatedFile) -> bool {
+        if !self.associated_allowed {
+            if self.archival_space.is_some() {
+                self.refusals.push(ArchivalRefusal::AssociatedFile);
+            }
+            return false;
+        }
+        if !file.is_writable() {
+            return false;
+        }
+        self.associated.push(file);
+        true
     }
 
     /// Gives this page an output intent of its own — the page's
@@ -3848,6 +3912,161 @@ impl NewOutputIntent {
     }
 }
 
+/// What an associated file is to the object it is associated with: ISO
+/// 32000-2 7.11.3's `/AFRelationship` (14.13).
+///
+/// The values the Arlington model lists for the key, the first four since
+/// ISO 19005-3 carried them on 1.7 and the next three since 2.0. The approved
+/// errata quote the entry's definition and leave the list to the 2.0 text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FileRelationship {
+    /// `/Source`: the file the content was made from.
+    Source,
+    /// `/Data`: the data the content presents — a table's spreadsheet.
+    Data,
+    /// `/Alternative`: another rendition of the content.
+    Alternative,
+    /// `/Supplement`: material that adds to the content.
+    Supplement,
+    /// `/EncryptedPayload` (2.0): an encrypted payload document. Read, and
+    /// never written: such a specification also needs an `/EP` dictionary
+    /// this writer has no API for.
+    EncryptedPayload,
+    /// `/FormData` (2.0): the data of a form.
+    FormData,
+    /// `/Schema` (2.0): a schema for the content.
+    Schema,
+    /// `/Unspecified`: a relationship the producer does not state, and the
+    /// Arlington model's default for the key.
+    Unspecified,
+}
+
+impl FileRelationship {
+    /// Every value, in the Arlington model's order.
+    pub const ALL: [FileRelationship; 8] = [
+        FileRelationship::Source,
+        FileRelationship::Data,
+        FileRelationship::Alternative,
+        FileRelationship::Supplement,
+        FileRelationship::EncryptedPayload,
+        FileRelationship::FormData,
+        FileRelationship::Schema,
+        FileRelationship::Unspecified,
+    ];
+
+    /// The name the value is written as.
+    #[must_use]
+    pub const fn name(self) -> &'static [u8] {
+        match self {
+            FileRelationship::Source => b"Source",
+            FileRelationship::Data => b"Data",
+            FileRelationship::Alternative => b"Alternative",
+            FileRelationship::Supplement => b"Supplement",
+            FileRelationship::EncryptedPayload => b"EncryptedPayload",
+            FileRelationship::FormData => b"FormData",
+            FileRelationship::Schema => b"Schema",
+            FileRelationship::Unspecified => b"Unspecified",
+        }
+    }
+
+    /// The value a name spells, or `None` for one the list does not hold.
+    #[must_use]
+    pub fn from_name(name: &[u8]) -> Option<FileRelationship> {
+        FileRelationship::ALL
+            .into_iter()
+            .find(|relationship| relationship.name() == name)
+    }
+}
+
+/// A file to associate with the document, a page or a structure element
+/// (ISO 32000-2 14.13): embedded, and connected to its holder by the holder's
+/// `/AF` array.
+///
+/// Written as a file specification dictionary carrying `/F`, `/UF`, `/Desc`,
+/// `/AFRelationship` and an `/EF` naming one embedded file stream, whose
+/// `/Subtype` is the MIME type — which the errata's Table 44 requires of a
+/// stream used as an associated file — and whose `/Params` hold `/Size` and
+/// the MD5 `/CheckSum`, as `DocumentEditor::attach_file` writes them. Not
+/// filed in `/Names /EmbeddedFiles`: the errata say that is "not required
+/// unless stated otherwise".
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NewAssociatedFile {
+    /// The name to offer when the file is saved out: `/UF` as a text string,
+    /// and `/F` beside it with every byte outside printable ASCII replaced.
+    pub filename: String,
+    /// The embedded file stream's `/Subtype`, a MIME type such as `text/csv`.
+    pub mime_type: String,
+    /// `/AFRelationship`.
+    pub relationship: FileRelationship,
+    /// `/Desc`.
+    pub description: Option<String>,
+    /// The file's bytes.
+    pub data: Vec<u8>,
+}
+
+impl NewAssociatedFile {
+    /// `data`, offered as `filename`, of type `mime_type`, standing to its
+    /// holder as `relationship` says.
+    #[must_use]
+    pub fn new(
+        filename: &str,
+        mime_type: &str,
+        relationship: FileRelationship,
+        data: Vec<u8>,
+    ) -> NewAssociatedFile {
+        NewAssociatedFile {
+            filename: filename.to_owned(),
+            mime_type: mime_type.to_owned(),
+            relationship,
+            description: None,
+            data,
+        }
+    }
+
+    /// `/Desc`.
+    #[must_use]
+    pub fn description(mut self, text: &str) -> NewAssociatedFile {
+        self.description = Some(text.to_owned());
+        self
+    }
+
+    /// Whether this can be written: a file name, a MIME type of the shape
+    /// veraPDF's published PDF/A rules 6.8-1 (part 3) and 6.9-1 (part 4)
+    /// test — `^[-\w+\.]+\/[-\w+\.]+$`, so one `/` between two runs of
+    /// letters, digits, `_`, `-`, `+` and `.`, which also keeps out the
+    /// `;`, `=` and `#` the errata's Table 44 forbids — and not
+    /// [`FileRelationship::EncryptedPayload`], which needs an `/EP`
+    /// dictionary this writer does not write.
+    #[must_use]
+    pub fn is_writable(&self) -> bool {
+        let token = |part: &str| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'+' | b'.'))
+        };
+        let mime = self
+            .mime_type
+            .split_once('/')
+            .is_some_and(|(kind, sub)| token(kind) && token(sub));
+        !self.filename.is_empty() && mime && self.relationship != FileRelationship::EncryptedPayload
+    }
+}
+
+/// `/F` beside `/UF` (7.11.3): the name in bytes, every character outside
+/// printable ASCII replaced by `_` — the rule `DocumentEditor::attach_file`
+/// follows, restated here because that one is private to the editor.
+fn byte_file_name(name: &str) -> Vec<u8> {
+    name.chars()
+        .map(|c| match u8::try_from(c) {
+            Ok(b) if (0x20..0x7f).contains(&b) => b,
+            _ => b'_',
+        })
+        .collect()
+}
+
 /// Which part of ISO 19005 a document is written under.
 ///
 /// The vocabulary is deliberately this crate's own and not the facade's
@@ -4049,6 +4268,14 @@ pub enum ArchivalRefusal {
         /// The colorant both name.
         colorant: Vec<u8>,
     },
+    /// An associated file (ISO 32000-2 14.13) under a part that admits no
+    /// embedded file this writer can vouch for. Part 1 forbids embedded files
+    /// outright; part 2, and part 4 without level F, require the embedded
+    /// file itself to conform (veraPDF's published rules 6.8-5 and 6.9-3),
+    /// which nothing here can check of a caller's bytes; and part 4 level F
+    /// requires an `/EmbeddedFiles` name tree (6.9-5) this writer does not
+    /// keep. Part 3 admits them, and they are written.
+    AssociatedFile,
 }
 
 impl ArchivalRefusal {
@@ -4074,6 +4301,7 @@ impl ArchivalRefusal {
             ArchivalRefusal::OptionalContent => "6.1.13",
             ArchivalRefusal::UndescribedColorant { .. }
             | ArchivalRefusal::InconsistentSeparation { .. } => "6.2.4.4",
+            ArchivalRefusal::AssociatedFile => "6.1.11",
         }
     }
 }
@@ -4133,6 +4361,10 @@ impl core::fmt::Display for ArchivalRefusal {
                 "a Separation space for /{} is already written with another \
                  alternate or tint transform, and every one of that name must agree",
                 String::from_utf8_lossy(colorant)
+            ),
+            ArchivalRefusal::AssociatedFile => f.write_str(
+                "this part admits no embedded file this writer can vouch for, and an \
+                 associated file is one",
             ),
         }
     }
@@ -4215,6 +4447,8 @@ pub struct DocumentBuilder {
     /// registered, which is the order `/Namespaces` lists them in. See
     /// [`DocumentBuilder::add_namespace`].
     namespaces: Vec<StructNamespace>,
+    /// The catalog's `/AF`. See [`DocumentBuilder::associate_file`].
+    associated: Vec<NewAssociatedFile>,
 }
 
 impl Default for DocumentBuilder {
@@ -4257,6 +4491,7 @@ impl DocumentBuilder {
             language: None,
             role_map: BTreeMap::new(),
             namespaces: Vec::new(),
+            associated: Vec::new(),
         }
     }
 
@@ -4356,6 +4591,113 @@ impl DocumentBuilder {
             builder: self.serial,
             index: u32::try_from(index).ok()?,
         })
+    }
+
+    /// Associates `file` with the document as a whole: the catalog's `/AF`
+    /// (ISO 32000-2 14.13.1 as the approved errata quote it — *"an AF entry
+    /// that shall be an array of file specification dictionaries … that
+    /// contain an AFRelationship entry"*). Each call adds one, in order.
+    ///
+    /// Associated files are a PDF 2.0 feature that ISO 19005-3 carried on 1.7
+    /// first, and the Arlington model gives `/AF` both origins. So returns
+    /// false, adding nothing, when:
+    ///
+    /// - the document declares a version before 2.0 and is not written under
+    ///   ISO 19005-3 ([`ArchivalPart::Three`]);
+    /// - it is written under any other part, which records
+    ///   [`ArchivalRefusal::AssociatedFile`];
+    /// - [`NewAssociatedFile::is_writable`] refuses the file.
+    pub fn associate_file(&mut self, file: NewAssociatedFile) -> bool {
+        if !self.associated_files_allowed() {
+            if self.profile.is_some() {
+                self.refuse(ArchivalRefusal::AssociatedFile);
+            }
+            return false;
+        }
+        if !file.is_writable() {
+            return false;
+        }
+        self.associated.push(file);
+        true
+    }
+
+    /// Whether this document may carry associated files: one declaring 2.0
+    /// or later with no profile, or one under ISO 19005-3.
+    fn associated_files_allowed(&self) -> bool {
+        match &self.profile {
+            None => self.declared_version() >= (2, 0),
+            Some(profile) => profile.part == ArchivalPart::Three,
+        }
+    }
+
+    /// Writes one associated file — its embedded file stream, then its file
+    /// specification — and returns the specification, for an `/AF` array.
+    fn write_associated_file(&mut self, file: &NewAssociatedFile) -> ObjRef {
+        let version = self.declared_version();
+        let mut params = Dict::new();
+        params.insert(
+            self.names.intern(b"Size"),
+            Object::Int(i64::try_from(file.data.len()).unwrap_or(i64::MAX)),
+        );
+        params.insert(
+            self.names.intern(b"CheckSum"),
+            Object::String(PdfString::hex(
+                tinker_pdf_crypto::md5::md5(&file.data).to_vec(),
+            )),
+        );
+        let mut stream = Dict::new();
+        stream.insert(Name::TYPE, Object::Name(self.names.intern(b"EmbeddedFile")));
+        stream.insert(
+            self.names.intern(b"Subtype"),
+            Object::Name(self.names.intern(file.mime_type.as_bytes())),
+        );
+        stream.insert(self.names.intern(b"Params"), Object::Dict(params));
+        let stream_ref = self.allocate();
+        self.objects.insert_stream(
+            stream_ref.num,
+            StreamData {
+                dict: stream,
+                data: file.data.clone(),
+            },
+        );
+
+        let mut ef = Dict::new();
+        ef.insert(self.names.intern(b"F"), Object::Ref(stream_ref));
+        ef.insert(self.names.intern(b"UF"), Object::Ref(stream_ref));
+        let mut spec = Dict::new();
+        spec.insert(Name::TYPE, Object::Name(self.names.intern(b"Filespec")));
+        spec.insert(
+            self.names.intern(b"F"),
+            Object::String(PdfString::literal(byte_file_name(&file.filename))),
+        );
+        spec.insert(
+            self.names.intern(b"UF"),
+            Object::String(encode_text_string(&file.filename, version)),
+        );
+        if let Some(description) = &file.description {
+            spec.insert(
+                self.names.intern(b"Desc"),
+                Object::String(encode_text_string(description, version)),
+            );
+        }
+        spec.insert(self.names.intern(b"EF"), Object::Dict(ef));
+        spec.insert(
+            self.names.intern(b"AFRelationship"),
+            Object::Name(self.names.intern(file.relationship.name())),
+        );
+        let spec_ref = self.allocate();
+        self.objects.insert(spec_ref.num, Object::Dict(spec));
+        spec_ref
+    }
+
+    /// Writes `files` and returns the `/AF` array naming them.
+    fn write_associated_files(&mut self, files: &[NewAssociatedFile]) -> Object {
+        Object::Array(
+            files
+                .iter()
+                .map(|file| Object::Ref(self.write_associated_file(file)))
+                .collect(),
+        )
     }
 
     /// The index of a namespace this builder registered.
@@ -6488,6 +6830,8 @@ impl DocumentBuilder {
             builder: self.serial,
             page_intents: self.declared_version() >= (2, 0) && self.profile.is_none(),
             output_intents: Vec::new(),
+            associated_allowed: self.associated_files_allowed(),
+            associated: Vec::new(),
         };
         page.reopen(&self.carried, self.carried_refused);
         page
@@ -6819,6 +7163,12 @@ impl DocumentBuilder {
             }
             if let Some(props) = &node.props {
                 self.write_element_props(&mut element, props, &walk.namespaces);
+                // ISO 32000-2 14.13: the files associated with the element,
+                // numbered after everything under it.
+                if !props.files.is_empty() {
+                    let af = self.write_associated_files(&props.files);
+                    element.insert(self.names.intern(b"AF"), af);
+                }
             }
             self.objects.insert(reference.num, Object::Dict(element));
             out.push(Object::Ref(reference));
@@ -6843,6 +7193,7 @@ impl DocumentBuilder {
             id: _,
             table,
             namespace,
+            files: _,
         } = props;
         // ISO 32000-2 Table 355: an indirect reference to the namespace's
         // dictionary — which is why a handle this builder did not make, and so
@@ -7193,6 +7544,11 @@ impl DocumentBuilder {
                 }
                 dict.insert(self.names.intern(b"OutputIntents"), Object::Array(listed));
             }
+            // ISO 32000-2 14.13: the files associated with this page.
+            if !page.associated.is_empty() {
+                let af = self.write_associated_files(&page.associated);
+                dict.insert(self.names.intern(b"AF"), af);
+            }
 
             // 12.5.2: the page's annotations, each an indirect object. `/Annots`
             // is written only when there are some — an empty array is a
@@ -7361,6 +7717,13 @@ impl DocumentBuilder {
                     Object::String(encode_text_string(language, self.declared_version())),
                 );
             }
+        }
+        // ISO 32000-2 14.13: the files associated with the document as a
+        // whole. Numbered here only when there are some.
+        let associated = std::mem::take(&mut self.associated);
+        if !associated.is_empty() {
+            let af = self.write_associated_files(&associated);
+            catalog.insert(self.names.intern(b"AF"), af);
         }
 
         // 14.7.2: the structure tree, when any page tagged anything. One

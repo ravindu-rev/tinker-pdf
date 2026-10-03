@@ -261,3 +261,390 @@ fn an_archival_documents_catalog_intent_reads_back() {
     assert_eq!(intents[0].components, Some(3));
     assert!(doc.page(0).expect("a page").output_intents().is_empty());
 }
+
+// ---- associated files ------------------------------------------------------
+
+use tinker_pdf::{
+    ArchivalRefusal, AssociatedFile, FileRelationship, NewAssociatedFile, StructElement, Tag,
+};
+
+/// An RGB part `part` profile, as `pdfa_writer.rs` builds one.
+fn archival(part: ArchivalPart, level: Option<ArchivalLevel>) -> ArchivalProfile {
+    ArchivalProfile {
+        part,
+        level,
+        destination_profile: srgb_like(),
+        destination_space: DeviceSpace::Rgb,
+        output_condition: "Custom".to_string(),
+        language: None,
+    }
+}
+
+/// Every element in the tree, depth-first.
+fn elements(doc: &Document) -> Vec<StructElement> {
+    doc.structure()
+        .expect("a tree")
+        .elements()
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
+/// The fields a test compares, borrowed.
+#[derive(Debug, PartialEq)]
+struct FileView<'a> {
+    filename: Option<&'a str>,
+    description: Option<&'a str>,
+    relationship: Option<FileRelationship>,
+    relationship_name: Option<&'a str>,
+    mime_type: Option<&'a str>,
+    size: Option<i64>,
+}
+
+impl<'a> FileView<'a> {
+    fn of(file: &'a AssociatedFile) -> Self {
+        FileView {
+            filename: file.filename.as_deref(),
+            description: file.description.as_deref(),
+            relationship: file.relationship,
+            relationship_name: file.relationship_name.as_deref(),
+            mime_type: file.mime_type.as_deref(),
+            size: file.size,
+        }
+    }
+}
+
+/// Written on the catalog, a page and a structure element, and read back from
+/// each as given: the filename (a non-ASCII one through `/UF`), the
+/// description, the relationship, the MIME type and the bytes — and an
+/// element holding nothing but an associated file is kept, since the file is
+/// something it says.
+#[test]
+fn associated_files_are_written_on_the_catalog_a_page_and_an_element_and_read_back() {
+    let csv = b"a,b\n1,2\n".to_vec();
+    let mut builder = DocumentBuilder::with_version(2, 0);
+    builder.add_base_font(b"F1", b"Helvetica");
+    assert!(builder.associate_file(
+        NewAssociatedFile::new(
+            "donn\u{e9}es.csv",
+            "text/csv",
+            FileRelationship::Data,
+            csv.clone()
+        )
+        .description("The table's data")
+    ));
+    builder.add_page(200.0, 200.0, |page| {
+        assert!(page.associate_file(NewAssociatedFile::new(
+            "page.svg",
+            "image/svg+xml",
+            FileRelationship::Source,
+            b"<svg/>".to_vec(),
+        )));
+        let table = Tag::new(b"Table").associated_file(NewAssociatedFile::new(
+            "table.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            FileRelationship::Alternative,
+            b"PK".to_vec(),
+        ));
+        page.tagged_with(&table, |page| {
+            page.tagged(b"P", |page| page.text(b"F1", 12.0, 20.0, 150.0, "1 2"));
+        });
+        let formula = Tag::new(b"Formula").associated_file(NewAssociatedFile::new(
+            "formula.mml",
+            "application/mathml+xml",
+            FileRelationship::Source,
+            b"<math/>".to_vec(),
+        ));
+        page.tagged_with(&formula, |_| {});
+    });
+    let doc = Document::open(builder.finish()).expect("opens");
+    structurally_clean(&doc);
+
+    let catalog = doc.associated_files();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(
+        FileView::of(&catalog[0]),
+        FileView {
+            filename: Some("donn\u{e9}es.csv"),
+            description: Some("The table's data"),
+            relationship: Some(FileRelationship::Data),
+            relationship_name: Some("Data"),
+            mime_type: Some("text/csv"),
+            size: Some(csv.len() as i64),
+        }
+    );
+    let stream = catalog[0].stream.expect("embedded");
+    assert_eq!(doc.cos().stream_decoded(stream).expect("decodes"), csv);
+    assert!(
+        catalog[0].specification.is_some(),
+        "an indirect specification"
+    );
+
+    let page = doc.page(0).expect("a page").associated_files();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].filename.as_deref(), Some("page.svg"));
+    assert_eq!(page[0].relationship, Some(FileRelationship::Source));
+    assert_eq!(page[0].mime_type.as_deref(), Some("image/svg+xml"));
+
+    let tree = elements(&doc);
+    let table = tree
+        .iter()
+        .find(|element| element.standard_type == "Table")
+        .expect("the table");
+    assert_eq!(table.associated_files.len(), 1);
+    assert_eq!(
+        table.associated_files[0].relationship,
+        Some(FileRelationship::Alternative)
+    );
+    let formula = tree
+        .iter()
+        .find(|element| element.standard_type == "Formula")
+        .expect("an element holding only a file is kept");
+    assert_eq!(
+        formula.associated_files[0].filename.as_deref(),
+        Some("formula.mml")
+    );
+    assert!(
+        tree.iter()
+            .filter(|element| element.standard_type == "P")
+            .all(|element| element.associated_files.is_empty()),
+        "a file is the element's own, not its kids'"
+    );
+}
+
+/// Each relationship is written as the name it reads back as.
+#[test]
+fn every_relationship_reads_back_as_itself() {
+    for relationship in FileRelationship::ALL {
+        assert_eq!(
+            FileRelationship::from_name(relationship.name()),
+            Some(relationship)
+        );
+    }
+    assert_eq!(FileRelationship::from_name(b"C2PA_Manifest"), None);
+}
+
+/// What the writer refuses: a file it cannot write well, and a document that
+/// may not carry one.
+#[test]
+fn an_associated_file_is_refused_where_it_cannot_be_written() {
+    let file = |name: &str, mime: &str, relationship| {
+        NewAssociatedFile::new(name, mime, relationship, b"x".to_vec())
+    };
+    for (bad, why) in [
+        (file("", "text/csv", FileRelationship::Data), "no filename"),
+        (file("a", "text", FileRelationship::Data), "no subtype"),
+        (file("a", "/csv", FileRelationship::Data), "no type"),
+        (
+            file("a", "text/csv; charset=utf-8", FileRelationship::Data),
+            "parameters",
+        ),
+        (
+            file("a", "text/c#v", FileRelationship::Data),
+            "a number sign",
+        ),
+        (
+            file("a", "text/csv/x", FileRelationship::Data),
+            "two solidi",
+        ),
+        (
+            file("a", "text/csv", FileRelationship::EncryptedPayload),
+            "an encrypted payload needs /EP",
+        ),
+    ] {
+        assert!(!bad.is_writable(), "{why}");
+        let mut builder = DocumentBuilder::with_version(2, 0);
+        assert!(!builder.associate_file(bad), "{why}");
+    }
+    assert!(file(
+        "a.bin",
+        "application/octet-stream",
+        FileRelationship::Unspecified
+    )
+    .is_writable());
+
+    // Before 2.0, with no ISO 19005-3 profile: nowhere, and an element's file
+    // is dropped where its element is still written.
+    let mut old = DocumentBuilder::new();
+    assert!(!old.associate_file(file("a.csv", "text/csv", FileRelationship::Data)));
+    old.add_base_font(b"F1", b"Helvetica");
+    old.add_page(100.0, 100.0, |page| {
+        assert!(!page.associate_file(file("a.csv", "text/csv", FileRelationship::Data)));
+        let tag = Tag::new(b"P").associated_file(file("a.csv", "text/csv", FileRelationship::Data));
+        page.tagged_with(&tag, |page| page.text(b"F1", 12.0, 20.0, 50.0, "x"));
+    });
+    assert!(
+        old.refusals().is_empty(),
+        "no profile, so nothing to refuse under"
+    );
+    let bytes = old.finish();
+    assert!(!bytes.windows(14).any(|window| window == b"AFRelationship"));
+    let doc = Document::open(bytes).expect("opens");
+    assert_eq!(
+        elements(&doc).len(),
+        2,
+        "the /P is written, without its file"
+    );
+
+    // Under part 2, each refusal is recorded.
+    let mut part2 = DocumentBuilder::archival(archival(ArchivalPart::Two, Some(ArchivalLevel::B)));
+    assert!(!part2.associate_file(file("a.csv", "text/csv", FileRelationship::Data)));
+    part2.add_page(100.0, 100.0, |page| {
+        assert!(!page.associate_file(file("a.csv", "text/csv", FileRelationship::Data)));
+        let tag =
+            Tag::new(b"Figure").associated_file(file("a.csv", "text/csv", FileRelationship::Data));
+        page.tagged_with(&tag, |page| page.fill_rect(1.0, 1.0, 2.0, 2.0, 0.0));
+    });
+    assert_eq!(
+        part2.refusals(),
+        &[
+            ArchivalRefusal::AssociatedFile,
+            ArchivalRefusal::AssociatedFile,
+            ArchivalRefusal::AssociatedFile
+        ]
+    );
+}
+
+/// ISO 19005-3 carried associated files on 1.7 before 2.0 did, and a part 3
+/// document carrying one validates with no finding — the repository's own
+/// part 3 rules ask for `/AFRelationship`, and it is there.
+#[test]
+fn a_part_3_document_carries_an_associated_file_and_validates() {
+    let mut builder =
+        DocumentBuilder::archival(archival(ArchivalPart::Three, Some(ArchivalLevel::B)));
+    assert!(builder.associate_file(NewAssociatedFile::new(
+        "invoice.xml",
+        "text/xml",
+        FileRelationship::Alternative,
+        b"<invoice/>".to_vec(),
+    )));
+    builder.add_page(100.0, 100.0, |page| {
+        assert!(page.set_fill_rgb(1.0, 0.0, 0.0));
+        page.fill_rect(10.0, 10.0, 50.0, 50.0, 0.5);
+    });
+    assert!(builder.refusals().is_empty(), "{:?}", builder.refusals());
+    let doc = Document::open(builder.finish_archival().expect("written")).expect("opens");
+    assert_eq!(doc.pdf_version(), "PDF 1.7", "part 3 is on 1.7");
+    assert_eq!(doc.associated_files().len(), 1);
+    let verdict = doc.validate_pdfa();
+    assert!(verdict.coverage.is_complete());
+    assert!(verdict.findings.is_empty(), "{:?}", verdict.findings);
+}
+
+/// The reader on what another producer may write: an entry that is not a
+/// dictionary, a specification with no `/AFRelationship`, a relationship an
+/// extension defines, a file outside the document, and an `/AF` on a `/Pages`
+/// node — which the Arlington model does not make inheritable.
+#[test]
+fn associated_files_another_producer_wrote_are_read_as_written() {
+    let bytes = "%PDF-2.0\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R\n\
+   /AF [ 10 0 R 7\n\
+         << /Type /Filespec /F (bare.txt) /EF << /F 12 0 R >> >>\n\
+         << /Type /Filespec /UF (c2pa.json) /AFRelationship /C2PA_Manifest >> ] >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 /AF [10 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>\nendobj\n\
+10 0 obj\n<< /Type /Filespec /F (http://example.com/x.csv) /FS /URL\n\
+   /AFRelationship /Supplement >>\nendobj\n\
+12 0 obj\n<< /Type /EmbeddedFile /Length 2 >>\nstream\nhi\nendstream\nendobj\n\
+trailer\n<< /Size 13 /Root 1 0 R >>\n%%EOF\n";
+    let doc = Document::open(bytes.as_bytes().to_vec()).expect("opens");
+    let files = doc.associated_files();
+    assert_eq!(files.len(), 3, "the integer is skipped");
+
+    assert_eq!(files[0].specification, Some(ObjRef::new(10, 0)));
+    assert_eq!(files[0].relationship, Some(FileRelationship::Supplement));
+    assert_eq!(files[0].stream, None, "a file outside the document");
+
+    assert_eq!(
+        FileView::of(&files[1]),
+        FileView {
+            filename: Some("bare.txt"),
+            description: None,
+            relationship: None,
+            relationship_name: None,
+            mime_type: None,
+            size: None,
+        },
+        "nothing defaulted: no relationship, no /Subtype, no /Params"
+    );
+    assert_eq!(files[1].stream, Some(ObjRef::new(12, 0)));
+    assert_eq!(files[1].specification, None, "a direct specification");
+
+    assert_eq!(files[2].relationship, None);
+    assert_eq!(files[2].relationship_name.as_deref(), Some("C2PA_Manifest"));
+
+    assert!(
+        doc.page(0).expect("a page").associated_files().is_empty(),
+        "nothing inherited from /Pages"
+    );
+}
+
+/// An element opened on one page and closed on the next is one element, and
+/// its file is written once rather than once per half.
+#[test]
+fn an_element_carried_over_a_page_break_holds_its_file_once() {
+    let mut builder = DocumentBuilder::with_version(2, 0);
+    builder.add_base_font(b"F1", b"Helvetica");
+    let tag = Tag::new(b"P").associated_file(NewAssociatedFile::new(
+        "p.txt",
+        "text/plain",
+        FileRelationship::Source,
+        b"p".to_vec(),
+    ));
+    let mut first = builder.begin_page(100.0, 100.0);
+    assert!(first.open_tag(&tag));
+    first.text(b"F1", 12.0, 20.0, 50.0, "first half");
+    builder.push_page(first);
+    let mut second = builder.begin_page(100.0, 100.0);
+    second.text(b"F1", 12.0, 20.0, 50.0, "second half");
+    assert!(second.close_tag());
+    builder.push_page(second);
+    let doc = Document::open(builder.finish()).expect("opens");
+    let paragraphs: Vec<StructElement> = elements(&doc)
+        .into_iter()
+        .filter(|element| element.standard_type == "P")
+        .collect();
+    assert_eq!(paragraphs.len(), 1, "one element");
+    assert_eq!(paragraphs[0].associated_files.len(), 1, "one file");
+}
+
+/// Two halves of one keyed element that state different files: the first
+/// half's statement stands, as for every other property of a merged element.
+#[test]
+fn keyed_halves_keep_the_first_halfs_files() {
+    let mut builder = DocumentBuilder::with_version(2, 0);
+    builder.add_base_font(b"F1", b"Helvetica");
+    let half = |name: &str| {
+        Tag::new(b"P")
+            .keyed(7, 0)
+            .associated_file(NewAssociatedFile::new(
+                name,
+                "text/plain",
+                FileRelationship::Source,
+                name.as_bytes().to_vec(),
+            ))
+    };
+    builder.add_page(100.0, 100.0, |page| {
+        page.tagged_with(&half("first.txt"), |page| {
+            page.text(b"F1", 12.0, 20.0, 50.0, "first half");
+        });
+    });
+    builder.add_page(100.0, 100.0, |page| {
+        page.tagged_with(&half("second.txt"), |page| {
+            page.text(b"F1", 12.0, 20.0, 50.0, "second half");
+        });
+    });
+    let doc = Document::open(builder.finish()).expect("opens");
+    let paragraphs: Vec<StructElement> = elements(&doc)
+        .into_iter()
+        .filter(|element| element.standard_type == "P")
+        .collect();
+    assert_eq!(paragraphs.len(), 1, "one element");
+    let names: Vec<Option<&str>> = paragraphs[0]
+        .associated_files
+        .iter()
+        .map(|file| file.filename.as_deref())
+        .collect();
+    assert_eq!(names, [Some("first.txt")]);
+}

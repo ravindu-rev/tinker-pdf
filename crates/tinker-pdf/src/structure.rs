@@ -56,6 +56,17 @@ const MAX_STRUCTURE_DEPTH: u32 = limits::MAX_NEST_DEPTH;
 /// and run to the low hundreds of thousands.
 const MAX_STRUCTURE_ELEMENTS: usize = 1 << 18;
 
+/// How many array entries the whole walk retains from elements' `/Headers`
+/// and `/AF` arrays together.
+///
+/// **A per-array cap does not bound them**, for the reason the depth cap
+/// does not bound the walk: one array of [`limits::MAX_ARRAY_LEN`] entries,
+/// shared by reference among [`MAX_STRUCTURE_ELEMENTS`] elements, would be
+/// read once per element — 2^38 entries kept from a file of a few megabytes.
+/// A real table's cell names a handful of header cells and a real element a
+/// handful of files, so a million across a tree is far past any honest one.
+const MAX_RETAINED_VALUES: usize = 1 << 20;
+
 /// How many entries of one element's `/K` array are examined.
 ///
 /// A page tagged span by span reaches the low thousands; this is well above
@@ -102,6 +113,10 @@ pub enum StructureWarning {
     /// [`MAX_STRUCTURE_ELEMENTS`] was reached; the rest of the tree was not
     /// read.
     ElementCapped,
+    /// `MAX_RETAINED_VALUES` (2^20) entries of elements' `/Headers` and `/AF`
+    /// arrays were kept, and every entry after them was dropped. Reported
+    /// once.
+    ValuesCapped,
     /// [`MAX_KIDS`] entries of one `/K` array were read and the rest dropped.
     KidsCapped {
         /// The element whose kid list was truncated.
@@ -315,6 +330,9 @@ pub struct StructElement {
     pub standard_namespace: Option<String>,
     /// `/T`, the human-readable title.
     pub title: Option<String>,
+    /// `/AF` (ISO 32000-2 14.13): files associated with the element, in the
+    /// array's order. Empty when it names none.
+    pub associated_files: Vec<crate::AssociatedFile>,
     /// `/Lang`, the natural language of this element's content (14.9.2).
     pub lang: Option<String>,
     /// `/Alt`, a description for content that is not text (14.9.3).
@@ -633,6 +651,8 @@ pub(crate) fn bind(doc: &Arc<CosDocument>) -> Option<StructureTree> {
         role_map: &role_map,
         path: HashSet::new(),
         budget: MAX_STRUCTURE_ELEMENTS,
+        retained: MAX_RETAINED_VALUES,
+        values_capped: false,
         stopped: false,
         warnings: Vec::new(),
         namespaces: BTreeMap::new(),
@@ -776,6 +796,11 @@ struct Walk<'a> {
     path: HashSet<u32>,
     /// Elements left before the walk stops.
     budget: usize,
+    /// Array entries left to retain from `/Headers` and `/AF`; see
+    /// [`MAX_RETAINED_VALUES`].
+    retained: usize,
+    /// Whether [`StructureWarning::ValuesCapped`] has been reported.
+    values_capped: bool,
     /// Set when a cap ends the walk, so every loop above unwinds without
     /// visiting more of a bomb than the budget allowed.
     stopped: bool,
@@ -1001,6 +1026,7 @@ impl Walk<'_> {
             standard_type,
             namespace,
             standard_namespace,
+            associated_files: self.associated_files(dict),
             title: text_of(self.doc, dict, b"T"),
             lang: text_of(self.doc, dict, b"Lang"),
             alt: text_of(self.doc, dict, b"Alt"),
@@ -1072,7 +1098,8 @@ impl Walk<'_> {
                 .resolve_key(attributes, self.doc.intern(b"Headers"));
             if let Some(items) = headers.as_array() {
                 if table.headers.is_empty() {
-                    for item in items.iter().take(limits::MAX_ARRAY_LEN) {
+                    let allowed = self.retain(items.len().min(limits::MAX_ARRAY_LEN));
+                    for item in items.iter().take(allowed) {
                         match self.doc.resolve(item).as_string() {
                             Some(id) => table.headers.push(id.bytes.clone()),
                             None => self.warn(ignored("Headers")),
@@ -1124,6 +1151,29 @@ impl Walk<'_> {
             }
         }
         found
+    }
+
+    /// How many of `wanted` array entries may still be retained, taking them
+    /// from [`MAX_RETAINED_VALUES`]; reports [`StructureWarning::ValuesCapped`]
+    /// the first time fewer than wanted are.
+    fn retain(&mut self, wanted: usize) -> usize {
+        let allowed = wanted.min(self.retained);
+        if allowed < wanted && !self.values_capped {
+            self.values_capped = true;
+            self.warn(StructureWarning::ValuesCapped);
+        }
+        self.retained -= allowed;
+        allowed
+    }
+
+    /// `/AF` (ISO 32000-2 14.13), within the walk's retention budget.
+    fn associated_files(&mut self, dict: &Dict) -> Vec<crate::AssociatedFile> {
+        let listed = self.doc.resolve_key(dict, self.doc.intern(b"AF"));
+        let Some(entries) = listed.as_array() else {
+            return Vec::new();
+        };
+        let allowed = self.retain(entries.len().min(limits::MAX_ARRAY_LEN));
+        crate::associated_files::files_in(self.doc, &entries[..allowed])
     }
 
     /// Reads a namespace dictionary once (ISO 32000-2 Table 356) and returns

@@ -24,6 +24,7 @@
 
 mod annotations;
 mod annots;
+mod associated_files;
 pub mod cbz;
 mod display;
 pub mod epub;
@@ -66,6 +67,9 @@ use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages};
 /// owns rather than the internal ones. `fontlist`'s module comment argues the
 /// boundary once for all three.
 pub use annotations::{Annotation, AnnotationFlags, AnnotationKind};
+/// Associated files (ISO 32000-2 14.13), as `Document::associated_files`,
+/// `Page::associated_files` and `StructElement::associated_files` read them.
+pub use associated_files::AssociatedFile;
 /// Comic archives: what [`Document::open`] does with a `PK\x03\x04` at offset
 /// zero, and what it refuses by name.
 pub use cbz::{
@@ -81,8 +85,6 @@ pub use html::{FromHtml, HtmlError, HtmlReport, PageBox};
 pub use layers::OptionalGroup;
 /// Digital signatures, read (12.8), behind [`Document::signatures`].
 pub use mdp::{Change, Modification, Modifications, Touched};
-/// Tagged PDF: the logical structure tree, and the reading-order view over it
-/// (14.7, 14.8).
 /// Output intents, the catalog's and (PDF 2.0) a page's: what
 /// `Document::output_intents` and `Page::output_intents` hand back.
 pub use output_intents::OutputIntent;
@@ -98,6 +100,8 @@ pub use signature::{
 /// One-file documents that are not PDFs: what [`Document::open`] does with a
 /// standalone SVG, a bare image and a loose XHTML file (tier 5).
 pub use standalone::Standalone;
+/// Tagged PDF: the logical structure tree, and the reading-order view over it
+/// (14.7, 14.8).
 pub use structure::{
     StructElement, StructKid, StructureTree, StructureWarning, StructuredNode, StructuredText,
     TextSource,
@@ -227,12 +231,16 @@ pub use svg_out::{Rasterised, Svg, SvgOptions, SvgWarning, MAX_SVG_BYTES};
 /// `DocumentBuilder::add_namespace` hands back and `Tag::namespace` takes, and
 /// the three namespace URIs are ISO 32000-2's, which both the writer's
 /// `add_namespace` and the reader's `StructElement::standard_namespace` speak.
+/// `NewOutputIntent` is `PageBuilder::output_intent`'s argument, and
+/// `NewAssociatedFile` the argument of every `associate_file`; the
+/// `FileRelationship` it carries is the one `AssociatedFile` reads back.
 pub use tinker_pdf_cos::{
     is_language_tag, is_standard_namespace, ArchivalLevel, ArchivalPart, ArchivalProfile,
     ArchivalRefusal, DocumentBuilder, DocumentEditor, EditCheckpoint, EmbeddedWhole, Encryption,
-    FillError, FillRejection, ImageData, NamespaceId, NewOutputIntent, OutlineEntry, PageBuilder,
-    SkippedWidget, SubsetRefusal, TableAttributes, TableScope, Tag, Target, WidgetDefect,
-    WriteMode, WriteOptions, MATHML_NAMESPACE, PDF_1_7_NAMESPACE, PDF_2_0_NAMESPACE,
+    FileRelationship, FillError, FillRejection, ImageData, NamespaceId, NewAssociatedFile,
+    NewOutputIntent, OutlineEntry, PageBuilder, SkippedWidget, SubsetRefusal, TableAttributes,
+    TableScope, Tag, Target, WidgetDefect, WriteMode, WriteOptions, MATHML_NAMESPACE,
+    PDF_1_7_NAMESPACE, PDF_2_0_NAMESPACE,
 };
 /// Creating form fields (12.7.3), behind [`DocumentEditor::add_field`].
 ///

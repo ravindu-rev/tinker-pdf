@@ -883,3 +883,50 @@ fn namespaces_another_producer_wrote_are_read_and_their_oddities_named() {
     assert_eq!(structured.plain_text(), "a\nb\nc\nd\ne\nf\ng\n");
     assert_eq!(structured.orphans, 0, "namespaces lose no content");
 }
+
+/// **One shared array, read once per element, is an amplification**, and
+/// the walk's retention budget is what bounds it: 500 elements naming one
+/// `/AF` array of 1 100 entries and 500 naming one `/Headers` array of as many
+/// ask for 1 100 000 entries from a file of a few kilobytes. The walk keeps
+/// 2^20 of them — the files first, since they come first — says so once, and
+/// reads every element all the same.
+#[test]
+fn shared_header_and_file_arrays_are_retained_within_one_budget() {
+    let per_array = 1_100;
+    let elements = 500;
+    let af: String = "21 0 R ".repeat(per_array);
+    let headers: String = "(h) ".repeat(per_array);
+    let kids: String = (0..elements)
+        .map(|_| "<< /S /P /AF 19 0 R >> ")
+        .chain((0..elements).map(|_| "<< /S /TD /A << /O /Table /Headers 20 0 R >> >> "))
+        .collect();
+    let doc = Document::open(build(
+        "",
+        "/K 10 0 R",
+        "",
+        &format!(
+            "10 0 obj\n<< /S /Document /K [{kids}] >>\nendobj\n\
+             19 0 obj\n[{af}]\nendobj\n\
+             20 0 obj\n[{headers}]\nendobj\n\
+             21 0 obj\n<< /Type /Filespec /F (x) /AFRelationship /Data >>\nendobj\n"
+        ),
+    ))
+    .expect("it opens");
+
+    let tree = doc.structure().expect("a structure tree");
+    assert_eq!(tree.warnings, vec![StructureWarning::ValuesCapped], "once");
+    assert_eq!(tree.element_count(), 2 * elements + 1, "every element read");
+    let found = tree.elements();
+    let files: usize = found.iter().map(|e| e.associated_files.len()).sum();
+    let header_ids: usize = found
+        .iter()
+        .filter_map(|e| e.table.as_ref())
+        .map(|t| t.headers.len())
+        .sum();
+    assert_eq!(files, elements * per_array, "the files came first, and fit");
+    assert_eq!(
+        files + header_ids,
+        1 << 20,
+        "exactly the budget, and no more"
+    );
+}

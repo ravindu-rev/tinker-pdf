@@ -301,6 +301,19 @@ judges every device colour against that one), and for an empty `/S`,
 identifier or profile. `Page::output_intents` reads it back
 ([document-model](document-model.md)).
 
+**Associated files** (ISO 32000-2 14.13). `DocumentBuilder::associate_file`,
+`PageBuilder::associate_file` and `Tag::associated_file` take a
+`NewAssociatedFile` — filename, MIME type, `FileRelationship`, optional
+description, bytes — and write it into the holder's `/AF`: an embedded file
+stream with `/Subtype` and `/Params` (`/Size`, MD5 `/CheckSum`), under an
+indirect file specification carrying `/F`, `/UF`, `/Desc`, `/EF` and
+`/AFRelationship`. They are written in a document declaring 2.0, or under
+ISO 19005-3, which carried them on 1.7 first — a part 3 document carrying one
+validates with no finding (`a_part_3_document_carries_an_associated_file_and_validates`).
+Other parts record `ArchivalRefusal::AssociatedFile`. A structure element
+holding nothing but an associated file is kept, as one holding any other
+property is.
+
 ## Refused by name
 
 | What | How it shows | Why | See |

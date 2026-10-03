@@ -168,6 +168,21 @@ its own, in a document declaring 2.0 and not under an archival profile — the
 profile writes the catalog's intent and checks device colour against that
 one — and pages naming one profile share one stream.
 
+**Associated files** (ISO 32000-2 14.13). `Document::associated_files()`,
+`Page::associated_files()` and `StructElement::associated_files` read the
+`/AF` arrays of the catalog, a page and a structure element: each an
+`AssociatedFile` with its `/UF`-preferred filename, `/Desc`, the
+`/AFRelationship` as a `FileRelationship` (and as written, for a name the
+list does not hold), the embedded stream by reference with its `/Subtype`
+MIME type and declared `/Params /Size`. A file outside the document has no
+stream; nothing is defaulted. They are not the `/EmbeddedFiles` tree's
+attachments, which `attachments()` lists: an associated file belongs to an
+object, and the errata say filing it in the tree is not required. The
+builder writes them — `DocumentBuilder::associate_file`,
+`PageBuilder::associate_file`, `Tag::associated_file` — in a 2.0 document or
+under ISO 19005-3, from a `NewAssociatedFile` whose MIME type has veraPDF's
+PDF/A 6.8-1 shape; [creation](creation.md) has the rest.
+
 **The writing side, on an existing document.** Each of these — page labels,
 an attachment, an outline, every `/Info` entry, a caller's XMP packet, viewer
 preferences and the production boxes — has a typed setter on
@@ -185,16 +200,17 @@ numerals capped so a hostile `/St` cannot emit a page of M's.
 
 Everything is on the facade `Document` and `Page`: `metadata()`,
 `pdf_version()`, `outline()`, `page_labels()`, `attachments()`,
-`xmp_metadata()`, `viewer_preferences()`, `output_intents()`, `page_count()`,
-`pages()`, `page(index)`, `layers()`, `fonts()`, and `Page::media_box()`,
-`crop_box()`, `bleed_box()`, `trim_box()`, `art_box()`,
-`boundary(PageBoundary)`, `rotation()`, `size()`, `links()`, `annotations()`,
-`output_intents()`. The types they hand back —
-`Metadata`, `Trapped`, `OutlineItem`, `Destination`, `DestKind`, `Action`,
-`Link`, `Attachment`, `LabelStyle`, `ViewerPreferences`,
-`NonFullScreenPageMode`, `ReadingDirection`, `PrintScaling`, `Duplex`,
-`EnforcedPreference`, `PageBoundary`, `OptionalGroup`, `Annotation`,
-`AnnotationKind`, `AnnotationFlags` — are re-exported from the same crate. The writing side takes the same vocabulary: `Target` wraps a page
+`xmp_metadata()`, `viewer_preferences()`, `output_intents()`,
+`associated_files()`, `page_count()`, `pages()`, `page(index)`, `layers()`,
+`fonts()`, and `Page::media_box()`, `crop_box()`, `bleed_box()`,
+`trim_box()`, `art_box()`, `boundary(PageBoundary)`, `rotation()`, `size()`,
+`links()`, `annotations()`, `output_intents()`, `associated_files()`. The
+types they hand back — `Metadata`, `Trapped`, `OutlineItem`, `Destination`,
+`DestKind`, `Action`, `Link`, `Attachment`, `LabelStyle`,
+`ViewerPreferences`, `NonFullScreenPageMode`, `ReadingDirection`,
+`PrintScaling`, `Duplex`, `EnforcedPreference`, `PageBoundary`,
+`OptionalGroup`, `Annotation`, `AnnotationKind`, `AnnotationFlags`,
+`OutputIntent`, `AssociatedFile`, `FileRelationship` — are re-exported from the same crate. The writing side takes the same vocabulary: `Target` wraps a page
 plus `DestKind`, a registered name or a URI for `PageBuilder::link` and
 `OutlineEntry`, so a write followed by a read is an equality, not a
 translation.
@@ -363,6 +379,9 @@ and 5 129 annotations carry a normal appearance.
 | An `/OutputIntents` array on a `/Pages` node | none — `Page::output_intents` reads the page's own only (`page_level_intents_are_read_from_the_page_alone_beside_the_catalogs`) | the Arlington model's `PageObject` table does not make the entry inheritable | ISO 32000-2 PageObject |
 | A page's intents merged over the catalog's into one answer | none — the two lists are handed back as written | the PDF Association's example says a page's intent overrides the catalog's; how the two combine when their subtypes differ is not in a source this build could read | [pdf20-deltas](../pdf20-deltas.md) |
 | A page-level output intent below 2.0 or under an archival profile | `PageBuilder::output_intent` → `false` | before 2.0 a page has no such entry; a profile writes the catalog's intent and judges every device colour against that one profile, which a page naming another would bypass | [creation](creation.md) |
+| `/AF` on an annotation, an XObject or the structure tree root, and a marked-content sequence's `/AF` tag with its `/MCAF` property list | none — not read and not written | the catalog, a page and a structure element are what this engine reads and writes; the rest of the Arlington model's holders, and 14.13.5's marked-content form the errata quote as Table 409a, are named in [pdf20-deltas](../pdf20-deltas.md) as left | ISO 32000-2 14.13 |
+| An associated file below 2.0 without ISO 19005-3, or under another archival part | `associate_file` → `false`; under a profile `ArchivalRefusal::AssociatedFile`; a `Tag`'s file is dropped and its element written | `/AF` is a 2.0 key that part 3 carried on 1.7 first; parts 1, 2 and 4 forbid embedded files or require the file itself to conform, which nothing here can check | [creation](creation.md) |
+| An associated file whose MIME type is not one `/` between two runs of letters, digits, `_`, `-`, `+` and `.`, or whose relationship is `EncryptedPayload` | `NewAssociatedFile::is_writable` → `false` | veraPDF's PDF/A rule 6.8-1 tests that shape, which also keeps out the `;`, `=` and `#` the errata's Table 44 forbids; an encrypted payload needs an `/EP` dictionary this writer does not write | ISO 32000-2 7.11.4 |
 | A `/Count` that disagrees with the walk | `WarningKind::PageCountMismatch` | the count is a claim; the walk is the fact | [ruling 10](../rulings.md) |
 | An outline `/First`/`/Next` loop, or one past the caps | `WarningKind::OutlineCycle`, `OutlineTruncated` | a looping sibling chain never ends on its own | [ruling 1](../rulings.md) |
 | A name/number tree cycle, cap breach, or odd-length leaf | `WarningKind::TreeCycle`, `TreeTruncated`, `TreeOddEntries` | the last key of an odd `/Names` array has no value | [ruling 10](../rulings.md) |

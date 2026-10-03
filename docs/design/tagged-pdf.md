@@ -298,6 +298,15 @@ writes, family by family:
   applied there, as 1.7 always did. The 2.0 namespace's own type list is not
   in a source this build could read, so the writer checks a target only in
   the 1.7 namespace.
+- **Associated files on elements**, from the same row. `Tag::associated_file`
+  writes the element's `/AF`; the file is a property the element states, so
+  an element holding nothing else is kept, and two halves of one element
+  hold the first half's files once. The reader's
+  `StructElement::associated_files` shares one walk-wide budget with
+  `/Headers` (2^20 entries, `StructureWarning::ValuesCapped`): writing the
+  reader for `/AF` found that the tagged-writing row's `/Headers` reading was
+  bounded per array and not across elements, so one shared array was read
+  once per element.
 
 What the row leaves, each named in a refusal table rather than absent: a
 link wrapped across lines is one annotation per rectangle rather than ISO
