@@ -63,7 +63,11 @@ can embed only those.
 declares a non-embedded face by name and encoding; `add_embedded_font`
 embeds a TrueType program as a simple font; `add_cid_font` embeds it as a
 Type 0 / CIDFontType2 with `/Identity-H`, so any glyph index is addressable
-(9.7.4). With `set_subset_fonts(true)` an embedded TrueType face is cut to
+(9.7.4). A CFF program — bare, or the `CFF ` table of an `OpenType/CFF`
+face — goes under a CIDFontType0 instead, as 9.9 Table 126 requires, and a
+CID-keyed one is written glyph by glyph as the CID its charset gives each
+index, in the string, `/W` and `/ToUnicode` alike
+([fonts](fonts.md)). With `set_subset_fonts(true)` an embedded TrueType face is cut to
 the glyphs the document draws — `glyf`/`loca` rebuilt, composite components
 followed, the 9.6.4 subset name tag written — so a line of Latin text set in
 a CJK face costs kilobytes rather than the whole face.
