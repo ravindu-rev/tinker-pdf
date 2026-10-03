@@ -254,7 +254,15 @@ writes, family by family:
 - **Table attributes and identifiers.** `Tag::id` writes `/ID`, claimed in
   reading order before an element's kids are written so the first element
   to carry one keeps it, and `finish` writes the `/IDTree` through the name
-  tree writer the named destinations use. `Tag::table(TableAttributes)`
+  tree writer the named destinations use — and, since the row's review, the
+  `/ParentTree` through its number-tree twin, one leaf while the keys fit
+  and a balanced tree past sixty-four, where it had been one flat `/Nums`
+  however many pages and held annotations it keyed. **Still open:** past the
+  2^18 identifiers the tree writer keeps, the `/IDTree` is left out while
+  every element keeps its `/ID`, which Table 322 does not allow; it needs
+  more elements than the reader's own element cap reads, so the coherent
+  fix is a document-wide element bound on the writer rather than an
+  identifier one. `Tag::table(TableAttributes)`
   writes one attribute object owned by `/Table` directly in `/A`. The reader
   reads `/A` (a dictionary, a stream, or an array with revision numbers) for
   the `/Table` owner into the same `TableAttributes` type, and `/C` classes

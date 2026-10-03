@@ -1343,3 +1343,46 @@ fn a_role_map_stops_at_the_entries_a_reader_keeps() {
         "every accepted mapping reads back, and a refused one as itself"
     );
 }
+
+/// **The `/ParentTree` is a balanced number tree once it outgrows one leaf**,
+/// written through the same tree writer as the `/IDTree` and the named
+/// destinations: seventy tagged pages are seventy keys, past the writer's
+/// sixty-four to a node, so the root names its leaves under `/Kids` and every
+/// page's `/StructParents` key is still found. It used to be one flat `/Nums`
+/// of any length — legal (7.9.7), but a lookup another reader makes is then a
+/// scan of every key, and nothing compared its size with the cap the tree
+/// writer keeps.
+#[test]
+fn a_parent_tree_past_one_leaf_is_written_as_a_balanced_tree() {
+    let pages = 70;
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    for page in 0..pages {
+        builder.add_page(200.0, 100.0, |builder_page| {
+            builder_page.tagged(b"P", |p| {
+                p.text(b"F1", 12.0, 20.0, 50.0, &format!("page {page}"));
+            });
+        });
+    }
+    let doc = Document::open(builder.finish()).expect("opens");
+    let cos = doc.cos();
+    let root = cos
+        .catalog()
+        .map(|catalog| cos.resolve_key(&catalog, cos.intern(b"StructTreeRoot")))
+        .expect("a catalog");
+    let root = root.as_dict().expect("a structure tree root");
+    let tree = cos.resolve_key(root, cos.intern(b"ParentTree"));
+    let tree = tree.as_dict().expect("a /ParentTree");
+    assert!(
+        tree.get(cos.intern(b"Kids")).is_some() && tree.get(cos.intern(b"Nums")).is_none(),
+        "seventy keys are a tree of leaves, not one leaf"
+    );
+
+    let structure = doc.structure().expect("a tree");
+    assert!(structure.warnings.is_empty(), "{:?}", structure.warnings);
+    for page in [0, pages - 1] {
+        let text = structure.text_for_page(page, &doc.page(page).expect("a page").text());
+        assert_eq!(text.plain_text().trim(), format!("page {page}"));
+        assert_eq!(text.unmarked, 0, "page {page}");
+    }
+}

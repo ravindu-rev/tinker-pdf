@@ -7845,19 +7845,43 @@ impl DocumentBuilder {
             element.insert(self.names.intern(b"K"), Object::Array(struct_kids));
             self.objects.insert(document.num, Object::Dict(element));
 
-            // 7.9.7: a number tree whose root is also its only leaf, which is
-            // what `/Nums` on the root node means. Legal at any size, and a
-            // document this builder produced has one entry per tagged page —
-            // splitting into `/Kids` would buy a lookup nothing here performs.
-            let mut nums = Vec::with_capacity(parent_tree.len() * 2);
-            for (key, value) in parent_tree.iter().enumerate() {
-                nums.push(Object::Int(key as i64));
-                nums.push(value.clone());
-            }
-            let tree_ref = self.allocate();
-            let mut tree = Dict::new();
-            tree.insert(self.names.intern(b"Nums"), Object::Array(nums));
-            self.objects.insert(tree_ref.num, Object::Dict(tree));
+            // 7.9.7, through the tree writer the `/IDTree` and the named
+            // destinations use: a root that is its only leaf while the keys
+            // fit one — the bytes a small document has always had — and a
+            // balanced tree of leaves past that, so a reader's lookup of one
+            // page's key is not a scan of every page's. The keys are one per
+            // tagged page and one per held annotation, and the tree writer
+            // refuses more than this crate's reader keeps; past that the one
+            // leaf is written whole, still legal at any size, and a reader of
+            // this crate reports `TreeTruncated` on it rather than nothing.
+            let parent_tree_len = parent_tree.len();
+            let entries: Vec<(i64, Object)> = parent_tree
+                .into_iter()
+                .enumerate()
+                .map(|(key, value)| (i64::try_from(key).unwrap_or(i64::MAX), value))
+                .collect();
+            let next = &mut self.next;
+            let objects = &mut self.objects;
+            let written = crate::trees::write_number_tree(entries.clone(), &self.names, |node| {
+                let reference = ObjRef::new(*next, 0);
+                *next = next.saturating_add(1);
+                objects.insert(reference.num, node);
+                reference
+            });
+            let tree_ref = match written {
+                Ok(tree) => tree,
+                Err(_) => {
+                    let nums = entries
+                        .into_iter()
+                        .flat_map(|(key, value)| [Object::Int(key), value])
+                        .collect();
+                    let tree_ref = self.allocate();
+                    let mut tree = Dict::new();
+                    tree.insert(self.names.intern(b"Nums"), Object::Array(nums));
+                    self.objects.insert(tree_ref.num, Object::Dict(tree));
+                    tree_ref
+                }
+            };
 
             let mut dict = Dict::new();
             dict.insert(
@@ -7874,7 +7898,7 @@ impl DocumentBuilder {
             // page takes no key.
             dict.insert(
                 self.names.intern(b"ParentTreeNextKey"),
-                Object::Int(parent_tree.len() as i64),
+                Object::Int(i64::try_from(parent_tree_len).unwrap_or(i64::MAX)),
             );
             // 14.7.2 Table 322: required when any element has an identifier —
             // a name tree from each identifier to its element, through the same
