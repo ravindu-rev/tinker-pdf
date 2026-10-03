@@ -35,7 +35,7 @@ use crate::{Document, Page};
 /// | | Bytes |
 /// | --- | --- |
 /// | The most any fixture in this repository spends: the one built to spend it | 64 MiB |
-/// | The most any other fixture spends: an archival intent's `/Info` and three names | under 1 KiB |
+/// | Any other fixture here: an archival intent's `/Info` and three names | under 1 KiB (estimate, not summed) |
 /// | A 200-page comic archive | 0 |
 /// | A 200-page fixed document | 0 |
 /// | A 300-page reflowable book | 0 |

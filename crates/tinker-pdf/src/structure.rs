@@ -73,7 +73,7 @@ const MAX_STRUCTURE_ELEMENTS: usize = 1 << 18;
 /// | | Entries |
 /// | --- | --- |
 /// | The most any fixture in this repository spends: the one built to spend it | 1 048 576 |
-/// | The most any other fixture spends: `tests/tagged_writer.rs`'s table | under 100 |
+/// | Any other fixture here: tables whose cells name a few headers each | under 100 (estimate, not summed) |
 /// | A 200-page comic archive | 0 |
 /// | A 200-page fixed document | 0 |
 /// | A 300-page reflowable book | 36 000 |
@@ -109,7 +109,7 @@ pub const MAX_STRUCTURE_VALUES: usize = 1 << 20;
 /// | | Bytes |
 /// | --- | --- |
 /// | The most any fixture in this repository spends: the one built to spend it | 64 MiB |
-/// | The most any other fixture spends: `tests/tagged_writer.rs`'s namespaces and table | under 4 KiB |
+/// | Any other fixture here: a few dozen elements' short strings | under 4 KiB (estimate, not summed) |
 /// | A 200-page comic archive | 0 |
 /// | A 200-page fixed document | 0 |
 /// | A 300-page reflowable book | 2 MiB |

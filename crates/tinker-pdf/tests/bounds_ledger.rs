@@ -2318,7 +2318,8 @@ fn ledger() -> Vec<Bound> {
             published: "1 048 576",
             // The firing test spends the budget to the entry: every element's
             // `/AF` and `/Headers` together are exactly the cap. Every other
-            // structure fixture reads fewer than a hundred entries.
+            // structure fixture is a table whose cells name a few headers
+            // each — an estimate, not a sum anybody took.
             fixtures: MAX_STRUCTURE_VALUES as u128,
             // Neither path writes a structure tree.
             comic: 0,
@@ -2365,7 +2366,7 @@ fn ledger() -> Vec<Bound> {
             cap: MAX_ASSOCIATED_FILE_BYTES as u128,
             published: "64 MiB",
             // The firing test copies to the description the budget runs out
-            // at; `pdf20.rs`'s other files copy under a kilobyte.
+            // at; `pdf20.rs`'s other files are a few short names each.
             fixtures: MAX_ASSOCIATED_FILE_BYTES as u128,
             // None of the three paths associates a file with the catalog or a
             // page.

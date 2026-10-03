@@ -38,7 +38,7 @@ use crate::{Document, FileRelationship, Page};
 /// | | Bytes |
 /// | --- | --- |
 /// | The most any fixture in this repository spends: the one built to spend it | 64 MiB |
-/// | The most any other fixture spends: `tests/pdf20.rs`'s catalog and page files | under 1 KiB |
+/// | Any other fixture here: `tests/pdf20.rs`'s catalog and page files | under 1 KiB (estimate, not summed) |
 /// | A 200-page comic archive | 0 |
 /// | A 200-page fixed document | 0 |
 /// | A 300-page reflowable book | 0 |
