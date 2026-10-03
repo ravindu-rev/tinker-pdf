@@ -23,10 +23,12 @@ specification is in this directory, and that is the point of it.
   3.11.2, `python3 test/spec_tests.py --dump-tests --spec spec.txt` with the
   tag's `cmark.py` and `normalize.py` beside it — and a SHA-256 taken over its
   652 objects' `markdown`, `html` and `section`; `commonmark_spec.rs` recomputes
-  that fingerprint over the examples it extracts itself and asserts it, so the
-  test reads exactly the examples `spec.json` carries. The script's output is a
-  dated measurement of what the examples *are*, never of whether an answer is
-  right: the answers are the specification's own.
+  that fingerprint over the examples it extracts itself and **prints** it beside
+  the recorded one, saying whether they agree. It does not assert it: the
+  script's output is a dated measurement of what the examples *are*, and ruling
+  13's amendment lets such a record be read by a person and never gate
+  anything. What gates is first-party — `spec.txt`'s SHA-256, the count of 652,
+  and each answer against the HTML the specification itself writes.
 - **Run it:** `sh crates/tinker-pdf/tests/commonmark/fetch-spec.sh`, then
   `TINKER_COMMONMARK_SPEC=<absolute path it prints> cargo test -p tinker-pdf
   --test commonmark_spec -- --nocapture`. `TINKER_COMMONMARK_SPEC_FAILURES=1`

@@ -41,9 +41,15 @@ const EXAMPLES: usize = 652;
 /// SHA-256 over every example's input, a NUL, its output, a NUL, its section
 /// and a `0x01`, in order — computed on 2 October 2026 over the 652 objects
 /// `python3 test/spec_tests.py --dump-tests --spec spec.txt` (Python 3.11.2,
-/// the 0.31.2 tag's own script) writes as `spec.json`. Recomputing it here
-/// over what [`examples`] extracts is what says this file reads the same 652
-/// examples as the published `spec.json`, not merely as many.
+/// the 0.31.2 tag's own script) writes as `spec.json`.
+///
+/// **A dated measurement, printed and never asserted.** It is what an outside
+/// program printed once, and ruling 13's amendment says such a record may be
+/// cited and read by a person and may not gate anything. So the test prints
+/// the fingerprint of what [`examples`] extracts beside this one, and says
+/// whether they agree; what gates is first-party: the input's own SHA-256, the
+/// count of examples, and every example's output against the HTML the
+/// specification writes beside it.
 const EXAMPLES_SHA256: &str = "68a4c06ba14feec70062206e8176cd5079ceaad31ccc5b2ca86b0d52c8c6bc06";
 
 /// The floor: how many examples pass exactly, measured 2 October 2026. A
@@ -188,10 +194,15 @@ fn the_markdown_reader_passes_its_counted_share_of_the_commonmark_examples() {
         fingerprint.extend_from_slice(example.section.as_bytes());
         fingerprint.push(1);
     }
-    assert_eq!(
-        hex(&tinker_pdf_crypto::sha2::sha256(&fingerprint)),
-        EXAMPLES_SHA256,
-        "the examples read here are not the 652 spec_tests.py dumps as spec.json"
+    let extracted = hex(&tinker_pdf_crypto::sha2::sha256(&fingerprint));
+    println!(
+        "commonmark-spec: examples fingerprint {extracted}; spec_tests.py --dump-tests \
+         printed {EXAMPLES_SHA256} on 2 October 2026 ({}; a record, not a check)",
+        if extracted == EXAMPLES_SHA256 {
+            "the same"
+        } else {
+            "DIFFERENT"
+        }
     );
 
     let mut sections: Vec<(String, usize, usize)> = Vec::new();
