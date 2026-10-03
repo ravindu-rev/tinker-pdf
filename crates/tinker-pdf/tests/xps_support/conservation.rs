@@ -230,6 +230,15 @@ pub enum Paint {
         kind: Gradient,
         geometry: Vec<f64>,
         stops: Vec<(f64, [f64; 3])>,
+        /// The stops' alphas, as `(offset, alpha)`, where they differ.
+        ///
+        /// `None` where every stop states one alpha, which is then the mark's
+        /// own constant [`Mark::alpha`]. On the document side this is the
+        /// `/DeviceGray` ramp of the `/Luminosity` soft mask in force when the
+        /// gradient was painted — 18.3.2 interpolates the alpha between stops
+        /// as it does each colour component, and a mask over a ramp is the one
+        /// PDF construction that says so.
+        alphas: Option<Vec<(f64, f64)>>,
     },
     /// A picture, at the pixel count of the part it came from, over the
     /// rectangle it covers in user space.
@@ -897,6 +906,11 @@ enum Brush {
         kind: Gradient,
         geometry: Vec<f64>,
         stops: Vec<(f64, [f64; 3])>,
+        /// Where the stops' alphas differ, each stop's.
+        alphas: Option<Vec<(f64, f64)>>,
+        /// The one alpha the stops share, times the brush's `Opacity`; the
+        /// `Opacity` alone where they differ.
+        alpha: f64,
     },
     Image {
         source: String,
@@ -915,17 +929,39 @@ enum Brush {
     },
 }
 
-/// The stops of a gradient brush, in the order the markup wrote them.
-fn stops(inner: &str) -> Vec<(f64, [f64; 3])> {
+/// The stops of a gradient brush, in the order the markup wrote them, with
+/// each stop's alpha.
+fn stops(inner: &str) -> Vec<(f64, [f64; 3], f64)> {
     tags(inner)
         .iter()
         .filter(|tag| tag.name.ends_with("GradientStop"))
         .filter_map(|tag| {
             let offset = attribute(tag.attributes, "Offset")?.parse::<f64>().ok()?;
-            let (rgb, _) = colour(attribute(tag.attributes, "Color")?)?;
-            Some((offset, rgb))
+            let (rgb, alpha) = colour(attribute(tag.attributes, "Color")?)?;
+            Some((offset, rgb, alpha))
         })
         .collect()
+}
+
+/// A gradient brush from its kind, its geometry, its stops and its start tag.
+///
+/// The stops' alphas are one fact when they agree — a constant alpha over the
+/// whole element, with the brush's `Opacity` — and a ramp of their own when
+/// they do not.
+fn gradient_brush(kind: Gradient, geometry: Vec<f64>, attributes: &str, inner: &str) -> Brush {
+    let read = stops(inner);
+    let opacity = attribute(attributes, "Opacity")
+        .and_then(|o| o.parse::<f64>().ok())
+        .unwrap_or(1.0);
+    let uniform = read.first().map_or(1.0, |stop| stop.2);
+    let varying = read.iter().any(|stop| stop.2 != uniform);
+    Brush::Gradient {
+        kind,
+        geometry,
+        stops: read.iter().map(|stop| (stop.0, stop.1)).collect(),
+        alphas: varying.then(|| read.iter().map(|stop| (stop.0, stop.2)).collect()),
+        alpha: if varying { opacity } else { uniform * opacity },
+    }
 }
 
 /// One brush element, from its start tag and everything under it.
@@ -942,10 +978,13 @@ fn brush(name: &str, attributes: &str, inner: &str) -> Option<Brush> {
         "LinearGradientBrush" => {
             let start = scalars(attribute(attributes, "StartPoint")?);
             let end = scalars(attribute(attributes, "EndPoint")?);
-            (start.len() == 2 && end.len() == 2).then(|| Brush::Gradient {
-                kind: Gradient::Linear,
-                geometry: vec![start[0], start[1], end[0], end[1]],
-                stops: stops(inner),
+            (start.len() == 2 && end.len() == 2).then(|| {
+                gradient_brush(
+                    Gradient::Linear,
+                    vec![start[0], start[1], end[0], end[1]],
+                    attributes,
+                    inner,
+                )
             })
         }
         "RadialGradientBrush" => {
@@ -957,10 +996,13 @@ fn brush(name: &str, attributes: &str, inner: &str) -> Option<Brush> {
                 .map(scalars)
                 .filter(|o| o.len() == 2)
                 .unwrap_or_else(|| centre.clone());
-            (centre.len() == 2).then(|| Brush::Gradient {
-                kind: Gradient::Radial,
-                geometry: vec![origin[0], origin[1], 0.0, centre[0], centre[1], radius],
-                stops: stops(inner),
+            (centre.len() == 2).then(|| {
+                gradient_brush(
+                    Gradient::Radial,
+                    vec![origin[0], origin[1], 0.0, centre[0], centre[1], radius],
+                    attributes,
+                    inner,
+                )
             })
         }
         "ImageBrush" => Some(Brush::Image {
@@ -1288,13 +1330,16 @@ fn path_mark(
             kind,
             geometry,
             stops,
+            alphas,
+            alpha,
         } => (
             Paint::Gradient {
                 kind,
                 geometry,
                 stops,
+                alphas,
             },
-            1.0,
+            alpha,
         ),
         Brush::Image {
             source,
@@ -1539,16 +1584,26 @@ fn array(cos: &CosDocument, dict: &Dict, name: &[u8]) -> Option<Vec<f64>> {
 /// states one more than it has bounds. Read from the dictionaries rather than
 /// through `parse_function`, which defaults a missing `/Domain`.
 fn function_stops(cos: &CosDocument, function: &Object) -> Vec<(f64, [f64; 3])> {
+    let values = function_values(cos, function);
+    if values.iter().any(|(_, value)| value.len() != 3) {
+        return Vec::new();
+    }
+    values
+        .into_iter()
+        .map(|(offset, value)| (offset, [value[0], value[1], value[2]]))
+        .collect()
+}
+
+/// [`function_stops`] for a function of any number of outputs — one, for the
+/// `/DeviceGray` ramp a soft mask's alphas are painted as.
+fn function_values(cos: &CosDocument, function: &Object) -> Vec<(f64, Vec<f64>)> {
     let Some(dict) = function.as_dict() else {
         return Vec::new();
     };
-    let colour_of = |name: &[u8]| -> Option<[f64; 3]> {
-        let values = array(cos, dict, name)?;
-        (values.len() == 3).then(|| [values[0], values[1], values[2]])
-    };
+    let colour_of = |name: &[u8]| -> Option<Vec<f64>> { array(cos, dict, name) };
     match key(cos, dict, b"FunctionType").as_int() {
         Some(2) => match (colour_of(b"C0"), colour_of(b"C1")) {
-            (Some(c0), Some(c1)) => vec![(0.0, c0), (1.0, c1)],
+            (Some(c0), Some(c1)) if c0.len() == c1.len() => vec![(0.0, c0), (1.0, c1)],
             _ => Vec::new(),
         },
         Some(3) => {
@@ -1557,13 +1612,13 @@ fn function_stops(cos: &CosDocument, function: &Object) -> Vec<(f64, [f64; 3])> 
             let Some(parts) = parts.as_array() else {
                 return Vec::new();
             };
-            let mut out: Vec<(f64, [f64; 3])> = Vec::new();
+            let mut out: Vec<(f64, Vec<f64>)> = Vec::new();
             for (index, part) in parts.iter().enumerate() {
                 let resolved = match part.as_objref() {
                     Some(reference) => cos.get(reference).unwrap_or(Arc::new(Object::Null)),
                     None => Arc::new(part.clone()),
                 };
-                let inner = function_stops(cos, &resolved);
+                let inner = function_values(cos, &resolved);
                 let (from, to) = (
                     if index == 0 {
                         0.0
@@ -1606,7 +1661,49 @@ fn shading_paint(cos: &CosDocument, shading: &Object) -> Option<Paint> {
         kind,
         geometry,
         stops,
+        alphas: None,
     })
+}
+
+/// The alphas a `/Luminosity` soft mask paints: the `(offset, grey)` ramp of
+/// the one shading its group form floods with `sh`.
+///
+/// Read out of the form's own stream, because that is where the writer puts
+/// the grey — the mask is a group whose content is the alphas.
+fn mask_alphas(cos: &CosDocument, resources: &Dict, state: &Dict) -> Option<Vec<(f64, f64)>> {
+    let mask = key(cos, state, b"SMask");
+    let mask = mask.as_dict()?;
+    let form = mask.get_ref(cos.intern(b"G"))?;
+    let content = cos.stream_decoded(form).ok()?;
+    let object = cos.get(form).ok()?;
+    let Object::Stream(stream) = object.as_ref() else {
+        return None;
+    };
+    let own = key(cos, &stream.dict, b"Resources");
+    let scope = own.as_dict().cloned().unwrap_or_else(|| resources.clone());
+    let mut tokens = Tokenizer::new(&content);
+    let mut last: Option<Vec<u8>> = None;
+    while let Some(token) = tokens.next_token() {
+        match token {
+            Token::Name(name) => last = Some(name),
+            Token::Operator(operator) if operator.as_slice() == b"sh" => {
+                let shading = entry(cos, &scope, b"Shading", last.as_deref()?)?;
+                let dict = shading.as_dict()?;
+                let values = function_values(cos, &key(cos, dict, b"Function"));
+                if values.iter().any(|(_, value)| value.len() != 1) {
+                    return None;
+                }
+                return Some(
+                    values
+                        .into_iter()
+                        .map(|(at, value)| (at, value[0]))
+                        .collect(),
+                );
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// A tiling or shading pattern, as the paint it stands for.
@@ -1673,6 +1770,9 @@ struct Frame {
     pattern: Option<Vec<u8>>,
     /// Table 106's text rendering mode, which is graphics state.
     render: i64,
+    /// The alphas the `/Luminosity` soft mask in force paints, if any — see
+    /// [`Paint::Gradient::alphas`].
+    soft: Option<Vec<(f64, f64)>>,
     /// `w`, in user space.
     width: f64,
 }
@@ -1738,6 +1838,7 @@ impl<'a> Walk<'a> {
                 pattern: None,
                 render: 0,
                 width: 1.0,
+                soft: None,
             },
             saved: Vec::new(),
             path: Rect::empty(),
@@ -1820,14 +1921,20 @@ impl Walk<'_> {
             }
             b"gs" => {
                 if let Some(Token::Name(name)) = operands.last() {
-                    if let Some(alpha) =
-                        entry(self.cos, resources, b"ExtGState", name).and_then(|state| {
-                            state
-                                .as_dict()
-                                .and_then(|dict| key(self.cos, dict, b"ca").as_number())
-                        })
-                    {
+                    let state = entry(self.cos, resources, b"ExtGState", name);
+                    if let Some(alpha) = state.as_ref().and_then(|state| {
+                        state
+                            .as_dict()
+                            .and_then(|dict| key(self.cos, dict, b"ca").as_number())
+                    }) {
                         self.frame.alpha = alpha;
+                    }
+                    if let Some(soft) = state
+                        .as_ref()
+                        .and_then(|state| state.as_dict())
+                        .and_then(|dict| mask_alphas(self.cos, resources, dict))
+                    {
+                        self.frame.soft = Some(soft);
                     }
                 }
             }
@@ -1883,7 +1990,7 @@ impl Walk<'_> {
                 if operator != b"n" {
                     if let Some(paint) = self.paint(resources) {
                         self.marks.push(Mark {
-                            paint,
+                            paint: self.faded(paint),
                             bounds: self.path,
                             alpha: self.frame.alpha,
                         });
@@ -1901,7 +2008,7 @@ impl Walk<'_> {
                         .and_then(|shading| shading_paint(self.cos, &shading))
                     {
                         self.marks.push(Mark {
-                            paint,
+                            paint: self.faded(paint),
                             // 8.7.4.2: `sh` paints the current clip, and the
                             // writer states one for exactly that reason.
                             bounds: self.clip.unwrap_or(self.path),
@@ -2110,6 +2217,24 @@ impl Walk<'_> {
             == Some(&b"Type0"[..])
     }
 
+    /// A gradient painted under a soft mask of alphas carries them.
+    fn faded(&self, paint: Paint) -> Paint {
+        match paint {
+            Paint::Gradient {
+                kind,
+                geometry,
+                stops,
+                ..
+            } => Paint::Gradient {
+                kind,
+                geometry,
+                stops,
+                alphas: self.frame.soft.clone(),
+            },
+            other => other,
+        }
+    }
+
     /// What the current colour operators say this fill is painted with.
     fn paint(&self, resources: &Dict) -> Option<Paint> {
         match &self.frame.pattern {
@@ -2170,8 +2295,12 @@ impl Walk<'_> {
                     .and_then(|reference| self.cos.stream_decoded(reference).ok())
                     .unwrap_or_default();
                 let mut inner = Walk::new(self.cos);
+                // 11.6.6: a transparency group starts with no soft mask of its
+                // own; the one in force applies to the group's result.
+                let group = !matches!(key(self.cos, dict, b"Group").as_ref(), Object::Null);
                 inner.frame = Frame {
                     ctm: base,
+                    soft: if group { None } else { self.frame.soft.clone() },
                     ..self.frame.clone()
                 };
                 inner.run(&content, &inherited, base, depth + 1);
@@ -2255,6 +2384,14 @@ pub enum Divergence {
         mark: usize,
         markup: Vec<(f64, [f64; 3])>,
         document: Vec<(f64, [f64; 3])>,
+    },
+    /// A gradient's stop alphas: stated and not masked, masked and not
+    /// stated, or a different ramp.
+    StopAlphas {
+        page: usize,
+        mark: usize,
+        markup: Option<Vec<(f64, f64)>>,
+        document: Option<Vec<(f64, f64)>>,
     },
     Pixels {
         page: usize,
@@ -2462,13 +2599,33 @@ fn compare_mark(
                 kind: wanted_kind,
                 geometry: wanted_geometry,
                 stops: wanted_stops,
+                alphas: wanted_alphas,
             },
             Paint::Gradient {
                 kind: got_kind,
                 geometry: got_geometry,
                 stops: got_stops,
+                alphas: got_alphas,
             },
         ) => {
+            let alphas_agree = match (wanted_alphas, got_alphas) {
+                (None, None) => true,
+                (Some(a), Some(b)) => {
+                    a.len() == b.len()
+                        && a.iter()
+                            .zip(b)
+                            .all(|(x, y)| near(x.0, y.0, COLOUR) && near(x.1, y.1, COLOUR))
+                }
+                _ => false,
+            };
+            if !alphas_agree {
+                out.push(Divergence::StopAlphas {
+                    page,
+                    mark,
+                    markup: wanted_alphas.clone(),
+                    document: got_alphas.clone(),
+                });
+            }
             if wanted_kind != got_kind {
                 out.push(Divergence::PaintKind {
                     page,

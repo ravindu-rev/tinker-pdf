@@ -126,6 +126,18 @@ pub enum Paint {
         shading: Shading,
         /// Shading space into the space the element draws in.
         matrix: [f64; 6],
+        /// The stops' **alphas**, where they differ, as a second shading over
+        /// the same geometry and the same `matrix`: one output, the alpha, in
+        /// `/DeviceGray`.
+        ///
+        /// 8.7.4.5's shading carries colour and no alpha, so a gradient whose
+        /// stops are not all equally opaque is two shadings — the colours, and
+        /// the alphas painted as a grey for 11.6.5.2's `/Luminosity` soft mask
+        /// to read back over the colours. 18.3.2 interpolates colour and alpha
+        /// separately, each between its enclosing stops, which is exactly what
+        /// a mask over a ramp composes to. `None` where every stop carries one
+        /// alpha, which [`Brush::alpha`] states instead.
+        alphas: Option<Box<Shading>>,
     },
     /// An `ImageBrush` (15.3), which becomes a PDF tiling pattern.
     ///
@@ -247,9 +259,10 @@ pub struct Brush {
     /// brush's `Opacity` multiplied together.
     pub alpha: f64,
     /// Whether something about the brush reached the page **approximately**:
-    /// gradient stops whose alphas differ from each other, which one constant
-    /// alpha cannot express, or a `ColorInterpolationMode` this build does not
-    /// interpolate in. Reported by name rather than left silent.
+    /// a `ContextColor` stop, or a `ColorInterpolationMode` this build does not
+    /// interpolate in. Reported by name rather than left silent. Stops whose
+    /// alphas differ are **not** among them since they became a soft mask —
+    /// see [`Paint::Gradient::alphas`].
     pub approximated: bool,
 }
 
@@ -612,7 +625,9 @@ pub fn mask_from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Mask, Brush
             }
             let brush = gradient(node, bbox, Channel::Alpha)?;
             match brush.paint {
-                Paint::Gradient { shading, matrix } => Ok(Mask::Luminosity {
+                Paint::Gradient {
+                    shading, matrix, ..
+                } => Ok(Mask::Luminosity {
                     shading,
                     matrix,
                     opacity,
@@ -860,14 +875,18 @@ fn stops_of(node: &Node) -> Result<Vec<Stop>, BrushError> {
 fn gradient(node: &Node, bbox: Option<[f64; 4]>, channel: Channel) -> Result<Brush, BrushError> {
     let stops = stops_of(node)?;
     let spread = spread_of(node)?;
-    let approximated = stops
-        .iter()
-        .any(|stop| stop.colour.alpha != stops[0].colour.alpha)
-        // A `ContextColor` stop, which cannot carry its own colour space into
-        // a shading — see `Stop::contextual`. Named rather than left silent,
-        // because the same colour on a solid fill *is* exact and a reader
-        // comparing the two is entitled to know which one lost something.
-        || stops.iter().any(|stop| stop.contextual)
+    // Stops whose alphas differ vary across the element, which one constant
+    // alpha cannot say: they become a second shading, of the alphas, which the
+    // painter reads back as a soft mask over the colours.
+    let varying = channel == Channel::Colour
+        && stops
+            .iter()
+            .any(|stop| stop.colour.alpha != stops[0].colour.alpha);
+    // A `ContextColor` stop, which cannot carry its own colour space into
+    // a shading — see `Stop::contextual`. Named rather than left silent,
+    // because the same colour on a solid fill *is* exact and a reader
+    // comparing the two is entitled to know which one lost something.
+    let approximated = stops.iter().any(|stop| stop.contextual)
         // 15.4's `ScRgbLinearInterpolation` interpolates in linear light and
         // this writer interpolates in the shading's own `/DeviceRGB`, which is
         // sRGB. The endpoints are right and the middle is not, so it is
@@ -875,7 +894,14 @@ fn gradient(node: &Node, bbox: Option<[f64; 4]>, channel: Channel) -> Result<Bru
         || node
             .attr("ColorInterpolationMode")
             .is_some_and(|mode| mode.trim() == "ScRgbLinearInterpolation");
-    let alpha = stops[0].colour.alpha * opacity_of(node)?;
+    // A varying alpha is the soft mask's to state, so the constant is the
+    // brush's own `Opacity` alone; a uniform one is that times the stops' one
+    // alpha.
+    let alpha = if varying {
+        opacity_of(node)?
+    } else {
+        stops[0].colour.alpha * opacity_of(node)?
+    };
 
     let relative = match node.attr("MappingMode") {
         None | Some("Absolute") => false,
@@ -898,9 +924,17 @@ fn gradient(node: &Node, bbox: Option<[f64; 4]>, channel: Channel) -> Result<Bru
         .map_err(|_| BrushError::Syntax)?
         .unwrap_or(markup::IDENTITY);
 
-    let (shading, inner) = match node.local.as_str() {
-        "LinearGradientBrush" => linear(node, &stops, spread, channel)?,
-        _ => radial(node, &stops, spread, channel)?,
+    let shade = |channel: Channel| match node.local.as_str() {
+        "LinearGradientBrush" => linear(node, &stops, spread, channel),
+        _ => radial(node, &stops, spread, channel),
+    };
+    let (shading, inner) = shade(channel)?;
+    // The same geometry and the same matrix, so the mask lies exactly over
+    // the colours it fades.
+    let alphas = if varying {
+        Some(Box::new(shade(Channel::Alpha)?.0))
+    } else {
+        None
     };
     let matrix = markup::concat(inner, markup::concat(unit, brush_transform));
     if !matrix.iter().all(|v| markup::usable(*v)) {
@@ -908,7 +942,11 @@ fn gradient(node: &Node, bbox: Option<[f64; 4]>, channel: Channel) -> Result<Bru
     }
 
     Ok(Brush {
-        paint: Paint::Gradient { shading, matrix },
+        paint: Paint::Gradient {
+            shading,
+            matrix,
+            alphas,
+        },
         alpha,
         approximated,
     })

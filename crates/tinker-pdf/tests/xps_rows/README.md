@@ -18,11 +18,20 @@ repository's.
 | File | Bytes | SHA-256 | Row |
 | --- | ---: | --- | --- |
 | `wpf-style-simulations.xps` | 78 764 | `3a31d48215aea021cb0a5853533656cf0f9821ddaa494bf84d279df6d310426a` | 12.1.5's `StyleSimulations` |
+| `wpf-stop-alphas.xps` | 78 925 | `c9ca7d2ddbe3c862c9046da29485ee06c11a34bb210b138d72d62a35b988263f` | 18.3.2's per-stop alpha |
 
 **`wpf-style-simulations.xps`** sets WPF's own run — `"Page one"`,
 `Indices=",53"`, in the package's font — four times at a 48-unit em, a hundred
 units apart: as designed, `BoldSimulation`, `ItalicSimulation` and
 `BoldItalicSimulation`.
+
+**`wpf-stop-alphas.xps`** fills three shapes from the page's resource
+dictionary: a linear gradient over `wpf-gradients.xps`'s three colours at
+alphas `FF`, `80` and `00`; a radial one fading from opaque to clear; and a
+linear one whose stops share the alpha `80`, which is a constant alpha and no
+ramp. The census reads the stops' alphas out of the markup and, out of the
+document, the `/DeviceGray` ramp of the `/Luminosity` soft mask in force when
+each gradient is painted.
 
 **How they were obtained**, on Linux x86_64 with CPython 3.11.15's `zipfile`,
 on 3 October 2026:

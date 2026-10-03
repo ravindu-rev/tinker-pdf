@@ -366,6 +366,7 @@ fn a_gradient_axis_the_wrong_way_round_is_reported() {
             kind: Gradient::Linear,
             geometry,
             stops: vec![(0.0, RED), (1.0, GREEN)],
+            alphas: None,
         },
         bounds: Rect::of(0.0, 0.0, 400.0, 200.0),
         alpha: 1.0,
@@ -395,6 +396,7 @@ fn a_radial_gradient_read_as_an_axial_one_is_a_paint_kind() {
                 kind: Gradient::Radial,
                 geometry: vec![120.0, 120.0, 0.0, 150.0, 150.0, 150.0],
                 stops: vec![(0.0, RED), (1.0, BLUE)],
+                alphas: None,
             },
             bounds: Rect::of(0.0, 0.0, 300.0, 300.0),
             alpha: 1.0,
@@ -406,6 +408,7 @@ fn a_radial_gradient_read_as_an_axial_one_is_a_paint_kind() {
         kind: Gradient::Linear,
         geometry: vec![120.0, 120.0, 0.0, 150.0, 150.0, 150.0],
         stops: vec![(0.0, RED), (1.0, BLUE)],
+        alphas: None,
     };
 
     let verdict = conserve(&markup, &document);
@@ -413,6 +416,41 @@ fn a_radial_gradient_read_as_an_axial_one_is_a_paint_kind() {
         verdict.divergences.first(),
         Some(Divergence::PaintKind { .. })
     ));
+}
+
+/// **Stop alphas the document dropped, and a ramp it ran the wrong way.**
+///
+/// A gradient whose stops' alphas differ is two ramps — colour and alpha —
+/// and a build that painted the colours at one constant alpha draws a
+/// plausible gradient that does not fade. So the alphas are a fact of their
+/// own beside the stops.
+#[test]
+fn stop_alphas_dropped_or_reversed_are_reported() {
+    let mark = |alphas: Option<Vec<(f64, f64)>>| Mark {
+        paint: Paint::Gradient {
+            kind: Gradient::Linear,
+            geometry: vec![0.0, 0.0, 400.0, 200.0],
+            stops: vec![(0.0, RED), (1.0, RED)],
+            alphas,
+        },
+        bounds: Rect::of(0.0, 0.0, 400.0, 200.0),
+        alpha: 1.0,
+    };
+    let stated = Some(vec![(0.0, 1.0), (1.0, 0.0)]);
+    let markup = one(vec![mark(stated.clone())], Vec::new());
+    for drawn in [None, Some(vec![(0.0, 0.0), (1.0, 1.0)])] {
+        let verdict = conserve(&markup, &one(vec![mark(drawn.clone())], Vec::new()));
+        assert_eq!(
+            verdict.divergences,
+            [Divergence::StopAlphas {
+                page: 0,
+                mark: 0,
+                markup: stated.clone(),
+                document: drawn,
+            }]
+        );
+    }
+    assert!(conserve(&markup, &markup).holds());
 }
 
 /// **A stop the document lost, and a radius taken from the wrong one.**
@@ -427,6 +465,7 @@ fn a_gradient_that_lost_a_stop_is_reported_with_both_stop_lists() {
                 kind: Gradient::Linear,
                 geometry: vec![0.0, 0.0, 400.0, 200.0],
                 stops: vec![(0.0, RED), (0.5, GREEN), (1.0, BLUE)],
+                alphas: None,
             },
             bounds: Rect::of(0.0, 0.0, 400.0, 200.0),
             alpha: 1.0,
@@ -1104,7 +1143,7 @@ fn the_document_census_reads_a_document_this_test_wrote() {
     assert!(
         matches!(
             &page.marks[1].paint,
-            Paint::Gradient { kind: Gradient::Linear, geometry, stops }
+            Paint::Gradient { kind: Gradient::Linear, geometry, stops, .. }
                 if *geometry == vec![10.0, 0.0, 50.0, 0.0] && stops.len() == 2
         ),
         "{:?}",
@@ -1240,6 +1279,7 @@ const DERIVED: &[&str] = &[
     // One per `XpsElementDefect` row closed since, each `wpf-image-and-text.xps`
     // with its page replaced (`tests/xps_rows/README.md`).
     "xps_rows/wpf-style-simulations.xps",
+    "xps_rows/wpf-stop-alphas.xps",
 ];
 
 /// **An interleaved package conserves, and states the census of the package

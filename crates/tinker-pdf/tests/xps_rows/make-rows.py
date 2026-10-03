@@ -51,6 +51,26 @@ def write(out, body, extra_parts=(), extra_types=""):
             package.writestr(entry, data)
 
 
+def linear(key, stops, extra=""):
+    return (
+        '<LinearGradientBrush x:Key="%s" StartPoint="0,0" EndPoint="400,0" '
+        'MappingMode="Absolute" SpreadMethod="Pad" %s>'
+        "<LinearGradientBrush.GradientStops>%s</LinearGradientBrush.GradientStops>"
+        "</LinearGradientBrush>" % (key, extra, stops)
+    )
+
+
+def stop(colour, offset):
+    return '<GradientStop Color="%s" Offset="%s" />' % (colour, offset)
+
+
+def path(key, y):
+    return (
+        '<Path Fill="{StaticResource %s}" RenderTransform="1,0,0,1,100,%d" '
+        'Data="M0,0L400,0 400,100 0,100Z" />' % (key, y)
+    )
+
+
 # 12.1.5's four values, one run each, a hundred units apart.
 write(
     "wpf-style-simulations.xps",
@@ -58,4 +78,26 @@ write(
     + glyphs(300, 'StyleSimulations="BoldSimulation" ')
     + glyphs(400, 'StyleSimulations="ItalicSimulation" ')
     + glyphs(500, 'StyleSimulations="BoldItalicSimulation" '),
+)
+
+# 18.3.2's alpha, interpolated between stops: three stops fading from opaque
+# through half to clear; a radial one fading outward; and one alpha shared by
+# every stop, which is a constant alpha and no ramp at all.
+RADIAL = (
+    '<RadialGradientBrush x:Key="r" MappingMode="Absolute" SpreadMethod="Pad" '
+    'Center="150,150" RadiusX="150" RadiusY="150" GradientOrigin="150,150">'
+    "<RadialGradientBrush.GradientStops>%s%s</RadialGradientBrush.GradientStops>"
+    "</RadialGradientBrush>" % (stop("#FF191970", "0"), stop("#00191970", "1"))
+)
+write(
+    "wpf-stop-alphas.xps",
+    "<FixedPage.Resources><ResourceDictionary>"
+    + linear("a", stop("#FFDC143C", "0") + stop("#80FFD700", "0.5") + stop("#002E8B57", "1"))
+    + RADIAL
+    + linear("u", stop("#80DC143C", "0") + stop("#802E8B57", "1"))
+    + "</ResourceDictionary></FixedPage.Resources>"
+    + path("a", 100)
+    + '<Path Fill="{StaticResource r}" RenderTransform="1,0,0,1,100,260" '
+    'Data="M0,0L300,0 300,300 0,300Z" />'
+    + path("u", 600),
 )

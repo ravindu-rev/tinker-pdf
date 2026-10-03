@@ -1376,6 +1376,31 @@ fn a_translucent_emboldened_run_is_composited_once() {
     );
 }
 
+/// A run filled by a gradient whose stops differ in alpha is drawn **through
+/// the mask of its alphas**, and an emboldened one is drawn inside that same
+/// group — one form, so the widening's overlap is composited once there too.
+#[test]
+fn a_run_whose_gradient_stops_differ_in_alpha_is_masked() {
+    let body = format!(
+        r##"<Glyphs OriginX="10" OriginY="100" FontRenderingEmSize="100" FontUri="{}" UnicodeString="A" StyleSimulations="BoldSimulation">
+              <Glyphs.Fill>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="100,0" MappingMode="Absolute">
+                  <LinearGradientBrush.GradientStops>
+                    <GradientStop Color="#FF000000" Offset="0" />
+                    <GradientStop Color="#00000000" Offset="1" />
+                  </LinearGradientBrush.GradientStops>
+                </LinearGradientBrush>
+              </Glyphs.Fill>
+            </Glyphs>"##,
+        font_uri("odttf")
+    );
+    let bytes = obfuscated(&body);
+    assert_eq!(defects(&bytes), []);
+    let page = stream(&open(&bytes).expect("an XPS"));
+    assert!(page.contains(" Do"), "{page}");
+    assert!(!page.contains("2 Tr"), "drawn inside the group: {page}");
+}
+
 /// **What the simulations look like**, in the real WPF font: the fixture in
 /// `tests/xps_rows` sets "Page one" four times at a 48-unit em — plain, bold,
 /// italic, both — a hundred units apart.

@@ -994,13 +994,22 @@ impl State<'_> {
                     out.extend_from_slice(data.fill_operator().as_bytes());
                     out.push(b'\n');
                 }
-                Paint::Gradient { shading, matrix } => {
+                Paint::Gradient {
+                    shading,
+                    matrix,
+                    alphas,
+                } => {
                     // 8.7.4.1: `sh` fills the **clip**, not a shape, and this
                     // writer emits no shading pattern — so the shape becomes
                     // the clip. The whole thing is bracketed so the clip does
                     // not outlive the fill and take the stroke with it.
-                    if self.shading(&shading, &mut out, &data, matrix) {
-                        // written
+                    let mut fill = Vec::new();
+                    self.shading(&shading, &mut fill, &data, matrix);
+                    match alphas {
+                        None => out.extend_from_slice(&fill),
+                        Some(alphas) => {
+                            self.through_alphas(&mut out, &fill, &alphas, matrix, bbox, budget)?;
+                        }
                     }
                 }
                 Paint::Image(tile) => {
@@ -1269,7 +1278,9 @@ impl State<'_> {
         let ink = match &fill.paint {
             Paint::Context(tint) => Ink::Context(tint.clone()),
             Paint::Solid(rgb) => Ink::Solid(*rgb),
-            Paint::Gradient { shading, matrix } => match self.gradient(shading, *matrix, ctm) {
+            Paint::Gradient {
+                shading, matrix, ..
+            } => match self.gradient(shading, *matrix, ctm) {
                 Some(name) => Ink::Pattern(name),
                 None => {
                     self.warn(XpsElementDefect::BrushUnreadable);
@@ -1375,17 +1386,30 @@ impl State<'_> {
             self.warn(XpsElementDefect::GlyphsFontUnreadable);
             return Ok(());
         }
-        if grouped {
-            // The group's box holds what the run can ink: an em above and below
-            // the baseline, past both ends by an em for the shear and the
-            // widening. Generous rather than tight, because a `/BBox` clips.
+        // The box that holds what the run can ink: two ems past the run's box
+        // every way, for descenders, the shear and the widening. Generous
+        // rather than tight, because a `/BBox` clips and so does a mask.
+        let ink_box = {
             let [x0, y0, x1, y1] = bbox;
             let reach = em * 2.0;
+            [x0 - reach, y0 - reach, x1 + reach, y1 + reach]
+        };
+        if let Paint::Gradient {
+            matrix,
+            alphas: Some(alphas),
+            ..
+        } = &fill.paint
+        {
+            // Stops whose alphas differ: the run is drawn through the soft
+            // mask of its alphas, which is a group of its own and so also
+            // composites an emboldened run's overlap once.
+            self.through_alphas(&mut out, &text, alphas, *matrix, Some(ink_box), budget)?;
+        } else if grouped {
             let name = self.painter.name("Fm");
             let registered = self.builder.add_form(
                 &name,
                 &FormXObject {
-                    bbox: [x0 - reach, y0 - reach, x1 + reach, y1 + reach],
+                    bbox: ink_box,
                     matrix: None,
                     group: Some(TransparencyGroup {
                         color_space: DeviceSpace::Rgb,
@@ -1809,6 +1833,9 @@ impl State<'_> {
             self.warn(XpsElementDefect::GeometryUnreadable);
             return Ok(());
         };
+        let whole = out;
+        let mut line = Vec::new();
+        let out = &mut line;
         markup::op(out, &[width], "w");
         if let Some(cap) = node.attr("StrokeStartLineCap").and_then(line_cap) {
             markup::op(out, &[f64::from(cap)], "J");
@@ -1816,13 +1843,16 @@ impl State<'_> {
         if let Some(join) = node.attr("StrokeLineJoin").and_then(line_join) {
             markup::op(out, &[f64::from(join)], "j");
         }
-        if let Some(limit) = node.attr("StrokeMiterLimit").and_then(markup::number) {
+        let limit = node.attr("StrokeMiterLimit").and_then(markup::number);
+        if let Some(limit) = limit {
             markup::op(out, &[limit], "M");
         }
         match &brush.paint {
             Paint::Context(tint) => self.context(out, tint, true),
             Paint::Solid(rgb) => markup::op(out, rgb, "RG"),
-            Paint::Gradient { shading, matrix } => match self.gradient(shading, *matrix, ctm) {
+            Paint::Gradient {
+                shading, matrix, ..
+            } => match self.gradient(shading, *matrix, ctm) {
                 Some(name) => stroke_with_pattern(out, &name),
                 None => {
                     // The writer refused the shading: a zero-length axis, a
@@ -1850,6 +1880,103 @@ impl State<'_> {
         }
         data.emit(out, false);
         out.extend_from_slice(b"S\n");
+        match &brush.paint {
+            Paint::Gradient {
+                matrix,
+                alphas: Some(alphas),
+                ..
+            } => {
+                // The stroke reaches past the shape by half its width, and a
+                // mitred corner by up to the miter limit times that (10.3.3's
+                // ratio), which is the box the mask must cover.
+                let reach = width * limit.unwrap_or(10.0).max(1.0) + 1.0;
+                let reached =
+                    bbox.map(|[x0, y0, x1, y1]| [x0 - reach, y0 - reach, x1 + reach, y1 + reach]);
+                self.through_alphas(whole, &line, alphas, *matrix, reached, budget)
+            }
+            _ => {
+                whole.extend_from_slice(&line);
+                Ok(())
+            }
+        }
+    }
+
+    /// Paints `content` through the soft mask a gradient's stop alphas make.
+    ///
+    /// The alphas are a `/DeviceGray` shading over the colours' own geometry
+    /// and `matrix`, painted into a `/Luminosity` mask over `bbox`; the
+    /// content is drawn inside a transparency group that sets that mask, and
+    /// the group is painted where `content` would have been. A group, and not
+    /// a `gs` in line, because 11.6.4.3 keeps **one** soft mask in the
+    /// graphics state: an element's own `OpacityMask` is already in force
+    /// there, and setting the alphas over it would replace it. Inside a
+    /// group the mask starts at `None` (11.6.6), and the group's result is
+    /// composited under whatever the element set — the product of the two.
+    ///
+    /// Where the mask cannot be placed — an element with no extent, a form
+    /// the writer refused — the content is drawn at the constant alpha and
+    /// the brush is named approximate, which is what this build did for
+    /// every such gradient before.
+    fn through_alphas(
+        &mut self,
+        out: &mut Vec<u8>,
+        content: &[u8],
+        alphas: &Shading,
+        matrix: [f64; 6],
+        bbox: Option<[f64; 4]>,
+        budget: &mut Budget,
+    ) -> Result<(), Trouble> {
+        let approximate = |state: &mut Self, out: &mut Vec<u8>| {
+            state.warn(XpsElementDefect::BrushApproximated);
+            out.extend_from_slice(content);
+        };
+        let Some(bbox) = bbox else {
+            approximate(self, out);
+            return Ok(());
+        };
+        let mask = Mask::Luminosity {
+            shading: alphas.clone(),
+            matrix,
+            opacity: 1.0,
+        };
+        let gs = match self.mask_form(&mask, bbox, budget) {
+            Ok((_, Some(gs))) => gs,
+            Ok((_, None)) => {
+                approximate(self, out);
+                return Ok(());
+            }
+            Err(Refused::Page(trouble)) => return Err(trouble),
+            Err(Refused::Brush(_)) => {
+                approximate(self, out);
+                return Ok(());
+            }
+        };
+        let mut group = Vec::with_capacity(content.len() + 32);
+        group.extend_from_slice(b"q /");
+        group.extend_from_slice(&gs);
+        group.extend_from_slice(b" gs\n");
+        group.extend_from_slice(content);
+        group.extend_from_slice(b"Q\n");
+        let name = self.painter.name("Fm");
+        if !self.builder.add_form(
+            &name,
+            &FormXObject {
+                bbox,
+                matrix: None,
+                group: Some(TransparencyGroup {
+                    color_space: DeviceSpace::Rgb,
+                    isolated: true,
+                    knockout: false,
+                }),
+                content: &group,
+            },
+        ) {
+            approximate(self, out);
+            return Ok(());
+        }
+        out.push(b'/');
+        out.extend_from_slice(&name);
+        out.extend_from_slice(b" Do\n");
         Ok(())
     }
 
