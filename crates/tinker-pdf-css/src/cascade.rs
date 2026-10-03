@@ -156,6 +156,8 @@ pub struct ComputedStyle {
     /// `quotes`, `css-content-3` §3.2. Read by [`crate::counter`], which
     /// resolves the quote keywords where it resolves `counter()`.
     pub quotes: Quotes,
+    /// `opacity`, `css-color-4` §15.1, clamped to `[0, 1]`.
+    pub opacity: f64,
     /// `visibility`
     pub visibility: Visibility,
     /// `text-decoration`
@@ -296,6 +298,7 @@ impl ComputedStyle {
             counter_increment: Vec::new(),
             counter_set: Vec::new(),
             quotes: Quotes::Auto,
+            opacity: 1.0,
             visibility: Visibility::Visible,
             text_decoration: TextDecoration::None,
             text_transform: TextTransform::None,
@@ -478,6 +481,9 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::CounterIncrement(value) => style.counter_increment = value.clone(),
         Property::CounterSet(value) => style.counter_set = value.clone(),
         Property::Quotes(value) => style.quotes = value.clone(),
+        // §15.1: *"any values outside the range 0.0 to 1.0 are clamped"*, at
+        // computed-value time — so `opacity: 2` is valid CSS and is one.
+        Property::Opacity(value) => style.opacity = value.clamp(0.0, 1.0),
         Property::Visibility(value) => style.visibility = *value,
         Property::Display(value) => style.display = *value,
         Property::Float(value) => style.float = *value,
@@ -954,6 +960,7 @@ pub fn cascade_from<E: Element>(
     // `css-lists-3` §4.5, over the finished styles. See [`crate::counter`]
     // for why it is a walk of its own.
     crate::counter::resolve(elements, &styles, &mut generated, &mut report, budget)?;
+    note_flattened_opacity(elements, &styles, &mut report);
 
     Ok(StyleTree {
         styles,
@@ -978,6 +985,60 @@ fn casing_needs_language(language: &str) -> bool {
     ["lt", "tr", "az"]
         .iter()
         .any(|named| primary.eq_ignore_ascii_case(named))
+}
+
+/// Counts every element whose `opacity` the painter applies **per fragment**
+/// where `css-color-4` §15.1 composites a **group**.
+///
+/// The two are the same picture wherever nothing inside the element paints
+/// over anything else inside it — a paragraph's glyphs at half alpha are a
+/// paragraph at half alpha — and different wherever something does: text over
+/// its own box's background, at half alpha each, shows the background through
+/// the text, where the group would not. The painter writes `/ca` per fragment
+/// because the alternative, a transparency-group form XObject, would carry the
+/// element's tagged text into a form the structure writer does not reach. So
+/// the elements where the two differ are counted against `opacity`, by
+/// element, and the rest are exact: an element with `opacity` below one whose
+/// subtree holds a box that paints a background or a border **and** has
+/// content inside it.
+fn note_flattened_opacity<E: Element>(
+    elements: &[E],
+    styles: &[ComputedStyle],
+    report: &mut Report,
+) {
+    let painted = |style: &ComputedStyle| {
+        style.display != Display::None
+            && (style.background_color.a != 0
+                || [Side::Top, Side::Right, Side::Bottom, Side::Left]
+                    .iter()
+                    .any(|side| {
+                        style.border_width.get(*side) > 0.0
+                            && !matches!(
+                                style.border_style.get(*side),
+                                BorderStyle::None | BorderStyle::Hidden
+                            )
+                    }))
+    };
+    // Reverse document order: every child has an index greater than its
+    // parent's, so a child's answer is final before its parent reads it.
+    let mut covered = vec![false; elements.len()];
+    for at in (0..elements.len()).rev() {
+        let Some(style) = styles.get(at) else {
+            continue;
+        };
+        let here = covered[at] || (painted(style) && !elements[at].is_empty());
+        covered[at] = here;
+        if let Some(parent) = elements[at].parent() {
+            if let Some(slot) = covered.get_mut(parent) {
+                *slot |= here;
+            }
+        }
+    }
+    for (at, style) in styles.iter().enumerate() {
+        if style.opacity < 1.0 && style.display != Display::None && covered[at] {
+            report.note_unsupported("opacity");
+        }
+    }
 }
 
 /// What the cascade decided for one property, before it is written down.
@@ -1806,6 +1867,7 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
         Longhand::CounterIncrement => into.counter_increment = from.counter_increment.clone(),
         Longhand::CounterSet => into.counter_set = from.counter_set.clone(),
         Longhand::Quotes => into.quotes = from.quotes.clone(),
+        Longhand::Opacity => into.opacity = from.opacity,
         Longhand::Visibility => into.visibility = from.visibility,
         Longhand::Display => into.display = from.display,
         Longhand::Float => into.float = from.float,

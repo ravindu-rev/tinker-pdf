@@ -750,6 +750,7 @@ fn emit(
                 border_width: block.border_width,
                 border_style: block.border_style,
                 border_color: block.border_color,
+                anchor: block.anchor,
             });
         }
         // The picture, once, on the page its box **begins** on. `from == head`
@@ -843,6 +844,7 @@ fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
                 border_width: block.border_width,
                 border_style: block.border_style,
                 border_color: block.border_color,
+                anchor: block.anchor,
             });
         }
         // A picture inside a band — a table cell, a flex item, a column — on

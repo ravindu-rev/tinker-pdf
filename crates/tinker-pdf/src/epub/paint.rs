@@ -62,7 +62,8 @@
 //! says, so it is not a bound in ruling 1's sense and does not join
 //! `bounds_ledger.rs`.
 
-use tinker_pdf_cos::build::{DocumentBuilder, Glyph, PageBuilder, Target};
+use tinker_pdf_cos::build::{DocumentBuilder, ExtGState, Glyph, PageBuilder, Target};
+use tinker_pdf_css::cascade::StyleTree;
 use tinker_pdf_css::property::{BorderStyle, Color, FontFamily, FontStyle, Side, TextDecoration};
 use tinker_pdf_font::base14::Standard14;
 use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, BaseEncoding};
@@ -872,6 +873,133 @@ pub fn request(run: &TextRun) -> FontRequest<'_> {
     }
 }
 
+/// What the painter applies to an **element** rather than to a box: its
+/// `opacity`, composed down the element tree.
+///
+/// # Per fragment, and where that is the group
+///
+/// `css-color-4` §15.1 composites an element and its descendants as one group
+/// and then applies the opacity once. This painter writes the opacity on each
+/// fragment the element's subtree draws — its background, its pictures, its
+/// glyphs — as an `/ExtGState` whose `/ca` and `/CA` are the product of every
+/// opacity on the way up, so a paragraph at 0.5 inside a section at 0.5 is at a
+/// quarter. Wherever nothing in the subtree paints over anything else in it, the
+/// two are the same picture; where something does — text over its own box's
+/// background — they are not, and the cascade counts that element against
+/// `opacity` (`tinker_pdf_css::cascade`) rather than letting it read as exact.
+/// The group would be a transparency-group form XObject, and the element's
+/// glyphs are tagged marked content that the structure writer puts in the page
+/// stream and not in a form.
+///
+/// Resources are registered **before the chapter's first page begins**, which
+/// is `begin_page`'s snapshot rule (see [`super::svg::Registry`]): one
+/// `/ExtGState` per distinct alpha the chapter needs, named for the alpha so
+/// that the same alpha on two chapters is one resource.
+#[derive(Clone, Debug, Default)]
+pub struct Effects {
+    /// Per element, the product of every `opacity` from the root down,
+    /// quantised to ten-thousandths, which is the resource's name and its
+    /// value: a `/ca` closer than that to another is not a different page.
+    alpha: Vec<u16>,
+}
+
+/// The quantum of [`Effects`]' alphas: ten thousand steps between clear and
+/// opaque.
+const ALPHA_STEPS: f64 = 10_000.0;
+
+impl Effects {
+    /// Every element's composed opacity, from the cascade's tree and the
+    /// document's.
+    #[must_use]
+    pub fn of(dom: &Dom, styles: &StyleTree) -> Effects {
+        let mut composed: Vec<f64> = Vec::with_capacity(dom.nodes.len());
+        for (at, node) in dom.nodes.iter().enumerate() {
+            let own = styles.styles.get(at).map_or(1.0, |style| style.opacity);
+            // `parent` is always less than the node's own index (the cascade
+            // refuses a tree where it is not), so the parent's product is
+            // already here.
+            let above = node
+                .parent
+                .and_then(|parent| composed.get(parent).copied())
+                .unwrap_or(1.0);
+            composed.push((above * own).clamp(0.0, 1.0));
+        }
+        Effects {
+            alpha: composed
+                .into_iter()
+                .map(|alpha| (alpha * ALPHA_STEPS).round() as u16)
+                .collect(),
+        }
+    }
+
+    /// The composed alpha of the element a fragment was anchored to, in
+    /// steps; opaque for a fragment nobody anchored.
+    fn steps(&self, anchor: Option<u32>) -> u16 {
+        anchor
+            .and_then(|at| self.alpha.get(at as usize).copied())
+            .unwrap_or(ALPHA_STEPS as u16)
+    }
+
+    /// Registers one `/ExtGState` per distinct alpha below one. Returns how
+    /// many **elements** were left opaque because the writer refused their
+    /// alpha — an archival profile that forbids transparency refuses every
+    /// one — so the caller can say so, by element, as it says every other
+    /// property it did not honour.
+    pub fn register(&self, builder: &mut DocumentBuilder) -> usize {
+        let mut wanted: Vec<u16> = self
+            .alpha
+            .iter()
+            .copied()
+            .filter(|steps| f64::from(*steps) < ALPHA_STEPS)
+            .collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        let mut refused = 0;
+        for steps in wanted {
+            let alpha = f64::from(steps) / ALPHA_STEPS;
+            let state = ExtGState {
+                fill_alpha: Some(alpha),
+                stroke_alpha: Some(alpha),
+                ..ExtGState::default()
+            };
+            if !builder.add_ext_gstate(&alpha_name(steps), &state) {
+                refused += self.alpha.iter().filter(|at| **at == steps).count();
+            }
+        }
+        refused
+    }
+
+    /// Opens what a fragment anchored here needs, returning whether anything
+    /// was opened and so has to be closed with [`Effects::close`].
+    fn open(&self, page: &mut PageBuilder, anchor: Option<u32>) -> bool {
+        let steps = self.steps(anchor);
+        if f64::from(steps) >= ALPHA_STEPS {
+            return false;
+        }
+        page.raw(b"q");
+        // False when the resource was refused at registration — an archival
+        // profile's — and then the fragment is drawn opaque rather than the
+        // page naming a resource it does not carry.
+        if page.set_ext_gstate(&alpha_name(steps)) {
+            return true;
+        }
+        page.raw(b"Q");
+        false
+    }
+
+    fn close(page: &mut PageBuilder, opened: bool) {
+        if opened {
+            page.raw(b"Q");
+        }
+    }
+}
+
+/// An alpha's resource name: `EA` and its ten-thousandths, so `EA5000` is
+/// half.
+fn alpha_name(steps: u16) -> Vec<u8> {
+    format!("EA{steps}").into_bytes()
+}
+
 /// Where a laid-out page's coordinates land on a PDF page.
 ///
 /// `tinker-pdf-layout` measures in CSS pixels with `y` growing **downward**
@@ -929,10 +1057,13 @@ pub fn draw_page(
     pictures: &[(u32, Vec<u8>)],
     dom: Option<&Dom>,
     chapter: u64,
+    effects: &Effects,
 ) -> usize {
     let mut refused = 0usize;
     for fragment in &laid.boxes {
+        let opened = effects.open(page, fragment.anchor);
         draw_box(page, fragment, frame);
+        Effects::close(page, opened);
     }
     // After the backgrounds and before the text, which is CSS 2.2 §E.2's
     // painting order for a replaced element's content: it goes in the same
@@ -947,7 +1078,9 @@ pub fn draw_page(
         let Some((_, name)) = pictures.iter().find(|(at, _)| *at == anchor) else {
             continue;
         };
+        let opened = effects.open(page, fragment.anchor);
         draw_replaced(page, fragment, frame, name);
+        Effects::close(page, opened);
     }
     // 14.7's structure tree, when the caller has the element tree the runs
     // came from. Every run carries the index of the element that wrote it, so
@@ -959,7 +1092,7 @@ pub fn draw_page(
             if !run.painted {
                 continue;
             }
-            refused += artifact_or_run(builder, page, run, frame, fonts);
+            refused += artifact_or_run(builder, page, run, frame, fonts, effects);
         }
         return refused;
     };
@@ -985,6 +1118,7 @@ pub fn draw_page(
         &chains,
         0,
         &mut refused,
+        effects,
     );
     refused
 }
@@ -996,6 +1130,7 @@ fn artifact_or_run(
     run: &TextRun,
     frame: &Frame,
     fonts: &Fonts<'_>,
+    effects: &Effects,
 ) -> usize {
     // 14.8.2.2: a list marker is *"a graphics object that is not part of
     // the author's original content"*, which is what 14.8.2 calls an
@@ -1007,7 +1142,11 @@ fn artifact_or_run(
     if run.generated {
         page.raw(b"/Artifact BMC");
     }
+    // Inside the marked-content sequence, so a `q`/`Q` pair never straddles
+    // a `BDC`/`EMC` one: the two nest.
+    let opened = effects.open(page, run.anchor);
     let refused = draw_run(builder, page, run, frame, fonts);
+    Effects::close(page, opened);
     if run.generated {
         page.raw(b"EMC");
     }
@@ -1069,13 +1208,14 @@ fn tag_runs(
     chains: &[Vec<usize>],
     level: usize,
     refused: &mut usize,
+    effects: &Effects,
 ) {
     let mut at = 0usize;
     while at < runs.len() {
         // A run whose chain has run out belongs to the element opened around
         // it, so it is drawn here rather than descended into.
         if chains[at].len() <= level {
-            *refused += artifact_or_run(builder, page, runs[at], frame, fonts);
+            *refused += artifact_or_run(builder, page, runs[at], frame, fonts, effects);
             at += 1;
             continue;
         }
@@ -1107,6 +1247,7 @@ fn tag_runs(
                 tails,
                 level + 1,
                 refused,
+                effects,
             );
         });
         at = end;

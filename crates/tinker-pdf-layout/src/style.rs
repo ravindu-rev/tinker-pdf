@@ -263,6 +263,11 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         // `css-content-3`'s `quotes`, the same walk's: the marks arrive as
         // `::before`/`::after` text.
         quotes: _,
+        // `css-color-4`'s `opacity` is paint and not layout: it moves no box
+        // and the painter reads it, per element, from the cascade's own tree
+        // (`tinker_pdf::epub::paint::Effects`), where an element's ancestors
+        // are — an inline box has no fragment of its own to carry it on.
+        opacity: _,
         visibility,
         text_decoration,
         text_transform,

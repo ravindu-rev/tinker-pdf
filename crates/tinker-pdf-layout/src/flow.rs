@@ -134,6 +134,8 @@ pub(crate) struct BlockRecord {
     /// *"does not affect the layout of any other box"*, and this field is that
     /// sentence: the flow keeps the box where it was and only the ink moves.
     pub dy: f64,
+    /// The node's [`crate::BoxNode::anchor`], for [`crate::BoxFragment::anchor`].
+    pub anchor: Option<u32>,
 }
 
 /// A replaced box's picture, as an inset from the box's own border-box corner.
@@ -1048,6 +1050,7 @@ impl<M: Metrics> Builder<'_, M> {
             // Filled in below, once `content_x` and the used height exist.
             replaced: None,
             dy: 0.0,
+            anchor: node.anchor,
         };
         let block = self.flow.blocks.len();
         self.flow.blocks.push(record);
@@ -2718,6 +2721,9 @@ impl<M: Metrics> Builder<'_, M> {
                     painted: true,
                     replaced: None,
                     dy: 0.0,
+                    // The rule belongs to the container: an `opacity` on it
+                    // fades its rules with its text.
+                    anchor: node.anchor,
                 });
             }
             for (at, &(from, to, top)) in chunk.iter().enumerate() {
@@ -3496,7 +3502,11 @@ impl<M: Metrics> Builder<'_, M> {
         self.inside_marker = Some(Piece {
             text,
             style: style.clone(),
-            anchor: None,
+            // The item's own, so that whatever the painter applies to the item
+            // — its `opacity` — reaches its marker. Generated text stays out of
+            // the structure tree and out of conservation by `generated`, not by
+            // having no anchor.
+            anchor: node.anchor,
             order,
             atomic: None,
             generated: true,
@@ -3572,7 +3582,8 @@ impl<M: Metrics> Builder<'_, M> {
                         letter_spacing: 0.0,
                         word_spacing: 0.0,
                         generated: true,
-                        anchor: None,
+                        // The item's, for the painter; see `arm_marker`.
+                        anchor: node.anchor,
                         order,
                     },
                 );
@@ -4485,6 +4496,7 @@ fn decorate(node: &BoxNode, x: f64, width: f64) -> BlockRecord {
         painted: painted && style.visible,
         replaced: None,
         dy: 0.0,
+        anchor: node.anchor,
     }
 }
 

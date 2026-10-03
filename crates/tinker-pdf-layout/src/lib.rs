@@ -489,6 +489,13 @@ pub struct BoxFragment {
     pub border_style: Sides<BorderStyle>,
     /// `border-*-color`.
     pub border_color: Sides<Color>,
+    /// The [`BoxNode::anchor`] of the box this decorates, carried unchanged.
+    ///
+    /// For the painter, which applies what belongs to an **element** rather
+    /// than to a box — `opacity` is the first — and needs to know whose
+    /// background this is to apply it to the right one. `None` for a box
+    /// nobody anchored: an anonymous one, or a column rule.
+    pub anchor: Option<u32>,
 }
 
 /// A replaced element's content box on one page.

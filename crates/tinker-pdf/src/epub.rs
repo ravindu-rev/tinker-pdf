@@ -1518,6 +1518,7 @@ fn write_chapters<R: read::Resources + ?Sized>(
 
     let mut pages: Vec<PageOrigin> = Vec::with_capacity(total_pages);
     let mut unwritable_runs = 0usize;
+    let mut refused_effects = 0usize;
     for (spine_at, chapter) in chapters.iter().enumerate() {
         if let Some(defect) = chapter.defect {
             let page = u32::try_from(chapter.first_page).unwrap_or(u32::MAX);
@@ -1587,6 +1588,16 @@ fn write_chapters<R: read::Resources + ?Sized>(
             });
             continue;
         }
+        // What the painter applies per element, and the resources it names,
+        // registered before the chapter's first page begins — `begin_page`
+        // snapshots the resource set, so an `/ExtGState` added after it is
+        // invisible to the page that names it.
+        let effects = chapter
+            .reading
+            .as_ref()
+            .map(|reading| paint::Effects::of(&reading.dom, &reading.styles))
+            .unwrap_or_default();
+        refused_effects += effects.register(builder);
         for (offset, laid) in chapter.pages.iter().enumerate() {
             let index = chapter.first_page + offset;
             let on_page = links.get(index).map_or(&[][..], Vec::as_slice);
@@ -1622,6 +1633,7 @@ fn write_chapters<R: read::Resources + ?Sized>(
                 // chapters would otherwise name the same element and sort into
                 // each other.
                 (spine_at as u64) << 32,
+                &effects,
             );
             if clip {
                 page.raw(b"Q");
@@ -1640,6 +1652,15 @@ fn write_chapters<R: read::Resources + ?Sized>(
     if unwritable_runs > 0 {
         warnings.push(ArchiveWarning::UnwritableTextRun {
             runs: unwritable_runs,
+        });
+    }
+    // An alpha the writer refused — a profile that forbids transparency — is an
+    // `opacity` this document does not honour, counted by element as the
+    // cascade counts every other one.
+    if refused_effects > 0 {
+        warnings.push(ArchiveWarning::UnimplementedProperty {
+            property: "opacity",
+            elements: refused_effects,
         });
     }
 

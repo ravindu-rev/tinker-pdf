@@ -1188,6 +1188,9 @@ pub enum Property {
     CounterSet(Vec<CounterChange>),
     /// `quotes`, `css-content-3` §3.2.
     Quotes(Quotes),
+    /// `opacity`, `css-color-4` §15.1, as written: a value outside `[0, 1]` is
+    /// valid and clamped at computed-value time, so the clamp is the cascade's.
+    Opacity(f64),
     /// `visibility`
     Visibility(Visibility),
     /// `display`
@@ -1323,6 +1326,7 @@ impl Property {
             Property::CounterIncrement(_) => "counter-increment",
             Property::CounterSet(_) => "counter-set",
             Property::Quotes(_) => "quotes",
+            Property::Opacity(_) => "opacity",
             Property::Visibility(_) => "visibility",
             Property::Display(_) => "display",
             Property::Float(_) => "float",
@@ -1461,6 +1465,11 @@ impl Property {
             | Property::CounterReset(_)
             | Property::CounterIncrement(_)
             | Property::CounterSet(_)
+            // `css-color-4` §15.1: *inherited: no*. A group's opacity is
+            // applied to the group once; inheriting it would apply it again at
+            // every level, and a paragraph at 0.5 inside a section at 0.5 would
+            // come out at a sixteenth rather than a quarter of its colour.
+            | Property::Opacity(_)
             | Property::Display(_)
             | Property::Float(_)
             | Property::Clear(_)
@@ -1694,7 +1703,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "justify-self",
     "list-style-image",
     "mix-blend-mode",
-    "opacity",
     "outline",
     "outline-color",
     "outline-offset",
@@ -2642,6 +2650,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "max-width",
     "min-height",
     "min-width",
+    "opacity",
     "order",
     "orphans",
     "overflow-wrap",
@@ -2970,6 +2979,16 @@ fn implemented(
             .map_or(Implemented::Malformed, |outcome| {
                 outcome.map(Property::CounterIncrement)
             }),
+        // `css-color-4` §15.1: `<alpha-value>`, a number or a percentage.
+        "opacity" => match (single, one) {
+            (true, Some(ComponentValue::Token(Token::Number { value, .. }))) => {
+                Implemented::Known(vec![Property::Opacity(*value)])
+            }
+            (true, Some(ComponentValue::Token(Token::Percentage(value)))) => {
+                Implemented::Known(vec![Property::Opacity(*value / 100.0)])
+            }
+            _ => Implemented::Malformed,
+        },
         // `css-content-3` §3.2: `auto | none | match-parent | [<string>
         // <string>]+`. `match-parent` is inside the grammar and refused by
         // value; an odd number of strings is outside it.
