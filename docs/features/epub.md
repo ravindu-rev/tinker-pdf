@@ -342,8 +342,11 @@ element that wrote it, so the tree is the XHTML tree and not a description of
 the page.
 
 XHTML names become ISO 32000 Table 333's standard types — `p` to `/P`, `h1` to
-`/H1`, `ul` to `/L`, `li` to `/LI`, `table`/`tr`/`th`/`td` to `/Table`/`/TR`/
-`/TH`/`/TD`, `section` and `article` to `/Sect`, `sub` and `sup` to `/Span`,
+`/H1`, `ul`, `ol` and `dl` to `/L`, `li`, `dt` and `dd` to `/LI`,
+`table`/`tr`/`th`/`td` to `/Table`/`/TR`/`/TH`/`/TD`, `section`, `article`,
+`aside` and the other sectioning elements to `/Sect`, `blockquote` to
+`/BlockQuote`, `caption` and `figcaption` to `/Caption`, `code` and `pre` to
+`/Code`, `sub` and `sup` to `/Span`,
 MathML's `math` to `/Formula`, anything else block-level to `/Div` and
 anything else to `/Span`. **The name is kept where the type would lose it**:
 an element whose standard type is not its own spelling is written as itself

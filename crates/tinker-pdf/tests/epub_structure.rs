@@ -1004,8 +1004,11 @@ fn every_table_attribute_is_carried_from_the_source() {
 /// Read off the source: every element with text of its own is found in the
 /// tree by that text, its `raw_type` is the source's element name (or that
 /// name's standard spelling, for `p`, `h1`, `table` and the rest that are
-/// their own standard type), and its `standard_type` is one of ISO
-/// 32000-1's. And the reader walked a role map with no loop in it.
+/// their own standard type), and its `standard_type` is the type
+/// [`what_it_is`] says that name is — not merely one of ISO 32000-1's, which
+/// a wrong role map passes (the review of the tagged-writing lane mapped
+/// `aside` to `/Span` and `li` to `/P` and this test stayed green). And the
+/// reader walked a role map with no loop in it.
 #[test]
 fn every_element_keeps_its_name_and_says_what_it_is() {
     let body = concat!(
@@ -1047,6 +1050,12 @@ fn every_element_keeps_its_name_and_says_what_it_is() {
             element.name,
             written.standard_type
         );
+        assert_eq!(
+            written.standard_type,
+            what_it_is(&element.name),
+            "<{}> reads as the wrong standard type",
+            element.name
+        );
         compared += 1;
     }
     assert_eq!(compared, 13, "every element with text was compared");
@@ -1061,6 +1070,27 @@ fn every_element_keeps_its_name_and_says_what_it_is() {
     assert_eq!(kind("em"), Some("Span".to_string()));
     assert_eq!(kind("strong"), Some("Span".to_string()));
     assert_eq!(kind("sub"), Some("Span".to_string()), "a subscript is text");
+}
+
+/// What each XHTML element of that fixture is among ISO 32000-1 14.8.4's
+/// standard types, stated here rather than read from the writer's table so
+/// that the two can disagree: `docs/features/epub.md` gives the mapping.
+fn what_it_is(name: &str) -> &'static str {
+    match name {
+        "h2" => "H2",
+        "p" => "P",
+        // Phrasing content: 14.8.4.4's generic inline element.
+        "em" | "strong" | "sub" | "abbr" => "Span",
+        // 14.8.4.4: computer program text.
+        "code" => "Code",
+        // A list's items, and a definition list's terms and descriptions.
+        "li" | "dt" | "dd" => "LI",
+        // Sectioning content.
+        "aside" | "section" => "Sect",
+        "blockquote" => "BlockQuote",
+        "figcaption" => "Caption",
+        other => panic!("the fixture has no <{other}> with text of its own"),
+    }
 }
 
 /// **A `headers` naming a cell that is never written names nothing**, and is
