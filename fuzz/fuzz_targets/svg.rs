@@ -160,7 +160,9 @@ fn count(nodes: &[Node]) -> usize {
     nodes
         .iter()
         .map(|node| match node {
-            Node::Group { nodes, .. } => 1 + count(nodes),
+            Node::Group { nodes, mask, .. } => {
+                1 + count(nodes) + mask.as_ref().map_or(0, |mask| count(&mask.nodes))
+            }
             _ => 1,
         })
         .sum()
@@ -231,10 +233,17 @@ fn sweep_nodes(nodes: &[Node], out: &mut Vec<f64>) {
                 nodes,
                 opacity,
                 clip,
+                mask,
             } => {
                 out.push(*opacity);
                 if let Some(clip) = clip {
                     sweep(&clip.outline, out);
+                }
+                // A mask's region reaches a `W` and its content a soft mask's
+                // form, so both are swept like the group's own.
+                if let Some(mask) = mask {
+                    sweep(&mask.region, out);
+                    sweep_nodes(&mask.nodes, out);
                 }
                 sweep_nodes(nodes, out);
             }

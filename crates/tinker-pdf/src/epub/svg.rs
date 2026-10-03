@@ -58,7 +58,7 @@ use std::collections::HashMap;
 
 use tinker_pdf_cos::build::{
     CalculatorOp, DeviceSpace, DocumentBuilder, ExtGState, FormXObject, Function, ImageData,
-    PageBuilder, Shading, ShadingPattern, TransparencyGroup,
+    MaskKind, PageBuilder, Shading, ShadingPattern, StateMask, TransparencyGroup,
 };
 use tinker_pdf_css::property::{Color, FontFamily, FontStyle, FontVariant, TextDecoration};
 use tinker_pdf_filters::Limits as FilterLimits;
@@ -166,6 +166,7 @@ pub fn register(
     let space = Space {
         base: placement.matrix(scene.size),
         extent: [0.0, 0.0, placement.page.0, placement.page.1],
+        grey: false,
     };
     let mut writer = Writer {
         builder,
@@ -238,10 +239,14 @@ pub fn draw(page: &mut PageBuilder, registry: &Registry) -> Drawn {
 /// **default** space, which is the page's for the page and for every group's
 /// form (see this module's header for why those are one space), and
 /// `extent` is that default space's visible box, which a form's `/BBox` is.
+///
+/// `grey` is set inside a §14.4 mask's content, where every flat colour and
+/// every stop is written as its own luminance — see [`luminance`].
 #[derive(Clone, Copy, Debug)]
 struct Space {
     base: [f64; 6],
     extent: [f64; 4],
+    grey: bool,
 }
 
 /// Where each text run of one content stream starts, consumed in paint order.
@@ -342,9 +347,15 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
                 if let Some(clip) = clip {
                     apply_clip(out, clip);
                 }
-                let filled = set_paint(out, fill, fill_pattern.as_deref(), false);
+                let filled = set_paint(out, fill, fill_pattern.as_deref(), false, space.grey);
                 let stroked = stroke.as_ref().is_some_and(|stroke| {
-                    let painted = set_paint(out, &stroke.paint, stroke_pattern.as_deref(), true);
+                    let painted = set_paint(
+                        out,
+                        &stroke.paint,
+                        stroke_pattern.as_deref(),
+                        true,
+                        space.grey,
+                    );
                     if painted {
                         set_stroke_state(out, stroke);
                     }
@@ -388,6 +399,7 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
                     node,
                     origin,
                     alpha.as_deref(),
+                    space.grey,
                     self.fonts,
                     self.metrics,
                 );
@@ -396,7 +408,16 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
                 nodes,
                 opacity,
                 clip,
-            } => self.group(out, nodes, *opacity, clip.as_ref(), space, cursor),
+                mask,
+            } => self.group(
+                out,
+                nodes,
+                *opacity,
+                clip.as_ref(),
+                mask.as_deref(),
+                space,
+                cursor,
+            ),
             // `Node` is `#[non_exhaustive]`: a variant added to the leaf crate
             // reaches here as ink nobody drew, so it is counted rather than
             // skipped.
@@ -404,23 +425,27 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
         }
     }
 
-    /// §14.5's group, and §14.3.5's clip of one.
+    /// §14.5's group, §14.3.5's clip of one, and §14.4's mask of one.
     ///
-    /// A group at full opacity is only a clip, which a `q`/`Q` pair around
-    /// its nodes says exactly. Below full opacity it is 11.6.6's transparency
-    /// group: the nodes are composited in a form of their own, and that form
-    /// is painted once under 11.6.4.4's constant alpha — which 11.6.6 applies
-    /// to the group's result as a whole, and which is §14.5 word for word.
+    /// A group at full opacity with no mask is only a clip, which a `q`/`Q`
+    /// pair around its nodes says exactly. Otherwise it is 11.6.6's
+    /// transparency group: the nodes are composited in a form of their own,
+    /// and that form is painted once under 11.6.4.4's constant alpha — which
+    /// 11.6.6 applies to the group's result as a whole, and which is §14.5
+    /// word for word — and under 11.6.5.2's `/Luminosity` soft mask, whose
+    /// group is the mask's content drawn in a form of its own.
+    #[allow(clippy::too_many_arguments)]
     fn group(
         &mut self,
         out: &mut Vec<u8>,
         nodes: &[Node],
         opacity: f64,
         clip: Option<&Clip>,
+        mask: Option<&tinker_pdf_svg::Mask>,
         space: Space,
         cursor: &mut Cursor,
     ) {
-        if opacity >= 1.0 {
+        if opacity >= 1.0 && mask.is_none() {
             out.extend_from_slice(b"q\n");
             if let Some(clip) = clip {
                 apply_clip(out, clip);
@@ -460,8 +485,11 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
                 content: &inner,
             },
         );
-        let alpha = self.alpha(opacity, opacity);
-        let (true, Some(alpha)) = (registered, alpha) else {
+        let state = match mask {
+            None => self.alpha(opacity, opacity),
+            Some(mask) => self.masking(mask, opacity, space),
+        };
+        let (true, Some(state)) = (registered, state) else {
             self.drawn.refused += 1;
             return;
         };
@@ -469,12 +497,87 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
         if let Some(clip) = clip {
             apply_clip(out, clip);
         }
-        gs(out, &alpha);
+        // The state is set **after** the page mapping is undone: 11.6.5.2
+        // places a soft mask's group in the coordinate system in force when
+        // the `gs` is executed, and the mask's form, like every form here,
+        // puts the mapping back as its first operator.
         out.extend_from_slice(b"q ");
         matrix(out, undo);
         out.extend_from_slice(b" cm ");
+        gs(out, &state);
         name(out, &form);
         out.extend_from_slice(b" Do Q\nQ\n");
+    }
+
+    /// §14.4's mask as 11.6.5.2's soft mask: its content in a transparency
+    /// group of its own, read for `/Luminosity`, clipped to the mask region —
+    /// outside which the group's backdrop, black, masks everything away.
+    ///
+    /// The content is written with every flat colour and every stop as its
+    /// own luminance ([`luminance`]), because 11.6.5.3 derives a luminosity
+    /// from an RGB group by its own weights and §14.4 by CSS Masking's; a
+    /// grey is the one colour on which the two agree.
+    fn masking(
+        &mut self,
+        mask: &tinker_pdf_svg::Mask,
+        opacity: f64,
+        space: Space,
+    ) -> Option<Vec<u8>> {
+        let inside = Space {
+            grey: true,
+            ..space
+        };
+        let mut cursor = Cursor {
+            origins: place_text(&mask.nodes, self.metrics),
+            next: 0,
+        };
+        let mut content = Vec::new();
+        content.extend_from_slice(b"q ");
+        matrix(&mut content, space.base);
+        content.extend_from_slice(b" cm\n");
+        apply_clip(
+            &mut content,
+            &Clip {
+                outline: mask.region.clone(),
+                rule: FillRule::NonZero,
+            },
+        );
+        self.nodes(&mut content, &mask.nodes, inside, &mut cursor);
+        content.extend_from_slice(b"Q\n");
+        let form = self.name("M");
+        let registered = self.builder.add_form(
+            &form,
+            &FormXObject {
+                bbox: space.extent,
+                matrix: None,
+                group: Some(TransparencyGroup {
+                    color_space: DeviceSpace::Rgb,
+                    isolated: true,
+                    knockout: false,
+                }),
+                content: &content,
+            },
+        );
+        if !registered {
+            return None;
+        }
+        let alpha = (opacity < 1.0).then_some(opacity);
+        let state = self.name("K");
+        self.builder
+            .add_ext_gstate(
+                &state,
+                &ExtGState {
+                    fill_alpha: alpha,
+                    stroke_alpha: alpha,
+                    soft_mask: Some(StateMask::Group {
+                        kind: MaskKind::Luminosity,
+                        form: &form,
+                        backdrop: None,
+                    }),
+                    ..ExtGState::default()
+                },
+            )
+            .then_some(state)
     }
 
     /// The `/ExtGState` for one pair of alphas, registered once per page.
@@ -512,6 +615,13 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
                 transform::concat(*matrix, space.base)
             }
             _ => space.base,
+        };
+        let toned;
+        let paint = if space.grey {
+            toned = grey_stops(paint);
+            &toned
+        } else {
+            paint
         };
         let shading = shading_of(paint, matrix, space.extent)?;
         let name = self.name("P");
@@ -650,12 +760,22 @@ fn apply_clip(out: &mut Vec<u8>, clip: &Clip) {
 ///
 /// A gradient's pattern name comes from [`Writer::pattern`] rather than being
 /// added here, which keeps this a function of what was already registered.
-fn set_paint(out: &mut Vec<u8>, paint: &Paint, pattern: Option<&[u8]>, stroking: bool) -> bool {
+fn set_paint(
+    out: &mut Vec<u8>,
+    paint: &Paint,
+    pattern: Option<&[u8]>,
+    stroking: bool,
+    grey: bool,
+) -> bool {
     match paint {
         Paint::None => false,
         Paint::Solid(colour) => {
             let c = |v: f64| number(v.clamp(0.0, 1.0));
-            let [r, g, b] = colour.rgb;
+            let [r, g, b] = if grey {
+                [luminance(colour.rgb); 3]
+            } else {
+                colour.rgb
+            };
             let op = if stroking { "RG" } else { "rg" };
             out.extend_from_slice(format!("{} {} {} {op}\n", c(r), c(g), c(b)).as_bytes());
             true
@@ -682,6 +802,28 @@ fn set_paint(out: &mut Vec<u8>, paint: &Paint, pattern: Option<&[u8]>, stroking:
         },
         _ => false,
     }
+}
+
+/// CSS Masking 1's luminance of a colour: `feColorMatrix`'s
+/// `luminanceToAlpha` weights, in `color-interpolation`'s initial sRGB.
+///
+/// SVG 1.1 §14.4 asked for linearRGB first; CSS Masking replaced that text and
+/// every reading system follows it. Written out as a grey so that 11.6.5.3's
+/// own luminosity of it — 0.30, 0.59 and 0.11 of an RGB group, which sum to
+/// one — is exactly this number.
+fn luminance(rgb: [f64; 3]) -> f64 {
+    (0.2125 * rgb[0] + 0.7154 * rgb[1] + 0.0721 * rgb[2]).clamp(0.0, 1.0)
+}
+
+/// A gradient whose every stop is its own [`luminance`], for a mask.
+fn grey_stops(paint: &Paint) -> Paint {
+    let mut out = paint.clone();
+    if let Paint::Linear { stops, .. } | Paint::Radial { stops, .. } = &mut out {
+        for stop in stops.iter_mut() {
+            stop.colour.rgb = [luminance(stop.colour.rgb); 3];
+        }
+    }
+    out
 }
 
 /// A gradient as 8.7.4.5's shading.
@@ -1242,12 +1384,14 @@ fn place_text(nodes: &[Node], metrics: &BookMetrics<'_>) -> Vec<Option<Origin>> 
 ///
 /// Returns how many pieces the writer refused, which the caller turns into
 /// [`crate::ArchiveWarning::UnwritableTextRun`] (ruling 10).
+#[allow(clippy::too_many_arguments)]
 fn draw_text(
     builder: &mut DocumentBuilder,
     out: &mut Vec<u8>,
     node: &Node,
     origin: Origin,
     alpha: Option<&[u8]>,
+    grey: bool,
     fonts: &Fonts<'_>,
     metrics: &BookMetrics<'_>,
 ) -> usize {
@@ -1288,7 +1432,7 @@ fn draw_text(
         gs(out, resource);
     }
     if let Paint::Solid(colour) = fill {
-        set_paint(out, &Paint::Solid(*colour), None, false);
+        set_paint(out, &Paint::Solid(*colour), None, false, grey);
     }
     matrix(out, local);
     out.extend_from_slice(b" cm\n");

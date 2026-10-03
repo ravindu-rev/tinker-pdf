@@ -40,6 +40,10 @@
 //! | a radial gradient's rings stop at the stated circle | 1 |
 //! | a `y`-only chunk resets the pen's `x` | 1 |
 //! | a glyph's rotation is applied after the move to its origin | 1 |
+//! | a mask's `gs` is set under the page mapping | 1 |
+//! | a mask's colours are not turned to their grey | 1 |
+//! | the mask region is not clipped | 1 |
+//! | a masked group is drawn unmasked | 4 |
 //! | the reader ignores a container's `clip-path`, as it did until groups | 1 |
 //!
 //! The form row fired **zero** the first time: its fixture's shapes covered
@@ -609,6 +613,100 @@ fn a_groups_clip_path_reaches_the_page() {
     );
 }
 
+// ---- §14.4's masks ------------------------------------------------------------
+
+/// **A mask reaches the page**: what is under its white is kept, what is under
+/// its black is gone.
+///
+/// A black square fills the page; its mask is white on the left half and
+/// nothing — black, the backdrop — on the right.
+#[test]
+fn a_mask_keeps_what_is_under_its_white() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="200" height="200">
+                <rect width="100" height="200" fill="#ffffff"/>
+              </mask>
+              <rect width="200" height="200" fill="#000000" mask="url(#m)"/>
+            </svg>"##,
+    );
+    assert!(rgb_at(&doc, 0.25, 0.5)[0] < 0x10, "kept under the white");
+    assert!(
+        rgb_at(&doc, 0.75, 0.5)[0] > 0xF0,
+        "and gone under the black"
+    );
+}
+
+/// The mask lands **where the drawing is**, the right way up.
+///
+/// Its white covers the drawing's top half. 11.6.5.2 places a soft mask's
+/// group in the space in force when the `gs` is set, so a state set under the
+/// page mapping — which the mask's form then applies again — composes the
+/// flip twice and turns the mask over: the bottom kept and the top gone. A
+/// mask symmetric about the page's middle cannot see that, and the first
+/// three tests here are.
+#[test]
+fn a_mask_is_placed_the_right_way_up() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="200" height="200">
+                <rect width="200" height="100" fill="#ffffff"/>
+              </mask>
+              <rect width="200" height="200" fill="#000000" mask="url(#m)"/>
+            </svg>"##,
+    );
+    assert!(rgb_at(&doc, 0.5, 0.25)[0] < 0x10, "the top half is kept");
+    assert!(
+        rgb_at(&doc, 0.5, 0.75)[0] > 0xF0,
+        "and the bottom half is gone"
+    );
+}
+
+/// The mask is a **luminance**, and CSS Masking's: a pure green mask keeps
+/// 0.7154 of what is under it.
+///
+/// A black square under it is `255 × (1 − 0.7154) = 72.6` over white. Read by
+/// 11.6.5.3's own RGB weights the green would be 0.59 and the square 104 —
+/// which is why the writer turns every colour in a mask into its grey first.
+#[test]
+fn a_masks_luminance_is_css_maskings() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="200" height="200">
+                <rect width="200" height="200" fill="#00ff00"/>
+              </mask>
+              <rect width="200" height="200" fill="#000000" mask="url(#m)"/>
+            </svg>"##,
+    );
+    let value = rgb_at(&doc, 0.5, 0.5)[0];
+    assert!(
+        (68..=78).contains(&value),
+        "a black square kept at 0.7154: {value}"
+    );
+}
+
+/// The mask **region** bounds it, and outside the region the mask is black.
+///
+/// The mask's white covers the whole page, but its region — in user space, x
+/// from 0 to 100 — is half of it: the square keeps its left half and loses its
+/// right however white the content is there.
+#[test]
+fn a_masks_region_bounds_it() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="200">
+                <rect width="200" height="200" fill="#ffffff"/>
+              </mask>
+              <rect width="200" height="200" fill="#000000" mask="url(#m)"/>
+            </svg>"##,
+    );
+    assert!(rgb_at(&doc, 0.25, 0.5)[0] < 0x10, "inside the region");
+    assert!(
+        rgb_at(&doc, 0.75, 0.5)[0] > 0xF0,
+        "and outside it, black, however white the content"
+    );
+}
+
 // ---- §11.6's markers ----------------------------------------------------------
 
 /// **A marker reaches the page**: an arrowhead drawn past the end of a line.
@@ -653,7 +751,7 @@ fn a_marker_is_drawn_at_the_end_of_its_line() {
 fn every_refusal_travels_out_named_with_its_item() {
     let doc = open(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
-             <filter id="f"/><mask id="m"/><pattern id="p"/>
+             <filter id="f"/><pattern id="p"/>
              <foreignObject width="1" height="1"/><animate/><script/>
              <rect width="10" height="10" fill="#000"/>
            </svg>"##,
@@ -670,7 +768,6 @@ fn every_refusal_travels_out_named_with_its_item() {
         .collect();
     for expected in [
         tinker_pdf_svg::Warning::FilterUnsupported,
-        tinker_pdf_svg::Warning::MaskUnsupported,
         tinker_pdf_svg::Warning::PatternUnsupported,
         tinker_pdf_svg::Warning::ForeignObjectUnsupported,
         tinker_pdf_svg::Warning::AnimationIgnored,

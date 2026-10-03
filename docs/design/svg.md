@@ -51,8 +51,8 @@ A picture that quietly drops one of these looks finished.
 - **Filters** (§15). `<filter>`, `filter=`, and the whole `fe*` family. A
   filter is a raster pipeline over a rendered subregion, and this crate
   produces geometry. `Warning::FilterUnsupported`.
-- **Masks** (§14.4). `<mask>`, `mask=`. A mask is a rendered alpha channel,
-  which is the same argument. `Warning::MaskUnsupported`.
+- ~~**Masks** (§14.4)~~ — **drawn since the milestones**; see *As built*. A
+  mask is a rendered alpha channel, and PDF has one: 11.6.5.2's soft mask.
 - **SMIL animation** (§19) and **scripting** (§18). A static rendering is the
   document's initial state, and saying so is the point.
   `Warning::AnimationIgnored`, `Warning::ScriptIgnored`.
@@ -297,6 +297,23 @@ continuing run's `dx` shifted that run alone, so the text after a nudged word
 slid back under it — the shift now accumulates until the next absolute `x`.
 What is still the caller's is the advance: a chunk's width for `text-anchor`
 does not include the `dx`s inside it.
+
+**After the milestones: §14.4's masks.** `Mask` is a node list and a region,
+and a masked element is a group carrying one. The facade writes the content as
+an 11.6.5.2 `/Luminosity` soft mask — a transparency group form clipped to
+the region, whose black backdrop masks everything outside it — under which
+the masked group's own form is painted. The `gs` is set after the page
+mapping is undone, because 11.6.5.2 places the mask's group in the space in
+force at the `gs`. One decision is the luminance: SVG 1.1 asked for linearRGB
+and CSS Masking 1, which every reading system follows, for the plain weighted
+sum in sRGB; 11.6.5.3 derives a luminosity from an RGB group by weights of its
+own, so every colour and stop in a mask's content is written as its CSS
+luminance, a grey, on which the two cannot differ. What is not converted is a
+picture inside a mask, which keeps 11.6.5.3's weights. Writing masks found a
+renderer defect a long way from SVG — a group under a soft mask was masked
+twice, through the form's `/BBox` clip and again at its composite
+(`soft_mask_clips.rs`) — and that an `<image>`'s `clip-path`, like a `<g>`'s
+before groups, was dropped without a word.
 
 **What this cannot reach**, stated rather than absorbed: nothing outside this
 repository adjudicates a rendering (ruling 13), so every expected value here is

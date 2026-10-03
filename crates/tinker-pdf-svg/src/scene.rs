@@ -189,10 +189,11 @@ impl Walk<'_> {
         &mut self,
         style: &Style,
         matrix: [f64; 6],
+        frame: &Frame,
         body: impl FnOnce(&mut Self) -> Result<(), Refusal>,
     ) -> Result<(), Refusal> {
         let opacity = style.opacity;
-        if opacity >= 1.0 && style.clip_path.is_none() {
+        if opacity >= 1.0 && style.clip_path.is_none() && style.mask.is_none() {
             return body(self);
         }
         let mut nodes = self.collect(body)?;
@@ -201,20 +202,30 @@ impl Walk<'_> {
         if nodes.is_empty() || opacity <= 0.0 {
             return Ok(());
         }
+        let bounds = transform::invert(matrix)
+            .map_or([0.0; 4], |inverse| gradient::nodes_bounds(&nodes, inverse));
         let clip = match &style.clip_path {
             None => None,
-            Some(name) => {
-                let bounds = transform::invert(matrix)
-                    .map_or([0.0; 4], |inverse| gradient::nodes_bounds(&nodes, inverse));
-                match gradient::clip(self.tree, name, matrix, bounds, style) {
-                    Some(clip) => Some(clip),
-                    None => {
-                        self.warn(Warning::ClipPathUnsupported);
-                        None
-                    }
+            Some(name) => match gradient::clip(self.tree, name, matrix, bounds, style) {
+                Some(clip) => Some(clip),
+                None => {
+                    self.warn(Warning::ClipPathUnsupported);
+                    None
                 }
-            }
+            },
         };
+        let mask = match &style.mask {
+            None => None,
+            Some(name) => self.mask_of(name, matrix, bounds, frame)?.map(Box::new),
+        };
+        if mask.is_some() {
+            return self.push(crate::Node::Group {
+                nodes,
+                opacity,
+                clip,
+                mask,
+            });
+        }
         if clip.is_none() {
             // Every node here was charged when it was pushed into the group's
             // own list, so moving them into the parent's spends nothing.
@@ -233,7 +244,112 @@ impl Walk<'_> {
             nodes,
             opacity,
             clip,
+            mask: None,
         })
+    }
+
+    /// §14.4's `<mask>`, read for one element: its region, and its content
+    /// walked into nodes of its own.
+    ///
+    /// `matrix` and `bounds` are the referencing element's, as for a clip:
+    /// `maskUnits` (initially `objectBoundingBox`, with the region
+    /// −10%/−10%/120%/120%) and `maskContentUnits` (initially
+    /// `userSpaceOnUse`) are each a fraction of that box or a length in that
+    /// space. `None` is a reference naming no `<mask>`, which ruling 2 draws
+    /// unmasked and names; a mask whose region has no area masks everything
+    /// away, which is §14.4's answer and an empty [`crate::Mask`] here.
+    fn mask_of(
+        &mut self,
+        name: &str,
+        matrix: [f64; 6],
+        bounds: [f64; 4],
+        frame: &Frame,
+    ) -> Result<Option<crate::Mask>, Refusal> {
+        let tree = self.tree;
+        let Some(at) = tree
+            .by_id(name)
+            .filter(|at| tree.nodes[*at].is_svg() && tree.nodes[*at].name == "mask")
+        else {
+            self.warn(Warning::MaskUnresolved);
+            return Ok(None);
+        };
+        // A mask whose content wears the same mask is the `<use>` bomb in a
+        // third spelling.
+        if self.expanding.contains(&at) {
+            return Err(Refusal::TooManyUses);
+        }
+        let element = &tree.nodes[at];
+        let nothing = crate::Mask {
+            nodes: Vec::new(),
+            region: Outline::default(),
+        };
+        let [min_x, min_y, max_x, max_y] = bounds;
+        let (width, height) = (max_x - min_x, max_y - min_y);
+        let has_area = width > 0.0 && height > 0.0;
+        let region = if matches!(
+            element.attr("maskUnits").map(str::trim),
+            Some("userSpaceOnUse")
+        ) {
+            let (vw, vh) = frame.viewport;
+            [
+                self.length_of(element, "x", Some(vw), -0.1 * vw),
+                self.length_of(element, "y", Some(vh), -0.1 * vh),
+                self.length_of(element, "width", Some(vw), 1.2 * vw),
+                self.length_of(element, "height", Some(vh), 1.2 * vh),
+            ]
+        } else {
+            if !has_area {
+                return Ok(Some(nothing));
+            }
+            let fraction = |walk: &mut Self, name: &str, default: f64| {
+                walk.length_of(element, name, Some(1.0), default)
+            };
+            let (x, y) = (fraction(self, "x", -0.1), fraction(self, "y", -0.1));
+            let (w, h) = (fraction(self, "width", 1.2), fraction(self, "height", 1.2));
+            [min_x + x * width, min_y + y * height, w * width, h * height]
+        };
+        let [x, y, w, h] = region;
+        if !(w > 0.0 && h > 0.0) {
+            return Ok(Some(nothing));
+        }
+        let content = if matches!(
+            element.attr("maskContentUnits").map(str::trim),
+            Some("objectBoundingBox")
+        ) {
+            if !has_area {
+                return Ok(Some(nothing));
+            }
+            transform::concat([width, 0.0, 0.0, height, min_x, min_y], matrix)
+        } else {
+            matrix
+        };
+        // §14.4: *"properties inherit into the 'mask' element from its
+        // ancestors; properties do not inherit from the element referencing
+        // the 'mask' element"* — the marker's rule, by the marker's code.
+        let style = self.style_of(at)?;
+        let inner = Frame {
+            matrix: content,
+            viewport: frame.viewport,
+            style,
+            depth: frame.depth + 1,
+        };
+        self.expanding.push(at);
+        let drawn = self.collect(|walk| walk.children(at, &inner));
+        self.expanding.pop();
+        let nodes = drawn?;
+        let rectangle = Outline {
+            segments: vec![
+                Segment::Move([x, y]),
+                Segment::Line([x + w, y]),
+                Segment::Line([x + w, y + h]),
+                Segment::Line([x, y + h]),
+                Segment::Close,
+            ],
+        };
+        Ok(Some(crate::Mask {
+            nodes,
+            region: rectangle.transformed(matrix),
+        }))
     }
 
     /// One node at an element's own `opacity`: pushed as it is, folded into
@@ -256,6 +372,7 @@ impl Walk<'_> {
             nodes,
             opacity,
             clip: None,
+            mask: None,
         })
     }
 
@@ -389,7 +506,7 @@ impl Walk<'_> {
                     matrix: self.matrix_of(node, frame.matrix),
                     ..frame.clone()
                 };
-                self.group(&frame.style, inner.matrix, |walk| {
+                self.group(&frame.style, inner.matrix, frame, |walk| {
                     walk.children(index, &inner)
                 })
             }
@@ -416,10 +533,9 @@ impl Walk<'_> {
                 self.warn(Warning::FilterUnsupported);
                 Ok(())
             }
-            "mask" => {
-                self.warn(Warning::MaskUnsupported);
-                Ok(())
-            }
+            // §14.4: a `<mask>` is reached by a `mask` reference and never
+            // rendered where it stands — `<clipPath>`'s rule.
+            "mask" => Ok(()),
             // §14.3: a `<clipPath>` is never rendered where it stands — it
             // is reached by a `clip-path` reference and nowhere else, so
             // walking into it here would draw every clip's own geometry as
@@ -538,6 +654,40 @@ impl Walk<'_> {
                 opacity: style.stroke_opacity.clamp(0.0, 1.0),
             }))
         };
+        // §14.4's mask on a shape is of its whole rendering — fill, stroke and
+        // markers — so it is a group around what follows, with the opacity
+        // and the clip left to the shape itself, which handles both already.
+        if style.mask.is_some() {
+            let masking = Style {
+                opacity: 1.0,
+                clip_path: None,
+                ..style.clone()
+            };
+            let unmasked = Style {
+                mask: None,
+                ..style.clone()
+            };
+            return self.group(&masking, matrix, frame, |walk| {
+                walk.paint_shape(node, &unmasked, matrix, outline, fill, stroke, clip, frame)
+            });
+        }
+        self.paint_shape(node, style, matrix, outline, fill, stroke, clip, frame)
+    }
+
+    /// A shape whose paint is resolved: its node, its markers, and its own
+    /// opacity over both.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_shape(
+        &mut self,
+        node: &Node,
+        style: &Style,
+        matrix: [f64; 6],
+        outline: Outline,
+        fill: Paint,
+        stroke: Option<Box<Stroke>>,
+        clip: Option<crate::Clip>,
+        frame: &Frame,
+    ) -> Result<(), Refusal> {
         let markers = self.markers(node, style, matrix, &outline, frame)?;
         let shape = crate::Node::Path {
             outline: outline.transformed(matrix),
@@ -570,6 +720,7 @@ impl Walk<'_> {
                     nodes: markers,
                     opacity: 1.0,
                     clip: Some(clip),
+                    mask: None,
                 });
             }
             None => nodes.extend(markers),
@@ -585,6 +736,7 @@ impl Walk<'_> {
             nodes,
             opacity: style.opacity,
             clip: None,
+            mask: None,
         })
     }
 
@@ -814,7 +966,7 @@ impl Walk<'_> {
         };
         self.expanding.push(marker.at);
         let drawn = self.collect(|walk| {
-            walk.group(&marker.style, content, |walk| {
+            walk.group(&marker.style, content, &inner, |walk| {
                 walk.children(marker.at, &inner)
             })
         });
@@ -844,6 +996,7 @@ impl Walk<'_> {
                 outline: rectangle.transformed(viewport),
                 rule: crate::FillRule::NonZero,
             }),
+            mask: None,
         })
     }
 
@@ -976,7 +1129,9 @@ impl Walk<'_> {
         // transform ends with.
         let style = frame.style.clone();
         self.expanding.push(target);
-        let drawn = self.group(&style, matrix, |walk| walk.instance(target, node, &inner));
+        let drawn = self.group(&style, matrix, frame, |walk| {
+            walk.instance(target, node, &inner)
+        });
         self.expanding.pop();
         drawn
     }
@@ -1035,7 +1190,9 @@ impl Walk<'_> {
             stack: vec![positions],
             ..Text::default()
         };
-        let drawn = self.group(&frame.style, matrix, |walk| walk.text_runs(index, &inner));
+        let drawn = self.group(&frame.style, matrix, frame, |walk| {
+            walk.text_runs(index, &inner)
+        });
         self.text.stack.clear();
         drawn
     }
@@ -1163,7 +1320,7 @@ impl Walk<'_> {
                     let style = child_frame.style.clone();
                     let positions = self.positions(&element, &child_frame);
                     self.text.stack.push(positions);
-                    let drawn = self.group(&style, child_frame.matrix, |walk| {
+                    let drawn = self.group(&style, child_frame.matrix, &child_frame, |walk| {
                         walk.text_runs(at, &child_frame)
                     });
                     self.text.stack.pop();
@@ -1308,17 +1465,18 @@ impl Walk<'_> {
         if !(width > 0.0 && height > 0.0) {
             return Ok(());
         }
-        // An image is painted once, but its node has no alpha of its own to
-        // fold an opacity into, so a translucent picture is a group of one.
-        self.emit(
-            crate::Node::Image {
-                href: href.to_owned(),
-                rect: [x, y, width, height],
-                matrix,
-                preserve: node.attr("preserveAspectRatio").map(str::to_owned),
-            },
-            frame.style.opacity,
-        )
+        // An image's node has no alpha and no clip of its own, so its
+        // `opacity`, its `clip-path` and its `mask` are all a group around it
+        // — the first folds nowhere, which makes a translucent picture a group
+        // of one. Until the group carried them the clip was dropped without a
+        // word, which is the defect `clip-path` on a `<g>` also was.
+        let picture = crate::Node::Image {
+            href: href.to_owned(),
+            rect: [x, y, width, height],
+            matrix,
+            preserve: node.attr("preserveAspectRatio").map(str::to_owned),
+        };
+        self.group(&frame.style, matrix, frame, |walk| walk.push(picture))
     }
 
     /// An `<svg>`, root or nested: §7.9's establishment of a new viewport.
@@ -1368,7 +1526,9 @@ impl Walk<'_> {
         // A nested `<svg>`'s own `opacity` and `clip-path` are of its whole
         // rendering, in the space its parent placed it in.
         let style = frame.style.clone();
-        self.group(&style, frame.matrix, |walk| walk.children(index, &inner))
+        self.group(&style, frame.matrix, frame, |walk| {
+            walk.children(index, &inner)
+        })
     }
 
     /// Every child element of `index`, in document order.
@@ -1529,8 +1689,15 @@ fn finite(node: &crate::Node) -> bool {
                 && stroke(line.as_deref())
         }
         crate::Node::Image { rect, matrix, .. } => numbers(rect) && numbers(matrix),
-        crate::Node::Group { opacity, clip, .. } => {
-            opacity.is_finite() && clip.as_ref().is_none_or(|clip| outline(&clip.outline))
+        crate::Node::Group {
+            opacity,
+            clip,
+            mask,
+            ..
+        } => {
+            opacity.is_finite()
+                && clip.as_ref().is_none_or(|clip| outline(&clip.outline))
+                && mask.as_ref().is_none_or(|mask| outline(&mask.region))
         }
     }
 }
@@ -1574,6 +1741,7 @@ fn fold(nodes: &mut [crate::Node], opacity: f64) -> bool {
         crate::Node::Group {
             opacity: inner,
             clip: None,
+            mask: None,
             ..
         } => {
             *inner = (*inner * opacity).clamp(0.0, 1.0);

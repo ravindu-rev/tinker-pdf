@@ -230,12 +230,12 @@ fn a_hidden_element_does_not_reach_the_scene() {
 #[test]
 fn display_none_is_read_from_the_style_attribute_too() {
     let markup = b"<svg xmlns=\"http://www.w3.org/2000/svg\">\
-        <g style=\"display:none\"><rect width=\"1\" height=\"1\"/><mask/></g>\
+        <g style=\"display:none\"><rect width=\"1\" height=\"1\"/><foreignObject/></g>\
         <rect width=\"1\" height=\"1\"/></svg>";
     let scene = scene(markup);
     assert_eq!(scene.nodes.len(), 1, "{:?}", scene.nodes);
     assert!(
-        !scene.warnings.contains(&Warning::MaskUnsupported),
+        !scene.warnings.contains(&Warning::ForeignObjectUnsupported),
         "and the subtree was not walked at all"
     );
 }
@@ -254,6 +254,7 @@ fn a_fill_and_a_stroke_under_one_opacity_are_a_group() {
         nodes,
         opacity,
         clip,
+        ..
     }) = scene
         .nodes
         .iter()

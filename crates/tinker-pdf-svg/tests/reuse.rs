@@ -327,6 +327,7 @@ fn a_uses_opacity_and_clip_are_a_group_around_the_instance() {
         nodes,
         opacity,
         clip: Some(clip),
+        ..
     }] = &scene.nodes[..]
     else {
         panic!("one group: {:?}", scene.nodes);

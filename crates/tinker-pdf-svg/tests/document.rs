@@ -344,7 +344,6 @@ fn every_named_non_goal_is_a_warning_that_says_which() {
     let scene = scene(NON_GOALS, Some((100.0, 100.0)));
     let expected = [
         Warning::FilterUnsupported,
-        Warning::MaskUnsupported,
         Warning::PatternUnsupported,
         Warning::ForeignObjectUnsupported,
         Warning::AnimationIgnored,
@@ -392,7 +391,7 @@ fn a_disabled_subtree_is_not_walked_at_all() {
         scene.warnings
     );
     assert!(
-        !scene.warnings.contains(&Warning::MaskUnsupported),
+        !scene.warnings.contains(&Warning::ForeignObjectUnsupported),
         "a degenerate viewBox kept the walk out: {:?}",
         scene.warnings
     );
@@ -454,27 +453,27 @@ fn warnings_are_deduplicated_and_capped() {
 /// `tests/shapes.rs` is where it is held.
 #[test]
 fn a_nested_viewport_with_no_area_draws_nothing() {
-    // The probe is a `<mask>` inside the innermost viewport: it is reached
+    // The probe is a `<foreignObject>` inside the innermost viewport: it is reached
     // only if the walk went in at all.
     let markup = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
       <svg width="10%" height="10%">
-        <svg width="5%" height="5%"><mask id="deep"/></svg>
+        <svg width="5%" height="5%"><foreignObject id="deep"/></svg>
       </svg>
     </svg>"#;
     let nested = scene(markup, Some((100.0, 100.0)));
     assert!(
-        nested.warnings.contains(&Warning::MaskUnsupported),
+        nested.warnings.contains(&Warning::ForeignObjectUnsupported),
         "every viewport on the way down has an area: {:?}",
         nested.warnings
     );
 
     let empty = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
-      <svg width="0%" height="10%"><mask id="deep"/></svg>
+      <svg width="0%" height="10%"><foreignObject id="deep"/></svg>
     </svg>"#;
     assert!(
         !scene(empty, Some((100.0, 100.0)))
             .warnings
-            .contains(&Warning::MaskUnsupported),
+            .contains(&Warning::ForeignObjectUnsupported),
         "a viewport of no width is not entered"
     );
 }

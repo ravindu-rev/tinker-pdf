@@ -470,6 +470,7 @@ fn clip_path_does_not_inherit() {
         nodes,
         clip,
         opacity,
+        ..
     } = &scene.nodes[5]
     else {
         panic!("a clipped group: {:?}", scene.nodes[5]);

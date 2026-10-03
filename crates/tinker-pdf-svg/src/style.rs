@@ -384,6 +384,9 @@ pub struct Style {
     pub stop_opacity: f64,
     /// §14.3's `clip-path`, as the bare fragment name it referenced.
     pub clip_path: Option<String>,
+    /// §14.4's `mask`, as the bare fragment name it referenced. Not
+    /// inherited, for `clip-path`'s reason.
+    pub mask: Option<String>,
     /// §11.6.2's `marker-start`, `marker-mid` and `marker-end`, in that order,
     /// as the bare fragment names they referenced.
     ///
@@ -437,6 +440,7 @@ impl Default for Style {
             },
             stop_opacity: 1.0,
             clip_path: None,
+            mask: None,
             markers: [None, None, None],
             // §10.10's initial `font-family` is the user agent's, and CSS 2.1
             // §15.7 makes the initial `font-size` `medium`. The first is the
@@ -454,7 +458,7 @@ impl Default for Style {
 
 /// The properties this build reads, so a presentation attribute that is not one
 /// is left alone rather than read as a property nobody consumes.
-pub const PROPERTIES: [&str; 27] = [
+pub const PROPERTIES: [&str; 28] = [
     "fill",
     "fill-rule",
     "fill-opacity",
@@ -482,6 +486,7 @@ pub const PROPERTIES: [&str; 27] = [
     "marker-start",
     "marker-mid",
     "marker-end",
+    "mask",
 ];
 
 /// What resolving one declaration did.
@@ -520,6 +525,7 @@ impl Style {
             stop_colour: initial.stop_colour,
             stop_opacity: initial.stop_opacity,
             clip_path: None,
+            mask: None,
             opacity: initial.opacity,
             ..self.clone()
         }
@@ -581,22 +587,28 @@ impl Style {
                 }
                 None => false,
             },
-            "clip-path" => match significant.first() {
-                Some(ComponentValue::Token(Token::Ident(word)))
-                    if significant.len() == 1 && word.eq_ignore_ascii_case("none") =>
-                {
-                    self.clip_path = None;
-                    true
-                }
-                Some(value) => match reference(value) {
-                    Some(name) => {
-                        self.clip_path = Some(name);
+            "clip-path" | "mask" => {
+                let read = match significant.first() {
+                    Some(ComponentValue::Token(Token::Ident(word)))
+                        if significant.len() == 1 && word.eq_ignore_ascii_case("none") =>
+                    {
+                        Some(None)
+                    }
+                    Some(value) => reference(value).map(Some),
+                    None => None,
+                };
+                match read {
+                    Some(value) => {
+                        if name == "mask" {
+                            self.mask = value;
+                        } else {
+                            self.clip_path = value;
+                        }
                         true
                     }
                     None => false,
-                },
-                None => false,
-            },
+                }
+            }
             // §11.6.2: `none` or a reference, and `marker` sets all three —
             // the shorthand is a property of its own in §11.6.2's table, so it
             // is read wherever the longhands are.

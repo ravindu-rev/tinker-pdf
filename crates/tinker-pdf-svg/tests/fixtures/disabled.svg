@@ -9,7 +9,7 @@
     <filter id="never-seen"/>
   </g>
   <svg width="50" height="50" viewBox="0 0 0 10">
-    <mask id="also-never-seen"/>
+    <foreignObject id="also-never-seen" width="1" height="1"/>
   </svg>
   <script>this one is seen</script>
 </svg>

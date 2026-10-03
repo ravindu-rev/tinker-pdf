@@ -26,7 +26,7 @@
 //!
 //! # What is refused, and why the list is short on purpose
 //!
-//! An SVG renderer is unbounded if you let it be. Filters, masks, SMIL
+//! An SVG renderer is unbounded if you let it be. Filters, SMIL
 //! animation, scripting and `<foreignObject>` are each a whole subsystem, and
 //! every one of them is refused **by name and counted** rather than skipped —
 //! so a caller learns that a picture was incomplete rather than being handed a
@@ -157,8 +157,13 @@ pub enum Warning {
     /// `<filter>` and every `filter=` that names one. A filter is a raster
     /// pipeline and this crate produces geometry.
     FilterUnsupported,
-    /// `<mask>` and `mask=`.
-    MaskUnsupported,
+    /// A `mask` naming no `<mask>`.
+    ///
+    /// §14.4's `<mask>` is **drawn** since it left the refusal list — its
+    /// content as a luminance mask over its region — so this is the reference
+    /// that went nowhere, and the element is drawn unmasked: ruling 2's
+    /// answer, and `clip-path`'s.
+    MaskUnresolved,
     /// A `clip-path` naming something this build cannot turn into an outline.
     ///
     /// **Not the element**: a `<clipPath>` full of shapes is drawn as a clip
@@ -356,6 +361,26 @@ pub struct Clip {
     pub rule: FillRule,
 }
 
+/// §14.4's mask: a second picture whose **luminance** is the first one's
+/// alpha.
+///
+/// Its nodes are drawn like any others — in the scene's space, with every
+/// transform composed — and then read for how light they are: white keeps
+/// the masked picture, black removes it, and a grey fades it. Outside
+/// `region`, the mask is black. The luminance is CSS Masking 1's, which every
+/// reading system computes and which `color-interpolation`'s initial `sRGB`
+/// makes the plain weighted sum of the colour's channels; SVG 1.1's own text
+/// asked for linearRGB first, and nothing that renders an SVG today does.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mask {
+    /// The mask's content, in paint order, in the scene's space.
+    pub nodes: Vec<Node>,
+    /// The mask region — `x`, `y`, `width` and `height` of the `<mask>` — as
+    /// an outline in the scene's space. Empty for a region with no area,
+    /// which masks everything away.
+    pub region: path::Outline,
+}
+
 /// SVG 1.1 §11.3's `fill-rule`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FillRule {
@@ -534,6 +559,8 @@ pub enum Node {
         opacity: f64,
         /// §14.3's clip of the element that made the group, or `None`.
         clip: Option<Clip>,
+        /// §14.4's mask of the element that made the group, or `None`.
+        mask: Option<Box<Mask>>,
     },
     /// An `<image>`, carried **unresolved**.
     ///
