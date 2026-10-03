@@ -3237,21 +3237,7 @@ fn reorder_line(line: &mut [TextRun]) -> bool {
     let mut run_levels: Vec<Level> = Vec::with_capacity(line.len());
     let mut at = 0usize;
     for run in line.iter() {
-        let mut strong: Option<Level> = None;
-        let mut any: Option<Level> = None;
-        for (offset, c) in run.text.chars().enumerate() {
-            let Some(level) = levels.get(at + offset).copied() else {
-                continue;
-            };
-            any = Some(any.map_or(level, |l| l.min(level)));
-            if matches!(
-                bidi_class(c),
-                BidiClass::L | BidiClass::R | BidiClass::AL | BidiClass::EN | BidiClass::AN
-            ) {
-                strong = Some(strong.map_or(level, |l| l.min(level)));
-            }
-        }
-        run_levels.push(strong.or(any).unwrap_or_else(|| paragraph.base_level()));
+        run_levels.push(level_of(&run.text, levels, at, paragraph.base_level()));
         at += run.text.chars().count();
     }
     let order = reorder(&run_levels);
@@ -3416,24 +3402,32 @@ fn piece_order(slice: &str, pieces: &[&str]) -> Vec<usize> {
     let mut piece_levels: Vec<Level> = Vec::with_capacity(pieces.len());
     let mut at = 0usize;
     for piece in pieces {
-        let mut strong: Option<Level> = None;
-        let mut any: Option<Level> = None;
-        for (offset, c) in piece.chars().enumerate() {
-            let Some(level) = levels.get(at + offset).copied() else {
-                continue;
-            };
-            any = Some(any.map_or(level, |l| l.min(level)));
-            if matches!(
-                bidi_class(c),
-                BidiClass::L | BidiClass::R | BidiClass::AL | BidiClass::EN | BidiClass::AN
-            ) {
-                strong = Some(strong.map_or(level, |l| l.min(level)));
-            }
-        }
-        piece_levels.push(strong.or(any).unwrap_or_else(|| paragraph.base_level()));
+        piece_levels.push(level_of(piece, levels, at, paragraph.base_level()));
         at += piece.chars().count();
     }
     reorder(&piece_levels)
+}
+
+/// The level a stretch of a line is reordered at as one unit: the lowest
+/// level of its strong characters, or of all of them for a stretch of
+/// neutrals, or `base` where `levels` has none. `from` is where `text` starts
+/// in `levels`, counted in characters.
+fn level_of(text: &str, levels: &[Level], from: usize, base: Level) -> Level {
+    let mut strong: Option<Level> = None;
+    let mut any: Option<Level> = None;
+    for (offset, c) in text.chars().enumerate() {
+        let Some(level) = levels.get(from + offset).copied() else {
+            continue;
+        };
+        any = Some(any.map_or(level, |l| l.min(level)));
+        if matches!(
+            bidi_class(c),
+            BidiClass::L | BidiClass::R | BidiClass::AL | BidiClass::EN | BidiClass::AN
+        ) {
+            strong = Some(strong.map_or(level, |l| l.min(level)));
+        }
+    }
+    strong.or(any).unwrap_or(base)
 }
 
 /// `slice`, cut after every space, with the space kept on the piece it ends.
