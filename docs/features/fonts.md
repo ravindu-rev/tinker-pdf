@@ -239,6 +239,26 @@ spellings are both refused — §4.1's table of 63 known tags, and §4.2's font
 collections. §5 says the result "may produce binary results that are different
 from the original data", so byte identity is not the property claimed for it.
 
+**Every transform the Recommendation defines is reversed.** Checked on 3
+October 2026 against the text of the Recommendation of 8 August 2024, the
+current one at the [W3C REC 2018] address. Clause 5 defines three
+transforms: `glyf` version 0 (§5.1, the `overlapSimpleBitmap` included),
+`loca` version 0 (§5.3) and `hmtx` version 1 (§5.4). §4.1 makes version 3 the
+null transform for `glyf` and `loca` and version 0 the null transform for
+everything else. That is the whole of `transform_kind`. Any other pair —
+`glyf` 1 or 2, `hmtx` 2 or 3, any version but 0 for any other table — is one
+§4.1 answers itself: "If a decoder encounters a table entry that specifies an
+unknown transformation version number the entire font MUST be rejected". So
+`WoffError::UnknownTransform` is that rejection and not a transform this
+build lacks. Reading the text again found one MUST the decoder did not keep:
+§5.3's "both glyf and loca tables must either be present in their transformed
+format or with null transform applied to both tables". A transformed `glyf`
+followed by a null-transformed `loca` was taken with that `loca`'s offsets,
+which index the `glyf` the encoder was handed and not the one §5.1
+rebuilds. A transformed `glyf` with no `loca` at all went out as a face with
+nothing to index its glyphs. Both are refused by name now
+(`a_transformed_glyf_needs_its_loca_transformed_with_it`).
+
 Both are bounded by a caller-supplied ceiling that is **not advisory**: a WOFF2
 directory states its lengths in `UIntBase128`, which reaches 2^32 − 1 in five
 bytes, so a forty-byte file can ask for four gigabytes. Metadata and private
@@ -796,8 +816,10 @@ could show was right.
 - `crates/tinker-pdf-font/src/woff/tests.rs` — 18 tests over the parts no
   committed file reaches: §3.1's three legal spellings of 506, `UIntBase128`'s
   two forbidden ones, the known-tag table, an unknown tag carried through, the
-  three tables whose legal transform versions differ, and the ceiling refused
-  before a byte is decompressed. 22 counted injections, and one deliberate
+  three tables whose legal transform versions differ, a transformed `glyf`
+  refused without its transformed `loca` (fontTools' file taken apart and
+  rebuilt three ways), and the ceiling refused before a byte is
+  decompressed. 22 counted injections, and one deliberate
   **non**-refusal — WOFF 2.0 §3.2 says a decoder "MUST NOT reject" a file for
   a non-zero reserved field or a `totalSfntSize` that disagrees, where WOFF 1.0
   §3 and §4 say it MUST reject both.

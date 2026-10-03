@@ -505,6 +505,182 @@ fn a_transformed_loca_with_a_length_is_refused() {
     assert!(matches!(decode(&file, ROOMY), Err(WoffError::Malformed(_))));
 }
 
+/// One table directory entry as the file wrote it: the flags byte, the
+/// explicit tag when there is one, `origLength`, and `transformLength` when
+/// the entry has one.
+struct Entry {
+    flags: u8,
+    tag: Option<u32>,
+    orig_length: u32,
+    transform_length: Option<u32>,
+}
+
+impl Entry {
+    fn tag(&self) -> u32 {
+        self.tag
+            .unwrap_or_else(|| u32::from_be_bytes(*KNOWN_TAGS[usize::from(self.flags & 0x3f)]))
+    }
+
+    fn span(&self) -> usize {
+        self.transform_length.unwrap_or(self.orig_length) as usize
+    }
+}
+
+/// §3.1's `UIntBase128`, written in its shortest spelling.
+fn base128(mut value: u32) -> Vec<u8> {
+    let mut groups = vec![(value & 0x7f) as u8];
+    value >>= 7;
+    while value > 0 {
+        groups.push((value & 0x7f) as u8 | 0x80);
+        value >>= 7;
+    }
+    groups.reverse();
+    groups
+}
+
+/// A WOFF2 taken apart: its flavor, its directory and its decompressed block.
+fn take_apart(file: &[u8]) -> (u32, Vec<Entry>, Vec<u8>) {
+    let flavor = be32(file, 4).expect("a flavor");
+    let count = be16(file, 12).expect("a table count");
+    let compressed = be32(file, 20).expect("a compressed size") as usize;
+    let mut r = Reader::new(&file[WOFF2_HEADER..]);
+    let mut entries = Vec::new();
+    for _ in 0..count {
+        let flags = r.u8().expect("flags");
+        let tag = (flags & 0x3f == 63).then(|| r.u32().expect("a tag"));
+        let mut entry = Entry {
+            flags,
+            tag,
+            orig_length: r.base128().expect("origLength"),
+            transform_length: None,
+        };
+        if transform_kind(entry.tag(), flags >> 6).expect("a known transform") {
+            entry.transform_length = Some(r.base128().expect("transformLength"));
+        }
+        entries.push(entry);
+    }
+    let at = WOFF2_HEADER + r.at;
+    let block = brotli_decode(&file[at..at + compressed], &Limits::new(1 << 20))
+        .expect("the fixture's block decompresses");
+    (flavor, entries, block)
+}
+
+/// A WOFF2 put back together from the parts [`take_apart`] gives.
+fn put_together(flavor: u32, entries: &[Entry], block: &[u8]) -> Vec<u8> {
+    let mut directory = Vec::new();
+    for entry in entries {
+        directory.push(entry.flags);
+        if let Some(tag) = entry.tag {
+            directory.extend_from_slice(&tag.to_be_bytes());
+        }
+        directory.extend(base128(entry.orig_length));
+        if let Some(length) = entry.transform_length {
+            directory.extend(base128(length));
+        }
+    }
+    let mut file = woff2(flavor, &directory, &brotli_uncompressed(block), block.len());
+    file[12..14].copy_from_slice(&(entries.len() as u16).to_be_bytes());
+    file
+}
+
+/// §5.3: "both glyf and loca tables must either be present in their
+/// transformed format or with null transform applied to both tables."
+///
+/// fontTools' `synthetic-2.woff2` transforms both. Rewritten with its `loca`
+/// as a **null** transform carrying the source face's own `loca` — the
+/// offsets of the `glyf` the encoder was handed, not of the one §5.1
+/// reconstructs, which need not be the same bytes — it is refused by name;
+/// and so is the same file with no `loca` at all. *Since October 2026*: both
+/// used to decode, the first with the source offsets laid over a rebuilt
+/// `glyf` and the second as a face with a `glyf` and nothing to index it.
+///
+/// Injected against the crate's tests:
+///
+/// | Injection | Caught by |
+/// | --- | --- |
+/// | a transformed `glyf` with no transformed `loca` is let through | 1 |
+/// | a second transformed `glyf` replaces the first's `loca` | 1 |
+/// | `glyf` version 3 is read as the transform | 1 |
+/// | `hmtx` version 1 is read as the null transform | 2 |
+#[test]
+fn a_transformed_glyf_needs_its_loca_transformed_with_it() {
+    let file = include_bytes!("../../tests/woff/synthetic-2.woff2");
+    let source = include_bytes!("../../tests/woff/synthetic-2.ttf");
+    let (flavor, entries, block) = take_apart(file);
+
+    // The control: put back together unchanged, it still decodes, so what the
+    // two cases below meet is their own change and not this harness.
+    let control = put_together(flavor, &entries, &block);
+    assert!(
+        decode(&control, ROOMY).is_ok(),
+        "the rebuilt fixture decodes"
+    );
+
+    let loca = entries
+        .iter()
+        .position(|e| e.tag() == TAG_LOCA)
+        .expect("a loca entry");
+    assert_eq!(entries[loca].flags >> 6, 0, "the fixture transforms loca");
+    assert_eq!(entries[loca].span(), 0, "and the placeholder spans nothing");
+
+    // A null-transformed loca: version 3, and the source face's bytes in the
+    // block where the placeholder was.
+    let original = Sfnt::parse(source)
+        .and_then(|sfnt| sfnt.table(TAG_LOCA).map(<[u8]>::to_vec))
+        .expect("the source face has a loca");
+    let at: usize = entries[..loca].iter().map(Entry::span).sum();
+    let mut nulled = Vec::with_capacity(block.len() + original.len());
+    nulled.extend_from_slice(&block[..at]);
+    nulled.extend_from_slice(&original);
+    nulled.extend_from_slice(&block[at..]);
+    let mut directory: Vec<Entry> = take_apart(file).1;
+    directory[loca].flags |= 3 << 6;
+    directory[loca].orig_length = original.len() as u32;
+    directory[loca].transform_length = None;
+    let mismatched = put_together(flavor, &directory, &nulled);
+    assert_eq!(
+        decode(&mismatched, ROOMY),
+        Err(WoffError::Malformed(UNPAIRED_GLYF))
+    );
+
+    // No loca at all: the placeholder spanned nothing, so the block is as it
+    // was.
+    let mut directory: Vec<Entry> = take_apart(file).1;
+    directory.remove(loca);
+    let missing = put_together(flavor, &directory, &block);
+    assert_eq!(
+        decode(&missing, ROOMY),
+        Err(WoffError::Malformed(UNPAIRED_GLYF))
+    );
+
+    // A second transformed glyf before the first one's loca — which is what a
+    // collection whose first font lost its loca looks like — is the first
+    // glyf with none, and not a glyf the second loca can serve as well.
+    let glyf = entries
+        .iter()
+        .position(|e| e.tag() == TAG_GLYF)
+        .expect("a glyf entry");
+    let start: usize = entries[..glyf].iter().map(Entry::span).sum();
+    let glyf_bytes = &block[start..start + entries[glyf].span()];
+    let mut doubled = Vec::with_capacity(block.len() + glyf_bytes.len());
+    doubled.extend_from_slice(&block[..start]);
+    doubled.extend_from_slice(glyf_bytes);
+    doubled.extend_from_slice(&block[start..]);
+    let mut directory: Vec<Entry> = take_apart(file).1;
+    let copy = Entry {
+        flags: directory[glyf].flags,
+        tag: directory[glyf].tag,
+        orig_length: directory[glyf].orig_length,
+        transform_length: directory[glyf].transform_length,
+    };
+    directory.insert(glyf, copy);
+    let twice = put_together(flavor, &directory, &doubled);
+    assert_eq!(
+        decode(&twice, ROOMY),
+        Err(WoffError::Malformed(UNPAIRED_GLYF))
+    );
+}
+
 /// A four-byte tag that is not in §4.1's table of 63, which is what index 63
 /// announces.
 #[test]
