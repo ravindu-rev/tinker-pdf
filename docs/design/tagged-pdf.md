@@ -263,6 +263,10 @@ writes, family by family:
   of its runs. `dc:language` is the catalog's `/Lang`, `xml:lang`/`lang` an
   element's, and the elements at a chapter's top carry the chapter's own
   language where it differs from the book's.
+- **The EPUB's links.** Each link annotation is added with `link_for` under
+  its `<a>`'s key, and an `<a>` is a `/Link` exactly when the chapter holds
+  at least one annotation for it — decided over the whole chapter, so both
+  halves of a link broken over a page are one type.
 
 ## Dependencies
 

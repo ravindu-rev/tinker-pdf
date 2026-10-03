@@ -1764,6 +1764,14 @@ fn epub_book() -> Vec<u8> {
 /// ones exactly. The book's chapters declare `lang="en"`, which is the book's
 /// own language, so no element carries a `/Lang` of its own, and the book's
 /// only picture is an SVG cover this build refuses, so no `/Figure` is drawn.
+///
+/// And a **fourth** time, the same way, when each `<a>` holding an annotation
+/// became a `/Link` element with an `/OBJR` to it and the annotation a
+/// `/StructParent`: `1517adfb…` became `e0f94b04…` and `36a2c5e1…` became
+/// `df84fe61…`. The book's eight annotations are unchanged — now counted as
+/// `/Subtype /Link`, since the bare name also counts the seven `/S /Link`
+/// elements that hold them and their marked content — and no raster hash
+/// moved.
 const GOLDEN: &[Fixture] = &[
     // The floors are about half of what each page paints today: 1486, 2363,
     // 9600, 3600 and 3230 pixels.
@@ -2659,11 +2667,21 @@ fn the_synthesised_book_is_the_same_bytes_on_every_target() {
 
     // The structure only a byte hash pins, named entry by entry so a failure
     // says which half moved.
+    //
+    // The annotations are counted by `/Subtype /Link` rather than `/Link`
+    // since the tagged-writing row: each `<a>` holding an annotation is now a
+    // `/Link` structure element (`/S /Link`) whose marked content is tagged
+    // `/Link` in the content stream, so the bare name counts three things.
     for (needle, count, what) in [
         (
-            &b"/Link"[..],
+            &b"/Subtype /Link"[..],
             8,
             "milestone 5's annotations, on no rendered page",
+        ),
+        (
+            b"/S /Link",
+            7,
+            "the `<a>` elements holding them, as /Link structure elements",
         ),
         (b"/Outlines", 2, "the navigation document, as an outline"),
         (
@@ -2686,7 +2704,7 @@ fn the_synthesised_book_is_the_same_bytes_on_every_target() {
     let hash = sha(&pdf);
     assert_eq!(
         hash,
-        "1517adfb0faaab6477418a4e0d9a510827188a95c9f47a34c3ee57e2f3a2f1c9",
+        "e0f94b0480426251b1f77dcb88b7291272ff48f9745941ebc3fd800cc3a38012",
         "the synthesised book is not the bytes it was; see this test's doc \
          comment for what that means and how to tell it apart from a rendering \
          change. The document is {} bytes.",
@@ -2772,12 +2790,12 @@ fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
     assert_eq!(sha(&other), sha(&other_again), "600 x 800 is not stable");
     assert_eq!(
         sha(&first),
-        "1517adfb0faaab6477418a4e0d9a510827188a95c9f47a34c3ee57e2f3a2f1c9",
+        "e0f94b0480426251b1f77dcb88b7291272ff48f9745941ebc3fd800cc3a38012",
         "the book at 432 x 648 is not the bytes it was"
     );
     assert_eq!(
         sha(&other),
-        "36a2c5e14c7f2b9236c22f8ff6b6b7b0b7dbe974c9e82479e34d8820f5a327d1",
+        "df84fe61f851aba97ed2fda7210d475a573066044504c6bf002c92a8f922d752",
         "the book at 600 x 800 is not the bytes it was"
     );
 
@@ -2807,7 +2825,7 @@ fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
         Some(OTHER_BOOK_BOX),
         "and so does the other"
     );
-    let links = |pdf: &[u8]| pdf.windows(5).filter(|w| *w == b"/Link").count();
+    let links = |pdf: &[u8]| pdf.windows(14).filter(|w| *w == b"/Subtype /Link").count();
     assert_eq!(
         (links(&first), links(&other)),
         (8, 7),

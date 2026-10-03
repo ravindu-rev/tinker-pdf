@@ -381,6 +381,15 @@ with the XML leaf's event reader:
   `ArchiveWarning::LanguageTagIgnored`. `every_language_declaration_is_a_lang`
   compares, text by text, the language the source gives each element with the
   one 14.9.2's hierarchy gives it in the tree.
+- **`<a href>` is a `/Link` holding its annotation** (14.8.4.4.2): the
+  anchor's text, an `/OBJR` to each link annotation drawn for it — one per
+  rectangle, so a link broken across a line holds two — and each
+  annotation's `/StructParent` naming the `/Link` back through the
+  `/ParentTree` (14.7.4.4). The annotations are written as they always were
+  and found by the anchor's key (`PageBuilder::link_for`). An `<a>` with no
+  `href`, or with one this build could not resolve, has no annotation and is
+  a `/Span`: a bare `/Link` would claim an association the file does not
+  contain. `every_a_href_is_a_link_holding_its_annotation`.
 
 **What is not done yet**, each named rather than absent:
 
@@ -388,7 +397,6 @@ with the XML leaf's event reader:
 | --- | --- |
 | A PDF/UA conformance claim | a structure tree is necessary for it and nowhere near sufficient |
 | A `/RoleMap` | not needed: every tag emitted is already a standard type. The cost is that the XHTML name is not recoverable — `<em>` and `<strong>` are both `/Span` |
-| `<a>` as a `/Link` | §14.8.4.4.2 wants an `/OBJR` for the annotation and this writer cannot emit one; a bare `/Link` would claim an association the file does not contain. It is a `/Span`, and the annotation itself is still written |
 | Table `/Headers`, `/Scope`, `/Summary` | a `<th>` is a `/TH` with no association to the cells it heads |
 
 ## Refused by name

@@ -30,7 +30,8 @@
 //! asserted the same way the order is: the chapter's XHTML is read again in
 //! the test, with the XML leaf's event reader and nothing of the EPUB path,
 //! and what it says is compared with what the tree carries —
-//! [`every_img_alt_is_a_figure_alt`], [`every_language_declaration_is_a_lang`].
+//! [`every_img_alt_is_a_figure_alt`], [`every_language_declaration_is_a_lang`],
+//! [`every_a_href_is_a_link_holding_its_annotation`].
 //!
 //! # What is not done yet, each named rather than absent
 //!
@@ -40,10 +41,6 @@
 //!   Table 333's standard types, so there is nothing non-standard to declare.
 //!   The cost is that the XHTML name is not recoverable — `<em>` and
 //!   `<strong>` are both `/Span`.
-//! - **`<a>` is a `/Span`, not a `/Link`.** §14.8.4.4.2 wants a `/Link`
-//!   element to contain an `/OBJR` for its annotation and this writer cannot
-//!   emit one; a bare `/Link` would claim an association that is not in the
-//!   file. The annotation itself is still written.
 //! - **No table `/Headers`, `/Scope` or `/Summary`**, so a `<th>` is a `/TH`
 //!   with no association to the cells it heads.
 //!
@@ -707,4 +704,171 @@ fn every_language_declaration_is_a_lang() {
             .collect();
         assert_eq!(ignored, [1], "{package}/{html}");
     }
+}
+
+/// A page's annotations, by reference, each with its `/StructParent`.
+fn struct_parents(doc: &Document, page: u32) -> Vec<(tinker_pdf::ObjRef, Option<i64>)> {
+    let cos = doc.cos();
+    let pages = tinker_pdf_cos::pages::collect(cos);
+    let Some(page) = pages.iter().find(|candidate| candidate.index == page) else {
+        return Vec::new();
+    };
+    let object = cos.get(page.reference).expect("the page object");
+    let dict = object.as_dict().expect("a dictionary");
+    let annots = cos.resolve_key(dict, cos.intern(b"Annots"));
+    annots
+        .as_array()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| {
+            let reference = entry.as_objref()?;
+            let annotation = cos.resolve(entry);
+            let key = annotation
+                .as_dict()
+                .and_then(|dict| cos.resolve_key(dict, cos.intern(b"StructParent")).as_int());
+            Some((reference, key))
+        })
+        .collect()
+}
+
+/// **Every `<a href>` that goes somewhere is a `/Link` holding its
+/// annotation** (14.8.4.4.2): the anchor's text, an `/OBJR` to each link
+/// annotation drawn for it, and each annotation's `/StructParent` naming the
+/// `/Link` back through the `/ParentTree` (14.7.4.4).
+///
+/// Read off the source independently: an `<a>` goes somewhere when its
+/// `href` is a URI or a fragment naming an `id` the document has. An `<a>`
+/// with no `href`, or with one naming a document the book does not hold, has
+/// no annotation and is not a `/Link` — a bare `/Link` would claim an
+/// association the file does not contain.
+#[test]
+fn every_a_href_is_a_link_holding_its_annotation() {
+    let body = concat!(
+        r##"<p>See <a href="#target">the target</a> and "##,
+        r##"<a href="https://example.org/a">the site</a>.</p>"##,
+        r##"<p>A <a id="anchor">bare anchor</a> and <a href="missing.xhtml">a broken one</a>.</p>"##,
+        r##"<p>Long <a href="https://example.org/b">a link whose words are many enough "##,
+        r##"to break across a line of this narrow page</a> ends.</p>"##,
+        r##"<p id="target">Target paragraph</p>"##,
+    );
+    let xhtml = chapter(r#"lang="en""#, body);
+    let bytes = book_of("en", &xhtml, &[]);
+    let doc = Document::open_with(bytes, &OpenOptions::at_page(220.0, 600.0)).expect("a book");
+    let tree = doc.structure().expect("a tree");
+    assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+
+    // The source, read on its own: which anchors go somewhere, and their text.
+    let source = source_elements(&xhtml);
+    let ids: Vec<&str> = source
+        .iter()
+        .filter_map(|element| element.attribute("id"))
+        .collect();
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    for element in source.iter().filter(|element| element.name == "a") {
+        let Some(href) = element.attribute("href") else {
+            continue;
+        };
+        let goes = href.starts_with("https://")
+            || href.strip_prefix('#').is_some_and(|id| ids.contains(&id));
+        if goes {
+            wanted.push((squeezed(&element.text), href.to_string()));
+        }
+    }
+    assert_eq!(wanted.len(), 3, "the fixture is what this test says it is");
+
+    // The tree: every `/Link`, its text, and what its annotations say.
+    let texts = tree_languages(&doc);
+    let annotations: Vec<(u32, tinker_pdf::ObjRef, Option<i64>)> = (0..doc.page_count())
+        .flat_map(|page| {
+            struct_parents(&doc, page)
+                .into_iter()
+                .map(move |(reference, key)| (page, reference, key))
+        })
+        .collect();
+    let targets: Vec<(tinker_pdf::ObjRef, String)> = (0..doc.page_count())
+        .flat_map(|page| doc.page(page).expect("a page").links())
+        .filter_map(|link| {
+            let reference = link.reference?;
+            let target = match link.target? {
+                tinker_pdf_cos::Action::Uri(uri) => String::from_utf8_lossy(&uri).into_owned(),
+                tinker_pdf_cos::Action::GoTo(_) => "#target".to_string(),
+                other => format!("{other:?}"),
+            };
+            Some((reference, target))
+        })
+        .collect();
+    let catalog = doc.cos().catalog().expect("a catalog");
+    let root = doc
+        .cos()
+        .resolve_key(&catalog, doc.cos().intern(b"StructTreeRoot"));
+    let parent_tree_ref = root
+        .as_dict()
+        .and_then(|root| root.get_ref(doc.cos().intern(b"ParentTree")))
+        .expect("a parent tree");
+    let parent_tree = tinker_pdf_cos::number_tree(doc.cos(), parent_tree_ref);
+
+    let mut found: Vec<(String, String)> = Vec::new();
+    for (text, _, element) in texts.iter().filter(|(_, _, e)| e.standard_type == "Link") {
+        let held: Vec<tinker_pdf::ObjRef> = element
+            .kids
+            .iter()
+            .filter_map(|kid| match kid {
+                StructKid::Object(reference) => Some(*reference),
+                _ => None,
+            })
+            .collect();
+        assert!(!held.is_empty(), "a /Link with no annotation: {text:?}");
+        let mut goes: Vec<&String> = Vec::new();
+        for reference in &held {
+            let (_, _, key) = annotations
+                .iter()
+                .find(|(_, annotation, _)| annotation == reference)
+                .expect("the /OBJR names an annotation the page carries");
+            let key = key.expect("the annotation has a /StructParent");
+            let (_, value) = parent_tree
+                .iter()
+                .find(|(k, _)| *k == key)
+                .expect("its key is in the /ParentTree");
+            assert_eq!(value.as_objref(), element.reference, "and names this /Link");
+            let (_, target) = targets
+                .iter()
+                .find(|(annotation, _)| annotation == reference)
+                .expect("a link annotation");
+            goes.push(target);
+        }
+        goes.dedup();
+        assert_eq!(goes.len(), 1, "one /Link, one destination: {goes:?}");
+        // The text a link's element draws on every page it spans.
+        let whole: String = texts
+            .iter()
+            .filter(|(_, _, e)| e.reference == element.reference)
+            .map(|(t, _, _)| t.clone())
+            .collect();
+        found.push((squeezed(&whole), goes[0].clone()));
+    }
+    assert_eq!(
+        found, wanted,
+        "every anchor that goes somewhere, in source order"
+    );
+
+    // The broken one and the bare one are spans, and their annotations — none
+    // for the bare one, none for the unresolved one — are nowhere.
+    let links_written: usize = (0..doc.page_count())
+        .map(|page| doc.page(page).expect("a page").links().len())
+        .sum();
+    let held: usize = texts
+        .iter()
+        .filter(|(_, _, e)| e.standard_type == "Link")
+        .map(|(_, _, e)| {
+            e.kids
+                .iter()
+                .filter(|k| matches!(k, StructKid::Object(_)))
+                .count()
+        })
+        .sum();
+    assert_eq!(held, links_written, "every link annotation is in the tree");
+    assert!(
+        links_written > 3,
+        "the long link was broken across lines: {links_written}"
+    );
 }

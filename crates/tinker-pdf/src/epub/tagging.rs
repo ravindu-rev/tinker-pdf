@@ -15,7 +15,7 @@
 //!
 //! Feature documentation: `docs/features/epub.md`, "Tagged output".
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tinker_pdf_cos::build::{DocumentBuilder, PageBuilder, Tag};
 use tinker_pdf_cos::is_language_tag;
@@ -38,6 +38,17 @@ pub(crate) struct Tagging<'a> {
     /// Each picture this content document draws, with the position it reads
     /// at. See [`figure_orders`].
     pub figures: &'a Figures,
+    /// Every `<a>` that holds a link annotation, by element. Each is a `/Link`
+    /// (14.8.4.4.2) whose `/OBJR`s `PageBuilder::link_for` attaches by key.
+    pub links: &'a BTreeSet<usize>,
+}
+
+/// Whether a link rectangle is one `PageBuilder::link_for` will write: finite,
+/// and enclosing an area. An `<a>` whose every rectangle is refused holds no
+/// annotation, and so is not a `/Link`.
+pub(crate) fn is_link_rect(rect: (f64, f64, f64, f64)) -> bool {
+    let (x0, y0, x1, y1) = rect;
+    [x0, y0, x1, y1].iter().all(|v| v.is_finite()) && x0 != x1 && y0 != y1
 }
 
 /// Where each picture of a content document reads, both ways round.
@@ -80,8 +91,9 @@ fn is_descendant(dom: &Dom, node: usize, ancestor: usize) -> bool {
 }
 
 impl Tagging<'_> {
-    /// The key of an element: what makes its halves on two pages one element.
-    fn key(&self, element: usize) -> u64 {
+    /// The key of an element: what makes its halves on two pages one element,
+    /// and what a link annotation names its `/Link` by.
+    pub(crate) fn key(&self, element: usize) -> u64 {
         self.chapter.saturating_add(element as u64)
     }
 
@@ -121,7 +133,15 @@ impl Tagging<'_> {
             .nodes
             .get(element)
             .map_or("", |node| node.name.as_str());
-        let mut tag = Tag::new(structure_type(name).as_bytes()).keyed(self.key(element), order);
+        // An `<a>` holding an annotation is a `/Link`; one holding none — no
+        // `href`, or one this build could not resolve — is what any other
+        // inline element is.
+        let kind = if self.links.contains(&element) {
+            "Link"
+        } else {
+            structure_type(name)
+        };
+        let mut tag = Tag::new(kind.as_bytes()).keyed(self.key(element), order);
         if let Some(language) = self.language(element, level) {
             tag = tag.lang(language);
         }
@@ -508,12 +528,12 @@ pub(crate) fn structure_type(name: &str) -> &'static str {
         "img" => "Figure",
         "figure" => "Div",
         "section" | "article" | "nav" | "aside" | "header" | "footer" | "main" => "Sect",
-        // **`<a>` is a `/Span` and not a `/Link`**, which is a refusal rather
-        // than an oversight. 14.8.4.4.2 requires a `/Link` element to contain
-        // an `/OBJR` referencing the link annotation it stands for, and this
-        // writer cannot emit one; a bare `/Link` would claim an association to
-        // assistive technology that is not in the file. The annotation itself
-        // is still written and still works.
+        // `<a>` is not here: one holding a link annotation is a `/Link`, and
+        // [`Tagging::tag`] decides that, because it depends on whether this
+        // build resolved its `href` and not on its name. One holding none is
+        // a `/Span` like any other inline element — a bare `/Link` would claim
+        // an association to assistive technology that is not in the file
+        // (14.8.4.4.2).
         //
         // §14.8.4.2's two inline defaults. Anything block-level this build
         // does not name is a `/Div` and anything else is a `/Span`, which is

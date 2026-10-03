@@ -1662,6 +1662,17 @@ fn write_chapters<R: read::Resources + ?Sized>(
             .as_ref()
             .map(|reading| tagging::figure_orders(&reading.dom, &chapter.pages))
             .unwrap_or_default();
+        // Every `<a>` of this chapter that will hold a link annotation, which
+        // is what makes it a `/Link` rather than a `/Span`: 14.8.4.4.2 gives a
+        // `/Link` an `/OBJR` to its annotation, and one with none would claim
+        // an association the file does not contain. Decided over the whole
+        // chapter so both halves of a link broken over a page are one type.
+        let linked: std::collections::BTreeSet<usize> = (0..chapter.pages.len())
+            .filter_map(|offset| links.get(chapter.first_page + offset))
+            .flatten()
+            .filter(|(rect, _, _)| tagging::is_link_rect(*rect))
+            .map(|(_, _, element)| *element)
+            .collect();
         let structure = chapter.reading.as_ref().map(|reading| tagging::Tagging {
             dom: &reading.dom,
             // **A base per content document.** Both an element index and a
@@ -1671,6 +1682,7 @@ fn write_chapters<R: read::Resources + ?Sized>(
             chapter: (spine_at as u64) << 32,
             document_language: language,
             figures: &figures,
+            links: &linked,
         });
         for (offset, laid) in chapter.pages.iter().enumerate() {
             let index = chapter.first_page + offset;
@@ -1707,8 +1719,20 @@ fn write_chapters<R: read::Resources + ?Sized>(
             if clip {
                 page.raw(b"Q");
             }
-            for (rect, target) in on_page {
-                page.link(rect.0, rect.1, rect.2, rect.3, target);
+            // Each annotation is the content item of its `<a>`'s `/Link`,
+            // found at `finish` by the element's key whichever page holds it.
+            for (rect, target, element) in on_page {
+                match &structure {
+                    Some(structure) => page.link_for(
+                        structure.key(*element),
+                        rect.0,
+                        rect.1,
+                        rect.2,
+                        rect.3,
+                        target,
+                    ),
+                    None => page.link(rect.0, rect.1, rect.2, rect.3, target),
+                };
             }
             builder.push_page(page);
             pages.push(PageOrigin {
@@ -2032,9 +2056,10 @@ fn read_background<R: read::Resources + ?Sized>(
     found
 }
 
-/// One page's link annotations: a rectangle in the page's own points, and
-/// where it goes.
-type PageLinks = Vec<((f64, f64, f64, f64), Target)>;
+/// One page's link annotations: a rectangle in the page's own points, where
+/// it goes, and the `<a>` element it is for — whose `/Link` structure element
+/// holds the annotation (14.8.4.4.2).
+type PageLinks = Vec<((f64, f64, f64, f64), Target, usize)>;
 
 /// Every `<a href>` in the book, as a rectangle on a page and a target.
 ///
@@ -2072,7 +2097,7 @@ fn cross_references(chapters: &[Chapter], limits: &Limits, total_pages: usize) -
                         continue;
                     }
                     if let Some(slot) = out.get_mut(at) {
-                        slot.push((run_rect(run, &chapter.frame), target.clone()));
+                        slot.push((run_rect(run, &chapter.frame), target.clone(), index));
                     }
                 }
             }
