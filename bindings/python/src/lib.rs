@@ -11,6 +11,7 @@ use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+mod docops;
 mod read;
 mod signatures;
 
@@ -247,6 +248,17 @@ impl PyDocument {
         self.inner
             .xmp_metadata()
             .map(|packet| PyBytes::new(py, &packet))
+    }
+
+    /// One of a page's boundaries (14.11.2) — "media", "crop", "bleed",
+    /// "trim" or "art" — as `(x0, y0, x1, y1)`, resolved the way the reader
+    /// resolves an absent one.
+    fn page_box(&self, index: u32, boundary: &str) -> PyResult<(f64, f64, f64, f64)> {
+        let boundary = docops::boundary(boundary)?;
+        self.inner
+            .page(index)
+            .map(|page| page.boundary(boundary))
+            .ok_or_else(|| PyIndexError::new_err("no such page"))
     }
 
     /// The document's digital signatures (12.8), read and checked against
@@ -664,6 +676,190 @@ impl PyEditor {
         // for the duration -- the same bargain `render` and `page_text` make.
         let bytes = py.detach(|| self.inner.save(&options));
         Ok(PyBytes::new(py, &bytes))
+    }
+
+    /// Sets the page labels (12.4.2), replacing any: a list of
+    /// `(first_page, style, prefix, start)` with `style` one of "decimal",
+    /// "roman-upper", "roman-lower", "letters-upper", "letters-lower" and
+    /// "none", and `prefix` `None` for no `/P`. Raises with the facade's own
+    /// reason, writing nothing, when the ranges are refused.
+    fn set_page_labels(&mut self, ranges: Vec<(u32, String, Option<String>, u32)>) -> PyResult<()> {
+        let ranges = docops::label_ranges(ranges)?;
+        self.inner
+            .set_page_labels(&ranges)
+            .map_err(|e| refused("set_page_labels", &e.to_string()))
+    }
+
+    /// Embeds a file (7.11.4) and returns its file specification's
+    /// `(object number, generation)`. Dates are `(year, month, day, hour,
+    /// minute, second, utc_offset_minutes)`, the offset `None` for an
+    /// unspecified zone.
+    #[pyo3(signature = (
+        name, filename, data, description = None, mime_type = None, created = None,
+        modified = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn attach_file(
+        &mut self,
+        name: String,
+        filename: String,
+        data: Vec<u8>,
+        description: Option<String>,
+        mime_type: Option<String>,
+        created: Option<docops::DateTuple>,
+        modified: Option<docops::DateTuple>,
+    ) -> PyResult<(u32, u16)> {
+        let file = tinker_pdf::EmbeddedFile {
+            name,
+            filename,
+            description,
+            mime_type,
+            created: created.map(docops::date),
+            modified: modified.map(docops::date),
+            data,
+        };
+        self.inner
+            .attach_file(&file)
+            .map(|r| (r.num, r.gen))
+            .map_err(|e| refused("attach_file", &e.to_string()))
+    }
+
+    /// Replaces the outline (12.3.3) with these entries.
+    fn set_outline(&mut self, entries: Vec<PyOutlineEntry>) -> PyResult<()> {
+        let entries = entries
+            .iter()
+            .map(PyOutlineEntry::to_facade)
+            .collect::<PyResult<Vec<_>>>()?;
+        if self.inner.set_outline(&entries) {
+            Ok(())
+        } else {
+            Err(refused(
+                "set_outline",
+                "the tree is deeper or wider than this engine's own reader walks",
+            ))
+        }
+    }
+
+    /// Sets `/Info /Title`; answers what it did to the XMP packet, "alone"
+    /// or "other-half-unchanged".
+    fn set_title(&mut self, value: &str) -> &'static str {
+        docops::sync(self.inner.set_title(value))
+    }
+
+    /// Sets `/Info /Author`.
+    fn set_author(&mut self, value: &str) -> &'static str {
+        docops::sync(self.inner.set_author(value))
+    }
+
+    /// Sets `/Info /Subject`.
+    fn set_subject(&mut self, value: &str) -> &'static str {
+        docops::sync(self.inner.set_subject(value))
+    }
+
+    /// Sets `/Info /Keywords`.
+    fn set_keywords(&mut self, value: &str) -> &'static str {
+        docops::sync(self.inner.set_keywords(value))
+    }
+
+    /// Sets `/Info /Creator`.
+    fn set_creator(&mut self, value: &str) -> &'static str {
+        docops::sync(self.inner.set_creator(value))
+    }
+
+    /// Sets `/Info /Producer`.
+    fn set_producer(&mut self, value: &str) -> &'static str {
+        docops::sync(self.inner.set_producer(value))
+    }
+
+    /// Sets `/Info /CreationDate`; raises when the date cannot be spelled.
+    fn set_creation_date(&mut self, date: docops::DateTuple) -> PyResult<&'static str> {
+        self.inner
+            .set_creation_date(docops::date(date))
+            .map(docops::sync)
+            .ok_or_else(|| refused("set_creation_date", &format!("{date:?}")))
+    }
+
+    /// Sets `/Info /ModDate`; raises when the date cannot be spelled.
+    fn set_modification_date(&mut self, date: docops::DateTuple) -> PyResult<&'static str> {
+        self.inner
+            .set_modification_date(docops::date(date))
+            .map(docops::sync)
+            .ok_or_else(|| refused("set_modification_date", &format!("{date:?}")))
+    }
+
+    /// Sets `/Info /Trapped`: "true", "false" or "unknown".
+    fn set_trapped(&mut self, value: &str) -> PyResult<&'static str> {
+        Ok(docops::sync(
+            self.inner.set_trapped(docops::trapped(value)?),
+        ))
+    }
+
+    /// Makes `packet` the XMP metadata (14.3.2), verbatim and uncompressed.
+    fn set_xmp_metadata(&mut self, packet: &[u8]) -> PyResult<&'static str> {
+        self.inner
+            .set_xmp_metadata(packet)
+            .map(docops::sync)
+            .ok_or_else(|| refused("set_xmp_metadata", "the document has no catalog"))
+    }
+
+    /// Sets one of a page's boundaries (14.11.2): "media", "crop", "bleed",
+    /// "trim" or "art".
+    #[allow(clippy::too_many_arguments)]
+    fn set_page_boundary(
+        &mut self,
+        index: u32,
+        boundary: &str,
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+    ) -> PyResult<()> {
+        let boundary = docops::boundary(boundary)?;
+        if self
+            .inner
+            .set_page_boundary(index, boundary, x0, y0, x1, y1)
+        {
+            Ok(())
+        } else {
+            Err(refused(
+                "set_page_boundary",
+                &format!("page {index}, [{x0} {y0} {x1} {y1}]"),
+            ))
+        }
+    }
+
+    /// Sets a page's `/BleedBox`.
+    fn set_bleed_box(&mut self, index: u32, x0: f64, y0: f64, x1: f64, y1: f64) -> PyResult<()> {
+        self.set_page_boundary(index, "bleed", x0, y0, x1, y1)
+    }
+
+    /// Sets a page's `/TrimBox`.
+    fn set_trim_box(&mut self, index: u32, x0: f64, y0: f64, x1: f64, y1: f64) -> PyResult<()> {
+        self.set_page_boundary(index, "trim", x0, y0, x1, y1)
+    }
+
+    /// Sets a page's `/ArtBox`.
+    fn set_art_box(&mut self, index: u32, x0: f64, y0: f64, x1: f64, y1: f64) -> PyResult<()> {
+        self.set_page_boundary(index, "art", x0, y0, x1, y1)
+    }
+
+    /// Takes out what the flags name and reports every change it made. With
+    /// no flag set it takes out nothing, which is `Sanitise::default()`;
+    /// all four is `Sanitise::ALL`.
+    #[pyo3(signature = (javascript = false, actions = false, embedded_files = false, metadata = false))]
+    fn sanitise(
+        &mut self,
+        javascript: bool,
+        actions: bool,
+        embedded_files: bool,
+        metadata: bool,
+    ) -> docops::PySanitiseReport {
+        docops::PySanitiseReport::new(self.inner.sanitise(&tinker_pdf::Sanitise {
+            javascript,
+            actions,
+            embedded_files,
+            metadata,
+        }))
     }
 
     fn __repr__(&self) -> String {
@@ -1148,6 +1344,7 @@ fn module_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyPageBuilder>()?;
     module.add_class::<PyOutlineEntry>()?;
     read::register(module)?;
+    module.add_class::<docops::PySanitiseReport>()?;
     signatures::register(module)?;
     Ok(())
 }

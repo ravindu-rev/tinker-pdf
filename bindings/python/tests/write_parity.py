@@ -128,6 +128,51 @@ def transaction_rolls_back_on_an_exception(fixture: bytes) -> None:
     print("PYTHON-PARITY: transaction rolls back on an exception and commits without one")
 
 
+CREATED = (2026, 10, 3, 12, 0, 0, 0)
+PACKET = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>"
+
+
+def document_ops(outline_fixture: bytes) -> bytes:
+    """The editor's document operations, one after another."""
+    editor = tinker_pdf.Document(outline_fixture).editor()
+    editor.set_page_labels([(0, "roman-lower", None, 1), (2, "decimal", "A-", 1)])
+    editor.attach_file(
+        "data.csv",
+        "data.csv",
+        b"a,b\n1,2\n",
+        description="the numbers",
+        mime_type="text/csv",
+        created=CREATED,
+    )
+    assert editor.set_title("Document operations") == "alone"
+    editor.set_author("tinker-pdf")
+    editor.set_creation_date(CREATED)
+    editor.set_trapped("false")
+    assert editor.set_xmp_metadata(PACKET) == "other-half-unchanged"
+    editor.set_trim_box(0, 10.0, 10.0, 585.0, 832.0)
+    editor.set_bleed_box(1, 0.0, 0.0, 595.0, 842.0)
+    editor.set_outline([tinker_pdf.OutlineEntry("Only entry", page=3, view="fith", top=700.0)])
+    return editor.save()
+
+
+def sanitise(operated: bytes):
+    """Everything Sanitise::ALL names, taken out, with the report as text."""
+    editor = tinker_pdf.Document(operated).editor()
+    report = editor.sanitise(javascript=True, actions=True, embedded_files=True, metadata=True)
+    lines = []
+    for holder, path, what, action in report.removed:
+        steps = "/".join(
+            f"i:{step}" if isinstance(step, int) else f"k:{step.hex()}" for step in path
+        )
+        lines.append(
+            f"removed {what} {'trailer' if holder is None else f'{holder[0]}.{holder[1]}'} "
+            f"{steps} {_bytes(action)}"
+        )
+    for (number, generation), what, action in report.deleted:
+        lines.append(f"deleted {what} {number}.{generation} {_bytes(action)}")
+    return editor.save(), "".join(line + "\n" for line in lines)
+
+
 def linked_document() -> bytes:
     """Read-surface's second document: links, an outline and /Info, built."""
     builder = tinker_pdf.DocumentBuilder()
@@ -236,6 +281,12 @@ def read_dump(name: str, document, out: list) -> None:
     out.append(f"trapped {metadata.trapped or 'absent'}")
     for index, label in enumerate(document.page_labels()):
         out.append(f"label {index} {_text(label)}")
+    for index in range(document.page_count):
+        for boundary in ("media", "crop", "bleed", "trim", "art"):
+            x0, y0, x1, y1 = document.page_box(index, boundary)
+            out.append(
+                f"box {index} {boundary} {_number(x0)} {_number(y0)} {_number(x1)} {_number(y1)}"
+            )
     for depth, item in _flatten(document.outline()):
         out.append(
             f"outline {depth} {int(item.open)} {_text(item.title)} {_destination(item.destination)}"
@@ -265,11 +316,12 @@ def read_dump(name: str, document, out: list) -> None:
         )
 
 
-def read_surface(outline_fixture: bytes) -> str:
-    """Script three: everything the read surface says about two documents."""
+def read_surface(outline_fixture: bytes, operated: bytes) -> str:
+    """Script three: everything the read surface says about three documents."""
     lines = []
     read_dump("shifted", tinker_pdf.Document(b"JUNK\n" + outline_fixture), lines)
     read_dump("linked", tinker_pdf.Document(linked_document()), lines)
+    read_dump("operated", tinker_pdf.Document(operated), lines)
     return "".join(line + "\n" for line in lines)
 
 
@@ -367,8 +419,19 @@ def main(fixture_path: str) -> None:
     outline = pathlib.Path(fixture_path).with_name("outline-3level.pdf").read_bytes()
     report("fill-and-save", fill_and_save(fixture))
     report("build-a-document", build_a_document())
+    operated = document_ops(outline)
+    report("document-ops", operated)
+    sanitised, removed = sanitise(operated)
+    report("sanitise", sanitised)
+    removed = removed.encode("utf-8")
+    if os.environ.get("TINKER_PARITY_DUMP"):
+        sys.stdout.write(removed.decode("utf-8"))
+    print(
+        f"READ sha256={hashlib.sha256(removed).hexdigest()} "
+        f"surface=python script=sanitise-report bytes={len(removed)}"
+    )
 
-    dumped = read_surface(outline).encode("utf-8")
+    dumped = read_surface(outline, operated).encode("utf-8")
     if os.environ.get("TINKER_PARITY_DUMP"):
         sys.stdout.write(dumped.decode("utf-8"))
     print(

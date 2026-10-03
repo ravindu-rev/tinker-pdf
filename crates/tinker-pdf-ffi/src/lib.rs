@@ -16,7 +16,9 @@
 
 #![warn(missing_docs)]
 
+mod docops;
 mod read;
+pub use docops::*;
 pub use read::*;
 
 use std::cell::RefCell;

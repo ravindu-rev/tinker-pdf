@@ -327,6 +327,22 @@ typedef enum TpdfTargetKind {
   TPDF_TARGET_KIND_URI = 1,
 } TpdfTargetKind;
 
+// How a page-label range writes its number (12.4.2, Table 159).
+typedef enum TpdfLabelStyle {
+  // `/D`: 1, 2, 3.
+  TPDF_LABEL_STYLE_DECIMAL = 0,
+  // `/R`: I, II, III.
+  TPDF_LABEL_STYLE_ROMAN_UPPER = 1,
+  // `/r`: i, ii, iii.
+  TPDF_LABEL_STYLE_ROMAN_LOWER = 2,
+  // `/A`: A, B, ... Z, AA.
+  TPDF_LABEL_STYLE_LETTERS_UPPER = 3,
+  // `/a`: a, b, ... z, aa.
+  TPDF_LABEL_STYLE_LETTERS_LOWER = 4,
+  // No number: every page of the range is labelled with the prefix alone.
+  TPDF_LABEL_STYLE_NONE = 5,
+} TpdfLabelStyle;
+
 // Which `/Info` entry to read (14.3.3, Table 349).
 //
 // `/Trapped` is not here because it is a name rather than a text string; it
@@ -350,6 +366,15 @@ typedef enum TpdfInfoKey {
   TPDF_INFO_KEY_MODIFICATION_DATE = 7,
 } TpdfInfoKey;
 
+// What a metadata write did to the other statement of the same metadata.
+typedef enum TpdfMetadataSync {
+  // The other half does not exist, so nothing can disagree.
+  TPDF_METADATA_SYNC_ALONE = 0,
+  // The other half exists and was **not** changed; it may still state the
+  // old value.
+  TPDF_METADATA_SYNC_OTHER_HALF_UNCHANGED = 1,
+} TpdfMetadataSync;
+
 // `/Trapped` (Table 349), with its absence spelled out.
 //
 // The facade's `Option<Trapped>` carries two facts that a three-arm enum
@@ -365,6 +390,51 @@ typedef enum TpdfTrapped {
   // `/Unknown`, or a name that is not one of the three.
   TPDF_TRAPPED_UNKNOWN = 3,
 } TpdfTrapped;
+
+// One of a page's five boundaries (14.11.2).
+typedef enum TpdfPageBoundary {
+  // `/MediaBox`.
+  TPDF_PAGE_BOUNDARY_MEDIA_BOX = 0,
+  // `/CropBox`.
+  TPDF_PAGE_BOUNDARY_CROP_BOX = 1,
+  // `/BleedBox`.
+  TPDF_PAGE_BOUNDARY_BLEED_BOX = 2,
+  // `/TrimBox`.
+  TPDF_PAGE_BOUNDARY_TRIM_BOX = 3,
+  // `/ArtBox`.
+  TPDF_PAGE_BOUNDARY_ART_BOX = 4,
+} TpdfPageBoundary;
+
+// Which of a sanitise report's two lists an accessor reads.
+typedef enum TpdfSanitiseList {
+  // Entries removed from objects that stay, and from the trailer.
+  TPDF_SANITISE_LIST_REMOVED = 0,
+  // Objects deleted because only removed entries reached them.
+  TPDF_SANITISE_LIST_DELETED = 1,
+} TpdfSanitiseList;
+
+// Why [`tpdf_editor_sanitise`] removed something, as C sees `Removal`.
+typedef enum TpdfRemoval {
+  // A JavaScript action.
+  TPDF_REMOVAL_JAVA_SCRIPT = 0,
+  // `/Names /JavaScript`.
+  TPDF_REMOVAL_DOCUMENT_JAVA_SCRIPT = 1,
+  // `/AcroForm /CO`.
+  TPDF_REMOVAL_CALCULATION_ORDER = 2,
+  // `/AcroForm /XFA`.
+  TPDF_REMOVAL_XFA_FORM = 3,
+  // An outward-reaching action; its `/S` crosses through
+  // [`tpdf_sanitise_report_action`].
+  TPDF_REMOVAL_ACTION = 4,
+  // `/Names /EmbeddedFiles`.
+  TPDF_REMOVAL_EMBEDDED_FILE_TREE = 5,
+  // A file specification's `/EF` or `/RF`, or an embedded file stream.
+  TPDF_REMOVAL_EMBEDDED_FILE = 6,
+  // `/Info`.
+  TPDF_REMOVAL_INFO = 7,
+  // A `/Metadata` stream.
+  TPDF_REMOVAL_METADATA = 8,
+} TpdfRemoval;
 
 // Which `Destination` arm an outline entry or a link names (12.3.2).
 //
@@ -499,6 +569,9 @@ typedef struct TpdfPageBuilder TpdfPageBuilder;
 // lists and a C signature that took them all would be unreadable and
 // unextendable. Freed with [`tpdf_recalculation_free`].
 typedef struct TpdfRecalculation TpdfRecalculation;
+
+// Everything a sanitise took out. Opaque to callers.
+typedef struct TpdfSanitiseReport TpdfSanitiseReport;
 
 // Every signature a document carries, read. Opaque to callers.
 //
@@ -675,6 +748,82 @@ typedef struct TpdfTarget {
   // [`TpdfTargetKind::Uri`].
   const char *uri;
 } TpdfTarget;
+
+// One run of page labels, as C sees `PageLabelRange`.
+typedef struct TpdfPageLabelRange {
+  // The zero-based index of the range's first page.
+  uint32_t first_page;
+  // How the number is written.
+  enum TpdfLabelStyle style;
+  // `/P`, null-terminated UTF-8, or null for no `/P` -- which reads the
+  // same as an empty one and is not the same file.
+  const char *prefix;
+  // `/St`: the number of the range's first page; at least 1.
+  uint32_t start;
+} TpdfPageLabelRange;
+
+// A date (7.9.4), as C sees `Date`.
+//
+// Every field an `int32_t` so a hand-written binding has no packing to
+// guess at; a field outside its range -- a month of 13, a minute of 60 --
+// is [`TpdfStatus::BadArgument`] rather than a byte truncated into another
+// date.
+typedef struct TpdfDate {
+  // Four-digit year.
+  int32_t year;
+  // 1 to 12.
+  int32_t month;
+  // 1 to 31.
+  int32_t day;
+  // 0 to 23.
+  int32_t hour;
+  // 0 to 59.
+  int32_t minute;
+  // 0 to 59.
+  int32_t second;
+  // 1 when the date states its offset from UT; 0 for an unspecified zone.
+  int32_t has_utc_offset;
+  // The offset from UT in minutes, when `has_utc_offset` is 1.
+  int32_t utc_offset_minutes;
+} TpdfDate;
+
+// A file to embed, as C sees `EmbeddedFile` (7.11.4).
+//
+// Pointers and a length only, so there is no padding to guess at. The
+// strings are null-terminated UTF-8; `description`, `mime_type`, `created`
+// and `modified` may be null for "none".
+typedef struct TpdfEmbeddedFile {
+  // The key it is filed under in `/Names /EmbeddedFiles`.
+  const char *name;
+  // The file name offered when it is saved out (`/UF`, and `/F`).
+  const char *filename;
+  // `/Desc`, or null.
+  const char *description;
+  // The stream's `/Subtype`, a MIME type such as `text/csv`, or null.
+  const char *mime_type;
+  // `/Params /CreationDate`, or null.
+  const struct TpdfDate *created;
+  // `/Params /ModDate`, or null.
+  const struct TpdfDate *modified;
+  // The file's bytes, unencoded; borrowed for the call and copied.
+  const uint8_t *data;
+  // How many bytes `data` points at.
+  size_t data_len;
+} TpdfEmbeddedFile;
+
+// What [`tpdf_editor_sanitise`] takes out, as C sees `Sanitise`. Each field
+// is 0 or 1; all four 1 is `Sanitise::ALL`, all four 0 removes nothing.
+typedef struct TpdfSanitise {
+  // Every JavaScript action, the document-level scripts, `/AcroForm /CO`
+  // and `/XFA`.
+  int javascript;
+  // Every action that reaches outside the document or plays media.
+  int actions;
+  // Every embedded file.
+  int embedded_files;
+  // `/Info` and every `/Metadata` stream.
+  int metadata;
+} TpdfSanitise;
 
 // A destination as read, which is `Destination` in C.
 //
@@ -2171,6 +2320,215 @@ enum TpdfStatus tpdf_builder_set_outline(struct TpdfBuilder *builder,
 //
 // `builder` must be a live handle and `out` a valid pointer.
 enum TpdfStatus tpdf_builder_finish(struct TpdfBuilder *builder, struct TpdfBuffer **out);
+
+// Sets the document's page labels (12.4.2), replacing any it had.
+//
+// Refused as a whole -- [`TpdfStatus::EditRefused`] with the facade's own
+// reason -- when no range starts at page 0, a range starts past the last
+// page or numbers from 0, two ranges start at one page, or there is no
+// catalog.
+//
+// # Safety
+//
+// `editor` must be a live handle and `ranges` must point to `count` ranges,
+// each `prefix` null or a null-terminated string.
+enum TpdfStatus tpdf_editor_set_page_labels(struct TpdfEditor *editor,
+                                            const struct TpdfPageLabelRange *ranges,
+                                            size_t count);
+
+// Embeds a file (7.11.4), filed under its name in `/Names /EmbeddedFiles`.
+//
+// The new file specification's object number and generation are written
+// through the out pointers, either of which may be null. Refused --
+// [`TpdfStatus::EditRefused`] with the facade's own reason -- when the name
+// is taken, the MIME type cannot be written as a name, a date cannot be
+// spelled, or there is no catalog.
+//
+// # Safety
+//
+// `editor` must be a live handle and `file` a valid pointer whose strings,
+// dates and bytes are valid for the call.
+enum TpdfStatus tpdf_editor_attach_file(struct TpdfEditor *editor,
+                                        const struct TpdfEmbeddedFile *file,
+                                        uint32_t *out_object,
+                                        uint16_t *out_generation);
+
+// Replaces the document's outline (12.3.3) with an array of top-level
+// entries built with `tpdf_outline_entry_new`.
+//
+// **Consumes every entry in `entries`**, in order, exactly as
+// `tpdf_builder_set_outline` does: each handle stays live and stays the
+// caller's to free. Refused when the tree is one this repository could not
+// read back.
+//
+// # Safety
+//
+// `editor` must be a live handle and `entries` must point to `count` live
+// entry handles.
+enum TpdfStatus tpdf_editor_set_outline(struct TpdfEditor *editor,
+                                        struct TpdfOutlineEntry *const *entries,
+                                        size_t count);
+
+// Sets one `/Info` text entry (14.3.3) -- the typed setters `set_title`,
+// `set_author`, `set_subject`, `set_keywords`, `set_creator` and
+// `set_producer` -- creating `/Info` when there is none.
+//
+// The two date keys are [`tpdf_editor_set_info_date`]'s, and passing one
+// here is [`TpdfStatus::BadArgument`]. What the write did to the XMP packet
+// is written through `out_sync`, which may be null.
+//
+// # Safety
+//
+// `editor` must be a live handle and `value` a null-terminated UTF-8 string.
+enum TpdfStatus tpdf_editor_set_info(struct TpdfEditor *editor,
+                                     enum TpdfInfoKey key,
+                                     const char *value,
+                                     enum TpdfMetadataSync *out_sync);
+
+// Sets `/CreationDate` or `/ModDate` (14.3.3), spelled as 7.9.4 spells a
+// date. Any other key is [`TpdfStatus::BadArgument`]; a date the document's
+// version cannot spell is [`TpdfStatus::EditRefused`], writing nothing.
+//
+// # Safety
+//
+// `editor` must be a live handle and `date` a valid pointer.
+enum TpdfStatus tpdf_editor_set_info_date(struct TpdfEditor *editor,
+                                          enum TpdfInfoKey key,
+                                          const struct TpdfDate *date,
+                                          enum TpdfMetadataSync *out_sync);
+
+// Sets `/Info /Trapped` (Table 349). [`TpdfTrapped::Absent`] is
+// [`TpdfStatus::BadArgument`]: the facade sets a value, it does not remove
+// one.
+//
+// # Safety
+//
+// `editor` must be a live handle.
+enum TpdfStatus tpdf_editor_set_trapped(struct TpdfEditor *editor,
+                                        enum TpdfTrapped trapped,
+                                        enum TpdfMetadataSync *out_sync);
+
+// Makes `packet` the document's XMP metadata (14.3.2), written verbatim and
+// never compressed. [`TpdfStatus::EditRefused`] when there is no catalog.
+//
+// # Safety
+//
+// `editor` must be a live handle and `data` must point to `len` bytes.
+enum TpdfStatus tpdf_editor_set_xmp_metadata(struct TpdfEditor *editor,
+                                             const uint8_t *data,
+                                             size_t len,
+                                             enum TpdfMetadataSync *out_sync);
+
+// Sets one of a page's boundaries (14.11.2) -- `set_page_boundary`, and
+// with it `set_bleed_box`, `set_trim_box` and `set_art_box`, which are that
+// call with the boundary named. Refused for a rectangle with no area, a
+// non-finite number, or a page that does not exist.
+//
+// # Safety
+//
+// `editor` must be a live handle.
+enum TpdfStatus tpdf_editor_set_page_boundary(struct TpdfEditor *editor,
+                                              uint32_t index,
+                                              enum TpdfPageBoundary boundary,
+                                              double x0,
+                                              double y0,
+                                              double x1,
+                                              double y1);
+
+// A page's boundary as the reader resolves it -- its own entry, or the
+// default 14.11.2 gives an absent one -- as `x0 y0 x1 y1`.
+//
+// # Safety
+//
+// `doc` must be a live handle; any out pointer may be null.
+enum TpdfStatus tpdf_page_boundary(const struct TpdfDocument *doc,
+                                   uint32_t index,
+                                   enum TpdfPageBoundary boundary,
+                                   double *out_x0,
+                                   double *out_y0,
+                                   double *out_x1,
+                                   double *out_y1);
+
+// Takes out what `what` names -- scripts, outward actions, embedded files,
+// metadata -- and reports every change it made (`DocumentEditor::sanitise`).
+//
+// The caller frees the report with [`tpdf_sanitise_report_free`]. An empty
+// report is a document that had nothing to take out, not a failure.
+//
+// # Safety
+//
+// `editor` must be a live handle, `what` a valid pointer and `out` a valid
+// pointer to write a handle to.
+enum TpdfStatus tpdf_editor_sanitise(struct TpdfEditor *editor,
+                                     const struct TpdfSanitise *what,
+                                     struct TpdfSanitiseReport **out);
+
+// How many entries one of the report's lists holds, or zero for null.
+//
+// # Safety
+//
+// `report` must be a live handle or null.
+uint32_t tpdf_sanitise_report_count(const struct TpdfSanitiseReport *report,
+                                    enum TpdfSanitiseList list);
+
+// One entry: why it was removed, and where. For [`TpdfSanitiseList::Removed`]
+// the object is the holder the entry was removed from, and
+// `out_has_object` is 0 when that holder is the trailer; for
+// [`TpdfSanitiseList::Deleted`] it is the deleted object.
+//
+// # Safety
+//
+// `report` must be a live handle; any out pointer may be null.
+enum TpdfStatus tpdf_sanitise_report_entry(const struct TpdfSanitiseReport *report,
+                                           enum TpdfSanitiseList list,
+                                           uint32_t index,
+                                           enum TpdfRemoval *out_what,
+                                           int *out_has_object,
+                                           uint32_t *out_object,
+                                           uint16_t *out_generation);
+
+// The `/S` of an [`TpdfRemoval::Action`] removal, borrowed until the report
+// is freed; null on `Ok` for any other removal.
+//
+// # Safety
+//
+// `report` must be a live handle and both out pointers valid.
+enum TpdfStatus tpdf_sanitise_report_action(const struct TpdfSanitiseReport *report,
+                                            enum TpdfSanitiseList list,
+                                            uint32_t index,
+                                            const uint8_t **out_data,
+                                            size_t *out_len);
+
+// How many steps lead from a removed entry's holder to it: the keys and
+// array positions, the last being the one removed.
+//
+// # Safety
+//
+// `report` must be a live handle or null.
+uint32_t tpdf_sanitise_report_path_count(const struct TpdfSanitiseReport *report, uint32_t index);
+
+// One step of a removed entry's path: a dictionary key, whose bytes are
+// borrowed until the report is freed (`out_is_index` 0), or an array
+// position counted in the array as it was (`out_is_index` 1).
+//
+// # Safety
+//
+// `report` must be a live handle; any out pointer may be null.
+enum TpdfStatus tpdf_sanitise_report_path_step(const struct TpdfSanitiseReport *report,
+                                               uint32_t index,
+                                               uint32_t step,
+                                               int *out_is_index,
+                                               uint64_t *out_position,
+                                               const uint8_t **out_key_data,
+                                               size_t *out_key_len);
+
+// Frees a sanitise report. Null is accepted and does nothing.
+//
+// # Safety
+//
+// `report` must have come from [`tpdf_editor_sanitise`] and must not be used
+// afterwards, nor any bytes borrowed from it.
+void tpdf_sanitise_report_free(struct TpdfSanitiseReport *report);
 
 // One `/Info` text entry (14.3.3), decoded.
 //

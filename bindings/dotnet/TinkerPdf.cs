@@ -1619,7 +1619,7 @@ public sealed class WriteOptions
 /// one instance is a data race no wrapper can prevent. One per thread, or your
 /// own lock.
 /// </remarks>
-public sealed class Editor : IDisposable
+public sealed partial class Editor : IDisposable
 {
     private readonly EditorHandle _handle;
 

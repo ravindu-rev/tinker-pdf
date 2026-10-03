@@ -129,6 +129,51 @@ stream_decoded` on the stream reference `Attachment` hands back — the route
 the facade's own documentation names — so no accessor was added to the facade
 for it.
 
+**The document operations: sixteen functions** in `src/docops.rs`, each
+one `DocumentEditor` call. `tpdf_editor_set_page_labels` takes an array of
+`TpdfPageLabelRange` (a `TpdfLabelStyle` and a nullable prefix);
+`tpdf_editor_attach_file` a `TpdfEmbeddedFile` of pointers and a length, its
+dates a `TpdfDate` of eight `int32_t`s — every field that wide so a
+hand-written binding has no padding to guess at, and a month of 300 refused
+rather than truncated into another date — and it hands back the new file
+specification's reference; `tpdf_editor_set_outline` consumes outline entries
+exactly as the builder's does. The typed `/Info` setters are
+`tpdf_editor_set_info` over the six text keys of `TpdfInfoKey` and
+`tpdf_editor_set_info_date` over the two date keys (the other kind of key is
+`BadArgument`), with `tpdf_editor_set_trapped` and
+`tpdf_editor_set_xmp_metadata`; each answers the facade's `MetadataSync` as a
+`TpdfMetadataSync`, because an `/Info` entry and an XMP packet that disagree
+are a document that says two things and the caller is owed the warning.
+`tpdf_editor_set_page_boundary` takes a `TpdfPageBoundary` — `set_bleed_box`,
+`set_trim_box` and `set_art_box` are that call with the boundary named — and
+`tpdf_page_boundary` reads one back through `Page::boundary`.
+`tpdf_editor_sanitise` takes a `TpdfSanitise` of four flags and hands back a
+`TpdfSanitiseReport` whose two lists, chosen by a `TpdfSanitiseList`, give
+each entry's `TpdfRemoval`, the object it was removed from or deleted (or the
+trailer), the `/S` of a removed action and, for a removed entry, every step
+of its path — a key's bytes or an array position counted in the array as it
+was. Where the facade answers `Result`, its refusal's own sentence crosses
+with `EditRefused`; where it answers `bool` or `Option`, the call and its
+argument are named, as for every other edit. `set_viewer_preferences` is not
+here: `ViewerPreferences` is eighteen optional entries, five enums and a list
+of page ranges, a sub-surface of its own, and stays owed.
+
+Python's `Editor` gains the same as `set_page_labels([(first, style, prefix,
+start)])`, `attach_file(...)` returning `(number, generation)`,
+`set_outline`, `set_title` to `set_producer`, `set_creation_date` and
+`set_modification_date` over `(year, month, day, hour, minute, second,
+offset)` tuples, `set_trapped`, `set_xmp_metadata` — each returning
+`"alone"` or `"other-half-unchanged"` — `set_page_boundary` and its three
+siblings, and `sanitise(javascript=, actions=, embedded_files=, metadata=)`
+returning a `SanitiseReport` whose `removed` and `deleted` carry every field;
+`Document.page_box(index, boundary)` reads one back. JavaScript has them in
+camelCase, a `PdfPageLabelRange` class for the ranges, dates as
+`[y, m, d, h, mi, s]` arrays with a seventh element for a stated offset, and
+the report's lists as plain objects. .NET has them over the C ABI as
+`SetPageLabels`, `AttachFile`, `SetOutline`, `SetInfo`, `SetInfoDate`,
+`SetTrapped`, `SetXmpMetadata`, `SetPageBoundary` and its siblings,
+`Sanitise(SanitiseOptions)` and `Document.PageBox`.
+
 **The write surface: fifty-five functions, and the shape they had to be
 given.** The facade has exported `DocumentEditor` and `DocumentBuilder` since
 gap 26, so what stood between the read surface and this one was never
@@ -318,15 +363,32 @@ than read from a file, so the four languages produce the same 64 bytes with no
 fixture between them — a parity suite whose surfaces read the same *file*
 proves only that they can read a file.
 
-**And read parity is text identity.** A third script, *read-surface*, opens
-two documents — `testdata/outline-3level.pdf` with five bytes in front of its
-header, which the reader tolerates and reports, and a two-page document each
+**The document operations are byte identity too.** *document-ops* opens
+`testdata/outline-3level.pdf` and, through one editor, sets page labels,
+attaches a file with a description, a MIME type and a creation date, sets
+`/Title`, `/Author`, `/CreationDate` and `/Trapped`, writes an XMP packet,
+sets a trim box and a bleed box and replaces the outline, then saves;
+*sanitise* takes everything `Sanitise::ALL` names out of that artefact and
+saves again, and writes its report down as *sanitise-report* — removed
+entries with their holders and paths, deleted objects — so what went is
+compared as well as what is left.
+
+```text
+document-ops     a8c436d092a929ce9ddfbc53b5fe1f48f7ff2141d23148a7b1e003a4dfb445e9
+sanitise         f6f9cedc25ac039b7b45d4baf8507ca38610228a8c3867ed3898b72ec239451d
+sanitise-report  a73b92e55800b856cb0f46107d89ce26d51ca9f8c941e536790305255d26300f
+```
+
+**And read parity is text identity.** A further script, *read-surface*, opens
+three documents — `testdata/outline-3level.pdf` with five bytes in front of
+its header, which the reader tolerates and reports, a two-page document each
 surface builds itself with two links, a nested outline and an `/Info` title
-outside ASCII beside an author that is empty rather than absent — and writes
-down everything the read surface says about each: version, page count, the
-eight `/Info` entries, `/Trapped`, page labels, the outline with its
-destinations, every link with its action, every attachment with a hash of its
-bytes, the XMP packet's hash and, last, every warning. The text is specified
+outside ASCII beside an author that is empty rather than absent, and the
+document-ops artefact — and writes down everything the read surface says
+about each: version, page count, the eight `/Info` entries, `/Trapped`, page
+labels, every page's five boundaries, the outline with its destinations,
+every link with its action, every attachment with a hash of its bytes, the
+XMP packet's hash and, last, every warning. The text is specified
 byte for byte in `crates/tinker-pdf/examples/write_parity.rs`: strings and
 byte strings as hex, numbers as the sixteen hex digits of their IEEE 754 bits,
 because every language formats `1.5` differently and a parity check that
@@ -335,12 +397,15 @@ surface prints `READ sha256=` of it. On linux/x86_64, October 2026, the
 facade, the wheel and the npm package printed
 
 ```text
-read-surface     be7deb042f7d68d6695e54988cdbfabf3d7240c03281b29534b4b108068bef9f
+read-surface     c02151fc924133fe2864d1b05bc57e5eaafaddab86f0be2b2088549fd91af5c0
 signatures       e2f5e33cb3c9826ad27076f065ed2baf4f8a665f1eb90041e1c906f1868135ef
 ```
 
-and the .NET leg is written to print both too (its build is unverified here:
-no .NET SDK on the machine that wrote it). *signatures* is the fourth script:
+and the .NET leg is written to print every one of them too (its build is
+unverified here: no .NET SDK on the machine that wrote it). *read-surface*
+first read `be7deb04…`; it moved to the hash above when it gained the
+document-ops artefact and the boundaries, which is the one recorded update a
+legitimate change costs. *signatures* is the fourth script:
 it opens three documents the signature tests commit — an ECDSA P-256
 signature, an `adbe.pkcs7.sha1` one and an RFC 3161 document timestamp —
 and writes down every signature as read and every verdict twice, anchored to
@@ -728,6 +793,26 @@ packaging commands.
   **1** (the warnings equality); a Python warning offset off by one, and the
   JavaScript link rectangle's first two numbers swapped, each fail
   `bindings-parity` on their surface's `read-surface` hash.
+- **The document operations are pinned by byte equality with the facade**
+  (`src/docops/tests.rs`): every operation made through the C ABI and the
+  same operations against `DocumentEditor` save the same bytes, which the
+  facade then reads back as the labels, attachment, title, `/Trapped`,
+  packet, trim box and outline asked for; a sanitise through the C ABI of a
+  document with a JavaScript open action, an attachment, `/Info` and XMP
+  saves the facade's bytes and reports the facade's entries — every removal,
+  holder, path step and action — and its object deletions. Around them: a
+  boundary read back equal to `Page::boundary` for all five; each refusal
+  (no range at page 0, a name already attached, a month out of range, a date
+  key to the text setter and the reverse, `Absent` to `set_trapped`, a
+  rectangle with no area, a page past the end) writing nothing and naming
+  why; a spent outline entry refused on a second `set_outline`; null on every
+  one of the sixteen entry points; the five new enums' numbers and
+  `TpdfDate`'s 32 bytes pinned. Counted injections, October 2026: the
+  roman-lower label style written upper fires **1** (the byte equality); the
+  sanitise report's holder flag inverted fires **1** (the report equality);
+  Python's date with hour and minute swapped, and JavaScript's trim box
+  written as a bleed box, each fail `bindings-parity` on their surface's
+  *document-ops*, *sanitise* and *read-surface* hashes.
 - **Signatures in Python and JavaScript** are held by the *signatures*
   script's hash, equal to the facade's, and by an assertion leg in each
   script for what only those two carry: an anchor that is not a certificate

@@ -31,16 +31,30 @@
 //! parity suite whose surfaces read the same *file* proves they can read a
 //! file.
 //!
+//! Two more write, with the editor's document operations:
+//!
+//! - **document-ops** opens the outline fixture and, through one editor, sets
+//!   page labels (`i`, `ii`, then `A-1` onwards), attaches a file with a
+//!   description, a MIME type and a creation date, sets `/Title`, `/Author`,
+//!   `/CreationDate` and `/Trapped`, writes an XMP packet, sets a trim box on
+//!   page 0 and a bleed box on page 1, and replaces the outline with one
+//!   entry; then saves, rewriting;
+//! - **sanitise** opens that artefact and takes out everything
+//!   `Sanitise::ALL` names, saving again; its report is written down as
+//!   **sanitise-report** (below), so the four lists of what went are compared
+//!   as well as the bytes that are left.
+//!
 //! A third script reads rather than writes:
 //!
-//! - **read-surface** opens two documents -- the outline fixture with five
+//! - **read-surface** opens three documents -- the outline fixture with five
 //!   bytes in front of its header, which the reader tolerates and reports as a
-//!   warning, and a two-page document it builds with links, an outline and
-//!   `/Info` -- and writes down everything the read surface says about each:
-//!   the version, the page count, every `/Info` entry, `/Trapped`, the page
-//!   labels, the outline flattened with its destinations, every link with its
-//!   action, every attachment with a hash of its bytes, the XMP packet's hash,
-//!   and, last, every warning. It prints `READ sha256=` of that text.
+//!   warning, a two-page document it builds with links, an outline and
+//!   `/Info`, and the document-ops artefact -- and writes down everything the
+//!   read surface says about each: the version, the page count, every `/Info`
+//!   entry, `/Trapped`, the page labels, every page's five boundaries, the
+//!   outline flattened with its destinations, every link with its action,
+//!   every attachment with a hash of its bytes, the XMP packet's hash, and,
+//!   last, every warning. It prints `READ sha256=` of that text.
 //!
 //! The text is the contract, so it is written down once, here, and every
 //! surface reproduces it byte for byte. Each line is space-separated tokens
@@ -60,6 +74,8 @@
 //!                      creation-date modification-date, in that order
 //! trapped <absent|true|false|unknown>
 //! label <page> <s>     one per page, or none when the document has no labels
+//! box <page> <media|crop|bleed|trim|art> <x0 f> <y0 f> <x1 f> <y1 f>
+//!                      five per page, as `Page::boundary` resolves each
 //! outline <depth> <open 0|1> <title s> <dest>
 //! link <page> <x0 f> <y0 f> <x1 f> <y1 f> <num.gen|-> <action>
 //! attachment <name s> <filename s> <description s|-> <size|-> <sha256|->
@@ -71,6 +87,17 @@
 //!        | fitr <f> <f> <f> <f> | fitb | fitbh <f|-> | fitbv <f|->
 //! action = - | goto <dest> | gotor <b|-> <dest> | uri <b> | named <b>
 //!        | launch <b|-> | other <b>
+//! ```
+//!
+//! The sanitise report's text, one line per entry, removed entries first:
+//!
+//! ```text
+//! removed <what> <num.gen|trailer> <step/step/...> <action b|->
+//! deleted <what> <num.gen> <action b|->
+//!
+//! what = javascript | document-javascript | calculation-order | xfa-form
+//!      | action | embedded-file-tree | embedded-file | info | metadata
+//! step = k:<hex of the key> | i:<array position>
 //! ```
 //!
 //! A fourth reads signatures, and is the read surface's other half:
@@ -120,8 +147,9 @@
 use std::path::PathBuf;
 
 use tinker_pdf::{
-    DestKind, Document, DocumentBuilder, ImageData, OutlineEntry, OutlineItem, Target, Trapped,
-    WriteMode, WriteOptions,
+    Date, DestKind, Document, DocumentBuilder, EmbeddedFile, EntryHolder, ImageData, LabelStyle,
+    MetadataSync, OutlineEntry, OutlineItem, PageBoundary, PageLabelRange, PathStep, Removal,
+    Sanitise, Target, Trapped, WriteMode, WriteOptions,
 };
 
 /// The eight-by-eight grey image both the Rust and the binding scripts build,
@@ -399,6 +427,27 @@ fn read_dump(name: &str, document: &Document, out: &mut Vec<String>) {
     for (index, label) in document.page_labels().iter().enumerate() {
         out.push(format!("label {index} {}", dump::text(Some(label))));
     }
+    for index in 0..document.page_count() {
+        let Some(page) = document.page(index) else {
+            continue;
+        };
+        for (name, boundary) in [
+            ("media", PageBoundary::MediaBox),
+            ("crop", PageBoundary::CropBox),
+            ("bleed", PageBoundary::BleedBox),
+            ("trim", PageBoundary::TrimBox),
+            ("art", PageBoundary::ArtBox),
+        ] {
+            let (x0, y0, x1, y1) = page.boundary(boundary);
+            out.push(format!(
+                "box {index} {name} {} {} {} {}",
+                dump::number(Some(x0)),
+                dump::number(Some(y0)),
+                dump::number(Some(x1)),
+                dump::number(Some(y1))
+            ));
+        }
+    }
     for (depth, item) in OutlineItem::flatten(&document.outline()) {
         out.push(format!(
             "outline {depth} {} {} {}",
@@ -453,8 +502,8 @@ fn read_dump(name: &str, document: &Document, out: &mut Vec<String>) {
     }
 }
 
-/// Script three: everything the read surface says about two documents.
-fn read_surface(outline_fixture: &[u8]) -> String {
+/// Script three: everything the read surface says about three documents.
+fn read_surface(outline_fixture: &[u8], operated: &[u8]) -> String {
     let mut shifted = b"JUNK\n".to_vec();
     shifted.extend_from_slice(outline_fixture);
     let mut lines = Vec::new();
@@ -462,6 +511,8 @@ fn read_surface(outline_fixture: &[u8]) -> String {
     read_dump("shifted", &document, &mut lines);
     let document = Document::open(linked_document()).expect("the built document opens");
     read_dump("linked", &document, &mut lines);
+    let document = Document::open(operated.to_vec()).expect("the operated document opens");
+    read_dump("operated", &document, &mut lines);
     let mut text = String::new();
     for line in lines {
         text.push_str(&line);
@@ -587,6 +638,133 @@ fn signatures(support: &std::path::Path) -> String {
     text
 }
 
+/// The creation date document-ops writes twice: on the attachment and in
+/// `/Info`.
+fn created() -> Date {
+    Date {
+        year: 2026,
+        month: 10,
+        day: 3,
+        hour: 12,
+        minute: 0,
+        second: 0,
+        utc_offset_minutes: Some(0),
+    }
+}
+
+/// The XMP packet document-ops writes, verbatim.
+const PACKET: &[u8] = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'/>";
+
+/// Script: the editor's document operations, one after another.
+fn document_ops(outline_fixture: &[u8]) -> Vec<u8> {
+    let document = Document::open(outline_fixture.to_vec()).expect("the fixture opens");
+    let mut editor = document.editor();
+    editor
+        .set_page_labels(&[
+            PageLabelRange {
+                first_page: 0,
+                style: LabelStyle::RomanLower,
+                prefix: None,
+                start: 1,
+            },
+            PageLabelRange {
+                first_page: 2,
+                style: LabelStyle::Decimal,
+                prefix: Some("A-".to_string()),
+                start: 1,
+            },
+        ])
+        .expect("the labels are written");
+    editor
+        .attach_file(&EmbeddedFile {
+            name: "data.csv".to_string(),
+            filename: "data.csv".to_string(),
+            description: Some("the numbers".to_string()),
+            mime_type: Some("text/csv".to_string()),
+            created: Some(created()),
+            modified: None,
+            data: b"a,b\n1,2\n".to_vec(),
+        })
+        .expect("the file is attached");
+    assert_eq!(editor.set_title("Document operations"), MetadataSync::Alone);
+    let _ = editor.set_author("tinker-pdf");
+    assert!(editor.set_creation_date(created()).is_some());
+    let _ = editor.set_trapped(Trapped::False);
+    assert_eq!(
+        editor.set_xmp_metadata(PACKET),
+        Some(MetadataSync::OtherHalfUnchanged)
+    );
+    assert!(editor.set_trim_box(0, 10.0, 10.0, 585.0, 832.0));
+    assert!(editor.set_bleed_box(1, 0.0, 0.0, 595.0, 842.0));
+    assert!(editor.set_outline(&[OutlineEntry {
+        title: "Only entry".to_string(),
+        target: Some(Target::Page {
+            index: 3,
+            view: DestKind::FitH { top: Some(700.0) },
+        }),
+        open: false,
+        children: Vec::new(),
+    }]));
+    editor.save(&WriteOptions::default())
+}
+
+/// Script: everything `Sanitise::ALL` names, taken out of the document-ops
+/// artefact, with the report as text.
+fn sanitise(operated: &[u8]) -> (Vec<u8>, String) {
+    let document = Document::open(operated.to_vec()).expect("the artefact opens");
+    let mut editor = document.editor();
+    let report = editor.sanitise(&Sanitise::ALL);
+    let what = |removal: &Removal| match removal {
+        Removal::JavaScript => "javascript",
+        Removal::DocumentJavaScript => "document-javascript",
+        Removal::CalculationOrder => "calculation-order",
+        Removal::XfaForm => "xfa-form",
+        Removal::Action(_) => "action",
+        Removal::EmbeddedFileTree => "embedded-file-tree",
+        Removal::EmbeddedFile => "embedded-file",
+        Removal::Info => "info",
+        Removal::Metadata => "metadata",
+    };
+    let action = |removal: &Removal| match removal {
+        Removal::Action(subtype) => dump::bytes(Some(subtype)),
+        _ => "-".to_string(),
+    };
+    let mut text = String::new();
+    for entry in &report.removed {
+        let steps: Vec<String> = entry
+            .path
+            .iter()
+            .map(|step| match step {
+                PathStep::Key(key) => format!(
+                    "k:{}",
+                    key.iter().map(|b| format!("{b:02x}")).collect::<String>()
+                ),
+                PathStep::Index(at) => format!("i:{at}"),
+            })
+            .collect();
+        text.push_str(&format!(
+            "removed {} {} {} {}\n",
+            what(&entry.what),
+            match entry.holder {
+                EntryHolder::Trailer => "trailer".to_string(),
+                EntryHolder::Object(r) => format!("{}.{}", r.num, r.gen),
+            },
+            steps.join("/"),
+            action(&entry.what)
+        ));
+    }
+    for entry in &report.deleted {
+        text.push_str(&format!(
+            "deleted {} {}.{} {}\n",
+            what(&entry.what),
+            entry.object.num,
+            entry.object.gen,
+            action(&entry.what)
+        ));
+    }
+    (editor.save(&WriteOptions::default()), text)
+}
+
 /// Validates, then prints the line `cargo xtask bindings-parity` reads.
 ///
 /// The validation is not decoration and not optional. A surface that printed a
@@ -624,8 +802,20 @@ fn main() {
 
     report("fill-and-save", &fill_and_save(&bytes));
     report("build-a-document", &build_a_document());
+    let operated = document_ops(&outline);
+    report("document-ops", &operated);
+    let (sanitised, removed) = sanitise(&operated);
+    report("sanitise", &sanitised);
+    if std::env::var_os("TINKER_PARITY_DUMP").is_some() {
+        print!("{removed}");
+    }
+    println!(
+        "READ sha256={} surface=facade script=sanitise-report bytes={}",
+        sha256_hex(removed.as_bytes()),
+        removed.len()
+    );
 
-    let dumped = read_surface(&outline);
+    let dumped = read_surface(&outline, &operated);
     if std::env::var_os("TINKER_PARITY_DUMP").is_some() {
         print!("{dumped}");
     }

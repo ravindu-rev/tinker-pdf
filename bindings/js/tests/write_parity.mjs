@@ -49,8 +49,15 @@ const require = createRequire(pathToFileURL(path.join(process.cwd(), 'package.js
 const entry = pathToFileURL(require.resolve('tinker-pdf-js')).href;
 const module_ = await import(entry);
 const init = module_.default;
-const { PdfDocument, PdfBuilder, PdfWriteOptions, PdfOutlineEntry, PdfView, PdfTrustAnchors } =
-  module_;
+const {
+  PdfDocument,
+  PdfBuilder,
+  PdfWriteOptions,
+  PdfOutlineEntry,
+  PdfView,
+  PdfTrustAnchors,
+  PdfPageLabelRange,
+} = module_;
 
 const wasmUrl = new URL('tinker_pdf_js_bg.wasm', entry);
 await init({ module_or_path: readFileSync(fileURLToPath(wasmUrl)) });
@@ -181,6 +188,75 @@ function transactionRollsBackOnAThrow(fixture) {
   console.log('JS-PARITY: transaction rolls back on a throw and commits without one');
 }
 
+const CREATED = new Int32Array([2026, 10, 3, 12, 0, 0, 0]);
+const PACKET = encoder.encode("<x:xmpmeta xmlns:x='adobe:ns:meta/'/>");
+
+// The editor's document operations, one after another.
+function documentOps(outlineFixture) {
+  const document_ = new PdfDocument(outlineFixture);
+  const editor = document_.editor();
+  editor.setPageLabels([
+    new PdfPageLabelRange(0, 'roman-lower', undefined, 1),
+    new PdfPageLabelRange(2, 'decimal', 'A-', 1),
+  ]);
+  editor.attachFile(
+    'data.csv',
+    'data.csv',
+    encoder.encode('a,b\n1,2\n'),
+    'the numbers',
+    'text/csv',
+    CREATED,
+    undefined,
+  );
+  if (editor.setTitle('Document operations') !== 'alone') throw new Error('no XMP packet yet');
+  editor.setAuthor('tinker-pdf');
+  editor.setCreationDate(CREATED);
+  editor.setTrapped('false');
+  if (editor.setXmpMetadata(PACKET) !== 'other-half-unchanged') {
+    throw new Error('/Info has entries the packet was not checked against');
+  }
+  editor.setTrimBox(0, 10.0, 10.0, 585.0, 832.0);
+  editor.setBleedBox(1, 0.0, 0.0, 595.0, 842.0);
+  const only = new PdfOutlineEntry('Only entry');
+  const fitH = PdfView.fitH(700.0);
+  only.setPageTargetView(3, fitH);
+  fitH.free();
+  editor.setOutline([only]);
+  const options = new PdfWriteOptions();
+  const bytes = editor.save(options);
+  options.free();
+  editor.free();
+  document_.free();
+  return bytes;
+}
+
+// Everything Sanitise::ALL names, taken out, with the report as text.
+function sanitiseScript(operated) {
+  const document_ = new PdfDocument(operated);
+  const editor = document_.editor();
+  const report = editor.sanitise(true, true, true, true);
+  const lines = [];
+  for (const { holder, path: steps, what, action } of report.removed) {
+    const spelled = steps
+      .map((step) => (typeof step === 'number' ? `i:${step}` : `k:${hex(step)}`))
+      .join('/');
+    lines.push(
+      `removed ${what} ${holder === undefined ? 'trailer' : `${holder[0]}.${holder[1]}`} ` +
+        `${spelled} ${byteString(action)}`,
+    );
+  }
+  for (const { object, what, action } of report.deleted) {
+    lines.push(`deleted ${what} ${object[0]}.${object[1]} ${byteString(action)}`);
+  }
+  report.free();
+  const options = new PdfWriteOptions();
+  const bytes = editor.save(options);
+  options.free();
+  editor.free();
+  document_.free();
+  return [bytes, lines.map((line) => `${line}\n`).join('')];
+}
+
 // Read-surface's second document: links, an outline and /Info, built.
 function linkedDocument() {
   const builder = new PdfBuilder();
@@ -298,6 +374,12 @@ function readDump(label, document_, out) {
   }
   out.push(`trapped ${metadata.trapped ?? 'absent'}`);
   document_.pageLabels().forEach((label_, index) => out.push(`label ${index} ${text(label_)}`));
+  for (let index = 0; index < document_.pageCount; index += 1) {
+    for (const which of ['media', 'crop', 'bleed', 'trim', 'art']) {
+      const [x0, y0, x1, y1] = document_.pageBox(index, which);
+      out.push(`box ${index} ${which} ${number(x0)} ${number(y0)} ${number(x1)} ${number(y1)}`);
+    }
+  }
   for (const [depth, item] of flatten(document_.outline())) {
     out.push(`outline ${depth} ${item.open ? 1 : 0} ${text(item.title)} ${destinationText(item.destination)}`);
   }
@@ -330,7 +412,7 @@ function readDump(label, document_, out) {
 }
 
 // Script three: everything the read surface says about two documents.
-function readSurface(outlineFixture) {
+function readSurface(outlineFixture, operated) {
   const lines = [];
   const shifted = new Uint8Array(outlineFixture.length + 5);
   shifted.set(encoder.encode('JUNK\n'), 0);
@@ -341,6 +423,9 @@ function readSurface(outlineFixture) {
   const second = new PdfDocument(linkedDocument());
   readDump('linked', second, lines);
   second.free();
+  const third = new PdfDocument(operated);
+  readDump('operated', third, lines);
+  third.free();
   return lines.map((line) => `${line}\n`).join('');
 }
 
@@ -454,7 +539,15 @@ report('fill-and-save', fillAndSave(fixture));
 report('build-a-document', buildADocument());
 
 const outlineFixture = readFileSync(path.join(path.dirname(fixturePath), 'outline-3level.pdf'));
-const dumped = encoder.encode(readSurface(outlineFixture));
+const operated = documentOps(outlineFixture);
+report('document-ops', operated);
+const [sanitised, removedText] = sanitiseScript(operated);
+report('sanitise', sanitised);
+const removed = encoder.encode(removedText);
+if (process.env.TINKER_PARITY_DUMP) process.stdout.write(Buffer.from(removed));
+console.log(`READ sha256=${sha256(removed)} surface=js script=sanitise-report bytes=${removed.length}`);
+
+const dumped = encoder.encode(readSurface(outlineFixture, operated));
 if (process.env.TINKER_PARITY_DUMP) process.stdout.write(Buffer.from(dumped));
 console.log(`READ sha256=${sha256(dumped)} surface=js script=read-surface bytes=${dumped.length}`);
 

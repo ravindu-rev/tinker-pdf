@@ -27,6 +27,8 @@ pub use read::{
 };
 mod signatures;
 pub use signatures::{PdfSignature, PdfTrustAnchors, PdfVerdict};
+mod docops;
+pub use docops::{PdfPageLabelRange, PdfSanitiseReport};
 
 /// An open PDF document.
 #[wasm_bindgen]

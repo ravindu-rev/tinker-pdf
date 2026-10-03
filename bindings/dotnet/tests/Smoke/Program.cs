@@ -330,6 +330,23 @@ static void ReadDump(string name, Document document, List<string> lines)
         }
         lines.Add("label " + index + " " + TextToken(label));
     }
+    var boundaries = new (PageBoundary Boundary, string Name)[]
+    {
+        (PageBoundary.MediaBox, "media"),
+        (PageBoundary.CropBox, "crop"),
+        (PageBoundary.BleedBox, "bleed"),
+        (PageBoundary.TrimBox, "trim"),
+        (PageBoundary.ArtBox, "art"),
+    };
+    for (uint index = 0; index < document.PageCount; index++)
+    {
+        foreach (var (boundary, boxName) in boundaries)
+        {
+            var (bx0, by0, bx1, by1) = document.PageBox(index, boundary);
+            lines.Add("box " + index + " " + boxName + " " + Number(bx0) + " " + Number(by0) + " "
+                + Number(bx1) + " " + Number(by1));
+        }
+    }
     using (var outline = document.ReadOutline())
     {
         for (uint index = 0; index < outline.Count; index++)
@@ -414,8 +431,95 @@ static byte[] LinkedDocument()
     return builder.Finish();
 }
 
+static byte[] DocumentOps(byte[] outlineFixture)
+{
+    var created = new PdfDate(2026, 10, 3, 12, 0, 0, 0);
+    using var source = Document.Open(outlineFixture);
+    using var ops = source.CreateEditor();
+    ops.SetPageLabels(
+        new PageLabelRange(0, LabelStyle.RomanLower, null, 1),
+        new PageLabelRange(2, LabelStyle.Decimal, "A-", 1));
+    ops.AttachFile(new EmbeddedFile(
+        "data.csv",
+        "data.csv",
+        System.Text.Encoding.ASCII.GetBytes("a,b\n1,2\n"),
+        Description: "the numbers",
+        MimeType: "text/csv",
+        Created: created));
+    if (ops.SetInfo(InfoKey.Title, "Document operations") != MetadataSync.Alone)
+    {
+        throw new Exception("no XMP packet yet, so the title is alone");
+    }
+    ops.SetInfo(InfoKey.Author, "tinker-pdf");
+    ops.SetInfoDate(InfoKey.CreationDate, created);
+    ops.SetTrapped(Trapped.False);
+    if (ops.SetXmpMetadata(System.Text.Encoding.ASCII.GetBytes("<x:xmpmeta xmlns:x='adobe:ns:meta/'/>"))
+        != MetadataSync.OtherHalfUnchanged)
+    {
+        throw new Exception("/Info has entries the packet was not checked against");
+    }
+    ops.SetTrimBox(0, 10.0, 10.0, 585.0, 832.0);
+    ops.SetBleedBox(1, 0.0, 0.0, 595.0, 842.0);
+    using var only = new OutlineEntry("Only entry");
+    only.SetPageTarget(3, new View(DestKind.FitH, Top: 700.0));
+    ops.SetOutline(only);
+    return ops.Save();
+}
+
+static string RemovalName(Removal removal) => removal switch
+{
+    Removal.JavaScript => "javascript",
+    Removal.DocumentJavaScript => "document-javascript",
+    Removal.CalculationOrder => "calculation-order",
+    Removal.XfaForm => "xfa-form",
+    Removal.Action => "action",
+    Removal.EmbeddedFileTree => "embedded-file-tree",
+    Removal.EmbeddedFile => "embedded-file",
+    Removal.Info => "info",
+    _ => "metadata",
+};
+
+static (byte[] Saved, string Report) SanitiseScript(byte[] operated)
+{
+    using var source = Document.Open(operated);
+    using var cleaner = source.CreateEditor();
+    var report = cleaner.Sanitise(new SanitiseOptions(true, true, true, true));
+    var text = new System.Text.StringBuilder();
+    foreach (var entry in report.Removed)
+    {
+        var steps = new List<string>();
+        foreach (var step in entry.Path)
+        {
+            steps.Add(step is ulong at ? "i:" + at : "k:" + Hex((byte[])step));
+        }
+        text.Append("removed ").Append(RemovalName(entry.What)).Append(' ')
+            .Append(entry.Holder is null ? "trailer" : entry.Holder.Value.Object + "." + entry.Holder.Value.Generation)
+            .Append(' ').Append(string.Join("/", steps)).Append(' ')
+            .Append(BytesToken(entry.Action)).Append('\n');
+    }
+    foreach (var entry in report.Deleted)
+    {
+        text.Append("deleted ").Append(RemovalName(entry.What)).Append(' ')
+            .Append(entry.Object.Object + "." + entry.Object.Generation).Append(' ')
+            .Append(BytesToken(entry.Action)).Append('\n');
+    }
+    return (cleaner.Save(), text.ToString());
+}
+
 var outlinePath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[2]))!, "outline-3level.pdf");
 var outlineBytes = File.ReadAllBytes(outlinePath);
+var operatedBytes = DocumentOps(outlineBytes);
+Report("document-ops", operatedBytes);
+var (sanitisedBytes, removedText) = SanitiseScript(operatedBytes);
+Report("sanitise", sanitisedBytes);
+var removedBytes = System.Text.Encoding.UTF8.GetBytes(removedText);
+if (Environment.GetEnvironmentVariable("TINKER_PARITY_DUMP") is not null)
+{
+    Console.Write(removedText);
+}
+Console.WriteLine(
+    $"DOTNET-SMOKE: READ sha256={Sha256(removedBytes)} surface=dotnet script=sanitise-report " +
+    $"bytes={removedBytes.Length}");
 var shiftedBytes = new byte[outlineBytes.Length + 5];
 "JUNK\n"u8.ToArray().CopyTo(shiftedBytes, 0);
 outlineBytes.CopyTo(shiftedBytes, 5);
@@ -427,6 +531,10 @@ using (var shifted = Document.Open(shiftedBytes))
 using (var linked = Document.Open(LinkedDocument()))
 {
     ReadDump("linked", linked, readLines);
+}
+using (var operatedDocument = Document.Open(operatedBytes))
+{
+    ReadDump("operated", operatedDocument, readLines);
 }
 var dumped = new System.Text.StringBuilder();
 foreach (var line in readLines)
