@@ -20,7 +20,7 @@ use tinker_pdf::{
     Document, HeaderEvidence, InferredTable, PageTables, StatedTable, TableAttributes,
     TableEvidence, TableOptions, TableRule, TableRules, TableScope, TableSource, TableWarning, Tag,
 };
-use tinker_pdf_cos::build::DocumentBuilder;
+use tinker_pdf_cos::build::{DocumentBuilder, FormXObject};
 
 fn open(bytes: Vec<u8>) -> Document {
     Document::open(bytes).expect("the fixture opens")
@@ -474,6 +474,76 @@ fn a_rule_is_cut_to_a_rectangular_clip_and_refused_under_any_other() {
         [TableWarning::ClipNotRectangular { rules: 1 }]
     );
     assert_eq!(read.rules.len(), 1, "the rule after Q is read");
+}
+
+/// **A form that leaves a `q` open does not leave its clip on the page.** The
+/// interpreter runs a form on a graphics-state stack of its own and drops
+/// whatever `q` the form left open without a `Q`, so the observer's clip
+/// stack has to go back to where the form found it — or the form's `/BBox`
+/// clip stays in force for the rest of the page, and every rule drawn after
+/// it outside that box is lost without a warning. A form that clips itself to
+/// a corner and leaves its `q` open, drawn before a ruled grid — on its own,
+/// and inside a `q`…`Q` of the page's, whose `Q` must find the page's clip
+/// and not the form's: the grid's nine rules are read and its table found, as
+/// they are with the form's `Q` written.
+#[test]
+fn a_form_that_leaves_a_q_open_does_not_clip_the_page() {
+    let (ys, xs) = grid_lines(3, 4);
+    let mut grid = String::from("0.5 w\n");
+    for y in &ys {
+        grid.push_str(&format!("72 {y} m 472 {y} l S\n"));
+    }
+    for x in &xs {
+        grid.push_str(&format!("{x} 540 m {x} 600 l S\n"));
+    }
+    let shapes = [
+        (&b"q 0 0 10 10 re W n 0 0 5 5 re f Q"[..], false),
+        (&b"q 0 0 10 10 re W n 0 0 5 5 re f"[..], false),
+        (&b"q 0 0 10 10 re W n 0 0 5 5 re f"[..], true),
+    ];
+    for (content, bracketed) in shapes {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F1", b"Helvetica");
+        assert!(builder.add_form(
+            b"Fm0",
+            &FormXObject {
+                bbox: [0.0, 0.0, 20.0, 20.0],
+                matrix: None,
+                group: None,
+                content,
+            },
+        ));
+        builder.add_page(612.0, 792.0, |page| {
+            if bracketed {
+                page.raw(b"q 0 0 612 792 re W n\n");
+            }
+            assert!(page.form(b"Fm0"));
+            if bracketed {
+                page.raw(b"Q\n");
+            }
+            page.raw(grid.as_bytes());
+            for row in 0..3 {
+                for column in 0..4 {
+                    let (x, y) = (76.0 + column as f64 * 100.0, 586.0 - row as f64 * 20.0);
+                    page.text(b"F1", 10.0, x, y, &format!("r{row}c{column}"));
+                }
+            }
+        });
+        let doc = open(builder.finish());
+        let page = doc.page(0).expect("a page");
+        let name = format!(
+            "{} (bracketed {bracketed})",
+            String::from_utf8_lossy(content)
+        );
+        let read = page.table_rules();
+        assert!(read.warnings.is_empty(), "{name}: {:?}", read.warnings);
+        assert_eq!(read.rules.len(), 9, "{name}");
+        let found = page.inferred_tables(&TableOptions::default());
+        assert_eq!(found.tables.len(), 1, "{name}");
+        let table = &found.tables[0];
+        assert_eq!(table.evidence, TableEvidence::Ruled, "{name}");
+        assert_eq!((table.rows, table.columns), (3, 4), "{name}");
+    }
 }
 
 /// **Past the cap no rule is read**, and the warning says how many there

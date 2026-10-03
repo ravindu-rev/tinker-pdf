@@ -178,6 +178,10 @@ struct Observer {
     keep_artifacts: bool,
     clip: Clip,
     saved: Vec<Clip>,
+    /// Each open form's entry: how deep `saved` was and the clip in force.
+    forms: Vec<(usize, Clip)>,
+    /// Forms opened past [`MAX_SAVED_CLIPS`], whose ends restore nothing.
+    forms_unrecorded: usize,
     /// Each open marked-content scope's own visibility (8.11.3.2), so an `EMC`
     /// knows whether the scope it closes was one hiding things.
     scopes: Vec<bool>,
@@ -196,6 +200,8 @@ impl Observer {
             keep_artifacts,
             clip: Clip::Open,
             saved: Vec::new(),
+            forms: Vec::new(),
+            forms_unrecorded: 0,
             scopes: Vec::new(),
             hidden: 0,
             rules: Vec::new(),
@@ -415,13 +421,28 @@ impl Device for Observer {
     // interpreter's own comment says `begin_form` saves the clip and
     // `end_form` restores it. Entering every form is the trait's default and
     // the text device's answer.
+    //
+    // The interpreter runs the form on a `q` stack of its own and drops what
+    // the form left open with no `restore_state`, so the clip and the depth
+    // of the saved stack are kept here and both put back: popping one entry
+    // would restore the form's own last `q` and leave its `/BBox` clipping
+    // the rest of the page.
     fn begin_form(&mut self, _id: u64, _name: &[u8]) -> bool {
-        self.push_clip();
+        if self.forms.len() < MAX_SAVED_CLIPS {
+            self.forms.push((self.saved.len(), self.clip));
+        } else {
+            self.forms_unrecorded = self.forms_unrecorded.saturating_add(1);
+        }
         true
     }
 
     fn end_form(&mut self, _id: u64) {
-        self.pop_clip();
+        if self.forms_unrecorded > 0 {
+            self.forms_unrecorded -= 1;
+        } else if let Some((depth, clip)) = self.forms.pop() {
+            self.saved.truncate(depth);
+            self.clip = clip;
+        }
     }
 
     fn clip_path(&mut self, path: &[PathSegment], _state: &GraphicsState, _even_odd: bool) {
