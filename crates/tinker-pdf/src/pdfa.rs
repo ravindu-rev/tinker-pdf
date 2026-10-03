@@ -50,9 +50,9 @@ use crate::Document;
 
 mod annotations;
 mod colour;
-mod content;
-mod fonts;
-mod logical;
+pub(crate) mod content;
+pub(crate) mod fonts;
+pub(crate) mod logical;
 mod structure;
 mod syntax;
 mod xmp;
@@ -1681,6 +1681,89 @@ pub enum FindingKind {
     /// ISO 14289-2 8.2.1). A tree that cannot be walked cannot be the
     /// hierarchy either clause asks for.
     StructureTreeUnwalkable,
+    /// A structure element whose `/S` is one of ISO 32000-1 14.8.4's standard
+    /// types and which the `/RoleMap` maps to another type (ISO 14289-1 7.1:
+    /// "standard tags … shall not be remapped").
+    StandardTypeRemapped {
+        /// The standard type the element names.
+        declared: String,
+        /// What the role map resolves it to.
+        mapped: String,
+    },
+    /// A structure element dictionary with no `/P` (ISO 14289-1 7.1,
+    /// ISO 14289-2 8.2.1, citing ISO 32000 14.7.2's table of entries).
+    StructureParentMissing,
+    /// The catalog's packet carries no `dc:title` (ISO 14289-1 7.1,
+    /// ISO 14289-2 8.11.1).
+    DocumentTitleMissing,
+    /// The catalog's `/ViewerPreferences` does not set `/DisplayDocTitle
+    /// true` (ISO 14289-1 7.1, ISO 14289-2 8.11.2), so a viewer's title bar
+    /// shows a file name rather than the document's title.
+    DisplayDocTitleNotSet,
+    /// The catalog's `/Metadata` is not a stream with `/Type /Metadata` and
+    /// `/Subtype /XML` (ISO 14289-1 7.1, ISO 14289-2 8.11.1).
+    MetadataStreamMalformed {
+        /// The entry that is missing or wrong: `Type` or `Subtype`.
+        key: String,
+    },
+    /// Part 2: the catalog has no `/Lang`, or an empty one (ISO 14289-2
+    /// 8.4.4: the default natural language "shall be specified using the
+    /// Lang entry, with a non-empty value, in the catalog dictionary").
+    CatalogLanguageMissing,
+    /// An optional content configuration dictionary with no `/Name`, or an
+    /// empty one (ISO 14289-1 7.10, ISO 14289-2 8.7).
+    OptionalContentConfigUnnamed,
+    /// An optional content configuration dictionary carrying `/AS`
+    /// (ISO 14289-1 7.10, ISO 14289-2 8.7).
+    OptionalContentConfigAutoState,
+    /// A form XObject carrying `/Ref`, which makes it a reference XObject
+    /// (ISO 14289-1 7.20).
+    ReferenceXObjectForbidden,
+    /// An encryption dictionary whose `/P` is absent or leaves bit 10 clear,
+    /// so assistive technology may not extract the text (ISO 14289-1 7.16,
+    /// ISO 32000-1 7.6.3.2 Table 22).
+    AccessibilityPermissionWithheld {
+        /// The `/P` value, or `None` where the dictionary carries none.
+        permissions: Option<i64>,
+    },
+    /// A composite font whose `/Encoding` names a CMap that is neither one of
+    /// ISO 32000-1 9.7.5.2 Table 118's predefined CMaps nor embedded
+    /// (ISO 14289-1 7.21.3.3, ISO 14289-2 8.4.5.4).
+    CMapNotEmbedded {
+        /// The name the font gave.
+        name: String,
+    },
+    /// An embedded CMap whose stream dictionary's `/WMode` and the `/WMode`
+    /// its own program defines differ (ISO 14289-1 7.21.3.3, ISO 14289-2
+    /// 8.4.5.4). Both default to 0, horizontal.
+    CMapWritingModeMismatch {
+        /// The stream dictionary's value.
+        dictionary: i64,
+        /// The program's value.
+        program: i64,
+    },
+    /// An embedded CMap whose `/UseCMap` names a CMap outside Table 118
+    /// (ISO 14289-1 7.21.3.3, ISO 14289-2 8.4.5.4).
+    CMapReferenceNotStandard {
+        /// The referenced CMap's name, or its `/CMapName` where the
+        /// reference is a stream.
+        name: String,
+    },
+    /// A composite font whose CIDFont and embedded CMap name different
+    /// character collections, or whose CIDFont's `/Supplement` exceeds the
+    /// CMap's (ISO 14289-1 7.21.3.1, ISO 14289-2 8.4.5.3.1).
+    CidSystemInfoMismatch {
+        /// Which entry disagrees: `Registry`, `Ordering` or `Supplement`.
+        key: String,
+    },
+    /// A code a page draws that the font's `/ToUnicode` maps to U+0000,
+    /// U+FEFF or U+FFFE (ISO 14289-1 7.21.7, ISO 14289-2 8.4.5.8).
+    ToUnicodeValueForbidden {
+        /// The character code.
+        code: u32,
+        /// The forbidden scalar value it maps to.
+        value: u32,
+    },
 }
 
 /// One thing wrong with the file.

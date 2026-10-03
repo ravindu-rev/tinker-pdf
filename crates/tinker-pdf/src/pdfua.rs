@@ -55,6 +55,7 @@ use crate::Document;
 
 mod fonts;
 mod structure;
+mod syntax;
 
 /// Which part of ISO 14289 a file claims.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -155,16 +156,137 @@ pub(crate) mod clauses {
         two: None,
     };
 
-    /// Natural language (UA-1 7.2, UA-2 8.4.4).
+    /// Natural language stated somewhere (UA-1 7.2). Part 2 asks for more —
+    /// the catalog's own `/Lang`, [`CATALOG_LANGUAGE`] — which every file this
+    /// rule would report also breaks, so it has no part 2 row: one defect,
+    /// one finding.
     pub(crate) const NATURAL_LANGUAGE: UaClauses = UaClauses {
         one: Some("7.2"),
+        two: None,
+    };
+
+    /// The catalog's `/Lang`, present and not empty: UA-2 8.4.4-1. Part 1
+    /// states no such rule — its 7.2 asks for a language "determinable" for
+    /// each text, which an element's `/Lang` can supply.
+    pub(crate) const CATALOG_LANGUAGE: UaClauses = UaClauses {
+        one: None,
         two: Some("8.4.4"),
+    };
+
+    /// Every `/Lang` a language identifier (UA-1 7.2-29, UA-2 8.4.4-2).
+    pub(crate) const LANGUAGE_IDENTIFIER: UaClauses = UaClauses {
+        one: Some("7.2"),
+        two: Some("8.4.4"),
+    };
+
+    /// Structure types against ISO 32000-1 14.8.4: a non-standard type
+    /// mapped to a standard one (UA-1 7.1-5), and a standard one not
+    /// remapped (7.1-7). Part 2's rules are stated over PDF 2.0's namespaces
+    /// (8.2.4), which this build does not judge yet; the row is part 1's.
+    pub(crate) const STRUCTURE_TYPES: UaClauses = UaClauses {
+        one: Some("7.1"),
+        two: None,
+    };
+
+    /// A structure element's `/P` (UA-1 7.1-12, UA-2 8.2.1-2).
+    pub(crate) const STRUCTURE_PARENT: UaClauses = UaClauses {
+        one: Some("7.1"),
+        two: Some("8.2.1"),
+    };
+
+    /// The catalog's metadata stream and its `dc:title` (UA-1 7.1-8 and -9,
+    /// UA-2 8.11.1-1 and -2).
+    pub(crate) const METADATA_STREAM: UaClauses = UaClauses {
+        one: Some("7.1"),
+        two: Some("8.11.1"),
+    };
+
+    /// `/ViewerPreferences /DisplayDocTitle true` (UA-1 7.1-10, UA-2
+    /// 8.11.2-1).
+    pub(crate) const DISPLAY_DOC_TITLE: UaClauses = UaClauses {
+        one: Some("7.1"),
+        two: Some("8.11.2"),
+    };
+
+    /// Optional content configurations (UA-1 7.10, UA-2 8.7).
+    pub(crate) const OPTIONAL_CONTENT: UaClauses = UaClauses {
+        one: Some("7.10"),
+        two: Some("8.7"),
+    };
+
+    /// An embedded file's `/F` and `/UF`, both non-empty (UA-1 7.11-1).
+    pub(crate) const EMBEDDED_FILE_NAMES: UaClauses = UaClauses {
+        one: Some("7.11"),
+        two: None,
+    };
+
+    /// An embedded file's `/Desc`, for every specification in the
+    /// `/EmbeddedFiles` name tree (UA-2 8.14.1-1).
+    pub(crate) const EMBEDDED_FILE_DESCRIPTION: UaClauses = UaClauses {
+        one: None,
+        two: Some("8.14"),
+    };
+
+    /// No reference XObject (UA-1 7.20-1). The UA-2 profile states no such
+    /// rule.
+    pub(crate) const REFERENCE_XOBJECTS: UaClauses = UaClauses {
+        one: Some("7.20"),
+        two: None,
+    };
+
+    /// An encrypted file permits extraction for accessibility (UA-1
+    /// 7.16-1). The UA-2 profile states no such rule.
+    pub(crate) const SECURITY: UaClauses = UaClauses {
+        one: Some("7.16"),
+        two: None,
+    };
+
+    /// No XFA form at all (UA-2 8.10.1-3). Part 1 forbids only *dynamic*
+    /// XFA (7.15-1), which needs the XFA packet read and is staged.
+    pub(crate) const XFA: UaClauses = UaClauses {
+        one: None,
+        two: Some("8.10.1"),
     };
 
     /// Font embedding (UA-1 7.21.4.1, UA-2 8.4.5.5.1).
     pub(crate) const FONT_EMBEDDING: UaClauses = UaClauses {
         one: Some("7.21.4.1"),
         two: Some("8.4.5.5.1"),
+    };
+
+    /// A composite font's collection against its CMap's (UA-1 7.21.3.1,
+    /// UA-2 8.4.5.3.1).
+    pub(crate) const CID_SYSTEM_INFO: UaClauses = UaClauses {
+        one: Some("7.21.3.1"),
+        two: Some("8.4.5.3.1"),
+    };
+
+    /// A Type 2 CIDFont's `/CIDToGIDMap` (UA-1 7.21.3.2, UA-2 8.4.5.3.2).
+    pub(crate) const CID_TO_GID: UaClauses = UaClauses {
+        one: Some("7.21.3.2"),
+        two: Some("8.4.5.3.2"),
+    };
+
+    /// CMaps: embedded unless predefined, `/WMode` agreeing, no reference
+    /// outside Table 118 (UA-1 7.21.3.3, UA-2 8.4.5.4).
+    pub(crate) const CMAPS: UaClauses = UaClauses {
+        one: Some("7.21.3.3"),
+        two: Some("8.4.5.4"),
+    };
+
+    /// TrueType encodings: a non-symbolic font's `/Encoding` is WinAnsi or
+    /// MacRoman, a symbolic one has none (UA-1 7.21.6-2 and -3, UA-2 8.4.5.7-2
+    /// and -3).
+    pub(crate) const TRUETYPE_ENCODINGS: UaClauses = UaClauses {
+        one: Some("7.21.6"),
+        two: Some("8.4.5.7"),
+    };
+
+    /// Unicode: every drawn code mapped, and never to U+0000, U+FEFF or
+    /// U+FFFE (UA-1 7.21.7-1 and -2, UA-2 8.4.5.8-1 and -2).
+    pub(crate) const UNICODE_MAPPING: UaClauses = UaClauses {
+        one: Some("7.21.7"),
+        two: Some("8.4.5.8"),
     };
 }
 
@@ -178,7 +300,12 @@ pub(crate) mod clauses {
 /// cannot be said to have run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Coverage {
-    /// The `pdfuaid` claim, read from the XMP packet.
+    /// The catalog and the object graph, which need no machinery past the
+    /// COS document: the metadata stream's shape, `/DisplayDocTitle`,
+    /// optional content configurations, embedded file specifications,
+    /// reference XObjects, encryption and XFA.
+    pub syntax: bool,
+    /// The `pdfuaid` claim and `dc:title`, read from the XMP packet.
     pub metadata: bool,
     /// The logical structure tree: `/MarkInfo`, the tree root, its elements.
     pub structure: bool,
@@ -189,13 +316,23 @@ pub struct Coverage {
 impl Coverage {
     /// Every group this build has rules for, which is the default request.
     pub const IMPLEMENTED: Coverage = Coverage {
+        syntax: true,
         metadata: true,
         structure: true,
         fonts: true,
     };
 
+    /// The object graph alone, which reaches for nothing past it.
+    pub const SYNTAX: Coverage = Coverage {
+        syntax: true,
+        metadata: false,
+        structure: false,
+        fonts: false,
+    };
+
     /// The claim alone: one pull-parse of a small packet, and nothing else.
     pub const METADATA: Coverage = Coverage {
+        syntax: false,
         metadata: true,
         structure: false,
         fonts: false,
@@ -203,6 +340,7 @@ impl Coverage {
 
     /// The structure tree alone, which reads no font program.
     pub const STRUCTURE: Coverage = Coverage {
+        syntax: false,
         metadata: false,
         structure: true,
         fonts: false,
@@ -210,6 +348,7 @@ impl Coverage {
 
     /// The font group alone.
     pub const FONTS: Coverage = Coverage {
+        syntax: false,
         metadata: false,
         structure: false,
         fonts: true,
@@ -222,7 +361,7 @@ impl Coverage {
     /// complete coverage means "nothing this build decides was broken".
     #[must_use]
     pub fn is_complete(self) -> bool {
-        self.metadata && self.structure && self.fonts
+        self.syntax && self.metadata && self.structure && self.fonts
     }
 }
 
@@ -231,6 +370,7 @@ impl core::fmt::Display for Coverage {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut first = true;
         for (ran, name) in [
+            (self.syntax, "syntax"),
             (self.metadata, "metadata"),
             (self.structure, "structure"),
             (self.fonts, "fonts"),
@@ -311,23 +451,6 @@ pub const STAGED: &[UaGap] = &[
     },
     UaGap {
         part: UaPart::One,
-        clause: "7.1",
-        rule: "the role map's own rules: a standard type remapped, a circular \
-               mapping, and a structure element with no /P",
-        because: "the role map is resolved by the structure reader, and these \
-                  are second clause tables on rules the PDF/A level A group \
-                  already runs (milestone 2)",
-    },
-    UaGap {
-        part: UaPart::One,
-        clause: "7.1",
-        rule: "the metadata stream, its dc:title, and \
-               /ViewerPreferences /DisplayDocTitle true",
-        because: "small rules over the catalog and the packet, not written yet \
-                  (milestone 2)",
-    },
-    UaGap {
-        part: UaPart::One,
         clause: "7.2",
         rule: "the content models of tables, lists and tables of contents, \
                and table regularity across row and column spans",
@@ -339,13 +462,14 @@ pub const STAGED: &[UaGap] = &[
     UaGap {
         part: UaPart::One,
         clause: "7.2",
-        rule: "each /Lang well formed, and the natural language determinable \
-               for alternative text, expansions, annotations, form fields, \
-               outline entries and every text item a page draws",
-        because: "the well-formedness half is the level A rule with a flag for \
-                  the empty string (milestone 2); the per-item half needs the \
-                  inheritance from parent elements and the marked-content \
-                  scopes of the real-content group",
+        rule: "a /Lang inside a marked-content property list well formed, and \
+               the natural language determinable for alternative text, \
+               expansions, annotations, form fields, outline entries and every \
+               text item a page draws",
+        because: "the catalog's and every structure element's /Lang are judged; \
+                  a property list is in a content stream, and the per-item half \
+                  needs the inheritance from parent elements and the \
+                  marked-content scopes of the real-content group (milestone 5)",
     },
     UaGap {
         part: UaPart::One,
@@ -375,29 +499,13 @@ pub const STAGED: &[UaGap] = &[
     },
     UaGap {
         part: UaPart::One,
-        clause: "7.10",
-        rule: "every optional content configuration carries a non-empty \
-               /Name and none carries /AS",
-        because: "a COS rule, not written (milestone 2)",
-    },
-    UaGap {
-        part: UaPart::One,
-        clause: "7.11",
-        rule: "an embedded file's specification carries non-empty /F and /UF",
-        because: "the PDF/A syntax group's rule, not yet given a second clause \
-                  table (milestone 2)",
-    },
-    UaGap {
-        part: UaPart::One,
         clause: "7.15",
         rule: "no dynamic XFA form",
-        because: "a COS rule over the XFA packet, not written (milestone 2)",
-    },
-    UaGap {
-        part: UaPart::One,
-        clause: "7.16",
-        rule: "an encrypted file's /P has bit 10 set",
-        because: "a COS rule, not written (milestone 2)",
+        because: "dynamic is the XFA packet's own statement \
+                  (config/acrobat/acrobat7/dynamicRender = required), so the \
+                  rule is a read of the packet's XML, which nothing here does; \
+                  forbidding every XFA form instead would report a static one, \
+                  which part 1 admits",
     },
     UaGap {
         part: UaPart::One,
@@ -412,52 +520,59 @@ pub const STAGED: &[UaGap] = &[
     UaGap {
         part: UaPart::One,
         clause: "7.20",
-        rule: "no reference XObject, and a form XObject's content in one \
-               structure element however often it is drawn",
-        because: "the first is a COS rule (milestone 2); the second counts \
-                  form invocations against /MCID ownership, which is the \
-                  real-content group (milestone 5)",
+        rule: "a form XObject's content in one structure element however \
+               often it is drawn",
+        because: "it counts form invocations against /MCID ownership, which is \
+                  the real-content group (milestone 5)",
     },
     UaGap {
         part: UaPart::One,
         clause: "7.21",
-        rule: "the font clauses past embedding: CIDSystemInfo, CIDToGIDMap, \
-               CMaps, encodings, ToUnicode and its values, glyph presence, \
-               CharSet and CIDSet, widths, cmap subtables, .notdef",
-        because: "most are rules the PDF/A font group runs and does not run \
-                  for a PDF/UA claim; giving them a second clause table is \
-                  milestone 2, and the ones that need the code-to-glyph \
-                  mapping of every drawn code stay behind it",
+        rule: "the font clauses that ask what a drawn code selects: every glyph \
+               present in the program (7.21.4.1), CharSet and CIDSet complete \
+               (7.21.4.2), /Widths against the program (7.21.5), the cmap \
+               subtables a TrueType program carries (7.21.6), a /Differences \
+               name on the Adobe Glyph List (7.21.6), a glyph name on it for an \
+               unmapped Type 1 or Type 3 font and a /ToUnicode for a font drawn \
+               only at rendering mode 3 (7.21.7), no .notdef drawn (7.21.8), \
+               and a predefined CMap's collection against the CIDFont's \
+               (7.21.3.1)",
+        because: "the font group runs everything a font dictionary and its \
+                  embedded CMap decide. These need the code-to-glyph mapping of \
+                  every drawn code into the program, the Adobe Glyph List as \
+                  vendored data, or the predefined CMaps' own collections, which \
+                  are built in only behind the cmap-predefined feature; the PDF/A \
+                  group stages the same four for the same reasons",
     },
     UaGap {
         part: UaPart::Two,
         clause: "8.2",
         rule: "the structure grammar ISO 32000-2 and ISO/TS 32005 define, the \
-               namespaced role maps, a Document element at the root, and real \
-               content against artifacts",
-        because: "the grammar is milestone 3, the namespace rules wait on the \
-                  PDF 2.0 namespaces row, and real content is milestone 5",
+               namespaced role maps and structure types, a Document element at \
+               the root, and real content against artifacts",
+        because: "the grammar is milestone 3; the namespace rules (8.2.4) are \
+                  stated over PDF 2.0's namespaces, whose type lists this build \
+                  does not hold for 2.0 (the PDF 2.0 namespaces row), so part 1's \
+                  structure-type rule does not run here; real content is \
+                  milestone 5",
     },
     UaGap {
         part: UaPart::Two,
         clause: "8.4",
-        rule: "the font clauses, Private Use Area code points without \
-               /ActualText, and the catalog's own non-empty /Lang",
-        because: "milestone 2 for the fonts and the catalog's /Lang; the PUA \
-                  rule needs the code-to-Unicode mapping of drawn glyphs \
-                  (milestone 6)",
+        rule: "the font clauses that ask what a drawn code selects (glyph \
+               presence, widths, cmap subtables, Adobe Glyph List names, \
+               .notdef, a predefined CMap's collection), a /Lang inside a \
+               marked-content property list, and Private Use Area code points \
+               without /ActualText",
+        because: "the same machinery as ISO 14289-1 7.21's residue; the PUA rule \
+                  needs the code-to-Unicode mapping of drawn glyphs and the \
+                  marked-content scopes they are drawn in (milestone 6)",
     },
     UaGap {
         part: UaPart::Two,
         clause: "8.6",
         rule: "no Private Use Area code point in a text string",
         because: "milestone 6",
-    },
-    UaGap {
-        part: UaPart::Two,
-        clause: "8.7",
-        rule: "optional content configurations named and without /AS",
-        because: "milestone 2",
     },
     UaGap {
         part: UaPart::Two,
@@ -475,21 +590,8 @@ pub const STAGED: &[UaGap] = &[
     UaGap {
         part: UaPart::Two,
         clause: "8.10",
-        rule: "widgets enclosed in Form elements, one per element, and no XFA",
-        because: "the annotation join (milestone 4); the XFA half is a COS \
-                  rule (milestone 2)",
-    },
-    UaGap {
-        part: UaPart::Two,
-        clause: "8.11",
-        rule: "the metadata stream, its dc:title, and DisplayDocTitle",
-        because: "milestone 2",
-    },
-    UaGap {
-        part: UaPart::Two,
-        clause: "8.14",
-        rule: "an embedded file's specification carries /Desc",
-        because: "milestone 2",
+        rule: "widgets enclosed in Form elements, one per element",
+        because: "the annotation join (milestone 4)",
     },
 ];
 
@@ -621,7 +723,7 @@ pub(crate) fn validate_counting(
 ) -> (Verdict, (u32, u32, u32)) {
     let machinery = Machinery::new(crate::pdfa::Coverage {
         metadata: groups.metadata,
-        syntax: false,
+        syntax: groups.syntax,
         structure: groups.structure,
         fonts: groups.fonts,
         colour: false,
@@ -639,6 +741,9 @@ pub(crate) fn validate_counting(
     }
     let numbering = part.unwrap_or(UaPart::One);
 
+    if machinery.reach(RuleGroup::Syntax) {
+        syntax::rules(&document.inner, numbering, &mut raw);
+    }
     if groups.structure {
         structure::rules(document, &machinery, numbering, &mut raw);
     }
@@ -687,11 +792,17 @@ const UA_ID_NAMESPACE: &str = "http://www.aiim.org/pdfua/ns/id/";
 /// The prefix the identification schema fixes.
 const UA_ID_PREFIX: &str = "pdfuaid";
 
+/// The Dublin Core schema's namespace, whose `title` is the document's.
+const DC_NAMESPACE: &str = "http://purl.org/dc/elements/1.1/";
+
 /// What the packet says about PDF/UA.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Identification {
     part: Option<String>,
     revision: Option<String>,
+    /// Whether the packet carries a `dc:title` property at all, which is
+    /// what veraPDF's 7.1-9 and 8.11.1-1 test (`dc_title != null`).
+    title: bool,
     /// `(property, prefix)` for every identification property written under
     /// a prefix other than `pdfuaid`.
     misprefixed: Vec<(String, String)>,
@@ -700,10 +811,19 @@ struct Identification {
 /// Reads `pdfuaid:part` and, for part 2, `pdfuaid:rev`, reporting what is
 /// wrong with the claim.
 fn claim_of(document: &Document, out: &mut Vec<UaRaw>) -> Option<UaPart> {
-    let identification = document
-        .xmp_metadata()
-        .map(|packet| identification(&packet))
-        .unwrap_or_default();
+    let packet = document.xmp_metadata();
+    let identification = packet.as_deref().map(identification).unwrap_or_default();
+
+    // ISO 14289-1 7.1 and ISO 14289-2 8.11.1: the catalog's packet names
+    // the document. Read in the same pass as the claim, because it is the
+    // same packet; a packet that is not there at all is the syntax group's
+    // finding about the stream, not this one's about a property.
+    if packet.is_some() && !identification.title {
+        out.push(UaRaw::file(
+            clauses::METADATA_STREAM,
+            FindingKind::DocumentTitleMissing,
+        ));
+    }
 
     for (property, found) in &identification.misprefixed {
         out.push(UaRaw::file(
@@ -813,6 +933,12 @@ fn identification(packet: &[u8]) -> Identification {
                         }
                         _ => {}
                     }
+                }
+                if element.local() == "title"
+                    && (element.name().namespace() == Some(DC_NAMESPACE)
+                        || element.name().prefix() == Some("dc"))
+                {
+                    found.title = true;
                 }
                 collecting = if is_uaid(element.name()) {
                     note_prefix(element.name(), &mut found);
@@ -943,7 +1069,8 @@ mod tests {
         assert_eq!(Coverage::default().to_string(), "nothing");
         assert_eq!(
             Coverage::IMPLEMENTED.to_string(),
-            "metadata, structure, fonts"
+            "syntax, metadata, structure, fonts"
         );
+        assert!(!Coverage::SYNTAX.is_complete());
     }
 }

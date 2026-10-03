@@ -56,6 +56,12 @@ struct Ua {
     lang: Option<String>,
     /// Whether the catalog names a `/StructTreeRoot`.
     tagged: bool,
+    /// The structure tree root's `/RoleMap` entries, or `None` for none.
+    role_map: Option<String>,
+    /// The metadata stream's dictionary entries.
+    metadata_dict: String,
+    /// The catalog's `/ViewerPreferences`.
+    viewer_preferences: String,
     /// Structure elements by object number, replacing the defaults.
     elements: Vec<(u32, String)>,
     /// The page's content stream.
@@ -87,6 +93,9 @@ impl Ua {
             mark_info: Some("<< /Marked true >>".to_string()),
             lang: Some("(en)".to_string()),
             tagged: true,
+            role_map: None,
+            metadata_dict: "/Type /Metadata /Subtype /XML".to_string(),
+            viewer_preferences: "<< /DisplayDocTitle true >>".to_string(),
             elements: vec![
                 (
                     11,
@@ -142,9 +151,10 @@ impl Ua {
     }
 
     fn build_with_packet(&self, packet: &str) -> Vec<u8> {
-        let mut catalog = "/Type /Catalog /Pages 2 0 R /Metadata 4 0 R \
-                           /ViewerPreferences << /DisplayDocTitle true >>"
-            .to_string();
+        let mut catalog = format!(
+            "/Type /Catalog /Pages 2 0 R /Metadata 4 0 R /ViewerPreferences {}",
+            self.viewer_preferences
+        );
         if let Some(mark_info) = &self.mark_info {
             catalog.push_str(&format!(" /MarkInfo {mark_info}"));
         }
@@ -169,10 +179,7 @@ impl Ua {
                 )
                 .into_bytes(),
             ),
-            (
-                4,
-                stream("/Type /Metadata /Subtype /XML", packet.as_bytes()),
-            ),
+            (4, stream(&self.metadata_dict, packet.as_bytes())),
             (9, stream("", self.content.as_bytes())),
         ];
         if !self.font.is_empty() {
@@ -185,9 +192,15 @@ impl Ua {
             objects.push((7, stream(&format!("/Length1 {}", program.len()), program)));
         }
         if self.tagged {
+            let role_map = self
+                .role_map
+                .as_ref()
+                .map(|entries| format!(" /RoleMap << {entries} >>"))
+                .unwrap_or_default();
             objects.push((
                 10,
-                b"<< /Type /StructTreeRoot /K 11 0 R /ParentTree 12 0 R >>".to_vec(),
+                format!("<< /Type /StructTreeRoot /K 11 0 R /ParentTree 12 0 R{role_map} >>")
+                    .into_bytes(),
             ));
             objects.push((12, b"<< /Nums [0 [13 0 R]] >>".to_vec()));
             for (num, body) in &self.elements {
@@ -554,4 +567,745 @@ fn an_unembedded_font_is_reported_under_each_parts_number() {
             "{kind:?}"
         );
     }
+}
+
+// ---- milestone 2: the PDF/A font group, run for a PDF/UA claim ---------------
+//
+// Each of these is a rule `pdfa_fonts.rs` already holds under ISO 19005's
+// numbering; the assertion here is that it now runs for a file that claims
+// PDF/UA and nothing else, under ISO 14289's number.
+
+/// A ToUnicode CMap mapping each `(code, unicode)` pair, with a one-byte or
+/// two-byte codespace.
+fn to_unicode(two_byte: bool, pairs: &[(u32, &str)]) -> Vec<u8> {
+    let (low, high, width) = if two_byte {
+        ("<0000>", "<FFFF>", 4)
+    } else {
+        ("<00>", "<FF>", 2)
+    };
+    let mut entries = String::new();
+    for (code, unicode) in pairs {
+        entries.push_str(&format!("<{code:0width$X}> <{unicode}>\n"));
+    }
+    format!(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+         /CMapName /Adobe-Identity-UCS def\n\
+         1 begincodespacerange {low} {high} endcodespacerange\n\
+         {} beginbfchar\n{entries}endbfchar\n\
+         endcmap CMapName currentdict /CMap defineresource pop end end",
+        pairs.len()
+    )
+    .into_bytes()
+}
+
+/// The baseline with its one font replaced by a Type 0 font over an embedded
+/// CIDFontType2: object 20 the descendant, 21 its `/ToUnicode`. Clean under
+/// both parts, which [`a_type0_baseline_is_clean`] asserts.
+fn type0(part: &str) -> Ua {
+    let mut fixture = Ua::new(part);
+    fixture.font = "/Type /Font /Subtype /Type0 /BaseFont /ABCDEF+Acme \
+                    /Encoding /Identity-H /DescendantFonts [20 0 R] /ToUnicode 21 0 R"
+        .to_string();
+    fixture.content = "/P << /MCID 0 >> BDC BT /F1 12 Tf 10 10 Td <0041> Tj ET EMC".to_string();
+    fixture.extra = vec![
+        (
+            20,
+            format!("<< {DESCENDANT} /CIDToGIDMap /Identity >>").into_bytes(),
+        ),
+        (21, stream("", &to_unicode(true, &[(0x41, "0041")]))),
+    ];
+    fixture
+}
+
+/// The descendant's dictionary entries, replacing object 20.
+fn with_descendant(mut fixture: Ua, entries: &str) -> Ua {
+    fixture.extra.retain(|(n, _)| *n != 20);
+    fixture
+        .extra
+        .push((20, format!("<< {entries} >>").into_bytes()));
+    fixture
+}
+
+/// An embedded CIDFontType2 with no `/CIDToGIDMap`.
+const DESCENDANT: &str = "/Type /Font /Subtype /CIDFontType2 /BaseFont /ABCDEF+Acme \
+     /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
+     /FontDescriptor 6 0 R /DW 1000";
+
+#[test]
+fn a_type0_baseline_is_clean() {
+    type0("1").clean();
+    type0("2").clean();
+}
+
+/// UA-1 7.21.3.2-1 / UA-2 8.4.5.3.2-1: an embedded Type 2 CIDFont "shall
+/// contain a CIDToGIDMap entry that shall be a stream … or the name
+/// Identity". The PDF/A group's `CidToGidMapMalformed`, re-numbered; the twin
+/// is `type0`'s own descendant, which names `/Identity`.
+#[test]
+fn a_cidfont_type2_with_no_cid_to_gid_map_is_reported_under_each_part() {
+    for (part, clause) in [("1", "7.21.3.2"), ("2", "8.4.5.3.2")] {
+        let fixture = with_descendant(type0(part), DESCENDANT);
+        let (found, kind) = fixture.one_finding();
+        assert_eq!(found, clause);
+        assert!(
+            matches!(kind, FindingKind::CidToGidMapMalformed { .. }),
+            "{kind:?}"
+        );
+    }
+}
+
+/// UA-1 7.21.6-2 / UA-2 8.4.5.7-2: a non-symbolic TrueType font's encoding is
+/// WinAnsi or MacRoman. `StandardEncoding` is neither.
+#[test]
+fn a_non_symbolic_truetype_font_in_standard_encoding_is_reported() {
+    for (part, clause) in [("1", "7.21.6"), ("2", "8.4.5.7")] {
+        let mut fixture = Ua::new(part);
+        fixture.font = fixture
+            .font
+            .replace("/WinAnsiEncoding", "/StandardEncoding");
+        let (found, kind) = fixture.one_finding();
+        assert_eq!(found, clause);
+        assert_eq!(
+            kind,
+            FindingKind::EncodingNotStandard {
+                declared: "StandardEncoding".to_string()
+            }
+        );
+    }
+}
+
+/// The baseline's TrueType font made symbolic (descriptor flag 3), with or
+/// without its `/Encoding`, and carrying a `/ToUnicode` (object 22).
+fn symbolic(part: &str, encoding: bool) -> Ua {
+    let mut fixture = Ua::new(part);
+    fixture.descriptor = fixture.descriptor.replace("/Flags 32", "/Flags 4");
+    if !encoding {
+        fixture.font = fixture.font.replace("/Encoding /WinAnsiEncoding ", "");
+    }
+    fixture.font.push_str(" /ToUnicode 22 0 R");
+    fixture
+        .extra
+        .push((22, stream("", &to_unicode(false, &[(0x41, "0041")]))));
+    fixture
+}
+
+/// UA-1 7.21.6-3: "Symbolic TrueType fonts shall not contain an Encoding
+/// entry". The twin drops the `/Encoding` and is clean.
+#[test]
+fn a_symbolic_truetype_font_with_an_encoding_is_reported_and_one_without_is_not() {
+    assert_eq!(
+        symbolic("1", true).one_finding(),
+        ("7.21.6".to_string(), FindingKind::SymbolicFontHasEncoding)
+    );
+    symbolic("1", false).clean();
+    symbolic("2", false).clean();
+}
+
+/// UA-1 7.21.7-1 / UA-2 8.4.5.8-1: every drawn code mapped to Unicode. A
+/// symbolic TrueType font with no `/ToUnicode` maps nothing — its program's
+/// `cmap` maps codes to glyphs, and a glyph is not a character. The twin is
+/// [`symbolic`]'s clean fixture, which carries one.
+#[test]
+fn a_symbolic_truetype_font_with_no_to_unicode_is_reported() {
+    for (part, clause) in [("1", "7.21.7"), ("2", "8.4.5.8")] {
+        let mut fixture = Ua::new(part);
+        fixture.descriptor = fixture.descriptor.replace("/Flags 32", "/Flags 4");
+        fixture.font = fixture.font.replace("/Encoding /WinAnsiEncoding ", "");
+        assert_eq!(
+            fixture.one_finding(),
+            (clause.to_string(), FindingKind::ToUnicodeMissing)
+        );
+    }
+}
+
+/// "Used for rendering", as the PDF/A group reads it: an unembedded font a
+/// page names and never draws, or draws only at rendering mode 3, is not
+/// reported. The census rule this group replaced judged every font a page's
+/// resources named; veraPDF's 7.21.4.1-1 is stated over fonts used for
+/// rendering and exempts `renderingMode == 3`.
+#[test]
+fn an_unembedded_font_that_is_never_drawn_visibly_is_not_reported() {
+    let mut unused = Ua::new("1");
+    unused.resources = "<< /Font << /F1 5 0 R /F2 23 0 R >> >>".to_string();
+    unused.extra.push((
+        23,
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+    ));
+    unused.clean();
+
+    let mut invisible = Ua::new("1");
+    invisible.font = "/Type /Font /Subtype /Type1 /BaseFont /Helvetica \
+                      /Encoding /WinAnsiEncoding"
+        .to_string();
+    invisible.descriptor = String::new();
+    invisible.program = None;
+    invisible.content = "/P << /MCID 0 >> BDC BT 3 Tr /F1 12 Tf 10 10 Td (A) Tj ET EMC".to_string();
+    invisible.clean();
+}
+
+// ---- milestone 2: the encoding CMap -----------------------------------------
+
+/// A CMap stream: `dict` inside its dictionary, the identity codespace and
+/// one `cidrange`, and `program_extra` in the program body.
+fn cmap_stream(dict: &str, program_extra: &str) -> Vec<u8> {
+    let program = format!(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+         {program_extra}\n\
+         /CMapName /Acme-H def\n\
+         1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
+         1 begincidrange <0000> <FFFF> 0 endcidrange\n\
+         endcmap CMapName currentdict /CMap defineresource pop end end"
+    );
+    stream(
+        &format!("/Type /CMap /CMapName /Acme-H {dict}"),
+        program.as_bytes(),
+    )
+}
+
+/// [`type0`] with its `/Encoding` an embedded CMap, object 24.
+fn with_cmap(part: &str, dict: &str, program_extra: &str) -> Ua {
+    let mut fixture = type0(part);
+    fixture.font = fixture.font.replace("/Identity-H", "24 0 R");
+    fixture.extra.push((24, cmap_stream(dict, program_extra)));
+    fixture
+}
+
+const IDENTITY_COLLECTION: &str =
+    "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>";
+
+/// UA-1 7.21.3.3-1 / UA-2 8.4.5.4-1: a CMap outside Table 118 is embedded. A
+/// name nobody predefines is the finding; `Identity-H`, in the baseline, is
+/// one twin, and an embedded CMap of the same name is the other.
+#[test]
+fn a_cmap_named_but_not_predefined_is_reported_and_one_embedded_is_not() {
+    for (part, clause) in [("1", "7.21.3.3"), ("2", "8.4.5.4")] {
+        let mut fixture = type0(part);
+        fixture.font = fixture.font.replace("/Identity-H", "/Acme-H");
+        assert_eq!(
+            fixture.one_finding(),
+            (
+                clause.to_string(),
+                FindingKind::CMapNotEmbedded {
+                    name: "Acme-H".to_string()
+                }
+            )
+        );
+        with_cmap(part, IDENTITY_COLLECTION, "").clean();
+    }
+}
+
+/// UA-1 7.21.3.3-2: an embedded CMap's dictionary `/WMode` is "identical to
+/// the WMode value in the embedded CMap stream". Both default to 0; a
+/// dictionary saying 1 over a program saying nothing is the finding, and the
+/// program saying 1 as well is the twin.
+#[test]
+fn an_embedded_cmap_whose_writing_modes_disagree_is_reported() {
+    let disagreeing = with_cmap("1", &format!("{IDENTITY_COLLECTION} /WMode 1"), "");
+    assert_eq!(
+        disagreeing.one_finding(),
+        (
+            "7.21.3.3".to_string(),
+            FindingKind::CMapWritingModeMismatch {
+                dictionary: 1,
+                program: 0
+            }
+        )
+    );
+    with_cmap(
+        "1",
+        &format!("{IDENTITY_COLLECTION} /WMode 1"),
+        "/WMode 1 def",
+    )
+    .clean();
+}
+
+/// UA-1 7.21.3.3-3 / UA-2 8.4.5.4-3: "A CMap shall not reference any other
+/// CMap except those listed in … Table 118" — by the dictionary's `/UseCMap`
+/// or by the program's `usecmap`. `Identity-H` is on the list and is the
+/// twin.
+#[test]
+fn an_embedded_cmap_using_a_cmap_off_the_list_is_reported() {
+    let by_dictionary = with_cmap(
+        "1",
+        &format!("{IDENTITY_COLLECTION} /UseCMap /Acme-Base"),
+        "",
+    );
+    assert_eq!(
+        by_dictionary.one_finding(),
+        (
+            "7.21.3.3".to_string(),
+            FindingKind::CMapReferenceNotStandard {
+                name: "Acme-Base".to_string()
+            }
+        )
+    );
+    let by_program = with_cmap("2", IDENTITY_COLLECTION, "/Acme-Base usecmap");
+    assert_eq!(
+        by_program.one_finding(),
+        (
+            "8.4.5.4".to_string(),
+            FindingKind::CMapReferenceNotStandard {
+                name: "Acme-Base".to_string()
+            }
+        )
+    );
+    with_cmap(
+        "1",
+        &format!("{IDENTITY_COLLECTION} /UseCMap /Identity-H"),
+        "",
+    )
+    .clean();
+}
+
+/// UA-1 7.21.3.1-1: with a CMap other than the identity ones, "the
+/// corresponding Registry and Ordering strings in both CIDSystemInfo
+/// dictionaries shall be identical, and the value of the Supplement key in
+/// the CIDSystemInfo dictionary of the CIDFont shall be less than or equal
+/// to the Supplement key in the CIDSystemInfo dictionary of the CMap".
+#[test]
+fn an_embedded_cmap_of_another_collection_is_reported() {
+    let other = with_cmap(
+        "1",
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 2 >>",
+        "",
+    );
+    assert_eq!(
+        other.one_finding(),
+        (
+            "7.21.3.1".to_string(),
+            FindingKind::CidSystemInfoMismatch {
+                key: "Ordering".to_string()
+            }
+        )
+    );
+    // The CIDFont's supplement above the CMap's.
+    let newer = with_descendant(
+        with_cmap("2", IDENTITY_COLLECTION, ""),
+        &format!(
+            "{} /CIDToGIDMap /Identity",
+            DESCENDANT.replace("/Supplement 0", "/Supplement 3")
+        ),
+    );
+    assert_eq!(
+        newer.one_finding(),
+        (
+            "8.4.5.3.1".to_string(),
+            FindingKind::CidSystemInfoMismatch {
+                key: "Supplement".to_string()
+            }
+        )
+    );
+    // The twin: the CMap's supplement above the CIDFont's, which the clause
+    // admits.
+    with_cmap(
+        "1",
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 5 >>",
+        "",
+    )
+    .clean();
+}
+
+// ---- milestone 2: ToUnicode values ------------------------------------------
+
+/// The baseline with a `/ToUnicode` (object 22) mapping `pairs`.
+fn mapped(part: &str, pairs: &[(u32, &str)]) -> Ua {
+    let mut fixture = Ua::new(part);
+    fixture.font.push_str(" /ToUnicode 22 0 R");
+    fixture
+        .extra
+        .push((22, stream("", &to_unicode(false, pairs))));
+    fixture
+}
+
+/// UA-1 7.21.7-2 / UA-2 8.4.5.8-2: "The Unicode values specified in the
+/// ToUnicode CMap shall all be greater than zero (0), but not equal to either
+/// U+FEFF or U+FFFE." Judged over the codes a page draws: an entry for a code
+/// nothing shows is one twin, and a drawn code mapped to `A` is the other.
+#[test]
+fn a_drawn_code_mapped_to_a_forbidden_value_is_reported() {
+    for (part, clause, value) in [("1", "7.21.7", 0x0000u32), ("2", "8.4.5.8", 0xFEFF)] {
+        let hex = format!("{value:04X}");
+        assert_eq!(
+            mapped(part, &[(0x41, &hex)]).one_finding(),
+            (
+                clause.to_string(),
+                FindingKind::ToUnicodeValueForbidden { code: 0x41, value }
+            )
+        );
+    }
+    mapped("1", &[(0x41, "0041"), (0x42, "FFFE")]).clean();
+}
+
+// ---- milestone 2: natural language ------------------------------------------
+
+/// UA-1 7.2-29 / UA-2 8.4.4-2: a `/Lang` is RFC 3066's language tag, and the
+/// empty string is not one — the reading PDF/A does not take
+/// (`pdfa::logical`'s `the_empty_language_is_pdfa_conforming_and_pdfua_not`
+/// holds both sides of the flag).
+#[test]
+fn an_empty_or_malformed_lang_is_reported_and_a_well_formed_one_is_not() {
+    let mut empty = Ua::new("1");
+    empty.lang = Some("()".to_string());
+    assert_eq!(
+        empty.one_finding(),
+        (
+            "7.2".to_string(),
+            FindingKind::LanguageMalformed {
+                declared: String::new()
+            }
+        )
+    );
+    let on_an_element = Ua::new("1").element(
+        13,
+        "<< /Type /StructElem /S /P /P 11 0 R /Pg 3 0 R /K 0 /Lang (en-) >>",
+    );
+    assert_eq!(
+        on_an_element.one_finding(),
+        (
+            "7.2".to_string(),
+            FindingKind::LanguageMalformed {
+                declared: "en-".to_string()
+            }
+        )
+    );
+    // RFC 3066's alphanumeric subtag, eight long: `1234abcd` passes in the
+    // corpus's 7.2-t29 outlines as the design records them.
+    let mut alphanumeric = Ua::new("2");
+    alphanumeric.lang = Some("(en-1234abcd)".to_string());
+    alphanumeric.clean();
+}
+
+/// UA-2 8.4.4-1: "The default natural language … shall be specified using
+/// the Lang entry, with a non-empty value, in the catalog dictionary". Under
+/// part 1 a `/Lang` on an element suffices, which is the twin.
+#[test]
+fn part_two_requires_the_catalogs_own_language() {
+    for lang in [None, Some("()")] {
+        let mut fixture = Ua::new("2").element(
+            13,
+            "<< /Type /StructElem /S /P /P 11 0 R /Pg 3 0 R /K 0 /Lang (en) >>",
+        );
+        fixture.lang = lang.map(str::to_string);
+        assert_eq!(
+            fixture.one_finding(),
+            ("8.4.4".to_string(), FindingKind::CatalogLanguageMissing)
+        );
+    }
+    let mut one = Ua::new("1").element(
+        13,
+        "<< /Type /StructElem /S /P /P 11 0 R /Pg 3 0 R /K 0 /Lang (en) >>",
+    );
+    one.lang = None;
+    one.clean();
+}
+
+// ---- milestone 2: structure types and parents -------------------------------
+
+/// The baseline with a `/RoleMap` on the structure tree root and element 13
+/// replaced.
+fn with_role_map(part: &str, role_map: &str, element: &str) -> Ua {
+    let mut fixture = Ua::new(part).element(13, element);
+    fixture.role_map = Some(role_map.to_string());
+    fixture
+}
+
+/// UA-1 7.1-5: a non-standard type "shall be mapped to the nearest
+/// functionally equivalent standard type". The PDF/A level A rule,
+/// re-numbered; the twin maps it. The UA-2 rules are stated over PDF 2.0's
+/// namespaces and are staged, so the same bytes claiming part 2 are clean.
+#[test]
+fn a_non_standard_type_with_no_mapping_is_reported_and_a_mapped_one_is_not() {
+    let unmapped = |part: &str| {
+        Ua::new(part).element(
+            13,
+            "<< /Type /StructElem /S /Para /P 11 0 R /Pg 3 0 R /K 0 >>",
+        )
+    };
+    assert_eq!(
+        unmapped("1").one_finding(),
+        (
+            "7.1".to_string(),
+            FindingKind::StructureTypeNotStandard {
+                declared: "Para".to_string(),
+                mapped: "Para".to_string()
+            }
+        )
+    );
+    unmapped("2").clean();
+    with_role_map(
+        "1",
+        "/Para /P",
+        "<< /Type /StructElem /S /Para /P 11 0 R /Pg 3 0 R /K 0 >>",
+    )
+    .clean();
+}
+
+/// UA-1 7.1-7: "Standard tags … shall not be remapped." An identity entry
+/// (`/P /P`), the commonest role-map entry in the wild, is the twin.
+#[test]
+fn a_remapped_standard_type_is_reported_and_an_identity_entry_is_not() {
+    let remapped = with_role_map(
+        "1",
+        "/P /Span",
+        "<< /Type /StructElem /S /P /P 11 0 R /Pg 3 0 R /K 0 >>",
+    );
+    assert_eq!(
+        remapped.one_finding(),
+        (
+            "7.1".to_string(),
+            FindingKind::StandardTypeRemapped {
+                declared: "P".to_string(),
+                mapped: "Span".to_string()
+            }
+        )
+    );
+    with_role_map(
+        "1",
+        "/P /P",
+        "<< /Type /StructElem /S /P /P 11 0 R /Pg 3 0 R /K 0 >>",
+    )
+    .clean();
+}
+
+/// UA-1 7.1-12 / UA-2 8.2.1-2: "A structure element dictionary shall contain
+/// the P (parent) entry".
+#[test]
+fn a_structure_element_with_no_parent_entry_is_reported() {
+    for (part, clause) in [("1", "7.1"), ("2", "8.2.1")] {
+        let orphan = Ua::new(part).element(13, "<< /Type /StructElem /S /P /Pg 3 0 R /K 0 >>");
+        assert_eq!(
+            orphan.one_finding(),
+            (clause.to_string(), FindingKind::StructureParentMissing)
+        );
+    }
+}
+
+// ---- milestone 2: the catalog and its metadata -------------------------------
+
+/// UA-1 7.1-9 / UA-2 8.11.1-1: the packet carries `dc:title`.
+#[test]
+fn a_packet_with_no_title_is_reported() {
+    for (part, clause) in [("1", "7.1"), ("2", "8.11.1")] {
+        let mut fixture = Ua::new(part);
+        fixture.xmp = String::new();
+        assert_eq!(
+            fixture.one_finding(),
+            (clause.to_string(), FindingKind::DocumentTitleMissing)
+        );
+    }
+}
+
+/// UA-1 7.1-8 / UA-2 8.11.1-2: the metadata stream's `/Type /Metadata` and
+/// `/Subtype /XML`. The twin is the baseline's stream.
+#[test]
+fn a_metadata_stream_of_the_wrong_subtype_is_reported() {
+    for (part, clause) in [("1", "7.1"), ("2", "8.11.1")] {
+        let mut fixture = Ua::new(part);
+        fixture.metadata_dict = "/Type /Metadata /Subtype /XYZ".to_string();
+        let findings = fixture.findings();
+        assert!(
+            findings.iter().any(|f| f.clause.0 == clause
+                && f.kind
+                    == FindingKind::MetadataStreamMalformed {
+                        key: "Subtype".to_string()
+                    }),
+            "{findings:#?}"
+        );
+    }
+}
+
+/// UA-1 7.1-10 / UA-2 8.11.2-1: `/DisplayDocTitle true`.
+#[test]
+fn display_doc_title_false_is_reported() {
+    for (part, clause) in [("1", "7.1"), ("2", "8.11.2")] {
+        let mut fixture = Ua::new(part);
+        fixture.viewer_preferences = "<< /DisplayDocTitle false >>".to_string();
+        assert_eq!(
+            fixture.one_finding(),
+            (clause.to_string(), FindingKind::DisplayDocTitleNotSet)
+        );
+    }
+}
+
+// ---- milestone 2: optional content, embedded files, XObjects, XFA -----------
+
+/// The baseline with an `/OCProperties` whose configurations are `oc`.
+fn with_oc(part: &str, oc: &str) -> Ua {
+    let mut fixture = Ua::new(part);
+    fixture.catalog = format!("/OCProperties << /OCGs [25 0 R] {oc} >>");
+    fixture
+        .extra
+        .push((25, b"<< /Type /OCG /Name (Layer) >>".to_vec()));
+    fixture
+}
+
+/// UA-1 7.10-1 and -2 / UA-2 8.7-1 and -2.
+///
+/// The parts differ on naming and the test asserts the difference: part 1
+/// names the default configuration always, part 2 only once `/Configs` holds
+/// one. `/AS` is forbidden under both.
+#[test]
+fn optional_content_configurations_are_named_and_carry_no_auto_state() {
+    let unnamed_default = "/D << /Order [25 0 R] >>";
+    assert_eq!(
+        with_oc("1", unnamed_default).one_finding(),
+        (
+            "7.10".to_string(),
+            FindingKind::OptionalContentConfigUnnamed
+        )
+    );
+    with_oc("2", unnamed_default).clean();
+    assert_eq!(
+        with_oc(
+            "2",
+            "/D << /Order [25 0 R] >> /Configs [<< /Name (Other) /Order [25 0 R] >>]",
+        )
+        .one_finding(),
+        ("8.7".to_string(), FindingKind::OptionalContentConfigUnnamed)
+    );
+    for (part, clause) in [("1", "7.10"), ("2", "8.7")] {
+        assert_eq!(
+            with_oc(
+                part,
+                "/D << /Name (Default) /AS [<< /Event /View /Category [/Zoom] /OCGs [25 0 R] >>] >>"
+            )
+            .one_finding(),
+            (clause.to_string(), FindingKind::OptionalContentConfigAutoState)
+        );
+    }
+    with_oc("1", "/D << /Name (Default) /Order [25 0 R] >>").clean();
+}
+
+/// An embedded file (object 26), its specification (27, carrying `spec`) and
+/// the `/EmbeddedFiles` name tree naming it (28).
+fn with_attachment(part: &str, spec: &str) -> Ua {
+    let mut fixture = Ua::new(part);
+    fixture.catalog = "/Names << /EmbeddedFiles 28 0 R >>".to_string();
+    fixture
+        .extra
+        .push((26, stream("/Type /EmbeddedFile", b"hello")));
+    fixture.extra.push((
+        27,
+        format!("<< /Type /Filespec /EF << /F 26 0 R >> {spec} >>").into_bytes(),
+    ));
+    fixture
+        .extra
+        .push((28, b"<< /Names [(a.txt) 27 0 R] >>".to_vec()));
+    fixture
+}
+
+/// UA-1 7.11-1: "The file specification dictionary for an embedded file
+/// shall contain the non-empty F and UF keys". UA-2 8.14.1-1 asks a
+/// different thing — a `/Desc` — and each part's fixture is the other's
+/// twin.
+#[test]
+fn an_embedded_file_specification_carries_what_its_part_asks() {
+    let empty_uf = "/F (a.txt) /UF () /Desc (A note)";
+    assert_eq!(
+        with_attachment("1", empty_uf).one_finding(),
+        (
+            "7.11".to_string(),
+            FindingKind::EmbeddedFileKeyMissing {
+                key: "UF".to_string()
+            }
+        )
+    );
+    with_attachment("2", empty_uf).clean();
+
+    let no_desc = "/F (a.txt) /UF (a.txt)";
+    assert_eq!(
+        with_attachment("2", no_desc).one_finding(),
+        (
+            "8.14".to_string(),
+            FindingKind::EmbeddedFileKeyMissing {
+                key: "Desc".to_string()
+            }
+        )
+    );
+    with_attachment("1", no_desc).clean();
+}
+
+/// UA-1 7.20-1: "A conforming file shall not contain any reference XObjects".
+/// The UA-2 profile states no such rule, so the same bytes claiming part 2
+/// are the twin.
+#[test]
+fn a_reference_xobject_is_a_part_one_finding() {
+    let with_ref = |part: &str| {
+        let mut fixture = Ua::new(part);
+        fixture.extra.push((
+            29,
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 10 10] \
+                 /Ref << /F (other.pdf) /Page 0 >>",
+                b"",
+            ),
+        ));
+        fixture
+    };
+    assert_eq!(
+        with_ref("1").one_finding(),
+        ("7.20".to_string(), FindingKind::ReferenceXObjectForbidden)
+    );
+    with_ref("2").clean();
+}
+
+/// UA-2 8.10.1-3: "XFA forms shall not be present." Part 1 forbids only
+/// dynamic XFA, which is staged, so the same bytes claiming part 1 are the
+/// twin.
+#[test]
+fn an_xfa_form_is_a_part_two_finding() {
+    let with_xfa = |part: &str| {
+        let mut fixture = Ua::new(part);
+        fixture.catalog = "/AcroForm << /Fields [] /XFA 30 0 R >>".to_string();
+        fixture.extra.push((30, stream("", b"<xdp:xdp/>")));
+        fixture
+    };
+    assert_eq!(
+        with_xfa("2").one_finding(),
+        ("8.10.1".to_string(), FindingKind::XfaForbidden)
+    );
+    with_xfa("1").clean();
+}
+
+/// UA-1 7.16-1: an encrypted file's `/P` sets bit 10, which ISO 32000-1 Table
+/// 22 says permits extraction "in support of accessibility". The file is the
+/// baseline re-saved by this engine's own writer with an empty user
+/// password, which the reader is then given; `-1`, every bit, is the twin.
+#[test]
+fn an_encrypted_file_that_withholds_accessibility_is_reported() {
+    let encrypted = |permissions: i32| {
+        let bytes = Document::open(Ua::new("1").build())
+            .expect("opens")
+            .editor()
+            .save(&tinker_pdf::WriteOptions {
+                mode: tinker_pdf::WriteMode::Rewrite,
+                encryption: Some(tinker_pdf::Encryption {
+                    user_password: String::new(),
+                    owner_password: "owner".to_string(),
+                    permissions,
+                    entropy: [9; 48],
+                }),
+                ..tinker_pdf::WriteOptions::default()
+            });
+        let document = Document::open(bytes).expect("it opens");
+        document
+            .authenticate("")
+            .expect("the empty user password authenticates");
+        document
+    };
+    let withheld = encrypted(!(1 << 9)).validate_pdfua().findings;
+    assert_eq!(withheld.len(), 1, "{withheld:#?}");
+    assert_eq!(withheld[0].clause.0, "7.16");
+    assert!(
+        matches!(
+            withheld[0].kind,
+            FindingKind::AccessibilityPermissionWithheld {
+                permissions: Some(_)
+            }
+        ),
+        "{:?}",
+        withheld[0].kind
+    );
+    let clean = encrypted(-1).validate_pdfua().findings;
+    assert!(clean.is_empty(), "{clean:#?}");
 }

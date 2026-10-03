@@ -10,7 +10,10 @@
 //! validator and `Document::structure` cannot disagree about what a file's
 //! tagging says.
 
+use tinker_pdf_cos::{decode_text_string, STANDARD_STRUCTURE_TYPES};
+
 use super::{clauses, UaPart, UaRaw};
+use crate::pdfa::logical::{language_is_well_formed, LanguageGrammar};
 use crate::pdfa::{FindingKind, Machinery, RuleGroup};
 use crate::structure::{StructElement, StructKid, StructureTree, StructureWarning};
 use crate::Document;
@@ -34,6 +37,9 @@ pub(super) fn rules(
     if !machinery.reach(RuleGroup::Structure) {
         return;
     }
+    // The catalog's `/Lang` is read whether or not there is a tree: a file
+    // with no structure at all still states, or fails to state, a language.
+    catalog_language(document, part, out);
     let Some(tree) = crate::structure::bind(&document.inner) else {
         out.push(UaRaw::file(
             clauses::STRUCTURE_HIERARCHY,
@@ -71,6 +77,148 @@ pub(super) fn rules(
             clauses::NATURAL_LANGUAGE,
             FindingKind::NaturalLanguageMissing,
         ));
+    }
+    element_languages(&tree, out);
+    if part == UaPart::One {
+        structure_types(&tree, out);
+    }
+    parents(document, &tree, out);
+}
+
+/// ISO 14289-1 7.2-29 and ISO 14289-2 8.4.4-2 over the catalog: "If the Lang
+/// entry is present in the document's Catalog dictionary … its value shall be
+/// a language identifier", RFC 3066's and never empty
+/// ([`LanguageGrammar::PDF_UA`]). Part 2 also requires the entry itself
+/// (8.4.4-1: "specified using the Lang entry, with a non-empty value, in the
+/// catalog dictionary").
+fn catalog_language(document: &Document, part: UaPart, out: &mut Vec<UaRaw>) {
+    let doc = &document.inner;
+    let Some(catalog) = doc.catalog() else {
+        return;
+    };
+    let value = doc.resolve_key(&catalog, doc.intern(b"Lang"));
+    let declared = value
+        .as_string()
+        .map(|string| decode_text_string(&string.bytes));
+    if part == UaPart::Two && declared.as_deref().is_none_or(str::is_empty) {
+        out.push(UaRaw::file(
+            clauses::CATALOG_LANGUAGE,
+            FindingKind::CatalogLanguageMissing,
+        ));
+        // An empty value is the finding just made; reporting it a second
+        // time as malformed would be one defect told twice.
+        return;
+    }
+    if let Some(declared) = declared {
+        if !language_is_well_formed(&declared, LanguageGrammar::PDF_UA) {
+            out.push(UaRaw::file(
+                clauses::LANGUAGE_IDENTIFIER,
+                FindingKind::LanguageMalformed { declared },
+            ));
+        }
+    }
+}
+
+/// The same rule over every structure element's `/Lang`. A `/Lang` in a
+/// marked-content property list is the content walk's, and staged.
+fn element_languages(tree: &StructureTree, out: &mut Vec<UaRaw>) {
+    let mut reported = 0usize;
+    for element in tree.elements() {
+        if reported >= MAX_FINDINGS_PER_RULE {
+            break;
+        }
+        let Some(declared) = element.lang.as_deref() else {
+            continue;
+        };
+        if !language_is_well_formed(declared, LanguageGrammar::PDF_UA) {
+            reported += 1;
+            out.push(UaRaw {
+                rule: clauses::LANGUAGE_IDENTIFIER,
+                object: element.reference,
+                kind: FindingKind::LanguageMalformed {
+                    declared: declared.to_string(),
+                },
+            });
+        }
+    }
+}
+
+/// ISO 14289-1 7.1-5 and 7.1-7: every structure type resolves through the
+/// `/RoleMap` to one of ISO 32000-1 14.8.4's standard types, and a standard
+/// type is not remapped.
+///
+/// The first half is the PDF/A level A rule (`pdfa::logical`), run here and
+/// re-numbered: the two clauses say the same sentence about the same table,
+/// and one function is what keeps them saying it alike. The second half is
+/// new — ISO 19005 does not forbid remapping a standard type — and reads what
+/// the structure reader already resolved: an element whose own `/S` is
+/// standard and whose resolved type is something else was remapped. An
+/// identity entry (`/P /P`) resolves to itself and is not reported, which is
+/// the reader's reading and the conservative one; an element in a PDF 2.0
+/// namespace is part 2's question, and part 2's rules are not this one.
+fn structure_types(tree: &StructureTree, out: &mut Vec<UaRaw>) {
+    let mut shared = Vec::new();
+    crate::pdfa::logical::structure_types(tree, &mut shared);
+    for raw in shared {
+        out.push(UaRaw {
+            rule: clauses::STRUCTURE_TYPES,
+            object: raw.object,
+            kind: raw.kind,
+        });
+    }
+    let mut reported = 0usize;
+    for element in tree.elements() {
+        if reported >= MAX_FINDINGS_PER_RULE {
+            break;
+        }
+        if element.namespace.is_some()
+            || !STANDARD_STRUCTURE_TYPES.contains(&element.raw_type.as_str())
+            || element.standard_type == element.raw_type
+        {
+            continue;
+        }
+        reported += 1;
+        out.push(UaRaw {
+            rule: clauses::STRUCTURE_TYPES,
+            object: element.reference,
+            kind: FindingKind::StandardTypeRemapped {
+                declared: element.raw_type.clone(),
+                mapped: element.standard_type.clone(),
+            },
+        });
+    }
+}
+
+/// ISO 14289-1 7.1-12, ISO 14289-2 8.2.1-2: "A structure element dictionary
+/// shall contain the P (parent) entry". Read from the element's own
+/// dictionary, since the structure reader reaches an element from its parent
+/// and records no `/P`; an element written in place rather than as an
+/// indirect object has no dictionary of its own to ask, and is not judged.
+fn parents(document: &Document, tree: &StructureTree, out: &mut Vec<UaRaw>) {
+    let doc = &document.inner;
+    let key = doc.intern(b"P");
+    let mut reported = 0usize;
+    for element in tree.elements() {
+        if reported >= MAX_FINDINGS_PER_RULE {
+            break;
+        }
+        let Some(reference) = element.reference else {
+            continue;
+        };
+        let Ok(object) = doc.get(reference) else {
+            continue;
+        };
+        let Some(dict) = object.as_dict() else {
+            continue;
+        };
+        if dict.get(key).is_none() {
+            reported += 1;
+            out.push(UaRaw {
+                rule: clauses::STRUCTURE_PARENT,
+                object: Some(reference),
+                kind: FindingKind::StructureParentMissing,
+            });
+        }
     }
 }
 

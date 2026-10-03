@@ -28,16 +28,48 @@ number differs.
 
 **Rule groups**, keyed by machinery:
 
-- **Metadata**: the `pdfuaid` claim.
+- **Syntax**, the COS document alone: the catalog's `/Metadata` a stream with
+  `/Type /Metadata /Subtype /XML` (UA-1 7.1, UA-2 8.11.1);
+  `/ViewerPreferences /DisplayDocTitle true` (7.1, 8.11.2); every optional
+  content configuration named and none carrying `/AS` (7.10, 8.7 — part 2
+  names them only once `/Configs` holds one, as its sentence says); an
+  embedded file's specification with non-empty `/F` and `/UF` (UA-1 7.11) or,
+  in the `/EmbeddedFiles` tree, a `/Desc` (UA-2 8.14); no reference XObject
+  (UA-1 7.20); an encryption dictionary whose `/P` sets bit 10, the
+  accessibility-extraction permission (UA-1 7.16); and no XFA form at all
+  (UA-2 8.10.1).
+- **Metadata**: the `pdfuaid` claim, and the packet's `dc:title` (7.1,
+  8.11.1), read in the same pass.
 - **Structure**: the tree the structure reader binds — a `/StructTreeRoot`
   (UA-1 7.1, UA-2 8.2.1), one that can be walked, `/MarkInfo /Marked true`
   (6.2 in both published profiles), `/Suspects` not true (UA-1 7.1), a
   `Figure` with `/Alt` or `/ActualText` (UA-1 7.3, UA-2 8.2.5.28.2), headings
-  starting at `H1` and never skipping a level in reading order (UA-1 7.4.2),
-  and a natural language stated somewhere (UA-1 7.2, UA-2 8.4.4).
-- **Fonts**: every font a page's resources name carries an embedded program,
-  the standard 14 included (UA-1 7.21.4.1, UA-2 8.4.5.5.1); a Type 3 font,
-  whose glyphs are content streams, has none to carry.
+  starting at `H1` and never skipping a level in reading order (UA-1 7.4.2), a
+  natural language stated somewhere (UA-1 7.2) or on the catalog itself and
+  not empty (UA-2 8.4.4), every `/Lang` on the catalog and on an element an
+  RFC 3066 language tag and never empty (7.2, 8.4.4), every structure type
+  resolving to a standard one and no standard type remapped (UA-1 7.1), and
+  every structure element carrying its `/P` (7.1, 8.2.1).
+- **Fonts**: **the PDF/A font group, run for a PDF/UA claim** and
+  re-numbered kind by kind, over the fonts a page draws with at a visible
+  rendering mode — embedding (UA-1 7.21.4.1, UA-2 8.4.5.5.1), a Type 2
+  CIDFont's `/CIDToGIDMap` (7.21.3.2, 8.4.5.3.2), a TrueType font's
+  `/Encoding` (7.21.6, 8.4.5.7), a mapping to Unicode with the PDF/A group's
+  exemptions (7.21.7, 8.4.5.8); and three rules of its own — a composite
+  font's encoding CMap embedded unless Table 118 predefines it, its `/WMode`
+  agreeing with its program, no `usecmap` outside Table 118 (7.21.3.3,
+  8.4.5.4), its collection the CIDFont's (7.21.3.1, 8.4.5.3.1) — and no drawn
+  code whose `/ToUnicode` maps to U+0000, U+FEFF or U+FFFE (7.21.7, 8.4.5.8).
+  A Type 3 font, whose glyphs are content streams, has no program to embed.
+
+**One rule, two standards.** Where ISO 14289 asks what ISO 19005 asks, the
+PDF/A rule runs and the clause is ISO 14289's: the font group above, the
+level A structure-type rule, and the language grammar, which is one function
+with one flag between them — ISO 19005 admits `/Lang ()`, ISO 14289 refuses
+it, and `pdfa::logical`'s unit test holds both sides. A finding kind with no
+PDF/UA clause — a subset tag's spelling, a program under the wrong
+`/FontFile` key, part 1's `/Differences` prohibition — is dropped rather than
+reported under the nearest number.
 
 **Abstentions are values.** `PdfUaVerdict::abstained` lists every clause of
 the part the verdict did not decide, each a `PdfUaGap` with the clause, what
@@ -98,9 +130,19 @@ honours `TINKER_CORPUS_REQUIRED`.
 
 The census figure in the roadmap — 29 of 239 caught, 210 abstained, 0 false
 alarms over 195 conforming — was measured on 16 September 2026 by the census
-*before* the validator existed. The rules here were moved in where the corpus
-was not reachable, so the census has not been run through the facade, and the
-first nightly run owes the figure.
+*before* the validator existed. The rules here, the nine moved in and the
+twenty-four milestone 2 adds, were written where the corpus was not
+reachable, so the census has not been run through the facade: the first
+nightly run owes the caught figure, and — the number that decides whether a
+milestone 2 rule stays — the false-alarm count over the 195 conforming
+files, which the census asserts is zero. Each rule's reading is held only to
+the fixture and the twin built here, which are this project's reading of the
+clause in both directions.
+
+This engine's own output carries four findings, each named in `pdfua.rs`
+with its reason: no `pdfuaid` claim, no metadata stream, no
+`/DisplayDocTitle`, and the unembedded standard 14 — all four the writer's to
+close when it claims PDF/UA (design/pdfua.md milestone 7).
 
 ## Refused by name
 

@@ -96,6 +96,16 @@ pub(super) fn rules(
     if !machinery.reach(RuleGroup::Fonts) {
         return;
     }
+    run(doc, flavour, out);
+}
+
+/// The font rules, once the group has been reached for.
+///
+/// Split from [`rules`] so that the PDF/UA validator, which reads the same
+/// fonts under ISO 14289's numbering (`docs/design/pdfua.md`, "one rule, two
+/// standards"), runs them behind its own counted reach rather than counting
+/// a second one.
+pub(crate) fn run(doc: &CosDocument, flavour: Option<Flavour>, out: &mut Vec<Raw>) {
     let mut budget = MAX_PROGRAM_PARSES;
     for reference in usage(doc) {
         let Ok(object) = doc.get(reference) else {
@@ -116,7 +126,7 @@ pub(super) fn rules(
 /// is the visitor over it. Returned as an ordered set so the findings come out
 /// in object-number order whatever order the pages happened to reach them in —
 /// a verdict is compared by tests and read by people, and both want it stable.
-fn usage(doc: &CosDocument) -> BTreeSet<ObjRef> {
+pub(crate) fn usage(doc: &CosDocument) -> BTreeSet<ObjRef> {
     let mut rendered = BTreeSet::new();
     content::walk(doc, &mut |op| {
         if !matches!(op.operator, b"Tj" | b"TJ" | b"'" | b"\"") {
@@ -710,6 +720,260 @@ fn cid_to_gid(doc: &CosDocument, descendant: &Dict, at: ObjRef, out: &mut Vec<Ra
         object: Some(at),
         kind: FindingKind::CidToGidMapMalformed { declared },
     });
+}
+
+// ---- the encoding CMap of a composite font ---------------------------------
+
+/// ISO 32000-1 9.7.5.2 Table 118: the predefined CMaps, by name.
+///
+/// **The names, not the data.** `PDFA_STAGED`'s 6.3.3.3 row stages the CMap
+/// rules because the predefined *tables* are built in only behind the
+/// `cmap-predefined` feature, and a verdict that changed with a cargo feature
+/// would not be a verdict. Whether a name is on this list does not need the
+/// tables: it is sixty-one strings, transcribed from veraPDF's published
+/// rules 7.21.3.3-1 and -3 (`veraPDF-validation-profiles` wiki at `109b482`,
+/// PDF/UA part 1), whose test conditions enumerate Table 118 name by name, and
+/// the same list stands in ISO 32000-2's Table 116 (rules 8.4.5.4-1 and -3).
+pub(crate) const PREDEFINED_CMAPS: &[&[u8]] = &[
+    b"Identity-H",
+    b"Identity-V",
+    b"GB-EUC-H",
+    b"GB-EUC-V",
+    b"GBpc-EUC-H",
+    b"GBpc-EUC-V",
+    b"GBK-EUC-H",
+    b"GBK-EUC-V",
+    b"GBKp-EUC-H",
+    b"GBKp-EUC-V",
+    b"GBK2K-H",
+    b"GBK2K-V",
+    b"UniGB-UCS2-H",
+    b"UniGB-UCS2-V",
+    b"UniGB-UTF16-H",
+    b"UniGB-UTF16-V",
+    b"B5pc-H",
+    b"B5pc-V",
+    b"HKscs-B5-H",
+    b"HKscs-B5-V",
+    b"ETen-B5-H",
+    b"ETen-B5-V",
+    b"ETenms-B5-H",
+    b"ETenms-B5-V",
+    b"CNS-EUC-H",
+    b"CNS-EUC-V",
+    b"UniCNS-UCS2-H",
+    b"UniCNS-UCS2-V",
+    b"UniCNS-UTF16-H",
+    b"UniCNS-UTF16-V",
+    b"83pv-RKSJ-H",
+    b"90ms-RKSJ-H",
+    b"90ms-RKSJ-V",
+    b"90msp-RKSJ-H",
+    b"90msp-RKSJ-V",
+    b"90pv-RKSJ-H",
+    b"Add-RKSJ-H",
+    b"Add-RKSJ-V",
+    b"EUC-H",
+    b"EUC-V",
+    b"Ext-RKSJ-H",
+    b"Ext-RKSJ-V",
+    b"H",
+    b"V",
+    b"UniJIS-UCS2-H",
+    b"UniJIS-UCS2-V",
+    b"UniJIS-UCS2-HW-H",
+    b"UniJIS-UCS2-HW-V",
+    b"UniJIS-UTF16-H",
+    b"UniJIS-UTF16-V",
+    b"KSC-EUC-H",
+    b"KSC-EUC-V",
+    b"KSCms-UHC-H",
+    b"KSCms-UHC-V",
+    b"KSCms-UHC-HW-H",
+    b"KSCms-UHC-HW-V",
+    b"KSCpc-EUC-H",
+    b"UniKS-UCS2-H",
+    b"UniKS-UCS2-V",
+    b"UniKS-UTF16-H",
+    b"UniKS-UTF16-V",
+];
+
+/// How many tokens of an embedded CMap program are read for its `/WMode`
+/// and its `usecmap`.
+const MAX_CMAP_TOKENS: usize = 1 << 16;
+
+/// What is wrong with a composite font's encoding CMap, as `(object, kind)`.
+///
+/// Four requirements ISO 14289-1 states at 7.21.3.1 and 7.21.3.3, and ISO
+/// 14289-2 at 8.4.5.3.1 and 8.4.5.4, in the words of veraPDF's published rules
+/// for them:
+///
+/// - a CMap not in Table 118 is embedded (7.21.3.3-1);
+/// - an embedded CMap's dictionary `/WMode` is "identical to the WMode value
+///   in the embedded CMap stream" (-2), both 0 when unwritten (Table 120);
+/// - a CMap references no CMap outside Table 118 (-3), whether by the stream
+///   dictionary's `/UseCMap` or by the program's own `usecmap`;
+/// - an embedded CMap's character collection is the CIDFont's: `/Registry`
+///   and `/Ordering` identical and the CIDFont's `/Supplement` not exceeding
+///   the CMap's (7.21.3.1). Decided only where both dictionaries carry a
+///   `/CIDSystemInfo`; a predefined CMap's collection is in the tables this
+///   build does not carry by default, and the identity CMaps admit any.
+///
+/// Returned as kinds rather than pushed as findings, because the clause is
+/// the caller's: the same four sentences are numbered differently by each
+/// standard that asks them.
+pub(crate) fn cmap_findings(
+    doc: &CosDocument,
+    font: &Dict,
+    at: ObjRef,
+) -> Vec<(ObjRef, FindingKind)> {
+    let mut out = Vec::new();
+    let key = doc.intern(b"Encoding");
+    let encoding = doc.resolve_key(font, key);
+    match encoding.as_ref() {
+        Object::Name(name) => {
+            let name = doc
+                .name_bytes(*name)
+                .map(|n| n.to_vec())
+                .unwrap_or_default();
+            if !PREDEFINED_CMAPS.contains(&name.as_slice()) {
+                out.push((
+                    at,
+                    FindingKind::CMapNotEmbedded {
+                        name: String::from_utf8_lossy(&name).into_owned(),
+                    },
+                ));
+            }
+        }
+        Object::Stream(stream) => {
+            // 7.3.8: a stream is indirect, so the entry is a reference.
+            let reference = font.get_ref(key).unwrap_or(at);
+            let program = doc.stream_decoded(reference).unwrap_or_default();
+            let (program_mode, used) = cmap_program(&program);
+            let dictionary_mode = doc
+                .resolve_key(&stream.dict, doc.intern(b"WMode"))
+                .as_int()
+                .unwrap_or(0);
+            if dictionary_mode != program_mode {
+                out.push((
+                    reference,
+                    FindingKind::CMapWritingModeMismatch {
+                        dictionary: dictionary_mode,
+                        program: program_mode,
+                    },
+                ));
+            }
+            let mut referenced: Vec<Vec<u8>> = used.into_iter().collect();
+            match doc
+                .resolve_key(&stream.dict, doc.intern(b"UseCMap"))
+                .as_ref()
+            {
+                Object::Name(name) => {
+                    referenced.extend(doc.name_bytes(*name).map(|n| n.to_vec()));
+                }
+                Object::Stream(parent) => {
+                    referenced.push(name_of(doc, &parent.dict, b"CMapName").unwrap_or_default())
+                }
+                _ => {}
+            }
+            for name in referenced {
+                if !PREDEFINED_CMAPS.contains(&name.as_slice()) {
+                    out.push((
+                        reference,
+                        FindingKind::CMapReferenceNotStandard {
+                            name: String::from_utf8_lossy(&name).into_owned(),
+                        },
+                    ));
+                }
+            }
+            let descendant = doc
+                .resolve_key(font, doc.intern(b"DescendantFonts"))
+                .as_array()
+                .and_then(<[Object]>::first)
+                .map(|first| doc.resolve(first));
+            let descendant_info = descendant
+                .as_deref()
+                .and_then(Object::as_dict)
+                .map(|d| doc.resolve_key(d, doc.intern(b"CIDSystemInfo")));
+            let cmap_info = doc.resolve_key(&stream.dict, doc.intern(b"CIDSystemInfo"));
+            if let (Some(font_info), Some(cmap_info)) = (
+                descendant_info.as_deref().and_then(Object::as_dict),
+                cmap_info.as_dict(),
+            ) {
+                for key in collection_disagreements(doc, font_info, cmap_info) {
+                    out.push((
+                        at,
+                        FindingKind::CidSystemInfoMismatch {
+                            key: key.to_string(),
+                        },
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// What an embedded CMap's own program says: its `/WMode` (0 when it writes
+/// none, Table 120's default) and every name it `usecmap`s.
+fn cmap_program(program: &[u8]) -> (i64, BTreeSet<Vec<u8>>) {
+    use tinker_pdf_content::{Token, Tokenizer};
+    let mut mode = None;
+    let mut used = BTreeSet::new();
+    let mut previous: Vec<Token> = Vec::new();
+    let mut tokenizer = Tokenizer::new(program);
+    let mut seen = 0usize;
+    while let Some(token) = tokenizer.next_token() {
+        seen += 1;
+        if seen > MAX_CMAP_TOKENS {
+            break;
+        }
+        if let Token::Operator(operator) = &token {
+            match (operator.as_slice(), previous.as_slice()) {
+                // `/WMode 1 def`: the first definition is the CMap's own.
+                (b"def", [.., Token::Name(key), Token::Number(value)])
+                    if key.as_slice() == b"WMode" && mode.is_none() =>
+                {
+                    mode = Some(*value as i64);
+                }
+                (b"usecmap", [.., Token::Name(name)]) => {
+                    used.insert(name.clone());
+                }
+                _ => {}
+            }
+            previous.clear();
+            continue;
+        }
+        if previous.len() >= 2 {
+            previous.remove(0);
+        }
+        previous.push(token);
+    }
+    (mode.unwrap_or(0), used)
+}
+
+/// Which of `/Registry`, `/Ordering` and `/Supplement` break 7.21.3.1's
+/// relationship between a CIDFont's collection and its CMap's.
+fn collection_disagreements(doc: &CosDocument, font: &Dict, cmap: &Dict) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for key in ["Registry", "Ordering"] {
+        let a = doc.resolve_key(font, doc.intern(key.as_bytes()));
+        let b = doc.resolve_key(cmap, doc.intern(key.as_bytes()));
+        let same = match (a.as_string(), b.as_string()) {
+            (Some(a), Some(b)) => a.bytes == b.bytes,
+            _ => false,
+        };
+        if !same {
+            out.push(key);
+        }
+    }
+    let font_supplement = doc.resolve_key(font, doc.intern(b"Supplement")).as_int();
+    let cmap_supplement = doc.resolve_key(cmap, doc.intern(b"Supplement")).as_int();
+    if !matches!((font_supplement, cmap_supplement), (Some(a), Some(b)) if a <= b) {
+        out.push("Supplement");
+    }
+    out
 }
 
 // ---- shared ---------------------------------------------------------------

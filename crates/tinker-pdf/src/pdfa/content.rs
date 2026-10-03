@@ -48,26 +48,26 @@ const MAX_TOKENS: usize = 1 << 22;
 const MAX_OPERANDS: usize = 64;
 
 /// The text rendering mode ISO 32000-1 9.3.6 gives to invisible text.
-pub(super) const RENDER_MODE_INVISIBLE: f64 = 3.0;
+pub(crate) const RENDER_MODE_INVISIBLE: f64 = 3.0;
 
 /// One operator, with everything a rule needs to judge it.
-pub(super) struct Op<'a> {
+pub(crate) struct Op<'a> {
     /// The resource dictionary in scope, which is the stream's own or the one
     /// it inherited from the stream that invoked it (7.8.3).
-    pub(super) resources: Option<&'a Dict>,
+    pub(crate) resources: Option<&'a Dict>,
     /// The operator's bytes, without a leading slash — `rg`, `Do`, `Tj`.
-    pub(super) operator: &'a [u8],
+    pub(crate) operator: &'a [u8],
     /// Its operands, in the order they were written.
-    pub(super) operands: &'a [Token],
+    pub(crate) operands: &'a [Token],
     /// The text rendering mode in force.
-    pub(super) mode: f64,
+    pub(crate) mode: f64,
     /// The resource name the last `Tf` selected.
-    pub(super) font: Option<&'a [u8]>,
+    pub(crate) font: Option<&'a [u8]>,
 }
 
 impl Op<'_> {
     /// The first operand, when it is a name.
-    pub(super) fn first_name(&self) -> Option<&[u8]> {
+    pub(crate) fn first_name(&self) -> Option<&[u8]> {
         match self.operands.first() {
             Some(Token::Name(name)) => Some(name),
             _ => None,
@@ -77,7 +77,7 @@ impl Op<'_> {
 
 /// Calls `visit` for every operator of every content stream the document
 /// renders.
-pub(super) fn walk(doc: &CosDocument, visit: &mut impl FnMut(&Op<'_>)) {
+pub(crate) fn walk(doc: &CosDocument, visit: &mut impl FnMut(&Op<'_>)) {
     let mut walker = Walker {
         doc,
         streams: MAX_STREAMS,
@@ -120,7 +120,7 @@ pub(super) fn walk(doc: &CosDocument, visit: &mut impl FnMut(&Op<'_>)) {
 
 /// A named resource's indirect reference, through the resource dictionary's
 /// own sub-dictionary.
-pub(super) fn lookup(
+pub(crate) fn lookup(
     doc: &CosDocument,
     resources: &Dict,
     category: &[u8],

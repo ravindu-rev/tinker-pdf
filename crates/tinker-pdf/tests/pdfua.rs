@@ -477,18 +477,29 @@ fn a_book_that_says_what_it_is() -> Vec<u8> {
 /// - `FontNotEmbedded`: a book with no `@font-face` is set in the standard
 ///   14, which the writer does not embed; ISO 14289-1 7.21.4.1 exempts none.
 ///   That is a font-provision question (`FontProvider`, bundled faces).
+/// - `MetadataMissing` and `DisplayDocTitleNotSet`, since milestone 2 of the
+///   PDF/UA design: ISO 14289-1 7.1 asks for a metadata stream in the catalog
+///   and for `/ViewerPreferences /DisplayDocTitle true`, and the writer, which
+///   claims no PDF/UA conformance, writes neither outside the archival
+///   profile. Both are the same ledger milestone as the claim itself.
 #[test]
 fn this_engines_own_epub_output_is_censused_and_what_remains_is_named() {
     let doc = Document::open(a_book_that_says_what_it_is()).expect("a book");
     assert_eq!(
         findings_of(&doc),
-        ["PdfUaIdentifierMissing", "FontNotEmbedded"]
+        [
+            "PdfUaIdentifierMissing",
+            "MetadataMissing",
+            "DisplayDocTitleNotSet",
+            "FontNotEmbedded"
+        ]
     );
 }
 
 /// **The census over a document built with the tagging API**, with what
-/// remains named — the same two, for the same reasons: the builder writes no
-/// `pdfuaid` packet, and this document is set in an unembedded standard font.
+/// remains named — the same four, for the same reasons: the builder writes no
+/// packet (so no `pdfuaid` claim and no metadata stream) and no viewer
+/// preferences, and this document is set in an unembedded standard font.
 /// Everything the tagging API decides — a tree, `/Marked`, described figures,
 /// heading order, a language — trips nothing.
 #[test]
@@ -521,6 +532,11 @@ fn a_tagged_document_builder_document_is_censused_and_what_remains_is_named() {
     let doc = Document::open(builder.finish()).expect("opens");
     assert_eq!(
         findings_of(&doc),
-        ["PdfUaIdentifierMissing", "FontNotEmbedded"]
+        [
+            "PdfUaIdentifierMissing",
+            "MetadataMissing",
+            "DisplayDocTitleNotSet",
+            "FontNotEmbedded"
+        ]
     );
 }

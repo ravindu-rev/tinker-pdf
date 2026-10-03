@@ -404,3 +404,64 @@ the facade still reads 29 caught, 0 false alarms", has not been measured. The
 corpus was not reachable where this landed; the census was run to prove it
 skips cleanly and fails when required, and the next nightly run records the
 figure.
+
+**Milestone 2 landed in October 2026, with its corpus exit criteria owed.**
+Twenty-four rules, each in `pdfua_rules.rs` with a fixture at the edge of its
+clause and the twin that must not fire, each citing the clause and sentence
+of veraPDF's published rule (the wiki's statements at `109b482`). What the
+milestone table priced, and what it became:
+
+- **Second clause tables on the shared rules.** The PDF/A font group runs for
+  a PDF/UA claim under a part 2, level U reading — `pdfa::fonts::run`, split
+  from the group's counted reach so the PDF/UA group reaches once — and
+  `pdfua::fonts::ua_clause_of` re-numbers what it finds kind by kind:
+  `FontNotEmbedded`, `CidToGidMapMalformed`, `EncodingNotStandard`,
+  `SymbolicFontHasEncoding`, `ToUnicodeMissing`. Its `/ToUnicode` exemptions
+  are a superset of 7.21.7's, so what it reports 7.21.7 reports. Four kinds
+  are dropped rather than given the nearest number: the subset tag, the
+  program/key pairing, an unreadable program, part 1's `/Differences`.
+  **`CidSystemInfoIncomplete` is dropped too, against this table's first
+  draft**: 7.21.3.1 is a relationship between two dictionaries, and veraPDF's
+  test passes any CIDFont collection under `Identity-H`, so a missing entry
+  there is not a 7.21.3.1 failure; the relationship is a new rule instead.
+  Embedding is now judged over the fonts drawn at a visible rendering mode,
+  as the PDF/A group judges it, not over every font a page's resources name —
+  the census's reading, and the one veraPDF's 7.21.4.1-1 (`renderingMode ==
+  3` exempt) does not take.
+- **`/Lang` with the empty-string flag**: `pdfa::logical::LanguageGrammar`,
+  one function and one flag; PDF/UA reads RFC 3066 and refuses `()`, as
+  7.2-29's and 8.4.4-2's published pattern does. Part 2 also asks for the
+  catalog's own (8.4.4-1), which subsumes "a language stated somewhere", so
+  that rule has no part 2 row any more.
+- **Role map and structure types** (UA-1 7.1-5, -7, -12; UA-2 8.2.1-2): the
+  level A rule re-numbered, a standard type remapped (read off what the
+  structure reader resolved, so `/P /P` is not a remap), and an element's own
+  `/P`. UA-2's 8.2.4 is stated over PDF 2.0's namespaces and stays staged.
+- **Optional content, embedded files, the three metadata rules**, as the
+  table said; the two parts' sentences differ on naming a lone default
+  configuration and on what a file specification carries (`/F`, `/UF` under
+  part 1; `/Desc` in `/EmbeddedFiles` under part 2), and each part's fixture
+  is the other's twin.
+- **Small rules the table did not list**, COS reads the published profiles
+  state: no reference XObject (7.20-1), the accessibility permission bit
+  (7.16-1), no XFA under part 2 (8.10.1-3).
+- **The three font rules with no PDF/A analogue**: `WMode` agreement landed
+  (7.21.3.3-2) with the rest of the CMap clause — a CMap outside Table 118
+  embedded, no `usecmap` outside it, an embedded CMap's collection the
+  CIDFont's — over the sixty-one names veraPDF's test conditions enumerate,
+  which needs none of the `cmap-predefined` tables. The forbidden `ToUnicode`
+  values landed over the codes a page draws. **The `/Differences` name absent
+  from the Adobe Glyph List did not**: the glyph list is not vendored in this
+  tree, and it stays in the 7.21 residue with glyph presence, `CharSet` and
+  `CIDSet`, `/Widths` and `.notdef`.
+
+`PDFUA_STAGED` went from twenty-five entries to seventeen, and five of those narrowed. **What is owed**:
+every exit criterion of this milestone that is a corpus figure — 7.21's
+abstentions falling to the staged residue, 8.4.5's likewise, the caught floor
+re-recorded, and above all **false alarms still zero over the 195 conforming
+files** — has not been measured, for the same reason as milestone 1's. The
+one exit criterion that is not a corpus figure, "`/Lang ()` reported under
+PDF/UA and admitted under PDF/A in one test", is
+`the_empty_language_is_pdfa_conforming_and_pdfua_not`. Until the nightly run
+reports, each of the twenty-four is held only to the fixture and twin built
+here, which read the clause the same way in both directions.
