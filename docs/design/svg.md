@@ -334,7 +334,10 @@ pattern that paints itself, directly or along its chain, is
 `Refusal::TooManyUses`, the `<use>` bomb's fourth spelling. Each tile's nodes
 are charged against `max_nodes` once per shape it fills, so a pattern painted
 on a thousand shapes is a thousand tiles' worth of the budget, as the same
-`<use>` a thousand times is.
+`<use>` a thousand times is. Text a tile or a mask draws had its face left
+unregistered until both were checked for it — the registry noted the page's
+runs and a group's, not a mask's or a tile's, so their `Tf` named a font the
+file did not hold (`text_inside_a_tile_or_a_mask_names_a_font_the_file_has`).
 
 **What this cannot reach**, stated rather than absorbed: nothing outside this
 repository adjudicates a rendering (ruling 13), so every expected value here is

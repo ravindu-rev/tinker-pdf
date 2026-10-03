@@ -46,6 +46,8 @@
 //! | a masked group is drawn unmasked | 4 |
 //! | a pattern's tile does not carry the page mapping | 1 |
 //! | a pattern is painted as nothing | 1 |
+//! | the registry does not note a tile's runs | 1 |
+//! | the registry does not note a mask's runs | 1 |
 //! | the reader ignores a container's `clip-path`, as it did until groups | 1 |
 //!
 //! The form row fired **zero** the first time: its fixture's shapes covered
@@ -616,6 +618,64 @@ fn a_groups_clip_path_reaches_the_page() {
 }
 
 // ---- §13.3's patterns ---------------------------------------------------------
+
+/// Every font resource a `Tf` names in the saved file, and whether a `/Font`
+/// dictionary somewhere defines it.
+fn fonts_named_and_defined(doc: &Document) -> Vec<(String, bool)> {
+    let pdf = doc.editor().save(&Default::default());
+    let text = String::from_utf8_lossy(&pdf);
+    let mut named: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        for (at, word) in words.iter().enumerate() {
+            if *word == "Tf" && at >= 2 {
+                if let Some(font) = words[at - 2].strip_prefix('/') {
+                    if !named.iter().any(|n| n == font) {
+                        named.push(font.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    named
+        .into_iter()
+        .map(|font| {
+            let defined = text.split("/Font").skip(1).any(|after| {
+                let dictionary = after.split(">>").next().unwrap_or("");
+                dictionary.contains(&format!("/{font} "))
+            });
+            (font, defined)
+        })
+        .collect()
+}
+
+/// **Text that only a pattern's tile or a mask draws has its face
+/// registered.** The registry notes every run it will draw so that each face
+/// is written once; a run inside a tile or a mask was not noted, so its `Tf`
+/// named a resource no `/Font` dictionary held, and the text was gone.
+#[test]
+fn text_inside_a_tile_or_a_mask_names_a_font_the_file_has() {
+    for markup in [
+        r##"<pattern id="p" patternUnits="userSpaceOnUse" width="50" height="50">
+              <text x="5" y="20" font-family="serif" font-size="12">Tile</text>
+            </pattern>
+            <rect width="100" height="100" fill="url(#p)"/>"##,
+        r##"<mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+              <text x="5" y="20" font-family="serif" font-size="12" fill="white">Mask</text>
+            </mask>
+            <rect width="100" height="100" mask="url(#m)"/>"##,
+    ] {
+        let doc = open(&format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">{markup}</svg>"##
+        ));
+        let fonts = fonts_named_and_defined(&doc);
+        assert!(!fonts.is_empty(), "the run is written: {markup}");
+        assert!(
+            fonts.iter().all(|(_, defined)| *defined),
+            "{fonts:?} in {markup}"
+        );
+    }
+}
 
 /// **A pattern reaches the page as tiles**: a checkerboard twenty units a
 /// tile, black in its top-left and bottom-right quarters.

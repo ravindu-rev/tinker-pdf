@@ -1615,14 +1615,47 @@ pub fn note(scene: &Scene, fonts: &mut Fonts<'_>) {
     note_nodes(&scene.nodes, fonts);
 }
 
+/// The runs a pattern's tile draws, which are drawn in its cell's stream and
+/// need their faces as much as the page's do.
+fn note_paint(paint: &Paint, fonts: &mut Fonts<'_>) {
+    if let Paint::Pattern(tile) = paint {
+        note_nodes(&tile.nodes, fonts);
+    }
+}
+
+/// Every run a node list draws — at every depth of a group, inside a mask,
+/// and inside a tile of any paint — noted, so that every face a stream names
+/// is one the registry writes.
 fn note_nodes(nodes: &[Node], fonts: &mut Fonts<'_>) {
     for node in nodes {
         let (text, font) = match node {
-            Node::Group { nodes, .. } => {
+            Node::Group { nodes, mask, .. } => {
                 note_nodes(nodes, fonts);
+                if let Some(mask) = mask {
+                    note_nodes(&mask.nodes, fonts);
+                }
                 continue;
             }
-            Node::Text { text, font, .. } => (text, font),
+            Node::Path { fill, stroke, .. } => {
+                note_paint(fill, fonts);
+                if let Some(stroke) = stroke {
+                    note_paint(&stroke.paint, fonts);
+                }
+                continue;
+            }
+            Node::Text {
+                text,
+                font,
+                fill,
+                stroke,
+                ..
+            } => {
+                note_paint(fill, fonts);
+                if let Some(stroke) = stroke {
+                    note_paint(&stroke.paint, fonts);
+                }
+                (text, font)
+            }
             _ => continue,
         };
         fonts.note(&TextRun {
