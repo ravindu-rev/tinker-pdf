@@ -292,6 +292,11 @@ fn exercise(bytes: Vec<u8>) {
             });
             let _ = order.plain_text();
             let _ = order.moved();
+            // The stated tables: a grid placed by spans the file states,
+            // which may claim any number of rows and columns.
+            for table in page.stated_tables() {
+                let _ = (table.rows, table.columns, table.cells.len());
+            }
         }
 
         // Image extraction describes every image dictionary the page reaches

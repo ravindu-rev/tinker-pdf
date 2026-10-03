@@ -566,6 +566,41 @@ impl StructureTree {
     }
 }
 
+impl StructureTree {
+    /// The runs each of `elements` claims on page `index`, one list per
+    /// element and each in structure order — [`StructureTree::text_for_page`]'s
+    /// join, over one element's subtree at a time and the **same**
+    /// [`TextPage`].
+    ///
+    /// For a reader that wants the content of particular elements — a table's
+    /// cells — rather than the page's. The page's characters are grouped by
+    /// sequence once, so the cost is the page plus the subtrees walked.
+    pub(crate) fn element_runs(
+        &self,
+        elements: &[&StructElement],
+        index: u32,
+        page: &TextPage,
+    ) -> Vec<Vec<StructuredNode>> {
+        let mut join = Join {
+            index,
+            unpaged_is_here: self.page_count <= 1,
+            by_mcid: chars_by_mcid(page),
+            page,
+            claimed: BTreeSet::new(),
+            nodes: Vec::new(),
+            warnings: Vec::new(),
+        };
+        elements
+            .iter()
+            .map(|element| {
+                join.nodes.clear();
+                join.element(element, 0, false);
+                std::mem::take(&mut join.nodes)
+            })
+            .collect()
+    }
+}
+
 /// A page's text in structure order (14.8).
 #[derive(Clone, Debug)]
 pub struct StructuredText {

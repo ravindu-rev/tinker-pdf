@@ -281,7 +281,35 @@ sentence.
 
 ## As built
 
-*Filled in as milestones land.* Nothing has landed; the roadmap row is not
-scheduled. The census numbers above were produced by a scratch program that
-is not in the tree, which is why milestone 1's first exit criterion is a test
-that re-derives them.
+**Milestone 1 (3 October 2026): stated tables.** The attribute reader the
+design asked for had already landed with the tagged-writing row —
+`StructElement::table` reads `/A`'s `/Table`-owned `/Headers`, `/Scope`,
+`/Summary`, `/RowSpan` and `/ColSpan`, and `StructElement::id` reads `/ID` —
+so this milestone shrank to the walk. `Page::stated_tables`
+(`crates/tinker-pdf/src/tables.rs`) finds every `Table` element, its `TR`
+rows through `THead`, `TBody`, `TFoot` and any other grouping element, and
+each row's `TH` and `TD` cells, never walking into a `Table` inside a cell;
+each cell's characters are the ones the structure join claims for its
+subtree over the **same** `TextPage` (`StructureTree::element_runs`, the
+page's sequences grouped once). Cells are placed as a table model places
+them — each in its row's first column no span above still holds — and what
+the file's arithmetic does not allow is named rather than repaired:
+`TableWarning::SpanInconsistent` for a cell over a held slot, a row span
+past the last row, or a column span past the most columns a table of that
+many cells can have (the clamp that keeps a `/ColSpan` of four billion from
+being an allocation), and `TableWarning::RaggedRows` for a row whose width is
+not the table's. Placement asks a segment tree over the columns where the
+next free one is, so a table whose every cell spans every row is a logarithm
+per cell and not a walk.
+
+Measured, first-party (`crates/tinker-pdf/tests/tables.rs`): an EPUB table
+with a header row, a column span and a row span reads back as its markup
+states it — 5 rows, 3 columns, 13 cells at their places, the header cells
+`TH` with `/Scope /Column`, every cell's characters spelling its text; five
+of the nine committed books carry one twelve-cell table each, all regular.
+`table_census.rs` counts the family per corpus by `standard_type` and reads
+every stated table on the pages it scores, in `corpus.yml`'s census step.
+**The corpus counts are owed**: the census has not run where this landed,
+so the 207 files, 1 908 tables and 74 474 `TD`s above are printed beside
+what the first run measures rather than asserted, and the eight span
+fixtures' spans are printed by name for the same reason.

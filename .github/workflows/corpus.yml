@@ -110,6 +110,7 @@ jobs:
             --test reading_order_census \
             --test signatures \
             --test streaming_open \
+            --test table_census \
             --test tagged_corpus \
             --test verdicts \
             -- --ignored --nocapture

@@ -445,6 +445,14 @@ permutation back to stream order, never a `TextPage` and never the default
 preferred to a statement; `InferenceOptions::hide_structure` reads past the
 tree only so the inference can be measured against it.
 
+**Tables a producer stated are read as a grid.** `Page::stated_tables()`
+walks the tree's `Table`, `TR`, `TH` and `TD` elements and places each cell
+by its `/RowSpan` and `/ColSpan` (Table 349), each with the characters the
+structure join claims for it on the page; a span that does not add up is
+`TableWarning::SpanInconsistent` and a row of the wrong width
+`TableWarning::RaggedRows`, never a repair
+([design/table-reconstruction.md](../design/table-reconstruction.md)).
+
 ### The structured view (14.7, 14.8)
 
 A tagged document says its own reading order, and that order is often not
