@@ -870,3 +870,45 @@ fn a_transformed_box_contains_its_absolute_descendants_as_a_positioned_one_does(
     let broken = lay(common, body);
     same("transform", transformed, positioned, broken);
 }
+
+// ---- the layout refusals ---------------------------------------------------------
+
+/// **Cells with no row are one anonymous row** (CSS 2.2 §17.2.1 rule 8:
+/// *"for each `table-cell` box whose parent is not a `table-row`, generate an
+/// anonymous `table-row` box around it and all consecutive siblings that are
+/// `table-cell` boxes"*): cells written straight into a row group, into a
+/// table, and into no table at all lay out as the row the markup omitted.
+#[test]
+fn cells_with_no_row_are_the_row_the_markup_omitted() {
+    let style = "body { font-size: 20px; line-height: 30px } td, .c { padding: 0 } \
+                 .c { display: table-cell } table.flush { border-spacing: 0 }";
+    // The user-agent sheet's `border-spacing: 2px` is the `<table>` element's,
+    // so the cells of a real table sit two pixels apart; an anonymous table
+    // (rule 9's) inherits nothing it does not inherit and has none, so its
+    // reference is a table told to have none.
+    for (what, written, implied) in [
+        (
+            "cells in a row group",
+            "<table><tbody><tr><td>aa</td><td>bb</td></tr></tbody></table>",
+            "<table><tbody><td>aa</td><td>bb</td></tbody></table>",
+        ),
+        (
+            "cells in a table",
+            "<table><tbody><tr><td>aa</td><td>bb</td></tr></tbody></table>",
+            "<table><td>aa</td><td>bb</td></table>",
+        ),
+        (
+            "cells in no table",
+            r#"<table class="flush"><tr><td>aa</td><td>bb</td></tr></table>"#,
+            r#"<div><div class="c">aa</div><div class="c">bb</div></div>"#,
+        ),
+    ] {
+        // The mismatch: the same two cells in two rows, which is a different
+        // table — what an anonymous row per cell would draw.
+        let broken = lay(
+            style,
+            "<table><tr><td>aa</td></tr><tr><td>bb</td></tr></table>",
+        );
+        same(what, lay(style, written), lay(style, implied), broken);
+    }
+}
