@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tinker_pdf_cos::build::{DocumentBuilder, PageBuilder, Tag};
+use tinker_pdf_cos::build::{DocumentBuilder, PageBuilder, TableAttributes, TableScope, Tag};
 use tinker_pdf_cos::is_language_tag;
 use tinker_pdf_layout::{Page as LayoutPage, ReplacedFragment, TextRun};
 
@@ -41,6 +41,29 @@ pub(crate) struct Tagging<'a> {
     /// Every `<a>` that holds a link annotation, by element. Each is a `/Link`
     /// (14.8.4.4.2) whose `/OBJR`s `PageBuilder::link_for` attaches by key.
     pub links: &'a BTreeSet<usize>,
+    /// The content document's container path, which qualifies its `id`s: a
+    /// structure element's `/ID` is unique in the **document** (14.7.2), and
+    /// two chapters may both say `id="h1"`.
+    pub path: &'a str,
+    /// Every table cell carrying an `id`, by that id. See [`table_cells`].
+    pub cells: &'a BTreeMap<String, usize>,
+}
+
+/// Every `<th>` and `<td>` of a content document carrying an `id`, by that
+/// id, the first element winning where a document repeats one — which is
+/// the set a cell's `headers` may name and the cells that are written with an
+/// `/ID`.
+pub(crate) fn table_cells(dom: &Dom) -> BTreeMap<String, usize> {
+    let mut out = BTreeMap::new();
+    for (at, node) in dom.nodes.iter().enumerate() {
+        if !node.is_html() || !matches!(node.name.as_str(), "th" | "td") {
+            continue;
+        }
+        if let Some(id) = node.id.as_deref().filter(|id| !id.is_empty()) {
+            out.entry(id.to_string()).or_insert(at);
+        }
+    }
+    out
 }
 
 /// Whether a link rectangle is one `PageBuilder::link_for` will write: finite,
@@ -145,9 +168,79 @@ impl Tagging<'_> {
         if let Some(language) = self.language(element, level) {
             tag = tag.lang(language);
         }
-        tag
+        self.table(tag, element)
     }
 
+    /// A cell's identifier and a table's or cell's Table 349 attributes, from
+    /// the HTML attributes that say the same things: `id`, `headers`, `scope`,
+    /// `colspan`, `rowspan` and `summary`.
+    fn table(&self, mut tag: Tag, element: usize) -> Tag {
+        let Some(node) = self.dom.nodes.get(element).filter(|node| node.is_html()) else {
+            return tag;
+        };
+        let mut attributes = TableAttributes::default();
+        match node.name.as_str() {
+            "table" => {
+                attributes.summary = node.attr("summary").map(str::to_owned);
+            }
+            "th" | "td" => {
+                if let Some(id) = node.id.as_deref() {
+                    if self.cells.get(id) == Some(&element) {
+                        tag = tag.id(self.qualified(id).as_bytes());
+                    }
+                }
+                // HTML's `headers` is a list of ids separated by white space;
+                // one naming no cell of this document is a reference into
+                // nothing and is not written.
+                attributes.headers = node
+                    .attr("headers")
+                    .unwrap_or_default()
+                    .split_ascii_whitespace()
+                    .filter(|id| self.cells.contains_key(*id))
+                    .map(|id| self.qualified(id).into_bytes())
+                    .collect();
+                if node.name == "th" {
+                    attributes.scope = node.attr("scope").and_then(scope);
+                }
+                attributes.row_span = node.attr("rowspan").and_then(span);
+                attributes.col_span = node.attr("colspan").and_then(span);
+            }
+            _ => {}
+        }
+        if attributes.is_empty() {
+            tag
+        } else {
+            tag.table(attributes)
+        }
+    }
+
+    /// An `id` of this content document as a document-wide identifier.
+    fn qualified(&self, id: &str) -> String {
+        format!("{}#{id}", self.path)
+    }
+}
+
+/// HTML's `scope` as Table 349's. `col` and `row` are the column and row;
+/// `colgroup` and `rowgroup` head the rest of their group, and the nearest
+/// thing Table 349 has to a group is the same direction, so they are the
+/// same answers. `auto` — HTML's default, decided from the table's shape — is
+/// left unstated rather than decided here.
+fn scope(value: &str) -> Option<TableScope> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "col" | "colgroup" => Some(TableScope::Column),
+        "row" | "rowgroup" => Some(TableScope::Row),
+        _ => None,
+    }
+}
+
+/// A `colspan` or `rowspan` worth stating: a whole number above one. HTML's
+/// `rowspan="0"` (to the end of the group) has no Table 349 spelling and is
+/// left unstated.
+fn span(value: &str) -> Option<u32> {
+    value.trim().parse::<u32>().ok().filter(|span| *span > 1)
+}
+
+impl Tagging<'_> {
     /// The `/Lang` an element is written with (14.9.2): what its own
     /// `xml:lang` or `lang` says, or — for an element at the top that says
     /// nothing — the content document's, when that differs from the

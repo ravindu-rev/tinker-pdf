@@ -267,6 +267,11 @@ writes, family by family:
   its `<a>`'s key, and an `<a>` is a `/Link` exactly when the chapter holds
   at least one annotation for it — decided over the whole chapter, so both
   halves of a link broken over a page are one type.
+- **The EPUB's tables.** `summary`, `scope`, `headers`, `colspan` and
+  `rowspan` become Table 349's attributes, and a cell's `id` its `/ID`,
+  qualified by its content document's path so identifiers stay unique across
+  chapters. A `headers` id naming no cell is dropped rather than written as a
+  reference into nothing.
 
 ## Dependencies
 

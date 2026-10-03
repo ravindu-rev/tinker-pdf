@@ -31,7 +31,8 @@
 //! the test, with the XML leaf's event reader and nothing of the EPUB path,
 //! and what it says is compared with what the tree carries —
 //! [`every_img_alt_is_a_figure_alt`], [`every_language_declaration_is_a_lang`],
-//! [`every_a_href_is_a_link_holding_its_annotation`].
+//! [`every_a_href_is_a_link_holding_its_annotation`],
+//! [`every_table_attribute_is_carried_from_the_source`].
 //!
 //! # What is not done yet, each named rather than absent
 //!
@@ -41,8 +42,6 @@
 //!   Table 333's standard types, so there is nothing non-standard to declare.
 //!   The cost is that the XHTML name is not recoverable — `<em>` and
 //!   `<strong>` are both `/Span`.
-//! - **No table `/Headers`, `/Scope` or `/Summary`**, so a `<th>` is a `/TH`
-//!   with no association to the cells it heads.
 //!
 //! Cross-page structure elements **are** written — an element's kids carry
 //! their own `/Pg` where they are not on its default page, which is 14.7.2
@@ -871,4 +870,132 @@ fn every_a_href_is_a_link_holding_its_annotation() {
         links_written > 3,
         "the long link was broken across lines: {links_written}"
     );
+}
+
+/// **A table's `summary`, a header's `scope` and a cell's `headers` and spans
+/// are its Table 349 attributes** (14.8.5.7), compared cell by cell with the
+/// source.
+///
+/// The source side resolves each cell's `headers` to the header cells' text
+/// by `id`; the tree side resolves each cell's `/Headers` through
+/// `element_by_id` to the `/TH` elements' text. An id naming no cell — this
+/// fixture's `nowhere` — is a reference into nothing and is not written.
+#[test]
+fn every_table_attribute_is_carried_from_the_source() {
+    let body = concat!(
+        r#"<table summary="Fruit prices by year"><caption>Prices</caption>"#,
+        r#"<tr><th id="fruit" scope="col">Fruit</th><th id="y2025" scope="col">Year 2025</th>"#,
+        r#"<th id="y2026" scope="colgroup">Year 2026</th></tr>"#,
+        r#"<tr><th id="apple" scope="row">Apple</th><td headers="apple y2025">1.10</td>"#,
+        r#"<td headers="apple y2026" rowspan="2">1.20</td></tr>"#,
+        r#"<tr><th id="pear" scope="row">Pear</th><td headers="pear y2025 nowhere">0.90</td></tr>"#,
+        r#"<tr><td colspan="2">Totals</td><td>2.10</td></tr>"#,
+        r#"</table>"#,
+    );
+    let xhtml = chapter(r#"lang="en""#, body);
+    let bytes = book_of("en", &xhtml, &[]);
+    let doc = Document::open_with(bytes, &OpenOptions::at_page(400.0, 600.0)).expect("a book");
+    let tree = doc.structure().expect("a tree");
+    assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+    let texts = tree_languages(&doc);
+    let element_text = |element: &StructElement| -> String {
+        texts
+            .iter()
+            .filter(|(_, _, e)| e.reference == element.reference)
+            .map(|(text, _, _)| squeezed(text))
+            .collect()
+    };
+    // The tree's element drawing `text`, of a type.
+    let in_tree = |text: &str, kind: &str| -> StructElement {
+        texts
+            .iter()
+            .find(|(t, _, e)| squeezed(t) == text && e.standard_type == kind)
+            .map(|(_, _, e)| e.clone())
+            .unwrap_or_else(|| panic!("no {kind} draws {text:?}"))
+    };
+
+    // The source, read on its own.
+    let source = source_elements(&xhtml);
+    let by_id = |id: &str| -> Option<&Source> {
+        source
+            .iter()
+            .find(|e| e.attribute("id") == Some(id) && matches!(e.name.as_str(), "th" | "td"))
+    };
+    let mut cells = 0;
+    for element in &source {
+        match element.name.as_str() {
+            "table" => {
+                let table = tree
+                    .elements()
+                    .into_iter()
+                    .find(|e| e.standard_type == "Table")
+                    .expect("a /Table");
+                assert_eq!(
+                    table.table.as_ref().and_then(|t| t.summary.as_deref()),
+                    element.attribute("summary")
+                );
+            }
+            "th" | "td" => {
+                cells += 1;
+                let kind = if element.name == "th" { "TH" } else { "TD" };
+                let cell = in_tree(&squeezed(&element.text), kind);
+                let attributes = cell.table.clone().unwrap_or_default();
+
+                let wanted_scope = element.attribute("scope").map(|scope| match scope {
+                    "col" | "colgroup" => tinker_pdf::TableScope::Column,
+                    "row" | "rowgroup" => tinker_pdf::TableScope::Row,
+                    other => panic!("the fixture has no scope {other}"),
+                });
+                assert_eq!(attributes.scope, wanted_scope, "{}", element.text);
+
+                let wanted_headers: Vec<String> = element
+                    .attribute("headers")
+                    .unwrap_or_default()
+                    .split_ascii_whitespace()
+                    .filter_map(by_id)
+                    .map(|header| squeezed(&header.text))
+                    .collect();
+                let written_headers: Vec<String> = attributes
+                    .headers
+                    .iter()
+                    .map(|id| {
+                        let header = tree.element_by_id(id).expect("every header resolves");
+                        element_text(header)
+                    })
+                    .collect();
+                assert_eq!(written_headers, wanted_headers, "{}", element.text);
+
+                let wanted_span = |name: &str| {
+                    element
+                        .attribute(name)
+                        .and_then(|span| span.parse::<u32>().ok())
+                        .filter(|span| *span > 1)
+                };
+                assert_eq!(
+                    attributes.row_span,
+                    wanted_span("rowspan"),
+                    "{}",
+                    element.text
+                );
+                assert_eq!(
+                    attributes.col_span,
+                    wanted_span("colspan"),
+                    "{}",
+                    element.text
+                );
+
+                // A cell with an `id` carries it, qualified by its document.
+                if let Some(id) = element.attribute("id") {
+                    let written = cell.id.clone().expect("an /ID");
+                    assert!(
+                        written.ends_with(format!("#{id}").as_bytes()),
+                        "{}",
+                        String::from_utf8_lossy(&written)
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(cells, 10, "every cell was compared");
 }

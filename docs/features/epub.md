@@ -390,6 +390,17 @@ with the XML leaf's event reader:
   `href`, or with one this build could not resolve, has no annotation and is
   a `/Span`: a bare `/Link` would claim an association the file does not
   contain. `every_a_href_is_a_link_holding_its_annotation`.
+- **A table says what heads what** (14.8.5.7): `<table summary>` is the
+  `/Table`'s `/Summary`; a `<th>` or `<td>` with an `id` carries it as `/ID`,
+  qualified by its content document (`EPUB/ch1.xhtml#apple`) because an
+  identifier is unique in the whole PDF and two chapters may both say
+  `id="h1"`; a cell's `headers` is `/Headers`, an id naming no cell of the
+  document left out; a `<th>`'s `scope` is `/Scope` (`col` and `colgroup`
+  `/Column`, `row` and `rowgroup` `/Row`, `auto` unstated); a `colspan` or
+  `rowspan` above one is `/ColSpan` or `/RowSpan`.
+  `every_table_attribute_is_carried_from_the_source` resolves every cell's
+  headers both ways — by `id` in the source, through `element_by_id` in the
+  tree — and compares the header cells' text.
 
 **What is not done yet**, each named rather than absent:
 
@@ -397,7 +408,7 @@ with the XML leaf's event reader:
 | --- | --- |
 | A PDF/UA conformance claim | a structure tree is necessary for it and nowhere near sufficient |
 | A `/RoleMap` | not needed: every tag emitted is already a standard type. The cost is that the XHTML name is not recoverable — `<em>` and `<strong>` are both `/Span` |
-| Table `/Headers`, `/Scope`, `/Summary` | a `<th>` is a `/TH` with no association to the cells it heads |
+| An empty table cell | the tree is built from the runs a page draws, so a `<td>` with nothing in it draws nothing and is not in the tree, and the cells after it in its row read one column early. `Tag::keep_empty` is the writer's answer; the EPUB path has no run to hang it on |
 
 ## Refused by name
 

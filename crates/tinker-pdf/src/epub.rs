@@ -1673,6 +1673,12 @@ fn write_chapters<R: read::Resources + ?Sized>(
             .filter(|(rect, _, _)| tagging::is_link_rect(*rect))
             .map(|(_, _, element)| *element)
             .collect();
+        let cells = chapter
+            .reading
+            .as_ref()
+            .map(|reading| tagging::table_cells(&reading.dom))
+            .unwrap_or_default();
+        let path = chapter.path.as_deref().unwrap_or(chapter.name.as_str());
         let structure = chapter.reading.as_ref().map(|reading| tagging::Tagging {
             dom: &reading.dom,
             // **A base per content document.** Both an element index and a
@@ -1683,6 +1689,8 @@ fn write_chapters<R: read::Resources + ?Sized>(
             document_language: language,
             figures: &figures,
             links: &linked,
+            path,
+            cells: &cells,
         });
         for (offset, laid) in chapter.pages.iter().enumerate() {
             let index = chapter.first_page + offset;
