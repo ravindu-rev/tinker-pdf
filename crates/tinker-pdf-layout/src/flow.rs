@@ -1121,8 +1121,10 @@ impl<M: Metrics> Builder<'_, M> {
         // §9.6: a box with a `position` other than `static` is a containing
         // block for its absolutely positioned descendants. Its **padding box**
         // and not its content box, which §10.1 says in as many words and which
-        // a build reading `content_x` here would get wrong by the padding.
-        let anchors = style.position != Position::Static;
+        // a build reading `content_x` here would get wrong by the padding. So
+        // is a transformed box (`css-transforms-1` §2), whose descendants turn
+        // with it.
+        let anchors = style.position != Position::Static || style.transformed();
         if anchors {
             self.positioned.push(crate::position::Containing {
                 left: left + border.left,
@@ -1805,20 +1807,7 @@ impl<M: Metrics> Builder<'_, M> {
             // deciding what a block container does with it.
             Content::Replaced(_) => Ok(()),
             Content::Text(source) => {
-                let mut pieces = Vec::new();
-                let mut collapser = Collapser::new();
-                self.lead_with_marker(&mut pieces);
-                let text =
-                    collapser.push_transformed(source, style.white_space, style.text_transform);
-                pieces.push(Piece {
-                    text,
-                    style: style.clone(),
-                    anchor: node.anchor,
-                    order: self.order(),
-                    atomic: None,
-                    generated: false,
-                });
-                self.lines(&pieces, style, block, content_x, content_width)
+                self.text_block(node, source, style, block, content_x, content_width)
             }
             Content::Children(children) => {
                 let styles: Vec<Consumed> = children.iter().map(|c| consume(&c.style)).collect();
@@ -1873,8 +1862,14 @@ impl<M: Metrics> Builder<'_, M> {
                         }
                         let end = table::misparented_run(children, index);
                         self.budget.spend_box()?;
-                        let wrapper = anonymous_table(&node.style, &children[index..end]);
-                        self.block(&wrapper, content_width, content_x, depth + 1, avoid, 0)?;
+                        self.misparented(
+                            node,
+                            &children[index..end],
+                            content_width,
+                            content_x,
+                            depth,
+                            avoid,
+                        )?;
                         wrapped_until = end;
                         continue;
                     }
@@ -1924,6 +1919,59 @@ impl<M: Metrics> Builder<'_, M> {
                 Ok(())
             }
         }
+    }
+
+    /// A block whose content is one text node: one inline formatting context
+    /// of one piece.
+    ///
+    /// **A function of its own for the stack's sake**, as
+    /// [`Builder::misparented`] is: [`Builder::children`] is in the frame of
+    /// every level of the block recursion, and an unoptimised build gives every
+    /// local of every arm its own slot whichever arm runs — a [`Piece`] holds a
+    /// whole [`Consumed`]. Kept here, the bytes are spent only by the arm that
+    /// needs them, and `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name`
+    /// keeps its margin under the depth cap as the computed style grows.
+    #[inline(never)]
+    fn text_block(
+        &mut self,
+        node: &BoxNode,
+        source: &str,
+        style: &Consumed,
+        block: usize,
+        content_x: f64,
+        content_width: f64,
+    ) -> Result<(), Refusal> {
+        let mut pieces = Vec::new();
+        let mut collapser = Collapser::new();
+        self.lead_with_marker(&mut pieces);
+        let text = collapser.push_transformed(source, style.white_space, style.text_transform);
+        pieces.push(Piece {
+            text,
+            style: style.clone(),
+            anchor: node.anchor,
+            order: self.order(),
+            atomic: None,
+            generated: false,
+        });
+        self.lines(&pieces, style, block, content_x, content_width)
+    }
+
+    /// §17.2.1 rule 9's anonymous table round a run of misparented internal
+    /// table boxes, laid out as the block it is. A function of its own for
+    /// [`Builder::text_block`]'s reason: the wrapper is a whole [`BoxNode`].
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn misparented(
+        &mut self,
+        node: &BoxNode,
+        run: &[BoxNode],
+        content_width: f64,
+        content_x: f64,
+        depth: usize,
+        avoid: bool,
+    ) -> Result<(), Refusal> {
+        let wrapper = anonymous_table(&node.style, run);
+        self.block(&wrapper, content_width, content_x, depth + 1, avoid, 0)
     }
 
     /// One anonymous block box holding a run of inline-level siblings.
@@ -5065,10 +5113,15 @@ impl Reach {
 }
 
 /// Whether a box draws an outline, a background image or a shadow, any of
-/// which makes it painted with no background colour or border at all.
+/// which makes it painted with no background colour or border at all — or is
+/// transformed, whose fragment the painter needs as the reference box its
+/// content turns about.
 fn draws_beyond_its_border(style: &Consumed) -> bool {
     style.paint.as_ref().is_some_and(|paint| {
-        paint.outline.is_some() || paint.image.is_some() || !paint.shadows.is_empty()
+        paint.transformed
+            || paint.outline.is_some()
+            || paint.image.is_some()
+            || !paint.shadows.is_empty()
     })
 }
 

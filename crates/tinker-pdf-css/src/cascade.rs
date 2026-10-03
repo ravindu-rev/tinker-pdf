@@ -158,6 +158,11 @@ pub struct ComputedStyle {
     pub quotes: Quotes,
     /// `opacity`, `css-color-4` §15.1, clamped to `[0, 1]`.
     pub opacity: f64,
+    /// `transform`, `css-transforms-1` §5: the list, leftmost outermost; empty
+    /// for `none`.
+    pub transform: Vec<Transform>,
+    /// `transform-origin`, §6.
+    pub transform_origin: TransformOrigin,
     /// `border-*-*-radius`, `css-backgrounds-3` §5.1, in [`Corner::ALL`]'s
     /// order.
     pub border_radius: [Radius; 4],
@@ -329,6 +334,8 @@ impl ComputedStyle {
             counter_set: Vec::new(),
             quotes: Quotes::Auto,
             opacity: 1.0,
+            transform: Vec::new(),
+            transform_origin: TransformOrigin::INITIAL,
             border_radius: [Radius::ZERO; 4],
             // §5.2's `medium`, which is `border-width`'s three pixels.
             outline_width: 3.0,
@@ -534,6 +541,27 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         // §15.1: *"any values outside the range 0.0 to 1.0 are clamped"*, at
         // computed-value time — so `opacity: 2` is valid CSS and is one.
         Property::Opacity(value) => style.opacity = value.clamp(0.0, 1.0),
+        Property::Transform(list) => {
+            style.transform = list
+                .iter()
+                .map(|function| match *function {
+                    SpecifiedTransform::Matrix(m) => Transform::Matrix(m),
+                    SpecifiedTransform::Translate(x, y) => Transform::Translate(
+                        x.compute(font_size, root_font_size),
+                        y.compute(font_size, root_font_size),
+                    ),
+                    SpecifiedTransform::Scale(x, y) => Transform::Scale(x, y),
+                    SpecifiedTransform::Rotate(degrees) => Transform::Rotate(degrees),
+                    SpecifiedTransform::Skew(x, y) => Transform::Skew(x, y),
+                })
+                .collect();
+        }
+        Property::TransformOrigin(origin) => {
+            style.transform_origin = TransformOrigin {
+                x: origin.x.compute(font_size, root_font_size),
+                y: origin.y.compute(font_size, root_font_size),
+            };
+        }
         Property::BorderRadius(corner, value) => {
             style.border_radius[corner.index()] = Radius {
                 horizontal: value.horizontal.compute(font_size, root_font_size),
@@ -1063,6 +1091,7 @@ pub fn cascade_from<E: Element>(
     // for why it is a walk of its own.
     crate::counter::resolve(elements, &styles, &mut generated, &mut report, budget)?;
     note_flattened_opacity(elements, &styles, &mut report);
+    note_fixed_under_transform(elements, &styles, &mut report);
 
     Ok(StyleTree {
         styles,
@@ -1139,6 +1168,44 @@ fn note_flattened_opacity<E: Element>(
     for (at, style) in styles.iter().enumerate() {
         if style.opacity < 1.0 && style.display != Display::None && covered[at] {
             report.note_unsupported("opacity");
+        }
+    }
+}
+
+/// Counts every `position: fixed` element with a transformed ancestor against
+/// `transform`.
+///
+/// `css-transforms-1` §2: a transformed element *"establishes a containing
+/// block for all descendants"*, fixed ones included — so a fixed box inside a
+/// rotated figure is positioned against the figure and turns with it. The
+/// layout this build hands it places a fixed box against the page box and
+/// repeats it on every page (CSS 2.2 §9.6.1's paged answer), which is a
+/// different picture; the painter still turns it with its ancestor. The
+/// ancestor's absolutely positioned descendants are exact: the layout makes a
+/// transformed box their containing block, as it does a positioned one.
+fn note_fixed_under_transform<E: Element>(
+    elements: &[E],
+    styles: &[ComputedStyle],
+    report: &mut Report,
+) {
+    // Parents first: every parent's index is below its child's.
+    let mut under = vec![false; elements.len()];
+    for (at, element) in elements.iter().enumerate() {
+        let inherited = element
+            .parent()
+            .and_then(|parent| {
+                let transformed = styles
+                    .get(parent)
+                    .is_some_and(|style| !style.transform.is_empty());
+                under.get(parent).map(|above| *above || transformed)
+            })
+            .unwrap_or(false);
+        under[at] = inherited;
+        let Some(style) = styles.get(at) else {
+            continue;
+        };
+        if inherited && style.position == Position::Fixed && style.display != Display::None {
+            report.note_unsupported("transform");
         }
     }
 }
@@ -1995,6 +2062,8 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
         Longhand::CounterSet => into.counter_set = from.counter_set.clone(),
         Longhand::Quotes => into.quotes = from.quotes.clone(),
         Longhand::Opacity => into.opacity = from.opacity,
+        Longhand::Transform => into.transform = from.transform.clone(),
+        Longhand::TransformOrigin => into.transform_origin = from.transform_origin,
         Longhand::BorderTopLeftRadius => into.border_radius[0] = from.border_radius[0],
         Longhand::BorderTopRightRadius => into.border_radius[1] = from.border_radius[1],
         Longhand::BorderBottomRightRadius => into.border_radius[2] = from.border_radius[2],

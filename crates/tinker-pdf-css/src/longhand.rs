@@ -7,7 +7,7 @@
 //! [`Property`] is not one -- it always holds a specified value, and six of its
 //! variants stand for four names each, carrying a [`Side`].
 //!
-//! Hence a hundred and six unit variants, one per name this build implements as a
+//! Hence a hundred and eight unit variants, one per name this build implements as a
 //! longhand. The twenty shorthands and `css-break-3`'s three aliases are not
 //! here, because a shorthand is not a property:
 //! `crate::property::DEFAULTABLE_SHORTHANDS` expands each into the longhands
@@ -15,7 +15,7 @@
 //!
 //! # This file is generated, and it is checked in to be read
 //!
-//! A hundred and six variants across four consumers is not hand-written code, and a
+//! A hundred and eight variants across four consumers is not hand-written code, and a
 //! macro would put it somewhere nobody can grep. So it is generated from
 //! `property.rs` itself -- the variants, the names out of [`Property::name`],
 //! the inheritance out of [`Property::inherited`] -- and written here as
@@ -87,6 +87,10 @@ pub enum Longhand {
     Quotes,
     /// `opacity`
     Opacity,
+    /// `transform`
+    Transform,
+    /// `transform-origin`
+    TransformOrigin,
     /// `border-top-left-radius`
     BorderTopLeftRadius,
     /// `border-top-right-radius`
@@ -285,6 +289,8 @@ impl Longhand {
         Longhand::CounterSet,
         Longhand::Quotes,
         Longhand::Opacity,
+        Longhand::Transform,
+        Longhand::TransformOrigin,
         Longhand::BorderTopLeftRadius,
         Longhand::BorderTopRightRadius,
         Longhand::BorderBottomRightRadius,
@@ -397,6 +403,8 @@ impl Longhand {
             Longhand::CounterSet => "counter-set",
             Longhand::Quotes => "quotes",
             Longhand::Opacity => "opacity",
+            Longhand::Transform => "transform",
+            Longhand::TransformOrigin => "transform-origin",
             Longhand::BorderTopLeftRadius => "border-top-left-radius",
             Longhand::BorderTopRightRadius => "border-top-right-radius",
             Longhand::BorderBottomRightRadius => "border-bottom-right-radius",
@@ -524,6 +532,8 @@ impl Longhand {
             | Longhand::CounterIncrement
             | Longhand::CounterSet
             | Longhand::Opacity
+            | Longhand::Transform
+            | Longhand::TransformOrigin
             | Longhand::BorderTopLeftRadius
             | Longhand::BorderTopRightRadius
             | Longhand::BorderBottomRightRadius
@@ -646,6 +656,8 @@ impl Property {
             Property::CounterSet(..) => Longhand::CounterSet,
             Property::Quotes(..) => Longhand::Quotes,
             Property::Opacity(..) => Longhand::Opacity,
+            Property::Transform(..) => Longhand::Transform,
+            Property::TransformOrigin(..) => Longhand::TransformOrigin,
             Property::BorderRadius(corner, ..) => match corner {
                 crate::property::Corner::TopLeft => Longhand::BorderTopLeftRadius,
                 crate::property::Corner::TopRight => Longhand::BorderTopRightRadius,

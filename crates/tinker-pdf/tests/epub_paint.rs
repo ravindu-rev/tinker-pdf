@@ -887,3 +887,185 @@ fn a_blurred_shadow_is_counted_and_not_drawn() {
     assert_eq!(counted(&doc, "text-shadow"), Some(2));
     assert!(!tokens(&doc).windows(4).any(|w| w == ["0", "1", "0", "rg"]));
 }
+
+// ---- transform --------------------------------------------------------------------
+
+/// Every `cm` on the first page, as its six operands, in stream order.
+fn matrices(doc: &Document) -> Vec<[f64; 6]> {
+    let words = tokens(doc);
+    let mut out = Vec::new();
+    for (at, word) in words.iter().enumerate() {
+        if word != "cm" || at < 6 {
+            continue;
+        }
+        let mut operands = [0.0; 6];
+        for (slot, text) in operands.iter_mut().zip(&words[at - 6..at]) {
+            *slot = text.parse().expect("a `cm` operand");
+        }
+        out.push(operands);
+    }
+    out
+}
+
+/// A CSS matrix `[a, b, c, d, e, f]` (CSS pixels, y downwards) about a page
+/// point, as the page's `cm`: the closed form, from first principles — flip
+/// the y axis, scale the offsets to points, conjugate by the origin.
+fn on_page(css: [f64; 6], origin: (f64, f64)) -> [f64; 6] {
+    let [a, b, c, d, e, f] = css;
+    let (pa, pb, pc, pd) = (a, -b, -c, d);
+    let (ox, oy) = origin;
+    [
+        pa,
+        pb,
+        pc,
+        pd,
+        ox - pa * ox - pc * oy + e * PX,
+        oy - pb * ox - pd * oy - f * PX,
+    ]
+}
+
+#[track_caller]
+fn near6(actual: [f64; 6], expected: [f64; 6]) {
+    for (a, e) in actual.iter().zip(expected) {
+        assert!((a - e).abs() < 1e-9, "{actual:?} against {expected:?}");
+    }
+}
+
+/// **A rotation is one `cm` about the border box's centre**
+/// (`css-transforms-1` §6's initial `transform-origin`), clockwise on the
+/// page: the matrix is the closed form, and the render says the box now
+/// stands on its end — red below where it was and white beside where it was.
+#[test]
+fn a_rotation_is_a_cm_about_the_border_boxs_centre() {
+    let style = "div { width: 100px; height: 40px; background-color: #ff0000; \
+                 transform: rotate(90deg) }";
+    let doc = open(style, "<div></div>");
+    let found = matrices(&doc);
+    assert_eq!(found.len(), 1, "{found:?}");
+    let centre = at(50.0, 20.0);
+    near6(found[0], on_page([0.0, 1.0, -1.0, 0.0, 0.0, 0.0], centre));
+    assert_eq!(rgb_at(&doc, 50.0, 60.0), [255, 0, 0], "below the old box");
+    assert_eq!(
+        rgb_at(&doc, 5.0, 20.0),
+        [255, 255, 255],
+        "beside the centre"
+    );
+    let plain = open(
+        "div { width: 100px; height: 40px; background-color: #ff0000 }",
+        "<div></div>",
+    );
+    assert!(matrices(&plain).is_empty(), "no transform, no `cm`");
+    assert_eq!(rgb_at(&plain, 5.0, 20.0), [255, 0, 0]);
+    // A box with nothing of its own to paint still turns its text: its
+    // fragment is the reference box, so the layout leaves one.
+    let bare = open(
+        "div { width: 100px; height: 40px; transform: rotate(90deg) }",
+        "<div>turned</div>",
+    );
+    let found = matrices(&bare);
+    assert!(!found.is_empty(), "the text is turned");
+    for matrix in found {
+        near6(matrix, on_page([0.0, 1.0, -1.0, 0.0, 0.0, 0.0], centre));
+    }
+}
+
+/// **The list applies rightmost first, about `transform-origin`**:
+/// `translate(30px) scale(2)` about the top-left corner doubles the box and
+/// then moves it, where `scale(2) translate(30px)` moves it sixty pixels.
+#[test]
+fn the_list_applies_rightmost_first_about_the_origin() {
+    let corner = at(0.0, 0.0);
+    let first = open(
+        "div { width: 100px; height: 40px; background-color: #ff0000; \
+         transform: translate(30px) scale(2); transform-origin: left top }",
+        "<div></div>",
+    );
+    near6(
+        matrices(&first)[0],
+        on_page([2.0, 0.0, 0.0, 2.0, 30.0, 0.0], corner),
+    );
+    let second = open(
+        "div { width: 100px; height: 40px; background-color: #ff0000; \
+         transform: scale(2) translate(30px); transform-origin: 0 0 }",
+        "<div></div>",
+    );
+    near6(
+        matrices(&second)[0],
+        on_page([2.0, 0.0, 0.0, 2.0, 60.0, 0.0], corner),
+    );
+    // And a percentage translation is of the border box: half of 100 + 2 × 10.
+    let percent = open(
+        "div { width: 100px; height: 40px; padding: 0 10px; \
+         background-color: #ff0000; transform: translate(50%, 25%) }",
+        "<div></div>",
+    );
+    let centre = at(60.0, 20.0);
+    near6(
+        matrices(&percent)[0],
+        on_page([1.0, 0.0, 0.0, 1.0, 60.0, 10.0], centre),
+    );
+}
+
+/// **A transform turns everything inside the element, its text included, and
+/// a nested one composes inside it**: the inner box is drawn under the outer
+/// matrix and then its own, in that order, and its text under both.
+#[test]
+fn a_nested_transform_composes_inside_its_ancestors() {
+    let doc = open(
+        ".o { width: 200px; height: 80px; background-color: #ff0000; \
+         transform: rotate(90deg) } \
+         .i { width: 50px; height: 20px; background-color: #0000ff; \
+         transform: translate(10px, 5px) }",
+        r#"<div class="o"><div class="i">x</div></div>"#,
+    );
+    let words = tokens(&doc);
+    let found = matrices(&doc);
+    let outer = on_page([0.0, 1.0, -1.0, 0.0, 0.0, 0.0], at(100.0, 40.0));
+    let inner = on_page([1.0, 0.0, 0.0, 1.0, 10.0, 5.0], at(25.0, 10.0));
+    // The outer box; the inner box (both matrices); its text (both again).
+    assert_eq!(found.len(), 5, "{found:?}");
+    near6(found[0], outer);
+    near6(found[1], outer);
+    near6(found[2], inner);
+    near6(found[3], outer);
+    near6(found[4], inner);
+    let text = words.iter().position(|w| w == "BT").expect("the text");
+    let last_cm = words.iter().rposition(|w| w == "cm").expect("a cm");
+    assert!(last_cm < text, "the text is drawn under the transforms");
+}
+
+/// **A transform that flattens the plane draws nothing**: `scale(0)` has no
+/// inverse, so the element's fragments are clipped to nothing rather than
+/// handed to a reader as a singular matrix.
+#[test]
+fn a_transform_with_no_inverse_draws_nothing() {
+    let doc = open(
+        "div { width: 100px; height: 40px; background-color: #ff0000; \
+         transform: scale(0) }",
+        "<div>gone</div>",
+    );
+    assert!(matrices(&doc).is_empty());
+    let words = tokens(&doc);
+    assert!(
+        words
+            .windows(6)
+            .any(|w| w == ["0", "0", "0", "0", "re", "W"]),
+        "an empty clip"
+    );
+    assert_eq!(darkest(&doc), u8::MAX, "nothing is drawn");
+}
+
+/// **A three-dimensional transform is counted and not drawn**, and a link
+/// under a two-dimensional one is counted, since its active area is the
+/// run's rectangle before the transform.
+#[test]
+fn a_three_d_transform_and_a_turned_link_are_counted() {
+    let doc = open("div { transform: rotateX(30deg) }", "<div>flat</div>");
+    assert_eq!(counted(&doc, "transform"), Some(1));
+    assert!(matrices(&doc).is_empty());
+    let linked = open(
+        "div { transform: rotate(5deg) }",
+        r##"<div><a href="#x">here</a></div><p id="x">there</p>"##,
+    );
+    assert_eq!(counted(&linked, "transform"), Some(1));
+}

@@ -1613,6 +1613,7 @@ fn write_chapters<R: read::Resources + ?Sized>(
         refused_effects.opacity += refused.opacity;
         refused_effects.box_shadow += refused.box_shadow;
         refused_effects.text_shadow += refused.text_shadow;
+        refused_effects.transform += refused.transform;
         for (offset, laid) in chapter.pages.iter().enumerate() {
             let index = chapter.first_page + offset;
             let on_page = links.get(index).map_or(&[][..], Vec::as_slice);
@@ -1671,11 +1672,13 @@ fn write_chapters<R: read::Resources + ?Sized>(
     }
     // An alpha the writer refused — a profile that forbids transparency — is an
     // `opacity`, or a translucent shadow colour, this document does not
-    // honour, counted by element as the cascade counts every other one.
+    // honour, counted by element as the cascade counts every other one; and a
+    // link under a transform keeps its untransformed active area.
     for (property, elements) in [
         ("opacity", refused_effects.opacity),
         ("box-shadow", refused_effects.box_shadow),
         ("text-shadow", refused_effects.text_shadow),
+        ("transform", refused_effects.transform),
     ] {
         if elements > 0 {
             warnings.push(ArchiveWarning::UnimplementedProperty { property, elements });

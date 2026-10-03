@@ -1087,6 +1087,74 @@ pub struct Shadow {
     pub inset: bool,
 }
 
+/// One two-dimensional `<transform-function>` of `css-transforms-1` §13.1,
+/// as written. Every angle is in **degrees**, whatever unit it was written
+/// in: the sine and cosine are the painter's, through the one deterministic
+/// implementation this repository has (ruling 4), and a conversion from
+/// `rad`, `grad` or `turn` is a multiplication.
+///
+/// `rotateZ()` is `rotate()` (`css-transforms-2` §12), and `translateX()`,
+/// `scaleY()` and the rest are the two-argument forms with the other argument
+/// at its identity.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpecifiedTransform {
+    /// `matrix(a, b, c, d, e, f)`; `e` and `f` are CSS pixels.
+    Matrix([f64; 6]),
+    /// `translate()`: a percentage is of the reference box — the border box —
+    /// on its own axis.
+    Translate(Len, Len),
+    /// `scale()`.
+    Scale(f64, f64),
+    /// `rotate()`, clockwise on the page, in degrees.
+    Rotate(f64),
+    /// `skew()`: the x angle and the y angle, in degrees.
+    Skew(f64, f64),
+}
+
+/// [`SpecifiedTransform`], computed: `em` resolved, a percentage still owed
+/// to the box it is drawn on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Transform {
+    /// See [`SpecifiedTransform::Matrix`].
+    Matrix([f64; 6]),
+    /// See [`SpecifiedTransform::Translate`].
+    Translate(LengthPercentage, LengthPercentage),
+    /// See [`SpecifiedTransform::Scale`].
+    Scale(f64, f64),
+    /// See [`SpecifiedTransform::Rotate`].
+    Rotate(f64),
+    /// See [`SpecifiedTransform::Skew`].
+    Skew(f64, f64),
+}
+
+/// `transform-origin`, `css-transforms-1` §6, as written: a point in the
+/// reference box, `50% 50%` initially. A third, `z`, value is accepted only as
+/// zero.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpecifiedTransformOrigin {
+    /// Across, from the border box's left edge.
+    pub x: Len,
+    /// Down, from its top edge.
+    pub y: Len,
+}
+
+/// `transform-origin`, computed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TransformOrigin {
+    /// Across, from the border box's left edge.
+    pub x: LengthPercentage,
+    /// Down, from its top edge.
+    pub y: LengthPercentage,
+}
+
+impl TransformOrigin {
+    /// `50% 50%`: the border box's centre.
+    pub const INITIAL: TransformOrigin = TransformOrigin {
+        x: LengthPercentage::Percent(50.0),
+        y: LengthPercentage::Percent(50.0),
+    };
+}
+
 /// `overflow-x` and `overflow-y`, `css-overflow-3` §3.1.
 ///
 /// **Five values and two questions**, and the two are not the same split:
@@ -1478,6 +1546,11 @@ pub enum Property {
     /// `opacity`, `css-color-4` §15.1, as written: a value outside `[0, 1]` is
     /// valid and clamped at computed-value time, so the clamp is the cascade's.
     Opacity(f64),
+    /// `transform`, `css-transforms-1` §5: the list, leftmost outermost.
+    /// Empty for `none`.
+    Transform(Vec<SpecifiedTransform>),
+    /// `transform-origin`, §6.
+    TransformOrigin(SpecifiedTransformOrigin),
     /// `border-*-*-radius`, `css-backgrounds-3` §5.1.
     BorderRadius(Corner, SpecifiedRadius),
     /// `outline-width`, `css-ui-4` §5.2.
@@ -1639,6 +1712,8 @@ impl Property {
             Property::CounterSet(_) => "counter-set",
             Property::Quotes(_) => "quotes",
             Property::Opacity(_) => "opacity",
+            Property::Transform(_) => "transform",
+            Property::TransformOrigin(_) => "transform-origin",
             Property::BorderRadius(corner, _) => match corner {
                 Corner::TopLeft => "border-top-left-radius",
                 Corner::TopRight => "border-top-right-radius",
@@ -1804,6 +1879,11 @@ impl Property {
             // every level, and a paragraph at 0.5 inside a section at 0.5 would
             // come out at a sixteenth rather than a quarter of its colour.
             | Property::Opacity(_)
+            // `css-transforms-1` §5 and §6: *inherited: no*. A child of a
+            // rotated box is rotated with it by being drawn inside it, which
+            // is the composition, not inheritance.
+            | Property::Transform(_)
+            | Property::TransformOrigin(_)
             // `css-backgrounds-3` §5.1 and `css-ui-4` §5: *inherited: no*,
             // like the borders they belong beside.
             | Property::BorderRadius(_, _)
@@ -2058,8 +2138,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "text-emphasis",
     "text-emphasis-style",
     "text-overflow",
-    "transform",
-    "transform-origin",
     "transition",
     "unicode-bidi",
     "unicode-range",
@@ -3053,6 +3131,8 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "text-shadow",
     "text-transform",
     "top",
+    "transform",
+    "transform-origin",
     "vertical-align",
     "visibility",
     "white-space",
@@ -3456,6 +3536,8 @@ fn implemented(
                 _ => Implemented::Malformed,
             }
         }
+        "transform" => transform_list(significant),
+        "transform-origin" => transform_origin(significant),
         // `css-color-4` §15.1: `<alpha-value>`, a number or a percentage.
         "opacity" => match (single, one) {
             (true, Some(ComponentValue::Token(Token::Number { value, .. }))) => {
@@ -4153,6 +4235,177 @@ fn shadows(values: &[ComponentValue], boxed: bool) -> Result<Vec<SpecifiedShadow
         return Err(Implemented::BadValue);
     }
     Ok(out)
+}
+
+/// `transform`, `css-transforms-1` §5: `none`, or a whitespace-separated list
+/// of §13.1's two-dimensional functions, each with comma-separated arguments.
+///
+/// **A three-dimensional function is refused by value** — `matrix3d()`,
+/// `translate3d()`, `translateZ()`, `scale3d()`, `scaleZ()`, `rotate3d()`,
+/// `rotateX()`, `rotateY()` and `perspective()` — and the whole declaration
+/// with it: a page is flat, and dropping the one function would draw a
+/// different flat picture from the one a 3D renderer projects. A name in
+/// neither list is not the grammar.
+fn transform_list(significant: &[&ComponentValue]) -> Implemented {
+    if let [ComponentValue::Token(Token::Ident(word))] = significant {
+        if word.eq_ignore_ascii_case("none") {
+            return Implemented::Known(vec![Property::Transform(Vec::new())]);
+        }
+    }
+    if significant.is_empty() {
+        return Implemented::Malformed;
+    }
+    let mut list = Vec::with_capacity(significant.len());
+    let mut refused = false;
+    for value in significant {
+        let ComponentValue::Function { name, arguments } = value else {
+            return Implemented::Malformed;
+        };
+        match transform_function(&name.to_ascii_lowercase(), arguments) {
+            Ok(Some(function)) => list.push(function),
+            Ok(None) => refused = true,
+            Err(outcome) => return outcome,
+        }
+    }
+    if refused {
+        return Implemented::BadValue;
+    }
+    Implemented::Known(vec![Property::Transform(list)])
+}
+
+/// One `<transform-function>`: `Ok(None)` for a three-dimensional one, which
+/// the caller refuses by value once it knows the rest is the grammar.
+fn transform_function(
+    name: &str,
+    arguments: &[ComponentValue],
+) -> Result<Option<SpecifiedTransform>, Implemented> {
+    // Comma-separated, `css-transforms-1` §13.1's `#` multiplier: an empty
+    // argument between two commas is not one.
+    let mut values: Vec<&ComponentValue> = Vec::new();
+    let mut expect_value = true;
+    for value in arguments.iter().filter(|v| !v.is_whitespace()) {
+        if is_comma(value) {
+            if expect_value {
+                return Err(Implemented::Malformed);
+            }
+            expect_value = true;
+            continue;
+        }
+        if !expect_value {
+            return Err(Implemented::Malformed);
+        }
+        values.push(value);
+        expect_value = false;
+    }
+    if expect_value && !values.is_empty() {
+        return Err(Implemented::Malformed);
+    }
+    let number = |value: &ComponentValue| match value {
+        ComponentValue::Token(Token::Number { value, .. }) => Ok(*value),
+        _ => Err(Implemented::Malformed),
+    };
+    // `css-transforms-2` §12 admits a percentage in `scale()`; it is the
+    // number a hundredth of it.
+    let factor = |value: &ComponentValue| match value {
+        ComponentValue::Token(Token::Percentage(percent)) => Ok(*percent / 100.0),
+        other => number(other),
+    };
+    let length = |value: &ComponentValue| match length_outcome(value) {
+        LenOutcome::Ok(len) => Ok(len),
+        LenOutcome::Unsupported => Err(Implemented::BadValue),
+        LenOutcome::Invalid => Err(Implemented::Malformed),
+    };
+    let angle = |value: &ComponentValue| angle_degrees(value).ok_or(Implemented::Malformed);
+    let zero = Len::Px(0.0);
+    Ok(Some(match (name, values.as_slice()) {
+        ("matrix", [a, b, c, d, e, f]) => SpecifiedTransform::Matrix([
+            number(a)?,
+            number(b)?,
+            number(c)?,
+            number(d)?,
+            number(e)?,
+            number(f)?,
+        ]),
+        ("translate", [x]) => SpecifiedTransform::Translate(length(x)?, zero),
+        ("translate", [x, y]) => SpecifiedTransform::Translate(length(x)?, length(y)?),
+        ("translatex", [x]) => SpecifiedTransform::Translate(length(x)?, zero),
+        ("translatey", [y]) => SpecifiedTransform::Translate(zero, length(y)?),
+        ("scale", [s]) => {
+            let s = factor(s)?;
+            SpecifiedTransform::Scale(s, s)
+        }
+        ("scale", [x, y]) => SpecifiedTransform::Scale(factor(x)?, factor(y)?),
+        ("scalex", [x]) => SpecifiedTransform::Scale(factor(x)?, 1.0),
+        ("scaley", [y]) => SpecifiedTransform::Scale(1.0, factor(y)?),
+        ("rotate" | "rotatez", [a]) => SpecifiedTransform::Rotate(angle(a)?),
+        ("skew", [x]) => SpecifiedTransform::Skew(angle(x)?, 0.0),
+        ("skew", [x, y]) => SpecifiedTransform::Skew(angle(x)?, angle(y)?),
+        ("skewx", [x]) => SpecifiedTransform::Skew(angle(x)?, 0.0),
+        ("skewy", [y]) => SpecifiedTransform::Skew(0.0, angle(y)?),
+        (
+            "matrix3d" | "translate3d" | "translatez" | "scale3d" | "scalez" | "rotate3d"
+            | "rotatex" | "rotatey" | "perspective",
+            _,
+        ) => return Ok(None),
+        _ => return Err(Implemented::Malformed),
+    }))
+}
+
+/// An `<angle>` in degrees, `css-values-4` §7.1, or `<zero>`, which
+/// `rotate()` and `skew()` also take. `None` for anything else.
+fn angle_degrees(value: &ComponentValue) -> Option<f64> {
+    match value {
+        ComponentValue::Token(Token::Number { value, .. }) if *value == 0.0 => Some(0.0),
+        ComponentValue::Token(Token::Dimension { value, unit }) => {
+            let degrees = match unit.to_ascii_lowercase().as_str() {
+                "deg" => *value,
+                // 180/π, written out: the conversion is a multiplication and
+                // the constant is the double nearest it.
+                "rad" => *value * (180.0 / std::f64::consts::PI),
+                "grad" => *value * 0.9,
+                "turn" => *value * 360.0,
+                _ => return None,
+            };
+            degrees.is_finite().then_some(degrees)
+        }
+        _ => None,
+    }
+}
+
+/// `transform-origin`, `css-transforms-1` §6: one or two values in
+/// `<bg-position>`'s one- and two-value forms, and an optional third that is
+/// the `z` offset — accepted as zero, refused by value as anything else,
+/// since a page has no depth to move the origin along.
+fn transform_origin(significant: &[&ComponentValue]) -> Implemented {
+    let (planar, depth) = match significant {
+        [_] | [_, _] => (significant, None),
+        [_, _, z] => (&significant[..2], Some(*z)),
+        _ => return Implemented::Malformed,
+    };
+    if let Some(z) = depth {
+        match length_outcome(z) {
+            LenOutcome::Ok(Len::Percent(_)) | LenOutcome::Invalid => return Implemented::Malformed,
+            LenOutcome::Ok(Len::Px(v) | Len::Em(v) | Len::Rem(v)) if v == 0.0 => {}
+            LenOutcome::Ok(_) | LenOutcome::Unsupported => return Implemented::BadValue,
+        }
+    }
+    let mut tokens = Vec::with_capacity(planar.len());
+    for value in planar {
+        match position_token(value) {
+            Ok(Some(token)) => tokens.push(token),
+            Ok(None) => return Implemented::Malformed,
+            Err(outcome) => return outcome,
+        }
+    }
+    match background_position(&tokens) {
+        Ok(position) => {
+            Implemented::Known(vec![Property::TransformOrigin(SpecifiedTransformOrigin {
+                x: position.x.offset,
+                y: position.y.offset,
+            })])
+        }
+        Err(outcome) => outcome,
+    }
 }
 
 /// Whether a value is the comma that separates `css-backgrounds-3` §2's layers.

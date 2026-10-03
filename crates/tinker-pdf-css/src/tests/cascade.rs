@@ -1193,3 +1193,54 @@ fn a_scrolling_axis_turns_the_other_one_from_visible_to_auto() {
         "clip beside visible is left alone: neither axis scrolls"
     );
 }
+
+/// **`transform` is not inherited, `em` in it is resolved against the element's
+/// own font size, and a fixed box under a transformed one is counted** —
+/// `css-transforms-1` §2 makes the transformed box its containing block, and
+/// the layout places a fixed box against the page.
+#[test]
+fn transform_is_not_inherited_and_a_fixed_box_under_one_is_counted() {
+    use crate::property::{Transform, TransformOrigin};
+    let nodes = tree(&[
+        ("html", None),
+        ("body", Some(0)),
+        ("div", Some(1)),
+        ("p", Some(2)),
+        ("span", Some(3)),
+        ("aside", Some(1)),
+    ]);
+    let parsed = sheet(
+        "div { font-size: 10px; transform: translate(2em, 50%); transform-origin: 1em 0 } \
+         span { position: fixed } aside { position: fixed }",
+    );
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let styled = cascade(&[(Origin::Author, &parsed)], &nodes, &limits, &mut budget)
+        .expect("under every cap");
+    assert_eq!(
+        styled.styles[2].transform,
+        vec![Transform::Translate(
+            LengthPercentage::Px(20.0),
+            LengthPercentage::Percent(50.0)
+        )]
+    );
+    assert_eq!(
+        styled.styles[2].transform_origin,
+        TransformOrigin {
+            x: LengthPercentage::Px(10.0),
+            y: LengthPercentage::Px(0.0),
+        }
+    );
+    assert!(styled.styles[3].transform.is_empty(), "not inherited");
+    assert_eq!(styled.styles[3].transform_origin, TransformOrigin::INITIAL);
+    // The `span` is fixed under the `div`; the `aside` is fixed under nothing.
+    assert_eq!(
+        styled
+            .report
+            .unsupported
+            .iter()
+            .find(|(name, _)| *name == "transform")
+            .map(|(_, count)| *count),
+        Some(1)
+    );
+}

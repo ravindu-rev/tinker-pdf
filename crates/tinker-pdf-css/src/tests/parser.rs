@@ -2055,3 +2055,103 @@ fn a_shadow_is_its_lengths_a_colour_and_inset_in_any_order() {
         );
     }
 }
+
+/// **`transform` is a list of `css-transforms-1` §13.1's two-dimensional
+/// functions**, angles in degrees whatever unit they were written in, the
+/// one-argument forms filling in the identity; a three-dimensional function
+/// is refused by value and anything else outside the grammar is dropped.
+#[test]
+fn transform_reads_the_two_dimensional_functions_and_refuses_the_rest_by_value() {
+    use crate::property::SpecifiedTransform as T;
+    assert_eq!(
+        known(
+            "p { transform: translate(10px, 50%) rotate(0.25turn) scale(2) \
+             skewX(30deg) matrix(1, 0, 0, 1, 5, 6) }"
+        ),
+        vec![Property::Transform(vec![
+            T::Translate(Len::Px(10.0), Len::Percent(50.0)),
+            T::Rotate(90.0),
+            T::Scale(2.0, 2.0),
+            T::Skew(30.0, 0.0),
+            T::Matrix([1.0, 0.0, 0.0, 1.0, 5.0, 6.0]),
+        ])]
+    );
+    assert_eq!(
+        known("p { transform: translateY(2em) scaleX(50%) rotateZ(100grad) skew(0, 10deg) }"),
+        vec![Property::Transform(vec![
+            T::Translate(Len::Px(0.0), Len::Em(2.0)),
+            T::Scale(0.5, 1.0),
+            T::Rotate(90.0),
+            T::Skew(0.0, 10.0),
+        ])]
+    );
+    let Property::Transform(radians) = &known("p { transform: rotate(1rad) }")[0] else {
+        panic!("a transform");
+    };
+    assert_eq!(radians, &vec![T::Rotate(180.0 / std::f64::consts::PI)]);
+    assert_eq!(
+        known("p { transform: none }"),
+        vec![Property::Transform(Vec::new())]
+    );
+    for malformed in [
+        "rotate(90)",
+        "translate(10px 20px)",
+        "translate(10px,)",
+        "scale()",
+        "spin(1turn)",
+        "translate(1px) 2px",
+        "rotate(1px)",
+    ] {
+        let declared = declarations(&format!("p {{ transform: {malformed} }}"));
+        assert!(
+            !declared.iter().any(|d| matches!(
+                d.declaration,
+                Declaration::Known(_) | Declaration::Unsupported { .. }
+            )),
+            "{malformed}: {declared:?}"
+        );
+    }
+    for refused in [
+        "rotateX(10deg)",
+        "translate(1px) translate3d(1px, 2px, 3px)",
+        "perspective(100px)",
+        "translate(10vw)",
+    ] {
+        assert!(
+            matches!(
+                &declarations(&format!("p {{ transform: {refused} }}"))[0].declaration,
+                Declaration::Unsupported {
+                    property: "transform",
+                    ..
+                }
+            ),
+            "{refused}"
+        );
+    }
+}
+
+/// **`transform-origin` is `<bg-position>`'s one- and two-value forms**, two
+/// keywords in either order, and a `z` that may only be zero.
+#[test]
+fn transform_origin_is_a_position_and_a_zero_depth() {
+    use crate::property::SpecifiedTransformOrigin as O;
+    let origin = |source: &str| known(&format!("p {{ transform-origin: {source} }}"));
+    let at = |x: Len, y: Len| vec![Property::TransformOrigin(O { x, y })];
+    assert_eq!(origin("left top"), at(Len::Percent(0.0), Len::Percent(0.0)));
+    assert_eq!(
+        origin("bottom right"),
+        at(Len::Percent(100.0), Len::Percent(100.0))
+    );
+    assert_eq!(origin("top"), at(Len::Percent(50.0), Len::Percent(0.0)));
+    assert_eq!(origin("10px 20%"), at(Len::Px(10.0), Len::Percent(20.0)));
+    assert_eq!(origin("10px 20% 0"), at(Len::Px(10.0), Len::Percent(20.0)));
+    assert!(origin("10px 20% 30%").is_empty());
+    assert!(origin("left 10px top").is_empty());
+    assert!(matches!(
+        &declarations("p { transform-origin: 1px 2px 3px }")[0].declaration,
+        Declaration::Unsupported {
+            property: "transform-origin",
+            ..
+        }
+    ));
+}

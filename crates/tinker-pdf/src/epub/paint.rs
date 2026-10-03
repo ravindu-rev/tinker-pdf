@@ -62,13 +62,15 @@
 //! says, so it is not a bound in ruling 1's sense and does not join
 //! `bounds_ledger.rs`.
 
+use std::collections::BTreeMap;
 use tinker_pdf_cos::build::{
     DocumentBuilder, ExtGState, Glyph, PageBuilder, Target, TilingPattern, TilingType,
 };
 use tinker_pdf_css::cascade::StyleTree;
+
 use tinker_pdf_css::property::{
     BackgroundSize, BorderStyle, Color, ComputedOffset, FontFamily, FontStyle, ImageRef,
-    LengthPercentage, Position, RepeatStyle, Side, TextDecoration,
+    LengthPercentage, Position, RepeatStyle, Side, TextDecoration, Transform, TransformOrigin,
 };
 use tinker_pdf_font::base14::Standard14;
 use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, BaseEncoding};
@@ -79,6 +81,7 @@ use tinker_pdf_layout::{
 };
 use tinker_pdf_shape::bidi::{reorder, BaseDirection, Paragraph};
 use tinker_pdf_shape::shape::itemize;
+use tinker_pdf_svg::transform::{concat, invert, rotation, IDENTITY};
 
 use super::read::PX_TO_PT;
 use super::typeface::FaceSet;
@@ -941,6 +944,18 @@ pub struct Effects {
     /// replaces the one in force rather than multiplying it — with the
     /// property and the element each is for, so a refusal can be counted.
     shadow_alphas: Vec<(u16, &'static str, u32)>,
+    /// Per element, the nearest element **at or above** it whose `transform`
+    /// is not `none`; following [`Effects::transformed_above`] from there
+    /// gives every transform its fragments are drawn under.
+    transformed_by: Vec<Option<u32>>,
+    /// Per element, the nearest transformed element strictly above it.
+    transformed_above: Vec<Option<u32>>,
+    /// Each transformed element's list and origin, by element.
+    transforms: BTreeMap<u32, (Vec<Transform>, TransformOrigin)>,
+    /// Links whose active area a transform above them would move: the
+    /// annotation's rectangle is the run's, untransformed. Counted against
+    /// `transform` by [`Effects::register`].
+    turned_links: usize,
 }
 
 /// What [`Effects::register`] could not register, by the property it was for,
@@ -953,6 +968,9 @@ pub struct Refused {
     pub box_shadow: usize,
     /// Elements whose translucent `text-shadow` is drawn opaque.
     pub text_shadow: usize,
+    /// Links inside a transformed element, whose active area is the run's
+    /// rectangle before the transform.
+    pub transform: usize,
 }
 
 /// A background image as one page draws it, in page points.
@@ -1193,8 +1211,15 @@ impl Effects {
             } else {
                 by
             };
+            // `css-transforms-1` §2: a transformed box is a containing block
+            // for its absolutely positioned descendants, as a positioned one
+            // is — the layout places them so, and their clips follow.
+            let transformed = styles
+                .styles
+                .get(at)
+                .is_some_and(|style| !style.transform.is_empty());
             let absolute = match position {
-                Position::Static => node
+                Position::Static if !transformed => node
                     .parent
                     .and_then(|parent| for_absolute.get(parent).copied().flatten()),
                 _ => own,
@@ -1233,6 +1258,32 @@ impl Effects {
                     .collect(),
             );
         }
+        // Parents first, as above.
+        let mut transformed_by: Vec<Option<u32>> = Vec::with_capacity(dom.nodes.len());
+        let mut transformed_above: Vec<Option<u32>> = Vec::with_capacity(dom.nodes.len());
+        let mut transforms = BTreeMap::new();
+        let mut turned_links = 0usize;
+        for (at, node) in dom.nodes.iter().enumerate() {
+            let above = node
+                .parent
+                .and_then(|parent| transformed_by.get(parent).copied().flatten());
+            let own = match styles.styles.get(at) {
+                Some(style) if !style.transform.is_empty() => {
+                    let element = u32::try_from(at).ok();
+                    if let Some(element) = element {
+                        transforms
+                            .insert(element, (style.transform.clone(), style.transform_origin));
+                    }
+                    element
+                }
+                _ => above,
+            };
+            if own.is_some() && node.is_html() && node.name == "a" && node.attr("href").is_some() {
+                turned_links += 1;
+            }
+            transformed_by.push(own);
+            transformed_above.push(above);
+        }
         Effects {
             alpha,
             clips,
@@ -1240,7 +1291,84 @@ impl Effects {
             backgrounds: Vec::new(),
             text_shadows,
             shadow_alphas,
+            transformed_by,
+            transformed_above,
+            transforms,
+            turned_links,
         }
+    }
+
+    /// Every transformed element's own matrix on one page, in page points,
+    /// about its origin: `None` for one that flattens the plane, which draws
+    /// nothing. Only the elements with a fragment on the page are here — a
+    /// non-replaced inline box has none, and `css-transforms-1` §3 does not
+    /// transform it — and the reference box is that fragment, so a box cut
+    /// across pages turns each page's slice about the slice's own origin.
+    fn locals(&self, laid: &LayoutPage, frame: &Frame) -> BTreeMap<u32, Option<[f64; 6]>> {
+        let mut out = BTreeMap::new();
+        if self.transforms.is_empty() {
+            return out;
+        }
+        let boxes = laid
+            .boxes
+            .iter()
+            .map(|b| (b.anchor, (b.x, b.y, b.width, b.height)));
+        let replaced = laid
+            .replaced
+            .iter()
+            .map(|r| (r.anchor, (r.x, r.y, r.width, r.height)));
+        for (anchor, rect) in boxes.chain(replaced) {
+            let Some(element) = anchor else {
+                continue;
+            };
+            if out.contains_key(&element) {
+                continue;
+            }
+            if let Some((list, origin)) = self.transforms.get(&element) {
+                out.insert(element, local_matrix(list, *origin, rect, frame));
+            }
+        }
+        out
+    }
+
+    /// The transformed elements a fragment anchored here is drawn under that
+    /// have a matrix in `locals`, **nearest first**.
+    fn turns(&self, locals: &BTreeMap<u32, Option<[f64; 6]>>, anchor: Option<u32>) -> Vec<u32> {
+        let mut out = Vec::new();
+        if locals.is_empty() {
+            return out;
+        }
+        let mut next =
+            anchor.and_then(|at| self.transformed_by.get(at as usize).copied().flatten());
+        // Each step is to a strict ancestor, whose index is lower, so the walk
+        // ends within the tree's depth.
+        while let Some(element) = next {
+            if locals.contains_key(&element) {
+                out.push(element);
+            }
+            next = self
+                .transformed_above
+                .get(element as usize)
+                .copied()
+                .flatten()
+                .filter(|above| *above < element);
+        }
+        out
+    }
+
+    /// The whole matrix a fragment anchored here is drawn under: its
+    /// transformed ancestors' own matrices, innermost applied first. `None`
+    /// where one of them flattens the plane; the identity where there are none.
+    fn composed(
+        &self,
+        locals: &BTreeMap<u32, Option<[f64; 6]>>,
+        anchor: Option<u32>,
+    ) -> Option<[f64; 6]> {
+        let mut out = IDENTITY;
+        for element in self.turns(locals, anchor) {
+            out = concat(out, locals.get(&element).copied().flatten()?);
+        }
+        Some(out)
     }
 
     /// Plans every background image a chapter's pages draw, and registers a
@@ -1261,10 +1389,11 @@ impl Effects {
         image: impl Fn(&ImageRef) -> Option<(&'i [u8], (f64, f64))>,
         counter: &mut usize,
     ) {
-        self.backgrounds = pages
+        let planned: Vec<Vec<(usize, Plan)>> = pages
             .iter()
             .map(|page| {
                 let mut plans = Vec::new();
+                let locals = self.locals(page, frame);
                 for (index, fragment) in page.boxes.iter().enumerate() {
                     let Some(layer) = &fragment.image else {
                         continue;
@@ -1291,6 +1420,13 @@ impl Effects {
                         ));
                         continue;
                     }
+                    // 8.7.3.1 maps a pattern onto the page's **default**
+                    // space, which no `cm` reaches: a transformed box's
+                    // pattern carries its transform itself. One that flattens
+                    // the plane draws nothing, and needs no pattern.
+                    let Some(turned) = self.composed(&locals, fragment.anchor) else {
+                        continue;
+                    };
                     let pattern = format!("BgP{counter}").into_bytes();
                     *counter += 1;
                     let mut content = format!("{width} 0 0 {height} 0 0 cm /").into_bytes();
@@ -1305,14 +1441,17 @@ impl Effects {
                             bbox: [0.0, 0.0, width, height],
                             x_step: geometry.step.0,
                             y_step: geometry.step.1,
-                            matrix: Some([
-                                1.0,
-                                0.0,
-                                0.0,
-                                1.0,
-                                geometry.origin.0,
-                                geometry.origin.1 - height,
-                            ]),
+                            matrix: Some(concat(
+                                [
+                                    1.0,
+                                    0.0,
+                                    0.0,
+                                    1.0,
+                                    geometry.origin.0,
+                                    geometry.origin.1 - height,
+                                ],
+                                turned,
+                            )),
                             tiling_type: TilingType::ConstantSpacing,
                             content: &content,
                         },
@@ -1330,6 +1469,7 @@ impl Effects {
                 plans
             })
             .collect();
+        self.backgrounds = planned;
     }
 
     /// This chapter's effects on one laid-out page, the `offset`-th of the
@@ -1341,6 +1481,7 @@ impl Effects {
             clips: &laid.clips,
             frame,
             backgrounds: self.backgrounds.get(offset).map_or(&[], Vec::as_slice),
+            locals: self.locals(laid, frame),
         }
     }
 
@@ -1391,6 +1532,7 @@ impl Effects {
                 }
             }
         }
+        refused.transform = self.turned_links;
         refused.box_shadow = shadowed.iter().filter(|(p, _)| *p == "box-shadow").count();
         refused.text_shadow = shadowed.iter().filter(|(p, _)| *p == "text-shadow").count();
         refused
@@ -1404,13 +1546,16 @@ impl Effects {
 }
 
 /// What a fragment drawn on one page is wrapped in: its element's composed
-/// alpha, and the clips of the elements above it. See [`Effects`].
-#[derive(Clone, Copy, Debug)]
+/// alpha, the clips of the elements above it, and the transforms. See
+/// [`Effects`].
+#[derive(Clone, Debug)]
 pub struct OnPage<'a> {
     effects: &'a Effects,
     clips: &'a [ClipFragment],
     frame: &'a Frame,
     backgrounds: &'a [(usize, Plan)],
+    /// [`Effects::locals`] for this page.
+    locals: BTreeMap<u32, Option<[f64; 6]>>,
 }
 
 impl OnPage<'_> {
@@ -1447,21 +1592,53 @@ impl OnPage<'_> {
     /// text — rather than its own box, which an element's own clip does not
     /// cut: `css-overflow-3` clips the content to the padding box and leaves
     /// the background and border where they are.
+    ///
+    /// The clips and the transforms are written **outermost first**, by
+    /// element: an ancestor's index is below its descendants', and a clipping
+    /// element's padding box is in its own coordinates — inside every
+    /// transform above it, and inside its own. So each transform is its own
+    /// matrix, `cm`'d after the ones above it, and the page's matrix at the
+    /// fragment is their product without a matrix ever being inverted.
     fn open(&self, page: &mut PageBuilder, anchor: Option<u32>, inside: bool) -> bool {
         let chain = self.chain(anchor, inside);
+        let turns = self.effects.turns(&self.locals, anchor);
         let steps = self.effects.steps(anchor);
         let translucent = f64::from(steps) < ALPHA_STEPS;
-        if chain.is_empty() && !translucent {
+        if chain.is_empty() && turns.is_empty() && !translucent {
             return false;
         }
         page.raw(b"q");
-        for element in &chain {
-            self.clip_to(page, *element);
+        let mut order: Vec<(u32, bool)> = turns
+            .iter()
+            .map(|element| (*element, false))
+            .chain(chain.iter().map(|element| (*element, true)))
+            .collect();
+        // `false` before `true`: an element's own transform before its clip.
+        order.sort_unstable();
+        for (element, clips) in order {
+            if clips {
+                self.clip_to(page, element);
+                continue;
+            }
+            match self.locals.get(&element).copied().flatten() {
+                Some(matrix) if matrix != IDENTITY => {
+                    let [a, b, c, d, e, f] = matrix;
+                    page.raw(format!("{a} {b} {c} {d} {e} {f} cm").as_bytes());
+                }
+                Some(_) => {}
+                // A transform that flattens the plane draws nothing of what is
+                // inside it (`css-transforms-1` §6.1's non-invertible matrix).
+                None => page.raw(b"0 0 0 0 re W n"),
+            }
         }
         // False when the resource was refused at registration — an archival
         // profile's — and then the fragment is drawn opaque rather than the
         // page naming a resource it does not carry.
-        if !translucent || page.set_ext_gstate(&alpha_name(steps)) || !chain.is_empty() {
+        if !translucent
+            || page.set_ext_gstate(&alpha_name(steps))
+            || !chain.is_empty()
+            || !turns.is_empty()
+        {
             return true;
         }
         page.raw(b"Q");
@@ -1549,6 +1726,70 @@ fn clip_path(clip: &ClipFragment, frame: &Frame) -> String {
         return rounded_path(rect, radii);
     }
     format!("{} {} {} {} re", rect.0, rect.1, rect.2, rect.3)
+}
+
+/// One transformed element's own matrix in page points, `css-transforms-1`
+/// §6's *"transformation matrix"*: translate to the origin, the list leftmost
+/// outermost, translate back — with the list's matrix, which is written in CSS
+/// pixels on a downward axis, carried onto the page's upward one. `rect` is
+/// the reference box, the element's border box on this page, in CSS pixels.
+///
+/// `None` where the product does not invert (`scale(0)`, a `matrix()` of
+/// zeros) or is not finite, and the element then draws nothing.
+fn local_matrix(
+    list: &[Transform],
+    origin: TransformOrigin,
+    rect: (f64, f64, f64, f64),
+    frame: &Frame,
+) -> Option<[f64; 6]> {
+    let (x, y, width, height) = rect;
+    let resolve = |value: LengthPercentage, of: f64| match value {
+        LengthPercentage::Px(px) => px,
+        LengthPercentage::Percent(percent) => of * percent / 100.0,
+    };
+    // §13.1's functions as matrices in CSS pixels, y downwards. Each later
+    // function is applied first: `translate(10px) rotate(45deg)` rotates and
+    // then translates.
+    let mut css = IDENTITY;
+    for function in list {
+        let own = match *function {
+            Transform::Matrix(matrix) => matrix,
+            Transform::Translate(tx, ty) => {
+                [1.0, 0.0, 0.0, 1.0, resolve(tx, width), resolve(ty, height)]
+            }
+            Transform::Scale(sx, sy) => [sx, 0.0, 0.0, sy, 0.0, 0.0],
+            // Clockwise on a downward axis, which is SVG's `rotate()` exactly
+            // and through the same deterministic sine (ruling 4).
+            Transform::Rotate(degrees) => rotation(degrees),
+            Transform::Skew(ax, ay) => [1.0, tangent(ay), tangent(ax), 1.0, 0.0, 0.0],
+        };
+        css = concat(own, css);
+    }
+    let [a, b, c, d, e, f] = css;
+    // The page flips the y axis and scales by the pixel: the linear part's
+    // off-diagonal terms change sign and the offsets become points.
+    let (pa, pb, pc, pd) = (a, -b, -c, d);
+    let (ox, oy) = (
+        frame.x(x + resolve(origin.x, width)),
+        frame.y(y + resolve(origin.y, height)),
+    );
+    let matrix = [
+        pa,
+        pb,
+        pc,
+        pd,
+        ox - (pa * ox + pc * oy) + e * PX_TO_PT,
+        oy - (pb * ox + pd * oy) - f * PX_TO_PT,
+    ];
+    invert(matrix).map(|_| matrix)
+}
+
+/// `tan` of an angle in degrees, as the sine over the cosine of the one
+/// deterministic implementation (ruling 4) — `skew(90deg)` is infinite, and
+/// [`local_matrix`] refuses the product.
+fn tangent(degrees: f64) -> f64 {
+    let turn = rotation(degrees);
+    turn[1] / turn[0]
 }
 
 /// A translucent colour's alpha over an element's composed opacity, in steps.

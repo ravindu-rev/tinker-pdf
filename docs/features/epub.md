@@ -191,7 +191,24 @@ first in the list is on top. **`text-shadow`** (`css-text-decor-3` §4) is the
 run drawn again, offset and in the shadow's colour, before any of the page's
 text and marked `/Artifact`, so text extraction reads the words once. A
 translucent shadow colour is its alpha times the element's composed
-`opacity`, since an `/ExtGState`'s `/ca` replaces the one in force. Borders, backgrounds, list markers and links are drawn;
+`opacity`, since an `/ExtGState`'s `/ca` replaces the one in force.
+**`transform`** (`css-transforms-1`, the two-dimensional functions of
+§13.1, with **`transform-origin`**) is one `cm` per transformed element:
+translate to the origin, the list with its leftmost function outermost,
+translate back, the CSS matrix carried from a downward axis in pixels onto
+the page's upward one in points. The reference box is the element's border
+box **on the page being drawn** — a box cut across pages turns each slice
+about its own origin, the whole box's height being unknown on the page that
+draws its top. Every fragment the element's subtree draws is wrapped in it:
+boxes, pictures, text and its shadows, outlines, and the clips of the
+clipping elements inside it, written outermost first so a nested transform
+composes without a matrix being inverted. A repeating background's pattern
+carries the transform in its own `/Matrix`, since 8.7.3.1 maps a pattern
+onto the page's default space and no `cm` reaches it. The rotations and
+skews go through the SVG crate's sine (ruling 4). A matrix with no inverse —
+`scale(0)` — draws nothing. A transformed box is the containing block of its
+absolutely positioned descendants (§2), in the layout and in the clips.
+Borders, backgrounds, list markers and links are drawn;
 **list markers are counters** (`css-lists-3` §4): `counter-reset`,
 `counter-increment` and `counter-set` are walked over the element tree in
 document order once the cascade is done (`tinker_pdf_css::counter`), with
@@ -332,6 +349,7 @@ order, at nine page boxes.
 | `opacity` on an element whose subtree holds a box that paints a background or border **and** has content over it | `ArchiveWarning::UnimplementedProperty { property: "opacity", .. }` | §15.1 composites the element as one group and then fades it; this painter fades each fragment, which is the same picture until something inside the element paints over something else inside it — text over its own box's background, each at half alpha, shows the background through the text. The group is a transparency-group form XObject, and the element's glyphs are tagged marked content the structure writer puts in the page stream rather than in a form, so the group is owed to that writer; meanwhile the elements where the two differ are counted by element, and the rest are exact. An archival profile that forbids transparency refuses the alpha outright, and those elements are drawn opaque and counted the same way | `crates/tinker-pdf/tests/epub_paint.rs` |
 | A gradient or any other `<image>` function, a second background layer, `background-attachment` other than `scroll`, and a `<box>` in the `background` shorthand | `ArchiveWarning::UnimplementedProperty { property: "background-image" \| "background" \| …, .. }` | `css-images-4`'s functions are images this build does not draw, §2's comma-separated layers are one image too many, and `background-origin` and `background-clip` — which the shorthand's two `<box>`es set — are not implemented: each is refused by value rather than given its first part, which would draw a background the author did not write | [ROADMAP.md](../ROADMAP.md) |
 | A blurred `box-shadow` or `text-shadow`, and a shadow list longer than `tinker_pdf_css::limits::MAX_CSS_SHADOWS` (32) | `ArchiveWarning::UnimplementedProperty { property: "box-shadow" \| "text-shadow", .. }` | a blur is a soft edge — a Gaussian of the shape — and this painter draws none; a hard shadow in its place is a different picture, so the whole declaration is refused by value and counted by element. A list past the cap is refused the same way: a text shadow is the run drawn again, so the cap is how many times a page may draw its text. A translucent shadow under an archival profile that forbids transparency is drawn opaque and counted the same way | `crates/tinker-pdf/tests/epub_paint.rs` |
+| A three-dimensional `transform` function (`matrix3d()`, `translate3d()`, `translateZ()`, `scale3d()`, `scaleZ()`, `rotate3d()`, `rotateX()`, `rotateY()`, `perspective()`), a non-zero `z` in `transform-origin`, a `position: fixed` box under a transformed one, and a link under one | `ArchiveWarning::UnimplementedProperty { property: "transform" \| "transform-origin", .. }` | a page is flat, and the one 3D function dropped from a list would be a different flat picture from the one a 3D renderer projects, so the declaration is refused by value. §2 makes a transformed box the containing block of its fixed descendants too, and this layout places a fixed box against the page and repeats it — so each one is counted. A link's annotation is the run's rectangle before the transform, so its active area does not turn with its text; each such link is counted | `crates/tinker-pdf/tests/epub_paint.rs` |
 | A background image on a box cut across pages — **a stated answer** | — | each page's fragment positions the image against its own padding box, for `border-radius`'s reason: the whole box's height is not known on the page that draws its top. so a `no-repeat` image is drawn once on every page the box crosses, at its position in each fragment, where `box-decoration-break: slice` would draw it once | `crates/tinker-pdf/tests/epub_images.rs` |
 | `object-fit`, `object-position` | `ArchiveWarning::UnimplementedProperty` | a replaced box's content fills its content box exactly, which is what CSS says happens when the property that would say otherwise is absent. An author who states a `width` and a `height` that disagree with the picture's proportions gets a stretched picture, asserted rather than assumed | [ROADMAP.md](../ROADMAP.md) |
 | An SVG content document that produced no picture at all | `SpineDefect::SvgUnreadable(tinker_pdf_svg::Refusal)` | six named causes — not XML, not an `<svg>` root, a `<use>` that reaches its own ancestor, or one of four ceilings — and the refusal travels, so a caller can tell a bomb from a truncated file | [design/svg.md](../design/svg.md) |
@@ -418,7 +436,7 @@ postdate the tool's removal under ruling 13, so
   against `inherit` and `initial`, asserted on an inherited and a
   non-inherited property in the same fixture because either one alone agrees
   with two of the three keywords; and `unset` asserted to be exactly *not
-  declaring the property* over **all one hundred and six longhands**, not a sample,
+  declaring the property* over **all one hundred and eight longhands**, not a sample,
   because §7.1's definition and `ComputedStyle::inherit_from`'s behaviour are
   the same rule written twice. `revert` against `revert-layer` in one fixture
   with a user-agent rule and two author layers, where the two keywords have

@@ -850,3 +850,23 @@ fn overflow_on_body_is_the_pages_and_not_the_bodys() {
     );
     same("body overflow", propagated, plain, broken);
 }
+
+// ---- transform ----------------------------------------------------------------
+
+/// **A transformed box is the containing block of its absolutely positioned
+/// descendants**, as a relatively positioned one is (`css-transforms-1` §2):
+/// `transform: translate(0)` moves no ink, so the two spellings lay out alike,
+/// and the mismatch — the same box untransformed — places the descendant
+/// against the page instead.
+#[test]
+fn a_transformed_box_contains_its_absolute_descendants_as_a_positioned_one_does() {
+    let body = r#"<p>before</p><div class="t"><p>inside</p><p class="a">placed</p></div>"#;
+    let common = "div.t { margin: 30px 0 0 40px } p.a { position: absolute; top: 5px; left: 7px }";
+    let transformed = lay(
+        &format!("{common} div.t {{ transform: translate(0) }}"),
+        body,
+    );
+    let positioned = lay(&format!("{common} div.t {{ position: relative }}"), body);
+    let broken = lay(common, body);
+    same("transform", transformed, positioned, broken);
+}

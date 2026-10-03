@@ -285,6 +285,12 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         // (`tinker_pdf::epub::paint::Effects`), where an element's ancestors
         // are — an inline box has no fragment of its own to carry it on.
         opacity: _,
+        // `css-transforms-1` §5: a transform moves ink and no box, so the list
+        // and its origin are the painter's, read from the cascade's tree with
+        // the fragment the box left on each page. Layout takes the one thing
+        // §2 makes it layout's: a transformed box is a containing block.
+        transform,
+        transform_origin: _,
         visibility,
         text_decoration,
         // `css-text-decor-3`'s `text-shadow` is paint, inherited, and drawn
@@ -435,6 +441,7 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
                 size: *background_size,
             }),
             box_shadow,
+            !transform.is_empty(),
         ),
         overflow_x: *overflow_x,
         overflow_y: *overflow_y,
@@ -559,6 +566,12 @@ impl Consumed {
     #[must_use]
     pub fn is_internal_table(&self) -> bool {
         self.display.is_internal_table()
+    }
+
+    /// Whether `transform` is anything but `none` ([`BoxPaint::transformed`]).
+    #[must_use]
+    pub fn transformed(&self) -> bool {
+        self.paint.as_ref().is_some_and(|paint| paint.transformed)
     }
 
     /// Whether this box is a **scroll container**, `css-overflow-3` §3: one
@@ -689,6 +702,14 @@ pub struct BoxPaint {
     /// `box-shadow`, `css-backgrounds-3` §7.1, first on top, each colour
     /// resolved — `currentColor` is the element's `color` by now.
     pub shadows: Vec<Shadow>,
+    /// Whether `transform` is anything but `none`, `css-transforms-1` §2: the
+    /// box is then the containing block of its absolutely positioned
+    /// descendants, as a positioned one is, and it leaves a fragment on every
+    /// page it crosses even with nothing of its own to paint, because that
+    /// fragment is the reference box the painter turns its content about.
+    /// Here and not on [`Consumed`] for [`Consumed::paint`]'s reason: a
+    /// `Consumed` is in every recursion's frame.
+    pub transformed: bool,
 }
 
 /// [`Consumed::paint`], resolved at the one door.
@@ -698,6 +719,7 @@ fn box_paint(
     current: &Color,
     image: Option<BackgroundLayer>,
     shadows: &[Shadow],
+    transformed: bool,
 ) -> Option<Box<BoxPaint>> {
     // §5.3: `auto` is the user agent's to draw, and a solid line is that
     // drawing here; `none` draws nothing whatever the width says, which is
@@ -717,7 +739,7 @@ fn box_paint(
         }),
     };
     let square = radius.iter().all(|corner| *corner == Radius::ZERO);
-    if square && outline.is_none() && image.is_none() && shadows.is_empty() {
+    if square && outline.is_none() && image.is_none() && shadows.is_empty() && !transformed {
         return None;
     }
     Some(Box::new(BoxPaint {
@@ -731,6 +753,7 @@ fn box_paint(
                 ..*shadow
             })
             .collect(),
+        transformed,
     }))
 }
 

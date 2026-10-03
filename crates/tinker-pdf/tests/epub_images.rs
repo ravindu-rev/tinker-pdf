@@ -932,3 +932,29 @@ fn a_background_url_is_relative_to_its_sheet_and_a_missing_one_is_named() {
         }]
     );
 }
+
+/// **A transformed box's repeating image turns with it**: 8.7.3.1 maps a
+/// pattern onto the page's *default* space, which no `cm` reaches, so the
+/// pattern's own `/Matrix` carries the box's transform — here a translation
+/// of ten pixels across and twenty down, on top of the untransformed cell.
+#[test]
+fn a_transformed_boxs_repeating_image_carries_the_transform_in_its_pattern() {
+    let doc = open(
+        r#"<div style="width: 200px; height: 100px; background: url(bg.png) repeat-x 0 30px; transform: translate(10px, 20px)"></div>"#,
+        &[("bg.png", solid(10, 10))],
+    );
+    let (left, top) = corner();
+    let tile = 10.0 * PX_TO_PT;
+    let (_, _, matrix, _) = pattern(&doc, 0, b"BgP0");
+    near(
+        &matrix,
+        &[
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            left + 10.0 * PX_TO_PT,
+            top - 30.0 * PX_TO_PT - tile - 20.0 * PX_TO_PT,
+        ],
+    );
+}
