@@ -182,7 +182,14 @@ to it rather than restated as current. ExtGState
 (fully masked, the default that does not invert every drop shadow), and
 `/TR` pre-sampled to 256 entries. An absent `/SMask` key leaves the mask in
 force where `/None` removes it (11.6.5.1); `q`/`Q` save and restore the mask
-beside the clip (8.5.4). All 16 standard blend modes apply (11.3.5), the
+beside the clip (8.5.4). *Corrected 3 October 2026*: a clip installed while
+a mask was in force used to carry the mask with it, because a clip was built
+by the fill's own coverage function and that multiplies the mask in — so a
+transparency group painted under a mask was masked twice (the interpreter
+installs the form's `/BBox` clip before the group takes the mask; a grey 0.5
+mask kept a quarter) and a clip set under a mask went on masking after
+`/SMask /None`. A clip is now the path times the clip in force and nothing
+else (`tests/soft_mask_clips.rs`). All 16 standard blend modes apply (11.3.5), the
 twelve separable and the four non-separable. Group buffers are a budget, not
 just a depth: nesting caps at 16 and the page as a whole at 2 000 buffers,
 because a soft mask that opens further groups branches rather than descends

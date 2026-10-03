@@ -1932,6 +1932,39 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         true
     }
 
+    /// A **new clip**: a path's coverage times the clip in force — and not the
+    /// soft mask.
+    ///
+    /// 8.5.4's clip and 11.6.5's soft mask are two parameters of the graphics
+    /// state, and a clip installed while a mask is in force is not masked: the
+    /// mask goes on being applied to what is painted, by [`Renderer::coverage`]
+    /// and by a group's composite, as long as it is in force and no longer.
+    /// Folding it into the clip applied it twice to everything painted under
+    /// both — a transparency group under a luminosity mask of grey 0.5 drew
+    /// at a quarter, because the interpreter installs the form's `/BBox` clip
+    /// before the group takes the mask, so the group's content was masked
+    /// through its clip and its composite masked again — and went on applying
+    /// it after an `/SMask /None` had turned it off, for as long as the clip
+    /// lasted.
+    ///
+    /// Returns the clip and its page-frame rectangle, both made with the mask
+    /// out of the way: the rectangle is the clip mask's, and a rectangle
+    /// narrowed by the mask's would stand beside a mask that is not.
+    fn clip_coverage(
+        &mut self,
+        path: &Path,
+        rule: FillRule,
+        stop: Option<&dyn Fn() -> bool>,
+    ) -> (Mask, Bounds) {
+        let soft = self.soft.take();
+        let soft_bounds = self.soft_bounds.take();
+        let bounds = self.page_region(path);
+        let mask = self.coverage(path, rule, stop);
+        self.soft = soft;
+        self.soft_bounds = soft_bounds;
+        (mask, bounds)
+    }
+
     /// The coverage a path contributes, over the pixels it can reach and with
     /// the current clip already multiplied in.
     ///
@@ -2505,8 +2538,8 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // the region it picks is the two rectangles' overlap, so a clip stack
         // shrinks as it nests instead of carrying a page apiece.
         let stop = self.stop_predicate();
-        let bounds = self.page_region(&built);
-        self.clip = Some(self.coverage(&built, rule, Some(&stop)));
+        let (clip, bounds) = self.clip_coverage(&built, rule, Some(&stop));
+        self.clip = Some(clip);
         self.clip_bounds = Some(bounds);
     }
 
@@ -2542,8 +2575,8 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             None => return,
         };
         let stop = self.stop_predicate();
-        let bounds = self.page_region(&path);
-        self.clip = Some(self.coverage(&path, FillRule::NonZero, Some(&stop)));
+        let (clip, bounds) = self.clip_coverage(&path, FillRule::NonZero, Some(&stop));
+        self.clip = Some(clip);
         self.clip_bounds = Some(bounds);
     }
 
