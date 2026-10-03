@@ -102,8 +102,11 @@ pub(crate) struct Observed {
     /// Rules dropped because the clip in force was not a rectangle.
     pub rules_unclipped: usize,
     /// Filled rectangles that are not rules, at most [`MAX_TABLE_RULES`] —
-    /// the cap on what a page's ink may cost, read the same way.
+    /// the cap on what a page's ink may cost, read the same way: none when
+    /// the page drew more.
     pub fills: Vec<Fill>,
+    /// How many such rectangles the page filled, counted past the cap.
+    pub fills_drawn: usize,
 }
 
 impl Observed {
@@ -127,16 +130,24 @@ impl Observed {
             rules_drawn,
             rules_unclipped,
             fills,
+            fills_drawn,
             ..
         } = observer;
         let mut text = text.finish();
         text_order::into_logical_order(&mut text);
         // Past the cap a page's rules are not read at all, rather than read
-        // up to an arbitrary first part of the content stream.
+        // up to an arbitrary first part of the content stream; and its fills
+        // the same way, so a shading the cap happened to keep is not read
+        // as a header when the one beside it was dropped.
         let rules = if rules_drawn > MAX_TABLE_RULES {
             Vec::new()
         } else {
             rules
+        };
+        let fills = if fills_drawn > MAX_TABLE_RULES {
+            Vec::new()
+        } else {
+            fills
         };
         Observed {
             text,
@@ -144,6 +155,7 @@ impl Observed {
             rules_drawn,
             rules_unclipped,
             fills,
+            fills_drawn,
         }
     }
 }
@@ -191,6 +203,7 @@ struct Observer {
     rules_drawn: usize,
     rules_unclipped: usize,
     fills: Vec<Fill>,
+    fills_drawn: usize,
 }
 
 impl Observer {
@@ -208,6 +221,7 @@ impl Observer {
             rules_drawn: 0,
             rules_unclipped: 0,
             fills: Vec::new(),
+            fills_drawn: 0,
         }
     }
 
@@ -478,11 +492,14 @@ impl Device for Observer {
                     to: y1,
                     width: w,
                 });
-            } else if self.fills.len() < MAX_TABLE_RULES {
-                self.fills.push(Fill {
-                    rect: (x0, y0, x1, y1),
-                    inked,
-                });
+            } else {
+                self.fills_drawn = self.fills_drawn.saturating_add(1);
+                if self.fills.len() < MAX_TABLE_RULES {
+                    self.fills.push(Fill {
+                        rect: (x0, y0, x1, y1),
+                        inked,
+                    });
+                }
             }
         }
     }

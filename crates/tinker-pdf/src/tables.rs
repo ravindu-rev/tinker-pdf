@@ -88,7 +88,9 @@ use crate::Page;
 /// rule against every vertical one — and a page of hatching is a denial of
 /// service with a table's name. Past this the page's rules are not read at
 /// all and [`TableWarning::TooManyRules`] says how many there were; the text
-/// is untouched, and so is every other inference.
+/// is untouched, and so is every other inference. The same number bounds the
+/// filled rectangles kept as header evidence, read the same way: past it none
+/// is, and [`TableWarning::TooManyFills`] says how many there were.
 ///
 /// | | Rules |
 /// | --- | --- |
@@ -284,9 +286,9 @@ pub struct InferredTables {
     /// Every rule the page draws: the evidence, whether or not a table was
     /// made of it.
     pub rules: Vec<TableRule>,
-    /// Page-level warnings: the rules' ([`TableWarning::TooManyRules`],
-    /// [`TableWarning::ClipNotRectangular`]), [`TableWarning::LatticesCross`]
-    /// and [`TableWarning::TreePresent`].
+    /// Page-level warnings: the ink's ([`TableWarning::TooManyRules`],
+    /// [`TableWarning::TooManyFills`], [`TableWarning::ClipNotRectangular`]),
+    /// [`TableWarning::LatticesCross`] and [`TableWarning::TreePresent`].
     pub warnings: Vec<TableWarning>,
 }
 
@@ -295,7 +297,7 @@ pub struct InferredTables {
 pub struct TableRules {
     /// The rules, in the order the page drew them.
     pub rules: Vec<TableRule>,
-    /// [`TableWarning::TooManyRules`] and
+    /// [`TableWarning::TooManyRules`], [`TableWarning::TooManyFills`] and
     /// [`TableWarning::ClipNotRectangular`].
     pub warnings: Vec<TableWarning>,
 }
@@ -375,6 +377,13 @@ pub enum TableWarning {
     /// The page draws more than [`MAX_TABLE_RULES`] rules, so none were read.
     TooManyRules {
         /// How many it draws.
+        drawn: usize,
+    },
+    /// The page fills more than [`MAX_TABLE_RULES`] rectangles too large to
+    /// be rules, so none were read, and no table on it has
+    /// [`HeaderEvidence::FillBeneath`] whatever its shading.
+    TooManyFills {
+        /// How many it fills.
         drawn: usize,
     },
     /// Rules drawn under a clip that is not a rectangle, which were not read:
@@ -523,6 +532,11 @@ pub(crate) fn rules_of(observed: &Observed) -> TableRules {
     if observed.rules_drawn > MAX_TABLE_RULES {
         warnings.push(TableWarning::TooManyRules {
             drawn: observed.rules_drawn,
+        });
+    }
+    if observed.fills_drawn > MAX_TABLE_RULES {
+        warnings.push(TableWarning::TooManyFills {
+            drawn: observed.fills_drawn,
         });
     }
     if observed.rules_unclipped > 0 {
@@ -804,9 +818,18 @@ fn tables_of(observed: &Observed, frame: (f64, f64, f64, f64), aligned: bool) ->
         }
         tables.push(table);
     }
-    // Aligned text where no ruled table stands.
+    // Aligned text where no ruled table stands: the characters whose centres
+    // a ruled table's frame holds are found frame by frame through the same
+    // sorted centres, not by asking every character about every frame.
     if aligned {
-        let ruled: Vec<(f64, f64, f64, f64)> = tables.iter().map(|t| t.bounds.bounds()).collect();
+        let mut ruled = vec![false; flat.len()];
+        for table in &tables {
+            for at in centres.held(table.bounds.bounds()) {
+                if let Some(flag) = ruled.get_mut(at) {
+                    *flag = true;
+                }
+            }
+        }
         tables.extend(infer_aligned(
             fragments(page, &flat, em, &ruled),
             &flat,
@@ -844,23 +867,52 @@ fn contains(outer: (f64, f64, f64, f64), inner: (f64, f64, f64, f64)) -> bool {
 struct Centres {
     by_x: Vec<(f64, usize)>,
     by_y: Vec<(f64, usize)>,
+    /// Each character's centre by its stream position, not a number where
+    /// its quad is not finite, so that no frame holds it.
+    centre_x: Vec<f64>,
+    centre_y: Vec<f64>,
 }
 
 impl Centres {
     fn of(flat: &[&TextChar]) -> Centres {
-        let mut by_x = Vec::with_capacity(flat.len());
-        let mut by_y = Vec::with_capacity(flat.len());
-        for (at, c) in flat.iter().enumerate() {
-            if !c.quad.is_finite() {
+        Centres::at(
+            flat.iter()
+                .map(|c| {
+                    c.quad.is_finite().then(|| {
+                        let (x0, y0, x1, y1) = c.quad.bounds();
+                        ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// From each character's centre, by stream position, `None` where its
+    /// quad is not finite.
+    fn at(centres: Vec<Option<(f64, f64)>>) -> Centres {
+        let mut by_x = Vec::with_capacity(centres.len());
+        let mut by_y = Vec::with_capacity(centres.len());
+        let mut centre_x = vec![f64::NAN; centres.len()];
+        let mut centre_y = vec![f64::NAN; centres.len()];
+        for (at, centre) in centres.into_iter().enumerate() {
+            let Some((x, y)) = centre else {
                 continue;
+            };
+            by_x.push((x, at));
+            by_y.push((y, at));
+            if let (Some(cx), Some(cy)) = (centre_x.get_mut(at), centre_y.get_mut(at)) {
+                *cx = x;
+                *cy = y;
             }
-            let (x0, y0, x1, y1) = c.quad.bounds();
-            by_x.push(((x0 + x1) / 2.0, at));
-            by_y.push(((y0 + y1) / 2.0, at));
         }
         by_x.sort_by(|a, b| a.0.total_cmp(&b.0));
         by_y.sort_by(|a, b| a.0.total_cmp(&b.0));
-        Centres { by_x, by_y }
+        Centres {
+            by_x,
+            by_y,
+            centre_x,
+            centre_y,
+        }
     }
 
     /// The characters whose centres lie strictly inside `(x0, y0, x1, y1)`
@@ -881,6 +933,31 @@ impl Centres {
             .unwrap_or_default()
             .iter()
             .map(|(_, at)| *at)
+            .collect()
+    }
+
+    /// The characters whose centres `(x0, y0, x1, y1)` holds, its edges
+    /// included: the shorter axis's run, each checked along the other.
+    fn held(&self, (x0, y0, x1, y1): (f64, f64, f64, f64)) -> Vec<usize> {
+        // An edge that is not a number holds nothing, as comparing with it
+        // says; the runs alone would read it as no bound at all.
+        if [x0, y0, x1, y1].iter().any(|v| v.is_nan()) {
+            return Vec::new();
+        }
+        let run = |axis: &[(f64, usize)], lo: f64, hi: f64| -> std::ops::Range<usize> {
+            let from = axis.partition_point(|(c, _)| *c < lo);
+            from..axis.partition_point(|(c, _)| *c <= hi).max(from)
+        };
+        let (across, down) = (run(&self.by_x, x0, x1), run(&self.by_y, y0, y1));
+        let (run, other, lo, hi) = if across.len() <= down.len() {
+            (self.by_x.get(across), &self.centre_y, y0, y1)
+        } else {
+            (self.by_y.get(down), &self.centre_x, x0, x1)
+        };
+        run.unwrap_or_default()
+            .iter()
+            .map(|(_, at)| *at)
+            .filter(|at| other.get(*at).is_some_and(|c| *c >= lo && *c <= hi))
             .collect()
     }
 }
@@ -1424,20 +1501,12 @@ struct Fragment {
     rtl: bool,
 }
 
-/// The fragments of the page's lines that no ruled table holds, each line cut
-/// at every gap of [`ALIGNED_GAP_EMS`] or more between neighbouring glyphs.
-fn fragments(
-    page: &TextPage,
-    flat: &[&TextChar],
-    em: f64,
-    ruled: &[(f64, f64, f64, f64)],
-) -> Vec<Fragment> {
+/// The fragments of the page's lines that no ruled table holds — `ruled`
+/// flags, by stream position, the characters whose centres a ruled table's
+/// frame holds — each line cut at every gap of [`ALIGNED_GAP_EMS`] or more
+/// between neighbouring glyphs.
+fn fragments(page: &TextPage, flat: &[&TextChar], em: f64, ruled: &[bool]) -> Vec<Fragment> {
     let gap = ALIGNED_GAP_EMS * em;
-    let inside = |x: f64, y: f64| {
-        ruled
-            .iter()
-            .any(|(a, b, c, d)| x >= *a && x <= *c && y >= *b && y <= *d)
-    };
     let mut out = Vec::new();
     let mut next = 0usize;
     for line in page.blocks.iter().flat_map(|b| b.lines.iter()) {
@@ -1453,7 +1522,7 @@ fn fragments(
                 let c = flat.get(at)?;
                 c.quad.is_finite().then(|| (at, c.quad.bounds()))
             })
-            .filter(|(_, (x0, y0, x1, y1))| !inside((x0 + x1) / 2.0, (y0 + y1) / 2.0))
+            .filter(|(at, _)| !ruled.get(*at).copied().unwrap_or(false))
             .collect();
         placed.sort_by(|a, b| a.1 .0.total_cmp(&b.1 .0));
         let mut current: Option<Fragment> = None;
@@ -1853,7 +1922,51 @@ impl Occupancy {
 
 #[cfg(test)]
 mod tests {
-    use super::Occupancy;
+    use super::{Centres, Occupancy};
+
+    /// What a frame holds, by the sorted centres, against asking every
+    /// character: points on a coarse grid so that edges are hit exactly, a
+    /// few with no centre, and frames of every shape including inverted and
+    /// not-a-number ones, which hold nothing.
+    #[test]
+    fn a_frame_holds_what_asking_every_centre_says_it_does() {
+        let mut state = 11u64;
+        let mut next = |modulo: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % modulo
+        };
+        let points: Vec<Option<(f64, f64)>> = (0..400)
+            .map(|_| {
+                let (x, y) = (next(40) as f64, next(40) as f64);
+                (next(17) != 0).then_some((x, y))
+            })
+            .collect();
+        let centres = Centres::at(points.clone());
+        let mut frames: Vec<(f64, f64, f64, f64)> = (0..300)
+            .map(|_| {
+                let (x, y) = (next(44) as f64 - 2.0, next(44) as f64 - 2.0);
+                (x, y, x + next(12) as f64, y + next(12) as f64)
+            })
+            .collect();
+        frames.push((10.0, 10.0, 5.0, 20.0));
+        frames.push((f64::NAN, 0.0, 40.0, 40.0));
+        frames.push((0.0, 0.0, 40.0, f64::NAN));
+        for frame in frames {
+            let (a, b, c, d) = frame;
+            let mut expect: Vec<usize> = points
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.is_some_and(|(x, y)| x >= a && x <= c && y >= b && y <= d))
+                .map(|(at, _)| at)
+                .collect();
+            let mut got = centres.held(frame);
+            expect.sort_unstable();
+            got.sort_unstable();
+            assert_eq!(got, expect, "{frame:?}");
+        }
+    }
 
     /// The segment tree, against the plain array it stands for.
     #[test]

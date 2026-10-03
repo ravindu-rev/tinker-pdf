@@ -570,6 +570,43 @@ fn a_page_past_the_rule_cap_has_no_rules_read() {
     assert!(read.rules.is_empty());
 }
 
+/// **Past the cap no fill is read either, and that is said.** A grid whose
+/// first row is shaded, which is `FillBeneath` on its own, on a page that
+/// then fills the cap's worth of small squares: the fills were kept up to the
+/// cap with nothing said, so this shading, drawn first, was read as a header
+/// where one drawn last would have been lost without a word. Now, as with
+/// rules, none is read past the cap, the header is `FirstRow` — no evidence
+/// — and `TooManyFills` says how many there were.
+#[test]
+fn a_page_past_the_fill_cap_has_no_fills_read() {
+    let mut squares = String::from("0.85 g 72 580 300 20 re f\n0.5 g\n");
+    for at in 0..MAX_TABLE_RULES {
+        let (x, y) = (20 + (at % 128) * 4, 20 + (at / 128) * 3);
+        squares.push_str(&format!("{x} {y} 3 3 re\n"));
+    }
+    squares.push_str("f\n");
+    let thin = "72 580 m 372 580 l S\n";
+    let doc = grid_with(&squares, thin);
+    let found = doc
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    assert_eq!(
+        found.warnings,
+        [TableWarning::TooManyFills {
+            drawn: MAX_TABLE_RULES + 1
+        }]
+    );
+    assert_eq!(found.tables.len(), 1);
+    assert_eq!(found.tables[0].header, HeaderEvidence::FirstRow);
+    assert_eq!(
+        rules(&doc).warnings,
+        [TableWarning::TooManyFills {
+            drawn: MAX_TABLE_RULES + 1
+        }]
+    );
+}
+
 /// **What is not a rule is not read as one**: a curve, a diagonal, a stroke
 /// five points wide, a filled square, and a line shorter than two points.
 #[test]
