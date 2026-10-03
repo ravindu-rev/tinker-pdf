@@ -13,10 +13,15 @@
 //!
 //! # The sniff, and why a PDF always wins it
 //!
-//! [`sniff`] answers `None` for anything carrying `%PDF-` in its first 1 024
-//! bytes, which is where 7.5.2's leniency lets a header sit — so a PDF with
-//! junk in front of it, and a polyglot that is a PDF and something else, stay
-//! PDFs. Past that, an image is told by its magic at offset zero, exactly as
+//! [`sniff`] answers `None` for anything carrying `%PDF-` in its first
+//! [`tinker_pdf_cos::limits::MAX_HEADER_SCAN`] bytes, which is exactly where
+//! the COS parser looks for a header and opens what follows it as the PDF — so
+//! a PDF with junk in front of it, and a polyglot that is a PDF and something
+//! else, stay PDFs wherever the parser would have read them as one. (7.5.2
+//! puts the header first and names no window; 1 024 bytes is Acrobat's
+//! implementation note, and the parser's 4 096 is the leniency this build
+//! already extends, so it is the one a sniff in front of it must not undercut.)
+//! Past that, an image is told by its magic at offset zero, exactly as
 //! [`cbz::image_format`] tells a page, and a markup document by the name of its
 //! root element once the prolog is skipped: the byte-order mark, white space,
 //! the XML declaration and any processing instruction, comments, and the
@@ -77,13 +82,21 @@ use crate::epub::{self, BookLayout, Loose};
 /// Four kilobytes — the chunk a streamed open reads anyway
 /// ([`crate::CHUNK_SIZE`]) — because the root element of a markup document
 /// comes after its prolog, and an XML declaration, a generator's comment and a
-/// doctype with a small internal subset fit in it where they would not all fit
-/// in the 1 024 bytes a PDF header is looked for in.
+/// doctype with a small internal subset fit in it. It is never less than
+/// [`PDF_HEADER_WINDOW`], which a streamed open relies on: the window it reads
+/// for this sniff is the one the PDF header is looked for in.
 pub const SNIFF_WINDOW: usize = 4_096;
 
-/// Where 7.5.2's leniency lets a PDF header sit, and so where a PDF is looked
-/// for before anything else is.
-const PDF_HEADER_WINDOW: usize = 1_024;
+/// Where a PDF header is looked for before anything else is: the COS parser's
+/// own [`tinker_pdf_cos::limits::MAX_HEADER_SCAN`], because a header it would
+/// find is a PDF it would open, and a sniff that looked in fewer bytes turned
+/// a PDF behind junk that began like a picture or a markup document into a
+/// synthesised one.
+const PDF_HEADER_WINDOW: usize = tinker_pdf_cos::limits::MAX_HEADER_SCAN;
+
+// The streamed open reads `SNIFF_WINDOW` bytes for this sniff, so a header past
+// them would go unseen streamed and be seen buffered.
+const _: () = assert!(SNIFF_WINDOW >= PDF_HEADER_WINDOW);
 
 /// What translating a document written in another language into the EPUB
 /// reader's tree had to do (tier 5's Markdown and FB2 rows), reported as
@@ -137,8 +150,8 @@ pub enum Standalone {
 /// Whether the bytes are a one-file document this build opens, and which.
 ///
 /// Reads at most [`SNIFF_WINDOW`] bytes, and answers `None` for anything with
-/// `%PDF-` in its first 1 024 — see the module comment for why a PDF always
-/// wins.
+/// `%PDF-` where the COS parser looks for a header — see the module comment
+/// for why a PDF always wins.
 #[must_use]
 pub fn sniff(bytes: &[u8]) -> Option<Standalone> {
     let head = bytes.get(..bytes.len().min(SNIFF_WINDOW)).unwrap_or(bytes);
@@ -833,15 +846,20 @@ mod tests {
     }
 
     #[test]
-    fn a_pdf_header_in_the_first_kilobyte_wins() {
+    fn a_pdf_header_where_the_parser_looks_for_one_wins() {
         assert_eq!(kind("<svg/>%PDF-1.7"), None);
+        // The last place a header still ends inside the parser's window.
+        let mut edge = String::from("<svg>");
+        edge.push_str(&" ".repeat(PDF_HEADER_WINDOW - 5 - "<svg>".len()));
+        edge.push_str("%PDF-1.7");
+        assert_eq!(kind(&edge), None, "a header the parser would find");
         let mut far = String::from("<svg>");
-        far.push_str(&" ".repeat(PDF_HEADER_WINDOW));
+        far.push_str(&" ".repeat(PDF_HEADER_WINDOW - 4 - "<svg>".len()));
         far.push_str("%PDF-1.7");
         assert_eq!(
             kind(&far),
             Some(Standalone::Svg),
-            "past the window 7.5.2 allows, a header is not one"
+            "a header that does not end inside the parser's window is not one"
         );
         assert_eq!(sniff(b"\xFF\xD8\xFF%PDF-1.4"), None, "a JPEG polyglot");
     }

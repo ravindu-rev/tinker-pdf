@@ -1320,7 +1320,8 @@ impl Document {
         // position a one-file document cannot also hold, and before the PDF
         // parser, because that parser's rescan would read an SVG as a damaged
         // PDF with no objects. `sniff` answers `None` for anything with a PDF
-        // header where 7.5.2 lets one sit, so a PDF never reaches this.
+        // header where the COS parser looks for one, so a PDF never reaches
+        // this.
         if let Some(kind) = standalone::sniff(&bytes) {
             let (layout, unusable) = epub::BookLayout::sanitised(options.page, options.font_size);
             let (pdf, mut report) = standalone::synthesise(kind, &bytes, &layout)
@@ -1441,7 +1442,10 @@ impl Document {
         // and an XHTML file's last element can be its first page's, and a bare
         // image is one picture. Its sniff looks further in than the container
         // one, so it is asked only when the first window holds no PDF header —
-        // which keeps every PDF's streamed open to the reads it always made.
+        // which keeps a PDF whose header is in its first kilobyte to the reads
+        // it always made. One with more junk in front than that costs the read
+        // of the head window the parser searches for its header anyway, and
+        // `sniff` answers `None` for it there, as it does buffered.
         let standalone = !head.windows(5).any(|w| w == b"%PDF-") && {
             let wider = filled(&*source, standalone::SNIFF_WINDOW as u64)?;
             standalone::sniff(&wider).is_some()

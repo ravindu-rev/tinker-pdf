@@ -31,8 +31,12 @@ through `tinker_pdf::standalone`: a **standalone SVG**, a **bare image** and a
 **loose XHTML file**. Each had a reader in the tree and was refused as
 not-a-PDF because nothing asked. The sniff comes after the containers and
 before the PDF parser, and a PDF always wins it — anything with `%PDF-` in its
-first 1 024 bytes, where 7.5.2's leniency lets a header sit, is a PDF, so a
-polyglot and a PDF with junk in front stay PDFs. Past that, an image is told
+first 4 096 bytes, which is where the COS parser itself looks for a header
+(`tinker_pdf_cos::limits::MAX_HEADER_SCAN`), is a PDF, so a polyglot and a PDF
+with junk in front stay PDFs wherever the parser would have opened them as one.
+(7.5.2 names no window; Acrobat's implementation note says 1 024 bytes, and a
+sniff that used it turned a PDF behind 1 500 bytes of junk that began like a
+JPEG or an SVG into a synthesised placeholder.) Past that, an image is told
 by its magic at offset zero (JPEG, PNG, TIFF, JPEG 2000, GIF, WebP, AVIF — the
 comic path's own classifier, less BMP's two-byte signature) and a markup
 document by its root element once the prolog is walked: byte-order mark, white
@@ -56,7 +60,9 @@ reference is **missing and named** (`StylesheetUnresolved`, `ImageNotDrawn`,
 `SvgImageUnresolved`, `FontFace`); RFC 2397's `data:` URL carries its own bytes
 and resolves. A streamed open of one is whole-file, as a container's is, and
 its wider sniff is read only when the first kilobyte holds no PDF header, so
-a streamed PDF's reads are unchanged.
+a streamed PDF whose header is in that kilobyte makes the reads it always
+made; one with more junk in front costs one read of the 4 096-byte head the
+parser searches anyway.
 
 **An FB2 opens like a loose XHTML file** — a root named `FictionBook`,
 and the `.fb2.zip` it is usually shipped as, a ZIP of one file whose bytes

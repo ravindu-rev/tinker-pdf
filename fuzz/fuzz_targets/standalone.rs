@@ -22,8 +22,9 @@
 //!   `MAX_SYNTHESISED_PDF`, which these inputs cannot reach: an unreadable
 //!   SVG, tag soup and an undecodable picture are each a page saying so. An
 //!   `Err` here is a refusal the module comment says does not exist.
-//! - **A PDF header in the first kilobyte wins**: the sniff answers `None`,
-//!   so a polyglot stays a PDF.
+//! - **A PDF header where the COS parser looks for one wins** (its first
+//!   `MAX_HEADER_SCAN` bytes): the sniff answers `None`, so a polyglot and a
+//!   PDF behind junk stay PDFs.
 //! - **Opening is deterministic** — the same page count and the same warnings
 //!   from the same bytes — which is ruling 4 over the reader rather than over
 //!   a rendered page.
@@ -82,7 +83,9 @@ fuzz_target!(|data: &[u8]| {
         }
     };
 
-    let head = input.get(..input.len().min(1024)).unwrap_or_default();
+    let head = input
+        .get(..input.len().min(tinker_pdf_cos::limits::MAX_HEADER_SCAN))
+        .unwrap_or_default();
     let kind = sniff(&input);
     if head.windows(5).any(|w| w == b"%PDF-") {
         assert!(kind.is_none(), "a PDF header was sniffed as {kind:?}");

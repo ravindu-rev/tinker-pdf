@@ -174,6 +174,52 @@ fn the_three_open_and_everything_else_is_still_refused() {
     }
 }
 
+/// **A PDF with junk in front of it stays the PDF wherever the parser would
+/// have found its header**, whatever the junk looks like.
+///
+/// The COS parser looks for `%PDF-` in the first
+/// `tinker_pdf_cos::limits::MAX_HEADER_SCAN` bytes and opens what follows as
+/// the PDF, the leading junk shifting every offset by its own length. A sniff
+/// that looked in fewer bytes turned a PDF behind 1 500 bytes of junk that
+/// began like a JPEG, an SVG or an HTML file into a synthesised placeholder,
+/// a picture that would not read or a truncated page — so the window is the
+/// parser's own, and this holds it at its far edge too, buffered and streamed.
+#[test]
+fn a_pdf_behind_junk_is_the_pdf_wherever_the_parser_finds_its_header() {
+    let mut builder = tinker_pdf::DocumentBuilder::new();
+    for _ in 0..2 {
+        builder.add_page(200.0, 100.0, |_| {});
+    }
+    let pdf = builder.finish();
+    let window = tinker_pdf_cos::limits::MAX_HEADER_SCAN;
+    for prefix in [
+        b"\xFF\xD8\xFF\xE0".as_slice(),
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\">",
+        b"<html><body>",
+        b"<!DOCTYPE html>",
+    ] {
+        // 1 500 bytes in, and as far in as a header that still ends inside the
+        // window the parser searches.
+        for junk in [1_500, window - 5] {
+            let mut bytes = prefix.to_vec();
+            bytes.resize(junk, b' ');
+            bytes.extend_from_slice(&pdf);
+            let what = format!("{:?} + {junk}", String::from_utf8_lossy(prefix));
+            assert_eq!(tinker_pdf::standalone::sniff(&bytes), None, "{what}");
+            let buffered = open(&bytes);
+            assert!(buffered.archive().is_none(), "{what}: synthesised");
+            assert_eq!(buffered.page_count(), 2, "{what}");
+            let source = Arc::new(ShreddedSource::new(SliceSource::new(bytes)));
+            let streamed = Document::open_streaming(source).expect("it opens streamed");
+            assert!(
+                streamed.archive().is_none(),
+                "{what}: streamed, synthesised"
+            );
+            assert_eq!(streamed.page_count(), 2, "{what}: streamed");
+        }
+    }
+}
+
 // ---- a standalone SVG --------------------------------------------------------
 
 const RED_SQUARE: &str = concat!(
