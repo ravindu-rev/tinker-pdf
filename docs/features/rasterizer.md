@@ -84,7 +84,11 @@ identically to a filled one. Caps are butt, round and square (8.4.3.3,
 Table 54); joins are miter with the 8.4.3.5 limit, round and bevel (8.4.3.4,
 Table 55); dashes follow 8.4.3.6, with an empty or zero-sum array meaning a
 solid line, and a width of zero drawing the thinnest device line — one
-pixel (8.4.3.2).
+pixel (8.4.3.2). A point repeated has no direction to join or cap along,
+so repeats are dropped before the joins are read — the close of a circle
+of four Béziers and an `h` ends on its start point twice, and until
+October 2026 that lost the join at the start, a notch at the point where
+every such circle begins.
 
 **Hard edges.** `Mask::harden` turns a coverage mask into one that is whole or
 empty at every pixel: at least half becomes 255, less becomes 0. It is what

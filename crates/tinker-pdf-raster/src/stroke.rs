@@ -231,6 +231,33 @@ fn apply_dashes(
 }
 
 fn stroke_polyline(poly: &[Point], radius: f64, style: &StrokeStyle, out: &mut Path) {
+    // A point repeated has no direction between its copies, so a join or a
+    // cap that reads one off them finds none and draws nothing. The commonest
+    // repeat is the close: `flatten` ends a closed subpath on its start point
+    // whether or not the last segment already returned there, so every circle
+    // of four Béziers and an `h` — and every polygon that names its first
+    // corner again before closing — lost the join at its start, a notch in
+    // the outline 8.4.3.4 says is joined. Repeats are dropped while two
+    // distinct points are left; a subpath of one point repeated is still the
+    // degenerate one 8.5.3.2 describes, and is handled as it was.
+    let distinct: Vec<Point>;
+    let poly = if poly.windows(2).any(|pair| pair.first() == pair.get(1)) {
+        distinct = poly
+            .iter()
+            .fold(Vec::with_capacity(poly.len()), |mut kept, &p| {
+                if kept.last() != Some(&p) {
+                    kept.push(p);
+                }
+                kept
+            });
+        if distinct.len() >= 2 {
+            &distinct[..]
+        } else {
+            poly
+        }
+    } else {
+        poly
+    };
     if poly.len() < 2 {
         // 8.4.3.3: a degenerate subpath draws a dot under a round cap, and
         // nothing at all under a butt cap.
@@ -845,5 +872,51 @@ mod tests {
              not one per step: {}",
             stop.calls.get()
         );
+    }
+
+    /// 8.4.3.4 joins every corner of a closed subpath, the one it starts at
+    /// included, however the path got back there. A square from 4 to 14
+    /// stroked two wide with miter joins is the ring between 3 and 15 and
+    /// 5 and 13: `144 − 64 = 80`. Naming the first corner again before `h`
+    /// — which is also what four Béziers and an `h` do to a circle — used to
+    /// leave that corner unjoined and the ring a pixel short, 79, because the
+    /// close repeated the point and a repeated point has no direction.
+    #[test]
+    fn a_closed_subpath_that_returns_to_its_start_keeps_the_join_there() {
+        let style = StrokeStyle {
+            width: 2.0,
+            ..StrokeStyle::default()
+        };
+        let square = |again: bool| {
+            let mut path = Path::new();
+            path.move_to(4.0, 4.0);
+            path.line_to(14.0, 4.0);
+            path.line_to(14.0, 14.0);
+            path.line_to(4.0, 14.0);
+            if again {
+                path.line_to(4.0, 4.0);
+            }
+            path.close();
+            coverage(&stroke(&path, &style, 0.05, None), 20, 20)
+        };
+        for again in [false, true] {
+            let area = square(again);
+            assert!(
+                (area - 80.0).abs() < 0.05,
+                "first corner named again: {again}; the ring is {area}"
+            );
+        }
+        // The degenerate subpath is still the degenerate one: a point named
+        // twice under a round cap is one dot, not two on top of each other.
+        let mut dot = Path::new();
+        dot.move_to(10.0, 10.0);
+        dot.line_to(10.0, 10.0);
+        let round = StrokeStyle {
+            width: 4.0,
+            cap: LineCap::Round,
+            ..StrokeStyle::default()
+        };
+        let area = coverage(&stroke(&dot, &round, 0.05, None), 20, 20);
+        assert!((area - 12.2).abs() < 0.5, "a disc of radius 2: {area}");
     }
 }
