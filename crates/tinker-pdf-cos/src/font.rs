@@ -548,6 +548,24 @@ impl Font {
         }
     }
 
+    /// Whether the document gave this font a `/ToUnicode` that read.
+    #[must_use]
+    pub fn has_to_unicode(&self) -> bool {
+        self.to_unicode.is_some()
+    }
+
+    /// The code whose `/ToUnicode` entry is exactly `c`, the lowest where
+    /// several are.
+    ///
+    /// The writer's direction, for a font whose program cannot answer it: a
+    /// bare CFF carries no `cmap`, so the only statement in a document of
+    /// which code means which character is the font's own `/ToUnicode`. `None`
+    /// for a font with none, or a character it never maps.
+    #[must_use]
+    pub fn code_for_char(&self, c: char) -> Option<u32> {
+        self.to_unicode.as_ref()?.code_for_unicode(c)
+    }
+
     /// The text a code stands for.
     ///
     /// `/ToUnicode` wins where it exists, because it is the producer's own

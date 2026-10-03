@@ -10,14 +10,16 @@
 //! once the appearances are right, asking viewers to rebuild them can only
 //! make things worse.
 
-use tinker_pdf_font::Sfnt;
+use std::collections::HashMap;
+
+use tinker_pdf_font::{Cff, Sfnt};
 use tinker_pdf_shape::bidi::{reorder, BaseDirection, Paragraph};
 use tinker_pdf_shape::shape::{itemize, Shaper};
-use tinker_pdf_shape::ShapedGlyph;
+use tinker_pdf_shape::{ShapedGlyph, Tag};
 
 use crate::build::{close_array, number};
 use crate::doc::CosDocument;
-use crate::font::{self, Font, FontKind};
+use crate::font::{self, Font, FontKind, ProgramKey};
 use crate::form::{self, FieldKind};
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
@@ -104,8 +106,8 @@ fn width_of(font: Option<&Font>, text: &str) -> f64 {
 /// and said nothing, so a form whose Arabic value had become a row of question
 /// marks was indistinguishable from one that had been filled correctly.
 ///
-/// The shaped path is the *other* half of the answer, and where a composite
-/// `/DA` font makes it available nothing reaches here; see [`Composite`].
+/// The shaped path is the *other* half of the answer, and where the `/DA`
+/// font makes it available nothing reaches here; see [`Shapeable`].
 pub(crate) fn escape(out: &mut Vec<u8>, text: &str, unwritable: &mut Vec<char>) {
     for c in text.chars() {
         let code = u32::from(c);
@@ -131,50 +133,80 @@ pub(crate) fn escape(out: &mut Vec<u8>, text: &str, unwritable: &mut Vec<char>) 
 /// `/DR`, and a [`Font`] that knew every width and no outline had nothing for
 /// a shaper to work on. [`Font::program`] is the entry that changed.
 ///
-/// # The conditions, each checked rather than assumed
+/// # Four fonts, four ways back from a glyph to a code
 ///
-/// 1. **The font is composite** (9.7). A simple font addresses a byte, so it
-///    cannot name a glyph beyond 255 whatever is embedded in it.
-/// 2. **The writing mode is horizontal.** 9.7.4.3's vertical CMaps advance
-///    the pen downward and this module places every glyph along a baseline.
-///    Selecting the right glyphs and drawing them in a row a viewer will
-///    stack is a worse answer than a question mark, so a `-V` encoding keeps
-///    the single-byte path.
-/// 3. **Its `/Encoding` can be read backwards to a code.** This is the
-///    condition that used to say `/Identity-H` and no longer does. A writer
-///    needs to go from a glyph to a *code*, and 9.7.5's CMaps are written to
-///    be read the other way — but "written to be read forwards" is not "not
-///    invertible". `tinker_pdf_font::CMap::code_for_cid` gathers every code
-///    the CMap's own tables could have meant by a CID and returns the first that maps
-///    **back**, so the round trip is checked rather than assumed and a
-///    `cidchar` override cannot be inverted into a code that now means
-///    something else. That covers `/Identity-H` (where the code is the CID
-///    outright), every embedded CMap stream, and — where this build compiled
-///    the tables in — every horizontal registry CMap of 9.7.5.2.
-///    [`Font::cid_for_gid`] inverts the remaining step, `/CIDToGIDMap`.
-///    Inversion is what condition 2 leaves on the table: `/Identity-V` is
-///    just as invertible and is still refused, because the refusal there is
-///    about where the glyph is *drawn* rather than about which one it is.
-/// 4. **The descriptor embeds a program `tinker_pdf_font::Sfnt` reads.** A
-///    bare CFF (`/FontFile3 /Subtype /Type1C` or `/CIDFontType0C`) is not an
-///    sfnt and carries no `GSUB`/`GPOS` for this crate to execute, so a
-///    CIDFontType0 face is still outside what this claims.
-struct Composite {
+/// Shaping answers in glyphs and a content stream carries codes, so what
+/// decides whether a font can take the shaped path is whether its glyphs can
+/// be read **backwards** into the codes that draw them. [`Path`] is that
+/// answer per font:
+///
+/// - **A composite font over an sfnt, horizontal** — milestone 8 as it
+///   shipped. The glyph goes back through `/CIDToGIDMap` to a CID
+///   ([`Font::cid_for_gid`]) and the CID back through the encoding CMap to a
+///   code ([`Font::code_for_cid`]), which gathers every code the CMap's own
+///   tables could have meant and returns the first that maps **back**. That
+///   covers `/Identity-H`, every embedded CMap stream, and — where this build
+///   compiled the tables in — every registry CMap of 9.7.5.2.
+/// - **The same under a vertical CMap** (9.7.4.3). The glyphs are found the
+///   same way; what differs is where they go. The pen advances *down* by each
+///   CID's own `/W2` displacement, so the value is written as a column at the
+///   box's centre and every glyph sits where a reader's own vertical metrics
+///   put it. `GSUB` runs `vert` and `vrt2` instead of the horizontal features
+///   and no `GPOS` runs at all, since every positioning feature this crate
+///   applies by default is horizontal.
+/// - **A simple TrueType font.** A byte names at most 256 glyphs, but which
+///   256 is decidable: each code the encoding gives a character (9.6.6, read
+///   by [`Font::char_drawn_by`]) reaches the glyph the program's `cmap` gives
+///   that character, and that table inverted is the way back. A shaped line
+///   whose every glyph is in it is written as codes with `GPOS`'s positions;
+///   a line that needs a glyph no byte reaches — a ligature, a joined form —
+///   keeps the single-byte path whole, which is exactly what it drew before.
+/// - **A composite font over a bare CFF** (`/FontFile3 /CIDFontType0C` or
+///   `/Type1C`). A CFF has no `cmap`, no `hmtx` and no `GSUB` or `GPOS`, and
+///   `tinker_pdf_shape::Shaper` takes an sfnt; so the program is **wrapped**,
+///   per line, in the smallest sfnt that answers the shaper's two questions —
+///   a `cmap` from each character of the line to a glyph, through the font's
+///   own `/ToUnicode` read backwards ([`Font::code_for_char`]), and an
+///   `hmtx` from `/W` — with each wrapper glyph standing for one CID the
+///   program really carries. Nothing joins, because a CFF carries nothing to
+///   join with; what the path buys is the characters, at the advances a
+///   reader will use, in UAX #9's visual order.
+///
+/// Still refused, by the single-byte path and a warning per character: a
+/// simple font that is not TrueType or is symbolic, a vertical CMap over a
+/// CFF, a CFF font with no `/ToUnicode`, and a vertical comb field.
+struct Shapeable {
     /// The embedded program, decoded once per appearance rather than once per
     /// line: a multiline field would otherwise inflate a megabyte per row.
     program: Vec<u8>,
+    /// Which way back from a glyph to a code.
+    path: Path,
+}
+
+/// See [`Shapeable`].
+enum Path {
+    /// A composite font over an sfnt, written along a baseline.
+    Composite,
+    /// A composite font over an sfnt under a vertical CMap, written as a
+    /// column.
+    Vertical,
+    /// A simple TrueType font: each glyph a byte reaches, and the lowest byte
+    /// that reaches it.
+    Simple(HashMap<u16, u8>),
+    /// A composite font over a bare CFF, wrapped per line.
+    Cff,
 }
 
 /// Whether a field's value can be shaped against its `/DA` font, and where it
 /// cannot, whether that is worth saying out loud.
 enum Shaping {
     /// It can, against this program.
-    Yes(Composite),
+    Yes(Shapeable),
     /// It cannot, and the single-byte path is the right answer for this font
-    /// — a simple font, a vertical one, one that embeds no sfnt. Every
-    /// character that path cannot write is still named (ruling 10); there is
-    /// just nothing to say about the *font* beyond what the file already
-    /// says.
+    /// — a standard-14 font, a symbolic one, one that embeds nothing this
+    /// build can shape against. Every character that path cannot write is
+    /// still named (ruling 10); there is just nothing to say about the *font*
+    /// beyond what the file already says.
     No,
     /// It cannot, and the reason is this **build** rather than this document.
     ///
@@ -193,30 +225,32 @@ enum Shaping {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Placed {
     /// The character code to write. Under `/Identity-H` this is the CID;
-    /// under any other CMap it is whatever code maps to it (9.7.5.2).
+    /// under any other CMap it is whatever code maps to it (9.7.5.2); in a
+    /// simple font it is the byte.
     code: u32,
     /// How many bytes the code occupies, from the CMap's codespace ranges
-    /// (9.7.6.2).
+    /// (9.7.6.2), or one in a simple font.
     ///
     /// Carried per glyph rather than per font because one CMap may have both
     /// widths: `90ms-RKSJ-H` takes one byte for ASCII and two for kanji, and
     /// writing `<0041>` where `<41>` was meant mis-splits every code after
     /// it.
     bytes: u8,
-    /// Where the glyph's origin sits along the baseline, from the line's
-    /// start.
+    /// Where the glyph's origin sits along the line — rightwards along a
+    /// baseline, downwards along a column — from the line's start.
     x: f64,
-    /// Its origin off the baseline — 9.4.3's `Ts`.
+    /// Its origin off the baseline — 9.4.3's `Ts`. Always zero in a column.
     rise: f64,
 }
 
 /// What one line of a field's value shapes to.
 struct ShapedLine {
     /// The glyphs, in the order they are **drawn** — left to right, whichever
-    /// way the text reads.
+    /// way the text reads, or top to bottom in a column.
     glyphs: Vec<Placed>,
     /// The line's whole advance, in thousandths of an em, which is what
-    /// quadding and auto-sizing measure with.
+    /// quadding and auto-sizing measure with: its width along a baseline, or
+    /// its length down a column.
     advance: f64,
     /// Characters the face has no glyph for, or that the font's own
     /// `/CIDToGIDMap` cannot address. Each becomes a warning naming the field
@@ -224,15 +258,23 @@ struct ShapedLine {
     unwritable: Vec<char>,
 }
 
-impl Composite {
-    /// The font behind a `/DA`, if the conditions above hold, and the typed
-    /// reason where one of them fails for a reason this build owns.
+/// The `GSUB` features a column of text runs: the default set's two that are
+/// not about horizontal setting, and the two vertical alternates.
+const VERTICAL_GSUB: &[Tag] = &[
+    Tag::new(b"locl"),
+    Tag::new(b"ccmp"),
+    Tag::new(b"vert"),
+    Tag::new(b"vrt2"),
+];
+
+impl Shapeable {
+    /// The font behind a `/DA`, if one of [`Path`]'s conditions holds, and
+    /// the typed reason where one fails for a reason this build owns.
     fn of<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &Font) -> Shaping {
-        if font.kind() != FontKind::Type0 {
-            return Shaping::No;
-        }
-        if font.is_vertical() {
-            return Shaping::No;
+        match font.kind() {
+            FontKind::Type0 => {}
+            FontKind::TrueType => return Self::simple(doc, font),
+            _ => return Shaping::No,
         }
         // A composite font whose `/Encoding` names nothing 9.7.5.2 defines
         // has no codes to write at all. `font::read` has already said which
@@ -263,18 +305,92 @@ impl Composite {
         else {
             return Shaping::No;
         };
-        // Parsed here and thrown away, so that a program which is not an sfnt
-        // — a bare CFF, or bytes that are not a font at all — declines now
-        // rather than per line.
-        if Sfnt::parse(&program).is_none() {
+        // Parsed here and thrown away, so that a program which is neither an
+        // sfnt nor a CFF declines now rather than per line.
+        let path = if Sfnt::parse(&program).is_some() {
+            if font.is_vertical() {
+                Path::Vertical
+            } else {
+                Path::Composite
+            }
+        } else if Cff::parse(&program).is_some() && !font.is_vertical() && font.has_to_unicode() {
+            Path::Cff
+        } else {
             return Shaping::No;
-        }
-        Shaping::Yes(Composite { program })
+        };
+        Shaping::Yes(Shapeable { program, path })
     }
 
-    /// Shapes one line and places every glyph, in visual order.
+    /// A simple TrueType font, if it is one the way back can be built for.
+    fn simple<R: Resolve + ?Sized>(doc: &R, font: &Font) -> Shaping {
+        // A symbolic font's codes name the program's own glyphs (9.6.6.4)
+        // rather than characters, so there is no character to shape.
+        if font.is_symbolic() {
+            return Shaping::No;
+        }
+        let Some(program) = font
+            .program()
+            .filter(|p| p.key == ProgramKey::FontFile2)
+            .and_then(|p| doc.stream_decoded(p.stream).ok())
+        else {
+            return Shaping::No;
+        };
+        let Some(face) = Sfnt::parse(&program) else {
+            return Shaping::No;
+        };
+        // Ascending codes, so a glyph two codes reach is written with the
+        // lower — the answer cannot depend on anything but the file.
+        let mut codes: HashMap<u16, u8> = HashMap::new();
+        for code in 0..=u8::MAX {
+            let Some(c) = font.char_drawn_by(code) else {
+                continue;
+            };
+            if let Some(glyph) = face.glyph_for_char(c).filter(|g| *g != 0) {
+                codes.entry(glyph).or_insert(code);
+            }
+        }
+        Shaping::Yes(Shapeable {
+            program,
+            path: Path::Simple(codes),
+        })
+    }
+
+    /// Whether this font writes a column rather than a line.
+    fn vertical(&self) -> bool {
+        matches!(self.path, Path::Vertical)
+    }
+
+    /// Shapes one line and places every glyph, in drawing order.
     ///
-    /// # Two steps, and they are the consumer's two steps
+    /// `None` is a line the shaped path cannot write and the single-byte path
+    /// should — only ever a simple font's line that needs a glyph no byte
+    /// reaches. A line with no glyphs at all comes back empty rather than as
+    /// `None`: an empty field value is not a failure.
+    fn line(&self, font: &Font, text: &str) -> Option<ShapedLine> {
+        match &self.path {
+            Path::Cff => Some(self.cff_line(font, text)),
+            Path::Composite | Path::Vertical => {
+                let face = Sfnt::parse(&self.program)?;
+                Some(self.place(font, &face, text, |glyph| {
+                    if glyph == 0 {
+                        return None;
+                    }
+                    font.code_for_cid(font.cid_for_gid(glyph)?)
+                }))
+            }
+            Path::Simple(codes) => {
+                let face = Sfnt::parse(&self.program)?;
+                let line = self.place(font, &face, text, |glyph| {
+                    codes.get(&glyph).map(|code| (u32::from(*code), 1))
+                });
+                line.unwritable.is_empty().then_some(line)
+            }
+        }
+    }
+
+    /// One line through a face, with `code_for` the way back from a glyph.
+    ///
+    /// # Two steps along a baseline, and they are the consumer's two steps
     ///
     /// `docs/design/shaping.md`'s pipeline ends with the caller reordering:
     /// the shaper returns **logical** order, UAX #9's rule L2 orders the runs,
@@ -282,84 +398,237 @@ impl Composite {
     /// here, which is what puts an Arabic value's last letter at the left of
     /// the box where a reader of the script expects it.
     ///
-    /// A line with no glyphs at all comes back empty rather than as `None`:
-    /// an empty field value is not a failure.
-    fn line(&self, font: &Font, text: &str) -> ShapedLine {
+    /// A column is not reordered: the text runs top to bottom in the order it
+    /// was written, which is what vertical setting is.
+    ///
+    /// Glyph 0 is `.notdef`, and every `code_for` here refuses it rather than
+    /// writing it: it is the face saying it has nothing for that character,
+    /// and drawing the empty box while reporting success is the invisible
+    /// failure ruling 10 exists to prevent.
+    fn place(
+        &self,
+        font: &Font,
+        face: &Sfnt<'_>,
+        text: &str,
+        code_for: impl Fn(u16) -> Option<(u32, u8)>,
+    ) -> ShapedLine {
         let mut out = ShapedLine {
             glyphs: Vec::new(),
             advance: 0.0,
             unwritable: Vec::new(),
         };
-        let Some(face) = Sfnt::parse(&self.program) else {
-            return out;
-        };
         let upem = f64::from(face.units_per_em.max(1));
         let scale = |units: i32| f64::from(units) * 1000.0 / upem;
-        let shaper = Shaper::new(&face);
-        let paragraph = Paragraph::new(text, BaseDirection::Auto);
+        let column = self.vertical();
+        let shaper = if column {
+            Shaper::new(face).with_features(VERTICAL_GSUB, &[])
+        } else {
+            Shaper::new(face)
+        };
+        let direction = if column {
+            BaseDirection::LeftToRight
+        } else {
+            BaseDirection::Auto
+        };
+        let paragraph = Paragraph::new(text, direction);
         let runs = itemize(text, &paragraph);
         let shaped: Vec<_> = runs.iter().map(|run| shaper.shape(text, run)).collect();
         let levels: Vec<_> = runs.iter().map(|run| run.level).collect();
+        let order: Vec<usize> = if column {
+            (0..shaped.len()).collect()
+        } else {
+            reorder(&levels)
+        };
 
         let mut pen = 0.0f64;
-        for index in reorder(&levels) {
+        for index in order {
             let Some(run) = shaped.get(index) else {
                 continue;
             };
-            let glyphs: Vec<ShapedGlyph> = if run.direction().is_forward() {
+            let glyphs: Vec<ShapedGlyph> = if column || run.direction().is_forward() {
                 run.glyphs().to_vec()
             } else {
                 run.glyphs().iter().rev().copied().collect()
             };
             for glyph in glyphs {
-                match self.code_for(font, glyph.glyph) {
-                    Some((code, bytes)) => out.glyphs.push(Placed {
-                        code,
-                        bytes,
-                        x: pen + scale(glyph.x_offset),
-                        rise: scale(glyph.y_offset),
-                    }),
+                match code_for(glyph.glyph) {
+                    Some((code, bytes)) => {
+                        let (x, rise, advance) = if column {
+                            // 9.7.4.3: `w1` is negative for text running
+                            // down, and the column's length is its sum.
+                            let (_, _, w1) = font.vertical_metrics(font.cid_of(code));
+                            (pen, 0.0, -w1)
+                        } else {
+                            (
+                                pen + scale(glyph.x_offset),
+                                scale(glyph.y_offset),
+                                scale(glyph.x_advance),
+                            )
+                        };
+                        out.glyphs.push(Placed {
+                            code,
+                            bytes,
+                            x,
+                            rise,
+                        });
+                        pen += advance;
+                    }
                     None => {
                         // The cluster is a byte offset into the text this run
-                        // was shaped from, which is the line, so the character
-                        // the reader typed is recoverable and is what the
-                        // warning names.
+                        // was shaped from, which is the line, so the
+                        // character the reader typed is recoverable and is
+                        // what the warning names.
                         let at = usize::try_from(glyph.cluster).unwrap_or(0);
                         if let Some(c) = text.get(at..).and_then(|rest| rest.chars().next()) {
                             if !out.unwritable.contains(&c) {
                                 out.unwritable.push(c);
                             }
                         }
+                        if !column {
+                            pen += scale(glyph.x_advance);
+                        }
                     }
                 }
-                pen += scale(glyph.x_advance);
             }
         }
         out.advance = pen;
         out
     }
 
-    /// The code that draws `glyph` and its byte width, or `None` where the
-    /// font cannot name it.
+    /// One line against a bare CFF, through an sfnt wrapped around it.
     ///
-    /// Two inversions, in the order 9.7.4 composes them forwards: the glyph
-    /// back through `/CIDToGIDMap` to a CID, the CID back through the
-    /// encoding CMap to a code. Either may refuse, and a refusal at either
-    /// step is a character this appearance will not draw.
-    ///
-    /// Glyph 0 is `.notdef` and is refused rather than written: it is the
-    /// face saying it has nothing for that character, and drawing the empty
-    /// box while reporting success is the invisible failure ruling 10 exists
-    /// to prevent.
-    fn code_for(&self, font: &Font, glyph: u16) -> Option<(u32, u8)> {
-        if glyph == 0 {
-            return None;
+    /// Each distinct character of the line is asked of `/ToUnicode` for the
+    /// code that means it, the code is taken to a CID through the encoding,
+    /// and the CID is kept only where the program carries it — a CID-keyed
+    /// CFF's charset says, and a name-keyed one numbers its glyphs as CIDs.
+    /// The wrapper gives each kept CID a glyph of its own, numbered from 1 in
+    /// the order the line first meets them, and the way back is that table.
+    fn cff_line(&self, font: &Font, text: &str) -> ShapedLine {
+        let empty = || ShapedLine {
+            glyphs: Vec::new(),
+            advance: 0.0,
+            unwritable: text.chars().fold(Vec::new(), |mut seen, c| {
+                if !seen.contains(&c) {
+                    seen.push(c);
+                }
+                seen
+            }),
+        };
+        let Some(cff) = Cff::parse(&self.program) else {
+            return empty();
+        };
+        // Glyph 0 is the wrapper's `.notdef` and stands for no CID.
+        let mut cids: Vec<u32> = vec![0];
+        let mut map: Vec<(char, u16, u16)> = Vec::new();
+        for c in text.chars() {
+            if map.iter().any(|(seen, _, _)| *seen == c) {
+                continue;
+            }
+            let Some(code) = font.code_for_char(c) else {
+                continue;
+            };
+            let cid = font.cid_of(code);
+            let carried = if cff.is_cid() {
+                cff.gid_for_cid(cid).is_some()
+            } else {
+                usize::try_from(cid).is_ok_and(|g| g < cff.glyph_count())
+            };
+            let Ok(glyph) = u16::try_from(cids.len()) else {
+                break;
+            };
+            if !carried {
+                continue;
+            }
+            // `/W` in thousandths of an em is the wrapper's `hmtx` at a
+            // thousand units to the em, so what the shaper advances by is
+            // exactly what a reader will.
+            let advance = font
+                .width_of(code)
+                .0
+                .round()
+                .clamp(0.0, f64::from(u16::MAX)) as u16;
+            cids.push(cid);
+            map.push((c, glyph, advance));
         }
-        font.code_for_cid(font.cid_for_gid(glyph)?)
+        let wrapped = wrap_for_shaping(&map);
+        let Some(face) = Sfnt::parse(&wrapped) else {
+            return empty();
+        };
+        self.place(font, &face, text, |glyph| {
+            let cid = *cids.get(usize::from(glyph)).filter(|_| glyph != 0)?;
+            font.code_for_cid(cid)
+        })
     }
 }
 
-/// Writes one shaped line as a composite text run at `(x, y)`.
+/// The smallest sfnt [`Shaper`] can shape against: `head` for the em, a
+/// format 12 `cmap` from each character to its glyph, and `hhea` and `hmtx`
+/// for the advances, with glyph 0 as an empty `.notdef`.
+///
+/// `map` is `(character, glyph, advance)`, glyphs numbered from 1 in order.
+/// It carries no outline table at all: the shaper reads none, and nothing
+/// draws from this — the appearance names the document's own font.
+fn wrap_for_shaping(map: &[(char, u16, u16)]) -> Vec<u8> {
+    let glyphs = map.len().saturating_add(1);
+    let mut head = vec![0u8; 54];
+    head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+    let mut hhea = vec![0u8; 36];
+    hhea[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    let metrics = u16::try_from(glyphs).unwrap_or(u16::MAX);
+    hhea[34..36].copy_from_slice(&metrics.to_be_bytes());
+    let mut hmtx = vec![0u8; 4];
+    for (_, _, advance) in map {
+        hmtx.extend_from_slice(&advance.to_be_bytes());
+        hmtx.extend_from_slice(&0u16.to_be_bytes());
+    }
+    let mut sorted: Vec<(u32, u16)> = map.iter().map(|(c, g, _)| (u32::from(*c), *g)).collect();
+    sorted.sort_unstable();
+    let groups = u32::try_from(sorted.len()).unwrap_or(0);
+    let mut sub = Vec::new();
+    sub.extend_from_slice(&12u16.to_be_bytes());
+    sub.extend_from_slice(&0u16.to_be_bytes());
+    sub.extend_from_slice(&(16 + groups * 12).to_be_bytes());
+    sub.extend_from_slice(&0u32.to_be_bytes());
+    sub.extend_from_slice(&groups.to_be_bytes());
+    for (c, g) in &sorted {
+        sub.extend_from_slice(&c.to_be_bytes());
+        sub.extend_from_slice(&c.to_be_bytes());
+        sub.extend_from_slice(&u32::from(*g).to_be_bytes());
+    }
+    let mut cmap = Vec::new();
+    cmap.extend_from_slice(&0u16.to_be_bytes());
+    cmap.extend_from_slice(&1u16.to_be_bytes());
+    cmap.extend_from_slice(&3u16.to_be_bytes());
+    cmap.extend_from_slice(&10u16.to_be_bytes());
+    cmap.extend_from_slice(&12u32.to_be_bytes());
+    cmap.extend_from_slice(&sub);
+
+    let tables: [(&[u8; 4], &[u8]); 4] = [
+        (b"cmap", &cmap),
+        (b"head", &head),
+        (b"hhea", &hhea),
+        (b"hmtx", &hmtx),
+    ];
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    out.extend_from_slice(&4u16.to_be_bytes());
+    out.extend_from_slice(&[0u8; 6]);
+    let mut offset = 12 + tables.len() * 16;
+    let mut body = Vec::new();
+    for (tag, data) in tables {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(&u32::try_from(offset).unwrap_or(u32::MAX).to_be_bytes());
+        out.extend_from_slice(&u32::try_from(data.len()).unwrap_or(u32::MAX).to_be_bytes());
+        offset += data.len();
+        body.extend_from_slice(data);
+    }
+    out.extend_from_slice(&body);
+    out
+}
+
+/// Writes one shaped line as a text run along a baseline at `(x, y)`.
 ///
 /// The `TJ` numbers are the difference between where the *reader's* pen will
 /// be — which advances by `/W`, not by the shaper's own `hmtx` figure — and
@@ -393,16 +662,7 @@ fn write_shaped(out: &mut Vec<u8>, font: &Font, line: &ShapedLine, x: f64, y: f6
             out.extend_from_slice(number(adjust).as_bytes());
             out.push(b' ');
         }
-        // 9.7.6.2: a code is as many bytes as its codespace range says, and
-        // the string carries no separators — so the width is what tells a
-        // reader where this code ends. Two hex digits per byte, zero-padded,
-        // whatever the code's magnitude; `/Identity-H`'s two bytes are the
-        // common case rather than the only one.
-        let digits = usize::from(placed.bytes).clamp(1, 4) * 2;
-        let mask = u32::MAX >> (32 - digits * 4);
-        out.extend_from_slice(
-            format!("<{:0digits$X}>", placed.code & mask, digits = digits).as_bytes(),
-        );
+        write_code(out, placed);
         pen = placed.x + font.width_of(placed.code).0;
     }
     close_array(out, &mut open);
@@ -411,6 +671,38 @@ fn write_shaped(out: &mut Vec<u8>, font: &Font, line: &ShapedLine, x: f64, y: f6
         // left one set would tilt whatever a viewer drew next.
         out.extend_from_slice(b"0 Ts\n");
     }
+}
+
+/// Writes one shaped column at `(x, y)`, the pen's start at the top.
+///
+/// No `TJ` numbers, by construction: every glyph was placed at the
+/// displacement 9.7.4.3 gives its own CID, which is the one a reader will
+/// advance by, so the pen and the placement cannot part.
+fn write_column(out: &mut Vec<u8>, line: &ShapedLine, x: f64, y: f64) {
+    out.extend_from_slice(format!("1 0 0 1 {x:.2} {y:.2} Tm\n").as_bytes());
+    if line.glyphs.is_empty() {
+        return;
+    }
+    out.push(b'[');
+    for placed in &line.glyphs {
+        write_code(out, placed);
+    }
+    out.extend_from_slice(b"] TJ\n");
+}
+
+/// One code as a hex string as wide as its codespace says.
+///
+/// 9.7.6.2: a code is as many bytes as its codespace range says, and the
+/// string carries no separators — so the width is what tells a reader where
+/// this code ends. Two hex digits per byte, zero-padded, whatever the code's
+/// magnitude; `/Identity-H`'s two bytes are the common case rather than the
+/// only one.
+fn write_code(out: &mut Vec<u8>, placed: &Placed) {
+    let digits = usize::from(placed.bytes).clamp(1, 4) * 2;
+    let mask = u32::MAX >> (32 - digits * 4);
+    out.extend_from_slice(
+        format!("<{:0digits$X}>", placed.code & mask, digits = digits).as_bytes(),
+    );
 }
 
 /// How a text field lays its value out.
@@ -498,18 +790,23 @@ pub(crate) fn text_appearance_in<R: Resolve + ?Sized>(
     // path this module has always had, which is still right for the `/Helv`
     // most forms name.
     let mut refusals: Vec<WarningKind> = Vec::new();
-    let composite = match font_dict
+    let shapeable = match font_dict
         .as_ref()
         .zip(font.as_ref())
-        .map_or(Shaping::No, |(dict, font)| Composite::of(doc, dict, font))
+        .map_or(Shaping::No, |(dict, font)| Shapeable::of(doc, dict, font))
     {
-        Shaping::Yes(composite) => Some(composite),
+        Shaping::Yes(shapeable) => Some(shapeable),
         Shaping::No => None,
         Shaping::Refused(kind) => {
             refusals.push(kind);
             None
         }
     };
+    // A vertical comb would need its cells down the box rather than across
+    // it, and 12.7.4.3 describes cells across; so a comb field keeps the
+    // single-byte path under a vertical font, as it did before columns.
+    let shapeable = shapeable.filter(|s| !(s.vertical() && comb.is_some_and(|n| n > 0)));
+    let column = shapeable.as_ref().is_some_and(Shapeable::vertical);
 
     // 12.7.3.3: two units of padding on each side is the convention, and
     // matching it is what keeps a regenerated appearance from jumping.
@@ -528,24 +825,31 @@ pub(crate) fn text_appearance_in<R: Resolve + ?Sized>(
     // same runs that are about to be drawn. Measuring one way and drawing
     // another is the two-paths-disagree failure `metrics.rs` warns about, and
     // a joined Arabic word is narrower than its letters by enough to see.
-    let shaped: Option<Vec<ShapedLine>> = composite
-        .as_ref()
-        .zip(font.as_ref())
-        .map(|(composite, font)| lines.iter().map(|l| composite.line(font, l)).collect());
-    let widths: Vec<f64> = match &shaped {
-        Some(shaped) => shaped.iter().map(|line| line.advance).collect(),
-        None => lines
-            .iter()
-            .map(|line| width_of(font.as_ref(), line))
-            .collect(),
-    };
+    //
+    // A line the shaped path declines — only ever a simple font's, needing a
+    // glyph no byte reaches — is `None` here and keeps the single-byte path.
+    let shaped: Vec<Option<ShapedLine>> = lines
+        .iter()
+        .map(|line| {
+            shapeable
+                .as_ref()
+                .zip(font.as_ref())
+                .and_then(|(shapeable, font)| shapeable.line(font, line))
+        })
+        .collect();
+    let widths: Vec<f64> = lines
+        .iter()
+        .zip(shaped.iter())
+        .map(|(line, shaped)| match shaped {
+            Some(shaped) => shaped.advance,
+            None => width_of(font.as_ref(), line),
+        })
+        .collect();
     let mut unwritable: Vec<char> = Vec::new();
-    if let Some(shaped) = &shaped {
-        for line in shaped {
-            for c in &line.unwritable {
-                if !unwritable.contains(c) {
-                    unwritable.push(*c);
-                }
+    for line in shaped.iter().flatten() {
+        for c in &line.unwritable {
+            if !unwritable.contains(c) {
+                unwritable.push(*c);
             }
         }
     }
@@ -554,17 +858,30 @@ pub(crate) fn text_appearance_in<R: Resolve + ?Sized>(
         // Auto-size. The height budget is what makes it legible; the width
         // budget is what keeps it inside the box.
         let widest = widths.iter().copied().fold(0.0f64, f64::max) / 1000.0;
-        let by_height = if multiline {
-            inner_h / (lines.len() as f64).max(1.0) / 1.15
+        size = if column {
+            // A column's length is its advance and its breadth is an em, so
+            // the two budgets swap axes: the longest column must fit the
+            // height, and the columns side by side the width.
+            let by_length = if widest > 0.0 {
+                inner_h / widest
+            } else {
+                inner_h
+            };
+            let by_breadth = inner_w / (lines.len() as f64).max(1.0) / 1.15;
+            by_length.min(by_breadth).clamp(1.0, 12.0)
         } else {
-            inner_h * 0.72
+            let by_height = if multiline {
+                inner_h / (lines.len() as f64).max(1.0) / 1.15
+            } else {
+                inner_h * 0.72
+            };
+            let by_width = if widest > 0.0 {
+                inner_w / widest
+            } else {
+                by_height
+            };
+            by_height.min(by_width).clamp(1.0, 12.0)
         };
-        let by_width = if widest > 0.0 {
-            inner_w / widest
-        } else {
-            by_height
-        };
-        size = by_height.min(by_width).clamp(1.0, 12.0);
     }
 
     let leading = size * 1.15;
@@ -596,10 +913,10 @@ pub(crate) fn text_appearance_in<R: Resolve + ?Sized>(
             // rather than a shortcut: a comb field draws one character per
             // printed box, so a joining script's letters are in the isolated
             // form in one whatever their neighbours are.
-            let cell_shaped = composite
+            let cell_shaped = shapeable
                 .as_ref()
                 .zip(font.as_ref())
-                .map(|(composite, font)| composite.line(font, &text));
+                .and_then(|(shapeable, font)| shapeable.line(font, &text));
             let width = cell_shaped
                 .as_ref()
                 .map_or_else(|| width_of(font.as_ref(), &text), |line| line.advance)
@@ -633,6 +950,37 @@ pub(crate) fn text_appearance_in<R: Resolve + ?Sized>(
         return finish_appearance(doc.document(), content, w, h, resources);
     }
 
+    if column {
+        for (index, line) in shaped.iter().enumerate() {
+            let Some(line) = line else {
+                continue;
+            };
+            let length = line.advance / 1000.0 * size;
+            // Columns run right to left, the first at the right, which is
+            // how vertical text is set; a single line is centred across the
+            // box. A glyph is drawn displaced by minus its position vector
+            // (9.7.4.3), whose horizontal half is half its width, so a pen on
+            // the column's centre line centres every glyph on it.
+            let x = if multiline {
+                PAD + inner_w - (index as f64 + 0.5) * leading
+            } else {
+                w / 2.0
+            };
+            // /Q, read down the column: 0 starts at the top, 1 centres the
+            // column in the box, 2 ends it at the bottom.
+            let top = match quadding {
+                1 => (h + length) / 2.0,
+                2 => PAD + length,
+                _ => h - PAD,
+            }
+            .min(h - PAD);
+            write_column(&mut content, line, x, top);
+        }
+        content.extend_from_slice(b"ET\nQ\nEMC\n");
+        report(doc.document(), field, &refusals, &unwritable);
+        return finish_appearance(doc.document(), content, w, h, resources);
+    }
+
     for (index, line) in lines.iter().enumerate() {
         let line_width = widths.get(index).copied().unwrap_or(0.0) / 1000.0 * size;
         // 12.7.4.3: /Q is 0 left, 1 centred, 2 right.
@@ -653,8 +1001,8 @@ pub(crate) fn text_appearance_in<R: Resolve + ?Sized>(
         };
 
         match shaped
-            .as_ref()
-            .and_then(|s| s.get(index))
+            .get(index)
+            .and_then(Option::as_ref)
             .zip(font.as_ref())
         {
             Some((shaped, font)) => write_shaped(&mut content, font, shaped, x, y),

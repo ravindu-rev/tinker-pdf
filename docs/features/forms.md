@@ -119,15 +119,42 @@ subset font in the wild has. `Font::cid_for_gid` inverts that last step
 through an index built once per font rather than by scanning the table per
 glyph.
 
+**Three more fonts shape (October 2026).** The ROADMAP named them as the
+refusals left, and each now has a fixture whose operators the test computes:
+
+- **A vertical CMap** (9.7.4.3) is written as a **column**: the glyphs are
+  found as above, `GSUB` runs `vert` and `vrt2` in place of the horizontal
+  features and no `GPOS` runs, and the pen goes down the box's centre line —
+  a glyph is drawn displaced by its position vector, whose horizontal half
+  is half its width, so the column is centred — advancing by each CID's own
+  `/W2` displacement, so the run carries no `TJ` numbers. `/Q` reads down
+  the column (top, centred, bottom); a multiline field's lines are columns
+  from the right; auto-sizing fits the longest column to the height.
+- **A bare CFF** (`/FontFile3 /Subtype /CIDFontType0C` or `/Type1C` under a
+  `CIDFontType0`) has no `cmap`, no `hmtx` and no `GSUB`, and the shaper
+  takes an sfnt, so the program is **wrapped** per line in the smallest
+  sfnt that answers the shaper's questions: a `cmap` from each character to
+  the code the font's own `/ToUnicode` gives it read backwards
+  (`Font::code_for_char`, the lowest such code), that code to a CID through
+  the encoding, kept only where the program's charset carries the CID, and an
+  `hmtx` from `/W`. The value is drawn at the advances a reader will use, in
+  UAX #9's visual order; nothing joins, because a CFF carries nothing to
+  join with.
+- **A simple TrueType font** is shaped against its embedded sfnt, and each
+  glyph written as the lowest byte that reaches it — the code whose
+  `/Encoding` character (9.6.6) the program's `cmap` maps to that glyph — so
+  `GPOS` kerning and placement reach the field as `TJ` numbers and `Ts`. A
+  line that needs a glyph no byte reaches — a ligature, a joined form —
+  keeps the single-byte path whole, which is what it drew before.
+
 Anything else keeps the single-byte path, still draws a `?`, and emits
 `WarningKind::FieldCharacterUnrepresentable { character }` against the
 field's own object for every character it could not write (rulings 2
-and 10) — a simple font; a **vertical** CMap, because 9.7.4.3 advances the
-pen downward and this module places glyphs along a baseline, so drawing
-the right glyphs in a row a viewer will stack is worse than a mark that
-announces itself; a program that is not an sfnt, which is every bare CFF
-(`/FontFile3 /Subtype /Type1C` or `/CIDFontType0C`), because a CFF carries
-no `GSUB`/`GPOS` to execute.
+and 10): a symbolic simple font, or one that is not TrueType or embeds no
+sfnt; a vertical CMap over a CFF; a CFF whose font has no `/ToUnicode`, so
+nothing in the document says which code means which character; a vertical
+**comb** field, whose cells 12.7.4.3 lays across the box; and a program that
+is neither an sfnt nor a CFF.
 
 **The feature gate is declared, not silent.** The registry's code-to-CID
 tables are 1.19 MB behind the `cmap-predefined` cargo feature
@@ -525,7 +552,7 @@ let bytes = editor.save(&WriteOptions::default());
 | A multiple selection imported into a field | `FillError::ValueRefused` through `FillRejection` | this build fills one value per field; half a selection is a different answer | — |
 | A value XML 1.0 cannot carry, written as XFDF | `FormDataError::NotRepresentable`, naming the field | written any other way it would come back different; FDF carries it | — |
 | A widget missing 12.5.2 Table 164's `/Rect` | `SkippedWidget` with `WidgetDefect::RectMissing` | the value is written and drawable widgets drawn; the damage is named, never silent (rulings 2, 10) | [rulings](../rulings.md) |
-| Shaping a value against a simple `/DA` font, a vertical CMap, or a `/FontFile3` that is a bare CFF | `WarningKind::FieldCharacterUnrepresentable { character }` per character; the single-byte path draws `?` | a byte cannot name a glyph past 255; a vertical run drawn along a baseline is stacked by the viewer; a CFF carries no `GSUB` | [design/shaping.md](../design/shaping.md) |
+| Shaping a value against a symbolic or non-TrueType simple `/DA` font, a vertical CMap over a CFF, a CFF with no `/ToUnicode`, or in a vertical comb field | `WarningKind::FieldCharacterUnrepresentable { character }` per character; the single-byte path draws `?` | a symbolic font's codes name glyphs rather than characters; the wrapper reads codes from `/ToUnicode` and a column from an sfnt; 12.7.4.3 lays comb cells across the box | [design/shaping.md](../design/shaping.md) |
 | Shaping a value under a **registry CMap** in a build without `cmap-predefined` | `WarningKind::PredefinedCMapApproximate(name)` against the field, then the per-character warnings | the code-to-CID tables that would be inverted were never compiled in — a capability that depends on a feature has to say so | [fonts.md](fonts.md) |
 | A CID no code means any more — a `cidchar` took the code its `cidrange` would have given | `WarningKind::FieldCharacterUnrepresentable { character }`; nothing is written for that glyph | the inverse of a CMap is not a function, and an unverified inverse draws a *different* wrong glyph | [rulings](../rulings.md) ruling 10 |
 | A trigger class the policy denies — keystroke, validate and document-level by default | `CalcError::Refused { trigger, subject }` | a pass that quietly ran nothing reads exactly like a form with no scripts (ruling 10) | — |
@@ -602,7 +629,7 @@ imported; and a unit test beside the writer counts that writing names back
 into a tree compares each partial name with one sibling at most, where a
 scan of every sibling took seven seconds over forty thousand flat names.
 
-`crates/tinker-pdf/tests/shaped_forms.rs` (12 tests, and the same 12 in a
+`crates/tinker-pdf/tests/shaped_forms.rs` (19 tests, and the same 19 in a
 `--no-default-features` build — the registry pair swap places) holds up the
 shaped half against a face the file synthesises, so the expected glyph
 indices are ones the test names rather than reads back out of the engine.
@@ -610,10 +637,16 @@ It asserts joined Arabic in visual order under `/Identity-H`, under an
 embedded CMap stream, under a one-byte codespace, under a registry CMap —
 where the codes are checked *forwards* through `CMap::cid`, which is what
 makes it a round trip rather than a restatement — and over a non-identity
-`/CIDToGIDMap`; and it asserts each refusal by name: the vertical CMap, the
-bare CFF, the CID whose code a `cidchar` took, and the registry CMap whose
-table a `cmap-predefined`-off build left out. Its module header carries the
-nine reintroduced defects and how many assertions each one fired.
+`/CIDToGIDMap`; a vertical CMap written as a column at the box's centre,
+with `/Q` read down it; a bare CFF drawn through its wrapper at `/W`'s
+advances, naming a character its `/ToUnicode` never mentions and one whose
+CID the program lacks, and refused with no `/ToUnicode`; a simple TrueType
+font carrying a `GPOS` placement as `TJ` numbers and `Ts`, and keeping the
+byte path for a line whose ligature no byte reaches; and it asserts each
+remaining refusal by name: a program that is no font, the CID whose code a
+`cidchar` took, and the registry CMap whose table a `cmap-predefined`-off
+build left out. Its module header carries milestone 8's nine reintroduced
+defects and how many assertions each one fired.
 
 `crates/tinker-pdf-cos/tests/form_script_budget.rs` (4 tests) builds a
 document that crowds all three surfaces and asserts the four mebibytes are

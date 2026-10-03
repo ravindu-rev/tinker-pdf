@@ -540,7 +540,13 @@ Landed so far:
   `/Identity-H`, under an embedded CMap stream, and under a predefined
   registry CMap where this build compiled its table in, because
   `CMap::code_for_cid` inverts the encoding and verifies each candidate
-  forwards before answering. Everywhere else the single-byte path stands and
+  forwards before answering. Since October 2026 three more fonts shape: a
+  **vertical** CMap, written as a column at each CID's own `/W2`
+  displacement with `vert`/`vrt2` applied; a **bare CFF** under a
+  `CIDFontType0`, wrapped per line in a synthesised sfnt whose `cmap` is the
+  font's `/ToUnicode` read backwards (`CMap::code_for_unicode`) and whose
+  `hmtx` is `/W`; and a **simple TrueType** font, each glyph written as the
+  lowest byte its encoding reaches it by, so `GPOS` reaches the field. Everywhere else the single-byte path stands and
   every character it could not write is named by
   `WarningKind::FieldCharacterUnrepresentable`, against the field's own
   object; a registry CMap in a `cmap-predefined`-off build is refused with

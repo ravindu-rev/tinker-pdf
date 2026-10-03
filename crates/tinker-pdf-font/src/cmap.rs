@@ -328,6 +328,49 @@ impl CMap {
         None
     }
 
+    /// The lowest code this `/ToUnicode` maps to exactly `c`, read backwards.
+    ///
+    /// A writer's question: a font whose program has no `cmap` — a bare CFF —
+    /// says what its codes *mean* only here, so a producer going from a
+    /// character to a code has nowhere else to ask. A `bfrange` whose
+    /// destination is one character answers for its whole run, offset as
+    /// [`CMap::to_unicode_string`] offsets it; one whose destination is
+    /// several characters answers for none of them, because a code that means
+    /// a ligature does not mean any one of its letters.
+    ///
+    /// The **lowest** code rather than the first found, because `single` is a
+    /// hash map and its iteration order is not a property of the file: two
+    /// codes meaning one character is legal, and the answer must not depend on
+    /// how a table was hashed (ruling 4).
+    #[must_use]
+    pub fn code_for_unicode(&self, c: char) -> Option<u32> {
+        let mut best: Option<u32> = None;
+        let mut offer = |code: u32| {
+            if best.is_none_or(|b| code < b) {
+                best = Some(code);
+            }
+        };
+        for (code, chars) in &self.single {
+            if chars.as_slice() == [c] {
+                offer(*code);
+            }
+        }
+        for (low, high, base) in &self.ranges {
+            let [first] = base.as_slice() else {
+                continue;
+            };
+            let Some(offset) = u32::from(c).checked_sub(u32::from(*first)) else {
+                continue;
+            };
+            if offset <= high.saturating_sub(*low) {
+                if let Some(code) = low.checked_add(offset) {
+                    offer(code);
+                }
+            }
+        }
+        best
+    }
+
     /// The CID a code maps to (9.7.5).
     ///
     /// A mapping this CMap states wins over `identity`, which is the
@@ -1188,6 +1231,35 @@ mod tests {
             "a destination may be more than one character"
         );
         assert_eq!(cmap.to_unicode_string(0x43), None);
+    }
+
+    #[test]
+    fn a_to_unicode_reads_backwards_to_its_lowest_code() {
+        let src = b"
+            1 begincodespacerange <0000> <FFFF> endcodespacerange
+            3 beginbfchar
+            <0009> <0062>
+            <0005> <0062>
+            <0007> <00660069>
+            endbfchar
+            1 beginbfrange
+            <0041> <0043> <0061>
+            endbfrange
+        ";
+        let cmap = parse(src);
+        assert_eq!(cmap.code_for_unicode('a'), Some(0x41), "a range's first");
+        assert_eq!(cmap.code_for_unicode('c'), Some(0x43), "a range offset");
+        assert_eq!(
+            cmap.code_for_unicode('b'),
+            Some(5),
+            "two codes mean b and the lower wins, below the range's 0x42"
+        );
+        assert_eq!(
+            cmap.code_for_unicode('f'),
+            None,
+            "a ligature's code means neither of its letters"
+        );
+        assert_eq!(cmap.code_for_unicode('d'), None, "past the range");
     }
 
     #[test]
