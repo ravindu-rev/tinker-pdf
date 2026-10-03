@@ -28,9 +28,10 @@ pixel** to the same markup as the one chapter of an EPUB at the same box. The
 unimplemented properties counted by element, pictures not drawn, sheets that
 did not resolve, characters no face covers, and an `UnusableOption` for a box,
 margin or size the caller passed that could not be used and was replaced. A
-document the cascade or the layout refuses at one of its caps is
-`HtmlError::{StyleRefused, LayoutRefused}` rather than a placeholder page,
-because a creation call has no page count to keep. References: a `data:` URL
+document the cascade or the layout refuses at one of its caps — the caller's
+own stylesheet included — is `HtmlError::{StyleRefused, LayoutRefused}`
+rather than a placeholder page, because a creation call has no page count to
+keep. References: a `data:` URL
 carries its own bytes; anything else is missing and named under `from_html`,
 and asked of the caller's `epub::read::Resources` under `from_html_with`.
 `from_markdown(text, stylesheet, PageBox)` is the same call for Markdown:
@@ -334,7 +335,9 @@ byte-deterministic XMP packet and the header version its part requires.
   finished PDF line by line, each with the mismatch reference that must not
   agree. Beside them: the caller's sheet ahead of the document's and
   `!important` beating it, the page box and margin, an unusable box and margin
-  named, a cascade cap refused as `StyleRefused`, and a provider answering a
+  named, a cascade cap refused as `StyleRefused` — the markup's element count,
+  and the caller's own sheet past its rule or byte cap, which before the
+  lane's review was dropped with no warning — and a provider answering a
   `<link>`. `hostile_input.rs` runs `from_html` over its damaged markup.
 - `crates/tinker-pdf/tests/png_passthrough.rs` asserts a PNG's IDAT reaches
   the page untouched and decodes identically.

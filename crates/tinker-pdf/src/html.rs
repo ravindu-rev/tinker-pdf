@@ -141,7 +141,9 @@ impl HtmlReport {
 #[non_exhaustive]
 pub enum HtmlError {
     /// The cascade refused the document: one of `tinker-pdf-css`'s caps —
-    /// elements, rules, declarations, selector matches — was spent.
+    /// elements, rules, declarations, selector matches, a sheet's length — was
+    /// spent, by the markup and its own sheets or by the stylesheet the caller
+    /// handed over, which is never dropped silently.
     StyleRefused,
     /// Layout or fragmentation refused it: one of `tinker-pdf-layout`'s caps
     /// was spent.

@@ -1204,7 +1204,14 @@ pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
     // The caller's sheet has no address of its own, so an `@import` in it is
     // resolved against the document it is applied to — what a `<style>`
     // element's would be.
-    let given = {
+    //
+    // A sheet the parser refuses at one of `tinker-pdf-css`'s caps refuses the
+    // document, as the cascade refusing it would: laying the markup out
+    // without the sheet its caller handed over would be pages nobody asked for
+    // with a report saying nothing (ruling 10). Only `from_html`'s caller can
+    // reach this: a loose file opened by `Document::open` is laid out with an
+    // empty sheet or the committed `fb2::STYLESHEET`.
+    let (given, sheet_refused) = {
         let resolver = read::Imports::new(resources, *limits);
         match css_parse(
             author.as_bytes(),
@@ -1214,8 +1221,8 @@ pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
             &limits.css,
             &mut css_budget,
         ) {
-            Ok(sheet) => vec![sheet],
-            Err(_) => Vec::new(),
+            Ok(sheet) => (vec![sheet], false),
+            Err(_) => (Vec::new(), true),
         }
     };
     let context = read::Context {
@@ -1235,6 +1242,7 @@ pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
             Ok(scene) => (true, None, Some(scene), None),
             Err(why) => (true, None, None, Some(why)),
         },
+        Loose::Markup(_) if sheet_refused => (false, None, None, Some(SpineDefect::NotStyled)),
         Loose::Markup(dom) => {
             let mut pass = PassOne {
                 css_budget: &mut css_budget,

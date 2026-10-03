@@ -299,6 +299,40 @@ fn a_document_past_a_cascade_cap_is_refused_by_name() {
     assert_eq!(refused.err(), Some(HtmlError::StyleRefused));
 }
 
+/// **The caller's own stylesheet refused at a cap refuses the document**, as
+/// the markup's would: a creation call that laid the markup out without the
+/// sheet it was handed would return pages its caller did not ask for and a
+/// report saying nothing. The two caps a sheet can reach on its own — its rule
+/// count and its length — each refuse it.
+#[test]
+fn a_stylesheet_past_a_cascade_cap_is_refused_by_name() {
+    use tinker_pdf_css::limits::{MAX_CSS_BYTES, MAX_CSS_RULES};
+    let mut rules: String = (0..=MAX_CSS_RULES)
+        .map(|n| format!(".c{n}{{color:red}}"))
+        .collect();
+    rules.push_str("p{color:#00ff00}");
+    let mut long = String::from("p{color:#00ff00}");
+    long.push_str(&" ".repeat(MAX_CSS_BYTES));
+    for (what, sheet) in [("rules", rules), ("bytes", long)] {
+        let refused =
+            DocumentBuilder::from_html(document("<p>x</p>"), &sheet, PageBox::new(300.0, 300.0));
+        assert_eq!(
+            refused.err(),
+            Some(HtmlError::StyleRefused),
+            "a sheet past the {what} cap"
+        );
+    }
+    // And a sheet of half as many rules is a document. (The rule cap is the
+    // whole document's, so the user-agent sheet's rules count against it too.)
+    let within: String = (0..MAX_CSS_RULES / 2)
+        .map(|n| format!(".c{n}{{color:red}}"))
+        .collect();
+    assert!(
+        DocumentBuilder::from_html(document("<p>x</p>"), &within, PageBox::new(300.0, 300.0))
+            .is_ok()
+    );
+}
+
 /// **What the markup names that nothing answers is named**, and a provider
 /// handed to `from_html_with` answers it — through the same seam a book's
 /// container does.
