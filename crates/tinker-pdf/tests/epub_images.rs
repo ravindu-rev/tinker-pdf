@@ -933,6 +933,40 @@ fn a_background_url_is_relative_to_its_sheet_and_a_missing_one_is_named() {
     );
 }
 
+/// **Sixty thousand background references, each its own missing image, are
+/// one warning counting sixty thousand elements** — a chapter near
+/// `MAX_DOM_NODES` giving every box a texture of its own.
+///
+/// The size is the test. Registering a reference looked for it in a list of
+/// every reference already read, and counting a failed element looked for it
+/// in a list of every element already counted, so both were quadratic: this
+/// test took 70 seconds in a debug build. Both are keyed now, and it takes
+/// two. There is no clock here, for `bounds_ledger.rs`'s reason — a timing
+/// passes on a fast machine with the defect present — so what the test
+/// asserts is the count, and what it does on the quadratic is stall the
+/// suite, as `hostile_input.rs`'s quadratic shapes would.
+#[test]
+fn sixty_thousand_missing_backgrounds_are_one_warning_counting_each_element() {
+    const BOXES: usize = 60_000;
+    // One declaration a box, the height in the sheet: two a box would be past
+    // `MAX_CSS_DECLARATIONS` and the chapter would not be styled at all.
+    let mut body = String::from(r#"<link rel="stylesheet" href="s.css"/>"#);
+    for at in 0..BOXES {
+        body.push_str(&format!(
+            r#"<div style="background-image: url(m{at}.png)"></div>"#
+        ));
+    }
+    let doc = open(&body, &[("s.css", b"div { height: 1px }".to_vec())]);
+    assert_eq!(
+        warnings(&doc),
+        [ArchiveWarning::BackgroundImageNotDrawn {
+            item: "EPUB/ch1.xhtml".to_owned(),
+            defect: ImageDefect::Unresolved,
+            elements: BOXES,
+        }]
+    );
+}
+
 /// **A transformed box's repeating image turns with it**: 8.7.3.1 maps a
 /// pattern onto the page's *default* space, which no `cm` reaches, so the
 /// pattern's own `/Matrix` carries the box's transform — here a translation

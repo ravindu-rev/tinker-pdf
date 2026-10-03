@@ -96,6 +96,8 @@ pub mod svg;
 pub mod typeface;
 pub mod xhtml;
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use tinker_pdf_cos::build::{ImageData, OutlineEntry, Target};
 use tinker_pdf_cos::dest::is_writable_uri;
 use tinker_pdf_cos::DocumentBuilder;
@@ -1854,19 +1856,30 @@ type BackgroundImage = Result<(Vec<u8>, (f64, f64)), ImageDefect>;
 /// its size until the painter, and reading it only for the fragments that
 /// reached a page means a book's unused texture — a rule for a class no element
 /// carries, a box under `display: none` — costs nothing at all.
+///
+/// **Keyed, not searched.** Every fragment that carries a layer looks its
+/// reference up here twice — once to register it and once to plan it — and a
+/// chapter may give every one of its elements a reference of its own, so a
+/// list scanned per fragment was quadratic in the references: twenty thousand
+/// boxes each naming a missing image of its own took eight seconds in a debug
+/// build where one shared name took one and a half.
 #[derive(Debug, Default)]
 struct Backgrounds {
-    /// `(base, href)` as the stylesheet wrote them, and what they came to.
-    images: Vec<(String, String, BackgroundImage)>,
+    /// What each reference came to, by the `base` the stylesheet wrote it
+    /// against and then by its `href`.
+    images: BTreeMap<String, BTreeMap<String, BackgroundImage>>,
 }
 
 impl Backgrounds {
+    /// What a reference written against `base` came to, if it was read.
+    fn get(&self, base: &str, href: &str) -> Option<&BackgroundImage> {
+        self.images.get(base).and_then(|named| named.get(href))
+    }
+
     /// The registered image a reference written against `base` names.
     fn find(&self, base: &str, href: &str) -> Option<(&[u8], (f64, f64))> {
-        self.images
-            .iter()
-            .find(|(at, name, _)| at == base && name == href)
-            .and_then(|(_, _, found)| found.as_ref().ok())
+        self.get(base, href)
+            .and_then(|found| found.as_ref().ok())
             .map(|(name, size)| (name.as_slice(), *size))
     }
 }
@@ -1883,10 +1896,12 @@ fn register_backgrounds<R: read::Resources + ?Sized>(
     let mut out = Backgrounds::default();
     // One resource per resolved entry, so two spellings of one file — or one
     // texture named by two sheets — are one image in the document.
-    let mut by_path: Vec<(String, BackgroundImage)> = Vec::new();
+    let mut by_path: BTreeMap<String, BackgroundImage> = BTreeMap::new();
     for chapter in chapters {
         let document = chapter.path.as_deref().unwrap_or("");
-        let mut failed: Vec<(ImageDefect, Vec<u32>)> = Vec::new();
+        // A defect is one of a handful, so its list is searched; the elements
+        // under one are as many as the chapter has, so they are a set.
+        let mut failed: Vec<(ImageDefect, BTreeSet<u32>)> = Vec::new();
         for page in &chapter.pages {
             for fragment in &page.boxes {
                 let Some(layer) = &fragment.image else {
@@ -1894,30 +1909,28 @@ fn register_backgrounds<R: read::Resources + ?Sized>(
                 };
                 let base = layer.image.base.as_deref().unwrap_or(document);
                 let href = &layer.image.href;
-                let index = match out
-                    .images
-                    .iter()
-                    .position(|(at, name, _)| at == base && name == href)
-                {
-                    Some(index) => index,
+                let defect = match out.get(base, href) {
+                    Some(found) => found.as_ref().err().copied(),
                     None => {
                         let found =
                             read_background(resources, builder, (base, href), limits, &mut by_path);
-                        out.images.push((base.to_owned(), href.clone(), found));
-                        out.images.len() - 1
+                        let defect = found.as_ref().err().copied();
+                        out.images
+                            .entry(base.to_owned())
+                            .or_default()
+                            .insert(href.clone(), found);
+                        defect
                     }
                 };
                 // Counted by element and by defect: a book's forty boxes on one
                 // missing texture are one sentence.
-                if let Err(defect) = out.images[index].2 {
+                if let Some(defect) = defect {
                     let anchor = fragment.anchor.unwrap_or(u32::MAX);
                     match failed.iter_mut().find(|(seen, _)| *seen == defect) {
                         Some((_, elements)) => {
-                            if !elements.contains(&anchor) {
-                                elements.push(anchor);
-                            }
+                            elements.insert(anchor);
                         }
-                        None => failed.push((defect, vec![anchor])),
+                        None => failed.push((defect, BTreeSet::from([anchor]))),
                     }
                 }
             }
@@ -1941,12 +1954,12 @@ fn read_background<R: read::Resources + ?Sized>(
     builder: &mut DocumentBuilder,
     (base, href): (&str, &str),
     limits: &Limits,
-    by_path: &mut Vec<(String, BackgroundImage)>,
+    by_path: &mut BTreeMap<String, BackgroundImage>,
 ) -> BackgroundImage {
     let (path, bytes) = resources
         .fetch(base, href, limits)
         .map_err(|_| ImageDefect::Unresolved)?;
-    if let Some((_, found)) = by_path.iter().find(|(at, _)| *at == path) {
+    if let Some(found) = by_path.get(&path) {
         return found.clone();
     }
     let found = read::picture_data(bytes).and_then(|(size, data)| {
@@ -1964,7 +1977,7 @@ fn read_background<R: read::Resources + ?Sized>(
             Err(ImageDefect::Undecodable)
         }
     });
-    by_path.push((path, found.clone()));
+    by_path.insert(path, found.clone());
     found
 }
 
