@@ -162,10 +162,15 @@ agrees on.
 
 ### What the writing is held to
 
-- **The envelope is OpenSSL's.** `a_sealed_envelope_is_openssls_outside_its_random_fields`
-  (`tinker-pdf-pki/tests/enveloped.rs`) seals the content OpenSSL 3.5.5
-  sealed in `aes-256-cbc.der` to the same certificate, and gets the same 484
-  octets outside the encrypted key, the IV and the ciphertext.
+- **The envelope is RFC 5652's, and so is OpenSSL's.**
+  `a_sealed_envelope_is_the_rfcs_and_so_is_openssls_outside_their_random_fields`
+  (`tinker-pdf-pki/tests/enveloped.rs`) writes the expected encoding from RFC
+  5652 §6 and RFC 3565, seals the content OpenSSL 3.5.5 sealed in
+  `aes-256-cbc.der` to the same certificate, and holds both envelopes to it:
+  the same 484 octets outside the encrypted key, the IV and the ciphertext.
+  OpenSSL's bytes are an input checked against the clause, not the expected
+  answer (ruling 13); until review on 3 October 2026 the test compared the
+  writer to OpenSSL's bytes directly, which made them the answer.
 - **RSAES-PKCS1-v1_5 is RSA Laboratories'.** All 300 encryption known answers
   in `pkcs1v15crypt-vectors.txt`, across fifteen keys from 1024 to 2048 bits,
   including the 1025- to 1031-bit moduli whose leading octet is not full.
@@ -238,7 +243,8 @@ Risks; the writer stopped writing the entry rather than keep a value nothing
 checked. Three rows reach only the OpenSSL comparison — a constructed
 `encryptedContent`, a version-2 recipient, a missing `NULL` — because this
 tree's own reader accepts all three, which is exactly why the writer is held
-to OpenSSL's bytes and not to its own reader.
+to an encoding written from the RFCs — and OpenSSL's envelope to the same one
+— and not to its own reader.
 
 ## The evidence, and what it is not
 

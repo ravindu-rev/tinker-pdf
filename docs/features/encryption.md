@@ -194,7 +194,9 @@ agrees with itself about. [design/pubsec.md](../design/pubsec.md) records that
 as an open risk rather than a footnote.
 
 Writing narrows the gap from the other side without closing it. The envelope
-the writer seals is OpenSSL's byte for byte outside its random fields, and
+the writer seals is RFC 5652's byte for byte outside its random fields, as is
+the one OpenSSL sealed to the same certificate, both held to an encoding
+written from the RFCs; and
 **OpenSSL 3.0.13 opened one** (`cms -decrypt`, 2 October 2026) to the seed and
 the permissions, after which `openssl enc -aes-256-cbc` decrypted every
 content stream of the sealed file under the derived key. RSAES-PKCS1-v1_5 is

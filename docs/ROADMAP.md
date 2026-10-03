@@ -782,8 +782,8 @@ appearance's has since closed (`SigningTarget::NewVisibleField`,
 creation's (`DocumentEditor::save_timestamped` with a host `Timestamper`,
 held to real RFC 3161 tokens over this engine's own output), and so has
 writing a public-key-encrypted document's (`PublicKeyEncryption::seal` and
-`DocumentEditor::save_sealed`, the envelope held to OpenSSL's bytes and
-opened by OpenSSL, [features/encryption.md](features/encryption.md)).
+`DocumentEditor::save_sealed`, the envelope held to RFC 5652's encoding as
+OpenSSL's is, and opened by OpenSSL, [features/encryption.md](features/encryption.md)).
 
 ## How this file changes
 

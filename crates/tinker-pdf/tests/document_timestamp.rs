@@ -36,9 +36,22 @@ use tinker_pdf_pki::TimeStampToken;
 const STAMPED_PDF: &[u8] = include_bytes!("signature_support/document-timestamp.pdf");
 const STAMPED_TSA_ROOT: &[u8] = include_bytes!("signature_support/document-timestamp-tsa-root.der");
 
-/// The fixture's `genTime`, as `openssl ts -reply -text` printed it:
-/// `Oct  2 09:58:34 2026 GMT`.
-const STAMPED_AT: i64 = 1_790_935_114;
+/// The fixture token's `genTime` as its own `GeneralizedTime` spells it,
+/// `20261002095834Z`, which the first test finds in the token.
+const STAMPED_AT: i64 = unix_time(2026, 10, 2, 9, 58, 34);
+
+/// Seconds since 1970 for a UTC calendar time: Howard Hinnant's
+/// `days_from_civil`, proleptic Gregorian, written out here so that an
+/// expected `genTime` is arithmetic on the token's own digits and not a
+/// program's printout of them (ruling 13).
+const fn unix_time(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146_097 + doe - 719_468) * 86_400 + hour * 3_600 + minute * 60 + second
+}
 
 /// The document the engine timestamps: already signed, so the timestamp is
 /// laid over a signature the way a long-term archive lays one.
@@ -57,6 +70,10 @@ fn a_document_timestamp_reaches_every_one_of_the_four_answers() {
     let document = Document::open(STAMPED_PDF.to_vec()).expect("the fixture opens");
     let signature = &document.signatures()[0];
     assert_eq!(signature.sub_filter, Some(SubFilter::EtsiRfc3161));
+    assert!(
+        find(signature.cms(), b"\x18\x0f20261002095834Z").is_some(),
+        "the GeneralizedTime STAMPED_AT is computed from"
+    );
     assert_eq!(signature.coverage, Coverage::WholeFile);
 
     let verdict = verdict_with(STAMPED_PDF, &[STAMPED_TSA_ROOT]);

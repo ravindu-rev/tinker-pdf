@@ -187,7 +187,7 @@ fn pem_to_der(pem: &str) -> Vec<u8> {
     out
 }
 
-// ---- the writer, held to OpenSSL's envelope -------------------------------
+// ---- the writer, held to RFC 5652's envelope, and OpenSSL's to it ----------
 
 /// A deterministic source: what is under test is the encoding, not the
 /// randomness.
@@ -226,27 +226,102 @@ fn without_randomness(der: &[u8]) -> Vec<u8> {
     out
 }
 
-/// **The writer's envelope is OpenSSL's, octet for octet, outside the three
-/// fields randomness fills.** The same content OpenSSL 3.5.5 sealed —
-/// `SEEDSEEDSEEDSEEDSEED` and four zeros — sealed here to the same
-/// certificate with AES-256-CBC: the same 484 octets, every tag, length, OID,
-/// version, the issuer and serial and the `NULL` parameters identical, and
-/// only the 256-octet encrypted key, the 16-octet IV and the 32 octets of
-/// ciphertext different, as they must be. This is what "held to the OpenSSL
-/// envelopes this reader already parses" means: the reader's own fixture is
-/// the writer's specification.
-#[test]
-fn a_sealed_envelope_is_openssls_outside_its_random_fields() {
-    let certificate = pem_to_der(include_str!("data/enveloped/recipient-cert.pem"));
-    let ours = tinker_pdf_pki::seal::seal(
-        b"SEEDSEEDSEEDSEEDSEED\0\0\0\0",
-        &[&certificate],
-        &mut Counter(0),
+/// `id-data`, `id-envelopedData` and `aes256-CBC`, as OID contents.
+const ID_DATA: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x01];
+const ID_ENVELOPED_DATA: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x03];
+const AES_256_CBC: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x01, 0x2A];
+
+/// The envelope RFC 5652 §6 and RFC 3565 describe for `content_len` octets
+/// sealed to `certificate` alone under AES-256-CBC, written here from the
+/// RFCs rather than from anybody's output, with the three fields randomness
+/// fills zeroed at the lengths they must have.
+///
+/// The issuer and serial come out of the certificate by this file's own DER
+/// walk, not by the parser the writer uses.
+fn rfc_envelope(certificate: &[u8], content_len: usize) -> Vec<u8> {
+    let (_, whole) = element(certificate);
+    let (_, tbs) = element(children(whole)[0]);
+    let tbs = children(tbs);
+    // RFC 5280 §4.1: [0] version, serial, signature, issuer, ...
+    let (serial, issuer) = (tbs[1], tbs[3]);
+    let (_, spki) = element(tbs[6]);
+    let (_, key) = element(children(spki)[1]);
+    // The BIT STRING's unused-bits octet, then RSAPublicKey; its modulus with
+    // the sign octet a DER INTEGER may carry dropped is RFC 8017 §7.2.1's `k`.
+    let (_, rsa_key) = element(&key[1..]);
+    let (_, modulus) = element(children(rsa_key)[0]);
+    let k = modulus.iter().skip_while(|octet| **octet == 0).count();
+
+    // §6.2.1: version 0 because the recipient is named by issuer and serial;
+    // the key encrypted under `rsaEncryption` with NULL parameters (RFC 8017
+    // A.1), `k` octets of it.
+    let recipient = tlv(
+        0x30,
+        &[
+            tlv(0x02, &[0]),
+            tlv(0x30, &[issuer, serial].concat()),
+            RSA_ENCRYPTION.to_vec(),
+            tlv(0x04, &vec![0; k]),
+        ]
+        .concat(),
+    );
+    // RFC 3565 §4.1: the IV is the parameter, sixteen octets; §2.3 and RFC
+    // 5652 §6.3 pad to the next whole block, a full one when it is already
+    // whole. `encryptedContent` is `[0] IMPLICIT OCTET STRING`, primitive.
+    let ciphertext_len = (content_len / 16 + 1) * 16;
+    let encrypted_content = tlv(
+        0x30,
+        &[
+            tlv(0x06, ID_DATA),
+            tlv(
+                0x30,
+                &[tlv(0x06, AES_256_CBC), tlv(0x04, &[0; 16])].concat(),
+            ),
+            tlv(0x80, &vec![0; ciphertext_len]),
+        ]
+        .concat(),
+    );
+    // §6.1: version 0 — no originator information, no unprotected
+    // attributes, every recipient a version-0 key transport.
+    let enveloped = tlv(
+        0x30,
+        &[tlv(0x02, &[0]), tlv(0x31, &recipient), encrypted_content].concat(),
+    );
+    tlv(
+        0x30,
+        &[tlv(0x06, ID_ENVELOPED_DATA), tlv(0xA0, &enveloped)].concat(),
     )
-    .expect("seals");
-    assert_eq!(ours.len(), AES_256.len(), "the same 484 octets");
-    assert_ne!(ours, AES_256, "and not a copy of them");
-    assert_eq!(without_randomness(&ours), without_randomness(AES_256));
+}
+
+/// **The writer's envelope is RFC 5652's, octet for octet, outside the three
+/// fields randomness fills — and so is OpenSSL's.** The expected encoding is
+/// written above from the RFCs. The writer's envelope is held to it, and
+/// OpenSSL 3.5.5's `aes-256-cbc.der`, sealed on 28 August 2026 to the same
+/// certificate over the same `SEEDSEEDSEEDSEEDSEED` and four zeros, is held
+/// to it too: an input checked against the clause rather than the answer
+/// (ruling 13). Both checks passing is what makes the writer's envelope
+/// OpenSSL's in all 484 octets but the 256-octet encrypted key, the 16-octet
+/// IV and the 32 of ciphertext.
+#[test]
+fn a_sealed_envelope_is_the_rfcs_and_so_is_openssls_outside_their_random_fields() {
+    let certificate = pem_to_der(include_str!("data/enveloped/recipient-cert.pem"));
+    let content = b"SEEDSEEDSEEDSEEDSEED\0\0\0\0";
+    let expected = rfc_envelope(&certificate, content.len());
+    assert_eq!(expected.len(), 484);
+
+    let ours =
+        tinker_pdf_pki::seal::seal(content, &[&certificate], &mut Counter(0)).expect("seals");
+    assert_eq!(
+        without_randomness(&ours),
+        expected,
+        "the writer's envelope is the one RFC 5652 §6 and RFC 3565 describe"
+    );
+    assert_eq!(
+        without_randomness(AES_256),
+        expected,
+        "OpenSSL's envelope over the same content is the same shape"
+    );
+    assert_ne!(ours, AES_256, "and the writer's is not a copy of it");
 }
 
 // ---- a key its certificate restricts to signing ----------------------------

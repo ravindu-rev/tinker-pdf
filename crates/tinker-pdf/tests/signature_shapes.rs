@@ -64,13 +64,27 @@ const STAMPED_ROOT: &[u8] = include_bytes!("signature_support/signature-timestam
 const STAMPED_TSA_ROOT: &[u8] =
     include_bytes!("signature_support/signature-timestamp-tsa-root.der");
 
-/// The fixture token's `genTime`, as OpenSSL printed it when it made the
-/// token: `Oct  2 09:47:30 2026 GMT`.
-const STAMPED_AT: i64 = 1_790_934_450;
+/// The fixture token's `genTime` as its own `GeneralizedTime` spells it,
+/// `20261002094730Z` (`the_token_carries_what_its_authority_was_told_to_write`
+/// finds the digits in the token).
+const STAMPED_AT: i64 = unix_time(2026, 10, 2, 9, 47, 30);
 
 /// Inside every fixture certificate's validity window and nothing to do with
 /// now: 1 January 2027. Ruling 4 keeps the clock out of the engine.
 const AT: i64 = 1_798_761_600;
+
+/// Seconds since 1970 for a UTC calendar time: Howard Hinnant's
+/// `days_from_civil`, proleptic Gregorian, written out here so that an
+/// expected `genTime` is arithmetic on the token's own digits and not a
+/// program's printout of them (ruling 13).
+const fn unix_time(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    (era * 146_097 + doe - 719_468) * 86_400 + hour * 3_600 + minute * 60 + second
+}
 
 // ---- RSASSA-PSS ------------------------------------------------------------
 
@@ -795,13 +809,24 @@ fn a_token_whose_ess_attribute_names_another_certificate_is_not_bound() {
     assert_eq!(stamp.signature, SignatureCheck::Failed);
 }
 
+/// The token read back to what its authority was told to write, which is the
+/// generator's input rather than any program's reading of the output (ruling
+/// 13). `tsa()` in `signature-fixtures.py` configured OpenSSL's TSA with
+/// `default_policy = 1.3.6.1.4.1.55555.1.1`, `accuracy = secs:1,
+/// millisecs:500, microsecs:100`, `ordering = yes`, and a serial file holding
+/// `2026100201` — the *last* serial issued, which `openssl ts -reply`
+/// increments before it issues the next, as its manual says. The query asked
+/// for a SHA-256 imprint and, by default, a nonce. The one field nobody
+/// configured is `genTime`: the token spells it `20261002094730Z`, and
+/// [`STAMPED_AT`] is those digits through the calendar arithmetic above.
 #[test]
-fn the_token_reads_as_openssl_printed_it() {
-    // `openssl ts -reply -text` over the committed token, on the day it was
-    // made: policy 1.3.6.1.4.1.55555.1.1, SHA-256, serial 0x2026100202,
-    // accuracy 1 s 500 ms 100 µs, ordering yes, a nonce, the TSA's name.
+fn the_token_carries_what_its_authority_was_told_to_write() {
     let der = cms_of(STAMPED_PDF);
     let token = token_at(&der);
+    assert!(
+        find(&der[token.clone()], b"\x18\x0f20261002094730Z").is_some(),
+        "the GeneralizedTime STAMPED_AT is computed from"
+    );
     let parsed = TimeStampToken::parse(&der[token]).expect("the token parses");
     let info = parsed.info();
     assert_eq!(info.policy().to_dotted(), "1.3.6.1.4.1.55555.1.1");

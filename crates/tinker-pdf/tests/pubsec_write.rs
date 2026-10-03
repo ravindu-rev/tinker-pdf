@@ -3,11 +3,13 @@
 //!
 //! # Which link is adjudicated by what
 //!
-//! **The envelope is held to OpenSSL's.** `tinker-pdf-pki`'s
-//! `a_sealed_envelope_is_openssls_outside_its_random_fields` seals the same
-//! content OpenSSL 3.5.5 did to the same certificate and finds the same 484
-//! octets outside the encrypted key, the IV and the ciphertext; this file does
-//! not re-prove that.
+//! **The envelope is held to RFC 5652's, and OpenSSL's to the same.**
+//! `tinker-pdf-pki`'s
+//! `a_sealed_envelope_is_the_rfcs_and_so_is_openssls_outside_their_random_fields`
+//! writes the expected encoding from RFC 5652 §6 and RFC 3565, and finds both
+//! the writer's envelope and the one OpenSSL 3.5.5 sealed to the same
+//! certificate equal to it in the 484 octets outside the encrypted key, the IV
+//! and the ciphertext; this file does not re-prove that.
 //!
 //! **The arithmetic is published vectors'.** RSAES-PKCS1-v1_5 is held to all
 //! 300 of RSA Laboratories' encryption known answers, AES-256-CBC to FIPS 197

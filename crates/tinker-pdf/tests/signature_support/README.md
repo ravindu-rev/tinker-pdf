@@ -192,8 +192,11 @@ SHA-256: `f494d76140328d6daa6242886772e630480da312753ebb3cd736f30a7b81ae06`
 (`signature-timestamp-root.der`, the signer's root) and
 `d9b49457a0937c0ef21520f348a62eda764cb48c005baaff4a0ccee2627121d1`
 (`signature-timestamp-tsa-root.der`, the authority's). The token's `genTime`
-is the moment OpenSSL made it, `Oct  2 09:47:30 2026 GMT` by its own
-`ts -reply -text`, and `signature_shapes.rs` pins it. The outer CMS blob is
+is the moment OpenSSL made it, which the token spells `20261002094730Z`;
+`signature_shapes.rs` finds those digits in the token and pins the time they
+name by its own calendar arithmetic, and holds the token's other fields to the
+TSA configuration `tsa()` wrote rather than to any program's printout of them
+(ruling 13). The outer CMS blob is
 also the `pki_cms` seed `rfc3161-signature-timestamp`.
 
 What it is worth: the token — its `TSTInfo`, its ESS attribute, its signature
@@ -209,8 +212,8 @@ one-page layout with the field's value a `/Type /DocTimeStamp` dictionary under
 the bare token from `openssl ts -reply -token_out` over SHA-256 of the covered
 bytes, its authority configured with `ess_cert_id_alg = sha256` so the token
 carries RFC 5816's `signingCertificateV2`, the other ESS version from
-`signature-timestamp.pdf`'s. `genTime` is `Oct  2 09:58:34 2026 GMT` by
-`ts -reply -text`.
+`signature-timestamp.pdf`'s. `genTime` is the token's own `20261002095834Z`,
+which `document_timestamp.rs` finds in it and turns into seconds itself.
 
 SHA-256: `b83122fa89da2a1bbaee6dd29c017bd714e4fcde7c8e3994b1d8849858501f8f`
 (`document-timestamp.pdf`) and
