@@ -165,7 +165,11 @@ configuration whose `/Order` is the order the layers were added and whose
 `/OFF` names the hidden ones. A layer inside a `tagged` element splits the
 element's sequence around itself, so each `EMC` closes the scope it was
 written for: without that, a child element's close would end the layer and
-the child would draw in plain view with every byte balanced. A layer a page
+the child would draw in plain view with every byte balanced. For the same
+reason the layer's closure is a scope for `open_tag`/`close_tag`, as
+`tagged_with`'s is: `close_tag` inside it cannot close an element opened
+outside it, and an element opened inside it and left open is closed when it
+returns. A layer a page
 cannot name — registered after the page was begun, or on another builder —
 or one nested past `MAX_NEST_DEPTH`, is refused and its closure not run:
 content drawn outside the layer it was meant for shows when the layer is

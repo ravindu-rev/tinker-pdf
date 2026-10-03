@@ -9,7 +9,7 @@
 
 use tinker_pdf::{
     ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal, DeviceSpace, Document,
-    DocumentBuilder, WriteMode, WriteOptions,
+    DocumentBuilder, Tag, WriteMode, WriteOptions,
 };
 
 mod pdfa_support;
@@ -242,4 +242,109 @@ fn an_element_in_a_hidden_layer_inside_a_visible_element_is_hidden() {
     // what it marks and still applies what it sets, so the colour the hidden
     // child chose is the one the element's last piece is painted in.
     assert_eq!(at(&bitmap, 50.0, 30.0), RED, "the element's last piece");
+}
+
+/// The first page's content stream, as bytes.
+fn page_content(document: &Document) -> Vec<u8> {
+    let cos = document.cos();
+    let pages = tinker_pdf_cos::pages::collect(cos);
+    let page = pages.first().expect("a page");
+    tinker_pdf_cos::pages::content_bytes(cos, page)
+}
+
+/// How many marked-content sequences a content stream opens, and how many it
+/// closes. Counted as operator tokens, so a `BDC` inside a string is not one.
+fn sequences(content: &[u8]) -> (usize, usize) {
+    let tokens = content
+        .split(|byte| byte.is_ascii_whitespace())
+        .filter(|token| !token.is_empty());
+    let (mut open, mut close) = (0, 0);
+    for token in tokens {
+        match token {
+            b"BDC" | b"BMC" => open += 1,
+            b"EMC" => close += 1,
+            _ => {}
+        }
+    }
+    (open, close)
+}
+
+/// A layer's closure is a scope the way a `tagged_with` closure is:
+/// `close_tag` inside it cannot reach an element opened outside it, and an
+/// element it opens and leaves open is closed when it returns.
+///
+/// Both are what its `EMC` needs. A layer and an element are both
+/// marked-content sequences and `EMC` closes whichever is innermost, so an
+/// element closed from inside the layer left the layer one `EMC` too many —
+/// three sequences opened against four closed — and an element left open
+/// inside it took the layer's `EMC` for its own, so what was drawn after the
+/// closure returned stayed inside the layer and hid with it. The review of
+/// the tagged-writing lane found both through public calls and nothing
+/// refused either.
+#[test]
+fn a_layer_closure_closes_what_it_opened_and_nothing_outside_it() {
+    // An element opened outside the layer and closed after it.
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_embedded_font(b"F1", b"Curvy", &curvy_font()));
+    let layer = builder.add_layer("Aside", true).expect("a layer");
+    builder.add_page(200.0, 100.0, |page| {
+        assert!(page.open_tag(&Tag::new(b"P")));
+        page.text(b"F1", 10.0, 5.0, 80.0, "AB");
+        assert!(page.optional(layer, |page| {
+            page.text(b"F1", 10.0, 45.0, 80.0, "CD");
+            assert!(!page.close_tag(), "the P was opened outside the layer");
+            page.text(b"F1", 10.0, 85.0, 80.0, "EF");
+        }));
+        page.text(b"F1", 10.0, 125.0, 80.0, "GH");
+        assert!(page.close_tag(), "the P, after the layer");
+        assert!(!page.close_tag(), "nothing else is open");
+    });
+    let document = Document::open(builder.finish()).expect("it opens");
+    let (open, close) = sequences(&page_content(&document));
+    assert_eq!(open, close, "every sequence opened is closed once");
+    let page = document.page(0).expect("a page");
+    let structured = page.structured_text().expect("the document is tagged");
+    assert_eq!(structured.orphans, 0, "every marked run is claimed");
+    assert_eq!(structured.unmarked, 0, "and nothing was drawn unmarked");
+    let text: String = structured
+        .plain_text()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    assert_eq!(
+        text, "ABCDEFGH",
+        "one paragraph, in order, around its layer"
+    );
+    let tree = document.structure().expect("a tree");
+    let paragraphs = tree
+        .elements()
+        .into_iter()
+        .filter(|element| element.standard_type == "P")
+        .count();
+    assert_eq!(paragraphs, 1, "the P is one element");
+
+    // An element opened inside a hidden layer and left open there.
+    let mut builder = DocumentBuilder::new();
+    let layer = builder.add_layer("Hidden", false).expect("a layer");
+    builder.add_page(PAGE, PAGE, |page| {
+        assert!(page.optional(layer, |page| {
+            assert!(page.open_tag(&Tag::new(b"Figure")));
+            page.set_fill_rgb(1.0, 0.0, 0.0);
+            page.raw(b"5 5 10 50 re f");
+        }));
+        page.set_fill_rgb(0.0, 0.0, 1.0);
+        page.raw(b"25 5 10 50 re f");
+        assert!(!page.close_tag(), "the layer closed the Figure");
+    });
+    let bytes = builder.finish();
+    let document = Document::open(bytes.clone()).expect("it opens");
+    let (open, close) = sequences(&page_content(&document));
+    assert_eq!(open, close, "every sequence opened is closed once");
+    let bitmap = render(bytes);
+    assert_eq!(at(&bitmap, 10.0, 30.0), WHITE, "the Figure, in the layer");
+    assert_eq!(
+        at(&bitmap, 30.0, 30.0),
+        BLUE,
+        "what was drawn after the layer's closure returned is not in it"
+    );
 }

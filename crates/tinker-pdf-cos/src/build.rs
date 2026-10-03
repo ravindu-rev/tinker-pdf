@@ -1945,9 +1945,9 @@ pub struct PageBuilder {
     /// must close nothing either.
     refused_opens: usize,
     /// How many elements on [`Self::tag_stack`], and how many refused opens,
-    /// belong to a `tagged` closure still running. [`PageBuilder::close_tag`]
-    /// does not reach below either: an element a closure opened is the
-    /// closure's to close.
+    /// were open when the innermost `tagged_with` or `optional` closure still
+    /// running began. [`PageBuilder::close_tag`] does not reach below either:
+    /// an element opened outside a closure is not the closure's to close.
     floor: (usize, usize),
     /// The device colour space an [`ArchivalProfile`]'s destination profile
     /// admits, when the document is being written under one.
@@ -2690,6 +2690,23 @@ impl PageBuilder {
     /// [`PageBuilder::tagged`] has always done.
     pub fn tagged_with(&mut self, tag: &Tag, draw: impl FnOnce(&mut PageBuilder)) {
         let opened = self.open_tag(tag);
+        self.scoped(draw);
+        if opened {
+            self.close_top();
+        } else {
+            self.refused_opens = self.refused_opens.saturating_sub(1);
+        }
+    }
+
+    /// Runs `draw` as a scope for [`PageBuilder::open_tag`] and
+    /// [`PageBuilder::close_tag`]: a `close_tag` inside it reaches nothing
+    /// opened before it, and whatever it opens and leaves open is closed when
+    /// it returns.
+    ///
+    /// What makes a closure's own marked-content sequence safe to close when
+    /// it returns — a `tagged_with` element's or a layer's — because the `EMC`
+    /// that closes it closes whichever sequence is innermost.
+    fn scoped(&mut self, draw: impl FnOnce(&mut PageBuilder)) {
         let floor = std::mem::replace(&mut self.floor, (self.tag_stack.len(), self.refused_opens));
         draw(self);
         // What the closure opened and did not close, innermost first. A
@@ -2701,11 +2718,6 @@ impl PageBuilder {
             self.close_top();
         }
         self.floor = floor;
-        if opened {
-            self.close_top();
-        } else {
-            self.refused_opens = self.refused_opens.saturating_sub(1);
-        }
     }
 
     /// Opens the structure element `tag` describes, so that everything drawn
@@ -2785,10 +2797,10 @@ impl PageBuilder {
     /// Closes the innermost element [`PageBuilder::open_tag`] opened.
     ///
     /// Returns false, closing nothing, when there is nothing this call may
-    /// close: no element open, or only elements a running
-    /// [`PageBuilder::tagged_with`] closure opened around this call, which
-    /// are that closure's to close. A close matching a refused `open_tag` is
-    /// accepted and closes nothing.
+    /// close: no element open, or only elements opened outside a running
+    /// [`PageBuilder::tagged_with`] or [`PageBuilder::optional`] closure this
+    /// call is inside, which are not the closure's to close. A close matching
+    /// a refused `open_tag` is accepted and closes nothing.
     pub fn close_tag(&mut self) -> bool {
         if self.refused_opens > 0 {
             if self.refused_opens <= self.floor.1 {
@@ -2992,6 +3004,16 @@ impl PageBuilder {
     /// closure drew. An element opened inside a layer nests inside it with no
     /// splitting at all.
     ///
+    /// **The closure is a scope**, as a [`PageBuilder::tagged_with`] closure
+    /// is, and for the same reason: the layer's `EMC` closes whatever sequence
+    /// is innermost. So a [`PageBuilder::close_tag`] inside it cannot close an
+    /// element opened outside it — that would end the element's sequence
+    /// inside the layer and leave the layer's own close one `EMC` too many —
+    /// and an element [`PageBuilder::open_tag`] opens inside it and leaves
+    /// open is closed when it returns, where otherwise the layer's `EMC` would
+    /// end the element's sequence and leave everything drawn afterwards
+    /// inside the layer.
+    ///
     /// A layer whose closure drew nothing writes nothing, for the reason an
     /// empty `tagged` writes nothing.
     ///
@@ -3023,7 +3045,7 @@ impl PageBuilder {
         }
 
         self.optional_depth += 1;
-        draw(self);
+        self.scoped(draw);
         self.optional_depth -= 1;
 
         if tagged {

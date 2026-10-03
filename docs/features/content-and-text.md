@@ -475,7 +475,12 @@ still open when its page is pushed is closed there and reopened on the next
 page begun, and `finish` writes the two halves as one element whose kids on
 the second page are `/MCR`s with their own `/Pg` (14.7.2 Table 323). A
 closure's element is the closure's to close — `close_tag` cannot reach it,
-and what the closure opened and left open is closed when it returns. An
+and what the closure opened and left open is closed when it returns. A
+layer's closure (`optional`) is the same kind of scope, because its `EMC`
+closes whichever sequence is innermost: an element opened outside the layer
+cannot be closed inside it, and one opened inside it and left open is closed
+when it returns — each was otherwise a stream with a stray `EMC` or content
+drawn after the layer still inside it. An
 element that draws nothing is **kept when it says something** — an `/Alt`,
 a `/Lang`, or `Tag::keep_empty()` for an empty table cell — and dropped
 when it says nothing, as before. `DocumentBuilder::set_language` writes the
