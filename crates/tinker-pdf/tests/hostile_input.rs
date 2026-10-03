@@ -282,6 +282,18 @@ fn exercise(bytes: Vec<u8>) {
             let _ = joined.unmarked;
         }
 
+        // The inferred reading order: geometry the file chose, read with the
+        // tree hidden so the artifacts and the tagged page are both inferred
+        // over. On the first page only — the order reads a window of
+        // neighbouring pages, and a mutated file may claim a thousand.
+        if index == 0 {
+            let order = page.inferred_order(&tinker_pdf::InferenceOptions {
+                hide_structure: true,
+            });
+            let _ = order.plain_text();
+            let _ = order.moved();
+        }
+
         // Image extraction describes every image dictionary the page reaches
         // — its space, palette, masks and samples — which the renderer reads
         // only as far as drawing needs.

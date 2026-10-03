@@ -349,3 +349,50 @@ across both columns and tagged column by column, scores 0.7603 for the
 stream (2 036 440 of 2 678 455 pairs); and a seeded shuffle of a one-column
 page drops the stream from 1 to 0.4139, which is the instrument seeing
 disorder (`the_score_sees_a_shuffled_page`).
+
+**Milestone 3 (3 October 2026): columns and block order.** The inference
+cuts each line into fragments at internal whitespace of at least a column gap,
+cuts the body into elementary intervals at the fragments' edges, and finds
+every gap in one pass (three columns are two gaps, not a recursion): a run of
+intervals covered by text over at most 40 % of the body's height, at least
+`COLUMN_GAP_EMS` wide, with a column of text at least `COLUMN_MIN_WIDTH_EMS`
+wide on both sides. A line that runs across a gap without touching it — a
+producer drawing both columns' lines at once — is cut in two; a line whose
+glyph boxes hold the cut is a spanner, and a run of spanners ends one band
+of the page and heads the next (`InferredBlock::section`), so a heading over
+two columns reads before them and a paragraph set across the page between two
+column sets reads between them. Inside a column, the text device's blocks are
+kept as units, ordered by their tops, with the stream's order wherever two
+stand level (`ROW_TOLERANCE_EMS`). Columns run right to left when most lines
+carry `TextLine::rtl`. Rotated and vertical lines go last as `Unplaced`, and a
+page that is mostly either is declined. The reading is still the one
+interpretation into the tee, not the recorder the milestone named.
+
+**Three departures from the design, each with its fixture.** (1)
+`COLUMN_GAP_EMS` is **0.8**, not 1.5: `css-multicol-1`'s `column-gap: normal`
+is 1em and LaTeX's `\columnsep` is 10 pt in a 10 pt document, a justified
+column ends exactly at its edge, and at 1.5 em — or at exactly 1 em, where the
+gap is met to the last bit of a sum of advances — a justified two-column book
+reads as one column, interleaved (`a_two_column_book_reads_down_its_columns`;
+both injections fire). (2) `COLUMN_MIN_WIDTH_EMS` (8) is new: labels beside
+their values are a gap by width and height, and reading every label before
+any value is the one order nobody wants
+(`labels_beside_their_values_are_one_column`). (3) A whitespace run that
+reaches the outermost edge of the text is a margin, never a gap, so a ragged
+right edge is not a near miss (`a_ragged_edge_is_a_margin_and_not_a_gap`).
+
+Measured, first-party (`crates/tinker-pdf/tests/reading_order.rs`, 23
+tests): the headline two-column fixture, the spanning fixture, three columns
+and right-to-left columns each score 1 against the tree with zero crossings
+where the stream scores 0.7603, 0.5068, below 1 and 0.4995; every one-column
+fixture, every committed `testdata` page and every page of the nine committed
+books moves no character; the two-column EPUB book is found as two columns on
+every page set in two, with no crossings; and the same book **redrawn as a
+line-by-line producer would draw it** — every line where the layout put it,
+drawn down the page by baseline across both columns, tagged with its place in
+the book's own tree — scores 0.7573 for the stream and 1.0000 for the
+inference over 3 915 671 pairs
+(`the_two_column_book_redrawn_across_the_page_reads_in_the_authors_order`).
+The census now prints column crossings over the files the stream does not
+already read; **the corpus figures — crossings against the baseline, pair
+agreement per corpus, and veraPDF's moved count — are owed**, as above.

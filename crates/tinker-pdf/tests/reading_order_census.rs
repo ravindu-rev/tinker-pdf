@@ -26,7 +26,9 @@
 //! as integers (`agreeing` of `pairs`) so a floor can be compared by
 //! cross-multiplication the way `corpus/ratchet.json`'s bars are; the number
 //! of tagged files whose stream already agrees exactly (which carry no
-//! information about columns); and the characters the inference moved.
+//! information about columns); the **column crossings** walking the tree over
+//! the files that remain; and the characters the inference moved, which over
+//! veraPDF's fixtures the design expects to be zero.
 //!
 //! **No corpus figure has been measured yet.** The fetched corpora were not
 //! reachable where this was written, so the floors table below is empty and
@@ -142,12 +144,19 @@ struct Totals {
     /// Characters the inference put somewhere other than their stream
     /// position.
     moved: usize,
+    /// Column crossings walking the tree, over the files whose stream does
+    /// *not* already agree exactly — the design's column score, computed
+    /// where it carries information.
+    crossings: usize,
+    /// The files those crossings were counted over.
+    informative: usize,
 }
 
 /// Scores one tagged file into `totals`.
 fn score(doc: &Document, totals: &mut Totals) {
     let pages = doc.page_count().min(PAGES_PER_FILE);
     let mut file_stream = Agreement::default();
+    let mut file_crossings = 0usize;
     for index in 0..pages {
         let Some(scored) = Scored::read(doc, index) else {
             continue;
@@ -166,10 +175,14 @@ fn score(doc: &Document, totals: &mut Totals) {
         totals.stream = totals.stream.plus(stream);
         totals.inferred = totals.inferred.plus(scored.inferred_agreement());
         totals.moved += scored.inferred.moved();
+        file_crossings += scored.crossings();
         file_stream = file_stream.plus(stream);
     }
     if file_stream.at_least(1, 1) {
         totals.stream_exact += 1;
+    } else {
+        totals.informative += 1;
+        totals.crossings += file_crossings;
     }
 }
 
@@ -246,10 +259,12 @@ fn the_inference_is_scored_against_every_tagged_files_own_order() {
             t.moved,
         );
         println!(
-            "{:<14} stream {:.6}  inferred {:.6}",
+            "{:<14} stream {:.6}  inferred {:.6}  crossings {} over {} files the stream does not already read",
             "",
             t.stream.score(),
-            t.inferred.score()
+            t.inferred.score(),
+            t.crossings,
+            t.informative
         );
     }
 
