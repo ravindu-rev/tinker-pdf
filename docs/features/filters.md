@@ -1038,12 +1038,14 @@ wants the reason to survive it.
   does *not* reach is visible too; `src/jpx/tests/refusals.rs` reaches every
   entry of the JPX refusal list, so "the refusals are the feature" is checked,
   not claimed.
-- Fuzzing: nine of the 25 fuzz targets exercise this crate —
-  `ascii_filters`, `lzw`, `inflate`, `ccitt`, `jpeg`, `jbig2`, `jpx`, `png`,
-  `tiff`. The last is the first target that reaches five other decoders
-  through one parser, because a two-byte `Compression` field is what chooses
-  between them, and it carries six committed seeds written by an `#[ignore]`d
-  test in this crate so the seeds and the fixtures cannot drift.
+- Fuzzing: fourteen of the 46 fuzz targets drive this crate's decoders —
+  `ascii_filters`, `lzw`, `inflate`, `ccitt`, `jpeg`, `jbig2`, `jpx`, `jxr`,
+  `brotli`, `png`, `bmp`, `gif`, `webp`, `tiff` — and `rar` and `sevenz`
+  borrow its CRC-32. The last is the first target that reaches other decoders
+  through one parser — six of them — because a two-byte `Compression` field is
+  what chooses between them; six of its thirteen committed seeds are written
+  by an `#[ignore]`d test in this crate so those seeds and the fixtures cannot
+  drift.
 - Downstream: the `image`, `jbig2` and `jpx` render fingerprints among the
   15 in `crates/tinker-pdf/tests/determinism.rs` pin decoded pixels
   bit-for-bit across targets ([determinism](determinism.md)), and the whole

@@ -2550,7 +2550,7 @@ fn mutated_fixtures_never_panic() {
 
 // ---- the fuzz corpus ---------------------------------------------------
 
-/// Writes six of the seven seeds `fuzz/corpus/tiff/` carries, so the seeds and the
+/// Writes six of the thirteen seeds `fuzz/corpus/tiff/` carries, so the seeds and the
 /// fixtures here cannot drift apart.
 ///
 /// Run with `--ignored` when a fixture changes; the corpus is committed, and a
