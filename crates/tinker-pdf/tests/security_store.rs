@@ -299,6 +299,118 @@ fn a_malformed_store_is_read_leniently_and_says_what_it_skipped() {
     )));
 }
 
+/// `BASE` with the catalog's `/DSS` set to what `dss` builds, saved
+/// incrementally. Names are interned per document, so `dss` is handed the
+/// document it builds for.
+fn with_dss(dss: impl FnOnce(&tinker_pdf_cos::CosDocument) -> tinker_pdf_cos::Object) -> Vec<u8> {
+    let document = Document::open(BASE.to_vec()).expect("opens");
+    let mut editor = document.editor();
+    let cos = document.cos();
+    let (dss_key, dss) = (cos.intern(b"DSS"), dss(cos));
+    assert!(editor.update_catalog(|catalog| {
+        catalog.insert(dss_key, dss);
+    }));
+    editor.save(&incremental())
+}
+
+/// Ruling 10, for the members whose *type* is wrong: each skip is named,
+/// where an entry that is not an array, a `/VRI` that is not a dictionary and
+/// a `/TU` that is not a date all used to read as nothing at all. This is the
+/// reviewer's probe — `/Certs 5 /CRLs true /VRI 7` — kept.
+#[test]
+fn a_store_of_the_wrong_types_names_every_member_it_could_not_read() {
+    let probe = with_dss(|cos| {
+        let mut dss = tinker_pdf_cos::Dict::new();
+        dss.insert(cos.intern(b"Certs"), tinker_pdf_cos::Object::Int(5));
+        dss.insert(cos.intern(b"CRLs"), tinker_pdf_cos::Object::Bool(true));
+        dss.insert(cos.intern(b"VRI"), tinker_pdf_cos::Object::Int(7));
+        tinker_pdf_cos::Object::Dict(dss)
+    });
+    let store = Document::open(probe)
+        .expect("reopens")
+        .security_store()
+        .expect("a /DSS, direct in the catalog");
+    assert!(store.certificates.is_empty() && store.crls.is_empty() && store.entries.is_empty());
+    assert_eq!(
+        store.warnings,
+        [
+            SecurityStoreWarning::NotAnArray {
+                store: None,
+                array: "Certs".into()
+            },
+            SecurityStoreWarning::NotAnArray {
+                store: None,
+                array: "CRLs".into()
+            },
+            SecurityStoreWarning::VriNotADictionary { store: None },
+        ],
+        "and nothing for the /OCSPs that is absent"
+    );
+
+    // The same inside a `/VRI` entry, and a `/TU` that is not a date.
+    let key = "0000000000000000000000000000000000000000";
+    let inside = with_dss(|cos| {
+        let mut entry = tinker_pdf_cos::Dict::new();
+        entry.insert(cos.intern(b"Cert"), tinker_pdf_cos::Object::Int(5));
+        entry.insert(
+            cos.intern(b"TU"),
+            tinker_pdf_cos::Object::String(tinker_pdf_cos::PdfString::literal(
+                b"last Tuesday".to_vec(),
+            )),
+        );
+        let mut vri = tinker_pdf_cos::Dict::new();
+        vri.insert(
+            cos.intern(key.as_bytes()),
+            tinker_pdf_cos::Object::Dict(entry),
+        );
+        let mut dss = tinker_pdf_cos::Dict::new();
+        dss.insert(cos.intern(b"VRI"), tinker_pdf_cos::Object::Dict(vri));
+        tinker_pdf_cos::Object::Dict(dss)
+    });
+    let store = Document::open(inside)
+        .expect("reopens")
+        .security_store()
+        .expect("a /DSS");
+    assert_eq!(store.entries.len(), 1, "the entry is kept");
+    assert_eq!(store.entries[0].updated, None);
+    assert_eq!(
+        store.warnings,
+        [
+            SecurityStoreWarning::DateUnreadable {
+                store: None,
+                key: key.into()
+            },
+            SecurityStoreWarning::NotAnArray {
+                store: None,
+                array: "Cert".into()
+            },
+        ]
+    );
+}
+
+/// A `/DSS` that is not a dictionary is a store that could not be read, and
+/// says so. One that is null — or a reference to an object the file does not
+/// have, which 7.3.10 makes null — is no store, as an absent one is.
+#[test]
+fn a_store_that_is_not_a_dictionary_is_named_and_a_null_one_is_none() {
+    let store = Document::open(with_dss(|_| tinker_pdf_cos::Object::Int(5)))
+        .expect("reopens")
+        .security_store()
+        .expect("a /DSS is there");
+    assert!(store.certificates.is_empty() && store.entries.is_empty());
+    assert_eq!(
+        store.warnings,
+        [SecurityStoreWarning::NotADictionary { store: None }]
+    );
+
+    let nowhere = tinker_pdf_cos::ObjRef { num: 9_999, gen: 0 };
+    let document =
+        Document::open(with_dss(|_| tinker_pdf_cos::Object::Ref(nowhere))).expect("reopens");
+    assert!(document.security_store().is_none());
+    let document = Document::open(with_dss(|_| tinker_pdf_cos::Object::Null)).expect("reopens");
+    assert!(document.security_store().is_none());
+}
+
 #[test]
 fn the_update_adds_nothing_the_strict_validator_refuses() {
     let rendered = |pdf: &[u8]| {

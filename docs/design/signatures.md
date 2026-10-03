@@ -415,6 +415,11 @@ byte, filed under the right key, with the signature still verifying over its rev
 Injections: the `/VRI` key taken over the trimmed CMS rather than the stored `/Contents`
 fires 2; the duplicate check removed fires 1; a store already there replaced rather than
 extended fires 1; a non-stream member kept fires 1; `/ESIC` never declared fires 1.
+Review on 3 October 2026 found the reader silent about members of the wrong *type*: an
+entry that is not an array, a `/VRI` that is not a dictionary and an unreadable `/TU` read
+as nothing, and a `/DSS` that is not a dictionary as no store. Each is a typed
+`SecurityStoreWarning` now (ruling 10), and a null `/DSS` — absent, or a reference to no
+object, 7.3.10 — is still `None`. Each of the four warnings removed fires 1.
 
 ## Scope
 

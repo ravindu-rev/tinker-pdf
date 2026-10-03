@@ -1748,7 +1748,11 @@ impl Document {
     /// The document security store (ISO 32000-2 12.8.4.3): the long-term
     /// validation material the catalog's `/DSS` carries, as references to its
     /// streams, and the `/VRI` entries filing some of it under particular
-    /// signatures ([`SecurityStore::entry_for`]). `None` when there is none.
+    /// signatures ([`SecurityStore::entry_for`]). `None` when there is none:
+    /// no `/DSS`, a null one, or a reference to no object (7.3.10). A `/DSS`
+    /// that is something other than a dictionary is an empty store whose
+    /// warnings say so, and every member skipped for its type is named the
+    /// same way ([`SecurityStoreWarning`]).
     ///
     /// Surfaced and never evaluated: nothing here reads a CRL or an OCSP
     /// response, and the verdict does not consult the store.

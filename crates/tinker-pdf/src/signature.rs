@@ -471,9 +471,42 @@ pub enum SecurityStoreWarning {
         /// Its key.
         key: String,
     },
+    /// The catalog's `/DSS` is there and is not a dictionary, so the store is
+    /// read as empty. A `/DSS` that is absent or null — a reference to no
+    /// object is null (7.3.10) — is no store at all, and not this.
+    NotADictionary {
+        /// The store's object, when `/DSS` was a reference.
+        store: Option<ObjRef>,
+    },
+    /// An entry that must be an array of streams is something else, so none
+    /// of it was read.
+    NotAnArray {
+        /// The store's object.
+        store: Option<ObjRef>,
+        /// Which entry: `Certs`, `CRLs`, `OCSPs`, or a `/VRI` entry's `Cert`,
+        /// `CRL` or `OCSP`.
+        array: String,
+    },
+    /// `/VRI` is there and is not a dictionary, so no entry was read.
+    VriNotADictionary {
+        /// The store's object.
+        store: Option<ObjRef>,
+    },
+    /// A `/VRI` entry's `/TU` is not a date this reader can read (7.9.4), so
+    /// the entry is kept with no `updated` time.
+    DateUnreadable {
+        /// The store's object.
+        store: Option<ObjRef>,
+        /// The entry's key.
+        key: String,
+    },
 }
 
 /// Reads the catalog's `/DSS`, if there is one.
+///
+/// Absent and null are the same (7.3.7), and so is a reference to an object
+/// that does not exist (7.3.10): no store. Anything else that is not a
+/// dictionary is a store that could not be read, and says so.
 pub(crate) fn security_store(document: &Document) -> Option<SecurityStore> {
     let cos = document.cos();
     let catalog = cos.catalog()?;
@@ -482,10 +515,18 @@ pub(crate) fn security_store(document: &Document) -> Option<SecurityStore> {
         Object::Ref(r) => (Some(*r), cos.get(*r).ok()?),
         other => (None, std::sync::Arc::new(other.clone())),
     };
-    let dss = value.as_dict()?;
+    if matches!(*value, Object::Null) {
+        return None;
+    }
     let mut store = SecurityStore {
         object,
         ..SecurityStore::default()
+    };
+    let Some(dss) = value.as_dict() else {
+        store
+            .warnings
+            .push(SecurityStoreWarning::NotADictionary { store: object });
+        return Some(store);
     };
     let mut warnings = Vec::new();
     store.certificates = streams(cos, dss, b"Certs", object, &mut warnings);
@@ -493,6 +534,9 @@ pub(crate) fn security_store(document: &Document) -> Option<SecurityStore> {
     store.ocsp_responses = streams(cos, dss, b"OCSPs", object, &mut warnings);
 
     let vri = cos.resolve_key(dss, cos.intern(b"VRI"));
+    if !matches!(*vri, Object::Null | Object::Dict(_)) {
+        warnings.push(SecurityStoreWarning::VriNotADictionary { store: object });
+    }
     if let Some(vri) = vri.as_dict() {
         for (name, value) in vri.iter() {
             let key = cos
@@ -510,13 +554,21 @@ pub(crate) fn security_store(document: &Document) -> Option<SecurityStore> {
                 warnings.push(SecurityStoreWarning::EntryNotADictionary { store: object, key });
                 continue;
             };
+            let tu = cos.intern(b"TU");
+            let updated = text_of(cos, entry, tu)
+                .as_deref()
+                .and_then(tinker_pdf_cos::parse_date);
+            if updated.is_none() && !matches!(*cos.resolve_key(entry, tu), Object::Null) {
+                warnings.push(SecurityStoreWarning::DateUnreadable {
+                    store: object,
+                    key: key.clone(),
+                });
+            }
             store.entries.push(ValidationEntry {
                 certificates: streams(cos, entry, b"Cert", object, &mut warnings),
                 crls: streams(cos, entry, b"CRL", object, &mut warnings),
                 ocsp_responses: streams(cos, entry, b"OCSP", object, &mut warnings),
-                updated: text_of(cos, entry, cos.intern(b"TU"))
-                    .as_deref()
-                    .and_then(tinker_pdf_cos::parse_date),
+                updated,
                 key,
             });
         }
@@ -536,6 +588,14 @@ fn streams(
 ) -> Vec<ObjRef> {
     let array = cos.resolve_key(dict, cos.intern(key));
     let Some(items) = array.as_array() else {
+        // Absent is an empty list; anything else is a list that could not be
+        // read, and is named.
+        if !matches!(*array, Object::Null) {
+            warnings.push(SecurityStoreWarning::NotAnArray {
+                store,
+                array: String::from_utf8_lossy(key).into_owned(),
+            });
+        }
         return Vec::new();
     };
     let mut out = Vec::with_capacity(items.len());

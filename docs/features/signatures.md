@@ -193,7 +193,9 @@ and a stream whose bytes are already listed is not written twice. A document
 below 2.0 gains the `/ESIC` developer extension a 1.7 file declares the store
 with. `Document::security_store` reads one back — as references to its
 streams, by the attachments precedent, so listing a store costs nothing like
-decoding it — and names what it skipped. Nothing parses a CRL or an OCSP
+decoding it — and names what it skipped: a member that is not a stream, an
+entry that is not an array, a `/VRI` or a `/DSS` that is not a dictionary, a
+`/TU` that is not a date, each a `SecurityStoreWarning`. Nothing parses a CRL or an OCSP
 response, and the verdict does not consult the store: whether revocation data
 is fresh is a question with a clock in it.
 
