@@ -124,8 +124,8 @@ pub use subset::{SubsetReport, Subsetted, Type3Subsetted, Untouched, UntouchedRe
 /// [`Page::tables`], [`Page::stated_tables`], [`Page::inferred_tables`] and the
 /// rules [`Page::table_rules`] reads (`docs/design/table-reconstruction.md`).
 pub use tables::{
-    InferredCell, InferredTable, InferredTables, PageTables, StatedCell, StatedTable,
-    TableEvidence, TableOptions, TableRule, TableRules, TableSource, TableWarning,
+    HeaderEvidence, InferredCell, InferredTable, InferredTables, PageTables, StatedCell,
+    StatedTable, TableEvidence, TableOptions, TableRule, TableRules, TableSource, TableWarning,
 };
 /// How [`Page::text_with`] orders a line: logical by default, or the content
 /// stream's own order (ruling 14).

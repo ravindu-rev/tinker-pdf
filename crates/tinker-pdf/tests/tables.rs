@@ -17,8 +17,8 @@ mod epub_support;
 use epub_support::book::styled_book;
 use tinker_pdf::tables::MAX_TABLE_RULES;
 use tinker_pdf::{
-    Document, InferredTable, PageTables, StatedTable, TableAttributes, TableEvidence, TableOptions,
-    TableRule, TableRules, TableScope, TableSource, TableWarning, Tag,
+    Document, HeaderEvidence, InferredTable, PageTables, StatedTable, TableAttributes,
+    TableEvidence, TableOptions, TableRule, TableRules, TableScope, TableSource, TableWarning, Tag,
 };
 use tinker_pdf_cos::build::DocumentBuilder;
 
@@ -907,4 +907,289 @@ fn rules_that_stop_short_still_meet() {
         .inferred_tables(&TableOptions::default());
     let shapes: Vec<(usize, usize)> = found.tables.iter().map(|t| (t.rows, t.columns)).collect();
     assert_eq!(shapes, [(3, 4)]);
+}
+
+// ---- spans, header evidence, direction --------------------------------------------
+
+/// **A book's spanned table is recovered with its spans**: [`FRUIT`] —
+/// a column span and a row span — bordered cell by cell, in both border
+/// models. Where the markup merges cells the layout draws no border between
+/// them, so the lattice has no rule there, and the shape the missing rules
+/// leave is the span. Every cell at its stated place with its stated span,
+/// and every character in its stated cell.
+#[test]
+fn a_books_spanned_table_is_recovered_with_its_spans() {
+    for model in ["collapse", "separate"] {
+        let doc = open(styled_book(
+            "en",
+            &format!(
+                "table {{ border-collapse: {model} }} td, th {{ border: 1px solid black; padding: 4px }}"
+            ),
+            FRUIT,
+        ));
+        let page = doc.page(0).expect("a page");
+        let stated = page.stated_tables();
+        assert_eq!(stated.len(), 1);
+        let inferred = page.inferred_tables(&hidden());
+        let (found, grid, agreeing, total) = score(&stated[0], &inferred.tables);
+        println!("{model}: found {found} grid {grid} cells {agreeing}/{total}");
+        assert!(found && grid, "{model}");
+        assert_eq!(agreeing, total, "{model}");
+        let table = &inferred.tables[0];
+        let shape = |cells: Vec<(usize, usize, usize, usize)>| {
+            let mut cells = cells;
+            cells.sort_unstable();
+            cells
+        };
+        assert_eq!(
+            shape(
+                table
+                    .cells
+                    .iter()
+                    .map(|c| (c.row, c.column, c.row_span, c.col_span))
+                    .collect()
+            ),
+            shape(
+                stated[0]
+                    .cells
+                    .iter()
+                    .map(|c| (c.row, c.column, c.row_span, c.col_span))
+                    .collect()
+            ),
+            "{model}"
+        );
+        assert!(table.warnings.is_empty(), "{model}: {:?}", table.warnings);
+    }
+}
+
+/// A three-by-three ruled grid whose interior rules are those `keep` lets
+/// through — `(horizontal, index along the other axis, row or column)` —
+/// with a letter in every cell.
+fn partly_ruled(keep: impl Fn(bool, usize, usize) -> bool) -> Document {
+    let mut content = String::from("0.5 w 72 600 m 372 600 l S 72 540 m 372 540 l S\n");
+    content.push_str("72 540 m 72 600 l S 372 540 m 372 600 l S\n");
+    for row in 0..3 {
+        for column in 0..3 {
+            let (x0, y1) = (72.0 + column as f64 * 100.0, 600.0 - row as f64 * 20.0);
+            // The rule under this cell and the one to its right.
+            if row < 2 && keep(true, row, column) {
+                content.push_str(&format!(
+                    "{x0} {} m {} {} l S\n",
+                    y1 - 20.0,
+                    x0 + 100.0,
+                    y1 - 20.0
+                ));
+            }
+            if column < 2 && keep(false, row, column) {
+                content.push_str(&format!(
+                    "{} {} m {} {y1} l S\n",
+                    x0 + 100.0,
+                    y1 - 20.0,
+                    x0 + 100.0
+                ));
+            }
+            let letter = (b'a' + (row * 3 + column) as u8) as char;
+            content.push_str(&format!(
+                "BT /F1 10 Tf {} {} Td ({letter}) Tj ET\n",
+                x0 + 4.0,
+                y1 - 14.0
+            ));
+        }
+    }
+    drawn(&content)
+}
+
+/// **A missing rule is a span; a shape that is not a rectangle is named.**
+/// The rule between the first two cells of the top row left out is a column
+/// span of two; leave out the rule under the first cell as well and the
+/// three cells make an L, which no span describes, so they stay grid cells
+/// and `SpanNotRectangular` says where.
+#[test]
+fn a_missing_rule_is_a_span_and_an_l_is_named() {
+    let doc = partly_ruled(|horizontal, row, column| !(!horizontal && row == 0 && column == 0));
+    let table = &doc
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default())
+        .tables[0];
+    let first = &table.cells[0];
+    assert_eq!(
+        (first.row, first.column, first.row_span, first.col_span),
+        (0, 0, 1, 2)
+    );
+    assert_eq!(first.text, "ab");
+    assert_eq!(table.cells.len(), 8);
+    assert!(table.warnings.is_empty(), "{:?}", table.warnings);
+
+    let doc = partly_ruled(|horizontal, row, column| {
+        // Neither rule of the first cell — not the one to its right, not
+        // the one under it.
+        let _ = horizontal;
+        row != 0 || column != 0
+    });
+    let table = &doc
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default())
+        .tables[0];
+    assert_eq!(
+        table.warnings,
+        [TableWarning::SpanNotRectangular { row: 0, column: 0 }]
+    );
+    assert_eq!(table.cells.len(), 9, "the L stays three grid cells");
+}
+
+/// A ruled three-by-three grid of letters, with `extra` drawn under it.
+fn grid_with(extra: &str, rule_under_first: &str) -> Document {
+    let mut content = String::from(extra);
+    content.push_str("0 g 0.5 w 72 600 m 372 600 l S 72 540 m 372 540 l S 72 560 m 372 560 l S\n");
+    content.push_str(rule_under_first);
+    for x in [72.0, 172.0, 272.0, 372.0] {
+        content.push_str(&format!("{x} 540 m {x} 600 l S\n"));
+    }
+    for row in 0..3 {
+        for column in 0..3 {
+            let letter = (b'a' + (row * 3 + column) as u8) as char;
+            content.push_str(&format!(
+                "BT /F1 10 Tf {} {} Td ({letter}) Tj ET\n",
+                76.0 + column as f64 * 100.0,
+                586.0 - row as f64 * 20.0
+            ));
+        }
+    }
+    drawn(&content)
+}
+
+fn header_of(doc: &Document) -> HeaderEvidence {
+    doc.page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default())
+        .tables[0]
+        .header
+}
+
+/// **Header evidence is what the ink shows.** A grey fill under the first
+/// row and none under the second: `FillBeneath`. The unfilled twin:
+/// `FirstRow`, which is no evidence and says so. A rule under the first row
+/// three times the others' weight, or doubled where they are single:
+/// `RuleBeneath`. A book whose header cells have a background: `FillBeneath`.
+#[test]
+fn header_evidence_is_what_the_ink_shows() {
+    let thin = "72 580 m 372 580 l S\n";
+    assert_eq!(
+        header_of(&grid_with("0.85 g 72 580 300 20 re f\n", thin)),
+        HeaderEvidence::FillBeneath
+    );
+    assert_eq!(header_of(&grid_with("", thin)), HeaderEvidence::FirstRow);
+    // Shading under both rows is a striped table, not a header.
+    assert_eq!(
+        header_of(&grid_with("0.85 g 72 560 300 40 re f\n", thin)),
+        HeaderEvidence::FirstRow
+    );
+    assert_eq!(
+        header_of(&grid_with("", "1.5 w 72 580 m 372 580 l S 0.5 w\n")),
+        HeaderEvidence::RuleBeneath
+    );
+    assert_eq!(
+        header_of(&grid_with(
+            "",
+            "72 580 m 372 580 l S 72 581.5 m 372 581.5 l S\n"
+        )),
+        HeaderEvidence::RuleBeneath
+    );
+
+    let book = open(styled_book(
+        "en",
+        "table { border-collapse: collapse } td, th { border: 1px solid black; padding: 4px } th { background: #cccccc }",
+        "<table><tr><th>Name</th><th>Price</th></tr><tr><td>Apple</td><td>1.20</td></tr><tr><td>Banana</td><td>0.80</td></tr></table>",
+    ));
+    let page = book.page(0).expect("a page");
+    let found = page.inferred_tables(&hidden());
+    assert_eq!(found.tables.len(), 1);
+    assert_eq!(found.tables[0].header, HeaderEvidence::FillBeneath);
+}
+
+/// A one-row table sets no row apart.
+#[test]
+fn a_one_row_table_has_no_header_evidence() {
+    let doc = drawn(concat!(
+        "0.5 w 72 600 m 372 600 l S 72 580 m 372 580 l S\n",
+        "72 580 m 72 600 l S 172 580 m 172 600 l S 272 580 m 272 600 l S 372 580 m 372 600 l S\n",
+        "BT /F1 10 Tf 76 586 Td (a) Tj ET BT /F1 10 Tf 176 586 Td (b) Tj ET BT /F1 10 Tf 276 586 Td (c) Tj ET\n",
+    ));
+    assert_eq!(header_of(&doc), HeaderEvidence::None);
+}
+
+/// **A right-to-left table is read from the right.** A ruled two-by-three
+/// grid of Hebrew words, each set in visual order the way a producer draws
+/// one: most of the table's characters are on right-to-left lines, so column
+/// 0 is the rightmost and each row reads right to left.
+#[test]
+fn a_right_to_left_table_reads_from_the_right() {
+    use epub_support::typeface::Face;
+    use tinker_pdf_cos::build::{Glyph, PlacedGlyph};
+    const LETTERS: &str = "\u{5D0}\u{5D1}\u{5D2}\u{5D3}\u{5D4}\u{5D5}";
+    let face = Face::new("Fixture Hebrew", LETTERS);
+    let program = face.build();
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_cid_font(b"F0", b"FixtureHebrew", &program));
+    let letters: Vec<char> = LETTERS.chars().collect();
+    let mut content = Vec::new();
+    content.extend_from_slice(
+        b"0.5 w 72 600 m 372 600 l S 72 580 m 372 580 l S 72 560 m 372 560 l S\n",
+    );
+    content.extend_from_slice(
+        b"72 560 m 72 600 l S 172 560 m 172 600 l S 272 560 m 272 600 l S 372 560 m 372 600 l S\n",
+    );
+    // Cell (row, grid column) holds two copies of one letter, so which cell
+    // a reading puts first is visible in its text.
+    for row in 0..2 {
+        for column in 0..3 {
+            let letter = letters[row * 3 + column].to_string();
+            let glyphs: Vec<PlacedGlyph<'_>> = (0..2)
+                .map(|i| PlacedGlyph {
+                    glyph: Glyph {
+                        id: face.glyph_of(letters[row * 3 + column]).expect("covered"),
+                        text: &letter,
+                    },
+                    x: i as f64 * 5.0,
+                    rise: 0.0,
+                })
+                .collect();
+            let (x, y) = (90.0 + column as f64 * 100.0, 586.0 - row as f64 * 20.0);
+            assert!(builder.glyph_run(
+                &mut content,
+                b"F0",
+                10.0,
+                [1.0, 0.0, 0.0, 1.0, x, y],
+                &glyphs
+            ));
+        }
+    }
+    builder.add_page(612.0, 792.0, |page| page.raw(&content));
+    let doc = open(builder.finish());
+    let found = doc
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    assert_eq!(found.tables.len(), 1);
+    let table = &found.tables[0];
+    let first = &table.cells[0];
+    assert_eq!((first.row, first.column), (0, 0));
+    // The rightmost cell of the top row — grid column 2 — is read first.
+    assert_eq!(first.text, letters[2].to_string().repeat(2));
+    let row: String = table
+        .cells
+        .iter()
+        .filter(|c| c.row == 0)
+        .map(|c| c.text.chars().next().unwrap_or(' '))
+        .collect();
+    assert_eq!(
+        row,
+        [letters[2], letters[1], letters[0]]
+            .iter()
+            .collect::<String>()
+    );
+    let (x0, _, _, _) = first.quad.bounds();
+    assert!(x0 > 270.0, "column 0 is the rightmost");
 }

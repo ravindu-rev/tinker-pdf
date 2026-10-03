@@ -74,7 +74,7 @@ use std::collections::BTreeMap;
 use tinker_pdf_content::{Quad, TextChar};
 use tinker_pdf_cos::{ObjRef, TableScope};
 
-use crate::observe::Observed;
+use crate::observe::{Fill, Observed};
 use crate::structure::{self, StructElement, StructKid, StructuredNode};
 use crate::Page;
 
@@ -179,6 +179,24 @@ pub struct TableOptions {
     pub hide_structure: bool,
 }
 
+/// What the page shows about a table's first row — evidence, never a header.
+///
+/// A `TH` is a producer's statement; this is what the ink says, and a caller
+/// decides what it means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum HeaderEvidence {
+    /// The table has one row, so no row is set apart.
+    None,
+    /// Every cell of the first row is shaded and no cell of the second is.
+    FillBeneath,
+    /// The rule under the first row is heavier than the table's other
+    /// interior rules, by half again, or doubled where they are single.
+    RuleBeneath,
+    /// Nothing sets the first row apart: no evidence, and said so.
+    FirstRow,
+}
+
 /// What a table was inferred from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -223,6 +241,8 @@ pub struct InferredTable {
     pub bounds: Quad,
     /// What the table was built from.
     pub evidence: TableEvidence,
+    /// What the page shows about its first row.
+    pub header: HeaderEvidence,
     /// For each character in the table's order, its position in the page's
     /// characters in stream order — blocks, then lines, then characters.
     pub permutation: Vec<usize>,
@@ -349,6 +369,16 @@ pub enum TableWarning {
     /// A lattice inside one of this table's cells — a nested table — was not
     /// read.
     NestedLattice,
+    /// The ruling of a lattice merges grid cells into a shape that is not a
+    /// rectangle where a rule is missing, so no span can be read from it; the
+    /// grid cells are reported as they are. For a stated table: see
+    /// [`TableWarning::SpanInconsistent`].
+    SpanNotRectangular {
+        /// The first grid row of the shape.
+        row: usize,
+        /// Its first grid column.
+        column: usize,
+    },
     /// The page's structure tree states a table, so the stated one is the
     /// answer and nothing was inferred — or, with
     /// [`TableOptions::hide_structure`], the inference is a measurement.
@@ -633,15 +663,17 @@ pub(crate) fn infer_tables(observed: &Observed, frame: (f64, f64, f64, f64)) -> 
         .collect();
     let em = median_size(&flat).unwrap_or(10.0);
     // Which of the text device's lines each character is on, by its place
-    // among the page's lines from the top.
-    let line_of: Vec<(usize, f64)> = page
+    // among the page's lines, with that line's top and whether it reads
+    // right to left.
+    let line_of: Vec<LineOf> = page
         .blocks
         .iter()
         .flat_map(|b| b.lines.iter())
         .enumerate()
         .flat_map(|(at, line)| {
             let top = line.quad.bounds().3;
-            line.chars.iter().map(move |_| (at, top))
+            let rtl = line.rtl;
+            line.chars.iter().map(move |_| LineOf { at, top, rtl })
         })
         .collect();
     let lines = lattice_lines(&read.rules, em);
@@ -677,7 +709,7 @@ pub(crate) fn infer_tables(observed: &Observed, frame: (f64, f64, f64, f64)) -> 
         if nested.get(at).copied().unwrap_or(false) {
             continue;
         }
-        let Some(mut table) = lattice.table(&flat, &line_of) else {
+        let Some(mut table) = lattice.table(&flat, &line_of, &observed.fills) else {
             continue;
         };
         if refused_inside.get(at).copied().unwrap_or(0) > 0 {
@@ -725,6 +757,11 @@ struct Line {
     at: f64,
     from: f64,
     to: f64,
+    /// The heaviest rule merged into it.
+    weight: f64,
+    /// How many distinct strokes, a point or more apart, were merged into it:
+    /// two for a doubled rule.
+    strands: usize,
 }
 
 /// The page's rules as lattice lines: rules along one axis within
@@ -759,27 +796,39 @@ fn lattice_lines(rules: &[TableRule], em: f64) -> Vec<Line> {
                 .map(|r| r.at)
                 .fold(f64::NEG_INFINITY, f64::max);
             let at = (low + high) / 2.0;
-            let mut pieces: Vec<(f64, f64)> = cluster.iter().map(|r| (r.from, r.to)).collect();
+            // Distinct strokes: positions a point or more apart.
+            let mut strands = 0usize;
+            let mut last = f64::NEG_INFINITY;
+            for r in &cluster {
+                if r.at - last >= 1.0 {
+                    strands += 1;
+                    last = r.at;
+                }
+            }
+            let mut pieces: Vec<(f64, f64, f64)> =
+                cluster.iter().map(|r| (r.from, r.to, r.width)).collect();
             pieces.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let mut current: Option<(f64, f64)> = None;
-            let flush = |piece: (f64, f64), out: &mut Vec<Line>| {
+            let mut current: Option<(f64, f64, f64)> = None;
+            let flush = |piece: (f64, f64, f64), out: &mut Vec<Line>| {
                 if piece.1 - piece.0 >= RULE_MIN_EMS * em {
                     out.push(Line {
                         horizontal,
                         at,
                         from: piece.0,
                         to: piece.1,
+                        weight: piece.2,
+                        strands,
                     });
                 }
             };
-            for (from, to) in pieces {
+            for (from, to, width) in pieces {
                 current = match current {
-                    Some((a, b)) if from <= b + merge => Some((a, b.max(to))),
+                    Some((a, b, w)) if from <= b + merge => Some((a, b.max(to), w.max(width))),
                     Some(done) => {
                         flush(done, &mut out);
-                        Some((from, to))
+                        Some((from, to, width))
                     }
-                    None => Some((from, to)),
+                    None => Some((from, to, width)),
                 };
             }
             if let Some(done) = current {
@@ -798,6 +847,12 @@ struct Lattice {
     ys: Vec<f64>,
     /// `x` of every vertical line, ascending.
     xs: Vec<f64>,
+    /// The segments, horizontal and vertical, each sorted by where it
+    /// stands, then where it starts.
+    horizontals: Vec<Line>,
+    verticals: Vec<Line>,
+    /// How near a segment's end may come to a boundary and still rule it.
+    reach: f64,
 }
 
 /// The lines that meet, grouped: a horizontal and a vertical line meet when
@@ -874,7 +929,18 @@ fn components(lines: &[Line], em: f64) -> Vec<Lattice> {
         if ys.len() < 2 || xs.len() < 2 || (ys.len() - 1) * (xs.len() - 1) < 2 {
             continue;
         }
-        out.push(Lattice { ys, xs });
+        let by_place = |a: &Line, b: &Line| a.at.total_cmp(&b.at).then(a.from.total_cmp(&b.from));
+        let mut horizontals: Vec<Line> = group.iter().filter(|l| l.horizontal).copied().collect();
+        let mut verticals: Vec<Line> = group.iter().filter(|l| !l.horizontal).copied().collect();
+        horizontals.sort_by(by_place);
+        verticals.sort_by(by_place);
+        out.push(Lattice {
+            ys,
+            xs,
+            horizontals,
+            verticals,
+            reach,
+        });
     }
     out
 }
@@ -915,16 +981,54 @@ impl Lattice {
         Some((row, column))
     }
 
+    /// Whether a segment of `lines` stands at `at` and covers at least half
+    /// of `from..to`, reaching to within the lattice's reach.
+    fn ruled(&self, lines: &[Line], at: f64, from: f64, to: f64) -> bool {
+        let first = lines.partition_point(|l| l.at < at);
+        let need = (to - from) / 2.0;
+        lines
+            .get(first..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|l| l.at == at)
+            .any(|l| (l.to + self.reach).min(to) - (l.from - self.reach).max(from) >= need)
+    }
+
+    /// The heaviest segment and the most strands at `at` among `lines`.
+    fn weight_at(lines: &[Line], at: f64) -> (f64, usize) {
+        let first = lines.partition_point(|l| l.at < at);
+        lines
+            .get(first..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|l| l.at == at)
+            .fold((0.0f64, 0usize), |(w, s), l| {
+                (w.max(l.weight), s.max(l.strands))
+            })
+    }
+
     /// The table this lattice rules, its text assigned and ordered; `None`
-    /// when fewer than two of its cells hold any text, or fewer than one in
-    /// [`LATTICE_TEXT_SHARE`] — a grid of empty boxes, a form or a page of
+    /// when fewer than two of its grid cells hold any text, or fewer than one
+    /// in [`LATTICE_TEXT_SHARE`] — a grid of empty boxes, a form or a page of
     /// hatching, and not a table. Checked before any cell is made, so the
     /// cells made are at most that multiple of the page's characters.
-    fn table(&self, flat: &[&TextChar], line_of: &[(usize, f64)]) -> Option<InferredTable> {
+    ///
+    /// A grid cell whose boundary with its neighbour is not ruled is one cell
+    /// with it: the merged shape is a span when it is a rectangle, and named
+    /// ([`TableWarning::SpanNotRectangular`]) and left as its grid cells when
+    /// it is not. Columns are counted, and cells read, right to left when most
+    /// of the table's characters are on right-to-left lines.
+    fn table(
+        &self,
+        flat: &[&TextChar],
+        line_of: &[LineOf],
+        fills: &[Fill],
+    ) -> Option<InferredTable> {
         let rows = self.ys.len().checked_sub(1)?;
         let columns = self.xs.len().checked_sub(1)?;
-        let mut cells: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+        let mut held: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
         let mut crossing = 0usize;
+        let mut rtl = 0usize;
         let interior = self.xs.get(1..columns).unwrap_or_default();
         for (at, c) in flat.iter().enumerate() {
             if !c.quad.is_finite() {
@@ -942,46 +1046,137 @@ impl Lattice {
             if interior.get(next).is_some_and(|x| *x < x1 - quarter) {
                 crossing += 1;
             }
-            cells.entry(slot).or_default().push(at);
+            if line_of.get(at).is_some_and(|l| l.rtl) {
+                rtl += 1;
+            }
+            held.entry(slot).or_default().push(at);
         }
         let slots = rows.checked_mul(columns)?;
-        if cells.len() < 2 || cells.len().saturating_mul(LATTICE_TEXT_SHARE) < slots {
+        if held.len() < 2 || held.len().saturating_mul(LATTICE_TEXT_SHARE) < slots {
             return None;
         }
+        let total: usize = held.values().map(Vec::len).sum();
+        let right_to_left = rtl * 2 > total;
         let mut warnings = Vec::new();
         if crossing > 0 {
             warnings.push(TableWarning::TextCrossesRule { chars: crossing });
         }
-        let mut permutation = Vec::new();
-        let mut out = Vec::with_capacity(rows * columns);
+
+        // Grid cells joined across every boundary no rule draws.
+        let mut parent: Vec<usize> = (0..slots).collect();
+        fn root(parent: &mut [usize], mut at: usize) -> usize {
+            while let Some(&up) = parent.get(at) {
+                if up == at {
+                    break;
+                }
+                let grand = parent.get(up).copied().unwrap_or(up);
+                if let Some(slot) = parent.get_mut(at) {
+                    *slot = grand;
+                }
+                at = grand;
+            }
+            at
+        }
+        let join = |parent: &mut Vec<usize>, a: usize, b: usize| {
+            let (ra, rb) = (root(parent, a), root(parent, b));
+            if ra != rb {
+                // The smaller index stays the root, so a shape's root is its
+                // first grid cell in reading order of the grid.
+                let (keep, child) = (ra.min(rb), ra.max(rb));
+                if let Some(slot) = parent.get_mut(child) {
+                    *slot = keep;
+                }
+            }
+        };
+        let at = |v: &[f64], i: usize| v.get(i).copied().unwrap_or(0.0);
         for row in 0..rows {
             for column in 0..columns {
-                let mut chars = cells.remove(&(row, column)).unwrap_or_default();
-                order_cell(&mut chars, line_of);
-                permutation.extend(chars.iter().copied());
-                let held: Vec<TextChar> = chars
-                    .iter()
-                    .filter_map(|at| flat.get(*at).map(|c| (*c).clone()))
-                    .collect();
-                let (x0, x1) = (
-                    self.xs.get(column).copied().unwrap_or(0.0),
-                    self.xs.get(column + 1).copied().unwrap_or(0.0),
-                );
-                let (y1, y0) = (
-                    self.ys.get(row).copied().unwrap_or(0.0),
-                    self.ys.get(row + 1).copied().unwrap_or(0.0),
-                );
-                out.push(InferredCell {
-                    row,
-                    column,
-                    row_span: 1,
-                    col_span: 1,
-                    text: held.iter().map(|c| c.text.as_str()).collect(),
-                    chars: held,
-                    quad: rect(x0, y0, x1, y1),
-                });
+                let here = row * columns + column;
+                let (top, bottom) = (at(&self.ys, row), at(&self.ys, row + 1));
+                let (left, right) = (at(&self.xs, column), at(&self.xs, column + 1));
+                if column + 1 < columns && !self.ruled(&self.verticals, right, bottom, top) {
+                    join(&mut parent, here, here + 1);
+                }
+                if row + 1 < rows && !self.ruled(&self.horizontals, bottom, left, right) {
+                    join(&mut parent, here, here + columns);
+                }
             }
         }
+        // Each shape: its grid cells, which make one cell when they make a
+        // rectangle and stay grid cells when they do not.
+        let mut shapes: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for slot in 0..slots {
+            let r = root(&mut parent, slot);
+            shapes.entry(r).or_default().push(slot);
+        }
+        // (row, column, row span, column span) of every cell.
+        let mut placed: Vec<(usize, usize, usize, usize)> = Vec::new();
+        for members in shapes.into_values() {
+            let rows_of = members.iter().map(|s| s / columns);
+            let columns_of = members.iter().map(|s| s % columns);
+            let (r0, r1) = (
+                rows_of.clone().min().unwrap_or(0),
+                rows_of.max().unwrap_or(0),
+            );
+            let (c0, c1) = (
+                columns_of.clone().min().unwrap_or(0),
+                columns_of.max().unwrap_or(0),
+            );
+            let (height, width) = (r1 - r0 + 1, c1 - c0 + 1);
+            if height * width == members.len() {
+                placed.push((r0, c0, height, width));
+            } else {
+                warnings.push(TableWarning::SpanNotRectangular {
+                    row: r0,
+                    column: c0,
+                });
+                placed.extend(members.iter().map(|s| (s / columns, s % columns, 1, 1)));
+            }
+        }
+        placed.sort_unstable();
+        // Read in the table's direction.
+        let mirrored = |column: usize, span: usize| columns - column - span;
+        if right_to_left {
+            for cell in &mut placed {
+                cell.1 = mirrored(cell.1, cell.3);
+            }
+            placed.sort_unstable();
+        }
+
+        let mut permutation = Vec::new();
+        let mut out = Vec::with_capacity(placed.len());
+        for (row, column, row_span, col_span) in placed {
+            // The grid columns the cell covers, back in left-to-right terms.
+            let first = if right_to_left {
+                mirrored(column, col_span)
+            } else {
+                column
+            };
+            let mut chars: Vec<usize> = Vec::new();
+            for r in row..row + row_span {
+                for c in first..first + col_span {
+                    chars.extend(held.remove(&(r, c)).unwrap_or_default());
+                }
+            }
+            order_cell(&mut chars, line_of);
+            permutation.extend(chars.iter().copied());
+            let text_chars: Vec<TextChar> = chars
+                .iter()
+                .filter_map(|i| flat.get(*i).map(|c| (*c).clone()))
+                .collect();
+            let (x0, x1) = (at(&self.xs, first), at(&self.xs, first + col_span));
+            let (y1, y0) = (at(&self.ys, row), at(&self.ys, row + row_span));
+            out.push(InferredCell {
+                row,
+                column,
+                row_span,
+                col_span,
+                text: text_chars.iter().map(|c| c.text.as_str()).collect(),
+                chars: text_chars,
+                quad: rect(x0, y0, x1, y1),
+            });
+        }
+        let header = self.header(&out, rows, fills);
         let (x0, y0, x1, y1) = self.bounds();
         Some(InferredTable {
             rows,
@@ -989,9 +1184,49 @@ impl Lattice {
             cells: out,
             bounds: rect(x0, y0, x1, y1),
             evidence: TableEvidence::Ruled,
+            header,
             permutation,
             warnings,
         })
+    }
+
+    /// What the ink says about the first row: shading under every first-row
+    /// cell and none under the second's, or a heavier or doubled rule under
+    /// it than the table's other interior rules.
+    fn header(&self, cells: &[InferredCell], rows: usize, fills: &[Fill]) -> HeaderEvidence {
+        if rows < 2 {
+            return HeaderEvidence::None;
+        }
+        let shaded = |cell: &InferredCell| {
+            let (x0, y0, x1, y1) = cell.quad.bounds();
+            let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+            fills.iter().any(|f| {
+                let (a, b, c, d) = f.rect;
+                f.inked && a <= cx && cx <= c && b <= cy && cy <= d
+            })
+        };
+        let first: Vec<&InferredCell> = cells.iter().filter(|c| c.row == 0).collect();
+        let second: Vec<&InferredCell> = cells.iter().filter(|c| c.row == 1).collect();
+        if !first.is_empty() && first.iter().all(|c| shaded(c)) && !second.iter().any(|c| shaded(c))
+        {
+            return HeaderEvidence::FillBeneath;
+        }
+        let beneath = Lattice::weight_at(&self.horizontals, self.ys.get(1).copied().unwrap_or(0.0));
+        let others: Vec<(f64, usize)> = self
+            .ys
+            .iter()
+            .skip(2)
+            .take(rows.saturating_sub(2))
+            .map(|y| Lattice::weight_at(&self.horizontals, *y))
+            .collect();
+        if !others.is_empty() {
+            let heaviest = others.iter().map(|o| o.0).fold(0.0f64, f64::max);
+            let most = others.iter().map(|o| o.1).max().unwrap_or(0);
+            if beneath.0 >= heaviest * 1.5 || beneath.1 > most {
+                return HeaderEvidence::RuleBeneath;
+            }
+        }
+        HeaderEvidence::FirstRow
     }
 }
 
@@ -999,12 +1234,27 @@ impl Lattice {
 /// that reach into the cell, top first, each line's characters in the page's
 /// own order, which is logical (ruling 14). A stable sort, so stream order
 /// decides between two lines level with each other.
-fn order_cell(chars: &mut [usize], line_of: &[(usize, f64)]) {
-    let key = |at: &usize| line_of.get(*at).copied().unwrap_or((usize::MAX, 0.0));
+fn order_cell(chars: &mut [usize], line_of: &[LineOf]) {
+    let key = |at: &usize| {
+        line_of
+            .get(*at)
+            .map_or((usize::MAX, 0.0), |l| (l.at, l.top))
+    };
     chars.sort_by(|a, b| {
         let ((la, ta), (lb, tb)) = (key(a), key(b));
         tb.total_cmp(&ta).then(la.cmp(&lb)).then(a.cmp(b))
     });
+}
+
+/// The text device's line a character is on.
+#[derive(Clone, Copy, Debug)]
+struct LineOf {
+    /// Its place among the page's lines.
+    at: usize,
+    /// Its top.
+    top: f64,
+    /// Whether it holds a right-to-left character (ruling 14).
+    rtl: bool,
 }
 
 fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Quad {

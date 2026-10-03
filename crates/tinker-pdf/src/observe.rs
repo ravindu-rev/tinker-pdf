@@ -4,7 +4,8 @@
 //! [`crate::reading_order`] and [`crate::tables`] both want the [`TextPage`]
 //! that [`crate::Page::text`] builds — one assembler, or an inferred view
 //! drifts from search and selection — and the tables want what a text device
-//! throws away: the rules a table is drawn with. Interpreting the page twice, once for each, is what the designs
+//! throws away: the rules a table is drawn with and the fills that shade its
+//! cells. Interpreting the page twice, once for each, is what the designs
 //! costed before a replay existed.
 //!
 //! What runs instead is **one interpretation into a tee**: [`Observer`] is a
@@ -34,7 +35,8 @@
 //! A *rule* ([`TableRule`]) is ink a table could be drawn with: a straight
 //! segment of a stroked path, axis-aligned to within [`RULE_SLANT`] over its
 //! length and no wider than [`RULE_MAX_WIDTH`], or a filled rectangle no
-//! thicker than that in one dimension. Curves are not rules. The
+//! thicker than that in one dimension. Every other filled rectangle is a
+//! [`Fill`], which is what a shaded header row is. Curves are neither. The
 //! thresholds are design/table-reconstruction.md's and are in points, because
 //! a rule's weight is a typesetter's choice made in points rather than in ems
 //! of the text it rules.
@@ -77,6 +79,15 @@ const RULE_SLANT: f64 = 0.5;
 /// imbalance from growing it.
 const MAX_SAVED_CLIPS: usize = 1 << 10;
 
+/// A filled rectangle too large to be a rule — a cell's shading, a box.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Fill {
+    /// `(x0, y0, x1, y1)`, ordered.
+    pub rect: (f64, f64, f64, f64),
+    /// Whether it painted something other than white.
+    pub inked: bool,
+}
+
 /// What one interpretation of a page left behind.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Observed {
@@ -90,6 +101,9 @@ pub(crate) struct Observed {
     pub rules_drawn: usize,
     /// Rules dropped because the clip in force was not a rectangle.
     pub rules_unclipped: usize,
+    /// Filled rectangles that are not rules, at most [`MAX_TABLE_RULES`] —
+    /// the cap on what a page's ink may cost, read the same way.
+    pub fills: Vec<Fill>,
 }
 
 impl Observed {
@@ -112,6 +126,7 @@ impl Observed {
             rules,
             rules_drawn,
             rules_unclipped,
+            fills,
             ..
         } = observer;
         let mut text = text.finish();
@@ -128,6 +143,7 @@ impl Observed {
             rules,
             rules_drawn,
             rules_unclipped,
+            fills,
         }
     }
 }
@@ -170,6 +186,7 @@ struct Observer {
     rules: Vec<TableRule>,
     rules_drawn: usize,
     rules_unclipped: usize,
+    fills: Vec<Fill>,
 }
 
 impl Observer {
@@ -184,6 +201,7 @@ impl Observer {
             rules: Vec::new(),
             rules_drawn: 0,
             rules_unclipped: 0,
+            fills: Vec::new(),
         }
     }
 
@@ -341,6 +359,12 @@ fn rectangle(subpath: &[PathSegment]) -> Option<(f64, f64, f64, f64)> {
         .then_some((x0, y0, x1, y1))
 }
 
+/// Whether the fill colour is white, which a fill of it does not ink.
+fn white(state: &GraphicsState) -> bool {
+    let c = state.fill_color;
+    c.r == 255 && c.g == 255 && c.b == 255
+}
+
 impl Device for Observer {
     fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
         self.text.show_glyph(glyph, state);
@@ -409,11 +433,12 @@ impl Device for Observer {
         self.clip = self.clip.and(clip);
     }
 
-    fn fill_path(&mut self, path: &[PathSegment], _state: &GraphicsState, _even_odd: bool) {
+    fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState, _even_odd: bool) {
         if self.hidden > 0 {
             return;
         }
         let (rects, _) = rectangles(path);
+        let inked = !white(state);
         for (x0, y0, x1, y1) in rects {
             let (w, h) = (x1 - x0, y1 - y0);
             if h <= RULE_MAX_WIDTH && w > h {
@@ -431,6 +456,11 @@ impl Device for Observer {
                     from: y0,
                     to: y1,
                     width: w,
+                });
+            } else if self.fills.len() < MAX_TABLE_RULES {
+                self.fills.push(Fill {
+                    rect: (x0, y0, x1, y1),
+                    inked,
                 });
             }
         }
@@ -500,13 +530,15 @@ mod tests {
     }
 
     #[test]
-    fn a_thin_fill_is_a_rule_and_a_thick_one_is_not() {
+    fn a_thin_fill_is_a_rule_and_a_thick_one_is_a_fill() {
         let mut observer = Observer::new(false);
         let state = GraphicsState::new(Matrix::IDENTITY);
         observer.fill_path(&rect_path(10.0, 10.0, 110.0, 10.5), &state, false);
         observer.fill_path(&rect_path(10.0, 20.0, 110.0, 40.0), &state, false);
         assert_eq!(observer.rules.len(), 1);
         assert!(observer.rules.iter().all(|r| r.horizontal));
+        assert_eq!(observer.fills.len(), 1);
+        assert!(observer.fills[0].inked, "black is ink");
     }
 
     #[test]

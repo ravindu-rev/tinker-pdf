@@ -377,3 +377,33 @@ committed books' five stated tables are not ruled, so they wait for aligned
 tables. The census prints found, grid agreement, cell assignment and extra
 tables per corpus with the tree hidden; **those corpus scores, and the
 veraPDF zero, are owed**.
+
+**Milestone 4 (3 October 2026): spans, header evidence, direction.** A grid
+cell whose boundary with a neighbour no lattice segment rules — a segment at
+that line covering at least half the boundary, within the lattice's reach —
+is one cell with it, and the shape the missing rules leave is a span when it
+is a rectangle; when it is not (an L), it stays grid cells and
+`TableWarning::SpanNotRectangular` says where, a typed name of its own
+because `SpanInconsistent` is about a producer's stated arithmetic, not about
+ink. `InferredTable::header` is `HeaderEvidence`: `FillBeneath` when every
+first-row cell is shaded and no second-row cell is (the observer now keeps
+filled rectangles that are not rules, with whether they inked anything);
+`RuleBeneath` when the rule under the first row is half again as heavy as the
+table's other interior rules, or doubled where they are single; `FirstRow`
+otherwise, which is no evidence and says so; `None` for one row. Columns are
+counted, and cells read, right to left when most of the table's characters are
+on right-to-left lines.
+
+Measured, first-party: the EPUB table with a column span and a row span,
+bordered cell by cell, is recovered with exactly its stated spans in both
+border models, 59 of 59 characters in their stated cells; a missing rule is a
+column span of two and an L of missing rules is named; a grey first row is
+`FillBeneath`, its unfilled twin `FirstRow`, a striped table `FirstRow`, a
+rule three times as heavy or doubled `RuleBeneath`, and an EPUB table whose
+`th` cells have a background `FillBeneath`; a Hebrew ruled grid reads from its
+rightmost cell. **Two of the milestone's exits are not met here.** The design's
+eight veraPDF span fixtures are in the fetched corpus, so the census prints
+their stated and inferred spans by name and the reproduction is owed; and
+"an Arabic EPUB table orders cells right to left" cannot be built, because the
+EPUB path does not lay out `direction: rtl` (a refused property), so the
+right-to-left fixture is a builder grid whose glyphs are set in visual order.

@@ -43,7 +43,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use tinker_pdf::{Document, InferredTable, StatedTable, TableOptions, TableWarning};
+use tinker_pdf::{
+    Document, HeaderEvidence, InferredTable, StatedTable, TableOptions, TableWarning,
+};
 
 /// Printed once when the census read the corpora. CI greps it.
 const RAN: &str = "table-census: RAN";
@@ -150,6 +152,10 @@ struct Totals {
     placeable: usize,
     /// Inferred tables on scored pages whose tree states none.
     extra: usize,
+    /// Inferred tables found over a stated one whose first row is all `TH`,
+    /// and of those the ones whose first row the ink sets apart.
+    headed: usize,
+    header_evidence: usize,
 }
 
 /// A character's identity across two readings of one page.
@@ -277,6 +283,19 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
             }
             for table in &stated {
                 let (found, grid, placed, total) = score(table, &inferred.tables);
+                let th_row = table.cells.iter().filter(|c| c.row == 0).all(|c| c.header)
+                    && table.cells.iter().any(|c| c.row == 0);
+                if found && th_row {
+                    totals.headed += 1;
+                    if inferred.tables.iter().any(|t| {
+                        matches!(
+                            t.header,
+                            HeaderEvidence::FillBeneath | HeaderEvidence::RuleBeneath
+                        )
+                    }) {
+                        totals.header_evidence += 1;
+                    }
+                }
                 totals.found += usize::from(found);
                 totals.grid += usize::from(grid);
                 totals.placed += placed;
@@ -303,6 +322,20 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
                     }
                 }
                 if span_fixture {
+                    for t in &inferred.tables {
+                        let spans: Vec<String> = t
+                            .cells
+                            .iter()
+                            .filter(|c| c.row_span > 1 || c.col_span > 1)
+                            .map(|c| {
+                                format!("({},{}) {}x{}", c.row, c.column, c.row_span, c.col_span)
+                            })
+                            .collect();
+                        println!(
+                            "span fixture {stem}, inferred: {}x{} table, spans {spans:?}, warnings {:?}",
+                            t.rows, t.columns, t.warnings
+                        );
+                    }
                     let spans: Vec<String> = table
                         .cells
                         .iter()
@@ -355,6 +388,10 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
         println!(
             "{:<14} inferred, tree hidden: found {} of {} stated, grid {} of those, cells {}/{}; {} extra tables",
             "", t.found, t.stated, t.grid, t.placed, t.placeable, t.extra
+        );
+        println!(
+            "{:<14} header rows (all TH) found {}, set apart by fill or rule {}",
+            "", t.headed, t.header_evidence
         );
         if let Some((_, recorded)) = DESIGN_RECORDED.iter().find(|(c, _)| c == name) {
             println!("{:<14} design's 16 September walk: {recorded:?}", "");
