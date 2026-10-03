@@ -170,6 +170,14 @@ pub(super) fn rules(
         return;
     };
 
+    // 6.7.5 / 6.6.2.1 / 6.7.2.1, in every part and before the packet is
+    // read for properties: the header is an instruction ahead of the first
+    // element, and a packet whose body does not parse still has one.
+    packet_header(&packet, None, out);
+    for (reference, page) in page_packets(&document.inner) {
+        packet_header(&page, Some(reference), out);
+    }
+
     let Some(properties) = properties(&packet) else {
         out.push(Raw::file(
             clauses::METADATA,
@@ -1033,6 +1041,84 @@ fn predefined_schema_membership(
 /// a validator is handed untrusted bytes, and a page tree is a graph a file
 /// can make as large as it likes.
 const MAX_PAGES: usize = 1 << 14;
+
+/// ISO 19005-1 6.7.5, ISO 19005-2/3 6.6.2.1, ISO 19005-4 6.7.2.1: "The
+/// bytes attribute shall not be used in the header of an XMP packet" and
+/// "The encoding attribute shall not be used in the header of an XMP
+/// packet", as veraPDF's published rules quote all three parts.
+///
+/// The header is the `<?xpacket begin=… ?>` instruction ahead of the first
+/// element; the trailer `<?xpacket end=…?>` carries no `begin` and is not a
+/// header. Its value is pseudo-attributes, which an XML reader hands over as
+/// one string, so they are split here — by name, never by a substring
+/// search, which would read an `id` containing the letters `bytes` as the
+/// attribute.
+fn packet_header(packet: &[u8], object: Option<ObjRef>, out: &mut Vec<Raw>) {
+    let packet = super::readable(packet);
+    let Ok(source) = Source::new(&packet) else {
+        return;
+    };
+    let limits = tinker_pdf_xml::Limits::default();
+    for event in source.reader(&limits) {
+        match event {
+            Ok(Event::Instruction {
+                target: "xpacket",
+                value,
+            }) => {
+                let names = pseudo_attributes(&value);
+                if !names.contains(&"begin") {
+                    continue;
+                }
+                for attribute in ["bytes", "encoding"] {
+                    if names.contains(&attribute) {
+                        out.push(Raw {
+                            rule: clauses::XMP_HEADER,
+                            object,
+                            kind: FindingKind::XmpPacketHeaderAttribute {
+                                attribute: attribute.to_string(),
+                            },
+                        });
+                    }
+                }
+                return;
+            }
+            // The header precedes the first element; past it there is none.
+            Ok(Event::Start(_)) | Err(_) => return,
+            Ok(_) => {}
+        }
+    }
+}
+
+/// The names of an instruction's `name="value"` pseudo-attributes, in order.
+///
+/// XML 1.0 §2.6 gives a processing instruction no attribute syntax, and the
+/// XMP specification writes its header in the attribute style the XML
+/// declaration uses (§2.8), so this reads that style: a name, `=`, and a
+/// value in matching quotes. A value that never closes ends the read.
+fn pseudo_attributes(value: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    let mut rest = value;
+    loop {
+        rest = rest.trim_start();
+        let Some(equals) = rest.find('=') else {
+            break;
+        };
+        let name = rest[..equals].trim();
+        rest = rest[equals + 1..].trim_start();
+        let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+            break;
+        };
+        let after = &rest[quote.len_utf8()..];
+        let Some(close) = after.find(quote) else {
+            break;
+        };
+        if !name.is_empty() {
+            names.push(name);
+        }
+        rest = &after[close + quote.len_utf8()..];
+    }
+    names
+}
 
 /// Every page's own `/Metadata` stream, with the page it belongs to.
 ///

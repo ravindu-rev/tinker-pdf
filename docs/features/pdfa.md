@@ -34,7 +34,9 @@ never happens.
   part 4's constraints on `/Info` and the catalog's `/Version`, and **every
   annotation** — the subtypes each part admits, the `/F` flag word, `/CA`, and
   the presence and shape of an appearance dictionary.
-- **Metadata** needs the XMP pull parser: the packet's well-formedness; the
+- **Metadata** needs the XMP pull parser: the packet's well-formedness; its
+  header's `bytes` and `encoding` attributes, which every part forbids (6.7.5,
+  6.6.2.1, 6.7.2.1), on the catalog's packet and every page's; the
   eight `/Info` entries ISO 19005-1 6.7.3 pairs with an XMP property, for
   part 1, compared as instants where they are dates; and both halves of the
   predefined-schema rule. **Membership** — every top-level property belongs to

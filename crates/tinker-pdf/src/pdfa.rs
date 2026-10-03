@@ -240,6 +240,16 @@ pub(crate) mod clauses {
         four: "6.7.2",
     };
 
+    /// The XMP packet header's `bytes` and `encoding` attributes: 6.7.5 in
+    /// part 1 ("XMP header"), 6.6.2.1 in parts 2 and 3, 6.7.2.1 in part 4,
+    /// as veraPDF's published rules number them (6.7.5-1 and -2, 6.6.2.1-2
+    /// and -3, 6.7.2.1-2 and -3).
+    pub(crate) const XMP_HEADER: ClauseTable = ClauseTable {
+        one: "6.7.5",
+        two_three: "6.6.2.1",
+        four: "6.7.2.1",
+    };
+
     /// The predefined schemas: which properties a packet may carry, and what
     /// value type each of them declares.
     ///
@@ -560,8 +570,15 @@ pub const STAGED: &[StagedRule] = &[
     },
     StagedRule {
         clause: "6.6.2.1",
-        rule: "the `bytes` and `encoding` attributes of the XMP packet                header's `<?xpacket?>` processing instruction, which a                conforming file may not write",
-        because: "nothing blocks it, and that is why it is named here rather                   than slipped in: the packet reaches this group whole and                   `tinker-pdf-xml` reports the instruction as an event the                   walk does not read. It is a different clause from the                   predefined-schema rules this group serves, with four                   fixtures of its own - `6-6-2-1-t01-fail-b` and `-fail-c`                   under parts 2 and 3, which name the two attributes in their                   own outlines, and two Isartor files under part 1 - and a                   rule landed without its own fixtures and its own counted                   injection beside it is a rule nobody measured",
+        rule: "the `bytes` and `encoding` attributes of the header of an XMP \
+               packet in a metadata stream that is neither the catalog's nor \
+               a page's - a font's, an image's, a form XObject's",
+        because: "the rule runs over the two packets this group already reads: \
+                  the catalog's and every page's. A metadata stream attached \
+                  anywhere else is a packet this group does not open, and \
+                  finding every one of them is an object-graph walk over every \
+                  stream's /Metadata that the metadata group, keyed to the XML \
+                  parser, does not make",
     },
     StagedRule {
         clause: "6.7.8",
@@ -1590,6 +1607,13 @@ pub enum FindingKind {
         /// What the `/RoleMap` made of it, which equals `declared` when the
         /// role map does not mention it.
         mapped: String,
+    },
+    /// An XMP packet header (`<?xpacket begin=…?>`) carrying the `bytes` or
+    /// the `encoding` attribute, which every part forbids (6.7.5 / 6.6.2.1 /
+    /// 6.7.2.1).
+    XmpPacketHeaderAttribute {
+        /// `bytes` or `encoding`.
+        attribute: String,
     },
     /// A `/Lang` entry whose value is not a language identifier
     /// (6.8.4 / 6.7.4).
