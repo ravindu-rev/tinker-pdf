@@ -47,7 +47,7 @@ writing (each writes a new file, and takes --font-policy and the image flags):
   tpdf merge    <a.pdf> <b.pdf>... --out FILE
   tpdf split    <file.pdf> --out DIR [--pages LIST]
   tpdf rotate   <file.pdf> --by DEGREES --out FILE [--page N | --pages LIST]
-  tpdf encrypt  <file.pdf> --owner-password O --out FILE [--user-password U]
+  tpdf encrypt  <file.pdf> --out FILE [--user-password U] [--owner-password O]
                            [--permissions P] [--entropy FILE] [--password P]
   tpdf decrypt  <file.pdf> --out FILE [--password P]
   tpdf attach   <file.pdf> --attach FILE --out FILE [--name NAME]
@@ -99,11 +99,13 @@ writing options:
   --by DEGREES with rotate, a multiple of 90, clockwise, on top of the turn
                each page already has
   --owner-password O
-               with encrypt, the password that lifts every restriction;
-               required, and not empty
+               with encrypt, the password that lifts every restriction
+               (default none: the user password is the owner's too, so it
+               opens the file with every permission)
   --user-password U
                with encrypt, the password a reader needs to open the file
-               (default empty: anyone opens it, and the permissions ask)
+               (default empty: anyone opens it, and the permissions ask; with
+               neither password, anyone opens it with every permission)
   --permissions P
                with encrypt, /P as ISO 32000 Table 22 stores it (default -1,
                everything permitted)

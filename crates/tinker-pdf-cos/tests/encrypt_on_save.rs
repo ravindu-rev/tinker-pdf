@@ -150,6 +150,46 @@ fn an_empty_user_password_opens_with_one() {
     assert!(String::from_utf8_lossy(&content).contains("CONFIDENTIAL"));
 }
 
+/// **An empty owner password is not a lock every reader opens.**
+///
+/// Algorithm 2.A tries the owner password first, and every reader tries the
+/// empty password first. So a `/O` derived from the empty string handed the
+/// owner's authority — and with it the file key — to anybody, whatever the
+/// user password was: `user "open-me", owner ""` was a file anyone opened
+/// with every permission, and the user password protected nothing. The C
+/// ABI documents an empty owner password as "none" and the Python binding
+/// defaults to one, so the plainest call made the weakest file. Algorithm 3
+/// step (a) answers this for R2 to R4 — "if there is no owner password, use
+/// the user password instead" — and the writer now takes that answer for R6:
+/// the user password opens the file, with the owner's authority since the two
+/// are one, and nothing else does.
+#[test]
+fn an_empty_owner_password_is_the_user_password() {
+    let no_printing = !0b100i32;
+    let bytes = encrypted("open-me", "", no_printing);
+    let doc = CosDocument::open(bytes.clone()).expect("it opens");
+    assert!(
+        doc.authenticate("").is_err(),
+        "the empty password opens nothing"
+    );
+    assert_eq!(doc.auth_level(), AuthLevel::None);
+
+    let doc = CosDocument::open(bytes).expect("it opens");
+    assert_eq!(
+        doc.authenticate("open-me"),
+        Ok(AuthLevel::Owner),
+        "the user password is the owner's too"
+    );
+    let collected = pages::collect(&doc);
+    let content = pages::content_bytes(&doc, &collected[0]);
+    assert!(String::from_utf8_lossy(&content).contains("CONFIDENTIAL"));
+
+    // With neither password there is nothing to substitute: the empty
+    // password is both, as it always was, and the restrictions bind nobody.
+    let doc = CosDocument::open(encrypted("", "", no_printing)).expect("it opens");
+    assert_eq!(doc.authenticate(""), Ok(AuthLevel::Owner));
+}
+
 /// Two streams with identical plaintext must not encrypt identically, or the
 /// fact that they match leaks without the key.
 #[test]

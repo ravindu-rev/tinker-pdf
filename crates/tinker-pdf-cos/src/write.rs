@@ -31,6 +31,15 @@ pub struct Encryption {
     /// The password a reader needs to open the document. Empty means none.
     pub user_password: String,
     /// The password that lifts the document's restrictions.
+    ///
+    /// **Empty means none, and then the user password is the owner's too**
+    /// (Algorithm 3 step (a)'s rule for R2 to R4, taken for R6). It is not
+    /// written as the empty string: a reader tries the owner password first
+    /// and the empty password before any other, so an empty owner password
+    /// would open the file with every permission for anybody, and the user
+    /// password would protect nothing. The cost of the rule is that whoever
+    /// has the user password has the owner's authority, so `permissions`
+    /// restrict nobody unless an owner password is given.
     pub owner_password: String,
     /// The permission bits, as `/P` stores them.
     pub permissions: i32,
@@ -594,9 +603,18 @@ pub(crate) fn build_encryption(
     encryption: &Encryption,
     names: &NameTable,
 ) -> Option<(Dict, StreamCipher)> {
+    // Algorithm 2.A tries the owner password first and every reader tries
+    // the empty one first, so a `/O` derived from "" would hand the owner's
+    // authority, and the file key, to anybody whatever the user password
+    // was. Algorithm 3 step (a)'s rule for R2 to R4 — "if there is no owner
+    // password, use the user password instead" — is taken for R6 as well.
+    let owner = match encryption.owner_password.is_empty() {
+        true => &encryption.user_password,
+        false => &encryption.owner_password,
+    };
     let built = tinker_pdf_crypto::handler::build_r6(
         encryption.user_password.as_bytes(),
-        encryption.owner_password.as_bytes(),
+        owner.as_bytes(),
         encryption.permissions,
         true,
         &encryption.entropy,

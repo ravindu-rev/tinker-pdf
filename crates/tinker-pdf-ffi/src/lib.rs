@@ -1992,7 +1992,11 @@ pub struct TpdfEncryption {
     /// UTF-8 string. Null or empty means none.
     pub user_password: *const c_char,
     /// The password that lifts the document's restrictions. Null or empty
-    /// means none.
+    /// means none, and then the user password is the owner's too — the
+    /// facade's rule (`Encryption::owner_password`), because an owner
+    /// password written as the empty string would open the file with every
+    /// permission for anybody who tries the empty password, as every reader
+    /// does first.
     pub owner_password: *const c_char,
     /// The permission bits, as `/P` stores them.
     pub permissions: i32,
@@ -6189,6 +6193,43 @@ endobj
 
         let reopened = Document::open(through_abi).expect("the encrypted output opens");
         assert!(reopened.is_encrypted());
+    }
+
+    /// An owner password left null — "none", as the struct documents it — is
+    /// the user's too, so the file opens with the user password and not with
+    /// the empty one. Before the facade took Algorithm 3 step (a)'s rule, the
+    /// plainest call through this door wrote a file anybody opened with every
+    /// permission.
+    #[test]
+    fn an_owner_password_left_null_is_the_users() {
+        let entropy: Vec<u8> = (0..TPDF_ENTROPY_LEN).map(|i| (i * 5) as u8).collect();
+        let user = c("open-sesame");
+        let doc = open("simple-text.pdf");
+        let editor = editor_over(doc);
+        unsafe { tpdf_document_free(doc) };
+
+        let mut options = incremental_options();
+        options.mode = TpdfWriteMode::Rewrite;
+        let encryption = TpdfEncryption {
+            user_password: user.as_ptr(),
+            owner_password: ptr::null(),
+            permissions: -2056,
+            entropy: entropy.as_ptr(),
+            entropy_len: TPDF_ENTROPY_LEN,
+        };
+        options.encryption = &encryption;
+        let mut buffer: *mut TpdfBuffer = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_editor_save(editor, &options, &mut buffer) },
+            TpdfStatus::Ok
+        );
+        let bytes = take_buffer(buffer);
+        unsafe { tpdf_editor_free(editor) };
+
+        let locked = Document::open(bytes.clone()).expect("it opens");
+        assert!(locked.authenticate("").is_err(), "the empty password fails");
+        let locked = Document::open(bytes).expect("it opens");
+        assert_eq!(locked.authenticate("open-sesame"), Ok(AuthLevel::Owner));
     }
 
     /// Null handles are refused rather than dereferenced, and every new free

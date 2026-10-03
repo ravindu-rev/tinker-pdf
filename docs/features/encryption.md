@@ -100,6 +100,23 @@ asked for an incremental save or for a password as well. It sits beside
 callers build by field and `save` has no error to return
 ([design/pubsec.md](../design/pubsec.md)).
 
+**An empty owner password is the user's.** Algorithm 2.A tries the owner
+password before the user's, and a reader tries the empty password before
+asking for one, so an `/O` derived from the empty string opened the file
+with the owner's authority — and the file key — for anybody, whatever the
+user password was. That was the plainest call on every surface: the C ABI
+documents a null owner password as "none" and the Python binding defaults
+to one. The writer now takes Algorithm 3 step (a)'s rule for R2 to R4 — "if
+there is no owner password, use the user password instead" — for R6 too, so
+a document with only a user password opens with it and with nothing else
+(`an_empty_owner_password_is_the_user_password`, and through the C ABI
+`an_owner_password_left_null_is_the_users`). What it costs is stated rather
+than hidden: whoever has the user password then has the owner's authority,
+so `permissions` restrict nobody who can open the file unless an owner
+password is given. With neither password the empty one is both, as before.
+Found by `tpdf encrypt`, which refused the case on its own until the facade
+made the decision for every surface (ruling 11).
+
 ## API
 
 On `Document`: `is_encrypted()`, `authenticate(&self, password)`

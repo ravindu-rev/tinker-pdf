@@ -223,31 +223,22 @@ pub(crate) fn rotate(options: &Options) -> Result<Vec<String>, String> {
     Ok(lines)
 }
 
-/// `tpdf encrypt <file.pdf> --owner-password O [--user-password U]
+/// `tpdf encrypt <file.pdf> [--user-password U] [--owner-password O]
 /// [--permissions P] [--entropy FILE] --out FILE`: the document written
 /// again at R6 (AES-256), the facade's one revision on save.
 ///
-/// `--owner-password` is required and may not be empty: a reader that tries
-/// the empty password — and they all do, since that is how a document
-/// encrypted only to restrict its permissions opens — would be handed the
-/// owner's authority, so the user password and every restriction would
-/// protect nothing. `--user-password` defaults to empty, which is a file
-/// anyone opens and whose permissions ask; `--permissions` is `/P` as Table
-/// 22 stores it and defaults to `-1`, everything permitted, as the bindings'
-/// does. The 48 bytes of entropy come from `--entropy FILE`, or the system's
-/// source where there is one; a file of predictable bytes makes a predictable
-/// key, which is the caller's decision and is only for reproducing output.
+/// The two passwords are [`Encryption`]'s two fields, each empty unless
+/// given, and what an empty one means is the facade's: an empty user
+/// password is a file anyone opens, whose permissions ask; an empty owner
+/// password makes the user password the owner's too, so a file with only a
+/// user password opens with it and nothing else, and its permissions bind
+/// nobody who can open it. `--permissions` is `/P` as Table 22 stores it and
+/// defaults to `-1`, everything permitted, as the bindings' does. The 48
+/// bytes of entropy come from `--entropy FILE`, or the system's source where
+/// there is one; a file of predictable bytes makes a predictable key, which
+/// is the caller's decision and is only for reproducing output.
 pub(crate) fn encrypt(options: &Options) -> Result<Vec<String>, String> {
     let out = needs_out(options, "encrypt", "FILE")?;
-    let owner_password = options
-        .owner_password
-        .clone()
-        .filter(|password| !password.is_empty())
-        .ok_or_else(|| {
-            "encrypt needs a non-empty --owner-password: a reader that tries the empty \
-             password would otherwise open the file with every permission"
-                .to_string()
-        })?;
     let path = only_input(options, "encrypt")?;
     let doc = open(path, options.password.as_deref(), None)?;
     if doc.is_encrypted() {
@@ -255,7 +246,7 @@ pub(crate) fn encrypt(options: &Options) -> Result<Vec<String>, String> {
     }
     let encryption = Encryption {
         user_password: options.user_password.clone().unwrap_or_default(),
-        owner_password,
+        owner_password: options.owner_password.clone().unwrap_or_default(),
         permissions: options.permissions.unwrap_or(-1),
         entropy: entropy(options)?,
     };
@@ -1225,27 +1216,37 @@ mod tests {
         assert_clean(&doc, "the re-encrypted file");
     }
 
-    /// The refusal, and the fact it rests on: a file whose owner password is
-    /// empty opens with the owner's authority for anyone trying the empty
-    /// password, whatever its user password is.
+    /// With no owner password, or an empty one, the command writes what the
+    /// facade writes for one: the user password is the owner's too
+    /// ([`Encryption::owner_password`]), so the file opens with it and not
+    /// with the empty password every reader tries first. This command used to
+    /// refuse that case on its own, a decision the facade and the bindings did
+    /// not make (ruling 11); the facade now makes it for all of them.
     #[test]
-    fn encrypt_refuses_an_empty_owner_password_because_it_protects_nothing() {
+    fn encrypt_without_an_owner_password_locks_the_file_with_the_users() {
         let dir = scratch("encrypt-empty-owner");
         let entropy = write(&dir, "entropy", &[9u8; 48]);
         let source = fixture("simple-text.pdf");
         let out = format!("{dir}/locked.pdf");
         for owner in [None, Some("")] {
             let mut args = vec![source.as_str(), "--user-password", "u", "--out", &out];
-            args.extend(["--entropy", &entropy]);
+            args.extend(["--entropy", &entropy, "--permissions", "-2056"]);
             if let Some(owner) = owner {
                 args.extend(["--owner-password", owner]);
             }
-            assert!(encrypt(&parse(&args))
-                .err()
-                .is_some_and(|e| e.starts_with("encrypt needs a non-empty --owner-password")));
+            encrypt(&parse(&args)).expect("encrypts");
+            let locked = reopen(&out, None);
+            assert!(
+                locked.authenticate("").is_err(),
+                "the empty password opens nothing ({owner:?})"
+            );
+            assert_eq!(locked.authenticate("u"), Ok(AuthLevel::Owner));
+            assert_eq!(texts(&locked), texts(&reopen(&source, None)));
+            assert_clean(&locked, "the file locked with one password");
         }
-        assert!(!Path::new(&out).exists());
 
+        // The facade's save with the same fields writes the same bytes: the
+        // command adds nothing to what an empty owner password means.
         let mut editor = reopen(&source, None).editor();
         let saved = save(
             &mut editor,
@@ -1262,8 +1263,7 @@ mod tests {
                 ..SaveOptions::default()
             },
         );
-        let doc = Document::open(saved.bytes).expect("it opens");
-        assert_eq!(doc.authenticate(""), Ok(AuthLevel::Owner));
+        assert_eq!(std::fs::read(&out).ok(), Some(saved.bytes));
     }
 
     #[test]
