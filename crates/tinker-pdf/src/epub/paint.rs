@@ -79,7 +79,9 @@
 //! the standard-14 limit stays, and [`Fonts::unrepresented`] counts what it
 //! costs.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+
 use tinker_pdf_cos::build::{
     DocumentBuilder, ExtGState, Glyph, PageBuilder, Target, TilingPattern, TilingType,
 };
@@ -96,8 +98,9 @@ use tinker_pdf_layout::metrics::{FontRequest, Metrics, PlacedGlyph, ShapedText, 
 use tinker_pdf_layout::{
     BackgroundLayer, BoxFragment, ClipFragment, Page as LayoutPage, ReplacedFragment, TextRun,
 };
-use tinker_pdf_shape::bidi::{reorder, BaseDirection, Paragraph};
+use tinker_pdf_shape::bidi::{reorder, BaseDirection, Level, Paragraph};
 use tinker_pdf_shape::shape::itemize;
+use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
 use tinker_pdf_svg::transform::{concat, invert, rotation, IDENTITY};
 
 use super::read::PX_TO_PT;
@@ -749,6 +752,10 @@ pub struct Fonts<'a> {
     used_embedded: Vec<bool>,
     /// Characters that could not be given a code at all.
     unrepresented: usize,
+    /// The page being drawn's shaping context: for each run, the text of its
+    /// logical neighbours on the line where they are set in the same face.
+    /// See [`Fonts::set_contexts`].
+    contexts: RefCell<BTreeMap<RunKey, (String, String)>>,
     /// Characters drawn in a face that has no glyph for them.
     uncovered: usize,
 }
@@ -765,6 +772,7 @@ impl<'a> Fonts<'a> {
             used_embedded: vec![false; faces.faces().len()],
             unrepresented: 0,
             uncovered: 0,
+            contexts: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -815,6 +823,93 @@ impl<'a> Fonts<'a> {
                     self.uncovered += 1;
                 }
             }
+        }
+    }
+
+    /// Records, for every run on a page, the text of its logical neighbours
+    /// that a shaper needs to see — what **GSUB** joins across and what
+    /// **GPOS** positions against — so that a styled span inside a word is
+    /// shaped in its context rather than as a word of its own.
+    ///
+    /// # Why the run is not the unit of shaping any more
+    ///
+    /// A span is a `TextRun` of its own, and a run shaped alone sees nothing
+    /// either side of it: an Arabic word whose middle letter is coloured was
+    /// drawn as three isolated letters, and a mark or the second glyph of a
+    /// kerning pair in a span of its own lost the offset its neighbour gives
+    /// it. Both are shaping decisions that depend on a glyph **below the
+    /// run's own level** — in another run — and the shaper can make them only
+    /// if it is shown that glyph.
+    ///
+    /// So each run's neighbours are recorded here, by logical order on the
+    /// page — which is the order the runs are in, whatever [`visual_lines`]
+    /// did to their `x` — when they are on the same line and the characters
+    /// at the boundary resolve to the **same embedded face**: a glyph index
+    /// means nothing in another face, and the standard 14 are not shaped.
+    /// [`draw_shaped`] shapes the run with that text either side and draws
+    /// only its own glyphs, each where the shaper put it relative to them.
+    ///
+    /// # What it does not change
+    ///
+    /// The **measurement**. Layout measures each run alone through
+    /// [`BookMetrics`] — the `Shaper` seam takes a run's text and no context —
+    /// so a contextual form whose advance differs from the isolated one's
+    /// leaves that difference between this run and the next. An offset (a
+    /// mark, a pair's `XPlacement`) moves no pen and costs nothing; an
+    /// advance a context changes is the remainder, and it is named in
+    /// `docs/features/fonts.md` rather than hidden.
+    ///
+    /// Through `&self`, because drawing holds the registry shared; it is
+    /// replaced whole per page, and read by nothing but [`draw_run`].
+    pub fn set_contexts(&self, runs: &[TextRun]) {
+        let painted: Vec<&TextRun> = runs
+            .iter()
+            .filter(|run| run.painted && !run.generated)
+            .collect();
+        let mut map: BTreeMap<RunKey, (String, String)> = BTreeMap::new();
+        for (at, run) in painted.iter().enumerate() {
+            let before = at
+                .checked_sub(1)
+                .and_then(|p| painted.get(p))
+                .filter(|previous| self.continues(previous, run))
+                .map(|previous| tail(&previous.text, CONTEXT_CHARS))
+                .unwrap_or_default();
+            let after = painted
+                .get(at + 1)
+                .filter(|next| self.continues(run, next))
+                .map(|next| head(&next.text, CONTEXT_CHARS))
+                .unwrap_or_default();
+            if !before.is_empty() || !after.is_empty() {
+                map.insert(run_key(run), (before, after));
+            }
+        }
+        *self.contexts.borrow_mut() = map;
+    }
+
+    /// The context [`Fonts::set_contexts`] recorded for `run`.
+    fn context_of(&self, run: &TextRun) -> (String, String) {
+        self.contexts
+            .borrow()
+            .get(&run_key(run))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Whether `b` follows `a` on one line in one embedded face, so that each
+    /// is the other's shaping context.
+    fn continues(&self, a: &TextRun, b: &TextRun) -> bool {
+        if (a.y - b.y).abs() > a.font_size.max(b.font_size) {
+            return false;
+        }
+        let (Some(last), Some(first)) = (a.text.chars().last(), b.text.chars().next()) else {
+            return false;
+        };
+        match (
+            choose(self.faces, &request(a), Some(last)),
+            choose(self.faces, &request(b), Some(first)),
+        ) {
+            (Chosen::Embedded(x), Chosen::Embedded(y)) => x == y,
+            _ => false,
         }
     }
 
@@ -2041,6 +2136,8 @@ pub(crate) fn draw_page_tagged(
     effects: &OnPage<'_>,
 ) -> usize {
     let mut refused = 0usize;
+    // What each run is shaped against, from its neighbours on the page.
+    fonts.set_contexts(&laid.runs);
     for (index, fragment) in laid.boxes.iter().enumerate() {
         let opened = effects.open(page, fragment.anchor, false);
         draw_box(page, fragment, frame, effects.background(index), effects);
@@ -2713,6 +2810,33 @@ struct Shaped {
     advance: f64,
 }
 
+/// Which run a context belongs to: its document order and where it is drawn,
+/// which no two runs on a page share.
+type RunKey = (usize, u64, u64);
+
+fn run_key(run: &TextRun) -> RunKey {
+    (run.order, run.x.to_bits(), run.y.to_bits())
+}
+
+/// How many characters of a neighbour a run is shaped against.
+///
+/// Enough for every context the default features look at — joining reaches
+/// past transparent marks to the nearest letter, and a pair or a mark looks
+/// one glyph away — and small enough that a page of short spans is not
+/// shaped twice over.
+const CONTEXT_CHARS: usize = 8;
+
+/// The last `n` characters of `text`.
+fn tail(text: &str, n: usize) -> String {
+    let count = text.chars().count();
+    text.chars().skip(count.saturating_sub(n)).collect()
+}
+
+/// The first `n` characters of `text`.
+fn head(text: &str, n: usize) -> String {
+    text.chars().take(n).collect()
+}
+
 /// One embedded face's glyphs for a slice, **in the order they are drawn**.
 ///
 /// Milestone 6 of `docs/design/shaping.md`. Four things happen here that the
@@ -2753,18 +2877,40 @@ struct Shaped {
 /// at cluster boundaries — one character's worth per character, none between a
 /// mark and its base — makes the drawn width the measured width by
 /// construction.
-fn shaped_glyphs(program: &[u8], text: &str, size: f64, letter_spacing: f64) -> Option<Shaped> {
+///
+/// # Context
+///
+/// `context` is the text of the run's logical neighbours in the same face
+/// ([`Fonts::set_contexts`]): the slice is shaped with it either side, and
+/// only the slice's own glyphs come back, placed relative to the pen where
+/// the first of them is drawn — so a glyph a neighbour offsets (a mark, the
+/// second glyph of a pair) keeps the offset, and one a neighbour joins to
+/// takes the joined form.
+fn shaped_glyphs(
+    program: &[u8],
+    text: &str,
+    size: f64,
+    letter_spacing: f64,
+    context: (&str, &str),
+) -> Option<Shaped> {
     let sfnt = Sfnt::parse(program)?;
     let upem = f64::from(sfnt.units_per_em.max(1));
     let scale = |units: i32| f64::from(units) * size / upem;
     let shaper = tinker_pdf_shape::Shaper::new(&sfnt);
-    let paragraph = Paragraph::new(text, BaseDirection::Auto);
-    let runs = itemize(text, &paragraph);
-    let shaped: Vec<_> = runs.iter().map(|run| shaper.shape(text, run)).collect();
+    let (before, after) = context;
+    let whole = format!("{before}{text}{after}");
+    let own = before.len()..before.len() + text.len();
+    let mine = |cluster: u32| usize::try_from(cluster).is_ok_and(|at| own.contains(&at));
+    let paragraph = Paragraph::new(&whole, BaseDirection::Auto);
+    let runs = itemize(&whole, &paragraph);
+    let shaped: Vec<_> = runs.iter().map(|run| shaper.shape(&whole, run)).collect();
     let levels: Vec<_> = runs.iter().map(|run| run.level).collect();
 
     let mut out: Vec<Placed> = Vec::new();
     let mut pen = 0.0f64;
+    // Where the pen stood at the first of this slice's own glyphs, in drawing
+    // order: the slice's origin, which is where the run is put.
+    let mut origin: Option<f64> = None;
     // Characters whose clusters are already behind the pen, and the characters
     // of the cluster it is inside. `letter-spacing` is charged once per
     // character and paid at the cluster boundary, so a mark keeps the position
@@ -2780,7 +2926,7 @@ fn shaped_glyphs(program: &[u8], text: &str, size: f64, letter_spacing: f64) -> 
         // The text each glyph stands for is worked out in **logical** order,
         // because that is the order clusters are monotonic in; the reversal
         // for drawing happens after.
-        let texts = crate::shaping::cluster_texts(text, run);
+        let texts = crate::shaping::cluster_texts(&whole, run);
         let order: Vec<usize> = if run.direction().is_forward() {
             (0..glyphs.len()).collect()
         } else {
@@ -2790,6 +2936,14 @@ fn shaped_glyphs(program: &[u8], text: &str, size: f64, letter_spacing: f64) -> 
             let Some(glyph) = glyphs.get(at) else {
                 continue;
             };
+            // A context glyph is shaped and not drawn: its neighbour run
+            // draws it. It still moves the pen, because the pen is how the
+            // shaper's positions are stated.
+            if !mine(glyph.cluster) {
+                pen += scale(glyph.x_advance);
+                continue;
+            }
+            let start = *origin.get_or_insert(pen);
             if cluster.is_some_and(|last| last != glyph.cluster) {
                 spaced = spaced.saturating_add(pending);
                 pending = 0;
@@ -2802,18 +2956,26 @@ fn shaped_glyphs(program: &[u8], text: &str, size: f64, letter_spacing: f64) -> 
             out.push(Placed {
                 id: glyph.glyph,
                 text: stands_for.to_string(),
-                x: pen + letter_spacing * spaced as f64 + scale(glyph.x_offset),
+                x: pen - start + letter_spacing * spaced as f64 + scale(glyph.x_offset),
                 rise: scale(glyph.y_offset),
             });
             pen += scale(glyph.x_advance);
         }
     }
+    // The slice's own advance: the pen's travel over its own glyphs, which is
+    // every glyph's travel when there is no context.
+    let own_advance: f64 = shaped
+        .iter()
+        .flat_map(|run| run.glyphs().iter())
+        .filter(|glyph| mine(glyph.cluster))
+        .map(|glyph| scale(glyph.x_advance))
+        .sum();
     Some(Shaped {
         // The whole slice's `letter-spacing` rather than the sum of the
         // clusters', so the pen agrees with `flow.rs`'s `measure` exactly even
         // where a shaper dropped a character that started no cluster of its
         // own.
-        advance: pen + letter_spacing * text.chars().count() as f64,
+        advance: own_advance + letter_spacing * text.chars().count() as f64,
         glyphs: out,
     })
 }
@@ -2837,15 +2999,33 @@ fn draw_run(
     // character-at-a-time path, because a simple font addresses a code and
     // there is no sfnt in this process to shape against.
     let mut segments = face_runs(fonts.faces(), &font, &run.text);
+    // The neighbours' text belongs to the logically first and last segments,
+    // which [`Fonts::continues`] has already checked are in the neighbours'
+    // face; worked out before the drawing order reverses them.
+    let (before, after) = fonts.context_of(run);
+    let first = segments.first().map(|(range, _)| range.start);
+    let last = segments.last().map(|(range, _)| range.end);
     if right_to_left(&run.text) {
         segments.reverse();
     }
     for (range, chosen) in segments {
+        let context = (
+            if Some(range.start) == first {
+                before.as_str()
+            } else {
+                ""
+            },
+            if Some(range.end) == last {
+                after.as_str()
+            } else {
+                ""
+            },
+        );
         let slice = run.text.get(range).unwrap_or("");
         match chosen {
             Chosen::Embedded(index) => {
                 let drawn = draw_shaped(
-                    builder, page, run, frame, fonts, index, slice, size, baseline, x,
+                    builder, page, run, frame, fonts, index, slice, context, size, baseline, x,
                 );
                 x = drawn.0;
                 refused += drawn.1;
@@ -2877,13 +3057,11 @@ fn draw_run(
 /// That is the same two-step [`shaped_glyphs`] performs over one segment's
 /// bidi runs, one level out.
 ///
-/// **The unit is the `TextRun` and not the visual line**, and that is a real
-/// limit rather than a simplification. `flow.rs` breaks lines over logical
-/// text and resolves no levels, so a line made of two styled spans is two
-/// `TextRun`s at two `x`s this file did not choose; reordering across them
-/// would mean moving boxes layout placed. What this closes is the case
-/// fallback creates — one run, one style, several faces — which is the case
-/// `docs/features/fonts.md` named.
+/// **Across runs, the unit is the visual line**: [`visual_lines`] has already
+/// put a right-to-left line's styled spans in L2's order before anything is
+/// drawn, so what is ordered here is one run's own segments. What this closes
+/// is the case fallback creates — one run, one style, several faces — which is
+/// the case `docs/features/fonts.md` named.
 ///
 /// **And a standard-14 segment is still drawn a character at a time in
 /// logical order**, because [`draw_coded`] addresses codes rather than glyphs
@@ -2897,6 +3075,120 @@ fn right_to_left(text: &str) -> bool {
     Paragraph::new(text, BaseDirection::Auto)
         .base_level()
         .is_rtl()
+}
+
+/// UAX #9's rule L2 over each **visual line** of a page's runs, rather than
+/// inside each run.
+///
+/// `flow.rs` breaks lines over logical text and resolves no levels, so a line
+/// made of two styled spans is two `TextRun`s laid out left to right in the
+/// order they were written — and an Arabic line whose second word is in a
+/// different colour was drawn with that word on the right, reading backwards.
+/// Every run's own glyphs were already in the right order; the runs were not.
+///
+/// So this resolves the levels of the line's whole text, gives each run the
+/// level of its strong characters (or of all of them, for a run of neutrals),
+/// orders the runs by L2 and lays them out again from the line's left edge in
+/// that order, each at its own measured width. The line's extent does not
+/// change, so its alignment does not either; only which run sits where.
+///
+/// # What a line is, here
+///
+/// Layout places a line's runs **contiguously** — each `x` is the previous
+/// one's `x` plus its width, computed in that order (`flow.rs`'s alignment
+/// pass) — on baselines a `vertical-align` may move by at most a few ems. So
+/// consecutive runs whose ends meet, and whose baselines are within the larger
+/// font size of each other, are one line; a new line starts at the left edge
+/// again and does not meet the last one's end, and two table cells on one
+/// baseline are separated by their cells' own edges. A generated run (a list
+/// marker) is not part of any line's reordering: it sits where the list put
+/// it.
+///
+/// A line with no right-to-left character is not touched, so no
+/// left-to-right page moves. Each run is still drawn in its own direction
+/// inside itself, by [`draw_run`]; a run mixing directions is ordered inside
+/// itself by its own P2 and P3, which is the approximation this keeps.
+///
+/// Returns how many lines moved.
+pub fn visual_lines(runs: &mut [TextRun]) -> usize {
+    let mut moved = 0usize;
+    let mut start = 0usize;
+    while start < runs.len() {
+        let mut end = start + 1;
+        while end < runs.len() && same_line(&runs[end - 1], &runs[end]) {
+            end += 1;
+        }
+        if let Some(line) = runs.get_mut(start..end) {
+            if line.len() > 1 && reorder_line(line) {
+                moved += 1;
+            }
+        }
+        start = end;
+    }
+    moved
+}
+
+/// Whether `b` continues the line `a` is on. See [`visual_lines`].
+fn same_line(a: &TextRun, b: &TextRun) -> bool {
+    if a.generated || b.generated {
+        return false;
+    }
+    let end = a.x + a.width;
+    let tolerance = 1e-6 * end.abs().max(1.0);
+    (end - b.x).abs() <= tolerance && (a.y - b.y).abs() <= a.font_size.max(b.font_size)
+}
+
+/// Lays one line's runs out again in L2's order. Returns whether any moved.
+fn reorder_line(line: &mut [TextRun]) -> bool {
+    let rtl = |c: char| {
+        matches!(
+            bidi_class(c),
+            BidiClass::R | BidiClass::AL | BidiClass::RLE | BidiClass::RLO | BidiClass::RLI
+        )
+    };
+    if !line.iter().any(|run| run.text.chars().any(rtl)) {
+        return false;
+    }
+    let text: String = line.iter().map(|run| run.text.as_str()).collect();
+    let paragraph = Paragraph::new(&text, BaseDirection::Auto);
+    let resolved = paragraph.line(0..paragraph.len());
+    let levels = resolved.levels();
+    let mut run_levels: Vec<Level> = Vec::with_capacity(line.len());
+    let mut at = 0usize;
+    for run in line.iter() {
+        let mut strong: Option<Level> = None;
+        let mut any: Option<Level> = None;
+        for (offset, c) in run.text.chars().enumerate() {
+            let Some(level) = levels.get(at + offset).copied() else {
+                continue;
+            };
+            any = Some(any.map_or(level, |l| l.min(level)));
+            if matches!(
+                bidi_class(c),
+                BidiClass::L | BidiClass::R | BidiClass::AL | BidiClass::EN | BidiClass::AN
+            ) {
+                strong = Some(strong.map_or(level, |l| l.min(level)));
+            }
+        }
+        run_levels.push(strong.or(any).unwrap_or_else(|| paragraph.base_level()));
+        at += run.text.chars().count();
+    }
+    let order = reorder(&run_levels);
+    if order.iter().enumerate().all(|(i, k)| i == *k) {
+        return false;
+    }
+    let mut cursor = line.first().map_or(0.0, |run| run.x);
+    let mut xs: Vec<f64> = line.iter().map(|run| run.x).collect();
+    for k in &order {
+        if let (Some(run), Some(slot)) = (line.get(*k), xs.get_mut(*k)) {
+            *slot = cursor;
+            cursor += run.width;
+        }
+    }
+    for (run, x) in line.iter_mut().zip(xs) {
+        run.x = x;
+    }
+    true
 }
 
 /// One embedded face's stretch: shaped, ordered, positioned, and drawn as text
@@ -2937,6 +3229,7 @@ fn draw_shaped(
     fonts: &Fonts<'_>,
     index: usize,
     slice: &str,
+    context: (&str, &str),
     size: f64,
     baseline: f64,
     mut x: f64,
@@ -2950,9 +3243,21 @@ fn draw_shaped(
         split_after_spaces(slice)
     };
     let mut refused = 0usize;
-    for piece in pieces {
-        let Some(shaped) = shaped_glyphs(&face.program, piece, size, run.letter_spacing * PX_TO_PT)
-        else {
+    let count = pieces.len();
+    for (at, piece) in pieces.into_iter().enumerate() {
+        // The neighbours are the slice's, so the first piece is shaped against
+        // what comes before it and the last against what comes after.
+        let piece_context = (
+            if at == 0 { context.0 } else { "" },
+            if at + 1 == count { context.1 } else { "" },
+        );
+        let Some(shaped) = shaped_glyphs(
+            &face.program,
+            piece,
+            size,
+            run.letter_spacing * PX_TO_PT,
+            piece_context,
+        ) else {
             return (x, refused);
         };
         if !shaped.glyphs.is_empty() {

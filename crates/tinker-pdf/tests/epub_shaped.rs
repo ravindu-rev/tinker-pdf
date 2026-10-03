@@ -42,19 +42,38 @@
 //! [`a_right_to_left_line_in_two_faces_is_drawn_right_to_left`], with a
 //! left-to-right control beside it.
 //!
-//! # The limit that remains
+//! # Two more that closed in October 2026, both about a styled span
 //!
-//! **The unit of reordering is the `TextRun`, not the visual line.** `flow.rs`
-//! breaks lines over logical text and resolves no levels, so a right-to-left
-//! line made of two styled spans is two runs at two `x`s this repository's
-//! painter did not choose. Reordering across them means resolving levels above
-//! the line breaker, which is a change to the layout crate.
+//! **The unit of reordering was the `TextRun`, not the visual line.**
+//! `flow.rs` breaks lines over logical text and resolves no levels, so a
+//! right-to-left line made of two styled spans was two runs laid left to
+//! right in the order written. `paint::visual_lines` now resolves UAX #9 over
+//! each visual line's whole text and lays its runs out again in rule L2's
+//! order, before anything reads a position:
+//! [`a_right_to_left_line_of_two_styled_spans_is_drawn_right_to_left`], with
+//! a left-to-right control.
+//!
+//! **Shaping below the run's own level.** A run shaped alone sees nothing
+//! either side of it, so a word with a coloured letter was three isolated
+//! letters and a glyph positioned by its neighbour lost the position. The
+//! painter shapes each run against its neighbours' text in the same face and
+//! draws its own glyphs: [`a_word_split_by_a_span_is_drawn_joined`] (GSUB) and
+//! [`a_pair_across_a_span_boundary_is_positioned`] (a `GPOS` `PairPos` offset).
+//!
+//! # What remains
+//!
+//! Layout still **measures** each run alone — its `Shaper` seam takes no
+//! context — so a context that changes an *advance* (a joined form wider than
+//! the isolated one, a pair that kerns) leaves that difference between the
+//! run and the next; an offset moves no pen and costs nothing. And a run that
+//! mixes directions inside a right-to-left line is ordered inside itself by
+//! its own P2 and P3 rather than by the line's levels.
 
 mod epub_support;
 
 use epub_support::book::{faces_book, one_face_book};
 use epub_support::typeface::{
-    origin_of, shown_glyphs, text_objects, Face, Form, Joining, Placement,
+    origin_of, shown_glyphs, text_objects, Face, Form, Joining, Pair, Placement,
 };
 use tinker_pdf::{Document, OpenOptions, RenderOptions, TextOptions};
 
@@ -655,5 +674,198 @@ fn the_shaped_page_renders_to_the_bytes_it_always_did() {
         "the shaped Arabic page renders differently. Two targets disagreeing \
          is a determinism bug and this number is not the thing to change; a \
          deliberate change to shaping moves it in the commit that caused it."
+    );
+}
+
+// ---- a right-to-left line of two styled spans --------------------------------
+
+/// The first word of [`LINE`], with its space: what the first span holds.
+const FIRST_WORD: &str = "\u{628}\u{62D}\u{645} ";
+
+/// The second word, which a span colours: a different `TextRun`.
+const SECOND_WORD: &str = "\u{645}\u{62D}\u{628}";
+
+/// The glyphs one word of the Arabic face draws joined, last letter first —
+/// what a right-to-left word's text object shows.
+fn drawn_word(face: &Face, word: &str) -> String {
+    let letters: Vec<char> = word.chars().filter(|c| *c != ' ').collect();
+    let forms: Vec<u16> = letters
+        .iter()
+        .enumerate()
+        .map(|(at, ch)| {
+            let form = if at == 0 {
+                Form::Initial
+            } else if at + 1 == letters.len() {
+                Form::Final
+            } else {
+                Form::Medial
+            };
+            face.form_glyph(*ch, form)
+                .unwrap_or_else(|| panic!("{ch:?} has no {form:?} form"))
+        })
+        .collect();
+    forms
+        .iter()
+        .rev()
+        .map(|glyph| format!("{glyph:04X}"))
+        .collect()
+}
+
+/// **A right-to-left line of two styled spans is drawn right to left.**
+///
+/// The limit this file named last, closed. A span is a `TextRun` of its own,
+/// and layout places a line's runs left to right in the order they were
+/// written, so the coloured second word used to be drawn to the **right** of
+/// the first: every glyph right and the line backwards. `paint::visual_lines`
+/// resolves UAX #9 over the line's whole text and lays its runs out again in
+/// rule L2's order, so the second word is now the leftmost text object on the
+/// line, and the line reads forwards when extracted.
+///
+/// The two words draw the same three letters in opposite orders, so each text
+/// object is told apart by its glyphs rather than by its font, which both
+/// share.
+#[test]
+fn a_right_to_left_line_of_two_styled_spans_is_drawn_right_to_left() {
+    let face = arabic_face();
+    let body = format!(r#"{FIRST_WORD}<span style="color: #c00000">{SECOND_WORD}</span>"#);
+    let doc = Document::open(arabic_book(&body)).expect("a book");
+    let content = page_content(&doc);
+    let objects = text_objects(&content);
+    let first = drawn_word(&face, FIRST_WORD);
+    let second = drawn_word(&face, SECOND_WORD);
+    let find = |word: &str| {
+        objects
+            .iter()
+            .find(|(_, object)| shown_glyphs(object).contains(word))
+            .map(|(_, object)| origin_of(object).0)
+            .unwrap_or_else(|| panic!("no text object draws {word}: {content}"))
+    };
+    let (first_x, second_x) = (find(&first), find(&second));
+    assert!(
+        second_x < first_x,
+        "the second span is not to the left of the first, so the line reads \
+         backwards ({second_x} against {first_x}): {content}"
+    );
+    let extracted = doc.page(0).expect("a page").text().plain_text();
+    assert_eq!(
+        extracted.trim_end(),
+        format!("{FIRST_WORD}{SECOND_WORD}"),
+        "the line does not extract in reading order"
+    );
+}
+
+/// **And a left-to-right line of two styled spans is not reordered.**
+///
+/// The control: a build that reversed every multi-span line would pass the
+/// test above and set every English sentence with a bold word in it
+/// backwards. The face covers Latin letters for it, and the spans are told
+/// apart by their glyphs.
+#[test]
+fn a_left_to_right_line_of_two_styled_spans_keeps_its_order() {
+    let face = Face::new("Fixture Arabic", "ab cd");
+    let doc = Document::open(one_face_book(
+        "Fixture Arabic",
+        &face.build(),
+        24,
+        r#"ab <span style="color: #c00000">cd</span>"#,
+    ))
+    .expect("a book");
+    let content = page_content(&doc);
+    let objects = text_objects(&content);
+    let glyph = |ch: char| format!("{:04X}", face.glyph_of(ch).expect("covered"));
+    let find = |run: &str| {
+        objects
+            .iter()
+            .find(|(_, object)| shown_glyphs(object).contains(run))
+            .map(|(_, object)| origin_of(object).0)
+            .unwrap_or_else(|| panic!("no text object draws {run}: {content}"))
+    };
+    let ab = find(&format!("{}{}", glyph('a'), glyph('b')));
+    let cd = find(&format!("{}{}", glyph('c'), glyph('d')));
+    assert!(ab < cd, "a left-to-right line was reordered: {content}");
+}
+
+// ---- shaping across a span boundary ------------------------------------------
+
+/// **A word whose middle letter is in a span of its own is drawn joined.**
+///
+/// The span is a `TextRun` of its own, and a run shaped alone sees nothing
+/// either side of it: hah was drawn in its isolated form between an isolated
+/// beh and an isolated meem, three letters where the word is one. The painter
+/// now shapes each run against its neighbours' text in the same face
+/// (`Fonts::set_contexts`) and draws only its own glyphs, so each letter takes
+/// the form its place in the **word** gives it — computed here from the face,
+/// not read back: beh initial, hah medial, meem final.
+#[test]
+fn a_word_split_by_a_span_is_drawn_joined() {
+    let face = arabic_face();
+    let body = "\u{628}<span style=\"color: #c00000\">\u{62D}</span>\u{645}";
+    let doc = Document::open(arabic_book(body)).expect("a book");
+    let content = page_content(&doc);
+    let objects = text_objects(&content);
+    let drawn: Vec<String> = objects
+        .iter()
+        .map(|(_, object)| shown_glyphs(object))
+        .collect();
+    for (ch, form) in [
+        ('\u{628}', Form::Initial),
+        ('\u{62D}', Form::Medial),
+        ('\u{645}', Form::Final),
+    ] {
+        let glyph = format!(
+            "{:04X}",
+            face.form_glyph(ch, form)
+                .unwrap_or_else(|| panic!("{ch:?} has no {form:?} form"))
+        );
+        assert!(
+            drawn.iter().any(|shown| shown == &glyph),
+            "{ch:?} is not drawn in its {form:?} form on its own: {drawn:?}\n{content}"
+        );
+    }
+}
+
+/// The pair the context fixture positions: `A` then `B`.
+const PAIR_COVERS: &str = "ABC";
+
+/// How far the pair moves `B`, in font units at 1000 to the em.
+const PAIR_X: i16 = 250;
+
+/// **A position a neighbour gives reaches a glyph in a span of its own.**
+///
+/// The face's `GPOS` `PairPos` displaces `B` by 250 units when it follows `A`
+/// — a position that exists only when the two are in one buffer. With `B` in
+/// a coloured span, `B` is a run of its own; shaped alone it was drawn where
+/// its advance put it. Shaped against `A`, it is displaced, and the number is
+/// 9.4.3's own: 250 units of a 1000-unit em is a `TJ` adjustment of −250
+/// whatever the size, worked out here as in
+/// [`a_positioned_glyph_is_drawn_where_its_anchor_puts_it`].
+#[test]
+fn a_pair_across_a_span_boundary_is_positioned() {
+    let face = Face::new("Fixture Pairs", PAIR_COVERS).with_pair(Pair {
+        first: 'A',
+        second: 'B',
+        script: *b"DFLT",
+        feature: *b"kern",
+        x: PAIR_X,
+        y: 0,
+    });
+    let doc = Document::open(one_face_book(
+        "Fixture Pairs",
+        &face.build(),
+        24,
+        "A<span style=\"color: #c00000\">B</span>C",
+    ))
+    .expect("a book");
+    let content = page_content(&doc);
+    let objects = text_objects(&content);
+    let b = format!("{:04X}", face.glyph_of('B').expect("covered"));
+    let object = objects
+        .iter()
+        .map(|(_, object)| object)
+        .find(|object| shown_glyphs(object) == b)
+        .unwrap_or_else(|| panic!("no text object draws B alone: {content}"));
+    assert!(
+        object.contains(&format!("-{PAIR_X} <{b}>")),
+        "the pair's offset did not reach B in its own span: {object}\n{content}"
     );
 }
