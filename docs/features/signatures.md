@@ -108,7 +108,9 @@ separate questions a signature gets and two of its own: whether the
 `messageImprint` is the digest of the signature octets it countersigns (RFC
 3161 Appendix A); whether the authority's key signed this `TSTInfo` — the
 signature verifies *and* its `messageDigest` is the `TSTInfo`'s own, which is
-what catches a time rewritten after stamping; whether the authority's
+what catches a time rewritten after stamping, and a token whose signed
+attributes carry no `messageDigest` at all has signed no `TSTInfo` and reads
+`NotChecked(NoMessageDigest)`; whether the authority's
 certificate is `Fit` — `id-kp-timeStamping` as its only extended key usage,
 critical (§2.3), and named by the token's ESS `signingCertificate` or
 `signingCertificateV2` (§2.4.1, RFC 5816); and how far its chain reaches,
@@ -124,7 +126,10 @@ detached signature, the digest of the covered bytes — so there is no
 that verifies answers both, and the digest reads `Matches`; one that does not
 cannot say whether the bytes changed or the signature was never theirs, and
 the digest stays `NotChecked(NoSignedAttributes)` rather than borrowing the
-signature's answer.
+signature's answer. Signed attributes *without* a `messageDigest` are another
+shape, which RFC 5652 §5.3 forbids: the signature is over attributes that
+name no content, so it may verify and still bind nothing, and the digest
+reads `NotChecked(NoMessageDigest)`.
 
 **`adbe.pkcs7.sha1`** (12.8.3.3.1), the legacy subfilter ISO 32000-2
 deprecates, is verified too. Its `SignedData` *encapsulates* the SHA-1 of the
@@ -136,7 +141,11 @@ reader that checked only the first would accept a document and its
 encapsulated digest replaced together — the signature over the attributes
 still verifies. Every such verdict carries `Weakness::Sha1Digest`, because the
 subfilter fixes the document digest at SHA-1, and a message under it that is
-detached is `NotChecked(ContentNotEncapsulated)`.
+detached is `NotChecked(ContentNotEncapsulated)` — even where it has no signed
+attributes and its signature verifies over the covered bytes, because that is
+not the shape the subfilter names. Signed attributes with no `messageDigest`
+are `NotChecked(NoMessageDigest)` here too: the message then carries the right
+digest and nothing signs it.
 
 **Modification detection.** `Signature::modifications()` lists every object a
 revision after the signed bytes wrote, classifies it, and marks it against the
@@ -380,7 +389,10 @@ tags, MGF1 the only mask generator, `trailerFieldBC` the only trailer — and th
 verifier takes the hash, the mask hash and the salt length from them and never
 from the recovered block. RFC 4056 §3's key restrictions are enforced: a
 signature with a salt shorter than its key permits is `Failed` even where the
-arithmetic would accept it. Eight tests in `tests/signature_shapes.rs` take the
+arithmetic would accept it. So is RFC 4055 §1.2's restriction of the key
+itself: an `id-RSASSA-PSS` key made no PKCS#1 v1.5 signature, so one is
+`Failed` as a signer's and `Broken` as a chain link's, and the sealing writer
+encrypts nothing to it. Eight tests in `tests/signature_shapes.rs` take the
 fixture to an anchored chain over a PSS link and refuse it five ways. Two of
 EMSA-PSS-VERIFY's checks — the bits above `emBits` and the `0xbc` trailer —
 are reached by no published vector at all, because a signer cannot produce a

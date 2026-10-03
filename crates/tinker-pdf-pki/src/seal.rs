@@ -67,6 +67,14 @@ pub enum SealError {
         /// Which recipient.
         index: usize,
     },
+    /// A recipient's RSA key is published under `id-RSASSA-PSS`, which RFC
+    /// 4055 §1.2 says restricts it to RSASSA-PSS signatures: its holder
+    /// declared that nothing is to be encrypted to it. Only an
+    /// `rsaEncryption` key is unrestricted.
+    KeyRestricted {
+        /// Which recipient.
+        index: usize,
+    },
     /// The entropy source could not supply what sealing needs.
     NoEntropy,
 }
@@ -81,6 +89,12 @@ impl core::fmt::Display for SealError {
             Self::NotRsa { index } => write!(f, "recipient {index}'s key is not RSA"),
             Self::KeyUnusable { index } => {
                 write!(f, "recipient {index}'s RSA key cannot carry a content key")
+            }
+            Self::KeyRestricted { index } => {
+                write!(
+                    f,
+                    "recipient {index}'s RSA key is restricted to RSASSA-PSS signatures"
+                )
             }
             Self::NoEntropy => f.write_str("the entropy source declined"),
         }
@@ -125,6 +139,13 @@ pub fn seal(
         else {
             return Err(SealError::NotRsa { index });
         };
+        // RFC 4055 §1.2: the same `RSAPublicKey` under `id-RSASSA-PSS` is a key
+        // whose owner limited it to RSASSA-PSS, and `rsaEncryption` is the one
+        // OID that leaves it free for key transport. `openssl cms -encrypt`
+        // refuses such a certificate for the same reason.
+        if certificate.subject_public_key_info().algorithm().oid() != oid::RSA_ENCRYPTION {
+            return Err(SealError::KeyRestricted { index });
+        }
         let key =
             RsaPublicKey::new(modulus, exponent).map_err(|_| SealError::KeyUnusable { index })?;
         let padding = key

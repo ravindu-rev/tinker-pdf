@@ -50,6 +50,11 @@ unlike anything else in the tree.
   else; reading all of them is unchanged.
 - **Sealing to a key that is not RSA.** Key agreement is not read, so it is
   not written: an EC certificate is `SealError::NotRsa`.
+- **Sealing to an RSA key restricted to signing.** RFC 4055 §1.2 makes a key
+  published under `id-RSASSA-PSS` an RSASSA-PSS key and nothing else, so it
+  is `SealError::KeyRestricted`; only `rsaEncryption` is sealed to. Until
+  review on 3 October 2026 the writer sealed to one anyway, and wrote
+  `rsaEncryption` in its recipient info.
 - **Key material of any kind.** No PKCS#8, no PKCS#12, no passphrase handling,
   no RSA private-key arithmetic. The same rule signing follows.
 - **`KeyAgreeRecipientInfo`, `KEKRecipientInfo`, `PasswordRecipientInfo`** and

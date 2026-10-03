@@ -355,6 +355,12 @@ pub enum SealError {
         /// Which recipient.
         index: usize,
     },
+    /// A recipient's RSA key is published under `id-RSASSA-PSS`, which
+    /// restricts it to signing (RFC 4055 §1.2), so nothing is sealed to it.
+    KeyRestricted {
+        /// Which recipient.
+        index: usize,
+    },
     /// The entropy source could not supply the seed, the content key, the IV
     /// or a recipient's padding.
     NoEntropy,
@@ -381,6 +387,12 @@ impl core::fmt::Display for SealError {
                     "recipient {index}'s RSA key cannot carry the content key"
                 )
             }
+            SealError::KeyRestricted { index } => {
+                write!(
+                    f,
+                    "recipient {index}'s RSA key is restricted to RSASSA-PSS signatures"
+                )
+            }
             SealError::NoEntropy => f.write_str("the entropy source declined"),
             SealError::NotRewrite => {
                 f.write_str("a public-key encrypted save rewrites; it cannot be incremental")
@@ -401,9 +413,9 @@ impl PublicKeyEncryption {
     ///
     /// # Errors
     ///
-    /// [`SealError`] — a certificate that does not parse or whose key is not
-    /// usable RSA, checked before any entropy is spent, or a source that
-    /// cannot fill.
+    /// [`SealError`] — a certificate that does not parse, whose key is not
+    /// usable RSA, or whose RSA key is restricted to signing, checked before
+    /// any entropy is spent; or a source that cannot fill.
     pub fn seal(
         certificates: &[Vec<u8>],
         permissions: i32,
@@ -425,6 +437,9 @@ impl PublicKeyEncryption {
                 }
                 Envelope::NotRsa { index } => return Err(SealError::NotRsa { index }),
                 Envelope::KeyUnusable { index } => return Err(SealError::KeyUnusable { index }),
+                Envelope::KeyRestricted { index } => {
+                    return Err(SealError::KeyRestricted { index })
+                }
                 _ => return Err(SealError::NoEntropy),
             }
         }

@@ -28,13 +28,22 @@
 //! of 12.8.1 twice. A `Matches` below catches a slip between the two and not a
 //! misreading of the clause — and the covered bytes reach OpenSSL as bytes, so
 //! a disagreement about *which* bytes would surface as `Differs`.
+//!
+//! **One section is the exception, and says so**: shapes OpenSSL will not
+//! sign — a PKCS#1 v1.5 signature under a key restricted to RSASSA-PSS, signed
+//! attributes with no `messageDigest` — are assembled in this file and signed
+//! with the committed throwaway key. Each is a refusal with a control beside
+//! it, and what holds them up is this engine's own reading of RFC 5652.
 
 use std::ops::Range;
 
 use tinker_pdf::{
     AuthorityCertificate, Chain, CmsState, Coverage, DigestAlgorithm, Document, DocumentDigest,
-    SignatureCheck, Stamped, SubFilter, TrustAnchors, Unchecked, Verdict, Weakness,
+    SignRefused, SignatureCheck, Signer, SigningRequest, SigningTarget, Stamped, SubFilter,
+    TimestampRequest, Timestamper, TrustAnchors, Unchecked, Verdict, Weakness, WriteMode,
+    WriteOptions,
 };
+use tinker_pdf_crypto::bignum::{Modulus, Uint};
 use tinker_pdf_crypto::{DigestAlgorithm as CryptoDigest, PssParameters};
 use tinker_pdf_pki::{
     oid, pss, Certificate, ContentInfo, GeneralName, SignatureAlgorithm, TimeStampToken,
@@ -812,6 +821,508 @@ fn the_token_reads_as_openssl_printed_it() {
     );
     assert!(info.ordering());
     assert!(info.nonce().is_some());
+}
+
+// ---- shapes no outside tool will sign, assembled here ----------------------
+//
+// OpenSSL refuses to make some shapes a reader still has to judge: a PKCS#1
+// v1.5 signature under a key restricted to RSASSA-PSS, signed attributes with
+// no `messageDigest`, an `adbe.pkcs7.sha1` message left detached. These are
+// assembled below and signed with the committed throwaway key
+// `visible-signer-key.der` through `tinker_pdf_crypto::bignum`, the
+// arrangement `visible_signature.rs` signs with, and `save_signed` lays them
+// out. So each is this engine agreeing with its own reading of RFC 5652 —
+// which is what these tests ask about, since each is a refusal — and every
+// refusal has a control beside it, signed the same way, that verifies.
+
+const SIGNER_KEY: &[u8] = include_bytes!("signature_support/visible-signer-key.der");
+const SIGNER: &[u8] = include_bytes!("signature_support/visible-signer.der");
+const UNSIGNED: &[u8] = include_bytes!("../../../testdata/simple-text.pdf");
+
+const OID_DATA: &[u8] = &[
+    0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x01,
+];
+const OID_SIGNED_DATA: &[u8] = &[
+    0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02,
+];
+/// `id-ct-TSTInfo`, `1.2.840.113549.1.9.16.1.4`.
+const OID_TST_INFO: &[u8] = &[
+    0x06, 0x0B, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x10, 0x01, 0x04,
+];
+const OID_CONTENT_TYPE: &[u8] = &[
+    0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x03,
+];
+const OID_MESSAGE_DIGEST: &[u8] = &[
+    0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x04,
+];
+const SHA256_ALGORITHM: &[u8] = &[
+    0x30, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00,
+];
+const RSA_ENCRYPTION_ALGORITHM: &[u8] = &[
+    0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00,
+];
+/// `id-RSASSA-PSS` with its parameters absent: RFC 4055 §1.2's key
+/// restricted to RSASSA-PSS and to nothing narrower.
+const RSASSA_PSS_ALGORITHM: &[u8] = &[
+    0x30, 0x0B, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0A,
+];
+
+/// One DER element at the start of `bytes`: its whole encoding and its
+/// contents. Test code over bytes this file built or this repository
+/// committed, so an index out of range is a statement about those bytes.
+fn element(bytes: &[u8]) -> (&[u8], &[u8]) {
+    let first = bytes[1];
+    let (length, header) = if first < 0x80 {
+        (usize::from(first), 2)
+    } else {
+        let count = usize::from(first & 0x7F);
+        let length = bytes[2..2 + count]
+            .iter()
+            .fold(0usize, |acc, byte| acc << 8 | usize::from(*byte));
+        (length, 2 + count)
+    };
+    (&bytes[..header + length], &bytes[header..header + length])
+}
+
+/// The elements inside a constructed element's contents.
+fn children(mut contents: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    while !contents.is_empty() {
+        let (whole, _) = element(contents);
+        out.push(whole);
+        contents = &contents[whole.len()..];
+    }
+    out
+}
+
+/// A DER element with `tag` around `contents`.
+fn tlv(tag: u8, contents: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    let length = contents.len();
+    if length < 0x80 {
+        out.push(length as u8);
+    } else {
+        let octets: Vec<u8> = length
+            .to_be_bytes()
+            .into_iter()
+            .skip_while(|byte| *byte == 0)
+            .collect();
+        out.push(0x80 | octets.len() as u8);
+        out.extend_from_slice(&octets);
+    }
+    out.extend_from_slice(contents);
+    out
+}
+
+fn sha256(bytes: &[u8]) -> Vec<u8> {
+    CryptoDigest::Sha256.digest(bytes).as_bytes().to_vec()
+}
+
+/// RSASSA-PKCS1-v1_5 with SHA-256 (RFC 8017 §8.2.1, §9.2) over `digest`, with
+/// the committed key's private exponent.
+fn rsa_sign(digest: &[u8]) -> Vec<u8> {
+    // RFC 8017 A.1.2: version, n, e, d, ...
+    let (_, key) = element(SIGNER_KEY);
+    let fields = children(key);
+    let modulus = Modulus::<32>::new(Uint::from_be_bytes(element(fields[1]).1).expect("n fits"))
+        .expect("an odd modulus");
+    let exponent = Uint::<32>::from_be_bytes(element(fields[3]).1).expect("d fits");
+    let info = tlv(0x30, &[SHA256_ALGORITHM, &tlv(0x04, digest)].concat());
+    let length = modulus.byte_len();
+    let mut block = vec![0x00, 0x01];
+    block.resize(length - info.len() - 1, 0xFF);
+    block.push(0x00);
+    block.extend_from_slice(&info);
+    let signature = modulus.pow(&Uint::from_be_bytes(&block).expect("fits"), &exponent);
+    let mut out = vec![0; length];
+    assert!(signature.to_be_bytes(&mut out));
+    out
+}
+
+/// The contents of a `SET OF Attribute`: `contentType`, and `messageDigest`
+/// where there is one to give. DER's order is by encoding, and the shorter
+/// `contentType` sorts first.
+fn attributes(content_type: &[u8], message_digest: Option<&[u8]>) -> Vec<u8> {
+    let mut out = tlv(0x30, &[OID_CONTENT_TYPE, &tlv(0x31, content_type)].concat());
+    if let Some(digest) = message_digest {
+        out.extend(tlv(
+            0x30,
+            &[OID_MESSAGE_DIGEST, &tlv(0x31, &tlv(0x04, digest))].concat(),
+        ));
+    }
+    out
+}
+
+/// A `ContentInfo` around a `SignedData` (RFC 5652 §5) with one SHA-256
+/// signer named by `certificate`'s issuer and serial, `certificate` the one
+/// certificate carried, and `content` encapsulated where it is given.
+fn signed_data(
+    certificate: &[u8],
+    content_type: &[u8],
+    content: Option<&[u8]>,
+    signed_attributes: Option<&[u8]>,
+    signature: &[u8],
+) -> Vec<u8> {
+    let (_, whole) = element(certificate);
+    let (_, tbs) = element(children(whole)[0]);
+    let tbs = children(tbs);
+    let (serial, issuer) = (tbs[1], tbs[3]);
+
+    let mut signer = vec![
+        tlv(0x02, &[1]),
+        tlv(0x30, &[issuer, serial].concat()),
+        SHA256_ALGORITHM.to_vec(),
+    ];
+    if let Some(attributes) = signed_attributes {
+        signer.push(tlv(0xA0, attributes));
+    }
+    signer.push(RSA_ENCRYPTION_ALGORITHM.to_vec());
+    signer.push(tlv(0x04, signature));
+
+    let mut encapsulated = content_type.to_vec();
+    if let Some(content) = content {
+        encapsulated.extend(tlv(0xA0, &tlv(0x04, content)));
+    }
+    // §5.1: version 3 for any `eContentType` other than `id-data`.
+    let version = if content_type == OID_DATA { 1 } else { 3 };
+    let signed = tlv(
+        0x30,
+        &[
+            tlv(0x02, &[version]),
+            tlv(0x31, SHA256_ALGORITHM),
+            tlv(0x30, &encapsulated),
+            tlv(0xA0, certificate),
+            tlv(0x31, &tlv(0x30, &signer.concat())),
+        ]
+        .concat(),
+    );
+    tlv(0x30, &[OID_SIGNED_DATA, &tlv(0xA0, &signed)].concat())
+}
+
+/// `der` with its key published under `id-RSASSA-PSS` where it said
+/// `rsaEncryption`: the same `RSAPublicKey`, its owner having restricted it
+/// to RSASSA-PSS (RFC 4055 §1.2). The certificate's own signature no longer
+/// covers the result.
+fn restricted_to_pss(der: &[u8]) -> Vec<u8> {
+    let (_, certificate) = element(der);
+    let parts = children(certificate);
+    let (_, tbs) = element(parts[0]);
+    let mut fields: Vec<Vec<u8>> = children(tbs).iter().map(|field| field.to_vec()).collect();
+    // RFC 5280 §4.1: [0] version, serial, signature, issuer, validity,
+    // subject, subjectPublicKeyInfo, ...
+    assert_eq!(fields[0][0], 0xA0, "a version 3 certificate");
+    let (_, spki) = element(&fields[6]);
+    let spki = children(spki);
+    assert_eq!(
+        spki[0], RSA_ENCRYPTION_ALGORITHM,
+        "the key was unrestricted"
+    );
+    fields[6] = tlv(0x30, &[RSASSA_PSS_ALGORITHM, spki[1]].concat());
+    let tbs = tlv(0x30, &fields.concat());
+    tlv(0x30, &[tbs.as_slice(), parts[1], parts[2]].concat())
+}
+
+/// What the assembled signer puts in its `SignerInfo`.
+#[derive(Clone, Copy)]
+enum Shape {
+    /// Detached, with `contentType` and `messageDigest`: the ordinary shape,
+    /// for the controls.
+    Ordinary,
+    /// Detached, with signed attributes and no `messageDigest` among them.
+    NoMessageDigest,
+    /// The covered bytes' SHA-1 encapsulated, as `adbe.pkcs7.sha1` asks, and
+    /// signed attributes with no `messageDigest` naming it.
+    EncapsulatedWithNoMessageDigest,
+    /// Detached, with no signed attributes: the signature is over the
+    /// covered bytes' own SHA-256 (RFC 5652 §5.4).
+    Unattributed,
+}
+
+struct Assembled {
+    shape: Shape,
+    certificate: Vec<u8>,
+}
+
+impl Signer for Assembled {
+    fn digest_algorithm(&self) -> DigestAlgorithm {
+        match self.shape {
+            // 12.8.3.3.1: the encapsulated digest is the covered bytes' SHA-1.
+            Shape::EncapsulatedWithNoMessageDigest => DigestAlgorithm::Sha1,
+            _ => DigestAlgorithm::Sha256,
+        }
+    }
+
+    fn sign(&self, digest: &[u8]) -> Result<Vec<u8>, SignRefused> {
+        let over_attributes = |attributes: &[u8]| rsa_sign(&sha256(&tlv(0x31, attributes)));
+        let certificate = &self.certificate;
+        Ok(match self.shape {
+            Shape::Ordinary => {
+                let attributes = attributes(OID_DATA, Some(digest));
+                let signature = over_attributes(&attributes);
+                signed_data(certificate, OID_DATA, None, Some(&attributes), &signature)
+            }
+            Shape::NoMessageDigest => {
+                let attributes = attributes(OID_DATA, None);
+                let signature = over_attributes(&attributes);
+                signed_data(certificate, OID_DATA, None, Some(&attributes), &signature)
+            }
+            Shape::EncapsulatedWithNoMessageDigest => {
+                let attributes = attributes(OID_DATA, None);
+                let signature = over_attributes(&attributes);
+                signed_data(
+                    certificate,
+                    OID_DATA,
+                    Some(digest),
+                    Some(&attributes),
+                    &signature,
+                )
+            }
+            Shape::Unattributed => {
+                signed_data(certificate, OID_DATA, None, None, &rsa_sign(digest))
+            }
+        })
+    }
+}
+
+fn incremental() -> WriteOptions {
+    WriteOptions {
+        mode: WriteMode::Incremental,
+        ..WriteOptions::default()
+    }
+}
+
+/// `testdata/simple-text.pdf`, signed under `sub_filter` by a signer of
+/// `shape` that names `certificate`.
+fn assembled(shape: Shape, certificate: &[u8], sub_filter: &str) -> Vec<u8> {
+    let signer = Assembled {
+        shape,
+        certificate: certificate.to_vec(),
+    };
+    let mut request = SigningRequest::new(
+        SigningTarget::NewInvisibleField {
+            name: "Assembled".into(),
+        },
+        &signer,
+    );
+    request.sub_filter = sub_filter.into();
+    request.reserve = 8192;
+    Document::open(UNSIGNED.to_vec())
+        .expect("the fixture opens")
+        .editor()
+        .save_signed(&incremental(), &request)
+        .expect("the signature is written")
+}
+
+#[test]
+fn the_assembled_signer_verifies_when_its_shape_is_an_ordinary_one() {
+    let verdict = verdict_for(
+        &assembled(Shape::Ordinary, SIGNER, "adbe.pkcs7.detached"),
+        SIGNER,
+    );
+    assert_eq!(verdict.document_digest, DocumentDigest::Matches);
+    assert_eq!(verdict.signature, SignatureCheck::Verified);
+    assert!(
+        matches!(verdict.chain, Chain::AnchoredTo { .. }),
+        "{:?}",
+        verdict.chain
+    );
+    assert!(verdict.is_trusted(), "{verdict:?}");
+
+    let verdict = verdict_for(
+        &assembled(Shape::Unattributed, SIGNER, "adbe.pkcs7.detached"),
+        SIGNER,
+    );
+    assert_eq!(verdict.document_digest, DocumentDigest::Matches);
+    assert_eq!(verdict.signature, SignatureCheck::Verified);
+}
+
+/// RFC 4055 §1.2: a key published under `id-RSASSA-PSS` is for RSASSA-PSS
+/// and nothing else. The PKCS#1 v1.5 arithmetic cannot tell — the
+/// `RSAPublicKey` is the same either way, and the signature below is a
+/// perfectly good one under it — so only the OID can, and the signature is
+/// `Failed`, as RFC 4056 §3 has a restriction the parameters break answered.
+#[test]
+fn a_pkcs1_v15_signature_under_a_key_restricted_to_pss_fails() {
+    let restricted = restricted_to_pss(SIGNER);
+    let verdict = verdict_for(
+        &assembled(Shape::Ordinary, &restricted, "adbe.pkcs7.detached"),
+        SIGNER,
+    );
+    assert_eq!(
+        verdict.document_digest,
+        DocumentDigest::Matches,
+        "the attributes still name these bytes"
+    );
+    assert_eq!(verdict.signature, SignatureCheck::Failed);
+    assert!(!verdict.is_trusted());
+}
+
+/// The same restriction on a chain link: the committed certificate is
+/// self-signed with `sha256WithRSAEncryption`, and an anchor that is the same
+/// subject and the same key, restricted to RSASSA-PSS, did not make that
+/// signature.
+#[test]
+fn a_pkcs1_v15_link_under_an_issuer_restricted_to_pss_breaks_the_path() {
+    let signed = assembled(Shape::Ordinary, SIGNER, "adbe.pkcs7.detached");
+    let restricted = restricted_to_pss(SIGNER);
+    let verdict = verdict_for(&signed, &restricted);
+    assert!(
+        matches!(verdict.chain, Chain::Broken { .. }),
+        "{:?}",
+        verdict.chain
+    );
+    assert_eq!(verdict.signature, SignatureCheck::Verified);
+    assert!(!verdict.is_trusted());
+}
+
+/// RFC 5652 §5.3: where there are signed attributes there is a
+/// `messageDigest`. Without one, the signature is over attributes that name
+/// no content: it verifies, and it binds nothing.
+#[test]
+fn signed_attributes_with_no_message_digest_bind_no_document() {
+    let verdict = verdict_for(
+        &assembled(Shape::NoMessageDigest, SIGNER, "adbe.pkcs7.detached"),
+        SIGNER,
+    );
+    assert_eq!(
+        verdict.document_digest,
+        DocumentDigest::NotChecked(Unchecked::NoMessageDigest),
+        "there are signed attributes, so not `NoSignedAttributes`"
+    );
+    assert_eq!(
+        verdict.signature,
+        SignatureCheck::Verified,
+        "the key did sign the attributes"
+    );
+    assert!(!verdict.is_trusted());
+}
+
+/// The `adbe.pkcs7.sha1` form of the same gap, which was worse: the message
+/// carries the covered bytes' right SHA-1 and nothing signs it, and the
+/// verdict read `Matches`, `Verified` and anchored — trusted.
+#[test]
+fn an_encapsulated_digest_no_message_digest_names_is_not_a_match() {
+    let verdict = verdict_for(
+        &assembled(
+            Shape::EncapsulatedWithNoMessageDigest,
+            SIGNER,
+            "adbe.pkcs7.sha1",
+        ),
+        SIGNER,
+    );
+    assert_eq!(
+        verdict.document_digest,
+        DocumentDigest::NotChecked(Unchecked::NoMessageDigest)
+    );
+    assert_eq!(verdict.signature, SignatureCheck::Verified);
+    assert!(!verdict.is_trusted(), "{verdict:?}");
+}
+
+/// A detached message under `adbe.pkcs7.sha1` with no signed attributes. The
+/// signature is over the covered bytes' own SHA-256 and verifies; the
+/// subfilter still asks for an encapsulated digest, so question 2 stays
+/// unanswered rather than borrowing question 3's answer as a detached
+/// signature's does.
+#[test]
+fn a_detached_message_under_the_sha1_subfilter_stays_unchecked_when_it_verifies() {
+    let verdict = verdict_for(
+        &assembled(Shape::Unattributed, SIGNER, "adbe.pkcs7.sha1"),
+        SIGNER,
+    );
+    assert_eq!(verdict.signature, SignatureCheck::Verified);
+    assert_eq!(
+        verdict.document_digest,
+        DocumentDigest::NotChecked(Unchecked::ContentNotEncapsulated)
+    );
+    assert!(!verdict.is_trusted());
+}
+
+/// A [`Timestamper`] that answers with a token it assembles over the digest
+/// it is handed: a `TSTInfo`, and signed attributes with or without the
+/// `messageDigest` that binds it.
+struct AssembledAuthority {
+    message_digest: bool,
+}
+
+impl Timestamper for AssembledAuthority {
+    fn digest_algorithm(&self) -> DigestAlgorithm {
+        DigestAlgorithm::Sha256
+    }
+
+    fn timestamp(&self, digest: &[u8]) -> Result<Vec<u8>, SignRefused> {
+        // RFC 3161 §2.4.2: version 1, a policy, the imprint, a serial, a
+        // `genTime`.
+        let info = tlv(
+            0x30,
+            &[
+                tlv(0x02, &[1]),
+                tlv(
+                    0x06,
+                    &[0x2B, 0x06, 0x01, 0x04, 0x01, 0x83, 0xB2, 0x03, 0x01],
+                ),
+                tlv(0x30, &[SHA256_ALGORITHM, &tlv(0x04, digest)].concat()),
+                tlv(0x02, &[0x01]),
+                tlv(0x18, b"20261003120000Z"),
+            ]
+            .concat(),
+        );
+        let bound = sha256(&info);
+        let attributes = attributes(
+            OID_TST_INFO,
+            self.message_digest.then_some(bound.as_slice()),
+        );
+        let signature = rsa_sign(&sha256(&tlv(0x31, &attributes)));
+        Ok(signed_data(
+            SIGNER,
+            OID_TST_INFO,
+            Some(&info),
+            Some(&attributes),
+            &signature,
+        ))
+    }
+}
+
+fn assembled_timestamp(message_digest: bool) -> Verdict {
+    let authority = AssembledAuthority { message_digest };
+    let mut request = TimestampRequest::new(
+        SigningTarget::NewInvisibleField {
+            name: "Timestamp".into(),
+        },
+        &authority,
+    );
+    request.reserve = 8192;
+    let stamped = Document::open(UNSIGNED.to_vec())
+        .expect("the fixture opens")
+        .editor()
+        .save_timestamped(&incremental(), &request)
+        .expect("the timestamp is written");
+    verdict_for(&stamped, SIGNER)
+}
+
+/// RFC 5652 §5.3 again, in a timestamp token: the authority's signature is
+/// over its signed attributes, and only their `messageDigest` ties those to
+/// the `TSTInfo` — its `genTime` and its imprint. Without one, a signature
+/// that verifies has signed no time at all.
+#[test]
+fn a_token_with_no_message_digest_has_not_signed_its_tstinfo() {
+    let control = assembled_timestamp(true);
+    assert_eq!(control.timestamps[0].imprint, DocumentDigest::Matches);
+    assert_eq!(control.timestamps[0].signature, SignatureCheck::Verified);
+
+    let unbound = assembled_timestamp(false);
+    let stamp = &unbound.timestamps[0];
+    assert_eq!(
+        stamp.imprint,
+        DocumentDigest::Matches,
+        "the imprint is right"
+    );
+    assert_eq!(
+        stamp.signature,
+        SignatureCheck::NotChecked(Unchecked::NoMessageDigest)
+    );
+    assert_eq!(unbound.signature, stamp.signature);
+    assert!(!stamp.is_trusted());
+    assert!(!unbound.is_trusted());
 }
 
 // ---- reading and rewriting the fixtures -----------------------------------

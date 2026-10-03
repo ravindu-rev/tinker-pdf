@@ -248,3 +248,117 @@ fn a_sealed_envelope_is_openssls_outside_its_random_fields() {
     assert_ne!(ours, AES_256, "and not a copy of them");
     assert_eq!(without_randomness(&ours), without_randomness(AES_256));
 }
+
+// ---- a key its certificate restricts to signing ----------------------------
+
+/// One DER element at the start of `bytes`: its whole encoding and its
+/// contents. Test code over committed bytes of known shape.
+fn element(bytes: &[u8]) -> (&[u8], &[u8]) {
+    let first = bytes[1];
+    let (length, header) = if first < 0x80 {
+        (usize::from(first), 2)
+    } else {
+        let count = usize::from(first & 0x7F);
+        let length = bytes[2..2 + count]
+            .iter()
+            .fold(0usize, |acc, byte| acc << 8 | usize::from(*byte));
+        (length, 2 + count)
+    };
+    (&bytes[..header + length], &bytes[header..header + length])
+}
+
+/// The elements inside a constructed element's contents.
+fn children(mut contents: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    while !contents.is_empty() {
+        let (whole, _) = element(contents);
+        out.push(whole);
+        contents = &contents[whole.len()..];
+    }
+    out
+}
+
+/// A DER element with `tag` around `contents`.
+fn tlv(tag: u8, contents: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    let length = contents.len();
+    if length < 0x80 {
+        out.push(length as u8);
+    } else {
+        let octets: Vec<u8> = length
+            .to_be_bytes()
+            .into_iter()
+            .skip_while(|byte| *byte == 0)
+            .collect();
+        out.push(0x80 | octets.len() as u8);
+        out.extend_from_slice(&octets);
+    }
+    out.extend_from_slice(contents);
+    out
+}
+
+/// `rsaEncryption` with its `NULL` parameters, as the recipient's
+/// `SubjectPublicKeyInfo` carries it.
+const RSA_ENCRYPTION: &[u8] = &[
+    0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00,
+];
+
+/// `id-RSASSA-PSS`, `1.2.840.113549.1.1.10`, with its parameters absent —
+/// RFC 4055 §1.2's form for a key restricted to RSASSA-PSS and nothing more.
+const RSASSA_PSS: &[u8] = &[
+    0x30, 0x0B, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0A,
+];
+
+/// `der` with its key published under `id-RSASSA-PSS` instead of
+/// `rsaEncryption`: the same `RSAPublicKey`, its owner having limited it to
+/// signing. The issuer's signature no longer covers the result, which
+/// nothing here asks about.
+fn restricted_to_pss(der: &[u8]) -> Vec<u8> {
+    let (_, certificate) = element(der);
+    let parts = children(certificate);
+    let (_, tbs) = element(parts[0]);
+    let mut fields: Vec<Vec<u8>> = children(tbs).iter().map(|field| field.to_vec()).collect();
+    // RFC 5280 §4.1: [0] version, serial, signature, issuer, validity,
+    // subject, subjectPublicKeyInfo, ...
+    assert_eq!(fields[0][0], 0xA0, "a version 3 certificate");
+    let (_, spki) = element(&fields[6]);
+    let spki = children(spki);
+    assert_eq!(spki[0], RSA_ENCRYPTION, "the key was unrestricted");
+    fields[6] = tlv(0x30, &[RSASSA_PSS, spki[1]].concat());
+    let tbs = tlv(0x30, &fields.concat());
+    tlv(0x30, &[tbs.as_slice(), parts[1], parts[2]].concat())
+}
+
+/// **RFC 4055 §1.2: a key under `id-RSASSA-PSS` is for RSASSA-PSS
+/// signatures only**, so nothing is encrypted to it, though its
+/// `RSAPublicKey` is exactly the one an `rsaEncryption` key would carry and
+/// this crate reads it as RSA either way. `openssl cms -encrypt` refuses such
+/// a certificate too; the writer once sealed to it, and wrote `rsaEncryption`
+/// in the recipient info.
+#[test]
+fn a_key_restricted_to_pss_signatures_is_not_sealed_to() {
+    let certificate = pem_to_der(include_str!("data/enveloped/recipient-cert.pem"));
+    let restricted = restricted_to_pss(&certificate);
+    let parsed = Certificate::parse(&restricted).expect("still a certificate");
+    assert_eq!(
+        parsed.subject_public_key_info().algorithm().oid(),
+        tinker_pdf_pki::oid::RSASSA_PSS
+    );
+    assert!(
+        matches!(
+            parsed.subject_public_key_info().public_key(),
+            tinker_pdf_pki::PublicKey::Rsa { .. }
+        ),
+        "the same key, read the same way"
+    );
+
+    assert_eq!(
+        tinker_pdf_pki::seal::seal(b"content", &[&certificate, &restricted], &mut Counter(0)),
+        Err(tinker_pdf_pki::seal::SealError::KeyRestricted { index: 1 }),
+        "refused by index, before any entropy is spent"
+    );
+    assert!(
+        tinker_pdf_pki::seal::seal(b"content", &[&certificate], &mut Counter(0)).is_ok(),
+        "the unrestricted certificate alone still seals"
+    );
+}

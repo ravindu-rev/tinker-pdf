@@ -154,7 +154,18 @@ pub enum Unchecked {
     /// The signature is `adbe.pkcs7.sha1` (12.8.3.3.1), whose `SignedData`
     /// must encapsulate the SHA-1 digest of the covered bytes — and this one
     /// is detached, so there is no document digest in it to compare.
+    ///
+    /// Whatever the signature then says: with no signed attributes it may
+    /// verify over the covered bytes' own digest, and the digest still reads
+    /// this, because a message under this subfilter is not that shape.
     ContentNotEncapsulated,
+    /// The signer has signed attributes and no `messageDigest` among them,
+    /// which RFC 5652 §5.3 requires wherever there are any. The signature is
+    /// over the attributes, and the attributes name no content, so nothing the
+    /// signature covers binds the document — or, for a timestamp token, its
+    /// `TSTInfo`. The signature over the attributes may well verify; that
+    /// proves the key signed *them*, and nothing else.
+    NoMessageDigest,
 }
 
 /// How far the certificate chain reached.
@@ -496,7 +507,14 @@ pub(crate) fn verdict(
     // 2 and 3 are one question. A signature that verifies answers both; one
     // that does not cannot say which half failed, and the digest stays
     // unchecked rather than borrowing the signature's answer.
-    if matches!(message, Signed::Covered { .. }) && verdict.signature == SignatureCheck::Verified {
+    // Not under `adbe.pkcs7.sha1`, whose message must encapsulate the
+    // document's digest: a detached one is not that subfilter's shape, and its
+    // digest stays `NotChecked(ContentNotEncapsulated)` whatever the signature
+    // says.
+    if matches!(message, Signed::Covered { .. })
+        && verdict.signature == SignatureCheck::Verified
+        && signature.sub_filter != Some(SubFilter::Pkcs7Sha1)
+    {
         verdict.document_digest = DocumentDigest::Matches;
     }
     verdict.chain = match signer_certificate {
@@ -635,21 +653,28 @@ fn timestamp(
 
     // The token's `messageDigest` must be the digest of this `TSTInfo`, or
     // the signature is over some other one; with no signed attributes the
-    // signature is over the `TSTInfo` octets themselves.
+    // signature is over the `TSTInfo` octets themselves. Signed attributes
+    // with no `messageDigest` bind no `TSTInfo` at all (RFC 5652 §5.3), so a
+    // signature over them that verifies has still not been shown to be over
+    // this one.
     let message = match signer.signed_attrs_to_digest() {
         Some(attributes) => Signed::Attributes(attributes),
         None => Signed::Content(info.der()),
     };
-    let content_matches = match (signer.message_digest(), signer.effective_digest()) {
-        (None, _) => true,
+    let bound = match (signer.message_digest(), signer.effective_digest()) {
+        (None, _) if signer.signed_attrs().is_some() => None,
+        (None, _) => Some(true),
         (Some(expected), Ok(algorithm)) => {
-            crypto_digest(algorithm).digest(info.der()).as_bytes() == expected
+            Some(crypto_digest(algorithm).digest(info.der()).as_bytes() == expected)
         }
-        (Some(_), Err(_)) => false,
+        (Some(_), Err(_)) => Some(false),
     };
     verdict.signature =
         match check_signature(signer, certificate, &message, &mut verdict.weaknesses) {
-            SignatureCheck::Verified if !content_matches => SignatureCheck::Failed,
+            SignatureCheck::Verified if bound.is_none() => {
+                SignatureCheck::NotChecked(Unchecked::NoMessageDigest)
+            }
+            SignatureCheck::Verified if bound == Some(false) => SignatureCheck::Failed,
             other => other,
         };
     verdict.authority_certificate = authority_certificate(signer, certificate);
@@ -785,11 +810,16 @@ fn check_document_digest(
         return check_encapsulated_sha1(document, signature, signed, signer, weaknesses);
     }
     let Some(expected) = signer.message_digest() else {
+        // Signed attributes that name no content: the signature, verified or
+        // not, is over them and binds no document.
+        if signer.signed_attrs().is_some() {
+            return DocumentDigest::NotChecked(Unchecked::NoMessageDigest);
+        }
         // No `messageDigest` to compare: the signature is over the content
         // directly and question 3 answers this one too (see `verdict`). The
         // digest it is over is still a document digest, and still worth
         // calling weak.
-        if signer.signed_attrs().is_none() && signer.effective_digest() == Ok(CmsDigest::Sha1) {
+        if signer.effective_digest() == Ok(CmsDigest::Sha1) {
             weaknesses.push(Weakness::Sha1Digest);
         }
         return DocumentDigest::NotChecked(Unchecked::NoSignedAttributes);
@@ -850,6 +880,13 @@ fn check_encapsulated_sha1(
         return DocumentDigest::Differs;
     }
     let Some(expected) = signer.message_digest() else {
+        // With no signed attributes the signature is over the twenty octets
+        // themselves, and question 3 checks that link. With attributes that
+        // carry no `messageDigest`, nothing does: the message holds the right
+        // digest and no signature covers it.
+        if signer.signed_attrs().is_some() {
+            return DocumentDigest::NotChecked(Unchecked::NoMessageDigest);
+        }
         return DocumentDigest::Matches;
     };
     let algorithm = match signer.effective_digest() {
@@ -914,6 +951,13 @@ fn check_signature(
                 weaknesses.push(Weakness::ShortRsaKey {
                     bits: key.modulus_bits(),
                 });
+            }
+            if !key_permits_pkcs1_v15(certificate) {
+                // RFC 4055 §1.2: the key's owner restricted it to RSASSA-PSS,
+                // so it made no PKCS#1 v1.5 signature, whatever the arithmetic
+                // would say — the same answer `key_permits_pss` gives a
+                // restriction the parameters break.
+                return SignatureCheck::Failed;
             }
             let Some(digest_value) = message.digest(crypto_digest(digest)) else {
                 return SignatureCheck::NotChecked(Unchecked::CoverageUnusable);
@@ -995,6 +1039,17 @@ fn check_signature(
             }
         }
     }
+}
+
+/// Whether the certificate's RSA key may have made an RSASSA-PKCS1-v1_5
+/// signature at all.
+///
+/// RFC 4055 §1.2: `rsaEncryption` leaves a key unrestricted, and a key
+/// published under `id-RSASSA-PSS` is one its owner limited to RSASSA-PSS. The
+/// `RSAPublicKey` is the same either way, so the arithmetic cannot tell them
+/// apart and only the OID can.
+fn key_permits_pkcs1_v15(certificate: &Certificate<'_>) -> bool {
+    certificate.subject_public_key_info().algorithm().oid() != oid::RSASSA_PSS
 }
 
 /// RFC 4056 §3's four checks, where the key's own `SubjectPublicKeyInfo` is
@@ -1136,8 +1191,10 @@ fn verifies(child: &Certificate<'_>, issuer: &Certificate<'_>) -> bool {
             let Some(key) = rsa_key(issuer) else {
                 return false;
             };
-            key.verify_pkcs1_v15_message(crypto_digest(digest), child.tbs(), signature)
-                .is_ok()
+            key_permits_pkcs1_v15(issuer)
+                && key
+                    .verify_pkcs1_v15_message(crypto_digest(digest), child.tbs(), signature)
+                    .is_ok()
         }
         Some(SignatureAlgorithm::Ecdsa { digest }) => {
             let Ok(key) = ec_key(issuer) else {
@@ -1172,6 +1229,10 @@ fn verifies(child: &Certificate<'_>, issuer: &Certificate<'_>) -> bool {
     }
 }
 
+/// The certificate's RSA key, published under either `rsaEncryption` or
+/// `id-RSASSA-PSS`. Which signatures that OID lets it have made is
+/// [`key_permits_pkcs1_v15`]'s and [`key_permits_pss`]'s to say, at every
+/// call site.
 fn rsa_key(certificate: &Certificate<'_>) -> Option<RsaPublicKey> {
     match certificate.subject_public_key_info().public_key() {
         PublicKey::Rsa { modulus, exponent } => RsaPublicKey::new(modulus, exponent).ok(),

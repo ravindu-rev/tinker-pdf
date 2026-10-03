@@ -375,6 +375,22 @@ EKU's criticality unchecked fires 1; the ESS binding unchecked fires 1; `tsa` re
 implicitly fires 9; a fraction with a trailing zero accepted fires 1. No corpus token has
 been validated by this code: the seven `cms_census.rs` counts are unread here.
 
+**Review of 3 October 2026 found three verdicts that said more than they had checked**,
+each a shape OpenSSL will not sign, so `signature_shapes.rs` now assembles them with the
+committed throwaway key, a control beside each. Signed attributes with no `messageDigest`
+(RFC 5652 §5.3 forbids it) bound nothing and were read as binding: a token's signature
+read `Verified` for whatever `TSTInfo` sat beside it, and an `adbe.pkcs7.sha1` message
+carrying the right digest read `Matches` and trusted with no signature over it. Both
+are `NotChecked(NoMessageDigest)` now, as is the detached digest, which read
+`NoSignedAttributes` for a signer that had some. A detached `adbe.pkcs7.sha1` message with
+no signed attributes borrowed its signature's answer as an ordinary detached one does; it
+stays `ContentNotEncapsulated`, as this page and the variant always said. And an
+`id-RSASSA-PSS` key, read as RSA since PSS landed, was used for PKCS#1 v1.5 signatures and
+links and sealed to; RFC 4055 §1.2 restricts it to RSASSA-PSS, and the OID is now asked at
+each use. Injections, one at a time over `tinker-pdf-pki` and the facade's signature
+suites: each of the six put back fires 1, and the sealing check fires 1 in each of
+`enveloped.rs` and `pubsec_write.rs`.
+
 **Document timestamps**, the same day: a `Timestamper` seam the shape of `Signer` —
 the engine hands over a digest and receives a token, and never speaks to an authority
 itself — and `DocumentEditor::save_timestamped`, which shares the reservation and the seal

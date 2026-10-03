@@ -156,6 +156,7 @@ let bytes = doc.editor().save_sealed(&WriteOptions::default(), &sealed)?;
 | A vendor's own `/Filter` | `AuthError::UnsupportedHandler` | only `Standard` and `Adobe.PubSec` are implemented; a foreign handler is refused rather than guessed | this page |
 | A password offered to a public-key document | `AuthError::UnsupportedHandler`, not `WrongPassword` | no password was ever going to work, and saying "wrong password" sends a caller looking for a better one | 7.6.5 |
 | Sealing to a key that is not RSA | `SealError::NotRsa { index }` | key transport here is RSAES-PKCS1-v1_5, every PDF public-key handler's; key agreement is not read either | [design/pubsec.md](../design/pubsec.md) |
+| Sealing to an RSA key its certificate restricts to signing | `SealError::KeyRestricted { index }` | RFC 4055 §1.2: a key published under `id-RSASSA-PSS` is for RSASSA-PSS signatures only, and only `rsaEncryption` leaves it free for key transport; `openssl cms -encrypt` refuses the same certificate | [design/pubsec.md](../design/pubsec.md) |
 | A sealed incremental save | `SealError::NotRewrite` | an update appends under an `/Encrypt` that still stands, and cannot change who the file is sealed to | this page |
 | A password and recipients both | `SealError::PasswordAlsoRequested` | a document has one security handler | 7.6 |
 | Recipients sealed with different permissions | none offered — one envelope, one `/P` for all | 7.6.5 allows an envelope per group; not yet asked for | [design/pubsec.md](../design/pubsec.md) |

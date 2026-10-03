@@ -479,6 +479,54 @@ fn what_cannot_be_sealed_is_refused_by_name_before_anything_is_written() {
     );
 }
 
+/// RFC 4055 §1.2: a certificate whose key is published under `id-RSASSA-PSS`
+/// restricts that key to RSASSA-PSS signatures, so nothing is sealed to it —
+/// even though its `RSAPublicKey` is one this engine reads, and once sealed to
+/// with `rsaEncryption` written in the recipient info. `openssl cms -encrypt`
+/// refuses the same certificate. The certificate is OpenSSL's: the signer of
+/// `signature_support/rsa-pss.pdf`, whose root beside it is unrestricted RSA.
+#[test]
+fn a_certificate_restricted_to_pss_signatures_is_not_sealed_to() {
+    let document = Document::open(include_bytes!("signature_support/rsa-pss.pdf").to_vec())
+        .expect("the PSS fixture opens");
+    let signatures = document.signatures();
+    let content = tinker_pdf_pki::ContentInfo::parse(signatures[0].cms()).expect("its CMS");
+    let certificates: Vec<Vec<u8>> = content
+        .signed_data()
+        .x509_certificates()
+        .map(<[u8]>::to_vec)
+        .collect();
+    let algorithm = |der: &[u8]| {
+        tinker_pdf_pki::Certificate::parse(der)
+            .expect("parses")
+            .subject_public_key_info()
+            .algorithm()
+            .oid()
+            .to_dotted()
+    };
+    assert_eq!(algorithm(&certificates[0]), "1.2.840.113549.1.1.10");
+    assert_eq!(algorithm(&certificates[1]), "1.2.840.113549.1.1.1");
+
+    assert_eq!(
+        PublicKeyEncryption::seal(&certificates[..1], -4, &mut Counter(0)).map(|_| ()),
+        Err(SealError::KeyRestricted { index: 0 })
+    );
+    assert_eq!(
+        PublicKeyEncryption::seal(
+            &[CERTIFICATE.to_vec(), certificates[0].clone()],
+            -4,
+            &mut Counter(0)
+        )
+        .map(|_| ()),
+        Err(SealError::KeyRestricted { index: 1 }),
+        "refused by index, however many recipients are fine"
+    );
+    assert!(
+        PublicKeyEncryption::seal(&certificates[1..], -4, &mut Counter(0)).is_ok(),
+        "the root's key is unrestricted, and seals"
+    );
+}
+
 #[test]
 fn the_debug_form_does_not_print_the_key() {
     let sealed = sealed_to(&[CERTIFICATE.to_vec()]);
