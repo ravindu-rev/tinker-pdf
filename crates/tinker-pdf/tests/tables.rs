@@ -209,6 +209,77 @@ fn a_vast_span_is_clamped_and_named() {
         .any(|w| matches!(w, TableWarning::SpanInconsistent { .. })));
 }
 
+/// **And past the first row and column.** A span of four billion added to a
+/// row or a column past the first overflows a 32-bit `usize` — wasm32 is a
+/// first-class target — so the spans are compared with what is left of the
+/// table rather than added to where they start. The cell is placed where its
+/// row's free column puts it, at the spans the file states, and named.
+#[test]
+fn a_vast_span_past_the_first_row_and_column_is_clamped_and_named() {
+    let doc = tagged_table(&[
+        &[("A", 1, 1), ("B", 1, 1)],
+        &[("C", 1, 1), ("D", u32::MAX, u32::MAX)],
+    ]);
+    let table = &stated(&doc)[0].1;
+    assert_eq!(table.rows, 2);
+    assert!(table.columns <= 4, "{} columns", table.columns);
+    assert!(
+        table
+            .warnings
+            .contains(&TableWarning::SpanInconsistent { row: 1, column: 1 }),
+        "{:?}",
+        table.warnings
+    );
+    let d = table.cells.iter().find(|c| c.text == "D").expect("D");
+    assert_eq!((d.row, d.column), (1, 1));
+    assert_eq!(
+        (d.row_span, d.col_span),
+        (u32::MAX as usize, u32::MAX as usize)
+    );
+}
+
+/// **A page of many small stated tables is read in bounded work.** Each
+/// table's cells were joined by a call of their own, and each call grouped
+/// the whole page's characters by sequence again — the page's characters
+/// times its tables, from a tree whose element cap allows tens of thousands
+/// of one-cell tables. Four thousand of them here, each of four characters,
+/// each read back with its text; and asked through `Page::tables`, which
+/// reads them once more.
+#[test]
+fn a_page_of_many_small_stated_tables_is_read_in_bounded_work() {
+    const TABLES: usize = 4_000;
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(612.0, 792.0, |page| {
+        for at in 0..TABLES {
+            let (x, y) = (
+                20.0 + (at % 40) as f64 * 14.0,
+                760.0 - (at / 40) as f64 * 7.0,
+            );
+            page.tagged_with(&Tag::new(b"Table"), |page| {
+                page.tagged_with(&Tag::new(b"TR"), |page| {
+                    page.tagged_with(&Tag::new(b"TD"), |page| {
+                        page.text(b"F1", 4.0, x, y, "abcd");
+                    });
+                });
+            });
+        }
+    });
+    let doc = open(builder.finish());
+    let page = doc.page(0).expect("a page");
+    let tables = page.stated_tables();
+    assert_eq!(tables.len(), TABLES);
+    for table in &tables {
+        assert_eq!((table.rows, table.columns), (1, 1));
+        assert_eq!(table.cells.len(), 1);
+        assert_eq!(table.cells[0].text, "abcd");
+    }
+    let PageTables::Stated(again) = page.tables(TableSource::Inferred) else {
+        panic!("a page that states tables answers with them");
+    };
+    assert_eq!(again.len(), TABLES);
+}
+
 /// An untagged page states no table, and a tagged page with none states none.
 #[test]
 fn no_tree_and_no_table_state_nothing() {

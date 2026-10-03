@@ -574,7 +574,9 @@ impl StructureTree {
     ///
     /// For a reader that wants the content of particular elements — a table's
     /// cells — rather than the page's. The page's characters are grouped by
-    /// sequence once, so the cost is the page plus the subtrees walked.
+    /// sequence once **per call**, so the cost of a call is the page plus the
+    /// subtrees walked, and a caller asks for every element it wants in one
+    /// call: a call per table was the page's characters times its tables.
     pub(crate) fn element_runs(
         &self,
         elements: &[&StructElement],

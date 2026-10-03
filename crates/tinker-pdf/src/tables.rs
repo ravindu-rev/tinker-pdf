@@ -441,8 +441,10 @@ impl Page {
         match source {
             TableSource::Stated => PageTables::Stated(stated),
             TableSource::Inferred if !stated.is_empty() => PageTables::Stated(stated),
+            // Read once: the page states none, which is what the inference
+            // would ask the tree again to learn.
             TableSource::Inferred => {
-                PageTables::Inferred(self.inferred_tables(&TableOptions::default()))
+                PageTables::Inferred(self.inferred_tables_beside(&TableOptions::default(), false))
             }
         }
     }
@@ -455,7 +457,11 @@ impl Page {
     /// [`TableOptions::hide_structure`] is set.
     #[must_use]
     pub fn inferred_tables(&self, options: &TableOptions) -> InferredTables {
-        let stated = !self.stated_tables().is_empty();
+        self.inferred_tables_beside(options, !self.stated_tables().is_empty())
+    }
+
+    /// [`Page::inferred_tables`], told whether the tree states a table here.
+    fn inferred_tables_beside(&self, options: &TableOptions, stated: bool) -> InferredTables {
         if stated && !options.hide_structure {
             return InferredTables {
                 warnings: vec![TableWarning::TreePresent],
@@ -483,19 +489,28 @@ impl Page {
         };
         let text = self.text();
         let index = self.index();
-        let mut out = Vec::new();
-        for table in tree
+        let tables: Vec<(&StructElement, Vec<Vec<&StructElement>>)> = tree
             .elements()
             .into_iter()
             .filter(|e| e.standard_type == "Table")
-        {
-            let rows = rows_of(table);
-            let cells: Vec<&StructElement> = rows.iter().flatten().copied().collect();
-            let runs = tree.element_runs(&cells, index, &text);
+            .map(|table| (table, rows_of(table)))
+            .collect();
+        // Every table's cells joined in one call, so the page's characters
+        // are grouped by sequence once for the page and not once a table:
+        // a call a table was the page's characters times its tables.
+        let cells: Vec<&StructElement> = tables
+            .iter()
+            .flat_map(|(_, rows)| rows.iter().flatten().copied())
+            .collect();
+        let mut runs = tree.element_runs(&cells, index, &text).into_iter();
+        let mut out = Vec::new();
+        for (table, rows) in &tables {
+            let count = rows.iter().map(Vec::len).sum();
+            let runs: Vec<Vec<StructuredNode>> = runs.by_ref().take(count).collect();
             let here =
                 table.page == Some(index) || runs.iter().flatten().any(|n| !n.text.is_empty());
             if here {
-                out.push(stated(table, &rows, &runs));
+                out.push(stated(table, rows, &runs));
             }
         }
         out
@@ -582,11 +597,15 @@ fn stated(
             let mut col_span = span(attributes.and_then(|a| a.col_span));
             let column = grid.first_free(cursor, row).unwrap_or(limit);
             let mut fits = true;
-            if row + row_span > rows.len() {
-                row_span = rows.len() - row;
+            // Each span against what is left of the table, never added to
+            // where it starts first: a `/RowSpan` of four billion in the
+            // second row overflows a 32-bit `usize`.
+            let rows_left = rows.len().saturating_sub(row);
+            if row_span > rows_left {
+                row_span = rows_left;
                 fits = false;
             }
-            if column >= limit || column + col_span > limit {
+            if column >= limit || col_span > limit - column {
                 col_span = limit.saturating_sub(column).max(1);
                 fits = false;
             }
@@ -634,7 +653,7 @@ fn stated(
     }
     let columns = cells
         .iter()
-        .map(|c| (c.column + c.col_span).min(limit))
+        .map(|c| c.column.saturating_add(c.col_span).min(limit))
         .max()
         .unwrap_or(0);
     let mut width = 0i64;

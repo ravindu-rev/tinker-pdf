@@ -291,13 +291,18 @@ rows through `THead`, `TBody`, `TFoot` and any other grouping element, and
 each row's `TH` and `TD` cells, never walking into a `Table` inside a cell;
 each cell's characters are the ones the structure join claims for its
 subtree over the **same** `TextPage` (`StructureTree::element_runs`, the
-page's sequences grouped once). Cells are placed as a table model places
+page's sequences grouped once — once a page, every table's cells joined in
+one call, since the review of this lane found a call a table, which was the
+page's characters times its tables: four thousand one-cell tables took 86
+seconds unoptimised and take under one). Cells are placed as a table model places
 them — each in its row's first column no span above still holds — and what
 the file's arithmetic does not allow is named rather than repaired:
 `TableWarning::SpanInconsistent` for a cell over a held slot, a row span
 past the last row, or a column span past the most columns a table of that
 many cells can have (the clamp that keeps a `/ColSpan` of four billion from
-being an allocation), and `TableWarning::RaggedRows` for a row whose width is
+being an allocation; each span is compared with what is left of the table,
+never added to where it starts, which on a 32-bit target overflowed), and
+`TableWarning::RaggedRows` for a row whose width is
 not the table's. Placement asks a segment tree over the columns where the
 next free one is, so a table whose every cell spans every row is a logarithm
 per cell and not a walk.
