@@ -41,14 +41,14 @@ in one handle is the same data race it would be in Rust, and no C ABI can
 stop it. One handle per thread, or the caller's own lock; freeing stays safe
 from any thread.
 
-**Two hundred and eight functions**, counted from the committed
+**Two hundred and eighteen functions**, counted from the committed
 header, October 2026 — eighteen open and render, two streaming, five
 validating, fifty-five writing, thirteen running form scripts
 (`tpdf_editor_recalculate` and the ten calls of its report,
 `tpdf_editor_formatted_value`, `_keystroke` and `_validate`), thirty reading
 signatures, thirty-four on the read surface, sixteen document operations
-twenty-two on the forms surface and thirteen of the builder's graphics
-resources.
+twenty-two on the forms surface, thirteen of the builder's graphics
+resources and ten of tagged writing.
 The fifty-five are the write surface below and the five are the strict
 validator it leans on
 (`tpdf_document_validate`, `tpdf_defects_count`, `tpdf_defect_rule`,
@@ -257,6 +257,27 @@ JavaScript the same in camelCase with a `PdfExtGState` built by setters;
 patterns are not here: a `Shading` carries a `Function`, which is recursive
 and has a PostScript calculator arm, and is a sub-surface of its own.
 
+**Tagged writing: ten functions** in `src/tagging.rs`, `PageBuilder::tagged`
+spelled without its closure. A `TpdfTag` is an owned `Tag` built a property
+at a time — `tpdf_tag_new` with the structure type, `tpdf_tag_set_text` over
+a `TpdfTagText` (`/T`, `/Lang`, `/Alt`, `/ActualText`, `/E`),
+`tpdf_tag_set_id`, `tpdf_tag_set_key` (the key and order that make halves
+drawn apart one element) and `tpdf_tag_keep_empty` — and
+`tpdf_page_builder_open_tag` borrows it, so one tag may open several
+elements; `tpdf_page_builder_close_tag` closes the innermost. An element
+open when its page is pushed is reopened on the next page begun, as the
+facade's own `open_tag` does. `tpdf_builder_set_language` writes the
+catalog's `/Lang` and `tpdf_builder_map_role` the `/RoleMap`. An open past
+the deepest nesting the reader walks, a close with nothing open, and a role
+mapping the facade refuses are `EditRefused`, and write nothing. Python has a
+`Tag(kind, title=, lang=, alt=, actual_text=, expansion=, id=, key=,
+keep_empty=)` class with `PageBuilder.open_tag` / `close_tag` and
+`DocumentBuilder.set_language` / `map_role`; JavaScript a `PdfTag` built by
+setters, its key and order `BigInt`s; .NET, Go, Ruby and Java the same over
+the C ABI. A tag's table attributes, namespace and associated files, and
+`continue_at`, `map_role_in`, `add_namespace` and `duplicate_element_ids`,
+are not here: each takes or returns a shape of its own.
+
 **The write surface: fifty-five functions, and the shape they had to be
 given.** The facade has exported `DocumentEditor` and `DocumentBuilder` since
 gap 26, so what stood between the read surface and this one was never
@@ -427,8 +448,8 @@ handle closed by its owner's `Close`/`close` (safe twice), and every string
 and byte array handed back a copy that outlives its handle. None decides a
 default: a save takes the options `tpdf_write_options_init` filled in, a
 view the engine's own `tpdf_destination_init_fit`, and an encrypted save the
-caller's 48 bytes of entropy. Go and Java call **all 208 functions**; Ruby
-calls 207. Each has the parity program (below) and a smoke program that
+caller's 48 bytes of entropy. Go and Java call **all 218 functions**; Ruby
+calls 217. Each has the parity program (below) and a smoke program that
 renders blank-then-inked and then calls, once each, every declaration the
 parity program does not reach — authentication against the two encrypted
 fixtures, the editor's page operations, fields, checkpoint and restore, the
@@ -473,7 +494,7 @@ available, so it has never been compiled. It is a SwiftPM package whose
 `CTinkerPdf` module imports the committed header through a shim (not a
 copy, which would be a second transcription to drift), a `TinkerPdf` target
 covering the core — open, text, render, validate, authenticate, the form
-fill and save, the builder, 49 of the 208 functions — and a `Smoke`
+fill and save, the builder, 49 of the 218 functions — and a `Smoke`
 executable written to the same blank-then-inked pattern. It has no parity
 program, is not in `bindings-parity` and has no CI job; the read surface,
 document operations, signatures and streaming are owed, and so is the first
@@ -624,8 +645,22 @@ once the list is cleared.
 graphics         8bf69d84af79241a94e6770e315ce79dfa9cf1d6f85052af122444c3b94dac5f
 ```
 
+*tagged* builds a two-page tagged document through `open_tag` and
+`close_tag`: the catalog's `/Lang`, a custom type mapped to `H1` with a
+title, a paragraph with a language and an actual text opened on page one and
+closed on page two, a figure with alternate text, a span with an expansion
+and an identifier, an element kept empty and two keyed halves of one
+element drawn out of their reading order (a key that lost its order would
+read them the other way round); a close with nothing open is refused on
+every surface and changes
+nothing.
+
+```text
+tagged           ca75ed2bff10974b46fcc9a55a77fd0b75411085b37a5f263c1559b4d3fba29f
+```
+
 On linux/x86_64, October 2026, the facade, the wheel, the npm package and the
-Go, Ruby and Java bindings printed all twelve recorded hashes; the .NET leg
+Go, Ruby and Java bindings printed all thirteen recorded hashes; the .NET leg
 prints them too and was not run.
 
 `cargo xtask bindings-parity` is the gate, and it is built around two different
@@ -920,7 +955,7 @@ packaged.
 | What | How it shows | Why | See |
 | --- | --- | --- | --- |
 | `ImageData::Compressed` | `TpdfImageKind` has `Jpeg`, `Rgb8` and `Gray8` and no fourth arm | it carries a `CompressedImage` whose colour space holds a palette slice and whose filter holds its own parameters, so projecting it is a sub-surface rather than a struct. It exists for the CBZ synthesiser, which must not decode 200 pages at open — an engine-internal path with no host at the other end. A host holding already-compressed bytes has `Jpeg`, which is the same idea for the one codec hosts actually hold bytes in | [creation](creation.md) |
-| `PageBuilder::tagged` | not projected; a page is drawn untagged through the C ABI | it nests *within* one page and takes a closure whose scope is the structure element's extent, so the closure-free spelling is an `open_tag`/`close_tag` pair on the page handle — a separate question with a separate answer, and neither parity script tags anything. `begin_page`/`push_page` compose with it, which is asserted, so nothing here has to be undone to add it | [tagged-pdf](tagged-pdf.md) |
+| A tag's `table`, `namespace` and `associated_file`; `PageBuilder::continue_at`; `DocumentBuilder`'s `map_role_in`, `add_namespace` and `duplicate_element_ids` | not projected (`PageBuilder::tagged` **is**, since October 2026, as the `open_tag`/`close_tag` pair, with a tag's text properties, identifier, key and keep-empty flag, `set_language` and `map_role`) | owed rather than refused: each takes or returns a shape of its own — `TableAttributes` with its header lists and spans, a `NamespaceId` handle a builder issues, a `NewAssociatedFile`, a list of identifiers | [creation](creation.md) |
 | The rest of `PageBuilder` — `glyphs`, `shading` — and `DocumentBuilder`'s `add_cid_font`, `glyph_run`, `add_shading`, `add_shading_pattern` | not projected (the graphics states, forms, tiling patterns, named fonts, encoded text, bleed box, version and `clear_image_resources` **are**, since October 2026) | owed rather than refused: `glyphs` and `glyph_run` draw `Glyph`s through a composite font, which `add_cid_font` registers from a font program, and `add_shading` takes a `Shading` built on a `Function` — recursive, with a PostScript calculator arm — a sub-surface of its own. `tpdf_page_builder_raw` is the escape hatch that keeps them reachable in the meantime | [ROADMAP.md](../ROADMAP.md) |
 | `DocumentEditor`'s `import_page`, `keep_pages`, `flatten_annotations`, `add_annotation`, `reset_form`, `set_field_values`, `set_calculated_values` | not projected (`recalculate` **is** projected, as `tpdf_editor_recalculate`, and this row listed it by mistake) | the same: owed, each with a shape of its own — a second document, a slice of indices, a `Dict`, a `Recalculation` — and none named by the milestones | [ROADMAP.md](../ROADMAP.md) |
 | The graphics-writing surface added in September 2026: `Target::Named` and both `add_named_destination`s; `DocumentBuilder::add_layer`, `PageBuilder::optional` and `DocumentEditor::set_layer_visible`; `add_separation_color_space`, `add_device_n_color_space`, `set_fill_tint` / `set_stroke_tint` and `ImageColorSpace::Tint`; `DocumentEditor`'s `stamp`, `add_resource`, `add_form` and `import_page_as_form`; `Page::images` | not projected | owed rather than refused: each takes or returns a shape of its own — a `LayerId` handle, a `Function::Calculator` program, `DeviceNAttributes`, a `StampPlacement` and a form reference, a `PageImage` with its samples, masks and placements — and `optional` takes a closure, so it needs a closure-free pair on the page handle as `tagged` does. Ruling 11 makes each a debt the day it reached the facade | [ROADMAP.md](../ROADMAP.md) |
@@ -931,8 +966,8 @@ packaged.
 | CommonJS build | none; ESM only | two builds of the engine can diverge | — |
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |
-| Streaming in Ruby | `TinkerPdf::Document` has no streaming open; the other 207 functions are there | `tpdf_document_open_streaming` takes its vtable **by value**, and Fiddle passes no struct by value; and the engine calls `read` from whatever thread is working, where a Ruby block would run without the GVL. A by-pointer variant on the C ABI would answer the first and not the second | [opening](opening.md) |
-| Swift beyond its core | 49 of 208 functions, no parity program, no CI | written without a toolchain; widening unverified source would only widen what nobody has run | [ROADMAP.md](../ROADMAP.md) |
+| Streaming in Ruby | `TinkerPdf::Document` has no streaming open; the other 217 functions are there | `tpdf_document_open_streaming` takes its vtable **by value**, and Fiddle passes no struct by value; and the engine calls `read` from whatever thread is working, where a Ruby block would run without the GVL. A by-pointer variant on the C ABI would answer the first and not the second | [opening](opening.md) |
+| Swift beyond its core | 49 of 218 functions, no parity program, no CI | written without a toolchain; widening unverified source would only widen what nobody has run | [ROADMAP.md](../ROADMAP.md) |
 | Published packages | `pip install` / `npm install` / `dotnet add package` do not work yet, and Go, Ruby, Java and Swift have no package at all | the facade is unstable until 0.1.0 | [ROADMAP.md](../ROADMAP.md) |
 
 ## Verified
@@ -1089,6 +1124,26 @@ packaged.
   knockout flags crossing as each other, Java's character and word spacing
   crossing as each other, Python's `no-distortion` spelled as faster tiling,
   JavaScript's stroking alpha dropped: **5 of 5 caught**.
+- **Tagged writing is pinned by byte equality with the facade**
+  (`src/tagging/tests.rs`): the *tagged* script's document built through the
+  C ABI equals the facade's, passes the strict validator and reads back
+  through `Document::structure` with no warning; one tag handle opens both
+  keyed halves; a refused role mapping, a close with nothing open and the
+  opens past the depth the reader walks write nothing, so the document
+  equals the facade's built from the calls that were taken; null on every
+  entry point is refused; `TpdfTagText`'s numbers are pinned. Counted
+  injections, October 2026: alternate text written as actual text fires
+  **1** (the byte equality); a close with nothing open answering `Ok` fires
+  **2** (the refusal test and the byte equality); a key that loses its order
+  fired **0** while the script drew its keyed halves in reading order, so
+  every surface's script now draws them out of it — the recorded hash moved
+  from `bcaf91ec…` to `ca75ed2b…` for that reason and no other — and it
+  fires **1**. Six defects in the bindings' own code, each failing
+  `bindings-parity` on that surface's *tagged* hash alone — Go's key
+  crossing as its order, Ruby's `ALT` transcribed as `ACTUAL_TEXT` and
+  Ruby's key losing its order, Java's language dropped, Python's language
+  written as the title, JavaScript's `keepEmpty` keeping nothing: **6 of 6
+  caught**.
 - **Signatures in Python and JavaScript** are held by the *signatures*
   script's hash, equal to the facade's, and by an assertion leg in each
   script for what only those two carry: an anchor that is not a certificate
@@ -1110,11 +1165,11 @@ packaged.
   interpreter and a missing `node_modules` reports both by name with the
   command that would fix each, exits 0 without them, and exits non-zero under
   `--require-all`.
-- **Go, Ruby and Java** are held by the parity programs — all twelve hashes,
+- **Go, Ruby and Java** are held by the parity programs — all thirteen hashes,
   equal to the facade's, on linux/x86_64 with Go 1.24, Ruby 3.3 (Fiddle 1.1)
   and OpenJDK 21, October 2026 — and by smoke programs that render
   blank-then-inked and then call every declaration the parity programs do
-  not: Go and Java all 208 functions, Ruby 207. Counted injections, each one
+  not: Go and Java all 218 functions, Ruby 217. Counted injections, each one
   defect in a binding's own code and never in its script, each failing
   `bindings-parity` on that surface and no other — **12 of 12 caught**: Go's
   null view number crossing as 0 rather than NaN (*read-surface*), an

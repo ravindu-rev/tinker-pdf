@@ -597,6 +597,21 @@ typedef enum TpdfActionKind {
   TPDF_ACTION_KIND_OTHER = 6,
 } TpdfActionKind;
 
+// Which text property [`tpdf_tag_set_text`] sets (14.7.2 Table 323, 14.9).
+typedef enum TpdfTagText {
+  // `/T`, the element's title.
+  TPDF_TAG_TEXT_TITLE = 0,
+  // `/Lang`, the natural language of its content: a BCP 47 tag, or empty
+  // for unknown.
+  TPDF_TAG_TEXT_LANG = 1,
+  // `/Alt`, a description of content that is not text.
+  TPDF_TAG_TEXT_ALT = 2,
+  // `/ActualText`, what the content is where the glyphs do not say it.
+  TPDF_TAG_TEXT_ACTUAL_TEXT = 3,
+  // `/E`, the expansion of an abbreviation.
+  TPDF_TAG_TEXT_EXPANSION = 4,
+} TpdfTagText;
+
 // Every file attached to a document, in name order. Opaque to callers.
 //
 // Holds its own clone of the document — an `Arc` bump, not a copy — because
@@ -702,6 +717,9 @@ typedef struct TpdfSanitiseReport TpdfSanitiseReport;
 // `TpdfDocument` it came from and is freed independently -- the same
 // arrangement `TpdfBitmap` has, and for the same reason.
 typedef struct TpdfSignatures TpdfSignatures;
+
+// A structure element to open: its type and properties. Opaque.
+typedef struct TpdfTag TpdfTag;
 
 // Certificates the caller trusts, as DER. Opaque to callers.
 typedef struct TpdfTrustAnchors TpdfTrustAnchors;
@@ -3543,6 +3561,102 @@ enum TpdfStatus tpdf_warning_message(const struct TpdfWarnings *warnings,
 // `warnings` must have come from [`tpdf_document_warnings`] and must not be
 // used afterwards.
 void tpdf_warnings_free(struct TpdfWarnings *warnings);
+
+// A structure element of type `kind` -- `P`, `H1`, `Figure`, `Span`, or a
+// type of the caller's own mapped with [`tpdf_builder_map_role`] --
+// `Tag::new`. Freed with [`tpdf_tag_free`].
+//
+// # Safety
+//
+// `kind` must be valid for `kind_len` bytes and `out` a valid pointer.
+enum TpdfStatus tpdf_tag_new(const uint8_t *kind, size_t kind_len, struct TpdfTag **out);
+
+// Sets one of the element's text properties -- `Tag::title`, `lang`,
+// `alt`, `actual_text` or `expansion`, as `which` names. Setting one twice
+// keeps the second.
+//
+// # Safety
+//
+// `tag` must be a live handle and `text` null-terminated UTF-8.
+enum TpdfStatus tpdf_tag_set_text(struct TpdfTag *tag, enum TpdfTagText which, const char *text);
+
+// Sets `/ID`, the element's identifier -- `Tag::id`. The first element in
+// the tree's order to carry an identifier keeps it.
+//
+// # Safety
+//
+// `tag` must be a live handle and `id` valid for `id_len` bytes.
+enum TpdfStatus tpdf_tag_set_id(struct TpdfTag *tag, const uint8_t *id, size_t id_len);
+
+// Names the element, so that halves drawn apart are one element --
+// `Tag::keyed`: `key` says which element, `order` where this half reads.
+//
+// # Safety
+//
+// `tag` must be a live handle.
+enum TpdfStatus tpdf_tag_set_key(struct TpdfTag *tag, uint64_t key, uint64_t order);
+
+// Writes the element even if nothing is drawn inside it --
+// `Tag::keep_empty`.
+//
+// # Safety
+//
+// `tag` must be a live handle.
+enum TpdfStatus tpdf_tag_keep_empty(struct TpdfTag *tag);
+
+// Frees a tag. Null is accepted and does nothing. An element it opened
+// stays open: the page holds its own copy.
+//
+// # Safety
+//
+// `tag` must have come from [`tpdf_tag_new`] and must not be used
+// afterwards.
+void tpdf_tag_free(struct TpdfTag *tag);
+
+// Opens the element `tag` describes, so everything drawn until the
+// matching [`tpdf_page_builder_close_tag`] belongs to it -- across drawing
+// calls and across pages (an element open when its page is pushed is
+// reopened on the next page begun) -- `PageBuilder::open_tag`.
+//
+// [`TpdfStatus::EditRefused`], opening nothing, past `MAX_TAG_DEPTH`
+// nested elements; what is drawn then belongs to the element around it,
+// and the matching close is still owed.
+//
+// # Safety
+//
+// `page` and `tag` must be live handles.
+enum TpdfStatus tpdf_page_builder_open_tag(struct TpdfPageBuilder *page, const struct TpdfTag *tag);
+
+// Closes the innermost element [`tpdf_page_builder_open_tag`] opened --
+// `PageBuilder::close_tag`. [`TpdfStatus::EditRefused`], closing nothing,
+// when no element is open; a close matching a refused open is accepted.
+//
+// # Safety
+//
+// `page` must be a live handle.
+enum TpdfStatus tpdf_page_builder_close_tag(struct TpdfPageBuilder *page);
+
+// Sets the document's natural language, the catalog's `/Lang` --
+// `DocumentBuilder::set_language`: a BCP 47 tag, or empty for unknown.
+//
+// # Safety
+//
+// `builder` must be a live handle and `language` null-terminated UTF-8.
+enum TpdfStatus tpdf_builder_set_language(struct TpdfBuilder *builder, const char *language);
+
+// Maps a structure type of the caller's own to a standard one in the
+// `/RoleMap` -- `DocumentBuilder::map_role`. [`TpdfStatus::EditRefused`],
+// mapping nothing, for an empty or identical pair, a type already mapped
+// elsewhere, a loop, or a full map.
+//
+// # Safety
+//
+// `builder` must be a live handle and both names valid for their lengths.
+enum TpdfStatus tpdf_builder_map_role(struct TpdfBuilder *builder,
+                                      const uint8_t *custom,
+                                      size_t custom_len,
+                                      const uint8_t *standard,
+                                      size_t standard_len);
 
 #ifdef __cplusplus
 }  // extern "C"

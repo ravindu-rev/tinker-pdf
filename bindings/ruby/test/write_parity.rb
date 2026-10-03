@@ -505,6 +505,63 @@ def graphics
   bytes
 end
 
+# Tagged writing through open_tag and close_tag.
+def tagged
+  builder = TinkerPdf::Builder.new
+  builder.add_base_font('F1', 'Helvetica')
+  builder.set_language('en-GB')
+  builder.map_role('Heading', 'H1')
+  open = lambda do |page, kind, &configure|
+    tag = TinkerPdf::Tag.new(kind)
+    configure.call(tag)
+    page.open_tag(tag)
+    tag.close
+  end
+  one = builder.begin_page(200.0, 200.0)
+  open.call(one, 'Heading') { |t| t.set_text(TinkerPdf::TagText::TITLE, 'Introduction') }
+  one.text('F1', 14.0, 20.0, 170.0, 'Tagged parity')
+  one.close_tag
+  open.call(one, 'P') do |t|
+    t.set_text(TinkerPdf::TagText::LANG, 'fr')
+    t.set_text(TinkerPdf::TagText::ACTUAL_TEXT, 'Bonjour')
+  end
+  one.text('F1', 12.0, 20.0, 150.0, 'Bon')
+  builder.push_page(one)
+  one.close
+  two = builder.begin_page(200.0, 200.0)
+  two.text('F1', 12.0, 20.0, 170.0, 'jour')
+  two.close_tag
+  refused = begin
+    two.close_tag
+    false
+  rescue TinkerPdf::Error => e
+    e.status == TinkerPdf::Status::EDIT_REFUSED
+  end
+  check(refused, 'a close with nothing open must be refused')
+  open.call(two, 'Figure') { |t| t.set_text(TinkerPdf::TagText::ALT, 'A grey square') }
+  two.fill_rect(20.0, 100.0, 40.0, 40.0, 0.5)
+  two.close_tag
+  open.call(two, 'Span') do |t|
+    t.set_text(TinkerPdf::TagText::EXPANSION, 'Portable Document Format')
+    t.set_id('pdf-1')
+  end
+  two.text('F1', 12.0, 20.0, 80.0, 'PDF')
+  two.close_tag
+  open.call(two, 'Div', &:keep_empty)
+  two.close_tag
+  open.call(two, 'P') { |t| t.set_key(7, 1) }
+  two.text('F1', 12.0, 20.0, 60.0, 'read second')
+  two.close_tag
+  open.call(two, 'P') { |t| t.set_key(7, 0) }
+  two.text('F1', 12.0, 20.0, 40.0, 'read first')
+  two.close_tag
+  builder.push_page(two)
+  two.close
+  bytes = builder.finish
+  builder.close
+  bytes
+end
+
 if ARGV.size != 1
   warn 'usage: write_parity.rb <form-fields.pdf>'
   exit 2
@@ -530,4 +587,5 @@ formed, form_lines = forms(fixture, form_data_dir)
 report('forms', formed)
 report_read('form-data', form_data_text(formed, form_lines, form_data_dir))
 report('graphics', graphics)
+report('tagged', tagged)
 puts 'RUBY-PARITY: RAN'

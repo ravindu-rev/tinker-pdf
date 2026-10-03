@@ -60,6 +60,7 @@ const {
   PdfRadioButton,
   PdfFormData,
   PdfExtGState,
+  PdfTag,
 } = module_;
 
 const wasmUrl = new URL('tinker_pdf_js_bg.wasm', entry);
@@ -726,6 +727,57 @@ function graphics() {
   return bytes;
 }
 
+// Tagged writing through openTag and closeTag.
+function tagged() {
+  const builder = new PdfBuilder();
+  builder.addBaseFont(name('F1'), name('Helvetica'));
+  builder.setLanguage('en-GB');
+  builder.mapRole(name('Heading'), name('H1'));
+  const open = (page, kind, configure) => {
+    const tag = new PdfTag(name(kind));
+    configure(tag);
+    page.openTag(tag);
+    tag.free();
+  };
+  const one = builder.beginPage(200, 200);
+  open(one, 'Heading', (tag) => tag.setTitle('Introduction'));
+  one.text(name('F1'), 14, 20, 170, 'Tagged parity');
+  one.closeTag();
+  open(one, 'P', (tag) => { tag.setLang('fr'); tag.setActualText('Bonjour'); });
+  one.text(name('F1'), 12, 20, 150, 'Bon');
+  builder.pushPage(one);
+  one.free();
+  const two = builder.beginPage(200, 200);
+  two.text(name('F1'), 12, 20, 170, 'jour');
+  two.closeTag();
+  let refusedClose = false;
+  try {
+    two.closeTag();
+  } catch (error) {
+    refusedClose = String(error).includes('closeTag');
+  }
+  if (!refusedClose) throw new Error('a close with nothing open must be refused');
+  open(two, 'Figure', (tag) => tag.setAlt('A grey square'));
+  two.fillRect(20, 100, 40, 40, 0.5);
+  two.closeTag();
+  open(two, 'Span', (tag) => { tag.setExpansion('Portable Document Format'); tag.setId(name('pdf-1')); });
+  two.text(name('F1'), 12, 20, 80, 'PDF');
+  two.closeTag();
+  open(two, 'Div', (tag) => tag.keepEmpty());
+  two.closeTag();
+  open(two, 'P', (tag) => tag.setKey(7n, 1n));
+  two.text(name('F1'), 12, 20, 60, 'read second');
+  two.closeTag();
+  open(two, 'P', (tag) => tag.setKey(7n, 0n));
+  two.text(name('F1'), 12, 20, 40, 'read first');
+  two.closeTag();
+  builder.pushPage(two);
+  two.free();
+  const bytes = builder.finish();
+  builder.free();
+  return bytes;
+}
+
 function report(script, bytes) {
   const document_ = new PdfDocument(bytes);
   const defects = document_.validate();
@@ -770,6 +822,7 @@ const said = encoder.encode(formDataText(formed, formLines, formDataDir));
 if (process.env.TINKER_PARITY_DUMP) process.stdout.write(Buffer.from(said));
 console.log(`READ sha256=${sha256(said)} surface=js script=form-data bytes=${said.length}`);
 report('graphics', graphics());
+report('tagged', tagged());
 transactionRollsBackOnAThrow(fixture);
 
 // A consumed handle refuses rather than producing a second document, which is

@@ -20,10 +20,12 @@ mod docops;
 mod forms;
 mod graphics;
 mod read;
+mod tagging;
 pub use docops::*;
 pub use forms::*;
 pub use graphics::*;
 pub use read::*;
+pub use tagging::*;
 
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};

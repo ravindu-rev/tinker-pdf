@@ -5,6 +5,7 @@ import io.github.ravindu_rev.tinkerpdf.Editor;
 import io.github.ravindu_rev.tinkerpdf.FormData;
 import io.github.ravindu_rev.tinkerpdf.OutlineEntry;
 import io.github.ravindu_rev.tinkerpdf.PageBuilder;
+import io.github.ravindu_rev.tinkerpdf.Tag;
 import io.github.ravindu_rev.tinkerpdf.TinkerPdf;
 import io.github.ravindu_rev.tinkerpdf.TinkerPdf.DestKind;
 import io.github.ravindu_rev.tinkerpdf.TinkerPdf.Destination;
@@ -652,6 +653,63 @@ public final class WriteParity {
         }
     }
 
+    static void openTag(PageBuilder page, String kind, java.util.function.Consumer<Tag> configure) {
+        try (Tag tag = new Tag(kind)) {
+            configure.accept(tag);
+            page.openTag(tag);
+        }
+    }
+
+    /** Tagged writing through openTag and closeTag. */
+    static byte[] tagged() {
+        try (Builder builder = new Builder()) {
+            builder.addBaseFont("F1", "Helvetica");
+            builder.setLanguage("en-GB");
+            builder.mapRole("Heading", "H1");
+            try (PageBuilder one = builder.beginPage(200, 200)) {
+                openTag(one, "Heading", t -> t.setText(TinkerPdf.TagText.TITLE, "Introduction"));
+                one.text("F1", 14, 20, 170, "Tagged parity");
+                one.closeTag();
+                openTag(one, "P", t -> {
+                    t.setText(TinkerPdf.TagText.LANG, "fr");
+                    t.setText(TinkerPdf.TagText.ACTUAL_TEXT, "Bonjour");
+                });
+                one.text("F1", 12, 20, 150, "Bon");
+                builder.pushPage(one);
+            }
+            try (PageBuilder two = builder.beginPage(200, 200)) {
+                two.text("F1", 12, 20, 170, "jour");
+                two.closeTag();
+                boolean refused = false;
+                try {
+                    two.closeTag();
+                } catch (TinkerPdfException e) {
+                    refused = e.status() == TinkerPdf.Status.EDIT_REFUSED;
+                }
+                check(refused, "a close with nothing open must be refused");
+                openTag(two, "Figure", t -> t.setText(TinkerPdf.TagText.ALT, "A grey square"));
+                two.fillRect(20, 100, 40, 40, 0.5);
+                two.closeTag();
+                openTag(two, "Span", t -> {
+                    t.setText(TinkerPdf.TagText.EXPANSION, "Portable Document Format");
+                    t.setId(utf8("pdf-1"));
+                });
+                two.text("F1", 12, 20, 80, "PDF");
+                two.closeTag();
+                openTag(two, "Div", Tag::keepEmpty);
+                two.closeTag();
+                openTag(two, "P", t -> t.setKey(7, 1));
+                two.text("F1", 12, 20, 60, "read second");
+                two.closeTag();
+                openTag(two, "P", t -> t.setKey(7, 0));
+                two.text("F1", 12, 20, 40, "read first");
+                two.closeTag();
+                builder.pushPage(two);
+            }
+            return builder.finish();
+        }
+    }
+
     public static void main(String[] args) throws IOException {
         if (args.length != 1) {
             System.err.println("usage: WriteParity <form-fields.pdf>");
@@ -679,6 +737,7 @@ public final class WriteParity {
         report("forms", formed.saved());
         reportRead("form-data", formDataText(formed.saved(), formed.lines(), formDataDir));
         report("graphics", graphics());
+        report("tagged", tagged());
         System.out.println("JAVA-PARITY: RAN");
     }
 }

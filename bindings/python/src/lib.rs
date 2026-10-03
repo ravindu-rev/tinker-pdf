@@ -1204,6 +1204,73 @@ impl PyOutlineEntry {
     }
 }
 
+/// A structure element to open on a page (14.7.2): its type and the
+/// properties a `Tag` carries, each `None` for absent.
+///
+/// `key` is `(key, order)` for one half of an element drawn in several
+/// places (`Tag::keyed`); `keep_empty` writes the element even with nothing
+/// drawn inside it.
+#[pyclass(name = "Tag")]
+#[derive(Clone)]
+pub struct PyTag {
+    inner: tinker_pdf::Tag,
+}
+
+#[pymethods]
+impl PyTag {
+    #[new]
+    #[pyo3(signature = (
+        kind, title = None, lang = None, alt = None, actual_text = None, expansion = None,
+        id = None, key = None, keep_empty = false
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        kind: &[u8],
+        title: Option<&str>,
+        lang: Option<&str>,
+        alt: Option<&str>,
+        actual_text: Option<&str>,
+        expansion: Option<&str>,
+        id: Option<&[u8]>,
+        key: Option<(u64, u64)>,
+        keep_empty: bool,
+    ) -> PyTag {
+        let mut tag = tinker_pdf::Tag::new(kind);
+        if let Some(text) = title {
+            tag = tag.title(text);
+        }
+        if let Some(text) = lang {
+            tag = tag.lang(text);
+        }
+        if let Some(text) = alt {
+            tag = tag.alt(text);
+        }
+        if let Some(text) = actual_text {
+            tag = tag.actual_text(text);
+        }
+        if let Some(text) = expansion {
+            tag = tag.expansion(text);
+        }
+        if let Some(id) = id {
+            tag = tag.id(id);
+        }
+        if let Some((key, order)) = key {
+            tag = tag.keyed(key, order);
+        }
+        if keep_empty {
+            tag = tag.keep_empty();
+        }
+        PyTag { inner: tag }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<tinker_pdf.Tag {}>",
+            String::from_utf8_lossy(self.inner.kind())
+        )
+    }
+}
+
 /// A page being drawn, owned until it is pushed.
 ///
 /// Born from a builder or not at all: there is no constructor, because a page
@@ -1269,6 +1336,31 @@ impl PyPageBuilder {
     fn raw(&mut self, operators: &[u8]) -> PyResult<()> {
         self.get()?.raw(operators);
         Ok(())
+    }
+
+    /// Opens the structure element `tag` describes: everything drawn until
+    /// the matching `close_tag` belongs to it, across calls and across
+    /// pages. Raises, opening nothing, past the deepest nesting the reader
+    /// walks (the close is still owed).
+    fn open_tag(&mut self, tag: &PyTag) -> PyResult<()> {
+        if self.get()?.open_tag(&tag.inner) {
+            Ok(())
+        } else {
+            Err(refused(
+                "open_tag",
+                "past the deepest nesting this engine reads back",
+            ))
+        }
+    }
+
+    /// Closes the innermost element `open_tag` opened; raises when none is
+    /// open.
+    fn close_tag(&mut self) -> PyResult<()> {
+        if self.get()?.close_tag() {
+            Ok(())
+        } else {
+            Err(refused("close_tag", "no element is open"))
+        }
     }
 
     /// Sets this page's `/BleedBox` (14.11.2).
@@ -1550,6 +1642,30 @@ impl PyBuilder {
         }
     }
 
+    /// Sets the document's natural language, the catalog's `/Lang`: a BCP 47
+    /// tag, or `""` for unknown.
+    fn set_language(&mut self, language: &str) -> PyResult<()> {
+        self.get()?.set_language(language);
+        Ok(())
+    }
+
+    /// Maps a structure type of the caller's own to a standard one in the
+    /// `/RoleMap`; raises, mapping nothing, when the facade refuses it.
+    fn map_role(&mut self, custom: &[u8], standard: &[u8]) -> PyResult<()> {
+        if self.get()?.map_role(custom, standard) {
+            Ok(())
+        } else {
+            Err(refused(
+                "map_role",
+                &format!(
+                    "{:?} to {:?}",
+                    String::from_utf8_lossy(custom),
+                    String::from_utf8_lossy(standard)
+                ),
+            ))
+        }
+    }
+
     /// Stops later pages from inheriting the images registered so far.
     fn clear_image_resources(&mut self) -> PyResult<()> {
         self.get()?.clear_image_resources();
@@ -1708,5 +1824,6 @@ fn module_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<docops::PySanitiseReport>()?;
     signatures::register(module)?;
     module.add_class::<forms::PyFormData>()?;
+    module.add_class::<PyTag>()?;
     Ok(())
 }

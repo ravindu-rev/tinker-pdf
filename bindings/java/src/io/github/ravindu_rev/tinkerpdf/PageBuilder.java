@@ -66,6 +66,16 @@ public final class PageBuilder implements AutoCloseable {
         }
     }
 
+    /** Opens the element {@code tag} describes, until the matching closeTag. */
+    public void openTag(Tag tag) {
+        Native.check(Native.tpdf_page_builder_open_tag, pointer, tag.pointer());
+    }
+
+    /** Closes the innermost element openTag opened. */
+    public void closeTag() {
+        Native.check(Native.tpdf_page_builder_close_tag, pointer);
+    }
+
     /** This page's /BleedBox (14.11.2). */
     public void setBleedBox(double x0, double y0, double x1, double y1) {
         Native.check(Native.tpdf_page_builder_set_bleed_box, pointer, x0, y0, x1, y1);

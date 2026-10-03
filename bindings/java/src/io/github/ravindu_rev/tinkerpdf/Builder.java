@@ -94,6 +94,23 @@ public final class Builder implements AutoCloseable {
         return new Builder(Document.handle(Native.tpdf_builder_new_with_version, major, minor));
     }
 
+    /** Sets the catalog's /Lang: a BCP 47 tag, or "" for unknown. */
+    public void setLanguage(String language) {
+        try (Arena arena = Arena.ofConfined()) {
+            Native.check(Native.tpdf_builder_set_language, pointer, Native.cString(arena, language));
+        }
+    }
+
+    /** Maps a structure type of the caller's own to a standard one. */
+    public void mapRole(String custom, String standard) {
+        byte[] c = ascii(custom);
+        byte[] s = ascii(standard);
+        try (Arena arena = Arena.ofConfined()) {
+            Native.check(Native.tpdf_builder_map_role, pointer, Native.bytes(arena, c), (long) c.length,
+                    Native.bytes(arena, s), (long) s.length);
+        }
+    }
+
     /** Stops later pages inheriting the images registered so far. */
     public void clearImageResources() {
         Native.check(Native.tpdf_builder_clear_image_resources, pointer);

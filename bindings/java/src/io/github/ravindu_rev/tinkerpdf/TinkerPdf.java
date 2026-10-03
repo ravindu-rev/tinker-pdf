@@ -123,6 +123,9 @@ public final class TinkerPdf {
     /** {@code TpdfDeviceSpace}. */
     public enum DeviceSpace { GRAY, RGB, CMYK }
 
+    /** {@code TpdfTagText}: which text property a tag sets. */
+    public enum TagText { TITLE, LANG, ALT, ACTUAL_TEXT, EXPANSION }
+
     /** {@code TpdfTilingType}, counted from zero. */
     public enum TilingType { CONSTANT_SPACING, NO_DISTORTION, FASTER_TILING }
 

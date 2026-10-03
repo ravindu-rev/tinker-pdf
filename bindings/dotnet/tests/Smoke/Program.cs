@@ -920,6 +920,74 @@ using (var graphicsBuilder = DocumentBuilder.WithVersion(2, 0))
 }
 Report("graphics", graphicsBytes);
 
+// Script eight: tagged. Structure elements through OpenTag and CloseTag.
+static void OpenTagged(PageBuilder page, string kind, Action<Tag> configure)
+{
+    using var tag = new Tag(System.Text.Encoding.ASCII.GetBytes(kind));
+    configure(tag);
+    page.OpenTag(tag);
+}
+
+byte[] taggedBytes;
+using (var taggedBuilder = new DocumentBuilder())
+{
+    taggedBuilder.AddBaseFont("F1"u8.ToArray(), "Helvetica"u8.ToArray());
+    taggedBuilder.SetLanguage("en-GB");
+    taggedBuilder.MapRole("Heading"u8.ToArray(), "H1"u8.ToArray());
+    using (var one = taggedBuilder.BeginPage(200.0, 200.0))
+    {
+        OpenTagged(one, "Heading", t => t.SetText(TagText.Title, "Introduction"));
+        one.Text("F1"u8.ToArray(), 14, 20, 170, "Tagged parity");
+        one.CloseTag();
+        OpenTagged(one, "P", t =>
+        {
+            t.SetText(TagText.Lang, "fr");
+            t.SetText(TagText.ActualText, "Bonjour");
+        });
+        one.Text("F1"u8.ToArray(), 12, 20, 150, "Bon");
+        taggedBuilder.PushPage(one);
+    }
+    using (var two = taggedBuilder.BeginPage(200.0, 200.0))
+    {
+        two.Text("F1"u8.ToArray(), 12, 20, 170, "jour");
+        two.CloseTag();
+        var refusedClose = false;
+        try
+        {
+            two.CloseTag();
+        }
+        catch (PdfException e) when (e.Status == Status.EditRefused)
+        {
+            refusedClose = true;
+        }
+        if (!refusedClose)
+        {
+            throw new Exception("a close with nothing open must be refused");
+        }
+        OpenTagged(two, "Figure", t => t.SetText(TagText.Alt, "A grey square"));
+        two.FillRect(20, 100, 40, 40, 0.5);
+        two.CloseTag();
+        OpenTagged(two, "Span", t =>
+        {
+            t.SetText(TagText.Expansion, "Portable Document Format");
+            t.SetId("pdf-1"u8.ToArray());
+        });
+        two.Text("F1"u8.ToArray(), 12, 20, 80, "PDF");
+        two.CloseTag();
+        OpenTagged(two, "Div", t => t.KeepEmpty());
+        two.CloseTag();
+        OpenTagged(two, "P", t => t.SetKey(7, 1));
+        two.Text("F1"u8.ToArray(), 12, 20, 60, "read second");
+        two.CloseTag();
+        OpenTagged(two, "P", t => t.SetKey(7, 0));
+        two.Text("F1"u8.ToArray(), 12, 20, 40, "read first");
+        two.CloseTag();
+        taggedBuilder.PushPage(two);
+    }
+    taggedBytes = taggedBuilder.Finish();
+}
+Report("tagged", taggedBytes);
+
 // The callback-taking transaction, which is checkpoint, `try`, restore and
 // nothing else. Asserted the only way that cannot be faked: save before, save
 // after, compare hashes. And the exception must still escape — a rollback that

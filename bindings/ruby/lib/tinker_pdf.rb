@@ -323,6 +323,18 @@ module TinkerPdf
     extern 'int tpdf_page_builder_form(void *page, const uint8_t *resource, size_t resource_len)'
     extern 'int tpdf_page_builder_set_fill_pattern(void *page, const uint8_t *resource, size_t resource_len)'
     extern 'int tpdf_page_builder_set_stroke_pattern(void *page, const uint8_t *resource, size_t resource_len)'
+
+    extern 'int tpdf_tag_new(const uint8_t *kind, size_t kind_len, void **out)'
+    extern 'int tpdf_tag_set_text(void *tag, int which, const char *text)'
+    extern 'int tpdf_tag_set_id(void *tag, const uint8_t *id, size_t id_len)'
+    extern 'int tpdf_tag_set_key(void *tag, uint64_t key, uint64_t order)'
+    extern 'int tpdf_tag_keep_empty(void *tag)'
+    extern 'void tpdf_tag_free(void *tag)'
+    extern 'int tpdf_page_builder_open_tag(void *page, const void *tag)'
+    extern 'int tpdf_page_builder_close_tag(void *page)'
+    extern 'int tpdf_builder_set_language(void *builder, const char *language)'
+    extern 'int tpdf_builder_map_role(void *builder, const uint8_t *custom, size_t custom_len, ' \
+           'const uint8_t *standard, size_t standard_len)'
   end
 
   # The TPDF_SCRIPT_* policy bits and TPDF_ENTROPY_LEN, transcribed.
@@ -1547,6 +1559,49 @@ module TinkerPdf
 
     def set_stroke_pattern(name)
       Raw.check(Native.tpdf_page_builder_set_stroke_pattern(@pointer, name, name.bytesize))
+    end
+  end
+
+  # TpdfTagText, transcribed.
+  module TagText
+    TITLE = 0
+    LANG = 1
+    ALT = 2
+    ACTUAL_TEXT = 3
+    EXPANSION = 4
+  end
+
+  # A structure element to open (14.7.2); the page holds its own copy.
+  class Tag
+    attr_reader :pointer
+
+    def initialize(kind)
+      @pointer = Raw.handle { |out| Native.tpdf_tag_new(kind, kind.bytesize, out) }
+    end
+
+    def close
+      Native.tpdf_tag_free(@pointer) unless @pointer.nil?
+      @pointer = nil
+    end
+
+    def set_text(which, text) = Raw.check(Native.tpdf_tag_set_text(@pointer, which, Raw.cstr(text)))
+    def set_id(id) = Raw.check(Native.tpdf_tag_set_id(@pointer, id, id.bytesize))
+    def set_key(key, order) = Raw.check(Native.tpdf_tag_set_key(@pointer, key, order))
+    def keep_empty = Raw.check(Native.tpdf_tag_keep_empty(@pointer))
+  end
+
+  # Tagged writing on a page.
+  class PageBuilder
+    def open_tag(tag) = Raw.check(Native.tpdf_page_builder_open_tag(@pointer, tag.pointer))
+    def close_tag = Raw.check(Native.tpdf_page_builder_close_tag(@pointer))
+  end
+
+  # The document's language and role map.
+  class Builder
+    def set_language(language) = Raw.check(Native.tpdf_builder_set_language(@pointer, Raw.cstr(language)))
+
+    def map_role(custom, standard)
+      Raw.check(Native.tpdf_builder_map_role(@pointer, custom, custom.bytesize, standard, standard.bytesize))
     end
   end
 

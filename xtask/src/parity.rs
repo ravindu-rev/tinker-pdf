@@ -5,7 +5,7 @@
 //! own. That is a claim, and this is the check: scripts with every input
 //! pinned, run through the facade, the wheel, the npm package, the NuGet
 //! package and the Go, Ruby and Java bindings over the C ABI, must produce
-//! **byte-identical** output. Eight of them write a document and print
+//! **byte-identical** output. Nine of them write a document and print
 //! `WROTE sha256=` of its bytes; `sanitise-report`, `read-surface`,
 //! `signatures` and `form-data` write down what a sanitise reported,
 //! everything the read surface says about documents, and what form data says,
@@ -77,7 +77,8 @@ use std::process::Command;
 /// 2026 on linux/x86_64 when the forms surface crossed; the form-data text
 /// hashes the FDF and XFDF the writer makes, both of which are text with no
 /// date or identifier in them, so they are as fixed as the rest. `graphics`
-/// was recorded the same way when the builder's graphics resources crossed.
+/// was recorded the same way when the builder's graphics resources crossed,
+/// and `tagged` when tagged writing did.
 const EXPECTED: &[(&str, &str)] = &[
     (
         "fill-and-save",
@@ -126,6 +127,10 @@ const EXPECTED: &[(&str, &str)] = &[
     (
         "graphics",
         "8bf69d84af79241a94e6770e315ce79dfa9cf1d6f85052af122444c3b94dac5f",
+    ),
+    (
+        "tagged",
+        "ca75ed2bff10974b46fcc9a55a77fd0b75411085b37a5f263c1559b4d3fba29f",
     ),
 ];
 
@@ -823,7 +828,7 @@ GO-PARITY: READ sha256=cccc surface=go script=read-surface bytes=30
     /// than a silent pass.
     #[test]
     fn the_recorded_answer_names_both_scripts_once() {
-        assert_eq!(EXPECTED.len(), 12);
+        assert_eq!(EXPECTED.len(), 13);
         let names: Vec<&str> = EXPECTED.iter().map(|(name, _)| *name).collect();
         assert_eq!(
             names,
@@ -839,7 +844,8 @@ GO-PARITY: READ sha256=cccc surface=go script=read-surface bytes=30
                 "signatures",
                 "forms",
                 "form-data",
-                "graphics"
+                "graphics",
+                "tagged"
             ]
         );
         for (name, hash) in EXPECTED {

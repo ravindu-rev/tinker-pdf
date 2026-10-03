@@ -561,6 +561,46 @@ def graphics() -> bytes:
     return builder.finish()
 
 
+def tagged() -> bytes:
+    """Tagged writing through open_tag and close_tag."""
+    builder = tinker_pdf.DocumentBuilder()
+    builder.add_base_font(b"F1", b"Helvetica")
+    builder.set_language("en-GB")
+    builder.map_role(b"Heading", b"H1")
+    one = builder.begin_page(200.0, 200.0)
+    one.open_tag(tinker_pdf.Tag(b"Heading", title="Introduction"))
+    one.text(b"F1", 14.0, 20.0, 170.0, "Tagged parity")
+    one.close_tag()
+    one.open_tag(tinker_pdf.Tag(b"P", lang="fr", actual_text="Bonjour"))
+    one.text(b"F1", 12.0, 20.0, 150.0, "Bon")
+    builder.push_page(one)
+    two = builder.begin_page(200.0, 200.0)
+    two.text(b"F1", 12.0, 20.0, 170.0, "jour")
+    two.close_tag()
+    try:
+        two.close_tag()
+    except ValueError as error:
+        assert "close_tag" in str(error), str(error)
+    else:
+        raise AssertionError("a close with nothing open must be refused")
+    two.open_tag(tinker_pdf.Tag(b"Figure", alt="A grey square"))
+    two.fill_rect(20.0, 100.0, 40.0, 40.0, 0.5)
+    two.close_tag()
+    two.open_tag(tinker_pdf.Tag(b"Span", expansion="Portable Document Format", id=b"pdf-1"))
+    two.text(b"F1", 12.0, 20.0, 80.0, "PDF")
+    two.close_tag()
+    two.open_tag(tinker_pdf.Tag(b"Div", keep_empty=True))
+    two.close_tag()
+    two.open_tag(tinker_pdf.Tag(b"P", key=(7, 1)))
+    two.text(b"F1", 12.0, 20.0, 60.0, "read second")
+    two.close_tag()
+    two.open_tag(tinker_pdf.Tag(b"P", key=(7, 0)))
+    two.text(b"F1", 12.0, 20.0, 40.0, "read first")
+    two.close_tag()
+    builder.push_page(two)
+    return builder.finish()
+
+
 def report(script: str, data: bytes) -> None:
     """Validate, then print the line `cargo xtask bindings-parity` reads."""
     defects = tinker_pdf.Document(data).validate()
@@ -621,6 +661,7 @@ def main(fixture_path: str) -> None:
         f"surface=python script=form-data bytes={len(said)}"
     )
     report("graphics", graphics())
+    report("tagged", tagged())
     transaction_rolls_back_on_an_exception(fixture)
 
     # A consumed handle refuses rather than producing a second document, which

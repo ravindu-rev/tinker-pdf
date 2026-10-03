@@ -274,6 +274,16 @@ final class Native {
     static final MethodHandle tpdf_warning_kind = function("tpdf_warning_kind", INT, ADDRESS, INT, ADDRESS);
     static final MethodHandle tpdf_warning_message = function("tpdf_warning_message", INT, ADDRESS, INT, ADDRESS);
     static final MethodHandle tpdf_warnings_free = procedure("tpdf_warnings_free", ADDRESS);
+    static final MethodHandle tpdf_tag_new = function("tpdf_tag_new", INT, ADDRESS, LONG, ADDRESS);
+    static final MethodHandle tpdf_tag_set_text = function("tpdf_tag_set_text", INT, ADDRESS, INT, ADDRESS);
+    static final MethodHandle tpdf_tag_set_id = function("tpdf_tag_set_id", INT, ADDRESS, ADDRESS, LONG);
+    static final MethodHandle tpdf_tag_set_key = function("tpdf_tag_set_key", INT, ADDRESS, LONG, LONG);
+    static final MethodHandle tpdf_tag_keep_empty = function("tpdf_tag_keep_empty", INT, ADDRESS);
+    static final MethodHandle tpdf_tag_free = procedure("tpdf_tag_free", ADDRESS);
+    static final MethodHandle tpdf_page_builder_open_tag = function("tpdf_page_builder_open_tag", INT, ADDRESS, ADDRESS);
+    static final MethodHandle tpdf_page_builder_close_tag = function("tpdf_page_builder_close_tag", INT, ADDRESS);
+    static final MethodHandle tpdf_builder_set_language = function("tpdf_builder_set_language", INT, ADDRESS, ADDRESS);
+    static final MethodHandle tpdf_builder_map_role = function("tpdf_builder_map_role", INT, ADDRESS, ADDRESS, LONG, ADDRESS, LONG);
 
     // ---- Helpers. They move bytes and raise on a status; that is all. ----
 

@@ -830,6 +830,63 @@ func graphics() []byte {
 	return bytes
 }
 
+// tagged writes a structure tree through OpenTag and CloseTag.
+func tagged() []byte {
+	builder, err := tp.NewBuilder()
+	must(err)
+	defer builder.Close()
+	must(builder.AddBaseFont([]byte("F1"), []byte("Helvetica")))
+	must(builder.SetLanguage("en-GB"))
+	must(builder.MapRole([]byte("Heading"), []byte("H1")))
+	open := func(page *tp.PageBuilder, kind string, configure func(*tp.Tag)) {
+		tag, err := tp.NewTag([]byte(kind))
+		must(err)
+		configure(tag)
+		must(page.OpenTag(tag))
+		tag.Close()
+	}
+	one, err := builder.BeginPage(200, 200)
+	must(err)
+	open(one, "Heading", func(t *tp.Tag) { must(t.SetText(tp.TagTitle, "Introduction")) })
+	must(one.Text([]byte("F1"), 14, 20, 170, "Tagged parity"))
+	must(one.CloseTag())
+	open(one, "P", func(t *tp.Tag) {
+		must(t.SetText(tp.TagLang, "fr"))
+		must(t.SetText(tp.TagActualText, "Bonjour"))
+	})
+	must(one.Text([]byte("F1"), 12, 20, 150, "Bon"))
+	must(builder.PushPage(one))
+	one.Close()
+	two, err := builder.BeginPage(200, 200)
+	must(err)
+	must(two.Text([]byte("F1"), 12, 20, 170, "jour"))
+	must(two.CloseTag())
+	e, ok := two.CloseTag().(*tp.Error)
+	check(ok && e.Status == tp.StatusEditRefused, "a close with nothing open must be refused")
+	open(two, "Figure", func(t *tp.Tag) { must(t.SetText(tp.TagAlt, "A grey square")) })
+	must(two.FillRect(20, 100, 40, 40, 0.5))
+	must(two.CloseTag())
+	open(two, "Span", func(t *tp.Tag) {
+		must(t.SetText(tp.TagExpansion, "Portable Document Format"))
+		must(t.SetID([]byte("pdf-1")))
+	})
+	must(two.Text([]byte("F1"), 12, 20, 80, "PDF"))
+	must(two.CloseTag())
+	open(two, "Div", func(t *tp.Tag) { must(t.KeepEmpty()) })
+	must(two.CloseTag())
+	open(two, "P", func(t *tp.Tag) { must(t.SetKey(7, 1)) })
+	must(two.Text([]byte("F1"), 12, 20, 60, "read second"))
+	must(two.CloseTag())
+	open(two, "P", func(t *tp.Tag) { must(t.SetKey(7, 0)) })
+	must(two.Text([]byte("F1"), 12, 20, 40, "read first"))
+	must(two.CloseTag())
+	must(builder.PushPage(two))
+	two.Close()
+	bytes, err := builder.Finish()
+	must(err)
+	return bytes
+}
+
 func main() {
 	if len(os.Args) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: parity <form-fields.pdf>")
@@ -859,5 +916,6 @@ func main() {
 	report("forms", formed)
 	reportRead("form-data", formDataText(formed, lines, formDataDir))
 	report("graphics", graphics())
+	report("tagged", tagged())
 	fmt.Println("GO-PARITY: RAN")
 }

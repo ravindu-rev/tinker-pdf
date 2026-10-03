@@ -33,6 +33,8 @@ mod forms;
 pub use forms::{PdfFormData, PdfRadioButton};
 mod graphics;
 pub use graphics::PdfExtGState;
+mod tagging;
+pub use tagging::PdfTag;
 
 /// An open PDF document.
 #[wasm_bindgen]

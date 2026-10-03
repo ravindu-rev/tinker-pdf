@@ -209,6 +209,19 @@
 //!   the image list is then cleared, so page two -- which draws the group
 //!   form -- does not name it.
 //!
+//! And one for tagged writing:
+//!
+//! - **tagged** builds a two-page document with a structure tree through
+//!   `open_tag` and `close_tag`: the catalog's `/Lang`, a custom type mapped
+//!   to `H1` with a title, a paragraph with a language and an actual text
+//!   opened on page one and closed on page two, a figure with alternate
+//!   text, a span with an expansion and an identifier, an element kept
+//!   empty, and two keyed halves of one element drawn out of their reading
+//!   order, so a key that lost its order would read them the other way
+//!   round. A `close_tag` with nothing
+//!   open is refused, and the document is what it would have been without
+//!   it.
+//!
 //! An attachment's hash is of its decoded bytes, `-` when it names no stream
 //! or the stream does not read. The warnings are read last on purpose:
 //! reading a page can tolerate more, so the order of the reads is part of the
@@ -1096,6 +1109,47 @@ fn graphics() -> Vec<u8> {
     builder.finish()
 }
 
+/// Script: tagged writing through `open_tag` and `close_tag`.
+fn tagged() -> Vec<u8> {
+    use tinker_pdf::Tag;
+
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.set_language("en-GB");
+    assert!(builder.map_role(b"Heading", b"H1"));
+    let mut one = builder.begin_page(200.0, 200.0);
+    assert!(one.open_tag(&Tag::new(b"Heading").title("Introduction")));
+    one.text(b"F1", 14.0, 20.0, 170.0, "Tagged parity");
+    assert!(one.close_tag());
+    assert!(one.open_tag(&Tag::new(b"P").lang("fr").actual_text("Bonjour")));
+    one.text(b"F1", 12.0, 20.0, 150.0, "Bon");
+    builder.push_page(one);
+    let mut two = builder.begin_page(200.0, 200.0);
+    two.text(b"F1", 12.0, 20.0, 170.0, "jour");
+    assert!(two.close_tag());
+    assert!(!two.close_tag(), "nothing is open");
+    assert!(two.open_tag(&Tag::new(b"Figure").alt("A grey square")));
+    two.fill_rect(20.0, 100.0, 40.0, 40.0, 0.5);
+    assert!(two.close_tag());
+    assert!(two.open_tag(
+        &Tag::new(b"Span")
+            .expansion("Portable Document Format")
+            .id(b"pdf-1")
+    ));
+    two.text(b"F1", 12.0, 20.0, 80.0, "PDF");
+    assert!(two.close_tag());
+    assert!(two.open_tag(&Tag::new(b"Div").keep_empty()));
+    assert!(two.close_tag());
+    assert!(two.open_tag(&Tag::new(b"P").keyed(7, 1)));
+    two.text(b"F1", 12.0, 20.0, 60.0, "read second");
+    assert!(two.close_tag());
+    assert!(two.open_tag(&Tag::new(b"P").keyed(7, 0)));
+    two.text(b"F1", 12.0, 20.0, 40.0, "read first");
+    assert!(two.close_tag());
+    builder.push_page(two);
+    builder.finish()
+}
+
 /// The creation date document-ops writes twice: on the attachment and in
 /// `/Info`.
 fn created() -> Date {
@@ -1339,5 +1393,6 @@ fn main() {
         said.len()
     );
     report("graphics", &graphics());
+    report("tagged", &tagged());
     println!("FACADE-PARITY: RAN");
 }
