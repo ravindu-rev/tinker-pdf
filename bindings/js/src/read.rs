@@ -488,12 +488,15 @@ impl PdfAttachment {
         self.inner.description.clone()
     }
 
-    /// `/Params /Size`. Advisory: the stream is the truth.
+    /// `/Params /Size`, a `BigInt`. Advisory: the stream is the truth.
+    ///
+    /// The facade's `i64`, as every `i64` here crosses: the number is the one
+    /// the document wrote, which nothing bounds by what memory holds, and a
+    /// JavaScript number would round one past 2^53 without a word where
+    /// every other surface returns it exactly (review of lane 7C).
     #[wasm_bindgen(getter)]
-    pub fn size(&self) -> Option<f64> {
-        // A JavaScript number holds every size a document can declare and
-        // still be held in memory; the facade's i64 is exact below 2^53.
-        self.inner.size.map(|size| size as f64)
+    pub fn size(&self) -> Option<i64> {
+        self.inner.size
     }
 
     /// `[objectNumber, generation]` of the embedded file stream.

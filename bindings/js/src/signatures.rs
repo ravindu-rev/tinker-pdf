@@ -550,17 +550,46 @@ impl PdfDocument {
     ///
     /// `at` is the instant to judge certificate validity at, in seconds since
     /// the Unix epoch; `undefined` judges nothing, because "expired" is a
-    /// claim about a moment the caller has to name.
+    /// claim about a moment the caller has to name. A number that names no
+    /// instant -- NaN, an infinity, or one past the facade's `i64` seconds --
+    /// throws rather than being judged as some other instant.
     #[wasm_bindgen(js_name = verifySignatures)]
-    pub fn verify_signatures(&self, anchors: &PdfTrustAnchors, at: Option<f64>) -> Vec<PdfVerdict> {
-        // A JavaScript instant is a number; the facade's is whole seconds.
-        // A fraction is the caller's precision, not this binding's to round,
-        // so it is truncated exactly as `Math.trunc` would.
-        let at = at.map(|seconds| seconds.trunc() as i64);
-        self.inner
+    pub fn verify_signatures(
+        &self,
+        anchors: &PdfTrustAnchors,
+        at: Option<f64>,
+    ) -> Result<Vec<PdfVerdict>, JsError> {
+        let at = match at {
+            None => None,
+            Some(seconds) => Some(whole_seconds(seconds).map_err(|why| JsError::new(&why))?),
+        };
+        Ok(self
+            .inner
             .verify_signatures(&anchors.inner, at)
             .into_iter()
             .map(|inner| PdfVerdict { inner })
-            .collect()
+            .collect())
+    }
+}
+
+/// A JavaScript instant as the facade's whole seconds, or why it is none.
+///
+/// A JavaScript instant is a number and the facade's is an `i64`. A fraction
+/// is the caller's precision, not this binding's to round, so it is truncated
+/// exactly as `Math.trunc` would. What is refused is a number `as i64` would
+/// turn into a different instant without a word: NaN becomes 0, the epoch,
+/// and an infinity or anything past 2^63 saturates to the end of time (review
+/// of lane 7C). Every other surface takes an integer and cannot be handed one.
+fn whole_seconds(seconds: f64) -> Result<i64, String> {
+    // 2^63, exact as an f64: `i64` holds [-2^63, 2^63).
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    let whole = seconds.trunc();
+    if whole.is_finite() && (-LIMIT..LIMIT).contains(&whole) {
+        // In range by the line above, so the cast is exact.
+        Ok(whole as i64)
+    } else {
+        Err(format!(
+            "verifySignatures: at is {seconds}, which is not an instant in whole seconds"
+        ))
     }
 }

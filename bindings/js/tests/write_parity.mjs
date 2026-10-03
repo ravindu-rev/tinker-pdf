@@ -428,6 +428,11 @@ function readDump(label, document_, out) {
     } catch {
       data = undefined;
     }
+    // The declared /Params /Size is the facade's i64, so a BigInt: exact past
+    // 2^53, where a number would round it.
+    if (attachment.size !== undefined && typeof attachment.size !== 'bigint') {
+      throw new Error(`a declared size is a BigInt, not ${typeof attachment.size}`);
+    }
     const size = attachment.size === undefined ? '-' : String(attachment.size);
     out.push(
       `attachment ${text(attachment.name)} ${text(attachment.filename)} ` +
@@ -554,6 +559,22 @@ function signaturePayloadsCross(support) {
     (_, i) => judged.weaknesses[i] === 'outside-validity',
   );
   check(details.length > 0 && details.every((d) => d.length > 0), 'outside-validity names a subject');
+  // A number that names no instant is refused, not judged as the epoch (NaN)
+  // or the end of time (an infinity, or past 2^63 seconds).
+  for (const at of [NaN, Infinity, -Infinity, 2 ** 63, -(2 ** 64)]) {
+    let threw = false;
+    try {
+      document_.verifySignatures(anchors, at);
+    } catch (error) {
+      threw = String(error).includes('not an instant');
+    }
+    check(threw, `an instant of ${at} must be refused`);
+  }
+  const [fraction] = document_.verifySignatures(anchors, 0.75);
+  check(
+    fraction.weaknesses.join() === judged.weaknesses.join(),
+    'a fraction is truncated toward zero, as Math.trunc does',
+  );
 
   const none = new PdfTrustAnchors();
   const [untrusted] = document_.verifySignatures(none);

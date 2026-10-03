@@ -433,7 +433,11 @@ facade). `PdfDocument`, `pageCount`, `isEncrypted`, `authenticate`,
 `xmpMetadata()` and `warnings()`, with `PdfView` the one class both
 directions share (`linkToPageView`, `setPageTargetView`); and signatures as
 `signatures()` and `verifySignatures(PdfTrustAnchors, at)`, payloads and all,
-as in Python;
+as in Python — `at` a number of seconds, truncated as `Math.trunc` does, and
+NaN, an infinity or a number past 2^63 thrown back rather than judged as the
+epoch or the end of time; an attachment's declared `size` is a `BigInt`, the
+facade's `i64` exactly, since the document writes that number and nothing
+bounds it at 2^53 (both review of lane 7C);
 `bitmap.data()` copies, `bitmap.viewUnsafeUntilNextAllocation()` aliases
 wasm linear memory and silently becomes zero-length when a later allocation
 grows the memory — observed, not hypothesised: `node_smoke.mjs` renders,
