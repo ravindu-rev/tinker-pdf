@@ -1852,6 +1852,11 @@ fn check(options: &Options) -> Result<(), String> {
             "{inaccessible} files broke a PDF/UA clause of the part they claim"
         ));
     }
+    if unprintable > 0 {
+        return Err(format!(
+            "{unprintable} files broke a PDF/X requirement of the level they claim"
+        ));
+    }
     Ok(())
 }
 
@@ -3491,6 +3496,46 @@ mod tests {
         let print = Options::parse(&["--pdfx".to_string(), "a.pdf".to_string()]).expect("parses");
         assert!(print.pdfx && !print.pdfua && !print.pdfa && !print.strict);
         assert!(!neither.pdfx && !accessible.pdfx);
+    }
+
+    /// `check --pdfx` exits by the verdict, as `--pdfa` and `--pdfua` do and
+    /// as `docs/features/pdfx.md` says it does: a file that breaks a
+    /// requirement of the level it claims is an error, and a file that claims
+    /// no level is not. The review of lane 7A found the count printed and
+    /// never returned.
+    #[test]
+    fn check_pdfx_exits_by_the_verdict() {
+        let dir = scratch("check-pdfx");
+        let write = |name: &str, claim: Option<&str>| {
+            let mut builder = DocumentBuilder::new();
+            builder.add_base_font(b"F0", b"Helvetica");
+            if let Some(claim) = claim {
+                builder.set_info(b"GTS_PDFXVersion", claim);
+            }
+            builder.add_page(200.0, 100.0, |page| {
+                page.text(b"F0", 12.0, 10.0, 50.0, "hello");
+            });
+            let path = format!("{dir}/{name}.pdf");
+            std::fs::write(&path, builder.finish()).expect("written");
+            path
+        };
+        let check_pdfx = |path: String| {
+            check(
+                &Options::parse(&["--pdfx".to_string(), "--quiet".to_string(), path])
+                    .expect("parses"),
+            )
+        };
+        // No output intent, no trim box, an unembedded font: anything but
+        // clean under PDF/X-1a:2003.
+        let claiming = write("claiming", Some("PDF/X-1a:2003"));
+        let verdict = check_pdfx(claiming);
+        assert!(
+            verdict
+                .as_ref()
+                .is_err_and(|message| message.contains("PDF/X")),
+            "{verdict:?}"
+        );
+        assert_eq!(check_pdfx(write("unclaimed", None)), Ok(()));
     }
 
     /// A finding prints its clause first, then its object when it has one.
