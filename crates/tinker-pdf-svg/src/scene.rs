@@ -83,10 +83,9 @@ struct Walk<'a> {
     segments: usize,
     /// Every `<style>` element of the document, read once before the walk.
     sheet: Sheet,
-    /// The last absolute text position seen, so a `<tspan>` that states only a
-    /// `y` keeps the `x` the chunk before it had — §10.4's rule, and the one a
-    /// build that defaulted the missing axis to zero gets wrong.
-    pen: [f64; 2],
+    /// §10.4's current text position, as far as it is a fact about the
+    /// document rather than about a font. See [`Text`].
+    text: Text,
     /// [`Limits::max_uses`], spent across the whole document.
     uses: usize,
     /// The `<use>` targets currently being expanded, innermost last.
@@ -1022,52 +1021,104 @@ impl Walk<'_> {
             matrix,
             ..frame.clone()
         };
-        self.group(&frame.style, matrix, |walk| {
-            walk.text_runs(index, node, &inner, true)
-        })
+        // §10.4: a `<text>`'s `x` and `y` are zero where it states none, so
+        // every `<text>` opens a chunk at its first character — and the
+        // position state starts again with it.
+        let mut positions = self.positions(node, frame);
+        if positions.x.is_empty() {
+            positions.x.push(0.0);
+        }
+        if positions.y.is_empty() {
+            positions.y.push(0.0);
+        }
+        self.text = Text {
+            stack: vec![positions],
+            ..Text::default()
+        };
+        let drawn = self.group(&frame.style, matrix, |walk| walk.text_runs(index, &inner));
+        self.text.stack.clear();
+        drawn
     }
 
-    /// One `<text>` or `<tspan>`, and everything under it.
-    ///
-    /// `absolute` says whether this element opened a chunk, which §10.9 makes
-    /// true of every `<text>` and of a `<tspan>` that states an `x` or a `y`.
-    fn text_runs(
-        &mut self,
-        index: usize,
-        node: &Node,
-        frame: &Frame,
-        mut absolute: bool,
-    ) -> Result<(), Refusal> {
-        // §10.4: `x`, `y`, `dx` and `dy` are **lists**, one number per glyph.
-        // The first is used and the rest are named: a build that took the
-        // first silently would set a deliberately-spaced line as an ordinary
-        // one and look entirely correct.
-        let x = self.text_number(node, "x", frame.viewport.0);
-        let y = self.text_number(node, "y", frame.viewport.1);
-        let dx = self
-            .text_number(node, "dx", frame.viewport.0)
-            .unwrap_or(0.0);
-        let dy = self
-            .text_number(node, "dy", frame.viewport.1)
-            .unwrap_or(0.0);
-        if x.is_some() || y.is_some() {
-            absolute = true;
+    /// One element's §10.4 lists, read.
+    fn positions(&mut self, node: &Node, frame: &Frame) -> Positions {
+        Positions {
+            x: self.coordinates(node, "x", frame.viewport.0),
+            y: self.coordinates(node, "y", frame.viewport.1),
+            dx: self.coordinates(node, "dx", frame.viewport.0),
+            dy: self.coordinates(node, "dy", frame.viewport.1),
+            rotate: self.coordinates(node, "rotate", 1.0),
+            placed: 0,
         }
-        // A `<tspan>` that shifts by `dx`/`dy` and states nothing absolute is
-        // still a continuation — §10.9 opens a chunk on an *absolute*
-        // position — so the shift travels with the run rather than opening one.
-        let anchor =
-            absolute.then(|| [x.unwrap_or(self.pen[0]) + dx, y.unwrap_or(self.pen[1]) + dy]);
-        if let Some(anchor) = anchor {
-            self.pen = anchor;
-        }
-        let mut pending = anchor;
-        let mut shift = if anchor.is_some() {
-            [0.0, 0.0]
-        } else {
-            [dx, dy]
-        };
+    }
 
+    /// A `<list-of-coordinates>`, each through §4.2's `<length>` grammar —
+    /// which is what `1em` in an `x` means — or the empty list for an
+    /// attribute that is absent or not the grammar, the second named.
+    fn coordinates(&mut self, node: &Node, name: &str, basis: f64) -> Vec<f64> {
+        let Some(text) = node.attr(name) else {
+            return Vec::new();
+        };
+        let read: Option<Vec<f64>> = text
+            .split(|c: char| c == ',' || c.is_ascii_whitespace())
+            .filter(|piece| !piece.is_empty())
+            .map(|piece| document::length(piece, Some(basis)))
+            .collect();
+        match read {
+            Some(list) => list,
+            None => {
+                self.warn(Warning::ValueUnreadable {
+                    attribute: name.to_owned(),
+                });
+                Vec::new()
+            }
+        }
+    }
+
+    /// The next character's §10.4 positioning, from the innermost element that
+    /// has a value for it, and every open element's count advanced past it.
+    ///
+    /// SVG 1.1 §10.5's rule, per attribute: the `n`th number of an element's
+    /// list belongs to the `n`th character **within that element or any of
+    /// its descendants**; a character past the end of an element's list takes
+    /// the nearest ancestor's number for it, if that one has one. `rotate` is
+    /// the exception the clause makes: past the end of a list, its **last**
+    /// number goes on applying, and an ancestor's is not consulted.
+    fn glyph(&mut self) -> Glyph {
+        let stack = &mut self.text.stack;
+        let pick = |list: fn(&Positions) -> &Vec<f64>| -> Option<f64> {
+            stack
+                .iter()
+                .rev()
+                .find_map(|positions| list(positions).get(positions.placed).copied())
+        };
+        let glyph = Glyph {
+            x: pick(|p| &p.x),
+            y: pick(|p| &p.y),
+            dx: pick(|p| &p.dx).unwrap_or(0.0),
+            dy: pick(|p| &p.dy).unwrap_or(0.0),
+            rotate: stack
+                .iter()
+                .rev()
+                .find(|positions| !positions.rotate.is_empty())
+                .and_then(|positions| {
+                    positions
+                        .rotate
+                        .get(positions.placed)
+                        .or(positions.rotate.last())
+                        .copied()
+                })
+                .unwrap_or(0.0),
+        };
+        for positions in stack.iter_mut() {
+            positions.placed = positions.placed.saturating_add(1);
+        }
+        glyph
+    }
+
+    /// One `<text>` or `<tspan>`, and everything under it, whose §10.4 lists
+    /// are already on [`Text::stack`].
+    fn text_runs(&mut self, index: usize, frame: &Frame) -> Result<(), Refusal> {
         let children = self.tree.nodes[index].children.clone();
         for child in children {
             match child {
@@ -1083,9 +1134,7 @@ impl Walk<'_> {
                     if text.is_empty() {
                         continue;
                     }
-                    self.push_text(&text, pending, shift, frame)?;
-                    pending = None;
-                    shift = [0.0, 0.0];
+                    self.characters(&text, frame)?;
                 }
                 Child::Element(at) => {
                     let element = self.tree.nodes[at].clone();
@@ -1112,25 +1161,88 @@ impl Walk<'_> {
                         return Err(Refusal::TooDeep);
                     }
                     let style = child_frame.style.clone();
-                    self.group(&style, child_frame.matrix, |walk| {
-                        walk.text_runs(at, &element, &child_frame, false)
-                    })?;
-                    pending = None;
-                    shift = [0.0, 0.0];
+                    let positions = self.positions(&element, &child_frame);
+                    self.text.stack.push(positions);
+                    let drawn = self.group(&style, child_frame.matrix, |walk| {
+                        walk.text_runs(at, &child_frame)
+                    });
+                    self.text.stack.pop();
+                    drawn?;
                 }
             }
         }
         Ok(())
     }
 
+    /// One piece of character data, cut into runs wherever §10.4 moves the
+    /// current text position or §10.5 turns a glyph.
+    ///
+    /// A run is as long as nothing interrupts it, which for a `<text>` with
+    /// one `x` and one `y` is the whole string and for one with an `x` per
+    /// character is one character each. What a run carries is what this crate
+    /// knows: an absolute position opens a chunk ([`crate::Node::Text`]'s
+    /// `anchor`), a `y` with no `x` opens one whose `x` continues
+    /// (`continues_x`), and a `dx` or `dy` with neither moves the run off the
+    /// pen by the shifts accumulated since the chunk opened — carried in its
+    /// matrix, the one place a shift can live without a metric.
+    fn characters(&mut self, text: &str, frame: &Frame) -> Result<(), Refusal> {
+        let mut run = Run::default();
+        for character in text.chars() {
+            let glyph = self.glyph();
+            let moved = glyph.x.is_some()
+                || glyph.y.is_some()
+                || glyph.dx != 0.0
+                || glyph.dy != 0.0
+                || glyph.rotate != 0.0
+                || run.rotate != 0.0;
+            if moved && !run.text.is_empty() {
+                let done = std::mem::take(&mut run);
+                self.push_text(done, frame)?;
+            }
+            let state = &mut self.text;
+            if run.text.is_empty() {
+                run.anchor = None;
+                run.continues_x = false;
+                if let Some(x) = glyph.x {
+                    let y = glyph.y.unwrap_or(state.y) + glyph.dy;
+                    run.anchor = Some([x + glyph.dx, y]);
+                    state.shift = 0.0;
+                    state.y = y;
+                    state.chunk_y = y;
+                } else if let Some(y) = glyph.y {
+                    // §10.5's rule (b): no `x` for this character anywhere, so
+                    // it starts where the previous glyph left the pen — with
+                    // every `dx` since the chunk opened, and this one's.
+                    let y = y + glyph.dy;
+                    run.anchor = Some([state.shift + glyph.dx, y]);
+                    run.continues_x = true;
+                    state.shift = 0.0;
+                    state.y = y;
+                    state.chunk_y = y;
+                } else {
+                    state.shift += glyph.dx;
+                    state.y += glyph.dy;
+                }
+                run.offset = [state.shift, state.y - state.chunk_y];
+                run.rotate = glyph.rotate;
+            }
+            run.text.push(character);
+        }
+        if !run.text.is_empty() {
+            self.push_text(run, frame)?;
+        }
+        Ok(())
+    }
+
     /// One run of characters, as a node.
-    fn push_text(
-        &mut self,
-        text: &str,
-        anchor: Option<[f64; 2]>,
-        shift: [f64; 2],
-        frame: &Frame,
-    ) -> Result<(), Refusal> {
+    fn push_text(&mut self, run: Run, frame: &Frame) -> Result<(), Refusal> {
+        let Run {
+            text,
+            anchor,
+            continues_x,
+            offset: shift,
+            rotate,
+        } = run;
         let style = &frame.style;
         if !style.visible {
             return Ok(());
@@ -1162,8 +1274,10 @@ impl Walk<'_> {
             }))
         };
         self.push(crate::Node::Text {
-            text: text.to_owned(),
+            text,
             anchor,
+            continues_x,
+            rotate,
             matrix,
             font: TextStyle {
                 families: style.families.clone(),
@@ -1176,20 +1290,6 @@ impl Walk<'_> {
             fill_opacity: style.fill_opacity.clamp(0.0, 1.0),
             stroke,
         })
-    }
-
-    /// The **first** number of a `<list-of-coordinates>`, naming the rest.
-    fn text_number(&mut self, node: &Node, name: &str, basis: f64) -> Option<f64> {
-        let text = node.attr(name)?;
-        let numbers = transform::numbers(text)?;
-        if numbers.len() > 1 {
-            self.warn(Warning::TextPositionListIgnored);
-        }
-        let first = *numbers.first()?;
-        // A bare number is user units; a length with a unit goes through §4.2's
-        // grammar, which is what `1em` in an `x` attribute means.
-        document::length(text.split_whitespace().next().unwrap_or(text), Some(basis))
-            .or(Some(first))
     }
 
     /// §5.7's `<image>`.
@@ -1288,6 +1388,60 @@ impl Walk<'_> {
 /// §7.7's "rendering of the element is disabled".
 struct Disabled;
 
+/// One `<text>` or `<tspan>`'s §10.4 lists, and how many characters within it
+/// have been placed.
+#[derive(Default)]
+struct Positions {
+    x: Vec<f64>,
+    y: Vec<f64>,
+    dx: Vec<f64>,
+    dy: Vec<f64>,
+    rotate: Vec<f64>,
+    placed: usize,
+}
+
+/// One character's §10.4 positioning.
+struct Glyph {
+    x: Option<f64>,
+    y: Option<f64>,
+    dx: f64,
+    dy: f64,
+    /// §10.5's supplemental rotation, in degrees.
+    rotate: f64,
+}
+
+/// The current text position, as far as this crate can know it.
+///
+/// Everything but the **advance** is a fact about the document: an absolute
+/// `x` or `y`, and the `dx` and `dy` added since, are numbers the file states,
+/// and in horizontal text only `y`, `dy` and an absolute `x` move the position
+/// vertically or put it anywhere at all. What a glyph's width adds is a font
+/// metric, which is the caller's (ruling 8). So the state is kept relative to
+/// the chunk the caller is advancing: `shift` is the `dx` added since that
+/// chunk's anchor, and `y` is exact.
+#[derive(Default)]
+struct Text {
+    /// The lists of the `<text>` and every open `<tspan>`, outermost first.
+    stack: Vec<Positions>,
+    /// `dx` accumulated since the chunk's anchor.
+    shift: f64,
+    /// The current text position's `y`.
+    y: f64,
+    /// The `y` of the chunk's anchor, which is where the caller's pen is.
+    chunk_y: f64,
+}
+
+/// A run being gathered.
+#[derive(Default)]
+struct Run {
+    text: String,
+    anchor: Option<[f64; 2]>,
+    continues_x: bool,
+    /// Off the caller's pen, for a run that opens no chunk.
+    offset: [f64; 2],
+    rotate: f64,
+}
+
 /// A `<marker>`, read once per shape that uses it.
 struct Marker {
     /// The element.
@@ -1364,9 +1518,11 @@ fn finite(node: &crate::Node) -> bool {
             font,
             fill,
             stroke: line,
+            rotate,
             ..
         } => {
             anchor.is_none_or(|anchor| numbers(&anchor))
+                && rotate.is_finite()
                 && numbers(matrix)
                 && font.size.is_finite()
                 && paint(fill)
@@ -1491,7 +1647,7 @@ pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Resu
         sheet,
         uses: 0,
         expanding: Vec::new(),
-        pen: [0.0, 0.0],
+        text: Text::default(),
         pushed: 0,
     };
     if walk.sheet.at_rules > 0 {

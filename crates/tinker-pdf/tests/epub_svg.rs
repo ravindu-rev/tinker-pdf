@@ -38,6 +38,8 @@
 //! | a reflected period is not turned back | 1 |
 //! | a linear domain reaches only the stated axis | 2 |
 //! | a radial gradient's rings stop at the stated circle | 1 |
+//! | a `y`-only chunk resets the pen's `x` | 1 |
+//! | a glyph's rotation is applied after the move to its origin | 1 |
 //! | the reader ignores a container's `clip-path`, as it did until groups | 1 |
 //!
 //! The form row fired **zero** the first time: its fixture's shapes covered
@@ -159,6 +161,34 @@ fn text_origins(doc: &Document) -> Vec<f64> {
                 if (a, b, c, d) == ("1", "0", "0", "-1") {
                     previous = e.parse().ok();
                 }
+            }
+        }
+    }
+    out
+}
+
+/// The whole `cm` that immediately precedes each text object, as six numbers
+/// — [`text_origins`]' reading, for runs that are turned as well as moved.
+fn text_matrices(doc: &Document) -> Vec<[f64; 6]> {
+    let pdf = doc.editor().save(&Default::default());
+    let text = String::from_utf8_lossy(&pdf);
+    let mut out = Vec::new();
+    let mut previous: Option<[f64; 6]> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("BT ") {
+            if let Some(matrix) = previous.take() {
+                out.push(matrix);
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_suffix(" cm") {
+            let numbers: Vec<f64> = rest
+                .split_whitespace()
+                .filter_map(|n| n.parse().ok())
+                .collect();
+            if let [a, b, c, d, e, f] = numbers[..] {
+                previous = Some([a, b, c, d, e, f]);
             }
         }
     }
@@ -872,6 +902,65 @@ fn text_anchor_is_applied_where_the_metrics_are() {
         (end - (100.0 - width)).abs() < 0.5,
         "`end` is a whole width left of it: {end} against {}",
         100.0 - width
+    );
+}
+
+/// §10.4's per-glyph `x`: a number per character, each set where its number
+/// says — which a build that took the first number set as one word at 10.
+#[test]
+fn an_x_per_character_sets_each_where_it_says() {
+    let doc = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="60">
+             <text x="10 50 90" y="40" font-family="serif" font-size="20">abc</text>
+           </svg>"##,
+    );
+    let origins = text_origins(&doc);
+    assert_eq!(origins.len(), 3, "a text object per character: {origins:?}");
+    for (got, want) in origins.iter().zip([10.0, 50.0, 90.0]) {
+        assert!((got - want).abs() < 1e-6, "{origins:?}");
+    }
+}
+
+/// §10.5's rule (b), where the metrics are: a `<tspan>` with a `y` and no `x`
+/// starts where the run before it ended, at its own `y`.
+#[test]
+fn a_y_without_an_x_continues_where_the_pen_is() {
+    let doc = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="80">
+             <text x="10" y="40" font-family="serif" font-size="20">One<tspan y="60">two</tspan></text>
+           </svg>"##,
+    );
+    let matrices = text_matrices(&doc);
+    assert_eq!(matrices.len(), 2, "{matrices:?}");
+    // `One` in Times-Roman at twenty: 0.722 + 0.5 + 0.444 em.
+    let advance = (0.722 + 0.5 + 0.444) * 20.0;
+    assert!(
+        (matrices[1][4] - (10.0 + advance)).abs() < 0.5,
+        "after `One`, not back at 10: {matrices:?}"
+    );
+    assert!((matrices[1][5] - 60.0).abs() < 1e-6, "at the y it stated");
+}
+
+/// §10.5's `rotate`: the glyph turns about its own origin, which is the run
+/// matrix's linear part turned and its translation untouched.
+#[test]
+fn a_rotated_glyph_turns_about_its_own_origin() {
+    let doc = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="80">
+             <text x="10" y="40" rotate="90" font-family="serif" font-size="20">a</text>
+           </svg>"##,
+    );
+    let matrices = text_matrices(&doc);
+    let [a, b, c, d, e, f] = matrices[0];
+    // The flip, then a quarter turn clockwise in the downward space:
+    // [1 0 0 -1] after [0 1 -1 0] is [0 1 1 0].
+    for (got, want) in [a, b, c, d].iter().zip([0.0, 1.0, 1.0, 0.0]) {
+        assert!((got - want).abs() < 1e-9, "the turn: {:?}", matrices[0]);
+    }
+    assert!(
+        (e - 10.0).abs() < 1e-9 && (f - 40.0).abs() < 1e-9,
+        "about the glyph's own origin: {:?}",
+        matrices[0]
     );
 }
 

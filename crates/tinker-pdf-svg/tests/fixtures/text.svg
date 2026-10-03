@@ -12,8 +12,8 @@
   <text x="10" y="20">Hello</text>
 
   <!-- A `<tspan>` that states nothing continues the run before it; one that
-       states an `x` opens a new chunk. §10.4: the `<tspan>` with only a `y`
-       keeps the `x` the chunk before it had. -->
+       states an `x` opens a new chunk. §10.5: the `<tspan>` with only a `y`
+       opens one too, and continues in `x` from where `three` left the pen. -->
   <text x="10" y="40">One<tspan>two</tspan><tspan x="80">three</tspan><tspan y="60">four</tspan></text>
 
   <!-- Properties inherit into a `<tspan>` and are overridden on it. `2em` is
@@ -24,8 +24,7 @@
        width. -->
   <text x="100" y="100" text-anchor="middle">centred</text>
 
-  <!-- §10.4's per-glyph positioning: the first number is used and the rest
-       are named. -->
+  <!-- §10.4's per-glyph positioning: a number per character, each a chunk. -->
   <text x="10 20 30" y="140">abc</text>
 
   <!-- A `<tspan>` with a transform of its own, composed onto the `<text>`'s. -->

@@ -21,7 +21,11 @@
 //! | `font-weight: bold` is not 700 | 1 |
 //! | `font-style: italic` is not read | 1 |
 //! | `text-anchor: middle` is not read | 1 |
-//! | a position list is taken silently | 1 |
+//! | a list's later numbers are dropped | 3 |
+//! | an ancestor's list does not reach through a `<tspan>` | 1 |
+//! | a `y` without an `x` resets `x` to the chunk's | 2 |
+//! | a `dx` shifts only the run it is written on | 1 |
+//! | `rotate` past its list's end is zero | 1 |
 //! | `<textPath>` is drawn as ordinary text | 1 |
 //! | a newline becomes a space rather than being removed | 1 |
 //! | leading white space is kept | 1 |
@@ -31,7 +35,7 @@
 //! | a `<text>`'s own `opacity` is dropped | 1 |
 //! | a `<tspan>`'s own `opacity` is dropped | 1 |
 //!
-//! Fifteen injections, no zeros — after two were found. The fixture's only
+//! Twenty-one injections, no zeros — after two were found at milestone 6. The fixture's only
 //! multi-word family was a **quoted** one, which is a single token, so the
 //! injection that splits an unquoted family on spaces produced the same list;
 //! and no `<tspan>` carried a `transform` of its own, so composing it was
@@ -88,9 +92,13 @@ fn a_text_element_opens_a_chunk_at_its_own_position() {
 ///
 /// The four runs of the second `<text>` are the whole rule in one line. `One`
 /// opens a chunk; `two` states nothing and continues it; `three` states an `x`
-/// and opens a new one; `four` states only a `y` and **keeps the `x` the chunk
-/// before it had** — which is §10.4's rule and the one a build that defaulted
-/// the missing axis to zero gets wrong, by putting the word at the left margin.
+/// and opens a new one; `four` states only a `y`, which opens a chunk that
+/// **continues in `x`** from where `three` left the pen — §10.5's rule (b).
+///
+/// *Corrected after the milestones*: this test said `four` *"keeps the `x`
+/// the chunk before it had"* and asserted 80, which put the word back under
+/// `three`. §10.5 says the `x` of a character with no `x` of its own is the
+/// current text position's, and the current text position is past `three`.
 #[test]
 fn a_chunk_opens_only_at_an_absolute_position() {
     let scene = scene(TEXT);
@@ -116,8 +124,17 @@ fn a_chunk_opens_only_at_an_absolute_position() {
 
     assert_eq!(runs[4].0, "four");
     let fourth = runs[4].1.expect("a `y` opens a chunk too");
-    near(fourth[0], 80.0, "§10.4: the x the previous chunk had");
+    near(fourth[0], 0.0, "no `dx`: the pen, wherever `three` left it");
     near(fourth[1], 60.0, "and the y it stated");
+    let Some(Node::Text { continues_x, .. }) = scene
+        .nodes
+        .iter()
+        .filter(|node| matches!(node, Node::Text { .. }))
+        .nth(4)
+    else {
+        panic!("the fourth run");
+    };
+    assert!(*continues_x, "its x is an offset from the pen");
 }
 
 /// The font properties resolve through the same §6.4 machinery as everything
@@ -189,22 +206,155 @@ fn text_anchor_is_carried_rather_than_applied() {
     );
 }
 
-/// §10.4: an `x` with more than one number is per-glyph positioning, which is
-/// named rather than taken silently.
+/// §10.4: an `x` with more than one number is per-glyph positioning — each
+/// character at its own number, and each one a chunk of its own.
 #[test]
-fn a_position_list_is_named_and_its_first_number_used() {
+fn an_x_per_character_places_each_one() {
     let scene = scene(TEXT);
-    assert!(
-        scene.warnings.contains(&Warning::TextPositionListIgnored),
-        "{:?}",
-        scene.warnings
-    );
     let runs = runs(&scene);
-    let abc = runs
+    let at = runs
         .iter()
-        .find(|(text, _)| text == "abc")
-        .expect("the run");
-    near(abc.1.expect("a chunk")[0], 10.0, "the first of the three");
+        .position(|(text, _)| text == "a")
+        .expect("the first of the three");
+    let placed: Vec<(&str, [f64; 2])> = runs[at..at + 3]
+        .iter()
+        .map(|(text, anchor)| (text.as_str(), anchor.expect("a chunk each")))
+        .collect();
+    assert_eq!(
+        placed,
+        [
+            ("a", [10.0, 140.0]),
+            ("b", [20.0, 140.0]),
+            ("c", [30.0, 140.0])
+        ]
+    );
+}
+
+/// One run, as `(text, anchor, continues_x, x shift of the matrix, rotate)`.
+type Laid = (String, Option<[f64; 2]>, bool, f64, f64);
+
+/// Every run of a small document, as [`Laid`]s.
+fn laid(markup: &str) -> Vec<Laid> {
+    let scene =
+        scene(format!("<svg xmlns=\"http://www.w3.org/2000/svg\">{markup}</svg>").as_bytes());
+    assert!(scene.warnings.is_empty(), "{:?}", scene.warnings);
+    scene
+        .nodes
+        .iter()
+        .filter_map(|node| match node {
+            Node::Text {
+                text,
+                anchor,
+                continues_x,
+                matrix,
+                rotate,
+                ..
+            } => Some((text.clone(), *anchor, *continues_x, matrix[4], *rotate)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// §10.5: an ancestor's list goes on applying **through** a `<tspan>` that
+/// states none, and a `<tspan>`'s own list wins for its characters and then
+/// gives way to the ancestor's again.
+///
+/// The `<text>`'s four numbers belong to its four characters in document
+/// order, whichever element each sits in; in the second line the `<tspan>`'s
+/// one number takes `b`, and `c` — past its list — takes the `<text>`'s third.
+#[test]
+fn an_ancestors_list_reaches_through_its_descendants() {
+    let first = laid("<text x=\"0 10 20 30\" y=\"0\">a<tspan>bc</tspan>d</text>");
+    let xs: Vec<(String, f64)> = first
+        .iter()
+        .map(|(text, anchor, ..)| (text.clone(), anchor.expect("a chunk")[0]))
+        .collect();
+    assert_eq!(
+        xs,
+        [
+            ("a".to_owned(), 0.0),
+            ("b".to_owned(), 10.0),
+            ("c".to_owned(), 20.0),
+            ("d".to_owned(), 30.0)
+        ]
+    );
+    let second = laid("<text x=\"0 10 20 30\" y=\"0\">a<tspan x=\"100\">bc</tspan>d</text>");
+    let xs: Vec<f64> = second
+        .iter()
+        .map(|(_, anchor, ..)| anchor.expect("a chunk")[0])
+        .collect();
+    assert_eq!(xs, [0.0, 100.0, 20.0, 30.0]);
+}
+
+/// §10.5's rule (b): a character with a `y` and no `x` opens a chunk at that
+/// `y` and **continues** in `x` from where the previous glyph left the pen —
+/// which is the caller's to know, so the anchor's `x` is the `dx` to add.
+#[test]
+fn a_y_without_an_x_continues_along_the_line() {
+    let runs = laid("<text x=\"10\" y=\"40\">One<tspan y=\"60\" dx=\"2\">four</tspan></text>");
+    assert_eq!(
+        runs[1],
+        ("four".to_owned(), Some([2.0, 60.0]), true, 0.0, 0.0),
+        "a chunk at y = 60 whose x is the pen's plus the dx"
+    );
+}
+
+/// `dx` and `dy` **move the current text position**, and every glyph after
+/// them stands where they put it — not only the glyph they were written on.
+///
+/// `c` follows a `<tspan dx="3">`, so it is three units along as well, and
+/// its run carries the shift in its matrix exactly as `b`'s does. The first
+/// draft of this crate carried a continuing run's shift on that run alone, so
+/// the text after a nudged word slid back under it.
+#[test]
+fn a_shift_persists_for_the_glyphs_after_it() {
+    let runs = laid("<text x=\"0\" y=\"0\">a<tspan dx=\"3\">b</tspan>c</text>");
+    let shifts: Vec<(String, f64)> = runs
+        .iter()
+        .map(|(text, _, _, shift, _)| (text.clone(), *shift))
+        .collect();
+    assert_eq!(
+        shifts,
+        [
+            ("a".to_owned(), 0.0),
+            ("b".to_owned(), 3.0),
+            ("c".to_owned(), 3.0)
+        ]
+    );
+    // A `dx` list is per character, and once it is spent the rest join one
+    // run: `b` and `c` have one shift between them.
+    let listed = laid("<text x=\"0\" y=\"0\" dx=\"1 2\">abc</text>");
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert_eq!(
+        listed[0].1,
+        Some([1.0, 0.0]),
+        "the first dx is in the anchor"
+    );
+    assert_eq!((listed[1].0.as_str(), listed[1].3), ("bc", 2.0));
+    // And a `dy` moves the line for the chunks after it.
+    let lowered = laid("<text x=\"0 10\" y=\"5\" dy=\"0 3\">ab</text>");
+    assert_eq!(lowered[1].1, Some([10.0, 8.0]), "five, and the three since");
+}
+
+/// §10.5's `rotate`: each glyph turns about its own origin, and past the end
+/// of the list the **last** number goes on applying.
+#[test]
+fn rotate_turns_each_glyph_and_its_last_number_persists() {
+    let runs = laid("<text x=\"0\" y=\"0\" rotate=\"10 20\">abc<tspan>d</tspan></text>");
+    let turned: Vec<(String, f64)> = runs
+        .iter()
+        .map(|(text, _, _, _, rotate)| (text.clone(), *rotate))
+        .collect();
+    assert_eq!(
+        turned,
+        [
+            ("a".to_owned(), 10.0),
+            ("b".to_owned(), 20.0),
+            ("c".to_owned(), 20.0),
+            ("d".to_owned(), 20.0)
+        ],
+        "one run per turned glyph, the last number reaching into the tspan"
+    );
 }
 
 /// §10.13's `<textPath>` and its relatives are refused by name.

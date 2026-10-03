@@ -212,14 +212,6 @@ pub enum Warning {
     /// An at-rule in a `<style>` element — `@media`, `@import`, `@font-face`.
     /// Skipped by the CSS specification's own recovery, and named.
     AtRuleIgnored,
-    /// §10.4's per-glyph positioning: an `x`, `y`, `dx`, `dy` or `rotate`
-    /// with **more than one number** in it.
-    ///
-    /// The first is used and the rest are dropped, which sets the run as one
-    /// piece at the right place instead of spreading its letters. Naming it is
-    /// the point: a build that took the first number silently would set a
-    /// deliberately-spaced line as an ordinary one and look entirely correct.
-    TextPositionListIgnored,
     /// `<textPath>`, `<tref>` and `<altGlyph>` — §10.13's text on a path and
     /// its two relatives. Each is a second layout engine.
     TextLayoutUnsupported,
@@ -483,8 +475,22 @@ pub enum Node {
         /// already applied.
         text: String,
         /// Where this run starts, in the space `matrix` maps out of, or `None`
-        /// to continue from where the previous run ended.
+        /// to continue from where the previous run ended. `Some` opens a
+        /// §10.9 chunk.
         anchor: Option<[f64; 2]>,
+        /// Whether the anchor's `x` is an **offset** from where the previous
+        /// run ended rather than a position.
+        ///
+        /// §10.5's rule (b): a character with a `y` and no `x` anywhere above
+        /// it opens a chunk at that `y` and at the `x` the previous glyph left
+        /// the pen at — which is a metric, so it is the caller's, and what
+        /// this crate supplies is the `dx` to add to it.
+        continues_x: bool,
+        /// §10.5's supplemental rotation of every glyph in the run, in
+        /// degrees, about the run's own origin — clockwise, in the downward
+        /// space `matrix` maps out of. A run with a rotation is one
+        /// character, because each glyph turns about its own origin.
+        rotate: f64,
         /// The matrix from that space into the scene's.
         matrix: [f64; 6],
         /// The font properties, resolved but not matched.

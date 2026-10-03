@@ -283,6 +283,21 @@ such a focus never covers what lies behind it. Writing these found a reader
 defect a long way from SVG: a shading's one `/Function`, when it was a
 stream, was never read and painted as the identity (`shading_functions.rs`).
 
+**After the milestones: §10.4's per-glyph lists.** Each character takes
+each of `x`, `y`, `dx` and `dy` from the innermost `<text>` or `<tspan>` whose
+list has a number at that character's place in it (§10.5), so an ancestor's
+list reaches through a `<tspan>` that states none; `rotate`'s last number
+goes on applying. A run is cut wherever a character moves or turns, so a line
+with an `x` per character is a run per character and one with a single `x`
+is one run. Two things were wrong before the lists rather than merely absent,
+and their tests said the wrong thing: a `<tspan>` with a `y` and no `x` was
+put back at the previous chunk's `x`, where §10.5's rule (b) continues from
+the pen (`continues_x` carries that to the caller, which has the pen); and a
+continuing run's `dx` shifted that run alone, so the text after a nudged word
+slid back under it — the shift now accumulates until the next absolute `x`.
+What is still the caller's is the advance: a chunk's width for `text-anchor`
+does not include the `dx`s inside it.
+
 **What this cannot reach**, stated rather than absorbed: nothing outside this
 repository adjudicates a rendering (ruling 13), so every expected value here is
 arithmetic from a clause or an identity checkable without the code — an arc ends

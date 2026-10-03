@@ -206,11 +206,13 @@ fn sweep_nodes(nodes: &[Node], out: &mut Vec<f64>) {
                 fill,
                 fill_opacity,
                 stroke,
+                rotate,
                 ..
             } => {
                 if let Some(anchor) = anchor {
                     out.extend_from_slice(anchor);
                 }
+                out.push(*rotate);
                 out.extend_from_slice(matrix);
                 // The size reaches a `Tf` operator, where an infinity is a
                 // content stream a reader refuses rather than a page that

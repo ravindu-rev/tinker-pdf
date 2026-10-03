@@ -84,6 +84,20 @@ pub fn list(text: &str) -> Option<[f64; 6]> {
     Some(out)
 }
 
+/// §7.6's `rotate(a)`: a turn of `a` degrees about the origin, clockwise in
+/// SVG's downward space.
+///
+/// Public because §10.5's per-glyph `rotate` is the same turn about each
+/// glyph's own origin, and the caller that places a glyph — which has the
+/// metrics this crate does not — must not compute a second one with a
+/// platform `sin` (ruling 4).
+#[must_use]
+pub fn rotation(degrees: f64) -> [f64; 6] {
+    let radians = math::to_radians(degrees);
+    let (sin, cos) = (math::sin(radians), math::cos(radians));
+    [cos, sin, -sin, cos, 0.0, 0.0]
+}
+
 /// One transform function, as its own matrix.
 fn function(name: &str, n: &[f64]) -> Option<[f64; 6]> {
     Some(match (name, n.len()) {
@@ -93,13 +107,7 @@ fn function(name: &str, n: &[f64]) -> Option<[f64; 6]> {
         // §7.6: one number scales both axes equally.
         ("scale", 1) => [n[0], 0.0, 0.0, n[0], 0.0, 0.0],
         ("scale", 2) => [n[0], 0.0, 0.0, n[1], 0.0, 0.0],
-        ("rotate", 1) => {
-            let (sin, cos) = (
-                math::sin(math::to_radians(n[0])),
-                math::cos(math::to_radians(n[0])),
-            );
-            [cos, sin, -sin, cos, 0.0, 0.0]
-        }
+        ("rotate", 1) => rotation(n[0]),
         // §7.6's three-argument form is a rotation about a point, which is a
         // translate, a rotate and the inverse translate — written out rather
         // than composed, because composing it here would be three matrix

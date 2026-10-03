@@ -1197,13 +1197,24 @@ fn place_text(nodes: &[Node], metrics: &BookMetrics<'_>) -> Vec<Option<Origin>> 
             match node {
                 Node::Group { nodes, .. } => walk(nodes, metrics, state),
                 Node::Text {
-                    text, anchor, font, ..
+                    text,
+                    anchor,
+                    continues_x,
+                    font,
+                    ..
                 } => {
                     let families = families_of(&font.families);
                     let width = metrics.measure(text, &request_of(font, &families));
                     if let Some(start) = anchor {
                         flush(state);
-                        state.pen = *start;
+                        // §10.5's rule (b): a chunk opened by a `y` alone
+                        // starts where the pen is, plus the `dx` it carries.
+                        let x = if *continues_x {
+                            state.pen[0] + start[0]
+                        } else {
+                            start[0]
+                        };
+                        state.pen = [x, start[1]];
                         state.kind = font.anchor;
                     }
                     let index = state.out.len();
@@ -1245,6 +1256,7 @@ fn draw_text(
         matrix: element,
         font,
         fill,
+        rotate,
         ..
     } = node
     else {
@@ -1255,8 +1267,21 @@ fn draw_text(
     // Glyph space is `y` up and SVG's run space is `y` down, so the run's own
     // matrix carries a flip at the baseline. Composed with the element's
     // matrix — and *not* with the page mapping, which the `cm` already in
-    // force supplies.
-    let local = transform::concat([1.0, 0.0, 0.0, -1.0, origin[0], origin[1]], *element);
+    // force supplies. §10.5's `rotate` turns the glyph about its own origin,
+    // so it sits between the flip and the move to the origin: clockwise in
+    // the downward space, which is what a positive angle means there.
+    let turned = if *rotate == 0.0 {
+        [1.0, 0.0, 0.0, -1.0, 0.0, 0.0]
+    } else {
+        transform::concat(
+            [1.0, 0.0, 0.0, -1.0, 0.0, 0.0],
+            transform::rotation(*rotate),
+        )
+    };
+    let local = transform::concat(
+        transform::concat(turned, [1.0, 0.0, 0.0, 1.0, origin[0], origin[1]]),
+        *element,
+    );
 
     out.extend_from_slice(b"q\n");
     if let Some(resource) = alpha {
