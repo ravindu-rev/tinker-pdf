@@ -69,9 +69,12 @@ A picture that quietly drops one of these looks finished.
   it to the tangent there, and an advance is a font metric this crate does
   not have (ruling 8) — so it would be a second text-layout seam, through the
   caller, beside the one §10.4's lists already use. `<tref>` and `<altGlyph>`
-  are SVG 1.1 features SVG 2 removed. None of the three has a file behind it
-  here (ruling 3). `Warning::TextLayoutUnsupported`; the element's content is
-  not drawn.
+  are SVG 1.1 features SVG 2 removed. `Warning::TextLayoutUnsupported`; the
+  element's content is not drawn. **Unscheduled, not decided**: none of the
+  three has a file behind it here, and ruling 3 makes that a reason to wait
+  for a count rather than a reason to refuse for good, so they stay a row in
+  the roadmap's tier 4 and not one of its named non-goals (*corrected on
+  review, 3 October 2026*).
 - ~~**`<pattern>` as a paint** (§13.3)~~ — **drawn since the milestones**;
   see *As built*. A tiling paint server is 8.7.3's tiling pattern, cell for
   cell.
