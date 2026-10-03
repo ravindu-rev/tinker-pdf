@@ -446,3 +446,27 @@ pandoc's stylesheet sets `table { display: block }`, and CSS 2.2 §17.2.1 would
 still wrap the orphaned rows in an anonymous table, which the EPUB path does
 not — a layout gap recorded here and not fixed in this row. The census's
 recall-by-evidence figures over the corpus are **owed**.
+
+**Milestone 6 (3 October 2026): the surface and the handoff.**
+`tpdf text --tables` prints each page's tables instead of its text — the ones
+its structure tree states, or else the inferred ones labelled by their
+evidence, with their header evidence and warnings — a line for each table and
+one for each cell, a span written as a range, so the output is as long as the
+cells and not as the grid. The reading-order handoff is the sibling design's
+`TableSuspected`: the reading-order inference asks for the page's **ruled**
+tables only (`ruled_tables`, the lattice half of the inference without the
+aligned pass) and reads each as one block in the permutation's order; here,
+on a page whose tree states a table, the answer stays the stated one
+(`TreePresent`). A fault in milestone 3 was found on the way and fixed in its
+own commit: nesting was asked as "inside one grid cell", so a small grid set
+in a cell merged from two was nested in neither and both tables claimed its
+characters — which the handoff would have read twice. Nesting is now frame
+containment, lattices whose frames cross are refused and named
+(`LatticesCross`), and each lattice reads only the characters whose centres
+fall in its frame, by binary search over two sorted copies, rather than every
+character on the page. Every `TableWarning` variant is reached by a fixture.
+**The roadmap row stays, narrowed**: the census's counts (the 207 files,
+1 908 tables and 74 474 `TD`s), its found, grid, cell and extras scores, zero
+extras over the veraPDF fixtures, the eight span fixtures and
+`MAX_TABLE_RULES` against the corpus's most rules on a page are all owed —
+the census has not run where this was written.

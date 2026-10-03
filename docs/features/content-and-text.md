@@ -462,7 +462,7 @@ never a structure element — builds tables from the rules a page draws
 (`Page::table_rules()`), each character in the cell holding its centre and
 the permutation back to stream order beside them; on a page whose tree states
 a table the stated one is the answer, and `Page::tables(TableSource)` says
-which it gave.
+which it gave. `tpdf text --tables` prints them, a line for each cell.
 
 ### The structured view (14.7, 14.8)
 

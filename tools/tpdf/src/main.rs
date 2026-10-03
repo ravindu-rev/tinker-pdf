@@ -22,9 +22,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tinker_pdf::{
-    BilevelCodec, Bitmap, CosDocument, Dict, Document, FontPolicy, LadderLevel, ObjRef, Object,
-    OrderedText, Page, ReadingOrder, RenderOptions, Sanitise, SimpleFontProvider, StreamObj,
-    StructureTree, TextFormat, TextWriter, Tier, WriteMode, WriteOptions, XrefEntry,
+    BilevelCodec, Bitmap, CosDocument, Dict, Document, FontPolicy, HeaderEvidence, LadderLevel,
+    ObjRef, Object, OrderedText, Page, PageTables, ReadingOrder, RenderOptions, Sanitise,
+    SimpleFontProvider, StreamObj, StructureTree, TableEvidence, TableSource, TextFormat,
+    TextWriter, Tier, WriteMode, WriteOptions, XrefEntry,
 };
 
 const USAGE: &str = "\
@@ -33,7 +34,7 @@ tpdf — inspect and convert PDFs with the tinker-pdf engine
 usage:
   tpdf info    <file.pdf> [--password P]
   tpdf text    <file.pdf> [--page N | --pages LIST] [--password P]
-                          [--json | --xml | --html | --order ORDER]
+                          [--json | --xml | --html | --order ORDER | --tables]
   tpdf render  <file.pdf> --out DIR [--page N | --pages LIST] [--dpi D]
                                     [--jobs N] [--no-annotations]
   tpdf fields  <file.pdf> [--password P]
@@ -87,6 +88,10 @@ options:
                footnotes, ruled tables), which is the tree's wherever the
                document carries one. Standard error says which each page
                got, and what an inference had to tolerate
+  --tables     with text, each page's tables instead of its text: the ones its
+               structure tree states, or else ones inferred from what the page
+               draws, labelled as such; a line for each table, then one for
+               each cell
 
 writing options:
   --out FILE   the file a writing command writes; for split, a directory
@@ -327,6 +332,8 @@ struct Options {
     /// `--order`, for `text`: which order plain text is read in. The
     /// content stream's unless asked, so no existing invocation changes.
     order: ReadingOrder,
+    /// `--tables`, for `text`: the page's tables rather than its text.
+    tables: bool,
     /// Print the record format version and stop, naming no file.
     ///
     /// The corpus runner asks before it spawns anything, because a child one
@@ -432,6 +439,7 @@ impl Options {
             pdfa: false,
             format: None,
             order: ReadingOrder::Stream,
+            tables: false,
             record_version: false,
             page_ranges: None,
             font_policy: FontPolicy::default(),
@@ -549,6 +557,7 @@ impl Options {
                         }
                     };
                 }
+                "--tables" => options.tables = true,
                 // The two values `FontPolicy` has, by the names it gives them.
                 // Anything else is refused: a typo that fell back to the
                 // default would subset a document somebody asked to keep
@@ -664,13 +673,16 @@ impl Options {
             return Err("choose one of --page and --pages".to_string());
         }
         // The structured formats write the text device's model, which is the
-        // stream's order.
-        if options.format.is_some() && options.order != ReadingOrder::Stream {
+        // stream's order; tables are not text in any order.
+        if options.format.is_some() && (options.order != ReadingOrder::Stream || options.tables) {
             return Err(
                 "--json, --xml and --html write the page in its stream order: \
-                 --order is for plain text"
+                 --order and --tables are for plain text"
                     .to_string(),
             );
+        }
+        if options.tables && options.order != ReadingOrder::Stream {
+            return Err("choose one of --order and --tables".to_string());
         }
         Ok(options)
     }
@@ -936,6 +948,10 @@ fn text(options: &Options, _path: &str, doc: &Document) -> Result<(), String> {
         let Some(page) = doc.page(index) else {
             continue;
         };
+        if options.tables {
+            print!("{}", page_tables(&page, index));
+            continue;
+        }
         let (text, label) = page_text(&page, index, options.order)?;
         if let (Some(label), false) = (label, options.quiet) {
             eprintln!("{label}");
@@ -986,6 +1002,84 @@ fn page_text(
         }
     };
     Ok((text.plain_text(), Some(label)))
+}
+
+/// Page `index`'s tables as lines: one naming each table — where it came
+/// from, its size, and for an inferred one its evidence and what it had to
+/// tolerate — then one for each cell, `row R, column C: text`, a span written
+/// as a range. A line a cell, so a table of a million columns that states
+/// three cells is three lines.
+fn page_tables(page: &Page, index: u32) -> String {
+    let number = index + 1;
+    let flat = |text: &str| -> String {
+        text.chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect()
+    };
+    let place = |first: usize, span: usize| -> String {
+        if span > 1 {
+            format!("{}-{}", first + 1, first.saturating_add(span))
+        } else {
+            (first + 1).to_string()
+        }
+    };
+    let mut out = String::new();
+    match page.tables(TableSource::Inferred) {
+        PageTables::Stated(tables) => {
+            for (at, table) in tables.iter().enumerate() {
+                out.push_str(&format!(
+                    "page {number}, table {}: stated by the structure tree, {} rows by {} columns\n",
+                    at + 1,
+                    table.rows,
+                    table.columns
+                ));
+                for cell in &table.cells {
+                    out.push_str(&format!(
+                        "  row {}, column {}{}: {}\n",
+                        place(cell.row, cell.row_span),
+                        place(cell.column, cell.col_span),
+                        if cell.header { " (header)" } else { "" },
+                        flat(&cell.text)
+                    ));
+                }
+            }
+        }
+        PageTables::Inferred(found) => {
+            for (at, table) in found.tables.iter().enumerate() {
+                let evidence = match table.evidence {
+                    TableEvidence::Ruled => "inferred from the page's rules",
+                    TableEvidence::Aligned => "inferred from aligned text, no rule drawn",
+                    _ => "inferred",
+                };
+                let header = match table.header {
+                    HeaderEvidence::FillBeneath => ", the first row shaded",
+                    HeaderEvidence::RuleBeneath => ", a heavier rule under the first row",
+                    _ => "",
+                };
+                out.push_str(&format!(
+                    "page {number}, table {}: {evidence}, {} rows by {} columns{header}",
+                    at + 1,
+                    table.rows,
+                    table.columns
+                ));
+                if !table.warnings.is_empty() {
+                    let warnings: Vec<String> =
+                        table.warnings.iter().map(|w| format!("{w:?}")).collect();
+                    out.push_str(&format!("; {}", warnings.join(", ")));
+                }
+                out.push('\n');
+                for cell in &table.cells {
+                    out.push_str(&format!(
+                        "  row {}, column {}: {}\n",
+                        place(cell.row, cell.row_span),
+                        place(cell.column, cell.col_span),
+                        flat(&cell.text)
+                    ));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn render(options: &Options, path: &str, doc: &Document) -> Result<(), String> {
@@ -2958,13 +3052,14 @@ mod tests {
     }
 
     /// The stream's order unless another is asked for, by the names
-    /// `ReadingOrder` gives them; no other order combines with a structured
-    /// format, which writes the stream's model.
+    /// `ReadingOrder` gives them; neither another order nor tables combine
+    /// with a structured format, which writes the stream's model, nor with
+    /// each other.
     #[test]
-    fn text_takes_an_order_for_plain_text_only() {
+    fn text_takes_an_order_or_tables_for_plain_text_only() {
         let args = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
         let plain = Options::parse(&args(&["a.pdf"])).expect("parses");
-        assert_eq!(plain.order, ReadingOrder::Stream);
+        assert_eq!((plain.order, plain.tables), (ReadingOrder::Stream, false));
         for (raw, order) in [
             ("stream", ReadingOrder::Stream),
             ("stated", ReadingOrder::Stated),
@@ -2980,16 +3075,34 @@ mod tests {
             Some("`--order geometric`: the orders are `stream`, `stated` and `inferred`")
         );
         assert!(
-            Options::parse(&args(&["--json", "--order", "inferred", "a.pdf"]))
-                .err()
-                .is_some_and(|e| e.contains("is for plain text"))
+            Options::parse(&args(&["--tables", "a.pdf"]))
+                .expect("parses")
+                .tables
         );
+        for refused in [
+            &["--json", "--order", "inferred", "a.pdf"][..],
+            &["--tables", "--html", "a.pdf"][..],
+        ] {
+            assert!(
+                Options::parse(&args(refused))
+                    .err()
+                    .is_some_and(|e| e.contains("are for plain text")),
+                "{refused:?}"
+            );
+        }
         // The stream's order named is the default, and combines with anything.
         assert!(Options::parse(&args(&["--json", "--order", "stream", "a.pdf"])).is_ok());
+        assert_eq!(
+            Options::parse(&args(&["--tables", "--order", "inferred", "a.pdf"]))
+                .err()
+                .as_deref(),
+            Some("choose one of --order and --tables")
+        );
     }
 
     /// Two columns of twelve lines drawn across the page, line by line, and a
-    /// ruled table of two rows by two columns under them: untagged.
+    /// ruled table of two rows by two columns under them, its second row one
+    /// cell across both — no rule between them: untagged.
     fn columns_and_a_table() -> Document {
         let mut builder = DocumentBuilder::new();
         builder.add_base_font(b"F0", b"Helvetica");
@@ -3013,21 +3126,20 @@ mod tests {
             }
             page.raw(
                 b"0.5 w 72 500 m 272 500 l S 72 470 m 272 470 l S 72 440 m 272 440 l S\n\
-                  72 440 m 72 500 l S 172 440 m 172 500 l S 272 440 m 272 500 l S\n",
+                  72 440 m 72 500 l S 172 470 m 172 500 l S 272 440 m 272 500 l S\n",
             );
             for (x, y, text) in [(76.0, 482.0, "a"), (176.0, 482.0, "b"), (76.0, 452.0, "c")] {
                 page.text(b"F0", 10.0, x, y, text);
             }
-            page.text(b"F0", 10.0, 176.0, 452.0, "d");
         });
         Document::open(builder.finish()).expect("it opens")
     }
 
     /// **`--order inferred` reads down each column and says so**; the stream
-    /// order is the one `text` always printed; and `--order stated` of an
-    /// untagged document is refused.
+    /// order is the one `text` always printed; `--order stated` of an
+    /// untagged document is refused; and `--tables` lists the table's cells.
     #[test]
-    fn text_prints_the_order_asked_for() {
+    fn text_prints_the_order_asked_for_and_the_tables() {
         let doc = columns_and_a_table();
         let page = doc.page(0).expect("a page");
         let (stream, label) = page_text(&page, 0, ReadingOrder::Stream).expect("the stream");
@@ -3055,6 +3167,14 @@ mod tests {
         assert_eq!(
             page_text(&page, 0, ReadingOrder::Stated).err().as_deref(),
             Some("page 1: no order is stated: the document carries no structure tree")
+        );
+
+        assert_eq!(
+            page_tables(&page, 0),
+            "page 1, table 1: inferred from the page's rules, 2 rows by 2 columns\n\
+             \x20 row 1, column 1: a\n\
+             \x20 row 1, column 2: b\n\
+             \x20 row 2, column 1-2: c\n"
         );
     }
 
