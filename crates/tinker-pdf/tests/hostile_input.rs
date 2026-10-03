@@ -197,6 +197,9 @@ fn exercise(bytes: Vec<u8>) {
         let _ = tree.content_count();
         let _ = tree.object_count();
         let _ = tree.elements().len();
+        // `/A` is read per element now (14.7.6.1): an attribute object or an
+        // array of them, dictionaries or streams, with values the file chose.
+        let _ = tree.element_by_id(b"x");
     }
     // The signature reader indexes the raw file buffer with offsets the
     // document supplies, which is the shape ruling 1 exists for. Digesting

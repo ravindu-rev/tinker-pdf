@@ -246,6 +246,14 @@ writes, family by family:
   an array. Writing it found that `close_marked`'s take-back of an empty
   sequence removed the element's *last* kid, which after a `link` call is the
   annotation's; it now removes the kid that named the id.
+- **Table attributes and identifiers.** `Tag::id` writes `/ID`, claimed in
+  reading order before an element's kids are written so the first element
+  to carry one keeps it, and `finish` writes the `/IDTree` through the name
+  tree writer the named destinations use. `Tag::table(TableAttributes)`
+  writes one attribute object owned by `/Table` directly in `/A`. The reader
+  reads `/A` (a dictionary, a stream, or an array with revision numbers) for
+  the `/Table` owner into the same `TableAttributes` type, and `/C` classes
+  are not read.
 
 ## Dependencies
 

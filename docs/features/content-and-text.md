@@ -500,6 +500,16 @@ or not, for a layout that measures link rectangles after drawing. A link
 outside every element is written in no structure, as before; one `finish`
 does not write — a dangling named destination — leaves no `/OBJR` and takes
 no key.
+`Tag::id(bytes)` writes `/ID` and the root's `/IDTree` (14.7.2 Table
+322); an identifier is one element's, so the first in reading order keeps it
+and `DocumentBuilder::duplicate_element_ids()` names the rest before
+`finish`. `Tag::table(TableAttributes)` writes an attribute object owned by
+`/Table` (14.8.5.7): `/Headers` (identifiers of the header cells that head a
+cell), `/Scope` (`TableScope::Row`, `Column`, `Both`), `/Summary`, and the
+spans. The reader hands back the same type — `StructElement::table` — and
+`StructElement::id`, and `StructureTree::element_by_id` resolves a header;
+a value Table 349 does not define is read as absent with
+`StructureWarning::AttributeIgnored` naming the element, owner and key.
 Nesting stops one level short of the reader's `MAX_NEST_DEPTH`, because
 `finish` puts every page's elements under one `/Document`; it used to stop
 at the cap itself, and an element nested exactly that deep came back
@@ -529,6 +539,8 @@ crate has an API of its own; see [architecture](../architecture.md).
 | `/ActualText` on a property list carrying no `/MCID` | — | the map is keyed by `(stream, /MCID)`, so a list with no identifier reaches no consumer | 14.9.4 |
 | Images inside a tiling pattern's cell, a soft-mask group or an annotation appearance | `Page::images()` does not list them | none is a drawing of the page's content: the renderer reaches a pattern cell and a mask group through its own device, not through the interpreter's `Do`, and an appearance belongs to the annotation | 8.7.3, 11.6.5, 12.5.5 |
 | A JPEG 2000 image's own opacity channel in extraction | `PageImage::samples` holds the colour channels only | `/SMaskInData` decides what the channel means (8.9.5.4), and a soft mask carried out of the codestream is not an `/SMask` image the type can name; the renderer applies it | 8.9.5.4 |
+| A table attribute with a value Table 349 does not define — a `/Scope` that is not `/Row`, `/Column` or `/Both`, a span below one, a `/Headers` entry that is not a string | `StructureWarning::AttributeIgnored { element, owner, key }` | read as absent rather than guessed at; the element and its other attributes are read as usual, so a table whose headers head nothing stays distinguishable from one that said something this reader could not read | 14.8.5.7 |
+| Attributes reached through an element's `/C` and the root's `/ClassMap` | — | `StructElement::table` reads the attribute objects in `/A` only; 14.7.6.2's classes are a second source of the same attributes that no writer here emits and no test here exercises, so it is named rather than half-read | 14.7.6.2 |
 | A written link that wraps across lines as **one** annotation with `/QuadPoints` | — | `PageBuilder::link` takes one rectangle, so a wrapped link is one annotation per rectangle, each an `/OBJR` of the one `/Link` element — which ISO 32000-1 14.8.4.4.2 permits ("one or more link annotations") and which the PDF Association's approved erratum 133 to ISO 32000-2 replaces, for a 2.0 document, with a single `/OBJR` to one annotation whose `/QuadPoints` mark each line | 14.8.4.4.2; ISO 32000-2 14.8.4.7.3 |
 
 The rendering side of a hidden layer is reported too —

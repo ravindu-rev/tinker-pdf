@@ -747,6 +747,199 @@ fn a_link_that_is_not_written_leaves_no_object_reference() {
     assert_eq!(only(&doc, "Link").kids.len(), 1, "its text");
 }
 
+// ---- table attributes and identifiers (14.8.5.7, 14.7.2) -------------------
+
+use tinker_pdf::{TableAttributes, TableScope};
+
+fn table_attributes(edit: impl FnOnce(&mut TableAttributes)) -> TableAttributes {
+    let mut attributes = TableAttributes::default();
+    edit(&mut attributes);
+    attributes
+}
+
+/// A small table: a summary on the table, two column headers with
+/// identifiers and a scope, and data cells naming their headers.
+fn a_table(builder: &mut DocumentBuilder) {
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(300.0, 200.0, |page| {
+        let summary = table_attributes(|t| t.summary = Some("Prices by year".into()));
+        page.tagged_with(&Tag::new(b"Table").table(summary), |page| {
+            page.tagged(b"TR", |page| {
+                for (x, (id, text)) in [(&b"year"[..], "Year"), (b"price", "Price")]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let scope = table_attributes(|t| t.scope = Some(TableScope::Column));
+                    page.tagged_with(&Tag::new(b"TH").id(id).table(scope), |page| {
+                        page.text(b"F1", 12.0, 20.0 + 100.0 * x as f64, 170.0, text);
+                    });
+                }
+            });
+            page.tagged(b"TR", |page| {
+                for (x, (header, text)) in [(&b"year"[..], "2026"), (b"price", "12")]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let headers = table_attributes(|t| {
+                        t.headers = vec![header.to_vec()];
+                        t.row_span = Some(1);
+                        t.col_span = Some(if x == 1 { 2 } else { 0 });
+                    });
+                    page.tagged_with(&Tag::new(b"TD").table(headers), |page| {
+                        page.text(b"F1", 12.0, 20.0 + 100.0 * x as f64, 150.0, text);
+                    });
+                }
+            });
+        });
+    });
+}
+
+/// Table 349's attributes and the identifiers `/Headers` names, written and
+/// read back: every data cell's headers resolve, through the identifiers, to
+/// the header cells that head it.
+#[test]
+fn table_attributes_are_written_and_each_header_resolves() {
+    let mut builder = DocumentBuilder::new();
+    a_table(&mut builder);
+    assert!(builder.duplicate_element_ids().is_empty());
+    let bytes = builder.finish();
+    structurally_clean(bytes.clone());
+    let doc = Document::open(bytes).expect("opens");
+    let tree = doc.structure().expect("a tree");
+    assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+
+    let table = only(&doc, "Table");
+    assert_eq!(
+        table.table.as_ref().and_then(|t| t.summary.as_deref()),
+        Some("Prices by year")
+    );
+    let headers: Vec<StructElement> = elements(&doc)
+        .into_iter()
+        .filter(|element| element.standard_type == "TH")
+        .collect();
+    assert_eq!(headers.len(), 2);
+    for header in &headers {
+        assert_eq!(
+            header.table.as_ref().and_then(|t| t.scope),
+            Some(TableScope::Column)
+        );
+    }
+    let cells: Vec<StructElement> = elements(&doc)
+        .into_iter()
+        .filter(|element| element.standard_type == "TD")
+        .collect();
+    let resolved: Vec<String> = cells
+        .iter()
+        .map(|cell| {
+            let attributes = cell.table.as_ref().expect("a TD's attributes");
+            assert_eq!(attributes.headers.len(), 1);
+            let header = tree
+                .element_by_id(&attributes.headers[0])
+                .expect("the header resolves");
+            header.raw_type.clone()
+                + ":"
+                + &String::from_utf8_lossy(header.id.as_deref().unwrap_or_default())
+        })
+        .collect();
+    assert_eq!(resolved, ["TH:year", "TH:price"]);
+    assert_eq!(
+        cells[0].table.as_ref().and_then(|t| t.col_span),
+        None,
+        "a zero span is not written"
+    );
+    assert_eq!(cells[1].table.as_ref().and_then(|t| t.col_span), Some(2));
+    assert_eq!(cells[1].table.as_ref().and_then(|t| t.row_span), Some(1));
+
+    // The `/IDTree` 14.7.2 Table 322 requires once any element has an `/ID`.
+    let cos = doc.cos();
+    let catalog = cos.catalog().expect("a catalog");
+    let root = cos.resolve_key(&catalog, cos.intern(b"StructTreeRoot"));
+    let root = root.as_dict().expect("a root");
+    let id_tree = root.get_ref(cos.intern(b"IDTree")).expect("an /IDTree");
+    let keys: Vec<Vec<u8>> = tinker_pdf_cos::trees::name_tree(cos, id_tree)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    assert_eq!(keys, [b"price".to_vec(), b"year".to_vec()]);
+}
+
+/// An identifier is one element's. The first in reading order keeps it, a
+/// later one is written without it, and `duplicate_element_ids` says so
+/// before the document is finished — while the two halves of one keyed
+/// element are one element and are not a duplicate.
+#[test]
+fn an_identifier_given_twice_is_kept_by_the_first_element_and_reported() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    for at in 0..2u64 {
+        builder.add_page(300.0, 200.0, |page| {
+            page.tagged_with(&Tag::new(b"P").id(b"twice"), |page| {
+                page.text(b"F1", 12.0, 20.0, 150.0, "anonymous");
+            });
+            page.tagged_with(&Tag::new(b"Sect").keyed(5, at).id(b"halves"), |page| {
+                page.text(b"F1", 12.0, 20.0, 130.0, "keyed");
+            });
+        });
+    }
+    assert_eq!(builder.duplicate_element_ids(), [b"twice".to_vec()]);
+    let doc = Document::open(builder.finish()).expect("opens");
+    let tree = doc.structure().expect("a tree");
+    let paragraphs: Vec<Option<Vec<u8>>> = elements(&doc)
+        .into_iter()
+        .filter(|element| element.standard_type == "P")
+        .map(|element| element.id)
+        .collect();
+    assert_eq!(paragraphs, [Some(b"twice".to_vec()), None]);
+    let first = tree.element_by_id(b"twice").expect("found");
+    assert_eq!(first.page, Some(0));
+    assert_eq!(only(&doc, "Sect").id.as_deref(), Some(&b"halves"[..]));
+}
+
+/// A value Table 349 does not define is read as absent and **named**: the
+/// element and its other attributes are read as usual.
+#[test]
+fn a_table_attribute_outside_table_349_is_ignored_by_name() {
+    let mut builder = DocumentBuilder::new();
+    a_table(&mut builder);
+    let mut bytes = builder.finish();
+    // Equal-length rewrites, so every offset in the cross-reference table
+    // still holds: a scope that is not a scope, and a span of zero.
+    for (from, to) in [
+        (&b"/Scope /Column"[..], &b"/Scope /Colum2"[..]),
+        (b"/ColSpan 2", b"/ColSpan 0"),
+    ] {
+        let at = bytes
+            .windows(from.len())
+            .position(|window| window == from)
+            .expect("the attribute is in the file");
+        bytes[at..at + from.len()].copy_from_slice(to);
+    }
+    let doc = Document::open(bytes).expect("opens");
+    let tree = doc.structure().expect("a tree");
+    let ignored: Vec<String> = tree
+        .warnings
+        .iter()
+        .filter_map(|warning| match warning {
+            tinker_pdf::StructureWarning::AttributeIgnored {
+                owner,
+                key,
+                element,
+            } => {
+                assert!(element.is_some(), "named by its element");
+                Some(format!("{owner}/{key}"))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ignored, ["Table/Scope", "Table/ColSpan"]);
+    let headers: Vec<Option<TableScope>> = elements(&doc)
+        .into_iter()
+        .filter(|element| element.standard_type == "TH")
+        .map(|element| element.table.and_then(|t| t.scope))
+        .collect();
+    assert_eq!(headers, [None, Some(TableScope::Column)]);
+}
+
 // ---- `/RoleMap` (14.7.3) ---------------------------------------------------
 
 /// A custom type is written as itself and read as the type it maps to — both

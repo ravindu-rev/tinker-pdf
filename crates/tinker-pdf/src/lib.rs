@@ -223,8 +223,8 @@ pub use svg_out::{Rasterised, Svg, SvgOptions, SvgWarning, MAX_SVG_BYTES};
 pub use tinker_pdf_cos::{
     is_language_tag, ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal,
     DocumentBuilder, DocumentEditor, EditCheckpoint, EmbeddedWhole, Encryption, FillError,
-    FillRejection, ImageData, OutlineEntry, PageBuilder, SkippedWidget, SubsetRefusal, Tag, Target,
-    WidgetDefect, WriteMode, WriteOptions,
+    FillRejection, ImageData, OutlineEntry, PageBuilder, SkippedWidget, SubsetRefusal,
+    TableAttributes, TableScope, Tag, Target, WidgetDefect, WriteMode, WriteOptions,
 };
 /// Creating form fields (12.7.3), behind [`DocumentEditor::add_field`].
 ///

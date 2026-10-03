@@ -48,7 +48,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use tinker_pdf::{Document, Object, StructElement, StructKid, StructureTree};
+use tinker_pdf::{Document, Object, StructElement, StructKid, StructureTree, StructureWarning};
 
 /// Printed once when the census ran. CI greps for it.
 const RAN: &str = "pdfua-census: RAN";
@@ -123,7 +123,15 @@ fn findings(path: &Path) -> Result<Vec<Rule>, String> {
     if tree.suspects {
         out.push(Rule::Suspects);
     }
-    if !tree.warnings.is_empty() {
+    // A dropped attribute value is not a walk that could not be completed: the
+    // element and everything under it were read. Excluded by name so that this
+    // rule's census stays the one it was measured as before attributes were
+    // read at all.
+    if tree
+        .warnings
+        .iter()
+        .any(|warning| !matches!(warning, StructureWarning::AttributeIgnored { .. }))
+    {
         out.push(Rule::TreeNotWalkable);
     }
     if figure_without_alt(&tree) {

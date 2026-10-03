@@ -2216,6 +2216,10 @@ struct ElementProps {
     actual_text: Option<String>,
     /// `/E` (14.9.5).
     expansion: Option<String>,
+    /// `/ID`, and the `/IDTree` entry that finds it.
+    id: Option<Vec<u8>>,
+    /// The `/Table` owner's attributes (14.8.5.7).
+    table: Option<TableAttributes>,
 }
 
 impl ElementProps {
@@ -2228,12 +2232,16 @@ impl ElementProps {
             alt,
             actual_text,
             expansion,
+            id,
+            table,
         } = other;
         fill(&mut self.title, title);
         fill(&mut self.lang, lang);
         fill(&mut self.alt, alt);
         fill(&mut self.actual_text, actual_text);
         fill(&mut self.expansion, expansion);
+        fill(&mut self.id, id);
+        fill(&mut self.table, table);
     }
 }
 
@@ -2311,6 +2319,29 @@ impl Tag {
         self
     }
 
+    /// `/ID`, the element's identifier (14.7.2 Table 323), which the
+    /// structure tree root's `/IDTree` maps back to it and which a table
+    /// cell's [`TableAttributes::headers`] names.
+    ///
+    /// Identifiers are unique in a document. The first element in the tree's
+    /// order to carry one keeps it; a later one is written without it, and
+    /// [`DocumentBuilder::duplicate_element_ids`] says which before the
+    /// document is finished.
+    #[must_use]
+    pub fn id(mut self, id: &[u8]) -> Tag {
+        self.props.id = Some(id.to_vec());
+        self
+    }
+
+    /// The attributes of the `/Table` owner (14.8.5.7): which header cells
+    /// head this cell, which way a header cell's heading runs, a table's
+    /// summary, and a cell's spans. Written only when they state something.
+    #[must_use]
+    pub fn table(mut self, attributes: TableAttributes) -> Tag {
+        self.props.table = Some(attributes);
+        self
+    }
+
     /// Writes the element even if nothing is drawn inside it.
     ///
     /// An element carrying any property is kept anyway; this is for one that
@@ -2331,6 +2362,80 @@ impl Tag {
 
     fn boxed_props(&self) -> Option<Box<ElementProps>> {
         (self.props != ElementProps::default()).then(|| Box::new(self.props.clone()))
+    }
+}
+
+/// The standard attributes of a table or a table cell (ISO 32000-1 14.8.5.7,
+/// Table 349), written as an attribute object whose owner `/O` is `/Table`.
+///
+/// The same type the reader hands back (`StructElement::table` on the
+/// facade), so a write followed by a read is an equality rather than a
+/// translation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TableAttributes {
+    /// `/Headers` (PDF 1.5): the identifiers ([`Tag::id`]) of the header
+    /// cells that head this one, in the order given.
+    ///
+    /// Written as given. An identifier no element carries is a reference into
+    /// nothing, which a writer cannot repair and should not be handed.
+    pub headers: Vec<Vec<u8>>,
+    /// `/Scope` (PDF 1.5): which cells a header cell heads.
+    pub scope: Option<TableScope>,
+    /// `/Summary` (PDF 1.7): what the table is for, for a reader who cannot
+    /// see it. A text string.
+    pub summary: Option<String>,
+    /// `/RowSpan`: how many rows the cell spans. Table 349's default is one,
+    /// and a span of zero is not a span: it is not written.
+    pub row_span: Option<u32>,
+    /// `/ColSpan`: how many columns.
+    pub col_span: Option<u32>,
+}
+
+impl TableAttributes {
+    /// Whether this would write nothing at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.headers.is_empty()
+            && self.scope.is_none()
+            && self.summary.is_none()
+            && self.row_span.unwrap_or(0) == 0
+            && self.col_span.unwrap_or(0) == 0
+    }
+}
+
+/// Table 349's `/Scope`: whether a header cell heads its row, its column, or
+/// both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableScope {
+    /// `/Row`.
+    Row,
+    /// `/Column`.
+    Column,
+    /// `/Both`.
+    Both,
+}
+
+impl TableScope {
+    /// The name Table 349 spells it with.
+    #[must_use]
+    pub fn name(self) -> &'static [u8] {
+        match self {
+            TableScope::Row => b"Row",
+            TableScope::Column => b"Column",
+            TableScope::Both => b"Both",
+        }
+    }
+
+    /// The scope a name spells, if it is one of Table 349's three.
+    #[must_use]
+    pub fn from_name(name: &[u8]) -> Option<TableScope> {
+        match name {
+            b"Row" => Some(TableScope::Row),
+            b"Column" => Some(TableScope::Column),
+            b"Both" => Some(TableScope::Both),
+            _ => None,
+        }
     }
 }
 
@@ -6253,6 +6358,20 @@ impl DocumentBuilder {
             };
             let node = &arena[*at];
             let reference = self.allocate();
+            // An identifier is claimed **before** the element's kids are
+            // written, so "the first element to carry it" means the first in
+            // reading order, an element before its descendants.
+            let id = node
+                .props
+                .as_ref()
+                .and_then(|props| props.id.as_ref())
+                .filter(|id| match walk.ids.entry((*id).clone()) {
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(reference);
+                        true
+                    }
+                    std::collections::btree_map::Entry::Occupied(_) => false,
+                });
             // The default page: the first content this element holds anywhere
             // under it, in the order the sort left them.
             let default = default_page(arena, *at);
@@ -6324,6 +6443,12 @@ impl DocumentBuilder {
             if !written.is_empty() {
                 element.insert(self.names.intern(b"K"), Object::Array(written));
             }
+            if let Some(id) = id {
+                element.insert(
+                    self.names.intern(b"ID"),
+                    Object::String(PdfString::literal(id.clone())),
+                );
+            }
             if let Some(props) = &node.props {
                 self.write_element_props(&mut element, props);
             }
@@ -6333,9 +6458,10 @@ impl DocumentBuilder {
         out
     }
 
-    /// The entries of Table 323 a [`Tag`] states, each only when stated.
+    /// The entries of Table 323 a [`Tag`] states, each only when stated —
+    /// all but `/ID`, which is the walk's to decide.
     ///
-    /// Every one of the five is a text string (7.9.2.2), encoded for the
+    /// The five 14.9 entries are text strings (7.9.2.2), encoded for the
     /// version the document declares — so UTF-8 in a 2.0 document and
     /// PDFDocEncoding or UTF-16BE below it, as `/Info` is.
     fn write_element_props(&self, element: &mut Dict, props: &ElementProps) {
@@ -6346,7 +6472,15 @@ impl DocumentBuilder {
             alt,
             actual_text,
             expansion,
+            id: _,
+            table,
         } = props;
+        if let Some(table) = table.as_ref().filter(|table| !table.is_empty()) {
+            element.insert(
+                self.names.intern(b"A"),
+                Object::Dict(self.table_attributes(table, version)),
+            );
+        }
         for (key, value) in [
             (&b"T"[..], title),
             (b"Lang", lang),
@@ -6361,6 +6495,96 @@ impl DocumentBuilder {
                 );
             }
         }
+    }
+
+    /// One attribute object whose owner is `/Table` (14.7.6.1, 14.8.5.7).
+    ///
+    /// Written directly in the element's `/A` rather than as an object of its
+    /// own: an attribute object belongs to the one element that names it, and
+    /// nothing else refers to it.
+    fn table_attributes(&self, table: &TableAttributes, version: (u8, u8)) -> Dict {
+        let mut owner = Dict::new();
+        owner.insert(
+            self.names.intern(b"O"),
+            Object::Name(self.names.intern(b"Table")),
+        );
+        if !table.headers.is_empty() {
+            owner.insert(
+                self.names.intern(b"Headers"),
+                Object::Array(
+                    table
+                        .headers
+                        .iter()
+                        .map(|id| Object::String(PdfString::literal(id.clone())))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(scope) = table.scope {
+            owner.insert(
+                self.names.intern(b"Scope"),
+                Object::Name(self.names.intern(scope.name())),
+            );
+        }
+        if let Some(summary) = &table.summary {
+            owner.insert(
+                self.names.intern(b"Summary"),
+                Object::String(encode_text_string(summary, version)),
+            );
+        }
+        for (key, span) in [
+            (&b"RowSpan"[..], table.row_span),
+            (b"ColSpan", table.col_span),
+        ] {
+            if let Some(span) = span.filter(|span| *span > 0) {
+                owner.insert(self.names.intern(key), Object::Int(i64::from(span)));
+            }
+        }
+        owner
+    }
+
+    /// The identifiers [`Tag::id`] gave more than one element, which `finish`
+    /// writes on the first of them only (14.7.2: `/IDTree` maps each
+    /// identifier to one element).
+    ///
+    /// The two halves of one element — a keyed element drawn on two pages, or
+    /// one carried over a page break — are one element and count once. Asked
+    /// of the pages pushed so far, so it is the answer `finish` would act on
+    /// if the document ended now.
+    #[must_use]
+    pub fn duplicate_element_ids(&self) -> Vec<Vec<u8>> {
+        // Each identifier, with the elements carrying it: a key where the
+        // element has one, so halves count once, and a fresh number where it
+        // does not.
+        let mut seen: BTreeMap<Vec<u8>, BTreeSet<(u8, u64)>> = BTreeMap::new();
+        let mut anonymous = 0u64;
+        let mut stack: Vec<&TaggedNode> = self
+            .pages
+            .iter()
+            .flat_map(|page| page.tag_roots.iter())
+            .collect();
+        while let Some(node) = stack.pop() {
+            if let Some(id) = node.props.as_ref().and_then(|props| props.id.as_ref()) {
+                let identity = match node.key {
+                    Some(NodeKey::Caller(key)) => (0, key),
+                    Some(NodeKey::Carried(key)) => (1, key),
+                    None => {
+                        anonymous += 1;
+                        (2, anonymous)
+                    }
+                };
+                seen.entry(id.clone()).or_default().insert(identity);
+            }
+            for kid in &node.kids {
+                if let TaggedKid::Element(child) = kid {
+                    stack.push(child);
+                }
+            }
+        }
+        seen.into_iter()
+            .filter(|(_, elements)| elements.len() > 1)
+            .map(|(id, _)| id)
+            .collect()
     }
 
     /// Serializes the document.
@@ -6718,6 +6942,7 @@ impl DocumentBuilder {
                     .map(|page| vec![None; page.next_mcid as usize])
                     .collect(),
                 objects: BTreeMap::new(),
+                ids: BTreeMap::new(),
             };
             let struct_kids = self.write_struct_elements(&arena, &roots, document, &mut walk);
             let mut parent_tree: Vec<Object> = tagged_pages
@@ -6800,6 +7025,28 @@ impl DocumentBuilder {
                 self.names.intern(b"ParentTreeNextKey"),
                 Object::Int(parent_tree.len() as i64),
             );
+            // 14.7.2 Table 322: required when any element has an identifier —
+            // a name tree from each identifier to its element, through the same
+            // tree writer the named destinations use. Its one refusal is a tree
+            // past the reader's cap; a tree refused is left out whole rather
+            // than half written.
+            if !walk.ids.is_empty() {
+                let entries: Vec<(Vec<u8>, Object)> = std::mem::take(&mut walk.ids)
+                    .into_iter()
+                    .map(|(id, element)| (id, Object::Ref(element)))
+                    .collect();
+                let next = &mut self.next;
+                let objects = &mut self.objects;
+                let tree = crate::trees::write_name_tree(entries, &self.names, |node| {
+                    let reference = ObjRef::new(*next, 0);
+                    *next = next.saturating_add(1);
+                    objects.insert(reference.num, node);
+                    reference
+                });
+                if let Ok(tree) = tree {
+                    dict.insert(self.names.intern(b"IDTree"), Object::Ref(tree));
+                }
+            }
             // 14.7.3: a name to a name, for every custom type the caller
             // mapped. A `BTreeMap`, so the entries are in one order however
             // they were registered.
@@ -7373,6 +7620,9 @@ struct StructWalk<'a> {
     claims: Vec<Vec<Option<ObjRef>>>,
     /// Per `(page, link)`: the element that holds the annotation.
     objects: BTreeMap<(usize, usize), ObjRef>,
+    /// Each identifier, and the first element in reading order to carry it —
+    /// the `/IDTree` (14.7.2).
+    ids: BTreeMap<Vec<u8>, ObjRef>,
 }
 
 /// A merged element's kid: a sequence on a **named** page, a child, or a link

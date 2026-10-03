@@ -189,6 +189,23 @@ pub enum StructureWarning {
         /// The `/MCID` the reference named.
         mcid: u32,
     },
+    /// 14.8.5: an attribute of a standard owner carried a value its table
+    /// does not define — a `/Scope` that is not `/Row`, `/Column` or `/Both`,
+    /// a span below one, a `/Headers` entry that is not a string — and was
+    /// read as absent.
+    ///
+    /// Not a fault in the tree's shape: the element and everything under it
+    /// are read as usual, and only the one attribute is dropped. Named so
+    /// that a table whose header cells head nothing is distinguishable from
+    /// a table that said they head something this reader could not read.
+    AttributeIgnored {
+        /// The element whose `/A` held it, when it could be named.
+        element: Option<ObjRef>,
+        /// The attribute's owner, as `/O` names it.
+        owner: String,
+        /// The attribute's key.
+        key: String,
+    },
 }
 
 /// One kid of a structure element — the three shapes 14.7.4 gives, never
@@ -276,6 +293,18 @@ pub struct StructElement {
     pub actual_text: Option<String>,
     /// `/E`, what an abbreviation stands for (14.9.5).
     pub expansion: Option<String>,
+    /// `/ID`, the element's identifier (14.7.2 Table 323): a byte string,
+    /// which is what a table cell's `/Headers` names and what
+    /// [`StructureTree::element_by_id`] looks up.
+    pub id: Option<Vec<u8>>,
+    /// The attributes of the `/Table` owner in `/A` (14.8.5.7, Table 349):
+    /// `/Headers`, `/Scope`, `/Summary`, `/RowSpan`, `/ColSpan` — the type the
+    /// writer takes, so a write followed by a read is an equality. `None`
+    /// when `/A` holds no attribute object owned by `/Table`.
+    ///
+    /// Attributes reached through `/C` and the root's `/ClassMap` (14.7.6.2)
+    /// are not read; see the refusal table in `content-and-text.md`.
+    pub table: Option<tinker_pdf_cos::TableAttributes>,
     /// `/Pg`, resolved to a zero-based page index.
     pub page: Option<u32>,
     /// `/K`, in the order the file wrote it — which 14.8 makes reading order.
@@ -335,6 +364,20 @@ impl StructureTree {
         let mut out = Vec::new();
         collect_elements(&self.kids, &mut out);
         out
+    }
+
+    /// The element carrying the identifier `id` (14.7.2), the first in
+    /// reading order where a file gives two elements one identifier.
+    ///
+    /// Found by walking the elements rather than through the root's
+    /// `/IDTree`: the walk is what this tree already is, and a file whose
+    /// `/IDTree` and elements disagree is answered by the elements, the way
+    /// the `/K` walk wins over the `/ParentTree`.
+    #[must_use]
+    pub fn element_by_id(&self, id: &[u8]) -> Option<&StructElement> {
+        self.elements()
+            .into_iter()
+            .find(|element| element.id.as_deref() == Some(id))
     }
 
     /// One page's text in structure order, joined with this tree (14.8).
@@ -846,6 +889,7 @@ impl Walk<'_> {
             self.path.remove(&reference.num);
         }
 
+        let table = self.table_attributes(dict, reference);
         Some(StructElement {
             reference,
             raw_type: String::from_utf8_lossy(&raw).into_owned(),
@@ -855,9 +899,124 @@ impl Walk<'_> {
             alt: text_of(self.doc, dict, b"Alt"),
             actual_text: text_of(self.doc, dict, b"ActualText"),
             expansion: text_of(self.doc, dict, b"E"),
+            id: self
+                .doc
+                .resolve_key(dict, self.doc.intern(b"ID"))
+                .as_string()
+                .map(|id| id.bytes.clone()),
+            table,
             page,
             kids,
         })
+    }
+
+    /// The `/Table` owner's attributes among an element's `/A` (14.7.6.1,
+    /// 14.8.5.7).
+    ///
+    /// `/A` is one attribute object or an array of them, each a dictionary or
+    /// a stream and each optionally followed by a revision number; only those
+    /// whose `/O` is `/Table` are read. Where two such objects state one
+    /// attribute, the first stands. A value Table 349 does not define is
+    /// dropped with [`StructureWarning::AttributeIgnored`].
+    fn table_attributes(
+        &mut self,
+        dict: &Dict,
+        element: Option<ObjRef>,
+    ) -> Option<tinker_pdf_cos::TableAttributes> {
+        let value = self.doc.resolve_key(dict, self.doc.intern(b"A"));
+        let mut objects: Vec<Dict> = Vec::new();
+        let mut take = |object: &Object| {
+            if let Some(attributes) = object.as_dict() {
+                objects.push(attributes.clone());
+            } else if let Some(stream) = object.as_stream() {
+                objects.push(stream.dict.clone());
+            }
+        };
+        match value.as_array() {
+            Some(items) => {
+                for item in items.iter().take(limits::MAX_ARRAY_LEN) {
+                    take(&self.doc.resolve(item));
+                }
+            }
+            None => take(&value),
+        }
+
+        let owner_key = self.doc.intern(b"O");
+        let mut found: Option<tinker_pdf_cos::TableAttributes> = None;
+        for attributes in &objects {
+            let owner = self
+                .doc
+                .resolve_key(attributes, owner_key)
+                .as_name()
+                .and_then(|n| self.doc.name_bytes(n))
+                .map(|n| n.to_vec());
+            if owner.as_deref() != Some(b"Table") {
+                continue;
+            }
+            let table = found.get_or_insert_with(tinker_pdf_cos::TableAttributes::default);
+            let ignored = |key: &str| StructureWarning::AttributeIgnored {
+                element,
+                owner: "Table".to_string(),
+                key: key.to_string(),
+            };
+
+            let headers = self
+                .doc
+                .resolve_key(attributes, self.doc.intern(b"Headers"));
+            if let Some(items) = headers.as_array() {
+                if table.headers.is_empty() {
+                    for item in items.iter().take(limits::MAX_ARRAY_LEN) {
+                        match self.doc.resolve(item).as_string() {
+                            Some(id) => table.headers.push(id.bytes.clone()),
+                            None => self.warn(ignored("Headers")),
+                        }
+                    }
+                }
+            } else if !headers.is_null() {
+                self.warn(ignored("Headers"));
+            }
+
+            let scope = self.doc.resolve_key(attributes, self.doc.intern(b"Scope"));
+            if !scope.is_null() {
+                let named = scope
+                    .as_name()
+                    .and_then(|n| self.doc.name_bytes(n))
+                    .and_then(|n| tinker_pdf_cos::TableScope::from_name(&n));
+                match named {
+                    Some(scope) => {
+                        table.scope.get_or_insert(scope);
+                    }
+                    None => self.warn(ignored("Scope")),
+                }
+            }
+
+            if table.summary.is_none() {
+                table.summary = text_of(self.doc, attributes, b"Summary");
+            }
+
+            for (key, slot) in [
+                ("RowSpan", &mut table.row_span),
+                ("ColSpan", &mut table.col_span),
+            ] {
+                let span = self
+                    .doc
+                    .resolve_key(attributes, self.doc.intern(key.as_bytes()));
+                if span.is_null() {
+                    continue;
+                }
+                match span
+                    .as_int()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| *n > 0)
+                {
+                    Some(span) => {
+                        slot.get_or_insert(span);
+                    }
+                    None => self.warn(ignored(key)),
+                }
+            }
+        }
+        found
     }
 
     /// `/Pg`, resolved to a page index.
