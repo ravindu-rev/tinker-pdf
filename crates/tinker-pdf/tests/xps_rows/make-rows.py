@@ -12,6 +12,7 @@
 # One fixed timestamp, so a rerun under the same CPython writes the same bytes.
 # Not run by any test: the committed packages are the record (ruling 13).
 
+import struct
 import zipfile
 
 SOURCE = "../xps/wpf-image-and-text.xps"
@@ -32,7 +33,7 @@ def glyphs(y, extra):
     )
 
 
-def write(out, body, extra_parts=(), extra_types=""):
+def write(out, body, extra_parts=(), extra_types="", extra_rels=""):
     source = zipfile.ZipFile(SOURCE)
     with zipfile.ZipFile(out, "w") as package:
         for info in source.infolist():
@@ -42,6 +43,11 @@ def write(out, body, extra_parts=(), extra_types=""):
             if info.filename == "[Content_Types].xml" and extra_types:
                 text = data.decode("utf-8")
                 data = text.replace("</Types>", extra_types + "</Types>").encode("utf-8")
+            if info.filename == "Documents/1/Pages/_rels/1.fpage.rels" and extra_rels:
+                text = data.decode("utf-8")
+                data = text.replace(
+                    "</Relationships>", extra_rels + "</Relationships>"
+                ).encode("utf-8")
             entry = zipfile.ZipInfo(info.filename, date_time=STAMP)
             entry.compress_type = info.compress_type
             package.writestr(entry, data)
@@ -100,6 +106,55 @@ write(
     + '<Path Fill="{StaticResource r}" RenderTransform="1,0,0,1,100,260" '
     'Data="M0,0L300,0 300,300 0,300Z" />'
     + path("u", 600),
+)
+
+def n_channel_lut(n):
+    """An nCLR profile of n channels, one mft2 at A2B0, XYZ connection space.
+
+    The same profile `xps_context_colour.rs` builds as `n_channel_lut`: a
+    two-point grid, a fifth of the D50 white with no ink on the first channel
+    and black with it full, whatever the other channels say.
+    """
+    table = b"mft2\0\0\0\0" + bytes([n, 3, 2, 0])
+    for row in range(3):
+        for column in range(3):
+            table += struct.pack(">i", 0x10000 if row == column else 0)
+    table += struct.pack(">HH", 2, 2)
+    table += b"\x00\x00\xff\xff" * n
+    fifth = (31595 // 5, 32768 // 5, 27030 // 5)
+    for corner in range(1 << n):
+        inked = (corner >> (n - 1)) & 1 == 1
+        table += struct.pack(">HHH", *((0, 0, 0) if inked else fifth))
+    table += b"\x00\x00\xff\xff" * 3
+    header = bytearray(128)
+    header[8:12] = bytes([2, 0x10, 0, 0])
+    header[12:16] = b"prtr"
+    header[16:20] = ("%XCLR" % n).encode("ascii")
+    header[20:24] = b"XYZ "
+    header[36:40] = b"acsp"
+    profile = bytes(header) + struct.pack(">I", 1) + b"A2B0" + struct.pack(">II", 144, len(table)) + table
+    return struct.pack(">I", len(profile)) + profile[4:]
+
+
+# 15.2.5's n-channel colour: a six-channel profile, placed as a `/DeviceN`,
+# three fills in it and one through a `SolidColorBrush`.
+def ncl(components):
+    return "ContextColor /Resources/n.icc 1.0,%s" % components
+
+
+write(
+    "wpf-n-channel.xps",
+    "<FixedPage.Resources><ResourceDictionary>"
+    '<SolidColorBrush x:Key="b" Color="%s" />' % ncl("0,0,0.5,0,0,1")
+    + "</ResourceDictionary></FixedPage.Resources>"
+    + '<Path Fill="%s" Data="M100,100L300,100 300,200 100,200Z" />' % ncl("0,0,0,0,0,0")
+    + '<Path Fill="%s" Data="M100,300L300,300 300,400 100,400Z" />' % ncl("1,0,0,0,0,0")
+    + '<Path Fill="%s" Data="M100,500L300,500 300,600 100,600Z" />' % ncl("0.5,0.25,0,0,0,1")
+    + '<Path Fill="{StaticResource b}" Data="M100,700L300,700 300,800 100,800Z" />',
+    extra_parts=[("Resources/n.icc", n_channel_lut(6))],
+    extra_types='<Default Extension="icc" ContentType="application/vnd.ms-color.iccprofile" />',
+    extra_rels='<Relationship Type="http://schemas.microsoft.com/xps/2005/06/required-resource" '
+    'Target="/Resources/n.icc" Id="Rn" />',
 )
 
 # 18.3.1.2's two interpolation modes over the same stops: sRGB stated, then

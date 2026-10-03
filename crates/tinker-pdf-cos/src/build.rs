@@ -620,18 +620,18 @@ pub enum Function {
         program: Vec<CalculatorOp>,
     },
     /// Type 0, a sampled table (7.10.2), sixteen bits a sample and 7.10.2's
-    /// default linear interpolation (`/Order 1`) between them — **one input**.
+    /// default multilinear interpolation (`/Order 1`) between them.
     ///
-    /// What a ramp no closed form states is made of: a gradient interpolated
-    /// in a space the shading's is not. `/Encode` and `/Decode` are 7.10.2's
-    /// defaults — the input across the whole table, and the samples across
-    /// `range` — so a sample of `0` is the bottom of its output's range and
-    /// `65535` the top.
+    /// What a function no closed form states is made of: a gradient
+    /// interpolated in a space the shading's is not, or a `/DeviceN` tint
+    /// transform taken from evaluating an ICC profile at a grid of points.
+    /// `/Encode` and `/Decode` are 7.10.2's defaults — the inputs across the
+    /// whole table, and the samples across `range` — so a sample of `0` is
+    /// the bottom of its output's range and `65535` the top.
     ///
-    /// One input, because this repository's reader evaluates a type 0 table
-    /// along its first input and no other: a `/DeviceN` tint transform
-    /// written as one would be read back wrong here, which is the reason
-    /// `features/creation.md` gives for offering none at all until now.
+    /// Several inputs since this repository's reader learnt to interpolate
+    /// across all of them (3 October 2026); before that it read a table along
+    /// its first input alone, and this variant took one.
     Sampled {
         /// `/Domain`: one `[lo hi]` per input.
         domain: Vec<[f64; 2]>,
@@ -1355,12 +1355,11 @@ impl Function {
                     samples,
                 } => {
                     // 7.10.2 makes `/Domain`, `/Range` and `/Size` required,
-                    // one entry per input or output — and one input, for the
-                    // reason on the variant.
+                    // one entry per input or output.
                     if domain.len() != inputs
                         || size.len() != inputs
                         || range.len() != outputs
-                        || inputs != 1
+                        || inputs == 0
                         || outputs == 0
                     {
                         return false;
@@ -9714,8 +9713,7 @@ mod tint_tests {
     /// **7.10.2's sampled function**: written as a stream of sixteen-bit
     /// samples under `/Size` and `/BitsPerSample 16`, and refused where its
     /// table does not add up — a sample short, an axis of one point, a domain
-    /// of no width, an arity that is not the caller's, or a second input this
-    /// reader would not read.
+    /// of no width, or an arity that is not the caller's.
     #[test]
     fn a_sampled_function_writes_its_table_and_refuses_one_that_does_not_add_up() {
         let table = |size: Vec<u32>, samples: Vec<u16>| Function::Sampled {
@@ -9737,10 +9735,17 @@ mod tint_tests {
             !table(vec![1], (0..3).collect()).is_valid(1, 3),
             "one point"
         );
-        assert!(
-            !table(vec![2, 3], (0..18).collect()).is_valid(2, 3),
-            "two inputs, which this reader reads along the first alone"
-        );
+        let two = table(vec![2, 3], (0..18).collect());
+        assert!(two.is_valid(2, 3), "two inputs at 2 x 3 points");
+        assert!(!table(vec![2, 3], (0..17).collect()).is_valid(2, 3));
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_device_n_color_space(
+            b"N",
+            &[b"A", b"B"],
+            DeviceSpace::Rgb,
+            &two,
+            None
+        ));
         assert!(
             !Function::Sampled {
                 domain: vec![[1.0, 1.0]],

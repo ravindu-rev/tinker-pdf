@@ -105,10 +105,11 @@ reached short of operands, that an `if` leaves the stack where it found it
 and an `ifelse`'s arms agree, and that the program ends with one value per
 alternate component, since a reader takes the last *n* and a program leaving
 another count writes outputs nobody meant. A type 0 sampled function,
-`Function::Sampled`, is offered with **one input** — sixteen-bit samples and
-7.10.2's linear interpolation, which is how XPS writes a gradient blended in
-linear light — and refused with more: this reader evaluates one along its
-first input only, so a multi-input one would be written and read back wrong. `DeviceNAttributes`
+`Function::Sampled` — sixteen-bit samples and 7.10.2's multilinear
+interpolation — is offered too, of any number of inputs: it is how XPS writes
+a gradient blended in linear light and an `nCLR` profile's `/DeviceN` tint
+transform. It was not offered while this reader evaluated a table along its
+first input only, which it no longer does (3 October 2026). `DeviceNAttributes`
 writes Table 71's `/Colorants` from separations registered earlier.
 Colorant names are unique but for `/None`, at most 32 (Annex C), and never
 `/All`, which 8.6.6.5 reserves for a `/Separation`.

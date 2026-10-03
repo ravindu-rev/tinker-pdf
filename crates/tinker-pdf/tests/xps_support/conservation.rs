@@ -252,6 +252,13 @@ pub enum Paint {
         /// function there.
         middles: Vec<(f64, [f64; 3])>,
     },
+    /// 15.2.5's `ContextColor`: the components in the profile's own space,
+    /// as the markup states them and as the content stream's `scn` writes
+    /// them under a colour space that is not a device one.
+    ///
+    /// Compared as numbers, because a translation is the claim: the profile
+    /// does the colour management and the components must arrive unchanged.
+    Context { values: Vec<f64> },
     /// A picture, at the pixel count of the part it came from, over the
     /// rectangle it covers in user space.
     ///
@@ -281,6 +288,7 @@ impl Paint {
                 ..
             } => "a radial gradient",
             Paint::Image { .. } => "an image",
+            Paint::Context { .. } => "a context colour",
         }
     }
 }
@@ -379,10 +387,10 @@ impl Census {
         self.count(|paint| matches!(paint, Paint::Image { .. }))
     }
 
-    /// Every solid fill.
+    /// Every solid fill — a `ContextColor` is one, in its profile's space.
     #[must_use]
     pub fn solids(&self) -> usize {
-        self.count(|paint| matches!(paint, Paint::Solid { .. }))
+        self.count(|paint| matches!(paint, Paint::Solid { .. } | Paint::Context { .. }))
     }
 
     /// Every glyph of every run.
@@ -656,6 +664,19 @@ fn colour(value: &str) -> Option<([f64; 3], f64)> {
     Some((rgb, alpha))
 }
 
+/// 15.2.5's `ContextColor <uri> a,c1,…,cn`, as `(components, alpha)`, each
+/// clamped to `[0, 1]` as 15.2.5 says before any further processing.
+fn context(value: &str) -> Option<(Vec<f64>, f64)> {
+    let rest = value.trim().strip_prefix("ContextColor")?;
+    let (_, numbers) = rest.trim_start().split_once(char::is_whitespace)?;
+    let numbers = scalars(numbers);
+    let (alpha, values) = numbers.split_first()?;
+    Some((
+        values.iter().map(|v| v.clamp(0.0, 1.0)).collect(),
+        alpha.clamp(0.0, 1.0),
+    ))
+}
+
 /// The bounds of a `Data` attribute, in the element's own space.
 ///
 /// 11.2.3's abbreviated grammar, read for extent only: every command that
@@ -914,6 +935,8 @@ fn pixels(part: &[u8]) -> Option<(u32, u32)> {
 #[derive(Clone, Debug)]
 enum Brush {
     Solid([f64; 3], f64),
+    /// A `ContextColor`'s components and its alpha.
+    Context(Vec<f64>, f64),
     Gradient {
         kind: Gradient,
         geometry: Vec<f64>,
@@ -1043,10 +1066,14 @@ fn brush(name: &str, attributes: &str, inner: &str) -> Option<Brush> {
     let local = name.rsplit(':').next().unwrap_or(name);
     match local {
         "SolidColorBrush" => {
-            let (rgb, alpha) = colour(attribute(attributes, "Color")?)?;
+            let value = attribute(attributes, "Color")?;
             let opacity = attribute(attributes, "Opacity")
                 .and_then(|o| o.parse::<f64>().ok())
                 .unwrap_or(1.0);
+            if let Some((values, alpha)) = context(value) {
+                return Some(Brush::Context(values, alpha * opacity));
+            }
+            let (rgb, alpha) = colour(value)?;
             Some(Brush::Solid(rgb, alpha * opacity))
         }
         "LinearGradientBrush" => {
@@ -1377,7 +1404,9 @@ fn path_mark(
     let brush = match attribute(attributes, "Fill") {
         Some(fill) => match fill.strip_prefix("{StaticResource ") {
             Some(key) => keyed.get(key.trim_end_matches('}').trim()).cloned(),
-            None => colour(fill).map(|(rgb, a)| Brush::Solid(rgb, a)),
+            None => context(fill)
+                .map(|(values, a)| Brush::Context(values, a))
+                .or_else(|| colour(fill).map(|(rgb, a)| Brush::Solid(rgb, a))),
         },
         None => {
             let (fill, _) = span(inner, "Path.Fill", 0);
@@ -1400,6 +1429,7 @@ fn path_mark(
 
     let (paint, brush_alpha) = match brush {
         Brush::Solid(rgb, a) => (Paint::Solid { rgb }, a),
+        Brush::Context(values, a) => (Paint::Context { values }, a),
         Brush::Gradient {
             kind,
             geometry,
@@ -2004,6 +2034,10 @@ struct Frame {
     /// The alphas the `/Luminosity` soft mask in force paints, if any — see
     /// [`Paint::Gradient::alphas`].
     soft: Option<Vec<(f64, f64)>>,
+    /// The components an `scn` set under a colour space that is not one of
+    /// the device spaces — an `/ICCBased` or a `/DeviceN` — and `Some` from
+    /// the moment such a space is set.
+    components: Option<Vec<f64>>,
     /// `w`, in user space.
     width: f64,
 }
@@ -2070,6 +2104,7 @@ impl<'a> Walk<'a> {
                 render: 0,
                 width: 1.0,
                 soft: None,
+                components: None,
             },
             saved: Vec::new(),
             path: Rect::empty(),
@@ -2172,10 +2207,12 @@ impl Walk<'_> {
             b"rg" if numbers.len() == 3 => {
                 self.frame.rgb = [numbers[0], numbers[1], numbers[2]];
                 self.frame.pattern = None;
+                self.frame.components = None;
             }
             b"g" if numbers.len() == 1 => {
                 self.frame.rgb = [numbers[0]; 3];
                 self.frame.pattern = None;
+                self.frame.components = None;
             }
             b"k" if numbers.len() == 4 => {
                 // The conversion 10.4.2.4 states, so that a census over a CMYK
@@ -2187,10 +2224,29 @@ impl Walk<'_> {
                     (1.0 - y) * (1.0 - k),
                 ];
                 self.frame.pattern = None;
+                self.frame.components = None;
             }
-            b"cs" => self.frame.pattern = None,
+            b"cs" => {
+                self.frame.pattern = None;
+                // A named space that is not a device one — a resource — sets
+                // components rather than a colour.
+                self.frame.components = match operands.last() {
+                    Some(Token::Name(name))
+                        if !matches!(
+                            name.as_slice(),
+                            b"DeviceRGB" | b"DeviceGray" | b"DeviceCMYK" | b"Pattern"
+                        ) =>
+                    {
+                        Some(Vec::new())
+                    }
+                    _ => None,
+                };
+            }
             b"scn" | b"sc" => match operands.last() {
                 Some(Token::Name(name)) => self.frame.pattern = Some(name.clone()),
+                _ if self.frame.components.is_some() => {
+                    self.frame.components = Some(numbers.clone());
+                }
                 _ if numbers.len() == 3 => {
                     self.frame.rgb = [numbers[0], numbers[1], numbers[2]];
                 }
@@ -2476,8 +2532,13 @@ impl Walk<'_> {
                 let reference = entry_ref(self.cos, resources, b"Pattern", name);
                 pattern_paint(self.cos, &pattern, reference)
             }
-            None => Some(Paint::Solid {
-                rgb: self.frame.rgb,
+            None => Some(match &self.frame.components {
+                Some(values) => Paint::Context {
+                    values: values.clone(),
+                },
+                None => Paint::Solid {
+                    rgb: self.frame.rgb,
+                },
             }),
         }
     }
@@ -2617,6 +2678,13 @@ pub enum Divergence {
         mark: usize,
         markup: Vec<(f64, [f64; 3])>,
         document: Vec<(f64, [f64; 3])>,
+    },
+    /// A `ContextColor`'s components, not the ones the markup stated.
+    Components {
+        page: usize,
+        mark: usize,
+        markup: Vec<f64>,
+        document: Vec<f64>,
     },
     /// A gradient's colours between its stops: blended in a space the
     /// markup's `ColorInterpolationMode` does not name.
@@ -2955,6 +3023,18 @@ fn compare_mark(
                     mark,
                     markup: *wanted_area,
                     document: *got_area,
+                });
+            }
+        }
+        (Paint::Context { values: wanted }, Paint::Context { values: got }) => {
+            if wanted.len() != got.len()
+                || !wanted.iter().zip(got).all(|(a, b)| near(*a, *b, COLOUR))
+            {
+                out.push(Divergence::Components {
+                    page,
+                    mark,
+                    markup: wanted.clone(),
+                    document: got.clone(),
                 });
             }
         }

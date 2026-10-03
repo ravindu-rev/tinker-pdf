@@ -65,7 +65,9 @@ chain is bounded the same two ways and read in a pass before the drawing
 walk; 15.2.5's `ContextColor`, whose ICC profile is embedded **verbatim**
 as an `/ICCBased` colour space and whose components reach the content
 stream unchanged, so the reader does the colour management and this build
-converts nothing; section 15's brushes — `SolidColorBrush`, `LinearGradientBrush`,
+converts nothing — and, for an `nCLR` profile `/ICCBased` cannot carry, a
+`/DeviceN` of the same components whose tint transform is the profile
+evaluated over a grid; section 15's brushes — `SolidColorBrush`, `LinearGradientBrush`,
 `RadialGradientBrush`, `ImageBrush` and `VisualBrush` with `TileMode`
 (through a PDF tiling pattern, whose cell is a picture for the one and a
 **drawing** for the other) — with colours in both the eight- and
@@ -149,7 +151,7 @@ the page synthesis.
 
 | What | Typed variant | Why | See |
 | --- | --- | --- | --- |
-| A `ContextColor` whose profile takes a channel count `/ICCBased` cannot state | `XpsElementDefect::ColourProfileChannels` | Table 66 permits **1, 3 or 4** components and ICC.1's `nCLR` family runs to fifteen; `/DeviceN` would need a tint transform only *evaluating* the profile could supply, which is the colour engine this build does not have. **Painted grey**, rather than in a colour picked by dropping components | [colour](colour.md) |
+| A `ContextColor` whose `nCLR` profile has more than eight channels, or no table this build evaluates | `XpsElementDefect::ColourProfileChannels` | ECMA-388 15.2.5 names `2CLR` through `8CLR`, and a `/DeviceN`'s tint transform is the profile evaluated, which needs a table to evaluate. **Painted grey**, rather than in a colour picked by dropping components. **The `nCLR` profiles of two to eight channels left this row** on 3 October 2026: each is an 8.6.6.5 `/DeviceN` of one colorant a channel, named for the profile (`6CLR.1` …), its tint transform `tinker-pdf-color`'s transform run over a grid as fine as 16 384 points allow and written as a sampled function into `/DeviceRGB`, the components reaching `scn` unchanged; `tests/xps_rows/wpf-n-channel.xps` is in the conservation sweep (5 facts of 5) | [colour](colour.md) |
 | A `ContextColor` whose profile part is missing, is not a profile, or names a data space ICC.1 does not | `XpsElementDefect::ColourProfileUnresolved` | **Still painted**, in 8.6.5.5's default-`/Alternate` reading of the components — one channel grey, three RGB, four CMYK. Not an invention: that is what a reader does with an `/ICCBased` stream it cannot use, and the numbers are the file's | [colour](colour.md) |
 | A `ContextColor` in a **gradient stop** | `XpsElementDefect::BrushApproximated` | 8.7.4.5's shading names one colour space for the whole function, so a stop cannot carry one of its own; it takes the same alternate reading and the brush says it reached the page and not exactly | — |
 | An image part no rule identifies | `XpsElementDefect::ImageFormatUnsupported` | a part neither the content type nor the magic bytes name is not one to guess at. **JPEG XR left this row**: 9.1.5.1's format now decodes and draws, so all four of 9.1.5's formats reach the page and the pre-emptive refusal loop that used to sit in front of both identification rules is gone | [filters](filters.md) |

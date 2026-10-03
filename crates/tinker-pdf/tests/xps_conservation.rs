@@ -1315,6 +1315,7 @@ const DERIVED: &[&str] = &[
     "xps_rows/wpf-style-simulations.xps",
     "xps_rows/wpf-stop-alphas.xps",
     "xps_rows/wpf-colour-interpolation.xps",
+    "xps_rows/wpf-n-channel.xps",
 ];
 
 /// **An interleaved package conserves, and states the census of the package

@@ -20,6 +20,7 @@ repository's.
 | `wpf-style-simulations.xps` | 78 764 | `3a31d48215aea021cb0a5853533656cf0f9821ddaa494bf84d279df6d310426a` | 12.1.5's `StyleSimulations` |
 | `wpf-stop-alphas.xps` | 78 925 | `c9ca7d2ddbe3c862c9046da29485ee06c11a34bb210b138d72d62a35b988263f` | 18.3.2's per-stop alpha |
 | `wpf-colour-interpolation.xps` | 78 997 | `873e0f42f3fa3610eaa9c5dc95e3a60d1839951392cfa360d5bed43170207684` | 18.3.1.2's `ColorInterpolationMode` |
+| `wpf-n-channel.xps` | 78 977 | `95a46000c0d33b0d296e9279a815a4a4a033c2a3440a370cf290232ec5afbcc6` | 15.2.5's n-channel `ContextColor` |
 
 **`wpf-style-simulations.xps`** sets WPF's own run — `"Page one"`,
 `Indices=",53"`, in the package's font — four times at a 48-unit em, a hundred
@@ -42,6 +43,15 @@ reads the colour halfway along every interval: out of the markup by 18.3.1.2
 — the mean in sRGB, the mean of the linear light re-encoded in scRGB, both
 written out from IEC 61966-2-1 — and out of the document by evaluating the
 shading's function there.
+
+**`wpf-n-channel.xps`** adds a `6CLR` profile part — the one
+`xps_context_colour.rs` builds as `n_channel_lut`, a two-point `mft2` grid
+whose answer is arithmetic, written again here by `make-rows.py` — with its
+content type and the page's required-resource relationship (M2.10), and
+fills four shapes in it, three through `Fill` and one through a keyed
+`SolidColorBrush`. The census reads each `ContextColor`'s components out of
+the markup and the `scn` operands under the `/DeviceN` space out of the
+document.
 
 **How they were obtained**, on Linux x86_64 with CPython 3.11.15's `zipfile`,
 on 3 October 2026:

@@ -10,9 +10,11 @@
 //! This build does not guess at a colour. The profile goes into the PDF
 //! verbatim as an `/ICCBased` colour space (8.6.5.5), the components go into
 //! the content stream unchanged, and the *reader* does the colour management.
-//! Nothing here evaluates a profile, so nothing here can be wrong about one —
-//! which is why `tinker-pdf-color`'s transform machinery is not used at all and
-//! only the profile's **header** is read, for the channel count.
+//! For one, three and four channels nothing here evaluates a profile, so
+//! nothing here can be wrong about one — only the profile's **header** is
+//! read, for the channel count. The `nCLR` profiles are the exception, below:
+//! `/ICCBased` cannot carry them, and the alternate a `/DeviceN` needs is the
+//! profile evaluated.
 //!
 //! That distinction matters more than it looks: [`Profile::parse`] refuses a
 //! profile it cannot build a transform out of, and a perfectly ordinary CMYK
@@ -28,13 +30,25 @@
 //! [`super::font::Fonts::load`]'s rule, [`super::image::Images::load`]'s rule
 //! and [`super::resources::Remotes::load`]'s rule, for one reason.
 //!
-//! # What is narrowed, by name
+//! # `nCLR`: a `/DeviceN` whose tint transform is the profile, evaluated
 //!
 //! Table 66 permits an `/ICCBased` space of **1, 3 or 4** components and no
-//! others. A profile with any other channel count — ICC.1's `nCLR` family runs
-//! to fifteen — has no `/ICCBased` spelling at all, and PDF's other n-channel
-//! space, `/DeviceN`, needs a tint transform into an alternate space that only
-//! evaluating the profile could supply. So it is
+//! others, so a profile of any other channel count — ECMA-388 15.2.5's
+//! `2CLR` through `8CLR` — has no `/ICCBased` spelling at all. PDF's other
+//! n-channel space is 8.6.6.5's `/DeviceN`: the components go into the content
+//! stream unchanged, one colorant each, and a **tint transform** carries them
+//! into an alternate space for a reader that has no such inks. Here that is
+//! the one place this module evaluates a profile: `tinker-pdf-color`'s
+//! transform, run at every point of a grid, written as a 7.10.2 sampled
+//! function into `/DeviceRGB` (the sRGB the transform answers). The
+//! translation of the components is as exact as for `/ICCBased`; the
+//! alternate is as exact as the grid, which is as fine as
+//! [`XPS_TINT_SAMPLES`] grid points allow — five a side for six channels.
+//!
+//! # What is narrowed, by name
+//!
+//! A channel count past [`MAX_XPS_DEVICE_N_CHANNELS`], or an `nCLR` profile
+//! this build cannot evaluate — one with no `A2B*` table it reads — is
 //! [`XpsElementDefect::ColourProfileChannels`]: **named**, and painted in the
 //! placeholder grey rather than in a colour picked by dropping components.
 //!
@@ -48,12 +62,32 @@
 use std::collections::HashMap;
 
 use tinker_pdf_color::icc;
-use tinker_pdf_cos::DocumentBuilder;
+use tinker_pdf_cos::{DeviceSpace, DocumentBuilder, Function};
 use tinker_pdf_xml::{Doctype, Event, Source};
 
 use super::markup::Trouble;
 use super::opc::{Package, PartName};
 use super::{dialect_of, Limits, XpsElementDefect};
+
+/// The most channels an `nCLR` profile may have and still be placed as a
+/// `/DeviceN` space.
+///
+/// **Eight**, which is ECMA-388's own: 15.2.5 permits `2CLR` through `8CLR`
+/// for an n-channel colour. It also bounds the work the tint transform costs —
+/// each grid point evaluates a lookup table's 2^n corners — which at eight is
+/// 6 561 points of 256 corners each, and at ICC.1's fifteen would be 32 768 of
+/// 32 768.
+///
+/// Reachable: `a_profile_past_eight_channels_is_a_named_narrowing`.
+pub const MAX_XPS_DEVICE_N_CHANNELS: u8 = 8;
+
+/// How many grid points the tint transform of an `nCLR` profile is sampled
+/// at, at most.
+///
+/// Not a bound — nothing is refused at it — but a resolution: the grid is as
+/// fine as this allows, the same count of points a side, never fewer than two.
+/// Six channels are five a side (15 625 points), eight are three (6 561).
+pub const XPS_TINT_SAMPLES: usize = 1 << 14;
 
 /// One profile part, placed.
 #[derive(Clone, Debug)]
@@ -149,9 +183,13 @@ impl Profiles {
         let channels = icc::data_space(bytes)
             .and_then(icc::channels)
             .ok_or(XpsElementDefect::ColourProfileUnresolved)?;
-        // Table 66 permits 1, 3 or 4 and no others.
+        // Table 66 permits 1, 3 or 4 and no others; the rest are `nCLR`, and
+        // a `/DeviceN` of their own.
         if !matches!(channels, 1 | 3 | 4) {
-            return Err(XpsElementDefect::ColourProfileChannels);
+            let resource = format!("CS{}", self.next).into_bytes();
+            self.next += 1;
+            return device_n(bytes, channels, &resource, builder)
+                .map(|()| Placed { resource, channels });
         }
         let profile = bytes.to_vec();
 
@@ -164,6 +202,74 @@ impl Profiles {
             return Err(XpsElementDefect::ColourProfileUnresolved);
         }
         Ok(Placed { resource, channels })
+    }
+}
+
+/// An `nCLR` profile as 8.6.6.5's `/DeviceN`: one colorant a channel, and the
+/// profile evaluated over a grid as the tint transform into `/DeviceRGB`.
+///
+/// The colorants are named `nCLR.1` through `nCLR.n` — `6CLR.3` for the third
+/// of six — which no process or spot ink is called, so a reader with real
+/// separations matches none of them and uses the transform, which is the
+/// profile's own answer. The grid is 7.10.2's, the first channel varying
+/// fastest, each point the sRGB `tinker-pdf-color` computes for it, the byte
+/// widened to sixteen bits exactly (`v × 257`).
+///
+/// # Errors
+/// [`XpsElementDefect::ColourProfileChannels`] for a profile past
+/// [`MAX_XPS_DEVICE_N_CHANNELS`] or one with no transform this build reads,
+/// and [`XpsElementDefect::ColourProfileUnresolved`] where the writer refused
+/// the space.
+fn device_n(
+    bytes: &[u8],
+    channels: u8,
+    resource: &[u8],
+    builder: &mut DocumentBuilder,
+) -> Result<(), XpsElementDefect> {
+    if !(2..=MAX_XPS_DEVICE_N_CHANNELS).contains(&channels) {
+        return Err(XpsElementDefect::ColourProfileChannels);
+    }
+    let transform = icc::Profile::parse(bytes)
+        .ok()
+        .and_then(|profile| icc::Transform::compile(&profile))
+        .filter(|transform| transform.inputs() == usize::from(channels))
+        .ok_or(XpsElementDefect::ColourProfileChannels)?;
+    let n = usize::from(channels);
+    // The finest grid of one count a side that fits: `side^n` points.
+    let mut side = 2usize;
+    while (side + 1)
+        .checked_pow(u32::from(channels))
+        .is_some_and(|points| points <= XPS_TINT_SAMPLES)
+    {
+        side += 1;
+    }
+    let points = side.pow(u32::from(channels));
+    let last = (side - 1) as f64;
+    let mut samples = Vec::with_capacity(points * 3);
+    let mut components = vec![0.0f64; n];
+    for index in 0..points {
+        let mut rest = index;
+        for slot in &mut components {
+            *slot = (rest % side) as f64 / last;
+            rest /= side;
+        }
+        let (r, g, b) = transform.apply(&components);
+        samples.extend([r, g, b].map(|v| u16::from(v) * 257));
+    }
+    let tint = Function::Sampled {
+        domain: vec![[0.0, 1.0]; n],
+        range: vec![[0.0, 1.0]; 3],
+        size: vec![u32::try_from(side).unwrap_or(2); n],
+        samples,
+    };
+    let names: Vec<Vec<u8>> = (1..=n)
+        .map(|k| format!("{channels}CLR.{k}").into_bytes())
+        .collect();
+    let names: Vec<&[u8]> = names.iter().map(Vec::as_slice).collect();
+    if builder.add_device_n_color_space(resource, &names, DeviceSpace::Rgb, &tint, None) {
+        Ok(())
+    } else {
+        Err(XpsElementDefect::ColourProfileUnresolved)
     }
 }
 

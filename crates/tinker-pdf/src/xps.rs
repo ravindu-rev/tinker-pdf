@@ -704,15 +704,17 @@ pub enum XpsElementDefect {
     /// with an `/ICCBased` stream it cannot use, and 15.2.5's syntax carries
     /// no sRGB fallback of its own to prefer over it.
     ColourProfileUnresolved,
-    /// A `ContextColor` whose profile takes a number of components PDF's
-    /// `/ICCBased` cannot state.
+    /// A `ContextColor` whose `nCLR` profile cannot be placed as a `/DeviceN`
+    /// space: more than [`profiles::MAX_XPS_DEVICE_N_CHANNELS`] channels —
+    /// ECMA-388 15.2.5 names `2CLR` through `8CLR` — or no transform this
+    /// build can evaluate.
     ///
-    /// Table 66 permits **1, 3 or 4** and no others, and ICC.1's `nCLR` family
-    /// runs to fifteen. PDF's other n-channel space, `/DeviceN`, needs a tint
-    /// transform into an alternate space that only *evaluating* the profile
-    /// could supply — so this is a **narrowing** and is named as one, and the
-    /// element takes the placeholder grey rather than a colour picked by
-    /// dropping components.
+    /// Table 66 permits `/ICCBased` **1, 3 or 4** components and no others,
+    /// so an `nCLR` profile is placed as 8.6.6.5's `/DeviceN`, its tint
+    /// transform the profile evaluated over a grid (since 3 October 2026).
+    /// Where that cannot be done this is a **narrowing** and is named as one,
+    /// and the element takes the placeholder grey rather than a colour picked
+    /// by dropping components.
     ColourProfileChannels,
     /// A colour or a gradient that is not 15's syntax. **Painted grey.**
     BrushUnreadable,
@@ -830,7 +832,7 @@ impl core::fmt::Display for XpsElementDefect {
                 "a `ContextColor` whose profile part is not a profile"
             }
             XpsElementDefect::ColourProfileChannels => {
-                "a colour profile with a channel count `/ICCBased` cannot state"
+                "an `nCLR` colour profile that cannot be placed as a `/DeviceN` space"
             }
             XpsElementDefect::BrushUnreadable => "a colour or gradient that is not 15's syntax",
             XpsElementDefect::BrushApproximated => "a brush that reached the page approximately",
