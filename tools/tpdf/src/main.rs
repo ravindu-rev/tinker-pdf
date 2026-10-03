@@ -6,7 +6,8 @@
 //! runner needs has to be reachable from here; and its write half (`writing`)
 //! is how a person merges, splits, rotates, encrypts, decrypts, attaches to,
 //! stamps and sanitises a document without writing Rust either — each a
-//! wrapper over the facade with no logic of its own (ruling 11).
+//! wrapper over the facade (ruling 11), with the two refusals of its own that
+//! `writing`'s documentation names and the facade does not make yet.
 //!
 //! Argument parsing is hand-rolled along with everything else. It is a
 //! sub-command plus flags, which needs no library.
@@ -55,7 +56,7 @@ writing (each writes a new file, and takes --font-policy and the image flags):
   tpdf stamp    <file.pdf> --stamp FILE --out FILE [--stamp-page N] [--under]
                            [--page N | --pages LIST]
   tpdf sanitise <file.pdf> --out FILE [--javascript] [--actions]
-                           [--embedded-files] [--metadata]
+                           [--embedded-files] [--metadata] [--all]
 
 options:
   --page N     one page, 1-based; the default is every page
@@ -119,7 +120,12 @@ writing options:
                with stamp, the document whose page is drawn, which page
                (default 1), and beneath the page's content rather than over it
   --javascript, --actions, --embedded-files, --metadata
-               with sanitise, what to take out; none of them means all four
+               with sanitise, what to take out, at least one of them
+  --all        with sanitise, all four
+
+Passwords are taken on the command line, where another user of the machine
+can read a running process's arguments and a shell may keep them in its
+history. There is no file, environment or prompt alternative yet.
 
 `--jobs` is the one flag that is meant to change nothing but the clock. A
 `Document` is `Send + Sync` and the pages of one are independent — each
@@ -231,7 +237,8 @@ An encrypted input is refused by every writing command but `encrypt` and
 plaintext. `decrypt`, and `encrypt` over a file that already is, need the
 owner password unless the owner withheld nothing from the user: they would
 lift the restrictions, and the library reports those rather than enforcing
-them, so this is the place that honours them.
+them, so this is the place that honours them. Both refusals are this tool's
+own: the library and its bindings make neither yet.
 ";
 
 fn main() -> ExitCode {
@@ -347,7 +354,7 @@ struct Options {
     /// `--under`, for `stamp`: beneath the page's content rather than over it.
     under: bool,
     /// `--javascript`, `--actions`, `--embedded-files` and `--metadata`, for
-    /// `sanitise`; none of them means all four.
+    /// `sanitise`, each one field; `--all` is `Sanitise::ALL`.
     sanitise: Sanitise,
     /// `--images`, for every writing command: how a continuous-tone image is
     /// coded on the way out. With `--bilevel` and `--max-ppi`, the image
@@ -568,6 +575,7 @@ impl Options {
                 "--actions" => options.sanitise.actions = true,
                 "--embedded-files" => options.sanitise.embedded_files = true,
                 "--metadata" => options.sanitise.metadata = true,
+                "--all" => options.sanitise = Sanitise::ALL,
                 // The codings `ContinuousCodec` and `BilevelCodec` have, by
                 // their names, and refused otherwise for `--font-policy`'s
                 // reason.

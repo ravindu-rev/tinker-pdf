@@ -2,8 +2,10 @@
 //! `attach`, `stamp` and `sanitise` — the commands that write a document out
 //! again.
 //!
-//! Each is a wrapper over the facade with no logic of its own (ruling 11). It
-//! opens its inputs, makes the editor calls its name says —
+//! Each is a wrapper over the facade (ruling 11), with **two refusals of its
+//! own** that the facade does not make yet, named under "An encrypted input"
+//! below; everything else a command decides, the facade decides. It opens
+//! its inputs, makes the editor calls its name says —
 //! [`DocumentEditor::import_page`], [`DocumentEditor::keep_pages`],
 //! [`DocumentEditor::rotate_page`], [`DocumentEditor::attach_file`],
 //! [`DocumentEditor::import_page_as_form`] with [`DocumentEditor::stamp`],
@@ -39,9 +41,9 @@
 //! the editor call it makes documents as its other half. `split` sets
 //! [`WriteOptions::garbage_collect`]: a rewrite keeps objects nothing reaches
 //! unless asked otherwise, so without it every piece would carry every
-//! page's content, unreferenced and readable by anyone who scans the file —
-//! [`DocumentEditor::keep_pages`] calls itself "the split half of
-//! split-and-merge" for exactly that pairing. `merge` sets
+//! page's content, unreferenced and readable by anyone who scans the file,
+//! which is why [`DocumentEditor::keep_pages`]' documentation names that
+//! option as what makes its result a split. `merge` sets
 //! [`WriteOptions::deduplicate_streams`]: [`DocumentEditor::import_page`]
 //! copies each page with everything it reaches, so pages sharing one face or
 //! one picture arrive with a copy each, and its documentation names that
@@ -62,6 +64,16 @@
 //! from the user. PDF permissions are advisory and the facade reports them
 //! rather than enforcing them ([`Document::permissions`]); this is the one
 //! place a command would *erase* them, and it honours them instead.
+//!
+//! **Both refusals are this command's and not the facade's**, so here the
+//! CLI and the facade answer one request differently: the C ABI and the
+//! bindings rewrite an encrypted input decrypted, and decrypt with the
+//! user's authority, as the facade does. Ruling 11's remedy is that the
+//! facade grows the behaviour first, and whether it should refuse either —
+//! `save` returns bytes, so a refusal there is an API decision — is the
+//! owner's; the ROADMAP's CLI row carries it. Until then these two stay,
+//! because the alternative is a `rotate` that writes the plaintext of an
+//! encrypted file without saying so.
 
 use std::io::Read;
 use std::path::Path;
@@ -407,9 +419,13 @@ pub(crate) fn stamp(options: &Options) -> Result<Vec<String>, String> {
 }
 
 /// `tpdf sanitise <file.pdf> [--javascript] [--actions] [--embedded-files]
-/// [--metadata] --out FILE`: what each flag names taken out, or with none of
-/// them all four ([`Sanitise::ALL`]), and every entry removed and object
-/// deleted listed.
+/// [--metadata] [--all] --out FILE`: what each flag names taken out — each
+/// flag one [`Sanitise`] field, `--all` [`Sanitise::ALL`] — and every entry
+/// removed and object deleted listed.
+///
+/// No flag at all is refused rather than read as anything: the facade's
+/// `Sanitise::default()` takes out nothing, and reading it as everything, as
+/// this command once did, was a default of its own (ruling 11).
 pub(crate) fn sanitise(options: &Options) -> Result<Vec<String>, String> {
     takes(
         options,
@@ -419,17 +435,19 @@ pub(crate) fn sanitise(options: &Options) -> Result<Vec<String>, String> {
             "--actions",
             "--embedded-files",
             "--metadata",
+            "--all",
         ],
     )?;
     let out = needs_out(options, "sanitise", "FILE")?;
+    if options.sanitise == Sanitise::default() {
+        return Err("sanitise needs what to take out: --javascript, --actions, \
+                    --embedded-files, --metadata, or --all for the four"
+            .to_string());
+    }
     let path = only_input(options, "sanitise")?;
     let doc = open_clear(path, options)?;
-    let what = match options.sanitise == Sanitise::default() {
-        true => Sanitise::ALL,
-        false => options.sanitise,
-    };
     let mut editor = doc.editor();
-    let report = editor.sanitise(&what);
+    let report = editor.sanitise(&options.sanitise);
 
     let mut lines = vec![format!(
         "  {path}: {} removed, {} deleted",
@@ -1823,8 +1841,24 @@ mod tests {
         )
     }
 
+    /// What is left of the document `everything_to_take_out` built, as four
+    /// facts: document-level scripts, the link (whose `/URI` action is the
+    /// only thing on it), attachments, and the title in `/Info`.
+    fn what_is_left(doc: &Document) -> (usize, usize, usize, Option<String>) {
+        (
+            doc.script_summary().document_scripts,
+            doc.page(0).expect("page").annotations().len(),
+            doc.attachments().len(),
+            doc.metadata().title,
+        )
+    }
+
+    /// Each flag takes out what it names and nothing else, `--all` takes out
+    /// all four, and none at all is refused: `Sanitise::default()` takes out
+    /// nothing, and the command used to read "nothing" as "everything", a
+    /// default of its own (ruling 11).
     #[test]
-    fn sanitise_takes_out_what_each_flag_names_and_all_four_by_default() {
+    fn sanitise_takes_out_what_each_flag_names_and_all_four_with_all() {
         let dir = scratch("sanitise");
         let source = everything_to_take_out(&dir);
         let before = reopen(&source, None);
@@ -1850,8 +1884,47 @@ mod tests {
         assert!(!any_stream_says(&doc, b"app.alert"));
         assert_clean(&doc, "the file without scripts");
 
+        let title = Some("a title".to_string());
+        for (flag, said, left) in [
+            ("--actions", ": a /URI action", (1, 0, 1, title.clone())),
+            (
+                "--embedded-files",
+                ": the embedded file tree",
+                (1, 1, 0, title.clone()),
+            ),
+            (
+                "--metadata",
+                ": the document information dictionary",
+                (1, 1, 1, None),
+            ),
+        ] {
+            let out = format!("{dir}/{}.pdf", flag.trim_start_matches('-'));
+            let lines = sanitise(&parse(&[&source, flag, "--out", &out])).expect("sanitises");
+            assert!(lines.iter().any(|l| l.ends_with(said)), "{flag}: {lines:?}");
+            let doc = reopen(&out, None);
+            assert_eq!(what_is_left(&doc), left, "{flag} takes out only its own");
+            assert_eq!(
+                any_stream_says(&doc, b"private"),
+                flag != "--embedded-files",
+                "{flag}: the attachment's bytes"
+            );
+            assert_clean(&doc, flag);
+        }
+
+        let nothing = format!("{dir}/nothing.pdf");
+        assert_eq!(
+            sanitise(&parse(&[&source, "--out", &nothing]))
+                .err()
+                .as_deref(),
+            Some(
+                "sanitise needs what to take out: --javascript, --actions, --embedded-files, \
+                 --metadata, or --all for the four"
+            )
+        );
+        assert!(!Path::new(&nothing).exists());
+
         let all = format!("{dir}/all.pdf");
-        let lines = sanitise(&parse(&[&source, "--out", &all])).expect("sanitises");
+        let lines = sanitise(&parse(&[&source, "--all", "--out", &all])).expect("sanitises");
         for what in [
             ": the document-level scripts",
             ": a /URI action",

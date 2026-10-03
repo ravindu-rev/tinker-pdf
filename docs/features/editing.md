@@ -658,19 +658,29 @@ if report.untouched.is_empty() {
 }
 ```
 
-**From the command line.** `tpdf`'s write half is these calls and nothing
-more (ruling 11, `tools/tpdf/src/writing.rs`): `merge` is `import_page` for
-every page of each later file, `split` is `keep_pages` per piece, `rotate` is
-`rotate_page`, `attach` is `attach_file`, `stamp` is `import_page_as_form`
-and then `stamp` per page, `sanitise` is `sanitise` with the flags as the
-`Sanitise` fields and none of them meaning `Sanitise::ALL`, and `encrypt` and
-`decrypt` change only `WriteOptions::encryption`. Every one saves through
-`write::save` as a rewrite and takes `--font-policy subset|keep`, defaulting
-to the facade's subset and printing the report above, a program left whole
-named with its reason; the image policy is there too, off unless asked
-([writing](writing.md)). `split` sets `garbage_collect` and `merge`
-`deduplicate_streams`, the options `keep_pages`' and `import_page`'s own
-documentation pair them with.
+**From the command line.** `tpdf`'s write half is these calls (ruling 11,
+`tools/tpdf/src/writing.rs`): `merge` is `import_page` for every page of each
+later file, `split` is `keep_pages` per piece, `rotate` is `rotate_page`,
+`attach` is `attach_file`, `stamp` is `import_page_as_form` and then `stamp`
+per page, `sanitise` is `sanitise` with each flag one `Sanitise` field and
+`--all` `Sanitise::ALL` (no flag at all is refused, where it once meant all
+four — a default the facade's `Sanitise::default()`, which is nothing, does
+not have), and `encrypt` and `decrypt` change only `WriteOptions::encryption`.
+Every one saves through `write::save` as a rewrite and takes `--font-policy
+subset|keep`, defaulting to the facade's subset and printing the report
+above, a program left whole named with its reason; the image policy is there
+too, off unless asked ([writing](writing.md)). `split` sets `garbage_collect`
+and `merge` `deduplicate_streams`, the options `keep_pages`' and
+`import_page`'s own documentation pair them with. Two refusals are the CLI's
+and not the facade's, so there the CLI and the C ABI or a binding answer one
+request differently: every writer but `encrypt` and `decrypt` refuses an
+encrypted input, which the facade rewrites decrypted, and those two refuse to
+lift an owner's restrictions with only the user's authority, which the
+facade reports and does not enforce. Whether the facade should make either
+is owed in the [roadmap](../ROADMAP.md)'s CLI row. What the CLI used to decide
+on its own and the facade now decides for every surface: a turn that is not
+a quarter (`rotate_page` refuses it) and an empty owner password (the user's,
+[encryption](encryption.md)).
 
 ## Refused by name
 

@@ -1571,8 +1571,9 @@ fix was to sharpen the injection rather than to shrug at the number.
   the same bytes, an owner's restriction refusing `decrypt` from the user, an
   attachment's bytes and `/Subtype` back as given, a stamp's text over or
   under the page's, and each thing `sanitise` takes out gone from every
-  stream. Fourteen defects put back one at a time each fire one assertion or
-  two. The image flags are held the same way: no flag leaves every stream as
+  stream — each of its four flags alone taking out only what it names, so a
+  permutation of their mapping fires, and no flag at all refused. Fourteen
+  defects put back one at a time each fire one assertion or two. The image flags are held the same way: no flag leaves every stream as
   stored, `--images flate --bilevel g4` gives back exactly the samples
   written, `--max-ppi 36` halves a 72 ppi image and names the one-bit image
   it would not box-filter, and `--images jpeg` writes `DCTDecode` with the

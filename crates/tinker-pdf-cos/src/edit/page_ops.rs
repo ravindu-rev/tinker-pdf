@@ -304,10 +304,18 @@ impl DocumentEditor {
 
     /// Keeps only the pages in `keep`, in that order.
     ///
-    /// The split half of split-and-merge: saving the result twice with
-    /// different selections divides a document. Pages appear in the order
-    /// given, so this reorders as well, and a repeated index appears twice —
-    /// both are what a caller asking for an explicit order means.
+    /// The split half of split-and-merge: saving the result with different
+    /// selections divides a document, **on a rewrite with
+    /// [`crate::write::WriteOptions::garbage_collect`]** — without it a
+    /// rewrite keeps every object, so each piece still carries every dropped
+    /// page and its content, unreferenced and readable by anyone who scans the
+    /// file. Even collected, a dropped page that something this call leaves —
+    /// an outline item, a named destination, a link on a kept page — still
+    /// names is reached and kept, outside the page tree, so a piece is not a
+    /// redaction (`docs/features/editing.md`, refused by name). Pages appear
+    /// in the order given, so this reorders as well, and a repeated index
+    /// appears twice — both are what a caller asking for an explicit order
+    /// means.
     ///
     /// Returns false when any index is out of range, having changed nothing.
     pub fn keep_pages(&mut self, keep: &[u32]) -> bool {
