@@ -2012,3 +2012,89 @@ fn list_attributes_are_presentational_hints() {
         ]
     );
 }
+
+/// `paint::draw_page` keeps the public signature it had before the book path's
+/// tagging moved to a crate-internal form (the review of the tagged-writing
+/// lane found the public function gone): given the element tree, it still
+/// tags the page into it, each element under its standard type, and the run
+/// reads back through the structure tree.
+#[test]
+fn the_public_draw_page_still_tags_a_page_from_its_element_tree() {
+    use super::paint::{draw_page, Effects, Fonts, Frame};
+    use tinker_pdf_css::property::{FontFamily, FontStyle, FontVariant, TextDecoration};
+    use tinker_pdf_layout::{Page as LayoutPage, TextRun};
+
+    let dom = super::xhtml::read(
+        br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Words</p></body></html>"#,
+        &XmlLimits::DEFAULT,
+    )
+    .expect("well-formed");
+    let paragraph = dom
+        .nodes
+        .iter()
+        .position(|node| node.name == "p")
+        .and_then(|at| u32::try_from(at).ok());
+    let run = TextRun {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        text: "Words".to_owned(),
+        font_size: 16.0,
+        families: vec![FontFamily::Serif],
+        weight: 400,
+        style: FontStyle::Normal,
+        variant: FontVariant::Normal,
+        color: tinker_pdf_css::property::Color::BLACK,
+        decoration: TextDecoration::None,
+        painted: true,
+        letter_spacing: 0.0,
+        word_spacing: 0.0,
+        generated: false,
+        anchor: paragraph,
+        order: 1,
+    };
+    let faces = super::typeface::FaceSet::new();
+    let mut fonts = Fonts::new(&faces);
+    fonts.note(&run);
+    let mut builder = tinker_pdf_cos::build::DocumentBuilder::new();
+    fonts.register(&mut builder);
+    let frame = Frame {
+        page: (300.0, 200.0),
+        margin: 10.0,
+    };
+    let laid = LayoutPage {
+        boxes: Vec::new(),
+        replaced: Vec::new(),
+        runs: vec![run],
+        clips: Vec::new(),
+    };
+    // No element of this one asks for an effect, so the page is drawn under
+    // none — the default the book path gives a chapter with no styles.
+    let effects = Effects::default();
+    let mut page = builder.begin_page(300.0, 200.0);
+    let refused = draw_page(
+        &mut builder,
+        &mut page,
+        &laid,
+        &frame,
+        &fonts,
+        &[],
+        Some(&dom),
+        0,
+        &effects.on(&laid, &frame, 0),
+    );
+    assert_eq!(refused, 0);
+    builder.push_page(page);
+
+    let doc = crate::Document::open(builder.finish()).expect("opens");
+    let tree = doc.structure().expect("the page is tagged");
+    let kinds: Vec<String> = tree
+        .elements()
+        .iter()
+        .map(|element| element.standard_type.clone())
+        .collect();
+    assert_eq!(kinds, ["Document", "P"]);
+    let text = tree.text_for_page(0, &doc.page(0).expect("a page").text());
+    assert_eq!(text.plain_text().trim(), "Words");
+    assert_eq!(text.unmarked, 0);
+}

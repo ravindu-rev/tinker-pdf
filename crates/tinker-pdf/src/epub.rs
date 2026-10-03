@@ -121,7 +121,7 @@ use crate::cbz::{
 };
 use ocf::resolve_reference;
 use package::{FallbackDefect, Package, RenditionLayout};
-use paint::{draw_page, page_target, run_rect, BookMetrics, Fonts, Frame};
+use paint::{draw_page_tagged, page_target, run_rect, BookMetrics, Fonts, Frame};
 use typeface::{FaceDefect, FaceSet};
 
 /// Every `@font-face` that did not become a face, deduplicated by family and
@@ -1726,7 +1726,7 @@ fn write_chapters<R: read::Resources + ?Sized>(
             if clip {
                 page.raw(format!("q 0 0 {page_width} {page_height} re W n").as_bytes());
             }
-            unwritable_runs += draw_page(
+            unwritable_runs += draw_page_tagged(
                 builder,
                 &mut page,
                 laid,

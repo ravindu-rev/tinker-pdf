@@ -84,7 +84,7 @@ use tinker_pdf_shape::shape::itemize;
 use tinker_pdf_svg::transform::{concat, invert, rotation, IDENTITY};
 
 use super::read::PX_TO_PT;
-use super::tagging::{ancestry, draw_figure, tag_runs, Tagging};
+use super::tagging::{ancestry, draw_figure, figure_orders, table_cells, tag_runs, Tagging};
 use super::typeface::FaceSet;
 use super::xhtml::Dom;
 // `Placed` and not `tinker_pdf_layout::metrics::PlacedGlyph`, which is
@@ -1853,10 +1853,63 @@ impl Frame {
 /// Returns how many shaped pieces the writer refused, which the caller turns
 /// into [`crate::ArchiveWarning::UnwritableTextRun`] (ruling 10).
 ///
-/// `tagging` is the structure the page is tagged into, when the caller has
-/// the element tree the runs came from ([`super::tagging`]).
+/// `dom` is the element tree the runs came from, when the caller has one, and
+/// the page is then tagged into it the way the book path tags a page — each
+/// element under its standard structure type, with what its markup states of
+/// `/Lang` and Table 349's attributes — with `chapter` the base its keys and
+/// reading positions are offset by. The book path itself tags through a
+/// crate-internal form that also knows the chapter's links, its pictures'
+/// places across pages and the document's role map; this one keeps the
+/// signature this function has always had, and knows only the one page.
+///
+/// `effects` is what the page's elements apply to what they draw — opacity,
+/// clips, transforms, background images and shadows ([`Effects::on`]).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn draw_page(
+pub fn draw_page(
+    builder: &mut DocumentBuilder,
+    page: &mut PageBuilder,
+    laid: &LayoutPage,
+    frame: &Frame,
+    fonts: &Fonts<'_>,
+    pictures: &[(u32, Vec<u8>)],
+    dom: Option<&Dom>,
+    chapter: u64,
+    effects: &OnPage<'_>,
+) -> usize {
+    let Some(dom) = dom else {
+        return draw_page_tagged(builder, page, laid, frame, fonts, pictures, None, effects);
+    };
+    let pages = std::slice::from_ref(laid);
+    let figures = figure_orders(dom, pages);
+    let cells = table_cells(dom, pages, pictures);
+    let none = std::collections::BTreeSet::new();
+    let tagging = Tagging {
+        dom,
+        chapter,
+        document_language: None,
+        figures: &figures,
+        links: &none,
+        path: "",
+        cells: &cells,
+        roles: &std::collections::BTreeSet::new(),
+    };
+    draw_page_tagged(
+        builder,
+        page,
+        laid,
+        frame,
+        fonts,
+        pictures,
+        Some(&tagging),
+        effects,
+    )
+}
+
+/// [`draw_page`], for the book path: `tagging` is the structure the page is
+/// tagged into, when the caller has the element tree the runs came from
+/// ([`super::tagging`]).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_page_tagged(
     builder: &mut DocumentBuilder,
     page: &mut PageBuilder,
     laid: &LayoutPage,
