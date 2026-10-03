@@ -921,6 +921,136 @@ pub enum TextTransform {
     Lowercase,
 }
 
+/// A `url()` as written, and the stylesheet it was written in.
+///
+/// **Unresolved, and that is ruling 8**: a relative URL in a stylesheet is
+/// relative to the **sheet** (`css-values-4` §4.5), and only the caller knows
+/// where a sheet was — an OCF path, a file, nothing at all. The parser records
+/// the `href` it was handed for the sheet in `base` — a `<style>` element's is
+/// its document's — and leaves `None` where it was handed none, which is a
+/// `style=""` attribute's case: the caller resolves that against the document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageRef {
+    /// The reference, exactly as the `url()` held it.
+    pub href: String,
+    /// The `href` of the stylesheet it was written in, where that sheet has
+    /// one.
+    pub base: Option<String>,
+}
+
+/// One axis of `background-repeat`, `css-backgrounds-3` §2.3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepeatStyle {
+    /// `repeat`: tiled from the positioned image outwards, clipped.
+    Repeat,
+    /// `space`: as many whole images as fit, the leftover space between them.
+    Space,
+    /// `round`: as many whole images as fit once each is rescaled to fill.
+    Round,
+    /// `no-repeat`: one image.
+    NoRepeat,
+}
+
+/// `background-repeat`, both axes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackgroundRepeat {
+    /// Across.
+    pub x: RepeatStyle,
+    /// Down.
+    pub y: RepeatStyle,
+}
+
+impl BackgroundRepeat {
+    /// `repeat`, the initial value.
+    pub const REPEAT: BackgroundRepeat = BackgroundRepeat {
+        x: RepeatStyle::Repeat,
+        y: RepeatStyle::Repeat,
+    };
+}
+
+/// One axis of a specified `background-position`: an offset in from the
+/// start edge (left or top) or, for `right 10px` and `bottom 2em`, from the end
+/// edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PositionOffset {
+    /// Measured from the right or bottom edge rather than the left or top.
+    pub from_end: bool,
+    /// The offset; a percentage is of the positioning area less the image
+    /// (§2.6), which is why `50%` centres.
+    pub offset: Len,
+}
+
+/// `background-position` as written, both axes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpecifiedBackgroundPosition {
+    /// Across.
+    pub x: PositionOffset,
+    /// Down.
+    pub y: PositionOffset,
+}
+
+/// One axis of a computed `background-position`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ComputedOffset {
+    /// See [`PositionOffset::from_end`].
+    pub from_end: bool,
+    /// The offset, `em` resolved.
+    pub offset: LengthPercentage,
+}
+
+/// `background-position`, computed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BackgroundPosition {
+    /// Across.
+    pub x: ComputedOffset,
+    /// Down.
+    pub y: ComputedOffset,
+}
+
+impl BackgroundPosition {
+    /// `0% 0%`, the initial value: the image's top left at the positioning
+    /// area's.
+    pub const INITIAL: BackgroundPosition = BackgroundPosition {
+        x: ComputedOffset {
+            from_end: false,
+            offset: LengthPercentage::Percent(0.0),
+        },
+        y: ComputedOffset {
+            from_end: false,
+            offset: LengthPercentage::Percent(0.0),
+        },
+    };
+}
+
+/// `background-size` as written, `css-backgrounds-3` §2.4. `None` is `auto`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpecifiedBackgroundSize {
+    /// `cover`
+    Cover,
+    /// `contain`
+    Contain,
+    /// A width and a height, each a non-negative length or `auto`.
+    Explicit(Option<Len>, Option<Len>),
+}
+
+/// `background-size`, computed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BackgroundSize {
+    /// `cover`: the smallest size that covers the positioning area, the image's
+    /// own ratio kept.
+    Cover,
+    /// `contain`: the largest that fits inside it.
+    Contain,
+    /// A width and a height; `None` is `auto`, which takes the image's own
+    /// size or, beside a stated one, its ratio.
+    Explicit(Option<LengthPercentage>, Option<LengthPercentage>),
+}
+
+impl BackgroundSize {
+    /// `auto`, the initial value.
+    pub const AUTO: BackgroundSize = BackgroundSize::Explicit(None, None);
+}
+
 /// `overflow-x` and `overflow-y`, `css-overflow-3` §3.1.
 ///
 /// **Five values and two questions**, and the two are not the same split:
@@ -1347,6 +1477,15 @@ pub enum Property {
     BorderColor(Side, Color),
     /// `background-color`
     BackgroundColor(Color),
+    /// `background-image`, `css-backgrounds-3` §2.2, one layer. `None` is
+    /// `none`.
+    BackgroundImage(Option<ImageRef>),
+    /// `background-repeat`, §2.3.
+    BackgroundRepeat(BackgroundRepeat),
+    /// `background-position`, §2.6.
+    BackgroundPosition(SpecifiedBackgroundPosition),
+    /// `background-size`, §2.4.
+    BackgroundSize(SpecifiedBackgroundSize),
     /// `page-break-before`
     PageBreakBefore(PageBreak),
     /// `page-break-after`
@@ -1507,6 +1646,10 @@ impl Property {
                 Side::Left => "border-left-color",
             },
             Property::BackgroundColor(_) => "background-color",
+            Property::BackgroundImage(_) => "background-image",
+            Property::BackgroundRepeat(_) => "background-repeat",
+            Property::BackgroundPosition(_) => "background-position",
+            Property::BackgroundSize(_) => "background-size",
             Property::PageBreakBefore(_) => "page-break-before",
             Property::PageBreakAfter(_) => "page-break-after",
             Property::PageBreakInside(_) => "page-break-inside",
@@ -1636,6 +1779,13 @@ impl Property {
             | Property::BorderStyle(_, _)
             | Property::BorderColor(_, _)
             | Property::BackgroundColor(_)
+            // `css-backgrounds-3` §2: none of the four is inherited, which is
+            // what stops a section's texture being drawn again in every
+            // paragraph inside it.
+            | Property::BackgroundImage(_)
+            | Property::BackgroundRepeat(_)
+            | Property::BackgroundPosition(_)
+            | Property::BackgroundSize(_)
             | Property::PageBreakBefore(_)
             | Property::PageBreakAfter(_)
             // `page-break-inside` is the one row here that disagrees with the
@@ -1823,10 +1973,6 @@ pub enum Parsed {
 pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "animation",
     "background-attachment",
-    "background-image",
-    "background-position",
-    "background-repeat",
-    "background-size",
     "border-image",
     "box-shadow",
     "caption-side",
@@ -2019,7 +2165,16 @@ impl Defaulting {
 /// Two tables that must agree are worth one test; two tables that quietly
 /// disagree are `border: inherit` leaving the border colour behind.
 pub const DEFAULTABLE_SHORTHANDS: &[(&str, &[&str])] = &[
-    ("background", &["background-color"]),
+    (
+        "background",
+        &[
+            "background-color",
+            "background-image",
+            "background-repeat",
+            "background-position",
+            "background-size",
+        ],
+    ),
     (
         "border",
         &[
@@ -2734,6 +2889,10 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "align-self",
     "background",
     "background-color",
+    "background-image",
+    "background-position",
+    "background-repeat",
+    "background-size",
     "border",
     "border-bottom",
     "border-bottom-color",
@@ -2865,14 +3024,14 @@ fn implemented(
     Some(match name {
         "color" => colour_property(one, single, Property::Color),
         "background-color" => colour_property(one, single, Property::BackgroundColor),
-        // The `background` shorthand at the one form a book writes: a colour
-        // alone. Anything else names an image, a position or a repeat, none of
-        // which this build has — and expanding the colour out of it and
-        // dropping the rest would paint a background the author did not ask for.
-        "background" => match (single, one.and_then(color)) {
-            (true, Some(c)) => Implemented::Known(vec![Property::BackgroundColor(c)]),
-            _ => Implemented::BadValue,
+        "background" => background_shorthand(significant),
+        "background-image" => background_image(significant),
+        "background-repeat" => match background_repeat(significant) {
+            Some(repeat) => Implemented::Known(vec![Property::BackgroundRepeat(repeat)]),
+            None => Implemented::Malformed,
         },
+        "background-position" => background_position_property(significant),
+        "background-size" => background_size_property(significant),
         "display" => keyword(one, single, |word| {
             Some(Property::Display(match word {
                 "inline" => Display::Inline,
@@ -3846,6 +4005,463 @@ fn border_radius_shorthand(significant: &[&ComponentValue]) -> Implemented {
             })
             .collect(),
     )
+}
+
+/// Whether a value is the comma that separates `css-backgrounds-3` §2's layers.
+fn is_comma(value: &ComponentValue) -> bool {
+    matches!(value, ComponentValue::Token(Token::Comma))
+}
+
+/// A `url()`, in either of the two spellings `css-values-4` §4.5 gives it: the
+/// unquoted token, or the function round one string.
+fn url_of(value: &ComponentValue) -> Option<String> {
+    match value {
+        ComponentValue::Token(Token::Url(href)) => Some(href.clone()),
+        ComponentValue::Function { name, arguments } if name.eq_ignore_ascii_case("url") => {
+            let mut inside = arguments.iter().filter(|value| !value.is_whitespace());
+            match (inside.next(), inside.next()) {
+                (Some(ComponentValue::Token(Token::Str(href))), None) => Some(href.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// An `<image>` this build does not draw: a gradient, or one of the other
+/// image functions `css-images-4` defines. Valid CSS, so refused by value.
+fn unimplemented_image(value: &ComponentValue) -> bool {
+    let ComponentValue::Function { name, .. } = value else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with("gradient")
+        || matches!(
+            lower.as_str(),
+            "image" | "image-set" | "-webkit-image-set" | "cross-fade" | "element" | "paint"
+        )
+}
+
+/// `background-image`: `none` or one `url()`.
+///
+/// More than one layer is §2's comma-separated list, which is valid CSS and
+/// this build's gap — refused by value, so a book that layers two textures is
+/// counted rather than given the first.
+fn background_image(significant: &[&ComponentValue]) -> Implemented {
+    if significant.iter().any(|value| is_comma(value)) {
+        return Implemented::BadValue;
+    }
+    let [one] = significant else {
+        return Implemented::Malformed;
+    };
+    if let ComponentValue::Token(Token::Ident(word)) = one {
+        if word.eq_ignore_ascii_case("none") {
+            return Implemented::Known(vec![Property::BackgroundImage(None)]);
+        }
+        return Implemented::Malformed;
+    }
+    if let Some(href) = url_of(one) {
+        return Implemented::Known(vec![Property::BackgroundImage(Some(ImageRef {
+            href,
+            base: None,
+        }))]);
+    }
+    if unimplemented_image(one) {
+        return Implemented::BadValue;
+    }
+    Implemented::Malformed
+}
+
+fn repeat_named(word: &str) -> Option<RepeatStyle> {
+    Some(match word {
+        "repeat" => RepeatStyle::Repeat,
+        "space" => RepeatStyle::Space,
+        "round" => RepeatStyle::Round,
+        "no-repeat" => RepeatStyle::NoRepeat,
+        _ => return None,
+    })
+}
+
+/// `background-repeat`, §2.3: `repeat-x`, `repeat-y`, or one or two of the
+/// four per-axis keywords — one standing for both axes.
+fn background_repeat(significant: &[&ComponentValue]) -> Option<BackgroundRepeat> {
+    let word = |value: &ComponentValue| match value {
+        ComponentValue::Token(Token::Ident(word)) => Some(word.to_ascii_lowercase()),
+        _ => None,
+    };
+    match significant {
+        [one] => {
+            let one = word(one)?;
+            match one.as_str() {
+                "repeat-x" => Some(BackgroundRepeat {
+                    x: RepeatStyle::Repeat,
+                    y: RepeatStyle::NoRepeat,
+                }),
+                "repeat-y" => Some(BackgroundRepeat {
+                    x: RepeatStyle::NoRepeat,
+                    y: RepeatStyle::Repeat,
+                }),
+                other => repeat_named(other).map(|style| BackgroundRepeat { x: style, y: style }),
+            }
+        }
+        [x, y] => Some(BackgroundRepeat {
+            x: repeat_named(&word(x)?)?,
+            y: repeat_named(&word(y)?)?,
+        }),
+        _ => None,
+    }
+}
+
+/// One component of a `<bg-position>`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PositionToken {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Center,
+    Length(Len),
+}
+
+/// A value's [`PositionToken`], or why it is not one: `Ok(None)` for a value
+/// that is no part of a position, `Err` for a length this build does not have.
+fn position_token(value: &ComponentValue) -> Result<Option<PositionToken>, Implemented> {
+    if let ComponentValue::Token(Token::Ident(word)) = value {
+        return Ok(match word.to_ascii_lowercase().as_str() {
+            "left" => Some(PositionToken::Left),
+            "right" => Some(PositionToken::Right),
+            "top" => Some(PositionToken::Top),
+            "bottom" => Some(PositionToken::Bottom),
+            "center" => Some(PositionToken::Center),
+            _ => None,
+        });
+    }
+    match length_outcome(value) {
+        LenOutcome::Ok(len) => Ok(Some(PositionToken::Length(len))),
+        LenOutcome::Unsupported => Err(Implemented::BadValue),
+        LenOutcome::Invalid => Ok(None),
+    }
+}
+
+/// `<bg-position>`, `css-backgrounds-3` §2.6: one to four values.
+///
+/// One value names one axis and centres the other; two are horizontal then
+/// vertical, except that two keywords may come in either order; three and four
+/// pair a keyword with an offset from that edge — `right 10px bottom 20%`.
+/// `Err` carries `Malformed` for a value that is not the grammar.
+fn background_position(
+    tokens: &[PositionToken],
+) -> Result<SpecifiedBackgroundPosition, Implemented> {
+    use PositionToken as T;
+    let start = |offset: Len| PositionOffset {
+        from_end: false,
+        offset,
+    };
+    let keyword = |token: T| match token {
+        T::Left | T::Top => Some(start(Len::Percent(0.0))),
+        T::Right | T::Bottom => Some(start(Len::Percent(100.0))),
+        T::Center => Some(start(Len::Percent(50.0))),
+        T::Length(len) => Some(start(len)),
+    };
+    let horizontal = |token: T| matches!(token, T::Left | T::Right | T::Center | T::Length(_));
+    let vertical = |token: T| matches!(token, T::Top | T::Bottom | T::Center | T::Length(_));
+    let bad = Err(Implemented::Malformed);
+    match *tokens {
+        [one] => {
+            let (x, y) = match one {
+                T::Top | T::Bottom => (T::Center, one),
+                _ => (one, T::Center),
+            };
+            Ok(SpecifiedBackgroundPosition {
+                x: keyword(x).ok_or(Implemented::Malformed)?,
+                y: keyword(y).ok_or(Implemented::Malformed)?,
+            })
+        }
+        [first, second] => {
+            let both_keywords = !matches!(first, T::Length(_)) && !matches!(second, T::Length(_));
+            let swapped = both_keywords
+                && (matches!(first, T::Top | T::Bottom) || matches!(second, T::Left | T::Right));
+            let (x, y) = if swapped {
+                (second, first)
+            } else {
+                (first, second)
+            };
+            if !horizontal(x) || !vertical(y) {
+                return bad;
+            }
+            Ok(SpecifiedBackgroundPosition {
+                x: keyword(x).ok_or(Implemented::Malformed)?,
+                y: keyword(y).ok_or(Implemented::Malformed)?,
+            })
+        }
+        [_, _, _] | [_, _, _, _] => {
+            // Keyword-and-offset groups: every group starts with a keyword,
+            // `center` takes no offset, and a bare length is never first.
+            let mut groups: Vec<(T, Option<Len>)> = Vec::new();
+            let mut at = 0;
+            while at < tokens.len() {
+                let edge = tokens[at];
+                if matches!(edge, T::Length(_)) {
+                    return bad;
+                }
+                let offset = match tokens.get(at + 1) {
+                    Some(T::Length(len)) if edge != T::Center => {
+                        at += 1;
+                        Some(*len)
+                    }
+                    _ => None,
+                };
+                groups.push((edge, offset));
+                at += 1;
+            }
+            let [first, second] = groups[..] else {
+                return bad;
+            };
+            let (x, y) = if matches!(first.0, T::Top | T::Bottom)
+                || matches!(second.0, T::Left | T::Right)
+            {
+                (second, first)
+            } else {
+                (first, second)
+            };
+            if !matches!(x.0, T::Left | T::Right | T::Center)
+                || !matches!(y.0, T::Top | T::Bottom | T::Center)
+            {
+                return bad;
+            }
+            let side = |(edge, offset): (T, Option<Len>)| match offset {
+                None => keyword(edge),
+                Some(len) => Some(PositionOffset {
+                    from_end: matches!(edge, T::Right | T::Bottom),
+                    offset: len,
+                }),
+            };
+            Ok(SpecifiedBackgroundPosition {
+                x: side(x).ok_or(Implemented::Malformed)?,
+                y: side(y).ok_or(Implemented::Malformed)?,
+            })
+        }
+        _ => bad,
+    }
+}
+
+/// `background-size`, §2.4: `cover`, `contain`, or one or two of a
+/// non-negative `<length-percentage>` and `auto`, one standing for the width
+/// with an `auto` height.
+fn background_size(
+    significant: &[&ComponentValue],
+) -> Result<SpecifiedBackgroundSize, Implemented> {
+    let one = |value: &ComponentValue| -> Result<Option<Len>, Implemented> {
+        if let ComponentValue::Token(Token::Ident(word)) = value {
+            if word.eq_ignore_ascii_case("auto") {
+                return Ok(None);
+            }
+            return Err(Implemented::Malformed);
+        }
+        match length_outcome(value) {
+            LenOutcome::Ok(len) if !len_is_negative(len) => Ok(Some(len)),
+            LenOutcome::Unsupported => Err(Implemented::BadValue),
+            _ => Err(Implemented::Malformed),
+        }
+    };
+    match significant {
+        [ComponentValue::Token(Token::Ident(word))] if word.eq_ignore_ascii_case("cover") => {
+            Ok(SpecifiedBackgroundSize::Cover)
+        }
+        [ComponentValue::Token(Token::Ident(word))] if word.eq_ignore_ascii_case("contain") => {
+            Ok(SpecifiedBackgroundSize::Contain)
+        }
+        [width] => Ok(SpecifiedBackgroundSize::Explicit(one(width)?, None)),
+        [width, height] => Ok(SpecifiedBackgroundSize::Explicit(one(width)?, one(height)?)),
+        _ => Err(Implemented::Malformed),
+    }
+}
+
+/// `background-position` as a declaration: one layer's position, a list of
+/// them refused by value as `background-image` refuses one.
+fn background_position_property(significant: &[&ComponentValue]) -> Implemented {
+    if significant.iter().any(|value| is_comma(value)) {
+        return Implemented::BadValue;
+    }
+    let mut tokens = Vec::with_capacity(significant.len());
+    for value in significant {
+        match position_token(value) {
+            Ok(Some(token)) => tokens.push(token),
+            Ok(None) => return Implemented::Malformed,
+            Err(outcome) => return outcome,
+        }
+    }
+    match background_position(&tokens) {
+        Ok(position) => Implemented::Known(vec![Property::BackgroundPosition(position)]),
+        Err(outcome) => outcome,
+    }
+}
+
+/// `background-size` as a declaration, likewise.
+fn background_size_property(significant: &[&ComponentValue]) -> Implemented {
+    if significant.iter().any(|value| is_comma(value)) {
+        return Implemented::BadValue;
+    }
+    match background_size(significant) {
+        Ok(size) => Implemented::Known(vec![Property::BackgroundSize(size)]),
+        Err(outcome) => outcome,
+    }
+}
+
+/// The initial `background-position`, as written.
+const POSITION_INITIAL: SpecifiedBackgroundPosition = SpecifiedBackgroundPosition {
+    x: PositionOffset {
+        from_end: false,
+        offset: Len::Percent(0.0),
+    },
+    y: PositionOffset {
+        from_end: false,
+        offset: Len::Percent(0.0),
+    },
+};
+
+/// The `background` shorthand, `css-backgrounds-3` §2.11, one layer:
+/// `<bg-image> || <bg-position> [ / <bg-size> ]? || <repeat-style> ||
+/// <attachment> || <box> || <box> || <'background-color'>`, every longhand not
+/// given reset to its initial value — so `background: #fff` takes away an
+/// image an earlier rule set, as it does in every browser.
+///
+/// `background-attachment` is unimplemented, so an attachment other than its
+/// initial `scroll` is refused by value; `background-origin` and
+/// `background-clip`, which the two `<box>`es set, are unimplemented too, and
+/// a box keyword is refused the same way. A second layer is a comma, refused
+/// as `background-image` refuses it.
+fn background_shorthand(significant: &[&ComponentValue]) -> Implemented {
+    if significant.is_empty() {
+        return Implemented::Malformed;
+    }
+    if significant.iter().any(|value| is_comma(value)) {
+        return Implemented::BadValue;
+    }
+    let mut image: Option<Option<ImageRef>> = None;
+    let mut colour: Option<Color> = None;
+    let mut repeat: Option<BackgroundRepeat> = None;
+    let mut position: Option<SpecifiedBackgroundPosition> = None;
+    let mut size: Option<SpecifiedBackgroundSize> = None;
+    let mut at = 0;
+    while at < significant.len() {
+        let value = significant[at];
+        let word = match value {
+            ComponentValue::Token(Token::Ident(word)) => Some(word.to_ascii_lowercase()),
+            _ => None,
+        };
+        if image.is_none() {
+            if word.as_deref() == Some("none") {
+                image = Some(None);
+                at += 1;
+                continue;
+            }
+            if let Some(href) = url_of(value) {
+                image = Some(Some(ImageRef { href, base: None }));
+                at += 1;
+                continue;
+            }
+        }
+        if unimplemented_image(value) {
+            return Implemented::BadValue;
+        }
+        if let Some(word) = word.as_deref() {
+            if repeat.is_none()
+                && (word == "repeat-x" || word == "repeat-y" || repeat_named(word).is_some())
+            {
+                let pair = &significant[at..(at + 2).min(significant.len())];
+                let two = word != "repeat-x"
+                    && word != "repeat-y"
+                    && pair.len() == 2
+                    && matches!(pair[1], ComponentValue::Token(Token::Ident(next))
+                        if repeat_named(&next.to_ascii_lowercase()).is_some());
+                let taken = if two { pair } else { &pair[..1] };
+                repeat = background_repeat(taken);
+                if repeat.is_none() {
+                    return Implemented::Malformed;
+                }
+                at += taken.len();
+                continue;
+            }
+            if word == "scroll" {
+                at += 1;
+                continue;
+            }
+            if matches!(
+                word,
+                "fixed" | "local" | "border-box" | "padding-box" | "content-box" | "text"
+            ) {
+                return Implemented::BadValue;
+            }
+        }
+        match position_token(value) {
+            Err(outcome) => return outcome,
+            Ok(Some(_)) if position.is_none() => {
+                let mut tokens = Vec::new();
+                while at < significant.len() && tokens.len() < 4 {
+                    match position_token(significant[at]) {
+                        Ok(Some(token)) => tokens.push(token),
+                        Err(outcome) => return outcome,
+                        Ok(None) => break,
+                    }
+                    at += 1;
+                }
+                position = match background_position(&tokens) {
+                    Ok(found) => Some(found),
+                    Err(outcome) => return outcome,
+                };
+                // `/ <bg-size>`, which may only follow a position.
+                if matches!(
+                    significant.get(at),
+                    Some(ComponentValue::Token(Token::Delim('/')))
+                ) {
+                    at += 1;
+                    let mut end = at;
+                    while end < significant.len() && end < at + 2 {
+                        let fits = match significant[end] {
+                            ComponentValue::Token(Token::Ident(word)) => {
+                                matches!(
+                                    word.to_ascii_lowercase().as_str(),
+                                    "auto" | "cover" | "contain"
+                                )
+                            }
+                            other => !matches!(length_outcome(other), LenOutcome::Invalid),
+                        };
+                        if !fits {
+                            break;
+                        }
+                        end += 1;
+                    }
+                    size = match background_size(&significant[at..end]) {
+                        Ok(found) => Some(found),
+                        Err(outcome) => return outcome,
+                    };
+                    at = end;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        if colour.is_none() {
+            match colour_outcome(value) {
+                ColourOutcome::Ok(found) => {
+                    colour = Some(found);
+                    at += 1;
+                    continue;
+                }
+                ColourOutcome::Unsupported => return Implemented::BadValue,
+                ColourOutcome::Invalid => return Implemented::Malformed,
+            }
+        }
+        return Implemented::Malformed;
+    }
+    Implemented::Known(vec![
+        Property::BackgroundColor(colour.unwrap_or(Color::TRANSPARENT)),
+        Property::BackgroundImage(image.unwrap_or(None)),
+        Property::BackgroundRepeat(repeat.unwrap_or(BackgroundRepeat::REPEAT)),
+        Property::BackgroundPosition(position.unwrap_or(POSITION_INITIAL)),
+        Property::BackgroundSize(size.unwrap_or(SpecifiedBackgroundSize::Explicit(None, None))),
+    ])
 }
 
 /// `css-overflow-3` §3.1's five keywords and its one legacy alias.

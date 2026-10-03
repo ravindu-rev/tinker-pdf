@@ -7,7 +7,7 @@
 //! [`Property`] is not one -- it always holds a specified value, and six of its
 //! variants stand for four names each, carrying a [`Side`].
 //!
-//! Hence one hundred unit variants, one per name this build implements as a
+//! Hence a hundred and four unit variants, one per name this build implements as a
 //! longhand. The twenty shorthands and `css-break-3`'s three aliases are not
 //! here, because a shorthand is not a property:
 //! `crate::property::DEFAULTABLE_SHORTHANDS` expands each into the longhands
@@ -15,7 +15,7 @@
 //!
 //! # This file is generated, and it is checked in to be read
 //!
-//! A hundred variants across four consumers is not hand-written code, and a
+//! A hundred and four variants across four consumers is not hand-written code, and a
 //! macro would put it somewhere nobody can grep. So it is generated from
 //! `property.rs` itself -- the variants, the names out of [`Property::name`],
 //! the inheritance out of [`Property::inherited`] -- and written here as
@@ -159,6 +159,14 @@ pub enum Longhand {
     BorderColorLeft,
     /// `background-color`
     BackgroundColor,
+    /// `background-image`
+    BackgroundImage,
+    /// `background-repeat`
+    BackgroundRepeat,
+    /// `background-position`
+    BackgroundPosition,
+    /// `background-size`
+    BackgroundSize,
     /// `page-break-before`
     PageBreakBefore,
     /// `page-break-after`
@@ -309,6 +317,10 @@ impl Longhand {
         Longhand::BorderColorBottom,
         Longhand::BorderColorLeft,
         Longhand::BackgroundColor,
+        Longhand::BackgroundImage,
+        Longhand::BackgroundRepeat,
+        Longhand::BackgroundPosition,
+        Longhand::BackgroundSize,
         Longhand::PageBreakBefore,
         Longhand::PageBreakAfter,
         Longhand::PageBreakInside,
@@ -415,6 +427,10 @@ impl Longhand {
             Longhand::BorderColorBottom => "border-bottom-color",
             Longhand::BorderColorLeft => "border-left-color",
             Longhand::BackgroundColor => "background-color",
+            Longhand::BackgroundImage => "background-image",
+            Longhand::BackgroundRepeat => "background-repeat",
+            Longhand::BackgroundPosition => "background-position",
+            Longhand::BackgroundSize => "background-size",
             Longhand::PageBreakBefore => "page-break-before",
             Longhand::PageBreakAfter => "page-break-after",
             Longhand::PageBreakInside => "page-break-inside",
@@ -535,6 +551,10 @@ impl Longhand {
             | Longhand::BorderColorBottom
             | Longhand::BorderColorLeft
             | Longhand::BackgroundColor
+            | Longhand::BackgroundImage
+            | Longhand::BackgroundRepeat
+            | Longhand::BackgroundPosition
+            | Longhand::BackgroundSize
             | Longhand::PageBreakBefore
             | Longhand::PageBreakAfter
             | Longhand::PageBreakInside
@@ -664,6 +684,10 @@ impl Property {
                 Side::Left => Longhand::BorderColorLeft,
             },
             Property::BackgroundColor(..) => Longhand::BackgroundColor,
+            Property::BackgroundImage(..) => Longhand::BackgroundImage,
+            Property::BackgroundRepeat(..) => Longhand::BackgroundRepeat,
+            Property::BackgroundPosition(..) => Longhand::BackgroundPosition,
+            Property::BackgroundSize(..) => Longhand::BackgroundSize,
             Property::PageBreakBefore(..) => Longhand::PageBreakBefore,
             Property::PageBreakAfter(..) => Longhand::PageBreakAfter,
             Property::PageBreakInside(..) => Longhand::PageBreakInside,

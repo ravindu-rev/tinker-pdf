@@ -878,6 +878,22 @@ pub enum ArchiveWarning {
         /// How many `<img>` elements in that document failed that way.
         images: usize,
     },
+    /// A `background-image` (`css-backgrounds-3` §2.2) that did not reach the
+    /// page: its `url()` named nothing the container holds, or bytes that are
+    /// no picture this build reads.
+    ///
+    /// [`ArchiveWarning::ImageNotDrawn`]'s companion for the picture a
+    /// stylesheet names, and invisible the same way: the box keeps its colour
+    /// and border and loses only the image, so the page looks finished.
+    BackgroundImageNotDrawn {
+        /// The content document whose boxes asked for the image.
+        item: String,
+        /// Why it did not reach the page.
+        defect: ImageDefect,
+        /// How many elements in that document asked for an image that failed
+        /// that way.
+        elements: usize,
+    },
     /// A `<link rel="stylesheet">` whose `href` produced no sheet, so the
     /// document was set **without rules its author wrote** (tier 5's formats
     /// row).

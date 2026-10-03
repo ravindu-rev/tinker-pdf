@@ -205,6 +205,15 @@ pub struct ComputedStyle {
     pub border_color: Sides<Color>,
     /// `background-color`
     pub background_color: Color,
+    /// `background-image`, `css-backgrounds-3` §2.2: the one layer this build
+    /// draws, its URL unresolved (see [`ImageRef`]).
+    pub background_image: Option<ImageRef>,
+    /// `background-repeat`, §2.3.
+    pub background_repeat: BackgroundRepeat,
+    /// `background-position`, §2.6, `em` resolved.
+    pub background_position: BackgroundPosition,
+    /// `background-size`, §2.4, `em` resolved.
+    pub background_size: BackgroundSize,
     /// `page-break-before`
     pub page_break_before: PageBreak,
     /// `page-break-after`
@@ -339,6 +348,10 @@ impl ComputedStyle {
             border_style: Sides::all(BorderStyle::None),
             border_color: Sides::all(Color::BLACK),
             background_color: Color::TRANSPARENT,
+            background_image: None,
+            background_repeat: BackgroundRepeat::REPEAT,
+            background_position: BackgroundPosition::INITIAL,
+            background_size: BackgroundSize::AUTO,
             page_break_before: PageBreak::Auto,
             page_break_after: PageBreak::Auto,
             page_break_inside: PageBreakInside::Auto,
@@ -568,6 +581,28 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::BorderStyle(side, value) => style.border_style.set(*side, *value),
         Property::BorderColor(side, value) => style.border_color.set(*side, *value),
         Property::BackgroundColor(value) => style.background_color = *value,
+        Property::BackgroundImage(value) => style.background_image = value.clone(),
+        Property::BackgroundRepeat(value) => style.background_repeat = *value,
+        Property::BackgroundPosition(value) => {
+            let axis = |offset: PositionOffset| ComputedOffset {
+                from_end: offset.from_end,
+                offset: offset.offset.compute(font_size, root_font_size),
+            };
+            style.background_position = BackgroundPosition {
+                x: axis(value.x),
+                y: axis(value.y),
+            };
+        }
+        Property::BackgroundSize(value) => {
+            let length = |len: Option<Len>| len.map(|len| len.compute(font_size, root_font_size));
+            style.background_size = match value {
+                SpecifiedBackgroundSize::Cover => BackgroundSize::Cover,
+                SpecifiedBackgroundSize::Contain => BackgroundSize::Contain,
+                SpecifiedBackgroundSize::Explicit(width, height) => {
+                    BackgroundSize::Explicit(length(*width), length(*height))
+                }
+            };
+        }
         Property::PageBreakBefore(value) => style.page_break_before = *value,
         Property::PageBreakAfter(value) => style.page_break_after = *value,
         Property::PageBreakInside(value) => style.page_break_inside = *value,
@@ -1996,6 +2031,10 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
             .border_color
             .set(Side::Left, from.border_color.get(Side::Left)),
         Longhand::BackgroundColor => into.background_color = from.background_color,
+        Longhand::BackgroundImage => into.background_image = from.background_image.clone(),
+        Longhand::BackgroundRepeat => into.background_repeat = from.background_repeat,
+        Longhand::BackgroundPosition => into.background_position = from.background_position,
+        Longhand::BackgroundSize => into.background_size = from.background_size,
         Longhand::PageBreakBefore => into.page_break_before = from.page_break_before,
         Longhand::PageBreakAfter => into.page_break_after = from.page_break_after,
         Longhand::PageBreakInside => into.page_break_inside = from.page_break_inside,

@@ -36,13 +36,14 @@
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    AlignContent, AlignItems, AlignSelf, BorderCollapse, BorderSpacing, BorderStyle, BoxSizing,
-    Clear, Color, ColumnCount, ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection,
-    FlexWrap, Float, FontFamily, FontStyle, FontVariant, Gap, Inset, JustifyContent,
-    LengthPercentage, LineHeight, ListStylePosition, ListStyleType, MarginValue, MaxSize, MinSize,
-    OutlineStyle, Overflow, OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Side,
-    Sides, Size, Spacing, TableLayout, TextAlign, TextDecoration, TextTransform, VerticalAlign,
-    Visibility, WhiteSpace, ZIndex,
+    AlignContent, AlignItems, AlignSelf, BackgroundPosition, BackgroundRepeat, BackgroundSize,
+    BorderCollapse, BorderSpacing, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
+    ColumnSpan, ColumnWidth, Display, FlexDirection, FlexWrap, Float, FontFamily, FontStyle,
+    FontVariant, Gap, ImageRef, Inset, JustifyContent, LengthPercentage, LineHeight,
+    ListStylePosition, ListStyleType, MarginValue, MaxSize, MinSize, OutlineStyle, Overflow,
+    OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Side, Sides, Size, Spacing,
+    TableLayout, TextAlign, TextDecoration, TextTransform, VerticalAlign, Visibility, WhiteSpace,
+    ZIndex,
 };
 
 use crate::metrics::FontRequest;
@@ -299,6 +300,10 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         border_style,
         border_color,
         background_color,
+        background_image,
+        background_repeat,
+        background_position,
+        background_size,
         border_radius,
         outline_width,
         outline_style,
@@ -416,11 +421,14 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         background_color: *background_color,
         paint: box_paint(
             border_radius,
-            outline_width,
-            outline_style,
-            outline_color,
-            outline_offset,
+            (outline_width, outline_style, outline_color, outline_offset),
             color,
+            background_image.as_ref().map(|image| BackgroundLayer {
+                image: image.clone(),
+                repeat: *background_repeat,
+                position: *background_position,
+                size: *background_size,
+            }),
         ),
         overflow_x: *overflow_x,
         overflow_y: *overflow_y,
@@ -643,8 +651,24 @@ pub struct Outline {
     pub style: BorderStyle,
 }
 
-/// A box's paint beyond its background and border: `css-backgrounds-3` §5's
-/// corners and `css-ui-4` §5's outline.
+/// One background image, `css-backgrounds-3` §2, as the painter draws it:
+/// the image still a reference, because what it resolves to is the caller's
+/// container and not this crate's, and nothing about it moves a box.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackgroundLayer {
+    /// `background-image`, unresolved.
+    pub image: ImageRef,
+    /// `background-repeat`.
+    pub repeat: BackgroundRepeat,
+    /// `background-position`, percentages unresolved: the positioning area
+    /// they are a percentage of is a fragment's.
+    pub position: BackgroundPosition,
+    /// `background-size`, likewise.
+    pub size: BackgroundSize,
+}
+
+/// A box's paint beyond its background colour and border:
+/// `css-backgrounds-3` §2's image, §5's corners, and `css-ui-4` §5's outline.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoxPaint {
     /// `border-*-*-radius`, in `Corner::ALL`'s order, percentages unresolved:
@@ -654,16 +678,16 @@ pub struct BoxPaint {
     /// The outline, where one is drawn at all: `None` for `outline-style:
     /// none` or a zero width, which §5.2 makes the same.
     pub outline: Option<Outline>,
+    /// The background image, where there is one.
+    pub image: Option<BackgroundLayer>,
 }
 
 /// [`Consumed::paint`], resolved at the one door.
 fn box_paint(
     radius: &[Radius; 4],
-    width: &f64,
-    style: &OutlineStyle,
-    colour: &Option<Color>,
-    offset: &f64,
+    (width, style, colour, offset): (&f64, &OutlineStyle, &Option<Color>, &f64),
     current: &Color,
+    image: Option<BackgroundLayer>,
 ) -> Option<Box<BoxPaint>> {
     // §5.3: `auto` is the user agent's to draw, and a solid line is that
     // drawing here; `none` draws nothing whatever the width says, which is
@@ -683,12 +707,13 @@ fn box_paint(
         }),
     };
     let square = radius.iter().all(|corner| *corner == Radius::ZERO);
-    if square && outline.is_none() {
+    if square && outline.is_none() && image.is_none() {
         return None;
     }
     Some(Box::new(BoxPaint {
         radius: *radius,
         outline,
+        image,
     }))
 }
 

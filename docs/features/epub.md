@@ -166,8 +166,21 @@ absolutely positioned box only through its containing block (CSS 2.2
 §11.1.1). The root's `overflow` — or `<body>`'s, under an `<html>` that has
 none — belongs to the page (§3.3) and leaves the element `visible`; and a
 scroll container in a flex line has no content-based minimum
-(`css-flexbox-1` §4.5). Borders, backgrounds, list markers and links are
-drawn;
+(`css-flexbox-1` §4.5). **`background-image`** (`css-backgrounds-3` §2.2,
+one layer, a raster `url()`) is drawn with **`background-repeat`**,
+**`background-position`** and **`background-size`**, and the `background`
+shorthand sets all five longhands this build has — a colour alone takes an
+image away, as it does in a browser. The `url()` is relative to the sheet
+that wrote it (`css-values-4` §4.5), and the picture is read after layout,
+only for the boxes that reached a page, by the reader an `<img>` takes: one
+resource per entry however many sheets name it. It is positioned against the
+fragment's padding box and clipped to its border box — on its curve where the
+box is rounded — over the box's colour and under its border; one image is one
+placement, and a repeating one a tiling pattern whose cell is the image
+(`epub::paint::tiling`), `space` spreading whole images edge to edge and
+`round` rescaling them to fit (§2.3, §2.4). A reference that names nothing,
+or bytes that are no picture, is `BackgroundImageNotDrawn`, counted by
+element. Borders, backgrounds, list markers and links are drawn;
 **list markers are counters** (`css-lists-3` §4): `counter-reset`,
 `counter-increment` and `counter-set` are walked over the element tree in
 document order once the cascade is done (`tinker_pdf_css::counter`), with
@@ -306,6 +319,8 @@ order, at nine page boxes.
 | A refused `<img>` — **not a refusal, a stated answer** | — | HTML §4.8.4.4 makes an element *"expected to be treated as a replaced element"* **only when the image is available**, so an unavailable one is an ordinary empty inline and generates **no box**. §10.3.2's 300 by 150 default would put a blank postcard into a paragraph for a reference that was merely misspelled, and carrying `alt` into it would put characters on the page the spine's markup does not contain — one per refused image, with no source character to answer it. Asserted as a byte-for-byte identity against the same book with an empty `<span>` in the `<img>`'s place | [design/epub-layout.md](../design/epub-layout.md) |
 | `text-transform` in Lithuanian, Turkish or Azeri, and its `full-width` and `full-size-kana` values | `ArchiveWarning::UnimplementedProperty { property: "text-transform", .. }` | §2.1 requires `SpecialCasing.txt`'s language-conditional mappings when the element's language is known, and the layout crate that applies the transform is handed computed styles and never a language — so the cascade counts every element in one of the three languages (by `xml:lang`/`lang`, inherited) that has a casing transform, rather than letting a Turkish heading set with an English `I` read as honoured. `full-width` and `full-size-kana` map to *other characters*, not cases, and are refused by value alone or beside a casing keyword | `crates/tinker-pdf-layout/src/case.rs` |
 | `opacity` on an element whose subtree holds a box that paints a background or border **and** has content over it | `ArchiveWarning::UnimplementedProperty { property: "opacity", .. }` | §15.1 composites the element as one group and then fades it; this painter fades each fragment, which is the same picture until something inside the element paints over something else inside it — text over its own box's background, each at half alpha, shows the background through the text. The group is a transparency-group form XObject, and the element's glyphs are tagged marked content the structure writer puts in the page stream rather than in a form, so the group is owed to that writer; meanwhile the elements where the two differ are counted by element, and the rest are exact. An archival profile that forbids transparency refuses the alpha outright, and those elements are drawn opaque and counted the same way | `crates/tinker-pdf/tests/epub_paint.rs` |
+| A gradient or any other `<image>` function, a second background layer, `background-attachment` other than `scroll`, and a `<box>` in the `background` shorthand | `ArchiveWarning::UnimplementedProperty { property: "background-image" \| "background" \| …, .. }` | `css-images-4`'s functions are images this build does not draw, §2's comma-separated layers are one image too many, and `background-origin` and `background-clip` — which the shorthand's two `<box>`es set — are not implemented: each is refused by value rather than given its first part, which would draw a background the author did not write | [ROADMAP.md](../ROADMAP.md) |
+| A background image on a box cut across pages — **a stated answer** | — | each page's fragment positions the image against its own padding box, for `border-radius`'s reason: the whole box's height is not known on the page that draws its top. so a `no-repeat` image is drawn once on every page the box crosses, at its position in each fragment, where `box-decoration-break: slice` would draw it once | `crates/tinker-pdf/tests/epub_images.rs` |
 | `object-fit`, `object-position` | `ArchiveWarning::UnimplementedProperty` | a replaced box's content fills its content box exactly, which is what CSS says happens when the property that would say otherwise is absent. An author who states a `width` and a `height` that disagree with the picture's proportions gets a stretched picture, asserted rather than assumed | [ROADMAP.md](../ROADMAP.md) |
 | An SVG content document that produced no picture at all | `SpineDefect::SvgUnreadable(tinker_pdf_svg::Refusal)` | six named causes — not XML, not an `<svg>` root, a `<use>` that reaches its own ancestor, or one of four ceilings — and the refusal travels, so a caller can tell a bomb from a truncated file | [design/svg.md](../design/svg.md) |
 | `position: fixed` — **not a refusal, a stated answer** | — | CSS 2.2 §9.6.1: *"in the case of paged media, fixed boxes are repeated on every page, and are fixed with respect to the page box"*. So a fixed box is positioned against the page box and drawn on every page of the document. That is the specification's own paged answer, not a degradation of the screen behaviour, and it is what a stylesheet asking for a running header meant | — |
@@ -391,7 +406,7 @@ postdate the tool's removal under ruling 13, so
   against `inherit` and `initial`, asserted on an inherited and a
   non-inherited property in the same fixture because either one alone agrees
   with two of the three keywords; and `unset` asserted to be exactly *not
-  declaring the property* over **all one hundred longhands**, not a sample,
+  declaring the property* over **all one hundred and four longhands**, not a sample,
   because §7.1's definition and `ComputedStyle::inherit_from`'s behaviour are
   the same rule written twice. `revert` against `revert-layer` in one fixture
   with a user-agent rule and two author layers, where the two keywords have

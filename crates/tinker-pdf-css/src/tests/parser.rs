@@ -1654,6 +1654,269 @@ fn the_border_radius_shorthand_expands_two_lists_clockwise() {
     assert!(known("div { border-radius: 1px / }").is_empty());
 }
 
+/// **`background-image` is `none` or one `url()`, in either spelling**
+/// (`css-backgrounds-3` §2.2, `css-values-4` §4.5); a gradient and a second
+/// layer are CSS this build does not draw, refused by value.
+#[test]
+fn background_image_is_none_or_one_url() {
+    use crate::property::ImageRef;
+    let image = |href: &str| {
+        Property::BackgroundImage(Some(ImageRef {
+            href: href.to_owned(),
+            base: None,
+        }))
+    };
+    assert_eq!(
+        known("div { background-image: url(paper.png) }"),
+        vec![image("paper.png")]
+    );
+    assert_eq!(
+        known(r#"div { background-image: url("img/paper.png") }"#),
+        vec![image("img/paper.png")]
+    );
+    assert_eq!(
+        known("div { background-image: none }"),
+        vec![Property::BackgroundImage(None)]
+    );
+    for refused in [
+        "linear-gradient(red, blue)",
+        "url(a.png), url(b.png)",
+        "image-set(url(a.png) 1x)",
+    ] {
+        assert!(
+            matches!(
+                declarations(&format!("div {{ background-image: {refused} }}"))[0].declaration,
+                Declaration::Unsupported {
+                    property: "background-image",
+                    ..
+                }
+            ),
+            "{refused}"
+        );
+    }
+    assert!(known("div { background-image: paper.png }").is_empty());
+}
+
+/// **A relative `url()` remembers the sheet it was written in** — the sheet's
+/// own address, and an `@import`ed sheet's its own — and a `<style>` sheet,
+/// which has none, leaves it to the document.
+#[test]
+fn a_background_url_carries_the_address_of_its_sheet() {
+    struct Table;
+    impl ImportResolver for Table {
+        fn resolve(&self, href: &str, _base: Option<&str>) -> Option<(String, Vec<u8>)> {
+            (href == "inner.css").then(|| {
+                (
+                    "styles/inner.css".to_owned(),
+                    b"p { background-image: url(dots.png) }".to_vec(),
+                )
+            })
+        }
+    }
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let parsed = crate::parse(
+        b"@import url(inner.css); div { background: url(paper.png) }",
+        Some("styles/book.css"),
+        &Table,
+        &MediaContext::screen(432.0, 648.0),
+        &limits,
+        &mut budget,
+    )
+    .expect("under every cap");
+    let bases: Vec<(String, Option<String>)> = parsed
+        .rules
+        .iter()
+        .flat_map(|rule| &rule.declarations)
+        .filter_map(|declared| match &declared.declaration {
+            Declaration::Known(Property::BackgroundImage(Some(image))) => {
+                Some((image.href.clone(), image.base.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        bases,
+        [
+            ("dots.png".to_owned(), Some("styles/inner.css".to_owned())),
+            ("paper.png".to_owned(), Some("styles/book.css".to_owned())),
+        ]
+    );
+    let inline = known("div { background-image: url(paper.png) }");
+    assert!(matches!(
+        &inline[0],
+        Property::BackgroundImage(Some(image)) if image.base.is_none()
+    ));
+}
+
+/// **`background-repeat`'s two one-word forms and its per-axis pairs**
+/// (§2.3): `repeat-x` is `repeat no-repeat`, and one keyword is both axes.
+#[test]
+fn background_repeat_is_one_keyword_per_axis() {
+    use crate::property::{BackgroundRepeat, RepeatStyle as R};
+    let repeat = |x, y| vec![Property::BackgroundRepeat(BackgroundRepeat { x, y })];
+    assert_eq!(
+        known("div { background-repeat: repeat-x }"),
+        repeat(R::Repeat, R::NoRepeat)
+    );
+    assert_eq!(
+        known("div { background-repeat: repeat-y }"),
+        repeat(R::NoRepeat, R::Repeat)
+    );
+    assert_eq!(
+        known("div { background-repeat: space }"),
+        repeat(R::Space, R::Space)
+    );
+    assert_eq!(
+        known("div { background-repeat: round no-repeat }"),
+        repeat(R::Round, R::NoRepeat)
+    );
+    assert!(known("div { background-repeat: repeat-x repeat }").is_empty());
+}
+
+/// **`<bg-position>`'s one-, two-, three- and four-value forms** (§2.6):
+/// one value centres the other axis, two keywords may come either way round,
+/// and an offset after `right` or `bottom` is measured from that edge.
+#[test]
+fn background_position_reads_every_form() {
+    use crate::property::{PositionOffset, SpecifiedBackgroundPosition};
+    let at = |x: (bool, Len), y: (bool, Len)| {
+        vec![Property::BackgroundPosition(SpecifiedBackgroundPosition {
+            x: PositionOffset {
+                from_end: x.0,
+                offset: x.1,
+            },
+            y: PositionOffset {
+                from_end: y.0,
+                offset: y.1,
+            },
+        })]
+    };
+    let pct = |value: f64| (false, Len::Percent(value));
+    assert_eq!(
+        known("div { background-position: top }"),
+        at(pct(50.0), pct(0.0))
+    );
+    assert_eq!(
+        known("div { background-position: 10px }"),
+        at((false, Len::Px(10.0)), pct(50.0))
+    );
+    assert_eq!(
+        known("div { background-position: bottom left }"),
+        at(pct(0.0), pct(100.0))
+    );
+    assert_eq!(
+        known("div { background-position: 25% 2em }"),
+        at(pct(25.0), (false, Len::Em(2.0)))
+    );
+    assert_eq!(
+        known("div { background-position: right 10px bottom 20% }"),
+        at((true, Len::Px(10.0)), (true, Len::Percent(20.0)))
+    );
+    assert_eq!(
+        known("div { background-position: bottom 5px center }"),
+        at(pct(50.0), (true, Len::Px(5.0)))
+    );
+    assert!(known("div { background-position: top 10px }").is_empty());
+    assert!(known("div { background-position: left right }").is_empty());
+    assert!(known("div { background-position: center 5px left }").is_empty());
+}
+
+/// **`background-size`'s keywords and its one or two lengths** (§2.4): one
+/// length is the width, the height `auto`.
+#[test]
+fn background_size_is_cover_contain_or_two_lengths() {
+    use crate::property::SpecifiedBackgroundSize as S;
+    assert_eq!(
+        known("div { background-size: cover }"),
+        vec![Property::BackgroundSize(S::Cover)]
+    );
+    assert_eq!(
+        known("div { background-size: 50% }"),
+        vec![Property::BackgroundSize(S::Explicit(
+            Some(Len::Percent(50.0)),
+            None
+        ))]
+    );
+    assert_eq!(
+        known("div { background-size: auto 2em }"),
+        vec![Property::BackgroundSize(S::Explicit(
+            None,
+            Some(Len::Em(2.0))
+        ))]
+    );
+    assert!(known("div { background-size: -1px }").is_empty());
+}
+
+/// **The `background` shorthand sets all five longhands this build has**,
+/// each one it does not name at its initial value (§2.11) — so a colour alone
+/// takes away an image — and refuses an attachment or a box by value.
+#[test]
+fn the_background_shorthand_resets_what_it_does_not_name() {
+    use crate::property::{
+        BackgroundRepeat, ImageRef, PositionOffset, RepeatStyle as R, SpecifiedBackgroundPosition,
+        SpecifiedBackgroundSize as S,
+    };
+    let start = |offset| PositionOffset {
+        from_end: false,
+        offset,
+    };
+    assert_eq!(
+        known("div { background: #ff0000 }"),
+        vec![
+            Property::BackgroundColor(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
+            Property::BackgroundImage(None),
+            Property::BackgroundRepeat(BackgroundRepeat::REPEAT),
+            Property::BackgroundPosition(SpecifiedBackgroundPosition {
+                x: start(Len::Percent(0.0)),
+                y: start(Len::Percent(0.0)),
+            }),
+            Property::BackgroundSize(S::Explicit(None, None)),
+        ]
+    );
+    assert_eq!(
+        known("div { background: url(a.png) no-repeat center / contain transparent }"),
+        vec![
+            Property::BackgroundColor(Color::TRANSPARENT),
+            Property::BackgroundImage(Some(ImageRef {
+                href: "a.png".to_owned(),
+                base: None,
+            })),
+            Property::BackgroundRepeat(BackgroundRepeat {
+                x: R::NoRepeat,
+                y: R::NoRepeat,
+            }),
+            Property::BackgroundPosition(SpecifiedBackgroundPosition {
+                x: start(Len::Percent(50.0)),
+                y: start(Len::Percent(50.0)),
+            }),
+            Property::BackgroundSize(S::Contain),
+        ]
+    );
+    for refused in [
+        "url(a.png) fixed",
+        "url(a.png) padding-box",
+        "url(a.png), url(b.png)",
+    ] {
+        assert!(
+            matches!(
+                declarations(&format!("div {{ background: {refused} }}"))[0].declaration,
+                Declaration::Unsupported {
+                    property: "background",
+                    ..
+                }
+            ),
+            "{refused}"
+        );
+    }
+    assert!(known("div { background: url(a.png) / cover }").is_empty());
+}
+
 /// **`overflow` is `overflow-x` and then `overflow-y`**, one value standing
 /// for both (`css-overflow-3` §3.1), and `overlay` is §3.1's legacy alias of
 /// `auto`.

@@ -764,6 +764,16 @@ fn picture<R: Resources + ?Sized>(
     let (_, bytes) = book
         .fetch(path, &href, limits)
         .map_err(|_| ImageDefect::Unresolved)?;
+    picture_data(bytes)
+}
+
+/// A picture's bytes, read into its intrinsic size and the shape the writer
+/// takes — for an `<img>`, and for a `background-image`, which is the same
+/// raster reached through a stylesheet.
+///
+/// # Errors
+/// The [`ImageDefect`] that says why the bytes are no picture this build draws.
+pub(crate) fn picture_data(bytes: Vec<u8>) -> Result<((f64, f64), PictureData), ImageDefect> {
     // Classification by magic and never by extension, `cbz::image_format`'s
     // own rule: a `.jpg` that is a PNG is routine, and an extension is a claim
     // where the first bytes of a file are a fact.

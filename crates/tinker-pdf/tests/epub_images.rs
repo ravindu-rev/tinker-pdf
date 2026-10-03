@@ -719,3 +719,216 @@ fn a_book_whose_pictures_all_failed_still_opens_and_sets_its_text() {
     let text = doc.page(0).expect("a page").text().plain_text();
     assert!(text.contains("before") && text.contains("after"), "{text}");
 }
+
+// ---- background-image -----------------------------------------------------------
+
+/// A one-colour picture, so a tile is ink wherever it lands.
+fn solid(width: u32, height: u32) -> Vec<u8> {
+    rgb_png(width, height, &vec![0u8; (width * height * 3) as usize])
+}
+
+/// The content area's top-left corner in page points, and a CSS pixel in
+/// points.
+fn corner() -> (f64, f64) {
+    (PAGE_MARGIN, DEFAULT_PAGE.1 - PAGE_MARGIN)
+}
+
+/// A page's tiling pattern by resource name: `/XStep`, `/YStep`, `/Matrix` and
+/// `/BBox`, as numbers.
+fn pattern(doc: &Document, page: usize, name: &[u8]) -> (f64, f64, Vec<f64>, Vec<f64>) {
+    let cos = doc.cos();
+    let pages = tinker_pdf_cos::pages::collect(cos);
+    let resources = pages[page].resources.as_ref().expect("/Resources");
+    let patterns = cos.resolve_key(resources, cos.intern(b"Pattern"));
+    let patterns = patterns.as_dict().expect("a /Pattern dictionary");
+    let object = cos.resolve_key(patterns, cos.intern(name));
+    let dict = &object
+        .as_stream()
+        .expect("a tiling pattern is a stream")
+        .dict;
+    let number = |key: &[u8]| {
+        cos.resolve_key(dict, cos.intern(key))
+            .as_number()
+            .expect("a number")
+    };
+    let numbers = |key: &[u8]| -> Vec<f64> {
+        cos.resolve_key(dict, cos.intern(key))
+            .as_array()
+            .expect("an array")
+            .iter()
+            .map(|value| value.as_number().expect("a number"))
+            .collect()
+    };
+    (
+        number(b"XStep"),
+        number(b"YStep"),
+        numbers(b"Matrix"),
+        numbers(b"BBox"),
+    )
+}
+
+#[track_caller]
+fn near(actual: &[f64], expected: &[f64]) {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{actual:?} against {expected:?}"
+    );
+    for (a, e) in actual.iter().zip(expected) {
+        assert!((a - e).abs() < 1e-6, "{actual:?} against {expected:?}");
+    }
+}
+
+/// **A `no-repeat` background image is one placement**, at §2.6's position in
+/// the padding box and the image's own size (§2.4's `auto`), under the box's
+/// colour and inside a clip to its border box.
+#[test]
+fn a_background_image_that_does_not_repeat_is_drawn_once_where_it_is_placed() {
+    let doc = open(
+        r#"<div style="width: 100px; height: 60px; border: 2px solid #000000; background: #ff0000 url(bg.png) no-repeat 10px 20px"></div>"#,
+        &[("bg.png", plate(8, 4))],
+    );
+    let (matrix, name) = only_placement(&doc, 0);
+    let (left, top) = corner();
+    // The padding box begins inside the two-pixel border.
+    let x = left + (2.0 + 10.0) * PX_TO_PT;
+    let y = top - (2.0 + 20.0) * PX_TO_PT;
+    near(
+        &matrix,
+        &[
+            8.0 * PX_TO_PT,
+            0.0,
+            0.0,
+            4.0 * PX_TO_PT,
+            x,
+            y - 4.0 * PX_TO_PT,
+        ],
+    );
+    assert_eq!(name, "/Bg0");
+    let content = page_content(&doc, 0);
+    let colour = content.find("1 0 0 rg").expect("the background colour");
+    let image = content.find("/Bg0 Do").expect("the image");
+    assert!(colour < image, "the colour is under the image: {content}");
+    assert!(warnings(&doc).is_empty(), "{:?}", warnings(&doc));
+
+    // An offset after `right` and `bottom` is from those edges: the image's
+    // right edge 10 pixels in from the padding box's, its bottom 20 up.
+    let from_end = open(
+        r#"<div style="width: 100px; height: 60px; border: 2px solid #000000; background: url(bg.png) no-repeat right 10px bottom 20px"></div>"#,
+        &[("bg.png", plate(8, 4))],
+    );
+    let (matrix, _) = only_placement(&from_end, 0);
+    let x = left + (2.0 + 100.0 - 10.0 - 8.0) * PX_TO_PT;
+    let bottom = top - (2.0 + 60.0 - 20.0) * PX_TO_PT;
+    near(
+        &matrix,
+        &[8.0 * PX_TO_PT, 0.0, 0.0, 4.0 * PX_TO_PT, x, bottom],
+    );
+}
+
+/// **`cover` and `contain` keep the image's ratio** and scale it to cover the
+/// padding box or to fit inside it (§2.4): an 8 by 4 picture in a 100 by 60
+/// box is 15 times its size for one and 12.5 for the other.
+#[test]
+fn cover_and_contain_scale_the_image_by_its_own_ratio() {
+    let (left, top) = corner();
+    for (size, scale) in [("cover", 15.0), ("contain", 12.5)] {
+        let doc = open(
+            &format!(
+                r#"<div style="width: 100px; height: 60px; background: url(bg.png) no-repeat 0 0 / {size}"></div>"#
+            ),
+            &[("bg.png", plate(8, 4))],
+        );
+        let (matrix, _) = only_placement(&doc, 0);
+        let (width, height) = (8.0 * scale * PX_TO_PT, 4.0 * scale * PX_TO_PT);
+        near(&matrix, &[width, 0.0, 0.0, height, left, top - height]);
+    }
+}
+
+/// **A repeating background is a tiling pattern** whose cell is the image,
+/// placed so a tile's corner lands at §2.6's position: `/XStep` and `/YStep`
+/// the image's size, `/Matrix` its bottom-left corner in page space. And it is
+/// drawn: a render shows the tile's ink well away from where the first one
+/// sits, and none below a `repeat-x` row.
+#[test]
+fn a_repeating_background_image_is_a_tiling_pattern() {
+    let doc = open(
+        r#"<div style="width: 200px; height: 100px; background: url(bg.png) repeat-x 0 30px"></div>"#,
+        &[("bg.png", solid(10, 10))],
+    );
+    let content = page_content(&doc, 0);
+    assert!(content.contains("/Pattern cs /BgP0 scn"), "{content}");
+    let (left, top) = corner();
+    let tile = 10.0 * PX_TO_PT;
+    let (x_step, y_step, matrix, bbox) = pattern(&doc, 0, b"BgP0");
+    near(&[x_step, y_step], &[tile, tile]);
+    near(
+        &matrix,
+        &[1.0, 0.0, 0.0, 1.0, left, top - 30.0 * PX_TO_PT - tile],
+    );
+    near(&bbox, &[0.0, 0.0, tile, tile]);
+
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    let ink = |x_px: f64, y_px: f64| {
+        let column = (left + x_px * PX_TO_PT) as usize;
+        let row = (DEFAULT_PAGE.1 - (top - y_px * PX_TO_PT)) as usize;
+        let start = row * bitmap.stride + column * bitmap.components();
+        bitmap.data[start]
+    };
+    assert_eq!(ink(185.0, 35.0), 0, "the row repeats across the box");
+    assert_eq!(ink(185.0, 70.0), 255, "and not down it");
+}
+
+/// **`space` and `round` fit whole images to the box** (§2.3, §2.4): three
+/// 30-pixel images in 100 pixels are spaced five apart under `space`, and
+/// rescaled to a third of the box under `round`, the `auto` height following.
+#[test]
+fn space_and_round_fit_whole_images() {
+    let spaced = open(
+        r#"<div style="width: 100px; height: 40px; background: url(bg.png) space no-repeat"></div>"#,
+        &[("bg.png", solid(30, 10))],
+    );
+    let (x_step, _, _, bbox) = pattern(&spaced, 0, b"BgP0");
+    near(&[x_step], &[35.0 * PX_TO_PT]);
+    near(&bbox, &[0.0, 0.0, 30.0 * PX_TO_PT, 10.0 * PX_TO_PT]);
+
+    let rounded = open(
+        r#"<div style="width: 100px; height: 40px; background: url(bg.png) round no-repeat"></div>"#,
+        &[("bg.png", solid(30, 10))],
+    );
+    let third = 100.0 / 3.0;
+    let (x_step, _, _, bbox) = pattern(&rounded, 0, b"BgP0");
+    near(&[x_step], &[third * PX_TO_PT]);
+    near(
+        &bbox,
+        &[0.0, 0.0, third * PX_TO_PT, 10.0 * third / 30.0 * PX_TO_PT],
+    );
+}
+
+/// **A `url()` in a stylesheet is relative to the stylesheet** (`css-values-4`
+/// §4.5), so `../img/bg.png` in `css/book.css` is `img/bg.png`; and one that
+/// names nothing is said, per element, rather than leaving a box that looks
+/// finished.
+#[test]
+fn a_background_url_is_relative_to_its_sheet_and_a_missing_one_is_named() {
+    let sheet = b"div.a { width: 50px; height: 50px; background: url(../img/bg.png) no-repeat } \
+                  div.b { width: 50px; height: 50px; background-image: url(../img/none.png) }"
+        .to_vec();
+    let doc = open(
+        r#"<link rel="stylesheet" href="css/book.css"/><div class="a"></div><div class="b"></div><div class="b"></div>"#,
+        &[("css/book.css", sheet), ("img/bg.png", plate(8, 4))],
+    );
+    let (_, name) = only_placement(&doc, 0);
+    assert_eq!(name, "/Bg0");
+    assert_eq!(
+        warnings(&doc),
+        [ArchiveWarning::BackgroundImageNotDrawn {
+            item: "EPUB/ch1.xhtml".to_owned(),
+            defect: ImageDefect::Unresolved,
+            elements: 2,
+        }]
+    );
+}

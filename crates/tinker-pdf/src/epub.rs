@@ -1513,6 +1513,8 @@ fn write_chapters<R: read::Resources + ?Sized>(
     let (width, height) = page;
     fonts.register(builder);
     let pictures = register_pictures(builder, chapters, warnings);
+    let backgrounds = register_backgrounds(resources, builder, chapters, limits, warnings);
+    let mut patterns = 0usize;
 
     let links = cross_references(chapters, limits, total_pages);
 
@@ -1592,11 +1594,21 @@ fn write_chapters<R: read::Resources + ?Sized>(
         // registered before the chapter's first page begins — `begin_page`
         // snapshots the resource set, so an `/ExtGState` added after it is
         // invisible to the page that names it.
-        let effects = chapter
+        let mut effects = chapter
             .reading
             .as_ref()
             .map(|reading| paint::Effects::of(&reading.dom, &reading.styles, &chapter.pages))
             .unwrap_or_default();
+        // A relative `url()` in a `style=""` attribute is relative to the
+        // document, which is the base a reference with none falls back to.
+        let document = chapter.path.as_deref().unwrap_or("");
+        effects.plan_backgrounds(
+            builder,
+            &chapter.pages,
+            &chapter.frame,
+            |image| backgrounds.find(image.base.as_deref().unwrap_or(document), &image.href),
+            &mut patterns,
+        );
         refused_effects += effects.register(builder);
         for (offset, laid) in chapter.pages.iter().enumerate() {
             let index = chapter.first_page + offset;
@@ -1633,7 +1645,7 @@ fn write_chapters<R: read::Resources + ?Sized>(
                 // chapters would otherwise name the same element and sort into
                 // each other.
                 (spine_at as u64) << 32,
-                &effects,
+                &effects.on(laid, &chapter_frame, offset),
             );
             if clip {
                 page.raw(b"Q");
@@ -1819,6 +1831,132 @@ fn register_pictures(
         }
     }
     out
+}
+
+/// What one `background-image` reference came to: the registered image and
+/// its size in CSS pixels, or why it is not on the page.
+type BackgroundImage = Result<(Vec<u8>, (f64, f64)), ImageDefect>;
+
+/// Every `background-image` the book's pages draw, read and registered once
+/// per reference.
+///
+/// After layout and not before it, which is the difference from
+/// [`register_pictures`]'s `<img>`: a background moves no box, so nothing needs
+/// its size until the painter, and reading it only for the fragments that
+/// reached a page means a book's unused texture — a rule for a class no element
+/// carries, a box under `display: none` — costs nothing at all.
+#[derive(Debug, Default)]
+struct Backgrounds {
+    /// `(base, href)` as the stylesheet wrote them, and what they came to.
+    images: Vec<(String, String, BackgroundImage)>,
+}
+
+impl Backgrounds {
+    /// The registered image a reference written against `base` names.
+    fn find(&self, base: &str, href: &str) -> Option<(&[u8], (f64, f64))> {
+        self.images
+            .iter()
+            .find(|(at, name, _)| at == base && name == href)
+            .and_then(|(_, _, found)| found.as_ref().ok())
+            .map(|(name, size)| (name.as_slice(), *size))
+    }
+}
+
+/// Reads, decodes and registers every background image a laid-out fragment
+/// names, and says by element which ones did not reach the page.
+fn register_backgrounds<R: read::Resources + ?Sized>(
+    resources: &mut R,
+    builder: &mut DocumentBuilder,
+    chapters: &[Chapter],
+    limits: &Limits,
+    warnings: &mut Vec<ArchiveWarning>,
+) -> Backgrounds {
+    let mut out = Backgrounds::default();
+    // One resource per resolved entry, so two spellings of one file — or one
+    // texture named by two sheets — are one image in the document.
+    let mut by_path: Vec<(String, BackgroundImage)> = Vec::new();
+    for chapter in chapters {
+        let document = chapter.path.as_deref().unwrap_or("");
+        let mut failed: Vec<(ImageDefect, Vec<u32>)> = Vec::new();
+        for page in &chapter.pages {
+            for fragment in &page.boxes {
+                let Some(layer) = &fragment.image else {
+                    continue;
+                };
+                let base = layer.image.base.as_deref().unwrap_or(document);
+                let href = &layer.image.href;
+                let index = match out
+                    .images
+                    .iter()
+                    .position(|(at, name, _)| at == base && name == href)
+                {
+                    Some(index) => index,
+                    None => {
+                        let found =
+                            read_background(resources, builder, (base, href), limits, &mut by_path);
+                        out.images.push((base.to_owned(), href.clone(), found));
+                        out.images.len() - 1
+                    }
+                };
+                // Counted by element and by defect: a book's forty boxes on one
+                // missing texture are one sentence.
+                if let Err(defect) = out.images[index].2 {
+                    let anchor = fragment.anchor.unwrap_or(u32::MAX);
+                    match failed.iter_mut().find(|(seen, _)| *seen == defect) {
+                        Some((_, elements)) => {
+                            if !elements.contains(&anchor) {
+                                elements.push(anchor);
+                            }
+                        }
+                        None => failed.push((defect, vec![anchor])),
+                    }
+                }
+            }
+        }
+        failed.sort_by_key(|(_, elements)| std::cmp::Reverse(elements.len()));
+        for (defect, elements) in failed {
+            warnings.push(ArchiveWarning::BackgroundImageNotDrawn {
+                item: chapter.name.clone(),
+                defect,
+                elements: elements.len(),
+            });
+        }
+    }
+    out
+}
+
+/// One background reference, fetched against the sheet that wrote it, read by
+/// the same reader an `<img>` takes, and registered — once per entry.
+fn read_background<R: read::Resources + ?Sized>(
+    resources: &mut R,
+    builder: &mut DocumentBuilder,
+    (base, href): (&str, &str),
+    limits: &Limits,
+    by_path: &mut Vec<(String, BackgroundImage)>,
+) -> BackgroundImage {
+    let (path, bytes) = resources
+        .fetch(base, href, limits)
+        .map_err(|_| ImageDefect::Unresolved)?;
+    if let Some((_, found)) = by_path.iter().find(|(at, _)| *at == path) {
+        return found.clone();
+    }
+    let found = read::picture_data(bytes).and_then(|(size, data)| {
+        let name = format!("Bg{}", by_path.len()).into_bytes();
+        let registered = match &data {
+            read::PictureData::Jpeg(bytes) => builder.add_image(&name, &ImageData::Jpeg(bytes)),
+            read::PictureData::Png(png) => builder.add_image(&name, &png.image()),
+            read::PictureData::Raster(raster) => builder.add_image(&name, &raster.image()),
+        };
+        // The writer refusing the bytes after they read is
+        // `register_pictures`' one case of the same, and named the same way.
+        if registered {
+            Ok((name, size))
+        } else {
+            Err(ImageDefect::Undecodable)
+        }
+    });
+    by_path.push((path, found.clone()));
+    found
 }
 
 /// One page's link annotations: a rectangle in the page's own points, and

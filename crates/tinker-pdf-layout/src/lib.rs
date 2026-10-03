@@ -118,7 +118,7 @@ pub mod limits;
 pub mod metrics;
 mod position;
 pub mod style;
-pub use style::Outline;
+pub use style::{BackgroundLayer, Outline};
 pub mod table;
 pub mod text;
 pub mod uax14;
@@ -519,6 +519,10 @@ pub struct BoxFragment {
     /// The outline, `css-ui-4` §5: drawn outside the border edge, moving no
     /// box.
     pub outline: Option<Outline>,
+    /// The background image, `css-backgrounds-3` §2, drawn over
+    /// [`BoxFragment::background`] and under the border, positioned against
+    /// **this fragment's** padding box for [`BoxFragment::radius`]'s reason.
+    pub image: Option<BackgroundLayer>,
     /// The [`BoxNode::anchor`] of the box this decorates, carried unchanged.
     ///
     /// For the painter, which applies what belongs to an **element** rather

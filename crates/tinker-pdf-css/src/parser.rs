@@ -41,7 +41,7 @@
 //! decision 5's `Unsupported` shape one level up from a property.
 
 use crate::media::MediaContext;
-use crate::property::{self, Declaration};
+use crate::property::{self, Declaration, Property};
 use crate::selector::{self, Selector};
 use crate::tokenizer::{tokenize, Token};
 use crate::{Budget, ImportResolver, Limits, Refusal, Warning};
@@ -467,6 +467,21 @@ impl Parse<'_> {
                             break;
                         }
                         RawRule::At { .. } => unreachable!("only an at-keyword makes an at-rule"),
+                    }
+                }
+            }
+        }
+        // A relative `url()` is relative to the sheet it was written in, so
+        // each image this sheet's own rules name is told which sheet that was.
+        // An `@import`ed sheet's rules were told by their own call, before
+        // they were spliced in here, and keep it.
+        for rule in &mut rules {
+            for declared in &mut rule.declarations {
+                if let Declaration::Known(Property::BackgroundImage(Some(image))) =
+                    &mut declared.declaration
+                {
+                    if image.base.is_none() {
+                        image.base = href.map(str::to_owned);
                     }
                 }
             }

@@ -62,16 +62,21 @@
 //! says, so it is not a bound in ruling 1's sense and does not join
 //! `bounds_ledger.rs`.
 
-use tinker_pdf_cos::build::{DocumentBuilder, ExtGState, Glyph, PageBuilder, Target};
+use tinker_pdf_cos::build::{
+    DocumentBuilder, ExtGState, Glyph, PageBuilder, Target, TilingPattern, TilingType,
+};
 use tinker_pdf_css::cascade::StyleTree;
 use tinker_pdf_css::property::{
-    BorderStyle, Color, FontFamily, FontStyle, Position, Side, TextDecoration,
+    BackgroundSize, BorderStyle, Color, ComputedOffset, FontFamily, FontStyle, ImageRef,
+    LengthPercentage, Position, RepeatStyle, Side, TextDecoration,
 };
 use tinker_pdf_font::base14::Standard14;
 use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, BaseEncoding};
 use tinker_pdf_font::Sfnt;
 use tinker_pdf_layout::metrics::{FontRequest, Metrics, PlacedGlyph, ShapedText, Shaper, Vertical};
-use tinker_pdf_layout::{BoxFragment, ClipFragment, Page as LayoutPage, ReplacedFragment, TextRun};
+use tinker_pdf_layout::{
+    BackgroundLayer, BoxFragment, ClipFragment, Page as LayoutPage, ReplacedFragment, TextRun,
+};
 use tinker_pdf_shape::bidi::{reorder, BaseDirection, Paragraph};
 use tinker_pdf_shape::shape::itemize;
 
@@ -924,6 +929,192 @@ pub struct Effects {
     /// Per element, the nearest element whose clip cuts **this element's own
     /// box**; following it from there gives the whole chain.
     clipped_by: Vec<Option<u32>>,
+    /// Per page of the chapter, each box fragment's background image as it
+    /// will be drawn, by the fragment's index in [`LayoutPage::boxes`]. See
+    /// [`Effects::plan_backgrounds`].
+    backgrounds: Vec<Vec<(usize, Plan)>>,
+}
+
+/// A background image as one page draws it, in page points.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Plan {
+    /// One image, `w 0 0 h x y cm`: `no-repeat` on both axes, or a `space`
+    /// with room for fewer than two.
+    Once {
+        /// The image's resource name.
+        image: Vec<u8>,
+        /// `(left, bottom, width, height)`.
+        rect: (f64, f64, f64, f64),
+    },
+    /// A tiling pattern registered for this fragment, filling a rectangle.
+    Tiled {
+        /// The pattern's resource name.
+        pattern: Vec<u8>,
+        /// `(left, bottom, width, height)`: the painting area, or the one row
+        /// or column of it an axis that does not repeat leaves.
+        fill: (f64, f64, f64, f64),
+    },
+}
+
+/// A background image's geometry on one fragment, `css-backgrounds-3` §2, in
+/// page points: what [`Effects::plan_backgrounds`] turns into a [`Plan`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tiling {
+    /// One image's width and height.
+    pub tile: (f64, f64),
+    /// The top-left corner of the image §2.6 positions.
+    pub origin: (f64, f64),
+    /// The distance from one image to the next on each axis: the image's own
+    /// size for `repeat` and `round`, and that plus the gap for `space`.
+    pub step: (f64, f64),
+    /// Whether each axis repeats at all.
+    pub repeats: (bool, bool),
+    /// `(left, bottom, width, height)` of what is filled: the border box —
+    /// `background-clip`'s initial value — cut to one row or column on an axis
+    /// that does not repeat.
+    pub fill: (f64, f64, f64, f64),
+}
+
+/// `css-backgrounds-3` §2's geometry for one image on one fragment.
+///
+/// The positioning area is the fragment's **padding box**
+/// (`background-origin: padding-box`, the initial value) and the painting area
+/// its border box; a box cut across pages positions its image against each
+/// page's fragment, for [`BoxFragment::radius`]'s reason. `intrinsic` is the
+/// image's own size in CSS pixels. `None` where §2.4 sizes the image to
+/// nothing, which draws nothing.
+#[must_use]
+pub fn tiling(
+    fragment: &BoxFragment,
+    layer: &BackgroundLayer,
+    intrinsic: (f64, f64),
+    frame: &Frame,
+) -> Option<Tiling> {
+    let border = &fragment.border_width;
+    let area = (
+        fragment.x + border.left,
+        fragment.y + border.top,
+        (fragment.width - border.left - border.right).max(0.0),
+        (fragment.height - border.top - border.bottom).max(0.0),
+    );
+    let (iw, ih) = intrinsic;
+    if iw <= 0.0 || ih <= 0.0 {
+        return None;
+    }
+    let resolve = |length: LengthPercentage, of: f64| match length {
+        LengthPercentage::Px(px) => px,
+        LengthPercentage::Percent(percent) => of * percent / 100.0,
+    };
+    // §2.4: `cover` and `contain` keep the ratio; one `auto` beside a stated
+    // size takes the ratio; two take the image's own size.
+    let (mut width, mut height) = match layer.size {
+        BackgroundSize::Cover | BackgroundSize::Contain => {
+            let across = area.2 / iw;
+            let down = area.3 / ih;
+            let scale = if layer.size == BackgroundSize::Cover {
+                across.max(down)
+            } else {
+                across.min(down)
+            };
+            (iw * scale, ih * scale)
+        }
+        BackgroundSize::Explicit(w, h) => match (w, h) {
+            (Some(w), Some(h)) => (resolve(w, area.2), resolve(h, area.3)),
+            (Some(w), None) => {
+                let w = resolve(w, area.2);
+                (w, w * ih / iw)
+            }
+            (None, Some(h)) => {
+                let h = resolve(h, area.3);
+                (h * iw / ih, h)
+            }
+            (None, None) => (iw, ih),
+        },
+    };
+    // §2.4's last paragraph: `round` rescales the image so a whole number of
+    // them fills the area, and an `auto` other dimension follows the ratio.
+    let auto_height = matches!(layer.size, BackgroundSize::Explicit(_, None));
+    let auto_width = matches!(layer.size, BackgroundSize::Explicit(None, _));
+    if layer.repeat.x == RepeatStyle::Round && width > 0.0 && area.2 > 0.0 {
+        let rounded = area.2 / (area.2 / width).round().max(1.0);
+        if layer.repeat.y != RepeatStyle::Round && auto_height {
+            height *= rounded / width;
+        }
+        width = rounded;
+    }
+    if layer.repeat.y == RepeatStyle::Round && height > 0.0 && area.3 > 0.0 {
+        let rounded = area.3 / (area.3 / height).round().max(1.0);
+        if layer.repeat.x != RepeatStyle::Round && auto_width {
+            width *= rounded / height;
+        }
+        height = rounded;
+    }
+    if !(width > 0.0 && height > 0.0 && width.is_finite() && height.is_finite()) {
+        return None;
+    }
+    // §2.6: a percentage aligns that point of the image with that point of
+    // the area; a length is the distance from the stated edge.
+    let place = |offset: ComputedOffset, room: f64| {
+        let from_start = match offset.offset {
+            LengthPercentage::Px(px) => px,
+            LengthPercentage::Percent(percent) => room * percent / 100.0,
+        };
+        if offset.from_end {
+            room - from_start
+        } else {
+            from_start
+        }
+    };
+    // §2.3's `space`: as many whole images as fit, the first and last against
+    // the edges and the rest spread between; fewer than two is one image,
+    // positioned.
+    let axis = |style: RepeatStyle, start: f64, extent: f64, size: f64, offset: ComputedOffset| {
+        match style {
+            RepeatStyle::Space => {
+                let count = (extent / size).floor();
+                if count >= 2.0 {
+                    let gap = (extent - count * size) / (count - 1.0);
+                    (start, size + gap, true)
+                } else {
+                    (start + place(offset, extent - size), size, false)
+                }
+            }
+            RepeatStyle::NoRepeat => (start + place(offset, extent - size), size, false),
+            RepeatStyle::Repeat | RepeatStyle::Round => {
+                (start + place(offset, extent - size), size, true)
+            }
+        }
+    };
+    let (x, step_x, repeat_x) = axis(layer.repeat.x, area.0, area.2, width, layer.position.x);
+    let (y, step_y, repeat_y) = axis(layer.repeat.y, area.1, area.3, height, layer.position.y);
+    // The painting area, cut to the image's own row or column on an axis that
+    // does not repeat.
+    let (mut left, mut top) = (fragment.x, fragment.y);
+    let (mut right, mut bottom) = (fragment.x + fragment.width, fragment.y + fragment.height);
+    if !repeat_x {
+        left = left.max(x);
+        right = right.min(x + width);
+    }
+    if !repeat_y {
+        top = top.max(y);
+        bottom = bottom.min(y + height);
+    }
+    if right <= left || bottom <= top {
+        return None;
+    }
+    let pt = |px: f64| px * PX_TO_PT;
+    Some(Tiling {
+        tile: (pt(width), pt(height)),
+        origin: (frame.x(x), frame.y(y)),
+        step: (pt(step_x), pt(step_y)),
+        repeats: (repeat_x, repeat_y),
+        fill: (
+            frame.x(left),
+            frame.y(bottom),
+            pt(right - left),
+            pt(bottom - top),
+        ),
+    })
 }
 
 /// The quantum of [`Effects`]' alphas: ten thousand steps between clear and
@@ -998,16 +1189,108 @@ impl Effects {
                 .collect(),
             clips,
             clipped_by,
+            backgrounds: Vec::new(),
         }
     }
 
-    /// This chapter's effects on one laid-out page.
+    /// Plans every background image a chapter's pages draw, and registers a
+    /// tiling pattern for each one that repeats — **before the chapter's first
+    /// page begins**, for `begin_page`'s snapshot rule, which is why the plan
+    /// is made here and not while drawing.
+    ///
+    /// `image` names a reference's registered image and its size in CSS
+    /// pixels, or nothing for one that did not resolve; `counter` numbers the
+    /// patterns across the whole document. A pattern the writer refuses leaves
+    /// its fragment without an image rather than naming a resource the page
+    /// does not hold.
+    pub fn plan_backgrounds<'i>(
+        &mut self,
+        builder: &mut DocumentBuilder,
+        pages: &[LayoutPage],
+        frame: &Frame,
+        image: impl Fn(&ImageRef) -> Option<(&'i [u8], (f64, f64))>,
+        counter: &mut usize,
+    ) {
+        self.backgrounds = pages
+            .iter()
+            .map(|page| {
+                let mut plans = Vec::new();
+                for (index, fragment) in page.boxes.iter().enumerate() {
+                    let Some(layer) = &fragment.image else {
+                        continue;
+                    };
+                    let Some((name, intrinsic)) = image(&layer.image) else {
+                        continue;
+                    };
+                    let Some(geometry) = tiling(fragment, layer, intrinsic, frame) else {
+                        continue;
+                    };
+                    let (width, height) = geometry.tile;
+                    if !geometry.repeats.0 && !geometry.repeats.1 {
+                        plans.push((
+                            index,
+                            Plan::Once {
+                                image: name.to_vec(),
+                                rect: (
+                                    geometry.origin.0,
+                                    geometry.origin.1 - height,
+                                    width,
+                                    height,
+                                ),
+                            },
+                        ));
+                        continue;
+                    }
+                    let pattern = format!("BgP{counter}").into_bytes();
+                    *counter += 1;
+                    let mut content = format!("{width} 0 0 {height} 0 0 cm /").into_bytes();
+                    content.extend_from_slice(name);
+                    content.extend_from_slice(b" Do");
+                    // 8.7.3.1: the pattern's matrix maps its cell, whose origin
+                    // is the image's bottom-left corner, onto the page's default
+                    // space, which is the space this painter draws in.
+                    let registered = builder.add_tiling_pattern(
+                        &pattern,
+                        &TilingPattern {
+                            bbox: [0.0, 0.0, width, height],
+                            x_step: geometry.step.0,
+                            y_step: geometry.step.1,
+                            matrix: Some([
+                                1.0,
+                                0.0,
+                                0.0,
+                                1.0,
+                                geometry.origin.0,
+                                geometry.origin.1 - height,
+                            ]),
+                            tiling_type: TilingType::ConstantSpacing,
+                            content: &content,
+                        },
+                    );
+                    if registered {
+                        plans.push((
+                            index,
+                            Plan::Tiled {
+                                pattern,
+                                fill: geometry.fill,
+                            },
+                        ));
+                    }
+                }
+                plans
+            })
+            .collect();
+    }
+
+    /// This chapter's effects on one laid-out page, the `offset`-th of the
+    /// chapter.
     #[must_use]
-    pub fn on<'a>(&'a self, laid: &'a LayoutPage, frame: &'a Frame) -> OnPage<'a> {
+    pub fn on<'a>(&'a self, laid: &'a LayoutPage, frame: &'a Frame, offset: usize) -> OnPage<'a> {
         OnPage {
             effects: self,
             clips: &laid.clips,
             frame,
+            backgrounds: self.backgrounds.get(offset).map_or(&[], Vec::as_slice),
         }
     }
 
@@ -1062,9 +1345,18 @@ pub struct OnPage<'a> {
     effects: &'a Effects,
     clips: &'a [ClipFragment],
     frame: &'a Frame,
+    backgrounds: &'a [(usize, Plan)],
 }
 
 impl OnPage<'_> {
+    /// The background image the `index`-th box fragment of the page draws.
+    fn background(&self, index: usize) -> Option<&Plan> {
+        self.backgrounds
+            .iter()
+            .find(|(at, _)| *at == index)
+            .map(|(_, plan)| plan)
+    }
+
     /// Opens what a fragment anchored here needs, returning whether anything
     /// was opened and so has to be closed with [`Effects::close`].
     ///
@@ -1239,13 +1531,12 @@ pub fn draw_page(
     pictures: &[(u32, Vec<u8>)],
     dom: Option<&Dom>,
     chapter: u64,
-    effects: &Effects,
+    effects: &OnPage<'_>,
 ) -> usize {
-    let effects = &effects.on(laid, frame);
     let mut refused = 0usize;
-    for fragment in &laid.boxes {
+    for (index, fragment) in laid.boxes.iter().enumerate() {
         let opened = effects.open(page, fragment.anchor, false);
-        draw_box(page, fragment, frame);
+        draw_box(page, fragment, frame, effects.background(index));
         Effects::close(page, opened);
     }
     // After the backgrounds and before the text, which is CSS 2.2 §E.2's
@@ -1523,7 +1814,7 @@ fn fill(page: &mut PageBuilder, x: f64, y: f64, width: f64, height: f64) {
     page.raw(format!("{x} {y} {width} {height} re f").as_bytes());
 }
 
-fn draw_box(page: &mut PageBuilder, fragment: &BoxFragment, frame: &Frame) {
+fn draw_box(page: &mut PageBuilder, fragment: &BoxFragment, frame: &Frame, image: Option<&Plan>) {
     let x = frame.x(fragment.x);
     let top = frame.y(fragment.y);
     let width = fragment.width * PX_TO_PT;
@@ -1533,12 +1824,16 @@ fn draw_box(page: &mut PageBuilder, fragment: &BoxFragment, frame: &Frame) {
         .iter()
         .any(|(horizontal, vertical)| *horizontal > 0.0 && *vertical > 0.0)
     {
-        draw_rounded_box(page, fragment, (x, top - height, width, height));
+        draw_rounded_box(page, fragment, (x, top - height, width, height), image);
         return;
     }
     if fragment.background.a != 0 {
         set_fill(page, fragment.background);
         fill(page, x, top - height, width, height);
+    }
+    if let Some(plan) = image {
+        let area = format!("{x} {} {width} {height} re", top - height);
+        draw_background_image(page, plan, &area);
     }
     // A border is drawn as four filled rectangles rather than as a stroked
     // path, because CSS's border box is defined by its **edges** and a stroke
@@ -1561,6 +1856,21 @@ fn draw_box(page: &mut PageBuilder, fragment: &BoxFragment, frame: &Frame) {
         };
         fill(page, bx, by, bw, bh);
     }
+}
+
+/// One planned background image, clipped to the painting area `area` — a
+/// path, the border box's rectangle or its rounded shape.
+fn draw_background_image(page: &mut PageBuilder, plan: &Plan, area: &str) {
+    page.raw(format!("q {area} W n").as_bytes());
+    match plan {
+        Plan::Once { image, rect } => page.image(image, rect.0, rect.1, rect.2, rect.3),
+        Plan::Tiled { pattern, fill } => {
+            if page.set_fill_pattern(pattern) {
+                page.raw(format!("{} {} {} {} re f", fill.0, fill.1, fill.2, fill.3).as_bytes());
+            }
+        }
+    }
+    page.raw(b"Q");
 }
 
 /// `4(√2 − 1) / 3`: the distance along each tangent, as a fraction of the
@@ -1646,7 +1956,12 @@ pub fn rounded_path(rect: (f64, f64, f64, f64), radii: [(f64, f64); 4]) -> Strin
 /// a clip that runs from the outer corner to the inner one, which is where §5.4
 /// puts the transition between two sides' colours — so four sides of one
 /// colour draw one ring, and four of four colours meet on the diagonals.
-fn draw_rounded_box(page: &mut PageBuilder, fragment: &BoxFragment, rect: (f64, f64, f64, f64)) {
+fn draw_rounded_box(
+    page: &mut PageBuilder,
+    fragment: &BoxFragment,
+    rect: (f64, f64, f64, f64),
+    image: Option<&Plan>,
+) {
     let (left, bottom, width, height) = rect;
     let (right, top) = (left + width, bottom + height);
     let outer: [(f64, f64); 4] = fragment
@@ -1655,6 +1970,10 @@ fn draw_rounded_box(page: &mut PageBuilder, fragment: &BoxFragment, rect: (f64, 
     if fragment.background.a != 0 {
         set_fill(page, fragment.background);
         page.raw(format!("{} f", rounded_path(rect, outer)).as_bytes());
+    }
+    // §5.3: the background is clipped to the curve, the image with it.
+    if let Some(plan) = image {
+        draw_background_image(page, plan, &rounded_path(rect, outer));
     }
     let widths = &fragment.border_width;
     let (bt, br, bb, bl) = (

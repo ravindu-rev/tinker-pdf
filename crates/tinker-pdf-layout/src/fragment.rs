@@ -770,6 +770,7 @@ fn emit(
                 border_color: block.border_color,
                 radius: corner_radii(block, block.width, height, cut_top, cut_bottom),
                 outline: block.paint.as_ref().and_then(|paint| paint.outline),
+                image: block.paint.as_ref().and_then(|paint| paint.image.clone()),
                 anchor: block.anchor,
             });
         }
@@ -998,6 +999,7 @@ fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
                 border_color: block.border_color,
                 radius: corner_radii(block, block.width, height, cut_top, cut_bottom),
                 outline: block.paint.as_ref().and_then(|paint| paint.outline),
+                image: block.paint.as_ref().and_then(|paint| paint.image.clone()),
                 anchor: block.anchor,
             });
         }

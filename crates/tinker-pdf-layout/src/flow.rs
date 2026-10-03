@@ -1074,7 +1074,7 @@ impl<M: Metrics> Builder<'_, M> {
             || border.right > 0.0
             || border.bottom > 0.0
             || border.left > 0.0
-            || has_outline(&style);
+            || draws_beyond_its_border(&style);
         let record = BlockRecord {
             x: left,
             width: border_box_width,
@@ -4949,7 +4949,7 @@ fn decorate(node: &BoxNode, x: f64, width: f64) -> BlockRecord {
         || style.border_width.right > 0.0
         || style.border_width.bottom > 0.0
         || style.border_width.left > 0.0
-        || has_outline(&style);
+        || draws_beyond_its_border(&style);
     BlockRecord {
         x,
         width,
@@ -5064,13 +5064,13 @@ impl Reach {
     }
 }
 
-/// Whether a box draws an outline, which makes it painted with no background
-/// or border at all.
-fn has_outline(style: &Consumed) -> bool {
+/// Whether a box draws an outline or a background image, either of which makes
+/// it painted with no background colour or border at all.
+fn draws_beyond_its_border(style: &Consumed) -> bool {
     style
         .paint
         .as_ref()
-        .is_some_and(|paint| paint.outline.is_some())
+        .is_some_and(|paint| paint.outline.is_some() || paint.image.is_some())
 }
 
 /// One box's **specified** border on one side, for §17.6.2.1.
