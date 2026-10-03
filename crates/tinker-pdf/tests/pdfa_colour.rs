@@ -1428,3 +1428,35 @@ fn a_devicen_spot_colorant_is_described_in_its_colorants() {
         }
     );
 }
+
+/// Rule 6.4-2, veraPDF's statement of ISO 19005-1 6.4 (with Cor.2:2011): "An
+/// XObject dictionary shall not contain the SMask key." The image the page
+/// draws carries a soft mask; the twins are the same image without one, and
+/// the same document claiming part 2, which permits transparency.
+#[test]
+fn an_xobject_soft_mask_is_part_one_transparency() {
+    let mut masked = drawing_an_image("/SMask 8 0 R");
+    masked.part = "1".to_string();
+    masked.extra.push((
+        8,
+        stream(
+            "/Type /XObject /Subtype /Image /Width 1 /Height 1 \
+             /BitsPerComponent 8 /ColorSpace /DeviceGray",
+            &[0xFF],
+        ),
+    ));
+    assert_eq!(
+        masked.one_finding(),
+        FindingKind::TransparencyForbidden {
+            feature: "SMask".to_string()
+        }
+    );
+
+    let mut plain = drawing_an_image("");
+    plain.part = "1".to_string();
+    assert_eq!(plain.findings(), Vec::<FindingKind>::new());
+
+    let mut two = masked;
+    two.part = "2".to_string();
+    assert_eq!(two.findings(), Vec::<FindingKind>::new());
+}

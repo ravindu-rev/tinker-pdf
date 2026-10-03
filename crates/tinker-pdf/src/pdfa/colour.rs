@@ -1417,10 +1417,11 @@ fn transfer_functions(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
 
 /// ISO 19005-1 6.4: a part 1 file has no transparency at all.
 ///
-/// Four ways to have some, and each is its own finding because they are
+/// Five ways to have some, and each is its own finding because they are
 /// different things to fix: a transparency group on a page or a form, a soft
-/// mask in a graphics state, a blend mode that is not one of the two meaning
-/// "do not blend", and a constant alpha below one.
+/// mask in a graphics state or on an XObject the pages draw, a blend mode that
+/// is not one of the two meaning "do not blend", and a constant alpha below
+/// one.
 ///
 /// **Parts 2 to 4 permit transparency** and constrain it instead — the group's
 /// colour space, the blend modes, the mask — and none of that runs here.
@@ -1457,6 +1458,31 @@ fn transparency(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
                 object: Some(*reference),
                 kind: FindingKind::TransparencyForbidden {
                     feature: "Group".to_string(),
+                },
+            });
+        }
+    }
+
+    // Rule 6.4-2, as veraPDF's published statement quotes ISO 19005-1 6.4
+    // (with Cor.2:2011): "An XObject dictionary shall not contain the SMask
+    // key." An image's own soft mask is transparency as surely as a graphics
+    // state's, and until this loop only the graphics state's was judged. The
+    // key at all, not its value: `/SMask` on an XObject has no `/None`
+    // spelling the way a graphics state's has, and the rule's test condition
+    // is `containsSMask == false`.
+    for reference in used.images.iter().chain(used.forms.iter()) {
+        let Ok(object) = doc.get(*reference) else {
+            continue;
+        };
+        let Some(stream) = object.as_stream() else {
+            continue;
+        };
+        if stream.dict.contains_key(doc.intern(b"SMask")) {
+            out.push(Raw {
+                rule: clauses::TRANSPARENCY,
+                object: Some(*reference),
+                kind: FindingKind::TransparencyForbidden {
+                    feature: "SMask".to_string(),
                 },
             });
         }

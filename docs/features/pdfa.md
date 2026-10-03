@@ -87,7 +87,9 @@ never happens.
   alternate and one tint transform, compared as objects — direct against
   indirect and compression ignored, as the clause says) and its `/DeviceN`
   colorants described, part 1's outright
-  prohibition on transparency, and the graphics clause's operator list
+  prohibition on transparency — a group, a graphics state's soft mask, blend
+  mode or alpha, and an `/SMask` on any XObject the pages draw (rule 6.4-2,
+  which until October 2026 did not run) — and the graphics clause's operator list
   (6.2.10 / 6.2.2): an operator outside ISO 32000-1 Table A.1's seventy-three
   — `PS` among them — is a finding inside `BX`/`EX` or not, naming the page,
   form or appearance stream that used it.
