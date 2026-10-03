@@ -1067,3 +1067,215 @@ fn a_language_tag_has_the_shape_bcp_47_gives_one() {
         assert!(!tinker_pdf::is_language_tag(bad), "{bad:?}");
     }
 }
+
+// ---- PDF 2.0 structure namespaces (ISO 32000-2 14.7.4, 14.8.6) ------------
+
+use tinker_pdf::{MATHML_NAMESPACE, PDF_1_7_NAMESPACE, PDF_2_0_NAMESPACE};
+
+/// The one element whose type, as written, is `raw`.
+fn written_as(doc: &Document, raw: &str) -> StructElement {
+    let found: Vec<StructElement> = elements(doc)
+        .into_iter()
+        .filter(|element| element.raw_type == raw)
+        .collect();
+    assert_eq!(found.len(), 1, "{} elements written as {raw}", found.len());
+    found.into_iter().next().expect("asserted above")
+}
+
+/// An element in a namespace of the caller's own is written as itself with
+/// `/NS`, and read through that namespace's `/RoleMapNS` into the namespace
+/// each `[type ns]` pair names — across two namespaces when the map goes
+/// through one, and into PDF 2.0's own when that is where it ends. An element
+/// naming no namespace is read in the default one, ISO 32000-2 14.8.6.1.
+#[test]
+fn a_namespaced_element_is_read_through_its_namespaces_role_map() {
+    let mut builder = DocumentBuilder::with_version(2, 0);
+    builder.add_base_font(b"F1", b"Helvetica");
+    let book = builder.add_namespace("urn:example:book").expect("2.0");
+    let other = builder.add_namespace("urn:example:other").expect("2.0");
+    let pdf17 = builder.add_namespace(PDF_1_7_NAMESPACE).expect("2.0");
+    let pdf20 = builder.add_namespace(PDF_2_0_NAMESPACE).expect("2.0");
+    assert!(builder.map_role_in(book, b"section", b"Sect", pdf17));
+    assert!(builder.map_role_in(book, b"box", b"Aside", pdf20));
+    assert!(builder.map_role_in(book, b"chapter", b"kapitel", other));
+    assert!(builder.map_role_in(other, b"kapitel", b"Part", pdf17));
+    builder.add_page(300.0, 200.0, |page| {
+        page.tagged_with(&Tag::new(b"chapter").namespace(book), |page| {
+            page.tagged_with(&Tag::new(b"section").namespace(book), |page| {
+                page.tagged_with(&Tag::new(b"box").namespace(book), |page| {
+                    page.text(b"F1", 12.0, 20.0, 150.0, "boxed");
+                });
+                page.tagged(b"P", |page| page.text(b"F1", 12.0, 20.0, 120.0, "plain"));
+                // Unmapped in its namespace: read as itself, in it.
+                page.tagged_with(&Tag::new(b"aside").namespace(book), |page| {
+                    page.text(b"F1", 12.0, 20.0, 90.0, "aside");
+                });
+            });
+        });
+    });
+    let bytes = builder.finish();
+    structurally_clean(bytes.clone());
+    let doc = Document::open(bytes).expect("opens");
+    let tree = doc.structure().expect("a tree");
+    assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+    assert_eq!(
+        tree.namespaces,
+        [
+            "urn:example:book",
+            "urn:example:other",
+            PDF_1_7_NAMESPACE,
+            PDF_2_0_NAMESPACE
+        ],
+        "every namespace registered, in the order registered"
+    );
+
+    let book_uri = Some("urn:example:book".to_string());
+    let section = written_as(&doc, "section");
+    assert_eq!(section.namespace, book_uri);
+    assert_eq!(section.standard_type, "Sect");
+    assert_eq!(
+        section.standard_namespace.as_deref(),
+        Some(PDF_1_7_NAMESPACE)
+    );
+
+    let boxed = written_as(&doc, "box");
+    assert_eq!(boxed.namespace, book_uri);
+    assert_eq!(boxed.standard_type, "Aside", "a PDF 2.0 type");
+    assert_eq!(boxed.standard_namespace.as_deref(), Some(PDF_2_0_NAMESPACE));
+
+    let chapter = written_as(&doc, "chapter");
+    assert_eq!(
+        chapter.standard_type, "Part",
+        "two hops, through urn:example:other"
+    );
+    assert_eq!(
+        chapter.standard_namespace.as_deref(),
+        Some(PDF_1_7_NAMESPACE)
+    );
+
+    let aside = written_as(&doc, "aside");
+    assert_eq!(aside.standard_type, "aside");
+    assert_eq!(
+        aside.standard_namespace, book_uri,
+        "unmapped, still in its own"
+    );
+
+    let paragraph = written_as(&doc, "P");
+    assert_eq!(paragraph.namespace, None, "no /NS written");
+    assert_eq!(
+        paragraph.standard_namespace.as_deref(),
+        Some(PDF_1_7_NAMESPACE)
+    );
+
+    let page = doc.page(0).expect("one page");
+    assert_eq!(
+        tree.text_for_page(0, &page.text()).plain_text().trim(),
+        "boxed\nplain\naside",
+        "a namespace changes no reading order"
+    );
+}
+
+/// What `add_namespace` and `map_role_in` refuse, each for the reason given
+/// in their documentation.
+#[test]
+fn namespaces_are_pdf_2_0_and_their_role_maps_obey_the_ua_2_rules() {
+    // `/NS` and `/Namespaces` are 2.0 keys.
+    assert!(DocumentBuilder::new().add_namespace("urn:x").is_none());
+    assert!(DocumentBuilder::with_version(1, 7)
+        .add_namespace("urn:x")
+        .is_none());
+
+    let mut builder = DocumentBuilder::with_version(2, 0);
+    assert!(
+        builder.add_namespace("").is_none(),
+        "Table 356's /NS is required"
+    );
+    let own = builder.add_namespace("urn:x").expect("2.0");
+    assert_eq!(
+        builder.add_namespace("urn:x"),
+        Some(own),
+        "one URI, one namespace"
+    );
+    let other = builder.add_namespace("urn:y").expect("2.0");
+    let pdf17 = builder.add_namespace(PDF_1_7_NAMESPACE).expect("2.0");
+    let pdf20 = builder.add_namespace(PDF_2_0_NAMESPACE).expect("2.0");
+    let math = builder.add_namespace(MATHML_NAMESPACE).expect("2.0");
+
+    // veraPDF 8.2.4-3: not within one namespace.
+    assert!(!builder.map_role_in(own, b"a", b"b", own));
+    // 8.2.4-4: a standard type only to another standard namespace.
+    assert!(!builder.map_role_in(pdf20, b"Aside", b"aside", own));
+    assert!(!builder.map_role_in(pdf17, b"P", b"math", math));
+    assert!(builder.map_role_in(pdf20, b"Aside", b"Note", pdf17));
+    // The 1.7 namespace defines exactly its standard types.
+    assert!(!builder.map_role_in(own, b"para", b"Paragraph", pdf17));
+    assert!(!builder.map_role_in(own, b"", b"P", pdf17), "an empty name");
+    assert!(
+        !builder.map_role_in(own, b"x", b"", other),
+        "an empty target"
+    );
+    // A loop through two namespaces.
+    assert!(builder.map_role_in(own, b"a", b"b", other));
+    assert!(!builder.map_role_in(other, b"b", b"a", own));
+    // The first statement stands, and restating it is accepted.
+    assert!(!builder.map_role_in(own, b"a", b"P", pdf17));
+    assert!(builder.map_role_in(own, b"a", b"b", other));
+
+    // Another builder's handle names nothing here.
+    let mut stranger = DocumentBuilder::with_version(2, 0);
+    let foreign = stranger.add_namespace("urn:x").expect("2.0");
+    assert_ne!(foreign, own, "same URI, different builder");
+    assert!(!builder.map_role_in(foreign, b"c", b"P", pdf17));
+    assert!(!builder.map_role_in(own, b"c", b"P", foreign));
+
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(300.0, 200.0, |page| {
+        page.tagged_with(&Tag::new(b"c").namespace(foreign), |page| {
+            page.text(b"F1", 12.0, 20.0, 150.0, "x");
+        });
+        // An element in a namespace and empty says nothing about content.
+        page.tagged_with(&Tag::new(b"empty").namespace(own), |_| {});
+    });
+    let bytes = builder.finish();
+    structurally_clean(bytes.clone());
+    let doc = Document::open(bytes).expect("opens");
+    let tree = doc.structure().expect("a tree");
+    assert!(
+        tree.warnings.is_empty(),
+        "no loop reached the file: {:?}",
+        tree.warnings
+    );
+    let c = written_as(&doc, "c");
+    assert_eq!(c.namespace, None, "a foreign handle is not written");
+    assert!(
+        elements(&doc)
+            .iter()
+            .all(|element| element.raw_type != "empty"),
+        "an empty namespaced element is dropped like any empty element"
+    );
+}
+
+/// A document that registers no namespace gains no `/Namespaces`, and one
+/// that registers namespaces but tags nothing gains no namespace dictionary:
+/// they are part of the structure tree, as the role map is.
+#[test]
+fn namespaces_are_written_only_with_a_tree_that_has_them() {
+    let mut builder = DocumentBuilder::with_version(2, 0);
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(300.0, 200.0, |page| {
+        page.tagged(b"P", |page| page.text(b"F1", 12.0, 20.0, 150.0, "x"));
+    });
+    let bytes = builder.finish();
+    assert!(!bytes.windows(9).any(|window| window == b"Namespace"));
+    let doc = Document::open(bytes).expect("opens");
+    assert!(doc.structure().expect("a tree").namespaces.is_empty());
+
+    let mut builder = DocumentBuilder::with_version(2, 0);
+    builder.add_base_font(b"F1", b"Helvetica");
+    assert!(builder.add_namespace("urn:x").is_some());
+    builder.add_page(300.0, 200.0, |page| {
+        page.text(b"F1", 12.0, 20.0, 150.0, "untagged");
+    });
+    let bytes = builder.finish();
+    assert!(!bytes.windows(9).any(|window| window == b"Namespace"));
+}

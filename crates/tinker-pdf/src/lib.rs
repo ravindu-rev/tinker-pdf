@@ -219,12 +219,16 @@ pub use svg_out::{Rasterised, Svg, SvgOptions, SvgWarning, MAX_SVG_BYTES};
 ///
 /// `Tag` is the argument to `PageBuilder::tagged_with` and `open_tag`, the
 /// tagging API that writes 14.9's properties; `is_language_tag` is the check
-/// its `lang` documentation sends a caller to.
+/// its `lang` documentation sends a caller to. `NamespaceId` is what
+/// `DocumentBuilder::add_namespace` hands back and `Tag::namespace` takes, and
+/// the three namespace URIs are ISO 32000-2's, which both the writer's
+/// `add_namespace` and the reader's `StructElement::standard_namespace` speak.
 pub use tinker_pdf_cos::{
-    is_language_tag, ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal,
-    DocumentBuilder, DocumentEditor, EditCheckpoint, EmbeddedWhole, Encryption, FillError,
-    FillRejection, ImageData, OutlineEntry, PageBuilder, SkippedWidget, SubsetRefusal,
-    TableAttributes, TableScope, Tag, Target, WidgetDefect, WriteMode, WriteOptions,
+    is_language_tag, is_standard_namespace, ArchivalLevel, ArchivalPart, ArchivalProfile,
+    ArchivalRefusal, DocumentBuilder, DocumentEditor, EditCheckpoint, EmbeddedWhole, Encryption,
+    FillError, FillRejection, ImageData, NamespaceId, OutlineEntry, PageBuilder, SkippedWidget,
+    SubsetRefusal, TableAttributes, TableScope, Tag, Target, WidgetDefect, WriteMode, WriteOptions,
+    MATHML_NAMESPACE, PDF_1_7_NAMESPACE, PDF_2_0_NAMESPACE,
 };
 /// Creating form fields (12.7.3), behind [`DocumentEditor::add_field`].
 ///

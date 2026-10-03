@@ -765,3 +765,121 @@ fn a_stream_owner_without_a_stream_is_a_warning_and_is_dropped() {
     assert_eq!(structured.plain_text(), "body\n");
     assert_eq!(structured.orphans, 0);
 }
+
+// ---------------------------------------------------------------------------
+// ISO 32000-2 14.7.4's namespaces, as another producer may write them
+// ---------------------------------------------------------------------------
+
+/// The shapes this crate's writer never produces, read from bytes: a
+/// `/RoleMapNS` chain through two namespaces, a bare-name entry, a loop, an
+/// `/NS` that is not an indirect reference to a namespace dictionary, and a
+/// global `/RoleMap` moving a type that named a namespace, and a type
+/// mapped to itself.
+///
+/// Each answer is either what the errata state or, where they state nothing
+/// this build could read, `None` rather than a guess — and each tolerated
+/// oddity is named, by the warning its documentation gives it.
+#[test]
+fn namespaces_another_producer_wrote_are_read_and_their_oddities_named() {
+    let content: String = ["a", "b", "c", "d", "e", "f", "g"]
+        .iter()
+        .enumerate()
+        .map(|(at, text)| marked(at as u32, 50 - 8 * at as u32, text))
+        .collect();
+    let doc = Document::open(build(
+        "",
+        "/K 10 0 R /Namespaces [20 0 R 21 0 R 22 0 R] /RoleMap << /glob /Sect >>",
+        &content,
+        "10 0 obj\n<< /S /Document /Pg 3 0 R /K [11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R 17 0 R] >>\nendobj\n\
+         11 0 obj\n<< /S /x /NS 20 0 R /Pg 3 0 R /K [0] >>\nendobj\n\
+         12 0 obj\n<< /S /bare /NS 20 0 R /Pg 3 0 R /K [1] >>\nendobj\n\
+         13 0 obj\n<< /S /loop1 /NS 20 0 R /Pg 3 0 R /K [2] >>\nendobj\n\
+         14 0 obj\n<< /S /P /NS << /Type /Namespace /NS (urn:direct) >> /Pg 3 0 R /K [3] >>\nendobj\n\
+         15 0 obj\n<< /S /glob /NS 21 0 R /Pg 3 0 R /K [4] >>\nendobj\n\
+         16 0 obj\n<< /S /P /NS 23 0 R /Pg 3 0 R /K [5] >>\nendobj\n\
+         17 0 obj\n<< /S /same /NS 20 0 R /Pg 3 0 R /K [6] >>\nendobj\n\
+         20 0 obj\n<< /Type /Namespace /NS (urn:a)\n\
+            /RoleMapNS << /x [/y 21 0 R] /bare /P /loop1 [/loop2 21 0 R] /same [/same 20 0 R] >> >>\nendobj\n\
+         21 0 obj\n<< /Type /Namespace /NS (urn:b)\n\
+            /RoleMapNS << /y [/H1 22 0 R] /loop2 [/loop1 20 0 R] >> >>\nendobj\n\
+         22 0 obj\n<< /Type /Namespace /NS (http://iso.org/pdf/ssn) >>\nendobj\n\
+         23 0 obj\n<< /Type /Namespace /RoleMapNS << /P [/H1 22 0 R] >> >>\nendobj\n",
+    ))
+    .expect("it opens");
+
+    let tree = doc.structure().expect("a structure tree");
+    assert_eq!(
+        tree.namespaces,
+        ["urn:a", "urn:b", "http://iso.org/pdf/ssn"]
+    );
+    assert_eq!(
+        tree.warnings,
+        vec![
+            StructureWarning::RoleMapLoop {
+                role: "loop1".to_string()
+            },
+            StructureWarning::NamespaceIgnored {
+                element: Some(ObjRef::new(14, 0))
+            },
+            StructureWarning::NamespaceIgnored {
+                element: Some(ObjRef::new(16, 0))
+            },
+        ]
+    );
+
+    let by_number = |num: u32| {
+        tree.elements()
+            .into_iter()
+            .find(|element| element.reference == Some(ObjRef::new(num, 0)))
+            .cloned()
+            .expect("the element was read")
+    };
+    let read = |num: u32| {
+        let element = by_number(num);
+        (
+            element.namespace,
+            element.standard_type,
+            element.standard_namespace,
+        )
+    };
+    let some = |uri: &str| Some(uri.to_string());
+
+    // Two hops, `urn:a` to `urn:b` to the 1.7 namespace: EXAMPLE 1's shape.
+    assert_eq!(
+        read(11),
+        (
+            some("urn:a"),
+            "H1".to_string(),
+            some(tinker_pdf::PDF_1_7_NAMESPACE)
+        )
+    );
+    // A bare name: the type is read, the namespace it is in is not said.
+    assert_eq!(read(12), (some("urn:a"), "P".to_string(), None));
+    // The loop is cut where it closes, as `/RoleMap`'s is.
+    assert_eq!(
+        read(13),
+        (some("urn:a"), "loop2".to_string(), some("urn:b"))
+    );
+    // A direct dictionary is not Table 355's indirect reference.
+    assert_eq!(
+        read(14),
+        (None, "P".to_string(), some(tinker_pdf::PDF_1_7_NAMESPACE))
+    );
+    // `urn:b` does not map `glob`; the global map does, into no stated
+    // namespace.
+    assert_eq!(read(15), (some("urn:b"), "Sect".to_string(), None));
+    // A namespace dictionary with no `/NS` names no namespace, and its map
+    // maps nothing.
+    assert_eq!(
+        read(16),
+        (None, "P".to_string(), some(tinker_pdf::PDF_1_7_NAMESPACE))
+    );
+    // Mapped to itself in its own namespace: what it is, and not a loop —
+    // the reading `/RoleMap` gives the same entry.
+    assert_eq!(read(17), (some("urn:a"), "same".to_string(), some("urn:a")));
+
+    let page = doc.page(0).expect("a page");
+    let structured = tree.text_for_page(0, &page.text());
+    assert_eq!(structured.plain_text(), "a\nb\nc\nd\ne\nf\ng\n");
+    assert_eq!(structured.orphans, 0, "namespaces lose no content");
+}

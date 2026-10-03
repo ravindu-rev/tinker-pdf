@@ -56,7 +56,9 @@ work — see "The writer, as built".
   API landed after this design closed, as the tagged-writing row — see
   "The writer, as built" below.*
 - **PDF 2.0 namespaces** (ISO 32000-2's namespaced structure types); noted
-  in `docs/pdf20-deltas.md` when read support lands.
+  in `docs/pdf20-deltas.md` when read support lands. *Amended October 2026:
+  read and written by the roadmap's PDF 2.0 row — see "The writer, as
+  built".*
 - **Assistive-technology integration.** This is bytes-to-values reading; a
   screen-reader bridge belongs to an embedder.
 
@@ -282,6 +284,20 @@ writes, family by family:
   PDF/UA claim is written, and none should be until the PDF/UA design's
   ledger says so) and `font-not-embedded` (both are set in the unembedded
   standard 14). Before this row the EPUB output also stated no language.
+- **PDF 2.0 namespaces**, from the roadmap's PDF 2.0 row rather than this
+  one. `DocumentBuilder::add_namespace` (2.0 only), `Tag::namespace` and
+  `map_role_in` write `/NS`, the root's `/Namespaces` and each namespace's
+  `/RoleMapNS`, from what the PDF Association's approved errata to ISO
+  32000-2 quote (Tables 354 and 355, 14.8.6.1, 14.8.6.2's EXAMPLE 1) and
+  veraPDF's published PDF/UA-2 rules 8.2.4-3 and 8.2.4-4 for what a mapping
+  may not do. Namespace dictionaries are numbered at `finish` before any
+  element, so a document with none is numbered as before. The reader follows
+  `/RoleMapNS` and reports the namespace each type landed in, or `None` where
+  nothing quoted says; whether the global `/RoleMap` is withheld from an
+  element that names a namespace is not quoted either, so it is still
+  applied there, as 1.7 always did. The 2.0 namespace's own type list is not
+  in a source this build could read, so the writer checks a target only in
+  the 1.7 namespace.
 
 What the row leaves, each named in a refusal table rather than absent: a
 link wrapped across lines is one annotation per rectangle rather than ISO

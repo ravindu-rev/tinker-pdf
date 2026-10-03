@@ -489,6 +489,26 @@ reader could not use — remapping a standard type (ISO 14289-1 7.1: *standard
 tags shall not be remapped*; the list is `STANDARD_STRUCTURE_TYPES`, shared
 with the PDF/A validator's level A rule), an empty or identity entry, a
 second target for one name, and a loop.
+**PDF 2.0's structure namespaces** (ISO 32000-2 14.7.4, 14.8.6) are read and
+written. `DocumentBuilder::add_namespace(uri)` registers one — refused below
+2.0, since `/NS` and `/Namespaces` are 2.0 keys — and `Tag::namespace(id)`
+puts an element's type in it: the element gains `/NS`, an indirect reference
+to a Table 356 namespace dictionary, and the root `/Namespaces` lists every
+namespace registered. `map_role_in(ns, custom, target, target_ns)` writes
+that namespace's `/RoleMapNS` as the `[/type ns]` pair the approved errata's
+14.8.6.2 EXAMPLE 1 shows, and refuses what veraPDF's published PDF/UA-2
+rules forbid: a mapping inside one namespace (8.2.4-3), a standard
+namespace's type mapped out of the standard namespaces (8.2.4-4), a type
+the 1.7 namespace does not define, a second target and a loop.
+`PDF_1_7_NAMESPACE`, `PDF_2_0_NAMESPACE` and `MATHML_NAMESPACE` are the
+three URIs the specification names. The reader keeps
+`StructElement::namespace` (the element's `/NS` URI) and
+`standard_namespace` (where `standard_type` ended): it follows `/RoleMapNS`
+across namespaces, puts an element naming none in the default namespace
+after `/RoleMap` (14.8.6.1 as the errata state it), and says `None` rather
+than guessing where no source this build could read says — a bare-name
+`/RoleMapNS` value, or a namespaced element the global `/RoleMap` moved.
+`StructureTree::namespaces` lists the root's array.
 `continue_at(order)` continues the innermost open element in a fresh
 sequence that reads at `order`, for an element with something drawn
 elsewhere — a picture painted before its text — that reads between two of
@@ -544,6 +564,8 @@ crate has an API of its own; see [architecture](../architecture.md).
 | Images inside a tiling pattern's cell, a soft-mask group or an annotation appearance | `Page::images()` does not list them | none is a drawing of the page's content: the renderer reaches a pattern cell and a mask group through its own device, not through the interpreter's `Do`, and an appearance belongs to the annotation | 8.7.3, 11.6.5, 12.5.5 |
 | A JPEG 2000 image's own opacity channel in extraction | `PageImage::samples` holds the colour channels only | `/SMaskInData` decides what the channel means (8.9.5.4), and a soft mask carried out of the codestream is not an `/SMask` image the type can name; the renderer applies it | 8.9.5.4 |
 | A table attribute with a value Table 349 does not define — a `/Scope` that is not `/Row`, `/Column` or `/Both`, a span below one, a `/Headers` entry that is not a string | `StructureWarning::AttributeIgnored { element, owner, key }` | read as absent rather than guessed at; the element and its other attributes are read as usual, so a table whose headers head nothing stays distinguishable from one that said something this reader could not read | 14.8.5.7 |
+| An element `/NS` that is not an indirect reference to a namespace dictionary carrying Table 356's required `/NS` URI | `StructureWarning::NamespaceIgnored { element }` | read as naming no namespace — the default one, after `/RoleMap` — rather than keyed on an object that names nothing; like `AttributeIgnored`, not a fault in the tree's shape, and the PDF/UA census does not count it as one | ISO 32000-2 Table 355 |
+| Which namespace a type lands in after a **bare-name** `/RoleMapNS` value, or after the global `/RoleMap` moves a type that named a namespace | `StructElement::standard_namespace` is `None` | the Arlington model permits the bare name and the errata quote only the `[type ns]` pair and the global map's use for elements in no namespace; neither says which namespace either result is in, and `None` is that, said rather than guessed. The type itself is still resolved | ISO 32000-2 14.8.6.2 |
 | Attributes reached through an element's `/C` and the root's `/ClassMap` | — | `StructElement::table` reads the attribute objects in `/A` only; 14.7.6.2's classes are a second source of the same attributes that no writer here emits and no test here exercises, so it is named rather than half-read | 14.7.6.2 |
 | A written link that wraps across lines as **one** annotation with `/QuadPoints` | — | `PageBuilder::link` takes one rectangle, so a wrapped link is one annotation per rectangle, each an `/OBJR` of the one `/Link` element — which ISO 32000-1 14.8.4.4.2 permits ("one or more link annotations") and which the PDF Association's approved erratum 133 to ISO 32000-2 replaces, for a 2.0 document, with a single `/OBJR` to one annotation whose `/QuadPoints` mark each line | 14.8.4.4.2; ISO 32000-2 14.8.4.7.3 |
 

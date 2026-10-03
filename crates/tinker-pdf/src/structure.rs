@@ -31,7 +31,7 @@ use std::sync::Arc;
 use tinker_pdf_content::{PlainText, PlainTextOptions, TextChar, TextPage};
 use tinker_pdf_cos::{
     decode_text_string, limits, number_tree, pages as cos_pages, CosDocument, Dict, Name, ObjRef,
-    Object,
+    Object, PDF_1_7_NAMESPACE,
 };
 
 /// How deep the `/K` tree may nest before a subtree is refused (14.7.2).
@@ -206,6 +206,18 @@ pub enum StructureWarning {
         /// The attribute's key.
         key: String,
     },
+    /// ISO 32000-2 Table 355: an element's `/NS` did not name a namespace —
+    /// it was not an indirect reference, or what it referred to was not a
+    /// dictionary with Table 356's required `/NS` URI.
+    ///
+    /// Read as naming none, which puts the element in the default standard
+    /// structure namespace after the role map, as for an element written
+    /// before namespaces existed. Like [`StructureWarning::AttributeIgnored`],
+    /// not a fault in the tree's shape.
+    NamespaceIgnored {
+        /// The element whose `/NS` it was, when it could be named.
+        element: Option<ObjRef>,
+    },
 }
 
 /// One kid of a structure element — the three shapes 14.7.4 gives, never
@@ -281,7 +293,26 @@ pub struct StructElement {
     ///
     /// An unmapped custom type resolving to itself is ruling 2: a `/Foo` no
     /// role map explains is a `/Foo`, not an error and not a `/Span`.
+    ///
+    /// For an element in a PDF 2.0 namespace whose `/RoleMapNS` maps its type,
+    /// that map is followed instead, into the namespace each entry names
+    /// ([`StructElement::standard_namespace`]).
     pub standard_type: String,
+    /// `/NS` (ISO 32000-2 Table 355): the URI of the namespace the element
+    /// names, or `None` when it names none — which 2.0 reads as the default
+    /// standard structure namespace ([`PDF_1_7_NAMESPACE`]) once its type is
+    /// role-mapped.
+    pub namespace: Option<String>,
+    /// The namespace [`StructElement::standard_type`] is in: where the last
+    /// `/RoleMapNS` entry followed led, the element's own when none applied,
+    /// and [`PDF_1_7_NAMESPACE`] for an element naming no namespace (14.8.6.1).
+    ///
+    /// `None` where no text this build could read says which namespace the
+    /// type ended in, rather than a guess: a `/RoleMapNS` entry that is a
+    /// bare name rather than a `[type namespace]` pair (the errata quote only
+    /// the pair's form), or an element naming a namespace whose type the
+    /// global `/RoleMap` moved.
+    pub standard_namespace: Option<String>,
     /// `/T`, the human-readable title.
     pub title: Option<String>,
     /// `/Lang`, the natural language of this element's content (14.9.2).
@@ -327,6 +358,10 @@ pub struct StructureTree {
     pub suspects: bool,
     /// `/MarkInfo /UserProperties`: the tree carries user properties.
     pub user_properties: bool,
+    /// The structure tree root's `/Namespaces` (ISO 32000-2 Table 354), as
+    /// each namespace dictionary's `/NS` URI, in the array's order. Empty for
+    /// a document before 2.0, or one whose elements name no namespace.
+    pub namespaces: Vec<String>,
     /// What the walk had to tolerate (ruling 10).
     pub warnings: Vec<StructureWarning>,
     /// How many pages the document has, for the one-page leniency in
@@ -600,6 +635,7 @@ pub(crate) fn bind(doc: &Arc<CosDocument>) -> Option<StructureTree> {
         budget: MAX_STRUCTURE_ELEMENTS,
         stopped: false,
         warnings: Vec::new(),
+        namespaces: BTreeMap::new(),
     };
     // `get`, not `resolve_key`: an indirect `/K` must arrive at the walk
     // **still a reference**, or the element it names has no object number and
@@ -608,6 +644,19 @@ pub(crate) fn bind(doc: &Arc<CosDocument>) -> Option<StructureTree> {
     // one level too late.
     let k = root.get(doc.intern(b"K")).cloned().unwrap_or(Object::Null);
     let kids = walk.kids(&k, None, None, 0);
+
+    // ISO 32000-2 Table 354: every namespace the elements use.
+    let listed = doc.resolve_key(root, doc.intern(b"Namespaces"));
+    let namespaces: Vec<String> = listed
+        .as_array()
+        .unwrap_or_default()
+        .iter()
+        .take(limits::MAX_ARRAY_LEN)
+        .filter_map(|entry| {
+            let resolved = doc.resolve(entry);
+            text_of(doc, resolved.as_dict()?, b"NS")
+        })
+        .collect();
     let warnings = walk.warnings;
 
     let (struct_parents, parent_tree) = read_parent_tree(doc, root, &pages);
@@ -617,11 +666,33 @@ pub(crate) fn bind(doc: &Arc<CosDocument>) -> Option<StructureTree> {
         marked: flag(b"Marked"),
         suspects: flag(b"Suspects"),
         user_properties: flag(b"UserProperties"),
+        namespaces,
         warnings,
         page_count,
         struct_parents,
         parent_tree,
     })
+}
+
+/// One namespace dictionary (ISO 32000-2 Table 356), as far as resolving a
+/// type through it needs.
+#[derive(Clone, Default)]
+struct NamespaceDict {
+    /// `/NS`, the namespace's URI.
+    uri: String,
+    /// `/RoleMapNS`: each type of this namespace and what it maps to.
+    role_map: BTreeMap<Vec<u8>, RoleTarget>,
+}
+
+/// One `/RoleMapNS` value.
+#[derive(Clone)]
+enum RoleTarget {
+    /// `[/Type ns]`: a type in the namespace the dictionary names — the form
+    /// the errata's EXAMPLE 1 shows (`/section [/H1 11 0 R]`).
+    In(Vec<u8>, ObjRef),
+    /// A bare name. The model allows it (the Arlington TSV's `array;name`);
+    /// which namespace it means is not in any text this build could read.
+    Bare(Vec<u8>),
 }
 
 /// A text string entry, decoded by 7.9.2.2's rules.
@@ -709,6 +780,9 @@ struct Walk<'a> {
     /// visiting more of a bomb than the budget allowed.
     stopped: bool,
     warnings: Vec<StructureWarning>,
+    /// Each namespace dictionary read so far, by reference, so a document of
+    /// a thousand elements in one namespace reads its `/RoleMapNS` once.
+    namespaces: BTreeMap<ObjRef, NamespaceDict>,
 }
 
 impl Walk<'_> {
@@ -862,7 +936,38 @@ impl Walk<'_> {
             }
         }
         let raw = raw.unwrap_or_default();
-        let standard_type = self.resolve_role(&raw);
+        // ISO 32000-2 Table 355: `/NS` is an indirect reference to a namespace
+        // dictionary. An element in a namespace whose `/RoleMapNS` maps its
+        // type follows that map; otherwise the 1.7 resolution stands — the
+        // errata quote the global `/RoleMap` applying to elements in an
+        // undefined namespace, and do not quote whether it is withheld from
+        // the rest, so this reader keeps its 1.7 behaviour there.
+        let ns_key = self.doc.intern(b"NS");
+        let namespace_ref = dict.get_ref(ns_key);
+        let namespace = namespace_ref.and_then(|r| self.namespace_uri(r));
+        if namespace.is_none() && dict.get(ns_key).is_some() {
+            self.warn(StructureWarning::NamespaceIgnored { element: reference });
+        }
+        let namespace_ref = namespace_ref.filter(|_| namespace.is_some());
+        let (standard_type, standard_namespace) =
+            match namespace_ref.and_then(|r| self.resolve_role_ns(&raw, r)) {
+                Some(resolved) => resolved,
+                None => {
+                    let resolved = self.resolve_role(&raw);
+                    let landed = match &namespace {
+                        // 14.8.6.1: no namespace, so the default one, after
+                        // the role map.
+                        None => Some(PDF_1_7_NAMESPACE.to_string()),
+                        // Its own namespace, where nothing moved it.
+                        Some(own) if resolved.as_bytes() == raw.as_slice() => Some(own.clone()),
+                        // The global map moved a type that named a namespace:
+                        // which namespace the result is in is not stated in
+                        // anything this build could read, so it is not said.
+                        Some(_) => None,
+                    };
+                    (resolved, landed)
+                }
+            };
 
         // 14.7.2 does not say `/Pg` is inherited. It is treated as inherited
         // here because a producer that writes it on the element holding the
@@ -894,6 +999,8 @@ impl Walk<'_> {
             reference,
             raw_type: String::from_utf8_lossy(&raw).into_owned(),
             standard_type,
+            namespace,
+            standard_namespace,
             title: text_of(self.doc, dict, b"T"),
             lang: text_of(self.doc, dict, b"Lang"),
             alt: text_of(self.doc, dict, b"Alt"),
@@ -1017,6 +1124,104 @@ impl Walk<'_> {
             }
         }
         found
+    }
+
+    /// Reads a namespace dictionary once (ISO 32000-2 Table 356) and returns
+    /// its URI. `None` for a reference to something that is not one, or a
+    /// dictionary with no `/NS` — Table 356 makes it required, and a namespace
+    /// with no name identifies nothing.
+    fn namespace_uri(&mut self, reference: ObjRef) -> Option<String> {
+        if let Some(read) = self.namespaces.get(&reference) {
+            return (!read.uri.is_empty()).then(|| read.uri.clone());
+        }
+        let mut read = NamespaceDict::default();
+        if let Ok(object) = self.doc.get(reference) {
+            if let Some(dict) = object.as_dict() {
+                read.uri = text_of(self.doc, dict, b"NS").unwrap_or_default();
+                let map = self.doc.resolve_key(dict, self.doc.intern(b"RoleMapNS"));
+                if let Some(map) = map.as_dict() {
+                    for (key, value) in map.iter().take(limits::MAX_ARRAY_LEN) {
+                        let Some(from) = self.doc.name_bytes(*key) else {
+                            continue;
+                        };
+                        let value = self.doc.resolve(value);
+                        let name_of = |object: &Object| {
+                            object
+                                .as_name()
+                                .and_then(|n| self.doc.name_bytes(n))
+                                .map(|n| n.to_vec())
+                        };
+                        let target = match value.as_array() {
+                            Some([kind, ns, ..]) => match (name_of(kind), ns.as_objref()) {
+                                (Some(kind), Some(ns)) => Some(RoleTarget::In(kind, ns)),
+                                _ => None,
+                            },
+                            Some(_) => None,
+                            None => name_of(&value).map(RoleTarget::Bare),
+                        };
+                        if let Some(target) = target {
+                            read.role_map.insert(from.to_vec(), target);
+                        }
+                    }
+                }
+            }
+        }
+        let uri = (!read.uri.is_empty()).then(|| read.uri.clone());
+        self.namespaces.insert(reference, read);
+        uri
+    }
+
+    /// ISO 32000-2 14.8.6.2: a type in a namespace whose `/RoleMapNS` maps it
+    /// is followed through that map, entry by entry, into the namespace each
+    /// `[type namespace]` pair names — the shape of the errata's EXAMPLE 1.
+    ///
+    /// `None` when the element's namespace does not map its type, which
+    /// leaves the 1.7 resolution to answer. Bounded as `/RoleMap` is, by
+    /// [`MAX_ROLE_MAP_HOPS`] and a visited set, and a loop is reported the
+    /// same way.
+    fn resolve_role_ns(
+        &mut self,
+        raw: &[u8],
+        namespace: ObjRef,
+    ) -> Option<(String, Option<String>)> {
+        let mut current = (raw.to_vec(), namespace);
+        let mut seen: BTreeSet<(Vec<u8>, ObjRef)> = BTreeSet::new();
+        seen.insert(current.clone());
+        let mut moved = false;
+        for _ in 0..MAX_ROLE_MAP_HOPS {
+            self.namespace_uri(current.1);
+            let target = self
+                .namespaces
+                .get(&current.1)
+                .and_then(|ns| ns.role_map.get(&current.0))
+                .cloned();
+            match target {
+                None => break,
+                Some(RoleTarget::Bare(kind)) => {
+                    return Some((String::from_utf8_lossy(&kind).into_owned(), None));
+                }
+                Some(RoleTarget::In(kind, ns)) => {
+                    let next = (kind, ns);
+                    // A type mapped to itself is a statement that it is what
+                    // it is, as `resolve_role` reads one, not a loop.
+                    if next == current {
+                        break;
+                    }
+                    moved = true;
+                    if !seen.insert(next.clone()) {
+                        let role = String::from_utf8_lossy(raw).into_owned();
+                        self.warn(StructureWarning::RoleMapLoop { role });
+                        break;
+                    }
+                    current = next;
+                }
+            }
+        }
+        if !moved {
+            return None;
+        }
+        let uri = self.namespace_uri(current.1);
+        Some((String::from_utf8_lossy(&current.0).into_owned(), uri))
     }
 
     /// `/Pg`, resolved to a page index.

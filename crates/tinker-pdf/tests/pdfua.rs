@@ -133,15 +133,16 @@ fn findings_of(doc: &Document) -> Vec<Rule> {
     if tree.suspects {
         out.push(Rule::Suspects);
     }
-    // A dropped attribute value is not a walk that could not be completed: the
-    // element and everything under it were read. Excluded by name so that this
-    // rule's census stays the one it was measured as before attributes were
-    // read at all.
-    if tree
-        .warnings
-        .iter()
-        .any(|warning| !matches!(warning, StructureWarning::AttributeIgnored { .. }))
-    {
+    // A dropped attribute value or namespace is not a walk that could not be
+    // completed: the element and everything under it were read. Excluded by
+    // name so that this rule's census stays the one it was measured as before
+    // attributes and namespaces were read at all.
+    if tree.warnings.iter().any(|warning| {
+        !matches!(
+            warning,
+            StructureWarning::AttributeIgnored { .. } | StructureWarning::NamespaceIgnored { .. }
+        )
+    }) {
         out.push(Rule::TreeNotWalkable);
     }
     if figure_without_alt(&tree) {

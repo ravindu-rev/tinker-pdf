@@ -2015,7 +2015,12 @@ impl TaggedNode {
     /// that keeps a row's columns in step — and is kept, as is one the caller
     /// asked to keep.
     fn is_kept(&self) -> bool {
-        !self.kids.is_empty() || self.props.is_some() || self.keep
+        !self.kids.is_empty()
+            || self
+                .props
+                .as_ref()
+                .is_some_and(|props| props.says_something())
+            || self.keep
     }
 
     /// The order a kid appended now takes: past every kid already here, so a
@@ -2183,6 +2188,53 @@ pub fn is_standard_structure_type(kind: &[u8]) -> bool {
         .any(|standard| standard.as_bytes() == kind)
 }
 
+/// ISO 32000-2's default standard structure namespace, the one ISO 32000-1's
+/// standard types are in (14.8.6.1, as the PDF Association's approved errata
+/// quote it): an element naming no `/NS` is read in it, after role mapping.
+pub const PDF_1_7_NAMESPACE: &str = "http://iso.org/pdf/ssn";
+
+/// ISO 32000-2's own standard structure namespace (14.8.6.1). Not quoted in
+/// the errata; the URI is the one veraPDF's published PDF/UA-2 rule 8.2.5.2
+/// tests a document's root element against.
+pub const PDF_2_0_NAMESPACE: &str = "http://iso.org/pdf2/ssn";
+
+/// MathML's namespace, the one domain-specific namespace ISO 32000-2 defines
+/// (14.8.6.3; 14.7.4.2's NOTE 1 as the errata quote it).
+pub const MATHML_NAMESPACE: &str = "http://www.w3.org/1998/Math/MathML";
+
+/// Whether `uri` names one of ISO 32000-2's two *standard structure
+/// namespaces* (14.8.6.1: "either of the two namespaces defined above").
+#[must_use]
+pub fn is_standard_namespace(uri: &str) -> bool {
+    uri == PDF_1_7_NAMESPACE || uri == PDF_2_0_NAMESPACE
+}
+
+/// A structure namespace (ISO 32000-2 14.7.4) a [`DocumentBuilder`]
+/// registered with [`DocumentBuilder::add_namespace`], for [`Tag::namespace`]
+/// to put an element in and [`DocumentBuilder::map_role_in`] to map between.
+///
+/// A handle rather than the URI, for the reason [`LayerId`] is one: it is
+/// written as a reference to the namespace's dictionary, which exists only
+/// once `finish` writes it. It carries which builder made it, and a handle
+/// from another builder is not written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NamespaceId {
+    /// The [`DocumentBuilder`] that registered it: see [`BuilderSerial`].
+    builder: BuilderSerial,
+    /// Its position among that builder's namespaces.
+    index: u32,
+}
+
+/// A namespace as [`DocumentBuilder::add_namespace`] registered it.
+#[derive(Clone, Debug)]
+struct StructNamespace {
+    /// `/NS` (Table 356), the namespace's name.
+    uri: String,
+    /// `/RoleMapNS`: each type of this namespace, and the type and namespace
+    /// (by index) it maps to.
+    role_map: BTreeMap<Vec<u8>, (Vec<u8>, u32)>,
+}
+
 /// A structure element to open: its type, and what it says about itself
 /// (14.7.2 Table 323, 14.9, 14.8.5).
 ///
@@ -2220,6 +2272,8 @@ struct ElementProps {
     id: Option<Vec<u8>>,
     /// The `/Table` owner's attributes (14.8.5.7).
     table: Option<TableAttributes>,
+    /// `/NS` (ISO 32000-2 Table 355): the namespace the element's type is in.
+    namespace: Option<NamespaceId>,
 }
 
 impl ElementProps {
@@ -2234,6 +2288,7 @@ impl ElementProps {
             expansion,
             id,
             table,
+            namespace,
         } = other;
         fill(&mut self.title, title);
         fill(&mut self.lang, lang);
@@ -2242,6 +2297,31 @@ impl ElementProps {
         fill(&mut self.expansion, expansion);
         fill(&mut self.id, id);
         fill(&mut self.table, table);
+        fill(&mut self.namespace, namespace);
+    }
+
+    /// Whether these say something about the element's content, which keeps
+    /// an element that drew nothing. A namespace does not: it says what the
+    /// element's *type* means, and an empty `/section` in a namespace is as
+    /// empty as an empty `/Span` in none.
+    fn says_something(&self) -> bool {
+        let ElementProps {
+            title,
+            lang,
+            alt,
+            actual_text,
+            expansion,
+            id,
+            table,
+            namespace: _,
+        } = self;
+        title.is_some()
+            || lang.is_some()
+            || alt.is_some()
+            || actual_text.is_some()
+            || expansion.is_some()
+            || id.is_some()
+            || table.is_some()
     }
 }
 
@@ -2342,12 +2422,29 @@ impl Tag {
         self
     }
 
+    /// `/NS` (ISO 32000-2 Table 355): puts the element's type in `namespace`,
+    /// so that `/S /section` means the `section` of that namespace — which
+    /// [`DocumentBuilder::map_role_in`] can then map to what it stands for.
+    ///
+    /// An element naming no namespace is in ISO 32000-2's default standard
+    /// structure namespace, after the `/RoleMap` is applied (14.8.6.1, as the
+    /// approved errata state it), which is what every element this builder
+    /// wrote before namespaces existed is.
+    ///
+    /// A handle from another builder is not written: the element is written
+    /// in no namespace, as if this had not been called.
+    #[must_use]
+    pub fn namespace(mut self, namespace: NamespaceId) -> Tag {
+        self.props.namespace = Some(namespace);
+        self
+    }
+
     /// Writes the element even if nothing is drawn inside it.
     ///
-    /// An element carrying any property is kept anyway; this is for one that
-    /// carries none and still means something by being there empty — a table
-    /// cell with nothing in it, which keeps the cells after it in their
-    /// columns.
+    /// An element carrying any property but a namespace is kept anyway; this
+    /// is for one that carries none and still means something by being there
+    /// empty — a table cell with nothing in it, which keeps the cells after
+    /// it in their columns.
     #[must_use]
     pub fn keep_empty(mut self) -> Tag {
         self.keep = true;
@@ -4001,6 +4098,10 @@ pub struct DocumentBuilder {
     /// The structure tree root's `/RoleMap` (14.7.3), custom type to the type
     /// it stands for. See [`DocumentBuilder::map_role`].
     role_map: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// Structure namespaces (ISO 32000-2 14.7.4), in the order they were
+    /// registered, which is the order `/Namespaces` lists them in. See
+    /// [`DocumentBuilder::add_namespace`].
+    namespaces: Vec<StructNamespace>,
 }
 
 impl Default for DocumentBuilder {
@@ -4042,6 +4143,7 @@ impl DocumentBuilder {
             next_carry: 0,
             language: None,
             role_map: BTreeMap::new(),
+            namespaces: Vec::new(),
         }
     }
 
@@ -4093,6 +4195,129 @@ impl DocumentBuilder {
             }
         }
         self.role_map.insert(custom.to_vec(), standard.to_vec());
+        true
+    }
+
+    /// Registers a structure namespace (ISO 32000-2 14.7.4), named by `uri`,
+    /// for [`Tag::namespace`] to put elements in.
+    ///
+    /// A namespace says which vocabulary an element's type is from, so that
+    /// a producer's `section` and another's are not the same word by
+    /// accident, and gives that vocabulary its own role map
+    /// ([`DocumentBuilder::map_role_in`]). [`PDF_1_7_NAMESPACE`],
+    /// [`PDF_2_0_NAMESPACE`] and [`MATHML_NAMESPACE`] are the namespaces ISO
+    /// 32000-2 names; any other URI is a namespace of the caller's own.
+    ///
+    /// Written as a namespace dictionary (Table 356) listed in the structure
+    /// tree root's `/Namespaces` (Table 354), whether or not an element ends
+    /// up in it — the errata make every `/NS` an entry of that array, and a
+    /// namespace registered and unused costs one small object.
+    ///
+    /// The same URI twice is one namespace, and the second call hands back
+    /// the first's handle. Returns `None`, registering nothing, when:
+    ///
+    /// - the document declares a version before 2.0 — `/NS` and
+    ///   `/Namespaces` are PDF 2.0 keys, and a 1.7 reader is owed nothing it
+    ///   can read (see [`DocumentBuilder::with_version`]);
+    /// - `uri` is empty, which Table 356's required `/NS` cannot be;
+    /// - as many namespaces are registered as [`crate::limits::MAX_ARRAY_LEN`],
+    ///   the most `/Namespaces` entries this crate's reader keeps.
+    pub fn add_namespace(&mut self, uri: &str) -> Option<NamespaceId> {
+        if self.declared_version() < (2, 0) || uri.is_empty() {
+            return None;
+        }
+        let index = match self.namespaces.iter().position(|ns| ns.uri == uri) {
+            Some(at) => at,
+            None => {
+                if self.namespaces.len() >= crate::limits::MAX_ARRAY_LEN {
+                    return None;
+                }
+                self.namespaces.push(StructNamespace {
+                    uri: uri.to_owned(),
+                    role_map: BTreeMap::new(),
+                });
+                self.namespaces.len() - 1
+            }
+        };
+        Some(NamespaceId {
+            builder: self.serial,
+            index: u32::try_from(index).ok()?,
+        })
+    }
+
+    /// The index of a namespace this builder registered.
+    fn own_namespace(&self, namespace: NamespaceId) -> Option<usize> {
+        let index = namespace.index as usize;
+        (namespace.builder == self.serial && index < self.namespaces.len()).then_some(index)
+    }
+
+    /// Maps the type `custom` of `namespace` to the type `target` of
+    /// `target_namespace`, in `namespace`'s `/RoleMapNS` (ISO 32000-2 Table
+    /// 356) — the namespaced form of [`DocumentBuilder::map_role`], written as
+    /// the `[/target ns]` pair the errata's 14.8.6.2 EXAMPLE 1 shows.
+    ///
+    /// Returns false, mapping nothing, when the mapping is one a reader
+    /// cannot use or a conforming document may not contain:
+    ///
+    /// - either handle is from another builder, or either name is empty;
+    /// - the two namespaces are one — *"Within a given explicitly provided
+    ///   namespace, structure types shall not be role mapped to other
+    ///   structure types in the same namespace"*, as veraPDF's published rule
+    ///   8.2.4-3 quotes ISO 14289-2;
+    /// - `namespace` is a standard structure namespace and `target_namespace`
+    ///   is not — veraPDF's rule 8.2.4-4 permits mapping a standard type only
+    ///   *"to another standard namespace"*;
+    /// - `target_namespace` is [`PDF_1_7_NAMESPACE`] and `target` is not one
+    ///   of the [`STANDARD_STRUCTURE_TYPES`] that namespace defines;
+    /// - `custom` is already mapped in `namespace` to something else — the
+    ///   first statement stands, and the same mapping again is accepted;
+    /// - the mapping would close a loop through any namespace's map.
+    pub fn map_role_in(
+        &mut self,
+        namespace: NamespaceId,
+        custom: &[u8],
+        target: &[u8],
+        target_namespace: NamespaceId,
+    ) -> bool {
+        let (Some(from), Some(to)) = (
+            self.own_namespace(namespace),
+            self.own_namespace(target_namespace),
+        ) else {
+            return false;
+        };
+        if custom.is_empty() || target.is_empty() || from == to {
+            return false;
+        }
+        let standard = |at: usize| is_standard_namespace(&self.namespaces[at].uri);
+        if standard(from) && !standard(to) {
+            return false;
+        }
+        if self.namespaces[to].uri == PDF_1_7_NAMESPACE && !is_standard_structure_type(target) {
+            return false;
+        }
+        let Ok(to_index) = u32::try_from(to) else {
+            return false;
+        };
+        if let Some(existing) = self.namespaces[from].role_map.get(custom) {
+            return existing.0 == target && existing.1 == to_index;
+        }
+        // Follow the target's own mappings, across namespaces: one that comes
+        // back to `custom` in `namespace` is a loop. Bounded by the number of
+        // entries in every map, since an acyclic chain visits each once.
+        let entries: usize = self.namespaces.iter().map(|ns| ns.role_map.len()).sum();
+        let mut at = (target, to);
+        for _ in 0..=entries {
+            if at.0 == custom && at.1 == from {
+                return false;
+            }
+            match self.namespaces[at.1].role_map.get(at.0) {
+                Some((next, ns)) => at = (next.as_slice(), *ns as usize),
+                None => break,
+            }
+        }
+        self.namespaces[from]
+            .role_map
+            .insert(custom.to_vec(), (target.to_vec(), to_index));
         true
     }
 
@@ -6478,7 +6703,7 @@ impl DocumentBuilder {
                 );
             }
             if let Some(props) = &node.props {
-                self.write_element_props(&mut element, props);
+                self.write_element_props(&mut element, props, &walk.namespaces);
             }
             self.objects.insert(reference.num, Object::Dict(element));
             out.push(Object::Ref(reference));
@@ -6492,7 +6717,7 @@ impl DocumentBuilder {
     /// The five 14.9 entries are text strings (7.9.2.2), encoded for the
     /// version the document declares — so UTF-8 in a 2.0 document and
     /// PDFDocEncoding or UTF-16BE below it, as `/Info` is.
-    fn write_element_props(&self, element: &mut Dict, props: &ElementProps) {
+    fn write_element_props(&self, element: &mut Dict, props: &ElementProps, namespaces: &[ObjRef]) {
         let version = self.declared_version();
         let ElementProps {
             title,
@@ -6502,7 +6727,17 @@ impl DocumentBuilder {
             expansion,
             id: _,
             table,
+            namespace,
         } = props;
+        // ISO 32000-2 Table 355: an indirect reference to the namespace's
+        // dictionary — which is why a handle this builder did not make, and so
+        // has no dictionary here, is not written.
+        if let Some(reference) = namespace
+            .and_then(|namespace| self.own_namespace(namespace))
+            .and_then(|at| namespaces.get(at))
+        {
+            element.insert(self.names.intern(b"NS"), Object::Ref(*reference));
+        }
         if let Some(table) = table.as_ref().filter(|table| !table.is_empty()) {
             element.insert(
                 self.names.intern(b"A"),
@@ -6971,6 +7206,12 @@ impl DocumentBuilder {
                     .collect(),
                 objects: BTreeMap::new(),
                 ids: BTreeMap::new(),
+                // Numbered before any element, so every `/NS` has a
+                // reference to name. None for a document with no namespace,
+                // which therefore numbers its objects as it always has.
+                namespaces: (0..self.namespaces.len())
+                    .map(|_| self.allocate())
+                    .collect(),
             };
             let struct_kids = self.write_struct_elements(&arena, &roots, document, &mut walk);
             let mut parent_tree: Vec<Object> = tagged_pages
@@ -7087,6 +7328,39 @@ impl DocumentBuilder {
                     );
                 }
                 dict.insert(self.names.intern(b"RoleMap"), Object::Dict(role_map));
+            }
+            // ISO 32000-2 Table 354: every namespace, in the order registered,
+            // each a Table 356 dictionary whose `/RoleMapNS` writes each
+            // mapping as the errata's EXAMPLE 1 does, `[/type ns]`.
+            if !self.namespaces.is_empty() {
+                let mut listed = Vec::with_capacity(self.namespaces.len());
+                for (namespace, reference) in self.namespaces.iter().zip(&walk.namespaces) {
+                    let mut entry = Dict::new();
+                    entry.insert(Name::TYPE, Object::Name(self.names.intern(b"Namespace")));
+                    entry.insert(
+                        self.names.intern(b"NS"),
+                        Object::String(encode_text_string(&namespace.uri, self.declared_version())),
+                    );
+                    if !namespace.role_map.is_empty() {
+                        let mut map = Dict::new();
+                        for (custom, (target, at)) in &namespace.role_map {
+                            let Some(target_ref) = walk.namespaces.get(*at as usize) else {
+                                continue;
+                            };
+                            map.insert(
+                                self.names.intern(custom),
+                                Object::Array(vec![
+                                    Object::Name(self.names.intern(target)),
+                                    Object::Ref(*target_ref),
+                                ]),
+                            );
+                        }
+                        entry.insert(self.names.intern(b"RoleMapNS"), Object::Dict(map));
+                    }
+                    self.objects.insert(reference.num, Object::Dict(entry));
+                    listed.push(Object::Ref(*reference));
+                }
+                dict.insert(self.names.intern(b"Namespaces"), Object::Array(listed));
             }
             self.objects.insert(root.num, Object::Dict(dict));
             catalog.insert(self.names.intern(b"StructTreeRoot"), Object::Ref(root));
@@ -7651,6 +7925,8 @@ struct StructWalk<'a> {
     /// Each identifier, and the first element in reading order to carry it —
     /// the `/IDTree` (14.7.2).
     ids: BTreeMap<Vec<u8>, ObjRef>,
+    /// Each registered namespace's dictionary, by index (ISO 32000-2 14.7.4).
+    namespaces: Vec<ObjRef>,
 }
 
 /// A merged element's kid: a sequence on a **named** page, a child, or a link

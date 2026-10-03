@@ -152,6 +152,7 @@ fn kind(warning: &StructureWarning) -> &'static str {
         StructureWarning::StreamOwnerWithoutStream { .. } => "stream-owner-without-stream",
         StructureWarning::ContentStreamAssumed { .. } => "content-stream-assumed",
         StructureWarning::AttributeIgnored { .. } => "attribute-ignored",
+        StructureWarning::NamespaceIgnored { .. } => "namespace-ignored",
     }
 }
 
