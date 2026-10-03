@@ -911,12 +911,66 @@ fn propagate_overflow(dom: &Dom, root: usize, tree: &mut BoxNode) {
 }
 
 fn build(dom: &Dom, styles: &StyleTree, pictures: &Pictures, at: usize) -> BoxNode {
-    let style = styles
-        .styles
-        .get(at)
-        .cloned()
-        .unwrap_or_else(ComputedStyle::initial);
-    let node: &Node = &dom.nodes[at];
+    let mut out = Vec::with_capacity(1);
+    build_into(&mut out, dom, styles, pictures, at);
+    out.pop()
+        .unwrap_or_else(|| BoxNode::element(ComputedStyle::initial(), Vec::new()))
+}
+
+/// One element's box, pushed onto `out`.
+///
+/// **The recursion of the box tree, and its frame is kept small on purpose.**
+/// It runs once per level of the document, and an unoptimised build gives
+/// every temporary of the function its own stack slot: a computed style is a
+/// kilobyte and a box node more, and the version of this that built its text
+/// boxes, generated boxes and its own node inline held several of each per
+/// level. `hostile_input.rs`'s two hundred nested `<em>` — Markdown's own
+/// nesting cap — then overflowed a two-megabyte thread once `border-radius`,
+/// the shadows and the transform had grown the computed style. So every box
+/// is made in a helper of its own ([`push_text`], [`push_pseudo`],
+/// [`push_element`], [`push_replaced`]), whose frame is gone before the next
+/// level begins, and this one and [`build_with`] hold references and the
+/// child list.
+fn build_into(
+    out: &mut Vec<BoxNode>,
+    dom: &Dom,
+    styles: &StyleTree,
+    pictures: &Pictures,
+    at: usize,
+) {
+    match styles.styles.get(at) {
+        Some(style) => build_with(out, dom, styles, pictures, at, style),
+        None => build_unstyled(out, dom, styles, pictures, at),
+    }
+}
+
+/// [`build_into`] for an element the cascade gave no style, which a tree the
+/// cascade built does not have: the initial style, in a frame of its own so
+/// the recursion's carries no second computed style.
+#[inline(never)]
+fn build_unstyled(
+    out: &mut Vec<BoxNode>,
+    dom: &Dom,
+    styles: &StyleTree,
+    pictures: &Pictures,
+    at: usize,
+) {
+    let initial = ComputedStyle::initial();
+    build_with(out, dom, styles, pictures, at, &initial);
+}
+
+/// [`build_into`] with the element's style in hand.
+fn build_with(
+    out: &mut Vec<BoxNode>,
+    dom: &Dom,
+    styles: &StyleTree,
+    pictures: &Pictures,
+    at: usize,
+    style: &ComputedStyle,
+) {
+    let Some(node) = dom.nodes.get(at) else {
+        return;
+    };
     let anchor = u32::try_from(at).unwrap_or(u32::MAX);
     // CSS 2.2 §3.1's replaced element, and the only one this build has. It is
     // decided here rather than by `display`, because *being replaced* is a
@@ -930,8 +984,9 @@ fn build(dom: &Dom, styles: &StyleTree, pictures: &Pictures, at: usize) -> BoxNo
     // when the image is available, so it falls through to the branch below and
     // becomes what it is — an empty inline element, generating an empty box and
     // no ink. See [`pictures`].
-    if let Some((width, height)) = pictures.intrinsic_of(at) {
-        return BoxNode::replaced(style, Intrinsic::raster(width, height)).with_anchor(anchor);
+    if let Some(size) = pictures.intrinsic_of(at) {
+        push_replaced(out, style, size, anchor);
+        return;
     }
     let mut children = Vec::with_capacity(node.children.len());
     // CSS 2.1 §12.1: `::before` is the first child of its originating element
@@ -940,18 +995,16 @@ fn build(dom: &Dom, styles: &StyleTree, pictures: &Pictures, at: usize) -> BoxNo
     // build that put the box next to the element would give it the parent's
     // width and its own line.
     if let Some(generated) = styles.pseudo(at, PseudoElement::Before) {
-        children.push(pseudo_box(generated, anchor));
+        push_pseudo(&mut children, generated, anchor);
     }
     for child in &node.children {
         match child {
-            Child::Element(index) => children.push(build(dom, styles, pictures, *index)),
-            Child::Text(text) => {
-                children.push(BoxNode::text(inline_box(&style), text.clone()).with_anchor(anchor));
-            }
+            Child::Element(index) => build_into(&mut children, dom, styles, pictures, *index),
+            Child::Text(text) => push_text(&mut children, style, text, anchor),
         }
     }
     if let Some(generated) = styles.pseudo(at, PseudoElement::After) {
-        children.push(pseudo_box(generated, anchor));
+        push_pseudo(&mut children, generated, anchor);
     }
     // `css-pseudo-4` §2.2: a block container's `::first-letter` is the first
     // typographic letter unit of its first formatted line — which, in a box
@@ -969,23 +1022,58 @@ fn build(dom: &Dom, styles: &StyleTree, pictures: &Pictures, at: usize) -> BoxNo
             let _ = first_letter(&mut children, &letter.style, 0);
         }
     }
+    push_element(out, style, children, node, anchor, styles.marker(at));
+}
+
+/// A replaced box, for [`build_into`].
+#[inline(never)]
+fn push_replaced(
+    out: &mut Vec<BoxNode>,
+    style: &ComputedStyle,
+    (width, height): (f64, f64),
+    anchor: u32,
+) {
+    out.push(
+        BoxNode::replaced(style.clone(), Intrinsic::raster(width, height)).with_anchor(anchor),
+    );
+}
+
+/// A text box in its element's inline style, for [`build_into`].
+#[inline(never)]
+fn push_text(out: &mut Vec<BoxNode>, style: &ComputedStyle, text: &str, anchor: u32) {
+    out.push(BoxNode::text(inline_box(style), text.to_owned()).with_anchor(anchor));
+}
+
+/// A generated box, for [`build_into`].
+#[inline(never)]
+fn push_pseudo(out: &mut Vec<BoxNode>, generated: &PseudoBox, anchor: u32) {
+    out.push(pseudo_box(generated, anchor));
+}
+
+/// An element's own box round its children, for [`build_into`].
+#[inline(never)]
+fn push_element(
+    out: &mut Vec<BoxNode>,
+    style: &ComputedStyle,
+    children: Vec<BoxNode>,
+    node: &Node,
+    anchor: u32,
+    marker: Option<&str>,
+) {
     // An element with no children at all still has to be a `Children(vec![])`
     // rather than a `Text("")`: an empty `<p>` generates a block box with its
     // own margins, and one carrying an empty string would be an inline box
     // with none.
-    BoxNode {
-        style,
+    out.push(BoxNode {
+        style: style.clone(),
         content: Content::Children(children),
         anchor: Some(anchor),
-        span: cell_span(
-            node,
-            &styles.styles.get(at).map_or(Display::Inline, |s| s.display),
-        ),
+        span: cell_span(node, &style.display),
         // `css-lists-3` §4's `list-item` counter, which the cascade walked over
         // the whole document: an `<ol start>`, an `<li value>` and every item
         // between are in this number, and the layout crate sees one box.
-        marker: styles.marker(at).map(str::to_owned),
-    }
+        marker: marker.map(str::to_owned),
+    });
 }
 
 /// Where the search for a `::first-letter` stands after a list of boxes.
