@@ -16,6 +16,9 @@
 
 #![warn(missing_docs)]
 
+mod read;
+pub use read::*;
+
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
@@ -125,6 +128,16 @@ pub enum TpdfStatus {
     /// and inventing seven codes for seven refusals would be this crate
     /// growing a vocabulary the facade does not have (ruling 11).
     ScriptRefused = 15,
+
+    // ---- the read surface, appended at 16 -----------------------------------
+    /// A stream the document names could not be read: an attachment whose
+    /// embedded file is not a stream, or whose filters refused it.
+    ///
+    /// Distinct from `Ok` with a null result, which is the document naming no
+    /// stream at all — "there is nothing here" and "there is something here
+    /// that could not be read" are different answers, and the engine's reason,
+    /// with the object it was reading, is in [`tpdf_last_error_message`].
+    StreamUnreadable = 16,
 }
 
 /// A document's bytes, as ranges the host answers (7.5.6, Annex F).
@@ -4902,6 +4915,9 @@ endobj
         // Streaming's one, and the script policy's one, appended in turn.
         assert_eq!(TpdfStatus::SourceMiss as i32, 14);
         assert_eq!(TpdfStatus::ScriptRefused as i32, 15);
+
+        // The read surface's one.
+        assert_eq!(TpdfStatus::StreamUnreadable as i32, 16);
     }
 
     /// A `TpdfStatus` crosses as an `int`, and the three hand-written bindings
@@ -4912,7 +4928,7 @@ endobj
     #[test]
     fn every_status_the_abi_carries_is_pinned_by_number() {
         // Nothing in Rust enumerates a `#[repr(C)]` enum's variants, so this
-        // is the list, written out. It is exactly the sixteen pinned above.
+        // is the list, written out. It is exactly the seventeen pinned above.
         const EVERY: &[(TpdfStatus, i32)] = &[
             (TpdfStatus::Ok, 0),
             (TpdfStatus::BadArgument, 1),
@@ -4930,11 +4946,12 @@ endobj
             (TpdfStatus::EditRefused, 13),
             (TpdfStatus::SourceMiss, 14),
             (TpdfStatus::ScriptRefused, 15),
+            (TpdfStatus::StreamUnreadable, 16),
         ];
         for (status, number) in EVERY {
             assert_eq!(*status as i32, *number, "{status:?}");
         }
-        assert_eq!(EVERY.len(), 16, "append only, and say how many there are");
+        assert_eq!(EVERY.len(), 17, "append only, and say how many there are");
     }
 
     /// The write surface's other two enums, pinned for the reason

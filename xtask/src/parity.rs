@@ -1,20 +1,25 @@
-//! `cargo xtask bindings-parity` — the four write surfaces, compared to one
+//! `cargo xtask bindings-parity` — every binding surface, compared to one
 //! recorded answer (gap 32 milestone 6).
 //!
 //! Ruling 11 says a binding projects the facade 1:1 and adds no logic of its
-//! own. That is a claim, and this is the check: two scripts with every input
-//! pinned, run through the facade, the wheel, the npm package and the NuGet
-//! package, must produce **byte-identical** output. Four surfaces disagreeing
-//! means one of them added something.
+//! own. That is a claim, and this is the check: scripts with every input
+//! pinned, run through the facade, the wheel, the npm package, the NuGet
+//! package and the bindings over the C ABI, must produce **byte-identical**
+//! output. Two of them write a document and print `WROTE sha256=` of its
+//! bytes; the third, `read-surface`, writes down everything the read surface
+//! says about two documents in a text whose every byte is specified
+//! (`crates/tinker-pdf/examples/write_parity.rs`) and prints `READ sha256=` of
+//! that. Surfaces disagreeing means one of them added something — or, on the
+//! read side, dropped or reordered something.
 //!
 //! **Two failures this is built to catch, and they are different.**
 //!
 //! - A *mismatch*: a surface printed a hash and it is not the recorded one.
 //!   That is the one everybody thinks of.
 //! - An *absent line*: a surface ran, exited zero, and printed no
-//!   `WROTE sha256=` at all. That is the one that gets shipped, because a
-//!   script that silently does nothing looks exactly like a passing one from
-//!   the outside. Both exit non-zero here.
+//!   `WROTE sha256=` or `READ sha256=` for a script at all. That is the one
+//!   that gets shipped, because a script that silently does nothing looks
+//!   exactly like a passing one from the outside. Both exit non-zero here.
 //!
 //! And a third thing, which is not a failure and must not be silence: a
 //! surface whose artefact is not installed on this machine is **SKIPPED**, and
@@ -24,13 +29,13 @@
 //! what CI passes.
 //!
 //! **Agreement is not enough, and the surfaces know it.** Four byte-identical
-//! outputs tell you nothing if all four are wrong, so every surface re-opens
+//! outputs tell you nothing if all of them are wrong, so every surface re-opens
 //! its own artefact through this engine's strict structural validator before
 //! it prints a hash, and refuses to print one if the artefact is not clean.
 //! Under ruling 13 that validator is first-party, which is exactly why it can
 //! be relied on here instead of being an external step somebody might not have
 //! installed. A `WROTE` line is therefore already a statement that the bytes
-//! are a valid document; this program's job is that the four agree about
+//! are a valid document; this program's job is that the surfaces agree about
 //! *which* one.
 
 use std::collections::BTreeMap;
@@ -46,15 +51,18 @@ use std::process::Command;
 /// writer change look like a determinism regression to whoever reads that file
 /// next.
 ///
-/// One place, and four surfaces compared to *it* rather than to each other:
-/// a legitimate writer change is then one recorded update here, not four
-/// flaky suites. If these move, the reason belongs in the commit message —
-/// a hash that moves without one is indistinguishable from a hash that broke.
+/// One place, and every surface compared to *it* rather than to each other:
+/// a legitimate writer change is then one recorded update here, not a flaky
+/// suite per language. If these move, the reason belongs in the commit
+/// message — a hash that moves without one is indistinguishable from a hash
+/// that broke.
 ///
-/// Recorded August 2026 on windows/x86_64, and target-independent by ruling 4:
-/// the writer's output is fixed-point and integer throughout, and the one
-/// input that would otherwise vary — encryption entropy — is not used by
-/// either script.
+/// The two write hashes were recorded August 2026 on windows/x86_64, and are
+/// target-independent by ruling 4: the writer's output is fixed-point and
+/// integer throughout, and the one input that would otherwise vary —
+/// encryption entropy — is not used by either script. The read hash was
+/// recorded October 2026 on linux/x86_64; its text spells every number by its
+/// IEEE bits, so it is as target-independent as the reads under it.
 const EXPECTED: &[(&str, &str)] = &[
     (
         "fill-and-save",
@@ -64,7 +72,15 @@ const EXPECTED: &[(&str, &str)] = &[
         "build-a-document",
         "1dbb7ace2a5787016efa257ab8c3efdb6ceae1b339f8597266ad47c5828dac62",
     ),
+    (
+        "read-surface",
+        "be7deb042f7d68d6695e54988cdbfabf3d7240c03281b29534b4b108068bef9f",
+    ),
 ];
+
+/// The two prefixes a surface's evidence line starts with: a written
+/// document's hash, and the read-surface text's.
+const EVIDENCE: [&str; 2] = ["WROTE sha256=", "READ sha256="];
 
 /// What one surface's run came to.
 enum Outcome {
@@ -135,7 +151,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     for surface in surfaces {
         match evaluate(surface) {
             (name, Outcome::Ran) => {
-                println!("bindings-parity: {name} RAN, both hashes agree");
+                println!("bindings-parity: {name} RAN, every hash agrees");
                 ran.push(name);
             }
             (name, Outcome::Skipped(why)) => {
@@ -204,7 +220,11 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     }
 
     if skipped.is_empty() {
-        println!("bindings-parity: all four surfaces wrote the same bytes");
+        println!(
+            "bindings-parity: every surface agrees ({} of {})",
+            ran.len(),
+            ran.len()
+        );
     } else {
         println!(
             "bindings-parity: the surfaces that ran agree; {} did not run and \
@@ -249,12 +269,13 @@ fn evaluate(surface: Surface) -> (&'static str, Outcome) {
             // The failure that gets shipped: a script that ran, exited zero
             // and produced no evidence looks exactly like a passing one.
             None => problems.push(format!(
-                "printed no `WROTE sha256=` line for {script}, which is not the \
-                 same as printing a wrong one — a surface that silently writes \
-                 nothing passes every check that only compares what it printed"
+                "printed no `WROTE sha256=` or `READ sha256=` line for {script}, \
+                 which is not the same as printing a wrong one — a surface that \
+                 silently writes nothing passes every check that only compares \
+                 what it printed"
             )),
             Some(actual) if actual != expected => problems.push(format!(
-                "{script}: wrote {actual}, and the recorded answer is {expected}"
+                "{script}: printed {actual}, and the recorded answer is {expected}"
             )),
             Some(_) => {}
         }
@@ -277,7 +298,8 @@ fn evaluate(surface: Surface) -> (&'static str, Outcome) {
     }
 }
 
-/// Every `WROTE sha256=<hex> ... script=<name>` line, as script to hash.
+/// Every `WROTE sha256=<hex> ... script=<name>` and `READ sha256=<hex> ...
+/// script=<name>` line, as script to hash.
 ///
 /// Parsed by key rather than by position so a surface may print whatever else
 /// it likes around them — the .NET smoke prefixes its own name, the JavaScript
@@ -285,7 +307,7 @@ fn evaluate(surface: Surface) -> (&'static str, Outcome) {
 fn harvest(stdout: &str) -> BTreeMap<String, String> {
     let mut found = BTreeMap::new();
     for line in stdout.lines() {
-        let Some(start) = line.find("WROTE sha256=") else {
+        let Some(start) = EVIDENCE.iter().filter_map(|prefix| line.find(prefix)).min() else {
             continue;
         };
         let rest = &line[start..];
@@ -483,6 +505,21 @@ DOTNET-PARITY: RAN
         assert_eq!(found.len(), 2);
     }
 
+    /// The read script's line is evidence on the same terms as a write's: it
+    /// is keyed by its script, and a surface that printed the text's hash
+    /// under the other prefix would still be counted for the right script.
+    #[test]
+    fn a_read_line_is_harvested_beside_the_written_ones() {
+        let stdout = "\
+WROTE sha256=aaaa surface=go script=fill-and-save bytes=10
+GO-PARITY: READ sha256=cccc surface=go script=read-surface bytes=30
+";
+        let found = harvest(stdout);
+        assert_eq!(found.get("read-surface").map(String::as_str), Some("cccc"));
+        assert_eq!(found.len(), 2);
+        assert!(harvest("READ sha256=cccc surface=go\n").is_empty());
+    }
+
     /// A line without a `script=` is not a hash about anything, so it is not
     /// counted — otherwise a malformed line would satisfy the presence check
     /// for whichever script happened to be missing.
@@ -497,9 +534,9 @@ DOTNET-PARITY: RAN
     /// than a silent pass.
     #[test]
     fn the_recorded_answer_names_both_scripts_once() {
-        assert_eq!(EXPECTED.len(), 2);
+        assert_eq!(EXPECTED.len(), 3);
         let names: Vec<&str> = EXPECTED.iter().map(|(name, _)| *name).collect();
-        assert_eq!(names, ["fill-and-save", "build-a-document"]);
+        assert_eq!(names, ["fill-and-save", "build-a-document", "read-surface"]);
         for (name, hash) in EXPECTED {
             assert_eq!(hash.len(), 64, "{name}: a SHA-256 is 64 hex characters");
             assert!(

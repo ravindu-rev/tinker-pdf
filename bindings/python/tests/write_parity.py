@@ -6,11 +6,14 @@ Run against a wheel that has been `pip install`ed, never against the source
 tree -- the same rule `wheel_smoke.py` follows, and for the same reason: a
 managed module that imports is not evidence that the engine came with it.
 
-The two scripts here are the *same two* that
+The scripts here are the *same* ones that
 `crates/tinker-pdf/examples/write_parity.rs` runs against the facade,
 `bindings/js/tests/write_parity.mjs` runs through wasm and
-`bindings/dotnet/tests/Smoke` runs through the C ABI. `cargo xtask
-bindings-parity` requires all four to print the same SHA-256s. Ruling 11 is
+`bindings/dotnet/tests/Smoke` and the Go, Java and Ruby parity programs run
+through the C ABI. `cargo xtask bindings-parity` requires every surface to
+print the same SHA-256s. The third, read-surface, writes down everything the
+read surface says about two documents in the text the facade example's module
+documentation specifies byte for byte, and prints the hash of that. Ruling 11 is
 what makes that the right test: a binding projects the facade 1:1 and adds no
 logic of its own, so four surfaces disagreeing means one of them added
 something.
@@ -23,7 +26,9 @@ step somebody might skip.
 """
 
 import hashlib
+import os
 import pathlib
+import struct
 import sys
 
 import tinker_pdf
@@ -123,6 +128,151 @@ def transaction_rolls_back_on_an_exception(fixture: bytes) -> None:
     print("PYTHON-PARITY: transaction rolls back on an exception and commits without one")
 
 
+def linked_document() -> bytes:
+    """Read-surface's second document: links, an outline and /Info, built."""
+    builder = tinker_pdf.DocumentBuilder()
+    builder.add_base_font(b"F1", b"Helvetica")
+    one = builder.begin_page(200.0, 200.0)
+    one.text(b"F1", 12.0, 20.0, 170.0, "Links")
+    one.link(10.0, 10.0, 60.0, 30.0, uri="https://example.org/parity")
+    one.link(70.0, 10.0, 120.5, 30.25, page=1, view="xyz", left=10.0, zoom=1.5)
+    builder.push_page(one)
+    builder.push_page(builder.begin_page(200.0, 200.0))
+    builder.set_info(b"Title", "Read surface \u2014 parity")
+    builder.set_info(b"Author", "")
+    chapter = tinker_pdf.OutlineEntry("Chapter one", page=1, view="fith", top=150.0)
+    heading = tinker_pdf.OutlineEntry("Part one", open=True, children=[chapter])
+    builder.set_outline([heading, tinker_pdf.OutlineEntry("Elsewhere", uri="https://example.org/")])
+    return builder.finish()
+
+
+def _text(value):
+    return "-" if value is None else "s:" + value.encode("utf-8").hex()
+
+
+def _bytes(value):
+    return "-" if value is None else "b:" + bytes(value).hex()
+
+
+def _number(value):
+    return "-" if value is None else "f:" + struct.pack(">d", value).hex()
+
+
+def _reference(value):
+    return "-" if value is None else f"{value[0]}.{value[1]}"
+
+
+def _digest(value):
+    return "-" if value is None else hashlib.sha256(value).hexdigest()
+
+
+def _view(view):
+    kind = view.kind
+    if kind == "xyz":
+        return f"xyz {_number(view.left)} {_number(view.top)} {_number(view.zoom)}"
+    if kind in ("fith", "fitbh"):
+        return f"{kind} {_number(view.top)}"
+    if kind in ("fitv", "fitbv"):
+        return f"{kind} {_number(view.left)}"
+    if kind == "fitr":
+        return (
+            f"fitr {_number(view.left)} {_number(view.bottom)} "
+            f"{_number(view.right)} {_number(view.top)}"
+        )
+    return kind
+
+
+def _destination(dest):
+    if dest is None:
+        return "-"
+    if dest.kind == "explicit":
+        page = "-" if dest.page_index is None else str(dest.page_index)
+        return f"explicit {page} {_reference(dest.page_ref)} {_view(dest.view)}"
+    if dest.kind == "named":
+        return f"named {_bytes(dest.name)}"
+    return f"uri {_bytes(dest.uri)}"
+
+
+def _action(action):
+    if action is None:
+        return "-"
+    kind = action.kind
+    if kind == "goto":
+        return f"goto {_destination(action.destination)}"
+    if kind == "gotor":
+        return f"gotor {_bytes(action.file)} {_destination(action.destination)}"
+    if kind == "uri":
+        return f"uri {_bytes(action.uri)}"
+    if kind == "named":
+        return f"named {_bytes(action.name)}"
+    if kind == "launch":
+        return f"launch {_bytes(action.file)}"
+    return f"other {_bytes(action.subtype)}"
+
+
+def _flatten(items, depth=0):
+    for item in items:
+        yield depth, item
+        yield from _flatten(item.children, depth + 1)
+
+
+def read_dump(name: str, document, out: list) -> None:
+    """Everything the read surface says about one document, in the contract's order."""
+    out.append(f"document {name}")
+    out.append(f"version {_text(document.pdf_version)}")
+    out.append(f"pages {document.page_count}")
+    metadata = document.metadata
+    for key, value in [
+        ("title", metadata.title),
+        ("author", metadata.author),
+        ("subject", metadata.subject),
+        ("keywords", metadata.keywords),
+        ("creator", metadata.creator),
+        ("producer", metadata.producer),
+        ("creation-date", metadata.creation_date),
+        ("modification-date", metadata.modification_date),
+    ]:
+        out.append(f"info {key} {_text(value)}")
+    out.append(f"trapped {metadata.trapped or 'absent'}")
+    for index, label in enumerate(document.page_labels()):
+        out.append(f"label {index} {_text(label)}")
+    for depth, item in _flatten(document.outline()):
+        out.append(
+            f"outline {depth} {int(item.open)} {_text(item.title)} {_destination(item.destination)}"
+        )
+    for index in range(document.page_count):
+        for link in document.links(index):
+            x0, y0, x1, y1 = link.rect
+            out.append(
+                f"link {index} {_number(x0)} {_number(y0)} {_number(x1)} {_number(y1)} "
+                f"{_reference(link.reference)} {_action(link.action)}"
+            )
+    for attachment in document.attachments():
+        try:
+            data = attachment.data()
+        except ValueError:
+            data = None
+        size = "-" if attachment.size is None else str(attachment.size)
+        out.append(
+            f"attachment {_text(attachment.name)} {_text(attachment.filename)} "
+            f"{_text(attachment.description)} {size} {_digest(data)}"
+        )
+    out.append(f"xmp {_digest(document.xmp_metadata())}")
+    for warning in document.warnings():
+        out.append(
+            f"warning {warning.offset} {_reference(warning.object)} {warning.kind} "
+            f"{_text(warning.message)}"
+        )
+
+
+def read_surface(outline_fixture: bytes) -> str:
+    """Script three: everything the read surface says about two documents."""
+    lines = []
+    read_dump("shifted", tinker_pdf.Document(b"JUNK\n" + outline_fixture), lines)
+    read_dump("linked", tinker_pdf.Document(linked_document()), lines)
+    return "".join(line + "\n" for line in lines)
+
+
 def report(script: str, data: bytes) -> None:
     """Validate, then print the line `cargo xtask bindings-parity` reads."""
     defects = tinker_pdf.Document(data).validate()
@@ -135,8 +285,17 @@ def report(script: str, data: bytes) -> None:
 
 def main(fixture_path: str) -> None:
     fixture = pathlib.Path(fixture_path).read_bytes()
+    outline = pathlib.Path(fixture_path).with_name("outline-3level.pdf").read_bytes()
     report("fill-and-save", fill_and_save(fixture))
     report("build-a-document", build_a_document())
+
+    dumped = read_surface(outline).encode("utf-8")
+    if os.environ.get("TINKER_PARITY_DUMP"):
+        sys.stdout.write(dumped.decode("utf-8"))
+    print(
+        f"READ sha256={hashlib.sha256(dumped).hexdigest()} "
+        f"surface=python script=read-surface bytes={len(dumped)}"
+    )
     transaction_rolls_back_on_an_exception(fixture)
 
     # A consumed handle refuses rather than producing a second document, which

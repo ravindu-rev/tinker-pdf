@@ -50,10 +50,11 @@ release options:
                                  bindings/dotnet/runtimes/<rid>/native/
 
   cargo xtask bindings-parity [options]
-                  run both write-parity scripts on all four surfaces and
-                  require byte-identical output. Non-zero on a mismatch OR on
-                  a surface that ran and printed no `WROTE sha256=` line at
-                  all, which is the failure that gets shipped. A surface whose
+                  run the two write-parity scripts and the read-surface
+                  script on every binding surface and require byte-identical
+                  output. Non-zero on a mismatch OR on a surface that ran and
+                  printed no `WROTE sha256=` / `READ sha256=` line for a
+                  script, which is the failure that gets shipped. A surface whose
                   artefact is not installed here is SKIPPED, by name and with
                   the reason -- never silently
 

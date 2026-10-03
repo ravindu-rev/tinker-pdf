@@ -3,14 +3,17 @@
 //   cd <a directory where `npm install <tarball>` has run>
 //   node <this file> <path to testdata/form-fields.pdf>
 //
-// The two scripts here are the same two that
+// The scripts here are the same ones that
 // `crates/tinker-pdf/examples/write_parity.rs` runs against the facade,
 // `bindings/python/tests/write_parity.py` runs through the wheel and
-// `bindings/dotnet/tests/Smoke` runs through the C ABI. `cargo xtask
-// bindings-parity` requires all four to print the same SHA-256s. Ruling 11 is
-// what makes that the right test: a binding projects the facade 1:1 and adds
-// no logic of its own, so four surfaces disagreeing means one of them added
-// something.
+// `bindings/dotnet/tests/Smoke` and the Go, Java and Ruby parity programs run
+// through the C ABI. `cargo xtask bindings-parity` requires every surface to
+// print the same SHA-256s. Ruling 11 is what makes that the right test: a
+// binding projects the facade 1:1 and adds no logic of its own, so surfaces
+// disagreeing means one of them added something. The third script,
+// read-surface, writes down everything the read surface says about two
+// documents in the text the facade example's module documentation specifies
+// byte for byte, and prints the hash of that.
 //
 // **There is no `editor.transaction(callback)` in this binding**, and the
 // reason is mechanical rather than a matter of taste: an exported wasm-bindgen
@@ -46,7 +49,7 @@ const require = createRequire(pathToFileURL(path.join(process.cwd(), 'package.js
 const entry = pathToFileURL(require.resolve('tinker-pdf-js')).href;
 const module_ = await import(entry);
 const init = module_.default;
-const { PdfDocument, PdfBuilder, PdfWriteOptions, PdfOutlineEntry } = module_;
+const { PdfDocument, PdfBuilder, PdfWriteOptions, PdfOutlineEntry, PdfView } = module_;
 
 const wasmUrl = new URL('tinker_pdf_js_bg.wasm', entry);
 await init({ module_or_path: readFileSync(fileURLToPath(wasmUrl)) });
@@ -177,6 +180,169 @@ function transactionRollsBackOnAThrow(fixture) {
   console.log('JS-PARITY: transaction rolls back on a throw and commits without one');
 }
 
+// Read-surface's second document: links, an outline and /Info, built.
+function linkedDocument() {
+  const builder = new PdfBuilder();
+  builder.addBaseFont(name('F1'), name('Helvetica'));
+  const one = builder.beginPage(200.0, 200.0);
+  one.text(name('F1'), 12.0, 20.0, 170.0, 'Links');
+  one.linkToUri(10.0, 10.0, 60.0, 30.0, 'https://example.org/parity');
+  const xyz = PdfView.xyz(10.0, undefined, 1.5);
+  one.linkToPageView(70.0, 10.0, 120.5, 30.25, 1, xyz);
+  xyz.free();
+  builder.pushPage(one);
+  one.free();
+  const two = builder.beginPage(200.0, 200.0);
+  builder.pushPage(two);
+  two.free();
+  builder.setInfo(name('Title'), 'Read surface \u2014 parity');
+  builder.setInfo(name('Author'), '');
+  const heading = new PdfOutlineEntry('Part one');
+  heading.setOpen(true);
+  const chapter = new PdfOutlineEntry('Chapter one');
+  const fitH = PdfView.fitH(150.0);
+  chapter.setPageTargetView(1, fitH);
+  fitH.free();
+  heading.addChild(chapter);
+  chapter.free();
+  const elsewhere = new PdfOutlineEntry('Elsewhere');
+  elsewhere.setUriTarget('https://example.org/');
+  builder.setOutline([heading, elsewhere]);
+  const bytes = builder.finish();
+  builder.free();
+  return bytes;
+}
+
+const hex = (bytes) => Buffer.from(bytes).toString('hex');
+const text = (value) => (value === undefined ? '-' : `s:${hex(encoder.encode(value))}`);
+const byteString = (value) => (value === undefined ? '-' : `b:${hex(value)}`);
+const number = (value) => {
+  if (value === undefined) return '-';
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, value);
+  return `f:${hex(new Uint8Array(view.buffer))}`;
+};
+const reference = (value) => (value === undefined ? '-' : `${value[0]}.${value[1]}`);
+const digest = (value) => (value === undefined ? '-' : sha256(value));
+
+function viewText(view) {
+  switch (view.kind) {
+    case 'xyz':
+      return `xyz ${number(view.left)} ${number(view.top)} ${number(view.zoom)}`;
+    case 'fith':
+    case 'fitbh':
+      return `${view.kind} ${number(view.top)}`;
+    case 'fitv':
+    case 'fitbv':
+      return `${view.kind} ${number(view.left)}`;
+    case 'fitr':
+      return `fitr ${number(view.left)} ${number(view.bottom)} ${number(view.right)} ${number(view.top)}`;
+    default:
+      return view.kind;
+  }
+}
+
+function destinationText(dest) {
+  if (dest === undefined) return '-';
+  if (dest.kind === 'explicit') {
+    const page = dest.pageIndex === undefined ? '-' : String(dest.pageIndex);
+    return `explicit ${page} ${reference(dest.pageRef)} ${viewText(dest.view)}`;
+  }
+  if (dest.kind === 'named') return `named ${byteString(dest.name)}`;
+  return `uri ${byteString(dest.uri)}`;
+}
+
+function actionText(action) {
+  if (action === undefined) return '-';
+  switch (action.kind) {
+    case 'goto':
+      return `goto ${destinationText(action.destination)}`;
+    case 'gotor':
+      return `gotor ${byteString(action.file)} ${destinationText(action.destination)}`;
+    case 'uri':
+      return `uri ${byteString(action.uri)}`;
+    case 'named':
+      return `named ${byteString(action.name)}`;
+    case 'launch':
+      return `launch ${byteString(action.file)}`;
+    default:
+      return `other ${byteString(action.subtype)}`;
+  }
+}
+
+function* flatten(items, depth = 0) {
+  for (const item of items) {
+    yield [depth, item];
+    yield* flatten(item.children, depth + 1);
+  }
+}
+
+// Everything the read surface says about one document, in the contract's order.
+function readDump(label, document_, out) {
+  out.push(`document ${label}`);
+  out.push(`version ${text(document_.pdfVersion)}`);
+  out.push(`pages ${document_.pageCount}`);
+  const metadata = document_.metadata;
+  for (const [key, value] of [
+    ['title', metadata.title],
+    ['author', metadata.author],
+    ['subject', metadata.subject],
+    ['keywords', metadata.keywords],
+    ['creator', metadata.creator],
+    ['producer', metadata.producer],
+    ['creation-date', metadata.creationDate],
+    ['modification-date', metadata.modificationDate],
+  ]) {
+    out.push(`info ${key} ${text(value)}`);
+  }
+  out.push(`trapped ${metadata.trapped ?? 'absent'}`);
+  document_.pageLabels().forEach((label_, index) => out.push(`label ${index} ${text(label_)}`));
+  for (const [depth, item] of flatten(document_.outline())) {
+    out.push(`outline ${depth} ${item.open ? 1 : 0} ${text(item.title)} ${destinationText(item.destination)}`);
+  }
+  for (let index = 0; index < document_.pageCount; index += 1) {
+    for (const link of document_.links(index)) {
+      const [x0, y0, x1, y1] = link.rect;
+      out.push(
+        `link ${index} ${number(x0)} ${number(y0)} ${number(x1)} ${number(y1)} ` +
+          `${reference(link.reference)} ${actionText(link.action)}`,
+      );
+    }
+  }
+  for (const attachment of document_.attachments()) {
+    let data;
+    try {
+      data = attachment.data();
+    } catch {
+      data = undefined;
+    }
+    const size = attachment.size === undefined ? '-' : String(attachment.size);
+    out.push(
+      `attachment ${text(attachment.name)} ${text(attachment.filename)} ` +
+        `${text(attachment.description)} ${size} ${digest(data)}`,
+    );
+  }
+  out.push(`xmp ${digest(document_.xmpMetadata())}`);
+  for (const warning of document_.warnings()) {
+    out.push(`warning ${warning.offset} ${reference(warning.object)} ${warning.kind} ${text(warning.message)}`);
+  }
+}
+
+// Script three: everything the read surface says about two documents.
+function readSurface(outlineFixture) {
+  const lines = [];
+  const shifted = new Uint8Array(outlineFixture.length + 5);
+  shifted.set(encoder.encode('JUNK\n'), 0);
+  shifted.set(outlineFixture, 5);
+  const first = new PdfDocument(shifted);
+  readDump('shifted', first, lines);
+  first.free();
+  const second = new PdfDocument(linkedDocument());
+  readDump('linked', second, lines);
+  second.free();
+  return lines.map((line) => `${line}\n`).join('');
+}
+
 function report(script, bytes) {
   const document_ = new PdfDocument(bytes);
   const defects = document_.validate();
@@ -192,6 +358,11 @@ function report(script, bytes) {
 const fixture = readFileSync(fixturePath);
 report('fill-and-save', fillAndSave(fixture));
 report('build-a-document', buildADocument());
+
+const outlineFixture = readFileSync(path.join(path.dirname(fixturePath), 'outline-3level.pdf'));
+const dumped = encoder.encode(readSurface(outlineFixture));
+if (process.env.TINKER_PARITY_DUMP) process.stdout.write(Buffer.from(dumped));
+console.log(`READ sha256=${sha256(dumped)} surface=js script=read-surface bytes=${dumped.length}`);
 transactionRollsBackOnAThrow(fixture);
 
 // A consumed handle refuses rather than producing a second document, which is

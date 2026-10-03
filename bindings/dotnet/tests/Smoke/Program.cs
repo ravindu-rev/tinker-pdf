@@ -17,6 +17,7 @@
 // renderer does nothing at all.
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using TinkerPdf;
 
@@ -90,12 +91,14 @@ Console.WriteLine("DOTNET-SMOKE: RAN, rendered and inked");
 
 // ---- the write leg (gap 32 milestone 5) ------------------------------------
 //
-// The same two scripts `crates/tinker-pdf/examples/write_parity.rs`,
-// `bindings/python/tests/write_parity.py` and
-// `bindings/js/tests/write_parity.mjs` run. `cargo xtask bindings-parity`
-// requires all four to print the same SHA-256s: ruling 11 says a binding
-// projects the facade 1:1 and adds no logic of its own, so four surfaces
-// disagreeing means one of them added something.
+// The same scripts `crates/tinker-pdf/examples/write_parity.rs`,
+// `bindings/python/tests/write_parity.py`, `bindings/js/tests/write_parity.mjs`
+// and the Go, Java and Ruby parity programs run. `cargo xtask bindings-parity`
+// requires every surface to print the same SHA-256s: ruling 11 says a binding
+// projects the facade 1:1 and adds no logic of its own, so surfaces
+// disagreeing means one of them added something. The third, read-surface,
+// writes down everything the read surface says about two documents in the
+// text the facade example's module documentation specifies byte for byte.
 //
 // Every artefact goes through the engine's own strict structural validator
 // before its hash is printed, because four byte-identical outputs agreeing
@@ -208,6 +211,236 @@ using (var builder = new DocumentBuilder())
     built = builder.Finish();
 }
 Report("build-a-document", built);
+
+// Script three: read-surface. The tokens are the contract's: hex for strings
+// and bytes, IEEE bits for numbers, `-` for absent.
+static string Hex(byte[] bytes) => Convert.ToHexString(bytes).ToLowerInvariant();
+
+static string TextToken(string? value) =>
+    value is null ? "-" : "s:" + Hex(System.Text.Encoding.UTF8.GetBytes(value));
+
+static string BytesToken(byte[]? value) => value is null ? "-" : "b:" + Hex(value);
+
+static string Number(double? value) =>
+    value is null ? "-" : "f:" + BitConverter.DoubleToInt64Bits(value.Value).ToString("x16");
+
+static string Reference((uint Object, ushort Generation)? value) =>
+    value is null ? "-" : value.Value.Object + "." + value.Value.Generation;
+
+static string Digest(byte[]? value) => value is null ? "-" : Sha256(value);
+
+static string ViewToken(View view)
+{
+    switch (view.Kind)
+    {
+        case DestKind.Xyz:
+            return "xyz " + Number(view.Left) + " " + Number(view.Top) + " " + Number(view.Zoom);
+        case DestKind.FitH:
+            return "fith " + Number(view.Top);
+        case DestKind.FitV:
+            return "fitv " + Number(view.Left);
+        case DestKind.FitR:
+            return "fitr " + Number(view.Left) + " " + Number(view.Bottom) + " "
+                + Number(view.Right) + " " + Number(view.Top);
+        case DestKind.FitB:
+            return "fitb";
+        case DestKind.FitBH:
+            return "fitbh " + Number(view.Top);
+        case DestKind.FitBV:
+            return "fitbv " + Number(view.Left);
+        default:
+            return "fit";
+    }
+}
+
+static string DestinationToken(Destination? destination)
+{
+    if (destination is null)
+    {
+        return "-";
+    }
+    switch (destination.Kind)
+    {
+        case DestinationKind.Explicit:
+            var page = destination.PageIndex is null ? "-" : destination.PageIndex.Value.ToString();
+            var view = destination.View ?? new View(DestKind.Fit);
+            return "explicit " + page + " " + Reference(destination.PageRef) + " " + ViewToken(view);
+        case DestinationKind.Named:
+            return "named " + BytesToken(destination.Bytes);
+        default:
+            return "uri " + BytesToken(destination.Bytes);
+    }
+}
+
+static string ActionToken(ActionKind kind, Destination? destination, byte[]? bytes)
+{
+    switch (kind)
+    {
+        case ActionKind.Absent:
+            return "-";
+        case ActionKind.GoTo:
+            return "goto " + DestinationToken(destination);
+        case ActionKind.GoToR:
+            return "gotor " + BytesToken(bytes) + " " + DestinationToken(destination);
+        case ActionKind.Uri:
+            return "uri " + BytesToken(bytes);
+        case ActionKind.Named:
+            return "named " + BytesToken(bytes);
+        case ActionKind.Launch:
+            return "launch " + BytesToken(bytes);
+        default:
+            return "other " + BytesToken(bytes);
+    }
+}
+
+static void ReadDump(string name, Document document, List<string> lines)
+{
+    lines.Add("document " + name);
+    lines.Add("version " + TextToken(document.PdfVersion));
+    lines.Add("pages " + document.PageCount);
+    var keys = new (InfoKey Key, string Label)[]
+    {
+        (InfoKey.Title, "title"),
+        (InfoKey.Author, "author"),
+        (InfoKey.Subject, "subject"),
+        (InfoKey.Keywords, "keywords"),
+        (InfoKey.Creator, "creator"),
+        (InfoKey.Producer, "producer"),
+        (InfoKey.CreationDate, "creation-date"),
+        (InfoKey.ModificationDate, "modification-date"),
+    };
+    foreach (var (key, label) in keys)
+    {
+        lines.Add("info " + label + " " + TextToken(document.Info(key)));
+    }
+    var trapped = document.Trapped switch
+    {
+        Trapped.True => "true",
+        Trapped.False => "false",
+        Trapped.Unknown => "unknown",
+        _ => "absent",
+    };
+    lines.Add("trapped " + trapped);
+    for (uint index = 0; index < document.PageCount; index++)
+    {
+        var label = document.PageLabel(index);
+        if (label is null)
+        {
+            break;
+        }
+        lines.Add("label " + index + " " + TextToken(label));
+    }
+    using (var outline = document.ReadOutline())
+    {
+        for (uint index = 0; index < outline.Count; index++)
+        {
+            var (depth, open) = outline.Item(index);
+            lines.Add("outline " + depth + " " + (open ? "1" : "0") + " "
+                + TextToken(outline.Title(index)) + " "
+                + DestinationToken(outline.DestinationOf(index)));
+        }
+    }
+    for (uint page = 0; page < document.PageCount; page++)
+    {
+        using var links = document.ReadLinks(page);
+        for (uint index = 0; index < links.Count; index++)
+        {
+            var (x0, y0, x1, y1) = links.Rect(index);
+            var (kind, destination) = links.Action(index);
+            lines.Add("link " + page + " " + Number(x0) + " " + Number(y0) + " " + Number(x1)
+                + " " + Number(y1) + " " + Reference(links.Reference(index)) + " "
+                + ActionToken(kind, destination, links.ActionBytes(index)));
+        }
+    }
+    using (var attachments = document.ReadAttachments())
+    {
+        for (uint index = 0; index < attachments.Count; index++)
+        {
+            byte[]? data;
+            try
+            {
+                data = attachments.Data(index);
+            }
+            catch (PdfException e) when (e.Status == Status.StreamUnreadable)
+            {
+                data = null;
+            }
+            var size = attachments.Size(index);
+            lines.Add("attachment " + TextToken(attachments.Name(index)) + " "
+                + TextToken(attachments.Filename(index)) + " "
+                + TextToken(attachments.Description(index)) + " "
+                + (size is null ? "-" : size.Value.ToString()) + " " + Digest(data));
+        }
+    }
+    lines.Add("xmp " + Digest(document.XmpMetadata()));
+    using (var warnings = document.ReadWarnings())
+    {
+        for (uint index = 0; index < warnings.Count; index++)
+        {
+            var (offset, objectRef) = warnings.Location(index);
+            lines.Add("warning " + offset + " " + Reference(objectRef) + " "
+                + warnings.Kind(index) + " " + TextToken(warnings.Message(index)));
+        }
+    }
+}
+
+static byte[] LinkedDocument()
+{
+    using var builder = new DocumentBuilder();
+    builder.AddBaseFont("F1"u8.ToArray(), "Helvetica"u8.ToArray());
+    using (var one = builder.BeginPage(200.0, 200.0))
+    {
+        one.Text("F1"u8.ToArray(), 12.0, 20.0, 170.0, "Links");
+        one.LinkToUri(10.0, 10.0, 60.0, 30.0, "https://example.org/parity");
+        one.LinkToPage(70.0, 10.0, 120.5, 30.25, 1, new View(DestKind.Xyz, Left: 10.0, Zoom: 1.5));
+        builder.PushPage(one);
+    }
+    using (var two = builder.BeginPage(200.0, 200.0))
+    {
+        builder.PushPage(two);
+    }
+    builder.SetInfo("Title"u8.ToArray(), "Read surface \u2014 parity");
+    builder.SetInfo("Author"u8.ToArray(), "");
+    using var heading = new OutlineEntry("Part one");
+    heading.SetOpen(true);
+    using (var chapter = new OutlineEntry("Chapter one"))
+    {
+        chapter.SetPageTarget(1, new View(DestKind.FitH, Top: 150.0));
+        heading.AddChild(chapter);
+    }
+    using var elsewhere = new OutlineEntry("Elsewhere");
+    elsewhere.SetUriTarget("https://example.org/");
+    builder.SetOutline(heading, elsewhere);
+    return builder.Finish();
+}
+
+var outlinePath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(args[2]))!, "outline-3level.pdf");
+var outlineBytes = File.ReadAllBytes(outlinePath);
+var shiftedBytes = new byte[outlineBytes.Length + 5];
+"JUNK\n"u8.ToArray().CopyTo(shiftedBytes, 0);
+outlineBytes.CopyTo(shiftedBytes, 5);
+var readLines = new List<string>();
+using (var shifted = Document.Open(shiftedBytes))
+{
+    ReadDump("shifted", shifted, readLines);
+}
+using (var linked = Document.Open(LinkedDocument()))
+{
+    ReadDump("linked", linked, readLines);
+}
+var dumped = new System.Text.StringBuilder();
+foreach (var line in readLines)
+{
+    dumped.Append(line).Append('\n');
+}
+var dumpedBytes = System.Text.Encoding.UTF8.GetBytes(dumped.ToString());
+if (Environment.GetEnvironmentVariable("TINKER_PARITY_DUMP") is not null)
+{
+    Console.Write(dumped.ToString());
+}
+Console.WriteLine(
+    $"DOTNET-SMOKE: READ sha256={Sha256(dumpedBytes)} surface=dotnet script=read-surface " +
+    $"bytes={dumpedBytes.Length}");
 
 // The callback-taking transaction, which is checkpoint, `try`, restore and
 // nothing else. Asserted the only way that cannot be faked: save before, save

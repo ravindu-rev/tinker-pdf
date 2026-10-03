@@ -248,6 +248,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --manifest-path bindings/python/Cargo.toml
       - run: cargo check --manifest-path bindings/js/Cargo.toml
+      # The committed C header is what cbindgen makes of `src/` today. The
+      # crate's `tests/header.rs` holds the *names* in step without spawning
+      # anything; this holds the signatures, which a name check cannot see.
+      # The version is pinned so a cbindgen release cannot move the bytes.
+      - name: The committed C header is the generated one
+        run: |
+          cargo install cbindgen --locked --version 0.29.4
+          cbindgen --config crates/tinker-pdf-ffi/cbindgen.toml --crate tinker-pdf-ffi \
+            --output crates/tinker-pdf-ffi/include/tinker_pdf.h
+          git diff --exit-code crates/tinker-pdf-ffi/include/tinker_pdf.h
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0'
@@ -298,7 +308,7 @@ jobs:
         run: |
           set -o pipefail
           cargo run -p xtask -- bindings-parity --require-all 2>&1 | tee parity.log
-          grep -q 'bindings-parity: all four surfaces wrote the same bytes' parity.log
+          grep -q 'bindings-parity: every surface agrees' parity.log
           grep -q 'SKIPPED 0 (none)' parity.log
 
   wasm:

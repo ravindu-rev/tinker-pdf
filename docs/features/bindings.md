@@ -17,12 +17,15 @@ caller-freed buffer, and a pointer into a handle's storage borrows it until
 the handle is freed. Every call returns a `TpdfStatus` (`Ok`, `BadArgument`,
 `NotAPdf`, `NeedsPassword`, `WrongPassword`, `NoSuchPage`, `NotEncrypted`,
 `UnsupportedHandler`, `NoSuchSignature`, `NoSuchField`, `ValueRefused`,
-`FieldUnreadable`, `SpentHandle`, `EditRefused`) and
+`FieldUnreadable`, `SpentHandle`, `EditRefused`, `SourceMiss`,
+`ScriptRefused`, `StreamUnreadable`) and
 `tpdf_last_error_message` carries the detail. Those numbers *are* the ABI —
 a C caller compares them against literals and the .NET binding against an
 `int` — so 0–7 are frozen, `NoSuchSignature` was **appended** at 8 rather
-than inserted, and the write surface's five were appended at 9–13. Two unit
-tests pin them: one names all fourteen individually, and one holds the list
+than inserted, the write surface's five were appended at 9–13, and
+streaming's, the script policy's and the read surface's one each at 14, 15
+and 16. Two unit tests pin them: one names all seventeen individually, and
+one holds the list
 and its length, so a variant added without a line is caught by the count
 rather than by somebody remembering. A third pins every discriminant of the
 six signature enums and the three write ones, because those are transcribed
@@ -90,6 +93,41 @@ because the facade's `Option<i64>` has no C spelling — and returns
 `_signer_issuer`, `_signer_validity`, `_weakness_count` and `_weakness`.
 There is no `is_valid` and there will not be one: the four questions are
 four `#[repr(C)]` enums, and `NotChecked` is not `Differs`.
+
+**The read surface beyond pages: thirty-four functions** in
+`src/read.rs`, each one facade call. `tpdf_document_info` takes a
+`TpdfInfoKey` for the eight `/Info` text entries, `tpdf_document_trapped`
+answers a `TpdfTrapped` whose `Absent` is the key missing and whose `Unknown`
+is the document saying `/Unknown` — the facade's `Option<Trapped>` carries
+both and a three-arm enum would merge them — and `_pdf_version`,
+`_page_label` and `_xmp_metadata` (a `TpdfBuffer`) follow. The outline, a
+page's links, the attachments and the warnings cross as owned handles on the
+`TpdfSignatures` pattern — `TpdfOutline`, `TpdfLinks`, `TpdfAttachments`,
+`TpdfWarnings`, each with `_count`, index accessors and `_free` — so each
+outlives the document it came from; `TpdfAttachments` holds its own clone of
+the document for that reason, since listing reads no bytes and
+`tpdf_attachment_data` reads them only when asked. The outline is
+**flattened** with each entry's depth (`OutlineItem::flatten`'s own answer),
+because a tree of handles is a tree of frees. A destination reads back as a
+`TpdfDestinationRead` whose view is the write side's `TpdfDestination`, NaN
+for `null` exactly as there, so a link written through
+`tpdf_page_builder_link` and read through `tpdf_link_action` is the same
+struct; its three arms (`Explicit`, `Named`, `Uri`, and `Absent` for none)
+are never collapsed (ruling 6), and a name or URI crosses as a borrowed
+pointer and length, because 12.3.2.3 makes a name a byte string. A link's
+action is a `TpdfActionKind` — all six of `Action`'s arms, `/Launch`
+reported and never run — with its own bytes beside it. A warning crosses as
+its offset, its object, its stable slug and the facade's sentence.
+
+Two answers are kept apart throughout, as they are on the signature surface:
+**null on `Ok` is the document not saying**, and an index past the end is
+`BadArgument`. The one new status is `StreamUnreadable`, appended at 16: an
+attachment whose `/EF` stream is named and does not decode is not the same
+answer as one that names no stream, and the engine's reason, with the object,
+is in `tpdf_last_error_message`. The bytes come from `CosDocument::
+stream_decoded` on the stream reference `Attachment` hands back — the route
+the facade's own documentation names — so no accessor was added to the facade
+for it.
 
 **The write surface: fifty-five functions, and the shape they had to be
 given.** The facade has exported `DocumentEditor` and `DocumentBuilder` since
@@ -255,6 +293,29 @@ four printed the same two hashes:
 fill-and-save    59f1efce6e4e5bfa8915fdee31e43f629e6373512de8040bf8e6404b7fe78af3
 build-a-document 1dbb7ace2a5787016efa257ab8c3efdb6ceae1b339f8597266ad47c5828dac62
 ```
+
+**And read parity is text identity.** A third script, *read-surface*, opens
+two documents — `testdata/outline-3level.pdf` with five bytes in front of its
+header, which the reader tolerates and reports, and a two-page document each
+surface builds itself with two links, a nested outline and an `/Info` title
+outside ASCII beside an author that is empty rather than absent — and writes
+down everything the read surface says about each: version, page count, the
+eight `/Info` entries, `/Trapped`, page labels, the outline with its
+destinations, every link with its action, every attachment with a hash of its
+bytes, the XMP packet's hash and, last, every warning. The text is specified
+byte for byte in `crates/tinker-pdf/examples/write_parity.rs`: strings and
+byte strings as hex, numbers as the sixteen hex digits of their IEEE 754 bits,
+because every language formats `1.5` differently and a parity check that
+tolerated "close" in a coordinate would be measuring the formatters. Each
+surface prints `READ sha256=` of it. On linux/x86_64, October 2026, the
+facade, the wheel and the npm package printed
+
+```text
+read-surface     be7deb042f7d68d6695e54988cdbfabf3d7240c03281b29534b4b108068bef9f
+```
+
+and the .NET leg is written to print it too (its build is unverified here: no
+.NET SDK on the machine that wrote it).
 
 That is the write-side analogue of the read side's 1 190 inked pixels, and it
 is the evidence for ruling 11: four surfaces disagreeing would mean one of them
@@ -519,13 +580,17 @@ tpdf_buffer_free(pdf);
 tpdf_builder_free(b);
 ```
 
-(The crate ships no generated header; the `#[repr(C)]` enums and structs —
-`TpdfStatus`, `TpdfAuthLevel`, `TpdfPixelFormat`, the six signature enums,
-`TpdfWidgetDefect`, `TpdfWriteMode`, `TpdfDestKind`, `TpdfTargetKind`,
-`TpdfImageKind`, `TpdfWriteOptions`, `TpdfEncryption`, `TpdfDestination`,
-`TpdfTarget`, `TpdfImage` — and the `extern "C"` signatures in
-`crates/tinker-pdf-ffi/src/lib.rs` are the contract, and the .NET binding's
-P/Invoke declarations are a worked transcription of them.)
+**The header is `crates/tinker-pdf-ffi/include/tinker_pdf.h`**, generated by
+cbindgen 0.29 from `crates/tinker-pdf-ffi/cbindgen.toml` and committed,
+because a C, Go or Swift caller needs it in the tree and `cargo build` runs
+nothing but rustc. The `extern "C"` items under `crates/tinker-pdf-ffi/src/`
+remain the contract and the header is their spelling. Two things keep a
+committed generated file from drifting: `tests/header.rs` reads both as text
+and fails when an export is missing from the header or a declaration names
+nothing — it spawns nothing (ruling 13) — and CI's `bindings` job regenerates
+the header and fails on any difference, which is what catches a signature that
+moved under an unchanged name. The .NET binding's P/Invoke declarations are a
+worked transcription of it.
 
 Each binding's README ([js](../../bindings/js/README.md),
 [python](../../bindings/python/README.md),
@@ -546,7 +611,6 @@ packaging commands.
 | A signature's `/Contents` blob, `/M`, `/ContactInfo`, `/Filter`, its lenient-read warnings, and `Signature::modifications` | not projected | owed rather than refused: each is a shape of its own — raw bytes, a date, a list of changed objects — rather than another string or enum, and none is named by the milestone | [signatures](../design/signatures.md) |
 | The signature and public-key surface added in October 2026: `DocumentEditor::save_timestamped` with `Timestamper` and `TimestampRequest`; `add_validation_data` with `ValidationData`; `Document::security_store` with `SecurityStore` and `SecurityStoreWarning`; `PublicKeyEncryption::seal` and `DocumentEditor::save_sealed`; `Verdict::timestamps` with `TimestampVerdict`; `Signature::validation_key` | not projected | owed rather than refused. `Timestamper` is a host callback, which the write design keeps off the C ABI as it keeps `Signer`, and `seal` takes an `EntropySource`, which is another; the rest take or return shapes of their own — lists of DER blobs, a store of object references, a per-token verdict with its own enums. Ruling 11 makes each a debt the day it reached the facade | [ROADMAP.md](../ROADMAP.md) |
 | Signatures in Python and JavaScript | not projected | those bindings sit on the facade directly rather than on the C ABI, so each is its own transcription and neither has been written | [ROADMAP.md](../ROADMAP.md) |
-| Outline, links, metadata, attachments, XMP, warnings | not projected | the read surface beyond rendering, text and signatures is owed | [ROADMAP.md](../ROADMAP.md) |
 | CommonJS build | none; ESM only | two builds of the engine can diverge | — |
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |
@@ -620,6 +684,25 @@ packaging commands.
   cannot be faked, and every one of them requiring the exception to *still
   escape*, because a rollback that also hid the reason would be the worst of
   both.
+- **The read surface is pinned by the same equality with the facade**
+  (`src/read/tests.rs`): a document built in the test with every shape the
+  surface reads — an empty `/Author` beside an absent `/Subject`, a nested
+  outline with explicit, URI and named targets and a heading with none, links
+  of two kinds, page labels, an attachment and an XMP packet — and the shifted
+  outline fixture are read through the C ABI and through `Document`, and every
+  `/Info` entry, `/Trapped`, version, label, outline entry and destination
+  (every view number, NaN against `None`), link rectangle, reference, action
+  and its bytes, attachment field and decoded byte, the XMP packet and every
+  warning's offset, object, slug and sentence must agree. Around them: an
+  index past each list's end is `BadArgument`, a page past the end is
+  `NoSuchPage`, the attachments handle reads bytes after its document is
+  freed, a null handle is refused on all thirty-four entry points and every
+  new free accepts null, and the four new enums' numbers are pinned. Counted
+  injections, October 2026: a `/FitH` top written into the view's left edge
+  fires **1** test (the outline equality); the first warning dropped fires
+  **1** (the warnings equality); a Python warning offset off by one, and the
+  JavaScript link rectangle's first two numbers swapped, each fail
+  `bindings-parity` on their surface's `read-surface` hash.
 - `cargo xtask bindings-parity` compares all four against the recorded answer
   in `xtask/src/parity.rs`. Its counted injections, run August 2026: a wrong
   recorded hash is reported by **all four** surfaces with both the written and

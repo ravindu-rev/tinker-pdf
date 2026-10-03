@@ -11,6 +11,8 @@ use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+mod read;
+
 /// Everything a binding may not invent, gathered where it can be seen.
 ///
 /// Ruling 11: a binding projects the facade and adds no defaults of its own.
@@ -21,6 +23,45 @@ use pyo3::types::PyBytes;
 mod write {
     use pyo3::exceptions::PyValueError;
     use pyo3::PyResult;
+
+    /// The facade's `DestKind` from its name and the five numbers, `None`
+    /// being the file's `null` (12.3.2.2 Table 151).
+    ///
+    /// All eight arms, as the C ABI's `TpdfDestination` carries them. `/FitR`
+    /// takes four numbers that are never `null`, so a missing one is refused
+    /// rather than written as zero.
+    pub fn view(name: &str, numbers: [Option<f64>; 5]) -> PyResult<tinker_pdf::DestKind> {
+        use tinker_pdf::DestKind;
+        let [left, bottom, right, top, zoom] = numbers;
+        Ok(match name {
+            "xyz" => DestKind::Xyz { left, top, zoom },
+            "fit" => DestKind::Fit,
+            "fith" => DestKind::FitH { top },
+            "fitv" => DestKind::FitV { left },
+            "fitr" => match (left, bottom, right, top) {
+                (Some(left), Some(bottom), Some(right), Some(top)) => DestKind::FitR {
+                    left,
+                    bottom,
+                    right,
+                    top,
+                },
+                _ => {
+                    return Err(PyValueError::new_err(
+                        "view 'fitr' needs left, bottom, right and top",
+                    ))
+                }
+            },
+            "fitb" => DestKind::FitB,
+            "fitbh" => DestKind::FitBH { top },
+            "fitbv" => DestKind::FitBV { left },
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "view must be one of xyz, fit, fith, fitv, fitr, fitb, fitbh and \
+                     fitbv, not {other:?}"
+                )))
+            }
+        })
+    }
 
     /// The facade's write mode from its name, or a refusal naming both.
     pub fn mode(name: &str) -> PyResult<tinker_pdf::WriteMode> {
@@ -163,6 +204,56 @@ impl PyDocument {
             .into_iter()
             .map(|defect| defect.kind.as_str().to_string())
             .collect()
+    }
+
+    /// The `/Info` dictionary (14.3.3), decoded: a `Metadata` whose absent
+    /// entries are `None` and whose empty ones are `""`.
+    #[getter]
+    fn metadata(&self) -> read::PyMetadata {
+        read::metadata(&self.inner)
+    }
+
+    /// The version, as "PDF 1.7": the later of the header's and the
+    /// catalog's, never absent.
+    #[getter]
+    fn pdf_version(&self) -> String {
+        self.inner.pdf_version()
+    }
+
+    /// Every page's label (12.4.2), or an empty list when the document
+    /// defines none.
+    fn page_labels(&self) -> Vec<String> {
+        self.inner.page_labels()
+    }
+
+    /// The outline tree (12.3.3); empty when the document has none.
+    fn outline(&self) -> Vec<read::PyOutlineItem> {
+        read::outline(&self.inner)
+    }
+
+    /// A page's link annotations, in `/Annots` order (12.5.6.5).
+    fn links(&self, index: u32) -> PyResult<Vec<read::PyLink>> {
+        read::links(&self.inner, index).ok_or_else(|| PyIndexError::new_err("no such page"))
+    }
+
+    /// Every file attached to the document (7.11.4), in name order.
+    fn attachments(&self) -> Vec<read::PyAttachment> {
+        read::attachments(&self.inner)
+    }
+
+    /// The XMP packet (14.3.2), unparsed, or `None`.
+    fn xmp_metadata<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
+        self.inner
+            .xmp_metadata()
+            .map(|packet| PyBytes::new(py, &packet))
+    }
+
+    /// Everything the engine has tolerated so far, in order (ruling 10).
+    ///
+    /// Reading a page can tolerate more, so asking again later may answer with
+    /// more.
+    fn warnings(&self) -> Vec<read::PyWarning> {
+        read::warnings(&self.inner)
     }
 
     /// An editor over this document.
@@ -632,18 +723,50 @@ pub struct PyOutlineEntry {
     /// Nested entries.
     #[pyo3(get, set)]
     pub children: Vec<PyOutlineEntry>,
+    /// How the page is positioned, for a page target: one of "xyz", "fit",
+    /// "fith", "fitv", "fitr", "fitb", "fitbh" and "fitbv" (12.3.2.2 Table
+    /// 151), with the numbers below. `None` for a number is the file's `null`,
+    /// "retain the current value".
+    #[pyo3(get, set)]
+    pub view: String,
+    /// The view's left edge.
+    #[pyo3(get, set)]
+    pub left: Option<f64>,
+    /// The view's bottom edge (`/FitR` only).
+    #[pyo3(get, set)]
+    pub bottom: Option<f64>,
+    /// The view's right edge (`/FitR` only).
+    #[pyo3(get, set)]
+    pub right: Option<f64>,
+    /// The view's top edge.
+    #[pyo3(get, set)]
+    pub top: Option<f64>,
+    /// The view's magnification (`/XYZ` only).
+    #[pyo3(get, set)]
+    pub zoom: Option<f64>,
 }
 
 #[pymethods]
 impl PyOutlineEntry {
     #[new]
-    #[pyo3(signature = (title, page = None, uri = None, open = false, children = Vec::new()))]
+    #[pyo3(signature = (
+        title, page = None, uri = None, open = false, children = Vec::new(),
+        view = "fit".to_string(), left = None, bottom = None, right = None, top = None,
+        zoom = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         title: String,
         page: Option<u32>,
         uri: Option<String>,
         open: bool,
         children: Vec<PyOutlineEntry>,
+        view: String,
+        left: Option<f64>,
+        bottom: Option<f64>,
+        right: Option<f64>,
+        top: Option<f64>,
+        zoom: Option<f64>,
     ) -> PyOutlineEntry {
         PyOutlineEntry {
             title,
@@ -651,6 +774,12 @@ impl PyOutlineEntry {
             uri,
             open,
             children,
+            view,
+            left,
+            bottom,
+            right,
+            top,
+            zoom,
         }
     }
 
@@ -676,7 +805,10 @@ impl PyOutlineEntry {
             }
             (Some(index), None) => Some(tinker_pdf::Target::Page {
                 index,
-                view: tinker_pdf::DestKind::Fit,
+                view: write::view(
+                    &self.view,
+                    [self.left, self.bottom, self.right, self.top, self.zoom],
+                )?,
             }),
             (None, Some(uri)) => Some(tinker_pdf::Target::Uri(uri.clone())),
             (None, None) => None,
@@ -762,7 +894,13 @@ impl PyPageBuilder {
     }
 
     /// Adds a link annotation over a rectangle (12.5.6.5).
-    #[pyo3(signature = (x0, y0, x1, y1, page = None, uri = None))]
+    ///
+    /// A page link is positioned as `view` says, with the same keywords
+    /// `OutlineEntry` takes; the default is "fit".
+    #[pyo3(signature = (
+        x0, y0, x1, y1, page = None, uri = None, view = "fit", left = None, bottom = None,
+        right = None, top = None, zoom = None
+    ))]
     #[allow(clippy::too_many_arguments)]
     fn link(
         &mut self,
@@ -772,6 +910,12 @@ impl PyPageBuilder {
         y1: f64,
         page: Option<u32>,
         uri: Option<String>,
+        view: &str,
+        left: Option<f64>,
+        bottom: Option<f64>,
+        right: Option<f64>,
+        top: Option<f64>,
+        zoom: Option<f64>,
     ) -> PyResult<()> {
         let target = match (page, uri) {
             (Some(_), Some(_)) | (None, None) => {
@@ -782,7 +926,7 @@ impl PyPageBuilder {
             }
             (Some(index), None) => tinker_pdf::Target::Page {
                 index,
-                view: tinker_pdf::DestKind::Fit,
+                view: write::view(view, [left, bottom, right, top, zoom])?,
             },
             (None, Some(uri)) => tinker_pdf::Target::Uri(uri),
         };
@@ -981,5 +1125,6 @@ fn module_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyBuilder>()?;
     module.add_class::<PyPageBuilder>()?;
     module.add_class::<PyOutlineEntry>()?;
+    read::register(module)?;
     Ok(())
 }

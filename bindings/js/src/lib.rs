@@ -20,6 +20,12 @@ use std::sync::{Arc, Mutex};
 
 use wasm_bindgen::prelude::*;
 
+mod read;
+pub use read::{
+    PdfAction, PdfAttachment, PdfDestination, PdfLink, PdfMetadata, PdfOutlineItem, PdfView,
+    PdfWarning,
+};
+
 /// An open PDF document.
 #[wasm_bindgen]
 pub struct PdfDocument {
@@ -807,6 +813,29 @@ impl PdfPageBuilder {
         }
     }
 
+    /// The same, with the page positioned as `view` says (12.3.2.2): any of
+    /// the eight views, `null` numbers included.
+    #[wasm_bindgen(js_name = linkToPageView)]
+    pub fn link_to_page_view(
+        &mut self,
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+        page: u32,
+        view: &PdfView,
+    ) -> Result<(), JsError> {
+        let target = tinker_pdf::Target::Page {
+            index: page,
+            view: view.facade(),
+        };
+        if self.get()?.link(x0, y0, x1, y1, &target) {
+            Ok(())
+        } else {
+            Err(refused("linkToPageView", &format!("[{x0} {y0} {x1} {y1}]")))
+        }
+    }
+
     /// The same, to a URI (12.6.4.7). 7-bit ASCII per that clause; anything
     /// else the writer refuses rather than mangles.
     #[wasm_bindgen(js_name = linkToUri)]
@@ -870,6 +899,16 @@ impl PdfOutlineEntry {
         self.get()?.target = Some(tinker_pdf::Target::Page {
             index,
             view: tinker_pdf::DestKind::Fit,
+        });
+        Ok(())
+    }
+
+    /// Points the entry at a page, positioned as `view` says (12.3.2.2).
+    #[wasm_bindgen(js_name = setPageTargetView)]
+    pub fn set_page_target_view(&mut self, index: u32, view: &PdfView) -> Result<(), JsError> {
+        self.get()?.target = Some(tinker_pdf::Target::Page {
+            index,
+            view: view.facade(),
         });
         Ok(())
     }
