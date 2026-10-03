@@ -118,9 +118,17 @@ wrapper with no logic of its own (ruling 11): a line per image with its
 geometry, depth, component count, codec, space, masks and how many times it
 is drawn, and with `--out` the samples written exactly as `PageImage` holds
 them — `<stem>-pNNNN-NNN.raw`, with `-smask.raw` and `-mask.raw` beside it for
-a soft or stencil mask and `.icc` for an ICC-based image's profile. It
-converts nothing to a picture format: that would evaluate the colour space,
-and the listing says how to read the bytes instead.
+a soft or stencil mask. The space goes out whole, as far as `ImageSpace`
+carries it: a `CalGray`, `CalRGB` or `Lab` space's white point, gamma, matrix
+and range on the listing line, an `/Indexed` palette as `-palette.raw`, and
+every ICC profile wherever in the space it sits — `.icc` for the image's own,
+`-base.icc` for the space a palette's entries are in, `-alternate.icc` for a
+separation's or another profile's alternate, a step of the suffix for each
+level down. The one part not written is a `/Separation` or `/DeviceN` tint
+transform, which `ImageSpace` does not carry: it names the colorants and the
+alternate, not the function between them. It converts nothing to a picture
+format: that would evaluate the colour space, and the listing and the files
+beside the samples are what reading the bytes needs instead.
 
 **The text device.** Glyphs become `TextChar`s with a device-space `Quad`
 each (9.4.4), grouped into `TextLine`s by baseline continuation and
@@ -508,9 +516,14 @@ target call `images()` on every page they reach.
 `tpdf images` is held the same way in `tools/tpdf/src/images.rs`: a document
 built from known arrays — RGB drawn twice, grey, a one-bit indexed image with
 a soft mask, a one-component ICC-based image — is listed and written out, and
-each file is the array the builder was handed: the indices rather than their
-colours, the soft mask's opacity beside its image, the profile beside the
-ICC-based samples, and nothing else in the directory.
+each file is the array the builder was handed: the indices, and beside them
+the palette they index, the soft mask's opacity beside its image, the profile
+beside the ICC-based samples, and nothing else in the directory. A
+hand-written page holds the rest of the space the same way — a `CalGray`,
+`CalRGB` and `Lab` image's parameters on the listing line, and the profile
+under an indexed base, a separation's alternate and an ICC space's own
+`/Alternate` each in its own file — and a stencil mask's samples, a refused
+image and a damaged fax's leniency each reported under its image.
 
 Unit tests live beside the code: `crates/tinker-pdf-content/src/tokenizer.rs`
 (every escape form, malformed numbers, arbitrary-byte termination),

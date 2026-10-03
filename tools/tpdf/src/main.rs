@@ -184,10 +184,14 @@ that produced its samples and the colour space they are in. `--out DIR`
 writes each image's samples to `<stem>-pNNNN-NNN.raw` exactly as the engine
 decoded them: before any colour conversion, `/Decode` not applied, rows from
 the top padded to a byte. A soft mask's samples go beside them as
-`-smask.raw`, a stencil mask's as `-mask.raw`, and an ICC-based image's
-profile as `.icc`. Nothing is converted to a picture format, because that
-would mean evaluating the colour space; the listing says how to read the
-bytes instead.
+`-smask.raw` and a stencil mask's as `-mask.raw`. The colour space goes with
+them: a CIE space's parameters on the listing line, an indexed palette as
+`-palette.raw`, and every ICC profile in the space as `.icc` — `-base.icc`
+for the space a palette's entries are in, `-alternate.icc` for an alternate.
+A separation's tint transform is not written; the engine does not hand it
+over. Nothing is converted to a picture format, because that would mean
+evaluating the colour space; the listing and those files are what reading
+the bytes needs instead.
 
 The writing commands each make the editor calls their name says and save
 through the library's own save door, so each takes `--font-policy`, and each
