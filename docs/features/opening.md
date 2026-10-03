@@ -79,7 +79,17 @@ become HTML's; a note reference is a link that lands on the note's page;
 `<book-title>` and the first `<author>` are `/Title` and `/Author`, the cover
 is the first page's picture, and the rest of the `<description>` is metadata
 and not text. Pictures are `<img src="#id">`, answered from the book's own
-`<binary>` elements through the `epub::read::Resources` seam.
+`<binary>` elements through the `epub::read::Resources` seam. **An FB2 in an
+8-bit encoding is read in it**: a declaration naming one of the WHATWG
+Encoding Standard's twenty-eight single-byte encodings — `windows-1251` and
+`koi8-r`, which a great many real books are, and their siblings, by any of
+the standard's labels — is decoded by that encoding's index, vendored from
+`whatwg/encoding` and compiled into `tinker-pdf-xml`
+(`Source::with_declared_encoding`, `tinker_pdf_xml::encoding`). A byte the
+index leaves unmapped is U+FFFD and counted
+(`TranslationDefect::UnmappedByte`). By the standard's own table
+`iso-8859-1`, `latin1` and `us-ascii` name windows-1252, which is what such a
+book means by its curly quotes.
 
 **Markdown opens by name, not by sniff.** `Document::open_markdown(bytes,
 &OpenOptions)` reads the bytes as UTF-8 (each malformed sequence U+FFFD,
@@ -257,7 +267,8 @@ exceed it routinely — declared in one place,
 | Raw HTML in Markdown | `ArchiveWarning::Translation { defect: TranslationDefect::RawHtmlAsText, .. }` | set as the text it is: CommonMark passes it through, and a tag that is not well-formed XML would stop the XML reader and lose the rest of the document. Every character still reaches the page | `crates/tinker-pdf/src/markdown.rs` |
 | A named character reference outside XHTML 1.0's 253, in Markdown | the reference stays literal | CommonMark resolves HTML's 2 231 names; this repository vendors XHTML 1.0's sets (W3C) and not HTML's list, so `&HilbertSpace;` is text. The one CommonMark example of 652 the reader fails | [THIRDPARTY.md](../../THIRDPARTY.md) |
 | Markdown containers past 100 deep, inlines nested past the 202 elements that bounds a document to, references past their copy budget | `TranslationDefect::{NestingTooDeep, ReferenceBudgetSpent}` | read as the text they then are — a too-deep emphasis or link keeps its text and loses its element, so the XML reader's depth cap is never what stops a document and nothing after a deep nest is lost; the two caps are `bounds_ledger.rs` rows. A reference is the one construct whose output is not bounded by its input, so its copies are held to 100 KiB or the document's own length, cmark's rule | `crates/tinker-pdf/src/markdown.rs` |
-| An FB2 in `windows-1251`, `koi8-r` or another 8-bit encoding | one empty page and `ArchiveWarning::Markup(Truncated)` | `tinker-pdf-xml` decodes UTF-8 and UTF-16 and refuses the rest by name, and a book set in the wrong letters would be worse than one not set. The narrowed half of the FB2 row | [ROADMAP](../ROADMAP.md) |
+| An FB2 in a multi-byte legacy encoding — GBK, gb18030, Big5, EUC-JP, ISO-2022-JP, Shift_JIS, EUC-KR | one empty page and `ArchiveWarning::Markup(Truncated)` | `tinker-pdf-xml` decodes UTF-8, UTF-16 and the Encoding Standard's single-byte encodings and refuses the rest by name, and a book set in the wrong letters would be worse than one not set. Each is a state machine over an index of thousands of rows; what is left of the FB2 row | [ROADMAP](../ROADMAP.md) |
+| A byte an FB2's declared single-byte encoding leaves unmapped | `ArchiveWarning::Translation { defect: TranslationDefect::UnmappedByte, count }` | U+FFFD, the Encoding Standard's own *replacement* error mode; windows-1253's 0xAA is one | `crates/tinker-pdf/src/fb2.rs` |
 | An FB2 element the schema does not define; a `<binary>` that is not base64 | `TranslationDefect::{UnknownElement, BinaryUnreadable}`, and `ImageNotDrawn` for the picture | the unknown element's text is kept and its structure is not; the picture has nothing to draw | `crates/tinker-pdf/src/fb2.rs` |
 | A bare BMP | `OpenError::NotAPdf` | `BM` is two bytes, and also how a text file about a car begins; the comic path can afford it because an archive's entries are already pictures, and a sniff over every input cannot | `crates/tinker-pdf/src/standalone.rs` |
 | An SVG or HTML whose root element is past byte 4 096 | `OpenError::NotAPdf` | the prolog is walked inside `SNIFF_WINDOW` and not searched past it, because a sniff that scans is one that finds `<svg` inside a PDF's stream | `crates/tinker-pdf/src/standalone.rs` |
@@ -342,8 +353,12 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   title centred, an epigraph to the right), **pixel for pixel** the XHTML it
   translates to, its cover and picture drawn from its own `<binary>`, a note
   link landing on its note, its own `<stylesheet>` winning over the format's,
-  an unknown element and a broken binary named, an 8-bit encoding an empty
-  page that says so, a cut book read as far as it goes, and an `.fb2.zip` the
+  an unknown element and a broken binary named, a Russian book in
+  `windows-1251` and in `koi8-r` — its bytes encoded in the test from each
+  code chart by hand — the same words, information, warnings and pixels as its
+  UTF-8 twin (`an_fb2_in_an_eight_bit_encoding_is_the_book_its_utf8_twin_is`),
+  an unmapped byte counted and a Shift_JIS book an empty page that says so, a
+  cut book read as far as it goes, and an `.fb2.zip` the
   same book while a ZIP of one picture stays a comic. `hostile_input.rs` sweeps a damaged FB2 and holds its translation to
   being XML; `fuzz/fuzz_targets/fb2.rs` is the deep version.
 - **`crates/tinker-pdf/tests/commonmark_spec.rs`** — the Markdown reader held

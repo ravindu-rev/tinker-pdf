@@ -62,6 +62,8 @@
 //!   references resolving too, which `doctype-xhtml1-named-entities` seeds.
 //! - **The XHTML entity table is live exactly when an XHTML 1.x declaration
 //!   was read by the relaxed mode**, and never in the strict one.
+//! - **A declared single-byte encoding decodes one character per byte**, and
+//!   the source it makes walks under every invariant above.
 //! # What this target cannot find, and what covers it instead
 //!
 //! Every assertion above is **structural**: a name past the cap is refused
@@ -329,6 +331,21 @@ fuzz_target!(|data: &[u8]| {
             _ => 4096,
         },
     };
+
+    // The declared-encoding constructor, before `Source::new` can turn the
+    // input away: a single-byte decode is one character per byte, and a
+    // source it makes walks under every invariant `walk` holds.
+    if let Ok(declared) = Source::with_declared_encoding(body) {
+        if let Encoding::SingleByte(_) = declared.encoding() {
+            assert_eq!(
+                declared.text().chars().count(),
+                body.len(),
+                "a single-byte decode is not one character per byte"
+            );
+            let decoded = declared.text().to_string();
+            let _ = walk(&declared, &limits, Doctype::SkipExternalId, &decoded);
+        }
+    }
 
     let Ok(source) = Source::new(body) else {
         return;

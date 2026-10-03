@@ -1270,6 +1270,97 @@ fn an_encoding_this_reader_does_not_decode_is_refused_by_name() {
     );
 }
 
+/// The text of every event, joined: what a declared encoding has to get right.
+fn declared_text(bytes: &[u8]) -> (String, Encoding, Vec<Warning>) {
+    let source = Source::with_declared_encoding(bytes).expect("decodes");
+    let mut reader = source.reader(&Limits::DEFAULT);
+    let mut text = String::new();
+    for event in &mut reader {
+        match event.expect("reads") {
+            Event::Text(t) => text.push_str(&t),
+            Event::Start(element) => {
+                for attribute in element.attributes() {
+                    text.push_str(attribute.value());
+                }
+            }
+            _ => {}
+        }
+    }
+    (text, source.encoding(), reader.warnings().to_vec())
+}
+
+/// **A declared single-byte encoding is read by its table** — the row FB2's
+/// `windows-1251` and `koi8-r` books needed — and the same document through
+/// [`Source::new`] is still refused, because a format such as XPS forbids it.
+#[test]
+fn a_declared_single_byte_encoding_is_read_by_its_table() {
+    use crate::encoding::SingleByte;
+    // *Привет*, by hand from each code chart, in text and in an attribute.
+    let windows: &[u8] = b"<?xml version=\"1.0\" encoding=\"windows-1251\"?>\
+        <p title=\"\xCF\xF0\xE8\xE2\xE5\xF2\">\xCF\xF0\xE8\xE2\xE5\xF2</p>";
+    let koi: &[u8] = b"<?xml version='1.0' encoding = 'KOI8-R' ?>\
+        <p title=\"\xF0\xD2\xC9\xD7\xC5\xD4\">\xF0\xD2\xC9\xD7\xC5\xD4</p>";
+    assert_eq!(
+        declared_text(windows),
+        (
+            "ПриветПривет".to_owned(),
+            Encoding::SingleByte(SingleByte::Windows1251),
+            Vec::new()
+        )
+    );
+    assert_eq!(
+        declared_text(koi),
+        (
+            "ПриветПривет".to_owned(),
+            Encoding::SingleByte(SingleByte::Koi8R),
+            Vec::new()
+        )
+    );
+    // `Source::new` refuses both, as it did before the constructor existed:
+    // the windows-1251 bytes are not UTF-8 at all.
+    assert_eq!(Source::new(windows).err(), Some(Error::NotUtf8));
+    assert_eq!(
+        refusal(b"<?xml version=\"1.0\" encoding=\"windows-1251\"?><p/>"),
+        Error::UnsupportedEncoding,
+        "ASCII bytes under a single-byte declaration, through Source::new"
+    );
+}
+
+#[test]
+fn a_declared_encoding_names_its_holes_and_yields_to_a_byte_order_mark() {
+    use crate::encoding::SingleByte;
+    // windows-1253 leaves 0xAA unmapped.
+    let (text, encoding, warnings) =
+        declared_text(b"<?xml version=\"1.0\" encoding=\"windows-1253\"?><p>a\xAAb</p>");
+    assert_eq!(text, "a\u{FFFD}b");
+    assert_eq!(encoding, Encoding::SingleByte(SingleByte::Windows1253));
+    assert_eq!(warnings, [Warning::UnmappedByte]);
+    // A UTF-8 signature is evidence and the declaration a claim.
+    let (text, encoding, warnings) =
+        declared_text("\u{FEFF}<?xml version=\"1.0\" encoding=\"koi8-r\"?><p>é</p>".as_bytes());
+    assert_eq!(
+        (text.as_str(), encoding),
+        ("é", Encoding::Utf8),
+        "the mark wins"
+    );
+    assert_eq!(warnings, [Warning::EncodingDeclarationIgnored]);
+    // A multi-byte encoding is not decoded by either constructor.
+    let shift_jis = b"<?xml version=\"1.0\" encoding=\"Shift_JIS\"?><p/>";
+    assert_eq!(
+        Source::with_declared_encoding(shift_jis)
+            .expect("ASCII decodes")
+            .reader(&Limits::DEFAULT)
+            .find_map(Result::err),
+        Some(Error::UnsupportedEncoding)
+    );
+    // `encodingX` is not the pseudo-attribute, and a declaration with none
+    // is UTF-8's.
+    assert_eq!(
+        Source::with_declared_encoding(b"<?xml version=\"1.0\"?><p>\xCF</p>").err(),
+        Some(Error::NotUtf8)
+    );
+}
+
 #[test]
 fn the_encoding_declaration_is_read_case_insensitively_in_both_spellings() {
     // Both appear in one corpus from one vendor: WPF writes `utf-8` and the XPS

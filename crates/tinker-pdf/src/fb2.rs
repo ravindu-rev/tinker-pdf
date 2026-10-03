@@ -36,11 +36,16 @@
 //!   that borrows an FB2 name, is read as its content and counted as
 //!   [`TranslationDefect::UnknownElement`]: its text reaches the page and its
 //!   structure does not.
-//! - **An encoding other than UTF-8 or UTF-16** stops the translation before
-//!   its first element, because `tinker-pdf-xml` decodes those two and no
-//!   others. A great many FB2 files are `windows-1251`; they open as an empty
-//!   page with [`crate::ArchiveWarning::Markup`] saying why, and the ROADMAP
-//!   row says what decoding them would take.
+//! - **An encoding the XML declaration names is decoded when it is one of the
+//!   Encoding Standard's single-byte encodings** — `windows-1251` and `koi8-r`,
+//!   which a great many real FB2 files are, and their siblings
+//!   (`tinker_pdf_xml::encoding::SingleByte`) — by
+//!   `tinker_pdf_xml::Source::with_declared_encoding`, and a byte the
+//!   declared table leaves unmapped is U+FFFD and counted as
+//!   [`TranslationDefect::UnmappedByte`]. **A multi-byte encoding** — GBK,
+//!   Big5, Shift_JIS — stops the translation before its first element: such
+//!   a book opens as an empty page with [`crate::ArchiveWarning::Markup`]
+//!   saying why.
 //! - The `<description>` is metadata: `book-title` becomes `/Title` and the
 //!   first `author` `/Author`, the cover is the first page's picture, and the
 //!   rest — genres, dates, the annotation, `document-info` — is not set.
@@ -227,9 +232,19 @@ pub(crate) fn translate(
     bytes: &[u8],
     limits: &XmlLimits,
 ) -> Result<(Translated, bool), tinker_pdf_xml::Error> {
-    let source = Source::new(bytes)?;
+    let source = Source::with_declared_encoding(bytes)?;
     let mut reader = source.reader(limits);
     let mut counts = Counts::default();
+    // A single-byte table holds no U+FFFD, so every one in the decoded text is
+    // a byte the declared encoding left unmapped.
+    if let tinker_pdf_xml::Encoding::SingleByte(_) = source.encoding() {
+        let unmapped = source.text().matches('\u{FFFD}').count();
+        if unmapped > 0 {
+            counts
+                .counts
+                .push((TranslationDefect::UnmappedByte, unmapped));
+        }
+    }
     let mut body = String::new();
     // What each open FB2 element wrote, so its end tag closes the right thing.
     let mut open: Vec<Option<&'static str>> = Vec::new();

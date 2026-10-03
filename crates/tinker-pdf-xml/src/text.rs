@@ -119,6 +119,50 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(Cow<'_, str>, Encoding, Option<War
     }
 }
 
+/// The single-byte encoding the XML declaration names, if it names one and
+/// nothing in front of it says otherwise.
+///
+/// Appendix F's reasoning: with no byte order mark and no `3C 00` / `00 3C`
+/// shape, an XML document begins `<?xml` in ASCII, and every encoding whose
+/// label this looks up agrees with ASCII there — so the declaration can be
+/// read as bytes before a byte past it is decoded. It is read as far as its
+/// `?>`, within the first kilobyte, and only its `encoding` pseudo-attribute is
+/// looked at; whether the rest is well-formed is the reader's question, asked
+/// again on the decoded text.
+pub(crate) fn declared_single_byte(bytes: &[u8]) -> Option<crate::encoding::SingleByte> {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF])
+        || bytes.starts_with(&[0xFF, 0xFE])
+        || bytes.starts_with(&[0xFE, 0xFF])
+        || matches!(bytes.get(..2), Some([0x3C, 0x00] | [0x00, 0x3C]))
+    {
+        return None;
+    }
+    let head = bytes.get(..bytes.len().min(1024)).unwrap_or(bytes);
+    let declaration = head.strip_prefix(b"<?xml")?;
+    if !declaration.first().is_some_and(|b| b.is_ascii_whitespace()) {
+        return None;
+    }
+    let end = declaration.windows(2).position(|w| w == b"?>")?;
+    let declaration = declaration.get(..end)?;
+    let key = declaration.windows(8).position(|w| w == b"encoding")?;
+    let mut rest = declaration.get(key + 8..)?;
+    rest = rest
+        .trim_ascii_start()
+        .strip_prefix(b"=")?
+        .trim_ascii_start();
+    let quote = *rest.first()?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    let body = rest.get(1..)?;
+    let close = body.iter().position(|&b| b == quote)?;
+    let label = std::str::from_utf8(body.get(..close)?).ok()?;
+    match crate::encoding::lookup(label)? {
+        crate::encoding::Label::SingleByte(single) => Some(single),
+        _ => None,
+    }
+}
+
 fn utf8(bytes: &[u8]) -> Result<Cow<'_, str>, Error> {
     std::str::from_utf8(bytes)
         .map(Cow::Borrowed)

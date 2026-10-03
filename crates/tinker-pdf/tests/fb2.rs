@@ -377,22 +377,140 @@ fn what_does_not_translate_is_named() {
     assert!(text(&document).contains("before kept text foreign after"));
 }
 
-/// **An encoding the XML reader does not decode opens as an empty page that
-/// says so**, rather than as a refusal or as text set in the wrong letters:
-/// `windows-1251` is the encoding of a great many real FB2 files, and the
-/// narrowed half of the row.
+/// A Russian book, declared in `encoding`, written here as text.
+fn cyrillic_book(encoding: &str) -> String {
+    format!(
+        concat!(
+            "<?xml version=\"1.0\" encoding=\"{encoding}\"?>\n",
+            "<FictionBook xmlns=\"http://www.gribuser.ru/xml/fictionbook/2.0\">",
+            "<description><title-info><author><first-name>Анна</first-name>",
+            "<last-name>Писатель</last-name></author>",
+            "<book-title>Долгая дорога</book-title><lang>ru</lang></title-info>",
+            "</description><body><section><title><p>Глава первая</p></title>",
+            "<p>Привет, мир. Ёлка и ёж ЖДУТ у ДОРОГИ.</p></section></body></FictionBook>"
+        ),
+        encoding = encoding
+    )
+}
+
+/// `text` in windows-1251, by its code chart: А to я are 0xC0 to 0xFF in
+/// order, Ё is 0xA8 and ё 0xB8.
+fn windows_1251(text: &str) -> Vec<u8> {
+    text.chars()
+        .map(|c| match c {
+            c if c.is_ascii() => c as u8,
+            'Ё' => 0xA8,
+            'ё' => 0xB8,
+            'А'..='я' => (c as u32 - 'А' as u32 + 0xC0) as u8,
+            other => panic!("{other} is not in this fixture's repertoire"),
+        })
+        .collect()
+}
+
+/// `text` in KOI8-R, by its code chart: the lower case in the order of the
+/// Latin letters they transliterate, from 0xC0, and the upper case 0x20 above.
+fn koi8_r(text: &str) -> Vec<u8> {
+    const ORDER: &str = "юабцдефгхийклмнопярстужвьызшэщчъ";
+    text.chars()
+        .map(|c| match c {
+            c if c.is_ascii() => c as u8,
+            'ё' => 0xA3,
+            'Ё' => 0xB3,
+            c => {
+                let lower = c.to_lowercase().next().unwrap_or(c);
+                let at = ORDER
+                    .chars()
+                    .position(|o| o == lower)
+                    .unwrap_or_else(|| panic!("{c} is not in this fixture's repertoire"));
+                (if lower == c { 0xC0 } else { 0xE0 }) + at as u8
+            }
+        })
+        .collect()
+}
+
+/// **An FB2 in `windows-1251` or `koi8-r` is the book its UTF-8 twin is**
+/// (tier 5's FB2 row): the same words on the same pages, the same title and
+/// author, and nothing tolerated — where before the row it was an empty page.
+/// The bytes are encoded here from each code chart, by hand, so the decoder
+/// is held to the charts and not to itself.
 #[test]
-fn an_eight_bit_encoding_is_an_empty_page_that_says_so() {
-    let source = full_book().replace("encoding=\"utf-8\"", "encoding=\"windows-1251\"");
+fn an_fb2_in_an_eight_bit_encoding_is_the_book_its_utf8_twin_is() {
+    let twin = Document::open(cyrillic_book("utf-8").into_bytes()).expect("opens");
+    let words = text(&twin);
+    let drawn_twin = drawn(twin);
+    assert!(
+        words.contains("Привет, мир. Ёлка и ёж ЖДУТ у ДОРОГИ."),
+        "{words}"
+    );
+    for (label, bytes) in [
+        ("windows-1251", windows_1251(&cyrillic_book("windows-1251"))),
+        ("cp1251", windows_1251(&cyrillic_book("cp1251"))),
+        ("koi8-r", koi8_r(&cyrillic_book("koi8-r"))),
+        ("KOI8-R", koi8_r(&cyrillic_book("KOI8-R"))),
+    ] {
+        assert_eq!(
+            tinker_pdf::standalone::sniff(&bytes),
+            Some(Standalone::Fb2),
+            "{label}"
+        );
+        let document = drawn(Document::open(bytes).expect("opens"));
+        assert_eq!(text(&document), words, "{label}");
+        // The same as the twin's — a face covering no Cyrillic is named the
+        // same way for both — and nothing about markup or translation.
+        assert_eq!(warnings(&document), warnings(&drawn_twin), "{label}");
+        assert!(
+            !warnings(&document).iter().any(|w| matches!(
+                w,
+                ArchiveWarning::Markup { .. } | ArchiveWarning::Translation { .. }
+            )),
+            "{label}: {:?}",
+            warnings(&document)
+        );
+        let metadata = document.metadata();
+        assert_eq!(metadata.title.as_deref(), Some("Долгая дорога"), "{label}");
+        assert_eq!(metadata.author.as_deref(), Some("Анна Писатель"), "{label}");
+        let (page, twin_page) = (render(&document, 0), render(&drawn_twin, 0));
+        assert!(
+            page.data == twin_page.data,
+            "{label}: the page is not its twin's"
+        );
+        assert!(ink(&page) > LEAST_INK, "{label}: nothing was drawn");
+    }
+}
+
+/// **A byte the declared table leaves unmapped is U+FFFD and counted**, and a
+/// **multi-byte encoding** — what is left of the row — still opens as an empty
+/// page that says why rather than as text in the wrong letters.
+#[test]
+fn what_an_eight_bit_book_cannot_say_is_named() {
+    // windows-1253 leaves 0xAA unmapped; the rest of the book is ASCII.
+    let mut greek = full_book()
+        .replace("encoding=\"utf-8\"", "encoding=\"windows-1253\"")
+        .into_bytes();
+    let at = greek
+        .windows(9)
+        .position(|w| w == b"nested te")
+        .expect("the fixture has nested text");
+    greek[at] = 0xAA;
+    let document = Document::open(greek).expect("opens");
+    assert!(
+        warnings(&document).contains(&ArchiveWarning::Translation {
+            item: String::new(),
+            defect: TranslationDefect::UnmappedByte,
+            count: 1
+        }),
+        "{:?}",
+        warnings(&document)
+    );
+    assert!(text(&document).contains("\u{FFFD}ested text"));
+
+    let source = full_book().replace("encoding=\"utf-8\"", "encoding=\"Shift_JIS\"");
     let document = Document::open(source.into_bytes()).expect("opens");
     assert_eq!(document.page_count(), 1);
-    assert_eq!(
-        warnings(&document).first(),
-        Some(&ArchiveWarning::Markup {
-            item: String::new(),
-            defect: tinker_pdf::epub::xhtml::MarkupDefect::Truncated
-        })
-    );
+    assert!(warnings(&document).contains(&ArchiveWarning::Markup {
+        item: String::new(),
+        defect: tinker_pdf::epub::xhtml::MarkupDefect::Truncated
+    }));
     assert!(text(&document).is_empty());
 }
 

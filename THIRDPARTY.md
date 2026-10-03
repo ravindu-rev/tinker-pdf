@@ -33,6 +33,7 @@ fails the same allowlist a crate licence would.
 | `crates/tinker-pdf-xml/data/xhtml-entities` | XHTML 1.0's three entity sets as XHTML Modularization 1.1 (2010-07-29) publishes them, from [w3c/markup-validator](https://github.com/w3c/markup-validator) `htdocs/sgml-lib/REC-xhtml-modularization-20100729/` at `724a15b` (fetched 2026-09-26) | `W3C` |
 | `crates/tinker-pdf-content/data/ucd` | The Unicode Character Database, version 17.0.0, via [unicode-org/unicodetools](https://github.com/unicode-org/unicodetools) `unicodetools/data/ucd/17.0.0` at `0509b4b` (fetched 2026-09-26) | `Unicode-3.0` |
 | `crates/tinker-pdf-archive/data/zstd-golden` | [facebook/zstd](https://github.com/facebook/zstd) `tests/golden-decompression/` and `tests/golden-decompression-errors/`, branch `dev` as served on 2026-09-26 (no commit could be resolved; pinned by SHA-256 below) | `BSD-3-Clause` |
+| `crates/tinker-pdf-xml/data/encoding-indexes` | The WHATWG Encoding Standard's single-byte indexes and label table, from [whatwg/encoding](https://github.com/whatwg/encoding) at `a985b62` (2026-05-21) | `BSD-3-Clause` |
 
 ### `crates/tinker-pdf-font/data/cmap-resources`
 
@@ -586,6 +587,76 @@ recorded here as the measurement it was rather than run by any test (ruling
 the semicolon-less legacy spellings) include ones that expand to two code points (`&nGt;` is U+226B U+20D2), which would end
 `tinker-pdf-xml`'s invariant that decoded text is never longer than its source,
 and it is not what any XHTML DTD declares.
+
+### `crates/tinker-pdf-xml/data/encoding-indexes`
+
+The Encoding Standard's **single-byte indexes** — the code points each of its
+twenty-seven distinct single-byte tables gives bytes 0x80 to 0xFF, with
+ISO-8859-8-I reading ISO-8859-8's — and `encodings.json`, its table of every
+label every encoding answers to. `tinker-pdf-xml`'s `build.rs` compiles the
+indexes into `[u16; 128]` arrays and the labels into one sorted
+`(label, name)` array, and `tinker_pdf_xml::encoding` decodes by them: an FB2
+whose declaration names `windows-1251` or `koi8-r` (tier 5's FB2 row). The
+multi-byte indexes (GBK, Big5, JIS, EUC-KR, gb18030) are **not** here; nothing
+decodes those, and their labels are recognised from `encodings.json` only to
+say so.
+
+Cloned from `https://github.com/whatwg/encoding` on 3 October 2026, at commit
+`a985b62a9b45c17da3e17a9f0a0b4e30c34c4a8a` (committed 2026-05-21); every file
+is byte-for-byte that commit's. Each index carries its own `# Identifier:` hash
+and `# Date:` line in its header, and `build.rs` refuses a file whose rows are
+not `pointer TAB 0xHEX`, a pointer past 127 or given twice, a code point outside
+the BMP, and an `encodings.json` whose *Legacy single-byte encodings* group is
+not exactly the twenty-eight it compiles.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `LICENSE` | 16 315 | `85dc6f5ccb57a6fe8c33d158f9fc8fc7ee5655a5d3db2cdd131c6a3d0f48a864` |
+| `encodings.json` | 8 913 | `078212b3697f60b81225b6671bd9da2604497abff0aa8e96e4d46605c02ac9e7` |
+| `index-ibm866.txt` | 6 039 | `1796f4955dbc5c94e3951a940e9250c819580ce5dd1c9ac396ef73a26e938264` |
+| `index-iso-8859-2.txt` | 5 550 | `86a09a772c5ff8631dc47b8838f0b7751dc31d53fd2eb4262f0fc858e638468b` |
+| `index-iso-8859-3.txt` | 5 214 | `d49c03f3e8cab4fbf861b4471ce121beb937dbd56dfd3106b997326c4b97da0d` |
+| `index-iso-8859-4.txt` | 5 522 | `d93b8b6606e1a12ccf28418a629911b497cb7a354c8a740207992059c50917b3` |
+| `index-iso-8859-5.txt` | 5 162 | `b42bf0bb8d49701efbd8c0fb2bc7330985ce84c576ac51efe86aeff6b47aea5d` |
+| `index-iso-8859-6.txt` | 2 844 | `84b979a90c6a4fb2a2dffe37994647cd4836f918550b46d329b0d798f4b84d52` |
+| `index-iso-8859-7.txt` | 4 986 | `fc1d4295d73dfd0dd6e1b2c2ee3de7a52c6e94ddb09358161d02a2adb08a5151` |
+| `index-iso-8859-8.txt` | 3 077 | `25a8f4366e7935f2c5d59f34e59c400683a1df86546776e7d4e527ae7235cc9e` |
+| `index-iso-8859-10.txt` | 5 677 | `6c1863fca2ad99eed23cc77cce075fcd3cac6bd7b50a584d3067456c2180f16e` |
+| `index-iso-8859-13.txt` | 5 410 | `5c5fe48042ef633a88d1aeed72dd3a2e1fb5202b70c5b7696b53e76ac5e56752` |
+| `index-iso-8859-14.txt` | 5 818 | `310ec047fbd33d8c02de309f0bc8562e453e7d873cc2093005a5d954fc8f0032` |
+| `index-iso-8859-15.txt` | 5 357 | `1171d20bd7c98b5755e8802480d2799527a99847531284cd8d860ffda7cde449` |
+| `index-iso-8859-16.txt` | 5 704 | `e7bee177fdf60c5167b7c44351cd25f51caf9780889493c7855c0eb222a31660` |
+| `index-koi8-r.txt` | 5 978 | `482889b92f244a03fd33ceee13a248a5fd479a3d1633019cc3b21910b8824f52` |
+| `index-koi8-u.txt` | 5 899 | `3b8bfcaa2b7fb125e9790cc4964c4c9e51eee2c9c6e2a80ba7dfd8901546a2c6` |
+| `index-macintosh.txt` | 5 531 | `5e2b0aa162f3032cf6c96a119f59f698da80c16d58014080a6bd246d7ade3c38` |
+| `index-windows-874.txt` | 4 624 | `81b42398e8bef2acc004f38ed6ae2c4d162dfdc367e5ddfcb1cb752ac8814a1e` |
+| `index-windows-1250.txt` | 5 842 | `857f28be0681aae376f1671ab388d8e141cff9648a68803b53887bfdf950f464` |
+| `index-windows-1251.txt` | 5 518 | `bf29b6293d8b5f8011804c575b78a3b589a3fd6a4ace29ff788e3445157a13c0` |
+| `index-windows-1252.txt` | 5 667 | `2c5fa192d566f92b8b9e6e116255b1f94016b4ece5b9dacb3b98be70b8c60795` |
+| `index-windows-1253.txt` | 5 173 | `38390cd918ac2c78c47be62bd486598e7d129e0adceb140c8a7f0165ddbbf3f5` |
+| `index-windows-1254.txt` | 5 658 | `88b7acb81b616bec879521d371eee5766b9306eb050b814e4dce9468e0725822` |
+| `index-windows-1255.txt` | 4 388 | `4a3ca10dd8ef4ce06b929f6bf66d7ea8932ab3c06e07162b0f8a9536a692e6ac` |
+| `index-windows-1256.txt` | 4 974 | `a3e9e6fcf4c3eda90275c791d5d7dad08700374ebe67b17cabdfff1e48f984c1` |
+| `index-windows-1257.txt` | 5 478 | `7e56420f3460befff856365b37733f9eabc1342e82be5999ce34c5eb518fddda` |
+| `index-windows-1258.txt` | 5 521 | `2236cdac45f5970629881d09908d13af96965f1c67617160734cbefb54aa3176` |
+| `index-x-mac-cyrillic.txt` | 5 485 | `a01be0035d0cfbb8da0af780eeb6e7c6169ab26d748d03d15ccd4cd969c5b786` |
+
+**The licence, and why this tree is `BSD-3-Clause` and not `CC-BY-4.0`.** The
+repository's `LICENSE`, vendored here verbatim, reads: *"This work is licensed
+under a Creative Commons Attribution 4.0 International License. To the extent
+portions of it are incorporated into source code, such portions in the source
+code are licensed under the BSD 3-Clause License instead."* CC BY 4.0 is **not**
+on `deny.toml`'s allowlist, and adding it was not this tree's decision to make.
+BSD-3-Clause is, and the second sentence is what applies here: these files are
+inputs a build script compiles into the crate's source, which is the use the
+grant was written for, and the reading `encoding_rs` — the Encoding Standard's
+own editor's crate — ships its compiled tables under ("(Apache-2.0 OR MIT) AND
+BSD-3-Clause", the BSD part for the data derived from the standard). The
+notice and disclaimer travel with the files in `LICENSE`, which is what
+BSD-3-Clause's first two conditions ask. Were the reading ever judged wrong,
+the remedy is the allowlist's and not this file's: the data would leave the
+tree with the decoders that read it, and an 8-bit FB2 would be an empty page
+again.
 
 ### `crates/tinker-pdf-content/data/ucd`
 

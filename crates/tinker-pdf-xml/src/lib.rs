@@ -80,6 +80,10 @@
 //! byte order mark would refuse every OpenXPS file Windows writes; one that
 //! required its absence would refuse every XPS file it writes.
 //! [`Source::new`] takes both, and UTF-16 in both byte orders.
+//! [`Source::with_declared_encoding`] also takes the WHATWG Encoding Standard's
+//! single-byte encodings when the declaration names one — FictionBook's
+//! `windows-1251` and `koi8-r` — from tables vendored in [`encoding`]; it is a
+//! second constructor because XPS forbids what XML allows there.
 //!
 //! # Using it
 //!
@@ -99,6 +103,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod encoding;
 pub mod limits;
 mod scan;
 mod text;
@@ -346,6 +351,10 @@ pub enum Encoding {
     Utf8,
     Utf16LittleEndian,
     Utf16BigEndian,
+    /// One of the Encoding Standard's single-byte encodings, which the XML
+    /// declaration named — read only by [`Source::with_declared_encoding`],
+    /// since a declaration is the one thing that can say a file is in one.
+    SingleByte(encoding::SingleByte),
 }
 
 /// Which construct ran off the end of the input.
@@ -601,6 +610,11 @@ pub enum Warning {
     /// and accepting silently would lose the fact. Ruling 10's shape: the mode
     /// reports rather than merely tolerates.
     ExternalIdentifierNotAllowed,
+    /// A byte the declared single-byte encoding leaves unmapped, read as
+    /// U+FFFD — the Encoding Standard's own *replacement* error mode. Five of
+    /// windows-1252's thirty-two upper-half bytes are such holes, and more of
+    /// several ISO 8859 parts'.
+    UnmappedByte,
 }
 
 impl fmt::Display for Warning {
@@ -614,6 +628,7 @@ impl fmt::Display for Warning {
             Self::ExternalIdentifierNotAllowed => {
                 "an external identifier outside the set EPUB 3.3 Appendix B allows"
             }
+            Self::UnmappedByte => "a byte the declared encoding maps to no character",
         })
     }
 }
@@ -815,6 +830,11 @@ pub struct Source<'a> {
     text: Cow<'a, str>,
     encoding: Encoding,
     warnings: Vec<Warning>,
+    /// Whether this source was made by [`Source::with_declared_encoding`], which
+    /// decides how a declaration naming a single-byte encoding the bytes were
+    /// not read in is answered: a warning there, and [`Error::UnsupportedEncoding`]
+    /// from [`Source::new`], exactly as before that constructor existed.
+    declared: bool,
 }
 
 impl<'a> Source<'a> {
@@ -840,7 +860,53 @@ impl<'a> Source<'a> {
             text,
             encoding,
             warnings: warning.into_iter().collect(),
+            declared: false,
         })
+    }
+
+    /// [`Source::new`], and also the Encoding Standard's single-byte encodings
+    /// when the XML declaration names one — `windows-1251`, `koi8-r`,
+    /// `iso-8859-2` and their siblings ([`encoding::SingleByte`]).
+    ///
+    /// §4.3.3 lets a processor read encodings beyond the two it must, and
+    /// Appendix F says how one is found: with no byte order mark and no UTF-16
+    /// shape, the declaration is ASCII whatever the encoding is, so its
+    /// `encoding` pseudo-attribute can be read before a byte past it is
+    /// decoded. A label the standard gives a single-byte encoding decodes the
+    /// whole input by that encoding's table; every other case is
+    /// [`Source::new`]'s. A byte the table leaves unmapped is U+FFFD and
+    /// [`Warning::UnmappedByte`].
+    ///
+    /// **A separate constructor rather than [`Source::new`]'s new behaviour**,
+    /// because a format can forbid what XML allows: ECMA-388 requires an XPS
+    /// part to be UTF-8 or UTF-16, and that reader keeps refusing a declared
+    /// `windows-1252` as [`Error::UnsupportedEncoding`] by calling the other
+    /// one. A multi-byte encoding — Shift_JIS, GBK, Big5 — is that same error
+    /// from both.
+    ///
+    /// # Errors
+    ///
+    /// [`Source::new`]'s.
+    pub fn with_declared_encoding(bytes: &'a [u8]) -> Result<Self, Error> {
+        if let Some(single) = text::declared_single_byte(bytes) {
+            let (decoded, unmapped) = single.decode(bytes);
+            if text::illegal_character(&decoded).is_some() {
+                return Err(Error::IllegalCharacter);
+            }
+            return Ok(Source {
+                text: Cow::Owned(decoded),
+                encoding: Encoding::SingleByte(single),
+                warnings: if unmapped > 0 {
+                    vec![Warning::UnmappedByte]
+                } else {
+                    Vec::new()
+                },
+                declared: true,
+            });
+        }
+        let mut source = Source::new(bytes)?;
+        source.declared = true;
+        Ok(source)
     }
 
     /// The decoded characters, with the byte order mark removed.
@@ -890,6 +956,7 @@ impl<'a> Source<'a> {
             external_id: None,
             saw_doctype: false,
             xhtml_entities: false,
+            declared: self.declared,
         }
     }
 }
@@ -941,6 +1008,8 @@ pub struct Reader<'a> {
     /// named references resolve. Set once, in the prolog, before any element
     /// has been read — which is the only place a declaration may stand.
     xhtml_entities: bool,
+    /// [`Source::declared`], carried over.
+    declared: bool,
 }
 
 impl<'a> Iterator for Reader<'a> {
@@ -1132,11 +1201,21 @@ impl<'a> Reader<'a> {
                 // Unmarked `UTF-16` names neither byte order, so it agrees with
                 // whichever one the bytes turned out to be.
                 Encoding::Utf16LittleEndian | Encoding::Utf16BigEndian => self.encoding,
-                Encoding::Utf8 => Encoding::Utf16BigEndian,
+                Encoding::Utf8 | Encoding::SingleByte(_) => Encoding::Utf16BigEndian,
             },
             "utf-16le" => Encoding::Utf16LittleEndian,
             "utf-16be" => Encoding::Utf16BigEndian,
-            _ => return Err(Error::UnsupportedEncoding),
+            // A single-byte label agrees with the bytes when
+            // `Source::with_declared_encoding` read them by it, and is the
+            // claim a byte order mark overruled when it did not. From
+            // `Source::new` it is what it always was: an encoding that
+            // constructor does not decode.
+            other => match encoding::lookup(other) {
+                Some(encoding::Label::SingleByte(single)) if self.declared => {
+                    Encoding::SingleByte(single)
+                }
+                _ => return Err(Error::UnsupportedEncoding),
+            },
         };
         if named != self.encoding {
             self.warn(Warning::EncodingDeclarationIgnored);

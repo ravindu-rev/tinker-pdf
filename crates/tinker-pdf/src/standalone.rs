@@ -140,6 +140,10 @@ pub enum TranslationDefect {
     /// An FB2 `<binary>` whose base64 would not decode, so the picture that
     /// names it is not drawn.
     BinaryUnreadable,
+    /// Bytes of an FB2 the single-byte encoding its declaration names leaves
+    /// unmapped, each read as U+FFFD — the Encoding Standard's own
+    /// *replacement* error mode. Counted per byte.
+    UnmappedByte,
 }
 
 /// What a one-file document turned out to be.
