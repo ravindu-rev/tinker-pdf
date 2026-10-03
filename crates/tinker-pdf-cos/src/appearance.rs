@@ -12,6 +12,20 @@
 //! two choices together make the mapping the identity and let the content be
 //! written in ordinary page coordinates. Any other choice means computing that
 //! map, getting it slightly wrong, and shipping annotations that drift.
+//!
+//! # What is drawn
+//!
+//! A subtype is drawn when its dictionary determines its appearance — when
+//! the geometry is in its own entries and 12.5.6 says what to do with it:
+//!
+//! - `Highlight`, `Underline`, `StrikeOut`, `Square`, `Circle` and `Text`, the
+//!   first six, exactly as they were drawn before anything else was added
+//!   (`the_seven_first_subtypes_are_drawn_exactly_as_they_were`); `Link`, the
+//!   seventh, draws nothing.
+//! - `Line` (12.5.6.7): `/L`, Table 176's endings, Figure 60's leader lines.
+//!
+//! Each carries 12.5.6.2's `/CA` in the graphics state it selects, and a line
+//! its `/BS` (or `/Border`) dash.
 
 use crate::doc::CosDocument;
 use crate::name::Name;
@@ -114,6 +128,372 @@ fn op(out: &mut Vec<u8>, values: &[f64], operator: &[u8]) {
     }
     out.extend_from_slice(operator);
     out.push(b'\n');
+}
+
+/// A point in default user space.
+type Point = (f64, f64);
+
+/// The finite numbers of an array entry, in order; empty when the entry is
+/// absent or not an array. A non-number element is dropped rather than read
+/// as zero, so a malformed array shortens instead of growing a point at the
+/// origin.
+fn numbers_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Vec<f64> {
+    doc.resolve_key(dict, doc.intern(key))
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Object::as_number)
+                .filter(|v| v.is_finite())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A finite number entry.
+fn number_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Option<f64> {
+    doc.resolve_key(dict, doc.intern(key))
+        .as_number()
+        .filter(|v| v.is_finite())
+}
+
+/// The colour a line-like annotation strokes with: `/C`, or black when the
+/// entry is absent — the convention `Underline` and `StrikeOut` already
+/// follow here. An empty `/C` is 12.5.2's "transparent", and strokes nothing.
+fn stroke_color_of(doc: &CosDocument, dict: &Dict) -> Option<[f64; 3]> {
+    match *doc.resolve_key(dict, doc.intern(b"C")) {
+        Object::Null => Some([0.0, 0.0, 0.0]),
+        _ => color_of(doc, dict, b"C"),
+    }
+}
+
+/// The dash pattern a border is drawn with (12.5.4 Table 166): `/BS /D` when
+/// `/BS /S` is `/D`, defaulting to `[3]`; otherwise the legacy `/Border`'s
+/// optional fourth element. `None` is a solid line.
+///
+/// A pattern 8.4.3.6 would refuse — a negative or non-finite element, or
+/// every element zero — is drawn solid: a viewer handed `[0 0] 0 d` draws
+/// nothing at all, which is the one thing a border must not become.
+fn dash_of(doc: &CosDocument, dict: &Dict) -> Option<Vec<f64>> {
+    let pattern = if let Some(style) = doc.resolve_key(dict, doc.intern(b"BS")).as_dict() {
+        let dashed = style
+            .get_name(doc.intern(b"S"))
+            .and_then(|name| doc.name_bytes(name))
+            .is_some_and(|name| name.as_ref() == b"D");
+        if !dashed {
+            return None;
+        }
+        match doc.resolve_key(style, doc.intern(b"D")).as_array() {
+            Some(items) => items
+                .iter()
+                .map(Object::as_number)
+                .collect::<Option<Vec<f64>>>()?,
+            None => vec![3.0],
+        }
+    } else {
+        let border = doc.resolve_key(dict, doc.intern(b"Border"));
+        let items = border.as_array()?.get(3)?;
+        let items = match items {
+            Object::Ref(r) => doc.get(*r).ok()?.as_array()?.to_vec(),
+            other => other.as_array()?.to_vec(),
+        };
+        items
+            .iter()
+            .map(Object::as_number)
+            .collect::<Option<Vec<f64>>>()?
+    };
+    let valid = !pattern.is_empty()
+        && pattern.iter().all(|v| v.is_finite() && *v >= 0.0)
+        && pattern.iter().any(|v| *v > 0.0);
+    valid.then_some(pattern)
+}
+
+/// Writes `[a b ...] phase d`.
+fn dash(out: &mut Vec<u8>, pattern: &[f64], phase: f64) {
+    out.push(b'[');
+    for (index, value) in pattern.iter().enumerate() {
+        if index > 0 {
+            out.push(b' ');
+        }
+        number(out, *value);
+    }
+    out.extend_from_slice(b"] ");
+    op(out, &[phase], b"d");
+}
+
+/// The constant opacity a markup annotation is painted with (12.5.6.2
+/// Table 170 `/CA`, and ISO 32000-2's `/ca` for what is filled), as
+/// `(stroking, non-stroking)`, when either is below one.
+///
+/// The appearance carries it as an `ExtGState`, because the renderer — this
+/// one and every other — reads opacity from the content, not from the
+/// annotation. It is applied per operator, so where a fill and a stroke
+/// overlap (the inner half of a border) the two compose; that is the same
+/// appearance every producer that writes `/CA` into a `gs` makes.
+fn opacity_of(doc: &CosDocument, dict: &Dict) -> Option<(f64, f64)> {
+    let stroking = number_of(doc, dict, b"CA").map_or(1.0, |v| v.clamp(0.0, 1.0));
+    let filling = number_of(doc, dict, b"ca").map_or(stroking, |v| v.clamp(0.0, 1.0));
+    (stroking < 1.0 || filling < 1.0).then_some((stroking, filling))
+}
+
+/// A unit vector along `(dx, dy)`, or `None` for one too short to have a
+/// direction.
+fn unit(dx: f64, dy: f64) -> Option<Point> {
+    let length = (dx * dx + dy * dy).sqrt();
+    (length.is_finite() && length > 1e-9).then(|| (dx / length, dy / length))
+}
+
+/// `tan 30°`, the half-angle of an arrowhead, written out so that drawing one
+/// calls no transcendental function (ruling 4).
+const TAN_30: f64 = 0.577_350_269_189_625_8;
+/// `cos 60°` and `sin 60°`, the slash's angle from the line.
+const COS_60: f64 = 0.5;
+const SIN_60: f64 = 0.866_025_403_784_438_6;
+
+/// One end of a line, polyline or callout (12.5.6.7 Table 176).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ending {
+    None,
+    Square,
+    Circle,
+    Diamond,
+    OpenArrow,
+    ClosedArrow,
+    Butt,
+    ROpenArrow,
+    RClosedArrow,
+    Slash,
+}
+
+impl Ending {
+    /// A name Table 176 does not list draws nothing at that end: an ending
+    /// is a decoration, and inventing one is worse than leaving it off.
+    fn from_name(name: &[u8]) -> Ending {
+        match name {
+            b"Square" => Ending::Square,
+            b"Circle" => Ending::Circle,
+            b"Diamond" => Ending::Diamond,
+            b"OpenArrow" => Ending::OpenArrow,
+            b"ClosedArrow" => Ending::ClosedArrow,
+            b"Butt" => Ending::Butt,
+            b"ROpenArrow" => Ending::ROpenArrow,
+            b"RClosedArrow" => Ending::RClosedArrow,
+            b"Slash" => Ending::Slash,
+            _ => Ending::None,
+        }
+    }
+
+    /// The endings Table 176 fills with the interior colour.
+    fn is_closed(self) -> bool {
+        matches!(
+            self,
+            Ending::Square
+                | Ending::Circle
+                | Ending::Diamond
+                | Ending::ClosedArrow
+                | Ending::RClosedArrow
+        )
+    }
+}
+
+/// `/LE`: the endings at the first and the last point, `None` by default.
+fn endings_of(doc: &CosDocument, dict: &Dict) -> (Ending, Ending) {
+    let value = doc.resolve_key(dict, doc.intern(b"LE"));
+    let Some(items) = value.as_array() else {
+        return (Ending::None, Ending::None);
+    };
+    let at = |index: usize| {
+        items
+            .get(index)
+            .and_then(Object::as_name)
+            .and_then(|name| doc.name_bytes(name))
+            .map_or(Ending::None, |name| Ending::from_name(&name))
+    };
+    (at(0), at(1))
+}
+
+/// How a line-like annotation is painted: its stroke, its interior and its
+/// width, already resolved.
+#[derive(Clone, Copy)]
+struct Paint {
+    stroke: Option<[f64; 3]>,
+    fill: Option<[f64; 3]>,
+    width: f64,
+}
+
+impl Paint {
+    fn strokes(&self) -> bool {
+        self.stroke.is_some() && self.width > 0.0
+    }
+
+    /// The operator that paints a closed path: filled and stroked, filled,
+    /// or stroked. `None` when it would paint nothing.
+    fn closed(&self) -> Option<&'static [u8]> {
+        match (self.fill.is_some(), self.strokes()) {
+            (true, true) => Some(b"B\n"),
+            (true, false) => Some(b"f\n"),
+            (false, true) => Some(b"S\n"),
+            (false, false) => None,
+        }
+    }
+}
+
+/// Draws one line ending at `at`, where `out_dir` is the unit vector pointing
+/// away from the line — along it at the last point, back along it at the
+/// first.
+///
+/// Table 176 says what each ending is and nothing about its size. Here every
+/// one is sized from the line's width, three times it (and never less than
+/// three units) from the point to the shape's edge, so a heavier line has a
+/// heavier arrowhead: a square or circle six widths across, an arrowhead six
+/// widths long, a butt or slash six widths from end to end. `line` is the
+/// line's own direction, from its first point to its last, which a slash is
+/// measured from at both ends.
+fn ending(out: &mut Vec<u8>, kind: Ending, at: Point, out_dir: Point, line: Point, paint: &Paint) {
+    // What paints this ending: a closed one is filled, stroked or both, an
+    // open one only stroked. One with nothing to paint writes nothing, since
+    // an unpainted path would be painted by whatever operator came next.
+    let paint_with: &[u8] = match (kind, kind.is_closed()) {
+        (Ending::None, _) => return,
+        (_, true) => match paint.closed() {
+            Some(operator) => operator,
+            None => return,
+        },
+        (_, false) if paint.strokes() => b"S\n",
+        (_, false) => return,
+    };
+    let half = 3.0 * paint.width.max(1.0);
+    let (ux, uy) = out_dir;
+    // The normal, a quarter turn counter-clockwise of the outward direction.
+    let (nx, ny) = (-uy, ux);
+    let (x, y) = at;
+    match kind {
+        Ending::None => {}
+        Ending::Square => {
+            op(out, &[x + half * (ux + nx), y + half * (uy + ny)], b"m");
+            op(out, &[x + half * (-ux + nx), y + half * (-uy + ny)], b"l");
+            op(out, &[x + half * (-ux - nx), y + half * (-uy - ny)], b"l");
+            op(out, &[x + half * (ux - nx), y + half * (uy - ny)], b"l");
+            out.extend_from_slice(b"h\n");
+        }
+        Ending::Circle => circle(out, x, y, half),
+        Ending::Diamond => {
+            op(out, &[x + half * ux, y + half * uy], b"m");
+            op(out, &[x + half * nx, y + half * ny], b"l");
+            op(out, &[x - half * ux, y - half * uy], b"l");
+            op(out, &[x - half * nx, y - half * ny], b"l");
+            out.extend_from_slice(b"h\n");
+        }
+        Ending::OpenArrow | Ending::ClosedArrow | Ending::ROpenArrow | Ending::RClosedArrow => {
+            // The tip is the point; the two back corners are an arrowhead's
+            // length behind it — back along the line for an arrow, outward
+            // past the point for a reversed one — and spread at thirty
+            // degrees either side.
+            let back = if matches!(kind, Ending::OpenArrow | Ending::ClosedArrow) {
+                -2.0 * half
+            } else {
+                2.0 * half
+            };
+            let spread = 2.0 * half * TAN_30;
+            op(
+                out,
+                &[x + back * ux + spread * nx, y + back * uy + spread * ny],
+                b"m",
+            );
+            op(out, &[x, y], b"l");
+            op(
+                out,
+                &[x + back * ux - spread * nx, y + back * uy - spread * ny],
+                b"l",
+            );
+            if kind.is_closed() {
+                out.extend_from_slice(b"h\n");
+            }
+        }
+        Ending::Butt => {
+            op(out, &[x + half * nx, y + half * ny], b"m");
+            op(out, &[x - half * nx, y - half * ny], b"l");
+        }
+        Ending::Slash => {
+            // Thirty degrees clockwise of the perpendicular is sixty degrees
+            // counter-clockwise of the line itself.
+            let (lx, ly) = line;
+            let (sx, sy) = (lx * COS_60 - ly * SIN_60, lx * SIN_60 + ly * COS_60);
+            op(out, &[x + half * sx, y + half * sy], b"m");
+            op(out, &[x - half * sx, y - half * sy], b"l");
+        }
+    }
+    out.extend_from_slice(paint_with);
+}
+
+/// A line annotation (12.5.6.7): `/L` from its first point to its last, in
+/// `/C` at the `/BS` width and dash, with `/LE`'s endings filled with `/IC`,
+/// and, when `/LL` is not zero, the leader lines of Figure 60.
+///
+/// `/LL` is the leader lines' length, measured from `/LLO` past each point —
+/// clockwise of the line's direction when positive — and the line proper is
+/// drawn between their far ends, `/LLE` short of where they stop. `/Cap`'s
+/// caption is not drawn: text needs a font the dictionary does not name.
+fn line(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
+    let points = numbers_of(doc, annotation, b"L");
+    let [x1, y1, x2, y2] = *points.get(..4)? else {
+        return None;
+    };
+    let along = unit(x2 - x1, y2 - y1)?;
+    let paint = Paint {
+        stroke: stroke_color_of(doc, annotation),
+        fill: color_of(doc, annotation, b"IC"),
+        width: border_width(doc, annotation),
+    };
+    let (first, last) = endings_of(doc, annotation);
+    let fills_an_end = paint.fill.is_some() && (first.is_closed() || last.is_closed());
+    if !paint.strokes() && !fills_an_end {
+        return None;
+    }
+
+    let leader = number_of(doc, annotation, b"LL").unwrap_or(0.0);
+    let extension = number_of(doc, annotation, b"LLE").unwrap_or(0.0).max(0.0);
+    let offset = number_of(doc, annotation, b"LLO").unwrap_or(0.0).max(0.0);
+    // Clockwise of the direction of travel, for a positive /LL.
+    let side = if leader < 0.0 { -1.0 } else { 1.0 };
+    let (cx, cy) = (along.1 * side, -along.0 * side);
+    let reach = offset + leader.abs();
+    let (p1, p2) = (
+        (x1 + cx * reach, y1 + cy * reach),
+        (x2 + cx * reach, y2 + cy * reach),
+    );
+
+    if let Some(stroke) = paint.stroke {
+        op(out, &stroke, b"RG");
+    }
+    if let Some(fill) = paint.fill {
+        op(out, &fill, b"rg");
+    }
+    if paint.strokes() {
+        op(out, &[paint.width], b"w");
+        let pattern = dash_of(doc, annotation);
+        if let Some(pattern) = &pattern {
+            dash(out, pattern, 0.0);
+        }
+        if leader != 0.0 {
+            let far = reach + extension;
+            for (x, y) in [(x1, y1), (x2, y2)] {
+                op(out, &[x + cx * offset, y + cy * offset], b"m");
+                op(out, &[x + cx * far, y + cy * far], b"l");
+            }
+        }
+        op(out, &[p1.0, p1.1], b"m");
+        op(out, &[p2.0, p2.1], b"l");
+        out.extend_from_slice(b"S\n");
+        // The endings are drawn solid whatever the line is: a dashed
+        // arrowhead is a broken one.
+        if pattern.is_some() {
+            out.extend_from_slice(b"[] 0 d\n");
+        }
+    }
+    ending(out, first, p1, (-along.0, -along.1), along, &paint);
+    ending(out, last, p2, along, along, &paint);
+    Some(())
 }
 
 /// Builds the appearance for an annotation, or `None` when its type needs
@@ -289,11 +669,22 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
             // drawing nothing.
             return None;
         }
+        b"Line" => line(doc, annotation, &mut content)?,
         _ => return None,
     }
 
     if content.is_empty() {
         return None;
+    }
+
+    // 12.5.6.2's constant opacity, in the one graphics state this appearance
+    // selects. A highlight already selects it for its blend mode, so the
+    // opacity joins that state rather than adding a second.
+    let opacity = opacity_of(doc, annotation);
+    if opacity.is_some() && !needs_multiply {
+        let mut selected = b"/GS0 gs\n".to_vec();
+        selected.extend_from_slice(&content);
+        content = selected;
     }
 
     let mut dict = Dict::new();
@@ -324,10 +715,16 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
     );
 
     let mut resources = Dict::new();
-    if needs_multiply {
+    if needs_multiply || opacity.is_some() {
         let mut state = Dict::new();
         state.insert(Name::TYPE, Object::Name(doc.intern(b"ExtGState")));
-        state.insert(doc.intern(b"BM"), Object::Name(doc.intern(b"Multiply")));
+        if needs_multiply {
+            state.insert(doc.intern(b"BM"), Object::Name(doc.intern(b"Multiply")));
+        }
+        if let Some((stroking, filling)) = opacity {
+            state.insert(doc.intern(b"CA"), Object::Real(stroking));
+            state.insert(doc.intern(b"ca"), Object::Real(filling));
+        }
         let mut states = Dict::new();
         states.insert(doc.intern(b"GS0"), Object::Dict(state));
         resources.insert(doc.intern(b"ExtGState"), Object::Dict(states));
@@ -875,5 +1272,216 @@ mod tests {
                 "/{subtype}'s appearance moved"
             );
         }
+    }
+
+    /// An annotation dictionary written as PDF text, its names interned in
+    /// `doc`'s table.
+    fn parsed(doc: &CosDocument, text: &str) -> Dict {
+        let mut sink = crate::warn::WarningSink::new();
+        let parsed =
+            crate::parse::parse_object_at(text.as_bytes(), 0, doc.names_table(), &mut sink);
+        match parsed.object {
+            Object::Dict(dict) => dict,
+            other => panic!("the test's dictionary did not parse: {other:?}"),
+        }
+    }
+
+    fn content_of(doc: &CosDocument, text: &str) -> Option<String> {
+        synthesize(doc, &parsed(doc, text)).map(|stream| text_of(&stream))
+    }
+
+    #[test]
+    fn a_line_needs_two_distinct_points() {
+        let doc = doc();
+        for l in ["", "/L [10 10 10]", "/L [10 10 10 10]", "/L [10 10 (x) 20]"] {
+            assert_eq!(
+                content_of(
+                    &doc,
+                    &format!("<< /Subtype /Line /Rect [0 0 100 100] {l} /C [1 0 0] >>")
+                ),
+                None,
+                "a line with {l:?} has no direction to draw"
+            );
+        }
+    }
+
+    /// A line with no stroke colour still fills a closed ending with `/IC`,
+    /// and an open ending — which only a stroke can draw — writes nothing at
+    /// all. A path left unpainted would be painted by the next operator,
+    /// which is the square's fill.
+    #[test]
+    fn an_ending_with_nothing_to_paint_writes_no_path() {
+        let doc = doc();
+        let content = content_of(
+            &doc,
+            "<< /Subtype /Line /Rect [0 0 100 100] /L [10 50 90 50] /C [] /IC [0 0 1] \
+             /LE [/OpenArrow /Square] /BS << /W 1 >> >>",
+        )
+        .expect("the square is still filled");
+        assert_eq!(
+            content, "0 0 1 rg\n93 53 m\n87 53 l\n87 47 l\n93 47 l\nh\nf\n",
+            "only the square, filled"
+        );
+        assert_eq!(
+            content_of(
+                &doc,
+                "<< /Subtype /Line /Rect [0 0 100 100] /L [10 50 90 50] /C [] \
+                 /LE [/OpenArrow /Square] >>",
+            ),
+            None,
+            "and with no interior either, nothing is left to draw"
+        );
+    }
+
+    /// Every ending, at the last point of a line travelling east, at width 1:
+    /// each reaches three units from its point.
+    #[test]
+    fn each_ending_is_drawn_where_table_176_puts_it() {
+        let doc = doc();
+        let ending = |name: &str| -> String {
+            let content = content_of(
+                &doc,
+                &format!(
+                    "<< /Subtype /Line /Rect [0 0 100 100] /L [10 50 90 50] /C [1 0 0] \
+                     /IC [0 0 1] /LE [/None /{name}] >>"
+                ),
+            )
+            .expect("a line");
+            let after = content
+                .split_once("90 50 l\nS\n")
+                .map(|(_, rest)| rest.to_owned())
+                .expect("the line comes first");
+            after
+        };
+        assert_eq!(ending("None"), "");
+        assert_eq!(ending("Bogus"), "", "an unlisted name draws nothing");
+        assert_eq!(ending("Butt"), "90 53 m\n90 47 l\nS\n");
+        assert_eq!(
+            ending("Diamond"),
+            "93 50 m\n90 53 l\n87 50 l\n90 47 l\nh\nB\n"
+        );
+        // Tip at the point, back corners six behind it and 6 tan 30 either
+        // side.
+        assert_eq!(
+            ending("OpenArrow"),
+            "84 53.4641 m\n90 50 l\n84 46.5359 l\nS\n"
+        );
+        assert_eq!(
+            ending("ClosedArrow"),
+            "84 53.4641 m\n90 50 l\n84 46.5359 l\nh\nB\n"
+        );
+        assert_eq!(
+            ending("ROpenArrow"),
+            "96 53.4641 m\n90 50 l\n96 46.5359 l\nS\n"
+        );
+        // Sixty degrees counter-clockwise of east, three either side.
+        assert_eq!(ending("Slash"), "91.5 52.5981 m\n88.5 47.4019 l\nS\n");
+        assert!(ending("Circle").ends_with("h\nB\n"));
+    }
+
+    /// The first point's ending points the other way: back along the line.
+    #[test]
+    fn the_first_ending_points_away_from_the_line() {
+        let doc = doc();
+        let content = content_of(
+            &doc,
+            "<< /Subtype /Line /Rect [0 0 100 100] /L [10 50 90 50] /C [1 0 0] \
+             /LE [/OpenArrow /None] >>",
+        )
+        .expect("a line");
+        assert!(
+            content.ends_with("16 46.5359 m\n10 50 l\n16 53.4641 l\nS\n"),
+            "{content}"
+        );
+    }
+
+    #[test]
+    fn a_dash_is_drawn_and_one_that_paints_nothing_is_not() {
+        let doc = doc();
+        let line = |bs: &str| {
+            content_of(
+                &doc,
+                &format!(
+                    "<< /Subtype /Line /Rect [0 0 100 100] /L [10 50 90 50] /C [1 0 0] \
+                     {bs} /LE [/None /Butt] >>"
+                ),
+            )
+            .expect("a line")
+        };
+        let dashed = line("/BS << /W 2 /S /D /D [6 4] >>");
+        assert!(dashed.contains("2 w\n[6 4] 0 d\n"), "{dashed}");
+        assert!(
+            dashed.contains("S\n[] 0 d\n"),
+            "the ending is drawn solid: {dashed}"
+        );
+        assert!(
+            line("/BS << /W 2 /S /D >>").contains("[3] 0 d\n"),
+            "Table 166's default dash"
+        );
+        assert!(
+            line("/Border [0 0 2 [5 1]]").contains("[5 1] 0 d\n"),
+            "the legacy /Border's dash"
+        );
+        for solid in [
+            "/BS << /W 2 /S /D /D [0 0] >>",
+            "/BS << /W 2 /S /D /D [4 -1] >>",
+            "/BS << /W 2 /S /D /D [] >>",
+            "/BS << /W 2 /S /S /D [6 4] >>",
+            "/BS << /W 2 >> /Border [0 0 2 [5 1]]",
+        ] {
+            assert!(!line(solid).contains(" d\n"), "{solid} is drawn solid");
+        }
+    }
+
+    /// `/CA` selects a graphics state with both opacities, and `/ca` the
+    /// non-stroking one on its own; a highlight's state carries its blend
+    /// mode and the opacity together.
+    #[test]
+    fn opacity_is_one_graphics_state() {
+        let doc = doc();
+        let state = |text: &str| -> (String, Dict) {
+            let stream = synthesize(&doc, &parsed(&doc, text)).expect("an appearance");
+            let resources = stream
+                .dict
+                .get_dict(doc.intern(b"Resources"))
+                .and_then(|r| r.get_dict(doc.intern(b"ExtGState")))
+                .and_then(|s| s.get_dict(doc.intern(b"GS0")))
+                .cloned()
+                .expect("a state");
+            (text_of(&stream), resources)
+        };
+        let number = |dict: &Dict, key: &[u8]| dict.get_number(doc.intern(key));
+
+        let (content, gs) =
+            state("<< /Subtype /Line /Rect [0 0 100 100] /L [10 50 90 50] /CA 0.25 >>");
+        assert!(content.starts_with("/GS0 gs\n"));
+        assert_eq!(number(&gs, b"CA"), Some(0.25));
+        assert_eq!(number(&gs, b"ca"), Some(0.25));
+
+        let (_, gs) =
+            state("<< /Subtype /Line /Rect [0 0 100 100] /L [10 50 90 50] /CA 2 /ca 0.5 >>");
+        assert_eq!(number(&gs, b"CA"), Some(1.0), "clamped to one");
+        assert_eq!(number(&gs, b"ca"), Some(0.5));
+
+        let (content, gs) = state(
+            "<< /Subtype /Highlight /Rect [0 0 100 100] /CA 0.5 \
+             /QuadPoints [10 60 90 60 10 40 90 40] >>",
+        );
+        assert_eq!(content.matches(" gs\n").count(), 1, "one state: {content}");
+        assert_eq!(
+            gs.get_name(doc.intern(b"BM")),
+            Some(doc.intern(b"Multiply"))
+        );
+        assert_eq!(number(&gs, b"CA"), Some(0.5));
+
+        let opaque = synthesize(
+            &doc,
+            &parsed(
+                &doc,
+                "<< /Subtype /Line /Rect [0 0 100 100] /L [10 50 90 50] /CA 1 >>",
+            ),
+        )
+        .expect("an appearance");
+        assert!(!text_of(&opaque).contains(" gs"), "opaque needs no state");
     }
 }
