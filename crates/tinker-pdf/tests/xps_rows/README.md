@@ -21,6 +21,7 @@ repository's.
 | `wpf-stop-alphas.xps` | 78 925 | `c9ca7d2ddbe3c862c9046da29485ee06c11a34bb210b138d72d62a35b988263f` | 18.3.2's per-stop alpha |
 | `wpf-colour-interpolation.xps` | 78 997 | `873e0f42f3fa3610eaa9c5dc95e3a60d1839951392cfa360d5bed43170207684` | 18.3.1.2's `ColorInterpolationMode` |
 | `wpf-n-channel.xps` | 78 977 | `95a46000c0d33b0d296e9279a815a4a4a033c2a3440a370cf290232ec5afbcc6` | 15.2.5's n-channel `ContextColor` |
+| `wpf-context-stops.xps` | 79 050 | `12905033c02364b96bcbc76625755018cc1712f603221272e970ee7d641069d4` | 18.3.1.2's `ContextColor` gradient stop |
 
 **`wpf-style-simulations.xps`** sets WPF's own run — `"Page one"`,
 `Indices=",53"`, in the package's font — four times at a 48-unit em, a hundred
@@ -52,6 +53,14 @@ fills four shapes in it, three through `Fill` and one through a keyed
 `SolidColorBrush`. The census reads each `ContextColor`'s components out of
 the markup and the `scn` operands under the `/DeviceN` space out of the
 document.
+
+**`wpf-context-stops.xps`** adds the committed fuzz corpus's
+`grey-gamma.icc` — a `GRAY` profile, a gamma of 461/256 over XYZ — and two
+gradients in it: one whose both stops are `ContextColor`s, and one with a
+`ContextColor` stop beside an sRGB one. The census converts each such stop to
+sRGB itself, from ICC.1 (`Y = v^γ`) and IEC 61966-2-1, without the reader's
+evaluator, and holds the stops and middles beside it to a byte, because the
+engine's conversion answers eight-bit sRGB.
 
 **How they were obtained**, on Linux x86_64 with CPython 3.11.15's `zipfile`,
 on 3 October 2026:

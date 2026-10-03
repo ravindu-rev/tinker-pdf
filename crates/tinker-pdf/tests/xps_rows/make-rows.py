@@ -157,6 +157,30 @@ write(
     'Target="/Resources/n.icc" Id="Rn" />',
 )
 
+# 18.3.1.2's ContextColor stops, converted to sRGB first: a grey profile --
+# the committed fuzz corpus's `grey-gamma.icc`, a gamma of 461/256 over XYZ --
+# at both ends of one ramp, and beside an sRGB stop in another.
+GREY = open("../../../../fuzz/corpus/icc_profile/grey-gamma.icc", "rb").read()
+
+
+def grey(v):
+    return "ContextColor /Resources/g.icc 1.0,%s" % v
+
+
+write(
+    "wpf-context-stops.xps",
+    "<FixedPage.Resources><ResourceDictionary>"
+    + linear("c", stop(grey("0.25"), "0") + stop(grey("0.75"), "1"))
+    + linear("m", stop(grey("0.5"), "0") + stop("#FFDC143C", "1"))
+    + "</ResourceDictionary></FixedPage.Resources>"
+    + path("c", 100)
+    + path("m", 300),
+    extra_parts=[("Resources/g.icc", GREY)],
+    extra_types='<Default Extension="icc" ContentType="application/vnd.ms-color.iccprofile" />',
+    extra_rels='<Relationship Type="http://schemas.microsoft.com/xps/2005/06/required-resource" '
+    'Target="/Resources/g.icc" Id="Rg" />',
+)
+
 # 18.3.1.2's two interpolation modes over the same stops: sRGB stated, then
 # scRGB over three stops, a hard edge, a radial and fading alpha.
 SCRGB = 'ColorInterpolationMode="ScRgbLinearInterpolation"'

@@ -65,6 +65,7 @@ use tinker_pdf_color::icc;
 use tinker_pdf_cos::{DeviceSpace, DocumentBuilder, Function};
 use tinker_pdf_xml::{Doctype, Event, Source};
 
+use super::brush::ContextColour;
 use super::markup::Trouble;
 use super::opc::{Package, PartName};
 use super::{dialect_of, Limits, XpsElementDefect};
@@ -101,6 +102,12 @@ pub struct Placed {
     /// and a `ContextColor` whose component count disagrees with its own
     /// profile is a file that contradicts itself.
     pub channels: u8,
+    /// The profile, compiled, where `tinker-pdf-color` can evaluate it: what a
+    /// gradient stop is converted to sRGB through (18.3.1.2), since a shading
+    /// carries one colour space and a stop cannot bring its own. `None` for a
+    /// profile embedded but not evaluable — a CMYK press profile with no
+    /// `A2B*` table, say — which still embeds.
+    pub transform: Option<icc::Transform>,
 }
 
 /// Every ICC profile the `ContextColor`s of one document named.
@@ -142,6 +149,28 @@ impl Profiles {
             self.placed.insert(name, placed);
         }
         Ok(())
+    }
+
+    /// A `ContextColor`'s sRGB, by its profile evaluated — `None` where the
+    /// profile is not placed or cannot be evaluated.
+    ///
+    /// The components are padded or cut to the profile's own count, as the
+    /// content stream writes them, and clamped to `[0, 1]` as 15.2.5 says.
+    #[must_use]
+    pub fn srgb(&self, page: &PartName, tint: &ContextColour) -> Option<[f64; 3]> {
+        let placed = self.get(page, &tint.profile).ok()?;
+        let transform = placed.transform.as_ref()?;
+        let components: Vec<f64> = (0..usize::from(placed.channels))
+            .map(|at| {
+                tint.components
+                    .get(at)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 1.0)
+            })
+            .collect();
+        let (r, g, b) = transform.apply(&components);
+        Some([r, g, b].map(|v| f64::from(v) / 255.0))
     }
 
     /// The colour space a `ContextColor` on `page` named.
@@ -188,10 +217,17 @@ impl Profiles {
         if !matches!(channels, 1 | 3 | 4) {
             let resource = format!("CS{}", self.next).into_bytes();
             self.next += 1;
-            return device_n(bytes, channels, &resource, builder)
-                .map(|()| Placed { resource, channels });
+            return device_n(bytes, channels, &resource, builder).map(|transform| Placed {
+                resource,
+                channels,
+                transform: Some(transform),
+            });
         }
         let profile = bytes.to_vec();
+        let transform = icc::Profile::parse(bytes)
+            .ok()
+            .and_then(|profile| icc::Transform::compile(&profile))
+            .filter(|transform| transform.inputs() == usize::from(channels));
 
         let resource = format!("CS{}", self.next).into_bytes();
         self.next += 1;
@@ -201,7 +237,11 @@ impl Profiles {
             // fallback rather than naming a space no page holds.
             return Err(XpsElementDefect::ColourProfileUnresolved);
         }
-        Ok(Placed { resource, channels })
+        Ok(Placed {
+            resource,
+            channels,
+            transform,
+        })
     }
 }
 
@@ -225,7 +265,7 @@ fn device_n(
     channels: u8,
     resource: &[u8],
     builder: &mut DocumentBuilder,
-) -> Result<(), XpsElementDefect> {
+) -> Result<icc::Transform, XpsElementDefect> {
     if !(2..=MAX_XPS_DEVICE_N_CHANNELS).contains(&channels) {
         return Err(XpsElementDefect::ColourProfileChannels);
     }
@@ -267,7 +307,7 @@ fn device_n(
         .collect();
     let names: Vec<&[u8]> = names.iter().map(Vec::as_slice).collect();
     if builder.add_device_n_color_space(resource, &names, DeviceSpace::Rgb, &tint, None) {
-        Ok(())
+        Ok(transform)
     } else {
         Err(XpsElementDefect::ColourProfileUnresolved)
     }

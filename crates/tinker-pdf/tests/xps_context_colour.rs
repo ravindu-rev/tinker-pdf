@@ -67,6 +67,20 @@
 //! | a profile past eight channels is placed anyway | 1 |
 //! | the census reads a resource space's components as RGB | 1 |
 //!
+//! And for `ContextColor` gradient stops converted through their profile,
+//! over this file and `xps_conservation.rs`, whose sweep holds
+//! `tests/xps_rows/wpf-context-stops.xps`:
+//!
+//! | Injection | Caught by |
+//! | --- | --- |
+//! | a stop keeps the alternate reading, as it did | 2 |
+//! | a converted stop is still named approximate | 1 |
+//! | the census evaluates no profile | 1 |
+//!
+//! One more was injected and fired nothing, and is not a defect: converting
+//! an `OpacityMask` gradient's stop colours through the resolver changes no
+//! picture, because a mask reads the stops' alphas and never their colours.
+//!
 //! Nothing fired zero. The single-test rows are five *different* tests, which
 //! is the property the file is arranged to have: the profile's bytes, its
 //! channel count, `/ICCBased`'s restriction, the fallback and the breadth of
@@ -461,28 +475,65 @@ fn a_context_colour_inside_a_solid_colour_brush_resolves_too() {
     assert!(stream(&bytes).contains("/CS0 cs\n0.1 0.2 0.3 scn"));
 }
 
-/// A `ContextColor` in a **gradient stop** is approximated, and says so.
-///
-/// 8.7.4.5's shading states one colour space for the whole function, so a stop
-/// is not free to name one of its own. The stop takes 8.6.5.5's alternate
-/// reading — the same numbers the file supplied, read the way a reader without
-/// the profile would — and the brush reports that it reached the page and not
-/// exactly, which is what `BrushApproximated` is for.
-///
-/// This is the one place `ContextColor` is lossy, and it is narrowed by name
-/// rather than left as a silent difference between a solid fill and a gradient
-/// stop of the same colour.
-#[test]
-fn a_context_colour_in_a_gradient_stop_is_approximated_and_named() {
-    let body = r##"<Path Data="M0,0L200,0 200,200 0,200Z"><Path.Fill>
+/// A linear gradient over the 200-unit square with these stops.
+fn ramp(stops: &str) -> String {
+    format!(
+        r##"<Path Data="M0,0L200,0 200,200 0,200Z"><Path.Fill>
          <LinearGradientBrush StartPoint="0,0" EndPoint="1,0"
                               MappingMode="RelativeToBoundingBox">
-           <LinearGradientBrush.GradientStops>
-             <GradientStop Color="ContextColor /Resources/p.icc 1.0,0.1,0.2,0.3" Offset="0" />
-             <GradientStop Color="#FF000000" Offset="1" />
-           </LinearGradientBrush.GradientStops>
-         </LinearGradientBrush></Path.Fill></Path>"##;
-    let bytes = package(body, Some(RGB));
+           <LinearGradientBrush.GradientStops>{stops}</LinearGradientBrush.GradientStops>
+         </LinearGradientBrush></Path.Fill></Path>"##
+    )
+}
+
+/// **A `ContextColor` in a gradient stop is converted to sRGB through its
+/// profile** — 18.3.1.2's *"convert the color values to sRGB first, and then
+/// perform a linear interpolation"* — since a shading carries one colour
+/// space and a stop cannot bring its own.
+///
+/// The grey profile is a gamma of 461/256 over XYZ, so the component 0.5 is
+/// `0.5^1.8008 = 0.2871` of the light, which sRGB encodes as 146 of 255 —
+/// where 8.6.5.5's alternate reading, the old answer, painted 128. Both stops
+/// the same, so the ramp is flat and the pixel is the stop.
+///
+/// *Since stops are converted*: this test used to assert the stop was named
+/// approximate and painted in the alternate reading.
+#[test]
+fn a_context_colour_in_a_gradient_stop_is_converted_through_its_profile() {
+    let stop = r#"<GradientStop Color="ContextColor /Resources/p.icc 1.0,0.5" Offset="OFFSET" />"#;
+    let body = ramp(&format!(
+        "{}{}",
+        stop.replace("OFFSET", "0"),
+        stop.replace("OFFSET", "1")
+    ));
+    let bytes = package(&body, Some(GREY));
+    assert_eq!(defects(&bytes), [], "converted, so nothing to name");
+    let got = f64::from(ink(&bytes));
+    assert!((got - 146.0).abs() < 2.0, "the profile's grey: {got}");
+
+    // Beside an sRGB stop the two blend in sRGB: white at the other end puts
+    // the middle at the mean of 146 and 255.
+    let mixed = ramp(&format!(
+        "{}{}",
+        stop.replace("OFFSET", "0"),
+        r##"<GradientStop Color="#FFFFFFFF" Offset="1" />"##
+    ));
+    let bytes = package(&mixed, Some(GREY));
+    assert_eq!(defects(&bytes), []);
+    let got = f64::from(ink(&bytes));
+    assert!((got - 200.5).abs() < 3.0, "halfway: {got}");
+}
+
+/// A stop whose profile cannot be evaluated — or is not there — keeps
+/// 8.6.5.5's alternate reading, and the brush says it reached the page
+/// approximately: the one case left where a `ContextColor` stop is lossy.
+#[test]
+fn a_context_colour_stop_whose_profile_cannot_be_evaluated_is_approximated() {
+    let body = ramp(
+        r##"<GradientStop Color="ContextColor /Resources/p.icc 1.0,0.1,0.2,0.3" Offset="0" />
+            <GradientStop Color="#FF000000" Offset="1" />"##,
+    );
+    let bytes = package(&body, None);
     assert_eq!(defects(&bytes), [XpsElementDefect::BrushApproximated]);
     assert!(
         stream(&bytes).contains("sh"),

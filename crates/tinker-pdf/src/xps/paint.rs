@@ -2249,7 +2249,11 @@ impl State<'_> {
     }
 
     fn brush_from_node(&mut self, node: &Node, bbox: Option<[f64; 4]>) -> Option<Brush> {
-        match brush::from_node(node, bbox) {
+        // A `ContextColor` gradient stop is converted through the page's own
+        // profiles, which only the painter holds.
+        let around = self.around;
+        let resolve = |tint: &ContextColour| around.profiles.srgb(around.part, tint);
+        match brush::from_node_resolving(node, bbox, &resolve) {
             Ok(brush) => {
                 if brush.approximated {
                     self.warn(XpsElementDefect::BrushApproximated);

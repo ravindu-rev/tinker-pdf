@@ -368,6 +368,7 @@ fn a_gradient_axis_the_wrong_way_round_is_reported() {
             stops: vec![(0.0, RED), (1.0, GREEN)],
             alphas: None,
             middles: Vec::new(),
+            profiled: false,
         },
         bounds: Rect::of(0.0, 0.0, 400.0, 200.0),
         alpha: 1.0,
@@ -399,6 +400,7 @@ fn a_radial_gradient_read_as_an_axial_one_is_a_paint_kind() {
                 stops: vec![(0.0, RED), (1.0, BLUE)],
                 alphas: None,
                 middles: Vec::new(),
+                profiled: false,
             },
             bounds: Rect::of(0.0, 0.0, 300.0, 300.0),
             alpha: 1.0,
@@ -412,6 +414,7 @@ fn a_radial_gradient_read_as_an_axial_one_is_a_paint_kind() {
         stops: vec![(0.0, RED), (1.0, BLUE)],
         alphas: None,
         middles: Vec::new(),
+        profiled: false,
     };
 
     let verdict = conserve(&markup, &document);
@@ -436,6 +439,7 @@ fn stop_alphas_dropped_or_reversed_are_reported() {
             stops: vec![(0.0, RED), (1.0, RED)],
             alphas,
             middles: Vec::new(),
+            profiled: false,
         },
         bounds: Rect::of(0.0, 0.0, 400.0, 200.0),
         alpha: 1.0,
@@ -471,6 +475,7 @@ fn a_ramp_blended_in_the_wrong_space_is_reported() {
             stops: vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])],
             alphas: None,
             middles: vec![(0.5, middle)],
+            profiled: false,
         },
         bounds: Rect::of(0.0, 0.0, 400.0, 200.0),
         alpha: 1.0,
@@ -500,6 +505,7 @@ fn a_gradient_that_lost_a_stop_is_reported_with_both_stop_lists() {
                 stops: vec![(0.0, RED), (0.5, GREEN), (1.0, BLUE)],
                 alphas: None,
                 middles: Vec::new(),
+                profiled: false,
             },
             bounds: Rect::of(0.0, 0.0, 400.0, 200.0),
             alpha: 1.0,
@@ -1316,6 +1322,7 @@ const DERIVED: &[&str] = &[
     "xps_rows/wpf-stop-alphas.xps",
     "xps_rows/wpf-colour-interpolation.xps",
     "xps_rows/wpf-n-channel.xps",
+    "xps_rows/wpf-context-stops.xps",
 ];
 
 /// **An interleaved package conserves, and states the census of the package

@@ -251,6 +251,14 @@ pub enum Paint {
         /// re-encoded in scRGB — and the document side evaluates the
         /// function there.
         middles: Vec<(f64, [f64; 3])>,
+        /// Whether any stop's colour came from a `ContextColor` evaluated
+        /// through its profile, on the markup side.
+        ///
+        /// Such a stop is converted to sRGB through an eight-bit transform
+        /// (18.3.1.2), so its colour, and the middles beside it, are held to a
+        /// byte rather than to [`COLOUR`]: the conversion's own resolution, and
+        /// not a loosening of any stop the file stated in sRGB.
+        profiled: bool,
     },
     /// 15.2.5's `ContextColor`: the components in the profile's own space,
     /// as the markup states them and as the content stream's `scn` writes
@@ -945,6 +953,8 @@ enum Brush {
         alphas: Option<Vec<(f64, f64)>>,
         /// See [`Paint::Gradient::middles`].
         middles: Vec<(f64, [f64; 3])>,
+        /// See [`Paint::Gradient::profiled`].
+        profiled: bool,
         /// The one alpha the stops share, times the brush's `Opacity`; the
         /// `Opacity` alone where they differ.
         alpha: f64,
@@ -967,17 +977,74 @@ enum Brush {
 }
 
 /// The stops of a gradient brush, in the order the markup wrote them, with
-/// each stop's alpha.
-fn stops(inner: &str) -> Vec<(f64, [f64; 3], f64)> {
+/// each stop's alpha and whether its colour came through a profile.
+fn stops(
+    inner: &str,
+    part: &str,
+    parts: &BTreeMap<String, Vec<u8>>,
+) -> Vec<(f64, [f64; 3], f64, bool)> {
     tags(inner)
         .iter()
         .filter(|tag| tag.name.ends_with("GradientStop"))
         .filter_map(|tag| {
             let offset = attribute(tag.attributes, "Offset")?.parse::<f64>().ok()?;
-            let (rgb, alpha) = colour(attribute(tag.attributes, "Color")?)?;
-            Some((offset, rgb, alpha))
+            let value = attribute(tag.attributes, "Color")?;
+            if let Some((values, alpha)) = context(value) {
+                let rgb = profiled_srgb(value, &values, part, parts)?;
+                return Some((offset, rgb, alpha, true));
+            }
+            let (rgb, alpha) = colour(value)?;
+            Some((offset, rgb, alpha, false))
         })
         .collect()
+}
+
+/// The sRGB a `ContextColor` comes to, by 18.3.1.2's conversion, for the one
+/// kind of profile this harness evaluates itself: a `GRAY` profile over an
+/// `XYZ` connection space whose `kTRC` is the identity or one gamma.
+///
+/// Written out from ICC.1 rather than borrowed: `Y = v^γ` from the curve
+/// (`curv` with no entries is the identity, with one a `u8Fixed8` gamma), and
+/// an achromatic `Y` is that light in each sRGB channel, encoded by
+/// IEC 61966-2-1. Anything else answers `None`, and a census that cannot read
+/// a stop states one fewer — which the comparison then reports.
+fn profiled_srgb(
+    value: &str,
+    components: &[f64],
+    part: &str,
+    parts: &BTreeMap<String, Vec<u8>>,
+) -> Option<[f64; 3]> {
+    let rest = value.trim().strip_prefix("ContextColor")?;
+    let (uri, _) = rest.trim_start().split_once(char::is_whitespace)?;
+    let bytes = parts.get(&resolve(part, uri))?;
+    if bytes.get(16..20)? != b"GRAY" || bytes.get(20..24)? != b"XYZ " {
+        return None;
+    }
+    let count = u32::from_be_bytes(bytes.get(128..132)?.try_into().ok()?) as usize;
+    let curve = (0..count.min(64)).find_map(|index| {
+        let at = 132 + index * 12;
+        let entry = bytes.get(at..at + 12)?;
+        (&entry[0..4] == b"kTRC").then(|| {
+            let offset = u32::from_be_bytes(entry[4..8].try_into().ok()?) as usize;
+            bytes.get(offset..offset + 14)
+        })?
+    })?;
+    if &curve[0..4] != b"curv" {
+        return None;
+    }
+    let gamma = match u32::from_be_bytes(curve[8..12].try_into().ok()?) {
+        0 => 1.0,
+        1 => f64::from(u16::from_be_bytes([curve[12], curve[13]])) / 256.0,
+        _ => return None,
+    };
+    let v = components.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
+    let light = v.powf(gamma);
+    let encoded = if light <= 0.003_130_8 {
+        light * 12.92
+    } else {
+        1.055 * light.powf(1.0 / 2.4) - 0.055
+    };
+    Some([encoded; 3])
 }
 
 /// A gradient brush from its kind, its geometry, its stops and its start tag.
@@ -985,8 +1052,20 @@ fn stops(inner: &str) -> Vec<(f64, [f64; 3], f64)> {
 /// The stops' alphas are one fact when they agree — a constant alpha over the
 /// whole element, with the brush's `Opacity` — and a ramp of their own when
 /// they do not.
-fn gradient_brush(kind: Gradient, geometry: Vec<f64>, attributes: &str, inner: &str) -> Brush {
-    let read = stops(inner);
+fn gradient_brush(
+    kind: Gradient,
+    geometry: Vec<f64>,
+    attributes: &str,
+    inner: &str,
+    part: &str,
+    parts: &BTreeMap<String, Vec<u8>>,
+) -> Brush {
+    let read = stops(inner, part, parts);
+    let profiled = read.iter().any(|stop| stop.3);
+    let read: Vec<(f64, [f64; 3], f64)> = read
+        .into_iter()
+        .map(|(offset, rgb, alpha, _)| (offset, rgb, alpha))
+        .collect();
     let opacity = attribute(attributes, "Opacity")
         .and_then(|o| o.parse::<f64>().ok())
         .unwrap_or(1.0);
@@ -1013,6 +1092,7 @@ fn gradient_brush(kind: Gradient, geometry: Vec<f64>, attributes: &str, inner: &
         alphas: varying.then(|| read.iter().map(|stop| (stop.0, stop.2)).collect()),
         alpha: if varying { opacity } else { uniform * opacity },
         middles: stated_middles(&read, linear_light),
+        profiled,
     }
 }
 
@@ -1062,7 +1142,13 @@ fn stated_middles(read: &[(f64, [f64; 3], f64)], linear_light: bool) -> Vec<(f64
 }
 
 /// One brush element, from its start tag and everything under it.
-fn brush(name: &str, attributes: &str, inner: &str) -> Option<Brush> {
+fn brush(
+    name: &str,
+    attributes: &str,
+    inner: &str,
+    part: &str,
+    parts: &BTreeMap<String, Vec<u8>>,
+) -> Option<Brush> {
     let local = name.rsplit(':').next().unwrap_or(name);
     match local {
         "SolidColorBrush" => {
@@ -1085,6 +1171,8 @@ fn brush(name: &str, attributes: &str, inner: &str) -> Option<Brush> {
                     vec![start[0], start[1], end[0], end[1]],
                     attributes,
                     inner,
+                    part,
+                    parts,
                 )
             })
         }
@@ -1103,6 +1191,8 @@ fn brush(name: &str, attributes: &str, inner: &str) -> Option<Brush> {
                     vec![origin[0], origin[1], 0.0, centre[0], centre[1], radius],
                     attributes,
                     inner,
+                    part,
+                    parts,
                 )
             })
         }
@@ -1283,7 +1373,7 @@ fn page_census(markup: &str, part: &str, parts: &BTreeMap<String, Vec<u8>>) -> P
         };
         let (inner, next) = span(resources, tag.name, at);
         at = next;
-        if let Some(brush) = brush(tag.name, tag.attributes, inner) {
+        if let Some(brush) = brush(tag.name, tag.attributes, inner, part, parts) {
             keyed.insert(key.to_owned(), brush);
         }
     }
@@ -1418,7 +1508,7 @@ fn path_mark(
                 }
                 let (nested, next) = span(fill, tag.name, at);
                 at = next;
-                if let Some(brush) = brush(tag.name, tag.attributes, nested) {
+                if let Some(brush) = brush(tag.name, tag.attributes, nested, part, parts) {
                     found = Some(brush);
                     break;
                 }
@@ -1437,6 +1527,7 @@ fn path_mark(
             alphas,
             alpha,
             middles,
+            profiled,
         } => (
             Paint::Gradient {
                 kind,
@@ -1444,6 +1535,7 @@ fn path_mark(
                 stops,
                 alphas,
                 middles,
+                profiled,
             },
             alpha,
         ),
@@ -1919,6 +2011,7 @@ fn shading_paint(cos: &CosDocument, shading: &Object) -> Option<Paint> {
         stops,
         alphas: None,
         middles: function_middles(cos, &function, reference),
+        profiled: false,
     })
 }
 
@@ -2512,6 +2605,7 @@ impl Walk<'_> {
                 geometry,
                 stops,
                 middles,
+                profiled,
                 ..
             } => Paint::Gradient {
                 kind,
@@ -2519,6 +2613,7 @@ impl Walk<'_> {
                 stops,
                 alphas: self.frame.soft.clone(),
                 middles,
+                profiled,
             },
             other => other,
         }
@@ -2910,6 +3005,7 @@ fn compare_mark(
                 stops: wanted_stops,
                 alphas: wanted_alphas,
                 middles: wanted_middles,
+                profiled,
             },
             Paint::Gradient {
                 kind: got_kind,
@@ -2917,15 +3013,27 @@ fn compare_mark(
                 stops: got_stops,
                 alphas: got_alphas,
                 middles: got_middles,
+                ..
             },
         ) => {
             // Half an eight-bit step: the writer samples a linear-light ramp
             // at sixteen bits and interpolates between samples, and 0.0018 is
             // the most that comes to anywhere (`brush.rs`'s own measurement).
+            // A byte, where a stop came through a profile's eight-bit
+            // transform — see `Paint::Gradient::profiled`.
+            let byte = 1.5 / 255.0;
+            let (stop_tolerance, middle_tolerance) = if *profiled {
+                (byte, byte)
+            } else {
+                (COLOUR, 2e-3)
+            };
             let middles_agree = wanted_middles.len() == got_middles.len()
                 && wanted_middles.iter().zip(got_middles).all(|(a, b)| {
                     near(a.0, b.0, GEOMETRY)
-                        && a.1.iter().zip(&b.1).all(|(x, y)| near(*x, *y, 2e-3))
+                        && a.1
+                            .iter()
+                            .zip(&b.1)
+                            .all(|(x, y)| near(*x, *y, middle_tolerance))
                 });
             if !middles_agree {
                 out.push(Divergence::Middles {
@@ -2974,10 +3082,13 @@ fn compare_mark(
                 });
             }
             let stops_agree = wanted_stops.len() == got_stops.len()
-                && wanted_stops
-                    .iter()
-                    .zip(got_stops)
-                    .all(|(a, b)| near(a.0, b.0, COLOUR) && rgb_near(a.1, b.1));
+                && wanted_stops.iter().zip(got_stops).all(|(a, b)| {
+                    near(a.0, b.0, COLOUR)
+                        && a.1
+                            .iter()
+                            .zip(&b.1)
+                            .all(|(x, y)| near(*x, *y, stop_tolerance))
+                });
             if !stops_agree {
                 out.push(Divergence::Stops {
                     page,

@@ -65,9 +65,9 @@ pub struct Colour {
 /// is a property of the **operator that sets a colour**, not of a number. A
 /// gradient *stop* cannot have one at all: 8.7.4.5's shading states one space
 /// for the whole function and a stop is not free to pick its own. So a stop
-/// reads [`Colour::rgb`] — the default-`/Alternate` reading — and the gradient
-/// says it approximated, while a `SolidColorBrush` carries the components
-/// verbatim through here and loses nothing.
+/// is converted to sRGB through its profile — 18.3.1.2's own rule — while a
+/// `SolidColorBrush` carries the components verbatim through here and loses
+/// nothing.
 ///
 /// The part is carried unresolved for [`Paint::Image`]'s reason: reading it
 /// needs the package, and this module is pure.
@@ -353,9 +353,9 @@ pub fn colour(text: &str) -> Result<Colour, BrushError> {
 /// says such a space falls back to `/Alternate`, and that `/Alternate`
 /// defaults by component count to `DeviceGray`, `DeviceRGB` or `DeviceCMYK`.
 /// So the fallback is not invented here either — it is the one PDF already
-/// specifies for exactly this situation, and it is only ever reached where a
-/// colour space cannot be named at all (a gradient stop) or where the part is
-/// missing.
+/// specifies for exactly this situation, and it is only ever reached where the
+/// part is missing, or where a gradient stop — which cannot name a colour
+/// space at all — has a profile this build cannot evaluate.
 pub fn context_colour(rest: &str) -> Result<(Colour, ContextColour), BrushError> {
     // A profile URI has to be separated from the keyword by whitespace;
     // `ContextColorx` is not a `ContextColor` and `#ContextColor` is not a
@@ -398,10 +398,11 @@ pub fn context_colour(rest: &str) -> Result<(Colour, ContextColour), BrushError>
 /// evaluated.
 ///
 /// This is what a PDF reader does with a profile it cannot use, and it is
-/// reached here for the two cases where an `/ICCBased` space cannot be named:
-/// a gradient stop, and a profile part that is not in the package. Nothing
-/// about it is this build's invention — the *rule* is PDF's and the numbers
-/// are the file's.
+/// reached here for the two cases where neither an `/ICCBased` space nor the
+/// profile's own answer is to be had: a gradient stop whose profile cannot be
+/// evaluated, and a profile part that is not in the package. Nothing about it
+/// is this build's invention — the *rule* is PDF's and the numbers are the
+/// file's.
 ///
 /// A component count that is none of one, three or four has no default
 /// alternate at all, and PDF has no colour space for it that does not need a
@@ -515,6 +516,19 @@ fn tinted(text: &str) -> Result<Brush, BrushError> {
 /// Every failure is [`BrushError::Syntax`]: there is no brush in section 15
 /// this build declines to paint.
 pub fn from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError> {
+    from_node_resolving(node, bbox, &unresolved)
+}
+
+/// [`from_node`], with the profiles a `ContextColor` gradient stop is
+/// converted through.
+///
+/// # Errors
+/// As [`from_node`].
+pub fn from_node_resolving(
+    node: &Node,
+    bbox: Option<[f64; 4]>,
+    resolve: Resolve<'_>,
+) -> Result<Brush, BrushError> {
     if !node.xps {
         return Err(BrushError::Syntax);
     }
@@ -524,7 +538,9 @@ pub fn from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushErro
             brush.alpha *= opacity_of(node)?;
             Ok(brush)
         }
-        "LinearGradientBrush" | "RadialGradientBrush" => gradient(node, bbox, Channel::Colour),
+        "LinearGradientBrush" | "RadialGradientBrush" => {
+            gradient(node, bbox, Channel::Colour, resolve)
+        }
         "ImageBrush" => image_brush(node, bbox),
         "VisualBrush" => visual_brush(node, bbox),
         _ => Err(BrushError::Syntax),
@@ -621,7 +637,9 @@ pub fn mask_from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Mask, Brush
             Ok(Mask::Uniform(colour.alpha * opacity_of(node)?))
         }
         "LinearGradientBrush" | "RadialGradientBrush" => {
-            let stops = stops_of(node)?;
+            // The alphas are all a mask reads, and a stop's alpha is the
+            // markup's whatever its profile says about its colour.
+            let stops = stops_of(node, &unresolved)?;
             let opacity = opacity_of(node)?;
             // Every stop carrying one alpha is a gradient that does not vary
             // where a mask reads it, whatever it does with colour — so it is
@@ -633,7 +651,7 @@ pub fn mask_from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Mask, Brush
             {
                 return Ok(Mask::Uniform(stops[0].colour.alpha * opacity));
             }
-            let brush = gradient(node, bbox, Channel::Alpha)?;
+            let brush = gradient(node, bbox, Channel::Alpha, &unresolved)?;
             match brush.paint {
                 Paint::Gradient {
                     shading, matrix, ..
@@ -833,19 +851,41 @@ fn spread_of(node: &Node) -> Result<Spread, BrushError> {
 struct Stop {
     offset: f64,
     colour: Colour,
-    /// Whether the stop stated a `ContextColor`.
+    /// Whether the stop stated a `ContextColor` its profile could not convert.
     ///
     /// 8.7.4.5's shading names **one** colour space for the whole function, so
-    /// a stop cannot carry a space of its own the way a solid fill can: it
-    /// takes 8.6.5.5's default-`/Alternate` reading and the gradient says it
-    /// approximated. Recorded here rather than inferred from the colour,
-    /// because the reading is a perfectly ordinary RGB triple once it is made
-    /// and nothing about the number remembers where it came from.
+    /// a stop cannot carry a space of its own the way a solid fill can: it is
+    /// converted to sRGB through its profile (18.3.1.2), and where that cannot
+    /// be done it takes 8.6.5.5's default-`/Alternate` reading and the
+    /// gradient says it approximated. Recorded here rather than inferred from
+    /// the colour, because the reading is a perfectly ordinary RGB triple once
+    /// it is made and nothing about the number remembers where it came from.
     contextual: bool,
 }
 
+/// What turns a `ContextColor` into the sRGB its profile says it is: the
+/// painter's profiles, evaluated. `None` where the profile is not there or
+/// cannot be evaluated.
+///
+/// A parameter rather than a lookup this module does, because the profiles
+/// are the package's and this module is pure.
+pub type Resolve<'a> = &'a dyn Fn(&ContextColour) -> Option<[f64; 3]>;
+
+/// A [`Resolve`] that resolves nothing, for a caller with no profiles.
+#[must_use]
+pub fn unresolved(_: &ContextColour) -> Option<[f64; 3]> {
+    None
+}
+
 /// 15.4.2's stop list, from either spelling of the property element.
-fn stops_of(node: &Node) -> Result<Vec<Stop>, BrushError> {
+///
+/// A `ContextColor` stop is converted to sRGB through `resolve` — 18.3.1.2's
+/// own first step, *"convert the color values to sRGB first"*, which applies
+/// wherever a stop is sRGB or scRGB and is this build's choice where none is,
+/// since no print ticket's blending space is read. A stop `resolve` cannot
+/// convert keeps 8.6.5.5's default-`/Alternate` reading and the gradient says
+/// it approximated.
+fn stops_of(node: &Node, resolve: Resolve<'_>) -> Result<Vec<Stop>, BrushError> {
     let property = format!("{}.GradientStops", node.local);
     let mut out = Vec::new();
     let mut push = |stop: &Node| -> Result<(), BrushError> {
@@ -853,13 +893,21 @@ fn stops_of(node: &Node) -> Result<Vec<Stop>, BrushError> {
             return Ok(());
         }
         let text = stop.attr("Color").ok_or(BrushError::Syntax)?;
-        let colour = colour(text)?;
+        let mut colour = colour(text)?;
         let offset = markup::number(stop.attr("Offset").ok_or(BrushError::Syntax)?)
             .ok_or(BrushError::Syntax)?;
+        let mut contextual = false;
+        if let Some(rest) = text.trim().strip_prefix("ContextColor") {
+            let (_, tint) = context_colour(rest)?;
+            match resolve(&tint) {
+                Some(rgb) => colour.rgb = rgb,
+                None => contextual = true,
+            }
+        }
         out.push(Stop {
             offset: offset.clamp(0.0, 1.0),
             colour,
-            contextual: text.trim_start().starts_with("ContextColor"),
+            contextual,
         });
         Ok(())
     };
@@ -882,8 +930,13 @@ fn stops_of(node: &Node) -> Result<Vec<Stop>, BrushError> {
     Ok(out)
 }
 
-fn gradient(node: &Node, bbox: Option<[f64; 4]>, channel: Channel) -> Result<Brush, BrushError> {
-    let stops = stops_of(node)?;
+fn gradient(
+    node: &Node,
+    bbox: Option<[f64; 4]>,
+    channel: Channel,
+    resolve: Resolve<'_>,
+) -> Result<Brush, BrushError> {
+    let stops = stops_of(node, resolve)?;
     let spread = spread_of(node)?;
     // Stops whose alphas differ vary across the element, which one constant
     // alpha cannot say: they become a second shading, of the alphas, which the

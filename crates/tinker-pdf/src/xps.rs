@@ -718,9 +718,12 @@ pub enum XpsElementDefect {
     ColourProfileChannels,
     /// A colour or a gradient that is not 15's syntax. **Painted grey.**
     BrushUnreadable,
-    /// The brush reached the page and not exactly: gradient stops whose alphas
-    /// differ from each other, which one constant alpha cannot express, or a
-    /// `ColorInterpolationMode` this build does not interpolate in.
+    /// The brush reached the page and not exactly: a `ContextColor` gradient
+    /// stop whose profile this build cannot evaluate, painted in 8.6.5.5's
+    /// alternate reading, or a `ColorInterpolationMode` 18.3.1.2 does not name,
+    /// blended as the default. Stops whose alphas differ, `ScRgbLinear`
+    /// interpolation and a stop whose profile evaluates are **drawn** since
+    /// 3 October 2026, and are not approximations.
     BrushApproximated,
     /// A `ResourceDictionary` whose `Source` names no part this package holds,
     /// or names one that cannot be read (14.2.4).
