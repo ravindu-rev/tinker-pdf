@@ -12,9 +12,9 @@
 //! the content stream unchanged, and the *reader* does the colour management.
 //! For one, three and four channels nothing here evaluates a profile, so
 //! nothing here can be wrong about one — only the profile's **header** is
-//! read, for the channel count. The `nCLR` profiles are the exception, below:
-//! `/ICCBased` cannot carry them, and the alternate a `/DeviceN` needs is the
-//! profile evaluated.
+//! read, for the channel count. The `nCLR` profiles of any other count are
+//! the exception, below: `/ICCBased` cannot carry them, and the alternate a
+//! `/DeviceN` needs is the profile evaluated.
 //!
 //! That distinction matters more than it looks: [`Profile::parse`] refuses a
 //! profile it cannot build a transform out of, and a perfectly ordinary CMYK
@@ -33,8 +33,13 @@
 //! # `nCLR`: a `/DeviceN` whose tint transform is the profile, evaluated
 //!
 //! Table 66 permits an `/ICCBased` space of **1, 3 or 4** components and no
-//! others, so a profile of any other channel count — ECMA-388 15.2.5's
-//! `2CLR` through `8CLR` — has no `/ICCBased` spelling at all. PDF's other
+//! others, so a profile of any other channel count — of ECMA-388 15.2.5's
+//! `2CLR` through `8CLR`, the five that are `2CLR` and `5CLR` to `8CLR` — has
+//! no `/ICCBased` spelling at all. `3CLR` and `4CLR` have counts Table 66
+//! admits and are embedded under `/N 3` and `/N 4` as the named spaces of
+//! three and four channels are (`a_three_or_four_channel_n_clr_profile_stays_icc_based`;
+//! *corrected on review, 3 October 2026*, where this said all seven had no
+//! `/ICCBased` spelling — the code never placed those two otherwise). PDF's other
 //! n-channel space is 8.6.6.5's `/DeviceN`: the components go into the content
 //! stream unchanged, one colorant each, and a **tint transform** carries them
 //! into an alternate space for a reader that has no such inks. Here that is

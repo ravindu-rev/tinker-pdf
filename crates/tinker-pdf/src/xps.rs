@@ -710,8 +710,10 @@ pub enum XpsElementDefect {
     /// build can evaluate.
     ///
     /// Table 66 permits `/ICCBased` **1, 3 or 4** components and no others,
-    /// so an `nCLR` profile is placed as 8.6.6.5's `/DeviceN`, its tint
-    /// transform the profile evaluated over a grid (since 3 October 2026).
+    /// so an `nCLR` profile of any other count — `2CLR`, `5CLR` to `8CLR` — is
+    /// placed as 8.6.6.5's `/DeviceN`, its tint transform the profile
+    /// evaluated over a grid (since 3 October 2026). `3CLR` and `4CLR` are
+    /// `/ICCBased`, as the named spaces of three and four channels are.
     /// Where that cannot be done this is a **narrowing** and is named as one,
     /// and the element takes the placeholder grey rather than a colour picked
     /// by dropping components.

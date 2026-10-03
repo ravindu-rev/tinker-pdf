@@ -33,7 +33,8 @@
 //!   invented: PDF already specifies it for an `/ICCBased` stream a reader
 //!   cannot use, and the numbers are the file's.
 //! - the profile takes a channel count `/ICCBased` cannot state — an `nCLR`
-//!   profile — and is placed as a `/DeviceN` whose tint transform is the
+//!   profile of two, or five to eight, channels; `3CLR` and `4CLR` are
+//!   `/ICCBased` — and is placed as a `/DeviceN` whose tint transform is the
 //!   profile evaluated over a grid; past eight channels, or with no table to
 //!   evaluate, a **narrowing**, named `ColourProfileChannels`, and painted in
 //!   the placeholder grey rather than in a colour picked by dropping
@@ -350,6 +351,27 @@ fn an_n_channel_profile_is_a_device_n_whose_tint_is_the_profile() {
     ] {
         let got = f64::from(ink(&package(&filled(components), Some(&profile))));
         assert!((got - expected).abs() < 4.0, "{what}: {got}");
+    }
+}
+
+/// **`3CLR` and `4CLR` stay `/ICCBased`.** Their channel counts are two Table
+/// 66 admits, so they take the path the named three- and four-channel spaces
+/// take — the profile embedded verbatim under `/N 3` or `/N 4` — and no
+/// `/DeviceN` is written. The `nCLR` profiles placed as a `/DeviceN` are the
+/// other five, `2CLR` and `5CLR` to `8CLR`; a claim that all seven were
+/// shipped with them and was corrected on review (3 October 2026).
+#[test]
+fn a_three_or_four_channel_n_clr_profile_stays_icc_based() {
+    for (n, components, count) in [
+        (3, "1.0,0.5,0,0", b"/N 3".as_slice()),
+        (4, "1.0,0.5,0,0,0", b"/N 4".as_slice()),
+    ] {
+        let bytes = package(&filled(components), Some(&n_channel_lut(n)));
+        assert_eq!(defects(&bytes), [], "{n}CLR");
+        let file = saved(&bytes);
+        assert!(!holds(&file, b"/DeviceN"), "{n}CLR is not a DeviceN");
+        assert!(holds(&file, b"/ICCBased"), "{n}CLR is embedded");
+        assert!(holds(&file, count), "{n}CLR under its own count");
     }
 }
 
