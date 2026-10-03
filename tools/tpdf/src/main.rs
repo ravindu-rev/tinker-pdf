@@ -42,7 +42,7 @@ usage:
   tpdf images  <file.pdf> [--out DIR] [--page N | --pages LIST] [--password P]
   tpdf outline <file.pdf> [--password P]
   tpdf objects <file.pdf> [--object N [--stream [--raw]]] [--password P]
-  tpdf check   <file.pdf>... [--strict] [--pdfa]
+  tpdf check   <file.pdf>... [--strict] [--pdfa] [--pdfua]
   tpdf probe   <file.pdf>... [--dpi D] [--fonts PATH]
 
 writing (each writes a new file, and takes --font-policy and the image flags):
@@ -75,6 +75,8 @@ options:
   --quiet      only report failures
   --strict     with check, also validate against ISO 32000 strictly
   --pdfa       with check, also validate against ISO 19005 (PDF/A)
+  --pdfua      with check, also validate against ISO 14289 (PDF/UA), and
+               print the clauses it abstains on
   --json       with text, the structured text as JSON: pages, blocks, lines,
                spans with their font and size, and characters with their boxes
   --xml        the same model as XML
@@ -168,6 +170,12 @@ with its clause, and which rule groups ran -- the last of those because this
 build does not implement all of ISO 19005, and \"no findings\" from a partial
 sweep is not \"it conforms\". A file claiming no flavour is reported and is not
 a failure: most PDFs are not PDF/A and are not pretending to be.
+
+`--pdfua` asks the accessibility question of ISO 14289 the same way, with
+one line more: most of that standard is a judgement about meaning no reader
+can make, so each file also prints how many clauses this build abstained on,
+staged and undecidable, beside the groups that ran. A file claiming no part
+is reported, numbered as part 1 numbers it, and is not a failure.
 
 `probe` is the one the corpus runner spawns, one child process per file. It
 opens the file, renders every page, rewrites it and validates the rewrite, and
@@ -326,6 +334,8 @@ struct Options {
     /// valid PDF, `--pdfa` asks whether it is a valid *archival* PDF. A file
     /// can be one and not the other in both directions.
     pdfa: bool,
+    /// Validate against ISO 14289 (PDF/UA) as well, and exit by the verdict.
+    pdfua: bool,
     /// `text` in a structured format rather than as plain text: one of
     /// `--json`, `--xml` and `--html`, and at most one.
     format: Option<TextFormat>,
@@ -437,6 +447,7 @@ impl Options {
             stream: false,
             strict: false,
             pdfa: false,
+            pdfua: false,
             format: None,
             order: ReadingOrder::Stream,
             tables: false,
@@ -528,6 +539,7 @@ impl Options {
                 "--stream" => options.stream = true,
                 "--strict" => options.strict = true,
                 "--pdfa" => options.pdfa = true,
+                "--pdfua" => options.pdfua = true,
                 "--record-version" => options.record_version = true,
                 "--json" | "--xml" | "--html" => {
                     let format = match arg {
@@ -1625,6 +1637,8 @@ fn check(options: &Options) -> Result<(), String> {
     let mut invalid = 0usize;
     let mut nonconforming = 0usize;
     let mut unclaimed = 0usize;
+    let mut inaccessible = 0usize;
+    let mut ua_unclaimed = 0usize;
 
     for path in &options.files {
         match open(path, options.password.as_deref(), fonts.as_ref()) {
@@ -1689,6 +1703,47 @@ fn check(options: &Options) -> Result<(), String> {
                         println!("      pdfa ran {}", verdict.coverage);
                     }
                 }
+
+                if options.pdfua {
+                    let verdict = doc.validate_pdfua();
+                    match verdict.part {
+                        Some(part) => {
+                            if !verdict.found_nothing() {
+                                inaccessible += 1;
+                            }
+                            if !options.quiet {
+                                println!("      pdfua claims {part}");
+                            }
+                        }
+                        // Not a failure, for the reason a missing PDF/A claim
+                        // is not: most PDFs claim neither.
+                        None => {
+                            ua_unclaimed += 1;
+                            if !options.quiet {
+                                println!("      pdfua claims nothing");
+                            }
+                        }
+                    }
+                    for finding in &verdict.findings {
+                        println!("      pdfua {finding}");
+                    }
+                    // The groups that ran and, beside them, how much was not
+                    // decided — as counts with their words, never as a rate,
+                    // because an abstention is not a pass.
+                    if !options.quiet {
+                        let staged = verdict
+                            .abstained
+                            .iter()
+                            .filter(|a| a.class == tinker_pdf::PdfUaAbstentionClass::Staged)
+                            .count();
+                        let undecidable = verdict.abstained.len() - staged;
+                        println!(
+                            "      pdfua ran {}; abstained on {staged} staged and \
+                             {undecidable} undecidable clauses",
+                            verdict.coverage
+                        );
+                    }
+                }
             }
             Err(message) => {
                 failed += 1;
@@ -1709,6 +1764,9 @@ fn check(options: &Options) -> Result<(), String> {
     if options.pdfa {
         println!("{nonconforming} with conformance findings, {unclaimed} claiming no flavour");
     }
+    if options.pdfua {
+        println!("{inaccessible} with PDF/UA findings, {ua_unclaimed} claiming no PDF/UA part");
+    }
     if failed > 0 {
         return Err(format!("{failed} files could not be opened"));
     }
@@ -1718,6 +1776,11 @@ fn check(options: &Options) -> Result<(), String> {
     if nonconforming > 0 {
         return Err(format!(
             "{nonconforming} files did not conform to the flavour they claim"
+        ));
+    }
+    if inaccessible > 0 {
+        return Err(format!(
+            "{inaccessible} files broke a PDF/UA clause of the part they claim"
         ));
     }
     Ok(())
@@ -3348,6 +3411,12 @@ mod tests {
         let strict =
             Options::parse(&["--strict".to_string(), "a.pdf".to_string()]).expect("parses");
         assert!(strict.strict && !strict.pdfa, "nor the other way round");
+
+        // ISO 14289 is a third question, and the same independence holds.
+        let accessible =
+            Options::parse(&["--pdfua".to_string(), "a.pdf".to_string()]).expect("parses");
+        assert!(accessible.pdfua && !accessible.pdfa && !accessible.strict);
+        assert!(!neither.pdfua);
     }
 
     /// A finding prints its clause first, then its object when it has one.

@@ -42,6 +42,7 @@ mod observe;
 mod optional;
 mod output_intents;
 pub mod pdfa;
+pub mod pdfua;
 mod png_read;
 pub mod reading_order;
 mod recode;
@@ -97,6 +98,13 @@ pub use output_intents::{OutputIntent, MAX_OUTPUT_INTENT_BYTES};
 pub use pdfa::{
     Clause, ConformanceFinding, Coverage as PdfACoverage, FindingKind, Flavour, Level, Part,
     RuleGroup as PdfARuleGroup, StagedRule, Verdict as PdfAVerdict, STAGED as PDFA_STAGED,
+};
+/// PDF/UA conformance (ISO 14289), behind [`Document::validate_pdfua`]: the
+/// same findings, and the clauses this build abstains on, by name.
+pub use pdfua::{
+    Abstention as PdfUaAbstention, AbstentionClass as PdfUaAbstentionClass,
+    Coverage as PdfUaCoverage, UaGap as PdfUaGap, UaPart as PdfUaPart, Verdict as PdfUaVerdict,
+    STAGED as PDFUA_STAGED, UNDECIDABLE as PDFUA_UNDECIDABLE,
 };
 /// Reading order, named — the stream's, the tree's, and one inferred from
 /// geometry and labelled as such: [`Page::text_in`], [`Page::inferred_order`]
@@ -1960,6 +1968,26 @@ impl Document {
     #[must_use]
     pub fn validate_pdfa_with(&self, groups: PdfACoverage) -> PdfAVerdict {
         pdfa::validate(self, groups)
+    }
+
+    /// What this build makes of the document's PDF/UA claim (ISO 14289).
+    ///
+    /// Findings for the clauses a reader decides, numbered by the part the
+    /// file claims, and — in the same struct — every clause this build did
+    /// not decide, as [`PdfUaVerdict::abstained`], each staged or
+    /// undecidable with its reason. An empty finding list is "nothing this
+    /// build decides was broken", never "it conforms": most of ISO 14289 is
+    /// a judgement about meaning no reader makes (`docs/design/pdfua.md`).
+    #[must_use]
+    pub fn validate_pdfua(&self) -> PdfUaVerdict {
+        pdfua::validate(self, PdfUaCoverage::IMPLEMENTED)
+    }
+
+    /// [`Document::validate_pdfua`], running only the rule groups in
+    /// `groups`; the verdict's own `coverage` says which ran.
+    #[must_use]
+    pub fn validate_pdfua_with(&self, groups: PdfUaCoverage) -> PdfUaVerdict {
+        pdfua::validate(self, groups)
     }
 
     /// The strictest certification any signature in this document declares

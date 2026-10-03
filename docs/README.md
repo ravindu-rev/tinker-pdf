@@ -22,6 +22,7 @@ Forward-looking work lives only in the [roadmap](ROADMAP.md) and its
 | [features/forms.md](features/forms.md) | field tree, fill, transactions, calculations |
 | [features/creation.md](features/creation.md) | `DocumentBuilder`: pages, text, images, patterns, outlines |
 | [features/pdfa.md](features/pdfa.md) | ISO 19005: the validator, its coverage as a measured number, and the writer's archival profile |
+| [features/pdfua.md](features/pdfua.md) | ISO 14289: the validator, the findings it decides, and the clauses it abstains on by name |
 | [features/cbz.md](features/cbz.md) | comic archives as documents |
 | [features/xps.md](features/xps.md) | XPS/OpenXPS as documents |
 | [features/epub.md](features/epub.md) | books as documents: the CSS and layout engines |

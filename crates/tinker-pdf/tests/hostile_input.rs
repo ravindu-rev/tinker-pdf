@@ -180,6 +180,12 @@ fn exercise(bytes: Vec<u8>) {
     let _ = doc.validate_pdfa();
     let _ = doc.validate_pdfa_with(tinker_pdf::PdfACoverage::SYNTAX);
     let _ = doc.validate_pdfa_with(tinker_pdf::PdfACoverage::METADATA);
+    // PDF/UA's validator reads the same packet through its own identification
+    // reader and walks the structure tree and the fonts again, so it is a
+    // second set of readers over the same hostile bytes (docs/design/pdfua.md
+    // milestone 1 puts the call here before the rules grow).
+    let _ = doc.validate_pdfua();
+    let _ = doc.validate_pdfua_with(tinker_pdf::PdfUaCoverage::STRUCTURE);
     let _ = doc.metadata();
     let _ = doc.pdf_version();
     let _ = doc.page_count();

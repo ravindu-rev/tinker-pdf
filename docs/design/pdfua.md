@@ -361,6 +361,46 @@ grid model serve two designs.
 
 ## As built
 
-*Filled in as milestones land.* Nothing has landed beyond what this document
-measures: the nine-rule census in `tests/pdfua.rs`, at 29 of 239 with zero
-false alarms, which predates this design and is its starting point.
+*Filled in as milestones land.* The starting point was the nine-rule census in
+`tests/pdfua.rs`, at 29 of 239 with zero false alarms on 16 September 2026,
+which predates this design.
+
+**Milestone 1 landed in October 2026, with its corpus exit criterion owed.**
+`crates/tinker-pdf/src/pdfua.rs` and `pdfua/` hold the validator;
+`Document::validate_pdfua` and `validate_pdfua_with(PdfUaCoverage)` surface it;
+`tpdf check --pdfua` prints it, abstentions included; `hostile_input.rs` calls
+it twice per input. The nine census rules moved in deciding what they decided,
+now as typed findings numbered by the claimed part, and four things changed
+in the move, each because a published source said so:
+
+- **The kernel is shared by opening it, not by moving it.** `Machinery::new`
+  and `reaches`, and the UTF-32 transcode `readable`, are `pub(crate)` in
+  `pdfa.rs`; `FindingKind` gains the ten kinds ISO 19005 has no rule for. This
+  design and [pdfx.md](pdfx.md) both left the shape of the move to whichever
+  landed first, and opening the items is the smallest move that shares them.
+- **Two rules have no row under ISO 14289-2.** The census fired `/Suspects`
+  and heading order under both parts; veraPDF's `PDFUA-2.xml` states neither
+  (PDF 2.0 deprecates `/Suspects`, and the part forbids `H` at 8.2.5.12
+  instead of ordering `Hn`), so neither runs under part 2.
+- **The claim's spelling and revision are findings.** `pdfuaid:rev` is read
+  for part 2 as a four-digit year, and an identification property in the
+  namespace under another prefix is reported, both under clause 5 as the
+  profiles number them.
+- **A Type 3 font is not reported as unembedded.** The census read a font
+  with no `/FontDescriptor` as one of the standard 14, which a Type 3 font
+  also is not; its glyphs are content streams (ISO 32000-1 9.6.5) and there
+  is no program to embed. `PDFUA-1.xml`'s 7.21.4.1-1 exempts `Type3` by name,
+  as the PDF/A font group already did.
+
+`PDFUA_STAGED` and `PDFUA_UNDECIDABLE` carry an entry for every clause
+directory the corpus holds under each part; `every_part_abstains_on_something_in_both_classes`
+is the unit test, and `crates/tinker-pdf/tests/pdfua_rules.rs` holds one
+fixture and one twin per rule. The census now finds `corpus/files` without
+`TINKER_CORPUS` — it read that variable alone, the nightly job sets none, and
+so it had been a skip every night — and honours `TINKER_CORPUS_REQUIRED`.
+
+**What is owed**: the milestone's first exit criterion, "the census through
+the facade still reads 29 caught, 0 false alarms", has not been measured. The
+corpus was not reachable where this landed; the census was run to prove it
+skips cleanly and fails when required, and the next nightly run records the
+figure.

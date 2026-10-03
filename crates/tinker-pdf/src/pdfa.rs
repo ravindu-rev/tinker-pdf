@@ -955,7 +955,12 @@ pub(crate) struct Machinery {
 }
 
 impl Machinery {
-    fn new(groups: Coverage) -> Machinery {
+    /// Machinery for the groups `groups` asks for, with every counter at zero.
+    ///
+    /// `pub(crate)` because the PDF/UA validator counts its reaches with the
+    /// same instrument (`docs/design/pdfua.md`, "the kernel shared"), and a
+    /// second counter would be a second claim about laziness nobody checks.
+    pub(crate) fn new(groups: Coverage) -> Machinery {
         Machinery {
             groups,
             ..Machinery::default()
@@ -979,7 +984,7 @@ impl Machinery {
     }
 
     /// How many times each group's machinery was reached for.
-    fn reaches(&self) -> (u32, u32, u32) {
+    pub(crate) fn reaches(&self) -> (u32, u32, u32) {
         (self.metadata.get(), self.fonts.get(), self.colour.get())
     }
 }
@@ -1617,6 +1622,65 @@ pub enum FindingKind {
         /// constant alpha.
         feature: String,
     },
+
+    // ---- PDF/UA (ISO 14289), behind `Document::validate_pdfua` ------------
+    //
+    // One closed enum for both standards, which is `docs/design/pdfua.md`'s
+    // decision: a finding kind is a statement about the file, and the clause
+    // is the statement about which standard asked. Where ISO 14289 asks what
+    // ISO 19005 already asks — an unembedded font, a structure tree that is
+    // not there — the kind above is reused and only the clause differs. The
+    // kinds below are the ones ISO 19005 has no rule for.
+    /// No `pdfuaid:part` in the catalog's XMP packet (ISO 14289-1 5,
+    /// ISO 14289-2 5), so the file does not say it is a PDF/UA file at all.
+    PdfUaIdentifierMissing,
+    /// `pdfuaid:part` names a part ISO 14289 does not define.
+    PdfUaPartUnknown {
+        /// What the file said.
+        declared: String,
+    },
+    /// A part 2 claim with no `pdfuaid:rev` (ISO 14289-2 5).
+    PdfUaRevisionMissing,
+    /// A `pdfuaid:rev` that is not a four-digit year (ISO 14289-2 5).
+    PdfUaRevisionMalformed {
+        /// What the file said.
+        declared: String,
+    },
+    /// An identification property written under a prefix other than the
+    /// `pdfuaid` the identification schema fixes (ISO 14289-1 5, ISO 14289-2
+    /// 5).
+    PdfUaIdentifierPrefix {
+        /// The property's local name: `part`, `rev`, `amd` or `corr`.
+        property: String,
+        /// The prefix the packet bound, empty where it bound none.
+        found: String,
+    },
+    /// `/MarkInfo /Suspects true`: the producer says its own tagging may be
+    /// wrong (ISO 14289-1 7.1).
+    MarkedSuspects,
+    /// A structure element whose content is not text — a `Figure` or a
+    /// `Formula` — with no alternative description (ISO 14289-1 7.3, 7.7,
+    /// ISO 14289-2 8.2.5.28.2).
+    AlternativeDescriptionMissing {
+        /// The element's standard type, after the role map.
+        structure_type: String,
+    },
+    /// A numbered heading that skips a level on the way down, or a first
+    /// heading that is not `H1` (ISO 14289-1 7.4.2).
+    HeadingLevelSkipped {
+        /// The level of the heading before it in reading order, 0 for none.
+        previous: u8,
+        /// This heading's level.
+        level: u8,
+    },
+    /// The document states no natural language anywhere it could — not on
+    /// the catalog and not on any structure element (ISO 14289-1 7.2).
+    NaturalLanguageMissing,
+    /// The structure tree's `/K` graph could not be walked as written: a
+    /// cycle, a role-map loop, an unreadable kid (ISO 14289-1 7.1,
+    /// ISO 14289-2 8.2.1). A tree that cannot be walked cannot be the
+    /// hierarchy either clause asks for.
+    StructureTreeUnwalkable,
 }
 
 /// One thing wrong with the file.
@@ -2024,7 +2088,10 @@ fn is_pdfaid(name: &tinker_pdf_xml::Name<'_>) -> bool {
 /// Ruling 8's line — format semantics stay in the facade — is the same line.
 ///
 /// Returns the packet unchanged when it is not UTF-32, which is nearly always.
-fn readable(packet: &[u8]) -> Cow<'_, [u8]> {
+///
+/// Shared with the PDF/UA identification reader, which has the same packet in
+/// the same encodings and the same reason to read it.
+pub(crate) fn readable(packet: &[u8]) -> Cow<'_, [u8]> {
     match utf32_endianness(packet) {
         Some(big_endian) => Cow::Owned(from_utf32(packet, big_endian)),
         None => Cow::Borrowed(packet),
