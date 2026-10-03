@@ -648,3 +648,120 @@ fn keyed_halves_keep_the_first_halfs_files() {
         .collect();
     assert_eq!(names, [Some("first.txt")]);
 }
+
+// ---- what the two listings copy --------------------------------------------
+
+use tinker_pdf::{MAX_ASSOCIATED_FILE_BYTES, MAX_OUTPUT_INTENT_BYTES};
+
+/// A 2.0 file whose catalog and only page both name, under `key`, the array
+/// at object 5: `entries` references to `shared` at object 6, beside a string
+/// of `string` bytes at object 7 for `shared` to name.
+fn shared_entries(key: &str, entries: usize, shared: &str, string: usize) -> Vec<u8> {
+    format!(
+        "%PDF-2.0\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /{key} 5 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /{key} 5 0 R >>\nendobj\n\
+5 0 obj\n[{}]\nendobj\n\
+6 0 obj\n{shared}\nendobj\n\
+7 0 obj\n({})\nendobj\n\
+trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n",
+        "6 0 R ".repeat(entries),
+        "a".repeat(string),
+    )
+    .into_bytes()
+}
+
+/// **One shared string, copied once per entry, is an amplification**, and
+/// `MAX_ASSOCIATED_FILE_BYTES` is what bounds it: 4 096 entries naming one
+/// file specification whose `/Desc` is 64 KiB ask for 256 MiB from a file of
+/// 90 KB. The listing copies within the budget, marks every entry it cut,
+/// and still lists every entry — with the references and the relationship,
+/// which are not copies.
+#[test]
+fn an_associated_file_listing_spends_one_budget_and_says_what_it_cut() {
+    let entries = 4_096;
+    let string = 64 << 10;
+    let bytes = shared_entries(
+        "AF",
+        entries,
+        "<< /Type /Filespec /F (x) /Desc 7 0 R /AFRelationship /Data >>",
+        string,
+    );
+    assert!(bytes.len() < 100_000, "a file of {} bytes", bytes.len());
+    let doc = Document::open(bytes).expect("opens");
+    let page = doc.page(0).expect("a page");
+    for files in [doc.associated_files(), page.associated_files()] {
+        assert_eq!(files.len(), entries, "every entry is listed");
+        let held: usize = files
+            .iter()
+            .map(|file| {
+                file.description.as_ref().map_or(0, String::len)
+                    + file.filename.as_ref().map_or(0, String::len)
+                    + file.relationship_name.as_ref().map_or(0, String::len)
+            })
+            .sum();
+        assert!(held <= MAX_ASSOCIATED_FILE_BYTES, "{held} bytes held");
+        // A whole entry costs its `/F`, its `/Desc` and its relationship's
+        // name.
+        let whole = MAX_ASSOCIATED_FILE_BYTES / (1 + string + "Data".len());
+        let complete = files.iter().take_while(|file| !file.incomplete).count();
+        assert_eq!(complete, whole, "every entry the budget paid for is whole");
+        let cut = files.get(whole..).unwrap_or_default();
+        assert!(
+            cut.iter().all(|file| file.incomplete),
+            "and every one after it says it was cut"
+        );
+        assert!(cut
+            .iter()
+            .all(|file| file.description.is_none() && file.specification.is_some()));
+        assert!(
+            files
+                .iter()
+                .all(|file| file.relationship == Some(FileRelationship::Data)),
+            "the relationship is read from the name in place"
+        );
+    }
+}
+
+/// The same for output intents: 4 096 entries naming one intent whose
+/// `/Info` is 64 KiB, within `MAX_OUTPUT_INTENT_BYTES`.
+#[test]
+fn an_output_intent_listing_spends_one_budget_and_says_what_it_cut() {
+    let entries = 4_096;
+    let string = 64 << 10;
+    let bytes = shared_entries(
+        "OutputIntents",
+        entries,
+        "<< /Type /OutputIntent /S /GTS_PDFX /OutputConditionIdentifier (x) /Info 7 0 R >>",
+        string,
+    );
+    let doc = Document::open(bytes).expect("opens");
+    let page = doc.page(0).expect("a page");
+    for intents in [doc.output_intents(), page.output_intents()] {
+        assert_eq!(intents.len(), entries, "every entry is listed");
+        let held: usize = intents
+            .iter()
+            .map(|intent| {
+                intent.info.as_ref().map_or(0, String::len)
+                    + intent.subtype.as_ref().map_or(0, String::len)
+                    + intent
+                        .output_condition_identifier
+                        .as_ref()
+                        .map_or(0, String::len)
+            })
+            .sum();
+        assert!(held <= MAX_OUTPUT_INTENT_BYTES, "{held} bytes held");
+        // A whole entry costs its `/S`, its identifier and its `/Info`.
+        let whole = MAX_OUTPUT_INTENT_BYTES / ("GTS_PDFX".len() + 1 + string);
+        let complete = intents
+            .iter()
+            .take_while(|intent| !intent.incomplete)
+            .count();
+        assert_eq!(complete, whole, "every entry the budget paid for is whole");
+        let cut = intents.get(whole..).unwrap_or_default();
+        assert!(cut
+            .iter()
+            .all(|intent| intent.incomplete && intent.info.is_none()));
+    }
+}

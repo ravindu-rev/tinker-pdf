@@ -30,9 +30,11 @@ use std::sync::Arc;
 
 use tinker_pdf_content::{PlainText, PlainTextOptions, TextChar, TextPage};
 use tinker_pdf_cos::{
-    decode_text_string, limits, number_tree, pages as cos_pages, CosDocument, Dict, Name, ObjRef,
-    Object, PDF_1_7_NAMESPACE,
+    limits, number_tree, pages as cos_pages, CosDocument, Dict, Name, ObjRef, Object,
+    PDF_1_7_NAMESPACE,
 };
+
+use crate::copies::{decodes_to_nothing, value, Copies};
 
 /// How deep the `/K` tree may nest before a subtree is refused (14.7.2).
 ///
@@ -56,16 +58,69 @@ const MAX_STRUCTURE_DEPTH: u32 = limits::MAX_NEST_DEPTH;
 /// and run to the low hundreds of thousands.
 const MAX_STRUCTURE_ELEMENTS: usize = 1 << 18;
 
-/// How many array entries the whole walk retains from elements' `/Headers`
-/// and `/AF` arrays together.
+/// How many array entries the whole walk reads from elements' `/A`,
+/// `/Headers` and `/AF` arrays together.
 ///
 /// **A per-array cap does not bound them**, for the reason the depth cap
 /// does not bound the walk: one array of [`limits::MAX_ARRAY_LEN`] entries,
 /// shared by reference among [`MAX_STRUCTURE_ELEMENTS`] elements, would be
-/// read once per element — 2^38 entries kept from a file of a few megabytes.
-/// A real table's cell names a handful of header cells and a real element a
-/// handful of files, so a million across a tree is far past any honest one.
-const MAX_RETAINED_VALUES: usize = 1 << 20;
+/// read once per element — 2^38 entries from a file of a few megabytes. For
+/// `/Headers` and `/AF` that is what is kept; for `/A` it is what is visited,
+/// each entry an attribute object resolved and asked for its owner, which is
+/// time rather than memory and the same arithmetic. Past this every array is
+/// read as empty and [`StructureWarning::ValuesCapped`] says so, once.
+///
+/// | | Entries |
+/// | --- | --- |
+/// | The most any fixture in this repository spends: the one built to spend it | 1 048 576 |
+/// | The most any other fixture spends: `tests/tagged_writer.rs`'s table | under 100 |
+/// | A 200-page comic archive | 0 |
+/// | A 200-page fixed document | 0 |
+/// | A 300-page reflowable book | 36 000 |
+/// | **This cap** | **1 048 576** |
+///
+/// The comic and fixed-document paths write no structure tree. The book's
+/// figure is arithmetic about what the EPUB path writes: `/A` as one
+/// dictionary rather than an array, so it costs nothing here; no `/AF`; and
+/// `/Headers` only where a cell's `headers` attribute names cells — taken as
+/// a forty-cell table on every one of three hundred pages, every cell naming
+/// three headers. A real table's cell names a handful of header cells and a
+/// real element a handful of files, so a million across a tree is far past
+/// any honest one.
+pub const MAX_STRUCTURE_VALUES: usize = 1 << 20;
+
+/// How many bytes the whole walk copies out of the document: every string
+/// and name an element, its attributes, its associated files and the tree's
+/// namespaces hand back.
+///
+/// `MAX_ANNOTATION_BYTES`'s reason, for a tree: an indirect string is parsed
+/// once and may be named from every element, every `/Headers` entry, every
+/// associated file and every namespace dictionary, so a reader that copies
+/// it once per mention turns a file of kilobytes into gigabytes — one shared
+/// `/NS` URI of a megabyte named by [`MAX_STRUCTURE_ELEMENTS`] elements is a
+/// quarter of a terabyte. The walk spends one budget, charged before each
+/// copy; a string it cannot pay for reads as absent, and
+/// [`StructureWarning::BytesCapped`] says so once, naming the element it
+/// stopped at. Type names are not charged: `/S` is a name, which the parser
+/// caps at [`limits::MAX_NAME_LEN`].
+///
+/// A string costs its bytes before decoding and a name its bytes.
+///
+/// | | Bytes |
+/// | --- | --- |
+/// | The most any fixture in this repository spends: the one built to spend it | 64 MiB |
+/// | The most any other fixture spends: `tests/tagged_writer.rs`'s namespaces and table | under 4 KiB |
+/// | A 200-page comic archive | 0 |
+/// | A 200-page fixed document | 0 |
+/// | A 300-page reflowable book | 2 MiB |
+/// | **This cap** | **64 MiB** |
+///
+/// The comic and fixed-document paths write no structure tree. The book's
+/// figure is arithmetic about what the EPUB path writes, rounded up: per page
+/// two pictures with a 200-byte `/Alt`, a forty-cell table whose cells carry
+/// a 30-byte `/ID` and three 30-byte `/Headers`, and fifty elements stating a
+/// language — about 5 500 bytes a page, 1.6 MB a book.
+pub const MAX_STRUCTURE_BYTES: usize = 64 << 20;
 
 /// How many entries of one element's `/K` array are examined.
 ///
@@ -113,10 +168,18 @@ pub enum StructureWarning {
     /// [`MAX_STRUCTURE_ELEMENTS`] was reached; the rest of the tree was not
     /// read.
     ElementCapped,
-    /// `MAX_RETAINED_VALUES` (2^20) entries of elements' `/Headers` and `/AF`
-    /// arrays were kept, and every entry after them was dropped. Reported
-    /// once.
+    /// [`MAX_STRUCTURE_VALUES`] entries of elements' `/A`, `/Headers` and
+    /// `/AF` arrays were read, and every entry after them was dropped.
+    /// Reported once.
     ValuesCapped,
+    /// [`MAX_STRUCTURE_BYTES`] were copied out of the document, and a string
+    /// or name after them was read as absent. Reported once.
+    BytesCapped {
+        /// The element being read when the budget ran out, when it could be
+        /// named: `None` for an element written inline, or for the root's
+        /// `/Namespaces`.
+        element: Option<ObjRef>,
+    },
     /// [`MAX_KIDS`] entries of one `/K` array were read and the rest dropped.
     KidsCapped {
         /// The element whose kid list was truncated.
@@ -651,8 +714,10 @@ pub(crate) fn bind(doc: &Arc<CosDocument>) -> Option<StructureTree> {
         role_map: &role_map,
         path: HashSet::new(),
         budget: MAX_STRUCTURE_ELEMENTS,
-        retained: MAX_RETAINED_VALUES,
+        values: MAX_STRUCTURE_VALUES,
         values_capped: false,
+        copies: Copies::new(MAX_STRUCTURE_BYTES),
+        bytes_capped: false,
         stopped: false,
         warnings: Vec::new(),
         namespaces: BTreeMap::new(),
@@ -665,18 +730,25 @@ pub(crate) fn bind(doc: &Arc<CosDocument>) -> Option<StructureTree> {
     let k = root.get(doc.intern(b"K")).cloned().unwrap_or(Object::Null);
     let kids = walk.kids(&k, None, None, 0);
 
-    // ISO 32000-2 Table 354: every namespace the elements use.
+    // ISO 32000-2 Table 354: every namespace the elements use, within the
+    // walk's copy budget — the array may name one dictionary with a long
+    // `/NS` as often as the elements may.
     let listed = doc.resolve_key(root, doc.intern(b"Namespaces"));
-    let namespaces: Vec<String> = listed
+    let mut namespaces: Vec<String> = Vec::new();
+    for entry in listed
         .as_array()
         .unwrap_or_default()
         .iter()
         .take(limits::MAX_ARRAY_LEN)
-        .filter_map(|entry| {
-            let resolved = doc.resolve(entry);
-            text_of(doc, resolved.as_dict()?, b"NS")
-        })
-        .collect();
+    {
+        let resolved = doc.resolve(entry);
+        let Some(dict) = resolved.as_dict() else {
+            continue;
+        };
+        if let Some(uri) = walk.text(dict, b"NS", None) {
+            namespaces.push(uri);
+        }
+    }
     let warnings = walk.warnings;
 
     let (struct_parents, parent_tree) = read_parent_tree(doc, root, &pages);
@@ -694,18 +766,8 @@ pub(crate) fn bind(doc: &Arc<CosDocument>) -> Option<StructureTree> {
     })
 }
 
-/// One namespace dictionary (ISO 32000-2 Table 356), as far as resolving a
-/// type through it needs.
-#[derive(Clone, Default)]
-struct NamespaceDict {
-    /// `/NS`, the namespace's URI.
-    uri: String,
-    /// `/RoleMapNS`: each type of this namespace and what it maps to.
-    role_map: BTreeMap<Vec<u8>, RoleTarget>,
-}
-
-/// One `/RoleMapNS` value.
-#[derive(Clone)]
+/// One `/RoleMapNS` value, looked up in the document for the one type being
+/// resolved rather than copied out of it with the rest of the map.
 enum RoleTarget {
     /// `[/Type ns]`: a type in the namespace the dictionary names — the form
     /// the errata's EXAMPLE 1 shows (`/section [/H1 11 0 R]`).
@@ -713,13 +775,6 @@ enum RoleTarget {
     /// A bare name. The model allows it (the Arlington TSV's `array;name`);
     /// which namespace it means is not in any text this build could read.
     Bare(Vec<u8>),
-}
-
-/// A text string entry, decoded by 7.9.2.2's rules.
-fn text_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Option<String> {
-    doc.resolve_key(dict, doc.intern(key))
-        .as_string()
-        .map(|s| decode_text_string(&s.bytes))
 }
 
 /// `/RoleMap`, as raw name to mapped name (14.7.3).
@@ -796,18 +851,30 @@ struct Walk<'a> {
     path: HashSet<u32>,
     /// Elements left before the walk stops.
     budget: usize,
-    /// Array entries left to retain from `/Headers` and `/AF`; see
-    /// [`MAX_RETAINED_VALUES`].
-    retained: usize,
+    /// Array entries left to read from `/A`, `/Headers` and `/AF`; see
+    /// [`MAX_STRUCTURE_VALUES`].
+    values: usize,
     /// Whether [`StructureWarning::ValuesCapped`] has been reported.
     values_capped: bool,
+    /// What the walk may still copy out of the document; see
+    /// [`MAX_STRUCTURE_BYTES`].
+    copies: Copies,
+    /// Whether [`StructureWarning::BytesCapped`] has been reported.
+    bytes_capped: bool,
     /// Set when a cap ends the walk, so every loop above unwinds without
     /// visiting more of a bomb than the budget allowed.
     stopped: bool,
     warnings: Vec<StructureWarning>,
-    /// Each namespace dictionary read so far, by reference, so a document of
-    /// a thousand elements in one namespace reads its `/RoleMapNS` once.
-    namespaces: BTreeMap<ObjRef, NamespaceDict>,
+    /// Whether each namespace dictionary asked about so far names a
+    /// namespace, by reference.
+    ///
+    /// **Only that bit is kept.** The dictionary's `/NS` is copied where an
+    /// element hands it back, under the copy budget, and its `/RoleMapNS` is
+    /// looked up one type at a time and never copied: a map kept per
+    /// dictionary was copied once per dictionary, and any number of them may
+    /// share one map of [`limits::MAX_DICT_ENTRIES`] entries by reference — a
+    /// file of 269 KB asked for 650 MB that way.
+    namespaces: BTreeMap<ObjRef, bool>,
 }
 
 impl Walk<'_> {
@@ -968,23 +1035,29 @@ impl Walk<'_> {
         // undefined namespace, and do not quote whether it is withheld from
         // the rest, so this reader keeps its 1.7 behaviour there.
         let ns_key = self.doc.intern(b"NS");
-        let namespace_ref = dict.get_ref(ns_key);
-        let namespace = namespace_ref.and_then(|r| self.namespace_uri(r));
-        if namespace.is_none() && dict.get(ns_key).is_some() {
+        let namespace_ref = dict
+            .get_ref(ns_key)
+            .filter(|namespace| self.is_namespace(*namespace));
+        if namespace_ref.is_none() && dict.get(ns_key).is_some() {
             self.warn(StructureWarning::NamespaceIgnored { element: reference });
         }
-        let namespace_ref = namespace_ref.filter(|_| namespace.is_some());
+        let namespace = namespace_ref.and_then(|r| self.namespace_uri(r, reference));
         let (standard_type, standard_namespace) =
             match namespace_ref.and_then(|r| self.resolve_role_ns(&raw, r)) {
-                Some(resolved) => resolved,
+                Some((resolved, landed)) => {
+                    let landed = landed.and_then(|r| self.namespace_uri(r, reference));
+                    (resolved, landed)
+                }
                 None => {
                     let resolved = self.resolve_role(&raw);
-                    let landed = match &namespace {
+                    let landed = match namespace_ref {
                         // 14.8.6.1: no namespace, so the default one, after
                         // the role map.
                         None => Some(PDF_1_7_NAMESPACE.to_string()),
                         // Its own namespace, where nothing moved it.
-                        Some(own) if resolved.as_bytes() == raw.as_slice() => Some(own.clone()),
+                        Some(own) if resolved.as_bytes() == raw.as_slice() => {
+                            self.namespace_uri(own, reference)
+                        }
                         // The global map moved a type that named a namespace:
                         // which namespace the result is in is not stated in
                         // anything this build could read, so it is not said.
@@ -1020,23 +1093,23 @@ impl Walk<'_> {
         }
 
         let table = self.table_attributes(dict, reference);
+        let associated_files = self.associated_files(dict, reference);
+        let refused = self.copies.refused();
+        let id = self.copies.bytes(self.doc, dict, b"ID");
+        self.note_copies(refused, reference);
         Some(StructElement {
             reference,
             raw_type: String::from_utf8_lossy(&raw).into_owned(),
             standard_type,
             namespace,
             standard_namespace,
-            associated_files: self.associated_files(dict),
-            title: text_of(self.doc, dict, b"T"),
-            lang: text_of(self.doc, dict, b"Lang"),
-            alt: text_of(self.doc, dict, b"Alt"),
-            actual_text: text_of(self.doc, dict, b"ActualText"),
-            expansion: text_of(self.doc, dict, b"E"),
-            id: self
-                .doc
-                .resolve_key(dict, self.doc.intern(b"ID"))
-                .as_string()
-                .map(|id| id.bytes.clone()),
+            associated_files,
+            title: self.text(dict, b"T", reference),
+            lang: self.text(dict, b"Lang", reference),
+            alt: self.text(dict, b"Alt", reference),
+            actual_text: self.text(dict, b"ActualText", reference),
+            expansion: self.text(dict, b"E", reference),
+            id,
             table,
             page,
             kids,
@@ -1057,26 +1130,29 @@ impl Walk<'_> {
         element: Option<ObjRef>,
     ) -> Option<tinker_pdf_cos::TableAttributes> {
         let value = self.doc.resolve_key(dict, self.doc.intern(b"A"));
-        let mut objects: Vec<Dict> = Vec::new();
-        let mut take = |object: &Object| {
-            if let Some(attributes) = object.as_dict() {
-                objects.push(attributes.clone());
-            } else if let Some(stream) = object.as_stream() {
-                objects.push(stream.dict.clone());
-            }
-        };
-        match value.as_array() {
+        // Held, not cloned: an attribute object may be named from every entry
+        // of a shared array, and each clone was a copy of the whole
+        // dictionary. An array is visited within the walk's values budget.
+        let objects: Vec<Arc<Object>> = match value.as_array() {
             Some(items) => {
-                for item in items.iter().take(limits::MAX_ARRAY_LEN) {
-                    take(&self.doc.resolve(item));
-                }
+                let allowed = self.values(items.len().min(limits::MAX_ARRAY_LEN));
+                items
+                    .iter()
+                    .take(allowed)
+                    .map(|item| self.doc.resolve(item))
+                    .collect()
             }
-            None => take(&value),
-        }
+            None => vec![value.clone()],
+        };
 
         let owner_key = self.doc.intern(b"O");
         let mut found: Option<tinker_pdf_cos::TableAttributes> = None;
-        for attributes in &objects {
+        for object in &objects {
+            let attributes = match (object.as_dict(), object.as_stream()) {
+                (Some(attributes), _) => attributes,
+                (None, Some(stream)) => &stream.dict,
+                (None, None) => continue,
+            };
             let owner = self
                 .doc
                 .resolve_key(attributes, owner_key)
@@ -1098,13 +1174,19 @@ impl Walk<'_> {
                 .resolve_key(attributes, self.doc.intern(b"Headers"));
             if let Some(items) = headers.as_array() {
                 if table.headers.is_empty() {
-                    let allowed = self.retain(items.len().min(limits::MAX_ARRAY_LEN));
+                    let allowed = self.values(items.len().min(limits::MAX_ARRAY_LEN));
+                    let refused = self.copies.refused();
                     for item in items.iter().take(allowed) {
                         match self.doc.resolve(item).as_string() {
-                            Some(id) => table.headers.push(id.bytes.clone()),
+                            Some(id) => {
+                                if let Some(id) = self.copies.string(&id.bytes) {
+                                    table.headers.push(id);
+                                }
+                            }
                             None => self.warn(ignored("Headers")),
                         }
                     }
+                    self.note_copies(refused, element);
                 }
             } else if !headers.is_null() {
                 self.warn(ignored("Headers"));
@@ -1125,7 +1207,7 @@ impl Walk<'_> {
             }
 
             if table.summary.is_none() {
-                table.summary = text_of(self.doc, attributes, b"Summary");
+                table.summary = self.text(attributes, b"Summary", element);
             }
 
             for (key, slot) in [
@@ -1153,99 +1235,140 @@ impl Walk<'_> {
         found
     }
 
-    /// How many of `wanted` array entries may still be retained, taking them
-    /// from [`MAX_RETAINED_VALUES`]; reports [`StructureWarning::ValuesCapped`]
+    /// How many of `wanted` array entries may still be read, taking them
+    /// from [`MAX_STRUCTURE_VALUES`]; reports [`StructureWarning::ValuesCapped`]
     /// the first time fewer than wanted are.
-    fn retain(&mut self, wanted: usize) -> usize {
-        let allowed = wanted.min(self.retained);
+    fn values(&mut self, wanted: usize) -> usize {
+        let allowed = wanted.min(self.values);
         if allowed < wanted && !self.values_capped {
             self.values_capped = true;
             self.warn(StructureWarning::ValuesCapped);
         }
-        self.retained -= allowed;
+        self.values -= allowed;
         allowed
     }
 
-    /// `/AF` (ISO 32000-2 14.13), within the walk's retention budget.
-    fn associated_files(&mut self, dict: &Dict) -> Vec<crate::AssociatedFile> {
+    /// Reports [`StructureWarning::BytesCapped`] the first time the copy
+    /// budget has refused anything since `refused`, naming `element`.
+    fn note_copies(&mut self, refused: usize, element: Option<ObjRef>) {
+        if self.copies.refused() > refused && !self.bytes_capped {
+            self.bytes_capped = true;
+            self.warn(StructureWarning::BytesCapped { element });
+        }
+    }
+
+    /// A text string entry of `dict`, decoded (7.9.2.2) and charged to
+    /// [`MAX_STRUCTURE_BYTES`].
+    fn text(&mut self, dict: &Dict, key: &[u8], element: Option<ObjRef>) -> Option<String> {
+        let refused = self.copies.refused();
+        let text = self.copies.text(self.doc, dict, key);
+        self.note_copies(refused, element);
+        text
+    }
+
+    /// `/AF` (ISO 32000-2 14.13), within the walk's values and copy budgets.
+    fn associated_files(
+        &mut self,
+        dict: &Dict,
+        element: Option<ObjRef>,
+    ) -> Vec<crate::AssociatedFile> {
         let listed = self.doc.resolve_key(dict, self.doc.intern(b"AF"));
         let Some(entries) = listed.as_array() else {
             return Vec::new();
         };
-        let allowed = self.retain(entries.len().min(limits::MAX_ARRAY_LEN));
-        crate::associated_files::files_in(self.doc, &entries[..allowed])
+        let allowed = self.values(entries.len().min(limits::MAX_ARRAY_LEN));
+        let refused = self.copies.refused();
+        let files = crate::associated_files::files_in(
+            self.doc,
+            entries.get(..allowed).unwrap_or_default(),
+            &mut self.copies,
+        );
+        self.note_copies(refused, element);
+        files
     }
 
-    /// Reads a namespace dictionary once (ISO 32000-2 Table 356) and returns
-    /// its URI. `None` for a reference to something that is not one, or a
-    /// dictionary with no `/NS` — Table 356 makes it required, and a namespace
-    /// with no name identifies nothing.
-    fn namespace_uri(&mut self, reference: ObjRef) -> Option<String> {
-        if let Some(read) = self.namespaces.get(&reference) {
-            return (!read.uri.is_empty()).then(|| read.uri.clone());
+    /// Whether `reference` names a namespace dictionary (ISO 32000-2 Table
+    /// 356): a dictionary whose `/NS` is a text string that says something —
+    /// Table 356 makes it required, and a namespace with no name identifies
+    /// nothing. Answered once per reference, without copying the URI.
+    fn is_namespace(&mut self, reference: ObjRef) -> bool {
+        if let Some(known) = self.namespaces.get(&reference) {
+            return *known;
         }
-        let mut read = NamespaceDict::default();
-        if let Ok(object) = self.doc.get(reference) {
-            if let Some(dict) = object.as_dict() {
-                read.uri = text_of(self.doc, dict, b"NS").unwrap_or_default();
-                let map = self.doc.resolve_key(dict, self.doc.intern(b"RoleMapNS"));
-                if let Some(map) = map.as_dict() {
-                    for (key, value) in map.iter().take(limits::MAX_ARRAY_LEN) {
-                        let Some(from) = self.doc.name_bytes(*key) else {
-                            continue;
-                        };
-                        let value = self.doc.resolve(value);
-                        let name_of = |object: &Object| {
-                            object
-                                .as_name()
-                                .and_then(|n| self.doc.name_bytes(n))
-                                .map(|n| n.to_vec())
-                        };
-                        let target = match value.as_array() {
-                            Some([kind, ns, ..]) => match (name_of(kind), ns.as_objref()) {
-                                (Some(kind), Some(ns)) => Some(RoleTarget::In(kind, ns)),
-                                _ => None,
-                            },
-                            Some(_) => None,
-                            None => name_of(&value).map(RoleTarget::Bare),
-                        };
-                        if let Some(target) = target {
-                            read.role_map.insert(from.to_vec(), target);
-                        }
-                    }
-                }
-            }
+        let known = self.doc.get(reference).ok().is_some_and(|object| {
+            object.as_dict().is_some_and(|dict| {
+                let mut held = None;
+                value(self.doc, dict, b"NS", &mut held)
+                    .and_then(Object::as_string)
+                    .is_some_and(|uri| !decodes_to_nothing(&uri.bytes))
+            })
+        });
+        self.namespaces.insert(reference, known);
+        known
+    }
+
+    /// The URI of the namespace dictionary `reference` names, copied under
+    /// [`MAX_STRUCTURE_BYTES`] for `element`. `None` for a reference that is
+    /// not one, or when the budget is spent.
+    fn namespace_uri(&mut self, reference: ObjRef, element: Option<ObjRef>) -> Option<String> {
+        if !self.is_namespace(reference) {
+            return None;
         }
-        let uri = (!read.uri.is_empty()).then(|| read.uri.clone());
-        self.namespaces.insert(reference, read);
-        uri
+        let object = self.doc.get(reference).ok()?;
+        let dict = object.as_dict()?;
+        self.text(dict, b"NS", element)
+    }
+
+    /// The `/RoleMapNS` entry of the namespace dictionary `namespace` for the
+    /// type `kind`, looked up where the document holds it.
+    ///
+    /// Nothing is copied but the entry's own names, and a direct map or a
+    /// direct entry is borrowed rather than resolved — which would copy it —
+    /// because any number of namespace dictionaries may share one map, and
+    /// one map may hold [`limits::MAX_DICT_ENTRIES`] entries of any length.
+    fn role_ns_target(&self, namespace: ObjRef, kind: &[u8]) -> Option<RoleTarget> {
+        let object = self.doc.get(namespace).ok()?;
+        let dict = object.as_dict()?;
+        let mut held_map = None;
+        let map = value(self.doc, dict, b"RoleMapNS", &mut held_map)?.as_dict()?;
+        let mut held_entry = None;
+        let entry = value(self.doc, map, kind, &mut held_entry)?;
+        let name_of = |object: &Object| {
+            object
+                .as_name()
+                .and_then(|n| self.doc.name_bytes(n))
+                .map(|n| n.to_vec())
+        };
+        match entry.as_array() {
+            Some([kind, ns, ..]) => match (name_of(kind), ns.as_objref()) {
+                (Some(kind), Some(ns)) => Some(RoleTarget::In(kind, ns)),
+                _ => None,
+            },
+            Some(_) => None,
+            None => name_of(entry).map(RoleTarget::Bare),
+        }
     }
 
     /// ISO 32000-2 14.8.6.2: a type in a namespace whose `/RoleMapNS` maps it
     /// is followed through that map, entry by entry, into the namespace each
     /// `[type namespace]` pair names — the shape of the errata's EXAMPLE 1.
     ///
-    /// `None` when the element's namespace does not map its type, which
-    /// leaves the 1.7 resolution to answer. Bounded as `/RoleMap` is, by
-    /// [`MAX_ROLE_MAP_HOPS`] and a visited set, and a loop is reported the
-    /// same way.
+    /// Returns the type it ended at and the namespace dictionary that type is
+    /// in, which is `None` for a bare name. `None` overall when the element's
+    /// namespace does not map its type, which leaves the 1.7 resolution to
+    /// answer. Bounded as `/RoleMap` is, by [`MAX_ROLE_MAP_HOPS`] and a
+    /// visited set, and a loop is reported the same way.
     fn resolve_role_ns(
         &mut self,
         raw: &[u8],
         namespace: ObjRef,
-    ) -> Option<(String, Option<String>)> {
+    ) -> Option<(String, Option<ObjRef>)> {
         let mut current = (raw.to_vec(), namespace);
         let mut seen: BTreeSet<(Vec<u8>, ObjRef)> = BTreeSet::new();
         seen.insert(current.clone());
         let mut moved = false;
         for _ in 0..MAX_ROLE_MAP_HOPS {
-            self.namespace_uri(current.1);
-            let target = self
-                .namespaces
-                .get(&current.1)
-                .and_then(|ns| ns.role_map.get(&current.0))
-                .cloned();
-            match target {
+            match self.role_ns_target(current.1, &current.0) {
                 None => break,
                 Some(RoleTarget::Bare(kind)) => {
                     return Some((String::from_utf8_lossy(&kind).into_owned(), None));
@@ -1270,8 +1393,10 @@ impl Walk<'_> {
         if !moved {
             return None;
         }
-        let uri = self.namespace_uri(current.1);
-        Some((String::from_utf8_lossy(&current.0).into_owned(), uri))
+        Some((
+            String::from_utf8_lossy(&current.0).into_owned(),
+            Some(current.1),
+        ))
     }
 
     /// `/Pg`, resolved to a page index.

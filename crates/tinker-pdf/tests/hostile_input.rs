@@ -187,6 +187,10 @@ fn exercise(bytes: Vec<u8>) {
     let _ = doc.page_labels();
     let _ = doc.viewer_preferences();
     let _ = doc.form_fields();
+    // ISO 32000-2's catalog listings: arrays the file sizes, entries it may
+    // share, strings each entry copies within its listing's budget.
+    let _ = doc.associated_files();
+    let _ = doc.output_intents();
     // 14.7: `/K` is a graph with no promise of acyclicity and `/RoleMap` is a
     // rewriting system the file writes for itself, so the structure walk is
     // one of the few readers here whose *input shape* is chosen by the
@@ -235,6 +239,9 @@ fn exercise(bytes: Vec<u8>) {
         let _ = page.trim_box();
         let _ = page.art_box();
         let _ = page.rotation();
+        // A page's own `/AF` and (PDF 2.0) `/OutputIntents`.
+        let _ = page.associated_files();
+        let _ = page.output_intents();
 
         let text = page.text();
         let _ = text.plain_text();

@@ -58,6 +58,12 @@ fuzz_target!(|data: &[u8]| {
         let _ = tree.element_count();
         let _ = tree.text_for_page(0, &page.text()).plain_text();
     }
+    // ISO 32000-2's listings on the catalog and the page: arrays the input
+    // sizes, each entry copying strings within its listing's budget.
+    let _ = doc.associated_files();
+    let _ = doc.output_intents();
+    let _ = page.associated_files();
+    let _ = page.output_intents();
 
     // Image extraction: every image dictionary the page reaches, described
     // rather than drawn, through the same sample decoders the render below

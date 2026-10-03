@@ -26,6 +26,7 @@ mod annotations;
 mod annots;
 mod associated_files;
 pub mod cbz;
+mod copies;
 mod display;
 pub mod epub;
 pub mod fb2;
@@ -69,7 +70,7 @@ use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages};
 pub use annotations::{Annotation, AnnotationFlags, AnnotationKind};
 /// Associated files (ISO 32000-2 14.13), as `Document::associated_files`,
 /// `Page::associated_files` and `StructElement::associated_files` read them.
-pub use associated_files::AssociatedFile;
+pub use associated_files::{AssociatedFile, MAX_ASSOCIATED_FILE_BYTES};
 /// Comic archives: what [`Document::open`] does with a `PK\x03\x04` at offset
 /// zero, and what it refuses by name.
 pub use cbz::{
@@ -87,7 +88,7 @@ pub use layers::OptionalGroup;
 pub use mdp::{Change, Modification, Modifications, Touched};
 /// Output intents, the catalog's and (PDF 2.0) a page's: what
 /// `Document::output_intents` and `Page::output_intents` hand back.
-pub use output_intents::OutputIntent;
+pub use output_intents::{OutputIntent, MAX_OUTPUT_INTENT_BYTES};
 /// PDF/A conformance (ISO 19005), behind [`Document::validate_pdfa`].
 pub use pdfa::{
     Clause, ConformanceFinding, Coverage as PdfACoverage, FindingKind, Flavour, Level, Part,

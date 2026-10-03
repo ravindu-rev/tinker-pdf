@@ -516,10 +516,18 @@ than guessing where no source this build could read says — a bare-name
 `StructureTree::namespaces` lists the root's array.
 `Tag::associated_file` writes an element's `/AF` (ISO 32000-2 14.13) and
 `StructElement::associated_files` reads it back
-([document-model](document-model.md) has the type). The `/Headers` and `/AF`
-entries the whole walk keeps are capped together at 2^20, since one shared
-array named by every element would otherwise be read once per element; past
-it they are dropped and `StructureWarning::ValuesCapped` says so once.
+([document-model](document-model.md) has the type). The `/A`, `/Headers` and
+`/AF` entries the whole walk reads are capped together at
+`structure::MAX_STRUCTURE_VALUES` (2^20), since one shared array named by
+every element would otherwise be read once per element; past it they are
+dropped and `StructureWarning::ValuesCapped` says so once. What the walk
+copies out — every string and name an element, its attributes, its files and
+the namespaces hand back — is capped at `structure::MAX_STRUCTURE_BYTES`
+(64 MiB), since one string may be named from every element; past it a string
+reads as absent and `StructureWarning::BytesCapped` says so once, naming the
+element. A namespace's `/RoleMapNS` is looked up one type at a time where the
+document holds it and never copied, because any number of namespace
+dictionaries may share one map.
 `continue_at(order)` continues the innermost open element in a fresh
 sequence that reads at `order`, for an element with something drawn
 elsewhere — a picture painted before its text — that reads between two of
@@ -575,7 +583,8 @@ crate has an API of its own; see [architecture](../architecture.md).
 | Images inside a tiling pattern's cell, a soft-mask group or an annotation appearance | `Page::images()` does not list them | none is a drawing of the page's content: the renderer reaches a pattern cell and a mask group through its own device, not through the interpreter's `Do`, and an appearance belongs to the annotation | 8.7.3, 11.6.5, 12.5.5 |
 | A JPEG 2000 image's own opacity channel in extraction | `PageImage::samples` holds the colour channels only | `/SMaskInData` decides what the channel means (8.9.5.4), and a soft mask carried out of the codestream is not an `/SMask` image the type can name; the renderer applies it | 8.9.5.4 |
 | A table attribute with a value Table 349 does not define — a `/Scope` that is not `/Row`, `/Column` or `/Both`, a span below one, a `/Headers` entry that is not a string | `StructureWarning::AttributeIgnored { element, owner, key }` | read as absent rather than guessed at; the element and its other attributes are read as usual, so a table whose headers head nothing stays distinguishable from one that said something this reader could not read | 14.8.5.7 |
-| More than 2^20 `/Headers` and `/AF` entries across one structure tree | `StructureWarning::ValuesCapped`, once | a per-array cap does not bound them: one array shared by reference among every element is read once per element, 2^38 entries from a file of kilobytes (`shared_header_and_file_arrays_are_retained_within_one_budget`); every element is still read | ruling 1 |
+| More than 2^20 `/A`, `/Headers` and `/AF` entries across one structure tree (`MAX_STRUCTURE_VALUES`) | `StructureWarning::ValuesCapped`, once | a per-array cap does not bound them: one array shared by reference among every element is read once per element, 2^38 entries from a file of kilobytes (`shared_header_and_file_arrays_are_retained_within_one_budget`, `a_shared_attribute_array_is_visited_within_the_walks_values_budget`); every element is still read | ruling 1 |
+| More than 64 MiB of strings and names copied out of one structure tree (`MAX_STRUCTURE_BYTES`) | `StructureWarning::BytesCapped { element }`, once; the string reads as absent | one indirect `/NS`, `/ID`, `/Alt` or `/Headers` string may be named from every element and was copied once per mention — a mebibyte `/NS` shared by 2^18 elements is a quarter of a terabyte (`a_shared_namespace_is_copied_within_the_walks_copy_budget`); every element and its type are still read | ruling 1 |
 | An element `/NS` that is not an indirect reference to a namespace dictionary carrying Table 356's required `/NS` URI | `StructureWarning::NamespaceIgnored { element }` | read as naming no namespace — the default one, after `/RoleMap` — rather than keyed on an object that names nothing; like `AttributeIgnored`, not a fault in the tree's shape, and the PDF/UA census does not count it as one | ISO 32000-2 Table 355 |
 | Which namespace a type lands in after a **bare-name** `/RoleMapNS` value, or after the global `/RoleMap` moves a type that named a namespace | `StructElement::standard_namespace` is `None` | the Arlington model permits the bare name and the errata quote only the `[type ns]` pair and the global map's use for elements in no namespace; neither says which namespace either result is in, and `None` is that, said rather than guessed. The type itself is still resolved | ISO 32000-2 14.8.6.2 |
 | Attributes reached through an element's `/C` and the root's `/ClassMap` | — | `StructElement::table` reads the attribute objects in `/A` only; 14.7.6.2's classes are a second source of the same attributes that no writer here emits and no test here exercises, so it is named rather than half-read | 14.7.6.2 |

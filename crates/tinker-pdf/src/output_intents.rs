@@ -14,9 +14,37 @@
 //! carry a file whose page-level intent, in its own words, *"can override the
 //! output intent for the document in the catalog"*.
 
-use tinker_pdf_cos::{decode_text_string, limits, CosDocument, Dict, ObjRef};
+use tinker_pdf_cos::{limits, CosDocument, Dict, ObjRef};
 
+use crate::copies::Copies;
 use crate::{Document, Page};
+
+/// How many bytes one [`Document::output_intents`] or
+/// [`Page::output_intents`] listing may copy out of the document.
+///
+/// `MAX_ANNOTATION_BYTES`'s reason: `/OutputIntents` is read to
+/// [`limits::MAX_ARRAY_LEN`] entries, every one of them may name the same
+/// intent dictionary, and its `/Info` — or any of its four strings — may be
+/// one indirect string as long as the file, copied once per entry. The
+/// listing spends one budget, charged before each copy, and an entry it
+/// cannot pay for reads as absent **and says so**:
+/// [`OutputIntent::incomplete`].
+///
+/// A string costs its bytes before decoding and a name its bytes.
+///
+/// | | Bytes |
+/// | --- | --- |
+/// | The most any fixture in this repository spends: the one built to spend it | 64 MiB |
+/// | The most any other fixture spends: an archival intent's `/Info` and three names | under 1 KiB |
+/// | A 200-page comic archive | 0 |
+/// | A 200-page fixed document | 0 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **64 MiB** |
+///
+/// The three zeros are facts about what those paths write: none of them
+/// writes an output intent unless it is asked for an archival profile, and
+/// then one, whose strings are a condition's name and a sentence.
+pub const MAX_OUTPUT_INTENT_BYTES: usize = 64 << 20;
 
 /// One output intent dictionary (ISO 32000-1 14.11.5 Table 365).
 ///
@@ -43,6 +71,11 @@ pub struct OutputIntent {
     pub destination_profile: Option<ObjRef>,
     /// That stream's `/N`: how many components its colour space has.
     pub components: Option<u32>,
+    /// Whether a string or name this entry carries was left unread because
+    /// the listing had spent [`MAX_OUTPUT_INTENT_BYTES`]. The fields it would
+    /// have filled read `None`; the profile and its `/N` are read regardless,
+    /// because neither is a copy.
+    pub incomplete: bool,
 }
 
 impl Document {
@@ -86,16 +119,19 @@ impl Page {
     }
 }
 
-/// The `/OutputIntents` array of `holder`, read.
+/// The `/OutputIntents` array of `holder`, read, within
+/// [`MAX_OUTPUT_INTENT_BYTES`].
 fn intents_in(doc: &CosDocument, holder: &Dict) -> Vec<OutputIntent> {
     let listed = doc.resolve_key(holder, doc.intern(b"OutputIntents"));
     let Some(entries) = listed.as_array() else {
         return Vec::new();
     };
+    let mut copies = Copies::new(MAX_OUTPUT_INTENT_BYTES);
     entries
         .iter()
         .take(limits::MAX_ARRAY_LEN)
         .filter_map(|entry| {
+            let refused = copies.refused();
             let resolved = doc.resolve(entry);
             let intent = resolved.as_dict()?;
             let destination_profile = intent.get_ref(doc.intern(b"DestOutputProfile"));
@@ -105,26 +141,22 @@ fn intents_in(doc: &CosDocument, holder: &Dict) -> Vec<OutputIntent> {
                 let n = doc.resolve_key(dict, doc.intern(b"N")).as_int()?;
                 u32::try_from(n).ok()
             });
+            let subtype = copies.name(doc, intent, b"S");
+            let output_condition_identifier =
+                copies.text(doc, intent, b"OutputConditionIdentifier");
+            let output_condition = copies.text(doc, intent, b"OutputCondition");
+            let registry_name = copies.text(doc, intent, b"RegistryName");
+            let info = copies.text(doc, intent, b"Info");
             Some(OutputIntent {
-                subtype: doc
-                    .resolve_key(intent, doc.intern(b"S"))
-                    .as_name()
-                    .and_then(|name| doc.name_bytes(name))
-                    .map(|name| String::from_utf8_lossy(&name).into_owned()),
-                output_condition_identifier: text(doc, intent, b"OutputConditionIdentifier"),
-                output_condition: text(doc, intent, b"OutputCondition"),
-                registry_name: text(doc, intent, b"RegistryName"),
-                info: text(doc, intent, b"Info"),
+                subtype,
+                output_condition_identifier,
+                output_condition,
+                registry_name,
+                info,
                 destination_profile,
                 components,
+                incomplete: copies.refused() > refused,
             })
         })
         .collect()
-}
-
-/// A text string entry, decoded by 7.9.2.2's rules.
-fn text(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Option<String> {
-    doc.resolve_key(dict, doc.intern(key))
-        .as_string()
-        .map(|s| decode_text_string(&s.bytes))
 }

@@ -161,7 +161,10 @@ and the `/DestOutputProfile` stream by reference with its `/N` — every field
 list is the page's alone: the Arlington model does not make the entry
 inheritable, and the two lists are not merged, because how a page's intents
 combine with the catalog's when their subtypes differ is not in a source this
-build could read. The PDF/A validator keeps its own reading (`pdfa/colour.rs`),
+build could read. One listing copies at most `MAX_OUTPUT_INTENT_BYTES`
+(64 MiB) of strings and names, because every entry may name one intent whose
+`/Info` is as long as the file; an entry the budget cut reads `None` where it
+was cut and says so with `OutputIntent::incomplete`. The PDF/A validator keeps its own reading (`pdfa/colour.rs`),
 which judges intents against the part claimed and is untouched by this one.
 On the write side `PageBuilder::output_intent(NewOutputIntent)` gives a page
 its own, in a document declaring 2.0 and not under an archival profile — the
@@ -175,7 +178,12 @@ one — and pages naming one profile share one stream.
 `/AFRelationship` as a `FileRelationship` (and as written, for a name the
 list does not hold), the embedded stream by reference with its `/Subtype`
 MIME type and declared `/Params /Size`. A file outside the document has no
-stream; nothing is defaulted. They are not the `/EmbeddedFiles` tree's
+stream; nothing is defaulted. One listing copies at most
+`MAX_ASSOCIATED_FILE_BYTES` (64 MiB) of strings and names — 4 096 entries
+naming one specification with a 64 KiB `/Desc` asked for 256 MiB from 90 KB —
+and an entry the budget cut says so with `AssociatedFile::incomplete`; an
+element's files are copied under the structure walk's own
+`MAX_STRUCTURE_BYTES`. They are not the `/EmbeddedFiles` tree's
 attachments, which `attachments()` lists: an associated file belongs to an
 object, and the errata say filing it in the tree is not required. The
 builder writes them — `DocumentBuilder::associate_file`,

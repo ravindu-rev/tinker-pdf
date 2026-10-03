@@ -144,6 +144,7 @@ fn kind(warning: &StructureWarning) -> &'static str {
         StructureWarning::DepthCapped { .. } => "depth-capped",
         StructureWarning::ElementCapped => "element-capped",
         StructureWarning::ValuesCapped => "values-capped",
+        StructureWarning::BytesCapped { .. } => "bytes-capped",
         StructureWarning::KidsCapped { .. } => "kids-capped",
         StructureWarning::UntypedElement { .. } => "untyped-element",
         StructureWarning::UnreadableKid { .. } => "unreadable-kid",

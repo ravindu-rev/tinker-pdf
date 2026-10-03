@@ -9,6 +9,22 @@
 //! neither has a stylesheet, and its book yardstick is the two of an embossed
 //! heading, since no committed book declares a shadow.
 //!
+//! *Amended, 3 October 2026, the review of the tagged-writing lane.* **Four
+//! more rows, for the readers ISO 32000-2 added, and three of them caps on
+//! copies.** `MAX_STRUCTURE_VALUES` is the structure walk's budget on the
+//! array entries it reads from elements' `/A`, `/Headers` and `/AF` — one
+//! array shared by every element was read once per element, and for `/A`
+//! that was nine seconds for sixteen elements and two days for the element
+//! cap. `MAX_STRUCTURE_BYTES` bounds what that walk copies out — one `/NS`
+//! URI, `/ID` or `/Headers` string named from every element — and
+//! `MAX_ASSOCIATED_FILE_BYTES` and `MAX_OUTPUT_INTENT_BYTES` the two
+//! document-level listings, where 90 KB of `/AF` asked for 256 MiB of
+//! descriptions. Each `fixtures` is the cap, for `MAX_ANNOTATION_BYTES`'s
+//! reason. The comic and fixed-document columns are zeros because neither
+//! path writes a structure tree, an `/AF` or an intent unasked; the book's
+//! two structure columns are arithmetic about what the EPUB path writes, and
+//! its two listing columns zeros.
+//!
 //! *Amended, 2 October 2026, the review of the redaction row.* **One more
 //! row, `MAX_FORM_COPY_BYTES`, the third cap on copies.** A redaction
 //! measures every placement of a form before it writes any, and kept every
@@ -496,11 +512,12 @@ use tinker_pdf::epub::{
 use tinker_pdf::form_data::MAX_FORM_DATA_BYTES;
 use tinker_pdf::markdown::{MAX_MARKDOWN_NESTING, MAX_MARKDOWN_REFERENCE_BYTES};
 use tinker_pdf::redact::MAX_FORM_COPY_BYTES;
+use tinker_pdf::structure::{MAX_STRUCTURE_BYTES, MAX_STRUCTURE_VALUES};
 use tinker_pdf::xps::{
     MAX_XPS_ELEMENTS, MAX_XPS_GLYPHS, MAX_XPS_PAGES, MAX_XPS_PARTS, MAX_XPS_RESOURCE_DEPTH,
     MAX_XPS_SEGMENTS,
 };
-use tinker_pdf::MAX_ANNOTATION_BYTES;
+use tinker_pdf::{MAX_ANNOTATION_BYTES, MAX_ASSOCIATED_FILE_BYTES, MAX_OUTPUT_INTENT_BYTES};
 use tinker_pdf_color::icc::{MAX_ICC_BYTES, MAX_ICC_TAGS};
 use tinker_pdf_css::limits as css_limits;
 use tinker_pdf_filters::{
@@ -573,6 +590,14 @@ const RENDER_DISPLAY: &str = include_str!("../../tinker-pdf-render/src/display.r
 const DISPLAY_LIST_TESTS: &str = include_str!("display_list.rs");
 const MARKDOWN: &str = include_str!("../src/markdown.rs");
 const MARKDOWN_TESTS: &str = include_str!("markdown.rs");
+/// The review of the tagged-writing lane: the structure walk's two budgets,
+/// declared beside the walk, and the two PDF 2.0 listings' copy budgets,
+/// declared beside each listing; fired by the suites that read them.
+const STRUCTURE: &str = include_str!("../src/structure.rs");
+const TAGGED_PDF_TESTS: &str = include_str!("tagged_pdf.rs");
+const ASSOCIATED_FILES: &str = include_str!("../src/associated_files.rs");
+const OUTPUT_INTENTS: &str = include_str!("../src/output_intents.rs");
+const PDF20_TESTS: &str = include_str!("pdf20.rs");
 
 /// One bound, as its own ledger publishes it.
 ///
@@ -2287,6 +2312,96 @@ fn ledger() -> Vec<Bound> {
                 CSS_BOUNDS_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_STRUCTURE_VALUES",
+            cap: MAX_STRUCTURE_VALUES as u128,
+            published: "1 048 576",
+            // The firing test spends the budget to the entry: every element's
+            // `/AF` and `/Headers` together are exactly the cap. Every other
+            // structure fixture reads fewer than a hundred entries.
+            fixtures: MAX_STRUCTURE_VALUES as u128,
+            // Neither path writes a structure tree.
+            comic: 0,
+            document: 0,
+            // The EPUB path writes `/A` as one dictionary and no `/AF`, so
+            // only `/Headers` spends this: a forty-cell table on each of three
+            // hundred pages, every cell naming three header cells.
+            book: 300 * 40 * 3,
+            // One array of `MAX_ARRAY_LEN` entries, named by each of the walk's
+            // 2^18 elements.
+            reachable: (1u128 << 18) * (tinker_pdf_cos::limits::MAX_ARRAY_LEN as u128),
+            reachable_because: "2^18 elements naming one shared array of 2^20 entries",
+            declared_in: STRUCTURE,
+            fires_in: (
+                "shared_header_and_file_arrays_are_retained_within_one_budget",
+                TAGGED_PDF_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_STRUCTURE_BYTES",
+            cap: MAX_STRUCTURE_BYTES as u128,
+            published: "64 MiB",
+            // The firing test copies to the URI the budget runs out at.
+            fixtures: MAX_STRUCTURE_BYTES as u128,
+            comic: 0,
+            document: 0,
+            // Two 200-byte `/Alt`s, a forty-cell table of 30-byte `/ID`s each
+            // naming three 30-byte headers, and fifty 5-byte `/Lang`s a page,
+            // over three hundred pages, rounded up to 2 MiB.
+            book: 2 << 20,
+            // Each of the walk's 2^18 elements may name one indirect string as
+            // long as the file, on the narrowest target at most `u32::MAX`
+            // bytes.
+            reachable: (1u128 << 18) * (1u128 << 32),
+            reachable_because: "2^18 elements naming one shared string as long as a 4 GiB file",
+            declared_in: STRUCTURE,
+            fires_in: (
+                "a_shared_namespace_is_copied_within_the_walks_copy_budget",
+                TAGGED_PDF_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_ASSOCIATED_FILE_BYTES",
+            cap: MAX_ASSOCIATED_FILE_BYTES as u128,
+            published: "64 MiB",
+            // The firing test copies to the description the budget runs out
+            // at; `pdf20.rs`'s other files copy under a kilobyte.
+            fixtures: MAX_ASSOCIATED_FILE_BYTES as u128,
+            // None of the three paths associates a file with the catalog or a
+            // page.
+            comic: 0,
+            document: 0,
+            book: 0,
+            // `/AF` is read to `MAX_ARRAY_LEN` entries, each of which may name
+            // one specification whose `/Desc` is as long as the file.
+            reachable: (tinker_pdf_cos::limits::MAX_ARRAY_LEN as u128) * (1u128 << 32),
+            reachable_because: "2^20 /AF entries naming one /Desc as long as a 4 GiB file",
+            declared_in: ASSOCIATED_FILES,
+            fires_in: (
+                "an_associated_file_listing_spends_one_budget_and_says_what_it_cut",
+                PDF20_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_OUTPUT_INTENT_BYTES",
+            cap: MAX_OUTPUT_INTENT_BYTES as u128,
+            published: "64 MiB",
+            // The firing test copies to the `/Info` the budget runs out at.
+            fixtures: MAX_OUTPUT_INTENT_BYTES as u128,
+            // None of the three paths writes an intent unless asked for an
+            // archival profile, and then one.
+            comic: 0,
+            document: 0,
+            book: 0,
+            reachable: (tinker_pdf_cos::limits::MAX_ARRAY_LEN as u128) * (1u128 << 32),
+            reachable_because:
+                "2^20 /OutputIntents entries naming one /Info as long as a 4 GiB file",
+            declared_in: OUTPUT_INTENTS,
+            fires_in: (
+                "an_output_intent_listing_spends_one_budget_and_says_what_it_cut",
+                PDF20_TESTS,
+            ),
+        },
     ]
 }
 
@@ -2328,8 +2443,10 @@ fn segment_size() -> u128 {
 /// `MAX_SVG_BYTES`; and the review of the retained page adds
 /// `MAX_DISPLAY_LIST_BYTES`; and tier 5's Markdown row adds
 /// `MAX_MARKDOWN_NESTING` and `MAX_MARKDOWN_REFERENCE_BYTES`; and the EPUB
-/// CSS row's shadows add `MAX_CSS_SHADOWS`. All **fifty-five** are here, and
-/// a bound added without a row fails this.
+/// CSS row's shadows add `MAX_CSS_SHADOWS`; and the review of the
+/// tagged-writing lane adds `MAX_STRUCTURE_VALUES`, `MAX_STRUCTURE_BYTES`,
+/// `MAX_ASSOCIATED_FILE_BYTES` and `MAX_OUTPUT_INTENT_BYTES`. All
+/// **fifty-nine** are here, and a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -2391,6 +2508,10 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_MARKDOWN_NESTING",
             "MAX_MARKDOWN_REFERENCE_BYTES",
             "MAX_CSS_SHADOWS",
+            "MAX_STRUCTURE_VALUES",
+            "MAX_STRUCTURE_BYTES",
+            "MAX_ASSOCIATED_FILE_BYTES",
+            "MAX_OUTPUT_INTENT_BYTES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2496,7 +2617,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 55, "the ledger is fifty-five rows");
+    assert_eq!(measured, 59, "the ledger is fifty-nine rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2528,7 +2649,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 55, "the ledger is fifty-five rows");
+    assert_eq!(ledger().len(), 59, "the ledger is fifty-nine rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
@@ -2835,6 +2956,8 @@ fn every_bound_names_a_test_that_exists() {
         ANNOTATION_TESTS,
         FORM_DATA,
         FORM_DATA_TESTS,
+        TAGGED_PDF_TESTS,
+        PDF20_TESTS,
     ] {
         assert!(
             !source.contains("Instant::now"),

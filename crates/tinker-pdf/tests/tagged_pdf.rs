@@ -930,3 +930,124 @@ fn shared_header_and_file_arrays_are_retained_within_one_budget() {
         "exactly the budget, and no more"
     );
 }
+
+/// **A shared `/A` array is visited once per element**, and the walk's values
+/// budget bounds the visits as it bounds what `/Headers` and `/AF` keep: five
+/// elements naming one array of 250 000 attribute objects ask for 1 250 000
+/// visits, each a resolution and a look at `/O`, from a file of under 2 MB.
+/// The array's one `/Table` object is its last entry, so an element whose
+/// visit the budget cut short says so by having no table attributes.
+///
+/// Before the budget covered `/A`, sixteen elements naming an array of 2^20
+/// took nine seconds and said nothing; 2^18 of them would take two days.
+#[test]
+fn a_shared_attribute_array_is_visited_within_the_walks_values_budget() {
+    let per_array = 250_000;
+    let elements = 5;
+    let layout = "21 0 R ".repeat(per_array - 1);
+    let kids: String = (0..elements).map(|_| "<< /S /TH /A 19 0 R >> ").collect();
+    let doc = Document::open(build(
+        "",
+        "/K 10 0 R",
+        "",
+        &format!(
+            "10 0 obj\n<< /S /Table /K [{kids}] >>\nendobj\n\
+             19 0 obj\n[{layout} 20 0 R]\nendobj\n\
+             20 0 obj\n<< /O /Table /Scope /Row >>\nendobj\n\
+             21 0 obj\n<< /O /Layout /Placement /Block >>\nendobj\n"
+        ),
+    ))
+    .expect("it opens");
+
+    let tree = doc.structure().expect("a structure tree");
+    assert_eq!(tree.warnings, vec![StructureWarning::ValuesCapped], "once");
+    assert_eq!(tree.element_count(), elements + 1, "every element read");
+    let scopes: Vec<bool> = tree
+        .elements()
+        .into_iter()
+        .filter(|element| element.raw_type == "TH")
+        .map(|element| element.table.is_some())
+        .collect();
+    let paid = tinker_pdf::structure::MAX_STRUCTURE_VALUES / per_array;
+    assert_eq!(paid, 4);
+    assert_eq!(
+        scopes,
+        [true, true, true, true, false],
+        "the budget paid for four whole visits and cut the fifth short"
+    );
+}
+
+/// **A shared namespace URI is copied once per element**, and the walk's copy
+/// budget bounds it: seventy elements, each in a namespace dictionary of its
+/// own, every one of which names one `/NS` string of a mebibyte — 70 MiB of
+/// copies from a file of about one. The walk copies what the budget pays for,
+/// says so once naming the element it stopped at, and reads every element's
+/// type all the same.
+///
+/// The seventy dictionaries also share one `/RoleMapNS` of four thousand
+/// entries, which the walk used to copy once per dictionary — a 269 KB file
+/// asked for 650 MB that way. It is now looked up a type at a time and never
+/// copied, so it costs this budget nothing; what the test can see of that is
+/// that every element's type still resolves through the map's last entry.
+#[test]
+fn a_shared_namespace_is_copied_within_the_walks_copy_budget() {
+    let elements: u32 = 70;
+    let uri_len: usize = 1 << 20;
+    let ssn = "http://iso.org/pdf/ssn";
+    let map: String = (0..4_000).map(|i| format!("/t{i} [/P 22 0 R] ")).collect();
+    let kids: String = (0..elements).map(|i| format!("{} 0 R ", 100 + i)).collect();
+    let mut objects = format!(
+        "10 0 obj\n<< /S /Document /K [{kids}] >>\nendobj\n\
+         20 0 obj\n<< {map}>>\nendobj\n\
+         21 0 obj\n({})\nendobj\n\
+         22 0 obj\n<< /Type /Namespace /NS ({ssn}) >>\nendobj\n",
+        "a".repeat(uri_len)
+    );
+    for i in 0..elements {
+        objects.push_str(&format!(
+            "{} 0 obj\n<< /S /t3999 /P 10 0 R /NS {} 0 R >>\nendobj\n\
+             {} 0 obj\n<< /Type /Namespace /NS 21 0 R /RoleMapNS 20 0 R >>\nendobj\n",
+            100 + i,
+            200 + i,
+            200 + i,
+        ));
+    }
+    let bytes = build("", "/K 10 0 R /Namespaces [22 0 R 200 0 R]", "", &objects);
+    assert!(bytes.len() < 1_200_000, "a file of {} bytes", bytes.len());
+    let doc = Document::open(bytes).expect("it opens");
+
+    let tree = doc.structure().expect("a structure tree");
+    // Each whole element costs its own namespace's URI and the URI of the
+    // namespace its type landed in.
+    let whole = tinker_pdf::structure::MAX_STRUCTURE_BYTES / (uri_len + ssn.len());
+    assert_eq!(whole, 63);
+    assert_eq!(
+        tree.warnings,
+        vec![StructureWarning::BytesCapped {
+            element: Some(ObjRef::new(100 + whole as u32, 0))
+        }],
+        "once, naming the element the budget ran out at"
+    );
+    let found = tree.elements();
+    let named: Vec<&tinker_pdf::StructElement> = found
+        .iter()
+        .copied()
+        .filter(|element| element.raw_type == "t3999")
+        .collect();
+    assert_eq!(named.len(), elements as usize, "every element read");
+    assert!(
+        named.iter().all(|element| element.standard_type == "P"
+            && element.standard_namespace.as_deref() == Some(ssn)),
+        "every type resolved through the shared map"
+    );
+    let copied = named
+        .iter()
+        .filter(|element| element.namespace.is_some())
+        .count();
+    assert_eq!(copied, whole, "the URIs the budget paid for, and no more");
+    assert_eq!(
+        tree.namespaces,
+        [ssn],
+        "the root's list is read within what was left"
+    );
+}

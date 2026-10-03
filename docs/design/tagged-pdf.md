@@ -303,10 +303,16 @@ writes, family by family:
   an element holding nothing else is kept, and two halves of one element
   hold the first half's files once. The reader's
   `StructElement::associated_files` shares one walk-wide budget with
-  `/Headers` (2^20 entries, `StructureWarning::ValuesCapped`): writing the
-  reader for `/AF` found that the tagged-writing row's `/Headers` reading was
-  bounded per array and not across elements, so one shared array was read
-  once per element.
+  `/Headers` and `/A` (`MAX_STRUCTURE_VALUES`, 2^20 entries,
+  `StructureWarning::ValuesCapped`): writing the reader for `/AF` found that
+  the tagged-writing row's `/Headers` reading was bounded per array and not
+  across elements, so one shared array was read once per element, and the
+  row's review found `/A` the same. The review also found every string the
+  walk copies — namespace URIs, `/ID`, `/Headers` ids, files' names — copied
+  once per mention, now within `MAX_STRUCTURE_BYTES`
+  (`StructureWarning::BytesCapped`), and each namespace's `/RoleMapNS` copied
+  once per namespace dictionary however many shared it, now looked up a type
+  at a time and never copied.
 
 What the row leaves, each named in a refusal table rather than absent: a
 link wrapped across lines is one annotation per rectangle rather than ISO
