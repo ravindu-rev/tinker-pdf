@@ -18,14 +18,21 @@
 //! 2. **The line is put in visual order**, by where each base glyph starts
 //!    along the baseline. A stable sort, so glyphs a producer overprinted at
 //!    one position keep the order it wrote them in.
-//! 3. **UAX #9's rule L2 is applied to that visual line**, with levels
-//!    resolved from the characters' own `Bidi_Class` over the line as it now
-//!    stands, through [`tinker_pdf_shape::bidi::order_units`]. L2 is a
-//!    sequence of reversals, so it takes a line drawn from logical order back
-//!    to logical order. The paragraph direction is the line's own
-//!    [`TextLine::rtl`] — its majority of strong characters — and not P2's
-//!    first strong character, because in visual order a right-to-left line's
-//!    first strong character is its *last* one.
+//! 3. **The visual line is read back through UAX #9**, by
+//!    [`tinker_pdf_shape::bidi::logical_order`]: the order whose text, drawn
+//!    by the algorithm, is the line as it stands. Not L2 applied to levels
+//!    resolved over the drawn line — those are other levels, because W2, W5
+//!    and W7 look backwards for a strong character and N1 at both neighbours,
+//!    and a `%` drawn beside Arabic digits would join them. Every order is
+//!    checked forwards before it is used.
+//! 4. **The paragraph direction is read off the drawn line**
+//!    ([`tinker_pdf_shape::bidi::drawn_direction`]): P2's first strong
+//!    character is the leftmost strong one for a left-to-right paragraph and
+//!    the rightmost for a right-to-left one, so a line whose two ends agree is
+//!    that direction, and a line whose ends disagree goes by its majority.
+//!    Classes are `Bidi_Class`, so N'Ko and Adlam read right to left like
+//!    Hebrew. [`TextLine::rtl`] is set to the direction read, for every line
+//!    this touches.
 //!
 //! A line with no right-to-left character is left exactly as it was
 //! collected, byte for byte: no sort, no reorder. That is what keeps every
@@ -38,10 +45,18 @@
 //!   `)`, and whether a producer's `/ToUnicode` names the character it stands
 //!   for or the glyph's own shape is not recoverable from the line. This
 //!   engine's own writers name the character, so nothing is swapped.
-//! - **The paragraph.** A line is resolved on its own. A right-to-left
-//!   paragraph whose line holds more Latin than Arabic is taken as
-//!   left-to-right, and its runs come back each in the right order but placed
-//!   as a left-to-right paragraph would place them.
+//! - **Texts UAX #9 draws alike.** The algorithm is not one-to-one: in a
+//!   right-to-left paragraph `שלום 2026 now` and `שלום now 2026` are one
+//!   picture, and this reads it as the second. `logical_order` states which
+//!   one it returns; every answer draws the line as drawn.
+//! - **Bracket pairs.** Rule N0 pairs brackets in the logical text, and a
+//!   right-to-left run draws them mirrored, so a line holding a bracket pair
+//!   can read back as another text the same picture could be:
+//!   `BidiCharacterTest.txt` has 669 such cases of 91 616, and no others.
+//! - **The paragraph.** A line is resolved on its own. A line of a
+//!   right-to-left paragraph that begins and ends with Latin reads as a
+//!   left-to-right one, and its runs come back each in the right order but
+//!   placed as a left-to-right paragraph would place them.
 //! - **Vertical lines**, which UAX #9 does not describe.
 //!
 //! [`crate::Page::text_with`] with [`TextOptions::content_order`] is the
@@ -49,7 +64,7 @@
 //! `TextDevice` collected them.
 
 use tinker_pdf_content::{TextChar, TextLine, TextPage, WritingMode};
-use tinker_pdf_shape::bidi::{order_units, BaseDirection};
+use tinker_pdf_shape::bidi::{drawn_direction, logical_order, BaseDirection};
 use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
 
 /// How [`crate::Page::text_with`] orders a page's lines.
@@ -213,7 +228,8 @@ fn logical_line(line: &mut TextLine) -> bool {
         start(a).total_cmp(&start(b))
     });
 
-    // Step 3: L2, over the visual line.
+    // Steps 3 and 4: the paragraph's direction, and the order the visual line
+    // is read in.
     let texts: Vec<String> = clusters
         .iter()
         .map(|cluster| {
@@ -224,12 +240,9 @@ fn logical_line(line: &mut TextLine) -> bool {
         })
         .collect();
     let units: Vec<&str> = texts.iter().map(String::as_str).collect();
-    let direction = if line.rtl {
-        BaseDirection::RightToLeft
-    } else {
-        BaseDirection::LeftToRight
-    };
-    let order = order_units(&units, direction);
+    let direction = drawn_direction(&units);
+    line.rtl = direction == BaseDirection::RightToLeft;
+    let order = logical_order(&units, direction);
 
     let sequence: Vec<usize> = order
         .iter()
@@ -364,6 +377,43 @@ mod tests {
         let mut l = line(vec![ch("b", 5.0, 5.0), ch("a", 0.0, 5.0)], false);
         assert!(!logical_line(&mut l));
         assert_eq!(l.text, "ba");
+    }
+
+    /// The direction comes from the drawn line, not from the flag it arrived
+    /// with: `TextDevice`'s count of letters by block took this line as right
+    /// to left, and it is read as left to right and says so.
+    #[test]
+    fn the_direction_is_read_off_the_line_and_reported() {
+        let mut l = line(
+            vec![
+                ch("a", 0.0, 5.0),
+                ch(" ", 5.0, 5.0),
+                ch(GIMEL, 10.0, 5.0),
+                ch(BET, 15.0, 5.0),
+                ch(ALEF, 20.0, 5.0),
+                ch(" ", 25.0, 5.0),
+                ch("b", 30.0, 5.0),
+            ],
+            true,
+        );
+        assert!(logical_line(&mut l));
+        assert_eq!(l.text, format!("a {ALEF}{BET}{GIMEL} b"));
+        assert!(!l.rtl, "the line was read left to right");
+    }
+
+    /// A percentage after Arabic digits, the `%` drawn on the number's left.
+    #[test]
+    fn a_percentage_reads_back_as_typed() {
+        let typed = "\u{646}\u{633} 50%";
+        let drawn: Vec<TextChar> = ["%", "5", "0", " ", "\u{633}", "\u{646}"]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| ch(t, i as f64 * 5.0, 5.0))
+            .collect();
+        let mut l = line(drawn, false);
+        logical_line(&mut l);
+        assert_eq!(l.text, typed);
+        assert!(l.rtl);
     }
 
     #[test]

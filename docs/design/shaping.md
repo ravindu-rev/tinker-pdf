@@ -60,7 +60,7 @@ engine.
   reasoning survives for the consuming half: `TJ` arrays are honored as
   written, forever. Nothing in `tinker-pdf-render` calls this crate.
   Reordering is not shaping: ruling 14 puts an extracted right-to-left line
-  into logical order with this crate's UAX #9 (`bidi::order_units`), called
+  into logical order with this crate's UAX #9 (`bidi::logical_order`), called
   from the facade, so `tinker-pdf-content` still has no edge here and no
   glyph is re-shaped.
 - **AAT (`morx`) and Graphite tables.** OpenType Layout only; a face

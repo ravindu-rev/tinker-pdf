@@ -300,14 +300,18 @@ living in one feature's head.
     Hebrew line backwards — a searchable Arabic PDF that searches as nothing
     and a screen reader that reads every word from its last letter. So a line
     holding a right-to-left character is put back into the order it is read
-    in by **UAX #9's reordering applied in reverse**: rule L2 is a sequence
-    of reversals, so the levels are resolved from the characters'
-    `Bidi_Class` over the line as drawn — sorted along its baseline, marks
-    kept with the base glyph they sit on — and L2 is applied to that,
-    recovering logical order. The paragraph direction is the line's own
-    majority (`TextLine::rtl`) rather than P2's first strong character,
-    because in visual order a right-to-left line's first strong character is
-    its last.
+    in by **UAX #9 read backwards and checked forwards**: the line is sorted
+    along its baseline, marks kept with the base glyph they sit on, and the
+    order returned is one whose text the algorithm draws as the line stands
+    (`tinker_pdf_shape::bidi::logical_order`). It is not L2 applied to levels
+    resolved over the drawn line: L2 undoes itself only with the logical
+    line's levels, and rules W2, W5, W7 and N1 read neighbours, so the drawn
+    line resolves to other levels — `نسبة 50%` is drawn with the `%` on the
+    number's left and read that way came back as `نسبة %50`. The paragraph
+    direction is P2 read off the drawn line, by `Bidi_Class`: a
+    left-to-right paragraph draws its first strong character leftmost and a
+    right-to-left one rightmost, so the two ends decide, and the majority
+    only where they disagree.
 
     *Decided 3 October 2026, and why this way.* The pin in
     `crates/tinker-pdf/tests/epub_shaped.rs` asserted the backwards line by
@@ -323,19 +327,28 @@ living in one feature's head.
     - **Both producer habits give one answer.** A producer that draws a
       right-to-left word in visual order and one that draws it in reading
       order with the pen moving left describe the same page; the line is
-      sorted by where its glyphs are before L2 is applied, so the content
+      sorted by where its glyphs are before it is read back, so the content
       stream's order decides nothing. Reversing the stream instead would
       have broken the second habit, which extracted right before this.
-    - **The algorithm is Unicode's, held to Unicode's file.**
-      `tinker_pdf_shape::bidi::order_units` is the entry point extraction
-      calls, and `tinker-pdf-shape/tests/bidi_conformance.rs` runs the whole
-      of `BidiCharacterTest.txt` (91 707 cases) and `BidiTest.txt` (770 241
-      resolutions) through it.
+    - **The algorithm is Unicode's, held to Unicode's file in the direction
+      extraction uses it.** `bidi_conformance.rs` feeds every visual order
+      `BidiCharacterTest.txt` states (the 91 616 cases with nothing X9
+      removes) back through `logical_order`: every answer is a permutation,
+      every answer but three draws the stated line, and 90 947 come back to
+      the file's own text. Each of the other 669 holds a bracket pair. Before
+      the forward check, 8 100 came back as other text. The drawing
+      direction, `order_units`, which the check calls, runs the whole of
+      both files.
 
-    What it does not undo is named in `crates/tinker-pdf/src/text_order.rs`:
-    mirroring (L4), because whether a producer's `/ToUnicode` names a
-    mirrored glyph's character or its shape is not on the page; a paragraph,
-    because a line is resolved alone; and vertical lines. The opt-out is
+    UAX #9 is not one-to-one, so "back to the text that was typed" is not a
+    property any reader can have: in a right-to-left paragraph
+    `שלום 2026 now` and `שלום now 2026` are one picture, and this reads it
+    as the second. What it does not undo is named in
+    `crates/tinker-pdf/src/text_order.rs`: texts drawn alike; mirroring (L4),
+    because whether a producer's `/ToUnicode` names a mirrored glyph's
+    character or its shape is not on the page, and bracket pairs, which N0
+    reads off the logical text; a paragraph, because a line is resolved
+    alone; and vertical lines. The opt-out is
     additive — `Page::text_with(&TextOptions { content_order: true })` is the
     order the content stream drew, which is what `Page::text` returned before
     this ruling — and the reordering lives in the facade, so

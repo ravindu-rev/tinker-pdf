@@ -785,6 +785,25 @@ fn a_left_to_right_line_of_two_styled_spans_keeps_its_order() {
     assert!(ab < cd, "a left-to-right line was reordered: {content}");
 }
 
+/// **An English line holding an Arabic word reads back as it was written.**
+///
+/// The painter resolves the line by P2, so `a`, then the word, then `b` is a
+/// left-to-right paragraph and the word alone is reversed on the page. The
+/// reader used to take the line's direction from a count of its letters —
+/// three Arabic against two Latin — and read the whole line as right to left:
+/// `b بحم a` (review of lane 6C). It reads the direction off the drawn line
+/// now, and both ends are Latin.
+#[test]
+fn an_english_line_holding_an_arabic_word_reads_back_as_written() {
+    let face = Face::new("Fixture Arabic", " ab\u{628}\u{62D}\u{645}")
+        .with_joining(Joining { script: *b"arab" });
+    let written = "a \u{628}\u{62D}\u{645} b";
+    let doc = Document::open(one_face_book("Fixture Arabic", &face.build(), 24, written))
+        .expect("a book");
+    let extracted = doc.page(0).expect("a page").text().plain_text();
+    assert_eq!(extracted.trim_end(), written);
+}
+
 // ---- shaping across a span boundary ------------------------------------------
 
 /// **A word whose middle letter is in a span of its own is drawn joined.**

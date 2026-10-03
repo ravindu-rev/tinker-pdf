@@ -26,8 +26,15 @@ const SHALOM: &str = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}";
 /// Hebrew point qamats, a nonspacing mark.
 const QAMATS: char = '\u{5B8}';
 
+/// Arabic noon, seen, beh, teh marbuta: `nisba`, a proportion, as it is read.
+const NISBA: &str = "\u{646}\u{633}\u{628}\u{629}";
+
+/// N'Ko a, ee, i: three letters whose `Bidi_Class` is `R` and which sit in
+/// none of the Hebrew or Arabic blocks.
+const NKO: &str = "\u{7CA}\u{7CB} \u{7CC}.";
+
 /// Everything any page here draws.
-const COVERS: &str = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}\u{5B8} 0123456789seonw";
+const COVERS: &str = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}\u{5B8}\u{646}\u{633}\u{628}\u{629}\u{7CA}\u{7CB}\u{7CC} 0123456789seonwab.%";
 
 /// The font size, and so the advance of every glyph: the face's 500 units of
 /// a 1000-unit em at twenty points is ten.
@@ -143,6 +150,69 @@ fn digits_in_a_right_to_left_line_read_left_to_right() {
     let read = format!("{SHALOM} 2026");
     let drawn = format!("2026 {}", reversed(SHALOM));
     assert_eq!(extract(page(&visual(&drawn))), read);
+}
+
+/// **A percentage in an Arabic line reads as typed** (review of lane 6C).
+///
+/// W2 makes digits after an Arabic letter `AN`, so the `%` is a neutral and
+/// is drawn on the number's left: `%50`. Levels resolved over the line as
+/// drawn see an `ET` touching an `EN` and join it to the number, which read
+/// the line back as `nisba %50`; the forward check is what refuses that.
+#[test]
+fn a_percentage_in_an_arabic_line_reads_as_typed() {
+    let read = format!("{NISBA} 50%");
+    let drawn = format!("%50 {}", reversed(NISBA));
+    assert_eq!(extract(page(&visual(&drawn))), read);
+}
+
+/// **A line in a right-to-left script outside the Hebrew and Arabic blocks
+/// reads right to left.** The paragraph direction is read from the line's
+/// characters' own `Bidi_Class` (review of lane 6C); a table of blocks counted
+/// N'Ko's letters as left to right, because they are alphabetic.
+#[test]
+fn an_nko_line_reads_right_to_left() {
+    let drawn = reversed(NKO);
+    assert_eq!(extract(page(&visual(&drawn))), NKO);
+}
+
+/// **An English line holding a Hebrew word longer than its English stays an
+/// English line.** Its leftmost and rightmost strong characters are Latin, so
+/// no left-to-right paragraph and no right-to-left one would draw it any
+/// other way than a left-to-right paragraph does; a count of strong
+/// characters took it as right to left and reversed the English around the
+/// word (review of lane 6C).
+#[test]
+fn an_english_line_holding_a_longer_hebrew_word_stays_left_to_right() {
+    let read = format!("a {SHALOM} b");
+    let drawn = format!("a {} b", reversed(SHALOM));
+    assert_eq!(extract(page(&visual(&drawn))), read);
+}
+
+/// **Two texts UAX #9 draws alike read as the stated one.**
+///
+/// In a right-to-left paragraph `shalom 2026 now` and `shalom now 2026` are
+/// the same picture: W7 makes digits after a Latin word left to right, so
+/// `now 2026` is one run either way. No reader can tell them apart, and
+/// `tinker_pdf_shape::bidi::logical_order` says which it returns: the one
+/// that keeps a Latin word and its number together. What it returns always
+/// draws the line as drawn.
+#[test]
+fn two_texts_drawn_alike_read_as_the_stated_one() {
+    use tinker_pdf_shape::bidi::{order_units, BaseDirection};
+    let number_first = format!("{SHALOM} 2026 now");
+    let word_first = format!("{SHALOM} now 2026");
+    let draw = |text: &str| -> String {
+        let units: Vec<String> = text.chars().map(String::from).collect();
+        let borrowed: Vec<&str> = units.iter().map(String::as_str).collect();
+        order_units(&borrowed, BaseDirection::RightToLeft)
+            .into_iter()
+            .map(|at| borrowed[at])
+            .collect()
+    };
+    let drawn = format!("now 2026 {}", reversed(SHALOM));
+    assert_eq!(draw(&number_first), drawn);
+    assert_eq!(draw(&word_first), drawn);
+    assert_eq!(extract(page(&visual(&drawn))), word_first);
 }
 
 /// **A Hebrew word inside an English line** is reversed back and the English

@@ -371,23 +371,20 @@ pub fn reorder(levels: &[Level]) -> Vec<usize> {
 /// X9 removed takes the level of the unit before it — the paragraph's own if
 /// it is first — which is what UAX #9 §5.2 says an implementation that
 /// *retains* the removed characters gives them, and which moves no other unit.
+/// A unit's level is its first kept character's.
 ///
-/// # What this is for, and why reading text needs a drawing rule
-///
-/// `docs/rulings.md`'s ruling 14: text extracted from a page is reported in
-/// **logical** order, and a page draws its glyphs in **visual** order. Rule L2
-/// is a sequence of reversals, so a line already in visual order goes back to
-/// logical order through the same reversals, resolved over the line as it
-/// stands. A unit is the glyph's text rather than a character because a
-/// ligature's `/ToUnicode` entry is already in logical order inside itself, and
-/// splitting it would reverse what needs no reversing. The level of a unit is
-/// its first kept character's.
+/// This is the **drawing** direction, logical to visual. Reading a drawn line
+/// back is [`logical_order`], which calls this to check every answer it gives.
 ///
 /// `crates/tinker-pdf-shape/tests/bidi_conformance.rs` runs the whole of
-/// `BidiCharacterTest.txt` through **this** function, so the reading path
-/// meets the conformance file at the entry point it calls.
+/// `BidiCharacterTest.txt` and `BidiTest.txt` through **this** function.
 #[must_use]
 pub fn order_units(units: &[&str], direction: BaseDirection) -> Vec<usize> {
+    reorder(&unit_levels(units, direction))
+}
+
+/// The level of each unit after L1, as [`order_units`] places them.
+fn unit_levels(units: &[&str], direction: BaseDirection) -> Vec<Level> {
     let text: String = units.concat();
     let paragraph = Paragraph::new(&text, direction);
     let line = paragraph.line(0..paragraph.len());
@@ -406,7 +403,159 @@ pub fn order_units(units: &[&str], direction: BaseDirection) -> Vec<usize> {
         previous = level;
         at = end;
     }
-    reorder(&levels)
+    levels
+}
+
+/// How many times [`logical_order`] re-resolves a candidate from one starting
+/// point before trying the next.
+///
+/// Each round is one linear resolution of the line, so this is what keeps
+/// reading a hostile line a constant multiple of drawing it. Over the whole of
+/// `BidiCharacterTest.txt` two rounds from each start already find every
+/// order that more rounds find.
+const LOGICAL_ORDER_ROUNDS: usize = 4;
+
+/// The inverse of [`order_units`]: given one line's units **as drawn**, left
+/// to right, the order they are read in — the positions of `visual`, the
+/// first read first.
+///
+/// # Why this is a search and not a reversal
+///
+/// L2 is a sequence of reversals, and with every unit's level known it undoes
+/// itself. But the levels are resolved over the *logical* line, and rules W2,
+/// W5 and W7 look backwards for a strong character while N1 reads both
+/// neighbours, so levels resolved over the line as drawn are other levels.
+/// `نسبة 50%` resolves its `%` as `ON` (W2 made the digits `AN`) and is
+/// drawn `%50` to the left of the word; resolve that drawn line as it stands
+/// and the `%` is an `ET` touching an `EN`, so it joins the number and the
+/// line reads back as `نسبة %50`.
+///
+/// So every answer is **checked forwards**: an order is returned only if
+/// [`order_units`] draws the units read in that order exactly as `visual`
+/// stands, unit for unit. The search is a fixed point on the levels: take a
+/// level for each drawn unit, undo L2 with them, resolve what that reads as
+/// logical text, carry those levels back to the drawn positions, and go round
+/// again until an order checks. It starts from two places, up to four rounds
+/// each: the levels of the line resolved as drawn, and the levels of the line
+/// resolved backwards (its units right to left), carried back. A
+/// right-to-left paragraph starts from the first and a left-to-right one from
+/// the second; that order is not derived but measured, because it is the one
+/// that brings the most of Unicode's own file back to the text it was typed
+/// as (`bidi_conformance.rs` pins the count).
+///
+/// # What no reader can recover
+///
+/// UAX #9 is not one-to-one. In a right-to-left paragraph `שלום 2026 now`
+/// and `שלום now 2026` are drawn identically — W7 makes digits after a Latin
+/// word left to right, so `now 2026` is one run either way — and nothing on
+/// the page says which was typed; this returns `שלום now 2026`, the reading
+/// that keeps a Latin name and its number together (`iPhone 15`). Where
+/// several orders draw the line, the first the search reaches is returned,
+/// which in `BidiCharacterTest.txt` is the file's own text except in cases
+/// that each hold a paired bracket, whose pairing (rule N0) is read off the
+/// logical text and is mirrored on the page. Where the search reaches no order
+/// that checks — a line no logical text draws, such as one a producer laid out
+/// by a rule of its own — the first candidate is returned, so every unit is
+/// still placed exactly once.
+///
+/// `direction` is the paragraph's; [`BaseDirection::Auto`] is
+/// [`drawn_direction`].
+///
+/// `crates/tinker-pdf-shape/tests/bidi_conformance.rs` feeds every visual
+/// order `BidiCharacterTest.txt` states back through this function.
+#[must_use]
+pub fn logical_order(visual: &[&str], direction: BaseDirection) -> Vec<usize> {
+    let direction = match direction {
+        BaseDirection::Auto => drawn_direction(visual),
+        given => given,
+    };
+    let count = visual.len();
+    let as_drawn = unit_levels(visual, direction);
+    let backwards: Vec<&str> = visual.iter().rev().copied().collect();
+    let mut from_the_right = unit_levels(&backwards, direction);
+    from_the_right.reverse();
+    let starts = if direction == BaseDirection::RightToLeft {
+        [as_drawn, from_the_right]
+    } else {
+        [from_the_right, as_drawn]
+    };
+    let mut first: Option<Vec<usize>> = None;
+    for start in starts {
+        let mut levels = start;
+        for _ in 0..LOGICAL_ORDER_ROUNDS {
+            // With every unit's level known L2 undoes itself: `order` lists
+            // the drawn positions in the order they are read.
+            let order = reorder(&levels);
+            let read: Vec<&str> = order
+                .iter()
+                .filter_map(|at| visual.get(*at).copied())
+                .collect();
+            let resolved = unit_levels(&read, direction);
+            let drawn = reorder(&resolved);
+            if drawn.len() == count
+                && drawn
+                    .iter()
+                    .zip(visual)
+                    .all(|(at, unit)| read.get(*at) == Some(unit))
+            {
+                return order;
+            }
+            let mut carried = levels.clone();
+            for (position, at) in order.iter().enumerate() {
+                if let (Some(slot), Some(level)) = (carried.get_mut(*at), resolved.get(position)) {
+                    *slot = *level;
+                }
+            }
+            first.get_or_insert(order);
+            if carried == levels {
+                break;
+            }
+            levels = carried;
+        }
+    }
+    first.unwrap_or_else(|| (0..count).collect())
+}
+
+/// P2 for a line given in **visual** order: which way its paragraph runs.
+///
+/// P2 takes the first strong character in logical order. A left-to-right
+/// paragraph draws that one leftmost of its strong characters, and a
+/// right-to-left paragraph rightmost, so a line whose leftmost and rightmost
+/// strong characters agree is that direction — an English line holding a long
+/// Arabic word stays left to right, and a line of a script whose letters are
+/// `R`, N'Ko or Adlam as much as Hebrew, reads right to left. Where they
+/// disagree either paragraph could have drawn the line, and the majority of
+/// its strong characters decides, left to right on a tie or with none.
+///
+/// Never [`BaseDirection::Auto`]. Classes are the characters' own
+/// `Bidi_Class`, so no script is missed by a table of blocks.
+#[must_use]
+pub fn drawn_direction(visual: &[&str]) -> BaseDirection {
+    let strong = |c: char| match unicode::bidi_class(c) {
+        BidiClass::L => Some(false),
+        BidiClass::R | BidiClass::AL => Some(true),
+        _ => None,
+    };
+    let mut leftmost = None;
+    let mut rightmost = None;
+    let (mut rtl, mut ltr) = (0usize, 0usize);
+    for c in visual.iter().flat_map(|unit| unit.chars()) {
+        if let Some(is_rtl) = strong(c) {
+            leftmost.get_or_insert(is_rtl);
+            rightmost = Some(is_rtl);
+            if is_rtl {
+                rtl += 1;
+            } else {
+                ltr += 1;
+            }
+        }
+    }
+    match (leftmost, rightmost) {
+        (Some(false), Some(false)) => BaseDirection::LeftToRight,
+        (Some(true), Some(true)) => BaseDirection::RightToLeft,
+        _ if rtl > ltr => BaseDirection::RightToLeft,
+        _ => BaseDirection::LeftToRight,
+    }
 }
 
 // --- P2, P3 --------------------------------------------------------------
@@ -1042,7 +1191,10 @@ pub fn mirror(c: char, level: Level) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
-    use super::{mirror, reorder, BaseDirection, Level, Paragraph};
+    use super::{
+        drawn_direction, logical_order, mirror, order_units, reorder, BaseDirection, Level,
+        Paragraph,
+    };
 
     fn levels(text: &str, direction: BaseDirection) -> Vec<u8> {
         let paragraph = Paragraph::new(text, direction);
@@ -1224,5 +1376,103 @@ mod tests {
             highest <= Level::MAX_DEPTH + 1,
             "an isolate reached level {highest}"
         );
+    }
+
+    /// `text` as one-character units, drawn by [`order_units`] and read back
+    /// by [`logical_order`]: what the line looks like, and what it reads as.
+    fn drawn_and_read(text: &str, direction: BaseDirection) -> (String, String) {
+        let units: Vec<String> = text.chars().map(String::from).collect();
+        let logical: Vec<&str> = units.iter().map(String::as_str).collect();
+        let visual: Vec<&str> = order_units(&logical, direction)
+            .into_iter()
+            .map(|at| logical[at])
+            .collect();
+        let read: String = logical_order(&visual, direction)
+            .into_iter()
+            .map(|at| visual[at])
+            .collect();
+        (visual.concat(), read)
+    }
+
+    /// **The review's percentage.** W2 makes the digits after an Arabic
+    /// letter `AN`, so the `%` is `ON` and is drawn on the number's left. Read
+    /// as drawn, that `%` is an `ET` beside an `EN` and joins the number; the
+    /// forward check is what refuses `نسبة %50`.
+    #[test]
+    fn an_arabic_percentage_reads_back_as_typed() {
+        let typed = "\u{646}\u{633}\u{628}\u{629} 50%";
+        let (drawn, read) = drawn_and_read(typed, BaseDirection::RightToLeft);
+        assert_eq!(drawn, "%50 \u{629}\u{628}\u{633}\u{646}");
+        assert_eq!(read, typed);
+    }
+
+    /// Unicode's own counter-examples to "L2 undoes itself", from the review:
+    /// a Hebrew letter before a hyphenated range, and an Arabic letter before
+    /// a fraction.
+    #[test]
+    fn numbers_with_separators_read_back_as_typed() {
+        for (typed, direction) in [
+            ("\u{5D0} 1-2", BaseDirection::LeftToRight),
+            ("\u{62A}1/2", BaseDirection::LeftToRight),
+            ("\u{5D0} 1-2", BaseDirection::RightToLeft),
+        ] {
+            let (_, read) = drawn_and_read(typed, direction);
+            assert_eq!(read, typed, "{direction:?}");
+        }
+    }
+
+    /// **What no reader can recover.** Two texts drawn identically: the answer
+    /// is one of them, it draws the line, and which one is the stated choice.
+    #[test]
+    fn two_texts_drawn_alike_read_as_the_stated_one() {
+        let shalom = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}";
+        let number_first = format!("{shalom} 2026 now");
+        let word_first = format!("{shalom} now 2026");
+        let (a, read_a) = drawn_and_read(&number_first, BaseDirection::RightToLeft);
+        let (b, read_b) = drawn_and_read(&word_first, BaseDirection::RightToLeft);
+        assert_eq!(a, b, "the two are not drawn alike");
+        assert_eq!(read_a, word_first);
+        assert_eq!(read_b, word_first);
+    }
+
+    /// Every unit is placed once, even for input no logical text draws.
+    #[test]
+    fn a_line_nothing_draws_still_places_every_unit() {
+        // A lone PDF, an RLE and a tab around digits: drawn by no rule.
+        let units = ["\u{202C}", "1", "\u{202B}", "\t", "\u{661}", "(", ")"];
+        for direction in [
+            BaseDirection::LeftToRight,
+            BaseDirection::RightToLeft,
+            BaseDirection::Auto,
+        ] {
+            let mut order = logical_order(&units, direction);
+            order.sort_unstable();
+            assert_eq!(order, (0..units.len()).collect::<Vec<_>>());
+        }
+        assert!(logical_order(&[], BaseDirection::Auto).is_empty());
+    }
+
+    /// P2 read off a drawn line: the two ends, then the majority.
+    #[test]
+    fn the_drawn_direction_is_read_from_both_ends() {
+        let dir = |text: &str| {
+            let units: Vec<String> = text.chars().map(String::from).collect();
+            let borrowed: Vec<&str> = units.iter().map(String::as_str).collect();
+            drawn_direction(&borrowed)
+        };
+        // An English line holding a longer Arabic word.
+        assert_eq!(
+            dir("a \u{645}\u{62D}\u{628}\u{645}\u{62D}\u{628} b"),
+            BaseDirection::LeftToRight
+        );
+        // N'Ko, whose letters are R and sit in no Hebrew or Arabic block.
+        assert_eq!(dir(".\u{7CC} \u{7CB}\u{7CA}"), BaseDirection::RightToLeft);
+        // Adlam.
+        assert_eq!(dir("\u{1E922}\u{1E923}"), BaseDirection::RightToLeft);
+        // The ends disagree: the majority.
+        assert_eq!(dir("ab \u{5D2}\u{5D1}\u{5D0}"), BaseDirection::RightToLeft);
+        assert_eq!(dir("abc \u{5D1}\u{5D0}"), BaseDirection::LeftToRight);
+        // No strong character at all.
+        assert_eq!(dir("12 %"), BaseDirection::LeftToRight);
     }
 }

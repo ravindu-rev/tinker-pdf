@@ -137,6 +137,13 @@ pub struct TextLine {
     /// Determined from the characters themselves, not from the writing mode:
     /// they are different properties and a vertical Japanese line is not
     /// right-to-left.
+    ///
+    /// [`TextDevice`] counts letters in the Hebrew, Arabic, Syriac and Thaana
+    /// blocks against alphabetic ones. The facade's `Page::text` replaces that
+    /// count, for a line holding a right-to-left character, with the paragraph
+    /// direction it read the line in (ruling 14), which comes from every
+    /// character's `Bidi_Class` and from which end of the line its strong
+    /// characters sit at.
     pub rtl: bool,
     /// The largest font size on the line, which is what the eye reads it as.
     pub size: f64,
