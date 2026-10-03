@@ -330,3 +330,9 @@ name = "form_data"
 path = "fuzz_targets/form_data.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "annotation_appearance"
+path = "fuzz_targets/annotation_appearance.rs"
+test = false
+doc = false

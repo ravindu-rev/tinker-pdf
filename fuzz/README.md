@@ -7,6 +7,7 @@ Policy: [`docs/verification.md`](../docs/verification.md).
 | --- | --- |
 | `cos_document` | The whole file parser: every rung of the leniency ladder, then the page tree and every stream |
 | `cos_object` | The object grammar of 7.3 alone, with no file around it |
+| `annotation_appearance` | Appearance synthesis (12.5.5, 12.5.6) for one annotation dictionary parsed from the bytes, against a fixed form whose `/DR` holds four fonts so `/DA` reaches every free text branch: what is written must stay bounded by the input and lex with no leniency |
 | `inflate` | Own inflate, including truncated and corrupt streams |
 | `lzw` | LZW with and without early change |
 | `jpeg` | Baseline JPEG: Huffman tables, restarts, sampling factors |

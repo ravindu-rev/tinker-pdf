@@ -141,6 +141,10 @@ fn signatures() -> BTreeMap<&'static str, Vec<Signature>> {
 /// `crates/tinker-pdf-svg/src/tests.rs` that restates the target's own split.
 const UNSIGNED: &[(&str, &str)] = &[
     (
+        "annotation_appearance",
+        "one annotation dictionary as COS text, which has no file header",
+    ),
+    (
         "ascii_filters",
         "ASCII85 and ASCIIHex are text with no header",
     ),

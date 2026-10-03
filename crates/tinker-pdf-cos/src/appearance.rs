@@ -91,7 +91,25 @@ fn inset(rect: Rect, by: f64) -> Rect {
 fn rect_of(doc: &CosDocument, dict: &Dict) -> Option<Rect> {
     let value = doc.resolve_key(dict, doc.intern(b"Rect"));
     let rect = value.as_array().and_then(Rect::from_array)?;
-    (!rect.is_empty()).then_some(rect)
+    let sane = [rect.x0, rect.y0, rect.x1, rect.y1].into_iter().all(sane);
+    (sane && !rect.is_empty()).then_some(rect)
+}
+
+/// The largest magnitude a number read here may have: Annex C's limit on a
+/// real (ISO 32000-1 Table C.1, ±3.403 × 10³⁸).
+///
+/// A coordinate past it is not one a conforming writer emits, and it is
+/// read as [`Malformed`]. That keeps everything this module computes from
+/// the dictionary far inside an `f64`, so every number it writes is one a
+/// reader takes back whole: one within a rounding of `f64::MAX`, written
+/// out in its 309 digits, is read by this crate's own lexer as an overflow
+/// (`RealOverflowClamped`).
+const MAX_NUMBER: f64 = 3.403e38;
+
+/// Whether a number read from the dictionary is finite and within
+/// [`MAX_NUMBER`].
+fn sane(v: f64) -> bool {
+    v.is_finite() && v.abs() <= MAX_NUMBER
 }
 
 /// An annotation colour entry (12.5.2 `/C`, and `/IC`): grey, RGB or CMYK,
@@ -169,11 +187,20 @@ fn quads_of(doc: &CosDocument, dict: &Dict) -> Result<Vec<[f64; 8]>, Malformed> 
 
 /// Writes a number the way a content stream wants it: short, and never in
 /// exponential notation, which no PDF tokenizer accepts.
+///
+/// A whole number past Annex C's 32-bit integer is written as a real, with
+/// its `.0`: as an integer token a reader that holds integers in 32 bits
+/// clamps it, and this crate's lexer clamps one past 64 bits
+/// (`IntOverflowClamped`), where a real token is read whole.
 fn number(out: &mut Vec<u8>, value: f64) {
     let value = if value.is_finite() { value } else { 0.0 };
     let text = format!("{value:.4}");
     let trimmed = text.trim_end_matches('0').trim_end_matches('.');
-    out.extend_from_slice(if trimmed.is_empty() { "0" } else { trimmed }.as_bytes());
+    let trimmed = if trimmed.is_empty() { "0" } else { trimmed };
+    out.extend_from_slice(trimmed.as_bytes());
+    if !trimmed.contains('.') && value.abs() > f64::from(i32::MAX) {
+        out.extend_from_slice(b".0");
+    }
 }
 
 fn op(out: &mut Vec<u8>, values: &[f64], operator: &[u8]) {
@@ -207,8 +234,8 @@ type Entry<T> = Result<Option<T>, Malformed>;
 
 /// An entry that is an array of finite numbers, each element a number or a
 /// reference to one (7.3.10). An absent or null entry is `Ok(None)`; one
-/// that is not an array, or holds an element that is not a finite number,
-/// is [`Malformed`].
+/// that is not an array, or holds an element that is not a finite number
+/// within [`MAX_NUMBER`], is [`Malformed`].
 fn numbers_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Entry<Vec<f64>> {
     let value = doc.resolve_key(dict, doc.intern(key));
     if value.is_null() {
@@ -217,8 +244,8 @@ fn numbers_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Entry<Vec<f64>> {
     numbers_in(doc, &value).map(Some)
 }
 
-/// The finite numbers an array object holds, or [`Malformed`] when it is
-/// not an array or one of them is not a finite number.
+/// The numbers an array object holds, or [`Malformed`] when it is not an
+/// array or one of them is not a finite number within [`MAX_NUMBER`].
 fn numbers_in(doc: &CosDocument, array: &Object) -> Result<Vec<f64>, Malformed> {
     array
         .as_array()
@@ -227,21 +254,21 @@ fn numbers_in(doc: &CosDocument, array: &Object) -> Result<Vec<f64>, Malformed> 
         .map(|item| {
             doc.resolve(item)
                 .as_number()
-                .filter(|v| v.is_finite())
+                .filter(|v| sane(*v))
                 .ok_or(Malformed)
         })
         .collect()
 }
 
 /// A number entry: absent or null is `Ok(None)`, and anything but a finite
-/// number is [`Malformed`].
+/// number within [`MAX_NUMBER`] is [`Malformed`].
 fn number_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Entry<f64> {
     let value = doc.resolve_key(dict, doc.intern(key));
     if value.is_null() {
         return Ok(None);
     }
     match value.as_number() {
-        Some(v) if v.is_finite() => Ok(Some(v)),
+        Some(v) if sane(v) => Ok(Some(v)),
         _ => Err(Malformed),
     }
 }
@@ -1041,6 +1068,14 @@ fn default_appearance(da: &[u8]) -> Option<DefaultAppearance> {
                 continue;
             }
         };
+        // A number past Annex C's real is not one an operator is handed,
+        // and what it would have set is a guess.
+        if operands
+            .iter()
+            .any(|operand| matches!(operand, Operand::Number(v) if !sane(*v)))
+        {
+            return None;
+        }
         // The last `n` operands, as numbers.
         let numbers = |n: usize| -> Option<Vec<f64>> {
             let start = operands.len().checked_sub(n)?;
@@ -1048,7 +1083,7 @@ fn default_appearance(da: &[u8]) -> Option<DefaultAppearance> {
                 .get(start..)?
                 .iter()
                 .map(|operand| match operand {
-                    Operand::Number(v) if v.is_finite() => Some(*v),
+                    Operand::Number(v) if sane(*v) => Some(*v),
                     _ => None,
                 })
                 .collect()
@@ -1059,7 +1094,7 @@ fn default_appearance(da: &[u8]) -> Option<DefaultAppearance> {
                     // 12.7.3.3 gives a size of zero a meaning, auto-sizing,
                     // and a negative one none: read as zero it would be a
                     // size the producer did not ask for.
-                    if !size.is_finite() || *size < 0.0 {
+                    if !sane(*size) || *size < 0.0 {
                         return None;
                     }
                     font = Some((name.clone(), *size));
@@ -2211,6 +2246,16 @@ mod tests {
             !text.contains('e') && !text.contains("inf") && !text.contains("NaN"),
             "no tokenizer accepts those, got: {text}"
         );
+        // A whole number past a 32-bit integer is a real token, which this
+        // crate's lexer reads without clamping it.
+        for (value, written) in [(2_147_483_647.0, "2147483647"), (4e9, "4000000000.0")] {
+            let mut out = Vec::new();
+            number(&mut out, value);
+            assert_eq!(String::from_utf8_lossy(&out), written);
+        }
+        let mut huge = Vec::new();
+        number(&mut huge, -1e300);
+        assert!(lexes_cleanly(&huge), "{}", String::from_utf8_lossy(&huge));
     }
 
     /// A stream as the writer would emit it: the dictionary, then the
@@ -2340,6 +2385,7 @@ mod tests {
             "<< /Subtype /Square /Rect [10 20 110 60] /C [1 0 0] /Border [0 0] >>",
             "<< /Subtype /Circle /Rect [10 20 110 60] /C [1 0 0] /IC [0 0 1 (x)] >>",
             "<< /Subtype /Text /Rect [10 20 110 60] /C (red) >>",
+            "<< /Subtype /Text /Rect [10 20 110 400000000000000000000000000000000000000.0] >>",
         ] {
             assert_eq!(content_of(&doc, declined), None, "{declined}");
         }
@@ -2398,6 +2444,9 @@ mod tests {
                     "/LLO [4]",
                     "/CA (x)",
                     "/ca /Half",
+                    // Past Annex C's real, written as a real so the parse
+                    // does not clamp it.
+                    "/L [10 50 400000000000000000000000000000000000000.0 50]",
                 ],
             ),
             (
@@ -3462,6 +3511,7 @@ mod tests {
             "/F\\(1 10 Tf 0 g",
             "/Helv 1e1 Tf 0 g",
             "/Helv 10 Tf 0 g \\)",
+            "/Helv 10 Tf 400000000000000000000000000000000000000.0 g",
         ] {
             assert!(synthesize(&form, &annotation(unread)).is_none(), "{unread}");
         }
@@ -3546,6 +3596,27 @@ mod tests {
             "thirteen subtypes are drawn, and Link draws none"
         );
         assert_eq!(ALL.len(), drawn + 1 + UNDETERMINED_SUBTYPES.len());
+    }
+
+    /// Whether this crate's lexer reads `data` to its end without a single
+    /// leniency: every number one 7.3.3 allows, every name escaped, every
+    /// string closed and no stray delimiter.
+    fn lexes_cleanly(data: &[u8]) -> bool {
+        let mut sink = crate::warn::WarningSink::new();
+        let mut lexer = crate::lexer::Lexer::new(data);
+        loop {
+            let token = lexer.next_token(&mut sink);
+            if token.is_eof() {
+                return sink.is_empty();
+            }
+            if matches!(token.kind, crate::lexer::TokenKind::Unknown)
+                && data
+                    .get(token.start as usize)
+                    .is_none_or(|b| crate::lexer::is_delimiter(*b))
+            {
+                return false;
+            }
+        }
     }
 
     /// Ruling 1, over every subtype this draws and a few it does not: no
@@ -3670,6 +3741,7 @@ mod tests {
                 let text = String::from_utf8_lossy(&stream.data);
                 prop_assert!(!text.contains("NaN") && !text.contains("inf"), "{text}");
                 prop_assert!(stream.data.len() < 64 << 10, "{} bytes", stream.data.len());
+                prop_assert!(lexes_cleanly(&stream.data), "{text}");
             }
             Ok(())
         });

@@ -169,7 +169,7 @@ measurement rather than a number kept in step.
 | Crate | Role | ~LOC | Feature doc | Fuzz targets |
 | --- | --- | ---: | --- | --- |
 | `tinker-pdf` | facade; the only public surface | 24 300 | all of [features/](README.md) | `render_page` |
-| `tinker-pdf-cos` | file syntax, object store, writer, strict validator | 32 900 | [opening](features/opening.md), [document-model](features/document-model.md), [writing](features/writing.md), [forms](features/forms.md), [creation](features/creation.md) | `cos_document`, `cos_object`, `form_script` |
+| `tinker-pdf-cos` | file syntax, object store, writer, strict validator | 32 900 | [opening](features/opening.md), [document-model](features/document-model.md), [writing](features/writing.md), [forms](features/forms.md), [creation](features/creation.md) | `cos_document`, `cos_object`, `form_script`, `annotation_appearance` |
 | `tinker-pdf-filters` | stream filters + image codecs | 21 800 | [filters](features/filters.md) | `ascii_filters`, `ccitt`, `inflate`, `jbig2`, `jpeg`, `jpx`, `lzw`, `png` |
 | `tinker-pdf-crypto` | ciphers, hashes, security handlers, RSA/ECDSA verify | 6 000 | [encryption](features/encryption.md) | `crypt`, `crypt_ciphers` |
 | `tinker-pdf-pki` | DER (X.690), X.509 (RFC 5280), CMS (RFC 5652) | 6 000 | [signatures](features/signatures.md) | `pki_der`, `pki_cms` |
