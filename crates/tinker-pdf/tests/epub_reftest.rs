@@ -1188,6 +1188,26 @@ fn a_first_letter_on_two_hundred_nested_blocks_is_one_box() {
     same("two hundred nested ::first-letter", styled, written, broken);
 }
 
+/// **`max-height` on a box that clips is the height it clamps to** (CSS 2.2
+/// §10.7, with `css-overflow-3` §3's clip): a 24-pixel `max-height` over four
+/// lines in an `overflow: hidden` box lays out as a 24-pixel `height` — the
+/// box ends there and the paragraph after it follows, and the lines past the
+/// clip are laid out, not painted, in the same places on both sides. The
+/// mismatch is the box with no clamp, as tall as its content, which is where
+/// `MaxHeightAsAuto` leaves a box that does not clip.
+#[test]
+fn max_height_on_a_clipping_box_is_the_height_it_clamps_to() {
+    let body = |rule: &str| {
+        format!(
+            r#"<div style="width: 40px; overflow: hidden; {rule}">aaaa bbbb cccc dddd</div><p>after</p>"#
+        )
+    };
+    let clamped = lay("", &body("max-height: 24px"));
+    let written = lay("", &body("height: 24px"));
+    let broken = lay("", &body(""));
+    same("max-height on a clipping box", clamped, written, broken);
+}
+
 /// **`column-span: all` interrupts the columns** (`css-multicol-1` §6): a
 /// two-column container with a spanning paragraph in the middle lays out as a
 /// two-column container, the paragraph, and a second two-column container —

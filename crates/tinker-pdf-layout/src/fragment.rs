@@ -907,6 +907,13 @@ fn clip(
 /// two radii meeting that side and `L` its length, when that is below one — so
 /// a 30-pixel radius on a 40-pixel-high box becomes 20 at all four corners and
 /// not only at the two that collided, which keeps a pill shape round.
+///
+/// **`width` and `height` are the fragment's**, so on a box cut across pages
+/// both the percentages and the factor are the slice's: a short last slice of
+/// a box with large radii has smaller corners than the unbroken box, where
+/// `css-break-3` §5.4's `slice` would cut the unbroken box's shape. Stated in
+/// `docs/features/epub.md`; the unbroken shape would need drawing under a clip
+/// to the slice, since its corner can be taller than the slice is.
 fn corner_radii(
     block: &BlockRecord,
     width: f64,
