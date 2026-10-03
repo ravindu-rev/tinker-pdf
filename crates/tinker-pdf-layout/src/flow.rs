@@ -3196,20 +3196,129 @@ impl<M: Metrics> Builder<'_, M> {
         // carried unresolved as far as here.
         let gap = style.gap_px(style.column_gap, content_width);
         let (count, width) = column_geometry(style, content_width, gap);
-        // §6's `column-span` is a property of a **child** of the container and
-        // not of the container, which is why this reads the children: a
-        // spanning box interrupts the columns and resumes them below itself,
-        // and this build has one column set per container. Counted per box, so
-        // a book with one spanning heading and a book with four hundred are
-        // different numbers.
-        if let Content::Children(children) = &node.content {
-            for child in children {
-                if consume(&child.style).column_span == ColumnSpan::All {
+        // §6's `column-span: all`: a spanning box *"interrupts"* the columns,
+        // is laid out across the container's whole width, and the columns
+        // resume beneath it — so a container with spanning children is
+        // several column sets, one per run of the children between them, each
+        // balanced on its own, with the spanners as ordinary blocks between.
+        // A spanner is an in-flow block-level **child** here; one deeper in
+        // the tree is laid out in its column and counted.
+        let Content::Children(children) = &node.content else {
+            return self.column_set(node, style, content_x, depth, avoid, (count, width, gap));
+        };
+        self.note_deep_spanners(children, depth)?;
+        let spans = |child: &BoxNode| {
+            let inner = &child.style;
+            inner.column_span == ColumnSpan::All
+                && inner.display != Display::None
+                && inner.float == Float::None
+                && !matches!(inner.position, Position::Absolute | Position::Fixed)
+        };
+        if !children.iter().any(spans) {
+            return self.column_set(node, style, content_x, depth, avoid, (count, width, gap));
+        }
+        let mut from = 0;
+        for (at, child) in children.iter().enumerate() {
+            if !spans(child) {
+                continue;
+            }
+            self.column_run(
+                node,
+                &children[from..at],
+                style,
+                content_x,
+                depth,
+                avoid,
+                (count, width, gap),
+            )?;
+            self.commit_margin();
+            self.block(child, content_width, content_x, depth + 1, avoid, 0)?;
+            self.commit_margin();
+            from = at + 1;
+        }
+        self.column_run(
+            node,
+            &children[from..],
+            style,
+            content_x,
+            depth,
+            avoid,
+            (count, width, gap),
+        )
+    }
+
+    /// One run of a multi-column container's children between two spanners,
+    /// as a column set of its own: the container's box with only these
+    /// children in it, so [`Builder::column_set`] lays them out and balances
+    /// them as it does a whole container's. A run of nothing is no set.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn column_run(
+        &mut self,
+        node: &BoxNode,
+        run: &[BoxNode],
+        style: &Consumed,
+        content_x: f64,
+        depth: usize,
+        avoid: bool,
+        geometry: (usize, f64, f64),
+    ) -> Result<(), Refusal> {
+        if run.iter().all(|child| child.style.display == Display::None) {
+            return Ok(());
+        }
+        let part = BoxNode {
+            style: node.style.clone(),
+            content: Content::Children(run.to_vec()),
+            anchor: node.anchor,
+            span: node.span,
+            marker: None,
+        };
+        self.column_set(&part, style, content_x, depth, avoid, geometry)
+    }
+
+    /// `column-span: all` below a multi-column container's own children,
+    /// counted per box and laid out in its column: a spanner nested in a
+    /// child is §6's too, and splitting the container round a box inside one
+    /// of its children would split that child, which this build does not.
+    /// Nested multi-column containers are their own question and are not
+    /// entered. Every node visited is charged to the layout work.
+    fn note_deep_spanners(&mut self, children: &[BoxNode], depth: usize) -> Result<(), Refusal> {
+        if depth > self.limits.max_depth {
+            return Err(Refusal::TooDeep { depth });
+        }
+        for child in children {
+            let Content::Children(inner) = &child.content else {
+                continue;
+            };
+            if child.style.display == Display::None || consume(&child.style).is_multicol() {
+                continue;
+            }
+            self.budget.spend_layout(inner.len())?;
+            for grandchild in inner {
+                if grandchild.style.column_span == ColumnSpan::All
+                    && grandchild.style.display != Display::None
+                {
                     self.warn(Warning::ColumnSpanAsNone);
                 }
             }
+            self.note_deep_spanners(inner, depth + 1)?;
         }
+        Ok(())
+    }
 
+    /// One column set: `node`'s children laid out once at one column's
+    /// width, balanced, sliced and placed side by side. See
+    /// [`Builder::columns`].
+    #[allow(clippy::too_many_arguments)]
+    fn column_set(
+        &mut self,
+        node: &BoxNode,
+        style: &Consumed,
+        content_x: f64,
+        depth: usize,
+        avoid: bool,
+        (count, width, gap): (usize, f64, f64),
+    ) -> Result<(), Refusal> {
         let sub = self.subflow(node, Some(style), width, depth, avoid)?;
         if sub.items.is_empty() {
             return Ok(());

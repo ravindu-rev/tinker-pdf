@@ -992,14 +992,17 @@ pub enum Warning {
     /// band inside it -- is itself taller than a whole page, which no cut can
     /// halve.
     ColumnTallerThanPage,
-    /// `column-span: all`, laid out in its column.
+    /// `column-span: all` on a box **below** a multi-column container's own
+    /// children, laid out in its column.
     ///
     /// `css-multicol-1` §6: a spanning box interrupts the columns, is laid out
     /// across the full width of the container, and the columns resume beneath
-    /// it. That is three column sets where this build has one, so the box is
-    /// laid out in the column it fell in and the fact is named. Counted per
-    /// box, for `UnimplementedProperty`'s reason: the same declaration on four
-    /// hundred figures is four hundred.
+    /// it. On a child of the container that is done — a column set either
+    /// side, the spanner a block between — and this is not raised. A spanner
+    /// inside one of the children would split that child round itself, which
+    /// this build does not, so that box is laid out in the column it fell in
+    /// and the fact is named. Counted per box, for `UnimplementedProperty`'s
+    /// reason: the same declaration on four hundred figures is four hundred.
     ColumnSpanAsNone,
     /// A `table-column` or `table-column-group` with a background **image**,
     /// which is not painted. Its background colour is §17.5.1's layer and is
@@ -1034,9 +1037,9 @@ impl fmt::Display for Warning {
             Warning::ColumnTallerThanPage => {
                 f.write_str("a multi-column container holds a box taller than a page")
             }
-            Warning::ColumnSpanAsNone => {
-                f.write_str("column-span: all is laid out in its own column")
-            }
+            Warning::ColumnSpanAsNone => f.write_str(
+                "column-span: all below a container's own children is laid out in its column",
+            ),
             Warning::ColumnBoxNotPainted => {
                 f.write_str("a table column box's background image is not painted")
             }

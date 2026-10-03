@@ -1135,3 +1135,26 @@ fn first_letter_is_the_first_letter_in_a_box_of_its_own() {
         same(what, styled, wrapped, broken);
     }
 }
+
+/// **`column-span: all` interrupts the columns** (`css-multicol-1` §6): a
+/// two-column container with a spanning paragraph in the middle lays out as a
+/// two-column container, the paragraph, and a second two-column container —
+/// the three written out. The mismatch is the paragraph laid out in its
+/// column, which is what this build drew before, warning `ColumnSpanAsNone`.
+#[test]
+fn a_spanning_child_is_the_column_sets_either_side_of_a_block() {
+    let style = ".mc { column-count: 2; column-gap: 0 } .s { column-span: all }";
+    let spanning = lay(
+        style,
+        r#"<div class="mc"><p>aa</p><p>bb</p><p class="s">span</p><p>cc</p><p>dd</p></div>"#,
+    );
+    let written = lay(
+        style,
+        r#"<div class="mc"><p>aa</p><p>bb</p></div><p>span</p><div class="mc"><p>cc</p><p>dd</p></div>"#,
+    );
+    let broken = lay(
+        style,
+        r#"<div class="mc"><p>aa</p><p>bb</p><p>span</p><p>cc</p><p>dd</p></div>"#,
+    );
+    same("column-span: all", spanning, written, broken);
+}

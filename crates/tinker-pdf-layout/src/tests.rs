@@ -1644,17 +1644,22 @@ fn a_float_with_no_width_is_shrunk_to_fit() {
 /// is plausible and wrong is the failure this whole plan is organised against.
 #[test]
 fn an_unimplemented_property_is_named_rather_than_approximated() {
-    // `column-span: all` rather than `display: inline-block`, which used to
-    // stand here and is now built. The claim is about the **shape** and not
-    // about either property: a value this build does not implement reaches the
-    // caller by name instead of being approximated into something plausible.
+    // `column-span: all` **below a child** of the container rather than
+    // `display: inline-block`, which used to stand here and is now built — and
+    // below a child because on a child it is built too, since October 2026.
+    // The claim is about the **shape** and not about either property: a value
+    // this build does not implement reaches the caller by name instead of
+    // being approximated into something plausible.
     let mut spanning = block();
     spanning.column_span = ColumnSpan::All;
     let tree = BoxNode::element(
         block(),
         vec![BoxNode::element(
             multicol(Some(2), None, Some(0.0)),
-            vec![BoxNode::element(spanning, vec![text("a")])],
+            vec![BoxNode::element(
+                block(),
+                vec![BoxNode::element(spanning, vec![text("a")])],
+            )],
         )],
     );
     let laid = run(&tree, 200.0, 400.0);
@@ -1677,7 +1682,7 @@ fn warnings_are_deduplicated_with_a_count() {
         block(),
         vec![BoxNode::element(
             multicol(Some(2), None, Some(0.0)),
-            children,
+            vec![BoxNode::element(block(), children)],
         )],
     );
     let laid = run(&tree, 200.0, 400.0);
@@ -3795,10 +3800,13 @@ fn a_column_rule_is_drawn_down_the_middle_of_the_gap() {
     );
 }
 
-/// §6: `column-span: all` is read on the **child** and named, because a
-/// spanning box makes three column sets where this build has one.
+/// §6: a `column-span: all` child **interrupts the columns**: the children
+/// before it are one balanced column set, it is a block across the whole
+/// container, and the children after it are a second set beneath it — so
+/// two paragraphs either side of a spanning heading sit side by side above
+/// and below it, and nothing is named.
 #[test]
-fn column_span_all_is_named_on_the_child_that_asked_for_it() {
+fn column_span_all_on_a_child_makes_a_column_set_either_side() {
     let mut spanning = block();
     spanning.column_span = ColumnSpan::All;
     let tree = BoxNode::element(
@@ -3807,18 +3815,30 @@ fn column_span_all_is_named_on_the_child_that_asked_for_it() {
             multicol(Some(2), None, Some(0.0)),
             vec![
                 para("a"),
-                BoxNode::element(spanning, vec![text("b")]),
+                para("b"),
+                BoxNode::element(spanning, vec![text("span")]),
                 para("c"),
+                para("d"),
             ],
         )],
     );
     let laid = run(&tree, 200.0, 400.0);
-    assert!(
-        laid.warnings.contains(&(Warning::ColumnSpanAsNone, 1)),
-        "{:?}",
-        laid.warnings
+    assert!(laid.warnings.is_empty(), "{:?}", laid.warnings);
+    assert_eq!(laid.text(), "abspancd", "in reading order");
+    let (a, b, span, c, d) = (
+        placed(&laid, "a"),
+        placed(&laid, "b"),
+        placed(&laid, "span"),
+        placed(&laid, "c"),
+        placed(&laid, "d"),
     );
-    assert_eq!(laid.text(), "abc", "and it is still on the page");
+    assert_eq!(a, (0.0, 0.0), "the first set's first column");
+    assert_eq!(b, (100.0, 0.0), "balanced into its second");
+    assert_eq!(span.0, 0.0, "the spanner starts at the container's left");
+    assert!(span.1 > a.1, "below the first set: {span:?}");
+    assert_eq!(c.0, 0.0, "the second set begins again in column one");
+    assert!(c.1 > span.1, "below the spanner: {c:?}");
+    assert_eq!(d, (100.0, c.1), "and balances beside it");
 }
 
 /// A container taller than a page becomes **several column sets**, stacked —
