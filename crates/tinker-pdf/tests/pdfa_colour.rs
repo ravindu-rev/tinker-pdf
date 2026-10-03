@@ -1377,6 +1377,133 @@ fn the_same_transform_direct_or_indirect_or_encoded_is_the_same() {
     assert_eq!(two_names.findings(), Vec::<FindingKind>::new());
 }
 
+/// Two parallel chains of stitching functions, one per side. The top of a
+/// side, object 100 or 200, names its chain and then a type 2 function
+/// ending at `after`; level `j` of the chain names level `j + 1` thirty-two
+/// times, and the bottom, six levels down, is a type 2 function ending at
+/// `bottom`.
+fn parallel_chains(bottom: [&str; 2], after: [&str; 2]) -> Fixture {
+    const LEVELS: u32 = 6;
+    let mut fixture = two_spaces(
+        "2",
+        "[/Separation /Ink /DeviceRGB 100 0 R]",
+        "[/Separation /Ink /DeviceRGB 200 0 R]",
+    );
+    for (side, base) in [100, 200].into_iter().enumerate() {
+        fixture.extra.push((
+            base,
+            format!(
+                "<< /FunctionType 3 /Domain [0 1] /Functions [{} 0 R << {} >>] >>",
+                base + 1,
+                tint(after[side])
+            )
+            .into_bytes(),
+        ));
+        for level in 1..=LEVELS {
+            let next = format!("{} 0 R ", base + level + 1);
+            fixture.extra.push((
+                base + level,
+                format!(
+                    "<< /FunctionType 3 /Domain [0 1] /Functions [{}] >>",
+                    next.repeat(32)
+                )
+                .into_bytes(),
+            ));
+        }
+        fixture.extra.push((
+            base + LEVELS + 1,
+            format!("<< {} >>", tint(bottom[side])).into_bytes(),
+        ));
+    }
+    fixture
+}
+
+/// Ruling 1, from the review of the PDF/A staged rules: the comparison
+/// 6.2.4.4 asks for walked a pair of objects once per path to it, so two
+/// chains of equal stitching functions, each level naming the next thirty-two
+/// times, asked for 32^6 comparisons of the bottom from a file of a few
+/// kilobytes and never finished. A pair is now compared once per question:
+/// the chains cost a few hundred comparisons, and a difference *after* them
+/// is still within the rule's budget and found. And a difference *beneath*
+/// them is found too, because remembering a pair is assuming it equal only
+/// while the answer is a conjunction that any difference ends.
+#[test]
+fn a_tint_transform_reached_by_many_paths_is_compared_once() {
+    let red = "1 0 0";
+    let blue = "0 0 1";
+    let equal = parallel_chains([red, red], [red, red]);
+    assert_eq!(equal.findings(), Vec::<FindingKind>::new());
+
+    let ink = FindingKind::SeparationsDisagree {
+        colorant: "Ink".to_string(),
+    };
+    assert_eq!(parallel_chains([red, red], [red, blue]).one_finding(), ink);
+    assert_eq!(parallel_chains([red, blue], [red, red]).one_finding(), ink);
+}
+
+/// The comparison's work budget, which is what bounds it once no pair is
+/// compared twice: side A's level of `fan` functions names the leaves in a
+/// different order from each function, side B's in one order, so every leaf
+/// of A meets every leaf of B — `fan`² pairs, each a leaf's worth of work —
+/// before the last entry of the top-level `/Functions`, where the two sides
+/// differ. Sixteen leaves is well inside the budget and the difference is
+/// found; a hundred and sixty is past it, and a comparison that cannot finish
+/// answers "the same", as a nesting past the depth cap always has: a finding
+/// has to be one the file shows.
+#[test]
+fn a_comparison_past_its_work_budget_answers_the_same() {
+    let rotated = |fan: u32| {
+        let mut fixture = two_spaces(
+            "2",
+            "[/Separation /Ink /DeviceRGB 100 0 R]",
+            "[/Separation /Ink /DeviceRGB 200 0 R]",
+        );
+        let leaf = format!(
+            "<< /FunctionType 0 /Domain [0 1] /Range [{}] >>",
+            "0 1 ".repeat(32)
+        );
+        // Side A is object 100, its middle level 1000.., its leaves 3000..;
+        // side B is 200, 2000.. and 4000...
+        for (top, middle, leaves, rotate, last) in [
+            (100, 1000, 3000, true, "1 0 0"),
+            (200, 2000, 4000, false, "0 0 1"),
+        ] {
+            let names: String = (0..fan).map(|j| format!("{} 0 R ", middle + j)).collect();
+            fixture.extra.push((
+                top,
+                format!(
+                    "<< /FunctionType 3 /Functions [{names} << {} >>] >>",
+                    tint(last)
+                )
+                .into_bytes(),
+            ));
+            for j in 0..fan {
+                let names: String = (0..fan)
+                    .map(|m| {
+                        let leaf = if rotate { (j + m) % fan } else { m };
+                        format!("{} 0 R ", leaves + leaf)
+                    })
+                    .collect();
+                fixture.extra.push((
+                    middle + j,
+                    format!("<< /FunctionType 3 /Functions [{names}] >>").into_bytes(),
+                ));
+            }
+            for m in 0..fan {
+                fixture.extra.push((leaves + m, leaf.clone().into_bytes()));
+            }
+        }
+        fixture
+    };
+    assert_eq!(
+        rotated(16).one_finding(),
+        FindingKind::SeparationsDisagree {
+            colorant: "Ink".to_string()
+        }
+    );
+    assert_eq!(rotated(160).findings(), Vec::<FindingKind>::new());
+}
+
 /// Rule 6.2.4.4-1: "For any spot colour used in a DeviceN or NChannel colour
 /// space, an entry in the Colorants dictionary shall be present". The process
 /// colorants need none, and a `/Colorants` entry is the twin — whose own

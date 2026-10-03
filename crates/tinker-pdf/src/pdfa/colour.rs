@@ -141,10 +141,11 @@ pub(super) fn rules(
 /// this build had not written down: objects, not functions — so two sampled
 /// functions that compute the same colour from different tables are
 /// different, and the same function written once directly and once by
-/// reference, or once deflated and once not, is the same. [`same_object`] is
-/// that sentence. Part 1 states no such rule.
+/// reference, or once deflated and once not, is the same. [`Comparison::same`]
+/// is that sentence. Part 1 states no such rule.
 fn separations_agree(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
     let mut reported: BTreeSet<&[u8]> = BTreeSet::new();
+    let mut work = 0;
     for (index, (name, alternate, tint, at)) in used.separations.iter().enumerate() {
         if reported.contains(name.as_slice()) {
             continue;
@@ -155,8 +156,12 @@ fn separations_agree(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
         else {
             continue;
         };
-        if !same_object(doc, first_alternate, alternate, 0)
-            || !same_object(doc, first_tint, tint, 0)
+        let mut comparison = Comparison {
+            doc,
+            assumed: BTreeSet::new(),
+            work: &mut work,
+        };
+        if !comparison.same(first_alternate, alternate, 0) || !comparison.same(first_tint, tint, 0)
         {
             reported.insert(name);
             out.push(Raw {
@@ -170,83 +175,121 @@ fn separations_agree(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
     }
 }
 
-/// Whether two PDF objects are the same object in 6.2.4.4's sense: compared
-/// as objects, with direct against indirect and compression ignored.
-///
-/// Numbers compare by value, so `1` and `1.0` are one number. A stream
-/// compares by its dictionary less the entries that describe its encoding
-/// (`/Length`, `/Filter`, `/DecodeParms`, `/DL`) and by its decoded bytes. A
-/// comparison this build cannot finish — a stream that will not decode, a
-/// nesting past [`MAX_COMPARE_DEPTH`] — answers "the same": a finding has to
-/// be one the file shows, never one the reader failed to rule out.
-fn same_object(doc: &CosDocument, a: &Object, b: &Object, depth: u32) -> bool {
-    if depth > MAX_COMPARE_DEPTH {
-        return true;
-    }
-    if let (Some(x), Some(y)) = (a.as_objref(), b.as_objref()) {
-        if x == y {
-            return true;
-        }
-    }
-    let (left, right) = (doc.resolve(a), doc.resolve(b));
-    match (left.as_ref(), right.as_ref()) {
-        (Object::Null, Object::Null) => true,
-        (Object::Bool(x), Object::Bool(y)) => x == y,
-        (Object::Int(_) | Object::Real(_), Object::Int(_) | Object::Real(_)) => {
-            left.as_number() == right.as_number()
-        }
-        (Object::String(x), Object::String(y)) => x.bytes == y.bytes,
-        (Object::Name(x), Object::Name(y)) => x == y,
-        (Object::Array(x), Object::Array(y)) => {
-            x.len() == y.len()
-                && x.iter()
-                    .zip(y)
-                    .all(|(p, q)| same_object(doc, p, q, depth + 1))
-        }
-        (Object::Dict(x), Object::Dict(y)) => same_dict(doc, x, y, &[], depth),
-        (Object::Stream(x), Object::Stream(y)) => {
-            let encoding = [
-                doc.intern(b"Length"),
-                doc.intern(b"Filter"),
-                doc.intern(b"DecodeParms"),
-                doc.intern(b"DL"),
-            ];
-            if !same_dict(doc, &x.dict, &y.dict, &encoding, depth) {
-                return false;
-            }
-            match (a.as_objref(), b.as_objref()) {
-                (Some(x), Some(y)) => match (doc.stream_decoded(x), doc.stream_decoded(y)) {
-                    (Ok(p), Ok(q)) => p == q,
-                    _ => true,
-                },
-                _ => true,
-            }
-        }
-        _ => false,
-    }
+/// One question 6.2.4.4 asks — are these two `/Separation` arrays' members
+/// the same object? — and what answering it has cost the rule so far.
+struct Comparison<'a> {
+    doc: &'a CosDocument,
+    /// Pairs of indirect objects this question is already comparing, or has
+    /// compared. Meeting one again answers "the same" at once.
+    ///
+    /// **That is sound because the answer is a conjunction.** Every step of
+    /// [`Comparison::same`] is "these parts, and those, and those": a pair
+    /// already entered is either still being compared, and its own answer
+    /// will carry any difference beneath it to the top, or it was compared
+    /// and found the same — or found different, and then the question's
+    /// answer is already "different", whatever this second visit says. So
+    /// a pair costs its work once per question, however many paths lead to
+    /// it, and a reference cycle ends here too. Without it, two chains of
+    /// equal stitching functions, each level naming the next thirty-two times,
+    /// cost 32^6 comparisons of their bottoms.
+    ///
+    /// It is per question, never per document: an assumption made while one
+    /// pair of arrays was being compared is not evidence about another.
+    assumed: BTreeSet<(ObjRef, ObjRef)>,
+    /// The rule's work so far, across every question it asks of the file.
+    work: &'a mut usize,
 }
 
-/// Two dictionaries with the same keys, `ignored` aside, and the same values.
-fn same_dict(
-    doc: &CosDocument,
-    x: &Dict,
-    y: &Dict,
-    ignored: &[tinker_pdf_cos::Name],
-    depth: u32,
-) -> bool {
-    let keys = |d: &Dict| -> BTreeSet<tinker_pdf_cos::Name> {
-        d.entries()
-            .iter()
-            .map(|(key, _)| *key)
-            .filter(|key| !ignored.contains(key))
-            .collect()
-    };
-    let (left, right) = (keys(x), keys(y));
-    left == right
-        && left.iter().all(|key| match (x.get(*key), y.get(*key)) {
-            (Some(p), Some(q)) => same_object(doc, p, q, depth + 1),
+impl Comparison<'_> {
+    /// Whether two PDF objects are the same object in 6.2.4.4's sense:
+    /// compared as objects, with direct against indirect and compression
+    /// ignored.
+    ///
+    /// Numbers compare by value, so `1` and `1.0` are one number. A stream
+    /// compares by its dictionary less the entries that describe its encoding
+    /// (`/Length`, `/Filter`, `/DecodeParms`, `/DL`) and by its decoded bytes.
+    /// A comparison this build cannot finish — a stream that will not decode,
+    /// a nesting past [`MAX_COMPARE_DEPTH`], a rule past
+    /// [`MAX_COMPARE_WORK`] — answers "the same": a finding has to be one the
+    /// file shows, never one the reader failed to rule out.
+    fn same(&mut self, a: &Object, b: &Object, depth: u32) -> bool {
+        if depth > MAX_COMPARE_DEPTH || !self.spend(1) {
+            return true;
+        }
+        if let (Some(x), Some(y)) = (a.as_objref(), b.as_objref()) {
+            if x == y || !self.assumed.insert((x, y)) {
+                return true;
+            }
+        }
+        let doc = self.doc;
+        let (left, right) = (doc.resolve(a), doc.resolve(b));
+        match (left.as_ref(), right.as_ref()) {
+            (Object::Null, Object::Null) => true,
+            (Object::Bool(x), Object::Bool(y)) => x == y,
+            (Object::Int(_) | Object::Real(_), Object::Int(_) | Object::Real(_)) => {
+                left.as_number() == right.as_number()
+            }
+            (Object::String(x), Object::String(y)) => x.bytes == y.bytes,
+            (Object::Name(x), Object::Name(y)) => x == y,
+            (Object::Array(x), Object::Array(y)) => {
+                x.len() == y.len() && x.iter().zip(y).all(|(p, q)| self.same(p, q, depth + 1))
+            }
+            (Object::Dict(x), Object::Dict(y)) => self.same_dict(x, y, &[], depth),
+            (Object::Stream(x), Object::Stream(y)) => {
+                let encoding = [
+                    doc.intern(b"Length"),
+                    doc.intern(b"Filter"),
+                    doc.intern(b"DecodeParms"),
+                    doc.intern(b"DL"),
+                ];
+                if !self.same_dict(&x.dict, &y.dict, &encoding, depth) {
+                    return false;
+                }
+                match (a.as_objref(), b.as_objref()) {
+                    (Some(x), Some(y)) => match (doc.stream_decoded(x), doc.stream_decoded(y)) {
+                        // The decoded bytes are the rule's work too, a unit
+                        // a kibibyte, so a file of many large equal streams
+                        // spends the budget rather than the reader's time.
+                        (Ok(p), Ok(q)) => !self.spend(p.len() / 1024) || p == q,
+                        _ => true,
+                    },
+                    _ => true,
+                }
+            }
             _ => false,
-        })
+        }
+    }
+
+    /// Two dictionaries with the same keys, `ignored` aside, and the same
+    /// values.
+    fn same_dict(
+        &mut self,
+        x: &Dict,
+        y: &Dict,
+        ignored: &[tinker_pdf_cos::Name],
+        depth: u32,
+    ) -> bool {
+        let keys = |d: &Dict| -> BTreeSet<tinker_pdf_cos::Name> {
+            d.entries()
+                .iter()
+                .map(|(key, _)| *key)
+                .filter(|key| !ignored.contains(key))
+                .collect()
+        };
+        let (left, right) = (keys(x), keys(y));
+        left == right
+            && left.iter().all(|key| match (x.get(*key), y.get(*key)) {
+                (Some(p), Some(q)) => self.same(p, q, depth + 1),
+                _ => false,
+            })
+    }
+
+    /// Charges `units` to the rule's budget: false once it is spent, and from
+    /// then on every comparison answers at once.
+    fn spend(&mut self, units: usize) -> bool {
+        *self.work = self.work.saturating_add(units);
+        *self.work <= MAX_COMPARE_WORK
+    }
 }
 
 /// The process colorants a `/DeviceN` space may name without describing
@@ -638,6 +681,14 @@ const MAX_SEPARATIONS: usize = 256;
 /// and calls them the same — a stitching function nests functions, and a
 /// nesting deeper than this is not a colour.
 const MAX_COMPARE_DEPTH: u32 = 16;
+
+/// How much work the consistency rule spends comparing, across every pair of
+/// arrays it compares in one document: a unit an object compared and a unit a
+/// kibibyte of decoded stream. Remembering the pairs already compared makes a
+/// question cost what its two objects hold rather than how many paths reach
+/// them; this bounds what they may hold. A tint transform is tens of units,
+/// and two hundred and fifty-six of them a few thousand.
+const MAX_COMPARE_WORK: usize = 1 << 18;
 
 /// Every operator ISO 32000-1 Annex A Table A.1 lists — seventy-three, the
 /// same set PDF Reference 1.4 (ISO 19005-1's reference) and ISO 32000-2

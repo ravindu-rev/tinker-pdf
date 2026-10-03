@@ -85,7 +85,9 @@ never happens.
   count and its header against the wider list `ICCBased` admits, the four
   rendering intents, 6.2.4.4's `/Separation` consistency (one name, one
   alternate and one tint transform, compared as objects — direct against
-  indirect and compression ignored, as the clause says) and its `/DeviceN`
+  indirect and compression ignored, as the clause says; each pair of objects
+  once however many paths reach it, and within a work budget past which the
+  comparison answers "the same" rather than guess) and its `/DeviceN`
   colorants described, part 1's outright
   prohibition on transparency — a group, a graphics state's soft mask, blend
   mode or alpha, and an `/SMask` on any XObject the pages draw (rule 6.4-2,
