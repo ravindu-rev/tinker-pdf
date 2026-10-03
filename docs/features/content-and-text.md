@@ -489,6 +489,10 @@ reader could not use — remapping a standard type (ISO 14289-1 7.1: *standard
 tags shall not be remapped*; the list is `STANDARD_STRUCTURE_TYPES`, shared
 with the PDF/A validator's level A rule), an empty or identity entry, a
 second target for one name, and a loop.
+`continue_at(order)` continues the innermost open element in a fresh
+sequence that reads at `order`, for an element with something drawn
+elsewhere — a picture painted before its text — that reads between two of
+its runs.
 A link annotation added with `PageBuilder::link` **while an element is
 open** is a content item of that element: its `/K` gains an `/OBJR`
 (14.7.4.3) naming the annotation and its page, and the annotation a

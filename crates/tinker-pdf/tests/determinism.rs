@@ -1754,6 +1754,16 @@ fn epub_book() -> Vec<u8> {
 /// dictionary. That is what closed the float reading-order row -- Beowulf
 /// conserves exactly in logical order where content order still shows 2 182 --
 /// and it changes which objects the file holds without changing one glyph.
+///
+/// *October 2026, the tagged-writing row.* They moved a **third** time, in the
+/// same three places and again with no raster movement, when the EPUB path
+/// began writing the book's `dc:language` as the catalog's `/Lang` (14.9.2):
+/// `dcd5912d…` became `1517adfb…` and `51748067…` became `36a2c5e1…`. That one
+/// entry is the whole of the move, and it was measured rather than argued:
+/// with only the `set_language` call removed, the three hashes are the old
+/// ones exactly. The book's chapters declare `lang="en"`, which is the book's
+/// own language, so no element carries a `/Lang` of its own, and the book's
+/// only picture is an SVG cover this build refuses, so no `/Figure` is drawn.
 const GOLDEN: &[Fixture] = &[
     // The floors are about half of what each page paints today: 1486, 2363,
     // 9600, 3600 and 3230 pixels.
@@ -2676,7 +2686,7 @@ fn the_synthesised_book_is_the_same_bytes_on_every_target() {
     let hash = sha(&pdf);
     assert_eq!(
         hash,
-        "dcd5912d597f051b8be162410ccdee9e7ea754cdd301acbb8c86251a85d8c7e7",
+        "1517adfb0faaab6477418a4e0d9a510827188a95c9f47a34c3ee57e2f3a2f1c9",
         "the synthesised book is not the bytes it was; see this test's doc \
          comment for what that means and how to tell it apart from a rendering \
          change. The document is {} bytes.",
@@ -2762,12 +2772,12 @@ fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
     assert_eq!(sha(&other), sha(&other_again), "600 x 800 is not stable");
     assert_eq!(
         sha(&first),
-        "dcd5912d597f051b8be162410ccdee9e7ea754cdd301acbb8c86251a85d8c7e7",
+        "1517adfb0faaab6477418a4e0d9a510827188a95c9f47a34c3ee57e2f3a2f1c9",
         "the book at 432 x 648 is not the bytes it was"
     );
     assert_eq!(
         sha(&other),
-        "51748067f1d7534bebe50bf891a591e2fc36618f3b76e0daaf149774ad1f9901",
+        "36a2c5e14c7f2b9236c22f8ff6b6b7b0b7dbe974c9e82479e34d8820f5a327d1",
         "the book at 600 x 800 is not the bytes it was"
     );
 

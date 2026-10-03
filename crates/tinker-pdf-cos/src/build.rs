@@ -2657,6 +2657,34 @@ impl PageBuilder {
         true
     }
 
+    /// Continues the innermost open element in a **fresh** marked-content
+    /// sequence that reads at `order`.
+    ///
+    /// For a caller whose element has something drawn elsewhere reading in
+    /// the middle of it: an EPUB paragraph whose picture is drawn before its
+    /// text, in painting order, and reads between two of its words. The text
+    /// before this call and the text after it become two sequences, and
+    /// `finish` sorts the picture's element between them by `order` — which
+    /// one sequence spanning both could not express.
+    ///
+    /// A sequence with nothing drawn in it is taken back as usual, so a call
+    /// that splits nothing writes nothing. Returns false, doing nothing, when
+    /// no element is open or an open was refused past the depth cap.
+    pub fn continue_at(&mut self, order: u64) -> bool {
+        if self.refused_opens > 0 {
+            return false;
+        }
+        let Some(tag) = self.tag_stack.last().map(|node| node.tag.clone()) else {
+            return false;
+        };
+        self.close_marked();
+        let mcid = self.open_marked(&tag);
+        if let Some(node) = self.tag_stack.last_mut() {
+            node.kids.push(TaggedKid::Content { mcid, order });
+        }
+        true
+    }
+
     /// Closes the innermost open element and hands it to its parent, or to
     /// the page's roots.
     fn close_top(&mut self) {

@@ -93,6 +93,7 @@ pub mod package;
 pub mod paint;
 pub mod read;
 pub mod svg;
+mod tagging;
 pub mod typeface;
 pub mod xhtml;
 
@@ -963,6 +964,23 @@ pub fn synthesise(
     if let Some(creator) = package.creator() {
         builder.set_info(b"Author", creator);
     }
+    // §5.5.3.1's first `dc:language`, as the catalog's `/Lang` (14.9.2): the
+    // language of everything no element states one for. A value that is not
+    // shaped like a language tag is not written, and is named.
+    let language = match package.language() {
+        Some(language) if tinker_pdf_cos::is_language_tag(language) => {
+            builder.set_language(language);
+            Some(language)
+        }
+        Some(_) => {
+            warnings.push(ArchiveWarning::LanguageTagIgnored {
+                item: package.path().to_owned(),
+                tags: 1,
+            });
+            None
+        }
+        None => None,
+    };
     let (pages, total_pages) = write_chapters(
         book,
         &mut builder,
@@ -974,6 +992,7 @@ pub fn synthesise(
         limits,
         &mut layout_budget,
         &mut warnings,
+        language,
     );
 
     let entries = outline(book, package, &chapters, limits, total_pages);
@@ -1306,6 +1325,9 @@ pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
         limits,
         &mut layout_budget,
         &mut warnings,
+        // A loose document has no package to state a document language: its
+        // own `<html lang>` reaches the elements at its top instead.
+        None,
     );
     let cost = BookCost {
         manifest_items: 0,
@@ -1343,6 +1365,7 @@ pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
 /// `builder` arrives with whatever document information the caller has already
 /// set, and leaves holding every page; `page` is the box a placeholder page is
 /// drawn at. Returns where each page came from and how many there are.
+/// `language` is what the catalog's `/Lang` says, when the caller set one.
 #[allow(clippy::too_many_arguments)]
 fn write_chapters<R: read::Resources + ?Sized>(
     resources: &mut R,
@@ -1355,6 +1378,7 @@ fn write_chapters<R: read::Resources + ?Sized>(
     limits: &Limits,
     layout_budget: &mut LayoutBudget,
     warnings: &mut Vec<ArchiveWarning>,
+    language: Option<&str>,
 ) -> (Vec<PageOrigin>, usize) {
     let mut layout_warnings: Vec<(LayoutWarning, usize)> = Vec::new();
     // ---- pass 3: lay every chapter out -------------------------------------
@@ -1510,6 +1534,20 @@ fn write_chapters<R: read::Resources + ?Sized>(
             characters: fonts.uncovered(),
         });
     }
+    // Ruling 10 for a `/Lang` this build did not write: an `xml:lang` or
+    // `lang` not shaped like a language tag, counted per content document.
+    for chapter in chapters.iter() {
+        let Some(reading) = &chapter.reading else {
+            continue;
+        };
+        let tags = tagging::malformed_language_tags(&reading.dom);
+        if tags > 0 {
+            warnings.push(ArchiveWarning::LanguageTagIgnored {
+                item: chapter.name.clone(),
+                tags,
+            });
+        }
+    }
 
     // ---- write it ----------------------------------------------------------
     let (width, height) = page;
@@ -1616,6 +1654,24 @@ fn write_chapters<R: read::Resources + ?Sized>(
         refused_effects.box_shadow += refused.box_shadow;
         refused_effects.text_shadow += refused.text_shadow;
         refused_effects.transform += refused.transform;
+        // Where each picture reads among the text, over the whole chapter
+        // rather than per page: a picture's neighbours in reading order may be
+        // on the page before.
+        let figures = chapter
+            .reading
+            .as_ref()
+            .map(|reading| tagging::figure_orders(&reading.dom, &chapter.pages))
+            .unwrap_or_default();
+        let structure = chapter.reading.as_ref().map(|reading| tagging::Tagging {
+            dom: &reading.dom,
+            // **A base per content document.** Both an element index and a
+            // reading-order stamp restart at every spine item, so two
+            // chapters would otherwise name the same element and sort into
+            // each other.
+            chapter: (spine_at as u64) << 32,
+            document_language: language,
+            figures: &figures,
+        });
         for (offset, laid) in chapter.pages.iter().enumerate() {
             let index = chapter.first_page + offset;
             let on_page = links.get(index).map_or(&[][..], Vec::as_slice);
@@ -1645,12 +1701,7 @@ fn write_chapters<R: read::Resources + ?Sized>(
                 &chapter_frame,
                 &fonts,
                 &pictures[spine_at],
-                chapter.reading.as_ref().map(|reading| &reading.dom),
-                // **A base per content document.** Both an element index and a
-                // reading-order stamp restart at every spine item, so two
-                // chapters would otherwise name the same element and sort into
-                // each other.
-                (spine_at as u64) << 32,
+                structure.as_ref(),
                 &effects.on(laid, &chapter_frame, offset),
             );
             if clip {

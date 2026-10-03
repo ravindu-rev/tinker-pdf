@@ -940,6 +940,40 @@ fn a_table_attribute_outside_table_349_is_ignored_by_name() {
     assert_eq!(headers, [None, Some(TableScope::Column)]);
 }
 
+/// `continue_at` splits an element's content so that something drawn
+/// elsewhere — before it, in painting order — reads between two of its runs.
+#[test]
+fn continue_at_lets_an_element_drawn_elsewhere_read_in_the_middle() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(300.0, 200.0, |page| {
+        // The picture first, as a painter draws it, keyed into the paragraph
+        // and positioned between the paragraph's two runs (orders 10 and 20).
+        page.tagged_with(&Tag::new(b"P").keyed(1, 10), |page| {
+            page.tagged_with(&Tag::new(b"Figure").keyed(2, 15).alt("x"), |page| {
+                page.fill_rect(10.0, 10.0, 5.0, 5.0, 0.0);
+            });
+        });
+        page.tagged_with(&Tag::new(b"P").keyed(1, 10), |page| {
+            page.text(b"F1", 12.0, 20.0, 150.0, "before");
+            assert!(page.continue_at(20));
+            page.text(b"F1", 12.0, 20.0, 130.0, "after");
+        });
+        assert!(!page.continue_at(30), "no element is open");
+    });
+    let doc = Document::open(builder.finish()).expect("opens");
+    let paragraph = only(&doc, "P");
+    let shape: Vec<&str> = paragraph
+        .kids
+        .iter()
+        .map(|kid| match kid {
+            StructKid::Element(child) => child.standard_type.as_str(),
+            _ => "text",
+        })
+        .collect();
+    assert_eq!(shape, ["text", "Figure", "text"]);
+}
+
 // ---- `/RoleMap` (14.7.3) ---------------------------------------------------
 
 /// A custom type is written as itself and read as the type it maps to — both

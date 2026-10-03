@@ -254,6 +254,15 @@ writes, family by family:
   reads `/A` (a dictionary, a stream, or an array with revision numbers) for
   the `/Table` owner into the same `TableAttributes` type, and `/C` classes
   are not read.
+- **The EPUB's pictures and languages.** The structure emission moved out of
+  `epub/paint.rs` into `epub/tagging.rs`. `<img alt>` is a `/Figure`'s
+  `/Alt`, an empty `alt` an artifact; a picture is drawn in painting order
+  and placed in reading order by a position recovered from the element tree,
+  since the layout stamps none on a replaced box, with the paragraph around
+  it split by `PageBuilder::continue_at` where the picture falls between two
+  of its runs. `dc:language` is the catalog's `/Lang`, `xml:lang`/`lang` an
+  element's, and the elements at a chapter's top carry the chapter's own
+  language where it differs from the book's.
 
 ## Dependencies
 

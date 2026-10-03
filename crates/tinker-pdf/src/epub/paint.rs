@@ -84,6 +84,7 @@ use tinker_pdf_shape::shape::itemize;
 use tinker_pdf_svg::transform::{concat, invert, rotation, IDENTITY};
 
 use super::read::PX_TO_PT;
+use super::tagging::{ancestry, draw_figure, tag_runs, Tagging};
 use super::typeface::FaceSet;
 use super::xhtml::Dom;
 // `Placed` and not `tinker_pdf_layout::metrics::PlacedGlyph`, which is
@@ -1538,7 +1539,8 @@ impl Effects {
         refused
     }
 
-    fn close(page: &mut PageBuilder, opened: bool) {
+    /// Closes what [`OnPage::open`] opened, if it opened anything.
+    pub(crate) fn close(page: &mut PageBuilder, opened: bool) {
         if opened {
             page.raw(b"Q");
         }
@@ -1599,7 +1601,7 @@ impl OnPage<'_> {
     /// transform above it, and inside its own. So each transform is its own
     /// matrix, `cm`'d after the ones above it, and the page's matrix at the
     /// fragment is their product without a matrix ever being inverted.
-    fn open(&self, page: &mut PageBuilder, anchor: Option<u32>, inside: bool) -> bool {
+    pub(crate) fn open(&self, page: &mut PageBuilder, anchor: Option<u32>, inside: bool) -> bool {
         let chain = self.chain(anchor, inside);
         let turns = self.effects.turns(&self.locals, anchor);
         let steps = self.effects.steps(anchor);
@@ -1850,16 +1852,18 @@ impl Frame {
 ///
 /// Returns how many shaped pieces the writer refused, which the caller turns
 /// into [`crate::ArchiveWarning::UnwritableTextRun`] (ruling 10).
+///
+/// `tagging` is the structure the page is tagged into, when the caller has
+/// the element tree the runs came from ([`super::tagging`]).
 #[allow(clippy::too_many_arguments)]
-pub fn draw_page(
+pub(crate) fn draw_page(
     builder: &mut DocumentBuilder,
     page: &mut PageBuilder,
     laid: &LayoutPage,
     frame: &Frame,
     fonts: &Fonts<'_>,
     pictures: &[(u32, Vec<u8>)],
-    dom: Option<&Dom>,
-    chapter: u64,
+    tagging: Option<&Tagging<'_>>,
     effects: &OnPage<'_>,
 ) -> usize {
     let mut refused = 0usize;
@@ -1874,6 +1878,10 @@ pub fn draw_page(
     // nothing the flow put on top of it. A picture registered nowhere — the
     // writer refused the bytes after the box was already laid out — leaves its
     // box empty and is named by `ArchiveWarning::ImageNotDrawn`.
+    //
+    // Tagged as a `/Figure` where it is drawn, rather than moved among the
+    // text: the content stream keeps the painting order, and the structure
+    // tree carries the reading order (`tagging::figure_orders`).
     for fragment in &laid.replaced {
         let Some(anchor) = fragment.anchor else {
             continue;
@@ -1881,9 +1889,14 @@ pub fn draw_page(
         let Some((_, name)) = pictures.iter().find(|(at, _)| *at == anchor) else {
             continue;
         };
-        let opened = effects.open(page, fragment.anchor, false);
-        draw_replaced(page, fragment, frame, name);
-        Effects::close(page, opened);
+        match tagging {
+            Some(tagging) => draw_figure(page, tagging, fragment, frame, name, effects),
+            None => {
+                let opened = effects.open(page, fragment.anchor, false);
+                draw_replaced(page, fragment, frame, name);
+                Effects::close(page, opened);
+            }
+        }
     }
     // `css-text-decor-3` §4: each shadow is the run drawn again, offset and
     // in the shadow's colour, **under** the text — and an artifact (14.8.2.2),
@@ -1931,7 +1944,7 @@ pub fn draw_page(
     // the tree this builds is the **document's** tree and not a description of
     // the page: the order is source order, which is what `TextRun::order`
     // already sorted these runs into.
-    let Some(dom) = dom else {
+    let Some(tagging) = tagging else {
         for run in &laid.runs {
             if !run.painted {
                 continue;
@@ -1949,7 +1962,7 @@ pub fn draw_page(
             // An artifact belongs to no element: 14.8.2.2 puts it outside the
             // structure entirely, which is `/Artifact` and not a tag.
             true => Vec::new(),
-            false => ancestry(dom, run.anchor),
+            false => ancestry(tagging.dom, run.anchor),
         })
         .collect();
     tag_runs(
@@ -1957,8 +1970,7 @@ pub fn draw_page(
         page,
         frame,
         fonts,
-        dom,
-        chapter,
+        tagging,
         &drawn,
         &chains,
         0,
@@ -1983,7 +1995,7 @@ fn draw_outlines(page: &mut PageBuilder, laid: &LayoutPage, frame: &Frame, effec
 }
 
 /// One run, marked as an artifact where it is one.
-fn artifact_or_run(
+pub(crate) fn artifact_or_run(
     builder: &mut DocumentBuilder,
     page: &mut PageBuilder,
     run: &TextRun,
@@ -2012,156 +2024,6 @@ fn artifact_or_run(
         page.raw(b"EMC");
     }
     refused
-}
-
-/// The element chain a run sits under, outermost first.
-///
-/// From the run's own element up to — but not including — `<body>`, then
-/// reversed. `<body>` is left out because [`DocumentBuilder`] already wraps
-/// every page's roots in a `/Document`, and a `/Sect` per page under it that
-/// meant "this chapter's body" would be a level that says nothing.
-///
-/// An element with no anchor gets an empty chain and is drawn untagged rather
-/// than guessed at, which is the same refusal the reader makes: this build
-/// does not invent structure (`docs/design/tagged-pdf.md`).
-fn ancestry(dom: &Dom, anchor: Option<u32>) -> Vec<usize> {
-    let Some(anchor) = anchor else {
-        return Vec::new();
-    };
-    let mut at = anchor as usize;
-    if at >= dom.nodes.len() {
-        return Vec::new();
-    }
-    let body = dom.body();
-    let mut chain = Vec::new();
-    loop {
-        if Some(at) == body {
-            break;
-        }
-        chain.push(at);
-        match dom.nodes[at].parent {
-            // `parent` is always less than the node's own index, so this
-            // terminates without a visited set.
-            Some(parent) => at = parent,
-            None => break,
-        }
-    }
-    chain.reverse();
-    chain
-}
-
-/// Draws a run of runs, opening one structure element per level they share.
-///
-/// **Grouped rather than one element per run.** Consecutive runs of one
-/// paragraph share its whole chain, and opening a `/P` for each of them would
-/// make a paragraph of three runs three paragraphs. The runs arrive in reading
-/// order — `fragment::order` sorted them — so equal chains are adjacent and a
-/// partition by the level's element is all the grouping there is to do.
-#[allow(clippy::too_many_arguments)]
-fn tag_runs(
-    builder: &mut DocumentBuilder,
-    page: &mut PageBuilder,
-    frame: &Frame,
-    fonts: &Fonts<'_>,
-    dom: &Dom,
-    chapter: u64,
-    runs: &[&TextRun],
-    chains: &[Vec<usize>],
-    level: usize,
-    refused: &mut usize,
-    effects: &OnPage<'_>,
-) {
-    let mut at = 0usize;
-    while at < runs.len() {
-        // A run whose chain has run out belongs to the element opened around
-        // it, so it is drawn here rather than descended into.
-        if chains[at].len() <= level {
-            *refused += artifact_or_run(builder, page, runs[at], frame, fonts, effects);
-            at += 1;
-            continue;
-        }
-        let element = chains[at][level];
-        let mut end = at + 1;
-        while end < runs.len() && chains[end].get(level) == Some(&element) {
-            end += 1;
-        }
-        let tag = structure_type(&dom.nodes[element].name);
-        let (slice, tails) = (&runs[at..end], &chains[at..end]);
-        // **The key is the element and the order is the reading position**,
-        // and they are two numbers because they answer two questions. The key
-        // has to be the same on every page this element appears on or its
-        // halves never merge, so it is the element's own index. The order has
-        // to ascend with the document or the halves merge into the wrong
-        // place, so it is the reading-order stamp of the first run under it —
-        // which for a float is where it was *met*, not where its box landed.
-        let key = chapter + element as u64;
-        let order = chapter + runs[at].order as u64;
-        page.tagged_keyed(tag.as_bytes(), key, order, |page| {
-            tag_runs(
-                builder,
-                page,
-                frame,
-                fonts,
-                dom,
-                chapter,
-                slice,
-                tails,
-                level + 1,
-                refused,
-                effects,
-            );
-        });
-        at = end;
-    }
-}
-
-/// ISO 32000 Table 333's standard structure type for an XHTML element.
-///
-/// **Every arm returns a standard type, which is why no `/RoleMap` is
-/// written.** 14.7.3's role map exists to say what a non-standard tag means;
-/// a producer that only ever emits standard tags has nothing to declare, and
-/// a role map mapping `/P` to `/P` is the loop the reader counts as a warning.
-/// The cost is that the XHTML element name is not recoverable from the PDF —
-/// `<em>` and `<strong>` are both `/Span` — which is named in the refusal
-/// table rather than hidden.
-fn structure_type(name: &str) -> &'static str {
-    match name {
-        "p" => "P",
-        "h1" => "H1",
-        "h2" => "H2",
-        "h3" => "H3",
-        "h4" => "H4",
-        "h5" => "H5",
-        "h6" => "H6",
-        "ul" | "ol" | "dl" => "L",
-        "li" | "dt" | "dd" => "LI",
-        "table" => "Table",
-        "thead" => "THead",
-        "tbody" => "TBody",
-        "tfoot" => "TFoot",
-        "tr" => "TR",
-        "td" => "TD",
-        "th" => "TH",
-        "caption" | "figcaption" => "Caption",
-        "blockquote" => "BlockQuote",
-        "code" | "kbd" | "samp" | "var" | "pre" => "Code",
-        "sub" => "Sub",
-        "figure" => "Figure",
-        "section" | "article" | "nav" | "aside" | "header" | "footer" | "main" => "Sect",
-        // **`<a>` is a `/Span` and not a `/Link`**, which is a refusal rather
-        // than an oversight. 14.8.4.4.2 requires a `/Link` element to contain
-        // an `/OBJR` referencing the link annotation it stands for, and this
-        // writer cannot emit one; a bare `/Link` would claim an association to
-        // assistive technology that is not in the file. The annotation itself
-        // is still written and still works.
-        //
-        // §14.8.4.2's two inline defaults. Anything block-level this build
-        // does not name is a `/Div` and anything else is a `/Span`, which is
-        // what a reader does with an unknown tag anyway — and is honest,
-        // because the alternative is inventing a type from a class attribute.
-        "div" | "body" | "html" | "form" | "fieldset" => "Div",
-        _ => "Span",
-    }
 }
 
 fn set_fill(page: &mut PageBuilder, colour: Color) {
@@ -2614,7 +2476,12 @@ fn draw_outline(page: &mut PageBuilder, fragment: &BoxFragment, frame: &Frame) {
 /// `/Alt`, and the structure this file builds is built out of *text runs* —
 /// every element of it is opened around a run's ancestry. See the refusal table
 /// in `docs/features/epub.md`.
-fn draw_replaced(page: &mut PageBuilder, fragment: &ReplacedFragment, frame: &Frame, name: &[u8]) {
+pub(crate) fn draw_replaced(
+    page: &mut PageBuilder,
+    fragment: &ReplacedFragment,
+    frame: &Frame,
+    name: &[u8],
+) {
     let width = fragment.width * PX_TO_PT;
     let height = fragment.height * PX_TO_PT;
     if width <= 0.0 || height <= 0.0 {

@@ -353,13 +353,40 @@ is right, so the load-bearing assertion in `epub_structure.rs` compares the
 tree's logical order against the book's own XHTML: every character, in source
 order, at nine page boxes.
 
-**What this first pass does not do**, each named rather than absent:
+**What the markup says about itself reaches the tree** (`epub/tagging.rs`),
+and each is asserted in `epub_structure.rs` against the XHTML read on its own
+with the XML leaf's event reader:
+
+- **`<img alt>` is a `/Figure`'s `/Alt`** (14.9.3). An empty `alt` is HTML's
+  statement that the picture is decoration, so it is drawn inside
+  `/Artifact BMC … EMC` (14.8.2.2) and is in the tree nowhere; an `<img>`
+  with no `alt` is a `/Figure` with no `/Alt`, because the book did not say.
+  `<figure>` is a `/Div` round the picture and its `/Caption` — as a
+  `/Figure` of its own it would be a figure with no description wrapped round
+  one that has it. A picture is drawn where it always was, before the text in
+  painting order, and **reads where it was written**: the layout stamps runs
+  with a reading position and pictures with none, so the position is
+  recovered from the element tree (an element before the picture's, or the
+  picture's ancestor's text up to the child holding it, counted in characters
+  that are not white space), and a paragraph whose picture falls between two
+  of its runs is split there (`PageBuilder::continue_at`) — `<p>a <img/> b</p>`
+  is text, `/Figure`, text. `every_img_alt_is_a_figure_alt`.
+- **`xml:lang`/`lang` is `/Lang`** (14.9.2), `xml:lang` first as the selector
+  engine reads it. The package's first `dc:language` is the catalog's
+  `/Lang`; an element states its own only where its markup does, and the
+  elements at a chapter's top carry the chapter's `<html>`/`<body>` language
+  when it differs from the book's, since those two are not in the tree. A
+  declaration not shaped like a language tag (`en_US`) is treated as no
+  declaration — the element inherits — and is named,
+  `ArchiveWarning::LanguageTagIgnored`. `every_language_declaration_is_a_lang`
+  compares, text by text, the language the source gives each element with the
+  one 14.9.2's hierarchy gives it in the tree.
+
+**What is not done yet**, each named rather than absent:
 
 | Not done | Why |
 | --- | --- |
 | A PDF/UA conformance claim | a structure tree is necessary for it and nowhere near sufficient |
-| `/Alt` on images | `PageBuilder` cannot write one, so an `<img alt="…">` becomes a `/Figure` and its alternate text is dropped |
-| `/Lang`, per element or on the catalog | not written |
 | A `/RoleMap` | not needed: every tag emitted is already a standard type. The cost is that the XHTML name is not recoverable — `<em>` and `<strong>` are both `/Span` |
 | `<a>` as a `/Link` | §14.8.4.4.2 wants an `/OBJR` for the annotation and this writer cannot emit one; a bare `/Link` would claim an association the file does not contain. It is a `/Span`, and the annotation itself is still written |
 | Table `/Headers`, `/Scope`, `/Summary` | a `<th>` is a `/TH` with no association to the cells it heads |
@@ -374,6 +401,7 @@ order, at nine page boxes.
 | Inside an SVG content document: `<filter>`, `<foreignObject>`, SMIL animation, `<script>` and `<textPath>`/`<tref>`/`<altGlyph>` | `ArchiveWarning::Svg { item, warning }` | the document draws; each of these is a subsystem this build declines, named per document and deduplicated by the crate that met it. The first four are **kept as decisions** — the reasons are in [design/svg.md](../design/svg.md)'s non-goals and the roadmap's *Named non-goals* — and `<textPath>`, `<tref>` and `<altGlyph>` are **unscheduled**, waiting in the roadmap's SVG row for a count (ruling 3). **§14.5's group `opacity` left this row**: a container's opacity, and a shape's where it both fills and strokes, is a transparency group composited once (`a_groups_opacity_is_composited_once`), and `GroupOpacityFlattened` is gone with it. **`<marker>` left this row** too: drawn at its vertices (`tests/markers.rs` in the leaf crate), and a reference naming no `<marker>` is `MarkerUnresolved`. **`spreadMethod` `reflect` and `repeat` left it** with them: a calculator function tiles the ramp past the axis, and `SpreadMethodUnsupported` is gone. **§10.4's per-glyph lists left it too**: an `x`, `y`, `dx`, `dy` or `rotate` per character is set per character, and `TextPositionListIgnored` is gone. **`<mask>` left it**: a luminance soft mask over a transparency group, and a reference naming no `<mask>` is `MaskUnresolved`. **`<pattern>` as a paint left it**: a tiling pattern, one cell of the tile's own nodes, and `PatternUnsupported` is gone; a pattern whose tile has no area paints nothing, §13.3's rule, and one whose tile paints with itself is refused like the `<use>` bomb. **Either on text in `objectBoundingBox` units** — a mask, a clip path, a gradient or a pattern — is drawn without the effect, or in the paint's own fallback, and is `TextBoxUnmeasured`: a run's box is a font metric the leaf does not have, and the review of the row found such text masked away or painted `none` without a word. **A clip path's `<use>` and `<text>` children left it**: a `<use>` of a shape clips as that shape, a clip holding text masks by the silhouettes of its shapes and runs, and a child §14.3.5 does not admit — a `<g>`, or a `<use>` of one — is `ClipChildIgnored`; both kinds of child had been dropped without a warning before. A shape, run or picture whose coordinates pass a double's range once its transforms are composed — two `scale(1e300)`s, each legal — is not drawn and is `GeometryOverflow`, where it used to reach the page as infinities | [design/svg.md](../design/svg.md) |
 | An `<image>` inside an SVG whose reference does not resolve, or whose bytes are neither JPEG nor PNG | `ArchiveWarning::SvgImageUnresolved { item, images }` | those two are embedded through the same `ImageData` path `cbz.rs` uses; anything else is counted per page rather than drawn as nothing | [design/svg.md](../design/svg.md) |
 | An XHTML `<img>` that did not become a box on the page | `ArchiveWarning::ImageNotDrawn { item, defect, images }` | four defects, because each is a different party's fault: `Unresolved` (no `src`, or one the container has no entry for), `UnsupportedFormat(f)` (BMP, TIFF, JPEG 2000 and AVIF are foreign resources an `<img>` does not place even where the comic path reads them — each named by format; every EPUB 3.3 §3.2 core raster type now has a decoder, so none lands here), `Unknown` (bytes matching no magic number — **an SVG lands here**, having none, and is a spine item in this build rather than a replaced box) and `Undecodable` (a JPEG, PNG, GIF or WebP whose bytes would not make an image; a GIF is drawn as its first image, an animated WebP as its first frame). Counted per content document and per defect, so a comic whose forty pictures are all WebP is one sentence a host can act on. The ruling 10 companion to `SvgImageUnresolved`, which is an SVG `<image>` and could never say this | [design/epub-layout.md](../design/epub-layout.md) |
+| An `xml:lang`, `lang` or `dc:language` not shaped like a language tag — `en_US`, a stray space | `ArchiveWarning::LanguageTagIgnored { item, tags }` | not written as `/Lang`: a value a reader cannot use says nothing, so the element inherits its ancestor's language as one that declared none would, and the book is told how many declarations went unwritten. Counted per content document, and once for the package document's `dc:language`, which would have been the catalog's | [design/tagged-pdf.md](../design/tagged-pdf.md) |
 | A `<link rel="stylesheet">` whose `href` produced no sheet | `ArchiveWarning::StylesheetUnresolved { item, sheets }` | the document is set without rules its author wrote and the page looks finished, which is `ImageNotDrawn`'s hole for the other reference a content document makes. Counted per content document. Silent until tier 5's formats row, where a loose XHTML file — which has nothing beside it — made every linked sheet one of these | [opening](opening.md) |
 | A refused `<img>` — **not a refusal, a stated answer** | — | HTML §4.8.4.4 makes an element *"expected to be treated as a replaced element"* **only when the image is available**, so an unavailable one is an ordinary empty inline and generates **no box**. §10.3.2's 300 by 150 default would put a blank postcard into a paragraph for a reference that was merely misspelled, and carrying `alt` into it would put characters on the page the spine's markup does not contain — one per refused image, with no source character to answer it. Asserted as a byte-for-byte identity against the same book with an empty `<span>` in the `<img>`'s place | [design/epub-layout.md](../design/epub-layout.md) |
 | `text-transform` in Lithuanian, Turkish or Azeri, and its `full-width` and `full-size-kana` values | `ArchiveWarning::UnimplementedProperty { property: "text-transform", .. }` | §2.1 requires `SpecialCasing.txt`'s language-conditional mappings when the element's language is known, and the layout crate that applies the transform is handed computed styles and never a language — so the cascade counts every element in one of the three languages (by `xml:lang`/`lang`, inherited) that has a casing transform, rather than letting a Turkish heading set with an English `I` read as honoured. `full-width` and `full-size-kana` map to *other characters*, not cases, and are refused by value alone or beside a casing keyword | `crates/tinker-pdf-layout/src/case.rs` |

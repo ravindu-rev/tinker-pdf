@@ -1043,6 +1043,23 @@ pub enum ArchiveWarning {
     /// outline it cannot read is worse than one written with none, and this is
     /// the sentence that says which happened.
     OutlineUnwritable,
+    /// Language declarations this build did not carry into the structure
+    /// tree as `/Lang` (ISO 32000-1 14.9.2), because they are not shaped like
+    /// a language tag — `en_US`, a stray space, a script name with no
+    /// language before it.
+    ///
+    /// Counted per document: an `xml:lang` or `lang` attribute of a content
+    /// document, or the package document's `dc:language`, which would have
+    /// been the catalog's `/Lang`. The text is still drawn and still tagged;
+    /// what it lacks is a statement of its language, which a reader then
+    /// takes from the nearest ancestor that made one.
+    LanguageTagIgnored {
+        /// The container path of the content document, or of the package
+        /// document for its `dc:language`.
+        item: String,
+        /// How many declarations were not written.
+        tags: usize,
+    },
 }
 
 /// Where one page came from.

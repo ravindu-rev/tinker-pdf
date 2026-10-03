@@ -24,15 +24,18 @@
 //! secondary and are labelled as such: they check that what was written is
 //! well-formed, not that it is true.
 //!
-//! # What this first pass does not do, each named rather than absent
+//! # What the markup says about itself, against the source
+//!
+//! `<img alt>` as a `/Figure`'s `/Alt` and `xml:lang`/`lang` as `/Lang` are
+//! asserted the same way the order is: the chapter's XHTML is read again in
+//! the test, with the XML leaf's event reader and nothing of the EPUB path,
+//! and what it says is compared with what the tree carries —
+//! [`every_img_alt_is_a_figure_alt`], [`every_language_declaration_is_a_lang`].
+//!
+//! # What is not done yet, each named rather than absent
 //!
 //! - **No PDF/UA conformance claim.** A structure tree is necessary for it and
 //!   nowhere near sufficient.
-//! - **No `/Alt` on images**, because `PageBuilder` cannot write one — its own
-//!   comment says so — and a `/Figure` with no alternate text is what an
-//!   `<img alt="…">` becomes. The alternate text is in the source and is
-//!   dropped.
-//! - **No `/Lang`** per element, and none on the catalog.
 //! - **No `/RoleMap`**, and it is not needed: every tag written is one of
 //!   Table 333's standard types, so there is nothing non-standard to declare.
 //!   The cost is that the XHTML name is not recoverable — `<em>` and
@@ -52,9 +55,12 @@
 #[path = "epub_support/mod.rs"]
 mod epub_support;
 
+#[path = "cbz_support/mod.rs"]
+mod cbz_support;
+
 use epub_support::conservation::conservation_in_logical_order;
 use epub_support::{ocf_zip, OcfEntry};
-use tinker_pdf::{Document, OpenOptions};
+use tinker_pdf::{Document, OpenOptions, StructElement, StructKid};
 
 const CONTAINER_XML: &str = concat!(
     r#"<?xml version="1.0" encoding="UTF-8"?>"#,
@@ -310,5 +316,395 @@ fn a_float_reads_where_it_was_written_even_across_a_page() {
             logical.missing,
             logical.divergences
         );
+    }
+}
+
+// ---- what the markup says about itself, against the source -----------------
+//
+// Each assertion below reads the chapter's XHTML **independently** — with the
+// XML leaf's event reader and nothing of the EPUB path — and compares what the
+// markup says (an `alt`, an `xml:lang`) with what the structure tree carries.
+// The XHTML is the ground truth this engine did not author.
+
+/// A book whose package names `language` and whose one chapter is `chapter`,
+/// with `resources` beside it in the container and the manifest.
+fn book_of(language: &str, chapter: &str, resources: &[(&str, &str, Vec<u8>)]) -> Vec<u8> {
+    let items: String = resources
+        .iter()
+        .enumerate()
+        .map(|(at, (href, media, _))| {
+            format!(r#"<item id="r{at}" href="{href}" media-type="{media}"/>"#)
+        })
+        .collect();
+    let package = format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">"#,
+            r#"<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">"#,
+            r#"<dc:identifier id="pub-id">urn:uuid:1f0c2c1e-0000-4000-8000-0000000057a7</dc:identifier>"#,
+            r#"<dc:title>Said About Itself</dc:title><dc:language>{}</dc:language>"#,
+            r#"</metadata><manifest>"#,
+            r#"<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>{}"#,
+            r#"</manifest><spine><itemref idref="c1"/></spine></package>"#
+        ),
+        language, items
+    );
+    let mut entries = vec![
+        OcfEntry::stored("mimetype", b"application/epub+zip"),
+        OcfEntry::deflated("META-INF/container.xml", CONTAINER_XML.as_bytes()),
+        OcfEntry::deflated("EPUB/content.opf", package.as_bytes()),
+        OcfEntry::deflated("EPUB/ch1.xhtml", chapter.as_bytes()),
+    ];
+    for (href, _, bytes) in resources {
+        entries.push(OcfEntry::stored(&format!("EPUB/{href}"), bytes));
+    }
+    let directory: Vec<usize> = (0..entries.len()).collect();
+    ocf_zip(&entries, &directory)
+}
+
+/// A chapter document: `html` is the attributes of `<html>`.
+fn chapter(html: &str, body: &str) -> String {
+    format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml" {}><head><title>T</title>"#,
+            r#"<style>p {{ margin: 0 }}</style></head><body>{}</body></html>"#
+        ),
+        html, body
+    )
+}
+
+/// One element of the source XHTML, as the XML reader reports it.
+struct Source {
+    name: String,
+    attributes: Vec<(String, String)>,
+    parent: Option<usize>,
+    /// The element's own character data, every text child concatenated.
+    text: String,
+}
+
+impl Source {
+    fn attribute(&self, name: &str) -> Option<&str> {
+        self.attributes
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// The source XHTML's elements in document order, read with the XML leaf's
+/// event reader and nothing of the EPUB path.
+fn source_elements(xhtml: &str) -> Vec<Source> {
+    let source = tinker_pdf_xml::Source::new(xhtml.as_bytes()).expect("well-formed");
+    let limits = tinker_pdf_xml::Limits::default();
+    let mut out: Vec<Source> = Vec::new();
+    let mut open: Vec<usize> = Vec::new();
+    for event in source.reader(&limits) {
+        match event.expect("the fixture is well-formed") {
+            tinker_pdf_xml::Event::Start(element) => {
+                let attributes = element
+                    .attributes()
+                    .iter()
+                    .map(|attribute| {
+                        let name = attribute.name();
+                        let qualified = match name.prefix() {
+                            Some(prefix) => format!("{prefix}:{}", name.local()),
+                            None => name.local().to_string(),
+                        };
+                        (qualified, attribute.value().to_string())
+                    })
+                    .collect();
+                out.push(Source {
+                    name: element.local().to_string(),
+                    attributes,
+                    parent: open.last().copied(),
+                    text: String::new(),
+                });
+                open.push(out.len() - 1);
+            }
+            tinker_pdf_xml::Event::End(_) => {
+                open.pop();
+            }
+            tinker_pdf_xml::Event::Text(text) | tinker_pdf_xml::Event::Cdata(text) => {
+                if let Some(&at) = open.last() {
+                    out[at].text.push_str(&text);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A language tag's shape, written here rather than borrowed from the
+/// engine: one to eight letters, then hyphen-joined subtags of one to eight
+/// letters and digits (RFC 5646 §2.1), or empty.
+fn shaped_like_a_language_tag(text: &str) -> bool {
+    text.is_empty()
+        || text.split('-').enumerate().all(|(at, subtag)| {
+            (1..=8).contains(&subtag.len())
+                && subtag
+                    .bytes()
+                    .all(|b| b.is_ascii_alphabetic() || (at > 0 && b.is_ascii_digit()))
+        })
+}
+
+/// The language the source says an element's text is in: its own `xml:lang`
+/// or `lang`, else its nearest ancestor's, else the package's — skipping any
+/// declaration not shaped like a tag, which says nothing a reader can use.
+fn source_language(elements: &[Source], at: usize, package: &str) -> String {
+    let mut current = Some(at);
+    while let Some(index) = current {
+        let element = &elements[index];
+        let declared = element
+            .attribute("xml:lang")
+            .or_else(|| element.attribute("lang"));
+        if let Some(language) = declared.filter(|l| shaped_like_a_language_tag(l)) {
+            return language.to_string();
+        }
+        current = element.parent;
+    }
+    package.to_string()
+}
+
+/// Every structure element with the text its own marked content draws and
+/// the language 14.9.2's hierarchy gives it: its own `/Lang`, else the
+/// nearest ancestor's, else the catalog's.
+fn tree_languages(doc: &Document) -> Vec<(String, Option<String>, StructElement)> {
+    let cos = doc.cos();
+    let catalog = cos.catalog().expect("a catalog");
+    let catalog_language = cos
+        .resolve_key(&catalog, cos.intern(b"Lang"))
+        .as_string()
+        .map(|s| tinker_pdf_cos::decode_text_string(&s.bytes));
+
+    let mut text: std::collections::BTreeMap<(u32, u32), String> = Default::default();
+    for index in 0..doc.page_count() {
+        let page = doc.page(index).expect("a page");
+        for line in page.text().lines() {
+            for character in &line.chars {
+                if let Some(mcid) = character.mcid {
+                    text.entry((index, mcid))
+                        .or_default()
+                        .push_str(&character.text);
+                }
+            }
+        }
+    }
+
+    fn walk(
+        kids: &[StructKid],
+        inherited: &Option<String>,
+        text: &std::collections::BTreeMap<(u32, u32), String>,
+        out: &mut Vec<(String, Option<String>, StructElement)>,
+    ) {
+        for kid in kids {
+            let StructKid::Element(element) = kid else {
+                continue;
+            };
+            let language = element.lang.clone().or_else(|| inherited.clone());
+            let own: String = element
+                .kids
+                .iter()
+                .filter_map(|kid| match kid {
+                    StructKid::Content {
+                        page: Some(page),
+                        mcid,
+                        ..
+                    } => text.get(&(*page, *mcid)).cloned(),
+                    _ => None,
+                })
+                .collect();
+            out.push((own, language.clone(), (**element).clone()));
+            walk(&element.kids, &language, text, out);
+        }
+    }
+    let tree = doc.structure().expect("a tree");
+    let mut out = Vec::new();
+    walk(&tree.kids, &catalog_language, &text, &mut out);
+    out
+}
+
+/// Text compared with every white-space character removed, which is the one
+/// thing collapsing and line breaking change.
+fn squeezed(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// A small PNG of one colour.
+fn picture(rgb: [u8; 3]) -> Vec<u8> {
+    cbz_support::rgb_png(4, 4, &rgb.repeat(16))
+}
+
+/// **Every `<img alt>` is a `/Figure` carrying that `alt` as `/Alt`**
+/// (14.9.3), read off the source and off the tree independently.
+///
+/// The three cases HTML distinguishes, each its own answer: a description
+/// is a `/Figure` with `/Alt`; an empty `alt` says the picture is
+/// decoration, which is an artifact (14.8.2.2) and in the tree nowhere; no
+/// `alt` at all is a `/Figure` with no `/Alt`, because the book did not say
+/// and this engine does not speak for it.
+///
+/// And the picture reads where it was written: an `<img>` in the middle of a
+/// paragraph is a `/Figure` between the paragraph's two runs of text, not
+/// before them or after.
+#[test]
+fn every_img_alt_is_a_figure_alt() {
+    let body = concat!(
+        r#"<p>Before <img src="red.png" alt="A red square"/> after</p>"#,
+        r#"<figure><img src="blue.png" alt="A blue square"/><figcaption>Blue</figcaption></figure>"#,
+        r#"<p>Plain <img src="deco.png" alt=""/> decorated</p>"#,
+        r#"<p>Last: <img src="bare.png"/></p>"#,
+    );
+    let xhtml = chapter(r#"lang="en" xml:lang="en""#, body);
+    let png = "image/png";
+    let bytes = book_of(
+        "en",
+        &xhtml,
+        &[
+            ("red.png", png, picture([200, 0, 0])),
+            ("blue.png", png, picture([0, 0, 200])),
+            ("deco.png", png, picture([0, 200, 0])),
+            ("bare.png", png, picture([90, 90, 90])),
+        ],
+    );
+    let doc = Document::open_with(bytes, &OpenOptions::at_page(400.0, 600.0)).expect("a book");
+    let tree = doc.structure().expect("a tree");
+    assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+
+    // The source, read on its own.
+    let expected: Vec<Option<String>> = source_elements(&xhtml)
+        .iter()
+        .filter(|element| element.name == "img")
+        .filter(|element| element.attribute("alt") != Some(""))
+        .map(|element| element.attribute("alt").map(str::to_string))
+        .collect();
+    assert_eq!(
+        expected.len(),
+        3,
+        "the fixture is what this test says it is"
+    );
+
+    let figures: Vec<&StructElement> = tree
+        .elements()
+        .into_iter()
+        .filter(|element| element.standard_type == "Figure")
+        .collect();
+    let written: Vec<Option<String>> = figures.iter().map(|f| f.alt.clone()).collect();
+    assert_eq!(
+        written, expected,
+        "every described picture, in source order"
+    );
+    assert_eq!(
+        doc.page(0).expect("a page").images().len(),
+        4,
+        "all four pictures are drawn, the decorative one included"
+    );
+
+    // The picture in the paragraph reads between its two runs.
+    let paragraph = tree
+        .elements()
+        .into_iter()
+        .find(|element| element.standard_type == "P")
+        .expect("the first paragraph");
+    let shape: Vec<&str> = paragraph
+        .kids
+        .iter()
+        .map(|kid| match kid {
+            StructKid::Element(child) => child.standard_type.as_str(),
+            StructKid::Content { .. } => "text",
+            StructKid::Object(_) => "object",
+        })
+        .collect();
+    assert_eq!(shape, ["text", "Figure", "text"]);
+
+    // `<figure>` is the grouping round the picture and its caption, not a
+    // second figure with no description.
+    let grouping = tree
+        .elements()
+        .into_iter()
+        .find(|element| {
+            element
+                .kids
+                .iter()
+                .any(|kid| matches!(kid, StructKid::Element(c) if c.standard_type == "Caption"))
+        })
+        .expect("the <figure>");
+    assert_eq!(grouping.standard_type, "Div");
+    assert!(grouping.kids.iter().any(
+        |kid| matches!(kid, StructKid::Element(c) if c.alt.as_deref() == Some("A blue square"))
+    ));
+}
+
+/// **Every language declaration is a `/Lang`** (14.9.2), compared text by
+/// text against what the source says each piece of text is in.
+///
+/// The source side resolves `xml:lang` before `lang`, element before
+/// ancestor, and the package's `dc:language` last; the tree side resolves an
+/// element's `/Lang`, its ancestors', and the catalog's. They must agree for
+/// every element that has text of its own — including one whose own
+/// declaration is not a language tag, which says nothing and so inherits.
+#[test]
+fn every_language_declaration_is_a_lang() {
+    for (package, html) in [
+        ("en", r#"lang="en" xml:lang="en""#),
+        // The chapter's own language differs from the book's: the elements
+        // at its top carry the chapter's, since `<html>` is not in the tree.
+        ("en", r#"xml:lang="fr""#),
+        // No language on `<html>` at all.
+        ("de", ""),
+    ] {
+        let body = concat!(
+            r#"<h1>Title words</h1>"#,
+            r#"<p xml:lang="fr">Bonjour le monde</p>"#,
+            r#"<p>Plain words <span lang="de">Guten Tag</span> more words</p>"#,
+            r#"<p lang="es" xml:lang="it">Ciao mondo</p>"#,
+            r#"<p lang="en_US">Underscored words</p>"#,
+            r#"<ul><li xml:lang="nl">Goedendag</li><li>Item two</li></ul>"#,
+        );
+        let xhtml = chapter(html, body);
+        let bytes = book_of(package, &xhtml, &[]);
+        let doc = Document::open_with(bytes, &OpenOptions::at_page(400.0, 600.0)).expect("a book");
+
+        let source = source_elements(&xhtml);
+        let tree = tree_languages(&doc);
+        let mut compared = 0;
+        for (at, element) in source.iter().enumerate() {
+            let own = squeezed(&element.text);
+            if own.is_empty() || element.name == "title" || element.name == "style" {
+                continue;
+            }
+            let wanted = source_language(&source, at, package);
+            let found: Vec<&(String, Option<String>, StructElement)> = tree
+                .iter()
+                .filter(|(text, _, _)| squeezed(text) == own)
+                .collect();
+            assert!(
+                !found.is_empty(),
+                "{package}/{html}: no element draws {own:?}"
+            );
+            for (_, language, element) in found {
+                assert_eq!(
+                    language.as_deref(),
+                    Some(wanted.as_str()),
+                    "{package}/{html}: {own:?} ({} in the tree)",
+                    element.standard_type
+                );
+            }
+            compared += 1;
+        }
+        assert_eq!(compared, 8, "every element with text was compared");
+        // The one declaration that is not a tag is named, once.
+        let ignored: Vec<usize> = doc
+            .archive()
+            .expect("a synthesised book carries a report")
+            .warnings()
+            .iter()
+            .filter_map(|warning| match warning {
+                tinker_pdf::ArchiveWarning::LanguageTagIgnored { tags, .. } => Some(*tags),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ignored, [1], "{package}/{html}");
     }
 }
