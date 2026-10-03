@@ -52,7 +52,10 @@ A picture that quietly drops one of these looks finished.
 
 - **Filters** (§15). `<filter>`, `filter=`, and the whole `fe*` family. A
   filter is a raster pipeline over a rendered subregion, and this crate
-  produces geometry. `Warning::FilterUnsupported`.
+  produces geometry. PDF has no filter either, so drawing one would mean
+  rasterising the element inside the writer — at a resolution the book does
+  not state, with the vector text under it lost to extraction. The element is
+  drawn unfiltered. `Warning::FilterUnsupported`.
 - ~~**Masks** (§14.4)~~ — **drawn since the milestones**; see *As built*. A
   mask is a rendered alpha channel, and PDF has one: 11.6.5.2's soft mask.
 - **SMIL animation** (§19) and **scripting** (§18). A static rendering is the
@@ -61,6 +64,14 @@ A picture that quietly drops one of these looks finished.
 - **`<foreignObject>`** (§23). Its content is a different document language;
   reading it here would be a second XHTML reader.
   `Warning::ForeignObjectUnsupported`.
+- **`<textPath>`, `<tref>` and `<altGlyph>`** (§10.13, §10.10, §10.14).
+  Text on a path places each glyph by its advance along the curve and turns
+  it to the tangent there, and an advance is a font metric this crate does
+  not have (ruling 8) — so it would be a second text-layout seam, through the
+  caller, beside the one §10.4's lists already use. `<tref>` and `<altGlyph>`
+  are SVG 1.1 features SVG 2 removed. None of the three has a file behind it
+  here (ruling 3). `Warning::TextLayoutUnsupported`; the element's content is
+  not drawn.
 - ~~**`<pattern>` as a paint** (§13.3)~~ — **drawn since the milestones**;
   see *As built*. A tiling paint server is 8.7.3's tiling pattern, cell for
   cell.
