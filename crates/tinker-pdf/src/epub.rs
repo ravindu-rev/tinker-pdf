@@ -1676,7 +1676,7 @@ fn write_chapters<R: read::Resources + ?Sized>(
         let cells = chapter
             .reading
             .as_ref()
-            .map(|reading| tagging::table_cells(&reading.dom))
+            .map(|reading| tagging::table_cells(&reading.dom, &chapter.pages, &pictures[spine_at]))
             .unwrap_or_default();
         let path = chapter.path.as_deref().unwrap_or(chapter.name.as_str());
         let roles = chapter

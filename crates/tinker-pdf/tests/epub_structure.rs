@@ -1062,3 +1062,49 @@ fn every_element_keeps_its_name_and_says_what_it_is() {
     assert_eq!(kind("strong"), Some("Span".to_string()));
     assert_eq!(kind("sub"), Some("Span".to_string()), "a subscript is text");
 }
+
+/// **A `headers` naming a cell that is never written names nothing**, and is
+/// left out: an empty header cell and one `display: none` removed are never
+/// opened as structure elements, because nothing is drawn inside them, so
+/// neither carries an `/ID` — and a `/Headers` entry is an element
+/// identifier (Table 349). The review of the tagged-writing lane found both
+/// written as ids no element carried, because the filter asked whether the
+/// source had the cell rather than whether the PDF did.
+#[test]
+fn a_header_cell_that_is_not_written_is_not_named() {
+    let body = concat!(
+        r#"<table><tr><th id="corner"></th><th id="hidden" style="display:none">Gone</th>"#,
+        r#"<th id="h">Head</th></tr>"#,
+        r#"<tr><th id="r" scope="row">Row</th>"#,
+        r#"<td headers="corner hidden h r">Cell</td></tr></table>"#,
+    );
+    let doc = opened(body);
+    let tree = doc.structure().expect("a tree");
+    let mut named = Vec::new();
+    for element in tree.elements() {
+        let Some(table) = &element.table else {
+            continue;
+        };
+        for id in &table.headers {
+            assert!(
+                tree.element_by_id(id).is_some(),
+                "{} names {}, which no element carries",
+                element.standard_type,
+                String::from_utf8_lossy(id)
+            );
+            named.push(String::from_utf8_lossy(id).into_owned());
+        }
+    }
+    assert_eq!(
+        named,
+        ["EPUB/ch1.xhtml#h", "EPUB/ch1.xhtml#r"],
+        "the two header cells that are drawn, and only those"
+    );
+    let ids: Vec<String> = tree
+        .elements()
+        .into_iter()
+        .filter_map(|element| element.id.as_deref())
+        .map(|id| String::from_utf8_lossy(id).into_owned())
+        .collect();
+    assert_eq!(ids, ["EPUB/ch1.xhtml#h", "EPUB/ch1.xhtml#r"]);
+}

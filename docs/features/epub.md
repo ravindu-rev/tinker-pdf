@@ -402,8 +402,10 @@ with the XML leaf's event reader:
   `/Table`'s `/Summary`; a `<th>` or `<td>` with an `id` carries it as `/ID`,
   qualified by its content document (`EPUB/ch1.xhtml#apple`) because an
   identifier is unique in the whole PDF and two chapters may both say
-  `id="h1"`; a cell's `headers` is `/Headers`, an id naming no cell of the
-  document left out; a `<th>`'s `scope` is `/Scope` (`col` and `colgroup`
+  `id="h1"`; a cell's `headers` is `/Headers`, an id naming no cell the
+  document writes left out — a cell with nothing drawn in it, empty or
+  `display: none`, is never opened as an element and carries no `/ID`
+  (`a_header_cell_that_is_not_written_is_not_named`); a `<th>`'s `scope` is `/Scope` (`col` and `colgroup`
   `/Column`, `row` and `rowgroup` `/Row`, `auto` unstated); a `colspan` or
   `rowspan` above one is `/ColSpan` or `/RowSpan`.
   `every_table_attribute_is_carried_from_the_source` resolves every cell's

@@ -45,21 +45,59 @@ pub(crate) struct Tagging<'a> {
     /// structure element's `/ID` is unique in the **document** (14.7.2), and
     /// two chapters may both say `id="h1"`.
     pub path: &'a str,
-    /// Every table cell carrying an `id`, by that id. See [`table_cells`].
+    /// Every table cell carrying an `id` that is written, by that id. See
+    /// [`table_cells`].
     pub cells: &'a BTreeMap<String, usize>,
     /// The element names written as themselves and role-mapped. See
     /// [`register_roles`].
     pub roles: &'a BTreeSet<String>,
 }
 
-/// Every `<th>` and `<td>` of a content document carrying an `id`, by that
-/// id, the first element winning where a document repeats one — which is
-/// the set a cell's `headers` may name and the cells that are written with an
-/// `/ID`.
-pub(crate) fn table_cells(dom: &Dom) -> BTreeMap<String, usize> {
+/// Every `<th>` and `<td>` of a content document that carries an `id` **and
+/// is written**, by that id, the first such cell winning where a document
+/// repeats one — which is the set a cell's `headers` may name and the cells
+/// that are written with an `/ID`.
+///
+/// **Written, not merely present.** A cell is opened as a structure element
+/// only when something drawn sits inside it, the way [`tag_runs`] and
+/// [`draw_figure`] decide it: a painted run that is not generated content,
+/// or a registered picture that is not an `alt=""` artifact. An empty header
+/// cell, or one `display: none` took out of the layout, is never opened and
+/// so carries no `/ID`, and a `/Headers` entry naming it would be an
+/// identifier no element has (Table 349). The source's own cells used to be
+/// the set, which is what wrote those. Nesting does not refuse a cell here:
+/// the XML reader stops at `MAX_XML_DEPTH` levels, below the depth the
+/// builder refuses an element at.
+pub(crate) fn table_cells(
+    dom: &Dom,
+    pages: &[LayoutPage],
+    pictures: &[(u32, Vec<u8>)],
+) -> BTreeMap<String, usize> {
+    let mut drawn: BTreeSet<usize> = BTreeSet::new();
+    for page in pages {
+        for run in page.runs.iter().filter(|run| run.painted && !run.generated) {
+            drawn.extend(ancestry(dom, run.anchor));
+        }
+        for fragment in &page.replaced {
+            let Some(anchor) = fragment.anchor else {
+                continue;
+            };
+            if !pictures.iter().any(|(at, _)| *at == anchor) {
+                continue;
+            }
+            let chain = ancestry(dom, Some(anchor));
+            let Some((&picture, around)) = chain.split_last() else {
+                continue;
+            };
+            let alt = dom.nodes.get(picture).and_then(|node| node.attr("alt"));
+            if alt != Some("") {
+                drawn.extend(around.iter().copied());
+            }
+        }
+    }
     let mut out = BTreeMap::new();
     for (at, node) in dom.nodes.iter().enumerate() {
-        if !node.is_html() || !matches!(node.name.as_str(), "th" | "td") {
+        if !node.is_html() || !matches!(node.name.as_str(), "th" | "td") || !drawn.contains(&at) {
             continue;
         }
         if let Some(id) = node.id.as_deref().filter(|id| !id.is_empty()) {
@@ -195,8 +233,9 @@ impl Tagging<'_> {
                     }
                 }
                 // HTML's `headers` is a list of ids separated by white space;
-                // one naming no cell of this document is a reference into
-                // nothing and is not written.
+                // one naming no cell this document writes — none of its
+                // cells, or one with nothing drawn in it — is a reference
+                // into nothing and is not written.
                 attributes.headers = node
                     .attr("headers")
                     .unwrap_or_default()
