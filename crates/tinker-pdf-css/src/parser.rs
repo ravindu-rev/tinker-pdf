@@ -571,6 +571,22 @@ impl Parse<'_> {
                     self.descend(block, href, rules, imports_still_allowed, budget)?;
                 }
             }
+            // `css-conditional-3` §6: the block applies where this build
+            // supports what the prelude asks about. See [`crate::supports`].
+            "supports" => {
+                *imports_still_allowed = false;
+                let Some(block) = block else {
+                    self.report.discarded_rules += 1;
+                    return Ok(());
+                };
+                match crate::supports::evaluate(&prelude, self.limits.max_selector_parts) {
+                    Some(true) => {
+                        self.descend(block, href, rules, imports_still_allowed, budget)?;
+                    }
+                    Some(false) => {}
+                    None => self.report.discarded_rules += 1,
+                }
+            }
             "import" => {
                 if !*imports_still_allowed {
                     self.report.warn(Warning::ImportOutOfOrder);
@@ -1239,7 +1255,7 @@ pub fn parse_inline(
 /// §5.4.4's rule is the last two non-whitespace values, and it is
 /// case-insensitive: `!IMPORTANT` is important. A `!` followed by anything else
 /// is an ordinary part of the value.
-fn strip_important(values: &mut Vec<ComponentValue>) -> bool {
+pub(crate) fn strip_important(values: &mut Vec<ComponentValue>) -> bool {
     let mut significant: Vec<usize> = values
         .iter()
         .enumerate()

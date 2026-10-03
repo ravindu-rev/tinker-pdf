@@ -432,16 +432,94 @@ fn a_layer_statement_leaves_the_import_window_open() {
 /// fixture now uses two at-rules that are still unimplemented — and
 /// `a_font_face_is_no_longer_an_unsupported_at_rule` below is what says the
 /// name left this list rather than the warning quietly changing shape.
+/// `@supports` left it in October 2026 (`supports_applies_its_block_where_this_build_supports_the_test`),
+/// and `@counter-style` took its place in the fixture.
 #[test]
 fn an_unsupported_at_rule_carries_its_name() {
-    let parsed = sheet("@page { margin: 1cm } @supports (x: y) { p { float: left } } @page { }");
+    let parsed =
+        sheet("@page { margin: 1cm } @counter-style x { system: cyclic; symbols: a } @page { }");
     assert_eq!(
         parsed.report.warnings,
         vec![
             (Warning::AtRuleUnsupported("page".to_string()), 2),
-            (Warning::AtRuleUnsupported("supports".to_string()), 1),
+            (Warning::AtRuleUnsupported("counter-style".to_string()), 1),
         ],
         "deduplicated by name, with the count beside each"
+    );
+}
+
+/// **`@supports` applies its block where this build supports what it asks**
+/// (`css-conditional-3` §6): a declaration test is the declaration's own
+/// answer — implemented property and value — so `display: flex` is supported
+/// and `display: grid`, a name in `UNSUPPORTED_PROPERTIES` and a value refused
+/// by value are not; `not`, `and`, `or`, parentheses and `selector()` combine
+/// them; an unknown test is false; a prelude outside the grammar drops the
+/// rule, counted; and no `@supports` is an unsupported at-rule any more.
+#[test]
+fn supports_applies_its_block_where_this_build_supports_the_test() {
+    let applies = |prelude: &str| -> Option<bool> {
+        let parsed = sheet(&format!("@supports {prelude} {{ p {{ float: left }} }}"));
+        assert!(
+            !parsed
+                .report
+                .warnings
+                .iter()
+                .any(|(warning, _)| matches!(warning, Warning::AtRuleUnsupported(_))),
+            "{prelude}: {:?}",
+            parsed.report.warnings
+        );
+        match (parsed.rules.len(), parsed.report.discarded_rules) {
+            (1, 0) => Some(true),
+            (0, 0) => Some(false),
+            (0, 1) => None,
+            other => panic!("{prelude}: {other:?}"),
+        }
+    };
+    for (prelude, expected) in [
+        ("(display: flex)", Some(true)),
+        ("(display:grid)", Some(false)),
+        ("(color: inherit)", Some(true)),
+        ("(margin: 1px 2px !important)", Some(true)),
+        ("(writing-mode: vertical-rl)", Some(false)),
+        ("(no-such-thing: 1)", Some(false)),
+        ("(transform: rotateX(1deg))", Some(false)),
+        ("(transform: rotate(1deg))", Some(true)),
+        ("(display: flexx)", Some(false)),
+        ("(display:)", Some(false)),
+        ("not (display: grid)", Some(true)),
+        ("not (display: flex)", Some(false)),
+        ("(display: flex) and (display: grid)", Some(false)),
+        (
+            "(display: flex) and (opacity: 0.5) and (color: red)",
+            Some(true),
+        ),
+        ("(display: grid) or (display: flex)", Some(true)),
+        (
+            "(display: grid) or (writing-mode: vertical-rl)",
+            Some(false),
+        ),
+        (
+            "((display: grid) or (display: flex)) and (not (display: grid))",
+            Some(true),
+        ),
+        ("(an unknown test)", Some(false)),
+        ("font-tech(color-COLRv1)", Some(false)),
+        ("selector(p > a:nth-child(2n))", Some(true)),
+        ("selector(p::first-line)", Some(false)),
+        ("selector(:hover)", Some(false)),
+        ("selector(p, a)", Some(false)),
+        ("(display: flex) and (display: grid) or (color: red)", None),
+        ("not (display: flex) and (color: red)", None),
+        ("not", None),
+        ("display: flex", None),
+        ("(display: flex) and", None),
+    ] {
+        assert_eq!(applies(prelude), expected, "@supports {prelude}");
+    }
+    // A statement form has no block to apply, and is invalid.
+    assert_eq!(
+        sheet("@supports (display: flex);").report.discarded_rules,
+        1
     );
 }
 
@@ -2154,4 +2232,28 @@ fn transform_origin_is_a_position_and_a_zero_depth() {
             ..
         }
     ));
+}
+
+/// **A hostile `@supports` prelude is read without a panic and within the
+/// parser's nesting cap**: parentheses past the component-value tree's 256
+/// levels, a `not` chain, and a thousand-term `or`.
+#[test]
+fn a_hostile_supports_prelude_is_bounded() {
+    let deep = format!(
+        "@supports {}(display: flex){} {{ p {{ float: left }} }}",
+        "(".repeat(2_000),
+        ")".repeat(2_000)
+    );
+    let _ = sheet(&deep);
+    let nots = format!(
+        "@supports {}(display: flex){} {{ p {{ float: left }} }}",
+        "(not ".repeat(300),
+        ")".repeat(300)
+    );
+    let _ = sheet(&nots);
+    let wide = format!(
+        "@supports {} {{ p {{ float: left }} }}",
+        vec!["(display: grid)"; 1_000].join(" or ")
+    );
+    assert!(sheet(&wide).rules.is_empty(), "every term is false");
 }

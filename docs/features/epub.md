@@ -60,7 +60,13 @@ defaulting keywords on every property and every shorthand — `inherit`,
 `initial`, `unset`, and the two that roll the cascade back rather than
 replacing a value, `revert` to the previous **origin** and `revert-layer` to
 the previous **layer**; `@media` evaluated
-against a `MediaContext`; `@import` with cycle and depth bounds;
+against a `MediaContext`; `@supports` (`css-conditional-3` §6) evaluated
+against **this build** — a declaration test is true where the property and
+its value would be accepted in a style rule, so `@supports (display: flex)`
+applies its rules and `@supports (display: grid)` or a value refused by value
+does not, with `not`, `and`, `or`, `css-conditional-4`'s `selector()` (true
+where the selector parses and nothing in it is refused or warned about) and an
+unknown test false; `@import` with cycle and depth bounds;
 `@font-face` descriptors collected into a `FaceSet`; `@layer` in all three
 syntaxes — block, statement and anonymous — with dotted and nested names
 resolving to one layer, first mention fixing a layer's position, the order
@@ -363,7 +369,7 @@ order, at nine page boxes.
 | `overflow: scroll` and `overflow: auto` — **a stated answer** | — | a page has no scrolling mechanism, so a scroll container is printed at its initial scroll position — its padding box from the top left — which CSS 2.2 §11.1.1 permits for print and a browser's own print does. What is past it is clipped, and along the block axis out of the column, laid out and not painted | `crates/tinker-pdf/tests/epub_paint.rs` |
 | A scroll container beside a float — **a stated answer** | — | CSS 2.2 §9.5: its border box must not overlap the float, and *"implementations should clear the said element by placing it below any preceding floats, but may place it adjacent to such floats if there is sufficient space"*. This build takes the *should*, and a browser the *may*: a picture floated beside an `overflow: hidden` box of text sets the text below the picture here and beside it there. Only the floats crossing the box's top edge are looked for, the box's height being unknown when it is placed | `crates/tinker-pdf-layout/src/tests.rs` |
 | Ink past a clipping box's padding box that no advance reaches — **a stated answer** | — | whether a box overflowed is decided on its content's extents, `css-overflow-3` §2.2's scrollable overflow, and not on its ink (§2.1): an italic's overhang past the last advance of a box whose advances fit is drawn rather than cut, since the box writes no clip | — |
-| Other at-rules (`@supports`, `@page`, …) | `tinker_pdf_css::Warning::AtRuleUnsupported(name)` | skipped by the spec's own recovery, named | — |
+| Other at-rules (`@page`, `@counter-style`, …) | `tinker_pdf_css::Warning::AtRuleUnsupported(name)` | skipped by the spec's own recovery, named. **`@supports` left this row** in October 2026, evaluated against what this build implements | — |
 | `:hover`, `:focus`, `:focus-within`, `:focus-visible`, `:active`, `:target`, `:visited` — **seven, and the whole of what never matches** | `tinker_pdf_css::Warning::PseudoClassUnsupported(name)` | each names a state of a reading *session*: a pointer, a focus ring, a press, a fragment the reader navigated to, a history. A paginated document has none of them, for any element, ever — so never matching is `selectors-4`'s **answer** here and not this build's gap. Still counted, because a rule that had no effect is something the book said (ruling 10), and the count is asserted by number so a shrinking list cannot read as a passing one | — |
 | `:nth-child(An+B of S)` | `parser::Report::discarded_rules` | the only pseudo-class syntax refused outright. Reading it as the `An+B` without the `of` would style every second row instead of every second `.a`, which is a book that renders beautifully and is wrong; §3.1 drops the rule instead, counted | [ROADMAP.md](../ROADMAP.md) |
 | `::first-line`, `::first-letter` | `tinker_pdf_css::Warning::PseudoElementUnsupported(name)` | parsed, no box generated. Neither is *generated* content: both select part of an **already laid out** box, so honouring either means a second layout pass, which is a different feature from `::before`. `::marker`, `::placeholder` and `::selection` are not parsed at all — `::selection` for the reason the pseudo-class row gives, that it names a state of a reading *session* and a paginated document has none | [ROADMAP.md](../ROADMAP.md) |

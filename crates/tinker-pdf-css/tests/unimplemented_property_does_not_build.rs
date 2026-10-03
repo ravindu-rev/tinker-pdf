@@ -179,6 +179,7 @@ impl Source {
             "media.rs",
             "parser.rs",
             "selector.rs",
+            "supports.rs",
             "tokenizer.rs",
         ] {
             std::fs::write(src.join(file), read(&root.join("src").join(file))).expect("write");

@@ -912,3 +912,45 @@ fn cells_with_no_row_are_the_row_the_markup_omitted() {
         same(what, lay(style, written), lay(style, implied), broken);
     }
 }
+
+/// **An `@supports` block applies where this build supports its test**
+/// (`css-conditional-3` §6), and is no longer skipped by name: a book's rule
+/// inside `@supports (display: flex)` is the same rule written plainly, and
+/// one inside `@supports (display: grid)` — a property this build does not
+/// implement — is not applied, which is the mismatch.
+#[test]
+fn a_supports_block_is_its_rules_where_the_test_is_supported() {
+    use tinker_pdf_css::media::MediaContext;
+    use tinker_pdf_css::parser::parse;
+    use tinker_pdf_css::{Budget, Limits, NoImports, Warning};
+    let body = r#"<p>one</p><p class="a">two</p>"#;
+    let conditional =
+        "@supports (display: flex) and (not (display: grid)) { p.a { margin-left: 30px } }";
+    let supported = lay(conditional, body);
+    let plain = lay("p.a { margin-left: 30px }", body);
+    let broken = lay(
+        "@supports (display: grid) { p.a { margin-left: 30px } }",
+        body,
+    );
+    same("@supports", supported, plain, broken);
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let sheet = parse(
+        conditional.as_bytes(),
+        None,
+        &NoImports,
+        &MediaContext::screen(MEASURE, 1000.0),
+        &limits,
+        &mut budget,
+    )
+    .expect("a sheet");
+    assert!(
+        !sheet
+            .report
+            .warnings
+            .iter()
+            .any(|(warning, _)| matches!(warning, Warning::AtRuleUnsupported(_))),
+        "{:?}",
+        sheet.report.warnings
+    );
+}
