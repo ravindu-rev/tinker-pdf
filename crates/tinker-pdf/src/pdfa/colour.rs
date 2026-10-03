@@ -588,32 +588,40 @@ fn profile_space(doc: &CosDocument, reference: ObjRef) -> Destination {
 // ---- what the pages paint with --------------------------------------------
 
 /// What one walk of the content streams found, for every colour rule at once.
+///
+/// `pub(crate)`, with the fields another standard reads, because ISO 15930's
+/// print rules ask what a page paints with the same question ISO 19005's
+/// colour group asks (`crate::pdfx`), and one walk answers both.
 #[derive(Default)]
-struct Used {
+pub(crate) struct Used {
     /// Device colour spaces painted with, and one object that did.
-    devices: BTreeMap<&'static str, Option<ObjRef>>,
+    pub(crate) devices: BTreeMap<&'static str, Option<ObjRef>>,
     /// Device colour spaces a `/Default…` entry in the resources standing over
     /// them excuses (ISO 32000-1 8.6.5.6).
-    defaulted: BTreeSet<&'static str>,
+    pub(crate) defaulted: BTreeSet<&'static str>,
     /// `ICCBased` streams the pages selected.
-    icc_streams: BTreeSet<ObjRef>,
+    pub(crate) icc_streams: BTreeSet<ObjRef>,
+    /// The other device-independent families the pages selected —
+    /// `CalGray`, `CalRGB`, `Lab` — and one object that did. No ISO 19005
+    /// rule reads it; PDF/X-3's profile requirement does.
+    pub(crate) independent: BTreeMap<&'static str, Option<ObjRef>>,
     /// Rendering intents named, by the `ri` operator or an `/ExtGState`.
     intents: BTreeMap<Vec<u8>, Option<ObjRef>>,
     /// Extended graphics states the pages selected.
     ext_g_states: BTreeSet<ObjRef>,
     /// Form XObjects the pages invoked.
-    forms: BTreeSet<ObjRef>,
+    pub(crate) forms: BTreeSet<ObjRef>,
     /// Image XObjects the pages drew.
     images: BTreeSet<ObjRef>,
     /// XObjects the pages drew that are neither a form nor an image, which
     /// 8.8.2 leaves exactly one of: a PostScript XObject.
-    postscript: BTreeSet<ObjRef>,
+    pub(crate) postscript: BTreeSet<ObjRef>,
     /// Device-independent blending colour spaces a transparency group named,
     /// by the device family each stands in for (11.6.6).
     group_spaces: BTreeSet<&'static str>,
     /// Operators no table of ISO 32000 defines, each with the first object
     /// whose content used it.
-    undefined: BTreeMap<Vec<u8>, ObjRef>,
+    pub(crate) undefined: BTreeMap<Vec<u8>, ObjRef>,
     /// Every `/Separation` array met — in a space the pages use, or in a
     /// `/DeviceN` space's `/Colorants` — as `(name, alternate, tint transform,
     /// where)`.
@@ -652,11 +660,11 @@ const MAX_UNDEFINED_OPERATORS: usize = 64;
 /// The three uncalibrated spaces, spelled as the operators and the names spell
 /// them.
 const DEVICE_GRAY: &str = "DeviceGray";
-const DEVICE_RGB: &str = "DeviceRGB";
+pub(crate) const DEVICE_RGB: &str = "DeviceRGB";
 const DEVICE_CMYK: &str = "DeviceCMYK";
 
 /// One walk, filling [`Used`].
-fn scan(doc: &CosDocument, used: &mut Used) {
+pub(crate) fn scan(doc: &CosDocument, used: &mut Used) {
     content::walk(doc, &mut |op| {
         if !DEFINED_OPERATORS.contains(&op.operator)
             && (used.undefined.len() < MAX_UNDEFINED_OPERATORS
@@ -819,6 +827,15 @@ fn colour_space(
                     if let Some(stream) = members.get(1).and_then(Object::as_objref) {
                         used.icc_streams.insert(stream);
                     }
+                }
+                b"CalGray" => {
+                    used.independent.entry("CalGray").or_insert(at);
+                }
+                b"CalRGB" => {
+                    used.independent.entry("CalRGB").or_insert(at);
+                }
+                b"Lab" => {
+                    used.independent.entry("Lab").or_insert(at);
                 }
                 // 8.6.6.3 and 8.6.6.4: the value a `/Separation` or `/DeviceN`
                 // produces lives in its **alternate** space, and 8.6.6.2 says
@@ -1426,7 +1443,11 @@ fn transfer_functions(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
 /// **Parts 2 to 4 permit transparency** and constrain it instead — the group's
 /// colour space, the blend modes, the mask — and none of that runs here.
 /// `super::STAGED` names it.
-fn transparency(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
+///
+/// `pub(crate)` because the 2003 PDF/X levels forbid transparency outright as
+/// well (`crate::pdfx`), and one reading of "no transparency" is better than
+/// two that drift.
+pub(crate) fn transparency(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
     for page in pages::collect_upto(doc, MAX_PAGES) {
         let Ok(object) = doc.get(page.reference) else {
             continue;

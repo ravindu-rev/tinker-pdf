@@ -42,7 +42,7 @@ usage:
   tpdf images  <file.pdf> [--out DIR] [--page N | --pages LIST] [--password P]
   tpdf outline <file.pdf> [--password P]
   tpdf objects <file.pdf> [--object N [--stream [--raw]]] [--password P]
-  tpdf check   <file.pdf>... [--strict] [--pdfa] [--pdfua]
+  tpdf check   <file.pdf>... [--strict] [--pdfa] [--pdfua] [--pdfx]
   tpdf probe   <file.pdf>... [--dpi D] [--fonts PATH]
 
 writing (each writes a new file, and takes --font-policy and the image flags):
@@ -77,6 +77,8 @@ options:
   --pdfa       with check, also validate against ISO 19005 (PDF/A)
   --pdfua      with check, also validate against ISO 14289 (PDF/UA), and
                print the clauses it abstains on
+  --pdfx       with check, also validate against ISO 15930 (PDF/X): the 2003
+               levels only, and the clauses it did not read
   --json       with text, the structured text as JSON: pages, blocks, lines,
                spans with their font and size, and characters with their boxes
   --xml        the same model as XML
@@ -176,6 +178,13 @@ one line more: most of that standard is a judgement about meaning no reader
 can make, so each file also prints how many clauses this build abstained on,
 staged and undecidable, beside the groups that ran. A file claiming no part
 is reported, numbered as part 1 numbers it, and is not a failure.
+
+`--pdfx` asks the print-exchange question of ISO 15930. Rules run under
+PDF/X-1a:2003 and PDF/X-3:2003 only, transcribed from the CGATS application
+notes because the standard's own text is not in hand; any other level a file
+claims is named and not checked, and the line beside the findings counts the
+clauses abstained on, staged and unread. A file claiming no level is reported
+and is not a failure.
 
 `probe` is the one the corpus runner spawns, one child process per file. It
 opens the file, renders every page, rewrites it and validates the rewrite, and
@@ -336,6 +345,8 @@ struct Options {
     pdfa: bool,
     /// Validate against ISO 14289 (PDF/UA) as well, and exit by the verdict.
     pdfua: bool,
+    /// Validate against ISO 15930 (PDF/X) as well, and exit by the verdict.
+    pdfx: bool,
     /// `text` in a structured format rather than as plain text: one of
     /// `--json`, `--xml` and `--html`, and at most one.
     format: Option<TextFormat>,
@@ -448,6 +459,7 @@ impl Options {
             strict: false,
             pdfa: false,
             pdfua: false,
+            pdfx: false,
             format: None,
             order: ReadingOrder::Stream,
             tables: false,
@@ -540,6 +552,7 @@ impl Options {
                 "--strict" => options.strict = true,
                 "--pdfa" => options.pdfa = true,
                 "--pdfua" => options.pdfua = true,
+                "--pdfx" => options.pdfx = true,
                 "--record-version" => options.record_version = true,
                 "--json" | "--xml" | "--html" => {
                     let format = match arg {
@@ -1639,6 +1652,8 @@ fn check(options: &Options) -> Result<(), String> {
     let mut unclaimed = 0usize;
     let mut inaccessible = 0usize;
     let mut ua_unclaimed = 0usize;
+    let mut unprintable = 0usize;
+    let mut x_unclaimed = 0usize;
 
     for path in &options.files {
         match open(path, options.password.as_deref(), fonts.as_ref()) {
@@ -1744,6 +1759,57 @@ fn check(options: &Options) -> Result<(), String> {
                         );
                     }
                 }
+
+                if options.pdfx {
+                    let verdict = doc.validate_pdfx();
+                    match (&verdict.claim, verdict.flavour) {
+                        (Some(_), Some(flavour)) => {
+                            if !verdict.found_nothing() {
+                                unprintable += 1;
+                            }
+                            if !options.quiet {
+                                let validated = if flavour.is_validated() {
+                                    ""
+                                } else {
+                                    " (not validated by this build)"
+                                };
+                                println!("      pdfx claims {flavour}{validated}");
+                            }
+                        }
+                        (Some(claim), None) => {
+                            if !options.quiet {
+                                println!(
+                                    "      pdfx claims {:?}, a level this build does not identify",
+                                    claim.version
+                                );
+                            }
+                        }
+                        // Not a failure, for the reason a missing PDF/A claim
+                        // is not.
+                        (None, _) => {
+                            x_unclaimed += 1;
+                            if !options.quiet {
+                                println!("      pdfx claims nothing");
+                            }
+                        }
+                    }
+                    for finding in &verdict.findings {
+                        println!("      pdfx {finding}");
+                    }
+                    if !options.quiet && verdict.claim.is_some() {
+                        let staged = verdict
+                            .abstained
+                            .iter()
+                            .filter(|a| a.class == tinker_pdf::PdfXAbstentionClass::Staged)
+                            .count();
+                        let unread = verdict.abstained.len() - staged;
+                        println!(
+                            "      pdfx ran {}; abstained on {staged} staged and \
+                             {unread} unread clauses",
+                            verdict.coverage
+                        );
+                    }
+                }
             }
             Err(message) => {
                 failed += 1;
@@ -1766,6 +1832,9 @@ fn check(options: &Options) -> Result<(), String> {
     }
     if options.pdfua {
         println!("{inaccessible} with PDF/UA findings, {ua_unclaimed} claiming no PDF/UA part");
+    }
+    if options.pdfx {
+        println!("{unprintable} with PDF/X findings, {x_unclaimed} claiming no PDF/X level");
     }
     if failed > 0 {
         return Err(format!("{failed} files could not be opened"));
@@ -3417,6 +3486,11 @@ mod tests {
             Options::parse(&["--pdfua".to_string(), "a.pdf".to_string()]).expect("parses");
         assert!(accessible.pdfua && !accessible.pdfa && !accessible.strict);
         assert!(!neither.pdfua);
+
+        // ISO 15930 is a fourth, and implies none of the others.
+        let print = Options::parse(&["--pdfx".to_string(), "a.pdf".to_string()]).expect("parses");
+        assert!(print.pdfx && !print.pdfua && !print.pdfa && !print.strict);
+        assert!(!neither.pdfx && !accessible.pdfx);
     }
 
     /// A finding prints its clause first, then its object when it has one.

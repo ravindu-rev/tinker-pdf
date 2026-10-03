@@ -23,6 +23,7 @@ Forward-looking work lives only in the [roadmap](ROADMAP.md) and its
 | [features/creation.md](features/creation.md) | `DocumentBuilder`: pages, text, images, patterns, outlines |
 | [features/pdfa.md](features/pdfa.md) | ISO 19005: the validator, its coverage as a measured number, and the writer's archival profile |
 | [features/pdfua.md](features/pdfua.md) | ISO 14289: the validator, the findings it decides, and the clauses it abstains on by name |
+| [features/pdfx.md](features/pdfx.md) | ISO 15930: the claim, the 2003 levels' rules from the CGATS notes, and every clause not read, by name |
 | [features/cbz.md](features/cbz.md) | comic archives as documents |
 | [features/xps.md](features/xps.md) | XPS/OpenXPS as documents |
 | [features/epub.md](features/epub.md) | books as documents: the CSS and layout engines |

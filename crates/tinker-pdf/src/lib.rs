@@ -43,6 +43,7 @@ mod optional;
 mod output_intents;
 pub mod pdfa;
 pub mod pdfua;
+pub mod pdfx;
 mod png_read;
 pub mod reading_order;
 mod recode;
@@ -105,6 +106,14 @@ pub use pdfua::{
     Abstention as PdfUaAbstention, AbstentionClass as PdfUaAbstentionClass,
     Coverage as PdfUaCoverage, UaGap as PdfUaGap, UaPart as PdfUaPart, Verdict as PdfUaVerdict,
     STAGED as PDFUA_STAGED, UNDECIDABLE as PDFUA_UNDECIDABLE,
+};
+/// PDF/X conformance (ISO 15930), behind [`Document::validate_pdfx`]: the
+/// 2003 levels' rules as the CGATS application notes restate them, and every
+/// clause of the claimed level this build did not read, by name.
+pub use pdfx::{
+    Abstention as PdfXAbstention, AbstentionClass as PdfXAbstentionClass, Coverage as PdfXCoverage,
+    Verdict as PdfXVerdict, XClaim as PdfXClaim, XFlavour as PdfXFlavour, XGap as PdfXGap,
+    STAGED as PDFX_STAGED, UNREAD as PDFX_UNREAD,
 };
 /// Reading order, named — the stream's, the tree's, and one inferred from
 /// geometry and labelled as such: [`Page::text_in`], [`Page::inferred_order`]
@@ -1988,6 +1997,29 @@ impl Document {
     #[must_use]
     pub fn validate_pdfua_with(&self, groups: PdfUaCoverage) -> PdfUaVerdict {
         pdfua::validate(self, groups)
+    }
+
+    /// What this build makes of the document's PDF/X claim (ISO 15930).
+    ///
+    /// The claim is `/Info`'s `GTS_PDFXVersion`, read with no XML parse.
+    /// Rules run under PDF/X-1a:2003 and PDF/X-3:2003 only — transcribed from
+    /// the CGATS application notes, the one free restatement of those levels —
+    /// and [`PdfXVerdict::abstained`] names every clause of the claimed level
+    /// this build did not decide. No annotated PDF/X corpus exists, so these
+    /// rules have a false-positive bar and no false-negative one
+    /// (`docs/design/pdfx.md`): an empty finding list is "nothing this build
+    /// looked for was broken", never "it conforms". A file claiming nothing is
+    /// not judged.
+    #[must_use]
+    pub fn validate_pdfx(&self) -> PdfXVerdict {
+        pdfx::validate(self, PdfXCoverage::IMPLEMENTED)
+    }
+
+    /// [`Document::validate_pdfx`], running only the rule groups in
+    /// `groups`; the verdict's own `coverage` says which ran.
+    #[must_use]
+    pub fn validate_pdfx_with(&self, groups: PdfXCoverage) -> PdfXVerdict {
+        pdfx::validate(self, groups)
     }
 
     /// The strictest certification any signature in this document declares

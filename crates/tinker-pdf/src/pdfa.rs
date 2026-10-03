@@ -49,7 +49,7 @@ use tinker_pdf_xml::{Event, Source};
 use crate::Document;
 
 mod annotations;
-mod colour;
+pub(crate) mod colour;
 pub(crate) mod content;
 pub(crate) mod fonts;
 pub(crate) mod logical;
@@ -1401,7 +1401,7 @@ pub enum FindingKind {
         key: String,
     },
     /// A PostScript XObject, by `/Subtype /PS` or by the `/Subtype2` that
-    /// makes a form one (ISO 19005-1 6.2.7).
+    /// makes a form one (ISO 19005-1 6.2.7; under PDF/X, AN 2.26).
     PostScriptXObjectForbidden,
     /// An image asking to be smoothed on the way up (ISO 19005-1 6.2.4).
     ImageInterpolated,
@@ -1423,7 +1423,8 @@ pub enum FindingKind {
         measured: u64,
     },
     /// The document is encrypted. Every part of ISO 19005 forbids it: a file
-    /// nobody can open without a key is not archival.
+    /// nobody can open without a key is not archival. So does every PDF/X
+    /// level this build validates (AN 2.11).
     Encrypted,
 
     // ---- the syntax group (milestone 2) ----------------------------------
@@ -1460,7 +1461,8 @@ pub enum FindingKind {
         /// Which of `/F`, `/FFilter`, `/FDecodeParms` was there.
         key: String,
     },
-    /// A filter the part forbids by name — `LZWDecode` (6.1.10).
+    /// A filter the part forbids by name — `LZWDecode` (6.1.10); under the
+    /// 2003 PDF/X levels `JBIG2Decode` as well (AN 2.8).
     FilterForbidden {
         /// The filter, as the file spelled it.
         filter: String,
@@ -1697,7 +1699,9 @@ pub enum FindingKind {
         key: String,
     },
     /// A `GTS_PDFA1` output intent with no `/DestOutputProfile`
-    /// (6.2.2 / 6.2.3).
+    /// (6.2.2 / 6.2.3); or a `GTS_PDFX` one that embeds no profile and names
+    /// no registered characterization, or that a PDF/X-3 file's
+    /// device-independent colour needs a profile in (AN 2.16).
     DestOutputProfileMissing,
     /// Two `GTS_PDFA1` output intents naming different destination profiles
     /// (6.2.2 / 6.2.3).
@@ -1728,7 +1732,8 @@ pub enum FindingKind {
         /// What the file said.
         declared: String,
     },
-    /// Transparency in a part 1 file, which forbids it outright (6.4).
+    /// Transparency in a part 1 file, which forbids it outright (6.4) — and
+    /// in a 2003 PDF/X file, which does too (AN 2.25).
     TransparencyForbidden {
         /// Which construct: the group, the soft mask, the blend mode or the
         /// constant alpha.
@@ -1875,6 +1880,65 @@ pub enum FindingKind {
         code: u32,
         /// The forbidden scalar value it maps to.
         value: u32,
+    },
+
+    // ---- PDF/X (ISO 15930), behind `Document::validate_pdfx` -------------
+    //
+    // The same decision PDF/UA took: where ISO 15930 asks what ISO 19005
+    // already asks — no encryption, no LZW, no transparency, no PostScript,
+    // every font embedded, a device colour the output intent can reproduce —
+    // the kind above is reused and only the clause differs. The kinds below
+    // are the ones ISO 19005 has no rule for. Each cites the section of the
+    // CGATS application notes it is transcribed from (`crate::pdfx`).
+    /// No `/Trapped` in the document information dictionary (AN 2.17).
+    TrappedMissing,
+    /// `/Trapped` present as anything but the name `/True` or `/False`
+    /// (AN 2.17): `/Unknown`, a boolean, a string.
+    TrappedInvalid {
+        /// What was there: the name with its slash, `true` or `false` for a
+        /// boolean, or a word for anything else.
+        found: String,
+    },
+    /// A page with no box the standard requires — `/MediaBox`, its own or
+    /// inherited (AN 2.10).
+    PageBoxMissing {
+        /// The box's key.
+        key: String,
+    },
+    /// A page carrying neither a `/TrimBox` nor an `/ArtBox` (AN 2.10).
+    TrimOrArtBoxMissing,
+    /// A page carrying both a `/TrimBox` and an `/ArtBox` (AN 2.10: "either
+    /// an ArtBox or TrimBox, but not both").
+    TrimAndArtBox,
+    /// A page's trim or art box extending beyond its bleed or crop box
+    /// (AN 2.10).
+    PageBoxOutside {
+        /// `TrimBox` or `ArtBox`.
+        inner: String,
+        /// `BleedBox` or `CropBox`.
+        outer: String,
+    },
+    /// An annotation whose `/Rect` shares area with the box it must stay
+    /// outside (AN 2.28).
+    AnnotationInsideBox {
+        /// The annotation's `/Subtype`.
+        subtype: String,
+        /// The box: `BleedBox`, or `TrimBox` or `ArtBox`.
+        boundary: String,
+    },
+    /// The `PS` operator in a content stream the pages render (AN 2.26).
+    PostScriptOperatorForbidden,
+    /// No output intent of the subtype the claimed standard requires
+    /// (AN 2.16).
+    OutputIntentMissing {
+        /// The `/S` value looked for: `GTS_PDFX`.
+        subtype: String,
+    },
+    /// A private document information entry whose value is not a text string
+    /// (AN 2.29).
+    InfoValueNotText {
+        /// The entry's key.
+        key: String,
     },
 }
 

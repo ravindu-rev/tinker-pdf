@@ -120,6 +120,59 @@ pub(crate) fn run(doc: &Arc<CosDocument>, flavour: Option<Flavour>, out: &mut Ve
     }
 }
 
+/// The embedding rule alone, over the fonts the pages draw with: no program
+/// is parsed, and no other font rule runs.
+///
+/// For ISO 15930, whose application notes ask one thing of a font — that it
+/// is embedded (`crate::pdfx`) — and ask it in the sentence ISO 19005-1 6.3.4
+/// uses. The findings are this module's own, `FontNotEmbedded` among them,
+/// read exactly as [`run`] reads them: a Type 3 font has no program to embed,
+/// a composite font's program is its descendant's, and a `/FontFile3 null` is
+/// a key present and a program absent. A zero parse budget is what keeps the
+/// programs closed.
+pub(crate) fn embedding(doc: &CosDocument, out: &mut Vec<Raw>) {
+    let mut budget = 0usize;
+    for reference in usage(doc) {
+        let Ok(object) = doc.get(reference) else {
+            continue;
+        };
+        let Some(dict) = object.as_dict() else {
+            continue;
+        };
+        let subtype = name_of(doc, dict, b"Subtype").unwrap_or_default();
+        let (descriptor_owner, at, program_subtype) = match subtype.as_slice() {
+            b"Type3" => continue,
+            b"Type0" => {
+                let descendants = doc.resolve_key(dict, doc.intern(b"DescendantFonts"));
+                let Some(first) = descendants.as_array().and_then(|values| values.first()) else {
+                    continue;
+                };
+                let at = first.as_objref().unwrap_or(reference);
+                let resolved = doc.resolve(first);
+                let Some(descendant) = resolved.as_dict() else {
+                    continue;
+                };
+                let descendant_subtype = name_of(doc, descendant, b"Subtype").unwrap_or_default();
+                (descendant.clone(), at, descendant_subtype)
+            }
+            _ => (dict.clone(), reference, subtype.clone()),
+        };
+        let descriptor = doc.resolve_key(&descriptor_owner, doc.intern(b"FontDescriptor"));
+        match descriptor.as_dict() {
+            Some(descriptor) => {
+                embedded_program(doc, descriptor, &program_subtype, at, &mut budget, out);
+            }
+            None => out.push(Raw {
+                rule: clauses::FONT_EMBEDDING,
+                object: Some(at),
+                kind: FindingKind::FontNotEmbedded {
+                    subtype: String::from_utf8_lossy(&program_subtype).into_owned(),
+                },
+            }),
+        }
+    }
+}
+
 // ---- what the file actually draws with ------------------------------------
 
 /// Every font a text-showing operator drew with at a visible rendering mode.

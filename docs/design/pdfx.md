@@ -373,5 +373,80 @@ document, and saying so is its job.
 
 ## As built
 
-*Filled in as milestones land.* Nothing has landed; the roadmap row is not
-scheduled.
+**October 2026: milestone 1, and milestones 3 to 5 as far as the notes
+restate them. Milestones 2, 6 and 7 have not landed, and nothing is
+measured.**
+
+**Milestone 1.** `Document::validate_pdfx`, `validate_pdfx_with` and
+`tpdf check --pdfx`, in `crates/tinker-pdf/src/pdfx.rs` with `pdfx/syntax.rs`
+and `pdfx/print.rs`. The claim is read from `/Info` by exact string, and six
+levels are identified — PDF/X-1:2001 (the version key without the X-1a
+conformance key), PDF/X-1a:2001, PDF/X-3:2002, PDF/X-1a:2003, PDF/X-3:2003
+and PDF/X-4 — each held by a unit fixture beside a trailing-space string, an
+empty one and `PDF/X-5g`, which are carried as claims this build does not
+identify. The PDF/X-4p and PDF/X-6 strings are in no source in hand and are
+not guessed. A claim in an XMP packet with none in `/Info` is no claim
+(`pdfx_rules.rs`). `Machinery`'s counters show a PDF/X read costs no XML
+parse: the metadata counter stays at zero. `hostile_input.rs` calls the
+validator. The census, `pdfx_census.rs`, is written and joined to the nightly
+`corpus.yml`; it skips here, where the corpora are not reachable, so **the
+flavour of each of the 23 real claims is owed by its first nightly run**.
+
+The kernel is shared the way the PDF/UA validator shared it — items opened to
+the crate rather than moved: the content walk's visitor and its record
+(`pdfa::colour::{scan, Used}`), part 1's transparency rule
+(`pdfa::colour::transparency`), and the embedding rule alone
+(`pdfa::fonts::embedding`, which opens no program). `Coverage` is `syntax`,
+`print` and `fonts`; "print" rather than "colour" because transparency and
+PostScript ride the same walk as the colour rules.
+
+**Two departures from the text above, both deliberate.** The design asks for
+X-1:2001 to be "a finding rather than a silence"; it is an `Unread`
+abstention naming the part instead, since every `FindingKind` is a statement
+that the file breaks something, and claiming a deprecated level does not. And
+the design's rule that a part not in hand gets no clause-table row would have
+left PDF/X-3:2003 with no rule at all — not even ISO 15930-6's contents are
+in hand — so under that level a finding cites the application note's section
+(`AN 2.11`), which is the source the rule was transcribed from. Under
+PDF/X-1a:2003 it cites 15930-4's contents as planned.
+
+**Milestones 3 to 5, for what the notes restate.** Held to `pdfx_rules.rs`,
+one fixture and twin per rule under both levels, with the injections counted
+in the commit: encryption (AN 2.11), LZW and JBIG2 (2.8), `/Trapped` (2.17),
+the boxes (2.10), annotations against them (2.28), private `/Info` keys
+(2.29), the `GTS_PDFX` intent and its profile-or-registry shape (2.16),
+`DeviceRGB` under a CMYK profile (2.16), PDF/X-3's profile for
+device-independent colour (2.16), transparency (2.25), PostScript (2.26) and
+embedding (2.18). The readings a sentence did not settle, each written beside
+its rule: with no bleed box, an annotation stays outside the trim or art box
+rather than the crop box ISO 32000 would default to; containment is exact;
+"used" is drawn at a visible rendering mode, as ISO 19005 reads it; the first
+`GTS_PDFX` intent is judged; the registry identifier is checked for shape;
+`DeviceRGB` is judged only where the profile's header says CMYK. Every
+clause the notes do not restate — 15930-4's 6.1, 6.4, 6.9, 6.12, 6.14, 6.15,
+6.17, TrapNet, Table 2's shapes, JPEG 2000, X-1a's device-independent colour
+— is an `Unread` gap by name, and what is in hand but not decided is
+`Staged`.
+
+**What the exit criteria asked that is not met.** Milestone 3's and 4's
+"zero findings over every pinned suite file" and "the Ghent CMYK and SPOT
+patches" — nothing is pinned. Milestone 4's 19005-2 multiple-intent question
+— not read; the PDF/A colour group still skips an intent that is not
+`GTS_PDFA1`, and no fixture claims both standards. Milestone 3's ledger class
+`secondary-source` — there is no PDF/X ledger, because there is no annotated
+file to disagree with. **And one thing this document did not see:** the
+evidence it names for the false-positive bar does not reach the levels the
+rules run under. Altona 1.2 is a PDF/X-3:2002 suite (its own table above),
+Ghent 5.0 a PDF/X-4 one, and the real claims' readable strings named
+`PDF/X-4`, `PDF/X-3:2002`, `PDF/X-1:2001` and an empty string. So for
+PDF/X-1a:2003 and PDF/X-3:2003 no third party's file is in reach at all; the
+census's no-finding assertion over real 2003 claims may hold over zero files,
+and it prints how many.
+
+**Milestone 2** — not attempted: the corpora are not fetchable in the
+environment this was built in, and the Ghent package's licence is still
+unestablished. **Milestone 6** — not attempted: `ArchivalProfile` and
+`PageBuilder` live in `tinker-pdf-cos`, `PageBuilder` has no `set_trim_box`,
+and the writer's third leg is a shape comparison against a pinned suite file,
+which waits on milestone 2. **Milestone 7** — unpriced; every 15930-7 clause
+is an `Unread` gap by its title.
