@@ -202,6 +202,8 @@ fn a_document_that_carries_the_markup_conserves_every_fact() {
             glyphs: 8,
             rgb: [0.0, 0.0, 0.0],
             advances: Vec::new(),
+            bold: false,
+            italic: false,
         }],
     );
     let verdict = conserve(&census, &census);
@@ -564,6 +566,8 @@ fn a_run_that_lost_glyphs_and_one_that_changed_letters_are_both_reported() {
         glyphs,
         rgb: [0.0, 0.0, 0.0],
         advances: Vec::new(),
+        bold: false,
+        italic: false,
     };
     let markup = one(Vec::new(), vec![run("Page one", 8)]);
 
@@ -603,6 +607,8 @@ fn a_run_at_the_wrong_origin_and_one_at_the_wrong_size_are_separate() {
         glyphs: 8,
         rgb: [0.0, 0.0, 0.0],
         advances: Vec::new(),
+        bold: false,
+        italic: false,
     };
     let markup = one(Vec::new(), vec![run((75.0, 492.0), 18.0)]);
 
@@ -617,6 +623,46 @@ fn a_run_at_the_wrong_origin_and_one_at_the_wrong_size_are_separate() {
         resized.divergences.first(),
         Some(Divergence::EmSize { .. })
     ));
+}
+
+/// **A simulation the document did not draw, and one it drew that the markup
+/// did not ask for.**
+///
+/// 12.1.5's two simulations are independent of each other and of where the
+/// run is: an emboldened run is at its place in its glyphs at its size, and so
+/// is the same run drawn plain. Each is its own fact and each way round is a
+/// divergence.
+#[test]
+fn a_simulation_dropped_or_invented_is_reported() {
+    let run = |bold: bool, italic: bool| Run {
+        origin: (75.0, 492.0),
+        em: 18.0,
+        text: "Page one".to_owned(),
+        glyphs: 8,
+        rgb: [0.0, 0.0, 0.0],
+        advances: Vec::new(),
+        bold,
+        italic,
+    };
+    for (stated, drawn) in [
+        ((true, false), (false, false)),
+        ((false, true), (false, false)),
+        ((false, false), (true, true)),
+    ] {
+        let verdict = conserve(
+            &one(Vec::new(), vec![run(stated.0, stated.1)]),
+            &one(Vec::new(), vec![run(drawn.0, drawn.1)]),
+        );
+        assert_eq!(
+            verdict.divergences,
+            [Divergence::Simulation {
+                page: 0,
+                run: 0,
+                markup: stated,
+                document: drawn,
+            }]
+        );
+    }
 }
 
 /// **A stated advance the document dropped.**
@@ -635,6 +681,8 @@ fn a_stated_advance_the_document_dropped_is_reported_per_glyph() {
         glyphs: 2,
         rgb: [0.0, 0.0, 0.0],
         advances: vec![Some(advance), None],
+        bold: false,
+        italic: false,
     };
     // 53 hundredths of a 24-unit em is 9.54 points; the face's own 586
     // thousandths is 10.548, which is what a build that dropped the override
@@ -1169,9 +1217,10 @@ fn every_committed_package_conserves_the_figure_the_record_states() {
     );
     assert_eq!(
         recorded.len(),
-        14,
-        "the sweep covers thirteen real packages and one derived from them"
+        COMMITTED.len() + DERIVED.len(),
+        "the sweep covers thirteen real packages and those derived from them"
     );
+    assert_eq!(COMMITTED.len(), 13);
 }
 
 /// The packages the sweep covers that no producer wrote, by their path under
@@ -1186,7 +1235,12 @@ fn every_committed_package_conserves_the_figure_the_record_states() {
 /// a real producer's and only the container is this repository's.
 /// `an_interleaved_package_states_the_census_of_the_one_it_was_cut_from` holds
 /// the two to one census.
-const DERIVED: &[&str] = &["xps_interleaved/wpf-image-and-text-pieces.xps"];
+const DERIVED: &[&str] = &[
+    "xps_interleaved/wpf-image-and-text-pieces.xps",
+    // One per `XpsElementDefect` row closed since, each `wpf-image-and-text.xps`
+    // with its page replaced (`tests/xps_rows/README.md`).
+    "xps_rows/wpf-style-simulations.xps",
+];
 
 /// **An interleaved package conserves, and states the census of the package
 /// it was cut from.**

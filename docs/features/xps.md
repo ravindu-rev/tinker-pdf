@@ -96,8 +96,14 @@ the visual order that comes back, with the origin at the run's right edge.
 The algorithm rather than a reversal, because European digits inside a
 Hebrew or Arabic run rise to an even level of their own and are drawn left
 to right inside a run drawn right to left — a reversal renders every price
-backwards. Bold and italic simulation (`StyleSimulations`) is reported,
-not applied.
+backwards. 12.1.5's `StyleSimulations` is **drawn**, from the clause:
+emboldening strokes every outline at 2% of the em in the fill's own paint
+(Table 106's mode 2, round joins), widens every advance the font supplies —
+and no advance the markup states — by 2% of the em, and moves the glyphs up
+and right by 1% (S5.6); italicising shears the text matrix 20° along the
+advance, which serves a sideways run too once its axes are exchanged. A
+translucent emboldened run is drawn into a transparency group so the band
+where stroke and fill overlap is composited once.
 
 **Images** pass through. A PNG or JPEG resource part reaches the page as
 the bytes it is ([creation](creation.md), `ImageData::Compressed`); a page
@@ -144,7 +150,7 @@ the page synthesis.
 | An image part no rule identifies | `XpsElementDefect::ImageFormatUnsupported` | a part neither the content type nor the magic bytes name is not one to guess at. **JPEG XR left this row**: 9.1.5.1's format now decodes and draws, so all four of 9.1.5's formats reach the page and the pre-emptive refusal loop that used to sit in front of both identification rules is gone | [filters](filters.md) |
 | A content type and magic bytes that disagree about two formats this build draws | `XpsElementDefect::ImageMediaTypeMismatch` | **the picture is drawn**, from the format its bytes name, because a decoder reads bytes — so this is a leniency and not a refusal, and what is lost is the producer's statement about the part. It rides the *success* side, on `Image::lenience`, because `Images::get` returns a `Result` whose `Err` is a refusal and a refusal here would lose a picture the package plainly holds; `State::tile` pushes it into `paint.rs`'s `defects`, where `warn` deduplicates it — set once per part, read once per use. Silence from one rule is not disagreement with it, so a part with no content type or no recognised signature owes nothing. Neither does one whose bytes then fail to decode: that is `ImageUnreadable`. Pinned by `a_content_type_that_disagrees_with_the_bytes_is_drawn_from_the_bytes_and_named` and, for the deduplication, `one_mis_declared_part_used_twice_is_named_once` | [rulings](../rulings.md) ruling 10 |
 | A wrapper around an `ImageSource` that is **not** `{ColorConvertedBitmap picture profile}` | `XpsElementDefect::ImageProfileUnsupported` | the references inside a wrapper cannot be told apart: one with three of them is not this wrapper, and reading its first two would draw a picture in a profile the file never paired it with. `{ColorConvertedBitmap …}` itself is **read** — the picture drawn, the profile embedded as the `/ICCBased` space its samples are values in | [colour](colour.md) |
-| `StyleSimulations` | `XpsElementDefect::GlyphsStyleSimulated` | reported; glyphs drawn unsimulated. **Still owed, and not implemented from memory**: the skew angle and the emboldening width are ECMA-388's to state, and its text could not be fetched when this was last attempted (26 September 2026, the `ecma-international.org` transfer reset twice); a simulation built from a remembered number would be exactly the unverified picture ruling 13 forbids calling right | [ROADMAP](../ROADMAP.md) |
+| A `StyleSimulations` value 12.1.5 does not name | `XpsElementDefect::GlyphsStyleSimulated` | reported; the run is drawn as designed. **The four values 12.1.5 names left this row** on 3 October 2026, once ECMA-388's text was read: each is drawn as the clause states it, and `tests/xps_rows/wpf-style-simulations.xps` is in the conservation sweep (5 facts of 5) | [ROADMAP](../ROADMAP.md) |
 | Gradient stops with differing alphas; a `ColorInterpolationMode` this build does not interpolate in | `XpsElementDefect::BrushApproximated` | the brush reached the page and not exactly — one constant alpha cannot express per-stop alphas — and the approximation is named | — |
 | Unknown element | `XpsElementDefect::ElementUnknown` | drawn around, never silently skipped | — |
 | Broken fixed representation, interleaved pieces that do not assemble into a part, invalid or ambiguous part names, no fixed pages | `ArchiveRefusal::{UnreadablePackage, Interleaved, InvalidPartName, AmbiguousPartNames, NoFixedPages}` | a package that *is* an XPS and is broken is refused, not paged as a comic. **Interleaving itself left this row**: pieces that assemble are joined, and `wpf-image-and-text-pieces.xps` is in the conservation sweep | [cbz](cbz.md) |

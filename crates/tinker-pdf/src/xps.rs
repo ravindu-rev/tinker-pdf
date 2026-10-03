@@ -762,17 +762,17 @@ pub enum XpsElementDefect {
     /// which is the geometry rule: a run at an origin this reader invented is
     /// text in the wrong place.
     GlyphsUnreadable,
-    /// A `StyleSimulations` other than `None` (12.1). The run **is painted**,
-    /// at exactly the glyphs, widths and positions the file states, without
-    /// the synthetic slant or weight — which is the paint-unreadable side of
-    /// the asymmetry rather than the geometry side, and dropping the text
-    /// would lose far more than the simulation does.
+    /// A `StyleSimulations` value 12.1.5 does not name — none of `None`,
+    /// `BoldSimulation`, `ItalicSimulation` and `BoldItalicSimulation`. The run
+    /// **is painted**, unsimulated, at exactly the glyphs, widths and positions
+    /// the file states: the paint-unreadable side of the asymmetry rather than
+    /// the geometry side, and dropping the text would lose far more than the
+    /// simulation does.
     ///
-    /// Owed rather than approximated: the italic skew and the bold widening
-    /// are numbers ECMA-388 states, and a simulation drawn from a remembered
-    /// number would be a picture nothing here can say is right (ruling 13).
-    /// The clause could not be read when tier 4's XPS row was last worked
-    /// (`docs/ROADMAP.md` records the attempt), so the warning stays.
+    /// The four values 12.1.5 names are **drawn** since its clause was read
+    /// (3 October 2026): emboldening as a stroke of 2% of the em in the fill's
+    /// paint, with every font-supplied advance widened by 2% and the glyphs
+    /// moved up and right by 1%; italicising as a 20° shear of the text matrix.
     GlyphsStyleSimulated,
     /// An `ImageSource` that resolves to no part in the package, or to one the
     /// package does not hold.
@@ -849,7 +849,7 @@ impl core::fmt::Display for XpsElementDefect {
             XpsElementDefect::GlyphsIndicesUnreadable => "`Indices` that is not 12.1.3's grammar",
             XpsElementDefect::GlyphsUnreadable => "a `Glyphs` stating no usable origin or em size",
             XpsElementDefect::GlyphsStyleSimulated => {
-                "a `StyleSimulations` this build does not simulate"
+                "a `StyleSimulations` value 12.1.5 does not name"
             }
             XpsElementDefect::ImageUnresolved => "an image the package does not hold",
             XpsElementDefect::ImageFormatUnsupported => {

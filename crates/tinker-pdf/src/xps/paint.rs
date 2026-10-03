@@ -1060,13 +1060,14 @@ impl State<'_> {
     ///   exists for, so the run is **not painted**. An even level is a
     ///   left-to-right run at any embedding depth and draws normally, which is
     ///   the implemented half.
-    /// - **`StyleSimulations`** adds a synthetic slant or weight to glyphs
-    ///   that are otherwise exactly the ones the file names, at exactly the
-    ///   widths and positions it states. That is the *paint* side of the
-    ///   asymmetry rather than the geometry side — the shape and its place are
-    ///   known and only its appearance is approximate — so the run **is
-    ///   painted** and says so. Refusing it would drop a page of text to avoid
-    ///   drawing it upright.
+    /// - **`StyleSimulations`** is drawn as 12.1.5 states it: emboldening
+    ///   strokes every outline at 2% of the em (1% each side of it) with the
+    ///   fill's own paint, widens every advance the font supplies by 2% of
+    ///   the em and offsets the glyphs up and right by 1% (S5.6); italicising
+    ///   shears the text matrix 20° to the right of the baseline. A value
+    ///   12.1.5 does not name is the *paint* side of the asymmetry — the
+    ///   shape and its place are known, only its appearance is not — so the
+    ///   run **is painted**, unsimulated, and says so.
     fn glyphs(
         &mut self,
         scopes: &mut [Scope],
@@ -1150,12 +1151,14 @@ impl State<'_> {
                 return Ok(());
             }
         };
-        if node
-            .attr("StyleSimulations")
-            .is_some_and(|value| value.trim() != "None")
-        {
-            self.warn(XpsElementDefect::GlyphsStyleSimulated);
-        }
+        let simulation = match glyphs::Simulation::parse(node.attr("StyleSimulations")) {
+            Some(simulation) => simulation,
+            None => {
+                self.warn(XpsElementDefect::GlyphsStyleSimulated);
+                glyphs::Simulation::default()
+            }
+        };
+        let widening = simulation.widening(em);
 
         // 9.1.7's font, resolved against **this part's** name.
         let Some(uri) = node.attr("FontUri") else {
@@ -1170,7 +1173,7 @@ impl State<'_> {
             }
         };
 
-        let placed = match glyphs::run(node, font, em, budget, rtl) {
+        let placed = match glyphs::run(node, font, em, budget, rtl, widening) {
             Ok(placed) => placed,
             Err(RunError::Exhausted) => return Err(Trouble::Exhausted),
             Err(RunError::Indices) => {
@@ -1191,7 +1194,7 @@ impl State<'_> {
         // and it is used for exactly two decisions that are about *where* a
         // thing is: 14.3's overlap test, and the box a
         // `RelativeToBoundingBox` brush is stated in fractions of.
-        let (low, high) = glyphs::extent(&placed, font, em);
+        let (low, high) = glyphs::extent(&placed, font, em, widening);
         // A sideways run's baseline runs **down** the page and its glyphs
         // stand out to the right of it, so the run's advance is its height and
         // the em is its width — the upright box with its two axes exchanged,
@@ -1237,6 +1240,13 @@ impl State<'_> {
             out.push(b'\n');
         }
         let alpha = opacity * mask.as_ref().map_or(1.0, |(alpha, _)| *alpha) * fill.alpha;
+        // An emboldened run is a fill and a stroke over the same outline, and
+        // half the stroke lies inside it: under a constant alpha that band
+        // would be composited twice, darker than the glyph it widens. So a
+        // translucent emboldened run is drawn into a transparency group and
+        // the alpha applied once, to the group — 11.4's answer, and the
+        // `Canvas` rule's.
+        let grouped = simulation.bold && alpha < 1.0;
         if alpha < 1.0 {
             if let Some(name) = self.gstate(alpha, alpha) {
                 out.push(b'/');
@@ -1249,36 +1259,61 @@ impl State<'_> {
             out.extend_from_slice(name);
             out.extend_from_slice(b" gs\n");
         }
+        let mut text = Vec::new();
         // A brush over text is set as a *colour* and not as a region: 9.4's
         // glyphs are filled with whatever the non-stroking colour is when `Tj`
         // runs, and a glyph outline is not a clip a content stream can state —
         // which is why a gradient over text is a `/PatternType 2` here and an
         // `sh` over a clip on a `Path`.
         let ctm = self.in_force(scopes, transform);
-        match &fill.paint {
-            Paint::Context(tint) => self.context(&mut out, tint, false),
-            Paint::Solid(rgb) => markup::op(&mut out, rgb, "rg"),
+        let ink = match &fill.paint {
+            Paint::Context(tint) => Ink::Context(tint.clone()),
+            Paint::Solid(rgb) => Ink::Solid(*rgb),
             Paint::Gradient { shading, matrix } => match self.gradient(shading, *matrix, ctm) {
-                Some(name) => fill_pattern_colour(&mut out, &name),
+                Some(name) => Ink::Pattern(name),
                 None => {
                     self.warn(XpsElementDefect::BrushUnreadable);
-                    markup::op(&mut out, &[PLACEHOLDER_GREY; 3], "rg");
+                    Ink::Solid([PLACEHOLDER_GREY; 3])
                 }
             },
             Paint::Image(tile) => match self.tile(tile, Some(bbox), ctm) {
-                Ok(name) => fill_pattern_colour(&mut out, &name),
+                Ok(name) => Ink::Pattern(name),
                 Err(error) => {
                     self.refused(error)?;
-                    markup::op(&mut out, &[PLACEHOLDER_GREY; 3], "rg");
+                    Ink::Solid([PLACEHOLDER_GREY; 3])
                 }
             },
             Paint::Visual(tile) => match self.visual(tile, Some(bbox), ctm, budget) {
-                Ok(name) => fill_pattern_colour(&mut out, &name),
+                Ok(name) => Ink::Pattern(name),
                 Err(error) => {
                     self.refused(error)?;
-                    markup::op(&mut out, &[PLACEHOLDER_GREY; 3], "rg");
+                    Ink::Solid([PLACEHOLDER_GREY; 3])
                 }
             },
+        };
+        // 12.1.5's emboldening widens the strokes **of the glyphs**, so the
+        // stroke takes the fill's own paint, at 2% of the em — 1% each side of
+        // the outline, round-joined so a corner grows by that 1% and no more.
+        // 9.3.6's line width is a user-space length, and so is the em here.
+        let strokes: &[bool] = if simulation.bold {
+            &[false, true]
+        } else {
+            &[false]
+        };
+        for &stroking in strokes {
+            match &ink {
+                Ink::Context(tint) => self.context(&mut text, tint, stroking),
+                Ink::Solid(rgb) => markup::op(&mut text, rgb, if stroking { "RG" } else { "rg" }),
+                Ink::Pattern(name) if stroking => stroke_with_pattern(&mut text, name),
+                Ink::Pattern(name) => fill_pattern_colour(&mut text, name),
+            }
+        }
+        if simulation.bold {
+            markup::op(&mut text, &[em * glyphs::BOLD_WIDENING], "w");
+            markup::op(&mut text, &[1.0], "j");
+            // Table 106's mode 2: fill, then stroke. Text state outlives the
+            // text object, and this one is inside the run's own `q`.
+            markup::op(&mut text, &[2.0], "Tr");
         }
 
         let run: Vec<PlacedGlyph<'_>> = placed
@@ -1309,14 +1344,29 @@ impl State<'_> {
         // upright one already carries 18.1's flip, and the sideways one
         // carries the same flip and the quarter turn. A build that reached for
         // a positive determinant here would draw the run backwards.
-        let matrix = if sideways {
+        let mut matrix = if sideways {
             [0.0, 1.0, 1.0, 0.0, origin_x, origin_y]
         } else {
             [1.0, 0.0, 0.0, -1.0, origin_x, origin_y]
         };
+        // 12.1.5, in text space, where "up" stands along `y` and "right" runs
+        // along the advance — so one matrix serves an upright run and a
+        // sideways one alike, which is what 12.1.5's sideways wording (the
+        // right edge skewed *down*) says once the axes are exchanged.
+        //
+        // S5.6 first: an emboldened glyph moves up and right by 1% of the em,
+        // keeping its baseline and left edge where they were. Then the italic
+        // shear, about the glyph's own baseline.
+        if simulation.bold {
+            let offset = em * glyphs::BOLD_WIDENING / 2.0;
+            matrix = markup::concat([1.0, 0.0, 0.0, 1.0, offset, offset], matrix);
+        }
+        if simulation.italic {
+            matrix = markup::concat([1.0, 0.0, glyphs::ITALIC_SHEAR, 1.0, 0.0, 0.0], matrix);
+        }
         if !self
             .builder
-            .glyph_run(&mut out, &font.resource, em, matrix, &run)
+            .glyph_run(&mut text, &font.resource, em, matrix, &run)
         {
             // The writer refused the run: the resource is not a composite font
             // after all, or a number in it is not one a content stream can
@@ -1324,6 +1374,36 @@ impl State<'_> {
             // left as a `q Q` pair that draws nothing.
             self.warn(XpsElementDefect::GlyphsFontUnreadable);
             return Ok(());
+        }
+        if grouped {
+            // The group's box holds what the run can ink: an em above and below
+            // the baseline, past both ends by an em for the shear and the
+            // widening. Generous rather than tight, because a `/BBox` clips.
+            let [x0, y0, x1, y1] = bbox;
+            let reach = em * 2.0;
+            let name = self.painter.name("Fm");
+            let registered = self.builder.add_form(
+                &name,
+                &FormXObject {
+                    bbox: [x0 - reach, y0 - reach, x1 + reach, y1 + reach],
+                    matrix: None,
+                    group: Some(TransparencyGroup {
+                        color_space: DeviceSpace::Rgb,
+                        isolated: true,
+                        knockout: false,
+                    }),
+                    content: &text,
+                },
+            );
+            if registered {
+                out.push(b'/');
+                out.extend_from_slice(&name);
+                out.extend_from_slice(b" Do\n");
+            } else {
+                out.extend_from_slice(&text);
+            }
+        } else {
+            out.extend_from_slice(&text);
         }
         out.extend_from_slice(b"Q\n");
 
@@ -2101,6 +2181,14 @@ impl State<'_> {
         }
         Err(XpsElementDefect::BrushTooDeep)
     }
+}
+
+/// The colour a run's glyphs are set in, resolved once so that an emboldened
+/// run can stroke in exactly what it fills with.
+enum Ink {
+    Context(Box<ContextColour>),
+    Solid([f64; 3]),
+    Pattern(Vec<u8>),
 }
 
 /// A materialised element with its children dropped, which is what

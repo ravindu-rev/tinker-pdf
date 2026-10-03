@@ -176,6 +176,33 @@ impl Matrix {
         let [a, b, c, d, _, _] = self.0;
         (a * a + b * b).sqrt().max((c * c + d * d).sqrt())
     }
+
+    /// The scale an em takes under a text matrix that may be **sheared**:
+    /// the advance axis's length, or the height the other axis stands to it
+    /// at — the area over the base — whichever is larger.
+    ///
+    /// The same as [`Matrix::scale`] for every unsheared matrix. Under 12.1.5's
+    /// italic shear the second axis is longer than the glyph is tall by
+    /// `1 / cos 20°`, and an em read off its length would be 6% too large.
+    #[must_use]
+    pub fn em_scale(self) -> f64 {
+        let [a, b, c, d, _, _] = self.0;
+        let base = (a * a + b * b).sqrt();
+        if base == 0.0 {
+            return self.scale();
+        }
+        base.max((a * d - b * c).abs() / base)
+    }
+
+    /// How far the second axis leans from perpendicular to the first, in
+    /// degrees, positive when the top of a glyph leans along the advance.
+    #[must_use]
+    pub fn lean(self) -> f64 {
+        let [a, b, c, d, _, _] = self.0;
+        let along = a * c + b * d;
+        let across = (a * d - b * c).abs();
+        along.atan2(across).to_degrees()
+    }
 }
 
 /// Which gradient, since 8.7.4.5.3 and 8.7.4.5.4 are different shadings and
@@ -276,6 +303,14 @@ pub struct Run {
     /// wrote and the `TJ` adjustments beside it; the comparison is only over
     /// the positions the markup states.
     pub advances: Vec<Option<f64>>,
+    /// 12.1.5's emboldening: on the markup side, `BoldSimulation` or
+    /// `BoldItalicSimulation`; on the document side, Table 106's fill-and-stroke
+    /// mode with a line width of 2% of the em.
+    pub bold: bool,
+    /// 12.1.5's italic: on the markup side, `ItalicSimulation` or
+    /// `BoldItalicSimulation`; on the document side, a text matrix whose
+    /// second axis leans 20° along the advance.
+    pub italic: bool,
 }
 
 /// One fixed page, and the document page made from it.
@@ -1345,6 +1380,23 @@ fn glyph_run(attributes: &str, transform: Matrix) -> Option<Run> {
     let (rgb, _) = attribute(attributes, "Fill")
         .and_then(colour)
         .unwrap_or(([0.0, 0.0, 0.0], 1.0));
+    let simulation = attribute(attributes, "StyleSimulations").unwrap_or("None");
+    let bold = matches!(simulation, "BoldSimulation" | "BoldItalicSimulation");
+    let italic = matches!(simulation, "ItalicSimulation" | "BoldItalicSimulation");
+    // 12.1.5's S5.6, written out from the clause: an emboldened glyph moves
+    // up and to the right by 1% of the em, which in the element's own
+    // y-down space is `+x, −y` upright and, for a sideways run whose advance
+    // runs down the page and whose glyphs stand to its right, `+x, +y`.
+    let (x, y) = if bold {
+        let offset = em * 0.01;
+        if attribute(attributes, "IsSideways") == Some("true") {
+            (x + offset, y + offset)
+        } else {
+            (x + offset, y - offset)
+        }
+    } else {
+        (x, y)
+    };
     let (x, y) = transform.apply(x, y);
     Some(Run {
         origin: (x, y),
@@ -1353,6 +1405,8 @@ fn glyph_run(attributes: &str, transform: Matrix) -> Option<Run> {
         glyphs,
         rgb,
         advances,
+        bold,
+        italic,
     })
 }
 
@@ -1617,6 +1671,10 @@ struct Frame {
     rgb: [f64; 3],
     alpha: f64,
     pattern: Option<Vec<u8>>,
+    /// Table 106's text rendering mode, which is graphics state.
+    render: i64,
+    /// `w`, in user space.
+    width: f64,
 }
 
 /// The content stream, walked for what it paints.
@@ -1678,6 +1736,8 @@ impl<'a> Walk<'a> {
                 rgb: [0.0, 0.0, 0.0],
                 alpha: 1.0,
                 pattern: None,
+                render: 0,
+                width: 1.0,
             },
             saved: Vec::new(),
             path: Rect::empty(),
@@ -1869,6 +1929,8 @@ impl Walk<'_> {
                     self.widths = self.widths_of(resources, name);
                 }
             }
+            b"Tr" if numbers.len() == 1 => self.frame.render = numbers[0] as i64,
+            b"w" if numbers.len() == 1 => self.frame.width = numbers[0],
             b"Tm" if numbers.len() == 6 => {
                 self.text = Matrix([
                     numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5],
@@ -1884,7 +1946,13 @@ impl Walk<'_> {
                 if self.glyphs > 0 {
                     if let Some(origin) = self.origin {
                         let placed = self.frame.ctm.compose(self.text);
-                        let em = self.size * placed.scale();
+                        let em = self.size * placed.em_scale();
+                        // Mode 2 fills and then strokes, and the stroke is the
+                        // emboldening only at 12.1.5's width: 2% of the em, in
+                        // the user space the CTM carries to points.
+                        let stroke = self.frame.width * self.frame.ctm.scale();
+                        let bold = self.frame.render == 2 && near(stroke, em * 0.02, em * 1e-3);
+                        let italic = near(placed.lean(), 20.0, 0.05);
                         self.runs.push(Run {
                             origin,
                             em,
@@ -1900,6 +1968,8 @@ impl Walk<'_> {
                                 .iter()
                                 .map(|width| Some(width / 1_000.0 * em))
                                 .collect(),
+                            bold,
+                            italic,
                         });
                     }
                 }
@@ -2246,6 +2316,13 @@ pub enum Divergence {
         markup: f64,
         document: f64,
     },
+    /// 12.1.5's simulations, as `(bold, italic)` on each side.
+    Simulation {
+        page: usize,
+        run: usize,
+        markup: (bool, bool),
+        document: (bool, bool),
+    },
 }
 
 /// What a comparison found.
@@ -2516,6 +2593,14 @@ fn compare_run(page: usize, run: usize, stated: &Run, drawn: &Run, out: &mut Vec
             run,
             markup: stated.origin,
             document: drawn.origin,
+        });
+    }
+    if (stated.bold, stated.italic) != (drawn.bold, drawn.italic) {
+        out.push(Divergence::Simulation {
+            page,
+            run,
+            markup: (stated.bold, stated.italic),
+            document: (drawn.bold, drawn.italic),
         });
     }
     if !near(stated.em, drawn.em, EM) {
