@@ -30,6 +30,8 @@
 //! - `Squiggly` (12.5.6.10), the fourth text markup: a zigzag in each quad's
 //!   own frame, at a cost per quad that does not grow with its length.
 //! - `Caret` (12.5.6.11): the typographic caret, filled, inside `/RD`.
+//! - `Ink` (12.5.6.13): each of `/InkList`'s paths, stroked with round caps
+//!   and joins.
 //!
 //! Each carries 12.5.6.2's `/CA` in the graphics state it selects, and each
 //! stroked border or line its `/BS` (or `/Border`) dash.
@@ -779,6 +781,75 @@ fn caret(doc: &CosDocument, annotation: &Dict, rect: Rect, out: &mut Vec<u8>) ->
     Some(())
 }
 
+/// `/InkList` (12.5.6.13 Table 182): one path per element, each an array of
+/// alternating x and y coordinates.
+///
+/// A path written as a reference is followed once: a second reference to
+/// the same array is the same path again, and skipping it keeps what a
+/// small file can ask for to what it holds — `[5 0 R 5 0 R ...]` would
+/// otherwise draw one large array as many times as the list names it, and
+/// under `/CA` a stroke drawn twice over itself is darker than one.
+fn ink_paths(doc: &CosDocument, dict: &Dict) -> Vec<Vec<Point>> {
+    let list = doc.resolve_key(dict, doc.intern(b"InkList"));
+    let Some(items) = list.as_array() else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::HashSet::new();
+    items
+        .iter()
+        .filter(|item| item.as_objref().is_none_or(|r| seen.insert(r)))
+        .filter_map(|item| {
+            let path = doc.resolve(item);
+            let numbers: Vec<f64> = path
+                .as_array()?
+                .iter()
+                .filter_map(Object::as_number)
+                .filter(|v| v.is_finite())
+                .collect();
+            let points = points_of(&numbers);
+            (!points.is_empty()).then_some(points)
+        })
+        .collect()
+}
+
+/// An ink annotation (12.5.6.13): each of `/InkList`'s paths stroked in
+/// `/C` at the `/BS` width and dash.
+///
+/// Table 182 leaves how the points are joined to the implementation —
+/// "straight lines or curves" — and this joins them with straight lines,
+/// which go through every point the pen recorded, with round caps and
+/// joins, the shape a pen leaves; a path of one point is a dot. An absent
+/// `/C` strokes black, as a line's does.
+fn ink(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
+    let paths = ink_paths(doc, annotation);
+    let paint = Paint {
+        stroke: stroke_color_of(doc, annotation),
+        fill: None,
+        width: border_width(doc, annotation),
+    };
+    if paths.is_empty() || !paint.strokes() {
+        return None;
+    }
+    set_up(doc, annotation, &paint, out);
+    out.extend_from_slice(b"1 J\n1 j\n");
+    for path in paths {
+        let mut points = path.iter();
+        let Some(&(x, y)) = points.next() else {
+            continue;
+        };
+        op(out, &[x, y], b"m");
+        if path.len() == 1 {
+            // 8.5.3.2: a subpath of no length is a dot under round caps.
+            op(out, &[x, y], b"l");
+        }
+        for (x, y) in points {
+            op(out, &[*x, *y], b"l");
+        }
+    }
+    out.extend_from_slice(b"S\n");
+    Some(())
+}
+
 /// Builds the appearance for an annotation, or `None` when its type needs
 /// none — a link with no border draws nothing, and inventing something for it
 /// would be worse than leaving it alone.
@@ -963,6 +1034,7 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
         b"PolyLine" => polygon(doc, annotation, &mut content, false)?,
         b"Squiggly" => squiggly(doc, annotation, &mut content)?,
         b"Caret" => caret(doc, annotation, rect, &mut content)?,
+        b"Ink" => ink(doc, annotation, &mut content)?,
         _ => return None,
     }
 
@@ -2087,5 +2159,42 @@ mod tests {
         );
         assert_eq!(caret("/C []"), None, "a transparent caret draws nothing");
         assert_eq!(caret("/Sy /P"), caret("/Sy /None"));
+    }
+
+    /// 12.5.6.13: each path of `/InkList` is a subpath of one stroke, joined
+    /// with straight lines and round caps and joins; a path of one point is
+    /// a dot, and an empty one is nothing.
+    #[test]
+    fn an_ink_annotation_strokes_each_of_its_paths() {
+        let doc = doc();
+        let ink = |rest: &str| {
+            content_of(
+                &doc,
+                &format!("<< /Subtype /Ink /Rect [0 0 100 100] {rest} >>"),
+            )
+        };
+        assert_eq!(
+            ink("/InkList [[10 20 50 60 90 20] [] [10 80 90 80 7] [40 40]] /C [0 0 1] /BS << /W 3 >>")
+                .as_deref(),
+            Some(
+                "0 0 1 RG\n3 w\n1 J\n1 j\n10 20 m\n50 60 l\n90 20 l\n10 80 m\n90 80 l\n\
+                 40 40 m\n40 40 l\nS\n"
+            )
+        );
+        assert_eq!(
+            ink("/InkList [[10 20 50 60]] /BS << /W 2 /S /D >>").as_deref(),
+            Some("0 0 0 RG\n2 w\n[3] 0 d\n1 J\n1 j\n10 20 m\n50 60 l\nS\n"),
+            "black without /C, and dashed"
+        );
+        for nothing in [
+            "/InkList [[10 20 50 60]] /C []",
+            "/InkList [[10 20 50 60]] /BS << /W 0 >>",
+            "/InkList []",
+            "/InkList [[] [7]]",
+            "/InkList [10 20 50 60]",
+            "",
+        ] {
+            assert_eq!(ink(nothing), None, "{nothing} draws nothing");
+        }
     }
 }

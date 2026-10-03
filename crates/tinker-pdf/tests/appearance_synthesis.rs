@@ -667,3 +667,63 @@ fn a_caret_flares_from_the_bottom_of_its_rect_differences() {
         is_white,
     );
 }
+
+// ------------------------------------------------------------------ Ink
+
+/// 12.5.6.13: each path of `/InkList` is stroked through its points, and
+/// the paths are not joined to each other. At width 6 with round caps and
+/// joins: a peak from (10, 20) up to (50, 60) and down to (90, 20), a bar
+/// along y = 80, and a single point at (30, 70), which is a dot.
+#[test]
+fn an_ink_annotation_strokes_each_path_and_joins_none_to_the_next() {
+    let page = synthesized(
+        "<< /Type /Annot /Subtype /Ink /Rect [0 0 100 100] /C [0 0 1] /BS << /W 6 >> \
+         /InkList [[10 20 50 60 90 20] [10 80 90 80] [30 70]] >>",
+    );
+    assert_points(
+        &page.bitmap,
+        "blue, on the paths, the round join and cap, and the dot",
+        &[
+            (30.5, 40.5),
+            (70.5, 39.5),
+            (50.5, 60.5),
+            (8.5, 20.5),
+            (50.5, 80.5),
+            (30.5, 70.5),
+        ],
+        is_blue,
+    );
+    // (50, 50) is where a line from the first path's end to the second's
+    // start would cross.
+    assert_points(
+        &page.bitmap,
+        "white, between the paths and past their ends",
+        &[
+            (50.5, 50.5),
+            (50.5, 65.5),
+            (50.5, 75.5),
+            (50.5, 84.5),
+            (94.5, 20.5),
+            (30.5, 64.5),
+        ],
+        is_white,
+    );
+}
+
+/// A path written as a reference is drawn once however many times the
+/// list names it: the fixture's object 5 is one line, named twice.
+#[test]
+fn an_ink_path_named_twice_is_drawn_once() {
+    let page = synthesized_in(
+        "<< /Type /Annot /Subtype /Ink /Rect [0 0 100 100] /C [0 0 1] /BS << /W 10 >> \
+         /CA 0.5 /InkList [5 0 R 5 0 R] >>",
+        "",
+        &["[10 50 90 50]"],
+    );
+    assert_eq!(page.content.matches(" m\n").count(), 1, "{}", page.content);
+    let pixel = at(&page.bitmap, 50.5, 50.5);
+    assert!(
+        pixel[2] > 245 && (118..=138).contains(&pixel[0]) && (118..=138).contains(&pixel[1]),
+        "half blue over white, got {pixel:?}"
+    );
+}
