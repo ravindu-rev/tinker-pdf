@@ -9,11 +9,14 @@
 //! Milestone 2 adds the most rules any scored page draws, which is the figure
 //! `MAX_TABLE_RULES` was to be sized from, and the pages past it. Milestone 3
 //! adds the design's scores, the tree hidden: stated tables an inferred one
-//! was found over, grid agreement, cell assignment, and extra tables on pages
-//! that state none — printed for SafeDocs and pdfjs, where producers
-//! under-tag, and for veraPDF, where the design expects zero. **None of these
-//! is held**: no figure has been measured, and the floors are owed to the
-//! first nightly run.
+//! was found over, grid agreement, cell assignment — cell by cell against the
+//! stated `TH`s and `TD`s, a character placed only in a cell at its stated
+//! row and column **with its stated spans** — the stated spans reproduced,
+//! and extra tables on pages that state none: printed for SafeDocs and pdfjs,
+//! where producers under-tag, and **asserted zero for veraPDF**, where
+//! everything is tagged. Header evidence is read off the table found over
+//! each stated one. **No floor is held**: no figure has been measured, and
+//! the floors are owed to the first nightly run.
 //!
 //! ```text
 //! cargo xtask corpus-fetch
@@ -33,8 +36,12 @@
 //! printed beside what the run measures, as `DESIGN_RECORDED`, and are not
 //! asserted; the first nightly run either confirms them or says by how much
 //! they were wrong, and the floors follow from it. Asserted whatever the
-//! corpus holds: every stated table reads without a panic, and every cell the
-//! join gives characters to spells its text with them.
+//! corpus holds: every stated table reads without a panic, every cell the
+//! join gives characters to spells its text with them, and no table is
+//! inferred on a veraPDF page that states none ([`held`]) — the design's
+//! zero, owed its first run like everything else here. The eight span
+//! fixtures' verdicts (spans reproduced, `SpanInconsistent` named) are
+//! printed by name.
 //!
 //! # Ruling 13
 //!
@@ -44,8 +51,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use tinker_pdf::{
-    Document, HeaderEvidence, InferredTable, StatedTable, TableEvidence, TableOptions, TableWarning,
+    Document, HeaderEvidence, InferredTable, InferredTables, StatedTable, TableAttributes,
+    TableEvidence, TableOptions, TableWarning, Tag,
 };
+use tinker_pdf_cos::build::DocumentBuilder;
 
 /// Printed once when the census read the corpora. CI greps it.
 const RAN: &str = "table-census: RAN";
@@ -56,6 +65,10 @@ const SKIPPED: &str = "table-census: SKIPPED";
 /// Pages read per file, for the per-page readers; the element counts are
 /// over the whole tree.
 const PAGES_PER_FILE: u32 = 16;
+
+/// The corpus where everything is tagged, so that a table inferred on a page
+/// stating none is a mistake: asserted zero.
+const NO_EXTRAS: &str = "verapdf";
 
 /// The design's scratch walk, per corpus: files with a `Table`, `Table`,
 /// `TR`, `TH`, `TD`, files with a `TH`. Printed for comparison, not held.
@@ -147,11 +160,16 @@ struct Totals {
     crossed: usize,
     /// The design's scores, the tree hidden: stated tables an inferred one
     /// was found over, of those the ones whose grid matched exactly, and the
-    /// stated cells' characters placed in the same row and column, of all.
+    /// stated cells' characters placed in the same row and column with the
+    /// same spans, of all.
     found: usize,
     grid: usize,
     placed: usize,
     placeable: usize,
+    /// Stated cells with a span, and of those the ones an inferred cell
+    /// reproduces at the same place with the same spans.
+    spans: usize,
+    spans_reproduced: usize,
     /// The same, by the evidence the found table was built on — never
     /// averaged together, as the design asks: `[ruled, aligned]`.
     found_by: [usize; 2],
@@ -171,20 +189,48 @@ fn key(c: &tinker_pdf::TextChar) -> Key {
     (c.origin.0.to_bits(), c.origin.1.to_bits(), c.text.clone())
 }
 
-/// The design's scores for one stated table against the inferred ones —
-/// `tables.rs`'s, for the corpus: found (an inferred table covering at least
-/// half the stated one's characters' quad), the grid exact, and the stated
-/// cells' characters placed in the same row and column, of how many.
-///
-/// With the evidence of the table found, so `Ruled` and `Aligned` are scored
-/// apart.
-fn score_by(
-    stated: &StatedTable,
-    inferred: &[InferredTable],
-) -> (bool, bool, usize, usize, Option<TableEvidence>) {
+/// A cell's place in its table: row, column, row span, column span.
+type Place = (usize, usize, usize, usize);
+
+/// The design's scores for one stated table against the inferred ones.
+struct Score<'a> {
+    /// The inferred table found over it: one covering at least half the
+    /// stated table's characters' quad.
+    found: Option<&'a InferredTable>,
+    /// Whether its rows and columns are the stated ones, exactly.
+    grid: bool,
+    /// The stated cells' characters the inference put in a cell at the same
+    /// row and column **with the same spans**, of how many — so a span split
+    /// into two cells, or two cells merged into one, misplaces what it holds.
+    placed: usize,
+    total: usize,
+    /// The stated cells with a span, and of those the ones the found table
+    /// has a cell for at the same place with the same spans.
+    spans: usize,
+    spans_reproduced: usize,
+}
+
+/// `tables.rs`'s scores, for the corpus: cell by cell against the stated
+/// `TH`s and `TD`s, spans and all.
+fn score_by<'a>(stated: &StatedTable, inferred: &'a [InferredTable]) -> Score<'a> {
+    let place_of = |row, column, row_span, col_span| -> Place { (row, column, row_span, col_span) };
     let total: usize = stated.cells.iter().map(|c| c.chars.len()).sum();
+    let spanned: Vec<Place> = stated
+        .cells
+        .iter()
+        .filter(|c| c.row_span > 1 || c.col_span > 1)
+        .map(|c| place_of(c.row, c.column, c.row_span, c.col_span))
+        .collect();
+    let mut score = Score {
+        found: None,
+        grid: false,
+        placed: 0,
+        total,
+        spans: spanned.len(),
+        spans_reproduced: 0,
+    };
     let Some(quad) = stated.quad else {
-        return (false, false, 0, total, None);
+        return score;
     };
     let (sx0, sy0, sx1, sy1) = quad.bounds();
     let found = inferred.iter().find(|t| {
@@ -193,22 +239,92 @@ fn score_by(
         overlap * 2.0 >= (sx1 - sx0) * (sy1 - sy0)
     });
     let Some(table) = found else {
-        return (false, false, 0, total, None);
+        return score;
     };
-    let grid = table.rows == stated.rows && table.columns == stated.columns;
+    score.found = Some(table);
+    score.grid = table.rows == stated.rows && table.columns == stated.columns;
     let mut place = BTreeMap::new();
+    let mut cells = std::collections::BTreeSet::new();
     for cell in &table.cells {
+        let at = place_of(cell.row, cell.column, cell.row_span, cell.col_span);
+        cells.insert(at);
         for c in &cell.chars {
-            place.insert(key(c), (cell.row, cell.column));
+            place.insert(key(c), at);
         }
     }
-    let placed = stated
+    score.placed = stated
         .cells
         .iter()
         .flat_map(|cell| cell.chars.iter().map(move |c| (cell, c)))
-        .filter(|(cell, c)| place.get(&key(c)) == Some(&(cell.row, cell.column)))
+        .filter(|(cell, c)| {
+            place.get(&key(c))
+                == Some(&place_of(
+                    cell.row,
+                    cell.column,
+                    cell.row_span,
+                    cell.col_span,
+                ))
+        })
         .count();
-    (true, grid, placed, total, Some(table.evidence))
+    score.spans_reproduced = spanned.iter().filter(|at| cells.contains(*at)).count();
+    score
+}
+
+/// Scores one page's stated tables against the tables inferred over it with
+/// the tree hidden, into `totals`.
+fn score_page(stated: &[StatedTable], inferred: &InferredTables, totals: &mut Totals) {
+    if stated.is_empty() {
+        totals.extra += inferred.tables.len();
+    }
+    for table in stated {
+        let score = score_by(table, &inferred.tables);
+        let class = usize::from(score.found.map(|t| t.evidence) == Some(TableEvidence::Aligned));
+        if score.found.is_some() {
+            if let Some(slot) = totals.found_by.get_mut(class) {
+                *slot += 1;
+            }
+        }
+        if score.grid {
+            if let Some(slot) = totals.grid_by.get_mut(class) {
+                *slot += 1;
+            }
+        }
+        let th_row = table.cells.iter().filter(|c| c.row == 0).all(|c| c.header)
+            && table.cells.iter().any(|c| c.row == 0);
+        if let (Some(found), true) = (score.found, th_row) {
+            totals.headed += 1;
+            // The table found over this one, not any table on the page.
+            if matches!(
+                found.header,
+                HeaderEvidence::FillBeneath | HeaderEvidence::RuleBeneath
+            ) {
+                totals.header_evidence += 1;
+            }
+        }
+        totals.found += usize::from(score.found.is_some());
+        totals.grid += usize::from(score.grid);
+        totals.placed += score.placed;
+        totals.placeable += score.total;
+        totals.spans += score.spans;
+        totals.spans_reproduced += score.spans_reproduced;
+    }
+}
+
+/// What the census holds whatever the corpus measures, as the invariants it
+/// broke: **no table inferred on a veraPDF page that states none** — the
+/// design's "asserted zero over the veraPDF table fixtures", where
+/// everything is tagged and an extra table is a mistake.
+fn held(per_corpus: &BTreeMap<String, Totals>) -> Vec<String> {
+    let mut broken = Vec::new();
+    if let Some(t) = per_corpus.get(NO_EXTRAS) {
+        if t.extra != 0 {
+            broken.push(format!(
+                "{NO_EXTRAS}: {} tables inferred on pages that state none",
+                t.extra
+            ));
+        }
+    }
+    broken
 }
 
 #[test]
@@ -290,9 +406,6 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
             let inferred = page.inferred_tables(&TableOptions {
                 hide_structure: true,
             });
-            if stated.is_empty() {
-                totals.extra += inferred.tables.len();
-            }
             if inferred
                 .warnings
                 .iter()
@@ -300,37 +413,7 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
             {
                 totals.crossed += 1;
             }
-            for table in &stated {
-                let (found, grid, placed, total, evidence) = score_by(table, &inferred.tables);
-                let class = usize::from(evidence == Some(TableEvidence::Aligned));
-                if found {
-                    if let Some(slot) = totals.found_by.get_mut(class) {
-                        *slot += 1;
-                    }
-                }
-                if grid {
-                    if let Some(slot) = totals.grid_by.get_mut(class) {
-                        *slot += 1;
-                    }
-                }
-                let th_row = table.cells.iter().filter(|c| c.row == 0).all(|c| c.header)
-                    && table.cells.iter().any(|c| c.row == 0);
-                if found && th_row {
-                    totals.headed += 1;
-                    if inferred.tables.iter().any(|t| {
-                        matches!(
-                            t.header,
-                            HeaderEvidence::FillBeneath | HeaderEvidence::RuleBeneath
-                        )
-                    }) {
-                        totals.header_evidence += 1;
-                    }
-                }
-                totals.found += usize::from(found);
-                totals.grid += usize::from(grid);
-                totals.placed += placed;
-                totals.placeable += total;
-            }
+            score_page(&stated, &inferred, totals);
             for table in stated {
                 totals.stated += 1;
                 for warning in &table.warnings {
@@ -376,6 +459,18 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
                         "span fixture {stem}: {}x{} table, spans {spans:?}, warnings {:?}",
                         table.rows, table.columns, table.warnings
                     );
+                    // The design's milestone-4 verdicts, printed by name
+                    // until a run has measured them: a `pass` file's spans
+                    // reproduced, a `fail` file's refused by name.
+                    let score = score_by(&table, &inferred.tables);
+                    let named = table
+                        .warnings
+                        .iter()
+                        .any(|w| matches!(w, TableWarning::SpanInconsistent { .. }));
+                    println!(
+                        "span fixture {stem}: stated spans reproduced {} of {}, cells {}/{}, SpanInconsistent named {named}",
+                        score.spans_reproduced, score.spans, score.placed, score.total
+                    );
                 }
             }
         }
@@ -416,8 +511,8 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
             "", t.most_rules, t.over_cap, t.crossed
         );
         println!(
-            "{:<14} inferred, tree hidden: found {} of {} stated, grid {} of those, cells {}/{}; {} extra tables",
-            "", t.found, t.stated, t.grid, t.placed, t.placeable, t.extra
+            "{:<14} inferred, tree hidden: found {} of {} stated, grid {} of those, cells {}/{} (spans and all), stated spans reproduced {} of {}; {} extra tables",
+            "", t.found, t.stated, t.grid, t.placed, t.placeable, t.spans_reproduced, t.spans, t.extra
         );
         println!(
             "{:<14} header rows (all TH) found {}, set apart by fill or rule {}",
@@ -435,4 +530,141 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
         }
     }
     println!("total family {total:?} (the design recorded [207, 1908, 15235, 3285, 74474, 98])");
+    let broken = held(&per_corpus);
+    assert!(broken.is_empty(), "{broken:#?}");
+}
+
+/// **The veraPDF zero is held, not printed.** A census whose veraPDF row
+/// infers a table on a page that states none fails; every other corpus's
+/// extras are printed and read, since producers there under-tag.
+#[test]
+fn the_census_holds_the_verapdf_zero() {
+    let mut per_corpus: BTreeMap<String, Totals> = BTreeMap::new();
+    per_corpus.insert(NO_EXTRAS.to_string(), Totals::default());
+    per_corpus.insert("safedocs".to_string(), Totals::default());
+    if let Some(t) = per_corpus.get_mut("safedocs") {
+        t.extra = 12;
+    }
+    assert!(held(&per_corpus).is_empty());
+    if let Some(t) = per_corpus.get_mut(NO_EXTRAS) {
+        t.extra = 1;
+    }
+    assert_eq!(held(&per_corpus).len(), 1);
+}
+
+/// A one-page document drawing a 2 x 2 ruled grid at (72, 600), 100 points
+/// by 20 a cell, every interior rule drawn, each of `cells` drawn at its
+/// cell's top left and tagged as its `TH` or `TD` with the column span it
+/// states — a stated span the ink rules as two cells. With `fill`, the
+/// grid's first row is shaded and a second, untagged grid is drawn below it.
+fn ruled_and_tagged(cells: &[&[(&str, u32, bool)]], second_with_fill: bool) -> Document {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(612.0, 792.0, |page| {
+        let mut rules = String::new();
+        let mut grid = |top: f64| {
+            rules.push_str("0 g 0.5 w\n");
+            for row in 0..=2 {
+                let y = top - f64::from(row) * 20.0;
+                rules.push_str(&format!("72 {y} m 272 {y} l S\n"));
+            }
+            for column in 0..=2 {
+                let x = 72.0 + f64::from(column) * 100.0;
+                rules.push_str(&format!("{x} {} m {x} {top} l S\n", top - 40.0));
+            }
+        };
+        grid(600.0);
+        if second_with_fill {
+            grid(400.0);
+            rules.push_str("0.85 g 72 380 200 20 re f 0 g\n");
+        }
+        page.raw(rules.as_bytes());
+        page.tagged_with(&Tag::new(b"Table"), |page| {
+            for (row, cells) in cells.iter().enumerate() {
+                page.tagged_with(&Tag::new(b"TR"), |page| {
+                    let mut column = 0u32;
+                    for (text, col_span, header) in *cells {
+                        let mut attributes = TableAttributes::default();
+                        attributes.col_span = (*col_span > 1).then_some(*col_span);
+                        let name: &[u8] = if *header { b"TH" } else { b"TD" };
+                        let tag = if attributes.is_empty() {
+                            Tag::new(name)
+                        } else {
+                            Tag::new(name).table(attributes)
+                        };
+                        let (x, y) = (76.0 + f64::from(column) * 100.0, 586.0 - row as f64 * 20.0);
+                        page.tagged_with(&tag, |page| page.text(b"F1", 10.0, x, y, text));
+                        column += col_span;
+                    }
+                });
+            }
+        });
+        if second_with_fill {
+            for (row, column) in [(0u32, 0u32), (0, 1), (1, 0), (1, 1)] {
+                let (x, y) = (
+                    76.0 + f64::from(column) * 100.0,
+                    386.0 - f64::from(row) * 20.0,
+                );
+                page.text(b"F1", 10.0, x, y, "n");
+            }
+        }
+    });
+    open(builder.finish()).expect("the fixture opens")
+}
+
+/// The one page of `doc`, scored as the census scores it.
+fn census_of(doc: &Document) -> Totals {
+    let page = doc.page(0).expect("a page");
+    let stated = page.stated_tables();
+    let inferred = page.inferred_tables(&TableOptions {
+        hide_structure: true,
+    });
+    let mut totals = Totals::default();
+    score_page(&stated, &inferred, &mut totals);
+    totals
+}
+
+/// **Cell assignment is scored with spans.** A stated header cell spanning
+/// both columns, which the page rules as two: the grid agrees and every
+/// character sits in row 0, column 0 — but not in a cell spanning two
+/// columns, so the header's characters are misplaced and its span is not
+/// reproduced. The same table stated without the span scores every
+/// character placed.
+#[test]
+fn the_census_scores_cells_with_their_spans() {
+    let spanned = census_of(&ruled_and_tagged(
+        &[&[("Wide", 2, true)], &[("a", 1, false), ("b", 1, false)]],
+        false,
+    ));
+    assert_eq!((spanned.found, spanned.grid), (1, 1));
+    assert_eq!((spanned.placed, spanned.placeable), (2, 6));
+    assert_eq!((spanned.spans_reproduced, spanned.spans), (0, 1));
+
+    let plain = census_of(&ruled_and_tagged(
+        &[
+            &[("Wide", 1, true), ("x", 1, true)],
+            &[("a", 1, false), ("b", 1, false)],
+        ],
+        false,
+    ));
+    assert_eq!((plain.found, plain.grid), (1, 1));
+    assert_eq!((plain.placed, plain.placeable), (7, 7));
+    assert_eq!((plain.spans_reproduced, plain.spans), (0, 0));
+}
+
+/// **Header evidence is the found table's.** A stated table whose first row
+/// is all `TH`, unshaded, on a page with a second, untagged grid whose first
+/// row is shaded: the header is counted, and its evidence is not — the fill
+/// is under another table.
+#[test]
+fn the_census_reads_header_evidence_off_the_table_found() {
+    let totals = census_of(&ruled_and_tagged(
+        &[
+            &[("Name", 1, true), ("Price", 1, true)],
+            &[("a", 1, false), ("b", 1, false)],
+        ],
+        true,
+    ));
+    assert_eq!(totals.found, 1);
+    assert_eq!((totals.headed, totals.header_evidence), (1, 0));
 }

@@ -383,8 +383,11 @@ XHTML; and **no table is inferred on any of the 53 committed pages** — every
 paragraph, a form of sixteen boxes and two labels, or a page of hatching. The
 committed books' five stated tables are not ruled, so they wait for aligned
 tables. The census prints found, grid agreement, cell assignment and extra
-tables per corpus with the tree hidden; **those corpus scores, and the
-veraPDF zero, are owed**.
+tables per corpus with the tree hidden — cell assignment cell by cell, a
+character placed only in a cell at its stated row and column with its stated
+spans, and the stated spans reproduced counted beside it, since the review
+of this lane found spans never scored — and asserts the veraPDF zero;
+**those corpus scores, and that zero's first run, are owed**.
 
 **Milestone 4 (3 October 2026): spans, header evidence, direction.** A grid
 cell whose boundary with a neighbour no lattice segment rules — a segment at

@@ -335,8 +335,13 @@ milestones 4 and 5; characters are matched across the two extractions by
 origin and text, the k-th repeat to the k-th. `reading_order_census.rs` is
 the corpus census, `#[ignore]`d, in `corpus.yml`'s census step, printing
 `RAN`/`SKIPPED`; it splits the population by corpus name (pdfjs and SafeDocs
-the ratchet population, veraPDF where nothing may move) and asserts only what
-holds whatever the corpus holds. **The corpus baseline is owed:** the fetched
+the ratchet population, veraPDF where nothing may move) and asserts what
+holds whatever the corpus holds — every inferred order a permutation, a
+floor only on the ratchet population, and, since the review of this lane,
+**zero characters moved on veraPDF**, milestone 3's exit, which the census
+printed and did not hold until then; running-head and footnote precision are
+scored over every page of a file that marks any, not only the pages that
+do. **The corpus baseline is owed:** the fetched
 corpora were not reachable where this landed, so `INFERRED_FLOORS` is empty
 and no `ratchet.json` axis was added; the first nightly run's figures are
 the floors.
