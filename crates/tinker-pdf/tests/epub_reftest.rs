@@ -954,3 +954,17 @@ fn a_supports_block_is_its_rules_where_the_test_is_supported() {
         sheet.report.warnings
     );
 }
+
+/// **`:nth-child(An+B of S)` is the position among the siblings that match
+/// `S`** (`selectors-4` §14.4.1), and is no longer a rule dropped whole: the
+/// second `.s` of four paragraphs is the third paragraph, which the same rule
+/// written as a class on that paragraph moves alike; read as plain
+/// `:nth-child(2)` — the mismatch — it moves the second instead.
+#[test]
+fn nth_child_of_a_selector_is_the_position_among_its_matches() {
+    let body = r#"<p class="s">aa</p><p>bb</p><p class="s t">cc</p><p class="s">dd</p>"#;
+    let of = lay("p:nth-child(2 of .s) { margin-left: 30px }", body);
+    let marked = lay("p.t { margin-left: 30px }", body);
+    let broken = lay("p:nth-child(2) { margin-left: 30px }", body);
+    same(":nth-child(of S)", of, marked, broken);
+}

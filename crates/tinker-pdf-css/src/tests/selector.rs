@@ -848,15 +848,33 @@ fn a_lone_element_is_at_position_one_from_either_end() {
 ///
 /// Every row is a shape a plausible parser accepts by accident: a trailing
 /// sign with nothing after it, a fraction, an identifier that is not `n`, two
-/// offsets, and `selectors-4`'s `of S` clause — which is **valid** selectors-4
-/// this build does not read, and is refused rather than silently read as the
-/// `An+B` without it. Reading `:nth-child(2n of .a)` as `:nth-child(2n)` would
-/// style every second row instead of every second `.a`.
+/// offsets, and the `of S` clause with nothing on one side of it or a
+/// pseudo-element in its list — `selectors-4` §14.4.1's `S` is a
+/// `<complex-real-selector-list>`. (`2n of .a` itself is read, since October
+/// 2026: `nth_child_of_counts_only_the_siblings_that_match`.)
 #[test]
 fn an_an_plus_b_the_grammar_rejects_takes_its_rule_down() {
     for argument in [
-        "", " ", "2n+", "+", "-", "1.5n", "n+1.5", "foo", "2x+1", "n+1+2", "2n+-1", "odd even",
-        "2n of .a", "even 1", "--n", "n-", "2n-",
+        "",
+        " ",
+        "2n+",
+        "+",
+        "-",
+        "1.5n",
+        "n+1.5",
+        "foo",
+        "2x+1",
+        "n+1+2",
+        "2n+-1",
+        "odd even",
+        "2n of",
+        "of .a",
+        "2n of p::before",
+        "2n of .a,",
+        "even 1",
+        "--n",
+        "n-",
+        "2n-",
     ] {
         let parsed = sheet(&format!("li:nth-child({argument}) {{ color: red }}"));
         assert!(
@@ -1250,4 +1268,32 @@ fn a_cyclic_parent_link_refuses_rather_than_hanging() {
         result.is_err(),
         "an unbounded ancestor walk returned {result:?}"
     );
+}
+
+/// **`:nth-child(An+B of S)` counts only the siblings that match `S`, and
+/// matches only an element that does** (`selectors-4` §14.4.1): in a list of
+/// six where the second and fifth are hidden, `odd of .shown` is the first
+/// and fourth — the first and third *shown* — where the plain
+/// `:nth-child(odd)` is the first, third and fifth. `:nth-last-child` counts
+/// from the other end, and §15 gives the pseudo-class its list's most specific
+/// selector on top of its own.
+#[test]
+fn nth_child_of_counts_only_the_siblings_that_match() {
+    let mut nodes = row("li", 6);
+    for at in [1, 3, 4, 6] {
+        nodes[at].classes = vec!["shown".to_owned()];
+    }
+    assert_eq!(positions("li:nth-child(odd of .shown)", &nodes), vec![1, 4]);
+    assert_eq!(positions("li:nth-child(odd)", &nodes), vec![1, 3, 5]);
+    assert_eq!(positions("li:nth-last-child(1 of .shown)", &nodes), vec![6]);
+    assert_eq!(
+        positions("li:nth-last-child(2 of .shown, #none)", &nodes),
+        vec![4]
+    );
+    assert_eq!(
+        positions("li:nth-child(-n+2 of :not(.shown))", &nodes),
+        vec![2, 5]
+    );
+    assert_eq!(specificity(":nth-child(2n of .a, #b)"), spec(1, 1, 0));
+    assert_eq!(specificity("li:nth-child(2n of p)"), spec(0, 1, 2));
 }

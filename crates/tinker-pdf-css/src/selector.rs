@@ -260,6 +260,13 @@ pub enum PseudoClass {
     NthChild(Nth),
     /// `:nth-last-child(…)`
     NthLastChild(Nth),
+    /// `:nth-child(An+B of S)`, §14.4.1: the element matches `S`, and its
+    /// position is counted among the siblings that match `S` too — so
+    /// `tr:nth-child(odd of .shown)` stripes the rows a book shows and not
+    /// every other row.
+    NthChildOf(Nth, Vec<Selector>),
+    /// `:nth-last-child(An+B of S)`, the same from the end.
+    NthLastChildOf(Nth, Vec<Selector>),
     /// `:nth-of-type(…)`
     NthOfType(Nth),
     /// `:nth-last-of-type(…)`
@@ -690,8 +697,8 @@ fn functional_pseudo_class(
                 .unwrap_or(Specificity::ZERO);
             Ok((PseudoClass::Has(list), most))
         }
-        "nth-child" => nth_function(arguments, PseudoClass::NthChild),
-        "nth-last-child" => nth_function(arguments, PseudoClass::NthLastChild),
+        "nth-child" => nth_child(arguments, max_parts, false),
+        "nth-last-child" => nth_child(arguments, max_parts, true),
         "nth-of-type" => nth_function(arguments, PseudoClass::NthOfType),
         "nth-last-of-type" => nth_function(arguments, PseudoClass::NthLastOfType),
         "lang" => Ok((PseudoClass::Lang(parse_lang(arguments)?), ONE_B)),
@@ -708,6 +715,47 @@ fn nth_function(
     wrap: fn(Nth) -> PseudoClass,
 ) -> Result<(PseudoClass, Specificity), Invalid> {
     Ok((wrap(parse_nth(arguments)?), ONE_B))
+}
+
+/// `:nth-child()` and `:nth-last-child()`, §14.4.1: `An+B`, and optionally
+/// `of` and a selector list, split at the first top-level `of` identifier —
+/// which cannot occur inside `An+B` itself. The list is a
+/// `<complex-real-selector-list>`, so a pseudo-element in it is invalid, and
+/// §15 makes the pseudo-class's specificity one pseudo-class plus the list's
+/// most specific selector.
+fn nth_child(
+    arguments: &[ComponentValue],
+    max_parts: usize,
+    from_end: bool,
+) -> Result<(PseudoClass, Specificity), Invalid> {
+    let of = arguments.iter().position(|value| {
+        matches!(value, ComponentValue::Token(Token::Ident(word)) if word.eq_ignore_ascii_case("of"))
+    });
+    let Some(at) = of else {
+        return nth_function(
+            arguments,
+            if from_end {
+                PseudoClass::NthLastChild
+            } else {
+                PseudoClass::NthChild
+            },
+        );
+    };
+    let nth = parse_nth(&arguments[..at])?;
+    let list = parse_list(&arguments[at + 1..], max_parts)?;
+    if list
+        .iter()
+        .any(|selector| selector.pseudo_element.is_some())
+    {
+        return Err(Invalid::Malformed);
+    }
+    let specificity = ONE_B.plus(most_specific(&list));
+    let class = if from_end {
+        PseudoClass::NthLastChildOf(nth, list)
+    } else {
+        PseudoClass::NthChildOf(nth, list)
+    };
+    Ok((class, specificity))
 }
 
 /// §6.5.1's argument: one or more comma-separated language **ranges**.
@@ -1071,7 +1119,11 @@ fn collect_stateless(classes: &[PseudoClass], out: &mut Vec<Warning>) {
     for class in classes {
         match class {
             PseudoClass::NoSuchState(name) => out.push(Warning::PseudoClassUnsupported(name)),
-            PseudoClass::Not(list) | PseudoClass::Is(list) | PseudoClass::Where(list) => {
+            PseudoClass::Not(list)
+            | PseudoClass::Is(list)
+            | PseudoClass::Where(list)
+            | PseudoClass::NthChildOf(_, list)
+            | PseudoClass::NthLastChildOf(_, list) => {
                 for selector in list {
                     for compound in &selector.compounds {
                         collect_stateless(&compound.pseudo_classes, out);
@@ -1352,6 +1404,16 @@ fn matches_pseudo_class<E: Element>(
         }
         PseudoClass::NthChild(nth) => nth.contains(position(elements, index, false, budget)?),
         PseudoClass::NthLastChild(nth) => nth.contains(position(elements, index, true, budget)?),
+        // §14.4.1: the element must match `S` itself — a hidden row is at no
+        // position among the shown ones — and only `S`'s matches are counted.
+        PseudoClass::NthChildOf(nth, list) => {
+            matches_any(list, elements, index, budget)?
+                && nth.contains(position_among(list, elements, index, false, budget)?)
+        }
+        PseudoClass::NthLastChildOf(nth, list) => {
+            matches_any(list, elements, index, budget)?
+                && nth.contains(position_among(list, elements, index, true, budget)?)
+        }
         PseudoClass::NthOfType(nth) => {
             nth.contains(position_of_type(elements, index, false, budget)?)
         }
@@ -1422,6 +1484,60 @@ fn matches_pseudo_class<E: Element>(
         PseudoClass::ReadWrite => element.ui_state().read_only == Some(false),
         PseudoClass::NoSuchState(_) => false,
     })
+}
+
+/// Whether any selector of a list matches the element, `:is()`'s question.
+fn matches_any<E: Element>(
+    list: &[Selector],
+    elements: &[E],
+    index: usize,
+    budget: &mut Budget,
+) -> Result<bool, Refusal> {
+    for selector in list {
+        if selector.pseudo_element.is_some() {
+            continue;
+        }
+        if match_from(
+            selector,
+            selector.compounds.len() - 1,
+            elements,
+            index,
+            None,
+            budget,
+        )? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The one-based position of an element among the siblings a selector list
+/// matches, from either end — each sibling tested as `:is()` tests it, and
+/// every test charged as any match is.
+fn position_among<E: Element>(
+    list: &[Selector],
+    elements: &[E],
+    index: usize,
+    from_end: bool,
+    budget: &mut Budget,
+) -> Result<i64, Refusal> {
+    let mut position = 1i64;
+    let step = |at: usize| {
+        if from_end {
+            elements[at].next_sibling()
+        } else {
+            elements[at].previous_sibling()
+        }
+    };
+    let mut at = step(index);
+    while let Some(sibling) = at {
+        budget.spend_match()?;
+        if matches_any(list, elements, sibling, budget)? {
+            position += 1;
+        }
+        at = step(sibling);
+    }
+    Ok(position)
 }
 
 /// The one-based position of an element among its siblings, from either end.
