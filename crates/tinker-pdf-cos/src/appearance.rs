@@ -29,6 +29,7 @@
 //!   a polygon, open with a line's endings for a polyline.
 //! - `Squiggly` (12.5.6.10), the fourth text markup: a zigzag in each quad's
 //!   own frame, at a cost per quad that does not grow with its length.
+//! - `Caret` (12.5.6.11): the typographic caret, filled, inside `/RD`.
 //!
 //! Each carries 12.5.6.2's `/CA` in the graphics state it selects, and each
 //! stroked border or line its `/BS` (or `/Border`) dash.
@@ -744,6 +745,40 @@ fn squiggly(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<(
     Some(())
 }
 
+/// A caret (12.5.6.11), the mark where text is to be inserted: filled in
+/// `/C` inside `/Rect` less Table 180's `/RD`, "the actual boundaries of the
+/// underlying caret".
+///
+/// 12.5.6.11 names the symbol and not its outline, so this draws the
+/// typographic caret: a spike rising from the middle of the bottom edge to
+/// the top, its two sides cubics bowed inward from the bottom corners, the
+/// bottom edge straight. An absent `/C` fills black, as a line strokes;
+/// an empty one is 12.5.2's transparent, and there is nothing to draw.
+///
+/// `/Sy /P` asks for a paragraph symbol "associated with the caret", and
+/// 12.5.6.11 places it nowhere; the caret is drawn and the symbol is not,
+/// and the feature doc's refusal table names it.
+fn caret(doc: &CosDocument, annotation: &Dict, rect: Rect, out: &mut Vec<u8>) -> Option<()> {
+    let color = stroke_color_of(doc, annotation)?;
+    let caret = drawn_rect(doc, annotation, rect);
+    let middle = (caret.x0 + caret.x1) / 2.0;
+    let half = (caret.y0 + caret.y1) / 2.0;
+    op(out, &color, b"rg");
+    op(out, &[caret.x0, caret.y0], b"m");
+    op(
+        out,
+        &[middle, caret.y0, middle, half, middle, caret.y1],
+        b"c",
+    );
+    op(
+        out,
+        &[middle, half, middle, caret.y0, caret.x1, caret.y0],
+        b"c",
+    );
+    out.extend_from_slice(b"h\nf\n");
+    Some(())
+}
+
 /// Builds the appearance for an annotation, or `None` when its type needs
 /// none — a link with no border draws nothing, and inventing something for it
 /// would be worse than leaving it alone.
@@ -927,6 +962,7 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
         b"Polygon" => polygon(doc, annotation, &mut content, true)?,
         b"PolyLine" => polygon(doc, annotation, &mut content, false)?,
         b"Squiggly" => squiggly(doc, annotation, &mut content)?,
+        b"Caret" => caret(doc, annotation, rect, &mut content)?,
         _ => return None,
     }
 
@@ -2026,5 +2062,30 @@ mod tests {
         let (long_lines, long_bytes) = ops("0 1 1000000 1 0 0 1000000 0");
         assert_eq!(short_lines, long_lines);
         assert!(long_bytes < 400, "{long_bytes} bytes");
+    }
+
+    /// 12.5.6.11: the caret fills the rectangle `/RD` leaves inside `/Rect`,
+    /// from its bottom corners to the middle of its top; `/Sy /P` draws the
+    /// same caret, and its paragraph symbol nowhere.
+    #[test]
+    fn a_caret_is_drawn_inside_its_rect_differences() {
+        let doc = doc();
+        let caret = |rest: &str| {
+            content_of(
+                &doc,
+                &format!("<< /Subtype /Caret /Rect [10 10 90 90] {rest} >>"),
+            )
+        };
+        assert_eq!(
+            caret("/RD [10 10 10 10] /C [0 0 1]").as_deref(),
+            Some("0 0 1 rg\n20 20 m\n50 20 50 50 50 80 c\n50 50 50 20 80 20 c\nh\nf\n")
+        );
+        assert_eq!(
+            caret("").as_deref(),
+            Some("0 0 0 rg\n10 10 m\n50 10 50 50 50 90 c\n50 50 50 10 90 10 c\nh\nf\n"),
+            "black without /C, in the whole /Rect without /RD"
+        );
+        assert_eq!(caret("/C []"), None, "a transparent caret draws nothing");
+        assert_eq!(caret("/Sy /P"), caret("/Sy /None"));
     }
 }

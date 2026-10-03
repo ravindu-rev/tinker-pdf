@@ -632,3 +632,38 @@ fn a_squiggly_underline_follows_a_turned_quad() {
         is_white,
     );
 }
+
+// ---------------------------------------------------------------- Caret
+
+/// 12.5.6.11: the caret fills the rectangle Table 180's `/RD` leaves inside
+/// `/Rect` — here (20, 20) to (80, 80) — flaring from the whole bottom edge
+/// and narrowing to a spike at the middle of the top: about 26 wide at
+/// y 25, 7 at y 40, 2.5 at y 50. Nothing is drawn below y 20, though
+/// `/Rect` goes down to 10.
+#[test]
+fn a_caret_flares_from_the_bottom_of_its_rect_differences() {
+    let page = synthesized(
+        "<< /Type /Annot /Subtype /Caret /Rect [10 10 90 90] /RD [10 10 10 10] /C [1 0 0] >>",
+    );
+    assert_points(
+        &page.bitmap,
+        "red, inside the caret",
+        &[(50.5, 20.5), (40.5, 25.5), (59.5, 25.5), (50.5, 38.5)],
+        is_red,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, beside the spike, and between /RD and /Rect",
+        &[
+            (25.5, 30.5),
+            (74.5, 30.5),
+            (45.5, 50.5),
+            (54.5, 50.5),
+            (30.5, 60.5),
+            (50.5, 18.5),
+            (50.5, 12.5),
+            (12.5, 50.5),
+        ],
+        is_white,
+    );
+}
