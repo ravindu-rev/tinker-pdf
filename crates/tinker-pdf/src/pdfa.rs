@@ -1881,6 +1881,55 @@ pub enum FindingKind {
         /// The forbidden scalar value it maps to.
         value: u32,
     },
+    /// A structure element of a type ISO 32000-1 14.8.4 places — a row, a
+    /// cell, a list item, a TOC item — under a parent that type may not sit
+    /// in (ISO 14289-1 7.2).
+    StructureParentNotAdmitted {
+        /// The element's standard type.
+        element: String,
+        /// Its parent's standard type, or `StructTreeRoot`.
+        parent: String,
+    },
+    /// A structure element whose kids include one its type may not contain
+    /// (ISO 14289-1 7.2): the first such kid.
+    StructureKidNotAdmitted {
+        /// The element's standard type.
+        element: String,
+        /// The kid's standard type.
+        kid: String,
+    },
+    /// A structure element with more kids of one type than it may have: a
+    /// second `THead`, `TFoot` or `Caption` in a `Table` (ISO 14289-1 7.2), a
+    /// second `H` under any node (7.4.4).
+    StructureKidRepeated {
+        /// The element's standard type.
+        element: String,
+        /// The repeated kid's standard type.
+        kid: String,
+        /// How many there are.
+        count: u32,
+    },
+    /// A `Caption` where its container may not have one: between a table's
+    /// first and last kids, after a list's or a TOC's first (ISO 14289-1 7.2).
+    CaptionMisplaced {
+        /// `Table`, `L` or `TOC`.
+        element: String,
+    },
+    /// A `Table` with a `THead` or a `TFoot` and no `TBody` (ISO 14289-1 7.2).
+    TableBodyMissing {
+        /// `THead` or `TFoot`.
+        beside: String,
+    },
+    /// Unnumbered `H` and numbered `Hn` headings in one document (ISO 14289-1
+    /// 7.4.4): "either strongly or weakly structured, but not both".
+    HeadingKindsMixed,
+    /// A `Note` with no `/ID`, or an empty one (ISO 14289-1 7.9).
+    NoteIdMissing,
+    /// A `Note` whose `/ID` another `Note` already carries (ISO 14289-1 7.9).
+    NoteIdDuplicate {
+        /// The identifier, as text.
+        id: String,
+    },
 
     // ---- PDF/X (ISO 15930), behind `Document::validate_pdfx` -------------
     //

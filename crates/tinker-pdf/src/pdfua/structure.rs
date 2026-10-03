@@ -10,7 +10,9 @@
 //! validator and `Document::structure` cannot disagree about what a file's
 //! tagging says.
 
-use tinker_pdf_cos::{decode_text_string, STANDARD_STRUCTURE_TYPES};
+use std::collections::BTreeMap;
+
+use tinker_pdf_cos::{decode_text_string, ObjRef, STANDARD_STRUCTURE_TYPES};
 
 use super::{clauses, UaPart, UaRaw};
 use crate::pdfa::logical::{language_is_well_formed, LanguageGrammar};
@@ -68,7 +70,7 @@ pub(super) fn rules(
             FindingKind::StructureTreeUnwalkable,
         ));
     }
-    figures(&tree, out);
+    figures(&tree, part, out);
     if part == UaPart::One {
         headings(&tree, out);
     }
@@ -81,6 +83,7 @@ pub(super) fn rules(
     element_languages(&tree, out);
     if part == UaPart::One {
         structure_types(&tree, out);
+        grammar(&tree, out);
     }
     parents(document, &tree, out);
 }
@@ -225,20 +228,36 @@ fn parents(document: &Document, tree: &StructureTree, out: &mut Vec<UaRaw>) {
 /// ISO 32000-1 14.9.3, as ISO 14289-1 7.3 requires it: a `Figure` stands for
 /// content that is not text, so something has to say what it is.
 /// `/ActualText` counts as well as `/Alt` — a figure that *is* a word, which
-/// is what a dropped capital is, says so with 14.9.4.
-fn figures(tree: &StructureTree, out: &mut Vec<UaRaw>) {
+/// is what a dropped capital is, says so with 14.9.4. And 7.7 asks the same
+/// of a `Formula` (part 1; part 2's profile states no such rule).
+///
+/// **An empty `/Alt` is no description under part 1, and an empty
+/// `/ActualText` is a replacement** — the corpus's reading, which the design
+/// records (7.3-t01-pass-c against -fail-b, 7.7-t01-pass-c against -fail-b)
+/// and veraPDF's conditions state for both rules: `(Alt != null && Alt != '')
+/// || ActualText != null`. Part 2's 8.2.5.28.2 condition is `Alt != null ||
+/// ActualText != null`, so an empty `/Alt` stands there. The first version
+/// of this rule read both keys alike under both parts, which passed the
+/// part 1 fixture whose `/Alt` is empty.
+fn figures(tree: &StructureTree, part: UaPart, out: &mut Vec<UaRaw>) {
     let mut reported = 0usize;
     for element in tree.elements() {
         if reported >= MAX_FINDINGS_PER_RULE {
             break;
         }
-        if element.standard_type == "Figure"
-            && element.alt.is_none()
-            && element.actual_text.is_none()
-        {
+        let rule = match (element.standard_type.as_str(), part) {
+            ("Figure", _) => clauses::FIGURE_ALTERNATIVE,
+            ("Formula", UaPart::One) => clauses::FORMULA_ALTERNATIVE,
+            _ => continue,
+        };
+        let described = match part {
+            UaPart::One => element.alt.as_deref().is_some_and(|alt| !alt.is_empty()),
+            UaPart::Two => element.alt.is_some(),
+        };
+        if !described && element.actual_text.is_none() {
             reported += 1;
             out.push(UaRaw {
-                rule: clauses::FIGURE_ALTERNATIVE,
+                rule,
                 object: element.reference,
                 kind: FindingKind::AlternativeDescriptionMissing {
                     structure_type: element.standard_type.clone(),
@@ -314,4 +333,267 @@ fn states_a_language(document: &Document, tree: &StructureTree) -> bool {
         }
     }
     tree.elements().iter().any(|element| element.lang.is_some())
+}
+
+// ---- 7.2, 7.4.4, 7.9: the structure grammar --------------------------------
+
+/// Which parents an element of a standard type may sit in, where ISO 32000-1
+/// 14.8.4 constrains it: veraPDF's statements of ISO 14289-1 rules 7.2-4 to
+/// 7.2-9, 7.2-17, 7.2-18 and 7.2-26 ("TR element should be contained in
+/// Table, THead, TBody or TFoot element", and the rest).
+const PARENTS: &[(&str, &[&str])] = &[
+    ("TR", &["Table", "THead", "TBody", "TFoot"]),
+    ("THead", &["Table"]),
+    ("TBody", &["Table"]),
+    ("TFoot", &["Table"]),
+    ("TH", &["TR"]),
+    ("TD", &["TR"]),
+    ("LI", &["L"]),
+    ("LBody", &["LI"]),
+    ("TOCI", &["TOC"]),
+];
+
+/// Which kids an element of a standard type may have, where 14.8.4
+/// constrains it: rules 7.2-3, 7.2-10, 7.2-19, 7.2-20, 7.2-27 and 7.2-36 to
+/// 7.2-38 ("Table element may contain only TR, THead, TBody, TFoot and
+/// Caption elements", and the rest).
+const KIDS: &[(&str, &[&str])] = &[
+    ("Table", &["TR", "THead", "TBody", "TFoot", "Caption"]),
+    ("TR", &["TH", "TD"]),
+    ("THead", &["TR"]),
+    ("TBody", &["TR"]),
+    ("TFoot", &["TR"]),
+    ("L", &["L", "LI", "Caption"]),
+    ("LI", &["Lbl", "LBody"]),
+    ("TOC", &["TOC", "TOCI", "Caption"]),
+];
+
+/// The structure tree root, as a parent's name in a finding: it has no
+/// structure type, and 14.8.4 admits no constrained element directly under it.
+const ROOT: &str = "StructTreeRoot";
+
+/// ISO 14289-1 7.2's content models, 7.4.4's heading kinds and 7.9's note
+/// identifiers: every rule veraPDF's PDF/UA-1 profile states over an
+/// element's standard type, its parent's and its kids' — read as data, never
+/// run (ruling 13), and each held to a fixture and twin in `pdfua_rules.rs`.
+///
+/// **Kids are structure elements whose standard type is one of 14.8.4's.**
+/// A marked-content or object reference is content, not a kid with a type,
+/// and the profile's `kidsStandardTypes` lists types; a kid whose type
+/// resolves to nothing standard is the structure-type rule's finding
+/// already, and judging it here as well would say one defect twice.
+///
+/// One finding per element per rule, the first offending kid named: a table
+/// with forty `P` kids has one defect of shape.
+///
+/// What is **not** here is the half of 7.2 that needs the table's grid —
+/// cells that intersect, rows and columns that disagree across `/RowSpan`
+/// and `/ColSpan` (7.2-15, 7.2-41 to 7.2-43) — which `super::STAGED` names.
+fn grammar(tree: &StructureTree, out: &mut Vec<UaRaw>) {
+    let mut reported = 0usize;
+    let mut headings = (None::<Option<ObjRef>>, None::<Option<ObjRef>>);
+    let mut notes: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+    let mut note_findings: Vec<UaRaw> = Vec::new();
+    visit_with_parents(&tree.kids, ROOT, &mut |element, parent| {
+        let own = element.standard_type.as_str();
+        let at = element.reference;
+
+        if let Some((_, admitted)) = PARENTS.iter().find(|(t, _)| *t == own) {
+            if !admitted.contains(&parent) {
+                push(
+                    UaRaw {
+                        rule: clauses::STRUCTURE_GRAMMAR,
+                        object: at,
+                        kind: FindingKind::StructureParentNotAdmitted {
+                            element: own.to_string(),
+                            parent: parent.to_string(),
+                        },
+                    },
+                    &mut reported,
+                    out,
+                );
+            }
+        }
+
+        let kids: Vec<&str> = element
+            .kids
+            .iter()
+            .filter_map(|kid| match kid {
+                StructKid::Element(kid) => Some(kid.standard_type.as_str()),
+                _ => None,
+            })
+            .filter(|kid| STANDARD_STRUCTURE_TYPES.contains(kid))
+            .collect();
+        let count = |name: &str| kids.iter().filter(|kid| **kid == name).count();
+
+        if let Some((_, admitted)) = KIDS.iter().find(|(t, _)| *t == own) {
+            if let Some(kid) = kids.iter().find(|kid| !admitted.contains(kid)) {
+                push(
+                    UaRaw {
+                        rule: clauses::STRUCTURE_GRAMMAR,
+                        object: at,
+                        kind: FindingKind::StructureKidNotAdmitted {
+                            element: own.to_string(),
+                            kid: (*kid).to_string(),
+                        },
+                    },
+                    &mut reported,
+                    out,
+                );
+            }
+        }
+
+        // 7.2-11, 7.2-12, 7.2-39: at most one THead, one TFoot, one Caption
+        // in a Table. 7.4.4-1: "Each node in the tag tree shall contain at
+        // most one child H tag" — every element, not only a table.
+        let mut limits: Vec<(&str, ClausesFor)> = vec![("H", ClausesFor::Headings)];
+        if own == "Table" {
+            limits.extend([
+                ("THead", ClausesFor::Grammar),
+                ("TFoot", ClausesFor::Grammar),
+                ("Caption", ClausesFor::Grammar),
+            ]);
+        }
+        for (kid, clause) in limits {
+            let n = count(kid);
+            if n > 1 {
+                push(
+                    UaRaw {
+                        rule: clause.table(),
+                        object: at,
+                        kind: FindingKind::StructureKidRepeated {
+                            element: own.to_string(),
+                            kid: kid.to_string(),
+                            count: u32::try_from(n).unwrap_or(u32::MAX),
+                        },
+                    },
+                    &mut reported,
+                    out,
+                );
+            }
+        }
+
+        if own == "Table" {
+            // 7.2-13, 7.2-14: a THead or a TFoot needs a TBody beside it.
+            for beside in ["THead", "TFoot"] {
+                if count(beside) > 0 && count("TBody") == 0 {
+                    push(
+                        UaRaw {
+                            rule: clauses::STRUCTURE_GRAMMAR,
+                            object: at,
+                            kind: FindingKind::TableBodyMissing {
+                                beside: beside.to_string(),
+                            },
+                        },
+                        &mut reported,
+                        out,
+                    );
+                }
+            }
+        }
+
+        // 7.2-16: a Table's Caption first or last; 7.2-28 and 7.2-40: a
+        // TOC's and an L's first only.
+        let misplaced = match own {
+            "Table" => kids.len() > 2 && kids[1..kids.len() - 1].contains(&"Caption"),
+            "TOC" | "L" => kids.iter().skip(1).any(|kid| *kid == "Caption"),
+            _ => false,
+        };
+        if misplaced {
+            push(
+                UaRaw {
+                    rule: clauses::STRUCTURE_GRAMMAR,
+                    object: at,
+                    kind: FindingKind::CaptionMisplaced {
+                        element: own.to_string(),
+                    },
+                },
+                &mut reported,
+                out,
+            );
+        }
+
+        // 7.4.4-2 and 7.4.4-3: "All documents shall be either strongly or
+        // weakly structured, but not both" — an unnumbered H and a numbered
+        // Hn in one document.
+        if own == "H" && headings.0.is_none() {
+            headings.0 = Some(at);
+        }
+        if heading_level(element).is_some() && headings.1.is_none() {
+            headings.1 = Some(at);
+        }
+
+        // 7.9-1 and 7.9-2: "Note tag shall have ID entry", and "Each Note
+        // tag shall have unique ID key".
+        if own == "Note" {
+            match element.id.as_deref() {
+                None | Some([]) => note_findings.push(UaRaw {
+                    rule: clauses::NOTE_IDS,
+                    object: at,
+                    kind: FindingKind::NoteIdMissing,
+                }),
+                Some(id) => {
+                    let seen = notes.entry(id.to_vec()).or_default();
+                    *seen += 1;
+                    if *seen == 2 {
+                        note_findings.push(UaRaw {
+                            rule: clauses::NOTE_IDS,
+                            object: at,
+                            kind: FindingKind::NoteIdDuplicate {
+                                id: String::from_utf8_lossy(id).into_owned(),
+                            },
+                        });
+                    }
+                }
+            }
+        }
+    });
+    if let (Some(first_h), Some(_)) = headings {
+        out.push(UaRaw {
+            rule: clauses::HEADING_KINDS,
+            object: first_h,
+            kind: FindingKind::HeadingKindsMixed,
+        });
+    }
+    out.extend(note_findings.into_iter().take(MAX_FINDINGS_PER_RULE));
+}
+
+/// One grammar finding, while the grammar's cap allows.
+fn push(raw: UaRaw, reported: &mut usize, out: &mut Vec<UaRaw>) {
+    if *reported < MAX_FINDINGS_PER_RULE {
+        *reported += 1;
+        out.push(raw);
+    }
+}
+
+/// Which clause table a kid-count finding belongs to.
+#[derive(Clone, Copy)]
+enum ClausesFor {
+    Grammar,
+    Headings,
+}
+
+impl ClausesFor {
+    fn table(self) -> super::UaClauses {
+        match self {
+            ClausesFor::Grammar => clauses::STRUCTURE_GRAMMAR,
+            ClausesFor::Headings => clauses::HEADING_KINDS,
+        }
+    }
+}
+
+/// Every element in the tree with its parent's standard type, in reading
+/// order. The root's kids have the root as their parent.
+fn visit_with_parents(
+    kids: &[StructKid],
+    parent: &str,
+    visit: &mut impl FnMut(&StructElement, &str),
+) {
+    for kid in kids {
+        let StructKid::Element(element) = kid else {
+            continue;
+        };
+        visit(element, parent);
+        visit_with_parents(&element.kids, &element.standard_type, visit);
+    }
 }

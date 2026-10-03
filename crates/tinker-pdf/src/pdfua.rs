@@ -116,6 +116,33 @@ impl UaClauses {
 pub(crate) mod clauses {
     use super::UaClauses;
 
+    /// ISO 14289-1 7.2's content models — tables, lists, TOCs — as veraPDF's
+    /// rules 7.2-3 to 7.2-20, 7.2-26 to 7.2-28 and 7.2-36 to 7.2-40 state
+    /// them. Part 2 states its grammar per type under 8.2.5, staged.
+    pub(crate) const STRUCTURE_GRAMMAR: UaClauses = UaClauses {
+        one: Some("7.2"),
+        two: None,
+    };
+
+    /// ISO 14289-1 7.7: a `Formula` carries `/Alt` or `/ActualText`.
+    pub(crate) const FORMULA_ALTERNATIVE: UaClauses = UaClauses {
+        one: Some("7.7"),
+        two: None,
+    };
+
+    /// ISO 14289-1 7.4.4: at most one `H` per node, and `H` never beside
+    /// `Hn`.
+    pub(crate) const HEADING_KINDS: UaClauses = UaClauses {
+        one: Some("7.4.4"),
+        two: None,
+    };
+
+    /// ISO 14289-1 7.9: every `Note` carries a unique `/ID`.
+    pub(crate) const NOTE_IDS: UaClauses = UaClauses {
+        one: Some("7.9"),
+        two: None,
+    };
+
     /// Version identification: the `pdfuaid` claim (5 in both parts).
     pub(crate) const IDENTIFICATION: UaClauses = UaClauses {
         one: Some("5"),
@@ -459,12 +486,12 @@ pub const STAGED: &[UaGap] = &[
     UaGap {
         part: UaPart::One,
         clause: "7.2",
-        rule: "the content models of tables, lists and tables of contents, \
-               and table regularity across row and column spans",
-        because: "the grammar is decidable from each element's standard type \
-                  and kids, which the structure reader has; the regularity \
-                  half needs the grid model design/table-reconstruction.md \
-                  shares (milestone 3)",
+        rule: "table regularity: cells that intersect, and rows and columns \
+               that disagree across /RowSpan and /ColSpan (veraPDF's 7.2-15 \
+               and 7.2-41 to 7.2-43)",
+        because: "the content models of tables, lists and TOCs are judged; \
+                  regularity needs the grid model \
+                  design/table-reconstruction.md shares (milestone 3)",
     },
     UaGap {
         part: UaPart::One,
@@ -480,29 +507,10 @@ pub const STAGED: &[UaGap] = &[
     },
     UaGap {
         part: UaPart::One,
-        clause: "7.4.4",
-        rule: "one unnumbered H per structure node, and H never mixed with Hn",
-        because: "decidable from the tree; not written (milestone 3)",
-    },
-    UaGap {
-        part: UaPart::One,
         clause: "7.5",
         rule: "every TD reachable from a TH through /Scope or /Headers",
         because: "the attributes are read now; the header association over \
                   the table's grid is not written (milestone 3)",
-    },
-    UaGap {
-        part: UaPart::One,
-        clause: "7.7",
-        rule: "a Formula's alternative description",
-        because: "the Figure rule's twin, held back until the empty-/Alt \
-                  reading the corpus states lands with it (milestone 2)",
-    },
-    UaGap {
-        part: UaPart::One,
-        clause: "7.9",
-        rule: "every Note carries a unique /ID",
-        because: "the /ID is read now; the rule is not written (milestone 3)",
     },
     UaGap {
         part: UaPart::One,

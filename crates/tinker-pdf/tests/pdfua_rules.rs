@@ -1350,3 +1350,353 @@ fn a_width_the_program_disagrees_with_is_reported_under_each_part() {
         measured(part, "600").clean();
     }
 }
+
+// ---- 7.2, 7.4.4, 7.9: the structure grammar -----------------------------------
+
+/// The baseline with `elements` under its `Document` beside the paragraph:
+/// each `(number, structure type, parent number, kid numbers, extra)` written
+/// as an indirect element with its `/P`, its `/K` the kids given.
+fn grammar(part: &str, elements: &[(u32, &str, u32, &[u32], &str)]) -> Ua {
+    let top: Vec<String> = elements
+        .iter()
+        .filter(|(_, _, parent, _, _)| *parent == 11)
+        .map(|(num, _, _, _, _)| format!("{num} 0 R"))
+        .collect();
+    let mut fixture = Ua::new(part).element(
+        11,
+        &format!(
+            "<< /Type /StructElem /S /Document /P 10 0 R /K [13 0 R {}] >>",
+            top.join(" ")
+        ),
+    );
+    for (num, structure_type, parent, kids, extra) in elements {
+        let kids: Vec<String> = kids.iter().map(|k| format!("{k} 0 R")).collect();
+        fixture = fixture.element(
+            *num,
+            &format!(
+                "<< /Type /StructElem /S /{structure_type} /P {parent} 0 R /K [{}] {extra} >>",
+                kids.join(" ")
+            ),
+        );
+    }
+    fixture
+}
+
+/// A table of one row and one cell, under `parent`, numbered from `first`.
+fn table(first: u32, parent: u32) -> Vec<(u32, &'static str, u32, Vec<u32>, &'static str)> {
+    vec![
+        (first, "Table", parent, vec![first + 1], ""),
+        (first + 1, "TR", first, vec![first + 2], ""),
+        (first + 2, "TD", first + 1, vec![], ""),
+    ]
+}
+
+/// [`grammar`] over owned rows.
+fn grammar_of(part: &str, rows: &[(u32, &str, u32, Vec<u32>, &str)]) -> Ua {
+    let borrowed: Vec<(u32, &str, u32, &[u32], &str)> = rows
+        .iter()
+        .map(|(n, s, p, k, e)| (*n, *s, *p, k.as_slice(), *e))
+        .collect();
+    grammar(part, &borrowed)
+}
+
+/// UA-1 7.2-3 and 7.2-10, veraPDF's statements: "Table element may contain
+/// only TR, THead, TBody, TFoot and Caption elements", "TR element may
+/// contain only TH and TD elements". The twin is the well-formed table.
+#[test]
+fn a_table_and_a_row_contain_only_what_14_8_4_admits() {
+    grammar_of("1", &table(20, 11)).clean();
+
+    let mut extra_kid = table(20, 11);
+    extra_kid[0].3.push(30);
+    extra_kid.push((30, "P", 20, vec![], ""));
+    assert_eq!(
+        grammar_of("1", &extra_kid).one_finding(),
+        (
+            "7.2".to_string(),
+            FindingKind::StructureKidNotAdmitted {
+                element: "Table".to_string(),
+                kid: "P".to_string(),
+            }
+        )
+    );
+
+    let mut row_kid = table(20, 11);
+    row_kid[1].3.push(30);
+    row_kid.push((30, "Span", 21, vec![], ""));
+    assert_eq!(
+        grammar_of("1", &row_kid).one_finding(),
+        (
+            "7.2".to_string(),
+            FindingKind::StructureKidNotAdmitted {
+                element: "TR".to_string(),
+                kid: "Span".to_string(),
+            }
+        )
+    );
+
+    // The same defect claiming part 2 is not 7.2's: ISO 14289-2 states its
+    // grammar differently, and that is staged under 8.2.
+    grammar_of("2", &extra_kid).clean();
+}
+
+/// UA-1 7.2-4 to 7.2-9, 7.2-17, 7.2-18 and 7.2-26: a row in a table or a
+/// table section, a cell in a row, a list item in a list, a list body in an
+/// item, a TOC item in a TOC.
+#[test]
+fn a_constrained_element_sits_in_the_parent_14_8_4_gives_it() {
+    for (structure_type, kids) in [
+        ("TR", vec![]),
+        ("LI", vec![]),
+        ("TOCI", vec![]),
+        ("LBody", vec![]),
+    ] {
+        let rows = vec![(20, structure_type, 11, kids, "")];
+        assert_eq!(
+            grammar_of("1", &rows).one_finding(),
+            (
+                "7.2".to_string(),
+                FindingKind::StructureParentNotAdmitted {
+                    element: structure_type.to_string(),
+                    parent: "Document".to_string(),
+                }
+            ),
+            "{structure_type}"
+        );
+    }
+    grammar_of(
+        "1",
+        &[
+            (20, "L", 11, vec![21], ""),
+            (21, "LI", 20, vec![22, 23], ""),
+            (22, "Lbl", 21, vec![], ""),
+            (23, "LBody", 21, vec![], ""),
+            (24, "TOC", 11, vec![25], ""),
+            (25, "TOCI", 24, vec![], ""),
+        ],
+    )
+    .clean();
+}
+
+/// UA-1 7.2-11 to 7.2-14 and 7.2-39: one `THead`, one `TFoot` and one
+/// `Caption` at most, and a `TBody` beside a `THead` or a `TFoot`.
+#[test]
+fn a_tables_sections_and_caption_are_counted() {
+    let sections = |kinds: &[&'static str]| {
+        let mut rows = vec![(20, "Table", 11, Vec::new(), "")];
+        let mut next = 30;
+        for kind in kinds {
+            rows[0].3.push(next);
+            if *kind == "Caption" {
+                rows.push((next, "Caption", 20, vec![], ""));
+                next += 1;
+            } else {
+                rows.push((next, *kind, 20, vec![next + 1], ""));
+                rows.push((next + 1, "TR", next, vec![], ""));
+                next += 2;
+            }
+        }
+        grammar_of("1", &rows)
+    };
+    sections(&["THead", "TBody", "TFoot"]).clean();
+    sections(&["Caption", "THead", "TBody"]).clean();
+    assert_eq!(
+        sections(&["THead", "THead", "TBody"]).one_finding(),
+        (
+            "7.2".to_string(),
+            FindingKind::StructureKidRepeated {
+                element: "Table".to_string(),
+                kid: "THead".to_string(),
+                count: 2,
+            }
+        )
+    );
+    assert_eq!(
+        sections(&["TBody", "Caption"]).findings().len(),
+        0,
+        "a caption last is admitted"
+    );
+    assert_eq!(
+        sections(&["Caption", "TBody", "Caption"]).one_finding(),
+        (
+            "7.2".to_string(),
+            FindingKind::StructureKidRepeated {
+                element: "Table".to_string(),
+                kid: "Caption".to_string(),
+                count: 2,
+            }
+        )
+    );
+    for beside in ["THead", "TFoot"] {
+        assert_eq!(
+            sections(&[beside]).one_finding(),
+            (
+                "7.2".to_string(),
+                FindingKind::TableBodyMissing {
+                    beside: beside.to_string(),
+                }
+            )
+        );
+    }
+}
+
+/// UA-1 7.2-16, 7.2-28 and 7.2-40: a table's caption first or last, a TOC's
+/// and a list's first only.
+#[test]
+fn a_caption_is_where_14_8_4_puts_it() {
+    let middle = grammar_of(
+        "1",
+        &[
+            (20, "Table", 11, vec![21, 23, 24], ""),
+            (21, "TR", 20, vec![], ""),
+            (23, "Caption", 20, vec![], ""),
+            (24, "TR", 20, vec![], ""),
+        ],
+    );
+    assert_eq!(
+        middle.one_finding(),
+        (
+            "7.2".to_string(),
+            FindingKind::CaptionMisplaced {
+                element: "Table".to_string(),
+            }
+        )
+    );
+    for (container, item) in [("L", "LI"), ("TOC", "TOCI")] {
+        let last = grammar_of(
+            "1",
+            &[
+                (20, container, 11, vec![21, 22], ""),
+                (21, item, 20, vec![], ""),
+                (22, "Caption", 20, vec![], ""),
+            ],
+        );
+        assert_eq!(
+            last.one_finding(),
+            (
+                "7.2".to_string(),
+                FindingKind::CaptionMisplaced {
+                    element: container.to_string(),
+                }
+            ),
+            "{container}"
+        );
+        grammar_of(
+            "1",
+            &[
+                (20, container, 11, vec![22, 21], ""),
+                (21, item, 20, vec![], ""),
+                (22, "Caption", 20, vec![], ""),
+            ],
+        )
+        .clean();
+    }
+}
+
+/// UA-1 7.4.4-1: "Each node in the tag tree shall contain at most one child
+/// H tag"; 7.4.4-2 and -3: "All documents shall be either strongly or weakly
+/// structured, but not both" — an `H` and an `Hn` in one document. The twins
+/// are one `H`, and `H` in two sibling sections.
+#[test]
+fn unnumbered_headings_are_one_per_node_and_never_beside_numbered_ones() {
+    assert_eq!(
+        grammar_of("1", &[(20, "H", 11, vec![], ""), (21, "H", 11, vec![], "")]).one_finding(),
+        (
+            "7.4.4".to_string(),
+            FindingKind::StructureKidRepeated {
+                element: "Document".to_string(),
+                kid: "H".to_string(),
+                count: 2,
+            }
+        )
+    );
+    grammar_of(
+        "1",
+        &[
+            (20, "Sect", 11, vec![21], ""),
+            (21, "H", 20, vec![], ""),
+            (22, "Sect", 11, vec![23], ""),
+            (23, "H", 22, vec![], ""),
+        ],
+    )
+    .clean();
+    assert_eq!(
+        grammar_of(
+            "1",
+            &[(20, "H", 11, vec![], ""), (21, "H1", 11, vec![], "")]
+        )
+        .one_finding(),
+        ("7.4.4".to_string(), FindingKind::HeadingKindsMixed)
+    );
+}
+
+/// UA-1 7.9-1 and 7.9-2: "Note tag shall have ID entry", "Each Note tag
+/// shall have unique ID key". The twin is two notes with two identifiers.
+#[test]
+fn a_note_carries_an_id_of_its_own() {
+    grammar_of(
+        "1",
+        &[
+            (20, "Note", 11, vec![], "/ID (n1)"),
+            (21, "Note", 11, vec![], "/ID (n2)"),
+        ],
+    )
+    .clean();
+    assert_eq!(
+        grammar_of("1", &[(20, "Note", 11, vec![], "")]).one_finding(),
+        ("7.9".to_string(), FindingKind::NoteIdMissing)
+    );
+    assert_eq!(
+        grammar_of("1", &[(20, "Note", 11, vec![], "/ID ()")]).one_finding(),
+        ("7.9".to_string(), FindingKind::NoteIdMissing)
+    );
+    assert_eq!(
+        grammar_of(
+            "1",
+            &[
+                (20, "Note", 11, vec![], "/ID (n1)"),
+                (21, "Note", 11, vec![], "/ID (n1)"),
+            ],
+        )
+        .one_finding(),
+        (
+            "7.9".to_string(),
+            FindingKind::NoteIdDuplicate {
+                id: "n1".to_string(),
+            }
+        )
+    );
+}
+
+/// UA-1 7.3-1 and 7.7-1, veraPDF's condition for both: `(Alt != null && Alt
+/// != '') || ActualText != null`. An empty `/Alt` is no description and an
+/// empty `/ActualText` is a replacement (7.3-t01-pass-c against -fail-b, and
+/// 7.7's pair). Part 2's 8.2.5.28.2 condition is `Alt != null`, so the empty
+/// `/Alt` is the twin there; and part 2 states no `Formula` rule.
+#[test]
+fn an_empty_alt_describes_nothing_under_part_one_and_an_empty_actual_text_stands() {
+    for (structure_type, clause) in [("Figure", "7.3"), ("Formula", "7.7")] {
+        let with = |part: &str, entries: &str| {
+            grammar_of(part, &[(20, structure_type, 11, vec![], entries)])
+        };
+        assert_eq!(
+            with("1", "/Alt ()").one_finding(),
+            (
+                clause.to_string(),
+                FindingKind::AlternativeDescriptionMissing {
+                    structure_type: structure_type.to_string(),
+                }
+            ),
+            "{structure_type}"
+        );
+        assert_eq!(
+            with("1", "").one_finding().0,
+            clause,
+            "{structure_type} with neither"
+        );
+        with("1", "/ActualText ()").clean();
+        with("1", "/Alt (A sum)").clean();
+    }
+    grammar_of("2", &[(20, "Figure", 11, vec![], "/Alt ()")]).clean();
+    grammar_of("2", &[(20, "Formula", 11, vec![], "")]).clean();
+}

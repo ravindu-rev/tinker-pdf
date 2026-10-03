@@ -465,3 +465,32 @@ PDF/UA and admitted under PDF/A in one test", is
 `the_empty_language_is_pdfa_conforming_and_pdfua_not`. Until the nightly run
 reports, each of the twenty-four is held only to the fixture and twin built
 here, which read the clause the same way in both directions.
+
+**Milestone 3's tree half landed in October 2026; its grid half and the
+attribute reader did not, and its corpus exit is owed.** What the milestone
+table priced as the structure-grammar group turned out, rule by published
+rule, to need nothing the structure reader does not already hold: an
+element's standard type, its parent's and its kids'. So it landed without the
+attribute reader — the content models of tables, lists and TOCs (veraPDF's
+7.2-3 to 7.2-20, 7.2-26 to 7.2-28 and 7.2-36 to 7.2-40), 7.4.4's one `H` per
+node and no `H` beside an `Hn`, 7.9's `Note` identifiers present and unique,
+and 7.7's `Formula`, each in `pdfua_rules.rs` with its twin. Two readings,
+both towards silence: a kid whose type resolves to nothing standard is not
+judged here, since the structure-type rule already reports it; and the
+structure tree root, as a parent, is no standard type. The corpus reading
+this document records — "a `List` may contain a `List`" while an `L` in an
+`LI` fails — is what the published conditions give (7.2-19 admits `L` in `L`;
+7.2-20 admits only `Lbl` and `LBody` in `LI`). And the empty-`/Alt` reading
+recorded above landed with it: under part 1 an empty `/Alt` no longer
+describes a `Figure`, which the milestone 1 rule had let through, and under
+part 2, whose condition is `Alt != null`, it still does. This engine's own
+output — the EPUB conversion and the tagged builder in `pdfua.rs` — is silent
+under every new rule.
+
+Left of milestone 3: the table's grid — cells that intersect, rows and
+columns that disagree across `/RowSpan` and `/ColSpan` (7.2-15, 7.2-41 to
+7.2-43) — and the header association over it (7.5), which is where the grid
+model [table-reconstruction.md](table-reconstruction.md) shares would come in.
+`PDFUA_STAGED` went from seventeen entries to fourteen, and 7.2's narrowed.
+**Owed by the nightly census**: 7.2's, 7.4's, 7.7's and 7.9's `-fail-` files
+caught, and false alarms still zero over the 195 conforming files.

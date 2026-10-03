@@ -43,8 +43,19 @@ number differs.
 - **Structure**: the tree the structure reader binds — a `/StructTreeRoot`
   (UA-1 7.1, UA-2 8.2.1), one that can be walked, `/MarkInfo /Marked true`
   (6.2 in both published profiles), `/Suspects` not true (UA-1 7.1), a
-  `Figure` with `/Alt` or `/ActualText` (UA-1 7.3, UA-2 8.2.5.28.2), headings
-  starting at `H1` and never skipping a level in reading order (UA-1 7.4.2), a
+  `Figure` with `/Alt` or `/ActualText` (UA-1 7.3, UA-2 8.2.5.28.2) and a
+  `Formula` likewise (UA-1 7.7) — an empty `/Alt` describing nothing under
+  part 1 and standing under part 2, an empty `/ActualText` standing under
+  both — headings
+  starting at `H1` and never skipping a level in reading order (UA-1 7.4.2),
+  at most one `H` under any node and never an `H` beside an `Hn` (7.4.4), the
+  content models of tables, lists and tables of contents — which parent a
+  row, a cell, a list item or a TOC item sits in, which kids a table, a row,
+  a table section, a list, an item or a TOC may hold, at most one `THead`,
+  `TFoot` and `Caption` in a table, a `TBody` beside a `THead` or `TFoot`, a
+  caption where its container admits one (UA-1 7.2, as veraPDF's 7.2-3 to
+  7.2-20, 7.2-26 to 7.2-28 and 7.2-36 to 7.2-40 state them) — every `Note`
+  carrying an `/ID` no other `Note` carries (7.9), a
   natural language stated somewhere (UA-1 7.2) or on the catalog itself and
   not empty (UA-2 8.4.4), every `/Lang` on the catalog and on an element an
   RFC 3066 language tag and never empty (7.2, 8.4.4), every structure type
