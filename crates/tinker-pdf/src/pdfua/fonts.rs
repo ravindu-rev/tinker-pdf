@@ -45,16 +45,30 @@ use super::{clauses, UaClauses, UaPart, UaRaw};
 use crate::pdfa::FindingKind;
 use crate::pdfa::{content, Flavour, Level, Machinery, Part, RuleGroup};
 
-/// How many distinct strings one font contributes to the `/ToUnicode` value
-/// check.
+/// How many bytes of drawn strings the `/ToUnicode` value check holds
+/// before it splits them into codes and lets them go, each string charged
+/// its length and [`STRING_OVERHEAD`].
 ///
 /// The rule is about codes, and a document with a million `Tj`s draws the
-/// same few hundred codes over and over; keeping every string would make the
-/// check's memory the size of the text.
-const MAX_STRINGS_PER_FONT: usize = 1 << 12;
+/// same few hundred codes over and over. Keeping the strings until the walk
+/// ended made the check's memory the size of the text **once per font that
+/// drew it**: one shared content stream holding a 512 KiB string, drawn on
+/// 512 pages each mapping `/F1` to a font of its own, held 256 MiB from a
+/// 3.2 MB file. Now the strings are a buffer and the codes are what is kept.
+const MAX_PENDING_BYTES: usize = 1 << 20;
+
+/// What one held string costs beyond its bytes: a set entry and a vector's
+/// header, so that a million empty strings are not free.
+const STRING_OVERHEAD: usize = 32;
 
 /// How many fonts the `/ToUnicode` value check reads.
 const MAX_FONTS: usize = 1 << 12;
+
+/// How many codes of three or four bytes one font contributes. A code below
+/// 2^16 — every simple font's, and a two-byte composite font's — is one bit
+/// of a set that holds all 65 536 of them exactly, so only a font whose CMap
+/// has wider codespaces is ever cut short, and only past this many.
+const MAX_WIDE_CODES_PER_FONT: usize = 1 << 10;
 
 /// How many `/ToUnicode` findings one font contributes.
 const MAX_VALUE_FINDINGS: usize = 8;
@@ -89,9 +103,10 @@ pub(super) fn rules(
         }
     }
 
-    let drawn = drawn_strings(doc);
-    for (reference, strings) in drawn.iter().take(MAX_FONTS) {
-        unicode_values(doc, *reference, strings, out);
+    for (reference, codes) in &drawn_codes(doc) {
+        if let Some(codes) = codes {
+            unicode_values(doc, *reference, codes, out);
+        }
     }
 }
 
@@ -116,15 +131,17 @@ pub(super) fn ua_clause_of(kind: &FindingKind) -> Option<UaClauses> {
     })
 }
 
-/// Every string a text-showing operator drew, by the font it drew with.
+/// Every code a text-showing operator drew, by the font it drew with; `None`
+/// for a font with no `/ToUnicode` stream, which the value rule has nothing
+/// to judge in.
 ///
 /// **At any rendering mode**, unlike the font group's own usage scan: the
 /// `/ToUnicode` value rule is about text extraction, not about painting, and
 /// veraPDF's statement of 7.21.7-2 says the requirement holds "regardless of
 /// their rendering mode usage". Invisible OCR text is exactly the text a
 /// screen reader reads.
-fn drawn_strings(doc: &CosDocument) -> BTreeMap<ObjRef, BTreeSet<Vec<u8>>> {
-    let mut drawn: BTreeMap<ObjRef, BTreeSet<Vec<u8>>> = BTreeMap::new();
+fn drawn_codes(doc: &CosDocument) -> BTreeMap<ObjRef, Option<Codes>> {
+    let mut drawn = Drawn::default();
     content::walk(doc, &mut |op| {
         if !matches!(op.operator, b"Tj" | b"TJ" | b"'" | b"\"") {
             return;
@@ -135,20 +152,131 @@ fn drawn_strings(doc: &CosDocument) -> BTreeMap<ObjRef, BTreeSet<Vec<u8>>> {
         let Some(reference) = content::lookup(doc, resources, b"Font", name) else {
             return;
         };
-        if !drawn.contains_key(&reference) && drawn.len() >= MAX_FONTS {
-            return;
-        }
-        let strings = drawn.entry(reference).or_default();
         for token in op.operands {
             if let Token::String(bytes) = token {
-                if strings.len() >= MAX_STRINGS_PER_FONT {
-                    return;
-                }
-                strings.insert(bytes.clone());
+                drawn.add(doc, reference, bytes);
             }
         }
     });
-    drawn
+    drawn.flush(doc);
+    drawn.codes
+}
+
+/// The walk's state: the codes found so far, and the strings drawn since
+/// they were last split into codes.
+#[derive(Default)]
+struct Drawn {
+    /// Every font met, up to [`MAX_FONTS`].
+    codes: BTreeMap<ObjRef, Option<Codes>>,
+    /// Distinct strings not yet split, by font.
+    pending: BTreeMap<ObjRef, BTreeSet<Vec<u8>>>,
+    /// What `pending` holds, as [`MAX_PENDING_BYTES`] counts it.
+    pending_bytes: usize,
+}
+
+impl Drawn {
+    /// One string drawn with the font at `reference`.
+    fn add(&mut self, doc: &CosDocument, reference: ObjRef, bytes: &[u8]) {
+        let judged = match self.codes.get(&reference) {
+            Some(codes) => codes.is_some(),
+            None => {
+                if self.codes.len() >= MAX_FONTS {
+                    return;
+                }
+                let judged = to_unicode_of(doc, reference).is_some();
+                self.codes.insert(reference, judged.then(Codes::default));
+                judged
+            }
+        };
+        if !judged {
+            return;
+        }
+        let strings = self.pending.entry(reference).or_default();
+        if strings.contains(bytes) {
+            return;
+        }
+        strings.insert(bytes.to_vec());
+        self.pending_bytes = self
+            .pending_bytes
+            .saturating_add(bytes.len() + STRING_OVERHEAD);
+        if self.pending_bytes >= MAX_PENDING_BYTES {
+            self.flush(doc);
+        }
+    }
+
+    /// Splits every held string into codes, through its font's own encoding
+    /// (a simple font's bytes, a composite font's CMap), and lets it go. A
+    /// font is read once a flush, and only a font with strings held.
+    fn flush(&mut self, doc: &CosDocument) {
+        for (reference, strings) in std::mem::take(&mut self.pending) {
+            let Some(Some(codes)) = self.codes.get_mut(&reference) else {
+                continue;
+            };
+            let Ok(object) = doc.get(reference) else {
+                continue;
+            };
+            let Some(dict) = object.as_dict() else {
+                continue;
+            };
+            let font = tinker_pdf_cos::font::read(doc, dict);
+            for string in &strings {
+                for decoded in font.decode(string) {
+                    codes.insert(decoded.code);
+                }
+            }
+        }
+        self.pending_bytes = 0;
+    }
+}
+
+/// The codes one font drew.
+#[derive(Default)]
+struct Codes {
+    /// Codes below 2^16, one bit each, grown as far as the highest one.
+    narrow: Vec<u64>,
+    /// Codes from 2^16 up, at most [`MAX_WIDE_CODES_PER_FONT`].
+    wide: BTreeSet<u32>,
+}
+
+impl Codes {
+    fn insert(&mut self, code: u32) {
+        match u16::try_from(code) {
+            Ok(code) => {
+                let word = usize::from(code / 64);
+                if self.narrow.len() <= word {
+                    self.narrow.resize(word + 1, 0);
+                }
+                if let Some(bits) = self.narrow.get_mut(word) {
+                    *bits |= 1 << (code % 64);
+                }
+            }
+            Err(_) => {
+                if self.wide.len() < MAX_WIDE_CODES_PER_FONT {
+                    self.wide.insert(code);
+                }
+            }
+        }
+    }
+
+    /// Every code, in ascending order.
+    fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        (0u32..)
+            .zip(&self.narrow)
+            .flat_map(|(word, bits)| {
+                (0..64u32)
+                    .filter(move |bit| bits >> bit & 1 == 1)
+                    .map(move |bit| word * 64 + bit)
+            })
+            .chain(self.wide.iter().copied())
+    }
+}
+
+/// The font's `/ToUnicode` stream, when it has one by reference.
+fn to_unicode_of(doc: &CosDocument, reference: ObjRef) -> Option<ObjRef> {
+    let object = doc.get(reference).ok()?;
+    let dict = object.as_dict()?;
+    let to_unicode = dict.get_ref(doc.intern(b"ToUnicode"))?;
+    matches!(doc.get(to_unicode).as_deref(), Ok(Object::Stream(_))).then_some(to_unicode)
 }
 
 /// ISO 14289-1 7.21.7, second sentence, as veraPDF's 7.21.7-2 states it:
@@ -156,53 +284,35 @@ fn drawn_strings(doc: &CosDocument) -> BTreeMap<ObjRef, BTreeSet<Vec<u8>>> {
 /// than zero (0), but not equal to either U+FEFF or U+FFFE." Judged over the
 /// codes a page draws, which is the object veraPDF's rule is stated over —
 /// a `/ToUnicode` may carry entries for codes nothing shows.
-fn unicode_values(
-    doc: &CosDocument,
-    reference: ObjRef,
-    strings: &BTreeSet<Vec<u8>>,
-    out: &mut Vec<UaRaw>,
-) {
-    let Ok(object) = doc.get(reference) else {
+fn unicode_values(doc: &CosDocument, reference: ObjRef, codes: &Codes, out: &mut Vec<UaRaw>) {
+    let Some(to_unicode) = to_unicode_of(doc, reference) else {
         return;
     };
-    let Some(dict) = object.as_dict() else {
-        return;
-    };
-    let key = doc.intern(b"ToUnicode");
-    let Some(to_unicode) = dict.get_ref(key) else {
-        return;
-    };
-    if !matches!(doc.get(to_unicode).as_deref(), Ok(Object::Stream(_))) {
-        return;
-    }
     let Ok(bytes) = doc.stream_decoded(to_unicode) else {
         return;
     };
     let cmap = tinker_pdf_font::cmap::parse(&bytes);
-    let font = tinker_pdf_cos::font::read(doc, dict);
-    let mut reported: BTreeSet<u32> = BTreeSet::new();
-    for string in strings {
-        for decoded in font.decode(string) {
-            if reported.len() >= MAX_VALUE_FINDINGS || reported.contains(&decoded.code) {
-                continue;
-            }
-            let Some(text) = cmap.to_unicode_string(decoded.code) else {
-                continue;
-            };
-            if let Some(bad) = text
-                .chars()
-                .find(|c| matches!(*c, '\u{0}' | '\u{FEFF}' | '\u{FFFE}'))
-            {
-                reported.insert(decoded.code);
-                out.push(UaRaw {
-                    rule: clauses::UNICODE_MAPPING,
-                    object: Some(reference),
-                    kind: FindingKind::ToUnicodeValueForbidden {
-                        code: decoded.code,
-                        value: u32::from(bad),
-                    },
-                });
-            }
+    let mut reported = 0usize;
+    for code in codes.iter() {
+        if reported >= MAX_VALUE_FINDINGS {
+            return;
+        }
+        let Some(text) = cmap.to_unicode_string(code) else {
+            continue;
+        };
+        if let Some(bad) = text
+            .chars()
+            .find(|c| matches!(*c, '\u{0}' | '\u{FEFF}' | '\u{FFFE}'))
+        {
+            reported += 1;
+            out.push(UaRaw {
+                rule: clauses::UNICODE_MAPPING,
+                object: Some(reference),
+                kind: FindingKind::ToUnicodeValueForbidden {
+                    code,
+                    value: u32::from(bad),
+                },
+            });
         }
     }
 }

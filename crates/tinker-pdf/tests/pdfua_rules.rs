@@ -26,7 +26,7 @@
 //! its false-alarm count over the 195 conforming fixtures is owed by the next
 //! nightly run.
 
-use tinker_pdf::{ConformanceFinding, Document, FindingKind, PdfUaPart};
+use tinker_pdf::{ConformanceFinding, Document, FindingKind, PdfUaCoverage, PdfUaPart};
 
 // A face with real `cmap`, `glyf` and `hmtx` tables, for the width rule.
 #[path = "epub_support/mod.rs"]
@@ -953,6 +953,159 @@ fn a_drawn_code_mapped_to_a_forbidden_value_is_reported() {
         );
     }
     mapped("1", &[(0x41, "0041"), (0x42, "FFFE")]).clean();
+}
+
+/// The kinds of the font group's findings alone.
+fn font_findings(fixture: &Ua) -> Vec<FindingKind> {
+    Document::open(fixture.build())
+        .expect("the fixture opens")
+        .validate_pdfua_with(PdfUaCoverage::FONTS)
+        .findings
+        .into_iter()
+        .map(|finding| finding.kind)
+        .collect()
+}
+
+/// Ruling 1, from the review of lane 7A: the value check kept every distinct
+/// string a font drew until the walk ended, and stopped at 4 096 of them. The
+/// count did not bound the bytes, and the bound was per font: one shared
+/// content stream holding a 512 KiB string, drawn on 512 pages whose `/F1`
+/// was a font of each page's own, held 256 MiB from a 3.2 MB file. The rule
+/// is about codes, so codes are what is kept now — every code below 2^16 —
+/// and a string is held only until a mebibyte of them is split.
+///
+/// So a code a font draws for the first time after four thousand other
+/// strings is judged: all 4 096 strings of twelve `A`s and `B`s, then a `C`
+/// mapped to U+0000. The twin is the same file with `C` mapped to `C`.
+#[test]
+fn a_code_drawn_after_four_thousand_strings_is_judged() {
+    let drawn = |c: &str| {
+        let mut fixture = mapped("1", &[(0x41, "0041"), (0x42, "0042"), (0x43, c)]);
+        fixture.font = fixture.font.replace(
+            "/LastChar 65 /Widths [500]",
+            "/LastChar 67 /Widths [500 500 500]",
+        );
+        let mut content = String::from("/P << /MCID 0 >> BDC BT /F1 12 Tf 10 10 Td ");
+        for n in 0..4096u32 {
+            let string: String = (0..12)
+                .map(|bit| if n >> bit & 1 == 1 { 'B' } else { 'A' })
+                .collect();
+            content.push_str(&format!("({string}) Tj "));
+        }
+        content.push_str("(C) Tj ET EMC");
+        fixture.content = content;
+        font_findings(&fixture)
+    };
+    assert_eq!(
+        drawn("0000"),
+        [FindingKind::ToUnicodeValueForbidden {
+            code: 0x43,
+            value: 0
+        }]
+    );
+    assert_eq!(drawn("0043"), Vec::<FindingKind>::new());
+}
+
+/// The strings held are let go a mebibyte at a time, and none of them is lost
+/// on the way: six pages share one content stream drawing 256 KiB of `A`
+/// with `/F1`, each page's `/F1` a font of its own, so the sixth font's
+/// strings are split after the walk ends and the first four's in the middle
+/// of it. The sixth font maps `A` to U+0000, and the twin is the third font
+/// doing so instead.
+#[test]
+fn strings_split_into_codes_on_the_way_are_still_judged() {
+    let shared = |bad: u32| {
+        let mut fixture = mapped("1", &[(0x41, "0041")]);
+        fixture.content = format!("BT /F1 12 Tf 10 10 Td ({}) Tj ET", "A".repeat(256 << 10));
+        for page in 0..6u32 {
+            let (num, font, map) = (100 + page, 200 + page, 300 + page);
+            fixture.kids.push(num);
+            fixture.extra.push((
+                num,
+                format!(
+                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
+                     /Resources << /Font << /F1 {font} 0 R >> >> /Contents 9 0 R >>"
+                )
+                .into_bytes(),
+            ));
+            fixture.extra.push((
+                font,
+                format!("<< {} /ToUnicode {map} 0 R >>", Ua::new("1").font).into_bytes(),
+            ));
+            let value = if page == bad { "0000" } else { "0041" };
+            fixture
+                .extra
+                .push((map, stream("", &to_unicode(false, &[(0x41, value)]))));
+        }
+        font_findings(&fixture)
+    };
+    for bad in [5, 2] {
+        assert_eq!(
+            shared(bad),
+            [FindingKind::ToUnicodeValueForbidden {
+                code: 0x41,
+                value: 0
+            }],
+            "the font of page {bad}"
+        );
+    }
+}
+
+/// A three-byte codespace, codes from 0x010000 selecting CIDs from 0, and a
+/// `/ToUnicode` mapping `bad` to U+0000 and the codes below 0x010400 to
+/// letters.
+fn three_byte(bad: u32, drawn: impl Iterator<Item = u32>) -> Ua {
+    let mut fixture = type0("1");
+    fixture.font = fixture
+        .font
+        .replace("/Identity-H", "24 0 R")
+        .replace("/ToUnicode 21 0 R", "/ToUnicode 25 0 R");
+    let program = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+                   /CMapName /Acme-H def\n\
+                   1 begincodespacerange <000000> <FFFFFF> endcodespacerange\n\
+                   1 begincidrange <010000> <0104FF> 0 endcidrange\n\
+                   endcmap CMapName currentdict /CMap defineresource pop end end";
+    fixture.extra.push((
+        24,
+        stream(
+            &format!("/Type /CMap /CMapName /Acme-H {IDENTITY_COLLECTION}"),
+            program.as_bytes(),
+        ),
+    ));
+    let to_unicode = format!(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+         /CMapName /Adobe-Identity-UCS def\n\
+         1 begincodespacerange <000000> <FFFFFF> endcodespacerange\n\
+         4 beginbfrange <010000> <0100FF> <0041> <010100> <0101FF> <0041> \
+         <010200> <0102FF> <0041> <010300> <0103FF> <0041> endbfrange\n\
+         1 beginbfchar <{bad:06X}> <0000> endbfchar\n\
+         endcmap CMapName currentdict /CMap defineresource pop end end"
+    );
+    fixture.extra.push((25, stream("", to_unicode.as_bytes())));
+    let hex: String = drawn.map(|code| format!("{code:06X}")).collect();
+    fixture.content = format!("/P << /MCID 0 >> BDC BT /F1 12 Tf 10 10 Td <{hex}> Tj ET EMC");
+    fixture
+}
+
+/// The one cut the codes still have: a font whose CMap's codes are three or
+/// four bytes long contributes its first 1 024 of them past 2^16, since one
+/// bit each is not a set it could hold. The 1 025th code is not judged, and
+/// the twin is the same code drawn first.
+#[test]
+fn a_font_contributes_at_most_1024_codes_past_two_bytes() {
+    let others = 0x01_0000..0x01_0400u32;
+    let last = 0x01_0400;
+    assert_eq!(
+        font_findings(&three_byte(last, others.clone().chain([last]))),
+        Vec::<FindingKind>::new()
+    );
+    assert_eq!(
+        font_findings(&three_byte(last, [last].into_iter().chain(others))),
+        [FindingKind::ToUnicodeValueForbidden {
+            code: last,
+            value: 0
+        }]
+    );
 }
 
 // ---- milestone 2: natural language ------------------------------------------

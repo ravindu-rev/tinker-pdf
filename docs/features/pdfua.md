@@ -84,7 +84,9 @@ number differs.
   font's encoding CMap embedded unless Table 118 predefines it, its `/WMode`
   agreeing with its program, no `usecmap` outside Table 118 (7.21.3.3,
   8.4.5.4), its collection the CIDFont's (7.21.3.1, 8.4.5.3.1) — and no drawn
-  code whose `/ToUnicode` maps to U+0000, U+FEFF or U+FFFE (7.21.7, 8.4.5.8).
+  code whose `/ToUnicode` maps to U+0000, U+FEFF or U+FFFE (7.21.7, 8.4.5.8),
+  over every code below 2^16 a font draws and its first 1 024 wider ones —
+  kept as codes, the drawn strings held a mebibyte at a time.
   A Type 3 font, whose glyphs are content streams, has no program to embed.
 
 **One rule, two standards.** Where ISO 14289 asks what ISO 19005 asks, the
