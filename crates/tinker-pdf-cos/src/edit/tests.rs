@@ -153,6 +153,41 @@ fn rotating_a_page_accumulates_and_normalizes() {
     assert_eq!(pages::collect(&saved)[0].rotation, 90);
 }
 
+/// **A `/Rotate` the document chose cannot overflow a turn** (ruling 1).
+///
+/// The existing value was added to the caller's before either was reduced,
+/// so a page stating `/Rotate 9223372036854775807` panicked in a debug build
+/// on any positive turn and wrapped in a release one. A turn is still taken
+/// on top of what the page reads as: `i64::MAX` reads as 0 (7 rounds down),
+/// so a quarter more is 90, and `i64::MIN` reads as 0 too (352 rounds up).
+#[test]
+fn a_rotate_near_the_ends_of_an_integer_turns_without_overflowing() {
+    for (stated, by, expected) in [
+        (i64::MAX, 90, 90),
+        (i64::MIN, -90, 270),
+        (90, i64::MAX, 90),
+        (i64::MAX, i64::MAX, 0),
+    ] {
+        let mut editor = DocumentEditor::new(document(1));
+        let page = editor.page_refs()[0];
+        let Some(Object::Dict(mut dict)) = editor.get(page) else {
+            panic!("the page is a dictionary");
+        };
+        dict.insert(editor.intern(b"Rotate"), Object::Int(stated));
+        editor.put(page, Object::Dict(dict));
+        let saved = reopen(&editor, WriteMode::Rewrite);
+
+        let mut editor = DocumentEditor::new(Arc::new(saved));
+        assert!(editor.rotate_page(0, by));
+        let saved = reopen(&editor, WriteMode::Rewrite);
+        assert_eq!(
+            pages::collect(&saved)[0].rotation,
+            expected,
+            "/Rotate {stated} turned by {by}"
+        );
+    }
+}
+
 /// **A crop box reaches the file as the rectangle the caller stated.**
 ///
 /// Read back through `pages::collect`, which clips a crop box to the media

@@ -70,7 +70,10 @@ impl DocumentEditor {
 
         let rotate = self.intern(b"Rotate");
         let current = dict.get_int(rotate).unwrap_or(0);
-        let next = pages::normalize_rotation(current + degrees);
+        // Each reduced before the sum: `/Rotate` is the document's to state,
+        // and one near `i64::MAX` overflowed it (ruling 1). Reducing first
+        // leaves the turn as it was, since the sum is taken modulo 360 anyway.
+        let next = pages::normalize_rotation(current.rem_euclid(360) + degrees.rem_euclid(360));
         dict.insert(rotate, Object::Int(i64::from(next)));
         self.put(reference, Object::Dict(dict));
         true
