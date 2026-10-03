@@ -51,7 +51,9 @@ design names as future work.
   storage requires.
 - **Writing complete tagged structure.** `DocumentBuilder` gains
   `/StructParents` allocation and a minimal element tree for its own output;
-  a general tagging API is future work.
+  a general tagging API is future work. *Amended October 2026: the general
+  API landed after this design closed, as the tagged-writing row — see
+  "The writer, as built" below.*
 - **PDF 2.0 namespaces** (ISO 32000-2's namespaced structure types); noted
   in `docs/pdf20-deltas.md` when read support lands.
 - **Assistive-technology integration.** This is bytes-to-values reading; a
@@ -208,6 +210,27 @@ reader hears, and that outline is the headings in reading order (14.8)
 regardless of what contains them — so the level carries across siblings and
 out of containers. The corpus found that; the unit tests, all of which used
 flat siblings, could not have.
+
+## The writer, as built
+
+Milestone 6's builder wrote a type and the content it claimed, and nothing
+else. The roadmap's tagged-writing row grew it into a tagging API; what it
+writes, family by family:
+
+- **14.9's properties and the general API.** `Tag` carries a structure type
+  and, each only when stated, `/Alt`, `/ActualText`, `/E`, `/Lang` and `/T`,
+  written as text strings for the declared version.
+  `PageBuilder::tagged_with(&Tag, …)` is the closure form;
+  `open_tag(&Tag)`/`close_tag()` the explicit one, which spans drawing calls
+  and pages — an element open when its page is pushed is closed there and
+  reopened on the next page begun under a key of the builder's own, and the
+  halves merge at `finish` the way `tagged_keyed`'s always have. An element
+  that draws nothing is kept when it carries a property or
+  `Tag::keep_empty()`, and dropped when it says nothing, which is what the
+  first writer did with every empty element. `DocumentBuilder::set_language`
+  writes the catalog's `/Lang`. The page-level nesting cap is one below the
+  reader's, because `/Document` is a level of its own; it used to equal the
+  reader's, and the deepest element's text came back orphaned.
 
 ## Dependencies
 

@@ -172,22 +172,6 @@ pub use png_read::PngReadError;
 pub use render_part::{NotDrawn, RenderPartError};
 /// A page written as SVG 1.1: [`Page::to_svg`], and what it could not say.
 pub use svg_out::{Rasterised, Svg, SvgOptions, SvgWarning, MAX_SVG_BYTES};
-/// Creating form fields (12.7.3), behind [`DocumentEditor::add_field`].
-///
-/// Here for the reason `ExtGState` is: [`NewField`] is the method's argument
-/// and [`AddFieldError`] its refusal, and a method whose argument cannot be
-/// named is callable by nobody outside this workspace (ruling 11). [`Rect`]
-/// comes with them because every widget a field places is one; it is the
-/// object model's own rectangle rather than a second spelling of four
-/// numbers.
-///
-/// [`SignatureAppearance`] and [`SignatureImage`] are the payload of
-/// [`SigningTarget::NewVisibleField`], the signature that draws a seal, and
-/// are here for the same reason: a variant whose payload cannot be named is a
-/// variant nobody outside this workspace can build.
-pub use tinker_pdf_cos::{
-    AddFieldError, NewField, NewFieldKind, RadioButton, Rect, SignatureAppearance, SignatureImage,
-};
 /// Writing: creation, editing and saving.
 ///
 /// Without these on the facade a caller depending only on this crate could
@@ -232,10 +216,31 @@ pub use tinker_pdf_cos::{
 /// `finish_archival` returns and what `refusals` hands back — a refusal a
 /// caller cannot name is a refusal they cannot match on, which is the thing
 /// this whole surface exists to avoid.
+///
+/// `Tag` is the argument to `PageBuilder::tagged_with` and `open_tag`, the
+/// tagging API that writes 14.9's properties; `is_language_tag` is the check
+/// its `lang` documentation sends a caller to.
 pub use tinker_pdf_cos::{
-    ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal, DocumentBuilder, DocumentEditor,
-    EditCheckpoint, EmbeddedWhole, Encryption, FillError, FillRejection, ImageData, OutlineEntry,
-    PageBuilder, SkippedWidget, SubsetRefusal, Target, WidgetDefect, WriteMode, WriteOptions,
+    is_language_tag, ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal,
+    DocumentBuilder, DocumentEditor, EditCheckpoint, EmbeddedWhole, Encryption, FillError,
+    FillRejection, ImageData, OutlineEntry, PageBuilder, SkippedWidget, SubsetRefusal, Tag, Target,
+    WidgetDefect, WriteMode, WriteOptions,
+};
+/// Creating form fields (12.7.3), behind [`DocumentEditor::add_field`].
+///
+/// Here for the reason `ExtGState` is: [`NewField`] is the method's argument
+/// and [`AddFieldError`] its refusal, and a method whose argument cannot be
+/// named is callable by nobody outside this workspace (ruling 11). [`Rect`]
+/// comes with them because every widget a field places is one; it is the
+/// object model's own rectangle rather than a second spelling of four
+/// numbers.
+///
+/// [`SignatureAppearance`] and [`SignatureImage`] are the payload of
+/// [`SigningTarget::NewVisibleField`], the signature that draws a seal, and
+/// are here for the same reason: a variant whose payload cannot be named is a
+/// variant nobody outside this workspace can build.
+pub use tinker_pdf_cos::{
+    AddFieldError, NewField, NewFieldKind, RadioButton, Rect, SignatureAppearance, SignatureImage,
 };
 /// Document operations on [`DocumentEditor`]: page labels, embedded files,
 /// `/Info` and XMP, viewer preferences, the production page boundaries, and

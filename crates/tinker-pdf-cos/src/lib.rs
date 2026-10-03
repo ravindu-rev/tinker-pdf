@@ -93,11 +93,11 @@ mod streams;
 pub use appearance::synthesize as synthesize_appearance;
 pub use bmp_embed::bmp_image;
 pub use build::{
-    jpeg_shape, subset_tag, ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal,
-    BlendMode, CalculatorOp, CompressedImage, DeviceNAttributes, DeviceSpace, DocumentBuilder,
-    EmbeddedWhole, ExtGState, FormXObject, Function, Glyph, ImageColorSpace, ImageData,
-    ImageFilter, LayerId, MaskKind, OutlineEntry, PageBuilder, PlacedGlyph, Shading,
-    ShadingPattern, SoftMask, StateMask, SubsetRefusal, Target, TilingPattern, TilingType,
+    is_language_tag, jpeg_shape, subset_tag, ArchivalLevel, ArchivalPart, ArchivalProfile,
+    ArchivalRefusal, BlendMode, CalculatorOp, CompressedImage, DeviceNAttributes, DeviceSpace,
+    DocumentBuilder, EmbeddedWhole, ExtGState, FormXObject, Function, Glyph, ImageColorSpace,
+    ImageData, ImageFilter, LayerId, MaskKind, OutlineEntry, PageBuilder, PlacedGlyph, Shading,
+    ShadingPattern, SoftMask, StateMask, SubsetRefusal, Tag, Target, TilingPattern, TilingType,
     TransparencyGroup,
 };
 // `calc::keystroke` and `calc::validate` are deliberately *not* re-exported

@@ -465,6 +465,27 @@ marked-content sequence and records the element that claims it, so the tree
 is correct by construction: there is no way to name a marked-content id
 that was never written, and none to write one no element claims.
 
+`tagged_with(&Tag, |page| …)` is the same with what an element says about
+itself: `Tag::new(b"Figure").alt("…")`, `.actual_text`, `.expansion` (`/E`),
+`.lang` and `.title` (`/T`) write 14.9's properties as text strings encoded
+for the declared version, each only when stated. `open_tag(&Tag)` and
+`close_tag()` are the same without a closure, for a caller whose paragraph
+starts in one call and ends several calls — or pages — later: an element
+still open when its page is pushed is closed there and reopened on the next
+page begun, and `finish` writes the two halves as one element whose kids on
+the second page are `/MCR`s with their own `/Pg` (14.7.2 Table 323). A
+closure's element is the closure's to close — `close_tag` cannot reach it,
+and what the closure opened and left open is closed when it returns. An
+element that draws nothing is **kept when it says something** — an `/Alt`,
+a `/Lang`, or `Tag::keep_empty()` for an empty table cell — and dropped
+when it says nothing, as before. `DocumentBuilder::set_language` writes the
+catalog's `/Lang`, and `is_language_tag` is the shape check (14.9.2's
+RFC 3066, BCP 47 in 2.0) a caller holding someone else's text makes first.
+Nesting stops one level short of the reader's `MAX_NEST_DEPTH`, because
+`finish` puts every page's elements under one `/Document`; it used to stop
+at the cap itself, and an element nested exactly that deep came back
+orphaned under `DepthCapped` (`opens_past_the_depth_cap_are_refused_and_still_paired`).
+
 Coordinates are PDF user space, y upward — the space the page's own boxes
 are in; a display transform is the caller's. The `Device` trait, the
 interpreter, `TextDevice` and `RecordingDevice` live in `tinker-pdf-content`
@@ -489,7 +510,6 @@ crate has an API of its own; see [architecture](../architecture.md).
 | `/ActualText` on a property list carrying no `/MCID` | — | the map is keyed by `(stream, /MCID)`, so a list with no identifier reaches no consumer | 14.9.4 |
 | Images inside a tiling pattern's cell, a soft-mask group or an annotation appearance | `Page::images()` does not list them | none is a drawing of the page's content: the renderer reaches a pattern cell and a mask group through its own device, not through the interpreter's `Do`, and an appearance belongs to the annotation | 8.7.3, 11.6.5, 12.5.5 |
 | A JPEG 2000 image's own opacity channel in extraction | `PageImage::samples` holds the colour channels only | `/SMaskInData` decides what the channel means (8.9.5.4), and a soft mask carried out of the codestream is not an `/SMask` image the type can name; the renderer applies it | 8.9.5.4 |
-| `/Alt`, `/ActualText`, `/E` and `/Lang` on **written** structure elements | — | `PageBuilder::tagged` writes the type and the content, not the 14.9 properties; an empty element is therefore dropped rather than kept, since an empty `Figure` carrying `/Alt` is the case that would want one | 14.9 |
 
 The rendering side of a hidden layer is reported too —
 `RenderWarning::HiddenOptionalContent { layer }` names which layer was not

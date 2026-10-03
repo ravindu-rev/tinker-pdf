@@ -1940,6 +1940,15 @@ pub struct PageBuilder {
     /// sequence has had anything drawn into it. See [`Self::close_marked`].
     opened: Option<usize>,
     opened_end: usize,
+    /// How many [`PageBuilder::open_tag`] calls past [`MAX_TAG_DEPTH`] are
+    /// still unclosed. They opened nothing, so their [`PageBuilder::close_tag`]
+    /// must close nothing either.
+    refused_opens: usize,
+    /// How many elements on [`Self::tag_stack`], and how many refused opens,
+    /// belong to a `tagged` closure still running. [`PageBuilder::close_tag`]
+    /// does not reach below either: an element a closure opened is the
+    /// closure's to close.
+    floor: (usize, usize),
     /// The device colour space an [`ArchivalProfile`]'s destination profile
     /// admits, when the document is being written under one.
     ///
@@ -1975,7 +1984,7 @@ struct TaggedNode {
     /// whose box was drawn a page away from where it reads -- and are merged
     /// at `finish`. `None` is an anonymous element, which never merges with
     /// anything and is what [`PageBuilder::tagged`] produces.
-    key: Option<u64>,
+    key: Option<NodeKey>,
     /// Where this element reads, which is **not** its key.
     ///
     /// The two are separate because they answer different questions and cannot
@@ -1985,7 +1994,60 @@ struct TaggedNode {
     /// met again on a later page keeps the **earliest** position it was given,
     /// because that is where it reads.
     order: u64,
+    /// What the element says about itself beyond its type (14.9, and the
+    /// attributes of 14.8.5). Boxed and optional because almost no element
+    /// carries any of it, and a book is tagged run by run.
+    props: Option<Box<ElementProps>>,
+    /// Kept even when it claims nothing. See [`Tag::keep_empty`].
+    keep: bool,
     kids: Vec<TaggedKid>,
+}
+
+impl TaggedNode {
+    /// Whether this element is written at all.
+    ///
+    /// An element that claims nothing **and says nothing** is dropped: it can
+    /// only arise from a `tagged` whose closure drew nothing, and a structure
+    /// element with no content, no children and no properties is a node the
+    /// reader would report and nobody asked for. One that carries an `/Alt`, a
+    /// `/Lang`, an identifier or table attributes is a statement in its own
+    /// right — an empty `/Figure` described by its `/Alt`, an empty table cell
+    /// that keeps a row's columns in step — and is kept, as is one the caller
+    /// asked to keep.
+    fn is_kept(&self) -> bool {
+        !self.kids.is_empty() || self.props.is_some() || self.keep
+    }
+
+    /// The order a kid appended now takes: past every kid already here, so a
+    /// stable sort leaves it after them.
+    fn next_order(&self) -> u64 {
+        self.kids.iter().map(TaggedKid::order).max().unwrap_or(0)
+    }
+}
+
+/// A key that merges the halves of one element across pages.
+///
+/// Two spaces rather than one number, so that an element
+/// [`PageBuilder::open_tag`] left open over a page break — which takes a key
+/// of the builder's choosing — can never collide with one a caller of
+/// [`PageBuilder::tagged_keyed`] chose for its own reasons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeKey {
+    /// The caller's.
+    Caller(u64),
+    /// The builder's, for an element carried over a page break.
+    Carried(u64),
+}
+
+/// An element left open when its page was pushed, reopened on the next page
+/// begun. See [`PageBuilder::open_tag`].
+#[derive(Clone)]
+struct CarriedTag {
+    tag: Vec<u8>,
+    key: NodeKey,
+    order: u64,
+    props: Option<Box<ElementProps>>,
+    keep: bool,
 }
 
 /// What a structure element holds: marked content on its own page, or a
@@ -2011,13 +2073,204 @@ enum TaggedKid {
     Element(TaggedNode),
 }
 
+impl TaggedKid {
+    fn order(&self) -> u64 {
+        match self {
+            TaggedKid::Content { order, .. } => *order,
+            TaggedKid::Element(child) => child.order,
+        }
+    }
+}
+
 /// How deep [`PageBuilder::tagged`] will nest before it stops opening
 /// elements and simply draws.
 ///
 /// The reader caps its own walk at [`crate::limits::MAX_NEST_DEPTH`], so a
 /// writer that nested past it would produce a file this engine could not read
 /// back — which is the one thing a writer must not do.
-const MAX_TAG_DEPTH: usize = crate::limits::MAX_NEST_DEPTH as usize;
+///
+/// **One less than the reader's cap, because `finish` adds a level**: every
+/// page's elements are written under one `/Document`, so a page nesting
+/// `MAX_NEST_DEPTH` elements put its innermost at the depth whose kids the
+/// reader refuses, and its text was orphaned with a `DepthCapped` warning. This
+/// constant used to be the reader's cap itself; the depth-cap test written
+/// with `open_tag` found it.
+const MAX_TAG_DEPTH: usize = crate::limits::MAX_NEST_DEPTH as usize - 1;
+
+/// A structure element to open: its type, and what it says about itself
+/// (14.7.2 Table 323, 14.9, 14.8.5).
+///
+/// Built by chaining — `Tag::new(b"Figure").alt("A cat asleep on a mat")` —
+/// and handed to [`PageBuilder::tagged_with`] or [`PageBuilder::open_tag`].
+/// Every property is optional and each is written only when stated, so a
+/// `Tag` naming nothing but its type writes exactly what
+/// [`PageBuilder::tagged`] always has.
+///
+/// The text properties are **text strings** (7.9.2.2), encoded for the
+/// version the document declares, as `/Info` and outline titles are.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tag {
+    kind: Vec<u8>,
+    key: Option<u64>,
+    order: u64,
+    props: ElementProps,
+    keep: bool,
+}
+
+/// The properties a [`Tag`] carries apart from its type.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ElementProps {
+    /// `/T`.
+    title: Option<String>,
+    /// `/Lang` (14.9.2).
+    lang: Option<String>,
+    /// `/Alt` (14.9.3).
+    alt: Option<String>,
+    /// `/ActualText` (14.9.4).
+    actual_text: Option<String>,
+    /// `/E` (14.9.5).
+    expansion: Option<String>,
+}
+
+impl ElementProps {
+    /// For a merged element: every property `other` states that `self` does
+    /// not. Where both halves made a statement, the first half's stands.
+    fn fill_from(&mut self, other: &ElementProps) {
+        let ElementProps {
+            title,
+            lang,
+            alt,
+            actual_text,
+            expansion,
+        } = other;
+        fill(&mut self.title, title);
+        fill(&mut self.lang, lang);
+        fill(&mut self.alt, alt);
+        fill(&mut self.actual_text, actual_text);
+        fill(&mut self.expansion, expansion);
+    }
+}
+
+fn fill<T: Clone>(slot: &mut Option<T>, other: &Option<T>) {
+    if slot.is_none() {
+        slot.clone_from(other);
+    }
+}
+
+impl Tag {
+    /// An element of structure type `kind` — `P`, `H1`, `Figure`, `Span`, or
+    /// a type of the caller's own that [`DocumentBuilder::map_role`] maps to
+    /// one of them.
+    #[must_use]
+    pub fn new(kind: &[u8]) -> Tag {
+        Tag {
+            kind: kind.to_vec(),
+            key: None,
+            order: 0,
+            props: ElementProps::default(),
+            keep: false,
+        }
+    }
+
+    /// Names the element, so that its halves drawn on different pages are
+    /// one element — the [`Tag`] form of [`PageBuilder::tagged_keyed`], whose
+    /// documentation says what `key` and `order` each answer.
+    #[must_use]
+    pub fn keyed(mut self, key: u64, order: u64) -> Tag {
+        self.key = Some(key);
+        self.order = order;
+        self
+    }
+
+    /// `/T`, a title for the element (14.7.2 Table 323).
+    #[must_use]
+    pub fn title(mut self, text: &str) -> Tag {
+        self.props.title = Some(text.to_owned());
+        self
+    }
+
+    /// `/Lang`, the natural language of the element's content (14.9.2).
+    ///
+    /// A language tag as BCP 47 spells one (`en`, `fr-CA`, `zh-Hant`), or the
+    /// empty string for a language that is not known. It is the caller's
+    /// statement and is written as given; [`is_language_tag`] is the check a
+    /// caller holding text from a document it did not write makes first.
+    #[must_use]
+    pub fn lang(mut self, tag: &str) -> Tag {
+        self.props.lang = Some(tag.to_owned());
+        self
+    }
+
+    /// `/Alt`, a description of content that is not text (14.9.3) — what a
+    /// `/Figure` is a picture *of*.
+    #[must_use]
+    pub fn alt(mut self, text: &str) -> Tag {
+        self.props.alt = Some(text.to_owned());
+        self
+    }
+
+    /// `/ActualText`, what the content *is* where the glyphs drawn do not say
+    /// it (14.9.4): a drop capital drawn as a picture, a ligature, a word
+    /// hyphenated across a line.
+    #[must_use]
+    pub fn actual_text(mut self, text: &str) -> Tag {
+        self.props.actual_text = Some(text.to_owned());
+        self
+    }
+
+    /// `/E`, the expansion of an abbreviation or acronym (14.9.5).
+    #[must_use]
+    pub fn expansion(mut self, text: &str) -> Tag {
+        self.props.expansion = Some(text.to_owned());
+        self
+    }
+
+    /// Writes the element even if nothing is drawn inside it.
+    ///
+    /// An element carrying any property is kept anyway; this is for one that
+    /// carries none and still means something by being there empty — a table
+    /// cell with nothing in it, which keeps the cells after it in their
+    /// columns.
+    #[must_use]
+    pub fn keep_empty(mut self) -> Tag {
+        self.keep = true;
+        self
+    }
+
+    /// The structure type.
+    #[must_use]
+    pub fn kind(&self) -> &[u8] {
+        &self.kind
+    }
+
+    fn boxed_props(&self) -> Option<Box<ElementProps>> {
+        (self.props != ElementProps::default()).then(|| Box::new(self.props.clone()))
+    }
+}
+
+/// Whether `text` has the shape of a language tag (14.9.2.2).
+///
+/// ISO 32000-1 14.9.2 defines the value by RFC 3066 and ISO 32000-2 by BCP 47,
+/// and both build a tag out of subtags of one to eight letters and digits
+/// joined by hyphens, the first of them letters only. This checks that shape
+/// and consults no registry — the check that can be made without one, and the
+/// grammar the facade's PDF/A validator holds parts 2 and 3 to. The empty
+/// string is accepted: it says the language is unknown, which is a statement
+/// rather than an omission, and ISO 19005's conforming fixtures write it.
+#[must_use]
+pub fn is_language_tag(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    text.split('-').enumerate().all(|(at, subtag)| {
+        (1..=8).contains(&subtag.len())
+            && if at == 0 {
+                subtag.bytes().all(|b| b.is_ascii_alphabetic())
+            } else {
+                subtag.bytes().all(|b| b.is_ascii_alphanumeric())
+            }
+    })
+}
 
 impl PageBuilder {
     /// Sets `/CropBox`, as `[x0 y0 x1 y1]` in points from the bottom-left.
@@ -2069,7 +2322,7 @@ impl PageBuilder {
         // An anonymous element has no position of its own; a stable sort
         // then leaves every one of them exactly where it was drawn, which
         // is what a caller that names nothing had before any of this.
-        self.tag_with(tag, None, 0, draw);
+        self.tagged_with(&Tag::new(tag), draw);
     }
 
     /// The same, for an element the caller can **name**.
@@ -2093,35 +2346,88 @@ impl PageBuilder {
         order: u64,
         draw: impl FnOnce(&mut PageBuilder),
     ) {
-        self.tag_with(tag, Some(key), order, draw);
+        self.tagged_with(&Tag::new(tag).keyed(key, order), draw);
     }
 
-    /// Where the two forms meet.
-    fn tag_with(
-        &mut self,
-        tag: &[u8],
-        key: Option<u64>,
-        order: u64,
-        draw: impl FnOnce(&mut PageBuilder),
-    ) {
-        if self.tag_stack.len() >= MAX_TAG_DEPTH {
-            draw(self);
-            return;
+    /// Draws inside the structure element `tag` describes — its type, and
+    /// whatever of `/Alt`, `/ActualText`, `/E`, `/Lang` and `/T` it states
+    /// (14.9) — recording an element that claims exactly what was drawn.
+    ///
+    /// The closure form of [`PageBuilder::open_tag`] and
+    /// [`PageBuilder::close_tag`], and the one that cannot be misnested: the
+    /// element is closed when the closure returns, along with anything the
+    /// closure opened with `open_tag` and left open, and a `close_tag` inside
+    /// the closure cannot close the closure's own element or anything around
+    /// it.
+    ///
+    /// An element that draws nothing is kept when it says something — see
+    /// [`Tag::keep_empty`] — and dropped when it does not, which is what
+    /// [`PageBuilder::tagged`] has always done.
+    pub fn tagged_with(&mut self, tag: &Tag, draw: impl FnOnce(&mut PageBuilder)) {
+        let opened = self.open_tag(tag);
+        let floor = std::mem::replace(&mut self.floor, (self.tag_stack.len(), self.refused_opens));
+        draw(self);
+        // What the closure opened and did not close, innermost first. A
+        // refused open is always innermost — nothing can be opened while one
+        // is outstanding, because the stack is still at the cap — so the
+        // count is simply put back.
+        self.refused_opens = self.refused_opens.min(self.floor.1);
+        while self.tag_stack.len() > self.floor.0 {
+            self.close_top();
+        }
+        self.floor = floor;
+        if opened {
+            self.close_top();
+        } else {
+            self.refused_opens = self.refused_opens.saturating_sub(1);
+        }
+    }
+
+    /// Opens the structure element `tag` describes, so that everything drawn
+    /// until the matching [`PageBuilder::close_tag`] belongs to it — across
+    /// any number of drawing calls, and **across pages**.
+    ///
+    /// The explicit form of [`PageBuilder::tagged_with`], for a caller whose
+    /// drawing is not shaped like a closure: a layout engine that meets the
+    /// start of a paragraph in one call and its end several calls later, or
+    /// on a later page.
+    ///
+    /// # Across a page break
+    ///
+    /// An element still open when its page is handed to
+    /// [`DocumentBuilder::push_page`] is closed on that page and **reopened on
+    /// the next page begun**, with everything open around it, as the same
+    /// element: 14.7.2 Table 323 lets an element's kids name different pages,
+    /// and `finish` writes the two halves as one element whose kids on its
+    /// second page are `/MCR` dictionaries carrying their own `/Pg`. So a
+    /// paragraph opened on page 3 and closed on page 4 is one `/P`. Nothing is
+    /// carried to a page begun *before* the push — [`DocumentBuilder::begin_page`]
+    /// takes what the last push left, as it takes the resources.
+    ///
+    /// Returns false, opening nothing, past [`MAX_TAG_DEPTH`] nested elements
+    /// — the depth this crate's reader walks to — and what is drawn is then
+    /// drawn into the element around it (ruling 2). The matching `close_tag`
+    /// is still owed, and closes nothing.
+    pub fn open_tag(&mut self, tag: &Tag) -> bool {
+        if self.tag_stack.len() >= MAX_TAG_DEPTH || self.refused_opens > 0 {
+            self.refused_opens += 1;
+            return false;
         }
 
         // The parent's sequence closes before the child's opens: 14.7.4.2
         // scopes content to the innermost sequence, and leaving the parent's
         // open would make the child's content belong to both.
-        let resume = self.tag_stack.last().map(|parent| parent.tag.clone());
-        if resume.is_some() {
+        if !self.tag_stack.is_empty() {
             self.close_marked();
         }
 
-        let mcid = self.open_marked(tag);
+        let mcid = self.open_marked(&tag.kind);
         self.tag_stack.push(TaggedNode {
-            tag: tag.to_vec(),
-            key,
-            order,
+            tag: tag.kind.clone(),
+            key: tag.key.map(NodeKey::Caller),
+            order: tag.order,
+            props: tag.boxed_props(),
+            keep: tag.keep,
             // **The element's own first sequence is seeded from `order`**, and
             // that is why no separate "say where this content sits" call is
             // needed: `tagged_keyed` is called once per page, with the position
@@ -2130,29 +2436,99 @@ impl PageBuilder {
             // landed on. A `mark_order` method existed here and was deleted
             // when its counted injection fired zero twice, against a fixture
             // written specifically to catch it.
-            kids: vec![TaggedKid::Content { mcid, order }],
+            kids: vec![TaggedKid::Content {
+                mcid,
+                order: tag.order,
+            }],
         });
-        draw(self);
-        self.close_marked();
+        true
+    }
 
-        let node = self.tag_stack.pop().expect("pushed immediately above");
-        // An element that claims nothing at all is dropped. It can only arise
-        // from a `tagged` whose closure drew nothing, and a structure element
-        // with no content and no children is a node the reader would report
-        // and nobody asked for. `/Alt` on an empty `Figure` is the case that
-        // would want one, and this builder cannot write `/Alt` yet.
-        if !node.kids.is_empty() {
+    /// Closes the innermost element [`PageBuilder::open_tag`] opened.
+    ///
+    /// Returns false, closing nothing, when there is nothing this call may
+    /// close: no element open, or only elements a running
+    /// [`PageBuilder::tagged_with`] closure opened around this call, which
+    /// are that closure's to close. A close matching a refused `open_tag` is
+    /// accepted and closes nothing.
+    pub fn close_tag(&mut self) -> bool {
+        if self.refused_opens > 0 {
+            if self.refused_opens <= self.floor.1 {
+                return false;
+            }
+            self.refused_opens -= 1;
+            return true;
+        }
+        if self.tag_stack.len() <= self.floor.0 {
+            return false;
+        }
+        self.close_top();
+        true
+    }
+
+    /// Closes the innermost open element and hands it to its parent, or to
+    /// the page's roots.
+    fn close_top(&mut self) {
+        self.close_marked();
+        let Some(node) = self.tag_stack.pop() else {
+            return;
+        };
+        if node.is_kept() {
             match self.tag_stack.last_mut() {
                 Some(parent) => parent.kids.push(TaggedKid::Element(node)),
                 None => self.tag_roots.push(node),
             }
         }
-
         // Reopen the parent so anything drawn after this child still belongs
         // to it. If nothing is, `close_marked` takes the reopening back.
-        if resume.is_some() {
-            self.resume_parent();
+        self.resume_parent();
+    }
+
+    /// Closes every element still open, giving each one that has none a key
+    /// so its continuation on the next page merges with it, and says what to
+    /// reopen there. See [`PageBuilder::open_tag`].
+    fn carry_over(&mut self, next_key: &mut u64) -> (Vec<CarriedTag>, usize) {
+        let mut carried = Vec::with_capacity(self.tag_stack.len());
+        for node in &mut self.tag_stack {
+            let key = match node.key {
+                Some(key) => key,
+                None => {
+                    let key = NodeKey::Carried(*next_key);
+                    *next_key = next_key.saturating_add(1);
+                    node.key = Some(key);
+                    key
+                }
+            };
+            carried.push(CarriedTag {
+                tag: node.tag.clone(),
+                key,
+                order: node.order,
+                props: node.props.clone(),
+                keep: node.keep,
+            });
         }
+        self.floor = (0, 0);
+        while !self.tag_stack.is_empty() {
+            self.close_top();
+        }
+        (carried, std::mem::take(&mut self.refused_opens))
+    }
+
+    /// Reopens what the previous page carried over, outermost first, and the
+    /// innermost one's sequence so what is drawn first belongs to it.
+    fn reopen(&mut self, carried: &[CarriedTag], refused: usize) {
+        for tag in carried {
+            self.tag_stack.push(TaggedNode {
+                tag: tag.tag.clone(),
+                key: Some(tag.key),
+                order: tag.order,
+                props: tag.props.clone(),
+                keep: tag.keep,
+                kids: Vec::new(),
+            });
+        }
+        self.refused_opens = refused;
+        self.resume_parent();
     }
 
     /// Opens a fresh marked-content sequence for the innermost open structure
@@ -2172,15 +2548,7 @@ impl PageBuilder {
         // an order past its siblings' rather than the parent's own. Without
         // this a paragraph's second half sorts back in front of the span that
         // split it.
-        let order = parent
-            .kids
-            .iter()
-            .map(|kid| match kid {
-                TaggedKid::Content { order, .. } => *order,
-                TaggedKid::Element(child) => child.order,
-            })
-            .max()
-            .unwrap_or(0);
+        let order = parent.next_order();
         parent.kids.push(TaggedKid::Content { mcid, order });
     }
 
@@ -2218,7 +2586,7 @@ impl PageBuilder {
         if layer.builder != self.builder || !holds(&self.resources.properties, &resource) {
             return false;
         }
-        if self.optional_depth >= MAX_TAG_DEPTH {
+        if self.optional_depth >= crate::limits::MAX_NEST_DEPTH as usize {
             return false;
         }
         let tagged = !self.tag_stack.is_empty();
@@ -3333,6 +3701,15 @@ pub struct DocumentBuilder {
     refusals: Vec<ArchivalRefusal>,
     /// Which builder this is, for the handles it gives out to carry.
     serial: BuilderSerial,
+    /// Structure elements the last pushed page left open, which the next page
+    /// begun reopens, and how many refused opens were outstanding with them.
+    /// See [`PageBuilder::open_tag`].
+    carried: Vec<CarriedTag>,
+    carried_refused: usize,
+    /// The next key an element carried over a page break takes.
+    next_carry: u64,
+    /// The catalog's `/Lang`. See [`DocumentBuilder::set_language`].
+    language: Option<String>,
 }
 
 impl Default for DocumentBuilder {
@@ -3369,7 +3746,25 @@ impl DocumentBuilder {
             profile: None,
             refusals: Vec::new(),
             serial: BuilderSerial::next(),
+            carried: Vec::new(),
+            carried_refused: 0,
+            next_carry: 0,
+            language: None,
         }
+    }
+
+    /// The document's natural language, written as the catalog's `/Lang`
+    /// (14.9.2.3 in ISO 32000-1's numbering): the language of every piece of
+    /// text that no structure element or marked-content sequence states one
+    /// for.
+    ///
+    /// A language tag, or the empty string for a language that is not known —
+    /// see [`is_language_tag`]. It is the caller's statement and is written as
+    /// given. Under an [`ArchivalProfile`] that states its own language, the
+    /// profile's is written instead, since that is the one its level A claim
+    /// was checked against.
+    pub fn set_language(&mut self, language: &str) {
+        self.language = Some(language.to_owned());
     }
 
     /// An empty document whose header declares PDF `major.minor` (7.5.2).
@@ -5388,7 +5783,7 @@ impl DocumentBuilder {
     /// handle.
     #[must_use]
     pub fn begin_page(&self, width: f64, height: f64) -> PageBuilder {
-        PageBuilder {
+        let mut page = PageBuilder {
             width,
             height,
             content: Vec::new(),
@@ -5404,11 +5799,15 @@ impl DocumentBuilder {
             tag_stack: Vec::new(),
             opened: None,
             opened_end: 0,
+            refused_opens: 0,
+            floor: (0, 0),
             archival_space: self.profile.as_ref().map(|p| p.destination_space),
             refusals: Vec::new(),
             optional_depth: 0,
             builder: self.serial,
-        }
+        };
+        page.reopen(&self.carried, self.carried_refused);
+        page
     }
 
     /// Adds a page the caller has finished drawing.
@@ -5425,6 +5824,11 @@ impl DocumentBuilder {
     /// written with the names it was drawn with.
     pub fn push_page(&mut self, mut page: PageBuilder) {
         self.refusals.append(&mut page.refusals);
+        // Structure elements still open are closed on this page and carried
+        // to the next one begun; see `PageBuilder::open_tag`.
+        let (carried, refused) = page.carry_over(&mut self.next_carry);
+        self.carried = carried;
+        self.carried_refused = refused;
         self.pages.push(page);
     }
 
@@ -5680,11 +6084,49 @@ impl DocumentBuilder {
             if let Some(page) = default {
                 element.insert(self.names.intern(b"Pg"), Object::Ref(pages[page]));
             }
-            element.insert(self.names.intern(b"K"), Object::Array(written));
+            // `/K` is optional (Table 323) and an element kept empty states
+            // none, rather than an empty array that says the same thing in
+            // more bytes.
+            if !written.is_empty() {
+                element.insert(self.names.intern(b"K"), Object::Array(written));
+            }
+            if let Some(props) = &node.props {
+                self.write_element_props(&mut element, props);
+            }
             self.objects.insert(reference.num, Object::Dict(element));
             out.push(Object::Ref(reference));
         }
         out
+    }
+
+    /// The entries of Table 323 a [`Tag`] states, each only when stated.
+    ///
+    /// Every one of the five is a text string (7.9.2.2), encoded for the
+    /// version the document declares — so UTF-8 in a 2.0 document and
+    /// PDFDocEncoding or UTF-16BE below it, as `/Info` is.
+    fn write_element_props(&self, element: &mut Dict, props: &ElementProps) {
+        let version = self.declared_version();
+        let ElementProps {
+            title,
+            lang,
+            alt,
+            actual_text,
+            expansion,
+        } = props;
+        for (key, value) in [
+            (&b"T"[..], title),
+            (b"Lang", lang),
+            (b"Alt", alt),
+            (b"ActualText", actual_text),
+            (b"E", expansion),
+        ] {
+            if let Some(text) = value {
+                element.insert(
+                    self.names.intern(key),
+                    Object::String(encode_text_string(text, version)),
+                );
+            }
+        }
     }
 
     /// Serializes the document.
@@ -5849,7 +6291,12 @@ impl DocumentBuilder {
             // **The key only.** The elements themselves are written after
             // every page has one, because an element may now hold content from
             // more than one page and cannot be written until they all exist.
-            if struct_root.is_some() && !page.tag_roots.is_empty() {
+            //
+            // Keyed on whether the page wrote a sequence rather than on whether
+            // it holds an element: an element kept empty is an element with no
+            // marked content, and a page holding only such elements has no
+            // sequence for a `/ParentTree` array to index.
+            if struct_root.is_some() && page.next_mcid > 0 {
                 let key = tagged_pages.len() as i64;
                 tagged_pages.push(at);
                 dict.insert(self.names.intern(b"StructParents"), Object::Int(key));
@@ -5944,6 +6391,17 @@ impl DocumentBuilder {
                 catalog.insert(
                     self.names.intern(b"Lang"),
                     Object::String(PdfString::literal(language.as_bytes().to_vec())),
+                );
+            }
+        }
+        // The caller's own statement of the document's language, where a
+        // profile has not already made one.
+        if let Some(language) = &self.language {
+            let key = self.names.intern(b"Lang");
+            if catalog.get(key).is_none() {
+                catalog.insert(
+                    key,
+                    Object::String(encode_text_string(language, self.declared_version())),
                 );
             }
         }
@@ -6583,9 +7041,12 @@ fn archival_packet(profile: &ArchivalProfile, info: &Dict, names: &NameTable) ->
 /// because merging appends to a node already in the tree.
 struct Merged {
     tag: Vec<u8>,
-    key: Option<u64>,
+    key: Option<NodeKey>,
     /// The **earliest** position any of its halves was given.
     order: u64,
+    /// What its halves said about it, the first half's statement standing
+    /// where two disagree.
+    props: Option<Box<ElementProps>>,
     kids: Vec<MergedKid>,
 }
 
@@ -6624,6 +7085,11 @@ fn absorb(arena: &mut Vec<Merged>, siblings: &mut Vec<MergedKid>, node: &TaggedN
             // continued onto a later page did not move, and a float met early
             // and drawn late did not either.
             arena[at].order = arena[at].order.min(node.order);
+            match (&mut arena[at].props, &node.props) {
+                (Some(mine), Some(theirs)) => mine.fill_from(theirs),
+                (slot @ None, Some(theirs)) => *slot = Some(theirs.clone()),
+                (_, None) => {}
+            }
             at
         }
         None => {
@@ -6631,6 +7097,7 @@ fn absorb(arena: &mut Vec<Merged>, siblings: &mut Vec<MergedKid>, node: &TaggedN
                 tag: node.tag.clone(),
                 key: node.key,
                 order: node.order,
+                props: node.props.clone(),
                 kids: Vec::new(),
             });
             let at = arena.len() - 1;

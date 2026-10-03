@@ -233,3 +233,299 @@ fn an_untagged_document_gains_nothing() {
     }
     assert!(Document::open(bytes).expect("opens").structure().is_none());
 }
+
+// ---- the general tagging API (`Tag`, `open_tag`, `close_tag`) --------------
+
+use tinker_pdf::{StructElement, Tag};
+
+/// Every element in the tree, depth-first.
+fn elements(doc: &Document) -> Vec<StructElement> {
+    doc.structure()
+        .expect("a tree")
+        .elements()
+        .into_iter()
+        .cloned()
+        .collect()
+}
+
+/// The one element of a type, asserting there is exactly one.
+fn only(doc: &Document, kind: &str) -> StructElement {
+    let found: Vec<StructElement> = elements(doc)
+        .into_iter()
+        .filter(|element| element.standard_type == kind)
+        .collect();
+    assert_eq!(found.len(), 1, "{} elements of type {kind}", found.len());
+    found.into_iter().next().expect("asserted above")
+}
+
+/// 14.9's four properties and `/T`, written by the builder and read back by
+/// the reader as the text they were given.
+///
+/// Through both encodings a text string can take below 2.0 — PDFDocEncoding
+/// for the ASCII ones and UTF-16BE for the ones that need it — and through
+/// UTF-8 in a document declaring 2.0, which is 7.9.2.2's third form.
+#[test]
+fn the_accessibility_properties_are_written_and_read_back() {
+    for (major, minor) in [(1u8, 7u8), (2, 0)] {
+        let mut builder = DocumentBuilder::with_version(major, minor);
+        builder.add_base_font(b"F1", b"Helvetica");
+        builder.add_page(300.0, 200.0, |page| {
+            page.tagged_with(
+                &Tag::new(b"Figure")
+                    .alt("Un chat endormi sur un tapis \u{2014} \u{263A}")
+                    .title("Plate 1")
+                    .lang("fr-CA"),
+                |page| page.fill_rect(10.0, 10.0, 50.0, 50.0, 0.5),
+            );
+            page.tagged_with(
+                &Tag::new(b"Span")
+                    .actual_text("\u{FB01}sh")
+                    .expansion("fish"),
+                |page| page.text(b"F1", 12.0, 20.0, 150.0, "fish"),
+            );
+        });
+        let bytes = builder.finish();
+        structurally_clean(bytes.clone());
+        let doc = Document::open(bytes).expect("opens");
+
+        let figure = only(&doc, "Figure");
+        assert_eq!(
+            figure.alt.as_deref(),
+            Some("Un chat endormi sur un tapis \u{2014} \u{263A}"),
+            "{major}.{minor}"
+        );
+        assert_eq!(figure.title.as_deref(), Some("Plate 1"));
+        assert_eq!(figure.lang.as_deref(), Some("fr-CA"));
+        assert_eq!(figure.actual_text, None, "nothing unstated is written");
+
+        let span = only(&doc, "Span");
+        assert_eq!(span.actual_text.as_deref(), Some("\u{FB01}sh"));
+        assert_eq!(span.expansion.as_deref(), Some("fish"));
+        assert_eq!(span.alt, None);
+
+        // The join: `/ActualText` replaces the glyphs (14.9.4).
+        let tree = doc.structure().expect("a tree");
+        let structured = tree.text_for_page(0, &doc.page(0).expect("a page").text());
+        assert!(
+            structured.nodes.iter().any(|node| node.text == "\u{FB01}sh"
+                && node.source == tinker_pdf::TextSource::ActualText),
+            "{:?}",
+            structured.nodes
+        );
+    }
+}
+
+/// **An element that draws nothing is kept when it says something.**
+///
+/// `an_element_that_draws_nothing_is_not_written` above is the other half and
+/// still holds: an empty `Figure` that states nothing is dropped. One that
+/// carries an `/Alt` is the case that wants keeping — a picture described in
+/// words — and so is a table cell asked to be kept, whose absence would move
+/// every cell after it one column left.
+#[test]
+fn an_empty_element_that_says_something_is_kept() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(300.0, 200.0, |page| {
+        page.tagged(b"P", |page| {
+            page.text(b"F1", 12.0, 20.0, 150.0, "only this");
+        });
+        page.tagged_with(&Tag::new(b"Figure").alt("an empty frame"), |_| {});
+        page.tagged_with(&Tag::new(b"TD").keep_empty(), |_| {});
+        page.tagged_with(&Tag::new(b"Div"), |_| {});
+    });
+
+    let bytes = builder.finish();
+    structurally_clean(bytes.clone());
+    let doc = Document::open(bytes).expect("opens");
+    let tree = doc.structure().expect("a tree");
+    assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+    let StructKid::Element(document) = &tree.kids[0] else {
+        panic!("the root kid is an element");
+    };
+    let kinds: Vec<&str> = document
+        .kids
+        .iter()
+        .filter_map(|kid| match kid {
+            StructKid::Element(element) => Some(element.standard_type.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        ["P", "Figure", "TD"],
+        "the bare empty Div is dropped"
+    );
+    let figure = only(&doc, "Figure");
+    assert!(figure.kids.is_empty(), "an empty element claims nothing");
+    assert_eq!(figure.page, None, "and so states no default page");
+    assert_eq!(tree.content_count(), 1, "and writes no sequence");
+}
+
+/// `open_tag` and `close_tag` span **content-stream calls and pages**: a
+/// paragraph opened on one page and closed on the next is one `/P`, whose
+/// kids on its second page carry their own `/Pg`.
+#[test]
+fn an_element_opened_on_one_page_and_closed_on_the_next_is_one_element() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(300.0, 200.0, |page| {
+        assert!(page.open_tag(&Tag::new(b"Sect").title("Chapter")));
+        page.tagged(b"H1", |page| page.text(b"F1", 18.0, 20.0, 170.0, "Title"));
+        assert!(page.open_tag(&Tag::new(b"P").lang("en")));
+        page.text(b"F1", 12.0, 20.0, 150.0, "begins here");
+        page.text(b"F1", 12.0, 20.0, 130.0, "and goes on");
+        // Left open: the page is pushed with the paragraph and the section
+        // both unclosed.
+    });
+    builder.add_page(300.0, 200.0, |page| {
+        page.text(b"F1", 12.0, 20.0, 170.0, "and ends here.");
+        assert!(page.close_tag(), "the paragraph");
+        page.tagged(b"P", |page| page.text(b"F1", 12.0, 20.0, 150.0, "Next."));
+        assert!(page.close_tag(), "the section");
+        assert!(!page.close_tag(), "nothing is left open");
+    });
+
+    let bytes = builder.finish();
+    structurally_clean(bytes.clone());
+    let doc = Document::open(bytes).expect("opens");
+    let tree = doc.structure().expect("a tree");
+    assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+
+    let section = only(&doc, "Sect");
+    assert_eq!(section.title.as_deref(), Some("Chapter"));
+    let paragraphs: Vec<StructElement> = elements(&doc)
+        .into_iter()
+        .filter(|element| element.standard_type == "P")
+        .collect();
+    assert_eq!(paragraphs.len(), 2, "the broken paragraph is one element");
+    let broken = &paragraphs[0];
+    assert_eq!(broken.lang.as_deref(), Some("en"), "stated once, kept once");
+    let pages: Vec<Option<u32>> = broken
+        .kids
+        .iter()
+        .filter_map(|kid| match kid {
+            StructKid::Content { page, .. } => Some(*page),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pages, [Some(0), Some(1)], "one sequence on each page");
+
+    for (index, expected) in [
+        (0u32, "Title\nbegins hereand goes on"),
+        (1, "and ends here.\nNext."),
+    ] {
+        let structured = tree.text_for_page(index, &doc.page(index).expect("a page").text());
+        assert_eq!(structured.orphans, 0, "page {index}");
+        assert_eq!(structured.unmarked, 0, "page {index}");
+        assert_eq!(structured.plain_text().trim(), expected, "page {index}");
+    }
+}
+
+/// A closure's element is the closure's to close: `close_tag` inside it
+/// cannot reach it, and what the closure opens and leaves open is closed when
+/// it returns.
+#[test]
+fn a_closure_closes_what_it_opened_and_nothing_outside_it() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(300.0, 200.0, |page| {
+        page.tagged(b"Div", |page| {
+            assert!(!page.close_tag(), "the Div is the closure's");
+            assert!(page.open_tag(&Tag::new(b"P")));
+            page.text(b"F1", 12.0, 20.0, 150.0, "inside");
+            // The P is left open, and the closure closes it.
+        });
+        page.text(b"F1", 12.0, 20.0, 120.0, "outside");
+    });
+
+    let doc = Document::open(builder.finish()).expect("opens");
+    let tree = doc.structure().expect("a tree");
+    let div = only(&doc, "Div");
+    assert!(
+        matches!(&div.kids[..], [StructKid::Element(p)] if p.standard_type == "P"),
+        "{:?}",
+        div.kids
+    );
+    let structured = tree.text_for_page(0, &doc.page(0).expect("a page").text());
+    assert_eq!(structured.plain_text().trim(), "inside");
+    assert_eq!(
+        structured.unmarked, 7,
+        "`outside` is drawn after both closed"
+    );
+}
+
+/// Past the depth the reader walks, `open_tag` opens nothing and its
+/// `close_tag` closes nothing — and the elements below are still closed by
+/// their own calls, in order.
+///
+/// The depth is one less than the reader's cap because the writer puts every
+/// page's elements under one `/Document`. This test is what found that the
+/// writer's cap used to be the reader's own: an element nested exactly that
+/// deep was written and its text came back orphaned under a `DepthCapped`
+/// warning — the one thing the cap existed to prevent.
+#[test]
+fn opens_past_the_depth_cap_are_refused_and_still_paired() {
+    let depth = tinker_pdf_cos::limits::MAX_NEST_DEPTH as usize - 1;
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(300.0, 200.0, |page| {
+        for _ in 0..depth {
+            assert!(page.open_tag(&Tag::new(b"Div")));
+        }
+        assert!(!page.open_tag(&Tag::new(b"Span")), "past the cap");
+        assert!(!page.open_tag(&Tag::new(b"Span")), "still past it");
+        page.text(b"F1", 12.0, 20.0, 150.0, "deep");
+        assert!(page.close_tag(), "the second refused open");
+        assert!(page.close_tag(), "the first");
+        for _ in 0..depth {
+            assert!(page.close_tag(), "a Div");
+        }
+        assert!(!page.close_tag());
+    });
+    let doc = Document::open(builder.finish()).expect("opens");
+    let tree = doc.structure().expect("a tree");
+    assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+    assert_eq!(tree.element_count(), depth + 1, "the Divs and the Document");
+    let structured = tree.text_for_page(0, &doc.page(0).expect("a page").text());
+    assert_eq!(structured.plain_text().trim(), "deep");
+}
+
+/// The catalog's `/Lang` (14.9.2): the language of everything no element
+/// states one for.
+#[test]
+fn the_documents_language_is_written_on_the_catalog() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.set_language("en-GB");
+    builder.add_page(300.0, 200.0, |page| {
+        page.tagged(b"P", |page| page.text(b"F1", 12.0, 20.0, 150.0, "colour"));
+    });
+    let doc = Document::open(builder.finish()).expect("opens");
+    let cos = doc.cos();
+    let catalog = cos.catalog().expect("a catalog");
+    let lang = cos.resolve_key(&catalog, cos.intern(b"Lang"));
+    let text = lang
+        .as_string()
+        .map(|s| tinker_pdf_cos::decode_text_string(&s.bytes));
+    assert_eq!(text.as_deref(), Some("en-GB"));
+}
+
+/// The shape check the `lang` documentation sends a caller to.
+#[test]
+fn a_language_tag_has_the_shape_bcp_47_gives_one() {
+    for good in ["en", "fr-CA", "zh-Hant-TW", "x-klingon", "ru-petr1708", ""] {
+        assert!(tinker_pdf::is_language_tag(good), "{good:?}");
+    }
+    for bad in [
+        "e n",
+        "en-",
+        "-en",
+        "1en",
+        "toolongtag",
+        "en-toolongsub",
+        "\u{430}\u{43D}",
+    ] {
+        assert!(!tinker_pdf::is_language_tag(bad), "{bad:?}");
+    }
+}
