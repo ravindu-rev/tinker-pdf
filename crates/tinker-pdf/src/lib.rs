@@ -121,8 +121,9 @@ pub use structure::{
 /// Font subsetting on rewrite (9.6.4, 9.9).
 pub use subset::{SubsetReport, Subsetted, Type3Subsetted, Untouched, UntouchedReason};
 /// Tables, stated in the structure tree and inferred from what a page draws:
-/// [`Page::stated_tables`] (`docs/design/table-reconstruction.md`).
-pub use tables::{StatedCell, StatedTable, TableWarning};
+/// [`Page::stated_tables`] and the rules [`Page::table_rules`] reads
+/// (`docs/design/table-reconstruction.md`).
+pub use tables::{StatedCell, StatedTable, TableRule, TableRules, TableWarning};
 /// How [`Page::text_with`] orders a line: logical by default, or the content
 /// stream's own order (ruling 14).
 pub use text_order::TextOptions;

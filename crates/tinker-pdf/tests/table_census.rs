@@ -6,6 +6,8 @@
 //! files with a `Table`, `Table`, `TR`, `TH` and `TD` elements and files with
 //! a `TH`, per corpus, by `standard_type` after the role map — and reads every
 //! stated table on the pages it scores, tallying the spans that do not add up.
+//! Milestone 2 adds the most rules any scored page draws, which is the figure
+//! `MAX_TABLE_RULES` was to be sized from, and the pages past it.
 //!
 //! ```text
 //! cargo xtask corpus-fetch
@@ -129,6 +131,10 @@ struct Totals {
     stated: usize,
     inconsistent: usize,
     ragged: usize,
+    /// The most rules one scored page draws, which `MAX_TABLE_RULES` was to
+    /// be sized from, and the pages past that cap.
+    most_rules: usize,
+    over_cap: usize,
 }
 
 #[test]
@@ -193,6 +199,19 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
             let Some(page) = doc.page(index) else {
                 continue;
             };
+            let rules = page.table_rules();
+            let drawn = rules
+                .warnings
+                .iter()
+                .find_map(|w| match w {
+                    TableWarning::TooManyRules { drawn } => Some(*drawn),
+                    _ => None,
+                })
+                .unwrap_or(rules.rules.len());
+            totals.most_rules = totals.most_rules.max(drawn);
+            if drawn > tinker_pdf::tables::MAX_TABLE_RULES {
+                totals.over_cap += 1;
+            }
             for table in page.stated_tables() {
                 totals.stated += 1;
                 for warning in &table.warnings {
@@ -258,6 +277,10 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
             t.stated,
             t.inconsistent,
             t.ragged
+        );
+        println!(
+            "{:<14} most rules on one page {}, pages past MAX_TABLE_RULES {}",
+            "", t.most_rules, t.over_cap
         );
         if let Some((_, recorded)) = DESIGN_RECORDED.iter().find(|(c, _)| c == name) {
             println!("{:<14} design's 16 September walk: {recorded:?}", "");

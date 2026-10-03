@@ -21,6 +21,17 @@
 //! width is not the table's is [`TableWarning::RaggedRows`]: the reader says
 //! what the file said, and that it did not add up.
 //!
+//! # Rules
+//!
+//! [`crate::Page::table_rules`] is the evidence an inferred table is built on,
+//! read on its own: every stroked segment and thin filled rectangle the page
+//! draws that a table could be ruled with, in default user space, cut to the
+//! rectangular clip in force when it was drawn — the page read through the
+//! same one interpretation the text is (`observe.rs`). A rule under a clip that
+//! is not a rectangle is refused and counted
+//! ([`TableWarning::ClipNotRectangular`]); a page that draws more than
+//! [`MAX_TABLE_RULES`] has none read ([`TableWarning::TooManyRules`]).
+//!
 //! # Every question is bounded
 //!
 //! The spans are the file's, so a cell may claim four billion columns. A
@@ -33,8 +44,65 @@
 use tinker_pdf_content::{Quad, TextChar};
 use tinker_pdf_cos::{ObjRef, TableScope};
 
+use crate::observe::Observed;
 use crate::structure::{self, StructElement, StructKid, StructuredNode};
 use crate::Page;
+
+/// How many rules one page may contribute to table reconstruction.
+///
+/// Finding where rules meet is quadratic in their number — every horizontal
+/// rule against every vertical one — and a page of hatching is a denial of
+/// service with a table's name. Past this the page's rules are not read at
+/// all and [`TableWarning::TooManyRules`] says how many there were; the text
+/// is untouched, and so is every other inference.
+///
+/// | | Rules |
+/// | --- | --- |
+/// | The most any fixture in this repository spends: the one built to spend it | 16 384 |
+/// | Any other fixture here: a ruled grid of a dozen cells drawn as cell borders | 48 |
+/// | A 200-page comic archive | 0 |
+/// | A 200-page fixed document | 8 000 |
+/// | A 300-page reflowable book | 240 |
+/// | **This cap** | **16 384** |
+///
+/// The comic is one image a page. The fixed document is gap 30's yardstick,
+/// 2 000 drawable elements a page, taken at its worst for this count: every
+/// element a stroked rectangle, four rules each. The book is arithmetic about
+/// what the EPUB path draws: a forty-cell table with a border on every cell,
+/// a border being four filled rectangles, plus its frame and a rule under its
+/// header — about 170 — rounded up. At the cap the junction search is 2^26
+/// comparisons, a fraction of a second. **Not sized from the corpus**, which
+/// the design asked for: the fetched corpora were not reachable where this
+/// landed, so `table_census.rs` prints the most rules any corpus page draws
+/// and this number is owed a look against it.
+pub const MAX_TABLE_RULES: usize = 1 << 14;
+
+/// A straight, axis-aligned stretch of ink a table could be ruled with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TableRule {
+    /// Whether it runs along `x`.
+    pub horizontal: bool,
+    /// Where it stands across its length: `y` for a horizontal rule, `x` for
+    /// a vertical one, in default user space.
+    pub at: f64,
+    /// Where it starts along its length; never more than `to`.
+    pub from: f64,
+    /// Where it ends along its length.
+    pub to: f64,
+    /// Its weight, in points: a stroke's width, or a filled rectangle's
+    /// thinner dimension.
+    pub width: f64,
+}
+
+/// A page's rules and what reading them had to tolerate.
+#[derive(Clone, Debug, Default)]
+pub struct TableRules {
+    /// The rules, in the order the page drew them.
+    pub rules: Vec<TableRule>,
+    /// [`TableWarning::TooManyRules`] and
+    /// [`TableWarning::ClipNotRectangular`].
+    pub warnings: Vec<TableWarning>,
+}
 
 /// One table the structure tree states, on one page.
 #[derive(Clone, Debug)]
@@ -108,9 +176,27 @@ pub enum TableWarning {
         /// How many the table has.
         columns: usize,
     },
+    /// The page draws more than [`MAX_TABLE_RULES`] rules, so none were read.
+    TooManyRules {
+        /// How many it draws.
+        drawn: usize,
+    },
+    /// Rules drawn under a clip that is not a rectangle, which were not read:
+    /// whether any of one shows through is not a question a rectangle answers.
+    ClipNotRectangular {
+        /// How many.
+        rules: usize,
+    },
 }
 
 impl Page {
+    /// The rules this page draws: the evidence an inferred table is built
+    /// on, read on its own. See the module documentation.
+    #[must_use]
+    pub fn table_rules(&self) -> TableRules {
+        rules_of(&Observed::read(self, false))
+    }
+
     /// The tables this page's structure tree states, in tree order: every
     /// `Table` element with a cell that claims text on this page, or whose
     /// `/Pg` is this page.
@@ -140,6 +226,25 @@ impl Page {
             }
         }
         out
+    }
+}
+
+/// The rules of an observed page, with the warnings reading them earned.
+pub(crate) fn rules_of(observed: &Observed) -> TableRules {
+    let mut warnings = Vec::new();
+    if observed.rules_drawn > MAX_TABLE_RULES {
+        warnings.push(TableWarning::TooManyRules {
+            drawn: observed.rules_drawn,
+        });
+    }
+    if observed.rules_unclipped > 0 {
+        warnings.push(TableWarning::ClipNotRectangular {
+            rules: observed.rules_unclipped,
+        });
+    }
+    TableRules {
+        rules: observed.rules.clone(),
+        warnings,
     }
 }
 

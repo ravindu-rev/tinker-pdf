@@ -313,3 +313,29 @@ every stated table on the pages it scores, in `corpus.yml`'s census step.
 so the 207 files, 1 908 tables and 74 474 `TD`s above are printed beside
 what the first run measures rather than asserted, and the eight span
 fixtures' spans are printed by name for the same reason.
+
+**Milestone 2 (3 October 2026): rules, through the same one
+interpretation.** The tee device the reading-order inference reads text
+through (`crates/tinker-pdf/src/observe.rs`) now keeps the ink beside the
+glyphs: every straight stroked segment axis-aligned to within 0.5 pt over its
+length and at most 2 pt wide, every filled rectangle at most 2 pt in one
+dimension, as a `TableRule` (`horizontal`, `at`, `from`, `to`, `width`) in
+default user space; curves, diagonals, bars and specks are not rules. It
+accumulates the clip itself — `q`, `Q` and a form's bracket save and restore
+it, each `W` intersects it while it stays a rectangle — cuts a rule to it,
+and refuses and counts one drawn under a clip that is not a rectangle
+(`TableWarning::ClipNotRectangular`). A rule in a hidden layer is not on the
+page and is not kept. `MAX_TABLE_RULES` (16 384, a `bounds_ledger.rs` row)
+bounds the page: past it no rule is read and `TableWarning::TooManyRules`
+says how many were drawn. `Page::table_rules` exposes the rules as the
+evidence an inferred table is built on. **The cap is not sized from the
+corpus**, which the design asked for; its yardsticks are arithmetic, and the
+census prints the most rules any scored page draws so the number can be
+checked against the first run.
+
+Measured, first-party (`crates/tinker-pdf/tests/tables.rs`): a grid of three
+rows of four cells stroked as lines yields exactly its nine lines at the
+coordinates and weight drawn; the same grid drawn as twelve cells' CSS-style
+borders yields forty-eight rules, four a cell, centred on each border
+rectangle; a rectangular clip cuts a rule and `Q` lifts it; a triangular
+clip refuses the rule and names it; the cap plus one rules reads none.

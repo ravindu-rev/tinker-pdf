@@ -1,5 +1,16 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, 3 October 2026, tier 5's table-reconstruction row.* **One more
+//! row, `MAX_TABLE_RULES`, and the first that bounds work rather than a copy
+//! or an allocation a format asks for.** Finding where a table's rules meet is
+//! every horizontal rule against every vertical one, and a page of hatching is
+//! a square's worth of junctions from a stream of a few bytes a rule. Past the
+//! cap a page's rules are not read at all. Its `fixtures` is the cap, for
+//! `MAX_ANNOTATION_BYTES`'s reason; its comic column is a zero, a comic page
+//! being one image; its fixed-document and book columns are arithmetic about
+//! two thousand stroked rectangles and a bordered forty-cell table, since the
+//! corpus measurement the design asked it be sized from has not been taken.
+//!
 //! *Amended, 3 October 2026, the EPUB CSS row's shadows.* **One more row,
 //! `MAX_CSS_SHADOWS`, output again.** A text shadow is its run drawn again, so
 //! a shadow list is a multiplier on every glyph its element's subtree draws,
@@ -598,6 +609,10 @@ const TAGGED_PDF_TESTS: &str = include_str!("tagged_pdf.rs");
 const ASSOCIATED_FILES: &str = include_str!("../src/associated_files.rs");
 const OUTPUT_INTENTS: &str = include_str!("../src/output_intents.rs");
 const PDF20_TESTS: &str = include_str!("pdf20.rs");
+/// Tier 5's table-reconstruction row: the rule cap, declared beside the
+/// tables it bounds, fired by the suite that reads them.
+const TABLES: &str = include_str!("../src/tables.rs");
+const TABLES_TESTS: &str = include_str!("tables.rs");
 
 /// One bound, as its own ledger publishes it.
 ///
@@ -2403,6 +2418,30 @@ fn ledger() -> Vec<Bound> {
                 PDF20_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_TABLE_RULES",
+            cap: tinker_pdf::tables::MAX_TABLE_RULES as u128,
+            published: "16 384",
+            // The firing test draws the cap and one more; every other fixture
+            // is a grid of a dozen cells, forty-eight rules at the most.
+            fixtures: tinker_pdf::tables::MAX_TABLE_RULES as u128,
+            // A comic page is one image and draws no rule.
+            comic: 0,
+            // Gap 30's two thousand drawable elements, each a stroked
+            // rectangle of four rules.
+            document: 2_000 * 4,
+            // A forty-cell table bordered cell by cell, four filled
+            // rectangles a border, its frame and a rule under its header:
+            // about 170, rounded up.
+            book: 240,
+            // `0 0 m 9 0 l` is twelve bytes and one rule, in a stream as long
+            // as the ceiling every stream decodes under.
+            reachable: tinker_pdf_cos::limits::MAX_DECODED_STREAM as u128 / 12,
+            reachable_because: "a `MAX_DECODED_STREAM` content stream of `0 0 m 9 0 l`, one \
+                                rule per twelve bytes",
+            declared_in: TABLES,
+            fires_in: ("a_page_past_the_rule_cap_has_no_rules_read", TABLES_TESTS),
+        },
     ]
 }
 
@@ -2446,8 +2485,9 @@ fn segment_size() -> u128 {
 /// `MAX_MARKDOWN_NESTING` and `MAX_MARKDOWN_REFERENCE_BYTES`; and the EPUB
 /// CSS row's shadows add `MAX_CSS_SHADOWS`; and the review of the
 /// tagged-writing lane adds `MAX_STRUCTURE_VALUES`, `MAX_STRUCTURE_BYTES`,
-/// `MAX_ASSOCIATED_FILE_BYTES` and `MAX_OUTPUT_INTENT_BYTES`. All
-/// **fifty-nine** are here, and a bound added without a row fails this.
+/// `MAX_ASSOCIATED_FILE_BYTES` and `MAX_OUTPUT_INTENT_BYTES`; and tier 5's
+/// table-reconstruction row adds `MAX_TABLE_RULES`. All **sixty** are here,
+/// and a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -2513,6 +2553,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_STRUCTURE_BYTES",
             "MAX_ASSOCIATED_FILE_BYTES",
             "MAX_OUTPUT_INTENT_BYTES",
+            "MAX_TABLE_RULES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2618,7 +2659,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 59, "the ledger is fifty-nine rows");
+    assert_eq!(measured, 60, "the ledger is sixty rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2650,7 +2691,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 59, "the ledger is fifty-nine rows");
+    assert_eq!(ledger().len(), 60, "the ledger is sixty rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
@@ -2959,6 +3000,7 @@ fn every_bound_names_a_test_that_exists() {
         FORM_DATA_TESTS,
         TAGGED_PDF_TESTS,
         PDF20_TESTS,
+        TABLES_TESTS,
     ] {
         assert!(
             !source.contains("Instant::now"),
