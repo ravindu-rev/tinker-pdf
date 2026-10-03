@@ -355,9 +355,14 @@ the page's physical size; numbers are rounded to four places, never `-0`,
 dropped as the rasterizer drops it — so a clip whose every point overflows
 installs no clip, as on a render, rather than one of no area that hides the
 page; every path carries its transform already applied, so only an
-image and a gradient carry a `transform`; fills and strokes carry colour,
-opacity, the fill rule and the whole pen — width and dashes scaled by the
-transform's expansion as the renderer scales them, caps, joins, miter limit;
+image, a gradient and a stroke under a map that is not a similarity carry a
+`transform`; fills and strokes carry colour, opacity, the fill rule and the
+whole pen — width and dashes scaled by the transform's expansion under a
+similarity, as the renderer scales them, and otherwise the path written in
+user space scaled by the map's largest stretch, where the pen is round,
+under a `transform` that takes it to the page, which is SVG 1.1 §11.4
+stroking in user space as 8.4.3.2 does (a zero-width dashed line there is
+written as its dashes, cut in user space); caps, joins, miter limit;
 a clip is a `<clipPath>` in page space, and a clip inside a clip names its
 parent with `clip-path` on the `<clipPath>`, which is §14.3.5's
 intersection; an image is a PNG `data:` URI of its decoded samples — a
@@ -436,24 +441,35 @@ and vanishes; `a_hard_edged_hairline_leaves_no_column_it_crosses_empty` sweeps
 eight slopes for it. A glyph feature narrower than half a pixel can still
 vanish where it straddles a pixel edge, which is what any threshold costs.
 
-**A known defect: a stroke under a transform that is not a similarity.**
-8.4.3.2 measures the line width in user space — a stroke paints every point
-within half the width of the path *in user space* — so under an anisotropic
-scale or a shear the stroke a device shows is wider in one direction than
-another. `stroke_path` instead strokes the path in device space at one
-width, the user-space width times `Matrix::expansion` (the square root of
-the transform's determinant), and scales the dash array by the same number
-(`crates/tinker-pdf-render/src/lib.rs`, `stroke_path`). Under a uniform
-scale, a rotation or a reflection that is exact; under `scale(1, 3)` a
-circle stroked two units wide is drawn 2√3, about 3.46, device units wide
-all round by that arithmetic, where 8.4.3.2 makes it six at its top and bottom and two at its
-sides, and a dash cut square across a sheared line comes out square in
-device space rather than sheared. The SVG writer states the same pen
-(`svg_out`, "width and dashes scaled by the transform's expansion as the
-renderer scales them"), so the two agree with each other and not with the
-clause. It is owed in the ROADMAP's Tier 1; `appearance.rs`'s squiggly
-underline is drawn diagonal in the quad's frame rather than under a shear
-to stay clear of it.
+**A stroke under a transform that is not a similarity.** 8.4.3.2 measures
+the line width in user space — a stroke paints every point within half the
+width of the path *in user space* — so under an anisotropic scale or a
+shear the stroke a device shows is wider in one direction than another, and
+8.4.3.6's dashes are measured, and cut square, in the same space. Under a
+similarity — a uniform scale with any rotation or reflection, which is
+nearly every page — that is one device width, the user width times
+`Matrix::expansion`, and `stroke_path` strokes in device space at it, as it
+always has. Under any other map (`user_space_pen` decides, from the map's
+two singular values, and the SVG writer asks the same function) it takes
+the path back to user space, strokes it there with the width, caps, joins,
+miter limit and dashes the content stream gave, and carries the outline out
+(`tinker_pdf_raster::stroke_mapped`); the thinnest-line floor stays in
+device pixels in every direction. A glyph stroked by text rendering modes
+1, 2, 5 and 6 goes the same way, with the CTM's user space and not the text
+matrix's. **Until October 2026 every stroke was drawn at the one width**,
+so under `scale(1, 3)` a circle stroked two wide was 2√3, about 3.46,
+device units all round where the clause makes it six at its top and two at
+its side, and a dash on a sheared line was cut square on the device;
+`stroke_parameters.rs`'s
+`a_circle_under_scale_1_3_is_six_wide_at_its_top_and_two_at_its_side` and
+`a_dash_on_a_sheared_line_is_sheared` hold the clause's arithmetic in
+pixels, and `the_current_transform_scales_the_line_width`, which had
+asserted the defect as the feature (an `x` scale thickening a horizontal
+line), now asserts that only the `y` scale does. A map that stretches one
+direction more than 10⁹ times another is still stroked at its expansion —
+going back to user space through it would cost the path its position — and
+`appearance.rs`'s squiggly underline, drawn diagonal in the quad's frame to
+stay clear of the old defect, is left as it was drawn.
 
 **A page as a layer, and premultiplied alpha.** `RenderOptions::transparent`
 starts the page with nothing on it instead of white — `(0, 0, 0, 0)` where

@@ -90,6 +90,20 @@ of four Béziers and an `h` ends on its start point twice, and until
 October 2026 that lost the join at the start, a notch at the point where
 every such circle begins.
 
+**A pen in another space.** `stroke_mapped` is 8.4.3.2 read literally for
+a map that is not a similarity: the path, the width and the dashes are in
+the pen's own space, the outline is built there exactly as `stroke` builds
+one, and each piece is carried through the map before its orientation is
+fixed — so a reflecting map cannot wind the pieces against each other.
+Under `scale(1, 3)` a pen two units wide is six device units across a line
+along `x` and two across one along `y`, and a dash cut square in the pen's
+space is cut along the shear on the device. Its `floor` is the device's:
+wherever the mapped pen is thinner than it, the same dashed pieces are also
+mapped first and stroked at the floor, and the union is at least that wide
+every way. `stretches` gives a map's two singular values, which is how a
+caller tells a similarity from anything else, and `dash` hands back the
+pieces a pattern leaves without stroking them.
+
 **Hard edges.** `Mask::harden` turns a coverage mask into one that is whole or
 empty at every pixel: at least half becomes 255, less becomes 0. It is what
 turning anti-aliasing off means one layer up ([rendering](rendering.md)), and
@@ -274,8 +288,8 @@ canvas.fill_mask(&mask, Color::BLACK, 1.0);
 ```
 
 The crate root re-exports the working set: `Path`, `Verb`, `Point`,
-`FillRule`, `flatten`; `fill`, `Mask`; `stroke`, `StrokeStyle`, `LineCap`,
-`LineJoin`; `Canvas`, `Color`, `PixelFormat`, `MaskKind`; `BlendMode` (in
+`FillRule`, `flatten`; `fill`, `Mask`; `stroke`, `stroke_mapped`,
+`stretches`, `dash`, `StrokeStyle`, `LineCap`, `LineJoin`; `Canvas`, `Color`, `PixelFormat`, `MaskKind`; `BlendMode` (in
 `blend`); `draw_image`, `ImageDraw`, `ImageSource`, `Transform`, `Filter`,
 `Sampling`, `Pyramid`, `image_bounds_in`; `draw_mesh`, `draw_mesh_over`,
 `MeshDraw`, `MeshBuffer`. The bridge

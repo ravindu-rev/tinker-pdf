@@ -836,8 +836,10 @@ fn quad_frame(quad: &[f64; 8]) -> Option<QuadFrame> {
 /// The lines are diagonal in the quad's frame rather than straight under a
 /// shear — which would make the same dashes with less arithmetic — because
 /// a shear is not a similarity, and a renderer that strokes in device space
-/// with one scale for the width, as this engine's does, would square every
-/// sheared dash back up into a vertical bar.
+/// with one scale for the width, as this engine's did until October 2026,
+/// squares every sheared dash back up into a vertical bar. This engine's now
+/// strokes such a map in user space; the construction is kept, because it is
+/// right under either and other readers still stroke the old way.
 fn squiggly(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
     const K: f64 = std::f64::consts::FRAC_1_SQRT_2;
     let color = color_of(doc, annotation, b"C")

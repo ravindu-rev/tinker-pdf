@@ -245,26 +245,67 @@ fn fills_and_strokes_read_back_as_the_page_states_them() {
     assert_eq!(stroke.dash_offset, 1.0);
 }
 
-/// **A stroke under a transform that scales** is written with its width, its
-/// dashes and its phase scaled by the transform's expansion into page space,
-/// `sqrt(|det|)` — the number the renderer strokes with. The fixture above
-/// strokes under the identity, where a width that was never scaled and one
-/// that was are the same number.
+/// The `transform` of each stroked `<path>` in `svg`, as six numbers, in
+/// order — `None` for one written without.
+fn stroke_transforms(svg: &Svg) -> Vec<Option<[f64; 6]>> {
+    svg.markup
+        .split("<path ")
+        .skip(1)
+        .filter_map(|element| {
+            let element = &element[..element.find("/>")?];
+            element.contains(" stroke=\"").then(|| {
+                let at = element.find("transform=\"matrix(")?;
+                let rest = &element[at + "transform=\"matrix(".len()..];
+                let numbers: Vec<f64> = rest[..rest.find(')')?]
+                    .split(' ')
+                    .map(|n| n.parse().expect("a number"))
+                    .collect();
+                numbers.try_into().ok()
+            })
+        })
+        .collect()
+}
+
+/// How wide a pen of `width` is on the page across a line running along
+/// `tangent`, once `m` carries it there: a band of `width` in the pen's
+/// space maps to `width × |det m| / |m · tangent|` across its image. This is
+/// 8.4.3.2's disc, measured where the clause measures it and carried out by
+/// the linear part of the map — computed here from the clause, not from any
+/// renderer.
+fn across(m: [f64; 6], width: f64, tangent: [f64; 2]) -> f64 {
+    let [a, b, c, d, _, _] = m;
+    let det = (a * d - b * c).abs();
+    let image = (a * tangent[0] + c * tangent[1]).hypot(b * tangent[0] + d * tangent[1]);
+    width * det / image
+}
+
+/// **A stroke under a transform that is not a similarity** is written where
+/// its pen is round. 8.4.3.2 measures the pen in user space, so under
+/// `2 0 0 8 0 0 cm` one page width cannot say it — `1 w` is eight points
+/// across a line along `x` and two across one along `y`. The writer states
+/// the path in user space scaled by the map's largest stretch, 8, with the
+/// width and dashes scaled alike, under a `transform` that takes that space
+/// to the page — SVG 1.1 §11.4 strokes in the element's user space, which is
+/// the clause's reading — and that transform's linear part is the page map
+/// over 8: `0.25 0 0 -1`.
 ///
-/// `2 0 0 8 0 0 cm` has a determinant of 16, so an expansion of exactly 4:
-/// `1 w` is 4 points, `[2 1] 0.5 d` is `[8 4]` from 2. And the renderer agrees
-/// in pixels: the undashed line's column is four rows of ink at scale 1.
+/// This test used to assert `stroke-width` 4 and dashes `[8 4]` with no
+/// transform — the expansion `sqrt(|det|)` the renderer used to stroke at,
+/// both ways — and four rows of ink down the renderer's column. By the
+/// clause the line is eight rows thick, and the renderer now draws eight.
 #[test]
-fn a_stroke_under_a_scaling_transform_is_scaled_as_the_renderer_scales_it() {
+fn a_stroke_under_a_stretching_transform_is_written_with_its_user_space_pen() {
     let content = "q 2 0 0 8 0 0 cm 0 0 1 RG 1 w [2 1] 0.5 d 5 1 m 50 1 l S Q\n\
                    q 2 0 0 8 0 0 cm 0 0 0 RG 1 w 5 5 m 50 5 l S Q";
     let bytes = pdf(content, 200, 100, "<< >>", &[]);
     let svg = svg_of(bytes.clone());
     assert!(svg.warnings.is_empty(), "{:?}", svg.warnings);
+    let under = [0.25, 0.0, 0.0, -1.0, 0.0, 100.0];
+    assert_eq!(stroke_transforms(&svg), vec![Some(under), Some(under)]);
+
     let (scene, k) = read_back(&svg);
     let nodes = paths(&scene);
     assert_eq!(nodes.len(), 2, "two strokes");
-
     let Node::Path {
         outline, stroke, ..
     } = nodes[0]
@@ -274,25 +315,27 @@ fn a_stroke_under_a_scaling_transform_is_scaled_as_the_renderer_scales_it() {
     close(
         &points(&outline.segments, k),
         &[vec![[10.0, 92.0]], vec![[100.0, 92.0]]],
-        "the dashed line, its points through the CTM",
+        "the dashed line, its points through the CTM and the transform",
     );
     let stroke = stroke.as_ref().expect("a stroke");
-    assert_eq!(stroke.width, 4.0, "1 w under an expansion of 4");
-    assert_eq!(stroke.dashes, vec![8.0, 4.0], "[2 1] under the same");
-    assert_eq!(stroke.dash_offset, 2.0, "and the phase");
+    assert_eq!(stroke.width, 8.0, "1 w in a space eight times user space");
+    assert_eq!(stroke.dashes, vec![16.0, 8.0], "[2 1] in the same");
+    assert_eq!(stroke.dash_offset, 4.0, "and the phase");
+    // On the page: across the line (along x) the pen is 1 × 8 = 8 points,
+    // and the dashes along it are 2 × 2 = 4 and 1 × 2 = 2.
+    assert_eq!(across(under, stroke.width, [1.0, 0.0]), 8.0);
+    assert_eq!(stroke.dashes[0] * under[0], 4.0);
+    assert_eq!(stroke.dashes[1] * under[0], 2.0);
 
     let Node::Path { stroke, .. } = nodes[1] else {
         unreachable!()
     };
-    let width = stroke.as_ref().expect("a stroke").width;
-    assert_eq!(width, 4.0);
-    assert!(
-        stroke.as_ref().is_some_and(|s| s.dashes.is_empty()),
-        "the second line is solid"
-    );
+    let stroke = stroke.as_ref().expect("a stroke");
+    assert_eq!(stroke.width, 8.0);
+    assert!(stroke.dashes.is_empty(), "the second line is solid");
 
     // The renderer's own pen, counted down column 50 across the solid line:
-    // page y 40 is pixel row 60, and the pen covers 58 to 62. Rows 40 to 79
+    // page y 40 is pixel row 60, and the pen covers 56 to 64. Rows 40 to 79
     // only, because the dashed line's ink is in this column too, at row 92.
     let document = Document::open(bytes).expect("it opens");
     let bitmap = document
@@ -307,9 +350,153 @@ fn a_stroke_under_a_scaling_transform_is_scaled_as_the_renderer_scales_it() {
         })
         .count();
     assert_eq!(
-        inked as f64, width,
-        "the SVG's width is the renderer's, in rows of ink"
+        inked as f64,
+        across(under, stroke.width, [1.0, 0.0]),
+        "the SVG's pen is the renderer's, in rows of ink"
     );
+}
+
+/// **The row's circle, in the SVG.** Under `scale(1, 3)` a circle of
+/// radius 10 stroked two wide is, by 8.4.3.2, six units across at its top
+/// and two at its side — `stroke_parameters.rs` holds the renderer to that in
+/// pixels. The writer states it as a circle of radius 30 (user space scaled
+/// by the largest stretch, 3) with `stroke-width` 6, under a transform whose
+/// linear part is `1/3 0 0 -1`; carried through that, the pen is
+/// `6 × (1/3) / (1/3) = 6` across the top, where the tangent runs along `x`,
+/// and `6 × (1/3) / 1 = 2` across the side, where it runs along `y`. It used
+/// to be written at `2√3 ≈ 3.4641` with no transform, which is that across
+/// both.
+#[test]
+fn a_circle_under_scale_1_3_is_written_six_wide_at_its_top_and_two_at_its_side() {
+    let k = 0.552_284_75 * 10.0;
+    let content = format!(
+        "0 0 0 RG q 1 0 0 3 50.5 50.5 cm 2 w \
+         10 0 m 10 {k} {k} 10 0 10 c -{k} 10 -10 {k} -10 0 c \
+         -10 -{k} -{k} -10 0 -10 c {k} -10 10 -{k} 10 0 c h S Q"
+    );
+    let svg = svg_of(pdf(&content, 100, 100, "<< >>", &[]));
+    let [Some(under)] = stroke_transforms(&svg)[..] else {
+        panic!("one stroke, under a transform: {}", svg.markup)
+    };
+    assert!((under[0] - 1.0 / 3.0).abs() < 1e-12, "{under:?}");
+    assert_eq!(&under[1..], &[0.0, 0.0, -1.0, 50.5, 49.5]);
+
+    let (scene, factor) = read_back(&svg);
+    let nodes = paths(&scene);
+    let Node::Path {
+        outline, stroke, ..
+    } = nodes[0]
+    else {
+        unreachable!()
+    };
+    // Its points through both maps are the page's ellipse: the side at
+    // x = 50.5 + 10, the top at y = 49.5 - 30 (y runs down).
+    let page = points(&outline.segments, factor);
+    close(&page[..1], &[vec![[60.5, 49.5]]], "the start, at the side");
+    close(
+        &page[1..2],
+        &[vec![[60.5, 49.5 - 3.0 * k], [50.5 + k, 19.5], [50.5, 19.5]]],
+        "the first quarter, to the top",
+    );
+    let width = stroke.as_ref().expect("a stroke").width;
+    assert_eq!(width, 6.0, "2 w in a space three times user space");
+    assert!(
+        (across(under, width, [1.0, 0.0]) - 6.0).abs() < 1e-9,
+        "the top"
+    );
+    assert!(
+        (across(under, width, [0.0, 1.0]) - 2.0).abs() < 1e-9,
+        "the side"
+    );
+}
+
+/// **A dash on a sheared line is sheared, in the SVG.** Under
+/// `1 0 1 1 0 50 cm` (`x' = x + y`) a dash of a line along `x` is cut
+/// square in user space, along `y`, and so along `x' = y` on the page. The
+/// writer states the line where its pen is round and leaves the shear to the
+/// transform, so the cut — the space's `(0, 1)` — reaches the page along the
+/// transform's second column, which is diagonal: as far across as down. It
+/// used to be written in page space with a dash array, which SVG cuts square
+/// to the line on the page — vertical.
+#[test]
+fn a_dash_on_a_sheared_line_is_written_sheared() {
+    let svg = svg_of(pdf(
+        "0 0 0 RG q 1 0 1 1 0 50 cm 6 w [10 20] 0 d 10 0 m 80 0 l S Q",
+        100,
+        100,
+        "<< >>",
+        &[],
+    ));
+    let [Some(under)] = stroke_transforms(&svg)[..] else {
+        panic!("one stroke, under a transform: {}", svg.markup)
+    };
+    // The shear's largest stretch is the golden ratio, so the transform is
+    // the page map `1 0 1 -1` over it.
+    let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
+    for (got, want) in under.iter().zip([1.0 / phi, 0.0, 1.0 / phi, -1.0 / phi]) {
+        assert!((got - want).abs() < 1e-12, "{under:?}");
+    }
+    // The line runs along the space's x, which the page keeps horizontal;
+    // the cut runs along its y, which reaches the page diagonal.
+    let (cut_x, cut_y) = (under[2], under[3]);
+    assert!(
+        (cut_x.abs() - cut_y.abs()).abs() < 1e-12 && cut_x != 0.0,
+        "the dash's end is at 45 degrees on the page: ({cut_x}, {cut_y})"
+    );
+    let (scene, _) = read_back(&svg);
+    let Node::Path { stroke, .. } = paths(&scene)[0] else {
+        unreachable!()
+    };
+    let stroke = stroke.as_ref().expect("a stroke");
+    assert!((stroke.width - 6.0 * phi).abs() < 1e-3, "{}", stroke.width);
+    // And across the line on the page the pen is the clause's six.
+    assert!((across(under, stroke.width, [1.0, 0.0]) - 6.0).abs() < 1e-3);
+}
+
+/// **A zero-width dashed line under a stretch is cut in user space.**
+/// 8.4.3.2's thinnest line is the device's, the same every way, so it is
+/// written in page space at the renderer's 0.8; but its dashes are
+/// user-space lengths, and under `scale(1, 3)` a dash of five along `y` is
+/// fifteen on the page where one along `x` would be five — no one dash
+/// array says both. So the writer cuts the dashes in user space, as the
+/// renderer does, and writes the pieces: `[5 5]` along `x = 50` from user
+/// `y` 2 to 30 is pieces at user `y` 2–7, 12–17 and 22–27, which are page
+/// `y` 6–21, 36–51 and 66–81, and SVG `y` (down from the top of 100)
+/// 94–79, 64–49 and 34–19. It used to be one path with a dash array of
+/// `5√3`.
+#[test]
+fn a_zero_width_dashed_line_under_a_stretch_is_cut_in_user_space() {
+    let svg = svg_of(pdf(
+        "0 0 0 RG q 1 0 0 3 0 0 cm 0 w [5 5] 0 d 50 2 m 50 30 l S Q",
+        100,
+        100,
+        "<< >>",
+        &[],
+    ));
+    assert_eq!(stroke_transforms(&svg), vec![None], "a page-space hairline");
+    let (scene, k) = read_back(&svg);
+    let Node::Path {
+        outline, stroke, ..
+    } = paths(&scene)[0]
+    else {
+        unreachable!()
+    };
+    assert_eq!(kinds(&outline.segments), "MLMLML");
+    close(
+        &points(&outline.segments, k),
+        &[
+            vec![[50.0, 94.0]],
+            vec![[50.0, 79.0]],
+            vec![[50.0, 64.0]],
+            vec![[50.0, 49.0]],
+            vec![[50.0, 34.0]],
+            vec![[50.0, 19.0]],
+        ],
+        "three pieces, each fifteen points long",
+    );
+    let stroke = stroke.as_ref().expect("a stroke");
+    assert_eq!(stroke.width, 0.8, "the thinnest line");
+    assert!(stroke.dashes.is_empty(), "the pieces are the dashes");
 }
 
 /// **A clip** is a `<clipPath>` the element names, and the reader hands back

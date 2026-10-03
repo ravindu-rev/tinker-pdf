@@ -16,8 +16,9 @@
 //!   root `width` and `height` in `pt` and a `viewBox` of the same numbers,
 //!   so one user unit is one point and the picture has the page's physical
 //!   size. Every path is written with its transform already applied; only an
-//!   image and a gradient carry a `transform`, because a unit square and a
-//!   gradient axis are not points.
+//!   image, a gradient and a stroke under a map that is not a similarity
+//!   carry a `transform`, because a unit square and a gradient axis are not
+//!   points and such a pen is not one page width.
 //! - **Numbers are written to four decimal places** — a ten-thousandth of a
 //!   point — rounded, with trailing zeros dropped. Deterministic on every
 //!   target (ruling 4): the rounding is `f64::round` and the printing is the
@@ -30,10 +31,21 @@
 //!   need nothing; the trade, named, is that the text in the file is not
 //!   text any more: not selectable and not searchable.
 //! - **Fills and strokes** carry colour, opacity, the fill rule, and a
-//!   stroke's width, caps, joins, miter limit and dashes. A stroke's width and
-//!   dashes are scaled by the transform's expansion into page space, which is
-//!   what the renderer does; a zero-width line, 8.4.3.2's "thinnest line", is
-//!   written at the renderer's own thinnest, 0.8 of a point.
+//!   stroke's width, caps, joins, miter limit and dashes. 8.4.3.2 measures the
+//!   pen in user space. Under a similarity that is one page width, and a
+//!   stroke's width and dashes are scaled by the transform's expansion into
+//!   page space, which is what the renderer does. Under any other map —
+//!   `tinker_pdf_render::user_space_pen` decides, for both — the path is
+//!   written in user space scaled by the map's largest stretch, a space
+//!   where the pen is round, with the width and dashes scaled alike, under a
+//!   `transform` that takes it to the page and only shrinks: SVG 1.1 §11.4
+//!   strokes in the element's user space, which is the clause's reading. The
+//!   linear part of that transform is written to twelve places, because its
+//!   smaller stretch can be far under four. A zero-width line, 8.4.3.2's
+//!   "thinnest line", is written at the renderer's own thinnest, 0.8 of a
+//!   point, in page space — and under a map that is not a similarity, its
+//!   dashes are cut in user space and written as the pieces, because no one
+//!   dash array says them.
 //! - **A clip is a `<clipPath>`** in page space, referenced by every element
 //!   drawn under it. A clip inside a clip names its parent with `clip-path` on
 //!   the `<clipPath>` element, which is SVG 1.1 §14.3.5's intersection.
@@ -129,8 +141,8 @@ use tinker_pdf_content::{
 };
 use tinker_pdf_cos::pages as cos_pages;
 use tinker_pdf_render::{
-    page_pixels, page_scale, page_view_transform, region_canvas_clear, DecodedImage, GlyphSource,
-    PatternPaint, PixelRegion, Renderer, Shading,
+    page_pixels, page_scale, page_view_transform, region_canvas_clear, user_space_pen,
+    DecodedImage, GlyphSource, PatternPaint, PixelRegion, Renderer, Shading,
 };
 
 use crate::annots::{self, AppearanceDevice};
@@ -720,10 +732,18 @@ impl<'a> Writer<'a> {
             return;
         }
         self.note_blend(state.blend);
-        let scale = state.ctm.then(&self.base).expansion();
+        let to_page = state.ctm.then(&self.base);
+        let scale = to_page.expansion();
+        // 8.4.3.2 measures the pen in user space. Under a similarity that is
+        // one width in page space, the user width times the expansion, which
+        // is how the renderer strokes it too; under any other map it is not,
+        // and `user_space_pen` — the renderer's own decision — says so with
+        // the map's largest stretch `k`.
+        let pen = user_space_pen(&to_page).and_then(|k| Some((k, inverse(&state.ctm)?)));
         if let Some(pattern) = &state.stroke_pattern {
             let pattern = pattern.clone();
-            let bounds = grow(path_bounds(path, &self.base), state.line_width * scale);
+            let reach = pen.map_or(scale, |(k, _)| k);
+            let bounds = grow(path_bounds(path, &self.base), state.line_width * reach);
             let path = path.to_vec();
             let state = state.clone();
             self.rasterise(
@@ -736,20 +756,62 @@ impl<'a> Writer<'a> {
             );
             return;
         }
-        let d = path_data(path, &self.base);
+        let user_dashes: &[f64] = if text { &[] } else { &state.dashes };
+        let dashed = user_dashes.iter().all(|d| d.is_finite() && *d >= 0.0)
+            && user_dashes.iter().any(|d| *d > 0.0);
+        // What is written: the path data, the width, the factor the dash
+        // array is scaled by, the `transform` the path is under, and whether
+        // the dashes are already cut.
+        let (d, width, factor, under, cut) = match pen {
+            // Under a map that is not a similarity the path is written in a
+            // space `k` times user space — a similarity of it, so the pen is
+            // round there and SVG 1.1 §11.4 strokes it in user space exactly
+            // as 8.4.3.2 does — and carried to the page by `transform`, which
+            // only shrinks: its stretches are 1 and the ratio of the two. The
+            // coordinates are page-sized, so four places are as fine as a
+            // page-space path's.
+            Some((k, back)) if state.line_width.is_finite() && state.line_width > 0.0 => (
+                path_data(path, &back.then(&Matrix::scale(k, k))),
+                state.line_width * k,
+                k,
+                Some(Matrix::scale(1.0 / k, 1.0 / k).then(&to_page)),
+                false,
+            ),
+            // A zero width is 8.4.3.2's thinnest line, which is the device's
+            // and the same in every direction, so it is written in page
+            // space. Its dashes are user-space lengths, and under this map no
+            // one dash array says them, so the dashes are cut here — in user
+            // space, as the renderer cuts them — and written as the pieces.
+            Some((k, back)) if dashed => (
+                dashed_pieces(path, &back, &to_page, user_dashes, state.dash_phase, k),
+                THINNEST,
+                k,
+                None,
+                true,
+            ),
+            _ => (
+                path_data(path, &self.base),
+                if state.line_width * scale > 0.0 {
+                    state.line_width * scale
+                } else {
+                    THINNEST
+                },
+                scale,
+                None,
+                false,
+            ),
+        };
         if d.is_empty() {
             return;
         }
-        let width = if state.line_width * scale > 0.0 {
-            state.line_width * scale
-        } else {
-            THINNEST
-        };
         let mut element = format!(
             "<path d=\"{d}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\"",
             colour(state.stroke_color),
             num(width)
         );
+        if let Some(under) = &under {
+            let _ = write!(element, " transform=\"{}\"", pen_matrix_attr(under));
+        }
         // Text is stroked with the renderer's defaults, not the state's
         // (9.3.6 strokes a glyph as a path, and the renderer strokes it with
         // butt caps and miter joins whatever `J` and `j` say).
@@ -769,15 +831,15 @@ impl<'a> Writer<'a> {
         if miter.is_finite() && miter >= 1.0 {
             let _ = write!(element, " stroke-miterlimit=\"{}\"", num(miter));
         }
-        let dashes: Vec<f64> = if text {
+        let dashes: Vec<f64> = if cut {
             Vec::new()
         } else {
-            state.dashes.iter().map(|d| d * scale).collect()
+            user_dashes.iter().map(|d| d * factor).collect()
         };
         if dashes.iter().all(|d| d.is_finite() && *d >= 0.0) && dashes.iter().any(|d| *d > 0.0) {
             let list: Vec<String> = dashes.iter().map(|d| num(*d)).collect();
             let _ = write!(element, " stroke-dasharray=\"{}\"", list.join(","));
-            let phase = state.dash_phase * scale;
+            let phase = state.dash_phase * factor;
             if phase != 0.0 && phase.is_finite() {
                 let _ = write!(element, " stroke-dashoffset=\"{}\"", num(phase));
             }
@@ -1531,6 +1593,108 @@ fn path_data(path: &[PathSegment], m: &Matrix) -> String {
     } else {
         String::new()
     }
+}
+
+/// A stroke's dashes cut in user space and written as the pieces in page
+/// space: a zero-width line's, under a map no one dash array can state.
+///
+/// `back` takes the page's points to user space, where 8.4.3.6 measures the
+/// pattern, and `to_page` takes the pieces out to this writer's units; `k` is
+/// `to_page`'s largest stretch, so flattening at a hundredth over it keeps
+/// every chord within a hundredth of a point of its curve once mapped.
+fn dashed_pieces(
+    path: &[PathSegment],
+    back: &Matrix,
+    to_page: &Matrix,
+    dashes: &[f64],
+    phase: f64,
+    k: f64,
+) -> String {
+    let mut user = tinker_pdf_raster::Path::new();
+    let at = |x: f64, y: f64| back.apply(x, y);
+    for segment in path {
+        match *segment {
+            PathSegment::MoveTo { x, y } => {
+                let (x, y) = at(x, y);
+                user.move_to(x, y);
+            }
+            PathSegment::LineTo { x, y } => {
+                let (x, y) = at(x, y);
+                user.line_to(x, y);
+            }
+            PathSegment::CurveTo {
+                x1,
+                y1,
+                x2,
+                y2,
+                x3,
+                y3,
+            } => {
+                let (x1, y1) = at(x1, y1);
+                let (x2, y2) = at(x2, y2);
+                let (x3, y3) = at(x3, y3);
+                user.curve_to(x1, y1, x2, y2, x3, y3);
+            }
+            PathSegment::Close => user.close(),
+        }
+    }
+    let mut out = String::new();
+    for piece in tinker_pdf_raster::dash(&user, dashes, phase, 0.01 / k) {
+        let mut verb = 'M';
+        for point in &piece {
+            let (x, y) = to_page.apply(point.x, point.y);
+            if x.is_finite() && y.is_finite() {
+                let _ = write!(out, "{verb}{} {}", num(x), num(y));
+                verb = 'L';
+            }
+        }
+    }
+    out
+}
+
+/// `m`'s inverse, or `None` where it is not finite.
+fn inverse(m: &Matrix) -> Option<Matrix> {
+    let det = m.a * m.d - m.b * m.c;
+    if !det.is_finite() || det == 0.0 {
+        return None;
+    }
+    let inverse = Matrix {
+        a: m.d / det,
+        b: -m.b / det,
+        c: -m.c / det,
+        d: m.a / det,
+        e: (m.c * m.f - m.d * m.e) / det,
+        f: (m.b * m.e - m.a * m.f) / det,
+    };
+    inverse.is_finite().then_some(inverse)
+}
+
+/// A pen's `transform`: the linear part to twelve places, because it is a
+/// shrink whose smaller stretch can be far below a ten-thousandth, which four
+/// places would round to nothing; the translation in points, as [`num`]
+/// writes every page coordinate.
+fn pen_matrix_attr(m: &Matrix) -> String {
+    let fine = |v: f64| {
+        if !v.is_finite() {
+            return "0".to_string();
+        }
+        let text = format!("{v:.12}");
+        let text = text.trim_end_matches('0').trim_end_matches('.');
+        if text == "-0" || text.is_empty() {
+            "0".to_string()
+        } else {
+            text.to_string()
+        }
+    };
+    format!(
+        "matrix({} {} {} {} {} {})",
+        fine(m.a),
+        fine(m.b),
+        fine(m.c),
+        fine(m.d),
+        num(m.e),
+        num(m.f)
+    )
 }
 
 /// Whether the rasterizer would build anything of `path` through `m`: a

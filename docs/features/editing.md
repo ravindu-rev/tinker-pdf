@@ -334,10 +334,11 @@ parallel strokes is the dashes of one wide diagonal line, so a quad costs the
 same fourteen operators however long it is, where a loop over teeth would let
 eight numbers — a quad a kilometre long on a point of text — ask for a
 million. The lines are diagonal in the quad's frame rather than straight
-under a shear because this engine's renderer strokes in device space with
-one scale for the width, and squares a sheared dash back into a vertical
-bar — a renderer defect, recorded in [rendering](rendering.md) and owed in
-the ROADMAP's Tier 1, that the squiggly is drawn to stay clear of. A **`Caret`** (12.5.6.11) is the typographic caret, filled in `/C`
+under a shear because a renderer that strokes in device space with one
+scale for the width squares a sheared dash back into a vertical bar — which
+this engine's did until October 2026, a defect [rendering](rendering.md)
+records as fixed; the squiggly keeps the construction that stays clear of
+it, which is right under either reading and under other renderers too. A **`Caret`** (12.5.6.11) is the typographic caret, filled in `/C`
 (black when absent) inside `/Rect` less Table 180's `/RD`: a spike from the
 middle of the bottom edge to the middle of the top, its sides cubics bowed
 in from the bottom corners. 12.5.6.11 names the symbol and not its outline,

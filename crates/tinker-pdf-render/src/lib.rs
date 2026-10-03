@@ -39,8 +39,74 @@ use tinker_pdf_raster::{
         Pyramid, Transform,
     },
     mesh::{draw_mesh_over, MeshDraw},
-    stroke::{stroke, LineCap, LineJoin, StrokeStyle},
+    stroke::{stretches, stroke, stroke_mapped, LineCap, LineJoin, StrokeStyle},
 };
+
+/// How far apart a map's two stretches may be, as a fraction of the larger,
+/// and still be stroked as a similarity: rounding, and nothing a page states.
+/// A rotation composed of several `cm`s is a similarity whose entries no
+/// longer cancel exactly; one written with five decimals is not, and is
+/// stroked through user space (`Renderer::pen`).
+const SIMILARITY_SLACK: f64 = 1e-9;
+
+/// The most a map may stretch one direction over another before a stroke
+/// under it is no longer taken back to user space: past this, a point's
+/// round trip through the inverse loses more than a thousandth of a pixel
+/// at a page's own coordinates, and the map is all but a collapse anyway.
+const STROKE_CONDITION: f64 = 1e9;
+
+/// Whether a stroke under `to_device` — user space to the device — has to be
+/// drawn in user space, and if so the map's largest stretch.
+///
+/// 8.4.3.2 measures a pen in user space. Under a similarity that is one
+/// device width, the user width times [`Matrix::expansion`], and the answer
+/// is `None`: stroke in device space, which every writer of a pen can say
+/// with one number. Under any other map no single width is the pen, and the
+/// answer is `Some(largest)`, the factor the map stretches its most-stretched
+/// direction by — the renderer strokes through user space
+/// (`tinker_pdf_raster::stroke_mapped`), and the SVG writer states the path
+/// in a space this much larger than user space, where the pen is round.
+///
+/// Also `None` for a map that is not finite or that stretches one direction
+/// more than [`STROKE_CONDITION`] times another — a near-collapse, which is
+/// stroked as a similarity at its expansion, the only answer left once a
+/// round trip through its inverse costs a path its position.
+#[must_use]
+pub fn user_space_pen(to_device: &Matrix) -> Option<f64> {
+    let (largest, smallest) = stretches(&transform(to_device));
+    if !(largest.is_finite() && largest > 0.0) {
+        return None;
+    }
+    // A similarity's two stretches are equal; the slack is rounding, so a
+    // product of rotations that is a similarity in exact arithmetic is
+    // stroked as one.
+    let similar = largest - smallest <= largest * SIMILARITY_SLACK;
+    (!similar && smallest * STROKE_CONDITION >= largest).then_some(largest)
+}
+
+/// `map`'s inverse, or `None` for a map whose inverse is not finite. Unlike
+/// `invert`, no determinant is too small by itself: how far a stroke may
+/// trust the round trip is [`STROKE_CONDITION`]'s question, and it is a ratio.
+fn pen_inverse(map: &Transform) -> Option<Transform> {
+    let det = map.a * map.d - map.b * map.c;
+    if !det.is_finite() || det == 0.0 {
+        return None;
+    }
+    let inverse = Transform {
+        a: map.d / det,
+        b: -map.b / det,
+        c: -map.c / det,
+        d: map.a / det,
+        e: (map.c * map.f - map.d * map.e) / det,
+        f: (map.b * map.e - map.a * map.f) / det,
+    };
+    [
+        inverse.a, inverse.b, inverse.c, inverse.d, inverse.e, inverse.f,
+    ]
+    .iter()
+    .all(|v| v.is_finite())
+    .then_some(inverse)
+}
 
 /// Lets a caller stop a render that is taking too long.
 ///
@@ -2198,6 +2264,49 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         run.fragments.would_overlap(&shape)
     }
 
+    /// The outline of a stroke of `path`, which is in device space, with a
+    /// pen whose width, dash array and phase are in **user space** (8.4.3.2,
+    /// 8.4.3.6), at least `floor` device pixels wide.
+    ///
+    /// Under a similarity — a uniform scale with any rotation or reflection,
+    /// which is nearly every page — a user-space pen is a device-space pen
+    /// of the width times the scale, and that is how it is stroked: in device
+    /// space, the dashes scaled alike, the width no thinner than `floor`.
+    /// Under any other map no one device width is the pen: `scale(1, 3)`
+    /// makes a pen two units wide six device units across the stretch and two
+    /// along it, and cuts a dash square in user space and sheared on the
+    /// device. So the path is taken back to user space, stroked there, and
+    /// the outline carried out again (`stroke_mapped`), with `floor` held in
+    /// device pixels in every direction.
+    ///
+    /// Which of the two is [`user_space_pen`]'s decision, shared with the
+    /// SVG writer so the two state one pen.
+    fn pen(
+        &self,
+        path: &Path,
+        state: &GraphicsState,
+        style: StrokeStyle,
+        floor: f64,
+        stop: &dyn Fn() -> bool,
+    ) -> Path {
+        let m = state.ctm.then(&self.base);
+        if user_space_pen(&m).is_some() {
+            let map = transform(&m);
+            if let Some(back) = pen_inverse(&map) {
+                let user = path.mapped(&back);
+                return stroke_mapped(&user, &style, &map, floor, self.tolerance, Some(stop));
+            }
+        }
+        let scale = m.expansion();
+        let style = StrokeStyle {
+            width: (style.width * scale).max(floor),
+            dashes: style.dashes.iter().map(|d| d * scale).collect(),
+            dash_phase: style.dash_phase * scale,
+            ..style
+        };
+        stroke(path, &style, self.tolerance, Some(stop))
+    }
+
     /// Converts interpreter path segments into a rasterizer path.
     ///
     /// The segments arrive already in user space with the content stream's own
@@ -2607,16 +2716,11 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             return;
         }
 
-        // 8.4.3.2: the line width is in user space, so the transform scales
-        // it. A hairline still has to cover a pixel to be visible.
-        //
-        // The dashes scale by the same factor, and for the same reason: a
-        // pattern measured in user space and applied in device space comes out
-        // at the wrong pitch under any zoom.
-        let scale = state.ctm.then(&self.base).expansion();
-        let width = (state.line_width * scale).max(self.thinnest(0.8));
+        // 8.4.3.2: the line width is in user space, and so are the dashes —
+        // the pen is stated in user units and `pen` carries it to the device.
+        // A hairline still has to cover a pixel to be visible.
         let style = StrokeStyle {
-            width,
+            width: state.line_width,
             cap: match state.line_cap {
                 ContentCap::Butt => LineCap::Butt,
                 ContentCap::Round => LineCap::Round,
@@ -2628,15 +2732,15 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 ContentJoin::Bevel => LineJoin::Bevel,
             },
             miter_limit: state.miter_limit,
-            dashes: state.dashes.iter().map(|d| d * scale).collect(),
-            dash_phase: state.dash_phase * scale,
+            dashes: state.dashes.clone(),
+            dash_phase: state.dash_phase,
         };
         // The dash expansion below is the part of a stroke that can run away:
         // 8.4.3.6 puts no floor on a dash length, so a page-long rule under a
         // fine array expands into a hundred thousand pieces per segment before
         // a single row of it is filled.
         let stop = self.stop_predicate();
-        let outline = stroke(&built, &style, self.tolerance, Some(&stop));
+        let outline = self.pen(&built, state, style, self.thinnest(0.8), &stop);
 
         // 8.7.3: a stroke painted with a pattern takes its paint from the
         // pattern, exactly as a fill does — and a stroke *is* a fill, of the
@@ -2799,13 +2903,14 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             }
         }
         if mode.strokes() {
-            let scale = state.ctm.then(&self.base).expansion();
+            // 9.3.6 strokes a glyph as a path, so its pen is 8.4.3.2's: the
+            // line width in user space — the CTM's, not the text matrix's.
             let style = StrokeStyle {
-                width: (state.line_width * scale).max(self.thinnest(0.6)),
+                width: state.line_width,
                 ..StrokeStyle::default()
             };
             let stop = self.stop_predicate();
-            let outlined = stroke(&path, &style, self.tolerance, Some(&stop));
+            let outlined = self.pen(&path, state, style, self.thinnest(0.6), &stop);
             if let Some(name) = state.stroke_pattern.clone() {
                 self.fill_with_pattern(
                     &outlined,

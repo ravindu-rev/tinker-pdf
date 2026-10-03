@@ -106,6 +106,29 @@ impl Path {
         self.push(Verb::Close);
     }
 
+    /// The same path with every point, control points included, carried
+    /// through `map` — which is exact for a Bézier, since an affine map of
+    /// the control polygon is the map of the curve. A point the map takes
+    /// past the finite is dropped as [`Path::line_to`] drops one.
+    #[must_use]
+    pub fn mapped(&self, map: &crate::image::Transform) -> Path {
+        let at = |p: Point| {
+            let (x, y) = map.apply(p.x, p.y);
+            Point::new(x, y)
+        };
+        let mut out = Path::new();
+        for verb in &self.verbs {
+            out.push(match *verb {
+                Verb::MoveTo(p) => Verb::MoveTo(at(p)),
+                Verb::LineTo(p) => Verb::LineTo(at(p)),
+                Verb::QuadTo(c, p) => Verb::QuadTo(at(c), at(p)),
+                Verb::CurveTo(a, b, c) => Verb::CurveTo(at(a), at(b), at(c)),
+                Verb::Close => Verb::Close,
+            });
+        }
+        out
+    }
+
     /// Adds a rectangle as its own subpath.
     pub fn rect(&mut self, x: f64, y: f64, w: f64, h: f64) {
         self.move_to(x, y);
