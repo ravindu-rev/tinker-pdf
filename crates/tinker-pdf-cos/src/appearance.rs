@@ -27,6 +27,8 @@
 //!   dashed when `/BS` says so.
 //! - `Polygon` and `PolyLine` (12.5.6.9): `/Vertices`, closed and filled for
 //!   a polygon, open with a line's endings for a polyline.
+//! - `Squiggly` (12.5.6.10), the fourth text markup: a zigzag in each quad's
+//!   own frame, at a cost per quad that does not grow with its length.
 //!
 //! Each carries 12.5.6.2's `/CA` in the graphics state it selects, and each
 //! stroked border or line its `/BS` (or `/Border`) dash.
@@ -618,6 +620,130 @@ fn polygon(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>, closed: bool
     Some(())
 }
 
+/// A quad's own frame (12.5.6.10): its lower-left corner, the unit vector
+/// along its baseline to the lower-right corner, the unit vector up its
+/// side towards the upper-left corner, its length and its height. `None`
+/// for a quad with no baseline or no height.
+struct QuadFrame {
+    origin: Point,
+    along: Point,
+    up: Point,
+    length: f64,
+    height: f64,
+}
+
+fn quad_frame(quad: &[f64; 8]) -> Option<QuadFrame> {
+    let origin = (quad[4], quad[5]);
+    let (dx, dy) = (quad[6] - quad[4], quad[7] - quad[5]);
+    let along = unit(dx, dy)?;
+    let length = (dx * dx + dy * dy).sqrt();
+    // A quarter turn counter-clockwise of the baseline, turned over when the
+    // upper-left corner is on the other side of it, so that what is drawn
+    // in the frame is always on the quad's side of its baseline.
+    let mut up = (-along.1, along.0);
+    let mut height = (quad[0] - origin.0) * up.0 + (quad[1] - origin.1) * up.1;
+    if height < 0.0 {
+        up = (-up.0, -up.1);
+        height = -height;
+    }
+    // Adding zero turns a negative zero, which the frame's `cm` would write
+    // as `-0`, into a zero.
+    let (along, up) = ((along.0 + 0.0, along.1 + 0.0), (up.0 + 0.0, up.1 + 0.0));
+    (height.is_finite() && height > 1e-9).then_some(QuadFrame {
+        origin,
+        along,
+        up,
+        length,
+        height,
+    })
+}
+
+/// A squiggly underline (12.5.6.10): a zigzag under each quad's text, in
+/// `/C` — black when `/C` is absent or empty, the rule `Underline` follows
+/// here.
+///
+/// Drawn in each quad's own frame, so a quad on rotated text gets a zigzag
+/// along its own baseline. The zigzag's band runs from 3% to 3% + ⅙ of the
+/// quad's height above the baseline, its strokes rise and fall at forty-five
+/// degrees — so a tooth is twice as wide as the band is high — and they are
+/// as thick as an underline's line.
+///
+/// It is drawn **without a vertex per tooth**. A quad is eight numbers, and
+/// a loop over its teeth would let eight numbers ask for as much content as
+/// their length over their height: a quad a kilometre long on a point of
+/// text is a million teeth. Instead the band is clipped, and each set of
+/// parallel strokes is the dashes of one line drawn across them — a line
+/// running up and to the right, as wide as the band is long, whose dashes,
+/// cut square across it, are the falling strokes; and one running down and
+/// to the right for the rising ones. That is a constant number of operators
+/// per quad whatever its length; how many dashes a line that long becomes
+/// is the renderer's to bound, as it is for any dashed line.
+///
+/// The lines are diagonal in the quad's frame rather than straight under a
+/// shear — which would make the same dashes with less arithmetic — because
+/// a shear is not a similarity, and a renderer that strokes in device space
+/// with one scale for the width, as this engine's does, would square every
+/// sheared dash back up into a vertical bar.
+fn squiggly(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
+    const K: f64 = std::f64::consts::FRAC_1_SQRT_2;
+    let color = color_of(doc, annotation, b"C").unwrap_or([0.0, 0.0, 0.0]);
+    let frames: Vec<QuadFrame> = quads_of(doc, annotation)
+        .iter()
+        .filter_map(quad_frame)
+        .collect();
+    if frames.is_empty() {
+        return None;
+    }
+    op(out, &color, b"RG");
+    for frame in frames {
+        let (length, h) = (frame.length, frame.height);
+        let band = h / 6.0;
+        let (low, high) = (h * 0.03, h * 0.03 + band);
+        // Strokes at forty-five degrees a tooth's half-width apart, measured
+        // along the band, are `band * sqrt 2` apart measured across them.
+        let period = band * std::f64::consts::SQRT_2;
+        // Never so thick that the gap between two strokes closes.
+        let thickness = (h * 0.07).max(0.5).min(period / 2.0);
+        // Wide enough that every dash crosses the whole band at any point
+        // along it.
+        let width = std::f64::consts::SQRT_2 * (length + band);
+        let (cx, cy) = (length / 2.0, (low + high) / 2.0);
+
+        out.extend_from_slice(b"q\n");
+        let QuadFrame {
+            origin, along, up, ..
+        } = frame;
+        op(
+            out,
+            &[along.0, along.1, up.0, up.1, origin.0, origin.1],
+            b"cm",
+        );
+        op(out, &[0.0, low, length, band], b"re");
+        out.extend_from_slice(b"W n\n");
+        op(out, &[width], b"w");
+        dash(out, &[thickness, period - thickness], 0.0);
+
+        // The falling strokes lie along x + y = low + 2k * band, so the
+        // line runs along (1, 1), measured by s = (x + y) / sqrt 2, through
+        // the band's centre; its first dash is centred on the stroke that
+        // reaches the baseline at x = 0.
+        let across = (cy - cx) * K;
+        let (s0, s1) = (low * K - thickness / 2.0, (length + high) * K + period);
+        op(out, &[(s0 - across) * K, (s0 + across) * K], b"m");
+        op(out, &[(s1 - across) * K, (s1 + across) * K], b"l");
+        out.extend_from_slice(b"S\n");
+        // The rising strokes lie along x - y = 2k * band - low: the line
+        // runs along (1, -1), measured by u = (x - y) / sqrt 2, its first
+        // dash centred on the stroke that rises from the baseline at x = 0.
+        let across = (cx + cy) * K;
+        let (u0, u1) = (-low * K - thickness / 2.0, (length - low) * K + period);
+        op(out, &[(u0 + across) * K, (across - u0) * K], b"m");
+        op(out, &[(u1 + across) * K, (across - u1) * K], b"l");
+        out.extend_from_slice(b"S\nQ\n");
+    }
+    Some(())
+}
+
 /// Builds the appearance for an annotation, or `None` when its type needs
 /// none — a link with no border draws nothing, and inventing something for it
 /// would be worse than leaving it alone.
@@ -800,6 +926,7 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
         b"Line" => line(doc, annotation, &mut content)?,
         b"Polygon" => polygon(doc, annotation, &mut content, true)?,
         b"PolyLine" => polygon(doc, annotation, &mut content, false)?,
+        b"Squiggly" => squiggly(doc, annotation, &mut content)?,
         _ => return None,
     }
 
@@ -1790,5 +1917,114 @@ mod tests {
             filled_only, "0 0 1 rg\n83 20 m\n80 23 l\n77 20 l\n80 17 l\nh\nf\n",
             "a polyline with no stroke draws only its closed endings"
         );
+    }
+
+    /// A squiggly underline, quad by quad: the quad's own frame, the band
+    /// clipped, and the falling and rising strokes as the dashes of two
+    /// diagonal lines. A quad sixty high has a band ten high, 1.8 above its
+    /// baseline, strokes 4.2 thick and ten times the square root of two
+    /// apart across them.
+    #[test]
+    fn a_squiggly_is_two_dashed_diagonals_a_quad() {
+        let doc = doc();
+        let squiggly = |quads: &str, rest: &str| {
+            content_of(
+                &doc,
+                &format!(
+                    "<< /Subtype /Squiggly /Rect [0 0 100 100] /QuadPoints [{quads}] {rest} >>"
+                ),
+            )
+        };
+        let content = squiggly("10 80 90 80 10 20 90 20", "/C [1 0 0]").expect("a squiggle");
+        let head = "1 0 0 RG\nq\n1 0 0 1 10 20 cm\n0 1.8 80 10 re\nW n\n127.2792 w\n\
+                    [4.2 9.9421] 0 d\n";
+        assert!(content.starts_with(head), "{content}");
+        assert!(content.ends_with("S\nQ\n"), "{content}");
+
+        // The two lines, each `x y m`, `x y l`, `S`.
+        let numbers: Vec<f64> = content[head.len()..]
+            .split_whitespace()
+            .filter_map(|word| word.parse().ok())
+            .collect();
+        let [fx0, fy0, fx1, fy1, rx0, ry0, rx1, ry1] = numbers[..] else {
+            panic!("two lines of two points: {content}");
+        };
+        assert!(
+            ((fy1 - fy0) / (fx1 - fx0) - 1.0).abs() < 1e-3,
+            "the falling strokes' line runs up and to the right"
+        );
+        assert!(
+            ((ry1 - ry0) / (rx1 - rx0) + 1.0).abs() < 1e-3,
+            "the rising strokes' line runs down and to the right"
+        );
+        // Each line's first dash is centred on the stroke through (0, 1.8):
+        // its start is half a stroke short of it, measured along the line.
+        let k = std::f64::consts::FRAC_1_SQRT_2;
+        assert!(((fx0 + fy0) * k - (1.8 * k - 2.1)).abs() < 1e-3);
+        assert!(((rx0 - ry0) * k - (-1.8 * k - 2.1)).abs() < 1e-3);
+        // And each passes through the band's middle, (40, 6.8).
+        assert!(((fy0 - fx0) - (6.8 - 40.0)).abs() < 1e-3);
+        assert!(((ry0 + rx0) - (6.8 + 40.0)).abs() < 1e-3);
+
+        assert_eq!(
+            squiggly("10 80 90 80 10 20 90 20", "")
+                .as_deref()
+                .map(|c| &c[..8]),
+            Some("0 0 0 RG"),
+            "black by default, as an underline is"
+        );
+        // Turned a quarter: the baseline runs up x = 80, the height leftward.
+        let turned = squiggly("20 10 20 90 80 10 80 90", "").expect("a squiggle");
+        assert!(
+            turned.contains("q\n0 1 -1 0 80 10 cm\n0 1.8 80 10 re\n"),
+            "{turned}"
+        );
+        // With the upper-left corner below the baseline, the frame turns
+        // over rather than drawing the zigzag outside the quad.
+        let flipped = squiggly("10 20 90 20 10 80 90 80", "").expect("a squiggle");
+        assert!(
+            flipped.contains("q\n1 0 0 -1 10 80 cm\n0 1.8 80 10 re\n"),
+            "{flipped}"
+        );
+
+        for degenerate in [
+            "",
+            "10 80 90 80 10 20",
+            "10 20 90 20 10 20 90 20",
+            "10 80 10 80 10 20 10 20",
+        ] {
+            assert_eq!(
+                squiggly(degenerate, ""),
+                None,
+                "{degenerate:?} has no frame"
+            );
+        }
+        assert_eq!(
+            squiggly(
+                "10 20 90 20 10 20 90 20 10 80 90 80 10 20 90 20",
+                "/C [1 0 0]"
+            ),
+            Some(content),
+            "a quad with no height is skipped and the next drawn"
+        );
+    }
+
+    /// A quad a million points long on text one point high draws the same
+    /// operators as a short one: what a quad costs does not grow with it.
+    #[test]
+    fn a_squiggly_quad_costs_the_same_however_long_it_is() {
+        let doc = doc();
+        let ops = |quads: &str| {
+            let content = content_of(
+                &doc,
+                &format!("<< /Subtype /Squiggly /Rect [0 0 100 100] /QuadPoints [{quads}] >>"),
+            )
+            .expect("a squiggle");
+            (content.lines().count(), content.len())
+        };
+        let (short_lines, _) = ops("0 1 10 1 0 0 10 0");
+        let (long_lines, long_bytes) = ops("0 1 1000000 1 0 0 1000000 0");
+        assert_eq!(short_lines, long_lines);
+        assert!(long_bytes < 400, "{long_bytes} bytes");
     }
 }

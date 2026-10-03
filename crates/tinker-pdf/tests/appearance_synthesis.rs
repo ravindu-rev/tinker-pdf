@@ -489,3 +489,146 @@ fn a_polyline_is_open_and_its_endings_face_along_its_end_segments() {
         is_blue,
     );
 }
+
+// ------------------------------- Highlight, Underline, StrikeOut, Squiggly
+
+/// 12.5.6.10's four text markups over one quad, (20, 40) to (80, 90): its
+/// `/QuadPoints` upper-left, upper-right, lower-left, lower-right, the
+/// order producers write.
+const QUAD: &str = "/QuadPoints [20 90 80 90 20 40 80 40]";
+
+/// A highlight fills the quad, multiplied, so on white it is its colour
+/// and nothing outside the quad is touched.
+#[test]
+fn a_highlight_fills_its_quad() {
+    let page = synthesized(&format!(
+        "<< /Type /Annot /Subtype /Highlight /Rect [0 0 100 100] /C [1 0 0] {QUAD} >>"
+    ));
+    assert_points(
+        &page.bitmap,
+        "red, inside the quad",
+        &[(20.5, 40.5), (50.5, 65.5), (79.5, 89.5)],
+        is_red,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, outside it",
+        &[(18.5, 65.5), (81.5, 65.5), (50.5, 38.5), (50.5, 91.5)],
+        is_white,
+    );
+}
+
+/// An underline sits under the text and a strike-out through it, each a
+/// fraction of the quad's height: for a quad fifty high, centred six and
+/// forty-two hundredths of the way up — y 43 and y 61 — and 3.5 thick.
+#[test]
+fn an_underline_sits_under_its_quad_and_a_strike_out_through_it() {
+    for (subtype, on, off) in [
+        (
+            "Underline",
+            [(50.5, 42.5), (50.5, 43.5), (20.5, 43.5)],
+            [(50.5, 40.5), (50.5, 45.5), (50.5, 61.5)],
+        ),
+        (
+            "StrikeOut",
+            [(50.5, 60.5), (50.5, 61.5), (79.5, 61.5)],
+            [(50.5, 58.5), (50.5, 63.5), (50.5, 43.5)],
+        ),
+    ] {
+        let page = synthesized(&format!(
+            "<< /Type /Annot /Subtype /{subtype} /Rect [0 0 100 100] /C [0 0 1] {QUAD} >>"
+        ));
+        assert_points(
+            &page.bitmap,
+            &format!("blue, /{subtype}'s line"),
+            &on,
+            is_blue,
+        );
+        assert_points(
+            &page.bitmap,
+            &format!("white, off /{subtype}'s line"),
+            &off,
+            is_white,
+        );
+        assert_points(
+            &page.bitmap,
+            &format!("white, past /{subtype}'s quad"),
+            &[(18.5, 43.5), (81.5, 61.5)],
+            is_white,
+        );
+    }
+}
+
+/// A squiggly underline is a zigzag in a band from 1.8 to 11.8 above the
+/// quad's baseline of a quad sixty high: teeth ten wide, so the strokes
+/// rise from x 10, 30, 50, 70 at the band's bottom to crests at x 20, 40,
+/// 60, 80 at its top, and fall back. At a crest the band's top is drawn and
+/// its bottom is not; at a trough the other way round; and between a rising
+/// and a falling stroke at the band's middle is white.
+#[test]
+fn a_squiggly_underline_zigzags_under_its_quad() {
+    let page = synthesized(
+        "<< /Type /Annot /Subtype /Squiggly /Rect [0 0 100 100] /C [1 0 0] \
+         /QuadPoints [10 80 90 80 10 20 90 20] >>",
+    );
+    assert_points(
+        &page.bitmap,
+        "red, the crests, the troughs and the strokes between",
+        &[
+            (20.5, 30.5),
+            (40.5, 30.5),
+            (30.5, 22.5),
+            (50.5, 22.5),
+            (14.5, 26.5),
+            (25.5, 26.5),
+            (34.5, 26.5),
+        ],
+        is_red,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, under a crest, over a trough, between strokes, and off the band",
+        &[
+            (20.5, 22.5),
+            (40.5, 22.5),
+            (30.5, 30.5),
+            (50.5, 30.5),
+            (20.5, 26.5),
+            (30.5, 26.5),
+            (30.5, 20.5),
+            (20.5, 33.5),
+            (50.5, 50.5),
+        ],
+        is_white,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, past the quad's ends",
+        &[(8.5, 21.5), (92.5, 26.5)],
+        is_white,
+    );
+}
+
+/// The same zigzag on a quad turned a quarter: text running up the page,
+/// its baseline the quad's right edge, x = 80, from y 10 to y 90, and its
+/// height leftward. The band is then x 68.2 to 78.2, and the crests are at
+/// y 20, 40, 60, 80 on its far side from the baseline.
+#[test]
+fn a_squiggly_underline_follows_a_turned_quad() {
+    let page = synthesized(
+        "<< /Type /Annot /Subtype /Squiggly /Rect [0 0 100 100] /C [1 0 0] \
+         /QuadPoints [20 10 20 90 80 10 80 90] >>",
+    );
+    assert_points(
+        &page.bitmap,
+        "red, a crest and a trough",
+        &[(69.5, 20.5), (77.5, 30.5)],
+        is_red,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, the other side of each, and off the band",
+        &[(77.5, 20.5), (69.5, 30.5), (66.5, 50.5), (80.5, 50.5)],
+        is_white,
+    );
+}

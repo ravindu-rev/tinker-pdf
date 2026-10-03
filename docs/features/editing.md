@@ -305,7 +305,19 @@ the shape a width and a height — and its border is dashed as a line's is. A
 endings at its first and last vertex, facing along its end segments (past a
 vertex written twice), and its `/IC` filling only those. Both stroke black
 when `/C` is absent, as a line does, and need two distinct vertices to draw
-anything. Every
+anything. A **`Squiggly`** (12.5.6.10), the fourth text markup, is a zigzag
+under each quad's text in the quad's own frame — along its baseline, so a
+quad on turned text gets a turned zigzag — in a band from 3% to 3% + ⅙ of
+the quad's height, its strokes at forty-five degrees and as thick as an
+underline's, and black when `/C` is absent or empty, as an underline is. It
+is drawn without a vertex per tooth: the band is clipped and each set of
+parallel strokes is the dashes of one wide diagonal line, so a quad costs the
+same fourteen operators however long it is, where a loop over teeth would let
+eight numbers — a quad a kilometre long on a point of text — ask for a
+million. The lines are diagonal in the quad's frame rather than straight
+under a shear because this engine's renderer strokes in device space with
+one scale for the width, and squares a sheared dash back into a vertical
+bar. Every
 synthesised appearance carries 12.5.6.2's `/CA` (and ISO 32000-2's `/ca` for
 what is filled) as the `ExtGState` it selects, since a renderer reads
 opacity from the content and not from the annotation. Constructors for the common
@@ -716,7 +728,7 @@ a quarter (`rotate_page` refuses it) and an empty owner password (the user's,
 | Redacting what a **tiling pattern's cell** or a **soft mask's group** draws | not measured: the walk follows `Do`, annotation appearances and Type 3 procedures, and a cell (8.7.3.1) or a mask's group (11.6.5.2) is reached through `scn`, `SCN` or `gs` instead. One whose content shows text or draws an image is **named**, `RedactionWarning::PatternOrMask` with the resource name that selected it, wherever a page, a form or a glyph procedure paints with it (`redact.rs`'s `patterns_and_masks`); one that only paints paths is not, since nothing in it is anything a redaction removes. Until October 2026 neither was read or named. The read of what else draws a form does not follow them either | a cell is painted at every tile of whatever it fills, so cutting one is a form drawn at as many placements as the fill has tiles, which is a design rather than a fix; a mask's group is drawn as alpha, glyph shapes and all. **Not permanent**: measuring both is owed in the ROADMAP's Editing row | 8.7.3, 11.6.5 |
 | Measuring more than `MAX_PLACEMENTS` distinct placements of one form | the count in `RepeatedForm` saturates at the cap, which is how a caller tells "too much went" from "something may have survived" (`a_form_placed_more_times_than_the_cap_saturates_its_count`) | a form that invokes itself under a matrix that moves each round makes a fresh placement every time; a count bounds it, where a tolerance on matrices would have to be loose enough to call two real placements one | ruling 1 |
 | Following more than 4 096 `Do`s of one content stream | the ones past the bound are written back as they were and never resolved — an image they draw is tested against no rectangle, a form not entered — and `RedactionWarning::TooManyXObjects` counts them (`a_stream_of_more_xobjects_than_the_walk_follows_is_reported`); until October 2026 the bound was there and the warning was not | the walk holds a use per `Do`, and a content stream may be 128 MiB of six-byte `/a Do`s; a page of more than four thousand XObject placements — a map, a tiled scan — has to be told it was not measured whole | ruling 1 |
-| Appearance synthesis for `Ink`, `Squiggly`, `Caret` and `FreeText` | `add_annotation` inserts the dictionary; no `/AP` is generated, and the annotation renders only if it carries its own | **not permanent**: each one's geometry is in its dictionary, and drawing it is owed in the ROADMAP's Editing row | 12.5.6 |
+| Appearance synthesis for `Ink`, `Caret` and `FreeText` | `add_annotation` inserts the dictionary; no `/AP` is generated, and the annotation renders only if it carries its own | **not permanent**: each one's geometry is in its dictionary, and drawing it is owed in the ROADMAP's Editing row | 12.5.6 |
 | A line's caption (`/Cap`, `/CP`, `/CO`) | the line is drawn, its caption is not | a caption is text, and a line annotation names no font to draw it in | 12.5.6.7 |
 | A synthesised border's **effect** (`/BE /S /C`, cloudy, on a square, circle or polygon) and the **beveled, inset and underline** border styles (`/BS /S /B`, `/I`, `/U`) | the border is drawn solid, at its width and in its colour, as though `/BE` were absent and `/S` were `/S` | 12.5.4 says a cloudy border "shall appear cloudy" at an intensity from 0 to 2 and gives no geometry for a cloud; Table 166's beveled and inset styles are "simulated" embossing in shades nothing names, and the underline style draws a widget's bottom edge, which is not what a shape is. A producer that wants one of them writes its own `/AP`, and one it wrote is kept | 12.5.4 |
 | Rewriting a Type 3 glyph's procedure when it draws under a rectangle | the **use** is removed whole and the procedure is left byte for byte (`a_glyph_whose_procedure_shows_text_under_a_rectangle_is_removed_at_that_use`), so a procedure that shows the covered words still says them in `/CharProcs` while any use of it is left; once none is, `subset::apply` — the default save — empties it (`a_procedure_whose_last_use_was_redacted_is_emptied_by_the_default_save`) | the procedure is the font's: every use of the glyph on every page runs it, so cutting it would cut every use, and there is no copy to give the uncovered ones short of a new glyph in the font. This is a substitute for the ROADMAP Editing row's "glyph-procedure streams rewritten", chosen here and not yet ruled on: the row stays open until the owner accepts it or it is replaced | 9.6.5 |
@@ -782,7 +794,11 @@ a quarter (`rotate_page` refuses it) and an empty owner password (the user's,
   inscribed in its `/Rect`, its corners left white, and its fill at half
   opacity. A polygon closed back to its first vertex and filled; a polyline
   left open and unfilled, a square ending at its first vertex and a closed
-  arrow at its last, pointing on along the last segment. `appearance.rs`'s own tests pin the seven first subtypes
+  arrow at its last, pointing on along the last segment. A highlight filling
+  its quad and nothing past it; an underline under the quad's text and a
+  strike-out through it; a squiggly underline's crests drawn at the band's
+  top and not its bottom, its troughs the other way round, white between
+  its strokes; and the same zigzag along a quad turned a quarter. `appearance.rs`'s own tests pin the seven first subtypes
   byte for byte and each ending's path.
 - `crates/tinker-pdf/tests/editor_docops.rs` — the document operations, from
   outside the crate: each setter's output saved **incrementally and as a
