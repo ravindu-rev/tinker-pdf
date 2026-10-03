@@ -394,6 +394,25 @@ and vanishes; `a_hard_edged_hairline_leaves_no_column_it_crosses_empty` sweeps
 eight slopes for it. A glyph feature narrower than half a pixel can still
 vanish where it straddles a pixel edge, which is what any threshold costs.
 
+**A known defect: a stroke under a transform that is not a similarity.**
+8.4.3.2 measures the line width in user space — a stroke paints every point
+within half the width of the path *in user space* — so under an anisotropic
+scale or a shear the stroke a device shows is wider in one direction than
+another. `stroke_path` instead strokes the path in device space at one
+width, the user-space width times `Matrix::expansion` (the square root of
+the transform's determinant), and scales the dash array by the same number
+(`crates/tinker-pdf-render/src/lib.rs`, `stroke_path`). Under a uniform
+scale, a rotation or a reflection that is exact; under `scale(1, 3)` a
+circle stroked two units wide is drawn 2√3, about 3.46, device units wide
+all round by that arithmetic, where 8.4.3.2 makes it six at its top and bottom and two at its
+sides, and a dash cut square across a sheared line comes out square in
+device space rather than sheared. The SVG writer states the same pen
+(`svg_out`, "width and dashes scaled by the transform's expansion as the
+renderer scales them"), so the two agree with each other and not with the
+clause. It is owed in the ROADMAP's Tier 1; `appearance.rs`'s squiggly
+underline is drawn diagonal in the quad's frame rather than under a shear
+to stay clear of it.
+
 **A page as a layer, and premultiplied alpha.** `RenderOptions::transparent`
 starts the page with nothing on it instead of white — `(0, 0, 0, 0)` where
 nothing paints, a half-opaque fill at half alpha, an anti-aliased edge at the

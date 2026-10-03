@@ -15,13 +15,21 @@
 //!
 //! # What is drawn
 //!
-//! A subtype is drawn when its dictionary determines its appearance — when
-//! the geometry is in its own entries and 12.5.6 says what to do with it:
+//! Thirteen subtypes, most of them because their dictionary determines their
+//! appearance — the geometry is in their own entries and 12.5.6 says what to
+//! do with it — and two because this module invents one:
 //!
 //! - `Highlight`, `Underline`, `StrikeOut`, `Square`, `Circle` and `Text`, the
-//!   first six, exactly as they were drawn before anything else was added
-//!   (`the_seven_first_subtypes_are_drawn_exactly_as_they_were`); `Link`, the
-//!   seventh, draws nothing.
+//!   first six. For a dictionary that carries none of the entries they did
+//!   not read before — `/CA`, `/ca`, `/RD`, a `/BS /S /D` or a `/Border`
+//!   dash — and none that is malformed, each is drawn byte for byte as it
+//!   was before anything else was added
+//!   (`the_seven_first_subtypes_are_drawn_exactly_as_they_were`, over the
+//!   editor's own constructors' dictionaries); with one of those entries it
+//!   is drawn as the entry says, and with a malformed one it is declined.
+//!   `Link`, the seventh, draws nothing. `Text` is one of the two
+//!   inventions: 12.5.6.4's `/Name` names an icon the reader provides, as a
+//!   stamp's does, and the sticky note drawn for it is this module's.
 //! - `Line` (12.5.6.7): `/L`, Table 176's endings, Figure 60's leader lines.
 //! - `Square` and `Circle` (12.5.6.8) read `/RD` too, and draw their border
 //!   dashed when `/BS` says so.
@@ -29,7 +37,8 @@
 //!   a polygon, open with a line's endings for a polyline.
 //! - `Squiggly` (12.5.6.10), the fourth text markup: a zigzag in each quad's
 //!   own frame, at a cost per quad that does not grow with its length.
-//! - `Caret` (12.5.6.11): the typographic caret, filled, inside `/RD`.
+//! - `Caret` (12.5.6.11): the typographic caret, filled, inside `/RD` — the
+//!   other invention, since 12.5.6.11 names the symbol and not its outline.
 //! - `Ink` (12.5.6.13): each of `/InkList`'s paths, stroked with round caps
 //!   and joins.
 //! - `FreeText` (12.5.6.6), when its `/DA` names a simple font the form's
@@ -47,9 +56,13 @@
 //! appearance ([`Malformed`]) rather than being read past, because what is
 //! drawn from what is left is a shape the producer never wrote.
 //!
-//! Every other subtype is declined: by name when 12.5.6 gives it an
-//! appearance its dictionary does not determine ([`UNDETERMINED_SUBTYPES`]),
-//! and as unknown otherwise.
+//! Every other subtype is declined. [`UNDETERMINED_SUBTYPES`] names the
+//! fourteen 12.5.6 and ISO 32000-2 define, with the reason for each; a
+//! subtype in it is declined exactly as one 12.5.6 does not name is, and the
+//! list is the record of which were considered, not a different behaviour.
+//! Declining them is this module's position and not a ruling: the
+//! ROADMAP's Editing row (d) owes the owner the choice between it and
+//! drawing invented icons for them, as `Text` has one.
 
 use crate::doc::CosDocument;
 use crate::name::Name;
@@ -81,59 +94,77 @@ fn rect_of(doc: &CosDocument, dict: &Dict) -> Option<Rect> {
     (!rect.is_empty()).then_some(rect)
 }
 
-/// An annotation colour entry, as `[]`, grey, RGB or CMYK (12.5.2 `/C`).
-fn color_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Option<[f64; 3]> {
-    let value = doc.resolve_key(dict, doc.intern(key));
-    let components = value.as_array()?;
-    let n: Vec<f64> = components
-        .iter()
-        .filter_map(Object::as_number)
-        .map(|v| v.clamp(0.0, 1.0))
-        .collect();
+/// An annotation colour entry (12.5.2 `/C`, and `/IC`): grey, RGB or CMYK,
+/// as RGB. `Ok(None)` when it is absent or empty — 12.5.2's
+/// "transparent", which is not a colour — and [`Malformed`] when it is not
+/// an array of none, one, three or four finite numbers. A component outside
+/// 0 to 1 is clamped into it, which is what a renderer handed it does.
+fn color_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Entry<[f64; 3]> {
+    let Some(n) = numbers_of(doc, dict, key)? else {
+        return Ok(None);
+    };
+    let n: Vec<f64> = n.iter().map(|v| v.clamp(0.0, 1.0)).collect();
     match n.as_slice() {
-        // An empty array means transparent, which is not a colour.
-        [] => None,
-        [g] => Some([*g, *g, *g]),
-        [r, g, b] => Some([*r, *g, *b]),
-        [c, m, y, k] => Some([
+        [] => Ok(None),
+        [g] => Ok(Some([*g, *g, *g])),
+        [r, g, b] => Ok(Some([*r, *g, *b])),
+        [c, m, y, k] => Ok(Some([
             (1.0 - c) * (1.0 - k),
             (1.0 - m) * (1.0 - k),
             (1.0 - y) * (1.0 - k),
-        ]),
-        _ => None,
+        ])),
+        _ => Err(Malformed),
     }
 }
 
-/// The border width, from `/BS /W` or the legacy `/Border` array (12.5.4).
-fn border_width(doc: &CosDocument, dict: &Dict) -> f64 {
-    if let Some(style) = doc.resolve_key(dict, doc.intern(b"BS")).as_dict() {
-        if let Some(width) = style.get_number(doc.intern(b"W")) {
-            return width.max(0.0);
+/// The border width, from `/BS /W` or the legacy `/Border` array (12.5.4),
+/// one by default. [`Malformed`]: a `/BS` that is not a dictionary, a width
+/// that is not a finite number at least zero, and a `/Border` that is not
+/// three numbers and an optional dash array (Table 164).
+fn border_width(doc: &CosDocument, dict: &Dict) -> Result<f64, Malformed> {
+    let style = doc.resolve_key(dict, doc.intern(b"BS"));
+    if !style.is_null() {
+        let style = style.as_dict().ok_or(Malformed)?;
+        if let Some(width) = number_of(doc, style, b"W")? {
+            return if width >= 0.0 {
+                Ok(width)
+            } else {
+                Err(Malformed)
+            };
         }
     }
+    let border = doc.resolve_key(dict, doc.intern(b"Border"));
+    if border.is_null() {
+        return Ok(1.0);
+    }
+    let items = border.as_array().ok_or(Malformed)?;
+    let (Some(head), true) = (items.get(..3), items.len() <= 4) else {
+        return Err(Malformed);
+    };
+    let head = numbers_in(doc, &Object::Array(head.to_vec()))?;
     // /Border is [hradius vradius width], so the width is the third entry.
-    doc.resolve_key(dict, doc.intern(b"Border"))
-        .as_array()
-        .and_then(|border| border.get(2))
-        .and_then(Object::as_number)
-        .map_or(1.0, |w| w.max(0.0))
+    match head.get(2) {
+        Some(width) if *width >= 0.0 => Ok(*width),
+        _ => Err(Malformed),
+    }
 }
 
-/// The `/QuadPoints` of a markup annotation, as `[x0 y0 .. x3 y3]` quads.
+/// The `/QuadPoints` of a markup annotation, as `[x0 y0 .. x3 y3]` quads,
+/// none when the entry is absent; [`Malformed`] when it is not a whole number
+/// of quads of finite numbers.
 ///
 /// 12.5.6.10 orders the corners upper-left, upper-right, lower-left,
 /// lower-right — neither clockwise nor counter-clockwise, and the reason
 /// naively drawn highlights come out bow-tied.
-fn quads_of(doc: &CosDocument, dict: &Dict) -> Vec<[f64; 8]> {
-    let value = doc.resolve_key(dict, doc.intern(b"QuadPoints"));
-    let Some(points) = value.as_array() else {
-        return Vec::new();
-    };
-    let numbers: Vec<f64> = points.iter().filter_map(Object::as_number).collect();
-    numbers
+fn quads_of(doc: &CosDocument, dict: &Dict) -> Result<Vec<[f64; 8]>, Malformed> {
+    let numbers = numbers_of(doc, dict, b"QuadPoints")?.unwrap_or_default();
+    if numbers.len() % 8 != 0 {
+        return Err(Malformed);
+    }
+    Ok(numbers
         .chunks_exact(8)
         .map(|c| [c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
-        .collect()
+        .collect())
 }
 
 /// Writes a number the way a content stream wants it: short, and never in
@@ -263,9 +294,9 @@ fn drawn_rect(doc: &CosDocument, dict: &Dict, rect: Rect) -> Result<Rect, Malfor
 /// The colour a line-like annotation strokes with: `/C`, or black when the
 /// entry is absent — the convention `Underline` and `StrikeOut` already
 /// follow here. An empty `/C` is 12.5.2's "transparent", and strokes nothing.
-fn stroke_color_of(doc: &CosDocument, dict: &Dict) -> Option<[f64; 3]> {
+fn stroke_color_of(doc: &CosDocument, dict: &Dict) -> Entry<[f64; 3]> {
     match *doc.resolve_key(dict, doc.intern(b"C")) {
-        Object::Null => Some([0.0, 0.0, 0.0]),
+        Object::Null => Ok(Some([0.0, 0.0, 0.0])),
         _ => color_of(doc, dict, b"C"),
     }
 }
@@ -560,9 +591,9 @@ fn line(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
     };
     let along = unit(x2 - x1, y2 - y1)?;
     let paint = Paint {
-        stroke: stroke_color_of(doc, annotation),
-        fill: color_of(doc, annotation, b"IC"),
-        width: border_width(doc, annotation),
+        stroke: stroke_color_of(doc, annotation).ok()?,
+        fill: color_of(doc, annotation, b"IC").ok()?,
+        width: border_width(doc, annotation).ok()?,
     };
     let (first, last) = endings_of(doc, annotation).ok()?;
     let fills_an_end = paint.fill.is_some() && (first.is_closed() || last.is_closed());
@@ -671,9 +702,9 @@ fn polygon(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>, closed: bool
     let (&first, &last) = (points.first()?, points.last()?);
     let start = leaving(first, points.iter().copied())?;
     let paint = Paint {
-        stroke: stroke_color_of(doc, annotation),
-        fill: color_of(doc, annotation, b"IC"),
-        width: border_width(doc, annotation),
+        stroke: stroke_color_of(doc, annotation).ok()?,
+        fill: color_of(doc, annotation, b"IC").ok()?,
+        width: border_width(doc, annotation).ok()?,
     };
     let (first_end, last_end) = if closed {
         (Ending::None, Ending::None)
@@ -782,16 +813,13 @@ fn quad_frame(quad: &[f64; 8]) -> Option<QuadFrame> {
 /// sheared dash back up into a vertical bar.
 fn squiggly(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
     const K: f64 = std::f64::consts::FRAC_1_SQRT_2;
-    let color = color_of(doc, annotation, b"C").unwrap_or([0.0, 0.0, 0.0]);
-    // `/QuadPoints` read strictly: a count that is not a whole number of
-    // quads, or an element that is not a finite number, declines.
-    let numbers = numbers_of(doc, annotation, b"QuadPoints").ok()??;
-    if numbers.len() % 8 != 0 {
-        return None;
-    }
-    let frames: Vec<QuadFrame> = numbers
-        .chunks_exact(8)
-        .filter_map(|c| quad_frame(&[c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+    let color = color_of(doc, annotation, b"C")
+        .ok()?
+        .unwrap_or([0.0, 0.0, 0.0]);
+    let frames: Vec<QuadFrame> = quads_of(doc, annotation)
+        .ok()?
+        .iter()
+        .filter_map(quad_frame)
         .collect();
     if frames.is_empty() {
         return None;
@@ -860,7 +888,7 @@ fn squiggly(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<(
 /// 12.5.6.11 places it nowhere; the caret is drawn and the symbol is not,
 /// and the feature doc's refusal table names it.
 fn caret(doc: &CosDocument, annotation: &Dict, rect: Rect, out: &mut Vec<u8>) -> Option<()> {
-    let color = stroke_color_of(doc, annotation)?;
+    let color = stroke_color_of(doc, annotation).ok()??;
     let caret = drawn_rect(doc, annotation, rect).ok()?;
     let middle = (caret.x0 + caret.x1) / 2.0;
     let half = (caret.y0 + caret.y1) / 2.0;
@@ -921,9 +949,9 @@ fn ink_paths(doc: &CosDocument, dict: &Dict) -> Result<Vec<Vec<Point>>, Malforme
 fn ink(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
     let paths = ink_paths(doc, annotation).ok()?;
     let paint = Paint {
-        stroke: stroke_color_of(doc, annotation),
+        stroke: stroke_color_of(doc, annotation).ok()?,
         fill: None,
-        width: border_width(doc, annotation),
+        width: border_width(doc, annotation).ok()?,
     };
     if paths.is_empty() || !paint.strokes() {
         return None;
@@ -1235,9 +1263,10 @@ fn free_text(
     let callout = callout_of(doc, annotation).ok()?;
     let paint = Paint {
         stroke: Some(da.color),
-        fill: color_of(doc, annotation, b"C"),
-        width: border_width(doc, annotation),
+        fill: color_of(doc, annotation, b"C").ok()?,
+        width: border_width(doc, annotation).ok()?,
     };
+    let interior = color_of(doc, annotation, b"IC").ok()?;
     if let Some(fill) = paint.fill {
         op(out, &fill, b"rg");
         op(
@@ -1271,7 +1300,7 @@ fn free_text(
         out.extend_from_slice(b"S\n");
         if let Some((points, kind)) = &callout {
             let ending_paint = Paint {
-                fill: color_of(doc, annotation, b"IC"),
+                fill: interior,
                 ..paint
             };
             draw_callout(points, *kind, &ending_paint, dashed, out);
@@ -1418,9 +1447,19 @@ fn draw_callout(points: &[Point], kind: Ending, paint: &Paint, dashed: bool, out
 }
 
 /// The subtypes whose appearance their dictionary does not determine
-/// (12.5.6, and ISO 32000-2's additions), which [`synthesize`] declines by
-/// name: what each would show is a picture, a medium, a viewer's window or
-/// a computation, and none of it is in the dictionary.
+/// (12.5.6, and ISO 32000-2's additions), which [`synthesize`] declines as it
+/// declines a subtype it does not know: what each would show is a picture, a
+/// medium, a viewer's window or a computation, and none of it is in the
+/// dictionary.
+///
+/// The list is the record of which subtypes were considered and why, kept
+/// beside the feature doc's refusal table and checked by
+/// `every_subtype_of_12_5_6_is_drawn_or_declined`; it changes nothing a
+/// caller sees. Declining them is not a ruling: `Text`'s `/Name` icon is the
+/// reader's in the same way 12.5.6.12, .15 and .16 leave the first three's
+/// to it, and `Text` is drawn — as an invented note, since before this list
+/// existed — so whether these get invented icons too, or `Text` loses its,
+/// is the owner's decision, owed in the ROADMAP's Editing row (d).
 ///
 /// - `Stamp` (12.5.6.12), `FileAttachment` (12.5.6.15) and `Sound`
 ///   (12.5.6.16): `/Name` names an icon — `Approved`, `PushPin`, `Speaker` —
@@ -1457,9 +1496,9 @@ pub const UNDETERMINED_SUBTYPES: &[&str] = &[
 
 /// Builds the appearance for an annotation, or `None` when its type needs
 /// none — a link with no border draws nothing, and inventing something for it
-/// would be worse than leaving it alone — or when its dictionary does not say
-/// what it looks like: [`UNDETERMINED_SUBTYPES`], and a subtype 12.5.6 does
-/// not name.
+/// would be worse than leaving it alone — when its dictionary does not say
+/// what it looks like ([`UNDETERMINED_SUBTYPES`], and a subtype 12.5.6 does
+/// not name), or when an entry it reads is malformed.
 ///
 /// The returned stream is a complete Form XObject, ready to be written as the
 /// annotation's `/AP` `/N`.
@@ -1478,8 +1517,10 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
 
     match subtype.as_ref() {
         b"Highlight" => {
-            let color = color_of(doc, annotation, b"C").unwrap_or([1.0, 1.0, 0.0]);
-            let quads = quads_of(doc, annotation);
+            let color = color_of(doc, annotation, b"C")
+                .ok()?
+                .unwrap_or([1.0, 1.0, 0.0]);
+            let quads = quads_of(doc, annotation).ok()?;
             if quads.is_empty() {
                 return None;
             }
@@ -1500,8 +1541,10 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
             content.extend_from_slice(b"f\n");
         }
         b"Underline" | b"StrikeOut" => {
-            let color = color_of(doc, annotation, b"C").unwrap_or([0.0, 0.0, 0.0]);
-            let quads = quads_of(doc, annotation);
+            let color = color_of(doc, annotation, b"C")
+                .ok()?
+                .unwrap_or([0.0, 0.0, 0.0]);
+            let quads = quads_of(doc, annotation).ok()?;
             if quads.is_empty() {
                 return None;
             }
@@ -1525,9 +1568,9 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
             }
         }
         b"Square" => {
-            let width = border_width(doc, annotation);
-            let stroke = color_of(doc, annotation, b"C");
-            let fill = color_of(doc, annotation, b"IC");
+            let width = border_width(doc, annotation).ok()?;
+            let stroke = color_of(doc, annotation, b"C").ok()?;
+            let fill = color_of(doc, annotation, b"IC").ok()?;
             if stroke.is_none() && fill.is_none() {
                 return None;
             }
@@ -1556,9 +1599,9 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
             });
         }
         b"Circle" => {
-            let width = border_width(doc, annotation);
-            let stroke = color_of(doc, annotation, b"C");
-            let fill = color_of(doc, annotation, b"IC");
+            let width = border_width(doc, annotation).ok()?;
+            let stroke = color_of(doc, annotation, b"C").ok()?;
+            let fill = color_of(doc, annotation, b"IC").ok()?;
             if stroke.is_none() && fill.is_none() {
                 return None;
             }
@@ -1615,7 +1658,9 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
             // whatever size the rectangle gives, because viewers vary on
             // whether they force the conventional 20x20 and a note that
             // ignores its own rectangle looks like a bug.
-            let color = color_of(doc, annotation, b"C").unwrap_or([1.0, 0.82, 0.0]);
+            let color = color_of(doc, annotation, b"C")
+                .ok()?
+                .unwrap_or([1.0, 0.82, 0.0]);
             let box_ = inset(rect, 1.0);
             let (w, h) = (box_.x1 - box_.x0, box_.y1 - box_.y0);
             if w <= 0.0 || h <= 0.0 {
@@ -1648,9 +1693,8 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
         b"Caret" => caret(doc, annotation, rect, &mut content)?,
         b"Ink" => ink(doc, annotation, &mut content)?,
         b"FreeText" => font = Some(free_text(doc, annotation, rect, &mut content)?),
-        // Declined by name: what these look like is not in their dictionary.
-        named if UNDETERMINED_SUBTYPES.iter().any(|s| s.as_bytes() == named) => return None,
-        // And a subtype 12.5.6 does not name, declined as unknown.
+        // `UNDETERMINED_SUBTYPES`, whose appearance is not in their
+        // dictionary, and a subtype 12.5.6 does not name.
         _ => return None,
     }
 
@@ -2261,6 +2305,43 @@ mod tests {
                 expected,
                 "/{subtype}'s appearance moved"
             );
+        }
+    }
+
+    /// The pin above holds for the dictionaries the editor's constructors
+    /// make, which carry none of the entries the first seven did not read
+    /// before; with one, they draw what it says — an underline under `/CA`
+    /// selects a state first. And a malformed entry declines them as it
+    /// declines the rest, whether they read it before or not: `/QuadPoints`
+    /// that are not whole quads of numbers, a colour of two components, a
+    /// negative width, a `/Border` that is not three numbers.
+    #[test]
+    fn the_first_seven_draw_what_an_entry_they_did_not_read_says() {
+        let doc = doc();
+        let underline =
+            "<< /Subtype /Underline /Rect [0 0 100 100] /QuadPoints [10 80 90 80 10 20 90 20]";
+        assert_eq!(
+            content_of(&doc, &format!("{underline} >>")).as_deref(),
+            Some("0 0 0 RG\n4.2 w\n10 23.6 m\n90 23.6 l\nS\n")
+        );
+        assert_eq!(
+            content_of(&doc, &format!("{underline} /CA 0.5 >>")).as_deref(),
+            Some("/GS0 gs\n0 0 0 RG\n4.2 w\n10 23.6 m\n90 23.6 l\nS\n")
+        );
+        for declined in [
+            "<< /Subtype /Underline /Rect [0 0 100 100] \
+             /QuadPoints [10 80 90 80 10 20 90 (x) 20] >>",
+            "<< /Subtype /Highlight /Rect [0 0 100 100] \
+             /QuadPoints [10 80 90 80 10 20 90 20 5] >>",
+            "<< /Subtype /StrikeOut /Rect [0 0 100 100] \
+             /QuadPoints [10 80 90 80 10 20 90 20] /C [1 0] >>",
+            "<< /Subtype /Square /Rect [10 20 110 60] /C [1 0 0] /BS << /W -2 >> >>",
+            "<< /Subtype /Square /Rect [10 20 110 60] /C [1 0 0] /Border [0 0 (x)] >>",
+            "<< /Subtype /Square /Rect [10 20 110 60] /C [1 0 0] /Border [0 0] >>",
+            "<< /Subtype /Circle /Rect [10 20 110 60] /C [1 0 0] /IC [0 0 1 (x)] >>",
+            "<< /Subtype /Text /Rect [10 20 110 60] /C (red) >>",
+        ] {
+            assert_eq!(content_of(&doc, declined), None, "{declined}");
         }
     }
 
@@ -3398,9 +3479,9 @@ mod tests {
     }
 
     /// 12.5.6's subtypes whose appearance no dictionary determines are
-    /// declined by name, even handed every entry the others draw from.
+    /// declined, even handed every entry the others draw from.
     #[test]
-    fn the_subtypes_no_dictionary_determines_are_declined_by_name() {
+    fn the_subtypes_no_dictionary_determines_are_declined() {
         let doc = helvetica_form();
         for subtype in UNDETERMINED_SUBTYPES {
             assert_eq!(
@@ -3412,11 +3493,11 @@ mod tests {
     }
 
     /// Every subtype ISO 32000-1 12.5.6 and ISO 32000-2 name is either drawn
-    /// from the dictionary above, declined by name, or `Link`, which draws
-    /// no border by 12.5.6.5's convention — so a subtype added to neither
-    /// list is a test failure rather than a silent `None`.
+    /// from the dictionary above, named in `UNDETERMINED_SUBTYPES`, or
+    /// `Link`, which draws no border by 12.5.6.5's convention — so a subtype
+    /// added to neither list is a test failure rather than a silent `None`.
     #[test]
-    fn every_subtype_of_12_5_6_is_drawn_or_declined_by_name() {
+    fn every_subtype_of_12_5_6_is_drawn_or_declined() {
         let doc = helvetica_form();
         const ALL: &[&str] = &[
             "Text",
