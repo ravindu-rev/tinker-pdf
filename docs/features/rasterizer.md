@@ -127,8 +127,8 @@ group covered, where the answer is the luminosity of `/BC` alone (11.6.5.2)
 throughout. `CmykA8` is the one **subtractive** format — its components are
 quantities of ink — and it exists for transparency groups that declare
 `/DeviceCMYK`, whose blends the specification says happen over ink rather than
-over light ([rendering](rendering.md)). It is not a format a page comes back
-in. The two device relations of 8.6.4.4 live here rather than in
+over light ([rendering](rendering.md)). A page comes back in it only when a
+caller asks for it twice (`RenderOptions::allow_cmyk`). The two device relations of 8.6.4.4 live here rather than in
 `tinker-pdf-color`, for the reason `Color::luma`'s coefficients do — a
 rasterizer turns stored components into light, and a leaf takes bytes and plain
 values in; a test holds the copy to the original so the two cannot drift. The
@@ -138,6 +138,10 @@ of the sixteen million colours survives the round trip.
 `BlendMode`s — the twelve separable modes of 11.3.5.2 and the four
 non-separable ones of 11.3.5.3 — with the whole operation scaled by an
 alpha, which is what the graphics state's `ca` and `CA` do (8.6.4.4).
+`fill_mask_inked` is the same with the colour's own ink beside it: a
+`CmykA8` canvas composites those four bytes rather than the colour turned
+back into ink, which matters because light has one ink for each colour and
+a document's rich black is four; every other format ignores them.
 `Canvas::composite` blits one canvas onto another (11.3.6), bounded by the
 source's rectangle, and a canvas can carry the initial backdrop of a
 non-isolated transparency group (11.4.4) so that 11.4.7.2's removal step has

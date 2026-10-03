@@ -994,6 +994,14 @@ impl FontSource for Recorded {
         self.inner.color_components(space)
     }
 
+    fn resolve_ink(&self, space: &[u8], components: &[f64]) -> Option<[u8; 4]> {
+        self.inner.resolve_ink(space, components)
+    }
+
+    fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
+        self.inner.initial_color(space)
+    }
+
     fn optional_content(&self, name: &[u8]) -> Option<tinker_pdf_content::Layer> {
         self.inner.optional_content(name)
     }

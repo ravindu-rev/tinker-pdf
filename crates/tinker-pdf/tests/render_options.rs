@@ -135,9 +135,16 @@ fn ink_page() -> Vec<u8> {
 // ---- CMYK page output --------------------------------------------------------
 
 /// Asking for ink and saying so gets ink: five bytes a pixel, the canvas
-/// starting with none, and each fill's components named — `1 0 0 0 k` is
-/// exactly cyan because 8.6.4.4 relates it to `(0, 255, 255)` and maximum
-/// undercolour removal relates that straight back.
+/// starting with none, and each fill's own components — `1 0 0 0 k` is
+/// cyan, `0 0 0 1 k` black ink, and a rich black `1 1 1 1 k` all four inks.
+///
+/// **The rich black is the flip.** Until October 2026 every colour was
+/// flattened to light where it was read, and an ink page took the light back
+/// through 8.6.4.4 inverted with maximum undercolour removal, which has one
+/// ink for each colour: the rich black came back as the pure K of the same
+/// shade, and this test pinned that as the limitation it was. The components
+/// now travel beside the light (`GraphicsState::fill_ink`), and an ink canvas
+/// composites them.
 #[test]
 fn a_page_asked_for_in_ink_with_the_opt_in_comes_back_in_ink() {
     let ink = render(
@@ -164,14 +171,156 @@ fn a_page_asked_for_in_ink_with_the_opt_in_comes_back_in_ink() {
     );
     assert_eq!(at(14, 40), [255, 0, 0, 0, 255], "cyan is cyan");
     assert_eq!(at(62, 40), [0, 0, 0, 255, 255], "black is K");
-    // **The limitation, pinned so it cannot be forgotten**: a rich black is
-    // light converted back, and comes back as the pure K of the same colour.
     assert_eq!(
         at(38, 40),
-        [0, 0, 0, 255, 255],
-        "a rich black arrives as pure K: the ink is light turned back into \
-         ink, not the file's own components"
+        [255, 255, 255, 255, 255],
+        "a rich black arrives as all four inks: the file's own components, \
+         not light turned back into ink"
     );
+}
+
+/// **A DeviceCMYK colour's components reach an ink page unchanged**, however
+/// the content stream names the space, for a fill, a stroke and a glyph —
+/// `round(255 × component)` each, which is 8.6.4.4's components as bytes and
+/// nothing else — and a colour that is not DeviceCMYK still becomes ink as it
+/// did: 8.6.4.4's light, inverted with maximum undercolour removal.
+///
+/// Every square is whole pixels on a one-point-a-pixel page, so a sampled
+/// pixel is wholly covered and its bytes are the colour's.
+#[test]
+fn a_device_cmyk_colour_reaches_an_ink_page_unchanged() {
+    let mut builder = DocumentBuilder::new();
+    builder.set_subset_fonts(false);
+    assert!(builder.add_embedded_font(b"F0", b"Curvy", &curvy_font()));
+    builder.add_page(120.0, 40.0, |page| {
+        // `k`, the operator.
+        page.raw(b"0.2 0.4 0.6 0.1 k 0 30 10 10 re f");
+        // `cs` naming the device space, then `sc`.
+        page.raw(b"/DeviceCMYK cs 0.1 0.9 0.3 0.7 sc 10 30 10 10 re f");
+        // `cs` alone: 8.6.8 resets DeviceCMYK to `0 0 0 1`, black ink.
+        page.raw(b"/DeviceCMYK cs 20 30 10 10 re f");
+        // A stroke, `K`: a six-wide line along y = 25 from x 30 to 60.
+        page.raw(b"1 0.5 0 0 K 6 w 30 25 m 60 25 l S");
+        // A colour that is not DeviceCMYK: red, light, becomes ink as before.
+        page.raw(b"1 0 0 rg 70 30 10 10 re f");
+        // A glyph filled in rich black, drawn large.
+        page.raw(b"BT /F0 30 Tf 1 1 1 1 k 85 5 Td (A) Tj ET");
+    });
+    let ink = render(
+        builder.finish(),
+        &RenderOptions {
+            format: PixelFormat::CmykA8,
+            allow_cmyk: true,
+            ..RenderOptions::default()
+        },
+    );
+    let at = |x: u32, y: u32| -> [u8; 5] {
+        let i = y as usize * ink.stride + x as usize * 5;
+        ink.data[i..i + 5].try_into().expect("five bytes")
+    };
+    let byte = |v: f64| (v * 255.0_f64).round() as u8;
+    // Page y 30 to 40 is pixel rows 0 to 9.
+    assert_eq!(
+        at(5, 5),
+        [byte(0.2), byte(0.4), byte(0.6), byte(0.1), 255],
+        "`k`"
+    );
+    assert_eq!(
+        at(15, 5),
+        [byte(0.1), byte(0.9), byte(0.3), byte(0.7), 255],
+        "`/DeviceCMYK cs ... sc`"
+    );
+    assert_eq!(at(25, 5), [0, 0, 0, 255, 255], "`cs` resets to black ink");
+    // Page y 22 to 28 is pixel rows 12 to 17.
+    assert_eq!(at(45, 15), [255, byte(0.5), 0, 0, 255], "`K` on a stroke");
+    // Red is (255, 0, 0) light, which maximum undercolour removal makes
+    // `0 1 1 0` — the conversion every non-CMYK colour still takes.
+    assert_eq!(at(75, 5), [0, 255, 255, 0, 255], "light still converts");
+    // The glyph: every wholly covered pixel of it is all four inks.
+    let glyph: Vec<[u8; 5]> = (85..120)
+        .flat_map(|x| (0..40).map(move |y| (x, y)))
+        .map(|(x, y)| at(x, y))
+        .filter(|pixel| pixel[4] == 255 && pixel[..4].iter().any(|v| *v != 0))
+        .collect();
+    assert!(
+        glyph.contains(&[255, 255, 255, 255, 255]),
+        "the glyph is drawn, and wholly covered pixels are rich black"
+    );
+    assert!(
+        glyph
+            .iter()
+            .all(|pixel| pixel[0] == pixel[1] && pixel[1] == pixel[2] && pixel[2] == pixel[3]),
+        "every glyph pixel, edges included, is the four inks in step: {:?}",
+        glyph
+            .iter()
+            .find(|pixel| !(pixel[0] == pixel[1] && pixel[1] == pixel[2] && pixel[2] == pixel[3]))
+    );
+
+    // And in light, `cs` alone is black, as 8.6.8 says, where an all-zeros
+    // reset made it white.
+    let light = render(
+        {
+            let mut builder = DocumentBuilder::new();
+            builder.add_page(30.0, 10.0, |page| {
+                page.raw(b"/DeviceCMYK cs 0 0 10 10 re f");
+            });
+            builder.finish()
+        },
+        &RenderOptions::default(),
+    );
+    assert_eq!(&light.data[..3], &[0, 0, 0], "`/DeviceCMYK cs` is black");
+}
+
+/// **Over ink, a rich black's edge is darker than over light**, and that is
+/// the clause's arithmetic rather than a disagreement. A pixel half covered
+/// by `1 1 1 1 k` composites to half of every ink, `128` four times, and
+/// 8.6.4.4 makes that `(1 − ½)(1 − ½) = ¼` of white: about 64. Over light
+/// the same pixel is half black on white, about 128. Compositing is linear
+/// in whichever components the canvas holds and 8.6.4.4 is a product, so
+/// the two orders part wherever more than one ink is partly there — which
+/// is why `to_png` of an ink page is the light render only for pages that
+/// never put two inks and black on a partial pixel.
+#[test]
+fn a_rich_black_edge_composited_over_ink_is_not_the_light_edge() {
+    let page = || {
+        let mut builder = DocumentBuilder::new();
+        builder.add_page(20.0, 20.0, |page| {
+            // Half a pixel off the lattice on the left: column 4 is half
+            // covered, columns 5 to 13 wholly.
+            page.raw(b"1 1 1 1 k 4.5 5 10 10 re f");
+        });
+        builder.finish()
+    };
+    let ink = render(
+        page(),
+        &RenderOptions {
+            format: PixelFormat::CmykA8,
+            allow_cmyk: true,
+            ..RenderOptions::default()
+        },
+    );
+    let light = render(page(), &RenderOptions::default());
+    let row = 10usize;
+    let ink_edge: [u8; 5] = ink.data[row * ink.stride + 4 * 5..][..5]
+        .try_into()
+        .expect("five bytes");
+    assert_eq!(ink_edge, [128, 128, 128, 128, 255], "half of every ink");
+    let png = Bitmap::from_png(&ink.to_png().expect("a picture")).expect("it reads");
+    let png_edge = png.data[row * png.stride + 4 * png.components()];
+    let light_edge = light.data[row * light.stride + 4 * light.components()];
+    // (1 - 128/255)^2 of 255 is 63.5; 1 - 128/255 of it, 127.
+    assert!(
+        (63..=64).contains(&png_edge),
+        "over ink: a quarter of white, {png_edge}"
+    );
+    assert!(
+        (127..=128).contains(&light_edge),
+        "over light: half of white, {light_edge}"
+    );
+    // Wholly covered, the two agree: all four inks are black either way.
+    let png_inside = png.data[row * png.stride + 8 * png.components()];
+    let light_inside = light.data[row * light.stride + 8 * light.components()];
+    assert_eq!((png_inside, light_inside), (0, 0));
 }
 
 /// Without the opt-in, ink is still light — which is what every caller that
@@ -221,6 +370,11 @@ fn the_opt_in_changes_nothing_for_a_format_that_is_not_ink() {
 /// `to_png` writes an ink page as the light it stands for, and that light is
 /// byte for byte what the same render returns without the switch: one
 /// conversion, 8.6.4.4's, reached two ways.
+///
+/// For these two pages, whose every partly covered or blended pixel is one
+/// ink and black. Not for every page since ink pages carry the document's own
+/// components: see
+/// `a_rich_black_edge_composited_over_ink_is_not_the_light_edge`.
 #[test]
 fn an_ink_page_written_as_png_is_the_light_the_switch_would_have_returned() {
     for page in [ink_page(), blend_grid_page()] {
@@ -263,11 +417,18 @@ fn ink_output_is_pinned() {
         800,
         "a8c768d45da8dbf2a9f9457f6c10e3f112576def13c28502a3a0b5fa6c03a418",
     );
+    // Moved in October 2026, deliberately, when DeviceCMYK components began
+    // to reach an ink page: the 400 pixels of the rich-black square (x 28 to
+    // 47, rows 24 to 43) went from pure K to all four inks — 120 of them
+    // `0 0 0 255` to `255 255 255 255`, and the 280 under the half-alpha
+    // `/Multiply` magenta band `0 128 0 255` to the same, since 11.3.5's
+    // multiply over complements keeps a full ink full — and no other byte.
+    // It was "cd3c60cc88514aaa0ac5a0ce2eea1d7b26cc8b0d6412f2c9fc824c0a42e8788b".
     pinned(
         "ink page, in ink",
         &render(ink_page(), &options),
         780,
-        "cd3c60cc88514aaa0ac5a0ce2eea1d7b26cc8b0d6412f2c9fc824c0a42e8788b",
+        "d8ca10789bb0cec54eb2d16e5b9d43432be855235b5a56e1137148c1f72afd75",
     );
 }
 

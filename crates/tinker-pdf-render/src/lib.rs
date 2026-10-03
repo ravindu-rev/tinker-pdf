@@ -2081,6 +2081,23 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// whose rasterization is the expensive part. A caller's entry is a
     /// different moment from this one, and this is the moment the work starts.
     fn paint(&mut self, path: &Path, rule: FillRule, color: Color, alpha: f64, mode: RasterBlend) {
+        self.paint_inked(path, rule, color, None, alpha, mode);
+    }
+
+    /// As [`Renderer::paint`], with the colour's DeviceCMYK components beside
+    /// it (`GraphicsState::fill_ink`): a canvas compositing in ink — the
+    /// page asked for in ink, or a `/DeviceCMYK` group's buffer — composites
+    /// the document's own components rather than the light turned back into
+    /// ink, which would lose every separation the file chose but one.
+    fn paint_inked(
+        &mut self,
+        path: &Path,
+        rule: FillRule,
+        color: Color,
+        ink: Option<[u8; 4]>,
+        alpha: f64,
+        mode: RasterBlend,
+    ) {
         if self.stopping() {
             return;
         }
@@ -2089,7 +2106,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if self.in_knockout() {
             self.knockout_restore(&mask);
         }
-        self.canvas.fill_mask_with(&mask, color, alpha, mode);
+        self.canvas.fill_mask_inked(&mask, color, ink, alpha, mode);
     }
 
     /// The question the rasterizer asks while it is working.
@@ -2611,10 +2628,11 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
 
         let color = fill_color(state);
-        self.paint(
+        self.paint_inked(
             &built,
             rule,
             color,
+            state.fill_ink,
             state.fill_alpha,
             blend_mode(state.blend),
         );
@@ -2774,10 +2792,11 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
 
         let color = stroke_color(state);
-        self.paint(
+        self.paint_inked(
             &outline,
             FillRule::NonZero,
             color,
+            state.stroke_ink,
             state.stroke_alpha,
             blend_mode(state.blend),
         );
@@ -2893,10 +2912,11 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                     fill_color(state),
                 );
             } else {
-                self.paint(
+                self.paint_inked(
                     &path,
                     FillRule::NonZero,
                     fill_color(state),
+                    state.fill_ink,
                     state.fill_alpha,
                     blend_mode(state.blend),
                 );
@@ -2921,10 +2941,11 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                     stroke_color(state),
                 );
             } else {
-                self.paint(
+                self.paint_inked(
                     &outlined,
                     FillRule::NonZero,
                     stroke_color(state),
+                    state.stroke_ink,
                     state.stroke_alpha,
                     blend_mode(state.blend),
                 );

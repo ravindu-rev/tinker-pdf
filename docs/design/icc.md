@@ -165,11 +165,15 @@ error smaller than half a level, so RGB→CMYK→RGB is the identity for all
 sixteen million colours — swept exhaustively as 32 896 `(v, max)` pairs, since
 `K` is fixed by the maximum and each channel is then independent. What *is*
 approximate is the other direction: a CMYK value that did not come from the
-inverse — a rich black — comes back as its pure-K equivalent. Nothing in this
-engine authors CMYK components (`resolve_color` flattens every source colour to
-sRGB at the resource seam), so every value in a group buffer originated from
-the inverse and round-trips. The day components cross that seam, this is the
-paragraph to revisit. Soft-mask luminosity (11.6.5.2) reads the group's
+inverse — a rich black — comes back as its pure-K equivalent. **Since October
+2026 such values exist**: a DeviceCMYK colour's own components cross the
+resource seam beside its light (`FontSource::resolve_ink`,
+`GraphicsState::fill_ink`), and a CMYK buffer — a `/DeviceCMYK` group's, or a
+page asked for in ink — composites them. Leaving a CMYK group for an additive
+parent takes them through 8.6.4.4 forward, which needs no inverse and is exact;
+what does not round-trip is a non-separable blend inside the group, whose
+operands go to light and back, and `RenderWarning::ApproximatedGroupBlend`
+already names that. Soft-mask luminosity (11.6.5.2) reads the group's
 own space — but **not for free, and not where this doc expected**. `to_mask`
 reads through `Canvas::pixel`, which already applies the group's own relation,
 so the space arrives on its own. The real defect was the *weighting*:

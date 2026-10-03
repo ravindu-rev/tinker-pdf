@@ -395,6 +395,19 @@ pub struct GraphicsState {
     pub fill_color: Rgb,
     /// The stroking colour.
     pub stroke_color: Rgb,
+    /// The non-stroking colour's own DeviceCMYK components, as bytes, when it
+    /// was set in DeviceCMYK — `k`, or `sc`/`scn` in a space that resolves to
+    /// it — and `None` for a colour set any other way.
+    ///
+    /// [`GraphicsState::fill_color`] is that colour as light (8.6.4.4), which
+    /// is what every device but one wants. The one is a device compositing in
+    /// ink: light turned back into ink loses the separation the document
+    /// chose — a rich black `1 1 1 1 k` comes back as the pure `K` of the same
+    /// colour — so the components travel beside the light rather than being
+    /// recovered from it.
+    pub fill_ink: Option<[u8; 4]>,
+    /// The same for the stroking colour: `K`, `SC`, `SCN`.
+    pub stroke_ink: Option<[u8; 4]>,
     /// `w`, the line width in user space.
     pub line_width: f64,
     /// `J`, the line cap.
@@ -436,6 +449,9 @@ impl GraphicsState {
             stroke_alpha: 1.0,
             fill_color: Rgb::BLACK,
             stroke_color: Rgb::BLACK,
+            // 8.6.8: the initial space is DeviceGray, so there is no ink.
+            fill_ink: None,
+            stroke_ink: None,
             // 8.4.3.2: the initial line width is 1.0 user-space units.
             line_width: 1.0,
             line_cap: LineCap::Butt,

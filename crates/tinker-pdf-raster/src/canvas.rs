@@ -361,6 +361,26 @@ impl Canvas {
 
     /// As [`Canvas::fill_mask`], with a blend mode (11.3.5).
     pub fn fill_mask_with(&mut self, mask: &Mask, color: Color, alpha: f64, mode: BlendMode) {
+        self.fill_mask_inked(mask, color, None, alpha, mode);
+    }
+
+    /// As [`Canvas::fill_mask_with`], with the colour's own ink beside it.
+    ///
+    /// `ink` is cyan, magenta, yellow and black as bytes, the components the
+    /// colour was chosen in, and a [`PixelFormat::CmykA8`] canvas composites
+    /// **those** rather than `color` turned back into ink. The two are not the
+    /// same: `color` is light, and light has one ink for each colour — maximum
+    /// undercolour removal, so a rich black of all four inks comes back as
+    /// black ink alone. Every other format composites `color` and never reads
+    /// `ink`, and so does this one when `ink` is `None`.
+    pub fn fill_mask_inked(
+        &mut self,
+        mask: &Mask,
+        color: Color,
+        ink: Option<[u8; 4]>,
+        alpha: f64,
+        mode: BlendMode,
+    ) {
         let alpha = if alpha.is_finite() {
             (alpha.clamp(0.0, 1.0) * 255.0).round() as u32
         } else {
@@ -374,7 +394,10 @@ impl Canvas {
             self.approximated_blends = self.approximated_blends.saturating_add(1);
         }
         let components = self.format.components();
-        let source = self.encode(color);
+        let source = match (ink, self.format) {
+            (Some([c, m, y, k]), PixelFormat::CmykA8) => [c, m, y, k, color.a],
+            _ => self.encode(color),
+        };
         let color_alpha = u32::from(color.a);
 
         // The mask's own rectangle, not the canvas. Outside it `Mask::at`
@@ -1380,6 +1403,29 @@ mod tests {
 
         assert_eq!(canvas.pixel(3, 3), Some(Color::BLACK), "inside");
         assert_eq!(canvas.pixel(0, 0), Some(Color::WHITE), "outside");
+    }
+
+    /// An ink canvas composites a colour's own ink when it is handed one, and
+    /// light turned into ink when it is not; any other canvas never reads the
+    /// ink. Black light becomes black ink alone — maximum undercolour removal
+    /// — where the ink it was chosen as may be all four.
+    #[test]
+    fn an_ink_canvas_composites_the_ink_it_is_handed() {
+        let mask = square_mask(0.0, 0.0, 4.0, 4.0, 4);
+        let rich = Some([255, 255, 255, 255]);
+        let at = |canvas: &Canvas| canvas.data[..5].to_vec();
+
+        let mut ink = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
+        ink.fill_mask_inked(&mask, Color::BLACK, rich, 1.0, BlendMode::Normal);
+        assert_eq!(at(&ink), [255, 255, 255, 255, 255], "the four inks");
+
+        let mut light = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
+        light.fill_mask_inked(&mask, Color::BLACK, None, 1.0, BlendMode::Normal);
+        assert_eq!(at(&light), [0, 0, 0, 255, 255], "black light is K");
+
+        let mut rgb = Canvas::new(4, 4, PixelFormat::Rgba8, Color::WHITE);
+        rgb.fill_mask_inked(&mask, Color::BLACK, rich, 1.0, BlendMode::Normal);
+        assert_eq!(&rgb.data[..4], &[0, 0, 0, 255], "light reads no ink");
     }
 
     #[test]

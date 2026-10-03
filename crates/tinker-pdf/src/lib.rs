@@ -592,19 +592,28 @@ pub struct RenderOptions {
     /// buffer is handed back as it stands instead of being converted to light
     /// at the end.
     ///
-    /// **It is not the document's own ink.** Every colour in this engine is
-    /// flattened to sRGB where the resource is read, long before a buffer sees
-    /// it, and a CMYK buffer turns that light back into ink by 8.6.4.4's
-    /// relation inverted with maximum undercolour removal: `K` takes all the
-    /// grey it can. So `1 0 0 0 k` arrives as exactly `(255, 0, 0, 0)`, and a
-    /// rich black `1 1 1 1 k` arrives as pure `K` — the same colour, not the
-    /// same ink. A caller preparing separations wants the components the file
-    /// wrote, and that is a different and larger piece of work that the
-    /// roadmap carries.
+    /// **A DeviceCMYK colour is the document's own ink.** A fill, a stroke or
+    /// a glyph whose colour was set in DeviceCMYK — `k`, `K`, or `sc`/`scn`
+    /// in a space that is DeviceCMYK, named directly or through
+    /// `/ColorSpace` — composites its own components, each
+    /// `round(255 × component)`: `1 0 0 0 k` arrives as `(255, 0, 0, 0)` and
+    /// a rich black `1 1 1 1 k` as all four inks. Every other colour is light
+    /// where its resource is read, and a CMYK buffer turns light into ink by
+    /// 8.6.4.4's relation inverted with maximum undercolour removal — `K`
+    /// takes all the grey it can — so `1 0 0 rg` arrives as `(0, 255, 255, 0)`.
+    /// That includes what is not a flat colour — an image, a shading, a
+    /// pattern — and the spaces whose components are not DeviceCMYK's
+    /// although they may be ink: an ICC CMYK profile, and a `/Separation` or
+    /// `/DeviceN` through its alternate.
     ///
     /// [`Bitmap::to_png`] writes an ink page as the light it stands for,
-    /// under colour type 6 — PNG has no CMYK — and those are exactly the bytes
-    /// the same render without this switch returns.
+    /// under colour type 6 — PNG has no CMYK. Where every partly covered or
+    /// blended pixel is one ink and black, those are exactly the bytes the
+    /// same render without this switch returns; where two inks and black
+    /// share a partial pixel they are not, because compositing is linear in
+    /// whichever components the canvas holds and 8.6.4.4 is a product — half
+    /// a pixel of rich black is a quarter of white over ink and half of it
+    /// over light.
     pub allow_cmyk: bool,
     /// Whether edges are anti-aliased. On by default.
     ///

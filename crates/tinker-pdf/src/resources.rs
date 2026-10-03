@@ -1337,6 +1337,28 @@ impl FontSource for PageResources {
         Some(self.color_space(space)?.components())
     }
 
+    fn resolve_ink(&self, space: &[u8], components: &[f64]) -> Option<[u8; 4]> {
+        // 8.6.4.4: DeviceCMYK's own components, clamped as `to_rgb` clamps
+        // them. Every other space — an ICC CMYK profile included, whose
+        // components are a profile's to interpret — stays light.
+        if self.color_space(space)? != ColorSpace::DeviceCmyk {
+            return None;
+        }
+        let byte = |i: usize| {
+            let v = components.get(i).copied().unwrap_or(0.0);
+            if v.is_finite() {
+                (v.clamp(0.0, 1.0) * 255.0).round() as u8
+            } else {
+                0
+            }
+        };
+        Some([byte(0), byte(1), byte(2), byte(3)])
+    }
+
+    fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
+        Some(self.color_space(space)?.initial())
+    }
+
     fn ext_g_state_alpha(&self, name: &[u8]) -> Option<(Option<f64>, Option<f64>)> {
         let resources = self.resources.as_ref()?;
         let table = self

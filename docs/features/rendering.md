@@ -174,16 +174,35 @@ said it was not a page format;
 than one: `format: PixelFormat::CmykA8` *and* `RenderOptions::allow_cmyk`, so a
 caller has said they know the bytes are ink. The page composites over ink on a
 canvas that starts with none — which it already did for `format: CmykA8`, and
-then converted — and the buffer comes back as it stands. **The ink is light
-turned back into ink**, not the document's own components: colour is flattened
-to sRGB where a resource is read, and a CMYK buffer takes that back through
-8.6.4.4's relation inverted with maximum undercolour removal, so `1 0 0 0 k`
-arrives as exactly `(255, 0, 0, 0)` and a rich black `1 1 1 1 k` arrives as pure
-`K`. `a_page_asked_for_in_ink_with_the_opt_in_comes_back_in_ink` pins both, the
-second as the limitation it is. `Bitmap::to_png` writes an ink page as the light
-it stands for — PNG has no CMYK — and those bytes are exactly what the same
-render without the switch returns, which
-`an_ink_page_written_as_png_is_the_light_the_switch_would_have_returned` holds.
+then converted — and the buffer comes back as it stands. **A DeviceCMYK
+colour is the document's own ink**: the interpreter keeps the components a
+fill, stroke or glyph colour was set with in DeviceCMYK — `k`, `K`, and
+`sc`/`scn` in a space the resource seam resolves to DeviceCMYK
+(`FontSource::resolve_ink`) — beside the light it stands for
+(`GraphicsState::fill_ink`, `stroke_ink`), and a CMYK canvas composites those
+(`Canvas::fill_mask_inked`), so `1 0 0 0 k` arrives as `(255, 0, 0, 0)` and a
+rich black `1 1 1 1 k` as all four inks. Every other colour is light, which a
+CMYK buffer takes through 8.6.4.4's relation inverted with maximum undercolour
+removal — `1 0 0 rg` arrives as `(0, 255, 255, 0)` — and so is what is not a
+flat colour (an image, a shading, a pattern's cell) and every space whose
+components are not DeviceCMYK's, ink or not: an ICC CMYK profile, and a
+`/Separation` or `/DeviceN` through its alternate. *Until October 2026 every
+colour was light*, so the rich black arrived as pure `K` and
+`a_page_asked_for_in_ink_with_the_opt_in_comes_back_in_ink` pinned that as the
+limitation it was; it now pins the four inks, and
+`a_device_cmyk_colour_reaches_an_ink_page_unchanged` holds `k`, `/DeviceCMYK cs
+… sc`, a stroke's `K`, a glyph and an RGB fill to `round(255 × component)`
+byte for byte. `cs` selecting DeviceCMYK now resets the colour to 8.6.8's
+`0 0 0 1` — black, where an all-zeros reset had made it white on every page,
+in light as much as in ink. `Bitmap::to_png` writes an ink page as the light
+it stands for — PNG has no CMYK — and where every partly covered or blended
+pixel is one ink and black those bytes are exactly what the same render
+without the switch returns
+(`an_ink_page_written_as_png_is_the_light_the_switch_would_have_returned`);
+where two inks and black share a partial pixel they are not, because
+compositing is linear in whichever components the canvas holds and 8.6.4.4 is
+a product: half a pixel of rich black is a quarter of white over ink and half
+of it over light (`a_rich_black_edge_composited_over_ink_is_not_the_light_edge`).
 
 **`/Lab` composites in Lab too**, which was the last space that did not. Its
 components are not in the unit interval — `L*` runs 0..100 and `a`/`b` roughly
@@ -654,7 +673,6 @@ a defect to hide in.
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |
 | A `RenderOptions::region` reaching past the page edge | `RenderWarning::RegionClamped` | The part on the page is rendered rather than refused (ruling 2), and a bitmap smaller than the rectangle asked for is named rather than left to arithmetic (ruling 10). A region that misses the page entirely trims to no pixels | [rulings](../rulings.md) |
-| The document's own CMYK components on a page asked for in ink | stated on `RenderOptions::allow_cmyk` | Colour is flattened to sRGB where a resource is read, so an ink page is light converted back with maximum undercolour removal: a rich black arrives as pure `K`. Separations want the file's components, carried through the resource seam, which is its own row | [ROADMAP](../ROADMAP.md) |
 | A PNG read back whose raster stops short of its declared height | `PngReadError::Incomplete`, carrying the decoder's own identifiers | The decoder degrades for a comic page; a file read back to be *compared* would have its missing rows scored as a rendering difference. Every refusal the decoder makes is `PngReadError::Refused` with its own reason | [filters](filters.md) |
 | A form render naming an XObject the page does not have, one that is not a form, or one whose stream cannot be read | `RenderPartError::NoSuchXObject`, `NotAForm { subtype }`, `UnreadableForm` | The page renders what it can; a caller who asked for one form asked about that form, and a blank bitmap is a wrong answer that looks right | — |
 | An annotation render at an index past `/Annots`, or of an entry that draws nothing | `RenderPartError::NoSuchAnnotation { count }`, `AnnotationNotDrawn { why }` with `NotDrawn::{NotADictionary, Hidden, Popup, NoRect, NoAppearance, UnreadableAppearance, Degenerate}` | Every reason `Page::render` skips an annotation silently, named where a caller asked for that one | [document model](document-model.md) |
