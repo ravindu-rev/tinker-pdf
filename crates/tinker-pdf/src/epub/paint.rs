@@ -61,6 +61,23 @@
 //! cap invented here — the array is allocated at that size whatever the input
 //! says, so it is not a bound in ruling 1's sense and does not join
 //! `bounds_ledger.rs`.
+//!
+//! # The CID-keyed fallback, where this build carries a face
+//!
+//! With `bundled-fonts` on, a character outside `WinAnsiEncoding` that the
+//! standard face's Liberation stand-in covers is drawn in **that** face,
+//! embedded as a composite font under `/Identity-H` ([`Fonts::register`]):
+//! the code is the glyph index, so there are as many codes as the face has
+//! glyphs rather than 224, the page shows the real glyph rather than a notdef,
+//! and `/ToUnicode` carries the character. Liberation is what every reader
+//! substitutes for Times, Helvetica and Courier anyway, metric-compatible with
+//! them over the Latin set, so the line a book was set in does not change face
+//! where it leaves the encoding. Its advance is the face's own `hmtx`, in
+//! [`BookMetrics`] as on the page — one path owns the run. A character the
+//! stand-in does not cover either (the Japanese line above) still goes to the
+//! overflow font and is still counted. Without the feature nothing changes:
+//! the standard-14 limit stays, and [`Fonts::unrepresented`] counts what it
+//! costs.
 
 use std::collections::BTreeMap;
 use tinker_pdf_cos::build::{
@@ -381,6 +398,33 @@ impl Face {
     pub fn overflow_resource(self) -> Vec<u8> {
         format!("Bx{}", self.index()).into_bytes()
     }
+
+    /// The resource name of this face's CID-keyed fallback: its bundled
+    /// stand-in, embedded as a composite font.
+    #[must_use]
+    pub fn fallback_resource(self) -> Vec<u8> {
+        format!("By{}", self.index()).into_bytes()
+    }
+
+    /// The `/BaseFont` the fallback is written under: the stand-in's own
+    /// PostScript name, which is what it is.
+    #[must_use]
+    pub fn fallback_base_font(self) -> &'static [u8] {
+        match (self.generic, self.bold, self.italic) {
+            (Generic::Serif, false, false) => b"LiberationSerif",
+            (Generic::Serif, false, true) => b"LiberationSerif-Italic",
+            (Generic::Serif, true, false) => b"LiberationSerif-Bold",
+            (Generic::Serif, true, true) => b"LiberationSerif-BoldItalic",
+            (Generic::SansSerif, false, false) => b"LiberationSans",
+            (Generic::SansSerif, false, true) => b"LiberationSans-Italic",
+            (Generic::SansSerif, true, false) => b"LiberationSans-Bold",
+            (Generic::SansSerif, true, true) => b"LiberationSans-BoldItalic",
+            (Generic::Monospace, false, false) => b"LiberationMono",
+            (Generic::Monospace, false, true) => b"LiberationMono-Italic",
+            (Generic::Monospace, true, false) => b"LiberationMono-Bold",
+            (Generic::Monospace, true, true) => b"LiberationMono-BoldItalic",
+        }
+    }
 }
 
 /// The character a code stands for in `WinAnsiEncoding`, backwards.
@@ -400,6 +444,42 @@ pub fn winansi_code(c: char) -> Option<u8> {
         return u8::try_from(code).ok();
     }
     (0x80..=0x9F).find(|code| base_char(BaseEncoding::WinAnsi, *code) == Some(c))
+}
+
+/// The bundled stand-in for one of the standard faces, where this build
+/// carries one.
+#[cfg(feature = "bundled-fonts")]
+fn fallback_program(face: Face) -> Option<&'static [u8]> {
+    use tinker_pdf_font::bundled::{self, Family};
+    let family = match face.generic {
+        Generic::Serif => Family::Serif,
+        Generic::SansSerif => Family::Sans,
+        Generic::Monospace => Family::Mono,
+    };
+    Some(bundled::face(family, face.bold, face.italic))
+}
+
+/// The bundled stand-in for one of the standard faces: none, in a build
+/// without `bundled-fonts`, which is what keeps the standard-14 limit there.
+#[cfg(not(feature = "bundled-fonts"))]
+fn fallback_program(_face: Face) -> Option<&'static [u8]> {
+    None
+}
+
+/// The glyph, and its advance in ems, that `face`'s bundled stand-in draws
+/// `ch` with — for a character **outside** `WinAnsiEncoding` only, which is
+/// the one case the fallback exists for. `None` where there is no stand-in,
+/// where it has no glyph for `ch`, and for every character the simple font
+/// already has a code for, so the Latin text of a book is never moved off
+/// the standard face it was always set in.
+fn fallback_glyph(face: Face, ch: char) -> Option<(u16, f64)> {
+    if winansi_code(ch).is_some() {
+        return None;
+    }
+    let sfnt = Sfnt::parse(fallback_program(face)?)?;
+    let glyph = sfnt.glyph_for_char(ch).filter(|g| *g != 0)?;
+    let advance = f64::from(sfnt.advance(glyph)?) / f64::from(sfnt.units_per_em.max(1));
+    Some((glyph, advance))
 }
 
 /// Advances and line heights for a book, through whichever face each character
@@ -443,6 +523,11 @@ impl Metrics for BookMetrics<'_> {
                 None => font.size * 0.5,
             },
             Chosen::Standard(face) => {
+                // Drawn in the bundled stand-in, so measured in it: one path
+                // owns the run (see the module's CID-keyed fallback).
+                if let Some((_, advance)) = fallback_glyph(face, ch) {
+                    return advance * font.size;
+                }
                 // An East Asian character is one em wide in every face that has
                 // one, and the standard 14 have none at all — so the number
                 // cannot come from `Standard14`, which would answer with a
@@ -656,6 +741,9 @@ pub struct Fonts<'a> {
     /// Which standard faces drew anything at all, so a book of Times does not
     /// carry twelve font dictionaries.
     used: Vec<bool>,
+    /// Which standard faces drew a character in their CID-keyed fallback, so
+    /// only those embed a stand-in.
+    fallback: Vec<bool>,
     /// Which embedded faces drew anything, so a book that declares six faces
     /// and uses two embeds two.
     used_embedded: Vec<bool>,
@@ -673,6 +761,7 @@ impl<'a> Fonts<'a> {
             faces,
             overflow: vec![Vec::new(); 12],
             used: vec![false; 12],
+            fallback: vec![false; 12],
             used_embedded: vec![false; faces.faces().len()],
             unrepresented: 0,
             uncovered: 0,
@@ -699,6 +788,13 @@ impl<'a> Fonts<'a> {
                     let index = face.index();
                     self.used[index] = true;
                     if winansi_code(ch).is_some() {
+                        continue;
+                    }
+                    // Drawn, with its own glyph and its own `/ToUnicode`
+                    // entry, in the stand-in: neither a code spent nor a
+                    // notdef.
+                    if fallback_glyph(face, ch).is_some() {
+                        self.fallback[index] = true;
                         continue;
                     }
                     if !self.overflow[index].contains(&ch) {
@@ -748,6 +844,13 @@ impl<'a> Fonts<'a> {
         self.overflow.iter().filter(|set| !set.is_empty()).count()
     }
 
+    /// How many CID-keyed fallback faces the document carries — none in a
+    /// build without `bundled-fonts`.
+    #[must_use]
+    pub fn fallback_fonts(&self) -> usize {
+        self.fallback.iter().filter(|used| **used).count()
+    }
+
     /// How many embedded faces the document actually carries.
     #[must_use]
     pub fn embedded_fonts(&self) -> usize {
@@ -775,6 +878,18 @@ impl<'a> Fonts<'a> {
                 continue;
             }
             builder.add_base_font(&face.resource(), face.base_font());
+            if self.fallback[index] {
+                if let Some(program) = fallback_program(face) {
+                    // `/Identity-H` over the stand-in: the code is the glyph,
+                    // `/W` comes from its `hmtx` and `/ToUnicode` from the
+                    // characters drawn, and the writer subsets it to them.
+                    builder.add_cid_font(
+                        &face.fallback_resource(),
+                        face.fallback_base_font(),
+                        program,
+                    );
+                }
+            }
             if self.overflow[index].is_empty() {
                 continue;
             }
@@ -842,6 +957,12 @@ impl<'a> Fonts<'a> {
                     return Some(Coded::Simple {
                         resource: face.resource(),
                         code,
+                    });
+                }
+                if let Some((id, _)) = fallback_glyph(face, ch) {
+                    return Some(Coded::Composite {
+                        resource: face.fallback_resource(),
+                        id,
                     });
                 }
                 let at = self.overflow[face.index()].iter().position(|c| *c == ch)?;

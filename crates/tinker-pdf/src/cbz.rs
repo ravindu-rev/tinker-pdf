@@ -958,9 +958,12 @@ pub enum ArchiveWarning {
     /// Characters that could not be given a code in any font this document
     /// carries, and are therefore on no page (gap 31, milestone 8).
     ///
-    /// A simple font has 256 codes and this build has no font program to
-    /// embed, so a book with more than 224 distinct characters outside
-    /// `WinAnsiEncoding` for one face loses the excess. **Reported rather than
+    /// A simple font has 256 codes, so a book with more than 224 distinct
+    /// characters outside `WinAnsiEncoding` for one standard face loses the
+    /// excess — of the characters no embedded face covers and, in a
+    /// `bundled-fonts` build, that the face's Liberation stand-in does not
+    /// cover either: what the stand-in covers is drawn in it as a composite
+    /// font, which has a code for every glyph. **Reported rather than
     /// dropped silently**, because text that is missing from a page and
     /// missing from `Page::text()` is exactly what text conservation exists to
     /// find, and a build that lost it without saying so would be a build whose
