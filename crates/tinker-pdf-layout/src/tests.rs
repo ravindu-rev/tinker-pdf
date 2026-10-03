@@ -6999,3 +6999,50 @@ fn a_scroll_container_flex_item_shrinks_below_its_content() {
     assert_eq!(width_of(Overflow::Hidden), 50.0);
     assert_eq!(width_of(Overflow::Visible), 80.0);
 }
+
+/// **§9.2.1.1 splits every inline ancestor of the block**, not only its
+/// parent: `a <i>b <b>c <div>d</div> e</b> f</i> g` is the line `a b c`, the
+/// block `d`, and the line `e f g`, with nothing warned about — and a block
+/// inside nested inline boxes past the depth cap is refused by name rather
+/// than searched for without end.
+#[test]
+fn a_block_inside_nested_inlines_splits_every_level() {
+    let inline = |children: Vec<BoxNode>| BoxNode::element(base(), children);
+    let tree = BoxNode::element(
+        block(),
+        vec![
+            text("a "),
+            inline(vec![
+                text("b "),
+                inline(vec![
+                    text("c "),
+                    BoxNode::element(block(), vec![text("d")]),
+                    text(" e"),
+                ]),
+                text(" f"),
+            ]),
+            text(" g"),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let y = baselines(&laid, 0);
+    let lines: Vec<&str> = laid.pages[0].runs.iter().map(|r| r.text.trim()).collect();
+    assert_eq!(lines, ["a", "b", "c", "d", "e", "f", "g"], "{lines:?}");
+    assert!(close(y[0], y[2]), "a b c on one line: {y:?}");
+    assert!(y[3] > y[2] && y[4] > y[3], "then d, then the rest: {y:?}");
+    assert!(close(y[4], y[6]), "e f g on one line: {y:?}");
+    assert!(laid.warnings.is_empty(), "{:?}", laid.warnings);
+
+    let mut deep = BoxNode::element(block(), vec![text("x")]);
+    for _ in 0..(Limits::DEFAULT.max_depth + 2) {
+        deep = inline(vec![deep]);
+    }
+    let refusal = layout(
+        &BoxNode::element(block(), vec![deep]),
+        &METRICS,
+        &Options::new(200.0, 400.0),
+        &Limits::DEFAULT,
+    )
+    .expect_err("past the depth cap");
+    assert!(matches!(refusal, Refusal::TooDeep { .. }));
+}

@@ -921,8 +921,15 @@ pub enum Warning {
     /// so is the difference between a known gap and a figure that quietly
     /// straddles a page.
     FloatBrokenAcrossPages,
-    /// An inline box with a block-level child, laid out as a block container.
-    /// CSS 2.2 §9.2.1.1 splits the inline instead.
+    /// An absolutely positioned block-level box inside an inline box, whose
+    /// content is set in the line rather than positioned.
+    ///
+    /// An **in-flow** block inside an inline box is CSS 2.2 §9.2.1.1's split,
+    /// done since October 2026 (`flow::Builder::split_inlines`): the content
+    /// before and after it are anonymous blocks and it is a block between
+    /// them. What reaches the line now is a box that is out of flow and was
+    /// written inside an inline, which §9.2.1.1 does not split for and which
+    /// this build does not take out of the line.
     BlockInInline,
     /// A line whose content does not fit and had nowhere to break — the word
     /// is longer than the line and `overflow-wrap` is `normal`, which is what
@@ -1011,7 +1018,7 @@ impl fmt::Display for Warning {
                 f.write_str("a float did not fit its page and was broken across the boundary")
             }
             Warning::BlockInInline => {
-                f.write_str("an inline box holds a block, and is laid out as one")
+                f.write_str("an inline box holds an absolutely positioned block, set in the line")
             }
             Warning::LineOverflowed => f.write_str("a line had nowhere to break and overflowed"),
             Warning::BreakForcedPastTheRules => {

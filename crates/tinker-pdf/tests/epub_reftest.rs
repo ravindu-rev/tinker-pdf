@@ -1071,3 +1071,24 @@ fn a_column_background_is_its_cells_backgrounds_under_the_row_group() {
     .2;
     assert!(laid.warnings.is_empty(), "{:?}", laid.warnings);
 }
+
+/// **A block inside an inline splits the inline** (CSS 2.2 §9.2.1.1): the
+/// inline content before the block and after it are anonymous block boxes of
+/// their own, and the block is a block between them — the same lines as the
+/// three written as three paragraphs. The mismatch is the block's text poured
+/// into the line, which is what this build did before, warning
+/// `BlockInInline`.
+#[test]
+fn a_block_inside_an_inline_splits_it_into_anonymous_blocks() {
+    let style = ".k { display: block }";
+    let split = lay(
+        style,
+        r#"<p>aa <span>bb<span class="k">cc</span>dd</span> ee</p>"#,
+    );
+    let written = lay(
+        style,
+        r#"<p>aa <span>bb</span></p><p><span><span class="k">cc</span></span></p><p><span>dd</span> ee</p>"#,
+    );
+    let broken = lay(style, r#"<p>aa <span>bb<span>cc</span>dd</span> ee</p>"#);
+    same("block-in-inline", split, written, broken);
+}

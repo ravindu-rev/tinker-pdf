@@ -82,7 +82,7 @@ silently-ignored property a build failure rather than a rendering surprise.
 **The layout engine** (`tinker-pdf-layout`, a leaf crate whose input is a
 caller-built tree rather than bytes): CSS 2.2's box model and the three
 margin-collapsing cases of §8.3.1; block and inline formatting contexts
-(§9.4); all nine float rules of §9.5, each its own step and fixture; the
+(§9.4), an inline box split round an in-flow block inside it (§9.2.1.1); all nine float rules of §9.5, each its own step and fixture; the
 §17 table model with §17.2.1's anonymous-box generation — cells written
 straight into a table or a row group are one anonymous row of those cells —
 §17.5.2.2's two-pass automatic width, §17.5.1's column and column-group

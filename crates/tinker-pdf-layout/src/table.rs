@@ -752,12 +752,22 @@ fn row_cells<'a>(row: &'a BoxNode, generated: &mut Generated) -> Vec<Cell<'a>> {
 /// wraps the newline between two misparented `<td>`s in a cell of its own, and
 /// the table it draws has an extra empty column in it.
 #[must_use]
-pub fn is_whitespace_between_table_boxes(children: &[BoxNode], at: usize) -> bool {
-    if !is_whitespace(&children[at]) {
+pub fn is_whitespace_between_table_boxes<N: std::borrow::Borrow<BoxNode>>(
+    children: &[N],
+    at: usize,
+) -> bool {
+    if !is_whitespace(children[at].borrow()) {
         return false;
     }
-    let before = children[..at].iter().rev().find(|node| !is_none(node));
-    let after = children[at + 1..].iter().find(|node| !is_none(node));
+    let before = children[..at]
+        .iter()
+        .map(N::borrow)
+        .rev()
+        .find(|node| !is_none(node));
+    let after = children[at + 1..]
+        .iter()
+        .map(N::borrow)
+        .find(|node| !is_none(node));
     matches!((before, after), (Some(b), Some(a))
         if b.style.display.is_internal_table() && a.style.display.is_internal_table())
 }
@@ -772,14 +782,14 @@ pub fn is_whitespace_between_table_boxes(children: &[BoxNode], at: usize) -> boo
 /// Returns `from` when the child at `from` is not an internal table box at all,
 /// which is the caller's "no anonymous table here".
 #[must_use]
-pub fn misparented_run(children: &[BoxNode], from: usize) -> usize {
-    if from >= children.len() || !children[from].style.display.is_internal_table() {
+pub fn misparented_run<N: std::borrow::Borrow<BoxNode>>(children: &[N], from: usize) -> usize {
+    if from >= children.len() || !children[from].borrow().style.display.is_internal_table() {
         return from;
     }
     let mut end = from + 1;
     let mut at = from + 1;
     while at < children.len() {
-        let child = &children[at];
+        let child = children[at].borrow();
         if is_none(child) {
             at += 1;
             continue;

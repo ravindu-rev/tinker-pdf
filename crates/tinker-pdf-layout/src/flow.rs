@@ -1810,7 +1810,12 @@ impl<M: Metrics> Builder<'_, M> {
             Content::Text(source) => {
                 self.text_block(node, source, style, block, content_x, content_width)
             }
-            Content::Children(children) => {
+            Content::Children(written) => {
+                // §9.2.1.1: an inline box holding a block-level box is split
+                // round it, which is this container's child list with that
+                // inline box's children standing in its place.
+                let children = self.split_inlines(written, depth, false)?;
+                let children = children.as_slice();
                 let styles: Vec<Consumed> = children.iter().map(|c| consume(&c.style)).collect();
                 let any_block = styles.iter().any(|s| !s.is_none() && s.is_block_level());
                 if !any_block {
@@ -1818,7 +1823,7 @@ impl<M: Metrics> Builder<'_, M> {
                     let mut pieces = Vec::new();
                     self.lead_with_marker(&mut pieces);
                     let mut collapser = Collapser::new();
-                    for child in children {
+                    for child in children.iter().copied() {
                         self.gather(
                             child,
                             &mut pieces,
@@ -1842,7 +1847,7 @@ impl<M: Metrics> Builder<'_, M> {
                 let mut ordinal = 0usize;
                 // §17.2.1 rule 9's run, once it has been wrapped.
                 let mut wrapped_until = 0usize;
-                for (index, (child, child_style)) in children.iter().zip(&styles).enumerate() {
+                for (index, (&child, child_style)) in children.iter().zip(&styles).enumerate() {
                     if index < wrapped_until {
                         continue;
                     }
@@ -1957,6 +1962,83 @@ impl<M: Metrics> Builder<'_, M> {
         self.lines(&pieces, style, block, content_x, content_width)
     }
 
+    /// CSS 2.2 §9.2.1.1: *"when an inline box contains an in-flow block-level
+    /// box, the inline box (and its inline ancestors within the same line box)
+    /// are broken around the block-level box"*. A child list in which an
+    /// inline box holds such a box — at any depth through inline boxes — is
+    /// returned with that inline box replaced by its own children, recursively,
+    /// so the caller's run of inline content ends at the block and a new one
+    /// begins after it: the content before and after are anonymous block boxes
+    /// of their own, and the block is a block between them. The text keeps its
+    /// own computed style and anchor, which are what an inline box gives its
+    /// content; what is lost is the inline box's own box — a background,
+    /// border or horizontal margin on the `<span>` — which this build does not
+    /// draw on an inline box in any case.
+    ///
+    /// An inline box with no such descendant is left whole, and the search
+    /// that found so is linear in it and is not charged: the gather that sets
+    /// it next walks the same nodes. **Inside a box that splits**, every node a
+    /// search visits is charged to the layout work, because there the same
+    /// nested inline boxes are searched once per level that splits.
+    #[inline(never)]
+    fn split_inlines<'n>(
+        &mut self,
+        children: &'n [BoxNode],
+        depth: usize,
+        charged: bool,
+    ) -> Result<Vec<&'n BoxNode>, Refusal> {
+        let mut out = Vec::with_capacity(children.len());
+        for child in children {
+            if self.holds_block(child, depth + 1, charged)? {
+                let Content::Children(inner) = &child.content else {
+                    out.push(child);
+                    continue;
+                };
+                out.extend(self.split_inlines(inner, depth + 1, true)?);
+            } else {
+                out.push(child);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether `node` is a non-atomic inline box with an in-flow block-level
+    /// box inside it, reached through inline boxes only — an inline-block, a
+    /// picture, a float and an absolutely positioned box are each a boundary.
+    fn holds_block(
+        &mut self,
+        node: &BoxNode,
+        depth: usize,
+        charged: bool,
+    ) -> Result<bool, Refusal> {
+        if depth > self.limits.max_depth {
+            return Err(Refusal::TooDeep { depth });
+        }
+        let style = &node.style;
+        if style.display != Display::Inline || style.float != Float::None {
+            return Ok(false);
+        }
+        let Content::Children(children) = &node.content else {
+            return Ok(false);
+        };
+        if charged {
+            self.budget.spend_layout(children.len())?;
+        }
+        for child in children {
+            let inner = &child.style;
+            let in_flow = inner.float == Float::None
+                && !matches!(inner.position, Position::Absolute | Position::Fixed);
+            let block_level = matches!(
+                inner.display,
+                Display::Block | Display::ListItem | Display::Table | Display::Flex
+            );
+            if (in_flow && block_level) || self.holds_block(child, depth + 1, charged)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// §17.2.1 rule 9's anonymous table round a run of misparented internal
     /// table boxes, laid out as the block it is. A function of its own for
     /// [`Builder::text_block`]'s reason: the wrapper is a whole [`BoxNode`].
@@ -1965,7 +2047,7 @@ impl<M: Metrics> Builder<'_, M> {
     fn misparented(
         &mut self,
         node: &BoxNode,
-        run: &[BoxNode],
+        run: &[&BoxNode],
         content_width: f64,
         content_x: f64,
         depth: usize,
@@ -5816,12 +5898,12 @@ fn place_flex_item(
     }
 }
 
-fn anonymous_table(parent: &ComputedStyle, run: &[BoxNode]) -> BoxNode {
+fn anonymous_table(parent: &ComputedStyle, run: &[&BoxNode]) -> BoxNode {
     let mut style = ComputedStyle::inherit_from(parent);
     style.display = Display::Table;
     BoxNode {
         style,
-        content: Content::Children(run.to_vec()),
+        content: Content::Children(run.iter().map(|node| (*node).clone()).collect()),
         anchor: None,
         span: crate::CellSpan::ONE,
         marker: None,
