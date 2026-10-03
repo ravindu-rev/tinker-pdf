@@ -249,8 +249,11 @@ a first child block, with the punctuation either side and the letter's
 combining marks — wrapped in a box of the pseudo-element's style and the text's
 own anchor, so a floated one is a drop cap and extraction reads the same
 characters in the same order. It inherits from the originating block rather
-than from an inline box round the letter, and a letter an element boundary
-separates from its opening quotation mark is not found;
+than from an inline box round the letter, a letter an element boundary
+separates from its opening quotation mark is not found, and where nested
+block containers each have one the letter is in the innermost's box only (its
+declarations are the ones CSS 2.1 §5.12.2's fictional tag sequence shows; an
+outer one's border or background round it is not drawn);
 every internal link and every navigation entry becomes a link annotation or
 outline item. **An XHTML `<img>` is a replaced box** at the picture's own
 dimensions, drawn inside its content box as an `/XObject` registered before the

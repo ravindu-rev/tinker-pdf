@@ -23,13 +23,14 @@
 //!   committed corpus. Guessing `"` is wrong in every language that does not
 //!   use it.
 //!
-//! `::first-line` and `::first-letter` still generate nothing and are still
-//! counted by `Warning::PseudoElementUnsupported`. Neither is generated
-//! content: both select part of an *already laid out* box, so honouring either
-//! means a second layout pass. `::marker`, `::placeholder` and `::selection`
-//! are not parsed at all — `::selection` for the reason row 142 already gives
-//! for the seven pseudo-classes, that it names a state of a reading session
-//! and a paginated document has none.
+//! `::first-line` still generates nothing and is still counted by
+//! `Warning::PseudoElementUnsupported`: it is not generated content but selects
+//! the part of an *already laid out* box on its first line, so honouring it
+//! means a second layout pass. `::first-letter` is a box round its letter
+//! (`epub_reftest.rs`) and generates no content of its own. `::marker`,
+//! `::placeholder` and `::selection` are not parsed at all — `::selection` for
+//! the reason row 142 already gives for the seven pseudo-classes, that it
+//! names a state of a reading session and a paginated document has none.
 //!
 //! # Generated content is not conserved text, and the harness is right
 //!
@@ -322,9 +323,12 @@ fn counter_and_counters_number_the_generated_boxes() {
     assert_eq!(text, "I. One1 a1-1 b1-2 cII. Two");
 }
 
-/// `::first-line` and `::first-letter` still generate nothing.
+/// `::first-line` and `::first-letter` generate no content: `content` on
+/// either puts nothing on the page. (`::first-letter` is a box round the
+/// letter, which `epub_reftest.rs` holds; `content` is not one of the
+/// properties that apply to it.)
 ///
-/// That they are still **named** is asserted in
+/// That `::first-line` is still **named** is asserted in
 /// `tinker-pdf-css`'s `tests/selector.rs`, where the warning lives: a
 /// `Warning::PseudoElementUnsupported` is a stylesheet's report and does not
 /// travel out through `ArchiveWarning`, so this side can only assert the

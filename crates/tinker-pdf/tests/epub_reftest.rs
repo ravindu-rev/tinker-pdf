@@ -1136,6 +1136,58 @@ fn first_letter_is_the_first_letter_in_a_box_of_its_own() {
     }
 }
 
+/// **Nested block containers' `::first-letter` boxes do not stack**: where a
+/// container and the block inside it both ask for one, the letter is in the
+/// inner one's box (CSS 2.1 §5.12.2's fictional tag sequence puts the inner
+/// pseudo-element innermost, so its declarations are the ones the letter
+/// shows) and the outer one makes no second box round the same letter. The
+/// mismatch is the outer one's size winning, which is what wrapping the same
+/// letter once per level drew.
+#[test]
+fn a_nested_first_letter_is_the_nearest_blocks() {
+    let sizes = ".big { font-size: 30px } .small { font-size: 20px }";
+    let rules = "div::first-letter { font-size: 30px } p::first-letter { font-size: 20px }";
+    let styled = lay(
+        &format!("{sizes} {rules}"),
+        "<div><p>Hello there</p><p>Next</p></div>",
+    );
+    let written = lay(
+        sizes,
+        r#"<div><p><span class="small">H</span>ello there</p><p><span class="small">N</span>ext</p></div>"#,
+    );
+    let broken = lay(
+        sizes,
+        r#"<div><p><span class="big">H</span>ello there</p><p><span class="small">N</span>ext</p></div>"#,
+    );
+    same("nested ::first-letter", styled, written, broken);
+}
+
+/// **A `::first-letter` on every one of two hundred nested blocks is one box**
+/// round the letter, not two hundred, and building it fits a test thread's
+/// two-megabyte stack. Each level used to search down to the letter again and
+/// wrap it again, which made the box tree twice as deep as the document — past
+/// `MAX_BOX_DEPTH` from 129 levels — and a search two frames a level deep
+/// whose frames each held a computed style, which overflowed the stack below a
+/// hundred levels. The mismatch is the nest without the rule.
+#[test]
+fn a_first_letter_on_two_hundred_nested_blocks_is_one_box() {
+    const LEVELS: usize = 200;
+    let big = ".big { font-size: 30px }";
+    let open = "<div>".repeat(LEVELS);
+    let close = "</div>".repeat(LEVELS);
+    let body = format!("{open}Hello there{close}");
+    let styled = lay(
+        &format!("{big} div::first-letter {{ font-size: 30px }}"),
+        &body,
+    );
+    let written = lay(
+        big,
+        &format!(r#"{open}<span class="big">H</span>ello there{close}"#),
+    );
+    let broken = lay(big, &body);
+    same("two hundred nested ::first-letter", styled, written, broken);
+}
+
 /// **`column-span: all` interrupts the columns** (`css-multicol-1` §6): a
 /// two-column container with a spanning paragraph in the middle lays out as a
 /// two-column container, the paragraph, and a second two-column container —

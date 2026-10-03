@@ -35,6 +35,7 @@
 //! `a_paragraph_does_not_pay_its_own_margin_twice` is what holds it.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 
 use tinker_pdf_cos::{gif_image, png_image, webp_image};
 use tinker_pdf_css::cascade::{cascade_from, ComputedStyle, Origin, PseudoBox, StyleTree};
@@ -912,9 +913,27 @@ fn propagate_overflow(dom: &Dom, root: usize, tree: &mut BoxNode) {
 
 fn build(dom: &Dom, styles: &StyleTree, pictures: &Pictures, at: usize) -> BoxNode {
     let mut out = Vec::with_capacity(1);
-    build_into(&mut out, dom, styles, pictures, at);
+    let mut build = Build {
+        dom,
+        styles,
+        pictures,
+        lettered: HashSet::new(),
+    };
+    build_into(&mut out, &mut build, at);
     out.pop()
         .unwrap_or_else(|| BoxNode::element(ComputedStyle::initial(), Vec::new()))
+}
+
+/// What [`build_into`] reads, and the one record it keeps besides the tree.
+struct Build<'a> {
+    dom: &'a Dom,
+    styles: &'a StyleTree,
+    pictures: &'a Pictures,
+    /// The elements whose own `::first-letter` search has ended — it found the
+    /// letter, or found that the first line has none — so that an ancestor's
+    /// search stops at their box rather than wrapping the same letter again.
+    /// See [`first_letter`].
+    lettered: HashSet<u32>,
 }
 
 /// One element's box, pushed onto `out`.
@@ -931,16 +950,11 @@ fn build(dom: &Dom, styles: &StyleTree, pictures: &Pictures, at: usize) -> BoxNo
 /// [`push_element`], [`push_replaced`]), whose frame is gone before the next
 /// level begins, and this one and [`build_with`] hold references and the
 /// child list.
-fn build_into(
-    out: &mut Vec<BoxNode>,
-    dom: &Dom,
-    styles: &StyleTree,
-    pictures: &Pictures,
-    at: usize,
-) {
+fn build_into(out: &mut Vec<BoxNode>, build: &mut Build<'_>, at: usize) {
+    let styles = build.styles;
     match styles.styles.get(at) {
-        Some(style) => build_with(out, dom, styles, pictures, at, style),
-        None => build_unstyled(out, dom, styles, pictures, at),
+        Some(style) => build_with(out, build, at, style),
+        None => build_unstyled(out, build, at),
     }
 }
 
@@ -948,26 +962,14 @@ fn build_into(
 /// cascade built does not have: the initial style, in a frame of its own so
 /// the recursion's carries no second computed style.
 #[inline(never)]
-fn build_unstyled(
-    out: &mut Vec<BoxNode>,
-    dom: &Dom,
-    styles: &StyleTree,
-    pictures: &Pictures,
-    at: usize,
-) {
+fn build_unstyled(out: &mut Vec<BoxNode>, build: &mut Build<'_>, at: usize) {
     let initial = ComputedStyle::initial();
-    build_with(out, dom, styles, pictures, at, &initial);
+    build_with(out, build, at, &initial);
 }
 
 /// [`build_into`] with the element's style in hand.
-fn build_with(
-    out: &mut Vec<BoxNode>,
-    dom: &Dom,
-    styles: &StyleTree,
-    pictures: &Pictures,
-    at: usize,
-    style: &ComputedStyle,
-) {
+fn build_with(out: &mut Vec<BoxNode>, build: &mut Build<'_>, at: usize, style: &ComputedStyle) {
+    let (dom, styles) = (build.dom, build.styles);
     let Some(node) = dom.nodes.get(at) else {
         return;
     };
@@ -984,7 +986,7 @@ fn build_with(
     // when the image is available, so it falls through to the branch below and
     // becomes what it is — an empty inline element, generating an empty box and
     // no ink. See [`pictures`].
-    if let Some(size) = pictures.intrinsic_of(at) {
+    if let Some(size) = build.pictures.intrinsic_of(at) {
         push_replaced(out, style, size, anchor);
         return;
     }
@@ -999,7 +1001,7 @@ fn build_with(
     }
     for child in &node.children {
         match child {
-            Child::Element(index) => build_into(&mut children, dom, styles, pictures, *index),
+            Child::Element(index) => build_into(&mut children, build, *index),
             Child::Text(text) => push_text(&mut children, style, text, anchor),
         }
     }
@@ -1018,8 +1020,10 @@ fn build_with(
                 | Display::InlineBlock
                 | Display::TableCell
                 | Display::TableCaption
-        ) {
-            let _ = first_letter(&mut children, &letter.style, 0);
+        ) && first_letter(&mut children, &letter.style, &build.lettered, 0)
+            != LetterSearch::Continue
+        {
+            build.lettered.insert(anchor);
         }
     }
     push_element(out, style, children, node, anchor, styles.marker(at));
@@ -1079,7 +1083,8 @@ fn push_element(
 /// Where the search for a `::first-letter` stands after a list of boxes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LetterSearch {
-    /// The letter was found and wrapped.
+    /// The letter was found and wrapped — by this search, or already by a
+    /// nearer block container's own `::first-letter`.
     Found,
     /// The first formatted line begins with something that has no first
     /// letter — a picture, an inline-block, a table, punctuation and then
@@ -1098,13 +1103,34 @@ enum LetterSearch {
 /// child is searched into (its first line is the container's), and floats and
 /// absolutely positioned boxes are passed over as out of the line.
 ///
+/// **A block that searched for its own first letter is not searched again.**
+/// The box tree is built innermost first, so where a container and the block
+/// inside it both have a `::first-letter`, the inner one's search has already
+/// run; `lettered` holds every element whose search ended, and this one stops
+/// at such a block's box. The letter keeps the inner box only, which is the
+/// one CSS 2.1 §5.12.2's fictional tag sequence puts innermost and whose
+/// declarations the letter therefore shows. Without it every level wrapped the
+/// same letter again — a box tree twice the document's depth, refused past
+/// `MAX_BOX_DEPTH`, and a search two frames a level deep.
+///
 /// **What is approximated, and stated.** The box inherits from the
 /// originating block and not from the inline box the letter is inside, so an
 /// `<em>` round the first word does not italicise the drop cap; a letter that
 /// a leading quotation mark and an element boundary separate (`“<em>T`) is
 /// not found; `display` other than `inline` is read as `inline` unless the
-/// box floats, as §2.2 says.
-fn first_letter(children: &mut Vec<BoxNode>, letter: &ComputedStyle, depth: usize) -> LetterSearch {
+/// box floats, as §2.2 says; and of nested containers' `::first-letter`s only
+/// the innermost makes a box, so an outer one's border or background round
+/// the inner one's is not drawn.
+///
+/// **The frame is small on purpose**, as [`build_into`]'s is: this recurses
+/// once per level it searches through, and the box it makes is made in
+/// [`wrap_letter`], whose computed styles are gone before it returns.
+fn first_letter(
+    children: &mut Vec<BoxNode>,
+    letter: &ComputedStyle,
+    lettered: &HashSet<u32>,
+    depth: usize,
+) -> LetterSearch {
     if depth > tinker_pdf_layout::limits::MAX_BOX_DEPTH {
         return LetterSearch::Stop;
     }
@@ -1123,48 +1149,33 @@ fn first_letter(children: &mut Vec<BoxNode>, letter: &ComputedStyle, depth: usiz
         match &mut child.content {
             Content::Replaced(_) => return LetterSearch::Stop,
             Content::Text(text) => {
-                let Some((start, end)) = letter_unit(text) else {
+                let Some(unit) = letter_unit(text) else {
                     if text.chars().all(char::is_whitespace) {
                         at += 1;
                         continue;
                     }
                     return LetterSearch::Stop;
                 };
-                let anchor = child.anchor;
-                let text_style = child.style.clone();
-                let whole = std::mem::take(text);
-                let mut style = letter.clone();
-                if style.float == Float::None {
-                    style.display = Display::Inline;
-                }
-                let mut replacement = Vec::with_capacity(3);
-                if start > 0 {
-                    replacement.push(text_node(text_style.clone(), &whole[..start], anchor));
-                }
-                replacement.push(BoxNode {
-                    style: style.clone(),
-                    content: Content::Children(vec![text_node(
-                        inline_box(&style),
-                        &whole[start..end],
-                        anchor,
-                    )]),
-                    anchor,
-                    span: CellSpan::ONE,
-                    marker: None,
-                });
-                if end < whole.len() {
-                    replacement.push(text_node(text_style, &whole[end..], anchor));
-                }
-                children.splice(at..=at, replacement);
+                wrap_letter(children, at, unit, letter);
                 return LetterSearch::Found;
             }
             Content::Children(inner) => match display {
-                Display::Inline => match first_letter(inner, letter, depth + 1) {
+                Display::Inline => match first_letter(inner, letter, lettered, depth + 1) {
                     LetterSearch::Continue => at += 1,
                     done => return done,
                 },
                 Display::Block | Display::ListItem => {
-                    match first_letter(inner, letter, depth + 1) {
+                    // An element's own box carries its anchor, and nothing
+                    // outside that box does — its text and generated boxes are
+                    // inside it — so the anchor names the block whose search
+                    // ended.
+                    if child
+                        .anchor
+                        .is_some_and(|anchor| lettered.contains(&anchor))
+                    {
+                        return LetterSearch::Found;
+                    }
+                    match first_letter(inner, letter, lettered, depth + 1) {
                         // An empty block has no line; the first line is the next
                         // box's.
                         LetterSearch::Continue => at += 1,
@@ -1176,6 +1187,54 @@ fn first_letter(children: &mut Vec<BoxNode>, letter: &ComputedStyle, depth: usiz
         }
     }
     LetterSearch::Continue
+}
+
+/// The text box at `children[at]` cut round `start..end`, its first letter
+/// unit, which goes into a box of its own in `letter`'s style, for
+/// [`first_letter`].
+#[inline(never)]
+fn wrap_letter(
+    children: &mut Vec<BoxNode>,
+    at: usize,
+    (start, end): (usize, usize),
+    letter: &ComputedStyle,
+) {
+    let Some(child) = children.get_mut(at) else {
+        return;
+    };
+    let Content::Text(text) = &mut child.content else {
+        return;
+    };
+    // `start..end` is `letter_unit`'s answer for this very text, so all three
+    // are character boundaries inside it and none of these is `None`.
+    let (Some(before), Some(unit), Some(after)) =
+        (text.get(..start), text.get(start..end), text.get(end..))
+    else {
+        return;
+    };
+    let (before, unit, after) = (before.to_owned(), unit.to_owned(), after.to_owned());
+    let anchor = child.anchor;
+    let text_style = child.style.clone();
+    let mut style = letter.clone();
+    if style.float == Float::None {
+        style.display = Display::Inline;
+    }
+    let mut replacement = Vec::with_capacity(3);
+    if !before.is_empty() {
+        replacement.push(text_node(text_style.clone(), &before, anchor));
+    }
+    let inner = text_node(inline_box(&style), &unit, anchor);
+    replacement.push(BoxNode {
+        style,
+        content: Content::Children(vec![inner]),
+        anchor,
+        span: CellSpan::ONE,
+        marker: None,
+    });
+    if !after.is_empty() {
+        replacement.push(text_node(text_style, &after, anchor));
+    }
+    children.splice(at..=at, replacement);
 }
 
 /// A text box anchored where the text it was cut from was.
