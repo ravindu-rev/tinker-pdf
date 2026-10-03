@@ -994,10 +994,13 @@ pub enum Warning {
     /// box, for `UnimplementedProperty`'s reason: the same declaration on four
     /// hundred figures is four hundred.
     ColumnSpanAsNone,
-    /// `display: table-column` or `table-column-group` carrying a `width`,
-    /// which this build reads, beside anything else on it, which it does not:
-    /// a column box's background and borders are §17.5.1's two rendering
-    /// layers and neither is painted here.
+    /// A `table-column` or `table-column-group` with a background **image**,
+    /// which is not painted. Its background colour is §17.5.1's layer and is
+    /// painted under each cell that originates in it; its borders are
+    /// resolved with the cells' in the collapsing model and ignored in the
+    /// separated one, which is §17.6.1's own rule. The image would be
+    /// positioned against the column's whole box while painted only over its
+    /// cells, which is a second geometry this build does not carry.
     ColumnBoxNotPainted,
 }
 
@@ -1028,7 +1031,7 @@ impl fmt::Display for Warning {
                 f.write_str("column-span: all is laid out in its own column")
             }
             Warning::ColumnBoxNotPainted => {
-                f.write_str("a table column box's background and borders are not painted")
+                f.write_str("a table column box's background image is not painted")
             }
             Warning::MaxHeightAsAuto => {
                 f.write_str("a max-height shorter than the content did not shorten the box")

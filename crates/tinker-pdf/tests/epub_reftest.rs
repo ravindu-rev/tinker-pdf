@@ -992,3 +992,82 @@ fn inline_flex_is_an_atomic_inline_holding_a_flex_layout() {
     );
     same("inline-flex", flex, blocks, broken);
 }
+
+/// A one-chapter book set by `style`, rendered: the page's pixels, for the
+/// pairs whose two spellings agree on paint rather than on lines.
+fn rendered(style: &str, body: &str) -> Vec<u8> {
+    use epub_support::{ocf_zip, OcfEntry};
+    const CONTAINER: &str = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        r#"<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">"#,
+        r#"<rootfiles><rootfile full-path="EPUB/content.opf" media-type="application/oebps-package+xml"/>"#,
+        r#"</rootfiles></container>"#
+    );
+    const PACKAGE: &str = concat!(
+        r#"<?xml version="1.0" encoding="utf-8"?>"#,
+        r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">"#,
+        r#"<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">"#,
+        r#"<dc:identifier id="id">urn:uuid:6a6a6a6a-0000-4000-8000-000000000002</dc:identifier>"#,
+        r#"<dc:title>Pair</dc:title><dc:language>en</dc:language></metadata><manifest>"#,
+        r#"<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>"#,
+        r#"</manifest><spine><itemref idref="c1"/></spine></package>"#
+    );
+    let chapter = format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>A Chapter</title>"#,
+            r#"<style>{} {}</style></head><body>{}</body></html>"#
+        ),
+        RESET, style, body
+    );
+    let entries = vec![
+        OcfEntry::stored("mimetype", b"application/epub+zip"),
+        OcfEntry::deflated("META-INF/container.xml", CONTAINER.as_bytes()),
+        OcfEntry::deflated("EPUB/content.opf", PACKAGE.as_bytes()),
+        OcfEntry::deflated("EPUB/ch1.xhtml", chapter.as_bytes()),
+    ];
+    let directory: Vec<usize> = (0..entries.len()).collect();
+    let doc = Document::open(ocf_zip(&entries, &directory)).expect("the book opens");
+    doc.page(0)
+        .expect("a page")
+        .render(&tinker_pdf::RenderOptions::default())
+        .data
+}
+
+/// **A column's background is painted under its cells** (CSS 2.2 §17.5.1's
+/// third layer, *"covers exactly the full area of all cells that originate in
+/// the column"*), and a row group's is above it: a `<col>` with a red
+/// background renders as the same table with each of that column's cells
+/// red, and under a blue `<tbody>` as the same cells blue. The mismatch is
+/// the table with no column background, which is what this build drew before,
+/// warning `ColumnBoxNotPainted`.
+#[test]
+fn a_column_background_is_its_cells_backgrounds_under_the_row_group() {
+    let style = "table { border-spacing: 0 } td { padding: 4px } .r { background-color: #ff0000 } \
+                 .b { background-color: #0000ff }";
+    let table = |col: &str, group: &str, first: &str| {
+        format!(
+            r#"<table><col{col}/><col/><tbody{group}><tr><td{first}>aa</td><td>bb</td></tr><tr><td{first}>cc</td><td>dd</td></tr></tbody></table>"#
+        )
+    };
+    let red = r#" class="r""#;
+    let blue = r#" class="b""#;
+    let column = rendered(style, &table(red, "", ""));
+    let cells = rendered(style, &table("", "", red));
+    let broken = rendered(style, &table("", "", ""));
+    assert!(column == cells, "a column's background is its cells'");
+    assert!(column != broken, "and the pair could have disagreed");
+    // The row group's layer is above the column's.
+    let under = rendered(style, &table(red, blue, ""));
+    let group = rendered(style, &table("", blue, ""));
+    assert!(under == group, "the row group covers the column");
+    // And nothing is named any more.
+    let laid = epub_support::layout::lay_out(
+        &document(&table(red, "", "")),
+        &format!("{RESET} {style}"),
+        MEASURE,
+        1000.0,
+    )
+    .2;
+    assert!(laid.warnings.is_empty(), "{:?}", laid.warnings);
+}

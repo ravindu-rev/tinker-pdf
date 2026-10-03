@@ -85,9 +85,9 @@ margin-collapsing cases of §8.3.1; block and inline formatting contexts
 (§9.4); all nine float rules of §9.5, each its own step and fixture; the
 §17 table model with §17.2.1's anonymous-box generation — cells written
 straight into a table or a row group are one anonymous row of those cells —
-§17.5.2.2's
-two-pass automatic width and §17.6.2.1's five-rule border conflict
-resolution, `rowspan` clamped; `css-flexbox-1`'s line algorithm with
+§17.5.2.2's two-pass automatic width, §17.5.1's column and column-group
+backgrounds painted under the cells that originate in them, and §17.6.2.1's
+five-rule border conflict resolution, `rowspan` clamped; `css-flexbox-1`'s line algorithm with
 grow/shrink freeze-and-redistribute and `order`, and `inline-flex` as an
 atomic inline-level box whose inside is that layout and whose baseline is its
 first (§8.5); §13.3 fragmentation rules

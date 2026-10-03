@@ -2697,26 +2697,29 @@ impl<M: Metrics> Builder<'_, M> {
             }
         }
 
-        // The column boxes: §17.5.2's widths, and §17.5.1's two rendering
-        // layers this build does not paint.
+        // The column boxes: §17.5.2's widths. Their backgrounds are §17.5.1's
+        // second and third layers, painted per cell by [`Builder::band`]; their
+        // borders are §17.6.2.1's to resolve in the collapsing model, and
+        // §17.6.1 says to ignore them in the separated one. A background
+        // **image** on one is not painted, and is the one thing named.
         let mut declared: Vec<Option<f64>> = vec![None; grid.columns];
         let collapsing = style.border_collapse == BorderCollapse::Collapse;
         for (at, width) in declared.iter_mut().enumerate() {
             let Some(column) = tree.columns.get(at) else {
                 break;
             };
+            for described in [column.node, column.group].into_iter().flatten() {
+                if consume(&described.style)
+                    .paint
+                    .is_some_and(|paint| paint.image.is_some())
+                {
+                    self.warn(Warning::ColumnBoxNotPainted);
+                }
+            }
             let Some(described) = column.node.or(column.group) else {
                 continue;
             };
             let consumed = consume(&described.style);
-            let bordered = !collapsing
-                && (consumed.border_width.top > 0.0
-                    || consumed.border_width.right > 0.0
-                    || consumed.border_width.bottom > 0.0
-                    || consumed.border_width.left > 0.0);
-            if consumed.background_color.a != 0 || bordered {
-                self.warn(Warning::ColumnBoxNotPainted);
-            }
             if let Size::Length(length) = consumed.width {
                 *width = Some(resolve_length(length, content_width).max(0.0));
             }
@@ -3873,7 +3876,69 @@ impl<M: Metrics> Builder<'_, M> {
         let mut blocks: Vec<BlockRecord> = Vec::new();
         let band_top = tops[from];
 
-        // The row boxes first, so a cell's background covers a row's rather
+        // CSS 2.2 §17.5.1's second and third layers, under everything else in
+        // the band: a column group's and a column's background *"covers
+        // exactly the full area of all cells that originate in"* it, so each
+        // is painted once per such cell, over that cell's box.
+        //
+        // **Only where nothing above it hides it.** A cell, its rows or its
+        // row group with an opaque background covers the cell's whole area,
+        // and painting the column under it would leave the column's colour in
+        // the anti-aliased seam where the two rectangles' edges meet — a
+        // hairline round every cell that the same table without the column
+        // does not have. Where the layers above are transparent the column
+        // shows, as §17.5.1 says; where the row group's is translucent, its
+        // record was painted once round the whole group before this band
+        // began, so it is painted over the column again in the cell's area,
+        // which is what keeps the order.
+        let opaque = |node: Option<&BoxNode>| {
+            node.is_some_and(|node| {
+                let style = consume(&node.style);
+                style.visible && style.background_color.a == u8::MAX
+            })
+        };
+        for grid_row in from..to {
+            for slot in grid.slots.iter().filter(|slot| slot.top == grid_row) {
+                let rows_covered = (slot.top..slot.top + slot.rows).all(|row| {
+                    rows_of
+                        .get(row)
+                        .is_some_and(|(group, row)| opaque(tree.groups[*group].rows[*row].node))
+                });
+                let cell = &tree.groups[slot.group].rows[slot.row].cells[slot.cell];
+                if opaque(Some(cell.content.node()))
+                    || rows_covered
+                    || opaque(tree.groups[slot.group].node)
+                {
+                    continue;
+                }
+                let column = tree.columns.get(slot.left);
+                let layers = [
+                    column.and_then(|column| column.group),
+                    column.and_then(|column| column.node),
+                ];
+                let area = (
+                    lefts[slot.left],
+                    columns[slot.left..slot.left + slot.columns]
+                        .iter()
+                        .sum::<f64>()
+                        + slot.columns.saturating_sub(1) as f64 * hspacing,
+                    tops[slot.top] - band_top,
+                    heights[slot.top..slot.top + slot.rows].iter().sum::<f64>()
+                        + slot.rows.saturating_sub(1) as f64 * vspacing,
+                );
+                let mut painted_any = false;
+                for node in layers.into_iter().flatten() {
+                    painted_any |= self.background_layer(node, area, &mut items, &mut blocks)?;
+                }
+                if painted_any {
+                    if let Some(group) = tree.groups[slot.group].node {
+                        self.background_layer(group, area, &mut items, &mut blocks)?;
+                    }
+                }
+            }
+        }
+
+        // The row boxes next, so a cell's background covers a row's rather
         // than the other way round -- CSS 2.2 §17.5.1's layer order, and the
         // reason these records come before the cells' in this vector.
         for grid_row in from..to {
@@ -3980,6 +4045,39 @@ impl<M: Metrics> Builder<'_, M> {
             }
         }
         Ok(Abreast { items, blocks })
+    }
+
+    /// One of §17.5.1's layers over one cell's area — `(x, width, top,
+    /// height)`, the top relative to the band — as a spacer and a record that
+    /// paints the box's background colour and nothing else: a column's or a
+    /// row group's border is §17.6.2.1's (collapsing) or ignored (§17.6.1,
+    /// separated). Whether anything was painted.
+    fn background_layer(
+        &mut self,
+        node: &BoxNode,
+        (x, width, top, height): (f64, f64, f64, f64),
+        items: &mut Vec<Item>,
+        blocks: &mut Vec<BlockRecord>,
+    ) -> Result<bool, Refusal> {
+        let style = consume(&node.style);
+        if !style.visible || style.background_color.a == 0 {
+            return Ok(false);
+        }
+        self.budget.spend_box()?;
+        let mut record = decorate(node, x, width);
+        record.border_width = Sides::all(0.0);
+        record.paint = None;
+        record.painted = true;
+        let spacer = items.len();
+        items.push(Item {
+            y: top,
+            height,
+            kind: ItemKind::Edge,
+        });
+        record.first = Some(spacer);
+        record.last = spacer + 1;
+        blocks.push(record);
+        Ok(true)
     }
 
     /// A block record for a box this module lays out itself — a row or a row
