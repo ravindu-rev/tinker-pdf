@@ -11,8 +11,9 @@ to a structure bar: counts of elements found, MCIDs matched and orphans left
 are ratcheted in `corpus/ratchet.json`, and the PDF/UA (ISO 14289-1) cases in
 that corpus are measured against the checks this design implements. This was the
 roadmap's "Tagged PDF and accessibility" row; it has left
-[../ROADMAP.md](../ROADMAP.md), which now carries only the writing gaps this
-design names as future work.
+[../ROADMAP.md](../ROADMAP.md), and so, in October 2026, has the
+tagged-writing row that carried the writing gaps this design named as future
+work — see "The writer, as built".
 
 ## Scope
 
@@ -275,6 +276,19 @@ writes, family by family:
 - **The EPUB's role map.** Every element name whose standard type is not its
   own spelling is registered with `map_role` before a chapter's pages are
   drawn and written as itself; `sub` stopped being the non-standard `/Sub`.
+- **The census over this engine's own output.** `pdfua.rs` runs milestone 5's
+  rules over an EPUB this engine converted and over a document built with the
+  tagging API, and asserts exactly what still fires: `no-pdfuaid-part` (no
+  PDF/UA claim is written, and none should be until the PDF/UA design's
+  ledger says so) and `font-not-embedded` (both are set in the unembedded
+  standard 14). Before this row the EPUB output also stated no language.
+
+What the row leaves, each named in a refusal table rather than absent: a
+link wrapped across lines is one annotation per rectangle rather than ISO
+32000-2 erratum 133's one annotation with `/QuadPoints`
+([content-and-text](../features/content-and-text.md)); attributes reached
+through `/C` and the `/ClassMap` are not read (the same); an empty EPUB table
+cell is not in the tree ([epub](../features/epub.md)).
 
 ## Dependencies
 

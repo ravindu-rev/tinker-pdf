@@ -410,6 +410,14 @@ with the XML leaf's event reader:
   headers both ways — by `id` in the source, through `element_by_id` in the
   tree — and compares the header cells' text.
 
+**The PDF/UA census runs over this output** (`pdfua.rs`,
+`this_engines_own_epub_output_is_censused_and_what_remains_is_named`): the
+same decidable rules the corpus census applies to other producers' files,
+over a book this path converted. Two still fire and are named there:
+`no-pdfuaid-part`, because the output claims no PDF/UA conformance and should
+not, and `font-not-embedded`, because a book with no `@font-face` is set in
+the unembedded standard 14.
+
 **What is not done yet**, each named rather than absent:
 
 | Not done | Why |

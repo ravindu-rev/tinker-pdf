@@ -45,6 +45,12 @@
 //! reason that looks exactly like a pass, so it prints [`RAN`] or [`SKIPPED`]
 //! and a job depending on it greps its own output for the second.
 
+#[path = "epub_support/mod.rs"]
+mod epub_support;
+
+#[path = "cbz_support/mod.rs"]
+mod cbz_support;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -107,7 +113,11 @@ impl Rule {
 fn findings(path: &Path) -> Result<Vec<Rule>, String> {
     let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
     let doc = Document::open(bytes).map_err(|error| format!("{error:?}"))?;
+    Ok(findings_of(&doc))
+}
 
+/// Every rule that fired on one opened document.
+fn findings_of(doc: &Document) -> Vec<Rule> {
     let mut out = Vec::new();
     if uaid_part(doc.xmp_metadata().as_deref()).is_none() {
         out.push(Rule::NoIdentifier);
@@ -115,7 +125,7 @@ fn findings(path: &Path) -> Result<Vec<Rule>, String> {
 
     let Some(tree) = doc.structure() else {
         out.push(Rule::NoStructureTree);
-        return Ok(out);
+        return out;
     };
     if !tree.marked {
         out.push(Rule::NotMarked);
@@ -140,14 +150,14 @@ fn findings(path: &Path) -> Result<Vec<Rule>, String> {
     if heading_level_skipped(&tree) {
         out.push(Rule::HeadingLevelSkipped);
     }
-    if !states_a_language(&doc, &tree) {
+    if !states_a_language(doc, &tree) {
         out.push(Rule::NoNaturalLanguage);
     }
-    if let Some(unembedded) = unembedded_font(&doc) {
+    if let Some(unembedded) = unembedded_font(doc) {
         let _ = unembedded;
         out.push(Rule::FontNotEmbedded);
     }
-    Ok(out)
+    out
 }
 
 /// 14.9.3: a `/Figure` stands for content that is not text, so something has
@@ -627,4 +637,129 @@ fn the_ua_identifier_is_read_and_is_not_the_pdfa_one() {
         "a PDF/A claim is not a PDF/UA one"
     );
     assert_eq!(uaid_part(None), None);
+}
+
+// ---- the census over this engine's own output ------------------------------
+//
+// The corpus census above measures this engine as a *reader* of other
+// producers' files. These two run the same rules over files this engine
+// *wrote* — an EPUB converted by the EPUB path, and a document built with
+// `DocumentBuilder`'s tagging API — and assert exactly which rules still fire,
+// each named with the reason it does. A rule that starts or stops firing on
+// our own output is a change to what this engine writes, and has to be
+// decided rather than discovered.
+
+/// An EPUB that says everything ISO 14289-1's decidable clauses ask about:
+/// a language, headings in order, a described picture, a link, a table with
+/// its headers.
+fn a_book_that_says_what_it_is() -> Vec<u8> {
+    use epub_support::{ocf_zip, OcfEntry};
+    const CONTAINER: &str = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        r#"<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">"#,
+        r#"<rootfiles><rootfile full-path="EPUB/content.opf" media-type="application/oebps-package+xml"/>"#,
+        r#"</rootfiles></container>"#
+    );
+    const PACKAGE: &str = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">"#,
+        r#"<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">"#,
+        r#"<dc:identifier id="pub-id">urn:uuid:1f0c2c1e-0000-4000-8000-0000000057a8</dc:identifier>"#,
+        r#"<dc:title>Censused</dc:title><dc:language>en</dc:language>"#,
+        r#"</metadata><manifest>"#,
+        r#"<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>"#,
+        r#"<item id="i1" href="red.png" media-type="image/png"/>"#,
+        r#"</manifest><spine><itemref idref="c1"/></spine></package>"#
+    );
+    const CHAPTER: &str = concat!(
+        r#"<?xml version="1.0" encoding="utf-8"?>"#,
+        r#"<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en">"#,
+        r#"<head><title>T</title></head><body>"#,
+        r##"<h1>A title</h1><p>Some <em>words</em> and a <a href="#t">link</a>.</p>"##,
+        r#"<h2>A section</h2><p><img src="red.png" alt="A red square"/></p>"#,
+        r#"<table summary="Two numbers"><tr><th id="k" scope="col">Key</th></tr>"#,
+        r#"<tr><td headers="k">One</td></tr></table><p id="t">The end.</p>"#,
+        r#"</body></html>"#
+    );
+    let picture = cbz_support::rgb_png(4, 4, &[200, 0, 0].repeat(16));
+    let entries = vec![
+        OcfEntry::stored("mimetype", b"application/epub+zip"),
+        OcfEntry::deflated("META-INF/container.xml", CONTAINER.as_bytes()),
+        OcfEntry::deflated("EPUB/content.opf", PACKAGE.as_bytes()),
+        OcfEntry::deflated("EPUB/ch1.xhtml", CHAPTER.as_bytes()),
+        OcfEntry::stored("EPUB/red.png", &picture),
+    ];
+    let directory: Vec<usize> = (0..entries.len()).collect();
+    ocf_zip(&entries, &directory)
+}
+
+/// **The census over this engine's own EPUB output**, with what remains
+/// named.
+///
+/// Before the tagged-writing row this output stated no `/Lang` anywhere, which
+/// is `no-natural-language`, and a book with a `<figure>` in it wrote a
+/// `/Figure` with no description, which is `figure-without-alt`. Removing
+/// either half of what closed them puts it back: the catalog's `/Lang`
+/// unwritten fires this test and the next, and a picture's `/Alt` unwritten
+/// fires this one. What still fires, and why each is not this row's to close:
+///
+/// - `no-pdfuaid-part`: the output claims no PDF/UA conformance, and should
+///   not — a structure tree is necessary for the claim and nowhere near
+///   sufficient (`docs/features/epub.md`). Writing `pdfuaid:part` is the
+///   PDF/UA design's ledger milestone, not a tagging question.
+/// - `font-not-embedded`: a book with no `@font-face` is set in the standard
+///   14, which the writer does not embed; ISO 14289-1 7.21.4.1 exempts none.
+///   That is a font-provision question (`FontProvider`, bundled faces).
+#[test]
+fn this_engines_own_epub_output_is_censused_and_what_remains_is_named() {
+    let doc = Document::open(a_book_that_says_what_it_is()).expect("a book");
+    let fired = findings_of(&doc);
+    assert_eq!(
+        fired,
+        [Rule::NoIdentifier, Rule::FontNotEmbedded],
+        "{:?}",
+        fired.iter().map(|rule| rule.label()).collect::<Vec<_>>()
+    );
+}
+
+/// **The census over a document built with the tagging API**, with what
+/// remains named — the same two, for the same reasons: the builder writes no
+/// `pdfuaid` packet, and this document is set in an unembedded standard font.
+/// Everything the tagging API decides — a tree, `/Marked`, described figures,
+/// heading order, a language — trips nothing.
+#[test]
+fn a_tagged_document_builder_document_is_censused_and_what_remains_is_named() {
+    use tinker_pdf::{DocumentBuilder, Tag, Target};
+
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.set_language("en");
+    builder.add_page(300.0, 300.0, |page| {
+        page.tagged(b"H1", |page| page.text(b"F1", 18.0, 20.0, 270.0, "Title"));
+        page.tagged(b"P", |page| {
+            page.text(b"F1", 12.0, 20.0, 250.0, "See ");
+            page.tagged(b"Link", |page| {
+                page.text(b"F1", 12.0, 45.0, 250.0, "this");
+                page.link(
+                    45.0,
+                    245.0,
+                    70.0,
+                    262.0,
+                    &Target::Uri("https://example.org/".into()),
+                );
+            });
+        });
+        page.tagged(b"H2", |page| page.text(b"F1", 14.0, 20.0, 220.0, "Part"));
+        page.tagged_with(&Tag::new(b"Figure").alt("A grey square"), |page| {
+            page.fill_rect(20.0, 150.0, 40.0, 40.0, 0.5);
+        });
+    });
+    let doc = Document::open(builder.finish()).expect("opens");
+    let fired = findings_of(&doc);
+    assert_eq!(
+        fired,
+        [Rule::NoIdentifier, Rule::FontNotEmbedded],
+        "{:?}",
+        fired.iter().map(|rule| rule.label()).collect::<Vec<_>>()
+    );
 }
