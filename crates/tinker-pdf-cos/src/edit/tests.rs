@@ -160,13 +160,17 @@ fn rotating_a_page_accumulates_and_normalizes() {
 /// on any positive turn and wrapped in a release one. A turn is still taken
 /// on top of what the page reads as: `i64::MAX` reads as 0 (7 rounds down),
 /// so a quarter more is 90, and `i64::MIN` reads as 0 too (352 rounds up).
+/// The caller's turn is a multiple of 90 now (the next test), so its ends
+/// are the largest and smallest multiples an `i64` holds, which are whole
+/// turns: `i64::MAX - 7` and `i64::MIN + 8`.
 #[test]
 fn a_rotate_near_the_ends_of_an_integer_turns_without_overflowing() {
     for (stated, by, expected) in [
         (i64::MAX, 90, 90),
         (i64::MIN, -90, 270),
-        (90, i64::MAX, 90),
-        (i64::MAX, i64::MAX, 0),
+        (90, i64::MAX - 7, 90),
+        (i64::MAX, i64::MIN + 8, 0),
+        (i64::MIN, i64::MAX - 7, 0),
     ] {
         let mut editor = DocumentEditor::new(document(1));
         let page = editor.page_refs()[0];
@@ -186,6 +190,27 @@ fn a_rotate_near_the_ends_of_an_integer_turns_without_overflowing() {
             "/Rotate {stated} turned by {by}"
         );
     }
+}
+
+/// **A turn that is not a quarter is refused, and changes nothing.**
+///
+/// 7.7.3.3 makes `/Rotate` a multiple of 90, and this method's contract has
+/// always been a quarter-turn multiple; anything else used to be rounded to
+/// the nearest quarter — 45 became 90 — on every surface but the CLI, which
+/// refused it on its own (ruling 11). Now the facade refuses for all of them.
+#[test]
+fn a_turn_that_is_not_a_quarter_is_refused_and_changes_nothing() {
+    let mut editor = DocumentEditor::new(document(1));
+    assert!(editor.rotate_page(0, 90));
+    for by in [45, 1, -89, 135, i64::MAX, i64::MIN] {
+        assert!(!editor.rotate_page(0, by), "a turn of {by} is refused");
+    }
+    let saved = reopen(&editor, WriteMode::Rewrite);
+    assert_eq!(
+        pages::collect(&saved)[0].rotation,
+        90,
+        "only the quarter turn was taken"
+    );
 }
 
 /// **A crop box reaches the file as the rectangle the caller stated.**

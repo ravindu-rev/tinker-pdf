@@ -60,7 +60,18 @@ impl DocumentEditor {
 
     /// Rotates a page by a quarter-turn multiple, relative to its current
     /// rotation.
+    ///
+    /// Returns false, having changed nothing, for a turn that is not a
+    /// multiple of 90 (7.7.3.3: `/Rotate` "shall be a multiple of 90"). It
+    /// used to be rounded to the nearest quarter, which no caller passing 45
+    /// asked for, and the CLI refused such a turn on its own while the C ABI
+    /// and the bindings rounded it (ruling 11). A `/Rotate` the *document*
+    /// states that is not a multiple is still read leniently, rounded, as
+    /// [`crate::pages::normalize_rotation`] reads it.
     pub fn rotate_page(&mut self, index: u32, degrees: i64) -> bool {
+        if degrees % 90 != 0 {
+            return false;
+        }
         let Some(reference) = self.page_refs().get(index as usize).copied() else {
             return false;
         };

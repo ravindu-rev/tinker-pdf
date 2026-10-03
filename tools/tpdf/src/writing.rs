@@ -215,7 +215,11 @@ pub(crate) fn rotate(options: &Options) -> Result<Vec<String>, String> {
     let mut editor = doc.editor();
     for &page in &turned {
         if !editor.rotate_page(page, by) {
-            return Err(format!("{path}: page {} could not be rotated", page + 1));
+            return Err(format!(
+                "{path}: page {} was not turned by {by}: `rotate_page` turns a page by a \
+                 multiple of 90 and refuses any other turn",
+                page + 1
+            ));
         }
     }
     let mut lines = vec![format!("  {path}: {} turned by {by}", pages(turned.len()))];
@@ -1060,13 +1064,27 @@ mod tests {
         rotate(&parse(&[&once, "--by", "-180", "--out", &twice])).expect("rotates");
         assert_eq!(rotation(&reopen(&twice, None)), vec![270, 180, 270]);
 
-        for (by, why) in [
-            ("45", "`--by 45` is not a quarter turn"),
-            ("right", "`--by right` is not a number"),
-        ] {
-            let args = strings(&[&source, "--by", by, "--out", &twice]);
-            assert_eq!(Options::parse(&args).err().as_deref(), Some(why));
-        }
+        // A turn that is not a quarter is the facade's to refuse, as it is
+        // for every surface, and nothing is written.
+        let refused = format!("{dir}/refused.pdf");
+        assert_eq!(
+            rotate(&parse(&[&source, "--by", "45", "--out", &refused]))
+                .err()
+                .as_deref(),
+            Some(
+                format!(
+                    "{source}: page 1 was not turned by 45: `rotate_page` turns a page by a \
+                     multiple of 90 and refuses any other turn"
+                )
+                .as_str()
+            )
+        );
+        assert!(!Path::new(&refused).exists());
+        let args = strings(&[&source, "--by", "right", "--out", &twice]);
+        assert_eq!(
+            Options::parse(&args).err().as_deref(),
+            Some("`--by right` is not a number")
+        );
         assert_eq!(
             rotate(&parse(&[&source, "--out", &twice])).err().as_deref(),
             Some("rotate needs --by DEGREES")

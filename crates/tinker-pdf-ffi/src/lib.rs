@@ -2303,7 +2303,8 @@ pub unsafe extern "C" fn tpdf_editor_move_page(
 }
 
 /// Rotates a page by a quarter-turn multiple, relative to its current
-/// rotation.
+/// rotation. Any other turn is [`TpdfStatus::EditRefused`], as the facade
+/// refuses it, and changes nothing.
 ///
 /// # Safety
 ///

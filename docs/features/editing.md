@@ -87,7 +87,9 @@ that names it, at the same number, plain and encrypted, and the facade's
 through `PageResources`.
 
 **Page surgery** (7.7.3). `delete_page`, `move_page`, `rotate_page` (any
-multiple of 90, stored as `/Rotate`), `set_crop_box` (14.11.2, written as the
+multiple of 90, stored as `/Rotate`; any other turn is refused and changes
+nothing, where it used to be rounded to the nearest quarter —
+`a_turn_that_is_not_a_quarter_is_refused_and_changes_nothing`), `set_crop_box` (14.11.2, written as the
 caller states it and never clipped here — 14.11.2 lets a crop box and a media
 box disagree and the *reader* reconciles them; a rectangle of no area is
 refused), `insert_page` (a blank page of the

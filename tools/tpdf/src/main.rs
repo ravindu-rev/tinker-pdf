@@ -515,17 +515,13 @@ impl Options {
                         }
                     };
                 }
-                // 7.7.3.3: `/Rotate` is a multiple of 90. The facade rounds
-                // anything else to the nearest quarter, which a person typing
-                // `--by 45` did not ask for, so it is refused here instead.
+                // Passed to `rotate_page` as given: a turn that is not a
+                // multiple of 90 is the facade's to refuse (7.7.3.3).
                 "--by" => {
                     let raw = value()?;
                     let degrees: i64 = raw
                         .parse()
                         .map_err(|_| format!("`--by {raw}` is not a number"))?;
-                    if degrees % 90 != 0 {
-                        return Err(format!("`--by {raw}` is not a quarter turn"));
-                    }
                     options.by = Some(degrees);
                 }
                 "--user-password" => options.user_password = Some(value()?),
