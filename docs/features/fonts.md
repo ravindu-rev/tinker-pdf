@@ -585,18 +585,27 @@ Landed so far:
   measured width, so the line's extent and alignment do not move; drawing,
   links and tags all read the one placement. A line is consecutive runs whose
   ends meet on one baseline, which is how `flow.rs` places a line; a line with
-  no right-to-left character is not touched.
+  no right-to-left character is not touched. Inside a run, the pieces
+  `word-spacing` cuts it into (every justified line but the last) are laid
+  in L2's order too, each paying its space where the space is drawn; *found
+  on review*, they had been drawn in written order, so a justified Arabic
+  paragraph read backwards line by line.
 
 - **Shaping across a span.** A styled span is a run of its own and a run
   shaped alone sees nothing either side of it, so a word with a coloured
   letter was drawn as isolated letters and a glyph its neighbour positions — a
   mark, the second glyph of a pair — lost the offset. The painter now shapes
-  each run against up to eight characters of its logical neighbours on the
-  line where they resolve to the same embedded face (`Fonts::set_contexts`),
-  and draws only its own glyphs, placed relative to the first of them. Layout
-  still measures each run alone, so a context that changes an advance leaves
-  the difference between the runs; that and a mixed-direction run's inner
-  order are in the refusal table below.
+  each run against up to eight characters of its logical neighbours where
+  they **touch it on its line** and resolve to the same embedded face
+  (`Fonts::set_contexts`), and draws only its own glyphs, placed relative to
+  the first of them. *Corrected on review*: the first version took any
+  neighbour within a font size of the run's baseline, which at a
+  `line-height` of 1 or less is the next line, and joined an Arabic word to
+  the line below; and a context in the other direction could put its glyphs
+  between the run's own, which overprinted the neighbour — such a run is now
+  shaped alone. Layout still measures each run alone, so a context that
+  changes an advance leaves the difference between the runs; that and a
+  mixed-direction run's inner order are in the refusal table below.
 
 - **`GPOS` offsets reach the page.** They did not, and it was a **silent**
   defect: `PageBuilder::glyphs` writes one hex string at one origin, so a mark
@@ -816,7 +825,7 @@ two corpora already vendored here. So every name stays on the list.
 
 | What | Typed variant | Why (one line) | See |
 |---|---|---|---|
-| A shaping context that changes an **advance** across a styled span (a joined form wider than the isolated one, a pair that kerns), and the inner order of a run that mixes directions inside a right-to-left line | none — the difference is left between the two runs; the run is ordered by its own P2/P3 | layout measures each run alone through the `Shaper` seam, which takes no context, and moving that is a change to the layout crate's trait; an offset moves no pen and is carried | [shaping](../design/shaping.md) |
+| A shaping context that changes an **advance** across a styled span (a joined form wider than the isolated one, a pair that kerns), and the inner order of a run that mixes directions | none — the difference is left between the two runs; a mixed run is ordered by its own P2/P3, so a span boundary inside a word of the other direction (`a ب<span>ح</span>م b`) leaves that word in written order, and a run whose own glyphs a context in the other direction would split is shaped alone | layout measures each run alone through the `Shaper` seam, which takes no context, and a run is the unit `paint::visual_lines` reorders: splitting one at its level boundaries means measuring the pieces, a change to the layout crate; an offset moves no pen and is carried | [shaping](../design/shaping.md) |
 | Shaping **while reading a PDF**: `TJ` arrays are honored as written | none — the producer positioned every glyph and re-shaping them would be wrong | Permanent, and the only half of the old non-goal that survived; the producing half is `tinker-pdf-shape`, below | [shaping](../design/shaping.md) |
 | A CFF whose `callsubr` operand is not the token before the call, or that calls a subroutine it does not carry, or whose subroutine calls itself, or that declares `CharstringType 1` | `SubsetRefusal::ProgramNotRebuildable`; the whole face is embedded | Each needs the subsetter to invent what the font meant, and a broken subset renders *almost* right | this page |
 | A CFF subset that comes out no smaller than the face | `SubsetRefusal::SubsetNotSmaller`; the whole face is embedded | A producer's own subset has nothing left to remove, and the face is also the one it tested | this page |

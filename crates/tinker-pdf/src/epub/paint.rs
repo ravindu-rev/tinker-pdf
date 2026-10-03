@@ -843,9 +843,10 @@ impl<'a> Fonts<'a> {
     ///
     /// So each run's neighbours are recorded here, by logical order on the
     /// page — which is the order the runs are in, whatever [`visual_lines`]
-    /// did to their `x` — when they are on the same line and the characters
-    /// at the boundary resolve to the **same embedded face**: a glyph index
-    /// means nothing in another face, and the standard 14 are not shaped.
+    /// did to their `x` — when they **touch on one line** and the
+    /// characters at the boundary resolve to the **same embedded face**: a
+    /// glyph index means nothing in another face, and the standard 14 are not
+    /// shaped. See [`Fonts::continues`] for why touching, and not nearness.
     /// [`draw_shaped`] shapes the run with that text either side and draws
     /// only its own glyphs, each where the shaper put it relative to them.
     ///
@@ -897,8 +898,26 @@ impl<'a> Fonts<'a> {
 
     /// Whether `b` follows `a` on one line in one embedded face, so that each
     /// is the other's shaping context.
+    ///
+    /// **On one line, and touching**, which is what [`visual_lines`] calls a
+    /// line: baselines within the larger font size, which a `vertical-align`
+    /// may move them by, and `b` starting where `a` ends — or ending where `a`
+    /// starts, a right-to-left neighbour once [`visual_lines`] has laid the
+    /// line out. The baseline alone is not enough, and it was all this asked
+    /// first: at a `line-height` of 1 or less the **next line's** baseline is
+    /// within a font size too, so the word ending one line was shaped with
+    /// the word starting the next as its context, and an Arabic letter was
+    /// joined across the break (review of lane 6C). A new line starts at the
+    /// line's own edge rather than where the last one ended, so it does not
+    /// touch it. Two logical neighbours one line holds apart — a left-to-right
+    /// pair of runs inside a right-to-left line puts the pair between its
+    /// neighbours — have no glyph between them for a shaper to join or
+    /// position against either.
     fn continues(&self, a: &TextRun, b: &TextRun) -> bool {
-        if (a.y - b.y).abs() > a.font_size.max(b.font_size) {
+        if a.generated || b.generated || (a.y - b.y).abs() > a.font_size.max(b.font_size) {
+            return false;
+        }
+        if !near(a.x + a.width, b.x) && !near(b.x + b.width, a.x) {
             return false;
         }
         let (Some(last), Some(first)) = (a.text.chars().last(), b.text.chars().next()) else {
@@ -2886,13 +2905,31 @@ fn head(text: &str, n: usize) -> String {
 /// the first of them is drawn — so a glyph a neighbour offsets (a mark, the
 /// second glyph of a pair) keeps the offset, and one a neighbour joins to
 /// takes the joined form.
+///
+/// That placement holds only while the slice's own glyphs are **one stretch**
+/// of the drawing order. A context in the other direction can be put between
+/// them by L2 — `a ب` before `حم b` draws the context's `م` and `ح` between
+/// the run's space and its `ب` — and the run then drew a gap the context's
+/// width inside itself and pushed a glyph past its box onto its neighbour's
+/// (review of lane 6C). Such a slice is shaped **alone**, as it was before
+/// context existed: its glyphs are then all its own, and contiguous.
+///
+/// # `word-spacing` inside a piece
+///
+/// `word_spacing` is added to the pen after every own glyph that stands for a
+/// space, in drawing order, and **not** to [`Shaped::advance`]: the caller
+/// pays for the space at the end of a piece, where a left-to-right piece's
+/// space is drawn and nothing follows it. A right-to-left piece draws its
+/// space first, so its word is moved right by the extra, which is where the
+/// gap belongs.
 fn shaped_glyphs(
     program: &[u8],
     text: &str,
     size: f64,
-    letter_spacing: f64,
+    spacing: (f64, f64),
     context: (&str, &str),
 ) -> Option<Shaped> {
+    let (letter_spacing, word_spacing) = spacing;
     let sfnt = Sfnt::parse(program)?;
     let upem = f64::from(sfnt.units_per_em.max(1));
     let scale = |units: i32| f64::from(units) * size / upem;
@@ -2906,11 +2943,43 @@ fn shaped_glyphs(
     let shaped: Vec<_> = runs.iter().map(|run| shaper.shape(&whole, run)).collect();
     let levels: Vec<_> = runs.iter().map(|run| run.level).collect();
 
+    // The slice's own glyphs must be one stretch of the drawing order, or the
+    // pen model below draws a context's width inside the run: shaped alone
+    // instead, where every glyph is its own.
+    if !(before.is_empty() && after.is_empty()) {
+        let order = reorder(&levels);
+        let mut stretches = 0usize;
+        let mut inside = false;
+        for index in &order {
+            let Some(run) = shaped.get(*index) else {
+                continue;
+            };
+            let glyphs = run.glyphs();
+            let walk: Vec<usize> = if run.direction().is_forward() {
+                (0..glyphs.len()).collect()
+            } else {
+                (0..glyphs.len()).rev().collect()
+            };
+            for at in walk {
+                let own = glyphs.get(at).is_some_and(|glyph| mine(glyph.cluster));
+                if own && !inside {
+                    stretches += 1;
+                }
+                inside = own;
+            }
+        }
+        if stretches > 1 {
+            return shaped_glyphs(program, text, size, spacing, ("", ""));
+        }
+    }
+
     let mut out: Vec<Placed> = Vec::new();
     let mut pen = 0.0f64;
     // Where the pen stood at the first of this slice's own glyphs, in drawing
     // order: the slice's origin, which is where the run is put.
     let mut origin: Option<f64> = None;
+    // `word-spacing` paid so far, after own spaces already drawn.
+    let mut widened = 0.0f64;
     // Characters whose clusters are already behind the pen, and the characters
     // of the cluster it is inside. `letter-spacing` is charged once per
     // character and paid at the cluster boundary, so a mark keeps the position
@@ -2956,10 +3025,14 @@ fn shaped_glyphs(
             out.push(Placed {
                 id: glyph.glyph,
                 text: stands_for.to_string(),
-                x: pen - start + letter_spacing * spaced as f64 + scale(glyph.x_offset),
+                x: pen - start + letter_spacing * spaced as f64 + widened + scale(glyph.x_offset),
                 rise: scale(glyph.y_offset),
             });
             pen += scale(glyph.x_advance);
+            let spaces = stands_for.chars().filter(|c| *c == ' ').count();
+            if spaces > 0 {
+                widened += word_spacing * spaces as f64;
+            }
         }
     }
     // The slice's own advance: the pen's travel over its own glyphs, which is
@@ -3084,7 +3157,8 @@ fn right_to_left(text: &str) -> bool {
 /// made of two styled spans is two `TextRun`s laid out left to right in the
 /// order they were written — and an Arabic line whose second word is in a
 /// different colour was drawn with that word on the right, reading backwards.
-/// Every run's own glyphs were already in the right order; the runs were not.
+/// A run in one direction already drew its own glyphs in the right order; the
+/// runs were not in it.
 ///
 /// So this resolves the levels of the line's whole text, gives each run the
 /// level of its strong characters (or of all of them, for a run of neutrals),
@@ -3126,6 +3200,13 @@ pub fn visual_lines(runs: &mut [TextRun]) -> usize {
         start = end;
     }
     moved
+}
+
+/// Whether two layout coordinates are one, to the rounding of the sums that
+/// placed them: `flow.rs` and [`visual_lines`] both place a run at the
+/// previous one's `x` plus its width.
+fn near(p: f64, q: f64) -> bool {
+    (p - q).abs() <= 1e-6 * p.abs().max(q.abs()).max(1.0)
 }
 
 /// Whether `b` continues the line `a` is on. See [`visual_lines`].
@@ -3204,6 +3285,12 @@ fn reorder_line(line: &mut [TextRun]) -> bool {
 /// the origin. Splitting there costs nothing a joining script would notice —
 /// a space is `Joining_Type` `U` and breaks a cursive connection anyway.
 ///
+/// The pieces are drawn in the order UAX #9 lays them ([`piece_order`]), not
+/// the order they were written: a right-to-left run with `word-spacing` —
+/// every justified line but the last — drew its words left to right in
+/// written order, the line reading backwards (review of lane 6C). Each piece
+/// pays its space where the space is drawn ([`shaped_glyphs`]).
+///
 /// # Why `DocumentBuilder::glyph_run` and not `PageBuilder::glyphs`
 ///
 /// `glyphs` shows one hex string at one origin and lets the font's advances
@@ -3244,9 +3331,19 @@ fn draw_shaped(
     };
     let mut refused = 0usize;
     let count = pieces.len();
-    for (at, piece) in pieces.into_iter().enumerate() {
-        // The neighbours are the slice's, so the first piece is shaped against
-        // what comes before it and the last against what comes after.
+    // The pieces in the order they are drawn: UAX #9's rule L2 over the
+    // slice, each piece at the level of its strong characters, so a
+    // right-to-left run's words are laid right to left and not in the order
+    // they were written (review of lane 6C). A left-to-right slice is every
+    // piece at one even level, and its order does not move.
+    let order = piece_order(slice, &pieces);
+    for at in order {
+        let Some(piece) = pieces.get(at).copied() else {
+            continue;
+        };
+        // The neighbours are the slice's, so the logically first piece is
+        // shaped against what comes before it and the last against what comes
+        // after.
         let piece_context = (
             if at == 0 { context.0 } else { "" },
             if at + 1 == count { context.1 } else { "" },
@@ -3255,7 +3352,7 @@ fn draw_shaped(
             &face.program,
             piece,
             size,
-            run.letter_spacing * PX_TO_PT,
+            (run.letter_spacing * PX_TO_PT, run.word_spacing * PX_TO_PT),
             piece_context,
         ) else {
             return (x, refused);
@@ -3294,6 +3391,49 @@ fn draw_shaped(
             };
     }
     (x, refused)
+}
+
+/// The order `pieces` — consecutive substrings of `slice`, in logical order —
+/// are drawn in, left to right.
+///
+/// Each piece takes the lowest level of its strong characters (of all of
+/// them, for a piece of neutrals), which is how [`visual_lines`] levels a run,
+/// and L2 orders the pieces. A slice with no right-to-left character keeps the
+/// order it was written in without resolving anything.
+fn piece_order(slice: &str, pieces: &[&str]) -> Vec<usize> {
+    let rtl = |c: char| {
+        matches!(
+            bidi_class(c),
+            BidiClass::R | BidiClass::AL | BidiClass::RLE | BidiClass::RLO | BidiClass::RLI
+        )
+    };
+    if pieces.len() < 2 || !slice.chars().any(rtl) {
+        return (0..pieces.len()).collect();
+    }
+    let paragraph = Paragraph::new(slice, BaseDirection::Auto);
+    let resolved = paragraph.line(0..paragraph.len());
+    let levels = resolved.levels();
+    let mut piece_levels: Vec<Level> = Vec::with_capacity(pieces.len());
+    let mut at = 0usize;
+    for piece in pieces {
+        let mut strong: Option<Level> = None;
+        let mut any: Option<Level> = None;
+        for (offset, c) in piece.chars().enumerate() {
+            let Some(level) = levels.get(at + offset).copied() else {
+                continue;
+            };
+            any = Some(any.map_or(level, |l| l.min(level)));
+            if matches!(
+                bidi_class(c),
+                BidiClass::L | BidiClass::R | BidiClass::AL | BidiClass::EN | BidiClass::AN
+            ) {
+                strong = Some(strong.map_or(level, |l| l.min(level)));
+            }
+        }
+        piece_levels.push(strong.or(any).unwrap_or_else(|| paragraph.base_level()));
+        at += piece.chars().count();
+    }
+    reorder(&piece_levels)
 }
 
 /// `slice`, cut after every space, with the space kept on the piece it ends.

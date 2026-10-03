@@ -136,8 +136,12 @@ into. A run is shaped against its neighbours' text where they are in the
 same face, so a word with a styled letter still joins and a glyph its
 neighbour positions keeps the offset, and each visual line's runs are put in
 UAX #9's order (`paint::visual_lines`) before anything is drawn, so a
-right-to-left line of two styled spans reads right to left
-([fonts](fonts.md)). A run in one of the standard 14 is unshaped and one glyph per character,
+right-to-left line of two styled spans reads right to left, as does a
+justified or `word-spacing` line, whose words are laid in that order too
+([fonts](fonts.md)). A context is a neighbour that touches the run on its
+line — not the next line's first word — and a run whose own glyphs a context
+in the other direction would split is shaped alone. A run that mixes
+directions is still ordered inside itself (fonts.md's refusal table). A run in one of the standard 14 is unshaped and one glyph per character,
 and keeps `PageBuilder::glyphs`. Faces are subset to what the book draws; every
 run that could not be represented is counted (`UnrepresentedCharacters`,
 `UncoveredCharacters`), and a run the writer refused is

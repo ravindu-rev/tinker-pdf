@@ -60,14 +60,30 @@
 //! draws its own glyphs: [`a_word_split_by_a_span_is_drawn_joined`] (GSUB) and
 //! [`a_pair_across_a_span_boundary_is_positioned`] (a `GPOS` `PairPos` offset).
 //!
+//! # Corrected on review, the same month
+//!
+//! The context reached too far: a neighbour within a font size of the run's
+//! baseline is the **next line** at a `line-height` of 1 or less, so a word
+//! ending a line was joined to the line below it
+//! ([`a_word_ending_a_line_is_not_joined_to_the_next_line`]); a context is now
+//! a neighbour the run touches on its line. A context in the other direction
+//! could split the run's own glyphs and overprint its neighbour's
+//! ([`a_styled_letter_in_a_mixed_line_overprints_nothing`]); such a run is
+//! shaped alone. And `word-spacing`, which every justified line but the last
+//! carries, drew a right-to-left run's words in written order
+//! ([`a_word_spaced_right_to_left_run_draws_its_words_right_to_left`],
+//! [`a_justified_arabic_paragraph_reads_in_order`]).
+//!
 //! # What remains
 //!
 //! Layout still **measures** each run alone — its `Shaper` seam takes no
 //! context — so a context that changes an *advance* (a joined form wider than
 //! the isolated one, a pair that kerns) leaves that difference between the
 //! run and the next; an offset moves no pen and costs nothing. And a run that
-//! mixes directions inside a right-to-left line is ordered inside itself by
-//! its own P2 and P3 rather than by the line's levels.
+//! mixes directions is ordered inside itself by its own P2 and P3 rather than
+//! split at the line's level boundaries: a span boundary inside a word of the
+//! other direction (`a ب<span>ح</span>م b`) leaves that word drawn in the
+//! order it was written.
 
 mod epub_support;
 
@@ -802,6 +818,209 @@ fn an_english_line_holding_an_arabic_word_reads_back_as_written() {
         .expect("a book");
     let extracted = doc.page(0).expect("a page").text().plain_text();
     assert_eq!(extracted.trim_end(), written);
+}
+
+// ---- what a run's context may and may not reach -----------------------------
+
+/// Every page's content stream, in page order.
+fn every_page_content(doc: &Document) -> Vec<String> {
+    let cos = doc.cos();
+    tinker_pdf_cos::pages::collect(cos)
+        .iter()
+        .map(|page| {
+            String::from_utf8_lossy(&tinker_pdf_cos::pages::content_bytes(cos, page)).into_owned()
+        })
+        .collect()
+}
+
+/// How many times `glyph` is shown, over every text object of every page.
+fn times_shown(doc: &Document, glyph: u16) -> usize {
+    let wanted = format!("{glyph:04X}");
+    every_page_content(doc)
+        .iter()
+        .flat_map(|content| text_objects(content))
+        .map(|(_, object)| {
+            let shown = shown_glyphs(&object);
+            shown
+                .as_bytes()
+                .chunks(4)
+                .filter(|chunk| *chunk == wanted.as_bytes())
+                .count()
+        })
+        .sum()
+}
+
+/// **A word that ends a line is not joined to the word that starts the
+/// next** (review of lane 6C).
+///
+/// Sixty copies of `بحم`, each a word of its own, so meem is word-final
+/// sixty times. A run's shaping context used to be any neighbour whose
+/// baseline was within a font size of its own, and at a `line-height` of 1 or
+/// less the next line's baseline is: the last run of one line was shaped with
+/// the first of the next as its context, and the meem ending the line came out
+/// **medial**, joined across the break. Context is now a neighbour on the same
+/// baseline that the run touches on the page.
+#[test]
+fn a_word_ending_a_line_is_not_joined_to_the_next_line() {
+    let face = arabic_face();
+    let words = vec!["\u{628}\u{62D}\u{645}"; 60].join(" ");
+    let medial = face
+        .form_glyph('\u{645}', Form::Medial)
+        .expect("meem has a medial form");
+    let fin = face
+        .form_glyph('\u{645}', Form::Final)
+        .expect("meem has a final form");
+    for line_height in ["1", "0.8", "0", "1.5"] {
+        let body = format!(r#"x</p><p style="line-height: {line_height}">{words}"#);
+        let doc = Document::open(arabic_book(&body)).expect("a book");
+        assert_eq!(
+            (times_shown(&doc, medial), times_shown(&doc, fin)),
+            (0, 60),
+            "line-height {line_height}: (medial, final) meems; a medial one is a \
+             line's last letter joined to the next line"
+        );
+    }
+}
+
+/// **A styled letter in an Arabic word inside an English line overprints
+/// nothing** (review of lane 6C).
+///
+/// The first run, `a ب`, was shaped with `حم b` after it, and in the visual
+/// order of that whole text the context's `م` and `ح` sit between the run's
+/// own space and its `ب`. Its glyphs were placed from the pen at the first of
+/// them, so the `ب` was pushed past the run's box onto the `ح` the next run
+/// draws: two glyphs in one box. A run whose own glyphs a context would split
+/// is shaped alone now.
+#[test]
+fn a_styled_letter_in_a_mixed_line_overprints_nothing() {
+    let face = Face::new("Fixture Arabic", " ab\u{628}\u{62D}\u{645}")
+        .with_joining(Joining { script: *b"arab" });
+    let body = "a \u{628}<span style=\"color: #c00000\">\u{62D}</span>\u{645} b";
+    let doc =
+        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, body)).expect("a book");
+    let page = doc.page(0).expect("a page");
+    let text = page.text_with(&TextOptions {
+        content_order: true,
+    });
+    let boxes: Vec<(String, f64, f64)> = text
+        .lines()
+        .iter()
+        .flat_map(|line| line.chars.iter())
+        .filter(|c| c.text != " ")
+        .map(|c| {
+            let (x0, _, x1, _) = c.quad.bounds();
+            (c.text.clone(), x0, x1)
+        })
+        .collect();
+    assert_eq!(boxes.len(), 5, "{boxes:?}");
+    for (at, a) in boxes.iter().enumerate() {
+        for b in &boxes[at + 1..] {
+            let overlap = a.2.min(b.2) - a.1.max(b.1);
+            assert!(
+                overlap < 0.01,
+                "{a:?} and {b:?} are drawn over each other: {boxes:?}"
+            );
+        }
+    }
+}
+
+// ---- word spacing inside a right-to-left run ----------------------------------
+
+/// **A right-to-left run with `word-spacing` draws its words right to left**
+/// (review of lane 6C).
+///
+/// `word-spacing` splits a shaped run at its spaces so each space can be paid
+/// for, and the pieces were drawn left to right in the order they were
+/// written: the second word to the right of the first, and the line reading
+/// backwards. The pieces are laid out in UAX #9's order now.
+#[test]
+fn a_word_spaced_right_to_left_run_draws_its_words_right_to_left() {
+    let face = arabic_face();
+    let body = format!(r#"<span style="word-spacing: 4px">{}</span>"#, LINE);
+    let doc = Document::open(arabic_book(&body)).expect("a book");
+    let content = page_content(&doc);
+    let objects = text_objects(&content);
+    let first = drawn_word(&face, FIRST_WORD);
+    let second = drawn_word(&face, SECOND_WORD);
+    let find = |word: &str| {
+        objects
+            .iter()
+            .find(|(_, object)| shown_glyphs(object).contains(word))
+            .map(|(_, object)| origin_of(object).0)
+            .unwrap_or_else(|| panic!("no text object draws {word}: {content}"))
+    };
+    let (first_x, second_x) = (find(&first), find(&second));
+    assert!(
+        second_x < first_x,
+        "the second word is not to the left of the first ({second_x} against \
+         {first_x}): {content}"
+    );
+    let extracted = doc.page(0).expect("a page").text().plain_text();
+    assert_eq!(extracted.trim_end(), LINE);
+
+    // And the extra space is **between** the words, where the space is: the
+    // gap from the left word's last glyph to the right word's first is the
+    // space's own box and 4 px (3 pt) more. Paid after the right word
+    // instead, the gap would be the space alone and the right word 3 pt short
+    // of its box.
+    let page = doc.page(0).expect("a page");
+    let text = page.text_with(&TextOptions {
+        content_order: true,
+    });
+    let chars: Vec<(String, f64, f64)> = text
+        .lines()
+        .iter()
+        .flat_map(|line| line.chars.iter())
+        .map(|c| {
+            let (x0, _, x1, _) = c.quad.bounds();
+            (c.text.clone(), x0, x1)
+        })
+        .collect();
+    let space = chars
+        .iter()
+        .find(|(t, _, _)| t == " ")
+        .unwrap_or_else(|| panic!("no space drawn: {chars:?}"));
+    let left_end = chars
+        .iter()
+        .filter(|(t, x0, _)| t != " " && *x0 < space.1)
+        .map(|(_, _, x1)| *x1)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let right_start = chars
+        .iter()
+        .filter(|(t, x0, _)| t != " " && *x0 > space.1)
+        .map(|(_, x0, _)| *x0)
+        .fold(f64::INFINITY, f64::min);
+    let gap = right_start - left_end;
+    let space_width = space.2 - space.1;
+    assert!(
+        (gap - space_width - 3.0).abs() < 0.01,
+        "the gap between the words is {gap}, the space {space_width}: {chars:?}"
+    );
+}
+
+/// **A justified Arabic paragraph reads in order, line by line.**
+///
+/// Justification is `word-spacing` on every line but the last, so every such
+/// line went through the pieces drawn in written order and read backwards.
+/// Three words of the same three letters in different orders, so a word read
+/// from its last letter, or two words swapped, is another word in the list.
+#[test]
+fn a_justified_arabic_paragraph_reads_in_order() {
+    let words = [
+        "\u{628}\u{62D}\u{645}",
+        "\u{645}\u{62D}\u{628}",
+        "\u{62D}\u{645}\u{628}",
+    ];
+    let text: Vec<&str> = (0..30).map(|at| words[at % 3]).collect();
+    let body = format!(r#"x</p><p style="text-align: justify">{}"#, text.join(" "));
+    let doc = Document::open(arabic_book(&body)).expect("a book");
+    let mut read: Vec<String> = Vec::new();
+    for page in doc.pages() {
+        let plain = page.text().plain_text();
+        read.extend(plain.split_whitespace().map(str::to_owned));
+    }
+    read.retain(|word| word != "x");
+    assert_eq!(read, text, "the paragraph does not read in order");
 }
 
 // ---- shaping across a span boundary ------------------------------------------
