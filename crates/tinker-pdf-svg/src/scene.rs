@@ -872,9 +872,6 @@ impl Walk<'_> {
                 if let (Some(at), Some("linearGradient" | "radialGradient")) = (target, kind) {
                     if let Some(resolved) = gradient::resolve(self.tree, at, matrix, bounds, style)
                     {
-                        if resolved.spread_unsupported {
-                            self.warn(Warning::SpreadMethodUnsupported);
-                        }
                         return resolved.paint;
                     }
                     // §13.2.4: a gradient with no stops paints **as if `none`

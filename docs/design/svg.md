@@ -270,6 +270,19 @@ is `Refusal::TooManyUses`, the `<use>` bomb in another spelling. The counted
 injection found one hole: the bisector's wrap is two rules, one per turning
 direction, and the first fixture turned one way.
 
+**After the milestones: §13.2.3's `spreadMethod`.** `Paint` carries the
+method and the facade writes `reflect` and `repeat` as one 7.10.5 calculator
+per shading — the parameter folded into one period (`t − ⌊t⌋`, or its
+reflection about one) and the stops as a binary search, so a ramp of a
+thousand stops nests ten deep and a period a hair wide costs what a wide one
+does. The domain is derived rather than chosen: the visible box taken back
+into gradient space and projected onto the axis, or for a radial gradient the
+smallest circle of the family holding every corner. A focus on or past the
+circle is drawn in to 99% of the radius, because the cone of circles from
+such a focus never covers what lies behind it. Writing these found a reader
+defect a long way from SVG: a shading's one `/Function`, when it was a
+stream, was never read and painted as the identity (`shading_functions.rs`).
+
 **What this cannot reach**, stated rather than absorbed: nothing outside this
 repository adjudicates a rendering (ruling 13), so every expected value here is
 arithmetic from a clause or an identity checkable without the code — an arc ends

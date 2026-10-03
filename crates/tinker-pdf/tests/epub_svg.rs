@@ -33,6 +33,11 @@
 //! | a group's form is painted under the page mapping | 1 |
 //! | a group's clip is not written | 1 |
 //! | the leaf crate draws no marker instance | 1 |
+//! | `reflect` and `repeat` are written as `pad` | 3 |
+//! | the leaf crate reads `repeat` as `reflect` | 2 |
+//! | a reflected period is not turned back | 1 |
+//! | a linear domain reaches only the stated axis | 2 |
+//! | a radial gradient's rings stop at the stated circle | 1 |
 //! | the reader ignores a container's `clip-path`, as it did until groups | 1 |
 //!
 //! The form row fired **zero** the first time: its fixture's shapes covered
@@ -346,6 +351,106 @@ fn a_gradients_matrix_carries_the_page_mapping() {
         top > 0xC0 && bottom < 0x40,
         "and it reaches both stops: {top} to {bottom}"
     );
+}
+
+/// The red channel along the page's middle row, at fractions of its width.
+fn row(doc: &Document, at: &[f64]) -> Vec<u8> {
+    at.iter().map(|x| rgb_at(doc, *x, 0.5)[0]).collect()
+}
+
+/// A black-to-white ramp fifty wide, across a rectangle two hundred wide, with
+/// the given `spreadMethod`.
+fn spread_page(method: &str) -> Document {
+    square(&format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <defs>
+                <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="50" y2="0"
+                                spreadMethod="{method}">
+                  <stop offset="0" stop-color="#000000"/>
+                  <stop offset="1" stop-color="#ffffff"/>
+                </linearGradient>
+              </defs>
+              <rect width="200" height="200" fill="url(#g)"/>
+            </svg>"##
+    ))
+}
+
+/// §13.2.3's `repeat`: the ramp again from its start, every fifty units.
+///
+/// Sampled a fifth of a period into each of the first three periods (x = 10,
+/// 60 and 110) and four fifths in (x = 40, 90, 140): dark, dark, dark and
+/// light, light, light. Padded — what this build drew until now — everything
+/// past fifty is the last stop's white.
+#[test]
+fn a_repeated_gradient_starts_again_every_period() {
+    let doc = spread_page("repeat");
+    let early = row(&doc, &[0.05, 0.3, 0.55]);
+    let late = row(&doc, &[0.2, 0.45, 0.7]);
+    for value in &early {
+        assert!((40..=62).contains(value), "a fifth of the way: {early:?}");
+    }
+    for value in &late {
+        assert!(
+            (193..=215).contains(value),
+            "four fifths of the way: {late:?}"
+        );
+    }
+}
+
+/// §13.2.3's `reflect`: forwards, then backwards, then forwards.
+///
+/// A fifth into the second period (x = 60) is the ramp read **backwards**, so
+/// it is light where `repeat` is dark; a fifth into the third (x = 110) is
+/// forwards again and dark.
+#[test]
+fn a_reflected_gradient_runs_back_on_every_other_period() {
+    let doc = spread_page("reflect");
+    let [first, second, third] = row(&doc, &[0.05, 0.3, 0.55])[..] else {
+        unreachable!("three samples")
+    };
+    assert!((40..=62).contains(&first), "forwards: {first}");
+    assert!((193..=215).contains(&second), "backwards: {second}");
+    assert!((40..=62).contains(&third), "forwards again: {third}");
+}
+
+/// `pad`, the initial value, is unchanged: the last stop's white past the axis.
+#[test]
+fn a_padded_gradient_is_its_end_colour_past_the_axis() {
+    let doc = spread_page("pad");
+    for value in row(&doc, &[0.3, 0.55, 0.9]) {
+        assert!(value > 0xF0, "white past the axis: {value}");
+    }
+}
+
+/// `repeat` on a **radial** gradient is rings: the stated circle, and then a
+/// second ring as wide outside it, from black again.
+///
+/// The circle is twenty in radius at the page's centre, so a sample four
+/// units out and one twenty-four units out are both a fifth into a period —
+/// dark — and sixteen and thirty-six units out are both four fifths — light.
+#[test]
+fn a_repeated_radial_gradient_is_rings() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <defs>
+                <radialGradient id="g" gradientUnits="userSpaceOnUse" cx="100" cy="100" r="20"
+                                spreadMethod="repeat">
+                  <stop offset="0" stop-color="#000000"/>
+                  <stop offset="1" stop-color="#ffffff"/>
+                </radialGradient>
+              </defs>
+              <rect width="200" height="200" fill="url(#g)"/>
+            </svg>"##,
+    );
+    let at = |units: f64| rgb_at(&doc, (100.0 + units) / 200.0, 0.5)[0];
+    for units in [4.0, 24.0] {
+        let value = at(units);
+        assert!((40..=70).contains(&value), "{units} out, dark: {value}");
+    }
+    for units in [16.0, 36.0] {
+        let value = at(units);
+        assert!((185..=215).contains(&value), "{units} out, light: {value}");
+    }
 }
 
 // ---- §14.5's groups --------------------------------------------------------------

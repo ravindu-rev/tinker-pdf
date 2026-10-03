@@ -12,7 +12,8 @@
 //! | `fx`/`fy` default to the initial centre, not the resolved one | 1 |
 //! | a gradient with no stops falls through to the paint's fallback | 2 |
 //! | a single stop is not doubled into a ramp | 1 |
-//! | an unsupported `spreadMethod` is silent | 1 |
+//! | `spreadMethod` is read from the element alone, not the chain | 1 |
+//! | `repeat` is read as `reflect` | 1 |
 //! | `stop-color` inherits from an ancestor | 2 |
 //! | `clip-path` inherits | 1 |
 //! | a clip path intersects its children rather than unioning them | 1 |
@@ -38,7 +39,7 @@
 //!   terminates the walk and the repeated entries resolve identically. The
 //!   `contains` check is gone and the cap is asserted directly.
 
-use tinker_pdf_svg::{Clip, Colour, FillRule, Limits, Node, Paint, Scene, Stop, Warning};
+use tinker_pdf_svg::{Clip, Colour, FillRule, Limits, Node, Paint, Scene, Spread, Stop, Warning};
 
 const GRADIENTS: &[u8] = include_bytes!("fixtures/gradients.svg");
 const CLIPPING: &[u8] = include_bytes!("fixtures/clipping.svg");
@@ -148,6 +149,7 @@ fn a_paint_server_takes_its_stops_from_the_one_it_references() {
         to,
         matrix,
         stops,
+        ..
     } = fill(&scene, 1)
     else {
         panic!("a linear gradient: {:?}", fill(&scene, 1));
@@ -297,19 +299,48 @@ fn a_gradient_with_no_stops_and_one_with_a_single_stop() {
     near(stops[1].offset, 1.0, "and it reaches the end");
 }
 
-/// §13.2.3's `reflect` and `repeat` are refused by name and drawn as `pad`.
+/// §13.2.3's `spreadMethod` reaches the paint, along the reference chain like
+/// every other attribute — `#spread` states only the method and takes its
+/// stops and geometry from `#ramp` — and `pad` is what a file that says
+/// nothing, or something else, means.
 #[test]
-fn an_unsupported_spread_method_is_named_and_padded() {
+fn the_spread_method_reaches_the_paint() {
     let scene = scene(GRADIENTS);
-    assert!(
-        scene.warnings.contains(&Warning::SpreadMethodUnsupported),
-        "{:?}",
-        scene.warnings
+    let Paint::Linear { spread, .. } = fill(&scene, 4) else {
+        panic!("a linear gradient: {:?}", fill(&scene, 4));
+    };
+    assert_eq!(spread, Spread::Reflect);
+    let Paint::Linear { spread, .. } = fill(&scene, 0) else {
+        panic!("a linear gradient");
+    };
+    assert_eq!(spread, Spread::Pad, "the initial value");
+    let markup = br##"<svg xmlns="http://www.w3.org/2000/svg">
+      <linearGradient id="r" spreadMethod="repeat"><stop offset="0"/><stop offset="1" stop-color="#fff"/></linearGradient>
+      <radialGradient id="q" xlink:href="#r" xmlns:xlink="http://www.w3.org/1999/xlink"/>
+      <linearGradient id="w" spreadMethod="wobble" xlink:href="#r" xmlns:xlink="http://www.w3.org/1999/xlink"/>
+      <rect width="1" height="1" fill="url(#r)"/>
+      <rect width="1" height="1" fill="url(#q)"/>
+      <rect width="1" height="1" fill="url(#w)"/>
+    </svg>"##;
+    let other = tinker_pdf_svg::read(markup, None, &Limits::DEFAULT).expect("it reads");
+    let spreads: Vec<Spread> = other
+        .nodes
+        .iter()
+        .map(|node| match node {
+            Node::Path {
+                fill: Paint::Linear { spread, .. } | Paint::Radial { spread, .. },
+                ..
+            } => *spread,
+            other => panic!("a gradient fill: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        spreads,
+        [Spread::Repeat, Spread::Repeat, Spread::Pad],
+        "a radial gradient inherits a linear one's method, and a word that is \
+         not one of the three is `pad`"
     );
-    assert!(
-        matches!(fill(&scene, 4), Paint::Linear { .. }),
-        "and the gradient still draws"
-    );
+    assert!(other.warnings.is_empty(), "{:?}", other.warnings);
 }
 
 /// A `<stop>` inherits its `stop-color` from nothing above the gradient.

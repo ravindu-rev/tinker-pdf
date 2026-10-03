@@ -30,7 +30,7 @@ use crate::path::Outline;
 use crate::shape::{self, Shape};
 use crate::style::Style;
 use crate::transform::{self, IDENTITY};
-use crate::{Clip, Paint, Stop};
+use crate::{Clip, Paint, Spread, Stop};
 
 /// How far an `xlink:href` chain between paint servers may run.
 ///
@@ -99,12 +99,10 @@ enum Units {
     BoundingBox,
 }
 
-/// What a gradient resolved to, plus what could not be honoured.
+/// What a gradient resolved to.
 pub struct Resolved {
     /// The paint.
     pub paint: Paint,
-    /// Whether `spreadMethod` was one this build does not draw.
-    pub spread_unsupported: bool,
 }
 
 /// Resolves a `<linearGradient>` or `<radialGradient>` into a [`Paint`].
@@ -131,8 +129,13 @@ pub fn resolve(
         // §13.2.3's initial value, and the one a file that says nothing means.
         _ => Units::BoundingBox,
     };
-    let spread = along(tree, &chain, "spreadMethod");
-    let spread_unsupported = matches!(spread, Some("reflect" | "repeat"));
+    // §13.2.3: inherited along the chain like every other attribute, and
+    // `pad` for anything that is not one of the three.
+    let spread = match along(tree, &chain, "spreadMethod") {
+        Some("reflect") => Spread::Reflect,
+        Some("repeat") => Spread::Repeat,
+        _ => Spread::Pad,
+    };
 
     // §13.2.3: `gradientTransform` is applied *inside* the units mapping, so
     // a translate on a bounding-box gradient moves it by a fraction of the box
@@ -186,6 +189,7 @@ pub fn resolve(
             to,
             matrix,
             stops,
+            spread,
         }
     } else {
         let half = basis / 2.0;
@@ -201,7 +205,6 @@ pub fn resolve(
             let last = stops.last()?;
             return Some(Resolved {
                 paint: Paint::Solid(last.colour),
-                spread_unsupported,
             });
         }
         Paint::Radial {
@@ -210,12 +213,10 @@ pub fn resolve(
             focus,
             matrix,
             stops,
+            spread,
         }
     };
-    Some(Resolved {
-        paint,
-        spread_unsupported,
-    })
+    Some(Resolved { paint })
 }
 
 /// §13.2.4's stops, from the first element of the chain that has any.

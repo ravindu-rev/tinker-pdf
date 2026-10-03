@@ -709,6 +709,7 @@ fn an_exact_shading_reads_back_as_a_gradient() {
         to,
         matrix,
         stops,
+        ..
     } = fill
     else {
         panic!("a linear gradient, not {fill:?}")
@@ -739,6 +740,7 @@ fn an_exact_shading_reads_back_as_a_gradient() {
         focus,
         matrix,
         stops,
+        ..
     } = fill
     else {
         panic!("a radial gradient, not {fill:?}")

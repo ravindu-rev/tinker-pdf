@@ -121,6 +121,7 @@ fn sweep_paint(paint: &Paint, out: &mut Vec<f64>) {
             to,
             matrix,
             stops,
+            ..
         } => {
             out.extend_from_slice(&[from[0], from[1], to[0], to[1]]);
             out.extend_from_slice(matrix);
@@ -132,6 +133,7 @@ fn sweep_paint(paint: &Paint, out: &mut Vec<f64>) {
             focus,
             matrix,
             stops,
+            ..
         } => {
             out.extend_from_slice(&[centre[0], centre[1], *radius, focus[0], focus[1]]);
             out.extend_from_slice(matrix);

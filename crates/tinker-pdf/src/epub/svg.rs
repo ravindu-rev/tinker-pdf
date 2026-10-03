@@ -57,8 +57,8 @@
 use std::collections::HashMap;
 
 use tinker_pdf_cos::build::{
-    DeviceSpace, DocumentBuilder, ExtGState, FormXObject, Function, ImageData, PageBuilder,
-    Shading, ShadingPattern, TransparencyGroup,
+    CalculatorOp, DeviceSpace, DocumentBuilder, ExtGState, FormXObject, Function, ImageData,
+    PageBuilder, Shading, ShadingPattern, TransparencyGroup,
 };
 use tinker_pdf_css::property::{Color, FontFamily, FontStyle, FontVariant, TextDecoration};
 use tinker_pdf_filters::Limits as FilterLimits;
@@ -68,7 +68,7 @@ use tinker_pdf_layout::TextRun;
 use tinker_pdf_shape::bidi::BaseDirection;
 use tinker_pdf_svg::path::Segment;
 use tinker_pdf_svg::{
-    transform, Clip, FillRule, LineCap, LineJoin, Node, Paint, Scene, TextAnchor,
+    transform, Clip, FillRule, LineCap, LineJoin, Node, Paint, Scene, Spread, Stop, TextAnchor,
 };
 
 use super::paint::{self, BookMetrics, Chosen, Coded, Fonts};
@@ -502,7 +502,6 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
     /// Registers a gradient as a `/Pattern`, or `None` for a paint that is not
     /// one.
     fn pattern(&mut self, paint: &Paint, space: Space) -> Option<Vec<u8>> {
-        let shading = shading_of(paint)?;
         // 8.7.3.1: pattern space is the stream's **default** coordinate
         // system, so the `cm` in force does not reach it and the space's
         // mapping has to be composed in here. This is the one place the flip
@@ -514,6 +513,7 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
             }
             _ => space.base,
         };
+        let shading = shading_of(paint, matrix, space.extent)?;
         let name = self.name("P");
         self.builder
             .add_shading_pattern(
@@ -686,16 +686,26 @@ fn set_paint(out: &mut Vec<u8>, paint: &Paint, pattern: Option<&[u8]>, stroking:
 
 /// A gradient as 8.7.4.5's shading.
 ///
+/// `to_default` is the pattern matrix — gradient space to the stream's
+/// default space — and `extent` the default space's visible box; together they
+/// say how far past its axis a `reflect` or `repeat` gradient has to reach.
+///
 /// The stops become 7.10.4's stitching function over 7.10.3's exponential
 /// pieces, which is how a PDF spells a multi-stop ramp: `k` stops are `k - 1`
 /// linear segments, and the bounds between them are the stops' own offsets.
-fn shading_of(paint: &Paint) -> Option<Shading> {
-    let stops = match paint {
-        Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => stops,
+/// A `reflect` or `repeat` gradient is [`spread_shading`]'s instead.
+fn shading_of(paint: &Paint, to_default: [f64; 6], extent: [f64; 4]) -> Option<Shading> {
+    let (stops, spread) = match paint {
+        Paint::Linear { stops, spread, .. } | Paint::Radial { stops, spread, .. } => {
+            (stops, *spread)
+        }
         _ => return None,
     };
     if stops.len() < 2 {
         return None;
+    }
+    if spread != Spread::Pad {
+        return spread_shading(paint, stops, spread, to_default, extent);
     }
     let colour = |at: usize| -> Vec<f64> { stops[at].colour.rgb.to_vec() };
     let mut functions = Vec::new();
@@ -747,8 +757,9 @@ fn shading_of(paint: &Paint) -> Option<Shading> {
             color_space: DeviceSpace::Rgb,
             coords: [from[0], from[1], to[0], to[1]],
             function,
-            // §13.2.3's `pad`, which is the initial `spreadMethod` and the one
-            // the leaf crate has already narrowed every document to.
+            // §13.2.3's `pad`: the end stops' colours past the axis, which is
+            // 8.7.4.5.3's `/Extend` exactly. `reflect` and `repeat` never reach
+            // here; `spread_shading` writes those.
             extend: (true, true),
         }),
         Paint::Radial {
@@ -767,6 +778,242 @@ fn shading_of(paint: &Paint) -> Option<Shading> {
         }),
         _ => None,
     }
+}
+
+/// How many periods past its axis a `reflect` or `repeat` gradient is drawn.
+///
+/// **Not a resource bound**, and so not in `bounds_ledger.rs`: the function
+/// that tiles the ramp is the same size whatever its domain, so a gradient
+/// whose period is a millionth of the page costs what one the size of the
+/// page does. It is a sanity bound on a *number*: a domain this wide is a
+/// period below a millionth of the visible box across it, finer than any
+/// pixel, and past it the shading pads with whichever stop it reached.
+const SPREAD_PERIODS: f64 = (1u64 << 20) as f64;
+
+/// §13.2.3's `reflect` and `repeat`, as one shading over the visible box.
+///
+/// # Why a calculator and not more stitched stops
+///
+/// The obvious spelling is the pad shading with its axis stretched and its
+/// stitching function repeated once per period — which is right, and costs a
+/// sub-function per period, so a gradient whose period is a hair across a
+/// page is a function of a million pieces. 7.10.5's calculator tiles the ramp
+/// in a dozen operators however many periods there are: `t − ⌊t⌋` for
+/// `repeat`, and its reflection about one for `reflect`, followed by the ramp
+/// itself as a binary search over the stops. The number of periods is still
+/// derived — from the visible box taken back into gradient space, which is the
+/// furthest any part of the shape can be — but only as the domain's two ends.
+///
+/// The axis's parameter `s` is SVG's: 0 at the first stop's end of the axis
+/// and 1 at the last's, so the shading's coordinates are the axis stretched to
+/// `[s0, s1]` and the function maps 8.7.4.5.3's `t ∈ [0, 1]` back onto it.
+/// For a radial gradient `s` is the circle's: the focus at 0, the stated
+/// circle at 1, and the shading's second circle at `s1`.
+fn spread_shading(
+    paint: &Paint,
+    stops: &[Stop],
+    spread: Spread,
+    to_default: [f64; 6],
+    extent: [f64; 4],
+) -> Option<Shading> {
+    let inverse = transform::invert(to_default)?;
+    let [x0, y0, x1, y1] = extent;
+    let corners: Vec<[f64; 2]> = [[x0, y0], [x1, y0], [x0, y1], [x1, y1]]
+        .iter()
+        .map(|corner| transform::apply(inverse, *corner))
+        .collect();
+    match paint {
+        Paint::Linear { from, to, .. } => {
+            let d = [to[0] - from[0], to[1] - from[1]];
+            let length = d[0] * d[0] + d[1] * d[1];
+            if !(length > 0.0 && length.is_finite()) {
+                return None;
+            }
+            let along = |p: &[f64; 2]| ((p[0] - from[0]) * d[0] + (p[1] - from[1]) * d[1]) / length;
+            let low = corners.iter().map(along).fold(0.0f64, f64::min).floor();
+            let high = corners.iter().map(along).fold(1.0f64, f64::max).ceil();
+            let low = low.max(-SPREAD_PERIODS);
+            let high = high.min(SPREAD_PERIODS);
+            let at = |s: f64| [from[0] + s * d[0], from[1] + s * d[1]];
+            let (start, end) = (at(low), at(high));
+            Some(Shading::Axial {
+                color_space: DeviceSpace::Rgb,
+                coords: [start[0], start[1], end[0], end[1]],
+                function: spread_function(stops, spread, low, high)?,
+                extend: (true, true),
+            })
+        }
+        Paint::Radial {
+            centre,
+            radius,
+            focus,
+            ..
+        } => {
+            // §13.2.3 puts the focus inside the circle; on it or past it the
+            // cone of circles never covers what lies behind the focus, so it
+            // is drawn in to 99% of the radius — the nudge every renderer
+            // makes — rather than leaving half the plane unpainted.
+            let mut d = [centre[0] - focus[0], centre[1] - focus[1]];
+            let mut focus = *focus;
+            let offset = (d[0] * d[0] + d[1] * d[1]).sqrt();
+            if offset >= 0.99 * radius {
+                let keep = 0.99 * radius / offset;
+                d = [d[0] * keep, d[1] * keep];
+                focus = [centre[0] - d[0], centre[1] - d[1]];
+            }
+            // A point p is inside the circle at s when |q − s·d| ≤ s·r, with
+            // q = p − focus. Squared, that is a quadratic in s whose leading
+            // coefficient r² − |d|² is positive while the focus is inside, and
+            // its larger root is the smallest s whose circle holds p.
+            let a = radius * radius - (d[0] * d[0] + d[1] * d[1]);
+            if !(a > 0.0 && a.is_finite()) {
+                return None;
+            }
+            let reach = |p: &[f64; 2]| {
+                let q = [p[0] - focus[0], p[1] - focus[1]];
+                let qd = q[0] * d[0] + q[1] * d[1];
+                let qq = q[0] * q[0] + q[1] * q[1];
+                (-qd + (qd * qd + a * qq).sqrt()) / a
+            };
+            let high = corners
+                .iter()
+                .map(reach)
+                .fold(1.0f64, f64::max)
+                .ceil()
+                .min(SPREAD_PERIODS);
+            if !high.is_finite() {
+                return None;
+            }
+            Some(Shading::Radial {
+                color_space: DeviceSpace::Rgb,
+                coords: [
+                    focus[0],
+                    focus[1],
+                    0.0,
+                    focus[0] + high * d[0],
+                    focus[1] + high * d[1],
+                    high * radius,
+                ],
+                function: spread_function(stops, spread, 0.0, high)?,
+                extend: (true, true),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The calculator that tiles a ramp: 8.7.4.5's `t` onto `[low, high]`, the
+/// period folded back into `[0, 1]`, and the stops evaluated there.
+fn spread_function(stops: &[Stop], spread: Spread, low: f64, high: f64) -> Option<Function> {
+    use CalculatorOp::{Number, Operator};
+    let first = stops.first()?;
+    let last = stops.last()?;
+    let mut program = vec![
+        // t ∈ [0, 1] to s ∈ [low, high].
+        Number(high - low),
+        Operator("mul"),
+        Number(low),
+        Operator("add"),
+    ];
+    match spread {
+        // u = s − ⌊s⌋, in [0, 1).
+        Spread::Repeat => program.extend([Operator("dup"), Operator("floor"), Operator("sub")]),
+        // u = s − 2⌊s/2⌋, in [0, 2), and then 2 − u past one: the ramp
+        // forwards on even periods and backwards on odd ones.
+        Spread::Reflect => program.extend([
+            Operator("dup"),
+            Number(2.0),
+            Operator("div"),
+            Operator("floor"),
+            Number(2.0),
+            Operator("mul"),
+            Operator("sub"),
+            Operator("dup"),
+            Number(1.0),
+            Operator("gt"),
+            CalculatorOp::If(vec![Number(2.0), Operator("exch"), Operator("sub")]),
+        ]),
+        Spread::Pad => {}
+    }
+    // Before the first stop's offset the first stop's colour, after the last
+    // the last's: §13.2.4's own rule inside one period.
+    program.extend([
+        Operator("dup"),
+        Number(first.offset),
+        Operator("lt"),
+        CalculatorOp::If(vec![Operator("pop"), Number(first.offset)]),
+        Operator("dup"),
+        Number(last.offset),
+        Operator("gt"),
+        CalculatorOp::If(vec![Operator("pop"), Number(last.offset)]),
+    ]);
+    program.extend(ramp(stops, 0, stops.len() - 1));
+    Some(Function::Calculator {
+        domain: vec![[0.0, 1.0]],
+        range: vec![[0.0, 1.0]; 3],
+        program,
+    })
+}
+
+/// The stops' piecewise-linear ramp over segments `[lo, hi)`, as a binary
+/// search: one comparison per halving, so a ramp of a thousand stops nests ten
+/// deep rather than a thousand — 7.10.5 has no `min`, no `max` and no table,
+/// and a chain of `ifelse`s one per stop would pass this writer's nesting
+/// limit at seventeen.
+///
+/// Enters with `u` on the stack and leaves `r g b`.
+fn ramp(stops: &[Stop], lo: usize, hi: usize) -> Vec<CalculatorOp> {
+    use CalculatorOp::{IfElse, Number, Operator};
+    if hi <= lo + 1 {
+        let (Some(a), Some(b)) = (stops.get(lo), stops.get(lo + 1)) else {
+            return Vec::new();
+        };
+        let width = b.offset - a.offset;
+        // A hard stop — two stops at one offset — is a segment of no width,
+        // which the search above never lands inside; it is the second
+        // stop's colour should it ever be reached.
+        let (base, slope): ([f64; 3], [f64; 3]) = if width > 0.0 {
+            let mut slope = [0.0; 3];
+            for (channel, value) in slope.iter_mut().enumerate() {
+                *value = (b.colour.rgb[channel] - a.colour.rgb[channel]) / width;
+            }
+            (a.colour.rgb, slope)
+        } else {
+            (b.colour.rgb, [0.0; 3])
+        };
+        // d = u − offset, kept three times: d d d → d d r → r d d → r d g →
+        // r g d → r g b.
+        return vec![
+            Number(a.offset),
+            Operator("sub"),
+            Operator("dup"),
+            Operator("dup"),
+            Number(slope[0]),
+            Operator("mul"),
+            Number(base[0]),
+            Operator("add"),
+            Number(3.0),
+            Number(1.0),
+            Operator("roll"),
+            Number(slope[1]),
+            Operator("mul"),
+            Number(base[1]),
+            Operator("add"),
+            Operator("exch"),
+            Number(slope[2]),
+            Operator("mul"),
+            Number(base[2]),
+            Operator("add"),
+        ];
+    }
+    let middle = lo + (hi - lo) / 2;
+    let split = stops.get(middle).map_or(0.0, |stop| stop.offset);
+    vec![
+        Operator("dup"),
+        Number(split),
+        Operator("lt"),
+        IfElse(ramp(stops, lo, middle), ramp(stops, middle, hi)),
+    ]
 }
 
 /// The next representable value above `x`, for the stitching bound above.

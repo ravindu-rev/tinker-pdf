@@ -223,15 +223,6 @@ pub enum Warning {
     /// `<textPath>`, `<tref>` and `<altGlyph>` — §10.13's text on a path and
     /// its two relatives. Each is a second layout engine.
     TextLayoutUnsupported,
-    /// §13.2.3's `spreadMethod` of `reflect` or `repeat`.
-    ///
-    /// `pad` is drawn instead, which is the initial value and the one every
-    /// gradient in the fetched corpus uses. The other two tile the stop list
-    /// outside the axis, and doing it honestly means a stitching function over
-    /// a repeated domain rather than a wider axis with more stops on it — an
-    /// approximation with a chosen number of repeats would be a gradient that
-    /// is right in the middle and wrong at the edges.
-    SpreadMethodUnsupported,
 }
 
 /// A colour, as three components in `[0, 1]`.
@@ -243,6 +234,18 @@ pub enum Warning {
 pub struct Colour {
     /// Red, green, blue, each in `[0, 1]`.
     pub rgb: [f64; 3],
+}
+
+/// §13.2.3's `spreadMethod`: what a gradient does past the ends of its axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Spread {
+    /// `pad`, the initial value: the end stops' colours, out to infinity.
+    #[default]
+    Pad,
+    /// `reflect`: the ramp again, backwards, then forwards, and so on.
+    Reflect,
+    /// `repeat`: the ramp again from its start, every period.
+    Repeat,
 }
 
 /// One stop of a gradient.
@@ -283,6 +286,8 @@ pub enum Paint {
         matrix: [f64; 6],
         /// Stops, in ascending offset order.
         stops: Vec<Stop>,
+        /// What happens past the axis's ends.
+        spread: Spread,
     },
     /// `<radialGradient>`, on the same terms.
     ///
@@ -301,6 +306,8 @@ pub enum Paint {
         matrix: [f64; 6],
         /// Stops, in ascending offset order.
         stops: Vec<Stop>,
+        /// What happens past the circle.
+        spread: Spread,
     },
 }
 
