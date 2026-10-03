@@ -517,6 +517,104 @@ fn each_refusal_writes_nothing_and_says_why() {
     unsafe { tpdf_editor_free(editor) };
 }
 
+/// A `TpdfDate` field is an `int32_t`, and two different things can be wrong
+/// with one. A number that does not fit the facade's byte -- 300, -1 -- is
+/// this crate's to refuse, [`TpdfStatus::BadArgument`], rather than a byte
+/// truncated into another date. A byte that is not a date -- a month of 13
+/// or 0, an hour of 24, a minute of 60 -- is the facade's to refuse
+/// (ruling 11: the date's rules live there), and crosses as its refusal,
+/// [`TpdfStatus::EditRefused`], writing nothing. The header said the second
+/// kind was `BadArgument` too, which no code ever did (review of lane 7C).
+#[test]
+fn a_date_field_past_a_byte_is_a_bad_argument_and_a_byte_that_is_no_date_is_refused() {
+    let fixture = outline_fixture();
+    let editor = editor_over(&fixture);
+    let before = save(editor);
+    let name = CString::new("dated.txt").expect("no nul");
+    let data = b"x";
+
+    let date_with = |field: &str, value: i32| {
+        let mut date = CREATED;
+        match field {
+            "month" => date.month = value,
+            "day" => date.day = value,
+            "hour" => date.hour = value,
+            "minute" => date.minute = value,
+            "second" => date.second = value,
+            _ => unreachable!("a TpdfDate field"),
+        }
+        date
+    };
+    let both_calls = |date: &TpdfDate| {
+        let set = unsafe {
+            tpdf_editor_set_info_date(
+                editor,
+                TpdfInfoKey::ModificationDate as c_int,
+                date,
+                ptr::null_mut(),
+            )
+        };
+        let file = TpdfEmbeddedFile {
+            name: name.as_ptr(),
+            filename: name.as_ptr(),
+            description: ptr::null(),
+            mime_type: ptr::null(),
+            created: date,
+            modified: ptr::null(),
+            data: data.as_ptr(),
+            data_len: data.len(),
+        };
+        let attach =
+            unsafe { tpdf_editor_attach_file(editor, &file, ptr::null_mut(), ptr::null_mut()) };
+        (set, attach)
+    };
+
+    for (field, value) in [
+        ("month", 300),
+        ("month", -1),
+        ("minute", 256),
+        ("day", i32::MAX),
+    ] {
+        let (set, attach) = both_calls(&date_with(field, value));
+        assert_eq!(
+            set,
+            TpdfStatus::BadArgument,
+            "set_info_date, {field} {value}"
+        );
+        assert_eq!(
+            attach,
+            TpdfStatus::BadArgument,
+            "attach_file, {field} {value}"
+        );
+        assert!(
+            last_error().contains(&format!("date {field} {value} is out of range")),
+            "{}",
+            last_error()
+        );
+    }
+    for (field, value) in [
+        ("month", 13),
+        ("month", 0),
+        ("day", 32),
+        ("hour", 24),
+        ("minute", 60),
+    ] {
+        let (set, attach) = both_calls(&date_with(field, value));
+        assert_eq!(
+            set,
+            TpdfStatus::EditRefused,
+            "set_info_date, {field} {value}"
+        );
+        assert_eq!(
+            attach,
+            TpdfStatus::EditRefused,
+            "attach_file, {field} {value}"
+        );
+    }
+    assert_eq!(save(editor), before, "no refused date wrote anything");
+    unsafe { tpdf_editor_free(editor) };
+}
+
 /// A document with something for every sanitise flag to take out: a
 /// JavaScript open action, a URI link, an attachment and `/Info`.
 fn hazardous() -> Vec<u8> {

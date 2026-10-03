@@ -87,9 +87,12 @@ pub struct TpdfPageLabelRange {
 /// A date (7.9.4), as C sees `Date`.
 ///
 /// Every field an `int32_t` so a hand-written binding has no packing to
-/// guess at; a field outside its range -- a month of 13, a minute of 60 --
-/// is [`TpdfStatus::BadArgument`] rather than a byte truncated into another
-/// date.
+/// guess at. Two things can be wrong with one, and they are refused
+/// differently. A month, day, hour, minute or second that does not fit a
+/// byte -- 300, or a negative number -- is [`TpdfStatus::BadArgument`]
+/// rather than a byte truncated into another date. A byte that is not a date
+/// -- a month of 13 or 0, a minute of 60 -- is the facade's to judge, and
+/// crosses as its refusal, [`TpdfStatus::EditRefused`], writing nothing.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct TpdfDate {
@@ -112,7 +115,8 @@ pub struct TpdfDate {
 }
 
 impl TpdfDate {
-    /// The facade's own date, or a refusal naming the field out of range.
+    /// The facade's own date, or a refusal naming the field that does not
+    /// fit its byte. Whether the bytes make a date is the facade's call.
     fn to_facade(self) -> Result<Date, TpdfStatus> {
         let byte = |value: i32, what: &str| -> Result<u8, TpdfStatus> {
             u8::try_from(value).map_err(|_| {

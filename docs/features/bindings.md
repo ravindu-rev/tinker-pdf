@@ -169,7 +169,9 @@ one `DocumentEditor` call. `tpdf_editor_set_page_labels` takes an array of
 `tpdf_editor_attach_file` a `TpdfEmbeddedFile` of pointers and a length, its
 dates a `TpdfDate` of eight `int32_t`s — every field that wide so a
 hand-written binding has no padding to guess at, and a month of 300 refused
-rather than truncated into another date — and it hands back the new file
+as `BadArgument` rather than truncated into another date, while a month of
+13, which fits the byte and is no month, is the facade's refusal,
+`EditRefused` — and it hands back the new file
 specification's reference; `tpdf_editor_set_outline` consumes outline entries
 exactly as the builder's does. The typed `/Info` setters are
 `tpdf_editor_set_info` over the six text keys of `TpdfInfoKey` and
