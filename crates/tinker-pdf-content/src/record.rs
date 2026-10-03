@@ -26,9 +26,14 @@
 //!    state and their marked-content scopes, which is the transcript plus one
 //!    join.
 //! 4. **Table reconstruction from geometry.** Wants the rules and fills a page
-//!    draws beside the glyphs, which no text-only device keeps.
+//!    draws beside the glyphs, which no text-only device keeps. **Landed
+//!    October 2026 without this module**: the facade's `observe.rs` is a tee
+//!    — a device that hands the text calls to a `TextDevice` unchanged and
+//!    keeps the rules, fills and clip itself — so a page is interpreted once
+//!    and no transcript is kept.
 //! 5. **Inferred reading order for untagged pages.** Wants glyphs and the
-//!    marked-content nesting, and nothing else.
+//!    marked-content nesting, and nothing else. **Landed October 2026 on the
+//!    same tee**, since it reads the same `TextPage` and the tables' rules.
 //! 6. **Font subsetting on rewrite.** Wants the glyph-usage walk —
 //!    `(font_id, code)` pairs — and nothing else at all.
 //!
@@ -63,10 +68,11 @@
 //! - The state is **boxed**, so one event's stride is set by a glyph and not
 //!   by the largest thing a page can ask for (a [`MaskGroup`] carries a
 //!   256-entry transfer function). `event_stays_small` pins the number.
-//! - [`Capture`] turns whole categories off. The two consumers above that want
-//!   only glyphs — subsetting's glyph-usage walk and inferred reading order —
-//!   run under [`Capture::GLYPHS`] and pay for a `Vec` of glyph events with no
-//!   state copies at all.
+//! - [`Capture`] turns whole categories off. The consumer above that wants
+//!   only glyphs — subsetting's glyph-usage walk — runs under
+//!   [`Capture::GLYPHS`] and pays for a `Vec` of glyph events with no state
+//!   copies at all. (Inferred reading order was to be the second, and reads
+//!   the tee in item 4 instead.)
 //! - When the state is not captured it is [`None`] rather than a default, so
 //!   an unrecorded state can never be mistaken for an initial one.
 //!

@@ -457,12 +457,17 @@ structure join claims for it on the page; a span that does not add up is
 `TableWarning::SpanInconsistent` and a row of the wrong width
 `TableWarning::RaggedRows`, never a repair
 ([design/table-reconstruction.md](../design/table-reconstruction.md)).
-`Page::inferred_tables(&TableOptions)` — opt-in, labelled `TableEvidence::Ruled`,
+`Page::inferred_tables(&TableOptions)` — opt-in, labelled by its evidence,
 never a structure element — builds tables from the rules a page draws
-(`Page::table_rules()`), each character in the cell holding its centre and
-the permutation back to stream order beside them; on a page whose tree states
-a table the stated one is the answer, and `Page::tables(TableSource)` says
-which it gave. `tpdf text --tables` prints them, a line for each cell.
+(`Page::table_rules()`), `TableEvidence::Ruled`, and where no rule stands
+from columns of text whose edges three rows share, `TableEvidence::Aligned`
+with `TableWarning::NoRules`, never averaged with the ruled ones; each
+character is in the cell holding its centre, spans are read where an
+interior rule is missing, `HeaderEvidence` says what the ink shows about the
+first row, and the permutation back to stream order is beside them. On a
+page whose tree states a table the stated one is the answer, and
+`Page::tables(TableSource)` says which it gave. `tpdf text --tables` prints
+them, a line for each cell.
 
 ### The structured view (14.7, 14.8)
 
