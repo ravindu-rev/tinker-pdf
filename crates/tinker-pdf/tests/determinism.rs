@@ -2648,10 +2648,12 @@ fn the_synthesised_book_is_the_same_bytes_on_every_target() {
     );
 
     // The structure only a byte hash pins, named entry by entry so a failure
-    // says which half moved.
+    // says which half moved. The annotations are counted by their subtype:
+    // since the book is tagged, `/Link` is also a structure type and the
+    // marked-content tag of its sequences, and a bare `/Link` counted those.
     for (needle, count, what) in [
         (
-            &b"/Link"[..],
+            &b"/Subtype /Link"[..],
             8,
             "milestone 5's annotations, on no rendered page",
         ),
@@ -2797,7 +2799,8 @@ fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
         Some(OTHER_BOOK_BOX),
         "and so does the other"
     );
-    let links = |pdf: &[u8]| pdf.windows(5).filter(|w| *w == b"/Link").count();
+    // By subtype, for the reason the needle above gives.
+    let links = |pdf: &[u8]| pdf.windows(14).filter(|w| *w == b"/Subtype /Link").count();
     assert_eq!(
         (links(&first), links(&other)),
         (8, 7),
