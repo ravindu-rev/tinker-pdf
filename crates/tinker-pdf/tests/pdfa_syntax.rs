@@ -53,6 +53,9 @@ struct Fixture {
     trailer_extra: String,
     /// The XMP packet.
     packet: String,
+    /// Whether the catalog's metadata stream, object 4, is written
+    /// ASCII-hex encoded under a `/Filter`.
+    packet_filtered: bool,
 }
 
 impl Fixture {
@@ -71,11 +74,23 @@ impl Fixture {
                             <0102030405060708090A0B0C0D0E0F10>]"
                 .to_string(),
             packet: packet(part, level),
+            packet_filtered: false,
         }
     }
 
     fn build(&self) -> Vec<u8> {
-        let stream = self.packet.as_bytes();
+        let hex: String;
+        let (stream, filter) = if self.packet_filtered {
+            hex = self
+                .packet
+                .bytes()
+                .map(|b| format!("{b:02X}"))
+                .chain(std::iter::once(">".to_string()))
+                .collect();
+            (hex.as_bytes(), "/Filter /ASCIIHexDecode ")
+        } else {
+            (self.packet.as_bytes(), "")
+        };
         let mut objects: Vec<(u32, Vec<u8>)> = vec![
             (
                 1,
@@ -92,7 +107,7 @@ impl Fixture {
             ),
             (4, {
                 let mut body = format!(
-                    "<< /Type /Metadata /Subtype /XML /Length {} >>\nstream\n",
+                    "<< /Type /Metadata /Subtype /XML {filter}/Length {} >>\nstream\n",
                     stream.len()
                 )
                 .into_bytes();
@@ -1001,45 +1016,64 @@ fn the_container_limits_apply_to_part_one_and_not_to_part_two() {
 // ---- 6.7.2, part 1: a metadata stream carries no /Filter ---------------------
 
 /// ISO 19005-1 6.7.2: "Metadata object stream dictionaries shall not contain
-/// the Filter key" — every metadata stream, as veraPDF's published rule
-/// 6.7.2-2 reads it, not the catalog's alone. A second metadata stream,
-/// ASCII-hex encoded, is a finding under part 1; the same bytes claiming part
-/// 2, whose published rules carry no such sentence, are the twin, and the
-/// baseline's unfiltered packet is the other.
+/// the Filter key", in the scope veraPDF's published rule 6.7.2-2 gives it
+/// (`PDFA-1B.xml` at `070d39f`: "The Metadata object stream dictionary in the
+/// document's catalog", `isCatalogMetadata == false || Filter == null`). The
+/// catalog's packet ASCII-hex encoded is a finding under part 1; the same
+/// file claiming part 2, whose published rules carry no such sentence, is
+/// the twin.
+///
+/// The wiki's older statement of the same rule (`109b482`) tests
+/// `Filter == null` on every metadata stream, and its working group's note
+/// says the clause "explicitly requires all XMP Metadata streams" to be
+/// unfiltered. That reading is the stricter one and nothing measured it, so a
+/// second metadata stream carrying a filter is not reported — the second
+/// twin — and `PDFA_STAGED` names it under 6.7.2.
 #[test]
-fn a_filtered_metadata_stream_is_a_part_one_finding() {
-    let second = |part: &str| {
+fn a_filtered_catalog_metadata_stream_is_a_part_one_finding() {
+    let filtered = |part: &str| {
         let mut fixture = Fixture::new(part, Some("B"));
-        let data: String = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>"
-            .bytes()
-            .map(|b| format!("{b:02X}"))
-            .chain(std::iter::once(">".to_string()))
-            .collect();
-        fixture.extra.push((
-            5,
-            format!(
-                "<< /Type /Metadata /Subtype /XML /Filter /ASCIIHexDecode /Length {} >>\n\
-                 stream\n{data}\nendstream",
-                data.len()
-            ),
-        ));
+        fixture.packet_filtered = true;
         fixture
     };
     assert_eq!(
-        second("1").one_finding(),
+        filtered("1").one_finding(),
         FindingKind::MetadataStreamFiltered
     );
-    assert_eq!(second("2").findings(), Vec::<FindingKind>::new());
+    assert_eq!(filtered("2").findings(), Vec::<FindingKind>::new());
 
-    let findings = Document::open(second("1").build())
+    let findings = Document::open(filtered("1").build())
         .expect("opens")
         .validate_pdfa()
         .findings;
     assert_eq!(findings[0].clause.0, "6.7.2");
-    assert_eq!(findings[0].object.map(|r| r.num), Some(5));
+    assert_eq!(findings[0].object.map(|r| r.num), Some(4));
+
+    // A second metadata stream, filtered, is the wider reading's subject.
+    let mut second = Fixture::new("1", Some("B"));
+    let data: String = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>"
+        .bytes()
+        .map(|b| format!("{b:02X}"))
+        .chain(std::iter::once(">".to_string()))
+        .collect();
+    second.extra.push((
+        5,
+        format!(
+            "<< /Type /Metadata /Subtype /XML /Filter /ASCIIHexDecode /Length {} >>\n\
+             stream\n{data}\nendstream",
+            data.len()
+        ),
+    ));
+    assert_eq!(second.findings(), Vec::<FindingKind>::new());
+    assert!(
+        tinker_pdf::PDFA_STAGED.iter().any(
+            |staged| staged.clause == "6.7.2" && staged.rule.contains("other than the catalog")
+        ),
+        "the wider reading is named"
+    );
 
     // The clause is about metadata streams: any other stream may be
-    // filtered under part 1, and one that is, is the second twin.
+    // filtered under part 1, and one that is, is the third twin.
     let mut other = Fixture::new("1", Some("B"));
     other.extra.push((
         5,

@@ -606,6 +606,19 @@ pub const STAGED: &[StagedRule] = &[
                   parser, does not make",
     },
     StagedRule {
+        clause: "6.7.2",
+        rule: "part 1: a `/Filter` on a metadata stream other than the \
+               catalog's - a font's, an image's, a page's",
+        because: "the two statements of the rule in hand disagree about its \
+                  scope. veraPDF's published profile (070d39f) judges the \
+                  catalog's metadata stream only; its older wiki statement \
+                  (109b482) tests every metadata stream, and its working \
+                  group's note says the clause requires all of them \
+                  unfiltered. The catalog's is judged; the wider reading is \
+                  the stricter one, and until the corpus measures it a rule \
+                  read that way could report conforming files",
+    },
+    StagedRule {
         clause: "6.7.8",
         rule: "an extension schema's custom value types: whether a value type \
                a property names is described, and whether a type with fields \
