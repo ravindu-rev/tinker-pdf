@@ -123,11 +123,33 @@ impl Walk<'_> {
     }
 
     /// Adds one node to the list being built, refusing by name when the
-    /// scene is full.
+    /// scene is full — and dropping it, named, when composing the transforms
+    /// above it carried a number past a double's range.
     fn push(&mut self, node: crate::Node) -> Result<(), Refusal> {
+        if !self.admits(&node) {
+            return Ok(());
+        }
         self.charge()?;
         self.scene.nodes.push(node);
         Ok(())
+    }
+
+    /// Whether every number a node carries is finite, naming the node that is
+    /// not.
+    ///
+    /// Every number this crate *reads* is finite — `1e999` is refused where
+    /// it is parsed — but a product of finite numbers is not: `scale(1e300)`
+    /// inside `scale(1e300)` is two legal transforms and an infinity, and an
+    /// infinity in a coordinate is a rasterizer with nothing to draw in a file
+    /// that looked ordinary. So the check is on what comes **out**, once per
+    /// node: a group's own opacity and clip, since its children were admitted
+    /// one by one on the way in.
+    fn admits(&mut self, node: &crate::Node) -> bool {
+        if finite(node) {
+            return true;
+        }
+        self.warn(Warning::GeometryOverflow);
+        false
     }
 
     /// Spends one node of [`Limits::max_nodes`].
@@ -222,7 +244,7 @@ impl Walk<'_> {
         if opacity >= 1.0 {
             return self.push(node);
         }
-        if opacity <= 0.0 {
+        if opacity <= 0.0 || !self.admits(&node) {
             return Ok(());
         }
         let mut nodes = vec![node];
@@ -537,8 +559,11 @@ impl Walk<'_> {
         // they are part of the **element's** rendering — so its clip and its
         // opacity are theirs too. The marker nodes were charged when the walk
         // pushed them; the shape and any wrapper are charged here.
-        self.charge()?;
-        let mut nodes = vec![shape];
+        let mut nodes = Vec::new();
+        if self.admits(&shape) {
+            self.charge()?;
+            nodes.push(shape);
+        }
         match clip {
             Some(clip) => {
                 self.charge()?;
@@ -1287,6 +1312,74 @@ struct Marker {
     viewport: (f64, f64),
     /// The style its content starts from: its own ancestry's.
     style: Style,
+}
+
+/// Whether every number one node carries is finite — not counting a group's
+/// children, which [`Walk::push`] admitted before they were grouped.
+fn finite(node: &crate::Node) -> bool {
+    fn outline(outline: &Outline) -> bool {
+        outline.segments.iter().all(|segment| match *segment {
+            Segment::Move(p) | Segment::Line(p) => p.iter().all(|v| v.is_finite()),
+            Segment::Cubic(a, b, c) => [a, b, c].iter().flatten().all(|v| v.is_finite()),
+            Segment::Close => true,
+        })
+    }
+    fn numbers(values: &[f64]) -> bool {
+        values.iter().all(|v| v.is_finite())
+    }
+    fn paint(paint: &Paint) -> bool {
+        match paint {
+            Paint::Linear {
+                from, to, matrix, ..
+            } => numbers(from) && numbers(to) && numbers(matrix),
+            Paint::Radial {
+                centre,
+                radius,
+                focus,
+                matrix,
+                ..
+            } => numbers(centre) && radius.is_finite() && numbers(focus) && numbers(matrix),
+            _ => true,
+        }
+    }
+    // A stroke's width and dashes are lengths, read finite and never
+    // multiplied by a transform here, so only its paint — whose matrix is
+    // composed — can overflow.
+    fn stroke(stroke: Option<&Stroke>) -> bool {
+        stroke.is_none_or(|stroke| paint(&stroke.paint))
+    }
+    match node {
+        crate::Node::Path {
+            outline: shape,
+            fill,
+            stroke: line,
+            clip,
+            ..
+        } => {
+            outline(shape)
+                && paint(fill)
+                && stroke(line.as_deref())
+                && clip.as_ref().is_none_or(|clip| outline(&clip.outline))
+        }
+        crate::Node::Text {
+            anchor,
+            matrix,
+            font,
+            fill,
+            stroke: line,
+            ..
+        } => {
+            anchor.is_none_or(|anchor| numbers(&anchor))
+                && numbers(matrix)
+                && font.size.is_finite()
+                && paint(fill)
+                && stroke(line.as_deref())
+        }
+        crate::Node::Image { rect, matrix, .. } => numbers(rect) && numbers(matrix),
+        crate::Node::Group { opacity, clip, .. } => {
+            opacity.is_finite() && clip.as_ref().is_none_or(|clip| outline(&clip.outline))
+        }
+    }
 }
 
 /// Folds a group's opacity into its one node, where that is the same picture.

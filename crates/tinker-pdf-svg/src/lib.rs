@@ -170,6 +170,15 @@ pub enum Warning {
     ClipPathUnsupported,
     /// `<pattern>` used as a paint.
     PatternUnsupported,
+    /// Something whose coordinates, once every transform above it was
+    /// composed, are past a double's range — `scale(1e300)` inside
+    /// `scale(1e300)`, or a `markerWidth` of `1e308` under a view box.
+    ///
+    /// Every number in the document was finite where it was read; their
+    /// product is not, and an infinity in a coordinate is a rasterizer with
+    /// nothing to draw. The node is **not drawn**, and named: the alternative,
+    /// clamping, would put the shape somewhere the file did not.
+    GeometryOverflow,
     /// A `marker-start`, `marker-mid` or `marker-end` naming no `<marker>`.
     ///
     /// §11.6.2 makes a reference to nothing an error; the path is drawn

@@ -478,3 +478,43 @@ fn a_nested_viewport_with_no_area_draws_nothing() {
         "a viewport of no width is not entered"
     );
 }
+
+/// A product of finite numbers past a double's range is **not drawn**, and is
+/// named.
+///
+/// `scale(1e300)` inside `scale(1e300)` is two legal transforms, each finite
+/// where it was read, and a rectangle under both has infinite corners — which
+/// reach a consumer as a rasterizer with nothing to draw and a file that
+/// looked ordinary. The fuzz target asserts every number in a scene is
+/// finite; this is the document it would have found. The line carries a
+/// marker because a shape with markers is assembled with them rather than
+/// pushed alone, and both have to be checked. The shape beside the two groups
+/// is unaffected.
+#[test]
+fn a_product_past_a_doubles_range_is_not_drawn_and_is_named() {
+    let markup = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+      <defs><marker id="m" markerUnits="userSpaceOnUse"><rect width="1" height="1"/></marker></defs>
+      <g transform="scale(1e300)"><g transform="scale(1e300)">
+        <rect width="1" height="1"/>
+        <image width="1" height="1" href="a.png"/>
+        <line x1="0" y1="0" x2="1" y2="0" stroke="black" marker-end="url(#m)"/>
+      </g></g>
+      <rect width="1" height="1"/>
+      <path d="M0 0 L1e308 0" transform="scale(10)" stroke="black" marker-start="url(#m)"/>
+    </svg>"#;
+    let scene = scene(markup, Some((100.0, 100.0)));
+    // The ordinary rectangle, and the path's start marker — which sits at the
+    // origin, where ten times nothing is still finite — but not the path,
+    // whose far end is ten times 1e308.
+    assert_eq!(scene.nodes.len(), 2, "{:?}", scene.nodes);
+    assert!(matches!(scene.nodes[0], tinker_pdf_svg::Node::Path { .. }));
+    assert!(
+        matches!(
+            &scene.nodes[1],
+            tinker_pdf_svg::Node::Group { clip: Some(_), .. }
+        ),
+        "the marker, clipped to its viewport: {:?}",
+        scene.nodes[1]
+    );
+    assert_eq!(scene.warnings, [Warning::GeometryOverflow]);
+}
