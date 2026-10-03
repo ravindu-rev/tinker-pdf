@@ -748,6 +748,53 @@ fn quadding_runs_down_a_column() {
     }
 }
 
+/// **A column runs `vert` and `vrt2`, and not the horizontal features**
+/// (a nit of the review of lane 6C: no fixture had a vertical substitution, so
+/// dropping either feature from the column's set fired nothing).
+///
+/// One face per feature, each with an `A`+`B` ligature under that one
+/// feature, so whether the pair becomes one glyph says whether the feature
+/// ran. In a column `vert` and `vrt2` join it and `liga` does not; across a
+/// row `liga` joins it and neither vertical feature does.
+#[test]
+fn a_column_runs_the_vertical_features_and_not_the_horizontal_ones() {
+    for (feature, in_a_column) in [(*b"vert", true), (*b"vrt2", true), (*b"liga", false)] {
+        let face = Face::new("Fixture Latin", "ABC").with_ligature(Ligature {
+            first: 'A',
+            second: 'B',
+            script: *b"DFLT",
+            feature,
+        });
+        let joined = vec![(u32::from(face.ligature_glyph().expect("a ligature")), 2)];
+        let apart: Vec<(u32, u8)> = "AB"
+            .chars()
+            .map(|ch| (u32::from(face.glyph_of(ch).expect("covered")), 2))
+            .collect();
+        let program = face.build();
+        let name = String::from_utf8_lossy(&feature).into_owned();
+
+        let column = form_document(&Fixture::named(&program, "/Identity-V"));
+        let (_, content) = filled(&column, "AB");
+        assert_eq!(
+            codes(&content),
+            if in_a_column {
+                joined.clone()
+            } else {
+                apart.clone()
+            },
+            "{name} in a column:\n{content}"
+        );
+
+        let row = form_document(&Fixture::named(&program, "/Identity-H"));
+        let (_, content) = filled(&row, "AB");
+        assert_eq!(
+            codes(&content),
+            if in_a_column { apart } else { joined },
+            "{name} across a row:\n{content}"
+        );
+    }
+}
+
 /// A program that is neither an sfnt nor a CFF is refused, and every
 /// character is named.
 ///
