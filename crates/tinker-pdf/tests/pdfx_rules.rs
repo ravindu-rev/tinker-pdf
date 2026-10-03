@@ -1085,6 +1085,40 @@ fn every_font_used_is_embedded() {
 
 // ---- the citations ----------------------------------------------------------
 
+/// Every clause of ISO 15930-4:2003's table of contents (`docs/design/pdfx.md`
+/// quotes all seventeen) is either cited by a rule that runs or named in the
+/// verdict as a gap of PDF/X-1a:2003's: an abstention is named, never a
+/// silent pass. 6.7, file identification, was neither until the review of
+/// lane 7A: the version string is how the claim is read, and whatever else
+/// the clause asks of `/Info` or the trailer is past the preview.
+#[test]
+fn every_clause_of_15930_4_is_run_or_named() {
+    // The clauses `features/pdfx.md` lists as cited by a running rule.
+    let running = [
+        "6.2", "6.3", "6.5", "6.6", "6.8", "6.10", "6.11", "6.13", "6.16",
+    ];
+    let named: Vec<&str> = tinker_pdf::PDFX_STAGED
+        .iter()
+        .chain(tinker_pdf::PDFX_UNREAD)
+        .filter(|gap| gap.flavour == Some(PdfXFlavour::X1a2003))
+        .map(|gap| gap.clause)
+        .collect();
+    for clause in (1..=17).map(|n| format!("6.{n}")) {
+        assert!(
+            running.contains(&clause.as_str()) || named.contains(&clause.as_str()),
+            "15930-4 {clause} is neither run nor named"
+        );
+    }
+    let verdict = X::x1a().document().validate_pdfx();
+    assert!(
+        verdict
+            .abstained
+            .iter()
+            .any(|a| a.gap.clause == "6.7" && a.class == PdfXAbstentionClass::Unread),
+        "the verdict names 6.7"
+    );
+}
+
 /// Under PDF/X-3:2003 every finding cites the application note it was
 /// transcribed from, because no number of ISO 15930-6's is in hand; under
 /// PDF/X-1a:2003 every finding but the private-key rule cites a clause of

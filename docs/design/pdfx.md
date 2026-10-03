@@ -423,10 +423,12 @@ rather than the crop box ISO 32000 would default to; containment is exact;
 "used" is drawn at a visible rendering mode, as ISO 19005 reads it; the first
 `GTS_PDFX` intent is judged; the registry identifier is checked for shape;
 `DeviceRGB` is judged only where the profile's header says CMYK. Every
-clause the notes do not restate — 15930-4's 6.1, 6.4, 6.9, 6.12, 6.14, 6.15,
-6.17, TrapNet, Table 2's shapes, JPEG 2000, X-1a's device-independent colour
-— is an `Unread` gap by name, and what is in hand but not decided is
-`Staged`.
+clause the notes do not restate — 15930-4's 6.1, 6.4, 6.7 past the version
+string, 6.9, 6.12, 6.14, 6.15, 6.17, TrapNet, Table 2's shapes, JPEG 2000,
+X-1a's device-independent colour — is an `Unread` gap by name, and what is in
+hand but not decided is `Staged`. (6.7 was neither run nor named until the
+review of the lane: `pdfx_rules.rs` now holds every one of the seventeen
+titles to one or the other.)
 
 **What the exit criteria asked that is not met.** Milestone 3's and 4's
 "zero findings over every pinned suite file" and "the Ghent CMYK and SPOT

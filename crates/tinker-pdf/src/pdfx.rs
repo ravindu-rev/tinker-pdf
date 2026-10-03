@@ -499,6 +499,17 @@ pub const UNREAD: &[XGap] = &[
     },
     XGap {
         flavour: Some(XFlavour::X1a2003),
+        clause: "6.7",
+        rule: "file identification, past the version string: whatever else \
+               the clause asks of /Info or the trailer",
+        because: "the notes' 2.3 restates one sentence of it - GTS_PDFXVersion \
+                  in /Info equal to (PDF/X-1a:2003) - and that sentence is how \
+                  the claim is read, so a file that does not carry it is not \
+                  judged under this level at all; the clause's own body is \
+                  past the preview's last page",
+    },
+    XGap {
+        flavour: Some(XFlavour::X1a2003),
         clause: "6.9",
         rule: "extended graphics state",
         because: "a clause title with no restatement in the notes as quoted; \
