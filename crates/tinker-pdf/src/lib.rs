@@ -37,6 +37,7 @@ pub mod layers;
 pub mod markdown;
 pub mod mdp;
 mod optional;
+mod output_intents;
 pub mod pdfa;
 mod png_read;
 mod recode;
@@ -80,6 +81,11 @@ pub use html::{FromHtml, HtmlError, HtmlReport, PageBox};
 pub use layers::OptionalGroup;
 /// Digital signatures, read (12.8), behind [`Document::signatures`].
 pub use mdp::{Change, Modification, Modifications, Touched};
+/// Tagged PDF: the logical structure tree, and the reading-order view over it
+/// (14.7, 14.8).
+/// Output intents, the catalog's and (PDF 2.0) a page's: what
+/// `Document::output_intents` and `Page::output_intents` hand back.
+pub use output_intents::OutputIntent;
 /// PDF/A conformance (ISO 19005), behind [`Document::validate_pdfa`].
 pub use pdfa::{
     Clause, ConformanceFinding, Coverage as PdfACoverage, FindingKind, Flavour, Level, Part,
@@ -92,8 +98,6 @@ pub use signature::{
 /// One-file documents that are not PDFs: what [`Document::open`] does with a
 /// standalone SVG, a bare image and a loose XHTML file (tier 5).
 pub use standalone::Standalone;
-/// Tagged PDF: the logical structure tree, and the reading-order view over it
-/// (14.7, 14.8).
 pub use structure::{
     StructElement, StructKid, StructureTree, StructureWarning, StructuredNode, StructuredText,
     TextSource,
@@ -226,9 +230,9 @@ pub use svg_out::{Rasterised, Svg, SvgOptions, SvgWarning, MAX_SVG_BYTES};
 pub use tinker_pdf_cos::{
     is_language_tag, is_standard_namespace, ArchivalLevel, ArchivalPart, ArchivalProfile,
     ArchivalRefusal, DocumentBuilder, DocumentEditor, EditCheckpoint, EmbeddedWhole, Encryption,
-    FillError, FillRejection, ImageData, NamespaceId, OutlineEntry, PageBuilder, SkippedWidget,
-    SubsetRefusal, TableAttributes, TableScope, Tag, Target, WidgetDefect, WriteMode, WriteOptions,
-    MATHML_NAMESPACE, PDF_1_7_NAMESPACE, PDF_2_0_NAMESPACE,
+    FillError, FillRejection, ImageData, NamespaceId, NewOutputIntent, OutlineEntry, PageBuilder,
+    SkippedWidget, SubsetRefusal, TableAttributes, TableScope, Tag, Target, WidgetDefect,
+    WriteMode, WriteOptions, MATHML_NAMESPACE, PDF_1_7_NAMESPACE, PDF_2_0_NAMESPACE,
 };
 /// Creating form fields (12.7.3), behind [`DocumentEditor::add_field`].
 ///

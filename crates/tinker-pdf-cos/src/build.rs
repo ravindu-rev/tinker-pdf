@@ -1965,6 +1965,12 @@ pub struct PageBuilder {
     /// The builder this page was begun on, whose [`LayerId`]s alone it
     /// takes.
     builder: BuilderSerial,
+    /// Whether [`PageBuilder::output_intent`] may write: the document
+    /// declares 2.0 or later and no archival profile writes its own intent.
+    /// Copied at [`DocumentBuilder::begin_page`], as `archival_space` is.
+    page_intents: bool,
+    /// The page's own `/OutputIntents`, in the order given.
+    output_intents: Vec<NewOutputIntent>,
 }
 
 /// One structure element under construction, and what it claims.
@@ -2868,6 +2874,40 @@ impl PageBuilder {
         parent.kids.push(TaggedKid::Content { mcid, order });
     }
 
+    /// Gives this page an output intent of its own — the page's
+    /// `/OutputIntents` (ISO 32000-2's PageObject entry, per the Arlington
+    /// model), which a reader takes over the catalog's for this page.
+    ///
+    /// Each call adds one entry, written as a direct dictionary in the
+    /// array, the shape of the PDF Association's PDF 2.0 example. A
+    /// destination profile is written once however many pages name the same
+    /// bytes, so pages that share a condition share its stream.
+    ///
+    /// Returns false, adding nothing, when:
+    ///
+    /// - the document declares a version before 2.0, where a page has no
+    ///   such entry ([`DocumentBuilder::with_version`]);
+    /// - the document is written under an [`ArchivalProfile`], which writes
+    ///   the catalog's intent itself and refuses every device colour against
+    ///   that one profile — a page naming another would be a combination
+    ///   this writer does not check;
+    /// - `/S` or the required `/OutputConditionIdentifier` is empty, or a
+    ///   destination profile is given with no bytes.
+    pub fn output_intent(&mut self, intent: NewOutputIntent) -> bool {
+        if !self.page_intents
+            || intent.subtype.is_empty()
+            || intent.output_condition_identifier.is_empty()
+            || intent
+                .destination_profile
+                .as_ref()
+                .is_some_and(|(bytes, _)| bytes.is_empty())
+        {
+            return false;
+        }
+        self.output_intents.push(intent);
+        true
+    }
+
     /// Draws inside an optional content group — `/OC /name BDC … EMC`
     /// (8.11.3.2) — so what is drawn shows or hides with the layer
     /// [`DocumentBuilder::add_layer`] returned.
@@ -3734,6 +3774,79 @@ pub(crate) fn outline_is_writable(entries: &[OutlineEntry]) -> bool {
 }
 
 // ---- the archival profile (ISO 19005) -------------------------------------
+
+/// An output intent (ISO 32000-1 14.11.5 Table 365) for
+/// [`PageBuilder::output_intent`]: the output device or condition a page's
+/// colours are meant for.
+///
+/// PDF 2.0 lets a **page** carry its own `/OutputIntents`, which the PDF
+/// Association's example file for it describes as able to *"override the
+/// output intent for the document in the catalog"*; the Arlington model lists
+/// the page entry as 2.0's. Built by chaining from [`NewOutputIntent::new`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NewOutputIntent {
+    /// `/S`: `GTS_PDFX`, `GTS_PDFA1`, `ISO_PDFE1`, or another a reader
+    /// knows. Written as a name.
+    pub subtype: Vec<u8>,
+    /// `/OutputConditionIdentifier`, the one entry Table 365 requires: a
+    /// registered condition's name, or `Custom`.
+    pub output_condition_identifier: String,
+    /// `/OutputCondition`: the condition, for a person.
+    pub output_condition: Option<String>,
+    /// `/RegistryName`: the registry the identifier is in.
+    pub registry_name: Option<String>,
+    /// `/Info`.
+    pub info: Option<String>,
+    /// `/DestOutputProfile`: an ICC profile's bytes and the kind of device
+    /// it characterises, which gives the stream's `/N` — declared, not read
+    /// out of the bytes, for the reason [`ArchivalProfile::destination_space`]
+    /// gives.
+    pub destination_profile: Option<(Vec<u8>, DeviceSpace)>,
+}
+
+impl NewOutputIntent {
+    /// An intent of subtype `subtype` naming the condition `identifier`.
+    #[must_use]
+    pub fn new(subtype: &[u8], identifier: &str) -> NewOutputIntent {
+        NewOutputIntent {
+            subtype: subtype.to_vec(),
+            output_condition_identifier: identifier.to_owned(),
+            output_condition: None,
+            registry_name: None,
+            info: None,
+            destination_profile: None,
+        }
+    }
+
+    /// `/OutputCondition`.
+    #[must_use]
+    pub fn condition(mut self, text: &str) -> NewOutputIntent {
+        self.output_condition = Some(text.to_owned());
+        self
+    }
+
+    /// `/RegistryName`.
+    #[must_use]
+    pub fn registry(mut self, text: &str) -> NewOutputIntent {
+        self.registry_name = Some(text.to_owned());
+        self
+    }
+
+    /// `/Info`.
+    #[must_use]
+    pub fn info(mut self, text: &str) -> NewOutputIntent {
+        self.info = Some(text.to_owned());
+        self
+    }
+
+    /// `/DestOutputProfile`: `bytes` is an ICC profile of a `space` device.
+    #[must_use]
+    pub fn profile(mut self, bytes: Vec<u8>, space: DeviceSpace) -> NewOutputIntent {
+        self.destination_profile = Some((bytes, space));
+        self
+    }
+}
 
 /// Which part of ISO 19005 a document is written under.
 ///
@@ -6373,6 +6486,8 @@ impl DocumentBuilder {
             refusals: Vec::new(),
             optional_depth: 0,
             builder: self.serial,
+            page_intents: self.declared_version() >= (2, 0) && self.profile.is_none(),
+            output_intents: Vec::new(),
         };
         page.reopen(&self.carried, self.carried_refused);
         page
@@ -6968,6 +7083,9 @@ impl DocumentBuilder {
             .map(|page| vec![None; page.links.len()])
             .collect();
 
+        // Each page-level destination profile written, by its bytes and
+        // components, so pages naming one condition share one stream.
+        let mut intent_profiles: BTreeMap<(&[u8], u32), ObjRef> = BTreeMap::new();
         for (at, (page, reference)) in pages.iter().zip(page_refs.iter()).enumerate() {
             let content_ref = self.allocate();
             self.objects.insert_stream(
@@ -7010,6 +7128,71 @@ impl DocumentBuilder {
             }
             dict.insert(Name::RESOURCES, Object::Dict(resources));
             dict.insert(Name::CONTENTS, Object::Ref(content_ref));
+
+            // PDF 2.0: the page's own output intents, written only when it
+            // has some. A profile is numbered the first time a page names it.
+            if !page.output_intents.is_empty() {
+                let version = self.declared_version();
+                let mut listed = Vec::with_capacity(page.output_intents.len());
+                for intent in &page.output_intents {
+                    let mut entry = Dict::new();
+                    entry.insert(Name::TYPE, Object::Name(self.names.intern(b"OutputIntent")));
+                    entry.insert(
+                        self.names.intern(b"S"),
+                        Object::Name(self.names.intern(&intent.subtype)),
+                    );
+                    for (key, value) in [
+                        (&b"OutputCondition"[..], &intent.output_condition),
+                        (b"RegistryName", &intent.registry_name),
+                        (b"Info", &intent.info),
+                    ] {
+                        if let Some(text) = value {
+                            entry.insert(
+                                self.names.intern(key),
+                                Object::String(encode_text_string(text, version)),
+                            );
+                        }
+                    }
+                    entry.insert(
+                        self.names.intern(b"OutputConditionIdentifier"),
+                        Object::String(encode_text_string(
+                            &intent.output_condition_identifier,
+                            version,
+                        )),
+                    );
+                    if let Some((bytes, space)) = &intent.destination_profile {
+                        let components = space.components();
+                        let reference = match intent_profiles.get(&(bytes.as_slice(), components)) {
+                            Some(reference) => *reference,
+                            None => {
+                                let reference = self.allocate();
+                                let mut stream = Dict::new();
+                                // Table 366: the profile stream's `/N`, as an
+                                // `ICCBased` stream carries it.
+                                stream.insert(
+                                    self.names.intern(b"N"),
+                                    Object::Int(i64::from(components)),
+                                );
+                                self.objects.insert_stream(
+                                    reference.num,
+                                    StreamData {
+                                        dict: stream,
+                                        data: bytes.clone(),
+                                    },
+                                );
+                                intent_profiles.insert((bytes.as_slice(), components), reference);
+                                reference
+                            }
+                        };
+                        entry.insert(
+                            self.names.intern(b"DestOutputProfile"),
+                            Object::Ref(reference),
+                        );
+                    }
+                    listed.push(Object::Dict(entry));
+                }
+                dict.insert(self.names.intern(b"OutputIntents"), Object::Array(listed));
+            }
 
             // 12.5.2: the page's annotations, each an indirect object. `/Annots`
             // is written only when there are some — an empty array is a

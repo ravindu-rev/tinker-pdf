@@ -97,9 +97,9 @@ pub use build::{
     ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal, BlendMode, CalculatorOp,
     CompressedImage, DeviceNAttributes, DeviceSpace, DocumentBuilder, EmbeddedWhole, ExtGState,
     FormXObject, Function, Glyph, ImageColorSpace, ImageData, ImageFilter, LayerId, MaskKind,
-    NamespaceId, OutlineEntry, PageBuilder, PlacedGlyph, Shading, ShadingPattern, SoftMask,
-    StateMask, SubsetRefusal, TableAttributes, TableScope, Tag, Target, TilingPattern, TilingType,
-    TransparencyGroup, MATHML_NAMESPACE, PDF_1_7_NAMESPACE, PDF_2_0_NAMESPACE,
+    NamespaceId, NewOutputIntent, OutlineEntry, PageBuilder, PlacedGlyph, Shading, ShadingPattern,
+    SoftMask, StateMask, SubsetRefusal, TableAttributes, TableScope, Tag, Target, TilingPattern,
+    TilingType, TransparencyGroup, MATHML_NAMESPACE, PDF_1_7_NAMESPACE, PDF_2_0_NAMESPACE,
     STANDARD_STRUCTURE_TYPES,
 };
 // `calc::keystroke` and `calc::validate` are deliberately *not* re-exported

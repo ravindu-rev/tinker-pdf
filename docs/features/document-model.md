@@ -150,6 +150,24 @@ so listing costs less than extracting. The catalog's `/Metadata` stream
 (14.3.2) comes back as decoded raw bytes: XMP is RDF/XML, and a caller that
 wants it parsed already has a reader.
 
+**Output intents, the catalog's and a page's.** `Document::output_intents()`
+reads the catalog's `/OutputIntents` (14.11.5) and `Page::output_intents()`
+a page's own, which PDF 2.0 added and which the PDF Association's example
+file describes as able to *override the output intent for the document in
+the catalog*. Each is an `OutputIntent`: `/S`, the required
+`/OutputConditionIdentifier`, `/OutputCondition`, `/RegistryName`, `/Info`,
+and the `/DestOutputProfile` stream by reference with its `/N` — every field
+`None` where the dictionary says nothing usable, nothing defaulted. A page's
+list is the page's alone: the Arlington model does not make the entry
+inheritable, and the two lists are not merged, because how a page's intents
+combine with the catalog's when their subtypes differ is not in a source this
+build could read. The PDF/A validator keeps its own reading (`pdfa/colour.rs`),
+which judges intents against the part claimed and is untouched by this one.
+On the write side `PageBuilder::output_intent(NewOutputIntent)` gives a page
+its own, in a document declaring 2.0 and not under an archival profile — the
+profile writes the catalog's intent and checks device colour against that
+one — and pages naming one profile share one stream.
+
 **The writing side, on an existing document.** Each of these — page labels,
 an attachment, an outline, every `/Info` entry, a caller's XMP packet, viewer
 preferences and the production boxes — has a typed setter on
@@ -167,10 +185,11 @@ numerals capped so a hostile `/St` cannot emit a page of M's.
 
 Everything is on the facade `Document` and `Page`: `metadata()`,
 `pdf_version()`, `outline()`, `page_labels()`, `attachments()`,
-`xmp_metadata()`, `viewer_preferences()`, `page_count()`, `pages()`,
-`page(index)`, `layers()`, `fonts()`, and `Page::media_box()`, `crop_box()`,
-`bleed_box()`, `trim_box()`, `art_box()`, `boundary(PageBoundary)`,
-`rotation()`, `size()`, `links()`, `annotations()`. The types they hand back —
+`xmp_metadata()`, `viewer_preferences()`, `output_intents()`, `page_count()`,
+`pages()`, `page(index)`, `layers()`, `fonts()`, and `Page::media_box()`,
+`crop_box()`, `bleed_box()`, `trim_box()`, `art_box()`,
+`boundary(PageBoundary)`, `rotation()`, `size()`, `links()`, `annotations()`,
+`output_intents()`. The types they hand back —
 `Metadata`, `Trapped`, `OutlineItem`, `Destination`, `DestKind`, `Action`,
 `Link`, `Attachment`, `LabelStyle`, `ViewerPreferences`,
 `NonFullScreenPageMode`, `ReadingDirection`, `PrintScaling`, `Duplex`,
@@ -341,6 +360,9 @@ and 5 129 annotations carry a normal appearance.
 | No usable `/MediaBox` on the whole path | `WarningKind::MediaBoxMissing` | 7.7.3.3 requires one; US Letter is guessed and the guess recorded | [ruling 10](../rulings.md) |
 | A `/BleedBox`, `/TrimBox` or `/ArtBox` on a `/Pages` node | none — the page reads its own or its crop box (`the_production_boxes_are_not_inherited`) | 7.7.3.3 Table 30 does not make them inheritable; taking a parent's would report a box the page never stated | 14.11.2 |
 | A viewer preference of the wrong type, or a name Table 147 does not define | none — the field reads `None` (`malformed_entries_read_as_absent`) | the table has a processor use the default, which is what absent means; a read that warned would make `Document::warnings` depend on who asked first | 12.2 |
+| An `/OutputIntents` array on a `/Pages` node | none — `Page::output_intents` reads the page's own only (`page_level_intents_are_read_from_the_page_alone_beside_the_catalogs`) | the Arlington model's `PageObject` table does not make the entry inheritable | ISO 32000-2 PageObject |
+| A page's intents merged over the catalog's into one answer | none — the two lists are handed back as written | the PDF Association's example says a page's intent overrides the catalog's; how the two combine when their subtypes differ is not in a source this build could read | [pdf20-deltas](../pdf20-deltas.md) |
+| A page-level output intent below 2.0 or under an archival profile | `PageBuilder::output_intent` → `false` | before 2.0 a page has no such entry; a profile writes the catalog's intent and judges every device colour against that one profile, which a page naming another would bypass | [creation](creation.md) |
 | A `/Count` that disagrees with the walk | `WarningKind::PageCountMismatch` | the count is a claim; the walk is the fact | [ruling 10](../rulings.md) |
 | An outline `/First`/`/Next` loop, or one past the caps | `WarningKind::OutlineCycle`, `OutlineTruncated` | a looping sibling chain never ends on its own | [ruling 1](../rulings.md) |
 | A name/number tree cycle, cap breach, or odd-length leaf | `WarningKind::TreeCycle`, `TreeTruncated`, `TreeOddEntries` | the last key of an odd `/Names` array has no value | [ruling 10](../rulings.md) |

@@ -290,6 +290,17 @@ asks for them, and the finished document carries an output intent, a
 byte-deterministic XMP packet and the header version its part requires.
 [features/pdfa.md](pdfa.md) is the whole of it.
 
+**PDF 2.0's page-level output intents.** In a document made with
+`DocumentBuilder::with_version(2, 0)`, `PageBuilder::output_intent(NewOutputIntent)`
+gives a page its own `/OutputIntents` entry — `/S`, the required
+`/OutputConditionIdentifier`, `/OutputCondition`, `/RegistryName`, `/Info` and
+an ICC `/DestOutputProfile` whose `/N` comes from the `DeviceSpace` declared
+beside it — and pages naming one profile share one stream. It returns `false`
+below 2.0, under an archival profile (which writes the catalog's intent and
+judges every device colour against that one), and for an empty `/S`,
+identifier or profile. `Page::output_intents` reads it back
+([document-model](document-model.md)).
+
 ## Refused by name
 
 | What | How it shows | Why | See |
