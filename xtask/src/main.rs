@@ -50,8 +50,9 @@ release options:
                                  bindings/dotnet/runtimes/<rid>/native/
 
   cargo xtask bindings-parity [options]
-                  run the nine parity scripts -- six that write a document,
-                  three that write down what the read surface says -- on the
+                  run the thirteen parity scripts -- nine that write a
+                  document, four that write down what a sanitise reported and
+                  what the read surface, signatures and form data say -- on the
                   facade, the wheel, the npm package, the NuGet package and
                   the Go, Ruby and Java bindings, and require byte-identical
                   output. Non-zero on a mismatch OR on a surface that ran and

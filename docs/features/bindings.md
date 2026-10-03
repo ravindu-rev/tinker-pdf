@@ -68,9 +68,9 @@ from any thread.
 **Two hundred and eighteen functions**, counted from the committed
 header, October 2026 — eighteen open and render, two streaming, five
 validating, fifty-five writing, thirteen running form scripts
-(`tpdf_editor_recalculate` and the ten calls of its report,
+(`tpdf_editor_recalculate` and the nine calls of its report,
 `tpdf_editor_formatted_value`, `_keystroke` and `_validate`), thirty reading
-signatures, thirty-four on the read surface, sixteen document operations
+signatures, thirty-four on the read surface, sixteen document operations,
 twenty-two on the forms surface, thirteen of the builder's graphics
 resources and ten of tagged writing.
 The fifty-five are the write surface below and the five are the strict
@@ -134,7 +134,13 @@ four `#[repr(C)]` enums, and `NotChecked` is not `Differs`.
 answers a `TpdfTrapped` whose `Absent` is the key missing and whose `Unknown`
 is the document saying `/Unknown` — the facade's `Option<Trapped>` carries
 both and a three-arm enum would merge them — and `_pdf_version`,
-`_page_label` and `_xmp_metadata` (a `TpdfBuffer`) follow. The outline, a
+`_page_label` and `_xmp_metadata` (a `TpdfBuffer`) follow. `_page_label`
+takes one index and is **not** a 1:1 projection: the facade answers
+`page_labels()`, every label at once, and each call builds all of them to
+hand back one, so reading a document's labels page by page — as the Go,
+Ruby, Java and .NET read surfaces do — costs the page count squared. A list
+handle on the outline's pattern is owed in its place (review of lane 7C);
+it is in the ROADMAP's Bindings row. The outline, a
 page's links, the attachments and the warnings cross as owned handles on the
 `TpdfSignatures` pattern — `TpdfOutline`, `TpdfLinks`, `TpdfAttachments`,
 `TpdfWarnings`, each with `_count`, index accessors and `_free` — so each
