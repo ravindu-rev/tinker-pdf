@@ -48,6 +48,7 @@
 //! | a pattern is painted as nothing | 1 |
 //! | the registry does not note a tile's runs | 1 |
 //! | the registry does not note a mask's runs | 1 |
+//! | a mask with no region is clipped to nothing | 1 |
 //! | the reader ignores a container's `clip-path`, as it did until groups | 1 |
 //!
 //! The form row fired **zero** the first time: its fixture's shapes covered
@@ -615,6 +616,54 @@ fn a_groups_clip_path_reaches_the_page() {
         rgb_at(&doc, 0.75, 0.5)[0] > 0xC0,
         "and the right half is clipped away"
     );
+}
+
+// ---- §14.3.5's clip paths of `<use>` and `<text>` ------------------------------
+
+/// **A clip of a shape and a run reaches the page as the mask of both.**
+///
+/// The left half of the clip is a rectangle and the right half holds a word.
+/// A standard-14 face draws no outline in this build, so the word's half is
+/// white either way; what is asserted is that the shape's half of the union
+/// keeps the blue under it, the word is written into the mask, and its face
+/// is one the file holds.
+#[test]
+fn a_clip_of_a_shape_and_text_masks_by_both() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <clipPath id="c">
+                <rect width="100" height="200"/>
+                <text x="120" y="100" font-family="serif" font-size="40">Clip</text>
+              </clipPath>
+              <rect width="200" height="200" fill="#0000ff" clip-path="url(#c)"/>
+            </svg>"##,
+    );
+    assert_eq!(rgb_at(&doc, 0.25, 0.5), [0, 0, 255], "inside the rectangle");
+    assert_eq!(rgb_at(&doc, 0.75, 0.1), [255, 255, 255], "outside both");
+    let pdf = doc.editor().save(&Default::default());
+    let text = String::from_utf8_lossy(&pdf);
+    assert!(text.contains("/Luminosity"), "a luminosity mask is written");
+    let fonts = fonts_named_and_defined(&doc);
+    assert!(!fonts.is_empty(), "the word is written into the mask");
+    assert!(fonts.iter().all(|(_, defined)| *defined), "{fonts:?}");
+}
+
+/// A `<use>` of a shape in a clip is that shape, and clips like one.
+#[test]
+fn a_use_in_a_clip_clips_like_its_shape() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <defs><rect id="r" width="100" height="200"/></defs>
+              <clipPath id="c"><use href="#r" x="100"/></clipPath>
+              <rect width="200" height="200" fill="#0000ff" clip-path="url(#c)"/>
+            </svg>"##,
+    );
+    assert_eq!(
+        rgb_at(&doc, 0.25, 0.5),
+        [255, 255, 255],
+        "left of the moved square"
+    );
+    assert_eq!(rgb_at(&doc, 0.75, 0.5), [0, 0, 255], "inside it");
 }
 
 // ---- §13.3's patterns ---------------------------------------------------------

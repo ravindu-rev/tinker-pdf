@@ -35,7 +35,7 @@ use crate::path::{self, Outline, Segment};
 use crate::shape::{self, Shape};
 use crate::style::{self, PaintSpec, Sheet, Style};
 use crate::transform::{self, IDENTITY};
-use crate::{Limits, Paint, Refusal, Scene, Stroke, TextStyle, Warning};
+use crate::{Colour, Limits, Paint, Refusal, Scene, Stroke, TextStyle, Warning};
 use tinker_pdf_math as math;
 
 /// The default viewport, in user units, for a document that states no size.
@@ -204,20 +204,41 @@ impl Walk<'_> {
         }
         let bounds = transform::invert(matrix)
             .map_or([0.0; 4], |inverse| gradient::nodes_bounds(&nodes, inverse));
-        let clip = match &style.clip_path {
+        let source = match &style.clip_path {
             None => None,
-            Some(name) => match gradient::clip(self.tree, name, matrix, bounds, style) {
-                Some(clip) => Some(clip),
-                None => {
-                    self.warn(Warning::ClipPathUnsupported);
-                    None
-                }
-            },
+            Some(name) => self.clip_of(name, matrix, bounds, style)?,
+        };
+        let (clip, silhouette) = match source {
+            Some(source) if !source.text.is_empty() => {
+                (None, Some(self.silhouette(source, frame)?))
+            }
+            Some(source) => (Some(source.clip), None),
+            None => (None, None),
         };
         let mask = match &style.mask {
             None => None,
             Some(name) => self.mask_of(name, matrix, bounds, frame)?.map(Box::new),
         };
+        if let Some(silhouette) = silhouette {
+            // A clip that holds text is a mask of its silhouettes, and an
+            // element with a mask of its own as well is masked by both — one
+            // group inside the other, since a group holds one mask.
+            if mask.is_some() {
+                self.charge()?;
+                nodes = vec![crate::Node::Group {
+                    nodes,
+                    opacity: 1.0,
+                    clip: None,
+                    mask,
+                }];
+            }
+            return self.push(crate::Node::Group {
+                nodes,
+                opacity,
+                clip: None,
+                mask: Some(Box::new(silhouette)),
+            });
+        }
         if mask.is_some() {
             return self.push(crate::Node::Group {
                 nodes,
@@ -281,7 +302,7 @@ impl Walk<'_> {
         let element = &tree.nodes[at];
         let nothing = crate::Mask {
             nodes: Vec::new(),
-            region: Outline::default(),
+            region: Some(Outline::default()),
         };
         let [min_x, min_y, max_x, max_y] = bounds;
         let (width, height) = (max_x - min_x, max_y - min_y);
@@ -352,8 +373,92 @@ impl Walk<'_> {
         };
         Ok(Some(crate::Mask {
             nodes,
-            region: rectangle.transformed(matrix),
+            region: Some(rectangle.transformed(matrix)),
         }))
+    }
+
+    /// §14.3's `<clipPath>`, read for one element: [`gradient::clip`] with the
+    /// walk's segment budget, and its two warnings named.
+    fn clip_of(
+        &mut self,
+        name: &str,
+        matrix: [f64; 6],
+        bounds: [f64; 4],
+        style: &Style,
+    ) -> Result<Option<gradient::ClipSource>, Refusal> {
+        let source = gradient::clip(self.tree, name, matrix, bounds, style, &mut self.segments)?;
+        match &source {
+            None => self.warn(Warning::ClipPathUnsupported),
+            Some(source) if source.ignored => self.warn(Warning::ClipChildIgnored),
+            Some(_) => {}
+        }
+        Ok(source)
+    }
+
+    /// A `<clipPath>` that holds text, as the mask of its silhouettes.
+    ///
+    /// §14.3.5's clip is *"the raw geometry of each child element exclusive of
+    /// rendering properties such as fill, stroke, stroke-width"*, a one-bit
+    /// mask. Its shapes are already one outline; its text is walked as text —
+    /// styled down the `<clipPath>`'s own ancestry, or the `<use>`'s that
+    /// names it, never the clipped element's (§14.3.5) — and every run and
+    /// the outline are filled white, unstroked and opaque, on the black a
+    /// mask has wherever nothing is drawn. White is the luminance that keeps,
+    /// so the mask is the union of the silhouettes.
+    fn silhouette(
+        &mut self,
+        source: gradient::ClipSource,
+        frame: &Frame,
+    ) -> Result<crate::Mask, Refusal> {
+        // A clip whose text wears the same clip is the `<use>` bomb in a fifth
+        // spelling.
+        if self.expanding.contains(&source.at) {
+            return Err(Refusal::TooManyUses);
+        }
+        let mut nodes = Vec::new();
+        if !source.clip.outline.segments.is_empty() {
+            let shapes = crate::Node::Path {
+                outline: source.clip.outline,
+                fill: Paint::Solid(Colour { rgb: [1.0; 3] }),
+                rule: source.clip.rule,
+                fill_opacity: 1.0,
+                stroke: None,
+                clip: None,
+            };
+            if self.admits(&shapes) {
+                self.charge()?;
+                nodes.push(shapes);
+            }
+        }
+        // The text position belongs to the run being clipped.
+        let text = std::mem::take(&mut self.text);
+        self.expanding.push(source.at);
+        let mut drawn = Ok(());
+        for (at, matrix, parent) in source.text {
+            let walked = self.style_of(parent).and_then(|style| {
+                let inner = Frame {
+                    matrix,
+                    viewport: frame.viewport,
+                    style,
+                    depth: frame.depth + 1,
+                };
+                self.collect(|walk| walk.element(at, &inner))
+            });
+            match walked {
+                Ok(found) => whiten(found, &mut nodes),
+                Err(refusal) => {
+                    drawn = Err(refusal);
+                    break;
+                }
+            }
+        }
+        self.expanding.pop();
+        self.text = text;
+        drawn?;
+        Ok(crate::Mask {
+            nodes,
+            region: None,
+        })
     }
 
     /// One node at an element's own `opacity`: pushed as it is, folded into
@@ -630,15 +735,18 @@ impl Walk<'_> {
         // A `clip-path` naming nothing is **not** a clip: §14.3.1 makes a
         // reference to a non-existent element an error, and ruling 2 draws the
         // element rather than losing it.
+        //
+        // A clip that holds text is a mask of silhouettes, which a shape cannot
+        // carry: it is a group around the shape, as a `mask` is.
+        let text_clip = style
+            .clip_path
+            .as_deref()
+            .is_some_and(|name| gradient::clip_holds_text(self.tree, name));
         let clip = match &style.clip_path {
-            None => None,
-            Some(name) => match gradient::clip(self.tree, name, matrix, bounds, style) {
-                Some(clip) => Some(clip),
-                None => {
-                    self.warn(Warning::ClipPathUnsupported);
-                    None
-                }
-            },
+            Some(name) if !text_clip => self
+                .clip_of(name, matrix, bounds, style)?
+                .map(|source| source.clip),
+            _ => None,
         };
         // §11.4: a stroke with no paint, no width or a zero width puts no ink
         // on the page. Answered here rather than carried, so a consumer never
@@ -660,10 +768,14 @@ impl Walk<'_> {
         // §14.4's mask on a shape is of its whole rendering — fill, stroke and
         // markers — so it is a group around what follows, with the opacity
         // and the clip left to the shape itself, which handles both already.
-        if style.mask.is_some() {
+        if style.mask.is_some() || text_clip {
             let masking = Style {
                 opacity: 1.0,
-                clip_path: None,
+                clip_path: if text_clip {
+                    style.clip_path.clone()
+                } else {
+                    None
+                },
                 ..style.clone()
             };
             let unmasked = Style {
@@ -1775,6 +1887,66 @@ struct Marker {
 
 /// Whether every number one node carries is finite — not counting a group's
 /// children, which [`Walk::push`] admitted before they were grouped.
+/// A clip's text as silhouettes: every run filled white, opaque and
+/// unstroked, at every depth, onto `out`.
+///
+/// A group inside keeps its own clip and mask — a child of a `<clipPath>`
+/// may be clipped itself, §14.3.5 says, and the silhouette is then the
+/// intersection — and loses its opacity, which a one-bit mask does not have.
+fn whiten(nodes: Vec<crate::Node>, out: &mut Vec<crate::Node>) {
+    let white = Paint::Solid(Colour { rgb: [1.0; 3] });
+    for node in nodes {
+        match node {
+            crate::Node::Text {
+                text,
+                anchor,
+                continues_x,
+                matrix,
+                font,
+                rotate,
+                ..
+            } => out.push(crate::Node::Text {
+                text,
+                anchor,
+                continues_x,
+                matrix,
+                font,
+                rotate,
+                fill: white.clone(),
+                fill_opacity: 1.0,
+                stroke: None,
+            }),
+            crate::Node::Path {
+                outline,
+                rule,
+                clip,
+                ..
+            } => out.push(crate::Node::Path {
+                outline,
+                fill: white.clone(),
+                rule,
+                fill_opacity: 1.0,
+                stroke: None,
+                clip,
+            }),
+            crate::Node::Group {
+                nodes, clip, mask, ..
+            } => {
+                let mut inner = Vec::new();
+                whiten(nodes, &mut inner);
+                out.push(crate::Node::Group {
+                    nodes: inner,
+                    opacity: 1.0,
+                    clip,
+                    mask,
+                });
+            }
+            // A picture has no silhouette in a clip: §14.3.5 admits none.
+            crate::Node::Image { .. } => {}
+        }
+    }
+}
+
 fn finite(node: &crate::Node) -> bool {
     fn outline(outline: &Outline) -> bool {
         outline.segments.iter().all(|segment| match *segment {
@@ -1846,7 +2018,9 @@ fn finite(node: &crate::Node) -> bool {
         } => {
             opacity.is_finite()
                 && clip.as_ref().is_none_or(|clip| outline(&clip.outline))
-                && mask.as_ref().is_none_or(|mask| outline(&mask.region))
+                && mask
+                    .as_ref()
+                    .is_none_or(|mask| mask.region.as_ref().is_none_or(outline))
         }
     }
 }

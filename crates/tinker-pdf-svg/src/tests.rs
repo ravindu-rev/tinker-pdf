@@ -537,7 +537,9 @@ fn sweep_nodes(nodes: &[crate::Node], out: &mut Vec<f64>) {
                     outline(&clip.outline, out);
                 }
                 if let Some(mask) = mask {
-                    outline(&mask.region, out);
+                    if let Some(region) = &mask.region {
+                        outline(region, out);
+                    }
                     sweep_nodes(&mask.nodes, out);
                 }
                 sweep_nodes(nodes, out);

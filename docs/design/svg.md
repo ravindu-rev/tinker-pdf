@@ -36,7 +36,8 @@ refusal table stops meaning anything.
   inheritance between paint servers — which is how every Illustrator file
   states a gradient it uses twice.
 - **§14.3's clipping**: `<clipPath>` and `clip-path`, as a path a consumer
-  intersects with.
+  intersects with — and, for a clip that holds text, as a mask (see *As
+  built*).
 - **§10's text**, through the shaping path that already sets an EPUB's prose:
   `<text>`, `<tspan>`, `x`/`y`/`dx`/`dy`, `text-anchor`, and the font
   properties a run needs.
@@ -338,6 +339,29 @@ on a thousand shapes is a thousand tiles' worth of the budget, as the same
 unregistered until both were checked for it — the registry noted the page's
 runs and a group's, not a mask's or a tile's, so their `Tf` named a font the
 file did not hold (`text_inside_a_tile_or_a_mask_names_a_font_the_file_has`).
+
+**After the milestones: §14.3.5's `<use>` and `<text>` in a clip.** A
+`<use>` there must name a shape or text directly, §14.3.5 says, and one that
+names a shape is that shape, placed as §5.6 places it — the `<use>`'s
+`transform`, its `x` and `y`, then the shape's own `transform` — joining the
+outline. A clip is rebuilt for every element that names it, so its segments
+are now spent from the document's budget, which a `<use>` in a clip would
+otherwise multiply for free. Text is the case a clip cannot hold: a glyph's
+outline is a font's, which this crate does not have, and the union of a path
+and glyphs is not one PDF clip either — `W` intersects, and 9.3.6's clipping
+text modes add glyphs only to each other. So a clip that holds text is a
+`Mask` with no region of its own: the clip's shapes as one white outline,
+under its fill rule, and every run walked as text styled down the
+`<clipPath>`'s own ancestry (or the `<use>`'s that names it), then filled
+white, opaque and unstroked whatever it was painted with. White keeps, a
+mask's black backdrop removes, and the union is what the luminance is. An
+element with a mask of its own as well is a group masked by one inside a
+group masked by the other. A child the content model refuses — a `<g>`, an
+`<image>`, a `<use>` of a group — adds nothing and is `ClipChildIgnored`.
+**Both kinds of child had been skipped without a word** until now: the
+shape loop passed over anything that was not a shape, and the warning the
+refusal table cited for them was raised only for a reference naming no
+`<clipPath>` at all.
 
 **What this cannot reach**, stated rather than absorbed: nothing outside this
 repository adjudicates a rendering (ruling 13), so every expected value here is

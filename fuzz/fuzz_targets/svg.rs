@@ -262,7 +262,9 @@ fn sweep_nodes(nodes: &[Node], out: &mut Vec<f64>) {
                 // A mask's region reaches a `W` and its content a soft mask's
                 // form, so both are swept like the group's own.
                 if let Some(mask) = mask {
-                    sweep(&mask.region, out);
+                    if let Some(region) = &mask.region {
+                        sweep(region, out);
+                    }
                     sweep_nodes(&mask.nodes, out);
                 }
                 sweep_nodes(nodes, out);

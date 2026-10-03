@@ -536,13 +536,17 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
         content.extend_from_slice(b"q ");
         matrix(&mut content, space.base);
         content.extend_from_slice(b" cm\n");
-        apply_clip(
-            &mut content,
-            &Clip {
-                outline: mask.region.clone(),
-                rule: FillRule::NonZero,
-            },
-        );
+        // A mask with no region of its own — a clip's silhouettes — is
+        // bounded by its form's `/BBox` and the black backdrop alone.
+        if let Some(region) = &mask.region {
+            apply_clip(
+                &mut content,
+                &Clip {
+                    outline: region.clone(),
+                    rule: FillRule::NonZero,
+                },
+            );
+        }
         self.nodes(&mut content, &mask.nodes, inside, &mut cursor);
         content.extend_from_slice(b"Q\n");
         let form = self.name("M");

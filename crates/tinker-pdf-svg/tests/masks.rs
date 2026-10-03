@@ -79,7 +79,7 @@ fn the_initial_region_is_ten_percent_around_the_box() {
     );
     let (nodes, mask) = masked(&scene);
     assert_eq!(nodes.len(), 1, "the rectangle, inside the group");
-    let [x0, y0, x1, y1] = span(&mask.region);
+    let [x0, y0, x1, y1] = span(mask.region.as_ref().expect("a <mask> has a region"));
     near(x0, 8.0, "left");
     near(y0, 9.0, "top");
     near(x1, 32.0, "right");
@@ -99,7 +99,7 @@ fn the_two_unit_attributes_mean_what_they_say() {
          <rect x=\"10\" y=\"10\" width=\"20\" height=\"10\" mask=\"url(#m)\"/>",
     );
     let (_, mask) = masked(&scene);
-    let [x0, y0, x1, y1] = span(&mask.region);
+    let [x0, y0, x1, y1] = span(mask.region.as_ref().expect("a <mask> has a region"));
     assert_eq!(
         [x0, y0, x1, y1],
         [0.0, 0.0, 50.0, 40.0],
@@ -171,7 +171,7 @@ fn a_region_with_no_area_masks_everything() {
          <rect width=\"10\" height=\"10\" mask=\"url(#m)\"/>",
     );
     let (_, mask) = masked(&scene);
-    assert!(mask.region.segments.is_empty(), "{:?}", mask.region);
+    assert_eq!(mask.region, Some(Default::default()), "{:?}", mask.region);
     assert!(mask.nodes.is_empty(), "and nothing to read luminance from");
 }
 

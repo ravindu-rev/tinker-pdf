@@ -164,15 +164,20 @@ pub enum Warning {
     /// that went nowhere, and the element is drawn unmasked: ruling 2's
     /// answer, and `clip-path`'s.
     MaskUnresolved,
-    /// A `clip-path` naming something this build cannot turn into an outline.
+    /// A `clip-path` naming no `<clipPath>`.
     ///
-    /// **Not the element**: a `<clipPath>` full of shapes is drawn as a clip
-    /// since milestone 4. This is the reference that names no `<clipPath>` at
-    /// all, or one whose children are `<use>` or `<text>` — geometry that
-    /// exists somewhere else. The element is drawn **unclipped**, which is
-    /// ruling 2's answer and the one that keeps a picture rather than losing
-    /// it; the alternative reading of §14.3.1 would clip everything away.
+    /// **Not the element**: a `<clipPath>` of shapes is drawn as a clip since
+    /// milestone 4, and one holding `<use>` or `<text>` since those left the
+    /// refusal list. This is the reference that went nowhere. The element is
+    /// drawn **unclipped**, which is ruling 2's answer and the one that keeps
+    /// a picture rather than losing it; the alternative reading of §14.3.1
+    /// would clip everything away.
     ClipPathUnsupported,
+    /// A `<clipPath>` child §14.3.5's content model does not admit — a `<g>`,
+    /// an `<image>`, or a `<use>` naming anything but a shape or `<text>`
+    /// (*"indirect references are an error"*) — which adds nothing to the
+    /// clip. The rest of the clip applies.
+    ClipChildIgnored,
     /// Something whose coordinates, once every transform above it was
     /// composed, are past a double's range — `scale(1e300)` inside
     /// `scale(1e300)`, or a `markerWidth` of `1e308` under a view box.
@@ -397,7 +402,12 @@ pub struct Mask {
     /// The mask region — `x`, `y`, `width` and `height` of the `<mask>` — as
     /// an outline in the scene's space. Empty for a region with no area,
     /// which masks everything away.
-    pub region: path::Outline,
+    ///
+    /// `None` for a mask with no region of its own: a `<clipPath>` that holds
+    /// text, drawn as the mask of its silhouettes — its shapes and its glyphs
+    /// in white — because a glyph's outline is a font's (ruling 8) and a
+    /// union of a path and glyphs is not something one clip can say.
+    pub region: Option<path::Outline>,
 }
 
 /// SVG 1.1 §11.3's `fill-rule`.
