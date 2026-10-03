@@ -143,6 +143,16 @@ pub struct ComputedStyle {
     pub white_space: WhiteSpace,
     /// `list-style-type`
     pub list_style_type: ListStyleType,
+    /// `list-style-position`
+    pub list_style_position: ListStylePosition,
+    /// `counter-reset`, `css-lists-3` §4.2. Read by [`crate::counter`], which
+    /// walks the counter tree after the cascade; nothing downstream lays it
+    /// out.
+    pub counter_reset: Vec<CounterChange>,
+    /// `counter-increment`, §4.3.
+    pub counter_increment: Vec<CounterChange>,
+    /// `counter-set`, §4.4.
+    pub counter_set: Vec<CounterChange>,
     /// `visibility`
     pub visibility: Visibility,
     /// `text-decoration`
@@ -278,6 +288,10 @@ impl ComputedStyle {
             text_indent: LengthPercentage::ZERO,
             white_space: WhiteSpace::Normal,
             list_style_type: ListStyleType::Disc,
+            list_style_position: ListStylePosition::Outside,
+            counter_reset: Vec::new(),
+            counter_increment: Vec::new(),
+            counter_set: Vec::new(),
             visibility: Visibility::Visible,
             text_decoration: TextDecoration::None,
             text_transform: TextTransform::None,
@@ -376,6 +390,7 @@ impl ComputedStyle {
         style.white_space = parent.white_space;
         style.text_transform = parent.text_transform;
         style.list_style_type = parent.list_style_type;
+        style.list_style_position = parent.list_style_position;
         style.visibility = parent.visibility;
         style.orphans = parent.orphans;
         style.widows = parent.widows;
@@ -453,6 +468,10 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::TextTransform(value) => style.text_transform = *value,
         Property::WhiteSpace(value) => style.white_space = *value,
         Property::ListStyleType(value) => style.list_style_type = *value,
+        Property::ListStylePosition(value) => style.list_style_position = *value,
+        Property::CounterReset(value) => style.counter_reset = value.clone(),
+        Property::CounterIncrement(value) => style.counter_increment = value.clone(),
+        Property::CounterSet(value) => style.counter_set = value.clone(),
         Property::Visibility(value) => style.visibility = *value,
         Property::Display(value) => style.display = *value,
         Property::Float(value) => style.float = *value,
@@ -701,21 +720,32 @@ pub struct StyleTree {
     /// Parallel rather than sparse because the consumer walks the element tree
     /// and asks about every element it reaches; a map would turn a hot loop
     /// into a lookup for the sake of a book that has none. `Generated::default`
-    /// is two `None`s and costs two words.
+    /// is three `None`s.
     pub generated: Vec<Generated>,
 }
 
 impl StyleTree {
+    /// A list item's marker text, or `None` for an element that is not one.
+    ///
+    /// The second door, beside [`StyleTree::pseudo`], and for the same reason:
+    /// the marker's number is the `list-item` counter, a counter is a walk of
+    /// the whole tree in document order, and `tinker-pdf-layout` sees one box
+    /// at a time.
+    #[must_use]
+    pub fn marker(&self, element: usize) -> Option<&str> {
+        self.generated.get(element)?.marker.as_deref()
+    }
+
     /// The box `which` generated for `element`, if any rule generated one.
     ///
-    /// **This is the whole door between the cascade and box generation, and
-    /// there is deliberately only one.** `tinker-pdf-layout` has no selector
+    /// **This and [`StyleTree::marker`] are the whole door between the
+    /// cascade and box generation.** `tinker-pdf-layout` has no selector
     /// engine and is never going to have one -- it takes a box tree and lays it
     /// out -- so the box has to exist before layout sees anything, which means
     /// `epub::read::build` has to be able to ask this question while it walks
     /// the DOM. Everything a generated box needs is on the far side of this
     /// call: the style, already inherited from the originating element, and the
-    /// text, with `attr()` already resolved.
+    /// text, with `attr()` and `counter()` already resolved.
     ///
     /// Returns `None` for `::first-line` and `::first-letter`, which generate
     /// nothing here and are counted by
@@ -755,13 +785,18 @@ pub struct PseudoBox {
     /// The generated box's own computed style. Inherited from the
     /// **originating element**, per §12.1, and not from its parent.
     pub style: ComputedStyle,
-    /// The text to lay out, with every `attr()` already resolved.
+    /// The text to lay out, with every `attr()`, `counter()` and
+    /// `counters()` already resolved.
     ///
     /// A `String` and not a value tree: `attr()` needs the originating element
-    /// and the cascade is the last place that has one, so resolving it here is
-    /// what keeps `epub::read` from needing a DOM lookup it has no business
-    /// doing.
+    /// and `counter()` the counter tree, the cascade is the last place that has
+    /// either, and resolving them here is what keeps `epub::read` from needing
+    /// a DOM lookup it has no business doing.
     pub text: String,
+    /// The `content` items the text was made from, kept because a counter's
+    /// value is not known until [`crate::counter`] has walked the whole tree
+    /// up to this box.
+    pub content: Vec<ContentItem>,
 }
 
 /// The two pseudo-elements an element can generate a box for.
@@ -771,6 +806,11 @@ pub struct Generated {
     pub before: Option<PseudoBox>,
     /// `::after`, laid out behind them.
     pub after: Option<PseudoBox>,
+    /// A `display: list-item`'s marker text, `css-lists-3` §3: its
+    /// `list-item` counter in its `list-style-type`, with the style's `.`
+    /// suffix and without its space. `None` on anything that is not a list
+    /// item or generates no box.
+    pub marker: Option<String>,
 }
 
 /// One sheet and where in the cascade it sits.
@@ -868,6 +908,7 @@ pub fn cascade_from<E: Element>(
             root_font_size,
         };
         generated.push(Generated {
+            marker: None,
             before: matcher.pseudo_winners(
                 elements,
                 index,
@@ -903,6 +944,10 @@ pub fn cascade_from<E: Element>(
         }
         styles.push(style);
     }
+
+    // `css-lists-3` §4.5, over the finished styles. See [`crate::counter`]
+    // for why it is a walk of its own.
+    crate::counter::resolve(elements, &styles, &mut generated, budget)?;
 
     Ok(StyleTree {
         styles,
@@ -1372,18 +1417,9 @@ impl<'a> Matcher<'a> {
             _ => return Ok(None),
         };
 
-        let mut text = String::new();
-        for item in items {
-            match item {
-                ContentItem::Text(literal) => text.push_str(literal),
-                // §2.4: an attribute the element does not carry contributes the
-                // empty string, which is the specification's own answer and not
-                // a fallback invented here.
-                ContentItem::Attr(name) => {
-                    text.push_str(elements[at].attribute(name).unwrap_or(""));
-                }
-            }
-        }
+        // The text is written by `crate::counter::resolve`, once the walk
+        // has reached this box: a `counter()` in it has no value before then.
+        let content = items.clone();
 
         let mut winners: Vec<(Longhand, usize)> = Vec::new();
         for (index, (_, _, declared)) in matched.iter().enumerate() {
@@ -1414,7 +1450,11 @@ impl<'a> Matcher<'a> {
             from.initial,
             from.root_font_size,
         );
-        Ok(Some(PseudoBox { style, text }))
+        Ok(Some(PseudoBox {
+            style,
+            text: String::new(),
+            content,
+        }))
     }
 
     fn winners<E: Element>(
@@ -1424,7 +1464,31 @@ impl<'a> Matcher<'a> {
         report: &mut Report,
         budget: &mut Budget,
     ) -> Result<Vec<Winner>, Refusal> {
+        // The document language's presentational hints — HTML §15.1: author
+        // level, specificity zero, *"at the start of the author style sheet"*.
+        // Pushed first and keyed at the weakest layer and the first position,
+        // so that every author rule that matches beats them on a tie as well
+        // as on specificity: an `<ol start="3">` styled `ol { counter-reset:
+        // list-item }` by its book numbers from one, which is what the author's
+        // rule says.
+        let hint_owned: Vec<Declared> = match elements[at].presentational_hints() {
+            Some(source) => crate::parse_inline(&source, report, budget)?,
+            None => Vec::new(),
+        };
         let mut matched: Vec<(CascadeKey, Origin, &Declared)> = Vec::new();
+        for declared in &hint_owned {
+            matched.push((
+                CascadeKey {
+                    rank: rank(Origin::Author, declared.important),
+                    attached: false,
+                    layer: 0,
+                    specificity: Specificity::ZERO,
+                    order: 0,
+                },
+                Origin::Author,
+                declared,
+            ));
+        }
         for handle in self.index.candidates(&elements[at]) {
             let (rule_at, selector_at) = self.selectors[handle];
             let placed = &self.rules[rule_at];
@@ -1731,6 +1795,10 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
         Longhand::TextTransform => into.text_transform = from.text_transform,
         Longhand::WhiteSpace => into.white_space = from.white_space,
         Longhand::ListStyleType => into.list_style_type = from.list_style_type,
+        Longhand::ListStylePosition => into.list_style_position = from.list_style_position,
+        Longhand::CounterReset => into.counter_reset = from.counter_reset.clone(),
+        Longhand::CounterIncrement => into.counter_increment = from.counter_increment.clone(),
+        Longhand::CounterSet => into.counter_set = from.counter_set.clone(),
         Longhand::Visibility => into.visibility = from.visibility,
         Longhand::Display => into.display = from.display,
         Longhand::Float => into.float = from.float,

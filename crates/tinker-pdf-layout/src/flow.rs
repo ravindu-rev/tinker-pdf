@@ -65,9 +65,9 @@ use std::collections::HashMap;
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignItems, BorderCollapse, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
-    ColumnSpan, ColumnWidth, Display, Float, LengthPercentage, ListStyleType, MarginValue,
-    OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size, TableLayout, TextAlign,
-    VerticalAlign, ZIndex,
+    ColumnSpan, ColumnWidth, Display, Float, LengthPercentage, ListStylePosition, ListStyleType,
+    MarginValue, OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size,
+    TableLayout, TextAlign, VerticalAlign, ZIndex,
 };
 
 use crate::flex;
@@ -465,6 +465,19 @@ struct Builder<'a, M: Metrics> {
     /// text conservation — an *ordered* comparison — would fail on a book that
     /// lost nothing at all.
     sequence: usize,
+    /// An `inside` list marker waiting for the first line of its list item,
+    /// CSS 2.2 §12.5.1 and `css-lists-3` §3.2.
+    ///
+    /// **It is the list item's first inline box**, so where it lands depends on
+    /// what the item's content turns out to be, which is not known when the item
+    /// is opened: an item that starts with text sets the marker at the head of
+    /// that text's first line, and one that starts with a block sets it on an
+    /// anonymous line of its own above the block — §9.2.1.1, the marker being
+    /// inline content beside a block sibling. So it is armed by
+    /// [`Builder::block`] and `take`n by whichever of those happens first, and
+    /// a sub-flow — a float's, a column's — saves and clears it, because a float
+    /// that leads a list item is not where its marker goes.
+    inside_marker: Option<Piece>,
 }
 
 /// What laying a subtree out in its own formatting context came to.
@@ -712,6 +725,10 @@ struct Piece {
     anchor: Option<u32>,
     /// Its position in document order. See [`Builder::sequence`].
     order: usize,
+    /// Text the source does not contain: an `inside` list marker. Carried to
+    /// [`TextRun::generated`], which is what keeps it out of text conservation
+    /// and makes the painter mark it an artifact.
+    generated: bool,
 }
 
 /// An atomic inline-level box, CSS 2.2 §9.2.2.
@@ -792,6 +809,7 @@ pub(crate) fn build<M: Metrics>(
         cell: None,
         flex_pass: None,
         sequence: 0,
+        inside_marker: None,
     };
     builder.block(root, options.width, 0.0, 0, false, 0)?;
     // The last pending margin is committed so the flow's height includes it,
@@ -1087,6 +1105,7 @@ impl<M: Metrics> Builder<'_, M> {
         // for the reason above: an uncommitted margin has not moved `self.y`
         // yet and it will.
         let outer_top = std::mem::replace(&mut self.content_top, before + self.pending.value());
+        self.arm_marker(node, &style, ordinal);
         if let Some(size) = replaced {
             self.replaced_content(
                 block,
@@ -1117,6 +1136,7 @@ impl<M: Metrics> Builder<'_, M> {
         } else {
             self.children(node, &style, content_x, content_width, depth, avoid, block)?;
         }
+        self.disarm_marker();
         self.content_top = outer_top;
         let content_height = self.y - before;
 
@@ -1147,8 +1167,11 @@ impl<M: Metrics> Builder<'_, M> {
 
         // The marker of a `list-item` is generated content and goes on the
         // box's first line, which is why it is placed after the children.
-        if style.display == Display::ListItem {
-            self.marker(&style, block, content_x, ordinal);
+        // An `inside` one went into that line as its first inline box instead.
+        if style.display == Display::ListItem
+            && style.list_style_position == ListStylePosition::Outside
+        {
+            self.marker(node, &style, block, content_x, ordinal);
         }
         Ok(())
     }
@@ -1338,13 +1361,16 @@ impl<M: Metrics> Builder<'_, M> {
             Content::Text(source) => {
                 let mut pieces = Vec::new();
                 let mut collapser = Collapser::new();
-                let text = collapser.push(source, style.white_space);
+                self.lead_with_marker(&mut pieces);
+                let text =
+                    collapser.push_transformed(source, style.white_space, style.text_transform);
                 pieces.push(Piece {
                     text,
                     style: style.clone(),
                     anchor: node.anchor,
                     order: self.order(),
                     atomic: None,
+                    generated: false,
                 });
                 self.lines(&pieces, style, block, content_x, content_width)
             }
@@ -1354,6 +1380,7 @@ impl<M: Metrics> Builder<'_, M> {
                 if !any_block {
                     // CSS 2.2 §9.4.2: an inline formatting context.
                     let mut pieces = Vec::new();
+                    self.lead_with_marker(&mut pieces);
                     let mut collapser = Collapser::new();
                     for child in children {
                         self.gather(
@@ -1433,6 +1460,9 @@ impl<M: Metrics> Builder<'_, M> {
                             self.anonymous(&run, style, block, content_x, content_width, depth)?;
                             run.clear();
                         }
+                        // An `inside` marker with no inline content before the
+                        // block: its own anonymous line, §9.2.1.1.
+                        self.marker_line(style, block, content_x, content_width)?;
                         let here = ordinal;
                         if child_style.display == Display::ListItem {
                             ordinal += 1;
@@ -1463,6 +1493,7 @@ impl<M: Metrics> Builder<'_, M> {
     ) -> Result<(), Refusal> {
         self.budget.spend_box()?;
         let mut pieces = Vec::new();
+        self.lead_with_marker(&mut pieces);
         let mut collapser = Collapser::new();
         for child in run {
             self.gather(
@@ -1537,6 +1568,7 @@ impl<M: Metrics> Builder<'_, M> {
                         anchor: node.anchor,
                         order: self.order(),
                         atomic: None,
+                        generated: false,
                     });
                 }
             }
@@ -1852,6 +1884,7 @@ impl<M: Metrics> Builder<'_, M> {
             style: style.clone(),
             anchor: node.anchor,
             order: self.order(),
+            generated: false,
             atomic: Some(Atomic {
                 items,
                 blocks,
@@ -2023,6 +2056,7 @@ impl<M: Metrics> Builder<'_, M> {
         let ceiling_box = std::mem::replace(&mut self.ceiling_box, f64::NEG_INFINITY);
         let ceiling_line = std::mem::replace(&mut self.ceiling_line, f64::NEG_INFINITY);
         let content_top = std::mem::replace(&mut self.content_top, 0.0);
+        let inside_marker = self.inside_marker.take();
 
         let result = match inside {
             None => self.block(node, measure, 0.0, depth, avoid, 0),
@@ -2057,6 +2091,7 @@ impl<M: Metrics> Builder<'_, M> {
         self.ceiling_box = ceiling_box;
         self.ceiling_line = ceiling_line;
         self.content_top = content_top;
+        self.inside_marker = inside_marker;
         result?;
         Ok(Sublayout {
             items: inner,
@@ -3427,9 +3462,80 @@ impl<M: Metrics> Builder<'_, M> {
         index
     }
 
+    /// A marker no line took — an item with no inline content anywhere in it —
+    /// is not carried into the next item's first line.
+    ///
+    /// **A method that is never inlined, for the sake of one assignment.** The
+    /// slot holds a [`Piece`], and a [`Consumed`] inside that is hundreds of
+    /// bytes: assigning to it in [`Builder::block`] put the old value's drop in
+    /// `block`'s frame, and `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name`
+    /// overflowed its stack the first time this was written that way.
+    #[inline(never)]
+    fn disarm_marker(&mut self) {
+        self.inside_marker = None;
+    }
+
+    /// An `inside` list marker, armed for the item's first line. A method and
+    /// not lines in [`Builder::block`], for [`Builder::fill_height`]'s reason,
+    /// and never inlined for [`Builder::disarm_marker`]'s.
+    #[inline(never)]
+    fn arm_marker(&mut self, node: &BoxNode, style: &Consumed, ordinal: usize) {
+        if style.display != Display::ListItem
+            || style.list_style_position != ListStylePosition::Inside
+        {
+            return;
+        }
+        let mut text = marker_of(node, style, ordinal);
+        if text.is_empty() {
+            return;
+        }
+        // `css-counter-styles-3` §6's suffix ends in a space, which an
+        // `outside` marker replaces with its own gap and an `inside` one sets.
+        text.push(' ');
+        let order = self.order();
+        self.inside_marker = Some(Piece {
+            text,
+            style: style.clone(),
+            anchor: None,
+            order,
+            atomic: None,
+            generated: true,
+        });
+    }
+
+    /// The armed `inside` marker, at the head of an inline formatting context.
+    fn lead_with_marker(&mut self, pieces: &mut Vec<Piece>) {
+        if let Some(marker) = self.inside_marker.take() {
+            pieces.insert(0, marker);
+        }
+    }
+
+    /// The armed `inside` marker on an anonymous line of its own, where the
+    /// item's first content is a block.
+    fn marker_line(
+        &mut self,
+        style: &Consumed,
+        block: usize,
+        content_x: f64,
+        content_width: f64,
+    ) -> Result<(), Refusal> {
+        let Some(marker) = self.inside_marker.take() else {
+            return Ok(());
+        };
+        self.lines(&[marker], style, block, content_x, content_width)
+    }
+
     /// A `list-item`'s marker, on the first line of its own box.
-    fn marker(&mut self, style: &Consumed, block: usize, content_x: f64, ordinal: usize) {
-        let text = marker_text(style.list_style_type, ordinal + 1);
+    #[inline(never)]
+    fn marker(
+        &mut self,
+        node: &BoxNode,
+        style: &Consumed,
+        block: usize,
+        content_x: f64,
+        ordinal: usize,
+    ) {
+        let text = marker_of(node, style, ordinal);
         if text.is_empty() {
             return;
         }
@@ -4015,7 +4121,7 @@ impl<M: Metrics> Builder<'_, M> {
                 painted: style.visible,
                 letter_spacing: style.letter_spacing,
                 word_spacing: style.word_spacing,
-                generated: false,
+                generated: pieces[*index].generated,
                 anchor: pieces[*index].anchor,
                 order: pieces[*index].order,
             });
@@ -4847,6 +4953,7 @@ fn anonymous_flex_item(parent: &ComputedStyle, run: Vec<BoxNode>) -> BoxNode {
         content: Content::Children(run),
         anchor: None,
         span: crate::CellSpan::ONE,
+        marker: None,
     }
 }
 
@@ -4972,6 +5079,7 @@ fn anonymous_table(parent: &ComputedStyle, run: &[BoxNode]) -> BoxNode {
         content: Content::Children(run.to_vec()),
         anchor: None,
         span: crate::CellSpan::ONE,
+        marker: None,
     }
 }
 
@@ -5062,73 +5170,21 @@ fn piece_at(spans: &[(usize, usize, usize)], at: usize) -> Option<usize> {
     found.ok().map(|index| spans[index].2)
 }
 
-/// A list marker's text, CSS 2.2 §12.5.
+/// A list marker's text, CSS 2.2 §12.5, for a caller with no counters.
 ///
-/// The three alphabetic and two Roman forms are computed rather than tabled,
-/// because a table stops at whatever length its author thought of and a book
-/// with more list items than that gets a marker that is silently wrong.
+/// `css-counter-styles-3` §6's predefined styles, from the one place this
+/// workspace formats them, [`tinker_pdf_css::counter::marker_text`], so a
+/// marker this crate counts and one a cascade counted cannot be drawn two ways.
 #[must_use]
 pub fn marker_text(kind: ListStyleType, ordinal: usize) -> String {
-    match kind {
-        ListStyleType::None => String::new(),
-        ListStyleType::Disc => "\u{2022}".to_string(),
-        ListStyleType::Circle => "\u{25e6}".to_string(),
-        ListStyleType::Square => "\u{25aa}".to_string(),
-        ListStyleType::Decimal => format!("{ordinal}."),
-        ListStyleType::LowerAlpha => format!("{}.", alphabetic(ordinal, b'a')),
-        ListStyleType::UpperAlpha => format!("{}.", alphabetic(ordinal, b'A')),
-        ListStyleType::LowerRoman => format!("{}.", roman(ordinal).to_lowercase()),
-        ListStyleType::UpperRoman => format!("{}.", roman(ordinal)),
-    }
+    tinker_pdf_css::counter::marker_text(kind, i64::try_from(ordinal).unwrap_or(i64::MAX))
 }
 
-/// Bijective base 26: 1 is `a`, 26 is `z`, 27 is `aa`.
-///
-/// **Not** ordinary base 26, which is the mistake: `z` is 26 and the next is
-/// `aa`, not `ba`, and there is no digit for zero.
-fn alphabetic(ordinal: usize, first: u8) -> String {
-    if ordinal == 0 {
-        return String::new();
+/// A list item's marker text: the caller's, where it counted one, and this
+/// crate's own sibling count where it did not. See [`BoxNode::marker`].
+fn marker_of(node: &BoxNode, style: &Consumed, ordinal: usize) -> String {
+    match &node.marker {
+        Some(text) => text.clone(),
+        None => marker_text(style.list_style_type, ordinal + 1),
     }
-    let mut out = Vec::new();
-    let mut n = ordinal;
-    while n > 0 {
-        let digit = (n - 1) % 26;
-        out.push(first + digit as u8);
-        n = (n - 1) / 26;
-    }
-    out.reverse();
-    String::from_utf8(out).unwrap_or_default()
-}
-
-/// Roman numerals, subtractive, up to 3 999; above that the number itself,
-/// because there is no agreed spelling and a wrong one is worse than a digit.
-fn roman(ordinal: usize) -> String {
-    const TABLE: [(usize, &str); 13] = [
-        (1000, "M"),
-        (900, "CM"),
-        (500, "D"),
-        (400, "CD"),
-        (100, "C"),
-        (90, "XC"),
-        (50, "L"),
-        (40, "XL"),
-        (10, "X"),
-        (9, "IX"),
-        (5, "V"),
-        (4, "IV"),
-        (1, "I"),
-    ];
-    if ordinal == 0 || ordinal > 3_999 {
-        return ordinal.to_string();
-    }
-    let mut out = String::new();
-    let mut n = ordinal;
-    for (value, sign) in TABLE {
-        while n >= value {
-            out.push_str(sign);
-            n -= value;
-        }
-    }
-    out
 }

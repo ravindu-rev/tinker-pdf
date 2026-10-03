@@ -17,11 +17,11 @@
  * exactly that case: HTML sets `table { display: table }`, this build has no
  * table box, and a sheet that stayed silent about it would set every table in
  * the corpus as inline text with nothing anywhere saying so. Everything else
- * §15 declares that this build has no consumer for -- `border-spacing`,
- * `border-collapse`, `vertical-align`, `quotes`, `counter-reset`,
- * `list-style-position`, `unicode-bidi` -- is **not** here, because none of
- * them changes which boxes exist and charging them would bury the one that
- * does. `tests/epub_reading.rs`'s census assertions pin what is charged.
+ * §15 declares that this build has no consumer for -- `quotes`,
+ * `unicode-bidi` -- is **not** here, because neither changes which boxes
+ * exist and charging them would bury the one that does; `counter-reset`
+ * arrived with `css-lists-3`'s counters and is below.
+ * `tests/epub_reading.rs`'s census assertions pin what is charged.
  *
  * **`[hidden]` is here and `[hidden=until-found]` is not.** HTML §15.3.1
  * spells the rule `[hidden]:not([hidden=until-found])`, and the exception is
@@ -223,6 +223,14 @@ mark {
 }
 
 /* ---- §15.3.3's list markers -------------------------------------------- */
+
+/* §15.3.8: every list starts its own `list-item` count. `<ol start>`,
+ * `<li value>` and `<ol reversed>` are presentational hints the element
+ * answers itself (`epub::xhtml`), because the number is in an attribute. */
+ol, ul, menu {
+  counter-reset: list-item;
+}
+
 ul, menu, dir {
   list-style-type: disc;
 }

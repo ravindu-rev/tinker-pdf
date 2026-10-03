@@ -170,7 +170,7 @@ fn unset_is_inherit_for_an_inherited_property_and_initial_for_the_rest() {
 /// build implements.
 ///
 /// §7.1's definition and [`ComputedStyle::inherit_from`]'s behaviour are the
-/// same rule written twice, so this asserts they agree — over all eighty-four
+/// same rule written twice, so this asserts they agree — over all eighty-eight
 /// longhands rather than a sample, because the two are only the same rule if
 /// they are the same rule everywhere.
 #[test]
@@ -192,7 +192,7 @@ fn unset_is_the_same_as_never_declaring_it_for_every_longhand() {
         );
         checked += 1;
     }
-    assert_eq!(checked, 84, "every longhand, not a sample");
+    assert_eq!(checked, 88, "every longhand, not a sample");
 }
 
 /// **`inherit` takes the parent's computed value, not its specified one.**
@@ -421,10 +421,10 @@ fn every_implemented_name_is_defaultable() {
             panic!("`{name}: inherit` names a property nothing here can default");
         }
     }
-    assert_eq!(longhands, 84, "eighty-four longhands");
+    assert_eq!(longhands, 88, "eighty-eight longhands");
     assert_eq!(
-        shorthands, 19,
-        "sixteen shorthands and `css-break-3` §3.4's three aliases"
+        shorthands, 20,
+        "seventeen shorthands and `css-break-3` §3.4's three aliases"
     );
     assert_eq!(exceptions, 1, "`content`, and nothing else");
     assert_eq!(longhands + shorthands + exceptions, IMPLEMENTED_NAMES.len());
@@ -463,7 +463,7 @@ fn every_implemented_name_is_defaultable() {
 /// would say so rather than passing on two empty sets.
 #[test]
 fn every_shorthand_expands_the_same_way_for_a_value_and_a_keyword() {
-    let samples: [(&str, &str); 19] = [
+    let samples: [(&str, &str); 20] = [
         ("background", "#ff0000"),
         ("border", "1px solid #ff0000"),
         ("border-bottom", "1px solid #ff0000"),
@@ -480,6 +480,7 @@ fn every_shorthand_expands_the_same_way_for_a_value_and_a_keyword() {
         ("columns", "2 auto"),
         ("flex", "1 1 auto"),
         ("flex-flow", "row wrap"),
+        ("list-style", "square inside"),
         ("gap", "10px"),
         ("margin", "0"),
         ("padding", "0"),

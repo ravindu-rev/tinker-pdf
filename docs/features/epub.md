@@ -125,6 +125,24 @@ and keeps `PageBuilder::glyphs`. Faces are subset to what the book draws; every
 run that could not be represented is counted (`UnrepresentedCharacters`,
 `UncoveredCharacters`), and a run the writer refused is
 `UnwritableTextRun`. Borders, backgrounds, list markers and links are drawn;
+**list markers are counters** (`css-lists-3` §4): `counter-reset`,
+`counter-increment` and `counter-set` are walked over the element tree in
+document order once the cascade is done (`tinker_pdf_css::counter`), with
+§4.5's scoping — a reset reaches the following siblings, a sibling's reset of
+the same name replaces it and a descendant's nests inside it, and an element
+that generates no box changes nothing — and §4.6's implicit `list-item`
+increment. HTML's `ol, ul, menu { counter-reset: list-item }` is in the
+user-agent sheet, and `<ol start>` and `<li value>` are the presentational
+hints HTML §15.3.8 makes them, cascaded at author level with no specificity
+ahead of every author rule. A marker is the item's `list-item` counter in its
+`list-style-type` — `css-counter-styles-3` §6's `decimal`, `lower-`/`upper-alpha`
+(and `-latin`), `lower-`/`upper-roman`, `disc`, `circle`, `square` and `none`,
+each falling back to decimal outside its range — and `counter()` and
+`counters()` in `content` read the same tree. `list-style-position: inside`
+sets the marker as the item's first inline box, on an anonymous line of its
+own where the item starts with a block, and `list-style` is the shorthand of
+the two (an image in it is refused by value, since `list-style-image` is not
+implemented);
 every internal link and every navigation entry becomes a link annotation or
 outline item. **An XHTML `<img>` is a replaced box** at the picture's own
 dimensions, drawn inside its content box as an `/XObject` registered before the
@@ -251,7 +269,8 @@ order, at nine page boxes.
 | `:hover`, `:focus`, `:focus-within`, `:focus-visible`, `:active`, `:target`, `:visited` — **seven, and the whole of what never matches** | `tinker_pdf_css::Warning::PseudoClassUnsupported(name)` | each names a state of a reading *session*: a pointer, a focus ring, a press, a fragment the reader navigated to, a history. A paginated document has none of them, for any element, ever — so never matching is `selectors-4`'s **answer** here and not this build's gap. Still counted, because a rule that had no effect is something the book said (ruling 10), and the count is asserted by number so a shrinking list cannot read as a passing one | — |
 | `:nth-child(An+B of S)` | `parser::Report::discarded_rules` | the only pseudo-class syntax refused outright. Reading it as the `An+B` without the `of` would style every second row instead of every second `.a`, which is a book that renders beautifully and is wrong; §3.1 drops the rule instead, counted | [ROADMAP.md](../ROADMAP.md) |
 | `::first-line`, `::first-letter` | `tinker_pdf_css::Warning::PseudoElementUnsupported(name)` | parsed, no box generated. Neither is *generated* content: both select part of an **already laid out** box, so honouring either means a second layout pass, which is a different feature from `::before`. `::marker`, `::placeholder` and `::selection` are not parsed at all — `::selection` for the reason the pseudo-class row gives, that it names a state of a reading *session* and a paginated document has none | [ROADMAP.md](../ROADMAP.md) |
-| `content: url()`, `counter()`, `counters()`, `open-quote` and its three siblings | `ArchiveWarning::UnimplementedProperty { property: "content", .. }` | `::before` and `::after` **do** generate boxes now, from strings, `attr()` and any concatenation of the two. These three families do not: `url()` is a replaced element needing a size before the image is fetched; `counter()` needs `counter-reset`, `counter-increment` and a scoped counter tree, and resolved to nothing would number every list item zero; the quote keywords read `quotes`, which is unimplemented and which one producer writes four times in the committed corpus — guessing `"` is wrong in every language that does not use it. Counted, so a book that asks is not quietly given an empty box | [ROADMAP.md](../ROADMAP.md) |
+| `content: url()`, `open-quote` and its three siblings, and `counter()`/`counters()` in a counter style this build does not format | `ArchiveWarning::UnimplementedProperty { property: "content", .. }` | `::before` and `::after` generate boxes from strings, `attr()`, `counter()`, `counters()` and any concatenation of them. What they do not: `url()` is a replaced element needing a size before the image is fetched; the quote keywords read `quotes`, which is unimplemented and which one producer writes four times in the committed corpus — guessing `"` is wrong in every language that does not use it; and a counter in a `<counter-style>` outside the nine below (`lower-greek`, `armenian`, `symbols()`) would be a Greek list numbered in the wrong alphabet. Counted, so a book that asks is not quietly given an empty box | [ROADMAP.md](../ROADMAP.md) |
+| `<ol reversed>`, and `counter-reset: reversed(…)` | `ArchiveWarning::UnimplementedProperty { property: "counter-reset", .. }` | a reversed counter starts at the number of items it will count, which is a count of the list this build does not take before numbering it; the list numbers upwards from its `start` and the element is counted rather than the list silently counting the wrong way | [ROADMAP.md](../ROADMAP.md) |
 | A single box taller than a page **inside** a table band | `tinker_pdf_layout::Warning::TableRowTallerThanPage` | the band itself is now cut across pages (`css-break-3` §3.1's class-3 break), so what is left is one atomic box — a line box, or a nested band — that no cut can halve. It is drawn where it starts and overflows | [ROADMAP.md](../ROADMAP.md) |
 | The same inside a flex line | `tinker_pdf_layout::Warning::FlexLineTallerThanPage` | same, and still two variants: a host with no table in its book must not be told a table row overflowed | [ROADMAP.md](../ROADMAP.md) |
 | A float whose **content-stream** order differs from its reading order | `tinker_pdf_layout::Warning::FloatBrokenAcrossPages`, and the content-order figure pinned in `epub_fetched.rs` | **Not a defect any more: a statement about two orders, both measured.** §9.5.1 places a float by geometry, so `clear` can push its box a page past the text it was written among — and a glyph is only on the page it is drawn on. So the *content stream* of `pg16328-beowulf.epub` genuinely reads 2 182 characters out of source order, and that figure stays pinned because it is true of any extractor that ignores the structure tree, which is what §14.8 says to do when there is none. **There is one now, and in logical order the same book conserves exactly: 0 extra, 0 missing.** ISO 32000 §14.7.2 Table 323 lets a structure element's kids name different pages, so the gloss sits under its own element in source position while its marked content stays on the page its glyphs landed on, written as an `/MCR` with its own `/Pg`. Nineteen of the twenty fetched books conserve exactly in logical order; the twentieth is the one with no glyphs at all. Four earlier fixes moved nothing and are worth naming so nobody rebuilds them: moving the float's page decision, removing `css-break-3`'s push (sixty times worse), tightening the reach further, and emitting a structure tree **per page** — which reproduces page order exactly and measures 2 182 too | [design/tagged-pdf.md](../design/tagged-pdf.md) |
@@ -320,7 +339,7 @@ postdate the tool's removal under ruling 13, so
   against `inherit` and `initial`, asserted on an inherited and a
   non-inherited property in the same fixture because either one alone agrees
   with two of the three keywords; and `unset` asserted to be exactly *not
-  declaring the property* over **all eighty-four longhands**, not a sample,
+  declaring the property* over **all eighty-eight longhands**, not a sample,
   because §7.1's definition and `ComputedStyle::inherit_from`'s behaviour are
   the same rule written twice. `revert` against `revert-layer` in one fixture
   with a user-agent rule and two author layers, where the two keywords have

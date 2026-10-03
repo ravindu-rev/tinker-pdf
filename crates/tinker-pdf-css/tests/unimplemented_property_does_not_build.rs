@@ -173,6 +173,7 @@ impl Source {
         // Everything but the three files the injection touches is copied
         // verbatim, so the proof builds this crate and not a sketch of it.
         for file in [
+            "counter.rs",
             "font_face.rs",
             "limits.rs",
             "media.rs",

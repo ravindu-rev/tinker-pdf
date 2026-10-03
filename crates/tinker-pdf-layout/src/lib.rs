@@ -90,9 +90,11 @@
 //!         content: Content::Text("the sea, the sea".into()),
 //!         anchor: None,
 //!         span: CellSpan::ONE,
+//!         marker: None,
 //!     }]),
 //!     anchor: None,
 //!     span: CellSpan::ONE,
+//!     marker: None,
 //! };
 //! let laid = layout(
 //!     &tree,
@@ -174,6 +176,22 @@ pub struct BoxNode {
     /// Ignored on every node that is not a `display: table-cell`, which is what
     /// HTML says of the attributes themselves.
     pub span: CellSpan,
+    /// A `display: list-item`'s marker text, where the caller has it.
+    ///
+    /// **The number is a counter and a counter is not this crate's to keep.**
+    /// `css-lists-3` §4 makes a list item's number its `list-item` counter, and
+    /// a counter is a walk of the whole document in tree order — reset by an
+    /// `<ol start>`, set by an `<li value>`, carried through every element that
+    /// generated a box. A caller with a cascade has done that walk
+    /// (`tinker_pdf_css::cascade::StyleTree::marker`) and puts the text here,
+    /// already in its counter style and with its `.` suffix.
+    ///
+    /// `None` on a list item is a caller with no counters, and gets CSS 2.2
+    /// §12.5's older model: the item's position among its list-item siblings,
+    /// counted here, in [`crate::flow::marker_text`]'s style — which is also
+    /// what [`BoxNode::text`], [`BoxNode::element`] and [`BoxNode::replaced`]
+    /// leave it at. Ignored on a node that is not a list item.
+    pub marker: Option<String>,
 }
 
 /// How many grid slots a table cell takes, CSS 2.2 §17.5.
@@ -294,6 +312,7 @@ impl BoxNode {
             content: Content::Text(text.into()),
             anchor: None,
             span: CellSpan::ONE,
+            marker: None,
         }
     }
 
@@ -305,6 +324,7 @@ impl BoxNode {
             content: Content::Children(children),
             anchor: None,
             span: CellSpan::ONE,
+            marker: None,
         }
     }
 
@@ -321,6 +341,7 @@ impl BoxNode {
             content: Content::Replaced(intrinsic),
             anchor: None,
             span: CellSpan::ONE,
+            marker: None,
         }
     }
 

@@ -359,6 +359,7 @@ fn anonymous_cell(parent: &ComputedStyle, run: Vec<BoxNode>) -> CellBox<'static>
         content: Content::Children(run),
         anchor: None,
         span: CellSpan::ONE,
+        marker: None,
     }))
 }
 
@@ -373,6 +374,7 @@ fn anonymous_text_cell(parent: &ComputedStyle, text: &str) -> CellBox<'static> {
             content: Content::Text(text.to_owned()),
             anchor: None,
             span: CellSpan::ONE,
+            marker: None,
         }],
     )
 }

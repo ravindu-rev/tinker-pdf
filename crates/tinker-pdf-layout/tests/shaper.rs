@@ -115,9 +115,11 @@ fn tree(text: &str) -> BoxNode {
             content: Content::Text(text.into()),
             anchor: None,
             span: CellSpan::ONE,
+            marker: None,
         }]),
         anchor: None,
         span: CellSpan::ONE,
+        marker: None,
     }
 }
 

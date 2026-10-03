@@ -1976,3 +1976,39 @@ fn a_document_with_no_resources_reads_every_reference_as_missing() {
         [(img, crate::cbz::ImageDefect::Unresolved)]
     );
 }
+
+/// **HTML §15.3.8's list attributes, as the presentational hints they are**,
+/// with §2.3.4.1's integer rules: leading white space and a sign are read,
+/// anything after the digits is not, and a value with no digit has no effect.
+/// `reversed` becomes the `reversed()` counter this build refuses by value, so
+/// it is counted against `counter-reset` rather than numbered upwards.
+#[test]
+fn list_attributes_are_presentational_hints() {
+    use tinker_pdf_css::Element;
+    let tree = dom(
+        "<body><ol start=\" 3x\"><li value=\"-2\">a</li><li value=\"x\">b</li></ol>\
+         <ol reversed=\"reversed\" start=\"9\"><li>c</li></ol><ol start=\"\"><li>d</li></ol>\
+         <ol start=\"99999999999\"><li>e</li></ol></body>",
+    );
+    let hints: Vec<Option<String>> = tree
+        .nodes
+        .iter()
+        .filter(|node| node.name == "ol" || node.name == "li")
+        .map(|node| node.presentational_hints())
+        .collect();
+    let some = |text: &str| Some(text.to_owned());
+    assert_eq!(
+        hints,
+        [
+            some("counter-reset: list-item 2"),
+            some("counter-set: list-item -2"),
+            None,
+            some("counter-reset: reversed(list-item)"),
+            None,
+            None,
+            None,
+            some("counter-reset: list-item 2147483646"),
+            None,
+        ]
+    );
+}

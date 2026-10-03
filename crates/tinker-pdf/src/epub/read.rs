@@ -905,6 +905,10 @@ fn build(dom: &Dom, styles: &StyleTree, pictures: &Pictures, at: usize) -> BoxNo
             node,
             &styles.styles.get(at).map_or(Display::Inline, |s| s.display),
         ),
+        // `css-lists-3` §4's `list-item` counter, which the cascade walked over
+        // the whole document: an `<ol start>`, an `<li value>` and every item
+        // between are in this number, and the layout crate sees one box.
+        marker: styles.marker(at).map(str::to_owned),
     }
 }
 
@@ -943,6 +947,7 @@ fn pseudo_box(generated: &PseudoBox, anchor: u32) -> BoxNode {
         // A generated box is never a table cell: `cell_span` reads `colspan`
         // and `rowspan` off a source element, and this box has none.
         span: CellSpan::ONE,
+        marker: None,
     }
 }
 

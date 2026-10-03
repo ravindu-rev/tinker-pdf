@@ -240,16 +240,22 @@ fn the_paragraph_is_not_styled_by_its_own_pseudo_element_rule() {
 
 // ---- what is refused, by name ------------------------------------------------
 
-/// The three families of `content` value this build does not read, each
-/// counted as a gap in `content` rather than silently producing an empty box.
+/// The `content` values this build does not read, each counted as a gap in
+/// `content` rather than silently producing an empty box.
+///
+/// **`counter()` and `counters()` left this list on 3 October 2026** with
+/// `css-lists-3`'s counters, and what stays of them is a counter in a
+/// `<counter-style>` this build does not format: a Greek list numbered in
+/// Latin digits would be a plausible wrong page.
+/// [`counter_and_counters_number_the_generated_boxes`] is their positive half.
 #[test]
-fn the_three_refused_content_families_are_named() {
+fn the_refused_content_families_are_named() {
     use tinker_pdf::ArchiveWarning;
     let mut refused = 0usize;
     for value in [
         "url(a.png)",
-        "counter(chapter)",
-        "counters(section, \".\")",
+        "counter(chapter, lower-greek)",
+        "counters(section, \".\", armenian)",
         "open-quote",
         "close-quote",
         "no-open-quote",
@@ -275,7 +281,24 @@ fn the_three_refused_content_families_are_named() {
         assert_eq!(text, "body", "{value} put something on the page");
         refused += 1;
     }
-    assert_eq!(refused, 7, "three families, seven spellings");
+    assert_eq!(
+        refused, 7,
+        "three families, seven spellings, two of them counters by style"
+    );
+}
+
+/// **`counter()` and `counters()` read `css-lists-3` §4's counter tree**, on
+/// the page: a heading counter incremented by its own `::before`, and a nested
+/// one reset per section and joined with `counters()`.
+#[test]
+fn counter_and_counters_number_the_generated_boxes() {
+    let sheet = "body { counter-reset: chapter } \
+                 h1::before { counter-increment: chapter; content: counter(chapter, upper-roman) \". \" } \
+                 div { counter-reset: part } \
+                 p::before { counter-increment: part; content: counters(part, \"-\") \" \" }";
+    let body = "<h1>One</h1><div><p>a</p><div><p>b</p><p>c</p></div></div><h1>Two</h1>";
+    let text = text_of(sheet, body);
+    assert_eq!(text, "I. One1 a1-1 b1-2 cII. Two");
 }
 
 /// `::first-line` and `::first-letter` still generate nothing.

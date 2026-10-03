@@ -257,7 +257,11 @@ fn the_unsupported_census_over_the_committed_corpus() {
             // counted names rather than asserting the set would have gone from
             // fourteen to thirteen and nobody would have known which one went.
             "hyphens",
-            "list-style",
+            // **`list-style` used to be here and left on 3 October 2026**,
+            // when `css-lists-3`'s shorthand was implemented with its two
+            // longhands. Its whole count was pandoc's `ul.task-list {
+            // list-style: none }`, four times over four sheets, on no element
+            // any committed book has.
             // **`max-width` used to be here and tier 4 removed it**, the same
             // way `display` left one milestone earlier: pandoc's whole count
             // over this corpus was `img { max-width: 100% }`, and CSS 2.2

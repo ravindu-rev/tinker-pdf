@@ -972,6 +972,26 @@ pub enum ListStyleType {
     None,
 }
 
+/// `list-style-position`, CSS 2.2 §12.5.1 and `css-lists-3` §3.2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListStylePosition {
+    /// `outside`: the marker stands in the margin, outside the principal box.
+    Outside,
+    /// `inside`: the marker is the first inline box of the list item, and the
+    /// lines wrap under it.
+    Inside,
+}
+
+/// One counter a `counter-reset`, `counter-increment` or `counter-set` names,
+/// and the integer it gives it (`css-lists-3` §4.2 to §4.4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CounterChange {
+    /// The counter's name, a `<custom-ident>`, so compared case-sensitively.
+    pub name: String,
+    /// The value it is reset or set to, or the amount it is incremented by.
+    pub value: i32,
+}
+
 /// `visibility`, at the two values that are not `collapse`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Visibility {
@@ -1142,6 +1162,14 @@ pub enum Property {
     WhiteSpace(WhiteSpace),
     /// `list-style-type`
     ListStyleType(ListStyleType),
+    /// `list-style-position`
+    ListStylePosition(ListStylePosition),
+    /// `counter-reset`, `css-lists-3` §4.2. Empty for `none`.
+    CounterReset(Vec<CounterChange>),
+    /// `counter-increment`, §4.3. Empty for `none`.
+    CounterIncrement(Vec<CounterChange>),
+    /// `counter-set`, §4.4. Empty for `none`.
+    CounterSet(Vec<CounterChange>),
     /// `visibility`
     Visibility(Visibility),
     /// `display`
@@ -1272,6 +1300,10 @@ impl Property {
             Property::TextTransform(_) => "text-transform",
             Property::WhiteSpace(_) => "white-space",
             Property::ListStyleType(_) => "list-style-type",
+            Property::ListStylePosition(_) => "list-style-position",
+            Property::CounterReset(_) => "counter-reset",
+            Property::CounterIncrement(_) => "counter-increment",
+            Property::CounterSet(_) => "counter-set",
             Property::Visibility(_) => "visibility",
             Property::Display(_) => "display",
             Property::Float(_) => "float",
@@ -1381,6 +1413,7 @@ impl Property {
             | Property::TextTransform(_)
             | Property::WhiteSpace(_)
             | Property::ListStyleType(_)
+            | Property::ListStylePosition(_)
             | Property::Visibility(_)
             | Property::Orphans(_)
             | Property::Widows(_)
@@ -1398,6 +1431,13 @@ impl Property {
             | Property::BorderCollapse(_)
             | Property::BorderSpacing(_, _) => true,
             Property::TextDecoration(_)
+            // `css-lists-3` §4.2 to §4.4: all three *inherited: no*. A
+            // counter is inherited through the **counter tree** (§4.5), which
+            // is a different walk from the property's; an inherited
+            // `counter-increment` would bump the counter once per descendant.
+            | Property::CounterReset(_)
+            | Property::CounterIncrement(_)
+            | Property::CounterSet(_)
             | Property::Display(_)
             | Property::Float(_)
             | Property::Clear(_)
@@ -1608,8 +1648,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "clip",
     "clip-path",
     "color-scheme",
-    "counter-increment",
-    "counter-reset",
     "cursor",
     "direction",
     "empty-cells",
@@ -1631,9 +1669,7 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "hyphens",
     "justify-items",
     "justify-self",
-    "list-style",
     "list-style-image",
-    "list-style-position",
     "mix-blend-mode",
     "opacity",
     "outline",
@@ -1899,6 +1935,9 @@ pub const DEFAULTABLE_SHORTHANDS: &[(&str, &[&str])] = &[
     ),
     ("columns", &["column-width", "column-count"]),
     ("flex", &["flex-grow", "flex-shrink", "flex-basis"]),
+    // `css-lists-3` §3.4's shorthand, without `list-style-image`, which is
+    // unimplemented and which the shorthand refuses by value when it is named.
+    ("list-style", &["list-style-type", "list-style-position"]),
     ("flex-flow", &["flex-direction", "flex-wrap"]),
     ("gap", &["row-gap", "column-gap"]),
     (
@@ -1949,6 +1988,26 @@ pub enum ContentItem {
     /// `attr(name)`: the originating element's attribute, or the empty string
     /// when it has none -- which is §2.4's own fallback and not a guess.
     Attr(String),
+    /// `counter(name, style)`, `css-lists-3` §4.8: the innermost counter of
+    /// that name, in a predefined counter style. `style` is `decimal` where
+    /// the author wrote none.
+    Counter {
+        /// The counter's name.
+        name: String,
+        /// The `<counter-style>` it is drawn in.
+        style: ListStyleType,
+    },
+    /// `counters(name, separator, style)`: every counter of that name in
+    /// scope, outermost first, joined by the separator — the `1.2.3` of a
+    /// nested list.
+    Counters {
+        /// The counter's name.
+        name: String,
+        /// The string between two values.
+        separator: String,
+        /// The `<counter-style>` each value is drawn in.
+        style: ListStyleType,
+    },
 }
 
 /// What this build reads inside `content`, and what it refuses.
@@ -1959,10 +2018,10 @@ pub enum ContentItem {
 /// * `<image>` / `url()` -- generated content that is a replaced element. The
 ///   box would need a size before the image is fetched, which is a different
 ///   layout question from the one this closes.
-/// * `counter()` / `counters()` -- these need `counter-reset` and
-///   `counter-increment`, a scoped counter tree, and §4's nesting rules. None
-///   of the three is here, and a `counter()` resolved to nothing would number
-///   every list item zero.
+/// * `counter()` / `counters()` in a `<counter-style>` this build does not
+///   format (see [`list_style_type_named`]). The two functions themselves are
+///   read, and resolved over `css-lists-3` §4.5's counter tree by
+///   `crate::counter`.
 /// * `open-quote` / `close-quote` / `no-open-quote` / `no-close-quote` -- these
 ///   read the `quotes` property, which is still in [`UNSUPPORTED_PROPERTIES`]
 ///   and which pandoc writes. Guessing `"` would be wrong in every language
@@ -1996,6 +2055,18 @@ fn parse_content(values: &[ComponentValue], significant: &[&ComponentValue]) -> 
             ComponentValue::Token(Token::Str(text)) => {
                 items.push(ContentItem::Text(text.clone()));
             }
+            ComponentValue::Function { name, arguments }
+                if name.eq_ignore_ascii_case("counter")
+                    || name.eq_ignore_ascii_case("counters") =>
+            {
+                match counter_function(name.eq_ignore_ascii_case("counters"), arguments) {
+                    Some(Ok(item)) => items.push(item),
+                    // A `<counter-style>` this build does not format, or a
+                    // `symbols()` function: inside the grammar, this build's.
+                    Some(Err(())) => return refuse(),
+                    None => return Parsed::Invalid,
+                }
+            }
             ComponentValue::Function { name, arguments } if name.eq_ignore_ascii_case("attr") => {
                 let inner: Vec<&ComponentValue> =
                     arguments.iter().filter(|v| !v.is_whitespace()).collect();
@@ -2020,6 +2091,65 @@ fn parse_content(values: &[ComponentValue], significant: &[&ComponentValue]) -> 
         return Parsed::Invalid;
     }
     Parsed::Content(ContentValue::Items(items))
+}
+
+/// `counter( <counter-name>, <counter-style>? )` and `counters(
+/// <counter-name>, <string>, <counter-style>? )`, `css-lists-3` §4.8.
+///
+/// `None` outside the grammar, `Some(Err(()))` for a counter style this build
+/// does not format — §4.8 makes an unknown name `decimal`, but a *known*
+/// predefined style drawn as decimal is a Greek or Armenian list numbered in
+/// the wrong alphabet, so those are refused rather than resolved.
+fn counter_function(plural: bool, arguments: &[ComponentValue]) -> Option<Result<ContentItem, ()>> {
+    let parts: Vec<Vec<&ComponentValue>> = arguments
+        .split(|v| matches!(v, ComponentValue::Token(Token::Comma)))
+        .map(|part| part.iter().filter(|v| !v.is_whitespace()).collect())
+        .collect();
+    let name = match parts.first().map(Vec::as_slice) {
+        Some([ComponentValue::Token(Token::Ident(name))]) => {
+            let lower = name.to_ascii_lowercase();
+            if lower == "none" || Defaulting::from_name(&lower).is_some() {
+                return None;
+            }
+            name.clone()
+        }
+        _ => return None,
+    };
+    let (separator, rest) = if plural {
+        match parts.get(1).map(Vec::as_slice) {
+            Some([ComponentValue::Token(Token::Str(separator))]) => {
+                (separator.clone(), parts.get(2..).unwrap_or_default())
+            }
+            _ => return None,
+        }
+    } else {
+        (String::new(), parts.get(1..).unwrap_or_default())
+    };
+    let style = match rest {
+        [] => ListStyleType::Decimal,
+        [one] => match one.as_slice() {
+            [ComponentValue::Token(Token::Ident(word))] => {
+                match list_style_type_named(&word.to_ascii_lowercase()) {
+                    Some(style) => style,
+                    None => return Some(Err(())),
+                }
+            }
+            [ComponentValue::Function { name, .. }] if name.eq_ignore_ascii_case("symbols") => {
+                return Some(Err(()));
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(Ok(if plural {
+        ContentItem::Counters {
+            name,
+            separator,
+            style,
+        }
+    } else {
+        ContentItem::Counter { name, style }
+    }))
 }
 
 /// Reading a value that is supposed to be a length, three ways.
@@ -2429,6 +2559,9 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "column-width",
     "columns",
     "content",
+    "counter-increment",
+    "counter-reset",
+    "counter-set",
     "display",
     "flex",
     "flex-basis",
@@ -2450,6 +2583,8 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "letter-spacing",
     "line-break",
     "line-height",
+    "list-style",
+    "list-style-position",
     "list-style-type",
     "margin",
     "margin-bottom",
@@ -2768,19 +2903,29 @@ fn implemented(
             }))
         }),
         "list-style-type" => keyword(one, single, |word| {
-            Some(Property::ListStyleType(match word {
-                "disc" => ListStyleType::Disc,
-                "circle" => ListStyleType::Circle,
-                "square" => ListStyleType::Square,
-                "decimal" => ListStyleType::Decimal,
-                "lower-alpha" | "lower-latin" => ListStyleType::LowerAlpha,
-                "upper-alpha" | "upper-latin" => ListStyleType::UpperAlpha,
-                "lower-roman" => ListStyleType::LowerRoman,
-                "upper-roman" => ListStyleType::UpperRoman,
-                "none" => ListStyleType::None,
-                _ => return None,
-            }))
+            list_style_type_named(word).map(Property::ListStyleType)
         }),
+        "list-style-position" => keyword(one, single, |word| {
+            list_style_position_named(word).map(Property::ListStylePosition)
+        }),
+        // `css-lists-3` §3.4: `<'list-style-position'> || <'list-style-image'>
+        // || <'list-style-type'>`, and **both implemented longhands are always
+        // emitted**, for `flex-flow`'s reason. `none` is the one word two of
+        // the three accept, and §3.4 resolves it the way it is resolved here:
+        // a `none` that is not needed for the image is the type.
+        "list-style" => list_style_shorthand(significant),
+        "counter-reset" => counter_list(significant, 0, true)
+            .map_or(Implemented::Malformed, |outcome| {
+                outcome.map(Property::CounterReset)
+            }),
+        "counter-increment" => counter_list(significant, 1, false)
+            .map_or(Implemented::Malformed, |outcome| {
+                outcome.map(Property::CounterIncrement)
+            }),
+        "counter-set" => counter_list(significant, 0, false)
+            .map_or(Implemented::Malformed, |outcome| {
+                outcome.map(Property::CounterSet)
+            }),
         "page-break-before" | "page-break-after" => {
             let before = name == "page-break-before";
             keyword(one, single, move |word| {
@@ -3268,6 +3413,178 @@ fn keyword(
         Some(_) if single => Implemented::BadValue,
         _ => Implemented::Malformed,
     }
+}
+
+/// `list-style-type`'s keywords, `css-counter-styles-3` §6's predefined
+/// styles this build formats.
+///
+/// Every other predefined style — `decimal-leading-zero`, `lower-greek`,
+/// `armenian`, the CJK and Indic numbering systems — is a value of the property
+/// this build does not have, and is refused by value rather than drawn as
+/// decimal, which would number a Greek list in the wrong alphabet.
+pub fn list_style_type_named(word: &str) -> Option<ListStyleType> {
+    Some(match word {
+        "disc" => ListStyleType::Disc,
+        "circle" => ListStyleType::Circle,
+        "square" => ListStyleType::Square,
+        "decimal" => ListStyleType::Decimal,
+        "lower-alpha" | "lower-latin" => ListStyleType::LowerAlpha,
+        "upper-alpha" | "upper-latin" => ListStyleType::UpperAlpha,
+        "lower-roman" => ListStyleType::LowerRoman,
+        "upper-roman" => ListStyleType::UpperRoman,
+        "none" => ListStyleType::None,
+        _ => return None,
+    })
+}
+
+fn list_style_position_named(word: &str) -> Option<ListStylePosition> {
+    match word {
+        "outside" => Some(ListStylePosition::Outside),
+        "inside" => Some(ListStylePosition::Inside),
+        _ => None,
+    }
+}
+
+/// The `list-style` shorthand, `css-lists-3` §3.4.
+fn list_style_shorthand(significant: &[&ComponentValue]) -> Implemented {
+    let mut kind: Option<ListStyleType> = None;
+    let mut position: Option<ListStylePosition> = None;
+    let mut nones = 0usize;
+    let mut image = false;
+    for value in significant {
+        match value {
+            ComponentValue::Token(Token::Ident(word)) => {
+                let word = word.to_ascii_lowercase();
+                if word == "none" {
+                    nones += 1;
+                } else if let Some(found) = list_style_position_named(&word) {
+                    if position.replace(found).is_some() {
+                        return Implemented::Malformed;
+                    }
+                } else if let Some(found) = list_style_type_named(&word) {
+                    if kind.replace(found).is_some() {
+                        return Implemented::Malformed;
+                    }
+                } else {
+                    // A keyword outside the predefined styles this build
+                    // formats is a `<counter-style>` this build does not have.
+                    return Implemented::BadValue;
+                }
+            }
+            // `list-style-image` is unimplemented, so an image in the
+            // shorthand is this build's gap and not the author's.
+            ComponentValue::Token(Token::Url(_)) => image = true,
+            ComponentValue::Function { name, .. }
+                if name.eq_ignore_ascii_case("url")
+                    || name.to_ascii_lowercase().ends_with("gradient") =>
+            {
+                image = true;
+            }
+            ComponentValue::Token(Token::Str(_)) => return Implemented::BadValue,
+            _ => return Implemented::Malformed,
+        }
+    }
+    if image {
+        return Implemented::BadValue;
+    }
+    // §3.4: one `none` sets whichever of the type and the image is not
+    // otherwise given — the image's initial value is `none` already, so it
+    // is the type. Two set both; three is not the grammar.
+    match (nones, kind) {
+        (0, _) => {}
+        (1, None) | (2, None) => kind = Some(ListStyleType::None),
+        _ => return Implemented::Malformed,
+    }
+    Implemented::Known(vec![
+        Property::ListStyleType(kind.unwrap_or(ListStyleType::Disc)),
+        Property::ListStylePosition(position.unwrap_or(ListStylePosition::Outside)),
+    ])
+}
+
+/// What one `counter-*` value read as.
+enum CounterOutcome {
+    Known(Vec<CounterChange>),
+    BadValue,
+}
+
+impl CounterOutcome {
+    fn map(self, build: impl Fn(Vec<CounterChange>) -> Property) -> Implemented {
+        match self {
+            CounterOutcome::Known(list) => Implemented::Known(vec![build(list)]),
+            CounterOutcome::BadValue => Implemented::BadValue,
+        }
+    }
+}
+
+/// `none | [ <counter-name> <integer>? ]+`, `css-lists-3` §4.2 to §4.4, with
+/// the property's own default integer.
+///
+/// `None` for a value outside the grammar. `counter-reset`'s
+/// `reversed(<counter-name>)` is inside it and refused by value: a reversed
+/// counter's initial value is the number of list items it counts, which is a
+/// count this build does not take, and counting up from zero instead would
+/// number an `<ol reversed>` upwards.
+fn counter_list(
+    significant: &[&ComponentValue],
+    default: i32,
+    allows_reversed: bool,
+) -> Option<CounterOutcome> {
+    if let [ComponentValue::Token(Token::Ident(word))] = significant {
+        if word.eq_ignore_ascii_case("none") {
+            return Some(CounterOutcome::Known(Vec::new()));
+        }
+    }
+    let mut out: Vec<CounterChange> = Vec::new();
+    let mut reversed = false;
+    // Whether the last name already has its integer: `a 1 2` is not the
+    // grammar, and comparing against the default would not see it when the
+    // first integer happens to be the default.
+    let mut numbered = true;
+    for value in significant {
+        match value {
+            ComponentValue::Token(Token::Ident(name)) => {
+                // `css-values-4` §3.2: a `<custom-ident>` may not be one of
+                // the CSS-wide keywords or `default`, and §4.2 excludes
+                // `none` too.
+                let lower = name.to_ascii_lowercase();
+                if lower == "none" || lower == "default" || Defaulting::from_name(&lower).is_some()
+                {
+                    return None;
+                }
+                out.push(CounterChange {
+                    name: name.clone(),
+                    value: default,
+                });
+                numbered = false;
+            }
+            ComponentValue::Token(Token::Number {
+                value,
+                integer: true,
+            }) => {
+                let last = out.last_mut()?;
+                if std::mem::replace(&mut numbered, true) {
+                    return None;
+                }
+                // `css-values-4` §5.1: an integer past the implementation's
+                // range is clamped, which is what `as` does from an `f64`.
+                last.value = *value as i32;
+            }
+            ComponentValue::Function { name, .. }
+                if allows_reversed && name.eq_ignore_ascii_case("reversed") =>
+            {
+                reversed = true;
+                numbered = false;
+            }
+            _ => return None,
+        }
+    }
+    if reversed {
+        return Some(CounterOutcome::BadValue);
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(CounterOutcome::Known(out))
 }
 
 /// `text-transform`'s value, `css-text-3` §2.1.
@@ -4066,7 +4383,15 @@ fn write_values(values: &[ComponentValue], out: &mut String) {
 
 fn write_token(token: &Token, out: &mut String) {
     match token {
-        Token::Ident(name) | Token::Url(name) => out.push_str(name),
+        Token::Ident(name) => out.push_str(name),
+        // `css-syntax-3` §4.3.6's `<url-token>` holds what is between the
+        // parentheses; a warning that carried only that would report
+        // `list-style: dot.png disc`, a value nobody wrote.
+        Token::Url(name) => {
+            out.push_str("url(");
+            out.push_str(name);
+            out.push(')');
+        }
         Token::Function(name) => {
             out.push_str(name);
             out.push('(');

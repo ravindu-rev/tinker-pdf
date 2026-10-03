@@ -119,6 +119,7 @@
 #![forbid(unsafe_code)]
 
 pub mod cascade;
+pub mod counter;
 pub mod font_face;
 pub mod limits;
 pub mod longhand;
@@ -191,6 +192,20 @@ pub trait Element {
     /// the same origin and importance. The default is `None` so a caller with
     /// no such concept says nothing rather than inventing one.
     fn inline_style(&self) -> Option<&str> {
+        None
+    }
+
+    /// Declarations the document language attaches to this element as
+    /// **presentational hints**, in CSS's declaration syntax.
+    ///
+    /// HTML §15.1 makes these author-level declarations of zero specificity
+    /// placed *"at the start of the author style sheet"*, and the cascade puts
+    /// them exactly there. They are asked for rather than derived for the
+    /// reason [`Element::language`] is: which attribute is a hint, and what it
+    /// means, is the document language's ruling — `<ol start="3">` is
+    /// `counter-reset: list-item 2` in HTML and nothing at all in a language
+    /// that has no `ol`. The default is `None`.
+    fn presentational_hints(&self) -> Option<String> {
         None
     }
 

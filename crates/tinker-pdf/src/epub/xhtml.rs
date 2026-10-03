@@ -157,6 +157,28 @@ impl CssElement for Node {
         self.style.as_deref()
     }
 
+    /// HTML §15.3.8's list numbering, as the presentational hints it states.
+    ///
+    /// `<ol start="n">` is `counter-reset: list-item n−1` and `<li value="n">`
+    /// is `counter-set: list-item n`, parsed by HTML's *rules for parsing
+    /// integers* — leading white space, an optional sign, digits, and anything
+    /// after them ignored. `<ol reversed>` is `counter-reset:
+    /// reversed(list-item)`, which this build refuses by value: the parser
+    /// counts it against `counter-reset` on the element, rather than the list
+    /// being numbered upwards with nothing to say so.
+    fn presentational_hints(&self) -> Option<String> {
+        match self.name.as_str() {
+            "ol" if self.attr("reversed").is_some() => {
+                Some("counter-reset: reversed(list-item)".to_owned())
+            }
+            "ol" => html_integer(self.attr("start")?)
+                .map(|start| format!("counter-reset: list-item {}", start.saturating_sub(1))),
+            "li" => html_integer(self.attr("value")?)
+                .map(|value| format!("counter-set: list-item {value}")),
+            _ => None,
+        }
+    }
+
     /// `selectors-4` §6.6.3's `:empty`.
     ///
     /// **Character data that is only white space is not content**, so
@@ -276,6 +298,34 @@ impl CssElement for Node {
 /// indentation is made of.
 fn is_document_white_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{000C}')
+}
+
+/// HTML §2.3.4.1's *rules for parsing integers*: leading ASCII white space, an
+/// optional `-` or `+`, at least one digit, and nothing after the digits read.
+///
+/// `None` where there is no digit, which HTML calls an error and which leaves
+/// the attribute without effect — `start="x"` numbers from one, as it does in
+/// a browser. A value past `i32`'s range is clamped, `css-values-4` §5.1's rule
+/// for the integer the hint becomes.
+fn html_integer(raw: &str) -> Option<i32> {
+    let text = raw.trim_start_matches(is_document_white_space);
+    let (negative, digits) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let digits: &str = &digits[..digits
+        .bytes()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(digits.len())];
+    if digits.is_empty() {
+        return None;
+    }
+    let magnitude = digits.bytes().fold(0i64, |acc, b| {
+        (acc * 10 + i64::from(b - b'0')).min(i64::from(i32::MAX) + 1)
+    });
+    let value = if negative { -magnitude } else { magnitude };
+    Some(value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
 }
 
 /// What could not be read about a content document.

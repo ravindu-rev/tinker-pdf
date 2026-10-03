@@ -449,6 +449,125 @@ fn lowercase_and_capitalize_are_the_text_written_that_way() {
     same("capitalize", capitalized, written_cap, broken_cap);
 }
 
+// ---- lists and counters -----------------------------------------------------------
+
+/// **An `inside` marker is the list item's first inline box** (`css-lists-3`
+/// §3.2), and so lays out exactly as a `::before` holding the same text: the
+/// `list-item` counter in the item's style, its `.` suffix and a space.
+///
+/// The two sides reach the page by different routes — one is the layout
+/// crate's marker, armed on the item and taken by its first line; the other is
+/// generated content resolved by the cascade's counter walk — and agree only if
+/// both number the item the same way and put the text in the same line.
+#[test]
+fn an_inside_marker_is_a_before_box_holding_the_counter() {
+    let base = "li { font-size: 20px; line-height: 30px }";
+    let body = "<ol><li>aaaa bbbb cccc dddd</li><li>eeee</li></ol>";
+    let marker = lay(
+        &format!("{base} li {{ list-style-position: inside }}"),
+        body,
+    );
+    let generated = lay(
+        &format!(
+            "{base} li {{ list-style-type: none }} \
+             li::before {{ content: counter(list-item) \". \" }}"
+        ),
+        body,
+    );
+    let broken = lay(
+        &format!("{base} li {{ list-style-position: outside }}"),
+        body,
+    );
+    // The marker is a run of its own, at the content edge, and the text after
+    // it is set three advances on: the lines wrap under the marker, which is
+    // what `inside` means.
+    assert_eq!(
+        (marker[0].0.as_str(), marker[0].1),
+        ("1. ", 40.0),
+        "{marker:?}"
+    );
+    assert_eq!((marker[1].0.as_str(), marker[1].1), ("aaaa bbbb", 76.0));
+    assert_eq!(marker[2].1, 40.0, "the second line wraps under the marker");
+    same("an inside marker", marker, generated, broken);
+}
+
+/// **`list-style` is its two longhands** (`css-lists-3` §3.4), in either
+/// order, `none` read as the type.
+#[test]
+fn the_list_style_shorthand_is_its_longhands() {
+    let base = "li { font-size: 20px; line-height: 30px }";
+    let body = "<ul><li>one</li><li>two</li></ul>";
+    let shorthand = lay(&format!("{base} ul {{ list-style: inside square }}"), body);
+    let longhand = lay(
+        &format!("{base} ul {{ list-style-type: square; list-style-position: inside }}"),
+        body,
+    );
+    let broken = lay(
+        &format!("{base} ul {{ list-style-type: square; list-style-position: outside }}"),
+        body,
+    );
+    same("list-style", shorthand, longhand, broken);
+    let none = lay(&format!("{base} ul {{ list-style: none }}"), body);
+    let none_type = lay(&format!("{base} ul {{ list-style-type: none }}"), body);
+    assert_eq!(none, none_type, "`list-style: none` is the type");
+}
+
+/// **`<ol start>` and `<li value>` are the counter properties HTML §15.3.8
+/// says they are**: `start="3"` is `counter-reset: list-item 2` and
+/// `value="7"` is `counter-set: list-item 7`, and the items after a `value`
+/// count on from it.
+#[test]
+fn ol_start_and_li_value_are_counter_reset_and_counter_set() {
+    let base = "li { font-size: 20px; line-height: 30px; list-style-position: inside }";
+    let items = "<li>a</li><li>b</li><li>c</li>";
+    let attribute = lay(base, &format!("<ol start=\"3\">{items}</ol>"));
+    let property = lay(
+        &format!("{base} ol {{ counter-reset: list-item 2 }}"),
+        &format!("<ol>{items}</ol>"),
+    );
+    let broken = lay(base, &format!("<ol start=\"1\">{items}</ol>"));
+    assert_eq!(attribute[0].0, "3. ", "{attribute:?}");
+    same("ol start", attribute, property, broken);
+
+    let valued = lay(base, "<ol><li>a</li><li value=\"7\">b</li><li>c</li></ol>");
+    let set = lay(
+        &format!("{base} .v {{ counter-set: list-item 7 }}"),
+        "<ol><li>a</li><li class=\"v\">b</li><li>c</li></ol>",
+    );
+    let broken = lay(base, "<ol><li>a</li><li>b</li><li>c</li></ol>");
+    assert_eq!(
+        valued.iter().map(|l| l.0.as_str()).collect::<Vec<_>>(),
+        ["1. ", "a", "7. ", "b", "8. ", "c"]
+    );
+    same("li value", valued, set, broken);
+}
+
+/// **A nested list's numbers are `counters(list-item, ".")`** — each `<ol>`
+/// resets its own instance (HTML §15.3.8's `ol { counter-reset: list-item }`)
+/// and the inner one nests inside the outer, §4.5 — and **a sibling `<ol>`
+/// starts again from one** rather than nesting inside the list before it.
+#[test]
+fn nested_lists_number_through_the_counter_tree() {
+    let base = "li { font-size: 20px; line-height: 30px; list-style-type: none } \
+                ol { padding: 0 }";
+    let body = "<ol><li>a<ol><li>b</li><li>c</li></ol></li><li>d</li></ol><ol><li>e</li></ol>";
+    let counted = lay(
+        &format!("{base} li::before {{ content: counters(list-item, \".\") \" \" }}"),
+        body,
+    );
+    let written = lay(
+        base,
+        "<ol><li><span>1 </span>a<ol><li><span>1.1 </span>b</li>\
+         <li><span>1.2 </span>c</li></ol></li><li><span>2 </span>d</li></ol>\
+         <ol><li><span>1 </span>e</li></ol>",
+    );
+    let broken = lay(
+        &format!("{base} li::before {{ content: counter(list-item) \" \" }}"),
+        body,
+    );
+    same("counters()", counted, written, broken);
+}
+
 // ---- fragmentation ------------------------------------------------------------
 
 /// Where every line landed **and on which page**, at a page box short enough

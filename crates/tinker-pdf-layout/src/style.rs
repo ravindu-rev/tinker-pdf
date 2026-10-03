@@ -39,9 +39,9 @@ use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BorderCollapse, BorderSpacing, BorderStyle, BoxSizing,
     Clear, Color, ColumnCount, ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection,
     FlexWrap, Float, FontFamily, FontStyle, FontVariant, Gap, Inset, JustifyContent,
-    LengthPercentage, LineHeight, ListStyleType, MarginValue, MaxSize, MinSize, OverflowWrap,
-    PageBreak, PageBreakInside, Position, Side, Sides, Size, Spacing, TableLayout, TextAlign,
-    TextDecoration, TextTransform, VerticalAlign, Visibility, WhiteSpace, ZIndex,
+    LengthPercentage, LineHeight, ListStylePosition, ListStyleType, MarginValue, MaxSize, MinSize,
+    OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size, Spacing, TableLayout,
+    TextAlign, TextDecoration, TextTransform, VerticalAlign, Visibility, WhiteSpace, ZIndex,
 };
 
 use crate::metrics::FontRequest;
@@ -91,8 +91,12 @@ pub struct Consumed {
     /// of operations: a transformed run is **measured** as the characters it
     /// becomes, so `ß` set in capitals is two advances wide.
     pub text_transform: TextTransform,
-    /// `list-style-type`, for a `display: list-item` marker.
+    /// `list-style-type`, for a `display: list-item` marker that its caller
+    /// did not supply the text of. See [`crate::BoxNode::marker`].
     pub list_style_type: ListStyleType,
+    /// `list-style-position`, CSS 2.2 §12.5.1: whether the marker stands
+    /// outside the principal box or is its first inline box.
+    pub list_style_position: ListStylePosition,
     /// `box-sizing`.
     pub box_sizing: BoxSizing,
     /// `width`.
@@ -246,6 +250,16 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         text_indent,
         white_space,
         list_style_type,
+        list_style_position,
+        // `css-lists-3` §4's three, read by `tinker_pdf_css::counter` over the
+        // whole element tree before a box tree exists — the walk a counter
+        // needs is the document's and not one box's — and arriving here as
+        // [`crate::BoxNode::marker`] and as `::before`/`::after` text. Named so
+        // that the pattern stays exhaustive and a fourth counter property still
+        // fails to build here.
+        counter_reset: _,
+        counter_increment: _,
+        counter_set: _,
         visibility,
         text_decoration,
         text_transform,
@@ -359,6 +373,7 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         white_space: *white_space,
         text_transform: *text_transform,
         list_style_type: *list_style_type,
+        list_style_position: *list_style_position,
         box_sizing: *box_sizing,
         width: *width,
         height: *height,
