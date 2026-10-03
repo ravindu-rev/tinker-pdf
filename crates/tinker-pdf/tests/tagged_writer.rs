@@ -1279,3 +1279,67 @@ fn namespaces_are_written_only_with_a_tree_that_has_them() {
     let bytes = builder.finish();
     assert!(!bytes.windows(9).any(|window| window == b"Namespace"));
 }
+
+/// **A role map stops at what a reader keeps.** `/RoleMap` and each
+/// namespace's `/RoleMapNS` are one dictionary each, and this crate's parser
+/// keeps `MAX_DICT_ENTRIES` entries of one — so `map_role` and `map_role_in`
+/// refuse the next, every mapping they accepted reads back, and the first
+/// they refused reads as itself rather than as a mapping that was written
+/// and then dropped. The review of the tagged-writing lane mapped five
+/// thousand names and read the last back as a type no standard defines, in
+/// a document claiming `/Marked true`.
+#[test]
+fn a_role_map_stops_at_the_entries_a_reader_keeps() {
+    let cap = tinker_pdf_cos::limits::MAX_DICT_ENTRIES;
+    let name = |i: usize| format!("c{i:05}");
+    let (last, refused) = (name(cap - 1), name(cap));
+
+    let mut builder = DocumentBuilder::with_version(2, 0);
+    builder.add_base_font(b"F1", b"Helvetica");
+    let accepted = (0..cap + 10)
+        .filter(|i| builder.map_role(name(*i).as_bytes(), b"P"))
+        .count();
+    assert_eq!(accepted, cap, "/RoleMap: as many as a reader keeps");
+    assert!(
+        builder.map_role(name(0).as_bytes(), b"P"),
+        "restating a mapping is still accepted"
+    );
+    let mine = builder.add_namespace("urn:example:mine").expect("2.0");
+    let pdf17 = builder.add_namespace(PDF_1_7_NAMESPACE).expect("2.0");
+    let accepted = (0..cap + 10)
+        .filter(|i| builder.map_role_in(mine, name(*i).as_bytes(), b"Div", pdf17))
+        .count();
+    assert_eq!(accepted, cap, "/RoleMapNS: the same");
+
+    builder.add_page(300.0, 200.0, |page| {
+        page.tagged(last.as_bytes(), |page| {
+            page.text(b"F1", 12.0, 20.0, 150.0, "a")
+        });
+        page.tagged(refused.as_bytes(), |page| {
+            page.text(b"F1", 12.0, 20.0, 130.0, "b")
+        });
+        page.tagged_with(&Tag::new(last.as_bytes()).namespace(mine), |page| {
+            page.text(b"F1", 12.0, 20.0, 110.0, "c")
+        });
+        page.tagged_with(&Tag::new(refused.as_bytes()).namespace(mine), |page| {
+            page.text(b"F1", 12.0, 20.0, 90.0, "d")
+        });
+    });
+    let doc = Document::open(builder.finish()).expect("opens");
+    let read: Vec<(String, String, Option<String>)> = elements(&doc)
+        .into_iter()
+        .filter(|element| element.raw_type.starts_with('c'))
+        .map(|element| (element.raw_type, element.standard_type, element.namespace))
+        .collect();
+    let mine_uri = Some("urn:example:mine".to_string());
+    assert_eq!(
+        read,
+        [
+            (last.clone(), "P".to_string(), None),
+            (refused.clone(), refused.clone(), None),
+            (last.clone(), "Div".to_string(), mine_uri.clone()),
+            (refused.clone(), refused.clone(), mine_uri),
+        ],
+        "every accepted mapping reads back, and a refused one as itself"
+    );
+}

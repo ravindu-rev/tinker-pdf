@@ -1679,11 +1679,17 @@ fn write_chapters<R: read::Resources + ?Sized>(
             .map(|reading| tagging::table_cells(&reading.dom, &chapter.pages, &pictures[spine_at]))
             .unwrap_or_default();
         let path = chapter.path.as_deref().unwrap_or(chapter.name.as_str());
-        let roles = chapter
+        let (roles, unmapped) = chapter
             .reading
             .as_ref()
             .map(|reading| tagging::register_roles(builder, &reading.dom))
             .unwrap_or_default();
+        if unmapped > 0 {
+            warnings.push(ArchiveWarning::ElementNamesUnmapped {
+                item: chapter.name.clone(),
+                names: unmapped,
+            });
+        }
         let structure = chapter.reading.as_ref().map(|reading| tagging::Tagging {
             dom: &reading.dom,
             // **A base per content document.** Both an element index and a

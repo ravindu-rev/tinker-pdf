@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use tinker_pdf_cos::build::{DocumentBuilder, PageBuilder, TableAttributes, TableScope, Tag};
-use tinker_pdf_cos::is_language_tag;
+use tinker_pdf_cos::{is_language_tag, is_standard_structure_type};
 use tinker_pdf_layout::{Page as LayoutPage, ReplacedFragment, TextRun};
 
 use super::paint::{artifact_or_run, draw_replaced, Effects, Fonts, Frame, OnPage};
@@ -630,7 +630,11 @@ pub(crate) fn figure_orders(dom: &Dom, pages: &[LayoutPage]) -> Figures {
 /// Registers a `/RoleMap` entry (14.7.3) for every element name of a content
 /// document whose standard type is not its own spelling, and returns the
 /// names it registered — the ones [`Tagging::tag`] then writes as
-/// themselves.
+/// themselves — and how many it could not, because the document's role map
+/// was full (`DocumentBuilder::map_role` stops at the entries one dictionary
+/// can carry to this engine's reader). Those are written as their standard
+/// type, the way a refused standard name is, and are counted so the caller
+/// can say so.
 ///
 /// **The XHTML name is kept and its meaning stated**, rather than the name
 /// thrown away: `<em>` is written `/S /em` and `<strong>` `/S /strong`, both
@@ -641,10 +645,14 @@ pub(crate) fn figure_orders(dom: &Dom, pages: &[LayoutPage]) -> Figures {
 /// not already know. A name `DocumentBuilder::map_role` refuses — one that is
 /// itself a standard type, which an element outside the XHTML namespace can
 /// be — is written as its standard type too.
-pub(crate) fn register_roles(builder: &mut DocumentBuilder, dom: &Dom) -> BTreeSet<String> {
+pub(crate) fn register_roles(
+    builder: &mut DocumentBuilder,
+    dom: &Dom,
+) -> (BTreeSet<String>, usize) {
     let mut out = BTreeSet::new();
+    let mut unmapped: BTreeSet<&str> = BTreeSet::new();
     for node in &dom.nodes {
-        if out.contains(&node.name) {
+        if out.contains(&node.name) || unmapped.contains(node.name.as_str()) {
             continue;
         }
         let standard = structure_type(&node.name);
@@ -653,9 +661,15 @@ pub(crate) fn register_roles(builder: &mut DocumentBuilder, dom: &Dom) -> BTreeS
         }
         if builder.map_role(node.name.as_bytes(), standard.as_bytes()) {
             out.insert(node.name.clone());
+        } else if !is_standard_structure_type(node.name.as_bytes()) {
+            // Every other refusal is ruled out here: the name is not a
+            // standard type, it is always mapped to the same standard type,
+            // and a standard type is never mapped onwards, so no loop. What
+            // is left is a full map.
+            unmapped.insert(node.name.as_str());
         }
     }
-    out
+    (out, unmapped.len())
 }
 
 /// ISO 32000 Table 333's standard structure type for an XHTML element — the

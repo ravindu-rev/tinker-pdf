@@ -1108,3 +1108,52 @@ fn a_header_cell_that_is_not_written_is_not_named() {
         .collect();
     assert_eq!(ids, ["EPUB/ch1.xhtml#h", "EPUB/ch1.xhtml#r"]);
 }
+
+/// **More element names than one role map carries** are written as their
+/// standard types, and the book says so. A `/RoleMap` is one dictionary and
+/// this engine's reader keeps `MAX_DICT_ENTRIES` entries of one, so a book
+/// naming more elements than that used to write every name, have the reader
+/// drop the mappings past the cap, and read those elements back as types no
+/// standard defines — in a document claiming `/Marked true`. Now every
+/// element reads as a standard type, the names that could not be kept are
+/// written as `/Span` itself, and `ArchiveWarning::ElementNamesUnmapped`
+/// counts them.
+#[test]
+fn element_names_past_what_a_role_map_carries_are_written_as_their_types() {
+    let distinct = tinker_pdf_cos::limits::MAX_DICT_ENTRIES + 100;
+    let body: String = (0..distinct).map(|i| format!("<x{i}>w</x{i}> ")).collect();
+    let doc = opened(&body);
+    let tree = doc.structure().expect("a tree");
+    let found = tree.elements();
+    for element in &found {
+        assert!(
+            tinker_pdf_cos::STANDARD_STRUCTURE_TYPES.contains(&element.standard_type.as_str()),
+            "/{} reads as /{}, which is not a standard type",
+            element.raw_type,
+            element.standard_type
+        );
+    }
+    let unmapped: Vec<usize> = doc
+        .archive()
+        .expect("a synthesised book carries a report")
+        .warnings()
+        .iter()
+        .filter_map(|warning| match warning {
+            tinker_pdf::ArchiveWarning::ElementNamesUnmapped { item, names } => {
+                assert_eq!(item, "EPUB/ch1.xhtml");
+                Some(*names)
+            }
+            _ => None,
+        })
+        .collect();
+    let written_as_span = found
+        .iter()
+        .filter(|element| element.raw_type == "Span")
+        .count();
+    assert!(written_as_span > 0, "some names were past the map");
+    assert_eq!(
+        unmapped,
+        [written_as_span],
+        "one warning, counting the names written as their type"
+    );
+}

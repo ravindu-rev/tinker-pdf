@@ -1060,6 +1060,22 @@ pub enum ArchiveWarning {
         /// How many declarations were not written.
         tags: usize,
     },
+    /// Element names this build wrote as their standard structure type
+    /// rather than as themselves, because the document's `/RoleMap` (ISO
+    /// 32000-1 14.7.3) already held `MAX_DICT_ENTRIES` names — the most
+    /// entries of one dictionary this engine's reader keeps, so a mapping
+    /// past it would be written and then dropped on read, and its elements
+    /// would read as types no standard defines.
+    ///
+    /// Counted per content document. The elements are still tagged and still
+    /// say what they are; what they lose is the book's own name for it.
+    ElementNamesUnmapped {
+        /// The container path of the content document.
+        item: String,
+        /// How many distinct element names were written as their standard
+        /// type.
+        names: usize,
+    },
 }
 
 /// Where one page came from.

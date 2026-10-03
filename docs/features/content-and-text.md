@@ -493,7 +493,10 @@ with `raw_type` `Chapitre` and `standard_type` `Sect`. It refuses what a
 reader could not use — remapping a standard type (ISO 14289-1 7.1: *standard
 tags shall not be remapped*; the list is `STANDARD_STRUCTURE_TYPES`, shared
 with the PDF/A validator's level A rule), an empty or identity entry, a
-second target for one name, and a loop.
+second target for one name, a loop, and a mapping past `MAX_DICT_ENTRIES`
+(4 096) — the most entries of one dictionary this engine's parser keeps, so
+a longer `/RoleMap` would be written and partly dropped on read.
+`map_role_in` stops at the same number per namespace.
 **PDF 2.0's structure namespaces** (ISO 32000-2 14.7.4, 14.8.6) are read and
 written. `DocumentBuilder::add_namespace(uri)` registers one — refused below
 2.0, since `/NS` and `/Namespaces` are 2.0 keys — and `Tag::namespace(id)`

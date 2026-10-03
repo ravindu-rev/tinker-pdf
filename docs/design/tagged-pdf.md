@@ -236,7 +236,9 @@ writes, family by family:
   reader's, and the deepest element's text came back orphaned.
 - **`/RoleMap`.** `DocumentBuilder::map_role` maps a custom type to a
   standard one, possibly through another custom type, and refuses to remap a
-  standard type (ISO 14289-1 7.1), an identity, a second target and a loop.
+  standard type (ISO 14289-1 7.1), an identity, a second target, a loop, and
+  — since the row's review — an entry past the 4 096 one dictionary carries
+  to this crate's reader, which used to be written and dropped on read.
   The standard list moved from the PDF/A validator into the writer's crate so
   the two cannot disagree about what "standard" means.
 - **`/Link` with its `/OBJR`.** A `link` call made while an element is open
@@ -278,6 +280,8 @@ writes, family by family:
 - **The EPUB's role map.** Every element name whose standard type is not its
   own spelling is registered with `map_role` before a chapter's pages are
   drawn and written as itself; `sub` stopped being the non-standard `/Sub`.
+  A name `map_role` refuses because the map is full is written as its
+  standard type and counted by `ArchiveWarning::ElementNamesUnmapped`.
 - **The census over this engine's own output.** `pdfua.rs` runs milestone 5's
   rules over an EPUB this engine converted and over a document built with the
   tagging API, and asserts exactly what still fires: `no-pdfuaid-part` (no

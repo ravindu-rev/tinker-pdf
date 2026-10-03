@@ -4537,7 +4537,12 @@ impl DocumentBuilder {
     /// - `custom` is already mapped to something else — the first statement
     ///   stands, and mapping it again to the same type is accepted;
     /// - the mapping would close a loop, which a reader can only cut
-    ///   somewhere arbitrary (this crate's reports `RoleMapLoop`).
+    ///   somewhere arbitrary (this crate's reports `RoleMapLoop`);
+    /// - [`crate::limits::MAX_DICT_ENTRIES`] types are mapped already — the
+    ///   most entries of one dictionary this crate's parser keeps, so a
+    ///   `/RoleMap` past it would be written and partly dropped on read, and
+    ///   an element of a dropped type would read as non-standard in a
+    ///   document claiming `/Marked true`.
     ///
     /// Written only when the document has a structure tree to hold it.
     pub fn map_role(&mut self, custom: &[u8], standard: &[u8]) -> bool {
@@ -4550,6 +4555,9 @@ impl DocumentBuilder {
         }
         if let Some(existing) = self.role_map.get(custom) {
             return existing == standard;
+        }
+        if self.role_map.len() >= crate::limits::MAX_DICT_ENTRIES {
+            return false;
         }
         // Follow the target's own mappings: a chain that comes back to
         // `custom` is a loop. Bounded by the map's size, since an acyclic
@@ -4748,7 +4756,10 @@ impl DocumentBuilder {
     ///   of the [`STANDARD_STRUCTURE_TYPES`] that namespace defines;
     /// - `custom` is already mapped in `namespace` to something else — the
     ///   first statement stands, and the same mapping again is accepted;
-    /// - the mapping would close a loop through any namespace's map.
+    /// - the mapping would close a loop through any namespace's map;
+    /// - `namespace`'s map holds [`crate::limits::MAX_DICT_ENTRIES`] types
+    ///   already, the most entries of one dictionary this crate's parser
+    ///   keeps — [`DocumentBuilder::map_role`]'s reason.
     pub fn map_role_in(
         &mut self,
         namespace: NamespaceId,
@@ -4777,6 +4788,9 @@ impl DocumentBuilder {
         };
         if let Some(existing) = self.namespaces[from].role_map.get(custom) {
             return existing.0 == target && existing.1 == to_index;
+        }
+        if self.namespaces[from].role_map.len() >= crate::limits::MAX_DICT_ENTRIES {
+            return false;
         }
         // Follow the target's own mappings, across namespaces: one that comes
         // back to `custom` in `namespace` is a loop. Bounded by the number of
