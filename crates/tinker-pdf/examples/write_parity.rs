@@ -161,6 +161,40 @@
 //!
 //! (each record is one line; the breaks above are for reading).
 //!
+//! And two for the forms surface:
+//!
+//! - **forms** opens the form fixture and, through one editor, creates a
+//!   field of every kind `DocumentEditor::add_field` makes -- a text field
+//!   with a value and a `/MaxLen`, a required check box that starts ticked, a
+//!   radio group of two buttons with the second selected, a combo box with a
+//!   font size and a list box -- then reads `form-fields.xfdf` (one of the
+//!   hand-written fixtures under `crates/tinker-pdf/tests/form_data/`) and
+//!   applies it, and saves, rewriting;
+//! - **form-data** writes down what form data says: each field created above
+//!   as the reference it was given, the widgets the apply wrote a value for
+//!   and could not draw, then for each of eight sets of form data -- the
+//!   forms artefact's own fields, the four fixtures, `hierarchy.fdf` altered
+//!   three ways so the reader leaves the three warnings the fixtures never
+//!   reach, a set built a field at a time and a set holding a character XML
+//!   cannot carry -- its source, every
+//!   field with its value's shape and strings, every warning the reader left,
+//!   and the hashes of the data written back out as FDF and as XFDF; last,
+//!   whether bytes that are neither are refused by each reader. It prints
+//!   `READ sha256=` of that text.
+//!
+//! ```text
+//! added <name s> <num.gen>
+//! applied <num.gen,...|->
+//! data <name>
+//! source <s|->
+//! field <name s> <none|text|state|many> <value s>...
+//! warning <not-read|value-unreadable|tree-cut|unnamed> <what s|-> <field s|->
+//! fdf <sha256>
+//! xfdf <sha256|refused>
+//! read-fdf <refused|accepted>
+//! read-xfdf <refused|accepted>
+//! ```
+//!
 //! An attachment's hash is of its decoded bytes, `-` when it names no stream
 //! or the stream does not read. The warnings are read last on purpose:
 //! reading a page can tolerate more, so the order of the reads is part of the
@@ -683,6 +717,267 @@ fn signatures(support: &std::path::Path) -> String {
     text
 }
 
+/// The fields the forms script creates, and the form data it applies.
+///
+/// Returns the saved artefact and the first lines of the form-data text: each
+/// created field's reference, and the widgets the apply could not draw.
+fn forms(fixture: &[u8], form_data_dir: &std::path::Path) -> (Vec<u8>, Vec<String>) {
+    use tinker_pdf::{form_data, NewField, NewFieldKind, RadioButton, Rect};
+
+    let document = Document::open(fixture.to_vec()).expect("the form fixture opens");
+    let mut editor = document.editor();
+    let rect = |x0, y0, x1, y1| Rect { x0, y0, x1, y1 };
+    let text = NewField::new(
+        "person.given",
+        NewFieldKind::Text {
+            page: 0,
+            rect: rect(300.0, 700.0, 500.0, 720.0),
+            value: Some("Ada".to_string()),
+            max_len: Some(20),
+        },
+    );
+    let mut checkbox = NewField::new(
+        "subscribe",
+        NewFieldKind::Checkbox {
+            page: 0,
+            rect: rect(300.0, 660.0, 320.0, 680.0),
+            export: "Yes".to_string(),
+            checked: true,
+        },
+    );
+    checkbox.flags = 2;
+    let radio = NewField::new(
+        "size",
+        NewFieldKind::Radio {
+            buttons: vec![
+                RadioButton {
+                    export: "S".to_string(),
+                    page: 0,
+                    rect: rect(300.0, 620.0, 320.0, 640.0),
+                },
+                RadioButton {
+                    export: "M".to_string(),
+                    page: 0,
+                    rect: rect(330.0, 620.0, 350.0, 640.0),
+                },
+            ],
+            selected: Some("M".to_string()),
+        },
+    );
+    let mut combo = NewField::new(
+        "country",
+        NewFieldKind::Choice {
+            page: 0,
+            rect: rect(300.0, 580.0, 400.0, 600.0),
+            options: vec!["NZ".to_string(), "LK".to_string(), "UK".to_string()],
+            combo: true,
+            editable: false,
+            value: Some("LK".to_string()),
+        },
+    );
+    combo.font_size = 10.0;
+    let list = NewField::new(
+        "languages",
+        NewFieldKind::Choice {
+            page: 0,
+            rect: rect(300.0, 500.0, 400.0, 560.0),
+            options: vec!["en".to_string(), "fr".to_string()],
+            combo: false,
+            editable: false,
+            value: None,
+        },
+    );
+
+    let mut lines = Vec::new();
+    for spec in [&text, &checkbox, &radio, &combo, &list] {
+        let reference = editor.add_field(spec).expect("the field is created");
+        lines.push(format!(
+            "added {} {}.{}",
+            dump::text(Some(&spec.name)),
+            reference.num,
+            reference.gen
+        ));
+    }
+
+    let xfdf = std::fs::read(form_data_dir.join("form-fields.xfdf"))
+        .unwrap_or_else(|e| panic!("reading form-fields.xfdf: {e}"));
+    let data = form_data::read_xfdf(&xfdf).expect("the fixture is XFDF");
+    let skipped = form_data::apply(&mut editor, &data).expect("the fixture applies");
+    let widgets: Vec<String> = skipped
+        .iter()
+        .map(|widget| format!("{}.{}", widget.widget.num, widget.widget.gen))
+        .collect();
+    lines.push(format!(
+        "applied {}",
+        if widgets.is_empty() {
+            "-".to_string()
+        } else {
+            widgets.join(",")
+        }
+    ));
+    (editor.save(&WriteOptions::default()), lines)
+}
+
+/// The three alterations `hostile.fdf` is `hierarchy.fdf` with, each the
+/// first occurrence replaced: a value that is a number, a field whose `/T` is
+/// another key, and a field whose kids are itself. They are what make the
+/// reader leave the three warnings the fixtures never reach --
+/// `value-unreadable`, `unnamed` and `tree-cut` -- so a surface that spelled
+/// one as another would disagree.
+const HOSTILE: [(&[u8], &[u8]); 3] = [
+    (b"/V (plain)", b"/V 12345"),
+    (b"/T (untouched)", b"/X (untouched)"),
+    (b"/V (through a reference)", b"/Kids [ 2 0 R ]"),
+];
+
+/// `hierarchy.fdf` with [`HOSTILE`]'s alterations.
+fn hostile(mut bytes: Vec<u8>) -> Vec<u8> {
+    for (from, to) in HOSTILE {
+        let at = bytes
+            .windows(from.len())
+            .position(|window| window == from)
+            .expect("hierarchy.fdf carries what the alteration changes");
+        bytes.splice(at..at + from.len(), to.iter().copied());
+    }
+    bytes
+}
+
+/// One set of form data, in the contract's text.
+fn form_data_dump(name: &str, data: &tinker_pdf::form_data::FormData, out: &mut Vec<String>) {
+    use tinker_pdf::form_data::FormDataWarning;
+    use tinker_pdf::FieldValue;
+
+    out.push(format!("data {name}"));
+    out.push(format!("source {}", dump::text(data.source.as_deref())));
+    for field in &data.fields {
+        let (kind, values): (&str, Vec<&str>) = match &field.value {
+            FieldValue::None => ("none", Vec::new()),
+            FieldValue::Text(text) => ("text", vec![text.as_str()]),
+            FieldValue::State(state) => ("state", vec![state.as_str()]),
+            FieldValue::Many(values) => ("many", values.iter().map(String::as_str).collect()),
+        };
+        let mut line = format!("field {} {kind}", dump::text(Some(&field.name)));
+        for value in values {
+            line.push(' ');
+            line.push_str(&dump::text(Some(value)));
+        }
+        out.push(line);
+    }
+    for warning in &data.warnings {
+        let (kind, what, field) = match warning {
+            FormDataWarning::NotRead { what, field } => {
+                ("not-read", Some(what.as_str()), Some(field.as_str()))
+            }
+            FormDataWarning::ValueUnreadable { field } => {
+                ("value-unreadable", None, Some(field.as_str()))
+            }
+            FormDataWarning::TreeCut { field } => ("tree-cut", None, Some(field.as_str())),
+            FormDataWarning::Unnamed => ("unnamed", None, None),
+            other => panic!("a warning the parity text has no spelling for: {other:?}"),
+        };
+        out.push(format!(
+            "warning {kind} {} {}",
+            dump::text(what),
+            dump::text(field)
+        ));
+    }
+    out.push(format!("fdf {}", sha256_hex(&data.to_fdf())));
+    out.push(format!(
+        "xfdf {}",
+        data.to_xfdf()
+            .map_or_else(|_| "refused".to_string(), |x| sha256_hex(x.as_bytes()))
+    ));
+}
+
+/// Script: everything form data says, in the contract's text.
+fn form_data_text(
+    forms_artefact: &[u8],
+    mut lines: Vec<String>,
+    form_data_dir: &std::path::Path,
+) -> String {
+    use tinker_pdf::form_data::{self, FieldData, FormData};
+    use tinker_pdf::FieldValue;
+
+    let document = Document::open(forms_artefact.to_vec()).expect("the forms artefact opens");
+    form_data_dump(
+        "document",
+        &FormData::from_fields(&document.form_fields()),
+        &mut lines,
+    );
+    for file in [
+        "form-fields.fdf",
+        "hierarchy.fdf",
+        "form-fields.xfdf",
+        "hierarchy.xfdf",
+    ] {
+        let bytes = std::fs::read(form_data_dir.join(file))
+            .unwrap_or_else(|e| panic!("reading {file}: {e}"));
+        let data = if file.ends_with(".xfdf") {
+            form_data::read_xfdf(&bytes)
+        } else {
+            form_data::read_fdf(&bytes)
+        }
+        .unwrap_or_else(|e| panic!("{file}: {e}"));
+        form_data_dump(file, &data, &mut lines);
+    }
+    let hierarchy = std::fs::read(form_data_dir.join("hierarchy.fdf"))
+        .unwrap_or_else(|e| panic!("reading hierarchy.fdf: {e}"));
+    let data = form_data::read_fdf(&hostile(hierarchy)).expect("the altered FDF still reads");
+    form_data_dump("hostile.fdf", &data, &mut lines);
+
+    let mut built = FormData {
+        source: Some("built.pdf".to_string()),
+        ..FormData::default()
+    };
+    for (name, value) in [
+        ("a.b", FieldValue::Text("x \u{e9}".to_string())),
+        ("a.c", FieldValue::State("On".to_string())),
+        (
+            "list",
+            FieldValue::Many(vec!["1".to_string(), "2".to_string()]),
+        ),
+        ("nothing", FieldValue::Many(Vec::new())),
+        ("empty", FieldValue::None),
+    ] {
+        built.fields.push(FieldData {
+            name: name.to_string(),
+            value,
+        });
+    }
+    form_data_dump("built", &built, &mut lines);
+
+    let mut unrepresentable = FormData::default();
+    unrepresentable.fields.push(FieldData {
+        name: "bell".to_string(),
+        value: FieldValue::Text("\u{7}".to_string()),
+    });
+    form_data_dump("unrepresentable", &unrepresentable, &mut lines);
+
+    lines.push(format!(
+        "read-fdf {}",
+        if form_data::read_fdf(b"not form data").is_err() {
+            "refused"
+        } else {
+            "accepted"
+        }
+    ));
+    lines.push(format!(
+        "read-xfdf {}",
+        if form_data::read_xfdf(b"<root/>").is_err() {
+            "refused"
+        } else {
+            "accepted"
+        }
+    ));
+
+    let mut text = String::new();
+    for line in lines {
+        text.push_str(&line);
+        text.push('\n');
+    }
+    text
+}
+
 /// The creation date document-ops writes twice: on the attachment and in
 /// `/Info`.
 fn created() -> Date {
@@ -909,6 +1204,21 @@ fn main() {
         "READ sha256={} surface=facade script=signatures bytes={}",
         sha256_hex(signed.as_bytes()),
         signed.len()
+    );
+
+    // The form data fixtures live with the form data tests, beside the signed
+    // ones.
+    let form_data_dir = support.with_file_name("form_data");
+    let (formed, lines) = forms(&bytes, &form_data_dir);
+    report("forms", &formed);
+    let said = form_data_text(&formed, lines, &form_data_dir);
+    if std::env::var_os("TINKER_PARITY_DUMP").is_some() {
+        print!("{said}");
+    }
+    println!(
+        "READ sha256={} surface=facade script=form-data bytes={}",
+        sha256_hex(said.as_bytes()),
+        said.len()
     );
     println!("FACADE-PARITY: RAN");
 }

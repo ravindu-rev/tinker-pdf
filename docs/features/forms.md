@@ -477,8 +477,14 @@ Form data lives in the facade module `tinker_pdf::form_data`:
 `read_fdf(bytes)`, `read_xfdf(bytes)`, `FormData::{from_fields, to_fdf,
 to_xfdf}`, `apply(editor, &data)`, the types `FormData`, `FieldData`,
 `FormDataWarning` and `FormDataError`, and the readers' budget
-`MAX_FORM_DATA_BYTES`. It is not yet projected through the C
-ABI or the bindings.
+`MAX_FORM_DATA_BYTES`. Both halves cross the C ABI and every binding
+([bindings](bindings.md)): `add_field` as four calls, one per
+`NewFieldKind` arm (`tpdf_editor_add_text_field`, `_add_checkbox`,
+`_add_radio_group`, `_add_choice_field`), and form data as an owned
+`TpdfFormData` — read from FDF or XFDF, taken from a document, or built a
+field at a time; written back as either; applied with
+`tpdf_editor_apply_form_data` — with a reader's or writer's refusal as
+`TpdfStatus::FormDataRefused` (17).
 
 ```rust
 let data = form_data::FormData::from_fields(&document.form_fields());

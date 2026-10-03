@@ -29,6 +29,8 @@ mod signatures;
 pub use signatures::{PdfSignature, PdfTrustAnchors, PdfVerdict};
 mod docops;
 pub use docops::{PdfPageLabelRange, PdfSanitiseReport};
+mod forms;
+pub use forms::{PdfFormData, PdfRadioButton};
 
 /// An open PDF document.
 #[wasm_bindgen]

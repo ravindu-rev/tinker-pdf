@@ -130,6 +130,17 @@ typedef enum TpdfStatus {
   // that could not be read" are different answers, and the engine's reason,
   // with the object it was reading, is in [`tpdf_last_error_message`].
   TPDF_STATUS_STREAM_UNREADABLE = 16,
+  // Form data this reader would not read in the format asked for, or that
+  // format cannot carry: not an FDF, no `/FDF` dictionary, an encrypted
+  // FDF, XML that is not well formed or not XFDF, a value XML 1.0 cannot
+  // hold, or more than `form_data::MAX_FORM_DATA_BYTES`.
+  //
+  // One status for all of them, as `ScriptRefused` is one: from a caller's
+  // side the answer is the same -- nothing was read, or nothing written --
+  // and the reader's own sentence, naming the field where it can, is in
+  // [`tpdf_last_error_message`]. Distinct from `NotAPdf` because an FDF is
+  // not a PDF and was never claimed to be one.
+  TPDF_STATUS_FORM_DATA_REFUSED = 17,
 } TpdfStatus;
 
 // How far a password got.
@@ -436,6 +447,37 @@ typedef enum TpdfRemoval {
   TPDF_REMOVAL_METADATA = 8,
 } TpdfRemoval;
 
+// The shape of a field's value (12.7.4), as form data and the field tree
+// read it.
+typedef enum TpdfFieldValueKind {
+  // The field is named and given no value; an import leaves it alone.
+  TPDF_FIELD_VALUE_KIND_NONE = 0,
+  // A text string: a text field's value, or a choice field's one
+  // selection.
+  TPDF_FIELD_VALUE_KIND_TEXT = 1,
+  // A name: a check box's or radio group's state, `Off` or an export value.
+  TPDF_FIELD_VALUE_KIND_STATE = 2,
+  // Several selections of a multiple-choice list, each a text string.
+  TPDF_FIELD_VALUE_KIND_MANY = 3,
+} TpdfFieldValueKind;
+
+// What a form-data reader met and did not read, or read leniently
+// (ruling 10).
+typedef enum TpdfFormDataWarningKind {
+  // A key or element this reader does not read -- `/Annots`, `/AP`,
+  // `<annots>`, `<value-richtext>` -- named once per place it was met.
+  TPDF_FORM_DATA_WARNING_KIND_NOT_READ = 0,
+  // A field's `/V` that is neither a string, a name nor an array of them;
+  // the field is kept with no value.
+  TPDF_FORM_DATA_WARNING_KIND_VALUE_UNREADABLE = 1,
+  // A `/Kids` entry already walked, or one past the depth cap: the walk
+  // stopped there.
+  TPDF_FORM_DATA_WARNING_KIND_TREE_CUT = 2,
+  // A field whose fully qualified name is empty, which nothing can address;
+  // it is not read.
+  TPDF_FORM_DATA_WARNING_KIND_UNNAMED = 3,
+} TpdfFormDataWarningKind;
+
 // Which `Destination` arm an outline entry or a link names (12.3.2).
 //
 // Ruling 6 is why three arms cross rather than a page number: a named
@@ -538,6 +580,10 @@ typedef struct TpdfEditor TpdfEditor;
 // the ordinary case and is not an error; a non-empty one is a document that
 // looks filled and is not wholly drawn.
 typedef struct TpdfFillReport TpdfFillReport;
+
+// Form data: what an FDF or XFDF file says, or what one will be written
+// from. Opaque to callers.
+typedef struct TpdfFormData TpdfFormData;
 
 // A page's link annotations, in `/Annots` order. Opaque to callers.
 typedef struct TpdfLinks TpdfLinks;
@@ -824,6 +870,23 @@ typedef struct TpdfSanitise {
   // `/Info` and every `/Metadata` stream.
   int metadata;
 } TpdfSanitise;
+
+// One button of a radio group for [`tpdf_editor_add_radio_group`].
+typedef struct TpdfRadioButton {
+  // The button's on state: its export value, and the name `/V` holds while
+  // it is the one selected (12.7.4.2.4). Not `Off`.
+  const char *export_value;
+  // The zero-based page the button is drawn on.
+  uint32_t page;
+  // Where on that page, in default user space.
+  double x0;
+  // The rectangle's other corners.
+  double y0;
+  // See `x0`.
+  double x1;
+  // See `x0`.
+  double y1;
+} TpdfRadioButton;
 
 // A destination as read, which is `Destination` in C.
 //
@@ -2529,6 +2592,293 @@ enum TpdfStatus tpdf_sanitise_report_path_step(const struct TpdfSanitiseReport *
 // `report` must have come from [`tpdf_editor_sanitise`] and must not be used
 // afterwards, nor any bytes borrowed from it.
 void tpdf_sanitise_report_free(struct TpdfSanitiseReport *report);
+
+// Creates a text field (12.7.4.3) merged with its one widget, drawn with
+// `/Helv` from the form's `/DR` so creating and filling lay a value out the
+// same way.
+//
+// `value` is the initial value, or null for none; `max_len` is `/MaxLen`
+// when `has_max_len` is non-zero. `flags` are the caller's `/Ff` bits -- the
+// bits that decide what kind of field it is are the function's, and setting
+// them is refused -- and `font_size` is the `/DA` size, 0 for auto. The new
+// field's object is written through the out pointers, either of which may
+// be null. Refused, [`TpdfStatus::EditRefused`] with the facade's reason and
+// nothing written, for a malformed or taken name, a page past the end, a
+// rectangle with no area, a value the field would refuse, contradicting
+// flags or an unusable font size.
+//
+// # Safety
+//
+// `editor` must be a live handle, `name` null-terminated UTF-8 and `value`
+// null or null-terminated UTF-8.
+enum TpdfStatus tpdf_editor_add_text_field(struct TpdfEditor *editor,
+                                           const char *name,
+                                           uint32_t page,
+                                           double x0,
+                                           double y0,
+                                           double x1,
+                                           double y1,
+                                           const char *value,
+                                           int has_max_len,
+                                           uint32_t max_len,
+                                           int64_t flags,
+                                           double font_size,
+                                           uint32_t *out_object,
+                                           uint16_t *out_generation);
+
+// Creates a check box (12.7.4.2.3) merged with its one widget, with an
+// `/Off` appearance and one for `export_value`, its on state.
+//
+// `checked` non-zero starts it ticked. Otherwise as
+// [`tpdf_editor_add_text_field`]; an export value of `Off` is refused.
+//
+// # Safety
+//
+// `editor` must be a live handle and `name` and `export_value` null-terminated
+// UTF-8.
+enum TpdfStatus tpdf_editor_add_checkbox(struct TpdfEditor *editor,
+                                         const char *name,
+                                         uint32_t page,
+                                         double x0,
+                                         double y0,
+                                         double x1,
+                                         double y1,
+                                         const char *export_value,
+                                         int checked,
+                                         int64_t flags,
+                                         double font_size,
+                                         uint32_t *out_object,
+                                         uint16_t *out_generation);
+
+// Creates a radio group (12.7.4.2.4): one field, and one widget per button.
+//
+// `buttons` points to `count` buttons, at least one, with export values all
+// different; `selected` is the export value of the button that starts
+// selected, or null for none. The object written back is the field whose
+// kids are the buttons' widgets. Otherwise as
+// [`tpdf_editor_add_text_field`].
+//
+// # Safety
+//
+// `editor` must be a live handle, `name` null-terminated UTF-8, `buttons`
+// valid for `count` buttons whose `export_value`s are null-terminated UTF-8, and
+// `selected` null or null-terminated UTF-8.
+enum TpdfStatus tpdf_editor_add_radio_group(struct TpdfEditor *editor,
+                                            const char *name,
+                                            const struct TpdfRadioButton *buttons,
+                                            size_t count,
+                                            const char *selected,
+                                            int64_t flags,
+                                            double font_size,
+                                            uint32_t *out_object,
+                                            uint16_t *out_generation);
+
+// Creates a choice field (12.7.4.4) merged with its one widget: a combo box
+// when `combo` is non-zero, otherwise a list box.
+//
+// `options` points to `option_count` strings, each its own export value and
+// display text; `editable` non-zero lets a combo box's text be typed as well
+// as picked, and is refused on a list box; `value` is the initial selection,
+// or null for none. Otherwise as [`tpdf_editor_add_text_field`].
+//
+// # Safety
+//
+// `editor` must be a live handle, `name` null-terminated UTF-8, `options`
+// valid for `option_count` null-terminated UTF-8 strings, and `value` null
+// or null-terminated UTF-8.
+enum TpdfStatus tpdf_editor_add_choice_field(struct TpdfEditor *editor,
+                                             const char *name,
+                                             uint32_t page,
+                                             double x0,
+                                             double y0,
+                                             double x1,
+                                             double y1,
+                                             const char *const *options,
+                                             size_t option_count,
+                                             int combo,
+                                             int editable,
+                                             const char *value,
+                                             int64_t flags,
+                                             double font_size,
+                                             uint32_t *out_object,
+                                             uint16_t *out_generation);
+
+// The data a document's fields hold, in the tree's order: every terminal
+// field with a name, its value as the field tree reads it
+// (`FormData::from_fields` over `Document::form_fields`). An empty handle
+// for a document with no form.
+//
+// # Safety
+//
+// `doc` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_document_form_data(const struct TpdfDocument *doc, struct TpdfFormData **out);
+
+// Reads an FDF file (12.7.8): every field of it or, on
+// [`TpdfStatus::FormDataRefused`], none.
+//
+// # Safety
+//
+// `bytes` must be valid for `len` bytes and `out` a valid pointer.
+enum TpdfStatus tpdf_form_data_read_fdf(const uint8_t *bytes,
+                                        size_t len,
+                                        struct TpdfFormData **out);
+
+// Reads an XFDF file: every field of it or, on
+// [`TpdfStatus::FormDataRefused`], none.
+//
+// # Safety
+//
+// `bytes` must be valid for `len` bytes and `out` a valid pointer.
+enum TpdfStatus tpdf_form_data_read_xfdf(const uint8_t *bytes,
+                                         size_t len,
+                                         struct TpdfFormData **out);
+
+// Empty form data, for [`tpdf_form_data_add_field`] to fill.
+//
+// # Safety
+//
+// `out` must be a valid pointer.
+enum TpdfStatus tpdf_form_data_new(struct TpdfFormData **out);
+
+// Appends one field: its fully qualified name and its value, given as
+// `count` strings -- none for [`TpdfFieldValueKind::None`], exactly one for
+// `Text` and `State`, any number for `Many`. A count that does not fit the
+// kind is [`TpdfStatus::BadArgument`].
+//
+// # Safety
+//
+// `handle` must be a live handle, `name` null-terminated UTF-8, and `values`
+// valid for `count` null-terminated UTF-8 strings.
+enum TpdfStatus tpdf_form_data_add_field(struct TpdfFormData *handle,
+                                         const char *name,
+                                         enum TpdfFieldValueKind kind,
+                                         const char *const *values,
+                                         size_t count);
+
+// Sets the document the data belongs to: FDF's `/F`, XFDF's `<f href>`.
+// Recorded and written, never opened. Null clears it.
+//
+// # Safety
+//
+// `handle` must be a live handle and `source` null or null-terminated
+// UTF-8.
+enum TpdfStatus tpdf_form_data_set_source(struct TpdfFormData *handle, const char *source);
+
+// Writes the data as an FDF file (12.7.8), the names a tree again, freed
+// with [`crate::tpdf_buffer_free`].
+//
+// # Safety
+//
+// `handle` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_form_data_to_fdf(const struct TpdfFormData *handle, struct TpdfBuffer **out);
+
+// Writes the data as an XFDF file, UTF-8, freed with
+// [`crate::tpdf_buffer_free`]. A name or value XML 1.0 cannot carry is
+// [`TpdfStatus::FormDataRefused`], naming the field.
+//
+// # Safety
+//
+// `handle` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_form_data_to_xfdf(const struct TpdfFormData *handle, struct TpdfBuffer **out);
+
+// How many fields the data holds, or zero for a null handle.
+//
+// # Safety
+//
+// `handle` must be a live handle or null.
+uint32_t tpdf_form_data_count(const struct TpdfFormData *handle);
+
+// A field's fully qualified name, freed with [`crate::tpdf_string_free`].
+//
+// # Safety
+//
+// `handle` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_form_data_field_name(const struct TpdfFormData *handle,
+                                          uint32_t index,
+                                          char **out);
+
+// The shape of a field's value.
+//
+// # Safety
+//
+// `handle` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_form_data_field_value_kind(const struct TpdfFormData *handle,
+                                                uint32_t index,
+                                                enum TpdfFieldValueKind *out);
+
+// How many strings a field's value is made of: none for `None`, one for
+// `Text` and `State`, each selection for `Many`. Zero for a null handle or
+// an index past the end, which [`tpdf_form_data_field_value_kind`] tells
+// apart from a value with no strings.
+//
+// # Safety
+//
+// `handle` must be a live handle or null.
+uint32_t tpdf_form_data_field_value_count(const struct TpdfFormData *handle, uint32_t index);
+
+// The `string`th string of a field's value, freed with
+// [`crate::tpdf_string_free`]. Past the end is [`TpdfStatus::BadArgument`].
+//
+// # Safety
+//
+// `handle` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_form_data_field_value(const struct TpdfFormData *handle,
+                                           uint32_t index,
+                                           uint32_t string,
+                                           char **out);
+
+// The document the data belongs to, freed with [`crate::tpdf_string_free`];
+// **null on `Ok` when the data names none**.
+//
+// # Safety
+//
+// `handle` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_form_data_source(const struct TpdfFormData *handle, char **out);
+
+// How many warnings the reader left, or zero for a null handle.
+//
+// # Safety
+//
+// `handle` must be a live handle or null.
+uint32_t tpdf_form_data_warning_count(const struct TpdfFormData *handle);
+
+// One warning: its kind, the key or element not read (null unless
+// `NotRead`), and the field it was met in (null for `Unnamed`; empty for the
+// file itself). Strings are freed with [`crate::tpdf_string_free`].
+//
+// # Safety
+//
+// `handle` must be a live handle and the out pointers valid.
+enum TpdfStatus tpdf_form_data_warning(const struct TpdfFormData *handle,
+                                       uint32_t index,
+                                       enum TpdfFormDataWarningKind *out_kind,
+                                       char **out_what,
+                                       char **out_field);
+
+// Frees form data. Null is accepted and does nothing.
+//
+// # Safety
+//
+// `handle` must have come from one of this module's constructors and must
+// not be used afterwards.
+void tpdf_form_data_free(struct TpdfFormData *handle);
+
+// Imports form data into an editor: every field with a value, all of them
+// or none of them (`form_data::apply`, through `set_field_values`).
+//
+// The three outcomes are [`crate::tpdf_editor_fill_field`]'s: a non-`Ok`
+// status -- `NoSuchField`, `ValueRefused` or `FieldUnreadable`, the field
+// named in [`crate::tpdf_last_error_message`] -- means **nothing was
+// written**; `Ok` writes a [`TpdfFillReport`] through `out_report` (which
+// may be null) of the widgets that took a value and could not be drawn.
+//
+// # Safety
+//
+// `editor` and `handle` must be live handles and `out_report` a valid
+// pointer or null.
+enum TpdfStatus tpdf_editor_apply_form_data(struct TpdfEditor *editor,
+                                            const struct TpdfFormData *handle,
+                                            struct TpdfFillReport **out_report);
 
 // One `/Info` text entry (14.3.3), decoded.
 //

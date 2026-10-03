@@ -2,6 +2,7 @@ import io.github.ravindu_rev.tinkerpdf.Attachments;
 import io.github.ravindu_rev.tinkerpdf.Builder;
 import io.github.ravindu_rev.tinkerpdf.Document;
 import io.github.ravindu_rev.tinkerpdf.Editor;
+import io.github.ravindu_rev.tinkerpdf.FormData;
 import io.github.ravindu_rev.tinkerpdf.OutlineEntry;
 import io.github.ravindu_rev.tinkerpdf.PageBuilder;
 import io.github.ravindu_rev.tinkerpdf.TinkerPdf;
@@ -489,6 +490,127 @@ public final class WriteParity {
         return out.toString();
     }
 
+    record Formed(byte[] saved, List<String> lines) {}
+
+    /** Creates a field of every kind, applies an XFDF fixture and saves. */
+    static Formed forms(byte[] fixture, Path formDataDir) throws IOException {
+        Editor editor;
+        try (Document document = Document.open(fixture)) {
+            editor = document.editor();
+        }
+        try (editor) {
+            List<String> lines = new ArrayList<>();
+            java.util.function.BiConsumer<String, TinkerPdf.Ref> added = (name, ref) ->
+                    lines.add("added " + textToken(name) + " " + ref.object() + "." + ref.generation());
+            added.accept("person.given", editor.addTextField("person.given", 0, 300, 700, 500, 720, "Ada", 20, 0, 0));
+            added.accept("subscribe", editor.addCheckbox("subscribe", 0, 300, 660, 320, 680, "Yes", true, 2, 0));
+            added.accept("size", editor.addRadioGroup("size", List.of(
+                    new TinkerPdf.RadioButton("S", 0, 300, 620, 320, 640),
+                    new TinkerPdf.RadioButton("M", 0, 330, 620, 350, 640)), "M", 0, 0));
+            added.accept("country", editor.addChoiceField("country", 0, 300, 580, 400, 600,
+                    List.of("NZ", "LK", "UK"), true, false, "LK", 0, 10));
+            added.accept("languages", editor.addChoiceField("languages", 0, 300, 500, 400, 560,
+                    List.of("en", "fr"), false, false, null, 0, 0));
+            List<String> widgets = new ArrayList<>();
+            try (FormData data = FormData.readXfdf(Files.readAllBytes(formDataDir.resolve("form-fields.xfdf")))) {
+                for (var widget : editor.applyFormData(data)) {
+                    widgets.add(widget.object() + "." + widget.generation());
+                }
+            }
+            lines.add("applied " + (widgets.isEmpty() ? "-" : String.join(",", widgets)));
+            return new Formed(editor.save(options(TinkerPdf.WriteMode.REWRITE)), lines);
+        }
+    }
+
+    static final String[] VALUE_KINDS = {"none", "text", "state", "many"};
+    static final String[] FORM_WARNINGS = {"not-read", "value-unreadable", "tree-cut", "unnamed"};
+
+    static void formDataDump(String label, FormData data, List<String> lines) {
+        lines.add("data " + label);
+        lines.add("source " + textToken(data.source()));
+        for (int i = 0; i < data.count(); i++) {
+            StringBuilder line = new StringBuilder("field " + textToken(data.fieldName(i)) + " "
+                    + VALUE_KINDS[data.valueKind(i).ordinal()]);
+            for (String value : data.values(i)) {
+                line.append(' ').append(textToken(value));
+            }
+            lines.add(line.toString());
+        }
+        for (var warning : data.warnings()) {
+            lines.add("warning " + FORM_WARNINGS[warning.kind().ordinal()] + " " + textToken(warning.what()) + " "
+                    + textToken(warning.field()));
+        }
+        lines.add("fdf " + sha(data.toFdf()));
+        String xfdf;
+        try {
+            xfdf = sha(data.toXfdf());
+        } catch (TinkerPdfException e) {
+            check(e.status() == TinkerPdf.Status.FORM_DATA_REFUSED, "toXfdf: " + e.getMessage());
+            xfdf = "refused";
+        }
+        lines.add("xfdf " + xfdf);
+    }
+
+    /** hierarchy.fdf altered three ways: the warnings the fixtures never reach (the facade example says why). */
+    static byte[] hostile(byte[] raw) {
+        String text = new String(raw, StandardCharsets.ISO_8859_1);
+        String[][] pairs = {
+            {"/V (plain)", "/V 12345"},
+            {"/T (untouched)", "/X (untouched)"},
+            {"/V (through a reference)", "/Kids [ 2 0 R ]"},
+        };
+        for (String[] pair : pairs) {
+            int at = text.indexOf(pair[0]);
+            check(at >= 0, "hierarchy.fdf carries what the alteration changes");
+            text = text.substring(0, at) + pair[1] + text.substring(at + pair[0].length());
+        }
+        return text.getBytes(StandardCharsets.ISO_8859_1);
+    }
+
+    static String formDataText(byte[] formed, List<String> lines, Path formDataDir) throws IOException {
+        try (Document document = Document.open(formed); FormData own = document.formData()) {
+            formDataDump("document", own, lines);
+        }
+        for (String file : List.of("form-fields.fdf", "hierarchy.fdf", "form-fields.xfdf", "hierarchy.xfdf")) {
+            byte[] raw = Files.readAllBytes(formDataDir.resolve(file));
+            try (FormData data = file.endsWith(".xfdf") ? FormData.readXfdf(raw) : FormData.readFdf(raw)) {
+                formDataDump(file, data, lines);
+            }
+        }
+        try (FormData data = FormData.readFdf(hostile(Files.readAllBytes(formDataDir.resolve("hierarchy.fdf"))))) {
+            formDataDump("hostile.fdf", data, lines);
+        }
+        try (FormData built = FormData.empty()) {
+            built.setSource("built.pdf");
+            built.addField("a.b", TinkerPdf.FieldValueKind.TEXT, "x é");
+            built.addField("a.c", TinkerPdf.FieldValueKind.STATE, "On");
+            built.addField("list", TinkerPdf.FieldValueKind.MANY, "1", "2");
+            built.addField("nothing", TinkerPdf.FieldValueKind.MANY);
+            built.addField("empty", TinkerPdf.FieldValueKind.NONE);
+            formDataDump("built", built, lines);
+        }
+        try (FormData unrepresentable = FormData.empty()) {
+            unrepresentable.addField("bell", TinkerPdf.FieldValueKind.TEXT, "\u0007");
+            formDataDump("unrepresentable", unrepresentable, lines);
+        }
+        for (String label : List.of("read-fdf", "read-xfdf")) {
+            boolean xml = label.equals("read-xfdf");
+            byte[] raw = utf8(xml ? "<root/>" : "not form data");
+            try {
+                (xml ? FormData.readXfdf(raw) : FormData.readFdf(raw)).close();
+                lines.add(label + " accepted");
+            } catch (TinkerPdfException e) {
+                check(e.status() == TinkerPdf.Status.FORM_DATA_REFUSED, label + ": " + e.getMessage());
+                lines.add(label + " refused");
+            }
+        }
+        StringBuilder out = new StringBuilder();
+        for (String line : lines) {
+            out.append(line).append('\n');
+        }
+        return out.toString();
+    }
+
     public static void main(String[] args) throws IOException {
         if (args.length != 1) {
             System.err.println("usage: WriteParity <form-fields.pdf>");
@@ -511,6 +633,10 @@ public final class WriteParity {
         Path support = fixturePath.getParent().getParent().resolve("crates").resolve("tinker-pdf").resolve("tests")
                 .resolve("signature_support");
         reportRead("signatures", signatures(support));
+        Path formDataDir = support.getParent().resolve("form_data");
+        Formed formed = forms(fixture, formDataDir);
+        report("forms", formed.saved());
+        reportRead("form-data", formDataText(formed.saved(), formed.lines(), formDataDir));
         System.out.println("JAVA-PARITY: RAN");
     }
 }

@@ -251,6 +251,14 @@ public enum Status
     /// from a null answer, which is the document naming no stream at all.
     /// </summary>
     StreamUnreadable = 16,
+
+    /// <summary>
+    /// Form data the reader would not read in the format asked for, or that
+    /// the format cannot carry: not an FDF, not XFDF, an encrypted FDF, a
+    /// value XML 1.0 cannot hold, or too large. Nothing was read or written;
+    /// the message is the reader's own sentence.
+    /// </summary>
+    FormDataRefused = 17,
 }
 
 /// <summary>What is wrong with a widget an appearance could not be written for.</summary>

@@ -53,6 +53,7 @@ module TinkerPdf
     SOURCE_MISS = 14
     SCRIPT_REFUSED = 15
     STREAM_UNREADABLE = 16
+    FORM_DATA_REFUSED = 17
   end
 
   # The C declarations, one per line, as the header spells them with enums as
@@ -268,6 +269,37 @@ module TinkerPdf
     extern 'int tpdf_page_builder_set_stroke_rgb(void *page, double r, double g, double b)'
     extern 'int tpdf_page_builder_set_crop_box(void *page, double x0, double y0, double x1, double y1)'
     extern 'int tpdf_page_builder_raw(void *page, const uint8_t *operators, size_t len)'
+
+    extern 'int tpdf_editor_add_text_field(void *editor, const char *name, uint32_t page, double x0, double y0, ' \
+           'double x1, double y1, const char *value, int has_max_len, uint32_t max_len, int64_t flags, ' \
+           'double font_size, uint32_t *out_object, uint16_t *out_generation)'
+    extern 'int tpdf_editor_add_checkbox(void *editor, const char *name, uint32_t page, double x0, double y0, ' \
+           'double x1, double y1, const char *export_value, int checked, int64_t flags, double font_size, ' \
+           'uint32_t *out_object, uint16_t *out_generation)'
+    extern 'int tpdf_editor_add_radio_group(void *editor, const char *name, const void *buttons, size_t count, ' \
+           'const char *selected, int64_t flags, double font_size, uint32_t *out_object, uint16_t *out_generation)'
+    extern 'int tpdf_editor_add_choice_field(void *editor, const char *name, uint32_t page, double x0, double y0, ' \
+           'double x1, double y1, const void *options, size_t option_count, int combo, int editable, ' \
+           'const char *value, int64_t flags, double font_size, uint32_t *out_object, uint16_t *out_generation)'
+    extern 'int tpdf_document_form_data(const void *doc, void **out)'
+    extern 'int tpdf_form_data_read_fdf(const uint8_t *bytes, size_t len, void **out)'
+    extern 'int tpdf_form_data_read_xfdf(const uint8_t *bytes, size_t len, void **out)'
+    extern 'int tpdf_form_data_new(void **out)'
+    extern 'int tpdf_form_data_add_field(void *handle, const char *name, int kind, const void *values, size_t count)'
+    extern 'int tpdf_form_data_set_source(void *handle, const char *source)'
+    extern 'int tpdf_form_data_to_fdf(const void *handle, void **out)'
+    extern 'int tpdf_form_data_to_xfdf(const void *handle, void **out)'
+    extern 'uint32_t tpdf_form_data_count(const void *handle)'
+    extern 'int tpdf_form_data_field_name(const void *handle, uint32_t index, char **out)'
+    extern 'int tpdf_form_data_field_value_kind(const void *handle, uint32_t index, int *out)'
+    extern 'uint32_t tpdf_form_data_field_value_count(const void *handle, uint32_t index)'
+    extern 'int tpdf_form_data_field_value(const void *handle, uint32_t index, uint32_t string, char **out)'
+    extern 'int tpdf_form_data_source(const void *handle, char **out)'
+    extern 'uint32_t tpdf_form_data_warning_count(const void *handle)'
+    extern 'int tpdf_form_data_warning(const void *handle, uint32_t index, int *out_kind, char **out_what, ' \
+           'char **out_field)'
+    extern 'void tpdf_form_data_free(void *handle)'
+    extern 'int tpdf_editor_apply_form_data(void *editor, const void *handle, void **out_report)'
   end
 
   # The TPDF_SCRIPT_* policy bits and TPDF_ENTROPY_LEN, transcribed.
@@ -952,7 +984,11 @@ module TinkerPdf
 
     # Raises when nothing was written; returns the widgets it could not draw.
     def fill_field(name, value)
-      report = Raw.handle { |out| Native.tpdf_editor_fill_field(@pointer, Raw.cstr(name), Raw.cstr(value), out) }
+      Editor.skipped(Raw.handle { |out| Native.tpdf_editor_fill_field(@pointer, Raw.cstr(name), Raw.cstr(value), out) })
+    end
+
+    # A fill report's widgets, copied; the report is freed.
+    def self.skipped(report)
       (0...Native.tpdf_fill_report_count(report)).map do |i|
         number, generation = Raw.slot(4), Raw.slot(2)
         Raw.check(Native.tpdf_fill_report_widget(report, i, number, generation))
@@ -1230,6 +1266,150 @@ module TinkerPdf
     def close
       Native.tpdf_builder_free(@pointer) unless @pointer.nil?
       @pointer = nil
+    end
+  end
+
+  # The shape of a field's value, transcribed from TpdfFieldValueKind.
+  module FieldValueKind
+    NONE = 0
+    TEXT = 1
+    STATE = 2
+    MANY = 3
+  end
+
+  # What a form-data reader set aside, transcribed from TpdfFormDataWarningKind.
+  module FormDataWarningKind
+    NOT_READ = 0
+    VALUE_UNREADABLE = 1
+    TREE_CUT = 2
+    UNNAMED = 3
+  end
+
+  FormDataWarning = Struct.new(:kind, :what, :field, keyword_init: true)
+
+  # What an FDF or XFDF file says, or what one will be written from: the
+  # engine's own copy, so it outlives the document it came from.
+  class FormData
+    attr_reader :pointer
+
+    def self.read_fdf(bytes)
+      new(Raw.handle { |out| Native.tpdf_form_data_read_fdf(bytes, bytes.bytesize, out) })
+    end
+
+    def self.read_xfdf(bytes)
+      new(Raw.handle { |out| Native.tpdf_form_data_read_xfdf(bytes, bytes.bytesize, out) })
+    end
+
+    def self.empty = new(Raw.handle { |out| Native.tpdf_form_data_new(out) })
+
+    # A `const char *const *` of NUL-terminated copies, and the copies, which
+    # the caller keeps alive for the call.
+    def self.strings(values)
+      kept = values.map { |value| Raw.cstr(value) }
+      [kept.map { |value| Raw.address(value) }.pack('Q*'), kept]
+    end
+
+    def initialize(pointer)
+      @pointer = pointer
+    end
+
+    def close
+      Native.tpdf_form_data_free(@pointer) unless @pointer.nil?
+      @pointer = nil
+    end
+
+    def add_field(name, kind, values = [])
+      array, _kept = FormData.strings(values)
+      Raw.check(Native.tpdf_form_data_add_field(@pointer, Raw.cstr(name), kind, array, values.size))
+    end
+
+    def source = Raw.text { |out| Native.tpdf_form_data_source(@pointer, out) }
+
+    def source=(value)
+      Raw.check(Native.tpdf_form_data_set_source(@pointer, value.nil? ? nil : Raw.cstr(value)))
+    end
+
+    def count = Native.tpdf_form_data_count(@pointer)
+    def field_name(index) = Raw.text { |out| Native.tpdf_form_data_field_name(@pointer, index, out) }
+
+    def value_kind(index)
+      out = Raw.slot(4)
+      Raw.check(Native.tpdf_form_data_field_value_kind(@pointer, index, out))
+      Raw.i32(out)
+    end
+
+    def values(index)
+      (0...Native.tpdf_form_data_field_value_count(@pointer, index)).map do |i|
+        Raw.text { |out| Native.tpdf_form_data_field_value(@pointer, index, i, out) }
+      end
+    end
+
+    def warnings
+      (0...Native.tpdf_form_data_warning_count(@pointer)).map do |i|
+        kind, what, field = Raw.slot(4), Raw.slot, Raw.slot
+        Raw.check(Native.tpdf_form_data_warning(@pointer, i, kind, what, field))
+        FormDataWarning.new(kind: Raw.i32(kind), what: Raw.take_string(what), field: Raw.take_string(field))
+      end
+    end
+
+    def to_fdf = Raw.take_buffer(Raw.handle { |out| Native.tpdf_form_data_to_fdf(@pointer, out) })
+    def to_xfdf = Raw.take_buffer(Raw.handle { |out| Native.tpdf_form_data_to_xfdf(@pointer, out) })
+  end
+
+  class Document
+    def form_data = FormData.new(Raw.handle { |out| Native.tpdf_document_form_data(@pointer, out) })
+  end
+
+  # Creating fields and applying form data. Each add returns the new field's
+  # [object, generation]; flags are the caller's /Ff bits and font_size the
+  # /DA size, 0 for auto -- the engine's own defaults.
+  class Editor
+    def added
+      object, generation = Raw.slot(4), Raw.slot(2)
+      Raw.check(yield(object, generation))
+      [Raw.u32(object), Raw.u16(generation)]
+    end
+    private :added
+
+    def add_text_field(name, page, rect, value: nil, max_len: nil, flags: 0, font_size: 0.0)
+      added do |object, generation|
+        Native.tpdf_editor_add_text_field(@pointer, Raw.cstr(name), page, *rect, value && Raw.cstr(value),
+                                          max_len.nil? ? 0 : 1, max_len || 0, flags, font_size, object, generation)
+      end
+    end
+
+    def add_checkbox(name, page, rect, export, checked, flags: 0, font_size: 0.0)
+      added do |object, generation|
+        Native.tpdf_editor_add_checkbox(@pointer, Raw.cstr(name), page, *rect, Raw.cstr(export), checked ? 1 : 0,
+                                        flags, font_size, object, generation)
+      end
+    end
+
+    # buttons: [export, page, [x0, y0, x1, y1]]; TpdfRadioButton is
+    # export_value pointer @0, page u32 @8, x0..y1 f64 @16..@40, 48 bytes.
+    def add_radio_group(name, buttons, selected: nil, flags: 0, font_size: 0.0)
+      exports = buttons.map { |export, _page, _rect| Raw.cstr(export) }
+      raw = buttons.each_with_index.map do |(_export, page, rect), i|
+        [Raw.address(exports[i]), page, *rect].pack('QLx4d4')
+      end.join
+      added do |object, generation|
+        Native.tpdf_editor_add_radio_group(@pointer, Raw.cstr(name), raw, buttons.size,
+                                           selected && Raw.cstr(selected), flags, font_size, object, generation)
+      end
+    end
+
+    def add_choice_field(name, page, rect, options, combo, editable: false, value: nil, flags: 0, font_size: 0.0)
+      array, _kept = FormData.strings(options)
+      added do |object, generation|
+        Native.tpdf_editor_add_choice_field(@pointer, Raw.cstr(name), page, *rect, array, options.size,
+                                            combo ? 1 : 0, editable ? 1 : 0, value && Raw.cstr(value), flags,
+                                            font_size, object, generation)
+      end
+    end
+
+    # Raises when nothing was written; returns the widgets it could not draw.
+    def apply_form_data(data)
+      Editor.skipped(Raw.handle { |out| Native.tpdf_editor_apply_form_data(@pointer, data.pointer, out) })
     end
   end
 

@@ -12,6 +12,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 mod docops;
+mod forms;
 mod read;
 mod signatures;
 
@@ -290,6 +291,15 @@ impl PyDocument {
         read::warnings(&self.inner)
     }
 
+    /// The data the document's fields hold, in the tree's order: every
+    /// terminal field with a name and its value (`FormData::from_fields`),
+    /// ready to write out as FDF or XFDF.
+    fn form_data(&self) -> forms::PyFormData {
+        forms::PyFormData::new(tinker_pdf::form_data::FormData::from_fields(
+            &self.inner.form_fields(),
+        ))
+    }
+
     /// An editor over this document.
     ///
     /// Independent of the `Document` it came from: the editor holds its own
@@ -438,6 +448,26 @@ pub struct PyEditor {
 /// difference between a debuggable failure and a `False` nobody checked.
 fn refused(call: &str, detail: &str) -> PyErr {
     PyValueError::new_err(format!("{call} refused: {detail}"))
+}
+
+impl PyEditor {
+    /// `DocumentEditor::add_field` with the field built from its parts, the
+    /// new field's reference as a pair.
+    fn add_field(
+        &mut self,
+        name: String,
+        kind: tinker_pdf::NewFieldKind,
+        flags: i64,
+        font_size: f64,
+    ) -> PyResult<(u32, u16)> {
+        let mut spec = tinker_pdf::NewField::new(name, kind);
+        spec.flags = flags;
+        spec.font_size = font_size;
+        self.inner
+            .add_field(&spec)
+            .map(|reference| (reference.num, reference.gen))
+            .map_err(|error| refused("add_field", &error.to_string()))
+    }
 }
 
 #[pymethods]
@@ -860,6 +890,124 @@ impl PyEditor {
             embedded_files,
             metadata,
         }))
+    }
+
+    /// Creates a text field (12.7.4.3) merged with its one widget, and
+    /// returns the field's `(object number, generation)`.
+    ///
+    /// `rect` is `(x0, y0, x1, y1)` on page `page`; `value` the initial value
+    /// and `max_len` the `/MaxLen`, `None` for neither; `flags` the caller's
+    /// `/Ff` bits and `font_size` the `/DA` size, 0 for auto -- both
+    /// `NewField::new`'s own defaults. Raises with the facade's reason,
+    /// creating nothing, when the field is refused.
+    #[pyo3(signature = (name, page, rect, value = None, max_len = None, flags = 0, font_size = 0.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_text_field(
+        &mut self,
+        name: String,
+        page: u32,
+        rect: (f64, f64, f64, f64),
+        value: Option<String>,
+        max_len: Option<u32>,
+        flags: i64,
+        font_size: f64,
+    ) -> PyResult<(u32, u16)> {
+        let kind = tinker_pdf::NewFieldKind::Text {
+            page,
+            rect: forms::rect(rect),
+            value,
+            max_len,
+        };
+        self.add_field(name, kind, flags, font_size)
+    }
+
+    /// Creates a check box (12.7.4.2.3) whose on state is `export`, ticked
+    /// when `checked`. Otherwise as `add_text_field`.
+    #[pyo3(signature = (name, page, rect, export, checked, flags = 0, font_size = 0.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_checkbox(
+        &mut self,
+        name: String,
+        page: u32,
+        rect: (f64, f64, f64, f64),
+        export: String,
+        checked: bool,
+        flags: i64,
+        font_size: f64,
+    ) -> PyResult<(u32, u16)> {
+        let kind = tinker_pdf::NewFieldKind::Checkbox {
+            page,
+            rect: forms::rect(rect),
+            export,
+            checked,
+        };
+        self.add_field(name, kind, flags, font_size)
+    }
+
+    /// Creates a radio group (12.7.4.2.4): one field and one widget per
+    /// button, each `(export, page, (x0, y0, x1, y1))`; `selected` is the
+    /// export value that starts selected, `None` for none. Otherwise as
+    /// `add_text_field`.
+    #[pyo3(signature = (name, buttons, selected = None, flags = 0, font_size = 0.0))]
+    fn add_radio_group(
+        &mut self,
+        name: String,
+        buttons: Vec<forms::Button>,
+        selected: Option<String>,
+        flags: i64,
+        font_size: f64,
+    ) -> PyResult<(u32, u16)> {
+        let kind = tinker_pdf::NewFieldKind::Radio {
+            buttons: forms::buttons(buttons),
+            selected,
+        };
+        self.add_field(name, kind, flags, font_size)
+    }
+
+    /// Creates a choice field (12.7.4.4): a combo box when `combo`, a list
+    /// box otherwise. `options` are each their own export value and display
+    /// text; `editable` lets a combo box's text be typed; `value` is the
+    /// initial selection. Otherwise as `add_text_field`.
+    #[pyo3(signature = (
+        name, page, rect, options, combo, editable = false, value = None, flags = 0,
+        font_size = 0.0
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_choice_field(
+        &mut self,
+        name: String,
+        page: u32,
+        rect: (f64, f64, f64, f64),
+        options: Vec<String>,
+        combo: bool,
+        editable: bool,
+        value: Option<String>,
+        flags: i64,
+        font_size: f64,
+    ) -> PyResult<(u32, u16)> {
+        let kind = tinker_pdf::NewFieldKind::Choice {
+            page,
+            rect: forms::rect(rect),
+            options,
+            combo,
+            editable,
+            value,
+        };
+        self.add_field(name, kind, flags, font_size)
+    }
+
+    /// Imports form data: every field with a value, all of them or none
+    /// (`form_data::apply`). Raises, naming the field and writing nothing,
+    /// when one would not take its value; otherwise returns the widgets that
+    /// took a value and could not be drawn, as `fill_field` does.
+    fn apply_form_data(&mut self, data: &forms::PyFormData) -> PyResult<Vec<PySkippedWidget>> {
+        match tinker_pdf::form_data::apply(&mut self.inner, &data.inner) {
+            Ok(skipped) => Ok(skipped
+                .into_iter()
+                .map(|inner| PySkippedWidget { inner })
+                .collect()),
+            Err(rejection) => Err(PyValueError::new_err(format!("apply refused: {rejection}"))),
+        }
     }
 
     fn __repr__(&self) -> String {
@@ -1346,5 +1494,6 @@ fn module_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
     read::register(module)?;
     module.add_class::<docops::PySanitiseReport>()?;
     signatures::register(module)?;
+    module.add_class::<forms::PyFormData>()?;
     Ok(())
 }

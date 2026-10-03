@@ -55,6 +55,7 @@ const (
 	StatusSourceMiss         Status = 14
 	StatusScriptRefused      Status = 15
 	StatusStreamUnreadable   Status = 16
+	StatusFormDataRefused    Status = 17
 )
 
 // Error is a failure the engine reported: its status, which a caller branches

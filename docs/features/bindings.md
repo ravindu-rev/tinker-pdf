@@ -19,13 +19,14 @@ the handle is freed. Every call returns a `TpdfStatus` (`Ok`, `BadArgument`,
 `NotAPdf`, `NeedsPassword`, `WrongPassword`, `NoSuchPage`, `NotEncrypted`,
 `UnsupportedHandler`, `NoSuchSignature`, `NoSuchField`, `ValueRefused`,
 `FieldUnreadable`, `SpentHandle`, `EditRefused`, `SourceMiss`,
-`ScriptRefused`, `StreamUnreadable`) and
+`ScriptRefused`, `StreamUnreadable`, `FormDataRefused`) and
 `tpdf_last_error_message` carries the detail. Those numbers *are* the ABI —
 a C caller compares them against literals and the .NET binding against an
 `int` — so 0–7 are frozen, `NoSuchSignature` was **appended** at 8 rather
 than inserted, the write surface's five were appended at 9–13, and
-streaming's, the script policy's and the read surface's one each at 14, 15
-and 16. Two unit tests pin them: one names all seventeen individually, and
+streaming's, the script policy's, the read surface's and the forms surface's
+one each at 14, 15, 16 and 17. Two unit tests pin them: one names all
+eighteen individually, and
 one holds the list
 and its length, so a variant added without a line is caught by the count
 rather than by somebody remembering. A third pins every discriminant of the
@@ -40,12 +41,13 @@ in one handle is the same data race it would be in Rust, and no C ABI can
 stop it. One handle per thread, or the caller's own lock; freeing stays safe
 from any thread.
 
-**One hundred and seventy-three functions**, counted from the committed
+**One hundred and ninety-five functions**, counted from the committed
 header, October 2026 — eighteen open and render, two streaming, five
 validating, fifty-five writing, thirteen running form scripts
 (`tpdf_editor_recalculate` and the ten calls of its report,
 `tpdf_editor_formatted_value`, `_keystroke` and `_validate`), thirty reading
-signatures, thirty-four on the read surface and sixteen document operations.
+signatures, thirty-four on the read surface, sixteen document operations
+and twenty-two on the forms surface.
 The fifty-five are the write surface below and the five are the strict
 validator it leans on
 (`tpdf_document_validate`, `tpdf_defects_count`, `tpdf_defect_rule`,
@@ -180,6 +182,45 @@ the report's lists as plain objects. .NET has them over the C ABI as
 `SetPageLabels`, `AttachFile`, `SetOutline`, `SetInfo`, `SetInfoDate`,
 `SetTrapped`, `SetXmpMetadata`, `SetPageBoundary` and its siblings,
 `Sanitise(SanitiseOptions)` and `Document.PageBox`.
+
+**The forms surface: twenty-two functions** in `src/forms.rs`, each one
+facade call. `DocumentEditor::add_field` takes a `NewField` whose kind has
+four arms with four payloads, so it crosses as four functions —
+`tpdf_editor_add_text_field` (a nullable value and a `/MaxLen` behind a
+presence flag), `_add_checkbox`, `_add_radio_group` (an array of
+`TpdfRadioButton`, a pointer, a page and four doubles) and
+`_add_choice_field` (an array of option strings, combo and editable flags) —
+each also taking `NewField`'s `flags` and `font_size`, whose `0` and `0.0`
+are `NewField::new`'s own, and handing back the new field's reference. A
+union of every arm's fields would be a struct where most fields mean nothing
+for any one call, which is the layout a hand-written binding gets wrong.
+Its refusal, `AddFieldError`, crosses as `EditRefused` with the facade's own
+sentence. Form data is an owned `TpdfFormData` on the `TpdfSignatures`
+pattern: `tpdf_document_form_data` (`FormData::from_fields` over the
+document's field tree), `tpdf_form_data_read_fdf` and `_read_xfdf`, or
+`tpdf_form_data_new` with `_add_field` and `_set_source` to build one;
+`_to_fdf` and `_to_xfdf` write it out as a `TpdfBuffer`; `_count`,
+`_field_name`, `_field_value_kind` (a `TpdfFieldValueKind`: `None`, `Text`,
+`State`, `Many`), `_field_value_count`, `_field_value`, `_source`,
+`_warning_count` and `_warning` (a `TpdfFormDataWarningKind` with the key and
+the field) read it; `_free` releases it; and `tpdf_editor_apply_form_data`
+applies it through `form_data::apply`, with `tpdf_editor_fill_field`'s three
+outcomes — a status means nothing was written, `Ok` hands back a
+`TpdfFillReport`. One status is appended: `FormDataRefused` = 17, for a file
+the reader will not read in the format asked for, or a value XML 1.0 cannot
+carry, distinct from `NotAPdf` because an FDF never claimed to be a PDF.
+Python has them as `Editor.add_text_field(name, page, rect, value=,
+max_len=, flags=, font_size=)` and its three siblings, each returning
+`(number, generation)`, `Editor.apply_form_data`, `Document.form_data()` and
+a `FormData` class (`read_fdf`, `read_xfdf`, `fields` as `(name, kind,
+values)`, `add_field`, `source`, `warnings` as `(kind, what, field)`,
+`to_fdf`, `to_xfdf`); JavaScript the same in camelCase, with a
+`PdfRadioButton` class and `flags` a `BigInt` as `rotatePage`'s degrees are;
+.NET `AddTextField` and its siblings, `ApplyFormData`, `ReadFormData` and a
+`FormData` class; Go, Ruby and Java the same over the C ABI.
+`SigningTarget::NewVisibleField` with `SignatureAppearance` is not here: it
+is a signing target, and signing is a host callback this surface does not
+take (below).
 
 **The write surface: fifty-five functions, and the shape they had to be
 given.** The facade has exported `DocumentEditor` and `DocumentBuilder` since
@@ -351,8 +392,8 @@ handle closed by its owner's `Close`/`close` (safe twice), and every string
 and byte array handed back a copy that outlives its handle. None decides a
 default: a save takes the options `tpdf_write_options_init` filled in, a
 view the engine's own `tpdf_destination_init_fit`, and an encrypted save the
-caller's 48 bytes of entropy. Go and Java call **all 173 functions**; Ruby
-calls 172. Each has the parity program (below) and a smoke program that
+caller's 48 bytes of entropy. Go and Java call **all 195 functions**; Ruby
+calls 194. Each has the parity program (below) and a smoke program that
 renders blank-then-inked and then calls, once each, every declaration the
 parity program does not reach — authentication against the two encrypted
 fixtures, the editor's page operations, fields, checkpoint and restore, the
@@ -397,7 +438,7 @@ available, so it has never been compiled. It is a SwiftPM package whose
 `CTinkerPdf` module imports the committed header through a shim (not a
 copy, which would be a second transcription to drift), a `TinkerPdf` target
 covering the core — open, text, render, validate, authenticate, the form
-fill and save, the builder, 49 of the 173 functions — and a `Smoke`
+fill and save, the builder, 49 of the 195 functions — and a `Smoke`
 executable written to the same blank-then-inked pattern. It has no parity
 program, is not in `bindings-parity` and has no CI job; the read surface,
 document operations, signatures and streaming are owed, and so is the first
@@ -511,8 +552,32 @@ save-options     652c7cd32149a0f6fd06e921fa9762e2c8411aa09fbfc732ea6a2c991e36970
 save-linearized  e64bffa59ffbc7a4b7335abdc634bc567a615d9f29e23ef1673c51e07f3ac7fc
 ```
 
+**And the forms surface, both halves.** *forms* opens the form fixture and,
+through one editor, creates a field of every kind `add_field` makes — a text
+field with a value and a `/MaxLen`, a required check box that starts ticked,
+a radio group of two buttons with the second selected, a combo box with a
+font size and a list box — then reads `form-fields.xfdf` (one of the
+hand-written fixtures under `crates/tinker-pdf/tests/form_data/`), applies
+it, and saves. *form-data* writes down each created field's reference, the
+widget the apply wrote a value for and could not draw (the fixture's
+`/Rect`-less one, `7.0`), and then, for eight sets of form data — the forms
+artefact's own fields, the four fixtures, `hierarchy.fdf` altered three ways
+so the reader leaves the `value-unreadable`, `unnamed` and `tree-cut`
+warnings the fixtures never reach, a set built a field at a time and a set
+holding a character XML 1.0 cannot carry — its source, every field with its
+value's shape and strings, every warning, and the hashes of the data written
+back as FDF and as XFDF (`refused` for the last); and last, that bytes which
+are neither format are refused by each reader. The altered FDF is there for
+the reason the altered signed document is: without it, a surface that
+spelled one of those three warnings as another agreed with every surface.
+
+```text
+forms            84b2daef81a1d6342fec8052971b25ea6ab82a366cd3afcd068c490806f1bc3b
+form-data        f81ce8279205bd2ce3058b3d2f5e0fd4347ef4e00300e367d1a54c873ad2aa51
+```
+
 On linux/x86_64, October 2026, the facade, the wheel, the npm package and the
-Go, Ruby and Java bindings printed all nine recorded hashes; the .NET leg
+Go, Ruby and Java bindings printed all eleven recorded hashes; the .NET leg
 prints them too and was not run.
 
 `cargo xtask bindings-parity` is the gate, and it is built around two different
@@ -793,7 +858,7 @@ the Ruby binding's `extern` lines are worked transcriptions of it, the Java
 binding's downcalls were generated from it, Go compiles against it and Swift
 imports it as a module. What a transcription cannot see from the header is a
 struct's padding, so `tests/layout.rs` pins the size and every field offset of
-the eleven structs a binding packs by hand.
+the twelve structs a binding packs by hand.
 
 Each of the first three bindings' READMEs ([js](../../bindings/js/README.md),
 [python](../../bindings/python/README.md),
@@ -818,8 +883,8 @@ packaged.
 | CommonJS build | none; ESM only | two builds of the engine can diverge | — |
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |
-| Streaming in Ruby | `TinkerPdf::Document` has no streaming open; the other 172 functions are there | `tpdf_document_open_streaming` takes its vtable **by value**, and Fiddle passes no struct by value; and the engine calls `read` from whatever thread is working, where a Ruby block would run without the GVL. A by-pointer variant on the C ABI would answer the first and not the second | [opening](opening.md) |
-| Swift beyond its core | 49 of 173 functions, no parity program, no CI | written without a toolchain; widening unverified source would only widen what nobody has run | [ROADMAP.md](../ROADMAP.md) |
+| Streaming in Ruby | `TinkerPdf::Document` has no streaming open; the other 194 functions are there | `tpdf_document_open_streaming` takes its vtable **by value**, and Fiddle passes no struct by value; and the engine calls `read` from whatever thread is working, where a Ruby block would run without the GVL. A by-pointer variant on the C ABI would answer the first and not the second | [opening](opening.md) |
+| Swift beyond its core | 49 of 195 functions, no parity program, no CI | written without a toolchain; widening unverified source would only widen what nobody has run | [ROADMAP.md](../ROADMAP.md) |
 | Published packages | `pip install` / `npm install` / `dotnet add package` do not work yet, and Go, Ruby, Java and Swift have no package at all | the facade is unstable until 0.1.0 | [ROADMAP.md](../ROADMAP.md) |
 
 ## Verified
@@ -929,6 +994,33 @@ packaged.
   Python's date with hour and minute swapped, and JavaScript's trim box
   written as a bleed box, each fail `bindings-parity` on their surface's
   *document-ops*, *sanitise* and *read-surface* hashes.
+- **The forms surface is pinned by byte equality with the facade**
+  (`src/forms/tests.rs`): a field of every kind created through the C ABI
+  and through `DocumentEditor::add_field` saves the same bytes; a document's
+  form data, data built a field at a time and data read from FDF and XFDF
+  carry the facade's fields, values and source, and write the facade's FDF
+  and XFDF bytes; applying it saves what `form_data::apply` saves, and a
+  refused apply writes nothing; every warning crosses as its own kind with
+  its strings, from an XFDF and from an FDF that reaches all four arms.
+  Around them: each refusal (a taken name, a rectangle with no area, a check
+  box on a page past the end with `Off` as its export value, a radio group
+  with no buttons) writing nothing and naming why; bytes that are neither
+  format, and a value XML
+  cannot carry, refused as `FormDataRefused` with the reader's sentence;
+  null and out-of-range on every one of the twenty-two entry points; the two
+  new enums' numbers pinned; and `TpdfRadioButton`'s 48 bytes in
+  `tests/layout.rs`. Counted injections, October 2026: a check box starting
+  the other way round fires **1** (the byte equality); `TreeCut` and
+  `ValueUnreadable` crossing as each other fired **0** until the warnings
+  test gained the FDF that reaches every arm, and fires **1** with it; and
+  eight defects in the bindings' own code, each failing `bindings-parity` on
+  that surface alone — Go's `/MaxLen` dropped and a radio button's top edge
+  crossing as its bottom (*forms*), Ruby's check box crossing unticked
+  (*forms*, *form-data*) and a warning's key and field crossing as each other
+  (*form-data*), Java's state read back as text (*form-data*) and combo and
+  editable crossing as each other (the list box refused, so no line at all),
+  Python's `tree-cut` spelled `value-unreadable` (*form-data*) and
+  JavaScript's `maxLen` dropped (*forms*): **8 of 8 caught**.
 - **Signatures in Python and JavaScript** are held by the *signatures*
   script's hash, equal to the facade's, and by an assertion leg in each
   script for what only those two carry: an anchor that is not a certificate
@@ -950,11 +1042,11 @@ packaged.
   interpreter and a missing `node_modules` reports both by name with the
   command that would fix each, exits 0 without them, and exits non-zero under
   `--require-all`.
-- **Go, Ruby and Java** are held by the parity programs — all nine hashes,
+- **Go, Ruby and Java** are held by the parity programs — all eleven hashes,
   equal to the facade's, on linux/x86_64 with Go 1.24, Ruby 3.3 (Fiddle 1.1)
   and OpenJDK 21, October 2026 — and by smoke programs that render
   blank-then-inked and then call every declaration the parity programs do
-  not: Go and Java all 173 functions, Ruby 172. Counted injections, each one
+  not: Go and Java all 195 functions, Ruby 194. Counted injections, each one
   defect in a binding's own code and never in its script, each failing
   `bindings-parity` on that surface and no other — **12 of 12 caught**: Go's
   null view number crossing as 0 rather than NaN (*read-surface*), an
@@ -971,7 +1063,7 @@ packaged.
   a rewrite (*fill-and-save*). The first run of the campaign caught 7 of 9:
   the digest/check swap and garbage collection were invisible to every
   script, which is what the altered signed document and the two save scripts
-  were added for. `crates/tinker-pdf-ffi/tests/layout.rs` pins the eleven
+  were added for. `crates/tinker-pdf-ffi/tests/layout.rs` pins the twelve
   hand-packed structs; counted injections: `TpdfDate`'s hour declared before
   its day, `TpdfWriteOptions`' compression before its object streams, and
   `TpdfPageLabelRange` aligned to 16 each fail **1** test. The Swift package

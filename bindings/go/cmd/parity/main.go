@@ -601,6 +601,187 @@ func signatures(support string) string {
 	return out.String()
 }
 
+func str(s string) *string { return &s }
+
+// forms creates a field of every kind, applies an XFDF fixture and saves; it
+// returns the artefact and the form-data text's first lines.
+func forms(fixture []byte, formDataDir string) ([]byte, []string) {
+	document, err := tp.Open(fixture)
+	must(err)
+	editor, err := document.Editor()
+	must(err)
+	document.Close()
+	defer editor.Close()
+
+	var lines []string
+	added := func(name string, ref tp.Ref, err error) {
+		must(err)
+		lines = append(lines, fmt.Sprintf("added %s %d.%d", textToken(&name), ref.Object, ref.Generation))
+	}
+	maxLen := uint32(20)
+	ref, err := editor.AddTextField("person.given", 0, 300, 700, 500, 720, str("Ada"), &maxLen, tp.FieldOptions{})
+	added("person.given", ref, err)
+	ref, err = editor.AddCheckbox("subscribe", 0, 300, 660, 320, 680, "Yes", true, tp.FieldOptions{Flags: 2})
+	added("subscribe", ref, err)
+	ref, err = editor.AddRadioGroup("size", []tp.RadioButton{
+		{Export: "S", Page: 0, X0: 300, Y0: 620, X1: 320, Y1: 640},
+		{Export: "M", Page: 0, X0: 330, Y0: 620, X1: 350, Y1: 640},
+	}, str("M"), tp.FieldOptions{})
+	added("size", ref, err)
+	ref, err = editor.AddChoiceField("country", 0, 300, 580, 400, 600, []string{"NZ", "LK", "UK"}, true, false,
+		str("LK"), tp.FieldOptions{FontSize: 10})
+	added("country", ref, err)
+	ref, err = editor.AddChoiceField("languages", 0, 300, 500, 400, 560, []string{"en", "fr"}, false, false,
+		nil, tp.FieldOptions{})
+	added("languages", ref, err)
+
+	raw, err := os.ReadFile(filepath.Join(formDataDir, "form-fields.xfdf"))
+	must(err)
+	data, err := tp.ReadXfdf(raw)
+	must(err)
+	skipped, err := editor.ApplyFormData(data)
+	must(err)
+	data.Close()
+	widgets := make([]string, 0, len(skipped))
+	for _, w := range skipped {
+		widgets = append(widgets, fmt.Sprintf("%d.%d", w.Object, w.Generation))
+	}
+	applied := "-"
+	if len(widgets) > 0 {
+		applied = strings.Join(widgets, ",")
+	}
+	lines = append(lines, "applied "+applied)
+	saved, err := editor.Save(options(tp.Rewrite))
+	must(err)
+	return saved, lines
+}
+
+var valueKindNames = map[tp.FieldValueKind]string{
+	tp.ValueNone: "none", tp.ValueText: "text", tp.ValueState: "state", tp.ValueMany: "many",
+}
+
+var formWarningNames = map[tp.FormDataWarningKind]string{
+	tp.WarningNotRead: "not-read", tp.WarningValueUnreadable: "value-unreadable",
+	tp.WarningTreeCut: "tree-cut", tp.WarningUnnamed: "unnamed",
+}
+
+func formDataDump(label string, data *tp.FormData, lines []string) []string {
+	lines = append(lines, "data "+label)
+	source, err := data.Source()
+	must(err)
+	lines = append(lines, "source "+textToken(source))
+	for i := uint32(0); i < data.Count(); i++ {
+		name, err := data.FieldName(i)
+		must(err)
+		kind, err := data.ValueKind(i)
+		must(err)
+		values, err := data.Values(i)
+		must(err)
+		line := fmt.Sprintf("field %s %s", textToken(&name), valueKindNames[kind])
+		for _, value := range values {
+			line += " " + textToken(str(value))
+		}
+		lines = append(lines, line)
+	}
+	warnings, err := data.Warnings()
+	must(err)
+	for _, w := range warnings {
+		lines = append(lines, fmt.Sprintf("warning %s %s %s", formWarningNames[w.Kind], textToken(w.What), textToken(w.Field)))
+	}
+	fdf, err := data.ToFdf()
+	must(err)
+	lines = append(lines, "fdf "+sum(fdf))
+	xfdf, err := data.ToXfdf()
+	if e, ok := err.(*tp.Error); ok && e.Status == tp.StatusFormDataRefused {
+		lines = append(lines, "xfdf refused")
+	} else {
+		must(err)
+		lines = append(lines, "xfdf "+sum(xfdf))
+	}
+	return lines
+}
+
+// hostile is hierarchy.fdf altered three ways, each the first occurrence
+// replaced: the three warnings the fixtures never reach (the facade example
+// says why).
+func hostile(raw []byte) []byte {
+	for _, pair := range [][2]string{
+		{"/V (plain)", "/V 12345"},
+		{"/T (untouched)", "/X (untouched)"},
+		{"/V (through a reference)", "/Kids [ 2 0 R ]"},
+	} {
+		check(bytes.Contains(raw, []byte(pair[0])), "hierarchy.fdf carries what the alteration changes")
+		raw = bytes.Replace(raw, []byte(pair[0]), []byte(pair[1]), 1)
+	}
+	return raw
+}
+
+func formDataText(formed []byte, lines []string, formDataDir string) string {
+	document, err := tp.Open(formed)
+	must(err)
+	own, err := document.FormData()
+	must(err)
+	lines = formDataDump("document", own, lines)
+	own.Close()
+	document.Close()
+	for _, file := range []string{"form-fields.fdf", "hierarchy.fdf", "form-fields.xfdf", "hierarchy.xfdf"} {
+		raw, err := os.ReadFile(filepath.Join(formDataDir, file))
+		must(err)
+		read := tp.ReadFdf
+		if strings.HasSuffix(file, ".xfdf") {
+			read = tp.ReadXfdf
+		}
+		data, err := read(raw)
+		must(err)
+		lines = formDataDump(file, data, lines)
+		data.Close()
+	}
+	raw, err := os.ReadFile(filepath.Join(formDataDir, "hierarchy.fdf"))
+	must(err)
+	altered, err := tp.ReadFdf(hostile(raw))
+	must(err)
+	lines = formDataDump("hostile.fdf", altered, lines)
+	altered.Close()
+
+	built, err := tp.NewFormData()
+	must(err)
+	must(built.SetSource(str("built.pdf")))
+	must(built.AddField("a.b", tp.ValueText, "x é"))
+	must(built.AddField("a.c", tp.ValueState, "On"))
+	must(built.AddField("list", tp.ValueMany, "1", "2"))
+	must(built.AddField("nothing", tp.ValueMany))
+	must(built.AddField("empty", tp.ValueNone))
+	lines = formDataDump("built", built, lines)
+	built.Close()
+
+	unrepresentable, err := tp.NewFormData()
+	must(err)
+	must(unrepresentable.AddField("bell", tp.ValueText, "\u0007"))
+	lines = formDataDump("unrepresentable", unrepresentable, lines)
+	unrepresentable.Close()
+
+	for _, probe := range []struct {
+		label string
+		read  func([]byte) (*tp.FormData, error)
+		raw   string
+	}{{"read-fdf", tp.ReadFdf, "not form data"}, {"read-xfdf", tp.ReadXfdf, "<root/>"}} {
+		data, err := probe.read([]byte(probe.raw))
+		if e, ok := err.(*tp.Error); ok && e.Status == tp.StatusFormDataRefused {
+			lines = append(lines, probe.label+" refused")
+			continue
+		}
+		must(err)
+		data.Close()
+		lines = append(lines, probe.label+" accepted")
+	}
+	var out strings.Builder
+	for _, line := range lines {
+		out.WriteString(line)
+		out.WriteByte('\n')
+	}
+	return out.String()
+}
+
 func main() {
 	if len(os.Args) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: parity <form-fields.pdf>")
@@ -625,5 +806,9 @@ func main() {
 	reportRead("read-surface", readSurface(outline, operated))
 	support := filepath.Join(filepath.Dir(filepath.Dir(fixturePath)), "crates", "tinker-pdf", "tests", "signature_support")
 	reportRead("signatures", signatures(support))
+	formDataDir := filepath.Join(filepath.Dir(support), "form_data")
+	formed, lines := forms(fixture, formDataDir)
+	report("forms", formed)
+	reportRead("form-data", formDataText(formed, lines, formDataDir))
 	fmt.Println("GO-PARITY: RAN")
 }

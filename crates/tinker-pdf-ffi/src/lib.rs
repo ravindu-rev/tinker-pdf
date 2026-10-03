@@ -17,8 +17,10 @@
 #![warn(missing_docs)]
 
 mod docops;
+mod forms;
 mod read;
 pub use docops::*;
+pub use forms::*;
 pub use read::*;
 
 use std::cell::RefCell;
@@ -140,6 +142,19 @@ pub enum TpdfStatus {
     /// that could not be read" are different answers, and the engine's reason,
     /// with the object it was reading, is in [`tpdf_last_error_message`].
     StreamUnreadable = 16,
+
+    // ---- the forms surface, appended at 17 ----------------------------------
+    /// Form data this reader would not read in the format asked for, or that
+    /// format cannot carry: not an FDF, no `/FDF` dictionary, an encrypted
+    /// FDF, XML that is not well formed or not XFDF, a value XML 1.0 cannot
+    /// hold, or more than `form_data::MAX_FORM_DATA_BYTES`.
+    ///
+    /// One status for all of them, as `ScriptRefused` is one: from a caller's
+    /// side the answer is the same -- nothing was read, or nothing written --
+    /// and the reader's own sentence, naming the field where it can, is in
+    /// [`tpdf_last_error_message`]. Distinct from `NotAPdf` because an FDF is
+    /// not a PDF and was never claimed to be one.
+    FormDataRefused = 17,
 }
 
 /// A document's bytes, as ranges the host answers (7.5.6, Annex F).
@@ -4918,8 +4933,9 @@ endobj
         assert_eq!(TpdfStatus::SourceMiss as i32, 14);
         assert_eq!(TpdfStatus::ScriptRefused as i32, 15);
 
-        // The read surface's one.
+        // The read surface's one, and the forms surface's.
         assert_eq!(TpdfStatus::StreamUnreadable as i32, 16);
+        assert_eq!(TpdfStatus::FormDataRefused as i32, 17);
     }
 
     /// A `TpdfStatus` crosses as an `int`, and the three hand-written bindings
@@ -4930,7 +4946,7 @@ endobj
     #[test]
     fn every_status_the_abi_carries_is_pinned_by_number() {
         // Nothing in Rust enumerates a `#[repr(C)]` enum's variants, so this
-        // is the list, written out. It is exactly the seventeen pinned above.
+        // is the list, written out. It is exactly the eighteen pinned above.
         const EVERY: &[(TpdfStatus, i32)] = &[
             (TpdfStatus::Ok, 0),
             (TpdfStatus::BadArgument, 1),
@@ -4949,11 +4965,12 @@ endobj
             (TpdfStatus::SourceMiss, 14),
             (TpdfStatus::ScriptRefused, 15),
             (TpdfStatus::StreamUnreadable, 16),
+            (TpdfStatus::FormDataRefused, 17),
         ];
         for (status, number) in EVERY {
             assert_eq!(*status as i32, *number, "{status:?}");
         }
-        assert_eq!(EVERY.len(), 17, "append only, and say how many there are");
+        assert_eq!(EVERY.len(), 18, "append only, and say how many there are");
     }
 
     /// The write surface's other two enums, pinned for the reason

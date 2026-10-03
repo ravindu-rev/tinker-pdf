@@ -75,6 +75,11 @@ func (e *Editor) FillField(name, value string) ([]SkippedWidget, error) {
 	}); err != nil {
 		return nil, err
 	}
+	return readFillReport(report)
+}
+
+// readFillReport copies a fill report's widgets out and frees it.
+func readFillReport(report *C.TpdfFillReport) ([]SkippedWidget, error) {
 	defer C.tpdf_fill_report_free(report)
 	count := uint32(C.tpdf_fill_report_count(report))
 	skipped := make([]SkippedWidget, 0, count)

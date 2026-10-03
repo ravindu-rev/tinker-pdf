@@ -1,6 +1,7 @@
 package io.github.ravindu_rev.tinkerpdf;
 
 import static io.github.ravindu_rev.tinkerpdf.Native.ADDRESS;
+import static io.github.ravindu_rev.tinkerpdf.Native.DOUBLE;
 import static io.github.ravindu_rev.tinkerpdf.Native.INT;
 import static io.github.ravindu_rev.tinkerpdf.Native.LONG;
 import static io.github.ravindu_rev.tinkerpdf.Native.SHORT;
@@ -13,6 +14,7 @@ import io.github.ravindu_rev.tinkerpdf.TinkerPdf.MetadataSync;
 import io.github.ravindu_rev.tinkerpdf.TinkerPdf.PageBoundary;
 import io.github.ravindu_rev.tinkerpdf.TinkerPdf.PageLabelRange;
 import io.github.ravindu_rev.tinkerpdf.TinkerPdf.PathStep;
+import io.github.ravindu_rev.tinkerpdf.TinkerPdf.RadioButton;
 import io.github.ravindu_rev.tinkerpdf.TinkerPdf.Recalculation;
 import io.github.ravindu_rev.tinkerpdf.TinkerPdf.Ref;
 import io.github.ravindu_rev.tinkerpdf.TinkerPdf.Removal;
@@ -57,6 +59,11 @@ public final class Editor implements AutoCloseable {
             report = Document.handle(Native.tpdf_editor_fill_field, pointer, Native.cString(arena, name),
                     Native.cString(arena, value));
         }
+        return skipped(report);
+    }
+
+    /** A fill report's widgets, copied; the report is freed. */
+    static List<SkippedWidget> skipped(MemorySegment report) {
         try (Arena arena = Arena.ofConfined()) {
             int count = Native.callInt(Native.tpdf_fill_report_count, report);
             List<SkippedWidget> skipped = new ArrayList<>(count);
@@ -74,6 +81,81 @@ public final class Editor implements AutoCloseable {
         } finally {
             Native.call(Native.tpdf_fill_report_free, report);
         }
+    }
+
+    /**
+     * Creates a text field (12.7.4.3) merged with its one widget; returns its
+     * reference. A null value or maxLen is none; flags are the caller's /Ff
+     * bits and fontSize the /DA size, 0 for auto. Refused, creating nothing,
+     * as {@code EDIT_REFUSED} with the engine's reason.
+     */
+    public Ref addTextField(String name, int page, double x0, double y0, double x1, double y1, String value,
+            Integer maxLen, long flags, double fontSize) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment object = Native.slot(arena, INT);
+            MemorySegment generation = Native.slot(arena, SHORT);
+            Native.check(Native.tpdf_editor_add_text_field, pointer, Native.cString(arena, name), page, x0, y0, x1,
+                    y1, Native.cStringOrNull(arena, value), Native.flag(maxLen != null),
+                    maxLen == null ? 0 : maxLen.intValue(), flags, fontSize, object, generation);
+            return Document.ref(object, generation);
+        }
+    }
+
+    /** Creates a check box (12.7.4.2.3) whose on state is exportValue. */
+    public Ref addCheckbox(String name, int page, double x0, double y0, double x1, double y1, String exportValue,
+            boolean checked, long flags, double fontSize) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment object = Native.slot(arena, INT);
+            MemorySegment generation = Native.slot(arena, SHORT);
+            Native.check(Native.tpdf_editor_add_checkbox, pointer, Native.cString(arena, name), page, x0, y0, x1, y1,
+                    Native.cString(arena, exportValue), Native.flag(checked), flags, fontSize, object, generation);
+            return Document.ref(object, generation);
+        }
+    }
+
+    /**
+     * Creates a radio group (12.7.4.2.4): one field, one widget per button. A
+     * null selected is none. {@code TpdfRadioButton}: export_value pointer @0,
+     * page u32 @8, x0..y1 f64 @16..@40; 48 bytes.
+     */
+    public Ref addRadioGroup(String name, List<RadioButton> buttons, String selected, long flags, double fontSize) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment raw = Native.slot(arena, Math.max(48L, 48L * buttons.size()));
+            for (int i = 0; i < buttons.size(); i++) {
+                RadioButton button = buttons.get(i);
+                long at = 48L * i;
+                raw.set(ADDRESS, at, Native.cString(arena, button.exportValue()));
+                raw.set(INT, at + 8, button.page());
+                raw.set(DOUBLE, at + 16, button.x0());
+                raw.set(DOUBLE, at + 24, button.y0());
+                raw.set(DOUBLE, at + 32, button.x1());
+                raw.set(DOUBLE, at + 40, button.y1());
+            }
+            MemorySegment object = Native.slot(arena, INT);
+            MemorySegment generation = Native.slot(arena, SHORT);
+            Native.check(Native.tpdf_editor_add_radio_group, pointer, Native.cString(arena, name), raw,
+                    (long) buttons.size(), Native.cStringOrNull(arena, selected), flags, fontSize, object,
+                    generation);
+            return Document.ref(object, generation);
+        }
+    }
+
+    /** Creates a choice field (12.7.4.4): a combo box when combo, a list box otherwise. */
+    public Ref addChoiceField(String name, int page, double x0, double y0, double x1, double y1,
+            List<String> options, boolean combo, boolean editable, String value, long flags, double fontSize) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment object = Native.slot(arena, INT);
+            MemorySegment generation = Native.slot(arena, SHORT);
+            Native.check(Native.tpdf_editor_add_choice_field, pointer, Native.cString(arena, name), page, x0, y0, x1,
+                    y1, FormData.strings(arena, options), (long) options.size(), Native.flag(combo),
+                    Native.flag(editable), Native.cStringOrNull(arena, value), flags, fontSize, object, generation);
+            return Document.ref(object, generation);
+        }
+    }
+
+    /** Imports form data, every field or none; the outcomes are {@link #fillField}'s. */
+    public List<SkippedWidget> applyFormData(FormData data) {
+        return skipped(Document.handle(Native.tpdf_editor_apply_form_data, pointer, data.pointer()));
     }
 
     public void setCheckbox(String name, boolean on) {

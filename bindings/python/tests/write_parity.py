@@ -433,6 +433,98 @@ def signature_payloads_cross(support: pathlib.Path) -> None:
     print("PYTHON-PARITY: signature payloads cross")
 
 
+def forms(fixture: bytes, form_data_dir: pathlib.Path):
+    """Create a field of every kind, apply an XFDF fixture, save.
+
+    Returns the artefact and the form-data text's first lines.
+    """
+    editor = tinker_pdf.Document(fixture).editor()
+    lines = []
+    added = [
+        ("person.given", editor.add_text_field(
+            "person.given", 0, (300.0, 700.0, 500.0, 720.0), value="Ada", max_len=20)),
+        ("subscribe", editor.add_checkbox(
+            "subscribe", 0, (300.0, 660.0, 320.0, 680.0), "Yes", True, flags=2)),
+        ("size", editor.add_radio_group(
+            "size",
+            [("S", 0, (300.0, 620.0, 320.0, 640.0)), ("M", 0, (330.0, 620.0, 350.0, 640.0))],
+            selected="M")),
+        ("country", editor.add_choice_field(
+            "country", 0, (300.0, 580.0, 400.0, 600.0), ["NZ", "LK", "UK"], True,
+            value="LK", font_size=10.0)),
+        ("languages", editor.add_choice_field(
+            "languages", 0, (300.0, 500.0, 400.0, 560.0), ["en", "fr"], False)),
+    ]
+    for name, (number, generation) in added:
+        lines.append(f"added {_text(name)} {number}.{generation}")
+
+    data = tinker_pdf.FormData.read_xfdf((form_data_dir / "form-fields.xfdf").read_bytes())
+    skipped = editor.apply_form_data(data)
+    widgets = [f"{w.object_number}.{w.generation}" for w in skipped]
+    lines.append(f"applied {','.join(widgets) if widgets else '-'}")
+    return editor.save(), lines
+
+
+# hierarchy.fdf altered three ways, each the first occurrence replaced: the
+# three warnings the fixtures never reach (the facade example says why).
+HOSTILE = [
+    (b"/V (plain)", b"/V 12345"),
+    (b"/T (untouched)", b"/X (untouched)"),
+    (b"/V (through a reference)", b"/Kids [ 2 0 R ]"),
+]
+
+
+def form_data_dump(name: str, data, out: list) -> None:
+    out.append(f"data {name}")
+    out.append(f"source {_text(data.source)}")
+    for field, kind, values in data.fields:
+        out.append(" ".join([f"field {_text(field)} {kind}"] + [_text(v) for v in values]))
+    for kind, what, field in data.warnings:
+        out.append(f"warning {kind} {_text(what)} {_text(field)}")
+    out.append(f"fdf {hashlib.sha256(data.to_fdf()).hexdigest()}")
+    try:
+        xfdf = hashlib.sha256(data.to_xfdf().encode("utf-8")).hexdigest()
+    except ValueError:
+        xfdf = "refused"
+    out.append(f"xfdf {xfdf}")
+
+
+def form_data_text(formed: bytes, lines: list, form_data_dir: pathlib.Path) -> str:
+    form_data_dump("document", tinker_pdf.Document(formed).form_data(), lines)
+    for file in ["form-fields.fdf", "hierarchy.fdf", "form-fields.xfdf", "hierarchy.xfdf"]:
+        raw = (form_data_dir / file).read_bytes()
+        reader = tinker_pdf.FormData.read_xfdf if file.endswith(".xfdf") else tinker_pdf.FormData.read_fdf
+        form_data_dump(file, reader(raw), lines)
+    hostile = (form_data_dir / "hierarchy.fdf").read_bytes()
+    for old, new in HOSTILE:
+        hostile = hostile.replace(old, new, 1)
+    form_data_dump("hostile.fdf", tinker_pdf.FormData.read_fdf(hostile), lines)
+
+    built = tinker_pdf.FormData()
+    built.source = "built.pdf"
+    built.add_field("a.b", "text", ["x \u00e9"])
+    built.add_field("a.c", "state", ["On"])
+    built.add_field("list", "many", ["1", "2"])
+    built.add_field("nothing", "many", [])
+    built.add_field("empty", "none", [])
+    form_data_dump("built", built, lines)
+
+    unrepresentable = tinker_pdf.FormData()
+    unrepresentable.add_field("bell", "text", ["\u0007"])
+    form_data_dump("unrepresentable", unrepresentable, lines)
+
+    for reader, label, raw in [
+        (tinker_pdf.FormData.read_fdf, "read-fdf", b"not form data"),
+        (tinker_pdf.FormData.read_xfdf, "read-xfdf", b"<root/>"),
+    ]:
+        try:
+            reader(raw)
+            lines.append(f"{label} accepted")
+        except ValueError:
+            lines.append(f"{label} refused")
+    return "".join(line + "\n" for line in lines)
+
+
 def report(script: str, data: bytes) -> None:
     """Validate, then print the line `cargo xtask bindings-parity` reads."""
     defects = tinker_pdf.Document(data).validate()
@@ -481,6 +573,17 @@ def main(fixture_path: str) -> None:
         f"surface=python script=signatures bytes={len(signed)}"
     )
     signature_payloads_cross(support)
+
+    form_data_dir = support.parent / "form_data"
+    formed, lines = forms(fixture, form_data_dir)
+    report("forms", formed)
+    said = form_data_text(formed, lines, form_data_dir).encode("utf-8")
+    if os.environ.get("TINKER_PARITY_DUMP"):
+        sys.stdout.write(said.decode("utf-8"))
+    print(
+        f"READ sha256={hashlib.sha256(said).hexdigest()} "
+        f"surface=python script=form-data bytes={len(said)}"
+    )
     transaction_rolls_back_on_an_exception(fixture)
 
     # A consumed handle refuses rather than producing a second document, which

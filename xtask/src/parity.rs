@@ -5,11 +5,11 @@
 //! own. That is a claim, and this is the check: scripts with every input
 //! pinned, run through the facade, the wheel, the npm package, the NuGet
 //! package and the Go, Ruby and Java bindings over the C ABI, must produce
-//! **byte-identical** output. Four of them write a document and print
-//! `WROTE sha256=` of its
-//! bytes; `sanitise-report`, `read-surface` and `signatures` write down what
-//! a sanitise reported and everything the read
-//! surface says about documents in a text whose every byte is specified
+//! **byte-identical** output. Seven of them write a document and print
+//! `WROTE sha256=` of its bytes; `sanitise-report`, `read-surface`,
+//! `signatures` and `form-data` write down what a sanitise reported,
+//! everything the read surface says about documents, and what form data says,
+//! in a text whose every byte is specified
 //! (`crates/tinker-pdf/examples/write_parity.rs`) and print `READ sha256=` of
 //! that. Surfaces disagreeing means one of them added something — or, on the
 //! read side, dropped or reordered something.
@@ -73,7 +73,10 @@ use std::process::Command;
 /// `ecdsa-p256-altered`, the one verdict whose digest and signature check
 /// disagree: before it, a surface reading either answer from the other's
 /// accessor agreed with every other surface, which the Ruby binding's
-/// injection campaign showed.
+/// injection campaign showed. `forms` and `form-data` were recorded October
+/// 2026 on linux/x86_64 when the forms surface crossed; the form-data text
+/// hashes the FDF and XFDF the writer makes, both of which are text with no
+/// date or identifier in them, so they are as fixed as the rest.
 const EXPECTED: &[(&str, &str)] = &[
     (
         "fill-and-save",
@@ -110,6 +113,14 @@ const EXPECTED: &[(&str, &str)] = &[
     (
         "signatures",
         "c3490eb5f9a5c893893494bf0c51269ef718f915051053d6b30ff7ae7c1ad2ff",
+    ),
+    (
+        "forms",
+        "84b2daef81a1d6342fec8052971b25ea6ab82a366cd3afcd068c490806f1bc3b",
+    ),
+    (
+        "form-data",
+        "f81ce8279205bd2ce3058b3d2f5e0fd4347ef4e00300e367d1a54c873ad2aa51",
     ),
 ];
 
@@ -807,7 +818,7 @@ GO-PARITY: READ sha256=cccc surface=go script=read-surface bytes=30
     /// than a silent pass.
     #[test]
     fn the_recorded_answer_names_both_scripts_once() {
-        assert_eq!(EXPECTED.len(), 9);
+        assert_eq!(EXPECTED.len(), 11);
         let names: Vec<&str> = EXPECTED.iter().map(|(name, _)| *name).collect();
         assert_eq!(
             names,
@@ -820,7 +831,9 @@ GO-PARITY: READ sha256=cccc surface=go script=read-surface bytes=30
                 "save-linearized",
                 "sanitise-report",
                 "read-surface",
-                "signatures"
+                "signatures",
+                "forms",
+                "form-data"
             ]
         );
         for (name, hash) in EXPECTED {

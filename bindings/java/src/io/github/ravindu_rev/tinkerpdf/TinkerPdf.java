@@ -31,7 +31,7 @@ public final class TinkerPdf {
     public enum Status {
         OK, BAD_ARGUMENT, NOT_A_PDF, NEEDS_PASSWORD, WRONG_PASSWORD, NO_SUCH_PAGE, NOT_ENCRYPTED,
         UNSUPPORTED_HANDLER, NO_SUCH_SIGNATURE, NO_SUCH_FIELD, VALUE_REFUSED, FIELD_UNREADABLE, SPENT_HANDLE,
-        EDIT_REFUSED, SOURCE_MISS, SCRIPT_REFUSED, STREAM_UNREADABLE
+        EDIT_REFUSED, SOURCE_MISS, SCRIPT_REFUSED, STREAM_UNREADABLE, FORM_DATA_REFUSED
     }
 
     /** {@code TpdfAuthLevel}. */
@@ -98,6 +98,18 @@ public final class TinkerPdf {
 
     /** {@code TpdfActionKind}. */
     public enum ActionKind { ABSENT, GO_TO, GO_TO_R, URI, NAMED, LAUNCH, OTHER }
+
+    /** {@code TpdfFieldValueKind}: the shape of a field's value. */
+    public enum FieldValueKind { NONE, TEXT, STATE, MANY }
+
+    /** {@code TpdfFormDataWarningKind}: what a form-data reader set aside. */
+    public enum FormDataWarningKind { NOT_READ, VALUE_UNREADABLE, TREE_CUT, UNNAMED }
+
+    /** One button of a radio group: its export value, page and rectangle. */
+    public record RadioButton(String exportValue, int page, double x0, double y0, double x1, double y1) {}
+
+    /** One form-data warning: the key or element (null unless NOT_READ) and the field. */
+    public record FormDataWarning(FormDataWarningKind kind, String what, String field) {}
 
     /** The {@code TPDF_SCRIPT_*} policy bits. */
     public static final int SCRIPT_CALCULATE = 1;

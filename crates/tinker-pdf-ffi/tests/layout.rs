@@ -18,7 +18,8 @@ use std::mem::{offset_of, size_of};
 
 use tinker_pdf_ffi::{
     TpdfDate, TpdfDestination, TpdfDestinationRead, TpdfEmbeddedFile, TpdfEncryption, TpdfImage,
-    TpdfPageLabelRange, TpdfSanitise, TpdfSourceVtable, TpdfTarget, TpdfWriteOptions,
+    TpdfPageLabelRange, TpdfRadioButton, TpdfSanitise, TpdfSourceVtable, TpdfTarget,
+    TpdfWriteOptions,
 };
 
 #[test]
@@ -136,4 +137,15 @@ fn a_source_vtable_is_three_function_pointers() {
     assert_eq!(offset_of!(TpdfSourceVtable, len), 0);
     assert_eq!(offset_of!(TpdfSourceVtable, read), 8);
     assert_eq!(offset_of!(TpdfSourceVtable, free), 16);
+}
+
+#[test]
+fn a_radio_button_is_its_export_value_its_page_and_four_doubles() {
+    assert_eq!(size_of::<TpdfRadioButton>(), 48);
+    assert_eq!(offset_of!(TpdfRadioButton, export_value), 0);
+    assert_eq!(offset_of!(TpdfRadioButton, page), 8);
+    assert_eq!(offset_of!(TpdfRadioButton, x0), 16);
+    assert_eq!(offset_of!(TpdfRadioButton, y0), 24);
+    assert_eq!(offset_of!(TpdfRadioButton, x1), 32);
+    assert_eq!(offset_of!(TpdfRadioButton, y1), 40);
 }

@@ -715,6 +715,169 @@ Console.WriteLine(
     $"DOTNET-SMOKE: READ sha256={Sha256(signedBytes)} surface=dotnet script=signatures " +
     $"bytes={signedBytes.Length}");
 
+// Scripts five and six: forms and form-data. A field of every kind created,
+// an XFDF fixture applied and the document saved; then what form data says,
+// in the text the facade example specifies.
+var formDataDir = Path.Combine(Path.GetDirectoryName(support)!, "form_data");
+var formLines = new List<string>();
+byte[] formed;
+using (var form = Document.Open(formBytes))
+using (var editor = form.CreateEditor())
+{
+    void Added(string label, (uint Object, ushort Generation) reference) =>
+        formLines.Add($"added {TextToken(label)} {reference.Object}.{reference.Generation}");
+    Added("person.given", editor.AddTextField(
+        "person.given", 0, 300, 700, 500, 720, value: "Ada", maxLen: 20));
+    Added("subscribe", editor.AddCheckbox(
+        "subscribe", 0, 300, 660, 320, 680, "Yes", true, flags: 2));
+    Added("size", editor.AddRadioGroup(
+        "size",
+        new[] { new RadioButton("S", 0, 300, 620, 320, 640), new RadioButton("M", 0, 330, 620, 350, 640) },
+        selected: "M"));
+    Added("country", editor.AddChoiceField(
+        "country", 0, 300, 580, 400, 600, new[] { "NZ", "LK", "UK" }, true, value: "LK", fontSize: 10));
+    Added("languages", editor.AddChoiceField(
+        "languages", 0, 300, 500, 400, 560, new[] { "en", "fr" }, false));
+    using var fixtureData = FormData.ReadXfdf(File.ReadAllBytes(Path.Combine(formDataDir, "form-fields.xfdf")));
+    var widgets = new List<string>();
+    foreach (var widget in editor.ApplyFormData(fixtureData))
+    {
+        widgets.Add($"{widget.ObjectNumber}.{widget.Generation}");
+    }
+    formLines.Add("applied " + (widgets.Count == 0 ? "-" : string.Join(",", widgets)));
+    formed = editor.Save(new WriteOptions());
+}
+Report("forms", formed);
+
+static void FormDataDump(string label, FormData data, List<string> lines)
+{
+    lines.Add($"data {label}");
+    lines.Add($"source {TextToken(data.Source)}");
+    for (uint i = 0; i < data.Count; i++)
+    {
+        var kind = data.ValueKind(i) switch
+        {
+            FieldValueKind.None => "none",
+            FieldValueKind.Text => "text",
+            FieldValueKind.State => "state",
+            FieldValueKind.Many => "many",
+            var other => throw new Exception($"a value kind the text has no spelling for: {other}"),
+        };
+        var line = $"field {TextToken(data.FieldName(i))} {kind}";
+        foreach (var value in data.Values(i))
+        {
+            line += " " + TextToken(value);
+        }
+        lines.Add(line);
+    }
+    foreach (var warning in data.Warnings)
+    {
+        var kind = warning.Kind switch
+        {
+            FormDataWarningKind.NotRead => "not-read",
+            FormDataWarningKind.ValueUnreadable => "value-unreadable",
+            FormDataWarningKind.TreeCut => "tree-cut",
+            FormDataWarningKind.Unnamed => "unnamed",
+            var other => throw new Exception($"a warning the text has no spelling for: {other}"),
+        };
+        lines.Add($"warning {kind} {TextToken(warning.What)} {TextToken(warning.Field)}");
+    }
+    lines.Add($"fdf {Sha256(data.ToFdf())}");
+    string xfdf;
+    try
+    {
+        xfdf = Sha256(data.ToXfdf());
+    }
+    catch (PdfException e) when (e.Status == Status.FormDataRefused)
+    {
+        xfdf = "refused";
+    }
+    lines.Add($"xfdf {xfdf}");
+}
+
+static byte[] Hostile(byte[] bytes)
+{
+    // hierarchy.fdf altered three ways, each the first occurrence replaced:
+    // the three warnings the fixtures never reach (the facade example says why).
+    var replacements = new[]
+    {
+        ("/V (plain)", "/V 12345"),
+        ("/T (untouched)", "/X (untouched)"),
+        ("/V (through a reference)", "/Kids [ 2 0 R ]"),
+    };
+    var text = System.Text.Encoding.Latin1.GetString(bytes);
+    foreach (var (from, to) in replacements)
+    {
+        var at = text.IndexOf(from, StringComparison.Ordinal);
+        if (at < 0)
+        {
+            throw new Exception("hierarchy.fdf carries what the alteration changes");
+        }
+        text = text.Substring(0, at) + to + text.Substring(at + from.Length);
+    }
+    return System.Text.Encoding.Latin1.GetBytes(text);
+}
+
+using (var formedDocument = Document.Open(formed))
+using (var own = formedDocument.ReadFormData())
+{
+    FormDataDump("document", own, formLines);
+}
+foreach (var file in new[] { "form-fields.fdf", "hierarchy.fdf", "form-fields.xfdf", "hierarchy.xfdf" })
+{
+    var raw = File.ReadAllBytes(Path.Combine(formDataDir, file));
+    using var data = file.EndsWith(".xfdf", StringComparison.Ordinal) ? FormData.ReadXfdf(raw) : FormData.ReadFdf(raw);
+    FormDataDump(file, data, formLines);
+}
+using (var hostile = FormData.ReadFdf(Hostile(File.ReadAllBytes(Path.Combine(formDataDir, "hierarchy.fdf")))))
+{
+    FormDataDump("hostile.fdf", hostile, formLines);
+}
+using (var builtData = new FormData())
+{
+    builtData.Source = "built.pdf";
+    builtData.AddField("a.b", FieldValueKind.Text, "x \u00e9");
+    builtData.AddField("a.c", FieldValueKind.State, "On");
+    builtData.AddField("list", FieldValueKind.Many, "1", "2");
+    builtData.AddField("nothing", FieldValueKind.Many);
+    builtData.AddField("empty", FieldValueKind.None);
+    FormDataDump("built", builtData, formLines);
+}
+using (var unrepresentable = new FormData())
+{
+    unrepresentable.AddField("bell", FieldValueKind.Text, "\u0007");
+    FormDataDump("unrepresentable", unrepresentable, formLines);
+}
+foreach (var (label, xml, raw) in new[]
+{
+    ("read-fdf", false, System.Text.Encoding.ASCII.GetBytes("not form data")),
+    ("read-xfdf", true, System.Text.Encoding.ASCII.GetBytes("<root/>")),
+})
+{
+    try
+    {
+        using var read = xml ? FormData.ReadXfdf(raw) : FormData.ReadFdf(raw);
+        formLines.Add($"{label} accepted");
+    }
+    catch (PdfException e) when (e.Status == Status.FormDataRefused)
+    {
+        formLines.Add($"{label} refused");
+    }
+}
+var said = new System.Text.StringBuilder();
+foreach (var line in formLines)
+{
+    said.Append(line).Append('\n');
+}
+var saidBytes = System.Text.Encoding.UTF8.GetBytes(said.ToString());
+if (Environment.GetEnvironmentVariable("TINKER_PARITY_DUMP") is not null)
+{
+    Console.Write(said.ToString());
+}
+Console.WriteLine(
+    $"DOTNET-SMOKE: READ sha256={Sha256(saidBytes)} surface=dotnet script=form-data " +
+    $"bytes={saidBytes.Length}");
+
 // The callback-taking transaction, which is checkpoint, `try`, restore and
 // nothing else. Asserted the only way that cannot be faked: save before, save
 // after, compare hashes. And the exception must still escape — a rollback that

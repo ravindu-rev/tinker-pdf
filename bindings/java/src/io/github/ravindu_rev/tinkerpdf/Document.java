@@ -166,6 +166,11 @@ public final class Document implements AutoCloseable {
         return new Editor(handle(Native.tpdf_document_editor, pointer));
     }
 
+    /** The data the document's fields hold, in the tree's order. */
+    public FormData formData() {
+        return new FormData(handle(Native.tpdf_document_form_data, pointer));
+    }
+
     /** One /Info text entry; null when absent, "" when empty. */
     public String info(InfoKey key) {
         return text(Native.tpdf_document_info, pointer, key.ordinal());

@@ -360,6 +360,110 @@ def signatures(support)
   out
 end
 
+# Creates a field of every kind, applies an XFDF fixture and saves; returns
+# the artefact and the form-data text's first lines.
+def forms(fixture, form_data_dir)
+  document = TinkerPdf::Document.open(fixture)
+  editor = document.editor
+  document.close
+  added = [
+    ['person.given', editor.add_text_field('person.given', 0, [300.0, 700.0, 500.0, 720.0], value: 'Ada', max_len: 20)],
+    ['subscribe', editor.add_checkbox('subscribe', 0, [300.0, 660.0, 320.0, 680.0], 'Yes', true, flags: 2)],
+    ['size', editor.add_radio_group('size', [['S', 0, [300.0, 620.0, 320.0, 640.0]],
+                                             ['M', 0, [330.0, 620.0, 350.0, 640.0]]], selected: 'M')],
+    ['country', editor.add_choice_field('country', 0, [300.0, 580.0, 400.0, 600.0], %w[NZ LK UK], true,
+                                        value: 'LK', font_size: 10.0)],
+    ['languages', editor.add_choice_field('languages', 0, [300.0, 500.0, 400.0, 560.0], %w[en fr], false)]
+  ]
+  lines = added.map { |name, ref| "added #{text_token(name)} #{ref.join('.')}" }
+  data = TinkerPdf::FormData.read_xfdf(File.binread(File.join(form_data_dir, 'form-fields.xfdf')))
+  skipped = editor.apply_form_data(data)
+  data.close
+  widgets = skipped.map { |w| "#{w.object}.#{w.generation}" }
+  lines << "applied #{widgets.empty? ? '-' : widgets.join(',')}"
+  saved = editor.save(options(TinkerPdf::WriteMode::REWRITE))
+  editor.close
+  [saved, lines]
+end
+
+VALUE_KINDS = %w[none text state many].freeze
+FORM_WARNINGS = %w[not-read value-unreadable tree-cut unnamed].freeze
+
+# hierarchy.fdf altered three ways, each the first occurrence replaced: the
+# three warnings the fixtures never reach (the facade example says why).
+HOSTILE = [['/V (plain)', '/V 12345'], ['/T (untouched)', '/X (untouched)'],
+           ['/V (through a reference)', '/Kids [ 2 0 R ]']].freeze
+
+def hostile(raw)
+  HOSTILE.reduce(raw.b) do |bytes, (from, to)|
+    check(bytes.include?(from), 'hierarchy.fdf carries what the alteration changes')
+    bytes.sub(from, to)
+  end
+end
+
+def form_data_dump(label, data, lines)
+  lines << "data #{label}"
+  lines << "source #{text_token(data.source)}"
+  (0...data.count).each do |i|
+    values = data.values(i).map { |value| " #{text_token(value)}" }.join
+    lines << "field #{text_token(data.field_name(i))} #{VALUE_KINDS.fetch(data.value_kind(i))}#{values}"
+  end
+  data.warnings.each do |w|
+    lines << "warning #{FORM_WARNINGS.fetch(w.kind)} #{text_token(w.what)} #{text_token(w.field)}"
+  end
+  lines << "fdf #{sha(data.to_fdf)}"
+  xfdf = begin
+    sha(data.to_xfdf)
+  rescue TinkerPdf::Error => e
+    raise unless e.status == TinkerPdf::Status::FORM_DATA_REFUSED
+
+    'refused'
+  end
+  lines << "xfdf #{xfdf}"
+end
+
+def form_data_text(formed, lines, form_data_dir)
+  document = TinkerPdf::Document.open(formed)
+  own = document.form_data
+  form_data_dump('document', own, lines)
+  own.close
+  document.close
+  %w[form-fields.fdf hierarchy.fdf form-fields.xfdf hierarchy.xfdf].each do |file|
+    raw = File.binread(File.join(form_data_dir, file))
+    data = file.end_with?('.xfdf') ? TinkerPdf::FormData.read_xfdf(raw) : TinkerPdf::FormData.read_fdf(raw)
+    form_data_dump(file, data, lines)
+    data.close
+  end
+  altered = TinkerPdf::FormData.read_fdf(hostile(File.binread(File.join(form_data_dir, 'hierarchy.fdf'))))
+  form_data_dump('hostile.fdf', altered, lines)
+  altered.close
+
+  built = TinkerPdf::FormData.empty
+  built.source = 'built.pdf'
+  built.add_field('a.b', TinkerPdf::FieldValueKind::TEXT, ["x é"])
+  built.add_field('a.c', TinkerPdf::FieldValueKind::STATE, ['On'])
+  built.add_field('list', TinkerPdf::FieldValueKind::MANY, %w[1 2])
+  built.add_field('nothing', TinkerPdf::FieldValueKind::MANY, [])
+  built.add_field('empty', TinkerPdf::FieldValueKind::NONE, [])
+  form_data_dump('built', built, lines)
+  built.close
+
+  unrepresentable = TinkerPdf::FormData.empty
+  unrepresentable.add_field('bell', TinkerPdf::FieldValueKind::TEXT, ["\u0007"])
+  form_data_dump('unrepresentable', unrepresentable, lines)
+  unrepresentable.close
+
+  [['read-fdf', :read_fdf, 'not form data'], ['read-xfdf', :read_xfdf, '<root/>']].each do |label, reader, raw|
+    TinkerPdf::FormData.public_send(reader, raw).close
+    lines << "#{label} accepted"
+  rescue TinkerPdf::Error => e
+    raise unless e.status == TinkerPdf::Status::FORM_DATA_REFUSED
+
+    lines << "#{label} refused"
+  end
+  lines.map { |line| "#{line}\n" }.join
+end
+
 if ARGV.size != 1
   warn 'usage: write_parity.rb <form-fields.pdf>'
   exit 2
@@ -380,4 +484,8 @@ report_read('sanitise-report', removed)
 report_read('read-surface', read_surface(outline, operated))
 support = File.join(File.dirname(File.dirname(fixture_path)), 'crates', 'tinker-pdf', 'tests', 'signature_support')
 report_read('signatures', signatures(support))
+form_data_dir = File.join(File.dirname(support), 'form_data')
+formed, form_lines = forms(fixture, form_data_dir)
+report('forms', formed)
+report_read('form-data', form_data_text(formed, form_lines, form_data_dir))
 puts 'RUBY-PARITY: RAN'

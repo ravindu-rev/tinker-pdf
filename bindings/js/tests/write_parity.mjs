@@ -57,6 +57,8 @@ const {
   PdfView,
   PdfTrustAnchors,
   PdfPageLabelRange,
+  PdfRadioButton,
+  PdfFormData,
 } = module_;
 
 const wasmUrl = new URL('tinker_pdf_js_bg.wasm', entry);
@@ -561,6 +563,120 @@ function signaturePayloadsCross(support) {
   console.log('JS-PARITY: signature payloads cross');
 }
 
+// Create a field of every kind, apply an XFDF fixture, save. Returns the
+// artefact and the form-data text's first lines.
+function forms(fixture, formDataDir) {
+  const document_ = new PdfDocument(fixture);
+  const editor = document_.editor();
+  document_.free();
+  const added = [
+    ['person.given', editor.addTextField('person.given', 0, 300, 700, 500, 720, 'Ada', 20, 0n, 0)],
+    ['subscribe', editor.addCheckbox('subscribe', 0, 300, 660, 320, 680, 'Yes', true, 2n, 0)],
+    ['size', editor.addRadioGroup(
+      'size',
+      [new PdfRadioButton('S', 0, 300, 620, 320, 640), new PdfRadioButton('M', 0, 330, 620, 350, 640)],
+      'M', 0n, 0,
+    )],
+    ['country', editor.addChoiceField(
+      'country', 0, 300, 580, 400, 600, ['NZ', 'LK', 'UK'], true, false, 'LK', 0n, 10,
+    )],
+    ['languages', editor.addChoiceField(
+      'languages', 0, 300, 500, 400, 560, ['en', 'fr'], false, false, undefined, 0n, 0,
+    )],
+  ];
+  const lines = added.map(([label, [number, generation]]) => `added ${text(label)} ${number}.${generation}`);
+  const data = PdfFormData.readXfdf(readFileSync(path.join(formDataDir, 'form-fields.xfdf')));
+  const skipped = editor.applyFormData(data);
+  data.free();
+  const widgets = skipped.map((w) => `${w.objectNumber}.${w.generation}`);
+  lines.push(`applied ${widgets.length ? widgets.join(',') : '-'}`);
+  const saved = editor.save(new PdfWriteOptions());
+  editor.free();
+  return [saved, lines];
+}
+
+// hierarchy.fdf altered three ways, each the first occurrence replaced: the
+// three warnings the fixtures never reach (the facade example says why).
+const HOSTILE = [
+  ['/V (plain)', '/V 12345'],
+  ['/T (untouched)', '/X (untouched)'],
+  ['/V (through a reference)', '/Kids [ 2 0 R ]'],
+];
+
+function hostile(bytes) {
+  let out = Buffer.from(bytes);
+  for (const [from, to] of HOSTILE) {
+    const at = out.indexOf(from);
+    if (at < 0) throw new Error('hierarchy.fdf carries what the alteration changes');
+    out = Buffer.concat([out.subarray(0, at), Buffer.from(to), out.subarray(at + from.length)]);
+  }
+  return new Uint8Array(out);
+}
+
+function formDataDump(label, data, out) {
+  out.push(`data ${label}`);
+  out.push(`source ${text(data.source)}`);
+  for (const field of data.fields) {
+    out.push([`field ${text(field.name)} ${field.kind}`, ...field.values.map(text)].join(' '));
+  }
+  for (const warning of data.warnings) {
+    out.push(`warning ${warning.kind} ${text(warning.what)} ${text(warning.field)}`);
+  }
+  out.push(`fdf ${sha256(data.toFdf())}`);
+  let xfdf;
+  try {
+    xfdf = sha256(encoder.encode(data.toXfdf()));
+  } catch {
+    xfdf = 'refused';
+  }
+  out.push(`xfdf ${xfdf}`);
+}
+
+function formDataText(formed, lines, formDataDir) {
+  const document_ = new PdfDocument(formed);
+  const own = document_.formData();
+  formDataDump('document', own, lines);
+  own.free();
+  document_.free();
+  for (const file of ['form-fields.fdf', 'hierarchy.fdf', 'form-fields.xfdf', 'hierarchy.xfdf']) {
+    const raw = readFileSync(path.join(formDataDir, file));
+    const data = file.endsWith('.xfdf') ? PdfFormData.readXfdf(raw) : PdfFormData.readFdf(raw);
+    formDataDump(file, data, lines);
+    data.free();
+  }
+  const altered_ = PdfFormData.readFdf(hostile(readFileSync(path.join(formDataDir, 'hierarchy.fdf'))));
+  formDataDump('hostile.fdf', altered_, lines);
+  altered_.free();
+
+  const built = new PdfFormData();
+  built.source = 'built.pdf';
+  built.addField('a.b', 'text', ['x \u00e9']);
+  built.addField('a.c', 'state', ['On']);
+  built.addField('list', 'many', ['1', '2']);
+  built.addField('nothing', 'many', []);
+  built.addField('empty', 'none', []);
+  formDataDump('built', built, lines);
+  built.free();
+
+  const unrepresentable = new PdfFormData();
+  unrepresentable.addField('bell', 'text', ['\u0007']);
+  formDataDump('unrepresentable', unrepresentable, lines);
+  unrepresentable.free();
+
+  for (const [read, label, raw] of [
+    [PdfFormData.readFdf, 'read-fdf', encoder.encode('not form data')],
+    [PdfFormData.readXfdf, 'read-xfdf', encoder.encode('<root/>')],
+  ]) {
+    try {
+      read(raw).free();
+      lines.push(`${label} accepted`);
+    } catch {
+      lines.push(`${label} refused`);
+    }
+  }
+  return lines.map((line) => `${line}\n`).join('');
+}
+
 function report(script, bytes) {
   const document_ = new PdfDocument(bytes);
   const defects = document_.validate();
@@ -597,6 +713,13 @@ const signed = encoder.encode(signaturesDump(support));
 if (process.env.TINKER_PARITY_DUMP) process.stdout.write(Buffer.from(signed));
 console.log(`READ sha256=${sha256(signed)} surface=js script=signatures bytes=${signed.length}`);
 signaturePayloadsCross(support);
+
+const formDataDir = path.join(path.dirname(support), 'form_data');
+const [formed, formLines] = forms(fixture, formDataDir);
+report('forms', formed);
+const said = encoder.encode(formDataText(formed, formLines, formDataDir));
+if (process.env.TINKER_PARITY_DUMP) process.stdout.write(Buffer.from(said));
+console.log(`READ sha256=${sha256(said)} surface=js script=form-data bytes=${said.length}`);
 transactionRollsBackOnAThrow(fixture);
 
 // A consumed handle refuses rather than producing a second document, which is
