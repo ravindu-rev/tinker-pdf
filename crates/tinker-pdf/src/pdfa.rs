@@ -412,6 +412,14 @@ pub(crate) mod clauses {
         four: "6.2.10.7",
     };
 
+    /// Font metrics: the dictionary's widths against the program's (6.3.6 /
+    /// 6.2.11.5 / 6.2.10.5).
+    pub(crate) const FONT_METRICS: ClauseTable = ClauseTable {
+        one: "6.3.6",
+        two_three: "6.2.11.5",
+        four: "6.2.10.5",
+    };
+
     /// Composite fonts: the CIDFont dictionary (6.3.3.2 / 6.2.11.3.2 /
     /// 6.2.10.3.2).
     pub(crate) const CID_FONTS: ClauseTable = ClauseTable {
@@ -735,15 +743,18 @@ pub const STAGED: &[StagedRule] = &[
     },
     StagedRule {
         clause: "6.3.6",
-        rule: "font metrics: the /Widths array against the embedded \
-               program's own advances",
-        because: "the advance is one call into tinker-pdf-font away, and the \
-                  mapping from a character code to the glyph whose advance it \
-                  is, is not: a symbolic TrueType font resolves a code \
-                  through a (3, 0) cmap subtable with the code offset into \
-                  the private-use area, a Type 1 font through the program's \
-                  own encoding vector, and a rule that got either wrong would \
-                  report conforming files by the hundred",
+        rule: "font metrics where the glyph is not one the font maps the \
+               code to by index: a Type 1 program, and a code a reader \
+               reaches only by 9.6.6.4's closing guess",
+        because: "a TrueType or CFF program's advance is judged now, for every \
+                  drawn code, through the glyph the renderer and the subsetter \
+                  themselves select (PageResources::selection) - a symbolic \
+                  face through its (3, 0) subtable, a composite one through \
+                  /CIDToGIDMap. A Type 1 program addresses its charstrings by \
+                  name through its own encoding vector, which that selection \
+                  does not answer as an index, and a glyph reached by guess is \
+                  not one the font stated: a width compared against it would \
+                  report conforming files whenever two readers guess apart",
     },
     StagedRule {
         clause: "6.3.3",
@@ -1619,6 +1630,17 @@ pub enum FindingKind {
         /// What the `/RoleMap` made of it, which equals `declared` when the
         /// role map does not mention it.
         mapped: String,
+    },
+    /// A drawn code whose width the font dictionary states and the embedded
+    /// program states differently, by more than one thousandth of an em
+    /// (6.3.6 / 6.2.11.5 / 6.2.10.5).
+    GlyphWidthInconsistent {
+        /// The character code.
+        code: u32,
+        /// The dictionary's width, in 1/1000 em, rounded.
+        dictionary: i64,
+        /// The program's advance, in 1/1000 em, rounded.
+        program: i64,
     },
     /// Two `/Separation` arrays of one colorant name with different
     /// alternate spaces or tint transforms, compared as objects (6.2.4.4).

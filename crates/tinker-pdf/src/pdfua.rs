@@ -261,6 +261,13 @@ pub(crate) mod clauses {
         two: Some("8.4.5.3.1"),
     };
 
+    /// Glyph widths, the dictionary's against the program's (UA-1 7.21.5,
+    /// UA-2 8.4.5.6).
+    pub(crate) const FONT_WIDTHS: UaClauses = UaClauses {
+        one: Some("7.21.5"),
+        two: Some("8.4.5.6"),
+    };
+
     /// A Type 2 CIDFont's `/CIDToGIDMap` (UA-1 7.21.3.2, UA-2 8.4.5.3.2).
     pub(crate) const CID_TO_GID: UaClauses = UaClauses {
         one: Some("7.21.3.2"),
@@ -528,9 +535,10 @@ pub const STAGED: &[UaGap] = &[
     UaGap {
         part: UaPart::One,
         clause: "7.21",
-        rule: "the font clauses that ask what a drawn code selects: every glyph \
-               present in the program (7.21.4.1), CharSet and CIDSet complete \
-               (7.21.4.2), /Widths against the program (7.21.5), the cmap \
+        rule: "the font clauses that ask what a drawn code selects past its \
+               width: every glyph present in the program (7.21.4.1), CharSet \
+               and CIDSet complete (7.21.4.2), the widths of a Type 1 program \
+               or of a glyph reached by guess (7.21.5), the cmap \
                subtables a TrueType program carries (7.21.6), a /Differences \
                name on the Adobe Glyph List (7.21.6), a glyph name on it for an \
                unmapped Type 1 or Type 3 font and a /ToUnicode for a font drawn \

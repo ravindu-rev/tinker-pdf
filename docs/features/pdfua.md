@@ -55,7 +55,8 @@ number differs.
   rendering mode — embedding (UA-1 7.21.4.1, UA-2 8.4.5.5.1), a Type 2
   CIDFont's `/CIDToGIDMap` (7.21.3.2, 8.4.5.3.2), a TrueType font's
   `/Encoding` (7.21.6, 8.4.5.7), a mapping to Unicode with the PDF/A group's
-  exemptions (7.21.7, 8.4.5.8); and three rules of its own — a composite
+  exemptions (7.21.7, 8.4.5.8), glyph widths against the program (7.21.5,
+  8.4.5.6); and three rules of its own — a composite
   font's encoding CMap embedded unless Table 118 predefines it, its `/WMode`
   agreeing with its program, no `usecmap` outside Table 118 (7.21.3.3,
   8.4.5.4), its collection the CIDFont's (7.21.3.1, 8.4.5.3.1) — and no drawn

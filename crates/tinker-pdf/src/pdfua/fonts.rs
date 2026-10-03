@@ -67,7 +67,12 @@ const SHARED_READING: Flavour = Flavour {
 };
 
 /// Runs the font group.
-pub(super) fn rules(doc: &CosDocument, machinery: &Machinery, _part: UaPart, out: &mut Vec<UaRaw>) {
+pub(super) fn rules(
+    doc: &std::sync::Arc<CosDocument>,
+    machinery: &Machinery,
+    _part: UaPart,
+    out: &mut Vec<UaRaw>,
+) {
     if !machinery.reach(RuleGroup::Fonts) {
         return;
     }
@@ -106,6 +111,7 @@ pub(super) fn ua_clause_of(kind: &FindingKind) -> Option<UaClauses> {
         | FindingKind::CMapWritingModeMismatch { .. }
         | FindingKind::CMapReferenceNotStandard { .. } => clauses::CMAPS,
         FindingKind::CidSystemInfoMismatch { .. } => clauses::CID_SYSTEM_INFO,
+        FindingKind::GlyphWidthInconsistent { .. } => clauses::FONT_WIDTHS,
         _ => return None,
     })
 }

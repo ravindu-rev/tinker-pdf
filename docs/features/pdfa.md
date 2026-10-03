@@ -64,7 +64,11 @@ never happens.
   including the standard 14, the program's format against the key that names
   it, the subset tag's shape, symbolic and non-symbolic `/Encoding`,
   `/CIDSystemInfo` and `/CIDToGIDMap`, the determinable half of the Unicode
-  rule, and a composite font's **encoding CMap** — embedded unless the part
+  rule, **font metrics** — every drawn code's `/Widths` or `/W` against the
+  advance of the glyph the engine's own code-to-glyph mapping selects, for a
+  TrueType or CFF program, within a thousandth of an em; a Type 1 program
+  and a glyph reached only by 9.6.6.4's closing guess are not judged — and
+  a composite font's **encoding CMap** — embedded unless the part
   admits its name (part 1 admits only `Identity-H` and `Identity-V`; parts 2
   to 4 admit Table 118's sixty-one, carried as names and needing none of the
   `cmap-predefined` tables), its `/WMode` agreeing with its program, no

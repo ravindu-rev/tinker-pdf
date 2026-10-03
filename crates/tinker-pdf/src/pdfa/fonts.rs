@@ -55,7 +55,8 @@
 //! the font dictionary, so no rule over font dictionaries can find it. What
 //! *is* determinable is checked; the rest is named rather than guessed.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use tinker_pdf_cos::{CosDocument, Dict, ObjRef, Object};
 
@@ -88,7 +89,7 @@ const PREDEFINED_ENCODINGS: &[&[u8]] = &[
 
 /// Runs every font rule that applies to `flavour`.
 pub(super) fn rules(
-    doc: &CosDocument,
+    doc: &Arc<CosDocument>,
     machinery: &Machinery,
     flavour: Option<Flavour>,
     out: &mut Vec<Raw>,
@@ -105,7 +106,8 @@ pub(super) fn rules(
 /// fonts under ISO 14289's numbering (`docs/design/pdfua.md`, "one rule, two
 /// standards"), runs them behind its own counted reach rather than counting
 /// a second one.
-pub(crate) fn run(doc: &CosDocument, flavour: Option<Flavour>, out: &mut Vec<Raw>) {
+pub(crate) fn run(doc: &Arc<CosDocument>, flavour: Option<Flavour>, out: &mut Vec<Raw>) {
+    widths(doc, out);
     let mut budget = MAX_PROGRAM_PARSES;
     for reference in usage(doc) {
         let Ok(object) = doc.get(reference) else {
@@ -742,6 +744,193 @@ fn cid_to_gid(doc: &CosDocument, descendant: &Dict, at: ObjRef, out: &mut Vec<Ra
         object: Some(at),
         kind: FindingKind::CidToGidMapMalformed { declared },
     });
+}
+
+// ---- 6.3.6 / 6.2.11.5 / 6.2.10.5 Font metrics -----------------------------
+
+/// How many distinct codes one font contributes to the width rule.
+const MAX_CODES_PER_FONT: usize = 1 << 12;
+
+/// How many fonts the width rule reads programs for.
+const MAX_WIDTH_FONTS: usize = 1 << 10;
+
+/// The tolerance veraPDF's published test gives the comparison, in 1/1000
+/// em: `Math.abs(widthFromFontProgram - widthFromDictionary) <= 1`.
+const WIDTH_TOLERANCE: f64 = 1.0;
+
+/// One font the pages drew with at a visible rendering mode, and the codes.
+struct Drawn {
+    /// The page or form scope it was drawn in, which is what decides which
+    /// glyph of the program a code selects.
+    scope: crate::resources::PageResources,
+    /// The resource name it was drawn under, in that scope.
+    name: Vec<u8>,
+    codes: BTreeSet<u32>,
+}
+
+/// ISO 19005-1 6.3.6, ISO 19005-2/3 6.2.11.5, ISO 19005-4 6.2.10.5: "For
+/// every font embedded in a conforming file and used for rendering, the glyph
+/// width information in the font dictionary and in the embedded font program
+/// shall be consistent" — veraPDF's statement of rules 6.3.6-1, 6.2.11.5-1 and
+/// 6.2.10.5-1, judged per glyph with a tolerance of one thousandth of an em.
+///
+/// **The mapping is the engine's, not a second one.** `PDFA_STAGED` held this
+/// rule back because the code-to-glyph mapping is where a rule goes wrong — a
+/// symbolic TrueType font reaches its glyph through a (3,0) subtable offset
+/// into the private-use area, a composite one through `/CIDToGIDMap` — and a
+/// rule that got either wrong "would report conforming files by the hundred".
+/// So it asks [`crate::resources::PageResources::selection`], the one the
+/// renderer and the subsetter both draw with, and judges a code only where
+/// that answer is **stated** by the font: a glyph a reader reaches by 9.6.6.4's
+/// closing guess is one another reader may not reach, and a width compared
+/// against it is a width compared against a guess. `.notdef` is not judged
+/// either; drawing it is a defect of its own.
+///
+/// The dictionary's width is judged only where the dictionary states one —
+/// `/Widths` or `/W` — not a `/MissingWidth` or `/DW` default, which veraPDF's
+/// `widthFromDictionary == null` exempts. A Type 1 program, whose charstrings
+/// are addressed by name rather than by a glyph index, is not judged; nor is
+/// a Type 3 font, which has no program.
+fn widths(doc: &Arc<CosDocument>, out: &mut Vec<Raw>) {
+    let mut drawn: BTreeMap<ObjRef, Drawn> = BTreeMap::new();
+    content::walk(doc, &mut |op| {
+        if !matches!(op.operator, b"Tj" | b"TJ" | b"'" | b"\"")
+            || op.mode == content::RENDER_MODE_INVISIBLE
+        {
+            return;
+        }
+        let (Some(name), Some(resources)) = (op.font, op.resources) else {
+            return;
+        };
+        let Some(reference) = content::lookup(doc, resources, b"Font", name) else {
+            return;
+        };
+        if !drawn.contains_key(&reference) {
+            if drawn.len() >= MAX_WIDTH_FONTS {
+                return;
+            }
+            drawn.insert(
+                reference,
+                Drawn {
+                    scope: crate::resources::PageResources::from_dict(doc, resources.clone(), None),
+                    name: name.to_vec(),
+                    codes: BTreeSet::new(),
+                },
+            );
+        }
+        let Some(entry) = drawn.get_mut(&reference) else {
+            return;
+        };
+        for token in op.operands {
+            if let tinker_pdf_content::Token::String(bytes) = token {
+                for (code, _, _) in
+                    tinker_pdf_content::FontSource::decode(&entry.scope, &entry.name, bytes)
+                {
+                    if entry.codes.len() < MAX_CODES_PER_FONT {
+                        entry.codes.insert(code);
+                    }
+                }
+            }
+        }
+    });
+
+    for (reference, entry) in &drawn {
+        let Some(font) = tinker_pdf_cos::font::at(doc, *reference) else {
+            continue;
+        };
+        let Some(program) = font.program() else {
+            continue;
+        };
+        let Ok(bytes) = doc.stream_decoded(program.stream) else {
+            continue;
+        };
+        let Some(metrics) = ProgramMetrics::read(&bytes) else {
+            continue;
+        };
+        let id = tinker_pdf_content::FontSource::font_id(&entry.scope, &entry.name);
+        for code in &entry.codes {
+            let (dictionary, stated) = font.width_of(*code);
+            if !stated {
+                continue;
+            }
+            let Some(selection) = entry.scope.selection(id, *code) else {
+                continue;
+            };
+            if !selection.stated || selection.glyph == 0 {
+                continue;
+            }
+            let Some(program) = metrics.advance(selection.glyph) else {
+                continue;
+            };
+            if (program - dictionary).abs() > WIDTH_TOLERANCE {
+                out.push(Raw {
+                    rule: clauses::FONT_METRICS,
+                    object: Some(*reference),
+                    kind: FindingKind::GlyphWidthInconsistent {
+                        code: *code,
+                        dictionary: dictionary.round() as i64,
+                        program: program.round() as i64,
+                    },
+                });
+                // One per font: the first disagreement says the dictionary
+                // and the program describe different faces, and a finding
+                // per glyph would be the same statement many times.
+                break;
+            }
+        }
+    }
+}
+
+/// A font program's advances in 1/1000 em, whichever outline format it is.
+enum ProgramMetrics<'a> {
+    /// `glyf` outlines: `hmtx` in font units over `head`'s units per em, for
+    /// the `maxp` glyph count's glyphs — `hmtx` repeats its last advance for
+    /// every index past `numberOfHMetrics`, and an index past the count is a
+    /// glyph the program does not have, whose "advance" is no statement.
+    TrueType(tinker_pdf_font::Sfnt<'a>, f64, u16),
+    /// CFF outlines, bare or inside an OpenType wrapper: charstring widths
+    /// through the font matrix. Boxed: a parsed CFF carries its indexes and
+    /// dictionaries, and one value of this type lives per font for a moment.
+    Cff(Box<tinker_pdf_font::Cff<'a>>),
+}
+
+impl<'a> ProgramMetrics<'a> {
+    fn read(bytes: &'a [u8]) -> Option<ProgramMetrics<'a>> {
+        const GLYF: u32 = 0x676C_7966;
+        const HEAD: u32 = 0x6865_6164;
+        const CFF: u32 = 0x4346_4620;
+        const MAXP: u32 = 0x6D61_7870;
+        if let Some(sfnt) = tinker_pdf_font::Sfnt::parse(bytes) {
+            if sfnt.table(GLYF).is_some() {
+                let head = sfnt.table(HEAD)?;
+                let units = u16::from_be_bytes([*head.get(18)?, *head.get(19)?]);
+                if units == 0 {
+                    return None;
+                }
+                let maxp = sfnt.table(MAXP)?;
+                let glyphs = u16::from_be_bytes([*maxp.get(4)?, *maxp.get(5)?]);
+                return Some(ProgramMetrics::TrueType(sfnt, f64::from(units), glyphs));
+            }
+            return tinker_pdf_font::Cff::parse(sfnt.table(CFF)?)
+                .map(|cff| ProgramMetrics::Cff(Box::new(cff)));
+        }
+        tinker_pdf_font::Cff::parse(bytes).map(|cff| ProgramMetrics::Cff(Box::new(cff)))
+    }
+
+    fn advance(&self, glyph: u16) -> Option<f64> {
+        match self {
+            ProgramMetrics::TrueType(sfnt, units, glyphs) => {
+                if glyph >= *glyphs {
+                    return None;
+                }
+                Some(f64::from(sfnt.advance(glyph)?) * 1000.0 / units)
+            }
+            ProgramMetrics::Cff(cff) => {
+                let scale = cff.font_matrix_for(glyph).first().copied()?;
+                Some(cff.advance(glyph)? * scale * 1000.0)
+            }
+        }
+    }
 }
 
 // ---- the encoding CMap of a composite font ---------------------------------

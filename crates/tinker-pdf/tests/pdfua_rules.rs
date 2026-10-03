@@ -28,6 +28,10 @@
 
 use tinker_pdf::{ConformanceFinding, Document, FindingKind, PdfUaPart};
 
+// A face with real `cmap`, `glyf` and `hmtx` tables, for the width rule.
+#[path = "epub_support/mod.rs"]
+mod epub_support;
+
 /// A real `sfnt` header: the version tag, one table, and a directory entry —
 /// the bytes `pdfa_fonts.rs` uses, for the reason it gives: filler would be
 /// refused at the first byte.
@@ -1308,4 +1312,41 @@ fn an_encrypted_file_that_withholds_accessibility_is_reported() {
     );
     let clean = encrypted(-1).validate_pdfua().findings;
     assert!(clean.is_empty(), "{clean:#?}");
+}
+
+// ---- the width rule, run for a PDF/UA claim -----------------------------------
+
+/// UA-1 7.21.5 / UA-2 8.4.5.6: "the glyph width information in the font
+/// dictionary and in the embedded font program shall be consistent" — the
+/// PDF/A group's width rule, run for a PDF/UA claim and re-numbered. The
+/// baseline's program has no `hmtx` to read, so this fixture embeds a real
+/// face; the same face with the matching width is the twin.
+#[test]
+fn a_width_the_program_disagrees_with_is_reported_under_each_part() {
+    let measured = |part: &str, widths: &str| {
+        let mut fixture = Ua::new(part);
+        fixture.program = Some(
+            epub_support::typeface::Face::new("Acme", "A")
+                .with_advance(600)
+                .build(),
+        );
+        fixture.font = fixture
+            .font
+            .replace("/Widths [500]", &format!("/Widths [{widths}]"));
+        fixture
+    };
+    for (part, clause) in [("1", "7.21.5"), ("2", "8.4.5.6")] {
+        assert_eq!(
+            measured(part, "500").one_finding(),
+            (
+                clause.to_string(),
+                FindingKind::GlyphWidthInconsistent {
+                    code: 65,
+                    dictionary: 500,
+                    program: 600
+                }
+            )
+        );
+        measured(part, "600").clean();
+    }
 }

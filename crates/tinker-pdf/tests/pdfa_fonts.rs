@@ -19,6 +19,11 @@
 
 use tinker_pdf::{Document, FindingKind, PdfACoverage};
 
+// A face with real `cmap`, `glyf` and `hmtx` tables, for the width rule,
+// which has to reach a glyph through the program's own mapping.
+#[path = "epub_support/mod.rs"]
+mod epub_support;
+
 // ---- building a document at the edge of a clause --------------------------
 
 /// A real `sfnt` header: the version tag, one table, and a directory entry.
@@ -886,4 +891,97 @@ fn an_embedded_cmaps_collection_is_the_cidfonts() {
         )]
     );
     assert_eq!(clauses_of(&older_cmap("1")), []);
+}
+
+// ---- 6.3.6 / 6.2.11.5 / 6.2.10.5: font metrics ------------------------------
+
+/// [`conforming`]'s TrueType font with a real program: one face covering `A`
+/// at 1000 units per em, its `A` `advance` units wide, and `widths` as the
+/// dictionary's `/Widths` for code 65.
+fn measured(part: &str, advance: u16, widths: &str) -> Fixture {
+    let mut fixture = Fixture::new(part, Some("B"));
+    let program = epub_support::typeface::Face::new("Acme", "A")
+        .with_advance(advance)
+        .build();
+    fixture.program = Some((String::new(), program));
+    fixture.font = fixture
+        .font
+        .replace("/Widths [500]", &format!("/Widths [{widths}]"));
+    fixture
+}
+
+/// Every finding as `(clause, kind)`.
+fn widths_of(fixture: &Fixture) -> Vec<(String, FindingKind)> {
+    Document::open(fixture.build())
+        .expect("the fixture opens")
+        .validate_pdfa()
+        .findings
+        .into_iter()
+        .map(|finding| (finding.clause.0, finding.kind))
+        .collect()
+}
+
+/// ISO 19005-2 6.2.11.5, in veraPDF's statement of rule 6.2.11.5-1: "the
+/// glyph width information in the font dictionary and in the embedded font
+/// program shall be consistent", with the published test's tolerance of one
+/// thousandth of an em. The program's advance is reached through the glyph
+/// the engine itself draws for the code — the `cmap`, here — and both parts'
+/// numbers are asserted.
+#[test]
+fn a_width_the_program_disagrees_with_is_a_finding() {
+    for (part, clause) in [("1", "6.3.6"), ("2", "6.2.11.5")] {
+        assert_eq!(
+            widths_of(&measured(part, 600, "500")),
+            [(
+                clause.to_string(),
+                FindingKind::GlyphWidthInconsistent {
+                    code: 65,
+                    dictionary: 500,
+                    program: 600
+                }
+            )],
+            "part {part}"
+        );
+    }
+}
+
+/// The twins: the same width, a width within the tolerance, and the
+/// disagreeing font drawn only at rendering mode 3 — veraPDF's test exempts
+/// `renderingMode == 3`, and the clause is about fonts used for rendering.
+#[test]
+fn a_width_within_a_thousandth_or_never_painted_is_not_a_finding() {
+    assert_eq!(widths_of(&measured("2", 600, "600")), []);
+    assert_eq!(widths_of(&measured("2", 600, "599.5")), []);
+    let mut invisible = measured("2", 600, "500");
+    invisible.content = "BT 3 Tr /F1 12 Tf 10 10 Td (A) Tj ET".to_string();
+    assert_eq!(widths_of(&invisible), []);
+}
+
+/// A code the program reaches only by 9.6.6.4's closing guess is not judged:
+/// `Z` is not in this face's `cmap`, so the glyph a reader draws for it is
+/// whichever its own guess picks, and a width compared against a guess is a
+/// width compared against nothing the font said.
+#[test]
+fn a_code_reached_by_guess_is_not_judged() {
+    // Code 1: no character the `cmap` maps, so the engine's last resort reads
+    // the code as the glyph index — glyph 1, which exists and is 600 wide.
+    let mut guessed = measured("2", 600, "500");
+    guessed.font = guessed
+        .font
+        .replace("/FirstChar 65 /LastChar 65", "/FirstChar 1 /LastChar 1");
+    guessed.content = "BT /F1 12 Tf 10 10 Td <01> Tj ET".to_string();
+    assert_eq!(widths_of(&guessed), []);
+
+    // And a width the dictionary does not state — `B` past `/LastChar`,
+    // which falls to `/MissingWidth` — is not compared either: veraPDF's
+    // `widthFromDictionary == null` exempts it.
+    let mut unstated = measured("2", 600, "600");
+    unstated.program = Some((
+        String::new(),
+        epub_support::typeface::Face::new("Acme", "AB")
+            .with_advance(600)
+            .build(),
+    ));
+    unstated.content = "BT /F1 12 Tf 10 10 Td (AB) Tj ET".to_string();
+    assert_eq!(widths_of(&unstated), []);
 }
