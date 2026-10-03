@@ -70,7 +70,10 @@ number differs.
   A hidden annotation, one whose `/Rect` misses the crop box, and a subtype
   ISO 32000-1 Table 169 does not define (the corpus's upper-case `FREETEXT`)
   are held to none of these; a `Popup`, a `Form` element's `Role`, and a
-  media clip's `/CT` and `/Alt` are staged by name.
+  media clip's `/CT` and `/Alt` are staged by name. An annotation is judged
+  once, on the first page that names it, and an indirect `/Annots` array
+  read once (`/Tabs` is still read on every page); the walk reads at most
+  2^18 entries across the document and stops at the group's 256 findings.
 - **Fonts**: **the PDF/A font group, run for a PDF/UA claim** and
   re-numbered kind by kind, over the fonts a page draws with at a visible
   rendering mode — embedding (UA-1 7.21.4.1, UA-2 8.4.5.5.1), a Type 2

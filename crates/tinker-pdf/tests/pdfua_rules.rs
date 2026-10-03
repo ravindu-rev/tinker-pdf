@@ -74,6 +74,9 @@ struct Ua {
     resources: String,
     /// Entries appended inside the page dictionary.
     page: String,
+    /// Pages after object 3, by object number; a test writes their bodies
+    /// into [`Ua::extra`].
+    kids: Vec<u32>,
     /// The font dictionary's entries.
     font: String,
     /// The descriptor's entries; empty for none.
@@ -113,6 +116,7 @@ impl Ua {
             content: "/P << /MCID 0 >> BDC BT /F1 12 Tf 10 10 Td (A) Tj ET EMC".to_string(),
             resources: "<< /Font << /F1 5 0 R >> >>".to_string(),
             page: String::new(),
+            kids: Vec::new(),
             font: "/Type /Font /Subtype /TrueType /BaseFont /ABCDEF+Acme \
                    /Encoding /WinAnsiEncoding /FirstChar 65 /LastChar 65 \
                    /Widths [500] /FontDescriptor 6 0 R"
@@ -173,7 +177,18 @@ impl Ua {
 
         let mut objects: Vec<(u32, Vec<u8>)> = vec![
             (1, format!("<< {catalog} >>").into_bytes()),
-            (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+            (
+                2,
+                format!(
+                    "<< /Type /Pages /Kids [3 0 R {}] /Count {} >>",
+                    self.kids
+                        .iter()
+                        .map(|num| format!("{num} 0 R "))
+                        .collect::<String>(),
+                    1 + self.kids.len()
+                )
+                .into_bytes(),
+            ),
             (
                 3,
                 format!(
@@ -1984,4 +1999,107 @@ fn with_no_tree_an_annotation_is_not_reported_unenclosed_as_well() {
             FindingKind::TabOrderNotStructure { found: None },
         ]
     );
+}
+
+// ---- what the annotation walk may cost ----------------------------------------
+
+/// `count` more pages, numbered from `first`, each with `entries`.
+fn more_pages(fixture: &mut Ua, first: u32, count: u32, entries: &str) {
+    for num in first..first + count {
+        fixture.kids.push(num);
+        fixture.extra.push((
+            num,
+            format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] {entries} >>")
+                .into_bytes(),
+        ));
+    }
+}
+
+/// Ruling 1, from the review of lane 7A: one annotation named 4 096 times
+/// from one `/Annots` array that sixty-four pages share was judged 262 144
+/// times — resolved, its `/Rect` copied, its `/Contents` decoded — and the
+/// group's 256 findings were all the same one. It is judged once, on the
+/// first page that names it, and the array read once; the per-page rule,
+/// `/Tabs`, still reads every page. The twin: a second annotation in the same
+/// array is a second finding.
+#[test]
+fn an_annotation_named_from_many_pages_is_judged_once() {
+    let unenclosed = |subtype: &str| FindingKind::AnnotationNotEnclosed {
+        subtype: subtype.to_string(),
+        expected: "Annot".to_string(),
+        enclosing: None,
+    };
+    let mut fixture = Ua::new("1");
+    fixture.page = "/Annots 21 0 R /Tabs /S".to_string();
+    fixture.extra.push((
+        30,
+        b"<< /Type /Annot /Subtype /Text /Rect [10 10 50 50] /Contents (A note) >>".to_vec(),
+    ));
+    fixture
+        .extra
+        .push((21, format!("[{}]", "30 0 R ".repeat(4096)).into_bytes()));
+    more_pages(&mut fixture, 100, 63, "/Annots 21 0 R /Tabs /S");
+    let kinds = |fixture: &Ua| -> Vec<FindingKind> {
+        fixture.findings().into_iter().map(|f| f.kind).collect()
+    };
+    assert_eq!(kinds(&fixture), [unenclosed("Text")]);
+
+    // The per-page rule reads a page whose array was read before.
+    let mut untabbed = Ua::new("1");
+    untabbed.page = fixture.page.clone();
+    untabbed.extra = fixture.extra[..2].to_vec();
+    more_pages(&mut untabbed, 100, 1, "/Annots 21 0 R");
+    assert_eq!(
+        kinds(&untabbed),
+        [
+            unenclosed("Text"),
+            FindingKind::TabOrderNotStructure { found: None }
+        ]
+    );
+
+    if let Some(array) = fixture.extra.iter_mut().find(|(num, _)| *num == 21) {
+        array.1 = format!("[31 0 R {}]", "30 0 R ".repeat(4095)).into_bytes();
+    }
+    fixture.extra.push((
+        31,
+        b"<< /Type /Annot /Subtype /Square /Rect [60 60 90 90] /Contents (A box) >>".to_vec(),
+    ));
+    assert_eq!(kinds(&fixture), [unenclosed("Square"), unenclosed("Text")]);
+}
+
+/// The walk's own budget, for the files sharing cannot reach: distinct
+/// `/Annots` arrays, each naming one hidden annotation 4 096 times, reported
+/// nothing and cost a resolution each. The group reads at most 2^18 entries
+/// across the document — sixty-four such pages — and an annotation past them
+/// is not looked at; the twin is the same page with one array fewer before
+/// it.
+#[test]
+fn the_annotation_walk_stops_at_its_budget() {
+    let walk = |arrays: u32| {
+        let mut fixture = Ua::new("1");
+        fixture.extra.push((
+            31,
+            b"<< /Type /Annot /Subtype /Text /F 2 /Rect [10 10 50 50] >>".to_vec(),
+        ));
+        for array in 0..arrays {
+            fixture.extra.push((
+                3000 + array,
+                format!("[{}]", "31 0 R ".repeat(4096)).into_bytes(),
+            ));
+            more_pages(
+                &mut fixture,
+                100 + array,
+                1,
+                &format!("/Annots {} 0 R /Tabs /S", 3000 + array),
+            );
+        }
+        fixture.extra.push((
+            30,
+            b"<< /Type /Annot /Subtype /Text /Rect [10 10 50 50] /Contents (A note) >>".to_vec(),
+        ));
+        more_pages(&mut fixture, 2000, 1, "/Annots [30 0 R] /Tabs /S");
+        fixture.findings().len()
+    };
+    assert_eq!(walk(63), 1);
+    assert_eq!(walk(64), 0);
 }

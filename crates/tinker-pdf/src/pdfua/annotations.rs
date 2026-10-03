@@ -24,7 +24,7 @@
 //! do not — an `/OBJR` with no `/StructParent` back to it — this reading
 //! finds an enclosing element veraPDF does not, and so errs towards silence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tinker_pdf_cos::{decode_text_string, pages, CosDocument, Dict, ObjRef, Object, Rect};
 
@@ -38,6 +38,18 @@ const MAX_PAGES: usize = 1 << 14;
 
 /// How many annotations one page contributes.
 const MAX_ANNOTATIONS: usize = 4096;
+
+/// How many `/Annots` entries the group reads across the whole document,
+/// duplicates included. An annotation is judged once and a shared array read
+/// once, which makes the walk's work what the file holds; this bounds what it
+/// may hold, as `MAX_ANNOTATION_OBJECTS` bounds the PDF/A colour group's
+/// annotation sweep. Without either, 1 024 pages sharing one `/Annots` of
+/// 4 096 entries — a 166 KB file — cost 13.6 s after the last finding the
+/// group would report.
+const MAX_ANNOTATION_ENTRIES: usize = 1 << 18;
+
+/// How many findings the group reports, across its rules.
+const MAX_FINDINGS: usize = MAX_FINDINGS_PER_RULE * 4;
 
 /// The annotation subtypes ISO 32000-1 Table 169 defines. A subtype outside
 /// it is not one the rules are about.
@@ -91,28 +103,37 @@ pub(super) fn rules(doc: &CosDocument, tree: Option<&StructureTree>, out: &mut V
             }
         }
     }
-    let mut reported = 0usize;
-    let mut push = |raw: UaRaw, out: &mut Vec<UaRaw>| {
-        if reported < MAX_FINDINGS_PER_RULE * 4 {
-            reported += 1;
-            out.push(raw);
-        }
-    };
+    let mut reported = Reported(0);
+    // An annotation is judged once, on the first page that names it, and an
+    // indirect `/Annots` array is read once, on the first page that holds
+    // it: ISO 32000-1 12.5.2's `/P` gives an annotation one page, and a file
+    // that names one from many has not placed it many times.
+    let mut arrays: BTreeSet<ObjRef> = BTreeSet::new();
+    let mut judged: BTreeSet<ObjRef> = BTreeSet::new();
+    let mut entries = 0usize;
 
     for page in pages::collect_upto(doc, MAX_PAGES) {
+        if reported.full() {
+            break;
+        }
         let Ok(object) = doc.get(page.reference) else {
             continue;
         };
         let Some(page_dict) = object.as_dict() else {
             continue;
         };
-        let annots = doc.resolve_key(page_dict, doc.intern(b"Annots"));
+        let key = doc.intern(b"Annots");
+        let annots = doc.resolve_key(page_dict, key);
         let Some(annots) = annots.as_array() else {
             continue;
         };
         if annots.is_empty() {
             continue;
         }
+        let read_before = page_dict
+            .get(key)
+            .and_then(Object::as_objref)
+            .is_some_and(|array| !arrays.insert(array));
 
         // 7.18.3-1: "Every page on which there is an annotation shall
         // contain in its page dictionary the key Tabs, and its value shall
@@ -123,7 +144,7 @@ pub(super) fn rules(doc: &CosDocument, tree: Option<&StructureTree>, out: &mut V
             .and_then(|name| doc.name_bytes(name))
             .map(|name| String::from_utf8_lossy(&name).into_owned());
         if tabs.as_deref() != Some("S") {
-            push(
+            reported.push(
                 UaRaw {
                     rule: clauses::TAB_ORDER,
                     object: Some(page.reference),
@@ -133,11 +154,21 @@ pub(super) fn rules(doc: &CosDocument, tree: Option<&StructureTree>, out: &mut V
             );
         }
 
+        if read_before {
+            continue;
+        }
         for entry in annots.iter().take(MAX_ANNOTATIONS) {
+            if entries >= MAX_ANNOTATION_ENTRIES {
+                break;
+            }
+            entries += 1;
             // An annotation written in place has no object an /OBJR can name,
             // so nothing encloses it; it is judged by the same rules, under
             // the page's number.
             let reference = entry.as_objref();
+            if reference.is_some_and(|r| !judged.insert(r)) {
+                continue;
+            }
             let resolved = doc.resolve(entry);
             let Some(annot) = resolved.as_dict() else {
                 continue;
@@ -173,7 +204,7 @@ pub(super) fn rules(doc: &CosDocument, tree: Option<&StructureTree>, out: &mut V
             // unenclosed beside it would be the same defect again.
             if let Some((expected, rule)) = expected.filter(|_| tree.is_some()) {
                 if parent_type != Some(expected) {
-                    push(
+                    reported.push(
                         UaRaw {
                             rule,
                             object,
@@ -197,7 +228,7 @@ pub(super) fn rules(doc: &CosDocument, tree: Option<&StructureTree>, out: &mut V
                 _ => contents || parent_alt,
             };
             if !described {
-                push(
+                reported.push(
                     UaRaw {
                         rule: clauses::ANNOTATION_TAGGING,
                         object,
@@ -212,7 +243,7 @@ pub(super) fn rules(doc: &CosDocument, tree: Option<&StructureTree>, out: &mut V
             match subtype.as_slice() {
                 // 7.18.2-1: "Annotations of subtype TrapNet shall not be
                 // permitted."
-                b"TrapNet" => push(
+                b"TrapNet" => reported.push(
                     UaRaw {
                         rule: clauses::TRAPNET,
                         object,
@@ -222,7 +253,7 @@ pub(super) fn rules(doc: &CosDocument, tree: Option<&StructureTree>, out: &mut V
                 ),
                 // 7.18.5-2: "Links shall contain an alternate description via
                 // their Contents key" — the enclosing /Alt does not stand in.
-                b"Link" if !contents => push(
+                b"Link" if !contents => reported.push(
                     UaRaw {
                         rule: clauses::LINKS,
                         object,
@@ -232,7 +263,7 @@ pub(super) fn rules(doc: &CosDocument, tree: Option<&StructureTree>, out: &mut V
                 ),
                 // 7.18.8-1: a printer's mark is an incidental artifact, so it
                 // is in no structure element.
-                b"PrinterMark" if parent.is_some() => push(
+                b"PrinterMark" if parent.is_some() => reported.push(
                     UaRaw {
                         rule: clauses::PRINTER_MARK,
                         object,
@@ -243,6 +274,22 @@ pub(super) fn rules(doc: &CosDocument, tree: Option<&StructureTree>, out: &mut V
                 _ => {}
             }
         }
+    }
+}
+
+/// The group's findings so far, which stop at [`MAX_FINDINGS`].
+struct Reported(usize);
+
+impl Reported {
+    fn push(&mut self, raw: UaRaw, out: &mut Vec<UaRaw>) {
+        if !self.full() {
+            self.0 += 1;
+            out.push(raw);
+        }
+    }
+
+    fn full(&self) -> bool {
+        self.0 >= MAX_FINDINGS
     }
 }
 
