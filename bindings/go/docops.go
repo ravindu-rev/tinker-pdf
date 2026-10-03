@@ -11,14 +11,14 @@ import "unsafe"
 // LabelStyle is how a page-label range writes its number (12.4.2).
 type LabelStyle int
 
-// The styles, transcribed from TpdfLabelStyle.
+// The styles: the header's own TpdfLabelStyle constants, so cgo checks each number.
 const (
-	LabelDecimal      LabelStyle = 0
-	LabelRomanUpper   LabelStyle = 1
-	LabelRomanLower   LabelStyle = 2
-	LabelLettersUpper LabelStyle = 3
-	LabelLettersLower LabelStyle = 4
-	LabelNone         LabelStyle = 5
+	LabelDecimal      LabelStyle = C.TPDF_LABEL_STYLE_DECIMAL
+	LabelRomanUpper   LabelStyle = C.TPDF_LABEL_STYLE_ROMAN_UPPER
+	LabelRomanLower   LabelStyle = C.TPDF_LABEL_STYLE_ROMAN_LOWER
+	LabelLettersUpper LabelStyle = C.TPDF_LABEL_STYLE_LETTERS_UPPER
+	LabelLettersLower LabelStyle = C.TPDF_LABEL_STYLE_LETTERS_LOWER
+	LabelNone         LabelStyle = C.TPDF_LABEL_STYLE_NONE
 )
 
 // PageLabelRange is one run of page labels; a nil Prefix writes no /P.
@@ -59,38 +59,38 @@ type EmbeddedFile struct {
 // same metadata.
 type MetadataSync int
 
-// The answers, transcribed from TpdfMetadataSync.
+// The answers: the header's own TpdfMetadataSync constants, so cgo checks each number.
 const (
-	SyncAlone              MetadataSync = 0
-	SyncOtherHalfUnchanged MetadataSync = 1
+	SyncAlone              MetadataSync = C.TPDF_METADATA_SYNC_ALONE
+	SyncOtherHalfUnchanged MetadataSync = C.TPDF_METADATA_SYNC_OTHER_HALF_UNCHANGED
 )
 
 // PageBoundary is one of a page's five boundaries (14.11.2).
 type PageBoundary int
 
-// The boundaries, transcribed from TpdfPageBoundary.
+// The boundaries: the header's own TpdfPageBoundary constants, so cgo checks each number.
 const (
-	MediaBox PageBoundary = 0
-	CropBox  PageBoundary = 1
-	BleedBox PageBoundary = 2
-	TrimBox  PageBoundary = 3
-	ArtBox   PageBoundary = 4
+	MediaBox PageBoundary = C.TPDF_PAGE_BOUNDARY_MEDIA_BOX
+	CropBox  PageBoundary = C.TPDF_PAGE_BOUNDARY_CROP_BOX
+	BleedBox PageBoundary = C.TPDF_PAGE_BOUNDARY_BLEED_BOX
+	TrimBox  PageBoundary = C.TPDF_PAGE_BOUNDARY_TRIM_BOX
+	ArtBox   PageBoundary = C.TPDF_PAGE_BOUNDARY_ART_BOX
 )
 
 // Removal is why a sanitise removed something.
 type Removal int
 
-// The reasons, transcribed from TpdfRemoval.
+// The reasons: the header's own TpdfRemoval constants, so cgo checks each number.
 const (
-	RemovedJavaScript         Removal = 0
-	RemovedDocumentJavaScript Removal = 1
-	RemovedCalculationOrder   Removal = 2
-	RemovedXfaForm            Removal = 3
-	RemovedAction             Removal = 4
-	RemovedEmbeddedFileTree   Removal = 5
-	RemovedEmbeddedFile       Removal = 6
-	RemovedInfo               Removal = 7
-	RemovedMetadata           Removal = 8
+	RemovedJavaScript         Removal = C.TPDF_REMOVAL_JAVA_SCRIPT
+	RemovedDocumentJavaScript Removal = C.TPDF_REMOVAL_DOCUMENT_JAVA_SCRIPT
+	RemovedCalculationOrder   Removal = C.TPDF_REMOVAL_CALCULATION_ORDER
+	RemovedXfaForm            Removal = C.TPDF_REMOVAL_XFA_FORM
+	RemovedAction             Removal = C.TPDF_REMOVAL_ACTION
+	RemovedEmbeddedFileTree   Removal = C.TPDF_REMOVAL_EMBEDDED_FILE_TREE
+	RemovedEmbeddedFile       Removal = C.TPDF_REMOVAL_EMBEDDED_FILE
+	RemovedInfo               Removal = C.TPDF_REMOVAL_INFO
+	RemovedMetadata           Removal = C.TPDF_REMOVAL_METADATA
 )
 
 // Sanitise is what a sanitise takes out; all four is Sanitise::ALL.

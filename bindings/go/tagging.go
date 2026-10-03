@@ -11,13 +11,13 @@ import "unsafe"
 // TagText is which text property SetText sets.
 type TagText int
 
-// The properties, transcribed from TpdfTagText.
+// The properties: the header's own TpdfTagText constants, so cgo checks each number.
 const (
-	TagTitle      TagText = 0
-	TagLang       TagText = 1
-	TagAlt        TagText = 2
-	TagActualText TagText = 3
-	TagExpansion  TagText = 4
+	TagTitle      TagText = C.TPDF_TAG_TEXT_TITLE
+	TagLang       TagText = C.TPDF_TAG_TEXT_LANG
+	TagAlt        TagText = C.TPDF_TAG_TEXT_ALT
+	TagActualText TagText = C.TPDF_TAG_TEXT_ACTUAL_TEXT
+	TagExpansion  TagText = C.TPDF_TAG_TEXT_EXPANSION
 )
 
 // Tag is a structure element to open (14.7.2): its type and properties.

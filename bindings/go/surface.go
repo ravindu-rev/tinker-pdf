@@ -11,17 +11,17 @@ import "unsafe"
 // AuthLevel is which password a document accepted.
 type AuthLevel int
 
-// The authentication levels, transcribed from TpdfAuthLevel.
+// The authentication levels: the header's own TpdfAuthLevel constants, so cgo checks each number.
 const (
-	AuthNone  AuthLevel = 0
-	AuthUser  AuthLevel = 1
-	AuthOwner AuthLevel = 2
+	AuthNone  AuthLevel = C.TPDF_AUTH_LEVEL_NONE
+	AuthUser  AuthLevel = C.TPDF_AUTH_LEVEL_USER
+	AuthOwner AuthLevel = C.TPDF_AUTH_LEVEL_OWNER
 )
 
 // ScriptPolicy is a bitmask of the form-script triggers a call may run.
 type ScriptPolicy uint32
 
-// The policy bits, transcribed from the TPDF_SCRIPT_* constants.
+// The policy bits: the header's own TPDF_SCRIPT_* constants.
 const (
 	ScriptCalculate ScriptPolicy = C.TPDF_SCRIPT_CALCULATE
 	ScriptFormat    ScriptPolicy = C.TPDF_SCRIPT_FORMAT

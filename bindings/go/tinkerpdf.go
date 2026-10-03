@@ -36,26 +36,26 @@ import (
 // pinned by the C crate's own tests.
 type Status int
 
-// The statuses, transcribed from TpdfStatus.
+// The statuses: the header's own TpdfStatus constants, so cgo checks each number.
 const (
-	StatusOk                 Status = 0
-	StatusBadArgument        Status = 1
-	StatusNotAPdf            Status = 2
-	StatusNeedsPassword      Status = 3
-	StatusWrongPassword      Status = 4
-	StatusNoSuchPage         Status = 5
-	StatusNotEncrypted       Status = 6
-	StatusUnsupportedHandler Status = 7
-	StatusNoSuchSignature    Status = 8
-	StatusNoSuchField        Status = 9
-	StatusValueRefused       Status = 10
-	StatusFieldUnreadable    Status = 11
-	StatusSpentHandle        Status = 12
-	StatusEditRefused        Status = 13
-	StatusSourceMiss         Status = 14
-	StatusScriptRefused      Status = 15
-	StatusStreamUnreadable   Status = 16
-	StatusFormDataRefused    Status = 17
+	StatusOk                 Status = C.TPDF_STATUS_OK
+	StatusBadArgument        Status = C.TPDF_STATUS_BAD_ARGUMENT
+	StatusNotAPdf            Status = C.TPDF_STATUS_NOT_A_PDF
+	StatusNeedsPassword      Status = C.TPDF_STATUS_NEEDS_PASSWORD
+	StatusWrongPassword      Status = C.TPDF_STATUS_WRONG_PASSWORD
+	StatusNoSuchPage         Status = C.TPDF_STATUS_NO_SUCH_PAGE
+	StatusNotEncrypted       Status = C.TPDF_STATUS_NOT_ENCRYPTED
+	StatusUnsupportedHandler Status = C.TPDF_STATUS_UNSUPPORTED_HANDLER
+	StatusNoSuchSignature    Status = C.TPDF_STATUS_NO_SUCH_SIGNATURE
+	StatusNoSuchField        Status = C.TPDF_STATUS_NO_SUCH_FIELD
+	StatusValueRefused       Status = C.TPDF_STATUS_VALUE_REFUSED
+	StatusFieldUnreadable    Status = C.TPDF_STATUS_FIELD_UNREADABLE
+	StatusSpentHandle        Status = C.TPDF_STATUS_SPENT_HANDLE
+	StatusEditRefused        Status = C.TPDF_STATUS_EDIT_REFUSED
+	StatusSourceMiss         Status = C.TPDF_STATUS_SOURCE_MISS
+	StatusScriptRefused      Status = C.TPDF_STATUS_SCRIPT_REFUSED
+	StatusStreamUnreadable   Status = C.TPDF_STATUS_STREAM_UNREADABLE
+	StatusFormDataRefused    Status = C.TPDF_STATUS_FORM_DATA_REFUSED
 )
 
 // Error is a failure the engine reported: its status, which a caller branches
@@ -216,12 +216,12 @@ func (d *Document) SetFonts(regular []byte) error {
 // PixelFormat is how a bitmap stores its pixels.
 type PixelFormat int
 
-// The pixel formats, transcribed from TpdfPixelFormat.
+// The pixel formats: the header's own TpdfPixelFormat constants, so cgo checks each number.
 const (
-	Gray8  PixelFormat = 0
-	GrayA8 PixelFormat = 1
-	Rgb8   PixelFormat = 2
-	Rgba8  PixelFormat = 3
+	Gray8  PixelFormat = C.TPDF_PIXEL_FORMAT_GRAY8
+	GrayA8 PixelFormat = C.TPDF_PIXEL_FORMAT_GRAY_A8
+	Rgb8   PixelFormat = C.TPDF_PIXEL_FORMAT_RGB8
+	Rgba8  PixelFormat = C.TPDF_PIXEL_FORMAT_RGBA8
 )
 
 // Bitmap is a rendered page.

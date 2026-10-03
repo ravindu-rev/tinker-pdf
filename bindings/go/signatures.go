@@ -9,67 +9,67 @@ import "C"
 // Coverage is what a signature's /ByteRange covers, checked against the file.
 type Coverage int
 
-// The answers, transcribed from TpdfCoverage.
+// The answers: the header's own TpdfCoverage constants, so cgo checks each number.
 const (
-	CoverageWholeFile  Coverage = 0
-	CoverageRevision   Coverage = 1
-	CoverageSuspicious Coverage = 2
+	CoverageWholeFile  Coverage = C.TPDF_COVERAGE_WHOLE_FILE
+	CoverageRevision   Coverage = C.TPDF_COVERAGE_REVISION
+	CoverageSuspicious Coverage = C.TPDF_COVERAGE_SUSPICIOUS
 )
 
 // CmsState is whether the CMS blob could be read.
 type CmsState int
 
-// The answers, transcribed from TpdfCmsState.
+// The answers: the header's own TpdfCmsState constants, so cgo checks each number.
 const (
-	CmsRead       CmsState = 0
-	CmsAbsent     CmsState = 1
-	CmsUnreadable CmsState = 2
+	CmsRead       CmsState = C.TPDF_CMS_STATE_READ
+	CmsAbsent     CmsState = C.TPDF_CMS_STATE_ABSENT
+	CmsUnreadable CmsState = C.TPDF_CMS_STATE_UNREADABLE
 )
 
 // DocumentDigest is whether the covered bytes still hash to what was signed.
 type DocumentDigest int
 
-// The answers, transcribed from TpdfDocumentDigest.
+// The answers: the header's own TpdfDocumentDigest constants, so cgo checks each number.
 const (
-	DigestMatches    DocumentDigest = 0
-	DigestDiffers    DocumentDigest = 1
-	DigestNotChecked DocumentDigest = 2
+	DigestMatches    DocumentDigest = C.TPDF_DOCUMENT_DIGEST_MATCHES
+	DigestDiffers    DocumentDigest = C.TPDF_DOCUMENT_DIGEST_DIFFERS
+	DigestNotChecked DocumentDigest = C.TPDF_DOCUMENT_DIGEST_NOT_CHECKED
 )
 
 // SignatureCheck is whether the signature verifies against the signer's key.
 type SignatureCheck int
 
-// The answers, transcribed from TpdfSignatureCheck.
+// The answers: the header's own TpdfSignatureCheck constants, so cgo checks each number.
 const (
-	SignatureVerified   SignatureCheck = 0
-	SignatureFailed     SignatureCheck = 1
-	SignatureNotChecked SignatureCheck = 2
+	SignatureVerified   SignatureCheck = C.TPDF_SIGNATURE_CHECK_VERIFIED
+	SignatureFailed     SignatureCheck = C.TPDF_SIGNATURE_CHECK_FAILED
+	SignatureNotChecked SignatureCheck = C.TPDF_SIGNATURE_CHECK_NOT_CHECKED
 )
 
 // Chain is how far the certificate chain reached.
 type Chain int
 
-// The answers, transcribed from TpdfChain.
+// The answers: the header's own TpdfChain constants, so cgo checks each number.
 const (
-	ChainAnchoredTo          Chain = 0
-	ChainSelfSigned          Chain = 1
-	ChainIncomplete          Chain = 2
-	ChainBroken              Chain = 3
-	ChainNoAnchors           Chain = 4
-	ChainNoSignerCertificate Chain = 5
+	ChainAnchoredTo          Chain = C.TPDF_CHAIN_ANCHORED_TO
+	ChainSelfSigned          Chain = C.TPDF_CHAIN_SELF_SIGNED
+	ChainIncomplete          Chain = C.TPDF_CHAIN_INCOMPLETE
+	ChainBroken              Chain = C.TPDF_CHAIN_BROKEN
+	ChainNoAnchors           Chain = C.TPDF_CHAIN_NO_ANCHORS
+	ChainNoSignerCertificate Chain = C.TPDF_CHAIN_NO_SIGNER_CERTIFICATE
 )
 
 // Weakness is something accepted that a caller should be told about.
 type Weakness int
 
-// The weaknesses, transcribed from TpdfWeakness.
+// The weaknesses: the header's own TpdfWeakness constants, so cgo checks each number.
 const (
-	WeaknessSha1Digest          Weakness = 0
-	WeaknessSha1Signature       Weakness = 1
-	WeaknessShortRsaKey         Weakness = 2
-	WeaknessCoversOnlyARevision Weakness = 3
-	WeaknessCoverageSuspicious  Weakness = 4
-	WeaknessOutsideValidity     Weakness = 5
+	WeaknessSha1Digest          Weakness = C.TPDF_WEAKNESS_SHA1_DIGEST
+	WeaknessSha1Signature       Weakness = C.TPDF_WEAKNESS_SHA1_SIGNATURE
+	WeaknessShortRsaKey         Weakness = C.TPDF_WEAKNESS_SHORT_RSA_KEY
+	WeaknessCoversOnlyARevision Weakness = C.TPDF_WEAKNESS_COVERS_ONLY_A_REVISION
+	WeaknessCoverageSuspicious  Weakness = C.TPDF_WEAKNESS_COVERAGE_SUSPICIOUS
+	WeaknessOutsideValidity     Weakness = C.TPDF_WEAKNESS_OUTSIDE_VALIDITY
 )
 
 // Span is one /ByteRange span.

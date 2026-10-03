@@ -29,14 +29,15 @@ public struct TinkerPdfError: Error, CustomStringConvertible {
     public var description: String { "\(message) (status \(status))" }
 }
 
-/// TpdfStatus numbers a caller branches on. Append only; the C crate pins them.
+/// TpdfStatus numbers a caller branches on: the header's own constants, so
+/// the C importer checks every one.
 public enum Status {
-    public static let badArgument = 1
-    public static let notAPdf = 2
-    public static let needsPassword = 3
-    public static let wrongPassword = 4
-    public static let noSuchPage = 5
-    public static let notEncrypted = 6
+    public static let badArgument = Int(TPDF_STATUS_BAD_ARGUMENT.rawValue)
+    public static let notAPdf = Int(TPDF_STATUS_NOT_A_PDF.rawValue)
+    public static let needsPassword = Int(TPDF_STATUS_NEEDS_PASSWORD.rawValue)
+    public static let wrongPassword = Int(TPDF_STATUS_WRONG_PASSWORD.rawValue)
+    public static let noSuchPage = Int(TPDF_STATUS_NO_SUCH_PAGE.rawValue)
+    public static let notEncrypted = Int(TPDF_STATUS_NOT_ENCRYPTED.rawValue)
 }
 
 /// Runs one C call and throws on anything but Ok, with the engine's message,

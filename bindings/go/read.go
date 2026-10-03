@@ -9,53 +9,53 @@ import "C"
 // InfoKey is which /Info entry to read or write (14.3.3, Table 349).
 type InfoKey int
 
-// The keys, transcribed from TpdfInfoKey.
+// The keys: the header's own TpdfInfoKey constants, so cgo checks each number.
 const (
-	InfoTitle            InfoKey = 0
-	InfoAuthor           InfoKey = 1
-	InfoSubject          InfoKey = 2
-	InfoKeywords         InfoKey = 3
-	InfoCreator          InfoKey = 4
-	InfoProducer         InfoKey = 5
-	InfoCreationDate     InfoKey = 6
-	InfoModificationDate InfoKey = 7
+	InfoTitle            InfoKey = C.TPDF_INFO_KEY_TITLE
+	InfoAuthor           InfoKey = C.TPDF_INFO_KEY_AUTHOR
+	InfoSubject          InfoKey = C.TPDF_INFO_KEY_SUBJECT
+	InfoKeywords         InfoKey = C.TPDF_INFO_KEY_KEYWORDS
+	InfoCreator          InfoKey = C.TPDF_INFO_KEY_CREATOR
+	InfoProducer         InfoKey = C.TPDF_INFO_KEY_PRODUCER
+	InfoCreationDate     InfoKey = C.TPDF_INFO_KEY_CREATION_DATE
+	InfoModificationDate InfoKey = C.TPDF_INFO_KEY_MODIFICATION_DATE
 )
 
 // Trapped is /Trapped (Table 349) with its absence spelled out.
 type Trapped int
 
-// The values, transcribed from TpdfTrapped.
+// The values: the header's own TpdfTrapped constants, so cgo checks each number.
 const (
-	TrappedAbsent  Trapped = 0
-	TrappedTrue    Trapped = 1
-	TrappedFalse   Trapped = 2
-	TrappedUnknown Trapped = 3
+	TrappedAbsent  Trapped = C.TPDF_TRAPPED_ABSENT
+	TrappedTrue    Trapped = C.TPDF_TRAPPED_TRUE
+	TrappedFalse   Trapped = C.TPDF_TRAPPED_FALSE
+	TrappedUnknown Trapped = C.TPDF_TRAPPED_UNKNOWN
 )
 
 // DestinationKind is which of a destination's three arms (12.3.2); they are
 // never collapsed (ruling 6).
 type DestinationKind int
 
-// The kinds, transcribed from TpdfDestinationKind.
+// The kinds: the header's own TpdfDestinationKind constants, so cgo checks each number.
 const (
-	DestinationAbsent   DestinationKind = 0
-	DestinationExplicit DestinationKind = 1
-	DestinationNamed    DestinationKind = 2
-	DestinationURI      DestinationKind = 3
+	DestinationAbsent   DestinationKind = C.TPDF_DESTINATION_KIND_ABSENT
+	DestinationExplicit DestinationKind = C.TPDF_DESTINATION_KIND_EXPLICIT
+	DestinationNamed    DestinationKind = C.TPDF_DESTINATION_KIND_NAMED
+	DestinationURI      DestinationKind = C.TPDF_DESTINATION_KIND_URI
 )
 
 // ActionKind is which action a link carries (12.6.4).
 type ActionKind int
 
-// The kinds, transcribed from TpdfActionKind.
+// The kinds: the header's own TpdfActionKind constants, so cgo checks each number.
 const (
-	ActionAbsent ActionKind = 0
-	ActionGoTo   ActionKind = 1
-	ActionGoToR  ActionKind = 2
-	ActionURI    ActionKind = 3
-	ActionNamed  ActionKind = 4
-	ActionLaunch ActionKind = 5
-	ActionOther  ActionKind = 6
+	ActionAbsent ActionKind = C.TPDF_ACTION_KIND_ABSENT
+	ActionGoTo   ActionKind = C.TPDF_ACTION_KIND_GO_TO
+	ActionGoToR  ActionKind = C.TPDF_ACTION_KIND_GO_TO_R
+	ActionURI    ActionKind = C.TPDF_ACTION_KIND_URI
+	ActionNamed  ActionKind = C.TPDF_ACTION_KIND_NAMED
+	ActionLaunch ActionKind = C.TPDF_ACTION_KIND_LAUNCH
+	ActionOther  ActionKind = C.TPDF_ACTION_KIND_OTHER
 )
 
 // Ref is an object reference.

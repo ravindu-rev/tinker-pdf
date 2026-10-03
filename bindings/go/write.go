@@ -14,10 +14,10 @@ import (
 // WriteMode is the shape of output a save produces (7.5.6).
 type WriteMode int
 
-// The write modes, transcribed from TpdfWriteMode.
+// The write modes: the header's own TpdfWriteMode constants, so cgo checks each number.
 const (
-	Rewrite     WriteMode = 0
-	Incremental WriteMode = 1
+	Rewrite     WriteMode = C.TPDF_WRITE_MODE_REWRITE
+	Incremental WriteMode = C.TPDF_WRITE_MODE_INCREMENTAL
 )
 
 // SkippedWidget is a widget a fill wrote a value for and could not draw: the
@@ -32,11 +32,11 @@ type SkippedWidget struct {
 // WidgetDefect is why a widget could not be drawn.
 type WidgetDefect int
 
-// The widget defects, transcribed from TpdfWidgetDefect.
+// The widget defects: the header's own TpdfWidgetDefect constants, so cgo checks each number.
 const (
 	// WidgetRectMissing: 12.5.2 Table 164 requires /Rect and this widget has
 	// no usable one.
-	WidgetRectMissing WidgetDefect = 0
+	WidgetRectMissing WidgetDefect = C.TPDF_WIDGET_DEFECT_RECT_MISSING
 )
 
 // Editor is an editor over a document. It holds its own reference to the
@@ -212,16 +212,16 @@ func (e *Editor) Save(options WriteOptions) ([]byte, error) {
 // DestKind is how a destination positions its page (12.3.2.2, Table 151).
 type DestKind int
 
-// The destination kinds, transcribed from TpdfDestKind.
+// The destination kinds: the header's own TpdfDestKind constants, so cgo checks each number.
 const (
-	Xyz   DestKind = 0
-	Fit   DestKind = 1
-	FitH  DestKind = 2
-	FitV  DestKind = 3
-	FitR  DestKind = 4
-	FitB  DestKind = 5
-	FitBH DestKind = 6
-	FitBV DestKind = 7
+	Xyz   DestKind = C.TPDF_DEST_KIND_XYZ
+	Fit   DestKind = C.TPDF_DEST_KIND_FIT
+	FitH  DestKind = C.TPDF_DEST_KIND_FIT_H
+	FitV  DestKind = C.TPDF_DEST_KIND_FIT_V
+	FitR  DestKind = C.TPDF_DEST_KIND_FIT_R
+	FitB  DestKind = C.TPDF_DEST_KIND_FIT_B
+	FitBH DestKind = C.TPDF_DEST_KIND_FIT_BH
+	FitBV DestKind = C.TPDF_DEST_KIND_FIT_BV
 )
 
 // View is a destination's view; a nil number is the file's null, "retain the
@@ -370,11 +370,11 @@ func entryArray(entries []*OutlineEntry) []*C.TpdfOutlineEntry {
 // ImageKind is which image description a payload carries.
 type ImageKind int
 
-// The image kinds, transcribed from TpdfImageKind.
+// The image kinds: the header's own TpdfImageKind constants, so cgo checks each number.
 const (
-	ImageJpeg  ImageKind = 0
-	ImageRgb8  ImageKind = 1
-	ImageGray8 ImageKind = 2
+	ImageJpeg  ImageKind = C.TPDF_IMAGE_KIND_JPEG
+	ImageRgb8  ImageKind = C.TPDF_IMAGE_KIND_RGB8
+	ImageGray8 ImageKind = C.TPDF_IMAGE_KIND_GRAY8
 )
 
 // Builder assembles a document from pages, fonts and images.

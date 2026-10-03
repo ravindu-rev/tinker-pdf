@@ -11,63 +11,63 @@ import "unsafe"
 // BlendMode is one of 11.3.5's sixteen blend modes.
 type BlendMode int
 
-// The blend modes, transcribed from TpdfBlendMode.
+// The blend modes: the header's own TpdfBlendMode constants, so cgo checks each number.
 const (
-	BlendNormal     BlendMode = 0
-	BlendMultiply   BlendMode = 1
-	BlendScreen     BlendMode = 2
-	BlendOverlay    BlendMode = 3
-	BlendDarken     BlendMode = 4
-	BlendLighten    BlendMode = 5
-	BlendColorDodge BlendMode = 6
-	BlendColorBurn  BlendMode = 7
-	BlendHardLight  BlendMode = 8
-	BlendSoftLight  BlendMode = 9
-	BlendDifference BlendMode = 10
-	BlendExclusion  BlendMode = 11
-	BlendHue        BlendMode = 12
-	BlendSaturation BlendMode = 13
-	BlendColor      BlendMode = 14
-	BlendLuminosity BlendMode = 15
+	BlendNormal     BlendMode = C.TPDF_BLEND_MODE_NORMAL
+	BlendMultiply   BlendMode = C.TPDF_BLEND_MODE_MULTIPLY
+	BlendScreen     BlendMode = C.TPDF_BLEND_MODE_SCREEN
+	BlendOverlay    BlendMode = C.TPDF_BLEND_MODE_OVERLAY
+	BlendDarken     BlendMode = C.TPDF_BLEND_MODE_DARKEN
+	BlendLighten    BlendMode = C.TPDF_BLEND_MODE_LIGHTEN
+	BlendColorDodge BlendMode = C.TPDF_BLEND_MODE_COLOR_DODGE
+	BlendColorBurn  BlendMode = C.TPDF_BLEND_MODE_COLOR_BURN
+	BlendHardLight  BlendMode = C.TPDF_BLEND_MODE_HARD_LIGHT
+	BlendSoftLight  BlendMode = C.TPDF_BLEND_MODE_SOFT_LIGHT
+	BlendDifference BlendMode = C.TPDF_BLEND_MODE_DIFFERENCE
+	BlendExclusion  BlendMode = C.TPDF_BLEND_MODE_EXCLUSION
+	BlendHue        BlendMode = C.TPDF_BLEND_MODE_HUE
+	BlendSaturation BlendMode = C.TPDF_BLEND_MODE_SATURATION
+	BlendColor      BlendMode = C.TPDF_BLEND_MODE_COLOR
+	BlendLuminosity BlendMode = C.TPDF_BLEND_MODE_LUMINOSITY
 )
 
 // SoftMask is which /SMask a graphics state writes.
 type SoftMask int
 
-// The soft masks, transcribed from TpdfSoftMask.
+// The soft masks: the header's own TpdfSoftMask constants, so cgo checks each number.
 const (
-	SoftMaskAbsent SoftMask = 0
-	SoftMaskNone   SoftMask = 1
-	SoftMaskGroup  SoftMask = 2
+	SoftMaskAbsent SoftMask = C.TPDF_SOFT_MASK_ABSENT
+	SoftMaskNone   SoftMask = C.TPDF_SOFT_MASK_NONE
+	SoftMaskGroup  SoftMask = C.TPDF_SOFT_MASK_GROUP
 )
 
 // MaskKind is what a group soft mask derives its alpha from.
 type MaskKind int
 
-// The mask kinds, transcribed from TpdfMaskKind.
+// The mask kinds: the header's own TpdfMaskKind constants, so cgo checks each number.
 const (
-	MaskAlpha      MaskKind = 0
-	MaskLuminosity MaskKind = 1
+	MaskAlpha      MaskKind = C.TPDF_MASK_KIND_ALPHA
+	MaskLuminosity MaskKind = C.TPDF_MASK_KIND_LUMINOSITY
 )
 
 // DeviceSpace is a device colour space.
 type DeviceSpace int
 
-// The device spaces, transcribed from TpdfDeviceSpace.
+// The device spaces: the header's own TpdfDeviceSpace constants, so cgo checks each number.
 const (
-	DeviceGray DeviceSpace = 0
-	DeviceRgb  DeviceSpace = 1
-	DeviceCmyk DeviceSpace = 2
+	DeviceGray DeviceSpace = C.TPDF_DEVICE_SPACE_GRAY
+	DeviceRgb  DeviceSpace = C.TPDF_DEVICE_SPACE_RGB
+	DeviceCmyk DeviceSpace = C.TPDF_DEVICE_SPACE_CMYK
 )
 
 // TilingType is a tiling pattern's /TilingType, counted from zero.
 type TilingType int
 
-// The tiling types, transcribed from TpdfTilingType.
+// The tiling types: the header's own TpdfTilingType constants, so cgo checks each number.
 const (
-	TilingConstantSpacing TilingType = 0
-	TilingNoDistortion    TilingType = 1
-	TilingFasterTiling    TilingType = 2
+	TilingConstantSpacing TilingType = C.TPDF_TILING_TYPE_CONSTANT_SPACING
+	TilingNoDistortion    TilingType = C.TPDF_TILING_TYPE_NO_DISTORTION
+	TilingFasterTiling    TilingType = C.TPDF_TILING_TYPE_FASTER_TILING
 )
 
 // ExtGState is a graphics state's overrides (Table 58); a nil field writes

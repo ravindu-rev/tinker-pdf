@@ -11,24 +11,24 @@ import "unsafe"
 // FieldValueKind is the shape of a field's value (12.7.4).
 type FieldValueKind int
 
-// The shapes, transcribed from TpdfFieldValueKind.
+// The shapes: the header's own TpdfFieldValueKind constants, so cgo checks each number.
 const (
-	ValueNone  FieldValueKind = 0
-	ValueText  FieldValueKind = 1
-	ValueState FieldValueKind = 2
-	ValueMany  FieldValueKind = 3
+	ValueNone  FieldValueKind = C.TPDF_FIELD_VALUE_KIND_NONE
+	ValueText  FieldValueKind = C.TPDF_FIELD_VALUE_KIND_TEXT
+	ValueState FieldValueKind = C.TPDF_FIELD_VALUE_KIND_STATE
+	ValueMany  FieldValueKind = C.TPDF_FIELD_VALUE_KIND_MANY
 )
 
 // FormDataWarningKind is what a form-data reader met and did not read, or
 // read leniently (ruling 10).
 type FormDataWarningKind int
 
-// The kinds, transcribed from TpdfFormDataWarningKind.
+// The kinds: the header's own TpdfFormDataWarningKind constants, so cgo checks each number.
 const (
-	WarningNotRead         FormDataWarningKind = 0
-	WarningValueUnreadable FormDataWarningKind = 1
-	WarningTreeCut         FormDataWarningKind = 2
-	WarningUnnamed         FormDataWarningKind = 3
+	WarningNotRead         FormDataWarningKind = C.TPDF_FORM_DATA_WARNING_KIND_NOT_READ
+	WarningValueUnreadable FormDataWarningKind = C.TPDF_FORM_DATA_WARNING_KIND_VALUE_UNREADABLE
+	WarningTreeCut         FormDataWarningKind = C.TPDF_FORM_DATA_WARNING_KIND_TREE_CUT
+	WarningUnnamed         FormDataWarningKind = C.TPDF_FORM_DATA_WARNING_KIND_UNNAMED
 )
 
 // RadioButton is one button of a radio group: its export value, the page it

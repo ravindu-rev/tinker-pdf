@@ -469,7 +469,7 @@ a package built with the wrong RID restores, compiles and throws
 **Go, Ruby and Java over the C ABI** (`bindings/go`, `bindings/ruby`,
 `bindings/java`). Three thin wrappers, each nothing but the header in its
 language's spelling: one method per C call, or a loop of calls over a list
-the engine hands back, every enum transcribed with the C numbers, every
+the engine hands back, every enum carrying the C numbers, every
 handle closed by its owner's `Close`/`close` (safe twice), and every string
 and byte array handed back a copy that outlives its handle. None decides a
 default: a save takes the options `tpdf_write_options_init` filled in, a
@@ -483,8 +483,39 @@ form-script calls, an encrypted save reopened with its password, an embedded
 and subset face, the page builder's colours, crop box and raw operators —
 so a declaration transcribed wrongly fails there rather than in a caller.
 
+**Every arm of every enum is held to the header, not only the arms a script
+uses.** The parity scripts send most enums across by one arm — the graphics
+script one blend mode, one mask kind, one device space, one tiling type —
+so a wrong number for any other arm passed `bindings-parity` and every
+smoke: the reviewer set Ruby's `SoftMask::ABSENT` to 1, which writes
+`/SMask /None` on every graphics state left without a mask, and the
+recorded *graphics* hash still printed (review of lane 7C). Go and Swift now
+name the header's own constants (`SoftMaskAbsent SoftMask =
+C.TPDF_SOFT_MASK_ABSENT`), so the compiler checks each number; Ruby and
+.NET write the numbers out and Java passes `ordinal()`, so its declaration
+order is the number. `crates/tinker-pdf-ffi/tests/binding_enums.rs` reads
+the committed header and the four bindings' sources as text and holds every
+enum each carries to the header's: the same arms, none missing and none
+extra, each with the header's number — Java's by position, Go's by the
+constant it names, which must be its own arm and never a literal — and
+Swift's six statuses each to its own constant. The two enums no binding
+keeps as a table, `TpdfTargetKind` and `TpdfSanitiseList`, are a literal 0
+or 1 at the one place each crosses, and both arms of each cross in a parity
+script. Python and JavaScript name arms by string over the facade, so no
+number crosses there; the same file holds each of their 237 string-to-arm
+lines, both directions, to the rule that the string is the arm's own name
+(the page boundaries' `"trim"` for `TrimBox` the one stated exception).
+Counted injections, October 2026: Ruby's `SoftMask::ABSENT = 1` fires
+**1**, an arm dropped from Ruby's `LabelStyle` **1**, Java's `SoftMask`
+reordered **1**, .NET's `BlendMode.Screen = 3` **1**, Go's `SoftMaskAbsent`
+wired to `NONE` **2** and written as a literal 0 **2**, Swift's
+`badArgument` wired to `NOT_A_PDF` **1**, Python's `"screen"` wired to
+`Overlay` **1**, JavaScript's `Sha1Digest` spoken as `"sha1-signature"`
+**1**.
+
 - **Go** is cgo, and the only one of the three that compiles against the
-  header rather than transcribing it, so cgo lays out every struct.
+  header rather than transcribing it, so cgo lays out every struct and
+  every enum constant is the header's own.
   `bindings/go/tinkerpdf.go` links `target/release` with that directory as
   its run path; `go run ./cmd/smoke testdata/simple-text.pdf FACE.ttf` and
   `go run ./cmd/parity testdata/form-fields.pdf` from `bindings/go`. Every
