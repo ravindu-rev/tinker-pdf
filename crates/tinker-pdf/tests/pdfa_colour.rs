@@ -814,9 +814,11 @@ fn an_alpha_one_part_in_ten_million_from_opaque_is_opaque() {
 /// find is a silent pass with extra steps.
 #[test]
 fn every_staged_colour_rule_is_named_with_its_clause_and_its_reason() {
-    for clause in [
-        "6.2.2", "6.2.3.4", "6.2.4", "6.2.5", "6.2.8", "6.2.10", "6.4",
-    ] {
+    // 6.2.3.4 left this list when 6.2.4.4's two rules landed
+    // (`two_separations_of_one_name_with_different_transforms_are_a_finding`,
+    // `a_devicen_spot_colorant_is_described_in_its_colorants`): the clause
+    // defines the equality it asks for, which was the staged entry's reason.
+    for clause in ["6.2.2", "6.2.4", "6.2.5", "6.2.8", "6.2.10", "6.4"] {
         let found = tinker_pdf::PDFA_STAGED
             .iter()
             .find(|rule| rule.clause == clause)
@@ -1272,5 +1274,157 @@ fn an_icc_based_profile_header_is_judged_against_its_own_list() {
     assert_eq!(
         with(header_only(2, b"abst", b"GRAY")),
         [("6.2.4.2".to_string(), header("device class", "abst"))]
+    );
+}
+
+// ---- 6.2.4.4: Separation and DeviceN colour spaces ---------------------------
+
+/// A type 2 function from 0 to `c1` in RGB, as a dictionary's entries.
+fn tint(c1: &str) -> String {
+    format!("/FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [{c1}] /N 1")
+}
+
+/// The baseline painting with two colour spaces, `/A` and `/B`, as written.
+fn two_spaces(part: &str, a: &str, b: &str) -> Fixture {
+    let mut fixture = Fixture::new(part, Some("B"));
+    fixture.resources = format!("<< /ColorSpace << /A {a} /B {b} >> >>");
+    fixture.content = "/A cs 1 scn 10 10 20 20 re f /B cs 1 scn 40 40 20 20 re f".to_string();
+    fixture
+}
+
+/// ISO 19005-2 6.2.4.4, in veraPDF's statement of rule 6.2.4.4-2: "All
+/// Separation arrays … that have the same name shall have the same
+/// tintTransform and alternateSpace. In evaluating equivalence, the PDF
+/// objects shall be compared, rather than the computational result of the use
+/// of those PDF objects. Compression and whether or not an object is direct
+/// or indirect shall be ignored."
+#[test]
+fn two_separations_of_one_name_with_different_transforms_are_a_finding() {
+    let mut differing = two_spaces(
+        "2",
+        "[/Separation /Ink /DeviceRGB 7 0 R]",
+        &format!("[/Separation /Ink /DeviceRGB << {} >>]", tint("0 0 1")),
+    );
+    differing
+        .extra
+        .push((7, format!("<< {} >>", tint("1 0 0")).into_bytes()));
+    assert_eq!(
+        differing.one_finding(),
+        FindingKind::SeparationsDisagree {
+            colorant: "Ink".to_string()
+        }
+    );
+    // Part 1 states no such rule.
+    let mut part_one = differing.clone();
+    part_one.part = "1".to_string();
+    assert_eq!(part_one.findings(), Vec::<FindingKind>::new());
+
+    // A different alternate space under one tint transform is the other half
+    // of the sentence.
+    let one_function = "<< /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>";
+    let alternates = two_spaces(
+        "2",
+        &format!("[/Separation /Ink /DeviceRGB {one_function}]"),
+        &format!("[/Separation /Ink /DeviceGray {one_function}]"),
+    );
+    assert_eq!(
+        alternates.one_finding(),
+        FindingKind::SeparationsDisagree {
+            colorant: "Ink".to_string()
+        }
+    );
+}
+
+/// The twins the clause's own last sentence makes: the same function once by
+/// reference and once written in place, and a sampled function once plain and
+/// once hex-encoded, are one function. Two names are two colorants.
+#[test]
+fn the_same_transform_direct_or_indirect_or_encoded_is_the_same() {
+    let mut direct_and_indirect = two_spaces(
+        "2",
+        "[/Separation /Ink /DeviceRGB 7 0 R]",
+        &format!("[/Separation /Ink /DeviceRGB << {} >>]", tint("1 0 0")),
+    );
+    direct_and_indirect
+        .extra
+        .push((7, format!("<< {} >>", tint("1.0 0 0")).into_bytes()));
+    assert_eq!(direct_and_indirect.findings(), Vec::<FindingKind>::new());
+
+    let sampled = "/FunctionType 0 /Domain [0 1] /Range [0 1 0 1 0 1] /Size [2] \
+                   /BitsPerSample 8";
+    let mut encoded = two_spaces(
+        "2",
+        "[/Separation /Ink /DeviceRGB 7 0 R]",
+        "[/Separation /Ink /DeviceRGB 8 0 R]",
+    );
+    encoded
+        .extra
+        .push((7, stream(sampled, &[255, 255, 255, 255, 0, 0])));
+    encoded.extra.push((
+        8,
+        stream(
+            &format!("{sampled} /Filter /ASCIIHexDecode"),
+            b"FFFFFFFF0000>",
+        ),
+    ));
+    assert_eq!(encoded.findings(), Vec::<FindingKind>::new());
+
+    let two_names = two_spaces(
+        "2",
+        &format!("[/Separation /Ink /DeviceRGB << {} >>]", tint("1 0 0")),
+        &format!("[/Separation /Other /DeviceRGB << {} >>]", tint("0 0 1")),
+    );
+    assert_eq!(two_names.findings(), Vec::<FindingKind>::new());
+}
+
+/// Rule 6.2.4.4-1: "For any spot colour used in a DeviceN or NChannel colour
+/// space, an entry in the Colorants dictionary shall be present". The process
+/// colorants need none, and a `/Colorants` entry is the twin — whose own
+/// `/Separation` the consistency rule then reads ("including those in
+/// Colorants dictionaries").
+#[test]
+fn a_devicen_spot_colorant_is_described_in_its_colorants() {
+    let device_n = |attributes: &str| {
+        let mut fixture = conforming();
+        fixture.resources = format!(
+            "<< /ColorSpace << /N [/DeviceN [/Cyan /Spot] /DeviceRGB 7 0 R {attributes}] >> >>"
+        );
+        fixture.content = "/N cs 0.5 0.5 scn 10 10 50 50 re f".to_string();
+        fixture.extra.push((
+            7,
+            stream(
+                "/FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1]",
+                b"{ pop pop 0 0 0 }",
+            ),
+        ));
+        fixture
+    };
+    assert_eq!(
+        device_n("").one_finding(),
+        FindingKind::ColorantUndescribed {
+            colorant: "Spot".to_string()
+        }
+    );
+    let described = device_n(&format!(
+        "<< /Colorants << /Spot [/Separation /Spot /DeviceRGB << {} >>] >> >>",
+        tint("0 0 1")
+    ));
+    assert_eq!(described.findings(), Vec::<FindingKind>::new());
+
+    // The Colorants entry against a page-level Separation of the same name.
+    let mut against = described;
+    against.resources = against.resources.replace(
+        "/ColorSpace << /N",
+        &format!(
+            "/ColorSpace << /S [/Separation /Spot /DeviceRGB << {} >>] /N",
+            tint("1 0 0")
+        ),
+    );
+    against.content = format!("/S cs 1 scn 0 0 5 5 re f {}", against.content);
+    assert_eq!(
+        against.one_finding(),
+        FindingKind::SeparationsDisagree {
+            colorant: "Spot".to_string()
+        }
     );
 }

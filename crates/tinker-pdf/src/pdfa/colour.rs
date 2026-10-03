@@ -123,6 +123,192 @@ pub(super) fn rules(
         transparency(doc, &used, out);
     }
     undefined_operators(&used, out);
+    if part.is_some() && part != Some(Part::One) {
+        separations_agree(doc, &used, out);
+        colorants_described(doc, &used, out);
+    }
+}
+
+/// ISO 19005-2/3/4 6.2.4.4, in veraPDF's statement of rule 6.2.4.4-2: "All
+/// Separation arrays within a single PDF/A-2 file (including those in
+/// Colorants dictionaries) that have the same name shall have the same
+/// tintTransform and alternateSpace. In evaluating equivalence, the PDF
+/// objects shall be compared, rather than the computational result of the use
+/// of those PDF objects. Compression and whether or not an object is direct or
+/// indirect shall be ignored."
+///
+/// **The clause defines its own equality**, which is what `PDFA_STAGED` said
+/// this build had not written down: objects, not functions — so two sampled
+/// functions that compute the same colour from different tables are
+/// different, and the same function written once directly and once by
+/// reference, or once deflated and once not, is the same. [`same_object`] is
+/// that sentence. Part 1 states no such rule.
+fn separations_agree(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
+    let mut reported: BTreeSet<&[u8]> = BTreeSet::new();
+    for (index, (name, alternate, tint, at)) in used.separations.iter().enumerate() {
+        if reported.contains(name.as_slice()) {
+            continue;
+        }
+        let Some((_, first_alternate, first_tint, _)) = used.separations[..index]
+            .iter()
+            .find(|(other, ..)| other == name)
+        else {
+            continue;
+        };
+        if !same_object(doc, first_alternate, alternate, 0)
+            || !same_object(doc, first_tint, tint, 0)
+        {
+            reported.insert(name);
+            out.push(Raw {
+                rule: clauses::SEPARATIONS,
+                object: *at,
+                kind: FindingKind::SeparationsDisagree {
+                    colorant: String::from_utf8_lossy(name).into_owned(),
+                },
+            });
+        }
+    }
+}
+
+/// Whether two PDF objects are the same object in 6.2.4.4's sense: compared
+/// as objects, with direct against indirect and compression ignored.
+///
+/// Numbers compare by value, so `1` and `1.0` are one number. A stream
+/// compares by its dictionary less the entries that describe its encoding
+/// (`/Length`, `/Filter`, `/DecodeParms`, `/DL`) and by its decoded bytes. A
+/// comparison this build cannot finish — a stream that will not decode, a
+/// nesting past [`MAX_COMPARE_DEPTH`] — answers "the same": a finding has to
+/// be one the file shows, never one the reader failed to rule out.
+fn same_object(doc: &CosDocument, a: &Object, b: &Object, depth: u32) -> bool {
+    if depth > MAX_COMPARE_DEPTH {
+        return true;
+    }
+    if let (Some(x), Some(y)) = (a.as_objref(), b.as_objref()) {
+        if x == y {
+            return true;
+        }
+    }
+    let (left, right) = (doc.resolve(a), doc.resolve(b));
+    match (left.as_ref(), right.as_ref()) {
+        (Object::Null, Object::Null) => true,
+        (Object::Bool(x), Object::Bool(y)) => x == y,
+        (Object::Int(_) | Object::Real(_), Object::Int(_) | Object::Real(_)) => {
+            left.as_number() == right.as_number()
+        }
+        (Object::String(x), Object::String(y)) => x.bytes == y.bytes,
+        (Object::Name(x), Object::Name(y)) => x == y,
+        (Object::Array(x), Object::Array(y)) => {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y)
+                    .all(|(p, q)| same_object(doc, p, q, depth + 1))
+        }
+        (Object::Dict(x), Object::Dict(y)) => same_dict(doc, x, y, &[], depth),
+        (Object::Stream(x), Object::Stream(y)) => {
+            let encoding = [
+                doc.intern(b"Length"),
+                doc.intern(b"Filter"),
+                doc.intern(b"DecodeParms"),
+                doc.intern(b"DL"),
+            ];
+            if !same_dict(doc, &x.dict, &y.dict, &encoding, depth) {
+                return false;
+            }
+            match (a.as_objref(), b.as_objref()) {
+                (Some(x), Some(y)) => match (doc.stream_decoded(x), doc.stream_decoded(y)) {
+                    (Ok(p), Ok(q)) => p == q,
+                    _ => true,
+                },
+                _ => true,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Two dictionaries with the same keys, `ignored` aside, and the same values.
+fn same_dict(
+    doc: &CosDocument,
+    x: &Dict,
+    y: &Dict,
+    ignored: &[tinker_pdf_cos::Name],
+    depth: u32,
+) -> bool {
+    let keys = |d: &Dict| -> BTreeSet<tinker_pdf_cos::Name> {
+        d.entries()
+            .iter()
+            .map(|(key, _)| *key)
+            .filter(|key| !ignored.contains(key))
+            .collect()
+    };
+    let (left, right) = (keys(x), keys(y));
+    left == right
+        && left.iter().all(|key| match (x.get(*key), y.get(*key)) {
+            (Some(p), Some(q)) => same_object(doc, p, q, depth + 1),
+            _ => false,
+        })
+}
+
+/// The process colorants a `/DeviceN` space may name without describing
+/// them: DeviceCMYK's four (ISO 32000-1 8.6.6.5), and `/None`.
+const PROCESS_COLORANTS: &[&[u8]] = &[b"Cyan", b"Magenta", b"Yellow", b"Black", b"None"];
+
+/// ISO 19005-2/3/4 6.2.4.4, in veraPDF's statement of rule 6.2.4.4-1: "For
+/// any spot colour used in a DeviceN or NChannel colour space, an entry in
+/// the Colorants dictionary shall be present." A spot colour is a colorant
+/// that is not a process one: DeviceCMYK's four, `/None`, and the components
+/// an `NChannel` space's `/Process` dictionary names — the same reading the
+/// writer's `ArchivalRefusal::UndescribedColorant` refuses at the call.
+fn colorants_described(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
+    let mut reported: BTreeSet<Vec<u8>> = BTreeSet::new();
+    for (members, at) in &used.device_n {
+        let names = members.get(1).map(|n| doc.resolve(n));
+        let Some(names) = names.as_deref().and_then(Object::as_array) else {
+            continue;
+        };
+        let attributes = members.get(4).map(|a| doc.resolve(a));
+        let attributes = attributes.as_deref().and_then(Object::as_dict);
+        let colorants = attributes.map(|a| doc.resolve_key(a, doc.intern(b"Colorants")));
+        let colorants = colorants.as_deref().and_then(Object::as_dict);
+        let process: Vec<Vec<u8>> = attributes
+            .map(|a| doc.resolve_key(a, doc.intern(b"Process")))
+            .as_deref()
+            .and_then(Object::as_dict)
+            .map(|p| doc.resolve_key(p, doc.intern(b"Components")))
+            .as_deref()
+            .and_then(Object::as_array)
+            .map(|components| {
+                components
+                    .iter()
+                    .filter_map(|c| doc.resolve(c).as_name())
+                    .filter_map(|n| doc.name_bytes(n).map(|b| b.to_vec()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for name in names {
+            let Some(name) = doc.resolve(name).as_name() else {
+                continue;
+            };
+            let Some(bytes) = doc.name_bytes(name) else {
+                continue;
+            };
+            if PROCESS_COLORANTS.contains(&bytes.as_ref())
+                || process.iter().any(|p| p.as_slice() == bytes.as_ref())
+                || colorants.is_some_and(|c| c.contains_key(name))
+                || reported.contains(bytes.as_ref())
+            {
+                continue;
+            }
+            reported.insert(bytes.to_vec());
+            out.push(Raw {
+                rule: clauses::SEPARATIONS,
+                object: *at,
+                kind: FindingKind::ColorantUndescribed {
+                    colorant: String::from_utf8_lossy(&bytes).into_owned(),
+                },
+            });
+        }
+    }
 }
 
 /// ISO 19005-1 6.2.10, ISO 19005-2/3/4 6.2.2: "Content streams shall not
@@ -428,7 +614,22 @@ struct Used {
     /// Operators no table of ISO 32000 defines, each with the first object
     /// whose content used it.
     undefined: BTreeMap<Vec<u8>, ObjRef>,
+    /// Every `/Separation` array met — in a space the pages use, or in a
+    /// `/DeviceN` space's `/Colorants` — as `(name, alternate, tint transform,
+    /// where)`.
+    separations: Vec<(Vec<u8>, Object, Object, Option<ObjRef>)>,
+    /// Every `/DeviceN` space met, as its array and where.
+    device_n: Vec<(Vec<Object>, Option<ObjRef>)>,
 }
+
+/// How many `/Separation` and `/DeviceN` arrays one document contributes to
+/// the consistency rules.
+const MAX_SEPARATIONS: usize = 256;
+
+/// How deep two tint transforms are compared before the comparison gives up
+/// and calls them the same — a stitching function nests functions, and a
+/// nesting deeper than this is not a colour.
+const MAX_COMPARE_DEPTH: u32 = 16;
 
 /// Every operator ISO 32000-1 Annex A Table A.1 lists — seventy-three, the
 /// same set PDF Reference 1.4 (ISO 19005-1's reference) and ISO 32000-2
@@ -625,12 +826,33 @@ fn colour_space(
                 // over `DeviceCMYK` uses `DeviceCMYK`, which is the reading
                 // that makes 6.2.3.4's fixtures make sense.
                 b"Separation" => {
+                    record_separation(doc, members, at, used);
                     if let Some(alternate) = members.get(2) {
                         let resolved = doc.resolve(alternate);
                         colour_space(doc, &resolved, at, used, depth + 1);
                     }
                 }
                 b"DeviceN" => {
+                    if used.device_n.len() < MAX_SEPARATIONS {
+                        used.device_n.push((members.clone(), at));
+                    }
+                    // 6.2.4.4: "All Separation arrays … (including those in
+                    // Colorants dictionaries)".
+                    let attributes = members.get(4).map(|a| doc.resolve(a));
+                    if let Some(colorants) = attributes
+                        .as_deref()
+                        .and_then(Object::as_dict)
+                        .map(|a| doc.resolve_key(a, doc.intern(b"Colorants")))
+                    {
+                        if let Some(colorants) = colorants.as_dict() {
+                            for (_, value) in colorants.entries() {
+                                let resolved = doc.resolve(value);
+                                if let Some(separation) = resolved.as_array() {
+                                    record_separation(doc, separation, at, used);
+                                }
+                            }
+                        }
+                    }
                     if let Some(alternate) = members.get(2) {
                         let resolved = doc.resolve(alternate);
                         colour_space(doc, &resolved, at, used, depth + 1);
@@ -656,6 +878,30 @@ fn colour_space(
             }
         }
         _ => {}
+    }
+}
+
+/// One `/Separation` array, kept for the consistency rule.
+fn record_separation(doc: &CosDocument, members: &[Object], at: Option<ObjRef>, used: &mut Used) {
+    if used.separations.len() >= MAX_SEPARATIONS {
+        return;
+    }
+    let is_separation = members
+        .first()
+        .and_then(|first| doc.resolve(first).as_name())
+        .and_then(|name| doc.name_bytes(name))
+        .is_some_and(|name| name.as_ref() == b"Separation");
+    let (Some(name), Some(alternate), Some(tint)) =
+        (members.get(1), members.get(2), members.get(3))
+    else {
+        return;
+    };
+    let Some(name) = doc.resolve(name).as_name().and_then(|n| doc.name_bytes(n)) else {
+        return;
+    };
+    if is_separation {
+        used.separations
+            .push((name.to_vec(), alternate.clone(), tint.clone(), at));
     }
 }
 

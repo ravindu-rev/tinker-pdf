@@ -439,6 +439,15 @@ pub(crate) mod clauses {
 
     // ---- the colour group (milestone 5) ----------------------------------
 
+    /// Separation and DeviceN colour spaces: colorants described, and every
+    /// `/Separation` of one name the same (6.2.4.4 in parts 2 to 4; part 1
+    /// states neither rule, so its arm is never reached).
+    pub(crate) const SEPARATIONS: ClauseTable = ClauseTable {
+        one: "6.2.3.4",
+        two_three: "6.2.4.4",
+        four: "6.2.4.4",
+    };
+
     /// Content streams: the operators they may use (6.2.10 in part 1, 6.2.2
     /// in parts 2 to 4, as veraPDF's published rules number them).
     pub(crate) const CONTENT_STREAMS: ClauseTable = ClauseTable {
@@ -672,17 +681,6 @@ pub const STAGED: &[StagedRule] = &[
                   one of them would report conforming files, so a profile \
                   this build cannot read leaves the intent's colour space \
                   unknown and the rules that need it do not fire",
-    },
-    StagedRule {
-        clause: "6.2.3.4",
-        rule: "Separation and DeviceN: the tint transform function, and two \
-               colourants of the same name having the same transform",
-        because: "the alternate space is read and judged, which is the half \
-                  that decides whether the colour can be reproduced. The tint \
-                  transform is a PDF function, and comparing two of them for \
-                  equality means comparing sampled or PostScript-calculator \
-                  functions - a definition of equality this build has not \
-                  written down",
     },
     StagedRule {
         clause: "6.2.4",
@@ -1621,6 +1619,18 @@ pub enum FindingKind {
         /// What the `/RoleMap` made of it, which equals `declared` when the
         /// role map does not mention it.
         mapped: String,
+    },
+    /// Two `/Separation` arrays of one colorant name with different
+    /// alternate spaces or tint transforms, compared as objects (6.2.4.4).
+    SeparationsDisagree {
+        /// The colorant.
+        colorant: String,
+    },
+    /// A spot colorant a `/DeviceN` space names that its `/Colorants`
+    /// dictionary does not describe (6.2.4.4).
+    ColorantUndescribed {
+        /// The colorant.
+        colorant: String,
     },
     /// An ICC profile whose header says it is not a profile the clause
     /// admits: its version, its device class or its data colour space (the

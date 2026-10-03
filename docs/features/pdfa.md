@@ -79,7 +79,10 @@ never happens.
   refuses is still judged), device colour spaces against that profile's own
   colour space, an `ICCBased` stream's `/N` against its profile's channel
   count and its header against the wider list `ICCBased` admits, the four
-  rendering intents, part 1's outright
+  rendering intents, 6.2.4.4's `/Separation` consistency (one name, one
+  alternate and one tint transform, compared as objects — direct against
+  indirect and compression ignored, as the clause says) and its `/DeviceN`
+  colorants described, part 1's outright
   prohibition on transparency, and the graphics clause's operator list
   (6.2.10 / 6.2.2): an operator outside ISO 32000-1 Table A.1's seventy-three
   — `PS` among them — is a finding inside `BX`/`EX` or not, naming the page,
@@ -178,7 +181,7 @@ ISO 19005-1 6.1.2 says the header consists of `%PDF-1.n`, one fixture carries
 Every disagreement has a row in `crates/tinker-pdf/tests/pdfa_ledger.tsv`
 carrying a class — our bug, a staged rule, or a reading — and a **mandatory
 reason**; a row without one is refused by the reader that loads the file, and a
-row whose subject no longer disagrees fails as stale. `PDFA_STAGED` names 39
+row whose subject no longer disagrees fails as stale. `PDFA_STAGED` names 38
 rules this build knows it does not run, each with its clause and what it is
 waiting for, and a `staged` ledger row has to point at one.
 
