@@ -648,3 +648,63 @@ fn a_cid_keyed_program_follows_a_non_identity_cmap() {
     drew_box(&page, 300.0, "code 0x41 through CID 11");
     assert!(!page.warnings.contains(&RenderWarning::UnreadableFont));
 }
+
+/// The CID-keyed program of the two tests above, as a writer is handed it.
+fn cid_keyed_font() -> Vec<u8> {
+    Program {
+        strings: vec![b"Adobe".to_vec(), b"Identity".to_vec()],
+        charset: vec![10, 11, 12],
+        charstrings: vec![vec![14], box_glyph(600), box_glyph(300), box_glyph(450)],
+        cid: true,
+        ..Program::default()
+    }
+    .build()
+}
+
+/// A one-page document that **this engine's writer** made, drawing `glyph` by
+/// index under a composite font over `program`.
+fn written(program: &[u8], glyph: u16, text: &str) -> Vec<u8> {
+    let mut builder = tinker_pdf::DocumentBuilder::new();
+    assert!(
+        builder.add_cid_font(b"C0", b"Fixture", program),
+        "the program registers as a composite font"
+    );
+    builder.add_page(200.0, 100.0, |page| {
+        assert!(page.glyphs(
+            b"C0",
+            48.0,
+            20.0,
+            30.0,
+            &[tinker_pdf::Glyph { id: glyph, text }]
+        ));
+    });
+    builder.finish_reporting().0
+}
+
+/// The writer's half of the two tests above: a composite font over a
+/// CID-keyed CFF, written by `DocumentBuilder::add_cid_font` and drawing glyph
+/// 2 by index, renders glyph 2 and extracts the text it was given.
+///
+/// Glyph 2 is CID 11, so the string has to say 11: an index written as the
+/// code is CID 2, which this font does not carry, and draws `.notdef`. Both
+/// shapes of the program — bare under `/CIDFontType0C`, and the `CFF ` table
+/// of an `OTTO` face — are drawn, because until October 2026 the bare one was
+/// refused and the wrapped one went out as a CIDFontType2 over the index.
+#[test]
+fn a_cid_keyed_program_the_writer_embedded_draws_the_glyph_it_was_given() {
+    for (what, program) in [
+        ("bare", cid_keyed_font()),
+        ("in an OTTO wrapper", otto(&cid_keyed_font())),
+    ] {
+        let bytes = written(&program, 2, "B");
+        let page = render(bytes.clone());
+        drew_box(&page, 300.0, what);
+        assert!(
+            !page.warnings.contains(&RenderWarning::UnreadableFont),
+            "{what}: every CID resolved"
+        );
+        let doc = Document::open(bytes).expect("it opens");
+        let text = doc.page(0).expect("a page").text().plain_text();
+        assert_eq!(text.trim(), "B", "{what}: /ToUnicode is keyed by the CID");
+    }
+}

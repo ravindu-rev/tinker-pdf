@@ -123,12 +123,26 @@ CIDFontType0 the CFF-based one and Table 126's note on `/Subtype /OpenType`
 admits that wrapper under a CIDFontType2 only when it carries `glyf`. Until
 October 2026 an `OpenType/CFF` face went out as a CIDFontType2 with
 `/CIDToGIDMap /Identity` — the pairing Table 126 rules out
-(`a_composite_font_over_a_cff_face_is_subsetted` pins the correction). That
-same pairing had let a **CID-keyed** CFF in an OpenType wrapper through, where
-the bare one was refused: under the CIDFontType0 Table 126 does allow, a page's
-glyph index is read as a CID through the charset, so the wrapped program is
-refused now for the bare one's reason
-(`a_cid_keyed_cff_in_an_opentype_wrapper_is_refused_by_the_composite_path`).
+(`a_composite_font_over_a_cff_face_is_subsetted` pins the correction).
+
+A **CID-keyed** CFF — bare, or in an OpenType wrapper — goes down the
+composite path too. 9.7.4.2 reads a CIDFontType0's CID through the program's
+charset when the program is CID-keyed, and `/Identity-H` makes the code the
+CID, so the code a glyph is written as is **the CID its charset gives it**:
+`add_cid_font` reads the charset once (`Cff::cid_for_gid`), and
+`PageBuilder::glyphs` and `DocumentBuilder::glyph_run` write each glyph's CID
+rather than its index. `/W` and `/ToUnicode` are keyed by that code and
+measured at the glyph it selects, and a run's pen advances by the same width,
+so the `TJ` adjustments and `/W` still cannot disagree. A glyph past the end of
+the font goes out as CID 0, `.notdef`, rather than as its own number, which
+the charset may give to a glyph that exists. A charset that is **not
+one-to-one** — two glyphs claiming one CID, a glyph after `.notdef` claiming
+CID 0, a charset short of the glyph count — is refused whole, because a glyph
+whose CID another glyph also claims is one no code reaches. Until October 2026
+the bare program was refused and the wrapped one went out as a CIDFontType2
+over the index, which this engine's own reader drew as a CID the font did not
+carry (`a_cid_keyed_cff_in_an_opentype_wrapper_writes_each_glyph_s_cid`,
+`a_cid_keyed_program_the_writer_embedded_draws_the_glyph_it_was_given`).
 
 `set_subset_fonts` (on by default) cuts each program down to the glyphs the
 pages drew, and **glyph identifiers are never renumbered** — which is what
@@ -730,7 +744,7 @@ could show was right.
 | Shaping **while reading a PDF**: `TJ` arrays are honored as written | none — the producer positioned every glyph and re-shaping them would be wrong | Permanent, and the only half of the old non-goal that survived; the producing half is `tinker-pdf-shape`, below | [shaping](../design/shaping.md) |
 | A CFF whose `callsubr` operand is not the token before the call, or that calls a subroutine it does not carry, or whose subroutine calls itself, or that declares `CharstringType 1` | `SubsetRefusal::ProgramNotRebuildable`; the whole face is embedded | Each needs the subsetter to invent what the font meant, and a broken subset renders *almost* right | this page |
 | A CFF subset that comes out no smaller than the face | `SubsetRefusal::SubsetNotSmaller`; the whole face is embedded | A producer's own subset has nothing left to remove, and the face is also the one it tested | this page |
-| A **CID-keyed** CFF under `add_cid_font`, bare or in an `OpenType` wrapper | `add_cid_font` returns false | Its charset maps a CID onto a glyph and the two are different numbers; `PageBuilder::glyphs` addresses glyphs, and `/Identity-H` would make every one of them a CID (9.7.4.2) | this page |
+| A **CID-keyed** CFF under `add_cid_font` whose charset is not one-to-one | `add_cid_font` returns false | 9.7.4.2 reads a CID through the charset, which answers with the first glyph claiming it, so a glyph whose CID another also claims is one no code reaches. A one-to-one charset is accepted and each glyph written as its CID (October 2026) | this page |
 | Symbol and ZapfDingbats when nothing embeds them | `RenderWarning::UnreadableFont`, in a `bundled-fonts` build too | Liberation has no equivalent, and a text face drawn for a symbolic font puts letters where the document meant arrows | this page |
 | A CID the descendant font does not carry | `.notdef` drawn + `RenderWarning::UnreadableFont`; extraction: `TextWarning::UnknownFont` | Drawing whichever glyph the code happens to number is the invisible failure | this page |
 | A predefined CMap name outside Adobe's registry | `WarningKind::PredefinedCMapUnknown` | A guessed codespace mis-splits the string, so glyphs *and* advances go wrong silently | [rulings](../rulings.md) ruling 10 |
@@ -793,7 +807,9 @@ could show was right.
   eight must be refused, both asserted by number; 8 509 prefixes and 11 988
   single-byte flips reach an answer rather than a panic (ruling 1).
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
-  code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect.
+  code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
+  and a CID-keyed program this engine's writer embedded drawing the glyph it
+  was given, bare and in an `OTTO` wrapper.
 - `crates/tinker-pdf-font/src/cff_subset/tests.rs` — 21 tests over fonts built
   byte by byte: local and global subroutine renumbering, a global subroutine
   reached from two Font DICTs, `hintmask` counting stems a subroutine declared,
@@ -807,7 +823,10 @@ could show was right.
 - `crates/tinker-pdf-cos/tests/cff_subsetting.rs` — the writer end: the 9.6.4
   tag, the Table 126 descriptor entry for each of the three shapes, the
   CIDFontType0 descendant over a `CFF ` table, `/W` from the original
-  program, and each `SubsetRefusal` reported by name.
+  program, each `SubsetRefusal` reported by name, and a CID-keyed program's
+  glyphs written as their CIDs — in the string, `/W` (sorted by CID over a
+  charset that runs backwards) and `/ToUnicode` — with a charset two glyphs
+  share refused.
 - `crates/tinker-pdf/tests/cff_subset_census.rs` — every CFF face in the
   fetched corpora cut to nine glyphs: 480 files, 3 313 faces (551 CID-keyed,
   2 735 bare simple, 27 `OpenType/CFF`), 3 311 rebuilt and 2 refused, 25.3 MB

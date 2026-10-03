@@ -21,6 +21,22 @@
 //! | an `OpenType/CFF` descendant is a CIDFontType2 again | 1 |
 //! | a CID-keyed CFF in an OpenType wrapper is let through | 1 |
 //! | `/CIDToGIDMap` is written on every descendant | 1 |
+//!
+//! And a CID-keyed CFF's glyphs written as the CIDs their charset gives them
+//! (9.7.4.2), over the same three suites:
+//!
+//! | Injection | Caught by |
+//! | --- | --- |
+//! | a glyph's code is its index, as before | 4 |
+//! | the OpenType wrapper's charset is not consulted | 2 |
+//! | a charset two glyphs share is accepted | 1 |
+//! | `/W` measures a CID at the glyph of the same number | 2 |
+//! | `/W` is keyed by glyph index | 2 |
+//! | `/ToUnicode` is keyed by glyph index | 2 |
+//! | a run's pen advances by the glyph of the code's number | 1 |
+//! | a glyph past the charset keeps its own number | 1 |
+//! | `glyph_run` writes the index | 1 |
+//! | `PageBuilder::glyphs` writes the index | 3 |
 
 use tinker_pdf_cos::{
     CosDocument, Dict, DocumentBuilder, EmbeddedWhole, Glyph, Object, SubsetRefusal,
@@ -823,39 +839,262 @@ fn cid_keyed_program() -> Vec<u8> {
     program
 }
 
-/// A **CID-keyed** CFF cannot go down the composite path: its charset maps a
-/// CID onto a glyph and the two are different numbers, while
-/// `PageBuilder::glyphs` addresses glyphs and `/Identity-H` would make every
-/// one of those numbers a CID.
-#[test]
-fn a_cid_keyed_bare_cff_is_refused_by_the_composite_path() {
-    let program = cid_keyed_program();
-
-    let mut builder = DocumentBuilder::new();
-    assert!(
-        !builder.add_cid_font(b"C0", b"Fixture", &program),
-        "9.7.4.2: the CID is not the glyph index for a CID-keyed CFF"
-    );
-    // And the simple path still takes it, so the refusal is about the
-    // composite semantics and not about the bytes.
-    assert!(builder.add_embedded_font(b"F0", b"Fixture", &program));
+/// The CID-keyed fixture with its charset rewritten: glyph `g` carries
+/// `cid(g)`. Format 0, so every entry is two bytes in place and nothing moves.
+fn recharted(cid: impl Fn(u16) -> u16) -> Vec<u8> {
+    let mut program = cid_keyed_program();
+    // Format 0, then SIDs 34, 35, 36 as the fixture wrote them.
+    let start = [0u8, 0, 34, 0, 35, 0, 36];
+    let at = program
+        .windows(start.len())
+        .position(|w| w == start)
+        .expect("the charset is in the file")
+        + 1;
+    for glyph in 1..GLYPHS as u16 {
+        let slot = at + usize::from(glyph - 1) * 2;
+        program[slot..slot + 2].copy_from_slice(&cid(glyph).to_be_bytes());
+    }
+    program
 }
 
-/// The same CID-keyed program inside an `OTTO` wrapper is refused too.
-///
-/// *Since October 2026*: it used to be let through as a CIDFontType2 with
-/// `/CIDToGIDMap /Identity`, which Table 126 does not allow over a `CFF `
-/// table, and under the CIDFontType0 it does allow the index a page writes is
-/// read as a CID through the charset — glyph 4 drew CID 4, which this font
-/// does not carry — exactly as the bare program's would be.
-#[test]
-fn a_cid_keyed_cff_in_an_opentype_wrapper_is_refused_by_the_composite_path() {
-    let program = otto(&cid_keyed_program());
+/// The page's content stream, as text.
+fn content(doc: &CosDocument) -> String {
+    let pages = tinker_pdf_cos::pages::collect(doc);
+    let page = pages.first().expect("a page");
+    String::from_utf8_lossy(&tinker_pdf_cos::pages::content_bytes(doc, page)).into_owned()
+}
+
+/// `/W`, flattened to its numbers.
+fn widths(doc: &CosDocument, cid: &Dict) -> Vec<f64> {
+    fn flatten(doc: &CosDocument, value: &Object, out: &mut Vec<f64>) {
+        let value = doc.resolve(value);
+        match value.as_array() {
+            Some(items) => {
+                for item in items {
+                    flatten(doc, item, out);
+                }
+            }
+            None => out.push(value.as_number().expect("a number")),
+        }
+    }
+    let mut out = Vec::new();
+    flatten(doc, &doc.resolve_key(cid, doc.intern(b"W")), &mut out);
+    out
+}
+
+/// The `/ToUnicode` stream of a font, as text.
+fn to_unicode(doc: &CosDocument, font: &Dict) -> String {
+    let reference = font
+        .get_ref(doc.intern(b"ToUnicode"))
+        .expect("a /ToUnicode stream");
+    String::from_utf8_lossy(&doc.stream_decoded(reference).expect("it decodes")).into_owned()
+}
+
+/// A one-page document drawing `drawn` with the program under `C0`, through
+/// [`tinker_pdf_cos::PageBuilder::glyphs`].
+fn composite(program: &[u8], drawn: &[Glyph<'_>]) -> CosDocument {
     let mut builder = DocumentBuilder::new();
-    assert!(
-        !builder.add_cid_font(b"C0", b"Fixture", &program),
-        "9.7.4.2: the CID is not the glyph index for a CID-keyed CFF"
+    assert!(builder.add_cid_font(b"C0", b"Fixture", program));
+    builder.add_page(200.0, 100.0, |page| {
+        assert!(page.glyphs(b"C0", 24.0, 20.0, 40.0, drawn));
+    });
+    let (bytes, _) = builder.finish_reporting();
+    CosDocument::open(bytes).expect("the document opens")
+}
+
+/// A **CID-keyed** CFF under the composite path writes each glyph as the CID
+/// its charset gives it, because 9.7.4.2 reads a CIDFontType0's CID through
+/// that charset and `/Identity-H` makes the code the CID.
+///
+/// The fixture's glyph `g` carries CID `33 + g`, so glyphs 4, 9 and 20 are
+/// CIDs 37, 42 and 53 — in the string, in `/W` and in `/ToUnicode` alike, and
+/// the embedded program still answers each CID with the glyph that was asked
+/// for.
+///
+/// *Since October 2026*: this program used to be refused, because the glyph
+/// index was all a page could write.
+#[test]
+fn a_cid_keyed_bare_cff_writes_each_glyph_s_cid() {
+    let program = cid_keyed_program();
+    let doc = composite(
+        &program,
+        &[
+            Glyph { id: 4, text: "D" },
+            Glyph { id: 9, text: "I" },
+            Glyph { id: 20, text: "T" },
+        ],
     );
+
+    assert!(
+        content(&doc).contains("<0025002A0035> Tj"),
+        "the CIDs, not the indices: {}",
+        content(&doc)
+    );
+
+    let font = page_font(&doc, b"C0");
+    let cid = descendant(&doc, &font);
+    assert_eq!(
+        name_of(&doc, &cid, b"Subtype").as_deref(),
+        Some(&b"CIDFontType0"[..])
+    );
+    assert!(!cid.contains_key(doc.intern(b"CIDToGIDMap")));
+    let (embedded_program, key, subtype) = embedded(&doc, b"C0");
+    assert_eq!(key, b"FontFile3");
+    assert_eq!(subtype.as_deref(), Some(&b"CIDFontType0C"[..]));
+
+    // Each CID reaches the glyph it was written for, in what was embedded.
+    let written = tinker_pdf_font::Cff::parse(&embedded_program).expect("it parses");
+    for (cid, glyph) in [(37, 4), (42, 9), (53, 20)] {
+        assert_eq!(written.gid_for_cid(cid), Some(glyph), "CID {cid}");
+    }
+    outlines_agree_by_cid(&program, &embedded_program, &[37, 42, 53]);
+
+    // `/W` keyed by CID: three runs, because 37, 42 and 53 are not adjacent.
+    assert_eq!(widths(&doc, &cid), [37.0, 600.0, 42.0, 600.0, 53.0, 600.0]);
+    let cmap = to_unicode(&doc, &font);
+    for entry in ["<0025> <0044>", "<002A> <0049>", "<0035> <0054>"] {
+        assert!(cmap.contains(entry), "{entry} in {cmap}");
+    }
+    assert!(
+        !cmap.contains("<0004>"),
+        "no entry keyed by an index: {cmap}"
+    );
+}
+
+/// Every CID in `cids` draws in `subset` what it draws in `original`.
+#[track_caller]
+fn outlines_agree_by_cid(original: &[u8], subset: &[u8], cids: &[u32]) {
+    let before = tinker_pdf_font::Cff::parse(original).expect("the original parses");
+    let after = tinker_pdf_font::Cff::parse(subset).expect("the subset parses");
+    for &cid in cids {
+        let glyph = |cff: &tinker_pdf_font::Cff<'_>| {
+            let glyph = cff.gid_for_cid(cid).expect("the CID is carried");
+            cff.outline(glyph).expect("an outline").segments
+        };
+        assert_eq!(
+            glyph(&before),
+            glyph(&after),
+            "CID {cid} draws something else"
+        );
+    }
+}
+
+/// The same program inside an `OTTO` wrapper, with a charset that runs
+/// **backwards** — glyph `g` is CID `100 − g` — so the order of the CIDs is
+/// not the order of the glyphs and `/W` has to be sorted by the code to be a
+/// width array at all.
+///
+/// The widths are `hmtx`'s, `500 + g`, so each CID's width says which glyph
+/// it was measured at. *Since October 2026*: this used to go out as a
+/// CIDFontType2 over the glyph indices, and this engine's reader drew CID 4 —
+/// a CID the font does not carry — where glyph 4 was asked for.
+#[test]
+fn a_cid_keyed_cff_in_an_opentype_wrapper_writes_each_glyph_s_cid() {
+    let program = otto(&recharted(|glyph| 100 - glyph));
+    let doc = composite(
+        &program,
+        &[
+            Glyph { id: 4, text: "D" },
+            Glyph { id: 9, text: "I" },
+            Glyph { id: 20, text: "T" },
+        ],
+    );
+
+    assert!(
+        content(&doc).contains("<0060005B0050> Tj"),
+        "CIDs 96, 91 and 80: {}",
+        content(&doc)
+    );
+    let font = page_font(&doc, b"C0");
+    let cid = descendant(&doc, &font);
+    assert_eq!(
+        name_of(&doc, &cid, b"Subtype").as_deref(),
+        Some(&b"CIDFontType0"[..])
+    );
+    let (embedded_program, key, subtype) = embedded(&doc, b"C0");
+    assert_eq!(key, b"FontFile3");
+    assert_eq!(subtype.as_deref(), Some(&b"OpenType"[..]));
+    let written = cff_of(&embedded_program);
+    let written = tinker_pdf_font::Cff::parse(&written).expect("it parses");
+    for (cid, glyph) in [(96, 4), (91, 9), (80, 20)] {
+        assert_eq!(written.gid_for_cid(cid), Some(glyph), "CID {cid}");
+    }
+
+    assert_eq!(
+        widths(&doc, &cid),
+        [80.0, 520.0, 91.0, 509.0, 96.0, 504.0],
+        "sorted by CID, each measured at its own glyph"
+    );
+    let cmap = to_unicode(&doc, &font);
+    for entry in ["<0060> <0044>", "<005B> <0049>", "<0050> <0054>"] {
+        assert!(cmap.contains(entry), "{entry} in {cmap}");
+    }
+}
+
+/// [`DocumentBuilder::glyph_run`] writes the same CIDs, and places each glyph
+/// with the width `/W` gives **that CID** — so a run drawn at the font's own
+/// advances needs no adjustment between glyphs, and a pen measured at any
+/// other glyph would put a number in the `TJ` array.
+#[test]
+fn a_glyph_run_over_a_cid_keyed_cff_writes_cids_at_their_own_widths() {
+    let program = otto(&recharted(|glyph| 100 - glyph));
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_cid_font(b"C0", b"Fixture", &program));
+    let size = 10.0;
+    let placed = [(4u16, "D", 0.0), (9, "I", 5.04), (20, "T", 5.04 + 5.09)];
+    let glyphs: Vec<tinker_pdf_cos::PlacedGlyph<'_>> = placed
+        .iter()
+        .map(|(id, text, x)| tinker_pdf_cos::PlacedGlyph {
+            glyph: Glyph { id: *id, text },
+            x: *x,
+            rise: 0.0,
+        })
+        .collect();
+    let mut run = Vec::new();
+    assert!(builder.glyph_run(
+        &mut run,
+        b"C0",
+        size,
+        [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        &glyphs
+    ));
+    let run = String::from_utf8(run).expect("operators are text");
+    assert!(run.contains("[<0060><005B><0050>] TJ"), "{run}");
+}
+
+/// A glyph past the end of a CID-keyed font is one it does not have, and its
+/// code is CID 0 — `.notdef`, what an index past a TrueType font's last glyph
+/// draws — rather than its own number: CID 40 is glyph 7 in this charset, so
+/// writing the index would draw a letter nobody asked for.
+#[test]
+fn a_glyph_the_cid_keyed_font_does_not_carry_is_written_as_notdef() {
+    let program = cid_keyed_program();
+    let doc = composite(
+        &program,
+        &[Glyph { id: 40, text: "?" }, Glyph { id: 1, text: "A" }],
+    );
+    assert!(content(&doc).contains("<00000022> Tj"), "{}", content(&doc));
+}
+
+/// A CID-keyed charset that is not **one-to-one** is refused whole: a glyph
+/// whose CID another glyph also claims is one no code can reach, because
+/// 9.7.4.2 reads the CID through the charset and the charset answers with the
+/// first. The same holds for a glyph after `.notdef` claiming CID 0.
+#[test]
+fn a_cid_keyed_charset_two_glyphs_share_is_refused_by_the_composite_path() {
+    let shared = recharted(|glyph| if glyph == 5 { 37 } else { 33 + glyph });
+    let parsed = tinker_pdf_font::Cff::parse(&shared).expect("it parses");
+    assert_eq!(parsed.gid_for_cid(37), Some(4), "glyph 5 is unreachable");
+
+    let mut builder = DocumentBuilder::new();
+    assert!(!builder.add_cid_font(b"C0", b"Fixture", &shared));
+    let zero = recharted(|glyph| if glyph == 7 { 0 } else { 33 + glyph });
+    assert!(!builder.add_cid_font(b"C1", b"Fixture", &zero));
+    // The simple path still takes both: the refusal is about what a composite
+    // font's codes can reach, not about the bytes.
+    assert!(builder.add_embedded_font(b"F0", b"Fixture", &shared));
+    // And the one-to-one charset beside them is accepted.
+    assert!(builder.add_cid_font(b"C2", b"Fixture", &cid_keyed_program()));
 }
 
 /// Turning subsetting off is the caller's stated intent, not a capability this

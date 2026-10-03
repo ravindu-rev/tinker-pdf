@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 
 use tinker_pdf_filters::CcittParams;
 
@@ -1480,11 +1481,17 @@ pub fn subset_tag(program: &[u8]) -> Vec<u8> {
     tag
 }
 
-/// `/W` for the glyphs a document drew, from the font's own `hmtx` (9.7.4.3).
+/// `/W` for the codes a document drew, from the font's own `hmtx` (9.7.4.3).
 ///
 /// Table 116's `c [w1 w2 ...]` form, one run per stretch of consecutive CIDs,
-/// so a document drawing glyphs 5, 6, 7 and 40 writes two runs rather than
+/// so a document drawing CIDs 5, 6, 7 and 40 writes two runs rather than
 /// four singletons.
+///
+/// Keyed by the **code** — the CID, under `/Identity-H` — and measured at the
+/// glyph that code selects, which [`FontProgram::glyph_for_code`] says. For
+/// every program but a CID-keyed CFF the two are one number; for that one the
+/// charset stands between them, and a `/W` keyed by glyph index would hand
+/// each CID the width of whichever glyph shares its number.
 ///
 /// `None` when the font states no advances at all — no `hmtx`, or an `hhea`
 /// claiming no metrics. That is the one case where a width array would have to
@@ -1495,7 +1502,7 @@ pub fn subset_tag(program: &[u8]) -> Vec<u8> {
 fn width_array(program: &FontProgram<'_>, ids: impl Iterator<Item = u16>) -> Option<Vec<Object>> {
     let mut runs: Vec<(u16, Vec<Object>)> = Vec::new();
     for id in ids {
-        let width = program.width(id)?.round();
+        let width = program.width(program.glyph_for_code(id))?.round();
         match runs.last_mut() {
             // `ids` arrives from a `BTreeMap`'s keys, so it is sorted and
             // duplicate-free; a run therefore continues exactly when the next
@@ -1552,12 +1559,54 @@ impl<'a> FontProgram<'a> {
         tinker_pdf_font::Cff::parse(program).map(FontProgram::Bare)
     }
 
-    /// Whether the program is a CID-keyed CFF, whose charset maps a CID onto a
-    /// glyph rather than the two being the same number.
-    fn is_cid_keyed(&self) -> bool {
+    /// The CID-keyed CFF whose charset stands between a composite font's CID
+    /// and its glyph, when there is one (9.7.4.2).
+    ///
+    /// A CID-keyed program, bare or the `CFF ` table of an OpenType face,
+    /// under the CIDFontType0 both are written as. Every other shape makes
+    /// the CID the glyph index — `/CIDToGIDMap /Identity` over a TrueType,
+    /// and a CFF that is not CID-keyed under 9.7.4.2's own rule — so there
+    /// is nothing to translate.
+    fn cid_keyed(&self) -> Option<&tinker_pdf_font::Cff<'a>> {
         match self {
-            FontProgram::TrueType(_) => false,
-            FontProgram::OpenType(_, cff) | FontProgram::Bare(cff) => cff.is_cid(),
+            FontProgram::OpenType(_, cff) | FontProgram::Bare(cff) if cff.is_cid() => Some(cff),
+            _ => None,
+        }
+    }
+
+    /// The code a composite font over this program writes for each glyph.
+    ///
+    /// `None` when a CID-keyed charset is not **one-to-one**: two glyphs
+    /// claiming one CID, a glyph after `.notdef` claiming CID 0, or a charset
+    /// that stops short of the glyph count. 9.7.4.2 reads a CID through the
+    /// charset, so a glyph whose CID another glyph also claims is one no code
+    /// can reach — writing its CID would draw the other glyph — and the font
+    /// is refused whole rather than drawing some of its glyphs as their
+    /// neighbours.
+    fn codes(&self) -> Option<Codes> {
+        let Some(cff) = self.cid_keyed() else {
+            return Some(Codes::default());
+        };
+        let mut cids = Vec::with_capacity(cff.glyph_count());
+        for glyph in 0..cff.glyph_count() {
+            let glyph = u16::try_from(glyph).ok()?;
+            let cid = cff.cid_for_gid(glyph)?;
+            if cff.gid_for_cid(u32::from(cid)) != Some(glyph) {
+                return None;
+            }
+            cids.push(cid);
+        }
+        Some(Codes {
+            cids: Some(cids.into()),
+        })
+    }
+
+    /// The glyph a code selects: [`FontProgram::codes`] read backwards, and
+    /// `.notdef` for a CID the charset does not carry.
+    fn glyph_for_code(&self, code: u16) -> u16 {
+        match self.cid_keyed() {
+            Some(cff) => cff.gid_for_cid(u32::from(code)).unwrap_or(0),
+            None => code,
         }
     }
 
@@ -1638,6 +1687,47 @@ impl<'a> FontProgram<'a> {
             FontProgram::TrueType(_) => b"CIDFontType2",
             FontProgram::OpenType(_, _) | FontProgram::Bare(_) => b"CIDFontType0",
         }
+    }
+}
+
+/// How a composite font's two-byte code is reached from the glyph a caller
+/// names (9.7.4.2).
+///
+/// Under `/Identity-H` the code **is** the CID, and what the CID then selects
+/// is the descendant's business. A CIDFontType2's `/CIDToGIDMap /Identity`,
+/// and a CIDFontType0 over a CFF that is not CID-keyed, both make it the
+/// glyph index, so the code is the glyph and this is the identity. A
+/// CID-keyed CFF selects through its charset instead, and there the code a
+/// glyph needs is the CID the charset gives it — a different number, which is
+/// what `cids` holds.
+///
+/// Computed once, when the font is registered, and copied into every page:
+/// [`PageBuilder::glyphs`] has no handle on the program and needs none.
+#[derive(Clone, Debug, Default)]
+struct Codes {
+    /// Glyph index to CID, for a CID-keyed CFF; `None` for the identity.
+    cids: Option<Arc<[u16]>>,
+}
+
+impl Codes {
+    /// The code that draws `glyph`.
+    ///
+    /// A glyph past the end of a CID-keyed font is one the font does not
+    /// have, and its code is CID 0 — `.notdef`, which is what an index past a
+    /// TrueType font's last glyph draws too — rather than its own number,
+    /// which the charset may give to a glyph that exists.
+    fn code(&self, glyph: u16) -> u16 {
+        match &self.cids {
+            Some(cids) => cids.get(usize::from(glyph)).copied().unwrap_or(0),
+            None => glyph,
+        }
+    }
+
+    /// The glyphs of one run, as the hex digits of the string that draws them.
+    fn hex(&self, glyphs: impl Iterator<Item = u16>) -> String {
+        glyphs
+            .map(|glyph| format!("{:04X}", self.code(glyph)))
+            .collect()
     }
 }
 
@@ -1814,8 +1904,9 @@ pub struct PageBuilder {
     /// was added.
     resources: ResourceSet,
     /// Which font resources are composite, so [`PageBuilder::glyphs`] can tell
-    /// a font whose codes are two bytes from one whose codes are one.
-    composite: BTreeSet<Vec<u8>>,
+    /// a font whose codes are two bytes from one whose codes are one — and
+    /// which code each glyph of one is drawn by.
+    composite: BTreeMap<Vec<u8>, Codes>,
     /// Characters drawn with each font resource, for subsetting.
     used: BTreeMap<Vec<u8>, BTreeSet<char>>,
     /// Glyphs drawn with each composite font resource, and the text each
@@ -2545,20 +2636,23 @@ impl PageBuilder {
     /// [`DocumentBuilder::add_cid_font`].
     ///
     /// The string is two bytes a glyph, big-endian, because `/Identity-H`
-    /// makes the code the CID and the descendant makes the CID the glyph
-    /// index — `/CIDToGIDMap /Identity` under a TrueType program, 9.7.4.2's
-    /// own rule under a CFF that is not CID-keyed. Written as a hex string
-    /// rather than a literal: a glyph index is arbitrary bytes and hex needs
-    /// no escaping decisions at all.
+    /// makes the code the CID. Under a TrueType program `/CIDToGIDMap
+    /// /Identity` then makes the CID the glyph index, and under a CFF that is
+    /// not CID-keyed 9.7.4.2's own rule does, so the code is the index the
+    /// caller named; a **CID-keyed** CFF turns a CID into a glyph through its
+    /// charset instead (9.7.4.2), so the code written is the CID the charset
+    /// gives that glyph. Written as a hex string rather than a literal: a
+    /// code is arbitrary bytes and hex needs no escaping decisions at all.
     ///
     /// Returns false when `resource` is not a registered **composite** font,
     /// rather than writing two-byte codes into a font whose codes are one byte
     /// — which would draw the wrong glyphs at the wrong widths and look like a
     /// font problem rather than an encoding one.
     pub fn glyphs(&mut self, font: &[u8], size: f64, x: f64, y: f64, glyphs: &[Glyph<'_>]) -> bool {
-        if !self.composite.contains(font) {
+        let Some(codes) = self.composite.get(font) else {
             return false;
-        }
+        };
+        let hex = codes.hex(glyphs.iter().map(|glyph| glyph.id));
 
         // Recorded so `finish` can write `/W` from the font's own `hmtx` for
         // the glyphs the document drew, and a `/ToUnicode` from the text they
@@ -2578,10 +2672,7 @@ impl PageBuilder {
         self.resource_name(font);
         self.content
             .extend_from_slice(format!(" {size} Tf {x} {y} Td <").as_bytes());
-        for glyph in glyphs {
-            self.content
-                .extend_from_slice(format!("{:04X}", glyph.id).as_bytes());
-        }
+        self.content.extend_from_slice(hex.as_bytes());
         self.content.extend_from_slice(b"> Tj ET\n");
         true
     }
@@ -3190,8 +3281,9 @@ pub struct DocumentBuilder {
     /// Which form resources carry a `/Group`, so an `/SMask` naming one that
     /// does not can be refused (11.6.5.2).
     groups: BTreeSet<Vec<u8>>,
-    /// Which font resources are composite.
-    composite: BTreeSet<Vec<u8>>,
+    /// Which font resources are composite, and the code each one's glyphs are
+    /// drawn by.
+    composite: BTreeMap<Vec<u8>, Codes>,
     /// Fonts whose programs are embedded, written at `finish` once the
     /// characters they are asked to draw are known.
     embedded: Vec<Embedded>,
@@ -3259,7 +3351,7 @@ impl DocumentBuilder {
             pages: Vec::new(),
             resources: ResourceSet::default(),
             groups: BTreeSet::new(),
-            composite: BTreeSet::new(),
+            composite: BTreeMap::new(),
             embedded: Vec::new(),
             cid_fonts: Vec::new(),
             drawn: BTreeMap::new(),
@@ -3489,9 +3581,11 @@ impl DocumentBuilder {
     /// in a string the CID. Over a TrueType program the descendant is a
     /// CIDFontType2 with `/CIDToGIDMap /Identity`, which makes the CID the
     /// glyph index; over a CFF — bare, or the `CFF ` table of an OpenType
-    /// face — it is a CIDFontType0, which reads a CID as the glyph index
-    /// because the program is not CID-keyed (9.7.4.2). Either way
-    /// [`PageBuilder::glyphs`] can address a glyph directly. That is the whole
+    /// face — it is a CIDFontType0, which reads the CID as the glyph index
+    /// when the program is not CID-keyed and through its charset when it is
+    /// (9.7.4.2), and then the code each glyph is written as is the CID its
+    /// charset gives it. Either way [`PageBuilder::glyphs`] addresses a glyph
+    /// by its index and the font says which code that is. That is the whole
     /// difference from [`DocumentBuilder::add_embedded_font`], and it is not a
     /// convenience: a simple font with `/WinAnsiEncoding` has no way to name a
     /// glyph the font's `cmap` does not reach from a character, and no way at
@@ -3503,24 +3597,17 @@ impl DocumentBuilder {
     /// drawing.
     ///
     /// Returns false when the bytes are not a font this can read, for
-    /// [`DocumentBuilder::add_embedded_font`]'s reason.
+    /// [`DocumentBuilder::add_embedded_font`]'s reason, and for a CID-keyed
+    /// CFF whose charset is not one-to-one: a glyph whose CID another glyph
+    /// also claims is one no code reaches.
     pub fn add_cid_font(&mut self, resource: &[u8], base_font: &[u8], program: &[u8]) -> bool {
-        // A **CID-keyed** CFF is refused rather than embedded, bare or in an
-        // OpenType wrapper. Its charset maps a CID onto a glyph, and the two
-        // are different numbers; `PageBuilder::glyphs` addresses glyphs, and
-        // `/Identity-H` would make every one of those numbers a CID.
-        // Accepting it would silently draw whichever glyph the charset
-        // happened to put at that CID — the failure this whole path exists to
-        // prevent (9.7.4.2). The wrapped one used to be let through, as a
-        // CIDFontType2 whose `/CIDToGIDMap /Identity` made the index the
-        // glyph; Table 126 does not allow that descendant over a `CFF `
-        // table, and under the CIDFontType0 it does allow the index is read
-        // as a CID like the bare one's.
-        match FontProgram::parse(program) {
-            None => return false,
-            Some(kind) if kind.is_cid_keyed() => return false,
-            Some(_) => {}
-        }
+        // The codes are worked out now, from the charset, so that a page —
+        // which never sees the program — writes the CID a glyph answers to
+        // rather than its index. Until October 2026 a CID-keyed CFF was
+        // refused here instead, because the index was all a page could write.
+        let Some(codes) = FontProgram::parse(program).and_then(|kind| kind.codes()) else {
+            return false;
+        };
 
         let file_ref = self.allocate();
         let descriptor_ref = self.allocate();
@@ -3539,7 +3626,7 @@ impl DocumentBuilder {
             to_unicode_ref,
         });
         self.resources.fonts.push((resource.to_vec(), font_ref));
-        self.composite.insert(resource.to_vec());
+        self.composite.insert(resource.to_vec(), codes);
         true
     }
 
@@ -3585,7 +3672,10 @@ impl DocumentBuilder {
         matrix: [f64; 6],
         glyphs: &[PlacedGlyph<'_>],
     ) -> bool {
-        if !self.composite.contains(font) || glyphs.is_empty() {
+        let Some(codes) = self.composite.get(font).cloned() else {
+            return false;
+        };
+        if glyphs.is_empty() {
             return false;
         }
         if !size.is_finite() || size <= 0.0 || !matrix.iter().all(|v| v.is_finite()) {
@@ -3605,11 +3695,13 @@ impl DocumentBuilder {
             .find(|f| f.resource == font)
             .map(|f| f.program.clone());
         let kind = program.as_deref().and_then(FontProgram::parse);
-        let advance = |id: u16| -> f64 {
+        // By code, as `/W` is: the width of the glyph the code selects, which
+        // for a glyph a CID-keyed font does not carry is `.notdef`'s.
+        let advance = |code: u16| -> f64 {
             // 9.7.4.3: a CID with no `/W` entry takes `/DW`, which this writer
             // states as 1000 — one em.
             kind.as_ref()
-                .and_then(|kind| kind.width(id))
+                .and_then(|kind| kind.width(kind.glyph_for_code(code)))
                 .map_or(1.0, |width| width.round() / 1000.0)
         };
 
@@ -3665,8 +3757,9 @@ impl DocumentBuilder {
                 out.extend_from_slice(number(adjust).as_bytes());
                 out.push(b' ');
             }
-            out.extend_from_slice(format!("<{:04X}>", placed.glyph.id).as_bytes());
-            pen = placed.x + advance(placed.glyph.id) * size;
+            let code = codes.code(placed.glyph.id);
+            out.extend_from_slice(format!("<{code:04X}>").as_bytes());
+            pen = placed.x + advance(code) * size;
         }
         close_array(out, &mut open);
         if rise != 0.0 {
@@ -4690,6 +4783,21 @@ impl DocumentBuilder {
         let Some(kind) = FontProgram::parse(&font.program) else {
             return;
         };
+        let Some(codes) = kind.codes() else {
+            return;
+        };
+        // `/W` and `/ToUnicode` are functions of the **code**, and `drawn` is
+        // keyed by glyph. The two are one number except under a CID-keyed
+        // CFF, whose charset maps each glyph to its own CID; there the record
+        // is rekeyed here, under the first-non-empty-text rule `drawn` was
+        // gathered by, so the merge cannot depend on which number it ran on.
+        let mut by_code: BTreeMap<u16, String> = BTreeMap::new();
+        for (glyph, text) in mapping {
+            let entry = by_code.entry(codes.code(*glyph)).or_default();
+            if entry.is_empty() && !text.is_empty() {
+                entry.clone_from(text);
+            }
+        }
 
         let (file_key, file_subtype) = kind.file_entry(true);
         let mut file_dict = Dict::new();
@@ -4781,7 +4889,7 @@ impl DocumentBuilder {
         // so the absence of a `/W` entry has a stated answer rather than one a
         // reader has to know the default of.
         descendant.insert(self.names.intern(b"DW"), Object::Int(1000));
-        if let Some(widths) = width_array(&kind, mapping.keys().copied()) {
+        if let Some(widths) = width_array(&kind, by_code.keys().copied()) {
             descendant.insert(self.names.intern(b"W"), Object::Array(widths));
         }
         // 9.7.4.2: `/Identity` makes the CID the glyph index. This is the
@@ -4821,7 +4929,7 @@ impl DocumentBuilder {
         // No `/ToUnicode` at all when no glyph stood for anything: 9.10.3's
         // CMap grammar has no zero-entry `beginbfchar` section, so the only
         // alternatives are a stream that says something and no stream.
-        if let Some(cmap) = to_unicode_cmap(mapping) {
+        if let Some(cmap) = to_unicode_cmap(&by_code) {
             self.objects.insert_stream(
                 font.to_unicode_ref.num,
                 StreamData {
