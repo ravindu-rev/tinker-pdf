@@ -210,3 +210,229 @@ fn opacity_over_a_painted_box_with_content_is_counted() {
     );
     assert_eq!(counted(&empty, "opacity"), None);
 }
+
+// ---- border-radius and outline -----------------------------------------------------
+
+/// The page box's margin and height, in points, which place every box below.
+const MARGIN: f64 = 36.0;
+const PAGE_HEIGHT: f64 = 648.0;
+/// CSS 2.2 §4.3.2's reference pixel against a point.
+const PX: f64 = 0.75;
+/// `4(√2 − 1) / 3`, the quarter-arc constant, computed rather than copied.
+fn quarter_arc() -> f64 {
+    4.0 * (2.0f64.sqrt() - 1.0) / 3.0
+}
+
+/// Every `c` on the first page, as its six operands, in stream order.
+fn curves(doc: &Document) -> Vec<[f64; 6]> {
+    let words = tokens(doc);
+    let mut out = Vec::new();
+    for (at, word) in words.iter().enumerate() {
+        if word != "c" || at < 6 {
+            continue;
+        }
+        let mut operands = [0.0; 6];
+        for (slot, text) in operands.iter_mut().zip(&words[at - 6..at]) {
+            *slot = text.parse().expect("a `c` operand");
+        }
+        out.push(operands);
+    }
+    out
+}
+
+#[track_caller]
+fn close(actual: [f64; 6], expected: [f64; 6]) {
+    for (a, e) in actual.iter().zip(expected) {
+        assert!((a - e).abs() < 1e-9, "{actual:?} against {expected:?}");
+    }
+}
+
+/// The top-right corner's cubic for a box at the content area's top left,
+/// `width` CSS pixels wide, with semi-axes `(rx, ry)` CSS pixels: the closed
+/// form, from the box's own edges.
+fn top_right(width: f64, rx: f64, ry: f64) -> [f64; 6] {
+    let right = MARGIN + width * PX;
+    let top = PAGE_HEIGHT - MARGIN;
+    let (rx, ry) = (rx * PX, ry * PX);
+    let k = quarter_arc();
+    [
+        right - rx + k * rx,
+        top,
+        right,
+        top - ry + k * ry,
+        right,
+        top - ry,
+    ]
+}
+
+/// **A rounded corner is a cubic whose control points sit `4(√2−1)/3` of the
+/// way along its tangents** (`css-backgrounds-3` §5), drawn for the
+/// background; a square box writes no curve at all.
+#[test]
+fn a_rounded_corner_is_the_quarter_arc_cubic() {
+    let doc = open(
+        "div { width: 100px; height: 40px; background-color: #ff0000; border-radius: 10px }",
+        "<div></div>",
+    );
+    let found = curves(&doc);
+    assert_eq!(found.len(), 4, "four corners: {found:?}");
+    close(found[0], top_right(100.0, 10.0, 10.0));
+    let square = open(
+        "div { width: 100px; height: 40px; background-color: #ff0000 }",
+        "<div></div>",
+    );
+    assert!(
+        curves(&square).is_empty(),
+        "a square box is the old rectangle"
+    );
+}
+
+/// **§5.5's overlap scaling scales all four radii by one factor**: 30 pixels
+/// on a box 40 high need 60 of a 40-pixel side, so every radius is two thirds
+/// of itself — 20 — and the horizontal ones too, which a per-side clamp would
+/// have left at 30.
+#[test]
+fn overlapping_radii_are_scaled_by_one_factor() {
+    let doc = open(
+        "div { width: 100px; height: 40px; background-color: #ff0000; border-radius: 30px }",
+        "<div></div>",
+    );
+    close(curves(&doc)[0], top_right(100.0, 20.0, 20.0));
+}
+
+/// **`h / v` is an ellipse**, and the shorthand's lists expand clockwise:
+/// `40px 0 0 0 / 10px` is one wide, flat corner at the top left.
+#[test]
+fn a_slash_radius_is_an_elliptical_corner() {
+    let doc = open(
+        "div { width: 100px; height: 40px; background-color: #ff0000; \
+               border-radius: 40px 0 0 0 / 10px }",
+        "<div></div>",
+    );
+    let found = curves(&doc);
+    assert_eq!(found.len(), 1, "{found:?}");
+    let left = MARGIN;
+    let top = PAGE_HEIGHT - MARGIN;
+    let (rx, ry, k) = (40.0 * PX, 10.0 * PX, quarter_arc());
+    close(
+        found[0],
+        [
+            left,
+            top - ry + k * ry,
+            left + rx - k * rx,
+            top,
+            left + rx,
+            top,
+        ],
+    );
+}
+
+/// **A rounded border is a ring between two rounded paths**, filled even-odd,
+/// one clipped region per side; the padding edge's radius is the border
+/// edge's less the border width (§5.3).
+#[test]
+fn a_rounded_border_is_a_ring_per_side() {
+    let doc = open(
+        "div { width: 100px; height: 40px; border: 4px solid #0000ff; border-radius: 10px }",
+        "<div></div>",
+    );
+    let words = tokens(&doc);
+    let rings = words.iter().filter(|w| *w == "f*").count();
+    let clips = words.iter().filter(|w| *w == "W").count();
+    assert_eq!((rings, clips), (4, 4), "{words:?}");
+    // Eight cubics per ring — four outer, four inner — and the first inner one
+    // is the padding box's top-right corner at a radius of 10 − 4 = 6. The
+    // `div` is content-box sized, so its border box is 108 wide.
+    let found = curves(&doc);
+    assert_eq!(found.len(), 32);
+    let right = MARGIN + 108.0 * PX - 4.0 * PX;
+    let top = PAGE_HEIGHT - MARGIN - 4.0 * PX;
+    let (r, k) = (6.0 * PX, quarter_arc());
+    close(
+        found[4],
+        [
+            right - r + k * r,
+            top,
+            right,
+            top - r + k * r,
+            right,
+            top - r,
+        ],
+    );
+}
+
+/// **An outline is four bands `outline-offset` out from the border edge and
+/// `outline-width` wide**, in its colour, drawn after the text (CSS 2.2
+/// Appendix E's last step), and moving nothing.
+#[test]
+fn an_outline_is_drawn_outside_the_border_edge_after_the_text() {
+    let doc = open(
+        "div { width: 100px; outline: 2px solid #0000ff; outline-offset: 4px }",
+        "<div>outlined</div>",
+    );
+    let words = tokens(&doc);
+    let colour = words
+        .windows(4)
+        .position(|w| w == ["0", "0", "1", "rg"])
+        .expect("the outline's colour");
+    let last_text = words.iter().rposition(|w| w == "ET").expect("the text");
+    assert!(colour > last_text, "the outline is drawn after the text");
+    let rects: Vec<[f64; 4]> = words[colour..]
+        .windows(5)
+        .filter(|w| w[4] == "re")
+        .map(|w| [0, 1, 2, 3].map(|i| w[i].parse::<f64>().expect("a number")))
+        .take(4)
+        .collect();
+    // The first band is the top one: its left edge 4 + 2 pixels out, its
+    // bottom 4 pixels above the border edge.
+    let left = MARGIN - 6.0 * PX;
+    let width = (100.0 + 12.0) * PX;
+    let bottom = PAGE_HEIGHT - MARGIN + 4.0 * PX;
+    assert_eq!(rects.len(), 4, "{rects:?}");
+    for (actual, expected) in rects[0].iter().zip([left, bottom, width, 2.0 * PX]) {
+        assert!((actual - expected).abs() < 1e-9, "{rects:?}");
+    }
+    // And no box moved for it: the text is where it is without one.
+    let plain = tokens(&open("div { width: 100px }", "<div>outlined</div>"));
+    let place = |words: &[String]| {
+        words
+            .iter()
+            .position(|w| w == "Td")
+            .map(|at| words[at - 2..at].to_vec())
+    };
+    assert_eq!(place(&words), place(&plain));
+}
+
+/// **A rounded box cut by a page boundary is sliced, not cloned**
+/// (`css-break-3` §5.4's `box-decoration-break: slice`, the initial value): the
+/// first page's fragment rounds only its top corners and the last page's only
+/// its bottom ones, so the curves are at the box's real ends and not at the
+/// page's.
+#[test]
+fn a_rounded_box_cut_across_pages_rounds_only_its_real_ends() {
+    let lines = "<p>line</p>".repeat(120);
+    let doc = open(
+        "div { background-color: #ff0000; border-radius: 10px }",
+        &format!("<div>{lines}</div>"),
+    );
+    let on = |page: usize| -> Vec<String> {
+        let cos = doc.cos();
+        let pages = tinker_pdf_cos::pages::collect(cos);
+        String::from_utf8_lossy(&tinker_pdf_cos::pages::content_bytes(cos, &pages[page]))
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect()
+    };
+    let count = |words: &[String]| words.iter().filter(|w| *w == "c").count();
+    assert!(doc.page_count() >= 2, "the box is taller than a page");
+    let last = doc.page_count() as usize - 1;
+    assert_eq!(
+        count(&on(0)),
+        2,
+        "the first page rounds its top two corners"
+    );
+    assert_eq!(count(&on(last)), 2, "the last page rounds its bottom two");
+    for middle in 1..last {
+        assert_eq!(count(&on(middle)), 0, "a middle page is a square slice");
+    }
+}

@@ -136,6 +136,10 @@ pub(crate) struct BlockRecord {
     pub dy: f64,
     /// The node's [`crate::BoxNode::anchor`], for [`crate::BoxFragment::anchor`].
     pub anchor: Option<u32>,
+    /// What else the box paints — its corners' radii and its outline — boxed
+    /// because almost no box has either and a record is in the frame of every
+    /// recursion of [`Builder::block`].
+    pub paint: Option<Box<crate::style::BoxPaint>>,
 }
 
 /// A replaced box's picture, as an inset from the box's own border-box corner.
@@ -1036,7 +1040,8 @@ impl<M: Metrics> Builder<'_, M> {
             || border.top > 0.0
             || border.right > 0.0
             || border.bottom > 0.0
-            || border.left > 0.0;
+            || border.left > 0.0
+            || has_outline(&style);
         let record = BlockRecord {
             x: left,
             width: border_box_width,
@@ -1051,6 +1056,7 @@ impl<M: Metrics> Builder<'_, M> {
             replaced: None,
             dy: 0.0,
             anchor: node.anchor,
+            paint: style.paint.clone(),
         };
         let block = self.flow.blocks.len();
         self.flow.blocks.push(record);
@@ -2724,6 +2730,7 @@ impl<M: Metrics> Builder<'_, M> {
                     // The rule belongs to the container: an `opacity` on it
                     // fades its rules with its text.
                     anchor: node.anchor,
+                    paint: None,
                 });
             }
             for (at, &(from, to, top)) in chunk.iter().enumerate() {
@@ -4483,7 +4490,8 @@ fn decorate(node: &BoxNode, x: f64, width: f64) -> BlockRecord {
         || style.border_width.top > 0.0
         || style.border_width.right > 0.0
         || style.border_width.bottom > 0.0
-        || style.border_width.left > 0.0;
+        || style.border_width.left > 0.0
+        || has_outline(&style);
     BlockRecord {
         x,
         width,
@@ -4497,7 +4505,17 @@ fn decorate(node: &BoxNode, x: f64, width: f64) -> BlockRecord {
         replaced: None,
         dy: 0.0,
         anchor: node.anchor,
+        paint: style.paint.clone(),
     }
+}
+
+/// Whether a box draws an outline, which makes it painted with no background
+/// or border at all.
+fn has_outline(style: &Consumed) -> bool {
+    style
+        .paint
+        .as_ref()
+        .is_some_and(|paint| paint.outline.is_some())
 }
 
 /// One box's **specified** border on one side, for §17.6.2.1.

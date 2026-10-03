@@ -1620,3 +1620,66 @@ fn text_transform_reads_its_casing_values_and_refuses_the_rest_by_value() {
         );
     }
 }
+
+/// **`border-radius` expands clockwise from the top left, and `/` separates
+/// the horizontal radii from the vertical ones** (`css-backgrounds-3` §5.2);
+/// a negative radius is not CSS.
+#[test]
+fn the_border_radius_shorthand_expands_two_lists_clockwise() {
+    use crate::property::{Corner, SpecifiedRadius};
+    let radius = |h: f64, v: f64| SpecifiedRadius {
+        horizontal: Len::Px(h),
+        vertical: Len::Px(v),
+    };
+    assert_eq!(
+        known("div { border-radius: 1px 2px 3px / 4px 5px }"),
+        vec![
+            Property::BorderRadius(Corner::TopLeft, radius(1.0, 4.0)),
+            Property::BorderRadius(Corner::TopRight, radius(2.0, 5.0)),
+            Property::BorderRadius(Corner::BottomRight, radius(3.0, 4.0)),
+            Property::BorderRadius(Corner::BottomLeft, radius(2.0, 5.0)),
+        ]
+    );
+    assert_eq!(
+        known("div { border-top-right-radius: 10% 2em }"),
+        vec![Property::BorderRadius(
+            Corner::TopRight,
+            SpecifiedRadius {
+                horizontal: Len::Percent(10.0),
+                vertical: Len::Em(2.0),
+            }
+        )]
+    );
+    assert!(known("div { border-radius: -1px }").is_empty());
+    assert!(known("div { border-radius: 1px / }").is_empty());
+}
+
+/// **`outline` is its three longhands**, the omitted ones at their initial
+/// values; `hidden` is not an outline style and `invert` is refused by value.
+#[test]
+fn the_outline_shorthand_is_its_three_longhands() {
+    use crate::property::OutlineStyle;
+    assert_eq!(
+        known("p { outline: thin dotted }"),
+        vec![
+            Property::OutlineWidth(Len::Px(1.0)),
+            Property::OutlineStyle(OutlineStyle::Border(BorderStyle::Dotted)),
+            Property::OutlineColor(None),
+        ]
+    );
+    assert_eq!(
+        known("p { outline-style: auto; outline-offset: -2px }"),
+        vec![
+            Property::OutlineStyle(OutlineStyle::Auto),
+            Property::OutlineOffset(Len::Px(-2.0)),
+        ]
+    );
+    assert!(known("p { outline-style: hidden }").is_empty());
+    assert_eq!(
+        declarations("p { outline-color: invert }")[0].declaration,
+        Declaration::Unsupported {
+            property: "outline-color",
+            value: "invert".to_owned(),
+        }
+    );
+}

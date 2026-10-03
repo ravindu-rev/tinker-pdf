@@ -982,6 +982,79 @@ pub enum ListStylePosition {
     Inside,
 }
 
+/// One of a box's four corners, `css-backgrounds-3` §5.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Corner {
+    /// `border-top-left-radius`
+    TopLeft,
+    /// `border-top-right-radius`
+    TopRight,
+    /// `border-bottom-right-radius`
+    BottomRight,
+    /// `border-bottom-left-radius`
+    BottomLeft,
+}
+
+impl Corner {
+    /// The four, in the order the shorthand states them.
+    pub const ALL: [Corner; 4] = [
+        Corner::TopLeft,
+        Corner::TopRight,
+        Corner::BottomRight,
+        Corner::BottomLeft,
+    ];
+
+    /// The index into a `[_; 4]` laid out in [`Corner::ALL`]'s order.
+    #[must_use]
+    pub fn index(self) -> usize {
+        match self {
+            Corner::TopLeft => 0,
+            Corner::TopRight => 1,
+            Corner::BottomRight => 2,
+            Corner::BottomLeft => 3,
+        }
+    }
+}
+
+/// One corner's radii as written, before `em` is resolved: §5.1's two
+/// `<length-percentage [0,∞]>`, horizontal then vertical.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpecifiedRadius {
+    /// The horizontal semi-axis; a percentage is of the border box's width.
+    pub horizontal: Len,
+    /// The vertical semi-axis; a percentage is of its height.
+    pub vertical: Len,
+}
+
+/// One corner's computed radii: an ellipse's two semi-axes, each still a
+/// percentage if it was one, since the box it is a percentage of is layout's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Radius {
+    /// The horizontal semi-axis.
+    pub horizontal: LengthPercentage,
+    /// The vertical semi-axis.
+    pub vertical: LengthPercentage,
+}
+
+impl Radius {
+    /// A square corner, `border-*-radius`'s initial value.
+    pub const ZERO: Radius = Radius {
+        horizontal: LengthPercentage::ZERO,
+        vertical: LengthPercentage::ZERO,
+    };
+}
+
+/// `outline-style`, `css-ui-4` §5.3: `border-style`'s values less `hidden`,
+/// plus `auto`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutlineStyle {
+    /// `auto`: §5.3 leaves the drawing to the user agent, and this one draws a
+    /// solid line — the outline is there, at its width and colour.
+    Auto,
+    /// One of `border-style`'s.
+    Border(BorderStyle),
+}
+
 /// `quotes`, `css-content-3` §3.2: the marks `open-quote` and `close-quote`
 /// produce, a pair per nesting level.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1191,6 +1264,16 @@ pub enum Property {
     /// `opacity`, `css-color-4` §15.1, as written: a value outside `[0, 1]` is
     /// valid and clamped at computed-value time, so the clamp is the cascade's.
     Opacity(f64),
+    /// `border-*-*-radius`, `css-backgrounds-3` §5.1.
+    BorderRadius(Corner, SpecifiedRadius),
+    /// `outline-width`, `css-ui-4` §5.2.
+    OutlineWidth(Len),
+    /// `outline-style`, §5.3.
+    OutlineStyle(OutlineStyle),
+    /// `outline-color`, §5.4. `None` is `currentColor`, its initial value.
+    OutlineColor(Option<Color>),
+    /// `outline-offset`, §5.5. May be negative.
+    OutlineOffset(Len),
     /// `visibility`
     Visibility(Visibility),
     /// `display`
@@ -1327,6 +1410,16 @@ impl Property {
             Property::CounterSet(_) => "counter-set",
             Property::Quotes(_) => "quotes",
             Property::Opacity(_) => "opacity",
+            Property::BorderRadius(corner, _) => match corner {
+                Corner::TopLeft => "border-top-left-radius",
+                Corner::TopRight => "border-top-right-radius",
+                Corner::BottomRight => "border-bottom-right-radius",
+                Corner::BottomLeft => "border-bottom-left-radius",
+            },
+            Property::OutlineWidth(_) => "outline-width",
+            Property::OutlineStyle(_) => "outline-style",
+            Property::OutlineColor(_) => "outline-color",
+            Property::OutlineOffset(_) => "outline-offset",
             Property::Visibility(_) => "visibility",
             Property::Display(_) => "display",
             Property::Float(_) => "float",
@@ -1470,6 +1563,13 @@ impl Property {
             // every level, and a paragraph at 0.5 inside a section at 0.5 would
             // come out at a sixteenth rather than a quarter of its colour.
             | Property::Opacity(_)
+            // `css-backgrounds-3` §5.1 and `css-ui-4` §5: *inherited: no*,
+            // like the borders they belong beside.
+            | Property::BorderRadius(_, _)
+            | Property::OutlineWidth(_)
+            | Property::OutlineStyle(_)
+            | Property::OutlineColor(_)
+            | Property::OutlineOffset(_)
             | Property::Display(_)
             | Property::Float(_)
             | Property::Clear(_)
@@ -1674,7 +1774,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "background-repeat",
     "background-size",
     "border-image",
-    "border-radius",
     "box-shadow",
     "caption-side",
     "clip",
@@ -1703,11 +1802,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "justify-self",
     "list-style-image",
     "mix-blend-mode",
-    "outline",
-    "outline-color",
-    "outline-offset",
-    "outline-style",
-    "outline-width",
     "overflow",
     "overflow-x",
     "overflow-y",
@@ -1968,6 +2062,19 @@ pub const DEFAULTABLE_SHORTHANDS: &[(&str, &[&str])] = &[
     // `css-lists-3` §3.4's shorthand, without `list-style-image`, which is
     // unimplemented and which the shorthand refuses by value when it is named.
     ("list-style", &["list-style-type", "list-style-position"]),
+    (
+        "border-radius",
+        &[
+            "border-top-left-radius",
+            "border-top-right-radius",
+            "border-bottom-right-radius",
+            "border-bottom-left-radius",
+        ],
+    ),
+    (
+        "outline",
+        &["outline-width", "outline-style", "outline-color"],
+    ),
     ("flex-flow", &["flex-direction", "flex-wrap"]),
     ("gap", &["row-gap", "column-gap"]),
     (
@@ -2218,6 +2325,7 @@ fn counter_function(plural: bool, arguments: &[ComponentValue]) -> Option<Result
 /// gaps would inflate the one figure the whole milestone is measured by, in
 /// the flattering direction for the author and the damning one for this
 /// engine.
+#[derive(Clone, Copy)]
 enum LenOutcome {
     /// A length this build resolves.
     Ok(Len),
@@ -2577,6 +2685,8 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "border",
     "border-bottom",
     "border-bottom-color",
+    "border-bottom-left-radius",
+    "border-bottom-right-radius",
     "border-bottom-style",
     "border-bottom-width",
     "border-collapse",
@@ -2585,6 +2695,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "border-left-color",
     "border-left-style",
     "border-left-width",
+    "border-radius",
     "border-right",
     "border-right-color",
     "border-right-style",
@@ -2593,6 +2704,8 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "border-style",
     "border-top",
     "border-top-color",
+    "border-top-left-radius",
+    "border-top-right-radius",
     "border-top-style",
     "border-top-width",
     "border-width",
@@ -2653,6 +2766,11 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "opacity",
     "order",
     "orphans",
+    "outline",
+    "outline-color",
+    "outline-offset",
+    "outline-style",
+    "outline-width",
     "overflow-wrap",
     "padding",
     "padding-bottom",
@@ -2979,6 +3097,66 @@ fn implemented(
             .map_or(Implemented::Malformed, |outcome| {
                 outcome.map(Property::CounterIncrement)
             }),
+        "border-top-left-radius"
+        | "border-top-right-radius"
+        | "border-bottom-right-radius"
+        | "border-bottom-left-radius" => {
+            let corner = match name {
+                "border-top-left-radius" => Corner::TopLeft,
+                "border-top-right-radius" => Corner::TopRight,
+                "border-bottom-right-radius" => Corner::BottomRight,
+                _ => Corner::BottomLeft,
+            };
+            match significant {
+                [one] | [one, _] => {
+                    let horizontal = radius_length(one);
+                    let vertical = significant.get(1).map_or(horizontal, |v| radius_length(v));
+                    match (horizontal, vertical) {
+                        (LenOutcome::Ok(horizontal), LenOutcome::Ok(vertical)) => {
+                            Implemented::Known(vec![Property::BorderRadius(
+                                corner,
+                                SpecifiedRadius {
+                                    horizontal,
+                                    vertical,
+                                },
+                            )])
+                        }
+                        (LenOutcome::Unsupported, _) | (_, LenOutcome::Unsupported) => {
+                            Implemented::BadValue
+                        }
+                        _ => Implemented::Malformed,
+                    }
+                }
+                _ => Implemented::Malformed,
+            }
+        }
+        "border-radius" => border_radius_shorthand(significant),
+        "outline-width" => match border_width_outcome(one, single) {
+            LenOutcome::Ok(len) => Implemented::Known(vec![Property::OutlineWidth(len)]),
+            LenOutcome::Unsupported => Implemented::BadValue,
+            LenOutcome::Invalid => Implemented::Malformed,
+        },
+        "outline-style" => keyword(one, single, |word| {
+            outline_style_named(word).map(Property::OutlineStyle)
+        }),
+        "outline-color" => match (single, one) {
+            // `css-ui-4` §5.4's `invert` is a value this build does not draw.
+            (true, Some(ComponentValue::Token(Token::Ident(word))))
+                if word.eq_ignore_ascii_case("invert") =>
+            {
+                Implemented::BadValue
+            }
+            _ => colour_property(one, single, |c| Property::OutlineColor(Some(c))),
+        },
+        "outline-offset" => match (single, one.map(length_outcome)) {
+            (true, Some(LenOutcome::Ok(Len::Percent(_)))) => Implemented::Malformed,
+            (true, Some(LenOutcome::Ok(len))) => {
+                Implemented::Known(vec![Property::OutlineOffset(len)])
+            }
+            (true, Some(LenOutcome::Unsupported)) => Implemented::BadValue,
+            _ => Implemented::Malformed,
+        },
+        "outline" => outline_shorthand(significant),
         // `css-color-4` §15.1: `<alpha-value>`, a number or a percentage.
         "opacity" => match (single, one) {
             (true, Some(ComponentValue::Token(Token::Number { value, .. }))) => {
@@ -3514,6 +3692,127 @@ fn keyword(
         Some(_) if single => Implemented::BadValue,
         _ => Implemented::Malformed,
     }
+}
+
+/// One radius: a non-negative `<length-percentage>` (§5.1).
+fn radius_length(value: &ComponentValue) -> LenOutcome {
+    match length_outcome(value) {
+        LenOutcome::Ok(len) if len_is_negative(len) => LenOutcome::Invalid,
+        other => other,
+    }
+}
+
+fn len_is_negative(len: Len) -> bool {
+    match len {
+        Len::Px(v) | Len::Em(v) | Len::Rem(v) | Len::Percent(v) => v < 0.0,
+    }
+}
+
+/// `border-radius`, `css-backgrounds-3` §5.2: one to four horizontal radii,
+/// then optionally `/` and one to four vertical ones, each list expanded
+/// clockwise from the top left as `margin`'s is from the top.
+fn border_radius_shorthand(significant: &[&ComponentValue]) -> Implemented {
+    let slash = significant
+        .iter()
+        .position(|v| matches!(v, ComponentValue::Token(Token::Delim('/'))));
+    let (first, second) = match slash {
+        Some(at) => (&significant[..at], Some(&significant[at + 1..])),
+        None => (significant, None),
+    };
+    let expand = |list: &[&ComponentValue]| -> Result<[Len; 4], Implemented> {
+        let mut lens = Vec::with_capacity(4);
+        for value in list {
+            match radius_length(value) {
+                LenOutcome::Ok(len) => lens.push(len),
+                LenOutcome::Unsupported => return Err(Implemented::BadValue),
+                LenOutcome::Invalid => return Err(Implemented::Malformed),
+            }
+        }
+        // §5.2: *"if the bottom-right is omitted it is the same as the top-left;
+        // if the bottom-left is omitted it is the same as the top-right"*.
+        match lens.as_slice() {
+            [a] => Ok([*a, *a, *a, *a]),
+            [a, b] => Ok([*a, *b, *a, *b]),
+            [a, b, c] => Ok([*a, *b, *c, *b]),
+            [a, b, c, d] => Ok([*a, *b, *c, *d]),
+            _ => Err(Implemented::Malformed),
+        }
+    };
+    let horizontal = match expand(first) {
+        Ok(list) => list,
+        Err(outcome) => return outcome,
+    };
+    let vertical = match second {
+        Some(list) => match expand(list) {
+            Ok(list) => list,
+            Err(outcome) => return outcome,
+        },
+        None => horizontal,
+    };
+    Implemented::Known(
+        Corner::ALL
+            .iter()
+            .map(|corner| {
+                Property::BorderRadius(
+                    *corner,
+                    SpecifiedRadius {
+                        horizontal: horizontal[corner.index()],
+                        vertical: vertical[corner.index()],
+                    },
+                )
+            })
+            .collect(),
+    )
+}
+
+fn outline_style_named(word: &str) -> Option<OutlineStyle> {
+    match word {
+        "auto" => Some(OutlineStyle::Auto),
+        // §5.3: *"the same as border-style, except that hidden is not a legal
+        // outline style"*.
+        "hidden" => None,
+        other => border_style_named(other).map(OutlineStyle::Border),
+    }
+}
+
+/// `outline`, `css-ui-4` §5.1: `<'outline-color'> || <'outline-style'> ||
+/// <'outline-width'>`, the omitted ones reset to their initial values, as
+/// `border`'s are.
+fn outline_shorthand(significant: &[&ComponentValue]) -> Implemented {
+    if significant.is_empty() || significant.len() > 3 {
+        return Implemented::Malformed;
+    }
+    let mut width: Option<Len> = None;
+    let mut style: Option<OutlineStyle> = None;
+    let mut paint: Option<Color> = None;
+    for value in significant {
+        if style.is_none() {
+            if let ComponentValue::Token(Token::Ident(word)) = value {
+                if let Some(found) = outline_style_named(&word.to_ascii_lowercase()) {
+                    style = Some(found);
+                    continue;
+                }
+            }
+        }
+        if width.is_none() {
+            if let Some(found) = border_width(Some(value), true) {
+                width = Some(found);
+                continue;
+            }
+        }
+        if paint.is_none() {
+            if let Some(found) = color(value) {
+                paint = Some(found);
+                continue;
+            }
+        }
+        return Implemented::BadValue;
+    }
+    Implemented::Known(vec![
+        Property::OutlineWidth(width.unwrap_or(Len::Px(3.0))),
+        Property::OutlineStyle(style.unwrap_or(OutlineStyle::Border(BorderStyle::None))),
+        Property::OutlineColor(paint),
+    ])
 }
 
 /// `list-style-type`'s keywords, `css-counter-styles-3` §6's predefined

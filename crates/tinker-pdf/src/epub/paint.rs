@@ -1094,6 +1094,7 @@ pub fn draw_page(
             }
             refused += artifact_or_run(builder, page, run, frame, fonts, effects);
         }
+        draw_outlines(page, laid, frame, effects);
         return refused;
     };
 
@@ -1120,7 +1121,21 @@ pub fn draw_page(
         &mut refused,
         effects,
     );
+    draw_outlines(page, laid, frame, effects);
     refused
+}
+
+/// Every outline on the page, after the text: CSS 2.2 Appendix E's tenth and
+/// last step, so an outline is drawn over what is beside it rather than under.
+fn draw_outlines(page: &mut PageBuilder, laid: &LayoutPage, frame: &Frame, effects: &Effects) {
+    for fragment in &laid.boxes {
+        if fragment.outline.is_none() {
+            continue;
+        }
+        let opened = effects.open(page, fragment.anchor);
+        draw_outline(page, fragment, frame);
+        Effects::close(page, opened);
+    }
 }
 
 /// One run, marked as an artifact where it is one.
@@ -1328,6 +1343,14 @@ fn draw_box(page: &mut PageBuilder, fragment: &BoxFragment, frame: &Frame) {
     let top = frame.y(fragment.y);
     let width = fragment.width * PX_TO_PT;
     let height = fragment.height * PX_TO_PT;
+    if fragment
+        .radius
+        .iter()
+        .any(|(horizontal, vertical)| *horizontal > 0.0 && *vertical > 0.0)
+    {
+        draw_rounded_box(page, fragment, (x, top - height, width, height));
+        return;
+    }
     if fragment.background.a != 0 {
         set_fill(page, fragment.background);
         fill(page, x, top - height, width, height);
@@ -1353,6 +1376,190 @@ fn draw_box(page: &mut PageBuilder, fragment: &BoxFragment, frame: &Frame) {
         };
         fill(page, bx, by, bw, bh);
     }
+}
+
+/// `4(√2 − 1) / 3`: the distance along each tangent, as a fraction of the
+/// radius, at which a cubic Bézier's control points make the closest quarter
+/// circle — and, scaled per axis, the closest quarter ellipse.
+pub const QUARTER_ARC: f64 = 0.552_284_749_830_793_4;
+
+/// A rectangle with elliptical corners as a closed path, in page points.
+///
+/// `rect` is `(left, bottom, width, height)` and `radii` the four corners'
+/// `(horizontal, vertical)` semi-axes in [`tinker_pdf_css::property::Corner::ALL`]'s
+/// order. Clockwise from the top edge; a corner with either semi-axis zero is
+/// square and its curve is not written. Each corner is one cubic whose control
+/// points sit [`QUARTER_ARC`] of the way along the two tangents, which is the
+/// closed form `epub_paint.rs` checks the operands against.
+#[must_use]
+pub fn rounded_path(rect: (f64, f64, f64, f64), radii: [(f64, f64); 4]) -> String {
+    let (left, bottom, width, height) = rect;
+    let (right, top) = (left + width, bottom + height);
+    let k = 1.0 - QUARTER_ARC;
+    let round = |(rx, ry): (f64, f64)| rx > 0.0 && ry > 0.0;
+    let [tl, tr, br, bl] = radii.map(|r| if round(r) { r } else { (0.0, 0.0) });
+    let mut path = String::new();
+    path.push_str(&format!("{} {} m ", left + tl.0, top));
+    path.push_str(&format!("{} {} l ", right - tr.0, top));
+    if round(tr) {
+        path.push_str(&format!(
+            "{} {} {} {} {} {} c ",
+            right - tr.0 * k,
+            top,
+            right,
+            top - tr.1 * k,
+            right,
+            top - tr.1
+        ));
+    }
+    path.push_str(&format!("{} {} l ", right, bottom + br.1));
+    if round(br) {
+        path.push_str(&format!(
+            "{} {} {} {} {} {} c ",
+            right,
+            bottom + br.1 * k,
+            right - br.0 * k,
+            bottom,
+            right - br.0,
+            bottom
+        ));
+    }
+    path.push_str(&format!("{} {} l ", left + bl.0, bottom));
+    if round(bl) {
+        path.push_str(&format!(
+            "{} {} {} {} {} {} c ",
+            left + bl.0 * k,
+            bottom,
+            left,
+            bottom + bl.1 * k,
+            left,
+            bottom + bl.1
+        ));
+    }
+    path.push_str(&format!("{} {} l ", left, top - tl.1));
+    if round(tl) {
+        path.push_str(&format!(
+            "{} {} {} {} {} {} c ",
+            left,
+            top - tl.1 * k,
+            left + tl.0 * k,
+            top,
+            left + tl.0,
+            top
+        ));
+    }
+    path.push('h');
+    path
+}
+
+/// A box with rounded corners, `css-backgrounds-3` §5.
+///
+/// The background fills the border box's rounded shape — `background-clip`'s
+/// initial `border-box`. The border is the region between that shape and the
+/// padding box's, whose radii are §5.3's: each outer radius less the border
+/// width on its own axis, never below zero. Each side's colour is filled inside
+/// a clip that runs from the outer corner to the inner one, which is where §5.4
+/// puts the transition between two sides' colours — so four sides of one
+/// colour draw one ring, and four of four colours meet on the diagonals.
+fn draw_rounded_box(page: &mut PageBuilder, fragment: &BoxFragment, rect: (f64, f64, f64, f64)) {
+    let (left, bottom, width, height) = rect;
+    let (right, top) = (left + width, bottom + height);
+    let outer: [(f64, f64); 4] = fragment
+        .radius
+        .map(|(horizontal, vertical)| (horizontal * PX_TO_PT, vertical * PX_TO_PT));
+    if fragment.background.a != 0 {
+        set_fill(page, fragment.background);
+        page.raw(format!("{} f", rounded_path(rect, outer)).as_bytes());
+    }
+    let widths = &fragment.border_width;
+    let (bt, br, bb, bl) = (
+        widths.top * PX_TO_PT,
+        widths.right * PX_TO_PT,
+        widths.bottom * PX_TO_PT,
+        widths.left * PX_TO_PT,
+    );
+    let inner_rect = (
+        left + bl,
+        bottom + bb,
+        (width - bl - br).max(0.0),
+        (height - bt - bb).max(0.0),
+    );
+    // §5.3: the padding edge's radius is the border edge's less the border's
+    // width, per axis.
+    let inner = [
+        ((outer[0].0 - bl).max(0.0), (outer[0].1 - bt).max(0.0)),
+        ((outer[1].0 - br).max(0.0), (outer[1].1 - bt).max(0.0)),
+        ((outer[2].0 - br).max(0.0), (outer[2].1 - bb).max(0.0)),
+        ((outer[3].0 - bl).max(0.0), (outer[3].1 - bb).max(0.0)),
+    ];
+    let ring = format!(
+        "{} {} f*",
+        rounded_path(rect, outer),
+        rounded_path(inner_rect, inner)
+    );
+    let (il, ib, iw, ih) = inner_rect;
+    let (ir, it) = (il + iw, ib + ih);
+    for side in [Side::Top, Side::Right, Side::Bottom, Side::Left] {
+        if widths.get(side) <= 0.0 || !drawable(fragment.border_style.get(side)) {
+            continue;
+        }
+        // The side's own region: its outer edge, and the two diagonals from
+        // the box's corners to the padding box's.
+        let polygon = match side {
+            Side::Top => [(left, top), (right, top), (ir, it), (il, it)],
+            Side::Right => [(right, top), (right, bottom), (ir, ib), (ir, it)],
+            Side::Bottom => [(right, bottom), (left, bottom), (il, ib), (ir, ib)],
+            Side::Left => [(left, bottom), (left, top), (il, it), (il, ib)],
+        };
+        let [a, b, c, d] = polygon;
+        set_fill(page, fragment.border_color.get(side));
+        page.raw(
+            format!(
+                "q {} {} m {} {} l {} {} l {} {} l h W n {ring} Q",
+                a.0, a.1, b.0, b.1, c.0, c.1, d.0, d.1
+            )
+            .as_bytes(),
+        );
+    }
+}
+
+/// A box's outline, `css-ui-4` §5: four filled bands outside the border edge,
+/// `outline-offset` out from it and `outline-width` wide.
+///
+/// **Rectangular around a rounded box.** §5 leaves it to the user agent
+/// whether an outline follows `border-radius`, and this one draws the
+/// rectangle, which is what CSS 2.1's outline was.
+fn draw_outline(page: &mut PageBuilder, fragment: &BoxFragment, frame: &Frame) {
+    let Some(outline) = fragment.outline else {
+        return;
+    };
+    if !drawable(outline.style) || outline.width <= 0.0 {
+        return;
+    }
+    let spread = outline.offset * PX_TO_PT;
+    let thickness = outline.width * PX_TO_PT;
+    let left = frame.x(fragment.x) - spread - thickness;
+    let top = frame.y(fragment.y) + spread + thickness;
+    let width = fragment.width * PX_TO_PT + 2.0 * (spread + thickness);
+    let height = fragment.height * PX_TO_PT + 2.0 * (spread + thickness);
+    if width <= 2.0 * thickness || height <= 2.0 * thickness {
+        // An offset negative enough to turn the outline inside out draws the
+        // whole rectangle.
+        set_fill(page, outline.color);
+        fill(page, left, top - height, width.max(0.0), height.max(0.0));
+        return;
+    }
+    set_fill(page, outline.color);
+    fill(page, left, top - thickness, width, thickness);
+    fill(page, left, top - height, width, thickness);
+    fill(page, left, top - height, thickness, height);
+    fill(
+        page,
+        left + width - thickness,
+        top - height,
+        thickness,
+        height,
+    );
 }
 
 /// Draws one replaced element's picture into its content box.

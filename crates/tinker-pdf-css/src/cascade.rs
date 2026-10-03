@@ -158,6 +158,17 @@ pub struct ComputedStyle {
     pub quotes: Quotes,
     /// `opacity`, `css-color-4` §15.1, clamped to `[0, 1]`.
     pub opacity: f64,
+    /// `border-*-*-radius`, `css-backgrounds-3` §5.1, in [`Corner::ALL`]'s
+    /// order.
+    pub border_radius: [Radius; 4],
+    /// `outline-width`, `css-ui-4` §5.2, in CSS pixels.
+    pub outline_width: f64,
+    /// `outline-style`, §5.3.
+    pub outline_style: OutlineStyle,
+    /// `outline-color`, §5.4; `None` is `currentColor`, which is `color`.
+    pub outline_color: Option<Color>,
+    /// `outline-offset`, §5.5, in CSS pixels.
+    pub outline_offset: f64,
     /// `visibility`
     pub visibility: Visibility,
     /// `text-decoration`
@@ -299,6 +310,12 @@ impl ComputedStyle {
             counter_set: Vec::new(),
             quotes: Quotes::Auto,
             opacity: 1.0,
+            border_radius: [Radius::ZERO; 4],
+            // §5.2's `medium`, which is `border-width`'s three pixels.
+            outline_width: 3.0,
+            outline_style: OutlineStyle::Border(BorderStyle::None),
+            outline_color: None,
+            outline_offset: 0.0,
             visibility: Visibility::Visible,
             text_decoration: TextDecoration::None,
             text_transform: TextTransform::None,
@@ -484,6 +501,20 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         // §15.1: *"any values outside the range 0.0 to 1.0 are clamped"*, at
         // computed-value time — so `opacity: 2` is valid CSS and is one.
         Property::Opacity(value) => style.opacity = value.clamp(0.0, 1.0),
+        Property::BorderRadius(corner, value) => {
+            style.border_radius[corner.index()] = Radius {
+                horizontal: value.horizontal.compute(font_size, root_font_size),
+                vertical: value.vertical.compute(font_size, root_font_size),
+            };
+        }
+        Property::OutlineWidth(value) => {
+            style.outline_width = px(*value, font_size, root_font_size).max(0.0);
+        }
+        Property::OutlineStyle(value) => style.outline_style = *value,
+        Property::OutlineColor(value) => style.outline_color = *value,
+        Property::OutlineOffset(value) => {
+            style.outline_offset = px(*value, font_size, root_font_size);
+        }
         Property::Visibility(value) => style.visibility = *value,
         Property::Display(value) => style.display = *value,
         Property::Float(value) => style.float = *value,
@@ -1868,6 +1899,14 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
         Longhand::CounterSet => into.counter_set = from.counter_set.clone(),
         Longhand::Quotes => into.quotes = from.quotes.clone(),
         Longhand::Opacity => into.opacity = from.opacity,
+        Longhand::BorderTopLeftRadius => into.border_radius[0] = from.border_radius[0],
+        Longhand::BorderTopRightRadius => into.border_radius[1] = from.border_radius[1],
+        Longhand::BorderBottomRightRadius => into.border_radius[2] = from.border_radius[2],
+        Longhand::BorderBottomLeftRadius => into.border_radius[3] = from.border_radius[3],
+        Longhand::OutlineWidth => into.outline_width = from.outline_width,
+        Longhand::OutlineStyle => into.outline_style = from.outline_style,
+        Longhand::OutlineColor => into.outline_color = from.outline_color,
+        Longhand::OutlineOffset => into.outline_offset = from.outline_offset,
         Longhand::Visibility => into.visibility = from.visibility,
         Longhand::Display => into.display = from.display,
         Longhand::Float => into.float = from.float,

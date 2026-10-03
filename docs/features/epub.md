@@ -131,7 +131,21 @@ and its glyphs, the last inside their marked-content sequences so the two
 kinds of bracket nest (`paint::Effects`, registered before the chapter's first
 page begins). Wherever nothing in the subtree paints over anything else in it,
 that is the group §15.1 composites; where something does, it is counted (see
-below). Borders, backgrounds, list markers and links are drawn;
+below). **`border-radius`** (`css-backgrounds-3` §5, the four longhands and
+the shorthand with `/`) rounds a box's background and border: each corner one
+cubic whose control points sit `4(√2−1)/3` along its tangents, horizontal
+percentages of the border box's width and vertical ones of its height, §5.5's
+one factor scaling all four corners when two on a side would overlap, the
+padding edge's radii the border edge's less the border width (§5.3), and each
+side's colour filled between the two shapes inside a clip from the outer
+corner to the inner one. A box cut by a page boundary rounds only its real
+ends — `box-decoration-break: slice` — though its percentages resolve against
+the fragment, the whole box's height being unknown on the page that draws its
+top. **`outline`** (`css-ui-4` §5, its four longhands and the shorthand) is
+four bands `outline-offset` out from the border edge, drawn after the text,
+moving nothing; it is rectangular around a rounded box, which §5 leaves to
+the user agent, and `outline-color: invert` is refused by value. Borders,
+backgrounds, list markers and links are drawn;
 **list markers are counters** (`css-lists-3` §4): `counter-reset`,
 `counter-increment` and `counter-set` are walked over the element tree in
 document order once the cascade is done (`tinker_pdf_css::counter`), with
@@ -352,7 +366,7 @@ postdate the tool's removal under ruling 13, so
   against `inherit` and `initial`, asserted on an inherited and a
   non-inherited property in the same fixture because either one alone agrees
   with two of the three keywords; and `unset` asserted to be exactly *not
-  declaring the property* over **all ninety longhands**, not a sample,
+  declaring the property* over **all ninety-eight longhands**, not a sample,
   because §7.1's definition and `ComputedStyle::inherit_from`'s behaviour are
   the same rule written twice. `revert` against `revert-layer` in one fixture
   with a user-agent rule and two author layers, where the two keywords have

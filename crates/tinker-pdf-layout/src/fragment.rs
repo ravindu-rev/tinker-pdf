@@ -44,6 +44,7 @@
 
 use crate::flow::{Abreast, BlockRecord, FloatRecord, Flow, Item, ItemKind};
 use crate::{BoxFragment, Layout, Limits, Options, Page, Refusal, ReplacedFragment, Warning};
+use tinker_pdf_css::property::LengthPercentage;
 
 /// Slack for a comparison against a page height, in points.
 ///
@@ -738,6 +739,12 @@ fn emit(
             continue;
         }
         if block.painted {
+            let height = (box_bottom - box_top).max(0.0);
+            // `box-decoration-break: slice`'s cut edges: the box began on an
+            // earlier page, or was cut inside its first item; it ends on a
+            // later one, or is cut inside its last.
+            let cut_top = from > head || box_top > head_y;
+            let cut_bottom = to < block.last || box_bottom < tail.y + tail.height;
             out.boxes.push(BoxFragment {
                 x: block.x,
                 // CSS 2.2 §9.4.3's offset, which the flow deliberately does not
@@ -745,11 +752,13 @@ fn emit(
                 // column and only its ink moves.
                 y: box_top + offset + block.dy,
                 width: block.width,
-                height: (box_bottom - box_top).max(0.0),
+                height,
                 background: block.background,
                 border_width: block.border_width,
                 border_style: block.border_style,
                 border_color: block.border_color,
+                radius: corner_radii(block, block.width, height, cut_top, cut_bottom),
+                outline: block.paint.as_ref().and_then(|paint| paint.outline),
                 anchor: block.anchor,
             });
         }
@@ -812,6 +821,64 @@ fn emit(
     }
 }
 
+/// A fragment's four corner radii, `css-backgrounds-3` §5, in CSS pixels.
+///
+/// §5.1 resolves a horizontal percentage against the border box's width and a
+/// vertical one against its height; §5.5 then scales **every** radius by one
+/// factor, the smallest `L / S` over the four sides where `S` is the sum of the
+/// two radii meeting that side and `L` its length, when that is below one — so
+/// a 30-pixel radius on a 40-pixel-high box becomes 20 at all four corners and
+/// not only at the two that collided, which keeps a pill shape round.
+fn corner_radii(
+    block: &BlockRecord,
+    width: f64,
+    height: f64,
+    cut_top: bool,
+    cut_bottom: bool,
+) -> [(f64, f64); 4] {
+    let Some(paint) = block.paint.as_ref() else {
+        return [(0.0, 0.0); 4];
+    };
+    let resolve = |length: LengthPercentage, of: f64| match length {
+        LengthPercentage::Px(px) => px.max(0.0),
+        LengthPercentage::Percent(percent) => (of * percent / 100.0).max(0.0),
+    };
+    let mut radii = paint.radius.map(|radius| {
+        (
+            resolve(radius.horizontal, width),
+            resolve(radius.vertical, height),
+        )
+    });
+    // `Corner::ALL`'s order: top-left, top-right, bottom-right, bottom-left.
+    if cut_top {
+        radii[0] = (0.0, 0.0);
+        radii[1] = (0.0, 0.0);
+    }
+    if cut_bottom {
+        radii[2] = (0.0, 0.0);
+        radii[3] = (0.0, 0.0);
+    }
+    let sides = [
+        (width, radii[0].0 + radii[1].0),
+        (height, radii[1].1 + radii[2].1),
+        (width, radii[2].0 + radii[3].0),
+        (height, radii[3].1 + radii[0].1),
+    ];
+    let mut factor: f64 = 1.0;
+    for (length, sum) in sides {
+        if sum > 0.0 {
+            factor = factor.min(length.max(0.0) / sum);
+        }
+    }
+    if factor < 1.0 {
+        for radius in &mut radii {
+            radius.0 *= factor;
+            radius.1 *= factor;
+        }
+    }
+    radii
+}
+
 /// Draws one band, or the part of one that belongs to this page.
 ///
 /// `offset` puts the band's local origin in the page's coordinates. A band
@@ -835,15 +902,20 @@ fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
             continue;
         }
         if block.painted {
+            let height = (box_bottom - box_top).max(0.0);
+            let cut_top = box_top > band.items[head].y;
+            let cut_bottom = box_bottom < tail.y + tail.height;
             out.boxes.push(BoxFragment {
                 x: block.x,
                 y: box_top + offset + block.dy,
                 width: block.width,
-                height: (box_bottom - box_top).max(0.0),
+                height,
                 background: block.background,
                 border_width: block.border_width,
                 border_style: block.border_style,
                 border_color: block.border_color,
+                radius: corner_radii(block, block.width, height, cut_top, cut_bottom),
+                outline: block.paint.as_ref().and_then(|paint| paint.outline),
                 anchor: block.anchor,
             });
         }

@@ -211,13 +211,13 @@ a picture reaching paper in this area is measured in pixels.
 | 2 | **The `background-*` image family.** `background-image`, `background-repeat`, `background-position`, `background-size` | A tiling `/Pattern` from the same `ImageData` path a replaced box takes; `UnimplementedProperty` stops naming the four; a reftest pair where the only difference is the background | M |
 | 3 | **`list-style-*`, `counter-reset`, `counter-increment`, `counters()`** | A scoped counter tree; `content: counter()` generates the marker's text; an ordered list numbers from its own `start`; `quotes` and the four quote keywords with it | M. **Counters and quotes done, 3 October 2026** (`tinker_pdf_css::counter`); `list-style-image`, `reversed()` and `quotes: auto`'s per-language marks left |
 | 4 | **`transform` and `opacity`** | A `cm` composed at paint from the transform list; group opacity as an `/ExtGState`; the two names leave `UNSUPPORTED_PROPERTIES` | M. **`opacity` done, 3 October 2026**, per fragment; the group over overlapping content is owed to the structure writer |
-| 5 | **`overflow`, `clip-path`, `border-radius`, `box-shadow`, `text-shadow`** | Each a clip or an ink the painter writes; the geometry asserted arithmetically, never against a recorded bitmap | L |
+| 5 | **`overflow`, `clip-path`, `border-radius`, `box-shadow`, `text-shadow`** | Each a clip or an ink the painter writes; the geometry asserted arithmetically, never against a recorded bitmap | L. **`border-radius` (and `outline`) done, 3 October 2026** |
 | 6 | **`writing-mode`, `direction`, `unicode-bidi` below the run** | Bidi whose unit is the visual line rather than the `TextRun`; a right-to-left line of two styled spans is one reordered line; the reading-order pin in `epub_shaped.rs` flipped to an assertion | L |
 | 7 | **`DocumentBuilder::from_html`** | The cascade, the layout engine and the painter reachable without an OCF container; held by the EPUB reftests, so the two callers cannot drift | M |
 
 Milestones 2 to 6 are scheduled by the fetched corpus's `UnimplementedProperty`
-counts, highest first — ruling 3, and not by interest. Sixty names are
-known and unimplemented against the 111 in `IMPLEMENTED_NAMES`; each landing deletes
+counts, highest first — ruling 3, and not by interest. Fifty-four names are
+known and unimplemented against the 121 in `IMPLEMENTED_NAMES`; each landing deletes
 its names from that table.
 
 ## Risks

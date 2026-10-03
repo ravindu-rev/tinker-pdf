@@ -118,6 +118,7 @@ pub mod limits;
 pub mod metrics;
 mod position;
 pub mod style;
+pub use style::Outline;
 pub mod table;
 pub mod text;
 pub mod uax14;
@@ -489,6 +490,22 @@ pub struct BoxFragment {
     pub border_style: Sides<BorderStyle>,
     /// `border-*-color`.
     pub border_color: Sides<Color>,
+    /// The four corners' radii in CSS pixels, `css-backgrounds-3` §5, in
+    /// `Corner::ALL`'s order — each `(horizontal, vertical)` — resolved
+    /// against **this fragment's** border box and scaled by §5.5's factor so
+    /// no two curves on a side overlap.
+    ///
+    /// A fragment cut at a page boundary has **square corners on the cut
+    /// edge**: `box-decoration-break: slice`, the initial value, draws the box
+    /// as though unbroken and slices it, so the curves are at the box's real
+    /// top and bottom and not at the page's. Percentages resolve against the
+    /// fragment rather than the whole box, which is where this differs from a
+    /// slice: the box's whole height is not known on the page that draws its
+    /// top.
+    pub radius: [(f64, f64); 4],
+    /// The outline, `css-ui-4` §5: drawn outside the border edge, moving no
+    /// box.
+    pub outline: Option<Outline>,
     /// The [`BoxNode::anchor`] of the box this decorates, carried unchanged.
     ///
     /// For the painter, which applies what belongs to an **element** rather

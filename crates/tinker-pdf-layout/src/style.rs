@@ -40,8 +40,9 @@ use tinker_pdf_css::property::{
     Clear, Color, ColumnCount, ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection,
     FlexWrap, Float, FontFamily, FontStyle, FontVariant, Gap, Inset, JustifyContent,
     LengthPercentage, LineHeight, ListStylePosition, ListStyleType, MarginValue, MaxSize, MinSize,
-    OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size, Spacing, TableLayout,
-    TextAlign, TextDecoration, TextTransform, VerticalAlign, Visibility, WhiteSpace, ZIndex,
+    OutlineStyle, OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Side, Sides, Size,
+    Spacing, TableLayout, TextAlign, TextDecoration, TextTransform, VerticalAlign, Visibility,
+    WhiteSpace, ZIndex,
 };
 
 use crate::metrics::FontRequest;
@@ -115,6 +116,16 @@ pub struct Consumed {
     pub border_color: Sides<Color>,
     /// `background-color`.
     pub background_color: Color,
+    /// The box's corners and outline, where it has either: `None` for the
+    /// box with square corners and no outline, which is nearly every box.
+    ///
+    /// **Boxed, and that is a stack measurement rather than a style.** A
+    /// `Consumed` lives in the frame of every recursion of
+    /// `flow::Builder::block`, and the frame is what the depth cap is sized
+    /// against: four radii and an outline unboxed are a hundred and seventy
+    /// bytes a level, and `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name`
+    /// overflowed its stack the first time they were written that way.
+    pub paint: Option<Box<BoxPaint>>,
     /// `page-break-before`, CSS 2.2 §13.3.1.
     pub page_break_before: PageBreak,
     /// `page-break-after`.
@@ -283,6 +294,11 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         border_style,
         border_color,
         background_color,
+        border_radius,
+        outline_width,
+        outline_style,
+        outline_color,
+        outline_offset,
         page_break_before,
         page_break_after,
         page_break_inside,
@@ -391,6 +407,14 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         border_style: *border_style,
         border_color: *border_color,
         background_color: *background_color,
+        paint: box_paint(
+            border_radius,
+            outline_width,
+            outline_style,
+            outline_color,
+            outline_offset,
+            color,
+        ),
         page_break_before: *page_break_before,
         page_break_after: *page_break_after,
         page_break_inside: *page_break_inside,
@@ -580,6 +604,69 @@ impl Consumed {
             LengthPercentage::Percent(percent) => (containing * percent / 100.0).max(0.0),
         }
     }
+}
+
+/// An outline, `css-ui-4` §5, resolved: `currentColor` is a colour by now.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Outline {
+    /// `outline-width`, CSS pixels.
+    pub width: f64,
+    /// `outline-offset`, CSS pixels, out from the border edge; negative draws
+    /// inside it.
+    pub offset: f64,
+    /// `outline-color`.
+    pub color: Color,
+    /// `outline-style`, with `auto` drawn solid.
+    pub style: BorderStyle,
+}
+
+/// A box's paint beyond its background and border: `css-backgrounds-3` §5's
+/// corners and `css-ui-4` §5's outline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoxPaint {
+    /// `border-*-*-radius`, in `Corner::ALL`'s order, percentages unresolved:
+    /// the box they are a percentage of is a fragment's, and a fragment is
+    /// decided at pagination.
+    pub radius: [Radius; 4],
+    /// The outline, where one is drawn at all: `None` for `outline-style:
+    /// none` or a zero width, which §5.2 makes the same.
+    pub outline: Option<Outline>,
+}
+
+/// [`Consumed::paint`], resolved at the one door.
+fn box_paint(
+    radius: &[Radius; 4],
+    width: &f64,
+    style: &OutlineStyle,
+    colour: &Option<Color>,
+    offset: &f64,
+    current: &Color,
+) -> Option<Box<BoxPaint>> {
+    // §5.3: `auto` is the user agent's to draw, and a solid line is that
+    // drawing here; `none` draws nothing whatever the width says, which is
+    // `border-width`'s rule and is resolved at this door for its reason.
+    let outline = match style {
+        OutlineStyle::Border(BorderStyle::None | BorderStyle::Hidden) => None,
+        _ if *width <= 0.0 => None,
+        style => Some(Outline {
+            width: *width,
+            offset: *offset,
+            // §5.4's initial `currentColor` is the element's `color`.
+            color: colour.unwrap_or(*current),
+            style: match style {
+                OutlineStyle::Auto => BorderStyle::Solid,
+                OutlineStyle::Border(style) => *style,
+            },
+        }),
+    };
+    let square = radius.iter().all(|corner| *corner == Radius::ZERO);
+    if square && outline.is_none() {
+        return None;
+    }
+    Some(Box::new(BoxPaint {
+        radius: *radius,
+        outline,
+    }))
 }
 
 /// CSS 2.2 §10.4's and §10.7's `min-width`/`min-height` as a used length.
