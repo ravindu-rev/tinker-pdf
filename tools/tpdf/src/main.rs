@@ -1,14 +1,18 @@
 //! `tpdf` — the engine's command-line front end.
 //!
-//! It exists for two reasons. It is how a person looks at what the engine
+//! It exists for three reasons. It is how a person looks at what the engine
 //! thinks of a file without writing Rust, which is most of debugging a corpus
-//! failure; and it is the thing a corpus runner invokes, so every capability
-//! the runner needs has to be reachable from here.
+//! failure; it is the thing a corpus runner invokes, so every capability the
+//! runner needs has to be reachable from here; and its write half (`writing`)
+//! is how a person merges, splits, rotates, encrypts, decrypts, attaches to,
+//! stamps and sanitises a document without writing Rust either — each a
+//! wrapper over the facade with no logic of its own (ruling 11).
 //!
 //! Argument parsing is hand-rolled along with everything else. It is a
 //! sub-command plus flags, which needs no library.
 
 mod images;
+mod writing;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -17,9 +21,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tinker_pdf::{
-    Bitmap, CosDocument, Dict, Document, LadderLevel, ObjRef, Object, Page, RenderOptions,
-    SimpleFontProvider, StreamObj, StructureTree, TextFormat, TextWriter, Tier, WriteMode,
-    WriteOptions, XrefEntry,
+    Bitmap, CosDocument, Dict, Document, FontPolicy, LadderLevel, ObjRef, Object, Page,
+    RenderOptions, Sanitise, SimpleFontProvider, StreamObj, StructureTree, TextFormat, TextWriter,
+    Tier, WriteMode, WriteOptions, XrefEntry,
 };
 
 const USAGE: &str = "\
@@ -38,6 +42,20 @@ usage:
   tpdf objects <file.pdf> [--object N [--stream [--raw]]] [--password P]
   tpdf check   <file.pdf>... [--strict] [--pdfa]
   tpdf probe   <file.pdf>... [--dpi D] [--fonts PATH]
+
+writing (each takes --font-policy subset|keep, and writes a new file):
+  tpdf merge    <a.pdf> <b.pdf>... --out FILE
+  tpdf split    <file.pdf> --out DIR [--pages LIST]
+  tpdf rotate   <file.pdf> --by DEGREES --out FILE [--page N | --pages LIST]
+  tpdf encrypt  <file.pdf> --owner-password O --out FILE [--user-password U]
+                           [--permissions P] [--entropy FILE] [--password P]
+  tpdf decrypt  <file.pdf> --out FILE [--password P]
+  tpdf attach   <file.pdf> --attach FILE --out FILE [--name NAME]
+                           [--mime TYPE] [--description TEXT]
+  tpdf stamp    <file.pdf> --stamp FILE --out FILE [--stamp-page N] [--under]
+                           [--page N | --pages LIST]
+  tpdf sanitise <file.pdf> --out FILE [--javascript] [--actions]
+                           [--embedded-files] [--metadata]
 
 options:
   --page N     one page, 1-based; the default is every page
@@ -60,6 +78,34 @@ options:
   --xml        the same model as XML
   --html       the same model as an HTML page that shows each line where the
                page puts it
+
+writing options:
+  --out FILE   the file a writing command writes; for split, a directory
+  --font-policy subset|keep
+               what happens to embedded font programs on the way out: cut to
+               the glyphs the document still draws (the default), or kept
+  --by DEGREES with rotate, a multiple of 90, clockwise, on top of the turn
+               each page already has
+  --owner-password O
+               with encrypt, the password that lifts every restriction;
+               required, and not empty
+  --user-password U
+               with encrypt, the password a reader needs to open the file
+               (default empty: anyone opens it, and the permissions ask)
+  --permissions P
+               with encrypt, /P as ISO 32000 Table 22 stores it (default -1,
+               everything permitted)
+  --entropy FILE
+               with encrypt, where the 48 random bytes come from (default the
+               system's /dev/urandom, where there is one)
+  --attach FILE, --name NAME, --mime TYPE, --description TEXT
+               with attach, the file, the name it is filed under (default its
+               own), its MIME type and its description
+  --stamp FILE, --stamp-page N, --under
+               with stamp, the document whose page is drawn, which page
+               (default 1), and beneath the page's content rather than over it
+  --javascript, --actions, --embedded-files, --metadata
+               with sanitise, what to take out; none of them means all four
 
 `--jobs` is the one flag that is meant to change nothing but the clock. A
 `Document` is `Send + Sync` and the pages of one are independent — each
@@ -130,6 +176,33 @@ the top padded to a byte. A soft mask's samples go beside them as
 profile as `.icc`. Nothing is converted to a picture format, because that
 would mean evaluating the colour space; the listing says how to read the
 bytes instead.
+
+The writing commands each make the editor calls their name says and save
+through the library's own save door, so each takes `--font-policy`, and each
+subsets the embedded fonts by default as the library does: a program cut down
+to the glyphs the document still draws no longer carries the outlines of the
+ones it does not. What the pass did is printed with every file written, and a
+program it left whole is named with the reason, because that program still
+carries every outline it had.
+
+Every one of them writes the whole file afresh, never an update appended to
+the old bytes: an update keeps the original as its prefix, so the pages a
+split left out or the scripts a sanitise removed would still be in the file.
+A signature over the original bytes does not cover the new ones.
+
+`merge` keeps the first file's catalog — outline, form, labels — and appends
+the pages of each later one, writing a resource those pages share once.
+`split` writes one file per item of `--pages`, or one per page, and each piece
+carries only what its pages reach, with one exception it does not fix: a page
+the outline, a named destination or a link still names stays in the file,
+outside the page tree. `split` is not a redaction.
+
+An encrypted input is refused by every writing command but `encrypt` and
+`decrypt`, because a rewrite that asks for no encryption writes the
+plaintext. `decrypt`, and `encrypt` over a file that already is, need the
+owner password unless the owner withheld nothing from the user: they would
+lift the restrictions, and the library reports those rather than enforcing
+them, so this is the place that honours them.
 ";
 
 fn main() -> ExitCode {
@@ -158,6 +231,14 @@ fn main() -> ExitCode {
         "objects" => run(&options, objects),
         "check" => check(&options),
         "probe" => probe(&options),
+        "merge" => writing::print(&options, writing::merge(&options)),
+        "split" => writing::print(&options, writing::split(&options)),
+        "rotate" => writing::print(&options, writing::rotate(&options)),
+        "encrypt" => writing::print(&options, writing::encrypt(&options)),
+        "decrypt" => writing::print(&options, writing::decrypt(&options)),
+        "attach" => writing::print(&options, writing::attach(&options)),
+        "stamp" => writing::print(&options, writing::stamp(&options)),
+        "sanitise" => writing::print(&options, writing::sanitise(&options)),
         other => Err(format!("unknown command `{other}`; try --help")),
     };
 
@@ -209,6 +290,36 @@ struct Options {
     record_version: bool,
     /// `--pages LIST`: inclusive ranges, 0-based. Exclusive with `--page`.
     page_ranges: Option<Vec<(u32, u32)>>,
+    /// `--font-policy`: what a command that rewrites a document does to its
+    /// embedded font programs on the way out. The facade's default, subset.
+    font_policy: FontPolicy,
+    /// `--by DEGREES`, for `rotate`: a quarter-turn multiple, clockwise.
+    by: Option<i64>,
+    /// `--user-password`, for `encrypt`: what a reader needs to open the file.
+    user_password: Option<String>,
+    /// `--owner-password`, for `encrypt`: what lifts the restrictions.
+    owner_password: Option<String>,
+    /// `--permissions P`, for `encrypt`: `/P` as Table 22 stores it.
+    permissions: Option<i32>,
+    /// `--entropy FILE`, for `encrypt`: where the 48 random bytes come from.
+    entropy: Option<String>,
+    /// `--attach FILE`, for `attach`.
+    attach: Option<String>,
+    /// `--name NAME`, for `attach`: the key the file is filed under.
+    name: Option<String>,
+    /// `--mime TYPE`, for `attach`: the embedded file stream's `/Subtype`.
+    mime: Option<String>,
+    /// `--description TEXT`, for `attach`: the file specification's `/Desc`.
+    description: Option<String>,
+    /// `--stamp FILE`, for `stamp`: the document whose page is drawn.
+    stamp: Option<String>,
+    /// `--stamp-page N`, for `stamp`: which of its pages, 0-based here.
+    stamp_page: u32,
+    /// `--under`, for `stamp`: beneath the page's content rather than over it.
+    under: bool,
+    /// `--javascript`, `--actions`, `--embedded-files` and `--metadata`, for
+    /// `sanitise`; none of them means all four.
+    sanitise: Sanitise,
 }
 
 /// `--pages 1-3,5` as inclusive 0-based ranges, in the order given.
@@ -257,6 +368,20 @@ impl Options {
             format: None,
             record_version: false,
             page_ranges: None,
+            font_policy: FontPolicy::default(),
+            by: None,
+            user_password: None,
+            owner_password: None,
+            permissions: None,
+            entropy: None,
+            attach: None,
+            name: None,
+            mime: None,
+            description: None,
+            stamp: None,
+            stamp_page: 0,
+            under: false,
+            sanitise: Sanitise::default(),
         };
 
         let mut index = 0;
@@ -333,6 +458,64 @@ impl Options {
                     options.format = Some(format);
                 }
                 "--pages" => options.page_ranges = Some(page_ranges(&value()?)?),
+                // The two values `FontPolicy` has, by the names it gives them.
+                // Anything else is refused: a typo that fell back to the
+                // default would subset a document somebody asked to keep
+                // whole, or the other way round.
+                "--font-policy" => {
+                    let raw = value()?;
+                    options.font_policy = match raw.as_str() {
+                        "subset" => FontPolicy::Subset,
+                        "keep" => FontPolicy::Keep,
+                        _ => {
+                            return Err(format!(
+                                "`--font-policy {raw}`: the policies are `subset` and `keep`"
+                            ))
+                        }
+                    };
+                }
+                // 7.7.3.3: `/Rotate` is a multiple of 90. The facade rounds
+                // anything else to the nearest quarter, which a person typing
+                // `--by 45` did not ask for, so it is refused here instead.
+                "--by" => {
+                    let raw = value()?;
+                    let degrees: i64 = raw
+                        .parse()
+                        .map_err(|_| format!("`--by {raw}` is not a number"))?;
+                    if degrees % 90 != 0 {
+                        return Err(format!("`--by {raw}` is not a quarter turn"));
+                    }
+                    options.by = Some(degrees);
+                }
+                "--user-password" => options.user_password = Some(value()?),
+                "--owner-password" => options.owner_password = Some(value()?),
+                "--permissions" => {
+                    let raw = value()?;
+                    options.permissions = Some(
+                        raw.parse()
+                            .map_err(|_| format!("`--permissions {raw}` is not a /P value"))?,
+                    );
+                }
+                "--entropy" => options.entropy = Some(value()?),
+                "--attach" => options.attach = Some(value()?),
+                "--name" => options.name = Some(value()?),
+                "--mime" => options.mime = Some(value()?),
+                "--description" => options.description = Some(value()?),
+                "--stamp" => options.stamp = Some(value()?),
+                "--stamp-page" => {
+                    let raw = value()?;
+                    let n: u32 = raw
+                        .parse()
+                        .map_err(|_| format!("`--stamp-page {raw}` is not a number"))?;
+                    options.stamp_page = n
+                        .checked_sub(1)
+                        .ok_or_else(|| "pages are numbered from 1".to_string())?;
+                }
+                "--under" => options.under = true,
+                "--javascript" => options.sanitise.javascript = true,
+                "--actions" => options.sanitise.actions = true,
+                "--embedded-files" => options.sanitise.embedded_files = true,
+                "--metadata" => options.sanitise.metadata = true,
                 _ if arg.starts_with("--") => return Err(format!("unknown option `{arg}`")),
                 _ => options.files.push(arg.to_string()),
             }

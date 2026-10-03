@@ -1550,15 +1550,29 @@ fix was to sharpen the injection rather than to shrug at the number.
 
 ## Tools
 
-- **`tpdf`** (`tools/tpdf`): debug CLI over the facade — `info`, `text`,
-  `render`, `fields`, `fonts`, `images`, `outline`, `objects`, `check`,
-  `probe`. `check --strict`
+- **`tpdf`** (`tools/tpdf`): the CLI over the facade. Ten commands read —
+  `info`, `text`, `render`, `fields`, `fonts`, `images`, `outline`,
+  `objects`, `check`, `probe` — and eight write: `merge`, `split`, `rotate`,
+  `encrypt`, `decrypt`, `attach`, `stamp`, `sanitise`. `check --strict`
   runs the validator and exits by its verdict; `probe` is what the corpus
   runner spawns, and its record carries the strict pass. `render` writes
   `<stem>-NNNN.png` through `Bitmap::to_png` — PNG always, with no flag for
   anything else: it wrote binary PNM until the encoder existed, and a debug
   tool with two output paths has one that is rarely taken and eventually
-  wrong.
+  wrong. The writers are wrappers over editor calls that save through
+  `write::save`, so each takes `--font-policy` and subsets by default
+  (`tools/tpdf/src/writing.rs`). Their tests call each command's function
+  rather than spawning the binary, reopen what it wrote through the facade
+  and hold it to the strict validator: pages and text in order after a merge,
+  a resource three pages share written once, a split piece carrying none of
+  the pages it left out, rotations on top of the existing turn, a whole face
+  cut by default and kept byte for byte under `keep`, each password opening
+  an encrypted file with its own authority and the same `--entropy` giving
+  the same bytes, an owner's restriction refusing `decrypt` from the user, an
+  attachment's bytes and `/Subtype` back as given, a stamp's text over or
+  under the page's, and each thing `sanitise` takes out gone from every
+  stream. Fourteen defects put back one at a time each fire one assertion or
+  two.
 - **`pdfcmp`** (`tools/pdfcmp`): the canonical perceptual comparator. Gates
   on the fraction of pixels where any channel moves more than a threshold —
   a glyph moving one pixel barely moves a mean, so the metric is changed

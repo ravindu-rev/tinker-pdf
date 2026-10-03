@@ -188,8 +188,9 @@ measurement rather than a number kept in step.
 | `tinker-pdf-layout` | box model, fragmentation, line breaking | 13 700 | [epub](features/epub.md) | `layout` |
 | `tinker-pdf-ffi` | C ABI | 900 | [bindings](features/bindings.md) | — |
 
-Tools: `tpdf` (debug CLI over the facade, whose `render` writes a `.png` a
-page through `Bitmap::to_png`) and `pdfcmp` (perceptual comparator), both
+Tools: `tpdf` (the CLI over the facade, whose `render` writes a `.png` a
+page through `Bitmap::to_png` and whose writing commands save through
+`write::save`) and `pdfcmp` (perceptual comparator), both
 described in [verification.md](verification.md) and both on the facade and
 nothing below it — `xtask`'s `TOOLS` table enforces that, so a tool exercises
 what a user gets rather than reaching past the API into a leaf. There is no

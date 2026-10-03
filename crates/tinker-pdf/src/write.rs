@@ -88,21 +88,21 @@
 //! [`SubsetOutcome::removed`] is the one-call form of the question
 //! "is the disclosure out of this file".
 //!
-//! # `tpdf` has nowhere to put the flag yet, and that is a finding
+//! # `tpdf`'s flag arrived with its write half
 //!
-//! The roadmap row this module closes asked for a `tpdf` flag as well. There
-//! is no place for one: all nine subcommands — `info`, `text`, `render`,
-//! `fields`, `fonts`, `outline`, `objects`, `check`, `probe` — are read-only,
-//! and none of them writes a PDF. The three `DocumentEditor::save` calls
-//! inside `tpdf` are `probe`'s rotate-and-crop relations and `check --strict`,
-//! which rewrite **in memory to measure**; a font policy on those would change
-//! what they measure rather than what a user gets, and `check --strict` in
-//! particular has to validate the document the reader saw and not a smaller
-//! one. So the flag waits for the write half of the CLI, which is its own
-//! roadmap row (`docs/ROADMAP.md`, tier 5, "A user-facing CLI") and now
-//! carries the font policy in its exit criterion. Ruling 11 is why that is the
-//! right row: a subcommand is a wrapper over this function with no logic of
-//! its own, so it cannot land before the door it wraps has a CLI at all.
+//! The roadmap row this module closes asked for a `tpdf` flag as well, and
+//! when it closed there was no place for one: every subcommand was read-only.
+//! The flag waited for the CLI's write half, its own roadmap row, rather than
+//! arriving before the door it wraps — ruling 11 makes a subcommand a wrapper
+//! over this function with no logic of its own. That half has landed: `merge`,
+//! `split`, `rotate`, `encrypt`, `decrypt`, `attach`, `stamp` and `sanitise`
+//! all save through [`save`] and all take `--font-policy subset|keep`, whose
+//! default is this module's (`tools/tpdf/src/writing.rs`). The other
+//! `DocumentEditor::save` calls inside `tpdf` — `probe`'s rotate-and-crop
+//! relations and `check --strict` — still rewrite **in memory to measure**,
+//! and take no policy: one there would change what they measure rather than
+//! what a user gets, and `check --strict` in particular has to validate the
+//! document the reader saw and not a smaller one.
 //!
 //! # Images, the second pass on this door
 //!

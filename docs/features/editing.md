@@ -656,6 +656,19 @@ if report.untouched.is_empty() {
 }
 ```
 
+**From the command line.** `tpdf`'s write half is these calls and nothing
+more (ruling 11, `tools/tpdf/src/writing.rs`): `merge` is `import_page` for
+every page of each later file, `split` is `keep_pages` per piece, `rotate` is
+`rotate_page`, `attach` is `attach_file`, `stamp` is `import_page_as_form`
+and then `stamp` per page, `sanitise` is `sanitise` with the flags as the
+`Sanitise` fields and none of them meaning `Sanitise::ALL`, and `encrypt` and
+`decrypt` change only `WriteOptions::encryption`. Every one saves through
+`write::save` as a rewrite and takes `--font-policy subset|keep`, defaulting
+to the facade's subset and printing the report above, a program left whole
+named with its reason. `split` sets `garbage_collect` and `merge`
+`deduplicate_streams`, the options `keep_pages`' and `import_page`'s own
+documentation pair them with.
+
 ## Refused by name
 
 | What | How it shows | Why | See |
@@ -681,7 +694,7 @@ if report.untouched.is_empty() {
 | Subsetting a font written **directly** into a resource dictionary rather than by reference | whole face, `NotAnObject` (`a_font_written_directly_into_the_resources_is_left_whole_and_reported`) | there is no object to key glyph usage by; the refusal also protects a program such a font *shares* with one that does have an object, which would otherwise be cut to the other font's glyphs | — |
 | Subsetting a program a `/FontDescriptor` embeds that **no font dictionary names** | whole face, `NoFontNamesIt` (`a_program_no_font_dictionary_names_is_left_whole_and_reported`) | there is no font, so no encoding and no glyph usage — nothing to subset it against. It is *reported* because a `Rewrite` keeps unreferenced objects unless `garbage_collect` asks otherwise, so every outline is still in the output; it was silently invisible until the corpus census counted 73 of them across eight of 5 605 documents | 9.8.1 |
 | Running the subsetter automatically from `DocumentEditor::save` | it cannot: `save` takes `&self` and the pass rewrites the editor, and `WriteOptions` is a crate below the interpreter that drives the walk. That door writes every program through as it arrived and does not offer to do otherwise | a flag the crate carrying it cannot act on would read as done and do nothing, on the one path where that is a disclosure. The switch is `tinker_pdf::write::SaveOptions::fonts`, which **defaults to subsetting** | [writing](writing.md) |
-| Running the subsetter from `tpdf` | nowhere to put it: all ten subcommands are read-only, so the CLI has no write path for a flag to attach to | tier 5's "A user-facing CLI" [roadmap](../ROADMAP.md) row owns the write half and now carries the font policy in its exit criterion, so the flag arrives with the door rather than before it (ruling 11: a subcommand is a wrapper over the facade with no logic of its own) | — |
+| Dropping every reference to a page `keep_pages` or `delete_page` removed | the page leaves the page tree and nothing else: an outline item, a named destination, a link, the structure tree or `/OpenAction` that names it still does, so a rewrite keeps the page and its content outside the tree, and `garbage_collect` keeps them too, because they are reached — page 6 of `outline-3level.pdf` kept alone still carries the four pages its outline names (`tools/tpdf/src/writing.rs`'s `a_page_the_outline_names_stays_in_a_piece_that_dropped_it`, found through `tpdf split`) | which references to null and which entries to drop — an outline item, a link annotation, a structure element — is a sweep over every object the editor has with a decision per kind, and none is made yet. **Not permanent**: owed in the ROADMAP's CLI row. Until it lands, a document cut down with `keep_pages` is not a redaction | 7.7.3, 12.3 |
 | Keeping `/Info` and the XMP packet in step | each `/Info` setter and `set_xmp_metadata` returns `MetadataSync::OtherHalfUnchanged` when the other half exists and was left as it was (`a_caller_supplied_packet_is_written_verbatim_and_uncompressed`) | `tinker-pdf-cos` neither parses nor rewrites XML, and deriving `/Info` from a caller's packet would be a second XMP reader; the caller who is told is the one who can make them agree | [document model](document-model.md) |
 | Page labels with no range at page 0, past the last page, numbering from 0, or two at one page | `PageLabelError`, nothing written (`page_label_refusals_write_nothing`) | 12.4.2 requires page 0's entry and Table 159 a `/St` of at least 1; which of two ranges at one page the caller meant is theirs to say | 12.4.2 |
 | A second attachment under a name already filed | `AttachError::NameTaken`, nothing written | two entries under one key is a tree a reader resolves by whichever it reaches first | 7.9.6 |
