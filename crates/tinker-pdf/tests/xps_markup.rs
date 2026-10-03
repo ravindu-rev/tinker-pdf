@@ -38,6 +38,22 @@
 //! | a run's stop alphas are ignored | 1 |
 //! | the census reads no soft mask | 1 |
 //!
+//! # Counted injection, 18.3.1.2's `ColorInterpolationMode`
+//!
+//! Over this file and `xps_conservation.rs`, whose sweep holds
+//! `tests/xps_rows/wpf-colour-interpolation.xps`; the writer's sampled
+//! function is counted in `tinker-pdf-cos`'s own test.
+//!
+//! | Defect injected | Tests that failed |
+//! | --- | ---: |
+//! | `ScRgbLinearInterpolation` blends in sRGB, as it did | 2 |
+//! | the linear blend is not re-encoded to sRGB | 2 |
+//! | the alpha is blended in linear light too | 1 |
+//! | the census reads no middle out of a sampled function | 1 |
+//! | a sampled table that does not add up is accepted | 1 |
+//! | an axis of one sample is accepted | 1 |
+//! | the samples are written little-endian | 1 |
+//!
 //! # And why the assertions are on the content stream
 //!
 //! Gap 30's geometry section keeps the flip in **one** `cm` on purpose, *"so
@@ -1206,6 +1222,67 @@ fn a_stroke_with_differing_stop_alphas_is_masked() {
     // stroke outside the shape is inside the mask's box.
     let red = f64::from(red_at(body, 60.0, 108.0));
     assert!((red - 255.0 * 0.75).abs() < 14.0, "{red}");
+}
+
+/// A black-to-white linear gradient over 100 units in a given
+/// `ColorInterpolationMode`, over the page's white.
+fn ramp_in(mode: &str, stops: &str) -> String {
+    format!(
+        r##"<Path Data="M0,0L100,0 100,100 0,100Z"><Path.Fill><LinearGradientBrush StartPoint="0,0" EndPoint="100,0" MappingMode="Absolute" ColorInterpolationMode="{mode}"><LinearGradientBrush.GradientStops>{stops}</LinearGradientBrush.GradientStops></LinearGradientBrush></Path.Fill></Path>"##
+    )
+}
+
+/// **18.3.1.2's `ScRgbLinearInterpolation` blends in linear light**: halfway
+/// from black to white is half the light, which sRGB encodes as 0.7354 —
+/// 188 of 255 — where `SRgbLinearInterpolation` gives 128. A quarter of the
+/// way is 0.25 of the light, 137, against 64.
+///
+/// *Since the mode is drawn*: it used to be interpolated in sRGB and named
+/// approximate.
+#[test]
+fn sc_rgb_interpolation_blends_in_linear_light() {
+    let stops = r##"<GradientStop Color="#FF000000" Offset="0" /><GradientStop Color="#FFFFFFFF" Offset="1" />"##;
+    let linear = ramp_in("ScRgbLinearInterpolation", stops);
+    let srgb = ramp_in("SRgbLinearInterpolation", stops);
+    assert_eq!(body_defects(&linear), [], "drawn exactly");
+    for (x, light, gamma) in [(50.0, 188.0, 128.0), (25.0, 137.0, 64.0)] {
+        let got = f64::from(red_at(&linear, x, 50.0));
+        assert!((got - light).abs() < 6.0, "linear light at {x}: {got}");
+        let got = f64::from(red_at(&srgb, x, 50.0));
+        assert!((got - gamma).abs() < 6.0, "sRGB at {x}: {got}");
+    }
+    let document = open(&package(&linear)).expect("an XPS");
+    let raw = String::from_utf8_lossy(document.cos().bytes()).into_owned();
+    assert!(raw.contains("/FunctionType 0"), "a sampled ramp: {raw}");
+}
+
+/// A `ColorInterpolationMode` 18.3.1.2 does not name is blended as the
+/// default and named approximate; the two it names are not.
+#[test]
+fn a_colour_interpolation_mode_18_3_1_2_does_not_name_is_named() {
+    let stops = r##"<GradientStop Color="#FF000000" Offset="0" /><GradientStop Color="#FFFFFFFF" Offset="1" />"##;
+    assert_eq!(
+        body_defects(&ramp_in("LabInterpolation", stops)),
+        [XpsElementDefect::BrushApproximated]
+    );
+    let got = f64::from(red_at(&ramp_in("LabInterpolation", stops), 50.0, 50.0));
+    assert!((got - 128.0).abs() < 6.0, "blended as the default: {got}");
+    assert_eq!(body_defects(&ramp_in("SRgbLinearInterpolation", stops)), []);
+}
+
+/// The mode changes how **colours** blend and not the alpha, which is a
+/// coverage: red fading from opaque to clear in linear light is half as
+/// opaque halfway, over black 128 of 255 rather than 188.
+#[test]
+fn sc_rgb_interpolation_leaves_the_alpha_linear() {
+    let stops = r##"<GradientStop Color="#FFFF0000" Offset="0" /><GradientStop Color="#00FF0000" Offset="1" />"##;
+    let body = format!(
+        r##"<Path Fill="#FF000000" Data="M0,0L100,0 100,100 0,100Z" />{}"##,
+        ramp_in("ScRgbLinearInterpolation", stops)
+    );
+    assert_eq!(body_defects(&body), []);
+    let red = f64::from(red_at(&body, 50.0, 50.0));
+    assert!((red - 128.0).abs() < 8.0, "{red}");
 }
 
 /// One alpha on every stop is still one constant alpha, and no mask.

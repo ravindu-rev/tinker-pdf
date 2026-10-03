@@ -619,6 +619,30 @@ pub enum Function {
         /// deepest.
         program: Vec<CalculatorOp>,
     },
+    /// Type 0, a sampled table (7.10.2), sixteen bits a sample and 7.10.2's
+    /// default linear interpolation (`/Order 1`) between them — **one input**.
+    ///
+    /// What a ramp no closed form states is made of: a gradient interpolated
+    /// in a space the shading's is not. `/Encode` and `/Decode` are 7.10.2's
+    /// defaults — the input across the whole table, and the samples across
+    /// `range` — so a sample of `0` is the bottom of its output's range and
+    /// `65535` the top.
+    ///
+    /// One input, because this repository's reader evaluates a type 0 table
+    /// along its first input and no other: a `/DeviceN` tint transform
+    /// written as one would be read back wrong here, which is the reason
+    /// `features/creation.md` gives for offering none at all until now.
+    Sampled {
+        /// `/Domain`: one `[lo hi]` per input.
+        domain: Vec<[f64; 2]>,
+        /// `/Range`: one `[lo hi]` per output.
+        range: Vec<[f64; 2]>,
+        /// `/Size`: how many samples along each input, each at least two.
+        size: Vec<u32>,
+        /// The samples, the first input varying fastest (7.10.2), each
+        /// output's value for one grid point together, written big-endian.
+        samples: Vec<u16>,
+    },
 }
 
 /// One instruction of a [`Function::Calculator`] program (7.10.5).
@@ -1322,6 +1346,44 @@ impl Function {
                     }
                     for sub in functions {
                         stack.push((sub, depth + 1, 1));
+                    }
+                }
+                Function::Sampled {
+                    domain,
+                    range,
+                    size,
+                    samples,
+                } => {
+                    // 7.10.2 makes `/Domain`, `/Range` and `/Size` required,
+                    // one entry per input or output — and one input, for the
+                    // reason on the variant.
+                    if domain.len() != inputs
+                        || size.len() != inputs
+                        || range.len() != outputs
+                        || inputs != 1
+                        || outputs == 0
+                    {
+                        return false;
+                    }
+                    let ordered = |pair: &[f64; 2]| all_finite(pair) && pair[0] <= pair[1];
+                    if !domain.iter().all(|pair| ordered(pair) && pair[0] < pair[1])
+                        || !range.iter().all(ordered)
+                    {
+                        return false;
+                    }
+                    // Two samples an axis at least: one is a table with nothing
+                    // to interpolate between, which 7.10.2's `/Encode` default
+                    // would map the whole domain onto.
+                    if size.iter().any(|count| *count < 2) {
+                        return false;
+                    }
+                    let points = size.iter().try_fold(1usize, |total, count| {
+                        usize::try_from(*count)
+                            .ok()
+                            .and_then(|c| total.checked_mul(c))
+                    });
+                    if points.and_then(|p| p.checked_mul(outputs)) != Some(samples.len()) {
+                        return false;
                     }
                 }
                 Function::Calculator {
@@ -4295,6 +4357,36 @@ impl DocumentBuilder {
                             .collect(),
                     ),
                 );
+            }
+            Function::Sampled {
+                domain,
+                range,
+                size,
+                samples,
+            } => {
+                // 7.10.2: a type 0 function is a **stream**, its samples the
+                // stream's data.
+                let pairs = |values: &[[f64; 2]]| {
+                    Object::Array(
+                        values
+                            .iter()
+                            .flat_map(|pair| [Object::Real(pair[0]), Object::Real(pair[1])])
+                            .collect(),
+                    )
+                };
+                dict.insert(self.names.intern(b"FunctionType"), Object::Int(0));
+                dict.insert(self.names.intern(b"Domain"), pairs(domain));
+                dict.insert(self.names.intern(b"Range"), pairs(range));
+                dict.insert(
+                    self.names.intern(b"Size"),
+                    Object::Array(size.iter().map(|n| Object::Int(i64::from(*n))).collect()),
+                );
+                dict.insert(self.names.intern(b"BitsPerSample"), Object::Int(16));
+                let data: Vec<u8> = samples.iter().flat_map(|s| s.to_be_bytes()).collect();
+                let reference = self.allocate();
+                self.objects
+                    .insert_stream(reference.num, StreamData { dict, data });
+                return reference;
             }
             Function::Calculator {
                 domain,
@@ -9617,6 +9709,69 @@ mod tint_tests {
             .map(|(name, _)| name.as_slice())
             .collect();
         assert_eq!(registered, [&b"Im1"[..]], "nothing was registered as Im0");
+    }
+
+    /// **7.10.2's sampled function**: written as a stream of sixteen-bit
+    /// samples under `/Size` and `/BitsPerSample 16`, and refused where its
+    /// table does not add up — a sample short, an axis of one point, a domain
+    /// of no width, an arity that is not the caller's, or a second input this
+    /// reader would not read.
+    #[test]
+    fn a_sampled_function_writes_its_table_and_refuses_one_that_does_not_add_up() {
+        let table = |size: Vec<u32>, samples: Vec<u16>| Function::Sampled {
+            domain: vec![[0.0, 1.0]; size.len()],
+            range: vec![[0.0, 1.0]; 3],
+            size,
+            samples,
+        };
+        // One input at six points, three outputs each: eighteen samples.
+        let good = table(vec![6], (0..18).collect());
+        assert!(good.is_valid(1, 3));
+        assert!(!good.is_valid(2, 3), "one input, not two");
+        assert!(!good.is_valid(1, 1), "three outputs, not one");
+        assert!(
+            !table(vec![6], (0..17).collect()).is_valid(1, 3),
+            "a sample short"
+        );
+        assert!(
+            !table(vec![1], (0..3).collect()).is_valid(1, 3),
+            "one point"
+        );
+        assert!(
+            !table(vec![2, 3], (0..18).collect()).is_valid(2, 3),
+            "two inputs, which this reader reads along the first alone"
+        );
+        assert!(
+            !Function::Sampled {
+                domain: vec![[1.0, 1.0]],
+                range: vec![[0.0, 1.0]; 3],
+                size: vec![6],
+                samples: (0..18).collect(),
+            }
+            .is_valid(1, 3),
+            "a domain of no width"
+        );
+
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_separation_color_space(b"S", b"A", DeviceSpace::Rgb, &good));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.set_fill_tint(b"S", &[0.5]));
+        });
+        let bytes = builder.finish();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("/FunctionType 0"), "{text}");
+        assert!(text.contains("/BitsPerSample 16"), "{text}");
+        assert!(text.contains("/Size [6]"), "{text}");
+        // The samples, big-endian: 0, 1, 2 … as 00 00 00 01 00 02.
+        let at = bytes
+            .windows(6)
+            .position(|w| w == [0, 0, 0, 1, 0, 2])
+            .expect("the samples are the stream's data");
+        assert_eq!(
+            &bytes[at + 34..at + 36],
+            &[0, 17],
+            "and all eighteen of them"
+        );
     }
 
     /// The calculator checks, one refusal at a time.

@@ -367,6 +367,7 @@ fn a_gradient_axis_the_wrong_way_round_is_reported() {
             geometry,
             stops: vec![(0.0, RED), (1.0, GREEN)],
             alphas: None,
+            middles: Vec::new(),
         },
         bounds: Rect::of(0.0, 0.0, 400.0, 200.0),
         alpha: 1.0,
@@ -397,6 +398,7 @@ fn a_radial_gradient_read_as_an_axial_one_is_a_paint_kind() {
                 geometry: vec![120.0, 120.0, 0.0, 150.0, 150.0, 150.0],
                 stops: vec![(0.0, RED), (1.0, BLUE)],
                 alphas: None,
+                middles: Vec::new(),
             },
             bounds: Rect::of(0.0, 0.0, 300.0, 300.0),
             alpha: 1.0,
@@ -409,6 +411,7 @@ fn a_radial_gradient_read_as_an_axial_one_is_a_paint_kind() {
         geometry: vec![120.0, 120.0, 0.0, 150.0, 150.0, 150.0],
         stops: vec![(0.0, RED), (1.0, BLUE)],
         alphas: None,
+        middles: Vec::new(),
     };
 
     let verdict = conserve(&markup, &document);
@@ -432,6 +435,7 @@ fn stop_alphas_dropped_or_reversed_are_reported() {
             geometry: vec![0.0, 0.0, 400.0, 200.0],
             stops: vec![(0.0, RED), (1.0, RED)],
             alphas,
+            middles: Vec::new(),
         },
         bounds: Rect::of(0.0, 0.0, 400.0, 200.0),
         alpha: 1.0,
@@ -453,6 +457,35 @@ fn stop_alphas_dropped_or_reversed_are_reported() {
     assert!(conserve(&markup, &markup).holds());
 }
 
+/// **A ramp blended in the wrong space.**
+///
+/// Its stops are all where the markup put them and the colour between them is
+/// not: 18.3.1.2's `ColorInterpolationMode` decides nothing at a stop and
+/// everything halfway, which is what the census compares.
+#[test]
+fn a_ramp_blended_in_the_wrong_space_is_reported() {
+    let mark = |middle: [f64; 3]| Mark {
+        paint: Paint::Gradient {
+            kind: Gradient::Linear,
+            geometry: vec![0.0, 0.0, 400.0, 200.0],
+            stops: vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])],
+            alphas: None,
+            middles: vec![(0.5, middle)],
+        },
+        bounds: Rect::of(0.0, 0.0, 400.0, 200.0),
+        alpha: 1.0,
+    };
+    // Halfway from black to white: 0.7354 in linear light, 0.5 in sRGB.
+    let markup = one(vec![mark([0.7354; 3])], Vec::new());
+    let verdict = conserve(&markup, &one(vec![mark([0.5; 3])], Vec::new()));
+    assert!(
+        matches!(verdict.divergences.as_slice(), [Divergence::Middles { .. }]),
+        "{:?}",
+        verdict.divergences
+    );
+    assert!(conserve(&markup, &one(vec![mark([0.7360; 3])], Vec::new())).holds());
+}
+
 /// **A stop the document lost, and a radius taken from the wrong one.**
 ///
 /// A three-stop ramp read as two is a gradient that still runs from the right
@@ -466,6 +499,7 @@ fn a_gradient_that_lost_a_stop_is_reported_with_both_stop_lists() {
                 geometry: vec![0.0, 0.0, 400.0, 200.0],
                 stops: vec![(0.0, RED), (0.5, GREEN), (1.0, BLUE)],
                 alphas: None,
+                middles: Vec::new(),
             },
             bounds: Rect::of(0.0, 0.0, 400.0, 200.0),
             alpha: 1.0,
@@ -1280,6 +1314,7 @@ const DERIVED: &[&str] = &[
     // with its page replaced (`tests/xps_rows/README.md`).
     "xps_rows/wpf-style-simulations.xps",
     "xps_rows/wpf-stop-alphas.xps",
+    "xps_rows/wpf-colour-interpolation.xps",
 ];
 
 /// **An interleaved package conserves, and states the census of the package

@@ -101,3 +101,32 @@ write(
     'Data="M0,0L300,0 300,300 0,300Z" />'
     + path("u", 600),
 )
+
+# 18.3.1.2's two interpolation modes over the same stops: sRGB stated, then
+# scRGB over three stops, a hard edge, a radial and fading alpha.
+SCRGB = 'ColorInterpolationMode="ScRgbLinearInterpolation"'
+THREE = stop("#FFDC143C", "0") + stop("#FFFFD700", "0.5") + stop("#FF2E8B57", "1")
+write(
+    "wpf-colour-interpolation.xps",
+    "<FixedPage.Resources><ResourceDictionary>"
+    + linear("s", THREE, 'ColorInterpolationMode="SRgbLinearInterpolation"')
+    + linear("l", THREE, SCRGB)
+    + linear(
+        "h",
+        stop("#FF000000", "0") + stop("#FF000000", "0.5") + stop("#FFFFFFFF", "0.5")
+        + stop("#FF191970", "1"),
+        SCRGB,
+    )
+    + '<RadialGradientBrush x:Key="r" MappingMode="Absolute" SpreadMethod="Pad" %s '
+    'Center="150,150" RadiusX="150" RadiusY="150" GradientOrigin="120,120">'
+    "<RadialGradientBrush.GradientStops>%s%s</RadialGradientBrush.GradientStops>"
+    "</RadialGradientBrush>" % (SCRGB, stop("#FFFFFFFF", "0.25"), stop("#FF191970", "0.75"))
+    + linear("a", stop("#FFDC143C", "0") + stop("#002E8B57", "1"), SCRGB)
+    + "</ResourceDictionary></FixedPage.Resources>"
+    + path("s", 40)
+    + path("l", 160)
+    + path("h", 280)
+    + '<Path Fill="{StaticResource r}" RenderTransform="1,0,0,1,100,400" '
+    'Data="M0,0L300,0 300,300 0,300Z" />'
+    + path("a", 740),
+)

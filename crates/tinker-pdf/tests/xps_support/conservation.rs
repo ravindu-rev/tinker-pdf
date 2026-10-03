@@ -239,6 +239,18 @@ pub enum Paint {
         /// as it does each colour component, and a mask over a ramp is the one
         /// PDF construction that says so.
         alphas: Option<Vec<(f64, f64)>>,
+        /// The colour halfway along each interval between stops, as
+        /// `(offset, colour)`, the ends padded to `0` and `1` as 15.4.2 pads
+        /// them and intervals narrower than a thousandth left out.
+        ///
+        /// The stops are where a ramp is pinned and these are how it bends:
+        /// 18.3.1.2's `ColorInterpolationMode` changes nothing at a stop and
+        /// everything between, so a census of stops alone conserves a ramp
+        /// blended in the wrong space. The markup side computes each from the
+        /// clause — the plain mean in sRGB, the mean of the linear light
+        /// re-encoded in scRGB — and the document side evaluates the
+        /// function there.
+        middles: Vec<(f64, [f64; 3])>,
     },
     /// A picture, at the pixel count of the part it came from, over the
     /// rectangle it covers in user space.
@@ -908,6 +920,8 @@ enum Brush {
         stops: Vec<(f64, [f64; 3])>,
         /// Where the stops' alphas differ, each stop's.
         alphas: Option<Vec<(f64, f64)>>,
+        /// See [`Paint::Gradient::middles`].
+        middles: Vec<(f64, [f64; 3])>,
         /// The one alpha the stops share, times the brush's `Opacity`; the
         /// `Opacity` alone where they differ.
         alpha: f64,
@@ -953,15 +967,75 @@ fn gradient_brush(kind: Gradient, geometry: Vec<f64>, attributes: &str, inner: &
     let opacity = attribute(attributes, "Opacity")
         .and_then(|o| o.parse::<f64>().ok())
         .unwrap_or(1.0);
+    // 18.3.1.1's artificial stops: a gradient whose stops do not reach 0 or 1
+    // takes its nearest stop's colour out to them.
+    let mut read = read;
+    read.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if let (Some(first), Some(last)) = (read.first().copied(), read.last().copied()) {
+        if first.0 > 0.0 {
+            read.insert(0, (0.0, first.1, first.2));
+        }
+        if last.0 < 1.0 {
+            read.push((1.0, last.1, last.2));
+        }
+    }
     let uniform = read.first().map_or(1.0, |stop| stop.2);
     let varying = read.iter().any(|stop| stop.2 != uniform);
+    let linear_light =
+        attribute(attributes, "ColorInterpolationMode") == Some("ScRgbLinearInterpolation");
     Brush::Gradient {
         kind,
         geometry,
         stops: read.iter().map(|stop| (stop.0, stop.1)).collect(),
         alphas: varying.then(|| read.iter().map(|stop| (stop.0, stop.2)).collect()),
         alpha: if varying { opacity } else { uniform * opacity },
+        middles: stated_middles(&read, linear_light),
     }
+}
+
+/// [`Paint::Gradient::middles`], from the markup's stops, by 18.3.1.2.
+fn stated_middles(read: &[(f64, [f64; 3], f64)], linear_light: bool) -> Vec<(f64, [f64; 3])> {
+    // IEC 61966-2-1 both ways, written out here rather than borrowed.
+    let decode = |c: f64| {
+        if c <= 0.040_45 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let encode = |l: f64| {
+        if l <= 0.003_130_8 {
+            l * 12.92
+        } else {
+            1.055 * l.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    let mut points: Vec<(f64, [f64; 3])> = read.iter().map(|stop| (stop.0, stop.1)).collect();
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if let (Some(first), Some(last)) = (points.first().copied(), points.last().copied()) {
+        if first.0 > 0.0 {
+            points.insert(0, (0.0, first.1));
+        }
+        if last.0 < 1.0 {
+            points.push((1.0, last.1));
+        }
+    }
+    points
+        .windows(2)
+        .filter(|pair| pair[1].0 - pair[0].0 >= 1e-3)
+        .map(|pair| {
+            let (a, b) = (pair[0].1, pair[1].1);
+            let mut mid = [0.0; 3];
+            for (channel, slot) in mid.iter_mut().enumerate() {
+                *slot = if linear_light {
+                    encode((decode(a[channel]) + decode(b[channel])) / 2.0)
+                } else {
+                    (a[channel] + b[channel]) / 2.0
+                };
+            }
+            ((pair[0].0 + pair[1].0) / 2.0, mid)
+        })
+        .collect()
 }
 
 /// One brush element, from its start tag and everything under it.
@@ -1332,12 +1406,14 @@ fn path_mark(
             stops,
             alphas,
             alpha,
+            middles,
         } => (
             Paint::Gradient {
                 kind,
                 geometry,
                 stops,
                 alphas,
+                middles,
             },
             alpha,
         ),
@@ -1583,8 +1659,12 @@ fn array(cos: &CosDocument, dict: &Dict, name: &[u8]) -> Option<Vec<f64>> {
 /// Type 2 is one interpolation and states two; type 3 stitches several and
 /// states one more than it has bounds. Read from the dictionaries rather than
 /// through `parse_function`, which defaults a missing `/Domain`.
-fn function_stops(cos: &CosDocument, function: &Object) -> Vec<(f64, [f64; 3])> {
-    let values = function_values(cos, function);
+fn function_stops(
+    cos: &CosDocument,
+    function: &Object,
+    reference: Option<ObjRef>,
+) -> Vec<(f64, [f64; 3])> {
+    let values = function_values(cos, function, reference);
     if values.iter().any(|(_, value)| value.len() != 3) {
         return Vec::new();
     }
@@ -1594,11 +1674,121 @@ fn function_stops(cos: &CosDocument, function: &Object) -> Vec<(f64, [f64; 3])> 
         .collect()
 }
 
+/// [`Paint::Gradient::middles`], out of a 7.10 function: each interval's
+/// colour halfway along it, evaluated.
+///
+/// Type 2 is `C0 + x^N (C1 − C0)` at `x = ½`; a one-input type 0 is its
+/// samples interpolated at the middle of its domain, by 7.10.2's default
+/// linear order; type 3 is its pieces, placed by its bounds, with any piece
+/// narrower than a thousandth — the nudge a hard stop is written with — left
+/// out, as the markup side leaves out the interval it stands for.
+fn function_middles(
+    cos: &CosDocument,
+    function: &Object,
+    reference: Option<ObjRef>,
+) -> Vec<(f64, [f64; 3])> {
+    let dict = match function {
+        Object::Stream(stream) => &stream.dict,
+        other => match other.as_dict() {
+            Some(dict) => dict,
+            None => return Vec::new(),
+        },
+    };
+    let three = |values: &[f64]| (values.len() == 3).then(|| [values[0], values[1], values[2]]);
+    match key(cos, dict, b"FunctionType").as_int() {
+        Some(2) => {
+            let (Some(c0), Some(c1)) = (array(cos, dict, b"C0"), array(cos, dict, b"C1")) else {
+                return Vec::new();
+            };
+            let n = key(cos, dict, b"N").as_number().unwrap_or(1.0);
+            let t = 0.5f64.powf(n);
+            let mid: Vec<f64> = c0.iter().zip(&c1).map(|(a, b)| a + t * (b - a)).collect();
+            three(&mid).map_or_else(Vec::new, |mid| vec![(0.5, mid)])
+        }
+        Some(0) => {
+            let size = array(cos, dict, b"Size").unwrap_or_default();
+            let range = array(cos, dict, b"Range").unwrap_or_default();
+            let bits = key(cos, dict, b"BitsPerSample").as_int().unwrap_or(0);
+            let (Some(reference), [points], 6, 8 | 16) =
+                (reference, size.as_slice(), range.len(), bits)
+            else {
+                return Vec::new();
+            };
+            let Ok(data) = cos.stream_decoded(reference) else {
+                return Vec::new();
+            };
+            let points = *points as usize;
+            let width = if bits == 16 { 2 } else { 1 };
+            let max = if bits == 16 { 65_535.0 } else { 255.0 };
+            let sample = |index: usize, channel: usize| -> f64 {
+                let at = (index * 3 + channel) * width;
+                let raw = if width == 2 {
+                    data.get(at..at + 2)
+                        .map_or(0.0, |b| f64::from(u16::from_be_bytes([b[0], b[1]])))
+                } else {
+                    data.get(at).map_or(0.0, |b| f64::from(*b))
+                };
+                let (lo, hi) = (range[channel * 2], range[channel * 2 + 1]);
+                lo + raw / max * (hi - lo)
+            };
+            let position = (points as f64 - 1.0) / 2.0;
+            let (low, frac) = (position.floor() as usize, position - position.floor());
+            let high = (low + 1).min(points - 1);
+            let mut mid = [0.0; 3];
+            for (channel, slot) in mid.iter_mut().enumerate() {
+                let (a, b) = (sample(low, channel), sample(high, channel));
+                *slot = a + frac * (b - a);
+            }
+            vec![(0.5, mid)]
+        }
+        Some(3) => {
+            let bounds = array(cos, dict, b"Bounds").unwrap_or_default();
+            let parts = key(cos, dict, b"Functions");
+            let Some(parts) = parts.as_array() else {
+                return Vec::new();
+            };
+            let mut out = Vec::new();
+            for (index, part) in parts.iter().enumerate() {
+                let from = if index == 0 {
+                    0.0
+                } else {
+                    bounds.get(index - 1).copied().unwrap_or(0.0)
+                };
+                let to = bounds.get(index).copied().unwrap_or(1.0);
+                if to - from < 1e-3 {
+                    continue;
+                }
+                let (resolved, inner_ref) = match part.as_objref() {
+                    Some(r) => (cos.get(r).unwrap_or(Arc::new(Object::Null)), Some(r)),
+                    None => (Arc::new(part.clone()), None),
+                };
+                for (offset, mid) in function_middles(cos, &resolved, inner_ref) {
+                    out.push((from + offset * (to - from), mid));
+                }
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// [`function_stops`] for a function of any number of outputs — one, for the
 /// `/DeviceGray` ramp a soft mask's alphas are painted as.
-fn function_values(cos: &CosDocument, function: &Object) -> Vec<(f64, Vec<f64>)> {
-    let Some(dict) = function.as_dict() else {
-        return Vec::new();
+///
+/// A one-input type 0 states its two ends, its first and last samples
+/// through `/Range` — which is where the writer pins each stop of a ramp it
+/// had to sample — and needs its `reference` to be decoded.
+fn function_values(
+    cos: &CosDocument,
+    function: &Object,
+    reference: Option<ObjRef>,
+) -> Vec<(f64, Vec<f64>)> {
+    let dict = match function {
+        Object::Stream(stream) => &stream.dict,
+        other => match other.as_dict() {
+            Some(dict) => dict,
+            None => return Vec::new(),
+        },
     };
     let colour_of = |name: &[u8]| -> Option<Vec<f64>> { array(cos, dict, name) };
     match key(cos, dict, b"FunctionType").as_int() {
@@ -1606,6 +1796,37 @@ fn function_values(cos: &CosDocument, function: &Object) -> Vec<(f64, Vec<f64>)>
             (Some(c0), Some(c1)) if c0.len() == c1.len() => vec![(0.0, c0), (1.0, c1)],
             _ => Vec::new(),
         },
+        Some(0) => {
+            let size = array(cos, dict, b"Size").unwrap_or_default();
+            let range = array(cos, dict, b"Range").unwrap_or_default();
+            let bits = key(cos, dict, b"BitsPerSample").as_int().unwrap_or(0);
+            let outputs = range.len() / 2;
+            let (Some(reference), [points], 8 | 16) = (reference, size.as_slice(), bits) else {
+                return Vec::new();
+            };
+            let Ok(data) = cos.stream_decoded(reference) else {
+                return Vec::new();
+            };
+            let width = if bits == 16 { 2 } else { 1 };
+            let max = if bits == 16 { 65_535.0 } else { 255.0 };
+            let at = |index: usize| -> Vec<f64> {
+                (0..outputs)
+                    .map(|channel| {
+                        let byte = (index * outputs + channel) * width;
+                        let raw = if width == 2 {
+                            data.get(byte..byte + 2)
+                                .map_or(0.0, |b| f64::from(u16::from_be_bytes([b[0], b[1]])))
+                        } else {
+                            data.get(byte).map_or(0.0, |b| f64::from(*b))
+                        };
+                        let (lo, hi) = (range[channel * 2], range[channel * 2 + 1]);
+                        lo + raw / max * (hi - lo)
+                    })
+                    .collect()
+            };
+            let last = (*points as usize).saturating_sub(1);
+            vec![(0.0, at(0)), (1.0, at(last))]
+        }
         Some(3) => {
             let bounds = array(cos, dict, b"Bounds").unwrap_or_default();
             let parts = key(cos, dict, b"Functions");
@@ -1614,11 +1835,14 @@ fn function_values(cos: &CosDocument, function: &Object) -> Vec<(f64, Vec<f64>)>
             };
             let mut out: Vec<(f64, Vec<f64>)> = Vec::new();
             for (index, part) in parts.iter().enumerate() {
-                let resolved = match part.as_objref() {
-                    Some(reference) => cos.get(reference).unwrap_or(Arc::new(Object::Null)),
-                    None => Arc::new(part.clone()),
+                let (resolved, inner_ref) = match part.as_objref() {
+                    Some(reference) => (
+                        cos.get(reference).unwrap_or(Arc::new(Object::Null)),
+                        Some(reference),
+                    ),
+                    None => (Arc::new(part.clone()), None),
                 };
-                let inner = function_values(cos, &resolved);
+                let inner = function_values(cos, &resolved, inner_ref);
                 let (from, to) = (
                     if index == 0 {
                         0.0
@@ -1656,12 +1880,15 @@ fn shading_paint(cos: &CosDocument, shading: &Object) -> Option<Paint> {
         _ => return None,
     };
     let geometry = array(cos, dict, b"Coords")?;
-    let stops = function_stops(cos, &key(cos, dict, b"Function"));
+    let function = key(cos, dict, b"Function");
+    let reference = dict.get_ref(cos.intern(b"Function"));
+    let stops = function_stops(cos, &function, reference);
     Some(Paint::Gradient {
         kind,
         geometry,
         stops,
         alphas: None,
+        middles: function_middles(cos, &function, reference),
     })
 }
 
@@ -1689,7 +1916,11 @@ fn mask_alphas(cos: &CosDocument, resources: &Dict, state: &Dict) -> Option<Vec<
             Token::Operator(operator) if operator.as_slice() == b"sh" => {
                 let shading = entry(cos, &scope, b"Shading", last.as_deref()?)?;
                 let dict = shading.as_dict()?;
-                let values = function_values(cos, &key(cos, dict, b"Function"));
+                let values = function_values(
+                    cos,
+                    &key(cos, dict, b"Function"),
+                    dict.get_ref(cos.intern(b"Function")),
+                );
                 if values.iter().any(|(_, value)| value.len() != 1) {
                     return None;
                 }
@@ -2224,12 +2455,14 @@ impl Walk<'_> {
                 kind,
                 geometry,
                 stops,
+                middles,
                 ..
             } => Paint::Gradient {
                 kind,
                 geometry,
                 stops,
                 alphas: self.frame.soft.clone(),
+                middles,
             },
             other => other,
         }
@@ -2380,6 +2613,14 @@ pub enum Divergence {
         document: Vec<f64>,
     },
     Stops {
+        page: usize,
+        mark: usize,
+        markup: Vec<(f64, [f64; 3])>,
+        document: Vec<(f64, [f64; 3])>,
+    },
+    /// A gradient's colours between its stops: blended in a space the
+    /// markup's `ColorInterpolationMode` does not name.
+    Middles {
         page: usize,
         mark: usize,
         markup: Vec<(f64, [f64; 3])>,
@@ -2600,14 +2841,32 @@ fn compare_mark(
                 geometry: wanted_geometry,
                 stops: wanted_stops,
                 alphas: wanted_alphas,
+                middles: wanted_middles,
             },
             Paint::Gradient {
                 kind: got_kind,
                 geometry: got_geometry,
                 stops: got_stops,
                 alphas: got_alphas,
+                middles: got_middles,
             },
         ) => {
+            // Half an eight-bit step: the writer samples a linear-light ramp
+            // at sixteen bits and interpolates between samples, and 0.0018 is
+            // the most that comes to anywhere (`brush.rs`'s own measurement).
+            let middles_agree = wanted_middles.len() == got_middles.len()
+                && wanted_middles.iter().zip(got_middles).all(|(a, b)| {
+                    near(a.0, b.0, GEOMETRY)
+                        && a.1.iter().zip(&b.1).all(|(x, y)| near(*x, *y, 2e-3))
+                });
+            if !middles_agree {
+                out.push(Divergence::Middles {
+                    page,
+                    mark,
+                    markup: wanted_middles.clone(),
+                    document: got_middles.clone(),
+                });
+            }
             let alphas_agree = match (wanted_alphas, got_alphas) {
                 (None, None) => true,
                 (Some(a), Some(b)) => {

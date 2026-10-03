@@ -19,6 +19,7 @@ repository's.
 | --- | ---: | --- | --- |
 | `wpf-style-simulations.xps` | 78 764 | `3a31d48215aea021cb0a5853533656cf0f9821ddaa494bf84d279df6d310426a` | 12.1.5's `StyleSimulations` |
 | `wpf-stop-alphas.xps` | 78 925 | `c9ca7d2ddbe3c862c9046da29485ee06c11a34bb210b138d72d62a35b988263f` | 18.3.2's per-stop alpha |
+| `wpf-colour-interpolation.xps` | 78 997 | `873e0f42f3fa3610eaa9c5dc95e3a60d1839951392cfa360d5bed43170207684` | 18.3.1.2's `ColorInterpolationMode` |
 
 **`wpf-style-simulations.xps`** sets WPF's own run — `"Page one"`,
 `Indices=",53"`, in the package's font — four times at a 48-unit em, a hundred
@@ -32,6 +33,15 @@ linear one whose stops share the alpha `80`, which is a constant alpha and no
 ramp. The census reads the stops' alphas out of the markup and, out of the
 document, the `/DeviceGray` ramp of the `/Luminosity` soft mask in force when
 each gradient is painted.
+
+**`wpf-colour-interpolation.xps`** states `wpf-gradients.xps`'s three stops
+twice, in `SRgbLinearInterpolation` and in `ScRgbLinearInterpolation`, then in
+linear light a hard edge (two stops at one offset), a radial gradient whose
+stops stop short of both ends, and a ramp that fades its alpha. The census
+reads the colour halfway along every interval: out of the markup by 18.3.1.2
+— the mean in sRGB, the mean of the linear light re-encoded in scRGB, both
+written out from IEC 61966-2-1 — and out of the document by evaluating the
+shading's function there.
 
 **How they were obtained**, on Linux x86_64 with CPython 3.11.15's `zipfile`,
 on 3 October 2026:
