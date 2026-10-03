@@ -1754,6 +1754,38 @@ fn epub_book() -> Vec<u8> {
 /// dictionary. That is what closed the float reading-order row -- Beowulf
 /// conserves exactly in logical order where content order still shows 2 182 --
 /// and it changes which objects the file holds without changing one glyph.
+///
+/// *October 2026, the tagged-writing row.* They moved a **third** time, in the
+/// same three places and again with no raster movement, when the EPUB path
+/// began writing the book's `dc:language` as the catalog's `/Lang` (14.9.2):
+/// `dcd5912d…` became `1517adfb…` and `51748067…` became `36a2c5e1…`. That one
+/// entry is the whole of the move, and it was measured rather than argued:
+/// with only the `set_language` call removed, the three hashes are the old
+/// ones exactly. The book's chapters declare `lang="en"`, which is the book's
+/// own language, so no element carries a `/Lang` of its own, and the book's
+/// only picture is an SVG cover this build refuses, so no `/Figure` is drawn.
+///
+/// And a **fourth** time, the same way, when each `<a>` holding an annotation
+/// became a `/Link` element with an `/OBJR` to it and the annotation a
+/// `/StructParent`: `1517adfb…` became `e0f94b04…` and `36a2c5e1…` became
+/// `df84fe61…`. The book's eight annotations are unchanged — counted as
+/// `/Subtype /Link`, since the bare name also counts the seven `/S /Link`
+/// elements that hold them and their marked content — and no raster hash
+/// moved.
+///
+/// And a **fifth**, when the EPUB path began writing an element's XHTML name
+/// where its standard type would lose it (`/S /section`, `/S /em`), with a
+/// `/RoleMap` saying what each is: `e0f94b04…` became `bcc9bb59…` and
+/// `df84fe61…` became `3b288a03…`. Measured as the third was: with only the
+/// role registration disabled, the hashes are the fourth move's exactly.
+///
+/// The CSS and shaping work merged beside it in the same wave — paint
+/// effects, counters, `text-transform`, right-to-left lines, CID-keyed
+/// fallback text — moved neither hash: the merged tree produces the fifth
+/// move's two values exactly, because this book uses none of those properties
+/// and none of its text is right-to-left or outside WinAnsi. The new values
+/// were produced on `x86_64-unknown-linux-gnu` and reproduced under
+/// `wasm32-wasip1` before they were committed.
 const GOLDEN: &[Fixture] = &[
     // The floors are about half of what each page paints today: 1486, 2363,
     // 9600, 3600 and 3230 pixels.
@@ -2657,6 +2689,11 @@ fn the_synthesised_book_is_the_same_bytes_on_every_target() {
             8,
             "milestone 5's annotations, on no rendered page",
         ),
+        (
+            b"/S /Link",
+            7,
+            "the `<a>` elements holding them, as /Link structure elements",
+        ),
         (b"/Outlines", 2, "the navigation document, as an outline"),
         (
             b"/FontFile2",
@@ -2678,7 +2715,7 @@ fn the_synthesised_book_is_the_same_bytes_on_every_target() {
     let hash = sha(&pdf);
     assert_eq!(
         hash,
-        "dcd5912d597f051b8be162410ccdee9e7ea754cdd301acbb8c86251a85d8c7e7",
+        "bcc9bb59d4898bcf5ff43fab0578945473a5c3ac80325a0fb220f63e7be82868",
         "the synthesised book is not the bytes it was; see this test's doc \
          comment for what that means and how to tell it apart from a rendering \
          change. The document is {} bytes.",
@@ -2764,12 +2801,12 @@ fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
     assert_eq!(sha(&other), sha(&other_again), "600 x 800 is not stable");
     assert_eq!(
         sha(&first),
-        "dcd5912d597f051b8be162410ccdee9e7ea754cdd301acbb8c86251a85d8c7e7",
+        "bcc9bb59d4898bcf5ff43fab0578945473a5c3ac80325a0fb220f63e7be82868",
         "the book at 432 x 648 is not the bytes it was"
     );
     assert_eq!(
         sha(&other),
-        "51748067f1d7534bebe50bf891a591e2fc36618f3b76e0daaf149774ad1f9901",
+        "3b288a033d40d0fd80d010901c4a79dbd8c45c68e3f79ffd5974e21678f19f9d",
         "the book at 600 x 800 is not the bytes it was"
     );
 

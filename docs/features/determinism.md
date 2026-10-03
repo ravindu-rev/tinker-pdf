@@ -104,6 +104,19 @@ numbering, dictionary key order and stream framing are pinned — none of
 which a rendered hash can see. The `epub` fixture asserts the two-box claim
 above: seven pages at one box, six at another, both stable.
 
+**The book's two byte-hashes moved on purpose in October 2026, and the reason
+is again the commit's.** Tagged writing made the EPUB path write the book's
+language as the catalog's `/Lang`, each `<a>` holding an annotation as a
+`/Link` structure element with its `/OBJR`, and each element's XHTML name
+under a `/RoleMap`; the 432 x 648 book went from `dcd5912d…` to `bcc9bb59…`
+and the 600 x 800 one from `51748067…` to `3b288a03…`, in three measured
+steps that `determinism.rs` lists one by one, each reverted alone to show it
+was the whole of its step. No raster fingerprint moved, the CSS and shaping
+work merged in the same wave moved neither hash, and the new values were
+produced on `x86_64-unknown-linux-gnu` and reproduced under `wasm32-wasip1`
+before they were committed — this file's first failure mode, the same target
+writing different bytes, and so updated rather than investigated.
+
 Three fixtures carry guarantees of different kinds: one is synthesised
 rather than parsed, so it pins the writer and parser to each other; one is
 a package a third-party serialiser wrote, so it can disagree with this
