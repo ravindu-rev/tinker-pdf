@@ -16,28 +16,34 @@
 //! is half a point right of x = 50 and half a point above y = 20 — the y axis
 //! is flipped onto the bitmap here, once.
 
+mod render_support;
+
 use std::sync::Arc;
 
+use render_support::curvy_font;
 use tinker_pdf::{Bitmap, Document, RenderOptions};
 use tinker_pdf_cos::{CosDocument, DocumentEditor, ObjRef, WriteMode, WriteOptions};
 
 /// A one-page file: the catalog (with `catalog_extra` inside it), the page,
 /// the annotation as object 4 — on no page's `/Annots`, so it is only drawn
-/// once the editor has added it — and `objects` from object 5 on.
-fn fixture(annotation: &str, catalog_extra: &str, objects: &[&str]) -> Vec<u8> {
-    let mut bodies = vec![
-        format!("<< /Type /Catalog /Pages 2 0 R {catalog_extra} >>"),
-        "<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_owned(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> >>".to_owned(),
-        annotation.to_owned(),
+/// once the editor has added it — and `objects` from object 5 on, as bytes
+/// so that one of them can be a stream.
+fn fixture(annotation: &str, catalog_extra: &str, objects: &[&[u8]]) -> Vec<u8> {
+    let mut bodies: Vec<Vec<u8>> = vec![
+        format!("<< /Type /Catalog /Pages 2 0 R {catalog_extra} >>").into_bytes(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> >>".to_vec(),
+        annotation.as_bytes().to_vec(),
     ];
-    bodies.extend(objects.iter().map(|o| (*o).to_owned()));
+    bodies.extend(objects.iter().map(|o| o.to_vec()));
 
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::new();
     for (index, body) in bodies.iter().enumerate() {
         offsets.push(out.len());
-        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
     }
     let xref = out.len();
     out.extend_from_slice(
@@ -66,7 +72,7 @@ struct Synthesized {
 /// Adds the fixture's annotation through the editor, saves, reopens and
 /// renders. Fails if the annotation came in with an `/AP` — the fixture would
 /// then be testing nothing — or went out without one.
-fn synthesized_in(annotation: &str, catalog_extra: &str, objects: &[&str]) -> Synthesized {
+fn synthesized_in(annotation: &str, catalog_extra: &str, objects: &[&[u8]]) -> Synthesized {
     let doc = Arc::new(
         CosDocument::open(fixture(annotation, catalog_extra, objects)).expect("the fixture opens"),
     );
@@ -718,7 +724,7 @@ fn an_ink_path_named_twice_is_drawn_once() {
         "<< /Type /Annot /Subtype /Ink /Rect [0 0 100 100] /C [0 0 1] /BS << /W 10 >> \
          /CA 0.5 /InkList [5 0 R 5 0 R] >>",
         "",
-        &["[10 50 90 50]"],
+        &[b"[10 50 90 50]".as_slice()],
     );
     assert_eq!(page.content.matches(" m\n").count(), 1, "{}", page.content);
     let pixel = at(&page.bitmap, 50.5, 50.5);
@@ -726,4 +732,184 @@ fn an_ink_path_named_twice_is_drawn_once() {
         pixel[2] > 245 && (118..=138).contains(&pixel[0]) && (118..=138).contains(&pixel[1]),
         "half blue over white, got {pixel:?}"
     );
+}
+
+// ------------------------------------------------------------- FreeText
+
+/// The interactive form a free text annotation finds its font in (12.7.3.3):
+/// `/DR` naming `/Cv`, object 5, a TrueType font whose program — object 7 —
+/// is `render_support::curvy_font`, a synthetic face carried by no file and
+/// licensed by nobody. Its `M` is a solid wedge 560 units wide and 700 high
+/// on an advance of 640, and its space is 320.
+const FORM: &str = "/AcroForm << /Fields [] /DR << /Font << /Cv 5 0 R >> >> >>";
+
+fn curvy_objects() -> Vec<Vec<u8>> {
+    let program = curvy_font();
+    let widths: Vec<String> = (32..=126)
+        .map(|code| if code == 32 { "320" } else { "640" }.to_owned())
+        .collect();
+    let font = format!(
+        "<< /Type /Font /Subtype /TrueType /BaseFont /Curvy /Encoding /WinAnsiEncoding \
+         /FirstChar 32 /LastChar 126 /Widths [{}] /FontDescriptor 6 0 R >>",
+        widths.join(" ")
+    );
+    let descriptor = "<< /Type /FontDescriptor /FontName /Curvy /Flags 32 \
+                      /FontBBox [-500 -300 1500 1000] /ItalicAngle 0 /Ascent 750 \
+                      /Descent -250 /CapHeight 700 /StemV 80 /FontFile2 7 0 R >>";
+    let mut file = format!("<< /Length {0} /Length1 {0} >>\nstream\n", program.len()).into_bytes();
+    file.extend_from_slice(&program);
+    file.extend_from_slice(b"\nendstream");
+    vec![font.into_bytes(), descriptor.as_bytes().to_vec(), file]
+}
+
+fn free_text(annotation: &str) -> Synthesized {
+    let objects = curvy_objects();
+    let objects: Vec<&[u8]> = objects.iter().map(Vec::as_slice).collect();
+    synthesized_in(annotation, FORM, &objects)
+}
+
+/// 12.5.6.6: the box filled with `/C` and bordered at the `/BS` width in
+/// the text's colour — `/DA`'s `rg` — inside `/Rect`.
+#[test]
+fn a_free_text_box_is_filled_and_bordered() {
+    let page = free_text(
+        "<< /Type /Annot /Subtype /FreeText /Rect [10 10 90 60] /C [0 0 1] \
+         /BS << /W 2 >> /DA (/Cv 12 Tf 1 0 0 rg) /Contents () >>",
+    );
+    // Two wide and inside /Rect, so its inner half reaches x 12.
+    assert_points(
+        &page.bitmap,
+        "red, the border",
+        &[
+            (10.5, 35.5),
+            (11.5, 35.5),
+            (88.5, 35.5),
+            (89.5, 35.5),
+            (50.5, 10.5),
+            (50.5, 59.5),
+        ],
+        is_red,
+    );
+    assert_points(
+        &page.bitmap,
+        "blue, inside it",
+        &[(50.5, 35.5), (13.5, 13.5), (86.5, 56.5)],
+        is_blue,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, outside /Rect",
+        &[(8.5, 35.5), (91.5, 35.5), (50.5, 62.5), (50.5, 8.5)],
+        is_white,
+    );
+}
+
+/// The text in the `/DA` font, size and colour, two units in from a box
+/// with no border — x 12 to 88 — wrapped where the next word would not fit:
+/// `MMM MMM MMM` at twenty points is three lines of three wedges, 38.4
+/// wide, on baselines 17 below the top and then 23 apart: y 71, 48 and 25.
+/// Each wedge covers its glyph's lower-left from its baseline up.
+#[test]
+fn a_free_texts_contents_are_written_where_its_layout_puts_them() {
+    let page = free_text(
+        "<< /Type /Annot /Subtype /FreeText /Rect [10 10 90 90] /BS << /W 0 >> \
+         /DA (/Cv 20 Tf 1 0 0 rg) /Contents (MMM MMM MMM) >>",
+    );
+    assert_points(
+        &page.bitmap,
+        "red, each wedge of the first line and the first of the others",
+        &[
+            (14.5, 73.5),
+            (27.5, 73.5),
+            (40.5, 73.5),
+            (14.5, 50.5),
+            (14.5, 27.5),
+        ],
+        is_red,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, past each line's end, between the lines and under the last",
+        &[
+            (60.5, 73.5),
+            (80.5, 50.5),
+            (14.5, 66.5),
+            (14.5, 86.5),
+            (14.5, 20.5),
+        ],
+        is_white,
+    );
+}
+
+/// `/Q 2` sets each line against the box's right side: the first line's
+/// three wedges start at x 49.6, and the last line's two — a line of their
+/// own after the line break — at x 62.4.
+#[test]
+fn a_free_text_is_aligned_by_its_quadding() {
+    let page = free_text(
+        "<< /Type /Annot /Subtype /FreeText /Rect [10 10 90 90] /BS << /W 0 >> /Q 2 \
+         /DA (/Cv 20 Tf 1 0 0 rg) /Contents (MMM MMM\\nMM) >>",
+    );
+    assert_points(
+        &page.bitmap,
+        "red, the wedges at the right",
+        &[(52.5, 73.5), (78.5, 73.5), (65.5, 27.5), (78.5, 27.5)],
+        is_red,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, where a left-aligned line, or a longer one, would be",
+        &[(14.5, 73.5), (40.5, 73.5), (14.5, 27.5), (52.5, 27.5)],
+        is_white,
+    );
+}
+
+/// Table 174's callout, under `/IT /FreeTextCallout`: `/RD` puts the box at
+/// (40, 50) to (90, 90), and `/CL` runs from the point called out, (15, 20),
+/// up to a knee at (15, 50) and on to the box at (40, 70), stroked as the
+/// border is, with an open arrow at (15, 20) pointing at it. Without the
+/// intent, Table 174 makes `/CL` meaningless, and nothing is drawn of it.
+#[test]
+fn a_free_text_callout_points_from_its_box() {
+    let callout = |intent: &str| {
+        free_text(&format!(
+            "<< /Type /Annot /Subtype /FreeText /Rect [10 10 90 90] /RD [30 0 0 40] \
+             /BS << /W 2 >> /DA (/Cv 12 Tf 1 0 0 rg) /Contents () {intent} \
+             /CL [15 20 15 50 40 70] /LE /OpenArrow >>"
+        ))
+    };
+    let page = callout("/IT /FreeTextCallout");
+    assert_points(
+        &page.bitmap,
+        "red, the callout, its arrow and the box's border",
+        &[
+            (15.5, 35.5),
+            (25.5, 58.5),
+            (18.5, 26.5),
+            (11.5, 26.5),
+            (40.5, 80.5),
+        ],
+        is_red,
+    );
+    assert_points(
+        &page.bitmap,
+        "white, past the arrow's tip, between its arms, and off the box",
+        &[
+            (15.5, 16.5),
+            (18.5, 22.5),
+            (30.5, 40.5),
+            (25.5, 80.5),
+            (65.5, 45.5),
+            (65.5, 70.5),
+        ],
+        is_white,
+    );
+    let page = callout("");
+    assert_points(
+        &page.bitmap,
+        "white, a callout with no intent",
+        &[(15.5, 35.5), (25.5, 58.5), (18.5, 26.5)],
+        is_white,
+    );
+    assert_points(&page.bitmap, "red, its box", &[(40.5, 80.5)], is_red);
 }

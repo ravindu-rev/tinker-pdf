@@ -328,7 +328,28 @@ lines — Table 182 leaves "straight lines or curves" to the implementation —
 and round caps and joins, the shape a pen leaves; a path of one point is a
 dot, and the paths are never joined to each other. A path written as a
 reference is drawn once however often the list names it, so a small file
-cannot ask for one large array many times over. Every
+cannot ask for one large array many times over. A **`FreeText`** (12.5.6.6)
+is drawn when its `/DA` names a font the interactive form's `/DR` holds as a
+simple font — Type 1 or TrueType, a byte a glyph — and every character of
+`/Contents` has a byte in it, the rule a field's value is written by. Its box
+is `/Rect` less `/RD`, filled with `/C` (12.5.2's "background of the
+annotation's icon", which a free text annotation's box is) and bordered at
+the `/BS` width and dash in the text's colour, since ISO 32000-1 names no
+other; the text is laid out as a multiline field's is — two units in from
+the border, wrapped at the last space that fits (or between characters, for
+a word wider than the box) and at each line break, the first baseline 0.85
+of the size below the top and the lines 1.15 apart, aligned by `/Q` and
+clipped to the box — in the `/DA` font, size and colour, a size of zero being
+the largest whole size from twelve down to four at which every line fits. A
+line wholly below the box is not written, nor any after it, and each line
+after the first costs its text and at most one number (`TL` once, then `T*`),
+so that the stream grows with what the box shows rather than with a large
+number repeated once a line.
+Only the font, the size and a `g`, `rg` or `k` colour are read from `/DA`;
+the rest of the string is not copied into the appearance, where a `Q` or an
+`ET` of the producer's would unbalance it. Under `/IT /FreeTextCallout`,
+Table 174's `/CL` callout is stroked as the border is, from the point it
+calls out to the box, with `/LE`'s ending at that point. Every
 synthesised appearance carries 12.5.6.2's `/CA` (and ISO 32000-2's `/ca` for
 what is filled) as the `ExtGState` it selects, since a renderer reads
 opacity from the content and not from the annotation. Constructors for the common
@@ -739,10 +760,11 @@ a quarter (`rotate_page` refuses it) and an empty owner password (the user's,
 | Redacting what a **tiling pattern's cell** or a **soft mask's group** draws | not measured: the walk follows `Do`, annotation appearances and Type 3 procedures, and a cell (8.7.3.1) or a mask's group (11.6.5.2) is reached through `scn`, `SCN` or `gs` instead. One whose content shows text or draws an image is **named**, `RedactionWarning::PatternOrMask` with the resource name that selected it, wherever a page, a form or a glyph procedure paints with it (`redact.rs`'s `patterns_and_masks`); one that only paints paths is not, since nothing in it is anything a redaction removes. Until October 2026 neither was read or named. The read of what else draws a form does not follow them either | a cell is painted at every tile of whatever it fills, so cutting one is a form drawn at as many placements as the fill has tiles, which is a design rather than a fix; a mask's group is drawn as alpha, glyph shapes and all. **Not permanent**: measuring both is owed in the ROADMAP's Editing row | 8.7.3, 11.6.5 |
 | Measuring more than `MAX_PLACEMENTS` distinct placements of one form | the count in `RepeatedForm` saturates at the cap, which is how a caller tells "too much went" from "something may have survived" (`a_form_placed_more_times_than_the_cap_saturates_its_count`) | a form that invokes itself under a matrix that moves each round makes a fresh placement every time; a count bounds it, where a tolerance on matrices would have to be loose enough to call two real placements one | ruling 1 |
 | Following more than 4 096 `Do`s of one content stream | the ones past the bound are written back as they were and never resolved — an image they draw is tested against no rectangle, a form not entered — and `RedactionWarning::TooManyXObjects` counts them (`a_stream_of_more_xobjects_than_the_walk_follows_is_reported`); until October 2026 the bound was there and the warning was not | the walk holds a use per `Do`, and a content stream may be 128 MiB of six-byte `/a Do`s; a page of more than four thousand XObject placements — a map, a tiled scan — has to be told it was not measured whole | ruling 1 |
-| Appearance synthesis for `FreeText` | `add_annotation` inserts the dictionary; no `/AP` is generated, and the annotation renders only if it carries its own | **not permanent**: its box and border are in its dictionary and its font is named by `/DA` against the form's `/DR`, and drawing it is owed in the ROADMAP's Editing row | 12.5.6.6 |
+| A free text annotation whose `/DA` names no font the form's `/DR` holds, or one it holds as a composite or Type 3 font, or whose `/Contents` has a character above a byte | no appearance is synthesised, and the annotation renders only if it carries its own | the text is written a byte a glyph, as a field's value is (`fill::escape`), and a font that is not there, a font addressed by multi-byte codes or a character no byte names would make a box of wrong text or question marks: this module draws none rather than a wrong one. A composite `/DA` font is what `fill.rs`'s shaped path writes for fields, and a free text annotation does not take it yet | 12.5.6.6, 12.7.3.3 |
+| A free text annotation's rich text (`/RC`), default style (`/DS`), and the operators of `/DA` other than its `Tf` and its `g`, `rg` or `k` | `/Contents` is drawn as plain text in the `/DA` font, size and colour; the rest is not read | `/RC` is XHTML and `/DS` CSS (12.7.3.4), which this module does not lay out; `/DA`'s other operators are the producer's text, and copying them into the appearance could unbalance its `q`/`Q` or `BT`/`ET` | 12.5.6.6 |
 | A line's caption (`/Cap`, `/CP`, `/CO`) | the line is drawn, its caption is not | a caption is text, and a line annotation names no font to draw it in | 12.5.6.7 |
 | A caret's paragraph symbol (`/Sy /P`) | the caret is drawn and the symbol is not, exactly as for `/Sy /None` | 12.5.6.11 says a ¶ "shall be associated with the caret" and says nothing of where it goes or how large it is; a symbol put somewhere is an invention, and a producer that wants one writes its own `/AP` | 12.5.6.11 |
-| A synthesised border's **effect** (`/BE /S /C`, cloudy, on a square, circle or polygon) and the **beveled, inset and underline** border styles (`/BS /S /B`, `/I`, `/U`) | the border is drawn solid, at its width and in its colour, as though `/BE` were absent and `/S` were `/S` | 12.5.4 says a cloudy border "shall appear cloudy" at an intensity from 0 to 2 and gives no geometry for a cloud; Table 166's beveled and inset styles are "simulated" embossing in shades nothing names, and the underline style draws a widget's bottom edge, which is not what a shape is. A producer that wants one of them writes its own `/AP`, and one it wrote is kept | 12.5.4 |
+| A synthesised border's **effect** (`/BE /S /C`, cloudy, on a square, circle, polygon or free text) and the **beveled, inset and underline** border styles (`/BS /S /B`, `/I`, `/U`) | the border is drawn solid, at its width and in its colour, as though `/BE` were absent and `/S` were `/S` | 12.5.4 says a cloudy border "shall appear cloudy" at an intensity from 0 to 2 and gives no geometry for a cloud; Table 166's beveled and inset styles are "simulated" embossing in shades nothing names, and the underline style draws a widget's bottom edge, which is not what a shape is. A producer that wants one of them writes its own `/AP`, and one it wrote is kept | 12.5.4 |
 | Rewriting a Type 3 glyph's procedure when it draws under a rectangle | the **use** is removed whole and the procedure is left byte for byte (`a_glyph_whose_procedure_shows_text_under_a_rectangle_is_removed_at_that_use`), so a procedure that shows the covered words still says them in `/CharProcs` while any use of it is left; once none is, `subset::apply` — the default save — empties it (`a_procedure_whose_last_use_was_redacted_is_emptied_by_the_default_save`) | the procedure is the font's: every use of the glyph on every page runs it, so cutting it would cut every use, and there is no copy to give the uncovered ones short of a new glyph in the font. This is a substitute for the ROADMAP Editing row's "glyph-procedure streams rewritten", chosen here and not yet ruled on: the row stays open until the owner accepts it or it is replaced | 9.6.5 |
 | Redacting a run in a font **the editor allocated** — through `import_page`, or a form or resources a caller wrote with new font objects | left whole, `UnknownFont`, like any font not in scope | fonts and glyph procedures are read through the file (`cos_font::from_resources` and `stream_decoded` over `DocumentEditor::document`) while pages, resources and XObjects are read through the editor, so a font object only the editor holds does not resolve. Named rather than silent; reading fonts through the editor is a change to `tinker-pdf-cos`'s font loader, owed in the ROADMAP's Editing row | — |
 | Measuring a glyph procedure that shows glyphs whose procedures show glyphs, past `MAX_PLACEMENTS` streams for one use | the use is removed as though covered, and `RedactionWarning::UnboundedProcedure` names the font and counts the uses (`a_glyph_procedure_that_shows_its_own_glyph_ends_and_errs_toward_removal`); until October 2026 nothing reported it | a procedure can show its own glyph, and a face that branches makes the measurement exponential; the budget is per use (`every_use_of_a_glyph_has_a_budget_of_its_own`), so only such a face reaches it | ruling 1 |
@@ -814,8 +836,14 @@ a quarter (`rotate_page` refuses it) and an empty owner password (the user's,
   flaring from the bottom of the rectangle its `/RD` leaves, white beside
   its spike and between `/RD` and `/Rect`. An ink annotation's three paths
   — a peak, a bar and a dot — each stroked with round caps and joins and
-  none joined to the next, and a path named twice by reference drawn once. `appearance.rs`'s own tests pin the seven first subtypes
-  byte for byte and each ending's path.
+  none joined to the next, and a path named twice by reference drawn once.
+  A free text box filled with `/C` and bordered in its text's colour; its
+  contents in the `/DR` font the `/DA` names — `render_support`'s synthetic
+  face, embedded — wrapped onto three lines where the layout puts them, and
+  set against the right side by `/Q 2`; and a callout from the box to the
+  point it calls out, drawn only under `/IT /FreeTextCallout`.
+  `appearance.rs`'s own tests pin the seven first subtypes byte for byte and
+  each ending's path.
 - `crates/tinker-pdf/tests/editor_docops.rs` — the document operations, from
   outside the crate: each setter's output saved **incrementally and as a
   rewrite**, reopened through `Document::open`, read back through the public

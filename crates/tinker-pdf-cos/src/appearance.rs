@@ -32,6 +32,9 @@
 //! - `Caret` (12.5.6.11): the typographic caret, filled, inside `/RD`.
 //! - `Ink` (12.5.6.13): each of `/InkList`'s paths, stroked with round caps
 //!   and joins.
+//! - `FreeText` (12.5.6.6), when its `/DA` names a simple font the form's
+//!   `/DR` holds: the box, its border, `/Contents` laid out in it, and the
+//!   callout.
 //!
 //! Each carries 12.5.6.2's `/CA` in the graphics state it selects, and each
 //! stroked border or line its `/BS` (or `/Border`) dash.
@@ -850,6 +853,338 @@ fn ink(doc: &CosDocument, annotation: &Dict, out: &mut Vec<u8>) -> Option<()> {
     Some(())
 }
 
+/// What a `/DA` string says (12.7.3.3): the font resource's name, its size
+/// (zero asks for one to be chosen), and the colour its `g`, `rg` or `k`
+/// sets, black when it sets none this reads.
+///
+/// Only those three are taken. The rest of the string is not replayed into
+/// the appearance: it is the producer's text, and an operator in it — a `Q`,
+/// an `ET` — would unbalance the stream it was copied into.
+struct DefaultAppearance {
+    font: Vec<u8>,
+    size: f64,
+    color: [f64; 3],
+}
+
+fn default_appearance(da: &[u8]) -> Option<DefaultAppearance> {
+    let tokens: Vec<&[u8]> = da
+        .split(|b| b.is_ascii_whitespace())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let number = |token: &[u8]| -> Option<f64> {
+        std::str::from_utf8(token)
+            .ok()?
+            .parse::<f64>()
+            .ok()
+            .filter(|v| v.is_finite())
+    };
+    let mut font = None;
+    let mut color = [0.0, 0.0, 0.0];
+    for (index, token) in tokens.iter().enumerate() {
+        // The operands of the operator at `index`, the `n` tokens before it.
+        let operands = |n: usize| -> Option<Vec<f64>> {
+            let start = index.checked_sub(n)?;
+            tokens
+                .get(start..index)?
+                .iter()
+                .map(|t| number(t))
+                .collect()
+        };
+        match *token {
+            b"Tf" => {
+                let name = index.checked_sub(2).and_then(|i| tokens.get(i));
+                let size = index.checked_sub(1).and_then(|i| tokens.get(i));
+                if let (Some(name), Some(size)) = (name, size) {
+                    if let (Some(name), Some(size)) = (name.strip_prefix(b"/"), number(size)) {
+                        font = Some((name.to_vec(), size.max(0.0)));
+                    }
+                }
+            }
+            b"g" => {
+                if let Some(&[g]) = operands(1).as_deref() {
+                    color = [g, g, g];
+                }
+            }
+            b"rg" => {
+                if let Some(&[r, g, b]) = operands(3).as_deref() {
+                    color = [r, g, b];
+                }
+            }
+            b"k" => {
+                if let Some(&[c, m, y, k]) = operands(4).as_deref() {
+                    color = [
+                        (1.0 - c) * (1.0 - k),
+                        (1.0 - m) * (1.0 - k),
+                        (1.0 - y) * (1.0 - k),
+                    ];
+                }
+            }
+            _ => {}
+        }
+    }
+    let (font, size) = font?;
+    Some(DefaultAppearance {
+        font,
+        size,
+        color: color.map(|c| c.clamp(0.0, 1.0)),
+    })
+}
+
+/// The font a `/DA` names, from the interactive form's `/DR` (12.7.3.3):
+/// the entry as `/DR` holds it — a reference, or a dictionary written
+/// inline — for the appearance's own `/Resources`, and the font as read.
+///
+/// Only a simple font with a byte per glyph — Type 1 or TrueType — is taken,
+/// because a character is written here as one byte, the way a field's value
+/// is (`fill::escape`); a composite or Type 3 font is refused.
+fn form_font(doc: &CosDocument, name: &[u8]) -> Option<(Object, crate::font::Font)> {
+    let form = crate::form::acro_form(doc)?;
+    let resources = doc.resolve_key(&form, doc.intern(b"DR"));
+    let fonts = doc.resolve_key(resources.as_dict()?, doc.intern(b"Font"));
+    let entry = fonts.as_dict()?.get(doc.intern(name))?.clone();
+    let dict = doc.resolve(&entry).as_dict()?.clone();
+    let font = crate::font::read(doc, &dict);
+    let simple = matches!(
+        font.kind(),
+        crate::font::FontKind::Type1 | crate::font::FontKind::TrueType
+    );
+    simple.then_some((entry, font))
+}
+
+/// Breaks text into the lines a box `width` wide holds at `size` (12.7.3.3's
+/// multiline layout): at each line break in the text, and otherwise at the
+/// last space that fits, or — for a word longer than the box — between two
+/// characters.
+fn wrap(text: &str, font: &crate::font::Font, size: f64, width: f64) -> Vec<String> {
+    let advance = |c: char| font.width_of(u32::from(c)).0 * size / 1000.0;
+    let mut lines = Vec::new();
+    for paragraph in text.split("\r\n").flat_map(|p| p.split(['\r', '\n'])) {
+        let mut line = String::new();
+        let mut line_width = 0.0;
+        for word in paragraph.split(' ') {
+            let word_width: f64 = word.chars().map(advance).sum();
+            let space = if line.is_empty() { 0.0 } else { advance(' ') };
+            if !line.is_empty() && line_width + space + word_width > width {
+                lines.push(std::mem::take(&mut line));
+                line_width = 0.0;
+            } else if !line.is_empty() {
+                line.push(' ');
+                line_width += space;
+            }
+            for c in word.chars() {
+                let w = advance(c);
+                if !line.is_empty() && line_width + w > width && line_width > 0.0 {
+                    lines.push(std::mem::take(&mut line));
+                    line_width = 0.0;
+                }
+                line.push(c);
+                line_width += w;
+            }
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+/// A free text annotation (12.5.6.6): its box — `/Rect` less `/RD` —
+/// filled with `/C`, bordered at the `/BS` width and dash, `/Contents`
+/// written inside it in the `/DA` font, size and colour, aligned by `/Q`,
+/// and, for `/IT /FreeTextCallout`, the `/CL` callout line with its `/LE`
+/// ending at the point it calls out.
+///
+/// ISO 32000-1 names no colour for the border; it and the callout are
+/// stroked in the text's colour, `/C` being 12.5.2's "background of the
+/// annotation's icon" — which a free text annotation's box is — and an
+/// absent `/C` leaves the box unfilled. The text is laid out as a multiline
+/// field's is: two units in from the border, the first baseline 0.85 of a
+/// line below the top, lines 1.15 apart, clipped to the box; a `/DA` size of
+/// zero takes the largest whole size up to twelve at which every line fits.
+///
+/// Returns the font resource the text needs, under its `/DA` name. `None`
+/// — no appearance at all — when the `/DA` names no font the form's `/DR`
+/// holds as a simple font, or `/Contents` has a character such a font has
+/// no byte for: a box with question marks in it is a wrong appearance, and
+/// this module would rather draw none.
+fn free_text(
+    doc: &CosDocument,
+    annotation: &Dict,
+    rect: Rect,
+    out: &mut Vec<u8>,
+) -> Option<(Vec<u8>, Object)> {
+    let da = doc.resolve_key(annotation, doc.intern(b"DA"));
+    let da = default_appearance(&da.as_string()?.bytes)?;
+    let (resource, font) = form_font(doc, &da.font)?;
+    let contents = match doc
+        .resolve_key(annotation, doc.intern(b"Contents"))
+        .as_string()
+    {
+        Some(string) => crate::decode_text_string(&string.bytes),
+        None => String::new(),
+    };
+    if contents.chars().any(|c| u32::from(c) > 0xFF) {
+        return None;
+    }
+
+    let boxed = drawn_rect(doc, annotation, rect);
+    let paint = Paint {
+        stroke: Some(da.color),
+        fill: color_of(doc, annotation, b"C"),
+        width: border_width(doc, annotation),
+    };
+    if let Some(fill) = paint.fill {
+        op(out, &fill, b"rg");
+        op(
+            out,
+            &[boxed.x0, boxed.y0, boxed.x1 - boxed.x0, boxed.y1 - boxed.y0],
+            b"re",
+        );
+        out.extend_from_slice(b"f\n");
+    }
+    let dashed = set_up(
+        doc,
+        annotation,
+        &Paint {
+            fill: None,
+            ..paint
+        },
+        out,
+    );
+    if paint.strokes() {
+        let border = inset(boxed, paint.width / 2.0);
+        op(
+            out,
+            &[
+                border.x0,
+                border.y0,
+                border.x1 - border.x0,
+                border.y1 - border.y0,
+            ],
+            b"re",
+        );
+        out.extend_from_slice(b"S\n");
+        callout(doc, annotation, &paint, dashed, out);
+    }
+
+    let inner = inset(boxed, paint.width + 2.0);
+    let (inner_w, inner_h) = (inner.x1 - inner.x0, inner.y1 - inner.y0);
+    // Lines fit when the last one's descender — a quarter of the size below
+    // its baseline — is inside the box.
+    let fits = |size: f64| {
+        let lines = wrap(&contents, &font, size, inner_w);
+        let height = size * (0.85 + 1.15 * (lines.len() as f64 - 1.0) + 0.25);
+        (height <= inner_h).then_some(lines)
+    };
+    let (size, lines) = if da.size > 0.0 {
+        (da.size, wrap(&contents, &font, da.size, inner_w))
+    } else {
+        (4..=12u8)
+            .rev()
+            .find_map(|s| fits(f64::from(s)).map(|lines| (f64::from(s), lines)))
+            .unwrap_or_else(|| (4.0, wrap(&contents, &font, 4.0, inner_w)))
+    };
+
+    if lines.iter().any(|line| !line.is_empty()) && inner_w > 0.0 && inner_h > 0.0 {
+        let quadding = doc
+            .resolve_key(annotation, doc.intern(b"Q"))
+            .as_int()
+            .unwrap_or(0);
+        out.extend_from_slice(b"q\n");
+        op(out, &[inner.x0, inner.y0, inner_w, inner_h], b"re");
+        out.extend_from_slice(b"W n\nBT\n/");
+        out.extend_from_slice(&da.font);
+        out.push(b' ');
+        op(out, &[size], b"Tf");
+        op(out, &da.color, b"rg");
+        // The leading is said once, and each line after the first moves by
+        // it (`T*`) and by how far its start is from the last one's — so a
+        // line costs its text and at most one more number, rather than the
+        // whole matrix again.
+        let leading = size * 1.15;
+        op(out, &[leading], b"TL");
+        let mut unwritable = Vec::new();
+        let mut previous: Option<f64> = None;
+        for (index, line) in lines.iter().enumerate() {
+            let y = inner.y1 - size * 0.85 - index as f64 * leading;
+            // A line wholly below the box is clipped away, and so is every
+            // one after it, so none of them is written; and an appearance
+            // longer than any stream this crate decodes is not one its own
+            // reader could draw (`MAX_DECODED_STREAM`).
+            if y + size < inner.y0 || out.len() > crate::limits::MAX_DECODED_STREAM {
+                break;
+            }
+            let line_width: f64 = line
+                .chars()
+                .map(|c| font.width_of(u32::from(c)).0 * size / 1000.0)
+                .sum();
+            let x = match quadding {
+                1 => inner.x0 + (inner_w - line_width) / 2.0,
+                2 => inner.x1 - line_width,
+                _ => inner.x0,
+            };
+            match previous {
+                None => op(out, &[1.0, 0.0, 0.0, 1.0, x, y], b"Tm"),
+                Some(last) if (x - last).abs() < 1e-9 => out.extend_from_slice(b"T*\n"),
+                Some(last) => {
+                    op(out, &[x - last, 0.0], b"Td");
+                    out.extend_from_slice(b"T*\n");
+                }
+            }
+            previous = Some(x);
+            out.push(b'(');
+            crate::fill::escape(out, line, &mut unwritable);
+            out.extend_from_slice(b") Tj\n");
+        }
+        out.extend_from_slice(b"ET\nQ\n");
+    }
+    Some((da.font, resource))
+}
+
+/// A free text callout (12.5.6.6 Table 174 `/CL`): two or three points from
+/// the point called out to the box, stroked as the border is, with `/LE`'s
+/// ending at the first point. Table 174 makes `/CL` meaningful only under
+/// `/IT /FreeTextCallout`, and it is drawn only then.
+fn callout(doc: &CosDocument, annotation: &Dict, paint: &Paint, dashed: bool, out: &mut Vec<u8>) {
+    let intent = annotation
+        .get_name(doc.intern(b"IT"))
+        .and_then(|name| doc.name_bytes(name));
+    if intent.as_deref() != Some(b"FreeTextCallout".as_slice()) {
+        return;
+    }
+    let numbers = numbers_of(doc, annotation, b"CL");
+    let points = match numbers.len() {
+        4 | 6 => points_of(&numbers),
+        _ => return,
+    };
+    let (Some(&first), Some(start)) = (
+        points.first(),
+        points
+            .first()
+            .and_then(|p| leaving(*p, points.iter().copied())),
+    ) else {
+        return;
+    };
+    op(out, &[first.0, first.1], b"m");
+    for (x, y) in points.iter().skip(1) {
+        op(out, &[*x, *y], b"l");
+    }
+    out.extend_from_slice(b"S\n");
+    if dashed {
+        out.extend_from_slice(b"[] 0 d\n");
+    }
+    let kind = annotation
+        .get_name(doc.intern(b"LE"))
+        .and_then(|name| doc.name_bytes(name))
+        .map_or(Ending::None, |name| Ending::from_name(&name));
+    let ending_paint = Paint {
+        fill: color_of(doc, annotation, b"IC"),
+        ..*paint
+    };
+    if let Some(fill) = ending_paint.fill.filter(|_| kind.is_closed()) {
+        op(out, &fill, b"rg");
+    }
+    ending(out, kind, first, (-start.0, -start.1), start, &ending_paint);
+}
+
 /// Builds the appearance for an annotation, or `None` when its type needs
 /// none — a link with no border draws nothing, and inventing something for it
 /// would be worse than leaving it alone.
@@ -865,6 +1200,9 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
 
     let mut content = Vec::new();
     let mut needs_multiply = false;
+    // The font a free text annotation's text is shown in, under its `/DA`
+    // name.
+    let mut font = None;
 
     match subtype.as_ref() {
         b"Highlight" => {
@@ -1035,6 +1373,7 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
         b"Squiggly" => squiggly(doc, annotation, &mut content)?,
         b"Caret" => caret(doc, annotation, rect, &mut content)?,
         b"Ink" => ink(doc, annotation, &mut content)?,
+        b"FreeText" => font = Some(free_text(doc, annotation, rect, &mut content)?),
         _ => return None,
     }
 
@@ -1093,6 +1432,11 @@ pub fn synthesize(doc: &CosDocument, annotation: &Dict) -> Option<StreamData> {
         let mut states = Dict::new();
         states.insert(doc.intern(b"GS0"), Object::Dict(state));
         resources.insert(doc.intern(b"ExtGState"), Object::Dict(states));
+    }
+    if let Some((name, entry)) = font {
+        let mut fonts = Dict::new();
+        fonts.insert(doc.intern(&name), entry);
+        resources.insert(doc.intern(b"Font"), Object::Dict(fonts));
     }
     dict.insert(Name::RESOURCES, Object::Dict(resources));
 
@@ -2196,5 +2540,224 @@ mod tests {
         ] {
             assert_eq!(ink(nothing), None, "{nothing} draws nothing");
         }
+    }
+
+    /// A one-page file whose interactive form's `/DR` holds `fonts`, with
+    /// `objects` from object 4 on, all written as PDF text.
+    fn form_doc(fonts: &str, objects: &[&str]) -> CosDocument {
+        let mut bodies = vec![
+            format!(
+                "<< /Type /Catalog /Pages 2 0 R \
+                 /AcroForm << /Fields [] /DR << /Font << {fonts} >> >> >> >>"
+            ),
+            "<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>".to_owned(),
+        ];
+        bodies.extend(objects.iter().map(|o| (*o).to_owned()));
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, body) in bodies.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref = out.len();
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", bodies.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                bodies.len() + 1
+            )
+            .as_bytes(),
+        );
+        CosDocument::open(out).expect("the form fixture opens")
+    }
+
+    const HELVETICA: &str = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica \
+                             /Encoding /WinAnsiEncoding >>";
+
+    fn helvetica_form() -> CosDocument {
+        form_doc("/Helv 4 0 R", &[HELVETICA])
+    }
+
+    /// `/DA`'s font, size and colour, and nothing else from it.
+    #[test]
+    fn a_default_appearance_gives_a_font_a_size_and_a_colour() {
+        let read = |da: &[u8]| default_appearance(da).map(|d| (d.font, d.size, d.color));
+        assert_eq!(
+            read(b"/Helv 9 Tf 0 0 1 rg"),
+            Some((b"Helv".to_vec(), 9.0, [0.0, 0.0, 1.0]))
+        );
+        assert_eq!(
+            read(b"0.5 g /F1 0 Tf"),
+            Some((b"F1".to_vec(), 0.0, [0.5; 3]))
+        );
+        assert_eq!(
+            read(b"/F1 12 Tf 0 1 0 0 k"),
+            Some((b"F1".to_vec(), 12.0, [1.0, 0.0, 1.0]))
+        );
+        assert_eq!(
+            read(b"/F1 12 Tf /CS0 cs 1 scn"),
+            Some((b"F1".to_vec(), 12.0, [0.0; 3])),
+            "a colour this does not read is black"
+        );
+        assert_eq!(read(b"/F1 -3 Tf"), Some((b"F1".to_vec(), 0.0, [0.0; 3])));
+        for none in [&b"0 g"[..], b"Tf", b"12 Tf", b"/F1 x Tf", b""] {
+            assert!(default_appearance(none).is_none(), "{none:?} names no font");
+        }
+    }
+
+    /// 12.5.6.6: the box bordered in the text's colour, and `/Contents`
+    /// in the `/DA` font, two units in from the border, its first baseline
+    /// 0.85 of the size below the top; the font is the appearance's own
+    /// resource, by the reference `/DR` holds.
+    #[test]
+    fn a_free_text_is_written_in_its_da_font_inside_its_box() {
+        let doc = helvetica_form();
+        let annotation = parsed(
+            &doc,
+            "<< /Subtype /FreeText /Rect [10 10 110 60] /DA (/Helv 10 Tf 0 0 1 rg) \
+             /Contents (Hello world) /BS << /W 1 >> >>",
+        );
+        let stream = synthesize(&doc, &annotation).expect("an appearance");
+        assert_eq!(
+            text_of(&stream),
+            "0 0 1 RG\n1 w\n10.5 10.5 99 49 re\nS\n\
+             q\n13 13 94 44 re\nW n\nBT\n/Helv 10 Tf\n0 0 1 rg\n11.5 TL\n\
+             1 0 0 1 13 48.5 Tm\n(Hello world) Tj\nET\nQ\n"
+        );
+        let font = stream
+            .dict
+            .get_dict(doc.intern(b"Resources"))
+            .and_then(|r| r.get_dict(doc.intern(b"Font")))
+            .and_then(|f| f.get_ref(doc.intern(b"Helv")));
+        assert_eq!(font, Some(ObjRef { num: 4, gen: 0 }));
+    }
+
+    /// `/Q`, `/C`, `/RD`, wrapping and a `/DA` size of zero.
+    #[test]
+    fn a_free_text_is_aligned_filled_inset_wrapped_and_sized() {
+        let doc = helvetica_form();
+        let content = |rest: &str| {
+            content_of(
+                &doc,
+                &format!(
+                    "<< /Subtype /FreeText /DA (/Helv 10 Tf 0 g) /BS << /W 0 >> \
+                     /Contents (Hello world) {rest} >>"
+                ),
+            )
+            .expect("an appearance")
+        };
+        // "Hello world" is 4 945 thousandths of Helvetica, 49.45 at ten
+        // points, in a box 96 wide two in from each side of /Rect.
+        let wide = "/Rect [10 10 110 60]";
+        assert!(content(&format!("{wide} /Q 1")).contains("1 0 0 1 35.275 49.5 Tm\n"));
+        assert!(content(&format!("{wide} /Q 2")).contains("1 0 0 1 58.55 49.5 Tm\n"));
+        // /C fills the box, inside /RD: left 10, top 5, right 20, bottom 0.
+        let filled = content(&format!("{wide} /C [1 1 0] /RD [10 5 20 0]"));
+        assert!(
+            filled.starts_with("1 1 0 rg\n20 10 70 45 re\nf\n"),
+            "{filled}"
+        );
+        assert!(filled.contains("1 0 0 1 22 44.5 Tm\n"), "{filled}");
+        // Too narrow for both words: "world" on a line of its own, the
+        // leading of 11.5 below the first; set right, it starts 1.11 left
+        // of where "Hello" did, being 1.11 wider.
+        let narrow = content("/Rect [10 10 50 60]");
+        assert!(
+            narrow.contains("11.5 TL\n1 0 0 1 12 49.5 Tm\n(Hello) Tj\nT*\n(world) Tj\n"),
+            "{narrow}"
+        );
+        let right = content("/Rect [10 10 50 60] /Q 2");
+        assert!(
+            right.contains("1 0 0 1 25.22 49.5 Tm\n(Hello) Tj\n-1.11 0 Td\nT*\n(world) Tj\n"),
+            "{right}"
+        );
+        // A line wholly below the box is not written, nor any after it:
+        // in a box sixteen high the third baseline is at -3.5.
+        let short = content_of(
+            &doc,
+            "<< /Subtype /FreeText /DA (/Helv 10 Tf 0 g) /BS << /W 0 >> \
+             /Contents (Hello world Hello world) /Rect [10 10 50 30] >>",
+        )
+        .expect("an appearance");
+        assert_eq!(short.matches(") Tj\n").count(), 2, "{short}");
+        // A size of zero is the largest of twelve down to four that fits.
+        let sized = |rect: &str| {
+            content_of(
+                &doc,
+                &format!(
+                    "<< /Subtype /FreeText /DA (/Helv 0 Tf 0 g) /BS << /W 0 >> \
+                     /Contents (Hello) /Rect {rect} >>"
+                ),
+            )
+            .expect("an appearance")
+        };
+        assert!(sized("[10 10 110 60]").contains("/Helv 12 Tf\n"));
+        assert!(sized("[10 10 110 23]").contains("/Helv 8 Tf\n"));
+    }
+
+    /// The callout of Table 174, drawn only under `/IT /FreeTextCallout`,
+    /// from the box out to the point it calls, with `/LE` there.
+    #[test]
+    fn a_free_text_callout_is_drawn_only_for_that_intent() {
+        let doc = helvetica_form();
+        let content = |rest: &str| {
+            content_of(
+                &doc,
+                &format!(
+                    "<< /Subtype /FreeText /Rect [0 0 100 100] /RD [50 0 0 50] \
+                     /DA (/Helv 10 Tf 1 0 0 rg) /CL [10 10 10 40 50 70] /LE /Butt {rest} >>"
+                ),
+            )
+            .expect("an appearance")
+        };
+        let callout = "S\n10 10 m\n10 40 l\n50 70 l\nS\n13 10 m\n7 10 l\nS\n";
+        assert!(content("/IT /FreeTextCallout").contains(callout));
+        assert!(!content("").contains("10 10 m"), "no intent, no callout");
+        assert!(!content("/IT /FreeTextTypeWriter").contains("10 10 m"));
+    }
+
+    /// No appearance at all, rather than a wrong one: a font `/DR` does not
+    /// hold, or holds as composite, a `/DA` with no font, and a character a
+    /// byte cannot address.
+    #[test]
+    fn a_free_text_without_a_font_to_write_it_in_is_refused() {
+        let form = form_doc(
+            "/Helv 4 0 R /Cmp 5 0 R",
+            &[
+                HELVETICA,
+                "<< /Type /Font /Subtype /Type0 /BaseFont /Cmp /Encoding /Identity-H \
+                 /DescendantFonts [] >>",
+            ],
+        );
+        let content = |rest: &str| {
+            content_of(
+                &form,
+                &format!("<< /Subtype /FreeText /Rect [10 10 110 60] /C [1 1 0] {rest} >>"),
+            )
+        };
+        assert!(content("/DA (/Helv 10 Tf 0 g) /Contents (fine)").is_some());
+        for refused in [
+            "/DA (/Times 10 Tf 0 g) /Contents (fine)",
+            "/DA (/Cmp 10 Tf 0 g) /Contents (fine)",
+            "/DA (0 g) /Contents (fine)",
+            "/Contents (fine)",
+            "/DA (/Helv 10 Tf 0 g) /Contents <FEFF0100>",
+        ] {
+            assert_eq!(content(refused), None, "{refused}");
+        }
+        assert!(
+            content_of(
+                &doc(),
+                "<< /Subtype /FreeText /Rect [10 10 110 60] /DA (/Helv 10 Tf 0 g) >>"
+            )
+            .is_none(),
+            "a file with no form has no /DR"
+        );
     }
 }
