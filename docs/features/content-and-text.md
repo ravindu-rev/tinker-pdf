@@ -140,7 +140,22 @@ while a real gap on the same baseline (two table cells) stays two lines.
 Writing mode and directionality are separate properties: `TextLine::wmode`
 is the font's 9.7.4.3 wmode, `TextLine::rtl` is counted from the characters
 themselves, because vertical Japanese and right-to-left Arabic are not the
-same thing. Warnings are deduplicated — a page whose font is unknown says
+same thing.
+
+**Logical order (ruling 14).** `TextDevice` collects a line's characters in
+the order the content stream showed them, and `Page::text` then puts every
+line holding a right-to-left character into the order it is read in: marks
+paired with the base glyph they sit on, the line sorted along its baseline,
+and UAX #9's rule L2 applied to the line as drawn, with levels resolved from
+the characters' `Bidi_Class` and the line's own `rtl` as the paragraph
+direction (`crates/tinker-pdf/src/text_order.rs`, through
+`tinker_pdf_shape::bidi::order_units`). A visually drawn Hebrew word and the
+same word drawn in reading order with the pen moving left extract the same;
+digits inside a right-to-left line keep their own order; a line with no
+right-to-left character is exactly as collected. `Page::text_with` with
+`TextOptions::content_order` is the opt-out. Search boxes a match from
+whichever of its ends starts first along the baseline, so a logical-order
+match on a right-to-left line is not boxed inside out. Warnings are deduplicated — a page whose font is unknown says
 so once, not once per glyph — so "this page has no text" and "this page has
 text this build could not decode" stay distinguishable (ruling 2).
 
@@ -236,7 +251,9 @@ recording accepted skip the mask's content rather than paint it.
 ## API
 
 Everything is on the facade (ruling 11): `Page::text()` returns a
-`TextPage` of `blocks` → `lines` → `chars`, plus `warnings`. `TextPage`
+`TextPage` of `blocks` → `lines` → `chars`, plus `warnings`, every line in
+logical order (ruling 14); `Page::text_with(&TextOptions)` is the same with
+`content_order` as the opt-out to the content stream's order. `TextPage`
 offers `plain_text()` (one line per line), `lines()` (flattened), and
 `search(needle)` — literal, case-insensitive, one `Quad` per match, mapped
 back to the glyphs it covers. `Quad` carries four corners and
@@ -576,8 +593,9 @@ crate has an API of its own; see [architecture](../architecture.md).
 | A code with no `/ToUnicode` entry and no encoding that names it | `TextWarning::UnmappedCode { code }` | the typed vocabulary for a per-code guess; a glyph that decodes to no text at all is dropped from the page rather than invented | 9.10.3 |
 | Form XObject / Type 3 / soft-mask nesting past 16 levels | `MAX_FORM_DEPTH` | recursion is refused rather than allowed to overflow the stack | 8.10 |
 | More than 4 096 open marked-content scopes | `MAX_MARKED_CONTENT_DEPTH` | scopes past the cap go unreported, and unreported means *visible* — a runaway stream must not hide a page | 14.6.2 |
-| Text shaping — Arabic joining, ligature substitution, bidi reordering | — | `TextLine::rtl` reports the dominant direction and reorders nothing; shaping is staged as its own work | [ROADMAP](../ROADMAP.md) |
-| Reading order for an **untagged** document | — | `plain_text()` reports lines and blocks in content-stream order and always has — geometry decides only whether two glyphs are one line and two lines one block, and `TextDevice` sorts nothing; a structure tree is read when the document carries one, and never invented when it does not ([design/reading-order.md](../design/reading-order.md) is the opt-in inference, labelled as such) | 14.8 |
+| Text shaping while **reading** — Arabic joining, ligature substitution | — | the producer positioned every glyph and re-shaping them would be wrong; a ligature extracts as whatever its `/ToUnicode` says. Bidi *reordering* is not in this row any more: ruling 14 puts a right-to-left line into logical order | [design/shaping.md](../design/shaping.md) |
+| L4 mirroring undone in extraction, and the paragraph as a bidi unit | — | ruling 14 resolves each line alone and swaps no character: whether a producer's `/ToUnicode` names a mirrored glyph's character or its shape is not on the page | ruling 14 |
+| Reading order for an **untagged** document | — | `plain_text()` reports lines and blocks in content-stream order and always has — geometry decides only whether two glyphs are one line and two lines one block, and within a line only where it holds a right-to-left character (ruling 14); a structure tree is read when the document carries one, and never invented when it does not ([design/reading-order.md](../design/reading-order.md) is the opt-in inference, labelled as such) | 14.8 |
 | An `/MCR` whose `/Stm` does not name a content stream | `StructureWarning::ContentStreamNotAStream { element, stream }` | a stream is always indirect (7.3.8), so the value names nothing that could hold a sequence; read as though `/Stm` were absent rather than keyed on an object with no content, which would make the sequence findable nowhere | 14.7.4.2 |
 | An `/MCR` carrying `/StmOwn` without the `/Stm` it qualifies | `StructureWarning::StreamOwnerWithoutStream { element, owner }` | Table 324 permits the owner only beside a stream; an owner alone names the owner of a stream nobody named, so it is dropped | 14.7.4.2 |
 | An `/MCR` with no `/Stm` whose `/MCID` is in no page-stream sequence but in exactly one other stream on the page | `StructureWarning::ContentStreamAssumed { page, mcid }` | a producer that tags content inside a form and omits `/Stm` writes something 14.7.4.2 does not define; where one reading exists it is taken and named, and where two streams share the identifier it is refused, because that is the collision `/Stm` exists to resolve | 14.7.4.2 |
@@ -631,6 +649,14 @@ Unit tests live beside the code: `crates/tinker-pdf-content/src/tokenizer.rs`
 (every escape form, malformed numbers, arbitrary-byte termination),
 `text.rs` (artifact scopes nest, `ET` continuation versus baseline gaps,
 search hit geometry, wmode/rtl separation, non-finite glyphs dropped),
+`crates/tinker-pdf/src/text_order.rs` (ruling 14 on hand-built lines: a
+visual Hebrew line, one already in reading order, a mark on either side of
+its base, digits in a right-to-left line, an out-of-order left-to-right line
+left alone, a line of twenty thousand marks), and
+`crates/tinker-pdf/tests/text_logical_order.rs` (the same on built pages:
+both producer habits, the opt-out, search's box, the three structured
+formats and the line's words, and every committed `testdata` document and
+EPUB book unchanged against the opt-out),
 `words.rs` (the table compiled from the file, segments of contractions,
 decimals and abbreviations, combining marks, flag pairs, word boxes from a
 real content stream, a raised character widening its word's box, a turned

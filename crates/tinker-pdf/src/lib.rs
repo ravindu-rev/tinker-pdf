@@ -52,6 +52,7 @@ pub mod standalone;
 pub mod structure;
 pub mod subset;
 mod svg_out;
+mod text_order;
 pub mod verdict;
 pub mod write;
 pub mod xps;
@@ -109,6 +110,9 @@ pub use structure::{
 };
 /// Font subsetting on rewrite (9.6.4, 9.9).
 pub use subset::{SubsetReport, Subsetted, Type3Subsetted, Untouched, UntouchedReason};
+/// How [`Page::text_with`] orders a line: logical by default, or the content
+/// stream's own order (ruling 14).
+pub use text_order::TextOptions;
 pub use tinker_pdf_content::{
     HyphenCounts, MarkedProps, PlainText, PlainTextOptions, Quad, SearchOptions, TextBlock,
     TextChar, TextLine, TextPage, TextWarning, TextWord, WritingMode,
@@ -2379,9 +2383,40 @@ impl Page {
         annotations::of_page(&self.doc, self.inner.reference)
     }
 
-    /// The page's text.
+    /// The page's text, every line in **logical** order (ruling 14,
+    /// `docs/rulings.md`).
+    ///
+    /// A page draws right-to-left text in visual order, so a line holding a
+    /// right-to-left character is put back into the order it is read in:
+    /// marks kept with their base, the line sorted along its baseline, and
+    /// UAX #9's rule L2 applied to it. A line with none is exactly as the
+    /// content stream showed it. [`TextPage::plain_text`],
+    /// [`TextPage::search`], [`Page::structured_text`] and every
+    /// [`TextWriter`] format read this one extraction, so they agree.
+    ///
+    /// [`Page::text_with`] is the opt-out.
     #[must_use]
     pub fn text(&self) -> TextPage {
+        self.text_with(&TextOptions::default())
+    }
+
+    /// The page's text, ordered as `options` asks.
+    ///
+    /// With [`TextOptions::default`] this is [`Page::text`]. With
+    /// [`TextOptions::content_order`] every line's characters are in the order
+    /// the content stream showed them, which is what [`Page::text`] returned
+    /// before ruling 14.
+    #[must_use]
+    pub fn text_with(&self, options: &TextOptions) -> TextPage {
+        let mut page = self.text_in_content_order();
+        if !options.content_order {
+            text_order::into_logical_order(&mut page);
+        }
+        page
+    }
+
+    /// What the content stream showed, in the order it showed it.
+    fn text_in_content_order(&self) -> TextPage {
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
         // Text extraction needs no glyph outlines — the widths come from the
         // font dictionary — so no provider is consulted here.

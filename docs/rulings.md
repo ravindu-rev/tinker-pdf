@@ -290,6 +290,58 @@ living in one feature's head.
     not own is one it cannot answer for on the day it breaks. The two
     failure modes are different enough to be worth different words.
 
+14. **Extracted text is in logical order.** Binds
+    [content-and-text](features/content-and-text.md),
+    [fonts](features/fonts.md), [epub](features/epub.md) and
+    [forms](features/forms.md), and every output that reads `Page::text`:
+    `plain_text`, `search`, the structured view and the JSON, XML and HTML
+    formats alike. A page draws right-to-left text in visual order, and
+    reading it in the order the content stream drew it reads an Arabic or
+    Hebrew line backwards — a searchable Arabic PDF that searches as nothing
+    and a screen reader that reads every word from its last letter. So a line
+    holding a right-to-left character is put back into the order it is read
+    in by **UAX #9's reordering applied in reverse**: rule L2 is a sequence
+    of reversals, so the levels are resolved from the characters'
+    `Bidi_Class` over the line as drawn — sorted along its baseline, marks
+    kept with the base glyph they sit on — and L2 is applied to that,
+    recovering logical order. The paragraph direction is the line's own
+    majority (`TextLine::rtl`) rather than P2's first strong character,
+    because in visual order a right-to-left line's first strong character is
+    its last.
+
+    *Decided 3 October 2026, and why this way.* The pin in
+    `crates/tinker-pdf/tests/epub_shaped.rs` asserted the backwards line by
+    name and said the decision was not a book's to take: reversing by
+    `TextLine::rtl` would be a decision about every PDF this engine reads.
+    That is the reason it is a ruling and not a fix, and the three properties
+    that make it safe for every PDF are each asserted rather than argued:
+
+    - **A line with no right-to-left character is untouched**, byte for byte
+      and quad for quad — `text_logical_order.rs`'s
+      `no_left_to_right_page_moves` compares every committed `testdata`
+      document and every committed EPUB book against the opt-out.
+    - **Both producer habits give one answer.** A producer that draws a
+      right-to-left word in visual order and one that draws it in reading
+      order with the pen moving left describe the same page; the line is
+      sorted by where its glyphs are before L2 is applied, so the content
+      stream's order decides nothing. Reversing the stream instead would
+      have broken the second habit, which extracted right before this.
+    - **The algorithm is Unicode's, held to Unicode's file.**
+      `tinker_pdf_shape::bidi::order_units` is the entry point extraction
+      calls, and `tinker-pdf-shape/tests/bidi_conformance.rs` runs the whole
+      of `BidiCharacterTest.txt` (91 707 cases) and `BidiTest.txt` (770 241
+      resolutions) through it.
+
+    What it does not undo is named in `crates/tinker-pdf/src/text_order.rs`:
+    mirroring (L4), because whether a producer's `/ToUnicode` names a
+    mirrored glyph's character or its shape is not on the page; a paragraph,
+    because a line is resolved alone; and vertical lines. The opt-out is
+    additive — `Page::text_with(&TextOptions { content_order: true })` is the
+    order the content stream drew, which is what `Page::text` returned before
+    this ruling — and the reordering lives in the facade, so
+    `tinker-pdf-content` keeps no edge to `tinker-pdf-shape` and
+    `TextDevice` itself still collects in stream order.
+
 ## How to add a ruling
 
 State it in one bold sentence, name the features it binds, give the reason

@@ -361,6 +361,54 @@ pub fn reorder(levels: &[Level]) -> Vec<usize> {
     order
 }
 
+/// P2 through L2 for one line handed over as **units** — strings that must
+/// stay whole, such as the characters one glyph stands for — with every unit
+/// placed, including one made only of characters rule X9 removes.
+///
+/// The result is the positions of `units` in the order UAX #9 draws them, left
+/// to right. That is the same permutation [`Paragraph::line`]'s
+/// [`Line::visual_order`] gives for one-character units, less nothing: a unit
+/// X9 removed takes the level of the unit before it — the paragraph's own if
+/// it is first — which is what UAX #9 §5.2 says an implementation that
+/// *retains* the removed characters gives them, and which moves no other unit.
+///
+/// # What this is for, and why reading text needs a drawing rule
+///
+/// `docs/rulings.md`'s ruling 14: text extracted from a page is reported in
+/// **logical** order, and a page draws its glyphs in **visual** order. Rule L2
+/// is a sequence of reversals, so a line already in visual order goes back to
+/// logical order through the same reversals, resolved over the line as it
+/// stands. A unit is the glyph's text rather than a character because a
+/// ligature's `/ToUnicode` entry is already in logical order inside itself, and
+/// splitting it would reverse what needs no reversing. The level of a unit is
+/// its first kept character's.
+///
+/// `crates/tinker-pdf-shape/tests/bidi_conformance.rs` runs the whole of
+/// `BidiCharacterTest.txt` through **this** function, so the reading path
+/// meets the conformance file at the entry point it calls.
+#[must_use]
+pub fn order_units(units: &[&str], direction: BaseDirection) -> Vec<usize> {
+    let text: String = units.concat();
+    let paragraph = Paragraph::new(&text, direction);
+    let line = paragraph.line(0..paragraph.len());
+    let resolved = line.levels();
+    let mut levels = Vec::with_capacity(units.len());
+    let mut previous = paragraph.base_level();
+    let mut at = 0usize;
+    for unit in units {
+        let count = unit.chars().count();
+        let end = at.saturating_add(count);
+        let own = (at..end)
+            .find(|index| !paragraph.is_removed(*index))
+            .and_then(|index| resolved.get(index).copied());
+        let level = own.unwrap_or(previous);
+        levels.push(level);
+        previous = level;
+        at = end;
+    }
+    reorder(&levels)
+}
+
 // --- P2, P3 --------------------------------------------------------------
 
 /// Rules P2 and P3: the level of the first strong character, or zero.

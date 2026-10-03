@@ -521,9 +521,14 @@ Landed so far:
   `BookMetrics` implements it over a book's own `@font-face` faces.
 - **Shaped runs into a document.** `tinker_pdf::shaping` turns a run's clusters
   back into the text each glyph stands for and writes it through
-  `DocumentBuilder::glyph_run`. An Arabic string built that way extracts back
-  to itself through the `/ToUnicode` the writer wrote, across a ligature, and
-  the document is clean under the strict structural validator.
+  `DocumentBuilder::glyph_run`. `write_run` draws its text as one line in
+  visual order — rule L2 over the bidi runs, a right-to-left run from its last
+  cluster to its first — where until ruling 14 it drew every run left to
+  right in logical order, a right-to-left word backwards on the page, and the
+  round trip passed only because extraction read content-stream order. An
+  Arabic string built that way extracts back to itself, in reading order,
+  through the `/ToUnicode` the writer wrote, across a ligature, and the
+  document is clean under the strict structural validator.
 
 - **Shaped values into a form field.** `tinker_pdf_cos::Font::program` walks
   `/DescendantFonts` → `/FontDescriptor` → `/FontFile2` (or `/FontFile3`, or
@@ -605,7 +610,7 @@ the fixture behind it, and the scripts divide in five:
 | Script | What is behind it |
 |---|---|
 | Latin, Ethiopic | text-rendering-tests sections `CMAP-1`, `CMAP-2`, `GSUB-1`, `GSUB-2`, `GPOS-1`–`GPOS-4`: 48 cases, 38 of them discriminating against an implementation with no shaper at all |
-| Hebrew, Arabic and every other bidirectional script, for **direction only** | `BidiTest.txt` and `BidiCharacterTest.txt` in full — 861 948 resolutions. This says the levels and the visual order are right; it says nothing about the glyphs |
+| Hebrew, Arabic and every other bidirectional script, for **direction only** | `BidiTest.txt` and `BidiCharacterTest.txt` in full — 861 948 resolutions — and both again through `bidi::order_units`, the entry point text extraction puts a drawn line back into reading order with (ruling 14). This says the levels and the visual order are right; it says nothing about the glyphs |
 | Arabic *shaping* | `SHARAN-1`: six words of Urdu in Nasta‘līq, all six reproduced glyph for glyph and position for position. It is the corpus's only Arabic-script section, so joining, `rlig` and cursive attachment are adjudicated **for one face of one style of one language**. Naskh, and the vowelled Arabic of a Qur'an, have no fixture here |
 | Balinese, Kannada, Tai Tham | `SHBALI`, `SHKNDA`, `SHLANA`: 333 cases, of which **301 are reproduced and 32 are not**. Seven of the sixteen sections pass whole. `crates/tinker-pdf-shape/tests/text_rendering.rs`'s `PASSING` holds the number per section and is a ratchet — it may rise and may not fall, and its `TRIAGE` says of each remaining failure whether the glyph *set*, their *order* or only a *position* is wrong |
 | Every other Brahmic and Southeast Asian script — Devanagari, Bengali, Gujarati, Gurmukhi, Malayalam, Odia, Sinhala, Tamil, Telugu, Myanmar, Khmer, Lao, Thai, Javanese, Sundanese, Tibetan, Tagalog and the rest — and Syriac, N'Ko, Mongolian, Adlam, Thaana, Mandaic, Hanifi Rohingya, Phags-pa | **shaped, and unverified.** The cluster model runs over them because it is driven by the Unicode properties rather than by a list of scripts — and so, since milestone 5 closed, does the canonical decomposition, which reaches every two-part vowel in Devanagari, Bengali, Oriya, Tamil, Telugu, Malayalam and Sinhala. No fixture in either vendored corpus contains a face for any of them. What that produces is deterministic and plausible; nothing in this repository says it is right |

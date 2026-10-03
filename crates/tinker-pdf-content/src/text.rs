@@ -118,7 +118,13 @@ pub enum WritingMode {
 /// One line of text.
 #[derive(Clone, Debug)]
 pub struct TextLine {
-    /// The characters, in the order the content stream showed them.
+    /// The characters, in the order [`TextDevice`] collected them — the order
+    /// the content stream showed them.
+    ///
+    /// The facade's `Page::text` puts a line holding a right-to-left
+    /// character into **logical** order before a caller sees it (ruling 14,
+    /// `docs/rulings.md`), so for a page read through it this is reading
+    /// order; `Page::text_with` keeps the stream's.
     pub chars: Vec<TextChar>,
     /// The whole line's text.
     pub text: String,
@@ -296,9 +302,23 @@ impl TextPage {
 }
 
 /// The quad covering glyphs `a..=b` of a line.
+///
+/// The left edge is taken from whichever of the two ends starts first along
+/// the first one's baseline. For a line in the order it was drawn that is `a`,
+/// and nothing changes; for a right-to-left line in logical order (ruling 14)
+/// the logically first glyph is the rightmost, and a quad taken from it as
+/// though it were the left end would be turned inside out.
 pub(crate) fn span_quad(line: &TextLine, a: usize, b: usize) -> Option<Quad> {
-    let first = line.chars.get(a)?;
-    let last = line.chars.get(b)?;
+    let mut first = line.chars.get(a)?;
+    let mut last = line.chars.get(b)?;
+    let (ux, uy) = (
+        first.quad.lr.0 - first.quad.ll.0,
+        first.quad.lr.1 - first.quad.ll.1,
+    );
+    let along = |p: (f64, f64)| p.0 * ux + p.1 * uy;
+    if along(last.quad.lr) < along(first.quad.ll) {
+        core::mem::swap(&mut first, &mut last);
+    }
     Some(Quad {
         ul: first.quad.ul,
         ll: first.quad.ll,

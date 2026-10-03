@@ -56,7 +56,7 @@ use epub_support::book::{faces_book, one_face_book};
 use epub_support::typeface::{
     origin_of, shown_glyphs, text_objects, Face, Form, Joining, Placement,
 };
-use tinker_pdf::{Document, OpenOptions, RenderOptions};
+use tinker_pdf::{Document, OpenOptions, RenderOptions, TextOptions};
 
 /// Beh, hah and meem: three Arabic letters that join on both sides, and a
 /// space, which joins on neither.
@@ -277,26 +277,77 @@ fn a_right_to_left_line_in_two_faces_is_drawn_right_to_left() {
         "the second face's letters are not to the left of the first's: {content}"
     );
 
-    // **And the extracted order is the visual one**, pinned here because it is
-    // a surprise worth having written down rather than met.
-    //
-    // A shaped right-to-left run is drawn in visual order — that is what makes
-    // the page right — and `TextPage` reports characters in the order the
-    // content stream showed them, with `TextLine::rtl` a *report* rather than
-    // an instruction. So a right-to-left line extracts reversed. It already
-    // did for a one-face line; the `LINE` above hides it only because those
-    // six letters are a palindrome. What this commit changes is that the
-    // two-face case now agrees with the one-face case, where before it was in
-    // neither order.
-    //
-    // Recorded and not fixed: reversing a line by `TextLine::rtl` is a
-    // decision about every PDF this engine reads and not about this book.
-    let extracted = doc.page(0).expect("a page").text().plain_text();
-    let reversed: String = SPLIT_LINE.chars().rev().collect();
+    // **And the line reads forwards.** Ruling 14 (`docs/rulings.md`): the
+    // page is drawn in visual order — that is what makes it right — and text
+    // is extracted in logical order, by UAX #9's rule L2 applied to the line
+    // as drawn. This assertion used to pin the reverse, with the decision it
+    // needed named and not taken; the ruling is the decision.
+    let page = doc.page(0).expect("a page");
+    let extracted = page.text().plain_text();
     assert_eq!(
         extracted.trim_end(),
+        SPLIT_LINE,
+        "a right-to-left line drawn in visual order does not extract in \
+         reading order"
+    );
+    // And the opt-out still says what the content stream says: the line as
+    // drawn, last letter first.
+    let drawn = page
+        .text_with(&TextOptions {
+            content_order: true,
+        })
+        .plain_text();
+    let reversed: String = SPLIT_LINE.chars().rev().collect();
+    assert_eq!(
+        drawn.trim_end(),
         reversed,
-        "the extracted order is neither logical nor visual"
+        "content order is no longer the order the line was drawn in"
+    );
+}
+
+/// **The one-face line reads forwards too**, with a line that is not a
+/// palindrome.
+///
+/// [`LINE`] is the same three letters in both orders, so it reads the same
+/// either way and could never have shown which order extraction used. This
+/// one can: beh, hah, meem, noon — four letters in one face, drawn joined and
+/// last letter first.
+#[test]
+fn a_one_face_arabic_line_extracts_in_reading_order() {
+    let face = Face::new("Fixture Arabic", SPLIT_LINE).with_joining(Joining { script: *b"arab" });
+    let doc = Document::open(one_face_book(
+        "Fixture Arabic",
+        &face.build(),
+        24,
+        SPLIT_LINE,
+    ))
+    .expect("a book");
+    let content = page_content(&doc);
+    let objects = text_objects(&content);
+    assert_eq!(objects.len(), 1, "one face, one text object: {content}");
+    // Drawn last letter first, which is what makes the page right.
+    let drawn: String = SPLIT_LINE
+        .chars()
+        .rev()
+        .map(|ch| {
+            let form = match ch {
+                '\u{646}' => Form::Final,
+                '\u{628}' => Form::Initial,
+                _ => Form::Medial,
+            };
+            format!(
+                "{:04X}",
+                face.form_glyph(ch, form)
+                    .unwrap_or_else(|| panic!("{ch:?} has no {form:?} form"))
+            )
+        })
+        .collect();
+    assert_eq!(shown_glyphs(&objects[0].1), drawn, "{content}");
+    let extracted = doc.page(0).expect("a page").text().plain_text();
+    assert_eq!(
+        extracted.trim_end(),
+        SPLIT_LINE,
+        "a joined Arabic line drawn right to left does not extract in reading order"
     );
 }
 
