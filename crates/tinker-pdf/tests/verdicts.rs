@@ -176,7 +176,11 @@ fn every_corpus_signature_gets_a_verdict() {
                 );
                 // Wired 2 October 2026: the signature is checked over the
                 // covered bytes' own digest rather than refused by name, so
-                // whatever it says, it no longer says it did not look.
+                // whatever it says, it no longer says it did not look. An
+                // expectation, not a measurement: it was written where the
+                // corpus could not be fetched, and an MD5 digest, unusable
+                // coverage or a missing certificate would still make it
+                // `NotChecked` (the roadmap's Signatures row).
                 assert!(
                     !matches!(verdict.signature, SignatureCheck::NotChecked(_)),
                     "{name}: an unattributed signer's signature is checked now, {:?}",
