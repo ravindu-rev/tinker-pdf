@@ -548,7 +548,12 @@ fn build_public_key(
         names.intern(b"AuthEvent"),
         Object::Name(names.intern(b"DocOpen")),
     );
-    filter.insert(names.intern(b"Length"), Object::Int(32));
+    // ISO 32000-1 Table 25: the standard handler gives a crypt filter's
+    // `/Length` in bytes, "public-key security handlers express it as is" —
+    // in bits. So a public-key AESV3 filter says 256 where `build_encryption`
+    // says 32. This tree's reader takes the key length from `/V` and ignores
+    // the filter's, so nothing here would notice either; another reader might.
+    filter.insert(names.intern(b"Length"), Object::Int(256));
     filter.insert(
         names.intern(b"Recipients"),
         Object::Array(

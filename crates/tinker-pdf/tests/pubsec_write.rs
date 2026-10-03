@@ -179,7 +179,11 @@ fn pem_to_der(pem: &str) -> Vec<u8> {
     out
 }
 
-/// "Print, copy" and nothing else, as `/P` stores it.
+/// `/P` as Table 22 stores it: `0xFFFFF2C0`, which is the reserved bits that
+/// must be set (7, 8 and 13 to 32) and bit 10, extraction for accessibility,
+/// and nothing else — printing (bit 3), copying (bit 5) and every other
+/// permission clear. Any value would do; this one is the record
+/// `docs/design/pubsec.md` cites, so it stays.
 const PERMISSIONS: i32 = -3392;
 
 fn sealed_to(certificates: &[Vec<u8>]) -> PublicKeyEncryption {
@@ -283,6 +287,16 @@ fn the_file_is_sealed_and_says_how() {
         .get_name(cos.intern(b"CFM"))
         .and_then(|name| cos.name_bytes(name));
     assert_eq!(method.as_deref(), Some(&b"AESV3"[..]));
+    // Table 25: in bits under a public-key handler ("as is"), where the
+    // standard handler's 32 would be bytes.
+    assert_eq!(
+        filter.get(cos.intern(b"Length")).and_then(|v| v.as_int()),
+        Some(256)
+    );
+    assert_eq!(
+        encrypt.get(cos.intern(b"Length")).and_then(|v| v.as_int()),
+        Some(256)
+    );
     let recipients = cos.resolve_key(filter, cos.intern(b"Recipients"));
     let recipients = recipients.as_array().expect("/Recipients");
     assert_eq!(recipients.len(), 1, "one envelope for one group");

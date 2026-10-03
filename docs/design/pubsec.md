@@ -146,6 +146,14 @@ certificate is checked first, in a dry run against a source that refuses, so a
 bad certificate costs no entropy. A zero padding octet is redrawn, not
 replaced, and a source that returns 64 zeros running is refused as broken.
 
+**The crypt filter's `/Length` is 256, in bits.** ISO 32000-1 Table 25 has
+the standard handler give that entry in bytes and public-key handlers give it
+"as is", so the password writer's AESV3 filter says 32 and this one says 256.
+Until review on 3 October 2026 this one said 32 too, copied from the password
+writer; the reader here takes the key length from `/V` and ignores the
+filter's (`decrypt.rs` calls the entry ambiguous), so no test of this tree's
+could have noticed.
+
 **`/EncryptMetadata` is not written.** ISO 32000-1 Table 27 puts the public-key handler's
 flag in the crypt filter, and this tree's reader looks for it on `/Encrypt`
 itself (see Risks). Both default to true, and the writer always encrypts the
