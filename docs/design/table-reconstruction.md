@@ -407,3 +407,39 @@ their stated and inferred spans by name and the reproduction is owed; and
 "an Arabic EPUB table orders cells right to left" cannot be built, because the
 EPUB path does not lay out `direction: rtl` (a refused property), so the
 right-to-left fixture is a builder grid whose glyphs are set in visual order.
+
+**Milestone 5 (3 October 2026): aligned tables, labelled.** Where no ruled
+table stands, each text-device line is cut into fragments at every gap of an
+em or more between glyphs that are not spaces (`ALIGNED_GAP_EMS`; a word
+space is a quarter to a third of one, and a run of space glyphs a producer
+pads columns with is the gap, not ink across it),
+fragments sharing a baseline to within half an em are a row, and a run of at
+least three consecutive rows (`ALIGNED_REPEATS`), each of two fragments or
+more and no more than two lines apart, is a candidate. Its columns are the
+left edges — right edges when most of its text is right to left — that three
+rows share to within a quarter em (`ALIGNED_EDGE_EMS`); each fragment belongs
+to the last column starting at or before it, which is what lets a header row
+centred over its columns land in them. The result is `TableEvidence::Aligned`
+with `TableWarning::NoRules`. Not a table: a run whose columns do not recur,
+text in fewer than one cell in four (checked before any cell is made), and —
+the false positive that matters — **two or more columns as wide as a column
+of prose** (`COLUMN_MIN_WIDTH_EMS`, the reading-order inference's constant),
+which is a page set in columns rather than a table. The census scores
+`Ruled` and `Aligned` separately and never averages them.
+
+Measured, first-party: the two calibre books' unruled twelve-cell table — a
+centred header row over three body columns at recurring left edges — is found
+`Aligned` over the stated table, the same 4 × 3 grid, 135 of 135 characters in
+their stated cells; an unruled table tagged row by row and drawn column by
+column, each row set up to a point off the others, is found with 51 of 51; a
+report whose columns are padded with spaces inside one string per row is cut
+into its 4 × 3 cells; a paragraph of prose, two columns of prose, two aligned
+rows and a Courier listing whose every word starts under the one above are
+not tables; and still no table is inferred on any of the
+53 committed pages that state none. Recall over the committed books' five
+stated tables is **two of five, both by alignment**. The other three are the
+pandoc books', which this engine lays out as running text rather than a grid:
+pandoc's stylesheet sets `table { display: block }`, and CSS 2.2 §17.2.1 would
+still wrap the orphaned rows in an anonymous table, which the EPUB path does
+not — a layout gap recorded here and not fixed in this row. The census's
+recall-by-evidence figures over the corpus are **owed**.

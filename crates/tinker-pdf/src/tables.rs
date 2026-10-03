@@ -71,7 +71,7 @@
 
 use std::collections::BTreeMap;
 
-use tinker_pdf_content::{Quad, TextChar};
+use tinker_pdf_content::{Quad, TextChar, TextPage};
 use tinker_pdf_cos::{ObjRef, TableScope};
 
 use crate::observe::{Fill, Observed};
@@ -131,6 +131,24 @@ pub const RULE_MIN_EMS: f64 = 1.0;
 /// made: cells are made only for a lattice that passes, so at most this
 /// multiple of the page's characters.
 pub const LATTICE_TEXT_SHARE: usize = 4;
+
+/// The narrowest gap between two glyphs of a line that cuts it into two
+/// fragments for an aligned table, in ems: a word space is a quarter to a
+/// third of one, so a gap of a whole em is a gap between cells.
+pub const ALIGNED_GAP_EMS: f64 = 1.0;
+
+/// How far apart, in ems, the edges of fragments may be and still start one
+/// column of an aligned table (the design's quarter em).
+pub const ALIGNED_EDGE_EMS: f64 = 0.25;
+
+/// On how many rows a column's start must recur — and how many consecutive
+/// rows of two fragments or more make a run — for an aligned table (the
+/// design's three).
+pub const ALIGNED_REPEATS: usize = 3;
+
+/// How many lines apart two rows of an aligned table may stand and still be
+/// one run.
+pub const ALIGNED_ROW_LINES: f64 = 2.0;
 
 /// A straight, axis-aligned stretch of ink a table could be ruled with.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -203,6 +221,9 @@ pub enum HeaderEvidence {
 pub enum TableEvidence {
     /// A lattice of drawn rules.
     Ruled,
+    /// Text whose fragments start in recurring columns, where no rule was
+    /// drawn: weaker evidence, and never averaged with [`Self::Ruled`].
+    Aligned,
 }
 
 /// One cell of an [`InferredTable`].
@@ -379,6 +400,9 @@ pub enum TableWarning {
         /// Its first grid column.
         column: usize,
     },
+    /// The table was inferred from aligned text, not from rules: nothing the
+    /// page drew bounds its cells.
+    NoRules,
     /// The page's structure tree states a table, so the stated one is the
     /// answer and nothing was inferred — or, with
     /// [`TableOptions::hide_structure`], the inference is a measurement.
@@ -720,6 +744,14 @@ pub(crate) fn infer_tables(observed: &Observed, frame: (f64, f64, f64, f64)) -> 
         }
         tables.push(table);
     }
+    // Aligned text where no ruled table stands.
+    let ruled: Vec<(f64, f64, f64, f64)> = tables.iter().map(|t| t.bounds.bounds()).collect();
+    tables.extend(infer_aligned(
+        fragments(page, &flat, em, &ruled),
+        &flat,
+        &line_of,
+        em,
+    ));
     // Top to bottom, then left to right, as a page is read.
     tables.sort_by(|a, b| {
         let (ab, bb) = (a.bounds.bounds(), b.bounds.bounds());
@@ -1264,6 +1296,324 @@ fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Quad {
         ll: (x0, y0),
         lr: (x1, y0),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Inferred tables: aligned text, where no rule was drawn
+// ---------------------------------------------------------------------------
+
+/// One stretch of a text line between gaps of [`ALIGNED_GAP_EMS`] or more.
+#[derive(Clone, Debug)]
+struct Fragment {
+    /// The page's characters it holds, by their stream position.
+    chars: Vec<usize>,
+    x0: f64,
+    x1: f64,
+    y0: f64,
+    y1: f64,
+    baseline: f64,
+    rtl: bool,
+}
+
+/// The fragments of the page's lines that no ruled table holds, each line cut
+/// at every gap of [`ALIGNED_GAP_EMS`] or more between neighbouring glyphs.
+fn fragments(
+    page: &TextPage,
+    flat: &[&TextChar],
+    em: f64,
+    ruled: &[(f64, f64, f64, f64)],
+) -> Vec<Fragment> {
+    let gap = ALIGNED_GAP_EMS * em;
+    let inside = |x: f64, y: f64| {
+        ruled
+            .iter()
+            .any(|(a, b, c, d)| x >= *a && x <= *c && y >= *b && y <= *d)
+    };
+    let mut out = Vec::new();
+    let mut next = 0usize;
+    for line in page.blocks.iter().flat_map(|b| b.lines.iter()) {
+        let first = next;
+        next += line.chars.len();
+        if line.wmode != tinker_pdf_content::WritingMode::Horizontal {
+            continue;
+        }
+        // The line's glyphs left to right, so a gap is between neighbours on
+        // the page whatever order the line is read in.
+        let mut placed: Vec<(usize, (f64, f64, f64, f64))> = (first..next)
+            .filter_map(|at| {
+                let c = flat.get(at)?;
+                c.quad.is_finite().then(|| (at, c.quad.bounds()))
+            })
+            .filter(|(_, (x0, y0, x1, y1))| !inside((x0 + x1) / 2.0, (y0 + y1) / 2.0))
+            .collect();
+        placed.sort_by(|a, b| a.1 .0.total_cmp(&b.1 .0));
+        let mut current: Option<Fragment> = None;
+        for (at, (x0, y0, x1, y1)) in placed {
+            // A space is part of the gap it stands in, not ink that closes
+            // it: a producer that aligns columns with spaces in one string
+            // draws them as glyphs. It stays with the fragment before it, so
+            // no character leaves the table, and moves no edge.
+            if flat.get(at).is_some_and(|c| c.text.trim().is_empty()) {
+                if let Some(f) = current.as_mut() {
+                    f.chars.push(at);
+                }
+                continue;
+            }
+            let baseline = flat.get(at).map_or(y0, |c| c.origin.1);
+            let starts = current.as_ref().is_none_or(|f| x0 - f.x1 >= gap);
+            if starts {
+                out.extend(current.take());
+                current = Some(Fragment {
+                    chars: vec![at],
+                    x0,
+                    x1,
+                    y0,
+                    y1,
+                    baseline,
+                    rtl: line.rtl,
+                });
+            } else if let Some(f) = current.as_mut() {
+                f.chars.push(at);
+                f.x1 = f.x1.max(x1);
+                f.y0 = f.y0.min(y0);
+                f.y1 = f.y1.max(y1);
+            }
+        }
+        out.extend(current);
+    }
+    out
+}
+
+/// Tables of aligned text, labelled [`TableEvidence::Aligned`]: runs of at
+/// least three consecutive rows — fragments sharing a baseline to within half
+/// an em — each with two fragments or more, whose column starts recur. A
+/// column is a left edge (a right edge, on a right-to-left table) that
+/// [`ALIGNED_REPEATS`] rows share to within [`ALIGNED_EDGE_EMS`]; a fragment
+/// belongs to the last column starting at or before it. Two columns of prose
+/// side by side are columns of a page, not of a table: a run in which more
+/// than one column is as wide as [`crate::reading_order::COLUMN_MIN_WIDTH_EMS`]
+/// is not one.
+fn infer_aligned(
+    fragments: Vec<Fragment>,
+    flat: &[&TextChar],
+    line_of: &[LineOf],
+    em: f64,
+) -> Vec<InferredTable> {
+    // Rows: fragments by baseline, top first.
+    let mut fragments = fragments;
+    fragments.sort_by(|a, b| {
+        b.baseline
+            .total_cmp(&a.baseline)
+            .then(a.x0.total_cmp(&b.x0))
+    });
+    let mut rows: Vec<Vec<Fragment>> = Vec::new();
+    for fragment in fragments {
+        match rows.last_mut() {
+            Some(row)
+                if row
+                    .first()
+                    .is_some_and(|f| (f.baseline - fragment.baseline).abs() <= em * 0.5) =>
+            {
+                row.push(fragment);
+            }
+            _ => rows.push(vec![fragment]),
+        }
+    }
+    // Runs of consecutive rows of two fragments or more, no further apart
+    // than two lines.
+    let mut runs: Vec<Vec<Vec<Fragment>>> = Vec::new();
+    let mut current: Vec<Vec<Fragment>> = Vec::new();
+    let mut last_baseline: Option<f64> = None;
+    for row in rows {
+        let baseline = row.first().map_or(0.0, |f| f.baseline);
+        let near = last_baseline.is_none_or(|b| b - baseline <= ALIGNED_ROW_LINES * em * 1.2);
+        if row.len() >= 2 && near {
+            current.push(row);
+        } else {
+            if current.len() >= ALIGNED_REPEATS {
+                runs.push(std::mem::take(&mut current));
+            }
+            current.clear();
+            if row.len() >= 2 {
+                current.push(row);
+            }
+        }
+        last_baseline = Some(baseline);
+    }
+    if current.len() >= ALIGNED_REPEATS {
+        runs.push(current);
+    }
+    runs.into_iter()
+        .filter_map(|run| aligned_table(run, flat, line_of, em))
+        .collect()
+}
+
+/// One run of rows as a table, or `None` when its columns do not recur or
+/// look like a page's.
+fn aligned_table(
+    run: Vec<Vec<Fragment>>,
+    flat: &[&TextChar],
+    line_of: &[LineOf],
+    em: f64,
+) -> Option<InferredTable> {
+    let total: usize = run.iter().flatten().map(|f| f.chars.len()).sum();
+    let rtl_chars: usize = run
+        .iter()
+        .flatten()
+        .filter(|f| f.rtl)
+        .map(|f| f.chars.len())
+        .sum();
+    let right_to_left = rtl_chars * 2 > total;
+    // A column's edge: where its fragments start in reading order.
+    let edge = |f: &Fragment| if right_to_left { f.x1 } else { f.x0 };
+    let tolerance = ALIGNED_EDGE_EMS * em;
+    let mut edges: Vec<(f64, usize)> = run
+        .iter()
+        .enumerate()
+        .flat_map(|(r, row)| row.iter().map(move |f| (edge(f), r)))
+        .collect();
+    edges.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Clusters of edges within the tolerance of their first, kept when
+    // enough distinct rows share them.
+    let mut starts: Vec<f64> = Vec::new();
+    let mut at = 0usize;
+    while at < edges.len() {
+        let Some(&(first, _)) = edges.get(at) else {
+            break;
+        };
+        let mut end = at + 1;
+        while edges.get(end).is_some_and(|e| e.0 - first <= tolerance) {
+            end += 1;
+        }
+        let mut rows: Vec<usize> = edges
+            .get(at..end)
+            .unwrap_or_default()
+            .iter()
+            .map(|e| e.1)
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        if rows.len() >= ALIGNED_REPEATS {
+            starts.push(first);
+        }
+        at = end;
+    }
+    if starts.len() < 2 {
+        return None;
+    }
+    // Reading order of the columns: left to right, or right to left.
+    if right_to_left {
+        starts.reverse();
+    }
+    // A binary search: starts ascend left to right, and descend right to
+    // left.
+    let column_of = |f: &Fragment| -> usize {
+        let e = edge(f);
+        let after = if right_to_left {
+            starts.partition_point(|s| *s >= e - tolerance)
+        } else {
+            starts.partition_point(|s| *s <= e + tolerance)
+        };
+        after.saturating_sub(1)
+    };
+    let columns = starts.len();
+    let mut widths: Vec<Vec<f64>> = vec![Vec::new(); columns];
+    let mut grid: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+    let mut bands: Vec<(f64, f64)> = Vec::with_capacity(run.len());
+    for (r, row) in run.iter().enumerate() {
+        let top = row.iter().map(|f| f.y1).fold(f64::NEG_INFINITY, f64::max);
+        let bottom = row.iter().map(|f| f.y0).fold(f64::INFINITY, f64::min);
+        bands.push((bottom, top));
+        for f in row {
+            let c = column_of(f);
+            if let Some(w) = widths.get_mut(c) {
+                w.push(f.x1 - f.x0);
+            }
+            grid.entry((r, c))
+                .or_default()
+                .extend(f.chars.iter().copied());
+        }
+    }
+    // Text in fewer than one cell in four is not a table, checked before any
+    // cell is made, as for a lattice.
+    let slots = run.len().checked_mul(columns)?;
+    if grid.len().saturating_mul(LATTICE_TEXT_SHARE) < slots {
+        return None;
+    }
+    // Prose set in columns is not a table.
+    let mut wide = 0usize;
+    for w in &mut widths {
+        w.sort_by(f64::total_cmp);
+        if w.get(w.len() / 2)
+            .is_some_and(|m| *m >= crate::reading_order::COLUMN_MIN_WIDTH_EMS * em)
+        {
+            wide += 1;
+        }
+    }
+    if wide > 1 {
+        return None;
+    }
+    let rows = run.len();
+    let left = run
+        .iter()
+        .flatten()
+        .map(|f| f.x0)
+        .fold(f64::INFINITY, f64::min);
+    let right = run
+        .iter()
+        .flatten()
+        .map(|f| f.x1)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let low = bands.iter().map(|b| b.0).fold(f64::INFINITY, f64::min);
+    let high = bands.iter().map(|b| b.1).fold(f64::NEG_INFINITY, f64::max);
+    // Column extents in page terms: from a column's start to the next's.
+    let mut bounds_x: Vec<f64> = starts.clone();
+    bounds_x.sort_by(f64::total_cmp);
+    let mut permutation = Vec::new();
+    let mut cells = Vec::with_capacity(rows * columns);
+    for r in 0..rows {
+        for c in 0..columns {
+            let mut chars = grid.remove(&(r, c)).unwrap_or_default();
+            order_cell(&mut chars, line_of);
+            permutation.extend(chars.iter().copied());
+            let held: Vec<TextChar> = chars
+                .iter()
+                .filter_map(|i| flat.get(*i).map(|ch| (*ch).clone()))
+                .collect();
+            // The page column this reading column is.
+            let page_column = if right_to_left { columns - 1 - c } else { c };
+            let x0 = if page_column == 0 {
+                left
+            } else {
+                bounds_x.get(page_column).copied().unwrap_or(left)
+            };
+            let x1 = bounds_x.get(page_column + 1).copied().unwrap_or(right);
+            let (y0, y1) = bands.get(r).copied().unwrap_or((low, high));
+            cells.push(InferredCell {
+                row: r,
+                column: c,
+                row_span: 1,
+                col_span: 1,
+                text: held.iter().map(|ch| ch.text.as_str()).collect(),
+                chars: held,
+                quad: rect(x0, y0, x1, y1),
+            });
+        }
+    }
+    Some(InferredTable {
+        rows,
+        columns,
+        cells,
+        bounds: rect(left, low, right, high),
+        evidence: TableEvidence::Aligned,
+        header: if rows < 2 {
+            HeaderEvidence::None
+        } else {
+            HeaderEvidence::FirstRow
+        },
+        permutation,
+        warnings: vec![TableWarning::NoRules],
+    })
 }
 
 /// For each column of a table, the first row at which it is free again — a

@@ -44,7 +44,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use tinker_pdf::{
-    Document, HeaderEvidence, InferredTable, StatedTable, TableOptions, TableWarning,
+    Document, HeaderEvidence, InferredTable, StatedTable, TableEvidence, TableOptions, TableWarning,
 };
 
 /// Printed once when the census read the corpora. CI greps it.
@@ -150,6 +150,10 @@ struct Totals {
     grid: usize,
     placed: usize,
     placeable: usize,
+    /// The same, by the evidence the found table was built on — never
+    /// averaged together, as the design asks: `[ruled, aligned]`.
+    found_by: [usize; 2],
+    grid_by: [usize; 2],
     /// Inferred tables on scored pages whose tree states none.
     extra: usize,
     /// Inferred tables found over a stated one whose first row is all `TH`,
@@ -169,10 +173,16 @@ fn key(c: &tinker_pdf::TextChar) -> Key {
 /// `tables.rs`'s, for the corpus: found (an inferred table covering at least
 /// half the stated one's characters' quad), the grid exact, and the stated
 /// cells' characters placed in the same row and column, of how many.
-fn score(stated: &StatedTable, inferred: &[InferredTable]) -> (bool, bool, usize, usize) {
+///
+/// With the evidence of the table found, so `Ruled` and `Aligned` are scored
+/// apart.
+fn score_by(
+    stated: &StatedTable,
+    inferred: &[InferredTable],
+) -> (bool, bool, usize, usize, Option<TableEvidence>) {
     let total: usize = stated.cells.iter().map(|c| c.chars.len()).sum();
     let Some(quad) = stated.quad else {
-        return (false, false, 0, total);
+        return (false, false, 0, total, None);
     };
     let (sx0, sy0, sx1, sy1) = quad.bounds();
     let found = inferred.iter().find(|t| {
@@ -181,7 +191,7 @@ fn score(stated: &StatedTable, inferred: &[InferredTable]) -> (bool, bool, usize
         overlap * 2.0 >= (sx1 - sx0) * (sy1 - sy0)
     });
     let Some(table) = found else {
-        return (false, false, 0, total);
+        return (false, false, 0, total, None);
     };
     let grid = table.rows == stated.rows && table.columns == stated.columns;
     let mut place = BTreeMap::new();
@@ -196,7 +206,7 @@ fn score(stated: &StatedTable, inferred: &[InferredTable]) -> (bool, bool, usize
         .flat_map(|cell| cell.chars.iter().map(move |c| (cell, c)))
         .filter(|(cell, c)| place.get(&key(c)) == Some(&(cell.row, cell.column)))
         .count();
-    (true, grid, placed, total)
+    (true, grid, placed, total, Some(table.evidence))
 }
 
 #[test]
@@ -282,7 +292,18 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
                 totals.extra += inferred.tables.len();
             }
             for table in &stated {
-                let (found, grid, placed, total) = score(table, &inferred.tables);
+                let (found, grid, placed, total, evidence) = score_by(table, &inferred.tables);
+                let class = usize::from(evidence == Some(TableEvidence::Aligned));
+                if found {
+                    if let Some(slot) = totals.found_by.get_mut(class) {
+                        *slot += 1;
+                    }
+                }
+                if grid {
+                    if let Some(slot) = totals.grid_by.get_mut(class) {
+                        *slot += 1;
+                    }
+                }
                 let th_row = table.cells.iter().filter(|c| c.row == 0).all(|c| c.header)
                     && table.cells.iter().any(|c| c.row == 0);
                 if found && th_row {
@@ -392,6 +413,10 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
         println!(
             "{:<14} header rows (all TH) found {}, set apart by fill or rule {}",
             "", t.headed, t.header_evidence
+        );
+        println!(
+            "{:<14} by evidence: ruled found {} grid {}; aligned found {} grid {}",
+            "", t.found_by[0], t.grid_by[0], t.found_by[1], t.grid_by[1]
         );
         if let Some((_, recorded)) = DESIGN_RECORDED.iter().find(|(c, _)| c == name) {
             println!("{:<14} design's 16 September walk: {recorded:?}", "");

@@ -1193,3 +1193,255 @@ fn a_right_to_left_table_reads_from_the_right() {
     let (x0, _, _, _) = first.quad.bounds();
     assert!(x0 > 270.0, "column 0 is the rightmost");
 }
+
+// ---- aligned tables -------------------------------------------------------------
+
+/// **A committed book's unruled table is found by its alignment.** The two
+/// calibre books lay their twelve-cell table out as a grid with no border:
+/// the header row centred over its columns, the body rows starting at three
+/// recurring left edges. With the tree hidden it is found as an `Aligned`
+/// table — named `NoRules` — over the stated one, with the stated grid and
+/// every character in its stated cell. The three pandoc books set the same
+/// table as running text, which no reader of the page could call a grid, and
+/// nothing is found there: recall over the committed books' five stated
+/// tables is two, by alignment, and none by rules.
+#[test]
+fn a_committed_books_unruled_table_is_found_by_its_alignment() {
+    let books = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/epub");
+    let mut entries: Vec<_> = std::fs::read_dir(books)
+        .expect("the committed books")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "epub"))
+        .collect();
+    entries.sort();
+    let (mut stated_count, mut found_aligned, mut found_ruled) = (0usize, 0usize, 0usize);
+    for path in entries {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let doc = open(std::fs::read(&path).expect("readable"));
+        for index in 0..doc.page_count() {
+            let page = doc.page(index).expect("a page");
+            let stated = page.stated_tables();
+            if stated.is_empty() {
+                continue;
+            }
+            let inferred = page.inferred_tables(&hidden());
+            for table in &stated {
+                stated_count += 1;
+                let (found, grid, agreeing, total) = score(table, &inferred.tables);
+                let evidence = inferred.tables.first().map(|t| t.evidence);
+                println!(
+                    "{name}: found {found} ({evidence:?}) grid {grid} cells {agreeing}/{total}"
+                );
+                if name.starts_with("calibre-book") {
+                    assert!(found && grid, "{name}");
+                    assert_eq!(agreeing, total, "{name}");
+                    let t = &inferred.tables[0];
+                    assert_eq!(t.evidence, TableEvidence::Aligned);
+                    assert_eq!(t.warnings, [TableWarning::NoRules]);
+                }
+                if found {
+                    match evidence {
+                        Some(TableEvidence::Aligned) => found_aligned += 1,
+                        _ => found_ruled += 1,
+                    }
+                }
+            }
+        }
+    }
+    println!("{stated_count} stated tables: {found_aligned} found aligned, {found_ruled} ruled");
+    assert_eq!((stated_count, found_aligned, found_ruled), (5, 2, 0));
+}
+
+/// A line of words, deterministic in `seed`, at least `length` characters.
+fn prose(seed: usize, length: usize) -> String {
+    const WORDS: &[&str] = &[
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+        "juliett", "kilo", "lima", "mike", "november", "oscar", "papa",
+    ];
+    let mut out = String::new();
+    let mut at = seed.wrapping_mul(7);
+    while out.len() < length {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(WORDS[at % WORDS.len()]);
+        at = at.wrapping_mul(31).wrapping_add(17);
+    }
+    out
+}
+
+/// **Prose is not a table**: a paragraph, whose lines are one fragment each;
+/// two columns of it side by side, whose rows are two fragments starting at
+/// two recurring edges — columns of a page, both as wide as a column of prose
+/// is; and two rows of aligned words, one fewer than a run needs.
+#[test]
+fn prose_in_one_column_or_two_is_not_a_table() {
+    let mut paragraph = String::new();
+    for row in 0..12 {
+        paragraph.push_str(&format!(
+            "BT /F1 10 Tf 72 {} Td ({}) Tj ET\n",
+            700 - row * 12,
+            prose(row, 90)
+        ));
+    }
+    let found = drawn(&paragraph)
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    assert!(found.tables.is_empty());
+
+    let mut columns = String::new();
+    for row in 0..20 {
+        for (x, seed) in [(72, row), (324, 100 + row)] {
+            columns.push_str(&format!(
+                "BT /F1 10 Tf {x} {} Td ({}) Tj ET\n",
+                700 - row * 12,
+                prose(seed, 40)
+            ));
+        }
+    }
+    let found = drawn(&columns)
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    assert!(found.tables.is_empty(), "{} tables", found.tables.len());
+
+    let two = drawn(concat!(
+        "BT /F1 10 Tf 72 700 Td (Name) Tj ET BT /F1 10 Tf 200 700 Td (Price) Tj ET\n",
+        "BT /F1 10 Tf 72 688 Td (Apple) Tj ET BT /F1 10 Tf 200 688 Td (1.20) Tj ET\n",
+    ));
+    assert!(two
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default())
+        .tables
+        .is_empty());
+}
+
+/// **An unruled table tagged as one is found as one**, against the tree it
+/// hid: four rows of three short cells at recurring left edges — each row
+/// set up to a point off the others, as a producer rounding positions sets
+/// them, which the quarter-em tolerance absorbs — drawn a column at a time.
+#[test]
+fn an_unruled_tagged_table_is_found_by_its_alignment() {
+    let cells = [
+        ["Name", "Weight", "Price"],
+        ["Apple", "150", "1.20"],
+        ["Banana", "120", "0.80"],
+        ["Cherry", "5", "0.10"],
+    ];
+    // The tagging API orders by key within a parent, so the table is built
+    // with its cells keyed in reading order and drawn column by column.
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(612.0, 792.0, |page| {
+        page.tagged_with(&Tag::new(b"Table"), |page| {
+            for c in 0..3 {
+                for (r, row) in cells.iter().enumerate() {
+                    let order = (r * 3 + c) as u64;
+                    page.tagged_with(&Tag::new(b"TR").keyed(1000 + r as u64, r as u64), |page| {
+                        page.tagged_with(&Tag::new(b"TD").keyed(order + 1, order), |page| {
+                            let jitter = [0.0, 0.8, -0.6, 1.0][r];
+                            page.text(
+                                b"F1",
+                                10.0,
+                                72.0 + c as f64 * 90.0 + jitter,
+                                700.0 - r as f64 * 14.0,
+                                row[c],
+                            );
+                        });
+                    });
+                }
+            }
+        });
+    });
+    let doc = open(builder.finish());
+    let page = doc.page(0).expect("a page");
+    let stated = page.stated_tables();
+    assert_eq!(stated.len(), 1);
+    assert_eq!((stated[0].rows, stated[0].columns), (4, 3));
+    let inferred = page.inferred_tables(&hidden());
+    let (found, grid, agreeing, total) = score(&stated[0], &inferred.tables);
+    println!("unruled: found {found} grid {grid} cells {agreeing}/{total}");
+    assert!(found && grid);
+    assert_eq!(agreeing, total);
+    assert_eq!(inferred.tables[0].evidence, TableEvidence::Aligned);
+}
+
+/// **Monospaced text is not a table.** A listing in Courier whose every word
+/// is four letters long: each word starts where the one above it does, so a
+/// line cut at its spaces would be a grid of aligned columns. A Courier space
+/// is three fifths of an em, short of [`tinker_pdf::tables::ALIGNED_GAP_EMS`],
+/// so each line is one fragment and nothing aligns.
+#[test]
+fn a_monospaced_listing_is_not_a_table() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F2", b"Courier");
+    builder.add_page(612.0, 792.0, |page| {
+        for row in 0..10 {
+            let words: Vec<&str> = (0..8)
+                .map(|w| ["load", "push", "jump", "test", "move", "call"][(row * 5 + w * 3) % 6])
+                .collect();
+            page.text(
+                b"F2",
+                10.0,
+                72.0,
+                700.0 - row as f64 * 12.0,
+                &words.join(" "),
+            );
+        }
+    });
+    let doc = open(builder.finish());
+    let found = doc
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    assert!(found.tables.is_empty(), "{} tables", found.tables.len());
+}
+
+/// **Columns aligned with spaces in one string are columns.** Each row of a
+/// table drawn as a single string, its cells padded apart with runs of
+/// spaces, as a plain-text report is: the spaces are glyphs, and they are the
+/// gap, not ink across it, so the rows still cut into their cells.
+#[test]
+fn columns_aligned_with_spaces_are_found() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F2", b"Courier");
+    builder.add_page(612.0, 792.0, |page| {
+        for (row, text) in [
+            "Name      Weight    Price",
+            "Apple     150       1.20",
+            "Banana    120       0.80",
+            "Cherry    5         0.10",
+        ]
+        .iter()
+        .enumerate()
+        {
+            page.text(b"F2", 10.0, 72.0, 700.0 - row as f64 * 12.0, text);
+        }
+    });
+    let doc = open(builder.finish());
+    let found = doc
+        .page(0)
+        .expect("a page")
+        .inferred_tables(&TableOptions::default());
+    assert_eq!(found.tables.len(), 1);
+    let table = &found.tables[0];
+    assert_eq!((table.rows, table.columns), (4, 3));
+    let texts: Vec<String> = table
+        .cells
+        .iter()
+        .map(|c| c.text.trim().to_string())
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "Name", "Weight", "Price", "Apple", "150", "1.20", "Banana", "120", "0.80", "Cherry",
+            "5", "0.10"
+        ]
+    );
+}
