@@ -249,6 +249,62 @@ impl Scored {
     }
 }
 
+/// The characters of page `index` that only a reading with the tree hidden
+/// extracts: what the producer drew inside `/Artifact` scopes (14.8.2.2), which
+/// `Page::text` drops. Over a page whose producer marks its furniture
+/// `/Pagination`, the truth the running-head score is held to.
+pub fn artifact_keys(doc: &Document, index: u32) -> BTreeSet<Key> {
+    let Some(page) = doc.page(index) else {
+        return BTreeSet::new();
+    };
+    let shown: BTreeSet<Key> = page
+        .text()
+        .lines()
+        .iter()
+        .flat_map(|l| l.chars.iter())
+        .map(key)
+        .collect();
+    let Some(hidden) = doc.inferred_order(
+        index,
+        &InferenceOptions {
+            hide_structure: true,
+        },
+    ) else {
+        return BTreeSet::new();
+    };
+    hidden
+        .chars()
+        .into_iter()
+        .map(key)
+        .filter(|k| !shown.contains(k))
+        .collect()
+}
+
+/// The artifact characters of page `index` ([`artifact_keys`]) that stand in
+/// its margin bands ([`tinker_pdf::reading_order::MARGIN_BAND`]): the truth a
+/// running-head score is held to over a corpus.
+///
+/// By position because the device seam carries a property list's `/MCID` and
+/// 14.9's entries and not an artifact's `/Type` or `/Subtype`, so a
+/// `/Pagination` artifact cannot be told from a `/Layout` one by name; one in
+/// the margin band of the page is what a running head, foot or page number
+/// is, and one elsewhere — a watermark, a rule — is left out of the truth.
+pub fn furniture_truth(doc: &Document, index: u32) -> BTreeSet<Key> {
+    let Some(page) = doc.page(index) else {
+        return BTreeSet::new();
+    };
+    let (_, y0, _, y1) = page.crop_box();
+    let band = (y1 - y0).abs() * tinker_pdf::reading_order::MARGIN_BAND;
+    let (low, high) = (y0.min(y1) + band, y0.max(y1) - band);
+    artifact_keys(doc, index)
+        .into_iter()
+        .filter(|k| {
+            let y = f64::from_bits(k.1);
+            y <= low || y >= high
+        })
+        .collect()
+}
+
 /// How the blocks an inference gave some roles compare with a set of
 /// characters known to have them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

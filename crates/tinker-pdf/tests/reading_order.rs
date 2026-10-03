@@ -699,6 +699,323 @@ fn right_to_left_columns_read_from_the_right() {
     );
 }
 
+// ---- running heads, running feet and page numbers ------------------------------
+
+/// One page of a book with page furniture: a running head (`head`, at the
+/// top, left or right), the page's number centred at the foot, and between
+/// them two columns of body text drawn line by line across both, tagged
+/// column by column. The furniture is drawn as `/Artifact /Pagination`
+/// (14.8.2.2), which is what a producer that marks it writes; the stream
+/// draws the number first, the body next and the head last.
+fn furnished_page(
+    builder: &mut DocumentBuilder,
+    head: &str,
+    head_right: bool,
+    number: &str,
+    seed: usize,
+) {
+    let rows = 20;
+    let runs = two_columns(rows)
+        .into_iter()
+        .enumerate()
+        .map(|(at, r)| Run {
+            text: prose(seed * 1000 + at, r.text.len()),
+            ..r
+        })
+        .collect::<Vec<_>>();
+    let draw = across(rows, 2);
+    builder.add_page(612.0, 792.0, |page| {
+        let artifact = |page: &mut tinker_pdf_cos::build::PageBuilder,
+                        subtype: &str,
+                        x: f64,
+                        y: f64,
+                        text: &str| {
+            page.raw(
+                format!("/Artifact <</Type /Pagination /Subtype /{subtype}>> BDC\n").as_bytes(),
+            );
+            page.text(b"F1", 9.0, x, y, text);
+            page.raw(b"EMC\n");
+        };
+        artifact(page, "Footer", 300.0, 40.0, number);
+        for &at in &draw {
+            let r = &runs[at];
+            page.tagged_keyed(b"P", at as u64 + 1, at as u64, |p| {
+                p.text(b"F1", r.size, r.x, r.y, &r.text);
+            });
+        }
+        let x = if head_right { 420.0 } else { 72.0 };
+        artifact(page, "Header", x, 760.0, head);
+    });
+}
+
+/// A six-page book with a verso head, a recto head and page numbers.
+fn furnished_book(pages: usize) -> Document {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    for at in 0..pages {
+        let (head, right) = if at % 2 == 0 {
+            ("A Treatise On Columns", false)
+        } else {
+            ("Chapter Two: The Gap", true)
+        };
+        furnished_page(&mut builder, head, right, &(at + 1).to_string(), at);
+    }
+    open(builder.finish())
+}
+
+/// **Running heads and page numbers are found by their recurring, and set
+/// aside first and last.** Six pages, a verso head and a recto head each
+/// recurring on every other page, a page number at each foot counting up,
+/// and two columns of body between them drawn across the page. The truth is
+/// the producer's own `/Artifact /Pagination` marks, read with the tree
+/// hidden; the stream's order calls nothing furniture, so its recall is zero
+/// and the inference's is asserted at one, with precision one.
+#[test]
+fn running_heads_and_page_numbers_are_found_by_recurring_and_set_aside() {
+    let doc = furnished_book(6);
+    let furniture = [Role::RunningHead, Role::RunningFoot, Role::PageNumber];
+    let mut total = reading_order_support::RoleScore::default();
+    for index in 0..doc.page_count() {
+        let scored = Scored::read(&doc, index).expect("tagged");
+        let truth = reading_order_support::artifact_keys(&doc, index);
+        assert!(
+            !truth.is_empty(),
+            "page {index}: the fixture marks its furniture"
+        );
+        let score = reading_order_support::role_score(&scored.inferred, &furniture, &truth);
+        total = total.plus(score);
+
+        let blocks = &scored.inferred.blocks;
+        let first = blocks.first().expect("blocks");
+        let last = blocks.last().expect("blocks");
+        assert_eq!(first.role, Role::RunningHead, "page {index}");
+        assert_eq!(last.role, Role::PageNumber, "page {index}");
+        assert_eq!(last.lines[0].text, (index + 1).to_string());
+        assert!(blocks[1..blocks.len() - 1]
+            .iter()
+            .all(|b| b.role == Role::Body));
+        // The body between them reads down its columns.
+        assert!(scored.inferred_agreement().at_least(1, 1), "page {index}");
+        assert!(!scored.stream_agreement().at_least(9, 10), "page {index}");
+        assert_eq!(scored.inferred.columns, 2);
+    }
+    println!(
+        "furniture: called {} correct {}, truth {} chars found {}",
+        total.called, total.correct, total.truth, total.found
+    );
+    assert!(total.precision_at_least(1, 1), "{total:?}");
+    assert!(total.recall_at_least(1, 1), "{total:?}");
+}
+
+/// **One page has nothing to compare**: its margin blocks are `Unplaced`
+/// where they stand, with the warning that says why, and no block is called a
+/// running head or a page number on no evidence.
+#[test]
+fn a_single_page_has_no_running_heads_only_unplaced_margins() {
+    let doc = furnished_book(1);
+    let order = doc.inferred_order(0, &hidden()).expect("a page");
+    assert!(order.blocks.iter().all(|b| !matches!(
+        b.role,
+        Role::RunningHead | Role::RunningFoot | Role::PageNumber
+    )));
+    let unplaced: Vec<&str> = order
+        .blocks
+        .iter()
+        .filter(|b| b.role == Role::Unplaced)
+        .flat_map(|b| b.lines.iter().map(|l| l.text.as_str()))
+        .collect();
+    assert_eq!(
+        unplaced,
+        ["A Treatise On Columns", "1"],
+        "{}",
+        order.plain_text()
+    );
+    assert!(order
+        .warnings
+        .contains(&InferenceWarning::NoCrossPageEvidence {
+            pages: 0,
+            blocks: 2
+        }));
+}
+
+/// **A page number needs one neighbour, a running head two.** Two pages: each
+/// number is confirmed by the other's, one more than or one less than its
+/// own, but each head has one recurrence where two are asked, so it is left
+/// `Unplaced` and named.
+#[test]
+fn two_pages_confirm_their_numbers_and_not_their_heads() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    for at in 0..2 {
+        furnished_page(
+            &mut builder,
+            "A Treatise On Columns",
+            false,
+            &(at + 7).to_string(),
+            at,
+        );
+    }
+    let doc = open(builder.finish());
+    for index in 0..2 {
+        let order = doc.inferred_order(index, &hidden()).expect("a page");
+        let last = order.blocks.last().expect("blocks");
+        assert_eq!(last.role, Role::PageNumber, "page {index}");
+        let head = order
+            .blocks
+            .iter()
+            .find(|b| b.lines.iter().any(|l| l.text == "A Treatise On Columns"))
+            .expect("the head");
+        assert_eq!(head.role, Role::Unplaced, "page {index}");
+        assert!(order
+            .warnings
+            .contains(&InferenceWarning::NoCrossPageEvidence {
+                pages: 1,
+                blocks: 1
+            }));
+    }
+}
+
+/// **A margin line that recurs nowhere is body**, on a document with pages
+/// to compare: a chapter's title at the top of its first page is read where
+/// it stands, and so is a numeral that does not count.
+#[test]
+fn a_margin_line_that_does_not_recur_is_body() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    for at in 0..5 {
+        builder.add_page(612.0, 792.0, |page| {
+            if at == 2 {
+                page.text(b"F1", 16.0, 72.0, 750.0, "Chapter Three");
+            }
+            // The same numeral on every page is not a page number; it
+            // recurs, so it is a running foot.
+            page.text(b"F1", 9.0, 300.0, 30.0, "2026");
+            for row in 0..20 {
+                page.text(
+                    b"F1",
+                    10.0,
+                    72.0,
+                    700.0 - row as f64 * 12.0,
+                    &prose(at * 50 + row, 80),
+                );
+            }
+        });
+    }
+    let doc = open(builder.finish());
+    let order = doc
+        .inferred_order(2, &InferenceOptions::default())
+        .expect("page 3");
+    let title = order
+        .blocks
+        .iter()
+        .find(|b| b.lines.iter().any(|l| l.text == "Chapter Three"))
+        .expect("the title");
+    assert_eq!(title.role, Role::Body);
+    let foot = order.blocks.last().expect("blocks");
+    assert_eq!(foot.lines[0].text, "2026");
+    assert_eq!(foot.role, Role::RunningFoot);
+    assert!(order.warnings.is_empty(), "{:?}", order.warnings);
+}
+
+/// **The same words elsewhere on the band are not a running head.** Five
+/// pages each open with a one-word line, the same word, set at a different
+/// place along the top band on every page: it recurs, but never where it
+/// stood, so it is body every time.
+#[test]
+fn a_recurrence_elsewhere_on_the_band_is_not_a_running_head() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    for at in 0..5 {
+        builder.add_page(612.0, 792.0, |page| {
+            page.text(b"F1", 10.0, 72.0 + at as f64 * 90.0, 760.0, "Summary");
+            for row in 0..20 {
+                page.text(
+                    b"F1",
+                    10.0,
+                    72.0,
+                    700.0 - row as f64 * 12.0,
+                    &prose(at * 50 + row, 80),
+                );
+            }
+        });
+    }
+    let doc = open(builder.finish());
+    for index in 0..5 {
+        let order = doc
+            .inferred_order(index, &InferenceOptions::default())
+            .expect("a page");
+        assert!(
+            order.blocks.iter().all(|b| b.role == Role::Body),
+            "page {index}: {:?}",
+            order.blocks.iter().map(|b| b.role).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// **"Page 3 of 9" recurs**, its digits masked; and a roman page number
+/// counts like an arabic one.
+#[test]
+fn masked_and_roman_page_furniture_is_found() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    let romans = ["iii", "iv", "v", "vi", "vii"];
+    for (at, roman) in romans.iter().enumerate() {
+        builder.add_page(612.0, 792.0, |page| {
+            page.text(b"F1", 9.0, 72.0, 760.0, &format!("Page {} of 9", at + 3));
+            page.text(b"F1", 9.0, 300.0, 30.0, roman);
+            for row in 0..20 {
+                page.text(
+                    b"F1",
+                    10.0,
+                    72.0,
+                    700.0 - row as f64 * 12.0,
+                    &prose(at * 50 + row, 80),
+                );
+            }
+        });
+    }
+    let doc = open(builder.finish());
+    for index in 0..5 {
+        let order = doc
+            .inferred_order(index, &InferenceOptions::default())
+            .expect("a page");
+        assert_eq!(
+            order.blocks.first().map(|b| b.role),
+            Some(Role::RunningHead),
+            "page {index}"
+        );
+        assert_eq!(
+            order.blocks.last().map(|b| b.role),
+            Some(Role::PageNumber),
+            "page {index}"
+        );
+    }
+}
+
+/// **The answer for a page does not depend on how it was asked for**: one page
+/// at a time and the whole document at once give the same order, role for
+/// role.
+#[test]
+fn every_way_of_asking_gives_the_same_order() {
+    let doc = furnished_book(6);
+    let all = doc.inferred_orders(0..doc.page_count(), &hidden());
+    assert_eq!(all.len(), 6);
+    for (index, together) in all.iter().enumerate() {
+        let alone = doc.inferred_order(index as u32, &hidden()).expect("a page");
+        let page = doc
+            .page(index as u32)
+            .expect("a page")
+            .inferred_order(&hidden());
+        for other in [&alone, &page] {
+            assert_eq!(other.plain_text(), together.plain_text(), "page {index}");
+            assert_eq!(other.permutation, together.permutation, "page {index}");
+            let roles =
+                |o: &tinker_pdf::InferredOrder| o.blocks.iter().map(|b| b.role).collect::<Vec<_>>();
+            assert_eq!(roles(other), roles(together), "page {index}");
+        }
+    }
+}
+
 // ---- one column: the set where nothing may move ------------------------------
 
 /// **One column drawn top to bottom moves nothing**, whatever is in it: a

@@ -28,7 +28,10 @@
 //! of tagged files whose stream already agrees exactly (which carry no
 //! information about columns); the **column crossings** walking the tree over
 //! the files that remain; and the characters the inference moved, which over
-//! veraPDF's fixtures the design expects to be zero.
+//! veraPDF's fixtures the design expects to be zero. And **running-head
+//! precision**: of the blocks called a running head, foot or page number, how
+//! many the producer drew as an artifact in a margin band — recall printed
+//! beside it, and neither yet held, for the reason below.
 //!
 //! **No corpus figure has been measured yet.** The fetched corpora were not
 //! reachable where this was written, so the floors table below is empty and
@@ -49,8 +52,8 @@ mod reading_order_support;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use reading_order_support::{Agreement, Scored};
-use tinker_pdf::Document;
+use reading_order_support::{furniture_truth, role_score, Agreement, RoleScore, Scored};
+use tinker_pdf::{Document, Role};
 
 /// Printed once when the census read the corpora. CI greps it.
 const RAN: &str = "reading-order-census: RAN";
@@ -150,6 +153,11 @@ struct Totals {
     crossings: usize,
     /// The files those crossings were counted over.
     informative: usize,
+    /// Running heads, feet and page numbers against the artifacts the
+    /// producer drew in the margin bands, over the pages that have any.
+    furniture: RoleScore,
+    /// The pages that had any.
+    furnished: usize,
 }
 
 /// Scores one tagged file into `totals`.
@@ -176,6 +184,15 @@ fn score(doc: &Document, totals: &mut Totals) {
         totals.inferred = totals.inferred.plus(scored.inferred_agreement());
         totals.moved += scored.inferred.moved();
         file_crossings += scored.crossings();
+        let truth = furniture_truth(doc, index);
+        if !truth.is_empty() {
+            totals.furnished += 1;
+            totals.furniture = totals.furniture.plus(role_score(
+                &scored.inferred,
+                &[Role::RunningHead, Role::RunningFoot, Role::PageNumber],
+                &truth,
+            ));
+        }
         file_stream = file_stream.plus(stream);
     }
     if file_stream.at_least(1, 1) {
@@ -265,6 +282,15 @@ fn the_inference_is_scored_against_every_tagged_files_own_order() {
             t.inferred.score(),
             t.crossings,
             t.informative
+        );
+        println!(
+            "{:<14} furniture: {} of {} blocks called were marked; {} of {} marked characters found, over {} pages",
+            "",
+            t.furniture.correct,
+            t.furniture.called,
+            t.furniture.found,
+            t.furniture.truth,
+            t.furnished
         );
     }
 

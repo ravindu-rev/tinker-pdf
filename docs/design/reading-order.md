@@ -396,3 +396,40 @@ inference over 3 915 671 pairs
 The census now prints column crossings over the files the stream does not
 already read; **the corpus figures — crossings against the baseline, pair
 agreement per corpus, and veraPDF's moved count — are owed**, as above.
+
+**Milestone 4 (3 October 2026): running heads, running feet and page
+numbers.** A line lying wholly in the top or foot `MARGIN_BAND` (12 % of the
+crop box) is a page number when a neighbouring page carries, in the same band
+at the same height to within an em, the numeral its own value plus the
+offset between the two pages — decimal or canonical roman, with dashes,
+bars, brackets and a full stop around it — and a running head or foot when
+`RUNNING_REPEATS` (two) neighbours carry its text, digits masked so "Page 3
+of 9" recurs, at the same place to within an em. Both are taken out of the
+body before columns are looked for, so a head across the page is never a
+spanner, and are read first and last with their roles. **The window is the
+pages around the page, not the first K of the document**: `RUNNING_WINDOW`
+(16) pages, half before and half after, because page 300's running head names
+its chapter and is not on pages 1 to 16. `Document::inferred_orders` reads
+each page's margins once for a whole range; `Page::inferred_order`,
+`Document::inferred_order` and it give the same answer, asserted role for
+role. With fewer than two other pages to compare — a one-page document — a
+block wholly in a band is `Unplaced` where it stands and
+`InferenceWarning::NoCrossPageEvidence` says why; nothing is called a running
+head on no evidence.
+
+Measured, first-party: a six-page builder book with a verso and a recto head,
+a numbered foot and two interleaved columns between them, its furniture
+drawn as `/Artifact /Pagination` and its stream drawing the number first and
+the head last — every page reads head first, number last and body between
+at full pair agreement, and against the producer's artifact marks, read with
+the tree hidden, 12 of 12 blocks called furniture were marked and 129 of 129
+marked characters were found, where the stream calls nothing furniture. A
+same word set at a different place on every page's top band stays body; a
+`Page # of #` head and a roman page number are found. **No EPUB fixture
+carries this milestone**: the EPUB path draws no running head (no
+`css-page-3` margin boxes), so the design's "reftest book with a running
+head" is the builder book. The census prints running-head precision and
+recall per corpus over the artifacts each producer drew in the margin bands
+— by position, because the device seam carries a property list's `/MCID` and
+14.9's entries but not an artifact's `/Type`, so `/Pagination` cannot be told
+from `/Layout` by name — and **the corpus figure is owed**.

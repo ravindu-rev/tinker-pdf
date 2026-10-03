@@ -11,7 +11,9 @@
 //! [`crate::Page::text_in`] names the three, and [`ReadingOrder::Inferred`] is
 //! the one this module adds: columns found from the whitespace between lines,
 //! blocks ordered top to bottom inside a column, a block that crosses a column
-//! boundary placed before the columns under it. Design:
+//! boundary placed before the columns under it; and running heads, running
+//! feet and page numbers found by their recurring on the pages around this
+//! one, set aside first and last with their roles. Design:
 //! `docs/design/reading-order.md`.
 //!
 //! # The label is a type
@@ -104,6 +106,32 @@ pub const BLOCK_SIZE_RATIO: f64 = 0.9;
 /// Two lines side by side are a column gap by the arithmetic and a label and
 /// its value by any reading, and there is no third line to say which.
 pub const MIN_COLUMN_LINES: usize = 3;
+
+/// The share of the page's height, at its top and at its foot, in which a
+/// running head, a running foot or a page number is looked for (the design's
+/// twelve per cent).
+///
+/// A line is in a band when the whole of it is; the first line of a body that
+/// starts high on the page and runs on below the band is body by that rule,
+/// because the block it begins is not a margin block.
+pub const MARGIN_BAND: f64 = 0.12;
+
+/// How many pages around a page are read for evidence that a margin line
+/// recurs: up to half before it and half after, fewer at either end of the
+/// document.
+///
+/// The design's K, taken around the page rather than from the front of the
+/// document: a running head names the chapter it is in, and page 300's is not
+/// on pages 1 to 16. Bounded, so an inferred order costs at most this many
+/// other pages' text, whatever the document's length.
+pub const RUNNING_WINDOW: u32 = 16;
+
+/// On how many other pages a margin line must recur, at the same place to
+/// within an em, to be a running head or foot.
+///
+/// Two, because a recto and a verso head each recur on every other page, and
+/// one recurrence is a coincidence as often as a convention.
+pub const RUNNING_REPEATS: usize = 2;
 
 /// Which order a caller asks [`crate::Page::text_in`] for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -241,6 +269,17 @@ pub enum InferenceWarning {
     },
     /// The page has no text at all.
     NoBodyText,
+    /// Fewer than [`RUNNING_REPEATS`] other pages with text were within
+    /// [`RUNNING_WINDOW`] — a one-page document is the common case — so a block
+    /// lying wholly in a margin band could be neither confirmed as nor ruled
+    /// out from a running head or foot. Each such block is [`Role::Unplaced`],
+    /// where it stands, rather than guessed at either way.
+    NoCrossPageEvidence {
+        /// How many other pages with text there were to compare.
+        pages: usize,
+        /// How many blocks were left unplaced for it.
+        blocks: usize,
+    },
     /// The document carries a structure tree, and this inference was asked to
     /// hide it ([`InferenceOptions::hide_structure`]): the answer is a
     /// measurement, not a reading.
@@ -375,19 +414,16 @@ impl Page {
     /// whose document carries a structure tree it declines
     /// ([`DeclineReason::TreePresent`]) unless
     /// [`InferenceOptions::hide_structure`] is set.
+    ///
+    /// Running heads, feet and page numbers are found by reading the margin
+    /// bands of up to [`RUNNING_WINDOW`] pages around this one; that is the
+    /// whole of what the inference reads beyond the page, and the answer for a
+    /// page is the same whichever of [`Page::inferred_order`],
+    /// [`Document::inferred_order`] and [`Document::inferred_orders`] asked.
     #[must_use]
     pub fn inferred_order(&self, options: &InferenceOptions) -> InferredOrder {
-        let tagged = has_structure_tree(&self.doc);
-        if tagged && !options.hide_structure {
-            let observed = Observed::read(self, false);
-            return declined(&observed.text, DeclineReason::TreePresent, Vec::new());
-        }
-        let observed = Observed::read(self, options.hide_structure);
-        let mut order = infer(&observed.text);
-        if tagged {
-            order.warnings.insert(0, InferenceWarning::TreePresent);
-        }
-        order
+        let mut margins = MarginCache::new(self, options);
+        infer_page(self, options, &mut margins)
     }
 }
 
@@ -400,6 +436,44 @@ impl Document {
     pub fn inferred_order(&self, index: u32, options: &InferenceOptions) -> Option<InferredOrder> {
         Some(self.page(index)?.inferred_order(options))
     }
+
+    /// The inferred order of every page in `pages` that exists, in page
+    /// order — [`Page::inferred_order`] for each, with each page's margin
+    /// bands read once rather than once for every page that consults them.
+    #[must_use]
+    pub fn inferred_orders(
+        &self,
+        pages: std::ops::Range<u32>,
+        options: &InferenceOptions,
+    ) -> Vec<InferredOrder> {
+        let mut out = Vec::new();
+        let mut margins: Option<MarginCache> = None;
+        for index in pages {
+            let Some(page) = self.page(index) else {
+                continue;
+            };
+            let cache = margins.get_or_insert_with(|| MarginCache::new(&page, options));
+            out.push(infer_page(&page, options, cache));
+        }
+        out
+    }
+}
+
+/// One page's inference, its neighbours' margins read through `margins`.
+fn infer_page(page: &Page, options: &InferenceOptions, margins: &mut MarginCache) -> InferredOrder {
+    let tagged = has_structure_tree(&page.doc);
+    if tagged && !options.hide_structure {
+        let observed = Observed::read(page, false);
+        return declined(&observed.text, DeclineReason::TreePresent, Vec::new());
+    }
+    let observed = Observed::read(page, options.hide_structure);
+    let frame = page.crop_box();
+    let neighbours = margins.around(page.index());
+    let mut order = infer(&observed.text, frame, &neighbours);
+    if tagged {
+        order.warnings.insert(0, InferenceWarning::TreePresent);
+    }
+    order
 }
 
 /// Whether the catalog names a structure tree root that is a dictionary —
@@ -579,8 +653,13 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
     values.get(values.len() / 2).copied()
 }
 
-/// Infers an order for `page`.
-fn infer(page: &TextPage) -> InferredOrder {
+/// Infers an order for `page`, whose crop box is `frame`, beside the margin
+/// lines of the pages around it.
+fn infer(
+    page: &TextPage,
+    frame: (f64, f64, f64, f64),
+    neighbours: &[(i64, &Margins)],
+) -> InferredOrder {
     let flat = flatten(page);
     let mut warnings = Vec::new();
     if flat.is_empty() {
@@ -650,7 +729,26 @@ fn infer(page: &TextPage) -> InferredOrder {
         rtl * 2 > across.len()
     };
 
-    let body: Vec<&Line<'_>> = across.iter().filter_map(|at| lines.get(*at)).collect();
+    // Running heads, feet and page numbers, by their recurring on the pages
+    // around this one: set aside before the columns are looked for, so a
+    // head across the page is not taken for a spanner.
+    let bands = Bands::of(frame);
+    let compared = neighbours.iter().filter(|(_, m)| m.has_text).count();
+    let mut running: Vec<(usize, Role, bool)> = Vec::new(); // (line, role, top)
+    for at in &across {
+        let Some(line) = lines.get(*at) else { continue };
+        let Some(here) = MarginLine::of(line.source, line.bounds, &bands) else {
+            continue;
+        };
+        if let Some(role) = here.role(neighbours, em) {
+            running.push((*at, role, here.top));
+        }
+    }
+    let body: Vec<&Line<'_>> = across
+        .iter()
+        .filter(|at| !running.iter().any(|(r, _, _)| r == *at))
+        .filter_map(|at| lines.get(*at))
+        .collect();
 
     // Columns.
     let columns = if body.len() < MIN_COLUMN_LINES {
@@ -674,8 +772,65 @@ fn infer(page: &TextPage) -> InferredOrder {
         }
     }
 
-    let drafts = order_body(placed, count, em);
-    let mut drafts: Vec<Draft> = drafts;
+    let mut drafts = order_body(placed, count, em);
+
+    // With nothing to compare, a block lying wholly in a margin band is
+    // neither body nor furniture by any evidence there is.
+    if compared < RUNNING_REPEATS {
+        let mut unplaced = 0usize;
+        for draft in &mut drafts {
+            if draft.pieces.iter().all(|p| bands.holds(p.bounds).is_some()) {
+                draft.role = Role::Unplaced;
+                unplaced += 1;
+            }
+        }
+        if unplaced > 0 {
+            warnings.push(InferenceWarning::NoCrossPageEvidence {
+                pages: compared,
+                blocks: unplaced,
+            });
+        }
+    }
+
+    // The furniture: heads first and feet last, each across the page in the
+    // order it is read.
+    let furniture = |top: bool| -> Vec<Draft> {
+        let mut found: Vec<(Role, Piece)> = running
+            .iter()
+            .filter(|(_, _, t)| *t == top)
+            .filter_map(|(at, role, _)| {
+                let line = lines.get(*at)?;
+                Some((
+                    *role,
+                    piece_of(line.block, line.chars.clone(), line.source, &flat),
+                ))
+            })
+            .collect();
+        found.sort_by(|a, b| {
+            let (x, y) = (a.1.bounds.0, b.1.bounds.0);
+            if rtl_page {
+                y.total_cmp(&x)
+            } else {
+                x.total_cmp(&y)
+            }
+        });
+        found
+            .into_iter()
+            .map(|(role, piece)| Draft {
+                role,
+                section: 0,
+                column: None,
+                pieces: vec![piece],
+            })
+            .collect()
+    };
+    let heads = furniture(true);
+    let mut feet = furniture(false);
+    let last = drafts.last().map_or(0, |d| d.section);
+    for foot in &mut feet {
+        foot.section = last;
+    }
+    let mut drafts: Vec<Draft> = heads.into_iter().chain(drafts).chain(feet).collect();
 
     // Lines nothing here orders, last and in stream order.
     let mut unplaced: Vec<Piece> = angled
@@ -941,6 +1096,274 @@ fn rect_quad(x0: f64, y0: f64, x1: f64, y1: f64) -> Quad {
         ur: (x1, y1),
         ll: (x0, y0),
         lr: (x1, y0),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Running heads, feet and page numbers
+// ---------------------------------------------------------------------------
+
+/// A page's two margin bands, as `y` ranges in its own coordinates.
+struct Bands {
+    /// Lines wholly at or above this are in the top band.
+    top: f64,
+    /// Lines wholly at or below this are in the foot band.
+    foot: f64,
+}
+
+impl Bands {
+    fn of(frame: (f64, f64, f64, f64)) -> Bands {
+        let (_, y0, _, y1) = frame;
+        let band = (y1 - y0).abs() * MARGIN_BAND;
+        Bands {
+            top: y0.max(y1) - band,
+            foot: y0.min(y1) + band,
+        }
+    }
+
+    /// `Some(true)` for a rectangle wholly in the top band, `Some(false)` for
+    /// one wholly in the foot band.
+    fn holds(&self, (_, y0, _, y1): (f64, f64, f64, f64)) -> Option<bool> {
+        if !(y0.is_finite() && y1.is_finite()) {
+            return None;
+        }
+        if y0.min(y1) >= self.top {
+            Some(true)
+        } else if y0.max(y1) <= self.foot {
+            Some(false)
+        } else {
+            None
+        }
+    }
+}
+
+/// The lines of a page that lie wholly in a margin band, which is all of a
+/// neighbouring page the inference reads.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Margins {
+    lines: Vec<MarginLine>,
+    /// Whether the page has any text at all: a page of pictures is no
+    /// evidence that a head does not recur.
+    has_text: bool,
+}
+
+impl Margins {
+    fn of(page: &TextPage, frame: (f64, f64, f64, f64)) -> Margins {
+        let bands = Bands::of(frame);
+        let mut out = Margins::default();
+        for line in page.lines() {
+            if line.chars.is_empty() {
+                continue;
+            }
+            out.has_text = true;
+            if run_of(line) != Run::Across {
+                continue;
+            }
+            let (x0, y0, x1, y1) = line.quad.bounds();
+            if let Some(here) = MarginLine::of(line, (x0, y0, x1, y1), &bands) {
+                out.lines.push(here);
+            }
+        }
+        out
+    }
+}
+
+/// One line in a margin band, as it is compared across pages.
+#[derive(Clone, Debug)]
+struct MarginLine {
+    /// The top band, or the foot.
+    top: bool,
+    /// The text, trimmed, with every decimal digit written `#` and every run
+    /// of white space one space — so "Page 3 of 9" and "Page 4 of 9" recur.
+    masked: String,
+    /// The value, when the text is a numeral and nothing else.
+    numeral: Option<i64>,
+    bounds: (f64, f64, f64, f64),
+}
+
+impl MarginLine {
+    fn of(line: &TextLine, bounds: (f64, f64, f64, f64), bands: &Bands) -> Option<MarginLine> {
+        let top = bands.holds(bounds)?;
+        let mut masked = String::new();
+        for word in line.text.split_whitespace() {
+            if !masked.is_empty() {
+                masked.push(' ');
+            }
+            masked.extend(
+                word.chars()
+                    .map(|c| if c.is_ascii_digit() { '#' } else { c }),
+            );
+        }
+        if masked.is_empty() {
+            return None;
+        }
+        Some(MarginLine {
+            top,
+            masked,
+            numeral: numeral(&line.text),
+            bounds,
+        })
+    }
+
+    /// What this line is, judged against the same band of `neighbours`, each
+    /// at its offset in pages from this one: a page number when a neighbour
+    /// carries the numeral this one's value plus the offset at the same
+    /// height, a running head or foot when [`RUNNING_REPEATS`] neighbours carry
+    /// the same masked text at the same place, and `None` otherwise.
+    fn role(&self, neighbours: &[(i64, &Margins)], em: f64) -> Option<Role> {
+        let middle = |b: (f64, f64, f64, f64)| (b.1 + b.3) / 2.0;
+        let level = |other: &MarginLine| {
+            other.top == self.top && (middle(other.bounds) - middle(self.bounds)).abs() <= em
+        };
+        if let Some(value) = self.numeral {
+            let counts = neighbours.iter().any(|(offset, margins)| {
+                margins
+                    .lines
+                    .iter()
+                    .any(|other| level(other) && other.numeral == value.checked_add(*offset))
+            });
+            if counts {
+                return Some(Role::PageNumber);
+            }
+        }
+        let (x0, _, x1, _) = self.bounds;
+        let placed = |other: &MarginLine| {
+            let (a, _, b, _) = other.bounds;
+            (a - x0).abs() <= em || (b - x1).abs() <= em || ((a + b) - (x0 + x1)).abs() <= 2.0 * em
+        };
+        let recurs = neighbours
+            .iter()
+            .filter(|(_, margins)| {
+                margins
+                    .lines
+                    .iter()
+                    .any(|other| level(other) && placed(other) && other.masked == self.masked)
+            })
+            .count();
+        (recurs >= RUNNING_REPEATS).then_some(if self.top {
+            Role::RunningHead
+        } else {
+            Role::RunningFoot
+        })
+    }
+}
+
+/// The value of `text` when it is a page number and nothing else: decimal
+/// digits, or a roman numeral in one case, with any of `-–—|()[]` and white
+/// space around it.
+fn numeral(text: &str) -> Option<i64> {
+    let core =
+        text.trim_matches(|c: char| c.is_whitespace() || "-\u{2013}\u{2014}|()[].".contains(c));
+    if core.is_empty() || core.chars().count() > 9 {
+        return None;
+    }
+    if core.chars().all(|c| c.is_ascii_digit()) {
+        return core.parse().ok();
+    }
+    roman(core)
+}
+
+/// A roman numeral's value, when `text` is one written the usual way — the
+/// value written back is `text` again, in its own case.
+fn roman(text: &str) -> Option<i64> {
+    let lower = text.to_ascii_lowercase();
+    if text != lower && text != text.to_ascii_uppercase() {
+        return None;
+    }
+    let digit = |c: char| match c {
+        'i' => Some(1),
+        'v' => Some(5),
+        'x' => Some(10),
+        'l' => Some(50),
+        'c' => Some(100),
+        'd' => Some(500),
+        'm' => Some(1000),
+        _ => None,
+    };
+    let values: Vec<i64> = lower.chars().map(digit).collect::<Option<_>>()?;
+    let mut total = 0i64;
+    for (at, value) in values.iter().enumerate() {
+        match values.get(at + 1) {
+            Some(next) if next > value => total -= value,
+            _ => total += value,
+        }
+    }
+    // Only the canonical spelling: "iiii" and "vx" are not page numbers.
+    const TABLE: [(i64, &str); 13] = [
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+    let mut rest = total;
+    let mut spelled = String::new();
+    for (value, letters) in TABLE {
+        while rest >= value {
+            spelled.push_str(letters);
+            rest -= value;
+        }
+    }
+    (total > 0 && total < 5000 && spelled == lower).then_some(total)
+}
+
+/// The margin lines of the pages around the ones being inferred, each page
+/// read once.
+pub(crate) struct MarginCache {
+    doc: std::sync::Arc<CosDocument>,
+    fonts: Option<std::sync::Arc<dyn crate::FontProvider>>,
+    count: u32,
+    keep_artifacts: bool,
+    read: BTreeMap<u32, Margins>,
+}
+
+impl MarginCache {
+    fn new(page: &Page, options: &InferenceOptions) -> MarginCache {
+        MarginCache {
+            doc: std::sync::Arc::clone(&page.doc),
+            fonts: page.fonts.clone(),
+            count: tinker_pdf_cos::pages::count(&page.doc),
+            keep_artifacts: options.hide_structure,
+            read: BTreeMap::new(),
+        }
+    }
+
+    /// The margins of up to [`RUNNING_WINDOW`] pages around `index`, each
+    /// with its offset from it.
+    fn around(&mut self, index: u32) -> Vec<(i64, &Margins)> {
+        let half = RUNNING_WINDOW / 2;
+        let from = index.saturating_sub(half);
+        let to = index.saturating_add(half).min(self.count.saturating_sub(1));
+        for other in from..=to {
+            if other == index || self.read.contains_key(&other) {
+                continue;
+            }
+            let margins = tinker_pdf_cos::pages::at(&self.doc, other)
+                .map(|inner| {
+                    let neighbour = Page {
+                        doc: std::sync::Arc::clone(&self.doc),
+                        inner,
+                        fonts: self.fonts.clone(),
+                    };
+                    let observed = Observed::read(&neighbour, self.keep_artifacts);
+                    Margins::of(&observed.text, neighbour.crop_box())
+                })
+                .unwrap_or_default();
+            self.read.insert(other, margins);
+        }
+        self.read
+            .range(from..=to)
+            .filter(|(other, _)| **other != index)
+            .map(|(other, margins)| (i64::from(*other) - i64::from(index), margins))
+            .collect()
     }
 }
 
@@ -1271,5 +1694,44 @@ impl Extents {
             }
         }
         count >= 2 && right - left >= self.min
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{numeral, roman};
+
+    /// The page numbers a foot carries, and the near misses that are not one.
+    #[test]
+    fn a_page_number_is_a_numeral_and_nothing_else() {
+        assert_eq!(numeral("12"), Some(12));
+        assert_eq!(numeral("- 12 -"), Some(12));
+        assert_eq!(numeral("\u{2014} 7 \u{2014}"), Some(7));
+        assert_eq!(numeral("[iv]"), Some(4));
+        assert_eq!(numeral("XLII"), Some(42));
+        assert_eq!(numeral("12a"), None);
+        assert_eq!(numeral("Page 12"), None);
+        assert_eq!(numeral(""), None);
+        assert_eq!(numeral("1234567890"), None, "too long to be a page");
+    }
+
+    /// Only the canonical spelling of a roman numeral counts, in one case.
+    #[test]
+    fn a_roman_numeral_is_read_only_as_it_is_written() {
+        for (text, value) in [
+            ("i", 1),
+            ("iv", 4),
+            ("ix", 9),
+            ("xiv", 14),
+            ("mcmxcix", 1999),
+        ] {
+            assert_eq!(roman(text), Some(value), "{text}");
+        }
+        for text in ["iiii", "vx", "iiv", "Iv", "mmmmm", "civic"] {
+            assert_eq!(roman(text), None, "{text}");
+        }
+        // A word that is a numeral in canonical form is read as one; the
+        // cross-page count is what keeps it from being a page number.
+        assert_eq!(roman("mix"), Some(1009));
     }
 }
