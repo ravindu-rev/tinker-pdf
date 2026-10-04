@@ -77,7 +77,8 @@ pub enum ImageData<'a> {
 /// A device colour space, which is all an `/Indexed` base may be here.
 ///
 /// 8.6.6.3 forbids an `/Indexed` whose base is itself `/Indexed`, and this
-/// writer emits no CIE-based, `/Separation` or `/DeviceN` space — so the three
+/// writer writes an `/Indexed` over a device space only — its CIE-based,
+/// `/Separation` and `/DeviceN` spaces are not offered as bases — so the three
 /// device families are the whole of it, and the restriction is the
 /// specification's rather than an invention.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -156,6 +157,23 @@ pub enum ImageColorSpace<'a> {
         /// a `/DeviceN`.
         components: u8,
     },
+    /// A registered CIE-based space — `/CalGray`, `/CalRGB` or `/Lab` — by
+    /// the resource name [`DocumentBuilder::add_cie_color_space`] gave it
+    /// (8.6.5.2–8.6.5.4), written as a reference to the space's own array as
+    /// [`Self::Icc`] is, and refused on the same terms: a name no CIE space
+    /// was registered under, or a `components` that is not the space's own
+    /// count, one for `/CalGray` and three for the others.
+    ///
+    /// The samples are Table 90's: with no `/Decode`, a `/CalGray` or
+    /// `/CalRGB` sample spans 0 to 1 and a `/Lab` one spans `0..100` for
+    /// `L*` and the space's `/Range` for `a*` and `b*`, linearly over the
+    /// sample's bits.
+    Cie {
+        /// The resource name the space was registered under.
+        resource: &'a [u8],
+        /// Channels per sample, which must be the space's component count.
+        components: u8,
+    },
     /// `[/Indexed base hival lookup]` (8.6.6.3).
     Indexed {
         /// The space each table entry is expressed in.
@@ -181,10 +199,128 @@ impl ImageColorSpace<'_> {
             ImageColorSpace::DeviceGray | ImageColorSpace::Indexed { .. } => 1,
             ImageColorSpace::DeviceRgb => 3,
             ImageColorSpace::DeviceCmyk => 4,
-            ImageColorSpace::Icc { components, .. } | ImageColorSpace::Tint { components, .. } => {
-                *components as u32
-            }
+            ImageColorSpace::Icc { components, .. }
+            | ImageColorSpace::Tint { components, .. }
+            | ImageColorSpace::Cie { components, .. } => *components as u32,
         }
+    }
+}
+
+/// A CIE-based colour space, as [`DocumentBuilder::add_cie_color_space`]
+/// writes it (ISO 32000-1 8.6.5.2–8.6.5.4).
+///
+/// Each is a two-element array, the family name and a dictionary of the
+/// parameters below, and each is device-independent: its components are
+/// colours relative to `white`, the diffuse white point, rather than amounts
+/// of a device's light or ink. `white` is required by Tables 63–65 — `X` and
+/// `Z` positive and `Y` exactly 1 — and `black`, the diffuse black point, is
+/// optional with a default of `[0 0 0]`; every other parameter defaults as
+/// its table says, and a parameter equal to its default is not written, as
+/// [`DocumentBuilder::add_icc_color_space`] leaves `/Alternate` unwritten.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum CieSpace {
+    /// `[/CalGray << ... >>]` (8.6.5.2, Table 63): one component `A`, and
+    /// `X = XW·A^G`, `Y = YW·A^G`, `Z = ZW·A^G`.
+    CalGray {
+        /// `/WhitePoint`.
+        white: [f64; 3],
+        /// `/BlackPoint`.
+        black: [f64; 3],
+        /// `/Gamma`, positive; 1 by default.
+        gamma: f64,
+    },
+    /// `[/CalRGB << ... >>]` (8.6.5.3, Table 64): three components, each
+    /// through its own gamma and then into XYZ by `matrix`.
+    CalRgb {
+        /// `/WhitePoint`.
+        white: [f64; 3],
+        /// `/BlackPoint`.
+        black: [f64; 3],
+        /// `/Gamma`, one positive number per component; `[1 1 1]` by default.
+        gamma: [f64; 3],
+        /// `/Matrix`, `[XA YA ZA XB YB ZB XC YC ZC]` — **column by column**,
+        /// as Table 64 writes it; the identity by default.
+        matrix: [f64; 9],
+    },
+    /// `[/Lab << ... >>]` (8.6.5.4, Table 65): `L*` from 0 to 100, and `a*`
+    /// and `b*` within `range`.
+    Lab {
+        /// `/WhitePoint`.
+        white: [f64; 3],
+        /// `/BlackPoint`.
+        black: [f64; 3],
+        /// `/Range`, `[amin amax bmin bmax]`; `[-100 100 -100 100]` by
+        /// default.
+        range: [f64; 4],
+    },
+}
+
+impl CieSpace {
+    /// Components a colour in this space has: one for `/CalGray`, three for
+    /// the others.
+    #[must_use]
+    pub const fn components(&self) -> usize {
+        match self {
+            CieSpace::CalGray { .. } => 1,
+            CieSpace::CalRgb { .. } | CieSpace::Lab { .. } => 3,
+        }
+    }
+
+    /// Whether every parameter is one Tables 63–65 allow: a white point with
+    /// `X` and `Z` positive and `Y` equal to 1, a black point of non-negative
+    /// numbers, positive gammas, a finite matrix, and a range whose minimums
+    /// are below its maximums.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        let (white, black) = match self {
+            CieSpace::CalGray { white, black, .. }
+            | CieSpace::CalRgb { white, black, .. }
+            | CieSpace::Lab { white, black, .. } => (white, black),
+        };
+        let finite = |values: &[f64]| values.iter().all(|v| v.is_finite());
+        let points = finite(white)
+            && white[0] > 0.0
+            && white[1] == 1.0
+            && white[2] > 0.0
+            && finite(black)
+            && black.iter().all(|v| *v >= 0.0);
+        points
+            && match self {
+                CieSpace::CalGray { gamma, .. } => gamma.is_finite() && *gamma > 0.0,
+                CieSpace::CalRgb { gamma, matrix, .. } => {
+                    gamma.iter().all(|g| g.is_finite() && *g > 0.0) && finite(matrix)
+                }
+                CieSpace::Lab { range, .. } => {
+                    finite(range) && range[0] < range[1] && range[2] < range[3]
+                }
+            }
+    }
+
+    /// A colour's components clamped to the space's own ranges: `[0, 1]` for
+    /// `/CalGray` and `/CalRGB` (8.6.5.2, 8.6.5.3), `L*` to `[0, 100]` and
+    /// `a*`, `b*` to `/Range` for `/Lab` (8.6.5.4), missing ones as zero —
+    /// which is black in all three — and a NaN as zero too.
+    fn clamp(&self, components: &[f64]) -> Vec<f64> {
+        let bounds: Vec<(f64, f64)> = match self {
+            CieSpace::CalGray { .. } => vec![(0.0, 1.0)],
+            CieSpace::CalRgb { .. } => vec![(0.0, 1.0); 3],
+            CieSpace::Lab { range, .. } => {
+                vec![(0.0, 100.0), (range[0], range[1]), (range[2], range[3])]
+            }
+        };
+        bounds
+            .iter()
+            .enumerate()
+            .map(|(at, &(lo, hi))| {
+                let value = components.get(at).copied().unwrap_or(0.0);
+                if value.is_nan() {
+                    0.0_f64.clamp(lo, hi)
+                } else {
+                    value.clamp(lo, hi)
+                }
+            })
+            .collect()
     }
 }
 
@@ -1145,6 +1281,10 @@ struct ResourceSet {
     /// [`PageBuilder::set_fill_tint`]'s reason `icc_channels` is kept for
     /// [`PageBuilder::set_fill_icc`]'s.
     tints: BTreeMap<Vec<u8>, usize>,
+    /// Each registered CIE-based space, by resource name, for
+    /// [`PageBuilder::set_fill_cie`]: its component count, and the ranges it
+    /// clamps to, which for `/Lab` are the space's own `/Range`.
+    cie: BTreeMap<Vec<u8>, CieSpace>,
 }
 
 impl ResourceSet {
@@ -3294,6 +3434,47 @@ impl PageBuilder {
         }
         self.content
             .extend_from_slice(if stroking { b"SCN\n" } else { b"scn\n" });
+        true
+    }
+
+    /// Sets the non-stroking colour in a registered CIE-based space:
+    /// `/Name cs c1 … cn sc` (8.6.8, Table 74).
+    ///
+    /// The space must have been registered with
+    /// [`DocumentBuilder::add_cie_color_space`]. **The operand count and the
+    /// ranges come from the space**, as they do for
+    /// [`PageBuilder::set_fill_icc`]: one component for `/CalGray`, three for
+    /// `/CalRGB` and `/Lab`, extra values dropped and missing ones written as
+    /// zero, which is black in all three. Each is clamped to the space's own
+    /// range — 0 to 1 for `/CalGray` and `/CalRGB` (8.6.5.2, 8.6.5.3), and
+    /// for `/Lab` (8.6.5.4) `L*` to 0..100 and `a*` and `b*` to the space's
+    /// `/Range`, which is what a `/Lab` colour's components are and why they
+    /// cannot share the 0..1 clamp every other setter applies.
+    ///
+    /// Returns false for a name no CIE-based space was registered under.
+    pub fn set_fill_cie(&mut self, resource: &[u8], components: &[f64]) -> bool {
+        self.set_cie(resource, components, false)
+    }
+
+    /// The same for the **stroking** colour: `CS` and `SC`.
+    pub fn set_stroke_cie(&mut self, resource: &[u8], components: &[f64]) -> bool {
+        self.set_cie(resource, components, true)
+    }
+
+    /// Both of the above. `stroking` picks Table 74's case.
+    fn set_cie(&mut self, resource: &[u8], components: &[f64], stroking: bool) -> bool {
+        let Some(space) = self.resources.cie.get(resource).copied() else {
+            return false;
+        };
+        self.resource_name(resource);
+        self.content
+            .extend_from_slice(if stroking { b" CS\n" } else { b" cs\n" });
+        for value in space.clamp(components) {
+            self.content
+                .extend_from_slice(format!("{value} ").as_bytes());
+        }
+        self.content
+            .extend_from_slice(if stroking { b"SC\n" } else { b"sc\n" });
         true
     }
 
@@ -5658,8 +5839,80 @@ impl DocumentBuilder {
         self.resources
             .icc_channels
             .insert(resource.to_vec(), components);
-        // The name now means this space; a tint space registered under it
-        // earlier no longer does.
+        // The name now means this space; a tint or CIE space registered
+        // under it earlier no longer does.
+        self.resources.tints.remove(resource);
+        self.resources.cie.remove(resource);
+        self.separations.remove(resource);
+        true
+    }
+
+    /// Registers a CIE-based colour space — `/CalGray`, `/CalRGB` or `/Lab`
+    /// (8.6.5.2–8.6.5.4) — under a resource name.
+    ///
+    /// The space is `[/CalGray dict]`, `[/CalRGB dict]` or `[/Lab dict]`,
+    /// written as an indirect array so one space serves every page and image
+    /// that names it, as [`DocumentBuilder::add_icc_color_space`]'s does. The
+    /// dictionary carries `/WhitePoint` always and each other parameter only
+    /// where it differs from Tables 63–65's default. A page names it with
+    /// [`PageBuilder::set_fill_cie`] and [`PageBuilder::set_stroke_cie`], and
+    /// an image with [`ImageColorSpace::Cie`].
+    ///
+    /// A CIE-based space is device-independent, so no [`ArchivalProfile`]
+    /// refuses one: 6.2.3.3's question is about device colour.
+    ///
+    /// Returns false, registering nothing, for parameters
+    /// [`CieSpace::is_valid`] refuses.
+    pub fn add_cie_color_space(&mut self, resource: &[u8], space: &CieSpace) -> bool {
+        if !space.is_valid() {
+            return false;
+        }
+        let numbers =
+            |values: &[f64]| Object::Array(values.iter().map(|v| Object::Real(*v)).collect());
+        let mut dict = Dict::new();
+        let (family, white, black): (&[u8], &[f64; 3], &[f64; 3]) = match space {
+            CieSpace::CalGray { white, black, .. } => (b"CalGray", white, black),
+            CieSpace::CalRgb { white, black, .. } => (b"CalRGB", white, black),
+            CieSpace::Lab { white, black, .. } => (b"Lab", white, black),
+        };
+        dict.insert(self.names.intern(b"WhitePoint"), numbers(white));
+        if black.iter().any(|v| *v != 0.0) {
+            dict.insert(self.names.intern(b"BlackPoint"), numbers(black));
+        }
+        match space {
+            CieSpace::CalGray { gamma, .. } => {
+                if *gamma != 1.0 {
+                    dict.insert(self.names.intern(b"Gamma"), Object::Real(*gamma));
+                }
+            }
+            CieSpace::CalRgb { gamma, matrix, .. } => {
+                if *gamma != [1.0; 3] {
+                    dict.insert(self.names.intern(b"Gamma"), numbers(gamma));
+                }
+                if *matrix != [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] {
+                    dict.insert(self.names.intern(b"Matrix"), numbers(matrix));
+                }
+            }
+            CieSpace::Lab { range, .. } => {
+                if *range != [-100.0, 100.0, -100.0, 100.0] {
+                    dict.insert(self.names.intern(b"Range"), numbers(range));
+                }
+            }
+        }
+        let reference = self.allocate();
+        self.objects.insert(
+            reference.num,
+            Object::Array(vec![
+                Object::Name(self.names.intern(family)),
+                Object::Dict(dict),
+            ]),
+        );
+        self.resources
+            .color_spaces
+            .push((resource.to_vec(), reference));
+        self.resources.cie.insert(resource.to_vec(), *space);
+        // The name now means this space and nothing registered before it.
+        self.resources.icc_channels.remove(resource);
         self.resources.tints.remove(resource);
         self.separations.remove(resource);
         true
@@ -5856,6 +6109,7 @@ impl DocumentBuilder {
         self.resources.color_spaces.push((resource.to_vec(), space));
         self.resources.tints.insert(resource.to_vec(), components);
         self.resources.icc_channels.remove(resource);
+        self.resources.cie.remove(resource);
     }
 
     /// The indirect colour space registered under `resource`, the latest
@@ -6635,13 +6889,25 @@ impl DocumentBuilder {
                 }
                 Some(self.color_space_ref(resource)?)
             }
+            ImageColorSpace::Cie {
+                resource,
+                components,
+            } => {
+                let space = self.resources.cie.get(resource)?;
+                if space.components() != usize::from(components) {
+                    return None;
+                }
+                Some(self.color_space_ref(resource)?)
+            }
             _ => None,
         };
         let space = match image.color_space {
             ImageColorSpace::DeviceGray => Object::Name(self.names.intern(b"DeviceGray")),
             ImageColorSpace::DeviceRgb => Object::Name(self.names.intern(b"DeviceRGB")),
             ImageColorSpace::DeviceCmyk => Object::Name(self.names.intern(b"DeviceCMYK")),
-            ImageColorSpace::Icc { .. } | ImageColorSpace::Tint { .. } => match registered {
+            ImageColorSpace::Icc { .. }
+            | ImageColorSpace::Tint { .. }
+            | ImageColorSpace::Cie { .. } => match registered {
                 Some(reference) => Object::Ref(reference),
                 // Unreachable: both arms above returned `None` or set it.
                 None => return None,
@@ -8332,6 +8598,8 @@ fn image_device_space(image: &ImageData<'_>) -> Option<DeviceSpace> {
             // A tint space's alternate was judged when the space was
             // registered, which is the one place its device colour is named.
             ImageColorSpace::Tint { .. } => None,
+            // CIE-based: device-independent, so not 6.2.3.3's question.
+            ImageColorSpace::Cie { .. } => None,
         },
     }
 }
@@ -12355,5 +12623,222 @@ mod layer_tests {
         assert_eq!(builder.add_layer("Refused", true), None);
         assert_eq!(builder.refusals(), &[ArchivalRefusal::OptionalContent]);
         assert_eq!(ArchivalRefusal::OptionalContent.clause(), "6.1.13");
+    }
+}
+
+#[cfg(test)]
+mod cie_tests {
+    //! CIE-based spaces on write (8.6.5.2–8.6.5.4): what the builder puts in
+    //! the file. What the file *draws*, and what the reader reads back, is
+    //! `crates/tinker-pdf/tests/writer_cie.rs`.
+
+    use super::*;
+    use crate::CosDocument;
+
+    const D50: [f64; 3] = [0.9642, 1.0, 0.8249];
+
+    /// A dictionary key and the numbers under it.
+    type Entry = (Vec<u8>, Vec<f64>);
+
+    fn opened(builder: DocumentBuilder) -> CosDocument {
+        CosDocument::open(builder.finish()).expect("the built document opens")
+    }
+
+    fn content(doc: &CosDocument) -> String {
+        let pages = crate::pages::collect(doc);
+        let bytes = crate::pages::content_bytes(doc, pages.first().expect("a page"));
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// The space page 0's `/ColorSpace` names `name`: its family, and each
+    /// key of its dictionary with the numbers under it, sorted by key.
+    fn space(doc: &CosDocument, name: &[u8]) -> (Vec<u8>, Vec<Entry>) {
+        let pages = crate::pages::collect(doc);
+        let resources = pages[0].resources.as_ref().expect("resources");
+        let table = doc.resolve_key(resources, doc.intern(b"ColorSpace"));
+        let entry = doc.resolve_key(table.as_dict().expect("/ColorSpace"), doc.intern(name));
+        let items = entry.as_array().expect("a space array");
+        assert_eq!(items.len(), 2, "the family and its dictionary");
+        let family = items[0]
+            .as_name()
+            .and_then(|n| doc.name_bytes(n))
+            .expect("a family name")
+            .to_vec();
+        let dict = doc.resolve(&items[1]);
+        let mut keys: Vec<Entry> = dict
+            .as_dict()
+            .expect("a parameter dictionary")
+            .iter()
+            .map(|(key, value)| {
+                let numbers = match doc.resolve(value).as_array() {
+                    Some(items) => items.iter().filter_map(Object::as_number).collect(),
+                    None => value.as_number().into_iter().collect(),
+                };
+                (doc.name_bytes(*key).expect("a key").to_vec(), numbers)
+            })
+            .collect();
+        keys.sort_by(|a, b| a.0.cmp(&b.0));
+        (family, keys)
+    }
+
+    /// Each family with `/WhitePoint` always and every other parameter only
+    /// where it is not Table 63–65's default — so a space at its defaults
+    /// says its white and nothing more, and one that is not says each
+    /// parameter that differs.
+    #[test]
+    fn a_cie_space_writes_its_white_and_what_differs_from_the_defaults() {
+        let mut builder = DocumentBuilder::new();
+        let plain = [
+            CieSpace::CalGray {
+                white: D50,
+                black: [0.0; 3],
+                gamma: 1.0,
+            },
+            CieSpace::CalRgb {
+                white: D50,
+                black: [0.0; 3],
+                gamma: [1.0; 3],
+                matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            },
+            CieSpace::Lab {
+                white: D50,
+                black: [0.0; 3],
+                range: [-100.0, 100.0, -100.0, 100.0],
+            },
+        ];
+        let full = [
+            CieSpace::CalGray {
+                white: D50,
+                black: [0.01, 0.01, 0.01],
+                gamma: 2.2,
+            },
+            CieSpace::CalRgb {
+                white: D50,
+                black: [0.0; 3],
+                gamma: [1.8, 2.0, 2.2],
+                matrix: [0.4, 0.2, 0.0, 0.4, 0.7, 0.1, 0.2, 0.1, 0.7],
+            },
+            CieSpace::Lab {
+                white: D50,
+                black: [0.0; 3],
+                range: [-128.0, 127.0, -128.0, 127.0],
+            },
+        ];
+        let names: [&[u8]; 6] = [b"G0", b"R0", b"L0", b"G1", b"R1", b"L1"];
+        for (name, space) in names.iter().zip(plain.iter().chain(full.iter())) {
+            assert!(builder.add_cie_color_space(name, space), "{space:?}");
+        }
+        builder.add_page(20.0, 20.0, |page| {
+            for name in names {
+                assert!(page.set_fill_cie(name, &[]));
+            }
+        });
+        let doc = opened(builder);
+        let white = (b"WhitePoint".to_vec(), D50.to_vec());
+        assert_eq!(
+            space(&doc, b"G0"),
+            (b"CalGray".to_vec(), vec![white.clone()])
+        );
+        assert_eq!(
+            space(&doc, b"R0"),
+            (b"CalRGB".to_vec(), vec![white.clone()])
+        );
+        assert_eq!(space(&doc, b"L0"), (b"Lab".to_vec(), vec![white.clone()]));
+        assert_eq!(
+            space(&doc, b"G1"),
+            (
+                b"CalGray".to_vec(),
+                vec![
+                    (b"BlackPoint".to_vec(), vec![0.01; 3]),
+                    (b"Gamma".to_vec(), vec![2.2]),
+                    white.clone(),
+                ]
+            )
+        );
+        assert_eq!(
+            space(&doc, b"R1"),
+            (
+                b"CalRGB".to_vec(),
+                vec![
+                    (b"Gamma".to_vec(), vec![1.8, 2.0, 2.2]),
+                    (
+                        b"Matrix".to_vec(),
+                        vec![0.4, 0.2, 0.0, 0.4, 0.7, 0.1, 0.2, 0.1, 0.7]
+                    ),
+                    white.clone(),
+                ]
+            )
+        );
+        assert_eq!(
+            space(&doc, b"L1"),
+            (
+                b"Lab".to_vec(),
+                vec![
+                    (b"Range".to_vec(), vec![-128.0, 127.0, -128.0, 127.0]),
+                    white,
+                ]
+            )
+        );
+    }
+
+    /// The setters write the space's own operand count, each component
+    /// clamped to the space's own range: 0..1 for `/CalGray` and `/CalRGB`,
+    /// and for `/Lab` `L*` to 0..100 and `a*`, `b*` to its `/Range` — not
+    /// 0..1, which would turn every `/Lab` colour into near-black. Missing
+    /// components are zero, extra ones dropped, and the stroking setter uses
+    /// Table 74's capitals.
+    #[test]
+    fn a_cie_colour_is_written_with_the_spaces_count_and_ranges() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_cie_color_space(
+            b"G",
+            &CieSpace::CalGray {
+                white: D50,
+                black: [0.0; 3],
+                gamma: 1.0,
+            }
+        ));
+        assert!(builder.add_cie_color_space(
+            b"L",
+            &CieSpace::Lab {
+                white: D50,
+                black: [0.0; 3],
+                range: [-128.0, 127.0, -50.0, 50.0],
+            }
+        ));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.set_fill_cie(b"G", &[1.5, 0.3]));
+            assert!(page.set_stroke_cie(b"L", &[150.0, -200.0, 20.0, 9.0]));
+            assert!(page.set_fill_cie(b"L", &[f64::NAN]));
+            assert!(!page.set_fill_cie(b"X", &[0.5]), "nothing is under X");
+        });
+        let text = content(&opened(builder));
+        assert!(text.contains("/G cs\n1 sc\n"), "{text}");
+        assert!(text.contains("/L CS\n100 -128 20 SC\n"), "{text}");
+        assert!(text.contains("/L cs\n0 0 0 sc\n"), "{text}");
+    }
+
+    /// Re-registering a name as another kind of space forgets the first:
+    /// a CIE space under a name an ICC profile held takes the setters and the
+    /// images it does, and an ICC profile under a CIE name takes them back.
+    #[test]
+    fn a_name_means_the_space_registered_under_it_last() {
+        let mut builder = DocumentBuilder::new();
+        let gray = CieSpace::CalGray {
+            white: D50,
+            black: [0.0; 3],
+            gamma: 1.0,
+        };
+        assert!(builder.add_icc_color_space(b"CS", b"not read here", 3));
+        assert!(builder.add_cie_color_space(b"CS", &gray));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(!page.set_fill_icc(b"CS", &[0.5, 0.5, 0.5]));
+            assert!(page.set_fill_cie(b"CS", &[0.5]));
+        });
+        assert!(builder.add_icc_color_space(b"CS", b"not read here", 3));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(!page.set_fill_cie(b"CS", &[0.5]));
+            assert!(page.set_fill_icc(b"CS", &[0.5, 0.5, 0.5]));
+        });
     }
 }

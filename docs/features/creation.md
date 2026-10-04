@@ -83,8 +83,8 @@ byte for byte (PDF's predictor is PNG 9.2's row filter adopted wholesale),
 and the writer never re-encodes a stream that already declares a `/Filter`.
 `tinker_pdf_cos::build::jpeg_shape(bytes)` reads a JPEG's dimensions and
 component count from its SOF marker so the caller need not. Indexed images take a `DeviceSpace` base
-only — 8.6.6.3 forbids an `/Indexed` over `/Indexed`, and this writer emits
-no CIE-based space. It **does** write an `/ICCBased`
+only — 8.6.6.3 forbids an `/Indexed` over `/Indexed`, and this writer offers
+no other space as a base. It **does** write an `/ICCBased`
 space: `add_icc_color_space` registers one as an indirect object with `/N`
 checked against Table 66, `set_fill_icc` and `set_stroke_icc` name it on the
 page, and `ImageColorSpace::Icc` puts it on an image — so one embedded
@@ -95,6 +95,34 @@ its rows would be the wrong width. The image's
 Table 89 makes it a colour space, and only a content stream's `cs` looks a
 name up in `/Resources` (8.6.3). The name was written until September 2026,
 and this reader drew those samples as grey.
+
+**CIE-based spaces.** `add_cie_color_space(resource, &CieSpace)` registers a
+`/CalGray`, `/CalRGB` or `/Lab` array (ISO 32000-1 8.6.5.2–8.6.5.4) as an
+indirect object: the family name and a dictionary carrying `/WhitePoint`
+always and every other parameter — `/BlackPoint`, `/Gamma`, `/Matrix`,
+`/Range` — only where it differs from Tables 63–65's default, as the ICC
+writer leaves `/Alternate` to its default. `CieSpace::is_valid` holds the
+tables: a white point with `X` and `Z` positive and `Y` exactly 1, a black
+point of non-negative numbers, positive gammas, a finite matrix written column
+by column as Table 64 writes it, and a `/Range` whose minimums are below its
+maximums; anything else registers nothing. `set_fill_cie` and
+`set_stroke_cie` write `/Name cs c1 … cn sc` with the space's own operand
+count, each component clamped to the space's own range — 0..1 for `/CalGray`
+and `/CalRGB`, and for `/Lab` `L*` to 0..100 and `a*`, `b*` to its `/Range`,
+which is what a `/Lab` colour is and why it cannot share the 0..1 clamp — and
+`ImageColorSpace::Cie { resource, components }` puts the space on an image,
+refused when `components` is not its count. No `ArchivalProfile` refuses one:
+a CIE-based space is device-independent, and 6.2.3.3 is about device colour.
+`writer_cie.rs` reads each back through this reader — the image's
+`ImageSpace` is the space written — and holds what the renderer draws to the
+clauses' arithmetic, computed in the test: neutral colours to IEC 61966-2-1's
+transfer of `Y`, and a chromatic `/Lab` colour through the published
+Bradford-adapted sRGB matrix for a D50 white. Two reader defects were found on
+the way and fixed with it: a `/Lab` image with no `/Decode` read its samples
+as fractions of one rather than Table 90's `0..100` and `/Range`, so it was all
+but black; and a `/ColorSpace` resource named `/G`, `/RGB` or `/CMYK` was
+read as the inline-image abbreviation for the device space it spells, so a
+`/CalGray` registered as `/G` was drawn in DeviceGray.
 
 **Spot colours.** `add_separation_color_space(resource, colorant, alternate,
 &tint)` registers `[/Separation /colorant /Alternate tint]` (8.6.6.4) and
@@ -238,7 +266,7 @@ b.set_info(b"Title", "Built");
 let pdf: Vec<u8> = b.finish();
 ```
 
-`DocumentBuilder`, `PageBuilder`, `ImageData`, `DeviceSpace`, `ExtGState`,
+`DocumentBuilder`, `PageBuilder`, `ImageData`, `DeviceSpace`, `CieSpace`, `ExtGState`,
 `TransparencyGroup`, `FormXObject`, `Function`, `CalculatorOp`,
 `DeviceNAttributes`, `LayerId`, `Shading`, `ShadingPattern`,
 `TilingPattern`, `TilingType`, `Glyph`, `PlacedGlyph`, `BlendMode`, `MaskKind`,
@@ -324,7 +352,6 @@ property is.
 | --- | --- | --- | --- |
 | Any image encoder but deflate | `Rgb8`/`Gray8` are deflated; JPEG and PNG-IDAT pass through; nothing is encoded to JPEG, CCITT, JBIG2 or JPX | **The reason has now changed twice and the refusal has not.** It used to be "the engine decodes those codecs; it does not write them"; on 15 September 2026 `tinker-pdf-filters` gained CCITT G4 and JBIG2 generic regions, and on 16 September a baseline JPEG encoder, so three of the four codecs named here have a writer in the leaf crate and this builder calls none of them. What is missing is not a coder. It is the decision of *when* a raster is better off lossy, or as a fax coding, than as deflate — and, per codec, the framing: for JBIG2 D.3's embedded-stream assembly, which the filter crate deliberately does not write, and for JPEG the `/DCTDecode` XObject's own colour and `/Decode` agreement. JPX has no encoder at all | [filters](filters.md), [ROADMAP](../ROADMAP.md) |
 | Text shaping in `text` and `glyphs` | `text` is one byte per character; `glyphs` takes glyph indices the caller positioned | neither runs GSUB or GPOS and neither will: `glyph_run` is the shaped entry point, through `tinker-pdf-shape` | [fonts](fonts.md), [design/shaping.md](../design/shaping.md) |
-| CIE-based spaces on write: `/CalGray`, `/CalRGB`, `/Lab` | `DeviceSpace`, `/ICCBased` and the two tint spaces on the fill, stroke and image setters; nothing registers, sets or places a CIE-based array | not built: `/ICCBased` is this writer's only device-independent colour today. Whether the CIE-based arrays are owed beside it is open on the roadmap, not decided here. `/Separation` and `/DeviceN` left this row in September 2026 | [ROADMAP](../ROADMAP.md) |
 | A `Target::Uri` outside 7-bit ASCII | `link` returns `false` | 12.6.4.7's `/URI` is ASCII; an unwritable target writes nothing rather than a plausible-and-wrong action | — |
 | Layout on the builder's own methods | none — positions are the caller's | by design; [epub](epub.md)'s layout engine is a *consumer* of this API, and `FromHtml` is where a caller reaches it: a constructor in the facade, because ruling 8 keeps the layout engine out of `tinker-pdf-cos` | — |
 | Markup that is not well-formed XML, handed to `from_html` | `ArchiveWarning::Markup(MarkupDefect::Truncated)` in the report, on a document of what parsed | the markup is read by the XML reader; an HTML5 tree builder is the open half of tier 5's loose-HTML row | [opening](opening.md), [ROADMAP](../ROADMAP.md) |

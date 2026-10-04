@@ -1141,7 +1141,7 @@ fn fill_in_space(space: &str, components: &str) -> tinker_pdf::Bitmap {
         .render(&RenderOptions::default())
 }
 
-/// **A `/CalGray` gamma is read** (8.6.5.1), which is the assertion that fails
+/// **A `/CalGray` gamma is read** (8.6.5.2), which is the assertion that fails
 /// if the space is aliased to `/DeviceGray`.
 ///
 /// The same component through two different gammas must not produce the same
@@ -1189,7 +1189,7 @@ fn a_cal_gray_reads_its_gamma_rather_than_aliasing_to_device_gray() {
     assert!(white.0 > 243, "1 is white: {white:?}");
 }
 
-/// **A `/CalRGB` matrix is read** (8.6.5.2), and Table 65 writes it column by
+/// **A `/CalRGB` matrix is read** (8.6.5.3), and Table 64 writes it column by
 /// column.
 ///
 /// The matrix below is the identity with its *A* and *C* columns exchanged, so

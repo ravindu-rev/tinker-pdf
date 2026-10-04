@@ -164,7 +164,7 @@ pub enum ImageSpace {
         white: [f64; 3],
         /// `/Gamma`, one per component.
         gamma: [f64; 3],
-        /// `/Matrix`, as Table 65 writes it, column by column.
+        /// `/Matrix`, as Table 64 writes it, column by column.
         matrix: [f64; 9],
     },
     /// `[/Lab << ... >>]` (8.6.5.4).

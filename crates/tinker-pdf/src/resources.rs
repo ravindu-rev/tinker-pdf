@@ -362,9 +362,30 @@ fn group_space(space: tinker_pdf_color::ColorSpace) -> tinker_pdf_content::Group
     }
 }
 
+/// Table 90's default `/Decode` pair for component `c` of an image in
+/// `space`, where it is not `[0 1]` and so not what a sample's fraction
+/// already is: a `/Lab` sample spans `L*` over `0..100` and `a*`, `b*` over
+/// the space's `/Range` (8.6.5.4, Table 90).
+///
+/// Until October 2026 an image in `/Lab` with no `/Decode` read every
+/// sample as a fraction of one, so `L*` ran 0 to 1 and the image was all but
+/// black. Every other space's default is `[0 1]` — an `/Indexed` one's is
+/// its index range, which the sample loop reads as the index itself.
+fn default_decode(space: &ColorSpace, c: usize) -> Option<(f64, f64)> {
+    match space {
+        ColorSpace::Lab { range } => match c {
+            0 => Some((0.0, 100.0)),
+            1 => Some((range[0], range[1])),
+            2 => Some((range[2], range[3])),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The D50 white point, and the default when a CIE-based space names none.
 ///
-/// 8.6.5.1 and 8.6.5.2 make `/WhitePoint` required, so this is the answer for a
+/// 8.6.5.2 and 8.6.5.3 make `/WhitePoint` required, so this is the answer for a
 /// dictionary that omits it or writes fewer than three numbers — a file that
 /// has not described a white point rather than one that described a different
 /// one.
@@ -783,20 +804,36 @@ impl PageResources {
             // A bare `/CalGray` or `/CalRGB` name carries no parameter
             // dictionary at all, so there is no white point or gamma to read
             // and the device space *is* the whole of what the file said.
-            b"DeviceGray" | b"G" | b"CalGray" => return Some(ColorSpace::DeviceGray),
-            b"DeviceRGB" | b"RGB" | b"CalRGB" => return Some(ColorSpace::DeviceRgb),
-            b"DeviceCMYK" | b"CMYK" => return Some(ColorSpace::DeviceCmyk),
+            b"DeviceGray" | b"CalGray" => return Some(ColorSpace::DeviceGray),
+            b"DeviceRGB" | b"CalRGB" => return Some(ColorSpace::DeviceRgb),
+            b"DeviceCMYK" => return Some(ColorSpace::DeviceCmyk),
             b"Pattern" => return Some(ColorSpace::Pattern { base: None }),
             _ => {}
         }
 
-        let resources = self.resources.as_ref()?;
-        let table = self
-            .doc
-            .resolve_key(resources, self.doc.intern(b"ColorSpace"));
-        let dict = table.as_dict()?;
-        let entry = dict.get(self.doc.intern(name))?.clone();
-        self.parse_space(&entry, 0)
+        // `/G`, `/RGB` and `/CMYK` are Table 93's abbreviations, which an
+        // inline image may use and a content stream's `cs` may not — 8.6.8
+        // gives `cs` a device space's own name or a `/ColorSpace` resource,
+        // and `/G` is a perfectly good resource name. So the resources are
+        // asked first and the abbreviation is the fallback. Until October
+        // 2026 the abbreviation won, and a page that registered its
+        // `/CalGray` as `/G` was drawn in DeviceGray, gamma and white point
+        // unread.
+        let entry = self.resources.as_ref().and_then(|resources| {
+            let table = self
+                .doc
+                .resolve_key(resources, self.doc.intern(b"ColorSpace"));
+            table.as_dict()?.get(self.doc.intern(name)).cloned()
+        });
+        match entry {
+            Some(entry) => self.parse_space(&entry, 0),
+            None => match name {
+                b"G" => Some(ColorSpace::DeviceGray),
+                b"RGB" => Some(ColorSpace::DeviceRgb),
+                b"CMYK" => Some(ColorSpace::DeviceCmyk),
+                _ => None,
+            },
+        }
     }
 
     fn parse_space(&self, object: &Object, depth: u32) -> Option<ColorSpace> {
@@ -908,7 +945,7 @@ impl PageResources {
                     .and_then(|o| self.parse_space(o, depth + 1))
                     .map(Box::new),
             }),
-            // 8.6.5.1 and 8.6.5.2. These were aliased to the device spaces,
+            // 8.6.5.2 and 8.6.5.3. These were aliased to the device spaces,
             // which read neither the white point nor the gamma and left
             // *nothing* recording that an approximation had happened — unlike
             // an ICC profile this build refuses, where `Approximated` says so
@@ -935,7 +972,7 @@ impl PageResources {
                     .and_then(|d| self.numbers(d, b"Gamma", 3))
                     .map_or([1.0; 3], |v| [v[0], v[1], v[2]]);
                 let matrix = dict.and_then(|d| self.numbers(d, b"Matrix", 9)).map_or(
-                    // Table 65's default is the identity, which makes the
+                    // Table 64's default is the identity, which makes the
                     // components XYZ directly.
                     [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
                     |v| {
@@ -3003,15 +3040,19 @@ impl PageResources {
                         ColorSpace::Indexed { .. } => f64::from(value),
                         _ => f64::from(value) / max,
                     };
-                    components.push(match decode.get(c) {
-                        // The interpolation is over the *sample* range, so an
-                        // indexed image maps its index rather than a fraction.
-                        Some((dmin, dmax)) => match &space {
-                            ColorSpace::Indexed { .. } => dmin + raw * (dmax - dmin) / max.max(1.0),
-                            _ => dmin + raw * (dmax - dmin),
+                    components.push(
+                        match decode.get(c).copied().or_else(|| default_decode(&space, c)) {
+                            // The interpolation is over the *sample* range, so an
+                            // indexed image maps its index rather than a fraction.
+                            Some((dmin, dmax)) => match &space {
+                                ColorSpace::Indexed { .. } => {
+                                    dmin + raw * (dmax - dmin) / max.max(1.0)
+                                }
+                                _ => dmin + raw * (dmax - dmin),
+                            },
+                            None => raw,
                         },
-                        None => raw,
-                    });
+                    );
                 }
 
                 if is_mask {
@@ -3328,13 +3369,17 @@ impl PageResources {
                         ColorSpace::Indexed { .. } => f64::from(value),
                         _ => f64::from(value) / max,
                     };
-                    components.push(match decode.get(c) {
-                        Some((dmin, dmax)) => match &space {
-                            ColorSpace::Indexed { .. } => dmin + raw * (dmax - dmin) / max.max(1.0),
-                            _ => dmin + raw * (dmax - dmin),
+                    components.push(
+                        match decode.get(c).copied().or_else(|| default_decode(&space, c)) {
+                            Some((dmin, dmax)) => match &space {
+                                ColorSpace::Indexed { .. } => {
+                                    dmin + raw * (dmax - dmin) / max.max(1.0)
+                                }
+                                _ => dmin + raw * (dmax - dmin),
+                            },
+                            None => raw,
                         },
-                        None => raw,
-                    });
+                    );
                 }
 
                 if is_mask {

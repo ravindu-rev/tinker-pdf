@@ -75,7 +75,7 @@ pub enum ColorSpace {
         /// How many components.
         components: usize,
     },
-    /// **CIE-based grey (8.6.5.1).**
+    /// **CIE-based grey (8.6.5.2).**
     ///
     /// One component through a gamma, scaled by a white point. Aliased to
     /// [`ColorSpace::DeviceGray`] until now, which meant `/WhitePoint` and
@@ -88,7 +88,7 @@ pub enum ColorSpace {
         /// `/Gamma`, defaulting to 1.
         gamma: f64,
     },
-    /// **CIE-based RGB (8.6.5.2).**
+    /// **CIE-based RGB (8.6.5.3).**
     ///
     /// Three components, each through its own gamma, then a 3×3 matrix into
     /// XYZ relative to `/WhitePoint`.
@@ -97,7 +97,7 @@ pub enum ColorSpace {
         white: [f64; 3],
         /// `/Gamma`, defaulting to `[1, 1, 1]`.
         gamma: [f64; 3],
-        /// `/Matrix`, column-major as Table 65 writes it —
+        /// `/Matrix`, column-major as Table 64 writes it —
         /// `[XA YA ZA XB YB ZB XC YC ZC]` — defaulting to the identity.
         matrix: [f64; 9],
     },
@@ -210,7 +210,7 @@ impl ColorSpace {
                 alternate.to_rgb(&converted)
             }
             ColorSpace::CalGray { white, gamma } => {
-                // 8.6.5.1: A^G scales the white point. `at` clamps to 0..1,
+                // 8.6.5.2: A^G scales the white point. `at` clamps to 0..1,
                 // which is this space's own range.
                 let a = math::pow(at(0), *gamma);
                 xyz_to_rgb([white[0] * a, white[1] * a, white[2] * a], *white)
@@ -220,8 +220,8 @@ impl ColorSpace {
                 gamma,
                 matrix,
             } => {
-                // 8.6.5.2: each component through its own gamma, then Table
-                // 65's matrix — which is written column by column, so the
+                // 8.6.5.3: each component through its own gamma, then Table
+                // 64's matrix — which is written column by column, so the
                 // first three numbers are the *A* column and not the X row.
                 let a = math::pow(at(0), gamma[0]);
                 let b = math::pow(at(1), gamma[1]);
@@ -315,7 +315,7 @@ pub(crate) fn xyz_d50_to_linear_srgb(x: f64, y: f64, z: f64) -> [f64; 3] {
 /// own white point and D65 is as common as D50 in the wild, so the two have to
 /// be reconciled. Scaling each axis by the ratio of the two whites is the
 /// simplest transform that maps one white exactly onto the other, and it is
-/// what 8.6.5.2's own note describes when it says the components are relative
+/// what 8.6.5.3's own note describes when it says the components are relative
 /// to the diffuse white.
 ///
 /// It is not Bradford, which is what [`XYZ_D50_TO_SRGB`] already has baked in

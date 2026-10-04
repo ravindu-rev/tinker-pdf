@@ -42,8 +42,8 @@ defines; and a CMYK printer profile with a single `kTRC` and no matrix — one
 curve for four channels of ink. Those are `ColorSpace::Approximated`, read by
 component count, which is the alternate-space reading 8.6.5.5 permits.
 
-**`CalGray` and `CalRGB` convert through their own parameters** (8.6.5.1,
-8.6.5.2): the components go through `/Gamma`, `/Matrix` takes them into XYZ
+**`CalGray` and `CalRGB` convert through their own parameters** (8.6.5.2,
+8.6.5.3): the components go through `/Gamma`, `/Matrix` takes them into XYZ
 relative to `/WhitePoint`, and the white point is adapted to D50 before the
 sRGB matrix. They were aliased to `DeviceGray` and `DeviceRGB` until September
 2026, which read neither the white point nor the gamma and left *nothing*
@@ -55,7 +55,14 @@ two whites, and not the Bradford transform baked into the profile path's
 matrix. Named rather than hidden: the two differ on saturated colours far from
 the neutral axis. A bare `/CalGray` or `/CalRGB` *name*, with no parameter
 dictionary behind it, is still the device space — there is nothing else the
-file has said. `[/Pattern base]` carries the underlying space
+file has said. `/G`, `/RGB` and `/CMYK` are Table 93's inline-image
+abbreviations and are read as the device spaces only where no `/ColorSpace`
+resource has the name: 8.6.8 gives `cs` a device space's own name or a
+resource, and until October 2026 a `/CalGray` registered as `/G` was drawn in
+DeviceGray. A `/Lab` image with no `/Decode` takes Table 90's default —
+`L*` over 0..100, `a*` and `b*` over the space's `/Range` — where it used to
+read every sample as a fraction of one and come out all but black;
+`writer_cie.rs` holds both, with the CIE-based spaces this engine now writes. `[/Pattern base]` carries the underlying space
 of an uncoloured pattern (8.7.3.2), so an `scn`'s components reach the paint.
 Initial colours follow 8.6.8 — CMYK starts at full black ink, not all zeros.
 Out-of-range components clamp rather than wrap.
