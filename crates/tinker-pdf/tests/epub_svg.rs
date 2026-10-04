@@ -1364,3 +1364,93 @@ fn an_import_the_container_lacks_is_named_and_a_loose_svg_reads_data_urls() {
         [tinker_pdf_svg::Warning::ImportUnresolved]
     );
 }
+
+// ---- how a run is painted ---------------------------------------------------------
+
+/// The first page's content stream, decoded.
+fn page_content(doc: &Document) -> String {
+    let cos = doc.cos();
+    let pages = tinker_pdf_cos::pages::collect(cos);
+    let page = pages.first().expect("one page");
+    String::from_utf8_lossy(&tinker_pdf_cos::pages::content_bytes(cos, page)).into_owned()
+}
+
+/// The operators between the run's `q` and its text object: what it is
+/// painted with.
+fn run_paint(doc: &Document) -> String {
+    let content = page_content(doc);
+    let end = content.find("BT").expect("a text object");
+    let start = content[..end].rfind("q\n").expect("the run's q");
+    content[start..end].to_owned()
+}
+
+/// **A run is painted as its `fill` and `stroke` say**, through 9.3.6's
+/// rendering modes, which are SVG's four combinations exactly: a fill alone
+/// is mode 0, a stroke alone 1, both 2, and neither 3 — invisible, and still
+/// text a reader extracts, which is what `fill="none"` on a label is. A
+/// gradient or a pattern is the shading or tiling pattern a shape would get.
+///
+/// Until this, `epub::svg::draw_text` set a solid fill and nothing else: a
+/// run filled with a gradient or a pattern, or with `none`, was drawn in
+/// whatever colour the state held — black — and a stroke was never drawn.
+#[test]
+fn svg_text_is_painted_as_its_fill_and_stroke_say() {
+    let gradient = r##"<linearGradient id="g" gradientUnits="userSpaceOnUse" x2="200">
+         <stop offset="0" stop-color="#ff0000"/><stop offset="1" stop-color="#0000ff"/>
+       </linearGradient>"##;
+    let run = |paint: &str| {
+        open(&format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">{gradient}
+                 <text x="10" y="50" font-family="serif" font-size="24" {paint}>Hello</text>
+               </svg>"##
+        ))
+    };
+    for (paint, wanted, unwanted) in [
+        (
+            r##"fill="#0000ff""##,
+            &["0 0 1 rg"][..],
+            &[" Tr", " RG"][..],
+        ),
+        (
+            r##"fill="url(#g)""##,
+            &["/Pattern cs", " scn"],
+            &[" Tr", " rg"],
+        ),
+        (
+            r##"fill="none" stroke="#ff0000" stroke-width="2""##,
+            &["1 0 0 RG", "2 w", "1 Tr"],
+            &[" rg"],
+        ),
+        (
+            r##"fill="#0000ff" stroke="url(#g)""##,
+            &["0 0 1 rg", "/Pattern CS", " SCN", "2 Tr"],
+            &[],
+        ),
+        (r##"fill="none""##, &["3 Tr"], &[" rg", " RG"]),
+        // A stroke's opacity is the run's as a shape's is: its `CA` in the
+        // run's `gs`.
+        (
+            r##"fill="none" stroke="#ff0000" stroke-opacity="0.5""##,
+            &[" gs", "1 0 0 RG", "1 Tr"],
+            &[],
+        ),
+    ] {
+        let doc = run(paint);
+        let ops = run_paint(&doc);
+        for operator in wanted {
+            assert!(
+                ops.contains(operator),
+                "{paint}: no `{operator}` in {ops:?}"
+            );
+        }
+        for operator in unwanted {
+            assert!(!ops.contains(operator), "{paint}: `{operator}` in {ops:?}");
+        }
+        assert_eq!(
+            doc.page(0).expect("a page").text().plain_text().trim(),
+            "Hello",
+            "{paint}: the run is still text"
+        );
+        assert_eq!(svg_warnings(&doc), [], "{paint}");
+    }
+}

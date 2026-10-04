@@ -385,14 +385,28 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
                 }
                 None => self.drawn.images_unresolved += 1,
             },
-            Node::Text { fill_opacity, .. } => {
+            Node::Text {
+                fill,
+                fill_opacity,
+                stroke,
+                ..
+            } => {
                 let Some(origin) = cursor.take() else {
                     return;
                 };
-                let alpha = if *fill_opacity < 1.0 {
-                    self.alpha(*fill_opacity, 1.0)
+                let stroke_alpha = stroke.as_ref().map_or(1.0, |stroke| stroke.opacity);
+                let alpha = if *fill_opacity < 1.0 || stroke_alpha < 1.0 {
+                    self.alpha(*fill_opacity, stroke_alpha)
                 } else {
                     None
+                };
+                // A run's gradient or pattern is the shape's: registered here,
+                // before the page is begun, and named in the run's paint.
+                let patterns = Patterns {
+                    fill: self.pattern(fill, space),
+                    stroke: stroke
+                        .as_ref()
+                        .and_then(|stroke| self.pattern(&stroke.paint, space)),
                 };
                 self.drawn.refused += draw_text(
                     self.builder,
@@ -400,6 +414,7 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
                     node,
                     origin,
                     alpha.as_deref(),
+                    &patterns,
                     space.grey,
                     self.fonts,
                     self.metrics,
@@ -1420,7 +1435,23 @@ fn place_text(nodes: &[Node], metrics: &BookMetrics<'_>) -> Vec<Option<Origin>> 
     state.out
 }
 
+/// The pattern resources a run's fill and stroke are painted with, where
+/// either is a gradient or a pattern the builder took.
+struct Patterns {
+    fill: Option<Vec<u8>>,
+    stroke: Option<Vec<u8>>,
+}
+
 /// One text run, as a text object under the run's own matrix.
+///
+/// Painted as its `fill` and `stroke` say, through 9.3.6's rendering modes,
+/// which are SVG's four combinations of the two exactly: a fill alone is the
+/// initial mode 0, a stroke alone 1, both 2, and neither 3 — invisible, and
+/// still text a reader extracts and searches, which is what `fill="none"` on
+/// a label is. `Tr` is graphics state, so the run's `q`/`Q` scopes it. Until
+/// this the run's solid fill was set and nothing else: a gradient, a pattern
+/// or `none` drew in whatever colour the state held, and a stroke was never
+/// drawn.
 ///
 /// Returns how many pieces the writer refused, which the caller turns into
 /// [`crate::ArchiveWarning::UnwritableTextRun`] (ruling 10).
@@ -1431,6 +1462,7 @@ fn draw_text(
     node: &Node,
     origin: Origin,
     alpha: Option<&[u8]>,
+    patterns: &Patterns,
     grey: bool,
     fonts: &Fonts<'_>,
     metrics: &BookMetrics<'_>,
@@ -1440,6 +1472,7 @@ fn draw_text(
         matrix: element,
         font,
         fill,
+        stroke,
         rotate,
         ..
     } = node
@@ -1471,8 +1504,22 @@ fn draw_text(
     if let Some(resource) = alpha {
         gs(out, resource);
     }
-    if let Paint::Solid(colour) = fill {
-        set_paint(out, &Paint::Solid(*colour), None, false, grey);
+    // Set before the run's `cm`, as a shape's are: a line width is read in
+    // the user space in force when the glyphs are stroked, which is the run's,
+    // and a pattern's space is the stream's default whatever the `cm`.
+    let filled = set_paint(out, fill, patterns.fill.as_deref(), false, grey);
+    let stroked = stroke.as_ref().is_some_and(|stroke| {
+        let painted = set_paint(out, &stroke.paint, patterns.stroke.as_deref(), true, grey);
+        if painted {
+            set_stroke_state(out, stroke);
+        }
+        painted
+    });
+    match (filled, stroked) {
+        (true, false) => {}
+        (false, true) => out.extend_from_slice(b"1 Tr\n"),
+        (true, true) => out.extend_from_slice(b"2 Tr\n"),
+        (false, false) => out.extend_from_slice(b"3 Tr\n"),
     }
     matrix(out, local);
     out.extend_from_slice(b" cm\n");

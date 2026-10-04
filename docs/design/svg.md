@@ -167,7 +167,13 @@ picks a face per character (`css-fonts-4` §5.3), `tinker-pdf-shape` shapes an
 embedded one, and `DocumentBuilder::glyph_run` writes it. That is the same path
 a paragraph of the book takes, which is the property worth having: SVG text and
 XHTML text in one book cannot be set in two different faces by two different
-matchers.
+matchers. A run is painted as a shape is — its fill and its stroke each a
+colour, a gradient or a pattern, through the same pattern resources — and
+9.3.6's rendering modes are SVG's four combinations of the two exactly: a fill
+alone is mode 0, a stroke alone 1, both 2, and neither 3, invisible text a
+reader still extracts. *Corrected 4 October 2026*: `draw_text` set a run's
+solid fill and nothing else, so a run painted with a gradient, a pattern
+or `none` drew in black, and a stroke never drew.
 
 This is `Node::Image`'s seam read a second time. The crate carries what the
 document said; the caller resolves it against what it has.

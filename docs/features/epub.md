@@ -511,7 +511,12 @@ family is set in it (`an_svg_reaches_its_container_for_its_imports_and_faces`)
 a container's `clip-path` as the clip of its rendering, §14.4's masks, §11.6's markers, §5.6's `<use>` with the
 bomb refused by name, §5.7's `<image>`, and §10's text — the last through the same `css-fonts-4` §5.3 matcher
 and the same shaper that set the rest of the book, because SVG text and XHTML
-text in one book must not resolve `serif` two different ways.
+text in one book must not resolve `serif` two different ways, and painted as
+its `fill` and `stroke` say: a colour, a gradient or a pattern each, by 9.3.6's
+rendering modes — `fill="none"` is mode 3, invisible text a reader still
+extracts (`svg_text_is_painted_as_its_fill_and_stroke_say`). *Corrected 4
+October 2026*: a run's solid fill was set and nothing else, so a run filled
+with a gradient, a pattern or `none` drew in black and a stroke never drew.
 
 **One thing that half-worked and was found by a test rather than by reading.**
 `DocumentBuilder::begin_page` snapshots the document's resource set, so a
