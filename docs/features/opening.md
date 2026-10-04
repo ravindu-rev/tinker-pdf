@@ -49,7 +49,9 @@ MIME Sniffing §7.1 takes to mean HTML, in any case, or a doctype naming
 `html`, is an HTML document. **Each is built by the code that builds
 the larger document it would be one part of**: an SVG is a book of one
 pre-paginated chapter — one page, the size its root states, the caller's
-`OpenOptions::page` as the viewport a root with no size fills; an XHTML file is
+`OpenOptions::page` as the viewport a root with no size fills, and read a
+second time, as a book's is, where a bounding-box effect on its text needs the
+box its faces give the runs (`a_bounding_box_gradient_on_svg_text_spans_the_text_it_paints`); an XHTML file is
 a book of one reflowable chapter at the caller's box with the book's 36-point
 margin, its `<title>` the document's `/Title` — read as XML first, so that a
 well-formed XHTML file is exactly an EPUB's chapter, and **when it is not XML,

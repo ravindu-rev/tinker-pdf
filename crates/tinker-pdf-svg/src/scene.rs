@@ -35,7 +35,10 @@ use crate::path::{self, Outline, Segment};
 use crate::shape::{self, Shape};
 use crate::style::{self, PaintSpec, Sheet, Style};
 use crate::transform::{self, IDENTITY};
-use crate::{Colour, Limits, Paint, Refusal, Scene, Stroke, TextStyle, Warning};
+use crate::{
+    Colour, Limits, MeasureText, Paint, Refusal, RunMetrics, Scene, Stroke, TextAnchor, TextStyle,
+    Warning,
+};
 use tinker_pdf_math as math;
 
 /// The default viewport, in user units, for a document that states no size.
@@ -158,6 +161,56 @@ struct Walk<'a> {
     /// its parent whole — so the length of whichever list is open is not how
     /// much of one picture the walk has built, and [`Limits::max_nodes`] is.
     pushed: usize,
+    /// The caller's measurement of a run, where it gave one
+    /// ([`crate::Context::measure`]).
+    measure: Option<&'a dyn MeasureText>,
+    /// The paints every open `<text>`'s runs wait on for its box, innermost
+    /// last — a `<text>` can open inside another's paint, mask or clip. Empty
+    /// without a measurer. See [`Walk::settle`].
+    waiting: Vec<Waiting>,
+}
+
+/// A `<text>`'s runs whose paint needs the box of the whole `<text>` — SVG 2
+/// §11.2's rule for a `<tspan>`'s paint as for the `<text>`'s own — which is
+/// known only once its last run is placed.
+#[derive(Default)]
+struct Waiting {
+    /// One per paint, in the order marked; a paint's mark is its index here.
+    paints: Vec<Unpainted>,
+}
+
+/// One run's `fill` or `stroke`, held until its `<text>`'s box is known.
+struct Unpainted {
+    spec: PaintSpec,
+    /// The run's matrix: the space the box is wanted in.
+    matrix: [f64; 6],
+    frame: Frame,
+}
+
+/// What a waiting paint stands as until [`Walk::settle`] replaces it: a
+/// colour no document can state — every colour read is in `[0, 1]` — whose
+/// third channel is the paint's index in its [`Waiting`].
+const MARK: f64 = -1.0;
+
+fn mark(number: usize) -> Paint {
+    #[allow(clippy::cast_precision_loss)]
+    let number = number as f64;
+    Paint::Solid(Colour {
+        rgb: [MARK, MARK, number],
+    })
+}
+
+/// The index a paint carries, if it is a mark.
+fn marked(paint: &Paint) -> Option<usize> {
+    match paint {
+        Paint::Solid(Colour { rgb: [a, b, n] })
+            if *a == MARK && *b == MARK && *n >= 0.0 && n.fract() == 0.0 =>
+        {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Some(*n as usize)
+        }
+        _ => None,
+    }
 }
 
 impl Walk<'_> {
@@ -271,11 +324,7 @@ impl Walk<'_> {
         }
         let extent = match own {
             Some(measured) => Extent::shape(measured),
-            None => Extent {
-                measured: transform::invert(matrix)
-                    .map_or([0.0; 4], |inverse| gradient::nodes_bounds(&nodes, inverse)),
-                text: gradient::nodes_hold_text(&nodes),
-            },
+            None => self.extent_of(&nodes, matrix),
         };
         let source = match &style.clip_path {
             None => None,
@@ -340,6 +389,32 @@ impl Walk<'_> {
             clip,
             mask: None,
         })
+    }
+
+    /// §7.11's box of what a container drew, in its own user space, with its
+    /// text's glyph cells in it where the caller measured them.
+    ///
+    /// Not inside a `<text>`: a `<tspan>`'s `mask` or `clip-path` takes the
+    /// box of the whole `<text>` (SVG 2 §11.2: *"in all cases, even when
+    /// different effects are applied to different 'tspan' … elements"*), and
+    /// that box is not known until the `<text>`'s last run is placed — so a
+    /// `<tspan>`'s group keeps its text unmeasured, and named, rather than
+    /// taking its own runs' box, which would be a different picture.
+    fn extent_of(&self, nodes: &[crate::Node], matrix: [f64; 6]) -> Extent {
+        let mut text = gradient::nodes_hold_text(nodes);
+        let mut cells = Vec::new();
+        if text && self.text.stack.len() <= 1 {
+            if let Some(points) = self.measure.and_then(|measure| text_cells(nodes, measure)) {
+                cells = points;
+                text = false;
+            }
+        }
+        Extent {
+            measured: transform::invert(matrix).map_or([0.0; 4], |inverse| {
+                gradient::nodes_bounds_with(nodes, &cells, inverse)
+            }),
+            text,
+        }
     }
 
     /// §14.4's `<mask>`, read for one element: its region, and its content
@@ -1313,43 +1388,22 @@ impl Walk<'_> {
         frame: &Frame,
     ) -> Result<Tiling, Refusal> {
         let tree = self.tree;
-        let mut chain = vec![at];
-        while chain.len() < 10 {
-            let Some(next) = chain
-                .last()
-                .and_then(|last| tree.nodes.get(*last))
-                .and_then(Node::href)
-                .and_then(|href| href.trim().strip_prefix('#'))
-                .and_then(|name| tree.by_id(name))
-                .filter(|next| tree.nodes[*next].is_svg() && tree.nodes[*next].name == "pattern")
-            else {
-                break;
-            };
-            chain.push(next);
-        }
-        let along = |name: &str| {
-            chain
-                .iter()
-                .find_map(|index| tree.nodes[*index].attr(name))
-                .map(str::trim)
-        };
+        let chain = pattern_chain(tree, at);
+        let along = |name: &str| pattern_along(tree, &chain, name);
         let length = |name: &str, basis: f64, default: f64| {
             along(name)
                 .and_then(|text| document::length(text, Some(basis)))
                 .unwrap_or(default)
         };
-        // §13.3's initial `patternUnits` is `objectBoundingBox`, and its
-        // initial `patternContentUnits` is `userSpaceOnUse` — which a
-        // `viewBox` makes moot.
-        let user_cell = along("patternUnits") == Some("userSpaceOnUse");
-        let view = along("viewBox")
-            .and_then(transform::numbers)
-            .filter(|numbers| numbers.len() == 4);
-        let box_content =
-            view.is_none() && along("patternContentUnits") == Some("objectBoundingBox");
-        if (!user_cell || box_content) && !self.measurable(extent) {
+        let units = PatternUnits::of(tree, &chain);
+        if units.measure_box() && !self.measurable(extent) {
             return Ok(Tiling::Unmeasured);
         }
+        let PatternUnits {
+            user_cell,
+            view,
+            box_content,
+        } = units;
         let [min_x, min_y, max_x, max_y] = extent.measured;
         let (box_width, box_height) = (max_x - min_x, max_y - min_y);
         let box_area = extent.has_area();
@@ -1587,11 +1641,116 @@ impl Walk<'_> {
             stack: vec![positions],
             ..Text::default()
         };
+        let start = self.scene.nodes.len();
+        let measuring = self.measure.is_some();
+        if measuring {
+            self.waiting.push(Waiting::default());
+        }
         let drawn = self.group(&frame.style, matrix, frame, |walk| {
             walk.text_runs(index, &inner)
         });
         self.text.stack.clear();
-        drawn
+        let waiting = if measuring { self.waiting.pop() } else { None };
+        drawn?;
+        match waiting {
+            Some(waiting) if !waiting.paints.is_empty() => self.settle(start, matrix, waiting),
+            _ => Ok(()),
+        }
+    }
+
+    /// A run's `fill` or `stroke`: resolved now, or — a paint server that
+    /// takes a fraction of the box, with the caller's measurement — marked to
+    /// wait for the `<text>`'s box ([`Walk::settle`]).
+    ///
+    /// Only what would otherwise be [`Warning::TextBoxUnmeasured`] waits, so a
+    /// document with no bounding-box paint on its text reads the same with a
+    /// measurer as without one, warnings in the same order.
+    fn paint_run(
+        &mut self,
+        spec: &PaintSpec,
+        matrix: [f64; 6],
+        frame: &Frame,
+    ) -> Result<Paint, Refusal> {
+        if self.waits(spec) {
+            if let Some(waiting) = self.waiting.last_mut() {
+                let number = waiting.paints.len();
+                waiting.paints.push(Unpainted {
+                    spec: spec.clone(),
+                    matrix,
+                    frame: frame.clone(),
+                });
+                return Ok(mark(number));
+            }
+        }
+        self.paint(spec, &frame.style, matrix, Extent::TEXT, frame)
+    }
+
+    /// Whether `spec` names a paint server that takes a fraction of the
+    /// painted element's box — the question [`Walk::paint`] asks of each.
+    fn waits(&self, spec: &PaintSpec) -> bool {
+        let PaintSpec::Reference(name, _) = spec else {
+            return false;
+        };
+        let tree = self.tree;
+        let Some(at) = tree.by_id(name) else {
+            return false;
+        };
+        match tree.nodes[at].name.as_str() {
+            "linearGradient" | "radialGradient" => gradient::measures_box(tree, at),
+            "pattern" => PatternUnits::of(tree, &pattern_chain(tree, at)).measure_box(),
+            _ => false,
+        }
+    }
+
+    /// The paints a `<text>`'s runs waited on, resolved against the box of
+    /// every run it drew — `nodes[start..]`, the `<text>`'s own output — and
+    /// put where their marks are.
+    ///
+    /// The box is taken in the `<text>`'s space and carried into each run's,
+    /// which differs from it by a `dy` or a `<tspan>`'s own matrix. A
+    /// `<text>` whose runs cannot be placed — its first run hidden, so that
+    /// its pen is wherever the text before it left one — has no box, and each
+    /// paint is resolved as it is without a measurer, which names it.
+    fn settle(&mut self, start: usize, matrix: [f64; 6], waiting: Waiting) -> Result<(), Refusal> {
+        let whole = self
+            .measure
+            .and_then(|measure| text_cells(self.scene.nodes.get(start..)?, measure))
+            .zip(transform::invert(matrix))
+            .and_then(|(cells, inverse)| {
+                bounds(cells.iter().map(|cell| transform::apply(inverse, *cell)))
+            });
+        let mut painted = Vec::with_capacity(waiting.paints.len());
+        for unpainted in waiting.paints {
+            let extent = whole
+                .and_then(|[x0, y0, x1, y1]| {
+                    let into = transform::invert(unpainted.matrix)?;
+                    bounds(
+                        [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+                            .into_iter()
+                            .map(|corner| transform::apply(into, transform::apply(matrix, corner))),
+                    )
+                })
+                .map_or(Extent::TEXT, Extent::shape);
+            let paint = self.paint(
+                &unpainted.spec,
+                &unpainted.frame.style,
+                unpainted.matrix,
+                extent,
+                &unpainted.frame,
+            )?;
+            // `push` checked the run with its mark in place; what replaces the
+            // mark is checked here, as `push` would have.
+            painted.push(if paint_finite(&paint) {
+                paint
+            } else {
+                self.warn(Warning::GeometryOverflow);
+                Paint::None
+            });
+        }
+        if let Some(nodes) = self.scene.nodes.get_mut(start..) {
+            repaint(nodes, &painted);
+        }
+        Ok(())
     }
 
     /// One element's §10.4 lists, read.
@@ -1811,10 +1970,12 @@ impl Walk<'_> {
         } else {
             frame.matrix
         };
-        // A run's box is its glyph cells, which are a font's: a paint server
-        // in `objectBoundingBox` units has nothing here to take a fraction of.
-        let fill = self.paint(&style.fill, style, matrix, Extent::TEXT, frame)?;
-        let stroke_paint = self.paint(&style.stroke, style, matrix, Extent::TEXT, frame)?;
+        // A run's box is its glyph cells, which are a font's. Measured by the
+        // caller, a paint server in `objectBoundingBox` units waits for the
+        // box of the whole `<text>`; without a measurer it has nothing here to
+        // take a fraction of.
+        let fill = self.paint_run(&style.fill, matrix, frame)?;
+        let stroke_paint = self.paint_run(&style.stroke, matrix, frame)?;
         let stroke = if stroke_paint == Paint::None || style.stroke_width <= 0.0 {
             None
         } else {
@@ -1946,6 +2107,68 @@ impl Walk<'_> {
 
 /// §7.7's "rendering of the element is disabled".
 struct Disabled;
+
+/// A `<pattern>` and the patterns its `xlink:href` names, nearest first, at
+/// most ten: §13.3's attributes and content are inherited along it as a
+/// gradient's are.
+fn pattern_chain(tree: &Tree, at: usize) -> Vec<usize> {
+    let mut chain = vec![at];
+    while chain.len() < 10 {
+        let Some(next) = chain
+            .last()
+            .and_then(|last| tree.nodes.get(*last))
+            .and_then(Node::href)
+            .and_then(|href| href.trim().strip_prefix('#'))
+            .and_then(|name| tree.by_id(name))
+            .filter(|next| tree.nodes[*next].is_svg() && tree.nodes[*next].name == "pattern")
+        else {
+            break;
+        };
+        chain.push(next);
+    }
+    chain
+}
+
+/// The first value `name` has along a pattern's chain, trimmed.
+fn pattern_along<'t>(tree: &'t Tree, chain: &[usize], name: &str) -> Option<&'t str> {
+    chain
+        .iter()
+        .find_map(|index| tree.nodes.get(*index)?.attr(name))
+        .map(str::trim)
+}
+
+/// §13.3's units of one `<pattern>`, along its chain.
+struct PatternUnits {
+    /// `patternUnits="userSpaceOnUse"`; the initial value is
+    /// `objectBoundingBox`.
+    user_cell: bool,
+    /// A `viewBox` of four numbers, which makes `patternContentUnits` moot.
+    view: Option<Vec<f64>>,
+    /// `patternContentUnits="objectBoundingBox"` with no `viewBox`; the
+    /// initial value is `userSpaceOnUse`.
+    box_content: bool,
+}
+
+impl PatternUnits {
+    fn of(tree: &Tree, chain: &[usize]) -> Self {
+        let along = |name: &str| pattern_along(tree, chain, name);
+        let view = along("viewBox")
+            .and_then(transform::numbers)
+            .filter(|numbers| numbers.len() == 4);
+        Self {
+            user_cell: along("patternUnits") == Some("userSpaceOnUse"),
+            box_content: view.is_none()
+                && along("patternContentUnits") == Some("objectBoundingBox"),
+            view,
+        }
+    }
+
+    /// Whether the tile or its content is a fraction of the painted element's
+    /// box.
+    fn measure_box(&self) -> bool {
+        !self.user_cell || self.box_content
+    }
+}
 
 /// One `<text>` or `<tspan>`'s §10.4 lists, and how many characters within it
 /// have been placed.
@@ -2086,6 +2309,28 @@ fn whiten(nodes: Vec<crate::Node>, out: &mut Vec<crate::Node>) {
     }
 }
 
+/// Whether every number a paint carries is finite: a tile's cell and matrix,
+/// a gradient's geometry and matrix.
+fn paint_finite(paint: &Paint) -> bool {
+    fn numbers(values: &[f64]) -> bool {
+        values.iter().all(|v| v.is_finite())
+    }
+    match paint {
+        Paint::Pattern(tile) => numbers(&tile.cell) && numbers(&tile.matrix),
+        Paint::Linear {
+            from, to, matrix, ..
+        } => numbers(from) && numbers(to) && numbers(matrix),
+        Paint::Radial {
+            centre,
+            radius,
+            focus,
+            matrix,
+            ..
+        } => numbers(centre) && radius.is_finite() && numbers(focus) && numbers(matrix),
+        _ => true,
+    }
+}
+
 fn finite(node: &crate::Node) -> bool {
     fn outline(outline: &Outline) -> bool {
         outline.segments.iter().all(|segment| match *segment {
@@ -2097,28 +2342,11 @@ fn finite(node: &crate::Node) -> bool {
     fn numbers(values: &[f64]) -> bool {
         values.iter().all(|v| v.is_finite())
     }
-    fn paint(paint: &Paint) -> bool {
-        match paint {
-            Paint::Pattern(tile) => numbers(&tile.cell) && numbers(&tile.matrix),
-            Paint::Linear {
-                from, to, matrix, ..
-            } => numbers(from) && numbers(to) && numbers(matrix),
-            Paint::Radial {
-                centre,
-                radius,
-                focus,
-                matrix,
-                ..
-            } => numbers(centre) && radius.is_finite() && numbers(focus) && numbers(matrix),
-            _ => true,
-        }
-    }
+    let paint = paint_finite;
     // A stroke's width and dashes are lengths, read finite and never
     // multiplied by a transform here, so only its paint — whose matrix is
     // composed — can overflow.
-    fn stroke(stroke: Option<&Stroke>) -> bool {
-        stroke.is_none_or(|stroke| paint(&stroke.paint))
-    }
+    let stroke = |stroke: Option<&Stroke>| stroke.is_none_or(|stroke| paint(&stroke.paint));
     match node {
         crate::Node::Path {
             outline: shape,
@@ -2160,6 +2388,189 @@ fn finite(node: &crate::Node) -> bool {
                 && mask
                     .as_ref()
                     .is_none_or(|mask| mask.region.as_ref().is_none_or(outline))
+        }
+    }
+}
+
+/// The corners of every run's glyph cells in `nodes`, in the scene's space,
+/// each run placed where a caller places it — or `None` where that cannot be
+/// said from these nodes alone.
+///
+/// **The facade's `place_text`, replayed with the caller's own numbers**,
+/// groups looked through as it looks through them: a run with an anchor
+/// opens a chunk there (its `x` an offset from the pen where `continues_x`
+/// says so), a run without one begins where the one before it ended, and a
+/// chunk's `text-anchor` moves the whole chunk by its whole width. A cell is
+/// the run's advance by the font's ascent and descent, in glyph space — `y`
+/// up — under the run's own `cm`: the flip at the baseline, §10.5's `rotate`
+/// about the run's origin, the move to that origin, and the run's matrix, as
+/// the caller writes it.
+///
+/// `None` for a first run that continues a chunk, whose pen is wherever text
+/// before these nodes left it; for a measurement that is not finite; and for
+/// a cell that lands past a double's range.
+fn text_cells(nodes: &[crate::Node], measure: &dyn MeasureText) -> Option<Vec<[f64; 2]>> {
+    struct Placed {
+        origin: [f64; 2],
+        metrics: RunMetrics,
+        matrix: [f64; 6],
+        rotate: f64,
+    }
+    #[derive(Default)]
+    struct Pen {
+        runs: Vec<Placed>,
+        /// The runs of the open chunk, by index into `runs`.
+        chunk: Vec<usize>,
+        at: [f64; 2],
+        kind: TextAnchor,
+        started: bool,
+    }
+    // §10.9's shift, of the whole chunk by its whole width.
+    fn flush(pen: &mut Pen) {
+        let total: f64 = pen
+            .chunk
+            .iter()
+            .filter_map(|at| pen.runs.get(*at))
+            .map(|run| run.metrics.advance)
+            .sum();
+        let shift = match pen.kind {
+            TextAnchor::Start => 0.0,
+            TextAnchor::Middle => -total / 2.0,
+            TextAnchor::End => -total,
+        };
+        for at in pen.chunk.drain(..) {
+            if let Some(run) = pen.runs.get_mut(at) {
+                run.origin[0] += shift;
+            }
+        }
+    }
+    fn walk(nodes: &[crate::Node], measure: &dyn MeasureText, pen: &mut Pen) -> Option<()> {
+        for node in nodes {
+            match node {
+                crate::Node::Group { nodes, .. } => walk(nodes, measure, pen)?,
+                crate::Node::Text {
+                    text,
+                    anchor,
+                    continues_x,
+                    rotate,
+                    matrix,
+                    font,
+                    ..
+                } => {
+                    let metrics = measure.measure(text, font);
+                    if ![metrics.advance, metrics.ascent, metrics.descent]
+                        .iter()
+                        .all(|n| n.is_finite())
+                    {
+                        return None;
+                    }
+                    if let Some(start) = anchor {
+                        flush(pen);
+                        let x = if *continues_x {
+                            pen.at[0] + start[0]
+                        } else {
+                            start[0]
+                        };
+                        pen.at = [x, start[1]];
+                        pen.kind = font.anchor;
+                        pen.started = true;
+                    } else if !pen.started {
+                        return None;
+                    }
+                    pen.chunk.push(pen.runs.len());
+                    pen.runs.push(Placed {
+                        origin: pen.at,
+                        metrics,
+                        matrix: *matrix,
+                        rotate: *rotate,
+                    });
+                    pen.at[0] += metrics.advance;
+                }
+                _ => {}
+            }
+        }
+        Some(())
+    }
+    let mut pen = Pen::default();
+    walk(nodes, measure, &mut pen)?;
+    flush(&mut pen);
+    let flip = [1.0, 0.0, 0.0, -1.0, 0.0, 0.0];
+    let mut out = Vec::with_capacity(pen.runs.len().saturating_mul(4));
+    for run in &pen.runs {
+        let turned = if run.rotate == 0.0 {
+            flip
+        } else {
+            transform::concat(flip, transform::rotation(run.rotate))
+        };
+        let local = transform::concat(
+            transform::concat(turned, [1.0, 0.0, 0.0, 1.0, run.origin[0], run.origin[1]]),
+            run.matrix,
+        );
+        let RunMetrics {
+            advance,
+            ascent,
+            descent,
+        } = run.metrics;
+        for corner in [
+            [0.0, -descent],
+            [advance, -descent],
+            [advance, ascent],
+            [0.0, ascent],
+        ] {
+            let [x, y] = transform::apply(local, corner);
+            if !(x.is_finite() && y.is_finite()) {
+                return None;
+            }
+            out.push([x, y]);
+        }
+    }
+    Some(out)
+}
+
+/// The box a set of points spans, or `None` for no points or for one that is
+/// not finite.
+fn bounds(points: impl Iterator<Item = [f64; 2]>) -> Option<[f64; 4]> {
+    let mut out: Option<[f64; 4]> = None;
+    for [x, y] in points {
+        if !(x.is_finite() && y.is_finite()) {
+            return None;
+        }
+        out = Some(match out {
+            None => [x, y, x, y],
+            Some([x0, y0, x1, y1]) => [x0.min(x), y0.min(y), x1.max(x), y1.max(y)],
+        });
+    }
+    out
+}
+
+/// Every marked paint in `nodes` replaced by what [`Walk::settle`] resolved
+/// for it, groups looked through — and a stroke whose paint came to `none`
+/// removed, as `push_text` removes one. A mark with no paint, which nothing
+/// should leave, paints nothing rather than reaching a caller as a colour no
+/// document stated.
+fn repaint(nodes: &mut [crate::Node], painted: &[Paint]) {
+    let find = |paint: &Paint| -> Option<Paint> {
+        let number = marked(paint)?;
+        Some(painted.get(number).cloned().unwrap_or(Paint::None))
+    };
+    for node in nodes {
+        match node {
+            crate::Node::Group { nodes, .. } => repaint(nodes, painted),
+            crate::Node::Text { fill, stroke, .. } => {
+                if let Some(paint) = find(fill) {
+                    *fill = paint;
+                }
+                match stroke.as_ref().and_then(|stroke| find(&stroke.paint)) {
+                    Some(Paint::None) => *stroke = None,
+                    Some(paint) => {
+                        if let Some(stroke) = stroke {
+                            stroke.paint = paint;
+                        }
+                    }
+                    None => {}
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -2301,6 +2712,8 @@ pub fn build_with(
         expanding: Vec::new(),
         text: Text::default(),
         pushed: 0,
+        measure: context.measure,
+        waiting: Vec::new(),
     };
     if walk.sheet.at_rules > 0 {
         walk.warn(Warning::AtRuleIgnored);

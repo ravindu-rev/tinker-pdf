@@ -1435,6 +1435,39 @@ fn place_text(nodes: &[Node], metrics: &BookMetrics<'_>) -> Vec<Option<Origin>> 
     state.out
 }
 
+/// A run measured as [`place_text`] places it, for the leaf's box of text.
+///
+/// `tinker-pdf-svg` resolves a `mask`, a `clip-path` or a paint server in
+/// `objectBoundingBox` units on text against the text's glyph cells, which
+/// are a font's (ruling 8), so the facade lends it these: the advance is
+/// [`Metrics::measure`] exactly as `place_text` and `draw_text` move the pen
+/// by it — the leaf replays `place_text` with it, so the box is where the ink
+/// is — and the ascent and descent are those of the face the run's request
+/// resolves to, which is SVG 2 §8.10's glyph cell. A run whose characters
+/// fall to more than one face is measured by the first face's, the one
+/// `Metrics::vertical` answers for.
+impl tinker_pdf_svg::MeasureText for BookMetrics<'_> {
+    fn measure(&self, text: &str, font: &tinker_pdf_svg::TextStyle) -> tinker_pdf_svg::RunMetrics {
+        let families = families_of(&font.families);
+        let request = request_of(font, &families);
+        let vertical = Metrics::vertical(self, &request);
+        tinker_pdf_svg::RunMetrics {
+            advance: Metrics::measure(self, text, &request),
+            ascent: vertical.ascent,
+            descent: vertical.descent,
+        }
+    }
+}
+
+/// Whether a scene has text a bounding-box effect needed the box of, which a
+/// read with [`tinker_pdf_svg::Context::with_measure`] can give it.
+#[must_use]
+pub fn unmeasured(scene: &Scene) -> bool {
+    scene
+        .warnings
+        .contains(&tinker_pdf_svg::Warning::TextBoxUnmeasured)
+}
+
 /// The pattern resources a run's fill and stroke are painted with, where
 /// either is a gradient or a pattern the builder took.
 struct Patterns {

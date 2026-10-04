@@ -358,6 +358,7 @@ fn every_committed_fuzz_seed_still_parses_to_finite_numbers() {
         .canonicalize()
         .expect("the seed corpus is committed beside the target");
     let mut seen = 0usize;
+    let mut boxes = 0usize;
     for entry in std::fs::read_dir(&dir).expect("the seed corpus reads") {
         let file = entry.expect("a seed").path();
         if !file.is_file() {
@@ -442,6 +443,50 @@ fn every_committed_fuzz_seed_still_parses_to_finite_numbers() {
                 "{name}: reading a document is not deterministic"
             );
         }
+        // The runs measured, as the target's third read measures them: no
+        // mark reaches the caller, and a document with nothing to measure
+        // reads the same.
+        let plain = crate::read(body, Some((100.0, 50.0)), &limits).ok();
+        let pitch = Pitch(if control.first().copied().unwrap_or(0) & 0x40 == 0 {
+            0.5
+        } else {
+            1e300
+        });
+        let measured = crate::read_with(
+            body,
+            Some((100.0, 50.0)),
+            &limits,
+            &crate::Context::NONE.with_measure(&pitch),
+        );
+        if let Ok(scene) = &measured {
+            let mut numbers = Vec::new();
+            sweep_nodes(&scene.nodes, &mut numbers);
+            assert!(
+                numbers.iter().all(|n| n.is_finite()),
+                "{name}: a measured node carries something that is not a number"
+            );
+            assert!(
+                colours_in_range(&scene.nodes),
+                "{name}: a colour no document states reached the caller"
+            );
+        }
+        if let Some(plain) = &plain {
+            let named = plain.warnings.contains(&crate::Warning::TextBoxUnmeasured);
+            if !named && plain.warnings.len() < limits.max_warnings {
+                assert_eq!(
+                    measured.as_ref().ok(),
+                    Some(plain),
+                    "{name}: nothing to measure, and it read differently"
+                );
+            }
+            if named
+                && measured
+                    .as_ref()
+                    .is_ok_and(|scene| !scene.warnings.contains(&crate::Warning::TextBoxUnmeasured))
+            {
+                boxes += 1;
+            }
+        }
         seen += 1;
     }
     // A corpus that emptied itself would pass every assertion above.
@@ -450,6 +495,47 @@ fn every_committed_fuzz_seed_still_parses_to_finite_numbers() {
         "only {seen} seeds were read from {}",
         dir.display()
     );
+    assert!(
+        boxes >= 1,
+        "no seed reaches a box that only a measurer gives"
+    );
+}
+
+/// Every character `.0` ems wide, eight tenths of one above the baseline and
+/// two below — the fuzz target's measurer.
+struct Pitch(f64);
+
+impl crate::MeasureText for Pitch {
+    fn measure(&self, text: &str, font: &crate::TextStyle) -> crate::RunMetrics {
+        #[allow(clippy::cast_precision_loss)]
+        let count = text.chars().count() as f64;
+        crate::RunMetrics {
+            advance: self.0 * font.size * count,
+            ascent: 0.8 * font.size,
+            descent: 0.2 * font.size,
+        }
+    }
+}
+
+/// Whether every colour a list of nodes paints with, at every depth of a
+/// group, a mask and a tile, is one a document can state.
+fn colours_in_range(nodes: &[crate::Node]) -> bool {
+    fn paint(server: &crate::Paint) -> bool {
+        match server {
+            crate::Paint::Solid(colour) => colour.rgb.iter().all(|c| (0.0..=1.0).contains(c)),
+            crate::Paint::Pattern(tile) => colours_in_range(&tile.nodes),
+            _ => true,
+        }
+    }
+    nodes.iter().all(|node| match node {
+        crate::Node::Path { fill, stroke, .. } | crate::Node::Text { fill, stroke, .. } => {
+            paint(fill) && stroke.as_ref().is_none_or(|stroke| paint(&stroke.paint))
+        }
+        crate::Node::Group { nodes, mask, .. } => {
+            colours_in_range(nodes) && mask.as_ref().is_none_or(|m| colours_in_range(&m.nodes))
+        }
+        crate::Node::Image { .. } => true,
+    })
 }
 
 /// Every number a list of nodes carries, at every depth — the fuzz target's

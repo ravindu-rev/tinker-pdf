@@ -1039,6 +1039,108 @@ fn mutated_svg_style_sheets_never_panic_and_hold_their_bytes() {
     }
 }
 
+/// An SVG's text measured for its box (the SVG-in-the-spine row): a run's
+/// bounding-box paint waits for its `<text>`'s box as a mark in its place, so
+/// the leaf is read here with a measurer over a drawing of every bounding-box
+/// effect on text — a gradient, a pattern, a mask and a clip, on a `<text>`,
+/// a `<tspan>` and a group, anchored, rotated and shifted — mutated, and no
+/// mark may reach the caller as a colour; every fourth case is opened as a
+/// loose file, whose facade reads it a second time with its own metrics.
+/// `fuzz/fuzz_targets/svg.rs` is the deep version.
+#[test]
+fn mutated_svg_text_boxes_never_panic_and_leak_no_mark() {
+    use tinker_pdf_svg::{MeasureText, Node, Paint, RunMetrics, TextStyle};
+
+    struct Halves;
+    impl MeasureText for Halves {
+        fn measure(&self, text: &str, font: &TextStyle) -> RunMetrics {
+            #[allow(clippy::cast_precision_loss)]
+            let count = text.chars().count() as f64;
+            RunMetrics {
+                advance: 0.5 * font.size * count,
+                ascent: 0.8 * font.size,
+                descent: 0.2 * font.size,
+            }
+        }
+    }
+    fn colours(nodes: &[Node], label: &str) {
+        let paint = |paint: &Paint| match paint {
+            Paint::Solid(colour) => assert!(
+                colour.rgb.iter().all(|c| (0.0..=1.0).contains(c)),
+                "{label}: a colour no document states: {colour:?}"
+            ),
+            Paint::Pattern(tile) => colours(&tile.nodes, label),
+            _ => {}
+        };
+        for node in nodes {
+            match node {
+                Node::Path { fill, stroke, .. } | Node::Text { fill, stroke, .. } => {
+                    paint(fill);
+                    if let Some(stroke) = stroke {
+                        paint(&stroke.paint);
+                    }
+                }
+                Node::Group { nodes, mask, .. } => {
+                    colours(nodes, label);
+                    if let Some(mask) = mask {
+                        colours(&mask.nodes, label);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let seed = concat!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\">",
+        "<linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"red\"/>",
+        "<stop offset=\"1\" stop-color=\"blue\"/></linearGradient>",
+        "<pattern id=\"p\" width=\"0.5\" height=\"0.5\"><rect width=\"5\" height=\"5\"/>",
+        "<text fill=\"url(#g)\">t</text></pattern>",
+        "<mask id=\"m\"><rect width=\"100\" height=\"100\" fill=\"white\"/></mask>",
+        "<clipPath id=\"c\" clipPathUnits=\"objectBoundingBox\"><rect width=\".5\" height=\"1\"/></clipPath>",
+        "<text x=\"10\" y=\"20\" text-anchor=\"middle\" fill=\"url(#g) red\" stroke=\"url(#p)\" ",
+        "mask=\"url(#m)\">AB<tspan dy=\"5\" fill=\"url(#p)\">CD</tspan><tspan y=\"40\" ",
+        "rotate=\"30\" clip-path=\"url(#c)\">EF</tspan></text>",
+        "<g clip-path=\"url(#c)\"><rect width=\"9\" height=\"9\"/>",
+        "<text x=\"5\" y=\"60\" transform=\"scale(2)\" fill=\"url(#p)\">GH</text></g></svg>"
+    )
+    .as_bytes();
+    let mut rng = Rng(0x0054_4558_5442);
+    for case in 0..sweep(600) {
+        let mutated = mutate(seed, &mut rng);
+        let label = format!("svg text box case {case}");
+        let _guard = Guard(&label);
+        let limits = tinker_pdf_svg::Limits::DEFAULT;
+        let measured = tinker_pdf_svg::read_with(
+            &mutated,
+            Some((100.0, 100.0)),
+            &limits,
+            &tinker_pdf_svg::Context::NONE.with_measure(&Halves),
+        );
+        if let Ok(scene) = &measured {
+            colours(&scene.nodes, &label);
+        }
+        // Only a paint that would be `TextBoxUnmeasured` waits for a box, so
+        // a document that names none reads the same with a measurer.
+        if let Ok(plain) = tinker_pdf_svg::read(&mutated, Some((100.0, 100.0)), &limits) {
+            if !plain
+                .warnings
+                .contains(&tinker_pdf_svg::Warning::TextBoxUnmeasured)
+                && plain.warnings.len() < limits.max_warnings
+            {
+                assert!(
+                    measured.as_ref() == Ok(&plain),
+                    "{label}: nothing to measure, and it read differently"
+                );
+            }
+        }
+        if case % 4 == 0 {
+            exercise(mutated);
+        }
+    }
+}
+
 /// Markdown is read from any bytes by a caller who says it is Markdown, so
 /// every byte sequence is an input (tier 5's Markdown row). Two halves: the
 /// shapes that make a CommonMark reader quadratic — a run of openers with no

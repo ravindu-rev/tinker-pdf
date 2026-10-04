@@ -867,6 +867,9 @@ pub fn synthesise(
     let mut census = read::Census::default();
     let mut chapters: Vec<Chapter> = Vec::with_capacity(package.spine().len());
     let mut declared: Vec<FontFace> = Vec::new();
+    // Each SVG chapter whose text needs a box, and its bytes, for
+    // `measure_svg` once the faces are loaded.
+    let mut unmeasured: Vec<(usize, Vec<u8>)> = Vec::new();
     for itemref in package.spine() {
         let (name, path, mut defect, is_svg) = plan_page(book, package, &itemref.idref);
         let fixed = itemref.layout(book_layout) == RenditionLayout::PrePaginated;
@@ -894,7 +897,12 @@ pub fn synthesise(
                         &mut declared,
                         &mut warnings,
                     ) {
-                        Ok(read) => scene = Some(read),
+                        Ok(read) => {
+                            if svg::unmeasured(&read) {
+                                unmeasured.push((chapters.len(), bytes));
+                            }
+                            scene = Some(read);
+                        }
                         Err(why) => defect = Some(why),
                     }
                 }
@@ -960,6 +968,27 @@ pub fn synthesise(
             defect,
             rules,
         });
+    }
+    // An SVG's text, measured with the faces it is set in, where a
+    // bounding-box effect on it needed its box.
+    let metrics = BookMetrics::with(&faces);
+    for (at, bytes) in unmeasured {
+        let Some(chapter) = chapters.get_mut(at) else {
+            continue;
+        };
+        if let (Some(scene), Some(path)) = (chapter.svg.as_mut(), chapter.path.as_deref()) {
+            measure_svg(
+                book,
+                path,
+                &bytes,
+                layout.page,
+                &chapter.name,
+                limits,
+                &metrics,
+                scene,
+                &mut warnings,
+            );
+        }
     }
 
     // ---- passes 3 and 4, and the pages ------------------------------------
@@ -1104,6 +1133,80 @@ fn read_svg<R: read::Resources + ?Sized>(
         }
     }
     Ok(read)
+}
+
+/// An SVG whose text needed a box, read a second time with the faces its
+/// runs are set in measuring them.
+///
+/// Pass 1 reads an SVG before any face is loaded — its own `@font-face`
+/// rules are among what pass 2 loads — so a `mask`, a `clip-path` or a paint
+/// in `objectBoundingBox` units on its text has no measurement then, and the
+/// leaf names it `TextBoxUnmeasured` ([`svg::unmeasured`]). Here, with the
+/// metrics the page will place the runs by, the document is read again
+/// through [`tinker_pdf_svg::Context::with_measure`] and that scene replaces
+/// the first. Only a scene that named it is read twice, so every other is
+/// exactly what pass 1 made; and a second read the leaf refuses — a measured
+/// box can walk a tile the first read did not, past a cap — keeps the first,
+/// which is a picture (ruling 2).
+///
+/// The report follows the scene: a warning the first read raised and the
+/// second did not leaves the item's warnings, and one the second raised that
+/// the first did not joins them, after the item's last.
+#[allow(clippy::too_many_arguments)]
+fn measure_svg<R: read::Resources + ?Sized>(
+    resources: &mut R,
+    path: &str,
+    bytes: &[u8],
+    page: (f64, f64),
+    name: &str,
+    limits: &Limits,
+    metrics: &BookMetrics<'_>,
+    scene: &mut tinker_pdf_svg::Scene,
+    warnings: &mut Vec<ArchiveWarning>,
+) {
+    let box_ = (page.0 / read::PX_TO_PT, page.1 / read::PX_TO_PT);
+    let imports = SvgImports {
+        imports: read::Imports::new(resources, *limits),
+        path,
+    };
+    let Ok(measured) = tinker_pdf_svg::read_with(
+        bytes,
+        Some(box_),
+        &limits.svg,
+        &tinker_pdf_svg::Context::new(&imports).with_measure(metrics),
+    ) else {
+        return;
+    };
+    fn of_item<'w>(warning: &'w ArchiveWarning, name: &str) -> Option<&'w tinker_pdf_svg::Warning> {
+        match warning {
+            ArchiveWarning::Svg { item, warning } if item == name => Some(warning),
+            _ => None,
+        }
+    }
+    for gone in scene
+        .warnings
+        .iter()
+        .filter(|warning| !measured.warnings.contains(warning))
+    {
+        if let Some(at) = warnings.iter().position(|w| of_item(w, name) == Some(gone)) {
+            warnings.remove(at);
+        }
+    }
+    let after = warnings
+        .iter()
+        .rposition(|warning| of_item(warning, name).is_some())
+        .map_or(warnings.len(), |at| at + 1);
+    let new: Vec<ArchiveWarning> = measured
+        .warnings
+        .iter()
+        .filter(|warning| !scene.warnings.contains(warning))
+        .map(|warning| ArchiveWarning::Svg {
+            item: name.to_owned(),
+            warning: warning.clone(),
+        })
+        .collect();
+    warnings.splice(after..after, new);
+    *scene = measured;
 }
 
 /// An SVG's `@import`s, fetched from the container it came out of.
@@ -1313,6 +1416,10 @@ pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
 
     let mut census = read::Census::default();
     let mut declared: Vec<FontFace> = Vec::new();
+    let svg_bytes = match &content {
+        Loose::Svg(bytes) => Some(*bytes),
+        Loose::Markup(_) => None,
+    };
     let (fixed, reading, scene, defect) = match content {
         Loose::Svg(bytes) => match read_svg(
             resources,
@@ -1376,6 +1483,26 @@ pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
             defect,
             rules,
         });
+    }
+    // `synthesise`'s second read of an SVG, for the same reason.
+    if let (Some(bytes), Some(scene)) = (
+        svg_bytes,
+        chapters
+            .first_mut()
+            .and_then(|chapter| chapter.svg.as_mut())
+            .filter(|scene| svg::unmeasured(scene)),
+    ) {
+        measure_svg(
+            resources,
+            name,
+            bytes,
+            layout.page,
+            name,
+            limits,
+            &BookMetrics::with(&faces),
+            scene,
+            &mut warnings,
+        );
     }
 
     let (pages, total_pages) = write_chapters(

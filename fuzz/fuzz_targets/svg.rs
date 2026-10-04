@@ -79,6 +79,22 @@
 //!   would let a file read itself without end.
 //! - **Reading with imports is deterministic**, the same scene and the same
 //!   number of fetches twice.
+//!
+//! # The runs measured, from the same bytes
+//!
+//! A third read hands the walk a measurer, [`tinker_pdf_svg::Context::with_measure`]:
+//! every character a fixed fraction of an em, or — under the control byte's
+//! `0x40` — `1e300` ems, so a box at the edge of a double's range is reached.
+//! A bounding-box paint on a run waits for its `<text>`'s box as a mark in its
+//! place, so what is asserted beyond the scene's own invariants is:
+//!
+//! - **No mark reaches the caller**: every colour in the scene, at every
+//!   depth of a group, a mask or a tile, is in `[0, 1]`.
+//! - **A document with nothing to measure reads the same**: where the
+//!   unmeasured read named no `TextBoxUnmeasured`, and its warnings were not
+//!   capped short of naming one, the measured scene is that scene.
+//! - **Reading with a measurer is deterministic.**
+//!
 //! # What this target cannot find, and what covers it instead
 //!
 //! Every assertion above is **structural**: a scene carries only finite
@@ -99,7 +115,61 @@ use std::cell::Cell;
 
 use tinker_pdf_css::ImportResolver;
 use tinker_pdf_svg::path::{self, Outline, Segment};
-use tinker_pdf_svg::{transform, Context, Limits, Node, Paint, Scene};
+use tinker_pdf_svg::{
+    transform, Context, Limits, MeasureText, Node, Paint, RunMetrics, Scene, TextStyle, Warning,
+};
+
+/// Every character `.0` ems wide, eight tenths of an em above the baseline
+/// and two below.
+struct Pitch(f64);
+
+impl MeasureText for Pitch {
+    fn measure(&self, text: &str, font: &TextStyle) -> RunMetrics {
+        let count = text.chars().count() as f64;
+        RunMetrics {
+            advance: self.0 * font.size * count,
+            ascent: 0.8 * font.size,
+            descent: 0.2 * font.size,
+        }
+    }
+}
+
+/// Every colour a list of nodes paints with, at every depth of a group, a
+/// mask and a tile, is in `[0, 1]`: no paint left waiting reaches a caller.
+fn colours_are_colours(nodes: &[Node]) {
+    fn paint(server: &Paint) {
+        match server {
+            Paint::Solid(colour) => assert!(
+                colour.rgb.iter().all(|c| (0.0..=1.0).contains(c)),
+                "a colour no document can state reached the caller: {colour:?}"
+            ),
+            Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => {
+                for stop in stops {
+                    paint(&Paint::Solid(stop.colour));
+                }
+            }
+            Paint::Pattern(tile) => colours_are_colours(&tile.nodes),
+            _ => {}
+        }
+    }
+    for node in nodes {
+        match node {
+            Node::Path { fill, stroke, .. } | Node::Text { fill, stroke, .. } => {
+                paint(fill);
+                if let Some(stroke) = stroke {
+                    paint(&stroke.paint);
+                }
+            }
+            Node::Group { nodes, mask, .. } => {
+                colours_are_colours(nodes);
+                if let Some(mask) = mask {
+                    colours_are_colours(&mask.nodes);
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 /// Every `@import` answered with the input, under the address asked for, and
 /// what was handed back counted.
@@ -371,11 +441,40 @@ fuzz_target!(|data: &[u8]| {
     } else {
         Some((100.0, 50.0))
     };
-    if let Ok(scene) = tinker_pdf_svg::read(body, viewport, &limits) {
-        check(&scene, &limits);
+    let plain = tinker_pdf_svg::read(body, viewport, &limits).ok();
+    if let Some(scene) = &plain {
+        check(scene, &limits);
+        colours_are_colours(&scene.nodes);
         let again = tinker_pdf_svg::read(body, viewport, &limits)
             .expect("the same bytes refused on a second run");
-        assert!(again == scene, "reading a document is not deterministic");
+        assert!(again == *scene, "reading a document is not deterministic");
+    }
+
+    // ---- the runs measured ---------------------------------------------------
+    let pitch = Pitch(if knobs & 0x40 == 0 { 0.5 } else { 1e300 });
+    let measuring = Context::NONE.with_measure(&pitch);
+    let measured = tinker_pdf_svg::read_with(body, viewport, &limits, &measuring);
+    if let Ok(scene) = &measured {
+        check(scene, &limits);
+        colours_are_colours(&scene.nodes);
+        let again = tinker_pdf_svg::read_with(body, viewport, &limits, &measuring)
+            .expect("the same bytes refused on a second run");
+        assert!(
+            again == *scene,
+            "reading with a measurer is not deterministic"
+        );
+    }
+    if let Some(plain) = &plain {
+        // Only a paint that would be `TextBoxUnmeasured` waits for a box; a
+        // capped warning list may have had no room to name one.
+        if !plain.warnings.contains(&Warning::TextBoxUnmeasured)
+            && plain.warnings.len() < limits.max_warnings
+        {
+            assert!(
+                measured.as_ref() == Ok(plain),
+                "a document with nothing to measure read differently with a measurer"
+            );
+        }
     }
 
     // ---- the same bytes as their own stylesheet ------------------------------

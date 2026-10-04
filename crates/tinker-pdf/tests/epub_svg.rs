@@ -1454,3 +1454,167 @@ fn svg_text_is_painted_as_its_fill_and_stroke_say() {
         assert_eq!(svg_warnings(&doc), [], "{paint}");
     }
 }
+
+// ---- a run's box, measured --------------------------------------------------------
+
+/// The six numbers of the first `cm` in a page's content: the page mapping,
+/// `[s 0 0 -s left top]`, under which every scene coordinate is written.
+fn page_mapping(doc: &Document) -> [f64; 6] {
+    let content = page_content(doc);
+    let line = content
+        .lines()
+        .find(|line| line.trim_end().ends_with(" cm"))
+        .expect("the page mapping");
+    let numbers: Vec<f64> = line
+        .split_whitespace()
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    let [a, b, c, d, e, f] = numbers[..] else {
+        panic!("six numbers: {line}");
+    };
+    [a, b, c, d, e, f]
+}
+
+/// The `/Matrix` of the first shading pattern in the saved file.
+fn shading_matrix(doc: &Document) -> [f64; 6] {
+    let pdf = doc.editor().save(&Default::default());
+    let text = String::from_utf8_lossy(&pdf);
+    let at = text.find("/PatternType 2").expect("a shading pattern");
+    let dictionary = &text[at..];
+    let end = dictionary.find(">>").expect("the dictionary ends");
+    let dictionary = &dictionary[..end];
+    let from = dictionary.find("/Matrix [").expect("a matrix") + "/Matrix [".len();
+    let numbers: Vec<f64> = dictionary[from..]
+        .split(']')
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    let [a, b, c, d, e, f] = numbers[..] else {
+        panic!("six numbers: {dictionary}");
+    };
+    [a, b, c, d, e, f]
+}
+
+/// **A bounding-box gradient on SVG text spans the text it paints**, in a
+/// book and in a loose file.
+///
+/// Until this the leaf had no box for text: the run was drawn in the paint's
+/// fallback — the green here — and named `TextBoxUnmeasured`. The facade
+/// reads such a scene a second time with the faces it sets the runs in
+/// measuring them, so the gradient's unit square is the run's glyph cells:
+/// from where the run is set, as wide as four `M`s of Times-Roman at twenty
+/// units — 4 × 0.889 × 20 = 71.12, Adobe's AFM number, not a figure read
+/// back out of this build — and from above the baseline to below it.
+#[test]
+fn a_bounding_box_gradient_on_svg_text_spans_the_text_it_paints() {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">
+         <linearGradient id="g">
+           <stop offset="0" stop-color="#ff0000"/><stop offset="1" stop-color="#0000ff"/>
+         </linearGradient>
+         <text x="20" y="50" font-family="serif" font-size="20" fill="url(#g) #00ff00">MMMM</text>
+       </svg>"##;
+    for (doc, what) in [
+        (open(svg), "a book"),
+        (
+            Document::open(svg.as_bytes().to_vec()).expect("a loose SVG opens"),
+            "a loose file",
+        ),
+    ] {
+        assert_eq!(svg_warnings(&doc), [], "{what}: {:?}", warnings(&doc));
+        let ops = run_paint(&doc);
+        assert!(ops.contains("/Pattern cs"), "{what}: a gradient: {ops:?}");
+        assert!(!ops.contains(" rg"), "{what}: not the fallback: {ops:?}");
+        assert_eq!(text_origins(&doc), [20.0], "{what}: set where it says");
+
+        // The pattern's matrix is the box's unit square under the page
+        // mapping: [w s, 0, 0, -h s, x s + left, -y s + top].
+        let [s, _, _, _, left, top] = page_mapping(&doc);
+        let [a, _, _, d, e, f] = shading_matrix(&doc);
+        let (x, y, width, height) = ((e - left) / s, (top - f) / s, a / s, -d / s);
+        assert!(
+            (x - 20.0).abs() < 1e-6,
+            "{what}: the box begins at the run: {x}"
+        );
+        assert!(
+            (width - 71.12).abs() < 0.5,
+            "{what}: as wide as the run: {width}"
+        );
+        assert!(
+            y < 50.0 && y + height > 50.0,
+            "{what}: the box straddles the baseline: {y} + {height}"
+        );
+        assert!(
+            (16.0..26.0).contains(&height),
+            "{what}: an ascent and a descent tall: {height}"
+        );
+        assert_eq!(
+            doc.page(0).expect("a page").text().plain_text().trim(),
+            "MMMM"
+        );
+    }
+}
+
+/// **A bounding-box mask on SVG text masks it**, rather than drawing it
+/// unmasked and naming the box unmeasured: the page carries 11.6.5.2's
+/// luminosity soft mask, and the text still extracts.
+#[test]
+fn a_bounding_box_mask_on_svg_text_masks_it() {
+    let doc = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">
+             <mask id="m"><rect width="1000" height="1000" fill="#ffffff"/></mask>
+             <text x="20" y="50" font-family="serif" font-size="20" mask="url(#m)">MMMM</text>
+           </svg>"##,
+    );
+    assert_eq!(svg_warnings(&doc), [], "{:?}", warnings(&doc));
+    let pdf = doc.editor().save(&Default::default());
+    assert!(
+        String::from_utf8_lossy(&pdf).contains("/Luminosity"),
+        "a soft mask"
+    );
+    assert_eq!(
+        doc.page(0).expect("a page").text().plain_text().trim(),
+        "MMMM"
+    );
+}
+
+/// **The report follows the second read.** A warning the measured read no
+/// longer raises leaves the item's, one only it raises joins them, and one
+/// both raise is there once.
+///
+/// - A bounding-box pattern on text whose tile holds an unknown element: the
+///   first read took the fallback and never walked the tile; the second walks
+///   it, so `ElementUnknown("blink")` is in the report and
+///   `TextBoxUnmeasured` is not.
+/// - A `<tspan>`'s mask, which waits on the whole `<text>`'s box and is
+///   still unmeasured after the second read: named once, not twice.
+#[test]
+fn the_report_is_the_measured_reads() {
+    let doc = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">
+             <pattern id="p" width="0.5" height="0.5"><rect width="5" height="5"/><blink/></pattern>
+             <text x="20" y="50" font-family="serif" font-size="20" fill="url(#p) #00ff00">MMMM</text>
+             <unknown/>
+           </svg>"##,
+    );
+    assert_eq!(
+        svg_warnings(&doc),
+        [
+            tinker_pdf_svg::Warning::ElementUnknown("unknown".into()),
+            tinker_pdf_svg::Warning::ElementUnknown("blink".into()),
+        ]
+    );
+    assert!(run_paint(&doc).contains("/Pattern cs"), "the tiles");
+
+    let doc = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">
+             <mask id="m"><rect width="1000" height="1000" fill="#ffffff"/></mask>
+             <text x="20" y="50" font-family="serif" font-size="20">MM<tspan mask="url(#m)">MM</tspan></text>
+           </svg>"##,
+    );
+    assert_eq!(
+        svg_warnings(&doc),
+        [tinker_pdf_svg::Warning::TextBoxUnmeasured]
+    );
+}

@@ -498,12 +498,13 @@ pub fn clip(
 /// The nodes are already in the scene's space, so `inverse` — the inverse of
 /// the container's own matrix — brings every point back into the container's
 /// user space, which is what `objectBoundingBox` on a `<g>` is a fraction of.
-/// Text is not measured: its extent is a font metric this crate does not have
-/// (ruling 8), so a group of text alone has the empty box. That is **not**
-/// §13.2.3's zero-area answer — the text has an extent, this crate cannot
-/// take it — so a caller asks [`nodes_hold_text`] as well, and a
+/// Text is not measured here: its extent is a font metric this crate does not
+/// have (ruling 8), so a group of text alone has the empty box. That is
+/// **not** §13.2.3's zero-area answer — the text has an extent, this crate
+/// cannot take it — so a caller asks [`nodes_hold_text`] as well, and a
 /// bounding-box mask, clip or paint on text is not resolved against nothing
-/// but named (`Warning::TextBoxUnmeasured`).
+/// but named (`Warning::TextBoxUnmeasured`) — unless the walk's caller
+/// measured the runs, whose cells then come in through [`nodes_bounds_with`].
 ///
 /// Markers are not in §7.11's box either, and a container's nodes do not say
 /// which of them a marker drew: a group holding a marked path measures the
@@ -511,7 +512,14 @@ pub fn clip(
 /// measured from the shape's geometry alone, where the walk has it.
 #[must_use]
 pub fn nodes_bounds(nodes: &[crate::Node], inverse: [f64; 6]) -> [f64; 4] {
-    let mut points: Vec<[f64; 2]> = Vec::new();
+    nodes_bounds_with(nodes, &[], inverse)
+}
+
+/// [`nodes_bounds`], with `cells` — points in the scene's space, the corners
+/// of text runs a caller measured — counted with the nodes' own.
+#[must_use]
+pub fn nodes_bounds_with(nodes: &[crate::Node], cells: &[[f64; 2]], inverse: [f64; 6]) -> [f64; 4] {
+    let mut points: Vec<[f64; 2]> = cells.to_vec();
     gather(nodes, &mut points);
     let mut out = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
     let mut seen = false;

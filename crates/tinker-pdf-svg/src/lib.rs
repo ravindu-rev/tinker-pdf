@@ -65,7 +65,7 @@ pub fn read(bytes: &[u8], viewport: Option<(f64, f64)>, limits: &Limits) -> Resu
 
 /// [`read`], with the document's references reaching what `context` names —
 /// an `@import` in a `<style>` element fetched through the caller's
-/// container.
+/// container, and a run of text measured by the caller's fonts.
 ///
 /// # Errors
 /// [`read`]'s.
@@ -81,10 +81,10 @@ pub fn read_with(
 
 /// What a document reaches beyond its own bytes, which this crate does not
 /// have and its caller does (ruling 8): the container an `@import` is fetched
-/// from.
+/// from, and the fonts a run of text is measured by.
 ///
-/// `#[non_exhaustive]`, made by [`Context::new`] or [`Context::NONE`], so a
-/// reach added later is not a break.
+/// `#[non_exhaustive]`, made by [`Context::new`] or [`Context::NONE`] and
+/// [`Context::with_measure`], so a reach added later is not a break.
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct Context<'a> {
@@ -92,19 +92,70 @@ pub struct Context<'a> {
     /// one the EPUB cascade's imports go through, so one adapter answers
     /// both.
     pub imports: &'a dyn tinker_pdf_css::ImportResolver,
+    /// What a run of text measures, where the caller can say: the box a
+    /// `mask`, a `clip-path` or a paint server in `objectBoundingBox` units
+    /// takes a fraction of. `None` leaves text with no box, and such an
+    /// effect on it is drawn without the effect and named
+    /// [`Warning::TextBoxUnmeasured`].
+    pub measure: Option<&'a dyn MeasureText>,
 }
 
 impl<'a> Context<'a> {
-    /// Nothing beside the document: every `@import` unresolved.
+    /// Nothing beside the document: every `@import` unresolved, and no run
+    /// measured.
     pub const NONE: Context<'static> = Context {
         imports: &tinker_pdf_css::NoImports,
+        measure: None,
     };
 
     /// `@import` resolved through `imports`.
     #[must_use]
     pub fn new(imports: &'a dyn tinker_pdf_css::ImportResolver) -> Self {
-        Context { imports }
+        Context {
+            imports,
+            measure: None,
+        }
     }
+
+    /// The same reach, with every run of text measured by `measure`.
+    #[must_use]
+    pub fn with_measure(self, measure: &'a dyn MeasureText) -> Self {
+        Context {
+            measure: Some(measure),
+            ..self
+        }
+    }
+}
+
+/// One run's measurement, in the run's own user units: what its glyph cells
+/// are made of.
+///
+/// §7.11 makes the box of text the union of its glyphs' **cells**, and SVG 2
+/// §8.10 says what a cell is for horizontal text: the glyph's advance along
+/// the baseline, by the font's full ascent above it and descent below it —
+/// three numbers a font has and this crate does not (ruling 8).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RunMetrics {
+    /// The run's advance along its baseline: where the next run begins.
+    pub advance: f64,
+    /// How far the font reaches above the baseline, as a positive length.
+    pub ascent: f64,
+    /// How far it reaches below, as a positive length.
+    pub descent: f64,
+}
+
+/// A caller's measurement of a run of text, with the fonts it sets it in.
+///
+/// The box a run is given is the box of the ink the caller draws only if this
+/// is the **same** measurement the caller places the run with: the walk
+/// places each run as a caller must — a run with no position of its own
+/// beginning where the one before it ended, and a chunk's `text-anchor`
+/// applied to the whole chunk's width ([`Node::Text`]) — from these advances.
+/// The facade's is the `BookMetrics` its pages are set with.
+pub trait MeasureText {
+    /// `text`, in `font`. A number that is not finite is no measurement, and
+    /// the text is left with no box, as it is without a measurer.
+    fn measure(&self, text: &str, font: &TextStyle) -> RunMetrics;
 }
 
 /// How much work one document may cost.
@@ -223,17 +274,23 @@ pub enum Warning {
     ClipChildIgnored,
     /// A `mask`, a `clip-path`, a `fill` or a `stroke` whose
     /// `objectBoundingBox` units needed the box of **text** — a `<text>`, or a
-    /// group that holds one.
+    /// group that holds one — and no measurement of it was had.
     ///
     /// §7.11's box of a run is its glyph cells, and a glyph's extent is a font
-    /// metric this crate does not have (ruling 8). Where the text is all there
-    /// is to measure there is no box at all, and a fraction of nothing would
-    /// take the ink away: the element is drawn **unmasked** or **unclipped**,
-    /// and a paint server's own fallback stands — `none` where the value
-    /// stated none — which is ruling 2's answer and the one this crate gave
-    /// before masks and patterns were drawn. Where shapes or pictures sit
-    /// beside the text, theirs is the box used, smaller than §7.11's by
-    /// whatever the text reaches past it.
+    /// metric this crate does not have (ruling 8): a caller that has one hands
+    /// it in through [`Context::with_measure`], and the box is then measured.
+    /// It is not measured through [`read`], which has no measurer; from a
+    /// measurer whose numbers are not finite; for text whose first run
+    /// continues a pen this crate cannot see — a `<text>` whose first
+    /// characters are hidden; or for a `mask` or `clip-path` on a `<tspan>`,
+    /// which SVG 2 §11.2 resolves against the box of the **whole** `<text>`,
+    /// a box not known until its last run is placed. There the text has no
+    /// box, and a fraction of nothing would take the ink away: the element is
+    /// drawn **unmasked** or **unclipped**, and a paint server's own fallback
+    /// stands — `none` where the value stated none — which is ruling 2's
+    /// answer. Where shapes or pictures sit beside unmeasured text, theirs is
+    /// the box used, smaller than §7.11's by whatever the text reaches past
+    /// it.
     TextBoxUnmeasured,
     /// Something whose coordinates, once every transform above it was
     /// composed, are past a double's range — `scale(1e300)` inside

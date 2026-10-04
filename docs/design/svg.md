@@ -80,16 +80,15 @@ A picture that quietly drops one of these looks finished.
 - ~~**`<pattern>` as a paint** (§13.3)~~ — **drawn since the milestones**;
   see *As built*. A tiling paint server is 8.7.3's tiling pattern, cell for
   cell.
-- **A bounding-box effect on text.** A `mask`, a `clip-path`, a gradient or a
-  pattern in `objectBoundingBox` units — the initial units of all but the
-  clip — is a fraction of §7.11's box, and a run's box is its glyph cells,
-  which are a font's (ruling 8). On a `<text>`, or a group of only text, there
-  is no box: the element is drawn unmasked or unclipped and a paint takes its
-  own fallback, `none` where it stated none. Beside shapes or pictures, theirs
-  is the box. Either way `Warning::TextBoxUnmeasured`
-  (`text_under_a_bounding_box_mask_draws_unmasked_and_is_named` and its
-  three siblings). It closes when the caller, which has the metrics, measures
-  a run's box.
+- ~~**A bounding-box effect on text**~~ — **measured by the caller since 4
+  October 2026**; see *As built*. What is left of it: a `mask` or `clip-path`
+  in `objectBoundingBox` units on a `<tspan>`, which SVG 2 §11.2 resolves
+  against the box of the whole `<text>` — not known while the `<tspan>`'s
+  group is built — and text whose first run is hidden, whose pen is wherever
+  the text before it left one. Each is drawn unmasked or unclipped, a paint in
+  its own fallback, and named `Warning::TextBoxUnmeasured`, as every such
+  effect on text was before (`what_cannot_be_placed_stays_named`). So is any
+  through `tinker_pdf_svg::read`, which has no measurer.
 - ~~**`<marker>`** (§11.6)~~ — **drawn since the milestones**; see *As built*.
   Arrowheads on a path's vertices, thirty-two of them in the fetched corpus,
   all on paths that also fill.
@@ -176,7 +175,10 @@ solid fill and nothing else, so a run painted with a gradient, a pattern
 or `none` drew in black, and a stroke never drew.
 
 This is `Node::Image`'s seam read a second time. The crate carries what the
-document said; the caller resolves it against what it has.
+document said; the caller resolves it against what it has. Where the document
+needs a font's number back — a bounding-box effect on text takes a fraction of
+its glyph cells — the caller lends it one through `Context::with_measure`
+rather than the leaf learning what a font is (see *As built*).
 
 ### Bounds
 
@@ -443,6 +445,46 @@ the three invalid or past a bound. Writing this found that the walk named
 **every** `<style>` element `ElementUnknown("style")` — a loss reported in
 every drawing that styles itself; §6.3 says it is not rendered, and it is
 dispatched beside `<title>` now.
+
+**After the milestones: text's box.** A gradient, a pattern, a mask or a clip
+in `objectBoundingBox` units is a fraction of §7.11's box, and the box of text
+is the union of its glyph cells — each glyph's advance by the font's full
+ascent and descent, SVG 2 §8.10 says — which are a font's (ruling 8). Until now
+every such effect on text was drawn without it and named `TextBoxUnmeasured`.
+The leaf takes a measurement now, through `read_with`'s
+`Context::with_measure`: a `MeasureText` hands back a run's advance, ascent and
+descent, and the facade's is the `BookMetrics` its pages are set with — the
+same `Metrics::measure` its `place_text` and `draw_text` move the pen by, and
+the `Metrics::vertical` of the face the run's request resolves to. The leaf
+**replays `place_text`** with those numbers — a run with no position of its own
+begins where the one before it ended, a chunk's `text-anchor` moves the whole
+chunk by its whole width, a cell is turned by §10.5's `rotate` about the run's
+origin and carried by the run's matrix — so the box is where the ink will be,
+and is only if the caller places runs by the measurement it gave. A group's
+box is its shapes' and its runs' cells together. A run's own paint is
+different, because SVG 2 §11.2 resolves every `objectBoundingBox` effect on a
+`<tspan>` against the box of the **whole** `<text>`, and that box is known only
+once the `<text>`'s last run is placed: a paint server that takes a fraction of
+the box waits as a mark in the run's place — a colour no document can state —
+and is resolved when the `<text>` ends, against its box carried into each
+run's space, and the mark replaced. Only such a paint waits, so a document with
+no bounding-box effect on its text reads exactly as it did without a
+measurer, warnings in the same order (`fuzz/fuzz_targets/svg.rs` and
+`hostile_input.rs` assert it of every input, and that no mark reaches a
+caller). A `<tspan>`'s own mask or clip cannot wait the same way — it is a
+group around the `<tspan>`'s runs, built before the `<text>` ends — and stays
+`TextBoxUnmeasured` rather than taking the `<tspan>`'s own box, which would be
+a different picture. The facade reads an SVG before its faces are loaded, since
+its `@font-face` rules are among what pass 2 loads, so a scene that named
+`TextBoxUnmeasured` is read a second time once they are (`epub.rs`'s
+`measure_svg`), and the report follows the second read; every other scene is
+read once, as before (`tests/text_box.rs` in the leaf;
+`a_bounding_box_gradient_on_svg_text_spans_the_text_it_paints`,
+`a_bounding_box_mask_on_svg_text_masks_it` and
+`the_report_is_the_measured_reads` in `epub_svg.rs`). Writing it found the run
+painting `draw_text` had never done — a gradient's or a pattern's fill drawn
+in black, a stroke never drawn (see *Text* under *Design*) — which would have
+put every gradient this made possible on the page as black.
 
 **What this cannot reach**, stated rather than absorbed: nothing outside this
 repository adjudicates a rendering (ruling 13), so every expected value here is
