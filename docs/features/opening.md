@@ -43,13 +43,17 @@ document by its root element once the prolog is walked: byte-order mark, white
 space, the XML declaration, processing instructions, comments and a doctype
 with its internal subset, all inside the first 4 096 bytes (`SNIFF_WINDOW`),
 in UTF-8 or in UTF-16 of either byte order, marked or in XML Appendix F's
-unmarked shape, which is what `tinker-pdf-xml` decodes. A root named `svg` is an SVG; one named `html`, in any case, or a doctype
-naming `html`, is an HTML document. **Each is built by the code that builds
+unmarked shape, which is what `tinker-pdf-xml` decodes. A root named `svg` is an SVG; one named
+`html`, `head`, `body`, `p`, `div`, `table` or another of the fifteen WHATWG
+MIME Sniffing §7.1 takes to mean HTML, in any case, or a doctype naming
+`html`, is an HTML document. **Each is built by the code that builds
 the larger document it would be one part of**: an SVG is a book of one
 pre-paginated chapter — one page, the size its root states, the caller's
 `OpenOptions::page` as the viewport a root with no size fills; an XHTML file is
 a book of one reflowable chapter at the caller's box with the book's 36-point
-margin, its `<title>` the document's `/Title`; a bare image is the comic of
+margin, its `<title>` the document's `/Title` — read as XML first, so that a
+well-formed XHTML file is exactly an EPUB's chapter, and **when it is not XML,
+read again by HTML's own parser** (below); a bare image is the comic of
 its one picture, paged by the comic path's own body with no archive around it,
 one pixel to one point — a GIF and a WebP drawn, a multi-page TIFF one page per
 directory. `tests/standalone.rs` holds that as equalities — the same XHTML
@@ -57,8 +61,32 @@ bytes render to the same pixels alone and as an EPUB's one chapter, and a bare
 PNG, JPEG, TIFF, GIF, WebP and three-page TIFF to the same pages, pixels and
 warnings as a one-entry CBZ.
 Nothing on these paths refuses a document the sniff recognised: an SVG the
-reader will not take, tag soup and an undecodable picture are each a page
-saying so in the report (ruling 2). A file opened from its bytes has nothing
+reader will not take and an undecodable picture are each a page saying so in
+the report (ruling 2).
+
+**Tag soup is a document.** HTML that is not XML — a `<p>` or `<li>` left
+open, an unquoted attribute, a `&nbsp` without its semicolon, formatting
+misnested across a block, a cell with no row — is read by
+`tinker_pdf_xml::html`, a hand-written WHATWG HTML parser: §13.2.5's
+tokenizer, every state, and §13.2.6's tree builder, every insertion mode the
+standard still has, the adoption agency, foster parenting, foreign content
+and `<template>`, with HTML's 2 231 named character references. It reads
+every input to its end, as a browser does, and the tree it builds is the
+one the EPUB reader lays out (`epub::xhtml::read_markup_or_html`), with
+`ArchiveWarning::Markup(MarkupDefect::NotXml)` in the report. Bytes are
+decoded as §13.2.3 says — a byte order mark, then a `<meta charset>` in the
+first kilobyte naming an encoding this build decodes (UTF-8, UTF-16 or one of
+the Encoding Standard's twenty-eight single-byte encodings), then UTF-8 if the
+bytes are UTF-8, then windows-1252. Scripting is disabled, always — nothing
+here runs a script — so a `<noscript>`'s content is markup and is drawn. It is
+held to html5lib's own suite, vendored: **1 779 of the 1 784
+tree-construction tests** that run with scripting disabled build exactly the
+suite's tree, the five that do not are named with their reasons, and **every
+one of the 7 028 tokenizer runs** a Rust string can express emits exactly the
+suite's tokens. An element the adoption agency nests past the XML reader's
+depth cap keeps its text in the deepest element the cap allows
+(`MarkupDefect::TooDeep`), because every reader after this one was written
+against that cap. A file opened from its bytes has nothing
 beside it, so a stylesheet, a picture or a face it names by a relative
 reference is **missing and named** (`StylesheetUnresolved`, `ImageNotDrawn`,
 `SvgImageUnresolved`, `FontFace`); RFC 2397's `data:` URL carries its own bytes
@@ -263,7 +291,10 @@ exceed it routinely — declared in one place,
 | Zero bytes | `OpenError::Empty` | Almost always a caller's bug — a path that did not exist — and telling that apart from a bad file matters | `crates/tinker-pdf/src/lib.rs` |
 | Nothing PDF-shaped | `OpenError::NotAPdf` | Not one indirect object found, even after a full rescan | `CosDocument::open` → `OpenError::NoObjects` |
 | A RAR 4 | `OpenError::UnsupportedArchive(ArchiveRefusal::NotAZip)` | Recognised by its own signature and refused as *that version*; no producer here can write one to hold a decoder to | [cbz](cbz.md), [design/comic-archives.md](../design/comic-archives.md) |
-| HTML that is not well-formed XML — tag soup | `ArchiveWarning::Markup { defect: MarkupDefect::Truncated, .. }` on a document of what parsed | **The narrowed half of tier 5's row.** A loose HTML file is read by the XML reader, so it opens as far as it parses as XML and the report says where it stopped; HTML5's tokenizer and tree builder (WHATWG §13.2) are not in this build, and the roadmap row says what holding one to html5lib-tests would take | [ROADMAP](../ROADMAP.md) |
+| Customizable `<select>`'s `<selectedcontent>` copy of the selected `<option>` | the `<selectedcontent>` element is built, empty | the copy is a DOM behaviour the parser triggers when an `<option>` is popped, and it needs the option *selectedness* algorithm and the `selected` attribute's dirtiness, which a tree builder does not have. html5lib's `webkit02.dat` #45–#48 are the four tests it fails, by name | `crates/tinker-pdf-xml/tests/html5lib.rs` |
+| An HTML tag, attribute or DOCTYPE name past 1 024 bytes, more than 256 attributes on one tag, nesting past 256, or more than a million tokens and nodes | the parse stops there, `MarkupDefect::Truncated`, the tree so far kept | `tinker-pdf-xml`'s four caps, which the HTML parser shares with the XML reader; the token cap counts every node the tree builder creates too, because reopening formatting elements makes a few bytes ask for hundreds. html5lib's `tests1.dat` #77, an attribute name of 1 100 characters, is the one suite test a cap stops | `crates/tinker-pdf-xml/src/limits.rs` |
+| A `<meta charset>` naming a multi-byte legacy encoding — Shift_JIS, GBK, Big5, EUC-KR — in loose HTML | `MarkupDefect::EncodingNotDecoded`; read as UTF-8 if the bytes are UTF-8 and windows-1252 if not | `tinker_pdf_xml::encoding` decodes the single-byte family and no multi-byte one; what is left of the FB2 row is the same work | [ROADMAP](../ROADMAP.md) |
+| Scripts in HTML, and html5lib's `#script-on` tests | never run; `<noscript>` is drawn | there is no script engine, by design; the tree a parser with scripting enabled builds is not this build's | — |
 | Raw HTML in Markdown | `ArchiveWarning::Translation { defect: TranslationDefect::RawHtmlAsText, .. }` | set as the text it is: CommonMark passes it through, and a tag that is not well-formed XML would stop the XML reader and lose the rest of the document. Every character still reaches the page | `crates/tinker-pdf/src/markdown.rs` |
 | A named character reference outside XHTML 1.0's 253, in Markdown | the reference stays literal | CommonMark resolves HTML's 2 231 names; this repository vendors XHTML 1.0's sets (W3C) and not HTML's list, so `&HilbertSpace;` is text. The one CommonMark example of 652 the reader fails | [THIRDPARTY.md](../../THIRDPARTY.md) |
 | Markdown containers past 100 deep, inlines nested past the 202 elements that bounds a document to, references past their copy budget | `TranslationDefect::{NestingTooDeep, ReferenceBudgetSpent}` | read as the text they then are — a too-deep emphasis or link keeps its text and loses its element, so the XML reader's depth cap is never what stops a document and nothing after a deep nest is lost; the two caps are `bounds_ledger.rs` rows. A reference is the one construct whose output is not bounded by its input, so its copies are held to 100 KiB or the document's own length, cmark's rule | `crates/tinker-pdf/src/markdown.rs` |
@@ -338,7 +369,10 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   for pixel the one page of a CBZ, a JPEG, a G4 TIFF, a GIF, two WebPs and a
   three-page TIFF each the same pages, pixels and warnings as a one-entry CBZ,
   the placeholders for an AVIF, an undecodable PNG and a GIF with no image, the `data:` URL resolved and the missing
-  references named, tag soup read as far as it parses and said so, and a
+  references named, tag soup — three files the XML reader stops at in their
+  first lines — **pixel for pixel** the XHTML of the tree HTML's parser
+  builds (`tag_soup_opens_as_the_tree_html_builds_pixel_for_pixel`), an
+  undeclared windows-1252 page read in it, and a
   streamed open the same document. It also holds the defect the row found in
   the streaming sniff: the container window was one `read`, a source that
   answers in pieces gave it one byte of `PK\x03\x04`, and a comic archive
@@ -361,6 +395,19 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   cut book read as far as it goes, and an `.fb2.zip` the
   same book while a ZIP of one picture stays a comic. `hostile_input.rs` sweeps a damaged FB2 and holds its translation to
   being XML; `fuzz/fuzz_targets/fb2.rs` is the deep version.
+- **`crates/tinker-pdf-xml/tests/html5lib.rs`** and
+  **`crates/tinker-pdf-xml/src/html/suite.rs`** — the HTML parser held to
+  html5lib's tree-construction and tokenizer tests, vendored at the last
+  commit that holds both (THIRDPARTY.md), compared exactly: **1 779 of 1 784**
+  trees, the five that do not pass named as a list rather than counted, and
+  **7 028 of 7 028** tokenizer runs (four runs holding a lone surrogate, which
+  a Rust string cannot, are not attempted). `tests/html.rs` beside them
+  crosses each of the four caps at its shipped value — the token cap by
+  reopened formatting elements, fifty kilobytes asking for a million nodes —
+  holds the tree builder's moves linear in a parent's children, and holds the
+  §13.2.3 decoding order; `hostile_input.rs`'s
+  `mutated_tag_soup_never_panics_the_html_parser` and
+  `fuzz/fuzz_targets/html.rs` hold the tree to being a tree.
 - **`crates/tinker-pdf/tests/commonmark_spec.rs`** — the Markdown reader held
   to CommonMark 0.31.2's 652 examples, compared exactly, over a `spec.txt`
   fetched at its pinned tag and SHA-256 by `tests/commonmark/fetch-spec.sh`

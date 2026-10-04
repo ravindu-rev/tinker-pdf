@@ -14,7 +14,10 @@ ExtGStates, patterns, links, outlines) and nothing speculative.
 places only what a caller positioned; `tinker_pdf::FromHtml`, implemented for
 it in the facade, is the one constructor that composes. With the trait in
 scope, `DocumentBuilder::from_html(markup, stylesheet, PageBox)` reads the
-markup as XML into the EPUB reader's tree, applies `stylesheet` as an author
+markup into the EPUB reader's tree — as XML, and when it is not XML by HTML's
+own parser (WHATWG §13.2, `tinker_pdf_xml::html`), so tag soup makes the
+document its tree is and the report says `MarkupDefect::NotXml`
+(`tag_soup_makes_the_document_its_tree_is`) — applies `stylesheet` as an author
 sheet **ahead of** every sheet the markup links (so the markup's own `<style>`
 wins a tie, as after a `<link>` at the top of `<head>`), lays it out into
 pages of the `PageBox` — a size, a margin inside it (default half an inch)
@@ -361,7 +364,6 @@ property is.
 | Text shaping in `text` and `glyphs` | `text` is one byte per character; `glyphs` takes glyph indices the caller positioned | neither runs GSUB or GPOS and neither will: `glyph_run` is the shaped entry point, through `tinker-pdf-shape` | [fonts](fonts.md), [design/shaping.md](../design/shaping.md) |
 | A `Target::Uri` outside 7-bit ASCII | `link` returns `false` | 12.6.4.7's `/URI` is ASCII; an unwritable target writes nothing rather than a plausible-and-wrong action | — |
 | Layout on the builder's own methods | none — positions are the caller's | by design; [epub](epub.md)'s layout engine is a *consumer* of this API, and `FromHtml` is where a caller reaches it: a constructor in the facade, because ruling 8 keeps the layout engine out of `tinker-pdf-cos` | — |
-| Markup that is not well-formed XML, handed to `from_html` | `ArchiveWarning::Markup(MarkupDefect::Truncated)` in the report, on a document of what parsed | the markup is read by the XML reader; an HTML5 tree builder is the open half of tier 5's loose-HTML row | [opening](opening.md), [ROADMAP](../ROADMAP.md) |
 | A cascade or layout cap spent | `HtmlError::{StyleRefused, LayoutRefused}` | a book keeps the page as a placeholder; a creation call has no page count to keep, so it is refused by which half refused it | [epub](epub.md) |
 | Everything an `ArchivalProfile` forbids | the call returns `false` and pushes a typed `ArchivalRefusal` naming its clause; `finish_archival` returns `Err` for what only a finished document can be judged on | a builder that emitted what the validator rejects would make the validator the last line of defence rather than the second | [pdfa](pdfa.md) |
 

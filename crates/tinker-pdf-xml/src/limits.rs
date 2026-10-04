@@ -125,6 +125,17 @@ pub const MAX_XML_NAME_LEN: usize = 1024;
 
 /// **The work cap.** Events one part may produce, spent and never refunded.
 ///
+/// **For [`crate::html`] it is tokens and nodes together.** HTML's tree
+/// builder makes elements no token asked for — it reopens the formatting
+/// elements a block closed, before every run of text after it, and clones them
+/// in the adoption agency — so eight bytes of `<p>x</p>` after two hundred
+/// open `<b>`s make two hundred elements. Every node created spends one beside
+/// every token, which keeps a document's whole tree inside this one number;
+/// `reopened_formatting_elements_are_spent_against_the_token_cap` crosses it
+/// at the shipped value with fifty kilobytes. The other three caps bound the
+/// HTML parser as they bound this reader: its stack of open elements, a tag's
+/// attributes, and a tag, attribute or DOCTYPE name.
+///
 /// A per-element cap times an element count the file chose is not a bound, and
 /// this is the number that is. Every event costs one — a start tag, an end tag,
 /// a text run, a CDATA section, a comment, a processing instruction — so an

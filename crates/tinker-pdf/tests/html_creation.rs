@@ -290,6 +290,33 @@ fn an_unusable_page_box_is_replaced_and_named() {
     assert!(report.margin() * 2.0 < 400.0);
 }
 
+/// **HTML that is not XML is made into the document its tree is** (tier 5's
+/// formats row): `from_html` reads tag soup with HTML's own parser, so the
+/// pages are the pages of the well-formed XHTML of the tree §13.2.6 builds —
+/// pixel for pixel — and the report says the markup was not XML.
+#[test]
+fn tag_soup_makes_the_document_its_tree_is() {
+    let soup = "<p class=lead>One<p>Two &amp three<br>four<ul><li>a<li>b</ul>";
+    let tree = document(
+        "<p class=\"lead\">One</p><p>Two &amp; three<br/>four</p><ul><li>a</li><li>b</li></ul>",
+    );
+    let sheet = ".lead { margin-left: 3em }";
+    let (builder, report) =
+        DocumentBuilder::from_html(soup, sheet, PageBox::new(300.0, 300.0)).expect("lays out");
+    assert_eq!(
+        report.warnings(),
+        [ArchiveWarning::Markup {
+            item: String::new(),
+            defect: tinker_pdf::epub::xhtml::MarkupDefect::NotXml
+        }]
+    );
+    let from_soup = drawn(Document::open(builder.finish()).expect("opens"));
+    let from_tree = drawn(made(&tree, sheet, PageBox::new(300.0, 300.0)));
+    let (a, b) = (render(&from_soup, 0), render(&from_tree, 0));
+    assert!(ink(&a) >= LEAST_INK, "nothing was drawn");
+    assert!(a.data == b.data, "the soup's page is not its tree's");
+}
+
 /// **A document the cascade refuses is an error, not a placeholder page**: a
 /// creation call has no page count to keep. `MAX_DOM_NODES` is the cap.
 #[test]

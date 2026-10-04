@@ -1,6 +1,12 @@
 //! XML 1.0 with namespaces: bytes in, events out, and no PDF vocabulary
 //! anywhere — nor any XPS vocabulary, which is the same rule read twice.
 //!
+//! **And HTML, which is not XML** ([`html`]): the WHATWG standard's tokenizer
+//! and tree builder, bytes in and a document tree out, for the loose `.html`
+//! file the XML reader stops at in its first line. It shares this crate's
+//! [`Limits`] and nothing else of the XML reader; the module comment says
+//! why it lives here.
+//!
 //! Feature documentation: `docs/features/xps.md`.
 //!
 //! The eighth leaf. It exists because three different parts of an OPC package
@@ -104,6 +110,7 @@
 #![forbid(unsafe_code)]
 
 pub mod encoding;
+pub mod html;
 pub mod limits;
 mod scan;
 mod text;

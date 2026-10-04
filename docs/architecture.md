@@ -182,7 +182,7 @@ measurement rather than a number kept in step.
 | `tinker-pdf-math` | pinned transcendentals, `no_std` | 900 | [determinism](features/determinism.md) | — |
 | `tinker-pdf-zip` | ZIP reader | 3 000 | [cbz](features/cbz.md) | `zip_archive` |
 | `tinker-pdf-archive` | the containers that are not ZIP: tar, 7z, RAR | 4 500 | [cbz](features/cbz.md), [design/comic-archives.md](design/comic-archives.md) | `tar`, `sevenz`, `rar` |
-| `tinker-pdf-xml` | XML pull parser | 4 100 | [xps](features/xps.md) | `xml` |
+| `tinker-pdf-xml` | XML pull parser; WHATWG HTML tokenizer and tree builder; the Encoding Standard's single-byte decoders | 4 100 (August); 10 700 (October, with the HTML parser and its suite runner) | [xps](features/xps.md), [opening](features/opening.md) | `xml`, `html` |
 | `tinker-pdf-css` | CSS engine | 10 800 | [epub](features/epub.md) | `css` |
 | `tinker-pdf-svg` | SVG 1.1: markup in, a display list out | 4 900 | [epub](features/epub.md) | `svg` |
 | `tinker-pdf-layout` | box model, fragmentation, line breaking | 13 700 | [epub](features/epub.md) | `layout` |

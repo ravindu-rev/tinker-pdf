@@ -2053,11 +2053,16 @@ fn the_token_cap_is_a_total_and_not_a_per_element_cap() {
 /// would mean the leaf had learned what it is for.
 #[test]
 fn no_public_item_names_a_pdf_or_an_xps_concept() {
-    const SOURCES: [&str; 4] = [
+    const SOURCES: [&str; 9] = [
         include_str!("lib.rs"),
         include_str!("limits.rs"),
         include_str!("scan.rs"),
         include_str!("text.rs"),
+        include_str!("encoding.rs"),
+        include_str!("html/mod.rs"),
+        include_str!("html/tokenizer.rs"),
+        include_str!("html/tree.rs"),
+        include_str!("html/entities.rs"),
     ];
     const FORBIDDEN: [&str; 12] = [
         "Pdf",

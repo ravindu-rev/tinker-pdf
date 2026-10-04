@@ -44,12 +44,14 @@
 //! - **An SVG** is laid out through [`crate::epub::lay_out_one`] as a
 //!   pre-paginated chapter: one page, the size its root states, with the
 //!   caller's page box as the viewport a root with no size of its own fills.
-//! - **An XHTML or HTML file** is read as XML into the EPUB reader's tree and
-//!   laid out as a reflowable chapter at the caller's page box, with
+//! - **An XHTML or HTML file** is read into the EPUB reader's tree and laid
+//!   out as a reflowable chapter at the caller's page box, with
 //!   [`crate::epub::PAGE_MARGIN`] inside it. Its `<title>` is the document's
-//!   `/Title`. **HTML that does not parse as XML is read as far as it parses**
-//!   and [`crate::ArchiveWarning::Markup`] says it stopped: this build has no
-//!   HTML5 tree builder, so tag soup is the narrowed half of the roadmap row.
+//!   `/Title`. It is read as XML first, so a well-formed XHTML file is exactly
+//!   an EPUB's chapter; **HTML that is not XML** — tag soup — is read again by
+//!   HTML's own parser (`tinker_pdf_xml::html`, WHATWG §13.2), which reads
+//!   every input to its end, and [`crate::ArchiveWarning::Markup`] says so
+//!   with `MarkupDefect::NotXml` (`epub::xhtml::read_markup_or_html`).
 //! - **A bare image** is the comic of that one picture, paged by
 //!   [`crate::cbz`]'s own body (`cbz::pages_from_picture`) and not by a copy of
 //!   it: one image pixel to one point (8.9.5.2), a JPEG, PNG, TIFF, JPEG 2000,
@@ -152,14 +154,25 @@ pub enum TranslationDefect {
 pub enum Standalone {
     /// An SVG document: the root element's local name is `svg`.
     Svg,
-    /// An XHTML or HTML document: the root element is `html`, in any case, or
-    /// the document type declaration names `html`.
+    /// An XHTML or HTML document: the root element is one MIME Sniffing
+    /// §7.1 calls HTML — `html`, `head`, `body`, `p`, `div`, `table` and the
+    /// rest of its fifteen — in any case, or the document type declaration
+    /// names `html`.
     Html,
     /// A FictionBook 2 document: the root element is `FictionBook`.
     Fb2,
     /// An image, by its magic at offset zero.
     Image(ImageFormat),
 }
+
+/// The first elements that make a file HTML: MIME Sniffing §7.1's patterns
+/// `<HTML`, `<HEAD`, `<SCRIPT`, `<IFRAME`, `<H1`, `<DIV`, `<FONT`, `<TABLE`,
+/// `<A`, `<STYLE`, `<TITLE`, `<B`, `<BODY`, `<BR` and `<P`, compared without
+/// case. (Its `<!DOCTYPE HTML` and `<!--` patterns are the prolog walk's.)
+const HTML_ROOTS: [&str; 15] = [
+    "html", "head", "script", "iframe", "h1", "div", "font", "table", "a", "style", "title", "b",
+    "body", "br", "p",
+];
 
 /// Whether the bytes are a one-file document this build opens, and which.
 ///
@@ -189,11 +202,20 @@ pub fn sniff(bytes: &[u8]) -> Option<Standalone> {
     });
     match root {
         Some(b"svg") => Some(Standalone::Svg),
-        Some(name) if name.eq_ignore_ascii_case(b"html") => Some(Standalone::Html),
+        // HTML lets a document leave out its `<html>`, its `<head>` and its
+        // `<body>`, and tag soup often begins with whatever it begins with. The
+        // names are WHATWG MIME Sniffing §7.1's HTML patterns — what a browser
+        // takes, at the head of a file of no stated type, to mean HTML.
+        Some(name)
+            if HTML_ROOTS
+                .iter()
+                .any(|root| name.eq_ignore_ascii_case(root.as_bytes())) =>
+        {
+            Some(Standalone::Html)
+        }
         Some(b"FictionBook") => Some(Standalone::Fb2),
-        // HTML lets a document leave out its `<html>`, and says what it is in
-        // its doctype instead. The reader will stop where the markup stops being
-        // XML, and the report will say so.
+        // Or it leaves out every tag a sniff could tell it by, and says what it
+        // is in its doctype instead.
         _ if doctype.is_some_and(|name| name.eq_ignore_ascii_case(b"html")) => {
             Some(Standalone::Html)
         }
@@ -360,7 +382,7 @@ pub(crate) fn synthesise(
         ),
         Standalone::Fb2 => fb2(bytes, layout),
         Standalone::Html => laid_out(
-            Loose::Markup(epub::read::markup(bytes, &limits.xml)),
+            Loose::Markup(epub::xhtml::read_markup_or_html(bytes, &limits.xml)),
             Vec::new(),
             &mut DataUrls(epub::read::NoResources),
             Page::plain(layout),
@@ -784,6 +806,13 @@ mod tests {
             None,
             "an FB2 root is case-sensitive"
         );
+        assert_eq!(
+            kind("<!-- generated -->\n<TABLE><td>cell"),
+            Some(Standalone::Html),
+            "tag soup that begins with one of MIME Sniffing's HTML elements"
+        );
+        assert_eq!(kind("<p>a paragraph"), Some(Standalone::Html));
+        assert_eq!(kind("<pre>"), None, "not one of the fifteen");
         assert_eq!(kind("<SVG/>"), None, "XML names are case-sensitive");
         assert_eq!(kind("<FixedPage/>"), None, "XML that is none of these");
         assert_eq!(kind("<!-- never closes <svg/>"), None);

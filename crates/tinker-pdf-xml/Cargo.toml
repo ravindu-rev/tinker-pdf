@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "XML 1.0 with namespaces, hand-rolled: a pull parser over the well-formed subset, UTF-8, UTF-16 and the Encoding Standard's single-byte encodings a declaration names, DTD content refused by name, and XHTML 1.0's named character references under an XHTML declaration. No PDF types"
+description = "XML 1.0 with namespaces, hand-rolled: a pull parser over the well-formed subset, UTF-8, UTF-16 and the Encoding Standard's single-byte encodings a declaration names, DTD content refused by name, and XHTML 1.0's named character references under an XHTML declaration; and HTML as the WHATWG standard parses it, tokenizer and tree builder. No PDF types"
 
 # The vendored XHTML entity sets ship with the crate, for the reason
 # `tinker-pdf-layout` gives for its UCD: `build.rs` compiles them and panics when

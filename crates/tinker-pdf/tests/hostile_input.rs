@@ -896,6 +896,87 @@ fn mutated_standalone_documents_never_panic() {
     }
 }
 
+/// HTML's tokenizer and tree builder (`tinker_pdf_xml::html`, tier 5's formats
+/// row) over mutated tag soup: the foster-parenting, adoption-agency,
+/// foreign-content, template and text-state seeds the fuzz target starts
+/// from, under the shipped limits and under tight ones. Each tree must be a
+/// tree — every node reached once, every child naming its parent — and the
+/// EPUB tree the facade builds from it no deeper than the XML reader's cap.
+/// `fuzz/fuzz_targets/html.rs` is the deep version.
+#[test]
+fn mutated_tag_soup_never_panics_the_html_parser() {
+    use tinker_pdf_xml::html::{self, Document, Namespace};
+    use tinker_pdf_xml::Limits;
+
+    fn check(document: &Document, limits: &Limits, label: &str) {
+        let nodes = document.nodes();
+        assert!(
+            nodes.len() <= limits.max_tokens + 16,
+            "{label}: past the cap"
+        );
+        let mut seen = vec![false; nodes.len()];
+        let mut stack = vec![0usize];
+        while let Some(at) = stack.pop() {
+            assert!(!seen[at], "{label}: node {at} reached twice");
+            seen[at] = true;
+            for &child in &nodes[at].children {
+                assert_eq!(nodes[child].parent, Some(at), "{label}: a child's parent");
+                stack.push(child);
+            }
+            if let Some(contents) = nodes[at].element().and_then(|e| e.template_contents) {
+                stack.push(contents);
+            }
+        }
+    }
+
+    let seeds: [&[u8]; 8] = [
+        b"<!DOCTYPE html><html><body><p>one<p>two<br><li>three &amp four &nbsp five</body>",
+        b"<table><b><tr><td>cell</td>text<td>x</table>after",
+        b"<p><b>1<i>2</b>3</i>4<a href=x>5<div>6</a>7</div>",
+        b"<svg viewbox=\"0 0 1 1\"><foreignobject><p>html</p></foreignobject></svg>\
+          <math><mi>x</mi><annotation-xml encoding=\"text/html\"><b>y</b></annotation-xml></math>",
+        b"<template><td>a</td><tr></tr></template><select><option>1<optgroup><option selected>2</select>",
+        b"<title>t &lt; <b></title><textarea>\nkept</textarea><script><!--<script>x</script>--></script>",
+        b"<meta charset=windows-1251><p>\xcf\xf0\xe8 &#x80; &#0; &notit; &CounterClockwiseContourIntegral;",
+        b"<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\"><p><table><caption>c<col>",
+    ];
+    let contexts = [
+        (Namespace::Html, "body"),
+        (Namespace::Html, "td"),
+        (Namespace::Html, "template"),
+        (Namespace::Svg, "svg"),
+    ];
+    let tight = Limits {
+        max_depth: 8,
+        max_attributes: 2,
+        max_name_len: 8,
+        max_tokens: 64,
+    };
+    for (index, seed) in seeds.iter().enumerate() {
+        let mut rng = Rng(0x0048_544D_4C00 ^ index as u64);
+        for case in 0..sweep(300) {
+            let mutated = mutate(seed, &mut rng);
+            let label = format!("html seed {index} case {case}");
+            let _guard = Guard(&label);
+            for limits in [Limits::DEFAULT, tight] {
+                let document = html::parse_bytes(&mutated, &limits);
+                check(&document, &limits, &label);
+                let dom = tinker_pdf::epub::xhtml::from_html(&document, &limits);
+                for (at, node) in dom.nodes.iter().enumerate() {
+                    assert!(node.parent.is_none_or(|p| p < at), "{label}: order");
+                }
+                let (text, _) = html::decode(&mutated);
+                let context = contexts[case % contexts.len()];
+                check(
+                    &html::parse_fragment(&text, context, &limits),
+                    &limits,
+                    &label,
+                );
+            }
+        }
+    }
+}
+
 /// Markdown is read from any bytes by a caller who says it is Markdown, so
 /// every byte sequence is an input (tier 5's Markdown row). Two halves: the
 /// shapes that make a CommonMark reader quadratic — a run of openers with no

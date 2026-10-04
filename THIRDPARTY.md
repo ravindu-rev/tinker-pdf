@@ -34,6 +34,8 @@ fails the same allowlist a crate licence would.
 | `crates/tinker-pdf-content/data/ucd` | The Unicode Character Database, version 17.0.0, via [unicode-org/unicodetools](https://github.com/unicode-org/unicodetools) `unicodetools/data/ucd/17.0.0` at `0509b4b` (fetched 2026-09-26) | `Unicode-3.0` |
 | `crates/tinker-pdf-archive/data/zstd-golden` | [facebook/zstd](https://github.com/facebook/zstd) `tests/golden-decompression/` and `tests/golden-decompression-errors/`, branch `dev` as served on 2026-09-26 (no commit could be resolved; pinned by SHA-256 below) | `BSD-3-Clause` |
 | `crates/tinker-pdf-xml/data/encoding-indexes` | The WHATWG Encoding Standard's single-byte indexes and label table, from [whatwg/encoding](https://github.com/whatwg/encoding) at `a985b62` (2026-05-21) | `BSD-3-Clause` |
+| `crates/tinker-pdf-xml/data/html-entities` | HTML's named character references, `entities/out/entities.json` from [whatwg/html-build](https://github.com/whatwg/html-build) at `283a353` (fetched 2026-10-03) | `BSD-3-Clause` |
+| `crates/tinker-pdf-xml/data/html5lib-tests` | [html5lib/html5lib-tests](https://github.com/html5lib/html5lib-tests) `tree-construction/` and `tokenizer/` at `9329e64` (2026-06-22), the last commit holding the tree-construction tests | `MIT` |
 
 ### `crates/tinker-pdf-font/data/cmap-resources`
 
@@ -583,10 +585,14 @@ table keeps U+2329 and U+232A, and
 `every_vendored_name_decodes_to_the_code_point_its_set_declares` pins both.
 The cross-check was a script run once over the two files on 26 September 2026,
 recorded here as the measurement it was rather than run by any test (ruling
-13); the HTML list itself is not vendored — its 2 125 names (2 231 entries with
-the semicolon-less legacy spellings) include ones that expand to two code points (`&nGt;` is U+226B U+20D2), which would end
-`tinker-pdf-xml`'s invariant that decoded text is never longer than its source,
-and it is not what any XHTML DTD declares.
+13). *Amended 3 October 2026*: the HTML list is now vendored too, as
+`html-entities` below, for the HTML tokenizer alone. It is still not this
+table: its 2 125 names (2 231 entries with the semicolon-less legacy
+spellings) include ones that expand to two code points (`&nGt;` is U+226B
+U+20D2), which would end the XML reader's invariant that decoded text is never
+longer than its source, and it is not what any XHTML DTD declares — so the
+XML reader resolves from this table and the HTML tokenizer from that one, and
+neither consults the other's.
 
 ### `crates/tinker-pdf-xml/data/encoding-indexes`
 
@@ -657,6 +663,145 @@ BSD-3-Clause's first two conditions ask. Were the reading ever judged wrong,
 the remedy is the allowlist's and not this file's: the data would leave the
 tree with the decoders that read it, and an 8-bit FB2 would be an empty page
 again.
+
+### `crates/tinker-pdf-xml/data/html-entities`
+
+HTML's **named character references** — 2 231 names, 2 125 of them with their
+semicolon and 106 the legacy spellings without it, 93 of them two code points
+— as the HTML standard's build publishes them. `tinker-pdf-xml`'s `build.rs`
+compiles them into one sorted `(name, first, second)` array for the HTML
+tokenizer (`tinker_pdf_xml::html`) and for nothing else: the XML reader keeps
+resolving XHTML 1.0's 253 from `xhtml-entities` above, under the declaration
+that names them, and never consults this table. `build.rs` refuses a name that
+is not ASCII alphanumerics and an optional `;`, a reference of more than two
+code points, a total other than 2 231, and any reference whose UTF-8 is longer
+than six fifths of its own source — `&nGt;`, five bytes for six, is the most
+any name asks, so a reference can lengthen text by a fifth and never multiply
+it.
+
+Cloned from `https://github.com/whatwg/html-build` on 3 October 2026 at commit
+`283a3531a61106d07d9a7d9fb3e6f3b9bfd33d70`: `entities/out/entities.json`, the
+generated file its own README says is checked in because it changes "very
+rarely, if ever", byte for byte — the same 145 897 bytes the XHTML section
+above cross-checked its 253 names against on 26 September — and the
+repository's `LICENSE`, which is the WHATWG's, byte for byte the one
+`encoding-indexes` carries.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `entities.json` | 145 897 | `d741d877ac77c4194c4ad526b5b4a19aef8dfe411ab840a466891cdbb9f362e6` |
+| `LICENSE` | 16 315 | `85dc6f5ccb57a6fe8c33d158f9fc8fc7ee5655a5d3db2cdd131c6a3d0f48a864` |
+
+**The licence** is the WHATWG's, read as `encoding-indexes` reads it:
+CC BY 4.0, with portions incorporated into source code licensed under
+BSD-3-Clause instead — and these are compiled into the crate's source by its
+build script. The data is derived from the W3C's `unicode.xml`
+(`w3c/xml-entities`), under the W3C licence `deny.toml` already allows for the
+XHTML sets.
+
+### `crates/tinker-pdf-xml/data/html5lib-tests`
+
+**The conformance suite the HTML parser is held to**: html5lib's
+tree-construction tests (57 files, 1 792 tests) and tokenizer tests (13 files
+of tests and one of XML-violation tests, 6 806 tests), each an input and the
+tree or tokens the WHATWG standard produces from it. `tests/html5lib.rs` and
+`src/html/suite.rs` read them at test time; nothing here reaches a build.
+
+Cloned from `https://github.com/html5lib/html5lib-tests` on 3 October 2026 and
+checked out at commit `9329e64694e7835d0dcff9811e22856ef6ad16f9` (committed
+2026-06-22). **That is not the repository's head, and the reason is
+upstream's**: four days later, at `224991e`, the tree-construction tests were
+removed from it — its README now says they "are now solely maintained on
+web-platform-tests" — so `9329e64` is the last commit that holds them, and the
+tokenizer tests are taken from the same commit so the two halves describe one
+standard. (The head, `c777c40` of 1 October 2026, adds tokenizer tests for the
+standard's new processing instructions, which this parser does not read; the
+module comment of `tinker_pdf_xml::html::tokenizer` says so.) The
+`tree-construction/scripted/` tests, which need a script engine, are not
+vendored. `LICENSE` and `AUTHORS.rst` are upstream's own; the suite is MIT,
+and the copyright line names its authors.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `LICENSE` | 1 103 | `ff512aac9ef231d504be5afaf4429005024e4b2aaf257be39524f37b8402aaf2` |
+| `AUTHORS.rst` | 460 | `ff66841d2cb8863976712fefb8c2f964b649cdca4480ec3faa31ed43c05c8eb1` |
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `tree-construction/adoption01.dat` | 6 084 | `b2aba05bd1d832f73a0c6103b3c8b151b283bab7c56887274d81f3a062c4963e` |
+| `tree-construction/adoption02.dat` | 1 035 | `b73bf9b375e8ee4b1e4364a7d6fec4eaf862930c26fdbdb59b87b75e468fd3dd` |
+| `tree-construction/blocks.dat` | 9 688 | `e3b7da1b57a4ec6991443dfc7ab3270f41d0f5959092a49be3e0edca0dae2104` |
+| `tree-construction/comments01.dat` | 3 502 | `79a7a42412b6dc48fa0c779dd8ba48d4d50033e7e9e417619288eec1e59d8db2` |
+| `tree-construction/doctype01.dat` | 9 076 | `f3a286c09d729eeed9aa63e0aec13ab12336af04590c169543e6d1e1ef4723b2` |
+| `tree-construction/domjs-unsafe.dat` | 10 356 | `eef4fb719e027ffaadfb854787d172893850fc561c29efe72d90c5bfa3c8b7ac` |
+| `tree-construction/entities01.dat` | 17 640 | `b73605caac5aed5656184ab8db3f08edff5457ac3186cb04afa28384bca955e3` |
+| `tree-construction/entities02.dat` | 4 952 | `f4e0cd461204b0184709be040c00811b776fbde1a6d002bb1c75d02056d9e54a` |
+| `tree-construction/foreign-fragment.dat` | 9 082 | `73e1785753c66420c067e5b29f89b17e7ebe1079687a512040ef19c6d42ac2c2` |
+| `tree-construction/html5test-com.dat` | 4 790 | `71d2ecbd0947599e82c876ce0300ecfc3a8cafd9d1736b33913f6a6152993bde` |
+| `tree-construction/inbody01.dat` | 836 | `cb722f2853ec9613b71ea68e8bb26f474cc450b64612930591ab2656406222fe` |
+| `tree-construction/isindex.dat` | 774 | `d152de773e276a07a1cfc91e93f01f3ce52c447c110192f2828dab51be2721b6` |
+| `tree-construction/main-element.dat` | 727 | `d56e382994e1a5228ddb2ea49a5ff51ab68487f9a8f79ad34bcad05d40dc1e8f` |
+| `tree-construction/math.dat` | 1 862 | `3c2ecc07272c175676ecfafa0cf6e18e74c3293075703702a4b7929fcb0d07bd` |
+| `tree-construction/menuitem-element.dat` | 4 015 | `08e5e25f38bbc181c840ce5c5203b2566dc03129aeaf105ca2311645d40aae4d` |
+| `tree-construction/namespace-sensitivity.dat` | 518 | `318fbc9926eddf5863524f1503c711ddaea93b55bcbd1eaab71b7e354ddfeb09` |
+| `tree-construction/noscript01.dat` | 4 619 | `e82449304a6371c14ed490384b6d814b7b1eeb1022dbc5caa2045fc8400655d7` |
+| `tree-construction/pending-spec-changes-plain-text-unsafe.dat` | 927 | `f45151f8dc7a4fe1a4b36710cf33606ff43cc98a42f1d2f085a77680683b0c99` |
+| `tree-construction/pending-spec-changes.dat` | 851 | `a6b7c4ecccabe70de2f24184245e4a73a8d12ed44ee658c3d5d25cce04c9d27f` |
+| `tree-construction/plain-text-unsafe.dat` | 9 486 | `1aef5e36b7ea04bb1d70684b33529a183938b7604283c562c698d6dad4e3878d` |
+| `tree-construction/quirks01.dat` | 1 170 | `b6717cc15d4ed573ccf6755bc9d52073e675b4d09f23bde07961e27592b9717c` |
+| `tree-construction/ruby.dat` | 4 471 | `5ae76ac4570d40e6648066798dd3ff729231bec98d3e010fdd67e0257f23a742` |
+| `tree-construction/scriptdata01.dat` | 6 624 | `e32ea3adc3d68c90e62ea50b3a41bf80369d1491958532bf00787b3509667322` |
+| `tree-construction/search-element.dat` | 741 | `30be0e9e8cbeea825e0323a7a3a518ab88f44fcada9b4f82b0cc7bbeb9334b76` |
+| `tree-construction/svg.dat` | 1 606 | `4c819b8dbdfbd98cfbce9a535a304b0a16597eb29ccc04077131a62810f309cd` |
+| `tree-construction/tables01.dat` | 7 041 | `bfd4a53246e3acc527c8bb214cc743082e19260e72365001aad3f1d8f4bd08dc` |
+| `tree-construction/template.dat` | 25 142 | `74bc8308e673589d81b63eb71411a6f8ecea6fd6af649b5802c22615b7102a03` |
+| `tree-construction/tests1.dat` | 39 802 | `8438d7948b366c77821cff1fc71826a8090759a78ac8a691a5c82a51fc7e5d57` |
+| `tree-construction/tests10.dat` | 16 458 | `2d2624a819c323661e396d864ac23440053127b5ea7adb44a5904f5ceee5fa64` |
+| `tree-construction/tests11.dat` | 17 679 | `276190e2a7b97e8fcf3bd863a4b4b5346b555a8336c00143cb1d0e8956b94a07` |
+| `tree-construction/tests12.dat` | 1 612 | `e6c506cea74979a0d6ca47f6b175c7b6177d6e57db708920a89694e31dfd8a42` |
+| `tree-construction/tests14.dat` | 1 067 | `d151b2426f38de40a5d4ae726e2a56dbc7742a9b1c95299d60c1e2e0fdad1f98` |
+| `tree-construction/tests15.dat` | 3 649 | `ef784ece74cbd760da3a6947aaf4478810246b73c753f25a04be4d11dd806b2d` |
+| `tree-construction/tests16.dat` | 46 454 | `3350be682713afc1f6dad37059f2551709497a3643c38c26e1fe36fd07d23745` |
+| `tree-construction/tests17.dat` | 2 819 | `0567680775f58a5b2ad24e234f41d53f68fb2fc3ef7809bebaec0920e2f13c89` |
+| `tree-construction/tests18.dat` | 12 119 | `5d0019ae43bb4e0b0da9f2e1d57ac0618a607bd8a1324b163ec7a23a1dc120f3` |
+| `tree-construction/tests19.dat` | 22 988 | `a9316b1eb4d2821a18e2c840394c6218bfcdb598857b92631490d9c3c1840ce4` |
+| `tree-construction/tests2.dat` | 13 193 | `9cf76b5f4890065c04fc82ae828379a55b85cbe76f584fb1ef23dcef0a77b86b` |
+| `tree-construction/tests20.dat` | 13 524 | `07f7661690c4cd7cc0bbb0f1b9c1e1d65135e07c4dde8bbf106692f687e7d33d` |
+| `tree-construction/tests21.dat` | 5 092 | `b1a67420c79a5131002fefc987084ffb6b6094a3a74b272c6f545a47df06452c` |
+| `tree-construction/tests22.dat` | 4 243 | `78488328181d0f82f34b1a5e9e456ff7c713b3ff86dab6ace1530f6f07d5370d` |
+| `tree-construction/tests23.dat` | 3 478 | `2e4752ff4ef898e4a0cf9a450e481440095163d45075a662846a062552afe148` |
+| `tree-construction/tests24.dat` | 929 | `fdd5c21f60f42235ded224a03e7182d289088328f460525adaf3c14e772a24ac` |
+| `tree-construction/tests25.dat` | 3 586 | `f2e08fda6d15a08faf9ff0001ec38560d942069cee6b4e264aeedbbacde7da8d` |
+| `tree-construction/tests26.dat` | 8 865 | `d55d24dfca2444fba759d59346cbab21f7e70340dbb14e2c7af8da3d44abd4ab` |
+| `tree-construction/tests3.dat` | 4 601 | `c4b4d8e0ea3d978c49d1e6a985d427164858b71ec980153c4526ed0c398f43b9` |
+| `tree-construction/tests4.dat` | 1 041 | `e6003a52e1cbffc361eca7c739cdd4459074ac8c59766d1eb171b9c9eb42f517` |
+| `tree-construction/tests5.dat` | 3 160 | `bf80b927082290541781844906abdcb72f091488f7a11e8b7d9ac00076dd4fce` |
+| `tree-construction/tests6.dat` | 11 065 | `be16c74d2a9862283262968439c95b9bfce6182ea61055a3c886c28d14f3e01a` |
+| `tree-construction/tests7.dat` | 7 339 | `aeb9569589c809b1a563c0b163173e8cf980a6a4028cb7c210f19c181b56999a` |
+| `tree-construction/tests8.dat` | 2 664 | `f3c8b1baece162e7e8c394540cdf9057266bb738bb0ad539a9d9b2f9d365f162` |
+| `tree-construction/tests9.dat` | 10 391 | `857820f088506a6d20ea6acefbf19c0a6c4de87a39b24988878066397516b36f` |
+| `tree-construction/tests_innerHTML_1.dat` | 11 205 | `acb9f835119e302d33204f437d54637a84ae26608ccb7bc961c6f7f44202a44c` |
+| `tree-construction/tricky01.dat` | 6 690 | `3fb6d24c5e371860d096ef07f5fff38be3ceaa85f1239bee35cce548b596198a` |
+| `tree-construction/void-in-phrasing.dat` | 1 890 | `c8855173aca8ecbd218abc26db34a631393ce0285fffebffdaf69b8bdd6224e9` |
+| `tree-construction/webkit01.dat` | 14 034 | `063ca232535a792fa238ae769eeb0ddcc9bd2ee961d3da327ca134612d35d93c` |
+| `tree-construction/webkit02.dat` | 14 921 | `03b215350d352faf110df2cc6eac23a44a7f70945b4ea962f0b17bed103459f7` |
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `tokenizer/contentModelFlags.test` | 3 055 | `77784a505a528950761cfb3c76617afade28b27c3be2a8c37dce3c3d8988391d` |
+| `tokenizer/domjs.test` | 13 430 | `3273e7861bbdb094571e4b0813ffdd934fe2bfd65864600fef62e8e3b807131a` |
+| `tokenizer/entities.test` | 19 147 | `fe17483810a00247579f5f129ca9c007fbab6755ba839523e29aa9f8875f4085` |
+| `tokenizer/escapeFlag.test` | 1 378 | `edbd2e070a14fc67f6bbc104e50207f0fe206a21891c260deea3d227b32c93c9` |
+| `tokenizer/namedEntities.test` | 1 128 317 | `a7f0e59ff7653820330548776cb3031c18e45f5fd1481a9813d9c7acee89bd6e` |
+| `tokenizer/numericEntities.test` | 49 842 | `679296c976252322ece27e2b113a5358a0aa3b0b8ecd2d6d9b365f9d1b0f9632` |
+| `tokenizer/pendingSpecChanges.test` | 162 | `6b56d81ca09afa47d8cb0f33e3fb7169010c3a64493e608ebec921ac098ff8e9` |
+| `tokenizer/test1.test` | 10 006 | `524fcfa4d561a14f0c4e72e0573549abe6341fd4dfb8e16bc2dcf59a608a7219` |
+| `tokenizer/test2.test` | 8 647 | `f6450e77760cea823258de86f8e08894a1815671dbec0d74e7fbdab075596e37` |
+| `tokenizer/test3.test` | 349 970 | `9912fa27f03344243f1baa96d9690a5c2a4a9c9426c70da5cbf5c62391d62de4` |
+| `tokenizer/test4.test` | 16 339 | `c4967118aecbf8eb2ca34d5c5306f536614acca03e58610f75fbd9efa89fbb42` |
+| `tokenizer/unicodeChars.test` | 43 771 | `22b7263a840da38179b13693bbfe72f0507dcd41951622456a0d3f5300ba42bd` |
+| `tokenizer/unicodeCharsProblematic.test` | 1 107 | `3c166d5cfa24ee60fd7310ff0f5057e4ae0c649842ec446b5949215759e19a68` |
+| `tokenizer/xmlViolation.test` | 442 | `193a2f52d81adb4df4e056e3489f3bae79b3fc65253ccf31423a0e2f9c128d5c` |
 
 ### `crates/tinker-pdf-content/data/ucd`
 

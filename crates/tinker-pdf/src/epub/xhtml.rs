@@ -344,6 +344,23 @@ pub enum MarkupDefect {
     Truncated,
     /// The document has no element at all.
     Empty,
+    /// The document is not well-formed XML and was read by HTML's own parser
+    /// (WHATWG §13.2) instead, which reads every input to its end: a loose
+    /// HTML file, or HTML handed to `DocumentBuilder::from_html`. Never said
+    /// of an EPUB chapter, which is XHTML by its media type.
+    NotXml,
+    /// Bytes HTML's decoder could not map — malformed UTF-8 after its byte
+    /// order mark, a byte windows-1252 leaves unmapped — each read as U+FFFD.
+    Undecodable,
+    /// A `<meta charset>` named an encoding this build does not decode — one
+    /// of the multi-byte legacy encodings — and HTML's decoder read the bytes
+    /// as UTF-8 where they are UTF-8 and as windows-1252 where they are not.
+    EncodingNotDecoded,
+    /// Elements HTML's tree builder nested past the XML reader's depth cap,
+    /// which it can do by nesting the adoption agency's clones: their text is
+    /// kept, in the deepest element the cap allows, and their structure is
+    /// not.
+    TooDeep,
 }
 
 /// EPUB 3.3 §8.2.2.6's viewport dimensions, in CSS pixels.
@@ -502,6 +519,12 @@ impl Dom {
 /// [`MarkupDefect`] on a partial tree instead, because a document that stops
 /// half way has still said most of a chapter.
 pub fn read(bytes: &[u8], limits: &XmlLimits) -> Result<Dom, XmlError> {
+    read_reporting(bytes, limits).map(|(dom, _)| dom)
+}
+
+/// [`read`], and the refusal that truncated the tree, if one did — which is
+/// what [`read_markup_or_html`] decides on.
+fn read_reporting(bytes: &[u8], limits: &XmlLimits) -> Result<(Dom, Option<XmlError>), XmlError> {
     let source = Source::new(bytes)?;
     let mut dom = Dom {
         warnings: source.warnings().to_vec(),
@@ -510,12 +533,14 @@ pub fn read(bytes: &[u8], limits: &XmlLimits) -> Result<Dom, XmlError> {
     let mut reader = source.reader_with(limits, Doctype::SkipExternalId);
     // The indices of the elements that are open, innermost last.
     let mut open: Vec<usize> = Vec::new();
+    let mut refusal = None;
 
     for event in &mut reader {
         let event = match event {
             Ok(event) => event,
-            Err(_) => {
+            Err(error) => {
                 dom.defects.push(MarkupDefect::Truncated);
+                refusal = Some(error);
                 break;
             }
         };
@@ -606,5 +631,161 @@ pub fn read(bytes: &[u8], limits: &XmlLimits) -> Result<Dom, XmlError> {
     if dom.nodes.is_empty() {
         dom.defects.push(MarkupDefect::Empty);
     }
-    Ok(dom)
+    Ok((dom, refusal))
+}
+
+/// Reads a document that is HTML **or** XHTML: as XML first, and — when the
+/// XML reader refuses it for anything but one of its caps — by HTML's own
+/// parser (`tinker_pdf_xml::html`, WHATWG §13.2), with
+/// [`MarkupDefect::NotXml`] saying so.
+///
+/// **XML first**, because a loose file that is well-formed XHTML is read
+/// exactly as an EPUB's chapter is, and `tests/standalone.rs` holds the two
+/// pixel-equal; HTML's parser reads `<div/>` as an open `<div>` and would
+/// break that for every such file. **HTML when XML refuses**, because a file
+/// that is not well-formed XML is HTML — a `<p>` left open, an attribute
+/// unquoted, a `&nbsp` without its semicolon — and HTML's parser reads every
+/// input to the end where the XML reader stopped at the first of them. A
+/// refusal at a cap is not a question of syntax, and reading the document
+/// again would meet the same cap, so the XML reader's tree stands.
+#[must_use]
+pub fn read_markup_or_html(bytes: &[u8], limits: &XmlLimits) -> Dom {
+    match read_reporting(bytes, limits) {
+        Ok((dom, None)) => dom,
+        Ok((
+            dom,
+            Some(
+                XmlError::DepthCap
+                | XmlError::AttributeCap
+                | XmlError::NameCap
+                | XmlError::TokenCap,
+            ),
+        )) => dom,
+        _ => from_html(&tinker_pdf_xml::html::parse_bytes(bytes, limits), limits),
+    }
+}
+
+/// The tree HTML's parser built, as this reader's tree.
+///
+/// Elements in document order, parents first, every element in the namespace
+/// the parser put it in — so an `<svg>` inside a `<p>` is an SVG element here
+/// as it is in an XHTML file that declares it. Comments, the DOCTYPE and a
+/// `<template>`'s content (which is not among its children, and is inert) are
+/// dropped, as [`read`] drops what is not content.
+///
+/// **One bound is kept here and not in the parser.** HTML's tree builder can
+/// make the tree deeper than its own stack of open elements, because the
+/// adoption agency nests clones inside the blocks it moves; every reader past
+/// this one was written against `tinker_pdf_xml::limits::MAX_XML_DEPTH`
+/// standing in front of it. An element past `limits.max_depth` is not made: its
+/// text is kept, in the deepest element the cap allows, and
+/// [`MarkupDefect::TooDeep`] says so.
+#[must_use]
+pub fn from_html(document: &tinker_pdf_xml::html::Document, limits: &XmlLimits) -> Dom {
+    use tinker_pdf_xml::html::NodeData;
+
+    let mut dom = Dom {
+        defects: vec![MarkupDefect::NotXml],
+        ..Dom::default()
+    };
+    if document.stopped().is_some() {
+        dom.defects.push(MarkupDefect::Truncated);
+    }
+    if document.encoding().is_some_and(|d| d.not_decoded.is_some()) {
+        dom.defects.push(MarkupDefect::EncodingNotDecoded);
+    }
+    if document.encoding().is_some_and(|d| d.replaced > 0) {
+        dom.defects.push(MarkupDefect::Undecodable);
+    }
+    let Some(root) = document.document_element() else {
+        dom.defects.push(MarkupDefect::Empty);
+        return dom;
+    };
+    let mut too_deep = false;
+    // (node in the HTML tree, the element it goes inside, its depth)
+    let mut stack: Vec<(usize, Option<usize>, usize)> = vec![(root, None, 1)];
+    while let Some((at, parent, depth)) = stack.pop() {
+        let Some(node) = document.node(at) else {
+            continue;
+        };
+        match &node.data {
+            NodeData::Text(text) => {
+                if let Some(parent) = parent.and_then(|p| dom.nodes.get_mut(p)) {
+                    parent.children.push(Child::Text(text.clone()));
+                }
+            }
+            NodeData::Element(element) => {
+                if depth > limits.max_depth {
+                    // The element is not made; what it holds goes on into the
+                    // deepest one that was.
+                    too_deep = true;
+                    for &child in node.children.iter().rev() {
+                        stack.push((child, parent, depth));
+                    }
+                    continue;
+                }
+                let index = dom.nodes.len();
+                let mut made = Node {
+                    name: element.name.clone(),
+                    namespace: Some(element.namespace.uri().to_owned()),
+                    id: None,
+                    classes: Vec::new(),
+                    attributes: Vec::with_capacity(element.attributes.len()),
+                    parent,
+                    previous: None,
+                    next: None,
+                    children: Vec::new(),
+                    style: None,
+                };
+                for attribute in &element.attributes {
+                    let name = attribute.qualified();
+                    match name.as_str() {
+                        "id" => made.id = Some(attribute.value.clone()),
+                        "class" => {
+                            made.classes = attribute
+                                .value
+                                .split_whitespace()
+                                .map(str::to_owned)
+                                .collect();
+                        }
+                        "style" => made.style = Some(attribute.value.clone()),
+                        _ => {}
+                    }
+                    made.attributes.push((name, attribute.value.clone()));
+                }
+                if let Some(parent_index) = parent {
+                    let previous = dom.nodes.get(parent_index).and_then(|p| {
+                        p.children.iter().rev().find_map(|child| match child {
+                            Child::Element(at) => Some(*at),
+                            Child::Text(_) => None,
+                        })
+                    });
+                    made.previous = previous;
+                    if let Some(previous) = previous.and_then(|p| dom.nodes.get_mut(p)) {
+                        previous.next = Some(index);
+                    }
+                    if let Some(p) = dom.nodes.get_mut(parent_index) {
+                        p.children.push(Child::Element(index));
+                    }
+                } else if dom.root.is_none() {
+                    dom.root = Some(index);
+                }
+                dom.nodes.push(made);
+                for &child in node.children.iter().rev() {
+                    stack.push((child, Some(index), depth + 1));
+                }
+            }
+            NodeData::Document
+            | NodeData::Fragment
+            | NodeData::Doctype { .. }
+            | NodeData::Comment(_) => {}
+        }
+    }
+    if too_deep {
+        dom.defects.push(MarkupDefect::TooDeep);
+    }
+    if dom.nodes.is_empty() {
+        dom.defects.push(MarkupDefect::Empty);
+    }
+    dom
 }

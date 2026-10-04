@@ -486,22 +486,133 @@ fn what_a_loose_file_names_beside_itself_is_named_as_missing() {
     );
 }
 
-/// **HTML that does not parse as XML is read as far as it does, and the report
-/// says it stopped.** This build has no HTML5 tree builder — the narrowed half
-/// of the row — so tag soup is never silently a complete document.
+/// **Tag soup opens as the tree HTML's parser builds, pixel for pixel**
+/// (tier 5's formats row). Each soup below is HTML the XML reader stops at in
+/// its first lines — an unclosed `<p>` and `<li>`, an unquoted attribute, a
+/// `&nbsp` with no semicolon, a misnested `<b><i>`, a cell with no row — and
+/// beside it the XHTML of the tree §13.2.6 builds from it, written out by hand
+/// from the standard and the way html5lib's suite writes such trees. The
+/// soup's pages are the twin's pages, byte for byte, and the report says the
+/// soup was not XML and nothing else.
 #[test]
-fn tag_soup_is_read_as_far_as_it_parses_and_says_so() {
-    let soup = "<!DOCTYPE html><html><body><p>first</p><p>unclosed<br><p>after</body></html>";
-    let document = open(soup.as_bytes());
-    assert!(page_text(&document, 0).contains("first"));
-    assert!(
-        warnings(&document).contains(&ArchiveWarning::Markup {
-            item: String::new(),
-            defect: tinker_pdf::epub::xhtml::MarkupDefect::Truncated
-        }),
-        "{:?}",
-        warnings(&document)
+fn tag_soup_opens_as_the_tree_html_builds_pixel_for_pixel() {
+    let cases: [(&str, &str); 3] = [
+        (
+            "<!DOCTYPE html><html><body><p>first</p><p>unclosed<br><p>after</body></html>",
+            "<p>first</p><p>unclosed<br/></p><p>after</p>",
+        ),
+        (
+            "<title>Soup</title><h1 class=big>Heading</h1><ul><li>one<li>two &amp three\
+             &nbsp;four</ul><p><b>bold <i>both</b> italic</i> plain",
+            "<h1 class=\"big\">Heading</h1><ul><li>one</li><li>two &amp; three\u{A0}four</li></ul>\
+             <p><b>bold <i>both</i></b><i> italic</i> plain</p>",
+        ),
+        (
+            "<table><td>cell<td>next</table><p>after the table",
+            "<table><tbody><tr><td>cell</td><td>next</td></tr></tbody></table><p>after the table</p>",
+        ),
+    ];
+    for (soup, tree) in cases {
+        let opened = drawn(open(soup.as_bytes()));
+        let twin = drawn(open(
+            format!(
+                "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head></head><body>{tree}</body></html>"
+            )
+            .as_bytes(),
+        ));
+        assert_eq!(opened.page_count(), twin.page_count(), "{soup}");
+        let (a, b) = (render(&opened, 0), render(&twin, 0));
+        assert!(ink(&a) >= LEAST_INK, "{soup}: nothing was drawn");
+        assert!(a.data == b.data, "{soup}: the soup is not the tree's page");
+        assert_eq!(page_text(&opened, 0), page_text(&twin, 0), "{soup}");
+        let soup_warnings: Vec<ArchiveWarning> = warnings(&opened)
+            .into_iter()
+            .filter(|w| !matches!(w, ArchiveWarning::FontsAttachedAfterPagination))
+            .collect();
+        assert_eq!(
+            soup_warnings,
+            [ArchiveWarning::Markup {
+                item: String::new(),
+                defect: tinker_pdf::epub::xhtml::MarkupDefect::NotXml
+            }],
+            "{soup}"
+        );
+    }
+    // The title of a document that is not XML is its title still.
+    let titled = open(b"<title>Soup</title><p>x");
+    assert_eq!(titled.metadata().title.as_deref(), Some("Soup"));
+}
+
+/// **The tree HTML builds is held to the XML reader's depth**: every reader
+/// after this one was written against `MAX_XML_DEPTH` standing in front of it,
+/// and HTML's adoption agency can nest clones deeper than its own stack. An
+/// element past the cap is not made; its text is kept in the deepest element
+/// the cap allows, and `TooDeep` says so.
+#[test]
+fn an_html_tree_deeper_than_the_cap_keeps_its_text_and_says_so() {
+    use tinker_pdf::epub::xhtml::{from_html, MarkupDefect};
+    let limits = tinker_pdf_xml::Limits {
+        max_depth: 4,
+        ..tinker_pdf_xml::Limits::DEFAULT
+    };
+    let parsed = tinker_pdf_xml::html::parse(
+        "<div><div><div><span>deep <b>deeper</b></span></div></div></div><p>after",
+        &tinker_pdf_xml::Limits::DEFAULT,
     );
+    let dom = from_html(&parsed, &limits);
+    assert!(
+        dom.defects.contains(&MarkupDefect::TooDeep),
+        "{:?}",
+        dom.defects
+    );
+    for (at, node) in dom.nodes.iter().enumerate() {
+        let mut depth = 1;
+        let mut up = node.parent;
+        while let Some(parent) = up {
+            depth += 1;
+            up = dom.nodes[parent].parent;
+        }
+        assert!(depth <= 4, "node {at} ({}) is {depth} deep", node.name);
+    }
+    let text: String = dom
+        .nodes
+        .iter()
+        .flat_map(|n| &n.children)
+        .filter_map(|c| match c {
+            tinker_pdf::epub::xhtml::Child::Text(t) => Some(t.as_str()),
+            tinker_pdf::epub::xhtml::Child::Element(_) => None,
+        })
+        .collect();
+    assert_eq!(
+        text, "deep deeperafter",
+        "the text past the cap is kept, in order"
+    );
+    // Within the cap nothing is said.
+    let shallow = from_html(&parsed, &tinker_pdf_xml::Limits::DEFAULT);
+    assert_eq!(shallow.defects, [MarkupDefect::NotXml]);
+}
+
+/// **A well-formed XHTML file is still read as XML**, so it is not reported
+/// as anything else; and **HTML in windows-1252** — not UTF-8, and saying
+/// nothing about its encoding — is decoded by HTML's default rather than
+/// lost.
+#[test]
+fn xml_is_still_xml_and_an_undeclared_eight_bit_page_is_windows_1252() {
+    let xhtml = open(
+        b"<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>t</title></head>\
+          <body><p>fine</p></body></html>",
+    );
+    assert!(
+        warnings(&xhtml).is_empty(),
+        "well-formed XHTML: {:?}",
+        warnings(&xhtml)
+    );
+    let latin = open(b"<!DOCTYPE html><p>\x93caf\xe9\x94 & cr\xe8me");
+    assert_eq!(page_text(&latin, 0), "\u{201C}café\u{201D} & crème");
+    assert!(warnings(&latin).contains(&ArchiveWarning::Markup {
+        item: String::new(),
+        defect: tinker_pdf::epub::xhtml::MarkupDefect::NotXml
+    }));
 }
 
 // ---- a bare image ------------------------------------------------------------

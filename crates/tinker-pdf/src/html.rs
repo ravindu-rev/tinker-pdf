@@ -183,11 +183,12 @@ pub trait FromHtml: Sized {
     /// `stylesheet` applied as an author sheet ahead of every sheet the
     /// markup links.
     ///
-    /// `markup` is read as XML — XHTML, or HTML that is well-formed XML — and
-    /// a document that stops being well-formed is laid out as far as it read,
-    /// with [`ArchiveWarning::Markup`] saying so. A reference to anything but a
-    /// `data:` URL is missing and named; [`FromHtml::from_html_with`] is where
-    /// a caller says what one means.
+    /// `markup` is read as XML first — XHTML, or HTML that is well-formed XML
+    /// — and, when it is not XML, by HTML's own parser (WHATWG §13.2), which
+    /// reads tag soup to its end; [`ArchiveWarning::Markup`] says which with
+    /// `MarkupDefect::NotXml`. A reference to anything but a `data:` URL is
+    /// missing and named; [`FromHtml::from_html_with`] is where a caller says
+    /// what one means.
     ///
     /// # Errors
     /// [`HtmlError`]: a cap the cascade or the layout enforces.
@@ -267,7 +268,7 @@ impl FromHtml for DocumentBuilder {
             };
 
         let limits = epub::Limits::DEFAULT;
-        let dom = epub::read::markup(markup.as_ref(), &limits.xml);
+        let dom = epub::xhtml::read_markup_or_html(markup.as_ref(), &limits.xml);
         let mut builder = DocumentBuilder::new();
         if let Some(title) = dom.title() {
             builder.set_info(b"Title", &title);

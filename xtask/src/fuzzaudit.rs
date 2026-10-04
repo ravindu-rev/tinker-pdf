@@ -188,6 +188,10 @@ const UNSIGNED: &[(&str, &str)] = &[
         "FDF and XFDF are text, and both readers see every seed whichever it is",
     ),
     ("form_script", "a generator over field and action shapes"),
+    (
+        "html",
+        "HTML is text, and tag soup need not begin with any one tag",
+    ),
     ("inflate", "a raw DEFLATE stream begins with a bit field"),
     ("jbig2", "an embedded JBIG2 stream has no file header"),
     (
