@@ -60,8 +60,51 @@ mod tests;
 /// [`Refusal`], whose six variants are the whole of what produces no picture
 /// at all. Everything else is a [`Scene`] with [`Scene::warnings`] on it.
 pub fn read(bytes: &[u8], viewport: Option<(f64, f64)>, limits: &Limits) -> Result<Scene, Refusal> {
+    read_with(bytes, viewport, limits, &Context::NONE)
+}
+
+/// [`read`], with the document's references reaching what `context` names —
+/// an `@import` in a `<style>` element fetched through the caller's
+/// container.
+///
+/// # Errors
+/// [`read`]'s.
+pub fn read_with(
+    bytes: &[u8],
+    viewport: Option<(f64, f64)>,
+    limits: &Limits,
+    context: &Context<'_>,
+) -> Result<Scene, Refusal> {
     let tree = document::read(bytes, limits)?;
-    scene::build(&tree, viewport, limits)
+    scene::build_with(&tree, viewport, limits, context)
+}
+
+/// What a document reaches beyond its own bytes, which this crate does not
+/// have and its caller does (ruling 8): the container an `@import` is fetched
+/// from.
+///
+/// `#[non_exhaustive]`, made by [`Context::new`] or [`Context::NONE`], so a
+/// reach added later is not a break.
+#[derive(Clone, Copy)]
+#[non_exhaustive]
+pub struct Context<'a> {
+    /// What `@import` is resolved through — `tinker-pdf-css`'s trait, the
+    /// one the EPUB cascade's imports go through, so one adapter answers
+    /// both.
+    pub imports: &'a dyn tinker_pdf_css::ImportResolver,
+}
+
+impl<'a> Context<'a> {
+    /// Nothing beside the document: every `@import` unresolved.
+    pub const NONE: Context<'static> = Context {
+        imports: &tinker_pdf_css::NoImports,
+    };
+
+    /// `@import` resolved through `imports`.
+    #[must_use]
+    pub fn new(imports: &'a dyn tinker_pdf_css::ImportResolver) -> Self {
+        Context { imports }
+    }
 }
 
 /// How much work one document may cost.
@@ -231,9 +274,18 @@ pub enum Warning {
     /// paint with. The paint's own fallback stands, or `none` when it stated
     /// none — which is §13.2's answer and not an invention here.
     PaintServerUnresolved,
-    /// An at-rule in a `<style>` element — `@media`, `@import`, `@font-face`.
-    /// Skipped by the CSS specification's own recovery, and named.
+    /// An at-rule in a `<style>` element this build does not read — anything
+    /// but `@media`, `@import`, `@font-face` and `@charset` — or one of those
+    /// that was invalid or past a bound: an `@import` after a rule, into a
+    /// cascade layer, nested past `MAX_CSS_IMPORT_DEPTH`, importing its own
+    /// ancestor, or past the token budget or `MAX_CSS_BYTES` that every
+    /// import shares; a `@font-face` with no family or no source. Skipped by
+    /// the CSS specification's own recovery, and named.
     AtRuleIgnored,
+    /// An `@import` whose sheet the caller's container did not hand back —
+    /// or any `@import` at all, through [`read`], which has no container. The
+    /// rules after it apply; its own do not.
+    ImportUnresolved,
     /// `<textPath>`, `<tref>` and `<altGlyph>` — §10.13's text on a path and
     /// its two relatives. Each is a second layout engine.
     TextLayoutUnsupported,
@@ -644,4 +696,9 @@ pub struct Scene {
     pub nodes: Vec<Node>,
     /// Everything the picture asked for that this build did not draw.
     pub warnings: Vec<Warning>,
+    /// Every `@font-face` its `<style>` elements and their imports declared,
+    /// in source order, for the caller to load through its container: a face
+    /// is a font program, which this crate has no vocabulary for (ruling 8),
+    /// and a run naming its family is matched against it there.
+    pub font_faces: Vec<tinker_pdf_css::font_face::FontFace>,
 }

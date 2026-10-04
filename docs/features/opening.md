@@ -89,8 +89,9 @@ depth cap keeps its text in the deepest element the cap allows
 against that cap. A file opened from its bytes has nothing
 beside it, so a stylesheet, a picture or a face it names by a relative
 reference is **missing and named** (`StylesheetUnresolved`, `ImageNotDrawn`,
-`SvgImageUnresolved`, `FontFace`); RFC 2397's `data:` URL carries its own bytes
-and resolves. A streamed open of one is whole-file, as a container's is, and
+`SvgImageUnresolved`, `FontFace`, and an SVG `<style>` element's `@import` as
+`Svg { warning: ImportUnresolved }`); RFC 2397's `data:` URL carries its own
+bytes and resolves. A streamed open of one is whole-file, as a container's is, and
 its wider sniff is read only when the first kilobyte holds no PDF header, so
 a streamed PDF whose header is in that kilobyte makes the reads it always
 made; one with more junk in front costs one read of the 4 096-byte head the
@@ -304,7 +305,7 @@ exceed it routinely — declared in one place,
 | A bare BMP | `OpenError::NotAPdf` | `BM` is two bytes, and also how a text file about a car begins; the comic path can afford it because an archive's entries are already pictures, and a sniff over every input cannot | `crates/tinker-pdf/src/standalone.rs` |
 | An SVG or HTML whose root element is past byte 4 096 | `OpenError::NotAPdf` | the prolog is walked inside `SNIFF_WINDOW` and not searched past it, because a sniff that scans is one that finds `<svg` inside a PDF's stream | `crates/tinker-pdf/src/standalone.rs` |
 | A bare AVIF | `ArchiveWarning::PlaceholderPage { defect: PageDefect::UnsupportedFormat(Avif), .. }` | recognised by magic and not decoded here; one placeholder page naming the format, which is what a one-entry comic archive holding it produces, because a bare picture is paged by the comic path itself | [cbz](cbz.md) |
-| What a loose file names beside itself | `StylesheetUnresolved`, `ImageNotDrawn { defect: Unresolved }`, `SvgImageUnresolved`, `FontFace { defect: ResourceMissing }` | bytes arrive with no directory, so a relative reference has nothing to resolve against; each is named by the warning that already exists for it. RFC 2397's `data:` URL is the exception and resolves | `crates/tinker-pdf/src/standalone.rs` |
+| What a loose file names beside itself | `StylesheetUnresolved`, `ImageNotDrawn { defect: Unresolved }`, `SvgImageUnresolved`, `FontFace { defect: ResourceMissing }`, `Svg { warning: ImportUnresolved }` | bytes arrive with no directory, so a relative reference has nothing to resolve against; each is named by the warning that already exists for it. RFC 2397's `data:` URL is the exception and resolves | `crates/tinker-pdf/src/standalone.rs` |
 | Encrypted, nothing authenticated | `DocumentError::PasswordRequired` | The document opened; reading it is the thing that waits | [encryption](encryption.md) |
 | Encryption handler not implemented | `DocumentError::UnsupportedEncryption` | A handler outside R2–R6 cannot be pretended at | [encryption](encryption.md) |
 | Decompression bomb | `WarningKind::Filter(Warning::OutputCapHit)` | `stream_decoded` output capped at `MAX_DECODED_STREAM` (128 MiB), so a 1 KB stream cannot buy unbounded memory | `limits.rs` |

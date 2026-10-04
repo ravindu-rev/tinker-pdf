@@ -977,6 +977,68 @@ fn mutated_tag_soup_never_panics_the_html_parser() {
     }
 }
 
+/// An SVG `<style>` element's at-rules (the SVG-in-the-spine row), mutated:
+/// `@media` blocks nested and damaged, `@font-face` rules cut short, and
+/// `@import`s answered with the document itself under the name asked for —
+/// so a mutation that leaves an `@import` at the top of the file makes the
+/// file its own stylesheet, and a repeated name is a cycle. Every read must
+/// hold the bytes every import shares to `MAX_CSS_BYTES` and one sheet past
+/// it, and the loose SVG must open, its `data:` imports read.
+/// `fuzz/fuzz_targets/svg.rs` is the deep version.
+#[test]
+fn mutated_svg_style_sheets_never_panic_and_hold_their_bytes() {
+    use std::cell::Cell;
+    use tinker_pdf_css::ImportResolver;
+
+    struct Itself<'a> {
+        body: &'a [u8],
+        bytes: Cell<usize>,
+    }
+    impl ImportResolver for Itself<'_> {
+        fn resolve(&self, href: &str, _: Option<&str>) -> Option<(String, Vec<u8>)> {
+            self.bytes.set(self.bytes.get() + self.body.len());
+            Some((href.to_owned(), self.body.to_vec()))
+        }
+    }
+
+    let seed = concat!(
+        "<!-- ;@import 'n'; @import 'o' print; --><svg xmlns=\"http://www.w3.org/2000/svg\" ",
+        "width=\"10\" height=\"10\"><style>@import 'm'; @import url(n) all and (min-width: 5px);",
+        "@import url('data:text/css,rect%7Bfill%3Ared%7D');",
+        "@media print { rect { fill: lime } @media (orientation: portrait) { circle { fill: blue } } }",
+        "@font-face { font-family: F; src: url(data:font/ttf;base64,AAEAAA==) format('truetype') }",
+        "@keyframes k { from { opacity: 0 } } rect { stroke: black } @import 'late';</style>",
+        "<rect width=\"5\" height=\"5\"/><circle cx=\"7\" cy=\"7\" r=\"2\"/>",
+        "<text x=\"1\" y=\"9\" font-family=\"F\">x</text></svg>"
+    )
+    .as_bytes();
+    let cap = tinker_pdf_css::limits::MAX_CSS_BYTES;
+    let mut rng = Rng(0x0053_5647_4053);
+    for case in 0..sweep(600) {
+        let mutated = mutate(seed, &mut rng);
+        let label = format!("svg style case {case}");
+        let _guard = Guard(&label);
+        let itself = Itself {
+            body: &mutated,
+            bytes: Cell::new(0),
+        };
+        let _ = tinker_pdf_svg::read_with(
+            &mutated,
+            Some((100.0, 100.0)),
+            &tinker_pdf_svg::Limits::DEFAULT,
+            &tinker_pdf_svg::Context::new(&itself),
+        );
+        assert!(
+            itself.bytes.get() <= cap + mutated.len(),
+            "{label}: {} bytes imported past {cap}",
+            itself.bytes.get()
+        );
+        if case % 4 == 0 {
+            exercise(mutated);
+        }
+    }
+}
+
 /// Markdown is read from any bytes by a caller who says it is Markdown, so
 /// every byte sequence is an input (tier 5's Markdown row). Two halves: the
 /// shapes that make a CommonMark reader quadratic — a run of openers with no

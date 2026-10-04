@@ -737,6 +737,11 @@ impl Walk<'_> {
             // Not a warning, because nothing was refused — the specification
             // says these do not paint.
             "title" | "desc" | "metadata" => Ok(()),
+            // §6.3: a `<style>` element is never rendered. Its sheet was read
+            // before the walk began (`style::sheet_with`), so it is not an
+            // unknown element either — reporting it as one named a loss that
+            // was not there in every document that styles itself.
+            "style" => Ok(()),
 
             // ---- §9's basic shapes -----------------------------------------
             "path" | "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" => {
@@ -2246,6 +2251,19 @@ fn collapse(text: &str) -> String {
 /// [`Refusal::TooDeep`], [`Refusal::TooManyNodes`] and
 /// [`Refusal::TooManySegments`] are the three ceilings a document can cross.
 pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Result<Scene, Refusal> {
+    build_with(tree, viewport, limits, &crate::Context::NONE)
+}
+
+/// [`build`], with the document's references reaching what `context` names.
+///
+/// # Errors
+/// [`build`]'s.
+pub fn build_with(
+    tree: &Tree,
+    viewport: Option<(f64, f64)>,
+    limits: &Limits,
+    context: &crate::Context<'_>,
+) -> Result<Scene, Refusal> {
     let viewport = match viewport {
         Some((width, height))
             if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 =>
@@ -2262,7 +2280,16 @@ pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Resu
     // per element: two of them are one author stylesheet in source order, and
     // that order is what `css-cascade-5` §6.1's last criterion compares.
     let css_limits = CssLimits::DEFAULT;
-    let sheet = style::sheet(tree, css_limits.max_selector_parts);
+    let mut sheet = style::sheet_with(
+        tree,
+        css_limits.max_selector_parts,
+        &style::Reach {
+            imports: context.imports,
+            media: style::print(viewport),
+        },
+    );
+    let font_faces = std::mem::take(&mut sheet.font_faces);
+    let imports_unresolved = sheet.imports_unresolved;
     let mut walk = Walk {
         tree,
         limits,
@@ -2277,6 +2304,9 @@ pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Resu
     };
     if walk.sheet.at_rules > 0 {
         walk.warn(Warning::AtRuleIgnored);
+    }
+    if imports_unresolved > 0 {
+        walk.warn(Warning::ImportUnresolved);
     }
     let root = tree.root;
     let Some(node) = tree.nodes.get(root) else {
@@ -2296,6 +2326,7 @@ pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Resu
         },
     )?;
     let mut scene = walk.scene;
+    scene.font_faces = font_faces;
     // The size the root stated, not the size the walk happened to leave
     // behind: a nested `<svg>` sets `Frame::viewport` and must not be able to
     // change what the document says it is.

@@ -63,6 +63,22 @@
 //! - **A text run's font size is a number.** It reaches a `Tf` operator, and an
 //!   infinity there is a content stream a reader refuses outright — which is a
 //!   worse failure than a page that looks wrong, not a better one.
+//!
+//! # A `<style>` element's imports, from the same bytes
+//!
+//! The document is read a second time through [`tinker_pdf_svg::read_with`]
+//! and a resolver that answers **every** `@import` with the input itself,
+//! under the address it was asked for — so a mutation that puts an `@import`
+//! at the front of the file makes the file its own stylesheet, a chain of
+//! distinct names nests it, and a repeated name is a cycle. What is asserted
+//! beyond the scene's own invariants above:
+//!
+//! - **The bytes every import shares hold**: what the resolver handed back
+//!   never comes to more than `MAX_CSS_BYTES` and one sheet past it, the one
+//!   that crossed it — a comment is no tokens, so the token budget alone
+//!   would let a file read itself without end.
+//! - **Reading with imports is deterministic**, the same scene and the same
+//!   number of fetches twice.
 //! # What this target cannot find, and what covers it instead
 //!
 //! Every assertion above is **structural**: a scene carries only finite
@@ -79,8 +95,56 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
+use std::cell::Cell;
+
+use tinker_pdf_css::ImportResolver;
 use tinker_pdf_svg::path::{self, Outline, Segment};
-use tinker_pdf_svg::{transform, Limits, Node, Paint, Scene};
+use tinker_pdf_svg::{transform, Context, Limits, Node, Paint, Scene};
+
+/// Every `@import` answered with the input, under the address asked for, and
+/// what was handed back counted.
+struct Itself<'a> {
+    body: &'a [u8],
+    fetched: Cell<usize>,
+    bytes: Cell<usize>,
+}
+
+impl ImportResolver for Itself<'_> {
+    fn resolve(&self, href: &str, _base: Option<&str>) -> Option<(String, Vec<u8>)> {
+        self.fetched.set(self.fetched.get() + 1);
+        self.bytes.set(self.bytes.get() + self.body.len());
+        Some((href.to_owned(), self.body.to_vec()))
+    }
+}
+
+/// The scene's own invariants: finite numbers, the node cap, and warnings
+/// deduplicated inside theirs.
+fn check(scene: &Scene, limits: &Limits) {
+    for number in numbers(scene) {
+        assert!(
+            number.is_finite(),
+            "a scene carries something that is not a number: {number}"
+        );
+    }
+    // At every depth: a group is assembled in a list of its own, so the
+    // top-level length is not the number the cap is about.
+    assert!(
+        count(&scene.nodes) <= limits.max_nodes,
+        "{} nodes came out of a cap of {}",
+        count(&scene.nodes),
+        limits.max_nodes
+    );
+    assert!(
+        scene.warnings.len() <= limits.max_warnings,
+        "the warning cap did not hold"
+    );
+    for (index, warning) in scene.warnings.iter().enumerate() {
+        assert!(
+            !scene.warnings[..index].contains(warning),
+            "a warning was reported twice: {warning:?}"
+        );
+    }
+}
 
 /// Every point a segment carries.
 fn points(segment: &Segment) -> Vec<[f64; 2]> {
@@ -308,33 +372,36 @@ fuzz_target!(|data: &[u8]| {
         Some((100.0, 50.0))
     };
     if let Ok(scene) = tinker_pdf_svg::read(body, viewport, &limits) {
-        for number in numbers(&scene) {
-            assert!(
-                number.is_finite(),
-                "a scene carries something that is not a number: {number}"
-            );
-        }
-        // At every depth: a group is assembled in a list of its own, so the
-        // top-level length is not the number the cap is about.
-        assert!(
-            count(&scene.nodes) <= limits.max_nodes,
-            "{} nodes came out of a cap of {}",
-            count(&scene.nodes),
-            limits.max_nodes
-        );
-        assert!(
-            scene.warnings.len() <= limits.max_warnings,
-            "the warning cap did not hold"
-        );
-        for (index, warning) in scene.warnings.iter().enumerate() {
-            assert!(
-                !scene.warnings[..index].contains(warning),
-                "a warning was reported twice: {warning:?}"
-            );
-        }
+        check(&scene, &limits);
         let again = tinker_pdf_svg::read(body, viewport, &limits)
             .expect("the same bytes refused on a second run");
         assert!(again == scene, "reading a document is not deterministic");
+    }
+
+    // ---- the same bytes as their own stylesheet ------------------------------
+    let itself = Itself {
+        body,
+        fetched: Cell::new(0),
+        bytes: Cell::new(0),
+    };
+    let read = tinker_pdf_svg::read_with(body, viewport, &limits, &Context::new(&itself));
+    let cap = tinker_pdf_css::limits::MAX_CSS_BYTES;
+    assert!(
+        itself.bytes.get() <= cap.saturating_add(body.len()),
+        "{} bytes were imported past a cap of {cap}",
+        itself.bytes.get()
+    );
+    if let Ok(scene) = read {
+        check(&scene, &limits);
+        let fetched = itself.fetched.replace(0);
+        let again = tinker_pdf_svg::read_with(body, viewport, &limits, &Context::new(&itself))
+            .expect("the same bytes refused on a second run");
+        assert!(again == scene, "reading with imports is not deterministic");
+        assert_eq!(
+            itself.fetched.get(),
+            fetched,
+            "imports were fetched differently"
+        );
     }
 
     let Ok(text) = core::str::from_utf8(body) else {

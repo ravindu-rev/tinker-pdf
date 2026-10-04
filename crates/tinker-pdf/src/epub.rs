@@ -884,7 +884,16 @@ pub fn synthesise(
                 // and reporting it as the second would be a lie about the book.
                 None => defect = Some(SpineDefect::ResourceMissing),
                 Some(bytes) if is_svg => {
-                    match read_svg(&bytes, layout.page, &name, limits, &mut warnings) {
+                    match read_svg(
+                        book,
+                        &source,
+                        &bytes,
+                        layout.page,
+                        &name,
+                        limits,
+                        &mut declared,
+                        &mut warnings,
+                    ) {
                         Ok(read) => scene = Some(read),
                         Err(why) => defect = Some(why),
                     }
@@ -1049,23 +1058,69 @@ struct PassOne<'a> {
 /// The viewport handed in is the caller's page **in CSS pixels**, because that
 /// is the unit an SVG's own lengths are in — a root that says `width="100%"`
 /// is asking for the box it was placed in, and this is that box.
-fn read_svg(
+///
+/// `path` is the document's place in `resources`: an `@import` in one of its
+/// `<style>` elements is fetched against it, and each `@font-face` it declares
+/// joins `declared` with it as the base, for `typeface::load` to load beside
+/// the book's own — which is how a run naming that family is set in it.
+#[allow(clippy::too_many_arguments)]
+fn read_svg<R: read::Resources + ?Sized>(
+    resources: &mut R,
+    path: &str,
     bytes: &[u8],
     page: (f64, f64),
     name: &str,
     limits: &Limits,
+    declared: &mut Vec<FontFace>,
     warnings: &mut Vec<ArchiveWarning>,
 ) -> Result<tinker_pdf_svg::Scene, SpineDefect> {
     let box_ = (page.0 / read::PX_TO_PT, page.1 / read::PX_TO_PT);
-    let read =
-        tinker_pdf_svg::read(bytes, Some(box_), &limits.svg).map_err(SpineDefect::SvgUnreadable)?;
+    let imports = SvgImports {
+        imports: read::Imports::new(resources, *limits),
+        path,
+    };
+    let read = tinker_pdf_svg::read_with(
+        bytes,
+        Some(box_),
+        &limits.svg,
+        &tinker_pdf_svg::Context::new(&imports),
+    )
+    .map_err(SpineDefect::SvgUnreadable)?;
     for warning in &read.warnings {
         warnings.push(ArchiveWarning::Svg {
             item: name.to_owned(),
             warning: warning.clone(),
         });
     }
+    // `read_markup`'s two rules: a `<style>` element's face takes the
+    // document's address as its base, and an equal rule is declared once.
+    for face in &read.font_faces {
+        let mut face = face.clone();
+        if face.base.is_none() {
+            face.base = Some(path.to_owned());
+        }
+        if !declared.contains(&face) {
+            declared.push(face);
+        }
+    }
     Ok(read)
+}
+
+/// An SVG's `@import`s, fetched from the container it came out of.
+///
+/// [`read::Imports`] drops an import with no base, because a sheet with no
+/// address of its own is a `<style>` element and the XHTML reader hands the
+/// document's path in for it. The SVG leaf has no path to hand in (ruling 8),
+/// so this fills it in: a `<style>` element's base is the document's.
+struct SvgImports<'b, R: ?Sized> {
+    imports: read::Imports<'b, R>,
+    path: &'b str,
+}
+
+impl<R: read::Resources + ?Sized> tinker_pdf_css::ImportResolver for SvgImports<'_, R> {
+    fn resolve(&self, href: &str, base: Option<&str>) -> Option<(String, Vec<u8>)> {
+        self.imports.resolve(href, Some(base.unwrap_or(self.path)))
+    }
 }
 
 /// One XHTML content document's tree, cascaded and turned into boxes, or the
@@ -1259,7 +1314,16 @@ pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
     let mut census = read::Census::default();
     let mut declared: Vec<FontFace> = Vec::new();
     let (fixed, reading, scene, defect) = match content {
-        Loose::Svg(bytes) => match read_svg(bytes, layout.page, name, limits, &mut warnings) {
+        Loose::Svg(bytes) => match read_svg(
+            resources,
+            name,
+            bytes,
+            layout.page,
+            name,
+            limits,
+            &mut declared,
+            &mut warnings,
+        ) {
             Ok(scene) => (true, None, Some(scene), None),
             Err(why) => (true, None, None, Some(why)),
         },

@@ -138,23 +138,18 @@ fn one_id_beats_any_number_of_classes() {
     assert_eq!(fill_of(&scene, 0), rgb(0, 255, 0));
 }
 
-/// An at-rule in a `<style>` element is skipped whole and named.
-///
-/// Not read as a qualified rule: `@media print { .a { fill: magenta } }` has a
-/// prelude that is not a selector list, and a build that fed it to the selector
-/// parser would either refuse the sheet or — worse — apply the print rule.
+/// An `@media` block whose query does not match is not read as a qualified
+/// rule, and is not a skipped at-rule either: `@media screen { .a { fill:
+/// magenta } }` is a rule for a medium a page is never on. `tests/at_rules.rs`
+/// holds the medium and the at-rules that are skipped.
 #[test]
-fn an_at_rule_is_skipped_and_named() {
+fn a_media_block_for_another_medium_does_not_apply() {
     let scene = scene(THREE);
-    assert!(
-        scene.warnings.contains(&Warning::AtRuleIgnored),
-        "{:?}",
-        scene.warnings
-    );
+    assert!(scene.warnings.is_empty(), "{:?}", scene.warnings);
     assert_ne!(
         fill_of(&scene, 1),
         rgb(255, 0, 255),
-        "and the print rule did not apply"
+        "and the screen rule did not apply"
     );
 }
 

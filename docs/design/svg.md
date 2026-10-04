@@ -30,7 +30,9 @@ refusal table stops meaning anything.
   `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit`, `stroke-dasharray`,
   `stroke-dashoffset`, `opacity`, `fill-opacity`, `stroke-opacity`, and the
   three ways a property is stated: a presentation attribute, a `style=""`
-  attribute and a `<style>` element.
+  attribute and a `<style>` element — whose `@media` is asked about paper,
+  whose `@import` is fetched through the caller and whose `@font-face` is
+  handed to it (see *As built*).
 - **§13's gradients**: `<linearGradient>`, `<radialGradient>`, `<stop>`,
   `gradientUnits`, `gradientTransform`, `spreadMethod`, and `xlink:href`
   inheritance between paint servers — which is how every Illustrator file
@@ -402,6 +404,39 @@ group masked by the other. A child the content model refuses — a `<g>`, an
 shape loop passed over anything that was not a shape, and the warning the
 refusal table cited for them was raised only for a reference naming no
 `<clipPath>` at all.
+
+**After the milestones: a `<style>` element's at-rules.** Until now every
+at-rule in a `<style>` element was skipped and named `AtRuleIgnored`, the
+three that change what a drawing looks like among them. `style::sheet_with`
+reads them now, against a `style::Reach` the caller supplies through
+`tinker_pdf_svg::read_with`'s `Context`: `@media` evaluated by
+`tinker_pdf_css::media::evaluate`, the EPUB cascade's evaluator, as **print**
+of the viewport — a book's sheets are written for the screen it is read on,
+and its pages answer `screen`, but an SVG here is set on a page, and a drawing
+that says `@media print` is saying what it looks like on one; `@import`
+fetched through `tinker_pdf_css::ImportResolver`, the trait the EPUB cascade's
+imports go through, and read in place before every rule after it (one after a
+rule is invalid, §3.3 of `css-cascade-5`), with `MAX_CSS_IMPORT_DEPTH`, the
+ancestor chain against cycles, one `Budget` across every imported sheet's
+tokens, and `MAX_CSS_BYTES` across their bytes together — an import is spliced
+into the sheet that names it, and a comment is no tokens, so a sheet of one
+comment imported a million times is what the second bound is for. The
+`<style>` element's own text is the document's and is not spent, so a drawing
+that read whole before reads whole now, and once either bound refuses, nothing
+more is fetched; and `@font-face` read by
+`tinker_pdf_css::font_face::parse_rule` into `Scene::font_faces`, a face's base
+its own sheet's address or `None` for the element's, because a face is a font
+program and this crate has no vocabulary for one. The facade's `read_svg`
+supplies the container as the resolver — a `<style>` element's base is the
+document's path, which the leaf does not have — and puts the faces in the list
+`typeface::load` loads, beside a chapter's (`tests/at_rules.rs` in the leaf;
+`an_svg_reaches_its_container_for_its_imports_and_faces` in `epub_svg.rs`).
+An import the resolver lacks is `ImportUnresolved`, and `AtRuleIgnored` now
+means what is left: `@keyframes`, `@page`, `@layer` and the rest, or one of
+the three invalid or past a bound. Writing this found that the walk named
+**every** `<style>` element `ElementUnknown("style")` — a loss reported in
+every drawing that styles itself; §6.3 says it is not rendered, and it is
+dispatched beside `<title>` now.
 
 **What this cannot reach**, stated rather than absorbed: nothing outside this
 repository adjudicates a rendering (ruling 13), so every expected value here is

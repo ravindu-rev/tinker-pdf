@@ -77,6 +77,7 @@ mod cbz_support;
 mod epub_support;
 
 use cbz_support::rgb_png;
+use epub_support::typeface::covering;
 use epub_support::{ocf_zip, OcfEntry};
 use tinker_pdf::epub::SpineDefect;
 use tinker_pdf::{ArchiveWarning, Document, OpenOptions, RenderOptions};
@@ -1251,5 +1252,115 @@ fn a_continuing_run_is_set_after_the_one_before_it() {
         "the second run begins where the first ended: {} against {}",
         origins[1],
         10.0 + advance
+    );
+}
+
+// ---- a `<style>` element's at-rules --------------------------------------------
+
+/// The `ArchiveWarning::Svg` warnings a book's report carries.
+fn svg_warnings(doc: &Document) -> Vec<tinker_pdf_svg::Warning> {
+    warnings(doc)
+        .into_iter()
+        .filter_map(|warning| match warning {
+            ArchiveWarning::Svg { warning, .. } => Some(warning),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **An SVG spine item's `@import` and `@font-face` reach the container**, and
+/// its `@media` is asked about paper.
+///
+/// The `<style>` element imports `style/draw.css` against the document's own
+/// path, and that sheet declares a face whose `src` is relative to *it* —
+/// `../fonts/drawn.ttf` — and sets a run in it. A second face is declared in
+/// the `<style>` element itself, against the document. Both reach
+/// `typeface::load` through the list a chapter's faces do, so each run is set
+/// in its own face rather than in the standard 14, and nothing in the report
+/// says a face, a sheet or an at-rule was lost. The band at the bottom is the
+/// `@media print` block's black, which a page is.
+#[test]
+fn an_svg_reaches_its_container_for_its_imports_and_faces() {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+         <style>
+           @import url(style/draw.css);
+           @font-face { font-family: Local; src: url(fonts/local.ttf) }
+           .local { font-family: Local }
+           rect { fill: #00ff00 }
+           @media print { rect { fill: #000000 } }
+           @media screen { rect { fill: #ff0000 } }
+         </style>
+         <rect x="0" y="60" width="100" height="40"/>
+         <text class="drawn" x="10" y="20" font-size="12">ABC</text>
+         <text class="local" x="10" y="40" font-size="12">DEF</text>
+       </svg>"##;
+    let sheet = b"@font-face { font-family: Drawn; src: url(../fonts/drawn.ttf) }\n\
+                  .drawn { font-family: Drawn }"
+        .to_vec();
+    let doc = Document::open_with(
+        book(
+            svg,
+            &[
+                ("EPUB/style/draw.css", sheet),
+                ("EPUB/fonts/drawn.ttf", covering("Drawn", "ABC")),
+                ("EPUB/fonts/local.ttf", covering("Local", "DEF")),
+            ],
+        ),
+        &OpenOptions::at_page(200.0, 200.0),
+    )
+    .expect("the book opens");
+
+    assert_eq!(svg_warnings(&doc), [], "every at-rule was read");
+    assert!(
+        !warnings(&doc)
+            .iter()
+            .any(|w| matches!(w, ArchiveWarning::FontFace { .. })),
+        "{:?}",
+        warnings(&doc)
+    );
+    let fonts = fonts_named_and_defined(&doc);
+    assert_eq!(fonts.len(), 2, "one face per run: {fonts:?}");
+    assert!(
+        fonts
+            .iter()
+            .all(|(name, defined)| *defined && name.starts_with("Bf")),
+        "both runs are in the book's own faces, not the standard 14: {fonts:?}"
+    );
+    assert_eq!(rgb_at(&doc, 0.5, 0.9), [0, 0, 0], "the print block's rule");
+}
+
+/// **An import the container does not hold is `ImportUnresolved`**, and the
+/// rules after it apply; a loose SVG, which has nothing beside it, reaches a
+/// `data:` URL and nothing else.
+#[test]
+fn an_import_the_container_lacks_is_named_and_a_loose_svg_reads_data_urls() {
+    let doc = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+             <style>@import 'missing.css'; rect { fill: #000 }</style>
+             <rect width="10" height="10" fill="#fff"/>
+           </svg>"##,
+    );
+    assert_eq!(
+        svg_warnings(&doc),
+        [tinker_pdf_svg::Warning::ImportUnresolved]
+    );
+    assert!(greys(&doc, 0).contains(&0), "the rule after it applied");
+
+    let loose = |style: &str| {
+        let markup = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+                 <style>{style}</style>
+                 <rect width="10" height="10" fill="#fff"/>
+               </svg>"##
+        );
+        Document::open(markup.into_bytes()).expect("a loose SVG opens")
+    };
+    let doc = loose("@import url('data:text/css,rect%20%7B%20fill%3A%20%23000%20%7D');");
+    assert_eq!(svg_warnings(&doc), [], "{:?}", warnings(&doc));
+    assert!(greys(&doc, 0).contains(&0), "the data: sheet's rule");
+    let doc = loose("@import 'beside.css'; rect { fill: #000 }");
+    assert_eq!(
+        svg_warnings(&doc),
+        [tinker_pdf_svg::Warning::ImportUnresolved]
     );
 }
