@@ -226,6 +226,41 @@ with tifffile.TiffWriter("tiff/tifffile-multipage.tif") as tw:
     tw.write(plane(lambda x, y: 255 - grey(x, y), np.uint8), photometric="minisblack")
 
 
+# PhotometricInterpretation 8, CIE L*a*b* (TIFF 6.0 §23): L* unsigned, a* and
+# b* signed two's complement. The recipe is the RGB one read as offset binary:
+# L* is the red channel, and a* and b* are the green and blue channels less
+# 128, stored as the signed bytes they are — the green and blue recipe with
+# the top bit flipped. A decoder that flips it back hands back the RGB recipe
+# exactly, and a PDF `/Lab` over `/Range [-128 127 -128 127]` reads those
+# bytes as L* = 100 r / 255, a* = g - 128, b* = b - 128. Uncompressed and
+# deflated at 8 bits, and uncompressed at 16, where each recipe byte is
+# widened by 257 and the top bit of the sixteen is flipped the same way.
+def cielab_array():
+    a = np.zeros((TH, TW, 3), dtype=np.uint8)
+    for y in range(TH):
+        for x in range(TW):
+            r, g, b = rgb(x, y)
+            a[y, x] = (r, g ^ 0x80, b ^ 0x80)
+    return a
+
+
+def cielab16_array():
+    a = np.zeros((TH, TW, 3), dtype=np.uint16)
+    for y in range(TH):
+        for x in range(TW):
+            r, g, b = rgb(x, y)
+            a[y, x] = (r * 257, (g * 257) ^ 0x8000, (b * 257) ^ 0x8000)
+    return a
+
+
+tifffile.imwrite("tiff/tifffile-cielab-13x7.tif", cielab_array(), photometric="cielab")
+tifffile.imwrite(
+    "tiff/tifffile-cielab-deflate-13x7.tif", cielab_array(), photometric="cielab",
+    compression="zlib",
+)
+tifffile.imwrite("tiff/tifffile-cielab16-13x7.tif", cielab16_array(), photometric="cielab")
+
+
 # ---- WebP --------------------------------------------------------------------
 #
 # Pillow 12.3.0's WebP plugin over its bundled libwebp, and imagecodecs'

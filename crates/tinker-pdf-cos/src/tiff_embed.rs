@@ -21,6 +21,12 @@
 //! routes into `/DeviceCMYK`: §16's samples are ink amounts with zero as none,
 //! which is what 8.6.4.4 means by a CMYK component, so nothing is converted.
 //!
+//! A CIE `L*a*b*` file (`PhotometricInterpretation` 8, §23) is always
+//! decoded — its `a*` and `b*` are two's complement and a PDF sample is not —
+//! and the decoder's offset binary goes into [`ImageColorSpace::Lab`], a
+//! `/Lab` array whose `/Range` makes every sample its own value exactly
+//! (8.6.5.4, Table 90): a byte transform, and no conversion of colour.
+//!
 //! So the common case copies bytes, reads a directory and never builds a
 //! raster — the same argument [`crate::png_embed`] makes for a PNG's IDAT, and
 //! for the same reason: a comic archive or an XPS package is synthesised whole
@@ -114,6 +120,9 @@ enum OwnedSpace {
     Rgb,
     /// `/DeviceCMYK`, for `PhotometricInterpretation` 5.
     Cmyk,
+    /// CIE `L*a*b*`, for `PhotometricInterpretation` 8: the decoder's offset
+    /// binary, which [`ImageColorSpace::Lab`] reads exactly.
+    Lab,
     /// `[/Indexed /DeviceRGB hival lookup]`. A TIFF `ColorMap` arrives from
     /// `tiff_scan` already transposed out of p.23's three arrays and scaled to
     /// eight bits, which is exactly the layout 8.6.6.3 wants.
@@ -162,6 +171,7 @@ impl TiffImageData {
                 OwnedSpace::Gray => ImageColorSpace::DeviceGray,
                 OwnedSpace::Rgb => ImageColorSpace::DeviceRgb,
                 OwnedSpace::Cmyk => ImageColorSpace::DeviceCmyk,
+                OwnedSpace::Lab => ImageColorSpace::Lab,
                 OwnedSpace::Indexed(lookup) => ImageColorSpace::Indexed {
                     base: DeviceSpace::Rgb,
                     lookup,
@@ -575,10 +585,13 @@ fn split(image: &TiffImage) -> (OwnedSpace, Vec<u8>, Option<Vec<u8>>) {
         TiffColour::Rgba => (3, true),
         TiffColour::Cmyk => (4, false),
         TiffColour::CmykAlpha => (4, true),
+        TiffColour::Lab => (3, false),
+        TiffColour::LabAlpha => (3, true),
     };
-    let space = match colour_components {
-        1 => OwnedSpace::Gray,
-        4 => OwnedSpace::Cmyk,
+    let space = match (image.colour, colour_components) {
+        (TiffColour::Lab | TiffColour::LabAlpha, _) => OwnedSpace::Lab,
+        (_, 1) => OwnedSpace::Gray,
+        (_, 4) => OwnedSpace::Cmyk,
         _ => OwnedSpace::Rgb,
     };
 

@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use tinker_pdf_filters::{
     bmp_decode, gif_decode, tiff_decode, tiff_scan, tiff_scan_directory, webp_decode, BmpError,
     BmpImage, GifError, GifImage, ImagePixels, Limits, TiffColour, TiffCompression, TiffImage,
-    TiffLayout, TiffSampleFormat, Warning, WebpError, WebpImage,
+    TiffLayout, TiffPhotometric, TiffSampleFormat, Warning, WebpError, WebpImage,
 };
 
 const CAP: Limits = Limits::new(1 << 24);
@@ -578,6 +578,41 @@ fn a_cmyk_tiff_is_its_ink_amounts() {
         });
         assert_eq!(img.data, want, "{name}");
     }
+}
+
+/// `PhotometricInterpretation` 8, CIE L\*a\*b\* (TIFF 6.0 §23): `L*`
+/// unsigned and `a*`, `b*` two's complement, handed back with the top bit of
+/// `a*` and `b*` flipped — offset binary, the same number line moved up by
+/// half its length. The fixtures store the RGB recipe's green and blue with
+/// that bit flipped (`make-images.py`), so what comes back is the recipe
+/// exactly: at 8 bits uncompressed and deflated, and at 16 bits, where the
+/// recipe was widened by 257 before its top bit was flipped.
+#[test]
+fn a_cielab_tiff_is_its_samples_in_offset_binary() {
+    for name in [
+        "tifffile-cielab-13x7.tif",
+        "tifffile-cielab-deflate-13x7.tif",
+    ] {
+        let file = read("tiff", name);
+        let scan = tiff_scan(&file).expect("scans");
+        assert_eq!(scan.photometric, TiffPhotometric::CieLab, "{name}");
+        let img = tiff(name);
+        assert_eq!(img.colour, TiffColour::Lab, "{name}");
+        assert_eq!(img.bits_per_component, 8, "{name}");
+        assert_eq!(
+            img.data,
+            each(13, 7, |x, y| recipe::rgb(x, y).to_vec()),
+            "{name}"
+        );
+    }
+    let img = tiff("tifffile-cielab16-13x7.tif");
+    assert_eq!(img.colour, TiffColour::Lab);
+    assert_eq!(img.bits_per_component, 16);
+    let want: Vec<u16> = (0..7u32)
+        .flat_map(|y| (0..13u32).flat_map(move |x| recipe::rgb(x, y)))
+        .map(|v| u16::from(v) * 257)
+        .collect();
+    assert_eq!(words(&img.data), want);
 }
 
 /// `SampleFormat` 2 at 8, 16 and 32 bits (the last with `Predictor` 2), each

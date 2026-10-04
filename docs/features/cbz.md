@@ -227,7 +227,10 @@ is what a CMYK component is. A single-strip JPEG 2000 file (compression 34712)
 is placed as `/JPXDecode` over the strip's own codestream once its header
 agrees with the directory, and a tiled one is decoded. BigTIFF is recognised
 by its own magic and read. Signed and floating-point samples are decoded
-through `tiff.rs`'s stated mapping. And **a TIFF of several directories is
+through `tiff.rs`'s stated mapping. A CIE L\*a\*b\* file (`PhotometricInterpretation`
+8, since 4 October 2026) is decoded and becomes a `/Lab` image whose `/Range`
+reads each sample as its own value — `cielab_tiff_pages_are_lab_images_drawn_to_the_clauses_arithmetic`
+holds the page to 8.6.5.4. And **a TIFF of several directories is
 several pages**: every directory on the `NextIFD` chain that is a page — not a
 reduced-resolution copy (`NewSubfileType` bit 0), not a transparency mask
 (bit 2, or `PhotometricInterpretation` 4) — becomes a page of its own, in

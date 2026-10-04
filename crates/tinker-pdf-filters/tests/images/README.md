@@ -28,6 +28,7 @@ the committed files are the record.
 | `webp/pillow-*.webp` | **Pillow 12.3.0** (`PIL.WebPImagePlugin`) over its bundled libwebp 1.6.0 | `python3 make-images.py` | 26 September 2026 (lossless), 2 October 2026 (lossy) |
 | `webp/imagecodecs-*.webp` | **imagecodecs 2026.3.6** (`imagecodecs.webp_encode`) over libwebp 1.6.0 | the same script | the same two days |
 | `tiff/tifffile-*.tif` | **tifffile 2026.3.3** over imagecodecs 2026.3.6 (zlib; JPEG 2000 through OpenJPEG 2.5.4, `level=0`, lossless) | `python3 make-images.py` | 26 September 2026 |
+| `tiff/tifffile-cielab*.tif` | **tifffile 2026.3.3** over imagecodecs 2026.3.6 (zlib), numpy 2.4.6, CPython 3.11.15 | the CIE L\*a\*b\* block of `make-images.py`, run alone so no other file was rewritten | 4 October 2026 |
 
 Pillow's BMP writer produces `BITMAPINFOHEADER`, `BI_RGB`, bottom-up files at
 1, 8, 24 and 32 bits — and at 32 it puts an RGBA image's alpha into the byte
@@ -57,7 +58,11 @@ deflated), signed samples at 8, 16 (big-endian) and 32 bits (with
 `Predictor` 2), IEEE floats at 16 (big-endian), 32 (with `Predictor` 3) and
 64 bits, BigTIFF in both byte orders, JPEG 2000 as one strip and as a padded
 16 x 16 tile grid, and four directories with a reduced-resolution copy among
-them. The float recipe is whole 128ths, which every width holds exactly, so
+them; and `PhotometricInterpretation` 8, CIE L\*a\*b\* (§23), uncompressed and
+deflated at 8 bits and uncompressed at 16 — whose recipe is the RGB one read
+as offset binary, stored with `a*` and `b*`'s top bit flipped into the two's
+complement §23 asks for, so a decoder that flips it back hands back the RGB
+recipe exactly. The float recipe is whole 128ths, which every width holds exactly, so
 no encoder's rounding stands between the recipe and the file; a signed or
 float sample's expected intensity is the recipe through the mapping
 `tiff.rs`'s module note states, recomputed in the test. For the lossless JPEG

@@ -1160,11 +1160,122 @@ fn a_palette_image_with_no_color_map_is_refused() {
     );
 }
 
+/// **8, CIE L\*a\*b\* (§23)**: `L*` unsigned, `a*` and `b*` two's complement,
+/// handed back with `a*` and `b*`'s top bit flipped — `-128`, `-1`, `0`, `1`
+/// and `127` become `0`, `127`, `128`, `129` and `255`, and `L*` is untouched —
+/// at 8 bits and at 16, where the flip is of the sixteenth bit.
+#[test]
+fn a_cielab_image_is_handed_back_in_offset_binary() {
+    let shape = |depth: u16| Simple {
+        little: true,
+        width: 5,
+        height: 1,
+        depth,
+        samples: 3,
+        photometric: 8,
+        compression: 1,
+    };
+    let signed: [i8; 5] = [-128, -1, 0, 1, 127];
+    let strip: Vec<u8> = signed
+        .iter()
+        .enumerate()
+        .flat_map(|(at, &v)| [at as u8 * 50, v as u8, v.wrapping_neg() as u8])
+        .collect();
+    let img = tiff_decode(&image(shape(8), strip), &CAP).expect("decodes");
+    assert_eq!(img.colour, TiffColour::Lab);
+    assert_eq!(img.bits_per_component, 8);
+    let want: Vec<u8> = signed
+        .iter()
+        .enumerate()
+        .flat_map(|(at, &v)| {
+            [
+                at as u8 * 50,
+                (i16::from(v) + 128) as u8,
+                (i16::from(v.wrapping_neg()) + 128) as u8,
+            ]
+        })
+        .collect();
+    assert_eq!(img.data, want);
+
+    // Sixteen bits, little-endian in the file and big-endian out.
+    let wide: [i16; 3] = [-32768, -256, 300];
+    let strip: Vec<u8> = wide
+        .iter()
+        .flat_map(|&v| {
+            let mut px = Vec::new();
+            px.extend_from_slice(&1000u16.to_le_bytes());
+            px.extend_from_slice(&v.to_le_bytes());
+            px.extend_from_slice(&0i16.to_le_bytes());
+            px
+        })
+        .collect();
+    let mut shape16 = shape(16);
+    shape16.width = 3;
+    let img = tiff_decode(&image(shape16, strip), &CAP).expect("decodes");
+    assert_eq!(img.colour, TiffColour::Lab);
+    assert_eq!(img.bits_per_component, 16);
+    let words: Vec<u16> = img
+        .data
+        .chunks_exact(2)
+        .map(|p| u16::from_be_bytes([p[0], p[1]]))
+        .collect();
+    let want: Vec<u16> = wide
+        .iter()
+        .flat_map(|&v| [1000, (i32::from(v) + 32768) as u16, 32768])
+        .collect();
+    assert_eq!(words, want);
+}
+
+/// A CIE L\*a\*b\* directory this build cannot read exactly is refused by
+/// name rather than read as something else: at a depth §23 does not define,
+/// under a `SampleFormat` (one tag cannot say §23's two number lines), and
+/// under a compression whose coder hands back samples of its own colour model.
+#[test]
+fn a_cielab_image_it_cannot_read_exactly_is_refused_by_name() {
+    let lab = |depth: u16, compression: u16| {
+        image(
+            Simple {
+                little: true,
+                width: 1,
+                height: 1,
+                depth,
+                samples: 3,
+                photometric: 8,
+                compression,
+            },
+            vec![0; 6],
+        )
+    };
+    assert_eq!(
+        tiff_decode(&lab(4, 1), &CAP).unwrap_err(),
+        TiffError::UnsupportedBitDepth(4)
+    );
+    assert_eq!(
+        tiff_decode(&lab(8, 7), &CAP).unwrap_err(),
+        TiffError::UnsupportedCompression(7)
+    );
+    let signed = TiffFile::new(true)
+        .tag(long(TAG_IMAGE_WIDTH, 1))
+        .tag(long(TAG_IMAGE_LENGTH, 1))
+        .tag(shorts(TAG_BITS_PER_SAMPLE, &[8, 8, 8]))
+        .tag(short(TAG_COMPRESSION, 1))
+        .tag(short(TAG_PHOTOMETRIC, 8))
+        .tag(short(TAG_SAMPLES_PER_PIXEL, 3))
+        .tag(long(TAG_ROWS_PER_STRIP, 1))
+        .tag(shorts(TAG_SAMPLE_FORMAT, &[2, 2, 2]))
+        .segments(vec![vec![0; 3]], false)
+        .build();
+    assert_eq!(
+        tiff_decode(&signed, &CAP).unwrap_err(),
+        TiffError::UnsupportedSampleFormat(2)
+    );
+}
+
 /// 4 is a transparency mask for another image and 32803 a colour filter array,
-/// both permanent refusals; 8 is CIELab, which is owed.
+/// both permanent refusals. 8, CIELab, was on this list until October 2026.
 #[test]
 fn the_photometrics_this_build_does_not_read_are_named() {
-    for code in [4u16, 8, 32803] {
+    for code in [4u16, 32803] {
         let file = image(
             Simple {
                 little: true,

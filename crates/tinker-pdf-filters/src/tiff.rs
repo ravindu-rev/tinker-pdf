@@ -78,6 +78,12 @@
 //!   header.
 //! - **`Compression` 34712**, JPEG 2000: each strip or tile is a codestream
 //!   and is decoded by `jpx`, the decoder `/JPXDecode` already has.
+//! - **CIE `L*a*b*`** (`PhotometricInterpretation` 8, §23; 4 October 2026)
+//!   at 8 and 16 bits, handed back as [`TiffColour::Lab`] with `a*` and `b*`
+//!   turned from the file's two's complement into offset binary by flipping
+//!   their top bit — exact, and a number line PDF's `/Lab` reads as it stands
+//!   over the right `/Range`, which is how the embed door writes it. No colour
+//!   is converted here, for CMYK's reason.
 //! - **Directories after the first**: [`tiff_scan_directory`] scans any
 //!   directory on the `NextIFD` chain, and [`TiffScan::subfile`] carries
 //!   `NewSubfileType` so a caller paging a multi-page file can tell a page from
@@ -244,8 +250,8 @@ pub enum TiffError {
     /// ROADMAP for the files whose `JPEGInterchangeFormat` points at a whole
     /// JPEG stream) and the rest.
     UnsupportedCompression(u16),
-    /// A `PhotometricInterpretation` outside {0, 1, 2, 3, 5} — and 6, which is
-    /// read only when `Compression` is 7 and the JPEG has already undone it.
+    /// A `PhotometricInterpretation` outside {0, 1, 2, 3, 5, 8} — and 6, which
+    /// is read only when `Compression` is 7 and the JPEG has already undone it.
     /// 4 (a transparency mask for another image) and 32803 (a colour filter
     /// array) are permanent refusals: the first is not a picture and the
     /// second needs a demosaicing choice no file adjudicates.
@@ -410,6 +416,14 @@ pub enum TiffPhotometric {
     /// 6.0 §21's subsampled YCbCr over any other compression is refused, since
     /// nothing here would undo the subsampling.
     YCbCr,
+    /// 8: CIE L*a*b* (§23) — `L*` unsigned over 0..100, `a*` and `b*` signed
+    /// two's complement — at 8 or 16 bits, unsigned `SampleFormat`, and a
+    /// compression whose samples are the file's own (none, LZW, deflate,
+    /// PackBits). Handed back as [`TiffColour::Lab`] with `a*` and `b*`
+    /// **offset by half their range** — the top bit flipped, which turns two's
+    /// complement into offset binary exactly — so that every channel is an
+    /// unsigned number like every other colour this module returns.
+    CieLab,
 }
 
 /// `PlanarConfiguration` (tag 284).
@@ -438,7 +452,8 @@ pub enum TiffLayout {
 
 /// The channel layout of [`TiffImage::data`] — [`crate::PngColour`]'s four,
 /// deliberately, so a consumer that splits an alpha channel learns one shape,
-/// and the two CMYK ones `PhotometricInterpretation` 5 adds.
+/// and the two CMYK ones `PhotometricInterpretation` 5 adds, and the two
+/// CIE L*a*b* ones 8 adds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TiffColour {
     Grey,
@@ -449,6 +464,15 @@ pub enum TiffColour {
     Cmyk,
     /// The same, and an opacity last.
     CmykAlpha,
+    /// CIE `L*`, `a*`, `b*` (§23), each an unsigned sample at the output
+    /// depth: `L*` is `100 s / max`, and `a*` and `b*` are offset binary,
+    /// `256 (s / (max + 1)) - 128` — the file's two's complement with its top
+    /// bit flipped, so `128` (or `32768`) is zero chroma. That is exactly a
+    /// PDF `/Lab` sample over `/Range [-128, 128 - 256/2^bits]` (8.6.5.4,
+    /// Table 90), which is how it is embedded.
+    Lab,
+    /// The same, and an opacity last.
+    LabAlpha,
 }
 
 impl TiffColour {
@@ -457,8 +481,8 @@ impl TiffColour {
         match self {
             Self::Grey => 1,
             Self::GreyAlpha => 2,
-            Self::Rgb => 3,
-            Self::Rgba | Self::Cmyk => 4,
+            Self::Rgb | Self::Lab => 3,
+            Self::Rgba | Self::Cmyk | Self::LabAlpha => 4,
             Self::CmykAlpha => 5,
         }
     }
@@ -466,7 +490,10 @@ impl TiffColour {
     /// Whether the last component is an opacity rather than a colour.
     #[must_use]
     pub const fn has_alpha(self) -> bool {
-        matches!(self, Self::GreyAlpha | Self::Rgba | Self::CmykAlpha)
+        matches!(
+            self,
+            Self::GreyAlpha | Self::Rgba | Self::CmykAlpha | Self::LabAlpha
+        )
     }
 }
 
@@ -779,6 +806,8 @@ impl TiffScan<'_> {
             }
             (TiffPhotometric::Separated, false) => TiffColour::Cmyk,
             (TiffPhotometric::Separated, true) => TiffColour::CmykAlpha,
+            (TiffPhotometric::CieLab, false) => TiffColour::Lab,
+            (TiffPhotometric::CieLab, true) => TiffColour::LabAlpha,
             (_, false) => TiffColour::Rgb,
             (_, true) => TiffColour::Rgba,
         }
@@ -1241,6 +1270,17 @@ impl TiffScan<'_> {
                             raster.put(x, y, c, u32::from(v));
                         }
                     } else {
+                        // §23: `a*` and `b*` are two's complement. Flipping the
+                        // top bit is offset binary, the same number line moved
+                        // up by half its length, and it is exact — so the
+                        // channel becomes an unsigned sample like every other.
+                        let raw = if self.photometric == TiffPhotometric::CieLab
+                            && (channel == 1 || channel == 2)
+                        {
+                            raw ^ (1u64 << (depth.clamp(1, 64) - 1))
+                        } else {
+                            raw
+                        };
                         let v = self.intensity(
                             raw,
                             channel,
@@ -1313,6 +1353,7 @@ impl TiffPhotometric {
             3 => Self::Palette,
             5 => Self::Separated,
             6 => Self::YCbCr,
+            8 => Self::CieLab,
             _ => return None,
         })
     }
@@ -1322,7 +1363,7 @@ impl TiffPhotometric {
     pub const fn colour_channels(self) -> u32 {
         match self {
             Self::WhiteIsZero | Self::BlackIsZero | Self::Palette => 1,
-            Self::Rgb | Self::YCbCr => 3,
+            Self::Rgb | Self::YCbCr | Self::CieLab => 3,
             Self::Separated => 4,
         }
     }
@@ -1905,6 +1946,21 @@ fn build_scan<'a>(
         // Under compression 7 the JPEG has already done all of it.
         return Err(TiffError::UnsupportedPhotometric(6));
     }
+    if photometric == TiffPhotometric::CieLab
+        && !matches!(
+            compression,
+            TiffCompression::None
+                | TiffCompression::Lzw
+                | TiffCompression::Deflate
+                | TiffCompression::PackBits
+        )
+    {
+        // A JPEG or JPEG 2000 coder hands back samples of its own colour
+        // model, and §23's signed `a*` and `b*` are not among them.
+        return Err(TiffError::UnsupportedCompression(
+            compression_code.min(u32::from(u16::MAX)) as u16,
+        ));
+    }
     if photometric == TiffPhotometric::Separated {
         // §16: "InkSet ... 1 = CMYK ... Default is 1". Any other set of inks
         // is not a device space, and reading it as CMYK draws other colours.
@@ -1958,7 +2014,11 @@ fn build_scan<'a>(
         TiffSampleFormat::Signed => matches!(bits_per_sample, 8 | 16 | 32),
         TiffSampleFormat::Float => matches!(bits_per_sample, 16 | 32 | 64),
     };
-    if !depth_ok || (photometric == TiffPhotometric::Palette && bits_per_sample > 16) {
+    if !depth_ok
+        || (photometric == TiffPhotometric::Palette && bits_per_sample > 16)
+        || (photometric == TiffPhotometric::CieLab && !matches!(bits_per_sample, 8 | 16))
+    {
+        // §23 defines `L*a*b*` at 8 and 16 bits and no other depth.
         return Err(TiffError::UnsupportedBitDepth(bits_per_sample));
     }
     // A number line other than the unsigned one means nothing to an index, to
@@ -1966,6 +2026,10 @@ fn build_scan<'a>(
     // produce unsigned samples whatever the tag says.
     if sample_format != TiffSampleFormat::Unsigned
         && (photometric == TiffPhotometric::Palette
+            // §23 fixes `L*a*b*`'s number lines itself: `L*` unsigned and
+            // `a*`, `b*` signed whatever `SampleFormat` says, and one tag for
+            // three channels cannot say both.
+            || photometric == TiffPhotometric::CieLab
             || !matches!(
                 compression,
                 TiffCompression::None

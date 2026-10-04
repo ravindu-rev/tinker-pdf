@@ -111,7 +111,11 @@ count, each component clamped to the space's own range — 0..1 for `/CalGray`
 and `/CalRGB`, and for `/Lab` `L*` to 0..100 and `a*`, `b*` to its `/Range`,
 which is what a `/Lab` colour is and why it cannot share the 0..1 clamp — and
 `ImageColorSpace::Cie { resource, components }` puts the space on an image,
-refused when `components` is not its count. No `ArchivalProfile` refuses one:
+refused when `components` is not its count; and `ImageColorSpace::Lab`, which
+needs no registration, writes an inline `/Lab` over a D50 white whose `/Range`
+is `[-128, 128 − 256/2^bits]`, so an offset-binary `a*` or `b*` sample is its
+own value under Table 90's default decode — the encoding the TIFF door hands
+a CIE L\*a\*b\* file over in. No `ArchivalProfile` refuses one:
 a CIE-based space is device-independent, and 6.2.3.3 is about device colour.
 `writer_cie.rs` reads each back through this reader — the image's
 `ImageSpace` is the space written — and holds what the renderer draws to the

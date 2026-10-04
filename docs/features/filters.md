@@ -562,6 +562,22 @@ range of the data type", so a signed integer is mapped linearly from its type's
 range — an offset by half of it — and a float is read as the intensity itself
 on [0, 1], the range ISO 32000-2 8.6.4 gives a device colour component, and
 clamped; explicit `SMinSampleValue`/`SMaxSampleValue` override either.
+**`PhotometricInterpretation` 8, CIE `L*a*b*`** (§23, 4 October 2026) is read
+at 8 and 16 bits as `TiffColour::Lab` (and `LabAlpha`): `L*` as the file holds
+it and `a*`, `b*` — two's complement in the file — with the top bit flipped,
+which is offset binary and exact. The embed door always decodes it and writes
+`ImageColorSpace::Lab`, a `/Lab` array whose `/Range` is `[-128, 128 −
+256/2^bits]`, so that Table 90 reads every sample as its own value: exactly at
+8 bits, and at 16 to the writer's six decimals (4 × 10⁻⁷ of a unit of `a*`).
+That is a byte transform and no conversion of colour, which is what the row
+asked for; the colour crate's floating-point `lab_to_srgb` is not involved.
+Refused by name: another depth (`UnsupportedBitDepth`), a `SampleFormat` other
+than unsigned (§23 fixes `L*` unsigned and `a*`, `b*` signed, which one tag
+cannot say) and a JPEG or JPEG 2000 coding, whose coders hand back samples of
+their own colour model (`UnsupportedCompression`). The white point written is
+D50; a TIFF `WhitePoint` tag is not read. `image_fixtures.rs` holds the decode
+to tifffile's files from authored pixels and `cbz_images.rs` holds the page to
+8.6.5.4's arithmetic.
 Samples wider than eight bits leave at sixteen, Table 89's widest. `Predictor`
 3 is Photoshop TIFF Technical Note 3's byte-plane predictor and is undone into
 big-endian samples whatever the file's own order; `Predictor` 2 now reaches 32
@@ -788,7 +804,8 @@ make both enums wrong.
 | JPEG precision other than 8 or 12 bits | `JpegError::UnsupportedPrecision` | B.2.2 allows 8 in a baseline frame and 8 or 12 elsewhere; anything else is a header this build will not guess at | [ROADMAP](../ROADMAP.md) |
 | TIFF `PhotometricInterpretation` 4 (transparency mask) — **permanent** | `TiffError::UnsupportedPhotometric` | p.37: the image "is used to define an irregularly shaped region of another image in the same TIFF file". It is not a picture; drawn alone it is a black-and-white stencil of one. The comic path skips such a directory rather than paging it | — |
 | TIFF `PhotometricInterpretation` 32803 (colour filter array) — **permanent** | `TiffError::UnsupportedPhotometric` | TIFF/EP's raw sensor mosaic. Turning it into a picture is demosaicing, which is an algorithm chosen, not a format read, and no data adjudicates one choice over another | — |
-| TIFF `PhotometricInterpretation` 8 (CIELab), and 6 outside compression 7 | `TiffError::UnsupportedPhotometric` | A CIELab image read as RGB is a different picture; placing it as PDF's `/Lab` needs a `/Decode` and a `/Range` the embed door does not carry, and converting it is the colour crate's floating-point transform rather than an exact mapping — owed on the ROADMAP. YCbCr is read only where a JPEG has already undone it | [ROADMAP](../ROADMAP.md) |
+| TIFF `PhotometricInterpretation` 6 outside compression 7 | `TiffError::UnsupportedPhotometric` | YCbCr is read only where a JPEG has already undone it: §21's subsampling and `ReferenceBlackWhite` are not decoded here. 8, CIELab, left this row on 4 October 2026 | — |
+| TIFF CIELab at a depth other than 8 or 16, under a signed or float `SampleFormat`, or under a JPEG or JPEG 2000 coding | `TiffError::UnsupportedBitDepth`, `UnsupportedSampleFormat`, `UnsupportedCompression` | §23 defines 8 and 16 bits, and fixes the number lines itself — `L*` unsigned, `a*` and `b*` signed — which one `SampleFormat` cannot say; a coder hands back samples of its own colour model | — |
 | TIFF `PhotometricInterpretation` 5 with `InkSet` other than 1 | `TiffError::UnsupportedInkSet` | §16: separated inks that are not CMYK, which no device space names | — |
 | TIFF `Compression` 6 (old-style JPEG), and the rest | `TiffError::UnsupportedCompression` | Technical Note 2 replaced compression 6 with 7 because TIFF 6.0 §22's tag-by-tag description of a JPEG could not be implemented consistently, and a file that carries only those tags leaves its tables and its stream boundaries to a reader's guess. **Not every such file does**: one whose `JPEGInterchangeFormat` (tag 513) points at a complete interchange-format stream needs no guess, and the existing JPEG decoder could read it as it stands. So it is owed on the ROADMAP rather than refused for good, with no count recorded (ruling 3). *Corrected 2 October 2026, on review*: this row called the refusal permanent and every reader's handling a guess, which overstated both. The rest are named by code, so a refusal says which | [ROADMAP](../ROADMAP.md) |
 | TIFF `SampleFormat` outside 1–4, two formats in one image, or signed/float on a palette or a JPEG, JPEG 2000 or fax coding | `TiffError::UnsupportedSampleFormat` | Nothing in the sample path carries two number lines at once, and a coder's output is unsigned whatever the tag says | — |

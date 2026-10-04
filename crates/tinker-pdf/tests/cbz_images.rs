@@ -545,3 +545,126 @@ fn signed_float_and_bigtiff_pages_are_their_pictures() {
         }
     }
 }
+
+/// IEC 61966-2-1's transfer function: linear light to an sRGB byte.
+fn srgb(linear: f64) -> u8 {
+    let v = linear.clamp(0.0, 1.0);
+    let encoded = if v <= 0.003_130_8 {
+        12.92 * v
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round() as u8
+}
+
+/// ISO 32000-1 8.6.5.4: `L*a*b*` to XYZ relative to D50, then the published
+/// Bradford-adapted sRGB matrix for a D50 white (quoted, not the renderer's
+/// own constants, which differ from it in the fourth decimal).
+fn lab_to_srgb(l: f64, a: f64, b: f64) -> [u8; 3] {
+    const D50: [f64; 3] = [0.9642, 1.0, 0.8249];
+    const M: [[f64; 3]; 3] = [
+        [3.133_856_1, -1.616_866_7, -0.490_614_6],
+        [-0.978_768_4, 1.916_141_5, 0.033_454_0],
+        [0.071_945_3, -0.228_991_4, 1.405_242_7],
+    ];
+    let g = |x: f64| {
+        if x >= 6.0 / 29.0 {
+            x * x * x
+        } else {
+            108.0 / 841.0 * (x - 4.0 / 29.0)
+        }
+    };
+    let m = (l + 16.0) / 116.0;
+    let xyz = [
+        D50[0] * g(m + a / 500.0),
+        D50[1] * g(m),
+        D50[2] * g(m - b / 200.0),
+    ];
+    let row = |r: [f64; 3]| r[0] * xyz[0] + r[1] * xyz[1] + r[2] * xyz[2];
+    [srgb(row(M[0])), srgb(row(M[1])), srgb(row(M[2]))]
+}
+
+/// **`PhotometricInterpretation` 8, CIE L\*a\*b\*, as a page** (TIFF 6.0
+/// §23). Each file is decoded — §23's `a*` and `b*` are two's complement and a
+/// PDF sample is not — and written as a `/Lab` image whose `/Range` is
+/// `[-128 127]` at 8 bits and `[-128 127.99609375]` at 16, so that Table 90
+/// reads every offset-binary sample as its own value, exactly: the samples in
+/// the file are the RGB recipe (widened by 257 at 16 bits), and the page draws
+/// 8.6.5.4's arithmetic of `L* = 100 s / max` and `a* = 256 s / 2^bits - 128`,
+/// computed here, within one level for the published matrix.
+#[test]
+fn cielab_tiff_pages_are_lab_images_drawn_to_the_clauses_arithmetic() {
+    let document = open(&[
+        ("p1.tif", fixture("tiff/tifffile-cielab-13x7.tif")),
+        ("p2.tif", fixture("tiff/tifffile-cielab-deflate-13x7.tif")),
+        ("p3.tif", fixture("tiff/tifffile-cielab16-13x7.tif")),
+    ]);
+    assert_no_placeholders(&document);
+    let cos = document.cos();
+    for (page, bits) in [(0usize, 8u32), (1, 8), (2, 16)] {
+        let dict = image_dict(&document, page);
+        let space = cos.resolve_key(&dict, cos.intern(b"ColorSpace"));
+        let items = space.as_array().expect("a /Lab array");
+        let family = items[0].as_name().and_then(|n| cos.name_bytes(n));
+        assert_eq!(family.as_deref(), Some(&b"Lab"[..]), "page {page}");
+        let params = cos.resolve(&items[1]);
+        let range: Vec<f64> = cos
+            .resolve_key(params.as_dict().expect("a dict"), cos.intern(b"Range"))
+            .as_array()
+            .expect("/Range")
+            .iter()
+            .filter_map(Object::as_number)
+            .collect();
+        let top = 128.0 - 256.0 / f64::from(1u32 << bits);
+        // Exact at 8 bits; at 16, 127.99609375 is written to the writer's six
+        // places, 127.996094, which is 4 x 10^-7 of a unit of a* away.
+        assert_eq!(range.len(), 4, "page {page}");
+        for (got, want) in range.iter().zip([-128.0, top, -128.0, top]) {
+            assert!((got - want).abs() <= 5e-7, "page {page}: {range:?}");
+        }
+        if bits == 8 {
+            assert_eq!(range, vec![-128.0, 127.0, -128.0, 127.0]);
+        }
+
+        let samples = cos
+            .stream_decoded(page_image(&document, page))
+            .expect("decodes");
+        let want: Vec<u8> = (0..7)
+            .flat_map(|y| (0..13).flat_map(move |x| recipe::rgb(x, y)))
+            .flat_map(|v| {
+                if bits == 8 {
+                    vec![v]
+                } else {
+                    (u16::from(v) * 257).to_be_bytes().to_vec()
+                }
+            })
+            .collect();
+        assert_eq!(samples, want, "page {page}: the recipe, offset binary");
+
+        let bitmap = render(&document, page as u32);
+        for y in 0..7 {
+            for x in 0..13 {
+                let [r, g, b] = recipe::rgb(x, y);
+                let s = |v: u8| {
+                    if bits == 8 {
+                        f64::from(v)
+                    } else {
+                        f64::from(u16::from(v) * 257)
+                    }
+                };
+                let max = f64::from((1u32 << bits) - 1);
+                let steps = f64::from(1u32 << bits);
+                let want = lab_to_srgb(
+                    100.0 * s(r) / max,
+                    256.0 * s(g) / steps - 128.0,
+                    256.0 * s(b) / steps - 128.0,
+                );
+                let got = rendered_rgb(&bitmap, x, y);
+                assert!(
+                    got.iter().zip(want).all(|(g, w)| g.abs_diff(w) <= 1),
+                    "page {page} ({x}, {y}): drawn {got:?}, 8.6.5.4 gives {want:?}"
+                );
+            }
+        }
+    }
+}

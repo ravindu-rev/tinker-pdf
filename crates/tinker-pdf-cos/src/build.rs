@@ -174,6 +174,22 @@ pub enum ImageColorSpace<'a> {
         /// Channels per sample, which must be the space's component count.
         components: u8,
     },
+    /// CIE `L*a*b*` samples in **offset binary**, written inline as
+    /// `[/Lab << /WhitePoint [0.9642 1 0.8249] /Range [-128 m -128 m] >>]`
+    /// with `m = 128 - 256 / 2^bits` (8.6.5.4), and no `/Decode`.
+    ///
+    /// Table 90 then reads a sample `s` of `bits` bits as `L* = 100 s /
+    /// (2^bits - 1)` and `a* = 256 s / 2^bits - 128`, so a signed `a*` with
+    /// its top bit flipped — 128 for zero chroma at 8 bits, 32768 at 16 — is
+    /// its own value: **exactly** at 8 bits, `[-128 127]`, and at 16 to the
+    /// writer's six decimal places, `127.99609375` written as `127.996094`,
+    /// which is 4 × 10⁻⁷ of a unit of `a*` from exact. That is the
+    /// encoding TIFF's `PhotometricInterpretation` 8 decodes to
+    /// (`tinker_pdf_filters::TiffColour::Lab`), and it needs no registered
+    /// space: the array says everything. The white point is D50, the ICC
+    /// connection space's — a TIFF's §23 samples are relative to a white the
+    /// file does not otherwise name.
+    Lab,
     /// `[/Indexed base hival lookup]` (8.6.6.3).
     Indexed {
         /// The space each table entry is expressed in.
@@ -197,7 +213,7 @@ impl ImageColorSpace<'_> {
     pub const fn components(&self) -> u32 {
         match self {
             ImageColorSpace::DeviceGray | ImageColorSpace::Indexed { .. } => 1,
-            ImageColorSpace::DeviceRgb => 3,
+            ImageColorSpace::DeviceRgb | ImageColorSpace::Lab => 3,
             ImageColorSpace::DeviceCmyk => 4,
             ImageColorSpace::Icc { components, .. }
             | ImageColorSpace::Tint { components, .. }
@@ -6912,6 +6928,25 @@ impl DocumentBuilder {
                 // Unreachable: both arms above returned `None` or set it.
                 None => return None,
             },
+            ImageColorSpace::Lab => {
+                let step = 256.0 / f64::from(1u32 << image.bits_per_component.clamp(1, 16));
+                let numbers = |values: &[f64]| {
+                    Object::Array(values.iter().map(|v| Object::Real(*v)).collect())
+                };
+                let mut dict = Dict::new();
+                dict.insert(
+                    self.names.intern(b"WhitePoint"),
+                    numbers(&[0.9642, 1.0, 0.8249]),
+                );
+                dict.insert(
+                    self.names.intern(b"Range"),
+                    numbers(&[-128.0, 128.0 - step, -128.0, 128.0 - step]),
+                );
+                Object::Array(vec![
+                    Object::Name(self.names.intern(b"Lab")),
+                    Object::Dict(dict),
+                ])
+            }
             ImageColorSpace::Indexed { base, lookup } => Object::Array(vec![
                 Object::Name(self.names.intern(b"Indexed")),
                 Object::Name(self.names.intern(base.pdf_name())),
@@ -8599,7 +8634,7 @@ fn image_device_space(image: &ImageData<'_>) -> Option<DeviceSpace> {
             // registered, which is the one place its device colour is named.
             ImageColorSpace::Tint { .. } => None,
             // CIE-based: device-independent, so not 6.2.3.3's question.
-            ImageColorSpace::Cie { .. } => None,
+            ImageColorSpace::Cie { .. } | ImageColorSpace::Lab => None,
         },
     }
 }
