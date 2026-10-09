@@ -207,7 +207,11 @@ limitation it was; it now pins the four inks, and
 … sc`, a stroke's `K`, a glyph and an RGB fill to `round(255 × component)`
 byte for byte. `cs` selecting DeviceCMYK now resets the colour to 8.6.8's
 `0 0 0 1` — black, where an all-zeros reset had made it white on every page,
-in light as much as in ink. `Bitmap::to_png` writes an ink page as the light
+in light as much as in ink — and since the review of lane 8A `cs` selecting a
+`/Separation` or `/DeviceN` space resets it to the whole colorant, a tint of
+1.0 in every component (8.6.6.4, 8.6.6.5), where zeros had made it none
+(`cs_resets_a_spot_space_to_full_tint`); a `/Lab` space starts at zero, or the
+nearest value a `/Range` that leaves zero out allows (8.6.5.4). `Bitmap::to_png` writes an ink page as the light
 it stands for — PNG has no CMYK — and where every partly covered or blended
 pixel is one ink and black those bytes are exactly what the same render
 without the switch returns

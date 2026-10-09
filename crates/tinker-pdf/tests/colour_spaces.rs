@@ -177,6 +177,42 @@ fn a_separation_at_zero_tint_is_blank() {
     assert!(r > 220 && g > 220 && b > 220, "got ({r}, {g}, {b})");
 }
 
+/// **`cs` resets a spot space to full tint.** 8.6.8 resets the colour to the
+/// space's initial value, and for `/Separation` that is a tint of 1.0
+/// (8.6.6.4) and for `/DeviceN` 1.0 in every component (8.6.6.5) — not the
+/// zeros of the device spaces. Each space here is black at full tint and
+/// white at none, so `cs` then a fill with no `sc` is black; it was white,
+/// no colorant at all. The stroke slot (`CS`) is reset the same way.
+#[test]
+fn cs_resets_a_spot_space_to_full_tint() {
+    let program = "{ add 2 div 1 exch sub }";
+    let objects = format!(
+        "5 0 obj\n<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1] /Length {} >>\n\
+         stream\n{program}\nendstream\nendobj\n",
+        program.len()
+    );
+    let resources = "/ColorSpace << \
+           /Spot [ /Separation /Ink /DeviceGray \
+             << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >> ] \
+           /Two [ /DeviceN [/A /B] /DeviceGray 5 0 R ] >>";
+    let bitmap = page_with_objects(
+        resources,
+        "/Spot cs 0 0 10 40 re f \
+         /Two cs 10 0 10 40 re f \
+         /Spot CS 10 w 25 0 m 25 40 l S \
+         /Spot cs 0 scn 30 0 10 40 re f",
+        &objects,
+    );
+    assert_eq!(pixel(&bitmap, 5, 20), (0, 0, 0), "/Separation: tint 1.0");
+    assert_eq!(pixel(&bitmap, 15, 20), (0, 0, 0), "/DeviceN: 1.0 each");
+    assert_eq!(pixel(&bitmap, 25, 20), (0, 0, 0), "and the stroke slot");
+    assert_eq!(
+        pixel(&bitmap, 35, 20),
+        (255, 255, 255),
+        "the space's tint 0 is white, so the black above is the reset's"
+    );
+}
+
 /// L* of 100 with no chroma is white. Read as RGB it clamps to (1, 0, 0) after
 /// the 0..1 clamp — and a mid-grey L* of 50 clamps to black.
 #[test]

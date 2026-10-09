@@ -330,12 +330,16 @@ pub trait FontSource {
         None
     }
 
-    /// The colour `cs` resets a named space to (8.6.8): black in every
-    /// device space, which for DeviceCMYK is `0 0 0 1` and not all zeros.
+    /// The colour `cs` resets a named space to (8.6.8), which each space's
+    /// own clause gives: black in every device space, which for DeviceCMYK is
+    /// `0 0 0 1` and not all zeros; a tint of 1.0 for `/Separation` (8.6.6.4)
+    /// and 1.0 in every component for `/DeviceN` (8.6.6.5); zero, or the
+    /// nearest value a `/Range` allows, for `/Lab` (8.6.5.4).
     ///
     /// The default is all zeros at [`FontSource::color_components`]'s count,
-    /// which is the initial colour of every space but DeviceCMYK and Lab's
-    /// spelling of black.
+    /// which is right for DeviceGray, DeviceRGB, the CIE-based and ICC
+    /// spaces and an `/Indexed` space's index, and wrong for the others
+    /// above; an implementation that can tell those apart answers for them.
     fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
         self.color_components(space).map(|n| vec![0.0; n])
     }
@@ -1052,7 +1056,8 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 // 8.6.8: selecting a space resets the colour to that space's
                 // initial value, which is black in every device space — and
                 // DeviceCMYK's black is `0 0 0 1`, which an all-zeros reset
-                // made white.
+                // made white — and the whole colorant, a tint of 1.0, in a
+                // `/Separation` or `/DeviceN` one, which it made none.
                 let components = self.fonts.initial_color(&space);
                 let initial = components
                     .as_ref()

@@ -147,21 +147,41 @@ impl ColorSpace {
         }
     }
 
-    /// The colour this space's initial value is (8.6.8).
+    /// The colour this space's initial value is (8.6.8), which each space's
+    /// own clause gives.
     #[must_use]
     pub fn initial(&self) -> Vec<f64> {
         match self {
             // Black in every device space, which for CMYK means all zeros
             // except the black ink.
             ColorSpace::DeviceCmyk => vec![0.0, 0.0, 0.0, 1.0],
+            // 8.6.6.4 and 8.6.6.5: a `/Separation`'s initial tint is 1.0 and
+            // a `/DeviceN`'s is 1.0 in every component — the whole colorant,
+            // where zeros would be none of it.
+            ColorSpace::Separation { components, .. } => vec![1.0; *components],
             // 8.6.8: an ICCBased space's initial colour is all zeros, whatever
             // the profile makes of them — which for a subtractive profile is
             // white rather than black, and is what the clause says.
             ColorSpace::Icc { components, .. } => vec![0.0; *components],
-            // 8.6.5.4: black is L=0 with no chroma, and zero is inside every
-            // legal /Range, so the generic all-zeros answer is right here for
-            // a different reason than it is elsewhere.
-            ColorSpace::Lab { .. } => vec![0.0, 0.0, 0.0],
+            // 8.6.5.4: all three zero, unless a component's range leaves zero
+            // out, when it is the nearest value the range allows. Table 65
+            // does not make `/Range` straddle zero, so `a*` and `b*` are each
+            // held to theirs (an unordered pair is left at zero rather than
+            // read as a range at all).
+            ColorSpace::Lab { range } => {
+                let nearest = |lo: f64, hi: f64| {
+                    if lo <= hi {
+                        0.0_f64.max(lo).min(hi)
+                    } else {
+                        0.0
+                    }
+                };
+                vec![
+                    0.0,
+                    nearest(range[0], range[1]),
+                    nearest(range[2], range[3]),
+                ]
+            }
             other => vec![0.0; other.components()],
         }
     }
@@ -462,6 +482,41 @@ mod tests {
         assert_eq!(
             ColorSpace::DeviceRgb.to_rgb(&ColorSpace::DeviceRgb.initial()),
             (0, 0, 0)
+        );
+    }
+
+    /// Each space's own clause gives its initial colour: a spot space's is
+    /// the whole colorant, 1.0 in every component (8.6.6.4, 8.6.6.5), and a
+    /// `/Lab` one's is zero or, where a `/Range` leaves zero out, the nearest
+    /// value it allows (8.6.5.4).
+    #[test]
+    fn every_space_starts_where_its_clause_says() {
+        let spot = |components: usize| ColorSpace::Separation {
+            components,
+            alternate: Box::new(ColorSpace::DeviceGray),
+            tint: Box::new(Function::Exponential {
+                domain: (0.0, 1.0),
+                c0: vec![1.0],
+                c1: vec![0.0],
+                n: 1.0,
+            }),
+        };
+        assert_eq!(spot(1).initial(), vec![1.0], "/Separation");
+        assert_eq!(spot(3).initial(), vec![1.0; 3], "/DeviceN");
+        assert_eq!(spot(1).to_rgb(&spot(1).initial()), (0, 0, 0), "full tint");
+
+        let lab = |range: [f64; 4]| ColorSpace::Lab { range }.initial();
+        assert_eq!(lab([-100.0, 100.0, -100.0, 100.0]), vec![0.0; 3]);
+        assert_eq!(lab([10.0, 20.0, -30.0, -5.0]), vec![0.0, 10.0, -5.0]);
+        assert_eq!(lab([20.0, 10.0, 0.0, 1.0]), vec![0.0; 3], "unordered");
+        assert_eq!(
+            ColorSpace::Indexed {
+                base: Box::new(ColorSpace::DeviceRgb),
+                lookup: vec![0; 3],
+                high: 0,
+            }
+            .initial(),
+            vec![0.0]
         );
     }
 
