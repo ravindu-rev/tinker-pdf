@@ -1279,3 +1279,62 @@ fn a_soft_hyphen_inside_a_line_is_not_there() {
     let broken = drawn_at("", "<p>ab-cd ef</p>", MEASURE);
     same("a soft hyphen inside a line", soft, written, broken);
 }
+
+// ---- positioned boxes written inside a line -------------------------------------
+
+/// [`lay`], its lines in the order they sit on the page rather than the order
+/// they were written: a box taken out of the line is laid out where it was
+/// met, so its runs are numbered among the line's, and a pair that moves it
+/// out of the paragraph in the markup numbers them after.
+fn placed(style: &str, body: &str) -> Vec<(String, f64, f64)> {
+    let mut lines = lay(style, body);
+    lines.sort_by(|a, b| a.2.total_cmp(&b.2).then(a.1.total_cmp(&b.1)));
+    lines
+}
+
+/// **An absolutely positioned box written inside a line is out of flow
+/// there too** (CSS 2.2 §9.6): it is laid out against its containing block as
+/// the same box written outside the paragraph is, and the line closes over
+/// the place it was written. With insets it is where they put it; without,
+/// it is at its static position, which for a box written at the start of a
+/// paragraph is the paragraph's top left — where the same box written before
+/// the paragraph sits. The mismatch is the box's text set in the line, which
+/// is what this build did before, warning `BlockInInline`.
+#[test]
+fn a_positioned_box_inside_a_line_is_taken_out_of_it() {
+    let style = ".a { position: absolute; top: 40px; left: 10px } .s { position: absolute }";
+    let inside = placed(
+        style,
+        r#"<p>aa <span>bb<span class="a">cc</span>dd</span> ee</p>"#,
+    );
+    let written = placed(
+        style,
+        r#"<p>aa <span>bb<span>dd</span></span> ee</p><div class="a">cc</div>"#,
+    );
+    let broken = placed(style, r#"<p>aa <span>bb<span>cc</span>dd</span> ee</p>"#);
+    same("positioned with insets", inside, written, broken);
+
+    let inside = placed(style, r#"<p><span class="s">cc</span>aa bb</p>"#);
+    let written = placed(style, r#"<div class="s">cc</div><p>aa bb</p>"#);
+    let broken = placed(style, r#"<p><span>cc</span>aa bb</p>"#);
+    same("positioned at its static position", inside, written, broken);
+
+    // The first is placed by its insets and names nothing; the second keeps
+    // the context's top left as its static position, and says so.
+    let warned = |body: &str| {
+        lay_out(
+            &document(body),
+            &format!("{RESET} {style}"),
+            MEASURE,
+            1000.0,
+        )
+        .2
+        .warnings
+        .iter()
+        .any(|(w, _)| *w == tinker_pdf_layout::Warning::PositionedInLine)
+    };
+    assert!(!warned(
+        r#"<p>aa <span>bb<span class="a">cc</span>dd</span> ee</p>"#
+    ));
+    assert!(warned(r#"<p><span class="s">cc</span>aa bb</p>"#));
+}

@@ -982,16 +982,17 @@ pub enum Warning {
     /// so is the difference between a known gap and a figure that quietly
     /// straddles a page.
     FloatBrokenAcrossPages,
-    /// An absolutely positioned block-level box inside an inline box, whose
-    /// content is set in the line rather than positioned.
+    /// An absolutely positioned or fixed box written inside a line, placed
+    /// at the top left of its inline formatting context where an inset pair
+    /// leaves it at its static position.
     ///
-    /// An **in-flow** block inside an inline box is CSS 2.2 §9.2.1.1's split,
-    /// done since October 2026 (`flow::Builder::split_inlines`): the content
-    /// before and after it are anonymous blocks and it is a block between
-    /// them. What reaches the line now is a box that is out of flow and was
-    /// written inside an inline, which §9.2.1.1 does not split for and which
-    /// this build does not take out of the line.
-    BlockInInline,
+    /// The box itself is out of flow and laid out as one (CSS 2.2 §9.6),
+    /// taken out of the line as a float is; until October 2026's eighth wave
+    /// its text was set in the line instead. Its static position is where it
+    /// would have been in flow — on the line it was written in, or below that
+    /// line for a block-level box — and the lines do not exist yet when it is
+    /// taken out, so it is the context's top left, as a float's is.
+    PositionedInLine,
     /// A line whose content does not fit and had nowhere to break — the word
     /// is longer than the line and `overflow-wrap` is `normal`, which is what
     /// the specification says to do and is still worth reporting.
@@ -1081,9 +1082,10 @@ impl fmt::Display for Warning {
             Warning::FloatBrokenAcrossPages => {
                 f.write_str("a float did not fit its page and was broken across the boundary")
             }
-            Warning::BlockInInline => {
-                f.write_str("an inline box holds an absolutely positioned block, set in the line")
-            }
+            Warning::PositionedInLine => f.write_str(
+                "an absolutely positioned box inside a line was placed at the top of its \
+                 inline formatting context",
+            ),
             Warning::LineOverflowed => f.write_str("a line had nowhere to break and overflowed"),
             Warning::BreakForcedPastTheRules => {
                 f.write_str("a page break was taken where CSS 2.2 13.3.3 permits none")

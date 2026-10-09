@@ -703,6 +703,37 @@ fn a_run_carries_no_deeper_a_stack_than_uax9_reads() {
     assert_eq!(deepest.embeddings.len(), 125);
 }
 
+/// **A formatting context of its own opens no level for its runs**: an
+/// inline-block inside an isolating span is one neutral of the line outside
+/// (UAX #9 reads it as U+FFFC), and the text inside it is its own paragraph,
+/// so its runs carry none of the span's embeddings while the span's own text
+/// carries its one.
+#[test]
+fn a_formatting_context_inside_an_isolate_opens_no_level_for_its_runs() {
+    let mut isolate = base();
+    isolate.unicode_bidi = UnicodeBidi::Isolate;
+    isolate.direction = Direction::Rtl;
+    let mut atomic = base();
+    atomic.display = Display::InlineBlock;
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            isolate,
+            vec![text("a "), BoxNode::element(atomic, vec![text("b")])],
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let levels = |body: &str| {
+        laid.pages[0]
+            .runs
+            .iter()
+            .find(|run| run.text == body)
+            .map(|run| run.embeddings.len())
+    };
+    assert_eq!(levels("a "), Some(1));
+    assert_eq!(levels("b"), Some(0));
+}
+
 /// **An outside marker stands on its item's inline-start side**
 /// (`css-lists-3` §3.1): the right of a right-to-left item, half an em past
 /// its content box, where a left-to-right one's stands half an em before it.

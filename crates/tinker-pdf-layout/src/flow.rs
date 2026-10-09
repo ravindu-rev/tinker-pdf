@@ -65,7 +65,7 @@ use std::collections::HashMap;
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignItems, BorderCollapse, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
-    ColumnSpan, ColumnWidth, Direction, Display, Float, Hyphens, LengthPercentage,
+    ColumnSpan, ColumnWidth, Direction, Display, Float, Hyphens, Inset, LengthPercentage,
     ListStylePosition, ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside,
     Position, Side, Sides, Size, TableLayout, TextAlign, UnicodeBidi, VerticalAlign, ZIndex,
 };
@@ -2151,6 +2151,19 @@ impl<M: Metrics> Builder<'_, M> {
         if style.float != Float::None {
             return self.float_box(node, &style, content_width, content_x, depth, false);
         }
+        // §9.6: `absolute` and `fixed` are out of flow wherever they are
+        // written, so one inside a line is taken out of it the way a float is
+        // and laid out as the positioned box it is, against its containing
+        // block. Where an inset pair leaves it at its static position, that is
+        // the context's top left — the float's limit, for the float's reason
+        // — and it is named.
+        if matches!(style.position, Position::Absolute | Position::Fixed) {
+            let auto = |side| style.inset.get(side) == Inset::Auto;
+            if (auto(Side::Top) && auto(Side::Bottom)) || (auto(Side::Left) && auto(Side::Right)) {
+                self.warn(Warning::PositionedInLine);
+            }
+            return self.positioned_box(node, &style, content_x, depth, false);
+        }
         self.budget.spend_box()?;
         // §9.2.2's own list: *"inline-level boxes that are not inline boxes
         // (such as replaced inline-level elements, inline-block elements and
@@ -2202,14 +2215,10 @@ impl<M: Metrics> Builder<'_, M> {
                     self.embeddings.push(embedding);
                 }
                 let mut gathered = Ok(());
+                // An in-flow block among the children was split out before
+                // this (§9.2.1.1, [`Builder::split_inlines`]), and a float or a
+                // positioned box is taken out of the line by its own `gather`.
                 for child in children {
-                    let child_style = consume(&child.style);
-                    // A float is not the §9.2.1.1 case: it is taken out of the
-                    // inline flow rather than splitting the inline box that
-                    // holds it, so warning about it would name the wrong rule.
-                    if child_style.float == Float::None && child_style.is_block_level() {
-                        self.warn(Warning::BlockInInline);
-                    }
                     gathered =
                         self.gather(child, out, collapser, depth + 1, content_x, content_width);
                     if gathered.is_err() {
@@ -2719,6 +2728,11 @@ impl<M: Metrics> Builder<'_, M> {
         let ceiling_line = std::mem::replace(&mut self.ceiling_line, f64::NEG_INFINITY);
         let content_top = std::mem::replace(&mut self.content_top, 0.0);
         let inside_marker = self.inside_marker.take();
+        // A sub-flow is a formatting context of its own and its paragraphs
+        // are their own: an inline-block, a float or a positioned box inside
+        // an isolating span opens no level for the runs inside it, which UAX
+        // #9 reads as one neutral of the line outside.
+        let embeddings = std::mem::take(&mut self.embeddings);
 
         let result = match inside {
             None => self.block(node, measure, 0.0, depth, avoid, 0),
@@ -2754,6 +2768,7 @@ impl<M: Metrics> Builder<'_, M> {
         self.ceiling_line = ceiling_line;
         self.content_top = content_top;
         self.inside_marker = inside_marker;
+        self.embeddings = embeddings;
         result?;
         Ok(Sublayout {
             items: inner,
