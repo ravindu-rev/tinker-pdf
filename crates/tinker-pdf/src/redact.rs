@@ -129,9 +129,10 @@
 //! 2026 and is measured now. The interpreter draws it when the `gs` that
 //! sets its graphics state runs, under the transform in force there with the
 //! group's `/Matrix` after it — one placement of a form — so [`rewrite`]
-//! records each `gs` as it records a `Do` (once per name and transform, under
-//! the same bound), and [`Walk`] enters the group as a form placement and
-//! cuts it. Never through a copy: pointing one `gs` at a copied group means
+//! records each `gs` whose state sets one as it records a `Do` (once per name
+//! and transform, under the same bound; a state that sets no mask is not a
+//! use, and spends nothing of it), and [`Walk`] enters the group as a form
+//! placement and cuts it. Never through a copy: pointing one `gs` at a copied group means
 //! a copied graphics state under a fresh name as well, and a stream sets one
 //! state nearly always once, so a group is cut in its own stream, the old way
 //! ([`union`]), and [`RedactionWarning::RepeatedForm`] names it when that is
@@ -493,6 +494,8 @@
 //! | the group drawn at the identity rather than at its `gs` | **1** |
 //! | a procedure's mask not followed | **1** |
 //! | every `gs` recorded however often it repeats | **1** |
+//! | every `gs` recorded whatever its state sets, which is how it was until the lane's review | 2 |
+//! | a placement remembered before the bound is asked, which is how it was until the lane's review | **1** |
 //!
 //! And a tiling pattern's cell measured (the other half of clause (b)), the
 //! same way:
@@ -645,9 +648,10 @@ pub enum RedactionWarning {
     /// One content stream invoked more XObjects than this module follows in
     /// one stream (4 096, a private bound), and the `Do`s past it were **not
     /// followed**: an image they draw was tested against no rectangle, and a
-    /// form was not entered. A `gs` that may set a soft mask counts toward
-    /// the bound as a `Do` does — once per name and transform — and one past
-    /// it is counted here, its group not measured.
+    /// form was not entered. A `gs` whose graphics state sets a soft mask
+    /// counts toward the bound as a `Do` does — once per name and transform
+    /// — and one past it is counted here, its group not measured; one whose
+    /// state sets no mask draws nothing and counts for nothing.
     ///
     /// The cap bounds what one stream's walk holds (ruling 1). Until October
     /// 2026 it was a bare `4096` in the rewrite, and what lay past it was left
@@ -3013,8 +3017,9 @@ fn cut_stream(
     ctm: Matrix,
     warnings: &mut Vec<RedactionWarning>,
 ) -> (Vec<u8>, RedactionReport, Vec<XObjectUse>) {
+    let sets_mask = |name: &[u8]| resolve_mask_group(editor, scope, name).is_some();
     let mut procedures = Procedures::default();
-    let first = rewrite(content, areas, &[fonts], ctm, &mut procedures);
+    let first = rewrite(content, areas, &[fonts], ctm, &mut procedures, &sets_mask);
     if procedures.found.is_empty() {
         return first;
     }
@@ -3054,7 +3059,7 @@ fn cut_stream(
         drop,
         ..Procedures::default()
     };
-    rewrite(content, areas, &[fonts], ctm, &mut again)
+    rewrite(content, areas, &[fonts], ctm, &mut again, &sets_mask)
 }
 
 /// How many streams one use of a Type 3 glyph may still run while its
@@ -3180,8 +3185,21 @@ fn draws_under(
     }
     budget.left -= 1;
 
+    let sets_mask = |name: &[u8]| {
+        measure
+            .scopes
+            .iter()
+            .any(|scope| resolve_mask_group(measure.editor, scope, name).is_some())
+    };
     let mut procedures = Procedures::default();
-    let (_, pass, uses) = rewrite(content, measure.areas, &measure.fonts, ctm, &mut procedures);
+    let (_, pass, uses) = rewrite(
+        content,
+        measure.areas,
+        &measure.fonts,
+        ctm,
+        &mut procedures,
+        &sets_mask,
+    );
     for warning in pass.warnings {
         note(warnings, warning);
     }
@@ -3808,6 +3826,100 @@ struct XObjectUse {
     mask: bool,
 }
 
+/// What one pass of [`rewrite`] follows: every `Do`, and every `gs` whose
+/// graphics state sets a soft mask, under the one bound
+/// [`MAX_XOBJECT_USES`]. Everything it holds is held per use, so nothing in
+/// it outgrows that bound however long the stream (ruling 1).
+struct Followed<'a> {
+    uses: Vec<XObjectUse>,
+    /// The (name, transform) of every `gs` recorded, so that a state set
+    /// again where it was set before is one placement of its mask. Entered
+    /// only beside a use, so it holds no more than `uses` does: entered
+    /// first, it took an entry for every state at a distinct transform past
+    /// the bound too, one per twenty-two bytes of `1 0 0 1 1 0 cm /A gs `.
+    states: HashSet<(Vec<u8>, PlacementKey)>,
+    /// Whether a state name sets a soft mask, asked of `sets_mask` once each
+    /// while there are few enough names to remember; past that a name is
+    /// asked every time, which costs a lookup and not memory.
+    masking: HashMap<Vec<u8>, bool>,
+    /// Whether the graphics state a `gs` names sets a mask whose group the
+    /// walk would enter ([`resolve_mask_group`]): the stream's resources are
+    /// the caller's, and [`rewrite`] has none.
+    sets_mask: &'a dyn Fn(&[u8]) -> bool,
+    /// `Do`s and mask states past the bound, written back and not followed.
+    unfollowed: usize,
+}
+
+impl<'a> Followed<'a> {
+    fn new(sets_mask: &'a dyn Fn(&[u8]) -> bool) -> Self {
+        Followed {
+            uses: Vec::new(),
+            states: HashSet::new(),
+            masking: HashMap::new(),
+            sets_mask,
+            unfollowed: 0,
+        }
+    }
+
+    /// Records a `Do` of `name` under `ctm`, or counts it unfollowed past
+    /// the bound. Whether it was recorded.
+    fn xobject(&mut self, name: &[u8], ctm: Matrix) -> bool {
+        if self.uses.len() < MAX_XOBJECT_USES {
+            self.uses.push(XObjectUse {
+                name: name.to_vec(),
+                ctm,
+                at: 0..0,
+                mask: false,
+            });
+            true
+        } else {
+            self.unfollowed = self.unfollowed.saturating_add(1);
+            false
+        }
+    }
+
+    /// Records a `gs` of `name` under `ctm` when its state sets a soft mask
+    /// and it was not recorded under that transform already, or counts it
+    /// unfollowed past the bound. Whether it was recorded.
+    ///
+    /// A state that sets no mask draws nothing, and is not a use: recorded
+    /// as one, every `gs` at a distinct transform — an alpha set per object
+    /// — spent the bound the `Do`s share, and an image drawn after four
+    /// thousand of them went unscrubbed under a rectangle.
+    fn state(&mut self, name: &[u8], ctm: Matrix) -> bool {
+        if !self.sets_mask(name) {
+            return false;
+        }
+        let key = (name.to_vec(), placement_key(ctm));
+        if self.states.contains(&key) {
+            return false;
+        }
+        if self.uses.len() >= MAX_XOBJECT_USES {
+            self.unfollowed = self.unfollowed.saturating_add(1);
+            return false;
+        }
+        self.states.insert(key);
+        self.uses.push(XObjectUse {
+            name: name.to_vec(),
+            ctm,
+            at: 0..0,
+            mask: true,
+        });
+        true
+    }
+
+    fn sets_mask(&mut self, name: &[u8]) -> bool {
+        if let Some(&known) = self.masking.get(name) {
+            return known;
+        }
+        let answer = (self.sets_mask)(name);
+        if self.masking.len() < MAX_XOBJECT_USES {
+            self.masking.insert(name.to_vec(), answer);
+        }
+        answer
+    }
+}
+
 /// The text state needed to place a glyph: everything in 9.4.4's displacement
 /// formula, and nothing else.
 ///
@@ -4098,28 +4210,26 @@ struct GlyphUse {
 /// A glyph is measured by its box. The Type 3 glyph occurrences `procedures`
 /// names are removed whatever their box says, and the other Type 3 glyphs
 /// whose procedures could draw beyond it are recorded in it, for
-/// [`cut_stream`] to measure.
+/// [`cut_stream`] to measure. `sets_mask` answers whether the graphics state
+/// a `gs` names sets a soft mask, whose group is then a use ([`Followed`]).
 fn rewrite(
     content: &[u8],
     areas: &[Redaction],
     fonts: &[&HashMap<Vec<u8>, Arc<RunFont>>],
     initial: Matrix,
     procedures: &mut Procedures,
+    sets_mask: &dyn Fn(&[u8]) -> bool,
 ) -> (Vec<u8>, RedactionReport, Vec<XObjectUse>) {
     let mut out = Vec::with_capacity(content.len());
     let mut tokens = Tokenizer::new(content);
     let mut operands: Vec<Token> = Vec::new();
-    let mut uses: Vec<XObjectUse> = Vec::new();
-    // The (name, transform) of every `gs` recorded, so one is recorded once.
-    let mut states: HashSet<(Vec<u8>, PlacementKey)> = HashSet::new();
+    let mut followed = Followed::new(sets_mask);
     let mut pen = Pen {
         ctm: initial,
         ..Pen::default()
     };
     let mut saved: Vec<Pen> = Vec::new();
     let mut report = RedactionReport::default();
-    // `Do`s past [`MAX_XOBJECT_USES`], written back and not followed.
-    let mut unfollowed = 0usize;
 
     while let Some(token) = tokens.next_token() {
         let Token::Operator(op) = &token else {
@@ -4186,17 +4296,7 @@ fn rewrite(
                 // what to do about it, is the caller's business — this crate
                 // has the transform, and the caller has the dictionaries.
                 if let Some(Token::Name(name)) = operands.last() {
-                    if uses.len() < MAX_XOBJECT_USES {
-                        uses.push(XObjectUse {
-                            name: name.clone(),
-                            ctm: pen.ctm,
-                            at: 0..0,
-                            mask: false,
-                        });
-                        recorded = true;
-                    } else {
-                        unfollowed = unfollowed.saturating_add(1);
-                    }
+                    recorded = followed.xobject(name, pen.ctm);
                 }
             }
             b"gs" => {
@@ -4206,21 +4306,10 @@ fn rewrite(
                 // once per name and transform, since a stream that sets one
                 // state at every text object draws one mask, and under the
                 // same bound as the `Do`s: a state past it is not followed,
-                // and `TooManyXObjects` counts it with them.
+                // and `TooManyXObjects` counts it with them. A state that
+                // sets no mask is not a use at all ([`Followed::state`]).
                 if let Some(Token::Name(name)) = operands.last() {
-                    if states.insert((name.clone(), placement_key(pen.ctm))) {
-                        if uses.len() < MAX_XOBJECT_USES {
-                            uses.push(XObjectUse {
-                                name: name.clone(),
-                                ctm: pen.ctm,
-                                at: 0..0,
-                                mask: true,
-                            });
-                            recorded = true;
-                        } else {
-                            unfollowed = unfollowed.saturating_add(1);
-                        }
-                    }
+                    recorded = followed.state(name, pen.ctm);
                 }
             }
             b"cm" => {
@@ -4379,7 +4468,7 @@ fn rewrite(
             // A `Do` or a `gs` is never rewritten, so its operand is always
             // written here, and it is the last one.
             if recorded {
-                if let Some(used) = uses.last_mut() {
+                if let Some(used) = followed.uses.last_mut() {
                     used.at = last;
                 }
             }
@@ -4389,15 +4478,15 @@ fn rewrite(
         operands.clear();
     }
 
-    if unfollowed > 0 && !areas.is_empty() {
+    if followed.unfollowed > 0 && !areas.is_empty() {
         note(
             &mut report.warnings,
             RedactionWarning::TooManyXObjects {
-                skipped: unfollowed,
+                skipped: followed.unfollowed,
             },
         );
     }
-    (out, report, uses)
+    (out, report, followed.uses)
 }
 
 /// A piece of a rewritten showing operation.
@@ -6584,6 +6673,7 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
             &[&fonts],
             Matrix::IDENTITY,
             &mut Procedures::default(),
+            &|_| false,
         );
         assert_eq!(report, RedactionReport::default());
         assert!(out.contains(&b'q'), "the operators survive");
@@ -10347,14 +10437,21 @@ mod xobject_cap {
     fn many(placements: usize) -> Vec<u8> {
         let mut content = "q 10 0 0 10 300 300 cm /Im0 Do Q\n".repeat(placements - 1);
         content.push_str("q 10 0 0 10 0 0 cm /Im0 Do Q\n");
+        page(&content)
+    }
+
+    /// One page drawing `content`, with `/Im0` the image [`many`] draws and
+    /// `/GS1` a graphics state that sets a constant alpha and no soft mask.
+    fn page(content: &str) -> Vec<u8> {
         let mut out = String::from("%PDF-1.7\n");
         out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
         out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
         out.push_str(
             "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400]\n\
-             /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+             /Resources << /XObject << /Im0 5 0 R >> /ExtGState << /GS1 << /CA 0.5 >> >> >>\n\
+             /Contents 4 0 R >>\nendobj\n",
         );
-        out.push_str(&stream_object(4, &content));
+        out.push_str(&stream_object(4, content));
         out.push_str(
             "5 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2\n\
              /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\n\
@@ -10401,6 +10498,65 @@ mod xobject_cap {
             all_streams(&open(bytes)).contains("SECR"),
             "which is what the warning is for"
         );
+    }
+
+    /// A `gs` whose state sets no soft mask draws nothing and is not a use.
+    /// As many of them as the walk follows `Do`s, each at a transform of its
+    /// own — an alpha set per object — and then the image under the
+    /// rectangle: it is followed and scrubbed, and nothing is reported.
+    /// Recorded as uses, the states spent the bound and the image was the
+    /// one past it: `images: 0`, `TooManyXObjects { skipped: 1 }`, its
+    /// samples still in the file, where before soft masks were measured at
+    /// all it was removed.
+    #[test]
+    fn a_state_that_sets_no_mask_does_not_spend_the_bound() {
+        let mut content: String = (0..MAX_XOBJECT_USES)
+            .map(|i| format!("q 1 0 0 1 {i} 0 cm /GS1 gs Q\n"))
+            .collect();
+        content.push_str("q 10 0 0 10 0 0 cm /Im0 Do Q\n");
+        let (bytes, report) = redact(open(page(&content)), &[under()]);
+        assert_eq!(report.images, 1, "{:?}", report.warnings);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert!(!all_streams(&open(bytes)).contains("SECR"));
+    }
+
+    /// What one pass remembers of the states it met is bounded by what it
+    /// records: three times the bound of mask states at distinct transforms
+    /// records the bound and counts the rest unfollowed, and remembers no
+    /// more placements than it recorded — where it used to take an entry for
+    /// every one, recorded or not, a set as long as the stream. A state set
+    /// again where it was recorded is still one placement, past the bound
+    /// too; and as many names as the bound are asked about and remembered,
+    /// the rest asked every time.
+    #[test]
+    fn what_a_pass_remembers_of_its_states_is_bounded() {
+        let masks = |_: &[u8]| true;
+        let mut followed = Followed::new(&masks);
+        let at = |x: usize| Matrix {
+            e: x as f64,
+            ..Matrix::IDENTITY
+        };
+        for x in 0..3 * MAX_XOBJECT_USES {
+            followed.state(b"A", at(x));
+        }
+        assert_eq!(followed.uses.len(), MAX_XOBJECT_USES);
+        assert_eq!(followed.unfollowed, 2 * MAX_XOBJECT_USES);
+        assert_eq!(followed.states.len(), MAX_XOBJECT_USES);
+        assert!(!followed.state(b"A", at(0)), "already recorded");
+        assert_eq!(followed.unfollowed, 2 * MAX_XOBJECT_USES);
+
+        let none = |_: &[u8]| false;
+        let mut followed = Followed::new(&none);
+        for n in 0..3 * MAX_XOBJECT_USES {
+            assert!(!followed.state(format!("S{n}").as_bytes(), at(n)));
+        }
+        assert!(followed.uses.is_empty());
+        assert_eq!(
+            followed.unfollowed, 0,
+            "a state that sets no mask is no use"
+        );
+        assert!(followed.states.is_empty());
+        assert_eq!(followed.masking.len(), MAX_XOBJECT_USES);
     }
 
     /// No rectangle, nothing to be uncertain about, as for every warning.
@@ -10771,10 +10927,11 @@ mod patterns_and_masks {
     /// transform thousands of times, and that is one placement of one mask:
     /// it is recorded once, and does not spend the bound `Do`s and states
     /// share. Recorded every time, five thousand `gs`es would pass it and be
-    /// reported as unfollowed.
+    /// reported as unfollowed. `/GS2`, whose mask is a group of paths: a
+    /// state that sets no mask is no use at all, and would pin nothing here.
     #[test]
     fn a_state_set_again_under_one_transform_is_one_placement() {
-        let content = "/GS1 gs ".repeat(5_000);
+        let content = "/GS2 gs ".repeat(5_000);
         assert_eq!(warnings(&content, &[anywhere()]), Vec::new());
     }
 
