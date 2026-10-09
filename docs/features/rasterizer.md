@@ -101,8 +101,12 @@ space is cut along the shear on the device. Its `floor` is the device's:
 wherever the mapped pen is thinner than it, the same dashed pieces are also
 mapped first and stroked at the floor, and the union is at least that wide
 every way. `stretches` gives a map's two singular values, which is how a
-caller tells a similarity from anything else, and `dash` hands back the
-pieces a pattern leaves without stroking them.
+caller tells a similarity from anything else, and `dash` hands a caller
+the pieces a pattern leaves without stroking them — one at a time, as each
+is cut, and stops cutting when the caller answers `false`: the 100 000-step
+bound is per segment, so forty segments under `[0.01 0.01]` are two million
+pieces, and a caller writing them somewhere bounded pays only for what it
+keeps (until the review of lane 8A it collected them all first).
 
 **Hard edges.** `Mask::harden` turns a coverage mask into one that is whole or
 empty at every pixel: at least half becomes 255, less becomes 0. It is what

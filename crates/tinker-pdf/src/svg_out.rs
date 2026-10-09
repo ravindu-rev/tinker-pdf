@@ -130,7 +130,10 @@
 //! tells the replay to stop, and the document it hands back is well-formed
 //! and ends where the budget did. The root element, `<defs>`' own tags and
 //! the `</g>` of each group still open are outside the count, a few hundred
-//! bytes in all.
+//! bytes in all. One element is built in pieces that could each outrun the
+//! budget — a zero-width dashed line under a stretch, whose dashes are cut
+//! and written one by one — and its cutting stops where the budget has no
+//! room left, so it never holds more than the budget before it is refused.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -523,6 +526,12 @@ impl<'a> Writer<'a> {
         true
     }
 
+    /// The bytes of elements the budget has left.
+    fn room_left(&self) -> usize {
+        self.limit
+            .saturating_sub(self.defs.len().saturating_add(self.body.len()))
+    }
+
     /// Writes an element into the body, if the budget has room for it.
     fn put(&mut self, element: &str) -> bool {
         if !self.room(element.len()) {
@@ -785,7 +794,15 @@ impl<'a> Writer<'a> {
             // one dash array says them, so the dashes are cut here — in user
             // space, as the renderer cuts them — and written as the pieces.
             Some((k, back)) if dashed => (
-                dashed_pieces(path, &back, &to_page, user_dashes, state.dash_phase, k),
+                dashed_pieces(
+                    path,
+                    &back,
+                    &to_page,
+                    user_dashes,
+                    state.dash_phase,
+                    k,
+                    self.room_left(),
+                ),
                 THINNEST,
                 k,
                 None,
@@ -1616,6 +1633,14 @@ fn path_data(path: &[PathSegment], m: &Matrix) -> String {
 /// pattern, and `to_page` takes the pieces out to this writer's units; `k` is
 /// `to_page`'s largest stretch, so flattening at a hundredth over it keeps
 /// every chord within a hundredth of a point of its curve once mapped.
+///
+/// **The cutting stops once the path data passes `room`**, the bytes the
+/// budget has left: the dash bound is per segment, so a short content stream
+/// of long segments under a fine pattern is millions of pieces, and an
+/// element longer than `room` is refused by [`Writer::put`] whatever else it
+/// says. What comes back then is longer than `room` by at most one piece, so
+/// the writer refuses it, says `Truncated` and stops, having held a budget's
+/// worth of markup rather than every piece.
 fn dashed_pieces(
     path: &[PathSegment],
     back: &Matrix,
@@ -1623,6 +1648,7 @@ fn dashed_pieces(
     dashes: &[f64],
     phase: f64,
     k: f64,
+    room: usize,
 ) -> String {
     let mut user = tinker_pdf_raster::Path::new();
     let at = |x: f64, y: f64| back.apply(x, y);
@@ -1653,16 +1679,17 @@ fn dashed_pieces(
         }
     }
     let mut out = String::new();
-    for piece in tinker_pdf_raster::dash(&user, dashes, phase, 0.01 / k) {
+    tinker_pdf_raster::dash(&user, dashes, phase, 0.01 / k, &mut |piece| {
         let mut verb = 'M';
-        for point in &piece {
+        for point in piece {
             let (x, y) = to_page.apply(point.x, point.y);
             if x.is_finite() && y.is_finite() {
                 let _ = write!(out, "{verb}{} {}", num(x), num(y));
                 verb = 'L';
             }
         }
-    }
+        out.len() <= room
+    });
     out
 }
 

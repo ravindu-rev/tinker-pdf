@@ -220,17 +220,31 @@ pub fn stroke_mapped(
 /// summing to zero, leaves each flattened subpath whole. The path is
 /// flattened at `tolerance`, and the same 100 000-step bound per segment
 /// [`stroke`] keeps applies.
-#[must_use]
-pub fn dash(path: &Path, dashes: &[f64], phase: f64, tolerance: f64) -> Vec<Vec<Point>> {
+///
+/// **Each piece is handed to `piece` as it is cut**, never collected: the
+/// bound is per segment, so the pieces of a short path under a fine pattern
+/// run to millions — forty nine-byte segments of `[0.01 0.01]` are two
+/// million — and a caller writing them somewhere bounded stops the cutting
+/// by answering `false`, having paid only for what it kept. Returns whether
+/// every piece was handed over.
+pub fn dash(
+    path: &Path,
+    dashes: &[f64],
+    phase: f64,
+    tolerance: f64,
+    piece: &mut dyn FnMut(&[Point]) -> bool,
+) -> bool {
     let style = StrokeStyle {
         dashes: dashes.to_vec(),
         dash_phase: phase,
         ..StrokeStyle::default()
     };
-    flatten(path, tolerance)
-        .iter()
-        .flat_map(|poly| apply_dashes(poly, &style, None))
-        .collect()
+    for poly in flatten(path, tolerance) {
+        if !each_dash(&poly, &style, None, &mut |cut| piece(&cut)) {
+            return false;
+        }
+    }
+    true
 }
 
 /// The largest and smallest factor by which `map` stretches a length — its
@@ -261,6 +275,23 @@ fn apply_dashes(
     style: &StrokeStyle,
     stop: Option<&dyn Fn() -> bool>,
 ) -> Vec<Vec<Point>> {
+    let mut pieces = Vec::new();
+    each_dash(poly, style, stop, &mut |piece| {
+        pieces.push(piece);
+        true
+    });
+    pieces
+}
+
+/// [`apply_dashes`]' walk, handing each piece to `piece` as it is cut, in
+/// the same order, and stopping as soon as `piece` answers `false` — which
+/// is what this returns — or `stop` answers `true`, after the piece in hand.
+fn each_dash(
+    poly: &[Point],
+    style: &StrokeStyle,
+    stop: Option<&dyn Fn() -> bool>,
+    piece: &mut dyn FnMut(Vec<Point>) -> bool,
+) -> bool {
     let pattern: Vec<f64> = style
         .dashes
         .iter()
@@ -269,10 +300,9 @@ fn apply_dashes(
         .collect();
     // 8.4.3.6: an empty array, or one summing to zero, is a solid line.
     if pattern.is_empty() || pattern.iter().sum::<f64>() <= 0.0 {
-        return vec![poly.to_vec()];
+        return piece(poly.to_vec());
     }
 
-    let mut pieces = Vec::new();
     let mut current: Vec<Point> = Vec::new();
 
     // Where in the pattern the phase starts.
@@ -324,9 +354,9 @@ fn apply_dashes(
                 // The pieces already measured, and the one in hand, rather
                 // than nothing: the same partial answer `fill` gives.
                 if current.len() > 1 {
-                    pieces.push(current);
+                    piece(current);
                 }
-                return pieces;
+                return true;
             }
             steps = steps.wrapping_add(1);
             guard += 1;
@@ -337,7 +367,9 @@ fn apply_dashes(
                 if on {
                     current.push(at);
                 } else if current.len() > 1 {
-                    pieces.push(std::mem::take(&mut current));
+                    if !piece(std::mem::take(&mut current)) {
+                        return false;
+                    }
                 } else {
                     current.clear();
                 }
@@ -359,9 +391,9 @@ fn apply_dashes(
     }
 
     if current.len() > 1 {
-        pieces.push(current);
+        return piece(current);
     }
-    pieces
+    true
 }
 
 fn stroke_polyline(poly: &[Point], radius: f64, style: &StrokeStyle, out: &mut Sink<'_>) {
@@ -1265,13 +1297,44 @@ mod tests {
     /// own space.
     #[test]
     fn dash_hands_back_the_pieces_a_pattern_leaves() {
-        let pieces = dash(&segment(0.0, 0.0, 30.0, 0.0), &[10.0, 5.0], 0.0, 0.05);
-        let ends: Vec<(f64, f64)> = pieces
-            .iter()
-            .map(|piece| (piece[0].x, piece[piece.len() - 1].x))
-            .collect();
+        let mut ends: Vec<(f64, f64)> = Vec::new();
+        let whole = dash(
+            &segment(0.0, 0.0, 30.0, 0.0),
+            &[10.0, 5.0],
+            0.0,
+            0.05,
+            &mut |piece| {
+                ends.push((piece[0].x, piece[piece.len() - 1].x));
+                true
+            },
+        );
+        assert!(whole, "every piece was handed over");
         assert_eq!(ends, vec![(0.0, 10.0), (15.0, 25.0)]);
-        let solid = dash(&segment(0.0, 0.0, 30.0, 0.0), &[], 0.0, 0.05);
-        assert_eq!(solid.len(), 1);
+        let mut solid = 0;
+        dash(&segment(0.0, 0.0, 30.0, 0.0), &[], 0.0, 0.05, &mut |_| {
+            solid += 1;
+            true
+        });
+        assert_eq!(solid, 1);
+    }
+
+    /// `dash` stops cutting when its caller says so: of the 1 500 pieces
+    /// `[0.01 0.01]` leaves of a line thirty long, the third answer `false`
+    /// is the last piece cut.
+    #[test]
+    fn dash_stops_cutting_when_the_caller_has_enough() {
+        let mut handed = 0;
+        let whole = dash(
+            &segment(0.0, 0.0, 30.0, 0.0),
+            &[0.01, 0.01],
+            0.0,
+            0.05,
+            &mut |_| {
+                handed += 1;
+                handed < 3
+            },
+        );
+        assert!(!whole, "the cutting was stopped");
+        assert_eq!(handed, 3);
     }
 }

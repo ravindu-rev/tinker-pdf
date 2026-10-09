@@ -411,7 +411,12 @@ markup grows with what a page *does* — every operator an element, every image
 `Do` a picture — so a short stream asks for as much as it likes, and an element
 that would pass the budget is not written, nothing after it is, the replay is
 told to stop and `SvgWarning::Truncated { limit }` says so; the document is
-well-formed and ends there. Before both, the review of 2 October 2026 measured
+well-formed and ends there. A zero-width dashed line under a stretch, written
+as its pieces, stops cutting them once its path data passes what the budget
+has left, so what it holds is the budget and not the pieces: the review of
+lane 8A measured 346 bytes of content (forty segments of `[0.01 0.01]` under
+`scale(1, 3)`) holding 452 679 156 bytes at once under a 1 MiB budget, and it
+now holds 4 201 056 (`svg_dash_memory.rs`). Before both, the review of 2 October 2026 measured
 a 252 112-byte file drawing one 200 x 200 image four hundred times write
 85 550 995 bytes of markup; the same drawing now writes 238 459, and four
 hundred `sh` of a 2 889-byte page whose shading is rasterised write one
