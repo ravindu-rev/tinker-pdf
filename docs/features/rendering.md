@@ -196,7 +196,13 @@ too (`ImageDraw::ink`, and a run of abutting stencils is kept to one ink and
 composited with it); until the review of lane 8A it took only the light, and
 `0.2 0.4 0.6 0.1 k` under a one-bit mask arrived as `(0, 64, 127, 71)` where a
 path fill of it arrived as `(51, 102, 153, 26)`
-(`a_stencil_mask_paints_the_fill_colour_s_own_ink`). Every other colour is light, which a
+(`a_stencil_mask_paints_the_fill_colour_s_own_ink`). A non-isolated group over
+an ink page starts from the page's own ink and takes that ink out again at
+close (11.4.4, 11.4.7.2); until the second review of lane 8A both steps went
+through light, so a `/Multiply` of `0 1 0 0 k` inside the group over a rich
+black was blended against its pure-`K` spelling and came out `(0, 255, 0,
+255)` where the same fill with no group is the rich black
+(`a_non_isolated_group_over_ink_blends_against_the_page_s_own_ink`). Every other colour is light, which a
 CMYK buffer takes through 8.6.4.4's relation inverted with maximum undercolour
 removal — `1 0 0 rg` arrives as `(0, 255, 255, 0)` — and so is what is not a
 flat colour (an image, a shading, a pattern's cell) and every space whose

@@ -301,16 +301,19 @@ impl Canvas {
     ///
     /// # Why the same-format path is correctness and not speed
     ///
-    /// For the formats that exist today the two paths produce the same bytes —
+    /// For the additive formats the two paths produce the same bytes —
     /// `Gray8`'s round trip survives because `luma` of a replicated grey is
-    /// that grey exactly, its weights summing to 1000 — so this could be
-    /// deleted tomorrow and no test would notice. It is here for the format
-    /// after them. A buffer holding *subtractive* components has no lossless
-    /// trip through an RGB `Color`: the relation is exact in one direction and
-    /// a projection in the other, so a group nested inside another group of
-    /// its own kind would have its ink re-derived at every composite — a
-    /// picture, and a different one. Same-format copies must not go through
-    /// `Color`, and the cheapest way to guarantee that is for them never to.
+    /// that grey exactly, its weights summing to 1000. A buffer holding
+    /// *subtractive* components has no lossless trip through an RGB `Color`:
+    /// the relation is exact in one direction and a projection in the other,
+    /// and an ink buffer holds ink the projection never makes — a DeviceCMYK
+    /// colour reaches it as the document's own components, so a rich black is
+    /// all four inks there and pure K after the trip. A group nested inside
+    /// another group of its own kind would have its ink re-derived at every
+    /// composite — a picture, and a different one. Same-format copies must not
+    /// go through `Color`, and the cheapest way to guarantee that is for them
+    /// never to; `adopt_backdrop` and `remove_backdrop` read through here for
+    /// that reason.
     ///
     /// `a_same_format_copy_is_the_bytes_it_started_as` pins the equivalence.
     fn source_from(&self, src: &Canvas, sx: u32, sy: u32) -> Option<([u8; 5], u32)> {
@@ -676,13 +679,18 @@ impl Canvas {
         {
             return;
         }
+        // The backdrop's own bytes, through `source_from`'s same-format path —
+        // the formats are equal, checked above. Going through `pixel` and
+        // `encode` instead re-derived an ink buffer's ink from its light, and
+        // an ink page holds ink that light has no spelling for: a rich black
+        // the document chose came back as pure K, and a blend inside the group
+        // saw a backdrop the page never had.
         let channels = color_channels(self.format);
         for row in 0..self.height {
             for col in 0..self.width {
-                let Some(color) = backdrop.pixel(col, row) else {
+                let Some((pixel, _)) = self.source_from(&backdrop, col, row) else {
                     continue;
                 };
-                let pixel = self.encode(color);
                 let components = self.format.components();
                 let base = (row as usize) * self.stride + (col as usize) * components;
                 for (i, slot) in self.data.iter_mut().skip(base).take(channels).enumerate() {
@@ -726,7 +734,10 @@ impl Canvas {
                 // painted, which is the known instability of the removal step
                 // and is why every channel clamps.
                 let factor = (i64::from(initial) * 255 / i64::from(own)) - i64::from(initial);
-                let Some(base0) = backdrop.pixel(col, row).map(|c| backdrop.encode(c)) else {
+                // `C0` is the backdrop's own bytes, as `adopt_backdrop` copied
+                // them in: the backdrop is in this buffer's format, so this is
+                // `source_from`'s same-format read and no trip through light.
+                let Some((base0, _)) = self.source_from(&backdrop, col, row) else {
                     continue;
                 };
                 let base = (row as usize) * self.stride + (col as usize) * components;
@@ -1018,11 +1029,15 @@ pub fn cmyk_to_rgb(c: u8, m: u8, y: u8, k: u8) -> (u8, u8, u8) {
 /// The other direction is *not* an identity, and the difference matters. A
 /// CMYK value that did not come from here — a rich black, say — comes back as
 /// the pure-K black with the same colour, because that is the only split this
-/// function produces. Nothing in this engine authors CMYK components: a source
-/// colour is flattened to sRGB at the resource seam long before a buffer sees
-/// it, so every CMYK value in a group buffer originated here and round-trips.
-/// The day components are carried through that seam, this comment is the one
-/// to revisit.
+/// function produces. And ink buffers hold such values: a DeviceCMYK colour
+/// reaches a [`PixelFormat::CmykA8`] canvas as the document's own components
+/// ([`Canvas::fill_mask_inked`], [`Canvas::blend_pixel_inked`]), so `1 1 1 1 k`
+/// is all four inks there, a value this function never returns. So nothing
+/// that copies an ink buffer into another of the same format may go through
+/// light and back — `source_from` reads the bytes across, and a non-isolated
+/// group's backdrop is adopted and removed that way — and the one place that
+/// must take the round trip, 11.3.5.3's non-separable blends, counts it as
+/// `approximated_blends`.
 #[must_use]
 pub fn rgb_to_cmyk(r: u8, g: u8, b: u8) -> (u8, u8, u8, u8) {
     let white = u32::from(r.max(g).max(b));
@@ -1447,6 +1462,45 @@ mod tests {
         let mut rgb = Canvas::new(4, 4, PixelFormat::Rgba8, Color::WHITE);
         rgb.fill_mask_inked(&mask, Color::BLACK, rich, 1.0, BlendMode::Normal);
         assert_eq!(&rgb.data[..4], &[0, 0, 0, 255], "light reads no ink");
+    }
+
+    /// A non-isolated group over ink starts from the backdrop's own ink and
+    /// takes the same ink out again (11.4.4, 11.4.7.2). A rich black is a value
+    /// `rgb_to_cmyk` never produces, so a backdrop copied through light came
+    /// in as pure K, and the removal step, reading it the same way, recovered
+    /// a colour the group never painted.
+    #[test]
+    fn a_backdrop_of_ink_is_adopted_and_removed_as_that_ink() {
+        let mask = square_mask(0.0, 0.0, 4.0, 4.0, 4);
+        let mut page = Canvas::new(4, 4, PixelFormat::CmykA8, Color::WHITE);
+        page.fill_mask_inked(
+            &mask,
+            Color::BLACK,
+            Some([255, 255, 255, 255]),
+            1.0,
+            BlendMode::Normal,
+        );
+
+        let mut group = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
+        group.adopt_backdrop(page.extract((0, 0), 4, 4, PixelFormat::CmykA8));
+        assert_eq!(
+            group.data[..5],
+            [255, 255, 255, 255, 0],
+            "the rich black, with none of the group's own alpha"
+        );
+
+        // Half of magenta, then the backdrop out: what is left is the group's
+        // own colour, magenta, whatever it was painted over.
+        let magenta = Color::rgb(255, 0, 255);
+        group.fill_mask_inked(&mask, magenta, Some([0, 255, 0, 0]), 0.5, BlendMode::Normal);
+        group.remove_backdrop();
+        let own = &group.data[..4];
+        assert!(
+            own.iter()
+                .zip([0u8, 255, 0, 0])
+                .all(|(got, want)| got.abs_diff(want) <= 3),
+            "the group's own ink is magenta, got {own:?}"
+        );
     }
 
     #[test]

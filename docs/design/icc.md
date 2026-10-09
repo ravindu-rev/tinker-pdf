@@ -171,9 +171,13 @@ resource seam beside its light (`FontSource::resolve_ink`,
 `GraphicsState::fill_ink`), and a CMYK buffer — a `/DeviceCMYK` group's, or a
 page asked for in ink — composites them. Leaving a CMYK group for an additive
 parent takes them through 8.6.4.4 forward, which needs no inverse and is exact;
-what does not round-trip is a non-separable blend inside the group, whose
-operands go to light and back, and `RenderWarning::ApproximatedGroupBlend`
-already names that. Soft-mask luminosity (11.6.5.2) reads the group's
+a non-isolated group over a parent of its own format adopts the backdrop as the
+parent's bytes and takes the same bytes out at close (`Canvas::adopt_backdrop`,
+`remove_backdrop`), where until the lane's review both went through light and
+a rich black under the group was blended against as pure K; what does not
+round-trip is a non-separable blend inside the group, whose operands go to
+light and back, and `RenderWarning::ApproximatedGroupBlend` already names
+that. Soft-mask luminosity (11.6.5.2) reads the group's
 own space — but **not for free, and not where this doc expected**. `to_mask`
 reads through `Canvas::pixel`, which already applies the group's own relation,
 so the space arrives on its own. The real defect was the *weighting*:

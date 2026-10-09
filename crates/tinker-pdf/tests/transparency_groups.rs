@@ -1472,3 +1472,87 @@ fn a_non_separable_blend_over_ink_is_named_and_a_separable_one_is_not() {
         rgb.warnings
     );
 }
+
+/// **A non-isolated group over ink starts from the page's own ink** (11.4.4),
+/// not from that ink turned into light and back.
+///
+/// Since a DeviceCMYK colour reaches an ink page as its components, a page
+/// can hold ink that 8.6.4.4 inverted with maximum undercolour removal never
+/// produces — a rich black of all four inks, where the inversion makes the
+/// same shade pure K. A non-isolated group that copied its backdrop through
+/// light started from that pure K instead, and a separable blend inside it
+/// saw the wrong backdrop: `0 1 0 0 k` multiplied over the rich black is
+/// all four inks again (complements `(0,0,0,0)` times anything), and over
+/// pure K it is `(0, 255, 0, 255)`. Drawn with no group the page is the
+/// former, and 11.4.4 makes an opaque non-isolated group composited
+/// Normally the same as no group at all.
+///
+/// Both routes to a CMYK group buffer are asked: a group that declares
+/// `/DeviceCMYK` and one that inherits the ink page's space. And the backdrop
+/// is taken out again (11.4.7.2) as the same ink it was put in as: half of
+/// `0 1 0 0 k` over the rich black is half of every ink but magenta, which a
+/// removal step reading the backdrop as pure K pushes to a full cyan, magenta
+/// and yellow at half black — the opaque square above cannot see that,
+/// because at full coverage the removal term is zero.
+#[test]
+fn a_non_isolated_group_over_ink_blends_against_the_page_s_own_ink() {
+    let ink = |bytes: Vec<u8>| -> [u8; 5] {
+        let bitmap = Document::open(bytes)
+            .expect("it opens")
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions {
+                format: tinker_pdf::PixelFormat::CmykA8,
+                allow_cmyk: true,
+                ..RenderOptions::default()
+            });
+        assert_eq!(bitmap.format, tinker_pdf::PixelFormat::CmykA8);
+        let (x, y) = (bitmap.width / 2, bitmap.height / 2);
+        let base = y as usize * bitmap.stride + x as usize * 5;
+        bitmap.data[base..base + 5].try_into().expect("five bytes")
+    };
+    let under = "1 1 1 1 k 0 0 60 60 re f";
+    let form = "/Mul gs 0 1 0 0 k 10 10 40 40 re f";
+    let gs = "/Mul << /BM /Multiply >>";
+
+    let ungrouped = ink(over_backdrop("", under, form, gs));
+    assert_eq!(
+        ungrouped,
+        [255, 255, 255, 255, 255],
+        "magenta multiplied over a rich black is the rich black"
+    );
+    for group in [
+        "/Group << /S /Transparency /I false >>",
+        "/Group << /S /Transparency /I false /CS /DeviceCMYK >>",
+    ] {
+        assert_eq!(
+            ink(over_backdrop(group, under, form, gs)),
+            ungrouped,
+            "{group}: the group blended against the rich black's pure-K \
+             spelling, the page's ink turned into light and back"
+        );
+    }
+
+    let form = "/Half gs 0 1 0 0 k 10 10 40 40 re f";
+    let gs = "/Half << /ca 0.5 >>";
+    let ungrouped = ink(over_backdrop("", under, form, gs));
+    assert_eq!(
+        ungrouped,
+        [127, 255, 127, 127, 255],
+        "half of magenta over a rich black"
+    );
+    for group in [
+        "/Group << /S /Transparency /I false >>",
+        "/Group << /S /Transparency /I false /CS /DeviceCMYK >>",
+    ] {
+        let grouped = ink(over_backdrop(group, under, form, gs));
+        assert!(
+            grouped
+                .iter()
+                .zip(ungrouped)
+                .all(|(got, want)| got.abs_diff(want) <= 2),
+            "{group}: {grouped:?} against {ungrouped:?}. The backdrop was \
+             taken out as pure K rather than the rich black put in"
+        );
+    }
+}
