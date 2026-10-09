@@ -122,10 +122,22 @@ pub(crate) fn into_logical_order(page: &mut TextPage) -> usize {
 /// sentence applied to where a line ends as well as to how one is read.
 ///
 /// So two lines in a row are one when their baselines agree to half an em and
-/// their extents along it meet or overlap to within the same half em the
-/// device's own rule allows. A line with no right-to-left character beside a
-/// line with none is never joined — a left-to-right page is collected exactly
-/// as it was — and neither is a vertical one.
+/// their extents along it meet to within the same half em the device's own
+/// rule allows. A line with no right-to-left character beside a line with
+/// none is never joined — a left-to-right page is collected exactly as it
+/// was — and neither is a vertical one.
+///
+/// # And two lines on top of each other are two drawings
+///
+/// **Meeting is not overlapping.** The pieces of a split line lie end to end,
+/// touching or a kerned hair into each other; text overdrawn in a second text
+/// object — a fake bold, a hand-made shadow, a word stroked twice — lies over
+/// the first copy. Joined, the two copies became one line whose characters
+/// [`logical_line`] interleaved: `אבג` drawn twice half a point apart read
+/// back `אאבבגג`, where every reader before this join read two lines of
+/// `אבג` (review of lane 8C). So two lines overlapping by more than half the
+/// shorter one's extent are not joined. A zero-width mark in an object of its
+/// own overlaps nothing and still joins its base's line.
 fn rejoin_split_lines(lines: &mut Vec<TextLine>) -> usize {
     let mut joined = 0usize;
     let mut out: Vec<TextLine> = Vec::with_capacity(lines.len());
@@ -183,7 +195,9 @@ fn continues_on_page(previous: &TextLine, next: &TextLine) -> bool {
     let (lo1, hi1) = span(previous);
     let (lo2, hi2) = span(next);
     let gap = (lo2 - hi1).max(lo1 - hi2).max(0.0);
-    gap.is_finite() && gap <= slack
+    let overlap = (hi1.min(hi2) - lo1.max(lo2)).max(0.0);
+    let shorter = (hi1 - lo1).min(hi2 - lo2);
+    gap.is_finite() && gap <= slack && overlap <= shorter * 0.5
 }
 
 /// The smallest upright box around two quads.
@@ -589,6 +603,49 @@ mod tests {
             line(vec![lower], true),
         ];
         assert_eq!(rejoin_split_lines(&mut lines), 0);
+    }
+
+    /// **A line drawn twice is two lines, not one line of each letter
+    /// twice** (review of lane 8C): `אבג` in reading order, and the same again
+    /// half a point to the right in a second text object — a fake bold. Each
+    /// copy reads back whole.
+    #[test]
+    fn a_line_drawn_over_itself_is_not_joined_to_its_copy() {
+        let copy = |dx: f64| {
+            line(
+                vec![
+                    ch(ALEF, 20.0 + dx, 5.0),
+                    ch(BET, 15.0 + dx, 5.0),
+                    ch(GIMEL, 10.0 + dx, 5.0),
+                ],
+                true,
+            )
+        };
+        let mut page = TextPage::default();
+        page.blocks.push(tinker_pdf_content::TextBlock {
+            lines: vec![copy(0.0), copy(0.5)],
+            quad: ch(ALEF, 10.0, 15.5).quad,
+        });
+        into_logical_order(&mut page);
+        let texts: Vec<&str> = page.blocks[0]
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect();
+        let word = format!("{ALEF}{BET}{GIMEL}");
+        assert_eq!(texts, [word.as_str(), word.as_str()]);
+    }
+
+    /// A mark in a text object of its own, with no width, lies inside its
+    /// base's extent and overlaps nothing: it is still the base's line.
+    #[test]
+    fn a_zero_width_mark_drawn_apart_still_joins_its_line() {
+        let mut lines = vec![
+            line(vec![ch(BET, 15.0, 5.0), ch(ALEF, 10.0, 5.0)], true),
+            line(vec![ch(QAMATS, 17.0, 0.0)], true),
+        ];
+        assert_eq!(rejoin_split_lines(&mut lines), 1);
+        assert_eq!(lines.len(), 1);
     }
 
     #[test]

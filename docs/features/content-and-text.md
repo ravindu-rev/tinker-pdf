@@ -163,7 +163,10 @@ word of several text objects drawn in reading order inside a left-to-right
 line — `a ب<span>ح</span>م b` as an EPUB draws it — came back as three lines on
 one baseline. Consecutive lines of a block that hold a right-to-left
 character, sit on one baseline to half an em and meet end to end to within
-the device's own half-em slack are joined before they are ordered. `Page::text_with` with
+the device's own half-em slack are joined before they are ordered — and two
+that overlap by more than half the shorter one's extent are not: that is text
+drawn over itself, a fake bold or a hand-made shadow, and each copy reads back
+whole rather than interleaved with the other. `Page::text_with` with
 `TextOptions::content_order` is the opt-out. Search boxes a match from
 whichever of its ends starts first along the baseline, so a logical-order
 match on a right-to-left line is not boxed inside out. Warnings are deduplicated — a page whose font is unknown says
@@ -700,8 +703,9 @@ search hit geometry, wmode/rtl separation, non-finite glyphs dropped),
 visual Hebrew line, one already in reading order, a mark on either side of
 its base, digits in a right-to-left line, an out-of-order left-to-right line
 left alone, a line of twenty thousand marks, a line the stream cut in three
-joined, and lines apart on one baseline, on two baselines or with no
-right-to-left character left apart), and
+joined, a zero-width mark drawn apart joined to its base's line, and lines
+apart on one baseline, on two baselines, with no right-to-left character or
+drawn over each other left apart), and
 `crates/tinker-pdf/tests/text_logical_order.rs` (the same on built pages:
 both producer habits, the opt-out, search's box, the three structured
 formats and the line's words, and every committed `testdata` document and
