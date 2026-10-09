@@ -763,7 +763,22 @@ fn write_entry(
                 None => data,
             };
             dict.insert(Name::LENGTH, Object::Int(data.len() as i64));
-            write_dict(out, &dict, names, 0);
+            match crypt {
+                // 7.6.2 again: a stream's dictionary holds strings as any
+                // object does — an embedded file's `/Params` `/CheckSum` and
+                // `/ModDate`, a form's `/PieceInfo` — and the reader decrypts
+                // them there. Writing it as given put those in the clear in a
+                // file sealed everywhere else, and a reader then decrypted the
+                // clear bytes into garbage. One walk over the whole dictionary,
+                // so its strings take the object's string nonces, which start
+                // above the stream's own.
+                Some(cipher) => write_object(
+                    out,
+                    &cipher.encrypt_strings(&Object::Dict(dict), num),
+                    names,
+                ),
+                None => write_dict(out, &dict, names, 0),
+            }
             out.extend_from_slice(
                 b"
 stream

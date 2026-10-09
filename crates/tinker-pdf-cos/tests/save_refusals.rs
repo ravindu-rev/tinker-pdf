@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
-    AuthLevel, CosDocument, DocumentEditor, Encryption, SaveRefusal, WriteMode, WriteOptions,
+    AuthLevel, CosDocument, DocumentEditor, Encryption, Object, SaveRefusal, WriteMode,
+    WriteOptions,
 };
 
 fn open(name: &str, password: Option<&str>) -> Arc<CosDocument> {
@@ -56,18 +57,26 @@ fn identity(entry: &str) -> Arc<CosDocument> {
     doc
 }
 
-/// A one-page document under the standard handler at `/V 4 /R 4` whose crypt
-/// filter is `/AESV2` with a 40-bit key, opened with its user password `u`.
-/// Algorithm 1 keys AES-128 with the first n + 5 bytes of a hash, here ten,
-/// which AES does not take — so the key authenticates and every encryption
-/// under it hands its bytes back unchanged. `/Length 40` is written at the
-/// top level (Table 20) and in the crypt filter (Table 25, where the
-/// standard handler counts bytes), so the key is five bytes whichever the
-/// reader takes; an absent `/Length` reads as 40 too.
+/// A hex string as a PDF writes one.
+fn hex(bytes: &[u8]) -> String {
+    let digits: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("<{digits}>")
+}
+
+/// A document under the standard handler at revision 3 or 4, whose user
+/// password is `u` and owner password `o`, with an `n`-byte file key. Objects
+/// 1 onwards are what `objects` makes of the file key, object 1 the catalog;
+/// the `/Encrypt` dictionary follows them, `encrypt` giving its entries
+/// before `/O`, `/U` and `/P`.
 ///
 /// Built here from Algorithms 2, 3 and 5 (7.6.4.3, 7.6.4.4) with the
 /// engine's own MD5 and RC4, so no outside program made it.
-fn forty_bit_aesv2() -> Arc<CosDocument> {
+fn standard_handler(
+    version: &str,
+    n: usize,
+    encrypt: &str,
+    objects: impl FnOnce(&[u8]) -> Vec<Vec<u8>>,
+) -> Vec<u8> {
     use tinker_pdf_crypto::md5::md5;
     use tinker_pdf_crypto::rc4::rc4;
 
@@ -85,7 +94,6 @@ fn forty_bit_aesv2() -> Arc<CosDocument> {
             .collect()
     };
     let stepped = |key: &[u8], i: u8| -> Vec<u8> { key.iter().map(|b| b ^ i).collect() };
-    let n = 5;
     let p: i32 = -4;
     let id: Vec<u8> = (0..16).collect();
 
@@ -120,27 +128,22 @@ fn forty_bit_aesv2() -> Arc<CosDocument> {
     }
     u.resize(32, 0);
 
-    let hex = |bytes: &[u8]| -> String {
-        let digits: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        format!("<{digits}>")
-    };
-    let objects = [
-        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_string(),
+    let mut objects = objects(key);
+    objects.push(
         format!(
-            "<< /Filter /Standard /V 4 /R 4 /Length 40 \
-             /CF << /StdCF << /CFM /AESV2 /AuthEvent /DocOpen /Length 5 >> >> \
-             /StmF /StdCF /StrF /StdCF /O {} /U {} /P {p} >>",
+            "<< /Filter /Standard {encrypt} /O {} /U {} /P {p} >>",
             hex(&o),
             hex(&u)
-        ),
-    ];
-    let mut bytes = b"%PDF-1.6\n".to_vec();
+        )
+        .into_bytes(),
+    );
+    let mut bytes = format!("%PDF-{version}\n").into_bytes();
     let mut offsets = Vec::new();
     for (index, object) in objects.iter().enumerate() {
         offsets.push(bytes.len());
-        bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+        bytes.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        bytes.extend_from_slice(object);
+        bytes.extend_from_slice(b"\nendobj\n");
     }
     let xref = bytes.len();
     bytes.extend_from_slice(
@@ -151,19 +154,93 @@ fn forty_bit_aesv2() -> Arc<CosDocument> {
     }
     bytes.extend_from_slice(
         format!(
-            "trailer\n<< /Size {} /Root 1 0 R /Encrypt 4 0 R /ID [{} {}] >>\n\
+            "trailer\n<< /Size {} /Root 1 0 R /Encrypt {} 0 R /ID [{} {}] >>\n\
              startxref\n{xref}\n%%EOF\n",
             objects.len() + 1,
+            objects.len(),
             hex(&id),
             hex(&id)
         )
         .as_bytes(),
+    );
+    bytes
+}
+
+/// A one-page document under the standard handler at `/V 4 /R 4` whose crypt
+/// filter is `/AESV2` with a 40-bit key, opened with its user password `u`.
+/// Algorithm 1 keys AES-128 with the first n + 5 bytes of a hash, here ten,
+/// which AES does not take — so the key authenticates and every encryption
+/// under it hands its bytes back unchanged. `/Length 40` is written at the
+/// top level (Table 20) and in the crypt filter (Table 25, where the
+/// standard handler counts bytes), so the key is five bytes whichever the
+/// reader takes; an absent `/Length` reads as 40 too.
+fn forty_bit_aesv2() -> Arc<CosDocument> {
+    let n = 5;
+    let bytes = standard_handler(
+        "1.6",
+        n,
+        "/V 4 /R 4 /Length 40 \
+         /CF << /StdCF << /CFM /AESV2 /AuthEvent /DocOpen /Length 5 >> >> \
+         /StmF /StdCF /StrF /StdCF",
+        |_| {
+            [
+                "<< /Type /Catalog /Pages 2 0 R >>",
+                "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>",
+            ]
+            .map(|object| object.as_bytes().to_vec())
+            .to_vec()
+        },
     );
 
     let doc = open_bytes(bytes, Some("u"));
     let key = doc.file_key().expect("authenticated, with a key");
     assert_eq!(key.key().len(), n, "a 40-bit file key");
     doc
+}
+
+/// The string [`rc4_with_a_string_in_a_stream_dictionary`] keeps in its
+/// content stream's dictionary, and the text its content stream shows.
+const DICTIONARY_SECRET: &[u8] = b"DICTSTRINGSECRET";
+const VISIBLE_TEXT: &[u8] = b"VISIBLETEXT";
+
+/// A one-page document under the standard handler at `/V 2 /R 3` with a
+/// 128-bit RC4 key, opened with its user password `u`, whose content
+/// stream's dictionary carries a string, `/Secret` — where an embedded
+/// file's `/Params` keeps `/CheckSum` and `/ModDate` (7.11.4 Table 45), or a
+/// form its `/PieceInfo` — encrypted with object 4's key, as 7.6.2 has every
+/// string encrypted.
+fn rc4_with_a_string_in_a_stream_dictionary() -> Arc<CosDocument> {
+    use tinker_pdf_crypto::md5::md5;
+    use tinker_pdf_crypto::rc4::rc4;
+
+    let bytes = standard_handler("1.4", 16, "/V 2 /R 3 /Length 128", |key| {
+        // Algorithm 1: object 4's key, the file key salted with the low three
+        // bytes of its number and two of its generation.
+        let mut salted = key.to_vec();
+        salted.extend_from_slice(&[4, 0, 0, 0, 0]);
+        let digest = md5(&salted);
+        let object_key = &digest[..(key.len() + 5).min(16)];
+        let content = rc4(object_key, b"BT /F1 12 Tf 72 700 Td (VISIBLETEXT) Tj ET");
+        let mut stream = format!(
+            "<< /Length {} /Secret {} >>\nstream\n",
+            content.len(),
+            hex(&rc4(object_key, DICTIONARY_SECRET))
+        )
+        .into_bytes();
+        stream.extend_from_slice(&content);
+        stream.extend_from_slice(b"\nendstream");
+        vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+              /Resources << /Font << /F1 5 0 R >> >> >>"
+                .to_vec(),
+            stream,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        ]
+    });
+    open_bytes(bytes, Some("u"))
 }
 
 fn rewrite() -> WriteOptions {
@@ -436,4 +513,114 @@ fn an_incremental_update_replaces_no_encryption() {
         Err(SaveRefusal::WouldDecrypt),
         "a rewrite drops /Encrypt whatever it could read"
     );
+}
+
+/// Whether `saved` holds `plaintext` in either form a string is written in:
+/// as given, or as the digits of a hex string.
+fn holds_string(saved: &[u8], plaintext: &[u8]) -> bool {
+    let upper: String = plaintext.iter().map(|b| format!("{b:02X}")).collect();
+    holds(saved, plaintext)
+        || holds(saved, upper.as_bytes())
+        || holds(saved, upper.to_ascii_lowercase().as_bytes())
+}
+
+/// Every `/Secret` string on a content stream's dictionary in `doc`, page by
+/// page, as the reader decrypts it.
+fn dictionary_secrets(doc: &CosDocument) -> Vec<Vec<u8>> {
+    let key = doc.intern(b"Secret");
+    tinker_pdf_cos::pages::collect(doc)
+        .iter()
+        .flat_map(|page| tinker_pdf_cos::pages::contents(doc, page))
+        .filter_map(|reference| doc.get(reference).ok())
+        .filter_map(|object| match object.as_ref() {
+            Object::Stream(stream) => stream.dict.get_string(key).map(|s| s.bytes.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whatever `check_save` answers `Ok` seals every string copied in, the ones
+/// in a stream's own dictionary among them (7.6.2). The writer sealed a
+/// stream's bytes and wrote its dictionary as given, so each save below
+/// wrote `/Secret` in the clear, and the file reopened read it as clear bytes
+/// decrypted as if they were ciphertext: a rewrite with encryption of its
+/// own, ordinary or linearized, of the encrypted source or of a plain
+/// document its page joined; an update of an AES-256 document under its own
+/// key; and an update of the RC4 source under its RC4 key.
+#[test]
+fn a_string_in_a_stream_dictionary_is_sealed_wherever_the_answer_is_ok() {
+    let source = rc4_with_a_string_in_a_stream_dictionary();
+    assert_eq!(
+        dictionary_secrets(&source),
+        [DICTIONARY_SECRET],
+        "the source reads its own string"
+    );
+    let linearized = WriteOptions {
+        linearize: true,
+        ..encrypted()
+    };
+    let cases = [
+        (
+            "the source, rewritten with encryption",
+            Arc::clone(&source),
+            encrypted(),
+            "u",
+            2,
+        ),
+        (
+            "the source, rewritten linearized with encryption",
+            Arc::clone(&source),
+            linearized.clone(),
+            "u",
+            2,
+        ),
+        (
+            "the source, updated under its RC4 key",
+            Arc::clone(&source),
+            incremental(),
+            "u",
+            2,
+        ),
+        (
+            "an encrypted document opened with its password, updated",
+            open("encrypted-aes256.pdf", Some("open-sesame")),
+            incremental(),
+            "open-sesame",
+            1,
+        ),
+        (
+            "a plain document, rewritten with encryption",
+            open("simple-text.pdf", None),
+            encrypted(),
+            "u",
+            1,
+        ),
+        (
+            "a plain document, rewritten linearized with encryption",
+            open("simple-text.pdf", None),
+            linearized,
+            "u",
+            1,
+        ),
+    ];
+    for (target, doc, options, password, pages) in cases {
+        let mut editor = DocumentEditor::new(doc);
+        editor.import_page(&source, 0, 1).expect("imported");
+        assert_eq!(editor.check_save(&options), Ok(()), "{target}");
+        let saved = editor.save(&options);
+        assert!(
+            !holds_string(&saved, DICTIONARY_SECRET),
+            "{target}: Ok, and the saved file holds the string in the clear"
+        );
+        assert!(
+            !holds(&saved, VISIBLE_TEXT),
+            "{target}: Ok, and the saved file holds the content in the clear"
+        );
+        let reopened = open_bytes(saved, Some(password));
+        assert_eq!(
+            dictionary_secrets(&reopened),
+            vec![DICTIONARY_SECRET.to_vec(); pages],
+            "{target}: the string reads back as it was"
+        );
+    }
 }

@@ -73,7 +73,12 @@ operating system to ask, so the caller supplies randomness (the
 `EntropySource` trait states the contract). Every string and stream is
 encrypted (7.6.2, 7.6.3.2) with a per-object initialisation vector derived
 from the file key and object number, so identical plaintexts never
-encrypt identically; ciphertext strings are written in hex form.
+encrypt identically; ciphertext strings are written in hex form. That
+includes the strings in a stream's own dictionary — an embedded file's
+`/Params` `/CheckSum` and `/ModDate`, a form's `/PieceInfo` — which until
+October 2026 every encrypting save, a rewrite or an update under an
+inherited key, wrote as given: in the clear, and then decrypted into
+garbage on reopening (`strings_in_a_stream_dictionary_are_encrypted_too`).
 Encryption composes with object streams and with linearized output
 (Annex F) — the linearized writer encrypts each object as it serialises it
 and measures the layout from the ciphertext. A rewrite of an opened
@@ -128,7 +133,8 @@ Table 22). `DocumentEditor::check_save(&WriteOptions)` answers both before
 anything is written: `SaveRefusal::WouldDecrypt` for the first, unless the
 save is a rewrite that brings its own encryption, or an incremental update
 sealed with the key the document was opened with, where that key encrypts
-both streams and strings; and
+both streams and strings — those of a stream's dictionary among them
+(`a_string_in_a_stream_dictionary_is_sealed_wherever_the_answer_is_ok`); and
 `SaveRefusal::OwnerAuthorityNeeded` for the second, whose `withheld()`
 names the Table 22 permissions in the table's order. An incremental update
 is sealed with that key and nothing else (7.6.2): it does not read

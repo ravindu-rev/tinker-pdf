@@ -1378,7 +1378,14 @@ fn write_indirect(
                 None => data,
             };
             dict.insert(Name::LENGTH, Object::Int(data.len() as i64));
-            write_object(out, &Object::Dict(dict), names);
+            // A stream's dictionary holds strings as any object does, and
+            // they are sealed with the object's others, as the ordinary
+            // writer's `write_entry` seals them.
+            let dict = Object::Dict(dict);
+            match crypt {
+                Some(cipher) => write_object(out, &cipher.encrypt_strings(&dict, number), names),
+                None => write_object(out, &dict, names),
+            }
             out.extend_from_slice(b"\nstream\n");
             out.extend_from_slice(&data);
             out.extend_from_slice(b"\nendstream");
