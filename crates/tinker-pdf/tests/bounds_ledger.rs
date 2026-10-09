@@ -1,5 +1,19 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, 9 October 2026, the review of tier 5's formats lane.* **Two more
+//! rows, both HTML's own, and the first of them a bound the lane had written
+//! and not recorded.** `MAX_HTML_ACTIVE_FORMATTING` bounds the list of active
+//! formatting elements, which the tree builder walks on every formatting tag
+//! and which table cells' markers let grow past the stack of open elements;
+//! the lane held it at four times the depth cap and reported crossing it as
+//! the depth cap, with no constant, no ledger and no test. `MAX_HTML_CLONE_BYTES`
+//! bounds the attribute bytes a clone of a formatting element copies, the one
+//! place an HTML tree is bigger than its input — 116 kB of markup held 200 MB
+//! of attribute values. Each `fixtures` is the cap, for
+//! `MAX_ANNOTATION_BYTES`'s reason, and all three yardsticks are zeros,
+//! because no container path parses HTML: an EPUB chapter is XHTML and is read
+//! by the XML reader.
+//!
 //! *Amended, 3 October 2026, tier 5's table-reconstruction row.* **One more
 //! row, `MAX_TABLE_RULES`, and the first that bounds work rather than a copy
 //! or an allocation a format asks for.** Finding where a table's rules meet is
@@ -613,6 +627,9 @@ const PDF20_TESTS: &str = include_str!("pdf20.rs");
 /// tables it bounds, fired by the suite that reads them.
 const TABLES: &str = include_str!("../src/tables.rs");
 const TABLES_TESTS: &str = include_str!("tables.rs");
+/// The review of tier 5's formats lane: HTML's two caps live with the XML
+/// reader's four, and its bounds suite fires them.
+const HTML_TESTS: &str = include_str!("../../tinker-pdf-xml/tests/html.rs");
 
 /// One bound, as its own ledger publishes it.
 ///
@@ -2442,6 +2459,50 @@ fn ledger() -> Vec<Bound> {
             declared_in: TABLES,
             fires_in: ("a_page_past_the_rule_cap_has_no_rules_read", TABLES_TESTS),
         },
+        Bound {
+            name: "MAX_HTML_ACTIVE_FORMATTING",
+            cap: xml_limits::MAX_HTML_ACTIVE_FORMATTING as u128,
+            published: "1 024",
+            // The firing test builds 1 206 entries and the one beside it
+            // 1 005; html5lib's trees are a few hundred bytes each.
+            fixtures: xml_limits::MAX_HTML_ACTIVE_FORMATTING as u128,
+            // No container path parses HTML: a comic has no markup, a fixed
+            // document is XML, and an EPUB chapter is XHTML.
+            comic: 0,
+            document: 0,
+            book: 0,
+            // Constructive rather than a field width: thirty-two table cells
+            // nested one inside another, each leaving a hundred `<b>`s that a
+            // `</p>` closed behind its marker, with the stack never past 231.
+            reachable: 32 * (100 + 1),
+            reachable_because: "thirty-two nested cells of a hundred closed `<b>`s and a \
+                                marker each, under MAX_XML_DEPTH",
+            declared_in: XML_LIMITS,
+            fires_in: (
+                "the_list_of_active_formatting_elements_stops_at_its_cap",
+                HTML_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_HTML_CLONE_BYTES",
+            cap: xml_limits::MAX_HTML_CLONE_BYTES as u128,
+            published: "64 MiB",
+            // The firing test copies to the clone the budget runs out at, and
+            // the one beside it to the last clone that fits.
+            fixtures: xml_limits::MAX_HTML_CLONE_BYTES as u128,
+            comic: 0,
+            document: 0,
+            book: 0,
+            // A value half a one-megabyte input long, reopened by the eight-byte
+            // `<p>x</p>`s in its other half.
+            reachable: (1u128 << 19) * ((1u128 << 19) / 8),
+            reachable_because: "a 512 KiB attribute value reopened by 65 536 `<p>x</p>`s",
+            declared_in: XML_LIMITS,
+            fires_in: (
+                "attribute_bytes_copied_onto_clones_stop_at_their_cap",
+                HTML_TESTS,
+            ),
+        },
     ]
 }
 
@@ -2486,8 +2547,10 @@ fn segment_size() -> u128 {
 /// CSS row's shadows add `MAX_CSS_SHADOWS`; and the review of the
 /// tagged-writing lane adds `MAX_STRUCTURE_VALUES`, `MAX_STRUCTURE_BYTES`,
 /// `MAX_ASSOCIATED_FILE_BYTES` and `MAX_OUTPUT_INTENT_BYTES`; and tier 5's
-/// table-reconstruction row adds `MAX_TABLE_RULES`. All **sixty** are here,
-/// and a bound added without a row fails this.
+/// table-reconstruction row adds `MAX_TABLE_RULES`; and the review of tier
+/// 5's formats lane adds HTML's `MAX_HTML_ACTIVE_FORMATTING` and
+/// `MAX_HTML_CLONE_BYTES`. All **sixty-two** are here, and a bound added
+/// without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -2554,6 +2617,8 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_ASSOCIATED_FILE_BYTES",
             "MAX_OUTPUT_INTENT_BYTES",
             "MAX_TABLE_RULES",
+            "MAX_HTML_ACTIVE_FORMATTING",
+            "MAX_HTML_CLONE_BYTES",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2659,7 +2724,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 60, "the ledger is sixty rows");
+    assert_eq!(measured, 62, "the ledger is sixty-two rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2691,7 +2756,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 60, "the ledger is sixty rows");
+    assert_eq!(ledger().len(), 62, "the ledger is sixty-two rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**

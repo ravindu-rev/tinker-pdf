@@ -295,7 +295,7 @@ exceed it routinely — declared in one place,
 | Nothing PDF-shaped | `OpenError::NotAPdf` | Not one indirect object found, even after a full rescan | `CosDocument::open` → `OpenError::NoObjects` |
 | A RAR 4 | `OpenError::UnsupportedArchive(ArchiveRefusal::NotAZip)` | Recognised by its own signature and refused as *that version*; no producer here can write one to hold a decoder to | [cbz](cbz.md), [design/comic-archives.md](../design/comic-archives.md) |
 | Customizable `<select>`'s `<selectedcontent>` copy of the selected `<option>` | the `<selectedcontent>` element is built, empty | the copy is a DOM behaviour the parser triggers when an `<option>` is popped, and it needs the option *selectedness* algorithm and the `selected` attribute's dirtiness, which a tree builder does not have. html5lib's `webkit02.dat` #45–#48 are the four tests it fails, by name | `crates/tinker-pdf-xml/tests/html5lib.rs` |
-| An HTML tag, attribute or DOCTYPE name past 1 024 bytes, more than 256 attributes on one tag, nesting past 256, or more than a million tokens and nodes | the parse stops there, `MarkupDefect::Truncated`, the tree so far kept | `tinker-pdf-xml`'s four caps, which the HTML parser shares with the XML reader; the token cap counts every node the tree builder creates too, because reopening formatting elements makes a few bytes ask for hundreds. html5lib's `tests1.dat` #77, an attribute name of 1 100 characters, is the one suite test a cap stops | `crates/tinker-pdf-xml/src/limits.rs` |
+| An HTML tag, attribute or DOCTYPE name past 1 024 bytes, more than 256 attributes on one element (a tag's, or an `<html>` or `<body>` that later tags' attributes are merged into), nesting past 256, more than a million tokens, nodes and copied attributes, more than 1 024 entries in the list of active formatting elements, or more than 64 MiB of attributes copied onto reopened formatting elements | the parse stops there, `MarkupDefect::Truncated`, the tree so far kept | `tinker-pdf-xml`'s four caps, which the HTML parser shares with the XML reader, and two of HTML's own (`MAX_HTML_ACTIVE_FORMATTING`, `MAX_HTML_CLONE_BYTES`). The token cap counts every node the tree builder creates and every attribute a clone copies, because reopening formatting elements makes a few bytes ask for hundreds; the clone cap bounds how long those copies are, since one long attribute value reopened by every paragraph after it asked for 1 700 times the input. html5lib's `tests1.dat` #77, an attribute name of 1 100 characters, is the one suite test a cap stops | `crates/tinker-pdf-xml/src/limits.rs` |
 | A `<meta charset>` naming a multi-byte legacy encoding — Shift_JIS, GBK, Big5, EUC-KR — in loose HTML | `MarkupDefect::EncodingNotDecoded`; read as UTF-8 if the bytes are UTF-8 and windows-1252 if not | `tinker_pdf_xml::encoding` decodes the single-byte family and no multi-byte one; what is left of the FB2 row is the same work | [ROADMAP](../ROADMAP.md) |
 | Scripts in HTML, and html5lib's `#script-on` tests | never run; `<noscript>` is drawn | there is no script engine, by design; the tree a parser with scripting enabled builds is not this build's | — |
 | Raw HTML in Markdown | `ArchiveWarning::Translation { defect: TranslationDefect::RawHtmlAsText, .. }` | set as the text it is: CommonMark passes it through, and a tag that is not well-formed XML would stop the XML reader and lose the rest of the document. Every character still reaches the page | `crates/tinker-pdf/src/markdown.rs` |
@@ -405,10 +405,13 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   trees, the five that do not pass named as a list rather than counted, and
   **7 028 of 7 028** tokenizer runs (four runs holding a lone surrogate, which
   a Rust string cannot, are not attempted). `tests/html.rs` beside them
-  crosses each of the four caps at its shipped value — the token cap by
-  reopened formatting elements, fifty kilobytes asking for a million nodes —
-  holds the tree builder's moves linear in a parent's children, and holds the
-  §13.2.3 decoding order; `hostile_input.rs`'s
+  crosses each of the six caps at its shipped value — the token cap by
+  reopened formatting elements, fifty kilobytes asking for a million nodes,
+  and by the attributes they copy; the attribute cap by merged `<html>` and
+  `<body>` tags; the clone cap by one hundred-kilobyte value reopened seven
+  hundred times — holds the tree builder's moves linear in a parent's
+  children, fostered text included, and Noah's Ark linear in a tag's
+  attributes, and holds the §13.2.3 decoding order; `hostile_input.rs`'s
   `mutated_tag_soup_never_panics_the_html_parser` and
   `fuzz/fuzz_targets/html.rs` hold the tree to being a tree.
 - **`crates/tinker-pdf/tests/commonmark_spec.rs`** — the Markdown reader held

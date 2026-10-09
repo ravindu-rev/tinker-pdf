@@ -37,14 +37,25 @@
 //! # Bounds
 //!
 //! The XML reader's [`Limits`], read as the same four ceilings: the stack of
-//! open elements is held to [`Limits::max_depth`], a tag's attributes to
-//! [`Limits::max_attributes`], a tag, attribute or DOCTYPE name to
-//! [`Limits::max_name_len`], and [`Limits::max_tokens`] is **the total**,
-//! spent by every token and by every node the tree builder creates — so the
-//! elements the standard creates on its own account, reopening formatting
-//! elements and cloning them in the adoption agency, are inside the same
-//! budget as the tokens that asked for them. Past any of them the parse stops
-//! and [`Document::stopped`] says which; the tree built so far is kept.
+//! open elements is held to [`Limits::max_depth`]; an element's attributes to
+//! [`Limits::max_attributes`] — a tag's, and the `<html>` or `<body>` that a
+//! later tag's attributes are merged into; a tag, attribute or DOCTYPE name to
+//! [`Limits::max_name_len`]; and [`Limits::max_tokens`] is **the total**,
+//! spent by every token, by every node the tree builder creates and by every
+//! attribute it copies onto a clone — so the elements the standard creates on
+//! its own account, reopening formatting elements and cloning them in the
+//! adoption agency, are inside the same budget as the tokens that asked for
+//! them.
+//!
+//! Two more are HTML's own, in [`crate::limits`]: the list of active
+//! formatting elements is held to [`MAX_HTML_ACTIVE_FORMATTING`] entries,
+//! because its cells' markers let it outgrow the stack; and the bytes of the
+//! attributes those clones copy, the one place a tree is bigger than its
+//! input, to [`MAX_HTML_CLONE_BYTES`]. Past any of the six the parse stops and
+//! [`Document::stopped`] says which; the tree built so far is kept.
+//!
+//! [`MAX_HTML_ACTIVE_FORMATTING`]: crate::limits::MAX_HTML_ACTIVE_FORMATTING
+//! [`MAX_HTML_CLONE_BYTES`]: crate::limits::MAX_HTML_CLONE_BYTES
 
 mod entities;
 #[cfg(test)]

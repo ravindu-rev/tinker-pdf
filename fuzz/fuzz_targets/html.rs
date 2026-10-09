@@ -21,6 +21,14 @@
 //!   (plus the document and the handful one token may make after the cap
 //!   is crossed), whatever the tree
 //!   builder created on its own account.
+//! - **The attribute cap is per element.** No element carries more than
+//!   `max_attributes`, including the `<html>` and `<body>` that later tags'
+//!   attributes are merged into — which is how the review of the formats
+//!   lane found one element holding a hundred thousand.
+//! - **The tree is no bigger than its input and the clone cap.** The bytes
+//!   of every attribute in the tree are at most the input's length plus
+//!   `MAX_HTML_CLONE_BYTES`, since a clone of a formatting element is the
+//!   only node that copies what the input said once.
 //! - **Parsing is deterministic.**
 //! - **The facade's conversion keeps the XML reader's depth bound**: the
 //!   EPUB tree built from any HTML document is no deeper than `max_depth`,
@@ -39,6 +47,7 @@
 use libfuzzer_sys::fuzz_target;
 
 use tinker_pdf_xml::html::{self, Document, Namespace};
+use tinker_pdf_xml::limits::MAX_HTML_CLONE_BYTES;
 use tinker_pdf_xml::Limits;
 
 const CONTEXTS: [(Namespace, &str); 8] = [
@@ -52,13 +61,32 @@ const CONTEXTS: [(Namespace, &str); 8] = [
     (Namespace::MathMl, "math"),
 ];
 
-fn check_tree(document: &Document, limits: &Limits, extra: usize) {
+fn check_tree(document: &Document, limits: &Limits, extra: usize, input: usize) {
     let nodes = document.nodes();
     assert!(
         nodes.len() <= limits.max_tokens + extra,
         "{} nodes past a cap of {}",
         nodes.len(),
         limits.max_tokens
+    );
+    let mut attribute_bytes = 0usize;
+    for element in nodes.iter().filter_map(|n| n.element()) {
+        assert!(
+            element.attributes.len() <= limits.max_attributes,
+            "<{}> carries {} attributes past a cap of {}",
+            element.name,
+            element.attributes.len(),
+            limits.max_attributes
+        );
+        for attribute in &element.attributes {
+            attribute_bytes += attribute.name.len() + attribute.value.len();
+        }
+    }
+    // A decoded byte may be three UTF-8 bytes (windows-1252's upper half),
+    // and a fragment's context element is one the input did not write.
+    assert!(
+        attribute_bytes <= input * 3 + MAX_HTML_CLONE_BYTES,
+        "{attribute_bytes} bytes of attributes from {input} bytes of input"
     );
     let mut seen = vec![false; nodes.len()];
     let mut stack = vec![0usize];
@@ -90,7 +118,7 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let document = html::parse_bytes(body, &limits);
-    check_tree(&document, &limits, 16);
+    check_tree(&document, &limits, 16, body.len());
     let again = html::parse_bytes(body, &limits);
     assert!(
         document.nodes() == again.nodes(),
@@ -118,5 +146,5 @@ fuzz_target!(|data: &[u8]| {
     let (text, _) = html::decode(body);
     let context = CONTEXTS[body.len() % CONTEXTS.len()];
     let fragment = html::parse_fragment(&text, context, &limits);
-    check_tree(&fragment, &limits, 16);
+    check_tree(&fragment, &limits, 16, body.len());
 });

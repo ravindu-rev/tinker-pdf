@@ -529,6 +529,12 @@ pub enum Error {
     NameCap,
     /// [`Limits::max_tokens`]. **The total**, which a per-item cap is not.
     TokenCap,
+    /// [`limits::MAX_HTML_ACTIVE_FORMATTING`]: HTML's list of active
+    /// formatting elements, which only [`html`]'s tree builder keeps.
+    FormattingCap,
+    /// [`limits::MAX_HTML_CLONE_BYTES`]: the attribute bytes [`html`]'s tree
+    /// builder copies onto clones of formatting elements. A total, per parse.
+    CloneCap,
 }
 
 impl fmt::Display for Error {
@@ -571,6 +577,12 @@ impl fmt::Display for Error {
             Self::AttributeCap => f.write_str("more attributes on one element than the cap allows"),
             Self::NameCap => f.write_str("a name past the length cap"),
             Self::TokenCap => f.write_str("more events than the part's cap allows"),
+            Self::FormattingCap => {
+                f.write_str("more active formatting elements than the cap allows")
+            }
+            Self::CloneCap => f.write_str(
+                "more attribute bytes copied onto reopened formatting elements than the cap allows",
+            ),
         }
     }
 }

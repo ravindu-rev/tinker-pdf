@@ -12,8 +12,14 @@
 //! into it, so the adoption agency can move a node by editing two `Vec`s and
 //! nothing is ever reference-counted.
 
+use std::collections::hash_map::DefaultHasher;
+use std::collections::BTreeSet;
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
+
 use super::tokenizer::{DoctypeToken, State, Tag, Token, Tokenizer};
 use super::{Attribute, AttributeNamespace, Document, Element, Namespace, Node, NodeData, Quirks};
+use crate::limits::{MAX_HTML_ACTIVE_FORMATTING, MAX_HTML_CLONE_BYTES};
 use crate::{Error, Limits};
 
 /// §13.2.4.1's insertion modes, by the names the standard gives them. "In
@@ -49,8 +55,65 @@ enum Mode {
 enum Entry {
     Marker,
     /// The element, and the token it was made for — which the standard keeps
-    /// so that a clone can be made of it later.
-    Element(usize, Tag),
+    /// so that a clone can be made of it later. Shared, so that taking an
+    /// entry out of the list to clone from is a count and not a copy of every
+    /// attribute it carries.
+    Element(usize, Rc<Formatting>),
+}
+
+/// A formatting element's token, as the list of active formatting elements
+/// keeps it.
+#[derive(Debug)]
+struct Formatting {
+    tag: Tag,
+    /// The attributes' indices in name order. A tag's names are distinct —
+    /// the tokenizer keeps the first of two — so this order is canonical, and
+    /// Noah's Ark compares two lists in one pass rather than looking every
+    /// name of one up in the other.
+    order: Vec<usize>,
+    /// A hash of the name and of the attributes in that order: two entries
+    /// whose keys differ are not the same, and only two whose keys agree are
+    /// compared attribute by attribute.
+    key: u64,
+}
+
+impl Formatting {
+    fn new(tag: Tag) -> Self {
+        let mut order: Vec<usize> = (0..tag.attributes.len()).collect();
+        order.sort_by(|&a, &b| {
+            let name = |at: usize| tag.attributes.get(at).map(|(name, _)| name);
+            name(a).cmp(&name(b))
+        });
+        // SipHash with its fixed keys: the same input hashes the same on every
+        // run and every target, and nothing the parser builds depends on the
+        // value beyond the equality it guards.
+        let mut hasher = DefaultHasher::new();
+        tag.name.hash(&mut hasher);
+        for &at in &order {
+            if let Some((name, value)) = tag.attributes.get(at) {
+                name.hash(&mut hasher);
+                value.hash(&mut hasher);
+            }
+        }
+        Formatting {
+            key: hasher.finish(),
+            order,
+            tag,
+        }
+    }
+
+    /// Noah's Ark's comparison: the same tag name, and the same attributes
+    /// with the same values, in any order — linear in the attributes.
+    fn same_as(&self, other: &Formatting) -> bool {
+        self.key == other.key
+            && self.tag.name == other.tag.name
+            && self.order.len() == other.order.len()
+            && self
+                .order
+                .iter()
+                .zip(&other.order)
+                .all(|(&a, &b)| self.tag.attributes.get(a) == other.tag.attributes.get(b))
+    }
 }
 
 /// What handling a token in a mode came to.
@@ -401,6 +464,9 @@ pub(crate) struct TreeBuilder<'a> {
     ignore_lf: bool,
     errors: usize,
     spent: usize,
+    /// Bytes of attribute names and values copied onto clones, against
+    /// [`MAX_HTML_CLONE_BYTES`].
+    cloned: usize,
     limits: Limits,
     stopped: Option<Error>,
     halt: bool,
@@ -476,6 +542,7 @@ impl<'a> TreeBuilder<'a> {
             ignore_lf: false,
             errors: 0,
             spent: 0,
+            cloned: 0,
             limits: *limits,
             stopped: None,
             halt: false,
@@ -523,10 +590,36 @@ impl<'a> TreeBuilder<'a> {
     /// One unit of [`Limits::max_tokens`], spent by every token and every
     /// node created.
     fn spend(&mut self) {
-        self.spent = self.spent.saturating_add(1);
+        self.spend_many(1);
+    }
+
+    fn spend_many(&mut self, units: usize) {
+        self.spent = self.spent.saturating_add(units);
         if self.spent > self.limits.max_tokens {
             self.stop(Error::TokenCap);
         }
+    }
+
+    /// What a clone of a formatting element costs, charged before it is made:
+    /// one unit of [`Limits::max_tokens`] for every attribute it copies — the
+    /// node itself is spent as every node is — and the attributes' bytes from
+    /// [`MAX_HTML_CLONE_BYTES`]. A clone is the one place the tree builder
+    /// copies what the input said once, as often as the input reopens it, so
+    /// these two are what keep the tree's size a function of the input's.
+    /// `false` when the clone would cross either, which stops the parse
+    /// without making it.
+    fn charge_clone(&mut self, tag: &Tag) -> bool {
+        let bytes = tag.attributes.iter().fold(0usize, |sum, (name, value)| {
+            sum.saturating_add(name.len()).saturating_add(value.len())
+        });
+        let cloned = self.cloned.saturating_add(bytes);
+        if cloned > MAX_HTML_CLONE_BYTES {
+            self.stop(Error::CloneCap);
+            return false;
+        }
+        self.cloned = cloned;
+        self.spend_many(tag.attributes.len());
+        !self.halt
     }
 
     fn error(&mut self) {
@@ -770,8 +863,11 @@ impl<'a> TreeBuilder<'a> {
             return;
         }
         let previous = match before {
+            // From the end, as `insert_before` finds it: the reference node is
+            // the open table, its parent's last child, and every fostered node
+            // goes in front of it.
             Some(b) => self.nodes.get(parent).and_then(|p| {
-                let at = p.children.iter().position(|&c| c == b)?;
+                let at = p.children.iter().rposition(|&c| c == b)?;
                 at.checked_sub(1).and_then(|i| p.children.get(i)).copied()
             }),
             None => self
@@ -944,25 +1040,37 @@ impl<'a> TreeBuilder<'a> {
     // ---- The list of active formatting elements -------------------------
 
     fn push_formatting(&mut self, node: usize, tag: Tag) {
-        let mut same = Vec::new();
+        let formatting = Formatting::new(tag);
+        // Noah's Ark: of three entries after the last marker that are the same
+        // as this one, the earliest goes.
+        let mut same = 0;
+        let mut earliest = None;
         for (at, entry) in self.active.iter().enumerate().rev() {
             match entry {
                 Entry::Marker => break,
                 Entry::Element(_, other) => {
-                    if other.name == tag.name && same_attributes(other, &tag) {
-                        same.push(at);
+                    if other.same_as(&formatting) {
+                        same += 1;
+                        earliest = Some(at);
                     }
                 }
             }
         }
-        if same.len() >= 3 {
-            if let Some(&earliest) = same.last() {
+        if same >= 3 {
+            if let Some(earliest) = earliest {
                 self.active.remove(earliest);
             }
         }
-        self.active.push(Entry::Element(node, tag));
-        if self.active.len() > self.limits.max_depth.saturating_mul(4) {
-            self.stop(Error::DepthCap);
+        self.push_active(Entry::Element(node, Rc::new(formatting)));
+    }
+
+    /// Appends to the list of active formatting elements, which is held to
+    /// [`MAX_HTML_ACTIVE_FORMATTING`] entries, markers included: past it the
+    /// parse stops with [`Error::FormattingCap`].
+    fn push_active(&mut self, entry: Entry) {
+        self.active.push(entry);
+        if self.active.len() > MAX_HTML_ACTIVE_FORMATTING {
+            self.stop(Error::FormattingCap);
         }
     }
 
@@ -996,13 +1104,16 @@ impl<'a> TreeBuilder<'a> {
             if self.halt {
                 return;
             }
-            let Some(Entry::Element(_, tag)) = self.active.get(at).cloned() else {
+            let Some(Entry::Element(_, formatting)) = self.active.get(at).cloned() else {
                 at += 1;
                 continue;
             };
-            let element = self.insert_html(&tag);
+            if !self.charge_clone(&formatting.tag) {
+                return;
+            }
+            let element = self.insert_html(&formatting.tag);
             if let Some(slot) = self.active.get_mut(at) {
-                *slot = Entry::Element(element, tag);
+                *slot = Entry::Element(element, formatting);
             }
             at += 1;
         }
@@ -1364,7 +1475,7 @@ impl<'a> TreeBuilder<'a> {
                 Step::Done
             }
             Token::StartTag(tag) if tag.name == "template" => {
-                self.active.push(Entry::Marker);
+                self.push_active(Entry::Marker);
                 self.frameset_ok = false;
                 self.mode = Mode::InTemplate;
                 self.template_modes.push(Mode::InTemplate);
@@ -1667,7 +1778,7 @@ impl<'a> TreeBuilder<'a> {
             "a" => {
                 let existing = self.active.iter().rev().find_map(|entry| match entry {
                     Entry::Marker => Some(None),
-                    Entry::Element(node, t) if t.name == "a" => Some(Some(*node)),
+                    Entry::Element(node, f) if f.tag.name == "a" => Some(Some(*node)),
                     Entry::Element(..) => None,
                 });
                 if let Some(Some(node)) = existing {
@@ -1701,7 +1812,7 @@ impl<'a> TreeBuilder<'a> {
             "applet" | "marquee" | "object" => {
                 self.reconstruct_active_formatting();
                 self.insert_html(&tag);
-                self.active.push(Entry::Marker);
+                self.push_active(Entry::Marker);
                 self.frameset_ok = false;
             }
             "table" => {
@@ -1865,25 +1976,48 @@ impl<'a> TreeBuilder<'a> {
         Step::Done
     }
 
+    /// The in-body `<html>` and `<body>` rule: each of the token's attributes
+    /// the element does not already carry is added to it.
+    ///
+    /// **Held to [`Limits::max_attributes`] per element**, as the tokenizer
+    /// holds it per tag: every `<body>` may bring that many new ones, so an
+    /// element merged into by a file's worth of them would carry as many as
+    /// the file liked. A token whose new attributes would take the element
+    /// past the cap merges none of them and stops the parse with
+    /// [`Error::AttributeCap`]. The names already present are looked up in a
+    /// set, so a merge is linear in the two lists rather than their product.
     fn merge_attributes(&mut self, node: usize, tag: &Tag) {
+        let max = self.limits.max_attributes;
+        let mut over = false;
         if let Some(Node {
             data: NodeData::Element(element),
             ..
         }) = self.nodes.get_mut(node)
         {
-            for (name, value) in &tag.attributes {
-                if !element
-                    .attributes
-                    .iter()
-                    .any(|a| a.namespace.is_none() && a.name == *name)
-                {
-                    element.attributes.push(Attribute {
-                        name: name.clone(),
-                        namespace: None,
-                        value: value.clone(),
-                    });
-                }
+            let present: BTreeSet<&str> = element
+                .attributes
+                .iter()
+                .filter(|a| a.namespace.is_none())
+                .map(|a| a.name.as_str())
+                .collect();
+            let added: Vec<Attribute> = tag
+                .attributes
+                .iter()
+                .filter(|(name, _)| !present.contains(name.as_str()))
+                .map(|(name, value)| Attribute {
+                    name: name.clone(),
+                    namespace: None,
+                    value: value.clone(),
+                })
+                .collect();
+            if element.attributes.len().saturating_add(added.len()) > max {
+                over = true;
+            } else {
+                element.attributes.extend(added);
             }
+        }
+        if over {
+            self.stop(Error::AttributeCap);
         }
     }
 
@@ -2053,7 +2187,7 @@ impl<'a> TreeBuilder<'a> {
             for (at, entry) in self.active.iter().enumerate().rev() {
                 match entry {
                     Entry::Marker => break,
-                    Entry::Element(node, tag) if tag.name == subject => {
+                    Entry::Element(node, f) if f.tag.name == subject => {
                         formatting = Some((at, *node));
                         break;
                     }
@@ -2130,12 +2264,15 @@ impl<'a> TreeBuilder<'a> {
                     self.open.remove(node_index);
                     continue;
                 };
-                let Some(Entry::Element(_, tag)) = self.active.get(list_at).cloned() else {
+                let Some(Entry::Element(_, formatting)) = self.active.get(list_at).cloned() else {
                     break;
                 };
-                let replacement = self.create_element(&tag, Namespace::Html);
+                if !self.charge_clone(&formatting.tag) {
+                    return;
+                }
+                let replacement = self.create_element(&formatting.tag, Namespace::Html);
                 if let Some(slot) = self.active.get_mut(list_at) {
-                    *slot = Entry::Element(replacement, tag);
+                    *slot = Entry::Element(replacement, formatting);
                 }
                 if let Some(slot) = self.open.get_mut(node_index) {
                     *slot = replacement;
@@ -2152,14 +2289,17 @@ impl<'a> TreeBuilder<'a> {
             if !self.is_inclusive_ancestor(last_node, target) {
                 self.insert_before(target, last_node, before);
             }
-            let Some(Entry::Element(_, formatting_tag)) = self
+            let Some(Entry::Element(_, formatting_entry)) = self
                 .active_position(formatting)
                 .and_then(|at| self.active.get(at))
                 .cloned()
             else {
                 return;
             };
-            let replacement = self.create_element(&formatting_tag, Namespace::Html);
+            if !self.charge_clone(&formatting_entry.tag) {
+                return;
+            }
+            let replacement = self.create_element(&formatting_entry.tag, Namespace::Html);
             // Every child moves at once: one at a time was a removal from the
             // front of the furthest block's list per child.
             let children = self
@@ -2184,7 +2324,7 @@ impl<'a> TreeBuilder<'a> {
             }
             let bookmark = bookmark.min(self.active.len());
             self.active
-                .insert(bookmark, Entry::Element(replacement, formatting_tag));
+                .insert(bookmark, Entry::Element(replacement, formatting_entry));
             self.remove_from_open(formatting);
             if let Some(at) = self.open.iter().position(|&n| n == furthest_block) {
                 self.open.insert(at + 1, replacement);
@@ -2250,7 +2390,7 @@ impl<'a> TreeBuilder<'a> {
             }
             Token::StartTag(tag) if tag.name == "caption" => {
                 self.clear_to_table_context();
-                self.active.push(Entry::Marker);
+                self.push_active(Entry::Marker);
                 self.insert_html(&tag);
                 self.mode = Mode::InCaption;
                 Step::Done
@@ -2569,7 +2709,7 @@ impl<'a> TreeBuilder<'a> {
                 self.clear_to_table_row_context();
                 self.insert_html(&tag);
                 self.mode = Mode::InCell;
-                self.active.push(Entry::Marker);
+                self.push_active(Entry::Marker);
                 Step::Done
             }
             Token::EndTag(ref tag) if tag.name == "tr" => {
@@ -3049,14 +3189,6 @@ fn adjust_mathml_attributes(tag: &mut Tag) {
             *name = "definitionURL".to_owned();
         }
     }
-}
-
-/// Noah's Ark's comparison: the same names and values, in any order.
-fn same_attributes(a: &Tag, b: &Tag) -> bool {
-    a.attributes.len() == b.attributes.len()
-        && a.attributes
-            .iter()
-            .all(|(name, value)| b.attribute(name) == Some(value.as_str()))
 }
 
 /// §13.2.6.4.1's quirks-mode decision for a DOCTYPE token.
