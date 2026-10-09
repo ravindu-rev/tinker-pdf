@@ -518,6 +518,100 @@ fn a_br_in_a_table_cell_breaks_the_cells_line() {
     close(laid[2].y, laid[0].y, "on the first line's baseline");
 }
 
+/// **A `<br>` that is a flex container's child is a flex item of its own.**
+///
+/// `css-flexbox-1` §4: *"Each in-flow child of a flex container becomes a flex
+/// item, and each child text sequence is wrapped in an anonymous block
+/// container flex item"*. A `<br>` is an element and not a text node, so it is
+/// in neither text sequence beside it: `aaa<br/>bbb` in a row is three items
+/// packed from the start edge — `aaa`, three advances wide; the `<br>`'s, no
+/// wider than a line feed, which sets nothing; and `bbb`, three advances in,
+/// on `aaa`'s baseline. One anonymous item round all three would set `bbb` a
+/// line down at the edge.
+///
+/// The `<br>`'s item is what the element is everywhere else, a box holding a
+/// forced line break, blockified (§4, `css-display-3` §2.7): a block whose one
+/// line ends in a preserved newline, which CSS 2.2 §9.4.2 does not make
+/// zero-height. So a flex container holding a lone `<br>` is one
+/// `line-height` tall, where a text sequence of white space alone is *"not
+/// rendered"* (§4) and would leave it none; and in a column the item is that
+/// line between `aaa` and `bbb`.
+#[test]
+fn a_br_in_a_flex_container_is_a_flex_item_of_its_own() {
+    let advance = MONO_ADVANCE * 20.0;
+    let style = sheet("div { font-size: 20px; line-height: 30px }");
+    let laid = |body: &str| column(&document(body), &style, MEASURE);
+
+    let row = laid(r#"<div style="display: flex">aaa<br/>bbb</div>"#);
+    assert_eq!(texts(&row), ["aaa", "bbb"], "{row:?}");
+    close(row[0].x, 0.0, "the first item starts at the edge");
+    close(row[0].width, 3.0 * advance, "three advances");
+    close(
+        row[1].x,
+        3.0 * advance,
+        "the third item after the first two",
+    );
+    close(row[1].y, row[0].y, "all three on the flex line's baseline");
+
+    let alone = laid(r#"<div style="display: flex"><br/></div><p>bbb</p>"#);
+    let empty = laid(r#"<div style="display: flex"></div><p>bbb</p>"#);
+    assert_eq!(texts(&alone), ["bbb"], "nothing is set for the break");
+    close(
+        alone[0].y - empty[0].y,
+        30.0,
+        "a flex container of one br is one line tall",
+    );
+
+    let stacked = laid(r#"<div style="display: flex; flex-direction: column">aaa<br/>bbb</div>"#);
+    assert_eq!(texts(&stacked), ["aaa", "bbb"], "{stacked:?}");
+    close(stacked[1].x, 0.0, "a column item starts at the edge");
+    close(gaps(&stacked)[0], 60.0, "the br's item is a line between");
+}
+
+/// **A `<br>` that is a table's or a row group's child is a row of its own,
+/// and is not dropped as white space.**
+///
+/// `css-tables-3` §2.2.1's fix-up (CSS 2.2 §17.2.1's, restated) discards
+/// *"anonymous inline boxes which contain only white space"* between or beside
+/// table boxes (steps 1.3 and 1.4). A `<br>` is an element, so its box is not
+/// anonymous and is not discarded: step 2.1 (2.2 in a row group) wraps it in
+/// an anonymous row and 2.3 that in an anonymous cell, whose one line ends in
+/// the break and is one `line-height` tall (CSS 2.2 §9.4.2). With no spacing
+/// and no padding, `b` is then two lines below `a` rather than the one it is
+/// without the `<br>`, and a table holding only a `<br>` is one line tall
+/// where an empty one is none.
+/// The XML reader's tree only: HTML's parser moves a `<br>` written inside a
+/// `<table>` out in front of it (HTML §13.2.6.4.9, *foster parenting*).
+#[test]
+fn a_br_between_table_rows_is_a_row_of_its_own() {
+    let style = sheet(
+        "table { border-spacing: 0; font-size: 20px; line-height: 30px } \
+         td { padding: 0 }",
+    );
+    let laid = |body: &str| column(&document(body), &style, MEASURE);
+
+    let plain = laid("<table><tr><td>a</td></tr><tr><td>b</td></tr></table>");
+    assert_eq!(texts(&plain), ["a", "b"]);
+    close(gaps(&plain)[0], 30.0, "two rows of one line each");
+    for body in [
+        "<table><tr><td>a</td></tr><br/><tr><td>b</td></tr></table>",
+        "<table><tbody><tr><td>a</td></tr><br/><tr><td>b</td></tr></tbody></table>",
+    ] {
+        let broken = laid(body);
+        assert_eq!(texts(&broken), ["a", "b"], "{body}: {broken:?}");
+        close(gaps(&broken)[0], 60.0, &format!("{body}: a row between"));
+    }
+
+    let alone = laid("<table><br/></table><p>bbb</p>");
+    let empty = laid("<table></table><p>bbb</p>");
+    assert_eq!(texts(&alone), ["bbb"], "nothing is set for the break");
+    close(
+        alone[0].y - empty[0].y,
+        30.0,
+        "a table of one br is one line tall",
+    );
+}
+
 // ---- fragmentation ----------------------------------------------------------
 
 /// **With one line allowed alone, a page holds the lines that fit it and no

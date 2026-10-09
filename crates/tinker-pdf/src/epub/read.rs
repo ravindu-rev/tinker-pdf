@@ -1059,9 +1059,9 @@ fn push_replaced(
     );
 }
 
-/// A `<br>`'s box, for [`build_into`]: one line feed, U+000A, in an anonymous
-/// inline box that inherits from the element and whose `white-space` is
-/// `pre-line`.
+/// A `<br>`'s box, for [`build_into`]: one line feed, U+000A, in an inline box
+/// that is the element's own — anchored to it, inheriting from it, whatever
+/// its `display` — and whose `white-space` is `pre-line`.
 ///
 /// # What HTML says, and what that is in this build
 ///
@@ -1086,17 +1086,31 @@ fn push_replaced(
 /// or `nowrap` a line feed is a collapsible space; it keeps the break and
 /// removes the spaces either side of it, as §4.1.1 does around a preserved
 /// one. Nothing is drawn for it: the break is what ends the line, and a line's
-/// trailing segment break is not set (`Builder::trim`). The box is an
-/// anonymous one, inheriting from the element, so a `float` or a `position`
-/// on a `<br>` does not take the newline out of its line, and an author's
-/// `display` other than `none` does not make it a block: no CSS value is
-/// `newline`'s, so there is nothing in the cascade for one to override.
-/// `::before` and `::after` on a `<br>` generate nothing.
+/// trailing segment break is not set (`Builder::trim`). The box's style is
+/// [`inline_box`]'s, inherited from the element with none of its own, so a
+/// `float` or a `position` on a `<br>` does not take the newline out of its
+/// line, and an author's `display` other than `none` does not make it a block:
+/// no CSS value is `newline`'s, so there is nothing in the cascade for one to
+/// override. `::before` and `::after` on a `<br>` generate nothing.
+///
+/// **The newline is inside an element box, not loose text**, because a
+/// `<br>` is an element and every container that sorts its children tells the
+/// two apart (review of wave 8). `css-flexbox-1` §4 makes *"each in-flow
+/// child"* a flex item of its own and wraps only *"each child text sequence"*
+/// in an anonymous one, so a `<br>` between two runs of text is a third item
+/// beside them — its box blockified (`css-display-3` §2.7) to the block a lone
+/// `<br>` is, one line tall — and not a break inside one anonymous item round
+/// all three. `css-tables-3` §2.2.1 discards only *"anonymous inline boxes which
+/// contain only white space"*, so a `<br>` between two rows is wrapped in an
+/// anonymous row and cell and keeps its line; as a bare text box holding a
+/// line feed it was both of the things those clauses act on, and was merged in
+/// the one and dropped in the other.
 #[inline(never)]
 fn push_newline(out: &mut Vec<BoxNode>, style: &ComputedStyle, anchor: u32) {
     let mut newline = inline_box(style);
     newline.white_space = WhiteSpace::PreLine;
-    out.push(BoxNode::text(newline, "\n").with_anchor(anchor));
+    let text = BoxNode::text(newline.clone(), "\n").with_anchor(anchor);
+    out.push(BoxNode::element(newline, vec![text]).with_anchor(anchor));
 }
 
 /// A text box in its element's inline style, for [`build_into`].

@@ -124,10 +124,19 @@ U+000A, bidi type B, it ends its bidi paragraph as well as its line
 implications"* — which a U+2028 does not. `display: none` takes it away;
 no other `display`, nor a `float` or a `position`, moves it out of its line;
 a `::first-letter` after one is not on the first line and is not made; and
-`::before` and `::after` on a `<br>` generate nothing. *Corrected October
-2026*: a `<br>` set no break at all before, so `<p>a<br/>b</p>` was the one
-line `ab`, in a book, a loose page and a Markdown hard break alike
-(`epub_analytic.rs`'s five `a_br_…`/`two_brs_…` tests, `epub_paint.rs`'s
+`::before` and `::after` on a `<br>` generate nothing. The line feed is in
+an inline box of the element's own, not loose text, so a container that
+sorts its children sees an element: a `<br>` that is a flex container's child
+is a flex item of its own (`css-flexbox-1` §4) — `aaa<br/>bbb` in a row is
+three items on one line, and the `<br>`'s, blockified, is the block a lone
+`<br>` is, one line tall, so a column sets it as a line between — and one
+between two table rows is an anonymous row a line tall rather than white
+space the table fix-up discards (`css-tables-3` §2.2.1 discards only
+anonymous inline boxes). *Corrected October 2026*: a `<br>` set no break at all before,
+so `<p>a<br/>b</p>` was the one line `ab`, in a book, a loose page and a
+Markdown hard break alike; and the first correction made it a bare text box,
+which a flex container merged into the text either side and a table dropped
+(`epub_analytic.rs`'s seven `a_br_…`/`two_brs_…` tests, `epub_paint.rs`'s
 `a_br_is_a_forced_line_break_and_draws_nothing`, `epub_shaped.rs`'s
 `a_br_ends_a_bidi_paragraph_and_not_only_a_line`, `standalone.rs`'s
 `a_br_breaks_the_line_in_tag_soup_and_in_xhtml`, `epub_reftest.rs`'s
