@@ -107,14 +107,23 @@
 //! October 2026 the bound was a bare number in [`rewrite`] and what lay past
 //! it was left with nothing in the report.
 //!
-//! And one kind of content a page draws that this module does not read at
-//! all: a **tiling pattern's cell** (8.7.3.1), painted at every tile of
-//! whatever it fills. Cutting a cell is a form drawn at as many placements
-//! as its fill has tiles, which is a design rather than a fix; so a cell
-//! that shows text or draws an image is named instead, by the resource name
-//! the `scn` gave ([`RedactionWarning::PatternOrMask`], [`unread`]), and one
-//! that only paints paths is not, because nothing in it is anything this
-//! module removes.
+//! A **tiling pattern's cell** (8.7.3.1) is painted at every tile of
+//! whatever it fills. Until October 2026 it was not read, and a cell that
+//! showed text or drew an image was named instead
+//! ([`RedactionWarning::PatternOrMask`]). It is measured now ([`Cells`],
+//! [`cut_cells`]): every tile of its lattice whose `/BBox` meets a rectangle
+//! is a placement of the cell — its translation, then the pattern's
+//! `/Matrix`, then the space the lattice is anchored to, which is measured
+//! twice where 8.7.2 (the painting stream's default space) and this engine's
+//! renderer (the page's) disagree — and the cell is cut at all of them, in
+//! its own stream, since every tile runs that one stream, and named
+//! [`RedactionWarning::RepeatedForm`]. A tile the fill does not reach is
+//! measured too, because this module does not follow paths: more removed,
+//! never less. Still named and not measured: a cell with more than
+//! [`MAX_PLACEMENTS`] tiles under the rectangles, one whose geometry places
+//! no lattice, and what a cell invokes beyond its own text and inline images
+//! (an XObject, a graphics state, another pattern); a glyph procedure's
+//! patterns are named as before ([`unread`]).
 //!
 //! A **soft mask's group** (11.6.5.2) was named the same way until October
 //! 2026 and is measured now. The interpreter draws it when the `gs` that
@@ -484,8 +493,20 @@
 //! | the group drawn at the identity rather than at its `gs` | **1** |
 //! | a procedure's mask not followed | **1** |
 //! | every `gs` recorded however often it repeats | **1** |
+//!
+//! And a tiling pattern's cell measured (the other half of clause (b)), the
+//! same way:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | the page's cells never read, which is how it used to be | 3 |
+//! | a cell anchored only where the renderer anchors it | **1** |
+//! | every tile measured at the lattice's origin | **1** |
+//! | the lattice's last index rounded up | **1** |
+//! | a cut cell named without its pattern's name | 2 |
+//! | the tile cap four times looser | 3 |
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use tinker_pdf_content::{Token, Tokenizer};
@@ -604,6 +625,11 @@ pub enum RedactionWarning {
     /// the alternative is the leak. But it is not free, and it is not
     /// something a caller can see from `glyphs` alone — so it is named here.
     ///
+    /// A **tiling pattern's cell** (8.7.3.1) cut at the tiles a rectangle
+    /// meets is named here too, under the pattern's resource name with the
+    /// tiles measured as `placements`: every tile, wherever the pattern
+    /// paints, runs the cell's one stream.
+    ///
     /// `placements` **saturates** at [`MAX_PLACEMENTS`]. A form drawn at more
     /// than that many distinct transforms has the placements past the cap
     /// measured against nothing at all, which is the one case where this
@@ -635,18 +661,21 @@ pub enum RedactionWarning {
         skipped: usize,
     },
     /// A stream painted with a **tiling pattern** (8.7.3.1) whose cell shows
-    /// text or draws an image, and this module does not read the cell: what
-    /// it draws was tested against no rectangle.
+    /// text or draws an image that this module did not measure: what is
+    /// named was tested against no rectangle.
     ///
-    /// A cell is painted at every tile of whatever it fills, so cutting one
-    /// is a form drawn at as many placements as the fill has tiles. It is
-    /// named, by the resource name the `scn` gave; a cell that only paints
-    /// paths is not, because nothing it draws is anything this module
-    /// removes. Until October 2026 it was not named, and a **soft mask's**
-    /// group was named here too; the group is measured now, as a form
-    /// placement at its `gs`, and this is raised for patterns alone. The
-    /// variant keeps its name, since a caller matching on it should not have
-    /// to change for a class that got narrower.
+    /// A cell is measured at every tile a rectangle meets, and cut
+    /// ([`RedactionWarning::RepeatedForm`] names that). It is named here
+    /// instead when its tiles under the rectangles number more than
+    /// [`MAX_PLACEMENTS`] or its `/Matrix`, `/BBox` or steps place no
+    /// lattice; when it invokes an XObject, sets a graphics state or paints
+    /// with another pattern, which its measurement does not follow (its own
+    /// text is still cut); and when a Type 3 glyph's procedure paints with
+    /// it. A cell that only paints paths is not named, because nothing it
+    /// draws is anything this module removes. Until October 2026 every such
+    /// cell was named, and a **soft mask's** group with them; both are
+    /// measured now. The variant keeps its name, since a caller matching on
+    /// it should not have to change for a class that got narrower.
     PatternOrMask {
         /// The `/Pattern` or `/ExtGState` resource name.
         resource: Vec<u8>,
@@ -1019,7 +1048,6 @@ pub fn apply(
     for warning in measured {
         note(&mut report.warnings, warning);
     }
-    unread(editor, &resources, &content, areas, &mut report.warnings);
 
     // 8.10: a form XObject holds content like any other, and a redaction that
     // stops at the page stream leaves whatever a form drew exactly where it
@@ -1031,6 +1059,8 @@ pub fn apply(
     // decided which placements share a stream and which need a copy of their
     // own ([`settle`]).
     let mut walk = Walk::default();
+    walk.cells
+        .read(editor, &resources, &content, Matrix::IDENTITY, areas);
     let children = walk.uses(editor, &resources, &uses, areas, &mut report, 0);
 
     // 12.5.5: every appearance stream an annotation on the page can show —
@@ -1047,6 +1077,9 @@ pub fn apply(
         .collect();
 
     let targets = settle(editor, &walk, reference, areas, &mut report);
+    // 8.7.3.1: every tiling pattern this page's streams painted with, its cell
+    // cut at each tile the rectangles meet, in its own stream ([`cut_cells`]).
+    cut_cells(editor, &walk.cells, areas, &mut report);
     let inline_annotations = repoint_appearances(editor, &appearances, &shown, &targets);
 
     // The page's own `Do`s that draw a copy name it by a resource name the
@@ -1519,8 +1552,12 @@ fn carries(content: &[u8]) -> bool {
     false
 }
 
-/// Names every tiling pattern one stream paints with whose cell [`carries`]
-/// text or an image ([`RedactionWarning::PatternOrMask`]).
+/// Names every tiling pattern a glyph procedure paints with whose cell
+/// [`carries`] text or an image ([`RedactionWarning::PatternOrMask`]).
+///
+/// A procedure is measured rather than cut ([`cut_stream`]), and a cell it
+/// paints with is not measured for it; a page's or a form's cells are, by
+/// [`Cells`] and [`cut_cells`].
 ///
 /// A pattern is selected by the name `scn` or `SCN` ends with (8.6.6.2), its
 /// cell the pattern's own stream (8.7.3.1), resolved in `scope`, the
@@ -1608,6 +1645,364 @@ fn resolve_mask_group(
     let group = mask.as_dict()?.get_ref(editor.intern(b"G"))?;
     let object = editor.get(group)?;
     Some((group, object.as_dict()?.clone()))
+}
+
+/// One tiling pattern the page's streams painted with (8.7.3.1).
+struct CellUse {
+    reference: ObjRef,
+    /// The pattern's stream dictionary, as the editor had it.
+    dict: Dict,
+    /// The resource name that first selected it, for a warning.
+    name: Vec<u8>,
+    /// The spaces its lattice is anchored to, each once.
+    bases: Vec<Matrix>,
+}
+
+/// The tiling patterns one page's streams paint with, by object, so a
+/// pattern several streams select is measured once over every anchoring.
+/// Ordered, so the warnings come out in one order whatever order the page
+/// met them in.
+#[derive(Default)]
+struct Cells {
+    by_number: BTreeMap<u32, CellUse>,
+}
+
+impl Cells {
+    /// Records every tiling pattern `content` selects — the name `scn` or
+    /// `SCN` ends with (8.6.6.2) — resolved in `scope`, the resources of the
+    /// stream that painted, through the editor.
+    ///
+    /// Anchored twice when the two readings differ. 8.7.2 puts a pattern's
+    /// space in the default space of the stream that paints with it, which
+    /// for a form is the form's at the `Do`: `initial`. This engine's
+    /// renderer anchors every lattice to the page's own space
+    /// (`tinker-pdf-render`'s `base`, "never translated after
+    /// construction"). A reader either way draws the cell, so it is measured
+    /// at both, as a glyph procedure is measured in both of its scopes.
+    fn read(
+        &mut self,
+        editor: &DocumentEditor,
+        scope: &Dict,
+        content: &[u8],
+        initial: Matrix,
+        areas: &[Redaction],
+    ) {
+        if areas.is_empty() {
+            return;
+        }
+        let mut tokens = Tokenizer::new(content);
+        let mut operands: Vec<Token> = Vec::new();
+        while let Some(token) = tokens.next_token() {
+            let Token::Operator(op) = &token else {
+                operands.push(token);
+                continue;
+            };
+            match op.as_slice() {
+                // 8.9.7: the samples are not tokens.
+                b"BI" => {
+                    let consumed = tinker_pdf_content::interpret::skip_inline_image(tokens.rest());
+                    let at = tokens.position();
+                    tokens.seek(at.saturating_add(consumed));
+                }
+                b"scn" | b"SCN" => {
+                    if let Some(Token::Name(name)) = operands.last() {
+                        self.add(editor, scope, name, initial);
+                    }
+                }
+                _ => {}
+            }
+            operands.clear();
+        }
+    }
+
+    fn add(&mut self, editor: &DocumentEditor, scope: &Dict, name: &[u8], initial: Matrix) {
+        let Some((reference, dict)) = resolve_tiling_cell(editor, scope, name) else {
+            return;
+        };
+        // Bounded like the walk's uses (ruling 1): past the bound a pattern
+        // not yet met is not recorded, and an anchoring not yet met is not
+        // added.
+        if !self.by_number.contains_key(&reference.num) && self.by_number.len() >= MAX_XOBJECT_USES
+        {
+            return;
+        }
+        let cell = self
+            .by_number
+            .entry(reference.num)
+            .or_insert_with(|| CellUse {
+                reference,
+                dict,
+                name: name.to_vec(),
+                bases: Vec::new(),
+            });
+        for base in [Matrix::IDENTITY, initial] {
+            let key = placement_key(base);
+            if cell.bases.len() < MAX_PLACEMENTS
+                && !cell.bases.iter().any(|b| placement_key(*b) == key)
+            {
+                cell.bases.push(base);
+            }
+        }
+    }
+}
+
+/// The tiling pattern `name` selects in `scope`: a pattern stream with
+/// `/PatternType 1` (8.7.3.1), and its dictionary. A shading pattern is a
+/// dictionary and draws no content, and answers `None`.
+fn resolve_tiling_cell(
+    editor: &DocumentEditor,
+    scope: &Dict,
+    name: &[u8],
+) -> Option<(ObjRef, Dict)> {
+    let table = Resolve::resolve_key(editor, scope, editor.intern(b"Pattern"));
+    let reference = table.as_dict()?.get_ref(editor.intern(name))?;
+    // A stream the editor wrote reads back as its dictionary, and one in the
+    // file as a stream; either way the content is `stream_bytes`'.
+    let object = editor.get(reference)?;
+    let dict = match &object {
+        Object::Stream(stream) => stream.dict.clone(),
+        other => other.as_dict()?.clone(),
+    };
+    let kind = Resolve::resolve_key(editor, &dict, editor.intern(b"PatternType")).as_int();
+    (kind == Some(1)).then_some((reference, dict))
+}
+
+/// The inverse of an affine map, when it has one.
+fn invert(m: Matrix) -> Option<Matrix> {
+    let det = m.a * m.d - m.b * m.c;
+    if det == 0.0 || !det.is_finite() {
+        return None;
+    }
+    let inverse = Matrix {
+        a: m.d / det,
+        b: -m.b / det,
+        c: -m.c / det,
+        d: m.a / det,
+        e: (m.c * m.f - m.d * m.e) / det,
+        f: (m.b * m.e - m.a * m.f) / det,
+    };
+    inverse.is_finite().then_some(inverse)
+}
+
+/// The lattice indices `k` whose tile `[b0 + k·step, b1 + k·step]` meets
+/// `[lo, hi]`, as an inclusive range — empty when `first > last` — or `None`
+/// when the step or the numbers cannot index a lattice at all.
+fn lattice_range(lo: f64, hi: f64, b0: f64, b1: f64, step: f64) -> Option<(i64, i64)> {
+    if step == 0.0 || !step.is_finite() {
+        return None;
+    }
+    let (p, q) = ((lo - b1) / step, (hi - b0) / step);
+    let (first, last) = (p.min(q).ceil(), p.max(q).floor());
+    // A lattice index past a billion is a tile no page reaches, and a count
+    // that cannot be held as an integer is not one this walk can bound.
+    let limit = 1e9;
+    if !first.is_finite() || !last.is_finite() || first.abs() > limit || last.abs() > limit {
+        return None;
+    }
+    Some((first as i64, last as i64))
+}
+
+/// The transforms of every tile of a cell's lattice whose `/BBox` meets a
+/// rectangle — pattern space carried to the page by `to_page`, the tile's
+/// translation first (8.7.3.1) — or `None` when there are more than
+/// [`MAX_PLACEMENTS`] of them or the lattice cannot be measured.
+///
+/// Every tile meeting a rectangle, whether or not the area the pattern fills
+/// reaches it: this module does not follow paths, and a tile the fill does
+/// not reach draws nothing, so measuring it can only remove more. That is the
+/// direction this module errs in.
+fn tiles(
+    to_page: Matrix,
+    bbox: [f64; 4],
+    step: (f64, f64),
+    areas: &[Redaction],
+) -> Option<Vec<Matrix>> {
+    let back = invert(to_page)?;
+    let [bx0, by0, bx1, by1] = bbox;
+    let mut seen: BTreeSet<(i64, i64)> = BTreeSet::new();
+    let mut out = Vec::new();
+    for area in areas.iter().map(|r| r.area) {
+        let corners = [
+            back.apply(area.x0, area.y0),
+            back.apply(area.x1, area.y0),
+            back.apply(area.x0, area.y1),
+            back.apply(area.x1, area.y1),
+        ];
+        let (mut px0, mut px1, mut py0, mut py1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        for (x, y) in corners {
+            px0 = px0.min(x);
+            px1 = px1.max(x);
+            py0 = py0.min(y);
+            py1 = py1.max(y);
+        }
+        let (i0, i1) = lattice_range(px0, px1, bx0, bx1, step.0)?;
+        let (j0, j1) = lattice_range(py0, py1, by0, by1, step.1)?;
+        if i0 > i1 || j0 > j1 {
+            continue;
+        }
+        let count = (i1 - i0 + 1).saturating_mul(j1 - j0 + 1);
+        if count > MAX_PLACEMENTS as i64 {
+            return None;
+        }
+        for i in i0..=i1 {
+            for j in j0..=j1 {
+                if seen.insert((i, j)) {
+                    if seen.len() > MAX_PLACEMENTS {
+                        return None;
+                    }
+                    out.push(Matrix::translate(i as f64 * step.0, j as f64 * step.1).then(to_page));
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Whether content invokes what a cell's measurement does not follow: an
+/// XObject (`Do`), a graphics state that may set a soft mask (`gs`), or
+/// another pattern (`scn` or `SCN` ending in a name).
+fn draws_further(content: &[u8]) -> bool {
+    let mut tokens = Tokenizer::new(content);
+    let mut named = false;
+    while let Some(token) = tokens.next_token() {
+        match token {
+            Token::Operator(op) => {
+                match op.as_slice() {
+                    b"Do" | b"gs" => return true,
+                    b"scn" | b"SCN" if named => return true,
+                    b"BI" => {
+                        let consumed =
+                            tinker_pdf_content::interpret::skip_inline_image(tokens.rest());
+                        let at = tokens.position();
+                        tokens.seek(at.saturating_add(consumed));
+                    }
+                    _ => {}
+                }
+                named = false;
+            }
+            Token::Name(_) => named = true,
+            _ => named = false,
+        }
+    }
+    false
+}
+
+/// Cuts every tiling pattern's cell the page painted with, at every tile of
+/// its lattice a rectangle meets (8.7.3.1), in the pattern's own stream.
+///
+/// **In its own stream, so wider than asked, and named.** A cell is one
+/// stream every tile runs, wherever the pattern paints — a glyph a rectangle
+/// covers at one tile is gone at all of them — so a cut is reported as
+/// [`RedactionWarning::RepeatedForm`] under the pattern's resource name, with
+/// the tiles measured. Over-removal is this module's direction, and a copy
+/// per tile would be a pattern per tile.
+///
+/// What is still named rather than measured, [`RedactionWarning::PatternOrMask`]:
+/// a cell whose tiles meeting the rectangles number more than
+/// [`MAX_PLACEMENTS`], or whose `/Matrix`, `/BBox` or steps cannot place a
+/// lattice; and a cell that invokes XObjects, sets graphics states or paints
+/// with another pattern, whose text is cut and whose further drawing is not
+/// followed. Each only when the cell carries something this module removes
+/// ([`carries`]).
+fn cut_cells(
+    editor: &mut DocumentEditor,
+    cells: &Cells,
+    areas: &[Redaction],
+    report: &mut RedactionReport,
+) {
+    if areas.is_empty() {
+        return;
+    }
+    for cell in cells.by_number.values() {
+        let Some(content) = editor.stream_bytes(cell.reference) else {
+            continue;
+        };
+        let named = RedactionWarning::PatternOrMask {
+            resource: cell.name.clone(),
+        };
+        let numbers = |key: &[u8], count: usize| -> Option<Vec<f64>> {
+            let value = Resolve::resolve_key(&*editor, &cell.dict, editor.intern(key));
+            let items = value.as_array()?;
+            let out: Vec<f64> = items
+                .iter()
+                .take(count)
+                .filter_map(Object::as_number)
+                .collect();
+            (out.len() == count && out.iter().all(|v| v.is_finite())).then_some(out)
+        };
+        let number = |key: &[u8]| {
+            Resolve::resolve_key(&*editor, &cell.dict, editor.intern(key))
+                .as_number()
+                .filter(|v| v.is_finite() && *v != 0.0)
+        };
+        let matrix =
+            match Resolve::resolve_key(&*editor, &cell.dict, editor.intern(b"Matrix")).is_null() {
+                true => Some(Matrix::IDENTITY),
+                false => numbers(b"Matrix", 6).and_then(|v| Matrix::from_operands(&v)),
+            };
+        let bbox = numbers(b"BBox", 4).and_then(|v| match v.as_slice() {
+            [a, b, c, d] => Some([a.min(*c), b.min(*d), a.max(*c), b.max(*d)]),
+            _ => None,
+        });
+        let (Some(matrix), Some(bbox), Some(xstep), Some(ystep)) =
+            (matrix, bbox, number(b"XStep"), number(b"YStep"))
+        else {
+            if carries(&content) {
+                note(&mut report.warnings, named);
+            }
+            continue;
+        };
+
+        // 8.7.3.1: a tiling pattern's `/Resources` is required; one that
+        // omits it names nothing a cut could resolve.
+        let resources = Resolve::resolve_key(&*editor, &cell.dict, Name::RESOURCES)
+            .as_dict()
+            .cloned()
+            .unwrap_or_default();
+        let fonts = fonts_in(editor, &resources);
+        let mut data = content.clone();
+        let (mut glyphs, mut images, mut operations, mut measured) = (0, 0, 0, 0usize);
+        let mut unmeasured = false;
+        for base in &cell.bases {
+            let Some(placed) = tiles(matrix.then(*base), bbox, (xstep, ystep), areas) else {
+                unmeasured = true;
+                continue;
+            };
+            for tile in placed {
+                let (next, pass, _) = cut_stream(
+                    editor,
+                    &resources,
+                    &data,
+                    areas,
+                    &fonts,
+                    tile,
+                    &mut report.warnings,
+                );
+                data = next;
+                glyphs += pass.glyphs;
+                images += pass.images;
+                operations += pass.operations;
+                measured += 1;
+            }
+        }
+        if (unmeasured || draws_further(&content)) && carries(&content) {
+            note(&mut report.warnings, named);
+        }
+        if glyphs > 0 || images > 0 {
+            let dict = plain_stream_dict(editor, &cell.dict);
+            editor.put_stream(cell.reference, StreamData { dict, data });
+            report.glyphs += glyphs;
+            report.images += images;
+            report.operations += operations;
+            note(
+                &mut report.warnings,
+                RedactionWarning::RepeatedForm {
+                    form: cell.name.clone(),
+                    placements: measured.min(MAX_PLACEMENTS),
+                },
+            );
+        }
+    }
 }
 
 /// How deep form XObjects may nest before recursion is refused (8.10).
@@ -1753,6 +2148,9 @@ struct Walk {
     /// The bytes of every cut held in [`FormEntry::cuts`], against
     /// [`MAX_FORM_COPY_BYTES`].
     held: usize,
+    /// Every tiling pattern the page's streams painted with, for
+    /// [`cut_cells`] once the walk is done.
+    cells: Cells,
 }
 
 impl Walk {
@@ -1919,13 +2317,8 @@ impl Walk {
         for warning in pass.warnings {
             note(&mut report.warnings, warning);
         }
-        unread(
-            editor,
-            &inner_resources,
-            &entry.content,
-            areas,
-            &mut report.warnings,
-        );
+        self.cells
+            .read(editor, &inner_resources, &entry.content, inner, areas);
         // A form over budget holds no cuts: it is cut the old way, from its
         // content, once every placement is known, and no placement of it
         // reads a cut.
@@ -10151,6 +10544,8 @@ mod patterns_and_masks {
         }
     }
 
+    /// Past [`MAX_PLACEMENTS`] tiles a cell is not measured: the page-sized
+    /// rectangle meets 220 of `/P0`'s 50 by 20 tiles, so it is named.
     #[test]
     fn a_tiling_pattern_whose_cell_shows_text_is_named() {
         assert_eq!(
@@ -10161,6 +10556,52 @@ mod patterns_and_masks {
             vec![named(b"P0")],
             "once, however often it is painted with"
         );
+    }
+
+    /// Clause (b) of the ROADMAP's Editing row, its cell half: a tiling
+    /// pattern's cell is cut at every tile of its lattice a rectangle meets
+    /// (8.7.3.1). `/P0`'s cell shows `SECRET` at (0, 5) in a 50 by 20 cell,
+    /// so tile (1, 1) draws it from x = 50 at y = 25; the band covers that
+    /// tile's `ECRE` and nothing of tiles (1, 0) and (1, 2), which it also
+    /// meets. In the cell's one stream, so at every tile, and named.
+    #[test]
+    fn a_tiling_cell_whose_text_is_under_a_rectangle_is_cut_at_its_tiles() {
+        let (bytes, report) = redact(
+            open(document("/Pattern cs /P0 scn 0 0 200 200 re f")),
+            &[band(60.0, 20.0, 90.0, 40.0)],
+        );
+        assert_eq!(report.glyphs, 4, "E, C, R and E: {:?}", report.warnings);
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::RepeatedForm {
+                form: b"P0".to_vec(),
+                placements: 3,
+            }]
+        );
+        // The fixture's other `SECRET` is `/GS0`'s group, which this page
+        // does not set.
+        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+        assert_eq!(streams.matches("SECRET").count(), 1, "{streams}");
+        assert!(streams.contains("(S)"), "{streams}");
+    }
+
+    /// A pattern a form paints with is measured where 8.7.2 anchors it —
+    /// the form's space at its `Do` — as well as where this engine's renderer
+    /// does, the page's. The form is drawn ten points up, so its lattice's
+    /// rows of text stand at y = 15 to 27 and 35 to 47 where the page's stand
+    /// at 5 to 17 and 25 to 37: the band from 18 to 24 meets only the
+    /// form's.
+    #[test]
+    fn a_cell_a_form_paints_with_is_measured_in_the_forms_space_too() {
+        let (_, report) = redact(
+            open(document("q 1 0 0 1 0 10 cm /Fm0 Do Q")),
+            &[band(0.0, 18.0, 400.0, 24.0)],
+        );
+        assert!(report.glyphs > 0, "{:?}", report.warnings);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| matches!(w, RedactionWarning::RepeatedForm { form, .. } if form == b"Q0")));
     }
 
     #[test]
