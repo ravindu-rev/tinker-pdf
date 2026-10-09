@@ -560,6 +560,47 @@ fn text_indent_is_the_first_line_only() {
     assert_eq!(page_text(&laid, 0), "aabb cc");
 }
 
+/// **`text-indent` is a margin on the line box's start edge** (`css-text-3`
+/// §8.1), and a right-to-left block's start edge is its right (review of
+/// lane 8C).
+///
+/// `aa bb cc dd ee` in a hundred points, twenty of indent: the first line has
+/// eighty to fill and holds `aa bb cc` exactly, the second holds `dd ee`. Left
+/// to right the first line starts at the indent. Right to left the indent is
+/// at the right, so the first line — flush with its start, the right — runs
+/// from 0 to 80 and the second, fifty points, starts at fifty. A build that
+/// put the indent on the left in both directions started the right-to-left
+/// first line at twenty and drew it over the indent's place at the right.
+///
+/// And beside a float the same holds of the band: a ten-point left float
+/// leaves the first line 10 to 110 of a 110-point block, so the left-to-right
+/// line starts at 30 and the right-to-left one at 10.
+#[test]
+fn text_indent_is_on_the_start_side_of_a_right_to_left_line() {
+    let xs = |direction: Direction, width: f64, float: bool| {
+        let mut style = block();
+        style.direction = direction;
+        style.text_indent = LengthPercentage::Px(20.0);
+        let mut children = Vec::new();
+        if float {
+            children.push(float_box(Float::Left, 10.0, "F"));
+        }
+        children.push(text("aa bb cc dd ee"));
+        let laid = run(&BoxNode::element(style, children), width, 400.0);
+        assert_eq!(baselines(&laid, 0).len(), 2 + usize::from(float));
+        laid.pages[0]
+            .runs
+            .iter()
+            .filter(|run| run.text != "F")
+            .map(|run| run.x)
+            .collect::<Vec<f64>>()
+    };
+    assert_eq!(xs(Direction::Ltr, 100.0, false), [20.0, 0.0]);
+    assert_eq!(xs(Direction::Rtl, 100.0, false), [0.0, 50.0]);
+    assert_eq!(xs(Direction::Ltr, 110.0, true), [30.0, 0.0]);
+    assert_eq!(xs(Direction::Rtl, 110.0, true), [10.0, 60.0]);
+}
+
 // ---- css-writing-modes-3 section 2, direction and unicode-bidi --------------
 
 /// **`start` and `end` are the block's sides** (`css-text-3` §7.1), `left`

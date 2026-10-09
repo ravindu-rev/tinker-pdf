@@ -159,7 +159,8 @@ is refused by value. **`direction` and `unicode-bidi`**
 (`css-writing-modes-3` §2) decide the line, not each line's first letter:
 every run carries its block's direction as its paragraph's base level, so a
 left-to-right paragraph that begins with an Arabic word stays left to right;
-`start` and `end` alignment and an outside marker's side follow it; an inline
+`start` and `end` alignment, the side `text-indent` is taken from
+(`css-text-3` §8.1) and an outside marker's side follow it; an inline
 box's `embed`, `isolate` and `plaintext` are carried on its runs as the
 levels §2.4.2 maps them to and written as formatting characters only into the
 text the painter resolves, never into the page's; and a block's `plaintext`

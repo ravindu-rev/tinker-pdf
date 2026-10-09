@@ -1969,3 +1969,44 @@ fn start_and_end_are_the_paragraphs_sides() {
         assert!(at(&line, &expected), "`{attributes}` drew {line:?}");
     }
 }
+
+/// **`text-indent` is taken from the paragraph's start side** (`css-text-3`
+/// §8.1: a margin on the line box's start edge), and under `plaintext` that
+/// is each paragraph's own (review of lane 8C).
+///
+/// 36 px is 27 pt. Left to right `ab` starts 27 pt in from the left edge.
+/// Right to left the same two letters are at level 2, drawn `ab`, and the
+/// line ends 27 pt in from the right edge, where it used to end at the edge
+/// with the indent spent on the left, which a flush-right line never
+/// reaches. Under `unicode-bidi: plaintext` an Arabic paragraph in a
+/// left-to-right block is right to left, so its indent is at the right too.
+#[test]
+fn text_indent_is_on_the_paragraphs_start_side() {
+    const INDENT: f64 = 27.0;
+    let ltr = drawn_line(" style=\"text-indent: 36px\"", "ab");
+    assert!(
+        at(&ltr, &[("a", LEFT + INDENT), ("b", LEFT + INDENT + GLYPH)]),
+        "the left-to-right indent moved: {ltr:?}"
+    );
+    let end = RIGHT - INDENT;
+    let rtl = drawn_line(" dir=\"rtl\" style=\"text-indent: 36px\"", "ab");
+    assert!(
+        at(&rtl, &[("a", end - 2.0 * GLYPH), ("b", end - GLYPH)]),
+        "the right-to-left line does not end at the indent: {rtl:?}"
+    );
+    let plain = drawn_line(
+        " style=\"unicode-bidi: plaintext; text-indent: 36px\"",
+        "\u{628}\u{62D}\u{645}",
+    );
+    assert!(
+        at(
+            &plain,
+            &[
+                ("\u{645}", end - 3.0 * GLYPH),
+                ("\u{62D}", end - 2.0 * GLYPH),
+                ("\u{628}", end - GLYPH),
+            ]
+        ),
+        "the right-to-left plaintext paragraph does not end at the indent: {plain:?}"
+    );
+}

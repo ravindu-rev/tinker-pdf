@@ -4577,6 +4577,11 @@ impl<M: Metrics> Builder<'_, M> {
                 cursor += 1;
             }
             let indent_here = if first_line { indent } else { 0.0 };
+            // `css-text-3` §8.1: the indent is a margin on the line box's
+            // **start** edge, which is the right in a right-to-left
+            // paragraph — the side `line` aligns `start` to, by the same
+            // test.
+            let rtl = paragraph.unwrap_or(container.direction == Direction::Rtl);
             // §9.5's other half: the measure is what the floats beside this
             // line have left of it, and where nothing is left the line goes
             // under them. Both are decided **before** the line is filled,
@@ -4585,7 +4590,7 @@ impl<M: Metrics> Builder<'_, M> {
                 container,
                 content_x,
                 content_width,
-                indent_here,
+                (indent_here, rtl),
                 &content,
                 &spans,
                 pieces,
@@ -4706,13 +4711,17 @@ impl<M: Metrics> Builder<'_, M> {
     /// line in a book of uniform text meets exactly, and the case it gets
     /// wrong — one oversized inline in the last line beside a float — is worth
     /// less than the circularity it avoids.
+    ///
+    /// `indent` is the line's `text-indent` and whether the line reads right
+    /// to left, which decides the side it is taken from (`css-text-3` §8.1:
+    /// the line box's start edge).
     #[allow(clippy::too_many_arguments)]
     fn beside(
         &mut self,
         container: &Consumed,
         content_x: f64,
         content_width: f64,
-        indent: f64,
+        (indent, rtl): (f64, bool),
         content: &str,
         spans: &[(usize, usize, usize)],
         pieces: &[Piece],
@@ -4720,8 +4729,11 @@ impl<M: Metrics> Builder<'_, M> {
         start: usize,
     ) -> Result<(f64, f64), Refusal> {
         let full = (content_width - indent).max(0.0);
+        // The indent's place is the start edge: a right-to-left line keeps
+        // its left edge and gives the indent up from its right.
+        let shift = if rtl { 0.0 } else { indent };
         if self.floats.is_empty() {
-            return Ok((content_x + indent, full));
+            return Ok((content_x + shift, full));
         }
         let left = content_x;
         let right = content_x + content_width;
@@ -4762,7 +4774,7 @@ impl<M: Metrics> Builder<'_, M> {
             self.emit(chosen - top, ItemKind::Edge, true);
         }
         Ok((
-            band_left + indent,
+            band_left + shift,
             (band_right - band_left - indent).max(0.0),
         ))
     }
