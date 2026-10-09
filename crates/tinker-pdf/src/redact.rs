@@ -48,6 +48,11 @@
 //! once the redaction removed a procedure's last use the default save
 //! leaves it saying nothing, and a Type 3 font it cannot bound is named
 //! (`a_procedure_whose_last_use_was_redacted_is_emptied_by_the_default_save`).
+//! What a procedure draws is left with it: a form it invokes is not cut,
+//! nor a soft mask's group it sets, and emptying the procedure removes
+//! neither from the file. A group is named
+//! ([`RedactionWarning::PatternOrMask`]) when what it showed under a
+//! rectangle is what removed a use.
 //! Nor an annotation's own text — `/Contents`, a
 //! rich-text `/RC`, a field's `/V`: what a redaction cuts is what a page
 //! draws, and those are what a viewer *says*, with no position to compare
@@ -132,15 +137,22 @@
 //! records each `gs` whose state sets one as it records a `Do` (once per name
 //! and transform, under the same bound; a state that sets no mask is not a
 //! use, and spends nothing of it), and [`Walk`] enters the group as a form
-//! placement and cuts it. Never through a copy: pointing one `gs` at a copied group means
-//! a copied graphics state under a fresh name as well, and a stream sets one
-//! state nearly always once, so a group is cut in its own stream, the old way
-//! ([`union`]), and [`RedactionWarning::RepeatedForm`] names it when that is
-//! wider than asked — a second placement, or another page that sets the same
-//! state, which the read of what else draws a form now follows through `gs`
-//! ([`Elsewhere`]). A glyph procedure that sets one is measured through it
-//! ([`draws_under`]). Its text is the mask's shape, not ink, and it is in the
-//! file all the same.
+//! placement and cuts it. Never through a copy: pointing one `gs` at a
+//! copied group means a copied graphics state under a fresh name as well,
+//! and a stream sets one state nearly always once, so a group is cut in its
+//! own stream, the old way ([`union`]), and [`RedactionWarning::RepeatedForm`]
+//! names it when that is wider than asked — a second placement, or another
+//! page that sets the same state, which the read of what else draws a form
+//! now follows through `gs` ([`Elsewhere`]). Its text is the mask's shape,
+//! not ink, and it is in the file all the same.
+//!
+//! A glyph procedure that sets one is measured through it ([`draws_under`]),
+//! and a use whose group shows text or draws an image under a rectangle is
+//! removed — but the group is **not cut**: it is the procedure's, every use
+//! of the glyph draws it, and the procedure is not rewritten ("A Type 3
+//! glyph's procedure"). So what it showed under the rectangle stays in the
+//! file, and [`RedactionWarning::PatternOrMask`] names the state; until the
+//! lane's review the use went and nothing said so.
 //!
 //! # Vertical writing
 //!
@@ -496,6 +508,8 @@
 //! | every `gs` recorded however often it repeats | **1** |
 //! | every `gs` recorded whatever its state sets, which is how it was until the lane's review | 2 |
 //! | a placement remembered before the bound is asked, which is how it was until the lane's review | **1** |
+//! | a procedure's group that removed a use left unnamed, which is how it was until the lane's review | **1** |
+//! | a procedure's group named whatever it drew, which is how it was before October 2026 | 2 |
 //!
 //! And a tiling pattern's cell measured (the other half of clause (b)), the
 //! same way:
@@ -680,6 +694,13 @@ pub enum RedactionWarning {
     /// cell was named, and a **soft mask's** group with them; both are
     /// measured now. The variant keeps its name, since a caller matching on
     /// it should not have to change for a class that got narrower.
+    ///
+    /// One group is named still, under the `/ExtGState` name that set it,
+    /// and it was measured: one a **Type 3 glyph's procedure** sets, when
+    /// what it shows under a rectangle is what removed a use of the glyph.
+    /// The use goes; the group, like the procedure, is every use's and is
+    /// not cut ([`cut_stream`]), so what it showed under the rectangle is
+    /// still in the file — which is what this says.
     PatternOrMask {
         /// The `/Pattern` or `/ExtGState` resource name.
         resource: Vec<u8>,
@@ -3225,12 +3246,8 @@ fn draws_under(
             Resolve::resolve_key(measure.editor, &dict, measure.editor.intern(b"Subtype"))
                 .as_name()
                 .and_then(|n| measure.editor.document().name_bytes(n));
-        match subtype.as_deref() {
-            Some(b"Image") => {
-                if covers_unit_square(used, measure.areas) {
-                    return true;
-                }
-            }
+        let drawn = match subtype.as_deref() {
+            Some(b"Image") => covers_unit_square(used, measure.areas),
             Some(b"Form") => {
                 let Some(inner_content) = measure.editor.stream_bytes(reference) else {
                     continue;
@@ -3241,7 +3258,7 @@ fn draws_under(
                     .as_dict()
                     .cloned();
                 let placed = form_transform(measure.editor, &dict, used.ctm);
-                let drawn = match &own {
+                match &own {
                     Some(resources) => {
                         let fonts = fonts_in(measure.editor, resources);
                         let inner = Measure {
@@ -3253,12 +3270,29 @@ fn draws_under(
                         draws_under(&inner, &inner_content, placed, warnings, budget)
                     }
                     None => draws_under(measure, &inner_content, placed, warnings, budget),
-                };
-                if drawn {
-                    return true;
                 }
             }
-            _ => {}
+            _ => false,
+        };
+        if drawn {
+            // A mask's group is the procedure's, as what the procedure shows
+            // is: the use goes, and the group is not cut, since every other
+            // use of the glyph draws it too ([`cut_stream`]'s decision). So
+            // what it showed under the rectangle is still in the file, and
+            // that is named, as a cell a procedure paints with is — when
+            // something found under a rectangle, rather than a measurement
+            // run out of budget, is what removed the use. Until the lane's
+            // review it went unnamed: a group's covered text stayed in the
+            // file with `warnings: []`.
+            if used.mask && !budget.spent {
+                note(
+                    warnings,
+                    RedactionWarning::PatternOrMask {
+                        resource: used.name.clone(),
+                    },
+                );
+            }
+            return true;
         }
     }
 
@@ -10700,6 +10734,16 @@ mod patterns_and_masks {
         }
     }
 
+    /// Everything the facade's extractor reads on page zero, one line each,
+    /// bottom to top.
+    fn text_of(bytes: Vec<u8>) -> String {
+        lines_of(bytes)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Past [`MAX_PLACEMENTS`] tiles a cell is not measured: the page-sized
     /// rectangle meets 220 of `/P0`'s 50 by 20 tiles, so it is named.
     #[test]
@@ -10908,6 +10952,13 @@ mod patterns_and_masks {
     /// the group at a hundred times glyph space: one point to the unit, its
     /// `SECRET` from about (20, 20) to (210, 55), well clear of the glyph's
     /// own box at (10, 10) to (20, 20).
+    ///
+    /// The group is the procedure's, and like the procedure it is not cut
+    /// (`cut_stream`'s decision: every use of the glyph draws it), so its
+    /// `SECRET` — whose `C`, `R`, `E` and `T` the band covers at this use —
+    /// is still in the file. That is named: `PatternOrMask`, under the state
+    /// the procedure set, as a cell a procedure paints with is. Until the
+    /// lane's review the use went and nothing said the text had stayed.
     #[test]
     fn a_glyph_whose_procedure_masks_text_under_a_rectangle_is_removed() {
         let original = b"1000 0 d0 /GS0 gs 0 0 1000 1000 re f";
@@ -10919,8 +10970,42 @@ mod patterns_and_masks {
             .position(|w| w == original)
             .expect("the procedure");
         bytes[at..at + scaled.len()].copy_from_slice(scaled);
-        let (_, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
+        let (after, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
         assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(
+            report.warnings,
+            vec![named(b"GS0")],
+            "the group it drew is left, and said to be"
+        );
+        let streams = all_streams(&CosDocument::open(after.clone()).expect("it reopens"));
+        assert!(
+            !streams.contains("(B) Tj"),
+            "the use is gone from the page: {streams}"
+        );
+        assert!(
+            streams.contains("BT /F0 48 Tf 10 10 Td (SECRET) Tj ET"),
+            "the group is left byte for byte, which is what is named: {streams}"
+        );
+        assert_eq!(text_of(after), "", "nothing on the page reads");
+    }
+
+    /// The same procedure, and a band clear of where the group draws: the
+    /// use is not under a rectangle and stays, and nothing is named, since
+    /// nothing the group shows was covered.
+    #[test]
+    fn a_procedure_mask_clear_of_the_rectangles_is_not_named() {
+        let original = b"1000 0 d0 /GS0 gs 0 0 1000 1000 re f";
+        let scaled = b"1000 0 d0 100 0 0 100 0 0 cm /GS0 gs";
+        let mut bytes = document("BT /T3 10 Tf 10 10 Td (B) Tj ET");
+        let at = bytes
+            .windows(original.len())
+            .position(|w| w == original)
+            .expect("the procedure");
+        bytes[at..at + scaled.len()].copy_from_slice(scaled);
+        let (after, report) = redact(open(bytes), &[band(300.0, 300.0, 400.0, 400.0)]);
+        assert_eq!(report, RedactionReport::default());
+        let streams = all_streams(&CosDocument::open(after).expect("it reopens"));
+        assert!(streams.contains("(B) Tj"), "{streams}");
     }
 
     /// A stream that sets one state at every text object sets it under one
