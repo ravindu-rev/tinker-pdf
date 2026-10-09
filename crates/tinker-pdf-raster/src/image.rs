@@ -545,6 +545,12 @@ pub struct ImageDraw<'a> {
     /// What a one-bit stencil needs, expressed without naming one: the image
     /// says *where*, the caller says *what*.
     pub tint: Option<Color>,
+    /// The tint's own ink — cyan, magenta, yellow and black as bytes, the
+    /// components it was chosen in — which a [`crate::PixelFormat::CmykA8`]
+    /// canvas composites in place of the tint turned back into ink, as
+    /// [`Canvas::fill_mask_inked`] does for a fill. Read only with a `tint`,
+    /// and only by an ink canvas.
+    pub ink: Option<[u8; 4]>,
     /// Asked once per destination row; drawing stops as soon as it answers
     /// `true`.
     pub stop: Option<&'a dyn Fn() -> bool>,
@@ -571,6 +577,7 @@ impl<'a> ImageDraw<'a> {
             blend: BlendMode::Normal,
             clip: None,
             tint: None,
+            ink: None,
             stop: None,
             antialias: true,
         }
@@ -591,6 +598,7 @@ pub fn draw_image(canvas: &mut Canvas, draw: &ImageDraw<'_>, pyramid: &mut Pyram
     // is in device pixels — the frame every placement is stated in — and only
     // the write below turns one into a canvas index (ruling 5).
     let rect = canvas.device_rect();
+    let ink = draw.tint.and(draw.ink);
     walk(draw, pyramid, rect, |px, py, color, covered, own| {
         let clip = draw.clip.map_or(255, |mask| mask.at(px, py));
         if clip == 0 {
@@ -601,7 +609,7 @@ pub fn draw_image(canvas: &mut Canvas, draw: &ImageDraw<'_>, pyramid: &mut Pyram
         };
         let effective =
             alpha * f64::from(covered) / 255.0 * f64::from(own) / 255.0 * f64::from(clip) / 255.0;
-        canvas.blend_pixel_with(x, y, color, effective, draw.blend);
+        canvas.blend_pixel_inked(x, y, color, ink, effective, draw.blend);
     });
 }
 
@@ -1241,6 +1249,53 @@ mod tests {
 
         assert_eq!(canvas.pixel(0, 0), Some(Color::WHITE), "still transparent");
         assert_eq!(canvas.pixel(3, 0), Some(Color::rgb(255, 0, 0)), "tinted");
+    }
+
+    /// A tint's own ink reaches an ink canvas, drawn directly and through a
+    /// run alike; without a tint, or on a light canvas, it is never read.
+    /// The tint is black light, which maximum undercolour removal would make
+    /// black ink alone, and the ink it was chosen as is all four.
+    #[test]
+    fn an_ink_canvas_composites_a_tint_s_own_ink() {
+        let rgb = vec![0u8; 3];
+        let image = ImageSource {
+            width: 1,
+            height: 1,
+            rgb: &rgb,
+            alpha: &[255],
+        };
+        let rich = Some([255, 255, 255, 255]);
+        let at = |canvas: &Canvas| canvas.data[..5].to_vec();
+
+        let mut draw = ImageDraw::new(image, over(4.0));
+        draw.tint = Some(Color::BLACK);
+        draw.ink = rich;
+        let mut direct = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
+        draw_image(&mut direct, &draw, &mut Pyramid::new());
+        assert_eq!(at(&direct), [255, 255, 255, 255, 255], "drawn directly");
+
+        let mut run = Fragments::new(0, 0, 4, 4);
+        accumulate_image(&mut run, &draw, &mut Pyramid::new(), (0, 0, 4, 4));
+        let mut held = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
+        run.composite_region_inked(
+            &mut held,
+            (0, 0, 4, 4),
+            1.0,
+            BlendMode::Normal,
+            None,
+            rich,
+            None,
+        );
+        assert_eq!(at(&held), [255, 255, 255, 255, 255], "through a run");
+
+        let mut light = Canvas::new(4, 4, PixelFormat::Rgb8, Color::WHITE);
+        draw_image(&mut light, &draw, &mut Pyramid::new());
+        assert_eq!(light.pixel(0, 0), Some(Color::BLACK), "light reads no ink");
+
+        draw.tint = None;
+        let mut untinted = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
+        draw_image(&mut untinted, &draw, &mut Pyramid::new());
+        assert_eq!(at(&untinted), [0, 0, 0, 255, 255], "no tint, no ink");
     }
 
     #[test]

@@ -271,6 +271,56 @@ fn a_device_cmyk_colour_reaches_an_ink_page_unchanged() {
     assert_eq!(&light.data[..3], &[0, 0, 0], "`/DeviceCMYK cs` is black");
 }
 
+/// **A stencil mask paints the fill colour's own ink** (8.9.6.2): it has no
+/// colour of its own and is painted with the current fill colour, which is a
+/// flat colour like any fill's — so a DeviceCMYK one reaches an ink page as
+/// its components, not as its light turned back into ink. Two abutting
+/// stencils of one colour, a third of another beside them (abutting stencils
+/// are held back and composited once, so the third must not join the first
+/// two's ink), and a fourth in light red, which still converts. Each is a
+/// whole ten-pixel square, so a sampled pixel is wholly covered.
+#[test]
+fn a_stencil_mask_paints_the_fill_colour_s_own_ink() {
+    let stencil = |x: u32| {
+        let mut content =
+            format!("q 10 0 0 10 {x} 30 cm BI /IM true /W 1 /H 1 /BPC 1 ID ").into_bytes();
+        content.extend_from_slice(b"\x00 EI Q");
+        content
+    };
+    let mut builder = DocumentBuilder::new();
+    builder.add_page(50.0, 40.0, |page| {
+        page.raw(b"0.2 0.4 0.6 0.1 k");
+        page.raw(&stencil(0));
+        page.raw(&stencil(10));
+        page.raw(b"0.1 0.9 0.3 0.7 k");
+        page.raw(&stencil(20));
+        page.raw(b"1 0 0 rg");
+        page.raw(&stencil(30));
+    });
+    let ink = render(
+        builder.finish(),
+        &RenderOptions {
+            format: PixelFormat::CmykA8,
+            allow_cmyk: true,
+            ..RenderOptions::default()
+        },
+    );
+    let at = |x: u32, y: u32| -> [u8; 5] {
+        let i = y as usize * ink.stride + x as usize * 5;
+        ink.data[i..i + 5].try_into().expect("five bytes")
+    };
+    let byte = |v: f64| (v * 255.0_f64).round() as u8;
+    let first = [byte(0.2), byte(0.4), byte(0.6), byte(0.1), 255];
+    assert_eq!(at(5, 5), first, "a stencil in `k`'s ink");
+    assert_eq!(at(15, 5), first, "the one beside it, in the same run");
+    assert_eq!(
+        at(25, 5),
+        [byte(0.1), byte(0.9), byte(0.3), byte(0.7), 255],
+        "a stencil of another ink, not the run's"
+    );
+    assert_eq!(at(35, 5), [0, 255, 255, 0, 255], "light still converts");
+}
+
 /// **Over ink, a rich black's edge is darker than over light**, and that is
 /// the clause's arithmetic rather than a disagreement. A pixel half covered
 /// by `1 1 1 1 k` composites to half of every ink, `128` four times, and

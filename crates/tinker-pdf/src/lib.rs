@@ -592,8 +592,9 @@ pub struct RenderOptions {
     /// buffer is handed back as it stands instead of being converted to light
     /// at the end.
     ///
-    /// **A DeviceCMYK colour is the document's own ink.** A fill, a stroke or
-    /// a glyph whose colour was set in DeviceCMYK — `k`, `K`, or `sc`/`scn`
+    /// **A DeviceCMYK colour is the document's own ink.** A fill, a stroke,
+    /// a glyph or a stencil mask (8.9.6.2's image painted in the fill colour)
+    /// whose colour was set in DeviceCMYK — `k`, `K`, or `sc`/`scn`
     /// in a space that is DeviceCMYK, named directly or through
     /// `/ColorSpace` — composites its own components, each
     /// `round(255 × component)`: `1 0 0 0 k` arrives as `(255, 0, 0, 0)` and

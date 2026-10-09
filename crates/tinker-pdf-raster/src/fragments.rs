@@ -194,6 +194,25 @@ impl Fragments {
         clip: Option<&Mask>,
         stop: Option<&dyn Fn() -> bool>,
     ) {
+        self.composite_region_inked(canvas, region, alpha, blend, clip, None, stop);
+    }
+
+    /// As [`Fragments::composite_region`], for a run every draw of which
+    /// painted one ink: a stencil's fill colour's own components, which a
+    /// [`crate::PixelFormat::CmykA8`] canvas composites in place of the run's
+    /// light turned back into ink ([`Canvas::blend_pixel_inked`]). The caller
+    /// keeps a run to one ink; every other format never reads it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn composite_region_inked(
+        &self,
+        canvas: &mut Canvas,
+        region: (i32, i32, i32, i32),
+        alpha: f64,
+        blend: BlendMode,
+        clip: Option<&Mask>,
+        ink: Option<[u8; 4]>,
+        stop: Option<&dyn Fn() -> bool>,
+    ) {
         let alpha = alpha.clamp(0.0, 1.0);
         let (rx0, ry0, rx1, ry1) = region;
         if rx1 <= rx0 || ry1 <= ry0 {
@@ -244,7 +263,7 @@ impl Fragments {
                 let Some((x, y)) = canvas.local(px, py) else {
                     continue;
                 };
-                canvas.blend_pixel_with(x, y, color, effective, blend);
+                canvas.blend_pixel_inked(x, y, color, ink, effective, blend);
             }
         }
     }

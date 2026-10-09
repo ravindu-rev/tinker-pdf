@@ -457,6 +457,22 @@ impl Canvas {
 
     /// As [`Canvas::blend_pixel`], with a blend mode (11.3.5).
     pub fn blend_pixel_with(&mut self, x: u32, y: u32, color: Color, alpha: f64, mode: BlendMode) {
+        self.blend_pixel_inked(x, y, color, None, alpha, mode);
+    }
+
+    /// As [`Canvas::blend_pixel_with`], with the colour's own ink beside it,
+    /// which a [`PixelFormat::CmykA8`] canvas composites in place of `color`
+    /// turned back into ink — what [`Canvas::fill_mask_inked`] does for a
+    /// mask, for a caller that samples. Every other format never reads `ink`.
+    pub fn blend_pixel_inked(
+        &mut self,
+        x: u32,
+        y: u32,
+        color: Color,
+        ink: Option<[u8; 4]>,
+        alpha: f64,
+        mode: BlendMode,
+    ) {
         if x >= self.width || y >= self.height {
             return;
         }
@@ -474,7 +490,12 @@ impl Canvas {
             self.approximated_blends = self.approximated_blends.saturating_add(1);
         }
         let components = self.format.components();
-        let source = self.encode(color);
+        let source = match (ink, self.format) {
+            (Some([cyan, magenta, yellow, black]), PixelFormat::CmykA8) => {
+                [cyan, magenta, yellow, black, color.a]
+            }
+            _ => self.encode(color),
+        };
         let base = (y as usize) * self.stride + (x as usize) * components;
         let backdrop = self.backdrop_alpha(x, y);
         blend(

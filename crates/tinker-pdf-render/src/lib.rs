@@ -672,6 +672,13 @@ struct ImageRun {
     /// mask is identified by its rectangle and the address of its coverage,
     /// which is cheap and cannot collide while the mask is alive.
     masks: (Option<MaskId>, Option<MaskId>),
+    /// The ink every draw in the run painted, when the canvas composites
+    /// ink: a stencil's fill colour's own components (8.9.6.2), handed to
+    /// the canvas as a fill's are. A draw of another ink, or none, ends the
+    /// run, since the run reaches the canvas as one colour per pixel. `None`
+    /// on every canvas that does not composite ink, so no light page's runs
+    /// are split by it.
+    ink: Option<[u8; 4]>,
     /// The device rectangle the run has put coverage in, as
     /// `(x0, y0, x1, y1)` with the far edges exclusive.
     ///
@@ -1077,12 +1084,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             .as_ref()
             .or(self.clip.as_ref())
             .or(self.soft.as_ref());
-        run.fragments.composite_region(
+        run.fragments.composite_region_inked(
             &mut self.canvas,
             run.covered,
             run.alpha,
             run.blend,
             clip,
+            run.ink,
             Some(&stop),
         );
     }
@@ -2148,8 +2156,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     fn blit(&mut self, image: &DecodedImage, state: &GraphicsState) {
         let unit_to_device = transform(&state.ctm.then(&self.base));
         // 8.9.6.2: a stencil selects where the *current fill colour* is
-        // painted; it has no colour of its own.
+        // painted; it has no colour of its own. That colour is a flat fill
+        // like any other, so a canvas compositing in ink is handed its own
+        // ink beside its light, as a fill is (`GraphicsState::fill_ink`).
         let tint = image.stencil.then(|| fill_color(state));
+        let ink = if image.stencil && self.canvas.format == PixelFormat::CmykA8 {
+            state.fill_ink
+        } else {
+            None
+        };
         // 11.4.5: an image is one element, and its shape is the unit square of
         // its transform (8.9.5.2). Rasterised only inside a knockout group,
         // where it is the coverage the restore needs; everywhere else this
@@ -2187,6 +2202,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             run.alpha.to_bits() != state.fill_alpha.to_bits()
                 || run.blend != blend_mode(state.blend)
                 || run.masks != masks
+                || run.ink != ink
         });
         // A different graphics state, or a picture laid *over* another rather
         // than beside it: both end the run. Fragments are added, so an overlap
@@ -2223,6 +2239,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             blend: blend_mode(state.blend),
             clip,
             tint,
+            ink,
             stop: Some(&stop),
             antialias: self.antialias,
         };
@@ -2243,6 +2260,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             alpha: state.fill_alpha,
             blend: blend_mode(state.blend),
             masks,
+            ink,
             covered: (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
         });
         accumulate_image(&mut run.fragments, &draw, &mut pyramid, extent);

@@ -147,7 +147,10 @@ of the sixteen million colours survives the round trip.
 `BlendMode`s — the twelve separable modes of 11.3.5.2 and the four
 non-separable ones of 11.3.5.3 — with the whole operation scaled by an
 alpha, which is what the graphics state's `ca` and `CA` do (8.6.4.4).
-`fill_mask_inked` is the same with the colour's own ink beside it: a
+`fill_mask_inked` is the same with the colour's own ink beside it (and
+`blend_pixel_inked` for a caller that samples, which is how `ImageDraw::ink`
+reaches the canvas for a tinted stencil, directly or through a run's
+`Fragments::composite_region_inked`): a
 `CmykA8` canvas composites those four bytes rather than the colour turned
 back into ink, which matters because light has one ink for each colour and
 a document's rich black is four; every other format ignores them.
@@ -250,7 +253,9 @@ accumulation, and so is the coverage the quad contributes. The only floats left
 on the path are `sqrt`, division and `round`, which IEEE 754 pins exactly
 (ruling 4). The pyramid belongs to the caller, so an image's lifetime is
 decided where it is known. A stencil's PDF name stayed behind as
-`ImageDraw::tint` (8.9.6.2): the image says where, the caller says what.
+`ImageDraw::tint` (8.9.6.2): the image says where, the caller says what —
+and `ImageDraw::ink` what that colour is in ink, which only a `CmykA8`
+canvas reads.
 
 The trade is written down in [design/image-edges.md](../design/image-edges.md).
 

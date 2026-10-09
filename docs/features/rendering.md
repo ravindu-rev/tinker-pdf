@@ -188,7 +188,13 @@ fill, stroke or glyph colour was set with in DeviceCMYK — `k`, `K`, and
 (`FontSource::resolve_ink`) — beside the light it stands for
 (`GraphicsState::fill_ink`, `stroke_ink`), and a CMYK canvas composites those
 (`Canvas::fill_mask_inked`), so `1 0 0 0 k` arrives as `(255, 0, 0, 0)` and a
-rich black `1 1 1 1 k` as all four inks. Every other colour is light, which a
+rich black `1 1 1 1 k` as all four inks. A stencil mask is painted in the fill
+colour (8.9.6.2), a flat colour like any fill's, so it is handed the fill's ink
+too (`ImageDraw::ink`, and a run of abutting stencils is kept to one ink and
+composited with it); until the review of lane 8A it took only the light, and
+`0.2 0.4 0.6 0.1 k` under a one-bit mask arrived as `(0, 64, 127, 71)` where a
+path fill of it arrived as `(51, 102, 153, 26)`
+(`a_stencil_mask_paints_the_fill_colour_s_own_ink`). Every other colour is light, which a
 CMYK buffer takes through 8.6.4.4's relation inverted with maximum undercolour
 removal — `1 0 0 rg` arrives as `(0, 255, 255, 0)` — and so is what is not a
 flat colour (an image, a shading, a pattern's cell) and every space whose
