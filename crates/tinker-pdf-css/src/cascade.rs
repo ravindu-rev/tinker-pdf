@@ -1771,7 +1771,7 @@ impl<'a> Matcher<'a> {
         // list-item }` by its book numbers from one, which is what the author's
         // rule says.
         let hint_owned: Vec<Declared> = match elements[at].presentational_hints() {
-            Some(source) => crate::parse_inline(&source, report, budget)?,
+            Some(source) => parse_attached(&source, report, budget)?,
             None => Vec::new(),
         };
         let mut matched: Vec<(CascadeKey, Origin, &Declared)> = Vec::new();
@@ -1818,7 +1818,7 @@ impl<'a> Matcher<'a> {
         // at open, because they belong to the element and not to a sheet, and
         // because a book with no `style=""` should pay nothing for the feature.
         let inline_owned: Vec<Declared> = match elements[at].inline_style() {
-            Some(source) => crate::parse_inline(source, report, budget)?,
+            Some(source) => parse_attached(source, report, budget)?,
             None => Vec::new(),
         };
         for declared in &inline_owned {
@@ -1877,6 +1877,28 @@ impl<'a> Matcher<'a> {
             .map(|(longhand, index)| resolve_rollbacks(longhand, index, &matched))
             .collect())
     }
+}
+
+/// Parses the declarations an element carries itself — its presentational
+/// hints and its `style=""` — for [`Matcher::winners`].
+///
+/// What the parse discards and warns about goes to `report`; what it refuses
+/// or does not know does not, because the walk over the element's matched
+/// declarations counts each of those where it reached an element, and the
+/// element is this one. Parsed straight into `report`, as both used to be,
+/// a `style="filter: none"` was charged to the census twice for one element,
+/// and so was every `<ol reversed>`.
+fn parse_attached(
+    source: &str,
+    report: &mut Report,
+    budget: &mut Budget,
+) -> Result<Vec<Declared>, Refusal> {
+    let mut parsed = Report::default();
+    let declared = crate::parse_inline(source, &mut parsed, budget)?;
+    parsed.unsupported.clear();
+    parsed.unknown.clear();
+    report.absorb(parsed);
+    Ok(declared)
 }
 
 /// Records that `index` is the strongest declaration seen so far for

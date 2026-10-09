@@ -861,6 +861,33 @@ fn the_unsupported_census_counts_elements_reached() {
     assert_eq!(tree_styles.report.unsupported, vec![("box-shadow", 3)]);
 }
 
+/// **A declaration an element carries itself is counted once for it**, as
+/// one a sheet sends it is.
+///
+/// A `style=""` or a presentational hint is parsed when its element is
+/// cascaded, and was parsed into the cascade's own report — whose parse
+/// counted each refused or unknown declaration, before the walk over the
+/// element's matched declarations counted it again. One element, two in the
+/// census: `<ol reversed>` was two lists and `<bdo>` two overrides.
+#[test]
+fn a_declaration_an_element_carries_is_counted_once_for_it() {
+    let mut nodes = tree(&[("p", None), ("p", Some(0)), ("p", Some(0))]);
+    nodes[1].style = Some("box-shadow: 0 0 2px #000; -x-typo: 1".to_owned());
+    nodes[2]
+        .attributes
+        .push(("hint".into(), "unicode-bidi: bidi-override".into()));
+    let parsed = sheet("");
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let tree_styles = cascade(&[(Origin::Author, &parsed)], &nodes, &limits, &mut budget)
+        .expect("under every cap");
+    assert_eq!(
+        tree_styles.report.unsupported,
+        vec![("box-shadow", 1), ("unicode-bidi", 1)]
+    );
+    assert_eq!(tree_styles.report.unknown, vec![("-x-typo".to_owned(), 1)]);
+}
+
 /// A caller that hands elements out of document order is refused **by name**.
 ///
 /// The alternative is reading a computed style before it was written, which in
