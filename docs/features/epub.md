@@ -204,7 +204,10 @@ left-to-right paragraph that begins with an Arabic word stays left to right;
 `css-lists-3` §3.1's user-agent rule — is ordered with its line as one unit
 at the paragraph's level, where N1 or N2 puts a neutral at a paragraph's
 start: first on the left of a left-to-right item and first on the right of
-a right-to-left one, drawn in that direction (`paint::visual_lines`); an inline
+a right-to-left one, drawn in that direction (`paint::visual_lines`) — except,
+a defect not fixed, beside an atomic inline on a right-to-left item's first
+line, where it is ordered with the run it touches rather than the line box
+and drawn between the item's first word and the box, uncounted; an inline
 box's `embed`, `isolate` and `plaintext` are carried on its runs as the
 levels §2.4.2 maps them to — one stack shared by every run set under the same
 boxes, no deeper than UAX #9's own 125
