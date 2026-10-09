@@ -121,16 +121,29 @@ func (d *Document) PDFVersion() (string, error) {
 	return "", nil
 }
 
-// PageLabel is one page's label (12.4.2); nil when the document has none.
-func (d *Document) PageLabel(index uint32) (*string, error) {
-	var out *C.char
-	err := call(func() C.enum_TpdfStatus {
-		return C.tpdf_document_page_label(d.ptr, C.uint32_t(index), &out)
-	})
-	if err != nil {
+// PageLabels is every page's label (12.4.2), in page order, read with one
+// walk; empty when the document defines none.
+func (d *Document) PageLabels() ([]string, error) {
+	var labels *C.TpdfPageLabels
+	if err := call(func() C.enum_TpdfStatus { return C.tpdf_document_page_labels(d.ptr, &labels) }); err != nil {
 		return nil, err
 	}
-	return takeString(out), nil
+	defer C.tpdf_page_labels_free(labels)
+	count := uint32(C.tpdf_page_labels_count(labels))
+	found := make([]string, 0, count)
+	for i := uint32(0); i < count; i++ {
+		index := C.uint32_t(i)
+		var out *C.char
+		if err := call(func() C.enum_TpdfStatus { return C.tpdf_page_label_text(labels, index, &out) }); err != nil {
+			return nil, err
+		}
+		label := ""
+		if text := takeString(out); text != nil {
+			label = *text
+		}
+		found = append(found, label)
+	}
+	return found, nil
 }
 
 // XMPMetadata is the XMP packet (14.3.2), unparsed; nil when there is none.

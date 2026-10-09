@@ -243,7 +243,10 @@ final class Native {
     static final MethodHandle tpdf_document_info = function("tpdf_document_info", INT, ADDRESS, INT, ADDRESS);
     static final MethodHandle tpdf_document_trapped = function("tpdf_document_trapped", INT, ADDRESS, ADDRESS);
     static final MethodHandle tpdf_document_pdf_version = function("tpdf_document_pdf_version", INT, ADDRESS, ADDRESS);
-    static final MethodHandle tpdf_document_page_label = function("tpdf_document_page_label", INT, ADDRESS, INT, ADDRESS);
+    static final MethodHandle tpdf_document_page_labels = function("tpdf_document_page_labels", INT, ADDRESS, ADDRESS);
+    static final MethodHandle tpdf_page_labels_count = function("tpdf_page_labels_count", INT, ADDRESS);
+    static final MethodHandle tpdf_page_label_text = function("tpdf_page_label_text", INT, ADDRESS, INT, ADDRESS);
+    static final MethodHandle tpdf_page_labels_free = procedure("tpdf_page_labels_free", ADDRESS);
     static final MethodHandle tpdf_document_xmp_metadata = function("tpdf_document_xmp_metadata", INT, ADDRESS, ADDRESS);
     static final MethodHandle tpdf_document_outline = function("tpdf_document_outline", INT, ADDRESS, ADDRESS);
     static final MethodHandle tpdf_outline_count = function("tpdf_outline_count", INT, ADDRESS);

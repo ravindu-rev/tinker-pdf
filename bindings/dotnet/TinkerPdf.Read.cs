@@ -193,7 +193,16 @@ internal static partial class Native
     internal static extern int tpdf_document_pdf_version(IntPtr doc, out IntPtr text);
 
     [DllImport(Library)]
-    internal static extern int tpdf_document_page_label(IntPtr doc, uint index, out IntPtr text);
+    internal static extern int tpdf_document_page_labels(IntPtr doc, out IntPtr labels);
+
+    [DllImport(Library)]
+    internal static extern uint tpdf_page_labels_count(IntPtr labels);
+
+    [DllImport(Library)]
+    internal static extern int tpdf_page_label_text(IntPtr labels, uint index, out IntPtr text);
+
+    [DllImport(Library)]
+    internal static extern void tpdf_page_labels_free(IntPtr labels);
 
     [DllImport(Library)]
     internal static extern int tpdf_document_xmp_metadata(IntPtr doc, out IntPtr buffer);
@@ -383,6 +392,33 @@ public sealed class Outline : IDisposable
     public void Dispose() => _handle.Dispose();
 }
 
+/// <summary>
+/// A document's page labels (12.4.2), one per page in page order: the engine's
+/// own copy, built by one walk, so it outlives its document and every indexed
+/// read is a lookup.
+/// </summary>
+public sealed class PageLabels : IDisposable
+{
+    private readonly ReadHandle _handle;
+
+    internal PageLabels(IntPtr raw) => _handle = new ReadHandle(raw, Native.tpdf_page_labels_free);
+
+    private IntPtr Raw => _handle.DangerousGetHandle();
+
+    /// <summary>How many labels: the page count, or zero when the document has none.</summary>
+    public uint Count => Native.tpdf_page_labels_count(Raw);
+
+    /// <summary>The label of the page at a zero-based index.</summary>
+    public string Label(uint index)
+    {
+        Native.Check(Native.tpdf_page_label_text(Raw, index, out var text));
+        return Native.TakeString(text) ?? string.Empty;
+    }
+
+    /// <summary>Releases the list.</summary>
+    public void Dispose() => _handle.Dispose();
+}
+
 /// <summary>A page's link annotations (12.5.6.5), in <c>/Annots</c> order.</summary>
 public sealed class Links : IDisposable
 {
@@ -561,11 +597,14 @@ public sealed partial class Document
         }
     }
 
-    /// <summary>One page's label (12.4.2); null when the document defines none.</summary>
-    public string? PageLabel(uint index)
+    /// <summary>
+    /// The page labels (12.4.2), read with one walk: one per page, or none when
+    /// the document defines none.
+    /// </summary>
+    public PageLabels ReadPageLabels()
     {
-        Native.Check(Native.tpdf_document_page_label(ReadRaw, index, out var text));
-        return Native.TakeString(text);
+        Native.Check(Native.tpdf_document_page_labels(ReadRaw, out var raw));
+        return new PageLabels(raw);
     }
 
     /// <summary>The XMP packet (14.3.2), unparsed, or null.</summary>

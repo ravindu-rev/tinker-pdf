@@ -267,6 +267,35 @@ fn info_through_the_abi(doc: *const TpdfDocument) -> Vec<Option<String>> {
         .collect()
 }
 
+/// Every label, through one `TpdfPageLabels` handle; an index past its end is
+/// refused rather than read as "no label".
+fn labels_through_the_abi(doc: *const TpdfDocument) -> Vec<String> {
+    let mut labels = ptr::null_mut();
+    assert_eq!(
+        unsafe { tpdf_document_page_labels(doc, &mut labels) },
+        TpdfStatus::Ok
+    );
+    let count = unsafe { tpdf_page_labels_count(labels) };
+    let read = (0..count)
+        .map(|index| {
+            let mut out = ptr::null_mut();
+            assert_eq!(
+                unsafe { tpdf_page_label_text(labels, index, &mut out) },
+                TpdfStatus::Ok
+            );
+            take(out).expect("a label is never null")
+        })
+        .collect();
+    let mut out = ptr::null_mut();
+    assert_eq!(
+        unsafe { tpdf_page_label_text(labels, count, &mut out) },
+        TpdfStatus::BadArgument
+    );
+    assert!(out.is_null(), "nothing is written past the end");
+    unsafe { tpdf_page_labels_free(labels) };
+    read
+}
+
 #[test]
 fn info_version_labels_and_xmp_read_the_same_through_the_abi() {
     for bytes in [rich_document(), shifted_document()] {
@@ -309,20 +338,7 @@ fn info_version_labels_and_xmp_read_the_same_through_the_abi() {
         );
         assert_eq!(take(version), Some(facade.pdf_version()));
 
-        let labels = facade.page_labels();
-        for index in 0..facade.page_count() {
-            let mut label = ptr::null_mut();
-            assert_eq!(
-                unsafe { tpdf_document_page_label(doc, index, &mut label) },
-                TpdfStatus::Ok
-            );
-            assert_eq!(take(label), labels.get(index as usize).cloned());
-        }
-        let mut label = ptr::null_mut();
-        assert_eq!(
-            unsafe { tpdf_document_page_label(doc, facade.page_count(), &mut label) },
-            TpdfStatus::NoSuchPage
-        );
+        assert_eq!(labels_through_the_abi(doc), facade.page_labels());
 
         let mut xmp = ptr::null_mut();
         assert_eq!(
@@ -346,12 +362,7 @@ fn info_version_labels_and_xmp_read_the_same_through_the_abi() {
     assert_eq!(info[0].as_deref(), Some("Read surface"));
     assert_eq!(info[1].as_deref(), Some(""), "empty is not absent");
     assert_eq!(info[2], None, "absent is not empty");
-    let mut label = ptr::null_mut();
-    assert_eq!(
-        unsafe { tpdf_document_page_label(doc, 1, &mut label) },
-        TpdfStatus::Ok
-    );
-    assert_eq!(take(label).as_deref(), Some("p-ii"));
+    assert_eq!(labels_through_the_abi(doc), ["p-i", "p-ii"]);
     let mut xmp = ptr::null_mut();
     assert_eq!(
         unsafe { tpdf_document_xmp_metadata(doc, &mut xmp) },
@@ -361,7 +372,8 @@ fn info_version_labels_and_xmp_read_the_same_through_the_abi() {
     unsafe { tpdf_buffer_free(xmp) };
     unsafe { tpdf_document_free(doc) };
 
-    // And the shifted fixture has none: null on Ok, not a failure.
+    // And the shifted fixture has none: null on Ok, not a failure, and an
+    // empty label handle rather than a refusal.
     let bytes = shifted_document();
     let doc = open(&bytes);
     let mut xmp = ptr::null_mut();
@@ -370,7 +382,66 @@ fn info_version_labels_and_xmp_read_the_same_through_the_abi() {
         TpdfStatus::Ok
     );
     assert!(xmp.is_null());
+    assert!(labels_through_the_abi(doc).is_empty());
     unsafe { tpdf_document_free(doc) };
+}
+
+/// The labels are read once, when the handle is built, and every indexed read
+/// after that is a lookup in the handle's own copy: the document is freed
+/// before the first label is asked for, so a read that went back to it — the
+/// per-index walk this handle replaced, which built every label to answer
+/// one — could not answer at all.
+#[test]
+fn the_page_label_handle_is_one_walk_and_outlives_its_document() {
+    let mut builder = DocumentBuilder::new();
+    for _ in 0..300 {
+        let page = builder.begin_page(100.0, 100.0);
+        builder.push_page(page);
+    }
+    let document = Document::open(builder.finish()).expect("the built document opens");
+    let mut editor = document.editor();
+    editor
+        .set_page_labels(&[
+            PageLabelRange {
+                first_page: 0,
+                style: LabelStyle::RomanLower,
+                prefix: None,
+                start: 1,
+            },
+            PageLabelRange {
+                first_page: 4,
+                style: LabelStyle::Decimal,
+                prefix: Some("A-".to_string()),
+                start: 1,
+            },
+        ])
+        .expect("the labels are written");
+    let bytes = editor.save(&tinker_pdf::WriteOptions::default());
+    let facade = Document::open(bytes.clone()).expect("the labelled document opens");
+
+    let doc = open(&bytes);
+    let mut labels = ptr::null_mut();
+    assert_eq!(
+        unsafe { tpdf_document_page_labels(doc, &mut labels) },
+        TpdfStatus::Ok
+    );
+    unsafe { tpdf_document_free(doc) };
+
+    assert_eq!(unsafe { tpdf_page_labels_count(labels) }, 300);
+    let read: Vec<String> = (0..300)
+        .map(|index| {
+            let mut out = ptr::null_mut();
+            assert_eq!(
+                unsafe { tpdf_page_label_text(labels, index, &mut out) },
+                TpdfStatus::Ok
+            );
+            take(out).expect("a label")
+        })
+        .collect();
+    unsafe { tpdf_page_labels_free(labels) };
+    assert_eq!(read, facade.page_labels());
+    assert_eq!(read[..5], ["i", "ii", "iii", "iv", "A-1"]);
+    assert_eq!(read[299], "A-296");
 }
 
 #[test]
@@ -689,7 +760,12 @@ fn null_handles_across_the_read_surface_are_refused() {
             TpdfStatus::BadArgument
         );
         assert_eq!(
-            tpdf_document_page_label(null_doc, 0, &mut text),
+            tpdf_document_page_labels(null_doc, &mut ptr::null_mut()),
+            TpdfStatus::BadArgument
+        );
+        assert_eq!(tpdf_page_labels_count(ptr::null()), 0);
+        assert_eq!(
+            tpdf_page_label_text(ptr::null(), 0, &mut text),
             TpdfStatus::BadArgument
         );
         assert_eq!(
@@ -809,6 +885,7 @@ fn null_handles_across_the_read_surface_are_refused() {
             TpdfStatus::BadArgument
         );
 
+        tpdf_page_labels_free(ptr::null_mut());
         tpdf_outline_free(ptr::null_mut());
         tpdf_links_free(ptr::null_mut());
         tpdf_attachments_free(ptr::null_mut());
@@ -832,6 +909,17 @@ fn null_handles_across_the_read_surface_are_refused() {
             tpdf_document_xmp_metadata(doc, ptr::null_mut()),
             TpdfStatus::BadArgument
         );
+        assert_eq!(
+            tpdf_document_page_labels(doc, ptr::null_mut()),
+            TpdfStatus::BadArgument
+        );
+        let mut labels = ptr::null_mut();
+        assert_eq!(tpdf_document_page_labels(doc, &mut labels), TpdfStatus::Ok);
+        assert_eq!(
+            tpdf_page_label_text(labels, 0, ptr::null_mut()),
+            TpdfStatus::BadArgument
+        );
+        tpdf_page_labels_free(labels);
         let mut links = ptr::null_mut();
         assert_eq!(tpdf_page_links(doc, 0, &mut links), TpdfStatus::Ok);
         assert_eq!(

@@ -133,14 +133,25 @@ four `#[repr(C)]` enums, and `NotChecked` is not `Differs`.
 `TpdfInfoKey` for the eight `/Info` text entries, `tpdf_document_trapped`
 answers a `TpdfTrapped` whose `Absent` is the key missing and whose `Unknown`
 is the document saying `/Unknown` — the facade's `Option<Trapped>` carries
-both and a three-arm enum would merge them — and `_pdf_version`,
-`_page_label` and `_xmp_metadata` (a `TpdfBuffer`) follow. `_page_label`
-takes one index and is **not** a 1:1 projection: the facade answers
-`page_labels()`, every label at once, and each call builds all of them to
-hand back one, so reading a document's labels page by page — as the Go,
-Ruby, Java and .NET read surfaces do — costs the page count squared. A list
-handle on the outline's pattern is owed in its place (review of lane 7C);
-it is in the ROADMAP's Bindings row. The outline, a
+both and a three-arm enum would merge them — and `_pdf_version` and
+`_xmp_metadata` (a `TpdfBuffer`) follow. **Page labels are a list handle**,
+`tpdf_document_page_labels` → `TpdfPageLabels` with
+`tpdf_page_labels_count`, `tpdf_page_label_text` and `tpdf_page_labels_free`,
+because the facade answers `page_labels()` — every label at once, the number
+tree walked and each range numbered for the whole document — and the
+per-index `tpdf_document_page_label` it replaced (October 2026, deferred
+from the review of lane 7C) built all of them to hand back one, so the Go,
+Ruby, Java and .NET read surfaces, which read labels page by page, cost the
+page count squared. Now one walk builds the handle and every indexed read is
+a lookup; a document with no labels is an empty handle rather than a null
+per page, and an index past the end is `BadArgument` like every other list.
+`the_page_label_handle_is_one_walk_and_outlives_its_document` frees the
+document before reading the first of 300 labels, which a read that went
+back to the document could not answer. Go's `PageLabels()`, Ruby's
+`page_labels`, Java's `pageLabels()` and .NET's `ReadPageLabels()` (a
+`PageLabels` with `Count` and `Label(index)`) each make the one walk;
+Python's `page_labels()` and JavaScript's `pageLabels()` call the facade
+directly and always did. The outline, a
 page's links, the attachments and the warnings cross as owned handles on the
 `TpdfSignatures` pattern — `TpdfOutline`, `TpdfLinks`, `TpdfAttachments`,
 `TpdfWarnings`, each with `_count`, index accessors and `_free` — so each
@@ -1123,7 +1134,13 @@ packaged.
   fires **1** test (the outline equality); the first warning dropped fires
   **1** (the warnings equality); a Python warning offset off by one, and the
   JavaScript link rectangle's first two numbers swapped, each fail
-  `bindings-parity` on their surface's `read-surface` hash.
+  `bindings-parity` on their surface's `read-surface` hash. The page-label
+  handle, October 2026: its count answered one short fires **2** tests (the
+  equality and the 300-page handle) and fails `read-surface` on Go, Ruby and
+  Java; a document with no labels answered with an empty label per page
+  fires **1** (the shifted fixture's empty handle) and fails the same three
+  hashes. The hashes themselves did not move: the scripts read the same
+  labels through one walk and print the same text.
 - **The document operations are pinned by byte equality with the facade**
   (`src/docops/tests.rs`): every operation made through the C ABI and the
   same operations against `DocumentEditor` save the same bytes, which the

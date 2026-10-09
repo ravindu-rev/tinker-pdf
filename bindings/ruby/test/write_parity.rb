@@ -266,10 +266,7 @@ def read_dump(name, document, out)
   out << "pages #{document.page_count}\n"
   INFO.each_with_index { |key, i| out << "info #{key} #{text_token(document.info(i))}\n" }
   out << "trapped #{TRAPPED[document.trapped]}\n"
-  document.page_count.times do |index|
-    label = document.page_label(index)
-    break if label.nil?
-
+  document.page_labels.each_with_index do |label, index|
     out << "label #{index} #{text_token(label)}\n"
   end
   document.page_count.times do |index|

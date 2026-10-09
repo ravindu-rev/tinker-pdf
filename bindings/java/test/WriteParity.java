@@ -346,12 +346,9 @@ public final class WriteParity {
                     .append('\n');
         }
         out.append("trapped ").append(TRAPPED[document.trapped().ordinal()]).append('\n');
-        for (int index = 0; index < document.pageCount(); index++) {
-            String label = document.pageLabel(index);
-            if (label == null) {
-                break;
-            }
-            out.append("label ").append(index).append(' ').append(textToken(label)).append('\n');
+        List<String> labels = document.pageLabels();
+        for (int index = 0; index < labels.size(); index++) {
+            out.append("label ").append(index).append(' ').append(textToken(labels.get(index))).append('\n');
         }
         for (int index = 0; index < document.pageCount(); index++) {
             for (TinkerPdf.PageBoundary boundary : TinkerPdf.PageBoundary.values()) {

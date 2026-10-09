@@ -321,14 +321,12 @@ static void ReadDump(string name, Document document, List<string> lines)
         _ => "absent",
     };
     lines.Add("trapped " + trapped);
-    for (uint index = 0; index < document.PageCount; index++)
+    using (var labels = document.ReadPageLabels())
     {
-        var label = document.PageLabel(index);
-        if (label is null)
+        for (uint index = 0; index < labels.Count; index++)
         {
-            break;
+            lines.Add("label " + index + " " + TextToken(labels.Label(index)));
         }
-        lines.Add("label " + index + " " + TextToken(label));
     }
     var boundaries = new (PageBoundary Boundary, string Name)[]
     {

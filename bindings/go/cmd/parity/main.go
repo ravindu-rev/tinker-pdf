@@ -415,13 +415,10 @@ func readDump(name string, document *tp.Document, out *strings.Builder) {
 	line("trapped %s", map[tp.Trapped]string{
 		tp.TrappedAbsent: "absent", tp.TrappedTrue: "true", tp.TrappedFalse: "false", tp.TrappedUnknown: "unknown",
 	}[trapped])
-	for index := uint32(0); index < document.PageCount(); index++ {
-		label, err := document.PageLabel(index)
-		must(err)
-		if label == nil {
-			break
-		}
-		line("label %d %s", index, textToken(label))
+	labels, err := document.PageLabels()
+	must(err)
+	for index := range labels {
+		line("label %d %s", index, textToken(&labels[index]))
 	}
 	for index := uint32(0); index < document.PageCount(); index++ {
 		for _, box := range []struct {

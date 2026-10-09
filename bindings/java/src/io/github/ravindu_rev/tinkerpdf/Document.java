@@ -188,9 +188,19 @@ public final class Document implements AutoCloseable {
         return text(Native.tpdf_document_pdf_version, pointer);
     }
 
-    /** A page's label; null when the document has no labels. */
-    public String pageLabel(int index) {
-        return text(Native.tpdf_document_page_label, pointer, index);
+    /** Every page's label, in page order, read with one walk; empty when the document has none. */
+    public List<String> pageLabels() {
+        MemorySegment labels = handle(Native.tpdf_document_page_labels, pointer);
+        try {
+            int count = Native.callInt(Native.tpdf_page_labels_count, labels);
+            List<String> found = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) {
+                found.add(text(Native.tpdf_page_label_text, labels, i));
+            }
+            return found;
+        } finally {
+            Native.call(Native.tpdf_page_labels_free, labels);
+        }
     }
 
     /** The XMP packet's bytes; null when there is none. */

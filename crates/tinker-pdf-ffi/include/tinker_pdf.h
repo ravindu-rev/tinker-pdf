@@ -701,6 +701,18 @@ typedef struct TpdfOutlineEntry TpdfOutlineEntry;
 // abandoning a handle safe.
 typedef struct TpdfPageBuilder TpdfPageBuilder;
 
+// A document's page labels (12.4.2), one per page in page order. Opaque to
+// callers.
+//
+// A list handle on [`TpdfOutline`]'s pattern rather than one call per page,
+// because `Document::page_labels` builds every label to answer any one of
+// them: the number tree is walked and each range numbered for the whole
+// document. The per-index call this replaced built all of them for every
+// page asked, so reading a document's labels page by page cost the page
+// count squared. Here the one walk is made when the handle is built, and
+// every indexed read after it is a lookup in the engine's own copy.
+typedef struct TpdfPageLabels TpdfPageLabels;
+
 // What one recalculation pass did.
 //
 // A handle rather than four out-parameters, because `Recalculation` has four
@@ -3272,19 +3284,45 @@ enum TpdfStatus tpdf_document_trapped(const struct TpdfDocument *doc, enum TpdfT
 // `doc` must be a live handle and `out` a valid pointer.
 enum TpdfStatus tpdf_document_pdf_version(const struct TpdfDocument *doc, char **out);
 
-// One page's label (12.4.2).
+// Reads the page labels with one `Document::page_labels` walk: one label
+// per page, or an empty handle when the document defines none — the
+// facade's empty list, which is not an error.
 //
-// Null on `Ok` when the document defines no labels at all, which is
-// `Document::page_labels` answering with an empty list; a page past the end
-// is [`TpdfStatus::NoSuchPage`]. The caller frees a non-null result with
-// [`crate::tpdf_string_free`].
+// The caller frees the handle with [`tpdf_page_labels_free`]. It is the
+// engine's own copy, so it outlives the document it came from.
 //
 // # Safety
 //
 // `doc` must be a live handle and `out` a valid pointer.
-enum TpdfStatus tpdf_document_page_label(const struct TpdfDocument *doc,
-                                         uint32_t index,
-                                         char **out);
+enum TpdfStatus tpdf_document_page_labels(const struct TpdfDocument *doc,
+                                          struct TpdfPageLabels **out);
+
+// How many labels the handle holds — the page count, or zero when the
+// document defines none — or zero for null.
+//
+// # Safety
+//
+// `labels` must be a live handle or null.
+uint32_t tpdf_page_labels_count(const struct TpdfPageLabels *labels);
+
+// The label of the page at zero-based `index`. An index past the end is
+// [`TpdfStatus::BadArgument`], as on every list handle. The caller frees the
+// string with [`crate::tpdf_string_free`].
+//
+// # Safety
+//
+// `labels` must be a live handle and `out` a valid pointer.
+enum TpdfStatus tpdf_page_label_text(const struct TpdfPageLabels *labels,
+                                     uint32_t index,
+                                     char **out);
+
+// Frees a page-label handle. Null is accepted and does nothing.
+//
+// # Safety
+//
+// `labels` must have come from [`tpdf_document_page_labels`] and must not be
+// used afterwards.
+void tpdf_page_labels_free(struct TpdfPageLabels *labels);
 
 // The document's XMP packet (14.3.2), unparsed.
 //

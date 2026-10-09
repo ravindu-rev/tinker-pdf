@@ -156,7 +156,10 @@ module TinkerPdf
     extern 'int tpdf_document_info(const void *doc, int key, char **out)'
     extern 'int tpdf_document_trapped(const void *doc, int *out)'
     extern 'int tpdf_document_pdf_version(const void *doc, char **out)'
-    extern 'int tpdf_document_page_label(const void *doc, uint32_t index, char **out)'
+    extern 'int tpdf_document_page_labels(const void *doc, void **out)'
+    extern 'uint32_t tpdf_page_labels_count(const void *labels)'
+    extern 'int tpdf_page_label_text(const void *labels, uint32_t index, char **out)'
+    extern 'void tpdf_page_labels_free(void *labels)'
     extern 'int tpdf_document_xmp_metadata(const void *doc, void **out)'
     extern 'int tpdf_document_outline(const void *doc, void **out)'
     extern 'uint32_t tpdf_outline_count(const void *outline)'
@@ -789,8 +792,15 @@ module TinkerPdf
       Raw.text { |out| Native.tpdf_document_pdf_version(@pointer, out) }
     end
 
-    def page_label(index)
-      Raw.text { |out| Native.tpdf_document_page_label(@pointer, index, out) }
+    # Every page's label, in page order, read with one walk; [] when the
+    # document has none.
+    def page_labels
+      handle = Raw.handle { |out| Native.tpdf_document_page_labels(@pointer, out) }
+      (0...Native.tpdf_page_labels_count(handle)).map do |i|
+        Raw.text { |out| Native.tpdf_page_label_text(handle, i, out) }
+      end
+    ensure
+      Native.tpdf_page_labels_free(handle) if handle
     end
 
     def xmp_metadata

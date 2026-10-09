@@ -424,32 +424,89 @@ pub unsafe extern "C" fn tpdf_document_pdf_version(
     unsafe { hand_over_string(out, Some(&doc.pdf_version())) }
 }
 
-/// One page's label (12.4.2).
+/// A document's page labels (12.4.2), one per page in page order. Opaque to
+/// callers.
 ///
-/// Null on `Ok` when the document defines no labels at all, which is
-/// `Document::page_labels` answering with an empty list; a page past the end
-/// is [`TpdfStatus::NoSuchPage`]. The caller frees a non-null result with
-/// [`crate::tpdf_string_free`].
+/// A list handle on [`TpdfOutline`]'s pattern rather than one call per page,
+/// because `Document::page_labels` builds every label to answer any one of
+/// them: the number tree is walked and each range numbered for the whole
+/// document. The per-index call this replaced built all of them for every
+/// page asked, so reading a document's labels page by page cost the page
+/// count squared. Here the one walk is made when the handle is built, and
+/// every indexed read after it is a lookup in the engine's own copy.
+pub struct TpdfPageLabels {
+    inner: Vec<String>,
+}
+
+/// Reads the page labels with one `Document::page_labels` walk: one label
+/// per page, or an empty handle when the document defines none — the
+/// facade's empty list, which is not an error.
+///
+/// The caller frees the handle with [`tpdf_page_labels_free`]. It is the
+/// engine's own copy, so it outlives the document it came from.
 ///
 /// # Safety
 ///
 /// `doc` must be a live handle and `out` a valid pointer.
 #[no_mangle]
-pub unsafe extern "C" fn tpdf_document_page_label(
+pub unsafe extern "C" fn tpdf_document_page_labels(
     doc: *const TpdfDocument,
-    index: u32,
-    out: *mut *mut c_char,
+    out: *mut *mut TpdfPageLabels,
 ) -> TpdfStatus {
     let doc = match unsafe { document(doc) } {
         Ok(doc) => doc,
         Err(status) => return status,
     };
-    if index >= doc.page_count() {
-        set_error(&format!("no such page: index {index}"));
-        return TpdfStatus::NoSuchPage;
+    if out.is_null() {
+        set_error("null pointer");
+        return TpdfStatus::BadArgument;
     }
-    let labels = doc.page_labels();
-    unsafe { hand_over_string(out, labels.get(index as usize).map(String::as_str)) }
+    let inner = doc.page_labels();
+    unsafe { *out = Box::into_raw(Box::new(TpdfPageLabels { inner })) };
+    TpdfStatus::Ok
+}
+
+/// How many labels the handle holds — the page count, or zero when the
+/// document defines none — or zero for null.
+///
+/// # Safety
+///
+/// `labels` must be a live handle or null.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_page_labels_count(labels: *const TpdfPageLabels) -> u32 {
+    unsafe { labels.as_ref() }.map_or(0, |l| count(l.inner.len()))
+}
+
+/// The label of the page at zero-based `index`. An index past the end is
+/// [`TpdfStatus::BadArgument`], as on every list handle. The caller frees the
+/// string with [`crate::tpdf_string_free`].
+///
+/// # Safety
+///
+/// `labels` must be a live handle and `out` a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_page_label_text(
+    labels: *const TpdfPageLabels,
+    index: u32,
+    out: *mut *mut c_char,
+) -> TpdfStatus {
+    match unsafe { entry(labels, |l: &TpdfPageLabels| &l.inner, index, "page label") } {
+        Ok(label) => unsafe { hand_over_string(out, Some(label)) },
+        Err(status) => status,
+    }
+}
+
+/// Frees a page-label handle. Null is accepted and does nothing.
+///
+/// # Safety
+///
+/// `labels` must have come from [`tpdf_document_page_labels`] and must not be
+/// used afterwards.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_page_labels_free(labels: *mut TpdfPageLabels) {
+    if !labels.is_null() {
+        drop(unsafe { Box::from_raw(labels) });
+    }
 }
 
 /// The document's XMP packet (14.3.2), unparsed.
