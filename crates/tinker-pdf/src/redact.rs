@@ -107,16 +107,30 @@
 //! October 2026 the bound was a bare number in [`rewrite`] and what lay past
 //! it was left with nothing in the report.
 //!
-//! And two kinds of content a page draws that this module does not read at
+//! And one kind of content a page draws that this module does not read at
 //! all: a **tiling pattern's cell** (8.7.3.1), painted at every tile of
-//! whatever it fills, and a **soft mask's group** (11.6.5.2), drawn as the
-//! alpha of what lies under it. Cutting a cell is a form drawn at as many
-//! placements as its fill has tiles, which is a design rather than a fix;
-//! so a cell or a group that shows text or draws an image is named instead,
-//! by the resource name the `scn` or the `gs` gave
-//! ([`RedactionWarning::PatternOrMask`], [`unread`]), and one that only
-//! paints paths is not, because nothing in it is anything this module
-//! removes. Until October 2026 neither was read or named.
+//! whatever it fills. Cutting a cell is a form drawn at as many placements
+//! as its fill has tiles, which is a design rather than a fix; so a cell
+//! that shows text or draws an image is named instead, by the resource name
+//! the `scn` gave ([`RedactionWarning::PatternOrMask`], [`unread`]), and one
+//! that only paints paths is not, because nothing in it is anything this
+//! module removes.
+//!
+//! A **soft mask's group** (11.6.5.2) was named the same way until October
+//! 2026 and is measured now. The interpreter draws it when the `gs` that
+//! sets its graphics state runs, under the transform in force there with the
+//! group's `/Matrix` after it — one placement of a form — so [`rewrite`]
+//! records each `gs` as it records a `Do` (once per name and transform, under
+//! the same bound), and [`Walk`] enters the group as a form placement and
+//! cuts it. Never through a copy: pointing one `gs` at a copied group means
+//! a copied graphics state under a fresh name as well, and a stream sets one
+//! state nearly always once, so a group is cut in its own stream, the old way
+//! ([`union`]), and [`RedactionWarning::RepeatedForm`] names it when that is
+//! wider than asked — a second placement, or another page that sets the same
+//! state, which the read of what else draws a form now follows through `gs`
+//! ([`Elsewhere`]). A glyph procedure that sets one is measured through it
+//! ([`draws_under`]). Its text is the mask's shape, not ink, and it is in the
+//! file all the same.
 //!
 //! # Vertical writing
 //!
@@ -454,6 +468,22 @@
 //! | a form cut in place never asking what else draws it, which is how it used to be | **1** |
 //! | a form met shallower not read again, which is how it used to be | **1** |
 //! | a form cut in place named whatever draws it | **1** |
+//!
+//! And October 2026's two clauses of the ROADMAP's Editing row, over
+//! `cargo test --no-fail-fast -p tinker-pdf --lib redact`. Fonts read
+//! through the editor (clause (c)): fonts read from the file, which is how it
+//! used to be, fires 2; a font dictionary read through the editor and what it
+//! reaches through the file fires **1**. A soft mask's group measured (half
+//! of clause (b)):
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | a `gs` never recorded, which is how it used to be | 4 |
+//! | a mask's group given copies like any form | **1** |
+//! | the read of what else draws a form not following `gs` | **1** |
+//! | the group drawn at the identity rather than at its `gs` | **1** |
+//! | a procedure's mask not followed | **1** |
+//! | every `gs` recorded however often it repeats | **1** |
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
@@ -589,7 +619,9 @@ pub enum RedactionWarning {
     /// One content stream invoked more XObjects than this module follows in
     /// one stream (4 096, a private bound), and the `Do`s past it were **not
     /// followed**: an image they draw was tested against no rectangle, and a
-    /// form was not entered.
+    /// form was not entered. A `gs` that may set a soft mask counts toward
+    /// the bound as a `Do` does — once per name and transform — and one past
+    /// it is counted here, its group not measured.
     ///
     /// The cap bounds what one stream's walk holds (ruling 1). Until October
     /// 2026 it was a bare `4096` in the rewrite, and what lay past it was left
@@ -602,18 +634,19 @@ pub enum RedactionWarning {
         /// placements, since each is a pass over it.
         skipped: usize,
     },
-    /// A stream painted with a **tiling pattern** (8.7.3.1) or set a **soft
-    /// mask** (11.6.5.2) whose content shows text or draws an image, and
-    /// this module reads neither: what the cell or the mask's group draws
-    /// was tested against no rectangle.
+    /// A stream painted with a **tiling pattern** (8.7.3.1) whose cell shows
+    /// text or draws an image, and this module does not read the cell: what
+    /// it draws was tested against no rectangle.
     ///
     /// A cell is painted at every tile of whatever it fills, so cutting one
-    /// is a form drawn at as many placements as the fill has tiles, and a
-    /// mask's group is drawn as the alpha of what lies under it — glyph
-    /// shapes and all. Neither is measured; both are named, by the resource
-    /// name the `scn` or the `gs` gave. A cell or a group that only paints
-    /// paths is not named, because nothing it draws is anything this module
-    /// removes. Until October 2026 neither was named.
+    /// is a form drawn at as many placements as the fill has tiles. It is
+    /// named, by the resource name the `scn` gave; a cell that only paints
+    /// paths is not, because nothing it draws is anything this module
+    /// removes. Until October 2026 it was not named, and a **soft mask's**
+    /// group was named here too; the group is measured now, as a form
+    /// placement at its `gs`, and this is raised for patterns alone. The
+    /// variant keeps its name, since a caller matching on it should not have
+    /// to change for a class that got narrower.
     PatternOrMask {
         /// The `/Pattern` or `/ExtGState` resource name.
         resource: Vec<u8>,
@@ -1486,15 +1519,15 @@ fn carries(content: &[u8]) -> bool {
     false
 }
 
-/// Names every tiling pattern and soft mask one stream paints with whose
-/// content [`carries`] text or an image ([`RedactionWarning::PatternOrMask`]).
+/// Names every tiling pattern one stream paints with whose cell [`carries`]
+/// text or an image ([`RedactionWarning::PatternOrMask`]).
 ///
 /// A pattern is selected by the name `scn` or `SCN` ends with (8.6.6.2), its
-/// cell the pattern's own stream (8.7.3.1); a soft mask is the `/SMask` of
-/// the `/ExtGState` a `gs` names,
-/// its group the form in `/G` (11.6.5.2). Both resolve in `scope`, the
+/// cell the pattern's own stream (8.7.3.1), resolved in `scope`, the
 /// resources of the stream that painted, through the editor. Only when there
-/// is a rectangle, as every warning here is; each name is resolved once.
+/// is a rectangle, as every warning here is; each name is resolved once. A
+/// soft mask's group was named here too until October 2026, and is measured
+/// now, as a placement of a form ([`Walk::one`]).
 fn unread(
     editor: &DocumentEditor,
     scope: &Dict,
@@ -1505,7 +1538,7 @@ fn unread(
     if areas.is_empty() {
         return;
     }
-    let mut asked: HashSet<(bool, Vec<u8>)> = HashSet::new();
+    let mut asked: HashSet<Vec<u8>> = HashSet::new();
     let mut tokens = Tokenizer::new(content);
     let mut operands: Vec<Token> = Vec::new();
     while let Some(token) = tokens.next_token() {
@@ -1519,28 +1552,23 @@ fn unread(
                 let consumed = tinker_pdf_content::interpret::skip_inline_image(tokens.rest());
                 let at = tokens.position();
                 tokens.seek(at.saturating_add(consumed));
-                None
+                false
             }
-            b"scn" | b"SCN" => Some(true),
-            b"gs" => Some(false),
-            _ => None,
+            b"scn" | b"SCN" => true,
+            _ => false,
         };
-        if let (Some(pattern), Some(Token::Name(name))) = (pattern, operands.last()) {
+        if let (true, Some(Token::Name(name))) = (pattern, operands.last()) {
             // Asked once each, while there are few enough names to remember
             // (ruling 1); past that a new name is asked every time, which
             // costs a lookup and not memory, and `note` merges what it finds.
-            let key = (pattern, name.clone());
+            let key = name.clone();
             let fresh = if asked.len() < MAX_XOBJECT_USES {
                 asked.insert(key)
             } else {
                 !asked.contains(&key)
             };
             if fresh {
-                let drawn = if pattern {
-                    tiling_cell(editor, scope, name)
-                } else {
-                    mask_group(editor, scope, name)
-                };
+                let drawn = tiling_cell(editor, scope, name);
                 if drawn.is_some_and(|content| carries(&content)) {
                     note(
                         warnings,
@@ -1564,15 +1592,22 @@ fn tiling_cell(editor: &DocumentEditor, scope: &Dict, name: &[u8]) -> Option<Vec
     editor.stream_bytes(reference)
 }
 
-/// The group of the soft mask the graphics state `name` sets in `scope`,
-/// decoded — `None` for `/SMask /None` and for a state that sets no mask.
-fn mask_group(editor: &DocumentEditor, scope: &Dict, name: &[u8]) -> Option<Vec<u8>> {
+/// The group of the soft mask the graphics state `name` sets in `scope`
+/// (11.6.5.2's `/G`, a form XObject), and its stream dictionary — `None` for
+/// `/SMask /None` and for a state that sets no mask. Through the editor, as
+/// [`resolve_xobject`] reads a `Do`'s.
+fn resolve_mask_group(
+    editor: &DocumentEditor,
+    scope: &Dict,
+    name: &[u8],
+) -> Option<(ObjRef, Dict)> {
     let table = Resolve::resolve_key(editor, scope, editor.intern(b"ExtGState"));
     let state = table.as_dict()?.get(editor.intern(name))?.clone();
     let state = Resolve::resolve(editor, &state);
     let mask = Resolve::resolve_key(editor, state.as_dict()?, editor.intern(b"SMask"));
     let group = mask.as_dict()?.get_ref(editor.intern(b"G"))?;
-    editor.stream_bytes(group)
+    let object = editor.get(group)?;
+    Some((group, object.as_dict()?.clone()))
 }
 
 /// How deep form XObjects may nest before recursion is refused (8.10).
@@ -1648,6 +1683,9 @@ struct FormEntry {
     /// [`MAX_FORM_COPY_BYTES`], so its cuts were let go and it is cut the
     /// old way ([`union`]), from `content`.
     over_budget: bool,
+    /// It is a soft mask's group (11.6.5.2), drawn through a `gs`: cut the
+    /// old way, in its own stream ([`settle`]).
+    masked: bool,
 }
 
 /// One outcome of cutting a form's content.
@@ -1752,6 +1790,27 @@ impl Walk {
         report: &mut RedactionReport,
         depth: u32,
     ) -> Option<usize> {
+        if used.mask {
+            // 11.6.5.2: the group is a form drawn at this placement. It is
+            // measured as one, and cut in its own stream ([`settle`] says why
+            // never through a copy).
+            let (reference, dict) = resolve_mask_group(editor, resources, &used.name)?;
+            let placement = Placing {
+                reference,
+                dict,
+                used,
+                scope: resources,
+            };
+            let node = self.form(editor, placement, areas, report, depth);
+            if let Some(entry) = self
+                .by_number
+                .get(&reference.num)
+                .and_then(|&at| self.forms.get_mut(at))
+            {
+                entry.masked = true;
+            }
+            return node;
+        }
         let (reference, dict) = resolve_xobject(editor, resources, &used.name)?;
         let subtype = Resolve::resolve_key(editor, &dict, editor.intern(b"Subtype"))
             .as_name()
@@ -1817,6 +1876,7 @@ impl Walk {
                     nodes: Vec::new(),
                     refused: false,
                     over_budget: false,
+                    masked: false,
                 });
                 self.by_number.insert(reference.num, index);
                 index
@@ -1972,7 +2032,10 @@ type Outcome = (usize, Vec<(usize, ObjRef)>);
 /// form this cannot order that way — one that draws itself, directly or
 /// through another, or draws one that does — or one with a placement past
 /// [`MAX_PLACEMENTS`], or one whose cuts went over [`MAX_FORM_COPY_BYTES`],
-/// is cut the old way instead, and so is everything it
+/// or a soft mask's group — which a `gs` draws through a graphics state, so
+/// that a copy would need a copy of the state under a fresh name and the
+/// `gs` pointed at it, and the one state a stream sets is nearly always set
+/// once — is cut the old way instead, and so is everything it
 /// draws: every placement's cut in the one stream, and
 /// [`RedactionWarning::RepeatedForm`] naming it when that was wider than a
 /// placement asked for or when a placement went unmeasured ([`union`]). A
@@ -2005,7 +2068,7 @@ fn settle(
     let mut old_way: Vec<bool> = walk
         .forms
         .iter()
-        .map(|f| f.refused || f.over_budget)
+        .map(|f| f.refused || f.over_budget || f.masked)
         .collect();
     close_downward(&mut old_way, &kids);
 
@@ -2241,8 +2304,9 @@ impl Elsewhere {
 /// where 9.6.5 puts it: a drawer either reader would find counts. Every
 /// procedure of a face counts, not only those of the glyphs shown, and a face
 /// is read in the first scope that selects it; both err toward *drawn*,
-/// which costs a copy rather than a cut. Not read, as the walk does not read
-/// them: a tiling pattern's cell and a soft mask's group.
+/// which costs a copy rather than a cut. A soft mask's group is drawn
+/// through the `gs` that sets its state, and read there. Not read, as the
+/// walk does not read one: a tiling pattern's cell.
 ///
 /// One read of each stream for each of the two roles, so the work is the
 /// document's size; [`MAX_FORM_DEPTH`] bounds the nesting, as it bounds the
@@ -2318,6 +2382,19 @@ impl Scan<'_> {
                     if let Some(Token::Name(name)) = operands.last() {
                         let name = name.clone();
                         self.xobject(scope, &name, counting, depth);
+                    }
+                }
+                // 11.6.5.2: a state that sets a soft mask draws its group.
+                b"gs" => {
+                    if let Some(Token::Name(name)) = operands.last() {
+                        if let Some((reference, dict)) =
+                            resolve_mask_group(self.editor, scope, name)
+                        {
+                            if counting {
+                                self.drawn.insert(reference.num);
+                            }
+                            self.form(reference, &dict, scope, counting, depth + 1);
+                        }
                     }
                 }
                 b"Tf" => {
@@ -2723,10 +2800,13 @@ fn draws_under(
     }
 
     for used in &uses {
-        let resolved = measure
-            .scopes
-            .iter()
-            .find_map(|scope| resolve_xobject(measure.editor, scope, &used.name));
+        let resolved = measure.scopes.iter().find_map(|scope| {
+            if used.mask {
+                resolve_mask_group(measure.editor, scope, &used.name)
+            } else {
+                resolve_xobject(measure.editor, scope, &used.name)
+            }
+        });
         let Some((reference, dict)) = resolved else {
             continue;
         };
@@ -3051,6 +3131,7 @@ impl Walk {
             name,
             ctm: appearance.fit,
             at: 0..0,
+            mask: false,
         };
         let placing = Placing {
             reference: appearance.stream,
@@ -3317,14 +3398,21 @@ fn is_blank_inline_image(blank: &[u8], span: &[u8]) -> bool {
     blank.trim_ascii_start() == span.trim_ascii_start()
 }
 
-/// One `Do` invocation, and the transform in force when it happened.
+/// One `Do` invocation, or one `gs` that may set a soft mask, and the
+/// transform in force when it happened.
 struct XObjectUse {
+    /// The `/XObject` name a `Do` gave, or the `/ExtGState` name a `gs` gave.
     name: Vec<u8>,
-    /// The transform mapping the XObject's space to the page's.
+    /// The transform mapping the XObject's space to the page's — for a `gs`,
+    /// the one its mask's group is drawn under, before the group's own
+    /// `/Matrix` (11.6.5.2: the group is drawn *now*, at the `gs`).
     ctm: Matrix,
-    /// Where the rewritten stream wrote the `Do`'s operand, `/` included, so
-    /// that it can be pointed at a copy of the form afterwards.
+    /// Where the rewritten stream wrote the operand, `/` included, so that a
+    /// `Do` can be pointed at a copy of the form afterwards.
     at: std::ops::Range<usize>,
+    /// A `gs` rather than a `Do`: what it draws, if anything, is the group of
+    /// the `/SMask` its graphics state sets ([`resolve_mask_group`]).
+    mask: bool,
 }
 
 /// The text state needed to place a glyph: everything in 9.4.4's displacement
@@ -3629,6 +3717,8 @@ fn rewrite(
     let mut tokens = Tokenizer::new(content);
     let mut operands: Vec<Token> = Vec::new();
     let mut uses: Vec<XObjectUse> = Vec::new();
+    // The (name, transform) of every `gs` recorded, so one is recorded once.
+    let mut states: HashSet<(Vec<u8>, PlacementKey)> = HashSet::new();
     let mut pen = Pen {
         ctm: initial,
         ..Pen::default()
@@ -3679,6 +3769,7 @@ fn rewrite(
                     name: Vec::new(),
                     ctm: pen.ctm,
                     at: 0..0,
+                    mask: false,
                 };
                 if covers_unit_square(&placed, areas) {
                     let blank = blank_inline_image(span);
@@ -3707,10 +3798,35 @@ fn rewrite(
                             name: name.clone(),
                             ctm: pen.ctm,
                             at: 0..0,
+                            mask: false,
                         });
                         recorded = true;
                     } else {
                         unfollowed = unfollowed.saturating_add(1);
+                    }
+                }
+            }
+            b"gs" => {
+                // 11.6.5.2: a state that sets a soft mask draws the mask's
+                // group now, under the transform in force here — a placement
+                // of a form like a `Do`'s, which the walk measures. Recorded
+                // once per name and transform, since a stream that sets one
+                // state at every text object draws one mask, and under the
+                // same bound as the `Do`s: a state past it is not followed,
+                // and `TooManyXObjects` counts it with them.
+                if let Some(Token::Name(name)) = operands.last() {
+                    if states.insert((name.clone(), placement_key(pen.ctm))) {
+                        if uses.len() < MAX_XOBJECT_USES {
+                            uses.push(XObjectUse {
+                                name: name.clone(),
+                                ctm: pen.ctm,
+                                at: 0..0,
+                                mask: true,
+                            });
+                            recorded = true;
+                        } else {
+                            unfollowed = unfollowed.saturating_add(1);
+                        }
                     }
                 }
             }
@@ -3867,8 +3983,8 @@ fn rewrite(
                 last = start..out.len();
                 out.push(b' ');
             }
-            // A `Do` is never rewritten, so its operand is always written
-            // here, and it is the last one.
+            // A `Do` or a `gs` is never rewritten, so its operand is always
+            // written here, and it is the last one.
             if recorded {
                 if let Some(used) = uses.last_mut() {
                     used.at = last;
@@ -10063,12 +10179,91 @@ mod patterns_and_masks {
         );
     }
 
+    fn band(x0: f64, y0: f64, x1: f64, y1: f64) -> Redaction {
+        Redaction {
+            area: Rect { x0, y0, x1, y1 },
+            mark: false,
+        }
+    }
+
+    /// Clause (b) of the ROADMAP's Editing row, its mask half: a soft mask's
+    /// group (11.6.5.2) is a form drawn at the `gs` that sets its state, and
+    /// it is measured there and cut. Until October 2026 it was named
+    /// (`PatternOrMask`) and not read.
     #[test]
-    fn a_soft_mask_whose_group_shows_text_is_named() {
+    fn a_soft_mask_whose_group_shows_text_under_a_rectangle_is_cut() {
+        let (bytes, report) = redact(open(document("/GS0 gs 0 0 200 200 re f")), &[anywhere()]);
+        assert!(report.glyphs > 0, "the group's glyphs went");
+        assert_eq!(report.warnings, Vec::new(), "nothing left unmeasured");
+        // The fixture's other `SECRET` is `/P0`'s cell, which this page does
+        // not paint with.
+        let before = all_streams(&open(document("/GS0 gs 0 0 200 200 re f")));
+        assert_eq!(before.matches("SECRET").count(), 2);
+        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+        assert_eq!(streams.matches("SECRET").count(), 1, "{streams}");
+        assert!(!streams.contains("48 Tf\n10 10 Td\n(SECRET)"), "{streams}");
+    }
+
+    /// The group is drawn under the transform in force at the `gs`, not at
+    /// the identity: half size at (200, 200), `SECRET` stands about
+    /// x = 205 to 290, y = 205 to 225. A band there cuts it; a band where it
+    /// would stand at the identity, and only there, does not.
+    #[test]
+    fn a_soft_mask_group_is_measured_where_its_gs_places_it() {
+        let placed = "q 0.5 0 0 0.5 200 200 cm /GS0 gs Q 0 0 400 400 re f";
+        let (bytes, report) = redact(open(document(placed)), &[band(200.0, 200.0, 400.0, 400.0)]);
+        assert!(report.glyphs > 0);
+        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
         assert_eq!(
-            warnings("/GS0 gs 0 0 200 200 re f", &[anywhere()]),
-            vec![named(b"GS0")]
+            streams.matches("SECRET").count(),
+            1,
+            "only /P0's cell: {streams}"
         );
+
+        let (bytes, report) = redact(open(document(placed)), &[band(0.0, 0.0, 190.0, 190.0)]);
+        assert_eq!(report.glyphs, 0, "the identity's place is not the group's");
+        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+        assert_eq!(streams.matches("SECRET").count(), 2, "{streams}");
+    }
+
+    /// One group two pages draw through one graphics state: it cannot be
+    /// given a copy (the walk cuts a mask's group in its own stream), so the
+    /// cut on page one is a cut on page two, and `RepeatedForm` says so —
+    /// which needs the read of what else draws a form to follow `gs`.
+    #[test]
+    fn a_mask_group_another_page_draws_is_cut_in_place_and_named() {
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 2 /Kids [3 0 R 5 0 R] >>\nendobj\n");
+        for (page, content) in [(3, 4), (5, 7)] {
+            out.push_str(&format!(
+                "{page} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400]\n\
+                 /Resources << /ExtGState << /GS0 << /SMask << /S /Luminosity /G 9 0 R >> >> >> >>\n\
+                 /Contents {content} 0 R >>\nendobj\n"
+            ));
+            out.push_str(&stream_object(content, "/GS0 gs 0 0 400 400 re f"));
+        }
+        out.push_str("6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
+        let body = "BT /F0 48 Tf 10 10 Td (SECRET) Tj ET";
+        out.push_str(&format!(
+            "9 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n\
+             /Group << /S /Transparency /CS /DeviceGray >>\n\
+             /Resources << /Font << /F0 6 0 R >> >> /Length {} >>\n\
+             stream\n{body}\nendstream\nendobj\n",
+            body.len() + 1
+        ));
+        out.push_str("trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n");
+        let (bytes, report) = redact(open(out.into_bytes()), &[anywhere()]);
+        assert!(report.glyphs > 0);
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::RepeatedForm {
+                form: b"GS0".to_vec(),
+                placements: 1,
+            }]
+        );
+        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+        assert!(!streams.contains("SECRET"), "{streams}");
     }
 
     #[test]
@@ -10089,9 +10284,9 @@ mod patterns_and_masks {
     #[test]
     fn what_a_glyph_procedure_paints_with_is_named() {
         // `/T3`'s `A` fills its em with `/P0` and its `B` under `/GS0`:
-        // each measured as a procedure that might draw text, and what it
-        // paints with named. The band is clear of the glyphs' own boxes,
-        // which would otherwise remove them unmeasured.
+        // each measured as a procedure that might draw text, and the
+        // pattern it paints with named. The band is clear of the glyphs' own
+        // boxes, which would otherwise remove them unmeasured.
         let clear = Redaction {
             area: Rect {
                 x0: 200.0,
@@ -10101,10 +10296,45 @@ mod patterns_and_masks {
             },
             mark: false,
         };
+        // `B`'s mask is measured now, as a form its procedure draws, and
+        // its text stands nowhere near the band: nothing is named for it.
         assert_eq!(
             warnings("BT /T3 10 Tf 10 10 Td (AB) Tj ET", &[clear]),
-            vec![named(b"P0"), named(b"GS0")]
+            vec![named(b"P0")]
         );
+    }
+
+    /// A glyph procedure that sets a soft mask draws the mask's group, and a
+    /// use whose group draws text under a rectangle is removed like one
+    /// whose procedure shows the text itself. `B`'s procedure is rewritten
+    /// here — the same length, so the fixture's `/Length` holds — to draw
+    /// the group at a hundred times glyph space: one point to the unit, its
+    /// `SECRET` from about (20, 20) to (210, 55), well clear of the glyph's
+    /// own box at (10, 10) to (20, 20).
+    #[test]
+    fn a_glyph_whose_procedure_masks_text_under_a_rectangle_is_removed() {
+        let original = b"1000 0 d0 /GS0 gs 0 0 1000 1000 re f";
+        let scaled = b"1000 0 d0 100 0 0 100 0 0 cm /GS0 gs";
+        assert_eq!(original.len(), scaled.len());
+        let mut bytes = document("BT /T3 10 Tf 10 10 Td (B) Tj ET");
+        let at = bytes
+            .windows(original.len())
+            .position(|w| w == original)
+            .expect("the procedure");
+        bytes[at..at + scaled.len()].copy_from_slice(scaled);
+        let (_, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+    }
+
+    /// A stream that sets one state at every text object sets it under one
+    /// transform thousands of times, and that is one placement of one mask:
+    /// it is recorded once, and does not spend the bound `Do`s and states
+    /// share. Recorded every time, five thousand `gs`es would pass it and be
+    /// reported as unfollowed.
+    #[test]
+    fn a_state_set_again_under_one_transform_is_one_placement() {
+        let content = "/GS1 gs ".repeat(5_000);
+        assert_eq!(warnings(&content, &[anywhere()]), Vec::new());
     }
 
     #[test]
