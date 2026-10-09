@@ -373,7 +373,7 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   values by ruling 12, which is why the enum stays `Copy + PartialEq + Eq`.
 - **Fuzzing** — `cos_document` (the whole file parser, every ladder rung
   reachable from arbitrary bytes, plus a bounded page-tree walk) and
-  `cos_object` are two of the 50 fuzz targets, run briefly in CI on every
+  `cos_object` are two of the 51 fuzz targets, run briefly in CI on every
   commit over committed seed corpora.
 - **Corpus** — 5 525 files, 5 516 of them rendered every page, 0 crashes
   (August 2026), in the ratcheted corpus run

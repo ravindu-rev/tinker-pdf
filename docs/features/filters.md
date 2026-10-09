@@ -1055,7 +1055,7 @@ wants the reason to survive it.
   does *not* reach is visible too; `src/jpx/tests/refusals.rs` reaches every
   entry of the JPX refusal list, so "the refusals are the feature" is checked,
   not claimed.
-- Fuzzing: fourteen of the 50 fuzz targets drive this crate's decoders —
+- Fuzzing: fourteen of the 51 fuzz targets drive this crate's decoders —
   `ascii_filters`, `lzw`, `inflate`, `ccitt`, `jpeg`, `jbig2`, `jpx`, `jxr`,
   `brotli`, `png`, `bmp`, `gif`, `webp`, `tiff` — and `rar` and `sevenz`
   borrow its CRC-32. The last is the first target that reaches other decoders

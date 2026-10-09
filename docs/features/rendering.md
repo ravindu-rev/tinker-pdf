@@ -839,7 +839,7 @@ a defect to hide in.
   — pin this device's output bit-for-bit across x86_64 Windows, Linux and
   `wasm32-wasip1`, each with an ink floor so a fixture that draws nothing
   fails instead of becoming a baseline ([determinism](determinism.md)).
-- Fuzzing: `render_page` among the 50 fuzz targets renders whole hostile
+- Fuzzing: `render_page` among the 51 fuzz targets renders whole hostile
   documents; `crates/tinker-pdf/tests/hostile_input.rs` replays the sweep on
   stable.
 - Corpus, as of September 2026: 5 525 files, 5 516 rendered every page, zero

@@ -470,7 +470,8 @@ can diverge, and ruling 11's point is that a binding has nothing to diverge
 *with*. Node ≥ 18 runs the same file by handing `init` the bytes. The
 package is `tinker-pdf-js`, name and version derived from `Cargo.toml` so
 `cargo xtask versions` has no fifth manifest to police. The `.wasm` is
-2.03 MB, 1.40 MB gzipped, with all 202 predefined CMaps in; `cmap-predefined`
+6.76 MB, 3.28 MB gzipped (9 October 2026; 1.40 MB gzipped on 8 September),
+**over** `release.yml`'s 2.5 MiB gzipped gate, with all 202 predefined CMaps in; `cmap-predefined`
 off is the switch for a host that renders no CJK.
 
 **.NET** (`bindings/dotnet`, C# over the C ABI). Every native handle lives
@@ -499,8 +500,8 @@ handle closed by its owner's `Close`/`close` (safe twice), and every string
 and byte array handed back a copy that outlives its handle. None decides a
 default: a save takes the options `tpdf_write_options_init` filled in, a
 view the engine's own `tpdf_destination_init_fit`, and an encrypted save the
-caller's 48 bytes of entropy. Go and Java call **all 218 functions**; Ruby
-calls 217. Each has the parity program (below) and a smoke program that
+caller's 48 bytes of entropy. Go and Java call **all 221 functions**; Ruby
+calls 220. Each has the parity program (below) and a smoke program that
 renders blank-then-inked and then calls, once each, every declaration the
 parity program does not reach — authentication against the two encrypted
 fixtures, the editor's page operations, fields, checkpoint and restore, the
@@ -576,7 +577,7 @@ available, so it has never been compiled. It is a SwiftPM package whose
 `CTinkerPdf` module imports the committed header through a shim (not a
 copy, which would be a second transcription to drift), a `TinkerPdf` target
 covering the core — open, text, render, validate, authenticate, the form
-fill and save, the builder, 49 of the 218 functions — and a `Smoke`
+fill and save, the builder, 49 of the 221 functions — and a `Smoke`
 executable written to the same blank-then-inked pattern. It has no parity
 program, is not in `bindings-parity` and has no CI job; the read surface,
 document operations, signatures and streaming are owed, and so is the first
@@ -1050,8 +1051,8 @@ packaged.
 | CommonJS build | none; ESM only | two builds of the engine can diverge | — |
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |
-| Streaming in Ruby | `TinkerPdf::Document` has no streaming open; the other 217 functions are there | `tpdf_document_open_streaming` takes its vtable **by value**, and Fiddle passes no struct by value; and the engine calls `read` from whatever thread is working, where a Ruby block would run without the GVL. A by-pointer variant on the C ABI would answer the first and not the second | [opening](opening.md) |
-| Swift beyond its core | 49 of 218 functions, no parity program, no CI | written without a toolchain; widening unverified source would only widen what nobody has run | [ROADMAP.md](../ROADMAP.md) |
+| Streaming in Ruby | `TinkerPdf::Document` has no streaming open; the other 220 functions are there | `tpdf_document_open_streaming` takes its vtable **by value**, and Fiddle passes no struct by value; and the engine calls `read` from whatever thread is working, where a Ruby block would run without the GVL. A by-pointer variant on the C ABI would answer the first and not the second | [opening](opening.md) |
+| Swift beyond its core | 49 of 221 functions, no parity program, no CI | written without a toolchain; widening unverified source would only widen what nobody has run | [ROADMAP.md](../ROADMAP.md) |
 | Published packages | `pip install` / `npm install` / `dotnet add package` do not work yet, and Go, Ruby, Java and Swift have no package at all | the facade is unstable until 0.1.0 | [ROADMAP.md](../ROADMAP.md) |
 
 ## Verified
@@ -1259,7 +1260,7 @@ packaged.
   equal to the facade's, on linux/x86_64 with Go 1.24, Ruby 3.3 (Fiddle 1.1)
   and OpenJDK 21, October 2026 — and by smoke programs that render
   blank-then-inked and then call every declaration the parity programs do
-  not: Go and Java all 218 functions, Ruby 217. Counted injections, each one
+  not: Go and Java all 221 functions, Ruby 220. Counted injections, each one
   defect in a binding's own code and never in its script, each failing
   `bindings-parity` on that surface and no other — **12 of 12 caught**: Go's
   null view number crossing as 0 rather than NaN (*read-surface*), an

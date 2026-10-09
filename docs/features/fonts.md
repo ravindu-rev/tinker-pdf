@@ -1048,7 +1048,7 @@ two corpora already vendored here. So every name stays on the list.
   under `/FontMatrix`; `vertical_metrics.rs` — `/W2` both forms, the `/DW2`
   default, and the position vector; `substitute_fonts.rs` — the
   `FontProvider` seam, including declining symbolic fonts.
-- Fuzzing: seven of the 50 fuzz targets exercise this feature — `cff`,
+- Fuzzing: seven of the 51 fuzz targets exercise this feature — `cff`,
   `cff_subset`, `cmap`, `sfnt`, `truetype`, `type1`, `woff` (ruling 1).
 - Determinism: the `text` fixture among the 15 render fingerprints in
   `crates/tinker-pdf/tests/determinism.rs` embeds a synthetic six-glyph face
