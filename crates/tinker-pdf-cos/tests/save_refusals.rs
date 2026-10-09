@@ -134,3 +134,131 @@ fn a_page_imported_from_an_encrypted_document_would_be_written_decrypted() {
         "a source that is not encrypted"
     );
 }
+
+/// The decoded first content stream of `doc`'s first page: what a reader
+/// holding the password sees. The fixture's `/Contents` is an array of one.
+fn first_page_content(doc: &CosDocument) -> Vec<u8> {
+    let pages = tinker_pdf_cos::pages::collect(doc);
+    let page = pages.first().expect("a page");
+    let object = doc.get(page.reference).expect("the page");
+    let page = object.as_dict().expect("a page dictionary");
+    let key = doc.intern(b"Contents");
+    let contents = page
+        .get_ref(key)
+        .or_else(|| {
+            page.get_array(key)
+                .and_then(|streams| streams.first())
+                .and_then(|first| first.as_objref())
+        })
+        .expect("a content stream");
+    doc.stream_decoded(contents).expect("decodes")
+}
+
+/// Whether `saved` holds `plaintext` as written, unencrypted.
+fn holds(saved: &[u8], plaintext: &[u8]) -> bool {
+    let probe = &plaintext[..plaintext.len().min(24)];
+    saved.windows(probe.len()).any(|window| window == probe)
+}
+
+/// The answer is held to what the save door does, arm by arm: whenever
+/// `check_save` answers `Ok`, the saved bytes do not hold the plaintext of
+/// the encrypted page copied in. An incremental update is sealed with the key
+/// the document was opened with and with nothing else — it does not read
+/// `WriteOptions::encryption`, and without a key it writes in the clear — so
+/// encryption asked of an incremental update seals nothing, and an encrypted
+/// document opened without its password has no key to seal with.
+#[test]
+fn an_incremental_update_is_sealed_only_with_the_key_the_document_was_opened_with() {
+    let source = open("encrypted-aes256.pdf", Some("owner-secret"));
+    let plaintext = first_page_content(&source);
+    assert!(plaintext.starts_with(b"BT"), "{plaintext:?}");
+    let incremental_encrypted = WriteOptions {
+        mode: WriteMode::Incremental,
+        ..encrypted()
+    };
+
+    let targets = [
+        ("a plain document", open("simple-text.pdf", None)),
+        (
+            "an encrypted document opened without its password",
+            open("encrypted-aes256.pdf", None),
+        ),
+        (
+            "an encrypted document opened with its password",
+            open("encrypted-aes256.pdf", Some("open-sesame")),
+        ),
+    ];
+    let mut answers = Vec::new();
+    for (target, doc) in targets {
+        let mut editor = DocumentEditor::new(doc);
+        editor.import_page(&source, 0, 1).expect("imported");
+        for (how, options) in [
+            ("rewrite", rewrite()),
+            ("incremental", incremental()),
+            (
+                "incremental asking for encryption",
+                incremental_encrypted.clone(),
+            ),
+            ("rewrite with encryption", encrypted()),
+        ] {
+            let answer = editor.check_save(&options);
+            let saved = editor.save(&options);
+            if answer.is_ok() {
+                assert!(
+                    !holds(&saved, &plaintext),
+                    "{target}, {how}: Ok, and the saved file holds the plaintext"
+                );
+            }
+            answers.push((target, how, answer));
+        }
+    }
+    let refused = |target: &str, how: &str| {
+        answers
+            .iter()
+            .find(|(t, h, _)| *t == target && *h == how)
+            .map(|(_, _, answer)| *answer)
+    };
+    assert_eq!(
+        refused("a plain document", "incremental asking for encryption"),
+        Some(Err(SaveRefusal::WouldDecrypt)),
+        "an incremental update does not read the encryption asked of it"
+    );
+    assert_eq!(
+        refused(
+            "an encrypted document opened without its password",
+            "incremental"
+        ),
+        Some(Err(SaveRefusal::WouldDecrypt)),
+        "no key to seal the import with"
+    );
+    assert_eq!(
+        refused(
+            "an encrypted document opened with its password",
+            "incremental"
+        ),
+        Some(Ok(())),
+        "sealed with the file's own key"
+    );
+}
+
+/// An incremental update leaves the document's own encryption standing, so
+/// encryption asked of one replaces nothing and lifts nothing the owner
+/// withheld; and an encrypted document opened without its password was never
+/// decrypted, so an update of it writes nothing it protected.
+#[test]
+fn an_incremental_update_replaces_no_encryption() {
+    let user = DocumentEditor::new(open("permissions-noprint.pdf", Some("user")));
+    let options = WriteOptions {
+        mode: WriteMode::Incremental,
+        ..encrypted()
+    };
+    assert_eq!(user.check_save(&options), Ok(()));
+
+    let locked = DocumentEditor::new(open("encrypted-aes256.pdf", None));
+    assert_eq!(locked.check_save(&incremental()), Ok(()));
+    assert_eq!(
+        locked.check_save(&rewrite()),
+        Err(SaveRefusal::WouldDecrypt),
+        "a rewrite drops /Encrypt whatever it could read"
+    );
+}

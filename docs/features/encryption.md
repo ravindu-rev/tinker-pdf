@@ -126,9 +126,15 @@ its own. Replacing or removing the encryption of a document opened with the
 user's password lifts whatever the owner withheld from that user (7.6.4.2,
 Table 22). `DocumentEditor::check_save(&WriteOptions)` answers both before
 anything is written: `SaveRefusal::WouldDecrypt` for the first, unless the
-save is incremental over the document's own encryption or brings its own,
-and `SaveRefusal::OwnerAuthorityNeeded` for the second, whose `withheld()`
-names the Table 22 permissions in the table's order.
+save is a rewrite that brings its own encryption, or an incremental update
+sealed with the key the document was opened with; and
+`SaveRefusal::OwnerAuthorityNeeded` for the second, whose `withheld()`
+names the Table 22 permissions in the table's order. An incremental update
+is sealed with that key and nothing else (7.6.2): it does not read
+`WriteOptions::encryption`, so encryption asked of one seals nothing and
+replaces nothing, and a document that is not encrypted, or was opened
+without its password, has no key — an update of it writes anything copied
+in from an encrypted source in the clear, and is refused.
 `DocumentEditor::check_decrypt()` asks whether decrypting on purpose is
 allowed: the document is encrypted (`SaveRefusal::NotEncrypted` otherwise),
 and whoever opened it holds the owner's authority or was withheld nothing.

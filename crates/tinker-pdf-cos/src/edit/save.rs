@@ -156,16 +156,22 @@ impl DocumentEditor {
     ///
     /// # Errors
     ///
-    /// - [`SaveRefusal::WouldDecrypt`] when the document is encrypted and the
-    ///   save rewrites it asking for no encryption — the rewrite drops
-    ///   `/Encrypt` and writes the plaintext, where an incremental update is
-    ///   sealed with the file's own key (7.6.2) — or when anything was copied
-    ///   in from an encrypted document and the save writes it with no
-    ///   encryption of its own;
+    /// - [`SaveRefusal::WouldDecrypt`] when the save is a rewrite asking for
+    ///   no encryption of a document that is encrypted, or that anything was
+    ///   copied into from an encrypted one — the rewrite drops `/Encrypt` and
+    ///   writes the plaintext — or an incremental update of a document that
+    ///   something was copied into from an encrypted one and that holds no
+    ///   key to seal it with. An update is sealed with the key the document
+    ///   was opened with (7.6.2) and with nothing else:
+    ///   [`WriteOptions::encryption`] is not read for one, so it seals
+    ///   nothing there, and a document that is not encrypted, or was opened
+    ///   without its password, has no key;
     /// - [`SaveRefusal::OwnerAuthorityNeeded`] when the document is encrypted,
     ///   was opened with the user's authority, the owner withholds permissions
-    ///   from that user (7.6.4.2, Table 22), and the save replaces the
-    ///   encryption — which lifts what the owner withheld. Permissions are
+    ///   from that user (7.6.4.2, Table 22), and the save is a rewrite that
+    ///   replaces the encryption — which lifts what the owner withheld. An
+    ///   incremental update leaves the document's own `/Encrypt` standing,
+    ///   whatever encryption it was asked for. Permissions are
     ///   advisory and this crate reports rather than enforces them
     ///   ([`crate::CosDocument::permissions`]); this is the one operation that
     ///   would erase them, and it honours them instead.
@@ -173,12 +179,30 @@ impl DocumentEditor {
     /// Decrypting on purpose is [`DocumentEditor::check_decrypt`]'s question.
     pub fn check_save(&self, options: &WriteOptions) -> Result<(), SaveRefusal> {
         let encrypted = self.doc.is_encrypted();
-        if encrypted && options.encryption.is_some() {
-            self.owner_authority()?;
-        }
-        let sealed =
-            options.encryption.is_some() || (encrypted && options.mode == WriteMode::Incremental);
-        if !sealed && (encrypted || self.encrypted_source) {
+        // Held to what `save_with` does, arm by arm.
+        let would_decrypt = match options.mode {
+            // A rewrite drops `/Encrypt` and is sealed with the encryption it
+            // is asked for or with none, so replacing the document's own
+            // encryption is the one place the owner's authority is needed.
+            WriteMode::Rewrite => {
+                if encrypted && options.encryption.is_some() {
+                    self.owner_authority()?;
+                }
+                options.encryption.is_none() && (encrypted || self.encrypted_source)
+            }
+            // An update is sealed with the key the document was opened with
+            // and with nothing else: it reads no `WriteOptions::encryption`,
+            // and with no key it writes in the clear. So it replaces no
+            // encryption and lifts nothing the owner withheld, and what it
+            // can write decrypted is only what was copied in — the
+            // document's own objects it writes as they were read, which for
+            // one opened without its password is still ciphertext. Counting
+            // the encryption asked of an update as a seal, or the document's
+            // `/Encrypt` as one whatever key it was opened with, answered
+            // `Ok` to updates that wrote an encrypted source's plaintext.
+            WriteMode::Incremental => self.encrypted_source && self.doc.file_key().is_none(),
+        };
+        if would_decrypt {
             return Err(SaveRefusal::WouldDecrypt);
         }
         Ok(())
