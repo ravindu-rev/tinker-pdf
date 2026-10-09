@@ -214,16 +214,16 @@ let bytes = doc.editor().save_sealed(&WriteOptions::default(), &sealed)?;
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| A vendor's own `/Filter` | `AuthError::UnsupportedHandler` | only `Standard` and `Adobe.PubSec` are implemented; a foreign handler is refused rather than guessed | this page |
+| A vendor's own `/Filter` | `AuthError::UnsupportedHandler` | only `Standard` and `Adobe.PubSec` are implemented; a foreign handler is refused rather than guessed, and a host seam for one is a roadmap row | [ROADMAP](../ROADMAP.md) SE-08 |
 | A password offered to a public-key document | `AuthError::UnsupportedHandler`, not `WrongPassword` | no password was ever going to work, and saying "wrong password" sends a caller looking for a better one | 7.6.5 |
 | Sealing to a key that is not RSA | `SealError::NotRsa { index }` | key transport here is RSAES-PKCS1-v1_5, every PDF public-key handler's; key agreement is not read either | [design/pubsec.md](../design/pubsec.md) |
 | Sealing to an RSA key its certificate restricts to signing | `SealError::KeyRestricted { index }` | RFC 4055 §1.2: a key published under `id-RSASSA-PSS` is for RSASSA-PSS signatures only, and only `rsaEncryption` leaves it free for key transport; `openssl cms -encrypt` refuses the same certificate | [design/pubsec.md](../design/pubsec.md) |
 | A sealed incremental save | `SealError::NotRewrite` | an update appends under an `/Encrypt` that still stands, and cannot change who the file is sealed to | this page |
 | A password and recipients both | `SealError::PasswordAlsoRequested` | a document has one security handler | 7.6 |
 | Recipients sealed with different permissions | none offered — one envelope, one `/P` for all | 7.6.5 allows an envelope per group; not yet asked for | [design/pubsec.md](../design/pubsec.md) |
-| Sealing below `/V 5` — `s3`, `s4`, RC4, AES-128 | none offered — the writer emits `AESV3` | as R6 is the password writer's only revision; reading all of them is unchanged | — |
+| Sealing below `/V 5` — `s3`, `s4`, RC4, AES-128 | none offered — the writer emits `AESV3` | as R6 is the password writer's only revision; reading all of them is unchanged | [ROADMAP](../ROADMAP.md) SE-01 |
 | An envelope's content cipher this build does not implement — AES-192-CBC and RC2 are the reachable ones | `PubSecError::UnsupportedContentCipher` | AES-128/256-CBC, RC4 and `des-ede3-cbc` are implemented, the last being what OpenSSL still picks by default for older recipients; anything else is named rather than silently unopenable | [design/pubsec.md](../design/pubsec.md) |
-| Recipient shapes other than key transport | `EnvelopedError::UnsupportedRecipientKind` | key agreement, KEK and password recipients are recognised by tag and refused; every PDF public-key handler in the wild uses key transport | RFC 5652 §6.2 |
+| Recipient shapes other than key transport | `EnvelopedError::UnsupportedRecipientKind` | key agreement, KEK and password recipients are recognised by tag and refused; every PDF public-key handler in the wild uses key transport | RFC 5652 §6.2; [ROADMAP](../ROADMAP.md) SE-07 |
 | Writing R5 | none offered — the writer emits R6 and nothing else | R5 is the withdrawn draft; reading it works and carries `HandlerNote::DeprecatedRevision5` | [pdf20-deltas](../pdf20-deltas.md) |
 | Wrong password / unencrypted document | `AuthError::WrongPassword`, `AuthError::NotEncrypted` | the ordinary API errors, typed so a prompt loop can tell them apart | — |
 

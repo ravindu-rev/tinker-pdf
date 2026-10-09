@@ -46,9 +46,15 @@ binding stays a 1:1 projection with no logic of its own.
 - No new facade capability. Everything projected here exists on
   `DocumentEditor` and `DocumentBuilder` today; APIs the facade lacks
   (e.g. content-editing beyond `append_content`) are out of scope.
+  Content editing is [ROADMAP](../ROADMAP.md) rows ED-01 and ED-02 since
+  9 October 2026, and reaches the facade first.
 - No callbacks into host code. `FontProvider` stays the byte-blob
   `SimpleFontProvider` projection `tpdf_document_set_fonts` already is; no
   host closure ever runs inside the engine, so no unwind crosses the boundary.
+  *No longer a non-goal, 9 October 2026*: a signing callback across the C ABI is the
+  owner's instruction ([ROADMAP](../ROADMAP.md) SG-09), with script host requests
+  (FJ-17) and warning and progress callbacks (SU-21) beside it; how each
+  crosses is the owner's to settle (H-28).
 - No streaming or file-handle I/O. Bytes in, bytes out, as everywhere
   (ruling 8 discipline at the boundary).
 - No new packages or registries. The wheel/npm/NuGet pipeline from gap 26

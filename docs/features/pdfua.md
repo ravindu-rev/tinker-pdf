@@ -180,5 +180,5 @@ since it knows both the link's text and that the page carries one.
 | What | Why (one line) | See |
 | --- | --- | --- |
 | Judging tagging correct | whether a `/P` is a paragraph, a reading order the author's, an `/Alt` truthful, is visible only to a person; each such clause is an `Undecidable` gap | design/pdfua.md, non-goals |
-| Auto-tagging an untagged file | an untagged file is reported as untagged; nothing inferred reaches a verdict | design/pdfua.md, non-goals |
-| Repairing a file | validation reports; the tagged writer conforms or refuses | design/pdfua.md, non-goals |
+| Auto-tagging an untagged file | an untagged file is reported as untagged; nothing inferred reaches a verdict | [ROADMAP](../ROADMAP.md) SD-07 |
+| Repairing a file | validation reports; the tagged writer conforms or refuses | [ROADMAP](../ROADMAP.md) SD-08 |

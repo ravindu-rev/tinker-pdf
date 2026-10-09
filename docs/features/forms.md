@@ -540,11 +540,11 @@ let bytes = editor.save(&WriteOptions::default());
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| `eval`, `try`, `switch`, `for...in`, `typeof`, `delete`, `with`, `class`, `let`/`const`, `import`/`export`, regular expressions, object literals, prototypes — and `function` anywhere but document scope | `ScriptError::Syntax` — each word reserved and refused outright | a construct silently approximated is one rename away from running it | — |
+| `eval`, `try`, `switch`, `for...in`, `typeof`, `delete`, `with`, `class`, `let`/`const`, `import`/`export`, regular expressions, object literals, prototypes — and `function` anywhere but document scope | `ScriptError::Syntax` — each word reserved and refused outright | a construct silently approximated is one rename away from running it | [ROADMAP](../ROADMAP.md) FJ-01…FJ-03 |
 | Anything at document scope that is not a function definition | `ScriptError::NotADefinition`, naming the `/Names /JavaScript` key through `CalcError::DocumentScript` | a skipped statement builds a name table silently missing what it would have defined | — |
 | A document-level helper that calls itself, directly or through another | `ScriptError::Recursion` | a depth cap makes the answer depend on a number nobody can predict from the file — the cascade rule's argument | — |
 | More than 256 document-level functions | `ScriptError::TooManyFunctions` | a name table is a lookup scanned per unknown name, so a document-controlled count of them is document-controlled work | — |
-| `app.*` and `console.*` | inert stubs; assigning a stub's result to a field is `ScriptError::NotStorable` | a stub's result must never become a field value | — |
+| `app.*` and `console.*` | inert stubs; assigning a stub's result to a field is `ScriptError::NotStorable` | a stub's result must never become a field value | [ROADMAP](../ROADMAP.md) FJ-12, FJ-13 |
 | A name or member outside the subset | `ScriptError::UnknownName` / `ScriptError::UnknownMember` | a calculation that guesses is a form that lies | — |
 | A script that does not terminate cheaply, or outgrows the size caps | `ScriptError::OutOfSteps` / `TooDeep` / `TooManyTokens` / `StringTooLong` / `ArrayTooLong` / `TooManyVars` | three independent bounds — depth, work, size — because none substitutes for another | — |
 | Script source past 64 KiB, or past what one read of the document has left of its 4 MiB `ScriptBudget` | `Script::Oversize(len)`; running it is `ScriptError::TooLong` | truncated source means something different from what the file says (ruling 10) | — |
@@ -566,11 +566,11 @@ let bytes = editor.save(&WriteOptions::default());
 | A trigger class the policy denies — keystroke, validate and document-level by default | `CalcError::Refused { trigger, subject }` | a pass that quietly ran nothing reads exactly like a form with no scripts (ruling 10) | — |
 | A computed value a field's own `/AA /V` refuses | `CalcError::Invalid { field, value }`, and the whole pass writes nothing | one total rejected and nine written anyway is a document that disagrees with itself | — |
 | A validate action the policy would not run, over a value the pass wrote anyway | `Recalculation::refused` names the field | a skipped check reads exactly like a form that has none, and the difference is whether the numbers were looked at (ruling 10) | — |
-| A catalog action (`WC`, `WS`, `DS`, `WP`, `DP`) | `Trigger::Catalog` exists and **nothing in this build runs one**; allowing it changes no answer | every one of the five names an event a reader has no notion of, and none of them is document-open | — |
+| A catalog action (`WC`, `WS`, `DS`, `WP`, `DP`) | `Trigger::Catalog` exists and **nothing in this build runs one**; allowing it changes no answer | every one of the five names an event a reader has no notion of, and none of them is document-open | [ROADMAP](../ROADMAP.md) FJ-06 |
 | A format action's display string reaching `/V` | `DisplayString`, which no write door will take — `error[E0308]`, proved by compiling the mistake | 12.7.3.3 keeps value and appearance apart, and a type is a guarantee where an arrangement of code was a convention | — |
-| Automatic recalculation | none offered — `recalculate()` is explicit | when a calculation runs is a host's policy, not the engine's | — |
-| Filling or signing a **signature field** | `FieldKind::Signature` recognises it and this module does neither | a signature field's value is a CMS blob over a `/ByteRange`, not text a fill layer could lay out; producing one is `DocumentEditor::save_signed` and reading one is `Document::verify_signatures` | [signatures](signatures.md) |
-| XFA | not read anywhere | removed in ISO 32000-2; a stated permanent non-goal | [ROADMAP](../ROADMAP.md) |
+| Automatic recalculation | none offered — `recalculate()` is explicit | when a calculation runs is a host's policy, not the engine's | [ROADMAP](../ROADMAP.md) FJ-07 |
+| Filling or signing a **signature field** | `FieldKind::Signature` recognises it and this module does neither | a signature field's value is a CMS blob over a `/ByteRange`, not text a fill layer could lay out; producing one is `DocumentEditor::save_signed` and reading one is `Document::verify_signatures` | [signatures](signatures.md); [ROADMAP](../ROADMAP.md) AN-17 |
+| XFA | not read anywhere | removed in ISO 32000-2, and a named non-goal until 9 October 2026; read, laid out, scripted and flattened as roadmap rows since the owner's parity decision | [ROADMAP](../ROADMAP.md) AN-27…AN-34 |
 
 ## Verified
 

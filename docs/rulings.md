@@ -27,6 +27,30 @@ living in one feature's head.
    corpus hit-rate report ([verification.md](verification.md)) says real
    documents need it — not before, however interesting it looks.
 
+   **Amended 9 October 2026, by the owner's decision on the roadmap's
+   scope.** The owner decided that this engine reaches parity with the field
+   and goes past it: every capability a mature, widely deployed PDF engine
+   offers and every capability the rest of the field offers, with speed
+   verified by tests, form JavaScript a complete implementation, signing with
+   a private key in the engine, and OCR in scope and last. **Every row of the
+   [roadmap](ROADMAP.md) is in scope by that decision**, and none waits for a
+   corpus to ask for it. What this ruling still decides is the order: inside
+   a tier, corpus hit-rate evidence puts the row a real document needs before
+   the row none has asked for yet, and a capability whose count is zero is
+   late in its tier rather than refused. The tiers themselves run in the
+   order the roadmap states.
+
+   What the amendment does not change is the half that kept this ruling
+   honest. A count is still what a scheduling argument cites, and "however
+   interesting it looks" still binds the order inside a tier; a capability
+   not yet built still refuses by name (ruling 2) until its row closes; and a
+   scope choice is never filed as a limit — the roadmap's named non-goals
+   hold only what is outside this repository's power, and a capability
+   declined for want of a count is a row, however late its tier. The
+   amendment is recorded here rather than left in the roadmap's preamble
+   because a ruling is amended by the owner, not drifted past; the roadmap's
+   last section asks the owner to ratify this wording.
+
 4. **Determinism is a contract, not a hope.** Binds
    [rasterizer](features/rasterizer.md) and
    [rendering](features/rendering.md). Fixed-point coverage accumulation,

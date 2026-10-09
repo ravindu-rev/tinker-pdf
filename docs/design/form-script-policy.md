@@ -36,13 +36,20 @@ saying so.
   trigger class exists in the policy because it names a real class a host has to be able to
   deny; nothing in this build consumes it. Decision 7 below is about saying so rather than
   letting it be assumed.
+  *No longer a non-goal, 9 October 2026*: every trigger, the catalog actions included, is
+  [ROADMAP](../ROADMAP.md) row FJ-06; whether one runs stays the host's policy (FJ-14).
 - **A general ECMAScript.** The subset stays a subset. `eval`, `try`, `switch`, `for...in`,
   `typeof`, `delete`, `with`, `class`, `let`/`const`, `import`/`export`, regular expressions,
   object literals and prototypes are refused exactly as they were, and a helper's body is
   parsed by the same productions a calculate action's is, so nothing can arrive through one
   that could not arrive through the other.
+  *No longer a non-goal, 9 October 2026*: the owner's instruction is a complete implementation,
+  [ROADMAP](../ROADMAP.md) rows FJ-01 to FJ-17; until FJ-01 lands, the subset above is the build,
+  and deny by default stays the policy unless the owner rules otherwise (H-36).
 - **Automatic recalculation.** When a calculation runs is a host's policy, so `recalculate()`
   stays an explicit call. That was true before this work and is not changed by it.
+  *No longer a non-goal, 9 October 2026*: calculation order and automatic recalculation are
+  [ROADMAP](../ROADMAP.md) row FJ-07, behind the host's policy.
 
 ## Decisions
 

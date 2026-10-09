@@ -430,7 +430,7 @@ and 5 129 annotations carry a normal appearance.
 | An outline `/First`/`/Next` loop, or one past the caps | `WarningKind::OutlineCycle`, `OutlineTruncated` | a looping sibling chain never ends on its own | [ruling 1](../rulings.md) |
 | A name/number tree cycle, cap breach, or odd-length leaf | `WarningKind::TreeCycle`, `TreeTruncated`, `TreeOddEntries` | the last key of an odd `/Names` array has no value | [ruling 10](../rulings.md) |
 | No readable version in header or catalog | `WarningKind::HeaderMissing` | the 1.7 baseline is reported and the guess stays on the record | [ruling 10](../rulings.md) |
-| `/Launch` and every other action | `Action::Launch`, `Action::Other` | reported, never executed — running a program because a document asked is not a service | [architecture](../architecture.md) |
+| `/Launch` and every other action | `Action::Launch`, `Action::Other` | reported, never executed — running a program because a document asked is not a service; every action typed and handed to the host as a request is a roadmap row, and the engine still launches nothing | [architecture](../architecture.md); [ROADMAP](../ROADMAP.md) AN-20 |
 | Writing a view with a NaN coordinate, a negative zoom or an empty `/FitR` | `DestKind::is_writable` → `false` | `NaN` is not a PDF number, and an empty rectangle asks for infinite magnification | [ruling 6](../rulings.md) |
 | Writing a URI that is empty, non-ASCII or control-bearing | `is_writable_uri` → `false`; `PageBuilder::link` returns `false` | 12.6.4.7 makes `/URI` 7-bit ASCII; percent-encoding is the caller's, since only the caller knows the bytes' encoding | [ruling 6](../rulings.md) |
 

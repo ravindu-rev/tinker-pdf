@@ -81,6 +81,9 @@ inferred" for the untagged majority. This design does not touch that path.
   [design/pdfua.md](pdfua.md)'s verdicts. content-and-text.md refuses "a tree
   guessed from geometry presented as the file's own statement", and the
   refusal stands.
+  *Narrowed, 9 October 2026*: auto-tagging is [ROADMAP](../ROADMAP.md) row SD-07 — a
+  tree written into a new document as that document's statement, never
+  presented as the input's own.
 - **Changing the default.** `plain_text()`, `search()` and selection quads
   do not change by a byte; the fingerprint suite pins that, and every
   milestone's exit repeats the pin.

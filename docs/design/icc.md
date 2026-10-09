@@ -50,11 +50,17 @@ records what they measured.
 - **Output intents and proofing** (14.11.5): `/OutputIntents` handling
   belongs to [pdfa](pdfa.md); this design converts for the screen, to
   sRGB, always.
+  *No longer a non-goal, 9 October 2026*: soft proofing is [ROADMAP](../ROADMAP.md)
+  row RC-05.
 - **N-channel output, overprint and spot-ink simulation.** `Separation` /
   `DeviceN` keep flowing through their tint transforms (8.6.6.4, 8.6.6.5);
   simulating ink interaction is a different renderer.
+  *No longer a non-goal, 9 October 2026*: overprint simulation and separations are
+  [ROADMAP](../ROADMAP.md) rows RC-03 and RC-04.
 - **Black point compensation, gamut mapping beyond intent selection,
   iccMAX/v5 profiles, named-colour tags.** Refused by name, per ruling 2.
+  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) rows RC-02 and
+  RC-20.
 - **Profiles embedded inside image codecs.** JPX colour boxes already have
   their own path in `tinker-pdf-filters`; routing them through this CMM is
   scheduled by corpus evidence (ruling 3), not assumed here.
@@ -317,6 +323,9 @@ actually asks for is that the **default** be right, and 8.6.5.8 makes that
 `RelativeColorimetric` — which is `A2B1`, which is what the parser reaches for
 first. Selecting a non-default intent is left unbuilt and said so here, rather
 than built for five files that may not even exercise it.
+*In scope since 9 October 2026*: the owner's parity decision makes every intent
+[ROADMAP](../ROADMAP.md) row RC-01, and ruling 3 as amended uses this count to
+order the row inside its tier rather than to decline it.
 
 The wrinkle if it is ever wanted: an intent is graphics state and a transform
 is compiled per colour space, so a space would need one compiled transform per

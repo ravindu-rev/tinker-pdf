@@ -139,7 +139,7 @@ in reach.
 | --- | --- | --- |
 | Rules under PDF/X-4 and PDF/X-6 | the requirement bodies are not in hand, and a rule written from a clause title is a guess; every X-4 clause is an `Unread` gap by name | design/pdfx.md, milestone 7 |
 | Rules under PDF/X-1a:2001 and PDF/X-3:2002 | the application notes v4 defer them to a Version 3 that was not found | design/pdfx.md |
-| PDF/X-1:2001, PDF/X-2, PDF/X-5 | non-goals: a deprecated level, and partial exchange a blind validator cannot settle | design/pdfx.md, non-goals |
+| PDF/X-1:2001, PDF/X-2, PDF/X-5 | not validated: a deprecated level, and partial exchange a blind validator cannot settle alone; in scope since 9 October 2026 | [ROADMAP](../ROADMAP.md) SD-11 |
 | A PDF/X flavour on the writer's archival profile | `ArchivalProfile` is PDF/A's and lives in `tinker-pdf-cos`, `PageBuilder` has no `set_trim_box`, and the writer's third leg — the shape comparison against a pinned suite file — waits on milestone 2's blocked pin | design/pdfx.md, milestone 6 |
-| Looking a `RegistryName` up in the ICC registry | the registry is data with a date on it; vendoring it is a decision | design/pdfx.md, non-goals |
-| Conversion to PDF/X | validation reports; nothing rewrites colour or fonts | design/pdfx.md, non-goals |
+| Looking a `RegistryName` up in the ICC registry | the registry is data with a date on it; looking it up in bytes the host supplies is a roadmap row | [ROADMAP](../ROADMAP.md) SD-11 |
+| Conversion to PDF/X | validation reports; nothing rewrites colour or fonts yet | [ROADMAP](../ROADMAP.md) SD-12 |

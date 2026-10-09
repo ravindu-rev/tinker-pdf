@@ -51,12 +51,19 @@ operations that still need every byte.
 - **No streaming write.** `DocumentEditor`'s incremental save requires the
   original bytes verbatim as its prefix (`CosDocument::bytes` says why:
   signatures); a save on a streamed document fetches all, and says so.
+  *No longer a non-goal, 9 October 2026*: a streaming writer is
+  [ROADMAP](../ROADMAP.md) row ED-38.
 - **No prefetch heuristics.** Speculative read-ahead is a host policy; the
   engine asks for exactly the ranges it needs and the counter stays honest.
-- **No progressive rendering below page granularity.**
+  *Narrowed, 9 October 2026*: offering a linearized file's hint tables to the
+  host as prefetch ranges is [ROADMAP](../ROADMAP.md) row FI-32; the policy
+  stays the host's.
+- **No progressive rendering below page granularity.** *No longer a
+  non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row RC-15.
 - **No container streaming.** A ZIP's central directory is at its end and
   cbz/xps/epub synthesis re-writes the whole document; `Document::open`'s
   container path declares whole-file and fetches all.
+  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row FI-32.
 
 ## Design
 

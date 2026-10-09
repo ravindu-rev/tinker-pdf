@@ -50,9 +50,12 @@ those are two different things and a green tick over both would be a lie.
 - **Encoding.** Nothing here writes a JPEG XR file. The fixtures are made by
   the platform encoder, which is a supplier of bytes and not an adjudicator
   (ruling 13).
+  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row FO-20.
 - **The interleaved alpha image plane** (8.3.18), refused by name. The
   separate form is what exists in evidence here; the interleaved one would be
   built when something emits it.
+  *Scheduled, 9 October 2026*: [ROADMAP](../ROADMAP.md) row FI-12, with the four
+  refusals below it.
 - **CMYK, CMYKDIRECT, NCOMPONENT and RGBE** output colour formats, and
   **YUV420, YUV422 and YUVK** internal formats. The subsampled internal
   formats bring 9.10.3's chroma upsampling and a different macroblock
@@ -69,6 +72,8 @@ those are two different things and a green tick over both would be a lie.
 - **`SPATIAL_XFRM_SUBORDINATE` and `SPATIAL_XFRM_PRIMARY`** are reported and
   never applied. 8.3.8 calls the transformation *preferred* and subordinate to
   the application, and this crate has no application (ruling 8).
+  *Narrowed, 9 October 2026*: the facade applies it when converting, as
+  [ROADMAP](../ROADMAP.md) row FI-14; this crate still never does.
 - **No new crate and no `Filter` variant.** See below.
 
 ## Design

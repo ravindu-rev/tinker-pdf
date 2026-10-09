@@ -319,9 +319,9 @@ default and each composable with the others:
   syllables stay composed, and canonical reordering is not performed.
   `tinker_pdf_content::fold_diacritics` is the folding on its own.
 
-Regular expressions are not an option, and whether they should be is a
-decision the [roadmap](../ROADMAP.md) keeps: the tree has no regex engine and
-links none.
+Regular expressions are not an option yet: the tree has no regex engine and
+links none, and a hand-rolled linear-time one is [roadmap](../ROADMAP.md) row
+FT-20 since the owner's parity decision of 9 October 2026.
 
 ```rust
 let options = SearchOptions { whole_word: true, diacritic_insensitive: true, ..Default::default() };
@@ -659,7 +659,7 @@ crate has an API of its own; see [architecture](../architecture.md).
 | An `/MCR` whose `/Stm` does not name a content stream | `StructureWarning::ContentStreamNotAStream { element, stream }` | a stream is always indirect (7.3.8), so the value names nothing that could hold a sequence; read as though `/Stm` were absent rather than keyed on an object with no content, which would make the sequence findable nowhere | 14.7.4.2 |
 | An `/MCR` carrying `/StmOwn` without the `/Stm` it qualifies | `StructureWarning::StreamOwnerWithoutStream { element, owner }` | Table 324 permits the owner only beside a stream; an owner alone names the owner of a stream nobody named, so it is dropped | 14.7.4.2 |
 | An `/MCR` with no `/Stm` whose `/MCID` is in no page-stream sequence but in exactly one other stream on the page | `StructureWarning::ContentStreamAssumed { page, mcid }` | a producer that tags content inside a form and omits `/Stm` writes something 14.7.4.2 does not define; where one reading exists it is taken and named, and where two streams share the identifier it is refused, because that is the collision `/Stm` exists to resolve | 14.7.4.2 |
-| A marked-content sequence in a stream `/StmOwn` says another object owns — an annotation's `/AP` | — | page text extraction runs the page's stream and the forms it invokes, never an annotation's appearance, so such a reference matches nothing here rather than taking whatever else shares its number; extracting appearance-stream text is separate work | 14.7.4.2, 12.5.5 |
+| A marked-content sequence in a stream `/StmOwn` says another object owns — an annotation's `/AP` | — | page text extraction runs the page's stream and the forms it invokes, never an annotation's appearance, so such a reference matches nothing here rather than taking whatever else shares its number; extracting appearance-stream text is separate work | 14.7.4.2, 12.5.5; [ROADMAP](../ROADMAP.md) FT-27 |
 | `/ActualText` on a property list carrying no `/MCID` | — | the map is keyed by `(stream, /MCID)`, so a list with no identifier reaches no consumer | 14.9.4 |
 | Images inside a tiling pattern's cell, a soft-mask group or an annotation appearance | `Page::images()` does not list them | none is a drawing of the page's content: the renderer reaches a pattern cell and a mask group through its own device, not through the interpreter's `Do`, and an appearance belongs to the annotation | 8.7.3, 11.6.5, 12.5.5 |
 | A JPEG 2000 image's own opacity channel in extraction | `PageImage::samples` holds the colour channels only | `/SMaskInData` decides what the channel means (8.9.5.4), and a soft mask carried out of the codestream is not an `/SMask` image the type can name; the renderer applies it | 8.9.5.4 |

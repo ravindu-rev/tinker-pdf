@@ -410,15 +410,15 @@ let bitmap = doc.page(0).expect("a page").render(&RenderOptions::default());
 | A RAR 4 | `ArchiveRefusal::NotAZip` (leaf: `rar::Error::Rar4`) | recognised by its own signature and refused as *that version*; no producer here can write one, so a decoder would be unadjudicated (ruling 13) | [design/comic-archives.md](../design/comic-archives.md) |
 | A RAR entry compressed with methods 1–5 | `PageDefect::RarEntryRefused` | placeholder page naming the method. A **non-goal, not a debt**: RAR's compression has no published specification and the only implementation's licence bars deriving from it, so there is nothing rule 1 permits writing it from | [design/comic-archives.md](../design/comic-archives.md) |
 | A solid RAR entry | `PageDefect::RarEntryRefused` | its dictionary is the entry before it, and this build decompresses neither | — |
-| An encrypted RAR, or one volume of a set | `ArchiveRefusal::Encrypted` / `MultiDisk` | named non-goals; the fragment that happens to be here is not the archive | — |
+| An encrypted RAR, or one volume of a set | `ArchiveRefusal::Encrypted` / `MultiDisk` | a password seam and whole multi-volume sets are a roadmap row since 9 October 2026; the fragment that happens to be here is not the archive | [ROADMAP](../ROADMAP.md) SE-14 |
 | A 7z coder this build does not read | `ArchiveRefusal::NotAZip` | named by its own method id — `03` is the delta filter and `0A` ARM64's branch filter — so a host can say what to re-pack without | — |
 | A 7z folder whose coders do not form a tree | `ArchiveRefusal::NotAZip` (leaf: `sevenz::Error::NotAChain`) | a cycle, a stream fed twice or by nothing, a coder with two outputs, or a known coder with stream counts not its own: a graph with no answer, refused at open | — |
-| An encrypted 7z | `ArchiveRefusal::Encrypted` | AES-256 is a named non-goal, as it is for ZIP | — |
+| An encrypted 7z | `ArchiveRefusal::Encrypted` | AES-256 behind a password seam is a roadmap row since 9 October 2026, as it is for ZIP | [ROADMAP](../ROADMAP.md) SE-14 |
 | A 7z entry whose recorded CRC-32 does not match | `PageDefect::SevenZipEntryRefused` | placeholder page; **this is the check that adjudicates the LZMA decoder**, so it is never tolerated | — |
 | A sparse or multi-volume tar entry | `PageDefect::TarEntryRefused(TarEntryError)` | placeholder page; a reader that ignored the flag hands back bytes in the wrong places, which is worse than a page that failed | — |
 | A tar with no `ustar` magic | `ArchiveRefusal::NotAZip` | the magic is the only signature tar has, so a reader that did not require it accepts anything | — |
 | Archive damaged past recovery | `ArchiveRefusal::Damaged` | structure present, nothing recoverable from either route | — |
-| Every page entry encrypted | `ArchiveRefusal::Encrypted` | ZipCrypto and the AES extensions are named non-goals; nothing is left to page | — |
+| Every page entry encrypted | `ArchiveRefusal::Encrypted` | ZipCrypto and the AES extensions are a roadmap row since 9 October 2026; until then nothing is left to page | [ROADMAP](../ROADMAP.md) SE-14 |
 | Spanned / multi-disk archive | `ArchiveRefusal::MultiDisk` | the fragment that happens to be here is not the archive | — |
 | Zip64 value past the file | `ArchiveRefusal::Zip64OutOfBounds` | a declared size or offset the archive cannot contain | — |
 | Valid archive, no image entries | `ArchiveRefusal::NoImages` | a zero-page open is a failure dressed as a success | — |

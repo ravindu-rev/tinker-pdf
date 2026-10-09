@@ -26,6 +26,9 @@ These are given; this document states each boundary, not the argument.
 - **Spec baseline:** PDF 1.7 (ISO 32000-1). PDF 2.0 deltas that matter
   early are tracked in [pdf20-deltas.md](pdf20-deltas.md); full 2.0
   conformance is not a current goal.
+  *Since 9 October 2026* the owner's parity decision tracks it as
+  [ROADMAP](ROADMAP.md) row SD-18; this locked decision stands until the
+  owner amends it (H-08).
 - **Formats: PDF, and CBZ, XPS and EPUB** — the three container formats
   open as a `Document` by synthesizing a real PDF at `open`, so every
   downstream capability applies to all four ([cbz](features/cbz.md),
@@ -311,6 +314,9 @@ the same dozen lines in here would be code that cannot exist on wasm32 and
 that every embedder with an executor of its own would have to be talked out
 of. Ruling 11 says the facade is the only public surface; this is that
 surface staying small where the alternative is a second scheduler.
+*Since 9 October 2026* a facade pool behind `Parallelism::Serial` by default is
+[ROADMAP](ROADMAP.md) row P-15; this decision stands until the owner
+amends it (H-16).
 
 Which leaves the claim above needing something to exercise it, since a
 guarantee nothing tests is the kind this repository has caught itself

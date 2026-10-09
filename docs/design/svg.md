@@ -59,14 +59,20 @@ A picture that quietly drops one of these looks finished.
   rasterising the element inside the writer — at a resolution the book does
   not state, with the vector text under it lost to extraction. The element is
   drawn unfiltered. `Warning::FilterUnsupported`.
+  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row CD-10, exact
+  vector mappings first.
 - ~~**Masks** (§14.4)~~ — **drawn since the milestones**; see *As built*. A
   mask is a rendered alpha channel, and PDF has one: 11.6.5.2's soft mask.
 - **SMIL animation** (§19) and **scripting** (§18). A static rendering is the
   document's initial state, and saying so is the point.
   `Warning::AnimationIgnored`, `Warning::ScriptIgnored`.
+  *Scripting is no longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row
+  CD-12. SMIL stays a limit: a page is static.
 - **`<foreignObject>`** (§23). Its content is a different document language;
   reading it here would be a second XHTML reader.
   `Warning::ForeignObjectUnsupported`.
+  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row CD-11, laid
+  out by the facade so this crate stays a leaf.
 - **`<textPath>`, `<tref>` and `<altGlyph>`** (§10.13, §10.10, §10.14).
   Text on a path places each glyph by its advance along the curve and turns
   it to the tangent there, and an advance is a font metric this crate does
@@ -76,8 +82,8 @@ A picture that quietly drops one of these looks finished.
   element's content is not drawn. **Unscheduled, not decided**: none of the
   three has a file behind it here, and ruling 3 makes that a reason to wait
   for a count rather than a reason to refuse for good, so they stay a row in
-  the roadmap's tier 4 and not one of its named non-goals (*corrected on
-  review, 3 October 2026*).
+  the roadmap and not one of its named non-goals (*corrected on review,
+  3 October 2026*); since 9 October 2026 that row is [ROADMAP](../ROADMAP.md) CD-08.
 - ~~**`<pattern>` as a paint** (§13.3)~~ — **drawn since the milestones**;
   see *As built*. A tiling paint server is 8.7.3's tiling pattern, cell for
   cell.
@@ -101,6 +107,7 @@ A picture that quietly drops one of these looks finished.
 - **`switch`/`requiredFeatures` conditional processing** (§5.8). Every branch
   of a `<switch>` in a book is a language variant, and choosing one is a
   reading-system policy this build does not have.
+  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row CD-09.
 - **Writing an SVG.** This is a reader. The writer is the facade's
   (`crates/tinker-pdf/src/svg_out.rs`, `Page::to_svg`), a `Device` held to
   this crate by reading every file it makes back through it; it never emits

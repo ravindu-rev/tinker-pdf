@@ -54,6 +54,10 @@ scrutiny, so here is the honest framing:
   what lets `bignum` skip constant-time discipline — every value it handles is
   published in the document being checked — and it is a boundary a future
   signing feature would have to cross deliberately, not drift across.
+  The owner crossed it deliberately on 9 October 2026: signing with a private key
+  in the engine is scheduled as [ROADMAP](docs/ROADMAP.md) rows SG-01 to
+  SG-09, and from SG-01 on every secret operand takes a constant-time path.
+  Until SG-01 lands, the sentences above describe the code.
 - **Correctness is checked against published vectors** — RFC 1321 for MD5,
   RFC 6229 for RC4, worked examples for SHA-2, and known-answer tests for AES.
 

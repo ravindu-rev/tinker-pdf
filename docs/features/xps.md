@@ -164,7 +164,7 @@ the page synthesis.
 | Unknown element | `XpsElementDefect::ElementUnknown` | drawn around, never silently skipped | — |
 | Broken fixed representation, interleaved pieces that do not assemble into a part, invalid or ambiguous part names, no fixed pages | `ArchiveRefusal::{UnreadablePackage, Interleaved, InvalidPartName, AmbiguousPartNames, NoFixedPages}` | a package that *is* an XPS and is broken is refused, not paged as a comic. **Interleaving itself left this row**: pieces that assemble are joined, and `wpf-image-and-text-pieces.xps` is in the conservation sweep | [cbz](cbz.md) |
 | Page-level defects | `XpsPageDefect::{SourceUnresolved, DocumentUnresolved, Unreadable, ContentUnreadable, SizeUnusable, MediaTypeMismatch, PageBoxUnusable}` | the page becomes a placeholder that keeps its number | — |
-| Signatures, print tickets, 3D, story fragments | not read | parts the spine does not reach are ignored | — |
+| Signatures, print tickets, 3D, story fragments | not read | parts the spine does not reach are ignored | [ROADMAP](../ROADMAP.md) CD-13 |
 
 ### Decoded but unadjudicated
 

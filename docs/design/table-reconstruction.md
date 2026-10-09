@@ -39,22 +39,29 @@ adjudicator.
 
 - **Tables in images.** A scanned table is pixels; OCR is a host seam the
   roadmap keeps as a decision, and nothing here reads a raster.
+  *No longer a non-goal, 9 October 2026*: OCR is the roadmap's last tier, and
+  tables in images are its row OC-15a ([ROADMAP](../ROADMAP.md)).
 - **Tables across pages.** A table continued on the next page is two tables
   here, each named `TableWarning::MayContinue` when its last rule is the
   page's bottom margin. Joining them is a document-level question the sibling
   design's cross-page pass would own, and it is not designed here.
+  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row FT-32.
 - **Nested tables.** A lattice inside another's frame is refused by name
   (`TableWarning::NestedLattice`) and the outer table is returned. Real
   documents have them; the first delivery does not guess at them.
+  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row FT-32.
 - **Writing a `/Table`.** No inferred grid enters a structure tree, a written
   document, or a PDF/UA verdict — the same line
   [design/reading-order.md](reading-order.md) draws for orders.
+  *Narrowed, 9 October 2026*: auto-tagging a new document is [ROADMAP](../ROADMAP.md)
+  row SD-07; no inferred grid ever reaches a verdict about its input.
 - **Semantics.** `Scope`, `/Headers`, a caption's relation to its table, a
   merged cell's meaning: a producer states them or nobody does.
 - **A probability.** Evidence is named (`Ruled`, `Aligned`) and warnings are
   typed; no score pretends to a calibration nobody has.
 - **Serialisation.** CSV and JSON are the structured-text-serialisation
   row's; `InferredTable` is shaped so that row can write it.
+  That row is [ROADMAP](../ROADMAP.md) FT-32 since 9 October 2026.
 
 ## What the corpus carries, measured
 

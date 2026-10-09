@@ -45,11 +45,15 @@ unlike anything else in the tree.
 - **Recipients with different permissions.** 7.6.5 allows one envelope per
   group of recipients, each sealing its own `/P`. The writer seals every
   recipient into one envelope under one `/P`.
+  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row SE-07.
 - **Writing below `/V 5`** — `s3`, `s4`, RC4, AES-128. The writer emits
   `AESV3` and nothing else, as the standard handler's emits R6 and nothing
   else; reading all of them is unchanged.
+  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row SE-01, behind an
+  explicit legacy option with a typed weakness warning.
 - **Sealing to a key that is not RSA.** Key agreement is not read, so it is
   not written: an EC certificate is `SealError::NotRsa`.
+  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row SE-07.
 - **Sealing to an RSA key restricted to signing.** RFC 4055 §1.2 makes a key
   published under `id-RSASSA-PSS` an RSASSA-PSS key and nothing else, so it
   is `SealError::KeyRestricted`; only `rsaEncryption` is sealed to. Until
@@ -57,8 +61,12 @@ unlike anything else in the tree.
   `rsaEncryption` in its recipient info.
 - **Key material of any kind.** No PKCS#8, no PKCS#12, no passphrase handling,
   no RSA private-key arithmetic. The same rule signing follows.
+  *No longer a non-goal, 9 October 2026*: the owner's parity decision puts private-key
+  signing in the engine; key import is [ROADMAP](../ROADMAP.md) row SG-05 and
+  RSA signing SG-01.
 - **`KeyAgreeRecipientInfo`, `KEKRecipientInfo`, `PasswordRecipientInfo`** and
   the `other` shape (§6.2.2–§6.2.5). Recognised by tag and refused by name.
+  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row SE-07.
 - **Content-encryption algorithms beyond AES-128/256-CBC, RC4 and
   `des-ede3-cbc`.** Triple DES used to be listed here as the one real gap; it
   is implemented now (`tinker_pdf_crypto::des`, FIPS 46-3 tables, 500 NIST
@@ -69,6 +77,8 @@ unlike anything else in the tree.
   keys only, and neither has ever been a PDF default. They are named where
   they are met rather than guessed at, which is the same answer Triple DES
   used to get.
+  *No longer a non-goal, 9 October 2026*: AES-192 and RC2 are [ROADMAP](../ROADMAP.md)
+  row SE-07.
 - **Writing a `des-ede3-cbc` envelope**, or any DES encryption at all. The new
   module decrypts and nothing more; its single-block encrypt exists only
   because EDE3 decryption is `D(K1, E(K2, D(K3, c)))` and the middle step is
@@ -79,6 +89,8 @@ unlike anything else in the tree.
   (see [encryption](../features/encryption.md)), so honouring a second source
   of them would add a code path whose only effect is to disagree with the
   first.
+  *No longer a non-goal, 9 October 2026*: applying an envelope's `/P` is
+  [ROADMAP](../ROADMAP.md) row SE-07.
 
 ## Design
 

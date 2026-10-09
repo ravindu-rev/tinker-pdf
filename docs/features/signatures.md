@@ -311,12 +311,12 @@ let crl = document.cos().stream_decoded(store.crls[0]);
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| Private-key operations of any kind | none offered — `Signer` returns finished CMS | no key parsing, no key generation, no signing arithmetic; the engine never holds key material | [design](../design/signatures.md) |
-| A bundled root store | `Chain::NoAnchors` when the caller supplies none | which certificates to trust is a policy, and a library that ships one has made the caller's decision for them | this page |
+| Private-key operations of any kind | none offered — `Signer` returns finished CMS | no key parsing, no key generation, no signing arithmetic yet, so the engine holds no key material; signing with a private key in the engine is in scope since the owner's parity decision of 9 October 2026 | [ROADMAP](../ROADMAP.md) SG-01…SG-09, SG-23 |
+| A bundled root store | `Chain::NoAnchors` when the caller supplies none | which certificates to trust is a policy, and a library that ships one has made the caller's decision for them; trust lists the host supplies are a roadmap row, and bundling one is the owner's decision | [ROADMAP](../ROADMAP.md) SG-14 |
 | Deciding whether a certificate is expired, unasked | validity reported; judged only against a caller-supplied instant | ruling 4 bans a clock, and "expired" is a claim about *now* — a library that invents one answers differently on different days | [rulings](../rulings.md) ruling 4 |
-| CRL and OCSP fetching | embedded revocation data surfaced, never evaluated | the engine performs no I/O; freshness is the host's call | [design](../design/signatures.md) |
-| An elliptic curve that is not P-256 or P-384 | `Unchecked::UnsupportedKey`, naming the curve's OID | each curve needs its own constants and its own vectors; a curve nobody has produced a PDF signature on is a liability rather than a feature | RFC 5480 §2.1.1 |
-| A compressed elliptic-curve point | `Unchecked::UnsupportedKey`, naming the form octet | recovering `y` means a square root in the field and guessing its sign, which would produce a different key half the time; no corpus certificate carries one | SEC 1 §2.3.3 |
+| CRL and OCSP fetching | embedded revocation data surfaced, not yet evaluated | the engine performs no I/O, so fetching stays the host's; parsing and evaluating what the host supplies is a roadmap row | [ROADMAP](../ROADMAP.md) SG-10 |
+| An elliptic curve that is not P-256 or P-384 | `Unchecked::UnsupportedKey`, naming the curve's OID | each curve needs its own constants and its own vectors; P-521, the Brainpool curves and EdDSA are in scope since the owner's parity decision of 9 October 2026 | RFC 5480 §2.1.1; [ROADMAP](../ROADMAP.md) SG-02…SG-04 |
+| A compressed elliptic-curve point | `Unchecked::UnsupportedKey`, naming the form octet | recovering `y` means a square root in the field and guessing its sign, which would produce a different key half the time; no corpus certificate carries one | SEC 1 §2.3.3; [ROADMAP](../ROADMAP.md) SG-02 |
 | An indefinite length inside `signedAttrs` | `CmsError::IndefiniteSignedAttributes` | RFC 5652 §5.4 requires those bytes to be DER and they are what gets digested; BER is read everywhere else in a `SignedData`, and only here is it refused | RFC 5652 §5.4 |
 
 ## Verified

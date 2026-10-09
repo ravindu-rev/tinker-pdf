@@ -462,6 +462,10 @@ object, 7.3.10 — is still `None`. Each of the four warnings removed fires 1.
 
 - **Signing keys in the engine.** No key parsing (PKCS#8, PKCS#12), no key generation, no
   RSA/ECDSA *signing* arithmetic. The `Signer` callback returns finished CMS bytes.
+  *No longer a non-goal, 9 October 2026*: the owner's parity decision puts signing with a private
+  key in the engine, as [ROADMAP](../ROADMAP.md) rows SG-01 to SG-09 and SG-23. The sentence above
+  is what the build does until SG-01 lands, and the `Signer` seam stays beside in-engine
+  keys for keys the engine never sees.
 - **Revocation fetching.** No CRL or OCSP network traffic — the engine performs no I/O.
   Embedded revocation data is surfaced, and evaluating freshness is the host's call.
   *Corrected 2 October 2026*: this bullet used to say the document security store (PAdES
@@ -472,6 +476,9 @@ object, 7.3.10 — is still `None`. Each of the four warnings removed fires 1.
   signatures, and `DocumentEditor::add_validation_data` writes one from host-supplied
   certificates, CRLs and OCSP responses. Still surfaced, never evaluated: nothing parses a
   CRL or an OCSP response, and the verdict does not consult the store.
+  *Narrowed, 9 October 2026*: parsing and evaluating CRLs and OCSP responses, building the
+  requests a host sends, and consulting the store are [ROADMAP](../ROADMAP.md) row SG-10; the
+  fetching itself stays the host's, because the engine performs no I/O.
 - ~~**Timestamp validation.** RFC 3161 tokens inside CMS are parsed and reported (present,
   TSA name, time); validating the TSA's own chain is a later tier, not this design.~~ *No
   longer a non-goal, 2 October 2026*: `Verdict::timestamps` validates each token's imprint,
@@ -479,6 +486,8 @@ object, 7.3.10 — is still `None`. Each of the four warnings removed fires 1.
   above).
 - **Long-term validation profiles.** PAdES-LTA conformance levels are out; the verdict
   reports what is embedded, nothing more.
+  *No longer a non-goal, 9 October 2026*: the PAdES baseline levels with a level detector are
+  [ROADMAP](../ROADMAP.md) row SG-07, and validation per EN 319 102-1 is SG-12.
 - **The public-key security handler** (`/Filter /Adobe.PPKLite` encryption, 7.6.5) — related
   ASN.1, different feature.
 - ~~**Visible signature appearance generation.** A signed field keeps whatever appearance the
