@@ -6840,13 +6840,23 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
             mode: WriteMode::Rewrite,
             ..WriteOptions::default()
         });
-        let reopened = CosDocument::open(bytes).expect("it reopens");
+        let reopened = CosDocument::open(bytes.clone()).expect("it reopens");
         let streams = all_streams(&reopened);
-        assert!(
-            !streams.contains("SEC"),
-            "no letter of it survives: {streams}"
-        );
         assert_eq!(streams.matches("PUBLIC").count(), 2, "{streams}");
+        // Every string either page's stream still shows, `PUBLIC` taken out
+        // of it: no letter of `SECRET` in any piece of any spelling.
+        let rest = super::tests_support::literals(&streams).replace("PUBLIC", "");
+        assert!(
+            !rest.chars().any(|c| "SECRET".contains(c)),
+            "no letter of it survives: {rest:?} in {streams}"
+        );
+        let text = crate::Document::open(bytes)
+            .expect("it reopens")
+            .page(1)
+            .expect("the imported page")
+            .text()
+            .plain_text();
+        assert_eq!(text.trim(), "PUBLIC", "the extractor reads what is left");
     }
 
     /// The same run through the file's own font reader names the font it
@@ -8301,6 +8311,44 @@ pub(crate) mod tests_support {
             }
         }
         String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// Every literal string `content` holds, the parentheses taken off, in
+    /// order and run together: what is left of a covered word in the raw
+    /// decoded bytes whatever spelling — a `Tj`, a `TJ` array of pieces —
+    /// the cut wrote it in. The fixtures write no hex strings.
+    pub fn literals(content: &str) -> String {
+        let mut out = String::new();
+        let mut depth = 0usize;
+        let mut escaped = false;
+        for c in content.chars() {
+            if depth == 0 {
+                if c == '(' {
+                    depth = 1;
+                }
+                continue;
+            }
+            if escaped {
+                escaped = false;
+                out.push(c);
+                continue;
+            }
+            match c {
+                '\\' => escaped = true,
+                '(' => {
+                    depth += 1;
+                    out.push(c);
+                }
+                ')' => {
+                    depth -= 1;
+                    if depth > 0 {
+                        out.push(c);
+                    }
+                }
+                _ => out.push(c),
+            }
+        }
+        out
     }
 
     pub fn redact(doc: Arc<CosDocument>, areas: &[Redaction]) -> (Vec<u8>, RedactionReport) {
@@ -10782,12 +10830,25 @@ mod patterns_and_masks {
 
     /// Everything the facade's extractor reads on page zero, one line each,
     /// bottom to top.
+    ///
+    /// The extractor never reads a tiling cell or a mask's group, so for
+    /// these fixtures it reads nothing before a redaction as after, and only
+    /// [`shown`], the raw decoded bytes, says what a cut kept. It is asserted
+    /// all the same, as every redaction fixture's is.
     fn text_of(bytes: Vec<u8>) -> String {
         lines_of(bytes)
             .into_iter()
             .map(|(_, line)| line)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Every string every stream of `bytes` still shows, run together in
+    /// object order ([`literals`]): what a search of the raw decoded bytes
+    /// for a covered letter looks through, whatever spelling a cut wrote.
+    fn shown(bytes: &[u8]) -> String {
+        let doc = CosDocument::open(bytes.to_vec()).expect("it reopens");
+        literals(&all_streams(&doc))
     }
 
     /// Past [`MAX_PLACEMENTS`] tiles a cell is not measured: the page-sized
@@ -10825,10 +10886,12 @@ mod patterns_and_masks {
             }]
         );
         // The fixture's other `SECRET` is `/GS0`'s group, which this page
-        // does not set.
-        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
-        assert_eq!(streams.matches("SECRET").count(), 1, "{streams}");
-        assert!(streams.contains("(S)"), "{streams}");
+        // does not set; of the cell's, `S` and `T` are left and nothing the
+        // band covered, in whatever pieces the cut wrote it.
+        let shown = shown(&bytes);
+        assert_eq!(shown.matches("SECRET").count(), 1, "{shown:?}");
+        assert_eq!(shown.replacen("SECRET", "", 1), "ST", "{shown:?}");
+        assert_eq!(text_of(bytes), "");
     }
 
     /// A pattern a form paints with is measured where 8.7.2 anchors it —
@@ -10839,7 +10902,7 @@ mod patterns_and_masks {
     /// form's.
     #[test]
     fn a_cell_a_form_paints_with_is_measured_in_the_forms_space_too() {
-        let (_, report) = redact(
+        let (bytes, report) = redact(
             open(document("q 1 0 0 1 0 10 cm /Fm0 Do Q")),
             &[band(0.0, 18.0, 400.0, 24.0)],
         );
@@ -10848,6 +10911,12 @@ mod patterns_and_masks {
             .warnings
             .iter()
             .any(|w| matches!(w, RedactionWarning::RepeatedForm { form, .. } if form == b"Q0")));
+        // The band spans every column of the form's rows, so the whole word
+        // goes from the cell's one stream: what is left is `/GS0`'s group's,
+        // which this page does not set.
+        let shown = shown(&bytes);
+        assert_eq!(shown, "SECRET", "only the group's");
+        assert_eq!(text_of(bytes), "");
     }
 
     /// One cell is measured at no more than [`MAX_PLACEMENTS`] tiles, over
@@ -10955,12 +11024,11 @@ mod patterns_and_masks {
         assert!(report.glyphs > 0, "the group's glyphs went");
         assert_eq!(report.warnings, Vec::new(), "nothing left unmeasured");
         // The fixture's other `SECRET` is `/P0`'s cell, which this page does
-        // not paint with.
-        let before = all_streams(&open(document("/GS0 gs 0 0 200 200 re f")));
-        assert_eq!(before.matches("SECRET").count(), 2);
-        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
-        assert_eq!(streams.matches("SECRET").count(), 1, "{streams}");
-        assert!(!streams.contains("48 Tf\n10 10 Td\n(SECRET)"), "{streams}");
+        // not paint with: every string any stream shows is that one, so no
+        // letter of the group's is left in any spelling.
+        assert_eq!(shown(&document("/GS0 gs 0 0 200 200 re f")), "SECRETSECRET");
+        assert_eq!(shown(&bytes), "SECRET");
+        assert_eq!(text_of(bytes), "");
     }
 
     /// The group is drawn under the transform in force at the `gs`, not at
@@ -10972,17 +11040,12 @@ mod patterns_and_masks {
         let placed = "q 0.5 0 0 0.5 200 200 cm /GS0 gs Q 0 0 400 400 re f";
         let (bytes, report) = redact(open(document(placed)), &[band(200.0, 200.0, 400.0, 400.0)]);
         assert!(report.glyphs > 0);
-        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
-        assert_eq!(
-            streams.matches("SECRET").count(),
-            1,
-            "only /P0's cell: {streams}"
-        );
+        assert_eq!(shown(&bytes), "SECRET", "only /P0's cell");
+        assert_eq!(text_of(bytes), "");
 
         let (bytes, report) = redact(open(document(placed)), &[band(0.0, 0.0, 190.0, 190.0)]);
         assert_eq!(report.glyphs, 0, "the identity's place is not the group's");
-        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
-        assert_eq!(streams.matches("SECRET").count(), 2, "{streams}");
+        assert_eq!(shown(&bytes), "SECRETSECRET");
     }
 
     /// One group two pages draw through one graphics state: it cannot be
@@ -11021,8 +11084,9 @@ mod patterns_and_masks {
                 placements: 1,
             }]
         );
-        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
-        assert!(!streams.contains("SECRET"), "{streams}");
+        assert_eq!(shown(&bytes), "", "no letter of it, in either page's group");
+        assert_eq!(text_of(bytes.clone()), "");
+        assert_eq!(lines_on(bytes, 1), Vec::new());
     }
 
     #[test]
