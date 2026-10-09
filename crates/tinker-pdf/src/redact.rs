@@ -125,8 +125,10 @@
 //! [`RedactionWarning::RepeatedForm`]. A tile the fill does not reach is
 //! measured too, because this module does not follow paths: more removed,
 //! never less. Still named and not measured: a cell with more than
-//! [`MAX_PLACEMENTS`] tiles under the rectangles, one whose geometry places
-//! no lattice, and what a cell invokes beyond its own text and inline images
+//! [`MAX_PLACEMENTS`] tiles under the rectangles — counted over every space
+//! its lattice is anchored to, so the bound is the cell's and an anchoring
+//! that would pass it is the part not measured ([`cell_tiles`]) — one whose
+//! geometry places no lattice, and what a cell invokes beyond its own text and inline images
 //! (an XObject, a graphics state, another pattern); a glyph procedure's
 //! patterns are named as before ([`unread`]).
 //!
@@ -522,6 +524,7 @@
 //! | the lattice's last index rounded up | **1** |
 //! | a cut cell named without its pattern's name | 2 |
 //! | the tile cap four times looser | 3 |
+//! | the tile cap an anchoring's alone, which is how it was until the lane's review | 2 |
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
@@ -684,9 +687,10 @@ pub enum RedactionWarning {
     ///
     /// A cell is measured at every tile a rectangle meets, and cut
     /// ([`RedactionWarning::RepeatedForm`] names that). It is named here
-    /// instead when its tiles under the rectangles number more than
-    /// [`MAX_PLACEMENTS`] or its `/Matrix`, `/BBox` or steps place no
-    /// lattice; when it invokes an XObject, sets a graphics state or paints
+    /// instead when its tiles under the rectangles, over every space its
+    /// lattice is anchored to, number more than [`MAX_PLACEMENTS`] — the
+    /// tiles measured are then cut and the rest named — or its `/Matrix`,
+    /// `/BBox` or steps place no lattice; when it invokes an XObject, sets a graphics state or paints
     /// with another pattern, which its measurement does not follow (its own
     /// text is still cut); and when a Type 3 glyph's procedure paints with
     /// it. A cell that only paints paths is not named, because nothing it
@@ -1883,6 +1887,52 @@ fn tiles(
     Some(out)
 }
 
+/// Every tile one cell is measured at, over every space its lattice is
+/// anchored to ([`CellUse::bases`]), each transform once, and whether any
+/// anchoring went unmeasured — its lattice not placeable, or its tiles past
+/// what the cell has left of [`MAX_PLACEMENTS`].
+///
+/// **The bound is the cell's, not an anchoring's.** A cell keeps up to
+/// [`MAX_PLACEMENTS`] anchorings and [`tiles`] gives each up to as many
+/// tiles, so bounding each anchoring alone let one cell run some four
+/// thousand passes over its stream — a pattern a form paints with, the form
+/// drawn at sixty-four transforms under a band of fifty tiles, ran 3 465 —
+/// and reported them as `placements: 64`. An anchoring whose tiles would
+/// take the cell past the bound is not measured at all, and the caller names
+/// the cell ([`RedactionWarning::PatternOrMask`]), as it names one whose
+/// tiles under the rectangles are too many for one anchoring.
+fn cell_tiles(
+    matrix: Matrix,
+    bases: &[Matrix],
+    bbox: [f64; 4],
+    step: (f64, f64),
+    areas: &[Redaction],
+) -> (Vec<Matrix>, bool) {
+    let mut out: Vec<Matrix> = Vec::new();
+    let mut seen: HashSet<PlacementKey> = HashSet::new();
+    let mut unmeasured = false;
+    for base in bases {
+        let Some(placed) = tiles(matrix.then(*base), bbox, step, areas) else {
+            unmeasured = true;
+            continue;
+        };
+        let fresh: Vec<Matrix> = placed
+            .into_iter()
+            .filter(|tile| !seen.contains(&placement_key(*tile)))
+            .collect();
+        if out.len().saturating_add(fresh.len()) > MAX_PLACEMENTS {
+            unmeasured = true;
+            continue;
+        }
+        for tile in fresh {
+            if seen.insert(placement_key(tile)) {
+                out.push(tile);
+            }
+        }
+    }
+    (out, unmeasured)
+}
+
 /// Whether content invokes what a cell's measurement does not follow: an
 /// XObject (`Do`), a graphics state that may set a soft mask (`gs`), or
 /// another pattern (`scn` or `SCN` ending in a name).
@@ -1923,8 +1973,10 @@ fn draws_further(content: &[u8]) -> bool {
 /// per tile would be a pattern per tile.
 ///
 /// What is still named rather than measured, [`RedactionWarning::PatternOrMask`]:
-/// a cell whose tiles meeting the rectangles number more than
-/// [`MAX_PLACEMENTS`], or whose `/Matrix`, `/BBox` or steps cannot place a
+/// a cell whose tiles meeting the rectangles, over every space its lattice
+/// is anchored to, number more than [`MAX_PLACEMENTS`] ([`cell_tiles`]: the
+/// anchorings within the bound are cut, so one cell runs its stream at most
+/// that many times), or whose `/Matrix`, `/BBox` or steps cannot place a
 /// lattice; and a cell that invokes XObjects, sets graphics states or paints
 /// with another pattern, whose text is cut and whose further drawing is not
 /// followed. Each only when the cell carries something this module removes
@@ -1987,28 +2039,22 @@ fn cut_cells(
         let fonts = fonts_in(editor, &resources);
         let mut data = content.clone();
         let (mut glyphs, mut images, mut operations, mut measured) = (0, 0, 0, 0usize);
-        let mut unmeasured = false;
-        for base in &cell.bases {
-            let Some(placed) = tiles(matrix.then(*base), bbox, (xstep, ystep), areas) else {
-                unmeasured = true;
-                continue;
-            };
-            for tile in placed {
-                let (next, pass, _) = cut_stream(
-                    editor,
-                    &resources,
-                    &data,
-                    areas,
-                    &fonts,
-                    tile,
-                    &mut report.warnings,
-                );
-                data = next;
-                glyphs += pass.glyphs;
-                images += pass.images;
-                operations += pass.operations;
-                measured += 1;
-            }
+        let (placed, unmeasured) = cell_tiles(matrix, &cell.bases, bbox, (xstep, ystep), areas);
+        for tile in placed {
+            let (next, pass, _) = cut_stream(
+                editor,
+                &resources,
+                &data,
+                areas,
+                &fonts,
+                tile,
+                &mut report.warnings,
+            );
+            data = next;
+            glyphs += pass.glyphs;
+            images += pass.images;
+            operations += pass.operations;
+            measured += 1;
         }
         if (unmeasured || draws_further(&content)) && carries(&content) {
             note(&mut report.warnings, named);
@@ -2023,7 +2069,7 @@ fn cut_cells(
                 &mut report.warnings,
                 RedactionWarning::RepeatedForm {
                     form: cell.name.clone(),
-                    placements: measured.min(MAX_PLACEMENTS),
+                    placements: measured,
                 },
             );
         }
@@ -10802,6 +10848,78 @@ mod patterns_and_masks {
             .warnings
             .iter()
             .any(|w| matches!(w, RedactionWarning::RepeatedForm { form, .. } if form == b"Q0")));
+    }
+
+    /// One cell is measured at no more than [`MAX_PLACEMENTS`] tiles, over
+    /// every space its lattice is anchored to. Sixty-four anchorings, each a
+    /// lattice of 50 by 20 tiles of which the band meets about fifty: the
+    /// first anchoring's tiles are measured, and every anchoring whose tiles
+    /// would take the cell past the bound is not, and says so. Bounded per
+    /// anchoring alone, the cell ran 3 465 passes.
+    #[test]
+    fn a_cell_is_measured_at_no_more_tiles_than_the_bound_over_all_its_anchorings() {
+        let bases: Vec<Matrix> = (0..MAX_PLACEMENTS)
+            .map(|i| Matrix::translate(i as f64 * 0.37, i as f64 * 0.11))
+            .collect();
+        let (placed, unmeasured) = cell_tiles(
+            Matrix::IDENTITY,
+            &bases,
+            [0.0, 0.0, 50.0, 20.0],
+            (50.0, 20.0),
+            &[band(0.0, 0.0, 350.0, 100.0)],
+        );
+        assert!(
+            !placed.is_empty() && placed.len() <= MAX_PLACEMENTS,
+            "{}",
+            placed.len()
+        );
+        assert!(unmeasured, "the anchorings past the bound are said to be");
+
+        // One anchoring within the bound is measured whole — nine columns by
+        // seven rows, the tiles that only touch the band's edges among them
+        // — and nothing is left unmeasured.
+        let (placed, unmeasured) = cell_tiles(
+            Matrix::IDENTITY,
+            &bases[..1],
+            [0.0, 0.0, 50.0, 20.0],
+            (50.0, 20.0),
+            &[band(0.0, 0.0, 350.0, 100.0)],
+        );
+        assert_eq!(placed.len(), 9 * 7);
+        assert!(!unmeasured);
+    }
+
+    /// The same through a page: `/Fm0`, which paints with `/Q0`, drawn at
+    /// sixty-four transforms, under the reviewer's band. The cell is cut at
+    /// the tiles it was measured at — `RepeatedForm` counts them, and they
+    /// are no more than the bound — and named, because the tiles of the
+    /// anchorings past it were measured against nothing.
+    #[test]
+    fn a_cell_anchored_past_its_bound_is_cut_where_measured_and_named() {
+        let content: String = (0..MAX_PLACEMENTS)
+            .map(|i| format!("q 1 0 0 1 {} {} cm /Fm0 Do Q\n", i * 3, i * 2))
+            .collect();
+        let (_, report) = redact(open(document(&content)), &[band(0.0, 0.0, 350.0, 100.0)]);
+        assert!(report.glyphs > 0, "{:?}", report.warnings);
+        let placements = report
+            .warnings
+            .iter()
+            .find_map(|w| match w {
+                RedactionWarning::RepeatedForm { form, placements } if form == b"Q0" => {
+                    Some(*placements)
+                }
+                _ => None,
+            })
+            .expect("the cell was cut");
+        assert!(
+            placements > 0 && placements <= MAX_PLACEMENTS,
+            "{placements}"
+        );
+        assert!(
+            report.warnings.contains(&named(b"Q0")),
+            "the anchorings past the bound: {:?}",
+            report.warnings
+        );
     }
 
     #[test]
