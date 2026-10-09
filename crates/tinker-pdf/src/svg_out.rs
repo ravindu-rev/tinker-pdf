@@ -366,6 +366,7 @@ impl DisplayList {
         // reports is what it met — `DisplayList::render`'s reason exactly.
         let resources = self.resources().for_one_render();
         resources.note_missing_fonts(self.interpreted_missing());
+        resources.note_repaired_spaces(self.interpreted_repairs());
         let mut writer = Writer::new(&resources, base, page, options);
         replay(self.content(), &mut writer);
         if options.annotations {
@@ -627,6 +628,12 @@ impl<'a> Writer<'a> {
         }
         for (name, reason) in resources.damaged_images() {
             self.warn(SvgWarning::Render(RenderWarning::DamagedImage {
+                name,
+                reason,
+            }));
+        }
+        for (name, reason) in resources.repaired_spaces() {
+            self.warn(SvgWarning::Render(RenderWarning::RepairedColorSpace {
                 name,
                 reason,
             }));

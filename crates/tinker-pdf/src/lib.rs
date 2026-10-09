@@ -2388,6 +2388,14 @@ impl Page {
                 warnings.push(warning);
             }
         }
+        // And a colour space read with a repair, for the same reason: the
+        // colours are drawn, and "read as written" stays distinguishable.
+        for (name, reason) in resources.repaired_spaces() {
+            let warning = RenderWarning::RepairedColorSpace { name, reason };
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
         if scaled_down {
             warnings.push(RenderWarning::PageScaledDown {
                 requested: scale,

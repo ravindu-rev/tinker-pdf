@@ -49,8 +49,8 @@
 //! region that misses a patterned fill, a render cancelled before anything was
 //! drawn — says nothing about it. The interpretation itself ran once, when the
 //! list was recorded, so what *it* could not resolve (a font name the resource
-//! dictionary does not define) is kept beside the events and reported by every
-//! replay that runs to the end. A cancelled replay reports none of it: a
+//! dictionary does not define), and the colour spaces it read with a repair, are
+//! kept beside the events and reported by every replay that runs to the end. A cancelled replay reports none of it: a
 //! cancelled direct render reports what its interpreter reached before it
 //! stopped, which depends on when it stopped, so the replay's answer is the
 //! one a render cancelled before the first such font would give — less, and
@@ -95,6 +95,10 @@ pub struct DisplayList {
     /// Font names the recording's interpretation could not resolve — what a
     /// direct render's interpreter reports, met once rather than per render.
     interpreted_missing: Vec<String>,
+    /// Colour spaces the recording's interpretation read with a repair — a
+    /// `cs` resolves its space while the content is interpreted, which a
+    /// replay does not do again.
+    interpreted_repairs: Vec<(String, String)>,
     /// Whether the calls are kept: false when recording them passed
     /// `MAX_DISPLAY_LIST_BYTES`, and every render is then a direct one.
     retained: bool,
@@ -130,6 +134,7 @@ impl Page {
         // Nothing has been drawn through these resources yet, so everything
         // they list is the interpretation's.
         let interpreted_missing = resources.missing_fonts();
+        let interpreted_repairs = resources.repaired_spaces();
         let content = recorder.take();
         let annotations = if recorder.overflowed() {
             Vec::new()
@@ -145,6 +150,7 @@ impl Page {
                 content: Vec::new(),
                 annotations: Vec::new(),
                 interpreted_missing: Vec::new(),
+                interpreted_repairs: Vec::new(),
                 retained: false,
             };
         }
@@ -154,6 +160,7 @@ impl Page {
             content,
             annotations,
             interpreted_missing,
+            interpreted_repairs,
             retained: true,
         }
     }
@@ -184,6 +191,7 @@ impl DisplayList {
                 // why a cancelled one reports none of it.
                 if !replayed.cancelled {
                     resources.note_missing_fonts(&self.interpreted_missing);
+                    resources.note_repaired_spaces(&self.interpreted_repairs);
                 }
                 if options.annotations {
                     for annotation in &self.annotations {
@@ -208,6 +216,11 @@ impl DisplayList {
     /// What the recording's interpretation could not resolve.
     pub(crate) fn interpreted_missing(&self) -> &[String] {
         &self.interpreted_missing
+    }
+
+    /// The colour spaces the recording's interpretation read with a repair.
+    pub(crate) fn interpreted_repairs(&self) -> &[(String, String)] {
+        &self.interpreted_repairs
     }
 
     /// The page's own calls.

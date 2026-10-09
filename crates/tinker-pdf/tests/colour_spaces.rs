@@ -231,6 +231,108 @@ fn an_unordered_lab_range_draws_as_the_range_it_spans() {
     let backwards = lab("10 -10 -100 100");
     let forwards = lab("-10 10 -100 100");
     assert_eq!(pixel(&backwards, 20, 20), pixel(&forwards, 20, 20));
+    // Ruling 10: the leniency is named, once, by the space's resource name.
+    assert_eq!(
+        backwards.warnings,
+        vec![tinker_pdf::RenderWarning::RepairedColorSpace {
+            name: "Lb".to_string(),
+            reason: "LabRangeUnordered".to_string(),
+        }],
+    );
+    assert!(forwards.warnings.is_empty(), "{:?}", forwards.warnings);
+}
+
+/// **A `/Lab` `/Range` written backwards is named wherever it is read**: by
+/// a `cs` resource, by an image XObject's own `/ColorSpace` and by an inline
+/// image's, each under the name it was reached by — on a render, on every
+/// replay of a display list (the `cs` was resolved once, when the list was
+/// recorded, and the image's decode is cached after the first replay), and
+/// on a page written as SVG. Until the third review of lane 8A the space was
+/// read as the span it covers and nothing said so.
+#[test]
+fn an_unordered_lab_range_is_named_wherever_it_is_read() {
+    let lab = |range: &str| format!("[/Lab << /WhitePoint [0.9642 1 0.8249] /Range [{range}] >>]");
+    let document = |a: &str, b: &str| {
+        let content = format!(
+            "/Lb cs 50 40 0 scn 0 0 10 40 re f \
+             q 10 0 0 40 10 0 cm /Im0 Do Q \
+             q 10 0 0 40 20 0 cm BI /W 1 /H 1 /BPC 8 /CS {} ID \u{80}\u{80}\u{80} EI Q",
+            lab(b)
+        );
+        let image = "\u{80}\u{80}\u{80}";
+        let bytes = format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
+   /Resources << /ColorSpace << /Lb {} >> /XObject << /Im0 5 0 R >> >> \
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Image /Width 1 /Height 1 \
+   /BitsPerComponent 8 /ColorSpace {} /Length 3 >>\nstream\n{image}\nendstream\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+            lab(a),
+            content.len() + 1,
+            lab(b),
+        );
+        // `\u{80}` is two bytes in a Rust string and one in the stream.
+        let bytes: Vec<u8> = bytes
+            .chars()
+            .map(|c| u8::try_from(u32::from(c)).expect("one byte"))
+            .collect();
+        Document::open(bytes).expect("it opens")
+    };
+    let repaired = |name: &str| tinker_pdf::RenderWarning::RepairedColorSpace {
+        name: name.to_string(),
+        reason: "LabRangeUnordered".to_string(),
+    };
+    let named = |warnings: &[tinker_pdf::RenderWarning]| -> Vec<String> {
+        let mut names: Vec<String> = warnings
+            .iter()
+            .filter_map(|w| match w {
+                tinker_pdf::RenderWarning::RepairedColorSpace { name, reason } => {
+                    assert_eq!(reason, "LabRangeUnordered");
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    let all = vec!["Im0".to_string(), "Lb".to_string(), "inline".to_string()];
+
+    let backwards = document("10 -10 -100 100", "-10 10 100 -100");
+    let page = backwards.page(0).expect("a page");
+    let direct = page.render(&RenderOptions::default());
+    assert_eq!(named(&direct.warnings), all, "{:?}", direct.warnings);
+    assert!(direct.warnings.contains(&repaired("Lb")));
+
+    let list = page.display_list();
+    assert!(list.is_retained());
+    for replay in 0..2 {
+        let bitmap = list.render(&RenderOptions::default());
+        assert_eq!(named(&bitmap.warnings), all, "replay {replay}");
+        assert_eq!(bitmap.data, direct.data, "replay {replay}");
+    }
+
+    let svg = page.to_svg(&tinker_pdf::SvgOptions::default());
+    let in_svg: Vec<tinker_pdf::RenderWarning> = svg
+        .warnings
+        .iter()
+        .filter_map(|w| match w {
+            tinker_pdf::SvgWarning::Render(w) => Some(w.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(named(&in_svg), all, "{:?}", svg.warnings);
+
+    let forwards = document("-10 10 -100 100", "-10 10 -100 100");
+    let bitmap = forwards
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    assert!(named(&bitmap.warnings).is_empty(), "{:?}", bitmap.warnings);
 }
 
 /// L* of 100 with no chroma is white. Read as RGB it clamps to (1, 0, 0) after

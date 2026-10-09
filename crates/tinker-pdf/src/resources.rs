@@ -46,6 +46,10 @@ type OutlineCache = HashMap<(u64, u32), (Option<Arc<Outline>>, Option<String>)>;
 struct CachedImage {
     image: Result<Arc<DecodedImage>, String>,
     damage: Vec<(String, String)>,
+    /// What [`PageResources::repaired_spaces`] gained under the image's name
+    /// while it decoded, said again by every render that meets the image
+    /// here, as `damage` is.
+    repairs: Vec<(String, String)>,
 }
 
 /// What a page's resources work out once and every render of the page can
@@ -164,6 +168,10 @@ pub struct PageResources {
     /// what the decoder tolerated)`. Ruling 10: the leaf crate says what it
     /// forgave, and this is where the object it happened in gets attached.
     damaged_images: Mutex<Vec<(String, String)>>,
+    /// Colour spaces whose parameters were read the nearest way that means
+    /// something, as `(resource name, what was repaired)` — reported as
+    /// [`tinker_pdf_render::RenderWarning::RepairedColorSpace`] (ruling 10).
+    repaired_spaces: Mutex<Vec<(String, String)>>,
     /// While [`crate::Page::images`] decodes one image, what the decoders
     /// tolerated for **that** image, so the leniency lands on the
     /// [`crate::PageImage`] it happened to rather than only on the page's
@@ -421,6 +429,24 @@ impl PageResources {
             .unwrap_or_default()
     }
 
+    /// Colour spaces read with a repair, and which repair (ruling 10).
+    #[must_use]
+    pub(crate) fn repaired_spaces(&self) -> Vec<(String, String)> {
+        self.repaired_spaces
+            .lock()
+            .map(|spaces| spaces.clone())
+            .unwrap_or_default()
+    }
+
+    /// Adds repairs some other pass over the same content met — the
+    /// interpretation a retained page recorded — to what this render reports,
+    /// as [`PageResources::note_missing_fonts`] does for fonts.
+    pub(crate) fn note_repaired_spaces(&self, entries: &[(String, String)]) {
+        for entry in entries {
+            self.note_repaired_space(entry.clone());
+        }
+    }
+
     /// These resources again, for **one render** of a page whose resources
     /// are kept across renders — a retained page's: every cache shared, so
     /// nothing decoded or extracted is paid for twice, and nothing tolerated
@@ -444,6 +470,7 @@ impl PageResources {
             caches: Arc::clone(&self.caches),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
+            repaired_spaces: Mutex::new(Vec::new()),
             image_capture: Mutex::new(None),
             unresolved: Mutex::new(None),
             provider: self.provider.clone(),
@@ -491,6 +518,7 @@ impl PageResources {
             caches: Arc::default(),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
+            repaired_spaces: Mutex::new(Vec::new()),
             image_capture: Mutex::new(None),
             unresolved: Mutex::new(None),
             provider: provider.cloned(),
@@ -560,7 +588,7 @@ impl PageResources {
             return None;
         }
         let cs = group.get(self.doc.intern(b"CS")).cloned()?;
-        self.parse_space(&cs, 0).map(group_space)
+        self.parse_space(&cs, 0, b"Group").map(group_space)
     }
 
     /// Reads a resource dictionary that is not a page's.
@@ -594,6 +622,7 @@ impl PageResources {
             caches: Arc::default(),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
+            repaired_spaces: Mutex::new(Vec::new()),
             image_capture: Mutex::new(None),
             unresolved: Mutex::new(None),
             provider: provider.cloned(),
@@ -837,7 +866,7 @@ impl PageResources {
             table.as_dict()?.get(self.doc.intern(name)).cloned()
         });
         match entry {
-            Some(entry) => self.parse_space(&entry, 0),
+            Some(entry) => self.parse_space(&entry, 0, name),
             None => match name {
                 b"G" => Some(ColorSpace::DeviceGray),
                 b"RGB" => Some(ColorSpace::DeviceRgb),
@@ -847,7 +876,7 @@ impl PageResources {
         }
     }
 
-    fn parse_space(&self, object: &Object, depth: u32) -> Option<ColorSpace> {
+    fn parse_space(&self, object: &Object, depth: u32, name: &[u8]) -> Option<ColorSpace> {
         if depth > 8 {
             return None;
         }
@@ -897,7 +926,7 @@ impl PageResources {
                 Some(ColorSpace::Approximated { components })
             }
             b"Indexed" | b"I" => {
-                let base = self.parse_space(items.get(1)?, depth + 1)?;
+                let base = self.parse_space(items.get(1)?, depth + 1, name)?;
                 let high = items.get(2).and_then(|o| self.doc.resolve(o).as_int())?;
                 let lookup = match items.get(3).map(|o| self.doc.resolve(o)) {
                     Some(value) => match value.as_string() {
@@ -925,7 +954,7 @@ impl PageResources {
                         .as_array()
                         .map_or(1, <[Object]>::len)
                 };
-                let alternate = self.parse_space(items.get(2)?, depth + 1)?;
+                let alternate = self.parse_space(items.get(2)?, depth + 1, name)?;
 
                 // 8.6.6.4: the fourth element converts tint values into the
                 // alternate space. Left as the identity, a one-ink Separation
@@ -953,7 +982,7 @@ impl PageResources {
             b"Pattern" => Some(ColorSpace::Pattern {
                 base: items
                     .get(1)
-                    .and_then(|o| self.parse_space(o, depth + 1))
+                    .and_then(|o| self.parse_space(o, depth + 1, name))
                     .map(Box::new),
             }),
             // 8.6.5.2 and 8.6.5.3. These were aliased to the device spaces,
@@ -1013,6 +1042,16 @@ impl PageResources {
                         (values.len() >= 4).then(|| [values[0], values[1], values[2], values[3]])
                     })
                     .unwrap_or([-100.0, 100.0, -100.0, 100.0]);
+                // Table 65: `[amin amax bmin bmax]`. A pair written backwards
+                // is read as the span it covers — `tinker_pdf_color`'s
+                // `within`, which is what stopped it panicking — and that is a
+                // leniency, so it is named (ruling 10).
+                if range[0] > range[1] || range[2] > range[3] {
+                    self.note_repaired_space((
+                        String::from_utf8_lossy(name).into_owned(),
+                        "LabRangeUnordered".to_string(),
+                    ));
+                }
                 Some(ColorSpace::Lab { range })
             }
             _ => None,
@@ -1045,7 +1084,12 @@ impl PageResources {
     /// a type 4 to 7 shading is a **stream** (8.7.4.5.5), and its vertices are
     /// the stream's bytes. A mesh written as a direct dictionary has no
     /// vertices at all, which is reported rather than drawn as an empty area.
-    fn read_shading(&self, dict: &Dict, reference: Option<ObjRef>) -> Result<Option<Shading>, i64> {
+    fn read_shading(
+        &self,
+        dict: &Dict,
+        reference: Option<ObjRef>,
+        name: &[u8],
+    ) -> Result<Option<Shading>, i64> {
         let kind = self
             .doc
             .resolve_key(dict, self.doc.intern(b"ShadingType"))
@@ -1053,7 +1097,9 @@ impl PageResources {
             .unwrap_or(0);
 
         let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
-        let space = self.parse_space(&space, 0).unwrap_or(ColorSpace::DeviceRgb);
+        let space = self
+            .parse_space(&space, 0, name)
+            .unwrap_or(ColorSpace::DeviceRgb);
         let function = self.function(dict).unwrap_or(Function::Identity);
 
         let coords = self.doc.resolve_key(dict, self.doc.intern(b"Coords"));
@@ -1372,7 +1418,7 @@ impl FontSource for PageResources {
         if subtype.as_ref() != b"Form" {
             return None;
         }
-        self.form_from(&dict, reference)
+        self.form_from(&dict, reference, name)
     }
 
     fn resolve_color(&self, space: &[u8], components: &[f64]) -> Option<Rgb> {
@@ -1479,7 +1525,7 @@ impl FontSource for PageResources {
         // `/G` is required, and is a form XObject with a transparency group.
         let reference = mask.get_ref(self.doc.intern(b"G"))?;
         let group_dict = self.doc.get(reference).ok()?.as_dict()?.clone();
-        let form = self.form_from(&group_dict, reference)?;
+        let form = self.form_from(&group_dict, reference, name)?;
 
         // 11.6.5.2: `/S` selects what the rendered group is read as. A name
         // this build does not know is `/Alpha`'s opposite rather than an
@@ -1509,7 +1555,7 @@ impl FontSource for PageResources {
                     .resolve_key(&group_dict, self.doc.intern(b"Group"))
                     .as_dict()
                     .and_then(|g| g.get(self.doc.intern(b"CS")).cloned())
-                    .and_then(|cs| self.parse_space(&cs, 0));
+                    .and_then(|cs| self.parse_space(&cs, 0, name));
                 let (r, g, b) = match space {
                     Some(space) => space.to_rgb(&components),
                     None => by_component_count(&components),
@@ -1670,7 +1716,7 @@ impl GlyphSource for PageResources {
             return Ok(None);
         };
 
-        self.read_shading(dict, reference)
+        self.read_shading(dict, reference, name)
     }
 
     fn pattern(&self, name: &[u8]) -> Option<PatternPaint> {
@@ -1699,7 +1745,7 @@ impl GlyphSource for PageResources {
                 // A mesh that cannot be read at all is as unpaintable inside a
                 // pattern as anywhere else, and reports as an unpainted
                 // pattern rather than as a missing one.
-                let Ok(Some(shading)) = self.read_shading(shading, reference) else {
+                let Ok(Some(shading)) = self.read_shading(shading, reference, name) else {
                     return Some(PatternPaint::Unsupported);
                 };
                 Some(PatternPaint::Shading(Box::new(shading), matrix))
@@ -1803,6 +1849,9 @@ impl GlyphSource for PageResources {
                     }
                 }
             }
+            for entry in resources.repaired_spaces() {
+                self.note_repaired_space(entry);
+            }
         }
 
         Some(tinker_pdf_render::Tile { canvas, warnings })
@@ -1828,6 +1877,9 @@ impl GlyphSource for PageResources {
                 for entry in &hit.damage {
                     self.note_damaged_image(entry.clone());
                 }
+                for entry in &hit.repairs {
+                    self.note_repaired_space(entry.clone());
+                }
                 return match &hit.image {
                     Ok(image) => Ok(Some((**image).clone())),
                     Err(codec) => Err(codec.clone()),
@@ -1850,13 +1902,27 @@ impl GlyphSource for PageResources {
                     .collect()
             })
             .unwrap_or_default();
+        // And the repairs, by the same rule: the decode names its colour
+        // space by the image's name.
+        let repairs: Vec<(String, String)> = self
+            .repaired_spaces()
+            .into_iter()
+            .filter(|(named, _)| *named == label)
+            .collect();
         let image = match &decoded {
             Ok(image) => Ok(Arc::new(image.clone())),
             Err(codec) => Err(codec.clone()),
         };
         if let Ok(mut cache) = self.caches.images.lock() {
             if cache.len() < 256 {
-                cache.insert(name.to_vec(), CachedImage { image, damage });
+                cache.insert(
+                    name.to_vec(),
+                    CachedImage {
+                        image,
+                        damage,
+                        repairs,
+                    },
+                );
             }
         }
         decoded.map(Some)
@@ -1873,7 +1939,12 @@ impl PageResources {
     /// resource table, and a second reader for the same dictionary is how
     /// `/Matrix` or `/BBox` comes to be honoured on one route and not the
     /// other.
-    fn form_from(&self, dict: &Dict, reference: ObjRef) -> Option<tinker_pdf_content::Form> {
+    fn form_from(
+        &self,
+        dict: &Dict,
+        reference: ObjRef,
+        name: &[u8],
+    ) -> Option<tinker_pdf_content::Form> {
         let content = self.doc.stream_decoded(reference).ok()?;
         // 8.10.2: /Matrix maps the form's space into the one that invoked it.
         let matrix = self
@@ -1946,7 +2017,7 @@ impl PageResources {
                     space: group
                         .get(self.doc.intern(b"CS"))
                         .cloned()
-                        .and_then(|cs| self.parse_space(&cs, 0))
+                        .and_then(|cs| self.parse_space(&cs, 0, name))
                         .map(group_space),
                 })
             });
@@ -2133,6 +2204,19 @@ impl PageResources {
         if let Ok(mut damaged) = self.damaged_images.lock() {
             if damaged.len() < 64 && !damaged.contains(&entry) {
                 damaged.push(entry);
+            }
+        }
+    }
+
+    /// Adds a colour space read with a repair to what this render met, once.
+    ///
+    /// Once per name and repair rather than per use: the `cs` path asks for
+    /// the space at every `sc`, and a page that sets a colour a thousand times
+    /// has one space to report.
+    fn note_repaired_space(&self, entry: (String, String)) {
+        if let Ok(mut repaired) = self.repaired_spaces.lock() {
+            if repaired.len() < 64 && !repaired.contains(&entry) {
+                repaired.push(entry);
             }
         }
     }
@@ -3005,7 +3089,7 @@ impl PageResources {
 
         let space = self.doc.resolve_key(&dict, self.doc.intern(b"ColorSpace"));
         let space = self
-            .parse_space(&space, 0)
+            .parse_space(&space, 0, name)
             .unwrap_or(ColorSpace::DeviceGray);
         let n = space.components();
 
@@ -3359,7 +3443,7 @@ impl PageResources {
 
         let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
         let space = self
-            .parse_space(&space, 0)
+            .parse_space(&space, 0, INLINE_NAME.as_bytes())
             .unwrap_or(ColorSpace::DeviceGray);
         let n = if is_mask { 1 } else { space.components() };
 

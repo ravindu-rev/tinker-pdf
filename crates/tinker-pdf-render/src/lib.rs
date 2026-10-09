@@ -175,6 +175,30 @@ pub enum RenderWarning {
         /// The decoder's own stable identifier for what it tolerated.
         reason: String,
     },
+    /// A colour space's parameters said something no space can mean, and
+    /// were read the nearest way that means something.
+    ///
+    /// Ruling 10, for the same reason as [`RenderWarning::DamagedImage`]: the
+    /// page is drawn, and "the colours were read" stays distinguishable from
+    /// "the colours were read as written". `reason` is a stable identifier;
+    /// today there is one, `LabRangeUnordered` — a `/Lab` space whose
+    /// `/Range` writes a pair backwards, `[10 -10 …]`, which 8.6.5.4's
+    /// Table 65 makes a minimum then a maximum, read as the span it covers.
+    ///
+    /// Reported once per name and repair, wherever the facade reports what
+    /// its resources tolerated — a space read through the page's resources
+    /// or a tiling cell's — and not yet through a form XObject's or an
+    /// annotation appearance's own `/Resources`, which keep what they
+    /// tolerate to themselves (`rendering.md`'s refusal table).
+    RepairedColorSpace {
+        /// The resource name the space was reached under: a `/ColorSpace`
+        /// entry's for `cs`, or the image's, shading's, pattern's, form's or
+        /// graphics state's whose dictionary names the space — and `Group`
+        /// for a page's own `/Group`.
+        name: String,
+        /// What was repaired.
+        reason: String,
+    },
     /// The page was too large to render at the requested resolution, so it
     /// was rendered smaller.
     ///

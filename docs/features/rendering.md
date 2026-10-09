@@ -19,7 +19,11 @@ the alternate space (8.6.6.4, 8.6.6.5); `/Lab` converts through XYZ at the
 D50 white point (8.6.5.4), kept separate because its components are not in
 0..1 and clamping them there renders the whole space black; `a*` and `b*` are
 held to `/Range` in whichever order its pairs come (a backwards pair panicked
-the colour crate until October 2026). An `ICCBased` space is converted
+the colour crate until October 2026), and a backwards pair is named —
+`RenderWarning::RepairedColorSpace` with the resource name the space was
+reached by and `LabRangeUnordered`, on a render, every display-list replay and
+a page written as SVG (`an_unordered_lab_range_is_named_wherever_it_is_read`);
+until the third review of lane 8A it was read that way silently. An `ICCBased` space is converted
 through **its own profile** (ICC.1): the header and tag table are read, the
 three `XYZ` columns and three tone curves compile once into fixed-point
 tables, and each colour is a lookup plus an integer matrix multiply, so
@@ -716,6 +720,7 @@ a defect to hide in.
 | A font program that could not be read | `RenderWarning::UnreadableFont` | Its glyphs are not drawn; the rest of the page is | [content and text](content-and-text.md) |
 | A shading that cannot be read into types 1–7 | `RenderWarning::UnsupportedShading` | Reported by type number rather than guessed at | [rulings](../rulings.md) |
 | A pattern whose cell cannot be read, or a lattice past 65 536 positions / 16.7 Mpx / 33.5 Mpx | `RenderWarning::UnsupportedPattern` | Unpainted reads as missing; `/Pattern`'s nominal black reads as content and hides the gap | [rulings](../rulings.md) |
+| A colour space whose parameters no space can mean, read the nearest way that does: today a `/Lab` `/Range` pair written backwards, read as the span it covers | `RenderWarning::RepairedColorSpace { name, reason }`, `reason` `LabRangeUnordered` | Drawn *and* named (ruling 10). Named where the space is reached through the page's resources or a tiling cell's, as every tolerance the resource layer reports is; **not yet** through a form XObject's or an annotation appearance's own `/Resources`, which keep what they tolerate to themselves — a font a form's own resources cannot resolve goes unreported the same way, measured October 2026 | [rulings](../rulings.md) |
 | A layer the default configuration turns off | `RenderWarning::HiddenOptionalContent` | Correct behaviour, reported all the same — the one leniency a reader cannot see | [rulings](../rulings.md) |
 | More than 2 000 transparency-group buffers on one page | `RenderWarning::GroupBudgetSpent` | A budget, not a depth: branching soft-mask recursion stays inside any depth cap | [rulings](../rulings.md) |
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |

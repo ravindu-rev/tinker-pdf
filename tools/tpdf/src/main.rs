@@ -2854,6 +2854,7 @@ fn render_warning_label(warning: &tinker_pdf::RenderWarning) -> String {
     match warning {
         W::UnsupportedImage { codec } => format!("UnsupportedImage({codec})"),
         W::DamagedImage { reason, .. } => format!("DamagedImage({reason})"),
+        W::RepairedColorSpace { reason, .. } => format!("RepairedColorSpace({reason})"),
         W::PageScaledDown { .. } => "PageScaledDown".to_string(),
         W::EmptyTextClip => "EmptyTextClip".to_string(),
         W::UnreadableFont => "UnreadableFont".to_string(),
