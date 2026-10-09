@@ -1145,7 +1145,7 @@ pub fn cascade_from<E: Element>(
     // for why it is a walk of its own.
     crate::counter::resolve(elements, &styles, &mut generated, &mut report, budget)?;
     note_flattened_opacity(elements, &styles, &mut report);
-    note_unturned_direction(&styles, &mut report);
+    note_unturned_direction(elements, &styles, &mut report);
     note_fixed_under_transform(elements, &styles, &mut report);
 
     Ok(StyleTree {
@@ -1173,34 +1173,107 @@ fn casing_needs_language(language: &str) -> bool {
         .any(|named| primary.eq_ignore_ascii_case(named))
 }
 
-/// Counts every right-to-left element whose `direction` reaches past its text
-/// into a layout this build sets left to right.
+/// Counts every element whose layout a right-to-left `direction` turns where
+/// this build sets it left to right.
 ///
 /// `direction` is honoured where it decides a paragraph — the base level of
-/// its lines, which side `start` aligns to, and the side an outside list
-/// marker stands on — and through `unicode-bidi`'s embeddings. CSS 2.2 §9.10
-/// gives it three more jobs this layout does not do: a table's columns run
-/// from the right (§17.5), a flex row's main axis does (`css-flexbox-1` §2)
-/// and so do a multi-column container's columns (`css-multicol-1` §3); and
-/// an over-constrained block — a definite `width` and neither margin `auto` —
-/// gives up its `margin-left` rather than its `margin-right` (§10.3.3). Each
-/// such right-to-left element is counted against `direction`, so a table read
-/// mirror-wise is not read as honoured.
-fn note_unturned_direction(styles: &[ComputedStyle], report: &mut Report) {
-    for style in styles {
-        if style.direction != Direction::Rtl || style.display == Display::None {
+/// its lines, which side `start` aligns to and `text-indent` is taken from,
+/// and the side an outside list marker stands on — and through
+/// `unicode-bidi`'s embeddings. CSS 2.2 §9.10 gives it more jobs this layout
+/// does not do, and each is counted against `direction` by element, so a
+/// table read mirror-wise is not read as honoured:
+///
+/// - **an element's own direction** runs a table's columns from the right
+///   (§17.5), a flex row's main axis (`css-flexbox-1` §2) and a multi-column
+///   container's columns (`css-multicol-1` §3);
+/// - **its containing block's direction** decides which margin of an
+///   over-constrained block in normal flow gives way — a definite `width`
+///   and neither margin `auto` — the right one under `ltr` and the left one
+///   under `rtl` (§10.3.3). The block's own `direction` is not asked: a
+///   right-to-left `<div style="width: 50%">` in a left-to-right body gives
+///   up its right margin, which is what this layout does, and a left-to-right
+///   one inside a right-to-left block gives up its left, which it does not
+///   (review of lane 8C);
+/// - and the same for an absolutely positioned or fixed box (§10.3.7):
+///   placed by `left` with `left`, `width` and `right` all stated in a
+///   right-to-left containing block, and at its static position's left edge
+///   with both insets `auto` in a right-to-left block, where the section puts
+///   `right` there.
+///
+/// The containing block of a box in normal flow is its nearest block
+/// container ancestor's content box, of an absolutely positioned one its
+/// nearest positioned — or transformed — ancestor's, and of a fixed one, as
+/// of the root, the initial containing block, whose direction is the root's
+/// (§10.1).
+fn note_unturned_direction<E: Element>(
+    elements: &[E],
+    styles: &[ComputedStyle],
+    report: &mut Report,
+) {
+    // Per element, whether the containing block it gives an in-flow block
+    // descendant reads right to left, and the same for an absolutely
+    // positioned one. Parents first: every parent's index is below its
+    // child's, so both are final before a child reads them.
+    let mut flow_rtl = vec![false; elements.len()];
+    let mut positioned_rtl = vec![false; elements.len()];
+    let mut root_rtl = false;
+    for (at, element) in elements.iter().enumerate() {
+        let Some(style) = styles.get(at) else {
+            continue;
+        };
+        let rtl = style.direction == Direction::Rtl;
+        let parent = element.parent();
+        if parent.is_none() {
+            root_rtl = rtl;
+        }
+        let (flow_cb, positioned_cb) = parent.map_or((rtl, rtl), |parent| {
+            (
+                flow_rtl.get(parent).copied().unwrap_or(root_rtl),
+                positioned_rtl.get(parent).copied().unwrap_or(root_rtl),
+            )
+        });
+        flow_rtl[at] = if style.display == Display::Inline {
+            flow_cb
+        } else {
+            rtl
+        };
+        positioned_rtl[at] = if style.position != Position::Static || !style.transform.is_empty() {
+            rtl
+        } else {
+            positioned_cb
+        };
+        if style.display == Display::None {
             continue;
         }
-        let laid_left_to_right = matches!(
-            style.display,
-            Display::Table | Display::Flex | Display::InlineFlex
-        ) || style.column_count != ColumnCount::Auto
-            || style.column_width != ColumnWidth::Auto;
-        let over_constrained = matches!(style.display, Display::Block | Display::ListItem)
-            && style.width != Size::Auto
-            && style.margin.left != MarginValue::Auto
-            && style.margin.right != MarginValue::Auto;
-        if laid_left_to_right || over_constrained {
+        let laid_left_to_right = rtl
+            && (matches!(
+                style.display,
+                Display::Table | Display::Flex | Display::InlineFlex
+            ) || style.column_count != ColumnCount::Auto
+                || style.column_width != ColumnWidth::Auto);
+        let placed_from_the_left = match style.position {
+            Position::Absolute | Position::Fixed => {
+                let containing = if style.position == Position::Fixed {
+                    root_rtl
+                } else {
+                    positioned_cb
+                };
+                match (style.inset.get(Side::Left), style.inset.get(Side::Right)) {
+                    (Inset::Auto, Inset::Auto) => flow_cb,
+                    (Inset::Length(_), Inset::Length(_)) => containing && style.width != Size::Auto,
+                    _ => false,
+                }
+            }
+            _ => {
+                flow_cb
+                    && style.float == Float::None
+                    && matches!(style.display, Display::Block | Display::ListItem)
+                    && style.width != Size::Auto
+                    && style.margin.left != MarginValue::Auto
+                    && style.margin.right != MarginValue::Auto
+            }
+        };
+        if laid_left_to_right || placed_from_the_left {
             report.note_unsupported("direction");
         }
     }

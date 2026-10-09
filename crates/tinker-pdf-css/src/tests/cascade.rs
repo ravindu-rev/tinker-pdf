@@ -868,9 +868,10 @@ fn the_unsupported_census_counts_elements_reached() {
 /// An embedding is opened by the box that declares it, so the `span` inside
 /// the isolating `div` reads `normal` while it reads `rtl`. The table lays
 /// its columns from the left here and the `p` — a definite width, neither
-/// margin `auto` — gives up its right margin where CSS 2.2 §10.3.3 gives up
-/// its left: two elements. The `div` and the `span` are inline and lose
-/// nothing.
+/// margin `auto`, in the right-to-left `div` that is its containing block (the
+/// root's is the initial containing block, in the root's direction) — gives
+/// up its right margin where CSS 2.2 §10.3.3 gives up its left: two elements.
+/// The `div` and the `span` are inline and lose nothing.
 #[test]
 fn direction_inherits_and_is_counted_where_layout_does_not_turn() {
     let nodes = tree(&[

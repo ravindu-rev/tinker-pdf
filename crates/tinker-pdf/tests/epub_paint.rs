@@ -1226,10 +1226,19 @@ fn a_feature_asked_of_a_face_this_build_does_not_shape_is_counted() {
 /// counts nothing, nor does an isolate inside it. A right-to-left table lays
 /// its columns from the left here (CSS 2.2 §17.5), a flex row its items
 /// (`css-flexbox-1` §2) and a multi-column container its columns
-/// (`css-multicol-1` §3); an over-constrained right-to-left block — a
-/// definite `width`, neither margin `auto` — gives up its right margin where
-/// §10.3.3 gives up its left. Each such element is counted against
-/// `direction`, and one with a margin `auto` is not over-constrained. An
+/// (`css-multicol-1` §3); and a block over-constrained in a right-to-left
+/// containing block — a definite `width`, neither margin `auto` — gives up
+/// its right margin where §10.3.3 gives up its left. Each such element is
+/// counted against `direction`, and one with a margin `auto` is not
+/// over-constrained. **The margin is the containing block's to decide**, not
+/// the block's own (review of lane 8C): a right-to-left `div` with a width
+/// in the left-to-right body gives up its right margin, as this layout does,
+/// and is not counted; a left-to-right one inside a right-to-left `div` gives
+/// up its left, which this layout does not, and is. An absolutely positioned
+/// box in a right-to-left block is placed from the right by §10.3.7 — at its
+/// static position with both insets `auto`, and by `right` when `left`,
+/// `width` and `right` are all stated — and counted; with `right` alone it
+/// is placed from the right here too. An
 /// override is drawn by nobody: `<bdo>`'s `isolate-override` and an
 /// author's `bidi-override` are refused by value and counted against
 /// `unicode-bidi`, per element they reached.
@@ -1265,11 +1274,42 @@ fn direction_and_unicode_bidi_count_what_this_layout_does_not_do() {
             "",
             "<div dir=\"rtl\" style=\"width: 50%\"><p>a</p></div>",
             "direction",
+            None,
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><div style=\"width: 50%\"><p>a</p></div></div>",
+            "direction",
             Some(1),
         ),
         (
             "",
-            "<div dir=\"rtl\" style=\"width: 50%; margin-left: auto\"><p>a</p></div>",
+            "<div dir=\"rtl\"><div dir=\"ltr\" style=\"width: 50%\"><p>a</p></div></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><div style=\"width: 50%; margin-left: auto\"><p>a</p></div></div>",
+            "direction",
+            None,
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><p style=\"position: absolute; width: 50px\">a</p></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\" style=\"position: relative\">\
+             <p style=\"position: absolute; left: 0; right: 0; width: 50px\">a</p></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><p style=\"position: absolute; right: 0; width: 50px\">a</p></div>",
             "direction",
             None,
         ),
