@@ -1646,9 +1646,13 @@ fn path_data(path: &[PathSegment], m: &Matrix) -> String {
 /// has no cancel hook and the budget is asked once a piece. A pattern whose
 /// every dash has no length — `[0 0.01]` — cuts no piece at all, and
 /// [`tinker_pdf_raster::dash`] says so without walking the path, where it
-/// used to take its 100 000 steps a segment to find nothing; any other
-/// pattern cuts a piece each time round, so the steps between one piece and
-/// the next are bounded by the pattern's length and the segments crossed.
+/// used to take its 100 000 steps a segment to find nothing. Dashes of no
+/// length among others are taken out before the walk, so every dash it
+/// steps through has length and cuts a piece: the steps between one piece
+/// and the next are two, besides the segments a dash or a gap crosses, and
+/// the budget stops the time with the markup. Until the third review of
+/// lane 8A they were a step each, and 250 of them padding one real dash made
+/// a piece cost 502 steps — about 21 a byte of markup.
 fn dashed_pieces(
     path: &[PathSegment],
     back: &Matrix,

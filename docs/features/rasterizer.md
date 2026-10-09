@@ -118,6 +118,19 @@ lane 8A it took its 100 000 steps a segment to find nothing, so a caller
 bounding the work by the pieces it is handed had none to stop on: a page of
 two hundred such segments took 1.65 s (debug) to write as SVG and render,
 and now under 10 ms (`dashes_of_no_length_cut_nothing_without_walking_the_line`).
+A dash of no length among dashes with length is taken out before the walk
+and the gaps either side of it joined (`without_empty_dashes`; an odd pattern
+is written out twice first, as the walk reads it, and turned to start at its
+first dash with length, its phase moved to match), which leaves every piece
+where it was and costs the walk no step: until the third review of lane 8A
+each entry was a step, so 250 dashes of no length padding one of 0.001 made
+a piece cost 502 steps, the per-segment bound ran out a fifth of the way
+along a thousand-long segment, and a caller bounding its work by the pieces —
+`Page::to_svg`, which has no cancel hook — paid about 21 steps a byte: 800
+segment pairs took 3.7 s (debug) to write 7.5 MB. They now write 15 MB, every
+piece of every segment, in 0.63 s — what `[0.001 2.51]` writes, at its cost
+(`a_dash_of_no_length_costs_no_step_of_the_walk`). A pattern with no dash of
+no length is walked exactly as before.
 
 **Hard edges.** `Mask::harden` turns a coverage mask into one that is whole or
 empty at every pixel: at least half becomes 255, less becomes 0. It is what

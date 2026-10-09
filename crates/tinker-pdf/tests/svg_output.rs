@@ -533,6 +533,50 @@ fn dashes_of_no_length_write_no_piece() {
     );
 }
 
+/// **Dashes of no length among others write what the others cut.** The
+/// third review of lane 8A padded one dash of 0.001 with 250 dashes of no
+/// length and their gaps: each entry was a step of the cutter, so a piece
+/// cost 502 steps, the 100 000-step bound per segment ran out a fifth of
+/// the way along each thousand-long segment, and the markup budget — asked
+/// once a piece, with no cancel hook behind it — let 800 segment pairs run
+/// 3.7 s (debug) for 7.5 MB, about 21 steps a byte. The cutter now takes
+/// them out before it walks (`tinker_pdf_raster::dash`), so the page writes
+/// exactly what the same dash written plainly, `[0.001 2.51]` at the phase
+/// that puts its gap first, writes — every piece of every segment — at that
+/// pattern's cost per byte. The step count is pinned where it lives, in the
+/// raster crate's `a_dash_of_no_length_costs_no_step_of_the_walk`.
+#[test]
+fn dashes_of_no_length_among_others_write_what_the_others_cut() {
+    let page = |pattern: &str| {
+        let mut content = format!("0 0 0 RG q 1 0 0 3 0 0 cm 0 w {pattern} 0 0 m");
+        for _ in 0..4 {
+            content.push_str(" 1000 0 l 0 0 l");
+        }
+        content.push_str(" S Q");
+        pdf(&content, 100, 100, "<< >>", &[])
+    };
+    let padded = format!("[{}0.001 0.01] 0 d", "0 0.01 ".repeat(250));
+    let padded = svg_of(page(&padded));
+    let plain = svg_of(page("[0.001 2.51] 0.011 d"));
+    assert!(padded.warnings.is_empty(), "{:?}", padded.warnings);
+    assert!(plain.warnings.is_empty(), "{:?}", plain.warnings);
+    let (padded_scene, k) = read_back(&padded);
+    let (plain_scene, _) = read_back(&plain);
+    let outline = |scene: &Scene| match paths(scene).first() {
+        Some(Node::Path { outline, .. }) => outline.segments.clone(),
+        _ => panic!("a dashed path"),
+    };
+    let (padded, plain) = (outline(&padded_scene), outline(&plain_scene));
+    // 398 pieces a segment, eight segments, two points a piece.
+    assert!(plain.len() > 6000, "{} segments", plain.len());
+    assert_eq!(kinds(&padded), kinds(&plain), "the same pieces");
+    close(
+        &points(&padded, k),
+        &points(&plain, k),
+        "the padded pattern's pieces",
+    );
+}
+
 /// **Those pieces follow the curve under a large stretch.** The dashes are
 /// cut in user space, so the curve is flattened there, at a hundredth of a
 /// point over the map's largest stretch. A quarter circle of radius 0.001

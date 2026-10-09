@@ -243,7 +243,10 @@ pub fn stroke_mapped(
 /// A pattern whose every dash has no length — `[0 0.01]` — leaves no piece,
 /// a dash of no length being a single point, and that is answered without
 /// walking the path: otherwise the walk spends its bound on every segment
-/// with nothing handed over that a caller could stop it on.
+/// with nothing handed over that a caller could stop it on. A dash of no
+/// length among others is taken out before the walk, its gaps joined, so
+/// every dash the walk steps through has length and a piece is handed over
+/// every other step, besides the segments a dash or a gap crosses.
 pub fn dash(
     path: &Path,
     dashes: &[f64],
@@ -334,11 +337,15 @@ fn each_dash(
 
     // Where in the pattern the phase starts.
     let total: f64 = pattern.iter().sum();
-    let mut remaining_phase = if style.dash_phase.is_finite() {
+    let phase = if style.dash_phase.is_finite() {
         style.dash_phase.rem_euclid(total)
     } else {
         0.0
     };
+    // A dash of no length among dashes with length: cut nothing, cost
+    // nothing. A pattern with none is walked exactly as it always was.
+    let (pattern, mut remaining_phase) =
+        without_empty_dashes(&pattern, phase).unwrap_or((pattern, phase));
     let mut index = 0usize;
     while remaining_phase > 0.0 {
         let step = pattern.get(index % pattern.len()).copied().unwrap_or(0.0);
@@ -421,6 +428,65 @@ fn each_dash(
         return piece(current);
     }
     true
+}
+
+/// `pattern` with its dashes of no length taken out and the gaps either
+/// side of each joined, and `phase` moved to match — or `None` when every
+/// dash has length, and the pattern is walked as it is.
+///
+/// A dash of no length is a single point, which [`each_dash`] drops (a
+/// piece needs two), so taking it out leaves every piece where it was.
+/// What it saves is time: each entry is a step of the walk, so 250 dashes
+/// of no length padding one of 0.001 were 502 steps a piece, the
+/// 100 000-step bound per segment ran out a fifth of the way along a line
+/// a thousand long, and a caller bounding its work by the pieces it is
+/// handed, with no cancel hook to stop it otherwise, paid hundreds of
+/// steps for each. Without them a piece is cut every other step, besides
+/// the segments a dash or a gap crosses.
+///
+/// The walk reads an odd pattern's entries as dashes and gaps by turns, so
+/// it is written out twice, which the walk reads the same way; and the
+/// result starts at its first dash with length, so that dashes of no length
+/// at the start join the gap at the end. `phase` is where the walk's own
+/// reduction puts it — in `[0, sum)` of the pattern as given, so an odd
+/// pattern's second time round is reached by walking, as it always was —
+/// and moves back by what the turn skipped. Every entry is finite and not
+/// negative, and one dash has length: the caller has filtered and answered
+/// every other pattern already.
+fn without_empty_dashes(pattern: &[f64], phase: f64) -> Option<(Vec<f64>, f64)> {
+    let twice: Vec<f64>;
+    let even = if pattern.len() % 2 == 1 {
+        twice = [pattern, pattern].concat();
+        &twice[..]
+    } else {
+        pattern
+    };
+    let pairs: Vec<(f64, f64)> = even
+        .chunks_exact(2)
+        .filter_map(|pair| match *pair {
+            [on, off] => Some((on, off)),
+            _ => None,
+        })
+        .collect();
+    if pairs.iter().all(|(on, _)| *on > 0.0) {
+        return None;
+    }
+    let first = pairs.iter().position(|(on, _)| *on > 0.0)?;
+    let skipped: f64 = pairs.iter().take(first).map(|(on, off)| on + off).sum();
+    let mut kept: Vec<(f64, f64)> = Vec::with_capacity(pairs.len());
+    for &(on, off) in pairs.iter().cycle().skip(first).take(pairs.len()) {
+        match kept.last_mut() {
+            Some(last) if on <= 0.0 => last.1 += off,
+            _ => kept.push((on, off)),
+        }
+    }
+    let total: f64 = kept.iter().map(|(on, off)| on + off).sum();
+    let phase = (phase - skipped).rem_euclid(total);
+    let phase = if phase.is_finite() { phase } else { 0.0 };
+    Some((
+        kept.into_iter().flat_map(|(on, off)| [on, off]).collect(),
+        phase,
+    ))
 }
 
 fn stroke_polyline(poly: &[Point], radius: f64, style: &StrokeStyle, out: &mut Sink<'_>) {
@@ -1407,5 +1473,84 @@ mod tests {
             odd.first().is_some_and(|piece| piece.len() > 1),
             "an odd pattern's entries are dashes every other time round"
         );
+    }
+
+    /// The pieces two walks cut, side by side: as many, and each point
+    /// within a nanometre of its twin.
+    fn same_pieces(left: &[Vec<Point>], right: &[Vec<Point>], what: &str) {
+        assert_eq!(left.len(), right.len(), "{what}: how many pieces");
+        for (i, (a, b)) in left.iter().zip(right).enumerate() {
+            assert_eq!(a.len(), b.len(), "{what}: piece {i}'s points");
+            for (p, q) in a.iter().zip(b) {
+                assert!(
+                    (p.x - q.x).abs() < 1e-9 && (p.y - q.y).abs() < 1e-9,
+                    "{what}: piece {i} at {p:?} against {q:?}"
+                );
+            }
+        }
+    }
+
+    /// **A dash of no length costs no step of the walk**, among dashes with
+    /// length as well as alone. It is a single point, which the walk drops,
+    /// so it cuts nothing — but each entry was a step, and the third review
+    /// of lane 8A padded one dash of 0.001 with 250 dashes of no length and
+    /// their gaps (502 entries, under the interpreter's 512-operand stack):
+    /// 502 steps a piece, so the 100 000-step bound per segment ran out a
+    /// fifth of the way along a line a thousand long, and a caller of
+    /// [`dash`] with no cancel hook, bounding its output by the pieces it
+    /// is handed, spent about 21 steps per byte it wrote.
+    ///
+    /// Taken out before the walk, with the gaps either side joined, every
+    /// piece is where it was and the whole line is cut in a step per entry
+    /// left: the padded pattern cuts exactly what `[0.001 2.51]` cuts at the
+    /// phase that puts its gap first, and asks `stop` once (the walk's
+    /// first step) where it asked 98 times. An odd pattern is read twice
+    /// round, so `[0 1 2]` is `[2 0 1 3]` turned to start one in, at every
+    /// phase; and one in the middle, `[1 1 0 1]`, is `[1 2]`.
+    #[test]
+    fn a_dash_of_no_length_costs_no_step_of_the_walk() {
+        let line = [Point::new(0.0, 0.0), Point::new(1000.0, 0.0)];
+        let style = |dashes: &[f64], phase: f64| StrokeStyle {
+            dashes: dashes.to_vec(),
+            dash_phase: phase,
+            ..StrokeStyle::default()
+        };
+        let mut padded = Vec::new();
+        for _ in 0..250 {
+            padded.extend_from_slice(&[0.0, 0.01]);
+        }
+        padded.extend_from_slice(&[0.001, 0.01]);
+        let asked = std::cell::Cell::new(0u32);
+        let ask = || {
+            asked.set(asked.get() + 1);
+            false
+        };
+        let cut = apply_dashes(&line, &style(&padded, 0.0), Some(&ask));
+        let plain = apply_dashes(&line, &style(&[0.001, 2.51], 0.011), None);
+        assert!(plain.len() > 390, "{} pieces", plain.len());
+        same_pieces(&cut, &plain, "250 dashes of no length and one of 0.001");
+        assert_eq!(
+            asked.get(),
+            1,
+            "a step per dash and gap, not one per entry: {} asks",
+            asked.get()
+        );
+
+        for phase in [0.0, 0.5, 1.0, 2.5, 2.999] {
+            same_pieces(
+                &apply_dashes(&line, &style(&[0.0, 1.0, 2.0], phase), None),
+                &apply_dashes(
+                    &line,
+                    &style(&[2.0, 0.0, 1.0, 3.0], (phase - 1.0).rem_euclid(6.0)),
+                    None,
+                ),
+                &format!("[0 1 2] at {phase}"),
+            );
+            same_pieces(
+                &apply_dashes(&line, &style(&[1.0, 1.0, 0.0, 1.0], phase), None),
+                &apply_dashes(&line, &style(&[1.0, 2.0], phase), None),
+                &format!("[1 1 0 1] at {phase}"),
+            );
+        }
     }
 }
