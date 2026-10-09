@@ -499,6 +499,70 @@ fn a_zero_width_dashed_line_under_a_stretch_is_cut_in_user_space() {
     assert!(stroke.dashes.is_empty(), "the pieces are the dashes");
 }
 
+/// **A clipped stroke under its user-space pen is clipped in page space.**
+/// The stroke carries the pen's `transform`, and SVG 1.1 §14.3.5 reads a
+/// `userSpaceOnUse` clip in the user space of the element that names it —
+/// its own `transform` included — so a `clip-path` on the `<path>` would
+/// carry the page-space clip through `matrix(1/3 0 0 -1 0 100)` and cut the
+/// line at page `x` 50/3 instead of 50. The clip is named by a `<g>` around
+/// the stroke instead, as an image's is, and reads back as that group's clip
+/// in page space: `0 0 50 100 re` is `x` 0 to 50 over the whole height.
+#[test]
+fn a_clipped_stroke_under_its_pen_transform_is_clipped_in_page_space() {
+    let svg = svg_of(pdf(
+        "0 0 50 100 re W n q 1 0 0 3 0 0 cm 0 0 0 RG 2 w 10 10 m 90 10 l S Q",
+        100,
+        100,
+        "<< >>",
+        &[],
+    ));
+    assert!(svg.warnings.is_empty(), "{:?}", svg.warnings);
+    let [Some(under)] = stroke_transforms(&svg)[..] else {
+        panic!("one stroke, under a transform: {}", svg.markup)
+    };
+    assert!((under[0] - 1.0 / 3.0).abs() < 1e-12, "{under:?}");
+    let at = svg.markup.find("<path d=\"M30").expect("the stroke");
+    let element = &svg.markup[at..at + svg.markup[at..].find("/>").expect("closed")];
+    assert!(
+        !element.contains("clip-path"),
+        "not on the transformed path: {element}"
+    );
+    assert!(
+        svg.markup[..at].ends_with("<g clip-path=\"url(#c1)\">"),
+        "on a group around it: {}",
+        svg.markup
+    );
+
+    let (scene, k) = read_back(&svg);
+    let Some(Node::Group {
+        nodes,
+        clip: Some(clip),
+        ..
+    }) = scene.nodes.first()
+    else {
+        panic!("a clipped group: {:?}", scene.nodes)
+    };
+    let corners: Vec<[f64; 2]> = points(&clip.outline.segments, k)
+        .into_iter()
+        .flatten()
+        .collect();
+    let low = |axis: usize| corners.iter().map(|p| p[axis]).fold(f64::MAX, f64::min);
+    let high = |axis: usize| corners.iter().map(|p| p[axis]).fold(f64::MIN, f64::max);
+    close(
+        &[vec![[low(0), low(1)]], vec![[high(0), high(1)]]],
+        &[vec![[0.0, 0.0]], vec![[50.0, 100.0]]],
+        "the clip, in page space",
+    );
+    let Some(Node::Path {
+        stroke: Some(_),
+        clip: None,
+        ..
+    }) = nodes.first()
+    else {
+        panic!("the stroke inside it, unclipped itself: {nodes:?}")
+    };
+}
+
 /// **A clip** is a `<clipPath>` the element names, and the reader hands back
 /// the clip's own rectangle beside the fill it clips.
 #[test]

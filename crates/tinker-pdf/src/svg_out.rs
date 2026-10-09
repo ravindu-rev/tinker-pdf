@@ -52,6 +52,8 @@
 //!   `tinker-pdf-svg` reads one clip per element and not that chain, so the
 //!   reader sees the innermost clip of a nested pair; the file is right and
 //!   the reader is one clip short, which `docs/features/rendering.md` records.
+//!   A clipped stroke written under its pen's `transform` sits inside a `<g>`
+//!   that names the clip, for the reason an image does, below.
 //! - **An image is an `<image>` with a PNG `data:` URI**, its samples as
 //!   decoded — a stencil in the fill colour, a soft-masked image with its
 //!   alpha — placed on the unit square by the image's own transform. A
@@ -845,7 +847,19 @@ impl<'a> Writer<'a> {
             }
         }
         push_opacity(&mut element, "stroke-opacity", state.stroke_alpha);
-        element.push_str(&self.clip_attr());
+        let clip = self.clip_attr();
+        if under.is_some() && !clip.is_empty() {
+            // Not `clip-path` on the `<path>` that carries the pen's
+            // `transform`: SVG 1.1 §14.3.5 reads a `userSpaceOnUse` clip in
+            // the naming element's user space, its own `transform` included,
+            // so the page-space clip would be carried through the pen's map
+            // and cut in the wrong place. A `<g>` with no transform names it
+            // in page space, as an image's `<g>` does.
+            element.push_str("/>");
+            self.put(&format!("<g{clip}>{element}</g>\n"));
+            return;
+        }
+        element.push_str(&clip);
         element.push_str("/>\n");
         self.put(&element);
     }

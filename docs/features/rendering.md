@@ -391,7 +391,12 @@ stroking in user space as 8.4.3.2 does (a zero-width dashed line there is
 written as its dashes, cut in user space); caps, joins, miter limit;
 a clip is a `<clipPath>` in page space, and a clip inside a clip names its
 parent with `clip-path` on the `<clipPath>`, which is §14.3.5's
-intersection; an image is a PNG `data:` URI of its decoded samples — a
+intersection; a clipped stroke under its pen's `transform` sits inside a
+`<g>` that names the clip, because §14.3.5 reads a clip named by the
+`<path>` through that path's own `transform`
+(`a_clipped_stroke_under_its_pen_transform_is_clipped_in_page_space`;
+until the review of lane 8A it was named by the path, and a conforming
+viewer cut the line at a third of the clip's width under `scale(1, 3)`); an image is a PNG `data:` URI of its decoded samples — a
 stencil in the fill colour, a soft mask as its alpha — on the unit square,
 inside a `<g>` that names its clip because a clip named by the `<image>`
 would be read through the image's own transform; **a picture drawn again is
