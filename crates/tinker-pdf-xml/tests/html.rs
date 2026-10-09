@@ -375,6 +375,58 @@ fn tag_soup_is_a_document() {
     );
 }
 
+/// **The prescan's `<meta>` is §13.2.3.2's, variable for variable.** A
+/// `charset` attribute overrides a `content` on its `<meta>` whichever comes
+/// first, and one whose label names no encoding is *failure*, so that
+/// `<meta>` names none and the bytes are guessed at; and `x-user-defined` is
+/// read as windows-1252. The lane read the content's encoding past a bogus
+/// `charset`, and set `x-user-defined` aside as not decoded.
+#[test]
+fn the_prescan_reads_a_meta_as_section_13_2_3_2_does() {
+    let guessed = |bytes: &[u8]| {
+        let decoding = html::parse_bytes(bytes, &Limits::DEFAULT)
+            .encoding()
+            .expect("decoded");
+        (decoding.encoding, decoding.confident, decoding.not_decoded)
+    };
+    let latin = (DecodedAs::SingleByte(SingleByte::Windows1252), false, None);
+    // \xf0\xd2\xc9 is "При" in KOI8-R and not UTF-8.
+    assert_eq!(
+        guessed(
+            b"<meta http-equiv=content-type content='text/html; charset=koi8-r' \
+              charset=bogus><p>\xf0\xd2\xc9"
+        ),
+        latin,
+        "a bogus charset after the content"
+    );
+    assert_eq!(
+        guessed(
+            b"<meta charset=bogus http-equiv=content-type \
+              content='text/html; charset=koi8-r'><p>\xf0\xd2\xc9"
+        ),
+        latin,
+        "and before it"
+    );
+    assert_eq!(
+        guessed(
+            b"<meta http-equiv=content-type content='text/html; charset=koi8-r'>\
+              <p>\xf0\xd2\xc9"
+        ),
+        (DecodedAs::SingleByte(SingleByte::Koi8R), true, None),
+        "the content alone, with its pragma"
+    );
+    assert_eq!(
+        guessed(b"<meta content='text/html; charset=koi8-r'><p>\xf0\xd2\xc9"),
+        latin,
+        "a content with no pragma names nothing"
+    );
+    assert_eq!(
+        guessed(b"<meta charset=x-user-defined><p>\x93"),
+        (DecodedAs::SingleByte(SingleByte::Windows1252), true, None),
+        "x-user-defined"
+    );
+}
+
 #[test]
 fn bytes_are_decoded_by_mark_then_meta_then_utf8_then_windows_1252() {
     let utf8 = html::parse_bytes("<p>é".as_bytes(), &Limits::DEFAULT);

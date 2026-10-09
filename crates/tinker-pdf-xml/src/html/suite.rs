@@ -344,6 +344,13 @@ const NOT_ATTEMPTED: usize = 4;
 /// every run attempted.
 const PASSING: usize = 7_028;
 
+/// `xmlViolation.test`'s tests, which the file holds under
+/// `xmlViolationTests` rather than `tests` and which are **not attempted**:
+/// each expects the tokens of a parser coercing its output to an XML infoset
+/// (§13.2.9), which a tree builder handing a document to a renderer does not
+/// do. Counted by name so that the file is not a silent zero.
+const XML_VIOLATION_NOT_ATTEMPTED: usize = 4;
+
 #[test]
 fn the_tokenizer_emits_html5libs_tokens() {
     let directory =
@@ -355,11 +362,15 @@ fn the_tokenizer_emits_html5libs_tokens() {
         .collect();
     files.sort();
     let (mut tests, mut runs, mut skipped, mut passed) = (0, 0, 0, 0);
+    let mut xml_violations = 0;
     let mut failures = Vec::new();
     for path in files {
         let text = std::fs::read(&path).expect("readable");
         let json = Reader { text: &text, at: 0 }.value();
         let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        xml_violations += json
+            .get("xmlViolationTests")
+            .map_or(0, |list| Json::array(list).len());
         for test in json.get("tests").map(Json::array).unwrap_or(&[]) {
             tests += 1;
             let double = test.get("doubleEscaped") == Some(&Json::Bool(true));
@@ -404,11 +415,13 @@ fn the_tokenizer_emits_html5libs_tokens() {
         }
     }
     println!(
-        "html5lib tokenizer: {passed} of {} runs pass ({skipped} not attempted)",
+        "html5lib tokenizer: {passed} of {} runs pass ({skipped} not attempted, and \
+         {xml_violations} XML-infoset tests)",
         runs - skipped
     );
     assert_eq!(tests, TESTS);
     assert_eq!(runs, RUNS);
     assert_eq!(skipped, NOT_ATTEMPTED);
+    assert_eq!(xml_violations, XML_VIOLATION_NOT_ATTEMPTED);
     assert_eq!(passed, PASSING, "{} failures", failures.len());
 }

@@ -262,12 +262,25 @@ mod tests {
         assert_eq!(SingleByte::Koi8R.char(0xA3), Some('ё'));
     }
 
-    /// windows-1252's five holes are U+FFFD and counted, and the C1 range it
-    /// fills is the typography that range means in real documents.
+    /// A byte an index leaves out is U+FFFD and counted. windows-1252 leaves
+    /// none out: the C1 range it fills is the typography that range means in
+    /// real documents, and the five bytes Windows leaves undefined are the C1
+    /// controls in the standard's index, so its decoder never replaces.
     #[test]
     fn an_unmapped_byte_is_a_replacement_and_counted() {
         assert_eq!(SingleByte::Windows1252.char(0x80), Some('€'));
         assert_eq!(SingleByte::Windows1252.char(0x93), Some('\u{201C}'));
+        for (byte, control) in [
+            (0x81, '\u{81}'),
+            (0x8D, '\u{8D}'),
+            (0x8F, '\u{8F}'),
+            (0x90, '\u{90}'),
+            (0x9D, '\u{9D}'),
+        ] {
+            assert_eq!(SingleByte::Windows1252.char(byte), Some(control));
+        }
+        let every: Vec<u8> = (0..=255).collect();
+        assert_eq!(SingleByte::Windows1252.decode(&every).1, 0);
         // windows-1253's 0xAA is one of the bytes its index leaves out.
         assert_eq!(SingleByte::Windows1253.char(0xAA), None);
         assert_eq!(

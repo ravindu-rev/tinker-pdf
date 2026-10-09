@@ -411,7 +411,9 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   commit that holds both (THIRDPARTY.md), compared exactly: **1 779 of 1 784**
   trees, the five that do not pass named as a list rather than counted, and
   **7 028 of 7 028** tokenizer runs (four runs holding a lone surrogate, which
-  a Rust string cannot, are not attempted). `tests/html.rs` beside them
+  a Rust string cannot, are not attempted, and nor are `xmlViolation.test`'s
+  four, counted by name, which expect a parser coercing its output to an XML
+  infoset, §13.2.9). `tests/html.rs` beside them
   crosses each of the six caps at its shipped value — the token cap by
   reopened formatting elements, fifty kilobytes asking for a million nodes,
   and by the attributes they copy; the attribute cap by merged `<html>` and

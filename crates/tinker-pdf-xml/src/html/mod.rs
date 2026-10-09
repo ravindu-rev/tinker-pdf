@@ -239,7 +239,8 @@ pub struct Decoding {
     pub replaced: usize,
     /// The Encoding Standard's name for an encoding a `<meta>` named and
     /// this crate does not decode — one of the multi-byte legacy encodings,
-    /// `replacement` or `x-user-defined` — set aside for the guess.
+    /// or `replacement` — set aside for the guess. (`x-user-defined` is not
+    /// one: the prescan reads it as windows-1252, as §13.2.3.2 says.)
     pub not_decoded: Option<&'static str>,
 }
 
@@ -453,7 +454,10 @@ fn lossy_utf16(bytes: &[u8], big_endian: bool) -> (String, usize) {
 /// §13.2.3.2's prescan, over the first 1 024 bytes: comments skipped, other
 /// tags' attributes skipped, and the first `<meta>` that names an encoding
 /// — `charset`, or `http-equiv="content-type"` with a `content` holding
-/// `charset=` — wins.
+/// `charset=` — wins. A `charset` attribute overrides a `content` on its
+/// `<meta>` whichever comes first, and one whose label names no encoding is
+/// the standard's *failure*: that `<meta>` names none, whatever its `content`
+/// says. `x-user-defined` is read as windows-1252, as the standard says.
 fn prescan(bytes: &[u8]) -> Option<Label> {
     let head = bytes.get(..bytes.len().min(1024)).unwrap_or(bytes);
     let mut at = 0;
@@ -472,9 +476,12 @@ fn prescan(bytes: &[u8]) -> Option<Label> {
                 .is_some_and(|b| b.is_ascii_whitespace() || *b == b'/');
         if meta {
             at += 5;
-            let mut charset: Option<Label> = None;
-            let mut pragma = false;
-            let mut content: Option<Label> = None;
+            // §13.2.3.2's three variables, as it names them: `charset` is
+            // null, failure or an encoding, and `need pragma` is null, true or
+            // false.
+            let mut charset: Option<Option<Label>> = None;
+            let mut need_pragma: Option<bool> = None;
+            let mut got_pragma = false;
             let mut seen: Vec<Vec<u8>> = Vec::new();
             loop {
                 let Some((name, value, next)) = prescan_attribute(head, at) else {
@@ -486,17 +493,45 @@ fn prescan(bytes: &[u8]) -> Option<Label> {
                 }
                 seen.push(name.clone());
                 match name.as_slice() {
-                    b"http-equiv" => pragma = value.eq_ignore_ascii_case(b"content-type"),
-                    b"content" if content.is_none() => content = charset_from_content(&value),
-                    b"charset" if charset.is_none() => {
-                        charset = std::str::from_utf8(&value).ok().and_then(encoding::lookup);
+                    b"http-equiv" => {
+                        if value.eq_ignore_ascii_case(b"content-type") {
+                            got_pragma = true;
+                        }
+                    }
+                    // Only an encoding the content names, and only while
+                    // `charset` is still null.
+                    b"content" => {
+                        if let (None, Some(found)) = (charset, charset_from_content(&value)) {
+                            charset = Some(Some(found));
+                            need_pragma = Some(true);
+                        }
+                    }
+                    // Whatever came before, and failure where the label is
+                    // not one: a `charset` attribute overrides a `content`.
+                    b"charset" => {
+                        charset = Some(std::str::from_utf8(&value).ok().and_then(encoding::lookup));
+                        need_pragma = Some(false);
                     }
                     _ => {}
                 }
             }
-            let found = charset.or(if pragma { content } else { None });
-            if found.is_some() {
-                return found;
+            let found = match need_pragma {
+                // Nothing named an encoding.
+                None => None,
+                // A `content` with no `http-equiv="content-type"` beside it.
+                Some(true) if !got_pragma => None,
+                // An encoding, or failure, which is the next byte too.
+                Some(_) => charset.flatten(),
+            };
+            if let Some(label) = found {
+                // §13.2.3.2: x-user-defined found by the prescan is read as
+                // windows-1252.
+                return Some(match label {
+                    Label::Unsupported("x-user-defined") => {
+                        Label::SingleByte(SingleByte::Windows1252)
+                    }
+                    other => other,
+                });
             }
             continue;
         }

@@ -630,9 +630,12 @@ pub enum Warning {
     /// reports rather than merely tolerates.
     ExternalIdentifierNotAllowed,
     /// A byte the declared single-byte encoding leaves unmapped, read as
-    /// U+FFFD — the Encoding Standard's own *replacement* error mode. Five of
-    /// windows-1252's thirty-two upper-half bytes are such holes, and more of
-    /// several ISO 8859 parts'.
+    /// U+FFFD — the Encoding Standard's own *replacement* error mode.
+    /// windows-1252 has none: the standard's index maps the five bytes
+    /// Windows leaves undefined to the C1 controls they would be. Eight of the
+    /// twenty-eight have some — windows-874, -1253, -1255 and -1257, and
+    /// ISO 8859-3, -6, -7 and -8 — from windows-1257's two to ISO 8859-6's
+    /// forty-five; windows-1253's 0xAA is one.
     UnmappedByte,
 }
 
