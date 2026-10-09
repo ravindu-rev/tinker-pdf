@@ -716,6 +716,11 @@ fn a_loose_file_xml_cannot_read_is_read_in_the_encoding_it_names() {
         let document = open(&wide);
         assert_eq!(page_text(&document, 0), "Привет", "{markup}");
         assert!(has(&document, MarkupDefect::NotXml), "{markup}");
+        // Refused for its syntax, and not for an encoding.
+        assert!(
+            !has(&document, MarkupDefect::EncodingNotDecoded),
+            "{markup}"
+        );
     }
 
     // An encoding this build does not decode, declared by a well-formed file:
@@ -728,6 +733,28 @@ fn a_loose_file_xml_cannot_read_is_read_in_the_encoding_it_names() {
     let meta = open(b"<html><head><meta charset=shift_jis></head><body><p>\x93\xfa\x96\x7b<br>");
     assert!(has(&meta, MarkupDefect::EncodingNotDecoded));
     assert_eq!(page_text(&japanese, 0), page_text(&meta, 0));
+
+    // The same declaration over bytes that are UTF-8 — ASCII, its Japanese
+    // written as character references — which the XML reader decodes and
+    // then refuses at the declaration: the text is right, and the report
+    // says why a well-formed file is not XML. Then the same with a byte order
+    // mark, which decides the encoding before the declaration is read.
+    let declared = "<?xml version=\"1.0\" encoding=\"Shift_JIS\"?>\
+        <html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>&#x65E5;&#x672C; Japan</p></body></html>";
+    let marked: Vec<u8> = [0xFF, 0xFE]
+        .into_iter()
+        .chain(declared.encode_utf16().flat_map(u16::to_le_bytes))
+        .collect();
+    for bytes in [declared.as_bytes(), &marked] {
+        let document = open(bytes);
+        assert_eq!(page_text(&document, 0), "日本 Japan");
+        assert!(has(&document, MarkupDefect::NotXml));
+        assert!(
+            has(&document, MarkupDefect::EncodingNotDecoded),
+            "{:?}",
+            warnings(&document)
+        );
+    }
 }
 
 // ---- a bare image ------------------------------------------------------------

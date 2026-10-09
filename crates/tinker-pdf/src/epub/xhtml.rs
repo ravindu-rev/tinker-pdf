@@ -384,9 +384,12 @@ pub enum MarkupDefect {
     /// HTML's default, whose table maps all 256 bytes.
     Undecodable,
     /// A `<meta charset>` or an XML declaration named an encoding this build
-    /// does not decode — one of the multi-byte legacy encodings — and HTML's
-    /// decoder read the bytes as UTF-8 where they are UTF-8 and as
-    /// windows-1252 where they are not.
+    /// does not decode — one of the multi-byte legacy encodings — and the
+    /// bytes were read as UTF-8 where they are UTF-8 and as windows-1252 where
+    /// they are not, or, where a byte order mark or UTF-16's shape had decided
+    /// before the declaration was read, as that said. Beside
+    /// [`MarkupDefect::NotXml`] when the XML reader refused a well-formed file
+    /// for its declaration.
     EncodingNotDecoded,
     /// Elements HTML's tree builder nested past the XML reader's depth cap,
     /// which it can do by nesting the adoption agency's clones: their text is
@@ -748,22 +751,27 @@ fn read_reporting(source: &Source<'_>, limits: &XmlLimits) -> (Dom, Option<XmlEr
 /// **One file, one encoding, well-formed or not.** A file the XML reader
 /// decoded — by its byte order mark, its UTF-16 shape, the encoding its
 /// declaration names, or as UTF-8, which bytes that are UTF-8 are — and then
-/// refused for its syntax goes to HTML's parser as those characters, with
+/// refused goes to HTML's parser as those characters, with
 /// [`MarkupDefect::Undecodable`] if a single-byte table left a byte unmapped:
 /// a `<br>` left open does not change which letters the page is in, and a
 /// UTF-16 file with no mark is not read again as bytes HTML's decoder has no
-/// rule for. Only a file the XML reader could not decode at all — an encoding
-/// it does not read, malformed bytes, or a character XML does not admit, such
-/// as a form feed — is decoded by HTML's own §13.2.3
+/// rule for. That includes a file refused at its declaration for naming an
+/// encoding this build does not decode — Shift_JIS over bytes that are ASCII
+/// or UTF-8, or behind a byte order mark — which says so with
+/// [`MarkupDefect::EncodingNotDecoded`], whether or not the rest of it is
+/// well-formed. Only a file the XML reader could not decode at all —
+/// malformed bytes, among them a multi-byte encoding's that are not UTF-8, a
+/// UTF-32 byte order mark, or a character XML does not admit, such as a form
+/// feed — is decoded by HTML's own §13.2.3
 /// (`tinker_pdf_xml::html::parse_bytes`), whose prescan reads a `<meta>` and
 /// then the same XML declaration, and names an encoding this build does not
-/// decode as [`MarkupDefect::EncodingNotDecoded`].
+/// decode as [`MarkupDefect::EncodingNotDecoded`] too.
 #[must_use]
 pub fn read_markup_or_html(bytes: &[u8], limits: &XmlLimits) -> Dom {
     let Ok(source) = Source::with_declared_encoding(bytes) else {
         return from_html(&tinker_pdf_xml::html::parse_bytes(bytes, limits), limits);
     };
-    match read_reporting(&source, limits) {
+    let refusal = match read_reporting(&source, limits) {
         (dom, None) => return dom,
         (
             dom,
@@ -774,9 +782,17 @@ pub fn read_markup_or_html(bytes: &[u8], limits: &XmlLimits) -> Dom {
                 | XmlError::TokenCap,
             ),
         ) => return dom,
-        _ => {}
-    }
+        (_, Some(refusal)) => refusal,
+    };
     let mut dom = from_html(&tinker_pdf_xml::html::parse(source.text(), limits), limits);
+    // The reader's one refusal of a Source it decoded that is about the
+    // encoding rather than the syntax: its declaration names one this build
+    // does not decode, over bytes that are UTF-8 or that a byte order mark or
+    // UTF-16's shape decided. (A UTF-32 mark is refused before there is a
+    // Source.) A file that is well-formed says why it is not XML.
+    if refusal == XmlError::UnsupportedEncoding {
+        dom.defects.push(MarkupDefect::EncodingNotDecoded);
+    }
     if source
         .warnings()
         .contains(&tinker_pdf_xml::Warning::UnmappedByte)

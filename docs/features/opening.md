@@ -91,14 +91,18 @@ file whose XML declaration names a single-byte encoding is read in it** — as
 XML when it is well-formed, as an FB2 is. **And a file is read in one
 encoding whether or not it is well-formed**: one the XML reader decoded — by
 its byte order mark, its UTF-16 shape (marked or not), the encoding its
-declaration names, or as UTF-8 — and refused for its syntax goes to HTML's
-parser as those characters, with `MarkupDefect::Undecodable` for a byte a
-single-byte table leaves unmapped; only bytes the XML reader could not decode
-at all (an encoding it does not read, malformed bytes, a character XML does
-not admit, such as a form feed) are decoded by §13.2.3 as above, whose prescan
-reads the same declaration. A well-formed file declaring Shift_JIS is
-therefore the guess with `EncodingNotDecoded`, as a `<meta charset=shift_jis>`
-is (`a_loose_file_xml_cannot_read_is_read_in_the_encoding_it_names`).
+declaration names, or as UTF-8 — and then refused goes to HTML's parser as
+those characters, with `MarkupDefect::Undecodable` for a byte a
+single-byte table leaves unmapped, and `MarkupDefect::EncodingNotDecoded` when
+the declaration it refused names an encoding this build does not decode —
+Shift_JIS over bytes that are ASCII or UTF-8, or behind a byte order mark;
+only bytes the XML reader could not decode at all (malformed bytes, a
+multi-byte encoding's among them, a character XML does not admit, such as a
+form feed) are decoded by §13.2.3 as above, whose prescan reads the same
+declaration. A well-formed file declaring Shift_JIS is therefore the guess
+with `EncodingNotDecoded` whatever its bytes are, as a
+`<meta charset=shift_jis>` is
+(`a_loose_file_xml_cannot_read_is_read_in_the_encoding_it_names`).
 Scripting is disabled, always — nothing
 here runs a script — so a `<noscript>`'s content is markup and is drawn. It is
 held to html5lib's own suite, vendored: **1 779 of the 1 784
