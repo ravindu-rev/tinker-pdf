@@ -38,7 +38,10 @@ impl Tag {
     pub(crate) fn attribute(&self, name: &str) -> Option<&str> {
         self.attributes
             .iter()
-            .find(|(n, _)| n == name)
+            .find(|(n, _)| {
+                super::step();
+                n == name
+            })
             .map(|(_, v)| v.as_str())
     }
 }

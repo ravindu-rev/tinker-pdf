@@ -109,11 +109,10 @@ impl Formatting {
         self.key == other.key
             && self.tag.name == other.tag.name
             && self.order.len() == other.order.len()
-            && self
-                .order
-                .iter()
-                .zip(&other.order)
-                .all(|(&a, &b)| self.tag.attributes.get(a) == other.tag.attributes.get(b))
+            && self.order.iter().zip(&other.order).all(|(&a, &b)| {
+                super::step();
+                self.tag.attributes.get(a) == other.tag.attributes.get(b)
+            })
     }
 }
 
@@ -473,6 +472,10 @@ pub(crate) struct TreeBuilder<'a> {
     halt: bool,
     /// The encoding the first `<meta>` that names one names (§13.2.6.4.4).
     meta_encoding: Option<Label>,
+    /// The names of the attributes of each element [`TreeBuilder::merge_attributes`]
+    /// has merged into — the root and the `<body>` — kept from its first
+    /// merge on, so that a merge costs its own tag's attributes.
+    merged: Vec<(usize, BTreeSet<String>)>,
 }
 
 /// The encoding a `<meta>` names, as §13.2.6.4.4 reads it: a `charset` that
@@ -566,6 +569,7 @@ impl<'a> TreeBuilder<'a> {
             stopped: None,
             halt: false,
             meta_encoding: None,
+            merged: Vec::new(),
         }
     }
 
@@ -754,7 +758,10 @@ impl<'a> TreeBuilder<'a> {
         // parent's last child, and a search from the front made a misnested
         // tag after a hundred thousand siblings a hundred thousand steps.
         if let Some(p) = self.nodes.get_mut(parent) {
-            if let Some(at) = p.children.iter().rposition(|&c| c == node) {
+            if let Some(at) = p.children.iter().rposition(|&c| {
+                super::step();
+                c == node
+            }) {
                 p.children.remove(at);
             }
         }
@@ -771,7 +778,12 @@ impl<'a> TreeBuilder<'a> {
         // From the end for the same reason: a foster parent's reference child
         // is the open table, which is its parent's last child.
         let at = before
-            .and_then(|b| p.children.iter().rposition(|&c| c == b))
+            .and_then(|b| {
+                p.children.iter().rposition(|&c| {
+                    super::step();
+                    c == b
+                })
+            })
             .unwrap_or(p.children.len());
         p.children.insert(at, node);
         if let Some(n) = self.nodes.get_mut(node) {
@@ -888,7 +900,10 @@ impl<'a> TreeBuilder<'a> {
             // the open table, its parent's last child, and every fostered node
             // goes in front of it.
             Some(b) => self.nodes.get(parent).and_then(|p| {
-                let at = p.children.iter().rposition(|&c| c == b)?;
+                let at = p.children.iter().rposition(|&c| {
+                    super::step();
+                    c == b
+                })?;
                 at.checked_sub(1).and_then(|i| p.children.get(i)).copied()
             }),
             None => self
@@ -2012,41 +2027,65 @@ impl<'a> TreeBuilder<'a> {
     /// element merged into by a file's worth of them would carry as many as
     /// the file liked. A token whose new attributes would take the element
     /// past the cap merges none of them and stops the parse with
-    /// [`Error::AttributeCap`]. The names already present are looked up in a
-    /// set, so a merge is linear in the two lists rather than their product.
+    /// [`Error::AttributeCap`].
+    ///
+    /// **A merge costs the token's attributes, and a tag with none costs
+    /// nothing.** The names the element carries are kept in a set from its
+    /// first merge on ([`TreeBuilder::merged`]), so a token looks each of its
+    /// own names up once. The review of the lane's fixes found the set built
+    /// again for every `<html>` and `<body>` — two hundred and fifty-six names
+    /// for each six-byte `<html>`, seventy-five seconds of a debug build at the
+    /// token cap.
     fn merge_attributes(&mut self, node: usize, tag: &Tag) {
+        if tag.attributes.is_empty() {
+            return;
+        }
         let max = self.limits.max_attributes;
-        let mut over = false;
-        if let Some(Node {
+        let Some(Node {
             data: NodeData::Element(element),
             ..
         }) = self.nodes.get_mut(node)
-        {
-            let present: BTreeSet<&str> = element
-                .attributes
-                .iter()
-                .filter(|a| a.namespace.is_none())
-                .map(|a| a.name.as_str())
-                .collect();
-            let added: Vec<Attribute> = tag
-                .attributes
-                .iter()
-                .filter(|(name, _)| !present.contains(name.as_str()))
-                .map(|(name, value)| Attribute {
-                    name: name.clone(),
-                    namespace: None,
-                    value: value.clone(),
-                })
-                .collect();
-            if element.attributes.len().saturating_add(added.len()) > max {
-                over = true;
-            } else {
-                element.attributes.extend(added);
+        else {
+            return;
+        };
+        let at = match self.merged.iter().position(|(n, _)| *n == node) {
+            Some(at) => at,
+            None => {
+                let names = element
+                    .attributes
+                    .iter()
+                    .filter(|a| a.namespace.is_none())
+                    .map(|a| {
+                        super::step();
+                        a.name.clone()
+                    })
+                    .collect();
+                self.merged.push((node, names));
+                self.merged.len() - 1
             }
-        }
-        if over {
+        };
+        let Some((_, names)) = self.merged.get_mut(at) else {
+            return;
+        };
+        let added: Vec<Attribute> = tag
+            .attributes
+            .iter()
+            .filter(|(name, _)| {
+                super::step();
+                !names.contains(name.as_str())
+            })
+            .map(|(name, value)| Attribute {
+                name: name.clone(),
+                namespace: None,
+                value: value.clone(),
+            })
+            .collect();
+        if element.attributes.len().saturating_add(added.len()) > max {
             self.stop(Error::AttributeCap);
+            return;
         }
+        names.extend(added.iter().map(|a| a.name.clone()));
+        element.attributes.extend(added);
     }
 
     fn in_body_end(&mut self, tag: Tag) -> Step {
@@ -3247,4 +3286,93 @@ fn quirks_of(doctype: &DoctypeToken) -> Quirks {
         return Quirks::Limited;
     }
     Quirks::NoQuirks
+}
+
+/// **The loops the review made linear, held linear by count.** Each case is
+/// an input the review timed — a slow test is not a failing one, since
+/// `cargo test` has no timeout — and each asserts that the steps
+/// [`super::step`] counts in it stay under the input's length in bytes: a
+/// child looked at from the end of its parent's list, two attributes Noah's
+/// Ark compares, a name a merge looks up. Put back the scan from the front, a
+/// name lookup per attribute or a set built per merge, and the count is the
+/// square of the input rather than a fraction of it.
+#[cfg(test)]
+mod tests {
+    use super::super::{parse, STEPS};
+    use crate::Limits;
+
+    /// The steps parsing `markup` takes, and that it parsed to its end.
+    fn steps(markup: &str) -> usize {
+        STEPS.with(|steps| steps.set(0));
+        let document = parse(markup, &Limits::DEFAULT);
+        assert_eq!(document.stopped(), None);
+        STEPS.with(std::cell::Cell::get)
+    }
+
+    fn assert_linear(markup: &str, what: &str) {
+        let taken = steps(markup);
+        assert!(
+            taken <= markup.len(),
+            "{what}: {taken} steps for {} bytes",
+            markup.len()
+        );
+    }
+
+    fn names(count: usize) -> String {
+        (0..count).map(|i| format!(" a{i}")).collect()
+    }
+
+    #[test]
+    fn a_merge_costs_its_own_tags_attributes() {
+        let many = names(255);
+        let tokens = 20_000;
+        assert_linear(
+            &format!("<html{many}>{}", "<html>".repeat(tokens)),
+            "bare <html>s",
+        );
+        assert_linear(
+            &format!("<html{many}>{}", "<html a0>".repeat(tokens)),
+            "<html a0>s",
+        );
+        assert_linear(
+            &format!("<body{many}>{}", "<body>".repeat(tokens)),
+            "bare <body>s",
+        );
+        assert_linear(
+            &format!("<body{many}>{}", "<body a0 b>".repeat(tokens)),
+            "<body a0 b>s",
+        );
+    }
+
+    #[test]
+    fn noahs_ark_compares_each_attribute_once() {
+        let many = names(254);
+        let mut markup = String::new();
+        for i in 0..60 {
+            markup.push_str(&format!("<b{many} z={i}>"));
+        }
+        for j in 0..10 {
+            markup.push_str(&format!("<b{many} z=n{j}></b>"));
+        }
+        // And four the same, of which the earliest goes.
+        markup.push_str(&format!("<p>{}</p>x", format!("<b{many}>").repeat(4)));
+        assert_linear(&markup, "Noah's Ark");
+    }
+
+    #[test]
+    fn a_child_is_found_from_the_end_of_its_parents_list() {
+        let many = 5_000;
+        assert_linear(
+            &format!("<b><div>{}</b>", "<i></i>".repeat(many)),
+            "the adoption agency's move",
+        );
+        assert_linear(
+            &format!("<table>{}</table>", "<span></span>".repeat(many)),
+            "fostered elements",
+        );
+        assert_linear(
+            &format!("<table>{}</table>", "<b></b>x".repeat(many)),
+            "fostered text",
+        );
+    }
 }

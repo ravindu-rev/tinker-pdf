@@ -436,7 +436,10 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   `<body>` tags; the clone cap by one hundred-kilobyte value reopened seven
   hundred times — holds the tree builder's moves linear in a parent's
   children, fostered text included, and Noah's Ark linear in a tag's
-  attributes, and holds the §13.2.3 decoding order — the XML declaration and
+  attributes (and `src/html/tree.rs`'s unit tests count the steps of each,
+  with a merge into `<html>` or `<body>` costing its own tag's attributes,
+  so that a quadratic loop fails rather than slows), and holds the §13.2.3
+  decoding order — the XML declaration and
   UTF-16's `<?x` past a prescan with no `<meta>`, a `<meta>` the bytes end
   inside naming nothing, a `<meta>` past the prescan read while parsing;
   `hostile_input.rs`'s

@@ -204,8 +204,10 @@ fn the_list_of_active_formatting_elements_stops_at_its_cap() {
 /// the comparison looked each of one tag's attributes up in the other's list:
 /// two hundred and forty open `<b>`s of two hundred and fifty-six attributes
 /// made every further `<b>` sixteen million string comparisons, seventy
-/// milliseconds apiece. The tree asserted is the standard's; the bound is the
-/// test finishing at all.
+/// milliseconds apiece. The tree asserted is the standard's. **The bound is
+/// not this test's**: a quadratic comparison only makes it slow, and
+/// `cargo test` has no timeout, so `src/html/tree.rs`'s
+/// `noahs_ark_compares_each_attribute_once` counts the comparisons and fails.
 #[test]
 fn noahs_ark_compares_attribute_lists_in_one_pass() {
     // The same in any order: of four, the earliest goes, so three are
@@ -293,8 +295,9 @@ fn reopened_formatting_elements_are_spent_against_the_token_cap() {
 /// thousand here — and a table that foster-parents sixty thousand elements
 /// inserts each in front of itself. Moving a child at a time from the front of
 /// the list, or finding the table from the front, made each of these billions
-/// of steps; the assertions are the trees the standard builds, and the bound
-/// is the test finishing at all.
+/// of steps; the assertions are the trees the standard builds. The bound is
+/// `src/html/tree.rs`'s `a_child_is_found_from_the_end_of_its_parents_list`,
+/// which counts the children looked at and fails where this only slows.
 ///
 /// Text fostered between them is the third case, and the one the lane missed:
 /// a run is appended to the text node in front of the table when there is

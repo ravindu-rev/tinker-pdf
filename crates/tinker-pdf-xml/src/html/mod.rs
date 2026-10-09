@@ -158,7 +158,10 @@ impl Element {
     pub fn attribute(&self, name: &str) -> Option<&str> {
         self.attributes
             .iter()
-            .find(|a| a.namespace.is_none() && a.name == name)
+            .find(|a| {
+                step();
+                a.namespace.is_none() && a.name == name
+            })
             .map(|a| a.value.as_str())
     }
 }
@@ -318,6 +321,25 @@ impl Document {
     pub fn encoding(&self) -> Option<Decoding> {
         self.decoding
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`step`]'s count, on this thread.
+    pub(crate) static STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// One step of a loop a crafted input could make quadratic: a child looked at
+/// in search of a reference node, two attributes compared by Noah's Ark, an
+/// attribute looked up by name. Counted only under `cfg(test)`, where the
+/// tree builder's unit tests hold the total to a multiple of the input's
+/// length — so that a regression to a quadratic loop **fails** rather than
+/// runs slowly, which `cargo test`, having no timeout, would not notice.
+/// Everywhere else it is nothing.
+#[inline]
+pub(crate) fn step() {
+    #[cfg(test)]
+    STEPS.with(|steps| steps.set(steps.get().saturating_add(1)));
 }
 
 /// §13.2.3.5: every CR LF pair and every lone CR is one LF.
