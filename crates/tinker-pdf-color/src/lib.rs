@@ -22,6 +22,23 @@ pub mod icc;
 
 pub use function::Function;
 
+/// `value` held between `a` and `b`, in whichever order they come.
+///
+/// `f64::clamp` panics when its minimum is above its maximum or either is
+/// NaN, and a `/Lab` `/Range` is the document's: `[10 -10 -100 100]` is
+/// four numbers a file may write, and it panicked here until October 2026
+/// (ruling 1). An unordered pair is read as the range it spans, as
+/// `function.rs`'s `clamp` reads a function's; a pair with no order at all
+/// — both NaN — holds nothing.
+fn within(value: f64, a: f64, b: f64) -> f64 {
+    let (low, high) = (a.min(b), a.max(b));
+    if low <= high {
+        value.clamp(low, high)
+    } else {
+        value
+    }
+}
+
 /// A colour space, reduced to what conversion needs.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ColorSpace {
@@ -166,22 +183,12 @@ impl ColorSpace {
             // 8.6.5.4: all three zero, unless a component's range leaves zero
             // out, when it is the nearest value the range allows. Table 65
             // does not make `/Range` straddle zero, so `a*` and `b*` are each
-            // held to theirs (an unordered pair is left at zero rather than
-            // read as a range at all).
-            ColorSpace::Lab { range } => {
-                let nearest = |lo: f64, hi: f64| {
-                    if lo <= hi {
-                        0.0_f64.max(lo).min(hi)
-                    } else {
-                        0.0
-                    }
-                };
-                vec![
-                    0.0,
-                    nearest(range[0], range[1]),
-                    nearest(range[2], range[3]),
-                ]
-            }
+            // held to theirs, read as `to_rgb` reads them.
+            ColorSpace::Lab { range } => vec![
+                0.0,
+                within(0.0, range[0], range[1]),
+                within(0.0, range[2], range[3]),
+            ],
             other => vec![0.0; other.components()],
         }
     }
@@ -258,8 +265,8 @@ impl ColorSpace {
                 // clamping them there is precisely the bug this variant fixes.
                 let raw = |i: usize| components.get(i).copied().unwrap_or(0.0);
                 let l = raw(0).clamp(0.0, 100.0);
-                let a = raw(1).clamp(range[0], range[1]);
-                let b = raw(2).clamp(range[2], range[3]);
+                let a = within(raw(1), range[0], range[1]);
+                let b = within(raw(2), range[2], range[3]);
                 lab_to_rgb(l, a, b)
             }
             // The profile's own transform, which is what this whole module
@@ -485,6 +492,28 @@ mod tests {
         );
     }
 
+    /// A `/Lab` `/Range` is the document's, and no order or value of it
+    /// panics: an unordered pair is the range it spans, the same colour as
+    /// the ordered one, and a NaN pair holds nothing.
+    #[test]
+    fn a_lab_range_in_any_order_converts() {
+        let lab = |range: [f64; 4], c: [f64; 3]| ColorSpace::Lab { range }.to_rgb(&c);
+        let ordered = lab([-10.0, 10.0, -100.0, 100.0], [50.0, 40.0, 0.0]);
+        assert_eq!(
+            lab([10.0, -10.0, -100.0, 100.0], [50.0, 40.0, 0.0]),
+            ordered
+        );
+        assert_eq!(
+            lab([10.0, -10.0, 100.0, -100.0], [50.0, 40.0, 0.0]),
+            ordered
+        );
+        let _ = lab([f64::NAN, f64::NAN, f64::NAN, 1.0], [50.0, 40.0, 0.0]);
+        let _ = ColorSpace::Lab {
+            range: [f64::NAN, f64::NAN, 5.0, -5.0],
+        }
+        .initial();
+    }
+
     /// Each space's own clause gives its initial colour: a spot space's is
     /// the whole colorant, 1.0 in every component (8.6.6.4, 8.6.6.5), and a
     /// `/Lab` one's is zero or, where a `/Range` leaves zero out, the nearest
@@ -508,7 +537,11 @@ mod tests {
         let lab = |range: [f64; 4]| ColorSpace::Lab { range }.initial();
         assert_eq!(lab([-100.0, 100.0, -100.0, 100.0]), vec![0.0; 3]);
         assert_eq!(lab([10.0, 20.0, -30.0, -5.0]), vec![0.0, 10.0, -5.0]);
-        assert_eq!(lab([20.0, 10.0, 0.0, 1.0]), vec![0.0; 3], "unordered");
+        assert_eq!(
+            lab([20.0, 10.0, 0.0, 1.0]),
+            vec![0.0, 10.0, 0.0],
+            "unordered"
+        );
         assert_eq!(
             ColorSpace::Indexed {
                 base: Box::new(ColorSpace::DeviceRgb),

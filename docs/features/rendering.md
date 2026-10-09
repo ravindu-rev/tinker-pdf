@@ -17,7 +17,9 @@ convert as 8.6.4 says; `/Indexed` reads its palette over any base space
 (8.6.6.3); `/Separation` and `/DeviceN` run their real tint transforms into
 the alternate space (8.6.6.4, 8.6.6.5); `/Lab` converts through XYZ at the
 D50 white point (8.6.5.4), kept separate because its components are not in
-0..1 and clamping them there renders the whole space black. An `ICCBased` space is converted
+0..1 and clamping them there renders the whole space black; `a*` and `b*` are
+held to `/Range` in whichever order its pairs come (a backwards pair panicked
+the colour crate until October 2026). An `ICCBased` space is converted
 through **its own profile** (ICC.1): the header and tag table are read, the
 three `XYZ` columns and three tone curves compile once into fixed-point
 tables, and each colour is a lookup plus an integer matrix multiply, so

@@ -213,6 +213,26 @@ fn cs_resets_a_spot_space_to_full_tint() {
     );
 }
 
+/// **A `/Lab` `/Range` written backwards draws as the range it spans**
+/// rather than panicking (ruling 1). `[10 -10 -100 100]` is four numbers a
+/// file may write, and the colour crate handed them to `f64::clamp` as its
+/// minimum and maximum, which panics when the first is above the second.
+#[test]
+fn an_unordered_lab_range_draws_as_the_range_it_spans() {
+    let lab = |range: &str| {
+        page(
+            &format!(
+                "/ColorSpace << /Lb [ /Lab << /WhitePoint [0.9642 1 0.8249] \
+                   /Range [{range}] >> ] >>"
+            ),
+            "/Lb cs 50 40 0 scn 0 0 40 40 re f",
+        )
+    };
+    let backwards = lab("10 -10 -100 100");
+    let forwards = lab("-10 10 -100 100");
+    assert_eq!(pixel(&backwards, 20, 20), pixel(&forwards, 20, 20));
+}
+
 /// L* of 100 with no chroma is white. Read as RGB it clamps to (1, 0, 0) after
 /// the 0..1 clamp — and a mid-grey L* of 50 clamps to black.
 #[test]
