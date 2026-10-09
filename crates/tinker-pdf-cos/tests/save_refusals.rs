@@ -13,15 +13,47 @@ use tinker_pdf_cos::{
 };
 
 fn open(name: &str, password: Option<&str>) -> Arc<CosDocument> {
+    open_bytes(fixture(name), password)
+}
+
+fn fixture(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../testdata")
         .join(name);
-    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+}
+
+fn open_bytes(bytes: Vec<u8>, password: Option<&str>) -> Arc<CosDocument> {
     let doc = CosDocument::open(bytes).expect("the fixture opens");
     if let Some(password) = password {
         doc.authenticate(password).expect("the password opens it");
     }
     Arc::new(doc)
+}
+
+/// `encrypted-aes256.pdf` with `entry` (`StmF` or `StrF`) naming `/Identity`
+/// rather than its AES-256 filter, opened with the user's password: an
+/// encrypted document whose key passes that half of what it is given
+/// through unchanged (7.6.5 Table 25). The `/Encrypt` dictionary sits in the
+/// trailer, after the cross-reference table, so no offset moves; and
+/// revision 6's `/Perms` covers `/P` and `/EncryptMetadata`, not the
+/// filters, so the password still opens it.
+fn identity(entry: &str) -> Arc<CosDocument> {
+    let bytes = fixture("encrypted-aes256.pdf");
+    let from = format!("/{entry}/StdCF");
+    let at = bytes
+        .windows(from.len())
+        .position(|window| window == from.as_bytes())
+        .unwrap_or_else(|| panic!("the fixture names {from}"));
+    let mut edited = bytes[..at].to_vec();
+    edited.extend_from_slice(format!("/{entry}/Identity").as_bytes());
+    edited.extend_from_slice(&bytes[at + from.len()..]);
+    let doc = open_bytes(edited, Some("open-sesame"));
+    assert!(
+        doc.file_key().is_some(),
+        "{entry}: authenticated, with a key"
+    );
+    doc
 }
 
 fn rewrite() -> WriteOptions {
@@ -166,7 +198,8 @@ fn holds(saved: &[u8], plaintext: &[u8]) -> bool {
 /// the document was opened with and with nothing else — it does not read
 /// `WriteOptions::encryption`, and without a key it writes in the clear — so
 /// encryption asked of an incremental update seals nothing, and an encrypted
-/// document opened without its password has no key to seal with.
+/// document opened without its password has no key to seal with. Nor does a
+/// key seal what its `/Identity` stream or string method passes through.
 #[test]
 fn an_incremental_update_is_sealed_only_with_the_key_the_document_was_opened_with() {
     let source = open("encrypted-aes256.pdf", Some("owner-secret"));
@@ -186,6 +219,14 @@ fn an_incremental_update_is_sealed_only_with_the_key_the_document_was_opened_wit
         (
             "an encrypted document opened with its password",
             open("encrypted-aes256.pdf", Some("open-sesame")),
+        ),
+        (
+            "an encrypted document whose streams' filter is /Identity",
+            identity("StmF"),
+        ),
+        (
+            "an encrypted document whose strings' filter is /Identity",
+            identity("StrF"),
         ),
     ];
     let mut answers = Vec::new();
@@ -239,6 +280,21 @@ fn an_incremental_update_is_sealed_only_with_the_key_the_document_was_opened_wit
         Some(Ok(())),
         "sealed with the file's own key"
     );
+    // A key whose stream or string method is `/Identity` passes those bytes
+    // through, so the update writes what was copied in as the target writes
+    // its own: in the clear. The page copied in carries no string, so the
+    // loop above sees only the stream half leak; the string half is the same
+    // refusal, for an import that does carry one.
+    for target in [
+        "an encrypted document whose streams' filter is /Identity",
+        "an encrypted document whose strings' filter is /Identity",
+    ] {
+        assert_eq!(
+            refused(target, "incremental"),
+            Some(Err(SaveRefusal::WouldDecrypt)),
+            "{target}: a key that passes the import through seals nothing"
+        );
+    }
 }
 
 /// An incremental update leaves the document's own encryption standing, so

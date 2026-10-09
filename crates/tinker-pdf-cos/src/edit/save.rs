@@ -161,11 +161,13 @@ impl DocumentEditor {
     ///   copied into from an encrypted one — the rewrite drops `/Encrypt` and
     ///   writes the plaintext — or an incremental update of a document that
     ///   something was copied into from an encrypted one and that holds no
-    ///   key to seal it with. An update is sealed with the key the document
+    ///   key that seals it. An update is sealed with the key the document
     ///   was opened with (7.6.2) and with nothing else:
     ///   [`WriteOptions::encryption`] is not read for one, so it seals
-    ///   nothing there, and a document that is not encrypted, or was opened
-    ///   without its password, has no key;
+    ///   nothing there; a document that is not encrypted, or was opened
+    ///   without its password, has no key; and a key whose `/StmF` or `/StrF`
+    ///   is `/Identity` passes those streams or strings through unchanged
+    ///   (7.6.5 Table 25), as the document's own are stored;
     /// - [`SaveRefusal::OwnerAuthorityNeeded`] when the document is encrypted,
     ///   was opened with the user's authority, the owner withholds permissions
     ///   from that user (7.6.4.2, Table 22), and the save is a rewrite that
@@ -199,8 +201,12 @@ impl DocumentEditor {
             // one opened without its password is still ciphertext. Counting
             // the encryption asked of an update as a seal, or the document's
             // `/Encrypt` as one whatever key it was opened with, answered
-            // `Ok` to updates that wrote an encrypted source's plaintext.
-            WriteMode::Incremental => self.encrypted_source && self.doc.file_key().is_none(),
+            // `Ok` to updates that wrote an encrypted source's plaintext; so
+            // did counting any key as one, when a key whose stream or string
+            // method is `/Identity` writes that half in the clear.
+            WriteMode::Incremental => {
+                self.encrypted_source && !self.doc.file_key().is_some_and(|key| key.seals())
+            }
         };
         if would_decrypt {
             return Err(SaveRefusal::WouldDecrypt);
@@ -312,7 +318,10 @@ impl DocumentEditor {
                 // 7.6.2: the update is sealed with the key the document was
                 // opened with, because it appends into a file whose /Encrypt
                 // still stands. An unencrypted document, or one never
-                // authenticated, has no key and writes in the clear as before.
+                // authenticated, has no key and writes in the clear as before;
+                // a key whose stream or string method is `/Identity` writes
+                // that half in the clear, as the file stores its own
+                // (`check_save` names what that writes of an import).
                 let key = self.doc.file_key();
                 let cipher = key.as_ref().map(|key| write::InheritedCipher { key });
                 write::incremental_update(

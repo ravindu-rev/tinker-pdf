@@ -169,6 +169,29 @@ impl FileKey {
         &self.key
     }
 
+    /// The method `/StmF` resolved to: how [`FileKey::encrypt_stream`] and
+    /// [`FileKey::decrypt_stream`] transform a stream.
+    #[must_use]
+    pub fn stream_method(&self) -> CryptMethod {
+        self.stream_method
+    }
+
+    /// The method `/StrF` resolved to: how [`FileKey::encrypt_string`] and
+    /// [`FileKey::decrypt_string`] transform a string.
+    #[must_use]
+    pub fn string_method(&self) -> CryptMethod {
+        self.string_method
+    }
+
+    /// Whether everything this key encrypts comes out encrypted: neither
+    /// method is [`CryptMethod::Identity`], which passes bytes through
+    /// unchanged. A writer reproducing a file's own encryption with a key
+    /// that does not seal writes that half of what it is given in the clear.
+    #[must_use]
+    pub fn seals(&self) -> bool {
+        self.stream_method != CryptMethod::Identity && self.string_method != CryptMethod::Identity
+    }
+
     /// Decrypts one string belonging to the given indirect object.
     #[must_use]
     pub fn decrypt_string(&self, num: u32, gen: u16, data: &[u8]) -> Vec<u8> {
@@ -800,6 +823,41 @@ mod tests {
                         "{method:?} encrypts two objects identically"
                     );
                 }
+            }
+        }
+    }
+
+    /// `seals` answers whether both halves come out encrypted, held to what
+    /// `encrypt_stream` and `encrypt_string` do rather than to the method
+    /// names: a key with either method `/Identity` hands that half back as
+    /// it was given, and a writer asking `seals` is asking exactly that.
+    #[test]
+    fn a_key_seals_only_when_neither_method_passes_bytes_through() {
+        let methods = [
+            CryptMethod::Identity,
+            CryptMethod::Rc4,
+            CryptMethod::AesV2,
+            CryptMethod::AesV3,
+        ];
+        let plain = b"the quick brown fox jumps over the lazy dog";
+        for stream_method in methods {
+            for string_method in methods {
+                let key = FileKey::from_derived(
+                    (0..32u8).collect(),
+                    6,
+                    stream_method,
+                    string_method,
+                    AuthOutcome::User,
+                );
+                let stream_sealed = key.encrypt_stream(7, 0, plain) != plain;
+                let string_sealed = key.encrypt_string(7, 0, 1, plain) != plain;
+                assert_eq!(
+                    key.seals(),
+                    stream_sealed && string_sealed,
+                    "streams {stream_method:?}, strings {string_method:?}"
+                );
+                assert_eq!(key.stream_method(), stream_method);
+                assert_eq!(key.string_method(), string_method);
             }
         }
     }
