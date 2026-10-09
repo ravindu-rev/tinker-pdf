@@ -60,7 +60,8 @@ use libfuzzer_sys::fuzz_target;
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    BorderStyle, BoxSizing, Clear, Direction, Display, Float, LengthPercentage, LineBreakStrictness,
+    BorderStyle, BoxSizing, Clear, Direction, Display, Float, Hyphens, LengthPercentage,
+    LineBreakStrictness,
     LineHeight, ListStyleType, MarginValue, Overflow, OverflowWrap, PageBreak, PageBreakInside,
     Sides, Size,
     TextAlign, TextTransform, UnicodeBidi, Visibility, WhiteSpace, WordBreak,
@@ -77,10 +78,10 @@ use tinker_pdf_layout::{layout_with, BoxNode, Budget, Content, Limits, Options};
 /// **about** — an ideograph, a small kana whose class the tailoring decides, a
 /// no-break space, a word joiner, a zero-width space, a joiner, a soft hyphen,
 /// an opening bracket that must not end a line and a full-width one that may.
-const ALPHABET: [char; 24] = [
+const ALPHABET: [char; 25] = [
     'a', 'b', ' ', ' ', '\n', '\t', '-', '.', '0', '9', '(', ')', '\u{6771}', '\u{4eac}',
     '\u{3041}', '\u{3001}', '\u{ff08}', '\u{a0}', '\u{2060}', '\u{200b}', '\u{200d}', '\u{2010}',
-    '\u{05d0}', '\u{1f469}',
+    '\u{05d0}', '\u{1f469}', '\u{ad}',
 ];
 
 /// The bytes, one at a time, wrapping when they run out.
@@ -180,6 +181,13 @@ fn style(bytes: &mut Bytes<'_>, block: bool) -> ComputedStyle {
         Direction::Rtl
     } else {
         Direction::Ltr
+    };
+    // A soft hyphen is a break that measures nothing until it is taken and
+    // a hyphen's width when it is, and `hyphens: none` takes it away.
+    style.hyphens = if (a ^ d) & 2 != 0 {
+        Hyphens::None
+    } else {
+        Hyphens::Manual
     };
     style.unicode_bidi = match (b ^ c) & 3 {
         0 => UnicodeBidi::Normal,

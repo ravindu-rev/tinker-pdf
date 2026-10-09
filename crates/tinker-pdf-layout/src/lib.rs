@@ -643,6 +643,14 @@ pub struct TextRun {
     /// paragraph — has no strong character to say which way it reads, and
     /// its level is the only thing that does.
     pub bidi_level: Option<u8>,
+    /// Whether the line breaks at a soft hyphen at this run's end, so a
+    /// hyphen is drawn there (`css-text-3` §5.4, `hyphens: manual`).
+    ///
+    /// The run's `text` keeps the soft hyphen and gains no hyphen — the text
+    /// is the book's, and every character of it is conserved — and its
+    /// `width` is the text's with the hyphen set after it. A soft hyphen
+    /// anywhere else in a run is invisible and measured as nothing.
+    pub hyphenated: bool,
     /// `color`.
     pub color: Color,
     /// `text-decoration`.

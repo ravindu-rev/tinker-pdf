@@ -13,9 +13,9 @@ use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, Clear, Color, ColumnCount,
     ColumnFill, ColumnSpan, ColumnWidth, Direction, Display, FlexDirection, FlexWrap, Float, Gap,
-    Inset, JustifyContent, LengthPercentage, LineHeight, ListStyleType, MarginValue, MaxSize,
-    MinSize, OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size, TextAlign,
-    UnicodeBidi, VerticalAlign, Visibility, WhiteSpace, ZIndex,
+    Hyphens, Inset, JustifyContent, LengthPercentage, LineHeight, ListStyleType, MarginValue,
+    MaxSize, MinSize, OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size,
+    TextAlign, UnicodeBidi, VerticalAlign, Visibility, WhiteSpace, ZIndex,
 };
 
 use crate::flex;
@@ -724,6 +724,73 @@ fn a_right_to_left_items_marker_stands_on_its_right() {
         .expect("a marker");
     assert_eq!(marker.x, 205.0);
     assert_eq!(marker.paragraph_rtl, Some(true));
+}
+
+// ---- css-text-3 section 5.4, hyphens --------------------------------------------
+
+/// **A soft hyphen where no line breaks is invisible and measures nothing**,
+/// and stays in the run's text: the text is the book's, and conservation
+/// counts every character of it.
+#[test]
+fn a_soft_hyphen_inside_a_line_measures_nothing() {
+    let laid = run(&para("ab\u{AD}cd"), 200.0, 400.0);
+    let first = &laid.pages[0].runs[0];
+    assert_eq!(first.text, "ab\u{AD}cd");
+    assert_eq!(first.width, 40.0, "four characters of ten points");
+    assert!(!first.hyphenated);
+}
+
+/// **A line that breaks at a soft hyphen ends in a hyphen, and has to have
+/// room for it** (`css-text-3` §5.4).
+///
+/// `aaa bbbb&#173;cc` at ninety points: the soft hyphen is eight characters
+/// in, and a break there needs room for a ninth, the hyphen — which ninety
+/// points has, so the first line is `aaa bbbb` and the hyphen, ninety wide,
+/// flagged for the painter. At eighty-five it does not, and the line breaks at
+/// the space instead.
+#[test]
+fn a_line_broken_at_a_soft_hyphen_has_room_for_its_hyphen() {
+    let lines = |width: f64| {
+        let laid = run(&para("aaa bbbb\u{AD}cc"), width, 400.0);
+        laid.pages[0]
+            .runs
+            .iter()
+            .map(|run| (run.text.clone(), run.width, run.hyphenated))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        lines(90.0),
+        vec![
+            ("aaa bbbb\u{AD}".to_owned(), 90.0, true),
+            ("cc".to_owned(), 20.0, false),
+        ]
+    );
+    assert_eq!(
+        lines(85.0),
+        vec![
+            ("aaa".to_owned(), 30.0, false),
+            ("bbbb\u{AD}cc".to_owned(), 60.0, false),
+        ]
+    );
+}
+
+/// **Under `hyphens: none` a soft hyphen is no break** — though UAX #14
+/// makes it one — and is still invisible.
+#[test]
+fn hyphens_none_takes_the_break_away() {
+    let mut none = base();
+    none.hyphens = Hyphens::None;
+    let laid = run(
+        &BoxNode::element(block(), vec![BoxNode::text(none, "aaaa\u{AD}bbbb")]),
+        60.0,
+        400.0,
+    );
+    assert_eq!(baselines(&laid, 0).len(), 1, "the word was broken");
+    assert_eq!(laid.pages[0].runs[0].width, 80.0);
+    assert!(laid
+        .warnings
+        .iter()
+        .any(|(w, _)| *w == Warning::LineOverflowed));
 }
 
 // ---- CSS 2.2 section 12.5, list markers -------------------------------------

@@ -1,15 +1,12 @@
 book	property	elements
-pandoc-book-cover.epub	hyphens	6
 pandoc-book-cover.epub	background-color	5
 pandoc-book-cover.epub	color	5
 pandoc-book-cover.epub	border-top	4
 pandoc-book-cover.epub	border-bottom	1
-pandoc-book-epub2.epub	hyphens	6
 pandoc-book-epub2.epub	background-color	5
 pandoc-book-epub2.epub	color	5
 pandoc-book-epub2.epub	border-top	4
 pandoc-book-epub2.epub	border-bottom	1
-pandoc-book-nocover.epub	hyphens	6
 pandoc-book-nocover.epub	background-color	4
 pandoc-book-nocover.epub	border-top	4
 pandoc-book-nocover.epub	color	4

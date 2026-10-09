@@ -3873,6 +3873,29 @@ fn own_direction(text: &str) -> BaseDirection {
     }
 }
 
+/// Each run's text as it is drawn, `css-text-3` §5.4: its soft hyphens
+/// removed, since one is invisible where no line breaks at it, and a hyphen
+/// after a run whose line breaks at one ([`TextRun::hyphenated`]).
+///
+/// Layout keeps the soft hyphens in a run's text, because the text is the
+/// book's and conservation counts every character of it, and measured each
+/// as nothing and the line-ending one as a hyphen. This is the one place the
+/// drawn text is made from it, before the line's levels are resolved, so
+/// shaping, ordering, drawing, tagging and links all read what the page
+/// shows. The hyphen is U+002D and reads back as one: extraction's opt-in
+/// rejoining infers it, as it does any hyphen at a line end before a
+/// lower-case letter, where a soft hyphen it would join for certain.
+pub fn hyphenate(runs: &mut [TextRun]) {
+    for run in runs {
+        if run.text.contains('\u{AD}') {
+            run.text.retain(|c| c != '\u{AD}');
+        }
+        if run.hyphenated {
+            run.text.push('-');
+        }
+    }
+}
+
 /// UAX #9's rule L2 over each **visual line** of a page's runs, rather than
 /// inside each run.
 ///

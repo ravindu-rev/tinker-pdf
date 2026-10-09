@@ -263,7 +263,11 @@ fn the_unsupported_census_over_the_committed_corpus() {
             // stylesheet and never reached the parser at all. A census that
             // counted names rather than asserting the set would have gone from
             // fourteen to thirteen and nobody would have known which one went.
-            "hyphens",
+            // **`hyphens` used to be here and left in October 2026's eighth
+            // wave**: pandoc's `code { hyphens: manual }`, once in each of
+            // its default sheets, is read now — `manual` breaks a word only
+            // at a soft hyphen and draws a hyphen there — and `auto`, which
+            // would need a hyphenation dictionary, is still refused by value.
             // **`list-style` used to be here and left on 3 October 2026**,
             // when `css-lists-3`'s shorthand was implemented with its two
             // longhands. Its whole count was pandoc's `ul.task-list {

@@ -148,7 +148,14 @@ runs. A run that mixes
 directions is cut at its line's level boundaries first
 (`paint::split_at_levels`), each piece taking its share of the run's
 measured width, so `a ب<span>ح</span>م b` draws its Arabic word last letter
-first and joined across both span boundaries. **`direction` and `unicode-bidi`**
+first and joined across both span boundaries. **`hyphens`** (`css-text-3`
+§5.4) is read at `none` and `manual`, its initial value: a soft hyphen
+(U+00AD) stays in a run's text, since the text is the book's, measures
+nothing and is not drawn where no line breaks at it; a line that breaks at
+one is measured with room for a hyphen and draws one there
+(`TextRun::hyphenated`, `paint::hyphenate`); and `none` takes the break
+away. `auto` asks for a hyphenation dictionary this build does not have and
+is refused by value. **`direction` and `unicode-bidi`**
 (`css-writing-modes-3` §2) decide the line, not each line's first letter:
 every run carries its block's direction as its paragraph's base level, so a
 left-to-right paragraph that begins with an Arabic word stays left to right;

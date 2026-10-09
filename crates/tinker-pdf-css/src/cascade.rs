@@ -203,6 +203,8 @@ pub struct ComputedStyle {
     pub direction: Direction,
     /// `unicode-bidi`, §2.2.
     pub unicode_bidi: UnicodeBidi,
+    /// `hyphens`, `css-text-3` §5.4.
+    pub hyphens: Hyphens,
     /// `display`
     pub display: Display,
     /// `float`
@@ -368,6 +370,7 @@ impl ComputedStyle {
             font_feature_settings: Vec::new(),
             direction: Direction::Ltr,
             unicode_bidi: UnicodeBidi::Normal,
+            hyphens: Hyphens::Manual,
             display: Display::Inline,
             float: Float::None,
             clear: Clear::None,
@@ -470,6 +473,7 @@ impl ComputedStyle {
         style.font_kerning = parent.font_kerning;
         style.font_feature_settings = parent.font_feature_settings.clone();
         style.direction = parent.direction;
+        style.hyphens = parent.hyphens;
         style.list_style_type = parent.list_style_type;
         style.list_style_position = parent.list_style_position;
         style.quotes = parent.quotes.clone();
@@ -560,6 +564,7 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::FontFeatureSettings(value) => style.font_feature_settings = value.clone(),
         Property::Direction(value) => style.direction = *value,
         Property::UnicodeBidi(value) => style.unicode_bidi = *value,
+        Property::Hyphens(value) => style.hyphens = *value,
         Property::WhiteSpace(value) => style.white_space = *value,
         Property::ListStyleType(value) => style.list_style_type = *value,
         Property::ListStylePosition(value) => style.list_style_position = *value,
@@ -2171,6 +2176,7 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
         }
         Longhand::Direction => into.direction = from.direction,
         Longhand::UnicodeBidi => into.unicode_bidi = from.unicode_bidi,
+        Longhand::Hyphens => into.hyphens = from.hyphens,
         Longhand::WhiteSpace => into.white_space = from.white_space,
         Longhand::ListStyleType => into.list_style_type = from.list_style_type,
         Longhand::ListStylePosition => into.list_style_position = from.list_style_position,

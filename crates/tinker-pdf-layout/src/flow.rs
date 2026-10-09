@@ -65,9 +65,9 @@ use std::collections::HashMap;
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignItems, BorderCollapse, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
-    ColumnSpan, ColumnWidth, Direction, Display, Float, LengthPercentage, ListStylePosition,
-    ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides,
-    Size, TableLayout, TextAlign, UnicodeBidi, VerticalAlign, ZIndex,
+    ColumnSpan, ColumnWidth, Direction, Display, Float, Hyphens, LengthPercentage,
+    ListStylePosition, ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside,
+    Position, Side, Sides, Size, TableLayout, TextAlign, UnicodeBidi, VerticalAlign, ZIndex,
 };
 
 use crate::flex;
@@ -4480,6 +4480,7 @@ impl<M: Metrics> Builder<'_, M> {
                         paragraph_rtl: Some(style.direction == Direction::Rtl),
                         embeddings: Vec::new(),
                         bidi_level: None,
+                        hyphenated: false,
                         color: style.color,
                         decoration: style.text_decoration,
                         painted: style.visible,
@@ -4523,7 +4524,14 @@ impl<M: Metrics> Builder<'_, M> {
             return Ok(());
         }
         self.budget.spend_breaks(content.chars().count())?;
-        let opportunities = uax14::opportunities(&content, container.tailoring);
+        let mut opportunities = uax14::opportunities(&content, container.tailoring);
+        // `css-text-3` §5.4: under `hyphens: none` a soft hyphen is no place
+        // to break a word, though UAX #14 makes it one (class `BA`).
+        opportunities.retain(|opportunity| {
+            soft_hyphen_before(&content, opportunity.at).is_none_or(|at| {
+                piece_at(&spans, at).is_none_or(|p| pieces[p].style.hyphens != Hyphens::None)
+            })
+        });
 
         let indent = match container.text_indent {
             LengthPercentage::Px(px) => px,
@@ -4586,6 +4594,10 @@ impl<M: Metrics> Builder<'_, M> {
             // wrong until somebody counted.
             let justify =
                 container.text_align == TextAlign::Justify && !hard && end < content.len();
+            // §5.4: a line that breaks at a soft hyphen ends in a hyphen. The
+            // end of the text is not a break at one.
+            let hyphenated =
+                !hard && end < content.len() && soft_hyphen_before(&content, end).is_some();
             self.line(
                 &content,
                 &spans,
@@ -4595,7 +4607,7 @@ impl<M: Metrics> Builder<'_, M> {
                 line_x,
                 available,
                 (trim_start, trim_end),
-                (justify, paragraph),
+                (justify, paragraph, hyphenated),
                 lines_here,
             );
             lines_here += 1;
@@ -4774,7 +4786,14 @@ impl<M: Metrics> Builder<'_, M> {
             width += self.measure(content, spans, pieces, cursor, opportunity.at, start);
             cursor = opportunity.at;
             let trailing = self.trailing(content, spans, pieces, start, opportunity.at);
-            if width - trailing <= available {
+            // A break at a soft hyphen sets a hyphen at the line's end, and
+            // the line has to have room for it (§5.4).
+            let hyphen = if hard || opportunity.at >= content.len() {
+                0.0
+            } else {
+                self.hyphen_width(content, spans, pieces, opportunity.at)
+            };
+            if width - trailing + hyphen <= available {
                 if hard {
                     return (opportunity.at, true);
                 }
@@ -4850,6 +4869,27 @@ impl<M: Metrics> Builder<'_, M> {
         piece_at(spans, at).map_or(OverflowWrap::Normal, |p| pieces[p].style.overflow_wrap)
     }
 
+    /// The width of the hyphen a line breaking at byte `at` would end in: the
+    /// advance of a hyphen in the style of the soft hyphen just before it,
+    /// with its `letter-spacing`, or nothing where there is no soft hyphen
+    /// there (§5.4).
+    fn hyphen_width(
+        &self,
+        content: &str,
+        spans: &[(usize, usize, usize)],
+        pieces: &[Piece],
+        at: usize,
+    ) -> f64 {
+        let Some(style) = soft_hyphen_before(content, at)
+            .and_then(|shy| piece_at(spans, shy))
+            .map(|piece| &pieces[piece].style)
+        else {
+            return 0.0;
+        };
+        let mut buffer = [0u8; 4];
+        self.advance_of(HYPHEN.encode_utf8(&mut buffer), &style.font()) + style.letter_spacing
+    }
+
     /// The advance of one byte range, spanning as many pieces as it must, on
     /// a line that starts at `line_start`.
     ///
@@ -4895,7 +4935,7 @@ impl<M: Metrics> Builder<'_, M> {
                 line_start..content.len(),
             );
             total += self.advance_in(slice, &style.font(), &context);
-            total += style.letter_spacing * slice.chars().count() as f64;
+            total += style.letter_spacing * visible_chars(slice) as f64;
             total += style.word_spacing * slice.chars().filter(|c| *c == ' ').count() as f64;
         }
         total
@@ -4925,7 +4965,18 @@ impl<M: Metrics> Builder<'_, M> {
     /// line: what the shaper joins across and kerns against
     /// ([`crate::metrics::Shaper::shape_in`]). A provider with no shaper has
     /// no use for it and measures the slice alone, as it always has.
+    ///
+    /// A soft hyphen measures nothing: it is invisible where no line breaks at
+    /// it (`css-text-3` §5.4), and where one does the hyphen it becomes is
+    /// added by whoever set the break ([`Builder::hyphen_width`]).
     fn advance_in(&self, text: &str, font: &FontRequest<'_>, context: &ShapingContext<'_>) -> f64 {
+        let visible;
+        let text = if text.contains(SOFT_HYPHEN) {
+            visible = text.replace(SOFT_HYPHEN, "");
+            visible.as_str()
+        } else {
+            text
+        };
         match self.metrics.shaper() {
             Some(shaper) => shaper.shape_in(text, font, false, context).advance,
             None => self.metrics.measure(text, font),
@@ -4982,7 +5033,7 @@ impl<M: Metrics> Builder<'_, M> {
         x: f64,
         available: f64,
         (start, end): (usize, usize),
-        (justify, paragraph): (bool, Option<bool>),
+        (justify, paragraph, hyphenated): (bool, Option<bool>, bool),
         index_in_block: usize,
     ) {
         // CSS 2.2 §10.8.1's strut: every line box carries the block
@@ -5100,6 +5151,7 @@ impl<M: Metrics> Builder<'_, M> {
                     paragraph_rtl: paragraph,
                     embeddings: pieces[*index].embeddings.clone(),
                     bidi_level: None,
+                    hyphenated: false,
                     color: style.color,
                     decoration: style.text_decoration,
                     painted: false,
@@ -5116,8 +5168,18 @@ impl<M: Metrics> Builder<'_, M> {
             // The run in the context it is drawn in: its neighbours on this
             // line, both ends of which are known now.
             let context = context_of(content, spans, pieces, span_at, lo..hi, start..end);
-            let advance = self.advance_in(&text, &font, &context)
-                + style.letter_spacing * text.chars().count() as f64
+            // The run that ends a hyphenated line is measured with the hyphen
+            // set after it, in its context, as the painter draws it.
+            let ends_hyphenated = hyphenated && hi == end && text.ends_with(SOFT_HYPHEN);
+            let measured = if ends_hyphenated {
+                let mut drawn = text.clone();
+                drawn.push(HYPHEN);
+                self.advance_in(&drawn, &font, &context) + style.letter_spacing
+            } else {
+                self.advance_in(&text, &font, &context)
+            };
+            let advance = measured
+                + style.letter_spacing * visible_chars(&text) as f64
                 + style.word_spacing * text.chars().filter(|c| *c == ' ').count() as f64;
             runs.push(TextRun {
                 x: 0.0,
@@ -5134,6 +5196,7 @@ impl<M: Metrics> Builder<'_, M> {
                 paragraph_rtl: paragraph,
                 embeddings: pieces[*index].embeddings.clone(),
                 bidi_level: None,
+                hyphenated: ends_hyphenated,
                 color: style.color,
                 decoration: style.text_decoration,
                 painted: style.visible,
@@ -6299,6 +6362,29 @@ fn translate(items: &mut [Item], blocks: &mut [BlockRecord], dx: f64, dy: f64) {
     for block in blocks {
         block.x += dx;
     }
+}
+
+/// U+00AD SOFT HYPHEN: a place a word may break, invisible unless it does
+/// (`css-text-3` §5.4).
+pub(crate) const SOFT_HYPHEN: char = '\u{AD}';
+
+/// What a line that breaks at a soft hyphen ends in: U+002D, the hyphen every
+/// face has — the standard 14 have no U+2010 — and the one a reader joining
+/// hyphenated words already looks for.
+pub(crate) const HYPHEN: char = '-';
+
+/// Where the soft hyphen just before byte `at` of `content` is, if one is.
+fn soft_hyphen_before(content: &str, at: usize) -> Option<usize> {
+    content
+        .get(..at)
+        .filter(|before| before.ends_with(SOFT_HYPHEN))
+        .map(|_| at - SOFT_HYPHEN.len_utf8())
+}
+
+/// How many characters of `text` are seen: all but its soft hyphens, which
+/// take no `letter-spacing` either.
+fn visible_chars(text: &str) -> usize {
+    text.chars().filter(|c| *c != SOFT_HYPHEN).count()
 }
 
 /// How many explicit bidi levels a run carries at most: UAX #9's `max_depth`

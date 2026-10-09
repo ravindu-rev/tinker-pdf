@@ -860,10 +860,11 @@ fn the_unsupported_census_is_the_one_the_record_states() {
     // build that measured nothing could still not pass by committing an empty
     // file. **The floor is the record's own size and moves with it**: it was
     // twenty-one rows until `color-scheme` left in October 2026's eighth wave
-    // and took its four rows with it, and a property leaving is a re-measure
-    // of this number exactly as it is of the file.
+    // and took its four rows with it, then seventeen until `hyphens` left in
+    // the same wave and took three, and a property leaving is a re-measure of
+    // this number exactly as it is of the file.
     assert!(
-        measured.len() >= 17,
+        measured.len() >= 14,
         "the census collapsed to {} rows, which is a build that stopped \
          counting rather than a corpus that stopped asking",
         measured.len()
@@ -909,24 +910,27 @@ fn the_unsupported_census_is_the_one_the_record_states() {
 /// `text-align: inherit` beside them, which left both calibre books with
 /// nothing unimplemented in them at all and this fixture with no book.
 ///
-/// It is now pandoc's `hyphens`, and it is a **better** fixture than either of
-/// its predecessors for the claim being made: pandoc writes `hyphens: manual`
-/// exactly **once**, in `code { … }`, and it reaches **six** elements. One
-/// declaration, six elements, and a build that counted at parse time would say
-/// one — where `vertical-align` was sixteen elements from three declarations
-/// and `display` was six from six, so neither could ever have shown a factor
-/// this cleanly.
+/// It was then pandoc's `hyphens` — `hyphens: manual` written once, in
+/// `code { … }`, reaching six elements — until October 2026's eighth wave
+/// implemented `manual`, and the fixture moved a fourth time for the same
+/// reason as the three before.
+///
+/// It is now pandoc's `border-top`, a value gap: the sheet writes
+/// `border-top: 1px solid light-dark(…)` **twice**, once in `tbody { … }` and
+/// once in `th { … }`, and `light-dark()` is refused by value, so the two
+/// declarations reach **four** elements — the book's one table body and its
+/// three header cells. A build that counted at parse time would say two.
 #[test]
 fn the_census_counts_elements_and_not_declarations() {
     let doc = Document::open(corpus_book("pandoc-book-cover.epub")).expect("a book");
     let entries = census(&doc);
-    let aligned = entries
+    let ruled = entries
         .iter()
-        .find(|(property, _)| property == "hyphens")
-        .expect("this book sets hyphens: manual on its code spans");
+        .find(|(property, _)| property == "border-top")
+        .expect("this book rules its table with light-dark() borders");
     assert_eq!(
-        aligned.1, 6,
-        "hyphens was counted per declaration rather than per element: {aligned:?}"
+        ruled.1, 4,
+        "border-top was counted per declaration rather than per element: {ruled:?}"
     );
     // And the ranking is by count, which is what makes the first line of a
     // report the thing worth reading.

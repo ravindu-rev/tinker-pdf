@@ -2580,6 +2580,28 @@ fn direction_and_unicode_bidi_read_their_keywords_and_refuse_the_overrides() {
     }
 }
 
+/// **`hyphens` at `none` and `manual`, and `auto` refused by value**
+/// (`css-text-3` §5.4): `auto` asks for a hyphenation dictionary this build
+/// does not have, so it is counted rather than read as `manual`.
+#[test]
+fn hyphens_reads_none_and_manual_and_refuses_auto() {
+    use crate::property::Hyphens;
+    for (value, expected) in [("none", Hyphens::None), ("Manual", Hyphens::Manual)] {
+        assert_eq!(
+            known(&format!("code {{ hyphens: {value} }}")),
+            vec![Property::Hyphens(expected)],
+            "hyphens: {value}"
+        );
+    }
+    assert_eq!(
+        declarations("p { hyphens: auto }")[0].declaration,
+        Declaration::Unsupported {
+            property: "hyphens",
+            value: "auto".to_owned(),
+        }
+    );
+}
+
 /// **`font-kerning` at its three keywords** (`css-fonts-4` §6.4).
 #[test]
 fn font_kerning_reads_its_three_keywords() {

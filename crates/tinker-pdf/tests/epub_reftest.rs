@@ -1230,3 +1230,52 @@ fn a_spanning_child_is_the_column_sets_either_side_of_a_block() {
     );
     same("column-span: all", spanning, written, broken);
 }
+
+// ---- hyphens ------------------------------------------------------------------
+
+/// Every line as the painter draws it — [`tinker_pdf::epub::paint::hyphenate`]
+/// over each page's runs first — with its width beside its text, since a
+/// hyphen is measured.
+fn drawn_at(style: &str, body: &str, measure: f64) -> Vec<(String, f64, f64)> {
+    let (_, _, mut laid) = lay_out(
+        &document(body),
+        &format!("{RESET} {style}"),
+        measure,
+        100_000.0,
+    );
+    for page in &mut laid.pages {
+        tinker_pdf::epub::paint::hyphenate(&mut page.runs);
+    }
+    lines(&laid)
+        .into_iter()
+        .map(|line| (format!("{} ({:.3})", line.text, line.width), line.x, line.y))
+        .collect()
+}
+
+/// **A line that breaks at a soft hyphen ends in a hyphen, and is measured
+/// with it** (`css-text-3` §5.4, `hyphens: manual`, the initial value): at a
+/// measure of ten Courier characters, `aaaa&#173;bbbbbbbb` breaks at its soft
+/// hyphen and draws `aaaa-` over `bbbbbbbb` — the same lines, at the same
+/// places and widths, as the hyphen and the break written out. The mismatch is
+/// `hyphens: none`, under which the soft hyphen is no break and the word
+/// overflows its line whole.
+#[test]
+fn a_line_broken_at_a_soft_hyphen_is_the_hyphen_and_the_break_written_out() {
+    let measure = 100.0;
+    let soft = drawn_at("", "<p>aaaa\u{AD}bbbbbbbb</p>", measure);
+    let written = drawn_at("", "<p>aaaa-<br/>bbbbbbbb</p>", measure);
+    let broken = drawn_at("p { hyphens: none }", "<p>aaaa\u{AD}bbbbbbbb</p>", measure);
+    same("a soft hyphen at a break", soft, written, broken);
+}
+
+/// **A soft hyphen where no line breaks is invisible and measures nothing**
+/// (§5.4): `ab&#173;cd ef` is `abcd ef`, to the width. The mismatch is the soft
+/// hyphen drawn as a hyphen, which is what this build drew before it read
+/// `hyphens` at all.
+#[test]
+fn a_soft_hyphen_inside_a_line_is_not_there() {
+    let soft = drawn_at("", "<p>ab\u{AD}cd ef</p>", MEASURE);
+    let written = drawn_at("", "<p>abcd ef</p>", MEASURE);
+    let broken = drawn_at("", "<p>ab-cd ef</p>", MEASURE);
+    same("a soft hyphen inside a line", soft, written, broken);
+}

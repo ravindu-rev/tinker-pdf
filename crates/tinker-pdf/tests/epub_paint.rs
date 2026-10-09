@@ -1576,3 +1576,22 @@ fn a_gradient_this_build_does_not_draw_is_counted() {
     assert_eq!(counted(&drawn, "background-image"), None);
     assert_ne!(tokens(&drawn), tokens(&plain), "a gradient drew nothing");
 }
+
+// ---- hyphens -------------------------------------------------------------------
+
+/// **A soft hyphen is drawn as a hyphen where its line breaks at it, and
+/// nowhere else** (`css-text-3` §5.4), read back off the page.
+///
+/// Courier at sixteen pixels is 9.6 pixels a character, so a hundred-pixel
+/// measure holds ten: `aaaa&#173;bbbbbbbb` breaks at its soft hyphen, and
+/// `ab&#173;cd` after it fits whole on its own line, where its soft hyphen is
+/// not drawn at all. The hyphen is U+002D, so it reads back as one.
+#[test]
+fn a_soft_hyphen_is_drawn_only_where_its_line_breaks() {
+    let doc = open(
+        "p { width: 100px; font-family: monospace; font-size: 16px }",
+        "<p>aaaa\u{AD}bbbbbbbb ab\u{AD}cd</p>",
+    );
+    let text = doc.page(0).expect("a page").text().plain_text();
+    assert_eq!(text.trim_end(), "aaaa-\nbbbbbbbb\nabcd");
+}

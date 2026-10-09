@@ -946,6 +946,24 @@ pub enum UnicodeBidi {
     Plaintext,
 }
 
+/// `hyphens`, `css-text-3` §5.4, at the two values this build sets.
+///
+/// `auto` is refused by value: it asks for a word to be hyphenated where a
+/// hyphenation dictionary for its language says it may be, and this build
+/// has none — so a book that asks is counted rather than set as `manual`
+/// and called honoured. The declaration then does not apply, and the
+/// element keeps the `manual` it inherits or starts with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hyphens {
+    /// `none`: a word breaks nowhere inside itself, a soft hyphen included,
+    /// and a soft hyphen is never seen.
+    None,
+    /// `manual`, the initial value: a word breaks inside itself only where it
+    /// says it may — after a hyphen, or at a soft hyphen (U+00AD), which is
+    /// invisible unless the line breaks at it and a hyphen where it does.
+    Manual,
+}
+
 /// `text-transform`, `css-text-3` §2.1, at the four values this build sets.
 ///
 /// `full-width` and `full-size-kana` are refused by value rather than
@@ -1800,6 +1818,8 @@ pub enum Property {
     FontKerning(FontKerning),
     /// `direction`, `css-writing-modes-3` §2.1.
     Direction(Direction),
+    /// `hyphens`, `css-text-3` §5.4.
+    Hyphens(Hyphens),
     /// `unicode-bidi`, §2.2.
     UnicodeBidi(UnicodeBidi),
     /// `font-feature-settings`, §6.12, in the order written; empty for
@@ -1989,6 +2009,7 @@ impl Property {
             Property::FontKerning(_) => "font-kerning",
             Property::Direction(_) => "direction",
             Property::UnicodeBidi(_) => "unicode-bidi",
+            Property::Hyphens(_) => "hyphens",
             Property::FontFeatureSettings(_) => "font-feature-settings",
             Property::WhiteSpace(_) => "white-space",
             Property::ListStyleType(_) => "list-style-type",
@@ -2135,6 +2156,8 @@ impl Property {
             // `css-writing-modes-3` §2.1: *inherited: yes*. `unicode-bidi` is
             // not (§2.2): an embedding is opened by the box that declares it.
             | Property::Direction(_)
+            // `css-text-3` §5.4: *inherited: yes*.
+            | Property::Hyphens(_)
             | Property::WhiteSpace(_)
             | Property::ListStyleType(_)
             | Property::ListStylePosition(_)
@@ -2420,7 +2443,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "grid-template-areas",
     "grid-template-columns",
     "grid-template-rows",
-    "hyphens",
     "justify-items",
     "justify-self",
     "list-style-image",
@@ -3381,6 +3403,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "font-weight",
     "gap",
     "height",
+    "hyphens",
     "justify-content",
     "left",
     "letter-spacing",
@@ -3857,6 +3880,14 @@ fn implemented(
             Some(Property::Direction(match word {
                 "ltr" => Direction::Ltr,
                 "rtl" => Direction::Rtl,
+                _ => return None,
+            }))
+        }),
+        // `auto` is inside the grammar and refused by value; see [`Hyphens`].
+        "hyphens" => keyword(one, single, |word| {
+            Some(Property::Hyphens(match word {
+                "none" => Hyphens::None,
+                "manual" => Hyphens::Manual,
                 _ => return None,
             }))
         }),

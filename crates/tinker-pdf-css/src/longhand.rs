@@ -7,7 +7,7 @@
 //! [`Property`] is not one -- it always holds a specified value, and six of its
 //! variants stand for four names each, carrying a [`Side`].
 //!
-//! Hence a hundred and thirteen unit variants, one per name this build implements as a
+//! Hence a hundred and fourteen unit variants, one per name this build implements as a
 //! longhand. The twenty shorthands and `css-break-3`'s three aliases are not
 //! here, because a shorthand is not a property:
 //! `crate::property::DEFAULTABLE_SHORTHANDS` expands each into the longhands
@@ -15,7 +15,7 @@
 //!
 //! # This file is generated, and it is checked in to be read
 //!
-//! A hundred and thirteen variants across four consumers is not hand-written code, and a
+//! A hundred and fourteen variants across four consumers is not hand-written code, and a
 //! macro would put it somewhere nobody can grep. So it is generated from
 //! `property.rs` itself -- the variants, the names out of [`Property::name`],
 //! the inheritance out of [`Property::inherited`] -- and written here as
@@ -81,6 +81,8 @@ pub enum Longhand {
     Direction,
     /// `unicode-bidi`
     UnicodeBidi,
+    /// `hyphens`
+    Hyphens,
     /// `white-space`
     WhiteSpace,
     /// `list-style-type`
@@ -296,6 +298,7 @@ impl Longhand {
         Longhand::FontFeatureSettings,
         Longhand::Direction,
         Longhand::UnicodeBidi,
+        Longhand::Hyphens,
         Longhand::WhiteSpace,
         Longhand::ListStyleType,
         Longhand::ListStylePosition,
@@ -415,6 +418,7 @@ impl Longhand {
             Longhand::FontFeatureSettings => "font-feature-settings",
             Longhand::Direction => "direction",
             Longhand::UnicodeBidi => "unicode-bidi",
+            Longhand::Hyphens => "hyphens",
             Longhand::WhiteSpace => "white-space",
             Longhand::ListStyleType => "list-style-type",
             Longhand::ListStylePosition => "list-style-position",
@@ -537,6 +541,7 @@ impl Longhand {
             | Longhand::FontKerning
             | Longhand::FontFeatureSettings
             | Longhand::Direction
+            | Longhand::Hyphens
             | Longhand::WhiteSpace
             | Longhand::ListStyleType
             | Longhand::ListStylePosition
@@ -678,6 +683,7 @@ impl Property {
             Property::FontFeatureSettings(..) => Longhand::FontFeatureSettings,
             Property::Direction(..) => Longhand::Direction,
             Property::UnicodeBidi(..) => Longhand::UnicodeBidi,
+            Property::Hyphens(..) => Longhand::Hyphens,
             Property::WhiteSpace(..) => Longhand::WhiteSpace,
             Property::ListStyleType(..) => Longhand::ListStyleType,
             Property::ListStylePosition(..) => Longhand::ListStylePosition,

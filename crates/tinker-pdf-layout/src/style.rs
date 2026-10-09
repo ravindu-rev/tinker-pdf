@@ -39,7 +39,7 @@ use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BackgroundPosition, BackgroundRepeat, BackgroundSize,
     BorderCollapse, BorderSpacing, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
     ColumnSpan, ColumnWidth, Direction, Display, FeatureSetting, FlexDirection, FlexWrap, Float,
-    FontFamily, FontKerning, FontStyle, FontVariant, Gap, Image, Inset, JustifyContent,
+    FontFamily, FontKerning, FontStyle, FontVariant, Gap, Hyphens, Image, Inset, JustifyContent,
     LengthPercentage, LineHeight, ListStylePosition, ListStyleType, MarginValue, MaxSize, MinSize,
     OutlineStyle, Overflow, OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Shadow,
     Side, Sides, Size, Spacing, TableLayout, TextAlign, TextDecoration, TextTransform, UnicodeBidi,
@@ -83,6 +83,9 @@ pub struct Consumed {
     /// `unicode-bidi`: an inline box's embedding, or a block container's
     /// `plaintext`.
     pub unicode_bidi: UnicodeBidi,
+    /// `hyphens`: whether a soft hyphen is a break, and a hyphen where the
+    /// line breaks at it.
+    pub hyphens: Hyphens,
     /// `color`.
     pub color: Color,
     /// `text-decoration`.
@@ -327,6 +330,7 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         // UAX #9, and `start` and `end` resolved against the first here.
         direction,
         unicode_bidi,
+        hyphens,
         display,
         float,
         clear,
@@ -442,6 +446,7 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         font_features: font_feature_settings.clone(),
         direction: *direction,
         unicode_bidi: *unicode_bidi,
+        hyphens: *hyphens,
         color: *color,
         text_decoration: *text_decoration,
         line_height,
