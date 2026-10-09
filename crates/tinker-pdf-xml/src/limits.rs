@@ -143,7 +143,7 @@ pub const MAX_XML_NAME_LEN: usize = 1024;
 /// `reopened_formatting_elements_are_spent_against_the_token_cap` crosses it
 /// at the shipped value with fifty kilobytes, and
 /// `attributes_copied_onto_clones_are_spent_against_the_token_cap` with
-/// thirty-five. How long the copies are is [`MAX_HTML_CLONE_BYTES`]'s. The
+/// thirty-four. How long the copies are is [`MAX_HTML_CLONE_BYTES`]'s. The
 /// other three caps bound the HTML parser as they bound this reader: its
 /// stack of open elements, an element's attributes — a tag's, and the
 /// `<html>` or `<body>` a later tag's attributes are merged into — and a tag,
@@ -196,7 +196,7 @@ pub const MAX_XML_TOKENS: usize = 1 << 20;
 /// Reachable: thirty-two cells nested one inside another, each leaving a
 /// hundred `<b>`s behind its marker, hold 3 232 entries and are never more
 /// than 231 elements deep; `the_list_of_active_formatting_elements_stops_at_its_cap`
-/// builds six cells of two hundred, eight kilobytes.
+/// builds six cells of two hundred, eleven kilobytes.
 pub const MAX_HTML_ACTIVE_FORMATTING: usize = 1024;
 
 /// The most bytes of attribute names and values HTML's tree builder may copy

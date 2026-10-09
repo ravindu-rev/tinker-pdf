@@ -146,7 +146,7 @@ fn attribute_bytes_copied_onto_clones_stop_at_their_cap() {
 /// **And a clone's attributes are counted, not only its bytes.** A `<b>` of
 /// two hundred and fifty-six one-byte-valued attributes reopened by every
 /// `<p>x</p>` copies two hundred and fifty-six attributes per eight bytes, so
-/// thirty-five kilobytes asked for a million of them with a few thousand
+/// thirty-four kilobytes asked for a million of them with a few thousand
 /// nodes spent. Each spends one unit of the token cap as a node does.
 #[test]
 fn attributes_copied_onto_clones_are_spent_against_the_token_cap() {
