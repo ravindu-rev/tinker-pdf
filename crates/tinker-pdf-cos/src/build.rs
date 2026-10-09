@@ -2297,7 +2297,7 @@ fn look_at_kid() {
 /// [`PageBuilder::open_tag`] left open over a page break — which takes a key
 /// of the builder's choosing — can never collide with one a caller of
 /// [`PageBuilder::tagged_keyed`] chose for its own reasons.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum NodeKey {
     /// The caller's.
     Caller(u64),
@@ -9201,20 +9201,39 @@ impl MergedKid {
 /// `writable` says whether a page's link at an index will be written at all —
 /// a link naming a dangling destination is not, and an `/OBJR` to it would be
 /// a reference into nothing.
+///
+/// **Linear in the elements and links**, which it was not: a keyed element
+/// looked for its sibling, and a keyed link for its element and for where
+/// that element's kids reach, by walking them, and an EPUB keys every
+/// element and attaches every link by key — so a paragraph of n `<span>`s
+/// cost n squared here. Each is now an index built as the tree is.
 fn merge_tree(
     pages: &[PageBuilder],
     writable: &dyn Fn(usize, usize) -> bool,
 ) -> (Vec<Merged>, Vec<MergedKid>) {
     let mut arena: Vec<Merged> = Vec::new();
     let mut roots: Vec<MergedKid> = Vec::new();
+    let mut keyed = BTreeMap::new();
     for (at, page) in pages.iter().enumerate() {
         for node in &page.tag_roots {
-            absorb(&mut arena, &mut roots, node, at);
+            absorb(&mut arena, &mut roots, None, &mut keyed, node, at);
         }
     }
     order_kids(&mut arena);
     roots.sort_by_key(|kid| kid.order(&arena));
 
+    // The first element in the arena's order carrying each caller's key,
+    // which is the one a caller naming each element once means.
+    let mut first_with: BTreeMap<u64, usize> = BTreeMap::new();
+    for (at, merged) in arena.iter().enumerate() {
+        if let Some(NodeKey::Caller(key)) = merged.key {
+            first_with.entry(key).or_insert(at);
+        }
+    }
+    // Where each element's kids reach, worked out the first time a link
+    // asks. An annotation appended takes exactly that order, so it never
+    // moves the answer for the next one.
+    let mut reach: Vec<Option<u64>> = vec![None; arena.len()];
     for (at, page) in pages.iter().enumerate() {
         for (link, annotation) in page.links.iter().enumerate() {
             let Some(key) = annotation.owner else {
@@ -9223,23 +9242,27 @@ fn merge_tree(
             if !writable(at, link) {
                 continue;
             }
-            // The first element in the arena's order carrying the key, which
-            // is the one a caller naming each element once means.
-            let Some(element) = arena
-                .iter()
-                .position(|merged| merged.key == Some(NodeKey::Caller(key)))
-            else {
+            let Some(&element) = first_with.get(&key) else {
                 continue;
             };
             // After everything already there: an annotation is not a piece
             // of the text the element reads, and putting it last keeps every
             // sequence where the sort left it.
-            let order = arena[element]
-                .kids
-                .iter()
-                .map(|kid| kid.order(&arena))
-                .max()
-                .unwrap_or(arena[element].order);
+            let order = match reach.get(element).copied().flatten() {
+                Some(order) => order,
+                None => arena[element]
+                    .kids
+                    .iter()
+                    .map(|kid| {
+                        look_at_kid();
+                        kid.order(&arena)
+                    })
+                    .max()
+                    .unwrap_or(arena[element].order),
+            };
+            if let Some(slot) = reach.get_mut(element) {
+                *slot = Some(order);
+            }
             arena[element].kids.push(MergedKid::Object {
                 page: at,
                 link,
@@ -9250,19 +9273,30 @@ fn merge_tree(
     (arena, roots)
 }
 
+/// Each keyed element of the tree by the element it is a kid of (`None` for
+/// a root) and its key: the sibling [`absorb`] merges a keyed node into,
+/// found without walking the siblings.
+type KeyedSiblings = BTreeMap<(Option<usize>, NodeKey), usize>;
+
 /// Folds one page's nodes into the document tree.
 ///
 /// `siblings` is the kid list the nodes join — the root list, or a merged
-/// element's own kids. A node with a key finds the sibling that shares it and
-/// appends to it; a node without one is always new, which is what keeps
+/// element's own kids — and `parent` the element whose kids they are. A node
+/// with a key finds the sibling that shares it, through `keyed`, and appends
+/// to it; a node without one is always new, which is what keeps
 /// [`PageBuilder::tagged`]'s anonymous elements per page.
-fn absorb(arena: &mut Vec<Merged>, siblings: &mut Vec<MergedKid>, node: &TaggedNode, page: usize) {
-    let existing = node.key.and_then(|key| {
-        siblings.iter().find_map(|kid| match kid {
-            MergedKid::Element(at) if arena[*at].key == Some(key) => Some(*at),
-            _ => None,
-        })
-    });
+fn absorb(
+    arena: &mut Vec<Merged>,
+    siblings: &mut Vec<MergedKid>,
+    parent: Option<usize>,
+    keyed: &mut KeyedSiblings,
+    node: &TaggedNode,
+    page: usize,
+) {
+    // Only this function adds an element to a kid list, and it records each
+    // keyed one here as it does, so the entry is the first sibling with the
+    // key: the one a walk over the siblings would have stopped at.
+    let existing = node.key.and_then(|key| keyed.get(&(parent, key)).copied());
     let at = match existing {
         Some(at) => {
             // The element reads where its **first** half did: a paragraph
@@ -9286,6 +9320,9 @@ fn absorb(arena: &mut Vec<Merged>, siblings: &mut Vec<MergedKid>, node: &TaggedN
             });
             let at = arena.len() - 1;
             siblings.push(MergedKid::Element(at));
+            if let Some(key) = node.key {
+                keyed.insert((parent, key), at);
+            }
             at
         }
     };
@@ -9303,7 +9340,7 @@ fn absorb(arena: &mut Vec<Merged>, siblings: &mut Vec<MergedKid>, node: &TaggedN
                 // borrowed at once. Nothing else can reach this node in
                 // between: `absorb` is the only walker.
                 let mut kids = std::mem::take(&mut arena[at].kids);
-                absorb(arena, &mut kids, child, page);
+                absorb(arena, &mut kids, Some(at), keyed, child, page);
                 arena[at].kids = kids;
             }
             TaggedKid::Object { link, order } => {
@@ -9403,6 +9440,103 @@ mod tests {
         let content =
             String::from_utf8_lossy(&crate::pages::content_bytes(&doc, &page)).into_owned();
         assert_eq!(content.matches("/Span <<").count(), SPANS);
+    }
+
+    /// **Folding the pages' elements into one tree costs the same however many
+    /// siblings an element has.** `finish` merges every page's elements by
+    /// key, and attaches each `link_for` annotation to the element its key
+    /// names after everything already there. The first way it did both
+    /// walked: a keyed element looked for the sibling sharing its key through
+    /// every sibling, and a keyed link looked for its element through the
+    /// whole tree and then for where that element's kids reach through every
+    /// kid. An EPUB keys every element and attaches its links by key, so a
+    /// paragraph of n `<span>`s was n squared again once `next_order` was
+    /// not: 1.82 / 5.40 / 17.66 s to open 10 000 / 20 000 / 40 000.
+    ///
+    /// One keyed `/P` of `SPANS` keyed `/Span`s, a `link_for` naming the
+    /// paragraph after every eighth span and one naming a span four later,
+    /// built **and finished** under the count: at most eight looked at per
+    /// span.
+    #[test]
+    fn a_tree_of_many_keyed_elements_costs_its_elements() {
+        const SPANS: u64 = 4096;
+        let target = Target::Uri("https://example.org/".to_string());
+        let mut builder = DocumentBuilder::new();
+        KIDS_LOOKED.with(|looked| looked.set(0));
+        builder.add_page(200.0, 200.0, |page| {
+            page.tagged_keyed(b"P", 0, 0, |page| {
+                for key in 1..=SPANS {
+                    page.tagged_keyed(b"Span", key, key, |page| page.raw(b"0 0 1 1 re f"));
+                    if key % 8 == 0 {
+                        assert!(page.link_for(0, 0.0, 0.0, 1.0, 1.0, &target));
+                    }
+                    if key % 8 == 4 {
+                        assert!(page.link_for(key, 0.0, 0.0, 1.0, 1.0, &target));
+                    }
+                }
+            });
+        });
+        let bytes = builder.finish();
+        let looked = KIDS_LOOKED.with(core::cell::Cell::get);
+        let spans = usize::try_from(SPANS).unwrap_or(usize::MAX);
+        assert!(
+            looked <= 8 * spans,
+            "a paragraph of {SPANS} keyed spans looked at {looked} kids and elements \
+             to build and finish"
+        );
+
+        let doc = CosDocument::open(bytes).expect("the built document opens");
+        let page = crate::pages::at(&doc, 0).expect("a page");
+        let content =
+            String::from_utf8_lossy(&crate::pages::content_bytes(&doc, &page)).into_owned();
+        assert_eq!(content.matches("/Span <<").count(), spans);
+    }
+
+    /// **A key merges an element with its own siblings only, and a keyed
+    /// link goes to the first element in the tree carrying the key** — what
+    /// the walks the indexes replaced answered. `Span` 7 is written under
+    /// `P` 1 on the first and third pages and under `Div` 2 on the second,
+    /// which links to key 7: the two `P`s and their spans merge, the `Div`'s
+    /// span stays its own, and the link joins the `P`'s span, the first in
+    /// the tree, after both of its sequences.
+    #[test]
+    fn a_key_merges_among_siblings_and_a_keyed_link_finds_the_first() {
+        let target = Target::Uri("https://example.org/".to_string());
+        let builder = DocumentBuilder::new();
+        let page_with = |parent: &[u8], key: u64, order: u64| {
+            let mut page = builder.begin_page(200.0, 200.0);
+            page.tagged_keyed(parent, key, order, |page| {
+                page.tagged_keyed(b"Span", 7, order + 1, |page| page.raw(b"0 0 1 1 re f"));
+            });
+            page
+        };
+        let first = page_with(b"P", 1, 0);
+        let mut second = page_with(b"Div", 2, 10);
+        assert!(second.link_for(7, 0.0, 0.0, 1.0, 1.0, &target));
+        let third = page_with(b"P", 1, 20);
+
+        let (arena, roots) = merge_tree(&[first, second, third], &|_, _| true);
+        let tags: Vec<&[u8]> = arena.iter().map(|merged| merged.tag.as_slice()).collect();
+        assert_eq!(tags, [&b"P"[..], b"Span", b"Div", b"Span"]);
+        assert!(matches!(
+            roots.as_slice(),
+            [MergedKid::Element(0), MergedKid::Element(2)]
+        ));
+        let kids = |at: usize| -> Vec<(usize, Option<u32>)> {
+            arena[at]
+                .kids
+                .iter()
+                .map(|kid| match kid {
+                    MergedKid::Content { page, mcid, .. } => (*page, Some(*mcid)),
+                    MergedKid::Object { page, .. } => (*page, None),
+                    MergedKid::Element(_) => (usize::MAX, None),
+                })
+                .collect()
+        };
+        // Each span's sequence is its page's first id: the paragraph's own
+        // sequences around it drew nothing and were taken back.
+        assert_eq!(kids(1), [(0, Some(0)), (2, Some(0)), (1, None)]);
+        assert_eq!(kids(3), [(1, Some(0))]);
     }
 
     /// **Where an element's kids reach is the greatest of their orders,

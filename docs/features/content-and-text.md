@@ -628,9 +628,12 @@ at the cap itself, and an element nested exactly that deep came back
 orphaned under `DepthCapped` (`opens_past_the_depth_cap_are_refused_and_still_paired`).
 Appending to an element costs the same however many kids it already holds:
 where its kids reach, which every resumption after a child and every link
-asks, is kept beside them rather than walked each time — the walk made an
-EPUB paragraph of 40 000 `<span>`s take 48.7 s to open in a debug build
-(`an_element_of_many_kids_costs_its_kids` counts the kids looked at).
+asks, is kept beside them rather than walked each time, and `finish` finds a
+keyed element's sibling, a `link_for` key's element and where that element's
+kids reach through indexes rather than walks. The walks made an EPUB
+paragraph of 40 000 `<span>`s take 48.7 s to open in a debug build, against
+3.9 s now (`an_element_of_many_kids_costs_its_kids` and
+`a_tree_of_many_keyed_elements_costs_its_elements` count what is looked at).
 
 Coordinates are PDF user space, y upward — the space the page's own boxes
 are in; a display transform is the caller's. The `Device` trait, the
