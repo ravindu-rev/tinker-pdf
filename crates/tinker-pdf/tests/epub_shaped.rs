@@ -91,18 +91,25 @@
 //! longer turns a run round: a slice is shaped in its own direction, whatever
 //! its neighbours' text would make of the whole.
 //!
-//! # What remains
+//! # And the measurement, the same wave
 //!
-//! Layout still **measures** each run alone — its `Shaper` seam takes no
-//! context — so a context that changes an *advance* (a joined form wider than
-//! the isolated one, a pair that kerns) leaves that difference between the
-//! run and the next; an offset moves no pen and costs nothing.
+//! Layout **measured** each run alone — its `Shaper` seam took no context —
+//! so a context that changed an *advance* (a joined form wider than the
+//! isolated one, a pair that kerns) left that difference between the run and
+//! the next. The seam takes the run's neighbours on its line now
+//! (`Shaper::shape_in`), and `BookMetrics` shapes against them by the
+//! painter's own rule:
+//! [`a_kerned_pair_across_a_span_is_measured_kerned`],
+//! [`a_joined_form_across_a_span_is_measured_joined`],
+//! [`the_line_breaker_measures_a_kerned_pair_across_a_span`] and
+//! [`a_mixed_line_is_cut_and_measured_in_one_context`], every expected
+//! position worked from the fixture face's `hmtx` and `GPOS` values.
 
 mod epub_support;
 
 use epub_support::book::{faces_book, one_face_book};
 use epub_support::typeface::{
-    origin_of, shown_glyphs, text_objects, Face, Form, Joining, Pair, Placement,
+    origin_of, shown_glyphs, text_objects, Face, Form, Joining, Kern, Pair, Placement,
 };
 use tinker_pdf::{Document, OpenOptions, RenderOptions, TextOptions};
 
@@ -1341,6 +1348,162 @@ fn a_joiner_inside_a_word_does_not_cut_it() {
         assert!(
             (x - expected).abs() < 0.01,
             "{text:?} is drawn at {x}, not {expected}: {drawn:?}"
+        );
+    }
+}
+
+// ---- a run measured in its context --------------------------------------------
+
+/// The kerning fixture: `A`, `V`, `C` and the space, every glyph 500 units of
+/// a 1000-unit em, and `A` 200 units narrower when `V` follows it — a `GPOS`
+/// `kern` pair whose `XAdvance` is −200.
+fn kerned_face() -> Face {
+    Face::new("Fixture Kern", "ACV ").with_kern(Kern {
+        first: 'A',
+        second: 'V',
+        script: *b"DFLT",
+        feature: *b"kern",
+        x_advance: -200,
+    })
+}
+
+/// **A kerned pair across a span boundary is measured kerned.**
+///
+/// `A<span>V</span>C` is three runs. The painter shapes `A` against the `V`
+/// beside it and draws it 300 units wide; layout measured `A` alone, at 500,
+/// and put the `V` run where the unkerned pair would have left it — a gap of
+/// the kern's width between two letters the face says belong together. The
+/// `Shaper` seam takes the run's context now (`Shaper::shape_in`), so the
+/// `V` run starts where the kerned `A` ends.
+///
+/// Worked from the face, not read back: at 24 px, which is 18 pt, `A`'s
+/// kerned advance is (500 − 200)/1000 × 18 = 5.4 pt and `V`'s is 9 pt, so `V`
+/// starts 5.4 pt after `A` and `C` 14.4 pt after it.
+#[test]
+fn a_kerned_pair_across_a_span_is_measured_kerned() {
+    let face = kerned_face();
+    let doc = Document::open(one_face_book(
+        "Fixture Kern",
+        &face.build(),
+        24,
+        "A<span style=\"color: #c00000\">V</span>C",
+    ))
+    .expect("a book");
+    let drawn = drawn_left_to_right(&doc);
+    let order: Vec<&str> = drawn.iter().map(|(text, _)| text.as_str()).collect();
+    assert_eq!(order, ["A", "V", "C"], "{drawn:?}");
+    let origin = drawn[0].1;
+    for ((text, x), offset) in drawn.iter().zip([0.0, 5.4, 14.4]) {
+        let expected = origin + offset;
+        assert!(
+            (x - expected).abs() < 0.01,
+            "{text:?} is drawn at {x}, not {expected}: the pair was measured \
+             without its kerning: {drawn:?}"
+        );
+    }
+}
+
+/// **A joined form wider than the isolated one is measured joined.**
+///
+/// The Arabic face with its joined forms 700 units wide against 500 for the
+/// isolated glyphs: `ب<span>ح</span>م` is drawn initial, medial and final, each
+/// 700/1000 × 18 = 12.6 pt, and each run was measured alone, isolated, at
+/// 9 pt — so the three overlapped by 3.6 pt at each boundary. Measured in
+/// its context each run is the width of the form it is drawn in.
+///
+/// The paragraph reads right to left (P2: its first strong character is
+/// Arabic) and is set from the left edge, so the line is drawn `م ح ب` from
+/// there, each 12.6 pt after the last.
+#[test]
+fn a_joined_form_across_a_span_is_measured_joined() {
+    let face = arabic_face().with_joined_advance(700);
+    let doc = Document::open(one_face_book(
+        "Fixture Arabic",
+        &face.build(),
+        24,
+        "\u{628}<span style=\"color: #c00000\">\u{62D}</span>\u{645}",
+    ))
+    .expect("a book");
+    let drawn = drawn_left_to_right(&doc);
+    let order: Vec<&str> = drawn.iter().map(|(text, _)| text.as_str()).collect();
+    assert_eq!(order, ["\u{645}", "\u{62D}", "\u{628}"], "{drawn:?}");
+    let origin = drawn[0].1;
+    for ((text, x), slot) in drawn.iter().zip([0.0, 1.0, 2.0]) {
+        let expected = origin + slot * 12.6;
+        assert!(
+            (x - expected).abs() < 0.01,
+            "{text:?} is drawn at {x}, not {expected}: a joined form was \
+             measured isolated: {drawn:?}"
+        );
+    }
+}
+
+/// **The line breaker sees the kerning.**
+///
+/// Four words `AV`, each `V` in a span of its own, on a measure of 90 pt.
+/// Kerned, each word is 5.4 + 9 = 14.4 pt and the line is 4 × 14.4 + 3 × 9 =
+/// 84.6 pt, which fits; measured run by run without context it is 4 × 18 +
+/// 27 = 99 pt, which does not, and the last word went to a second line. The
+/// page is 162 pt wide, the margins 36 pt each side.
+#[test]
+fn the_line_breaker_measures_a_kerned_pair_across_a_span() {
+    let face = kerned_face();
+    let word = "A<span style=\"color: #c00000\">V</span>";
+    let body = [word; 4].join(" ");
+    let doc = Document::open_with(
+        one_face_book("Fixture Kern", &face.build(), 24, &body),
+        &OpenOptions::at_page(162.0, 400.0),
+    )
+    .expect("a book");
+    let page = doc.page(0).expect("a page");
+    let text = page.text_with(&TextOptions {
+        content_order: true,
+    });
+    let baselines: Vec<f64> = text
+        .lines()
+        .iter()
+        .flat_map(|line| line.chars.iter())
+        .map(|c| c.origin.1)
+        .collect();
+    assert_eq!(baselines.len(), 11, "every glyph is drawn: {baselines:?}");
+    assert!(
+        baselines.iter().all(|y| (y - baselines[0]).abs() < 0.01),
+        "the four words were broken onto two lines: {baselines:?}"
+    );
+}
+
+/// **Both halves at once: a word of the other direction split by a span, its
+/// joined forms wider than its isolated ones.**
+///
+/// `a ب<span>ح</span>م b` again, with the joined forms 700 units wide. Layout
+/// measures `a ب` with `ح` after it, so `ب` is initial and 12.6 pt; the cut
+/// at the level boundary (`paint::split_at_levels`) has to share the run's
+/// width out in that same context, or the `م` of `م b` — final, 12.6 pt —
+/// gets its isolated 9 pt and the word overlaps itself. Worked from the face:
+/// `a` and the space 9 pt each, the three letters 12.6 pt each, drawn
+/// `م ح ب` from 18 pt, the space after them, then `b` at 18 + 3 × 12.6 + 9.
+#[test]
+fn a_mixed_line_is_cut_and_measured_in_one_context() {
+    let face = Face::new("Fixture Arabic", " ab\u{628}\u{62D}\u{645}")
+        .with_joining(Joining { script: *b"arab" })
+        .with_joined_advance(700);
+    let body = "a \u{628}<span style=\"color: #c00000\">\u{62D}</span>\u{645} b";
+    let doc =
+        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, body)).expect("a book");
+    let drawn = drawn_left_to_right(&doc);
+    let order: Vec<&str> = drawn.iter().map(|(text, _)| text.as_str()).collect();
+    assert_eq!(
+        order,
+        ["a", "\u{645}", "\u{62D}", "\u{628}", "b"],
+        "{drawn:?}"
+    );
+    let origin = drawn[0].1;
+    let expected = [0.0, 18.0, 30.6, 43.2, 64.8];
+    for ((text, x), offset) in drawn.iter().zip(expected) {
+        assert!(
+            (x - (origin + offset)).abs() < 0.01,
+            "{text:?} is drawn at {x}, not {}: {drawn:?}",
+            origin + offset
         );
     }
 }

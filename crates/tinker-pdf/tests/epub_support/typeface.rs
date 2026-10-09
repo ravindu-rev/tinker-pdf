@@ -128,6 +128,35 @@ pub struct Face {
     /// this and [`Face::placement`] are set, the placement wins: one `GPOS`
     /// lookup per face is all any fixture here has needed.
     pub pair: Option<Pair>,
+    /// A `GPOS` `PairPos` that changes the **advance** of the first glyph of
+    /// one pair: kerning, as a face's `kern` feature states it.
+    ///
+    /// The difference from [`Face::pair`] is the whole point. A placement
+    /// moves a glyph and leaves the pen where it was, so a layout that never
+    /// saw it measured the line right anyway; an advance moves the pen, and
+    /// everything after the pair with it, so a layout that measured the first
+    /// glyph without the second beside it measured the line wrong. `None` is
+    /// a face with no kerning; [`Face::placement`] and [`Face::pair`] win over
+    /// it, one lookup per face.
+    pub kern: Option<Kern>,
+}
+
+/// The first glyph of one pair narrowed or widened, by a `GPOS`
+/// `PairPosFormat1` whose second value record is empty and whose first is an
+/// `XAdvance` alone.
+#[derive(Clone, Copy, Debug)]
+pub struct Kern {
+    /// The first character of the pair, whose advance changes.
+    pub first: char,
+    /// The second.
+    pub second: char,
+    /// The script tag the lookup is declared under; `DFLT` reaches every run.
+    pub script: [u8; 4],
+    /// The feature tag, `kern` for kerning.
+    pub feature: [u8; 4],
+    /// `XAdvance` of the first glyph, in font units: negative draws the pair
+    /// closer.
+    pub x_advance: i16,
 }
 
 /// The second glyph of one pair displaced, by a `GPOS` `PairPosFormat1` whose
@@ -260,7 +289,15 @@ impl Face {
             joined_advance: None,
             placement: None,
             pair: None,
+            kern: None,
         }
+    }
+
+    /// The same face, kerning one pair through `GPOS`.
+    #[must_use]
+    pub fn with_kern(mut self, kern: Kern) -> Face {
+        self.kern = Some(kern);
+        self
     }
 
     /// The same face, displacing the second glyph of one pair through `GPOS`.
@@ -470,10 +507,11 @@ fn build(face: &Face) -> Vec<u8> {
         (None, Some(joining)) => Some(gsub_joining(face, joining)),
         (None, None) => None,
     };
-    let gpos = match (face.placement, face.pair) {
-        (Some(placement), _) => Some(gpos_placement(face, placement)),
-        (None, Some(pair)) => Some(gpos_pair(face, pair)),
-        (None, None) => None,
+    let gpos = match (face.placement, face.pair, face.kern) {
+        (Some(placement), _, _) => Some(gpos_placement(face, placement)),
+        (None, Some(pair), _) => Some(gpos_pair(face, pair)),
+        (None, None, Some(kern)) => Some(gpos_kern(face, kern)),
+        (None, None, None) => None,
     };
 
     // Built as a list rather than as two hard-coded arrays, because `GPOS` and
@@ -563,6 +601,32 @@ fn gpos_pair(face: &Face, pair: Pair) -> Vec<u8> {
     subtable.extend_from_slice(&1u16.to_be_bytes()); // glyphCount
     subtable.extend_from_slice(&first.to_be_bytes());
     gpos_of_one_lookup(2, &subtable, pair.script, pair.feature)
+}
+
+/// A `GPOS` with one `PairPosFormat1` lookup changing the first glyph's
+/// advance when the second follows it.
+///
+/// `valueFormat1` is `0x0004`, `X_ADVANCE` alone, and `valueFormat2` is zero,
+/// so a pair value record is the second glyph and one `int16`: four bytes,
+/// and the pair set six. The header is twelve bytes, so the pair set starts
+/// at twelve and the coverage at eighteen.
+fn gpos_kern(face: &Face, kern: Kern) -> Vec<u8> {
+    let first = face.glyph_of(kern.first).unwrap_or(0);
+    let second = face.glyph_of(kern.second).unwrap_or(0);
+    let mut subtable = Vec::new();
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // posFormat 1
+    subtable.extend_from_slice(&18u16.to_be_bytes()); // coverage, from here
+    subtable.extend_from_slice(&0x0004u16.to_be_bytes()); // valueFormat1: XAdvance
+    subtable.extend_from_slice(&0u16.to_be_bytes()); // valueFormat2
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // pairSetCount
+    subtable.extend_from_slice(&12u16.to_be_bytes()); // pairSetOffsets[0]
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // pairValueCount
+    subtable.extend_from_slice(&second.to_be_bytes()); // secondGlyph
+    subtable.extend_from_slice(&kern.x_advance.to_be_bytes()); // XAdvance
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // coverage format 1
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // glyphCount
+    subtable.extend_from_slice(&first.to_be_bytes());
+    gpos_of_one_lookup(2, &subtable, kern.script, kern.feature)
 }
 
 /// `SinglePosFormat1` displacing `glyph`, appended to `subtable`.

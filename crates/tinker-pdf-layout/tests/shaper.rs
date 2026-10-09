@@ -23,9 +23,9 @@
 use std::cell::RefCell;
 
 use tinker_pdf_css::cascade::ComputedStyle;
-use tinker_pdf_css::property::Display;
+use tinker_pdf_css::property::{Display, Visibility};
 use tinker_pdf_layout::metrics::{
-    FixedPitch, FontRequest, Metrics, PlacedGlyph, ShapedText, Shaper, Vertical,
+    FixedPitch, FontRequest, Metrics, PlacedGlyph, ShapedText, Shaper, ShapingContext, Vertical,
 };
 use tinker_pdf_layout::{layout, BoxNode, CellSpan, Content, Limits, Options};
 
@@ -180,4 +180,149 @@ fn the_two_paths_disagree_by_a_number_this_test_can_name() {
         shaped, unshaped,
         "if the two paths agreed there would be nothing for the rule to protect"
     );
+}
+
+// ---- a run measured in its context ------------------------------------------
+
+/// A provider that kerns one pair: every glyph half an em, and an `A` a fifth
+/// of an em narrower when the text after it — its own or its context's —
+/// starts with `V`. The smallest thing whose answer depends on a neighbour.
+struct Kerns;
+
+impl Kerns {
+    fn kerned(text: &str, after: Option<&str>, size: f64) -> ShapedText {
+        let chars: Vec<(usize, char)> = text.char_indices().collect();
+        let mut glyphs = Vec::new();
+        let mut advance = 0.0;
+        for (k, (at, ch)) in chars.iter().enumerate() {
+            let next = chars
+                .get(k + 1)
+                .map(|(_, c)| *c)
+                .or_else(|| after.and_then(|a| a.chars().next()));
+            let width = if *ch == 'A' && next == Some('V') {
+                size * 0.3
+            } else {
+                size * 0.5
+            };
+            glyphs.push(PlacedGlyph {
+                glyph: 1,
+                cluster: u32::try_from(*at).unwrap_or(0),
+                x_advance: width,
+                y_advance: 0.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+            });
+            advance += width;
+        }
+        ShapedText {
+            glyphs,
+            advance,
+            rtl: false,
+        }
+    }
+}
+
+impl Shaper for Kerns {
+    fn shape(&self, text: &str, font: &FontRequest<'_>, _rtl: bool) -> ShapedText {
+        Kerns::kerned(text, None, font.size)
+    }
+
+    fn shape_in(
+        &self,
+        text: &str,
+        font: &FontRequest<'_>,
+        _rtl: bool,
+        context: &ShapingContext<'_>,
+    ) -> ShapedText {
+        Kerns::kerned(text, context.after.map(|n| n.text), font.size)
+    }
+}
+
+impl Metrics for Kerns {
+    fn advance(&self, ch: char, _font: &FontRequest<'_>) -> f64 {
+        panic!("{ch:?} was measured a character at a time")
+    }
+
+    fn vertical(&self, font: &FontRequest<'_>) -> Vertical {
+        Vertical {
+            ascent: font.size * 0.8,
+            descent: font.size * 0.2,
+        }
+    }
+
+    fn shaper(&self) -> Option<&dyn Shaper> {
+        Some(self)
+    }
+}
+
+/// `A` and then an inline box holding `V`, at 10 px: two pieces, so two runs.
+fn kerned_pair(visible: bool) -> BoxNode {
+    let mut block = ComputedStyle::initial();
+    block.display = Display::Block;
+    let mut text = ComputedStyle::initial();
+    text.font_size = 10.0;
+    let mut span = text.clone();
+    span.display = Display::Inline;
+    if !visible {
+        span.visibility = Visibility::Hidden;
+    }
+    let leaf = |style: &ComputedStyle, s: &str| BoxNode {
+        style: style.clone(),
+        content: Content::Text(s.into()),
+        anchor: None,
+        span: CellSpan::ONE,
+        marker: None,
+    };
+    BoxNode {
+        style: block,
+        content: Content::Children(vec![
+            leaf(&text, "A"),
+            BoxNode {
+                style: span.clone(),
+                content: Content::Children(vec![leaf(&span, "V")]),
+                anchor: None,
+                span: CellSpan::ONE,
+                marker: None,
+            },
+        ]),
+        anchor: None,
+        span: CellSpan::ONE,
+        marker: None,
+    }
+}
+
+/// **A run is measured with its neighbour beside it**, through
+/// `Shaper::shape_in`: `A` is three points wide because the next run starts
+/// with `V`, and the `V` run starts there.
+#[test]
+fn a_run_is_measured_in_the_context_of_its_neighbour() {
+    let laid = layout(
+        &kerned_pair(true),
+        &Kerns,
+        &Options::new(200.0, 400.0),
+        &Limits::DEFAULT,
+    )
+    .expect("two runs lay out");
+    let runs = &laid.pages[0].runs;
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert!((runs[0].width - 3.0).abs() < 1e-9, "{runs:?}");
+    assert!(
+        (runs[1].x - (runs[0].x + 3.0)).abs() < 1e-9,
+        "the V run was not placed after the kerned A: {runs:?}"
+    );
+}
+
+/// **A neighbour that is not painted is no context**: the painter shapes a
+/// run against what it draws, so text laid out and not drawn kerns nothing.
+#[test]
+fn hidden_text_is_no_one_s_context() {
+    let laid = layout(
+        &kerned_pair(false),
+        &Kerns,
+        &Options::new(200.0, 400.0),
+        &Limits::DEFAULT,
+    )
+    .expect("two runs lay out");
+    let runs = &laid.pages[0].runs;
+    assert!((runs[0].width - 5.0).abs() < 1e-9, "{runs:?}");
 }

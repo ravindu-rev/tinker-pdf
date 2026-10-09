@@ -140,7 +140,11 @@ right-to-left line of two styled spans reads right to left, as does a
 justified or `word-spacing` line, whose words are laid in that order too
 ([fonts](fonts.md)). A context is a neighbour that touches the run on its
 line — not the next line's first word — and a run whose own glyphs a context
-in the other direction would split is shaped alone. A run that mixes
+in the other direction would split is shaped alone. Layout measures each run
+in the same context (`tinker_pdf_layout::metrics::Shaper::shape_in`), so a
+pair kerned across a span boundary or a joined form wider than the isolated
+one is the width the line was broken at, not a gap or an overlap between two
+runs. A run that mixes
 directions is cut at its line's level boundaries first
 (`paint::split_at_levels`), each piece taking its share of the run's
 measured width, so `a ب<span>ح</span>م b` draws its Arabic word last letter

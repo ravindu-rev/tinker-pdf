@@ -94,7 +94,9 @@ use tinker_pdf_css::property::{
 use tinker_pdf_font::base14::Standard14;
 use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, BaseEncoding};
 use tinker_pdf_font::Sfnt;
-use tinker_pdf_layout::metrics::{FontRequest, Metrics, PlacedGlyph, ShapedText, Shaper, Vertical};
+use tinker_pdf_layout::metrics::{
+    FontRequest, Metrics, Neighbour, PlacedGlyph, ShapedText, Shaper, ShapingContext, Vertical,
+};
 use tinker_pdf_layout::{
     BackgroundLayer, BoxFragment, ClipFragment, Page as LayoutPage, ReplacedFragment, TextRun,
 };
@@ -592,16 +594,71 @@ impl Metrics for BookMetrics<'_> {
 /// them into `/ToUnicode`.
 impl Shaper for BookMetrics<'_> {
     fn shape(&self, text: &str, font: &FontRequest<'_>, rtl: bool) -> ShapedText {
+        self.shape_in(text, font, rtl, &ShapingContext::NONE)
+    }
+
+    /// The run in its context: the same rule the painter draws it by
+    /// ([`Fonts::set_contexts`]), so a run is measured as it is drawn.
+    ///
+    /// A neighbour is a context only where the characters either side of the
+    /// boundary resolve to **one embedded face** ([`one_embedded_face`]), and
+    /// only its near [`CONTEXT_CHARS`] are shaped. It belongs to the run's
+    /// logically first face segment if before, and last if after, as in
+    /// [`draw_run_against`]. A segment with a context is shaped with it either
+    /// side and keeps its own glyphs ([`shape_in_context`]); every other
+    /// segment is shaped alone, as before.
+    fn shape_in(
+        &self,
+        text: &str,
+        font: &FontRequest<'_>,
+        rtl: bool,
+        context: &ShapingContext<'_>,
+    ) -> ShapedText {
+        let before = context
+            .before
+            .filter(|n| {
+                one_embedded_face(
+                    self.faces(),
+                    (n.text.chars().last(), &n.font),
+                    (text.chars().next(), font),
+                )
+            })
+            .map(|n| tail(n.text, CONTEXT_CHARS))
+            .unwrap_or_default();
+        let after = context
+            .after
+            .filter(|n| {
+                one_embedded_face(
+                    self.faces(),
+                    (text.chars().last(), font),
+                    (n.text.chars().next(), &n.font),
+                )
+            })
+            .map(|n| head(n.text, CONTEXT_CHARS))
+            .unwrap_or_default();
         let mut glyphs = Vec::new();
         let mut advance = 0.0;
         for (range, chosen) in face_runs(self.faces(), font, text) {
             let slice = text.get(range.clone()).unwrap_or("");
+            let near = (
+                if range.start == 0 {
+                    before.as_str()
+                } else {
+                    ""
+                },
+                if range.end == text.len() {
+                    after.as_str()
+                } else {
+                    ""
+                },
+            );
             let shaped = match chosen {
-                Chosen::Embedded(index) => self
-                    .faces()
-                    .faces()
-                    .get(index)
-                    .and_then(|face| shape_with(&face.program, slice, font, rtl)),
+                Chosen::Embedded(index) => {
+                    self.faces().faces().get(index).and_then(|face| match near {
+                        ("", "") => shape_with(&face.program, slice, font, rtl),
+                        _ => shape_in_context(&face.program, slice, font, rtl, near),
+                    })
+                }
                 Chosen::Standard(_) => None,
             };
             let mut shaped = shaped.unwrap_or_else(|| self.unshaped(slice, font, rtl));
@@ -683,6 +740,60 @@ fn shape_with(bytes: &[u8], text: &str, font: &FontRequest<'_>, rtl: bool) -> Op
             glyphs.push(PlacedGlyph {
                 glyph: glyph.glyph,
                 cluster: glyph.cluster,
+                x_advance: scale(glyph.x_advance),
+                y_advance: scale(glyph.y_advance),
+                x_offset: scale(glyph.x_offset),
+                y_offset: scale(glyph.y_offset),
+            });
+            advance += scale(glyph.x_advance);
+        }
+    }
+    Some(ShapedText {
+        glyphs,
+        advance,
+        rtl,
+    })
+}
+
+/// [`shape_with`], with the text either side of `text` shaped beside it:
+/// `text`'s own glyphs and their advances, as the painter's
+/// [`shaped_glyphs`] places them.
+///
+/// The paragraph direction is `text`'s own ([`own_direction`]), as it is
+/// where the run is drawn, and the clusters are put back to index `text`.
+/// Unlike the painter this keeps the context's shaping even where L2 would
+/// lay a context between the run's own glyphs: the painter cuts such a run at
+/// its level boundary before drawing it ([`split_at_levels`]), and each piece
+/// is then shaped in the context this measured it in — so the run's width
+/// here is the sum of what its pieces are drawn at.
+fn shape_in_context(
+    bytes: &[u8],
+    text: &str,
+    font: &FontRequest<'_>,
+    rtl: bool,
+    (before, after): (&str, &str),
+) -> Option<ShapedText> {
+    let sfnt = Sfnt::parse(bytes)?;
+    let shaper = tinker_pdf_shape::Shaper::new(&sfnt);
+    let whole = format!("{before}{text}{after}");
+    let own = before.len()..before.len() + text.len();
+    let paragraph = Paragraph::new(&whole, own_direction(text));
+    let mut glyphs = Vec::new();
+    let mut advance = 0.0;
+    for run in itemize(&whole, &paragraph) {
+        let shaped = shaper.shape(&whole, &run);
+        let units = f64::from(shaped.units_per_em().max(1));
+        let scale = |value: i32| f64::from(value) * font.size / units;
+        for glyph in shaped.glyphs() {
+            let Some(at) = usize::try_from(glyph.cluster)
+                .ok()
+                .filter(|at| own.contains(at))
+            else {
+                continue;
+            };
+            glyphs.push(PlacedGlyph {
+                glyph: glyph.glyph,
+                cluster: u32::try_from(at - own.start).unwrap_or(u32::MAX),
                 x_advance: scale(glyph.x_advance),
                 y_advance: scale(glyph.y_advance),
                 x_offset: scale(glyph.x_offset),
@@ -850,15 +961,16 @@ impl<'a> Fonts<'a> {
     /// [`draw_shaped`] shapes the run with that text either side and draws
     /// only its own glyphs, each where the shaper put it relative to them.
     ///
-    /// # What it does not change
+    /// # And the measurement agrees
     ///
-    /// The **measurement**. Layout measures each run alone through
-    /// [`BookMetrics`] — the `Shaper` seam takes a run's text and no context —
-    /// so a contextual form whose advance differs from the isolated one's
-    /// leaves that difference between this run and the next. An offset (a
-    /// mark, a pair's `XPlacement`) moves no pen and costs nothing; an
-    /// advance a context changes is the remainder, and it is named in
-    /// `docs/features/fonts.md` rather than hidden.
+    /// Layout measures each run with the same neighbours
+    /// (`tinker_pdf_layout::metrics::Shaper::shape_in`, through
+    /// [`BookMetrics`]): its painted neighbours on the line, the same face
+    /// at the boundary decided by the one function both sides call
+    /// ([`one_embedded_face`]), the same [`CONTEXT_CHARS`]. So a contextual
+    /// form whose advance differs from the isolated one's, or a pair that
+    /// kerns, is the width layout gave the run — it used to leave the
+    /// difference between this run and the next.
     ///
     /// Through `&self`, because drawing holds the registry shared; it is
     /// replaced whole per page, and read by nothing but [`draw_run`].
@@ -920,16 +1032,11 @@ impl<'a> Fonts<'a> {
         if !near(a.x + a.width, b.x) && !near(b.x + b.width, a.x) {
             return false;
         }
-        let (Some(last), Some(first)) = (a.text.chars().last(), b.text.chars().next()) else {
-            return false;
-        };
-        match (
-            choose(self.faces, &request(a), Some(last)),
-            choose(self.faces, &request(b), Some(first)),
-        ) {
-            (Chosen::Embedded(x), Chosen::Embedded(y)) => x == y,
-            _ => false,
-        }
+        one_embedded_face(
+            self.faces,
+            (a.text.chars().last(), &request(a)),
+            (b.text.chars().next(), &request(b)),
+        )
     }
 
     /// How many characters had no code, and are therefore not on any page.
@@ -2832,6 +2939,28 @@ struct Shaped {
     advance: f64,
 }
 
+/// Whether the last character of one side and the first of the other resolve
+/// to the **same embedded face**: the condition for either to be the other's
+/// shaping context, since a glyph index means nothing in another face and the
+/// standard 14 are not shaped. One function, so the painter ([`Fonts`]) and
+/// the measurement ([`BookMetrics`]) cannot disagree about it.
+fn one_embedded_face(
+    faces: &FaceSet,
+    (last, left): (Option<char>, &FontRequest<'_>),
+    (first, right): (Option<char>, &FontRequest<'_>),
+) -> bool {
+    let (Some(last), Some(first)) = (last, first) else {
+        return false;
+    };
+    match (
+        choose(faces, left, Some(last)),
+        choose(faces, right, Some(first)),
+    ) {
+        (Chosen::Embedded(x), Chosen::Embedded(y)) => x == y,
+        _ => false,
+    }
+}
+
 /// Which run a context belongs to: its document order and where it is drawn,
 /// which no two runs on a page share.
 type RunKey = (usize, u64, u64);
@@ -3335,19 +3464,52 @@ fn split_line(line: &mut Vec<TextRun>, metrics: &BookMetrics<'_>, out: &mut Vec<
     }
     let mut cut = 0usize;
     let mut first_char = 0usize;
-    for run in line.drain(..) {
+    let mut placed: Vec<Vec<TextRun>> = Vec::with_capacity(line.len());
+    for (at, run) in line.iter().enumerate() {
         let count = run.text.chars().count();
         let own = levels.get(first_char..first_char + count).unwrap_or(&[]);
         first_char += count;
         let pieces = level_pieces(&run.text, own);
         if run.generated || pieces.len() < 2 {
-            out.push(run);
+            placed.push(Vec::new());
             continue;
         }
         cut += 1;
-        out.extend(cut_run(&run, &pieces, metrics));
+        placed.push(cut_run(run, &pieces, metrics, &layout_context(line, at)));
+    }
+    for (run, pieces) in line.drain(..).zip(placed) {
+        if pieces.is_empty() {
+            out.push(run);
+        } else {
+            out.extend(pieces);
+        }
     }
     cut
+}
+
+/// The context `tinker-pdf-layout` measured run `at` of a line in: its
+/// painted neighbours either side on the line, in logical order, which is
+/// the order a line's runs are in before [`visual_lines`] moves them. The
+/// provider decides which of them share its face.
+fn layout_context(line: &[TextRun], at: usize) -> ShapingContext<'_> {
+    if !line.get(at).is_some_and(|run| run.painted) {
+        return ShapingContext::NONE;
+    }
+    ShapingContext {
+        before: as_neighbour(at.checked_sub(1).and_then(|p| line.get(p))),
+        after: as_neighbour(line.get(at + 1)),
+    }
+}
+
+/// A run as a shaping neighbour, where it can be one: painted, from the
+/// source, and holding text.
+fn as_neighbour(other: Option<&TextRun>) -> Option<Neighbour<'_>> {
+    other
+        .filter(|other| other.painted && !other.generated && !other.text.is_empty())
+        .map(|other| Neighbour {
+            text: other.text.as_str(),
+            font: request(other),
+        })
 }
 
 /// The byte ranges of `text` over which `levels` — one per character — is
@@ -3370,13 +3532,15 @@ fn level_pieces(text: &str, levels: &[Level]) -> Vec<core::ops::Range<usize>> {
 }
 
 /// One run as one run per piece, each carrying its part of the run's
-/// measured width. See [`split_at_levels`].
+/// measured width — shaped in the `context` layout measured it in. See
+/// [`split_at_levels`].
 fn cut_run(
     run: &TextRun,
     pieces: &[core::ops::Range<usize>],
     metrics: &BookMetrics<'_>,
+    context: &ShapingContext<'_>,
 ) -> Vec<TextRun> {
-    let shaped = metrics.shape(&run.text, &request(run), false);
+    let shaped = metrics.shape_in(&run.text, &request(run), false, context);
     let mut widths = vec![0.0f64; pieces.len()];
     for glyph in &shaped.glyphs {
         let at = usize::try_from(glyph.cluster).unwrap_or(usize::MAX);

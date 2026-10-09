@@ -603,9 +603,27 @@ Landed so far:
   `line-height` of 1 or less is the next line, and joined an Arabic word to
   the line below; and a context in the other direction could put its glyphs
   between the run's own, which overprinted the neighbour — such a run is now
-  shaped alone. Layout still measures each run alone, so a context that
-  changes an advance leaves the difference between the runs; that is in the
-  refusal table below.
+  shaped alone.
+
+  **And layout measures each run in that context** (October 2026's eighth
+  wave). It measured each run alone, so a context that changed an advance —
+  a joined form wider than the isolated one, a pair that kerns — left the
+  difference between the run and the next, and the line breaker never saw
+  it. The `Shaper` seam in `tinker-pdf-layout` takes a context now
+  (`Shaper::shape_in`, with a default that ignores it for every provider
+  that has none): each run's painted neighbours on its line, text and face
+  request, the line's ends and atomic boxes and generated content stopping
+  it, and the slices the line breaker measures between break opportunities
+  take the rest of their own span as theirs. `BookMetrics` applies a
+  neighbour only where both sides of the boundary resolve to one embedded
+  face and shapes the run with up to eight of its characters either side —
+  `one_embedded_face` and `CONTEXT_CHARS` are the painter's own — keeping its
+  own glyphs. `epub_shaped.rs` holds a kerned pair across a span (`V` 5.4 pt
+  after `A`, a 500-unit advance less 200 at 18 pt), a joined form wider than
+  the isolated one (12.6 pt each, not 9), the line breaker setting four
+  kerned words on a measure the unkerned ones overflow, and a mixed-direction
+  line cut and measured in one context; `tinker-pdf-layout/tests/shaper.rs`
+  holds the seam with a provider whose answer depends on its neighbour.
 
   **A run that mixes directions is cut at its line's level boundaries**
   (`paint::split_at_levels`, October 2026's eighth wave). A run is one
@@ -842,7 +860,6 @@ two corpora already vendored here. So every name stays on the list.
 
 | What | Typed variant | Why (one line) | See |
 |---|---|---|---|
-| A shaping context that changes an **advance** across a styled span (a joined form wider than the isolated one, a pair that kerns) | none — the difference is left between the two runs, and a run whose own glyphs a context in the other direction would split is shaped alone | layout measures each run alone through the `Shaper` seam, which takes no context; an offset moves no pen and is carried. **A run that mixes directions left this row** in October 2026's eighth wave: it is cut at its line's level boundaries before the line is ordered | [shaping](../design/shaping.md) |
 | Shaping **while reading a PDF**: `TJ` arrays are honored as written | none — the producer positioned every glyph and re-shaping them would be wrong | Permanent, and the only half of the old non-goal that survived; the producing half is `tinker-pdf-shape`, below | [shaping](../design/shaping.md) |
 | A CFF whose `callsubr` operand is not the token before the call, or that calls a subroutine it does not carry, or whose subroutine calls itself, or that declares `CharstringType 1` | `SubsetRefusal::ProgramNotRebuildable`; the whole face is embedded | Each needs the subsetter to invent what the font meant, and a broken subset renders *almost* right | this page |
 | A CFF subset that comes out no smaller than the face | `SubsetRefusal::SubsetNotSmaller`; the whole face is embedded | A producer's own subset has nothing left to remove, and the face is also the one it tested | this page |

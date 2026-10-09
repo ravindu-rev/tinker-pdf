@@ -114,6 +114,46 @@ pub struct ShapedText {
     pub rtl: bool,
 }
 
+/// One neighbour of a run on its line: its text and the face it asks for.
+///
+/// The font travels with the text because whether a neighbour is a context
+/// at all is the **provider's** question, not this crate's: a glyph means
+/// something only in the face it came from, so a shaper joins across a span
+/// boundary or kerns a pair across it only where both sides resolve to one
+/// face — and resolving a face is `css-fonts-4` §5.3's matching, which lives
+/// above this crate.
+#[derive(Clone, Copy, Debug)]
+pub struct Neighbour<'a> {
+    /// The neighbour's text on this line, whole; the provider takes as much
+    /// of its near end as its shaping can see.
+    pub text: &'a str,
+    /// The neighbour's own face request.
+    pub font: FontRequest<'a>,
+}
+
+/// What touches a run on its line, either side: the text a shaper may join
+/// across or position against.
+///
+/// `None` on a side is a line's edge, an atomic box, generated content, text
+/// that is not painted, or no neighbour at all — the places a painter shapes
+/// a run with nothing beside it, so that a run measured with a context is
+/// drawn with the same one.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShapingContext<'a> {
+    /// The text before the run, in logical order.
+    pub before: Option<Neighbour<'a>>,
+    /// The text after it.
+    pub after: Option<Neighbour<'a>>,
+}
+
+impl ShapingContext<'_> {
+    /// No neighbours: a run shaped alone.
+    pub const NONE: ShapingContext<'static> = ShapingContext {
+        before: None,
+        after: None,
+    };
+}
+
 /// Text in, positioned glyphs out: the seam a shaping engine plugs into.
 ///
 /// # One path owns a run
@@ -145,6 +185,41 @@ pub trait Shaper {
     /// re-run UAX #9 per run — the paragraph's levels were resolved once,
     /// above.
     fn shape(&self, text: &str, font: &FontRequest<'_>, rtl: bool) -> ShapedText;
+
+    /// Shapes one run **in its context**: the glyphs and advances of `text`
+    /// alone, as they come out when its neighbours on the line are shaped
+    /// beside it.
+    ///
+    /// # Why a run is not measured alone
+    ///
+    /// A styled span is a run of its own, and a shaper's decisions reach
+    /// across it: an Arabic letter takes its joined form from the letter in
+    /// the next span, and `GPOS` kerns a pair whose second glyph is coloured.
+    /// A painter that shapes each run against its neighbours draws those
+    /// forms and that kerning; a layout that measured each run alone placed
+    /// the next run where the isolated form, or the unkerned pair, would have
+    /// left it, and the difference was a gap or an overlap between the two.
+    /// So a run is measured here with the context it will be drawn with, and
+    /// the line breaker sees a joined form's advance and a kerned pair's.
+    ///
+    /// Only the run's **own** glyphs come back, their clusters indexing
+    /// `text`; a neighbour's glyphs are shaped and dropped, because the
+    /// neighbour's own run is measured — with this run as its context — on
+    /// its own turn.
+    ///
+    /// The default is [`Shaper::shape`], context unread: a provider that has
+    /// no shaping across runs measures every run alone, as every provider did
+    /// before this method existed.
+    fn shape_in(
+        &self,
+        text: &str,
+        font: &FontRequest<'_>,
+        rtl: bool,
+        context: &ShapingContext<'_>,
+    ) -> ShapedText {
+        let _ = context;
+        self.shape(text, font, rtl)
+    }
 }
 
 /// Where advance widths and line heights come from.

@@ -72,7 +72,7 @@ use tinker_pdf_css::property::{
 
 use crate::flex;
 use crate::floats::{Ceilings, FloatContext, Placed};
-use crate::metrics::{FontRequest, Metrics};
+use crate::metrics::{FontRequest, Metrics, Neighbour, ShapingContext};
 use crate::style::{consume, Consumed};
 use crate::table::{self, CellWidths, Edge, Grid, Origin, Slot, TableBox};
 use crate::text::{self, Collapser};
@@ -4590,7 +4590,7 @@ impl<M: Metrics> Builder<'_, M> {
         // never fit anywhere, so it is not a reason to go looking below a
         // float — that line overflows wherever it is put.
         let first = opportunities.first().map_or(content.len(), |o| o.at);
-        let word = self.measure(content, spans, pieces, start, first)
+        let word = self.measure(content, spans, pieces, start, first, start)
             - self.trailing(content, spans, pieces, start, first);
         let mut chosen = top;
         let (band_left, band_right) = loop {
@@ -4656,7 +4656,7 @@ impl<M: Metrics> Builder<'_, M> {
             if !self.wrappable(spans, pieces, opportunity.at) && !hard {
                 continue;
             }
-            width += self.measure(content, spans, pieces, cursor, opportunity.at);
+            width += self.measure(content, spans, pieces, cursor, opportunity.at, start);
             cursor = opportunity.at;
             let trailing = self.trailing(content, spans, pieces, start, opportunity.at);
             if width - trailing <= available {
@@ -4704,7 +4704,7 @@ impl<M: Metrics> Builder<'_, M> {
         for (offset, ch) in content[start..limit].char_indices() {
             let at = start + offset;
             let next = at + ch.len_utf8();
-            width += self.measure(content, spans, pieces, at, next);
+            width += self.measure(content, spans, pieces, at, next, start);
             if width > available && last.is_some() {
                 return last;
             }
@@ -4735,7 +4735,16 @@ impl<M: Metrics> Builder<'_, M> {
         piece_at(spans, at).map_or(OverflowWrap::Normal, |p| pieces[p].style.overflow_wrap)
     }
 
-    /// The advance of one byte range, spanning as many pieces as it must.
+    /// The advance of one byte range, spanning as many pieces as it must, on
+    /// a line that starts at `line_start`.
+    ///
+    /// Each piece's slice is measured **in its context** ([`context_of`]):
+    /// the text either side of it on the line, which a shaper joins across
+    /// and kerns against. Where the line ends is not known yet while it is
+    /// being filled, so the text after a slice is taken as far as the
+    /// neighbour goes; the line's own runs are measured again with both ends
+    /// known when the line is set ([`Builder::line`]).
+    #[allow(clippy::too_many_arguments)]
     fn measure(
         &self,
         content: &str,
@@ -4743,9 +4752,10 @@ impl<M: Metrics> Builder<'_, M> {
         pieces: &[Piece],
         from: usize,
         to: usize,
+        line_start: usize,
     ) -> f64 {
         let mut total = 0.0;
-        for (start, end, index) in spans {
+        for (at, (start, end, index)) in spans.iter().enumerate() {
             let lo = (*start).max(from);
             let hi = (*end).min(to);
             if lo >= hi {
@@ -4761,7 +4771,15 @@ impl<M: Metrics> Builder<'_, M> {
             }
             let style = &pieces[*index].style;
             let slice = &content[lo..hi];
-            total += self.advance_of(slice, &style.font());
+            let context = context_of(
+                content,
+                spans,
+                pieces,
+                at,
+                lo..hi,
+                line_start..content.len(),
+            );
+            total += self.advance_in(slice, &style.font(), &context);
             total += style.letter_spacing * slice.chars().count() as f64;
             total += style.word_spacing * slice.chars().filter(|c| *c == ' ').count() as f64;
         }
@@ -4785,8 +4803,16 @@ impl<M: Metrics> Builder<'_, M> {
     /// lines over logical text and never reorders, so what it needs from
     /// direction is the run's *width*, which the two agree on.
     fn advance_of(&self, text: &str, font: &FontRequest<'_>) -> f64 {
+        self.advance_in(text, font, &ShapingContext::NONE)
+    }
+
+    /// [`Builder::advance_of`], with the text either side of the slice on its
+    /// line: what the shaper joins across and kerns against
+    /// ([`crate::metrics::Shaper::shape_in`]). A provider with no shaper has
+    /// no use for it and measures the slice alone, as it always has.
+    fn advance_in(&self, text: &str, font: &FontRequest<'_>, context: &ShapingContext<'_>) -> f64 {
         match self.metrics.shaper() {
-            Some(shaper) => shaper.shape(text, font, false).advance,
+            Some(shaper) => shaper.shape_in(text, font, false, context).advance,
             None => self.metrics.measure(text, font),
         }
     }
@@ -4803,7 +4829,7 @@ impl<M: Metrics> Builder<'_, M> {
     ) -> f64 {
         let slice = &content[from..to];
         let trimmed = slice.trim_end_matches([' ', '\n']);
-        self.measure(content, spans, pieces, from + trimmed.len(), to)
+        self.measure(content, spans, pieces, from + trimmed.len(), to, from)
     }
 
     /// Phase II, §4.1.2: the two ends of one line.
@@ -4866,7 +4892,7 @@ impl<M: Metrics> Builder<'_, M> {
         // in the same pass that gives the runs theirs.
         let mut boxes: Vec<(usize, InlineBox)> = Vec::new();
         let mut width = 0.0;
-        for (span_start, span_end, index) in spans {
+        for (span_at, (span_start, span_end, index)) in spans.iter().enumerate() {
             let lo = (*span_start).max(start);
             let hi = (*span_end).min(end);
             if lo >= hi {
@@ -4968,7 +4994,10 @@ impl<M: Metrics> Builder<'_, M> {
                 continue;
             }
             let text = content[lo..hi].to_string();
-            let advance = self.advance_of(&text, &font)
+            // The run in the context it is drawn in: its neighbours on this
+            // line, both ends of which are known now.
+            let context = context_of(content, spans, pieces, span_at, lo..hi, start..end);
+            let advance = self.advance_in(&text, &font, &context)
                 + style.letter_spacing * text.chars().count() as f64
                 + style.word_spacing * text.chars().filter(|c| *c == ' ').count() as f64;
             runs.push(TextRun {
@@ -6144,6 +6173,72 @@ fn translate(items: &mut [Item], blocks: &mut [BlockRecord], dx: f64, dy: f64) {
 /// linear scan makes a paragraph of a thousand `<em>`s cost
 /// `O(pieces x characters)`. The spans are built in document order and are
 /// disjoint, so the search is sound by construction.
+/// The text either side of `slice` — part of span `at` — on a line that
+/// covers `line`, as a shaper sees it ([`ShapingContext`]).
+///
+/// The rule is the painter's, because a run measured in one context and drawn
+/// in another is the two-paths failure [`crate::metrics::Shaper`] warns
+/// about: a context is a **painted** neighbour of **text** on **the same
+/// line**. An atomic box, generated content (a marker, `::before`) and text
+/// that is laid out and not drawn (`visibility: hidden`) are no one's
+/// context and take none, and a line's edges stop it. Inside one span the
+/// rest of the span is the context — a slice between two break
+/// opportunities is part of a run the painter shapes whole. Empty spans are
+/// passed over, since they draw nothing to stand between two runs.
+///
+/// Whether a neighbour that qualifies is in the same **face** — the other
+/// half of the painter's rule — is the provider's to decide, which is why each
+/// side carries its own [`FontRequest`].
+fn context_of<'p>(
+    content: &'p str,
+    spans: &[(usize, usize, usize)],
+    pieces: &'p [Piece],
+    at: usize,
+    slice: core::ops::Range<usize>,
+    line: core::ops::Range<usize>,
+) -> ShapingContext<'p> {
+    let text_of = |index: usize| {
+        pieces
+            .get(index)
+            .filter(|piece| piece.atomic.is_none() && !piece.generated && piece.style.visible)
+    };
+    let Some(&(start, end, own)) = spans.get(at) else {
+        return ShapingContext::NONE;
+    };
+    let Some(piece) = text_of(own) else {
+        return ShapingContext::NONE;
+    };
+    let neighbour = |from: usize, to: usize, piece: &'p Piece| {
+        (from < to)
+            .then(|| content.get(from..to))
+            .flatten()
+            .map(|text| Neighbour {
+                text,
+                font: piece.style.font(),
+            })
+    };
+    let before = if slice.start > start {
+        neighbour(start.max(line.start), slice.start, piece)
+    } else {
+        spans[..at]
+            .iter()
+            .rev()
+            .find(|(s, e, _)| s < e)
+            .and_then(|&(s, e, index)| neighbour(s.max(line.start), e, text_of(index)?))
+    };
+    let after = if slice.end < end {
+        neighbour(slice.end, end.min(line.end), piece)
+    } else {
+        spans
+            .get(at + 1..)
+            .unwrap_or(&[])
+            .iter()
+            .find(|(s, e, _)| s < e)
+            .and_then(|&(s, e, index)| neighbour(s, e.min(line.end), text_of(index)?))
+    };
+    ShapingContext { before, after }
+}
+
 fn piece_at(spans: &[(usize, usize, usize)], at: usize) -> Option<usize> {
     let found = spans.binary_search_by(|(start, end, _)| {
         if at < *start {

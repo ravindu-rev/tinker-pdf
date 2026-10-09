@@ -119,7 +119,13 @@ documents the two-paths-disagree failure and one path must own a run.
 `FixedPitch` keeps serving the structured fuzz generator unchanged; the
 facade's `BookMetrics` (`crates/tinker-pdf/src/epub/paint.rs`) implements
 `Shaper` over the book's `FaceSet`. Layout stays a leaf: the trait is
-plain structs, and `tinker-pdf-layout` gains no dependency edge.
+plain structs, and `tinker-pdf-layout` gains no dependency edge. *Amended
+October 2026, eighth wave:* the seam takes a run's **context** —
+`Shaper::shape_in`, the text and face request of its painted neighbours on
+its line — because a span is a run of its own and a shaper's decisions
+cross it; measured alone, a joined form or a kerned pair across a span left
+its difference between two runs. The default ignores the context, so a
+provider with no shaping across runs is unchanged.
 
 **Creation and forms.** A shaped run maps 1:1 onto
 `DocumentBuilder::glyph_run`'s `Glyph` (index plus the characters it
