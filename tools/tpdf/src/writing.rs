@@ -1542,6 +1542,14 @@ mod tests {
     /// is, by name: the facade's `check_save` answers for what the editor
     /// imported. The file opens with the empty user password every reader
     /// tries, so no `--password` is given and the plain input opens too.
+    ///
+    /// Not new behaviour: before October 2026 `tpdf` refused both itself,
+    /// opening every merge input and the stamp source through a check of
+    /// its own (`open_clear`) with this message. That check is gone, and
+    /// what refuses them now is the editor's record of an encrypted import,
+    /// so this pins that the refusal survived the move, not that it was
+    /// added. The commit that moved it said `tpdf` had not seen these
+    /// inputs, and that was wrong.
     #[test]
     fn an_encrypted_later_input_or_stamp_source_is_refused_by_name() {
         let dir = scratch("encrypted-later-input");
