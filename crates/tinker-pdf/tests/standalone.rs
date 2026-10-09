@@ -615,6 +615,65 @@ fn xml_is_still_xml_and_an_undeclared_eight_bit_page_is_windows_1252() {
     }));
 }
 
+/// **An XHTML file in the single-byte encoding its declaration names is read
+/// in that encoding**, as XML when it is well-formed and as HTML's characters
+/// when it is not. The review of the formats lane found the well-formed one
+/// refused for its encoding, handed to HTML's parser — which reads no XML
+/// declaration — and set as `Ïðèâåò`, windows-1252's letters for the bytes of
+/// `Привет`, with a warning saying only that it was not XML.
+#[test]
+fn a_loose_xhtml_file_is_read_in_the_single_byte_encoding_it_declares() {
+    let privet = [0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2];
+    let file = |encoding: &str, body: &[u8]| {
+        let mut bytes = format!(
+            "<?xml version=\"1.0\" encoding=\"{encoding}\"?>\
+             <html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>t</title></head><body>"
+        )
+        .into_bytes();
+        bytes.extend_from_slice(body);
+        bytes
+    };
+
+    let mut well_formed = b"<p>".to_vec();
+    well_formed.extend_from_slice(&privet);
+    well_formed.extend_from_slice(b"</p></body></html>");
+    let document = open(&file("windows-1251", &well_formed));
+    assert_eq!(page_text(&document, 0), "Привет");
+    // Nothing about the markup: it is XML. (The build's faces cover no
+    // Cyrillic, which `UncoveredCharacters` says, and which is not this.)
+    assert!(
+        !warnings(&document)
+            .iter()
+            .any(|w| matches!(w, ArchiveWarning::Markup { .. })),
+        "well-formed XHTML in a declared encoding: {:?}",
+        warnings(&document)
+    );
+
+    // An unclosed `<br>` and no end tags: HTML, over the declared encoding's
+    // characters rather than over bytes for it to guess at.
+    let mut soup = b"<p>".to_vec();
+    soup.extend_from_slice(&privet);
+    soup.extend_from_slice(b"<br>");
+    let document = open(&file("windows-1251", &soup));
+    assert_eq!(page_text(&document, 0), "Привет");
+    assert!(warnings(&document).contains(&ArchiveWarning::Markup {
+        item: String::new(),
+        defect: tinker_pdf::epub::xhtml::MarkupDefect::NotXml
+    }));
+
+    // A byte the declared table leaves unmapped is U+FFFD, and said.
+    let mut hole = b"<p>".to_vec();
+    hole.extend_from_slice(&[0xE2, 0xAA, 0xE3]);
+    hole.extend_from_slice(b"<br>");
+    let document = open(&file("windows-1253", &hole));
+    let text = page_text(&document, 0);
+    assert!(text.starts_with('β') && text.ends_with('γ'), "{text}");
+    assert!(warnings(&document).contains(&ArchiveWarning::Markup {
+        item: String::new(),
+        defect: tinker_pdf::epub::xhtml::MarkupDefect::Undecodable
+    }));
+}
+
 // ---- a bare image ------------------------------------------------------------
 
 /// **A bare PNG is the one page of a comic, pixel for pixel**, at one image

@@ -47,7 +47,8 @@
 //! - **An XHTML or HTML file** is read into the EPUB reader's tree and laid
 //!   out as a reflowable chapter at the caller's page box, with
 //!   [`crate::epub::PAGE_MARGIN`] inside it. Its `<title>` is the document's
-//!   `/Title`. It is read as XML first, so a well-formed XHTML file is exactly
+//!   `/Title`. It is read as XML first, in the single-byte encoding its
+//!   declaration names if it names one, so a well-formed XHTML file is exactly
 //!   an EPUB's chapter; **HTML that is not XML** — tag soup — is read again by
 //!   HTML's own parser (`tinker_pdf_xml::html`, WHATWG §13.2), which reads
 //!   every input to its end, and [`crate::ArchiveWarning::Markup`] says so

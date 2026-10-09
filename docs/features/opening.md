@@ -79,7 +79,12 @@ one the EPUB reader lays out (`epub::xhtml::read_markup_or_html`), with
 decoded as §13.2.3 says — a byte order mark, then a `<meta charset>` in the
 first kilobyte naming an encoding this build decodes (UTF-8, UTF-16 or one of
 the Encoding Standard's twenty-eight single-byte encodings), then UTF-8 if the
-bytes are UTF-8, then windows-1252. Scripting is disabled, always — nothing
+bytes are UTF-8, then windows-1252. **An XHTML file whose XML declaration
+names a single-byte encoding is read in it** — as XML when it is well-formed,
+as an FB2 is, and when it is not, by HTML's parser over the characters that
+encoding decodes rather than over bytes for §13.2.3 to guess at, with
+`MarkupDefect::Undecodable` for a byte its table leaves unmapped.
+Scripting is disabled, always — nothing
 here runs a script — so a `<noscript>`'s content is markup and is drawn. It is
 held to html5lib's own suite, vendored: **1 779 of the 1 784
 tree-construction tests** that run with scripting disabled build exactly the
@@ -375,7 +380,9 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   references named, tag soup — three files the XML reader stops at in their
   first lines — **pixel for pixel** the XHTML of the tree HTML's parser
   builds (`tag_soup_opens_as_the_tree_html_builds_pixel_for_pixel`), an
-  undeclared windows-1252 page read in it, and a
+  undeclared windows-1252 page read in it, an XHTML file declaring
+  windows-1251 read in it whether or not it is well-formed
+  (`a_loose_xhtml_file_is_read_in_the_single_byte_encoding_it_declares`), and a
   streamed open the same document. It also holds the defect the row found in
   the streaming sniff: the container window was one `read`, a source that
   answers in pieces gave it one byte of `PK\x03\x04`, and a comic archive

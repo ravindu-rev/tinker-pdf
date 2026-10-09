@@ -349,8 +349,11 @@ pub enum MarkupDefect {
     /// HTML file, or HTML handed to `DocumentBuilder::from_html`. Never said
     /// of an EPUB chapter, which is XHTML by its media type.
     NotXml,
-    /// Bytes HTML's decoder could not map — malformed UTF-8 after its byte
-    /// order mark, a byte windows-1252 leaves unmapped — each read as U+FFFD.
+    /// Bytes the decoder in front of HTML's parser could not map — malformed
+    /// UTF-8 or UTF-16 after its byte order mark, or a byte the single-byte
+    /// table a `<meta>` or an XML declaration named leaves unmapped, as
+    /// windows-1253 leaves 0xAA — each read as U+FFFD. Never windows-1252,
+    /// HTML's default, whose table maps all 256 bytes.
     Undecodable,
     /// A `<meta charset>` named an encoding this build does not decode — one
     /// of the multi-byte legacy encodings — and HTML's decoder read the bytes
@@ -519,13 +522,13 @@ impl Dom {
 /// [`MarkupDefect`] on a partial tree instead, because a document that stops
 /// half way has still said most of a chapter.
 pub fn read(bytes: &[u8], limits: &XmlLimits) -> Result<Dom, XmlError> {
-    read_reporting(bytes, limits).map(|(dom, _)| dom)
+    let source = Source::new(bytes)?;
+    Ok(read_reporting(&source, limits).0)
 }
 
-/// [`read`], and the refusal that truncated the tree, if one did — which is
-/// what [`read_markup_or_html`] decides on.
-fn read_reporting(bytes: &[u8], limits: &XmlLimits) -> Result<(Dom, Option<XmlError>), XmlError> {
-    let source = Source::new(bytes)?;
+/// [`read`] of a decoded source, and the refusal that truncated the tree, if
+/// one did — which is what [`read_markup_or_html`] decides on.
+fn read_reporting(source: &Source<'_>, limits: &XmlLimits) -> (Dom, Option<XmlError>) {
     let mut dom = Dom {
         warnings: source.warnings().to_vec(),
         ..Dom::default()
@@ -631,7 +634,7 @@ fn read_reporting(bytes: &[u8], limits: &XmlLimits) -> Result<(Dom, Option<XmlEr
     if dom.nodes.is_empty() {
         dom.defects.push(MarkupDefect::Empty);
     }
-    Ok((dom, refusal))
+    (dom, refusal)
 }
 
 /// Reads a document that is HTML **or** XHTML: as XML first, and — when the
@@ -648,21 +651,46 @@ fn read_reporting(bytes: &[u8], limits: &XmlLimits) -> Result<(Dom, Option<XmlEr
 /// input to the end where the XML reader stopped at the first of them. A
 /// refusal at a cap is not a question of syntax, and reading the document
 /// again would meet the same cap, so the XML reader's tree stands.
+///
+/// **In the encoding its declaration names**, single-byte ones included
+/// ([`Source::with_declared_encoding`]): a loose file is not an EPUB chapter,
+/// which EPUB 3.3 holds to UTF-8 or UTF-16, and an XHTML file whose
+/// declaration says `windows-1251` is well-formed XML in windows-1251. Read by
+/// [`Source::new`] it was refused for its encoding and handed to HTML's
+/// parser, which does not read an XML declaration and set the page in
+/// windows-1252's letters. A file that declares one and is *not* well-formed
+/// goes to HTML's parser as the characters that encoding decodes, not as
+/// bytes for it to guess at, with [`MarkupDefect::Undecodable`] if the table
+/// left a byte unmapped.
 #[must_use]
 pub fn read_markup_or_html(bytes: &[u8], limits: &XmlLimits) -> Dom {
-    match read_reporting(bytes, limits) {
-        Ok((dom, None)) => dom,
-        Ok((
-            dom,
-            Some(
-                XmlError::DepthCap
-                | XmlError::AttributeCap
-                | XmlError::NameCap
-                | XmlError::TokenCap,
-            ),
-        )) => dom,
-        _ => from_html(&tinker_pdf_xml::html::parse_bytes(bytes, limits), limits),
+    let source = Source::with_declared_encoding(bytes);
+    if let Ok(source) = &source {
+        match read_reporting(source, limits) {
+            (dom, None) => return dom,
+            (
+                dom,
+                Some(
+                    XmlError::DepthCap
+                    | XmlError::AttributeCap
+                    | XmlError::NameCap
+                    | XmlError::TokenCap,
+                ),
+            ) => return dom,
+            _ => {}
+        }
+        if let tinker_pdf_xml::Encoding::SingleByte(_) = source.encoding() {
+            let mut dom = from_html(&tinker_pdf_xml::html::parse(source.text(), limits), limits);
+            if source
+                .warnings()
+                .contains(&tinker_pdf_xml::Warning::UnmappedByte)
+            {
+                dom.defects.push(MarkupDefect::Undecodable);
+            }
+            return dom;
+        }
     }
+    from_html(&tinker_pdf_xml::html::parse_bytes(bytes, limits), limits)
 }
 
 /// The tree HTML's parser built, as this reader's tree.
