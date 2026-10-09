@@ -50,9 +50,10 @@
 //! (`a_procedure_whose_last_use_was_redacted_is_emptied_by_the_default_save`).
 //! What a procedure draws is left with it: a form it invokes is not cut,
 //! nor a soft mask's group it sets, and emptying the procedure removes
-//! neither from the file. A group is named
-//! ([`RedactionWarning::PatternOrMask`]) when what it showed under a
-//! rectangle is what removed a use.
+//! neither from the file. A group the procedure sets is measured at every
+//! use of the glyph, one its own box removed included, and named
+//! ([`RedactionWarning::PatternOrMask`]) when it shows text or an image
+//! under a rectangle there, whatever removed the use.
 //! Nor an annotation's own text — `/Contents`, a
 //! rich-text `/RC`, a field's `/V`: what a redaction cuts is what a page
 //! draws, and those are what a viewer *says*, with no position to compare
@@ -154,7 +155,14 @@
 //! of the glyph draws it, and the procedure is not rewritten ("A Type 3
 //! glyph's procedure"). So what it showed under the rectangle stays in the
 //! file, and [`RedactionWarning::PatternOrMask`] names the state; until the
-//! lane's review the use went and nothing said so.
+//! lane's review the use went and nothing said so. The group is measured at
+//! every use, and named for what it shows there whatever removed the use:
+//! the glyph's own box under a rectangle, which until the lane's second
+//! review removed the use with the procedure never measured; text the
+//! procedure shows itself, where the measurement used to stop at the first
+//! thing it found; or the group itself. A font with `/Resources` of its own
+//! has both readings of a name measured ([`procedure_draws_under`]), each of
+//! them now even when the other has already decided the use.
 //!
 //! # Vertical writing
 //!
@@ -512,6 +520,11 @@
 //! | a placement remembered before the bound is asked, which is how it was until the lane's review | **1** |
 //! | a procedure's group that removed a use left unnamed, which is how it was until the lane's review | **1** |
 //! | a procedure's group named whatever it drew, which is how it was before October 2026 | 2 |
+//! | a use its own box removed left unmeasured, which is how it was until the lane's second review | 2 |
+//! | a measurement ending at the first thing it found, which is how it was until the lane's second review | 3 |
+//! | the font's own reading skipped once the first decided the use, which is how it was until the lane's second review | **1** |
+//! | the budget a group measured only to be named spent, counted as why the use went | **1** |
+//! | the same, in the font's own reading | **1** |
 //!
 //! And a tiling pattern's cell measured (the other half of clause (b)), the
 //! same way:
@@ -700,11 +713,13 @@ pub enum RedactionWarning {
     /// it should not have to change for a class that got narrower.
     ///
     /// One group is named still, under the `/ExtGState` name that set it,
-    /// and it was measured: one a **Type 3 glyph's procedure** sets, when
-    /// what it shows under a rectangle is what removed a use of the glyph.
-    /// The use goes; the group, like the procedure, is every use's and is
-    /// not cut ([`cut_stream`]), so what it showed under the rectangle is
-    /// still in the file — which is what this says.
+    /// and it was measured: one a **Type 3 glyph's procedure** sets, when it
+    /// shows text or an image under a rectangle at a use of the glyph —
+    /// measured at every use, one the glyph's own box removed included, and
+    /// named whatever removed the use. The use goes; the group, like the
+    /// procedure, is every use's and is not cut ([`cut_stream`]), so what it
+    /// showed under the rectangle is still in the file — which is what this
+    /// says.
     PatternOrMask {
         /// The `/Pattern` or `/ExtGState` resource name.
         resource: Vec<u8>,
@@ -3075,6 +3090,12 @@ fn form_transform(editor: &DocumentEditor, dict: &Dict, ctm: Matrix) -> Matrix {
 /// What that leaves is the procedure's own bytes in the font, as an embedded
 /// program keeps its outlines — see the module's "What this module does not
 /// remove".
+///
+/// A use its own box put under a rectangle is gone after [`rewrite`]
+/// whatever its procedure draws, and is measured all the same: what the
+/// procedure draws with — a soft mask's group, a tiling pattern's cell — is
+/// not cut either, and the measurement is what names it
+/// ([`RedactionWarning::PatternOrMask`]). It decides nothing about the use.
 fn cut_stream(
     editor: &DocumentEditor,
     scope: &Dict,
@@ -3103,7 +3124,8 @@ fn cut_stream(
             left: MAX_PLACEMENTS,
             spent: false,
         };
-        if procedure_draws_under(&measure, glyph, warnings, &mut budget) {
+        let drawn = procedure_draws_under(&measure, glyph, warnings, &mut budget);
+        if drawn && !glyph.covered {
             drop.insert(glyph.index);
             // Removed because the measurement could not finish, not because
             // anything was found under a rectangle: wider than asked, and
@@ -3169,7 +3191,12 @@ struct Measure<'a> {
 ///
 /// The second pass reads the same names as the first, so a warning it
 /// raises for a cause and a resource the first already named is dropped
-/// rather than counted twice.
+/// rather than counted twice. It runs even when the first decided the use:
+/// a soft mask's group the font's own resources bind is measured there and
+/// nowhere else, and it is named for what it shows under a rectangle
+/// whatever removed the use ([`draws_under`]). Until the lane's second
+/// review it ran only when the first found nothing, and such a group went
+/// unmeasured at that use.
 fn procedure_draws_under(
     measure: &Measure<'_>,
     glyph: &GlyphUse,
@@ -3194,9 +3221,11 @@ fn procedure_draws_under(
         fonts,
         areas: measure.areas,
     };
-    if draws_under(&enclosing, &glyph.procedure, glyph.ctm, warnings, budget) {
-        return true;
-    }
+    let first = draws_under(&enclosing, &glyph.procedure, glyph.ctm, warnings, budget);
+    // Whether the answer is already one given for want of budget; a second
+    // pass run only to name what it finds decides nothing, so the budget it
+    // spends does not make the answer that.
+    let spent = budget.spent;
 
     let mut scopes = vec![own];
     scopes.extend(measure.scopes.iter().copied());
@@ -3210,12 +3239,15 @@ fn procedure_draws_under(
     };
     let mut more = Vec::new();
     let drawn = draws_under(&theirs, &glyph.procedure, glyph.ctm, &mut more, budget);
+    if first {
+        budget.spent = spent;
+    }
     for warning in more {
         if !warnings.iter().any(|w| w.same_cause(&warning)) {
             note(warnings, warning);
         }
     }
-    drawn
+    first || drawn
 }
 
 /// Whether content drawn under `ctm` puts text or an image under a
@@ -3273,11 +3305,17 @@ fn draws_under(
     for scope in &measure.scopes {
         unread(measure.editor, scope, content, measure.areas, warnings);
     }
-    if pass.glyphs > 0 || pass.images > 0 {
-        return true;
-    }
+    let mut drawn = pass.glyphs > 0 || pass.images > 0;
 
     for used in &uses {
+        // Once the answer is yes, a form or an image decides nothing more,
+        // and only a mask's group is still measured: it is not cut, so what
+        // it shows under a rectangle is named whatever decided the use.
+        // Until the lane's second review the measurement stopped at the
+        // first thing it found, and a group after it went unmeasured.
+        if drawn && !used.mask {
+            continue;
+        }
         let resolved = measure.scopes.iter().find_map(|scope| {
             if used.mask {
                 resolve_mask_group(measure.editor, scope, &used.name)
@@ -3292,7 +3330,12 @@ fn draws_under(
             Resolve::resolve_key(measure.editor, &dict, measure.editor.intern(b"Subtype"))
                 .as_name()
                 .and_then(|n| measure.editor.document().name_bytes(n));
-        let drawn = match subtype.as_deref() {
+        // A group measured after the answer was given is measured only to
+        // be named, so the budget it spends does not make the answer one
+        // given for want of budget.
+        let decided = drawn;
+        let spent = budget.spent;
+        let found = match subtype.as_deref() {
             Some(b"Image") => covers_unit_square(used, measure.areas),
             Some(b"Form") => {
                 let Some(inner_content) = measure.editor.stream_bytes(reference) else {
@@ -3320,16 +3363,16 @@ fn draws_under(
             }
             _ => false,
         };
-        if drawn {
+        if found {
             // A mask's group is the procedure's, as what the procedure shows
             // is: the use goes, and the group is not cut, since every other
             // use of the glyph draws it too ([`cut_stream`]'s decision). So
             // what it showed under the rectangle is still in the file, and
-            // that is named, as a cell a procedure paints with is — when
-            // something found under a rectangle, rather than a measurement
-            // run out of budget, is what removed the use. Until the lane's
-            // review it went unnamed: a group's covered text stayed in the
-            // file with `warnings: []`.
+            // that is named, as a cell a procedure paints with is — when it
+            // was found under a rectangle rather than measured out of
+            // budget, and whatever removed the use. Until the lane's review
+            // it went unnamed: a group's covered text stayed in the file
+            // with `warnings: []`.
             if used.mask && !budget.spent {
                 note(
                     warnings,
@@ -3338,8 +3381,14 @@ fn draws_under(
                     },
                 );
             }
-            return true;
+            drawn = true;
         }
+        if decided {
+            budget.spent = spent;
+        }
+    }
+    if drawn {
+        return true;
     }
 
     procedures
@@ -4267,11 +4316,13 @@ struct Procedures {
     drop: HashSet<usize>,
     /// The next occurrence's index.
     next: usize,
-    /// Every occurrence the pass kept, with where its procedure runs.
+    /// Every occurrence the pass showed and was not told to remove, with
+    /// where its procedure runs: the ones it kept, and the ones their own
+    /// box removed ([`GlyphUse::covered`]).
     found: Vec<GlyphUse>,
 }
 
-/// One Type 3 glyph kept, and the transform its procedure runs under: the
+/// One Type 3 glyph shown, and the transform its procedure runs under: the
 /// font matrix, then the text rendering matrix at the glyph's origin (9.4.4),
 /// then the transform in force — where the interpreter runs it.
 struct GlyphUse {
@@ -4283,6 +4334,12 @@ struct GlyphUse {
     /// The resource name the `Tf` gave it, for a report that has to name
     /// it.
     font_name: Vec<u8>,
+    /// The glyph's own box met a rectangle, so the pass removed the use
+    /// already. Its procedure is measured all the same, for what it leaves
+    /// in the file — a soft mask's group or a pattern's cell it draws with,
+    /// neither of which is cut — and the measurement decides nothing about
+    /// the use ([`cut_stream`]).
+    covered: bool,
 }
 
 /// Rewrites a content stream with redacted glyphs removed.
@@ -4669,7 +4726,9 @@ struct Cut {
 /// ([`RunFont::procedures`]) is counted in `procedures`: removed when a
 /// previous pass found its procedure drawing under a rectangle, and otherwise
 /// recorded, with the transform its procedure runs under, for that pass to
-/// measure ([`cut_stream`]).
+/// measure ([`cut_stream`]) — a use its own box removes as well, marked
+/// [`GlyphUse::covered`], since what its procedure draws with is named by
+/// that measurement and by nothing else.
 fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction], procedures: &mut Procedures) -> Cut {
     let whole = |warning: Option<RedactionWarning>| Cut {
         runs: vec![Run::Text(bytes.to_vec())],
@@ -4752,7 +4811,14 @@ fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction], procedures: &mut 
             procedures.next += 1;
             if procedures.drop.contains(&index) {
                 inside = true;
-            } else if !inside {
+            } else {
+                // A use its own box put under a rectangle is recorded too:
+                // it goes whatever its procedure draws, but what the
+                // procedure draws with — a soft mask's group, a pattern's
+                // cell — is not cut, and its measurement is what names it.
+                // Until the lane's second review such a use went unmeasured,
+                // and a group showing text under the same rectangle stayed in
+                // the file with nothing said.
                 let placed = Matrix {
                     a: pen.size * pen.horizontal_scale,
                     b: 0.0,
@@ -4767,6 +4833,7 @@ fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction], procedures: &mut 
                     ctm: space.matrix.then(placed).then(frame),
                     font: Arc::clone(selected),
                     font_name: pen.font_name.clone(),
+                    covered: inside,
                 });
             }
         }
@@ -11109,7 +11176,8 @@ mod patterns_and_masks {
         // `/T3`'s `A` fills its em with `/P0` and its `B` under `/GS0`:
         // each measured as a procedure that might draw text, and the
         // pattern it paints with named. The band is clear of the glyphs' own
-        // boxes, which would otherwise remove them unmeasured.
+        // boxes, so the uses stay; one a box removes is measured too
+        // (`what_a_covered_glyphs_procedure_paints_with_is_named`).
         let clear = Redaction {
             area: Rect {
                 x0: 200.0,
@@ -11188,6 +11256,156 @@ mod patterns_and_masks {
         assert_eq!(report, RedactionReport::default());
         let streams = all_streams(&CosDocument::open(after).expect("it reopens"));
         assert!(streams.contains("(B) Tj"), "{streams}");
+    }
+
+    /// [`document`] showing `content`, with `B`'s procedure replaced by
+    /// `procedure`, the Type 3 font given `resources` of its own (empty for
+    /// none), and `objects` added. The fixture has no cross-reference table,
+    /// so an object may change length.
+    fn with_procedure(content: &str, procedure: &str, resources: &str, objects: &str) -> Vec<u8> {
+        let original = stream_object(15, "1000 0 d0 /GS0 gs 0 0 1000 1000 re f");
+        let fixture = String::from_utf8(document(content)).expect("the fixture is ASCII");
+        assert!(fixture.contains(&original), "B's procedure");
+        fixture
+            .replace(&original, &stream_object(15, procedure))
+            .replace("/FirstChar 65", &format!("{resources} /FirstChar 65"))
+            .replace(
+                "trailer\n<< /Size 16",
+                &format!("{objects}trailer\n<< /Size 17"),
+            )
+            .into_bytes()
+    }
+
+    /// `B` drawing `/GS0`'s group at one point to the unit, from its origin
+    /// at (10, 10): `SECRET` from about (20, 20) to (210, 55).
+    const MASKS: &str = "1000 0 d0 100 0 0 100 0 0 cm /GS0 gs";
+
+    /// A band over the glyph's own box and over the group's `SECRET`
+    /// alike, as a band over a Type 3 word usually is. The box alone
+    /// removes the use, and until the lane's second review it did so with
+    /// the procedure never measured — so the group, which is not cut, kept
+    /// `SECRET` under the band and nothing named it. A procedure is measured
+    /// at every use now, for what it leaves in the file, and the group is
+    /// named as it is where the box is clear.
+    #[test]
+    fn a_covered_glyph_whose_procedure_masks_text_under_a_rectangle_names_the_group() {
+        let bytes = with_procedure("BT /T3 10 Tf 10 10 Td (B) Tj ET", MASKS, "", "");
+        let (after, report) = redact(open(bytes), &[band(0.0, 0.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(
+            report.warnings,
+            vec![named(b"GS0")],
+            "the group it drew is left, and said to be"
+        );
+        let streams = all_streams(&CosDocument::open(after.clone()).expect("it reopens"));
+        assert!(!streams.contains("(B) Tj"), "{streams}");
+        assert!(
+            streams.contains("BT /F0 48 Tf 10 10 Td (SECRET) Tj ET"),
+            "the group is left byte for byte, which is what is named: {streams}"
+        );
+        assert_eq!(text_of(after), "", "nothing on the page reads");
+    }
+
+    /// A procedure that shows text of its own under the rectangle, `X` at
+    /// about (150, 25), as well as setting the group: what it shows decides
+    /// the use, and the group is measured all the same, since it is named
+    /// for what it leaves in the file and not for what removed the use.
+    /// Until the lane's second review the measurement stopped at the first
+    /// thing it found under a rectangle, and the group went unmeasured.
+    #[test]
+    fn a_procedure_whose_own_text_removed_the_use_still_names_its_group() {
+        let procedure = format!("{MASKS} BT /F0 10 Tf 140 15 Td (X) Tj ET");
+        let bytes = with_procedure("BT /T3 10 Tf 10 10 Td (B) Tj ET", &procedure, "", "");
+        let (after, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(report.warnings, vec![named(b"GS0")]);
+        let streams = all_streams(&CosDocument::open(after).expect("it reopens"));
+        assert!(!streams.contains("(B) Tj"), "{streams}");
+        assert!(streams.contains("(SECRET) Tj"), "{streams}");
+    }
+
+    /// The font's own `/Resources` bind `/GS0` to a second group, whose
+    /// `OTHER` stands at about (20, 310) to (200, 345), under the band; the
+    /// page's `/GS0` group is clear of it. The procedure's own `X`, at about
+    /// (150, 300), is under the band too, so the first measurement — names
+    /// resolved in the page's scope first — removes the use. The second,
+    /// the font's own resources first, is where `/GS0` is the group under
+    /// the band, and it is run all the same: until the lane's second review
+    /// it ran only when the first found nothing, and the font's group was
+    /// never measured at this use.
+    #[test]
+    fn a_group_the_fonts_own_resources_bind_is_measured_when_the_first_reading_removed_the_use() {
+        let procedure = format!("{MASKS} BT /F0 10 Tf 140 290 Td (X) Tj ET");
+        let resources = "/Resources << /Font << /F0 6 0 R >>\n\
+                         /ExtGState << /GS0 << /SMask << /S /Luminosity /G 16 0 R >> >> >> >>";
+        let other = "BT /F0 48 Tf 10 300 Td (OTHER) Tj ET";
+        let group = format!(
+            "16 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n\
+             /Group << /S /Transparency /CS /DeviceGray >>\n\
+             /Resources << /Font << /F0 6 0 R >> >> /Length {} >>\n\
+             stream\n{other}\nendstream\nendobj\n",
+            other.len() + 1
+        );
+        let bytes = with_procedure(
+            "BT /T3 10 Tf 10 10 Td (B) Tj ET",
+            &procedure,
+            resources,
+            &group,
+        );
+        let (after, report) = redact(open(bytes), &[band(100.0, 290.0, 400.0, 400.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(report.warnings, vec![named(b"GS0")]);
+        let streams = all_streams(&CosDocument::open(after).expect("it reopens"));
+        assert!(streams.contains("(OTHER) Tj"), "not cut: {streams}");
+    }
+
+    /// A group measured after its procedure's own `X` decided the use is
+    /// measured to be named, and the budget it spends is not why the use
+    /// went. Here the group, bound by the font's own `/GS9`, shows `B`
+    /// again, whose procedure sets it again: the measurement recurses until
+    /// the use's budget runs out. Every level found its `X` under the band
+    /// before that, so the use was decided by measurement and is not
+    /// `UnboundedProcedure`; and the group, which shows `B` and so that `X`,
+    /// is named. Counting the budget the naming spent as the reason the use
+    /// went — in `draws_under`, or in `procedure_draws_under`'s second
+    /// reading, which then finds the budget gone — names the font instead.
+    #[test]
+    fn a_group_measured_only_to_be_named_does_not_make_the_use_unbounded() {
+        let procedure = "1000 0 d0 100 0 0 100 0 0 cm /GS9 gs BT /F0 10 Tf 140 15 Td (X) Tj ET";
+        let resources = "/Resources << /Font << /F0 6 0 R >>\n\
+                         /ExtGState << /GS9 << /SMask << /S /Luminosity /G 16 0 R >> >> >> >>";
+        let again = "BT /T3 10 Tf 0 0 Td (B) Tj ET";
+        let group = format!(
+            "16 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n\
+             /Group << /S /Transparency /CS /DeviceGray >>\n\
+             /Resources << /Font << /F0 6 0 R /T3 13 0 R >> >> /Length {} >>\n\
+             stream\n{again}\nendstream\nendobj\n",
+            again.len() + 1
+        );
+        let bytes = with_procedure(
+            "BT /T3 10 Tf 10 10 Td (B) Tj ET",
+            procedure,
+            resources,
+            &group,
+        );
+        let (_, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(report.warnings, vec![named(b"GS9")]);
+    }
+
+    /// A pattern a covered glyph's procedure paints with is named as one an
+    /// uncovered glyph's is (`what_a_glyph_procedure_paints_with_is_named`):
+    /// the cell is not measured for a procedure, and the use going does not
+    /// take it out of the file.
+    #[test]
+    fn what_a_covered_glyphs_procedure_paints_with_is_named() {
+        assert_eq!(
+            warnings(
+                "BT /T3 10 Tf 10 10 Td (A) Tj ET",
+                &[band(0.0, 0.0, 30.0, 30.0)]
+            ),
+            vec![named(b"P0")]
+        );
     }
 
     /// A stream that sets one state at every text object sets it under one
