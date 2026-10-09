@@ -1845,8 +1845,8 @@ fn the_block_and_not_the_first_letter_decides_a_paragraphs_direction() {
 /// dir="auto">` — what this test once wrote — is one direction for the whole
 /// element ([`dir_auto_is_one_direction_from_the_content_and_is_inherited`]).
 ///
-/// Under `white-space: pre` the newline is a forced break, and a forced
-/// break ends a bidi paragraph (§2.4.1), so the two lines here are two
+/// Under `white-space: pre` the newline is a forced break of bidi type `B`,
+/// which ends a bidi paragraph (§2.4), so the two lines here are two
 /// paragraphs: the first finds `ب` and is the right-to-left line of
 /// [`the_block_and_not_the_first_letter_decides_a_paragraphs_direction`],
 /// against the right edge; the second finds `a`, so it is left to right and
@@ -1884,6 +1884,71 @@ fn plaintext_gives_each_paragraph_its_own_first_strong_direction() {
             ]
         ),
         "the second paragraph is not left to right: {lines:?}"
+    );
+}
+
+/// **A line separator ends a line and not a `plaintext` paragraph**
+/// (`css-writing-modes-3` §2.4: a bidi paragraph is bounded by a block
+/// boundary or a forced break of bidi type `B`, and U+2028 LINE SEPARATOR is
+/// `WS`; review of lane 8C).
+///
+/// `بحم`, U+2028, `ab` is one paragraph whose first strong character is `ب`,
+/// so it is right to left throughout and its second line is `ab` against the
+/// right edge — the line the same text draws under `dir="rtl"`. It was set
+/// as two paragraphs, the second finding `a` and starting at the left edge,
+/// as the same text does with a separator that is `B`: U+2029, the twin, or
+/// the preserved newline of
+/// [`plaintext_gives_each_paragraph_its_own_first_strong_direction`]. A
+/// `<pre dir="auto">`, which HTML makes `plaintext`, is the same paragraph.
+#[test]
+fn a_line_separator_ends_a_line_and_not_a_plaintext_paragraph() {
+    let arabic = "\u{628}\u{62D}\u{645}";
+    let flush_right = [("a", RIGHT - 2.0 * GLYPH), ("b", RIGHT - GLYPH)];
+    let second = |attributes: &str, body: &str| {
+        let lines = drawn_lines(attributes, body);
+        assert_eq!(lines.len(), 2, "`{attributes}` {body:?}: {lines:?}");
+        lines.into_iter().nth(1).unwrap_or_default()
+    };
+    let control = second(" dir=\"rtl\"", &format!("{arabic}\u{2028}ab"));
+    assert!(
+        at(&control, &flush_right),
+        "the `dir=\"rtl\"` control moved: {control:?}"
+    );
+    let plain = second(
+        " style=\"unicode-bidi: plaintext\"",
+        &format!("{arabic}\u{2028}ab"),
+    );
+    assert!(
+        at(&plain, &flush_right),
+        "the line after U+2028 started a paragraph of its own: {plain:?}"
+    );
+    // A `pre` is set in the UA sheet's monospace, whose `a` and `b` are not
+    // the fixture's, so its control is a `pre` too.
+    let pre = |dir: &str| {
+        second(
+            "",
+            &format!("<pre dir=\"{dir}\" style=\"margin: 0\">{arabic}\u{2028}ab</pre>"),
+        )
+    };
+    let (pre_auto, pre_rtl) = (pre("auto"), pre("rtl"));
+    assert!(
+        pre_rtl
+            .first()
+            .is_some_and(|(_, x)| *x > (LEFT + RIGHT) / 2.0),
+        "the `pre dir=\"rtl\"` control is not at the right: {pre_rtl:?}"
+    );
+    let expected: Vec<(&str, f64)> = pre_rtl.iter().map(|(t, x)| (t.as_str(), *x)).collect();
+    assert!(
+        at(&pre_auto, &expected),
+        "the `pre`'s line after U+2028 started a paragraph of its own: {pre_auto:?}"
+    );
+    let separated = second(
+        " style=\"unicode-bidi: plaintext\"",
+        &format!("{arabic}\u{2029}ab"),
+    );
+    assert!(
+        at(&separated, &[("a", LEFT), ("b", LEFT + GLYPH)]),
+        "U+2029 did not start a left-to-right paragraph: {separated:?}"
     );
 }
 

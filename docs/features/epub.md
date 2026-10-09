@@ -171,8 +171,10 @@ left-to-right paragraph that begins with an Arabic word stays left to right;
 box's `embed`, `isolate` and `plaintext` are carried on its runs as the
 levels §2.4.2 maps them to and written as formatting characters only into the
 text the painter resolves, never into the page's; and a block's `plaintext`
-gives each paragraph — a forced break starts one — its own first strong
-direction. HTML's `dir` and `<bdi>` are presentational hints
+gives each paragraph its own first strong direction — a paragraph separator
+starts one, which is a forced break of bidi type B (a preserved newline, CR,
+NEL or U+2029), and a U+2028 line separator, a forced break that is not,
+ends its line and not its paragraph (§2.4). HTML's `dir` and `<bdi>` are presentational hints
 (`epub::xhtml`): `dir="ltr"` and `"rtl"` set `direction` and isolate, and
 `dir="auto"` and a `<bdi>` with no `dir` isolate with the direction HTML's
 auto directionality gives them — the first strong character of their text,

@@ -430,9 +430,10 @@ fn phase_two_trims_the_space_a_line_broke_at() {
 /// which is what a caller resolving UAX #9 over a paragraph rather than a line
 /// gathers its lines by (review of lane 8C).
 ///
-/// `aa bb cc` wrapped to three lines is one paragraph; a forced break under
-/// `white-space: pre` starts the next (`css-writing-modes-3` §2.4.1), and the
-/// next block's text another. Numbered from one in the order they are set.
+/// `aa bb cc` wrapped to three lines is one paragraph; a preserved newline
+/// under `white-space: pre`, a forced break of bidi type `B`, starts the next
+/// (`css-writing-modes-3` §2.4), and the next block's text another. Numbered
+/// from one in the order they are set.
 #[test]
 fn every_run_carries_its_bidi_paragraph() {
     let mut pre = block();
@@ -699,6 +700,179 @@ fn plaintext_without_a_bidi_provider_is_aligned_by_direction() {
     let laid = run(&BoxNode::element(style, vec![text("abcd")]), 100.0, 400.0);
     let first = &laid.pages[0].runs[0];
     assert_eq!((first.x, first.paragraph_rtl), (60.0, None));
+}
+
+/// [`METRICS`] with UAX #9's P2 over a few characters, counting every
+/// character it is asked about: Hebrew letters are `R`, ASCII letters `L`,
+/// the seven characters of `DerivedBidiClass.txt`'s `B` separators, and
+/// everything else is neutral.
+struct FirstStrongCounted {
+    looked: std::cell::Cell<usize>,
+}
+
+impl crate::metrics::Metrics for FirstStrongCounted {
+    fn advance(&self, ch: char, font: &crate::metrics::FontRequest<'_>) -> f64 {
+        METRICS.advance(ch, font)
+    }
+
+    fn vertical(&self, font: &crate::metrics::FontRequest<'_>) -> crate::metrics::Vertical {
+        METRICS.vertical(font)
+    }
+
+    fn first_strong(&self, text: &str) -> Option<crate::metrics::FirstStrong> {
+        use crate::metrics::FirstStrong;
+        for c in text.chars() {
+            self.looked.set(self.looked.get() + 1);
+            match c {
+                '\n' | '\r' | '\u{1C}'..='\u{1E}' | '\u{85}' | '\u{2029}' => {
+                    return Some(FirstStrong::Separator)
+                }
+                'a'..='z' | 'A'..='Z' => return Some(FirstStrong::Left),
+                '\u{5D0}'..='\u{5EA}' => return Some(FirstStrong::Right),
+                _ => {}
+            }
+        }
+        Some(FirstStrong::Neither)
+    }
+}
+
+/// [`run`] through [`FirstStrongCounted`], and how many characters it was
+/// asked about.
+fn run_counted(tree: &BoxNode, width: f64, height: f64) -> (Layout, usize) {
+    let metrics = FirstStrongCounted {
+        looked: std::cell::Cell::new(0),
+    };
+    let laid = layout(
+        tree,
+        &metrics,
+        &Options::new(width, height),
+        &Limits::DEFAULT,
+    )
+    .expect("the fixture is under every cap");
+    (laid, metrics.looked.get())
+}
+
+/// **A bidi paragraph ends at a paragraph separator, not at every forced
+/// break** (`css-writing-modes-3` §2.4: UAX #9 is applied to every sequence
+/// of inline-level boxes *"uninterrupted by any block boundary or 'bidi type
+/// B' forced paragraph break"*; review of lane 8C).
+///
+/// `א`, a forced break, then `ab`, in a `plaintext` block a hundred points
+/// wide. UAX #14 breaks the line at all seven: `BK` (U+000B, U+000C, U+2028,
+/// U+2029), `CR`, `LF` and `NL`. Four of them are `Bidi_Class` `B` — LF, CR,
+/// NL and U+2029 — and start a paragraph of their own, so `ab` finds `a` and
+/// is left to right, at the left. U+2028 LINE SEPARATOR is `WS`, U+000C `WS`
+/// and U+000B `S`: the line ends and the paragraph does not, so `ab` is the
+/// second line of `א`'s right-to-left paragraph, one paragraph number with
+/// it, flush right at eighty. The layout started a paragraph at every forced
+/// break, and the second line re-decided its direction after each of the
+/// three.
+#[test]
+fn a_bidi_paragraph_ends_at_a_paragraph_separator_not_at_every_forced_break() {
+    for (separator, white_space, one_paragraph) in [
+        ('\u{2028}', WhiteSpace::Normal, true),
+        ('\u{B}', WhiteSpace::Normal, true),
+        ('\u{C}', WhiteSpace::Pre, true),
+        ('\n', WhiteSpace::Pre, false),
+        ('\r', WhiteSpace::Pre, false),
+        ('\u{85}', WhiteSpace::Normal, false),
+        ('\u{2029}', WhiteSpace::Normal, false),
+    ] {
+        let mut style = block();
+        style.unicode_bidi = UnicodeBidi::Plaintext;
+        style.white_space = white_space;
+        let mut inner = base();
+        inner.white_space = white_space;
+        let body = format!("\u{5D0}{separator}ab");
+        let tree = BoxNode::element(style, vec![BoxNode::text(inner, body)]);
+        let (laid, _) = run_counted(&tree, 100.0, 400.0);
+        let runs = &laid.pages[0].runs;
+        assert_eq!(runs.len(), 2, "{separator:?} is not two lines: {runs:?}");
+        let (first, second) = (&runs[0], &runs[1]);
+        assert_eq!(second.text, "ab", "{separator:?}");
+        assert_eq!(first.paragraph_rtl, Some(true), "{separator:?}");
+        let expected = if one_paragraph {
+            (first.paragraph, Some(true), 80.0)
+        } else {
+            (first.paragraph + 1, Some(false), 0.0)
+        };
+        assert_eq!(
+            (second.paragraph, second.paragraph_rtl, second.x),
+            expected,
+            "{separator:?}: the line after it is the wrong paragraph's"
+        );
+    }
+}
+
+/// **A paragraph separator inside an isolate ends the paragraph**, whichever
+/// of the four it is: P1 splits the text before any isolate is opened, so
+/// P2 does not look past it for the paragraph's first strong character.
+///
+/// `<span isolate>1␤</span>א` in a `plaintext` block: the first paragraph
+/// has nothing strong outside its isolate before its separator, so P3 makes
+/// it left to right, and `א` is the next paragraph's. The layout asked an
+/// isolate's text for `\n` and U+2029 only, so after a CR or a NEL in one it
+/// went on to `א` and set the first paragraph right to left.
+#[test]
+fn every_paragraph_separator_inside_an_isolate_ends_the_paragraph() {
+    for separator in ['\n', '\r', '\u{85}', '\u{2029}'] {
+        let mut style = block();
+        style.unicode_bidi = UnicodeBidi::Plaintext;
+        style.white_space = WhiteSpace::Pre;
+        let mut inner = base();
+        inner.white_space = WhiteSpace::Pre;
+        let mut isolate = inner.clone();
+        isolate.unicode_bidi = UnicodeBidi::Isolate;
+        let tree = BoxNode::element(
+            style,
+            vec![
+                BoxNode::element(
+                    isolate,
+                    vec![BoxNode::text(inner.clone(), format!("1{separator}"))],
+                ),
+                BoxNode::text(inner, "\u{5D0}"),
+            ],
+        );
+        let (laid, _) = run_counted(&tree, 100.0, 400.0);
+        let directions: Vec<(&str, Option<bool>)> = laid.pages[0]
+            .runs
+            .iter()
+            .map(|run| (run.text.trim_end_matches(separator), run.paragraph_rtl))
+            .collect();
+        assert_eq!(
+            directions,
+            [("1", Some(false)), ("\u{5D0}", Some(true))],
+            "{separator:?}"
+        );
+    }
+}
+
+/// **A `plaintext` block of a thousand line separators asks each character
+/// its direction once**, not once per paragraph after it (review of lane
+/// 8C).
+///
+/// `1` then U+2028, 2 048 times: 4 096 characters, 2 048 lines, one
+/// paragraph with no strong character. Held by count, not by a clock:
+/// [`FirstStrongCounted`] counts every character P2 is asked about, and the
+/// block is held to twice its length. When every forced break started a
+/// paragraph, each line asked from its own start to the block's end, past
+/// every separator after it — none of them `B`, so nothing stopped the scan
+/// — which is `n^2 / 2`, 4 196 352.
+#[test]
+fn a_plaintext_block_of_line_separators_asks_each_character_once() {
+    const LINES: usize = 2_048;
+    let mut style = block();
+    style.unicode_bidi = UnicodeBidi::Plaintext;
+    let body = "1\u{2028}".repeat(LINES);
+    let tree = BoxNode::element(style, vec![text(&body)]);
+    let (laid, looked) = run_counted(&tree, 100.0, 1.0e6);
+    let lines = laid.pages.iter().map(|page| page.runs.len()).sum::<usize>();
+    assert_eq!(lines, LINES);
+    let characters = 2 * LINES;
+    assert!(
+        looked <= 2 * characters,
+        "{looked} characters looked at for a block of {characters}"
+    );
 }
 
 /// **An inline box whose `unicode-bidi` is not `normal` opens a level every

@@ -517,7 +517,8 @@ struct Builder<'a, M: Metrics> {
     /// lost nothing at all.
     sequence: usize,
     /// The last bidi paragraph number handed out ([`TextRun::paragraph`]):
-    /// one per inline formatting context's text up to a forced break, counted
+    /// one per inline formatting context's text up to a paragraph separator
+    /// (a forced break of `Bidi_Class` `B`, [`separates_paragraphs`]), counted
     /// across the whole layout as `sequence` is, so a paragraph's lines are
     /// one number wherever they land.
     paragraphs: usize,
@@ -4564,9 +4565,17 @@ impl<M: Metrics> Builder<'_, M> {
         let mut lines_here = 0usize;
         let mut cursor = 0usize;
         let first_item = self.flow.items.len();
-        // A forced break ends a bidi paragraph as well as a line
-        // (`css-writing-modes-3` §2.4.1), so a `plaintext` container's
-        // direction is asked again of the text after each one.
+        // A paragraph separator ends a bidi paragraph as well as a line, so a
+        // `plaintext` container's direction is asked again of the text after
+        // each one. **Only a separator**: `css-writing-modes-3` §2.4 bounds a
+        // bidi paragraph by a block boundary or a *"bidi type B"* forced
+        // break, and three of UAX #14's seven forced breaks are not one
+        // ([`separates_paragraphs`]). A U+2028 LINE SEPARATOR ends the line
+        // and not the paragraph, and a paragraph started after one asked its
+        // direction of everything to the next separator — so a block of
+        // line separators was asked `O(n^2)` characters, and each line after
+        // one could take a direction its paragraph did not have (review of
+        // lane 8C).
         let mut paragraph = None;
         let mut paragraph_starts = true;
         let mut paragraph_number = 0usize;
@@ -4643,7 +4652,11 @@ impl<M: Metrics> Builder<'_, M> {
             );
             lines_here += 1;
             first_line = false;
-            paragraph_starts = hard;
+            paragraph_starts = hard
+                && content
+                    .get(..end)
+                    .and_then(|before| before.chars().next_back())
+                    .is_some_and(separates_paragraphs);
             start = end;
         }
         // `lines_in_block` cannot be known when a line is made, so it is
@@ -4664,11 +4677,15 @@ impl<M: Metrics> Builder<'_, M> {
     ///
     /// The text is asked a box at a time, and what an inline box isolates is
     /// skipped rather than asked: P2 does not look inside an isolate. A
-    /// separator inside one still ends the paragraph — P1 splits the text
-    /// before any isolate is opened — and is what keeps the scan to this
-    /// paragraph rather than the rest of the container, so a container of a
-    /// thousand preserved newlines is not scanned a thousand times over.
-    /// `None` is a provider with no UAX #9 ([`Metrics::first_strong`]).
+    /// separator inside one — any of the seven ([`separates_paragraphs`]) —
+    /// still ends the paragraph, since P1 splits the text before any isolate
+    /// is opened. The separator is what keeps the scan to this paragraph
+    /// rather than the rest of the container, so a container of a thousand
+    /// preserved newlines is not scanned a thousand times over; and since
+    /// [`Builder::lines`] starts a paragraph only after a separator, a
+    /// thousand line separators are one paragraph, scanned once (review of
+    /// lane 8C). `None` is a provider with no UAX #9
+    /// ([`Metrics::first_strong`]).
     fn paragraph_direction(
         &self,
         container: &Consumed,
@@ -4692,7 +4709,7 @@ impl<M: Metrics> Builder<'_, M> {
                     .any(|e| e.kind != EmbeddingKind::Embed)
             });
             if isolated {
-                if slice.contains(['\n', '\u{2029}']) {
+                if slice.contains(separates_paragraphs) {
                     return Some(false);
                 }
                 continue;
@@ -6412,6 +6429,24 @@ pub(crate) const SOFT_HYPHEN: char = '\u{AD}';
 /// face has — the standard 14 have no U+2010 — and the one a reader joining
 /// hyphenated words already looks for.
 pub(crate) const HYPHEN: char = '-';
+
+/// Whether `c` is a paragraph separator, `Bidi_Class` `B`: what ends a bidi
+/// paragraph inside a block (`css-writing-modes-3` §2.4) and stops UAX #9's
+/// P2.
+///
+/// The seven characters of `DerivedBidiClass.txt`'s `B`, written out because
+/// this crate has no `Bidi_Class` table ([`Metrics::first_strong`] says why)
+/// and the class is closed and small. Four of them are also UAX #14 forced
+/// breaks — LF, CR, NEL and U+2029 — and the other three forced breaks are
+/// not separators: U+000B is `S`, U+000C and U+2028 LINE SEPARATOR `WS`.
+/// U+001C to U+001E are separators that are not forced breaks; one ends the
+/// scan for a paragraph's direction, as P2 says, but no line is cut there,
+/// so the text after it stays in the layout's paragraph until the next
+/// forced break that is a separator, where P1 would start one. They are C0
+/// controls XML 1.0 does not admit, so only markup read as HTML holds one.
+fn separates_paragraphs(c: char) -> bool {
+    matches!(c, '\n' | '\r' | '\u{1C}'..='\u{1E}' | '\u{85}' | '\u{2029}')
+}
 
 /// Where the soft hyphen just before byte `at` of `content` is, if one is.
 fn soft_hyphen_before(content: &str, at: usize) -> Option<usize> {

@@ -631,7 +631,9 @@ pub struct TextRun {
     /// needs the paragraph's direction to do it.
     pub paragraph_rtl: Option<bool>,
     /// Which bidi paragraph the run is part of: one block container's inline
-    /// content up to a forced break (`css-writing-modes-3` §2.4.1), numbered
+    /// content up to a forced break of `Bidi_Class` `B` — a preserved
+    /// newline, CR, NEL or U+2029, but not U+2028 LINE SEPARATOR, which ends
+    /// the line and not the paragraph (`css-writing-modes-3` §2.4) — numbered
     /// from one in the order this crate sets them, across the whole layout;
     /// zero for a run set outside every paragraph, an outside list marker.
     ///
