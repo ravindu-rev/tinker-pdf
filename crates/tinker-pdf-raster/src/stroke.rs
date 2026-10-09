@@ -239,6 +239,11 @@ pub fn stroke_mapped(
 /// million — and a caller writing them somewhere bounded stops the cutting
 /// by answering `false`, having paid only for what it kept. Returns whether
 /// every piece was handed over.
+///
+/// A pattern whose every dash has no length — `[0 0.01]` — leaves no piece,
+/// a dash of no length being a single point, and that is answered without
+/// walking the path: otherwise the walk spends its bound on every segment
+/// with nothing handed over that a caller could stop it on.
 pub fn dash(
     path: &Path,
     dashes: &[f64],
@@ -313,6 +318,16 @@ fn each_dash(
     // 8.4.3.6: an empty array, or one summing to zero, is a solid line.
     if pattern.is_empty() || pattern.iter().sum::<f64>() <= 0.0 {
         return piece(poly.to_vec());
+    }
+    // The entries the walk below ever treats as dashes are the even ones of
+    // an even-length pattern, and every one of an odd-length pattern, whose
+    // roles swap each time round. When none of them has length — `[0 0.01]`
+    // — every dash is a single point, which the walk drops (a piece needs two
+    // points), so it cuts nothing; but it took its 100 000 steps a segment to
+    // find that out, and a writer bounding the work by the pieces it is
+    // handed was never handed one to stop on. Nothing is cut either way.
+    if pattern.len() % 2 == 0 && !pattern.iter().step_by(2).any(|d| *d > 0.0) {
+        return true;
     }
 
     let mut current: Vec<Point> = Vec::new();
@@ -1348,5 +1363,49 @@ mod tests {
         );
         assert!(!whole, "the cutting was stopped");
         assert_eq!(handed, 3);
+    }
+
+    /// A pattern whose every dash has no length cuts nothing, and knows it
+    /// without walking: `[0 0.01]` along a line a thousand long was 100 000
+    /// steps of nothing, asking `stop` every [`STOP_EVERY`] of them and
+    /// handing a caller no piece it could stop on. An odd-length pattern
+    /// swaps its entries' roles each time round, so `[0 1 0]`, whose even
+    /// entries have no length, still dashes: its `1` is a dash every other
+    /// time round.
+    #[test]
+    fn dashes_of_no_length_cut_nothing_without_walking_the_line() {
+        let line = [Point::new(0.0, 0.0), Point::new(1000.0, 0.0)];
+        let style = |dashes: &[f64]| StrokeStyle {
+            dashes: dashes.to_vec(),
+            ..StrokeStyle::default()
+        };
+        let asked = std::cell::Cell::new(0u32);
+        let ask = || {
+            asked.set(asked.get() + 1);
+            false
+        };
+        let pieces = apply_dashes(&line, &style(&[0.0, 0.01]), Some(&ask));
+        assert!(pieces.is_empty(), "a dash of no length is no piece");
+        assert_eq!(asked.get(), 0, "and the line was not walked to find that");
+
+        let mut handed = 0;
+        let whole = dash(
+            &segment(0.0, 0.0, 1000.0, 0.0),
+            &[0.0, 0.01, 0.0, 5.0],
+            0.0,
+            0.05,
+            &mut |_| {
+                handed += 1;
+                true
+            },
+        );
+        assert!(whole);
+        assert_eq!(handed, 0, "every even entry of an even pattern is a dash");
+
+        let odd = apply_dashes(&line, &style(&[0.0, 1.0, 0.0]), None);
+        assert!(
+            odd.first().is_some_and(|piece| piece.len() > 1),
+            "an odd pattern's entries are dashes every other time round"
+        );
     }
 }

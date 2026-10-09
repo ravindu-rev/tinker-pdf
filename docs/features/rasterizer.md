@@ -111,7 +111,13 @@ the pieces a pattern leaves without stroking them — one at a time, as each
 is cut, and stops cutting when the caller answers `false`: the 100 000-step
 bound is per segment, so forty segments under `[0.01 0.01]` are two million
 pieces, and a caller writing them somewhere bounded pays only for what it
-keeps (until the review of lane 8A it collected them all first).
+keeps (until the review of lane 8A it collected them all first). A pattern
+whose every dash has no length — `[0 0.01]` — leaves no piece, and the walk
+now answers that without stepping along the path; until the second review of
+lane 8A it took its 100 000 steps a segment to find nothing, so a caller
+bounding the work by the pieces it is handed had none to stop on: a page of
+two hundred such segments took 1.65 s (debug) to write as SVG and render,
+and now under 10 ms (`dashes_of_no_length_cut_nothing_without_walking_the_line`).
 
 **Hard edges.** `Mask::harden` turns a coverage mask into one that is whole or
 empty at every pixel: at least half becomes 255, less becomes 0. It is what

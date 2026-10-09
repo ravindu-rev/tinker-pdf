@@ -1641,6 +1641,14 @@ fn path_data(path: &[PathSegment], m: &Matrix) -> String {
 /// says. What comes back then is longer than `room` by at most one piece, so
 /// the writer refuses it, says `Truncated` and stops, having held a budget's
 /// worth of markup rather than every piece.
+///
+/// That bounds the *time* only while pieces keep coming, since this writer
+/// has no cancel hook and the budget is asked once a piece. A pattern whose
+/// every dash has no length — `[0 0.01]` — cuts no piece at all, and
+/// [`tinker_pdf_raster::dash`] says so without walking the path, where it
+/// used to take its 100 000 steps a segment to find nothing; any other
+/// pattern cuts a piece each time round, so the steps between one piece and
+/// the next are bounded by the pattern's length and the segments crossed.
 fn dashed_pieces(
     path: &[PathSegment],
     back: &Matrix,

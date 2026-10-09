@@ -499,6 +499,40 @@ fn a_zero_width_dashed_line_under_a_stretch_is_cut_in_user_space() {
     assert!(stroke.dashes.is_empty(), "the pieces are the dashes");
 }
 
+/// **Dashes of no length are no pieces**, written or drawn: `[0 0.01]` on a
+/// zero-width line under a stretch cuts nothing, so the SVG holds no path
+/// and the render paints nothing — the two agree. It is the page the second
+/// review of lane 8A timed: the cutter walked 100 000 steps a segment to
+/// find no piece, and with none handed over the markup budget had nothing
+/// to stop it on, so two hundred segments took most of a second to write
+/// 195 bytes. It now knows without walking (`tinker_pdf_raster::dash`); the
+/// cost is pinned where it lives, in the raster crate's
+/// `dashes_of_no_length_cut_nothing_without_walking_the_line`.
+#[test]
+fn dashes_of_no_length_write_no_piece() {
+    let mut content = String::from("0 0 0 RG q 1 0 0 3 0 0 cm 0 w [0 0.01] 0 d 0 0 m");
+    for _ in 0..40 {
+        content.push_str(" 100 0 l 0 0 l");
+    }
+    content.push_str(" S Q");
+    let bytes = pdf(&content, 100, 100, "<< >>", &[]);
+
+    let svg = svg_of(bytes.clone());
+    assert!(svg.warnings.is_empty(), "{:?}", svg.warnings);
+    let (scene, _) = read_back(&svg);
+    assert!(paths(&scene).is_empty(), "{}", svg.markup);
+
+    let bitmap = Document::open(bytes)
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .render(&tinker_pdf::RenderOptions::default());
+    assert!(
+        bitmap.data.iter().all(|v| *v == 255),
+        "the renderer cuts the same nothing"
+    );
+}
+
 /// **Those pieces follow the curve under a large stretch.** The dashes are
 /// cut in user space, so the curve is flattened there, at a hundredth of a
 /// point over the map's largest stretch. A quarter circle of radius 0.001
