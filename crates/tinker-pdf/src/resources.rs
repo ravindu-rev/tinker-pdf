@@ -399,16 +399,49 @@ fn default_decode(space: &ColorSpace, c: usize) -> Option<(f64, f64)> {
 /// one.
 const WHITE_D50: [f64; 3] = [0.964_212, 1.0, 0.825_188];
 
+/// `read` of `object` resolved, **where it lies**: an indirect object is the
+/// document's cached one and a direct one is `object` itself.
+///
+/// Not [`CosDocument::resolve`], which hands a direct object back as a fresh
+/// `Arc` of a deep copy. That is nothing for a number and everything for a
+/// long array, and the readers this serves run once per operator: a review
+/// measured a page of 2 000 `/X /P0 BDC EMC` naming one list beside a
+/// 1 048 576-entry array at 150 s to extract text from while each `BDC` was
+/// handed a copy, against 0.38 s with the list borrowed.
+pub(crate) fn read_resolved<R>(
+    doc: &CosDocument,
+    object: &Object,
+    read: impl FnOnce(&Object) -> R,
+) -> R {
+    if object.as_objref().is_some() {
+        read(&doc.resolve(object))
+    } else {
+        read(object)
+    }
+}
+
 impl PageResources {
-    /// The property list this scope's `/Properties` names `name` (14.6.2),
-    /// resolved: what `/Tag /name BDC` refers to.
-    pub(crate) fn property_list(&self, name: &[u8]) -> Option<Dict> {
+    /// `read` of the property list this scope's `/Properties` names `name`
+    /// (14.6.2), resolved: what `/Tag /name BDC` refers to. `None` when there
+    /// is no such list or it is not a dictionary.
+    ///
+    /// Lent rather than returned, because neither the table nor the list is
+    /// copied to answer: each is the document's cached object when it is
+    /// indirect and the resource dictionary's own when it is direct (see
+    /// [`read_resolved`]). Every named `BDC` on every reading of a page asks,
+    /// so a copy here is the list's size times the page's sequences —
+    /// `tests/property_list_work.rs` counts it.
+    pub(crate) fn with_property_list<R>(
+        &self,
+        name: &[u8],
+        read: impl FnOnce(&Dict) -> R,
+    ) -> Option<R> {
         let resources = self.resources.as_ref()?;
-        let table = self
-            .doc
-            .resolve_key(resources, self.doc.intern(b"Properties"));
-        let entry = table.as_dict()?.get(self.doc.intern(name))?.clone();
-        self.doc.resolve(&entry).as_dict().cloned()
+        let table = resources.get(self.doc.intern(b"Properties"))?;
+        read_resolved(&self.doc, table, |table| {
+            let entry = table.as_dict()?.get(self.doc.intern(name))?;
+            read_resolved(&self.doc, entry, |list| list.as_dict().map(read))
+        })
     }
 
     /// The font resource names that could not be resolved.
@@ -1616,9 +1649,20 @@ impl FontSource for PageResources {
         // the seam — the interpreter never sees a dictionary — and it is the
         // reason the inline and named forms arrive at a device
         // indistinguishable from each other.
-        let list = self.property_list(name)?;
-        let dict = &list;
+        let props = self.with_property_list(name, |dict| self.marked_props(name, dict))?;
+        // An `/OC` group, a `/Type /Pagination` artifact list, a producer's
+        // private dictionary: every one of them reaches here and says nothing
+        // 14.6.2 or 14.9 defines. `None` rather than an empty struct, so the
+        // interpreter's own filter and this one cannot disagree.
+        (!props.is_empty()).then_some(props)
+    }
+}
 
+impl PageResources {
+    /// What the property list `dict`, named `name`, says to a device: the
+    /// body of [`FontSource::marked_content_properties`], run on the list
+    /// where it lies.
+    fn marked_props(&self, name: &[u8], dict: &Dict) -> MarkedProps {
         // 14.7.4.2: a non-negative integer. Read through `resolve_key`
         // because 7.3.10 lets any value in a *file* dictionary be indirect —
         // which is exactly the difference between this form and the inline
@@ -1636,7 +1680,7 @@ impl FontSource for PageResources {
                 .map(|s| decode_text_string(&s.bytes))
         };
 
-        let props = MarkedProps {
+        MarkedProps {
             mcid,
             actual_text: text(b"ActualText"),
             alt: text(b"Alt"),
@@ -1651,18 +1695,15 @@ impl FontSource for PageResources {
             // a named list with an `/MCAF` array associates files with an
             // `/AF` sequence. The name is handed on, not the files, which
             // `Page::marked_content_associated_files` reads in this scope.
-            associated_files: self
-                .doc
-                .resolve_key(dict, self.doc.intern(b"MCAF"))
-                .as_array()
-                .is_some()
+            // Asked whether it is an array where it lies, since a direct
+            // `/MCAF` is the list's own and as long as the file makes it.
+            associated_files: dict
+                .get(self.doc.intern(b"MCAF"))
+                .is_some_and(|mcaf| {
+                    read_resolved(&self.doc, mcaf, |mcaf| mcaf.as_array().is_some())
+                })
                 .then(|| name.to_vec()),
-        };
-        // An `/OC` group, a `/Type /Pagination` artifact list, a producer's
-        // private dictionary: every one of them reaches here and says nothing
-        // 14.6.2 or 14.9 defines. `None` rather than an empty struct, so the
-        // interpreter's own filter and this one cannot disagree.
-        (!props.is_empty()).then_some(props)
+        }
     }
 }
 

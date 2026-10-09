@@ -24,7 +24,7 @@ use tinker_pdf_content::{Device, FontSource, MarkedProps};
 use tinker_pdf_cos::{limits, CosDocument, Dict, ObjRef, Object};
 
 use crate::copies::{value, Copies};
-use crate::resources::PageResources;
+use crate::resources::{read_resolved, PageResources};
 use crate::{Document, FileRelationship, Page};
 
 /// How many bytes one [`Document::associated_files`] or
@@ -309,14 +309,22 @@ impl Device for MarkedFiles<'_> {
             self.found.dropped = self.found.dropped.saturating_add(1);
             return;
         }
-        let list = self.scope.property_list(property);
-        let mcaf = list
-            .as_ref()
-            .map(|list| self.doc.resolve_key(list, self.doc.intern(b"MCAF")));
-        let (files, incomplete) = match mcaf.as_deref().and_then(Object::as_array) {
-            Some(entries) => charged_files(self.doc, entries, &mut self.copies),
-            None => (Vec::new(), false),
-        };
+        // The list and its `/MCAF` read where they lie: a copy of either for
+        // each sequence would be the list's size, uncharged, times the page's
+        // sequences.
+        let doc = self.doc;
+        let copies = &mut self.copies;
+        let (files, incomplete) = self
+            .scope
+            .with_property_list(property, |list| {
+                let mcaf = list.get(doc.intern(b"MCAF"))?;
+                read_resolved(doc, mcaf, |mcaf| {
+                    mcaf.as_array()
+                        .map(|entries| charged_files(doc, entries, copies))
+                })
+            })
+            .flatten()
+            .unwrap_or_default();
         // 14.7.4.2's packing, `num << 16 | gen`, undone; `0` is the page.
         let form = (stream != 0).then(|| {
             ObjRef::new(

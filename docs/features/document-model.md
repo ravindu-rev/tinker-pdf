@@ -207,7 +207,13 @@ the content crate's `MarkedProps` carries the one thing the facade's resolver
 needs back: `associated_files`, the name of a named list holding `/MCAF`.
 The listing spends one `MAX_ASSOCIATED_FILE_BYTES` budget, sequences and
 files charged for their records, and counts the sequences past it in
-`MarkedContentFileList::dropped`. They are not the `/EmbeddedFiles` tree's
+`MarkedContentFileList::dropped`. A named property list — this listing's,
+and the one every named `BDC` asks for on every reading of a page — is read
+where it lies, the document's cached object or the resource dictionary's
+own, and never copied per sequence: while it was, a review measured 2 000
+sequences naming one list beside a 1 048 576-entry array at 150 s of text
+extraction, against 0.38 s borrowed (`tests/property_list_work.rs` counts
+the bytes). They are not the `/EmbeddedFiles` tree's
 attachments, which `attachments()` lists: an associated file belongs to an
 object, and the errata say filing it in the tree is not required. The
 builder writes them — `DocumentBuilder::associate_file`,
