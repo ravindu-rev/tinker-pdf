@@ -921,6 +921,28 @@ pub enum TextTransform {
     Lowercase,
 }
 
+/// `color-scheme`, `css-color-adjust-1` §2.1, as far as a printed page reads
+/// it.
+///
+/// A page is printed in the **light** scheme: paper is the light canvas, and
+/// print media's `prefers-color-scheme` is `light` (`mediaqueries-5` §12.5).
+/// So `normal`, and every list that names `light` — `light dark`, which is
+/// what pandoc writes on every book's `:root` — is one answer here: the used
+/// scheme is light, which is the one this build draws everywhere, and the
+/// property draws nothing differently. A list of nothing but `<custom-ident>`s
+/// names no scheme this build supports and is `normal` by §2.1. A list that
+/// names `dark` and not `light` asks for the dark scheme, whose canvas and
+/// system colours this build does not have, and is refused by value rather
+/// than drawn light.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorScheme {
+    /// `normal`, or a list naming no scheme this build knows.
+    Normal,
+    /// A list naming `light`, with or without `dark`, `only` and custom
+    /// identifiers: the scheme a printed page uses.
+    Light,
+}
+
 /// A `url()` as written, and the stylesheet it was written in.
 ///
 /// **Unresolved, and that is ruling 8**: a relative URL in a stylesheet is
@@ -1524,6 +1546,8 @@ pub enum Property {
     TextDecoration(TextDecoration),
     /// `text-transform`, `css-text-3` §2.1.
     TextTransform(TextTransform),
+    /// `color-scheme`, `css-color-adjust-1` §2.1. See [`ColorScheme`].
+    ColorScheme(ColorScheme),
     /// `text-shadow`, `css-text-decor-3` §4: the list, first on top. Empty
     /// for `none`.
     TextShadow(Vec<SpecifiedShadow>),
@@ -1704,6 +1728,7 @@ impl Property {
             Property::TextShadow(_) => "text-shadow",
             Property::BoxShadow(_) => "box-shadow",
             Property::TextTransform(_) => "text-transform",
+            Property::ColorScheme(_) => "color-scheme",
             Property::WhiteSpace(_) => "white-space",
             Property::ListStyleType(_) => "list-style-type",
             Property::ListStylePosition(_) => "list-style-position",
@@ -1837,6 +1862,10 @@ impl Property {
             // lets `h1 { text-transform: uppercase }` reach the text inside an
             // `<em>` in the heading.
             | Property::TextTransform(_)
+            // `css-color-adjust-1` §2.1: *inherited: yes*, which is how
+            // pandoc's one `:root { color-scheme: light dark }` reaches every
+            // element of the book.
+            | Property::ColorScheme(_)
             | Property::WhiteSpace(_)
             | Property::ListStyleType(_)
             | Property::ListStylePosition(_)
@@ -2106,7 +2135,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "caption-side",
     "clip",
     "clip-path",
-    "color-scheme",
     "cursor",
     "direction",
     "empty-cells",
@@ -3053,6 +3081,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "break-inside",
     "clear",
     "color",
+    "color-scheme",
     "column-count",
     "column-fill",
     "column-gap",
@@ -3542,6 +3571,7 @@ fn implemented(
         }
         "transform" => transform_list(significant),
         "transform-origin" => transform_origin(significant),
+        "color-scheme" => color_scheme(significant),
         // `css-color-4` §15.1: `<alpha-value>`, a number or a percentage.
         "opacity" => match (single, one) {
             (true, Some(ComponentValue::Token(Token::Number { value, .. }))) => {
@@ -4076,6 +4106,47 @@ fn keyword(
         }
         Some(_) if single => Implemented::BadValue,
         _ => Implemented::Malformed,
+    }
+}
+
+/// `color-scheme`, `css-color-adjust-1` §2.1:
+/// `normal | [ light | dark | <custom-ident> ]+ && only?`.
+///
+/// `only` once, at either end; `normal` alone; and a `<custom-ident>` is any
+/// identifier but the CSS-wide keywords and `default` (`css-values-4` §4.2),
+/// which are outside the grammar. See [`ColorScheme`] for what is refused by
+/// value and why.
+fn color_scheme(significant: &[&ComponentValue]) -> Implemented {
+    let mut words: Vec<String> = Vec::with_capacity(significant.len());
+    for value in significant {
+        match value.token() {
+            Some(Token::Ident(word)) => words.push(word.to_ascii_lowercase()),
+            _ => return Implemented::Malformed,
+        }
+    }
+    if words.len() == 1 && words[0] == "normal" {
+        return Implemented::Known(vec![Property::ColorScheme(ColorScheme::Normal)]);
+    }
+    let only = words.iter().filter(|w| *w == "only").count();
+    let at_an_end =
+        words.first().is_some_and(|w| w == "only") || words.last().is_some_and(|w| w == "only");
+    if only > 1 || (only == 1 && !at_an_end) || only == words.len() {
+        return Implemented::Malformed;
+    }
+    let outside = |w: &str| {
+        matches!(
+            w,
+            "normal" | "initial" | "inherit" | "unset" | "revert" | "revert-layer" | "default"
+        )
+    };
+    if words.iter().any(|w| outside(w)) {
+        return Implemented::Malformed;
+    }
+    let names = |scheme: &str| words.iter().any(|w| w == scheme);
+    match (names("light"), names("dark")) {
+        (true, _) => Implemented::Known(vec![Property::ColorScheme(ColorScheme::Light)]),
+        (false, true) => Implemented::BadValue,
+        (false, false) => Implemented::Known(vec![Property::ColorScheme(ColorScheme::Normal)]),
     }
 }
 

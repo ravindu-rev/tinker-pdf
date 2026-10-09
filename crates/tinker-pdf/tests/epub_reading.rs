@@ -858,9 +858,12 @@ fn the_unsupported_census_is_the_one_the_record_states() {
     // So "no real book is fully implemented" was a claim about six books that
     // happened to share a shape. What the guard was for survives as a total: a
     // build that measured nothing could still not pass by committing an empty
-    // file.
+    // file. **The floor is the record's own size and moves with it**: it was
+    // twenty-one rows until `color-scheme` left in October 2026's eighth wave
+    // and took its four rows with it, and a property leaving is a re-measure
+    // of this number exactly as it is of the file.
     assert!(
-        measured.len() > 20,
+        measured.len() >= 17,
         "the census collapsed to {} rows, which is a build that stopped \
          counting rather than a corpus that stopped asking",
         measured.len()

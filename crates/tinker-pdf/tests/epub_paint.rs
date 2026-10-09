@@ -1140,3 +1140,44 @@ fn a_three_d_transform_and_a_turned_link_are_counted() {
     );
     assert_eq!(counted(&linked, "transform"), Some(1));
 }
+
+// ---- color-scheme ---------------------------------------------------------------
+
+/// **`color-scheme` names the scheme a printed page is already in, and draws
+/// nothing differently** (`css-color-adjust-1` §2.1).
+///
+/// Paper is the light canvas and print media's `prefers-color-scheme` is
+/// `light`, so pandoc's `:root { color-scheme: light dark }` chooses the
+/// scheme this build draws: the page is the same content stream, operator for
+/// operator, as the page without it, and nothing is counted. The claim's
+/// other side is the value that would make it false — `dark`, a list without
+/// `light`, asks for the dark canvas and system colours this build does not
+/// have, so it is refused by value and counted by element rather than drawn
+/// light and called honoured.
+#[test]
+fn color_scheme_is_the_light_scheme_a_page_is_printed_in() {
+    let body = "<p>Ink on <em>paper</em>.</p>";
+    let plain = open("", body);
+    let light = open(":root { color-scheme: light dark }", body);
+    assert_eq!(
+        tokens(&light),
+        tokens(&plain),
+        "`color-scheme: light dark` changed what the page draws"
+    );
+    assert_eq!(counted(&light, "color-scheme"), None);
+
+    let dark = open(":root { color-scheme: dark }", body);
+    assert_eq!(
+        tokens(&dark),
+        tokens(&plain),
+        "the refused value still draws the page in the light scheme"
+    );
+    // One element: the root the rule matched. A refused declaration is
+    // counted where it was written, not where it would have been inherited.
+    assert_eq!(
+        counted(&dark, "color-scheme"),
+        Some(1),
+        "`color-scheme: dark` was not counted once: {:?}",
+        warnings(&dark)
+    );
+}

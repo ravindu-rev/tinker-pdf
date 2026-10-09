@@ -190,6 +190,10 @@ pub struct ComputedStyle {
     pub box_shadow: Vec<Shadow>,
     /// `text-transform`, `css-text-3` §2.1.
     pub text_transform: TextTransform,
+    /// `color-scheme`, `css-color-adjust-1` §2.1: what a printed page reads
+    /// of it, which is whether the scheme is the light one (see
+    /// [`ColorScheme`]).
+    pub color_scheme: ColorScheme,
     /// `display`
     pub display: Display,
     /// `float`
@@ -349,6 +353,7 @@ impl ComputedStyle {
             text_shadow: Vec::new(),
             box_shadow: Vec::new(),
             text_transform: TextTransform::None,
+            color_scheme: ColorScheme::Normal,
             display: Display::Inline,
             float: Float::None,
             clear: Clear::None,
@@ -447,6 +452,7 @@ impl ComputedStyle {
         style.text_indent = parent.text_indent;
         style.white_space = parent.white_space;
         style.text_transform = parent.text_transform;
+        style.color_scheme = parent.color_scheme;
         style.list_style_type = parent.list_style_type;
         style.list_style_position = parent.list_style_position;
         style.quotes = parent.quotes.clone();
@@ -532,6 +538,7 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
             style.box_shadow = computed_shadows(list, font_size, root_font_size);
         }
         Property::TextTransform(value) => style.text_transform = *value,
+        Property::ColorScheme(value) => style.color_scheme = *value,
         Property::WhiteSpace(value) => style.white_space = *value,
         Property::ListStyleType(value) => style.list_style_type = *value,
         Property::ListStylePosition(value) => style.list_style_position = *value,
@@ -2076,6 +2083,7 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
         Longhand::TextShadow => into.text_shadow = from.text_shadow.clone(),
         Longhand::BoxShadow => into.box_shadow = from.box_shadow.clone(),
         Longhand::TextTransform => into.text_transform = from.text_transform,
+        Longhand::ColorScheme => into.color_scheme = from.color_scheme,
         Longhand::WhiteSpace => into.white_space = from.white_space,
         Longhand::ListStyleType => into.list_style_type = from.list_style_type,
         Longhand::ListStylePosition => into.list_style_position = from.list_style_position,

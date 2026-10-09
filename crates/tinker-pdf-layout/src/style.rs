@@ -299,6 +299,13 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         text_shadow: _,
         box_shadow,
         text_transform,
+        // `css-color-adjust-1`'s `color-scheme` chooses a scheme for the
+        // canvas and the system colours, and a printed page's is the light one
+        // (`mediaqueries-5` §12.5): every value that reaches a computed style
+        // is a scheme this build already draws, the dark-only lists having
+        // been refused by value. It moves no box and paints nothing
+        // differently, which is the whole of what it means on paper.
+        color_scheme: _,
         display,
         float,
         clear,

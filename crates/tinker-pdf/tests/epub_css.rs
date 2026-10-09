@@ -247,7 +247,14 @@ fn the_unsupported_census_over_the_committed_corpus() {
             "border-bottom",
             "border-top",
             "color",
-            "color-scheme",
+            // **`color-scheme` used to be here and left in October 2026's
+            // eighth wave**: pandoc's `:root { color-scheme: light dark }`, on
+            // five, five, four and five elements of the four pandoc books, is
+            // read now, and on paper it is the light scheme this build draws
+            // (`css-color-adjust-1` §2.1); a list naming `dark` and not
+            // `light` is still refused by value. The `light-dark()` above is
+            // still a value gap, though the used scheme it would choose by is
+            // now known to be light.
             // **`display` used to be here and milestone 11 removed it**, and
             // the way it left is the census earning its keep. Its whole count
             // over this corpus was calibre's six `display: table*` values, all

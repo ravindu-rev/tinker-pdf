@@ -2283,3 +2283,58 @@ fn a_hostile_supports_prelude_is_bounded() {
     );
     assert!(sheet(&wide).rules.is_empty(), "every term is false");
 }
+
+/// **`color-scheme` is read, and a printed page's scheme is the light one**
+/// (`css-color-adjust-1` §2.1).
+///
+/// `normal`, and every list naming `light` whatever else it names, is the
+/// scheme a page is printed in, so each is a value this build draws. A list
+/// naming `dark` and not `light` asks for a scheme this build does not have and
+/// is refused by value; a list of custom identifiers names no scheme at all
+/// and is `normal`. `only` twice, `only` alone or in the middle, and `normal`
+/// beside anything are outside the grammar.
+#[test]
+fn color_scheme_reads_the_light_scheme_and_refuses_a_dark_only_one_by_value() {
+    use crate::property::ColorScheme;
+    for (value, expected) in [
+        ("normal", ColorScheme::Normal),
+        ("light dark", ColorScheme::Light),
+        ("dark light", ColorScheme::Light),
+        ("only light", ColorScheme::Light),
+        ("light only", ColorScheme::Light),
+        ("LIGHT", ColorScheme::Light),
+        ("sepia light", ColorScheme::Light),
+        ("sepia", ColorScheme::Normal),
+    ] {
+        assert_eq!(
+            known(&format!(":root {{ color-scheme: {value} }}")),
+            vec![Property::ColorScheme(expected)],
+            "color-scheme: {value}"
+        );
+    }
+    for value in ["dark", "only dark", "dark sepia"] {
+        assert_eq!(
+            declarations(&format!(":root {{ color-scheme: {value} }}"))[0].declaration,
+            Declaration::Unsupported {
+                property: "color-scheme",
+                value: value.to_owned(),
+            },
+            "color-scheme: {value}"
+        );
+    }
+    for value in [
+        "only",
+        "only only light",
+        "light only dark",
+        "normal light",
+        "default",
+        "light 3",
+        "\"light\"",
+    ] {
+        let parsed = sheet(&format!(":root {{ color-scheme: {value} }}"));
+        assert!(
+            parsed.rules.iter().all(|rule| rule.declarations.is_empty()),
+            "color-scheme: {value} is not CSS and is discarded"
+        );
+    }
+}
