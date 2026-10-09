@@ -460,9 +460,11 @@ use std::sync::{Arc, OnceLock};
 
 use tinker_pdf_content::{Token, Tokenizer};
 use tinker_pdf_cos::{
-    font as cos_font, CosDocument, Dict, DocumentEditor, Font, Name, ObjRef, Object, Rect, Resolve,
-    StreamData,
+    font as cos_font, Dict, DocumentEditor, Font, Name, ObjRef, Object, Rect, Resolve, StreamData,
 };
+// Fonts are read through the editor now; the tests still open documents.
+#[cfg(test)]
+use tinker_pdf_cos::CosDocument;
 
 /// What a redaction covers and how it is marked.
 #[derive(Clone, Copy, Debug)]
@@ -969,7 +971,7 @@ pub fn apply(
         existing,
         resources,
     } = EditorPage::read(editor, reference)?;
-    let fonts = fonts_in(editor.document(), &resources);
+    let fonts = fonts_in(editor, &resources);
 
     let mut measured = Vec::new();
     let (data, mut report, uses) = cut_stream(
@@ -1285,7 +1287,7 @@ impl GlyphSpace {
     /// too: its Type 3 path (`PageResources::type3_glyph`) needs six numbers,
     /// and a font without them is advanced by `w0 / 1000` like any other — so
     /// reading it that way measures the run where it is drawn.
-    fn read(doc: &CosDocument, font: &Dict) -> GlyphSpace {
+    fn read<R: Resolve + ?Sized>(doc: &R, font: &Dict) -> GlyphSpace {
         let first = |key: &[u8], count: usize| -> Option<Vec<f64>> {
             let value = doc.resolve_key(font, doc.intern(key));
             let array = value.as_array()?;
@@ -1321,12 +1323,24 @@ impl GlyphSpace {
 /// Re-keyed by the bytes rather than by an interned [`Name`] because the
 /// rewrite matches against what the `Tf` operator literally says, and it has
 /// no document to intern with.
-fn fonts_in(doc: &CosDocument, resources: &Dict) -> HashMap<Vec<u8>, Arc<RunFont>> {
-    let mut spaces = glyph_spaces(doc, resources);
-    cos_font::from_resources(doc, resources)
+///
+/// **Read through the editor**, every object a font reaches — its
+/// dictionary, descriptor, widths, encoding, CMaps, a Type 3 face's
+/// `/CharProcs` and `/Resources` — as the pages, resources and XObjects
+/// around it already were ([`EditorPage`]). Until October 2026 fonts alone
+/// were read from the file (`cos_font::from_resources` took a
+/// `CosDocument`), so a run in a font the editor allocated — a page
+/// [`DocumentEditor::import_page`] copied in, or a font object a caller
+/// wrote — had no metrics and was left whole as
+/// [`RedactionWarning::UnknownFont`]. `cos_font::from_resources_in` reads
+/// through any [`Resolve`], and the editor is one: its names are the
+/// file's, so nothing here re-interns.
+fn fonts_in(editor: &DocumentEditor, resources: &Dict) -> HashMap<Vec<u8>, Arc<RunFont>> {
+    let mut spaces = glyph_spaces(editor, resources);
+    cos_font::from_resources_in(editor, resources)
         .into_iter()
         .filter_map(|(name, font)| {
-            let bytes = doc.name_bytes(name)?.to_vec();
+            let bytes = Resolve::name_bytes(editor, name)?.to_vec();
             let (glyph_space, procedures, own) = if font.kind() == cos_font::FontKind::Type3 {
                 let (space, procedures, own) =
                     spaces
@@ -1358,8 +1372,8 @@ fn fonts_in(doc: &CosDocument, resources: &Dict) -> HashMap<Vec<u8>, Arc<RunFont
 /// `/FontMatrix`, `/FontBBox` nor `/CharProcs`: this module is the only
 /// caller that builds a glyph box from them. Only a Type 3 font's answer is
 /// ever used.
-fn glyph_spaces(
-    doc: &CosDocument,
+fn glyph_spaces<R: Resolve + ?Sized>(
+    doc: &R,
     resources: &Dict,
 ) -> HashMap<Name, (GlyphSpace, GlyphProcedures, Option<Dict>)> {
     let mut out = HashMap::new();
@@ -1397,7 +1411,7 @@ fn glyph_spaces(
 /// `/CharProcs` holds the stream under that name — there is no built-in
 /// encoding for a font whose glyphs the document invented. At most 256
 /// codes, one read each.
-fn carrying_procedures(doc: &CosDocument, font: &Dict) -> GlyphProcedures {
+fn carrying_procedures<R: Resolve + ?Sized>(doc: &R, font: &Dict) -> GlyphProcedures {
     let mut out = HashMap::new();
     let subtype = font
         .get_name(doc.intern(b"Subtype"))
@@ -1832,7 +1846,7 @@ impl Walk {
             .as_dict()
             .cloned()
             .unwrap_or_else(|| scope.clone());
-        let fonts = fonts_in(editor.document(), &inner_resources);
+        let fonts = fonts_in(editor, &inner_resources);
         let (data, pass, inner_uses) = cut_stream(
             editor,
             &inner_resources,
@@ -2433,7 +2447,7 @@ fn union(
         let Some(node) = walk.nodes.get(n) else {
             continue;
         };
-        let fonts = fonts_in(editor.document(), &node.resources);
+        let fonts = fonts_in(editor, &node.resources);
         let (next, pass, _) = cut_stream(
             editor,
             &node.resources,
@@ -2626,7 +2640,7 @@ fn procedure_draws_under(
     let own_fonts = glyph
         .font
         .own_fonts
-        .get_or_init(|| fonts_in(measure.editor.document(), own));
+        .get_or_init(|| fonts_in(measure.editor, own));
 
     let mut scopes = measure.scopes.clone();
     scopes.push(own);
@@ -2738,7 +2752,7 @@ fn draws_under(
                 let placed = form_transform(measure.editor, &dict, used.ctm);
                 let drawn = match &own {
                     Some(resources) => {
-                        let fonts = fonts_in(measure.editor.document(), resources);
+                        let fonts = fonts_in(measure.editor, resources);
                         let inner = Measure {
                             editor: measure.editor,
                             scopes: vec![resources],
@@ -6064,6 +6078,111 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
         );
         assert_eq!(report, RedactionReport::default());
         assert!(out.contains(&b'q'), "the operators survive");
+    }
+
+    /// The page `import_page` copied in, its font numbered past everything
+    /// the file has: the font object is the editor's alone.
+    ///
+    /// The font is no standard face, so its only metrics are its `/Widths`,
+    /// and they are an object of their own: a reader that resolved the font
+    /// dictionary through the editor and what it reaches through the file
+    /// would place every glyph at the run's start, and cut nothing.
+    fn editor_with_an_imported_page() -> (DocumentEditor, ObjRef) {
+        let content = "BT /F9 12 Tf 10 50 Td (PUBLIC SECRET) Tj ET";
+        let widths = vec!["1000"; 59].join(" ");
+        let source = format!(
+            "%PDF-1.7\n\
+             1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+             2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+             3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 100]\n\
+             /Resources << /Font << /F9 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+             4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+             5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Monospaced\n\
+             /FirstChar 32 /LastChar 90 /Widths 6 0 R >>\nendobj\n\
+             6 0 obj\n[{widths}]\nendobj\n\
+             trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
+            content.len() + 1
+        );
+        let source = CosDocument::open(source.into_bytes()).expect("it opens");
+        let mut editor = DocumentEditor::new(document("PUBLIC"));
+        editor
+            .import_page(&source, 0, 1)
+            .expect("the page is imported");
+        let page = editor.page_refs()[1];
+        let page = editor.get(page).expect("the imported page");
+        let resources =
+            Resolve::resolve_key(&editor, page.as_dict().expect("a page"), Name::RESOURCES);
+        let fonts = Resolve::resolve_key(
+            &editor,
+            resources.as_dict().expect("resources"),
+            editor.intern(b"Font"),
+        );
+        let font = fonts
+            .as_dict()
+            .and_then(|fonts| fonts.get_ref(editor.intern(b"F9")))
+            .expect("the font is an object of its own");
+        (editor, font)
+    }
+
+    /// Clause (c) of the ROADMAP's Editing row: a run in a font only the
+    /// editor holds is measured through the editor and cut, where until
+    /// October 2026 it was left whole as `UnknownFont` because fonts alone
+    /// were read from the file.
+    #[test]
+    fn a_run_in_a_font_only_the_editor_holds_is_cut() {
+        let (mut editor, font) = editor_with_an_imported_page();
+        assert!(
+            editor
+                .document()
+                .get(font)
+                .map_or(true, |object| object.is_null()),
+            "the file does not have the font, or the test proves nothing"
+        );
+        // At its own widths, one em each, `SECRET` stands from x = 94 to 166
+        // and `PUBLIC` ends at 82; at any other a reader would substitute,
+        // the word starts well left of this band and part of it survives.
+        let band = Redaction {
+            area: Rect {
+                x0: 92.0,
+                y0: 45.0,
+                x1: 400.0,
+                y1: 70.0,
+            },
+            mark: false,
+        };
+        let report = apply(&mut editor, 1, &[band]).expect("the page exists");
+        assert!(report.glyphs > 0, "glyphs were removed");
+        assert!(
+            report.warnings.is_empty(),
+            "nothing left unmeasured: {:?}",
+            report.warnings
+        );
+        let bytes = editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        });
+        let reopened = CosDocument::open(bytes).expect("it reopens");
+        let streams = all_streams(&reopened);
+        assert!(
+            !streams.contains("SEC"),
+            "no letter of it survives: {streams}"
+        );
+        assert_eq!(streams.matches("PUBLIC").count(), 2, "{streams}");
+    }
+
+    /// The same run through the file's own font reader names the font it
+    /// cannot find: the difference the editor's view makes is the whole of
+    /// clause (c), so it is pinned from both sides.
+    #[test]
+    fn the_file_alone_does_not_have_the_imported_font() {
+        let (editor, _) = editor_with_an_imported_page();
+        let page = editor.page_refs()[1];
+        let page = editor.get(page).expect("the imported page");
+        let resources =
+            Resolve::resolve_key(&editor, page.as_dict().expect("a page"), Name::RESOURCES);
+        let resources = resources.as_dict().expect("resources");
+        assert!(cos_font::from_resources(editor.document(), resources).is_empty());
+        assert_eq!(fonts_in(&editor, resources).len(), 1);
     }
 }
 
