@@ -1705,7 +1705,12 @@ fn drawn_lines(attributes: &str, body: &str) -> Vec<Vec<(String, f64)>> {
     let program = bidi_face().build();
     let book = faces_book_with(&[("Fixture Bidi", &program)], 24, attributes, body);
     let doc = Document::open(book).expect("a book");
-    let page = doc.page(0).expect("a page");
+    page_lines(&doc, 0)
+}
+
+/// [`drawn_lines`] of page `index` of a document already open.
+fn page_lines(doc: &Document, index: u32) -> Vec<Vec<(String, f64)>> {
+    let page = doc.page(index).expect("a page");
     let text = page.text_with(&TextOptions {
         content_order: true,
     });
@@ -2089,5 +2094,68 @@ fn dir_auto_is_one_direction_from_the_content_and_is_inherited() {
             ]
         ),
         "the `pre`'s second paragraph is not its own, right to left: {pre:?}"
+    );
+}
+
+/// **A line's levels are its paragraph's, so where a line wraps does not
+/// change the order inside it** (UAX #9: X1 to I2 over the paragraph, L1 and
+/// L2 per line; review of lane 8C).
+///
+/// `abc (de` in a right-to-left paragraph, in a face covering ` ()abcde`.
+/// Every letter is `L`, raised to 2; the space and `(` lie between `c` and
+/// `d`, both `L`, so N1 makes them `L` too, and the whole text is one
+/// level-2 run drawn as written. Unwrapped it ends at the right edge with
+/// `(` just before `d`. At 48 px wide — four glyphs — it breaks before `(`,
+/// and the second line is `(de`: drawn `(`, `d`, `e` from 27 pt before the
+/// box's right edge at 72. Each line used to be resolved alone, `(`
+/// between the line's start (`sos`, R) and `d`, which N2 puts at level 1,
+/// and the line was drawn `de(`.
+///
+/// And the same across a page: a page one line high puts `(de` at the top
+/// of the second page, ordered by the `c` that ended the first.
+#[test]
+fn a_wrapped_line_is_ordered_by_its_paragraphs_levels() {
+    let program = Face::new("Fixture Bidi", " ()abcde").build();
+    let open = |attributes: &str, options: &OpenOptions| {
+        let book = faces_book_with(&[("Fixture Bidi", &program)], 24, attributes, "abc (de");
+        Document::open_with(book, options).expect("a book")
+    };
+    let whole = page_lines(&open(" dir=\"rtl\"", &OpenOptions::default()), 0);
+    assert_eq!(whole.len(), 1, "{whole:?}");
+    assert!(
+        at(
+            &whole[0],
+            &[
+                ("a", RIGHT - 7.0 * GLYPH),
+                ("b", RIGHT - 6.0 * GLYPH),
+                ("c", RIGHT - 5.0 * GLYPH),
+                ("(", RIGHT - 3.0 * GLYPH),
+                ("d", RIGHT - 2.0 * GLYPH),
+                ("e", RIGHT - GLYPH)
+            ]
+        ),
+        "the unwrapped line is not `abc (de` against the right edge: {whole:?}"
+    );
+
+    let narrow = " dir=\"rtl\" style=\"width: 48px\"";
+    let edge = LEFT + 36.0;
+    let expected = [
+        ("(", edge - 3.0 * GLYPH),
+        ("d", edge - 2.0 * GLYPH),
+        ("e", edge - GLYPH),
+    ];
+    let wrapped = page_lines(&open(narrow, &OpenOptions::default()), 0);
+    assert_eq!(wrapped.len(), 2, "{wrapped:?}");
+    assert!(
+        at(&wrapped[1], &expected),
+        "the wrapped second line is not `(de`: {wrapped:?}"
+    );
+
+    let paged = open(narrow, &OpenOptions::at_page(432.0, 100.0));
+    assert!(paged.page_count() >= 2, "the paragraph fitted one page");
+    let second = page_lines(&paged, 1);
+    assert!(
+        second.first().is_some_and(|line| at(line, &expected)),
+        "the line at the top of the next page is not `(de`: {second:?}"
     );
 }

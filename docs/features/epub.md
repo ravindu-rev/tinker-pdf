@@ -148,7 +148,13 @@ runs. A run that mixes
 directions is cut at its line's level boundaries first
 (`paint::split_at_levels`), each piece taking its share of the run's
 measured width, so `a ب<span>ح</span>م b` draws its Arabic word last letter
-first and joined across both span boundaries. **`hyphens`** (`css-text-3`
+first and joined across both span boundaries. The levels are the
+**paragraph's**: UAX #9's X1 to I2 run once over every line of the bidi
+paragraph `flow.rs` set the runs in (`TextRun::paragraph`), across pages,
+and only L1 and L2 per line, so where a line wraps does not change the order
+inside it — `abc (de` in a right-to-left paragraph draws `(de` on its second
+line, as it does unwrapped. A line whose runs are not all of one paragraph
+is resolved by itself. **`hyphens`** (`css-text-3`
 §5.4) is read at `none` and `manual`, its initial value: a soft hyphen
 (U+00AD) stays in a run's text, since the text is the book's, measures
 nothing and is not drawn where no line breaks at it; a line that breaks at

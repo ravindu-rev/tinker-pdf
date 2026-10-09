@@ -4019,11 +4019,13 @@ pub fn hyphenate(runs: &mut [TextRun]) {
 /// A run in one direction already drew its own glyphs in the right order; the
 /// runs were not in it.
 ///
-/// So this resolves the levels of the line's whole text, gives each run the
-/// level of its strong characters (or of all of them, for a run of neutrals),
-/// orders the runs by L2 and lays them out again from the line's left edge in
-/// that order, each at its own measured width. The line's extent does not
-/// change, so its alignment does not either; only which run sits where.
+/// So this gives each run of the line a level — the one [`split_at_levels`]
+/// cut it at, its paragraph's; for a line nobody cut, the level of its strong
+/// characters (or of all of them, for a run of neutrals) with the line's text
+/// resolved by itself — orders the runs by L2 and lays them out again from
+/// the line's left edge in that order, each at its own measured width. The
+/// line's extent does not change, so its alignment does not either; only
+/// which run sits where.
 ///
 /// # What a line is, here
 ///
@@ -4062,8 +4064,9 @@ pub fn visual_lines(runs: &mut [TextRun]) -> usize {
     moved
 }
 
-/// Cuts every run that crosses one of its **line's** UAX #9 level boundaries
-/// into one run per level, before [`visual_lines`] orders the line.
+/// Cuts every run that crosses one of its line's UAX #9 level boundaries
+/// into one run per level, before [`visual_lines`] orders the line — every
+/// page of a chapter at once, because the levels are the **paragraph's**.
 ///
 /// # Why the run cannot be the unit L2 moves
 ///
@@ -4079,12 +4082,34 @@ pub fn visual_lines(runs: &mut [TextRun]) -> usize {
 /// line's: the run `a ب` resolved alone puts `ب` at level 1 and has no idea
 /// that the `ح` it joins is in the next run.
 ///
-/// So the line's whole text is resolved, each run is cut wherever the level
+/// So the line's text is resolved, each run is cut wherever the level
 /// changes inside it — `a ` and `ب`, `م` and ` b` — and every piece is at one
 /// level, which is a unit L2 can place. The pieces keep the run's style,
 /// anchor and document order, so drawing, links, tags and text extraction see
 /// two runs of one element where there was one; and shaping across them is
 /// [`Fonts::set_contexts`]'s, so `ب`, `ح` and `م` still join.
+///
+/// # The levels are the paragraph's, and only L1 and L2 the line's
+///
+/// UAX #9 resolves a paragraph — X1 to I2 — and breaks it into lines after:
+/// a weak or neutral character at a line's start or end takes its level from
+/// the strong characters either side of it **in the paragraph**, which may be
+/// on the line before or after. Each line used to be resolved as a paragraph
+/// of its own, its start and end against `sos` and `eos`, so where a line
+/// wrapped changed the order inside it: `abc (de` in a right-to-left
+/// paragraph draws `(de` unwrapped — `(` between `c` and `d`, both `L`, is
+/// `L` by N1 — and drew `de(` when the line broke before `(`, which N2 then
+/// put at the paragraph's level (review of lane 8C).
+///
+/// So the chapter's runs are gathered by the paragraph `flow.rs` set them in
+/// ([`TextRun::paragraph`]), across pages, and each paragraph is resolved
+/// once over its whole text ([`paragraphs`]); a line then takes its
+/// characters' levels from [`Paragraph::line`], which applies L1 — trailing
+/// whitespace back to the paragraph's level — at that line's end. Two limits
+/// stand: the white space a line's end hangs is in no run, so it is not in
+/// the resolved text either — a neutral, which L1 resets anyway — and a line
+/// whose runs are not all of one paragraph (an inline block's own text
+/// touching the line it sits in) is resolved by itself, as before.
 ///
 /// # The pieces' widths are the run's, partitioned
 ///
@@ -4103,19 +4128,134 @@ pub fn visual_lines(runs: &mut [TextRun]) -> usize {
 ///
 /// A line with no right-to-left character is not touched. Returns how many
 /// runs were cut.
-pub fn split_at_levels(runs: &mut Vec<TextRun>, metrics: &BookMetrics<'_>) -> usize {
-    let taken = std::mem::take(runs);
-    runs.reserve(taken.len());
+pub fn split_at_levels(pages: &mut [LayoutPage], metrics: &BookMetrics<'_>) -> usize {
+    let (resolved, places) = paragraphs(pages);
     let mut cut = 0usize;
-    let mut line: Vec<TextRun> = Vec::new();
-    for run in taken {
-        if line.last().is_some_and(|last| !same_line(last, &run)) {
-            cut += split_line(&mut line, metrics, runs);
+    for (page, places) in pages.iter_mut().zip(places) {
+        let taken = std::mem::take(&mut page.runs);
+        page.runs.reserve(taken.len());
+        let mut line: Vec<TextRun> = Vec::new();
+        let mut at: Vec<Place> = Vec::new();
+        // Padded rather than zipped short: a run with no place is resolved by
+        // its line alone, and a run the zip dropped would be text lost.
+        let places = places.into_iter().chain(std::iter::repeat(None));
+        for (run, place) in taken.into_iter().zip(places) {
+            if line.last().is_some_and(|last| !same_line(last, &run)) {
+                cut += split_line(&mut line, &at, &resolved, metrics, &mut page.runs);
+                at.clear();
+            }
+            line.push(run);
+            at.push(place);
         }
-        line.push(run);
+        cut += split_line(&mut line, &at, &resolved, metrics, &mut page.runs);
     }
-    cut += split_line(&mut line, metrics, runs);
     cut
+}
+
+/// Where a run's characters are in its bidi paragraph: the paragraph's
+/// number ([`TextRun::paragraph`]) and the index, in [`paragraphs`]'s text
+/// for it, of the run's first character. `None` for a generated run or one
+/// set outside every paragraph.
+type Place = Option<(usize, usize)>;
+
+/// Every bidi paragraph of a chapter's pages that UAX #9 has anything to do
+/// with — a right-to-left character, embedding or base in it — resolved once,
+/// X1 to I2, over its whole text; and, per page and run, where the run's
+/// characters are in it.
+///
+/// A paragraph's text is its runs' text in the order `flow.rs` set them,
+/// which is logical order — [`visual_lines`] has not moved anything yet —
+/// with each run's embeddings written round it as formatting characters, as
+/// [`line_levels`] writes a line's: the ones a run shares with the run
+/// before it left open, across a line's end and a page's as well. Generated
+/// runs stay out of it, as they stay out of a line's order.
+fn paragraphs(pages: &[LayoutPage]) -> (BTreeMap<usize, Paragraph>, Vec<Vec<Place>>) {
+    struct Gathered {
+        text: String,
+        count: usize,
+        open: Vec<Embedding>,
+        base: Option<bool>,
+        right_to_left: bool,
+    }
+    let mut gathered: BTreeMap<usize, Gathered> = BTreeMap::new();
+    let mut places: Vec<Vec<Place>> = Vec::with_capacity(pages.len());
+    for page in pages {
+        let mut here: Vec<Place> = Vec::with_capacity(page.runs.len());
+        for run in &page.runs {
+            if run.generated || run.paragraph == 0 {
+                here.push(None);
+                continue;
+            }
+            let paragraph = gathered.entry(run.paragraph).or_insert_with(|| Gathered {
+                text: String::new(),
+                count: 0,
+                open: Vec::new(),
+                base: run.paragraph_rtl,
+                right_to_left: run.paragraph_rtl == Some(true),
+            });
+            let shared = paragraph
+                .open
+                .iter()
+                .zip(&run.embeddings)
+                .take_while(|(a, b)| a == b)
+                .count();
+            while paragraph.open.len() > shared {
+                if let Some(e) = paragraph.open.pop() {
+                    paragraph.text.push(closer(&e));
+                    paragraph.count += 1;
+                }
+            }
+            for e in run.embeddings.iter().skip(shared) {
+                paragraph.text.push(opener(e));
+                paragraph.count += 1;
+                paragraph.open.push(*e);
+                paragraph.right_to_left |= e.rtl && e.kind != EmbeddingKind::FirstStrong;
+            }
+            here.push(Some((run.paragraph, paragraph.count)));
+            for c in run.text.chars() {
+                paragraph.text.push(c);
+                paragraph.count += 1;
+                paragraph.right_to_left |= opens_right_to_left(c);
+            }
+        }
+        places.push(here);
+    }
+    let resolved = gathered
+        .into_iter()
+        .filter(|(_, paragraph)| paragraph.right_to_left)
+        .map(|(number, mut paragraph)| {
+            while let Some(e) = paragraph.open.pop() {
+                paragraph.text.push(closer(&e));
+            }
+            let direction = match paragraph.base {
+                Some(true) => BaseDirection::RightToLeft,
+                Some(false) => BaseDirection::LeftToRight,
+                None => BaseDirection::Auto,
+            };
+            (number, Paragraph::new(&paragraph.text, direction))
+        })
+        .collect();
+    (resolved, places)
+}
+
+/// The formatting character that opens an embedding (`css-writing-modes-3`
+/// §2.4.2's table).
+fn opener(e: &Embedding) -> char {
+    match (e.kind, e.rtl) {
+        (EmbeddingKind::Embed, false) => '\u{202A}',
+        (EmbeddingKind::Embed, true) => '\u{202B}',
+        (EmbeddingKind::Isolate, false) => '\u{2066}',
+        (EmbeddingKind::Isolate, true) => '\u{2067}',
+        (EmbeddingKind::FirstStrong, _) => '\u{2068}',
+    }
+}
+
+/// The formatting character that closes one.
+fn closer(e: &Embedding) -> char {
+    match e.kind {
+        EmbeddingKind::Embed => '\u{202C}',
+        EmbeddingKind::Isolate | EmbeddingKind::FirstStrong => '\u{2069}',
+    }
 }
 
 /// Whether `c` is a character whose own class reads right to left, or opens
@@ -4127,9 +4267,16 @@ fn opens_right_to_left(c: char) -> bool {
     )
 }
 
-/// [`split_at_levels`] over one line, draining `line` into `out`.
-fn split_line(line: &mut Vec<TextRun>, metrics: &BookMetrics<'_>, out: &mut Vec<TextRun>) -> usize {
-    let Some((levels, _)) = line_levels(line) else {
+/// [`split_at_levels`] over one line, draining `line` into `out`. `places`
+/// are the line's runs' places in their paragraph, one per run.
+fn split_line(
+    line: &mut Vec<TextRun>,
+    places: &[Place],
+    paragraphs: &BTreeMap<usize, Paragraph>,
+    metrics: &BookMetrics<'_>,
+    out: &mut Vec<TextRun>,
+) -> usize {
+    let Some((levels, _)) = line_levels(line, places, paragraphs) else {
         out.append(line);
         return 0;
     };
@@ -4218,7 +4365,20 @@ fn as_neighbour(other: Option<&TextRun>) -> Option<Neighbour<'_>> {
 ///
 /// A line with no right-to-left character, in a left-to-right paragraph,
 /// with no right-to-left embedding, is `None`: no left-to-right page moves.
-fn line_levels(line: &[TextRun]) -> Option<(Vec<Level>, Level)> {
+///
+/// # And whose levels they are
+///
+/// Where every run of the line has a place in one resolved paragraph
+/// ([`paragraphs`]), the levels are that paragraph's, through
+/// [`Paragraph::line`] over the stretch of it the line holds — X1 to I2 over
+/// the paragraph, L1 at this line's end. Otherwise, and for a caller with no
+/// paragraphs (`places` empty), the line is resolved as a paragraph of its
+/// own, as below.
+fn line_levels(
+    line: &[TextRun],
+    places: &[Place],
+    paragraphs: &BTreeMap<usize, Paragraph>,
+) -> Option<(Vec<Level>, Level)> {
     let base = line
         .iter()
         .find(|run| !run.generated)
@@ -4234,17 +4394,9 @@ fn line_levels(line: &[TextRun]) -> Option<(Vec<Level>, Level)> {
     if !rtl_text && !rtl_embedding && base != Some(true) {
         return None;
     }
-    let opener = |e: &Embedding| match (e.kind, e.rtl) {
-        (EmbeddingKind::Embed, false) => '\u{202A}',
-        (EmbeddingKind::Embed, true) => '\u{202B}',
-        (EmbeddingKind::Isolate, false) => '\u{2066}',
-        (EmbeddingKind::Isolate, true) => '\u{2067}',
-        (EmbeddingKind::FirstStrong, _) => '\u{2068}',
-    };
-    let closer = |e: &Embedding| match e.kind {
-        EmbeddingKind::Embed => '\u{202C}',
-        EmbeddingKind::Isolate | EmbeddingKind::FirstStrong => '\u{2069}',
-    };
+    if let Some(levels) = paragraph_levels(line, places, paragraphs) {
+        return Some(levels);
+    }
     let mut text = String::new();
     let mut count = 0usize;
     let mut own: Vec<usize> = Vec::new();
@@ -4294,6 +4446,61 @@ fn line_levels(line: &[TextRun]) -> Option<(Vec<Level>, Level)> {
         levels.push(kept);
     }
     Some((levels, paragraph.base_level()))
+}
+
+/// [`line_levels`] from the line's paragraph, resolved whole: `None` unless
+/// every run of the line has a place in one paragraph [`paragraphs`]
+/// resolved.
+///
+/// The line is the stretch of the paragraph from its first run's first
+/// character to its last run's last; the formatting characters between two
+/// runs are in that stretch and in no run, and a character X9 removes inside
+/// a run takes the level of the character before it, as below.
+fn paragraph_levels(
+    line: &[TextRun],
+    places: &[Place],
+    paragraphs: &BTreeMap<usize, Paragraph>,
+) -> Option<(Vec<Level>, Level)> {
+    if places.len() != line.len() {
+        return None;
+    }
+    let mut number = None;
+    for place in places {
+        let (id, _) = (*place)?;
+        if number.is_some_and(|n| n != id) {
+            return None;
+        }
+        number = Some(id);
+    }
+    let paragraph = paragraphs.get(&number?)?;
+    let spans: Vec<(usize, usize)> = line
+        .iter()
+        .zip(places)
+        .filter_map(|(run, place)| {
+            place.map(|(_, start)| (start, start + run.text.chars().count()))
+        })
+        .collect();
+    let first = spans.iter().filter(|(s, e)| s < e).map(|(s, _)| *s).min()?;
+    let last = spans.iter().filter(|(s, e)| s < e).map(|(_, e)| *e).max()?;
+    let resolved = paragraph.line(first..last);
+    let base = paragraph.base_level();
+    let mut levels: Vec<Level> = Vec::with_capacity(last - first);
+    for (start, end) in spans {
+        for at in start..end {
+            let level = at
+                .checked_sub(first)
+                .and_then(|offset| resolved.levels().get(offset))
+                .copied()
+                .unwrap_or(base);
+            let kept = if paragraph.is_removed(at) {
+                levels.last().copied().unwrap_or(level)
+            } else {
+                level
+            };
+            levels.push(kept);
+        }
+    }
+    Some((levels, base))
 }
 
 /// The byte ranges of `text` over which `levels` — one per character — is
@@ -4379,15 +4586,32 @@ fn same_line(a: &TextRun, b: &TextRun) -> bool {
 }
 
 /// Lays one line's runs out again in L2's order. Returns whether any moved.
+///
+/// A line [`split_at_levels`] cut is ordered by the level each of its runs
+/// was cut at — its paragraph's — and an empty run among them, which has no
+/// level and no width, by the line's lowest. A line nobody resolved is
+/// resolved here, by itself.
 fn reorder_line(line: &mut [TextRun]) -> bool {
-    let Some((levels, base)) = line_levels(line) else {
-        return false;
-    };
     let mut run_levels: Vec<Level> = Vec::with_capacity(line.len());
-    let mut at = 0usize;
-    for run in line.iter() {
-        run_levels.push(level_of(&run.text, &levels, at, base));
-        at += run.text.chars().count();
+    if line.iter().any(|run| run.bidi_level.is_some()) {
+        let lowest = line
+            .iter()
+            .filter_map(|run| run.bidi_level)
+            .min()
+            .unwrap_or(0);
+        for run in line.iter() {
+            let number = run.bidi_level.unwrap_or(lowest);
+            run_levels.push(Level::from_number(number).unwrap_or(Level::LTR));
+        }
+    } else {
+        let Some((levels, base)) = line_levels(line, &[], &BTreeMap::new()) else {
+            return false;
+        };
+        let mut at = 0usize;
+        for run in line.iter() {
+            run_levels.push(level_of(&run.text, &levels, at, base));
+            at += run.text.chars().count();
+        }
     }
     let order = reorder(&run_levels);
     if order.iter().enumerate().all(|(i, k)| i == *k) {

@@ -426,6 +426,36 @@ fn phase_two_trims_the_space_a_line_broke_at() {
     assert_eq!(laid.pages[0].runs[0].width, 60.0);
 }
 
+/// **Every run carries the bidi paragraph it is part of** (`TextRun::paragraph`),
+/// which is what a caller resolving UAX #9 over a paragraph rather than a line
+/// gathers its lines by (review of lane 8C).
+///
+/// `aa bb cc` wrapped to three lines is one paragraph; a forced break under
+/// `white-space: pre` starts the next (`css-writing-modes-3` §2.4.1), and the
+/// next block's text another. Numbered from one in the order they are set.
+#[test]
+fn every_run_carries_its_bidi_paragraph() {
+    let mut pre = block();
+    pre.white_space = WhiteSpace::Pre;
+    let tree = BoxNode::element(
+        block(),
+        vec![
+            para("aa bb cc"),
+            BoxNode::element(pre.clone(), vec![BoxNode::text(pre, "dd\nee")]),
+        ],
+    );
+    let laid = run(&tree, 30.0, 400.0);
+    let numbered: Vec<(&str, usize)> = laid.pages[0]
+        .runs
+        .iter()
+        .map(|run| (run.text.as_str(), run.paragraph))
+        .collect();
+    assert_eq!(
+        numbered,
+        [("aa", 1), ("bb", 1), ("cc", 1), ("dd", 2), ("ee", 3)]
+    );
+}
+
 /// `white-space: pre` preserves both the spaces and the segment breaks;
 /// `pre-line` preserves the breaks and collapses the spaces.
 #[test]

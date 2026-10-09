@@ -71,6 +71,19 @@ impl Level {
         self.0
     }
 
+    /// The level a number names, where UAX #9 can resolve one: up to
+    /// [`Level::MAX_DEPTH`] and the one above it that rule I2 can raise a
+    /// character to. A caller that resolved a line once and kept each run's
+    /// [`Level::number`] reorders the runs with [`reorder`] through this.
+    #[must_use]
+    pub const fn from_number(number: u8) -> Option<Self> {
+        if number <= Self::MAX_DEPTH + 1 {
+            Some(Self(number))
+        } else {
+            None
+        }
+    }
+
     /// Whether text at this level reads right to left.
     #[must_use]
     pub const fn is_rtl(self) -> bool {

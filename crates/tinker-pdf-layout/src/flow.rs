@@ -516,6 +516,11 @@ struct Builder<'a, M: Metrics> {
     /// text conservation — an *ordered* comparison — would fail on a book that
     /// lost nothing at all.
     sequence: usize,
+    /// The last bidi paragraph number handed out ([`TextRun::paragraph`]):
+    /// one per inline formatting context's text up to a forced break, counted
+    /// across the whole layout as `sequence` is, so a paragraph's lines are
+    /// one number wherever they land.
+    paragraphs: usize,
     /// An `inside` list marker waiting for the first line of its list item,
     /// CSS 2.2 §12.5.1 and `css-lists-3` §3.2.
     ///
@@ -915,6 +920,7 @@ pub(crate) fn build<M: Metrics>(
         cell: None,
         flex_pass: None,
         sequence: 0,
+        paragraphs: 0,
         inside_marker: None,
         embeddings: Vec::new(),
         outer_floats: Vec::new(),
@@ -4493,6 +4499,7 @@ impl<M: Metrics> Builder<'_, M> {
                         kerning: style.font_kerning,
                         features: style.font_features.clone(),
                         paragraph_rtl: Some(style.direction == Direction::Rtl),
+                        paragraph: 0,
                         embeddings: Vec::new(),
                         bidi_level: None,
                         hyphenated: false,
@@ -4562,9 +4569,12 @@ impl<M: Metrics> Builder<'_, M> {
         // direction is asked again of the text after each one.
         let mut paragraph = None;
         let mut paragraph_starts = true;
+        let mut paragraph_number = 0usize;
         while start < content.len() {
             if paragraph_starts {
                 paragraph = self.paragraph_direction(container, &content, &spans, pieces, start);
+                self.paragraphs += 1;
+                paragraph_number = self.paragraphs;
             }
             // `cursor` is where the previous line stopped looking, and it is
             // not an optimisation. Restarting the scan at zero for every line
@@ -4628,7 +4638,7 @@ impl<M: Metrics> Builder<'_, M> {
                 line_x,
                 available,
                 (trim_start, trim_end),
-                (justify, paragraph, hyphenated),
+                (justify, (paragraph, paragraph_number), hyphenated),
                 lines_here,
             );
             lines_here += 1;
@@ -5061,7 +5071,7 @@ impl<M: Metrics> Builder<'_, M> {
         x: f64,
         available: f64,
         (start, end): (usize, usize),
-        (justify, paragraph, hyphenated): (bool, Option<bool>, bool),
+        (justify, (paragraph, paragraph_number), hyphenated): (bool, (Option<bool>, usize), bool),
         index_in_block: usize,
     ) {
         // CSS 2.2 §10.8.1's strut: every line box carries the block
@@ -5177,6 +5187,7 @@ impl<M: Metrics> Builder<'_, M> {
                     kerning: style.font_kerning,
                     features: style.font_features.clone(),
                     paragraph_rtl: paragraph,
+                    paragraph: paragraph_number,
                     embeddings: pieces[*index].embeddings.clone(),
                     bidi_level: None,
                     hyphenated: false,
@@ -5222,6 +5233,7 @@ impl<M: Metrics> Builder<'_, M> {
                 kerning: style.font_kerning,
                 features: style.font_features.clone(),
                 paragraph_rtl: paragraph,
+                paragraph: paragraph_number,
                 embeddings: pieces[*index].embeddings.clone(),
                 bidi_level: None,
                 hyphenated: ends_hyphenated,

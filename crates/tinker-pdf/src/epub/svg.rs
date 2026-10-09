@@ -1813,6 +1813,7 @@ fn note_nodes(nodes: &[Node], fonts: &mut Fonts<'_>) {
             kerning: FontKerning::Auto,
             features: Vec::new(),
             paragraph_rtl: Some(false),
+            paragraph: 0,
             embeddings: Vec::new(),
             bidi_level: None,
             hyphenated: false,

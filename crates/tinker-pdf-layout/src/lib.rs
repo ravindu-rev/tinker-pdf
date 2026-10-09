@@ -630,6 +630,18 @@ pub struct TextRun {
     /// logical text and resolves no levels: the caller that orders a line
     /// needs the paragraph's direction to do it.
     pub paragraph_rtl: Option<bool>,
+    /// Which bidi paragraph the run is part of: one block container's inline
+    /// content up to a forced break (`css-writing-modes-3` §2.4.1), numbered
+    /// from one in the order this crate sets them, across the whole layout;
+    /// zero for a run set outside every paragraph, an outside list marker.
+    ///
+    /// UAX #9 resolves a **paragraph** — rules X1 to I2 — and only then
+    /// breaks it into lines, so a neutral at a line's start takes its level
+    /// from the strong character ending the line before. A caller that
+    /// resolved each line as a paragraph of its own ordered a wrapped line
+    /// differently from the same text unwrapped (review of lane 8C); this is
+    /// what it gathers the paragraph's lines by, across pages as well.
+    pub paragraph: usize,
     /// The explicit embeddings and isolates this run's inline ancestors open
     /// round it, outermost first (`unicode-bidi`, §2.2): what UAX #9's
     /// formatting characters would say, kept beside the text rather than in

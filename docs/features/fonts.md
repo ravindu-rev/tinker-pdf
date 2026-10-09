@@ -642,6 +642,23 @@ Landed so far:
   `epub_shaped.rs` holds the positions against the face's `hmtx` and UAX #9's
   levels worked out by hand.
 
+  **Corrected on review: the levels are the paragraph's, not the line's.**
+  Each visual line had been resolved as a paragraph of its own, so a weak or
+  neutral character at a line's start or end was resolved against `sos` or
+  `eos` rather than the strong character on the line before or after, and
+  where a line wrapped changed its order: `abc (de` in a right-to-left
+  paragraph drew `de(` on its second line where unwrapped it draws `(de`.
+  Layout now numbers the bidi paragraph every run is set in
+  (`TextRun::paragraph`: a block's inline content up to a forced break), and
+  the painter resolves each paragraph once over every line of it, across
+  pages, and takes each line's levels from `Paragraph::line` — X1 to I2 the
+  paragraph's, L1 and L2 the line's
+  (`a_wrapped_line_is_ordered_by_its_paragraphs_levels`). The white space a
+  line's end hangs is in no run and so not in the resolved text; it is a
+  neutral that L1 resets anyway. A line whose runs are not all of one
+  paragraph — an inline block's own text touching the line it sits in — is
+  resolved by itself.
+
   **The paragraph's level is the block's `direction`, and an inline box's
   `unicode-bidi` opens one** (`css-writing-modes-3` §2, October 2026's eighth
   wave). Every line had been resolved by its own P2 and P3, so a
