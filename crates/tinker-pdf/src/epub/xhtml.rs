@@ -48,6 +48,7 @@
 
 use tinker_pdf_css::selector::UiState;
 use tinker_pdf_css::Element as CssElement;
+use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
 use tinker_pdf_xml::{Doctype, Error as XmlError, Event, Limits as XmlLimits, Source};
 
 /// The XHTML namespace, which is what tells an `<image>` from an `<img>`.
@@ -87,6 +88,18 @@ pub struct Node {
     /// `style=""`, unparsed. The cascade parses it, because the declarations it
     /// yields do not outlive the call that matched them.
     pub style: Option<String>,
+    /// HTML's **auto directionality** (§3.2.6.4, *the `dir` attribute*), for
+    /// an element whose `dir` is in the auto state — `dir="auto"`, or a
+    /// `<bdi>` with no valid `dir` — and `None` for every other element.
+    ///
+    /// `Some(true)` where the first character of type `L`, `R` or `AL` in the
+    /// element's text — skipping every `bdi`, `script`, `style` and
+    /// `textarea` inside it and every element with a `dir` of its own — is
+    /// `R` or `AL`; `Some(false)` otherwise, including where there is no such
+    /// character, which HTML resolves to `ltr`. Worked out once the whole
+    /// tree is read ([`read`]), since it is a fact about the element's
+    /// content.
+    pub auto_rtl: Option<bool>,
 }
 
 /// What sits inside an element.
@@ -228,9 +241,10 @@ impl CssElement for Node {
     ///
     /// The value is passed through rather than resolved, `auto` included:
     /// HTML's `dir="auto"` means *work it out from the first strong character
-    /// of the content*, which this build does not do — so it reaches `:dir()`
-    /// as `auto`, matches neither keyword, and stops the inheritance, rather
-    /// than being guessed at as one of the two.
+    /// of the content*, which this build does for the `direction` it gives the
+    /// element ([`Node::auto_rtl`], [`bidi_hints`]) and not yet for `:dir()` —
+    /// so it reaches `:dir()` as `auto`, matches neither keyword, and stops
+    /// the inheritance, rather than being guessed at as one of the two.
     ///
     /// The document element with nothing declared is `ltr`, which is HTML's
     /// own default and is the one place a default belongs: an element deeper
@@ -393,34 +407,45 @@ pub enum MarkupDefect {
 /// is no `dir` at all.
 ///
 /// - `dir="ltr"` and `dir="rtl"` set `direction` and open an isolate, as
-///   §15.3.5's `[dir] { unicode-bidi: isolate }` does;
-/// - `dir="auto"`, and a `<bdi>` with no `dir`, are `unicode-bidi:
-///   plaintext`: the isolate whose direction is its content's first strong
-///   character (`css-writing-modes-3` §2.2) and, on a block, each
-///   paragraph's own P2 and P3. HTML computes a `direction` from the content
-///   instead and lets it inherit, which a descendant's own `direction`
-///   would read; here a descendant inherits the parent's;
+///   §15.3.5's `[dir]:dir(ltr) { direction: ltr }` and `[dir] {
+///   unicode-bidi: isolate }` do;
+/// - `dir="auto"`, and a `<bdi>` with no `dir`, are the same isolate, with
+///   the `direction` HTML's auto directionality gives the element
+///   ([`Node::auto_rtl`]) — computed once from its content and **inherited**
+///   by everything inside it, a block child's paragraphs included;
+/// - **only `<pre dir="auto">` and `<textarea dir="auto">` are `unicode-bidi:
+///   plaintext`**, §15.3.5's one rule for it, so that each paragraph of
+///   preformatted text takes its own direction after every forced break. A
+///   `<p dir="auto">` was mapped to `plaintext` too, which re-decided the
+///   direction after every `<br>` and left its block descendants the
+///   parent's `ltr` (review of lane 8C);
 /// - `<bdo>` is `unicode-bidi: isolate-override`, which this build refuses
 ///   by value, so each `<bdo>` is counted rather than read as honoured.
 fn bidi_hints(node: &Node) -> Option<&'static str> {
     if !node.is_html() {
         return None;
     }
-    let dir = node.attr("dir").and_then(|value| {
-        ["ltr", "rtl", "auto"]
-            .into_iter()
-            .find(|keyword| value.eq_ignore_ascii_case(keyword))
-    });
-    let bdo = node.name == "bdo";
-    Some(match (dir, bdo) {
-        (Some("ltr"), true) => "direction: ltr; unicode-bidi: isolate-override",
-        (Some("rtl"), true) => "direction: rtl; unicode-bidi: isolate-override",
-        (_, true) => "unicode-bidi: isolate-override",
-        (Some("ltr"), false) => "direction: ltr; unicode-bidi: isolate",
-        (Some("rtl"), false) => "direction: rtl; unicode-bidi: isolate",
-        (Some(_), false) => "unicode-bidi: plaintext",
-        (None, false) if node.name == "bdi" => "unicode-bidi: plaintext",
-        (None, false) => return None,
+    let declared = match dir_keyword(node) {
+        Some("auto") => node.auto_rtl.map(|rtl| if rtl { "rtl" } else { "ltr" }),
+        None if node.name == "bdi" => node.auto_rtl.map(|rtl| if rtl { "rtl" } else { "ltr" }),
+        other => other,
+    };
+    let plaintext =
+        dir_keyword(node) == Some("auto") && matches!(node.name.as_str(), "pre" | "textarea");
+    Some(match (declared, node.name == "bdo", plaintext) {
+        (Some("ltr"), true, _) => "direction: ltr; unicode-bidi: isolate-override",
+        (Some("rtl"), true, _) => "direction: rtl; unicode-bidi: isolate-override",
+        (_, true, _) => "unicode-bidi: isolate-override",
+        (Some("ltr"), false, true) => "direction: ltr; unicode-bidi: plaintext",
+        (Some("rtl"), false, true) => "direction: rtl; unicode-bidi: plaintext",
+        (Some("ltr"), false, false) => "direction: ltr; unicode-bidi: isolate",
+        (Some("rtl"), false, false) => "direction: rtl; unicode-bidi: isolate",
+        // An element in the auto state whose content was never resolved —
+        // one built by hand rather than by [`read`] — is the isolate HTML
+        // gives every `[dir]`, its direction inherited.
+        (Some(_), false, _) => "unicode-bidi: isolate",
+        (None, false, _) if node.name == "bdi" => "unicode-bidi: isolate",
+        (None, false, _) => return None,
     })
 }
 
@@ -619,6 +644,7 @@ fn read_reporting(source: &Source<'_>, limits: &XmlLimits) -> (Dom, Option<XmlEr
                     next: None,
                     children: Vec::new(),
                     style: None,
+                    auto_rtl: None,
                 };
                 for attribute in element.attributes() {
                     let name = attribute.name().qualified();
@@ -692,6 +718,7 @@ fn read_reporting(source: &Source<'_>, limits: &XmlLimits) -> (Dom, Option<XmlEr
     if dom.nodes.is_empty() {
         dom.defects.push(MarkupDefect::Empty);
     }
+    resolve_auto_directions(&mut dom.nodes);
     (dom, refusal)
 }
 
@@ -830,6 +857,7 @@ pub fn from_html(document: &tinker_pdf_xml::html::Document, limits: &XmlLimits) 
                     next: None,
                     children: Vec::new(),
                     style: None,
+                    auto_rtl: None,
                 };
                 for attribute in &element.attributes {
                     let name = attribute.qualified();
@@ -881,5 +909,87 @@ pub fn from_html(document: &tinker_pdf_xml::html::Document, limits: &XmlLimits) 
     if dom.nodes.is_empty() {
         dom.defects.push(MarkupDefect::Empty);
     }
+    resolve_auto_directions(&mut dom.nodes);
     dom
+}
+
+/// The `dir` keyword an HTML element declares — HTML's enumerated attribute,
+/// ASCII case-insensitive — or `None` for no `dir` or a value that is none of
+/// the three, which is no `dir` at all (the *undefined* state).
+fn dir_keyword(node: &Node) -> Option<&'static str> {
+    if !node.is_html() {
+        return None;
+    }
+    node.attr("dir").and_then(|value| {
+        ["ltr", "rtl", "auto"]
+            .into_iter()
+            .find(|keyword| value.eq_ignore_ascii_case(keyword))
+    })
+}
+
+/// Whether an element's `dir` is in HTML's auto state: `dir="auto"`, or a
+/// `<bdi>` whose `dir` is undefined.
+fn in_auto_state(node: &Node) -> bool {
+    match dir_keyword(node) {
+        Some(keyword) => keyword == "auto",
+        None => node.is_html() && node.name == "bdi",
+    }
+}
+
+/// Fills [`Node::auto_rtl`] for every element in the auto state: HTML's
+/// *auto directionality*, the first strong character of the element's text
+/// in tree order.
+///
+/// HTML's walk skips every `bdi`, `script`, `style` and `textarea`
+/// descendant and every descendant with a `dir` of its own, with all they
+/// hold. So the stretches two elements in the auto state walk are disjoint —
+/// an inner one has a `dir`, or is a `bdi`, and the outer one skips it — and
+/// the whole pass reads each node at most once, however the elements nest.
+/// The walk is a stack, not recursion, because the tree's depth is the
+/// document's to choose.
+fn resolve_auto_directions(nodes: &mut [Node]) {
+    let skipped = |node: &Node| {
+        node.is_html()
+            && (matches!(node.name.as_str(), "bdi" | "script" | "style" | "textarea")
+                || dir_keyword(node).is_some())
+    };
+    for at in 0..nodes.len() {
+        if !in_auto_state(&nodes[at]) {
+            continue;
+        }
+        let mut found = None;
+        // Each child with the index of the element holding it.
+        let mut stack: Vec<(usize, &Child)> = nodes[at]
+            .children
+            .iter()
+            .rev()
+            .map(|child| (at, child))
+            .collect();
+        while let Some((parent, child)) = stack.pop() {
+            match child {
+                Child::Text(text) => {
+                    found = text.chars().find_map(|c| match bidi_class(c) {
+                        BidiClass::L => Some(false),
+                        BidiClass::R | BidiClass::AL => Some(true),
+                        _ => None,
+                    });
+                    if found.is_some() {
+                        break;
+                    }
+                }
+                Child::Element(index) => {
+                    // A child's index is above its parent's — [`read`] builds
+                    // the tree in document order — so an index that is not
+                    // is no child of this tree's, and is passed over rather
+                    // than followed: every step goes up, and the walk ends.
+                    if let Some(node) = nodes.get(*index).filter(|_| *index > parent) {
+                        if !skipped(node) {
+                            stack.extend(node.children.iter().rev().map(|child| (*index, child)));
+                        }
+                    }
+                }
+            }
+        }
+        nodes[at].auto_rtl = Some(found.unwrap_or(false));
+    }
 }

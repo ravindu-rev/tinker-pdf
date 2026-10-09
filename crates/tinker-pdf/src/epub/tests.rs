@@ -2034,8 +2034,10 @@ fn list_attributes_are_presentational_hints() {
 }
 
 /// **HTML §15.3.5's `dir`, as presentational hints**: `ltr` and `rtl` set
-/// `direction` and isolate, `auto` and a bare `<bdi>` are `plaintext`, and
-/// `<bdo>` is the override this build refuses by value. The keyword is ASCII
+/// `direction` and isolate, `auto` and a bare `<bdi>` isolate with the
+/// direction their content's first strong character gives them (`c` and `e`
+/// are `L`), and `<bdo>` is the override this build refuses by value. The
+/// keyword is ASCII
 /// case-insensitive, a value that is none of the three is no `dir`, an
 /// element outside XHTML's namespace has none of HTML's hints, and a list's
 /// hint and its `dir` are one declaration block.
@@ -2060,14 +2062,124 @@ fn dir_is_a_presentational_hint() {
         [
             some("direction: rtl; unicode-bidi: isolate"),
             some("direction: ltr; unicode-bidi: isolate"),
-            some("unicode-bidi: plaintext"),
+            some("direction: ltr; unicode-bidi: isolate"),
             None,
-            some("unicode-bidi: plaintext"),
+            some("direction: ltr; unicode-bidi: isolate"),
             some("direction: rtl; unicode-bidi: isolate"),
             some("direction: rtl; unicode-bidi: isolate-override"),
             some("unicode-bidi: isolate-override"),
             some("counter-reset: list-item 2; direction: rtl; unicode-bidi: isolate"),
             None,
+        ]
+    );
+}
+
+/// **`dir="auto"` is HTML's auto directionality**: the first character of
+/// type `L`, `R` or `AL` in the element's text, in tree order, skipping every
+/// `bdi`, `script`, `style` and `textarea` inside it and every element with a
+/// `dir` of its own, with what they hold — `ltr` where there is none — and
+/// only `<pre dir="auto">` and `<textarea dir="auto">` are `plaintext`
+/// (HTML §3.2.6.4 and §15.3.5; review of lane 8C).
+///
+/// The digits in the first paragraph are `EN`, which is not strong, so its
+/// `ب` decides. The second paragraph's `a` is in a `span` with its own `dir`,
+/// its `b` in a `bdi` and its `c` in a `script`, all skipped, so `ب` decides
+/// there too, while the `bdi` resolves itself from its own `b`. Digits alone
+/// are `ltr`. The `pre` says `AUTO`, the keyword being ASCII
+/// case-insensitive, and is the one `plaintext`. An `em` is walked into.
+#[test]
+fn dir_auto_is_resolved_on_the_tree_htmls_parser_builds() {
+    use tinker_pdf_css::Element;
+    // Not XML — a `<p>` left open and an attribute unquoted — so the tree is
+    // the one HTML's parser builds, and it is in the auto state as an XHTML
+    // chapter's is: the first strong character decides, digits passed over.
+    let tree = super::xhtml::read_markup_or_html(
+        "<!DOCTYPE html><body><p dir=auto>1 \u{628} a<p dir=\"auto\">2 a \u{628}<p>b".as_bytes(),
+        &XmlLimits::DEFAULT,
+    );
+    assert!(
+        tree.defects.contains(&super::xhtml::MarkupDefect::NotXml),
+        "{:?}",
+        tree.defects
+    );
+    let paragraphs: Vec<(Option<bool>, Option<String>)> = tree
+        .nodes
+        .iter()
+        .filter(|node| node.name == "p")
+        .map(|node| (node.auto_rtl, node.presentational_hints()))
+        .collect();
+    assert_eq!(
+        paragraphs,
+        [
+            (
+                Some(true),
+                Some("direction: rtl; unicode-bidi: isolate".to_owned())
+            ),
+            (
+                Some(false),
+                Some("direction: ltr; unicode-bidi: isolate".to_owned())
+            ),
+            (None, None),
+        ]
+    );
+}
+
+#[test]
+fn dir_auto_is_the_direction_of_the_first_strong_character() {
+    use tinker_pdf_css::Element;
+    let tree = dom("<body><p dir=\"auto\">1 \u{628} a</p>\
+         <p dir=\"auto\"><span dir=\"ltr\">a</span><bdi>b</bdi><script>c</script>\u{628}</p>\
+         <p dir=\"auto\">1 2</p><pre dir=\"AUTO\">\u{628}\na</pre>\
+         <p dir=\"auto\"><em>\u{628}</em></p></body>");
+    let read: Vec<(&str, Option<bool>, Option<String>)> = tree
+        .nodes
+        .iter()
+        .filter(|node| node.name != "body")
+        .map(|node| {
+            (
+                node.name.as_str(),
+                node.auto_rtl,
+                node.presentational_hints(),
+            )
+        })
+        .collect();
+    let some = |text: &str| Some(text.to_owned());
+    assert_eq!(
+        read,
+        [
+            (
+                "p",
+                Some(true),
+                some("direction: rtl; unicode-bidi: isolate")
+            ),
+            (
+                "p",
+                Some(true),
+                some("direction: rtl; unicode-bidi: isolate")
+            ),
+            ("span", None, some("direction: ltr; unicode-bidi: isolate")),
+            (
+                "bdi",
+                Some(false),
+                some("direction: ltr; unicode-bidi: isolate")
+            ),
+            ("script", None, None),
+            (
+                "p",
+                Some(false),
+                some("direction: ltr; unicode-bidi: isolate")
+            ),
+            (
+                "pre",
+                Some(true),
+                some("direction: rtl; unicode-bidi: plaintext")
+            ),
+            (
+                "p",
+                Some(true),
+                some("direction: rtl; unicode-bidi: isolate")
+            ),
+            ("em", None, None),
         ]
     );
 }

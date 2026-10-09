@@ -1831,9 +1831,14 @@ fn the_block_and_not_the_first_letter_decides_a_paragraphs_direction() {
     );
 }
 
-/// **`dir="auto"` is `unicode-bidi: plaintext`: each paragraph takes its
+/// **`unicode-bidi: plaintext` on a block: each paragraph takes its
 /// direction from its own first strong character, and its start side with
 /// it** (`css-writing-modes-3` §2.2).
+///
+/// The block says so in its own `style`: HTML gives `plaintext` to `<pre
+/// dir="auto">` and `<textarea dir="auto">` and to nothing else, so a `<p
+/// dir="auto">` — what this test once wrote — is one direction for the whole
+/// element ([`dir_auto_is_one_direction_from_the_content_and_is_inherited`]).
 ///
 /// Under `white-space: pre` the newline is a forced break, and a forced
 /// break ends a bidi paragraph (§2.4.1), so the two lines here are two
@@ -1844,7 +1849,7 @@ fn the_block_and_not_the_first_letter_decides_a_paragraphs_direction() {
 #[test]
 fn plaintext_gives_each_paragraph_its_own_first_strong_direction() {
     let lines = drawn_lines(
-        " dir=\"auto\" style=\"white-space: pre\"",
+        " style=\"unicode-bidi: plaintext; white-space: pre\"",
         "\u{628}\u{62D}\u{645} ab\nab \u{628}\u{62D}\u{645}",
     );
     assert_eq!(lines.len(), 2, "not two lines: {lines:?}");
@@ -2008,5 +2013,81 @@ fn text_indent_is_on_the_paragraphs_start_side() {
             ]
         ),
         "the right-to-left plaintext paragraph does not end at the indent: {plain:?}"
+    );
+}
+
+/// **`dir="auto"` is one direction for the whole element, from its content,
+/// and it is inherited** (HTML §3.2.6.4 and §15.3.5; review of lane 8C).
+///
+/// HTML gives an element whose `dir` is `auto` the direction of the first
+/// strong character of its text and `unicode-bidi: isolate`, and everything
+/// inside it inherits that direction. It was mapped to `plaintext` instead,
+/// which is HTML's rule for `<pre dir="auto">` and `<textarea dir="auto">`
+/// alone: the paragraph re-decided after every forced break, and a block
+/// inside it inherited `ltr` from the parent.
+///
+/// - `ab` then `بحم` on a second preformatted line: the `p`'s first strong
+///   character is `a`, so it is left to right throughout and the second line
+///   starts at the left edge, its word reversed alone;
+/// - `بحم ab` in a block `span`: the `p` is right to left and so is the span,
+///   which inherits it — the same line as under `dir="rtl"`, ending at the
+///   right edge;
+/// - and `<pre dir="auto">` with the same two lines as the first case is
+///   `plaintext`, so its second paragraph is right to left on its own and
+///   ends at the right edge.
+#[test]
+fn dir_auto_is_one_direction_from_the_content_and_is_inherited() {
+    let lines = drawn_lines(
+        " dir=\"auto\" style=\"white-space: pre\"",
+        "ab\n\u{628}\u{62D}\u{645}",
+    );
+    assert_eq!(lines.len(), 2, "not two lines: {lines:?}");
+    assert!(
+        at(
+            &lines[1],
+            &[
+                ("\u{645}", LEFT),
+                ("\u{62D}", LEFT + GLYPH),
+                ("\u{628}", LEFT + 2.0 * GLYPH),
+            ]
+        ),
+        "the second line re-decided the paragraph's direction: {lines:?}"
+    );
+
+    let block = "<span style=\"display: block\">\u{628}\u{62D}\u{645} ab</span>";
+    let rtl = drawn_line(" dir=\"rtl\"", block);
+    let start = RIGHT - 6.0 * GLYPH;
+    let expected = [
+        ("a", start),
+        ("b", start + GLYPH),
+        ("\u{645}", start + 3.0 * GLYPH),
+        ("\u{62D}", start + 4.0 * GLYPH),
+        ("\u{628}", start + 5.0 * GLYPH),
+    ];
+    assert!(
+        at(&rtl, &expected),
+        "the `dir=\"rtl\"` control moved: {rtl:?}"
+    );
+    let auto = drawn_line(" dir=\"auto\"", block);
+    assert!(
+        at(&auto, &expected),
+        "the block inside `dir=\"auto\"` did not inherit its direction: {auto:?}"
+    );
+
+    let pre = drawn_lines(
+        "",
+        "<pre dir=\"auto\" style=\"margin: 0\">ab\n\u{628}\u{62D}\u{645}</pre>",
+    );
+    assert_eq!(pre.len(), 2, "not two lines: {pre:?}");
+    assert!(
+        at(
+            &pre[1],
+            &[
+                ("\u{645}", RIGHT - 3.0 * GLYPH),
+                ("\u{62D}", RIGHT - 2.0 * GLYPH),
+                ("\u{628}", RIGHT - GLYPH),
+            ]
+        ),
+        "the `pre`'s second paragraph is not its own, right to left: {pre:?}"
     );
 }

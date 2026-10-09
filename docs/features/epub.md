@@ -166,7 +166,14 @@ levels §2.4.2 maps them to and written as formatting characters only into the
 text the painter resolves, never into the page's; and a block's `plaintext`
 gives each paragraph — a forced break starts one — its own first strong
 direction. HTML's `dir` and `<bdi>` are presentational hints
-(`epub::xhtml`). A cut piece is drawn at the level its line resolved it at,
+(`epub::xhtml`): `dir="ltr"` and `"rtl"` set `direction` and isolate, and
+`dir="auto"` and a `<bdi>` with no `dir` isolate with the direction HTML's
+auto directionality gives them — the first strong character of their text,
+skipping `bdi`, `script`, `style`, `textarea` and anything with a `dir` of
+its own, `ltr` where there is none — which everything inside them inherits;
+only `<pre dir="auto">` and `<textarea dir="auto">` are `plaintext`
+(HTML §15.3.5). `:dir()` is still handed `auto` as written, and matches
+neither keyword there. A cut piece is drawn at the level its line resolved it at,
 so the space and `!` that end a right-to-left paragraph are drawn `! ` and
 not ` !`. A run in one of the standard 14 is unshaped and one glyph per character,
 and keeps `PageBuilder::glyphs`. Faces are subset to what the book draws; every
