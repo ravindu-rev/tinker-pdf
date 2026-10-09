@@ -139,8 +139,13 @@ in from an encrypted source in the clear, and is refused. So is an update
 under a key whose `/StmF` or `/StrF` is `/Identity` (an absent one is, and so
 is a crypt filter whose `/CFM` is `/None`, 7.6.5): the update reproduces the
 file's own encryption, which passes that half through unchanged, so what was
-copied in is written as the file stores its own, in the clear
-(`FileKey::seals`).
+copied in is written as the file stores its own, in the clear. So too an
+update under an AES method whose key AES does not take: Algorithm 1 (7.6.2)
+keys `/AESV2` with n + 5 bytes of hash, so a `/V 4` document with a 40-bit
+key — a `/Length` of 40, or none, which reads as 40 — authenticates with a
+key that gets a ten-byte AES key, and encryption under it hands the bytes
+back unchanged. `FileKey::seals` asks the encryption itself rather than
+the method names.
 `DocumentEditor::check_decrypt()` asks whether decrypting on purpose is
 allowed: the document is encrypted (`SaveRefusal::NotEncrypted` otherwise),
 and whoever opened it holds the owner's authority or was withheld nothing.

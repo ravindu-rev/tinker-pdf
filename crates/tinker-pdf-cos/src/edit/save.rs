@@ -167,7 +167,10 @@ impl DocumentEditor {
     ///   nothing there; a document that is not encrypted, or was opened
     ///   without its password, has no key; and a key whose `/StmF` or `/StrF`
     ///   is `/Identity` passes those streams or strings through unchanged
-    ///   (7.6.5 Table 25), as the document's own are stored;
+    ///   (7.6.5 Table 25), as the document's own are stored, and so does an
+    ///   AES method under a key AES does not take — `/AESV2` with a 40-bit
+    ///   key gets a ten-byte one from Algorithm 1 (7.6.2) — which
+    ///   [`tinker_pdf_crypto::FileKey::seals`] asks of the encryption itself;
     /// - [`SaveRefusal::OwnerAuthorityNeeded`] when the document is encrypted,
     ///   was opened with the user's authority, the owner withholds permissions
     ///   from that user (7.6.4.2, Table 22), and the save is a rewrite that
@@ -203,7 +206,9 @@ impl DocumentEditor {
             // `/Encrypt` as one whatever key it was opened with, answered
             // `Ok` to updates that wrote an encrypted source's plaintext; so
             // did counting any key as one, when a key whose stream or string
-            // method is `/Identity` writes that half in the clear.
+            // method is `/Identity` writes that half in the clear, and so did
+            // counting any key whose methods are ciphers, when AES under a
+            // key it does not take hands back what it was given.
             WriteMode::Incremental => {
                 self.encrypted_source && !self.doc.file_key().is_some_and(|key| key.seals())
             }

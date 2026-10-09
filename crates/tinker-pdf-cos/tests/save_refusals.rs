@@ -56,6 +56,116 @@ fn identity(entry: &str) -> Arc<CosDocument> {
     doc
 }
 
+/// A one-page document under the standard handler at `/V 4 /R 4` whose crypt
+/// filter is `/AESV2` with a 40-bit key, opened with its user password `u`.
+/// Algorithm 1 keys AES-128 with the first n + 5 bytes of a hash, here ten,
+/// which AES does not take — so the key authenticates and every encryption
+/// under it hands its bytes back unchanged. `/Length 40` is written at the
+/// top level (Table 20) and in the crypt filter (Table 25, where the
+/// standard handler counts bytes), so the key is five bytes whichever the
+/// reader takes; an absent `/Length` reads as 40 too.
+///
+/// Built here from Algorithms 2, 3 and 5 (7.6.4.3, 7.6.4.4) with the
+/// engine's own MD5 and RC4, so no outside program made it.
+fn forty_bit_aesv2() -> Arc<CosDocument> {
+    use tinker_pdf_crypto::md5::md5;
+    use tinker_pdf_crypto::rc4::rc4;
+
+    const PAD: [u8; 32] = [
+        0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01,
+        0x08, 0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53,
+        0x69, 0x7A,
+    ];
+    let pad = |password: &[u8]| -> Vec<u8> {
+        password
+            .iter()
+            .chain(PAD.iter())
+            .take(32)
+            .copied()
+            .collect()
+    };
+    let stepped = |key: &[u8], i: u8| -> Vec<u8> { key.iter().map(|b| b ^ i).collect() };
+    let n = 5;
+    let p: i32 = -4;
+    let id: Vec<u8> = (0..16).collect();
+
+    // Algorithm 3: /O from the owner password `o` and the user password `u`.
+    let mut digest = md5(&pad(b"o"));
+    for _ in 0..50 {
+        digest = md5(&digest);
+    }
+    let owner_key = &digest[..n];
+    let mut o = rc4(owner_key, &pad(b"u"));
+    for i in 1..=19 {
+        o = rc4(&stepped(owner_key, i), &o);
+    }
+
+    // Algorithm 2: the file key from `u`.
+    let mut input = pad(b"u");
+    input.extend_from_slice(&o);
+    input.extend_from_slice(&p.to_le_bytes());
+    input.extend_from_slice(&id);
+    let mut digest = md5(&input);
+    for _ in 0..50 {
+        digest = md5(&digest[..n]);
+    }
+    let key = &digest[..n];
+
+    // Algorithm 5: /U.
+    let mut seed = PAD.to_vec();
+    seed.extend_from_slice(&id);
+    let mut u = rc4(key, &md5(&seed));
+    for i in 1..=19 {
+        u = rc4(&stepped(key, i), &u);
+    }
+    u.resize(32, 0);
+
+    let hex = |bytes: &[u8]| -> String {
+        let digits: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        format!("<{digits}>")
+    };
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>".to_string(),
+        format!(
+            "<< /Filter /Standard /V 4 /R 4 /Length 40 \
+             /CF << /StdCF << /CFM /AESV2 /AuthEvent /DocOpen /Length 5 >> >> \
+             /StmF /StdCF /StrF /StdCF /O {} /U {} /P {p} >>",
+            hex(&o),
+            hex(&u)
+        ),
+    ];
+    let mut bytes = b"%PDF-1.6\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(bytes.len());
+        bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+    }
+    let xref = bytes.len();
+    bytes.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    bytes.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R /Encrypt 4 0 R /ID [{} {}] >>\n\
+             startxref\n{xref}\n%%EOF\n",
+            objects.len() + 1,
+            hex(&id),
+            hex(&id)
+        )
+        .as_bytes(),
+    );
+
+    let doc = open_bytes(bytes, Some("u"));
+    let key = doc.file_key().expect("authenticated, with a key");
+    assert_eq!(key.key().len(), n, "a 40-bit file key");
+    doc
+}
+
 fn rewrite() -> WriteOptions {
     WriteOptions {
         mode: WriteMode::Rewrite,
@@ -199,7 +309,8 @@ fn holds(saved: &[u8], plaintext: &[u8]) -> bool {
 /// `WriteOptions::encryption`, and without a key it writes in the clear — so
 /// encryption asked of an incremental update seals nothing, and an encrypted
 /// document opened without its password has no key to seal with. Nor does a
-/// key seal what its `/Identity` stream or string method passes through.
+/// key seal what its `/Identity` stream or string method passes through, or
+/// what an AES method under a key AES does not take hands back unchanged.
 #[test]
 fn an_incremental_update_is_sealed_only_with_the_key_the_document_was_opened_with() {
     let source = open("encrypted-aes256.pdf", Some("owner-secret"));
@@ -227,6 +338,10 @@ fn an_incremental_update_is_sealed_only_with_the_key_the_document_was_opened_wit
         (
             "an encrypted document whose strings' filter is /Identity",
             identity("StrF"),
+        ),
+        (
+            "an encrypted document whose AESV2 key is 40 bits",
+            forty_bit_aesv2(),
         ),
     ];
     let mut answers = Vec::new();
@@ -285,9 +400,13 @@ fn an_incremental_update_is_sealed_only_with_the_key_the_document_was_opened_wit
     // its own: in the clear. The page copied in carries no string, so the
     // loop above sees only the stream half leak; the string half is the same
     // refusal, for an import that does carry one.
+    // So does a key under which AES cannot run: Algorithm 1 gives a 40-bit
+    // file key a ten-byte AES key, and encryption hands the bytes back as
+    // given rather than fail.
     for target in [
         "an encrypted document whose streams' filter is /Identity",
         "an encrypted document whose strings' filter is /Identity",
+        "an encrypted document whose AESV2 key is 40 bits",
     ] {
         assert_eq!(
             refused(target, "incremental"),

@@ -183,13 +183,30 @@ impl FileKey {
         self.string_method
     }
 
-    /// Whether everything this key encrypts comes out encrypted: neither
-    /// method is [`CryptMethod::Identity`], which passes bytes through
-    /// unchanged. A writer reproducing a file's own encryption with a key
-    /// that does not seal writes that half of what it is given in the clear.
+    /// Whether everything this key encrypts comes out encrypted: both
+    /// methods run a cipher over what they are given. A writer reproducing a
+    /// file's own encryption with a key that does not seal writes that half
+    /// of what it is given in the clear.
+    ///
+    /// Two things pass bytes through unchanged: [`CryptMethod::Identity`],
+    /// by definition, and an AES method under a key AES does not take —
+    /// [`FileKey::encrypt_stream`] and [`FileKey::encrypt_string`] hand the
+    /// bytes back as given rather than fail. AES takes 16 or 32 bytes; `/AESV2`
+    /// below revision 5 keys it with Algorithm 1's first n + 5 bytes of hash,
+    /// at most 16, so a file key shorter than 11 bytes — `/V 4` with a
+    /// `/Length` of 40, or with none, which reads as 40 — gives one it cannot
+    /// use. So the answer is asked of the code those two run, not of the
+    /// method names. The per-object key's length depends on the file key's
+    /// alone, so one object answers for every object.
     #[must_use]
     pub fn seals(&self) -> bool {
-        self.stream_method != CryptMethod::Identity && self.string_method != CryptMethod::Identity
+        self.method_seals(self.stream_method) && self.method_seals(self.string_method)
+    }
+
+    /// Whether `method` under this key runs its cipher: [`FileKey::seal`]
+    /// answers for object 0, and every object's key is the same length.
+    fn method_seals(&self, method: CryptMethod) -> bool {
+        self.seal(method, 0, 0, 0, &[]).is_some()
     }
 
     /// Decrypts one string belonging to the given indirect object.
@@ -240,20 +257,34 @@ impl FileKey {
     /// used, and a second implementation of the same four cases is how the two
     /// come to disagree about one of them.
     fn encrypt(&self, method: CryptMethod, num: u32, gen: u16, nonce: u32, data: &[u8]) -> Vec<u8> {
+        self.seal(method, num, gen, nonce, data)
+            .unwrap_or_else(|| data.to_vec())
+    }
+
+    /// `method`'s cipher over `data`, or `None` where it runs none and
+    /// [`FileKey::encrypt`] hands `data` back unchanged: `/Identity`, and an
+    /// AES method under a key AES does not take. [`FileKey::seals`] asks
+    /// this, so what it answers is what encryption does.
+    fn seal(
+        &self,
+        method: CryptMethod,
+        num: u32,
+        gen: u16,
+        nonce: u32,
+        data: &[u8],
+    ) -> Option<Vec<u8>> {
         match method {
-            CryptMethod::Identity => data.to_vec(),
+            CryptMethod::Identity => None,
             // RC4 is its own inverse, so this is `decrypt` unchanged.
-            CryptMethod::Rc4 => rc4(&self.object_key(num, gen, false), data),
+            CryptMethod::Rc4 => Some(rc4(&self.object_key(num, gen, false), data)),
             CryptMethod::AesV2 => {
                 let key = self.object_key(num, gen, true);
                 aes::cbc_encrypt_with_iv_prefix(&key, &self.iv(num, gen, nonce), data)
-                    .unwrap_or_else(|| data.to_vec())
             }
             // 7.6.4.3.3: revision 6 uses the file key directly; there is no
             // per-object salting.
             CryptMethod::AesV3 => {
                 aes::cbc_encrypt_with_iv_prefix(&self.key, &self.iv(num, gen, nonce), data)
-                    .unwrap_or_else(|| data.to_vec())
             }
         }
     }
@@ -830,7 +861,10 @@ mod tests {
     /// `seals` answers whether both halves come out encrypted, held to what
     /// `encrypt_stream` and `encrypt_string` do rather than to the method
     /// names: a key with either method `/Identity` hands that half back as
-    /// it was given, and a writer asking `seals` is asking exactly that.
+    /// it was given, and so does an AES method whose key AES does not take,
+    /// and a writer asking `seals` is asking exactly that. Every key length
+    /// a handler can hand over is tried, at revisions that salt the key per
+    /// object (Algorithm 1) and at one that does not, over several objects.
     #[test]
     fn a_key_seals_only_when_neither_method_passes_bytes_through() {
         let methods = [
@@ -840,25 +874,72 @@ mod tests {
             CryptMethod::AesV3,
         ];
         let plain = b"the quick brown fox jumps over the lazy dog";
-        for stream_method in methods {
-            for string_method in methods {
-                let key = FileKey::from_derived(
-                    (0..32u8).collect(),
-                    6,
-                    stream_method,
-                    string_method,
-                    AuthOutcome::User,
-                );
-                let stream_sealed = key.encrypt_stream(7, 0, plain) != plain;
-                let string_sealed = key.encrypt_string(7, 0, 1, plain) != plain;
-                assert_eq!(
-                    key.seals(),
-                    stream_sealed && string_sealed,
-                    "streams {stream_method:?}, strings {string_method:?}"
-                );
-                assert_eq!(key.stream_method(), stream_method);
-                assert_eq!(key.string_method(), string_method);
+        let objects = [(7u32, 0u16), (8, 0), (900, 3)];
+        // The standard handler's legacy keys are 5 to 16 bytes and revision
+        // 6's are 32; the public-key handler's are 1 to 20 bytes under /V 4
+        // and 32 under /V 5.
+        for revision in [2, 4, 6] {
+            for length in [1u8, 5, 10, 11, 16, 20, 24, 32] {
+                for stream_method in methods {
+                    for string_method in methods {
+                        let key = FileKey::from_derived(
+                            (0..length).collect(),
+                            revision,
+                            stream_method,
+                            string_method,
+                            AuthOutcome::User,
+                        );
+                        let stream_sealed = objects
+                            .iter()
+                            .all(|&(num, gen)| key.encrypt_stream(num, gen, plain) != plain);
+                        let string_sealed = objects
+                            .iter()
+                            .all(|&(num, gen)| key.encrypt_string(num, gen, 1, plain) != plain);
+                        assert_eq!(
+                            key.seals(),
+                            stream_sealed && string_sealed,
+                            "revision {revision}, a {length}-byte key, \
+                             streams {stream_method:?}, strings {string_method:?}"
+                        );
+                        assert_eq!(key.stream_method(), stream_method);
+                        assert_eq!(key.string_method(), string_method);
+                    }
+                }
             }
+        }
+    }
+
+    /// The case that reached a writer: `/V 4` with `/CFM /AESV2` and a
+    /// `/Length` of 40 — or none, which reads as 40 — gives a five-byte file
+    /// key, so Algorithm 1's AES-128 key is its first ten bytes of hash
+    /// (n + 5), a length AES does not take. Such a key hands back what it is
+    /// given, so it seals nothing; eleven bytes is the shortest file key
+    /// whose salted AES key is sixteen.
+    #[test]
+    fn a_forty_bit_key_under_aesv2_seals_nothing() {
+        let params = HandlerParams {
+            v: 4,
+            r: 4,
+            stream_method: CryptMethod::AesV2,
+            string_method: CryptMethod::AesV2,
+            ..HandlerParams::default()
+        };
+        assert_eq!(key_length_bytes(&params, 4), 5, "no /Length reads as 40");
+        let plain = b"BT /F1 12 Tf (secret) Tj ET";
+        for (length, sealed) in [(5u8, false), (10, false), (11, true), (16, true)] {
+            let key = FileKey::from_derived(
+                (0..length).collect(),
+                4,
+                CryptMethod::AesV2,
+                CryptMethod::AesV2,
+                AuthOutcome::User,
+            );
+            assert_eq!(
+                key.encrypt_stream(7, 0, plain) != plain,
+                sealed,
+                "a {length}-byte key"
+            );
+            assert_eq!(key.seals(), sealed, "a {length}-byte key");
         }
     }
 
