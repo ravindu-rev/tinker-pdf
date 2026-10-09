@@ -1361,6 +1361,104 @@ fn a_declared_encoding_names_its_holes_and_yields_to_a_byte_order_mark() {
     );
 }
 
+/// **The Encoding Standard's other labels for UTF-8 and UTF-16 name those
+/// encodings** under [`Source::with_declared_encoding`], which decodes both:
+/// `unicode-1-1-utf-8`, `UCS-2`, and `ISO-10646-UCS-2` — the name XML 1.0
+/// §4.3.3 itself recommends for UCS-2. Each agrees with bytes in the encoding
+/// it names and is overruled, with a warning, by bytes in another, as `UTF-16`
+/// is; [`Source::new`] refuses each as it always did, because a format such as
+/// XPS allows only `UTF-8` and `UTF-16` there.
+#[test]
+fn the_encoding_standards_other_labels_for_utf_8_and_utf_16_name_them() {
+    let declare =
+        |label: &str| format!("<?xml version=\"1.0\" encoding=\"{label}\"?><p>Привет</p>");
+    let wide = |label: &str, big_endian: bool| -> Vec<u8> {
+        let mark: [u8; 2] = if big_endian {
+            [0xFE, 0xFF]
+        } else {
+            [0xFF, 0xFE]
+        };
+        mark.into_iter()
+            .chain(declare(label).encode_utf16().flat_map(|unit| {
+                if big_endian {
+                    unit.to_be_bytes()
+                } else {
+                    unit.to_le_bytes()
+                }
+            }))
+            .collect()
+    };
+    let read = |text: &str, encoding: Encoding, warnings: &[Warning]| {
+        (text.to_owned(), encoding, warnings.to_vec())
+    };
+    let ignored = [Warning::EncodingDeclarationIgnored];
+
+    for label in [
+        "unicode-1-1-utf-8",
+        "UNICODE11UTF8",
+        "unicode20utf8",
+        "x-unicode20utf8",
+    ] {
+        let bytes = declare(label);
+        assert_eq!(
+            declared_text(bytes.as_bytes()),
+            read("Привет", Encoding::Utf8, &[]),
+            "{label}"
+        );
+        assert_eq!(
+            declared_text(&wide(label, false)),
+            read("Привет", Encoding::Utf16LittleEndian, &ignored),
+            "{label} behind a UTF-16 mark"
+        );
+        assert_eq!(
+            refusal(bytes.as_bytes()),
+            Error::UnsupportedEncoding,
+            "{label} through Source::new"
+        );
+    }
+    // UCS-2's names give no byte order, as `UTF-16` gives none, and Appendix
+    // F reads either order as ISO-10646-UCS-2: each agrees with both marks.
+    for label in ["ISO-10646-UCS-2", "UCS-2", "unicode", "csUnicode"] {
+        assert_eq!(
+            declared_text(&wide(label, false)),
+            read("Привет", Encoding::Utf16LittleEndian, &[]),
+            "{label}"
+        );
+        assert_eq!(
+            declared_text(&wide(label, true)),
+            read("Привет", Encoding::Utf16BigEndian, &[]),
+            "{label}, big-endian"
+        );
+        assert_eq!(
+            declared_text(declare(label).as_bytes()),
+            read("Привет", Encoding::Utf8, &ignored),
+            "{label} over UTF-8"
+        );
+        assert_eq!(
+            refusal(&wide(label, false)),
+            Error::UnsupportedEncoding,
+            "{label} through Source::new"
+        );
+    }
+    // Two labels do give an order, by the mark each is named after.
+    assert_eq!(
+        declared_text(&wide("unicodeFEFF", false)),
+        read("Привет", Encoding::Utf16LittleEndian, &[])
+    );
+    assert_eq!(
+        declared_text(&wide("unicodeFEFF", true)),
+        read("Привет", Encoding::Utf16BigEndian, &ignored)
+    );
+    assert_eq!(
+        declared_text(&wide("unicodeFFFE", true)),
+        read("Привет", Encoding::Utf16BigEndian, &[])
+    );
+    assert_eq!(
+        declared_text(&wide("unicodeFFFE", false)),
+        read("Привет", Encoding::Utf16LittleEndian, &ignored)
+    );
+}
+
 #[test]
 fn the_encoding_declaration_is_read_case_insensitively_in_both_spellings() {
     // Both appear in one corpus from one vendor: WPF writes `utf-8` and the XPS

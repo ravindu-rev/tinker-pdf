@@ -88,8 +88,10 @@
 //! [`Source::new`] takes both, and UTF-16 in both byte orders.
 //! [`Source::with_declared_encoding`] also takes the WHATWG Encoding Standard's
 //! single-byte encodings when the declaration names one — FictionBook's
-//! `windows-1251` and `koi8-r` — from tables vendored in [`encoding`]; it is a
-//! second constructor because XPS forbids what XML allows there.
+//! `windows-1251` and `koi8-r` — from tables vendored in [`encoding`], and the
+//! standard's other labels for UTF-8 and UTF-16 (`ISO-10646-UCS-2`,
+//! `unicode-1-1-utf-8`) in the declaration; it is a second constructor because
+//! XPS forbids what XML allows there.
 //!
 //! # Using it
 //!
@@ -853,8 +855,10 @@ pub struct Source<'a> {
     encoding: Encoding,
     warnings: Vec<Warning>,
     /// Whether this source was made by [`Source::with_declared_encoding`], which
-    /// decides how a declaration naming a single-byte encoding the bytes were
-    /// not read in is answered: a warning there, and [`Error::UnsupportedEncoding`]
+    /// decides how a declaration giving any label but `UTF-8`, `UTF8`,
+    /// `UTF-16`, `UTF-16LE` or `UTF-16BE` is answered: by the Encoding
+    /// Standard's table of labels there — a warning when the label names an
+    /// encoding the bytes were not read in — and [`Error::UnsupportedEncoding`]
     /// from [`Source::new`], exactly as before that constructor existed.
     declared: bool,
 }
@@ -897,7 +901,11 @@ impl<'a> Source<'a> {
     /// decoded. A label the standard gives a single-byte encoding decodes the
     /// whole input by that encoding's table; every other case is
     /// [`Source::new`]'s. A byte the table leaves unmapped is U+FFFD and
-    /// [`Warning::UnmappedByte`].
+    /// [`Warning::UnmappedByte`]. The declaration may also give any of the
+    /// standard's labels for UTF-8 and UTF-16 — `unicode-1-1-utf-8`, `UCS-2`,
+    /// and `ISO-10646-UCS-2`, which §4.3.3 itself recommends — and is checked
+    /// against the bytes as `UTF-8` and `UTF-16` are, UCS-2's names giving no
+    /// byte order.
     ///
     /// **A separate constructor rather than [`Source::new`]'s new behaviour**,
     /// because a format can forbid what XML allows: ECMA-388 requires an XPS
@@ -1219,30 +1227,58 @@ impl<'a> Reader<'a> {
         let lower = declared.to_ascii_lowercase();
         let named = match lower.as_str() {
             "utf-8" | "utf8" => Encoding::Utf8,
-            "utf-16" => match self.encoding {
-                // Unmarked `UTF-16` names neither byte order, so it agrees with
-                // whichever one the bytes turned out to be.
-                Encoding::Utf16LittleEndian | Encoding::Utf16BigEndian => self.encoding,
-                Encoding::Utf8 | Encoding::SingleByte(_) => Encoding::Utf16BigEndian,
-            },
+            "utf-16" => self.utf16_in_either_order(),
             "utf-16le" => Encoding::Utf16LittleEndian,
             "utf-16be" => Encoding::Utf16BigEndian,
-            // A single-byte label agrees with the bytes when
-            // `Source::with_declared_encoding` read them by it, and is the
-            // claim a byte order mark overruled when it did not. From
-            // `Source::new` it is what it always was: an encoding that
-            // constructor does not decode.
+            // From `Source::new` every other name is what it always was: an
+            // encoding that constructor does not decode, because a format
+            // such as XPS allows only the names above.
+            _ if !self.declared => return Err(Error::UnsupportedEncoding),
+            // The Encoding Standard's labels, as `Source::with_declared_encoding`
+            // read the bytes by them. A single-byte label agrees with the
+            // bytes when that constructor decoded them by its table, and is
+            // the claim a byte order mark overruled when it did not; UTF-8's
+            // and UTF-16's other labels (`unicode-1-1-utf-8`, `ucs-2`, ...)
+            // name encodings every `Source` decodes.
             other => match encoding::lookup(other) {
-                Some(encoding::Label::SingleByte(single)) if self.declared => {
-                    Encoding::SingleByte(single)
+                Some(encoding::Label::SingleByte(single)) => Encoding::SingleByte(single),
+                Some(encoding::Label::Utf8) => Encoding::Utf8,
+                // UCS-2's names give no byte order, as `UTF-16` gives none:
+                // Appendix F reads either order as ISO-10646-UCS-2. The
+                // standard's table gives them to UTF-16LE, but here a byte
+                // order mark or UTF-16's shape decided the order before the
+                // declaration was read.
+                Some(encoding::Label::Utf16LittleEndian)
+                    if matches!(
+                        other
+                            .trim_matches(|c: char| matches!(c, '\t' | '\n' | '\x0C' | '\r' | ' ')),
+                        "iso-10646-ucs-2" | "ucs-2" | "unicode" | "csunicode"
+                    ) =>
+                {
+                    self.utf16_in_either_order()
                 }
-                _ => return Err(Error::UnsupportedEncoding),
+                // `unicodefeff` and `unicodefffe`, named after a mark's bytes.
+                Some(encoding::Label::Utf16LittleEndian) => Encoding::Utf16LittleEndian,
+                Some(encoding::Label::Utf16BigEndian) => Encoding::Utf16BigEndian,
+                Some(encoding::Label::Unsupported(_)) | None => {
+                    return Err(Error::UnsupportedEncoding)
+                }
             },
         };
         if named != self.encoding {
             self.warn(Warning::EncodingDeclarationIgnored);
         }
         Ok(())
+    }
+
+    /// What a name for UTF-16 that gives no byte order names: whichever order
+    /// the bytes turned out to be in, and UTF-16BE — so a disagreement — when
+    /// they are not UTF-16 at all.
+    fn utf16_in_either_order(&self) -> Encoding {
+        match self.encoding {
+            Encoding::Utf16LittleEndian | Encoding::Utf16BigEndian => self.encoding,
+            Encoding::Utf8 | Encoding::SingleByte(_) => Encoding::Utf16BigEndian,
+        }
     }
 
     /// Everything before the root element: whitespace, comments and processing

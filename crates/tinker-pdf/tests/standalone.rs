@@ -757,6 +757,53 @@ fn a_loose_file_xml_cannot_read_is_read_in_the_encoding_it_names() {
     }
 }
 
+/// **A loose file whose declaration gives one of the Encoding Standard's
+/// other labels for UTF-8 or UTF-16 is XML**: `unicode-1-1-utf-8`, `UCS-2` and
+/// `ISO-10646-UCS-2` (XML 1.0 §4.3.3's own name) name encodings this build
+/// decodes, so the file is not refused: no markup defect is reported, and its
+/// `<div/>` is an empty element where HTML's parser would have opened one —
+/// over UTF-8 bytes and behind a UTF-16LE byte order mark alike, exactly as
+/// with `encoding="utf-8"`.
+#[test]
+fn a_loose_file_declaring_another_label_for_utf_8_or_utf_16_is_xml() {
+    let markup_defects = |document: &Document| {
+        warnings(document)
+            .into_iter()
+            .filter(|w| matches!(w, ArchiveWarning::Markup { .. }))
+            .collect::<Vec<_>>()
+    };
+    for label in [
+        "utf-8",
+        "unicode-1-1-utf-8",
+        "UCS-2",
+        "ISO-10646-UCS-2",
+        "utf-16",
+    ] {
+        let declared = format!(
+            "<?xml version=\"1.0\" encoding=\"{label}\"?>\
+             <html xmlns=\"http://www.w3.org/1999/xhtml\"><body>\
+             <div/><p>Привет</p></body></html>"
+        );
+        let marked: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain(declared.encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        for bytes in [declared.as_bytes(), &marked] {
+            let document = open(bytes);
+            assert_eq!(page_text(&document, 0), "Привет", "{label}");
+            assert_eq!(markup_defects(&document), [], "{label}");
+            // HTML's parser would have opened a <div> and put the <p> in it.
+            let dom = tinker_pdf::epub::xhtml::read_markup_or_html(
+                bytes,
+                &tinker_pdf_xml::Limits::DEFAULT,
+            );
+            let p = dom.nodes.iter().find(|n| n.name == "p").expect("a <p>");
+            let parent = p.parent.and_then(|at| dom.nodes.get(at));
+            assert_eq!(parent.map(|n| n.name.as_str()), Some("body"), "{label}");
+        }
+    }
+}
+
 // ---- a bare image ------------------------------------------------------------
 
 /// **A bare PNG is the one page of a comic, pixel for pixel**, at one image

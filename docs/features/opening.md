@@ -88,7 +88,9 @@ twenty-eight single-byte encodings; a multi-byte one named in a `<meta>` or a
 declaration is `MarkupDefect::EncodingNotDecoded`, over the guess. html5lib's
 encoding tests, vendored beside its trees, hold it: **82 of 82**. **An XHTML
 file whose XML declaration names a single-byte encoding is read in it** — as
-XML when it is well-formed, as an FB2 is. **And a file is read in one
+XML when it is well-formed, as an FB2 is — and one that gives another of the
+standard's labels for UTF-8 or UTF-16, such as `unicode-1-1-utf-8` or XML's
+own `ISO-10646-UCS-2`, is XML as `utf-8` is. **And a file is read in one
 encoding whether or not it is well-formed**: one the XML reader decoded — by
 its byte order mark, its UTF-16 shape (marked or not), the encoding its
 declaration names, or as UTF-8 — and then refused goes to HTML's parser as
