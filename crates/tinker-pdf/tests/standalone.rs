@@ -674,6 +674,62 @@ fn a_loose_xhtml_file_is_read_in_the_single_byte_encoding_it_declares() {
     }));
 }
 
+/// **A loose file XML cannot read is still read in the encoding it says it is
+/// in.** The review of the lane's fixes found the single-byte fix held only
+/// while the XML reader could decode the file: a declared windows-1251 with a
+/// form feed in it — no character to XML — went to HTML's parser as bytes and
+/// was set as `Ïðèâåò`; a UTF-16 file with no byte order mark that is not
+/// well-formed, decoded as UTF-16 and thrown away, was read again as UTF-8;
+/// and a well-formed file declaring Shift_JIS was set in windows-1252's
+/// letters saying only `NotXml`, where a `<meta charset>` naming the same
+/// encoding says `EncodingNotDecoded`.
+#[test]
+fn a_loose_file_xml_cannot_read_is_read_in_the_encoding_it_names() {
+    use tinker_pdf::epub::xhtml::MarkupDefect;
+    let has = |document: &Document, defect: MarkupDefect| {
+        warnings(document).contains(&ArchiveWarning::Markup {
+            item: String::new(),
+            defect,
+        })
+    };
+    let privet: &[u8] = b"\xcf\xf0\xe8\xe2\xe5\xf2";
+
+    // A C0 control the declared table decodes and XML does not admit.
+    let mut controlled = b"<?xml version=\"1.0\" encoding=\"windows-1251\"?>\
+        <html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>"
+        .to_vec();
+    controlled.extend_from_slice(privet);
+    controlled.extend_from_slice(b" \x0c ");
+    controlled.extend_from_slice(privet);
+    controlled.extend_from_slice(b"</p></body></html>");
+    let document = open(&controlled);
+    assert_eq!(page_text(&document, 0), "Привет Привет");
+    assert!(has(&document, MarkupDefect::NotXml));
+
+    // UTF-16LE with no byte order mark, a declaration, and a `<br>` left
+    // open; and the same with no declaration, in Appendix F's unmarked shape.
+    for markup in [
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?><html><body><p>Привет<br></body></html>",
+        "<html><body><p>Привет<br></body></html>",
+    ] {
+        let wide: Vec<u8> = markup.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let document = open(&wide);
+        assert_eq!(page_text(&document, 0), "Привет", "{markup}");
+        assert!(has(&document, MarkupDefect::NotXml), "{markup}");
+    }
+
+    // An encoding this build does not decode, declared by a well-formed file:
+    // the guess, and the same defect a `<meta>` naming it gets.
+    let japanese = open(
+        b"<?xml version=\"1.0\" encoding=\"Shift_JIS\"?>\
+          <html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>\x93\xfa\x96\x7b</p></body></html>",
+    );
+    assert!(has(&japanese, MarkupDefect::EncodingNotDecoded));
+    let meta = open(b"<html><head><meta charset=shift_jis></head><body><p>\x93\xfa\x96\x7b<br>");
+    assert!(has(&meta, MarkupDefect::EncodingNotDecoded));
+    assert_eq!(page_text(&japanese, 0), page_text(&meta, 0));
+}
+
 // ---- a bare image ------------------------------------------------------------
 
 /// **A bare PNG is the one page of a comic, pixel for pixel**, at one image

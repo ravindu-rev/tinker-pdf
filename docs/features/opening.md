@@ -88,10 +88,17 @@ twenty-eight single-byte encodings; a multi-byte one named in a `<meta>` or a
 declaration is `MarkupDefect::EncodingNotDecoded`, over the guess. html5lib's
 encoding tests, vendored beside its trees, hold it: **82 of 82**. **An XHTML
 file whose XML declaration names a single-byte encoding is read in it** — as
-XML when it is well-formed, as an FB2 is, and when it is not, by HTML's parser
-over the characters that encoding decodes rather than over bytes for §13.2.3
-to guess at, with `MarkupDefect::Undecodable` for a byte its table leaves
-unmapped.
+XML when it is well-formed, as an FB2 is. **And a file is read in one
+encoding whether or not it is well-formed**: one the XML reader decoded — by
+its byte order mark, its UTF-16 shape (marked or not), the encoding its
+declaration names, or as UTF-8 — and refused for its syntax goes to HTML's
+parser as those characters, with `MarkupDefect::Undecodable` for a byte a
+single-byte table leaves unmapped; only bytes the XML reader could not decode
+at all (an encoding it does not read, malformed bytes, a character XML does
+not admit, such as a form feed) are decoded by §13.2.3 as above, whose prescan
+reads the same declaration. A well-formed file declaring Shift_JIS is
+therefore the guess with `EncodingNotDecoded`, as a `<meta charset=shift_jis>`
+is (`a_loose_file_xml_cannot_read_is_read_in_the_encoding_it_names`).
 Scripting is disabled, always — nothing
 here runs a script — so a `<noscript>`'s content is markup and is drawn. It is
 held to html5lib's own suite, vendored: **1 779 of the 1 784
