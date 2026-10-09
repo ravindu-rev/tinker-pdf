@@ -42,7 +42,7 @@ use tinker_pdf_css::cascade::{cascade_from, ComputedStyle, Origin, PseudoBox, St
 use tinker_pdf_css::font_face::FontFace;
 use tinker_pdf_css::media::MediaContext;
 use tinker_pdf_css::parser::Stylesheet;
-use tinker_pdf_css::property::{Display, Float, Overflow, Position};
+use tinker_pdf_css::property::{Display, Float, Overflow, Position, WhiteSpace};
 use tinker_pdf_css::selector::PseudoElement;
 use tinker_pdf_css::{
     Budget as CssBudget, ImportResolver, Limits as CssLimits, Refusal as CssRefusal,
@@ -990,6 +990,23 @@ fn build_with(out: &mut Vec<BoxNode>, build: &mut Build<'_>, at: usize, style: &
         push_replaced(out, style, size, anchor);
         return;
     }
+    // HTML §15.3.4 (Rendering, *Phrasing content*): `br { display-outside:
+    // newline; } /* this also has bidi implications */`. A `<br>` is a
+    // newline in its line, decided by the element as being replaced is, and
+    // only `display: none` takes it away. See [`push_newline`].
+    if node.is_html() && node.name == "br" && style.display != Display::None {
+        push_newline(out, style, anchor);
+        // HTML's parser never gives a `<br>` content (a void element,
+        // §13.1.2); XML can, and what it holds is laid out after the break
+        // rather than lost.
+        for child in &node.children {
+            match child {
+                Child::Element(index) => build_into(out, build, *index),
+                Child::Text(text) => push_text(out, style, text, anchor),
+            }
+        }
+        return;
+    }
     let mut children = Vec::with_capacity(node.children.len());
     // CSS 2.1 §12.1: `::before` is the first child of its originating element
     // and `::after` is the last. **Inside**, not beside — a `::before` on a
@@ -1040,6 +1057,46 @@ fn push_replaced(
     out.push(
         BoxNode::replaced(style.clone(), Intrinsic::raster(width, height)).with_anchor(anchor),
     );
+}
+
+/// A `<br>`'s box, for [`build_into`]: one line feed, U+000A, in an anonymous
+/// inline box that inherits from the element and whose `white-space` is
+/// `pre-line`.
+///
+/// # What HTML says, and what that is in this build
+///
+/// HTML §15.3.4 gives the element `display-outside: newline`, a value
+/// `css-display-3` does not define, with the comment *"this also has bidi
+/// implications"*. The newline is the one CSS 2.1's own sample sheet spelled
+/// `br:before { content: "\A"; white-space: pre-line }` (Appendix D), and that
+/// is what is laid out here: a preserved segment break is a forced line break
+/// (`css-text-3` §5.1), and U+000A is the character a forced line break is in
+/// the text `tinker-pdf-layout` breaks.
+///
+/// **The bidi implication is that it ends the bidi paragraph.** U+000A is
+/// Bidi_Class `B`; `css-writing-modes-3` §2.4 bounds a bidi paragraph by a
+/// block boundary or a *"bidi type B"* forced paragraph break, and UAX #9's P1
+/// splits the text there, the separator kept with the paragraph before it. So
+/// a `<br>` is not a U+2028 LINE SEPARATOR, which is `WS` and ends only its
+/// line: the text after a `<br>` is resolved as a paragraph of its own, and a
+/// `plaintext` block asks it for its own first strong direction, as a
+/// preserved newline is asked.
+///
+/// `pre-line` and not the element's own `white-space`, since under `normal`
+/// or `nowrap` a line feed is a collapsible space; it keeps the break and
+/// removes the spaces either side of it, as §4.1.1 does around a preserved
+/// one. Nothing is drawn for it: the break is what ends the line, and a line's
+/// trailing segment break is not set (`Builder::trim`). The box is an
+/// anonymous one, inheriting from the element, so a `float` or a `position`
+/// on a `<br>` does not take the newline out of its line, and an author's
+/// `display` other than `none` does not make it a block: no CSS value is
+/// `newline`'s, so there is nothing in the cascade for one to override.
+/// `::before` and `::after` on a `<br>` generate nothing.
+#[inline(never)]
+fn push_newline(out: &mut Vec<BoxNode>, style: &ComputedStyle, anchor: u32) {
+    let mut newline = inline_box(style);
+    newline.white_space = WhiteSpace::PreLine;
+    out.push(BoxNode::text(newline, "\n").with_anchor(anchor));
 }
 
 /// A text box in its element's inline style, for [`build_into`].
@@ -1146,10 +1203,24 @@ fn first_letter(
             continue;
         }
         let display = style.display;
+        let breaks = tinker_pdf_layout::text::preserves_breaks(style.white_space);
         match &mut child.content {
             Content::Replaced(_) => return LetterSearch::Stop,
             Content::Text(text) => {
-                let Some(unit) = letter_unit(text) else {
+                // A preserved segment break before the letter — a `<br>`'s
+                // ([`push_newline`]) or one written in a `pre` — ends the
+                // first formatted line with no letter on it, so there is none
+                // (§2.2: the letter *"on the first formatted line"*).
+                let unit = letter_unit(text);
+                let lead = unit.map_or(text.len(), |(start, _)| start);
+                if breaks
+                    && text
+                        .get(..lead)
+                        .is_some_and(|lead| lead.contains(['\n', '\r']))
+                {
+                    return LetterSearch::Stop;
+                }
+                let Some(unit) = unit else {
                     if text.chars().all(char::is_whitespace) {
                         at += 1;
                         continue;

@@ -1893,3 +1893,68 @@ fn an_emergency_break_after_a_soft_hyphen_under_none_draws_no_hyphen() {
     let text = doc.page(0).expect("a page").text().plain_text();
     assert_eq!(text.trim_end(), "aaaa\nbbbb\nbbbb");
 }
+
+// ---- the forced line break ------------------------------------------------------
+
+/// Every `Tj` on the first page that a `Td` placed, as `(x, y, string)`: the
+/// operands of the `Td` before it and the string it shows, as written.
+fn shown(doc: &Document) -> Vec<(f64, f64, String)> {
+    let words = tokens(doc);
+    let mut out = Vec::new();
+    for at in 4..words.len() {
+        if words[at] != "Tj" || words[at - 2] != "Td" {
+            continue;
+        }
+        if let (Ok(x), Ok(y)) = (words[at - 4].parse::<f64>(), words[at - 3].parse::<f64>()) {
+            out.push((x, y, words[at - 1].clone()));
+        }
+    }
+    out
+}
+
+/// **A `<br>` is a forced line break, and nothing is drawn for it** (HTML
+/// §15.3.4, `br { display-outside: newline }`), read off the operators.
+///
+/// `aaa<br/>bbb` in Courier at twenty pixels with a thirty-pixel
+/// `line-height` is two strings, `(aaa)` and `(bbb)`, each moved to the
+/// content box's left edge, the second 22.5 pt below the first — thirty CSS
+/// pixels at 72/96 — and no string shows the break. Text extraction reads
+/// the page back as the two lines. The mismatch is the same page with `br {
+/// display: none }`, which generates no box and so no break: the two strings
+/// on one baseline, `(bbb)` three advances of 15 pt Courier after `(aaa)`,
+/// read back as the one line `aaabbb` — which is what every `<br>` drew
+/// before.
+#[test]
+fn a_br_is_a_forced_line_break_and_draws_nothing() {
+    let style = "p { font-family: monospace; font-size: 20px; line-height: 30px }";
+    let doc = open(style, "<p>aaa<br/>bbb</p>");
+    let drawn = shown(&doc);
+    let strings: Vec<&str> = drawn.iter().map(|(_, _, s)| s.as_str()).collect();
+    assert_eq!(strings, ["(aaa)", "(bbb)"], "{drawn:?}");
+    assert!(
+        (drawn[0].0 - drawn[1].0).abs() < 0.01,
+        "both lines start at the content edge: {drawn:?}"
+    );
+    assert!(
+        ((drawn[0].1 - drawn[1].1) - 30.0 * 72.0 / 96.0).abs() < 0.01,
+        "the second line is one line-height down: {drawn:?}"
+    );
+    let text = doc.page(0).expect("a page").text();
+    let lines: Vec<&str> = text.lines().iter().map(|line| line.text.as_str()).collect();
+    assert_eq!(lines, ["aaa", "bbb"]);
+
+    let gone = open(
+        &format!("{style} br {{ display: none }}"),
+        "<p>aaa<br/>bbb</p>",
+    );
+    let drawn = shown(&gone);
+    assert_eq!(drawn.len(), 2, "{drawn:?}");
+    assert!(
+        (drawn[0].1 - drawn[1].1).abs() < 0.01
+            && ((drawn[1].0 - drawn[0].0) - 3.0 * 0.6 * 15.0).abs() < 0.01,
+        "display: none leaves one line: {drawn:?}"
+    );
+    let text = gone.page(0).expect("a page").text();
+    let lines: Vec<&str> = text.lines().iter().map(|line| line.text.as_str()).collect();
+    assert_eq!(lines, ["aaabbb"], "display: none takes the break away");
+}

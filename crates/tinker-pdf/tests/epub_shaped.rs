@@ -1952,6 +1952,55 @@ fn a_line_separator_ends_a_line_and_not_a_plaintext_paragraph() {
     );
 }
 
+/// **A `<br>` ends its bidi paragraph as well as its line, as a paragraph
+/// separator does and a U+2028 line separator does not.**
+///
+/// HTML §15.3.4 makes a `<br>` a newline, *"this also has bidi
+/// implications"*: the newline is U+000A, bidi type `B`, and
+/// `css-writing-modes-3` §2.4 bounds a bidi paragraph by a block boundary or
+/// a *"bidi type B"* forced paragraph break, where UAX #9's P1 splits the
+/// text.
+///
+/// `a!`, the break, `b`, in a `dir="rtl"` paragraph, each glyph 9 pt. Where
+/// the break ends the paragraph, `!` is a neutral between `a` (L) and the
+/// paragraph's end, whose `eos` is the paragraph's R: N1 does not apply, N2
+/// gives it the embedding level, 1, and I2 raises `a` to 2 — so L2 draws `!`
+/// left of `a`, the pair against the right edge. Where the break ends only
+/// the line, `!` and the separator lie between `a` and `b`, both L, and N1
+/// makes them L: `a!` in the order written. U+2029 is the first case and
+/// U+2028 the second, worked out the same way. And in a `plaintext` block
+/// the text after a `<br>` takes its own first strong direction, so `ab`
+/// after an Arabic word starts at the left edge, where after a U+2028 it is
+/// flush right (`a_line_separator_ends_a_line_and_not_a_plaintext_paragraph`).
+#[test]
+fn a_br_ends_a_bidi_paragraph_and_not_only_a_line() {
+    let ended = [("!", RIGHT - 2.0 * GLYPH), ("a", RIGHT - GLYPH)];
+    let joined = [("a", RIGHT - 2.0 * GLYPH), ("!", RIGHT - GLYPH)];
+    for (body, first) in [
+        ("a!<br/>b", &ended),
+        ("a!\u{2029}b", &ended),
+        ("a!\u{2028}b", &joined),
+    ] {
+        let lines = drawn_lines(" dir=\"rtl\"", body);
+        assert_eq!(lines.len(), 2, "{body:?} is not two lines: {lines:?}");
+        assert!(at(&lines[0], first), "{body:?}'s first line: {lines:?}");
+        assert!(
+            at(&lines[1], &[("b", RIGHT - GLYPH)]),
+            "{body:?}'s second line: {lines:?}"
+        );
+    }
+    let arabic = "\u{628}\u{62D}\u{645}";
+    let plain = drawn_lines(
+        " style=\"unicode-bidi: plaintext\"",
+        &format!("{arabic}<br/>ab"),
+    );
+    assert_eq!(plain.len(), 2, "{plain:?}");
+    assert!(
+        at(&plain[1], &[("a", LEFT), ("b", LEFT + GLYPH)]),
+        "the paragraph after the br is not left to right: {plain:?}"
+    );
+}
+
 /// **An inline box's `unicode-bidi` opens a level round its content, and
 /// `direction` alone does not** (`css-writing-modes-3` §2.2, §2.4.2).
 ///

@@ -226,6 +226,25 @@ fn the_title_is_the_first_headings_text_with_its_links_and_images_resolved() {
     }
 }
 
+/// **A hard line break is a line break on the page** (CommonMark 0.31.2
+/// §6.7): a line ending after two spaces or a backslash is a `<br />`, which
+/// HTML's rendering makes a newline (§15.3.4), so `first` and `second` are
+/// read back as two lines; and a soft line break (§6.8) is a space, so the
+/// same words written without either are one. Before `<br>` set a break,
+/// all three read back as one line.
+#[test]
+fn a_hard_line_break_is_a_line_break_on_the_page() {
+    let lines = |source: &str| -> Vec<String> {
+        let document = Document::open_markdown(source.as_bytes().to_vec(), &OpenOptions::default())
+            .expect("opens");
+        let text = document.page(0).expect("a page").text();
+        text.lines().iter().map(|line| line.text.clone()).collect()
+    };
+    assert_eq!(lines("first  \nsecond\n"), ["first", "second"]);
+    assert_eq!(lines("first\\\nsecond\n"), ["first", "second"]);
+    assert_eq!(lines("first\nsecond\n"), ["first second"]);
+}
+
 /// **A Markdown document is the XHTML it translates to, pixel for pixel**:
 /// `from_markdown` against `from_html` handed the same reader's HTML in an
 /// XHTML document. One cascade, one layout, one painter — the translation is

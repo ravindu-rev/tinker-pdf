@@ -419,10 +419,11 @@ pub enum MarkupDefect {
 /// - **only `<pre dir="auto">` and `<textarea dir="auto">` are `unicode-bidi:
 ///   plaintext`**, §15.3.5's one rule for it, so that each paragraph of
 ///   preformatted text takes its own direction after every preserved
-///   newline, a forced break of bidi type B (a U+2028 is not one). A
-///   `<p dir="auto">` was mapped to `plaintext` too, which re-decided the
-///   direction after every preserved newline and left its block descendants
-///   the parent's `ltr` (review of lane 8C);
+///   newline or `<br>`, each a forced break of bidi type B (a U+2028 is not
+///   one; `epub::read::push_newline`). A `<p dir="auto">` was mapped to
+///   `plaintext` too, which re-decided the direction after every one of
+///   them and left its block descendants the parent's `ltr` (review of lane
+///   8C);
 /// - `<bdo>` is `unicode-bidi: isolate-override`, which this build refuses
 ///   by value, so each `<bdo>` is counted rather than read as honoured.
 fn bidi_hints(node: &Node) -> Option<&'static str> {

@@ -543,6 +543,53 @@ fn tag_soup_opens_as_the_tree_html_builds_pixel_for_pixel() {
     assert_eq!(titled.metadata().title.as_deref(), Some("Soup"));
 }
 
+/// **A `<br>` breaks its line whichever reader built the tree** (HTML
+/// §15.3.4, `br { display-outside: newline }`). A loose page HTML's parser
+/// reads — a void `<br>`, a `<p>` never closed — and its XHTML twin each read
+/// back as `first` over `second`, both at the page's left edge, the second
+/// baseline one `line-height` below the first — twenty CSS pixels, 15 pt —
+/// and eleven characters, none of them drawn for the break. Both read back
+/// as the one line `firstsecond` before.
+#[test]
+fn a_br_breaks_the_line_in_tag_soup_and_in_xhtml() {
+    let style =
+        "<style>body { margin: 0 } p { margin: 0; font-size: 16px; line-height: 20px }</style>";
+    let soup =
+        format!("<!DOCTYPE html><html><head>{style}</head><body><p>first<br>second</body></html>");
+    let xhtml = format!(
+        "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head>{style}</head>\
+         <body><p>first<br/>second</p></body></html>"
+    );
+    for markup in [soup, xhtml] {
+        let doc = open(markup.as_bytes());
+        let text = doc.page(0).expect("a page").text();
+        let lines: Vec<(String, f64, f64, usize)> = text
+            .lines()
+            .iter()
+            .filter_map(|line| {
+                let first = line.chars.first()?;
+                Some((
+                    line.text.clone(),
+                    first.origin.0,
+                    first.origin.1,
+                    line.chars.len(),
+                ))
+            })
+            .collect();
+        let texts: Vec<&str> = lines.iter().map(|(t, ..)| t.as_str()).collect();
+        assert_eq!(texts, ["first", "second"], "{markup}");
+        assert!(
+            (lines[0].1 - lines[1].1).abs() < 1e-6,
+            "{markup}: {lines:?}"
+        );
+        assert!(
+            ((lines[0].2 - lines[1].2) - 20.0 * PX_TO_PT).abs() < 1e-6,
+            "{markup}: the second line is not one line-height down: {lines:?}"
+        );
+        assert_eq!(lines[0].3 + lines[1].3, 11, "{markup}: {lines:?}");
+    }
+}
+
 /// **The tree HTML builds is held to the XML reader's depth**: every reader
 /// after this one was written against `MAX_XML_DEPTH` standing in front of it,
 /// and HTML's adoption agency can nest clones deeper than its own stack. An

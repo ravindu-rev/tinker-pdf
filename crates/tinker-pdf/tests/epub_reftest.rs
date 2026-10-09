@@ -1188,6 +1188,102 @@ fn a_first_letter_on_two_hundred_nested_blocks_is_one_box() {
     same("two hundred nested ::first-letter", styled, written, broken);
 }
 
+/// **A `::first-letter` is on the first formatted line, and a `<br>` that
+/// starts the block leaves that line with no letter on it** (`css-pseudo-4`
+/// §2.2): `<p><br/>Hello there</p>` under a 30-pixel first letter is the same
+/// paragraph with no rule at all, and so is a `pre` whose text starts with a
+/// preserved line feed. The mismatch is the `H` on the second line wrapped,
+/// which is where the search found a letter once the break had made a line.
+#[test]
+fn a_first_letter_after_a_br_is_not_there() {
+    let big = ".big { font-size: 30px } pre { margin: 0 }";
+    for (what, rule, body, broken) in [
+        (
+            "a br",
+            "p::first-letter { font-size: 30px }",
+            "<p><br/>Hello there</p>",
+            r#"<p><br/><span class="big">H</span>ello there</p>"#,
+        ),
+        (
+            "a preserved line feed",
+            "pre::first-letter { font-size: 30px }",
+            "<pre>\nHello there</pre>",
+            "<pre>\n<span class=\"big\">H</span>ello there</pre>",
+        ),
+    ] {
+        let styled = lay(&format!("{big} {rule}"), body);
+        let unstyled = lay(big, body);
+        let broken = lay(big, broken);
+        same(what, styled, unstyled, broken);
+    }
+}
+
+/// **A `<br>` is a line feed that `white-space` preserves** — CSS 2.1's own
+/// sample sheet spelled HTML's newline `br:before { content: "\A";
+/// white-space: pre-line }` (Appendix D) — in a paragraph, in an inline box,
+/// under `nowrap`, in a table cell, and where an author gave the `<br>` a
+/// `display`, a `float` or a `position`: each is the same text with a
+/// preserved line feed where the `<br>` was. The mismatch is the paragraph
+/// with neither, which is where every `<br>` was laid out before.
+#[test]
+fn a_br_is_a_preserved_line_feed() {
+    let feed = r#"<span style="white-space: pre-line">&#10;</span>"#;
+    for (what, style, br, written, broken) in [
+        (
+            "a paragraph",
+            "",
+            "<p>aaa <br/> bbb</p>".to_owned(),
+            format!("<p>aaa {feed} bbb</p>"),
+            "<p>aaa bbb</p>".to_owned(),
+        ),
+        (
+            "an inline box",
+            "",
+            "<p>aa <span>bbb<br/>ccc</span> dd</p>".to_owned(),
+            format!("<p>aa <span>bbb{feed}ccc</span> dd</p>"),
+            "<p>aa <span>bbbccc</span> dd</p>".to_owned(),
+        ),
+        (
+            "nowrap",
+            "p { white-space: nowrap }",
+            "<p>aaaa bbbb cccc dddd eeee<br/>ffff gggg hhhh iiii jjjj</p>".to_owned(),
+            format!("<p>aaaa bbbb cccc dddd eeee{feed}ffff gggg hhhh iiii jjjj</p>"),
+            "<p>aaaa bbbb cccc dddd eeeeffff gggg hhhh iiii jjjj</p>".to_owned(),
+        ),
+        (
+            "a table cell",
+            "",
+            "<table><tr><td>aaa<br/>bbb</td><td>cc</td></tr></table>".to_owned(),
+            format!("<table><tr><td>aaa{feed}bbb</td><td>cc</td></tr></table>"),
+            "<table><tr><td>aaabbb</td><td>cc</td></tr></table>".to_owned(),
+        ),
+        // No CSS value is `newline`'s, so an author's `display`, `float` or
+        // `position` on a `<br>` has nothing to override: it is the same
+        // newline in the same line.
+        (
+            "a br an author made a floated block",
+            "br { display: block; float: left; margin: 10px }",
+            "<p>aaa <br/> bbb</p>".to_owned(),
+            format!("<p>aaa {feed} bbb</p>"),
+            "<p>aaa bbb</p>".to_owned(),
+        ),
+        (
+            "a br an author positioned",
+            "br { position: absolute }",
+            "<p>aaa <br/> bbb</p>".to_owned(),
+            format!("<p>aaa {feed} bbb</p>"),
+            "<p>aaa bbb</p>".to_owned(),
+        ),
+    ] {
+        same(
+            what,
+            lay(style, &br),
+            lay(style, &written),
+            lay(style, &broken),
+        );
+    }
+}
+
 /// **`max-height` on a box that clips is the height it clamps to** (CSS 2.2
 /// §10.7, with `css-overflow-3` §3's clip): a 24-pixel `max-height` over four
 /// lines in an `overflow: hidden` box lays out as a 24-pixel `height` — the

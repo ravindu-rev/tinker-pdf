@@ -187,7 +187,13 @@ h6 {
   margin-bottom: 2.33em;
 }
 
-/* ---- §15.3.4: the phrasing elements ------------------------------------ */
+/* ---- §15.3.4: the phrasing elements ------------------------------------
+ *
+ * Its `br { display-outside: newline; }` is not here: `newline` is a value no
+ * CSS specification defines, so the rule would be charged to the census on
+ * every `<br>` of every book and change nothing. The newline is the element's
+ * own, and `epub::read` lays it out as the line feed it is (`push_newline`),
+ * as `epub::xhtml` answers `dir`. */
 b, strong, th {
   font-weight: bold;
 }

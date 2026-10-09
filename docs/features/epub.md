@@ -111,6 +111,29 @@ breaking is **UAX #14** over vendored Unicode 17.0.0 data, passing
 come from the face (embedded, host-provided, or the standard-14 metrics for
 an unembedded family), one per character.
 
+**A `<br>` is a forced line break** — HTML §15.3.4's `br { display-outside:
+newline; }`, from the XML reader's tree and HTML's parser's alike.
+`epub::read` lays it out as the line feed CSS 2.1's own sample sheet made it
+(`br:before { content: "\A"; white-space: pre-line }`, Appendix D), so it
+ends its line under every `white-space`, `nowrap` and `pre` included, the
+spaces either side of it go as they do round a preserved newline, and nothing
+is drawn for it; two in a row leave an empty line, a trailing one leaves
+none, and a block that is one `<br>` is one line tall (CSS 2.2 §9.4.2). Being
+U+000A, bidi type B, it ends its bidi paragraph as well as its line
+(`css-writing-modes-3` §2.4, UAX #9 P1) — HTML's *"this also has bidi
+implications"* — which a U+2028 does not. `display: none` takes it away;
+no other `display`, nor a `float` or a `position`, moves it out of its line;
+a `::first-letter` after one is not on the first line and is not made; and
+`::before` and `::after` on a `<br>` generate nothing. *Corrected October
+2026*: a `<br>` set no break at all before, so `<p>a<br/>b</p>` was the one
+line `ab`, in a book, a loose page and a Markdown hard break alike
+(`epub_analytic.rs`'s five `a_br_…`/`two_brs_…` tests, `epub_paint.rs`'s
+`a_br_is_a_forced_line_break_and_draws_nothing`, `epub_shaped.rs`'s
+`a_br_ends_a_bidi_paragraph_and_not_only_a_line`, `standalone.rs`'s
+`a_br_breaks_the_line_in_tag_soup_and_in_xhtml`, `epub_reftest.rs`'s
+`a_br_is_a_preserved_line_feed`). `<wbr>`, HTML's `display-outside:
+break-opportunity`, is still no break opportunity.
+
 **`text-transform`** (`css-text-3` §2.1) runs between white-space collapsing
 and line breaking, which is §1.3's order, so a transformed run is measured as
 the characters it becomes. The mapping is Unicode §3.13's **full** case
@@ -175,8 +198,8 @@ boxes, no deeper than UAX #9's own 125
 formatting characters only into the text the painter resolves, never into the
 page's; and a block's `plaintext`
 gives each paragraph its own first strong direction — a paragraph separator
-starts one, which is a forced break of bidi type B (a preserved newline, CR,
-NEL or U+2029), and a U+2028 line separator, a forced break that is not,
+starts one, which is a forced break of bidi type B (a preserved newline, a
+`<br>`, CR, NEL or U+2029), and a U+2028 line separator, a forced break that is not,
 ends its line and not its paragraph (§2.4). HTML's `dir` and `<bdi>` are presentational hints
 (`epub::xhtml`): `dir="ltr"` and `"rtl"` set `direction` and isolate, and
 `dir="auto"` and a `<bdi>` with no `dir` isolate with the direction HTML's
