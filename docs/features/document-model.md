@@ -212,8 +212,12 @@ and the one every named `BDC` asks for on every reading of a page — is read
 where it lies, the document's cached object or the resource dictionary's
 own, and never copied per sequence: while it was, a review measured 2 000
 sequences naming one list beside a 1 048 576-entry array at 150 s of text
-extraction, against 0.38 s borrowed (`tests/property_list_work.rs` counts
-the bytes). They are not the `/EmbeddedFiles` tree's
+extraction, against 0.38 s borrowed. So is each value read out of it —
+`/MCID`, `/ActualText`, `/Alt`, `/Lang`, `/E`, `/MCAF` — since a list read
+where it lies still copied a long array under one of those keys at every
+`BDC`, as it did before the list was ever copied
+(`tests/property_list_work.rs` counts the bytes, a page per key). They are
+not the `/EmbeddedFiles` tree's
 attachments, which `attachments()` lists: an associated file belongs to an
 object, and the errata say filing it in the tree is not required. The
 builder writes them — `DocumentBuilder::associate_file`,

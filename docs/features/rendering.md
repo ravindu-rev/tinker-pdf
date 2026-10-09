@@ -301,9 +301,11 @@ to visible — a malformed `/VE`, an unknown `/P`, an unlisted group, a cycle
 — because content wrongly hidden is invisible to the reader while content
 wrongly shown is theirs to ignore. A hidden layer is reported by its `/Name`
 (8.11.2.1), falling back to the resource name. The group an `/OC /name BDC`
-names, and the `/Properties` table it sits in, are read where they lie
-rather than copied at each `BDC`, which a direct group beside a long array
-made the page's sequences times the array (`tests/property_list_work.rs`).
+names, the `/Properties` table it sits in and every value read out of the
+group — `/Name`, `/Type`, and a membership dictionary's `/VE` (each operand
+too), `/OCGs` and `/P` — are read where they lie rather than copied at each
+`BDC`, which a long array beside or under any of them made the page's
+sequences times the array (`tests/property_list_work.rs`).
 
 **Page geometry.** `page_view_transform` applies `/Rotate` (7.7.3.3,
 normalised to quarter turns) and the `/CropBox` origin, so the bitmap is the

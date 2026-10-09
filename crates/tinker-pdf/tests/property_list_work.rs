@@ -13,7 +13,10 @@
 //! three after it (643 s). The list, the `/Properties` table it sits in and
 //! the `/MCAF` array beside it are now read where they lie: the document's
 //! cached object for an indirect one, the resource dictionary itself for a
-//! direct one.
+//! direct one. So is every value read out of a list or an optional content
+//! group: a verifier found the same copy, at the same cost, with the array
+//! under `/MCID` or `/Alt` rather than beside them, or under an `/OC`
+//! group's `/Name` — and on develop before the lane too.
 //!
 //! # Why this file counts allocations, and why it is a file of its own
 //!
@@ -92,11 +95,15 @@ const PER_SEQUENCE: usize = 16 * 1024;
 
 /// A 2.0 page whose `/Properties` is `properties` and whose content is
 /// `/{tag} /P0 BDC EMC` `count` times, with `extra` objects from 5 on.
+///
+/// The catalog's `/OCProperties` is `7 0 R`, for `extra` to write where a
+/// page needs a configuration; on every other page it names nothing, which
+/// reads as none.
 fn pdf(tag: &str, count: usize, properties: &str, extra: &str) -> Vec<u8> {
     let content = format!("/{tag} /P0 BDC EMC\n").repeat(count);
     format!(
         "%PDF-2.0\n\
-1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties 7 0 R >>\nendobj\n\
 2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
 3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100]\n\
    /Resources << /Properties {properties} >> /Contents 4 0 R >>\nendobj\n\
@@ -144,6 +151,12 @@ fn cost_of_more_sequences(
 ///   list again for each;
 /// - `/OC` sequences naming a direct optional content group beside the large
 ///   array, which the reading asks for its layer as well as its properties.
+///
+/// Then the array as each **value** the reading takes out of a list, one
+/// page each, since a list read where it lies still copies a value read by
+/// copy: the list's `/MCID`, `/ActualText`, `/Alt`, `/Lang` and `/E`; a
+/// group's `/Name` and `/Type`; a membership dictionary's `/OCGs`, `/VE`, an
+/// operand of its `/VE`, and its `/P`.
 ///
 /// Each extra sequence is held to `PER_SEQUENCE` bytes. A copy per sequence
 /// is `SEQUENCES - 1` copies of the array, megabytes each.
@@ -219,4 +232,45 @@ fn a_named_property_list_is_read_where_it_lies() {
         "{SEQUENCES} /OC sequences naming a direct group cost {layer} bytes more than one \
          did, over {budget}: the group or its table is copied for each"
     );
+
+    // Each value a list's properties are read from: the reading asks each
+    // one's type, and a copy to ask is the array's size whatever the answer.
+    for key in ["MCID", "ActualText", "Alt", "Lang", "E"] {
+        let value =
+            cost_of_more_sequences("X", &format!("<< /P0 << /{key} {large} >> >>"), "", text);
+        assert!(
+            value <= budget,
+            "{SEQUENCES} sequences naming a list whose /{key} is a long array cost {value} \
+             bytes more than one did, over {budget}: the value is copied for each"
+        );
+    }
+
+    // What a group's layer is read from, and a membership dictionary's
+    // visibility. `/P` is read only once every group in `/OCGs` is one the
+    // configuration knows, so that page writes one.
+    let configured = "7 0 obj\n<< /OCGs [8 0 R] >>\nendobj\n\
+8 0 obj\n<< /Type /OCG /Name (Layer) >>\nendobj\n";
+    for (what, group, extra) in [
+        ("/Name", format!("<< /Type /OCG /Name {large} >>"), ""),
+        ("/Type", format!("<< /Type {large} /Name (Layer) >>"), ""),
+        ("/OCGs", format!("<< /Type /OCMD /OCGs {large} >>"), ""),
+        ("/VE", format!("<< /Type /OCMD /VE {large} >>"), ""),
+        (
+            "/VE operand",
+            format!("<< /Type /OCMD /VE [/Or {large}] >>"),
+            "",
+        ),
+        (
+            "/P",
+            format!("<< /Type /OCMD /OCGs [8 0 R] /P {large} >>"),
+            configured,
+        ),
+    ] {
+        let value = cost_of_more_sequences("OC", &format!("<< /P0 {group} >>"), extra, text);
+        assert!(
+            value <= budget,
+            "{SEQUENCES} /OC sequences naming a group whose {what} is a long array cost \
+             {value} bytes more than one did, over {budget}: the value is copied for each"
+        );
+    }
 }

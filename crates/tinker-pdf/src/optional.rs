@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use tinker_pdf_content::Layer;
 use tinker_pdf_cos::{decode_text_string, CosDocument, Dict, ObjRef, Object};
 
-use crate::resources::read_resolved;
+use crate::resources::{read_key, read_resolved};
 
 /// How deep a `/VE` visibility expression may nest before it is refused
 /// (8.11.2.3).
@@ -145,8 +145,10 @@ impl OptionalContent {
     /// own: the resource name is what the file called it, and a warning that
     /// cannot say which layer it hid is not actionable (ruling 10).
     ///
-    /// The entry is read where it lies ([`read_resolved`]) and never copied:
-    /// every `/OC /name BDC` asks, and a direct group is as long as the file
+    /// The entry is read where it lies ([`read_resolved`]) and never copied,
+    /// and so is every value read out of it ([`read_key`]) — a group's
+    /// `/Name` and `/Type`, a membership dictionary's `/VE`, `/OCGs` and `/P`:
+    /// every `/OC /name BDC` asks, and any of them is as long as the file
     /// makes it.
     pub(crate) fn layer_of(&self, doc: &CosDocument, object: &Object, fallback: &str) -> Layer {
         let reference = object.as_objref();
@@ -169,18 +171,15 @@ impl OptionalContent {
         reference: Option<ObjRef>,
         fallback: &str,
     ) -> Layer {
-        let name = doc.resolve_key(dict, doc.intern(b"Name"));
-        let label = name
-            .as_string()
-            .map(|s| decode_text_string(&s.bytes))
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| fallback.to_string());
+        // Every value read where it lies, as the dictionary is: a copy of
+        // one is its size at every `BDC` naming the group.
+        let label = read_key(doc, dict, b"Name", |name| {
+            name.as_string().map(|s| decode_text_string(&s.bytes))
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback.to_string());
 
-        let type_entry = doc.resolve_key(dict, doc.intern(b"Type"));
-        let kind = type_entry
-            .as_name()
-            .and_then(|n| doc.name_bytes(n))
-            .map(|n| n.to_vec());
+        let kind = read_key(doc, dict, b"Type", |entry| name_of(doc, entry));
 
         let visible = match kind.as_deref() {
             // 8.11.2.2: a membership dictionary combines groups.
@@ -201,11 +200,17 @@ impl OptionalContent {
         // understood. An expression this build cannot read falls back to
         // /OCGs and /P rather than to nothing, because a file that wrote both
         // wrote the second as the simpler statement of the first.
-        let expression = doc.resolve_key(dict, doc.intern(b"VE"));
-        if let Some(items) = expression.as_array() {
-            if let Some(value) = self.evaluate(doc, items, 0) {
-                return value;
-            }
+        //
+        // Every value here is read where it lies, as `layer_of`'s are: an
+        // expression is evaluated a bounded way in (`MAX_OPERANDS`), but a
+        // copy of one is all of it, at every `BDC`.
+        let understood = read_key(doc, dict, b"VE", |expression| {
+            expression
+                .as_array()
+                .and_then(|items| self.evaluate(doc, items, 0))
+        });
+        if let Some(value) = understood {
+            return value;
         }
 
         let groups = refs_of(doc, dict, b"OCGs");
@@ -227,11 +232,7 @@ impl OptionalContent {
             }
         }
 
-        let entry = doc.resolve_key(dict, doc.intern(b"P"));
-        let policy = entry
-            .as_name()
-            .and_then(|n| doc.name_bytes(n))
-            .map(|n| n.to_vec());
+        let policy = read_key(doc, dict, b"P", |entry| name_of(doc, entry));
 
         // 8.11.2.2 Table 99. Two of these read backwards to anyone who has
         // not just read the table: /AnyOff is visible when *any* group is
@@ -265,11 +266,9 @@ impl OptionalContent {
             return None;
         }
 
-        let head = doc.resolve(items.first()?);
-        let operator = head
-            .as_name()
-            .and_then(|n| doc.name_bytes(n))
-            .map(|n| n.to_vec())?;
+        // The head and each operand read where they lie (`read_resolved`): a
+        // nested expression is copied whole before its length is checked.
+        let operator = read_resolved(doc, items.first()?, |head| name_of(doc, head))?;
         let operands = items.get(1..)?;
         if operands.is_empty() || operands.len() > MAX_OPERANDS {
             return None;
@@ -280,12 +279,15 @@ impl OptionalContent {
             // An operand is either a nested expression or a group reference.
             // A nested *array* is only ever an expression: 8.11.2.3 has no
             // other array-shaped leaf.
-            let resolved = doc.resolve(operand);
-            if let Some(nested) = resolved.as_array() {
-                values.push(self.evaluate(doc, nested, depth + 1)?);
-                continue;
+            let nested = read_resolved(doc, operand, |resolved| {
+                resolved
+                    .as_array()
+                    .map(|nested| self.evaluate(doc, nested, depth + 1))
+            });
+            match nested {
+                Some(value) => values.push(value?),
+                None => values.push(self.group_state(operand.as_objref()?)?),
             }
-            values.push(self.group_state(operand.as_objref()?)?);
         }
 
         match operator.as_slice() {
@@ -308,11 +310,17 @@ impl OptionalContent {
 /// A single reference where an array was expected is accepted: `/OCGs 5 0 R`
 /// is legal in a membership dictionary (8.11.2.2) and appears in the wild for
 /// the configuration arrays too.
+///
+/// Read where it lies, never cloned: a membership dictionary's `/OCGs` is
+/// read at every `BDC` naming it, and only `MAX_OPERANDS` of it is looked
+/// at, so a copy was the whole array to read the head of it.
 fn refs_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Vec<ObjRef> {
-    let value = dict.get(doc.intern(key)).cloned().unwrap_or(Object::Null);
+    let Some(value) = dict.get(doc.intern(key)) else {
+        return Vec::new();
+    };
     if let Some(reference) = value.as_objref() {
         // The key may point at the array indirectly, or *be* the one group.
-        let resolved = doc.resolve(&value);
+        let resolved = doc.resolve(value);
         let Some(items) = resolved.as_array() else {
             return vec![reference];
         };
@@ -322,6 +330,14 @@ fn refs_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Vec<ObjRef> {
         Some(items) => collect(items),
         None => Vec::new(),
     }
+}
+
+/// The name `object` is, as bytes; `None` for anything else.
+fn name_of(doc: &CosDocument, object: &Object) -> Option<Vec<u8>> {
+    object
+        .as_name()
+        .and_then(|n| doc.name_bytes(n))
+        .map(|n| n.to_vec())
 }
 
 fn collect(items: &[Object]) -> Vec<ObjRef> {

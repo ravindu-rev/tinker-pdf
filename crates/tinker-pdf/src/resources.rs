@@ -420,6 +420,26 @@ pub(crate) fn read_resolved<R>(
     }
 }
 
+/// `read` of the value of `key` in `dict`, resolved where it lies
+/// ([`read_resolved`]): what [`CosDocument::resolve_key`] answers, `Null` for
+/// an absent key, without its copy of a direct value.
+///
+/// For the readers that take values **out of** a dictionary read where it
+/// lies: the dictionary is not copied, and a value under one of the keys
+/// they read must not be either, or a long array under `/Alt` costs what it
+/// cost beside the keys before.
+pub(crate) fn read_key<R>(
+    doc: &CosDocument,
+    dict: &Dict,
+    key: &[u8],
+    read: impl FnOnce(&Object) -> R,
+) -> R {
+    match dict.get(doc.intern(key)) {
+        Some(value) => read_resolved(doc, value, read),
+        None => read(&Object::Null),
+    }
+}
+
 impl PageResources {
     /// `read` of the property list this scope's `/Properties` names `name`
     /// (14.6.2), resolved: what `/Tag /name BDC` refers to. `None` when there
@@ -430,7 +450,9 @@ impl PageResources {
     /// indirect and the resource dictionary's own when it is direct (see
     /// [`read_resolved`]). Every named `BDC` on every reading of a page asks,
     /// so a copy here is the list's size times the page's sequences —
-    /// `tests/property_list_work.rs` counts it.
+    /// `tests/property_list_work.rs` counts it. The same holds for every value
+    /// `read` takes out of the list, which is why the readers lent it read
+    /// each through [`read_key`] rather than `resolve_key`.
     pub(crate) fn with_property_list<R>(
         &self,
         name: &[u8],
@@ -1665,21 +1687,18 @@ impl PageResources {
     /// body of [`FontSource::marked_content_properties`], run on the list
     /// where it lies.
     fn marked_props(&self, name: &[u8], dict: &Dict) -> MarkedProps {
-        // 14.7.4.2: a non-negative integer. Read through `resolve_key`
-        // because 7.3.10 lets any value in a *file* dictionary be indirect —
-        // which is exactly the difference between this form and the inline
-        // one, where it cannot be.
-        let mcid = self
-            .doc
-            .resolve_key(dict, self.doc.intern(b"MCID"))
-            .as_int()
-            .and_then(|n| u32::try_from(n).ok());
+        // 14.7.4.2: a non-negative integer. Resolved because 7.3.10 lets any
+        // value in a *file* dictionary be indirect — which is exactly the
+        // difference between this form and the inline one, where it cannot
+        // be. Every value here is read where it lies (`read_key`), as the
+        // list is: a copy of one is its size at every `BDC`.
+        let mcid =
+            read_key(&self.doc, dict, b"MCID", Object::as_int).and_then(|n| u32::try_from(n).ok());
 
         let text = |key: &[u8]| {
-            self.doc
-                .resolve_key(dict, self.doc.intern(key))
-                .as_string()
-                .map(|s| decode_text_string(&s.bytes))
+            read_key(&self.doc, dict, key, |value| {
+                value.as_string().map(|s| decode_text_string(&s.bytes))
+            })
         };
 
         MarkedProps {
@@ -1699,11 +1718,7 @@ impl PageResources {
             // `Page::marked_content_associated_files` reads in this scope.
             // Asked whether it is an array where it lies, since a direct
             // `/MCAF` is the list's own and as long as the file makes it.
-            associated_files: dict
-                .get(self.doc.intern(b"MCAF"))
-                .is_some_and(|mcaf| {
-                    read_resolved(&self.doc, mcaf, |mcaf| mcaf.as_array().is_some())
-                })
+            associated_files: read_key(&self.doc, dict, b"MCAF", |mcaf| mcaf.as_array().is_some())
                 .then(|| name.to_vec()),
         }
     }
