@@ -273,6 +273,30 @@ pub const MAX_CSS_SHADOWS: usize = 32;
 /// settings nobody wrote on their own.
 pub const MAX_CSS_FEATURE_SETTINGS: usize = 32;
 
+/// The most colour stops one `linear-gradient()` or `radial-gradient()` may
+/// list.
+///
+/// | Fixture | Stops in its longest gradient |
+/// |---|---|
+/// | Every committed book | 0 — none declares a gradient |
+/// | A 400-page novel | 3, a chapter head's rule fading in and out |
+/// | A 200-page comic | 0 |
+/// | A 200-page fixed document | 0 |
+/// | **This cap** | **32** |
+///
+/// **A cap on output.** A gradient is written as a stitching function of one
+/// sub-function per pair of stops, once for every fragment of its box on
+/// every page the box crosses — a background on `body` once a page — so the
+/// stops are a multiplier on the book's length. `red,` is four bytes, so one
+/// sheet at [`MAX_CSS_BYTES`] could write a gradient of 2 097 152 stops, and
+/// a three-hundred-page chapter would write it three hundred times. With it a
+/// fragment's function has at most thirty-one pieces.
+///
+/// A list past it is **refused by value**, the whole declaration, and counted
+/// against `background-image` by element, as a shadow list past
+/// [`MAX_CSS_SHADOWS`] is.
+pub const MAX_CSS_GRADIENT_STOPS: usize = 32;
+
 /// The relations, checked at compile time so a bad one **does not build**.
 ///
 /// Gap 29's device. The one that matters is written the opposite way round

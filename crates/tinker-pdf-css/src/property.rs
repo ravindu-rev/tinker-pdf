@@ -1035,6 +1035,179 @@ pub struct ImageRef {
     pub base: Option<String>,
 }
 
+/// One `background-image` layer, `css-images-3` §2's `<image>` at the two
+/// kinds this build draws: a `url()`, and a gradient.
+///
+/// Generic over its lengths, because a gradient's stop positions, radii and
+/// centre are written with units: [`Len`] as specified, and
+/// [`LengthPercentage`] — the default — once [`Image::compute`] has resolved
+/// `em` and `rem`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Image<L = LengthPercentage> {
+    /// A `url()`, unresolved.
+    Url(ImageRef),
+    /// `linear-gradient()` or `radial-gradient()`, §3.
+    Gradient(Box<Gradient<L>>),
+}
+
+impl Image<Len> {
+    /// The computed value: every length's `em` and `rem` resolved against
+    /// the element's and the root's font sizes. Percentages stay: a stop's
+    /// is of a gradient line, and a radius's and a centre's of a gradient
+    /// box, that only a laid-out box decides.
+    #[must_use]
+    pub fn compute(&self, font_size: f64, root_font_size: f64) -> Image {
+        match self {
+            Image::Url(image) => Image::Url(image.clone()),
+            Image::Gradient(gradient) => Image::Gradient(Box::new(
+                gradient.map(|len| len.compute(font_size, root_font_size)),
+            )),
+        }
+    }
+}
+
+/// A gradient, `css-images-3` §3: its geometry, and at least two colour
+/// stops, every one opaque.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gradient<L> {
+    /// Linear or radial, and which way.
+    pub shape: GradientShape<L>,
+    /// The colour stops in the order written, a double position (`red 10%
+    /// 20%`, `css-images-4` §3.5.1) already two. Positions are as written:
+    /// §3.5.3's fix-up is the painter's, because a percentage is of a
+    /// gradient line a box's size decides.
+    pub stops: Vec<ColorStop<L>>,
+}
+
+impl<L: Copy> Gradient<L> {
+    /// The same gradient with every length passed through `f`.
+    fn map<M: Copy>(&self, f: impl Fn(L) -> M) -> Gradient<M> {
+        let offset = |o: GradientOffset<L>| GradientOffset {
+            from_end: o.from_end,
+            offset: f(o.offset),
+        };
+        let shape = match self.shape {
+            GradientShape::Linear(direction) => GradientShape::Linear(direction),
+            GradientShape::Radial(radial) => GradientShape::Radial(RadialGradient {
+                circle: radial.circle,
+                size: match radial.size {
+                    RadialSize::ClosestSide => RadialSize::ClosestSide,
+                    RadialSize::FarthestSide => RadialSize::FarthestSide,
+                    RadialSize::ClosestCorner => RadialSize::ClosestCorner,
+                    RadialSize::FarthestCorner => RadialSize::FarthestCorner,
+                    RadialSize::Explicit(x, y) => RadialSize::Explicit(f(x), f(y)),
+                },
+                at: [offset(radial.at[0]), offset(radial.at[1])],
+            }),
+        };
+        Gradient {
+            shape,
+            stops: self
+                .stops
+                .iter()
+                .map(|stop| ColorStop {
+                    color: stop.color,
+                    position: stop.position.map(&f),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A gradient's geometry, `css-images-3` §3.1 and §3.2.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GradientShape<L> {
+    /// `linear-gradient()`.
+    Linear(LinearDirection),
+    /// `radial-gradient()`.
+    Radial(RadialGradient<L>),
+}
+
+/// Which way a linear gradient's line points, §3.1.1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LinearDirection {
+    /// An angle, in degrees clockwise from up: an `<angle>`, or `to top`
+    /// (0), `to right` (90), `to bottom` (180, the default) and `to left`
+    /// (270).
+    Angle(f64),
+    /// `to` a corner. Its angle is the box's own — the one that puts the
+    /// two other corners on the 50% line — so it is known only once the box
+    /// is.
+    Corner {
+        /// Towards the right edge rather than the left.
+        right: bool,
+        /// Towards the bottom edge rather than the top.
+        bottom: bool,
+    },
+}
+
+/// A radial gradient's ending shape, its size and its centre, §3.2.1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RadialGradient<L> {
+    /// `circle` rather than `ellipse`. `ellipse` is the default, unless the
+    /// size is one length.
+    pub circle: bool,
+    /// The ending shape's size.
+    pub size: RadialSize<L>,
+    /// The centre, `at <position>`, horizontal then vertical; `center` when
+    /// it is not given. A percentage is of the gradient box.
+    pub at: [GradientOffset<L>; 2],
+}
+
+impl RadialGradient<Len> {
+    /// `radial-gradient()` with no configuration: an ellipse to the farthest
+    /// corner, centred.
+    pub const DEFAULT: RadialGradient<Len> = RadialGradient {
+        circle: false,
+        size: RadialSize::FarthestCorner,
+        at: [
+            GradientOffset {
+                from_end: false,
+                offset: Len::Percent(50.0),
+            },
+            GradientOffset {
+                from_end: false,
+                offset: Len::Percent(50.0),
+            },
+        ],
+    };
+}
+
+/// §3.2.1's `<radial-size>`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RadialSize<L> {
+    /// `closest-side`.
+    ClosestSide,
+    /// `farthest-side`.
+    FarthestSide,
+    /// `closest-corner`.
+    ClosestCorner,
+    /// `farthest-corner`, the default.
+    FarthestCorner,
+    /// Explicit radii, horizontal then vertical: a circle's one length twice,
+    /// or an ellipse's two `<length-percentage>`s.
+    Explicit(L, L),
+}
+
+/// One axis of a radial gradient's centre: an offset from the left or top
+/// edge, or, for `right 10px`, from the right or bottom one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GradientOffset<L> {
+    /// Measured from the right or bottom edge.
+    pub from_end: bool,
+    /// The offset.
+    pub offset: L,
+}
+
+/// One colour stop, `css-images-3` §3.5.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColorStop<L> {
+    /// The colour, opaque: a translucent stop is refused by value.
+    pub color: Color,
+    /// Where it is on the gradient line or ray; `None` for §3.5.3 to place.
+    pub position: Option<L>,
+}
+
 /// One axis of `background-repeat`, `css-backgrounds-3` §2.3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RepeatStyle {
@@ -1701,7 +1874,7 @@ pub enum Property {
     BackgroundColor(Color),
     /// `background-image`, `css-backgrounds-3` §2.2, one layer. `None` is
     /// `none`.
-    BackgroundImage(Option<ImageRef>),
+    BackgroundImage(Option<Image<Len>>),
     /// `background-repeat`, §2.3.
     BackgroundRepeat(BackgroundRepeat),
     /// `background-position`, §2.6.
@@ -4702,7 +4875,7 @@ fn unimplemented_image(value: &ComponentValue) -> bool {
         )
 }
 
-/// `background-image`: `none` or one `url()`.
+/// `background-image`: `none`, one `url()` or one gradient ([`gradient`]).
 ///
 /// More than one layer is §2's comma-separated list, which is valid CSS and
 /// this build's gap — refused by value, so a book that layers two textures is
@@ -4721,15 +4894,304 @@ fn background_image(significant: &[&ComponentValue]) -> Implemented {
         return Implemented::Malformed;
     }
     if let Some(href) = url_of(one) {
-        return Implemented::Known(vec![Property::BackgroundImage(Some(ImageRef {
-            href,
-            base: None,
-        }))]);
+        return Implemented::Known(vec![Property::BackgroundImage(Some(Image::Url(
+            ImageRef { href, base: None },
+        )))]);
     }
-    if unimplemented_image(one) {
-        return Implemented::BadValue;
+    match gradient(one) {
+        Some(Ok(found)) => Implemented::Known(vec![Property::BackgroundImage(Some(
+            Image::Gradient(Box::new(found)),
+        ))]),
+        Some(Err(outcome)) => outcome,
+        None if unimplemented_image(one) => Implemented::BadValue,
+        None => Implemented::Malformed,
     }
-    Implemented::Malformed
+}
+
+/// `linear-gradient()` and `radial-gradient()`, `css-images-3` §3 — `None`
+/// for any other value.
+///
+/// `Err` is `Malformed` for what is not the grammar, and `BadValue` for what
+/// is and this build does not draw: a translucent stop (a PDF shading has no
+/// alpha, and a soft mask per gradient is not written here), a colour
+/// interpolation hint (§3.5.2), an `in <color-space>` (`css-images-4`), a
+/// stop list past [`crate::limits::MAX_CSS_GRADIENT_STOPS`], or a unit this
+/// build does not resolve. The `repeating-` forms and `conic-gradient()` are
+/// [`unimplemented_image`]'s.
+fn gradient(value: &ComponentValue) -> Option<Result<Gradient<Len>, Implemented>> {
+    let ComponentValue::Function { name, arguments } = value else {
+        return None;
+    };
+    let linear = if name.eq_ignore_ascii_case("linear-gradient") {
+        true
+    } else if name.eq_ignore_ascii_case("radial-gradient") {
+        false
+    } else {
+        return None;
+    };
+    Some(gradient_arguments(linear, arguments))
+}
+
+fn gradient_arguments(
+    linear: bool,
+    arguments: &[ComponentValue],
+) -> Result<Gradient<Len>, Implemented> {
+    let mut parts: Vec<Vec<&ComponentValue>> = vec![Vec::new()];
+    for value in arguments {
+        if is_comma(value) {
+            parts.push(Vec::new());
+        } else if !value.is_whitespace() {
+            if let Some(last) = parts.last_mut() {
+                last.push(value);
+            }
+        }
+    }
+    if parts.iter().any(Vec::is_empty) {
+        return Err(Implemented::Malformed);
+    }
+    let first = parts.first().map_or(&[][..], Vec::as_slice);
+    let (shape, stops) = if linear {
+        match linear_direction(first)? {
+            Some(direction) => (GradientShape::Linear(direction), &parts[1..]),
+            None => (
+                GradientShape::Linear(LinearDirection::Angle(180.0)),
+                &parts[..],
+            ),
+        }
+    } else {
+        match radial_configuration(first)? {
+            Some(radial) => (GradientShape::Radial(radial), &parts[1..]),
+            None => (GradientShape::Radial(RadialGradient::DEFAULT), &parts[..]),
+        }
+    };
+    Ok(Gradient {
+        shape,
+        stops: color_stops(stops)?,
+    })
+}
+
+/// Whether `value` is the identifier `word`, in any case.
+fn is_ident(value: &ComponentValue, word: &str) -> bool {
+    matches!(value, ComponentValue::Token(Token::Ident(found)) if found.eq_ignore_ascii_case(word))
+}
+
+/// A linear gradient's first argument, where it is a direction rather than a
+/// stop: `to` a side or a corner, or an `<angle>` — `<zero>` included, as
+/// `rotate()` takes it.
+fn linear_direction(part: &[&ComponentValue]) -> Result<Option<LinearDirection>, Implemented> {
+    if part.iter().any(|value| is_ident(value, "in")) {
+        return Err(Implemented::BadValue);
+    }
+    match part {
+        [to, sides @ ..] if is_ident(to, "to") => {
+            if sides.is_empty() || sides.len() > 2 {
+                return Err(Implemented::Malformed);
+            }
+            let mut horizontal: Option<bool> = None;
+            let mut vertical: Option<bool> = None;
+            for side in sides {
+                let ComponentValue::Token(Token::Ident(word)) = side else {
+                    return Err(Implemented::Malformed);
+                };
+                match word.to_ascii_lowercase().as_str() {
+                    "left" if horizontal.is_none() => horizontal = Some(false),
+                    "right" if horizontal.is_none() => horizontal = Some(true),
+                    "top" if vertical.is_none() => vertical = Some(false),
+                    "bottom" if vertical.is_none() => vertical = Some(true),
+                    _ => return Err(Implemented::Malformed),
+                }
+            }
+            Ok(Some(match (horizontal, vertical) {
+                (Some(right), Some(bottom)) => LinearDirection::Corner { right, bottom },
+                (Some(true), None) => LinearDirection::Angle(90.0),
+                (Some(false), None) => LinearDirection::Angle(270.0),
+                (None, Some(true)) => LinearDirection::Angle(180.0),
+                (None, Some(false)) => LinearDirection::Angle(0.0),
+                (None, None) => return Err(Implemented::Malformed),
+            }))
+        }
+        [one] => Ok(angle_degrees(one).map(LinearDirection::Angle)),
+        _ => Ok(None),
+    }
+}
+
+/// A radial gradient's first argument, where it is the ending shape, its
+/// size or its centre rather than a stop: §3.2.1's
+/// `[ <ending-shape> || <radial-size> ]? [ at <position> ]?`.
+fn radial_configuration(
+    part: &[&ComponentValue],
+) -> Result<Option<RadialGradient<Len>>, Implemented> {
+    const WORDS: [&str; 8] = [
+        "circle",
+        "ellipse",
+        "closest-side",
+        "closest-corner",
+        "farthest-side",
+        "farthest-corner",
+        "at",
+        "in",
+    ];
+    let keyworded = part
+        .iter()
+        .any(|value| WORDS.iter().any(|word| is_ident(value, word)));
+    let lengths_only = part
+        .iter()
+        .all(|value| !matches!(length_outcome(value), LenOutcome::Invalid));
+    if !keyworded && !lengths_only {
+        return Ok(None);
+    }
+    if part.iter().any(|value| is_ident(value, "in")) {
+        return Err(Implemented::BadValue);
+    }
+    let (head, position) = match part.iter().position(|value| is_ident(value, "at")) {
+        Some(at) => (&part[..at], Some(&part[at + 1..])),
+        None => (part, None),
+    };
+    let mut circle: Option<bool> = None;
+    let mut extent: Option<RadialSize<Len>> = None;
+    let mut lengths: Vec<Len> = Vec::new();
+    for value in head {
+        if let ComponentValue::Token(Token::Ident(word)) = value {
+            let word = word.to_ascii_lowercase();
+            match word.as_str() {
+                "circle" | "ellipse" if circle.is_none() => circle = Some(word == "circle"),
+                "closest-side" if extent.is_none() => extent = Some(RadialSize::ClosestSide),
+                "farthest-side" if extent.is_none() => extent = Some(RadialSize::FarthestSide),
+                "closest-corner" if extent.is_none() => extent = Some(RadialSize::ClosestCorner),
+                "farthest-corner" if extent.is_none() => {
+                    extent = Some(RadialSize::FarthestCorner);
+                }
+                _ => return Err(Implemented::Malformed),
+            }
+            continue;
+        }
+        match length_outcome(value) {
+            LenOutcome::Ok(len) if !len_is_negative(len) && lengths.len() < 2 => lengths.push(len),
+            LenOutcome::Unsupported => return Err(Implemented::BadValue),
+            _ => return Err(Implemented::Malformed),
+        }
+    }
+    let size = match (extent, lengths.as_slice()) {
+        (Some(_), [_, ..]) => return Err(Implemented::Malformed),
+        (Some(extent), []) => extent,
+        (None, []) => RadialSize::FarthestCorner,
+        // §3.2.1: a circle's size is one `<length>`, never a percentage.
+        (None, [radius]) => {
+            if circle == Some(false) || matches!(radius, Len::Percent(_)) {
+                return Err(Implemented::Malformed);
+            }
+            RadialSize::Explicit(*radius, *radius)
+        }
+        (None, [x, y]) => {
+            if circle == Some(true) {
+                return Err(Implemented::Malformed);
+            }
+            RadialSize::Explicit(*x, *y)
+        }
+        (None, _) => return Err(Implemented::Malformed),
+    };
+    let at = match position {
+        None => RadialGradient::DEFAULT.at,
+        Some([]) => return Err(Implemented::Malformed),
+        Some(values) => {
+            let mut tokens = Vec::with_capacity(values.len());
+            for value in values {
+                match position_token(value) {
+                    Ok(Some(token)) => tokens.push(token),
+                    Ok(None) => return Err(Implemented::Malformed),
+                    Err(outcome) => return Err(outcome),
+                }
+            }
+            let position = background_position(&tokens)?;
+            [
+                GradientOffset {
+                    from_end: position.x.from_end,
+                    offset: position.x.offset,
+                },
+                GradientOffset {
+                    from_end: position.y.from_end,
+                    offset: position.y.offset,
+                },
+            ]
+        }
+    };
+    Ok(Some(RadialGradient {
+        circle: circle.unwrap_or(lengths.len() == 1),
+        size,
+        at,
+    }))
+}
+
+/// §3.5's `<color-stop-list>`: each stop a colour and up to two positions,
+/// on either side of it (`css-images-4`'s `&&`), and at least two stops.
+fn color_stops(parts: &[Vec<&ComponentValue>]) -> Result<Vec<ColorStop<Len>>, Implemented> {
+    let mut stops: Vec<ColorStop<Len>> = Vec::new();
+    let mut hinted = false;
+    let mut previous_was_hint = false;
+    for (index, part) in parts.iter().enumerate() {
+        let mut color: Option<Color> = None;
+        let mut before: Vec<Len> = Vec::new();
+        let mut after: Vec<Len> = Vec::new();
+        for value in part {
+            match length_outcome(value) {
+                LenOutcome::Ok(len) => {
+                    if color.is_some() {
+                        after.push(len);
+                    } else {
+                        before.push(len);
+                    }
+                    continue;
+                }
+                LenOutcome::Unsupported => return Err(Implemented::BadValue),
+                LenOutcome::Invalid => {}
+            }
+            if color.is_some() {
+                return Err(Implemented::Malformed);
+            }
+            color = Some(match colour_outcome(value) {
+                ColourOutcome::Ok(found) if found.a == 255 => found,
+                ColourOutcome::Ok(_) | ColourOutcome::Unsupported => {
+                    return Err(Implemented::BadValue)
+                }
+                ColourOutcome::Invalid => return Err(Implemented::Malformed),
+            });
+        }
+        let Some(color) = color else {
+            // An interpolation hint, §3.5.2: one position alone, and only
+            // between two stops.
+            if before.len() != 1 || index == 0 || index + 1 == parts.len() || previous_was_hint {
+                return Err(Implemented::Malformed);
+            }
+            hinted = true;
+            previous_was_hint = true;
+            continue;
+        };
+        previous_was_hint = false;
+        let positions = match (before.len(), after.len()) {
+            (0, n) if n <= 2 => after,
+            (n, 0) if n <= 2 => before,
+            _ => return Err(Implemented::Malformed),
+        };
+        if positions.is_empty() {
+            stops.push(ColorStop {
+                color,
+                position: None,
+            });
+        }
+        for position in positions {
+            stops.push(ColorStop {
+                color,
+                position: Some(position),
+            });
+        }
+    }
+    if stops.len() < 2 {
+        return Err(Implemented::Malformed);
+    }
+    if hinted || stops.len() > crate::limits::MAX_CSS_GRADIENT_STOPS {
+        return Err(Implemented::BadValue);
+    }
+    Ok(stops)
 }
 
 fn repeat_named(word: &str) -> Option<RepeatStyle> {
@@ -4998,7 +5460,7 @@ fn background_shorthand(significant: &[&ComponentValue]) -> Implemented {
     if significant.iter().any(|value| is_comma(value)) {
         return Implemented::BadValue;
     }
-    let mut image: Option<Option<ImageRef>> = None;
+    let mut image: Option<Option<Image<Len>>> = None;
     let mut colour: Option<Color> = None;
     let mut repeat: Option<BackgroundRepeat> = None;
     let mut position: Option<SpecifiedBackgroundPosition> = None;
@@ -5017,9 +5479,18 @@ fn background_shorthand(significant: &[&ComponentValue]) -> Implemented {
                 continue;
             }
             if let Some(href) = url_of(value) {
-                image = Some(Some(ImageRef { href, base: None }));
+                image = Some(Some(Image::Url(ImageRef { href, base: None })));
                 at += 1;
                 continue;
+            }
+            match gradient(value) {
+                Some(Ok(found)) => {
+                    image = Some(Some(Image::Gradient(Box::new(found))));
+                    at += 1;
+                    continue;
+                }
+                Some(Err(outcome)) => return outcome,
+                None => {}
             }
         }
         if unimplemented_image(value) {

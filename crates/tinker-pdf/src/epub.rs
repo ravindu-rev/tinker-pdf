@@ -2229,11 +2229,15 @@ fn register_backgrounds<R: read::Resources + ?Sized>(
         let mut failed: Vec<(ImageDefect, BTreeSet<u32>)> = Vec::new();
         for page in &chapter.pages {
             for fragment in &page.boxes {
-                let Some(layer) = &fragment.image else {
+                // A gradient is drawn from its own geometry and needs no
+                // resource read.
+                let Some(tinker_pdf_css::property::Image::Url(image)) =
+                    fragment.image.as_ref().map(|layer| &layer.image)
+                else {
                     continue;
                 };
-                let base = layer.image.base.as_deref().unwrap_or(document);
-                let href = &layer.image.href;
+                let base = image.base.as_deref().unwrap_or(document);
+                let href = &image.href;
                 let defect = match out.get(base, href) {
                     Some(found) => found.as_ref().err().copied(),
                     None => {

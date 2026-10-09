@@ -41,7 +41,7 @@
 //! decision 5's `Unsupported` shape one level up from a property.
 
 use crate::media::MediaContext;
-use crate::property::{self, Declaration, Property};
+use crate::property::{self, Declaration, Image, Property};
 use crate::selector::{self, Selector};
 use crate::tokenizer::{tokenize, Token};
 use crate::{Budget, ImportResolver, Limits, Refusal, Warning};
@@ -477,7 +477,7 @@ impl Parse<'_> {
         // they were spliced in here, and keep it.
         for rule in &mut rules {
             for declared in &mut rule.declarations {
-                if let Declaration::Known(Property::BackgroundImage(Some(image))) =
+                if let Declaration::Known(Property::BackgroundImage(Some(Image::Url(image)))) =
                     &mut declared.declaration
                 {
                     if image.base.is_none() {

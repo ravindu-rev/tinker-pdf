@@ -1295,3 +1295,284 @@ fn direction_and_unicode_bidi_count_what_this_layout_does_not_do() {
         );
     }
 }
+
+// ---- gradients -----------------------------------------------------------------
+
+/// The colour at each point, in CSS pixels from the content area's top left,
+/// of the first page rendered once.
+fn colours(doc: &Document, points: &[(f64, f64)]) -> Vec<[f64; 3]> {
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    let scale = f64::from(bitmap.height) / PAGE_HEIGHT;
+    points
+        .iter()
+        .map(|&(x, y)| {
+            let (x, y) = at(x, y);
+            let column = (x * scale) as usize;
+            let row = ((PAGE_HEIGHT - y) * scale) as usize;
+            let start = row * bitmap.stride + column * bitmap.components();
+            let pixel = bitmap
+                .data
+                .get(start..start + 3)
+                .expect("the point is on the page");
+            [pixel[0], pixel[1], pixel[2]].map(f64::from)
+        })
+        .collect()
+}
+
+/// `from` blended `t` of the way to `to`, clamped as a gradient is past its
+/// ends.
+fn blend(from: [f64; 3], to: [f64; 3], t: f64) -> [f64; 3] {
+    let t = t.clamp(0.0, 1.0);
+    [0, 1, 2].map(|i| from[i] + (to[i] - from[i]) * t)
+}
+
+/// Asserts each sampled colour is the expected one to within four levels of
+/// 255 — a pixel's width of the ramp, and the renderer's rounding.
+fn near_colours(actual: &[[f64; 3]], expected: &[[f64; 3]], what: &str) {
+    assert_eq!(actual.len(), expected.len());
+    for (at, (a, e)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            a.iter().zip(e).all(|(a, e)| (a - e).abs() <= 4.0),
+            "{what}, point {at}: drew {a:?}, expected {e:?}"
+        );
+    }
+}
+
+const RED: [f64; 3] = [255.0, 0.0, 0.0];
+const GREEN: [f64; 3] = [0.0, 255.0, 0.0];
+const BLUE: [f64; 3] = [0.0, 0.0, 255.0];
+const WHITE: [f64; 3] = [255.0, 255.0, 255.0];
+const BLACK: [f64; 3] = [0.0, 0.0, 0.0];
+
+/// A 200 by 100 pixel box whose `background-image` is `image`, followed by
+/// whatever else `image` goes on to declare.
+fn gradient_box(image: &str) -> Document {
+    open(
+        &format!(".g {{ width: 200px; height: 100px; background-image: {image} }}"),
+        "<div class=\"g\"></div>",
+    )
+}
+
+/// **A linear gradient is an axial shading along its gradient line**
+/// (`css-images-3` §3.1), sampled on the page against the colour CSS says
+/// each point is.
+///
+/// The expected colours are worked out here, not read back: a point's place
+/// on the gradient line is its offset from the box's centre along the line's
+/// direction — `(sin A, −cos A)` in CSS's downward y, `A` clockwise from up —
+/// over the line's length `|w sin A| + |h cos A|`, plus a half. `to right` is
+/// the plain case, `45deg` one whose line is longer than either side, and the
+/// third and fourth have §3.5.3's fix-up: a stop with no position spread
+/// between its neighbours, two at one place an edge, and the last stop's
+/// unwritten position 100%.
+#[test]
+fn a_linear_gradient_is_the_colour_css_says_at_every_point() {
+    let line = |degrees: f64, (x, y): (f64, f64)| {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let length = (200.0 * sin).abs() + (100.0 * cos).abs();
+        ((x - 100.0) * sin - (y - 50.0) * cos) / length + 0.5
+    };
+    let points = [
+        (20.0, 50.0),
+        (100.0, 50.0),
+        (180.0, 50.0),
+        (40.0, 80.0),
+        (160.0, 20.0),
+    ];
+
+    let doc = gradient_box("linear-gradient(to right, #ff0000, #0000ff)");
+    let expected: Vec<[f64; 3]> = points
+        .iter()
+        .map(|p| blend(RED, BLUE, line(90.0, *p)))
+        .collect();
+    near_colours(&colours(&doc, &points), &expected, "to right");
+
+    let doc = gradient_box("linear-gradient(45deg, #ff0000, #0000ff)");
+    let expected: Vec<[f64; 3]> = points
+        .iter()
+        .map(|p| blend(RED, BLUE, line(45.0, *p)))
+        .collect();
+    near_colours(&colours(&doc, &points), &expected, "45deg");
+
+    // A stop with no position is spread between its neighbours: green at
+    // the middle.
+    let doc = gradient_box("linear-gradient(to right, #ff0000, #00ff00, #0000ff)");
+    near_colours(
+        &colours(&doc, &[(50.0, 50.0), (100.0, 50.0), (150.0, 50.0)]),
+        &[blend(RED, GREEN, 0.5), GREEN, blend(GREEN, BLUE, 0.5)],
+        "an unplaced stop",
+    );
+
+    let doc =
+        gradient_box("linear-gradient(to bottom, #ff0000 25%, #00ff00 25%, #00ff00 50%, #0000ff)");
+    near_colours(
+        &colours(
+            &doc,
+            &[(100.0, 10.0), (100.0, 40.0), (100.0, 75.0), (100.0, 98.0)],
+        ),
+        &[
+            RED,
+            GREEN,
+            blend(GREEN, BLUE, 0.5),
+            blend(GREEN, BLUE, 0.96),
+        ],
+        "hard stops",
+    );
+}
+
+/// **`to` a corner is the angle that puts the other two corners on the 50%
+/// line** (§3.1.1), so it depends on the box: in a 200 by 100 box `to top
+/// right` is not 45°. Checked by that property rather than by the angle: the
+/// points on the diagonal from the top left to the bottom right are all the
+/// midpoint colour, and a pixel in from the bottom-left corner is nearly the
+/// start and one in from the top-right nearly the end — 0.0076 of the line
+/// from either, the line being 178.9 pixels long and each point 88.1 short
+/// of its end.
+#[test]
+fn a_corner_gradient_puts_the_other_two_corners_on_its_midline() {
+    let doc = gradient_box("linear-gradient(to top right, #ffffff, #000000)");
+    let middle = blend(WHITE, BLACK, 0.5);
+    near_colours(
+        &colours(
+            &doc,
+            &[
+                (50.0, 25.0),
+                (100.0, 50.0),
+                (150.0, 75.0),
+                (1.0, 99.0),
+                (199.0, 1.0),
+            ],
+        ),
+        &[
+            middle,
+            middle,
+            middle,
+            blend(WHITE, BLACK, 0.0076),
+            blend(WHITE, BLACK, 0.9924),
+        ],
+        "to top right",
+    );
+}
+
+/// **A radial gradient is a radial shading, an ellipse a circle squashed**
+/// (§3.2): `circle closest-side` in a 200 by 100 box centred is a circle of
+/// radius 50, red at the centre and blue from 50 out; the default, an
+/// ellipse to the farthest corner, keeps farthest-side's 2:1 ratio and passes
+/// through the corners — radii 141.42 and 70.71 — so the midpoint grey lies
+/// half each radius from the centre on both axes. A stop before the centre,
+/// an ending shape of no size and `at` are the cases after.
+#[test]
+fn a_radial_gradient_is_the_colour_css_says_at_every_point() {
+    let doc = gradient_box("radial-gradient(circle closest-side, #ff0000, #0000ff)");
+    near_colours(
+        &colours(
+            &doc,
+            &[(100.0, 50.0), (125.0, 50.0), (100.0, 30.0), (180.0, 50.0)],
+        ),
+        &[RED, blend(RED, BLUE, 0.5), blend(RED, BLUE, 0.4), BLUE],
+        "circle closest-side",
+    );
+
+    let doc = gradient_box("radial-gradient(#ffffff, #000000)");
+    let ry = 50.0_f64.hypot(50.0);
+    let rx = 2.0 * ry;
+    near_colours(
+        &colours(
+            &doc,
+            &[
+                (100.0 + rx / 2.0, 50.0),
+                (100.0, 50.0 + ry / 2.0),
+                (100.0 - rx / 4.0, 50.0),
+            ],
+        ),
+        &[
+            blend(WHITE, BLACK, 0.5),
+            blend(WHITE, BLACK, 0.5),
+            blend(WHITE, BLACK, 0.25),
+        ],
+        "an ellipse to the farthest corner",
+    );
+
+    // A stop before the centre is no circle PDF can draw: the centre is the
+    // colour interpolated there, half way from -25 to 25 pixels.
+    let doc = gradient_box("radial-gradient(circle closest-side, #ff0000 -50%, #0000ff 50%)");
+    near_colours(
+        &colours(&doc, &[(100.0, 50.0), (112.5, 50.0), (130.0, 50.0)]),
+        &[blend(RED, BLUE, 0.5), blend(RED, BLUE, 0.75), BLUE],
+        "a stop before the centre",
+    );
+
+    // Centred on a corner, the closest side is no distance away: §3.2.4's
+    // degenerate shape, drawn as its last colour everywhere.
+    let doc = gradient_box("radial-gradient(circle closest-side at left top, #ff0000, #0000ff)");
+    near_colours(
+        &colours(&doc, &[(10.0, 10.0), (150.0, 80.0)]),
+        &[BLUE, BLUE],
+        "a ring of no size",
+    );
+    // And an ellipse centred on the top edge has no height to its closest
+    // side, whatever its width: the same.
+    let doc = gradient_box("radial-gradient(closest-side at top, #ff0000, #0000ff)");
+    near_colours(
+        &colours(&doc, &[(100.0, 50.0), (20.0, 80.0)]),
+        &[BLUE, BLUE],
+        "an ellipse of no height",
+    );
+
+    // Centred on the left edge's midpoint, the farthest side is 200 pixels
+    // away: half way across is half way along the ray.
+    let doc = gradient_box("radial-gradient(circle farthest-side at left, #ff0000, #0000ff)");
+    near_colours(
+        &colours(&doc, &[(1.0, 50.0), (100.0, 50.0)]),
+        &[blend(RED, BLUE, 0.005), blend(RED, BLUE, 0.5)],
+        "at left",
+    );
+}
+
+/// **A gradient is an image with no size of its own, so `background-size`
+/// gives it one and it repeats** (§5.3; `css-backgrounds-3` §2.3): fifty
+/// pixels wide and `to right`, it starts again every fifty pixels.
+#[test]
+fn a_sized_gradient_repeats_as_an_image_does() {
+    let doc =
+        gradient_box("linear-gradient(to right, #ff0000, #0000ff); background-size: 50px 100%");
+    near_colours(
+        &colours(
+            &doc,
+            &[(10.0, 50.0), (60.0, 50.0), (160.0, 50.0), (40.0, 50.0)],
+        ),
+        &[
+            blend(RED, BLUE, 0.2),
+            blend(RED, BLUE, 0.2),
+            blend(RED, BLUE, 0.2),
+            blend(RED, BLUE, 0.8),
+        ],
+        "a fifty-pixel tile",
+    );
+}
+
+/// **A gradient this build cannot draw is counted and draws nothing**: a
+/// translucent stop (a PDF shading has no alpha) and a repeating gradient are
+/// refused by value, one element each, and the page is the page with no
+/// image. The one it can draw is not counted.
+#[test]
+fn a_gradient_this_build_does_not_draw_is_counted() {
+    let plain = open(
+        ".g { width: 200px; height: 100px }",
+        "<div class=\"g\"></div>",
+    );
+    for image in [
+        "linear-gradient(#ff0000, transparent)",
+        "repeating-linear-gradient(#ff0000, #0000ff 20px)",
+    ] {
+        let doc = gradient_box(image);
+        assert_eq!(counted(&doc, "background-image"), Some(1), "{image}");
+        assert_eq!(tokens(&doc), tokens(&plain), "{image} drew something");
+    }
+    let drawn = gradient_box("linear-gradient(#ff0000, #0000ff)");
+    assert_eq!(counted(&drawn, "background-image"), None);
+    assert_ne!(tokens(&drawn), tokens(&plain), "a gradient drew nothing");
+}

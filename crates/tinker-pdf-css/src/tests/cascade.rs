@@ -897,6 +897,35 @@ fn direction_inherits_and_is_counted_where_layout_does_not_turn() {
     assert_eq!(styled.report.unsupported, vec![("direction", 2)]);
 }
 
+/// **A gradient's lengths are computed with its element's font size**: an
+/// `em` in a stop, a radius or a centre is pixels once cascaded, and a
+/// percentage stays for the box the painter is given.
+#[test]
+fn a_gradients_lengths_are_computed_with_the_elements_font_size() {
+    use crate::property::{Gradient, GradientShape, Image, RadialSize};
+    let nodes = tree(&[("div", None)]);
+    let styled = styles(
+        "div { font-size: 20px; \
+         background-image: radial-gradient(2em 50% at 1em 10%, red 1em, blue 50%) }",
+        &nodes,
+    );
+    let Some(Image::Gradient(gradient)) = &styled[0].background_image else {
+        panic!("no gradient: {:?}", styled[0].background_image);
+    };
+    let Gradient { shape, stops } = gradient.as_ref();
+    let GradientShape::Radial(radial) = shape else {
+        panic!("not radial: {shape:?}");
+    };
+    assert_eq!(
+        radial.size,
+        RadialSize::Explicit(LengthPercentage::Px(40.0), LengthPercentage::Percent(50.0))
+    );
+    assert_eq!(radial.at[0].offset, LengthPercentage::Px(20.0));
+    assert_eq!(radial.at[1].offset, LengthPercentage::Percent(10.0));
+    assert_eq!(stops[0].position, Some(LengthPercentage::Px(20.0)));
+    assert_eq!(stops[1].position, Some(LengthPercentage::Percent(50.0)));
+}
+
 /// **A declaration an element carries itself is counted once for it**, as
 /// one a sheet sends it is.
 ///

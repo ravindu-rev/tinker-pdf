@@ -454,3 +454,51 @@ fn a_feature_list_past_the_cap_is_refused_by_value() {
     );
     assert_eq!(declarations.len(), 2, "the declaration after it survives");
 }
+
+/// `MAX_CSS_GRADIENT_STOPS`: a gradient of exactly the cap's stops is read,
+/// one more is refused by value — counted, not cut to its first thirty-two —
+/// and the declaration after it survives.
+#[test]
+fn a_gradient_past_the_stop_cap_is_refused_by_value() {
+    use crate::limits::MAX_CSS_GRADIENT_STOPS;
+    use crate::property::{Declaration, Image, Property};
+    let list = |count: usize| {
+        (0..count)
+            .map(|n| if n % 2 == 0 { "red" } else { "blue" })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let at = parse_at_defaults(
+        format!(
+            "p {{ background-image: linear-gradient({}) }}",
+            list(MAX_CSS_GRADIENT_STOPS)
+        )
+        .as_bytes(),
+    )
+    .expect("the sheet is read");
+    match &at.rules[0].declarations[0].declaration {
+        Declaration::Known(Property::BackgroundImage(Some(Image::Gradient(gradient)))) => {
+            assert_eq!(gradient.stops.len(), MAX_CSS_GRADIENT_STOPS);
+        }
+        other => panic!("a gradient at the cap was not read: {other:?}"),
+    }
+
+    let past = parse_at_defaults(
+        format!(
+            "p {{ background-image: linear-gradient({}); float: left }}",
+            list(MAX_CSS_GRADIENT_STOPS + 1)
+        )
+        .as_bytes(),
+    )
+    .expect("the sheet is still read");
+    let declarations = &past.rules[0].declarations;
+    assert!(
+        matches!(
+            &declarations[0].declaration,
+            Declaration::Unsupported { property, .. } if *property == "background-image"
+        ),
+        "a gradient past the cap: {:?}",
+        declarations[0].declaration
+    );
+    assert_eq!(declarations.len(), 2, "the declaration after it survives");
+}

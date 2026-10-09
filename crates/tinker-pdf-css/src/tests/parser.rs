@@ -7,7 +7,7 @@ use crate::media::{MediaContext, MediaType};
 use crate::parser::{parse, Declared, LayerName, LayerPart};
 use crate::property::{
     AlignContent, AlignItems, AlignSelf, BorderStyle, Color, ColumnCount, ColumnFill, ColumnSpan,
-    Declaration, Defaulting, Display, FlexDirection, FlexWrap, Float, JustifyContent, Len,
+    Declaration, Defaulting, Display, FlexDirection, FlexWrap, Float, Image, JustifyContent, Len,
     LengthPercentage, MarginValue, Position, Property, Side, Size, SpecifiedColumnWidth,
     SpecifiedGap, SpecifiedInset, SpecifiedMargin, SpecifiedMaxSize, SpecifiedMinSize,
     SpecifiedSize, SpecifiedVerticalAlign, ZIndex, IMPLEMENTED_NAMES, UNSUPPORTED_PROPERTIES,
@@ -1733,16 +1733,18 @@ fn the_border_radius_shorthand_expands_two_lists_clockwise() {
 }
 
 /// **`background-image` is `none` or one `url()`, in either spelling**
-/// (`css-backgrounds-3` §2.2, `css-values-4` §4.5); a gradient and a second
-/// layer are CSS this build does not draw, refused by value.
+/// (`css-backgrounds-3` §2.2, `css-values-4` §4.5), or one gradient (see
+/// [`linear_and_radial_gradients_read_their_geometry_and_stops`]); a
+/// repeating gradient, another image function and a second layer are CSS
+/// this build does not draw, refused by value.
 #[test]
 fn background_image_is_none_or_one_url() {
     use crate::property::ImageRef;
     let image = |href: &str| {
-        Property::BackgroundImage(Some(ImageRef {
+        Property::BackgroundImage(Some(Image::Url(ImageRef {
             href: href.to_owned(),
             base: None,
-        }))
+        })))
     };
     assert_eq!(
         known("div { background-image: url(paper.png) }"),
@@ -1757,7 +1759,8 @@ fn background_image_is_none_or_one_url() {
         vec![Property::BackgroundImage(None)]
     );
     for refused in [
-        "linear-gradient(red, blue)",
+        "repeating-linear-gradient(red, blue)",
+        "conic-gradient(red, blue)",
         "url(a.png), url(b.png)",
         "image-set(url(a.png) 1x)",
     ] {
@@ -1773,6 +1776,193 @@ fn background_image_is_none_or_one_url() {
         );
     }
     assert!(known("div { background-image: paper.png }").is_empty());
+}
+
+/// **`linear-gradient()` and `radial-gradient()` read their geometry and
+/// their stops** (`css-images-3` §3, with `css-images-4` §3.5.1's double
+/// positions), every length kept as written for the cascade to compute and
+/// the painter to place.
+///
+/// Refused by value — valid CSS this build does not draw, so counted — are a
+/// translucent stop, an interpolation hint, an interpolation colour space, a
+/// unit this build does not resolve, and a list past
+/// `MAX_CSS_GRADIENT_STOPS`; discarded as not the grammar are one stop, a
+/// `to` with no side or two of one axis, a circle sized by a percentage or
+/// two lengths, an ellipse by one, an extent beside a length, a negative
+/// radius, a hint at either end, and an `at` with no position.
+#[test]
+fn linear_and_radial_gradients_read_their_geometry_and_stops() {
+    use crate::property::{
+        ColorStop, Gradient, GradientOffset, GradientShape, LinearDirection, RadialGradient,
+        RadialSize,
+    };
+    let rgb = |r, g, b| Color { r, g, b, a: 255 };
+    let (red, blue) = (rgb(255, 0, 0), rgb(0, 0, 255));
+    let stop = |color, position| ColorStop { color, position };
+    let one = |source: &str| -> Gradient<Len> {
+        match known(&format!("div {{ background-image: {source} }}")).as_slice() {
+            [Property::BackgroundImage(Some(Image::Gradient(gradient)))] => (**gradient).clone(),
+            other => panic!("{source}: {other:?}"),
+        }
+    };
+    assert_eq!(
+        one("linear-gradient(red, blue)"),
+        Gradient {
+            shape: GradientShape::Linear(LinearDirection::Angle(180.0)),
+            stops: vec![stop(red, None), stop(blue, None)],
+        }
+    );
+    for (direction, expected) in [
+        ("45deg", LinearDirection::Angle(45.0)),
+        ("0.25turn", LinearDirection::Angle(90.0)),
+        ("100grad", LinearDirection::Angle(90.0)),
+        ("0", LinearDirection::Angle(0.0)),
+        ("to top", LinearDirection::Angle(0.0)),
+        ("to right", LinearDirection::Angle(90.0)),
+        ("TO LEFT", LinearDirection::Angle(270.0)),
+        (
+            "to top right",
+            LinearDirection::Corner {
+                right: true,
+                bottom: false,
+            },
+        ),
+        (
+            "to left bottom",
+            LinearDirection::Corner {
+                right: false,
+                bottom: true,
+            },
+        ),
+    ] {
+        assert_eq!(
+            one(&format!("linear-gradient({direction}, red, blue)")).shape,
+            GradientShape::Linear(expected),
+            "{direction}"
+        );
+    }
+    assert_eq!(
+        one("linear-gradient(red 10% 20%, 30px blue, rgb(0, 128, 0) 2em)").stops,
+        vec![
+            stop(red, Some(Len::Percent(10.0))),
+            stop(red, Some(Len::Percent(20.0))),
+            stop(blue, Some(Len::Px(30.0))),
+            stop(rgb(0, 128, 0), Some(Len::Em(2.0))),
+        ]
+    );
+    let offset = |from_end, offset| GradientOffset { from_end, offset };
+    let centre = [
+        offset(false, Len::Percent(50.0)),
+        offset(false, Len::Percent(50.0)),
+    ];
+    for (configuration, expected) in [
+        ("", RadialGradient::DEFAULT),
+        (
+            "circle, ",
+            RadialGradient {
+                circle: true,
+                size: RadialSize::FarthestCorner,
+                at: centre,
+            },
+        ),
+        (
+            "20px, ",
+            RadialGradient {
+                circle: true,
+                size: RadialSize::Explicit(Len::Px(20.0), Len::Px(20.0)),
+                at: centre,
+            },
+        ),
+        (
+            "ellipse 20px 50%, ",
+            RadialGradient {
+                circle: false,
+                size: RadialSize::Explicit(Len::Px(20.0), Len::Percent(50.0)),
+                at: centre,
+            },
+        ),
+        (
+            "closest-side at right 10px top, ",
+            RadialGradient {
+                circle: false,
+                size: RadialSize::ClosestSide,
+                at: [
+                    offset(true, Len::Px(10.0)),
+                    offset(false, Len::Percent(0.0)),
+                ],
+            },
+        ),
+        (
+            "farthest-side circle at 25% 75%, ",
+            RadialGradient {
+                circle: true,
+                size: RadialSize::FarthestSide,
+                at: [
+                    offset(false, Len::Percent(25.0)),
+                    offset(false, Len::Percent(75.0)),
+                ],
+            },
+        ),
+    ] {
+        assert_eq!(
+            one(&format!("radial-gradient({configuration}red, blue)")).shape,
+            GradientShape::Radial(expected),
+            "{configuration}"
+        );
+    }
+    let many: Vec<String> = (0..=crate::limits::MAX_CSS_GRADIENT_STOPS)
+        .map(|_| "red".to_owned())
+        .collect();
+    let at_cap = many[1..].join(", ");
+    assert_eq!(
+        one(&format!("linear-gradient({at_cap})")).stops.len(),
+        crate::limits::MAX_CSS_GRADIENT_STOPS
+    );
+    let past_cap = format!("linear-gradient({})", many.join(", "));
+    for refused in [
+        "linear-gradient(red, rgba(0, 0, 255, 0.5))",
+        "linear-gradient(red, transparent)",
+        "linear-gradient(red, 30%, blue)",
+        "linear-gradient(in oklab, red, blue)",
+        "radial-gradient(10vw, red, blue)",
+        past_cap.as_str(),
+    ] {
+        assert!(
+            matches!(
+                declarations(&format!("div {{ background-image: {refused} }}"))[0].declaration,
+                Declaration::Unsupported {
+                    property: "background-image",
+                    ..
+                }
+            ),
+            "{refused}"
+        );
+    }
+    for malformed in [
+        "linear-gradient(red)",
+        "linear-gradient(to, red, blue)",
+        "linear-gradient(to top bottom, red, blue)",
+        "linear-gradient(, red, blue)",
+        "linear-gradient(red, blue, 10%)",
+        "linear-gradient(red blue, green)",
+        "radial-gradient(circle 10%, red, blue)",
+        "radial-gradient(circle 1px 2px, red, blue)",
+        "radial-gradient(ellipse 1px, red, blue)",
+        "radial-gradient(closest-side 10px, red, blue)",
+        "radial-gradient(-1px, red, blue)",
+        "radial-gradient(at, red, blue)",
+    ] {
+        let parsed = sheet(&format!("div {{ background-image: {malformed} }}"));
+        assert!(
+            parsed.rules.iter().all(|rule| rule.declarations.is_empty()),
+            "{malformed} is not CSS and is discarded"
+        );
+    }
+    // The shorthand takes a gradient as its image.
+    assert!(matches!(
+        known("div { background: linear-gradient(red, blue) no-repeat }").as_slice(),
+        [_, Property::BackgroundImage(Some(Image::Gradient(_))), ..]
+    ));
 }
 
 /// **A relative `url()` remembers the sheet it was written in** — the sheet's
@@ -1807,7 +1997,7 @@ fn a_background_url_carries_the_address_of_its_sheet() {
         .iter()
         .flat_map(|rule| &rule.declarations)
         .filter_map(|declared| match &declared.declaration {
-            Declaration::Known(Property::BackgroundImage(Some(image))) => {
+            Declaration::Known(Property::BackgroundImage(Some(Image::Url(image)))) => {
                 Some((image.href.clone(), image.base.clone()))
             }
             _ => None,
@@ -1823,7 +2013,7 @@ fn a_background_url_carries_the_address_of_its_sheet() {
     let inline = known("div { background-image: url(paper.png) }");
     assert!(matches!(
         &inline[0],
-        Property::BackgroundImage(Some(image)) if image.base.is_none()
+        Property::BackgroundImage(Some(Image::Url(image))) if image.base.is_none()
     ));
 }
 
@@ -1961,10 +2151,10 @@ fn the_background_shorthand_resets_what_it_does_not_name() {
         known("div { background: url(a.png) no-repeat center / contain transparent }"),
         vec![
             Property::BackgroundColor(Color::TRANSPARENT),
-            Property::BackgroundImage(Some(ImageRef {
+            Property::BackgroundImage(Some(Image::Url(ImageRef {
                 href: "a.png".to_owned(),
                 base: None,
-            })),
+            }))),
             Property::BackgroundRepeat(BackgroundRepeat {
                 x: R::NoRepeat,
                 y: R::NoRepeat,

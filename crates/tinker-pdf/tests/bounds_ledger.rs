@@ -14,6 +14,15 @@
 //! because no container path parses HTML: an EPUB chapter is XHTML and is read
 //! by the XML reader.
 //!
+//! *Amended, October 2026, the EPUB CSS row's gradients.* **One more row,
+//! `MAX_CSS_GRADIENT_STOPS`, a cap on output.** A gradient is a stitching
+//! function of one piece per pair of stops, written for every fragment of
+//! its box on every page the box crosses; a stop is four bytes, `red,`. Its
+//! `fixtures` is the cap — the gradient built at it parses — its comic and
+//! fixed-document yardsticks are zeros, since neither has a stylesheet, and
+//! its book yardstick is three, a rule fading in and out, since no committed
+//! book declares a gradient.
+//!
 //! *Amended, October 2026, the EPUB CSS row's font features.* **One more row,
 //! `MAX_CSS_FEATURE_SETTINGS`, a cap on copies.** `font-feature-settings` is
 //! inherited, so a list is copied into the computed style of every element
@@ -2536,6 +2545,27 @@ fn ledger() -> Vec<Bound> {
                 CSS_BOUNDS_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_CSS_GRADIENT_STOPS",
+            cap: css_limits::MAX_CSS_GRADIENT_STOPS as u128,
+            published: "32",
+            // The gradient built exactly at the cap parses; the one past it is
+            // refused by value.
+            fixtures: css_limits::MAX_CSS_GRADIENT_STOPS as u128,
+            comic: 0,
+            document: 0,
+            // No committed book declares a gradient (a search of their
+            // sheets); a chapter head's rule fading in and out is three.
+            book: 3,
+            // `red,` is four bytes.
+            reachable: css_limits::MAX_CSS_BYTES as u128 / 4,
+            reachable_because: "a stop is four bytes, in a sheet of MAX_CSS_BYTES",
+            declared_in: CSS_LIMITS,
+            fires_in: (
+                "a_gradient_past_the_stop_cap_is_refused_by_value",
+                CSS_BOUNDS_TESTS,
+            ),
+        },
     ]
 }
 
@@ -2583,8 +2613,8 @@ fn segment_size() -> u128 {
 /// table-reconstruction row adds `MAX_TABLE_RULES`; and the review of tier
 /// 5's formats lane adds HTML's `MAX_HTML_ACTIVE_FORMATTING` and
 /// `MAX_HTML_CLONE_BYTES`; and the EPUB CSS row's font features add
-/// `MAX_CSS_FEATURE_SETTINGS`. All **sixty-three** are here, and a bound
-/// added without a row fails this.
+/// `MAX_CSS_FEATURE_SETTINGS`, and its gradients `MAX_CSS_GRADIENT_STOPS`.
+/// All **sixty-four** are here, and a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -2654,6 +2684,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_HTML_ACTIVE_FORMATTING",
             "MAX_HTML_CLONE_BYTES",
             "MAX_CSS_FEATURE_SETTINGS",
+            "MAX_CSS_GRADIENT_STOPS",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2759,7 +2790,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 63, "the ledger is sixty-three rows");
+    assert_eq!(measured, 64, "the ledger is sixty-four rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2791,7 +2822,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 63, "the ledger is sixty-three rows");
+    assert_eq!(ledger().len(), 64, "the ledger is sixty-four rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**

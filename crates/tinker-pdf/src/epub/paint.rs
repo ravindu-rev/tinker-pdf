@@ -83,14 +83,16 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use tinker_pdf_cos::build::{
-    DocumentBuilder, ExtGState, Glyph, PageBuilder, Target, TilingPattern, TilingType,
+    DeviceSpace, DocumentBuilder, ExtGState, Function, Glyph, PageBuilder, Shading, Target,
+    TilingPattern, TilingType,
 };
 use tinker_pdf_css::cascade::StyleTree;
 
 use tinker_pdf_css::property::{
-    BackgroundSize, BorderStyle, Color, ComputedOffset, FeatureSetting, FontFamily, FontKerning,
-    FontStyle, ImageRef, LengthPercentage, Position, RepeatStyle, Side, TextDecoration, Transform,
-    TransformOrigin,
+    BackgroundSize, BorderStyle, Color, ColorStop, ComputedOffset, FeatureSetting, FontFamily,
+    FontKerning, FontStyle, Gradient, GradientOffset, GradientShape, Image, ImageRef,
+    LengthPercentage, LinearDirection, Position, RadialSize, RepeatStyle, Side, TextDecoration,
+    Transform, TransformOrigin,
 };
 use tinker_pdf_font::base14::Standard14;
 use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, BaseEncoding};
@@ -1576,6 +1578,445 @@ pub fn tiling(
     })
 }
 
+/// A gradient's geometry on one fragment: `css-images-3` §5.3's default
+/// sizing, then [`tiling`]'s.
+///
+/// A gradient has no size and no ratio of its own, so an `auto` dimension is
+/// the positioning area's and `cover` and `contain` are that area exactly;
+/// the size that comes out is handed to [`tiling`] as if it were an image's
+/// own, which places and repeats it as it does a raster one.
+fn gradient_tiling(
+    fragment: &BoxFragment,
+    layer: &BackgroundLayer,
+    frame: &Frame,
+) -> Option<Tiling> {
+    let border = &fragment.border_width;
+    let area = (
+        (fragment.width - border.left - border.right).max(0.0),
+        (fragment.height - border.top - border.bottom).max(0.0),
+    );
+    let resolve = |length: LengthPercentage, of: f64| match length {
+        LengthPercentage::Px(px) => px,
+        LengthPercentage::Percent(percent) => of * percent / 100.0,
+    };
+    let size = match layer.size {
+        BackgroundSize::Cover | BackgroundSize::Contain => area,
+        BackgroundSize::Explicit(width, height) => (
+            width.map_or(area.0, |width| resolve(width, area.0)),
+            height.map_or(area.1, |height| resolve(height, area.1)),
+        ),
+    };
+    let sized = BackgroundLayer {
+        image: layer.image.clone(),
+        repeat: layer.repeat,
+        position: layer.position,
+        size: BackgroundSize::Explicit(
+            Some(LengthPercentage::Px(size.0)),
+            Some(LengthPercentage::Px(size.1)),
+        ),
+    };
+    tiling(fragment, &sized, size, frame)
+}
+
+/// What one gradient tile draws: a shading, through `cm` (an ellipse's
+/// squash and its centre) then `sh`, or one colour where the gradient has
+/// no extent to blend over.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GradientPaint {
+    /// A PDF shading, in the space `matrix` makes of the tile's.
+    Shaded {
+        /// The axial or radial shading.
+        shading: Box<Shading>,
+        /// The `cm` before `sh`, where the shading's space is not the tile's.
+        matrix: Option<[f64; 6]>,
+    },
+    /// One colour over the whole tile: a radial gradient whose ending shape
+    /// has no width or no height (§3.2.4 draws it as its last colour), or
+    /// whose every stop is at or before its centre.
+    Solid(Color),
+}
+
+/// §3.5.3's fix-up over stop positions already resolved to points along the
+/// gradient line or ray: the first defaults to 0 and the last to `length`,
+/// a position before an earlier one is moved up to it, and a run without
+/// positions is spread evenly between the stops either side.
+fn fix_up(positions: &[Option<f64>], length: f64) -> Vec<f64> {
+    let count = positions.len();
+    let mut fixed: Vec<Option<f64>> = positions.to_vec();
+    if let Some(first) = fixed.first_mut() {
+        first.get_or_insert(0.0);
+    }
+    if count > 1 {
+        if let Some(last) = fixed.last_mut() {
+            last.get_or_insert(length);
+        }
+    }
+    let mut highest = f64::NEG_INFINITY;
+    for position in fixed.iter_mut().flatten() {
+        highest = highest.max(*position);
+        *position = highest;
+    }
+    let mut out: Vec<f64> = Vec::with_capacity(count);
+    let mut at = 0usize;
+    while at < count {
+        match fixed[at] {
+            Some(position) => {
+                out.push(position);
+                at += 1;
+            }
+            None => {
+                // A run of unpositioned stops: the first and last stops are
+                // positioned, so one stands either side of it.
+                let start = out.last().copied().unwrap_or(0.0);
+                let mut end_at = at;
+                while end_at < count && fixed[end_at].is_none() {
+                    end_at += 1;
+                }
+                let end = fixed.get(end_at).copied().flatten().unwrap_or(start);
+                let steps = (end_at - at + 1) as f64;
+                for k in 1..=(end_at - at) {
+                    out.push(start + (end - start) * k as f64 / steps);
+                }
+                at = end_at;
+            }
+        }
+    }
+    out
+}
+
+/// One stop's colour as `DeviceRGB` components.
+fn components(color: Color) -> Vec<f64> {
+    [color.r, color.g, color.b]
+        .iter()
+        .map(|channel| f64::from(*channel) / 255.0)
+        .collect()
+}
+
+/// The stitching function a stop list is along `[from, to]` of a gradient
+/// line or ray: one straight ramp per pair of stops that are apart, the
+/// stitch at each join, so two stops at one place are a hard edge.
+///
+/// `stops` are `(position, colour)` in order, non-decreasing, and `to` is
+/// greater than `from`.
+fn ramp(stops: &[(f64, Color)], from: f64, to: f64) -> Option<Function> {
+    let span = to - from;
+    let mut pieces: Vec<(f64, Function)> = Vec::new();
+    for pair in stops.windows(2) {
+        let [(start, first), (end, second)] = pair else {
+            continue;
+        };
+        if end - start <= 0.0 {
+            continue;
+        }
+        pieces.push((
+            (start - from) / span,
+            Function::Exponential {
+                domain: [0.0, 1.0],
+                c0: components(*first),
+                c1: components(*second),
+                n: 1.0,
+            },
+        ));
+    }
+    match pieces.len() {
+        0 => None,
+        1 => pieces.pop().map(|(_, function)| function),
+        _ => {
+            let bounds: Vec<f64> = pieces.iter().skip(1).map(|(at, _)| *at).collect();
+            let encode = vec![[0.0, 1.0]; pieces.len()];
+            Some(Function::Stitching {
+                domain: [0.0, 1.0],
+                functions: pieces.into_iter().map(|(_, function)| function).collect(),
+                bounds,
+                encode,
+            })
+        }
+    }
+}
+
+/// The stops of `gradient` placed along a line or ray `length` points long,
+/// fixed up; a pixel position is converted to points, a percentage is of
+/// `length`.
+fn placed_stops(stops: &[ColorStop<LengthPercentage>], length: f64) -> Vec<(f64, Color)> {
+    let positions: Vec<Option<f64>> = stops
+        .iter()
+        .map(|stop| {
+            stop.position.map(|position| match position {
+                LengthPercentage::Px(px) => px * PX_TO_PT,
+                LengthPercentage::Percent(percent) => length * percent / 100.0,
+            })
+        })
+        .collect();
+    fix_up(&positions, length)
+        .into_iter()
+        .zip(stops.iter().map(|stop| stop.color))
+        .collect()
+}
+
+/// How far, in points, the end stops' colours are held past them: see
+/// [`held`].
+const HARD_EDGE: f64 = 1e-3;
+
+/// `stops` with the first colour held for [`HARD_EDGE`] before the first
+/// stop — where `before` allows it — and the last colour for as long after
+/// the last.
+///
+/// A PDF shading extends the value its function has at either end of its
+/// domain, and two stops at one place are an edge (§3.5.3), not a ramp: a
+/// gradient whose first two stops coincide is the first colour up to them
+/// and the second after, and its function's value at the start must be the
+/// first colour, which the ramp alone — the coincident pair contributing no
+/// piece — would not make it. Held, every coincident pair is inside the
+/// domain, a stitch, and a gradient whose every stop is at one place is an
+/// edge there rather than nothing.
+fn held(stops: &[(f64, Color)], before: bool) -> Vec<(f64, Color)> {
+    let mut out: Vec<(f64, Color)> = Vec::with_capacity(stops.len() + 2);
+    if let (true, Some(&(at, color))) = (before, stops.first()) {
+        out.push((at - HARD_EDGE, color));
+    }
+    out.extend_from_slice(stops);
+    if let Some(&(at, color)) = stops.last() {
+        out.push((at + HARD_EDGE, color));
+    }
+    out
+}
+
+/// `gradient` as one tile `width` by `height` points draws it, in the tile's
+/// space: its origin the tile's bottom-left corner, y up.
+///
+/// # Linear, §3.1
+///
+/// The gradient line passes through the tile's centre at the angle given —
+/// clockwise from up, and for a corner the angle that puts the other two
+/// corners on the 50% line — and is `|w sin A| + |h cos A|` long, so its
+/// ends' perpendiculars pass through two corners. The PDF axis is the
+/// stretch of that line from the first stop to the last, extended both
+/// ways, so a stop before 0% or past 100% is where it says, and the end
+/// colours held a hair past the end stops ([`held`]).
+///
+/// # Radial, §3.2
+///
+/// The ending shape's radii come from its size (§3.2.1, a corner keyword's
+/// ellipse keeping the side keyword's ratio), and a PDF radial shading
+/// blends between two concentric circles in a space squashed by `ry / rx`,
+/// so an ellipse is a circle of radius `rx` there. A stop before the centre
+/// is not a circle PDF can draw: the colour at the centre is interpolated
+/// and the stops before it dropped.
+pub fn gradient_paint(
+    gradient: &Gradient<LengthPercentage>,
+    (width, height): (f64, f64),
+) -> Option<GradientPaint> {
+    match gradient.shape {
+        GradientShape::Linear(direction) => {
+            let angle = match direction {
+                LinearDirection::Angle(degrees) => degrees.to_radians(),
+                LinearDirection::Corner { right, bottom } => {
+                    let across = if right { 1.0 } else { -1.0 };
+                    let down = if bottom { 1.0 } else { -1.0 };
+                    (across * height).atan2(-down * width)
+                }
+            };
+            let (sin, cos) = angle.sin_cos();
+            let length = (width * sin).abs() + (height * cos).abs();
+            let stops = held(&placed_stops(&gradient.stops, length), true);
+            let (first, to) = (stops.first()?.0, stops.last()?.0);
+            // CSS's down is the tile's up turned over: the line's direction
+            // in the tile's space is (sin, cos).
+            let start = (
+                width / 2.0 - sin * length / 2.0,
+                height / 2.0 - cos * length / 2.0,
+            );
+            let point = |along: f64| (start.0 + sin * along, start.1 + cos * along);
+            let (a, b) = (point(first), point(to));
+            let function = ramp(&stops, first, to)?;
+            Some(GradientPaint::Shaded {
+                shading: Box::new(Shading::Axial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [a.0, a.1, b.0, b.1],
+                    function,
+                    extend: (true, true),
+                }),
+                matrix: None,
+            })
+        }
+        GradientShape::Radial(radial) => {
+            let resolve = |length: LengthPercentage, of: f64| match length {
+                LengthPercentage::Px(px) => px * PX_TO_PT,
+                LengthPercentage::Percent(percent) => of * percent / 100.0,
+            };
+            let place = |offset: GradientOffset<LengthPercentage>, of: f64| {
+                let along = resolve(offset.offset, of);
+                if offset.from_end {
+                    of - along
+                } else {
+                    along
+                }
+            };
+            // The centre, from the tile's top left in CSS's orientation.
+            let (cx, cy) = (place(radial.at[0], width), place(radial.at[1], height));
+            let sides = (
+                cx.abs().min((width - cx).abs()),
+                cy.abs().min((height - cy).abs()),
+            );
+            let far_sides = (
+                cx.abs().max((width - cx).abs()),
+                cy.abs().max((height - cy).abs()),
+            );
+            let corners = [(0.0, 0.0), (width, 0.0), (0.0, height), (width, height)]
+                .map(|(x, y): (f64, f64)| ((x - cx).abs(), (y - cy).abs()));
+            let distance = |(dx, dy): (f64, f64)| dx.hypot(dy);
+            let nearest = corners
+                .iter()
+                .copied()
+                .min_by(|p, q| distance(*p).total_cmp(&distance(*q)))?;
+            let farthest = corners
+                .iter()
+                .copied()
+                .max_by(|p, q| distance(*p).total_cmp(&distance(*q)))?;
+            // §3.2.1: a corner keyword's ellipse has the ratio the side
+            // keyword's would, and passes through that corner.
+            let through = |(dx, dy): (f64, f64), (sx, sy): (f64, f64)| {
+                if sx <= 0.0 || sy <= 0.0 {
+                    return (0.0, 0.0);
+                }
+                let ratio = sx / sy;
+                let ry = (dx / ratio).hypot(dy);
+                (ratio * ry, ry)
+            };
+            let (rx, ry) = match (radial.size, radial.circle) {
+                (RadialSize::ClosestSide, true) => {
+                    let r = sides.0.min(sides.1);
+                    (r, r)
+                }
+                (RadialSize::FarthestSide, true) => {
+                    let r = far_sides.0.max(far_sides.1);
+                    (r, r)
+                }
+                (RadialSize::ClosestCorner, true) => (distance(nearest), distance(nearest)),
+                (RadialSize::FarthestCorner, true) => (distance(farthest), distance(farthest)),
+                (RadialSize::ClosestSide, false) => sides,
+                (RadialSize::FarthestSide, false) => far_sides,
+                (RadialSize::ClosestCorner, false) => through(nearest, sides),
+                (RadialSize::FarthestCorner, false) => through(farthest, far_sides),
+                (RadialSize::Explicit(x, y), _) => (resolve(x, width), resolve(y, height)),
+            };
+            let stops = placed_stops(&gradient.stops, rx);
+            let last = *stops.last()?;
+            if !(rx > 0.0 && ry > 0.0) || last.0 <= 0.0 {
+                return Some(GradientPaint::Solid(last.1));
+            }
+            // The colour at the centre, where a stop lies before it.
+            let mut kept: Vec<(f64, Color)> = Vec::with_capacity(stops.len());
+            for pair in stops.windows(2) {
+                let [(start, first), (end, second)] = pair else {
+                    continue;
+                };
+                if *start < 0.0 && *end > 0.0 && kept.is_empty() {
+                    let t = -start / (end - start);
+                    let mix = |a: u8, b: u8| {
+                        (f64::from(a) + (f64::from(b) - f64::from(a)) * t).round() as u8
+                    };
+                    kept.push((
+                        0.0,
+                        Color {
+                            r: mix(first.r, second.r),
+                            g: mix(first.g, second.g),
+                            b: mix(first.b, second.b),
+                            a: 255,
+                        },
+                    ));
+                }
+            }
+            kept.extend(stops.iter().copied().filter(|(at, _)| *at >= 0.0));
+            // A radius is not negative: the first colour is held inward only
+            // where there is room for it.
+            let room = kept.first().is_some_and(|(at, _)| *at >= HARD_EDGE);
+            let kept = held(&kept, room);
+            let (first, to) = (kept.first()?.0, kept.last()?.0);
+            let function = ramp(&kept, first, to)?;
+            Some(GradientPaint::Shaded {
+                shading: Box::new(Shading::Radial {
+                    color_space: DeviceSpace::Rgb,
+                    coords: [0.0, 0.0, first, 0.0, 0.0, to],
+                    function,
+                    extend: (true, true),
+                }),
+                // The centre turned over into the tile's up, and the circle
+                // squashed into the ellipse.
+                matrix: Some([1.0, 0.0, 0.0, ry / rx, cx, height - cy]),
+            })
+        }
+    }
+}
+
+/// One gradient tile as a tiling pattern filling the painting area: the
+/// shading registered as a resource the cell's `sh` names, clipped to the
+/// cell, or the cell filled with one colour.
+///
+/// A pattern even where the gradient does not repeat, for the raster path's
+/// tiled reason: 8.7.3.1 maps a pattern onto the page's default space, so the
+/// box's transform is in its matrix, and one path is one place for a
+/// gradient to be placed wrong.
+fn gradient_plan(
+    builder: &mut DocumentBuilder,
+    gradient: &Gradient<LengthPercentage>,
+    geometry: &Tiling,
+    turned: [f64; 6],
+    counter: &mut usize,
+) -> Option<Plan> {
+    let (width, height) = geometry.tile;
+    let paint = gradient_paint(gradient, (width, height))?;
+    let content = match paint {
+        GradientPaint::Shaded { shading, matrix } => {
+            let name = format!("BgSh{counter}").into_bytes();
+            if !builder.add_shading(&name, &shading) {
+                return None;
+            }
+            let squash = matrix.map_or(String::new(), |m| {
+                format!("{} {} {} {} {} {} cm ", m[0], m[1], m[2], m[3], m[4], m[5])
+            });
+            let mut content = format!("0 0 {width} {height} re W n {squash}/").into_bytes();
+            content.extend_from_slice(&name);
+            content.extend_from_slice(b" sh");
+            content
+        }
+        GradientPaint::Solid(color) => format!(
+            "{} {} {} rg 0 0 {width} {height} re f",
+            f64::from(color.r) / 255.0,
+            f64::from(color.g) / 255.0,
+            f64::from(color.b) / 255.0
+        )
+        .into_bytes(),
+    };
+    let pattern = format!("BgP{counter}").into_bytes();
+    *counter += 1;
+    let registered = builder.add_tiling_pattern(
+        &pattern,
+        &TilingPattern {
+            bbox: [0.0, 0.0, width, height],
+            x_step: geometry.step.0,
+            y_step: geometry.step.1,
+            matrix: Some(concat(
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                    geometry.origin.0,
+                    geometry.origin.1 - height,
+                ],
+                turned,
+            )),
+            tiling_type: TilingType::ConstantSpacing,
+            content: &content,
+        },
+    );
+    registered.then_some(Plan::Tiled {
+        pattern,
+        fill: geometry.fill,
+    })
+}
+
 /// The quantum of [`Effects`]' alphas: ten thousand steps between clear and
 /// opaque.
 const ALPHA_STEPS: f64 = 10_000.0;
@@ -1819,7 +2260,24 @@ impl Effects {
                     let Some(layer) = &fragment.image else {
                         continue;
                     };
-                    let Some((name, intrinsic)) = image(&layer.image) else {
+                    let reference = match &layer.image {
+                        Image::Url(reference) => reference,
+                        Image::Gradient(gradient) => {
+                            let Some(geometry) = gradient_tiling(fragment, layer, frame) else {
+                                continue;
+                            };
+                            let Some(turned) = self.composed(&locals, fragment.anchor) else {
+                                continue;
+                            };
+                            if let Some(plan) =
+                                gradient_plan(builder, gradient, &geometry, turned, counter)
+                            {
+                                plans.push((index, plan));
+                            }
+                            continue;
+                        }
+                    };
+                    let Some((name, intrinsic)) = image(reference) else {
                         continue;
                     };
                     let Some(geometry) = tiling(fragment, layer, intrinsic, frame) else {

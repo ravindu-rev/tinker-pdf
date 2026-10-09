@@ -228,8 +228,9 @@ pub struct ComputedStyle {
     /// `background-color`
     pub background_color: Color,
     /// `background-image`, `css-backgrounds-3` §2.2: the one layer this build
-    /// draws, its URL unresolved (see [`ImageRef`]).
-    pub background_image: Option<ImageRef>,
+    /// draws — a URL unresolved (see [`ImageRef`]), or a gradient with `em`
+    /// resolved.
+    pub background_image: Option<Image>,
     /// `background-repeat`, §2.3.
     pub background_repeat: BackgroundRepeat,
     /// `background-position`, §2.6, `em` resolved.
@@ -649,7 +650,11 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::BorderStyle(side, value) => style.border_style.set(*side, *value),
         Property::BorderColor(side, value) => style.border_color.set(*side, *value),
         Property::BackgroundColor(value) => style.background_color = *value,
-        Property::BackgroundImage(value) => style.background_image = value.clone(),
+        Property::BackgroundImage(value) => {
+            style.background_image = value
+                .as_ref()
+                .map(|image| image.compute(font_size, root_font_size));
+        }
         Property::BackgroundRepeat(value) => style.background_repeat = *value,
         Property::BackgroundPosition(value) => {
             let axis = |offset: PositionOffset| ComputedOffset {

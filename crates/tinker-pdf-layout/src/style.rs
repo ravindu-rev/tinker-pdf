@@ -39,7 +39,7 @@ use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BackgroundPosition, BackgroundRepeat, BackgroundSize,
     BorderCollapse, BorderSpacing, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
     ColumnSpan, ColumnWidth, Direction, Display, FeatureSetting, FlexDirection, FlexWrap, Float,
-    FontFamily, FontKerning, FontStyle, FontVariant, Gap, ImageRef, Inset, JustifyContent,
+    FontFamily, FontKerning, FontStyle, FontVariant, Gap, Image, Inset, JustifyContent,
     LengthPercentage, LineHeight, ListStylePosition, ListStyleType, MarginValue, MaxSize, MinSize,
     OutlineStyle, Overflow, OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Shadow,
     Side, Sides, Size, Spacing, TableLayout, TextAlign, TextDecoration, TextTransform, UnicodeBidi,
@@ -696,12 +696,13 @@ pub struct Outline {
 }
 
 /// One background image, `css-backgrounds-3` §2, as the painter draws it:
-/// the image still a reference, because what it resolves to is the caller's
-/// container and not this crate's, and nothing about it moves a box.
+/// a `url()` still a reference, because what it resolves to is the caller's
+/// container and not this crate's, or a gradient, which the painter draws
+/// into the box it is given — and nothing about either moves a box.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BackgroundLayer {
-    /// `background-image`, unresolved.
-    pub image: ImageRef,
+    /// `background-image`, a URL unresolved.
+    pub image: Image,
     /// `background-repeat`.
     pub repeat: BackgroundRepeat,
     /// `background-position`, percentages unresolved: the positioning area
