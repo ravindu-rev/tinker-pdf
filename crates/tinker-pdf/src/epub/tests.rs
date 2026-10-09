@@ -1766,6 +1766,113 @@ fn an_east_asian_character_is_one_em_wide() {
     assert!((vertical.descent - 20.0 * 0.217).abs() < 1e-9);
 }
 
+// ---- A run cut at its levels -------------------------------------------------
+
+/// **Each glyph finds its piece by a search, not a scan** (review of lane 8C).
+///
+/// `cut_run` shapes a run once and hands each glyph's advance to the piece
+/// its cluster starts in. It found that piece by walking the pieces from the
+/// first, so a run cut into a piece per character cost `O(glyphs x pieces)`,
+/// and one line can be such a run: a paragraph at a tiny `font-size` is one
+/// line, and a word of each direction in turn cuts it in two pieces a word.
+/// The review timed `ab بحم ` x 20 000 at 51.8 s to open, against 8.0 s for
+/// as many characters of `ab ab ab `.
+///
+/// The bound is held by count, not by a clock: `paint::step` counts each
+/// piece the lookup looks at, under `cfg(test)` only, and a run of 4 096
+/// one-character pieces is held to `glyphs x (log2 pieces + 2)` steps — a
+/// binary search's — where the scan takes `n (n + 1) / 2`, 8 390 656. And
+/// the pieces still partition the run: each has its own character, the
+/// level it was cut at and its glyph's advance, and the last ends where the
+/// run did.
+#[test]
+fn a_run_cut_in_a_piece_per_character_finds_each_glyphs_piece_by_search() {
+    use super::paint::{cut_run, BookMetrics, STEPS};
+    use tinker_pdf_css::property::{
+        Color, FontFamily, FontKerning, FontStyle, FontVariant, TextDecoration,
+    };
+    use tinker_pdf_layout::metrics::{Metrics, ShapingContext};
+    use tinker_pdf_layout::TextRun;
+    use tinker_pdf_shape::bidi::Level;
+
+    const N: usize = 4096;
+    let text = "ab".repeat(N / 2);
+    let pieces: Vec<(core::ops::Range<usize>, Level)> = (0..N)
+        .map(|at| {
+            (
+                at..at + 1,
+                if at % 2 == 0 { Level::LTR } else { Level::RTL },
+            )
+        })
+        .collect();
+    let metrics = BookMetrics::STANDARD;
+    let mut run = TextRun {
+        x: 7.0,
+        y: 0.0,
+        width: 0.0,
+        text,
+        font_size: 10.0,
+        families: vec![FontFamily::Serif],
+        weight: 400,
+        style: FontStyle::Normal,
+        variant: FontVariant::Normal,
+        kerning: FontKerning::Auto,
+        features: Vec::new(),
+        paragraph_rtl: Some(false),
+        paragraph: 1,
+        embeddings: Vec::new(),
+        bidi_level: None,
+        hyphenated: false,
+        color: Color::BLACK,
+        decoration: TextDecoration::None,
+        painted: true,
+        letter_spacing: 0.0,
+        word_spacing: 0.0,
+        generated: false,
+        anchor: None,
+        order: 1,
+    };
+    let font = super::paint::request(&run);
+    let (a, b) = (metrics.advance('a', &font), metrics.advance('b', &font));
+    run.width = (a + b) * (N / 2) as f64;
+
+    STEPS.with(|steps| steps.set(0));
+    let cut = cut_run(&run, &pieces, &metrics, &ShapingContext::NONE);
+    let steps = STEPS.with(core::cell::Cell::get);
+
+    let search = N * (N.ilog2() as usize + 2);
+    assert!(
+        steps <= search,
+        "{steps} pieces looked at for {N} glyphs in {N} pieces; a search looks at {search}"
+    );
+    assert_eq!(cut.len(), N);
+    let mut x = run.x;
+    for (at, piece) in cut.iter().enumerate() {
+        let (ch, width, level) = if at % 2 == 0 {
+            ("a", a, 0)
+        } else {
+            ("b", b, 1)
+        };
+        assert_eq!(piece.text, ch, "piece {at}");
+        assert_eq!(piece.bidi_level, Some(level), "piece {at}");
+        assert!(
+            (piece.x - x).abs() < 1e-6,
+            "piece {at} is at {}, not {x}",
+            piece.x
+        );
+        assert!(
+            (piece.width - width).abs() < 1e-6,
+            "piece {at}: {}",
+            piece.width
+        );
+        x += piece.width;
+    }
+    assert!(
+        (x - (run.x + run.width)).abs() < 1e-9,
+        "the pieces end at {x}"
+    );
+}
+
 // ---- The table of contents ---------------------------------------------------
 
 /// An NCX's `navMap`, nested, with the labels and the references it names.

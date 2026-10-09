@@ -4525,7 +4525,7 @@ fn level_pieces(text: &str, levels: &[Level]) -> Vec<(core::ops::Range<usize>, L
 /// One run as one run per piece, each carrying its part of the run's
 /// measured width — shaped in the `context` layout measured it in. See
 /// [`split_at_levels`].
-fn cut_run(
+pub(crate) fn cut_run(
     run: &TextRun,
     pieces: &[(core::ops::Range<usize>, Level)],
     metrics: &BookMetrics<'_>,
@@ -4535,10 +4535,18 @@ fn cut_run(
     let mut widths = vec![0.0f64; pieces.len()];
     for glyph in &shaped.glyphs {
         let at = usize::try_from(glyph.cluster).unwrap_or(usize::MAX);
+        // A search and not a scan: the pieces are [`level_pieces`]', in
+        // logical order, each starting where the one before it ended, so the
+        // first one ending past `at` holds it. A scan from the first made a
+        // run cut into a piece a word cost `O(glyphs x pieces)`, and one line
+        // can be such a run (review of lane 8C). A cluster past the text
+        // goes to the last piece, as it did.
         let piece = pieces
-            .iter()
-            .position(|(range, _)| range.contains(&at))
-            .unwrap_or(pieces.len() - 1);
+            .partition_point(|(range, _)| {
+                step();
+                range.end <= at
+            })
+            .min(pieces.len().saturating_sub(1));
         if let Some(width) = widths.get_mut(piece) {
             *width += glyph.x_advance;
         }
@@ -4566,6 +4574,23 @@ fn cut_run(
         out.push(piece);
     }
     out
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`step`]'s count, on this thread.
+    pub(crate) static STEPS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// One step of a lookup a crafted line could make quadratic: a piece
+/// [`cut_run`] looks at to find a glyph's. Counted only under `cfg(test)`,
+/// where `epub/tests.rs` holds the total to a search's, so that a scan put
+/// back **fails** rather than runs slowly — which `cargo test`, having no
+/// timeout, would not notice. Everywhere else it is nothing.
+#[inline]
+fn step() {
+    #[cfg(test)]
+    STEPS.with(|steps| steps.set(steps.get().saturating_add(1)));
 }
 
 /// Whether two layout coordinates are one, to the rounding of the sums that
