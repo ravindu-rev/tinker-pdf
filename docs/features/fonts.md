@@ -649,7 +649,10 @@ Landed so far:
   where a line wrapped changed its order: `abc (de` in a right-to-left
   paragraph drew `de(` on its second line where unwrapped it draws `(de`.
   Layout now numbers the bidi paragraph every run is set in
-  (`TextRun::paragraph`: a block's inline content up to a forced break), and
+  (`TextRun::paragraph`: a block's inline content up to a forced break of
+  `Bidi_Class` `B` — a preserved newline, CR, NEL or U+2029, and not a
+  U+2028 line separator, which ends the line and not the paragraph,
+  `css-writing-modes-3` §2.4), and
   the painter resolves each paragraph once over every line of it, across
   pages, and takes each line's levels from `Paragraph::line` — X1 to I2 the
   paragraph's, L1 and L2 the line's
