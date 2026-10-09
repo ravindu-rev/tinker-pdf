@@ -159,6 +159,13 @@ fn a_cie_colour_fills_and_strokes_to_its_clauses_arithmetic() {
         // A stroke, ten wide, along y = 10.
         assert!(page.set_stroke_cie(b"G", &[0.8]));
         page.raw(b"10 w 0 10 m 60 10 l S");
+        // And one in each three-component space, ten wide along y = 30 with
+        // butt caps, so each covers its own 20-point run and no fill. The
+        // /Lab one has a negative a*, which a 0..1 clamp would make zero.
+        assert!(page.set_stroke_cie(b"R", &[0.7, 0.2, 0.5]));
+        page.raw(b"20 30 m 40 30 l S");
+        assert!(page.set_stroke_cie(b"L", &[65.0, -30.0, 40.0]));
+        page.raw(b"40 30 m 60 30 l S");
     });
     let bitmap = render(builder.finish());
 
@@ -188,6 +195,14 @@ fn a_cie_colour_fills_and_strokes_to_its_clauses_arithmetic() {
         at(&bitmap, 10.0, 30.0),
         grey(lab_xyz(60.0, 0.0, 0.0, D50)[1]),
         "Lab grey",
+    );
+    // The strokes, through `CS` and `SC`, to the same arithmetic.
+    let y = 0.5 * 0.7 + 0.3 * 0.2_f64.powi(2) + 0.2 * 0.5_f64.powi(3);
+    near(at(&bitmap, 30.0, 30.0), grey(y), "CalRGB stroke");
+    near(
+        at(&bitmap, 50.0, 30.0),
+        d50_to_srgb(lab_xyz(65.0, -30.0, 40.0, D50)),
+        "Lab stroke",
     );
 }
 
