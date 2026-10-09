@@ -381,14 +381,37 @@ fn tag_soup_is_a_document() {
 /// `<meta>` names none and the bytes are guessed at; and `x-user-defined` is
 /// read as windows-1252. The lane read the content's encoding past a bogus
 /// `charset`, and set `x-user-defined` aside as not decoded.
+///
+/// `html::decode` is the prescan's answer alone. `parse_bytes` goes on to
+/// §13.2.3.4, whose `<meta>` is read by different rules — a `charset` that
+/// names nothing passes to the `content` — and the two bogus-charset cases
+/// end there in KOI8-R, as a browser reads them.
 #[test]
 fn the_prescan_reads_a_meta_as_section_13_2_3_2_does() {
     let guessed = |bytes: &[u8]| {
+        let (_, decoding) = html::decode(bytes);
+        (decoding.encoding, decoding.confident, decoding.not_decoded)
+    };
+    let parsed = |bytes: &[u8]| {
         let decoding = html::parse_bytes(bytes, &Limits::DEFAULT)
             .encoding()
             .expect("decoded");
         (decoding.encoding, decoding.confident, decoding.not_decoded)
     };
+    let koi8 = (DecodedAs::SingleByte(SingleByte::Koi8R), true, None);
+    for bogus in [
+        &b"<meta http-equiv=content-type content='text/html; charset=koi8-r' \
+           charset=bogus><p>\xf0\xd2\xc9"[..],
+        b"<meta charset=bogus http-equiv=content-type \
+          content='text/html; charset=koi8-r'><p>\xf0\xd2\xc9",
+    ] {
+        assert_eq!(parsed(bogus), koi8, "changed while parsing");
+    }
+    assert_eq!(
+        parsed(b"<meta content='text/html; charset=koi8-r'><p>\xf0\xd2\xc9"),
+        (DecodedAs::SingleByte(SingleByte::Windows1252), false, None),
+        "a content with no pragma names nothing to the tree builder either"
+    );
     let latin = (DecodedAs::SingleByte(SingleByte::Windows1252), false, None);
     // \xf0\xd2\xc9 is "При" in KOI8-R and not UTF-8.
     assert_eq!(
@@ -424,6 +447,187 @@ fn the_prescan_reads_a_meta_as_section_13_2_3_2_does() {
         guessed(b"<meta charset=x-user-defined><p>\x93"),
         (DecodedAs::SingleByte(SingleByte::Windows1252), true, None),
         "x-user-defined"
+    );
+    // §2.5.6's extraction looks past a `charset` that no `=` follows.
+    assert_eq!(
+        guessed(
+            b"<meta http-equiv=content-type \
+              content='text/html; charsetx; charset=koi8-r'><p>\xf0\xd2\xc9"
+        ),
+        (DecodedAs::SingleByte(SingleByte::Koi8R), true, None),
+        "a second charset= in the content"
+    );
+}
+
+/// **The rest of §13.2.3.2, and §13.2.3.4.** The review of the lane's fixes
+/// found three more departures: a UTF-16 `<?x` with no byte order mark was
+/// read as UTF-8 (step 2); a prescan that finds no `<meta>` ended there,
+/// where the standard reads the XML declaration (*get an XML encoding*) — so
+/// `parse_bytes` set a declared windows-1251 in windows-1252's letters and
+/// said nothing of a declared Shift_JIS; and a `<meta>` whose attribute ran to
+/// the end of the bytes still named its encoding, where running out of bytes
+/// aborts the prescan. A `<meta>` past the first kilobyte, which the prescan
+/// does not reach, is §13.2.6.4.4's to act on while parsing: the encoding is
+/// changed and the document read again (§13.2.3.4).
+#[test]
+fn a_prescan_without_a_meta_reads_the_xml_declaration_and_utf16s_shape() {
+    let read = |bytes: &[u8]| {
+        let document = html::parse_bytes(bytes, &Limits::DEFAULT);
+        let decoding = document.encoding().expect("decoded");
+        (
+            text_of(&document),
+            decoding.encoding,
+            decoding.confident,
+            decoding.not_decoded,
+        )
+    };
+    let privet_1251: &[u8] = b"\xcf\xf0\xe8\xe2\xe5\xf2";
+
+    // Get an XML encoding: a single-byte encoding this crate decodes.
+    let mut bytes = b"<?xml version=\"1.0\" encoding=\"windows-1251\"?><p>".to_vec();
+    bytes.extend_from_slice(privet_1251);
+    assert_eq!(
+        read(&bytes),
+        (
+            "Привет".to_owned(),
+            DecodedAs::SingleByte(SingleByte::Windows1251),
+            true,
+            None
+        ),
+        "a declared windows-1251"
+    );
+    // A form feed is no character to XML and nothing to HTML.
+    let mut bytes = b"<?xml version='1.0' encoding='windows-1251'?><p>\x0c".to_vec();
+    bytes.extend_from_slice(privet_1251);
+    assert_eq!(read(&bytes).0, "\u{c}Привет", "with a C0 control");
+    // One this crate does not decode is named and set aside, as a `<meta>`'s is.
+    let (_, _, confident, not_decoded) =
+        read(b"<?xml version=\"1.0\" encoding=\"Shift_JIS\"?><p>\x93\xfa\x96\x7b");
+    assert_eq!(
+        (confident, not_decoded),
+        (false, Some("Shift_JIS")),
+        "a declared Shift_JIS"
+    );
+    // UTF-16 named by bytes that are ASCII means UTF-8, as a `<meta>`'s does.
+    assert_eq!(
+        read("<?xml version=\"1.0\" encoding=\"UTF-16\"?><p>é".as_bytes()),
+        ("é".to_owned(), DecodedAs::Utf8, true, None),
+        "UTF-16 named in ASCII"
+    );
+    // A `<meta>` comes first.
+    assert_eq!(
+        read(b"<?xml version=\"1.0\" encoding=\"windows-1251\"?><meta charset=koi8-r><p>\xf0\xd2\xc9")
+            .1,
+        DecodedAs::SingleByte(SingleByte::Koi8R),
+        "a <meta> over the declaration"
+    );
+
+    // Step 2: UTF-16's `<?x`, in either order, with no byte order mark.
+    let wide = "<?xml version=\"1.0\" encoding=\"UTF-16\"?><p>Привет<br>";
+    let little: Vec<u8> = wide.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let big: Vec<u8> = wide.encode_utf16().flat_map(u16::to_be_bytes).collect();
+    assert_eq!(
+        read(&little),
+        (
+            "Привет".to_owned(),
+            DecodedAs::Utf16LittleEndian,
+            true,
+            None
+        ),
+        "UTF-16LE with no mark"
+    );
+    assert_eq!(
+        read(&big),
+        ("Привет".to_owned(), DecodedAs::Utf16BigEndian, true, None),
+        "UTF-16BE with no mark"
+    );
+
+    // Running out of bytes inside a `<meta>` aborts the prescan: no encoding,
+    // quoted or not, and whether or not the quote closed.
+    for cut in [
+        &b"<p>\x93<meta charset=koi8-r"[..],
+        b"<p>\x93<meta charset='koi8-r",
+        b"<p>\x93<meta charset='koi8-r'",
+        b"<p>\x93<meta charset",
+    ] {
+        assert_eq!(
+            read(cut).1,
+            DecodedAs::SingleByte(SingleByte::Windows1252),
+            "{:?}",
+            String::from_utf8_lossy(cut)
+        );
+    }
+}
+
+/// **§13.2.3.4: a `<meta>` the prescan did not reach changes the encoding.**
+/// The tree builder meets it in `<head>` (§13.2.6.4.4) while the encoding is
+/// tentative, and the bytes are read again in the encoding it names, once; a
+/// byte order mark is certain, and a `<meta>` naming the encoding in use
+/// changes nothing.
+#[test]
+fn a_meta_past_the_prescan_changes_the_encoding() {
+    let past = |meta: &str, body: &[u8]| {
+        let mut bytes = format!("<!-- {} -->{meta}<p>", "x".repeat(1_100)).into_bytes();
+        bytes.extend_from_slice(body);
+        bytes
+    };
+    let document = html::parse_bytes(
+        &past("<meta charset=koi8-r>", b"\xf0\xd2\xc9"),
+        &Limits::DEFAULT,
+    );
+    let decoding = document.encoding().expect("decoded");
+    assert_eq!(
+        (decoding.encoding, decoding.confident),
+        (DecodedAs::SingleByte(SingleByte::Koi8R), true)
+    );
+    assert!(
+        text_of(&document).ends_with("При"),
+        "{}",
+        text_of(&document)
+    );
+
+    let document = html::parse_bytes(
+        &past(
+            "<meta http-equiv=Content-Type content='text/html; charset=windows-1251'>",
+            b"\xcf\xf0\xe8",
+        ),
+        &Limits::DEFAULT,
+    );
+    assert!(
+        text_of(&document).ends_with("При"),
+        "{}",
+        text_of(&document)
+    );
+
+    // One this crate does not decode is named, as the prescan's is.
+    let document = html::parse_bytes(
+        &past("<meta charset=euc-jp>", b"\xa4\xa2"),
+        &Limits::DEFAULT,
+    );
+    assert_eq!(
+        document.encoding().and_then(|d| d.not_decoded),
+        Some("EUC-JP")
+    );
+
+    // A byte order mark is certain.
+    let mut marked = vec![0xEF, 0xBB, 0xBF];
+    marked.extend_from_slice(&past("<meta charset=koi8-r>", "é".as_bytes()));
+    let document = html::parse_bytes(&marked, &Limits::DEFAULT);
+    assert_eq!(
+        document.encoding().map(|d| d.encoding),
+        Some(DecodedAs::Utf8)
+    );
+    assert!(text_of(&document).ends_with('é'));
+
+    // Only in `<head>`'s rules, which `<body>` hands a `<meta>` to as well;
+    // not as text.
+    let document = html::parse_bytes(
+        &past("<title>&lt;meta charset=koi8-r></title>", b"\x93"),
+        &Limits::DEFAULT,
+    );
+    assert_eq!(
+        document.encoding().map(|d| (d.encoding, d.confident)),
+        Some((DecodedAs::SingleByte(SingleByte::Windows1252), false))
     );
 }
 

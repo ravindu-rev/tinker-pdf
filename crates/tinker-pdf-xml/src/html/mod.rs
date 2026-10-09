@@ -20,7 +20,9 @@
 //! compares the tree, serialised the way the suite writes it, exactly, and
 //! holds a counted floor. **Scripting is disabled, always**: nothing here runs
 //! a script, so `<noscript>` is markup a reader sees, which is what a
-//! renderer with no script engine must show.
+//! renderer with no script engine must show. Its encoding tests, vendored
+//! beside them, are run through [`parse_bytes`] the same way: all 82 decode in
+//! the encoding the suite names.
 //!
 //! # What it does not do
 //!
@@ -30,9 +32,12 @@
 //!   shadowrootmode>` is an ordinary template, which is what the standard
 //!   gives a parser whose *allow declarative shadow roots* is false.
 //! - **Encodings past UTF-8, UTF-16 and the single-byte family** — the
-//!   multi-byte legacy encodings a `<meta charset>` may name are read as
-//!   UTF-8 if the bytes are UTF-8 and windows-1252 if not, and
-//!   [`Document::encoding`] says which, with `confident: false`.
+//!   multi-byte legacy encodings a `<meta charset>` or an XML declaration may
+//!   name are read as UTF-8 if the bytes are UTF-8 and windows-1252 if not,
+//!   and [`Document::encoding`] says which, with `confident: false`.
+//! - **No guessing by letter frequency.** §13.2.3.2 lets a decoder with
+//!   nothing to go on autodetect; this one tells UTF-8 from not, and that is
+//!   all.
 //!
 //! # Bounds
 //!
@@ -230,17 +235,18 @@ pub enum DecodedAs {
 pub struct Decoding {
     /// The encoding the text was decoded from.
     pub encoding: DecodedAs,
-    /// Whether something in the bytes said so: a byte order mark or a
-    /// `<meta charset>` this build decodes. `false` is a default or a guess —
-    /// UTF-8 because the bytes were UTF-8, windows-1252 because they were
-    /// not.
+    /// Whether something in the bytes said so: a byte order mark, UTF-16's
+    /// `<?x`, or a `<meta charset>` or XML declaration naming an encoding this
+    /// build decodes. `false` is a default or a guess — UTF-8 because the
+    /// bytes were UTF-8, windows-1252 because they were not.
     pub confident: bool,
     /// Bytes the decoder could not map, each read as U+FFFD.
     pub replaced: usize,
-    /// The Encoding Standard's name for an encoding a `<meta>` named and
-    /// this crate does not decode — one of the multi-byte legacy encodings,
-    /// or `replacement` — set aside for the guess. (`x-user-defined` is not
-    /// one: the prescan reads it as windows-1252, as §13.2.3.2 says.)
+    /// The Encoding Standard's name for an encoding a `<meta>` or an XML
+    /// declaration named and this crate does not decode — one of the
+    /// multi-byte legacy encodings, `replacement`, or an XML declaration's
+    /// `x-user-defined` — set aside for the guess. (A `<meta>`'s
+    /// `x-user-defined` is not one: §13.2.3.2 reads it as windows-1252.)
     pub not_decoded: Option<&'static str>,
 }
 
@@ -253,6 +259,9 @@ pub struct Document {
     errors: usize,
     stopped: Option<Error>,
     decoding: Option<Decoding>,
+    /// The encoding the first `<meta>` the tree builder met named, for
+    /// [`parse_bytes`]'s §13.2.3.4.
+    meta_encoding: Option<Label>,
 }
 
 impl Document {
@@ -350,20 +359,37 @@ pub fn parse_fragment(text: &str, context: (Namespace, &str), limits: &Limits) -
 /// Decodes bytes as §13.2.3 does and parses them.
 ///
 /// The encoding is the first of: a byte order mark (UTF-8 or UTF-16 in either
-/// order); a `<meta charset>` or `<meta http-equiv="content-type">` in the
-/// first kilobyte, by §13.2.3.2's prescan, naming an encoding this crate
-/// decodes; UTF-8 when the bytes are valid UTF-8; and windows-1252 —
-/// §13.2.3.3's default for most locales, and what a document that says
-/// nothing about its encoding and is not UTF-8 is overwhelmingly in.
+/// order); §13.2.3.2's prescan of the first kilobyte — a UTF-16 `<?x` with no
+/// mark, then a `<meta charset>` or `<meta http-equiv="content-type">`, then,
+/// when the prescan runs out of bytes without one, the `encoding` an
+/// `<?xml … ?>` at the very start declares; UTF-8 when the bytes are valid
+/// UTF-8; and windows-1252 — §13.2.3.3's default for most locales, and what a
+/// document that says nothing about its encoding and is not UTF-8 is
+/// overwhelmingly in. An encoding the prescan finds and this crate does not
+/// decode is [`Decoding::not_decoded`], and the guess stands.
+///
+/// **Then §13.2.3.4.** Every encoding but a byte order mark's is tentative,
+/// and the first `<meta>` the tree builder meets that names one
+/// (§13.2.6.4.4's, in `<head>` or handed to `<head>`'s rules by another
+/// mode) *changes the encoding*: when it names another than the one the bytes
+/// were read in, they are decoded again in it and parsed again, once — the
+/// second reading is certain. That is how a `<meta>` past the prescan's
+/// kilobyte is read, and the only way this parses the input twice.
 #[must_use]
 pub fn parse_bytes(bytes: &[u8], limits: &Limits) -> Document {
     let (text, decoding) = decode(bytes);
-    let mut document = parse(&text, limits);
+    let document = parse(&text, limits);
+    let (mut document, decoding) = match change_encoding(bytes, &decoding, document.meta_encoding) {
+        Some((text, changed)) => (parse(&text, limits), changed),
+        None => (document, decoding),
+    };
     document.decoding = Some(decoding);
     document
 }
 
-/// The bytes as text, and how they were read.
+/// The bytes as text, and how they were read: §13.2.3.2's *encoding sniffing
+/// algorithm*, before a byte is parsed — [`parse_bytes`] without its
+/// §13.2.3.4.
 #[must_use]
 pub fn decode(bytes: &[u8]) -> (String, Decoding) {
     if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
@@ -378,21 +404,45 @@ pub fn decode(bytes: &[u8]) -> (String, Decoding) {
         let (text, replaced) = lossy_utf16(rest, true);
         return (text, decoded(DecodedAs::Utf16BigEndian, true, replaced));
     }
-    let mut not_decoded = None;
     match prescan(bytes) {
-        Some(Label::SingleByte(single)) => {
-            let (text, replaced) = single.decode(bytes);
-            return (text, decoded(DecodedAs::SingleByte(single), true, replaced));
-        }
-        // §13.2.3.2: a UTF-16 label found by the prescan means UTF-8, since
-        // an ASCII-compatible `<meta>` could not have been read in UTF-16.
-        Some(Label::Utf8 | Label::Utf16LittleEndian | Label::Utf16BigEndian) => {
-            let (text, replaced) = lossy_utf8(bytes);
-            return (text, decoded(DecodedAs::Utf8, true, replaced));
-        }
-        Some(Label::Unsupported(name)) => not_decoded = Some(name),
-        _ => {}
+        Some(Label::Unsupported(name)) => guess(bytes, Some(name)),
+        Some(label) => decode_as(bytes, label).unwrap_or_else(|| guess(bytes, None)),
+        None => guess(bytes, None),
     }
+}
+
+/// The bytes in an encoding something in them named, confidently; `None` for
+/// one this crate does not decode.
+fn decode_as(bytes: &[u8], label: Label) -> Option<(String, Decoding)> {
+    let (text, decoding) = match label {
+        Label::Utf8 => {
+            let (text, replaced) = lossy_utf8(bytes);
+            (text, decoded(DecodedAs::Utf8, true, replaced))
+        }
+        // Only the prescan's step 2 says UTF-16 here: a `<meta>` or a
+        // declaration naming it means UTF-8 by the time it arrives.
+        Label::Utf16LittleEndian => {
+            let (text, replaced) = lossy_utf16(bytes, false);
+            (text, decoded(DecodedAs::Utf16LittleEndian, true, replaced))
+        }
+        Label::Utf16BigEndian => {
+            let (text, replaced) = lossy_utf16(bytes, true);
+            (text, decoded(DecodedAs::Utf16BigEndian, true, replaced))
+        }
+        Label::SingleByte(single) => {
+            let (text, replaced) = single.decode(bytes);
+            (text, decoded(DecodedAs::SingleByte(single), true, replaced))
+        }
+        Label::Unsupported(_) => return None,
+    };
+    Some((text, decoding))
+}
+
+/// §13.2.3.2's last two steps, when nothing in the bytes named an encoding
+/// this crate decodes: UTF-8 if they are UTF-8 (step 8's autodetection, which
+/// the standard's note calls especially effective over a whole file), and
+/// windows-1252 if not. `not_decoded` is the encoding they did name.
+fn guess(bytes: &[u8], not_decoded: Option<&'static str>) -> (String, Decoding) {
     let (text, mut decoding) = match std::str::from_utf8(bytes) {
         Ok(text) => (text.to_owned(), decoded(DecodedAs::Utf8, false, 0)),
         Err(_) => {
@@ -406,6 +456,45 @@ pub fn decode(bytes: &[u8]) -> (String, Decoding) {
     };
     decoding.not_decoded = not_decoded;
     (text, decoding)
+}
+
+/// §13.2.3.4's *change the encoding*, for the encoding the first `<meta>` the
+/// tree builder met named: the bytes decoded again in it, certain, or `None`
+/// to leave the first reading standing — a byte order mark's encoding is
+/// already certain, UTF-16 is never changed (step 1), and an encoding equal to
+/// the one in use only becomes certain (step 4). The one in use, for a guess
+/// made past an encoding this crate does not decode, is that encoding: it is
+/// what the standard would be reading in.
+fn change_encoding(
+    bytes: &[u8],
+    decoding: &Decoding,
+    requested: Option<Label>,
+) -> Option<(String, Decoding)> {
+    let requested = requested?;
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return None;
+    }
+    let current = match (decoding.not_decoded, decoding.encoding) {
+        (_, DecodedAs::Utf16LittleEndian | DecodedAs::Utf16BigEndian) => return None,
+        (Some(name), _) => Label::Unsupported(name),
+        (None, DecodedAs::Utf8) => Label::Utf8,
+        (None, DecodedAs::SingleByte(single)) => Label::SingleByte(single),
+    };
+    // Steps 2 and 3.
+    let new = match requested {
+        Label::Utf16LittleEndian | Label::Utf16BigEndian => Label::Utf8,
+        Label::Unsupported("x-user-defined") => Label::SingleByte(SingleByte::Windows1252),
+        other => other,
+    };
+    if new == current {
+        return None;
+    }
+    // Step 6: read again, in the new encoding, which is now certain — or, for
+    // one this crate does not decode, the guess, with that encoding named.
+    Some(match new {
+        Label::Unsupported(name) => guess(bytes, Some(name)),
+        other => decode_as(bytes, other)?,
+    })
 }
 
 fn decoded(encoding: DecodedAs, confident: bool, replaced: usize) -> Decoding {
@@ -451,21 +540,50 @@ fn lossy_utf16(bytes: &[u8], big_endian: bool) -> (String, usize) {
     (text, replaced)
 }
 
-/// §13.2.3.2's prescan, over the first 1 024 bytes: comments skipped, other
-/// tags' attributes skipped, and the first `<meta>` that names an encoding
-/// — `charset`, or `http-equiv="content-type"` with a `content` holding
-/// `charset=` — wins. A `charset` attribute overrides a `content` on its
-/// `<meta>` whichever comes first, and one whose label names no encoding is
-/// the standard's *failure*: that `<meta>` names none, whatever its `content`
-/// says. `x-user-defined` is read as windows-1252, as the standard says.
+/// How far the prescan reads: its end condition, the first kilobyte, which
+/// §13.2.3.2 encourages and the authoring rules hold a `<meta charset>` to.
+const PRESCAN_WINDOW: usize = 1024;
+
+/// §13.2.3.2's *prescan a byte stream to determine its encoding*, over the
+/// first [`PRESCAN_WINDOW`] bytes.
+///
+/// Step 2 first: a UTF-16 `<?x`, little-endian or big, is that UTF-16. Then
+/// the loop: comments skipped, other tags' attributes skipped, and the first
+/// `<meta>` that names an encoding — `charset`, or `http-equiv="content-type"`
+/// with a `content` holding `charset=` — wins. A `charset` attribute overrides
+/// a `content` on its `<meta>` whichever comes first, and one whose label
+/// names no encoding is the standard's *failure*: that `<meta>` names none,
+/// whatever its `content` says. A `<meta>` naming UTF-16 means UTF-8, since an
+/// ASCII-compatible `<meta>` could not have been read in UTF-16, and
+/// `x-user-defined` means windows-1252.
+///
+/// **Running out of bytes ends the loop wherever it happens** — at the
+/// window's end, or inside a comment, a tag or an attribute, so that a
+/// `<meta charset=euc-jp` with no `>` names nothing — and the answer is then
+/// the standard's *get an XML encoding* over the same bytes.
 fn prescan(bytes: &[u8]) -> Option<Label> {
-    let head = bytes.get(..bytes.len().min(1024)).unwrap_or(bytes);
+    let head = bytes
+        .get(..bytes.len().min(PRESCAN_WINDOW))
+        .unwrap_or(bytes);
+    if head.starts_with(b"<\0?\0x\0") {
+        return Some(Label::Utf16LittleEndian);
+    }
+    if head.starts_with(b"\0<\0?\0x") {
+        return Some(Label::Utf16BigEndian);
+    }
+    prescan_loop(head).or_else(|| xml_encoding(head))
+}
+
+/// The prescan's steps 3 and 4: the encoding the first `<meta>` that names
+/// one names, or `None` when the bytes run out — the only way the loop ends
+/// without one.
+fn prescan_loop(head: &[u8]) -> Option<Label> {
     let mut at = 0;
-    while at < head.len() {
-        let rest = head.get(at..).unwrap_or_default();
+    loop {
+        let rest = head.get(at..).filter(|rest| !rest.is_empty())?;
         if rest.starts_with(b"<!--") {
-            let end = find(rest.get(2..).unwrap_or_default(), b"-->")?;
-            at += 2 + end + 3;
+            // The first `>` after two dashes, which may be the opening's own.
+            at += 2 + find(rest.get(2..)?, b"-->")? + 3;
             continue;
         }
         let meta = rest
@@ -483,10 +601,7 @@ fn prescan(bytes: &[u8]) -> Option<Label> {
             let mut need_pragma: Option<bool> = None;
             let mut got_pragma = false;
             let mut seen: Vec<Vec<u8>> = Vec::new();
-            loop {
-                let Some((name, value, next)) = prescan_attribute(head, at) else {
-                    break;
-                };
+            while let Sniffed::Attribute(name, value, next) = prescan_attribute(head, at)? {
                 at = next;
                 if seen.contains(&name) {
                     continue;
@@ -524,123 +639,186 @@ fn prescan(bytes: &[u8]) -> Option<Label> {
                 Some(_) => charset.flatten(),
             };
             if let Some(label) = found {
-                // §13.2.3.2: x-user-defined found by the prescan is read as
-                // windows-1252.
                 return Some(match label {
+                    Label::Utf16LittleEndian | Label::Utf16BigEndian => Label::Utf8,
                     Label::Unsupported("x-user-defined") => {
                         Label::SingleByte(SingleByte::Windows1252)
                     }
                     other => other,
                 });
             }
+            // The next byte: past the tag's `>`.
+            at += 1;
             continue;
         }
-        let tag = rest.first() == Some(&b'<')
-            && rest
-                .get(1)
-                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'/');
+        let letter = |at: usize| rest.get(at).is_some_and(u8::is_ascii_alphabetic);
+        let tag =
+            rest.first() == Some(&b'<') && (letter(1) || (rest.get(1) == Some(&b'/') && letter(2)));
         if tag {
             at += 1;
-            while head
-                .get(at)
-                .is_some_and(|b| !b.is_ascii_whitespace() && *b != b'>')
-            {
+            while !matches!(head.get(at)?, b'\t' | b'\n' | b'\x0C' | b'\r' | b' ' | b'>') {
                 at += 1;
             }
-            while let Some((_, _, next)) = prescan_attribute(head, at) {
+            while let Sniffed::Attribute(_, _, next) = prescan_attribute(head, at)? {
                 at = next;
             }
+            at += 1;
             continue;
         }
-        if rest.starts_with(b"<!") || rest.starts_with(b"<?") {
+        if rest.starts_with(b"<!") || rest.starts_with(b"</") || rest.starts_with(b"<?") {
             at += find(rest, b">")? + 1;
             continue;
         }
         at += 1;
     }
-    None
 }
 
-/// §13.2.3.2's *get an attribute*, from `at`: the name lowercased, the value,
-/// and where the next one starts — or `None` at the tag's `>`.
-fn prescan_attribute(bytes: &[u8], mut at: usize) -> Option<(Vec<u8>, Vec<u8>, usize)> {
-    while bytes
-        .get(at)
-        .is_some_and(|b| b.is_ascii_whitespace() || *b == b'/')
-    {
+/// What §13.2.3.2's *get an attribute* found.
+enum Sniffed {
+    /// The name lowercased, the value, and where the next attribute starts.
+    Attribute(Vec<u8>, Vec<u8>, usize),
+    /// The tag's `>`: there is no attribute.
+    End,
+}
+
+/// §13.2.3.2's *get an attribute*, from `at` — `None` when the bytes run out,
+/// which ends the prescan.
+fn prescan_attribute(bytes: &[u8], mut at: usize) -> Option<Sniffed> {
+    let space = |b: u8| matches!(b, b'\t' | b'\n' | b'\x0C' | b'\r' | b' ');
+    while space(*bytes.get(at)?) || *bytes.get(at)? == b'/' {
         at += 1;
     }
-    if bytes.get(at).is_none_or(|b| *b == b'>') {
-        return None;
+    if *bytes.get(at)? == b'>' {
+        return Some(Sniffed::End);
     }
     let mut name = Vec::new();
-    while let Some(&b) = bytes.get(at) {
+    let mut equals = false;
+    loop {
+        let b = *bytes.get(at)?;
         if b == b'=' && !name.is_empty() {
+            at += 1;
+            equals = true;
             break;
         }
-        if b.is_ascii_whitespace() || b == b'/' || b == b'>' {
+        if space(b) {
             break;
+        }
+        if b == b'/' || b == b'>' {
+            return Some(Sniffed::Attribute(name, Vec::new(), at));
         }
         name.push(b.to_ascii_lowercase());
         at += 1;
     }
-    while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+    if !equals {
+        // *Spaces*: a name with no `=` after it has the empty value.
+        while space(*bytes.get(at)?) {
+            at += 1;
+        }
+        if *bytes.get(at)? != b'=' {
+            return Some(Sniffed::Attribute(name, Vec::new(), at));
+        }
         at += 1;
     }
-    if bytes.get(at) != Some(&b'=') {
-        return Some((name, Vec::new(), at));
-    }
-    at += 1;
-    while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+    // *Value*.
+    while space(*bytes.get(at)?) {
         at += 1;
     }
     let mut value = Vec::new();
-    match bytes.get(at) {
-        Some(&quote @ (b'"' | b'\'')) => {
+    match *bytes.get(at)? {
+        quote @ (b'"' | b'\'') => loop {
             at += 1;
-            while let Some(&b) = bytes.get(at) {
-                at += 1;
-                if b == quote {
-                    return Some((name, value, at));
-                }
-                value.push(b.to_ascii_lowercase());
+            let b = *bytes.get(at)?;
+            if b == quote {
+                return Some(Sniffed::Attribute(name, value, at + 1));
             }
-            // Ran off the end of the window inside a quoted value.
-            None
+            value.push(b.to_ascii_lowercase());
+        },
+        b'>' => return Some(Sniffed::Attribute(name, value, at)),
+        b => {
+            value.push(b.to_ascii_lowercase());
+            at += 1;
         }
-        _ => {
-            while let Some(&b) = bytes.get(at) {
-                if b.is_ascii_whitespace() || b == b'>' {
-                    break;
-                }
-                value.push(b.to_ascii_lowercase());
-                at += 1;
-            }
-            Some((name, value, at))
+    }
+    loop {
+        let b = *bytes.get(at)?;
+        if space(b) || b == b'>' {
+            return Some(Sniffed::Attribute(name, value, at));
         }
+        value.push(b.to_ascii_lowercase());
+        at += 1;
     }
 }
 
+/// §13.2.3.2's *get an XML encoding*: the label in the `encoding` of an
+/// `<?xml` the bytes begin with, read as bytes — which works because every
+/// encoding the standard could name agrees with ASCII there — and UTF-16 as
+/// UTF-8, as the `<meta>`'s is. `None` is the standard's failure.
+fn xml_encoding(bytes: &[u8]) -> Option<Label> {
+    if !bytes.starts_with(b"<?xml") {
+        return None;
+    }
+    let end = bytes.iter().position(|&b| b == b'>')?;
+    let mut at = find(bytes.get(..end)?, b"encoding")? + 8;
+    while *bytes.get(at)? <= 0x20 {
+        at += 1;
+    }
+    if *bytes.get(at)? != b'=' {
+        return None;
+    }
+    at += 1;
+    while *bytes.get(at)? <= 0x20 {
+        at += 1;
+    }
+    let quote = *bytes.get(at)?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    let rest = bytes.get(at + 1..)?;
+    let label = rest.get(..rest.iter().position(|&b| b == quote)?)?;
+    if label.iter().any(|&b| b <= 0x20) {
+        return None;
+    }
+    // Isomorphic decoding: a byte past ASCII is a character no label holds.
+    let label: String = label.iter().copied().map(char::from).collect();
+    Some(match encoding::lookup(&label)? {
+        Label::Utf16LittleEndian | Label::Utf16BigEndian => Label::Utf8,
+        other => other,
+    })
+}
+
 /// §2.5.6's *extracting a character encoding from a meta element*: the label
-/// after the first `charset=` in a `content` value.
-fn charset_from_content(value: &[u8]) -> Option<Label> {
-    let at = find(value, b"charset")?;
-    let mut rest = value.get(at + 7..)?.trim_ascii_start();
-    rest = rest.strip_prefix(b"=")?.trim_ascii_start();
-    let label: &[u8] = match rest.first() {
-        Some(&quote @ (b'"' | b'\'')) => {
-            let body = rest.get(1..)?;
-            body.get(..body.iter().position(|&b| b == quote)?)?
-        }
-        _ => {
-            let end = rest
-                .iter()
-                .position(|b| b.is_ascii_whitespace() || *b == b';')
-                .unwrap_or(rest.len());
-            rest.get(..end)?
-        }
-    };
-    encoding::lookup(std::str::from_utf8(label).ok()?)
+/// after the first `charset` (in any case) that an `=` follows, past white
+/// space; a `charset` with no `=` after it is passed over for the next.
+pub(crate) fn charset_from_content(value: &[u8]) -> Option<Label> {
+    let mut from = 0;
+    loop {
+        let at = from + find_ignoring_case(value.get(from..)?, b"charset")?;
+        from = at + 7;
+        let Some(rest) = value.get(from..)?.trim_ascii_start().strip_prefix(b"=") else {
+            continue;
+        };
+        let rest = rest.trim_ascii_start();
+        let label: &[u8] = match rest.first()? {
+            &quote @ (b'"' | b'\'') => {
+                let body = rest.get(1..)?;
+                body.get(..body.iter().position(|&b| b == quote)?)?
+            }
+            _ => {
+                let end = rest
+                    .iter()
+                    .position(|b| b.is_ascii_whitespace() || *b == b';')
+                    .unwrap_or(rest.len());
+                rest.get(..end)?
+            }
+        };
+        return encoding::lookup(std::str::from_utf8(label).ok()?);
+    }
+}
+
+fn find_ignoring_case(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|w| w.eq_ignore_ascii_case(needle))
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {

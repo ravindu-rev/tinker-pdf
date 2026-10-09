@@ -19,6 +19,7 @@ use std::rc::Rc;
 
 use super::tokenizer::{DoctypeToken, State, Tag, Token, Tokenizer};
 use super::{Attribute, AttributeNamespace, Document, Element, Namespace, Node, NodeData, Quirks};
+use crate::encoding::{self, Label};
 use crate::limits::{MAX_HTML_ACTIVE_FORMATTING, MAX_HTML_CLONE_BYTES};
 use crate::{Error, Limits};
 
@@ -470,6 +471,24 @@ pub(crate) struct TreeBuilder<'a> {
     limits: Limits,
     stopped: Option<Error>,
     halt: bool,
+    /// The encoding the first `<meta>` that names one names (§13.2.6.4.4).
+    meta_encoding: Option<Label>,
+}
+
+/// The encoding a `<meta>` names, as §13.2.6.4.4 reads it: a `charset` that
+/// is an encoding's label, or else an `http-equiv` of `Content-Type` and a
+/// `content` holding `charset=`.
+fn meta_encoding(tag: &Tag) -> Option<Label> {
+    if let Some(found) = tag.attribute("charset").and_then(encoding::lookup) {
+        return Some(found);
+    }
+    let pragma = tag
+        .attribute("http-equiv")
+        .is_some_and(|v| v.eq_ignore_ascii_case("content-type"));
+    if !pragma {
+        return None;
+    }
+    super::charset_from_content(tag.attribute("content")?.as_bytes())
 }
 
 pub(crate) fn parse_document(text: &str, limits: &Limits) -> Document {
@@ -546,6 +565,7 @@ impl<'a> TreeBuilder<'a> {
             limits: *limits,
             stopped: None,
             halt: false,
+            meta_encoding: None,
         }
     }
 
@@ -557,6 +577,7 @@ impl<'a> TreeBuilder<'a> {
             errors: self.errors.saturating_add(self.tokenizer.errors),
             stopped: self.stopped.or(self.tokenizer.stop),
             decoding: None,
+            meta_encoding: self.meta_encoding,
         }
     }
 
@@ -1443,6 +1464,13 @@ impl<'a> TreeBuilder<'a> {
             {
                 self.insert_html(&tag);
                 self.pop();
+                // §13.2.6.4.4: a `<meta>` naming an encoding asks to change
+                // to it while the encoding is tentative. Only the first can:
+                // changing the encoding makes it certain, whichever way it
+                // goes, and `parse_bytes` is the one that knows whether it was.
+                if tag.name == "meta" && self.meta_encoding.is_none() {
+                    self.meta_encoding = meta_encoding(&tag);
+                }
                 Step::Done
             }
             Token::StartTag(tag) if tag.name == "title" => {

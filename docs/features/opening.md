@@ -75,15 +75,23 @@ standard still has, the adoption agency, foster parenting, foreign content
 and `<template>`, with HTML's 2 231 named character references. It reads
 every input to its end, as a browser does, and the tree it builds is the
 one the EPUB reader lays out (`epub::xhtml::read_markup_or_html`), with
-`ArchiveWarning::Markup(MarkupDefect::NotXml)` in the report. Bytes are
-decoded as §13.2.3 says — a byte order mark, then a `<meta charset>` in the
-first kilobyte naming an encoding this build decodes (UTF-8, UTF-16 or one of
-the Encoding Standard's twenty-eight single-byte encodings), then UTF-8 if the
-bytes are UTF-8, then windows-1252. **An XHTML file whose XML declaration
-names a single-byte encoding is read in it** — as XML when it is well-formed,
-as an FB2 is, and when it is not, by HTML's parser over the characters that
-encoding decodes rather than over bytes for §13.2.3 to guess at, with
-`MarkupDefect::Undecodable` for a byte its table leaves unmapped.
+`ArchiveWarning::Markup(MarkupDefect::NotXml)` in the report. Bytes HTML's
+parser decodes are decoded as §13.2.3 says — a byte order mark; then the
+prescan of the first kilobyte: UTF-16's `<?x` with no mark, a `<meta charset>`
+naming an encoding, and, when the prescan runs out of bytes without one, the
+encoding an `<?xml … ?>` at the start declares; then UTF-8 if the bytes are
+UTF-8, then windows-1252 — and a `<meta>` the tree builder meets in `<head>`
+naming another encoding while that one is tentative changes it, and the bytes
+are read again (§13.2.3.4), which is how a `<meta>` past the first kilobyte
+is read. The encodings decoded are UTF-8, UTF-16 and the Encoding Standard's
+twenty-eight single-byte encodings; a multi-byte one named in a `<meta>` or a
+declaration is `MarkupDefect::EncodingNotDecoded`, over the guess. html5lib's
+encoding tests, vendored beside its trees, hold it: **82 of 82**. **An XHTML
+file whose XML declaration names a single-byte encoding is read in it** — as
+XML when it is well-formed, as an FB2 is, and when it is not, by HTML's parser
+over the characters that encoding decodes rather than over bytes for §13.2.3
+to guess at, with `MarkupDefect::Undecodable` for a byte its table leaves
+unmapped.
 Scripting is disabled, always — nothing
 here runs a script — so a `<noscript>`'s content is markup and is drawn. It is
 held to html5lib's own suite, vendored: **1 779 of the 1 784
@@ -413,14 +421,18 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   **7 028 of 7 028** tokenizer runs (four runs holding a lone surrogate, which
   a Rust string cannot, are not attempted, and nor are `xmlViolation.test`'s
   four, counted by name, which expect a parser coercing its output to an XML
-  infoset, §13.2.9). `tests/html.rs` beside them
+  infoset, §13.2.9), and **82 of 82** encoding tests, through `parse_bytes`'s
+  prescan and change of encoding. `tests/html.rs` beside them
   crosses each of the six caps at its shipped value — the token cap by
   reopened formatting elements, fifty kilobytes asking for a million nodes,
   and by the attributes they copy; the attribute cap by merged `<html>` and
   `<body>` tags; the clone cap by one hundred-kilobyte value reopened seven
   hundred times — holds the tree builder's moves linear in a parent's
   children, fostered text included, and Noah's Ark linear in a tag's
-  attributes, and holds the §13.2.3 decoding order; `hostile_input.rs`'s
+  attributes, and holds the §13.2.3 decoding order — the XML declaration and
+  UTF-16's `<?x` past a prescan with no `<meta>`, a `<meta>` the bytes end
+  inside naming nothing, a `<meta>` past the prescan read while parsing;
+  `hostile_input.rs`'s
   `mutated_tag_soup_never_panics_the_html_parser` and
   `fuzz/fuzz_targets/html.rs` hold the tree to being a tree.
 - **`crates/tinker-pdf/tests/commonmark_spec.rs`** — the Markdown reader held

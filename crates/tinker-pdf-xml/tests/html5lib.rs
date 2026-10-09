@@ -22,6 +22,16 @@
 //! - **Parse errors are not counted against the suite's.** A test passes on
 //!   its tree; the `#errors` lines are kept by the suite to grade a
 //!   conformance *checker*, and this is a parser.
+//!
+//! # The encoding tests
+//!
+//! `data/html5lib-tests/encoding/*.dat` is the suite's other half that a
+//! parser with no script engine can run: bytes, and the encoding §13.2.3
+//! decodes them in. They are run through `html::parse_bytes`, prescan and
+//! change of encoding both, against a floor of their own. `encoding/scripted/`
+//! (a `<meta>` written by `document.write`) and `encoding/chardet/` (a guesser
+//! by letter frequency, which §13.2.3.2 permits and this decoder does not
+//! have) are not vendored.
 
 use std::path::{Path, PathBuf};
 
@@ -299,4 +309,116 @@ fn the_html_parser_builds_its_counted_share_of_html5libs_trees() {
         failed, NOT_PASSING,
         "the tests that do not pass are not the five named"
     );
+}
+
+// ---- the encoding tests ------------------------------------------------------
+
+/// The encoding tests the vendored files hold.
+const ENCODING_TESTS: usize = 82;
+
+/// **The floor over them**, measured 9 October 2026: how many decode in the
+/// encoding the suite names. **All 82.** Before the review of the formats
+/// lane's fixes it was 74: `tests2.dat#5`, a `<meta charset=euc-jp` the bytes
+/// end inside, which the prescan read where running out of bytes aborts it;
+/// and `tests1.dat#48` to `#54`, a `<meta>` past the prescan's first
+/// kilobyte, which only §13.2.3.4's change of encoding while parsing reads.
+const ENCODING_PASSING: usize = 82;
+
+/// The encoding tests that do not pass, each with its reason: none.
+const ENCODING_NOT_PASSING: [&str; 0] = [];
+
+/// `data/html5lib-tests/encoding/*.dat`: a test is a `#data` section, which
+/// is the input **as bytes** — `tests1.dat` holds one that is not UTF-8 —
+/// and an `#encoding` section, whose one line is the label of the encoding
+/// §13.2.3 decodes it in. The data's lines are joined as the tree-construction
+/// tests' are, without the newline before the next heading.
+fn encoding_tests() -> Vec<(String, Vec<u8>, String)> {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("data/html5lib-tests/encoding");
+    let mut files: Vec<PathBuf> = std::fs::read_dir(directory)
+        .expect("the vendored suite is in the tree")
+        .map(|entry| entry.expect("a directory entry").path())
+        .filter(|path| path.extension().is_some_and(|e| e == "dat"))
+        .collect();
+    files.sort();
+    let mut out = Vec::new();
+    for path in files {
+        let file = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_owned();
+        let bytes = std::fs::read(&path).expect("a .dat file");
+        let mut number = 0;
+        let mut data: Option<Vec<&[u8]>> = None;
+        let mut lines = bytes.split(|&b| b == b'\n');
+        while let Some(line) = lines.next() {
+            match (line, &mut data) {
+                (b"#data", _) => data = Some(Vec::new()),
+                (b"#encoding", Some(input)) => {
+                    number += 1;
+                    let label = lines.next().expect("an #encoding has its label");
+                    out.push((
+                        format!("{file}#{number}"),
+                        input.join(&b'\n'),
+                        String::from_utf8(label.to_vec()).expect("a label is ASCII"),
+                    ));
+                    data = None;
+                }
+                (_, Some(input)) => input.push(line),
+                (_, None) => {}
+            }
+        }
+    }
+    out
+}
+
+/// Whether the decoder read `bytes` in the encoding the suite names. The suite
+/// writes `windows-1252` for what a parser with nothing to go on defaults to,
+/// so a guess — `confident: false`, nothing named and set aside — is that
+/// answer whichever of UTF-8 and windows-1252 it guessed; every other label
+/// has to have been found in the bytes.
+fn decodes_as(bytes: &[u8], label: &str) -> bool {
+    use tinker_pdf_xml::encoding::{lookup, Label, SingleByte};
+    let decoding = html::parse_bytes(bytes, &Limits::DEFAULT)
+        .encoding()
+        .expect("parse_bytes says how it decoded");
+    let found = match decoding.encoding {
+        html::DecodedAs::Utf8 => Label::Utf8,
+        html::DecodedAs::Utf16LittleEndian => Label::Utf16LittleEndian,
+        html::DecodedAs::Utf16BigEndian => Label::Utf16BigEndian,
+        html::DecodedAs::SingleByte(single) => Label::SingleByte(single),
+    };
+    match lookup(label) {
+        Some(Label::Unsupported(name)) => decoding.not_decoded == Some(name),
+        Some(Label::SingleByte(SingleByte::Windows1252)) if !decoding.confident => {
+            decoding.not_decoded.is_none()
+        }
+        Some(expected) => decoding.confident && found == expected,
+        None => panic!("the suite names an encoding the standard does not: {label}"),
+    }
+}
+
+/// **The counted floor over html5lib's encoding tests**, which decide the
+/// encoding by `parse_bytes` — the prescan, and a `<meta>` the tree builder
+/// meets past it.
+#[test]
+fn the_html_decoder_reads_its_counted_share_of_html5libs_encodings() {
+    let all = encoding_tests();
+    assert_eq!(
+        all.len(),
+        ENCODING_TESTS,
+        "the vendored files hold {ENCODING_TESTS} tests"
+    );
+    let failed: Vec<&str> = all
+        .iter()
+        .filter(|(_, bytes, label)| !decodes_as(bytes, label))
+        .map(|(name, _, _)| name.as_str())
+        .collect();
+    let passed = all.len() - failed.len();
+    println!("html5lib encoding: {passed} of {ENCODING_TESTS} pass; not passing: {failed:?}");
+    assert_eq!(
+        passed, ENCODING_PASSING,
+        "the floor is {ENCODING_PASSING} of {ENCODING_TESTS}: a change that moves it says so in the same commit"
+    );
+    assert_eq!(failed, ENCODING_NOT_PASSING);
 }

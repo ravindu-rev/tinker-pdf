@@ -35,7 +35,7 @@ fails the same allowlist a crate licence would.
 | `crates/tinker-pdf-archive/data/zstd-golden` | [facebook/zstd](https://github.com/facebook/zstd) `tests/golden-decompression/` and `tests/golden-decompression-errors/`, branch `dev` as served on 2026-09-26 (no commit could be resolved; pinned by SHA-256 below) | `BSD-3-Clause` |
 | `crates/tinker-pdf-xml/data/encoding-indexes` | The WHATWG Encoding Standard's single-byte indexes and label table, from [whatwg/encoding](https://github.com/whatwg/encoding) at `a985b62` (2026-05-21) | `BSD-3-Clause` |
 | `crates/tinker-pdf-xml/data/html-entities` | HTML's named character references, `entities/out/entities.json` from [whatwg/html-build](https://github.com/whatwg/html-build) at `283a353` (fetched 2026-10-03) | `BSD-3-Clause` |
-| `crates/tinker-pdf-xml/data/html5lib-tests` | [html5lib/html5lib-tests](https://github.com/html5lib/html5lib-tests) `tree-construction/` and `tokenizer/` at `9329e64` (2026-06-22), the last commit holding the tree-construction tests | `MIT` |
+| `crates/tinker-pdf-xml/data/html5lib-tests` | [html5lib/html5lib-tests](https://github.com/html5lib/html5lib-tests) `tree-construction/`, `tokenizer/` and `encoding/` at `9329e64` (2026-06-22), the last commit holding the tree-construction tests | `MIT` |
 
 ### `crates/tinker-pdf-font/data/cmap-resources`
 
@@ -704,8 +704,10 @@ XHTML sets.
 **The conformance suite the HTML parser is held to**: html5lib's
 tree-construction tests (57 files, 1 792 tests) and tokenizer tests (13 files
 of tests and one of XML-violation tests, 6 806 tests), each an input and the
-tree or tokens the WHATWG standard produces from it. `tests/html5lib.rs` and
-`src/html/suite.rs` read them at test time; nothing here reaches a build.
+tree or tokens the WHATWG standard produces from it; and its encoding tests
+(three files, 82 tests), each an input and the encoding §13.2.3 decodes it
+in. `tests/html5lib.rs` and `src/html/suite.rs` read them at test time;
+nothing here reaches a build.
 
 Cloned from `https://github.com/html5lib/html5lib-tests` on 3 October 2026 and
 checked out at commit `9329e64694e7835d0dcff9811e22856ef6ad16f9` (committed
@@ -718,7 +720,12 @@ standard. (The head, `c777c40` of 1 October 2026, adds tokenizer tests for the
 standard's new processing instructions, which this parser does not read; the
 module comment of `tinker_pdf_xml::html::tokenizer` says so.) The
 `tree-construction/scripted/` tests, which need a script engine, are not
-vendored. `LICENSE` and `AUTHORS.rst` are upstream's own; the suite is MIT,
+vendored, nor are `encoding/scripted/` and `encoding/chardet/`, which need a
+script engine and a frequency-analysis guesser this parser does not have. The
+three encoding files were added on 9 October 2026 from the same commit,
+fetched from `raw.githubusercontent.com` at `9329e64` and identical to the
+clone's; `tests1.dat` is not UTF-8 (one test's input is a raw 0xFE), which is
+the point of it. `LICENSE` and `AUTHORS.rst` are upstream's own; the suite is MIT,
 and the copyright line names its authors.
 
 | File | Bytes | SHA-256 |
@@ -802,6 +809,12 @@ and the copyright line names its authors.
 | `tokenizer/unicodeChars.test` | 43 771 | `22b7263a840da38179b13693bbfe72f0507dcd41951622456a0d3f5300ba42bd` |
 | `tokenizer/unicodeCharsProblematic.test` | 1 107 | `3c166d5cfa24ee60fd7310ff0f5057e4ae0c649842ec446b5949215759e19a68` |
 | `tokenizer/xmlViolation.test` | 442 | `193a2f52d81adb4df4e056e3489f3bae79b3fc65253ccf31423a0e2f9c128d5c` |
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `encoding/test-yahoo-jp.dat` | 502 | `dc353a7ceaa9428a668e7846e78efd18f7e0a09e768d6be61166c12fc223a432` |
+| `encoding/tests1.dat` | 45 380 | `ef54dd3d9c256a6830c266808c0277545a156a241b350c613c996a4cea52e5f7` |
+| `encoding/tests2.dat` | 3 113 | `5e00d81e6207307f1186ea85f85b5f58003af94f5a7c6a3e06ca19c17567f51b` |
 
 ### `crates/tinker-pdf-content/data/ucd`
 
