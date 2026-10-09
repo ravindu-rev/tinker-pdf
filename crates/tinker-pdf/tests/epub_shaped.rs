@@ -2273,3 +2273,114 @@ fn a_wrapped_line_is_ordered_by_its_paragraphs_levels() {
         "the line at the top of the next page is not `(de`: {second:?}"
     );
 }
+
+/// **An `inside` marker is ordered with its item's line, at the paragraph's
+/// level, whatever the line holds** (CSS 2.2 §12.5.1, `css-lists-3` §3.1;
+/// review of lane 8C).
+///
+/// The marker is an isolate at its paragraph's start, one neutral to UAX #9,
+/// which N1 or N2 puts at the paragraph's level: 0 in a left-to-right item
+/// and 1 in a right-to-left one, below the Arabic word's 1 or the Latin
+/// word's 2, so L2 never moves it inside the line and its last reversal of
+/// a right-to-left line moves it to the right end. The face has no digits:
+/// the marker's `1.` is drawn in the standard 14, an `/Artifact` that
+/// extraction skips, so it is read off the content stream, and its space is
+/// the face's, nine points.
+///
+/// - **Left to right, with an Arabic word**: the marker starts the line at
+///   the left edge and the word follows it, as before; the line has a
+///   right-to-left character in it, so it is ordered, and the marker at
+///   level 0 stays first. Its width is read off here: where the word starts.
+/// - **Right to left**: the word is flush against the marker, which ends the
+///   line at the right edge — drawn right to left, its space first and `1.`
+///   last, against the edge. The word was drawn at the right edge and the
+///   marker to its left, at the line's end side.
+#[test]
+fn an_inside_marker_is_ordered_at_its_paragraphs_level() {
+    let item = "display: list-item; list-style-position: inside; list-style-type: decimal";
+    let word = "\u{628}\u{62D}\u{645}";
+    let program = bidi_face().build();
+    let open = |attributes: &str| {
+        let book = faces_book_with(&[("Fixture Bidi", &program)], 24, attributes, word);
+        Document::open(book).expect("a book")
+    };
+    let number_at = |doc: &Document| {
+        let content = page_content(doc);
+        text_objects(&content)
+            .iter()
+            .find(|(_, object)| object.contains("(1.) Tj"))
+            .map(|(_, object)| origin_of(object).0)
+            .unwrap_or_else(|| panic!("no text object draws `1.`: {content}"))
+    };
+
+    let ltr = open(&format!(" style=\"{item}\""));
+    let line = page_lines(&ltr, 0);
+    assert_eq!(line.len(), 1, "{line:?}");
+    let marker = line[0][0].1 - LEFT;
+    assert!(
+        (number_at(&ltr) - LEFT).abs() < 1e-9,
+        "{}",
+        page_content(&ltr)
+    );
+    assert!(
+        at(
+            &line[0],
+            &[
+                ("\u{645}", LEFT + marker),
+                ("\u{62D}", LEFT + marker + GLYPH),
+                ("\u{628}", LEFT + marker + 2.0 * GLYPH)
+            ]
+        ),
+        "the left-to-right line is not the marker, then the word: {line:?}"
+    );
+
+    let rtl = open(&format!(" dir=\"rtl\" style=\"{item}\""));
+    let line = page_lines(&rtl, 0);
+    assert_eq!(line.len(), 1, "{line:?}");
+    let start = RIGHT - marker - 3.0 * GLYPH;
+    assert!(
+        at(
+            &line[0],
+            &[
+                ("\u{645}", start),
+                ("\u{62D}", start + GLYPH),
+                ("\u{628}", start + 2.0 * GLYPH)
+            ]
+        ),
+        "the word is not flush against the marker at the right: {line:?}"
+    );
+    let number = number_at(&rtl);
+    assert!(
+        (number - (RIGHT - marker + GLYPH)).abs() < 1e-9,
+        "`1.` does not end the line at the right edge: at {number}, {line:?}"
+    );
+
+    // And a wrapped item's first line is still ordered by its paragraph's
+    // levels: the marker, which is in no paragraph's text, does not send the
+    // line back to being resolved by itself. `ab ! ab` breaks after the `!`;
+    // in the paragraph the ` ! ` between two `b`/`a` pairs is `L` by N1,
+    // level 2, and the first line is drawn `ab !` as written. Resolved alone
+    // the `!` would lie between `b` and the line's `eos` and be drawn left of
+    // `ab`.
+    let width = 63.0;
+    let book = faces_book_with(
+        &[("Fixture Bidi", &program)],
+        24,
+        &format!(" dir=\"rtl\" style=\"{item}; width: {}px\"", width / 0.75),
+        "ab ! ab",
+    );
+    let wrapped = page_lines(&Document::open(book).expect("a book"), 0);
+    assert_eq!(wrapped.len(), 2, "{wrapped:?}");
+    let start = LEFT + width - marker - 4.0 * GLYPH;
+    assert!(
+        at(
+            &wrapped[0],
+            &[
+                ("a", start),
+                ("b", start + GLYPH),
+                ("!", start + 3.0 * GLYPH)
+            ]
+        ),
+        "the first line is not `ab !` against the marker: {wrapped:?}"
+    );
+}

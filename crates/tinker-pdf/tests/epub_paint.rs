@@ -1958,3 +1958,80 @@ fn a_br_is_a_forced_line_break_and_draws_nothing() {
     let lines: Vec<&str> = text.lines().iter().map(|line| line.text.as_str()).collect();
     assert_eq!(lines, ["aaabbb"], "display: none takes the break away");
 }
+
+/// Where the first page draws the literal string `(shown)`: the `x` of the
+/// last `Td` before the `Tj` that shows it.
+fn shown_at(doc: &Document, shown: &str) -> f64 {
+    let words = tokens(doc);
+    let wanted = format!("({shown})");
+    for (at, word) in words.iter().enumerate() {
+        if word != "Tj" {
+            continue;
+        }
+        // The string operand, put back together from the tokens a space in
+        // it split it into.
+        let Some(open) = words[..at].iter().rposition(|w| w.starts_with('(')) else {
+            continue;
+        };
+        if words[open..at].join(" ") != wanted {
+            continue;
+        }
+        let td = words[..open]
+            .iter()
+            .rposition(|w| w == "Td")
+            .expect("a Td before the string");
+        return words[td - 2].parse().expect("an x");
+    }
+    panic!("nothing shows {wanted}: {words:?}");
+}
+
+/// **An `inside` list marker is on its item's start side, which in a
+/// right-to-left item is the right** (CSS 2.2 §12.5.1, `css-lists-3` §3.1;
+/// review of lane 8C).
+///
+/// The marker is the item's first inline box and, by `css-lists-3`'s
+/// user-agent rule, an isolate: UAX #9 sees it as one neutral at the
+/// paragraph's start, which N1 or N2 puts at the paragraph's own level
+/// whatever follows it. In a right-to-left item that is level 1, so L2's
+/// last reversal takes the whole line and the marker, logically first, is
+/// drawn last, at the right, with `ab` to its left. It stayed where layout
+/// wrote it, at the left, and `ab` was moved past it to the right edge,
+/// with nothing counted: `direction` had left the unsupported names.
+///
+/// The widths are read off the two controls rather than assumed. Left to
+/// right the marker `1. ` starts at the content box's left edge and `ab`
+/// where it ends, so the gap between them is the marker's width; an
+/// `outside` marker in a right-to-left list leaves `ab` alone against the
+/// right edge, 396 pt, so what it leaves of the line is `ab`'s width. The
+/// right-to-left line is the two, flush right: `ab`, then `1. ` ending at
+/// the edge. The marker's own characters are drawn in logical order, the
+/// standard 14's known limit.
+#[test]
+fn an_inside_marker_is_on_its_items_start_side() {
+    const RIGHT: f64 = 396.0;
+    let style = "ol { margin: 0; padding: 0; list-style-position: inside }";
+    let ltr = open(style, "<ol><li>ab</li></ol>");
+    let (marker, text) = (shown_at(&ltr, "1. "), shown_at(&ltr, "ab"));
+    assert!((marker - MARGIN).abs() < 1e-9, "{marker}");
+    let marker_width = text - marker;
+    assert!(marker_width > 0.0, "{marker} {text}");
+
+    let outside = open(
+        "ol { margin: 0; padding: 0 }",
+        "<ol dir=\"rtl\"><li>ab</li></ol>",
+    );
+    let text_width = RIGHT - shown_at(&outside, "ab");
+    assert!(text_width > 0.0, "{text_width}");
+
+    let rtl = open(style, "<ol dir=\"rtl\"><li>ab</li></ol>");
+    let (marker, text) = (shown_at(&rtl, "1. "), shown_at(&rtl, "ab"));
+    assert!(
+        (marker - (RIGHT - marker_width)).abs() < 1e-9,
+        "the marker is not against the right edge: at {marker}, `ab` at {text}"
+    );
+    assert!(
+        (text - (RIGHT - marker_width - text_width)).abs() < 1e-9,
+        "`ab` is not to the marker's left: at {text}, the marker at {marker}"
+    );
+    assert_eq!(counted(&rtl, "direction"), None, "{:?}", warnings(&rtl));
+}

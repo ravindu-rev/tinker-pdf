@@ -4040,9 +4040,23 @@ pub fn hyphenate(runs: &mut [TextRun]) {
 /// consecutive runs whose ends meet, and whose baselines are within the larger
 /// font size of each other, are one line; a new line starts at the left edge
 /// again and does not meet the last one's end, and two table cells on one
-/// baseline are separated by their cells' own edges. A generated run (a list
-/// marker) is not part of any line's reordering: it sits where the list put
-/// it.
+/// baseline are separated by their cells' own edges. An `outside` list
+/// marker is not part of any line's reordering: it sits where the list put
+/// it ([`beside_the_line`]).
+///
+/// # An `inside` marker is one unit, at the paragraph's level
+///
+/// It is the first inline box of its item (CSS 2.2 §12.5.1), and
+/// `css-lists-3` §3.1's user-agent rule makes every marker `unicode-bidi:
+/// isolate`: `LRI` or `RLI` before it and `PDI` after, in the item's
+/// direction. Seen from outside, an isolate is one neutral (UAX #9 X5a to
+/// X6a), and one at its paragraph's start lies between `sos` and the next
+/// strong character, so N1 or N2 gives it the paragraph's own direction
+/// whatever follows it: it is at the paragraph's level, the lowest on the
+/// line. So [`split_line`] orders it whole at that level and draws it in
+/// the paragraph's direction — first on the left of a left-to-right line
+/// and first on the right of a right-to-left one, its item's text after it
+/// — and leaves its characters out of the text it resolves.
 ///
 /// A line with no right-to-left character is not touched, so no
 /// left-to-right page moves. Each run is still drawn in its own direction
@@ -4173,7 +4187,9 @@ type Place = Option<(usize, usize)>;
 /// with each run's embeddings written round it as formatting characters, as
 /// [`line_levels`] writes a line's: the ones a run shares with the run
 /// before it left open, across a line's end and a page's as well. Generated
-/// runs stay out of it, as they stay out of a line's order.
+/// runs stay out of it: an `outside` marker is in no line, and an `inside`
+/// one is an isolate, whose own characters decide no level outside it
+/// ([`visual_lines`]).
 fn paragraphs(pages: &[LayoutPage]) -> (BTreeMap<usize, Paragraph>, Vec<Vec<Place>>) {
     struct Gathered {
         text: String,
@@ -4281,7 +4297,7 @@ fn split_line(
     metrics: &BookMetrics<'_>,
     out: &mut Vec<TextRun>,
 ) -> usize {
-    let Some((levels, _)) = line_levels(line, places, paragraphs) else {
+    let Some((levels, base)) = line_levels(line, places, paragraphs) else {
         out.append(line);
         return 0;
     };
@@ -4293,16 +4309,19 @@ fn split_line(
         let count = run.text.chars().count();
         let own = levels.get(first_char..first_char + count).unwrap_or(&[]);
         first_char += count;
+        if run.generated {
+            // An `inside` marker — the only generated run a line holds (see
+            // [`beside_the_line`]) — is one isolate at its paragraph's
+            // start, which UAX #9 puts at the paragraph's level whatever
+            // follows it; it is ordered whole at that level and drawn in
+            // that level's direction. See [`visual_lines`].
+            whole.push(Some(base.number()));
+            placed.push(Vec::new());
+            continue;
+        }
         let pieces = level_pieces(&run.text, own);
-        if run.generated || pieces.len() < 2 {
-            // A generated run is not part of the line's order (see
-            // [`visual_lines`]) and keeps reading by its own text.
-            whole.push(
-                pieces
-                    .first()
-                    .filter(|_| !run.generated)
-                    .map(|(_, level)| level.number()),
-            );
+        if pieces.len() < 2 {
+            whole.push(pieces.first().map(|(_, level)| level.number()));
             placed.push(Vec::new());
             continue;
         }
@@ -4404,9 +4423,19 @@ fn line_levels(
     }
     let mut text = String::new();
     let mut count = 0usize;
-    let mut own: Vec<usize> = Vec::new();
+    // Where each character of the line's runs is in `text`, or `None` for an
+    // `inside` marker's, which are not in it: see below.
+    let mut own: Vec<Option<usize>> = Vec::new();
     let mut open: Vec<Embedding> = Vec::new();
     for run in line {
+        if run.generated {
+            // An `inside` marker is an isolate (`css-lists-3` §3.1) at its
+            // paragraph's start, which X5a to X6a and N1 make one neutral at
+            // the paragraph's level; its own characters decide nothing out
+            // here. [`split_line`] gives it that level.
+            own.extend(core::iter::repeat_n(None, run.text.chars().count()));
+            continue;
+        }
         let shared = open
             .iter()
             .zip(run.embeddings.iter())
@@ -4424,7 +4453,7 @@ fn line_levels(
             open.push(*e);
         }
         for c in run.text.chars() {
-            own.push(count);
+            own.push(Some(count));
             text.push(c);
             count += 1;
         }
@@ -4442,6 +4471,10 @@ fn line_levels(
     let all = resolved.levels();
     let mut levels: Vec<Level> = Vec::with_capacity(own.len());
     for at in own {
+        let Some(at) = at else {
+            levels.push(paragraph.base_level());
+            continue;
+        };
         let level = all.get(at).copied().unwrap_or(paragraph.base_level());
         let kept = if paragraph.is_removed(at) {
             levels.last().copied().unwrap_or(level)
@@ -4455,7 +4488,8 @@ fn line_levels(
 
 /// [`line_levels`] from the line's paragraph, resolved whole: `None` unless
 /// every run of the line has a place in one paragraph [`paragraphs`]
-/// resolved.
+/// resolved — every run but an `inside` marker, which is in no paragraph's
+/// text and takes the paragraph's level, as [`line_levels`] says.
 ///
 /// The line is the stretch of the paragraph from its first run's first
 /// character to its last run's last; the formatting characters between two
@@ -4470,28 +4504,42 @@ fn paragraph_levels(
         return None;
     }
     let mut number = None;
-    for place in places {
-        let (id, _) = (*place)?;
+    for (run, place) in line.iter().zip(places) {
+        let Some((id, _)) = *place else {
+            if run.generated {
+                continue;
+            }
+            return None;
+        };
         if number.is_some_and(|n| n != id) {
             return None;
         }
         number = Some(id);
     }
     let paragraph = paragraphs.get(&number?)?;
-    let spans: Vec<(usize, usize)> = line
+    // Each run's stretch of the paragraph, `None` for a marker's.
+    let spans: Vec<(Option<usize>, usize)> = line
         .iter()
         .zip(places)
-        .filter_map(|(run, place)| {
-            place.map(|(_, start)| (start, start + run.text.chars().count()))
-        })
+        .map(|(run, place)| (place.map(|(_, start)| start), run.text.chars().count()))
         .collect();
-    let first = spans.iter().filter(|(s, e)| s < e).map(|(s, _)| *s).min()?;
-    let last = spans.iter().filter(|(s, e)| s < e).map(|(_, e)| *e).max()?;
+    let placed = || {
+        spans
+            .iter()
+            .filter_map(|(start, count)| start.map(|s| (s, s + count)))
+            .filter(|(s, e)| s < e)
+    };
+    let first = placed().map(|(s, _)| s).min()?;
+    let last = placed().map(|(_, e)| e).max()?;
     let resolved = paragraph.line(first..last);
     let base = paragraph.base_level();
     let mut levels: Vec<Level> = Vec::with_capacity(last - first);
-    for (start, end) in spans {
-        for at in start..end {
+    for (start, count) in spans {
+        let Some(start) = start else {
+            levels.extend(core::iter::repeat_n(base, count));
+            continue;
+        };
+        for at in start..start + count {
             let level = at
                 .checked_sub(first)
                 .and_then(|offset| resolved.levels().get(offset))
@@ -4607,12 +4655,27 @@ fn near(p: f64, q: f64) -> bool {
 
 /// Whether `b` continues the line `a` is on. See [`visual_lines`].
 fn same_line(a: &TextRun, b: &TextRun) -> bool {
-    if a.generated || b.generated {
+    if beside_the_line(a) || beside_the_line(b) {
         return false;
     }
     let end = a.x + a.width;
     let tolerance = 1e-6 * end.abs().max(1.0);
     (end - b.x).abs() <= tolerance && (a.y - b.y).abs() <= a.font_size.max(b.font_size)
+}
+
+/// Whether `run` stands beside its line rather than in it: generated text set
+/// in no paragraph, which is an `outside` list marker, hung beside its item's
+/// first line box on the item's start side (`css-lists-3` §3.1) where layout
+/// put it.
+///
+/// An `inside` marker is generated text too, but it is the first inline box
+/// of its item's first line (CSS 2.2 §12.5.1), set in the item's paragraph
+/// ([`TextRun::paragraph`]), so it is part of that line and of its order. It
+/// was kept out of the line with the outside one, and so stayed at the left
+/// of a right-to-left line, its item's text moved past it to the right
+/// (review of lane 8C).
+fn beside_the_line(run: &TextRun) -> bool {
+    run.generated && run.paragraph == 0
 }
 
 /// Lays one line's runs out again in L2's order. Returns whether any moved.
