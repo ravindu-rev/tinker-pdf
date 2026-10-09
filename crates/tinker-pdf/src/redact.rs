@@ -663,16 +663,28 @@ pub enum RedactionWarning {
     /// tiles measured as `placements`: every tile, wherever the pattern
     /// paints, runs the cell's one stream.
     ///
-    /// `placements` **saturates** at [`MAX_PLACEMENTS`]. A form drawn at more
-    /// than that many distinct transforms has the placements past the cap
-    /// measured against nothing at all, which is the one case where this
-    /// warning still means text may have *survived* under a rectangle rather
-    /// than only that too much went; a saturated count is how to tell.
+    /// For a form, `placements` **saturates** at [`MAX_PLACEMENTS`]. A form
+    /// drawn at more than that many distinct transforms has the placements
+    /// past the cap measured against nothing at all, which is the one case
+    /// where this warning still means text may have *survived* under a
+    /// rectangle rather than only that too much went; a saturated count is
+    /// how to tell (a form measured whole at exactly that many placements
+    /// reads the same, the safe way to be wrong).
+    ///
+    /// For a cell it does not: `placements` is the number of tiles measured
+    /// and cut, never more than [`MAX_PLACEMENTS`] since the bound is the
+    /// cell's over all its anchorings ([`cell_tiles`]), and it says nothing
+    /// about what went unmeasured. A cell measured whole at exactly the bound
+    /// reports it, and one with anchorings left unmeasured can report fewer.
+    /// What says a cell showing text or an image was not measured whole is
+    /// [`RedactionWarning::PatternOrMask`] under the same name, raised
+    /// whether or not anything measured was cut. Until the lane's review a
+    /// cell's count was clamped as a form's is.
     RepeatedForm {
-        /// The resource name the `Do` gave the form.
+        /// The resource name the `Do` gave the form, or the pattern's.
         form: Vec<u8>,
-        /// How many distinct placements of it were measured, saturating at
-        /// [`MAX_PLACEMENTS`].
+        /// How many distinct placements of it were measured: for a form,
+        /// saturating at [`MAX_PLACEMENTS`]; for a cell, the tiles cut.
         placements: usize,
     },
     /// One content stream invoked more XObjects than this module follows in
