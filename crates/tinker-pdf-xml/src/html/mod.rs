@@ -395,16 +395,16 @@ pub fn parse_fragment(text: &str, context: (Namespace, &str), limits: &Limits) -
 /// (§13.2.6.4.4's, in `<head>` or handed to `<head>`'s rules by another
 /// mode) *changes the encoding*: when it names another than the one the bytes
 /// were read in, they are decoded again in it and parsed again, once — the
-/// second reading is certain. That is how a `<meta>` past the prescan's
+/// second reading is certain — and when it names the one they were read in,
+/// that reading is certain. That is how a `<meta>` past the prescan's
 /// kilobyte is read, and the only way this parses the input twice.
 #[must_use]
 pub fn parse_bytes(bytes: &[u8], limits: &Limits) -> Document {
-    let (text, decoding) = decode(bytes);
-    let document = parse(&text, limits);
-    let (mut document, decoding) = match change_encoding(bytes, &decoding, document.meta_encoding) {
-        Some((text, changed)) => (parse(&text, limits), changed),
-        None => (document, decoding),
-    };
+    let (text, mut decoding) = decode(bytes);
+    let mut document = parse(&text, limits);
+    if let Some(text) = change_encoding(bytes, &mut decoding, document.meta_encoding) {
+        document = parse(&text, limits);
+    }
     document.decoding = Some(decoding);
     document
 }
@@ -481,17 +481,20 @@ fn guess(bytes: &[u8], not_decoded: Option<&'static str>) -> (String, Decoding) 
 }
 
 /// §13.2.3.4's *change the encoding*, for the encoding the first `<meta>` the
-/// tree builder met named: the bytes decoded again in it, certain, or `None`
-/// to leave the first reading standing — a byte order mark's encoding is
-/// already certain, UTF-16 is never changed (step 1), and an encoding equal to
-/// the one in use only becomes certain (step 4). The one in use, for a guess
-/// made past an encoding this crate does not decode, is that encoding: it is
-/// what the standard would be reading in.
+/// tree builder met named: the bytes decoded again in it, certain, with
+/// `decoding` replaced, or `None` to leave the first reading standing — a byte
+/// order mark's encoding is already certain, UTF-16 is never changed (step 1),
+/// and an encoding equal to the one in use only becomes certain (step 4), so
+/// a guess the `<meta>` agrees with is `confident` from then on, as it is when
+/// the prescan finds that `<meta>`. The one in use, for a guess made past an
+/// encoding this crate does not decode, is that encoding: it is what the
+/// standard would be reading in, and the bytes are still a guess, so that one
+/// stays unconfident.
 fn change_encoding(
     bytes: &[u8],
-    decoding: &Decoding,
+    decoding: &mut Decoding,
     requested: Option<Label>,
-) -> Option<(String, Decoding)> {
+) -> Option<String> {
     let requested = requested?;
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         return None;
@@ -509,14 +512,20 @@ fn change_encoding(
         other => other,
     };
     if new == current {
+        // Step 4.
+        if decoding.not_decoded.is_none() {
+            decoding.confident = true;
+        }
         return None;
     }
     // Step 6: read again, in the new encoding, which is now certain — or, for
     // one this crate does not decode, the guess, with that encoding named.
-    Some(match new {
+    let (text, changed) = match new {
         Label::Unsupported(name) => guess(bytes, Some(name)),
         other => decode_as(bytes, other)?,
-    })
+    };
+    *decoding = changed;
+    Some(text)
 }
 
 fn decoded(encoding: DecodedAs, confident: bool, replaced: usize) -> Decoding {

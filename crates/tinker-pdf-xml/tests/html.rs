@@ -612,6 +612,31 @@ fn a_meta_past_the_prescan_changes_the_encoding() {
         Some("EUC-JP")
     );
 
+    // One naming the encoding the guess is already in is not read again, and
+    // makes it certain (§13.2.3.4 step 4), as the same `<meta>` in the
+    // prescan's kilobyte does — UTF-8 for bytes that are UTF-8, windows-1252
+    // for bytes that are not.
+    for (meta, body, encoding) in [
+        ("<meta charset=utf-8>", "é".as_bytes(), DecodedAs::Utf8),
+        (
+            "<meta charset=windows-1252>",
+            b"\xe9".as_slice(),
+            DecodedAs::SingleByte(SingleByte::Windows1252),
+        ),
+    ] {
+        for bytes in [past(meta, body), [meta.as_bytes(), b"<p>", body].concat()] {
+            let document = html::parse_bytes(&bytes, &Limits::DEFAULT);
+            let decoding = document.encoding().expect("decoded");
+            assert_eq!(
+                (decoding.encoding, decoding.confident, decoding.not_decoded),
+                (encoding, true, None),
+                "{meta} at {}",
+                bytes.len()
+            );
+            assert!(text_of(&document).ends_with('é'), "{meta}");
+        }
+    }
+
     // A byte order mark is certain.
     let mut marked = vec![0xEF, 0xBB, 0xBF];
     marked.extend_from_slice(&past("<meta charset=koi8-r>", "é".as_bytes()));
