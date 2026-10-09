@@ -4027,7 +4027,9 @@ pub fn hyphenate(runs: &mut [TextRun]) {
 /// So this gives each run of the line a level — the one [`split_at_levels`]
 /// cut it at, its paragraph's; for a line nobody cut, the level of its strong
 /// characters (or of all of them, for a run of neutrals) with the line's text
-/// resolved by itself — orders the runs by L2 and lays them out again from
+/// resolved by itself — orders the runs by L2, an isolate's formatting
+/// characters between two runs standing between them at their own level
+/// ([`TextRun::bidi_gap`]), and lays them out again from
 /// the line's left edge in that order, each at its own measured width. The
 /// line's extent does not change, so its alignment does not either; only
 /// which run sits where.
@@ -4297,7 +4299,7 @@ fn split_line(
     metrics: &BookMetrics<'_>,
     out: &mut Vec<TextRun>,
 ) -> usize {
-    let Some((levels, base)) = line_levels(line, places, paragraphs) else {
+    let Some(LineLevels { levels, base, gaps }) = line_levels(line, places, paragraphs) else {
         out.append(line);
         return 0;
     };
@@ -4329,11 +4331,21 @@ fn split_line(
         whole.push(None);
         placed.push(cut_run(run, &pieces, metrics, &layout_context(line, at)));
     }
-    for ((mut run, pieces), level) in line.drain(..).zip(placed).zip(whole) {
+    // The gap before a run stands before its first piece; the pieces of one
+    // run have nothing between them.
+    let gaps = gaps.into_iter().chain(core::iter::repeat(None));
+    for (((mut run, pieces), level), gap) in line.drain(..).zip(placed).zip(whole).zip(gaps) {
+        let gap = gap.map(Level::number);
         if pieces.is_empty() {
             run.bidi_level = level;
+            run.bidi_gap = gap;
             out.push(run);
         } else {
+            let mut pieces = pieces.into_iter();
+            if let Some(mut first) = pieces.next() {
+                first.bidi_gap = gap;
+                out.push(first);
+            }
             out.extend(pieces);
         }
     }
@@ -4365,8 +4377,20 @@ fn as_neighbour(other: Option<&TextRun>) -> Option<Neighbour<'_>> {
         })
 }
 
-/// UAX #9's level for every character of a line's runs, in order, and the
-/// paragraph's base level — or `None` for a line UAX #9 would leave as it is.
+/// What [`line_levels`] finds for one line.
+struct LineLevels {
+    /// UAX #9's level for every character of the line's runs, in order.
+    levels: Vec<Level>,
+    /// The paragraph's base level.
+    base: Level,
+    /// One per run: the lowest level of the isolate formatting characters
+    /// between it and the run before it ([`TextRun::bidi_gap`]).
+    gaps: Vec<Option<Level>>,
+}
+
+/// UAX #9's level for every character of a line's runs, in order, the
+/// paragraph's base level and the gaps between the runs — or `None` for a
+/// line UAX #9 would leave as it is.
 ///
 /// # What the line is resolved as
 ///
@@ -4380,10 +4404,15 @@ fn as_neighbour(other: Option<&TextRun>) -> Option<Neighbour<'_>> {
 /// says they are**, written into the text resolved here and nowhere else: a
 /// run's [`TextRun::embeddings`] are opened before it and closed after, the
 /// ones a run shares with the run before it left open across the boundary,
-/// and each is told apart from a sibling's by the box that opened it. X9
-/// removes them before any level is read back, so the runs' own characters
-/// are the only levels returned. A character X9 removes in a run's own text
-/// (a joiner, a format control) has no level of its own either; it takes the
+/// and each is told apart from a sibling's by the box that opened it. They
+/// are in no run, so the runs' own characters are the only levels returned
+/// per character. X9 removes an embedding's characters; an isolate's it
+/// keeps, and L2 reverses them with the rest, so the lowest level of the
+/// ones between two runs is returned as the gap between them
+/// ([`TextRun::bidi_gap`]): without it an isolate and the text beside it
+/// were reversed together wherever no lower character stood between them
+/// (review of lane 8C). A character X9 removes in a run's own text (a
+/// joiner, a format control) has no level of its own either; it takes the
 /// level of the character before it, since after L1 it carries the
 /// paragraph's, which would cut its word in three.
 ///
@@ -4402,7 +4431,7 @@ fn line_levels(
     line: &[TextRun],
     places: &[Place],
     paragraphs: &BTreeMap<usize, Paragraph>,
-) -> Option<(Vec<Level>, Level)> {
+) -> Option<LineLevels> {
     let base = line
         .iter()
         .find(|run| !run.generated)
@@ -4426,14 +4455,19 @@ fn line_levels(
     // Where each character of the line's runs is in `text`, or `None` for an
     // `inside` marker's, which are not in it: see below.
     let mut own: Vec<Option<usize>> = Vec::new();
+    // Each run's first character in `text` and how many it has, for the
+    // gaps between runs.
+    let mut spans: Vec<(Option<usize>, usize)> = Vec::with_capacity(line.len());
     let mut open: Vec<Embedding> = Vec::new();
     for run in line {
+        let chars = run.text.chars().count();
         if run.generated {
             // An `inside` marker is an isolate (`css-lists-3` §3.1) at its
             // paragraph's start, which X5a to X6a and N1 make one neutral at
             // the paragraph's level; its own characters decide nothing out
             // here. [`split_line`] gives it that level.
-            own.extend(core::iter::repeat_n(None, run.text.chars().count()));
+            own.extend(core::iter::repeat_n(None, chars));
+            spans.push((None, chars));
             continue;
         }
         let shared = open
@@ -4452,6 +4486,7 @@ fn line_levels(
             count += 1;
             open.push(*e);
         }
+        spans.push((Some(count), chars));
         for c in run.text.chars() {
             own.push(Some(count));
             text.push(c);
@@ -4483,7 +4518,14 @@ fn line_levels(
         };
         levels.push(kept);
     }
-    Some((levels, paragraph.base_level()))
+    let gaps = gaps_between(&spans, |at| {
+        all.get(at).copied().filter(|_| !paragraph.is_removed(at))
+    });
+    Some(LineLevels {
+        levels,
+        base: paragraph.base_level(),
+        gaps,
+    })
 }
 
 /// [`line_levels`] from the line's paragraph, resolved whole: `None` unless
@@ -4499,7 +4541,7 @@ fn paragraph_levels(
     line: &[TextRun],
     places: &[Place],
     paragraphs: &BTreeMap<usize, Paragraph>,
-) -> Option<(Vec<Level>, Level)> {
+) -> Option<LineLevels> {
     if places.len() != line.len() {
         return None;
     }
@@ -4533,18 +4575,19 @@ fn paragraph_levels(
     let last = placed().map(|(_, e)| e).max()?;
     let resolved = paragraph.line(first..last);
     let base = paragraph.base_level();
+    let level_at = |at: usize| {
+        at.checked_sub(first)
+            .and_then(|offset| resolved.levels().get(offset))
+            .copied()
+    };
     let mut levels: Vec<Level> = Vec::with_capacity(last - first);
-    for (start, count) in spans {
+    for &(start, count) in &spans {
         let Some(start) = start else {
             levels.extend(core::iter::repeat_n(base, count));
             continue;
         };
         for at in start..start + count {
-            let level = at
-                .checked_sub(first)
-                .and_then(|offset| resolved.levels().get(offset))
-                .copied()
-                .unwrap_or(base);
+            let level = level_at(at).unwrap_or(base);
             let kept = if paragraph.is_removed(at) {
                 levels.last().copied().unwrap_or(level)
             } else {
@@ -4553,7 +4596,38 @@ fn paragraph_levels(
             levels.push(kept);
         }
     }
-    Some((levels, base))
+    let gaps = gaps_between(&spans, |at| {
+        level_at(at).filter(|_| !paragraph.is_removed(at))
+    });
+    Some(LineLevels { levels, base, gaps })
+}
+
+/// [`TextRun::bidi_gap`] for each run of a line, from `spans` — each run's
+/// first character's index in the text resolved and how many it has, `None`
+/// for a run that is not in it — and `kept`, the level of the character at
+/// an index, `None` where X9 removed it.
+///
+/// What lies between a run and the last run before it with any characters
+/// is the formatting characters written between them; X9 keeps an
+/// isolate's, and the lowest of their levels is the gap. Linear: each
+/// character of the text is looked at once at most.
+fn gaps_between(
+    spans: &[(Option<usize>, usize)],
+    kept: impl Fn(usize) -> Option<Level>,
+) -> Vec<Option<Level>> {
+    let mut gaps = Vec::with_capacity(spans.len());
+    let mut end: Option<usize> = None;
+    for &(start, count) in spans {
+        let gap = match (start, end) {
+            (Some(start), Some(end)) if count > 0 => (end..start).filter_map(&kept).min(),
+            _ => None,
+        };
+        gaps.push(gap);
+        if let Some(start) = start.filter(|_| count > 0) {
+            end = Some(start + count);
+        }
+    }
+    gaps
 }
 
 /// The byte ranges of `text` over which `levels` — one per character — is
@@ -4682,11 +4756,12 @@ fn beside_the_line(run: &TextRun) -> bool {
 ///
 /// A line [`split_at_levels`] cut is ordered by the level each of its runs
 /// was cut at — its paragraph's — and an empty run among them, which has no
-/// level and no width, by the line's lowest. A line nobody resolved is
-/// resolved here, by itself.
+/// level and no width, by the line's lowest; with each run's
+/// [`TextRun::bidi_gap`] between it and the run before it. A line nobody
+/// resolved is resolved here, by itself.
 fn reorder_line(line: &mut [TextRun]) -> bool {
     let mut run_levels: Vec<Level> = Vec::with_capacity(line.len());
-    if line.iter().any(|run| run.bidi_level.is_some()) {
+    let gaps: Vec<Option<Level>> = if line.iter().any(|run| run.bidi_level.is_some()) {
         let lowest = line
             .iter()
             .filter_map(|run| run.bidi_level)
@@ -4696,17 +4771,21 @@ fn reorder_line(line: &mut [TextRun]) -> bool {
             let number = run.bidi_level.unwrap_or(lowest);
             run_levels.push(Level::from_number(number).unwrap_or(Level::LTR));
         }
+        line.iter()
+            .map(|run| run.bidi_gap.and_then(Level::from_number))
+            .collect()
     } else {
-        let Some((levels, base)) = line_levels(line, &[], &BTreeMap::new()) else {
+        let Some(found) = line_levels(line, &[], &BTreeMap::new()) else {
             return false;
         };
         let mut at = 0usize;
         for run in line.iter() {
-            run_levels.push(level_of(&run.text, &levels, at, base));
+            run_levels.push(level_of(&run.text, &found.levels, at, found.base));
             at += run.text.chars().count();
         }
-    }
-    let order = reorder(&run_levels);
+        found.gaps
+    };
+    let order = order_with_gaps(&run_levels, &gaps);
     if order.iter().enumerate().all(|(i, k)| i == *k) {
         return false;
     }
@@ -4722,6 +4801,34 @@ fn reorder_line(line: &mut [TextRun]) -> bool {
         run.x = x;
     }
     true
+}
+
+/// L2's order of a line's runs, each one unit at its level in `levels`,
+/// with the gap before each ([`TextRun::bidi_gap`], one per run) standing
+/// between it and the run before it as a unit of its own that is drawn
+/// nowhere.
+///
+/// Every character of a gap lies between the same two runs, so the gap's
+/// lowest level is all L2 needs of it: at each level at or below that one
+/// the gap is inside the stretch L2 reverses and joins its neighbours, and
+/// at each level above it the gap ends the stretch on one side and starts
+/// it on the other. A gap at the line's start would order nothing and is
+/// not one.
+fn order_with_gaps(levels: &[Level], gaps: &[Option<Level>]) -> Vec<usize> {
+    let mut units: Vec<Level> = Vec::with_capacity(levels.len() * 2);
+    let mut runs: Vec<Option<usize>> = Vec::with_capacity(levels.len() * 2);
+    for (at, level) in levels.iter().enumerate() {
+        if let Some(gap) = gaps.get(at).copied().flatten().filter(|_| at > 0) {
+            units.push(gap);
+            runs.push(None);
+        }
+        units.push(*level);
+        runs.push(Some(at));
+    }
+    reorder(&units)
+        .into_iter()
+        .filter_map(|unit| runs.get(unit).copied().flatten())
+        .collect()
 }
 
 /// One embedded face's stretch: shaped, ordered, positioned, and drawn as text

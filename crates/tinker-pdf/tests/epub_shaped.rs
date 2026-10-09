@@ -2041,6 +2041,79 @@ fn an_isolate_or_an_embedding_reorders_its_content_and_direction_alone_does_not(
     }
 }
 
+/// **An isolate is kept apart from the text beside it, and an embedding is
+/// not** (UAX #9 X9 and L2; review of lane 8C).
+///
+/// X9 removes an embedding's `LRE` and `PDF` but keeps an isolate's `LRI`,
+/// `RLI`, `FSI` and `PDI`, and L2 reverses those with the rest of the line
+/// at the level N1 or N2 gave them. In `<span dir="ltr">ab</span>بحم`, a
+/// left-to-right paragraph, `ab` is at level 2 inside its `LRI`, the
+/// Arabic word at 1, and the `PDI` between them a neutral between the
+/// isolate and `R`, which N2 puts at the paragraph's level, 0. L2 reverses
+/// `ab` alone at level 2 and the word alone at 1, the `PDI` between them,
+/// so the line is drawn `ab` then the word, `م` first. The same box as an
+/// embedding has no `PDI` left to stand between them, and at level 1 L2
+/// reverses `ab` and the word together: the word first, `ab` after it.
+///
+/// Right to left, `<span dir="rtl">بحم</span>ab` puts the word at 3 inside
+/// its `RLI`, `ab` at 2 by I2, and the `PDI` at 1; L2 reverses the two
+/// apart at 2 and the whole line at 1, so `ab` is drawn on the left and the
+/// word, logically first, on the right. The painter ordered a line's runs
+/// by their own levels alone, as though no `PDI` stood between them, and
+/// drew the isolate and its neighbour reversed together in both.
+#[test]
+fn an_isolate_is_kept_apart_from_the_text_beside_it_and_an_embedding_is_not() {
+    let word = "\u{628}\u{62D}\u{645}";
+    let isolate = drawn_line("", &format!("<span dir=\"ltr\">ab</span>{word}"));
+    let ab_first = [
+        ("a", LEFT),
+        ("b", LEFT + GLYPH),
+        ("\u{645}", LEFT + 2.0 * GLYPH),
+        ("\u{62D}", LEFT + 3.0 * GLYPH),
+        ("\u{628}", LEFT + 4.0 * GLYPH),
+    ];
+    assert!(at(&isolate, &ab_first), "the isolate drew {isolate:?}");
+    let auto = drawn_line("", &format!("<bdi>ab</bdi>{word}"));
+    assert!(at(&auto, &ab_first), "the `<bdi>` drew {auto:?}");
+
+    let embedding = drawn_line(
+        "",
+        &format!("<span style=\"unicode-bidi: embed; direction: ltr\">ab</span>{word}"),
+    );
+    assert!(
+        at(
+            &embedding,
+            &[
+                ("\u{645}", LEFT),
+                ("\u{62D}", LEFT + GLYPH),
+                ("\u{628}", LEFT + 2.0 * GLYPH),
+                ("a", LEFT + 3.0 * GLYPH),
+                ("b", LEFT + 4.0 * GLYPH),
+            ]
+        ),
+        "the embedding drew {embedding:?}"
+    );
+
+    let rtl = drawn_line(
+        " dir=\"rtl\"",
+        &format!("<span dir=\"rtl\">{word}</span>ab"),
+    );
+    let start = RIGHT - 5.0 * GLYPH;
+    assert!(
+        at(
+            &rtl,
+            &[
+                ("a", start),
+                ("b", start + GLYPH),
+                ("\u{645}", start + 2.0 * GLYPH),
+                ("\u{62D}", start + 3.0 * GLYPH),
+                ("\u{628}", start + 4.0 * GLYPH),
+            ]
+        ),
+        "the right-to-left isolate drew {rtl:?}"
+    );
+}
+
 /// **`text-align: start` and `end` are the paragraph's sides, not the
 /// page's** (`css-text-3` §7.1).
 ///

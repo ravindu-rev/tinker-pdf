@@ -662,6 +662,18 @@ pub struct TextRun {
     /// paragraph — has no strong character to say which way it reads, and
     /// its level is the only thing that does.
     pub bidi_level: Option<u8>,
+    /// The lowest level UAX #9 gives the isolate formatting characters —
+    /// `LRI`, `RLI`, `FSI` and `PDI`, which [`Embedding`]s stand for —
+    /// between this run and the one before it on its line, once the caller
+    /// that orders the line has resolved it; `None` where no such character
+    /// stands between them, and as this crate makes it.
+    ///
+    /// X9 keeps those characters, so L2 reverses them with the text, and one
+    /// at a level below both its neighbours keeps them apart: in `<span
+    /// dir="ltr">ab</span>بحم` the `PDI` at level 0 stops the level-1 word
+    /// taking the level-2 `ab` with it when L2 reverses it. A run's own
+    /// level cannot say that, and the characters are in no run.
+    pub bidi_gap: Option<u8>,
     /// Whether the line breaks at a soft hyphen at this run's end, so a
     /// hyphen is drawn there (`css-text-3` §5.4, `hyphens: manual`).
     ///

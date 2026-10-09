@@ -210,7 +210,12 @@ levels §2.4.2 maps them to — one stack shared by every run set under the same
 boxes, no deeper than UAX #9's own 125
 (`tinker_pdf_layout::limits::MAX_EMBEDDING_DEPTH`) — and written as
 formatting characters only into the text the painter resolves, never into the
-page's; and a block's `plaintext`
+page's, where an isolate's `LRI`, `RLI`, `FSI` and `PDI`, which X9 keeps
+and an embedding's do not have, are ordered by L2 at their own levels
+between the runs either side (`TextRun::bidi_gap`), so an isolate is not
+reversed together with the text beside it as an embedding is
+(`an_isolate_is_kept_apart_from_the_text_beside_it_and_an_embedding_is_not`);
+and a block's `plaintext`
 gives each paragraph its own first strong direction — a paragraph separator
 starts one, which is a forced break of bidi type B (a preserved newline, a
 `<br>`, CR, NEL or U+2029), and a U+2028 line separator, a forced break that is not,
