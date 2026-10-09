@@ -71,6 +71,21 @@ impl Vertical {
     }
 }
 
+/// What UAX #9's rule P2 found first in some text: [`Metrics::first_strong`]'s
+/// answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirstStrong {
+    /// A strong left-to-right character (`Bidi_Class` `L`).
+    Left,
+    /// A strong right-to-left character (`R` or `AL`).
+    Right,
+    /// A paragraph separator (`B`) before any strong character: the
+    /// paragraph ended with none, and P3 makes it left to right.
+    Separator,
+    /// None of the three before the text ran out.
+    Neither,
+}
+
 /// One glyph, positioned, in points.
 ///
 /// The projection of `tinker_pdf_shape::ShapedGlyph` into this crate's units
@@ -243,6 +258,23 @@ pub trait Metrics {
     /// cheaply than a character at a time.
     fn measure(&self, text: &str, font: &FontRequest<'_>) -> f64 {
         text.chars().map(|ch| self.advance(ch, font)).sum()
+    }
+
+    /// What UAX #9's rule P2 finds first in `text`, skipping what the text's
+    /// own isolate initiators enclose.
+    ///
+    /// Asked for a block container whose `unicode-bidi` is `plaintext`
+    /// (`css-writing-modes-3` §2.2), whose paragraphs take their direction
+    /// from their text — and with it the side `start` aligns to
+    /// (`css-text-3` §7.1). It is asked a box's text at a time, so an inline
+    /// box's own isolate is skipped by the caller rather than found here.
+    /// This crate has no `Bidi_Class` table and is not the place for one, so
+    /// a provider that has UAX #9 answers; `None` — the default — is a
+    /// provider that cannot, and the paragraph is then aligned by
+    /// `direction` and resolved by whoever orders its lines.
+    fn first_strong(&self, text: &str) -> Option<FirstStrong> {
+        let _ = text;
+        None
     }
 
     /// The [`Shaper`] this provider is, if it is one.

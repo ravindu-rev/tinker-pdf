@@ -38,12 +38,12 @@ use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BackgroundPosition, BackgroundRepeat, BackgroundSize,
     BorderCollapse, BorderSpacing, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
-    ColumnSpan, ColumnWidth, Display, FeatureSetting, FlexDirection, FlexWrap, Float, FontFamily,
-    FontKerning, FontStyle, FontVariant, Gap, ImageRef, Inset, JustifyContent, LengthPercentage,
-    LineHeight, ListStylePosition, ListStyleType, MarginValue, MaxSize, MinSize, OutlineStyle,
-    Overflow, OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Shadow, Side, Sides,
-    Size, Spacing, TableLayout, TextAlign, TextDecoration, TextTransform, VerticalAlign,
-    Visibility, WhiteSpace, ZIndex,
+    ColumnSpan, ColumnWidth, Direction, Display, FeatureSetting, FlexDirection, FlexWrap, Float,
+    FontFamily, FontKerning, FontStyle, FontVariant, Gap, ImageRef, Inset, JustifyContent,
+    LengthPercentage, LineHeight, ListStylePosition, ListStyleType, MarginValue, MaxSize, MinSize,
+    OutlineStyle, Overflow, OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Shadow,
+    Side, Sides, Size, Spacing, TableLayout, TextAlign, TextDecoration, TextTransform, UnicodeBidi,
+    VerticalAlign, Visibility, WhiteSpace, ZIndex,
 };
 
 use crate::metrics::FontRequest;
@@ -76,6 +76,13 @@ pub struct Consumed {
     pub font_kerning: FontKerning,
     /// `font-feature-settings`, for the shaper; empty for `normal`.
     pub font_features: Vec<FeatureSetting>,
+    /// `direction`: a block container's paragraphs' base direction, which
+    /// side `start` aligns to and where an outside marker stands; an inline
+    /// box's embedding direction.
+    pub direction: Direction,
+    /// `unicode-bidi`: an inline box's embedding, or a block container's
+    /// `plaintext`.
+    pub unicode_bidi: UnicodeBidi,
     /// `color`.
     pub color: Color,
     /// `text-decoration`.
@@ -315,6 +322,11 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         // measured with them, and drawn with them, by one shaper.
         font_kerning,
         font_feature_settings,
+        // `css-writing-modes-3` §2: a block container's base direction and an
+        // inline box's embedding, carried to the runs for the painter's
+        // UAX #9, and `start` and `end` resolved against the first here.
+        direction,
+        unicode_bidi,
         display,
         float,
         clear,
@@ -428,6 +440,8 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         font_variant: *font_variant,
         font_kerning: *font_kerning,
         font_features: font_feature_settings.clone(),
+        direction: *direction,
+        unicode_bidi: *unicode_bidi,
         color: *color,
         text_decoration: *text_decoration,
         line_height,

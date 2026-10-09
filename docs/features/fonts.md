@@ -642,6 +642,23 @@ Landed so far:
   `epub_shaped.rs` holds the positions against the face's `hmtx` and UAX #9's
   levels worked out by hand.
 
+  **The paragraph's level is the block's `direction`, and an inline box's
+  `unicode-bidi` opens one** (`css-writing-modes-3` §2, October 2026's eighth
+  wave). Every line had been resolved by its own P2 and P3, so a
+  left-to-right paragraph whose line began with an Arabic word was laid out
+  right to left. A run carries its paragraph's direction and the embeddings
+  its inline ancestors open (`TextRun::paragraph_rtl`, `TextRun::embeddings`),
+  and the line is resolved with those as `LRE`/`RLE`/`LRI`/`RLI`/`FSI` …
+  `PDF`/`PDI` written into the text UAX #9 reads and nowhere else, two
+  sibling boxes' isolates told apart by the box that opened each. A cut piece
+  remembers its level (`TextRun::bidi_level`) and is drawn and shaped in
+  that level's direction: a run of neutrals has no strong character to say
+  which way it reads, and read by its own text the space and `!` ending a
+  right-to-left paragraph were drawn ` !`. A `plaintext` block's paragraphs
+  ask the metrics provider for their first strong character
+  (`Metrics::first_strong`), which `BookMetrics` answers from the vendored
+  `Bidi_Class`.
+
 - **A book's feature settings reach the shaper** (October 2026's eighth
   wave). `tinker_pdf_shape::Shaper::with_settings` switches features on or
   off **over** the plan a run gets, where `with_features` replaces it: a

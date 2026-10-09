@@ -2339,6 +2339,57 @@ fn color_scheme_reads_the_light_scheme_and_refuses_a_dark_only_one_by_value() {
     }
 }
 
+/// **`direction` at its two keywords, `unicode-bidi` at the four this build
+/// honours, and the two overrides refused by value** (`css-writing-modes-3`
+/// §2.1, §2.2) — with `text-align`'s `start` and `end` kept as written,
+/// because which side they are is the block's `direction`, decided where the
+/// line is set (`css-text-3` §7.1).
+#[test]
+fn direction_and_unicode_bidi_read_their_keywords_and_refuse_the_overrides() {
+    use crate::property::{Direction, TextAlign, UnicodeBidi};
+    for (value, expected) in [("ltr", Direction::Ltr), ("RTL", Direction::Rtl)] {
+        assert_eq!(
+            known(&format!("p {{ direction: {value} }}")),
+            vec![Property::Direction(expected)],
+            "direction: {value}"
+        );
+    }
+    for (value, expected) in [
+        ("normal", UnicodeBidi::Normal),
+        ("embed", UnicodeBidi::Embed),
+        ("isolate", UnicodeBidi::Isolate),
+        ("Plaintext", UnicodeBidi::Plaintext),
+    ] {
+        assert_eq!(
+            known(&format!("p {{ unicode-bidi: {value} }}")),
+            vec![Property::UnicodeBidi(expected)],
+            "unicode-bidi: {value}"
+        );
+    }
+    for value in ["bidi-override", "isolate-override"] {
+        assert_eq!(
+            declarations(&format!("bdo {{ unicode-bidi: {value} }}"))[0].declaration,
+            Declaration::Unsupported {
+                property: "unicode-bidi",
+                value: value.to_owned(),
+            },
+            "unicode-bidi: {value}"
+        );
+    }
+    for (value, expected) in [
+        ("start", TextAlign::Start),
+        ("end", TextAlign::End),
+        ("left", TextAlign::Left),
+        ("right", TextAlign::Right),
+    ] {
+        assert_eq!(
+            known(&format!("p {{ text-align: {value} }}")),
+            vec![Property::TextAlign(expected)],
+            "text-align: {value}"
+        );
+    }
+}
+
 /// **`font-kerning` at its three keywords** (`css-fonts-4` §6.4).
 #[test]
 fn font_kerning_reads_its_three_keywords() {

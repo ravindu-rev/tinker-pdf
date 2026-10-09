@@ -107,7 +107,7 @@
 
 mod epub_support;
 
-use epub_support::book::{faces_book, one_face_book};
+use epub_support::book::{faces_book, faces_book_with, one_face_book};
 use epub_support::typeface::{
     origin_of, shown_glyphs, text_objects, Face, Form, Joining, Kern, Ligature, Pair, Placement,
 };
@@ -1645,5 +1645,286 @@ fn font_feature_settings_switch_a_ligature_off_and_a_discretionary_one_on() {
             (at - x).abs() < 0.01,
             "`{style}`: `x` is {at} pt along, not {x}"
         );
+    }
+}
+
+// ---- direction and unicode-bidi -------------------------------------------------
+
+/// The bidi fixture: Latin `a`, `b` and `!`, the three Arabic letters, and the
+/// space, every glyph 500 units of a 1000-unit em — 9 pt at the 24 px every
+/// book here is set at — and joining under `arab`.
+fn bidi_face() -> Face {
+    Face::new("Fixture Bidi", " !ab\u{628}\u{62D}\u{645}")
+        .with_joining(Joining { script: *b"arab" })
+}
+
+/// Each line's glyphs, top line first, each line's from the left, with the
+/// left edge of each in points from the page's left edge.
+fn drawn_lines(attributes: &str, body: &str) -> Vec<Vec<(String, f64)>> {
+    let program = bidi_face().build();
+    let book = faces_book_with(&[("Fixture Bidi", &program)], 24, attributes, body);
+    let doc = Document::open(book).expect("a book");
+    let page = doc.page(0).expect("a page");
+    let text = page.text_with(&TextOptions {
+        content_order: true,
+    });
+    let mut lines: Vec<(f64, Vec<(String, f64)>)> = Vec::new();
+    for c in text
+        .lines()
+        .iter()
+        .flat_map(|line| line.chars.iter())
+        .filter(|c| !c.text.trim().is_empty())
+    {
+        let (left, bottom, _, _) = c.quad.bounds();
+        match lines.iter_mut().find(|(y, _)| (y - bottom).abs() < 1.0) {
+            Some((_, glyphs)) => glyphs.push((c.text.clone(), left)),
+            None => lines.push((bottom, vec![(c.text.clone(), left)])),
+        }
+    }
+    lines.sort_by(|a, b| b.0.total_cmp(&a.0));
+    lines
+        .into_iter()
+        .map(|(_, mut glyphs)| {
+            glyphs.sort_by(|a, b| a.1.total_cmp(&b.1));
+            glyphs
+        })
+        .collect()
+}
+
+/// The page's one line, as [`drawn_lines`] reads it.
+fn drawn_line(attributes: &str, body: &str) -> Vec<(String, f64)> {
+    let lines = drawn_lines(attributes, body);
+    assert_eq!(lines.len(), 1, "not one line: {lines:?}");
+    lines.into_iter().next().unwrap_or_default()
+}
+
+/// The content box's left and right edges on the default page: 432 pt wide,
+/// with a 36 pt page margin either side and the fixture's `body { margin: 0
+/// }`.
+const LEFT: f64 = 36.0;
+const RIGHT: f64 = 396.0;
+
+/// One glyph's advance, in points.
+const GLYPH: f64 = 9.0;
+
+/// **A paragraph's direction is its block's, and it decides both where the
+/// line starts and how the line is ordered** (`css-writing-modes-3` §2.1,
+/// `css-text-3` §7.1).
+///
+/// `ab !` is laid out at the content box's left edge when nothing is said:
+/// `a`, `b`, a space, `!`, nine points apart. Under `dir="rtl"` the same four
+/// characters are worked out from UAX #9 with the paragraph at level 1, not
+/// read back: `a` and `b` are `L`, raised to 2 by I2; the space and `!` lie
+/// between `b` and the paragraph's end, whose `eos` is `R`, so N2 gives them
+/// the embedding level, 1. L2 reverses the level-2 pair and then the whole
+/// line: `!`, space, `a`, `b`. And `start`, the initial `text-align`, is the
+/// right edge now, so the line's 36 pt end at the content box's right edge.
+///
+/// Before `direction` was read the second page drew the first page's line.
+#[test]
+fn a_right_to_left_paragraph_starts_at_the_right_and_is_ordered_at_level_one() {
+    let ltr = drawn_line("", "ab !");
+    assert!(
+        at(
+            &ltr,
+            &[("a", LEFT), ("b", LEFT + GLYPH), ("!", LEFT + 3.0 * GLYPH)]
+        ),
+        "the left-to-right line moved: {ltr:?}"
+    );
+    let rtl = drawn_line(" dir=\"rtl\"", "ab !");
+    let start = RIGHT - 4.0 * GLYPH;
+    assert!(
+        at(
+            &rtl,
+            &[
+                ("!", start),
+                ("a", start + 2.0 * GLYPH),
+                ("b", start + 3.0 * GLYPH)
+            ]
+        ),
+        "the right-to-left line is not `! ab` against the right edge: {rtl:?}"
+    );
+}
+
+/// **A left-to-right paragraph that begins with an Arabic word stays left to
+/// right**, and the same text in a right-to-left one does not.
+///
+/// `بحم ab`: the paragraph used to be each line's own P2 and P3, which find
+/// `ب` first and make the line right to left whatever the block said. At
+/// level 0 the three letters are an `AL` run raised to 1, the space between
+/// `م` and `a` takes the embedding level, 0, by N2, and L2 reverses only the
+/// word: `م`, `ح`, `ب`, space, `a`, `b` from the left edge. At level 1 `ab`
+/// is raised to 2 and the space between `م` and `a` is 1, so L2 draws `a`,
+/// `b`, space, `م`, `ح`, `ب`, ending at the right edge.
+#[test]
+fn the_block_and_not_the_first_letter_decides_a_paragraphs_direction() {
+    let word = "\u{628}\u{62D}\u{645} ab";
+    let ltr = drawn_line("", word);
+    assert!(
+        at(
+            &ltr,
+            &[
+                ("\u{645}", LEFT),
+                ("\u{62D}", LEFT + GLYPH),
+                ("\u{628}", LEFT + 2.0 * GLYPH),
+                ("a", LEFT + 4.0 * GLYPH),
+                ("b", LEFT + 5.0 * GLYPH),
+            ]
+        ),
+        "a left-to-right paragraph was laid out by its first letter: {ltr:?}"
+    );
+    let start = RIGHT - 6.0 * GLYPH;
+    let rtl = drawn_line(" dir=\"rtl\"", word);
+    assert!(
+        at(
+            &rtl,
+            &[
+                ("a", start),
+                ("b", start + GLYPH),
+                ("\u{645}", start + 3.0 * GLYPH),
+                ("\u{62D}", start + 4.0 * GLYPH),
+                ("\u{628}", start + 5.0 * GLYPH),
+            ]
+        ),
+        "the right-to-left paragraph is not `ab محب` against the right edge: {rtl:?}"
+    );
+}
+
+/// **`dir="auto"` is `unicode-bidi: plaintext`: each paragraph takes its
+/// direction from its own first strong character, and its start side with
+/// it** (`css-writing-modes-3` §2.2).
+///
+/// Under `white-space: pre` the newline is a forced break, and a forced
+/// break ends a bidi paragraph (§2.4.1), so the two lines here are two
+/// paragraphs: the first finds `ب` and is the right-to-left line of
+/// [`the_block_and_not_the_first_letter_decides_a_paragraphs_direction`],
+/// against the right edge; the second finds `a`, so it is left to right and
+/// starts at the left edge, its Arabic word reversed alone.
+#[test]
+fn plaintext_gives_each_paragraph_its_own_first_strong_direction() {
+    let lines = drawn_lines(
+        " dir=\"auto\" style=\"white-space: pre\"",
+        "\u{628}\u{62D}\u{645} ab\nab \u{628}\u{62D}\u{645}",
+    );
+    assert_eq!(lines.len(), 2, "not two lines: {lines:?}");
+    let start = RIGHT - 6.0 * GLYPH;
+    assert!(
+        at(
+            &lines[0],
+            &[
+                ("a", start),
+                ("b", start + GLYPH),
+                ("\u{645}", start + 3.0 * GLYPH),
+                ("\u{62D}", start + 4.0 * GLYPH),
+                ("\u{628}", start + 5.0 * GLYPH),
+            ]
+        ),
+        "the first paragraph is not right to left: {lines:?}"
+    );
+    assert!(
+        at(
+            &lines[1],
+            &[
+                ("a", LEFT),
+                ("b", LEFT + GLYPH),
+                ("\u{645}", LEFT + 3.0 * GLYPH),
+                ("\u{62D}", LEFT + 4.0 * GLYPH),
+                ("\u{628}", LEFT + 5.0 * GLYPH),
+            ]
+        ),
+        "the second paragraph is not left to right: {lines:?}"
+    );
+}
+
+/// **An inline box's `unicode-bidi` opens a level round its content, and
+/// `direction` alone does not** (`css-writing-modes-3` §2.2, §2.4.2).
+///
+/// `a b! a` with `b!` in a box. A box that only says `direction: rtl` opens
+/// nothing — its text is the paragraph's, all at level 0 — so the line is
+/// drawn as written. A box with `dir="rtl"` is an isolate (`RLI` … `PDI`),
+/// and one with `unicode-bidi: embed; direction: rtl` an embedding (`RLE` …
+/// `PDF`); in both `b!` is at level 1, `b` raised to 2 by I2, and `!` — between
+/// `b` and the level run's end, whose `eos` is `R` — at 1 by N2. L2 then
+/// draws `!` before `b`, in the slot `b` had: `a`, space, `!`, `b`, space,
+/// `a`.
+#[test]
+fn an_isolate_or_an_embedding_reorders_its_content_and_direction_alone_does_not() {
+    let written = [
+        ("a", LEFT),
+        ("b", LEFT + 2.0 * GLYPH),
+        ("!", LEFT + 3.0 * GLYPH),
+        ("a", LEFT + 5.0 * GLYPH),
+    ];
+    let turned = [
+        ("a", LEFT),
+        ("!", LEFT + 2.0 * GLYPH),
+        ("b", LEFT + 3.0 * GLYPH),
+        ("a", LEFT + 5.0 * GLYPH),
+    ];
+    for (open, close, expected) in [
+        ("<span style=\"direction: rtl\">", "</span>", &written),
+        ("<span dir=\"rtl\">", "</span>", &turned),
+        (
+            "<span style=\"unicode-bidi: embed; direction: rtl\">",
+            "</span>",
+            &turned,
+        ),
+        ("<bdi dir=\"rtl\">", "</bdi>", &turned),
+    ] {
+        let line = drawn_line("", &format!("a {open}b!{close} a"));
+        assert!(at(&line, expected), "`{open}` drew {line:?}");
+    }
+}
+
+/// **`text-align: start` and `end` are the paragraph's sides, not the
+/// page's** (`css-text-3` §7.1).
+///
+/// `end` in a left-to-right paragraph is the right edge and in a
+/// right-to-left one the left; `left` and `right` stay where they are
+/// whatever the direction. The right-to-left line is `! ab`, as in
+/// [`a_right_to_left_paragraph_starts_at_the_right_and_is_ordered_at_level_one`].
+#[test]
+fn start_and_end_are_the_paragraphs_sides() {
+    let flush_right = RIGHT - 4.0 * GLYPH;
+    for (attributes, expected) in [
+        (
+            " style=\"text-align: end\"",
+            [
+                ("a", flush_right),
+                ("b", flush_right + GLYPH),
+                ("!", flush_right + 3.0 * GLYPH),
+            ],
+        ),
+        (
+            " style=\"text-align: start\"",
+            [("a", LEFT), ("b", LEFT + GLYPH), ("!", LEFT + 3.0 * GLYPH)],
+        ),
+        (
+            " dir=\"rtl\" style=\"text-align: end\"",
+            [
+                ("!", LEFT),
+                ("a", LEFT + 2.0 * GLYPH),
+                ("b", LEFT + 3.0 * GLYPH),
+            ],
+        ),
+        (
+            " dir=\"rtl\" style=\"text-align: left\"",
+            [
+                ("!", LEFT),
+                ("a", LEFT + 2.0 * GLYPH),
+                ("b", LEFT + 3.0 * GLYPH),
+            ],
+        ),
+        (
+            " dir=\"rtl\" style=\"text-align: right\"",
+            [
+                ("!", flush_right),
+                ("a", flush_right + 2.0 * GLYPH),
+                ("b", flush_right + 3.0 * GLYPH),
+            ],
+        ),
+    ] {
+        let line = drawn_line(attributes, "ab !");
+        assert!(at(&line, &expected), "`{attributes}` drew {line:?}");
     }
 }

@@ -217,12 +217,12 @@ a picture reaching paper in this area is measured in pixels.
 | 3 | **`list-style-*`, `counter-reset`, `counter-increment`, `counters()`** | A scoped counter tree; `content: counter()` generates the marker's text; an ordered list numbers from its own `start`; `quotes` and the four quote keywords with it | M. **Counters and quotes done, 3 October 2026** (`tinker_pdf_css::counter`); `list-style-image`, `reversed()` and `quotes: auto`'s per-language marks left |
 | 4 | **`transform` and `opacity`** | A `cm` composed at paint from the transform list; group opacity as an `/ExtGState`; the two names leave `UNSUPPORTED_PROPERTIES` | M. **`opacity` done, 3 October 2026**, per fragment; the group over overlapping content is owed to the structure writer. **`transform` done the same day**, two-dimensional, with `transform-origin`; the 3D functions are refused by value |
 | 5 | **`overflow`, `clip-path`, `border-radius`, `box-shadow`, `text-shadow`** | Each a clip or an ink the painter writes; the geometry asserted arithmetically, never against a recorded bitmap | L. **`border-radius` (and `outline`) done, 3 October 2026; `overflow` done the same day**, as a clip to the padding box written only where content reaches past it, scroll containers as formatting contexts of their own, and the content past a block-axis clip taken out of the column as hidden text; **`box-shadow` and `text-shadow` done the same day**, without blur, which is still counted |
-| 6 | **`writing-mode`, `direction`, `unicode-bidi` below the run** | Bidi whose unit is the visual line rather than the `TextRun`; a right-to-left line of two styled spans is one reordered line; the reading-order pin in `epub_shaped.rs` flipped to an assertion | L |
+| 6 | **`writing-mode`, `direction`, `unicode-bidi` below the run** | Bidi whose unit is the visual line rather than the `TextRun`; a right-to-left line of two styled spans is one reordered line; the reading-order pin in `epub_shaped.rs` flipped to an assertion | L. **`direction` and `unicode-bidi` done, October 2026's eighth wave**: the paragraph's level, `start`/`end`, the marker's side, inline embeddings and isolates, and `plaintext` per paragraph, positions asserted in `epub_shaped.rs`; the overrides are refused by value, and a right-to-left table, flex row, column set or over-constrained block is counted. `writing-mode` left |
 | 7 | **`DocumentBuilder::from_html`** | The cascade, the layout engine and the painter reachable without an OCF container; held by the EPUB reftests, so the two callers cannot drift | M |
 
 Milestones 2 to 6 are scheduled by the fetched corpus's `UnimplementedProperty`
-counts, highest first — ruling 3, and not by interest. Forty names are
-known and unimplemented against the 135 in `IMPLEMENTED_NAMES`; each landing deletes
+counts, highest first — ruling 3, and not by interest. Thirty-eight names are
+known and unimplemented against the 137 in `IMPLEMENTED_NAMES`; each landing deletes
 its names from that table.
 
 ## Risks

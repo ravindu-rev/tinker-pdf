@@ -60,10 +60,10 @@ use libfuzzer_sys::fuzz_target;
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    BorderStyle, BoxSizing, Clear, Display, Float, LengthPercentage, LineBreakStrictness,
+    BorderStyle, BoxSizing, Clear, Direction, Display, Float, LengthPercentage, LineBreakStrictness,
     LineHeight, ListStyleType, MarginValue, Overflow, OverflowWrap, PageBreak, PageBreakInside,
     Sides, Size,
-    TextAlign, TextTransform, Visibility, WhiteSpace, WordBreak,
+    TextAlign, TextTransform, UnicodeBidi, Visibility, WhiteSpace, WordBreak,
 };
 use tinker_pdf_layout::metrics::FixedPitch;
 use tinker_pdf_layout::uax14::{opportunities, Tailoring};
@@ -165,11 +165,27 @@ fn style(bytes: &mut Bytes<'_>, block: bool) -> ComputedStyle {
         1 => LineHeight::Number(1.0 + f64::from(c & 3)),
         _ => LineHeight::Px(f64::from(c & 63)),
     };
-    style.text_align = match c >> 6 {
-        0 => TextAlign::Left,
-        1 => TextAlign::Right,
-        2 => TextAlign::Center,
+    style.text_align = match (c >> 6, d & 1) {
+        (0, 0) => TextAlign::Left,
+        (0, _) => TextAlign::Start,
+        (1, 0) => TextAlign::Right,
+        (1, _) => TextAlign::End,
+        (2, _) => TextAlign::Center,
         _ => TextAlign::Justify,
+    };
+    // `direction` moves where a line starts and which side a marker stands
+    // on, and `unicode-bidi` makes an inline box an embedding every piece
+    // inside it carries: a stack the generator's nesting deepens.
+    style.direction = if (a ^ b) & 1 != 0 {
+        Direction::Rtl
+    } else {
+        Direction::Ltr
+    };
+    style.unicode_bidi = match (b ^ c) & 3 {
+        0 => UnicodeBidi::Normal,
+        1 => UnicodeBidi::Embed,
+        2 => UnicodeBidi::Isolate,
+        _ => UnicodeBidi::Plaintext,
     };
     style.text_indent = LengthPercentage::Px(f64::from(d as i8));
     style.white_space = match (b >> 3) & 7 {

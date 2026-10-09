@@ -24,9 +24,9 @@
 use super::{sheet, tree, Node};
 use crate::cascade::{cascade, cascade_from, rank, resolve_lazily, ComputedStyle, Origin};
 use crate::property::{
-    Color, ColumnCount, Display, Float, FontStyle, Gap, Inset, LengthPercentage, LineHeight,
-    MarginValue, MaxSize, MinSize, Position, Side, Size, Spacing, TextAlign, VerticalAlign,
-    Visibility, ZIndex,
+    Color, ColumnCount, Direction, Display, Float, FontStyle, Gap, Inset, LengthPercentage,
+    LineHeight, MarginValue, MaxSize, MinSize, Position, Side, Size, Spacing, TextAlign,
+    UnicodeBidi, VerticalAlign, Visibility, ZIndex,
 };
 use crate::{Budget, Limits, Refusal, Stylesheet};
 
@@ -859,6 +859,42 @@ fn the_unsupported_census_counts_elements_reached() {
     let tree_styles = cascade(&[(Origin::Author, &parsed)], &nodes, &limits, &mut budget)
         .expect("under every cap");
     assert_eq!(tree_styles.report.unsupported, vec![("box-shadow", 3)]);
+}
+
+/// **`direction` inherits and `unicode-bidi` does not, and a right-to-left
+/// element this layout sets left to right is counted against `direction`**
+/// (`css-writing-modes-3` §2.1, §2.2).
+///
+/// An embedding is opened by the box that declares it, so the `span` inside
+/// the isolating `div` reads `normal` while it reads `rtl`. The table lays
+/// its columns from the left here and the `p` — a definite width, neither
+/// margin `auto` — gives up its right margin where CSS 2.2 §10.3.3 gives up
+/// its left: two elements. The `div` and the `span` are inline and lose
+/// nothing.
+#[test]
+fn direction_inherits_and_is_counted_where_layout_does_not_turn() {
+    let nodes = tree(&[
+        ("div", None),
+        ("table", Some(0)),
+        ("p", Some(0)),
+        ("span", Some(2)),
+    ]);
+    let parsed = sheet(
+        "div { direction: rtl; unicode-bidi: isolate } table { display: table } \
+         p { display: block; width: 10px }",
+    );
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let styled = cascade(&[(Origin::Author, &parsed)], &nodes, &limits, &mut budget)
+        .expect("under every cap");
+    assert_eq!(styled.styles[0].unicode_bidi, UnicodeBidi::Isolate);
+    assert_eq!(styled.styles[3].direction, Direction::Rtl, "inherited");
+    assert_eq!(
+        styled.styles[3].unicode_bidi,
+        UnicodeBidi::Normal,
+        "not inherited"
+    );
+    assert_eq!(styled.report.unsupported, vec![("direction", 2)]);
 }
 
 /// **A declaration an element carries itself is counted once for it**, as

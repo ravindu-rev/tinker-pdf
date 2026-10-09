@@ -1214,3 +1214,84 @@ fn a_feature_asked_of_a_face_this_build_does_not_shape_is_counted() {
     let none = open("p { font-kerning: none }", body);
     assert_eq!(counted(&none, "font-kerning"), None);
 }
+
+// ---- direction and unicode-bidi where this layout does not meet them -------------
+
+/// **What `direction` and `unicode-bidi` ask of a box this layout does not
+/// do is counted, by element, and what it does is not**
+/// (`css-writing-modes-3` §2.1, §2.2).
+///
+/// A right-to-left paragraph is met — its lines' level and the side they
+/// start from, which `epub_shaped.rs` asserts position by position — and
+/// counts nothing, nor does an isolate inside it. A right-to-left table lays
+/// its columns from the left here (CSS 2.2 §17.5), a flex row its items
+/// (`css-flexbox-1` §2) and a multi-column container its columns
+/// (`css-multicol-1` §3); an over-constrained right-to-left block — a
+/// definite `width`, neither margin `auto` — gives up its right margin where
+/// §10.3.3 gives up its left. Each such element is counted against
+/// `direction`, and one with a margin `auto` is not over-constrained. An
+/// override is drawn by nobody: `<bdo>`'s `isolate-override` and an
+/// author's `bidi-override` are refused by value and counted against
+/// `unicode-bidi`, per element they reached.
+#[test]
+fn direction_and_unicode_bidi_count_what_this_layout_does_not_do() {
+    let met = open(
+        "",
+        "<p dir=\"rtl\">Ink <span dir=\"ltr\">on</span> <bdi>paper</bdi>.</p>",
+    );
+    assert_eq!(counted(&met, "direction"), None, "{:?}", warnings(&met));
+    assert_eq!(counted(&met, "unicode-bidi"), None, "{:?}", warnings(&met));
+
+    for (style, body, name, elements) in [
+        (
+            "",
+            "<table dir=\"rtl\"><tr><td>a</td><td>b</td></tr></table>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\" style=\"display: flex\"><p>a</p><p>b</p></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\" style=\"column-count: 2\"><p>a</p></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\" style=\"width: 50%\"><p>a</p></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\" style=\"width: 50%; margin-left: auto\"><p>a</p></div>",
+            "direction",
+            None,
+        ),
+        (
+            "",
+            "<p>a <bdo dir=\"rtl\">bc</bdo> d</p>",
+            "unicode-bidi",
+            Some(1),
+        ),
+        (
+            "span { unicode-bidi: bidi-override; direction: rtl }",
+            "<p><span>a</span> <span>b</span></p>",
+            "unicode-bidi",
+            Some(2),
+        ),
+    ] {
+        let doc = open(style, body);
+        assert_eq!(
+            counted(&doc, name),
+            elements,
+            "`{body}` under `{style}`: {:?}",
+            warnings(&doc)
+        );
+    }
+}

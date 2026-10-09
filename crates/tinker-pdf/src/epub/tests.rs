@@ -1595,6 +1595,9 @@ fn an_unencodable_character_gets_one_stable_code() {
         variant: FontVariant::Normal,
         kerning: FontKerning::Auto,
         features: Vec::new(),
+        paragraph_rtl: Some(false),
+        embeddings: Vec::new(),
+        bidi_level: None,
         color: tinker_pdf_css::property::Color::BLACK,
         decoration: TextDecoration::None,
         painted: true,
@@ -1712,6 +1715,9 @@ fn characters_past_the_overflow_font_are_counted() {
         variant: FontVariant::Normal,
         kerning: FontKerning::Auto,
         features: Vec::new(),
+        paragraph_rtl: Some(false),
+        embeddings: Vec::new(),
+        bidi_level: None,
         color: Color::BLACK,
         decoration: TextDecoration::None,
         painted: true,
@@ -2025,6 +2031,45 @@ fn list_attributes_are_presentational_hints() {
     );
 }
 
+/// **HTML §15.3.5's `dir`, as presentational hints**: `ltr` and `rtl` set
+/// `direction` and isolate, `auto` and a bare `<bdi>` are `plaintext`, and
+/// `<bdo>` is the override this build refuses by value. The keyword is ASCII
+/// case-insensitive, a value that is none of the three is no `dir`, an
+/// element outside XHTML's namespace has none of HTML's hints, and a list's
+/// hint and its `dir` are one declaration block.
+#[test]
+fn dir_is_a_presentational_hint() {
+    use tinker_pdf_css::Element;
+    let tree = dom(
+        "<body><p dir=\"RTL\">a</p><p dir=\"ltr\">b</p><p dir=\"auto\">c</p>\
+         <p dir=\"sideways\">d</p><bdi>e</bdi><bdi dir=\"rtl\">f</bdi><bdo dir=\"rtl\">g</bdo>\
+         <bdo>h</bdo><ol dir=\"rtl\" start=\"3\"><li>i</li></ol>\
+         <x:p xmlns:x=\"urn:x\" dir=\"rtl\">j</x:p></body>",
+    );
+    let hints: Vec<Option<String>> = tree
+        .nodes
+        .iter()
+        .filter(|node| node.name != "body" && node.name != "li")
+        .map(|node| node.presentational_hints())
+        .collect();
+    let some = |text: &str| Some(text.to_owned());
+    assert_eq!(
+        hints,
+        [
+            some("direction: rtl; unicode-bidi: isolate"),
+            some("direction: ltr; unicode-bidi: isolate"),
+            some("unicode-bidi: plaintext"),
+            None,
+            some("unicode-bidi: plaintext"),
+            some("direction: rtl; unicode-bidi: isolate"),
+            some("direction: rtl; unicode-bidi: isolate-override"),
+            some("unicode-bidi: isolate-override"),
+            some("counter-reset: list-item 2; direction: rtl; unicode-bidi: isolate"),
+            None,
+        ]
+    );
+}
+
 /// `paint::draw_page` keeps the public signature it had before the book path's
 /// tagging moved to a crate-internal form (the review of the tagged-writing
 /// lane found the public function gone): given the element tree, it still
@@ -2060,6 +2105,9 @@ fn the_public_draw_page_still_tags_a_page_from_its_element_tree() {
         variant: FontVariant::Normal,
         kerning: FontKerning::Auto,
         features: Vec::new(),
+        paragraph_rtl: Some(false),
+        embeddings: Vec::new(),
+        bidi_level: None,
         color: tinker_pdf_css::property::Color::BLACK,
         decoration: TextDecoration::None,
         painted: true,

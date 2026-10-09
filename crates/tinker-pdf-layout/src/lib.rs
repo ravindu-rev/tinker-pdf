@@ -622,6 +622,27 @@ pub struct TextRun {
     pub kerning: FontKerning,
     /// `font-feature-settings`, likewise; empty for `normal`.
     pub features: Vec<FeatureSetting>,
+    /// The base direction of the paragraph this run is set in: its block
+    /// container's `direction` (`css-writing-modes-3` §2.1), or `None` where
+    /// the container's `unicode-bidi: plaintext` asks for UAX #9's P2 and P3.
+    ///
+    /// Carried rather than resolved, because this crate breaks lines over
+    /// logical text and resolves no levels: the caller that orders a line
+    /// needs the paragraph's direction to do it.
+    pub paragraph_rtl: Option<bool>,
+    /// The explicit embeddings and isolates this run's inline ancestors open
+    /// round it, outermost first (`unicode-bidi`, §2.2): what UAX #9's
+    /// formatting characters would say, kept beside the text rather than in
+    /// it, so that the characters a book wrote are the characters a run holds.
+    pub embeddings: Vec<Embedding>,
+    /// UAX #9's resolved level of every character of this run, once the
+    /// caller that orders its line has cut it to one level; `None` as this
+    /// crate makes it, since it resolves no levels.
+    ///
+    /// A run of neutrals — a space and a `!` at the end of a right-to-left
+    /// paragraph — has no strong character to say which way it reads, and
+    /// its level is the only thing that does.
+    pub bidi_level: Option<u8>,
     /// `color`.
     pub color: Color,
     /// `text-decoration`.
@@ -670,6 +691,33 @@ pub struct TextRun {
     /// it is holding; a caller that wants the order the words were written in
     /// has this.
     pub order: usize,
+}
+
+/// One explicit level an inline box opens round its content
+/// (`css-writing-modes-3` §2.2): the bidi formatting character its
+/// `unicode-bidi` and `direction` stand for, as §2.4.2 maps them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Embedding {
+    /// Which formatting character opens it.
+    pub kind: EmbeddingKind,
+    /// `direction: rtl` on the box. Unread for [`EmbeddingKind::FirstStrong`].
+    pub rtl: bool,
+    /// The [`BoxNode::anchor`] of the inline box that opened it: two sibling
+    /// spans each isolating their content are two isolates, not one, and the
+    /// difference is where a neutral between them goes.
+    pub anchor: Option<u32>,
+}
+
+/// Which bidi formatting character an [`Embedding`] stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmbeddingKind {
+    /// `unicode-bidi: embed` — `LRE` or `RLE`, closed by `PDF`.
+    Embed,
+    /// `unicode-bidi: isolate` — `LRI` or `RLI`, closed by `PDI`.
+    Isolate,
+    /// `unicode-bidi: plaintext` on an inline box — `FSI`, closed by `PDI`:
+    /// an isolate whose direction is its content's first strong character.
+    FirstStrong,
 }
 
 /// A whole book, paginated.

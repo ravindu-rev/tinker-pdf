@@ -157,7 +157,8 @@ impl CssElement for Node {
         self.style.as_deref()
     }
 
-    /// HTML §15.3.8's list numbering, as the presentational hints it states.
+    /// HTML §15.3.8's list numbering and §15.3.5's bidirectional text, as
+    /// the presentational hints they state.
     ///
     /// `<ol start="n">` is `counter-reset: list-item n−1` and `<li value="n">`
     /// is `counter-set: list-item n`, parsed by HTML's *rules for parsing
@@ -166,16 +167,26 @@ impl CssElement for Node {
     /// reversed(list-item)`, which this build refuses by value: the parser
     /// counts it against `counter-reset` on the element, rather than the list
     /// being numbered upwards with nothing to say so.
+    ///
+    /// The bidirectional half is [`bidi_hints`]'s.
     fn presentational_hints(&self) -> Option<String> {
-        match self.name.as_str() {
+        let list = match self.name.as_str() {
             "ol" if self.attr("reversed").is_some() => {
                 Some("counter-reset: reversed(list-item)".to_owned())
             }
-            "ol" => html_integer(self.attr("start")?)
+            "ol" => self
+                .attr("start")
+                .and_then(html_integer)
                 .map(|start| format!("counter-reset: list-item {}", start.saturating_sub(1))),
-            "li" => html_integer(self.attr("value")?)
+            "li" => self
+                .attr("value")
+                .and_then(html_integer)
                 .map(|value| format!("counter-set: list-item {value}")),
             _ => None,
+        };
+        match (list, bidi_hints(self)) {
+            (Some(list), Some(bidi)) => Some(format!("{list}; {bidi}")),
+            (list, bidi) => list.or_else(|| bidi.map(str::to_owned)),
         }
     }
 
@@ -364,6 +375,49 @@ pub enum MarkupDefect {
     /// kept, in the deepest element the cap allows, and their structure is
     /// not.
     TooDeep,
+}
+
+/// HTML §15.3.5's bidirectional rendering, as the declarations an element's
+/// `dir` attribute and its name make.
+///
+/// HTML writes these as user-agent rules keyed on `[dir]` and `:dir()`; they
+/// are hints here, at the start of the author sheet rather than in
+/// `ua.css`, because a rule keyed on an attribute alone is tried against
+/// every element of every book and a hint is asked of each element once —
+/// and an author rule beats both alike. The value is HTML's enumerated
+/// attribute, ASCII case-insensitive, and a value that is none of the three
+/// is no `dir` at all.
+///
+/// - `dir="ltr"` and `dir="rtl"` set `direction` and open an isolate, as
+///   §15.3.5's `[dir] { unicode-bidi: isolate }` does;
+/// - `dir="auto"`, and a `<bdi>` with no `dir`, are `unicode-bidi:
+///   plaintext`: the isolate whose direction is its content's first strong
+///   character (`css-writing-modes-3` §2.2) and, on a block, each
+///   paragraph's own P2 and P3. HTML computes a `direction` from the content
+///   instead and lets it inherit, which a descendant's own `direction`
+///   would read; here a descendant inherits the parent's;
+/// - `<bdo>` is `unicode-bidi: isolate-override`, which this build refuses
+///   by value, so each `<bdo>` is counted rather than read as honoured.
+fn bidi_hints(node: &Node) -> Option<&'static str> {
+    if !node.is_html() {
+        return None;
+    }
+    let dir = node.attr("dir").and_then(|value| {
+        ["ltr", "rtl", "auto"]
+            .into_iter()
+            .find(|keyword| value.eq_ignore_ascii_case(keyword))
+    });
+    let bdo = node.name == "bdo";
+    Some(match (dir, bdo) {
+        (Some("ltr"), true) => "direction: ltr; unicode-bidi: isolate-override",
+        (Some("rtl"), true) => "direction: rtl; unicode-bidi: isolate-override",
+        (_, true) => "unicode-bidi: isolate-override",
+        (Some("ltr"), false) => "direction: ltr; unicode-bidi: isolate",
+        (Some("rtl"), false) => "direction: rtl; unicode-bidi: isolate",
+        (Some(_), false) => "unicode-bidi: plaintext",
+        (None, false) if node.name == "bdi" => "unicode-bidi: plaintext",
+        (None, false) => return None,
+    })
 }
 
 /// EPUB 3.3 §8.2.2.6's viewport dimensions, in CSS pixels.

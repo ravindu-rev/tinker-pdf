@@ -48,6 +48,20 @@ pub fn one_face_book(family: &str, program: &[u8], size_px: u32, body: &str) -> 
 /// segments in two faces.
 #[must_use]
 pub fn faces_book(faces: &[(&str, &[u8])], size_px: u32, body: &str) -> Vec<u8> {
+    faces_book_with(faces, size_px, "", body)
+}
+
+/// [`faces_book`], with `attributes` written into the paragraph's start tag
+/// — ` dir="rtl"`, ` style="text-align: end"` — for the tests about what a
+/// paragraph's own attributes do to its lines. An empty `attributes` is
+/// [`faces_book`]'s bytes exactly.
+#[must_use]
+pub fn faces_book_with(
+    faces: &[(&str, &[u8])],
+    size_px: u32,
+    attributes: &str,
+    body: &str,
+) -> Vec<u8> {
     let mut items = String::new();
     let mut rules = String::new();
     let mut families: Vec<String> = Vec::with_capacity(faces.len());
@@ -85,11 +99,12 @@ pub fn faces_book(faces: &[(&str, &[u8])], size_px: u32, body: &str) -> Vec<u8> 
             r#"<style>{rules}"#,
             r#" body {{ margin: 0 }}"#,
             r#" p {{ margin: 0; font-family: {families}; font-size: {size}px; }}</style>"#,
-            r#"</head><body><p>{body}</p></body></html>"#
+            r#"</head><body><p{attributes}>{body}</p></body></html>"#
         ),
         rules = rules,
         families = families.join(", "),
         size = size_px,
+        attributes = attributes,
         body = body
     );
     let mut entries = vec![

@@ -889,7 +889,13 @@ pub enum SpecifiedSpacing {
     Length(Len),
 }
 
-/// `text-align`, at CSS 2.1's four values.
+/// `text-align`, at CSS 2.1's four values and `css-text-3`'s two logical
+/// ones.
+///
+/// `start` and `end` are kept as written rather than read as `left` and
+/// `right`: which side they are is the **block container's** `direction`
+/// (`css-text-3` §7.1), and that is known where the line is set, not where
+/// the declaration is parsed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextAlign {
     /// `left`
@@ -900,6 +906,44 @@ pub enum TextAlign {
     Center,
     /// `justify`
     Justify,
+    /// `start`, the initial value: `left` in a left-to-right block, `right`
+    /// in a right-to-left one.
+    Start,
+    /// `end`: the other side.
+    End,
+}
+
+/// `direction`, `css-writing-modes-3` §2.1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    /// `ltr`, the initial value.
+    Ltr,
+    /// `rtl`
+    Rtl,
+}
+
+/// `unicode-bidi`, `css-writing-modes-3` §2.2, at the four values this build
+/// honours.
+///
+/// `bidi-override` and `isolate-override` are refused by value: an override
+/// makes every character inside it strong in one direction, so a Latin word
+/// under `rtl` is drawn letter by letter backwards — a glyph order the
+/// painter's shaper never produces, since it shapes a slice in that slice's
+/// own direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnicodeBidi {
+    /// `normal`, the initial value: no embedding.
+    Normal,
+    /// `embed`: on an inline box, an embedding — `LRE` or `RLE` and `PDF`
+    /// round its content. No effect on a block container.
+    Embed,
+    /// `isolate`: on an inline box, an isolate — `LRI` or `RLI` and `PDI`. No
+    /// effect on a block container.
+    Isolate,
+    /// `plaintext`: on an inline box, `FSI` and `PDI`; on a block container,
+    /// each of its paragraphs takes its direction from UAX #9's P2 and P3
+    /// rather than from `direction`.
+    Plaintext,
 }
 
 /// `text-transform`, `css-text-3` §2.1, at the four values this build sets.
@@ -1581,6 +1625,10 @@ pub enum Property {
     ColorScheme(ColorScheme),
     /// `font-kerning`, `css-fonts-4` §6.4.
     FontKerning(FontKerning),
+    /// `direction`, `css-writing-modes-3` §2.1.
+    Direction(Direction),
+    /// `unicode-bidi`, §2.2.
+    UnicodeBidi(UnicodeBidi),
     /// `font-feature-settings`, §6.12, in the order written; empty for
     /// `normal`.
     FontFeatureSettings(Vec<FeatureSetting>),
@@ -1766,6 +1814,8 @@ impl Property {
             Property::TextTransform(_) => "text-transform",
             Property::ColorScheme(_) => "color-scheme",
             Property::FontKerning(_) => "font-kerning",
+            Property::Direction(_) => "direction",
+            Property::UnicodeBidi(_) => "unicode-bidi",
             Property::FontFeatureSettings(_) => "font-feature-settings",
             Property::WhiteSpace(_) => "white-space",
             Property::ListStyleType(_) => "list-style-type",
@@ -1909,6 +1959,9 @@ impl Property {
             // text in its `<em>`.
             | Property::FontKerning(_)
             | Property::FontFeatureSettings(_)
+            // `css-writing-modes-3` §2.1: *inherited: yes*. `unicode-bidi` is
+            // not (§2.2): an embedding is opened by the box that declares it.
+            | Property::Direction(_)
             | Property::WhiteSpace(_)
             | Property::ListStyleType(_)
             | Property::ListStylePosition(_)
@@ -1936,6 +1989,7 @@ impl Property {
             // its text's, through every `<em>` in it.
             | Property::TextShadow(_) => true,
             Property::TextDecoration(_)
+            | Property::UnicodeBidi(_)
             // `css-backgrounds-3` §7.1: *inherited: no*; a box's shadow is its
             // own box's.
             | Property::BoxShadow(_)
@@ -2179,7 +2233,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "clip",
     "clip-path",
     "cursor",
-    "direction",
     "empty-cells",
     "filter",
     "font",
@@ -2208,7 +2261,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "text-emphasis-style",
     "text-overflow",
     "transition",
-    "unicode-bidi",
     "unicode-range",
     "word-wrap",
     "writing-mode",
@@ -3137,6 +3189,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "counter-increment",
     "counter-reset",
     "counter-set",
+    "direction",
     "display",
     "flex",
     "flex-basis",
@@ -3205,6 +3258,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "top",
     "transform",
     "transform-origin",
+    "unicode-bidi",
     "vertical-align",
     "visibility",
     "white-space",
@@ -3458,8 +3512,10 @@ fn implemented(
         }),
         "text-align" => keyword(one, single, |word| {
             Some(Property::TextAlign(match word {
-                "left" | "start" => TextAlign::Left,
-                "right" | "end" => TextAlign::Right,
+                "left" => TextAlign::Left,
+                "right" => TextAlign::Right,
+                "start" => TextAlign::Start,
+                "end" => TextAlign::End,
                 "center" => TextAlign::Center,
                 "justify" => TextAlign::Justify,
                 _ => return None,
@@ -3624,6 +3680,24 @@ fn implemented(
             }))
         }),
         "font-feature-settings" => font_feature_settings(values, significant),
+        "direction" => keyword(one, single, |word| {
+            Some(Property::Direction(match word {
+                "ltr" => Direction::Ltr,
+                "rtl" => Direction::Rtl,
+                _ => return None,
+            }))
+        }),
+        // `bidi-override` and `isolate-override` are inside the grammar and
+        // refused by value; see [`UnicodeBidi`].
+        "unicode-bidi" => keyword(one, single, |word| {
+            Some(Property::UnicodeBidi(match word {
+                "normal" => UnicodeBidi::Normal,
+                "embed" => UnicodeBidi::Embed,
+                "isolate" => UnicodeBidi::Isolate,
+                "plaintext" => UnicodeBidi::Plaintext,
+                _ => return None,
+            }))
+        }),
         // `css-color-4` §15.1: `<alpha-value>`, a number or a percentage.
         "opacity" => match (single, one) {
             (true, Some(ComponentValue::Token(Token::Number { value, .. }))) => {

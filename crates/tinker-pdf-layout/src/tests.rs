@@ -12,10 +12,10 @@
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, Clear, Color, ColumnCount,
-    ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection, FlexWrap, Float, Gap, Inset,
-    JustifyContent, LengthPercentage, LineHeight, ListStyleType, MarginValue, MaxSize, MinSize,
-    OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size, TextAlign,
-    VerticalAlign, Visibility, WhiteSpace, ZIndex,
+    ColumnFill, ColumnSpan, ColumnWidth, Direction, Display, FlexDirection, FlexWrap, Float, Gap,
+    Inset, JustifyContent, LengthPercentage, LineHeight, ListStyleType, MarginValue, MaxSize,
+    MinSize, OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size, TextAlign,
+    UnicodeBidi, VerticalAlign, Visibility, WhiteSpace, ZIndex,
 };
 
 use crate::flex;
@@ -23,8 +23,8 @@ use crate::flow::marker_text;
 use crate::metrics::FixedPitch;
 use crate::table;
 use crate::{
-    layout, layout_with, BoxNode, Budget, Content, Intrinsic, Layout, Limits, Options, Refusal,
-    Warning,
+    layout, layout_with, BoxNode, Budget, Content, EmbeddingKind, Intrinsic, Layout, Limits,
+    Options, Refusal, Warning,
 };
 
 /// One point of advance per point of font size.
@@ -558,6 +558,172 @@ fn text_indent_is_the_first_line_only() {
     let xs: Vec<f64> = laid.pages[0].runs.iter().map(|r| r.x).collect();
     assert_eq!(xs, vec![20.0, 0.0]);
     assert_eq!(page_text(&laid, 0), "aabb cc");
+}
+
+// ---- css-writing-modes-3 section 2, direction and unicode-bidi --------------
+
+/// **`start` and `end` are the block's sides** (`css-text-3` §7.1), `left`
+/// and `right` the page's, and every run carries its paragraph's direction
+/// for whoever orders the line — this crate resolves no levels.
+///
+/// `abcd` is forty points in a hundred, so a line flush with the far edge
+/// starts at sixty.
+#[test]
+fn start_and_end_follow_the_blocks_direction() {
+    let at = |align: TextAlign, direction: Direction| {
+        let mut style = block();
+        style.text_align = align;
+        style.direction = direction;
+        let laid = run(&BoxNode::element(style, vec![text("abcd")]), 100.0, 400.0);
+        let first = &laid.pages[0].runs[0];
+        (first.x, first.paragraph_rtl)
+    };
+    assert_eq!(at(TextAlign::Start, Direction::Ltr), (0.0, Some(false)));
+    assert_eq!(at(TextAlign::End, Direction::Ltr), (60.0, Some(false)));
+    assert_eq!(at(TextAlign::Start, Direction::Rtl), (60.0, Some(true)));
+    assert_eq!(at(TextAlign::End, Direction::Rtl), (0.0, Some(true)));
+    assert_eq!(at(TextAlign::Left, Direction::Rtl), (0.0, Some(true)));
+    assert_eq!(at(TextAlign::Right, Direction::Ltr), (60.0, Some(false)));
+    // The initial value is `start`, so a right-to-left block that says
+    // nothing about alignment is set flush right.
+    let mut style = block();
+    style.direction = Direction::Rtl;
+    let laid = run(&BoxNode::element(style, vec![text("abcd")]), 100.0, 400.0);
+    assert_eq!(laid.pages[0].runs[0].x, 60.0);
+}
+
+/// **A justified right-to-left paragraph's last line is set at its start,
+/// the right** (`css-text-3` §7.2: `text-align-last: auto` is `start`).
+///
+/// `aa bb cc` fills the first line of a hundred points and is stretched to
+/// it; `dd ee` is fifty points, so flush right it starts at fifty.
+#[test]
+fn a_justified_right_to_left_paragraphs_last_line_is_flush_right() {
+    let mut style = block();
+    style.text_align = TextAlign::Justify;
+    style.direction = Direction::Rtl;
+    let laid = run(
+        &BoxNode::element(style, vec![text("aa bb cc dd ee")]),
+        100.0,
+        400.0,
+    );
+    assert_eq!(baselines(&laid, 0).len(), 2);
+    let last = laid.pages[0].runs.last().expect("a last line");
+    assert_eq!(last.text, "dd ee");
+    assert_eq!(last.x, 50.0, "the last line is not flush right");
+    let first = &laid.pages[0].runs[0];
+    assert_eq!(first.x, 0.0, "a justified line fills the measure");
+}
+
+/// **`unicode-bidi: plaintext` leaves a paragraph's direction to UAX #9**,
+/// which this crate asks its metrics provider for — and [`FixedPitch`] has
+/// no `Bidi_Class` table, so it cannot say: the run carries `None` and the
+/// line is aligned by `direction`, as [`crate::metrics::Metrics::first_strong`]
+/// says.
+#[test]
+fn plaintext_without_a_bidi_provider_is_aligned_by_direction() {
+    let mut style = block();
+    style.unicode_bidi = UnicodeBidi::Plaintext;
+    style.direction = Direction::Rtl;
+    let laid = run(&BoxNode::element(style, vec![text("abcd")]), 100.0, 400.0);
+    let first = &laid.pages[0].runs[0];
+    assert_eq!((first.x, first.paragraph_rtl), (60.0, None));
+}
+
+/// **An inline box whose `unicode-bidi` is not `normal` opens a level every
+/// run inside it carries, outermost first, and a block's opens none**
+/// (`css-writing-modes-3` §2.2).
+///
+/// The level is kept beside the text rather than written into it as a
+/// formatting character, so `a b c` is the page's text and no `RLI` is in
+/// it; each embedding names the box that opened it.
+#[test]
+fn an_inline_boxs_unicode_bidi_is_an_embedding_its_runs_carry() {
+    let mut paragraph = block();
+    paragraph.unicode_bidi = UnicodeBidi::Isolate;
+    let mut isolate = base();
+    isolate.unicode_bidi = UnicodeBidi::Isolate;
+    isolate.direction = Direction::Rtl;
+    let mut embed = base();
+    embed.unicode_bidi = UnicodeBidi::Embed;
+    let mut inner = BoxNode::element(embed, vec![text("c")]);
+    inner.anchor = Some(2);
+    let mut outer = BoxNode::element(isolate, vec![text("b "), inner]);
+    outer.anchor = Some(1);
+    let tree = BoxNode::element(paragraph, vec![text("a "), outer]);
+    let laid = run(&tree, 200.0, 400.0);
+    type Carried = (EmbeddingKind, bool, Option<u32>);
+    let carried: Vec<(&str, Vec<Carried>)> = laid.pages[0]
+        .runs
+        .iter()
+        .map(|run| {
+            (
+                run.text.as_str(),
+                run.embeddings
+                    .iter()
+                    .map(|e| (e.kind, e.rtl, e.anchor))
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        carried,
+        vec![
+            ("a ", vec![]),
+            ("b ", vec![(EmbeddingKind::Isolate, true, Some(1))]),
+            (
+                "c",
+                vec![
+                    (EmbeddingKind::Isolate, true, Some(1)),
+                    (EmbeddingKind::Embed, false, Some(2)),
+                ]
+            ),
+        ]
+    );
+    assert_eq!(laid.text(), "a b c");
+}
+
+/// **A run carries no more levels than UAX #9 reads**: X1's `max_depth` is
+/// 125, past which an embedding overflows and does nothing, so a book of
+/// two hundred nested isolating spans costs each run a stack of 125.
+#[test]
+fn a_run_carries_no_deeper_a_stack_than_uax9_reads() {
+    let mut isolate = base();
+    isolate.unicode_bidi = UnicodeBidi::Isolate;
+    let mut node = text("x");
+    for _ in 0..200 {
+        node = BoxNode::element(isolate.clone(), vec![node]);
+    }
+    let laid = run(&BoxNode::element(block(), vec![node]), 200.0, 400.0);
+    let deepest = laid.pages[0]
+        .runs
+        .iter()
+        .find(|run| run.text == "x")
+        .expect("the text is set");
+    assert_eq!(deepest.embeddings.len(), 125);
+}
+
+/// **An outside marker stands on its item's inline-start side**
+/// (`css-lists-3` §3.1): the right of a right-to-left item, half an em past
+/// its content box, where a left-to-right one's stands half an em before it.
+#[test]
+fn a_right_to_left_items_marker_stands_on_its_right() {
+    let mut item = block();
+    item.display = Display::ListItem;
+    item.list_style_type = ListStyleType::Decimal;
+    item.direction = Direction::Rtl;
+    let laid = run(
+        &BoxNode::element(block(), vec![BoxNode::element(item, vec![text("first")])]),
+        200.0,
+        400.0,
+    );
+    let marker = laid.pages[0]
+        .runs
+        .iter()
+        .find(|run| run.generated)
+        .expect("a marker");
+    assert_eq!(marker.x, 205.0);
+    assert_eq!(marker.paragraph_rtl, Some(true));
 }
 
 // ---- CSS 2.2 section 12.5, list markers -------------------------------------

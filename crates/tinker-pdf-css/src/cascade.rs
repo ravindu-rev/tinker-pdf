@@ -199,6 +199,10 @@ pub struct ComputedStyle {
     /// `font-feature-settings`, §6.12, in the order written; empty for
     /// `normal`.
     pub font_feature_settings: Vec<FeatureSetting>,
+    /// `direction`, `css-writing-modes-3` §2.1.
+    pub direction: Direction,
+    /// `unicode-bidi`, §2.2.
+    pub unicode_bidi: UnicodeBidi,
     /// `display`
     pub display: Display,
     /// `float`
@@ -333,7 +337,7 @@ impl ComputedStyle {
             line_height: LineHeight::Normal,
             letter_spacing: Spacing::Normal,
             word_spacing: Spacing::Normal,
-            text_align: TextAlign::Left,
+            text_align: TextAlign::Start,
             text_indent: LengthPercentage::ZERO,
             white_space: WhiteSpace::Normal,
             list_style_type: ListStyleType::Disc,
@@ -361,6 +365,8 @@ impl ComputedStyle {
             color_scheme: ColorScheme::Normal,
             font_kerning: FontKerning::Auto,
             font_feature_settings: Vec::new(),
+            direction: Direction::Ltr,
+            unicode_bidi: UnicodeBidi::Normal,
             display: Display::Inline,
             float: Float::None,
             clear: Clear::None,
@@ -462,6 +468,7 @@ impl ComputedStyle {
         style.color_scheme = parent.color_scheme;
         style.font_kerning = parent.font_kerning;
         style.font_feature_settings = parent.font_feature_settings.clone();
+        style.direction = parent.direction;
         style.list_style_type = parent.list_style_type;
         style.list_style_position = parent.list_style_position;
         style.quotes = parent.quotes.clone();
@@ -550,6 +557,8 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::ColorScheme(value) => style.color_scheme = *value,
         Property::FontKerning(value) => style.font_kerning = *value,
         Property::FontFeatureSettings(value) => style.font_feature_settings = value.clone(),
+        Property::Direction(value) => style.direction = *value,
+        Property::UnicodeBidi(value) => style.unicode_bidi = *value,
         Property::WhiteSpace(value) => style.white_space = *value,
         Property::ListStyleType(value) => style.list_style_type = *value,
         Property::ListStylePosition(value) => style.list_style_position = *value,
@@ -1126,6 +1135,7 @@ pub fn cascade_from<E: Element>(
     // for why it is a walk of its own.
     crate::counter::resolve(elements, &styles, &mut generated, &mut report, budget)?;
     note_flattened_opacity(elements, &styles, &mut report);
+    note_unturned_direction(&styles, &mut report);
     note_fixed_under_transform(elements, &styles, &mut report);
 
     Ok(StyleTree {
@@ -1151,6 +1161,39 @@ fn casing_needs_language(language: &str) -> bool {
     ["lt", "tr", "az"]
         .iter()
         .any(|named| primary.eq_ignore_ascii_case(named))
+}
+
+/// Counts every right-to-left element whose `direction` reaches past its text
+/// into a layout this build sets left to right.
+///
+/// `direction` is honoured where it decides a paragraph — the base level of
+/// its lines, which side `start` aligns to, and the side an outside list
+/// marker stands on — and through `unicode-bidi`'s embeddings. CSS 2.2 §9.10
+/// gives it three more jobs this layout does not do: a table's columns run
+/// from the right (§17.5), a flex row's main axis does (`css-flexbox-1` §2)
+/// and so do a multi-column container's columns (`css-multicol-1` §3); and
+/// an over-constrained block — a definite `width` and neither margin `auto` —
+/// gives up its `margin-left` rather than its `margin-right` (§10.3.3). Each
+/// such right-to-left element is counted against `direction`, so a table read
+/// mirror-wise is not read as honoured.
+fn note_unturned_direction(styles: &[ComputedStyle], report: &mut Report) {
+    for style in styles {
+        if style.direction != Direction::Rtl || style.display == Display::None {
+            continue;
+        }
+        let laid_left_to_right = matches!(
+            style.display,
+            Display::Table | Display::Flex | Display::InlineFlex
+        ) || style.column_count != ColumnCount::Auto
+            || style.column_width != ColumnWidth::Auto;
+        let over_constrained = matches!(style.display, Display::Block | Display::ListItem)
+            && style.width != Size::Auto
+            && style.margin.left != MarginValue::Auto
+            && style.margin.right != MarginValue::Auto;
+        if laid_left_to_right || over_constrained {
+            report.note_unsupported("direction");
+        }
+    }
 }
 
 /// Counts every element whose `opacity` the painter applies **per fragment**
@@ -2121,6 +2164,8 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
         Longhand::FontFeatureSettings => {
             into.font_feature_settings = from.font_feature_settings.clone();
         }
+        Longhand::Direction => into.direction = from.direction,
+        Longhand::UnicodeBidi => into.unicode_bidi = from.unicode_bidi,
         Longhand::WhiteSpace => into.white_space = from.white_space,
         Longhand::ListStyleType => into.list_style_type = from.list_style_type,
         Longhand::ListStylePosition => into.list_style_position = from.list_style_position,

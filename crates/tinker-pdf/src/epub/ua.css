@@ -16,10 +16,13 @@
  * property of the book rather than of this file. The table rules below are
  * exactly that case: HTML sets `table { display: table }`, this build has no
  * table box, and a sheet that stayed silent about it would set every table in
- * the corpus as inline text with nothing anywhere saying so. Everything else
- * §15 declares that this build has no consumer for -- `unicode-bidi` -- is
- * **not** here, because it does not change which boxes exist and charging it
- * would bury the one that does; `counter-reset` and the `<q>` rules arrived
+ * the corpus as inline text with nothing anywhere saying so. §15.3.5's
+ * bidirectional rules are not here either, since October 2026's eighth wave
+ * gave `direction` and `unicode-bidi` a consumer: they are the `dir`
+ * attribute's, and `epub::xhtml` answers them as presentational hints, as it
+ * does `<ol start>`, because a rule keyed on an attribute alone is tried
+ * against every element of every book and the hint is asked of each element
+ * once. `counter-reset` and the `<q>` rules arrived
  * with `css-lists-3`'s counters and `css-content-3`'s quotes and are below,
  * and HTML's per-language `quotes` table is not, for the reason the `q` rule
  * gives.

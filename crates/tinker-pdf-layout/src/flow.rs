@@ -65,19 +65,22 @@ use std::collections::HashMap;
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignItems, BorderCollapse, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
-    ColumnSpan, ColumnWidth, Display, Float, LengthPercentage, ListStylePosition, ListStyleType,
-    MarginValue, OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size,
-    TableLayout, TextAlign, VerticalAlign, ZIndex,
+    ColumnSpan, ColumnWidth, Direction, Display, Float, LengthPercentage, ListStylePosition,
+    ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides,
+    Size, TableLayout, TextAlign, UnicodeBidi, VerticalAlign, ZIndex,
 };
 
 use crate::flex;
 use crate::floats::{Ceilings, FloatContext, Placed};
-use crate::metrics::{FontRequest, Metrics, Neighbour, ShapingContext};
+use crate::metrics::{FirstStrong, FontRequest, Metrics, Neighbour, ShapingContext};
 use crate::style::{consume, Consumed};
 use crate::table::{self, CellWidths, Edge, Grid, Origin, Slot, TableBox};
 use crate::text::{self, Collapser};
 use crate::uax14;
-use crate::{BoxNode, Budget, Content, Intrinsic, Limits, Options, Refusal, TextRun, Warning};
+use crate::{
+    BoxNode, Budget, Content, Embedding, EmbeddingKind, Intrinsic, Limits, Options, Refusal,
+    TextRun, Warning,
+};
 
 /// Slack for the comparisons a float's geometry needs, in points.
 ///
@@ -526,6 +529,11 @@ struct Builder<'a, M: Metrics> {
     /// a sub-flow — a float's, a column's — saves and clears it, because a float
     /// that leads a list item is not where its marker goes.
     inside_marker: Option<Piece>,
+    /// The explicit bidi levels the inline boxes being gathered open, outermost
+    /// first: what each [`Piece`] — and so each [`TextRun`] — carries for the
+    /// painter's UAX #9. Bounded by UAX #9's own depth, past which X1 ignores
+    /// an embedding anyway.
+    embeddings: Vec<Embedding>,
     /// The float contexts of the formatting contexts a scroll container
     /// interrupted, innermost last: CSS 2.2 §9.4.1 makes one a block
     /// formatting context of its own, so its children are placed against a
@@ -824,6 +832,9 @@ struct Piece {
     /// [`TextRun::generated`], which is what keeps it out of text conservation
     /// and makes the painter mark it an artifact.
     generated: bool,
+    /// The bidi levels its inline ancestors open. See
+    /// [`TextRun::embeddings`].
+    embeddings: Vec<Embedding>,
 }
 
 /// An atomic inline-level box, CSS 2.2 §9.2.2.
@@ -905,6 +916,7 @@ pub(crate) fn build<M: Metrics>(
         flex_pass: None,
         sequence: 0,
         inside_marker: None,
+        embeddings: Vec::new(),
         outer_floats: Vec::new(),
         clipping: 0,
         deferred: None,
@@ -1246,7 +1258,7 @@ impl<M: Metrics> Builder<'_, M> {
         if style.display == Display::ListItem
             && style.list_style_position == ListStylePosition::Outside
         {
-            self.marker(node, &style, block, content_x, ordinal);
+            self.marker(node, &style, block, (content_x, content_width), ordinal);
         }
         Ok(())
     }
@@ -1981,6 +1993,7 @@ impl<M: Metrics> Builder<'_, M> {
             order: self.order(),
             atomic: None,
             generated: false,
+            embeddings: Vec::new(),
         });
         self.lines(&pieces, style, block, content_x, content_width)
     }
@@ -2171,10 +2184,24 @@ impl<M: Metrics> Builder<'_, M> {
                         order: self.order(),
                         atomic: None,
                         generated: false,
+                        embeddings: self.embeddings.clone(),
                     });
                 }
             }
             Content::Children(children) => {
+                // `css-writing-modes-3` §2.2: an inline box whose
+                // `unicode-bidi` is not `normal` opens a level round its
+                // content, which every piece inside it carries. A block
+                // container's `embed` and `isolate` do nothing, and its
+                // `plaintext` is its paragraphs' (see [`Builder::line`]).
+                let opened = (!style.is_block_level())
+                    .then(|| embedding_of(&style, node.anchor))
+                    .flatten()
+                    .filter(|_| self.embeddings.len() < EMBEDDING_DEPTH);
+                if let Some(embedding) = opened {
+                    self.embeddings.push(embedding);
+                }
+                let mut gathered = Ok(());
                 for child in children {
                     let child_style = consume(&child.style);
                     // A float is not the §9.2.1.1 case: it is taken out of the
@@ -2183,8 +2210,16 @@ impl<M: Metrics> Builder<'_, M> {
                     if child_style.float == Float::None && child_style.is_block_level() {
                         self.warn(Warning::BlockInInline);
                     }
-                    self.gather(child, out, collapser, depth + 1, content_x, content_width)?;
+                    gathered =
+                        self.gather(child, out, collapser, depth + 1, content_x, content_width);
+                    if gathered.is_err() {
+                        break;
+                    }
                 }
+                if opened.is_some() {
+                    self.embeddings.pop();
+                }
+                gathered?;
             }
         }
         Ok(())
@@ -2508,6 +2543,7 @@ impl<M: Metrics> Builder<'_, M> {
             anchor: node.anchor,
             order: self.order(),
             generated: false,
+            embeddings: self.embeddings.clone(),
             atomic: Some(Atomic {
                 items,
                 blocks,
@@ -4364,6 +4400,7 @@ impl<M: Metrics> Builder<'_, M> {
             order,
             atomic: None,
             generated: true,
+            embeddings: Vec::new(),
         });
     }
 
@@ -4396,7 +4433,7 @@ impl<M: Metrics> Builder<'_, M> {
         node: &BoxNode,
         style: &Consumed,
         block: usize,
-        content_x: f64,
+        (content_x, content_width): (f64, f64),
         ordinal: usize,
     ) {
         let text = marker_of(node, style, ordinal);
@@ -4421,7 +4458,15 @@ impl<M: Metrics> Builder<'_, M> {
                         // Outside the content box, half an em clear of it,
                         // which is `list-style-position: outside`'s initial
                         // value.
-                        x: content_x - width - style.font_size * 0.5,
+                        // On the item's start side: the left in a
+                        // left-to-right item and the right in a right-to-left
+                        // one (`css-lists-3` §3.1's marker box stands outside
+                        // the principal box on its inline-start side).
+                        x: if style.direction == Direction::Rtl {
+                            content_x + content_width + style.font_size * 0.5
+                        } else {
+                            content_x - width - style.font_size * 0.5
+                        },
                         y: 0.0,
                         width,
                         text,
@@ -4432,6 +4477,9 @@ impl<M: Metrics> Builder<'_, M> {
                         variant: style.font_variant,
                         kerning: style.font_kerning,
                         features: style.font_features.clone(),
+                        paragraph_rtl: Some(style.direction == Direction::Rtl),
+                        embeddings: Vec::new(),
+                        bidi_level: None,
                         color: style.color,
                         decoration: style.text_decoration,
                         painted: style.visible,
@@ -4487,7 +4535,15 @@ impl<M: Metrics> Builder<'_, M> {
         let mut lines_here = 0usize;
         let mut cursor = 0usize;
         let first_item = self.flow.items.len();
+        // A forced break ends a bidi paragraph as well as a line
+        // (`css-writing-modes-3` §2.4.1), so a `plaintext` container's
+        // direction is asked again of the text after each one.
+        let mut paragraph = None;
+        let mut paragraph_starts = true;
         while start < content.len() {
+            if paragraph_starts {
+                paragraph = self.paragraph_direction(container, &content, &spans, pieces, start);
+            }
             // `cursor` is where the previous line stopped looking, and it is
             // not an optimisation. Restarting the scan at zero for every line
             // makes filling a paragraph `O(lines x opportunities)`, which for a
@@ -4531,11 +4587,20 @@ impl<M: Metrics> Builder<'_, M> {
             let justify =
                 container.text_align == TextAlign::Justify && !hard && end < content.len();
             self.line(
-                &content, &spans, pieces, container, block, line_x, available, trim_start,
-                trim_end, justify, lines_here,
+                &content,
+                &spans,
+                pieces,
+                container,
+                block,
+                line_x,
+                available,
+                (trim_start, trim_end),
+                (justify, paragraph),
+                lines_here,
             );
             lines_here += 1;
             first_line = false;
+            paragraph_starts = hard;
             start = end;
         }
         // `lines_in_block` cannot be known when a line is made, so it is
@@ -4548,6 +4613,54 @@ impl<M: Metrics> Builder<'_, M> {
             }
         }
         Ok(())
+    }
+
+    /// The base direction of the paragraph that starts at `from`: the block
+    /// container's `direction`, or, under `unicode-bidi: plaintext`, what P2
+    /// and P3 find in the paragraph's own text (`css-writing-modes-3` §2.2).
+    ///
+    /// The text is asked a box at a time, and what an inline box isolates is
+    /// skipped rather than asked: P2 does not look inside an isolate. A
+    /// separator inside one still ends the paragraph — P1 splits the text
+    /// before any isolate is opened — and is what keeps the scan to this
+    /// paragraph rather than the rest of the container, so a container of a
+    /// thousand preserved newlines is not scanned a thousand times over.
+    /// `None` is a provider with no UAX #9 ([`Metrics::first_strong`]).
+    fn paragraph_direction(
+        &self,
+        container: &Consumed,
+        content: &str,
+        spans: &[(usize, usize, usize)],
+        pieces: &[Piece],
+        from: usize,
+    ) -> Option<bool> {
+        if container.unicode_bidi != UnicodeBidi::Plaintext {
+            return Some(container.direction == Direction::Rtl);
+        }
+        let first = spans.partition_point(|&(_, end, _)| end <= from);
+        for &(start, end, index) in spans.get(first..).unwrap_or_default() {
+            let Some(slice) = content.get(start.max(from)..end) else {
+                continue;
+            };
+            let isolated = pieces.get(index).is_some_and(|piece| {
+                piece
+                    .embeddings
+                    .iter()
+                    .any(|e| e.kind != EmbeddingKind::Embed)
+            });
+            if isolated {
+                if slice.contains(['\n', '\u{2029}']) {
+                    return Some(false);
+                }
+                continue;
+            }
+            match self.metrics.first_strong(slice)? {
+                FirstStrong::Left | FirstStrong::Separator => return Some(false),
+                FirstStrong::Right => return Some(true),
+                FirstStrong::Neither => {}
+            }
+        }
+        Some(false)
     }
 
     /// Where the next line box starts and how wide it is, given the floats.
@@ -4868,9 +4981,8 @@ impl<M: Metrics> Builder<'_, M> {
         block: usize,
         x: f64,
         available: f64,
-        start: usize,
-        end: usize,
-        justify: bool,
+        (start, end): (usize, usize),
+        (justify, paragraph): (bool, Option<bool>),
         index_in_block: usize,
     ) {
         // CSS 2.2 §10.8.1's strut: every line box carries the block
@@ -4985,6 +5097,9 @@ impl<M: Metrics> Builder<'_, M> {
                     variant: style.font_variant,
                     kerning: style.font_kerning,
                     features: style.font_features.clone(),
+                    paragraph_rtl: paragraph,
+                    embeddings: pieces[*index].embeddings.clone(),
+                    bidi_level: None,
                     color: style.color,
                     decoration: style.text_decoration,
                     painted: false,
@@ -5016,6 +5131,9 @@ impl<M: Metrics> Builder<'_, M> {
                 variant: style.font_variant,
                 kerning: style.font_kerning,
                 features: style.font_features.clone(),
+                paragraph_rtl: paragraph,
+                embeddings: pieces[*index].embeddings.clone(),
+                bidi_level: None,
                 color: style.color,
                 decoration: style.text_decoration,
                 painted: style.visible,
@@ -5058,15 +5176,26 @@ impl<M: Metrics> Builder<'_, M> {
             .map(|run| run.text.chars().filter(|c| *c == ' ').count())
             .sum();
         let mut extra_per_space = 0.0;
+        // `css-text-3` §7.1: `start` and `end` are the block container's
+        // inline-start and -end sides, and a justified paragraph's last line
+        // is `text-align-last: auto`, which is `start` (§7.2).
+        // A provider that cannot say what P2 finds leaves a `plaintext`
+        // paragraph aligned by `direction`, as [`Metrics::first_strong`] says.
+        let rtl = paragraph.unwrap_or(container.direction == Direction::Rtl);
+        let start_side = if rtl { slack } else { 0.0 };
         let mut offset = match container.text_align {
             TextAlign::Left => 0.0,
             TextAlign::Right => slack,
             TextAlign::Center => slack / 2.0,
+            TextAlign::Start => start_side,
+            TextAlign::End => slack - start_side,
             TextAlign::Justify => {
                 if justify && spaces > 0 {
                     extra_per_space = slack / spaces as f64;
+                    0.0
+                } else {
+                    start_side
                 }
-                0.0
             }
         };
         offset += x;
@@ -6172,13 +6301,28 @@ fn translate(items: &mut [Item], blocks: &mut [BlockRecord], dx: f64, dy: f64) {
     }
 }
 
-/// Which piece a byte offset belongs to.
-///
-/// A binary search rather than a scan, and for the same reason the line
-/// filler carries a cursor: this is called once per break opportunity, so a
-/// linear scan makes a paragraph of a thousand `<em>`s cost
-/// `O(pieces x characters)`. The spans are built in document order and are
-/// disjoint, so the search is sound by construction.
+/// How many explicit bidi levels a run carries at most: UAX #9's `max_depth`
+/// (X1), past which an embedding or isolate overflows and is ignored by the
+/// algorithm anyway — so a hostile book's thousand nested spans cost each of
+/// their runs a stack no deeper than the algorithm reads.
+const EMBEDDING_DEPTH: usize = 125;
+
+/// The level an inline box opens round its content, from its `unicode-bidi`
+/// and `direction` (`css-writing-modes-3` §2.4.2's table).
+fn embedding_of(style: &Consumed, anchor: Option<u32>) -> Option<Embedding> {
+    let kind = match style.unicode_bidi {
+        UnicodeBidi::Normal => return None,
+        UnicodeBidi::Embed => EmbeddingKind::Embed,
+        UnicodeBidi::Isolate => EmbeddingKind::Isolate,
+        UnicodeBidi::Plaintext => EmbeddingKind::FirstStrong,
+    };
+    Some(Embedding {
+        kind,
+        rtl: style.direction == Direction::Rtl,
+        anchor,
+    })
+}
+
 /// The text either side of `slice` — part of span `at` — on a line that
 /// covers `line`, as a shaper sees it ([`ShapingContext`]).
 ///
@@ -6245,6 +6389,13 @@ fn context_of<'p>(
     ShapingContext { before, after }
 }
 
+/// Which piece a byte offset belongs to.
+///
+/// A binary search rather than a scan, and for the same reason the line
+/// filler carries a cursor: this is called once per break opportunity, so a
+/// linear scan makes a paragraph of a thousand `<em>`s cost
+/// `O(pieces x characters)`. The spans are built in document order and are
+/// disjoint, so the search is sound by construction.
 fn piece_at(spans: &[(usize, usize, usize)], at: usize) -> Option<usize> {
     let found = spans.binary_search_by(|(start, end, _)| {
         if at < *start {

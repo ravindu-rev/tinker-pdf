@@ -96,10 +96,12 @@ use tinker_pdf_font::base14::Standard14;
 use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, BaseEncoding};
 use tinker_pdf_font::Sfnt;
 use tinker_pdf_layout::metrics::{
-    FontRequest, Metrics, Neighbour, PlacedGlyph, ShapedText, Shaper, ShapingContext, Vertical,
+    FirstStrong, FontRequest, Metrics, Neighbour, PlacedGlyph, ShapedText, Shaper, ShapingContext,
+    Vertical,
 };
 use tinker_pdf_layout::{
-    BackgroundLayer, BoxFragment, ClipFragment, Page as LayoutPage, ReplacedFragment, TextRun,
+    BackgroundLayer, BoxFragment, ClipFragment, Embedding, EmbeddingKind, Page as LayoutPage,
+    ReplacedFragment, TextRun,
 };
 use tinker_pdf_shape::bidi::{reorder, BaseDirection, Level, Paragraph};
 use tinker_pdf_shape::shape::itemize;
@@ -567,9 +569,32 @@ impl Metrics for BookMetrics<'_> {
         }
     }
 
+    fn first_strong(&self, text: &str) -> Option<FirstStrong> {
+        Some(first_strong(text))
+    }
+
     fn shaper(&self) -> Option<&dyn Shaper> {
         Some(self)
     }
+}
+
+/// UAX #9's P2 over one box's text, for a `unicode-bidi: plaintext`
+/// container: the first strong character outside the text's own isolates, or
+/// the separator that ended the paragraph before one was found. A separator
+/// inside an isolate ends it too, since P1 splits before any isolate opens.
+fn first_strong(text: &str) -> FirstStrong {
+    let mut depth = 0usize;
+    for c in text.chars() {
+        match bidi_class(c) {
+            BidiClass::B => return FirstStrong::Separator,
+            class if class.is_isolate_initiator() => depth += 1,
+            BidiClass::PDI => depth = depth.saturating_sub(1),
+            BidiClass::L if depth == 0 => return FirstStrong::Left,
+            BidiClass::R | BidiClass::AL if depth == 0 => return FirstStrong::Right,
+            _ => {}
+        }
+    }
+    FirstStrong::Neither
 }
 
 /// Milestone 6 of `docs/design/shaping.md`: the book's own faces, shaped.
@@ -3114,6 +3139,7 @@ fn shaped_glyphs(
     spacing: (f64, f64),
     context: (&str, &str),
     settings: &[(Tag, u32)],
+    direction: BaseDirection,
 ) -> Option<Shaped> {
     let (letter_spacing, word_spacing) = spacing;
     let sfnt = Sfnt::parse(program)?;
@@ -3124,7 +3150,7 @@ fn shaped_glyphs(
     let whole = format!("{before}{text}{after}");
     let own = before.len()..before.len() + text.len();
     let mine = |cluster: u32| usize::try_from(cluster).is_ok_and(|at| own.contains(&at));
-    let paragraph = Paragraph::new(&whole, own_direction(text));
+    let paragraph = Paragraph::new(&whole, direction);
     let runs = itemize(&whole, &paragraph);
     let shaped: Vec<_> = runs.iter().map(|run| shaper.shape(&whole, run)).collect();
     let levels: Vec<_> = runs.iter().map(|run| run.level).collect();
@@ -3155,7 +3181,7 @@ fn shaped_glyphs(
             }
         }
         if stretches > 1 {
-            return shaped_glyphs(program, text, size, spacing, ("", ""), settings);
+            return shaped_glyphs(program, text, size, spacing, ("", ""), settings, direction);
         }
     }
 
@@ -3284,7 +3310,7 @@ fn draw_run_against(
     // face; worked out before the drawing order reverses them.
     let first = segments.first().map(|(range, _)| range.start);
     let last = segments.last().map(|(range, _)| range.end);
-    if right_to_left(&run.text) {
+    if reads_right_to_left(run) {
         segments.reverse();
     }
     for (range, chosen) in segments {
@@ -3354,6 +3380,20 @@ fn right_to_left(text: &str) -> bool {
     Paragraph::new(text, BaseDirection::Auto)
         .base_level()
         .is_rtl()
+}
+
+/// Whether a run is drawn right to left: by the level its line resolved it
+/// at ([`TextRun::bidi_level`]) where [`split_at_levels`] gave it one, and
+/// by [`right_to_left`] over its own text where its line was left as it was.
+///
+/// The level is the answer and the text is only a proxy for it. The two
+/// agree on any run with a strong character, and part on a run of neutrals:
+/// the space and `!` that end a right-to-left paragraph are at level 1, and
+/// read by their own text — no strong character, so P3's left to right —
+/// they were drawn ` !` where L2 draws `! `.
+fn reads_right_to_left(run: &TextRun) -> bool {
+    run.bidi_level
+        .map_or_else(|| right_to_left(&run.text), |level| level % 2 == 1)
 }
 
 /// The paragraph direction a slice is shaped in, context and all: the
@@ -3495,44 +3535,38 @@ fn opens_right_to_left(c: char) -> bool {
 
 /// [`split_at_levels`] over one line, draining `line` into `out`.
 fn split_line(line: &mut Vec<TextRun>, metrics: &BookMetrics<'_>, out: &mut Vec<TextRun>) -> usize {
-    if !line
-        .iter()
-        .any(|run| !run.generated && run.text.chars().any(opens_right_to_left))
-    {
+    let Some((levels, _)) = line_levels(line) else {
         out.append(line);
         return 0;
-    }
-    let text: String = line.iter().map(|run| run.text.as_str()).collect();
-    let paragraph = Paragraph::new(&text, BaseDirection::Auto);
-    let resolved = paragraph.line(0..paragraph.len());
-    // X9's removed characters carry the paragraph's level after L1, which is
-    // no level of theirs: each takes the level of the character before it.
-    let mut levels: Vec<Level> = Vec::with_capacity(resolved.levels().len());
-    for (at, level) in resolved.levels().iter().enumerate() {
-        let kept = if paragraph.is_removed(at) {
-            levels.last().copied().unwrap_or(*level)
-        } else {
-            *level
-        };
-        levels.push(kept);
-    }
+    };
     let mut cut = 0usize;
     let mut first_char = 0usize;
     let mut placed: Vec<Vec<TextRun>> = Vec::with_capacity(line.len());
+    let mut whole: Vec<Option<u8>> = Vec::with_capacity(line.len());
     for (at, run) in line.iter().enumerate() {
         let count = run.text.chars().count();
         let own = levels.get(first_char..first_char + count).unwrap_or(&[]);
         first_char += count;
         let pieces = level_pieces(&run.text, own);
         if run.generated || pieces.len() < 2 {
+            // A generated run is not part of the line's order (see
+            // [`visual_lines`]) and keeps reading by its own text.
+            whole.push(
+                pieces
+                    .first()
+                    .filter(|_| !run.generated)
+                    .map(|(_, level)| level.number()),
+            );
             placed.push(Vec::new());
             continue;
         }
         cut += 1;
+        whole.push(None);
         placed.push(cut_run(run, &pieces, metrics, &layout_context(line, at)));
     }
-    for (run, pieces) in line.drain(..).zip(placed) {
+    for ((mut run, pieces), level) in line.drain(..).zip(placed).zip(whole) {
         if pieces.is_empty() {
+            run.bidi_level = level;
             out.push(run);
         } else {
             out.extend(pieces);
@@ -3566,21 +3600,123 @@ fn as_neighbour(other: Option<&TextRun>) -> Option<Neighbour<'_>> {
         })
 }
 
+/// UAX #9's level for every character of a line's runs, in order, and the
+/// paragraph's base level — or `None` for a line UAX #9 would leave as it is.
+///
+/// # What the line is resolved as
+///
+/// **The paragraph's direction is the block's** (`css-writing-modes-3` §2.1):
+/// each run carries its block container's `direction`, and `unicode-bidi:
+/// plaintext` on the container leaves it to P2 and P3. Before `direction` was
+/// read every line was resolved by P2 and P3, so a left-to-right paragraph
+/// whose line began with an Arabic word was laid out right to left.
+///
+/// **And the inline boxes' embeddings are the formatting characters §2.4.2
+/// says they are**, written into the text resolved here and nowhere else: a
+/// run's [`TextRun::embeddings`] are opened before it and closed after, the
+/// ones a run shares with the run before it left open across the boundary,
+/// and each is told apart from a sibling's by the box that opened it. X9
+/// removes them before any level is read back, so the runs' own characters
+/// are the only levels returned. A character X9 removes in a run's own text
+/// (a joiner, a format control) has no level of its own either; it takes the
+/// level of the character before it, since after L1 it carries the
+/// paragraph's, which would cut its word in three.
+///
+/// A line with no right-to-left character, in a left-to-right paragraph,
+/// with no right-to-left embedding, is `None`: no left-to-right page moves.
+fn line_levels(line: &[TextRun]) -> Option<(Vec<Level>, Level)> {
+    let base = line
+        .iter()
+        .find(|run| !run.generated)
+        .map_or(Some(false), |run| run.paragraph_rtl);
+    let rtl_embedding = line.iter().any(|run| {
+        run.embeddings
+            .iter()
+            .any(|e| e.rtl && e.kind != EmbeddingKind::FirstStrong)
+    });
+    let rtl_text = line
+        .iter()
+        .any(|run| !run.generated && run.text.chars().any(opens_right_to_left));
+    if !rtl_text && !rtl_embedding && base != Some(true) {
+        return None;
+    }
+    let opener = |e: &Embedding| match (e.kind, e.rtl) {
+        (EmbeddingKind::Embed, false) => '\u{202A}',
+        (EmbeddingKind::Embed, true) => '\u{202B}',
+        (EmbeddingKind::Isolate, false) => '\u{2066}',
+        (EmbeddingKind::Isolate, true) => '\u{2067}',
+        (EmbeddingKind::FirstStrong, _) => '\u{2068}',
+    };
+    let closer = |e: &Embedding| match e.kind {
+        EmbeddingKind::Embed => '\u{202C}',
+        EmbeddingKind::Isolate | EmbeddingKind::FirstStrong => '\u{2069}',
+    };
+    let mut text = String::new();
+    let mut count = 0usize;
+    let mut own: Vec<usize> = Vec::new();
+    let mut open: Vec<Embedding> = Vec::new();
+    for run in line {
+        let shared = open
+            .iter()
+            .zip(&run.embeddings)
+            .take_while(|(a, b)| a == b)
+            .count();
+        while open.len() > shared {
+            if let Some(e) = open.pop() {
+                text.push(closer(&e));
+                count += 1;
+            }
+        }
+        for e in run.embeddings.iter().skip(shared) {
+            text.push(opener(e));
+            count += 1;
+            open.push(*e);
+        }
+        for c in run.text.chars() {
+            own.push(count);
+            text.push(c);
+            count += 1;
+        }
+    }
+    while let Some(e) = open.pop() {
+        text.push(closer(&e));
+    }
+    let direction = match base {
+        Some(true) => BaseDirection::RightToLeft,
+        Some(false) => BaseDirection::LeftToRight,
+        None => BaseDirection::Auto,
+    };
+    let paragraph = Paragraph::new(&text, direction);
+    let resolved = paragraph.line(0..paragraph.len());
+    let all = resolved.levels();
+    let mut levels: Vec<Level> = Vec::with_capacity(own.len());
+    for at in own {
+        let level = all.get(at).copied().unwrap_or(paragraph.base_level());
+        let kept = if paragraph.is_removed(at) {
+            levels.last().copied().unwrap_or(level)
+        } else {
+            level
+        };
+        levels.push(kept);
+    }
+    Some((levels, paragraph.base_level()))
+}
+
 /// The byte ranges of `text` over which `levels` — one per character — is
-/// constant, in logical order.
-fn level_pieces(text: &str, levels: &[Level]) -> Vec<core::ops::Range<usize>> {
+/// constant, in logical order, each with its level.
+fn level_pieces(text: &str, levels: &[Level]) -> Vec<(core::ops::Range<usize>, Level)> {
     let mut pieces = Vec::new();
     let mut start = 0usize;
     let mut current: Option<Level> = None;
     for ((at, _), level) in text.char_indices().zip(levels.iter().copied()) {
-        if current.is_some_and(|c| c != level) {
-            pieces.push(start..at);
+        if let Some(c) = current.filter(|c| *c != level) {
+            pieces.push((start..at, c));
             start = at;
         }
         current = Some(level);
     }
-    if start < text.len() {
-        pieces.push(start..text.len());
+    if let Some(c) = current.filter(|_| start < text.len()) {
+        pieces.push((start..text.len(), c));
     }
     pieces
 }
@@ -3590,7 +3726,7 @@ fn level_pieces(text: &str, levels: &[Level]) -> Vec<core::ops::Range<usize>> {
 /// [`split_at_levels`].
 fn cut_run(
     run: &TextRun,
-    pieces: &[core::ops::Range<usize>],
+    pieces: &[(core::ops::Range<usize>, Level)],
     metrics: &BookMetrics<'_>,
     context: &ShapingContext<'_>,
 ) -> Vec<TextRun> {
@@ -3600,22 +3736,23 @@ fn cut_run(
         let at = usize::try_from(glyph.cluster).unwrap_or(usize::MAX);
         let piece = pieces
             .iter()
-            .position(|range| range.contains(&at))
+            .position(|(range, _)| range.contains(&at))
             .unwrap_or(pieces.len() - 1);
         if let Some(width) = widths.get_mut(piece) {
             *width += glyph.x_advance;
         }
     }
-    for (width, range) in widths.iter_mut().zip(pieces) {
+    for (width, (range, _)) in widths.iter_mut().zip(pieces) {
         let slice = run.text.get(range.clone()).unwrap_or("");
         *width += run.letter_spacing * slice.chars().count() as f64
             + run.word_spacing * slice.chars().filter(|c| *c == ' ').count() as f64;
     }
     let mut x = run.x;
     let mut out = Vec::with_capacity(pieces.len());
-    for (at, (range, width)) in pieces.iter().zip(&widths).enumerate() {
+    for (at, ((range, level), width)) in pieces.iter().zip(&widths).enumerate() {
         let mut piece = run.clone();
         piece.text = run.text.get(range.clone()).unwrap_or("").to_owned();
+        piece.bidi_level = Some(level.number());
         piece.x = x;
         // The last piece ends where the run did, whatever the rounding of the
         // partition: the run after it was placed against the run's width.
@@ -3649,20 +3786,13 @@ fn same_line(a: &TextRun, b: &TextRun) -> bool {
 
 /// Lays one line's runs out again in L2's order. Returns whether any moved.
 fn reorder_line(line: &mut [TextRun]) -> bool {
-    if !line
-        .iter()
-        .any(|run| run.text.chars().any(opens_right_to_left))
-    {
+    let Some((levels, base)) = line_levels(line) else {
         return false;
-    }
-    let text: String = line.iter().map(|run| run.text.as_str()).collect();
-    let paragraph = Paragraph::new(&text, BaseDirection::Auto);
-    let resolved = paragraph.line(0..paragraph.len());
-    let levels = resolved.levels();
+    };
     let mut run_levels: Vec<Level> = Vec::with_capacity(line.len());
     let mut at = 0usize;
     for run in line.iter() {
-        run_levels.push(level_of(&run.text, levels, at, paragraph.base_level()));
+        run_levels.push(level_of(&run.text, &levels, at, base));
         at += run.text.chars().count();
     }
     let order = reorder(&run_levels);
@@ -3748,7 +3878,18 @@ fn draw_shaped(
     // right-to-left run's words are laid right to left and not in the order
     // they were written (review of lane 6C). A left-to-right slice is every
     // piece at one even level, and its order does not move.
-    let order = piece_order(slice, &pieces);
+    let direction = run.bidi_level.map(|level| {
+        if level % 2 == 1 {
+            BaseDirection::RightToLeft
+        } else {
+            BaseDirection::LeftToRight
+        }
+    });
+    let order = match direction {
+        Some(BaseDirection::RightToLeft) => (0..pieces.len()).rev().collect(),
+        Some(_) => (0..pieces.len()).collect(),
+        None => piece_order(slice, &pieces),
+    };
     for at in order {
         let Some(piece) = pieces.get(at).copied() else {
             continue;
@@ -3767,6 +3908,7 @@ fn draw_shaped(
             (run.letter_spacing * PX_TO_PT, run.word_spacing * PX_TO_PT),
             piece_context,
             &settings,
+            direction.unwrap_or_else(|| own_direction(piece)),
         ) else {
             return (x, refused);
         };
