@@ -262,14 +262,15 @@ pub fn sheet(tree: &Tree, max_parts: usize) -> Sheet {
 }
 
 /// What a `<style>` element's at-rules are read against: where an `@import`
-/// is fetched from, and the medium an `@media` is asked about.
+/// is fetched from, and the medium an `@media` — or the element's own `media`
+/// attribute — is asked about.
 pub struct Reach<'a> {
     /// The resolver an `@import` goes through — the container the document
     /// came out of, which this crate does not have (ruling 8).
     /// [`tinker_pdf_css::NoImports`] for a caller with nothing beside the
     /// document.
     pub imports: &'a dyn ImportResolver,
-    /// The medium. [`print`] of the viewport: an SVG here is set on a page.
+    /// The medium. [`print()`] of the viewport: an SVG here is set on a page.
     pub media: MediaContext,
 }
 
@@ -298,7 +299,10 @@ pub fn print(viewport: (f64, f64)) -> MediaContext {
 ///
 /// - **`@media`**: its rules apply when `css-mediaqueries` says the query
 ///   list matches [`Reach::media`] — `tinker_pdf_css::media::evaluate`, the
-///   evaluator the EPUB cascade uses, over a different medium.
+///   evaluator the EPUB cascade uses, over a different medium. A `<style>`
+///   element's own `media` attribute (SVG 2 §6.2) is the same question asked
+///   of the whole sheet: one whose list does not match is not read, and
+///   nothing it imports is fetched.
 /// - **`@import`**: fetched through [`Reach::imports`] and read in place,
 ///   before every rule after it, as `css-cascade-5` §6.4.1 orders it; one
 ///   with a media query list is read when the list matches. One that does not
@@ -340,6 +344,15 @@ pub fn sheet_with(tree: &Tree, max_parts: usize, reach: &Reach<'_>) -> Sheet {
         if node
             .attr("type")
             .is_some_and(|kind| !kind.trim().eq_ignore_ascii_case("text/css"))
+        {
+            continue;
+        }
+        // SVG 2 §6.2's `media`: a media query list the medium must match for
+        // the sheet to apply at all — an `@import`'s list, on the element, and
+        // asked the same way. An absent one is `all`, and so is an empty one.
+        if node
+            .attr("media")
+            .is_some_and(|query| !media::evaluate(&component_values(tokenize(query)), &reach.media))
         {
             continue;
         }

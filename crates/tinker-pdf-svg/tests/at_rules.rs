@@ -86,6 +86,74 @@ fn media_is_evaluated_as_print() {
     }
 }
 
+/// **A `<style>` element's own `media` attribute is asked as `@media` is**:
+/// SVG 2 §6.2 makes it a media query list the medium must match for the sheet
+/// to apply, so a `screen` sheet does not apply on paper and a `print` one
+/// does, a query on the width is asked about the viewport, and an empty list
+/// is `all`. A sheet that does not apply fetches nothing it imports.
+#[test]
+fn a_style_elements_media_attribute_is_asked_as_print() {
+    let resolver = sheets(&[("red.css", ".a { fill: red }")]);
+    for (styles, wanted) in [
+        (
+            "<style>.a { fill: lime }</style><style media=\"screen\">.a { fill: red }</style>",
+            GREEN,
+        ),
+        (
+            "<style>.a { fill: red }</style><style media=\"print\">.a { fill: lime }</style>",
+            GREEN,
+        ),
+        (
+            "<style>.a { fill: red }</style>\
+             <style media=\"screen, print\">.a { fill: lime }</style>",
+            GREEN,
+        ),
+        (
+            "<style>.a { fill: red }</style>\
+             <style media=\"all and (min-width: 50px)\">.a { fill: lime }</style>",
+            GREEN,
+        ),
+        (
+            "<style>.a { fill: lime }</style>\
+             <style media=\"(min-width: 500px)\">.a { fill: red }</style>",
+            GREEN,
+        ),
+        (
+            "<style>.a { fill: lime }</style>\
+             <style media=\"not print\">.a { fill: red }</style>",
+            GREEN,
+        ),
+        (
+            "<style>.a { fill: red }</style><style media=\" \">.a { fill: lime }</style>",
+            GREEN,
+        ),
+        (
+            "<style>.a { fill: lime }</style>\
+             <style media=\"screen\">@import 'red.css';</style>",
+            GREEN,
+        ),
+    ] {
+        let markup = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\">\
+             {styles}<rect class=\"a\" width=\"1\" height=\"1\"/></svg>"
+        );
+        let scene = tinker_pdf_svg::read_with(
+            markup.as_bytes(),
+            Some((100.0, 100.0)),
+            &Limits::DEFAULT,
+            &Context::new(&resolver),
+        )
+        .expect("reads");
+        assert_eq!(fill(&scene), Some(wanted), "{styles}");
+        assert!(scene.warnings.is_empty(), "{styles}: {:?}", scene.warnings);
+    }
+    assert_eq!(
+        resolver.asked.get(),
+        0,
+        "a screen sheet's import was fetched"
+    );
+}
+
 /// **`@import` is fetched through the resolver and read in place**, so a
 /// rule after it still beats it on source order; one for another medium is
 /// not fetched at all; one the resolver does not have is `ImportUnresolved`

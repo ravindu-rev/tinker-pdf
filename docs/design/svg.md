@@ -30,7 +30,8 @@ refusal table stops meaning anything.
   `stroke-linecap`, `stroke-linejoin`, `stroke-miterlimit`, `stroke-dasharray`,
   `stroke-dashoffset`, `opacity`, `fill-opacity`, `stroke-opacity`, and the
   three ways a property is stated: a presentation attribute, a `style=""`
-  attribute and a `<style>` element — whose `@media` is asked about paper,
+  attribute and a `<style>` element — whose `@media`, and whose own `media`
+  attribute, are asked about paper,
   whose `@import` is fetched through the caller and whose `@font-face` is
   handed to it (see *As built*).
 - **§13's gradients**: `<linearGradient>`, `<radialGradient>`, `<stop>`,
@@ -452,7 +453,10 @@ reads them now, against a `style::Reach` the caller supplies through
 `tinker_pdf_css::media::evaluate`, the EPUB cascade's evaluator, as **print**
 of the viewport — a book's sheets are written for the screen it is read on,
 and its pages answer `screen`, but an SVG here is set on a page, and a drawing
-that says `@media print` is saying what it looks like on one; `@import`
+that says `@media print` is saying what it looks like on one — and the
+`<style>` element's own `media` attribute (SVG 2 §6.2) asked the same way of
+the whole sheet, so `<style media="screen">` does not apply on paper, as
+`@media screen { … }` does not; `@import`
 fetched through `tinker_pdf_css::ImportResolver`, the trait the EPUB cascade's
 imports go through, and read in place before every rule after it (one after a
 rule is invalid, §3.3 of `css-cascade-5`), with `MAX_CSS_IMPORT_DEPTH`, the
