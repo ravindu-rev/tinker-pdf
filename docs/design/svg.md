@@ -84,11 +84,12 @@ A picture that quietly drops one of these looks finished.
   October 2026**; see *As built*. What is left of it: a `mask` or `clip-path`
   in `objectBoundingBox` units on a `<tspan>`, which SVG 2 §11.2 resolves
   against the box of the whole `<text>` — not known while the `<tspan>`'s
-  group is built — and text whose first run is hidden, whose pen is wherever
-  the text before it left one. Each is drawn unmasked or unclipped, a paint in
-  its own fallback, and named `Warning::TextBoxUnmeasured`, as every such
-  effect on text was before (`what_cannot_be_placed_stays_named`). So is any
-  through `tinker_pdf_svg::read`, which has no measurer.
+  group is built. It is drawn unmasked or unclipped and named
+  `Warning::TextBoxUnmeasured`, as every such effect on text was before
+  (`what_cannot_be_placed_stays_named`). So is any effect through
+  `tinker_pdf_svg::read`, which has no measurer. *Text whose first run is
+  hidden left this list on 9 October 2026*: a hidden run is now laid out (see
+  *Text* under *Design*), so it opens its chunk and is in the box.
 - ~~**`<marker>`** (§11.6)~~ — **drawn since the milestones**; see *As built*.
   Arrowheads on a path's vertices, thirty-two of them in the fetched corpus,
   all on paths that also fill.
@@ -173,6 +174,22 @@ alone is mode 0, a stroke alone 1, both 2, and neither 3, invisible text a
 reader still extracts. *Corrected 4 October 2026*: `draw_text` set a run's
 solid fill and nothing else, so a run painted with a gradient, a pattern
 or `none` drew in black, and a stroke never drew.
+
+A run under `visibility: hidden` is **laid out and not painted**, which is
+§11.5 read with SVG 2's *Controlling visibility*: a hidden element still
+affects text layout and counts in a bounding box. The leaf emits it as a
+`Node::Text` with `hidden` set, no fill and no stroke; `place_text` moves the
+pen past it and opens a chunk where it begins one, the box of its `<text>`
+holds its cells, and the writer draws nothing for it — not 9.3.6's invisible
+text, which a reader would extract, and not a silhouette in a clip, which
+§14.3.5 says a hidden child is not. *Corrected 9 October 2026, on the review
+of the formats lane*: the run was not emitted at all, so the text after it
+was set where the hidden text began, a hidden first run's text at the pen's
+zero rather than at its `x`, and a bounding-box paint on such a `<text>` was
+`TextBoxUnmeasured` (`a_hidden_run_is_laid_out_and_not_painted`,
+`a_hidden_run_is_in_its_texts_box`, `a_hidden_run_in_a_clip_is_no_silhouette`,
+`a_hidden_run_moves_the_pen_and_draws_nothing`). A hidden *shape* is still
+left out: it moves nothing.
 
 This is `Node::Image`'s seam read a second time. The crate carries what the
 document said; the caller resolves it against what it has. Where the document

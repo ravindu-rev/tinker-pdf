@@ -1710,10 +1710,11 @@ impl Walk<'_> {
     /// put where their marks are.
     ///
     /// The box is taken in the `<text>`'s space and carried into each run's,
-    /// which differs from it by a `dy` or a `<tspan>`'s own matrix. A
-    /// `<text>` whose runs cannot be placed — its first run hidden, so that
-    /// its pen is wherever the text before it left one — has no box, and each
-    /// paint is resolved as it is without a measurer, which names it.
+    /// which differs from it by a `dy` or a `<tspan>`'s own matrix, and a
+    /// hidden run's cells are in it (SVG 2's *Controlling visibility*). A
+    /// `<text>` whose runs cannot be placed — a measurement that is not
+    /// finite, or a cell past a double's range — has no box, and each paint is
+    /// resolved as it is without a measurer, which names it.
     fn settle(&mut self, start: usize, matrix: [f64; 6], waiting: Waiting) -> Result<(), Refusal> {
         let whole = self
             .measure
@@ -1960,9 +1961,11 @@ impl Walk<'_> {
             rotate,
         } = run;
         let style = &frame.style;
-        if !style.visible {
-            return Ok(());
-        }
+        // §11.5: a hidden run is laid out and not painted. It is a node all
+        // the same, with no paint, because the pen it advances and the box it
+        // is in are the caller's to measure (see `Node::Text::hidden`); a run
+        // left out set the text after it where the hidden text began.
+        let hidden = !style.visible;
         // A `dx`/`dy` on a **continuing** run is an offset from a pen this
         // crate does not have, so it is carried in the *matrix* — the one
         // place a shift can live without a metric. On a run that opens a chunk
@@ -1976,9 +1979,16 @@ impl Walk<'_> {
         // A run's box is its glyph cells, which are a font's. Measured by the
         // caller, a paint server in `objectBoundingBox` units waits for the
         // box of the whole `<text>`; without a measurer it has nothing here to
-        // take a fraction of.
-        let fill = self.paint_run(&style.fill, matrix, frame)?;
-        let stroke_paint = self.paint_run(&style.stroke, matrix, frame)?;
+        // take a fraction of. A hidden run paints nothing and waits for
+        // nothing.
+        let (fill, stroke_paint) = if hidden {
+            (Paint::None, Paint::None)
+        } else {
+            (
+                self.paint_run(&style.fill, matrix, frame)?,
+                self.paint_run(&style.stroke, matrix, frame)?,
+            )
+        };
         let stroke = if stroke_paint == Paint::None || style.stroke_width <= 0.0 {
             None
         } else {
@@ -2010,6 +2020,7 @@ impl Walk<'_> {
             fill,
             fill_opacity: style.fill_opacity.clamp(0.0, 1.0),
             stroke,
+            hidden,
         })
     }
 
@@ -2263,6 +2274,9 @@ fn whiten(nodes: Vec<crate::Node>, out: &mut Vec<crate::Node>) {
     let white = Paint::Solid(Colour { rgb: [1.0; 3] });
     for node in nodes {
         match node {
+            // A hidden run stays hidden: it is laid out among the others and
+            // is no silhouette (§14.3.5: a child made invisible by
+            // `visibility` does not contribute to the clip).
             crate::Node::Text {
                 text,
                 anchor,
@@ -2270,6 +2284,7 @@ fn whiten(nodes: Vec<crate::Node>, out: &mut Vec<crate::Node>) {
                 matrix,
                 font,
                 rotate,
+                hidden,
                 ..
             } => out.push(crate::Node::Text {
                 text,
@@ -2278,9 +2293,10 @@ fn whiten(nodes: Vec<crate::Node>, out: &mut Vec<crate::Node>) {
                 matrix,
                 font,
                 rotate,
-                fill: white.clone(),
+                fill: if hidden { Paint::None } else { white.clone() },
                 fill_opacity: 1.0,
                 stroke: None,
+                hidden,
             }),
             crate::Node::Path {
                 outline,

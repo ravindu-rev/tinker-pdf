@@ -201,6 +201,35 @@ fn a_clip_of_shapes_and_text_masks_by_their_union() {
     assert_eq!(*fill, WHITE);
 }
 
+/// §14.3.5: a child *"made invisible by … visibility"* does not contribute to
+/// the clip. A hidden run in a clip's text is laid out — the run after it is
+/// placed past it — and is no silhouette: it stays hidden and unpainted.
+#[test]
+fn a_hidden_run_in_a_clip_is_no_silhouette() {
+    let scene = scene(
+        "<clipPath id=\"c\"><text x=\"10\" y=\"20\"><tspan visibility=\"hidden\">A</tspan>B\
+         </text></clipPath><rect width=\"100\" height=\"100\" clip-path=\"url(#c)\"/>",
+    );
+    let (_, mask) = silhouette(&scene);
+    let [Node::Text {
+        text: first,
+        hidden: true,
+        fill: hidden_fill,
+        ..
+    }, Node::Text {
+        text: second,
+        hidden: false,
+        fill,
+        ..
+    }] = &mask.nodes[..]
+    else {
+        panic!("the hidden run, then the drawn one: {:?}", mask.nodes);
+    };
+    assert_eq!((first.as_str(), second.as_str()), ("A", "B"));
+    assert_eq!(*hidden_fill, Paint::None);
+    assert_eq!(*fill, WHITE);
+}
+
 /// §14.3.5: *"properties inherit into the 'clipPath' element from its
 /// ancestors; properties do not inherit from the element referencing the
 /// 'clipPath' element"*.

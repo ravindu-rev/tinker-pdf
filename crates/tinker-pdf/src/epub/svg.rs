@@ -420,11 +420,18 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
                 fill,
                 fill_opacity,
                 stroke,
+                hidden,
                 ..
             } => {
                 let Some(origin) = cursor.take() else {
                     return;
                 };
+                // §11.5: laid out — `place_text` moved the pen past it, and
+                // its origin is spent here — and not painted, not even as
+                // 9.3.6's invisible text a reader would extract.
+                if *hidden {
+                    return;
+                }
                 let stroke_alpha = stroke.as_ref().map_or(1.0, |stroke| stroke.opacity);
                 let alpha = if *fill_opacity < 1.0 || stroke_alpha < 1.0 {
                     self.alpha(*fill_opacity, stroke_alpha)
@@ -1768,6 +1775,8 @@ fn note_nodes(nodes: &[Node], fonts: &mut Fonts<'_>) {
                 }
                 continue;
             }
+            // A hidden run is measured and never drawn, so it needs no code.
+            Node::Text { hidden: true, .. } => continue,
             Node::Text {
                 text,
                 font,

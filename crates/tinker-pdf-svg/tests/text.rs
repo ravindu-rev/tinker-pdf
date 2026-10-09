@@ -399,15 +399,79 @@ fn a_run_of_pure_white_space_is_not_a_node() {
     assert!(scene(markup.as_bytes()).nodes.is_empty());
 }
 
-/// `visibility: hidden` keeps a run out of the display list, exactly as it
-/// keeps a shape out.
+/// `visibility: hidden` **lays a run out and paints nothing** (§11.5, and SVG
+/// 2's *Controlling visibility*: a hidden element still affects text layout).
+/// The run reaches the scene marked hidden, with no paint, so the caller moves
+/// the pen past it: a hidden `<tspan>` between two visible runs keeps the
+/// third where it would be were the second visible, and a hidden first run
+/// still opens its chunk at the `<text>`'s position. A shape, which moves
+/// nothing, is still left out (`paint.rs`).
+///
+/// *Corrected 9 October 2026, on the review of the formats lane*: this was
+/// `a_hidden_run_does_not_reach_the_scene`, and the run left out set the text
+/// after it where the hidden text began — the defect the roadmap's SVG row
+/// had recorded as found and not fixed.
 #[test]
-fn a_hidden_run_does_not_reach_the_scene() {
+fn a_hidden_run_is_laid_out_and_not_painted() {
+    let hidden = |scene: &Scene| -> Vec<(String, bool, bool)> {
+        scene
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                Node::Text {
+                    text,
+                    hidden,
+                    fill,
+                    stroke,
+                    ..
+                } => Some((
+                    text.clone(),
+                    *hidden,
+                    *fill == Paint::None && stroke.is_none(),
+                )),
+                _ => None,
+            })
+            .collect()
+    };
     let markup = "<svg xmlns=\"http://www.w3.org/2000/svg\">\
-        <text visibility=\"hidden\">gone</text><text>here</text></svg>";
-    let scene = scene(markup.as_bytes());
-    assert_eq!(runs(&scene).len(), 1);
-    assert_eq!(runs(&scene)[0].0, "here");
+        <text visibility=\"hidden\" stroke=\"red\">gone</text><text>here</text></svg>";
+    let first = scene(markup.as_bytes());
+    assert_eq!(
+        hidden(&first),
+        [
+            ("gone".to_owned(), true, true),
+            ("here".to_owned(), false, false)
+        ]
+    );
+    assert_eq!(runs(&first)[0].1, Some([0.0, 0.0]), "it opens its chunk");
+
+    let between = "<svg xmlns=\"http://www.w3.org/2000/svg\">\
+        <text x=\"5\" y=\"9\">AB<tspan visibility=\"hidden\">CD</tspan>EF</text></svg>";
+    let middle = scene(between.as_bytes());
+    assert_eq!(
+        runs(&middle),
+        [
+            ("AB".to_owned(), Some([5.0, 9.0])),
+            ("CD".to_owned(), None),
+            ("EF".to_owned(), None)
+        ],
+        "one chunk, the hidden run in it"
+    );
+    assert_eq!(
+        hidden(&middle).iter().map(|r| r.1).collect::<Vec<_>>(),
+        [false, true, false]
+    );
+
+    // A descendant may turn it back on.
+    let back = "<svg xmlns=\"http://www.w3.org/2000/svg\">\
+        <text visibility=\"hidden\">A<tspan visibility=\"visible\">B</tspan></text></svg>";
+    assert_eq!(
+        hidden(&scene(back.as_bytes()))
+            .iter()
+            .map(|r| r.1)
+            .collect::<Vec<_>>(),
+        [true, false]
+    );
 }
 
 /// A `<text>` inside a transformed group carries the composed matrix, so the

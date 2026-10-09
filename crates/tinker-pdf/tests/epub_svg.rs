@@ -1332,6 +1332,63 @@ fn a_continuing_run_is_set_after_the_one_before_it() {
     );
 }
 
+/// **A hidden run is laid out and not painted** (§11.5; SVG 2's *Controlling
+/// visibility*: a hidden element still affects text layout). `Two` hidden
+/// between `One` and `Six` moves the pen by its own advance, so `Six` is set
+/// where it would be were `Two` visible, and `Two` is no text object at all —
+/// not a glyph and not 9.3.6's invisible text a reader would extract. A
+/// hidden first run opens its chunk at the `<text>`'s `x` as a visible one
+/// would.
+///
+/// Until the review of the formats lane the run was left out of the scene,
+/// so `Six` began where `Two` began, and after a hidden first run at the pen's
+/// zero rather than at `x`.
+#[test]
+fn a_hidden_run_moves_the_pen_and_draws_nothing() {
+    // Times-Roman, in thousandths of an em: O 722, n 500, e 444; T 611,
+    // w 722, o 500. At twenty units `One` is 33.32 and `Two` 36.66.
+    let one = (0.722 + 0.5 + 0.444) * 20.0;
+    let two = (0.611 + 0.722 + 0.5) * 20.0;
+    let between = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="60">
+             <text x="10" y="40" font-family="serif" font-size="20">One<tspan
+               visibility="hidden">Two</tspan>Six</text>
+           </svg>"##,
+    );
+    let origins = text_origins(&between);
+    assert_eq!(origins.len(), 2, "two runs drawn: {origins:?}");
+    assert!((origins[0] - 10.0).abs() < 1e-6, "{origins:?}");
+    assert!(
+        (origins[1] - (10.0 + one + two)).abs() < 0.5,
+        "Six is set past the hidden Two: {} against {}",
+        origins[1],
+        10.0 + one + two
+    );
+    let text = between
+        .page(0)
+        .expect("a page")
+        .text()
+        .plain_text()
+        .split_whitespace()
+        .collect::<String>();
+    assert_eq!(text, "OneSix", "the hidden run extracts as nothing");
+
+    let first = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="60">
+             <text x="10" y="40" font-family="serif" font-size="20"><tspan
+               visibility="hidden">Two</tspan>Six</text>
+           </svg>"##,
+    );
+    let origins = text_origins(&first);
+    assert_eq!(origins.len(), 1, "one run drawn: {origins:?}");
+    assert!(
+        (origins[0] - (10.0 + two)).abs() < 0.5,
+        "after a hidden first run: {} against {}",
+        origins[0],
+        10.0 + two
+    );
+}
+
 // ---- a `<style>` element's at-rules --------------------------------------------
 
 /// The `ArchiveWarning::Svg` warnings a book's report carries.

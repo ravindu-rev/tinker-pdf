@@ -208,6 +208,35 @@ fn a_tspans_paint_spans_the_whole_text() {
     near_all(&gradient_box(&stroke.paint), &whole, "stroke");
 }
 
+/// **A hidden run is in its `<text>`'s box** (SVG 2's *Controlling
+/// visibility*), and a hidden first run is where the box begins: `AB` hidden
+/// and `CD` drawn at (10, 50) span (10, 34) to (50, 54), so the gradient on
+/// `CD` is the right half of a ramp across both, and the hidden run paints
+/// nothing. *Corrected 9 October 2026*: the hidden run was not in the scene,
+/// `CD`'s pen was wherever text before it had left one, and the box was
+/// `TextBoxUnmeasured`.
+#[test]
+fn a_hidden_run_is_in_its_texts_box() {
+    let scene = measured(
+        &format!(
+            "<linearGradient id=\"g\">{STOPS}</linearGradient>\
+             <text x=\"10\" y=\"50\" font-size=\"20\" fill=\"url(#g) #00ff00\">\
+             <tspan visibility=\"hidden\">AB</tspan>CD</text>"
+        ),
+        &Halves,
+    );
+    assert!(scene.warnings.is_empty(), "{:?}", scene.warnings);
+    let [hidden, shown] = fills(&scene.nodes)[..] else {
+        panic!("two runs: {:?}", scene.nodes);
+    };
+    assert_eq!(*hidden, Paint::None, "the hidden run paints nothing");
+    near_all(
+        &gradient_box(shown),
+        &[40.0, 0.0, 0.0, 20.0, 10.0, 34.0],
+        "the box of both runs",
+    );
+}
+
 /// **A run that continues a chunk is placed where the previous one ended**,
 /// and a `dy` on it moves its cells: the box of `AB`, then `CD` ten units
 /// lower, is (10, 34) to (50, 64).
@@ -349,10 +378,8 @@ fn text_beside_a_shape_is_measured_with_it() {
 /// measurer: unmasked, or in the paint's fallback.
 ///
 /// - A `<tspan>`'s mask takes the whole `<text>`'s box (SVG 2 §11.2), which
-///   is not known while the `<tspan>` is being read; its own runs' box would
-///   be a different picture.
-/// - A `<text>` whose first characters are hidden begins where the text
-///   before it left the pen, which is not in these nodes.
+///   is not known while the `<tspan>`'s group is built; its own runs' box
+///   would be a different picture.
 /// - A measurer with nothing to say gives no box.
 /// - A cell scaled past a double's range is no box either.
 #[test]
@@ -389,16 +416,6 @@ fn what_cannot_be_placed_stays_named() {
         }
     };
     let gradient = format!("<linearGradient id=\"g\">{STOPS}</linearGradient>");
-    let scene = measured(
-        &format!(
-            "{gradient}<text x=\"10\" y=\"50\" font-size=\"20\" fill=\"url(#g) #00ff00\">\
-             <tspan visibility=\"hidden\">AB</tspan>CD</text>"
-        ),
-        &Halves,
-    );
-    assert_eq!(fills(&scene.nodes).len(), 1, "the visible run");
-    fallback(&scene, "a hidden first run");
-
     let plain = format!(
         "{gradient}<text x=\"10\" y=\"50\" font-size=\"20\" fill=\"url(#g) #00ff00\">ABCD</text>"
     );

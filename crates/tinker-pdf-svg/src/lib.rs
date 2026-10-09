@@ -693,6 +693,15 @@ pub enum Node {
         fill_opacity: f64,
         /// How the glyphs are outlined, if at all.
         stroke: Option<Box<Stroke>>,
+        /// §11.5's `visibility: hidden`: the run is **laid out and not
+        /// painted**. SVG 2's *Controlling visibility* has a hidden element
+        /// still affect text layout and count in a bounding box, so the run
+        /// is here — its advance moves the pen for the text after it, a chunk
+        /// it opens opens there, and its cells are in its `<text>`'s box —
+        /// with `fill` none and no `stroke`, and a consumer draws nothing for
+        /// it: not a glyph, not an invisible one a reader would extract, and
+        /// not a clip's silhouette.
+        hidden: bool,
     },
     /// §14.5's group: nodes composited **together**, and then faded and
     /// clipped as one.
