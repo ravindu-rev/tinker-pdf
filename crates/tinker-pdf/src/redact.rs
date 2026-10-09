@@ -315,12 +315,16 @@
 //! not covered short of a new glyph in the font. A procedure that shows a
 //! glyph whose procedure shows a glyph is followed down, a fixed budget of
 //! streams per use ([`draws_under`]), past which the answer is *covered* and
-//! [`RedactionWarning::UnboundedProcedure`] says so. A procedure is measured
-//! where either reader of 9.6.5 runs it: in the scope that showed the glyph,
-//! as this engine's interpreter does, and in the font's own `/Resources`,
-//! where Table 112 puts what it names ([`procedure_draws_under`]); until
-//! October 2026 a `Do` only the font's resources named was not measured and
-//! nothing said so.
+//! [`RedactionWarning::UnboundedProcedure`] says so. What the budget cut
+//! short is said whatever removed the use: a soft mask's group under its
+//! state's name ([`RedactionWarning::PatternOrMask`]), anything else as
+//! `UnboundedProcedure` — a use the glyph's own box removed included, and
+//! one whose measurement after the answer ran out ([`Budget`]). A procedure
+//! is measured where either reader of 9.6.5 runs it: in the scope that
+//! showed the glyph, as this engine's interpreter does, and in the font's
+//! own `/Resources`, where Table 112 puts what it names
+//! ([`procedure_draws_under`]); until October 2026 a `Do` only the font's
+//! resources named was not measured and nothing said so.
 //!
 //! # The injections that were counted
 //!
@@ -525,6 +529,17 @@
 //! | the font's own reading skipped once the first decided the use, which is how it was until the lane's second review | **1** |
 //! | the budget a group measured only to be named spent, counted as why the use went | **1** |
 //! | the same, in the font's own reading | **1** |
+//!
+//! And what the lane's third review fixed, over the same filter, 140 tests:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | a group named only when found with the budget unspent, which is how it was until the lane's third review | 2 |
+//! | a use named unbounded only when removed for want of budget, which is how it was until the lane's third review | **1** |
+//! | the font's own reading kept no stream of the budget | 2 |
+//! | a form drawn after the answer not followed, which is how it was until the lane's third review | **1** |
+//! | a glyph shown after the answer not followed, which is how it was until the lane's third review | **1** |
+//! | what a named group's measurement cut short counted as unnamed too | 2 |
 //!
 //! And a tiling pattern's cell measured (the other half of clause (b)), the
 //! same way:
@@ -731,20 +746,32 @@ pub enum RedactionWarning {
     /// named whatever removed the use. The use goes; the group, like the
     /// procedure, is every use's and is not cut ([`cut_stream`]), so what it
     /// showed under the rectangle is still in the file — which is what this
-    /// says.
+    /// says. Such a group whose measurement at a use the per-use budget cut
+    /// short ([`MAX_PLACEMENTS`] streams) is named as well, since it was
+    /// measured against nothing past that point, and the variant's first
+    /// meaning is exactly that.
     PatternOrMask {
         /// The `/Pattern` or `/ExtGState` resource name.
         resource: Vec<u8>,
     },
     /// Measuring a Type 3 glyph's procedure ran past the [`MAX_PLACEMENTS`]
     /// streams one use of a glyph may run — a procedure that shows glyphs
-    /// whose procedures show glyphs, or one that shows its own — and the use
-    /// was **removed as though covered**, whatever its procedure draws.
+    /// whose procedures show glyphs, or one that shows its own — and either
+    /// the use was **removed as though covered**, whatever its procedure
+    /// draws, or what the procedure draws past where the budget stopped was
+    /// **measured against nothing** and is in no soft mask's group named
+    /// for it ([`RedactionWarning::PatternOrMask`]).
     ///
-    /// Over-removal, the direction this module errs in, and named for
-    /// [`RedactionWarning::RepeatedForm`]'s reason: it is not something a
-    /// caller can see from `glyphs` alone. Until October 2026 the use went
-    /// and nothing said why.
+    /// The first is over-removal, the direction this module errs in, and
+    /// named for [`RedactionWarning::RepeatedForm`]'s reason: it is not
+    /// something a caller can see from `glyphs` alone. Until October 2026
+    /// the use went and nothing said why. The second is raised whatever
+    /// removed the use — the glyph's own box, or what was found before the
+    /// budget ran out — because a group set where the measurement never
+    /// reached is not cut ([`cut_stream`]) and is in the file unread. Until
+    /// the lane's third review a use its box removed was never named, and a
+    /// measurement made after the answer, only to name what the use paints
+    /// with, said nothing when it ran out.
     UnboundedProcedure {
         /// The resource name of the Type 3 font the use was shown in.
         font: Vec<u8>,
@@ -893,10 +920,12 @@ const MAX_WARNINGS: usize = 64;
 /// such chain and this bounds the rest (ruling 1).
 ///
 /// It is also how many streams one use of a Type 3 glyph may run while its
-/// procedure is measured — the procedure, and every form and glyph procedure
-/// below it, each a placement of a stream under a transform — past which the
-/// use is removed as covered ([`draws_under`]) and named
-/// ([`RedactionWarning::UnboundedProcedure`]).
+/// procedure is measured — the procedure, and every form, soft mask's group
+/// and glyph procedure below it, each a placement of a stream under a
+/// transform — past which the use is removed as covered ([`draws_under`])
+/// and what went unmeasured is named: a group as
+/// [`RedactionWarning::PatternOrMask`], anything else as
+/// [`RedactionWarning::UnboundedProcedure`].
 pub const MAX_PLACEMENTS: usize = 64;
 
 /// How many bytes of cut form content one redaction holds before it writes
@@ -3107,7 +3136,9 @@ fn form_transform(editor: &DocumentEditor, dict: &Dict, ctm: Matrix) -> Matrix {
 /// whatever its procedure draws, and is measured all the same: what the
 /// procedure draws with — a soft mask's group, a tiling pattern's cell — is
 /// not cut either, and the measurement is what names it
-/// ([`RedactionWarning::PatternOrMask`]). It decides nothing about the use.
+/// ([`RedactionWarning::PatternOrMask`]). It decides nothing about the use,
+/// and what the budget cut short of it is named as at any other use
+/// ([`Budget`]).
 fn cut_stream(
     editor: &DocumentEditor,
     scope: &Dict,
@@ -3135,22 +3166,28 @@ fn cut_stream(
         let mut budget = Budget {
             left: MAX_PLACEMENTS,
             spent: false,
+            unnamed: false,
         };
         let drawn = procedure_draws_under(&measure, glyph, warnings, &mut budget);
-        if drawn && !glyph.covered {
+        let removed = drawn && !glyph.covered;
+        if removed {
             drop.insert(glyph.index);
-            // Removed because the measurement could not finish, not because
-            // anything was found under a rectangle: wider than asked, and
-            // said so.
-            if budget.spent {
-                note(
-                    warnings,
-                    RedactionWarning::UnboundedProcedure {
-                        font: glyph.font_name.clone(),
-                        uses: 1,
-                    },
-                );
-            }
+        }
+        // Named when the use was removed because the measurement could not
+        // finish, not because anything was found under a rectangle — wider
+        // than asked — and when what its procedure draws went unmeasured
+        // past where the budget stopped, in no group named for it, whatever
+        // removed the use: a group set there is in the file unread. Until
+        // the lane's third review a use its own box removed was never
+        // named, so one whose measurement ran out said nothing at all.
+        if (removed && budget.spent) || budget.unnamed {
+            note(
+                warnings,
+                RedactionWarning::UnboundedProcedure {
+                    font: glyph.font_name.clone(),
+                    uses: 1,
+                },
+            );
         }
     }
     if drop.is_empty() {
@@ -3165,11 +3202,48 @@ fn cut_stream(
 
 /// How many streams one use of a Type 3 glyph may still run while its
 /// procedure is measured, and whether it ran out.
+///
+/// Nothing a measurement spends is given back: the budget is what bounds the
+/// work (ruling 1), so a measurement made only to name what a use paints
+/// with spends it as one that decides the use does, and whatever is
+/// measured after the budget is gone is measured against nothing. That is
+/// said, never absorbed: a soft mask's group the budget cut short is named
+/// ([`RedactionWarning::PatternOrMask`], [`draws_under`]), and anything
+/// else it cut short is `unnamed`.
 struct Budget {
     left: usize,
     /// The budget ran out, and the answer *covered* was given for that
     /// reason rather than for anything measured.
     spent: bool,
+    /// The budget ran out somewhere no group named for it covers: what lay
+    /// past that point — a group set there among it — was measured against
+    /// nothing and is named by nothing else, so [`cut_stream`] names the use
+    /// ([`RedactionWarning::UnboundedProcedure`]) whatever removed it. Until
+    /// the lane's third review a measurement made only to name gave back
+    /// `spent` and nothing else, and what it left unmeasured went unsaid.
+    unnamed: bool,
+}
+
+impl Budget {
+    /// Whether the budget is gone, marking that it was found so: a stream
+    /// that would run now is measured against nothing.
+    fn exhausted(&mut self) -> bool {
+        if self.left == 0 {
+            self.spent = true;
+            self.unnamed = true;
+            return true;
+        }
+        false
+    }
+
+    /// Takes one stream, or says the budget is gone and marks that.
+    fn take(&mut self) -> bool {
+        if self.exhausted() {
+            return false;
+        }
+        self.left -= 1;
+        true
+    }
 }
 
 /// What [`draws_under`] measures in.
@@ -3209,6 +3283,12 @@ struct Measure<'a> {
 /// whatever removed the use ([`draws_under`]). Until the lane's second
 /// review it ran only when the first found nothing, and such a group went
 /// unmeasured at that use.
+///
+/// The first pass is held one stream short of the budget, so the second
+/// always reads the procedure itself — a group it sets there is measured,
+/// or named as measured against nothing — rather than finding the budget
+/// gone and leaving the whole of what the font's own resources bind unread
+/// ([`Budget::unnamed`]).
 fn procedure_draws_under(
     measure: &Measure<'_>,
     glyph: &GlyphUse,
@@ -3233,10 +3313,14 @@ fn procedure_draws_under(
         fonts,
         areas: measure.areas,
     };
+    let reserve = budget.left.min(1);
+    budget.left -= reserve;
     let first = draws_under(&enclosing, &glyph.procedure, glyph.ctm, warnings, budget);
+    budget.left += reserve;
     // Whether the answer is already one given for want of budget; a second
     // pass run only to name what it finds decides nothing, so the budget it
-    // spends does not make the answer that.
+    // spends does not make the answer that. What it leaves unmeasured is
+    // still said (`unnamed` is not put back).
     let spent = budget.spent;
 
     let mut scopes = vec![own];
@@ -3283,6 +3367,21 @@ fn procedure_draws_under(
 /// glyph rather than leaving one, and `budget` records that it was spent so
 /// [`cut_stream`] can name the use ([`RedactionWarning::UnboundedProcedure`]);
 /// only a face that recurses ever reaches it.
+///
+/// Once the answer is *yes* nothing decides more, but what the content
+/// paints with is still measured, because it is named and not cut: every
+/// soft mask's group it sets, and every form and glyph procedure it draws,
+/// for a group set inside one. So a group is named whatever comes before it
+/// in the content. Until the lane's third review the measurement after the
+/// answer read groups alone, and a group inside a form or a glyph procedure
+/// drawn after it went unmeasured.
+///
+/// A group the budget cut short is named too, measured against nothing as
+/// it was ([`Budget`]): it stays in the file, and was not measured whole.
+/// Until the lane's third review a group measured only to be named spent
+/// the budget, the answer it gave was put back and the streams were not, so
+/// every group after it met an empty budget, was "found" for want of one,
+/// was not named for that reason, and nothing said the budget had run out.
 fn draws_under(
     measure: &Measure<'_>,
     content: &[u8],
@@ -3290,11 +3389,9 @@ fn draws_under(
     warnings: &mut Vec<RedactionWarning>,
     budget: &mut Budget,
 ) -> bool {
-    if budget.left == 0 {
-        budget.spent = true;
+    if !budget.take() {
         return true;
     }
-    budget.left -= 1;
 
     let sets_mask = |name: &[u8]| {
         measure
@@ -3320,14 +3417,6 @@ fn draws_under(
     let mut drawn = pass.glyphs > 0 || pass.images > 0;
 
     for used in &uses {
-        // Once the answer is yes, a form or an image decides nothing more,
-        // and only a mask's group is still measured: it is not cut, so what
-        // it shows under a rectangle is named whatever decided the use.
-        // Until the lane's second review the measurement stopped at the
-        // first thing it found, and a group after it went unmeasured.
-        if drawn && !used.mask {
-            continue;
-        }
         let resolved = measure.scopes.iter().find_map(|scope| {
             if used.mask {
                 resolve_mask_group(measure.editor, scope, &used.name)
@@ -3342,50 +3431,73 @@ fn draws_under(
             Resolve::resolve_key(measure.editor, &dict, measure.editor.intern(b"Subtype"))
                 .as_name()
                 .and_then(|n| measure.editor.document().name_bytes(n));
-        // A group measured after the answer was given is measured only to
-        // be named, so the budget it spends does not make the answer one
-        // given for want of budget.
+        // Once the answer is yes, what is measured is measured only to name
+        // what it paints with, so the budget it spends does not make the
+        // answer one given for want of budget.
         let decided = drawn;
         let spent = budget.spent;
+        // What a group's own measurement leaves unmeasured is the group's,
+        // and naming the group says it; the flag is put back after.
+        let unnamed = budget.unnamed;
+        if used.mask {
+            budget.unnamed = false;
+        }
         let found = match subtype.as_deref() {
-            Some(b"Image") => covers_unit_square(used, measure.areas),
+            // An image paints with nothing, so after the answer it has
+            // nothing left to say.
+            Some(b"Image") => !decided && covers_unit_square(used, measure.areas),
             Some(b"Form") => {
-                let Some(inner_content) = measure.editor.stream_bytes(reference) else {
-                    continue;
+                // With no stream left the form is measured against nothing,
+                // as `draws_under` would say, without decoding it or loading
+                // its fonts: every form after the answer is followed now, and
+                // a stream of four thousand `Do`s would otherwise decode and
+                // load them all for nothing. A form whose stream does not
+                // decode draws nothing; neither is a `continue`, so a
+                // group's flag is put back below.
+                let content = if budget.exhausted() {
+                    None
+                } else {
+                    Some(measure.editor.stream_bytes(reference))
                 };
-                // 8.10.1, as the walk reads it: the form's own resources, or
-                // the scopes that drew it.
-                let own = Resolve::resolve_key(measure.editor, &dict, Name::RESOURCES)
-                    .as_dict()
-                    .cloned();
-                let placed = form_transform(measure.editor, &dict, used.ctm);
-                match &own {
-                    Some(resources) => {
-                        let fonts = fonts_in(measure.editor, resources);
-                        let inner = Measure {
-                            editor: measure.editor,
-                            scopes: vec![resources],
-                            fonts: vec![&fonts],
-                            areas: measure.areas,
-                        };
-                        draws_under(&inner, &inner_content, placed, warnings, budget)
+                match content {
+                    None => true,
+                    Some(None) => false,
+                    Some(Some(inner_content)) => {
+                        // 8.10.1, as the walk reads it: the form's own
+                        // resources, or the scopes that drew it.
+                        let own = Resolve::resolve_key(measure.editor, &dict, Name::RESOURCES)
+                            .as_dict()
+                            .cloned();
+                        let placed = form_transform(measure.editor, &dict, used.ctm);
+                        match &own {
+                            Some(resources) => {
+                                let fonts = fonts_in(measure.editor, resources);
+                                let inner = Measure {
+                                    editor: measure.editor,
+                                    scopes: vec![resources],
+                                    fonts: vec![&fonts],
+                                    areas: measure.areas,
+                                };
+                                draws_under(&inner, &inner_content, placed, warnings, budget)
+                            }
+                            None => draws_under(measure, &inner_content, placed, warnings, budget),
+                        }
                     }
-                    None => draws_under(measure, &inner_content, placed, warnings, budget),
                 }
             }
             _ => false,
         };
-        if found {
+        if used.mask {
             // A mask's group is the procedure's, as what the procedure shows
             // is: the use goes, and the group is not cut, since every other
             // use of the glyph draws it too ([`cut_stream`]'s decision). So
             // what it showed under the rectangle is still in the file, and
-            // that is named, as a cell a procedure paints with is — when it
-            // was found under a rectangle rather than measured out of
-            // budget, and whatever removed the use. Until the lane's review
-            // it went unnamed: a group's covered text stayed in the file
-            // with `warnings: []`.
-            if used.mask && !budget.spent {
+            // that is named, as a cell a procedure paints with is, whatever
+            // removed the use — and so is a group the budget cut short,
+            // which may show anything there. Until the lane's review a group
+            // that showed covered text went unnamed with `warnings: []`, and
+            // until its third one a group cut short did.
+            if found || budget.unnamed {
                 note(
                     warnings,
                     RedactionWarning::PatternOrMask {
@@ -3393,20 +3505,29 @@ fn draws_under(
                     },
                 );
             }
+            budget.unnamed = unnamed;
+        }
+        if found {
             drawn = true;
         }
         if decided {
             budget.spent = spent;
         }
     }
-    if drawn {
-        return true;
-    }
 
-    procedures
-        .found
-        .iter()
-        .any(|glyph| procedure_draws_under(measure, glyph, warnings, budget))
+    // A glyph this content shows draws what its procedure draws, measured
+    // the same way: after the answer, only for what it paints with.
+    for glyph in &procedures.found {
+        let decided = drawn;
+        let spent = budget.spent;
+        if procedure_draws_under(measure, glyph, warnings, budget) {
+            drawn = true;
+        }
+        if decided {
+            budget.spent = spent;
+        }
+    }
+    drawn
 }
 
 /// The `Do`s of one stream that must draw a copy, and the copy each draws.
@@ -11403,6 +11524,154 @@ mod patterns_and_masks {
         let (_, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
         assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
         assert_eq!(report.warnings, vec![named(b"GS9")]);
+    }
+
+    /// A group that shows `B` again — so a measurement of it that recurses
+    /// until the use's budget is gone — as object 16, and `/Fm9`, a form
+    /// that does the same, as object 17. `B` stands at (300, 300) in each,
+    /// far from every band below, so neither ever finds anything under a
+    /// rectangle: each is cut short by the budget, and by nothing else.
+    const RECURSES: &str = "BT /T3 10 Tf 300 300 Td (B) Tj ET";
+
+    fn recursing_objects() -> String {
+        let mut objects = String::new();
+        for (number, extra) in [
+            (16, "/Group << /S /Transparency /CS /DeviceGray >>\n"),
+            (17, ""),
+        ] {
+            objects.push_str(&format!(
+                "{number} 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n{extra}\
+                 /Resources << /Font << /F0 6 0 R /T3 13 0 R >> >> /Length {} >>\n\
+                 stream\n{RECURSES}\nendstream\nendobj\n",
+                RECURSES.len() + 1
+            ));
+        }
+        objects
+    }
+
+    /// [`with_procedure`] showing `content` with `B`'s procedure replaced by
+    /// `procedure`, the font's own `/Resources` binding `/GS7` to the
+    /// recursing group and `/Fm9` to the recursing form, and both objects
+    /// added.
+    fn recursing(content: &str, procedure: &str) -> Vec<u8> {
+        let resources = "/Resources << /Font << /F0 6 0 R >>\n\
+             /ExtGState << /GS7 << /SMask << /S /Luminosity /G 16 0 R >> >> >>\n\
+             /XObject << /Fm9 17 0 R >> >>";
+        let bytes = with_procedure(content, procedure, resources, &recursing_objects());
+        String::from_utf8(bytes)
+            .expect("the fixture is ASCII")
+            .replace("trailer\n<< /Size 17", "trailer\n<< /Size 18")
+            .into_bytes()
+    }
+
+    /// The reviewer's first probe. `B`'s own `X` is under the band and
+    /// decides the use; then `/GS7`'s group, measured only to be named,
+    /// recurses until the use's budget is gone; then `/GS0`'s group, whose
+    /// `SECRET` the band covers, is measured against what is left — nothing.
+    /// Until the lane's third review the budget a naming spent was given
+    /// back as a flag and not as streams, so `/GS0` met an empty budget, was
+    /// not named because it was "found" only for want of one, and the flag
+    /// was then put back: `warnings: []`, with the group's covered text in
+    /// the file. Each group the budget cut short is named now — it stays in
+    /// the file, and was not measured whole — and the use, which the `X`
+    /// decided, is not unbounded.
+    #[test]
+    fn a_group_after_a_naming_that_spent_the_budget_is_named() {
+        let bytes = recursing(
+            "BT /T3 10 Tf 10 10 Td (B) Tj ET",
+            "1000 0 d0 100 0 0 100 0 0 cm BT /F0 10 Tf 140 15 Td (X) Tj ET /GS7 gs /GS0 gs",
+        );
+        let (after, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(report.warnings, vec![named(b"GS7"), named(b"GS0")]);
+        let streams = all_streams(&CosDocument::open(after).expect("it reopens"));
+        assert!(
+            streams.contains("BT /F0 48 Tf 10 10 Td (SECRET) Tj ET"),
+            "the group is not cut, which is what is named: {streams}"
+        );
+    }
+
+    /// The reviewer's second probe: a use its own box removed, whose
+    /// procedure draws `/Fm9` — which recurses until the budget is gone —
+    /// and then sets `/GS0`, whose `SECRET` the band covers. Until the lane's
+    /// third review `/GS0` met the empty budget and went unnamed, and a use
+    /// its box removed was never named `UnboundedProcedure`, so the covered
+    /// text stayed with `warnings: []`. Now the group is named, and so is
+    /// the font: what `/Fm9` draws past where the budget stopped it was
+    /// measured against nothing, and is in no group named for it.
+    #[test]
+    fn a_covered_use_whose_measurement_ran_out_says_so() {
+        let procedure = "1000 0 d0 q 100 0 0 100 0 0 cm /Fm9 Do Q 100 0 0 100 0 0 cm /GS0 gs";
+        let bytes = recursing("BT /T3 10 Tf 10 10 Td (B) Tj ET", procedure);
+        let (_, report) = redact(open(bytes), &[band(0.0, 0.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(
+            report.warnings,
+            vec![
+                named(b"GS0"),
+                RedactionWarning::UnboundedProcedure {
+                    font: b"T3".to_vec(),
+                    uses: 1,
+                },
+            ]
+        );
+
+        // The same use with the band clear of its box: removed as though
+        // covered, as before, and the group named all the same.
+        let bytes = recursing("BT /T3 10 Tf 10 10 Td (B) Tj ET", procedure);
+        let (_, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "{:?}", report.warnings);
+        assert_eq!(
+            report.warnings,
+            vec![
+                named(b"GS0"),
+                RedactionWarning::UnboundedProcedure {
+                    font: b"T3".to_vec(),
+                    uses: 1,
+                },
+            ]
+        );
+    }
+
+    /// The reviewer's nit: `B`'s own `X` decides the use, and then it draws
+    /// `/Fm8`, a form whose own `/ExtGState` sets `/GS0`, whose `SECRET` the
+    /// band covers. Until the lane's third review a form after the answer
+    /// was skipped, so a group set inside one was named only when nothing
+    /// earlier in the procedure had decided the use. A form, and a glyph's
+    /// procedure, is followed after the answer now, to name what it sets.
+    #[test]
+    fn what_a_form_or_a_glyph_drawn_after_the_answer_paints_with_is_named() {
+        let procedure = "1000 0 d0 100 0 0 100 0 0 cm BT /F0 10 Tf 140 15 Td (X) Tj ET /Fm8 Do";
+        let resources = "/Resources << /Font << /F0 6 0 R >> /XObject << /Fm8 16 0 R >> >>";
+        let body = "/GS0 gs";
+        let form = format!(
+            "16 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n\
+             /Resources << /ExtGState << /GS0 << /SMask << /S /Luminosity /G 9 0 R >> >> >> >>\n\
+             /Length {} >>\nstream\n{body}\nendstream\nendobj\n",
+            body.len() + 1
+        );
+        let bytes = with_procedure(
+            "BT /T3 10 Tf 10 10 Td (B) Tj ET",
+            procedure,
+            resources,
+            &form,
+        );
+        let (_, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(report.warnings, vec![named(b"GS0")]);
+
+        // A glyph the procedure shows after its `X` is followed the same
+        // way: `A`, at about (10, 10), clear of the band, whose procedure
+        // fills its em with `/P0` — the cell is named, as one a procedure
+        // paints with is (`what_a_glyph_procedure_paints_with_is_named`).
+        // Until the lane's third review the glyph was never measured once
+        // the `X` had decided the use, and nothing was named.
+        let procedure = "1000 0 d0 100 0 0 100 0 0 cm BT /F0 10 Tf 140 15 Td (X) Tj ET \
+                         BT /T3 1 Tf 0 0 Td (A) Tj ET";
+        let bytes = with_procedure("BT /T3 10 Tf 10 10 Td (B) Tj ET", procedure, "", "");
+        let (_, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(report.warnings, vec![named(b"P0")]);
     }
 
     /// A pattern a covered glyph's procedure paints with is named as one an
