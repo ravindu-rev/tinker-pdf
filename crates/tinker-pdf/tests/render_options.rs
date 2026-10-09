@@ -321,6 +321,113 @@ fn a_stencil_mask_paints_the_fill_colour_s_own_ink() {
     assert_eq!(at(35, 5), [0, 255, 255, 0, 255], "light still converts");
 }
 
+/// **A pattern or a group keeps a DeviceCMYK colour's ink where it is drawn
+/// on ink, and nowhere else.** A coloured tiling pattern's cell (8.7.3.3's
+/// `/PaintType 1`) is drawn into a buffer of the page's own format and
+/// composited component for component, so a `k` inside it reaches the page
+/// as its components, exactly as on the page, and an `rg` inside it as its
+/// light turned to ink. An uncoloured one (`/PaintType 2`) paints in the
+/// colour its `scn` operands gave, which is light even over a DeviceCMYK
+/// base: `1 1 1 1` arrives as the pure K of the same shade. A form is drawn
+/// on the page; a group that names `/CS /DeviceRGB` composites in light
+/// (11.6.6), so its rich black is pure K too.
+///
+/// Until the third review of lane 8A, `RenderOptions::allow_cmyk`'s doc and
+/// `rendering.md` said a pattern's cell was light, which was true of the
+/// uncoloured pattern only, and nothing here held either case.
+#[test]
+fn a_pattern_or_group_keeps_a_device_cmyk_colour_s_ink_where_it_is_drawn_on_ink() {
+    // A coloured cell: rich black below, red above, ten by ten.
+    let coloured = "1 1 1 1 k 0 0 10 5 re f 1 0 0 rg 0 5 10 5 re f";
+    // An uncoloured cell: a shape, in whatever colour `scn` gives it.
+    let uncoloured = "0 0 10 10 re f";
+    let isolated_rgb = "1 1 1 1 k 40 0 10 20 re f";
+    let plain_form = "1 1 1 1 k 50 0 10 20 re f";
+    let content = "/Pattern cs /P0 scn 0 0 20 20 re f \
+                   /Cs1 cs 1 1 1 1 /P1 scn 20 0 20 20 re f \
+                   /Fm0 Do /Fm1 Do";
+    let cell = |keys: &str, body: &str| {
+        format!(
+            "<< /Type /Pattern /PatternType 1 /TilingType 1 /BBox [0 0 10 10] \
+             /XStep 10 /YStep 10 /Resources << >> {keys} /Length {} >>\n\
+             stream\n{body}\nendstream",
+            body.len() + 1
+        )
+    };
+    let form = |keys: &str, body: &str| {
+        format!(
+            "<< /Type /XObject /Subtype /Form /BBox [0 0 60 20] {keys} \
+             /Length {} >>\nstream\n{body}\nendstream",
+            body.len() + 1
+        )
+    };
+    let bytes = format!(
+        "%PDF-1.7\n\
+         1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+         2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+         3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 60 20] \
+         /Resources << /Pattern << /P0 5 0 R /P1 6 0 R >> \
+         /ColorSpace << /Cs1 [/Pattern /DeviceCMYK] >> \
+         /XObject << /Fm0 7 0 R /Fm1 8 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+         4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+         5 0 obj\n{}\nendobj\n\
+         6 0 obj\n{}\nendobj\n\
+         7 0 obj\n{}\nendobj\n\
+         8 0 obj\n{}\nendobj\n\
+         trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n",
+        content.len() + 1,
+        cell("/PaintType 1", coloured),
+        cell("/PaintType 2", uncoloured),
+        form(
+            "/Group << /S /Transparency /I true /CS /DeviceRGB >>",
+            isolated_rgb
+        ),
+        form("", plain_form),
+    );
+    let ink = render(
+        bytes.into_bytes(),
+        &RenderOptions {
+            format: PixelFormat::CmykA8,
+            allow_cmyk: true,
+            ..RenderOptions::default()
+        },
+    );
+    assert_eq!(ink.format, PixelFormat::CmykA8);
+    let at = |x: u32, y: u32| -> [u8; 5] {
+        let i = y as usize * ink.stride + x as usize * 5;
+        ink.data[i..i + 5].try_into().expect("five bytes")
+    };
+    // Page y 0 to 5 is pixel rows 15 to 19, and y 5 to 10 rows 10 to 14; the
+    // lattice repeats ten up, so rows 5 to 9 are the next cell's black.
+    for (x, y) in [(5, 17), (15, 17), (5, 7), (15, 7)] {
+        assert_eq!(
+            at(x, y),
+            [255, 255, 255, 255, 255],
+            "({x}, {y}): a `k` in a coloured cell is the document's own ink"
+        );
+    }
+    assert_eq!(
+        at(5, 12),
+        [0, 255, 255, 0, 255],
+        "an `rg` in a coloured cell is light turned to ink, as on the page"
+    );
+    assert_eq!(
+        at(30, 10),
+        [0, 0, 0, 255, 255],
+        "an uncoloured pattern's colour is light, over a DeviceCMYK base too"
+    );
+    assert_eq!(
+        at(45, 10),
+        [0, 0, 0, 255, 255],
+        "a group in `/DeviceRGB` composites light"
+    );
+    assert_eq!(
+        at(55, 10),
+        [255, 255, 255, 255, 255],
+        "a form is drawn on the page, and keeps the ink"
+    );
+}
+
 /// **Over ink, a rich black's edge is darker than over light**, and that is
 /// the clause's arithmetic rather than a disagreement. A pixel half covered
 /// by `1 1 1 1 k` composites to half of every ink, `128` four times, and

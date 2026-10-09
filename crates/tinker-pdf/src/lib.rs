@@ -609,10 +609,23 @@ pub struct RenderOptions {
     /// where its resource is read, and a CMYK buffer turns light into ink by
     /// 8.6.4.4's relation inverted with maximum undercolour removal — `K`
     /// takes all the grey it can — so `1 0 0 rg` arrives as `(0, 255, 255, 0)`.
-    /// That includes what is not a flat colour — an image, a shading, a
-    /// pattern — and the spaces whose components are not DeviceCMYK's
-    /// although they may be ink: an ICC CMYK profile, and a `/Separation` or
-    /// `/DeviceN` through its alternate.
+    /// That includes what is not a flat colour — an image, a shading — and
+    /// the spaces whose components are not DeviceCMYK's although they may be
+    /// ink: an ICC CMYK profile, and a `/Separation` or `/DeviceN` through its
+    /// alternate.
+    ///
+    /// **What is drawn on ink keeps its ink, wherever it is drawn.** A form
+    /// is drawn on the page. A coloured tiling pattern's cell (`/PaintType 1`)
+    /// is drawn into a buffer of the page's own format and composited
+    /// component for component, so a `k` inside it arrives as its components
+    /// and an `rg` as light turned to ink, exactly as on the page. A
+    /// transparency group does the same when it composites in ink — no `/CS`,
+    /// or `/CS /DeviceCMYK` — and composites in the space it names otherwise
+    /// (11.6.6), so a rich black inside a `/CS /DeviceRGB` group arrives as
+    /// pure `K`. An uncoloured pattern (`/PaintType 2`) paints in the colour
+    /// its `scn` operands gave, and that colour is light even over a
+    /// DeviceCMYK base: `[/Pattern /DeviceCMYK]` with `1 1 1 1 /P0 scn` is
+    /// pure `K` too.
     ///
     /// [`Bitmap::to_png`] writes an ink page as the light it stands for,
     /// under colour type 6 — PNG has no CMYK. Where every partly covered or

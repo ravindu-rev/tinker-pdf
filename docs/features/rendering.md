@@ -205,9 +205,22 @@ black was blended against its pure-`K` spelling and came out `(0, 255, 0,
 (`a_non_isolated_group_over_ink_blends_against_the_page_s_own_ink`). Every other colour is light, which a
 CMYK buffer takes through 8.6.4.4's relation inverted with maximum undercolour
 removal — `1 0 0 rg` arrives as `(0, 255, 255, 0)` — and so is what is not a
-flat colour (an image, a shading, a pattern's cell) and every space whose
-components are not DeviceCMYK's, ink or not: an ICC CMYK profile, and a
-`/Separation` or `/DeviceN` through its alternate. *Until October 2026 every
+flat colour (an image, a shading) and every space whose components are not
+DeviceCMYK's, ink or not: an ICC CMYK profile, and a `/Separation` or
+`/DeviceN` through its alternate. What is drawn on ink keeps its ink wherever
+it is drawn: a form on the page; a coloured tiling pattern's cell
+(`/PaintType 1`), drawn into a buffer of the page's own format and composited
+component for component, so a `k` inside it arrives as its components and an
+`rg` as light turned to ink, as on the page; and a transparency group that
+composites in ink (no `/CS`, or `/CS /DeviceCMYK`) — one that names
+`/CS /DeviceRGB` composites in light (11.6.6), so its rich black arrives as
+pure `K`. An uncoloured pattern (`/PaintType 2`) paints in the colour its
+`scn` operands gave, which is light even over a DeviceCMYK base:
+`[/Pattern /DeviceCMYK]` with `1 1 1 1 /P0 scn` is pure `K` too
+(`a_pattern_or_group_keeps_a_device_cmyk_colour_s_ink_where_it_is_drawn_on_ink`).
+Until the third review of lane 8A this paragraph and `allow_cmyk`'s doc
+called "a pattern's cell" light, which was true of the uncoloured pattern
+only. *Until October 2026 every
 colour was light*, so the rich black arrived as pure `K` and
 `a_page_asked_for_in_ink_with_the_opt_in_comes_back_in_ink` pinned that as the
 limitation it was; it now pins the four inks, and
