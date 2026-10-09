@@ -72,7 +72,7 @@ use tinker_pdf_css::property::{
 
 use crate::flex;
 use crate::floats::{Ceilings, FloatContext, Placed};
-use crate::metrics::{FirstStrong, FontRequest, Metrics, Neighbour, ShapingContext};
+use crate::metrics::{FirstStrong, FontRequest, Metrics, Neighbour, ShapingContext, CONTEXT_BYTES};
 use crate::style::{consume, Consumed};
 use crate::table::{self, CellWidths, Edge, Grid, Origin, Slot, TableBox};
 use crate::text::{self, Collapser};
@@ -6488,6 +6488,11 @@ fn embedding_of(style: &Consumed, anchor: Option<u32>) -> Option<Embedding> {
 /// Whether a neighbour that qualifies is in the same **face** — the other
 /// half of the painter's rule — is the provider's to decide, which is why each
 /// side carries its own [`FontRequest`].
+///
+/// A neighbour is handed over as its near [`CONTEXT_BYTES`] and no more —
+/// the last bytes of what comes before, the first of what comes after — so
+/// that what a provider does with it costs the same on a line of any length
+/// (review of lane 8C).
 fn context_of<'p>(
     content: &'p str,
     spans: &[(usize, usize, usize)],
@@ -6516,24 +6521,41 @@ fn context_of<'p>(
                 font: piece.style.font(),
             })
     };
+    // Only the near end of either, [`CONTEXT_BYTES`] of it cut back to a
+    // character boundary: before a slice the neighbour is the line so far,
+    // and the slice is measured at every break opportunity.
+    let before_of = |from: usize, to: usize, piece: &'p Piece| {
+        let mut from = from.max(to.saturating_sub(CONTEXT_BYTES));
+        while from < to && !content.is_char_boundary(from) {
+            from += 1;
+        }
+        neighbour(from, to, piece)
+    };
+    let after_of = |from: usize, to: usize, piece: &'p Piece| {
+        let mut to = to.min(from.saturating_add(CONTEXT_BYTES));
+        while to > from && !content.is_char_boundary(to) {
+            to -= 1;
+        }
+        neighbour(from, to, piece)
+    };
     let before = if slice.start > start {
-        neighbour(start.max(line.start), slice.start, piece)
+        before_of(start.max(line.start), slice.start, piece)
     } else {
         spans[..at]
             .iter()
             .rev()
             .find(|(s, e, _)| s < e)
-            .and_then(|&(s, e, index)| neighbour(s.max(line.start), e, text_of(index)?))
+            .and_then(|&(s, e, index)| before_of(s.max(line.start), e, text_of(index)?))
     };
     let after = if slice.end < end {
-        neighbour(slice.end, end.min(line.end), piece)
+        after_of(slice.end, end.min(line.end), piece)
     } else {
         spans
             .get(at + 1..)
             .unwrap_or(&[])
             .iter()
             .find(|(s, e, _)| s < e)
-            .and_then(|&(s, e, index)| neighbour(s, e.min(line.end), text_of(index)?))
+            .and_then(|&(s, e, index)| after_of(s, e.min(line.end), text_of(index)?))
     };
     ShapingContext { before, after }
 }

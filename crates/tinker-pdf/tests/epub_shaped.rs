@@ -1508,28 +1508,28 @@ fn a_mixed_line_is_cut_and_measured_in_one_context() {
     }
 }
 
-/// **A slice's context is read from its near end, so a long line costs its
-/// length and not its length squared** (review of lane 8C).
+/// **A paragraph set on one line opens, as one line** (review of lane 8C).
 ///
-/// Layout hands each slice everything before it on its line as its context,
-/// once per break opportunity (`Shaper::shape_in`), and the provider takes
-/// the near characters of it. It took them by counting the whole of it
-/// first, so filling a line cost the line's length at every opportunity —
-/// `O(characters²)` a line, and a paragraph set on one line is any book's
-/// for the asking: a tiny `font-size`, a negative `letter-spacing`, a wide
-/// fixed-layout viewport.
+/// The input the review found quadratic: 20 000 two-letter words at 0.001
+/// px in the kerning fixture's face, 60 000 characters on one line. A
+/// slice of it was measured with the whole line before it as its context,
+/// and the provider counted that to find its last eight characters —
+/// `O(characters²)`, 25.8 s to open in a debug build against 2.6 s for the
+/// same words at 16 px.
 ///
-/// No clock is read, for `5adf502`'s reason: a timing assertion fails on a
-/// slow machine and passes on a fast one with the defect back. The size is
-/// the evidence instead: 20 000 two-letter words on one line, at 0.001 px,
-/// in the kerning fixture's face — 60 000 characters. The quadratic build
-/// spent tens of seconds opening it in a debug build, the same words at
-/// 16 px, on hundreds of short lines, a few; this one opens it in the
-/// latter's time — 25.8 s against 2.6 s for this test on the machine the
-/// review was fixed on. The line is asserted to be one line, since a size
-/// that broke it would measure nothing.
+/// **This test does not hold the time, and its name does not say it
+/// does.** No clock is read, for `5adf502`'s reason, and `cargo test` has
+/// no timeout, so a quadratic build passes it slowly. The bound is held by
+/// two tests that fail: layout's `shaper.rs`
+/// `a_shaper_is_handed_the_near_end_of_a_neighbour_and_never_all_of_it`,
+/// by the length of what a shaper is handed — at most `CONTEXT_BYTES`,
+/// whatever the provider does with it — and this crate's
+/// `a_run_cut_in_a_piece_per_character_finds_each_glyphs_piece_by_search`,
+/// by count, for the painter's cut. What this one holds is that the input
+/// is the shape those two are about — the paragraph is set on one line —
+/// and that it opens.
 #[test]
-fn a_paragraph_on_one_line_is_measured_in_linear_time() {
+fn a_paragraph_set_on_one_line_opens_as_one_line() {
     let face = Face::new("Fixture Kern", "ab ");
     let words = "ab ".repeat(20_000);
     let body = format!("<span style=\"font-size: 0.001px\">{words}</span>");
@@ -1545,7 +1545,7 @@ fn a_paragraph_on_one_line_is_measured_in_linear_time() {
     assert_eq!(
         text.lines().len(),
         1,
-        "the paragraph was not set on one line, so it measures nothing"
+        "the paragraph was not set on one line, so it is not the input the bound is about"
     );
 }
 

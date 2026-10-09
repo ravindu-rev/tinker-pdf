@@ -135,6 +135,23 @@ pub struct ShapedText {
     pub rtl: bool,
 }
 
+/// How much of a neighbour's text a shaper is handed ([`Neighbour::text`]):
+/// its near 64 bytes, cut back to a character boundary — sixteen characters
+/// of any script at the least, four bytes being UTF-8's longest.
+///
+/// **Not a cap: nothing is refused at it.** It is the reach of a shaping
+/// context, and more than the shaping above this crate looks at — joining
+/// reaches past a few transparent marks to the nearest letter, and a pair or
+/// a mark one glyph away; the EPUB provider shapes eight characters of a
+/// neighbour. It is fixed **here** because of what a neighbour is: before a
+/// slice it is everything on the line so far, and a slice is measured at
+/// every break opportunity, so a neighbour handed over whole made the cost
+/// of filling a line depend on every provider reading only its near end — a
+/// provider that counted it to find its last few characters made the line
+/// quadratic in its length, and a paragraph on one line is any book's for a
+/// tiny `font-size` (review of lane 8C). Cut here, no provider can.
+pub const CONTEXT_BYTES: usize = 64;
+
 /// One neighbour of a run on its line: its text and the face it asks for.
 ///
 /// The font travels with the text because whether a neighbour is a context
@@ -145,14 +162,10 @@ pub struct ShapedText {
 /// above this crate.
 #[derive(Clone, Copy, Debug)]
 pub struct Neighbour<'a> {
-    /// The neighbour's text on this line, whole; the provider takes as much
-    /// of its near end as its shaping can see.
-    ///
-    /// **And reads it from that end.** Before a slice the neighbour is
-    /// everything on the line so far, and a slice is measured at every break
-    /// opportunity, so a provider that walks the whole of it — counting its
-    /// characters to find the last few — makes filling a line quadratic in
-    /// the line's length (review of lane 8C).
+    /// The near end of the neighbour's text on this line: at most
+    /// [`CONTEXT_BYTES`] of it, cut back to a character boundary — the last
+    /// bytes of what comes before, the first of what comes after. The
+    /// provider takes as much of it as its shaping can see.
     pub text: &'a str,
     /// The neighbour's own face request.
     pub font: FontRequest<'a>,

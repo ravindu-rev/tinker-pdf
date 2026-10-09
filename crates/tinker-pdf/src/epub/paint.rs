@@ -99,7 +99,7 @@ use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, BaseEncoding};
 use tinker_pdf_font::Sfnt;
 use tinker_pdf_layout::metrics::{
     FirstStrong, FontRequest, Metrics, Neighbour, PlacedGlyph, ShapedText, Shaper, ShapingContext,
-    Vertical,
+    Vertical, CONTEXT_BYTES,
 };
 use tinker_pdf_layout::{
     BackgroundLayer, BoxFragment, ClipFragment, Embedding, EmbeddingKind, Page as LayoutPage,
@@ -3616,14 +3616,19 @@ fn run_key(run: &TextRun) -> RunKey {
 /// shaped twice over.
 const CONTEXT_CHARS: usize = 8;
 
+// Layout hands a measured slice at most `CONTEXT_BYTES` of a neighbour, and
+// the painter shapes a drawn run against `CONTEXT_CHARS` of its neighbour
+// run: the two agree only while the first holds the second whatever the
+// script, a character being at most four bytes.
+const _: () = assert!(CONTEXT_CHARS * 4 <= CONTEXT_BYTES);
+
 /// The last `n` characters of `text`, read from its end.
 ///
-/// **From the end, and not by counting first.** Layout hands a slice the
-/// whole of its line before it as its context (`Neighbour::text`), once per
-/// break opportunity, so a tail that counted the text to find where its last
-/// `n` characters start cost the line's length at every opportunity —
-/// filling a paragraph set on one line, which a tiny `font-size` gives any
-/// book, was `O(characters²)` (review of lane 8C).
+/// **From the end, and not by counting first.** A neighbour layout hands a
+/// measured slice is at most [`CONTEXT_BYTES`], so either would do there;
+/// the painter's neighbour is a whole run ([`layout_context`], [`Fonts::set_contexts`]),
+/// which a paragraph at a tiny `font-size` makes a whole line, and reading
+/// it from the end costs what is taken (review of lane 8C).
 fn tail(text: &str, n: usize) -> String {
     let start = match n.checked_sub(1) {
         None => text.len(),

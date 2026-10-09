@@ -20,12 +20,13 @@
 //! twice, and a `flow.rs` that grew a second `metrics.measure` call would fail
 //! here rather than in a book.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{Display, Visibility};
 use tinker_pdf_layout::metrics::{
     FixedPitch, FontRequest, Metrics, PlacedGlyph, ShapedText, Shaper, ShapingContext, Vertical,
+    CONTEXT_BYTES,
 };
 use tinker_pdf_layout::{layout, BoxNode, CellSpan, Content, Limits, Options};
 
@@ -327,4 +328,177 @@ fn hidden_text_is_no_one_s_context() {
     .expect("two runs lay out");
     let runs = &laid.pages[0].runs;
     assert!((runs[0].width - 5.0).abs() < 1e-9, "{runs:?}");
+}
+
+// ---- how much of a neighbour a shaper is handed -------------------------------
+
+/// A provider that keeps count of the context it is handed: the longest
+/// neighbour either side, how many slices had none before them, how many
+/// `before` neighbours filled the window, and how many neighbours were not
+/// the near end of the text beside the slice. Counts rather than copies,
+/// since the defect this watches for hands over tens of kilobytes a call.
+#[derive(Default)]
+struct Records {
+    /// The paragraph, so a short `before` can be checked to be its start.
+    paragraph: String,
+    calls: Cell<usize>,
+    longest: Cell<usize>,
+    alone: Cell<usize>,
+    filled: Cell<usize>,
+    far: Cell<usize>,
+}
+
+impl Shaper for Records {
+    fn shape(&self, text: &str, font: &FontRequest<'_>, rtl: bool) -> ShapedText {
+        let glyphs: Vec<PlacedGlyph> = text
+            .char_indices()
+            .map(|(at, _)| PlacedGlyph {
+                glyph: 1,
+                cluster: u32::try_from(at).unwrap_or(0),
+                x_advance: font.size / 2.0,
+                y_advance: 0.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+            })
+            .collect();
+        let advance = glyphs.len() as f64 * font.size / 2.0;
+        ShapedText {
+            glyphs,
+            advance,
+            rtl,
+        }
+    }
+
+    fn shape_in(
+        &self,
+        text: &str,
+        font: &FontRequest<'_>,
+        rtl: bool,
+        context: &ShapingContext<'_>,
+    ) -> ShapedText {
+        self.calls.set(self.calls.get() + 1);
+        for n in [context.before, context.after].into_iter().flatten() {
+            self.longest.set(self.longest.get().max(n.text.len()));
+        }
+        if context.before.is_none() {
+            self.alone.set(self.alone.get() + 1);
+        }
+        if let Some(before) = context.before {
+            if before.text.len() + 3 >= CONTEXT_BYTES {
+                self.filled.set(self.filled.get() + 1);
+            } else if !self.paragraph.starts_with(before.text) {
+                // Shorter than the window, so it is all of the line before
+                // the slice, and this line starts the paragraph.
+                self.far.set(self.far.get() + 1);
+            }
+            if !self.touch(before.text.chars().next_back(), text.chars().next()) {
+                self.far.set(self.far.get() + 1);
+            }
+        }
+        if let Some(after) = context.after {
+            if !self.touch(text.chars().next_back(), after.text.chars().next()) {
+                self.far.set(self.far.get() + 1);
+            }
+        }
+        self.shape(text, font, rtl)
+    }
+}
+
+impl Records {
+    /// Whether `left` then `right` is a pair the paragraph holds — which a
+    /// neighbour's far end and the slice are not: the line's first 64 bytes
+    /// end in `a`, and no `a` is followed by an `a` or a space.
+    fn touch(&self, left: Option<char>, right: Option<char>) -> bool {
+        let (Some(left), Some(right)) = (left, right) else {
+            return false;
+        };
+        self.paragraph.contains(&format!("{left}{right}"))
+    }
+}
+
+impl Metrics for Records {
+    fn advance(&self, ch: char, _font: &FontRequest<'_>) -> f64 {
+        panic!("{ch:?} was measured a character at a time")
+    }
+
+    fn vertical(&self, font: &FontRequest<'_>) -> Vertical {
+        Vertical {
+            ascent: font.size * 0.8,
+            descent: font.size * 0.2,
+        }
+    }
+
+    fn shaper(&self) -> Option<&dyn Shaper> {
+        Some(self)
+    }
+}
+
+/// **A shaper is handed the near end of a neighbour, never all of it**
+/// (review of lane 8C).
+///
+/// Before a slice its neighbour is everything on the line so far, and a
+/// slice is measured at every break opportunity. Handed over whole, that
+/// made the cost of filling a line rest on every provider reading only the
+/// near end of it, and the EPUB provider once counted it instead —
+/// `O(characters²)` a line, and a paragraph at a tiny `font-size` is one
+/// line. So `flow.rs` hands over at most [`CONTEXT_BYTES`], cut back to a
+/// character boundary, and no provider can.
+///
+/// Held by what the provider is handed, not by a clock: 10 000 words of
+/// `aé€ ` — one, two, three and one bytes, so a cut that is not at a
+/// character boundary is met — set on one line at a hundredth of a point.
+/// Every neighbour is at most the window; every slice but the line's first
+/// has one before it; a `before` is the window filled, or the whole start
+/// of the line; and each is the near end — its character
+/// next to the slice and the slice's own next to it are a pair the paragraph
+/// holds.
+#[test]
+fn a_shaper_is_handed_the_near_end_of_a_neighbour_and_never_all_of_it() {
+    let paragraph = "a\u{e9}\u{20ac} ".repeat(10_000);
+    let mut node = tree(&paragraph);
+    if let Content::Children(children) = &mut node.content {
+        children[0].style.font_size = 0.01;
+    }
+    let provider = Records {
+        paragraph: paragraph.clone(),
+        ..Records::default()
+    };
+    let laid = layout(
+        &node,
+        &provider,
+        &Options::new(200.0, 400.0),
+        &Limits::DEFAULT,
+    )
+    .expect("one long line lays out");
+    let runs = &laid.pages[0].runs;
+    assert_eq!(runs.len(), 1, "the paragraph is not one line");
+    // Its last space hangs at the line's end, and is in no run.
+    assert!(
+        runs[0].text == paragraph.trim_end(),
+        "the line holds {} bytes of the paragraph's {}",
+        runs[0].text.len(),
+        paragraph.len()
+    );
+    assert!(provider.calls.get() > 10_000, "{}", provider.calls.get());
+    // The line's first slice, and the line's run measured whole once the
+    // line is set, have nothing before them; every other slice has the
+    // line so far, and a cut inside a character would have left it none.
+    assert!(
+        provider.alone.get() <= 2,
+        "{} of {} slices were measured with nothing before them",
+        provider.alone.get(),
+        provider.calls.get()
+    );
+    assert!(
+        provider.longest.get() <= CONTEXT_BYTES,
+        "a neighbour of {} bytes was handed over",
+        provider.longest.get()
+    );
+    assert!(
+        provider.filled.get() > 9_000,
+        "only {} of {} neighbours before a slice filled the window",
+        provider.filled.get(),
+        provider.calls.get()
+    );
+    assert_eq!(provider.far.get(), 0, "a neighbour was not its near end");
 }
