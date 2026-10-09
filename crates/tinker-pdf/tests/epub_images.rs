@@ -376,6 +376,59 @@ fn an_inline_img_sits_on_the_line_beside_its_text() {
     );
 }
 
+/// How many elements the report counts against `direction`, if any.
+fn direction_counted(doc: &Document) -> Option<usize> {
+    warnings(doc).into_iter().find_map(|warning| match warning {
+        ArchiveWarning::UnimplementedProperty {
+            property: "direction",
+            elements,
+        } => Some(elements),
+        _ => None,
+    })
+}
+
+/// **A block-level picture in a right-to-left containing block is counted
+/// against `direction`** (review of lane 8C).
+///
+/// CSS 2.2 §10.3.4 gives a block-level replaced box the used width an inline
+/// one would have, which is never `auto`, and then applies §10.3.3's margin
+/// rules: with neither margin `auto` the box is over-constrained, and a
+/// right-to-left containing block gives up `margin-left` and puts the picture
+/// against its right edge. This layout places it against the left, as it
+/// would in a left-to-right block — so it is counted, as a `<div>` with a
+/// `width` there is. The placement is asserted beside the count: the left
+/// edge is what makes the count true.
+///
+/// And the pictures direction does not move are not counted: one centred by
+/// two `auto` margins, one floated, one on a line (its line's alignment puts
+/// it), and the same picture in a left-to-right block.
+#[test]
+fn a_block_picture_in_a_right_to_left_block_is_counted_against_direction() {
+    let png = plate(20, 20);
+    let doc = open(
+        r#"<div dir="rtl"><img src="pic.png" style="display: block"/></div>"#,
+        &[("pic.png", png.clone())],
+    );
+    assert_eq!(direction_counted(&doc), Some(1), "{:?}", warnings(&doc));
+    let (matrix, _) = only_placement(&doc, 0);
+    assert_eq!(matrix[4], PAGE_MARGIN, "placed from the left, as counted");
+
+    for body in [
+        r#"<div dir="rtl"><img src="pic.png" style="display: block; margin: 0 auto"/></div>"#,
+        r#"<div dir="rtl"><img src="pic.png" style="display: block; float: left"/></div>"#,
+        r#"<div dir="rtl"><p><img src="pic.png"/></p></div>"#,
+        r#"<img src="pic.png" style="display: block"/>"#,
+    ] {
+        let doc = open(body, &[("pic.png", png.clone())]);
+        assert_eq!(
+            direction_counted(&doc),
+            None,
+            "`{body}`: {:?}",
+            warnings(&doc)
+        );
+    }
+}
+
 // ---- the picture is really in the document ----------------------------------
 
 /// **The page is more than one colour**, which is the claim no content stream

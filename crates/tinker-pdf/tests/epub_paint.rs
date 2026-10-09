@@ -1332,6 +1332,80 @@ fn direction_and_unicode_bidi_count_what_this_layout_does_not_do() {
             "direction",
             None,
         ),
+        // §10.4 runs §10.3.3 again with a clamping `max-width`, or a widening
+        // `min-width`, as the `width` — so an `auto` width that either clamps
+        // is over-constrained as a stated one is (review of lane 8C). Whether
+        // it clamps is the containing block's width to say, which the cascade
+        // does not know, so a box either may clamp is counted; a `max-width`
+        // of 100% or more over margins that are not negative never does, a
+        // `min-width` of zero never does, and `auto` margins still decide for
+        // themselves.
+        (
+            "",
+            "<div dir=\"rtl\"><div style=\"max-width: 50%\"><p dir=\"ltr\">a</p></div></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><p style=\"max-width: 50%\">a</p></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><p style=\"max-width: 20em\">a</p></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><p style=\"min-width: 120%\">a</p></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><table dir=\"ltr\" style=\"max-width: 50%\"><tr><td>a</td></tr></table></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><p style=\"max-width: 100%\">a</p></div>",
+            "direction",
+            None,
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><p style=\"max-width: 100%; margin-right: -10px\">a</p></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><p style=\"min-width: 0\">a</p></div>",
+            "direction",
+            None,
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><p style=\"max-width: 50%; margin: 0 auto\">a</p></div>",
+            "direction",
+            None,
+        ),
+        (
+            "",
+            "<p style=\"max-width: 50%\">a</p>",
+            "direction",
+            None,
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><p style=\"max-width: 50%; float: left\">a</p></div>",
+            "direction",
+            None,
+        ),
         // And a relatively positioned box with both `left` and `right` in a
         // right-to-left containing block, where §9.4.3 lets `right` win and
         // this layout applies `left` — a block, and an inline block, whose

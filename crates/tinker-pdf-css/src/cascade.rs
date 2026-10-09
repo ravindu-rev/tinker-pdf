@@ -1191,12 +1191,25 @@ fn casing_needs_language(language: &str) -> bool {
 ///   list item, a table or a flex container, with a definite `width` and
 ///   neither margin `auto` — the right one under `ltr` and the left one
 ///   under `rtl` (§10.3.3; a table's margins are its wrapper box's, §17.4).
+///   A width is definite when it is stated; when §10.4 runs §10.3.3 again
+///   with a `max-width` that narrows the box or a `min-width` that widens it
+///   as its `width`, which depends on the containing block's width and is
+///   counted wherever it may ([`may_narrow`], [`may_widen`]); and when the
+///   box is replaced — a block-level `<img>`, whose used width §10.3.4 takes
+///   from the picture and never leaves `auto` (review of lane 8C).
 ///   The box's own `direction` is not asked: a right-to-left
 ///   `<div style="width: 50%">` in a left-to-right body gives up its right
 ///   margin, which is what this layout does, and a left-to-right one inside
 ///   a right-to-left block gives up its left, which it does not (review of
-///   lane 8C). Without a `width` a flex container fills its line, and so
-///   does a table in this layout, so neither gives up a margin;
+///   lane 8C). Without a `width` — or a `min-width` or `max-width` that may
+///   clamp one — a flex container fills its line, and so does a table in
+///   this layout, so neither gives up a margin. A box with an `auto` margin
+///   whose width and other margin are wider than its containing block is
+///   over-constrained as well, the `auto` taken as zero, and is not counted:
+///   whether it is wider is the containing block's width to say, and
+///   counting every `auto` margin beside a width would count every centred
+///   block; the layout's `ContentOverflowedPage` names it where the box
+///   itself is wider than its containing block;
 /// - the same direction decides which inset of a relatively positioned box
 ///   wins when `left` and `right` are both stated — `left` under `ltr`,
 ///   `right` under `rtl` (§9.4.3) — and this layout applies `left`, so a box
@@ -1274,12 +1287,19 @@ fn note_unturned_direction<E: Element>(
                 }
             }
             _ => {
+                // §10.3.4: a block-level replaced box's used width is never
+                // `auto`. The cascade cannot see whether an `<img>`'s picture
+                // resolves, so an unresolved one — an empty box, not a
+                // replaced one — is counted too.
+                let replaced = element.local_name() == "img";
+                let definite =
+                    style.width != Size::Auto || replaced || may_narrow(style) || may_widen(style);
                 let over_constrained = style.float == Float::None
                     && matches!(
                         style.display,
                         Display::Block | Display::ListItem | Display::Table | Display::Flex
                     )
-                    && style.width != Size::Auto
+                    && definite
                     && style.margin.left != MarginValue::Auto
                     && style.margin.right != MarginValue::Auto;
                 let both_offsets = matches!(style.position, Position::Relative | Position::Sticky)
@@ -1292,6 +1312,39 @@ fn note_unturned_direction<E: Element>(
         if laid_left_to_right || placed_from_the_left {
             report.note_unsupported("direction");
         }
+    }
+}
+
+/// Whether §10.4 may run §10.3.3 again with `max-width` as a box's `width`:
+/// whether its `max-width` may be below the width it would otherwise fill.
+///
+/// The containing block's width decides, and it is not known before layout,
+/// so every `max-width` but `none` may — except a percentage of 100% or more
+/// over margins neither of which is negative: the room an `auto` width fills
+/// is the containing block less the margins, padding and border, and such a
+/// maximum is never below it, measured as content or as border box.
+fn may_narrow(style: &ComputedStyle) -> bool {
+    let not_negative = |margin: MarginValue| match margin {
+        MarginValue::Auto => true,
+        MarginValue::Length(LengthPercentage::Px(v) | LengthPercentage::Percent(v)) => v >= 0.0,
+    };
+    match style.max_width {
+        MaxSize::None => false,
+        MaxSize::Length(LengthPercentage::Percent(p)) => {
+            !(p >= 100.0 && not_negative(style.margin.left) && not_negative(style.margin.right))
+        }
+        MaxSize::Length(LengthPercentage::Px(_)) => true,
+    }
+}
+
+/// Whether §10.4 may run §10.3.3 again with `min-width` as a box's `width`:
+/// whether its `min-width` may be above the width it would otherwise fill —
+/// which any `min-width` above zero may, against a narrow enough containing
+/// block.
+fn may_widen(style: &ComputedStyle) -> bool {
+    match style.min_width {
+        MinSize::Auto => false,
+        MinSize::Length(LengthPercentage::Px(v) | LengthPercentage::Percent(v)) => v > 0.0,
     }
 }
 
