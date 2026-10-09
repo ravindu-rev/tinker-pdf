@@ -138,42 +138,124 @@ pub(crate) fn into_logical_order(page: &mut TextPage) -> usize {
 /// `אבג` (review of lane 8C). So two lines overlapping by more than half the
 /// shorter one's extent are not joined. A zero-width mark in an object of its
 /// own overlaps nothing and still joins its base's line.
+///
+/// # And a join costs the piece it joins
+///
+/// What a join asks of the line so far — where it lies along its baseline,
+/// which way that baseline runs, whether it holds a right-to-left character,
+/// its text — is kept in a [`Reach`] and grown by each piece, never read
+/// again from the line's first character. Read again, a line rejoined from
+/// `n` pieces cost `n²`: a right-to-left word drawn as one text object per
+/// letter or two is all a page needs to be that line, and this runs on every
+/// PDF's default extraction (review of lane 8C).
 fn rejoin_split_lines(lines: &mut Vec<TextLine>) -> usize {
     let mut joined = 0usize;
     let mut out: Vec<TextLine> = Vec::with_capacity(lines.len());
+    // What `continues_on_page` asks of `out.last()`, kept as it grows.
+    let mut reach: Option<Reach> = None;
     for line in std::mem::take(lines) {
-        match out.last_mut() {
-            Some(previous) if continues_on_page(previous, &line) => {
+        let rtl = holds_rtl(&line.chars);
+        if let (Some(previous), Some(reached)) = (out.last_mut(), reach.as_mut()) {
+            if let Some(along) = continues_on_page(previous, reached, &line, rtl) {
+                // A joined line's text is its characters': made from them
+                // once, at its first join, and grown by each piece's after.
+                if !reached.joined {
+                    previous.text.clear();
+                    push_text(&mut previous.text, &previous.chars);
+                    reached.joined = true;
+                }
+                let first_new = previous.chars.len();
+                push_text(&mut previous.text, &line.chars);
                 previous.chars.extend(line.chars);
-                previous.text = previous.chars.iter().map(|c| c.text.as_str()).collect();
                 previous.size = previous.size.max(line.size);
                 previous.quad = enclose(previous.quad, line.quad);
+                reached.grow(&previous.chars, first_new, along, rtl);
                 joined += 1;
+                continue;
             }
-            _ => out.push(line),
         }
+        reach = Some(Reach::of(&line.chars, rtl));
+        out.push(line);
     }
     *lines = out;
     joined
 }
 
-/// Whether `next` is the rest of the line `previous` is on. See
-/// [`rejoin_split_lines`].
-fn continues_on_page(previous: &TextLine, next: &TextLine) -> bool {
-    if previous.wmode == WritingMode::Vertical || next.wmode == WritingMode::Vertical {
-        return false;
+/// What [`continues_on_page`] asks of the line a piece might join, kept as
+/// pieces join it — so that a join looks at the piece and not at the line
+/// so far. See [`rejoin_split_lines`].
+struct Reach {
+    /// The line's [`baseline`].
+    axis: (f64, f64),
+    /// Whether a character of the line gave `axis` — until one does, it is
+    /// the page's `x` axis standing in, and a piece joined later may give
+    /// the line its first, as `baseline` over the joined characters would.
+    settled: bool,
+    /// Where the line's characters start and end along `axis`.
+    span: (f64, f64),
+    /// Whether any of them reads right to left ([`holds_rtl`]).
+    rtl: bool,
+    /// Whether a piece has been joined to the line yet.
+    joined: bool,
+}
+
+impl Reach {
+    /// A line's reach, from all of its characters, of which `rtl` says
+    /// whether any reads right to left.
+    fn of(chars: &[TextChar], rtl: bool) -> Reach {
+        let found = found_baseline(chars);
+        let axis = found.unwrap_or((1.0, 0.0));
+        Reach {
+            axis,
+            settled: found.is_some(),
+            span: span(chars, axis),
+            rtl,
+            joined: false,
+        }
     }
-    let holds_rtl = |line: &TextLine| line.chars.iter().any(|c| c.text.chars().any(right_to_left));
-    if !holds_rtl(previous) && !holds_rtl(next) {
-        return false;
+
+    /// The reach of the line once the characters from `first_new` on —
+    /// a piece whose extent along `axis` is `along`, and of which `rtl` says
+    /// whether it reads right to left — have joined it.
+    fn grow(&mut self, chars: &[TextChar], first_new: usize, along: (f64, f64), rtl: bool) {
+        self.rtl |= rtl;
+        self.span = (self.span.0.min(along.0), self.span.1.max(along.1));
+        if !self.settled {
+            if let Some(axis) = found_baseline(chars.get(first_new..).unwrap_or_default()) {
+                // The line's first baseline, from this piece: the extent is
+                // measured again along it — once for the line, since a
+                // settled axis never moves.
+                self.axis = axis;
+                self.settled = true;
+                self.span = span(chars, axis);
+            }
+        }
+    }
+}
+
+/// Whether `next` is the rest of the line `previous` is on, and if it is,
+/// `next`'s extent along that line's baseline. `reach` is `previous`'s
+/// [`Reach`]; `next_rtl` says whether `next` holds a right-to-left
+/// character. See [`rejoin_split_lines`].
+fn continues_on_page(
+    previous: &TextLine,
+    reach: &Reach,
+    next: &TextLine,
+    next_rtl: bool,
+) -> Option<(f64, f64)> {
+    if previous.wmode == WritingMode::Vertical || next.wmode == WritingMode::Vertical {
+        return None;
+    }
+    if !reach.rtl && !next_rtl {
+        return None;
     }
     let (Some(first), Some(other)) = (previous.chars.first(), next.chars.first()) else {
-        return false;
+        return None;
     };
-    let axis = baseline(&previous.chars);
+    let axis = reach.axis;
     let theirs = baseline(&next.chars);
     if axis.0 * theirs.0 + axis.1 * theirs.1 < 0.999 {
-        return false;
+        return None;
     }
     let slack = previous.size.max(next.size).max(1.0) * 0.5;
     // Across the baseline: the two first glyphs' origins, on the normal.
@@ -181,23 +263,39 @@ fn continues_on_page(previous: &TextLine, next: &TextLine) -> bool {
     let across =
         (other.origin.0 - first.origin.0) * normal.0 + (other.origin.1 - first.origin.1) * normal.1;
     if !across.is_finite() || across.abs() > slack {
-        return false;
+        return None;
     }
     // Along it: the gap between the two extents, zero where they overlap.
-    let span = |line: &TextLine| {
-        line.chars
-            .iter()
-            .map(|c| extent(c, axis))
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (a, b)| {
-                (lo.min(a), hi.max(b))
-            })
-    };
-    let (lo1, hi1) = span(previous);
-    let (lo2, hi2) = span(next);
+    let (lo1, hi1) = reach.span;
+    let (lo2, hi2) = span(&next.chars, axis);
     let gap = (lo2 - hi1).max(lo1 - hi2).max(0.0);
     let overlap = (hi1.min(hi2) - lo1.max(lo2)).max(0.0);
     let shorter = (hi1 - lo1).min(hi2 - lo2);
-    gap.is_finite() && gap <= slack && overlap <= shorter * 0.5
+    (gap.is_finite() && gap <= slack && overlap <= shorter * 0.5).then_some((lo2, hi2))
+}
+
+/// Whether any of `chars` holds a right-to-left character.
+fn holds_rtl(chars: &[TextChar]) -> bool {
+    chars.iter().any(|c| c.text.chars().any(right_to_left))
+}
+
+/// Adds the text of `chars`, in their order, to `text`.
+fn push_text(text: &mut String, chars: &[TextChar]) {
+    for c in chars {
+        look();
+        text.push_str(&c.text);
+    }
+}
+
+/// Where `chars` start and end along `axis`: the outermost of their
+/// [`extent`]s.
+fn span(chars: &[TextChar], axis: (f64, f64)) -> (f64, f64) {
+    chars
+        .iter()
+        .map(|c| extent(c, axis))
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (a, b)| {
+            (lo.min(a), hi.max(b))
+        })
 }
 
 /// The smallest upright box around two quads.
@@ -220,6 +318,7 @@ fn enclose(a: Quad, b: Quad) -> Quad {
 /// number in a left-to-right line resolves to level 2, which L2 reverses twice
 /// and so leaves where it was.
 fn right_to_left(c: char) -> bool {
+    look();
     matches!(
         bidi_class(c),
         BidiClass::R | BidiClass::AL | BidiClass::RLE | BidiClass::RLO | BidiClass::RLI
@@ -236,18 +335,22 @@ fn is_mark(text: &str) -> bool {
 /// The unit vector along the line's baseline, from the first character whose
 /// quad has one; the page's own `x` axis when none does.
 fn baseline(chars: &[TextChar]) -> (f64, f64) {
-    for c in chars {
+    found_baseline(chars).unwrap_or((1.0, 0.0))
+}
+
+/// The unit vector along the baseline of the first of `chars` whose quad has
+/// one, if any does.
+fn found_baseline(chars: &[TextChar]) -> Option<(f64, f64)> {
+    chars.iter().find_map(|c| {
         let (dx, dy) = (c.quad.lr.0 - c.quad.ll.0, c.quad.lr.1 - c.quad.ll.1);
         let length = (dx * dx + dy * dy).sqrt();
-        if length.is_finite() && length > 1e-9 {
-            return (dx / length, dy / length);
-        }
-    }
-    (1.0, 0.0)
+        (length.is_finite() && length > 1e-9).then(|| (dx / length, dy / length))
+    })
 }
 
 /// Where a character's box starts and ends along `axis`.
 fn extent(c: &TextChar, (ux, uy): (f64, f64)) -> (f64, f64) {
+    look();
     let mut lo = f64::INFINITY;
     let mut hi = f64::NEG_INFINITY;
     for (x, y) in [c.quad.ll, c.quad.lr, c.quad.ul, c.quad.ur] {
@@ -256,6 +359,27 @@ fn extent(c: &TextChar, (ux, uy): (f64, f64)) -> (f64, f64) {
         hi = hi.max(s);
     }
     (lo, hi)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`look`]'s count, on this thread.
+    static LOOKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// One look at one character: its extent along a baseline ([`extent`]), its
+/// `Bidi_Class` ([`right_to_left`]) or its text added to a line's
+/// ([`push_text`]) — the three things a join asks of every character of a
+/// line, and so the three a crafted page could make it ask over and over.
+/// Counted only under `cfg(test)`, where the tests below hold a page's total
+/// to a small multiple of its characters, so that a lookup over the whole
+/// line so far put back **fails** rather than runs slowly — which
+/// `cargo test`, having no timeout, would not notice. Everywhere else it is
+/// nothing.
+#[inline]
+fn look() {
+    #[cfg(test)]
+    LOOKS.with(|looks| looks.set(looks.get().saturating_add(1)));
 }
 
 /// How far `at` lies outside `(lo, hi)`; zero inside it.
@@ -646,6 +770,201 @@ mod tests {
         ];
         assert_eq!(rejoin_split_lines(&mut lines), 1);
         assert_eq!(lines.len(), 1);
+    }
+
+    /// **A line rejoined from many pieces costs its characters, not their
+    /// square** (review of lane 8C). A right-to-left word drawn as one text
+    /// object per two letters, in reading order, after a long left-to-right
+    /// run: every piece meets the line so far end to end and is joined to
+    /// it. Each join used to rebuild the line's text from every character
+    /// joined so far, measure its extent over all of them and look for a
+    /// right-to-left character from its start — past the whole left-to-right
+    /// run — so the page cost the square of its pieces, on every PDF's
+    /// default extraction.
+    ///
+    /// Held by count, not by a clock: [`look`] counts every character's
+    /// extent, `Bidi_Class` and text looked at, under `cfg(test)`, and a page
+    /// of `C` characters is held to `8 C`, 49 152 here, where a join that
+    /// looks at the line so far took 12 595 201 (its text rebuilt from every
+    /// character at every join, uncounted then, besides). And the line is
+    /// whole: one line, every character in it once, read in logical order.
+    #[test]
+    fn a_line_rejoined_from_many_pieces_costs_its_characters() {
+        const RUN: usize = 2048;
+        const PIECES: usize = 2048;
+        let start = -5.0 * RUN as f64;
+        let mut lines = vec![line(
+            (0..RUN)
+                .map(|i| ch("a", start + 5.0 * i as f64, 5.0))
+                .collect(),
+            false,
+        )];
+        // Piece `k` spans `[10k, 10k + 10]`: alef drawn first on the right,
+        // the pen moving left to bet. The next piece starts where it ends.
+        lines.extend((0..PIECES).map(|k| {
+            let x = 10.0 * k as f64;
+            line(vec![ch(ALEF, x + 5.0, 5.0), ch(BET, x, 5.0)], true)
+        }));
+        let characters = RUN + 2 * PIECES;
+        let mut page = TextPage::default();
+        page.blocks.push(tinker_pdf_content::TextBlock {
+            lines,
+            quad: ch("a", start, 5.0 * characters as f64).quad,
+        });
+
+        LOOKS.with(|looks| looks.set(0));
+        into_logical_order(&mut page);
+        let looks = LOOKS.with(core::cell::Cell::get);
+
+        let bound = 8 * characters;
+        assert!(
+            looks <= bound,
+            "{looks} characters looked at to rejoin and read a page of {characters}; \
+             a join that costs its piece looks at no more than {bound}"
+        );
+        let lines = &page.blocks[0].lines;
+        assert_eq!(lines.len(), 1, "every piece is the one line");
+        assert_eq!(lines[0].chars.len(), characters, "no character lost");
+        let word = format!("{ALEF}{BET}").repeat(PIECES);
+        assert_eq!(lines[0].text, format!("{word}{}", "a".repeat(RUN)));
+        assert_eq!(
+            lines[0].text,
+            lines[0]
+                .chars
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<String>(),
+            "the text is its characters'"
+        );
+    }
+
+    /// The join as it was before [`Reach`]: everything about the line so far
+    /// read again from its characters at every piece. Quadratic, and kept
+    /// only to say what the kept reach must answer.
+    fn rejoin_by_rereading(lines: &mut Vec<TextLine>) -> usize {
+        fn continues(previous: &TextLine, next: &TextLine) -> bool {
+            if previous.wmode == WritingMode::Vertical || next.wmode == WritingMode::Vertical {
+                return false;
+            }
+            if !holds_rtl(&previous.chars) && !holds_rtl(&next.chars) {
+                return false;
+            }
+            let (Some(first), Some(other)) = (previous.chars.first(), next.chars.first()) else {
+                return false;
+            };
+            let axis = baseline(&previous.chars);
+            let theirs = baseline(&next.chars);
+            if axis.0 * theirs.0 + axis.1 * theirs.1 < 0.999 {
+                return false;
+            }
+            let slack = previous.size.max(next.size).max(1.0) * 0.5;
+            let normal = (-axis.1, axis.0);
+            let across = (other.origin.0 - first.origin.0) * normal.0
+                + (other.origin.1 - first.origin.1) * normal.1;
+            if !across.is_finite() || across.abs() > slack {
+                return false;
+            }
+            let (lo1, hi1) = span(&previous.chars, axis);
+            let (lo2, hi2) = span(&next.chars, axis);
+            let gap = (lo2 - hi1).max(lo1 - hi2).max(0.0);
+            let overlap = (hi1.min(hi2) - lo1.max(lo2)).max(0.0);
+            let shorter = (hi1 - lo1).min(hi2 - lo2);
+            gap.is_finite() && gap <= slack && overlap <= shorter * 0.5
+        }
+        let mut joined = 0usize;
+        let mut out: Vec<TextLine> = Vec::new();
+        for line in std::mem::take(lines) {
+            match out.last_mut() {
+                Some(previous) if continues(previous, &line) => {
+                    previous.chars.extend(line.chars);
+                    previous.text = previous.chars.iter().map(|c| c.text.as_str()).collect();
+                    previous.size = previous.size.max(line.size);
+                    previous.quad = enclose(previous.quad, line.quad);
+                    joined += 1;
+                }
+                _ => out.push(line),
+            }
+        }
+        *lines = out;
+        joined
+    }
+
+    /// **The kept reach answers what reading the line again answered**, to
+    /// the bit, on 2 000 made-up blocks of pieces that meet, miss, overlap,
+    /// sit a hair or a line apart, run along baselines a degree, two and
+    /// thirty off the page's, and start with characters whose quads have no
+    /// baseline at all — so that a line's axis is first the page's and then
+    /// its first real piece's, and a piece a degree off is measured along
+    /// whichever the line has. The lines are compared by their `Debug`
+    /// form, every coordinate in it exact.
+    #[test]
+    fn the_kept_reach_joins_exactly_what_rereading_the_line_joined() {
+        // (cos, sin) of 0, 1, 2 and 30 degrees: within the join's 0.999 of
+        // each other but for the last.
+        const AXES: [(f64, f64); 4] = [
+            (1.0, 0.0),
+            (0.999_847_695_156_391_3, 0.017_452_406_437_283_51),
+            (0.999_390_827_019_095_8, 0.034_899_496_702_500_97),
+            (0.866_025_403_784_438_6, 0.5),
+        ];
+        const TEXTS: [&str; 5] = ["a", ALEF, BET, QAMATS, " "];
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |below: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % below
+        };
+        let mut joins = 0usize;
+        for _ in 0..2000 {
+            let mut lines = Vec::new();
+            let mut along = 0.0f64;
+            for _ in 0..1 + next(10) {
+                let (ux, uy) = AXES[next(4) as usize];
+                let rise = [0.0, 0.3, 20.0][next(3) as usize];
+                // Where this piece starts against where the last one ended:
+                // overlapping, touching, a hair apart, or an em.
+                along += [-4.0, -1.0, 0.0, 0.5, 2.0, 12.0][next(6) as usize];
+                let mut chars = Vec::new();
+                for _ in 0..1 + next(4) {
+                    let width = [0.0, 5.0, 5.0, 3.0][next(4) as usize];
+                    let at =
+                        |s: f64, up: f64| (s * ux - (rise + up) * uy, s * uy + (rise + up) * ux);
+                    chars.push(TextChar {
+                        text: TEXTS[next(5) as usize].to_string(),
+                        quad: Quad {
+                            ll: at(along, -2.0),
+                            lr: at(along + width, -2.0),
+                            ul: at(along, 8.0),
+                            ur: at(along + width, 8.0),
+                        },
+                        size: [10.0, 12.0][next(2) as usize],
+                        origin: at(along, 0.0),
+                        mcid: None,
+                        stream: 0,
+                        font: None,
+                    });
+                    along += width;
+                }
+                let mut piece = line(chars, false);
+                piece.size = piece.chars.iter().map(|c| c.size).fold(0.0, f64::max);
+                piece.quad = piece
+                    .chars
+                    .iter()
+                    .fold(piece.quad, |q, c| enclose(q, c.quad));
+                lines.push(piece);
+            }
+            let mut kept = lines.clone();
+            let mut reread = lines;
+            let joined = rejoin_split_lines(&mut kept);
+            assert_eq!(joined, rejoin_by_rereading(&mut reread));
+            assert_eq!(format!("{kept:?}"), format!("{reread:?}"));
+            joins += joined;
+        }
+        assert!(
+            joins > 1000,
+            "only {joins} joins: the blocks test too little"
+        );
     }
 
     #[test]
