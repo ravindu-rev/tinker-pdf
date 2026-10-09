@@ -38,12 +38,12 @@ use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BackgroundPosition, BackgroundRepeat, BackgroundSize,
     BorderCollapse, BorderSpacing, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
-    ColumnSpan, ColumnWidth, Display, FlexDirection, FlexWrap, Float, FontFamily, FontStyle,
-    FontVariant, Gap, ImageRef, Inset, JustifyContent, LengthPercentage, LineHeight,
-    ListStylePosition, ListStyleType, MarginValue, MaxSize, MinSize, OutlineStyle, Overflow,
-    OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Shadow, Side, Sides, Size, Spacing,
-    TableLayout, TextAlign, TextDecoration, TextTransform, VerticalAlign, Visibility, WhiteSpace,
-    ZIndex,
+    ColumnSpan, ColumnWidth, Display, FeatureSetting, FlexDirection, FlexWrap, Float, FontFamily,
+    FontKerning, FontStyle, FontVariant, Gap, ImageRef, Inset, JustifyContent, LengthPercentage,
+    LineHeight, ListStylePosition, ListStyleType, MarginValue, MaxSize, MinSize, OutlineStyle,
+    Overflow, OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Shadow, Side, Sides,
+    Size, Spacing, TableLayout, TextAlign, TextDecoration, TextTransform, VerticalAlign,
+    Visibility, WhiteSpace, ZIndex,
 };
 
 use crate::metrics::FontRequest;
@@ -72,6 +72,10 @@ pub struct Consumed {
     pub font_weight: u16,
     /// `font-variant`, carried to the painter.
     pub font_variant: FontVariant,
+    /// `font-kerning`, for the shaper.
+    pub font_kerning: FontKerning,
+    /// `font-feature-settings`, for the shaper; empty for `normal`.
+    pub font_features: Vec<FeatureSetting>,
     /// `color`.
     pub color: Color,
     /// `text-decoration`.
@@ -306,6 +310,11 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         // been refused by value. It moves no box and paints nothing
         // differently, which is the whole of what it means on paper.
         color_scheme: _,
+        // `css-fonts-4` §6.4 and §6.12 change which features the shaper
+        // applies, so they reach the provider in the run's `FontRequest` —
+        // measured with them, and drawn with them, by one shaper.
+        font_kerning,
+        font_feature_settings,
         display,
         float,
         clear,
@@ -417,6 +426,8 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         font_style: *font_style,
         font_weight: *font_weight,
         font_variant: *font_variant,
+        font_kerning: *font_kerning,
+        font_features: font_feature_settings.clone(),
         color: *color,
         text_decoration: *text_decoration,
         line_height,
@@ -520,6 +531,8 @@ impl Consumed {
             weight: self.font_weight,
             style: self.font_style,
             size: self.font_size,
+            kerning: self.font_kerning,
+            features: &self.font_features,
         }
     }
 

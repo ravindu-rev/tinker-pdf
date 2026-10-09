@@ -24,7 +24,7 @@
 //! request and answers; *which* face that is came from `css-fonts-4` §5's
 //! matching, which is milestone 9's and lives above this crate.
 
-use tinker_pdf_css::property::{FontFamily, FontStyle};
+use tinker_pdf_css::property::{FeatureSetting, FontFamily, FontKerning, FontStyle};
 
 /// Which face a run wants, and at what size.
 ///
@@ -41,6 +41,12 @@ pub struct FontRequest<'a> {
     pub style: FontStyle,
     /// The computed `font-size`, in points.
     pub size: f64,
+    /// The computed `font-kerning`, which a shaper turns into its `kern`
+    /// feature and a provider that does not shape has no use for.
+    pub kerning: FontKerning,
+    /// The computed `font-feature-settings`, in the order written: the
+    /// features a shaper switches on or off over its own plan.
+    pub features: &'a [FeatureSetting],
 }
 
 /// How tall a line of one face is.

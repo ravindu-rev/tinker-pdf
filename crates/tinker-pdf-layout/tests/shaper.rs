@@ -169,6 +169,8 @@ fn the_two_paths_disagree_by_a_number_this_test_can_name() {
         weight: 400,
         style: tinker_pdf_css::property::FontStyle::Normal,
         size: 10.0,
+        kerning: tinker_pdf_css::property::FontKerning::Auto,
+        features: &[],
     };
     let shaper = OnlyShapes::default();
     // `fi` ligates to one em; five characters that do not would be 25 points.

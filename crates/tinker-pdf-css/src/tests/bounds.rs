@@ -9,8 +9,9 @@
 use super::{sheet, tree, Node};
 use crate::cascade::{cascade, Origin};
 use crate::limits::{
-    MAX_CSS_BYTES, MAX_CSS_DECLARATIONS, MAX_CSS_IMPORT_DEPTH, MAX_CSS_RULES,
-    MAX_CSS_SELECTOR_PARTS, MAX_CSS_SHADOWS, MAX_CSS_TOKENS, MAX_DOM_NODES, MAX_SELECTOR_MATCHES,
+    MAX_CSS_BYTES, MAX_CSS_DECLARATIONS, MAX_CSS_FEATURE_SETTINGS, MAX_CSS_IMPORT_DEPTH,
+    MAX_CSS_RULES, MAX_CSS_SELECTOR_PARTS, MAX_CSS_SHADOWS, MAX_CSS_TOKENS, MAX_DOM_NODES,
+    MAX_SELECTOR_MATCHES,
 };
 use crate::media::MediaContext;
 use crate::parser::{parse, MAX_AT_RULE_DEPTH};
@@ -405,4 +406,51 @@ fn a_shadow_list_past_the_cap_is_refused_by_value() {
         );
         assert_eq!(declarations.len(), 2, "the declaration after it survives");
     }
+}
+
+/// `MAX_CSS_FEATURE_SETTINGS`: a list at the cap is read, one past it is
+/// refused by value — counted, not truncated — and the declaration after it
+/// survives.
+#[test]
+fn a_feature_list_past_the_cap_is_refused_by_value() {
+    use crate::property::{Declaration, Property};
+    let list = |count: usize| {
+        (0..count)
+            .map(|n| format!("\"ss{:02}\"", n % 100))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let at = parse_at_defaults(
+        format!(
+            "p {{ font-feature-settings: {} }}",
+            list(MAX_CSS_FEATURE_SETTINGS)
+        )
+        .as_bytes(),
+    )
+    .expect("the sheet is read");
+    match &at.rules[0].declarations[0].declaration {
+        Declaration::Known(Property::FontFeatureSettings(settings)) => {
+            assert_eq!(settings.len(), MAX_CSS_FEATURE_SETTINGS);
+        }
+        other => panic!("a list at the cap was not read: {other:?}"),
+    }
+
+    let past = parse_at_defaults(
+        format!(
+            "p {{ font-feature-settings: {}; float: left }}",
+            list(MAX_CSS_FEATURE_SETTINGS + 1)
+        )
+        .as_bytes(),
+    )
+    .expect("the sheet is still read");
+    let declarations = &past.rules[0].declarations;
+    assert!(
+        matches!(
+            &declarations[0].declaration,
+            Declaration::Unsupported { property, .. } if *property == "font-feature-settings"
+        ),
+        "a list past the cap: {:?}",
+        declarations[0].declaration
+    );
+    assert_eq!(declarations.len(), 2, "the declaration after it survives");
 }

@@ -61,7 +61,9 @@ use tinker_pdf_cos::build::{
     MaskKind, PageBuilder, Shading, ShadingPattern, StateMask, TilingPattern, TilingType,
     TransparencyGroup,
 };
-use tinker_pdf_css::property::{Color, FontFamily, FontStyle, FontVariant, TextDecoration};
+use tinker_pdf_css::property::{
+    Color, FontFamily, FontKerning, FontStyle, FontVariant, TextDecoration,
+};
 use tinker_pdf_filters::Limits as FilterLimits;
 use tinker_pdf_font::Sfnt;
 use tinker_pdf_layout::metrics::{FontRequest, Metrics};
@@ -105,6 +107,8 @@ fn request_of<'a>(font: &tinker_pdf_svg::TextStyle, families: &'a [FontFamily]) 
             FontStyle::Normal
         },
         size: font.size,
+        kerning: FontKerning::Auto,
+        features: &[],
     }
 }
 
@@ -1806,6 +1810,8 @@ fn note_nodes(nodes: &[Node], fonts: &mut Fonts<'_>) {
                 FontStyle::Normal
             },
             variant: FontVariant::Normal,
+            kerning: FontKerning::Auto,
+            features: Vec::new(),
             color: Color::BLACK,
             decoration: TextDecoration::None,
             painted: true,

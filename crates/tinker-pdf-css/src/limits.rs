@@ -249,6 +249,30 @@ pub const MAX_SELECTOR_MATCHES: usize = 4_000_000;
 /// 2 097 152 shadows.
 pub const MAX_CSS_SHADOWS: usize = 32;
 
+/// The most `<feature-tag-value>`s one `font-feature-settings` declaration
+/// may list.
+///
+/// | Fixture | Settings in its longest list |
+/// |---|---|
+/// | Every committed book | 0 — none declares the property |
+/// | A 400-page novel | 4, old-style figures and small capitals on and two ligatures off |
+/// | A 200-page comic | 0 |
+/// | A 200-page fixed document | 0 |
+/// | **This cap** | **32** |
+///
+/// **A cap on copies.** The property is inherited (`css-fonts-4` §6.12), so a
+/// list is copied into the computed style of every element under the one it
+/// is written on and into every text run those elements set — and seven
+/// bytes, `"abcd",`, a setting, let one sheet at [`MAX_CSS_BYTES`] write a list
+/// of 1 198 372 settings for each of up to [`MAX_DOM_NODES`] elements. With it a run carries at most thirty-two. OpenType registers
+/// about a hundred and twenty feature tags and a book's list is a handful.
+///
+/// A list past it is **refused by value**, the whole declaration, and counted
+/// against the property by element, as a shadow list past
+/// [`MAX_CSS_SHADOWS`] is: the first thirty-two of a longer list would be
+/// settings nobody wrote on their own.
+pub const MAX_CSS_FEATURE_SETTINGS: usize = 32;
+
 /// The relations, checked at compile time so a bad one **does not build**.
 ///
 /// Gap 29's device. The one that matters is written the opposite way round

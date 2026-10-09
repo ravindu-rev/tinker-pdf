@@ -2338,3 +2338,89 @@ fn color_scheme_reads_the_light_scheme_and_refuses_a_dark_only_one_by_value() {
         );
     }
 }
+
+/// **`font-kerning` at its three keywords** (`css-fonts-4` §6.4).
+#[test]
+fn font_kerning_reads_its_three_keywords() {
+    use crate::property::FontKerning;
+    for (value, expected) in [
+        ("auto", FontKerning::Auto),
+        ("normal", FontKerning::Normal),
+        ("NONE", FontKerning::None),
+    ] {
+        assert_eq!(
+            known(&format!("p {{ font-kerning: {value} }}")),
+            vec![Property::FontKerning(expected)],
+            "font-kerning: {value}"
+        );
+    }
+    for value in ["off", "none normal", "0"] {
+        let parsed = sheet(&format!("p {{ font-kerning: {value} }}"));
+        assert!(
+            parsed.rules.iter().all(|rule| rule.declarations.is_empty())
+                || matches!(
+                    parsed.rules[0].declarations[0].declaration,
+                    Declaration::Unsupported { .. }
+                ),
+            "font-kerning: {value} is not one of the three"
+        );
+    }
+}
+
+/// **`font-feature-settings` is its list of tags, each on or off**
+/// (`css-fonts-4` §6.12).
+///
+/// A tag alone is on; `on` and `1` are on, `off` and `0` off. A tag that is not
+/// exactly four printable ASCII characters invalidates the whole declaration,
+/// as §6.12 says, and so does a negative value or a missing string. A value
+/// above one is an alternate index — inside the grammar, and a parameter this
+/// build's shaper does not carry — so the declaration is refused by value.
+#[test]
+fn font_feature_settings_reads_tags_on_and_off_and_refuses_an_alternate_index() {
+    use crate::property::FeatureSetting;
+    let set = |tag: &[u8; 4], value: u32| FeatureSetting { tag: *tag, value };
+    for (value, expected) in [
+        ("normal", vec![]),
+        ("\"liga\"", vec![set(b"liga", 1)]),
+        ("\"liga\" 0", vec![set(b"liga", 0)]),
+        (
+            "\"liga\" off, \"smcp\" on",
+            vec![set(b"liga", 0), set(b"smcp", 1)],
+        ),
+        ("'kern' 1,'dlig'", vec![set(b"kern", 1), set(b"dlig", 1)]),
+        ("\"ss01\" ON", vec![set(b"ss01", 1)]),
+    ] {
+        assert_eq!(
+            known(&format!("p {{ font-feature-settings: {value} }}")),
+            vec![Property::FontFeatureSettings(expected)],
+            "font-feature-settings: {value}"
+        );
+    }
+    for value in ["\"salt\" 2", "\"liga\", \"swsh\" 3"] {
+        assert_eq!(
+            declarations(&format!("p {{ font-feature-settings: {value} }}"))[0].declaration,
+            Declaration::Unsupported {
+                property: "font-feature-settings",
+                value: value.to_owned(),
+            },
+            "font-feature-settings: {value}"
+        );
+    }
+    for value in [
+        "liga",
+        "\"lig\"",
+        "\"ligat\"",
+        "\"li\u{e9}a\"",
+        "\"liga\" -1",
+        "\"liga\" 1.5",
+        "\"liga\",",
+        "\"liga\" on off",
+        "normal, \"liga\"",
+    ] {
+        let parsed = sheet(&format!("p {{ font-feature-settings: {value} }}"));
+        assert!(
+            parsed.rules.iter().all(|rule| rule.declarations.is_empty()),
+            "font-feature-settings: {value} is not CSS and is discarded"
+        );
+    }
+}

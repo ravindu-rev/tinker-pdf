@@ -1667,14 +1667,31 @@ fn write_chapters<R: read::Resources + ?Sized>(
 
     // ---- pass 4: every face, and every character that needs a code ---------
     let mut fonts = Fonts::new(faces);
+    // `font-kerning: normal` and an on `font-feature-settings` asked of text
+    // set in a face this build does not shape, by element: what the cascade
+    // could not count, since which face a character is set in is decided
+    // here (`Fonts::unshaped_settings`).
+    let mut unshaped: [usize; 2] = [0, 0];
     for chapter in chapters.iter() {
+        let mut asked: [std::collections::BTreeSet<u32>; 2] = Default::default();
         for page in &chapter.pages {
             for run in &page.runs {
                 if run.painted {
                     fonts.note(run);
+                    let (kerning, features) = fonts.unshaped_settings(run);
+                    if let Some(anchor) = run.anchor.filter(|_| !run.generated) {
+                        if kerning {
+                            asked[0].insert(anchor);
+                        }
+                        if features {
+                            asked[1].insert(anchor);
+                        }
+                    }
                 }
             }
         }
+        unshaped[0] += asked[0].len();
+        unshaped[1] += asked[1].len();
         // An SVG's characters need codes on the same terms and in the same
         // pass: a PDF's font resources belong to the document rather than to a
         // page, and a character outside `WinAnsiEncoding` needs a code chosen
@@ -1686,6 +1703,18 @@ fn write_chapters<R: read::Resources + ?Sized>(
     }
 
     // ---- what the caller is told, before any of it is drawn ----------------
+    let mut census = census.clone();
+    let counted: Vec<(&'static str, usize)> = [
+        ("font-kerning", unshaped[0]),
+        ("font-feature-settings", unshaped[1]),
+    ]
+    .into_iter()
+    .filter(|(_, elements)| *elements > 0)
+    .collect();
+    census.absorb(&read::Census {
+        unsupported: counted,
+        ..read::Census::default()
+    });
     for (property, elements) in census.ranked() {
         warnings.push(ArchiveWarning::UnimplementedProperty { property, elements });
     }

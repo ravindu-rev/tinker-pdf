@@ -172,6 +172,8 @@ fn a_fallback_character_is_measured_in_the_face_it_is_drawn_in() {
         weight: 400,
         style: FontStyle::Normal,
         size: 10.0,
+        kerning: tinker_pdf_css::property::FontKerning::Auto,
+        features: &[],
     };
     let sfnt = Sfnt::parse(face(Family::Serif, false, false)).expect("the bundled face parses");
     for ch in ['\u{416}', '\u{3A9}', '\u{11F}'] {

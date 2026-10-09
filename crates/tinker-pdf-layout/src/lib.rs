@@ -131,7 +131,8 @@ use std::fmt;
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    BorderStyle, Color, FontFamily, FontStyle, FontVariant, Sides, TextDecoration,
+    BorderStyle, Color, FeatureSetting, FontFamily, FontKerning, FontStyle, FontVariant, Sides,
+    TextDecoration,
 };
 
 /// One node of the tree layout is given.
@@ -617,6 +618,10 @@ pub struct TextRun {
     pub style: FontStyle,
     /// `font-variant`.
     pub variant: FontVariant,
+    /// `font-kerning`, for the shaper the painter draws the run with.
+    pub kerning: FontKerning,
+    /// `font-feature-settings`, likewise; empty for `normal`.
+    pub features: Vec<FeatureSetting>,
     /// `color`.
     pub color: Color,
     /// `text-decoration`.

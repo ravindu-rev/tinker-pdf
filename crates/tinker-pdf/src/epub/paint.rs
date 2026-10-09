@@ -88,8 +88,9 @@ use tinker_pdf_cos::build::{
 use tinker_pdf_css::cascade::StyleTree;
 
 use tinker_pdf_css::property::{
-    BackgroundSize, BorderStyle, Color, ComputedOffset, FontFamily, FontStyle, ImageRef,
-    LengthPercentage, Position, RepeatStyle, Side, TextDecoration, Transform, TransformOrigin,
+    BackgroundSize, BorderStyle, Color, ComputedOffset, FeatureSetting, FontFamily, FontKerning,
+    FontStyle, ImageRef, LengthPercentage, Position, RepeatStyle, Side, TextDecoration, Transform,
+    TransformOrigin,
 };
 use tinker_pdf_font::base14::Standard14;
 use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, BaseEncoding};
@@ -103,6 +104,7 @@ use tinker_pdf_layout::{
 use tinker_pdf_shape::bidi::{reorder, BaseDirection, Level, Paragraph};
 use tinker_pdf_shape::shape::itemize;
 use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
+use tinker_pdf_shape::Tag;
 use tinker_pdf_svg::transform::{concat, invert, rotation, IDENTITY};
 
 use super::read::PX_TO_PT;
@@ -724,7 +726,8 @@ impl BookMetrics<'_> {
 /// pipeline is allowed to end. Every number is an integer until this line.
 fn shape_with(bytes: &[u8], text: &str, font: &FontRequest<'_>, rtl: bool) -> Option<ShapedText> {
     let sfnt = Sfnt::parse(bytes)?;
-    let shaper = tinker_pdf_shape::Shaper::new(&sfnt);
+    let settings = settings_of(font.kerning, font.features);
+    let shaper = tinker_pdf_shape::Shaper::new(&sfnt).with_settings(&settings);
     let direction = if rtl {
         BaseDirection::RightToLeft
     } else {
@@ -774,7 +777,8 @@ fn shape_in_context(
     (before, after): (&str, &str),
 ) -> Option<ShapedText> {
     let sfnt = Sfnt::parse(bytes)?;
-    let shaper = tinker_pdf_shape::Shaper::new(&sfnt);
+    let settings = settings_of(font.kerning, font.features);
+    let shaper = tinker_pdf_shape::Shaper::new(&sfnt).with_settings(&settings);
     let whole = format!("{before}{text}{after}");
     let own = before.len()..before.len() + text.len();
     let paragraph = Paragraph::new(&whole, own_direction(text));
@@ -1039,6 +1043,33 @@ impl<'a> Fonts<'a> {
         )
     }
 
+    /// Whether `run` asks a face this build does not shape for kerning, and
+    /// for a feature switched on: the two halves of `css-fonts-4` §6.4's and
+    /// §6.12's requests that cannot be met, `(font-kerning, font-feature-settings)`.
+    ///
+    /// The standard 14 are drawn a character at a time from their widths —
+    /// no `GSUB`, no `GPOS`, and none of their AFM kerning pairs, which this
+    /// build does not carry — so a run with a visible character set in one of
+    /// them gets no kerning and no feature whatever its style says. A
+    /// feature switched **off** is met there trivially, and `auto` kerning is
+    /// the user agent's to decide, so only `normal` and a setting above zero
+    /// are asked and not given.
+    #[must_use]
+    pub fn unshaped_settings(&self, run: &TextRun) -> (bool, bool) {
+        let kerning = run.kerning == FontKerning::Normal;
+        let features = run.features.iter().any(|setting| setting.value > 0);
+        if !kerning && !features {
+            return (false, false);
+        }
+        let font = request(run);
+        let unshaped = run
+            .text
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .any(|c| matches!(choose(self.faces, &font, Some(c)), Chosen::Standard(_)));
+        (kerning && unshaped, features && unshaped)
+    }
+
     /// How many characters had no code, and are therefore not on any page.
     #[must_use]
     pub fn unrepresented(&self) -> usize {
@@ -1223,7 +1254,29 @@ pub fn request(run: &TextRun) -> FontRequest<'_> {
         weight: run.weight,
         style: run.style,
         size: run.font_size,
+        kerning: run.kerning,
+        features: &run.features,
     }
+}
+
+/// The features a run's shaper switches on or off over its own plan:
+/// `font-kerning` as `kern`, then `font-feature-settings` in the order
+/// written — `css-fonts-4` §7.2's precedence, the general property first and
+/// the low-level one after it, so `font-kerning: none; font-feature-settings:
+/// "kern"` kerns. `auto` adds nothing: the default plan already kerns.
+fn settings_of(kerning: FontKerning, features: &[FeatureSetting]) -> Vec<(Tag, u32)> {
+    let mut out = Vec::with_capacity(features.len() + 1);
+    match kerning {
+        FontKerning::Auto => {}
+        FontKerning::Normal => out.push((Tag::new(b"kern"), 1)),
+        FontKerning::None => out.push((Tag::new(b"kern"), 0)),
+    }
+    out.extend(
+        features
+            .iter()
+            .map(|setting| (Tag::new(&setting.tag), setting.value)),
+    );
+    out
 }
 
 /// What the painter applies to an **element** rather than to a box: its
@@ -3060,12 +3113,13 @@ fn shaped_glyphs(
     size: f64,
     spacing: (f64, f64),
     context: (&str, &str),
+    settings: &[(Tag, u32)],
 ) -> Option<Shaped> {
     let (letter_spacing, word_spacing) = spacing;
     let sfnt = Sfnt::parse(program)?;
     let upem = f64::from(sfnt.units_per_em.max(1));
     let scale = |units: i32| f64::from(units) * size / upem;
-    let shaper = tinker_pdf_shape::Shaper::new(&sfnt);
+    let shaper = tinker_pdf_shape::Shaper::new(&sfnt).with_settings(settings);
     let (before, after) = context;
     let whole = format!("{before}{text}{after}");
     let own = before.len()..before.len() + text.len();
@@ -3101,7 +3155,7 @@ fn shaped_glyphs(
             }
         }
         if stretches > 1 {
-            return shaped_glyphs(program, text, size, spacing, ("", ""));
+            return shaped_glyphs(program, text, size, spacing, ("", ""), settings);
         }
     }
 
@@ -3681,6 +3735,7 @@ fn draw_shaped(
     let Some(face) = fonts.faces().faces().get(index) else {
         return (x, 0);
     };
+    let settings = settings_of(run.kerning, &run.features);
     let pieces: Vec<&str> = if run.word_spacing == 0.0 {
         vec![slice]
     } else {
@@ -3711,6 +3766,7 @@ fn draw_shaped(
             size,
             (run.letter_spacing * PX_TO_PT, run.word_spacing * PX_TO_PT),
             piece_context,
+            &settings,
         ) else {
             return (x, refused);
         };

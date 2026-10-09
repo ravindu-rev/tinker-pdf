@@ -1181,3 +1181,36 @@ fn color_scheme_is_the_light_scheme_a_page_is_printed_in() {
         warnings(&dark)
     );
 }
+
+// ---- font-kerning and font-feature-settings on a face that is not shaped ---------
+
+/// **A feature asked of the standard 14 is counted, by element, and the page
+/// is drawn as it would be without it** (`css-fonts-4` §6.4, §6.12).
+///
+/// The standard 14 are drawn a character at a time from their widths: no
+/// `GSUB`, no `GPOS`, and no AFM kerning pairs, which this build does not
+/// carry. So `font-kerning: normal` and a feature switched on cannot be met
+/// on text set in one of them, and each element whose text asked is counted
+/// against the property — here the `<p>` and the `<em>` that inherits from
+/// it. A feature switched off is met there already, and `auto` kerning is the
+/// user agent's to decide, so neither is counted.
+#[test]
+fn a_feature_asked_of_a_face_this_build_does_not_shape_is_counted() {
+    let body = "<p>plain <em>emphasis</em></p>";
+    let plain = open("", body);
+    let small_caps = open("p { font-feature-settings: \"smcp\" }", body);
+    assert_eq!(counted(&small_caps, "font-feature-settings"), Some(2));
+    assert_eq!(
+        tokens(&small_caps),
+        tokens(&plain),
+        "an unmet feature changed the page"
+    );
+    let off = open("p { font-feature-settings: \"liga\" 0 }", body);
+    assert_eq!(counted(&off, "font-feature-settings"), None);
+    let kerned = open("p { font-kerning: normal }", body);
+    assert_eq!(counted(&kerned, "font-kerning"), Some(2));
+    let auto = open("p { font-kerning: auto }", body);
+    assert_eq!(counted(&auto, "font-kerning"), None);
+    let none = open("p { font-kerning: none }", body);
+    assert_eq!(counted(&none, "font-kerning"), None);
+}

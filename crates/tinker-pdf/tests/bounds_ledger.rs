@@ -14,6 +14,16 @@
 //! because no container path parses HTML: an EPUB chapter is XHTML and is read
 //! by the XML reader.
 //!
+//! *Amended, October 2026, the EPUB CSS row's font features.* **One more row,
+//! `MAX_CSS_FEATURE_SETTINGS`, a cap on copies.** `font-feature-settings` is
+//! inherited, so a list is copied into the computed style of every element
+//! under the one it is written on and into every run those elements set; a
+//! setting is seven bytes, `"abcd",`. Its `fixtures` is the cap — the list
+//! built at it parses — its comic and fixed-document yardsticks are zeros,
+//! since neither has a stylesheet, and its book yardstick is four, figures
+//! and small capitals on and two ligatures off, since no committed book
+//! declares the property.
+//!
 //! *Amended, 3 October 2026, tier 5's table-reconstruction row.* **One more
 //! row, `MAX_TABLE_RULES`, and the first that bounds work rather than a copy
 //! or an allocation a format asks for.** Finding where a table's rules meet is
@@ -2503,6 +2513,29 @@ fn ledger() -> Vec<Bound> {
                 HTML_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_CSS_FEATURE_SETTINGS",
+            cap: css_limits::MAX_CSS_FEATURE_SETTINGS as u128,
+            published: "32",
+            // The list built exactly at the cap parses; the one past it is
+            // refused by value.
+            fixtures: css_limits::MAX_CSS_FEATURE_SETTINGS as u128,
+            comic: 0,
+            document: 0,
+            // No committed book declares `font-feature-settings`
+            // (`CENSUS.tsv`, and a search of their sheets); old-style figures
+            // and small capitals on and two ligatures off is a typesetter's
+            // ordinary list.
+            book: 4,
+            // `"abcd",` is seven bytes, a tag with no value being on.
+            reachable: css_limits::MAX_CSS_BYTES as u128 / 7,
+            reachable_because: "a setting is seven bytes, in a sheet of MAX_CSS_BYTES",
+            declared_in: CSS_LIMITS,
+            fires_in: (
+                "a_feature_list_past_the_cap_is_refused_by_value",
+                CSS_BOUNDS_TESTS,
+            ),
+        },
     ]
 }
 
@@ -2549,8 +2582,9 @@ fn segment_size() -> u128 {
 /// `MAX_ASSOCIATED_FILE_BYTES` and `MAX_OUTPUT_INTENT_BYTES`; and tier 5's
 /// table-reconstruction row adds `MAX_TABLE_RULES`; and the review of tier
 /// 5's formats lane adds HTML's `MAX_HTML_ACTIVE_FORMATTING` and
-/// `MAX_HTML_CLONE_BYTES`. All **sixty-two** are here, and a bound added
-/// without a row fails this.
+/// `MAX_HTML_CLONE_BYTES`; and the EPUB CSS row's font features add
+/// `MAX_CSS_FEATURE_SETTINGS`. All **sixty-three** are here, and a bound
+/// added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -2619,6 +2653,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_TABLE_RULES",
             "MAX_HTML_ACTIVE_FORMATTING",
             "MAX_HTML_CLONE_BYTES",
+            "MAX_CSS_FEATURE_SETTINGS",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2724,7 +2759,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 62, "the ledger is sixty-two rows");
+    assert_eq!(measured, 63, "the ledger is sixty-three rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2756,7 +2791,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 62, "the ledger is sixty-two rows");
+    assert_eq!(ledger().len(), 63, "the ledger is sixty-three rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**

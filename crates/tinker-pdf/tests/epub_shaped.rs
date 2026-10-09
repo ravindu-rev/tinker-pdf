@@ -109,7 +109,7 @@ mod epub_support;
 
 use epub_support::book::{faces_book, one_face_book};
 use epub_support::typeface::{
-    origin_of, shown_glyphs, text_objects, Face, Form, Joining, Kern, Pair, Placement,
+    origin_of, shown_glyphs, text_objects, Face, Form, Joining, Kern, Ligature, Pair, Placement,
 };
 use tinker_pdf::{Document, OpenOptions, RenderOptions, TextOptions};
 
@@ -1504,6 +1504,146 @@ fn a_mixed_line_is_cut_and_measured_in_one_context() {
             (x - (origin + offset)).abs() < 0.01,
             "{text:?} is drawn at {x}, not {}: {drawn:?}",
             origin + offset
+        );
+    }
+}
+
+// ---- font-kerning and font-feature-settings ---------------------------------------
+
+/// Where `A`, `V` and `C` land, in points from `A`, in a book whose paragraph
+/// says `style` and is set in the kerning fixture.
+fn kerned_positions(style: &str) -> Vec<(String, f64)> {
+    let face = kerned_face();
+    // `C` outside the span, so where it lands is the span's width as layout
+    // measured it, not only where the shaper drew the span's own glyphs.
+    let body = format!("<span style='{style}'>AV</span>C");
+    let doc =
+        Document::open(one_face_book("Fixture Kern", &face.build(), 24, &body)).expect("a book");
+    let drawn = drawn_left_to_right(&doc);
+    let origin = drawn[0].1;
+    drawn
+        .into_iter()
+        .map(|(text, x)| (text, x - origin))
+        .collect()
+}
+
+/// Whether two position lists agree to a hundredth of a point.
+fn at(actual: &[(String, f64)], expected: &[(&str, f64)]) -> bool {
+    actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected)
+            .all(|((t, x), (u, y))| t == u && (x - y).abs() < 0.01)
+}
+
+/// **`font-kerning: none` switches the face's kerning off, and
+/// `font-feature-settings` can switch it back on** (`css-fonts-4` §6.4,
+/// §6.12, and §7.2's precedence: the low-level property last).
+///
+/// The kerning fixture's `kern` pair draws `V` 5.4 pt after `A` — (500 − 200)
+/// / 1000 × 18 — and without it 9 pt after: 500 / 1000 × 18. Measured and
+/// drawn alike, so `C` moves with it.
+#[test]
+fn font_kerning_none_and_a_kern_setting_turn_the_pair_off_and_on() {
+    let kerned = [("A", 0.0), ("V", 5.4), ("C", 14.4)];
+    let unkerned = [("A", 0.0), ("V", 9.0), ("C", 18.0)];
+    for (style, expected) in [
+        ("", &kerned),
+        ("font-kerning: auto", &kerned),
+        ("font-kerning: normal", &kerned),
+        ("font-kerning: none", &unkerned),
+        ("font-feature-settings: \"kern\" 0", &unkerned),
+        ("font-feature-settings: \"kern\" off", &unkerned),
+        (
+            "font-kerning: none; font-feature-settings: \"kern\"",
+            &kerned,
+        ),
+    ] {
+        let positions = kerned_positions(style);
+        assert!(
+            at(&positions, expected),
+            "`{style}` drew {positions:?}, not {expected:?}"
+        );
+    }
+}
+
+/// A face that ligates `f` and `i` under `feature`, and covers `x` and the
+/// space beside them, every glyph 500 units wide — the ligature too.
+fn ligating_face(feature: &[u8; 4]) -> Face {
+    Face::new("Fixture Liga", "fix ").with_ligature(Ligature {
+        first: 'f',
+        second: 'i',
+        script: *b"DFLT",
+        feature: *feature,
+    })
+}
+
+/// The glyphs a book whose paragraph says `style` draws for `fix`, and where
+/// its `x` lands in points from the first glyph.
+fn ligated(face: &Face, style: &str) -> (String, f64) {
+    let body = format!("<span style='{style}'>fi</span>x");
+    let doc =
+        Document::open(one_face_book("Fixture Liga", &face.build(), 24, &body)).expect("a book");
+    let content = page_content(&doc);
+    let shown: String = text_objects(&content)
+        .iter()
+        .map(|(_, object)| shown_glyphs(object))
+        .collect();
+    let drawn = drawn_left_to_right(&doc);
+    let origin = drawn[0].1;
+    let x = drawn
+        .iter()
+        .find(|(text, _)| text == "x")
+        .map_or(f64::NAN, |(_, x)| x - origin);
+    (shown, x)
+}
+
+/// **`font-feature-settings` switches a default feature off and a
+/// discretionary one on, through the shaper** (`css-fonts-4` §6.12).
+///
+/// Worked from the face: under `liga`, which the shaper applies by default,
+/// `fi` is the ligature glyph — one 500-unit glyph, so `x` starts 9 pt after
+/// the first glyph — and with `"liga" 0` it is `f` and `i`, and `x` is 18 pt
+/// along. Under `dlig`, which is off by default, the two are the other way
+/// round. The glyph indices are the face builder's own: the covered
+/// characters from 1 in sorted order, the ligature after them.
+#[test]
+fn font_feature_settings_switch_a_ligature_off_and_a_discretionary_one_on() {
+    let liga = ligating_face(b"liga");
+    let dlig = ligating_face(b"dlig");
+    let glyph = |face: &Face, ch: char| format!("{:04X}", face.glyph_of(ch).expect("covered"));
+    let ligature = |face: &Face| format!("{:04X}", face.ligature_glyph().expect("a ligature"));
+    let joined = |face: &Face| format!("{}{}", ligature(face), glyph(face, 'x'));
+    let apart = |face: &Face| {
+        format!(
+            "{}{}{}",
+            glyph(face, 'f'),
+            glyph(face, 'i'),
+            glyph(face, 'x')
+        )
+    };
+    for (face, style, glyphs, x) in [
+        (&liga, "", joined(&liga), 9.0),
+        (
+            &liga,
+            "font-feature-settings: \"liga\" 0",
+            apart(&liga),
+            18.0,
+        ),
+        (&dlig, "", apart(&dlig), 18.0),
+        (&dlig, "font-feature-settings: \"dlig\"", joined(&dlig), 9.0),
+        (
+            &dlig,
+            "font-feature-settings: \"dlig\" 1, \"dlig\" 0",
+            apart(&dlig),
+            18.0,
+        ),
+    ] {
+        let (shown, at) = ligated(face, style);
+        assert_eq!(shown, glyphs, "`{style}` drew the wrong glyphs");
+        assert!(
+            (at - x).abs() < 0.01,
+            "`{style}`: `x` is {at} pt along, not {x}"
         );
     }
 }

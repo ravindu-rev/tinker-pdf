@@ -7,7 +7,7 @@
 //! [`Property`] is not one -- it always holds a specified value, and six of its
 //! variants stand for four names each, carrying a [`Side`].
 //!
-//! Hence a hundred and nine unit variants, one per name this build implements as a
+//! Hence a hundred and eleven unit variants, one per name this build implements as a
 //! longhand. The twenty shorthands and `css-break-3`'s three aliases are not
 //! here, because a shorthand is not a property:
 //! `crate::property::DEFAULTABLE_SHORTHANDS` expands each into the longhands
@@ -15,7 +15,7 @@
 //!
 //! # This file is generated, and it is checked in to be read
 //!
-//! A hundred and nine variants across four consumers is not hand-written code, and a
+//! A hundred and eleven variants across four consumers is not hand-written code, and a
 //! macro would put it somewhere nobody can grep. So it is generated from
 //! `property.rs` itself -- the variants, the names out of [`Property::name`],
 //! the inheritance out of [`Property::inherited`] -- and written here as
@@ -73,6 +73,10 @@ pub enum Longhand {
     TextTransform,
     /// `color-scheme`
     ColorScheme,
+    /// `font-kerning`
+    FontKerning,
+    /// `font-feature-settings`
+    FontFeatureSettings,
     /// `white-space`
     WhiteSpace,
     /// `list-style-type`
@@ -284,6 +288,8 @@ impl Longhand {
         Longhand::BoxShadow,
         Longhand::TextTransform,
         Longhand::ColorScheme,
+        Longhand::FontKerning,
+        Longhand::FontFeatureSettings,
         Longhand::WhiteSpace,
         Longhand::ListStyleType,
         Longhand::ListStylePosition,
@@ -399,6 +405,8 @@ impl Longhand {
             Longhand::BoxShadow => "box-shadow",
             Longhand::TextTransform => "text-transform",
             Longhand::ColorScheme => "color-scheme",
+            Longhand::FontKerning => "font-kerning",
+            Longhand::FontFeatureSettings => "font-feature-settings",
             Longhand::WhiteSpace => "white-space",
             Longhand::ListStyleType => "list-style-type",
             Longhand::ListStylePosition => "list-style-position",
@@ -518,6 +526,8 @@ impl Longhand {
             | Longhand::TextIndent
             | Longhand::TextTransform
             | Longhand::ColorScheme
+            | Longhand::FontKerning
+            | Longhand::FontFeatureSettings
             | Longhand::WhiteSpace
             | Longhand::ListStyleType
             | Longhand::ListStylePosition
@@ -654,6 +664,8 @@ impl Property {
             Property::BoxShadow(..) => Longhand::BoxShadow,
             Property::TextTransform(..) => Longhand::TextTransform,
             Property::ColorScheme(..) => Longhand::ColorScheme,
+            Property::FontKerning(..) => Longhand::FontKerning,
+            Property::FontFeatureSettings(..) => Longhand::FontFeatureSettings,
             Property::WhiteSpace(..) => Longhand::WhiteSpace,
             Property::ListStyleType(..) => Longhand::ListStyleType,
             Property::ListStylePosition(..) => Longhand::ListStylePosition,

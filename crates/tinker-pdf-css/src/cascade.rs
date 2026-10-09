@@ -194,6 +194,11 @@ pub struct ComputedStyle {
     /// of it, which is whether the scheme is the light one (see
     /// [`ColorScheme`]).
     pub color_scheme: ColorScheme,
+    /// `font-kerning`, `css-fonts-4` §6.4.
+    pub font_kerning: FontKerning,
+    /// `font-feature-settings`, §6.12, in the order written; empty for
+    /// `normal`.
+    pub font_feature_settings: Vec<FeatureSetting>,
     /// `display`
     pub display: Display,
     /// `float`
@@ -354,6 +359,8 @@ impl ComputedStyle {
             box_shadow: Vec::new(),
             text_transform: TextTransform::None,
             color_scheme: ColorScheme::Normal,
+            font_kerning: FontKerning::Auto,
+            font_feature_settings: Vec::new(),
             display: Display::Inline,
             float: Float::None,
             clear: Clear::None,
@@ -453,6 +460,8 @@ impl ComputedStyle {
         style.white_space = parent.white_space;
         style.text_transform = parent.text_transform;
         style.color_scheme = parent.color_scheme;
+        style.font_kerning = parent.font_kerning;
+        style.font_feature_settings = parent.font_feature_settings.clone();
         style.list_style_type = parent.list_style_type;
         style.list_style_position = parent.list_style_position;
         style.quotes = parent.quotes.clone();
@@ -539,6 +548,8 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         }
         Property::TextTransform(value) => style.text_transform = *value,
         Property::ColorScheme(value) => style.color_scheme = *value,
+        Property::FontKerning(value) => style.font_kerning = *value,
+        Property::FontFeatureSettings(value) => style.font_feature_settings = value.clone(),
         Property::WhiteSpace(value) => style.white_space = *value,
         Property::ListStyleType(value) => style.list_style_type = *value,
         Property::ListStylePosition(value) => style.list_style_position = *value,
@@ -2084,6 +2095,10 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
         Longhand::BoxShadow => into.box_shadow = from.box_shadow.clone(),
         Longhand::TextTransform => into.text_transform = from.text_transform,
         Longhand::ColorScheme => into.color_scheme = from.color_scheme,
+        Longhand::FontKerning => into.font_kerning = from.font_kerning,
+        Longhand::FontFeatureSettings => {
+            into.font_feature_settings = from.font_feature_settings.clone();
+        }
         Longhand::WhiteSpace => into.white_space = from.white_space,
         Longhand::ListStyleType => into.list_style_type = from.list_style_type,
         Longhand::ListStylePosition => into.list_style_position = from.list_style_position,

@@ -642,6 +642,20 @@ Landed so far:
   `epub_shaped.rs` holds the positions against the face's `hmtx` and UAX #9's
   levels worked out by hand.
 
+- **A book's feature settings reach the shaper** (October 2026's eighth
+  wave). `tinker_pdf_shape::Shaper::with_settings` switches features on or
+  off **over** the plan a run gets, where `with_features` replaces it: a
+  feature set to `0` leaves every stage it is in and the positioning list,
+  and one set on that the plan lacks joins the last substitution stage and
+  the positioning list — both, a tag saying nothing about which table holds
+  its lookups — so a joining run asked for `smcp` keeps its staged forms. The
+  last setting of a tag wins. The EPUB path hands it `font-kerning: none` as
+  `kern` off and `font-feature-settings` after it, `css-fonts-4` §7.2's
+  order, through the run's `FontRequest`, so layout measures with the
+  settings the painter draws with. A setting above one is an alternate index
+  this crate's alternate substitution does not take, and is refused before it
+  arrives.
+
 - **`GPOS` offsets reach the page.** They did not, and it was a **silent**
   defect: `PageBuilder::glyphs` writes one hex string at one origin, so a mark
   sat where its advance put it rather than where its anchor did, and a

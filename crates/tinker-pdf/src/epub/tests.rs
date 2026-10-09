@@ -1496,7 +1496,7 @@ fn every_face_has_its_own_index_and_its_own_base_font() {
 #[test]
 fn a_family_this_build_does_not_have_falls_through_to_the_next() {
     use super::paint::{Face, Generic};
-    use tinker_pdf_css::property::{FontFamily, FontStyle};
+    use tinker_pdf_css::property::{FontFamily, FontKerning, FontStyle};
     use tinker_pdf_layout::metrics::FontRequest;
 
     let face = |families: Vec<FontFamily>, weight: u16, style: FontStyle| {
@@ -1505,6 +1505,8 @@ fn a_family_this_build_does_not_have_falls_through_to_the_next() {
             weight,
             style,
             size: 16.0,
+            kerning: FontKerning::Auto,
+            features: &[],
         })
     };
 
@@ -1576,7 +1578,9 @@ fn the_encoding_covers_what_it_covers_and_says_so() {
 #[test]
 fn an_unencodable_character_gets_one_stable_code() {
     use super::paint::{Chosen, Coded, Face, Fonts, Generic, OVERFLOW_FIRST};
-    use tinker_pdf_css::property::{FontFamily, FontStyle, FontVariant, TextDecoration};
+    use tinker_pdf_css::property::{
+        FontFamily, FontKerning, FontStyle, FontVariant, TextDecoration,
+    };
     use tinker_pdf_layout::TextRun;
 
     let run = |text: &str| TextRun {
@@ -1589,6 +1593,8 @@ fn an_unencodable_character_gets_one_stable_code() {
         weight: 400,
         style: FontStyle::Normal,
         variant: FontVariant::Normal,
+        kerning: FontKerning::Auto,
+        features: Vec::new(),
         color: tinker_pdf_css::property::Color::BLACK,
         decoration: TextDecoration::None,
         painted: true,
@@ -1683,7 +1689,9 @@ fn an_unencodable_character_gets_one_stable_code() {
 #[test]
 fn characters_past_the_overflow_font_are_counted() {
     use super::paint::{Fonts, OVERFLOW_CODES};
-    use tinker_pdf_css::property::{Color, FontFamily, FontStyle, FontVariant, TextDecoration};
+    use tinker_pdf_css::property::{
+        Color, FontFamily, FontKerning, FontStyle, FontVariant, TextDecoration,
+    };
     use tinker_pdf_layout::TextRun;
 
     // 300 distinct CJK ideographs, of which 224 fit.
@@ -1702,6 +1710,8 @@ fn characters_past_the_overflow_font_are_counted() {
         weight: 400,
         style: FontStyle::Normal,
         variant: FontVariant::Normal,
+        kerning: FontKerning::Auto,
+        features: Vec::new(),
         color: Color::BLACK,
         decoration: TextDecoration::None,
         painted: true,
@@ -1724,7 +1734,7 @@ fn characters_past_the_overflow_font_are_counted() {
 #[test]
 fn an_east_asian_character_is_one_em_wide() {
     use super::paint::BookMetrics;
-    use tinker_pdf_css::property::{FontFamily, FontStyle};
+    use tinker_pdf_css::property::{FontFamily, FontKerning, FontStyle};
     use tinker_pdf_layout::metrics::{FontRequest, Metrics};
 
     let families = vec![FontFamily::Serif];
@@ -1733,6 +1743,8 @@ fn an_east_asian_character_is_one_em_wide() {
         weight: 400,
         style: FontStyle::Normal,
         size: 20.0,
+        kerning: FontKerning::Auto,
+        features: &[],
     };
     let metrics = BookMetrics::STANDARD;
     assert!((metrics.advance('\u{65e5}', &font) - 20.0).abs() < 1e-9);
@@ -2021,7 +2033,9 @@ fn list_attributes_are_presentational_hints() {
 #[test]
 fn the_public_draw_page_still_tags_a_page_from_its_element_tree() {
     use super::paint::{draw_page, Effects, Fonts, Frame};
-    use tinker_pdf_css::property::{FontFamily, FontStyle, FontVariant, TextDecoration};
+    use tinker_pdf_css::property::{
+        FontFamily, FontKerning, FontStyle, FontVariant, TextDecoration,
+    };
     use tinker_pdf_layout::{Page as LayoutPage, TextRun};
 
     let dom = super::xhtml::read(
@@ -2044,6 +2058,8 @@ fn the_public_draw_page_still_tags_a_page_from_its_element_tree() {
         weight: 400,
         style: FontStyle::Normal,
         variant: FontVariant::Normal,
+        kerning: FontKerning::Auto,
+        features: Vec::new(),
         color: tinker_pdf_css::property::Color::BLACK,
         decoration: TextDecoration::None,
         painted: true,

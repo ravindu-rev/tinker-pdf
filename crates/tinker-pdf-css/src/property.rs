@@ -921,6 +921,37 @@ pub enum TextTransform {
     Lowercase,
 }
 
+/// `font-kerning`, `css-fonts-4` §6.4.
+///
+/// A face's kerning is its `GPOS` `kern` feature, which the shaper applies by
+/// default; so `auto` and `normal` are the default plan and `none` is `kern`
+/// switched off over it ([`FeatureSetting`]'s route into the shaper). The
+/// standard 14 are not shaped and this build carries their widths and not
+/// their AFM kerning pairs, so a run set in one of them is unkerned whatever
+/// this says — and where it says `normal` the element is counted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontKerning {
+    /// `auto`, the initial value: the user agent's choice, which is the
+    /// face's own kerning wherever the face is shaped.
+    Auto,
+    /// `normal`: kerning applied.
+    Normal,
+    /// `none`: kerning not applied.
+    None,
+}
+
+/// One `<feature-tag-value>` of `font-feature-settings`, `css-fonts-4` §6.12:
+/// an OpenType feature tag and whether it is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeatureSetting {
+    /// The tag, four bytes of printable ASCII (§6.12's `<opentype-tag>`).
+    pub tag: [u8; 4],
+    /// `0` off and `1` on. A larger value is an alternate index, which the
+    /// shaper's alternate substitution does not carry, and is refused by
+    /// value before it reaches here.
+    pub value: u32,
+}
+
 /// `color-scheme`, `css-color-adjust-1` §2.1, as far as a printed page reads
 /// it.
 ///
@@ -1548,6 +1579,11 @@ pub enum Property {
     TextTransform(TextTransform),
     /// `color-scheme`, `css-color-adjust-1` §2.1. See [`ColorScheme`].
     ColorScheme(ColorScheme),
+    /// `font-kerning`, `css-fonts-4` §6.4.
+    FontKerning(FontKerning),
+    /// `font-feature-settings`, §6.12, in the order written; empty for
+    /// `normal`.
+    FontFeatureSettings(Vec<FeatureSetting>),
     /// `text-shadow`, `css-text-decor-3` §4: the list, first on top. Empty
     /// for `none`.
     TextShadow(Vec<SpecifiedShadow>),
@@ -1729,6 +1765,8 @@ impl Property {
             Property::BoxShadow(_) => "box-shadow",
             Property::TextTransform(_) => "text-transform",
             Property::ColorScheme(_) => "color-scheme",
+            Property::FontKerning(_) => "font-kerning",
+            Property::FontFeatureSettings(_) => "font-feature-settings",
             Property::WhiteSpace(_) => "white-space",
             Property::ListStyleType(_) => "list-style-type",
             Property::ListStylePosition(_) => "list-style-position",
@@ -1866,6 +1904,11 @@ impl Property {
             // pandoc's one `:root { color-scheme: light dark }` reaches every
             // element of the book.
             | Property::ColorScheme(_)
+            // `css-fonts-4` §6.4 and §6.12: both *inherited: yes*, as every
+            // font property is — a `<p>`'s `font-feature-settings` reaches the
+            // text in its `<em>`.
+            | Property::FontKerning(_)
+            | Property::FontFeatureSettings(_)
             | Property::WhiteSpace(_)
             | Property::ListStyleType(_)
             | Property::ListStylePosition(_)
@@ -2141,8 +2184,6 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "filter",
     "font",
     "font-display",
-    "font-feature-settings",
-    "font-kerning",
     "font-stretch",
     "font-variant-numeric",
     "grid",
@@ -3106,6 +3147,8 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "flex-wrap",
     "float",
     "font-family",
+    "font-feature-settings",
+    "font-kerning",
     "font-size",
     "font-style",
     "font-variant",
@@ -3572,6 +3615,15 @@ fn implemented(
         "transform" => transform_list(significant),
         "transform-origin" => transform_origin(significant),
         "color-scheme" => color_scheme(significant),
+        "font-kerning" => keyword(one, single, |word| {
+            Some(Property::FontKerning(match word {
+                "auto" => FontKerning::Auto,
+                "normal" => FontKerning::Normal,
+                "none" => FontKerning::None,
+                _ => return None,
+            }))
+        }),
+        "font-feature-settings" => font_feature_settings(values, significant),
         // `css-color-4` §15.1: `<alpha-value>`, a number or a percentage.
         "opacity" => match (single, one) {
             (true, Some(ComponentValue::Token(Token::Number { value, .. }))) => {
@@ -4148,6 +4200,64 @@ fn color_scheme(significant: &[&ComponentValue]) -> Implemented {
         (false, true) => Implemented::BadValue,
         (false, false) => Implemented::Known(vec![Property::ColorScheme(ColorScheme::Normal)]),
     }
+}
+
+/// `font-feature-settings`, `css-fonts-4` §6.12:
+/// `normal | <feature-tag-value>#`, where a `<feature-tag-value>` is
+/// `<opentype-tag> [ <integer [0,∞]> | on | off ]?`.
+///
+/// A tag is a string of exactly four characters from U+20 to U+7E, and any
+/// other string makes the whole declaration invalid, as §6.12 says. A value
+/// above one is inside the grammar and an alternate index this build's shaper
+/// does not carry, so the declaration is refused by value; so is a list longer
+/// than [`crate::limits::MAX_CSS_FEATURE_SETTINGS`], since the list is copied
+/// into every element that inherits it.
+fn font_feature_settings(
+    values: &[ComponentValue],
+    significant: &[&ComponentValue],
+) -> Implemented {
+    if let [one] = significant {
+        if one
+            .token()
+            .is_some_and(|t| matches!(t, Token::Ident(w) if w.eq_ignore_ascii_case("normal")))
+        {
+            return Implemented::Known(vec![Property::FontFeatureSettings(Vec::new())]);
+        }
+    }
+    let mut out: Vec<FeatureSetting> = Vec::new();
+    let mut indexed = false;
+    for group in values.split(|v| matches!(v, ComponentValue::Token(Token::Comma))) {
+        let parts: Vec<&ComponentValue> = group.iter().filter(|v| !v.is_whitespace()).collect();
+        let Some((ComponentValue::Token(Token::Str(tag)), rest)) = parts.split_first() else {
+            return Implemented::Malformed;
+        };
+        let Ok(tag) = <[u8; 4]>::try_from(tag.as_bytes()) else {
+            return Implemented::Malformed;
+        };
+        if !tag.iter().all(|b| (0x20..=0x7E).contains(b)) {
+            return Implemented::Malformed;
+        }
+        let value = match rest {
+            [] => 1,
+            [ComponentValue::Token(Token::Ident(word))] if word.eq_ignore_ascii_case("on") => 1,
+            [ComponentValue::Token(Token::Ident(word))] if word.eq_ignore_ascii_case("off") => 0,
+            [ComponentValue::Token(Token::Number {
+                value,
+                integer: true,
+            })] if *value >= 0.0 && value.is_finite() => {
+                if *value > 1.0 {
+                    indexed = true;
+                }
+                u32::from(*value > 0.0)
+            }
+            _ => return Implemented::Malformed,
+        };
+        out.push(FeatureSetting { tag, value });
+    }
+    if indexed || out.len() > crate::limits::MAX_CSS_FEATURE_SETTINGS {
+        return Implemented::BadValue;
+    }
+    Implemented::Known(vec![Property::FontFeatureSettings(out)])
 }
 
 /// One radius: a non-negative `<length-percentage>` (§5.1).
