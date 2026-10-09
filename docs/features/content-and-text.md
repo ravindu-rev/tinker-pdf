@@ -633,7 +633,9 @@ keyed element's sibling, a `link_for` key's element and where that element's
 kids reach through indexes rather than walks. The walks made an EPUB
 paragraph of 40 000 `<span>`s take 48.7 s to open in a debug build, against
 3.9 s now (`an_element_of_many_kids_costs_its_kids` and
-`a_tree_of_many_keyed_elements_costs_its_elements` count what is looked at).
+`a_tree_of_many_keyed_elements_costs_its_elements` count every kid's order
+read and every key compared, in the accessors rather than in the new loops,
+so each walk put back as it was written fails them).
 
 Coordinates are PDF user space, y upward — the space the page's own boxes
 are in; a display transform is the caller's. The `Device` trait, the

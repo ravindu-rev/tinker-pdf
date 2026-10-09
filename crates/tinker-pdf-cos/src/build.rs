@@ -2265,7 +2265,6 @@ impl TaggedNode {
         self.reach.truncate(at);
         let mut reach = self.reach.last().copied();
         for kid in self.kids.get(at..).unwrap_or_default() {
-            look_at_kid();
             let order = kid.order();
             let here = reach.map_or(order, |before| before.max(order));
             self.reach.push(here);
@@ -2280,11 +2279,19 @@ thread_local! {
     static KIDS_LOOKED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
-/// One kid of a structure element under construction looked at to work out
-/// where its kids reach ([`TaggedNode::reach`]). Counted only under
-/// `cfg(test)`, where a test holds an element's total to a small multiple of
-/// its kids, so that a walk over every kid at every append put back
-/// **fails** rather than runs slowly. Everywhere else it is nothing.
+/// One kid or element of the structure tree looked at: a kid's order read
+/// ([`TaggedKid::order`], [`MergedKid::order`]) or an element's key compared
+/// (`NodeKey`'s equality).
+///
+/// **Counted in the accessors, not in the loops**, because a count only the
+/// new code calls cannot see the old code come back: it first sat in the
+/// loops that replaced the walks, and the walks put back as they were
+/// written passed every guard. Finding where an element's kids reach reads
+/// their orders, and finding the element that carries a key compares keys,
+/// however either is written, so here a walk is counted whoever writes it.
+/// Counted only under `cfg(test)`, where a test holds the total to a small
+/// multiple of the kids, so that a walk over every kid or sibling at every
+/// append **fails** rather than runs slowly. Everywhere else it is nothing.
 #[inline]
 fn look_at_kid() {
     #[cfg(test)]
@@ -2297,12 +2304,24 @@ fn look_at_kid() {
 /// [`PageBuilder::open_tag`] left open over a page break — which takes a key
 /// of the builder's choosing — can never collide with one a caller of
 /// [`PageBuilder::tagged_keyed`] chose for its own reasons.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, PartialOrd, Ord)]
 enum NodeKey {
     /// The caller's.
     Caller(u64),
     /// The builder's, for an element carried over a page break.
     Carried(u64),
+}
+
+/// The derived order's equality, **counted** ([`look_at_kid`]): a search for
+/// the element carrying a key, among its siblings or through the whole tree,
+/// compares one key per element it looks at, and this is where a guard sees
+/// it. The indexes `finish` keeps descend by [`Ord`] instead, which is not
+/// counted: a lookup there is a logarithm, not a walk.
+impl PartialEq for NodeKey {
+    fn eq(&self, other: &NodeKey) -> bool {
+        look_at_kid();
+        self.cmp(other) == core::cmp::Ordering::Equal
+    }
 }
 
 /// An element left open when its page was pushed, reopened on the next page
@@ -2348,7 +2367,10 @@ enum TaggedKid {
 }
 
 impl TaggedKid {
+    /// Where this kid reads. Counted ([`look_at_kid`]): it is what a walk for
+    /// where an element's kids reach reads at every kid.
     fn order(&self) -> u64 {
+        look_at_kid();
         match self {
             TaggedKid::Content { order, .. } | TaggedKid::Object { order, .. } => *order,
             TaggedKid::Element(child) => child.order,
@@ -9185,8 +9207,10 @@ enum MergedKid {
 }
 
 impl MergedKid {
-    /// Where this kid reads, which is what the sort below orders by.
+    /// Where this kid reads, which is what the sort below orders by. Counted
+    /// ([`look_at_kid`]), as [`TaggedKid::order`] is.
     fn order(&self, arena: &[Merged]) -> u64 {
+        look_at_kid();
         match self {
             MergedKid::Content { order, .. } | MergedKid::Object { order, .. } => *order,
             MergedKid::Element(at) => arena[*at].order,
@@ -9253,10 +9277,7 @@ fn merge_tree(
                 None => arena[element]
                     .kids
                     .iter()
-                    .map(|kid| {
-                        look_at_kid();
-                        kid.order(&arena)
-                    })
+                    .map(|kid| kid.order(&arena))
                     .max()
                     .unwrap_or(arena[element].order),
             };
@@ -9409,7 +9430,9 @@ mod tests {
     /// the paragraph between two of them is taken back empty, with a link
     /// after every eighth and a `continue_at` after every sixteenth: every
     /// way a kid joins or leaves an element. Held by count, not by a clock:
-    /// the kids looked at to answer are at most eight per span.
+    /// every kid's order read, by whatever code reads it ([`look_at_kid`]),
+    /// is at most eight per span. The walk as it was first written, put back
+    /// word for word, reads 10 632 705.
     #[test]
     fn an_element_of_many_kids_costs_its_kids() {
         const SPANS: usize = 4096;
@@ -9455,8 +9478,10 @@ mod tests {
     ///
     /// One keyed `/P` of `SPANS` keyed `/Span`s, a `link_for` naming the
     /// paragraph after every eighth span and one naming a span four later,
-    /// built **and finished** under the count: at most eight looked at per
-    /// span.
+    /// built **and finished** under the count of every kid's order read and
+    /// every key compared ([`look_at_kid`]): at most eight per span. Each of
+    /// the three walks put back word for word fails it: the siblings'
+    /// 8 411 647, the tree's 1 074 687, the kids' 2 248 959.
     #[test]
     fn a_tree_of_many_keyed_elements_costs_its_elements() {
         const SPANS: u64 = 4096;
