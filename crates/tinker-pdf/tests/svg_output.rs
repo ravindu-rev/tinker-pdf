@@ -499,6 +499,49 @@ fn a_zero_width_dashed_line_under_a_stretch_is_cut_in_user_space() {
     assert!(stroke.dashes.is_empty(), "the pieces are the dashes");
 }
 
+/// **Those pieces follow the curve under a large stretch.** The dashes are
+/// cut in user space, so the curve is flattened there, at a hundredth of a
+/// point over the map's largest stretch. A quarter circle of radius 0.001
+/// under `scale(10000, 30000)` is a quarter ellipse of radii 10 and 30 on
+/// the page, and that tolerance, 0.01 / 30 000, is under the floor the
+/// flattener keeps for a device tolerance, which read it as 0.1 *user*
+/// units — a hundred times the radius — so the Bézier was one chord and
+/// every piece lay on it, up to nine points inside the ellipse. Every point
+/// written must be on the ellipse: its normalised radius within 0.002 of 1,
+/// which is the chord's hundredth of a point, the Bézier's own 3e-4 and the
+/// writer's four places.
+#[test]
+fn a_zero_width_dashed_curve_under_a_large_stretch_follows_the_curve() {
+    let k = 0.552_284_75 * 0.001;
+    let svg = svg_of(pdf(
+        &format!(
+            "0 0 0 RG q 10000 0 0 30000 50 50 cm 0 w [0.0001 0.0001] 0 d \
+             0.001 0 m 0.001 {k} {k} 0.001 0 0.001 c S Q"
+        ),
+        100,
+        100,
+        "<< >>",
+        &[],
+    ));
+    let (scene, factor) = read_back(&svg);
+    let Node::Path { outline, .. } = paths(&scene)[0] else {
+        unreachable!()
+    };
+    let page: Vec<[f64; 2]> = points(&outline.segments, factor)
+        .into_iter()
+        .flatten()
+        .collect();
+    assert!(page.len() > 8, "several pieces: {}", page.len());
+    for [x, y] in page {
+        // SVG y runs down from the top of a page 100 high.
+        let radius = ((x - 50.0) / 10.0).hypot((100.0 - y - 50.0) / 30.0);
+        assert!(
+            (radius - 1.0).abs() < 0.002,
+            "({x:.4}, {y:.4}) is off the ellipse: normalised radius {radius:.4}"
+        );
+    }
+}
+
 /// **A clipped stroke under its user-space pen is clipped in page space.**
 /// The stroke carries the pen's `transform`, and SVG 1.1 §14.3.5 reads a
 /// `userSpaceOnUse` clip in the user space of the element that names it —

@@ -100,7 +100,12 @@ along `x` and two across one along `y`, and a dash cut square in the pen's
 space is cut along the shear on the device. Its `floor` is the device's:
 wherever the mapped pen is thinner than it, the same dashed pieces are also
 mapped first and stroked at the floor, and the union is at least that wide
-every way. `stretches` gives a map's two singular values, which is how a
+every way. Its curves are flattened in the pen's space at the device
+tolerance over the map's largest stretch, honoured however small — `flatten`'s
+floor of a millionth guards a *device* tolerance, and until the review of lane
+8A it was applied here too, so under a stretch past 200 000 a circle's four
+Béziers were flattened at 0.1 of the pen's own units and came out a diamond;
+`dash` flattens at its caller's tolerance the same way. `stretches` gives a map's two singular values, which is how a
 caller tells a similarity from anything else, and `dash` hands a caller
 the pieces a pattern leaves without stroking them — one at a time, as each
 is cut, and stops cutting when the caller answers `false`: the 100 000-step

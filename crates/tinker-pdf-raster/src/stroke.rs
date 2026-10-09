@@ -7,7 +7,7 @@
 
 use tinker_pdf_math as math;
 
-use crate::geom::{flatten, Path, Point};
+use crate::geom::{flatten, flatten_mapped, Path, Point};
 use crate::image::Transform;
 
 /// How a stroke's ends are finished (8.4.3.3, Table 54).
@@ -147,11 +147,13 @@ pub fn stroke(
 /// `floor`, so the union is at least that wide in every direction and exactly
 /// the pen where the pen is wider. A width of zero is the floor alone.
 ///
-/// `tolerance` is in device units too; the path is flattened in the pen's
-/// space at `tolerance` over the map's largest stretch, so a chord is never
-/// further than `tolerance` from its curve once mapped. A map that is not
-/// finite, or has no stretch at all, outlines nothing. `stop` is asked as
-/// [`stroke`] asks it.
+/// `tolerance` is in device units too, read as [`stroke`] reads it; the path
+/// is flattened in the pen's space at `tolerance` over the map's largest
+/// stretch, so a chord is never further than `tolerance` from its curve once
+/// mapped — however far below a millionth that quotient is, since it is a
+/// length in the pen's space and not the device's. A map that is not finite,
+/// or has no stretch at all, outlines nothing. `stop` is asked as [`stroke`]
+/// asks it.
 #[must_use]
 pub fn stroke_mapped(
     path: &Path,
@@ -180,7 +182,15 @@ pub fn stroke_mapped(
     // the pen's narrowest image is its width times the smallest stretch.
     let floored = floor > 0.0 && width * smallest < floor;
 
-    for poly in flatten(path, tolerance / largest) {
+    // The device tolerance read as `flatten` reads one, then carried into
+    // the pen's space, where `flatten`'s floor for a device tolerance does
+    // not apply: under a stretch of 400 000, 0.2 is half a millionth there.
+    let tolerance = if tolerance.is_finite() && tolerance > 1e-6 {
+        tolerance
+    } else {
+        0.1
+    };
+    for poly in flatten_mapped(path, tolerance / largest) {
         if stop.is_some_and(|stop| stop()) {
             return out;
         }
@@ -218,7 +228,9 @@ pub fn stroke_mapped(
 ///
 /// `dashes` and `phase` are in the path's units; an empty pattern, or one
 /// summing to zero, leaves each flattened subpath whole. The path is
-/// flattened at `tolerance`, and the same 100 000-step bound per segment
+/// flattened at `tolerance`, in the path's units too and honoured however
+/// small, since a caller carrying the pieces through a large stretch divides
+/// a device tolerance by it; and the same 100 000-step bound per segment
 /// [`stroke`] keeps applies.
 ///
 /// **Each piece is handed to `piece` as it is cut**, never collected: the
@@ -239,7 +251,7 @@ pub fn dash(
         dash_phase: phase,
         ..StrokeStyle::default()
     };
-    for poly in flatten(path, tolerance) {
+    for poly in flatten_mapped(path, tolerance) {
         if !each_dash(&poly, &style, None, &mut |cut| piece(&cut)) {
             return false;
         }

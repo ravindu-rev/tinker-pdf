@@ -282,3 +282,59 @@ fn a_dash_on_a_sheared_line_is_sheared() {
         );
     }
 }
+
+/// **A pen under a large stretch is flattened at the device's tolerance.**
+/// Under a map that is not a similarity the path is stroked in user space
+/// and carried out, so its curves are flattened there, at the device
+/// tolerance over the map's largest stretch. Two circles with one device
+/// geometry — radius 10 and width 1 under `scale(2, 4)`, and radius 1e-4
+/// and width 1e-5 under `scale(200000, 400000)`, each an ellipse of radii 20
+/// and 40 drawn 2 across its side and 4 across its top — must draw the same
+/// pixels. The second's tolerance, 0.2 / 400 000, is under the floor the
+/// flattener keeps for a device tolerance, which read it as 0.1 *user*
+/// units — a thousand times the radius — so each Bézier was one chord and
+/// the ellipse a diamond, with nothing at the top of its band.
+#[test]
+fn a_pen_under_a_large_stretch_is_flattened_at_the_device_tolerance() {
+    let circle = |r: f64, w: f64, sx: f64, sy: f64| {
+        let k = 0.552_284_75 * r;
+        format!(
+            "0 0 0 RG q {sx} 0 0 {sy} 50.5 50.5 cm {w} w \
+             {r} 0 m {r} {k} {k} {r} 0 {r} c -{k} {r} -{r} {k} -{r} 0 c \
+             -{r} -{k} -{k} -{r} 0 -{r} c {k} -{r} {r} -{k} {r} 0 c h S Q"
+        )
+    };
+    let small = ink(100, &circle(10.0, 1.0, 2.0, 4.0));
+    let tiny = ink(100, &circle(0.0001, 0.00001, 200_000.0, 400_000.0));
+    // The clause first, for both: across the top (column 50, above the
+    // centre's row 49) the band is 1 x 4 rows, across the side (row 49,
+    // right of column 50) 1 x 2 columns.
+    for (name, ink) in [("radius 10", &small), ("radius 1e-4", &tiny)] {
+        let top: f64 = (0..49).map(|y| ink(50, y)).sum();
+        assert!(
+            (top - 4.0).abs() < 0.1,
+            "{name}: the top is 4 rows: {top:.3}"
+        );
+        let side: f64 = (51..100).map(|x| ink(x, 49)).sum();
+        assert!(
+            (side - 2.0).abs() < 0.1,
+            "{name}: the side is 2 columns: {side:.3}"
+        );
+    }
+    let mut worst = (0.0_f64, 0, 0);
+    for y in 0..100 {
+        for x in 0..100 {
+            let gap = (small(x, y) - tiny(x, y)).abs();
+            if gap > worst.0 {
+                worst = (gap, x, y);
+            }
+        }
+    }
+    assert!(
+        worst.0 < 0.02,
+        "one device geometry draws one picture; pixel ({}, {}) differs by {:.3}",
+        worst.1,
+        worst.2,
+        worst.0
+    );
+}
