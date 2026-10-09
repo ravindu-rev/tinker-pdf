@@ -7,6 +7,7 @@ use crate::limits;
 use crate::object::{Dict, ObjRef, Object};
 use crate::resolve::Resolve;
 use crate::write::{self, ObjectSet, StreamData, WriteMode, WriteOptions, Written};
+use tinker_pdf_crypto::Permissions;
 
 /// Every indirect reference inside `value`, not following any, nested no
 /// deeper than [`limits::MAX_NEST_DEPTH`].
@@ -143,11 +144,84 @@ impl DocumentEditor {
         kept
     }
 
+    /// Whether a save with `options` would undo what encryption protects
+    /// without being asked to, or with less authority than that takes — the
+    /// two decisions `tpdf` used to make on its own, made here so that every
+    /// surface can ask the same question.
+    ///
+    /// [`DocumentEditor::save`] does not ask it: a save returns bytes, and
+    /// whether the save door itself refuses is a change to that door's
+    /// contract, which the ROADMAP's CLI row leaves to the owner. This is the
+    /// question, for a caller that wants the answer before it writes.
+    ///
+    /// # Errors
+    ///
+    /// - [`SaveRefusal::WouldDecrypt`] when the document is encrypted and the
+    ///   save rewrites it asking for no encryption — the rewrite drops
+    ///   `/Encrypt` and writes the plaintext, where an incremental update is
+    ///   sealed with the file's own key (7.6.2) — or when anything was copied
+    ///   in from an encrypted document and the save writes it with no
+    ///   encryption of its own;
+    /// - [`SaveRefusal::OwnerAuthorityNeeded`] when the document is encrypted,
+    ///   was opened with the user's authority, the owner withholds permissions
+    ///   from that user (7.6.4.2, Table 22), and the save replaces the
+    ///   encryption — which lifts what the owner withheld. Permissions are
+    ///   advisory and this crate reports rather than enforces them
+    ///   ([`crate::CosDocument::permissions`]); this is the one operation that
+    ///   would erase them, and it honours them instead.
+    ///
+    /// Decrypting on purpose is [`DocumentEditor::check_decrypt`]'s question.
+    pub fn check_save(&self, options: &WriteOptions) -> Result<(), SaveRefusal> {
+        let encrypted = self.doc.is_encrypted();
+        if encrypted && options.encryption.is_some() {
+            self.owner_authority()?;
+        }
+        let sealed =
+            options.encryption.is_some() || (encrypted && options.mode == WriteMode::Incremental);
+        if !sealed && (encrypted || self.encrypted_source) {
+            return Err(SaveRefusal::WouldDecrypt);
+        }
+        Ok(())
+    }
+
+    /// Whether this document may be written decrypted on purpose: it is
+    /// encrypted, and whoever opened it holds the owner's authority or was
+    /// withheld nothing (7.6.4.2).
+    ///
+    /// # Errors
+    ///
+    /// [`SaveRefusal::NotEncrypted`] for a document with nothing to decrypt,
+    /// and [`SaveRefusal::OwnerAuthorityNeeded`] as
+    /// [`DocumentEditor::check_save`] gives it: removing the encryption
+    /// lifts what the owner withheld.
+    pub fn check_decrypt(&self) -> Result<(), SaveRefusal> {
+        if !self.doc.is_encrypted() {
+            return Err(SaveRefusal::NotEncrypted);
+        }
+        self.owner_authority()
+    }
+
+    /// The owner's authority, or a user the owner withheld nothing from.
+    fn owner_authority(&self) -> Result<(), SaveRefusal> {
+        // `permissions()` answers "everything" for the owner, so nothing is
+        // withheld exactly when the owner's authority is what opened it, or
+        // the owner restricted the user in nothing.
+        let permissions = self.doc.permissions();
+        if withheld(permissions).is_empty() {
+            Ok(())
+        } else {
+            Err(SaveRefusal::OwnerAuthorityNeeded { permissions })
+        }
+    }
+
     /// Saves the edits.
     ///
     /// An incremental save appends only what changed, leaving the original
     /// bytes untouched — the only way to modify a signed document without
     /// breaking the signature over it.
+    ///
+    /// It writes what it is asked to: [`DocumentEditor::check_save`] is the
+    /// question of whether that undoes an encryption.
     #[must_use]
     pub fn save(&self, options: &WriteOptions) -> Vec<u8> {
         self.save_with(options, write::Sealing::from_options(options))
@@ -489,4 +563,75 @@ mod gc_tests {
             "a font reached through two levels of nesting was collected"
         );
     }
+}
+
+/// Why [`DocumentEditor::check_save`] or [`DocumentEditor::check_decrypt`]
+/// answers no.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SaveRefusal {
+    /// The save would write an encrypted document's plaintext — or what was
+    /// copied in from one — with no encryption, without being asked to
+    /// decrypt.
+    WouldDecrypt,
+    /// The save would replace or remove the encryption of a document opened
+    /// with the user's authority, from whom the owner withholds permissions:
+    /// `permissions` is what the user holds, and [`SaveRefusal::withheld`]
+    /// names the rest.
+    OwnerAuthorityNeeded {
+        /// The permissions the user holds (Table 22).
+        permissions: Permissions,
+    },
+    /// [`DocumentEditor::check_decrypt`] on a document that is not
+    /// encrypted.
+    NotEncrypted,
+}
+
+impl SaveRefusal {
+    /// The Table 22 permissions the owner withholds, by name, in the
+    /// table's order; empty for every other refusal.
+    #[must_use]
+    pub fn withheld(&self) -> Vec<&'static str> {
+        match self {
+            SaveRefusal::OwnerAuthorityNeeded { permissions } => withheld(*permissions),
+            _ => Vec::new(),
+        }
+    }
+}
+
+impl std::fmt::Display for SaveRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SaveRefusal::WouldDecrypt => f.write_str(
+                "the save would write an encrypted document decrypted without being asked to",
+            ),
+            SaveRefusal::OwnerAuthorityNeeded { .. } => write!(
+                f,
+                "opened as its user, from whom the owner withholds {}; changing the \
+                 encryption would lift that, so it needs the owner password",
+                self.withheld().join(", ")
+            ),
+            SaveRefusal::NotEncrypted => f.write_str("the document is not encrypted"),
+        }
+    }
+}
+
+impl std::error::Error for SaveRefusal {}
+
+/// Every named bit of Table 22 a set of permissions does not grant.
+fn withheld(p: Permissions) -> Vec<&'static str> {
+    [
+        ("print", p.print()),
+        ("modify", p.modify()),
+        ("copy", p.copy()),
+        ("annotate", p.annotate()),
+        ("fill forms", p.fill_forms()),
+        ("extract for accessibility", p.accessibility()),
+        ("assemble", p.assemble()),
+        ("print at high resolution", p.print_high_res()),
+    ]
+    .into_iter()
+    .filter(|(_, granted)| !granted)
+    .map(|(name, _)| name)
+    .collect()
 }

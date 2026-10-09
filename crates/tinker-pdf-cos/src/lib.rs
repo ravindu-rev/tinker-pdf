@@ -124,7 +124,7 @@ pub use edit::{
 // metadata, each read back by the readers in `outline`.
 pub use edit::{
     AttachError, DeletedObject, EmbeddedFile, EntryHolder, MetadataSync, PageLabelError,
-    PageLabelRange, PathStep, Removal, RemovedEntry, Sanitise, SanitiseReport,
+    PageLabelRange, PathStep, Removal, RemovedEntry, Sanitise, SanitiseReport, SaveRefusal,
 };
 pub use fill::{text_appearance, TextLayout};
 pub use font::{DecodedCode, EmbeddedProgram, Font, FontKind, ProgramKey};

@@ -316,11 +316,13 @@ pub use tinker_pdf_cos::{
 /// same values the editor takes, so a write followed by a read is an equality.
 /// [`SanitiseReport`] is what [`DocumentEditor::sanitise`] answers with, and
 /// every type its entries are built from comes with it, because a report whose
-/// fields cannot be named cannot be read.
+/// fields cannot be named cannot be read. [`SaveRefusal`] is what
+/// [`DocumentEditor::check_save`] and [`DocumentEditor::check_decrypt`]
+/// answer with: whether a save would undo an encryption.
 pub use tinker_pdf_cos::{
     AttachError, DeletedObject, Duplex, EmbeddedFile, EnforcedPreference, EntryHolder, LabelStyle,
     MetadataSync, NonFullScreenPageMode, PageBoundary, PageLabelError, PageLabelRange, PathStep,
-    PrintScaling, ReadingDirection, Removal, RemovedEntry, Sanitise, SanitiseReport,
+    PrintScaling, ReadingDirection, Removal, RemovedEntry, Sanitise, SanitiseReport, SaveRefusal,
     TreeWriteError, ViewerPreferences,
 };
 /// Form calculations: running the `/AA` calculate actions a form carries.

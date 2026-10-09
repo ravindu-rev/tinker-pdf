@@ -52,6 +52,7 @@ pub use metadata::MetadataSync;
 pub use sanitise::{
     DeletedObject, EntryHolder, PathStep, Removal, RemovedEntry, Sanitise, SanitiseReport,
 };
+pub use save::SaveRefusal;
 pub use stamp::StampPlacement;
 
 /// A copy of `dict` with one key gone.
@@ -111,11 +112,16 @@ pub struct DocumentEditor {
     /// which only the cross-reference-stream path reads; the trailer a save
     /// hands the writer is the one thing all three paths share.
     trailer: Dict,
+    /// Whether anything was copied in from an encrypted document —
+    /// [`DocumentEditor::import_page`], [`DocumentEditor::import_page_as_form`]
+    /// — whose objects arrive as plaintext, since the source was
+    /// authenticated to read them. [`DocumentEditor::check_save`] reads it.
+    encrypted_source: bool,
 }
 
 /// Everything a rollback restores: an editor's state, taken as a value.
 ///
-/// Exhaustive by construction: [`DocumentEditor`] holds these five fields and
+/// Exhaustive by construction: [`DocumentEditor`] holds these six fields and
 /// one more -- the `Arc<CosDocument>` it overlays, which is immutable and
 /// therefore has nothing to restore. A field added to the editor without being
 /// added here is a silent hole in every transaction, which is why the two
@@ -147,6 +153,7 @@ pub struct EditCheckpoint {
     next: u32,
     page_order: Option<Vec<ObjRef>>,
     trailer: Dict,
+    encrypted_source: bool,
 }
 
 impl core::fmt::Debug for EditCheckpoint {
@@ -176,6 +183,7 @@ impl DocumentEditor {
             next,
             page_order: None,
             trailer: Dict::new(),
+            encrypted_source: false,
         }
     }
 
@@ -335,6 +343,7 @@ impl DocumentEditor {
             next: self.next,
             page_order: self.page_order.clone(),
             trailer: self.trailer.clone(),
+            encrypted_source: self.encrypted_source,
         }
     }
 
@@ -360,6 +369,7 @@ impl DocumentEditor {
         self.next = saved.next;
         self.page_order = saved.page_order.clone();
         self.trailer = saved.trailer.clone();
+        self.encrypted_source = saved.encrypted_source;
     }
 
     /// Reads an object, seeing this editor's changes.

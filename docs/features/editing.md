@@ -797,16 +797,21 @@ subset|keep`, defaulting to the facade's subset and printing the report
 above, a program left whole named with its reason; the image policy is there
 too, off unless asked ([writing](writing.md)). `split` sets `garbage_collect`
 and `merge` `deduplicate_streams`, the options `keep_pages`' and
-`import_page`'s own documentation pair them with. Two refusals are the CLI's
-and not the facade's, so there the CLI and the C ABI or a binding answer one
-request differently: every writer but `encrypt` and `decrypt` refuses an
-encrypted input, which the facade rewrites decrypted, and those two refuse to
-lift an owner's restrictions with only the user's authority, which the
-facade reports and does not enforce. Whether the facade should make either
-is owed in the [roadmap](../ROADMAP.md)'s CLI row. What the CLI used to decide
-on its own and the facade now decides for every surface: a turn that is not
-a quarter (`rotate_page` refuses it) and an empty owner password (the user's,
-[encryption](encryption.md)).
+`import_page`'s own documentation pair them with. Every writer asks the
+editor before it writes whether the save would undo an encryption, and maps
+the answer into its own words: every writer but `encrypt` and `decrypt`
+refuses an encrypted input, or a page or stamp copied in from one, which a
+rewrite asking for no encryption writes decrypted
+(`DocumentEditor::check_save`, `SaveRefusal::WouldDecrypt`), and those two
+refuse to lift an owner's restrictions with only the user's authority
+(`SaveRefusal::OwnerAuthorityNeeded`, `check_decrypt`; [encryption](encryption.md)).
+Until October 2026 both were the CLI's own refusals. The save doors do not
+ask, so the C ABI and a binding, which save without asking, still rewrite an
+encrypted input decrypted; whether `save` itself refuses is owed in the
+[roadmap](../ROADMAP.md)'s CLI row. What the CLI used to decide on its own
+and the facade now decides for every surface: a turn that is not a quarter
+(`rotate_page` refuses it), an empty owner password (the user's,
+[encryption](encryption.md)), and these two.
 
 ## Refused by name
 

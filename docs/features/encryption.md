@@ -117,6 +117,27 @@ password is given. With neither password the empty one is both, as before.
 Found by `tpdf encrypt`, which refused the case on its own until the facade
 made the decision for every surface (ruling 11).
 
+**A save that would undo the encryption is the editor's question.** A
+rewrite of an encrypted document asking for no encryption drops `/Encrypt`
+and writes the plaintext — the objects were decrypted to be read — and so
+does any save, of any document, of a page or a stamp copied in from an
+encrypted one (`import_page`, `import_page_as_form`), with no encryption of
+its own. Replacing or removing the encryption of a document opened with the
+user's password lifts whatever the owner withheld from that user (7.6.4.2,
+Table 22). `DocumentEditor::check_save(&WriteOptions)` answers both before
+anything is written: `SaveRefusal::WouldDecrypt` for the first, unless the
+save is incremental over the document's own encryption or brings its own,
+and `SaveRefusal::OwnerAuthorityNeeded` for the second, whose `withheld()`
+names the Table 22 permissions in the table's order.
+`DocumentEditor::check_decrypt()` asks whether decrypting on purpose is
+allowed: the document is encrypted (`SaveRefusal::NotEncrypted` otherwise),
+and whoever opened it holds the owner's authority or was withheld nothing.
+A rollback forgets an import it undoes
+(`tinker-pdf-cos/tests/save_refusals.rs`). Permissions stay advisory and
+the save doors do not ask — `save` returns bytes, so whether it refuses is
+an API change the owner decides in the ROADMAP's CLI row — but `tpdf` asks
+before every write, which until October 2026 it decided on its own.
+
 ## API
 
 On `Document`: `is_encrypted()`, `authenticate(&self, password)`

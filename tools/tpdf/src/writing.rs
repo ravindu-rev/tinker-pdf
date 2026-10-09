@@ -2,9 +2,9 @@
 //! `attach`, `stamp` and `sanitise` — the commands that write a document out
 //! again.
 //!
-//! Each is a wrapper over the facade (ruling 11), with **two refusals of its
-//! own** that the facade does not make yet, named under "An encrypted input"
-//! below; everything else a command decides, the facade decides. It opens
+//! Each is a wrapper over the facade (ruling 11): what a command decides,
+//! the facade decides, the two refusals about an encrypted input included
+//! (below). It opens
 //! its inputs, makes the editor calls its name says —
 //! [`DocumentEditor::import_page`], [`DocumentEditor::keep_pages`],
 //! [`DocumentEditor::rotate_page`], [`DocumentEditor::attach_file`],
@@ -53,27 +53,26 @@
 //!
 //! A rewrite of an encrypted document that asks for no encryption writes it
 //! **decrypted** — the facade drops `/Encrypt` rather than carry it over
-//! plaintext. So every command but `encrypt` and `decrypt` refuses an
-//! encrypted input outright, naming the two that handle one: `rotate` on an
-//! encrypted file quietly producing an unencrypted one is the wrong kind of
-//! forgiving.
-//!
+//! plaintext — and so does any save of pages or a stamp copied in from one.
 //! `decrypt`, and `encrypt` over a file that already is, replace the owner's
 //! restrictions with none or with new ones, so they want the owner's
 //! authority: a user password is enough only when the owner withheld nothing
-//! from the user. PDF permissions are advisory and the facade reports them
-//! rather than enforcing them ([`Document::permissions`]); this is the one
-//! place a command would *erase* them, and it honours them instead.
+//! from the user.
 //!
-//! **Both refusals are this command's and not the facade's**, so here the
-//! CLI and the facade answer one request differently: the C ABI and the
-//! bindings rewrite an encrypted input decrypted, and decrypt with the
-//! user's authority, as the facade does. Ruling 11's remedy is that the
-//! facade grows the behaviour first, and whether it should refuse either —
-//! `save` returns bytes, so a refusal there is an API decision — is the
-//! owner's; the ROADMAP's CLI row carries it. Until then these two stay,
-//! because the alternative is a `rotate` that writes the plaintext of an
-//! encrypted file without saying so.
+//! **Both decisions are the facade's**, since October 2026:
+//! [`DocumentEditor::check_save`] answers whether a save would write an
+//! encrypted document's plaintext unasked ([`SaveRefusal::WouldDecrypt`]) or
+//! replace its encryption with the user's authority over withheld
+//! permissions ([`SaveRefusal::OwnerAuthorityNeeded`]), and
+//! [`DocumentEditor::check_decrypt`] whether decrypting on purpose is
+//! allowed. Every command asks before it writes anything and maps the answer
+//! into its own words ([`refused`]), naming the input the refusal is about —
+//! `decrypt` asks the second question, every other command the first, which
+//! is what each command is for and not a decision about the input. What is
+//! still the owner's, and the ROADMAP's CLI row's: whether the facade's save
+//! doors refuse on their own, which `save` returning bytes makes an API
+//! change. Until then the C ABI and the bindings, which save through those
+//! doors without asking, rewrite an encrypted input decrypted.
 
 use std::io::Read;
 use std::path::Path;
@@ -81,7 +80,7 @@ use std::path::Path;
 use tinker_pdf::write::{save, SaveOptions};
 use tinker_pdf::{
     BilevelCodec, ContinuousCodec, Document, DocumentEditor, EmbeddedFile, Encryption, EntryHolder,
-    ImageOutcome, ImagePolicy, ImageRecoding, JpegTables, PathStep, Removal, Sanitise,
+    ImageOutcome, ImagePolicy, ImageRecoding, JpegTables, PathStep, Removal, Sanitise, SaveRefusal,
     StampPlacement, SubsetOutcome, WriteMode, WriteOptions,
 };
 
@@ -136,11 +135,19 @@ pub(crate) fn merge(options: &Options) -> Result<Vec<String>, String> {
     let Some((first, rest)) = options.files.split_first() else {
         return Err("no input file".to_string());
     };
-    let base = open_clear(first, options)?;
+    let base = open_input(first, options)?;
     let mut editor = base.editor();
     let mut lines = vec![format!("  {first}: {}", pages(base.page_count()))];
+    let mut inputs = vec![(first.as_str(), base.is_encrypted())];
+    let write = WriteOptions {
+        deduplicate_streams: true,
+        ..rewrite()
+    };
+    // Asked after each input joins, so an encrypted one is refused before
+    // the next is opened, in the order they were given.
+    check(&editor, &write, &inputs, "merging it")?;
     for path in rest {
-        let doc = open_clear(path, options)?;
+        let doc = open_input(path, options)?;
         let count = doc.page_count();
         for page in 0..count {
             let at = u32::try_from(editor.page_refs().len())
@@ -150,11 +157,9 @@ pub(crate) fn merge(options: &Options) -> Result<Vec<String>, String> {
                 .ok_or_else(|| format!("{path}: page {} could not be imported", page + 1))?;
         }
         lines.push(format!("  {path}: {}", pages(count)));
+        inputs.push((path.as_str(), doc.is_encrypted()));
+        check(&editor, &write, &inputs, "merging it")?;
     }
-    let write = WriteOptions {
-        deduplicate_streams: true,
-        ..rewrite()
-    };
     lines.extend(save_to(options, &mut editor, out, write)?);
     Ok(lines)
 }
@@ -177,7 +182,17 @@ pub(crate) fn split(options: &Options) -> Result<Vec<String>, String> {
     takes(options, "split", &["--page", "--pages"])?;
     let dir = needs_out(options, "split", "DIR")?;
     let path = only_input(options, "split")?;
-    let doc = open_clear(path, options)?;
+    let doc = open_input(path, options)?;
+    let write = WriteOptions {
+        garbage_collect: true,
+        ..rewrite()
+    };
+    check(
+        &doc.editor(),
+        &write,
+        &[(path, doc.is_encrypted())],
+        "splitting it",
+    )?;
     let count = doc.page_count();
     let pieces = match options.ranges() {
         Some(ranges) => ranges,
@@ -219,11 +234,7 @@ pub(crate) fn split(options: &Options) -> Result<Vec<String>, String> {
             true => format!("{dir}/{stem}-{:04}.pdf", first + 1),
             false => format!("{dir}/{stem}-{:04}-{:04}.pdf", first + 1, last + 1),
         };
-        let write = WriteOptions {
-            garbage_collect: true,
-            ..rewrite()
-        };
-        lines.extend(save_to(options, &mut editor, &file, write)?);
+        lines.extend(save_to(options, &mut editor, &file, write.clone())?);
     }
     Ok(lines)
 }
@@ -238,9 +249,15 @@ pub(crate) fn rotate(options: &Options) -> Result<Vec<String>, String> {
         .ok_or_else(|| "rotate needs --by DEGREES".to_string())?;
     let out = needs_out(options, "rotate", "FILE")?;
     let path = only_input(options, "rotate")?;
-    let doc = open_clear(path, options)?;
+    let doc = open_input(path, options)?;
     let turned = write_pages(options, doc.page_count(), path)?;
     let mut editor = doc.editor();
+    check(
+        &editor,
+        &rewrite(),
+        &[(path, doc.is_encrypted())],
+        "rotating it",
+    )?;
     for &page in &turned {
         if !editor.rotate_page(page, by) {
             return Err(format!(
@@ -283,9 +300,6 @@ pub(crate) fn encrypt(options: &Options) -> Result<Vec<String>, String> {
     let out = needs_out(options, "encrypt", "FILE")?;
     let path = only_input(options, "encrypt")?;
     let doc = open_input(path, options)?;
-    if doc.is_encrypted() {
-        owner_authority(path, &doc, "encrypting it again")?;
-    }
     let encryption = Encryption {
         user_password: options.user_password.clone().unwrap_or_default(),
         owner_password: options.owner_password.clone().unwrap_or_default(),
@@ -297,6 +311,12 @@ pub(crate) fn encrypt(options: &Options) -> Result<Vec<String>, String> {
         ..rewrite()
     };
     let mut editor = doc.editor();
+    check(
+        &editor,
+        &write,
+        &[(path, doc.is_encrypted())],
+        "encrypting it again",
+    )?;
     save_to(options, &mut editor, out, write)
 }
 
@@ -310,11 +330,10 @@ pub(crate) fn decrypt(options: &Options) -> Result<Vec<String>, String> {
     let out = needs_out(options, "decrypt", "FILE")?;
     let path = only_input(options, "decrypt")?;
     let doc = open_input(path, options)?;
-    if !doc.is_encrypted() {
-        return Err(format!("{path} is not encrypted"));
-    }
-    owner_authority(path, &doc, "decrypting it")?;
     let mut editor = doc.editor();
+    editor
+        .check_decrypt()
+        .map_err(|refusal| refused(refusal, path, "decrypting it"))?;
     save_to(options, &mut editor, out, rewrite())
 }
 
@@ -337,7 +356,13 @@ pub(crate) fn attach(options: &Options) -> Result<Vec<String>, String> {
         .ok_or_else(|| "attach needs --attach FILE".to_string())?;
     let out = needs_out(options, "attach", "FILE")?;
     let path = only_input(options, "attach")?;
-    let doc = open_clear(path, options)?;
+    let doc = open_input(path, options)?;
+    check(
+        &doc.editor(),
+        &rewrite(),
+        &[(path, doc.is_encrypted())],
+        "attaching to it",
+    )?;
     let data = std::fs::read(file).map_err(|e| format!("reading {file}: {e}"))?;
     let filename = Path::new(file).file_name().map_or_else(
         || file.to_string(),
@@ -385,8 +410,14 @@ pub(crate) fn stamp(options: &Options) -> Result<Vec<String>, String> {
         .ok_or_else(|| "stamp needs --stamp FILE".to_string())?;
     let out = needs_out(options, "stamp", "FILE")?;
     let path = only_input(options, "stamp")?;
-    let doc = open_clear(path, options)?;
-    let stamp = open_clear(source, options)?;
+    let doc = open_input(path, options)?;
+    check(
+        &doc.editor(),
+        &rewrite(),
+        &[(path, doc.is_encrypted())],
+        "stamping it",
+    )?;
+    let stamp = open_input(source, options)?;
     let stamped = write_pages(options, doc.page_count(), path)?;
 
     let mut editor = doc.editor();
@@ -399,6 +430,12 @@ pub(crate) fn stamp(options: &Options) -> Result<Vec<String>, String> {
                 pages(stamp.page_count())
             )
         })?;
+    check(
+        &editor,
+        &rewrite(),
+        &[(path, doc.is_encrypted()), (source, stamp.is_encrypted())],
+        "stamping it",
+    )?;
     let placement = match options.under {
         true => StampPlacement::Under,
         false => StampPlacement::Over,
@@ -445,8 +482,14 @@ pub(crate) fn sanitise(options: &Options) -> Result<Vec<String>, String> {
             .to_string());
     }
     let path = only_input(options, "sanitise")?;
-    let doc = open_clear(path, options)?;
+    let doc = open_input(path, options)?;
     let mut editor = doc.editor();
+    check(
+        &editor,
+        &rewrite(),
+        &[(path, doc.is_encrypted())],
+        "sanitising it",
+    )?;
     let report = editor.sanitise(&options.sanitise);
 
     let mut lines = vec![format!(
@@ -691,17 +734,39 @@ fn only_input<'a>(options: &'a Options, command: &str) -> Result<&'a str, String
     }
 }
 
-/// Opens an input that will be written out unencrypted, refusing one that is
-/// encrypted (this module's documentation).
-fn open_clear(path: &str, options: &Options) -> Result<Document, String> {
-    let doc = open_input(path, options)?;
-    if doc.is_encrypted() {
-        return Err(format!(
+/// Asks the facade whether saving `editor` with `write` would undo an
+/// encryption ([`DocumentEditor::check_save`], this module's documentation),
+/// and says so in this command's words, naming the first encrypted input.
+fn check(
+    editor: &DocumentEditor,
+    write: &WriteOptions,
+    inputs: &[(&str, bool)],
+    doing: &str,
+) -> Result<(), String> {
+    editor.check_save(write).map_err(|refusal| {
+        let path = inputs
+            .iter()
+            .find(|(_, encrypted)| *encrypted)
+            .map_or("an input", |(path, _)| *path);
+        refused(refusal, path, doing)
+    })
+}
+
+/// The facade's [`SaveRefusal`], in this command's words, about `path`.
+fn refused(refusal: SaveRefusal, path: &str, doing: &str) -> String {
+    match refusal {
+        SaveRefusal::WouldDecrypt => format!(
             "{path} is encrypted, and a rewrite would write it decrypted; \
              `tpdf decrypt` it first, and `tpdf encrypt` the result if it should stay encrypted"
-        ));
+        ),
+        SaveRefusal::OwnerAuthorityNeeded { .. } => format!(
+            "{path}: opened as its user, from whom the owner withholds {}; \
+             {doing} would lift that, so it needs the owner password",
+            refusal.withheld().join(", ")
+        ),
+        SaveRefusal::NotEncrypted => format!("{path} is not encrypted"),
+        other => format!("{path}: {other}"),
     }
-    Ok(doc)
 }
 
 /// The flags every writing command takes: where it writes, how quietly, the
@@ -761,37 +826,6 @@ fn open_input(path: &str, options: &Options) -> Result<Document, String> {
         ));
     }
     Ok(doc)
-}
-
-/// Refuses an operation that would lift restrictions the owner set, unless
-/// the owner's authority is what opened the document.
-fn owner_authority(path: &str, doc: &Document, doing: &str) -> Result<(), String> {
-    // Every named bit of Table 22. `permissions()` already answers "all" for
-    // the owner, so the list is empty exactly when nothing is withheld from
-    // whoever opened it.
-    let p = doc.permissions();
-    let withheld: Vec<&str> = [
-        ("print", p.print()),
-        ("modify", p.modify()),
-        ("copy", p.copy()),
-        ("annotate", p.annotate()),
-        ("fill forms", p.fill_forms()),
-        ("extract for accessibility", p.accessibility()),
-        ("assemble", p.assemble()),
-        ("print at high resolution", p.print_high_res()),
-    ]
-    .into_iter()
-    .filter(|(_, granted)| !granted)
-    .map(|(name, _)| name)
-    .collect();
-    if withheld.is_empty() {
-        return Ok(());
-    }
-    Err(format!(
-        "{path}: opened as its user, from whom the owner withholds {}; \
-         {doing} would lift that, so it needs the owner password",
-        withheld.join(", ")
-    ))
 }
 
 /// Refuses a page a writing command was asked for that the document does
@@ -1501,6 +1535,60 @@ mod tests {
             );
         }
         assert!(!Path::new(&out).exists() && !Path::new(&pieces).exists());
+    }
+
+    /// What `merge` copies from a later input, or `stamp` from its source,
+    /// arrives decrypted, so an encrypted one is refused as the first input
+    /// is, by name: the facade's `check_save` answers for what the editor
+    /// imported. The file opens with the empty user password every reader
+    /// tries, so no `--password` is given and the plain input opens too.
+    #[test]
+    fn an_encrypted_later_input_or_stamp_source_is_refused_by_name() {
+        let dir = scratch("encrypted-later-input");
+        let out = format!("{dir}/out.pdf");
+        let plain = fixture("simple-text.pdf");
+        let mut editor = reopen(&plain, None).editor();
+        let locked = save(
+            &mut editor,
+            &SaveOptions {
+                write: WriteOptions {
+                    encryption: Some(Encryption {
+                        user_password: String::new(),
+                        owner_password: "o".to_string(),
+                        permissions: -1,
+                        entropy: [5u8; 48],
+                    }),
+                    ..rewrite()
+                },
+                ..SaveOptions::default()
+            },
+        );
+        let locked = write(&dir, "locked.pdf", &locked.bytes);
+        assert!(reopen(&locked, None).is_encrypted());
+
+        let decrypted = format!("{locked} is encrypted, and a rewrite would write it decrypted");
+        for (command, refused) in [
+            ("merge", merge(&parse(&[&plain, &locked, "--out", &out]))),
+            (
+                "stamp",
+                stamp(&parse(&[&plain, "--stamp", &locked, "--out", &out])),
+            ),
+        ] {
+            assert!(
+                refused
+                    .as_ref()
+                    .err()
+                    .is_some_and(|e| e.starts_with(&decrypted)),
+                "{command}: {refused:?}"
+            );
+        }
+        assert!(!Path::new(&out).exists());
+
+        merge(&parse(&[&plain, &plain, "--out", &out])).expect("two plain inputs merge");
+        assert_eq!(
+            reopen(&out, None).page_count(),
+            2 * reopen(&plain, None).page_count()
+        );
     }
 
     /// **A flag a command would ignore is refused.** Every flag parses

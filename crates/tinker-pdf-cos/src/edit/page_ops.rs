@@ -234,6 +234,11 @@ impl DocumentEditor {
         if depth > crate::limits::MAX_NEST_DEPTH {
             return Some(Object::Null);
         }
+        // What an encrypted document's objects say arrives here decrypted,
+        // and a save that writes no encryption writes it so.
+        if source.is_encrypted() {
+            self.encrypted_source = true;
+        }
 
         match value {
             Object::Ref(r) => {

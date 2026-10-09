@@ -264,11 +264,12 @@ outside the page tree. `split` is not a redaction.
 
 An encrypted input is refused by every writing command but `encrypt` and
 `decrypt`, because a rewrite that asks for no encryption writes the
-plaintext. `decrypt`, and `encrypt` over a file that already is, need the
-owner password unless the owner withheld nothing from the user: they would
-lift the restrictions, and the library reports those rather than enforcing
-them, so this is the place that honours them. Both refusals are this tool's
-own: the library and its bindings make neither yet.
+plaintext; so is an encrypted later input to `merge` or `--stamp` file,
+whose pages would be written so too. `decrypt`, and `encrypt` over a file
+that already is, need the owner password unless the owner withheld nothing
+from the user: they would lift the restrictions, which the library reports
+rather than enforcing. Both are the library's answers, which this tool asks
+before it writes; the library's own save, and its bindings, do not ask yet.
 ";
 
 fn main() -> ExitCode {
