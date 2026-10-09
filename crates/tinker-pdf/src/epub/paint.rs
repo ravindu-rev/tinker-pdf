@@ -2941,7 +2941,7 @@ fn shaped_glyphs(
     let whole = format!("{before}{text}{after}");
     let own = before.len()..before.len() + text.len();
     let mine = |cluster: u32| usize::try_from(cluster).is_ok_and(|at| own.contains(&at));
-    let paragraph = Paragraph::new(&whole, BaseDirection::Auto);
+    let paragraph = Paragraph::new(&whole, own_direction(text));
     let runs = itemize(&whole, &paragraph);
     let shaped: Vec<_> = runs.iter().map(|run| shaper.shape(&whole, run)).collect();
     let levels: Vec<_> = runs.iter().map(|run| run.level).collect();
@@ -3173,6 +3173,25 @@ fn right_to_left(text: &str) -> bool {
         .is_rtl()
 }
 
+/// The paragraph direction a slice is shaped in, context and all: the
+/// slice's **own** P2 and P3, stated rather than left to the text it is
+/// shaped beside.
+///
+/// Without a context the two are one answer. With one they are not, and the
+/// difference is a run drawn backwards: ` b`, shaped after the Arabic word its
+/// line draws before it, is a right-to-left paragraph by P2 — the first strong
+/// character of `بحم b` is Arabic — so its space and its `b` came back in that
+/// paragraph's visual order, `b` first, inside a run that reads left to right.
+/// A context is there to be joined and positioned against; it decides no
+/// direction.
+fn own_direction(text: &str) -> BaseDirection {
+    if right_to_left(text) {
+        BaseDirection::RightToLeft
+    } else {
+        BaseDirection::LeftToRight
+    }
+}
+
 /// UAX #9's rule L2 over each **visual line** of a page's runs, rather than
 /// inside each run.
 ///
@@ -3203,8 +3222,9 @@ fn right_to_left(text: &str) -> bool {
 ///
 /// A line with no right-to-left character is not touched, so no
 /// left-to-right page moves. Each run is still drawn in its own direction
-/// inside itself, by [`draw_run`]; a run mixing directions is ordered inside
-/// itself by its own P2 and P3, which is the approximation this keeps.
+/// inside itself, by [`draw_run`]. A run that **mixes** directions is not one
+/// unit L2 can place, so [`split_at_levels`] cuts it at its line's level
+/// boundaries first, and every run this orders is at one level.
 ///
 /// Returns how many lines moved.
 pub fn visual_lines(runs: &mut [TextRun]) -> usize {
@@ -3223,6 +3243,173 @@ pub fn visual_lines(runs: &mut [TextRun]) -> usize {
         start = end;
     }
     moved
+}
+
+/// Cuts every run that crosses one of its **line's** UAX #9 level boundaries
+/// into one run per level, before [`visual_lines`] orders the line.
+///
+/// # Why the run cannot be the unit L2 moves
+///
+/// L2 reverses stretches of characters by level, and [`visual_lines`] can only
+/// move whole runs. A run is one element's text on one line, and an element
+/// boundary falls wherever the markup put it: in `a ب<span>ح</span>م b` the
+/// first run is `a ب` and the last `م b`, each half one direction and half the
+/// other. Giving each one level — the lowest of its strong characters, which
+/// is what [`visual_lines`] did with them — left `ب` and `م` with the Latin
+/// either side of them, and the word was drawn `ب ح م` from the left: in the
+/// order it was typed, so it read backwards. Each run ordered inside itself by
+/// its own P2 and P3 cannot fix that, because the levels that matter are the
+/// line's: the run `a ب` resolved alone puts `ب` at level 1 and has no idea
+/// that the `ح` it joins is in the next run.
+///
+/// So the line's whole text is resolved, each run is cut wherever the level
+/// changes inside it — `a ` and `ب`, `م` and ` b` — and every piece is at one
+/// level, which is a unit L2 can place. The pieces keep the run's style,
+/// anchor and document order, so drawing, links, tags and text extraction see
+/// two runs of one element where there was one; and shaping across them is
+/// [`Fonts::set_contexts`]'s, so `ب`, `ح` and `م` still join.
+///
+/// # The pieces' widths are the run's, partitioned
+///
+/// Layout measured the run whole, and the line's other runs were placed
+/// against that width. The pieces are not measured again on their own: the
+/// run is shaped once, as layout shaped it, and each glyph's advance goes to
+/// the piece its cluster starts in, with `letter-spacing` per character and
+/// `word-spacing` per space as `flow.rs` charges them. The last piece takes
+/// what the others leave of the run's width, so the pieces end exactly where
+/// the run did and the line's extent — and with it its alignment — does not
+/// move.
+///
+/// A character UAX #9's X9 removes (a joiner, a format control) has no level
+/// of its own; it stays with the character before it, so a `ZWJ` inside a
+/// word does not cut the word.
+///
+/// A line with no right-to-left character is not touched. Returns how many
+/// runs were cut.
+pub fn split_at_levels(runs: &mut Vec<TextRun>, metrics: &BookMetrics<'_>) -> usize {
+    let taken = std::mem::take(runs);
+    runs.reserve(taken.len());
+    let mut cut = 0usize;
+    let mut line: Vec<TextRun> = Vec::new();
+    for run in taken {
+        if line.last().is_some_and(|last| !same_line(last, &run)) {
+            cut += split_line(&mut line, metrics, runs);
+        }
+        line.push(run);
+    }
+    cut += split_line(&mut line, metrics, runs);
+    cut
+}
+
+/// Whether `c` is a character whose own class reads right to left, or opens
+/// a right-to-left embedding, override or isolate.
+fn opens_right_to_left(c: char) -> bool {
+    matches!(
+        bidi_class(c),
+        BidiClass::R | BidiClass::AL | BidiClass::RLE | BidiClass::RLO | BidiClass::RLI
+    )
+}
+
+/// [`split_at_levels`] over one line, draining `line` into `out`.
+fn split_line(line: &mut Vec<TextRun>, metrics: &BookMetrics<'_>, out: &mut Vec<TextRun>) -> usize {
+    if !line
+        .iter()
+        .any(|run| !run.generated && run.text.chars().any(opens_right_to_left))
+    {
+        out.append(line);
+        return 0;
+    }
+    let text: String = line.iter().map(|run| run.text.as_str()).collect();
+    let paragraph = Paragraph::new(&text, BaseDirection::Auto);
+    let resolved = paragraph.line(0..paragraph.len());
+    // X9's removed characters carry the paragraph's level after L1, which is
+    // no level of theirs: each takes the level of the character before it.
+    let mut levels: Vec<Level> = Vec::with_capacity(resolved.levels().len());
+    for (at, level) in resolved.levels().iter().enumerate() {
+        let kept = if paragraph.is_removed(at) {
+            levels.last().copied().unwrap_or(*level)
+        } else {
+            *level
+        };
+        levels.push(kept);
+    }
+    let mut cut = 0usize;
+    let mut first_char = 0usize;
+    for run in line.drain(..) {
+        let count = run.text.chars().count();
+        let own = levels.get(first_char..first_char + count).unwrap_or(&[]);
+        first_char += count;
+        let pieces = level_pieces(&run.text, own);
+        if run.generated || pieces.len() < 2 {
+            out.push(run);
+            continue;
+        }
+        cut += 1;
+        out.extend(cut_run(&run, &pieces, metrics));
+    }
+    cut
+}
+
+/// The byte ranges of `text` over which `levels` — one per character — is
+/// constant, in logical order.
+fn level_pieces(text: &str, levels: &[Level]) -> Vec<core::ops::Range<usize>> {
+    let mut pieces = Vec::new();
+    let mut start = 0usize;
+    let mut current: Option<Level> = None;
+    for ((at, _), level) in text.char_indices().zip(levels.iter().copied()) {
+        if current.is_some_and(|c| c != level) {
+            pieces.push(start..at);
+            start = at;
+        }
+        current = Some(level);
+    }
+    if start < text.len() {
+        pieces.push(start..text.len());
+    }
+    pieces
+}
+
+/// One run as one run per piece, each carrying its part of the run's
+/// measured width. See [`split_at_levels`].
+fn cut_run(
+    run: &TextRun,
+    pieces: &[core::ops::Range<usize>],
+    metrics: &BookMetrics<'_>,
+) -> Vec<TextRun> {
+    let shaped = metrics.shape(&run.text, &request(run), false);
+    let mut widths = vec![0.0f64; pieces.len()];
+    for glyph in &shaped.glyphs {
+        let at = usize::try_from(glyph.cluster).unwrap_or(usize::MAX);
+        let piece = pieces
+            .iter()
+            .position(|range| range.contains(&at))
+            .unwrap_or(pieces.len() - 1);
+        if let Some(width) = widths.get_mut(piece) {
+            *width += glyph.x_advance;
+        }
+    }
+    for (width, range) in widths.iter_mut().zip(pieces) {
+        let slice = run.text.get(range.clone()).unwrap_or("");
+        *width += run.letter_spacing * slice.chars().count() as f64
+            + run.word_spacing * slice.chars().filter(|c| *c == ' ').count() as f64;
+    }
+    let mut x = run.x;
+    let mut out = Vec::with_capacity(pieces.len());
+    for (at, (range, width)) in pieces.iter().zip(&widths).enumerate() {
+        let mut piece = run.clone();
+        piece.text = run.text.get(range.clone()).unwrap_or("").to_owned();
+        piece.x = x;
+        // The last piece ends where the run did, whatever the rounding of the
+        // partition: the run after it was placed against the run's width.
+        piece.width = if at + 1 == pieces.len() {
+            run.x + run.width - x
+        } else {
+            *width
+        };
+        x += piece.width;
+        out.push(piece);
+    }
+    out
 }
 
 /// Whether two layout coordinates are one, to the rounding of the sums that
@@ -3244,13 +3431,10 @@ fn same_line(a: &TextRun, b: &TextRun) -> bool {
 
 /// Lays one line's runs out again in L2's order. Returns whether any moved.
 fn reorder_line(line: &mut [TextRun]) -> bool {
-    let rtl = |c: char| {
-        matches!(
-            bidi_class(c),
-            BidiClass::R | BidiClass::AL | BidiClass::RLE | BidiClass::RLO | BidiClass::RLI
-        )
-    };
-    if !line.iter().any(|run| run.text.chars().any(rtl)) {
+    if !line
+        .iter()
+        .any(|run| run.text.chars().any(opens_right_to_left))
+    {
         return false;
     }
     let text: String = line.iter().map(|run| run.text.as_str()).collect();
@@ -3410,13 +3594,7 @@ fn draw_shaped(
 /// and L2 orders the pieces. A slice with no right-to-left character keeps the
 /// order it was written in without resolving anything.
 fn piece_order(slice: &str, pieces: &[&str]) -> Vec<usize> {
-    let rtl = |c: char| {
-        matches!(
-            bidi_class(c),
-            BidiClass::R | BidiClass::AL | BidiClass::RLE | BidiClass::RLO | BidiClass::RLI
-        )
-    };
-    if pieces.len() < 2 || !slice.chars().any(rtl) {
+    if pieces.len() < 2 || !slice.chars().any(opens_right_to_left) {
         return (0..pieces.len()).collect();
     }
     let paragraph = Paragraph::new(slice, BaseDirection::Auto);

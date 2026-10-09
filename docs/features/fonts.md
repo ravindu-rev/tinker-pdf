@@ -604,8 +604,25 @@ Landed so far:
   the line below; and a context in the other direction could put its glyphs
   between the run's own, which overprinted the neighbour — such a run is now
   shaped alone. Layout still measures each run alone, so a context that
-  changes an advance leaves the difference between the runs; that and a
-  mixed-direction run's inner order are in the refusal table below.
+  changes an advance leaves the difference between the runs; that is in the
+  refusal table below.
+
+  **A run that mixes directions is cut at its line's level boundaries**
+  (`paint::split_at_levels`, October 2026's eighth wave). A run is one
+  element's text on one line, and `a ب<span>ح</span>م b` is three runs of
+  which two mix directions; each had been one unit of the line's reordering,
+  ordered inside itself by its own P2 and P3, so the Arabic word was drawn
+  in the order it was typed. The line's whole text is resolved, every run
+  is cut wherever the level changes inside it, and each piece takes its
+  share of the run's measured width — the run shaped once, as layout shaped
+  it, each glyph's advance to the piece its cluster starts in, the last
+  piece taking what the others leave — so the line's extent does not move. A
+  character X9 removes takes the level of the one before it, so a joiner does
+  not cut its word. A slice shaped with a context is shaped in its **own**
+  paragraph direction: ` b` after the Arabic word its line draws before it
+  had been shaped as part of a right-to-left paragraph and drawn `b` first.
+  `epub_shaped.rs` holds the positions against the face's `hmtx` and UAX #9's
+  levels worked out by hand.
 
 - **`GPOS` offsets reach the page.** They did not, and it was a **silent**
   defect: `PageBuilder::glyphs` writes one hex string at one origin, so a mark
@@ -825,7 +842,7 @@ two corpora already vendored here. So every name stays on the list.
 
 | What | Typed variant | Why (one line) | See |
 |---|---|---|---|
-| A shaping context that changes an **advance** across a styled span (a joined form wider than the isolated one, a pair that kerns), and the inner order of a run that mixes directions | none — the difference is left between the two runs; a mixed run is ordered by its own P2/P3, so a span boundary inside a word of the other direction (`a ب<span>ح</span>م b`) leaves that word in written order, and a run whose own glyphs a context in the other direction would split is shaped alone | layout measures each run alone through the `Shaper` seam, which takes no context, and a run is the unit `paint::visual_lines` reorders: splitting one at its level boundaries means measuring the pieces, a change to the layout crate; an offset moves no pen and is carried | [shaping](../design/shaping.md) |
+| A shaping context that changes an **advance** across a styled span (a joined form wider than the isolated one, a pair that kerns) | none — the difference is left between the two runs, and a run whose own glyphs a context in the other direction would split is shaped alone | layout measures each run alone through the `Shaper` seam, which takes no context; an offset moves no pen and is carried. **A run that mixes directions left this row** in October 2026's eighth wave: it is cut at its line's level boundaries before the line is ordered | [shaping](../design/shaping.md) |
 | Shaping **while reading a PDF**: `TJ` arrays are honored as written | none — the producer positioned every glyph and re-shaping them would be wrong | Permanent, and the only half of the old non-goal that survived; the producing half is `tinker-pdf-shape`, below | [shaping](../design/shaping.md) |
 | A CFF whose `callsubr` operand is not the token before the call, or that calls a subroutine it does not carry, or whose subroutine calls itself, or that declares `CharstringType 1` | `SubsetRefusal::ProgramNotRebuildable`; the whole face is embedded | Each needs the subsetter to invent what the font meant, and a broken subset renders *almost* right | this page |
 | A CFF subset that comes out no smaller than the face | `SubsetRefusal::SubsetNotSmaller`; the whole face is embedded | A producer's own subset has nothing left to remove, and the face is also the one it tested | this page |

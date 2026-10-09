@@ -1646,8 +1646,12 @@ fn write_chapters<R: read::Resources + ?Sized>(
                 chapter.pages = laid.pages;
                 // UAX #9 across each visual line of styled spans, before
                 // anything reads a run's position: drawing, links and tags
-                // all see one placement (`paint::visual_lines`).
+                // all see one placement. A run that mixes directions is cut
+                // at the line's level boundaries first, so every run L2 moves
+                // is at one level (`paint::split_at_levels`,
+                // `paint::visual_lines`).
                 for page in &mut chapter.pages {
+                    paint::split_at_levels(&mut page.runs, &metrics);
                     paint::visual_lines(&mut page.runs);
                 }
             }

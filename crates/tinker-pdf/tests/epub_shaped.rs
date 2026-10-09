@@ -74,16 +74,29 @@
 //! ([`a_word_spaced_right_to_left_run_draws_its_words_right_to_left`],
 //! [`a_justified_arabic_paragraph_reads_in_order`]).
 //!
+//! # Closed in October 2026's eighth wave: a run that mixes directions
+//!
+//! A run was the unit of the line's reordering, ordered inside itself by its
+//! own P2 and P3, so a span boundary inside a word of the other direction
+//! (`a ب<span>ح</span>م b`) left that word drawn in the order it was written.
+//! Runs are cut at their line's level boundaries before the line is ordered
+//! (`paint::split_at_levels`), each piece carrying its share of the run's
+//! measured width:
+//! [`a_span_inside_a_word_of_the_other_direction_keeps_the_word_in_order`],
+//! with a number in a right-to-left run and a joiner inside a word as its
+//! controls. The cut draws a right-to-left word of three text objects in
+//! reading order inside a left-to-right line, which the extractor read as
+//! three lines on one baseline; ruling 14's reader now joins such pieces
+//! before ordering them. And a context in the other paragraph direction no
+//! longer turns a run round: a slice is shaped in its own direction, whatever
+//! its neighbours' text would make of the whole.
+//!
 //! # What remains
 //!
 //! Layout still **measures** each run alone — its `Shaper` seam takes no
 //! context — so a context that changes an *advance* (a joined form wider than
 //! the isolated one, a pair that kerns) leaves that difference between the
-//! run and the next; an offset moves no pen and costs nothing. And a run that
-//! mixes directions is ordered inside itself by its own P2 and P3 rather than
-//! split at the line's level boundaries: a span boundary inside a word of the
-//! other direction (`a ب<span>ح</span>م b`) leaves that word drawn in the
-//! order it was written.
+//! run and the next; an offset moves no pen and costs nothing.
 
 mod epub_support;
 
@@ -1151,4 +1164,183 @@ fn a_pair_across_a_span_boundary_is_positioned() {
         object.contains(&format!("-{PAIR_X} <{b}>")),
         "the pair's offset did not reach B in its own span: {object}\n{content}"
     );
+}
+
+// ---- a run that mixes directions -----------------------------------------------
+
+/// Every glyph on the first page but the spaces, as (text, left edge), sorted
+/// left to right by where it is drawn.
+///
+/// Read back through this repository's own extraction in **content order**,
+/// so the edges are the text positions the content stream states and not a
+/// reading order put back afterwards.
+fn drawn_left_to_right(doc: &Document) -> Vec<(String, f64)> {
+    let page = doc.page(0).expect("a page");
+    let text = page.text_with(&TextOptions {
+        content_order: true,
+    });
+    let mut glyphs: Vec<(String, f64)> = text
+        .lines()
+        .iter()
+        .flat_map(|line| line.chars.iter())
+        .filter(|c| !c.text.trim().is_empty())
+        .map(|c| (c.text.clone(), c.quad.bounds().0))
+        .collect();
+    glyphs.sort_by(|a, b| a.1.total_cmp(&b.1));
+    glyphs
+}
+
+/// **A span boundary inside a word of the other direction leaves the word in
+/// its order.**
+///
+/// `a ب<span>ح</span>م b` is three runs, and two of them mix directions: `a ب`
+/// and `م b`. Each run used to be one unit of the line's reordering, placed at
+/// the level of its lowest strong character — level 0 for both, since each
+/// holds a Latin letter — so only the middle run was reversed, which reverses
+/// nothing, and the Arabic word was drawn `ب ح م` from the left: in the order
+/// it was typed, reading backwards. The runs are cut at the line's level
+/// boundaries now (`paint::split_at_levels`), and every piece is placed by L2.
+///
+/// The expected positions are worked out here, not read back:
+///
+/// - **the levels** are UAX #9's. P2 finds `a` first, so the paragraph is
+///   level 0; `ب`, `ح` and `م` are `AL`, raised to 1 by I1; each space sits
+///   between an `L` and an `AL` and takes the embedding level, 0, by N2. L2
+///   then reverses the one stretch at level 1, so the line is drawn
+///   `a`, space, `م`, `ح`, `ب`, space, `b`.
+/// - **the widths** are the face's `hmtx`: every glyph, the three joined forms
+///   included, is 500 units of a 1000-unit em, and the paragraph is set at
+///   24 px, which is 18 pt — so each glyph is 9 pt and the *k*-th one drawn
+///   starts 9*k* pt right of the first.
+/// - **the forms** are the joining rules': `ب` starts the word (initial), `ح`
+///   joins on both sides (medial), `م` ends it (final), each across a span
+///   boundary.
+#[test]
+fn a_span_inside_a_word_of_the_other_direction_keeps_the_word_in_order() {
+    let face = Face::new("Fixture Arabic", " ab\u{628}\u{62D}\u{645}")
+        .with_joining(Joining { script: *b"arab" });
+    let body = "a \u{628}<span style=\"color: #c00000\">\u{62D}</span>\u{645} b";
+    let doc =
+        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, body)).expect("a book");
+    let drawn = drawn_left_to_right(&doc);
+    let order: Vec<&str> = drawn.iter().map(|(text, _)| text.as_str()).collect();
+    assert_eq!(
+        order,
+        ["a", "\u{645}", "\u{62D}", "\u{628}", "b"],
+        "the Arabic word is not drawn last letter first: {drawn:?}"
+    );
+    // Where each one sits, in 9 pt advances from the first: the space after
+    // `a` is advance 1, and the one before `b` advance 5.
+    let advance = 500.0 / 1000.0 * 18.0;
+    let origin = drawn[0].1;
+    for ((text, x), slot) in drawn.iter().zip([0.0, 2.0, 3.0, 4.0, 6.0]) {
+        let expected = origin + slot * advance;
+        assert!(
+            (x - expected).abs() < 0.01,
+            "{text:?} is drawn at {x}, not {expected}: {drawn:?}"
+        );
+    }
+
+    let content = page_content(&doc);
+    let shown: String = text_objects(&content)
+        .iter()
+        .map(|(_, object)| shown_glyphs(object))
+        .collect();
+    for (ch, form) in [
+        ('\u{628}', Form::Initial),
+        ('\u{62D}', Form::Medial),
+        ('\u{645}', Form::Final),
+    ] {
+        let glyph = face
+            .form_glyph(ch, form)
+            .unwrap_or_else(|| panic!("{ch:?} has no {form:?} form"));
+        assert!(
+            shown.contains(&format!("{glyph:04X}")),
+            "{ch:?} is not drawn in its {form:?} form: {content}"
+        );
+    }
+    // And it reads back as it was written (ruling 14).
+    let extracted = doc.page(0).expect("a page").text().plain_text();
+    assert_eq!(
+        extracted.trim_end(),
+        "a \u{628}\u{62D}\u{645} b",
+        "the line does not read back in logical order"
+    );
+}
+
+/// **A right-to-left run with a number in it is cut where the number is, and
+/// the number still reads left to right.**
+///
+/// The control for the cut: a run whose own levels are 1 and 2 — Arabic and
+/// European digits — is two pieces, and L2 puts the number on the word's left
+/// with its digits in their written order. A build that cut the run and then
+/// drew every piece of an odd paragraph right to left would draw `21`.
+#[test]
+fn a_number_in_a_right_to_left_run_keeps_its_digits_in_order() {
+    let face = Face::new("Fixture Arabic", " 12\u{628}\u{62D}\u{645}")
+        .with_joining(Joining { script: *b"arab" });
+    let body = "\u{628}\u{62D}\u{645} 12";
+    let doc =
+        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, body)).expect("a book");
+    let drawn = drawn_left_to_right(&doc);
+    let order: Vec<&str> = drawn.iter().map(|(text, _)| text.as_str()).collect();
+    // P2 finds `ب`: a level-1 paragraph, the digits at level 2 by I2, and the
+    // space between word and number at 1 by N1, an `EN` counting as `R`
+    // there. L2 draws the number first, in its own order, then the space, then
+    // the word last letter first.
+    assert_eq!(
+        order,
+        ["1", "2", "\u{645}", "\u{62D}", "\u{628}"],
+        "the number or the word is out of order: {drawn:?}"
+    );
+    let advance = 500.0 / 1000.0 * 18.0;
+    let origin = drawn[0].1;
+    for ((text, x), slot) in drawn.iter().zip([0.0, 1.0, 3.0, 4.0, 5.0]) {
+        let expected = origin + slot * advance;
+        assert!(
+            (x - expected).abs() < 0.01,
+            "{text:?} is drawn at {x}, not {expected}: {drawn:?}"
+        );
+    }
+}
+
+/// **A joiner inside a word does not cut the word.**
+///
+/// `ZWJ` is `Bidi_Class` `BN`, which UAX #9's X9 removes: it has no level of
+/// its own, and after L1 it carries the paragraph's, 0 here. Cut at that
+/// level, `ب‍حم` inside an English line would be three pieces — `ب` at 1, the
+/// joiner at 0, `حم` at 1 — and L2 reverses each Arabic piece alone, drawing
+/// `ب` on the left of the other two: the word read backwards again, by the
+/// cut meant to fix it. The joiner keeps the level of the letter before it,
+/// so the word is one piece and is drawn `م ح ب` from the left, exactly as
+/// [`a_span_inside_a_word_of_the_other_direction_keeps_the_word_in_order`]
+/// draws it, the joiner itself drawing nothing.
+#[test]
+fn a_joiner_inside_a_word_does_not_cut_it() {
+    let face = Face::new("Fixture Arabic", " ab\u{628}\u{62D}\u{645}\u{200D}")
+        .with_joining(Joining { script: *b"arab" });
+    let body = "a \u{628}\u{200D}\u{62D}\u{645} b";
+    let doc =
+        Document::open(one_face_book("Fixture Arabic", &face.build(), 24, body)).expect("a book");
+    let drawn = drawn_left_to_right(&doc);
+    // The joiner is in the text of the glyph it rides on, `ب`'s, and is
+    // drawn as nothing of its own.
+    let order: Vec<String> = drawn
+        .iter()
+        .map(|(text, _)| text.replace('\u{200D}', ""))
+        .collect();
+    assert_eq!(
+        order,
+        ["a", "\u{645}", "\u{62D}", "\u{628}", "b"],
+        "the word was cut at its joiner: {drawn:?}"
+    );
+    let advance = 500.0 / 1000.0 * 18.0;
+    let origin = drawn[0].1;
+    for ((text, x), slot) in drawn.iter().zip([0.0, 2.0, 3.0, 4.0, 6.0]) {
+        let expected = origin + slot * advance;
+        assert!(
+            (x - expected).abs() < 0.01,
+            "{text:?} is drawn at {x}, not {expected}: {drawn:?}"
+        );
+    }
 }

@@ -7,8 +7,14 @@
 //! read backwards; and for one that draws each glyph in reading order with the
 //! pen moving left, they are already right. [`into_logical_order`] answers
 //! both the same way, because it never trusts the stream's order for a line
-//! that holds a right-to-left character:
+//! that holds a right-to-left character — including for where the line ends:
 //!
+//! 0. **A line the stream's order cut is one line again.** A right-to-left
+//!    word drawn in reading order as several text objects, inside a
+//!    left-to-right line, reaches `TextDevice` as pieces on one baseline,
+//!    since a line resumes after an `ET` only where it stopped; consecutive
+//!    lines that hold a right-to-left character and meet end to end on one
+//!    baseline are joined ([`rejoin_split_lines`]).
 //! 1. **Marks are kept with their base.** A character whose first code point
 //!    is a nonspacing mark (`Bidi_Class` `NSM`) belongs to the base glyph it
 //!    sits on — the neighbour, in content order, whose extent along the
@@ -63,7 +69,7 @@
 //! opt-out: the characters in the order the content stream showed them, as
 //! `TextDevice` collected them.
 
-use tinker_pdf_content::{TextChar, TextLine, TextPage, WritingMode};
+use tinker_pdf_content::{Quad, TextChar, TextLine, TextPage, WritingMode};
 use tinker_pdf_shape::bidi::{drawn_direction, logical_order, BaseDirection};
 use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
 
@@ -86,6 +92,7 @@ pub struct TextOptions {
 pub(crate) fn into_logical_order(page: &mut TextPage) -> usize {
     let mut changed = 0usize;
     for block in &mut page.blocks {
+        changed += rejoin_split_lines(&mut block.lines);
         for line in &mut block.lines {
             if logical_line(line) {
                 changed += 1;
@@ -93,6 +100,103 @@ pub(crate) fn into_logical_order(page: &mut TextPage) -> usize {
         }
     }
     changed
+}
+
+/// Joins consecutive lines of one block that the content stream's order split
+/// and that are one line on the page: on one baseline, end to end, with a
+/// right-to-left character in either. Returns how many joins it made.
+///
+/// # Why a line drawn in reading order can arrive in pieces
+///
+/// `TextDevice` resumes a line after an `ET` only where the last glyph
+/// stopped, give or take half an em — which is what keeps two cells of a table
+/// row two lines. A producer that draws a right-to-left word in reading order
+/// moves its pen left, and when that word is several text objects inside a
+/// left-to-right line — `a ب<span>ح</span>م b`, each span its own object — the
+/// object drawn first is the rightmost: `a ` ends at one place and `ب` starts
+/// two letters further on, so the line was cut there, and again after `م`,
+/// which ends at the word's left edge while ` b` starts at its right. Three
+/// lines on one baseline came back, and the reading order below, which never
+/// trusts the stream's order, was handed three lines to order instead of one.
+/// Ruling 14 says the content stream's order decides nothing; this is that
+/// sentence applied to where a line ends as well as to how one is read.
+///
+/// So two lines in a row are one when their baselines agree to half an em and
+/// their extents along it meet or overlap to within the same half em the
+/// device's own rule allows. A line with no right-to-left character beside a
+/// line with none is never joined — a left-to-right page is collected exactly
+/// as it was — and neither is a vertical one.
+fn rejoin_split_lines(lines: &mut Vec<TextLine>) -> usize {
+    let mut joined = 0usize;
+    let mut out: Vec<TextLine> = Vec::with_capacity(lines.len());
+    for line in std::mem::take(lines) {
+        match out.last_mut() {
+            Some(previous) if continues_on_page(previous, &line) => {
+                previous.chars.extend(line.chars);
+                previous.text = previous.chars.iter().map(|c| c.text.as_str()).collect();
+                previous.size = previous.size.max(line.size);
+                previous.quad = enclose(previous.quad, line.quad);
+                joined += 1;
+            }
+            _ => out.push(line),
+        }
+    }
+    *lines = out;
+    joined
+}
+
+/// Whether `next` is the rest of the line `previous` is on. See
+/// [`rejoin_split_lines`].
+fn continues_on_page(previous: &TextLine, next: &TextLine) -> bool {
+    if previous.wmode == WritingMode::Vertical || next.wmode == WritingMode::Vertical {
+        return false;
+    }
+    let holds_rtl = |line: &TextLine| line.chars.iter().any(|c| c.text.chars().any(right_to_left));
+    if !holds_rtl(previous) && !holds_rtl(next) {
+        return false;
+    }
+    let (Some(first), Some(other)) = (previous.chars.first(), next.chars.first()) else {
+        return false;
+    };
+    let axis = baseline(&previous.chars);
+    let theirs = baseline(&next.chars);
+    if axis.0 * theirs.0 + axis.1 * theirs.1 < 0.999 {
+        return false;
+    }
+    let slack = previous.size.max(next.size).max(1.0) * 0.5;
+    // Across the baseline: the two first glyphs' origins, on the normal.
+    let normal = (-axis.1, axis.0);
+    let across =
+        (other.origin.0 - first.origin.0) * normal.0 + (other.origin.1 - first.origin.1) * normal.1;
+    if !across.is_finite() || across.abs() > slack {
+        return false;
+    }
+    // Along it: the gap between the two extents, zero where they overlap.
+    let span = |line: &TextLine| {
+        line.chars
+            .iter()
+            .map(|c| extent(c, axis))
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (a, b)| {
+                (lo.min(a), hi.max(b))
+            })
+    };
+    let (lo1, hi1) = span(previous);
+    let (lo2, hi2) = span(next);
+    let gap = (lo2 - hi1).max(lo1 - hi2).max(0.0);
+    gap.is_finite() && gap <= slack
+}
+
+/// The smallest upright box around two quads.
+fn enclose(a: Quad, b: Quad) -> Quad {
+    let (ax0, ay0, ax1, ay1) = a.bounds();
+    let (bx0, by0, bx1, by1) = b.bounds();
+    let (x0, y0, x1, y1) = (ax0.min(bx0), ay0.min(by0), ax1.max(bx1), ay1.max(by1));
+    Quad {
+        ul: (x0, y1),
+        ur: (x1, y1),
+        ll: (x0, y0),
+        lr: (x1, y0),
+    }
 }
 
 /// Whether a character reads right to left, or may open a right-to-left
@@ -267,7 +371,6 @@ fn logical_line(line: &mut TextLine) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tinker_pdf_content::Quad;
 
     /// A character `width` wide whose box starts at `x` on the baseline.
     fn ch(text: &str, x: f64, width: f64) -> TextChar {
@@ -425,5 +528,79 @@ mod tests {
         let mut l = line(chars, true);
         logical_line(&mut l);
         assert_eq!(l.chars.len(), 20_001, "no character may be lost");
+    }
+
+    /// `a ב<span>ג</span>א b`-shaped, as an EPUB draws it: each span its own
+    /// text object, in reading order, so the word's objects are drawn right to
+    /// left and the device cut the line at both ends of the word.
+    fn split_in_three() -> Vec<TextLine> {
+        // Each line's quad encloses its characters, as the device's do.
+        let whole = |chars: Vec<TextChar>, rtl: bool| {
+            let mut l = line(chars, rtl);
+            l.quad = l.chars.iter().fold(l.quad, |q, c| enclose(q, c.quad));
+            l
+        };
+        vec![
+            whole(vec![ch("a", 0.0, 5.0), ch(" ", 5.0, 5.0)], false),
+            whole(
+                vec![
+                    ch(ALEF, 20.0, 5.0),
+                    ch(BET, 15.0, 5.0),
+                    ch(GIMEL, 10.0, 5.0),
+                ],
+                true,
+            ),
+            whole(vec![ch(" ", 25.0, 5.0), ch("b", 30.0, 5.0)], false),
+        ]
+    }
+
+    #[test]
+    fn a_line_the_stream_split_on_one_baseline_is_read_as_one() {
+        let mut page = TextPage::default();
+        page.blocks.push(tinker_pdf_content::TextBlock {
+            lines: split_in_three(),
+            quad: ch("a", 0.0, 35.0).quad,
+        });
+        into_logical_order(&mut page);
+        let lines = &page.blocks[0].lines;
+        assert_eq!(lines.len(), 1, "the three pieces are one line");
+        assert_eq!(lines[0].text, format!("a {ALEF}{BET}{GIMEL} b"));
+        let (x0, _, x1, _) = lines[0].quad.bounds();
+        assert_eq!((x0, x1), (0.0, 35.0), "the joined line encloses all three");
+    }
+
+    #[test]
+    fn lines_apart_on_one_baseline_stay_apart() {
+        // Two table cells: the second starts a whole em past the first.
+        let mut lines = vec![
+            line(vec![ch(ALEF, 0.0, 5.0)], true),
+            line(vec![ch(BET, 15.0, 5.0)], true),
+        ];
+        assert_eq!(rejoin_split_lines(&mut lines), 0);
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn lines_on_two_baselines_stay_apart() {
+        let mut lower = ch(BET, 5.0, 5.0);
+        lower.origin.1 = -12.0;
+        let mut lines = vec![
+            line(vec![ch(ALEF, 0.0, 5.0)], true),
+            line(vec![lower], true),
+        ];
+        assert_eq!(rejoin_split_lines(&mut lines), 0);
+    }
+
+    #[test]
+    fn left_to_right_lines_are_never_joined() {
+        // The same shape as the split word, with no right-to-left character:
+        // the device's lines stand exactly as it collected them.
+        let mut lines = vec![
+            line(vec![ch("a", 0.0, 5.0)], false),
+            line(vec![ch("c", 10.0, 5.0)], false),
+            line(vec![ch("b", 5.0, 5.0)], false),
+        ];
+        assert_eq!(rejoin_split_lines(&mut lines), 0);
+        assert_eq!(lines.len(), 3);
     }
 }
