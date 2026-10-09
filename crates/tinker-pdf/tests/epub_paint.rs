@@ -1226,15 +1226,19 @@ fn a_feature_asked_of_a_face_this_build_does_not_shape_is_counted() {
 /// counts nothing, nor does an isolate inside it. A right-to-left table lays
 /// its columns from the left here (CSS 2.2 §17.5), a flex row its items
 /// (`css-flexbox-1` §2) and a multi-column container its columns
-/// (`css-multicol-1` §3); and a block over-constrained in a right-to-left
-/// containing block — a definite `width`, neither margin `auto` — gives up
-/// its right margin where §10.3.3 gives up its left. Each such element is
-/// counted against `direction`, and one with a margin `auto` is not
+/// (`css-multicol-1` §3); and a block-level box over-constrained in a
+/// right-to-left containing block — a block, a table or a flex container
+/// with a definite `width`, neither margin `auto` — gives up its right
+/// margin where §10.3.3 gives up its left. Each such element is counted
+/// against `direction`, and one with a margin `auto` is not
 /// over-constrained. **The margin is the containing block's to decide**, not
-/// the block's own (review of lane 8C): a right-to-left `div` with a width
+/// the box's own (review of lane 8C): a right-to-left `div` with a width
 /// in the left-to-right body gives up its right margin, as this layout does,
 /// and is not counted; a left-to-right one inside a right-to-left `div` gives
-/// up its left, which this layout does not, and is. An absolutely positioned
+/// up its left, which this layout does not, and is — as is a left-to-right
+/// table or flex container with a width there. A relatively positioned box
+/// with `left` and `right` both stated in a right-to-left block is offset by
+/// `left` here, where §9.4.3 lets `right` win, and is counted. An absolutely positioned
 /// box in a right-to-left block is placed from the right by §10.3.7 — at its
 /// static position with both insets `auto`, and by `right` when `left`,
 /// `width` and `right` are all stated — and counted; with `right` alone it
@@ -1291,6 +1295,71 @@ fn direction_and_unicode_bidi_count_what_this_layout_does_not_do() {
         (
             "",
             "<div dir=\"rtl\"><div style=\"width: 50%; margin-left: auto\"><p>a</p></div></div>",
+            "direction",
+            None,
+        ),
+        // The same over-constrained margin, on the other block-level boxes in
+        // normal flow (review of lane 8C): a table and a flex container with a
+        // definite width. Without one a flex container fills its line, and so
+        // does a table here, so neither gives up a margin.
+        (
+            "",
+            "<div dir=\"rtl\"><table dir=\"ltr\" style=\"width: 50%\"><tr><td>a</td></tr></table></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><table dir=\"ltr\"><tr><td>a</td></tr></table></div>",
+            "direction",
+            None,
+        ),
+        (
+            "",
+            "<table dir=\"ltr\" style=\"width: 50%\"><tr><td>a</td></tr></table>",
+            "direction",
+            None,
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><div dir=\"ltr\" style=\"display: flex; width: 50%\"><p>a</p></div></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><div dir=\"ltr\" style=\"display: flex\"><p>a</p></div></div>",
+            "direction",
+            None,
+        ),
+        // And a relatively positioned box with both `left` and `right` in a
+        // right-to-left containing block, where §9.4.3 lets `right` win and
+        // this layout applies `left` — a block, and an inline block, whose
+        // containing block is the block it sits in. One inset alone moves it
+        // as §9.4.3 says in either direction, and `left` winning in a
+        // left-to-right block is §9.4.3's own answer.
+        (
+            "",
+            "<div dir=\"rtl\"><p style=\"position: relative; left: 10px; right: 20px\">a</p></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><span style=\"display: inline-block; position: relative; \
+             left: 10px; right: 20px\">a</span></div>",
+            "direction",
+            Some(1),
+        ),
+        (
+            "",
+            "<div dir=\"rtl\"><p style=\"position: relative; right: 20px\">a</p></div>",
+            "direction",
+            None,
+        ),
+        (
+            "",
+            "<p style=\"position: relative; left: 10px; right: 20px\">a</p>",
             "direction",
             None,
         ),

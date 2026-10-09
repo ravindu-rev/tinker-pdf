@@ -1187,24 +1187,33 @@ fn casing_needs_language(language: &str) -> bool {
 ///   (§17.5), a flex row's main axis (`css-flexbox-1` §2) and a multi-column
 ///   container's columns (`css-multicol-1` §3);
 /// - **its containing block's direction** decides which margin of an
-///   over-constrained block in normal flow gives way — a definite `width`
-///   and neither margin `auto` — the right one under `ltr` and the left one
-///   under `rtl` (§10.3.3). The block's own `direction` is not asked: a
-///   right-to-left `<div style="width: 50%">` in a left-to-right body gives
-///   up its right margin, which is what this layout does, and a left-to-right
-///   one inside a right-to-left block gives up its left, which it does not
-///   (review of lane 8C);
+///   over-constrained block-level box in normal flow gives way — a block, a
+///   list item, a table or a flex container, with a definite `width` and
+///   neither margin `auto` — the right one under `ltr` and the left one
+///   under `rtl` (§10.3.3; a table's margins are its wrapper box's, §17.4).
+///   The box's own `direction` is not asked: a right-to-left
+///   `<div style="width: 50%">` in a left-to-right body gives up its right
+///   margin, which is what this layout does, and a left-to-right one inside
+///   a right-to-left block gives up its left, which it does not (review of
+///   lane 8C). Without a `width` a flex container fills its line, and so
+///   does a table in this layout, so neither gives up a margin;
+/// - the same direction decides which inset of a relatively positioned box
+///   wins when `left` and `right` are both stated — `left` under `ltr`,
+///   `right` under `rtl` (§9.4.3) — and this layout applies `left`, so a box
+///   it offsets (any but an inline box, which it does not offset at all;
+///   `sticky` is offset as `relative`) is counted in a right-to-left
+///   containing block (review of lane 8C);
 /// - and the same for an absolutely positioned or fixed box (§10.3.7):
 ///   placed by `left` with `left`, `width` and `right` all stated in a
 ///   right-to-left containing block, and at its static position's left edge
 ///   with both insets `auto` in a right-to-left block, where the section puts
 ///   `right` there.
 ///
-/// The containing block of a box in normal flow is its nearest block
-/// container ancestor's content box, of an absolutely positioned one its
-/// nearest positioned — or transformed — ancestor's, and of a fixed one, as
-/// of the root, the initial containing block, whose direction is the root's
-/// (§10.1).
+/// The containing block of a box in normal flow — relatively positioned or
+/// not — is its nearest block container ancestor's content box, of an
+/// absolutely positioned one its nearest positioned — or transformed —
+/// ancestor's, and of a fixed one, as of the root, the initial containing
+/// block, whose direction is the root's (§10.1).
 fn note_unturned_direction<E: Element>(
     elements: &[E],
     styles: &[ComputedStyle],
@@ -1265,12 +1274,19 @@ fn note_unturned_direction<E: Element>(
                 }
             }
             _ => {
-                flow_cb
-                    && style.float == Float::None
-                    && matches!(style.display, Display::Block | Display::ListItem)
+                let over_constrained = style.float == Float::None
+                    && matches!(
+                        style.display,
+                        Display::Block | Display::ListItem | Display::Table | Display::Flex
+                    )
                     && style.width != Size::Auto
                     && style.margin.left != MarginValue::Auto
-                    && style.margin.right != MarginValue::Auto
+                    && style.margin.right != MarginValue::Auto;
+                let both_offsets = matches!(style.position, Position::Relative | Position::Sticky)
+                    && style.display != Display::Inline
+                    && matches!(style.inset.get(Side::Left), Inset::Length(_))
+                    && matches!(style.inset.get(Side::Right), Inset::Length(_));
+                flow_cb && (over_constrained || both_offsets)
             }
         };
         if laid_left_to_right || placed_from_the_left {
