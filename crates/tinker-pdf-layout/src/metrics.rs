@@ -147,6 +147,12 @@ pub struct ShapedText {
 pub struct Neighbour<'a> {
     /// The neighbour's text on this line, whole; the provider takes as much
     /// of its near end as its shaping can see.
+    ///
+    /// **And reads it from that end.** Before a slice the neighbour is
+    /// everything on the line so far, and a slice is measured at every break
+    /// opportunity, so a provider that walks the whole of it — counting its
+    /// characters to find the last few — makes filling a line quadratic in
+    /// the line's length (review of lane 8C).
     pub text: &'a str,
     /// The neighbour's own face request.
     pub font: FontRequest<'a>,

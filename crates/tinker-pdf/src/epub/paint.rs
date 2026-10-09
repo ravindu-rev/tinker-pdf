@@ -3513,10 +3513,20 @@ fn run_key(run: &TextRun) -> RunKey {
 /// shaped twice over.
 const CONTEXT_CHARS: usize = 8;
 
-/// The last `n` characters of `text`.
+/// The last `n` characters of `text`, read from its end.
+///
+/// **From the end, and not by counting first.** Layout hands a slice the
+/// whole of its line before it as its context (`Neighbour::text`), once per
+/// break opportunity, so a tail that counted the text to find where its last
+/// `n` characters start cost the line's length at every opportunity —
+/// filling a paragraph set on one line, which a tiny `font-size` gives any
+/// book, was `O(characters²)` (review of lane 8C).
 fn tail(text: &str, n: usize) -> String {
-    let count = text.chars().count();
-    text.chars().skip(count.saturating_sub(n)).collect()
+    let start = match n.checked_sub(1) {
+        None => text.len(),
+        Some(last) => text.char_indices().rev().nth(last).map_or(0, |(at, _)| at),
+    };
+    text.get(start..).unwrap_or_default().to_owned()
 }
 
 /// The first `n` characters of `text`.

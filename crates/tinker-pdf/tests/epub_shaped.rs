@@ -1508,6 +1508,47 @@ fn a_mixed_line_is_cut_and_measured_in_one_context() {
     }
 }
 
+/// **A slice's context is read from its near end, so a long line costs its
+/// length and not its length squared** (review of lane 8C).
+///
+/// Layout hands each slice everything before it on its line as its context,
+/// once per break opportunity (`Shaper::shape_in`), and the provider takes
+/// the near characters of it. It took them by counting the whole of it
+/// first, so filling a line cost the line's length at every opportunity —
+/// `O(characters²)` a line, and a paragraph set on one line is any book's
+/// for the asking: a tiny `font-size`, a negative `letter-spacing`, a wide
+/// fixed-layout viewport.
+///
+/// No clock is read, for `5adf502`'s reason: a timing assertion fails on a
+/// slow machine and passes on a fast one with the defect back. The size is
+/// the evidence instead: 20 000 two-letter words on one line, at 0.001 px,
+/// in the kerning fixture's face — 60 000 characters. The quadratic build
+/// spent tens of seconds opening it in a debug build, the same words at
+/// 16 px, on hundreds of short lines, a few; this one opens it in the
+/// latter's time — 25.8 s against 2.6 s for this test on the machine the
+/// review was fixed on. The line is asserted to be one line, since a size
+/// that broke it would measure nothing.
+#[test]
+fn a_paragraph_on_one_line_is_measured_in_linear_time() {
+    let face = Face::new("Fixture Kern", "ab ");
+    let words = "ab ".repeat(20_000);
+    let body = format!("<span style=\"font-size: 0.001px\">{words}</span>");
+    let doc =
+        Document::open(one_face_book("Fixture Kern", &face.build(), 24, &body)).expect("a book");
+    assert_eq!(doc.page_count(), 1);
+    // The letters are a few ten-thousandths of a point apart, which the
+    // extractor reads as one letter drawn over another; what it can say is
+    // that they share one baseline.
+    let text = doc.page(0).expect("a page").text_with(&TextOptions {
+        content_order: true,
+    });
+    assert_eq!(
+        text.lines().len(),
+        1,
+        "the paragraph was not set on one line, so it measures nothing"
+    );
+}
+
 // ---- font-kerning and font-feature-settings ---------------------------------------
 
 /// Where `A`, `V` and `C` land, in points from `A`, in a book whose paragraph
