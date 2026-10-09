@@ -2187,7 +2187,18 @@ struct TaggedNode {
     props: Option<Box<ElementProps>>,
     /// Kept even when it claims nothing. See [`Tag::keep_empty`].
     keep: bool,
+    /// Changed only through [`TaggedNode::push_kid`] and
+    /// [`TaggedNode::remove_kid`], which keep `reach` in step.
     kids: Vec<TaggedKid>,
+    /// `reach[i]` is the greatest order among `kids[..=i]`, so where the
+    /// kids reach is the last entry rather than a walk over every kid. An
+    /// element is appended to once per resumption and per link, and the walk
+    /// made an element of n kids cost n squared: lane 8C's fixer measured an
+    /// EPUB paragraph of 10 000 / 20 000 / 40 000 `<span>`s at 3.8 / 13.1 /
+    /// 48.7 s to open, all of it there. A prefix rather than one running
+    /// maximum because a kid can be taken back ([`PageBuilder::close_marked`]),
+    /// and the greatest of the rest is then the entry before it.
+    reach: Vec<u64>,
 }
 
 impl TaggedNode {
@@ -2210,11 +2221,74 @@ impl TaggedNode {
             || self.keep
     }
 
+    /// An element with no kids yet.
+    fn new(
+        tag: Vec<u8>,
+        key: Option<NodeKey>,
+        order: u64,
+        props: Option<Box<ElementProps>>,
+        keep: bool,
+    ) -> TaggedNode {
+        TaggedNode {
+            tag,
+            key,
+            order,
+            props,
+            keep,
+            kids: Vec::new(),
+            reach: Vec::new(),
+        }
+    }
+
     /// The order a kid appended now takes: past every kid already here, so a
     /// stable sort leaves it after them.
     fn next_order(&self) -> u64 {
-        self.kids.iter().map(TaggedKid::order).max().unwrap_or(0)
+        self.reach.last().copied().unwrap_or(0)
     }
+
+    /// Appends `kid`, and where the kids now reach.
+    fn push_kid(&mut self, kid: TaggedKid) {
+        let order = kid.order();
+        let reach = self.reach.last().map_or(order, |&before| before.max(order));
+        self.kids.push(kid);
+        self.reach.push(reach);
+    }
+
+    /// Takes back the kid at `at`, working out again where the kids after it
+    /// reach — which the removal from the vector already walks, so it costs
+    /// no more than that did.
+    fn remove_kid(&mut self, at: usize) {
+        if at >= self.kids.len() {
+            return;
+        }
+        self.kids.remove(at);
+        self.reach.truncate(at);
+        let mut reach = self.reach.last().copied();
+        for kid in self.kids.get(at..).unwrap_or_default() {
+            look_at_kid();
+            let order = kid.order();
+            let here = reach.map_or(order, |before| before.max(order));
+            self.reach.push(here);
+            reach = Some(here);
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`look_at_kid`]'s count, on this thread.
+    static KIDS_LOOKED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// One kid of a structure element under construction looked at to work out
+/// where its kids reach ([`TaggedNode::reach`]). Counted only under
+/// `cfg(test)`, where a test holds an element's total to a small multiple of
+/// its kids, so that a walk over every kid at every append put back
+/// **fails** rather than runs slowly. Everywhere else it is nothing.
+#[inline]
+fn look_at_kid() {
+    #[cfg(test)]
+    KIDS_LOOKED.with(|looked| looked.set(looked.get().saturating_add(1)));
 }
 
 /// A key that merges the halves of one element across pages.
@@ -2947,25 +3021,26 @@ impl PageBuilder {
         let props = props.filter(|held| **held != ElementProps::default());
 
         let mcid = self.open_marked(&tag.kind);
-        self.tag_stack.push(TaggedNode {
-            tag: tag.kind.clone(),
-            key: tag.key.map(NodeKey::Caller),
-            order: tag.order,
+        let mut node = TaggedNode::new(
+            tag.kind.clone(),
+            tag.key.map(NodeKey::Caller),
+            tag.order,
             props,
-            keep: tag.keep,
-            // **The element's own first sequence is seeded from `order`**, and
-            // that is why no separate "say where this content sits" call is
-            // needed: `tagged_keyed` is called once per page, with the position
-            // of the first run drawn on *that* page, so a merged element's text
-            // already carries where it was written rather than which page it
-            // landed on. A `mark_order` method existed here and was deleted
-            // when its counted injection fired zero twice, against a fixture
-            // written specifically to catch it.
-            kids: vec![TaggedKid::Content {
-                mcid,
-                order: tag.order,
-            }],
+            tag.keep,
+        );
+        // **The element's own first sequence is seeded from `order`**, and
+        // that is why no separate "say where this content sits" call is
+        // needed: `tagged_keyed` is called once per page, with the position
+        // of the first run drawn on *that* page, so a merged element's text
+        // already carries where it was written rather than which page it
+        // landed on. A `mark_order` method existed here and was deleted
+        // when its counted injection fired zero twice, against a fixture
+        // written specifically to catch it.
+        node.push_kid(TaggedKid::Content {
+            mcid,
+            order: tag.order,
         });
+        self.tag_stack.push(node);
         true
     }
 
@@ -3014,7 +3089,7 @@ impl PageBuilder {
         self.close_marked();
         let mcid = self.open_marked(&tag);
         if let Some(node) = self.tag_stack.last_mut() {
-            node.kids.push(TaggedKid::Content { mcid, order });
+            node.push_kid(TaggedKid::Content { mcid, order });
         }
         true
     }
@@ -3028,7 +3103,7 @@ impl PageBuilder {
         };
         if node.is_kept() {
             match self.tag_stack.last_mut() {
-                Some(parent) => parent.kids.push(TaggedKid::Element(node)),
+                Some(parent) => parent.push_kid(TaggedKid::Element(node)),
                 None => self.tag_roots.push(node),
             }
         }
@@ -3071,14 +3146,13 @@ impl PageBuilder {
     /// innermost one's sequence so what is drawn first belongs to it.
     fn reopen(&mut self, carried: &[CarriedTag], refused: usize) {
         for tag in carried {
-            self.tag_stack.push(TaggedNode {
-                tag: tag.tag.clone(),
-                key: Some(tag.key),
-                order: tag.order,
-                props: tag.props.clone(),
-                keep: tag.keep,
-                kids: Vec::new(),
-            });
+            self.tag_stack.push(TaggedNode::new(
+                tag.tag.clone(),
+                Some(tag.key),
+                tag.order,
+                tag.props.clone(),
+                tag.keep,
+            ));
         }
         self.refused_opens = refused;
         self.resume_parent();
@@ -3102,7 +3176,7 @@ impl PageBuilder {
         // this a paragraph's second half sorts back in front of the span that
         // split it.
         let order = parent.next_order();
-        parent.kids.push(TaggedKid::Content { mcid, order });
+        parent.push_kid(TaggedKid::Content { mcid, order });
     }
 
     /// Associates `file` with this page: the page's `/AF` (ISO 32000-2
@@ -3399,7 +3473,7 @@ impl PageBuilder {
                 .iter()
                 .rposition(|kid| matches!(kid, TaggedKid::Content { mcid: m, .. } if *m == mcid))
             {
-                node.kids.remove(at);
+                node.remove_kid(at);
             }
         }
     }
@@ -3868,7 +3942,7 @@ impl PageBuilder {
         let link = self.links.len() - 1;
         if let Some(node) = self.tag_stack.last_mut() {
             let order = node.next_order();
-            node.kids.push(TaggedKid::Object { link, order });
+            node.push_kid(TaggedKid::Object { link, order });
         }
         true
     }
@@ -9285,6 +9359,98 @@ fn order_kids(arena: &mut [Merged]) {
 mod tests {
     use super::*;
     use crate::CosDocument;
+
+    /// **Appending to a structure element costs the same however many kids
+    /// it already has.** Every append that reads after its siblings — a
+    /// resumption after a child, a link — asks where the element's kids
+    /// reach, and the first way the builder answered walked all of them. So
+    /// an element of n kids cost n squared: lane 8C's fixer measured an EPUB
+    /// paragraph of 10 000 / 20 000 / 40 000 inline `<span>`s at 3.8 / 13.1 /
+    /// 48.7 s to open, all of it in that walk.
+    ///
+    /// One `/P` of `SPANS` `/Span`s drawn back to back, so each resumption of
+    /// the paragraph between two of them is taken back empty, with a link
+    /// after every eighth and a `continue_at` after every sixteenth: every
+    /// way a kid joins or leaves an element. Held by count, not by a clock:
+    /// the kids looked at to answer are at most eight per span.
+    #[test]
+    fn an_element_of_many_kids_costs_its_kids() {
+        const SPANS: usize = 4096;
+        let target = Target::Uri("https://example.org/".to_string());
+        let mut builder = DocumentBuilder::new();
+        KIDS_LOOKED.with(|looked| looked.set(0));
+        builder.add_page(200.0, 200.0, |page| {
+            page.tagged(b"P", |page| {
+                for at in 0..SPANS {
+                    page.tagged(b"Span", |page| page.raw(b"0 0 1 1 re f"));
+                    if at % 8 == 0 {
+                        assert!(page.link(0.0, 0.0, 1.0, 1.0, &target));
+                    }
+                    if at % 16 == 0 {
+                        assert!(page.continue_at(u64::try_from(at).unwrap_or(0)));
+                    }
+                }
+            });
+        });
+        let looked = KIDS_LOOKED.with(core::cell::Cell::get);
+        assert!(
+            looked <= 8 * SPANS,
+            "a paragraph of {SPANS} spans looked at {looked} kids to place them"
+        );
+
+        let doc = CosDocument::open(builder.finish()).expect("the built document opens");
+        let page = crate::pages::at(&doc, 0).expect("a page");
+        let content =
+            String::from_utf8_lossy(&crate::pages::content_bytes(&doc, &page)).into_owned();
+        assert_eq!(content.matches("/Span <<").count(), SPANS);
+    }
+
+    /// **Where an element's kids reach is the greatest of their orders,
+    /// whatever joined and left.** A fixed pseudo-random script over one
+    /// page — draw, open and close an element (keyed at an arbitrary order
+    /// or not), `continue_at` an arbitrary order, a link, an empty and a
+    /// drawn layer — and after every step, every open element's
+    /// `next_order` is the maximum over its kids, worked out the slow way.
+    #[test]
+    fn next_order_is_the_greatest_order_among_the_kids() {
+        let target = Target::Uri("https://example.org/".to_string());
+        let mut builder = DocumentBuilder::new();
+        let layer = builder.add_layer("Notes", true).expect("a layer");
+        let mut page = builder.begin_page(200.0, 200.0);
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move |below: u64| {
+            // A 64-bit linear congruential step (Knuth's MMIX constants).
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % below
+        };
+        assert!(page.open_tag(&Tag::new(b"P")));
+        for _ in 0..4096 {
+            match next(8) {
+                0 | 1 => page.raw(b"0 0 1 1 re f"),
+                2 if page.tag_stack.len() < 6 => {
+                    let tag = match next(2) {
+                        0 => Tag::new(b"Span"),
+                        _ => Tag::new(b"Span").keyed(next(1 << 20), next(100)),
+                    };
+                    assert!(page.open_tag(&tag));
+                }
+                3 if page.tag_stack.len() > 1 => assert!(page.close_tag()),
+                4 => assert!(page.continue_at(next(100))),
+                5 => assert!(page.link(0.0, 0.0, 1.0, 1.0, &target)),
+                6 => assert!(page.optional(layer, |_| {})),
+                7 => assert!(page.optional(layer, |page| page.raw(b"1 1 1 1 re f"))),
+                _ => {}
+            }
+            for node in &page.tag_stack {
+                let slow = node.kids.iter().map(TaggedKid::order).max().unwrap_or(0);
+                assert_eq!(node.next_order(), slow);
+            }
+        }
+        builder.push_page(page);
+        CosDocument::open(builder.finish()).expect("the built document opens");
+    }
 
     /// 7.3.4.2's three escapes, on the operator a caller writes its **own**
     /// codes through.
