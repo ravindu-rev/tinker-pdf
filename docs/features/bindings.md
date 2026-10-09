@@ -145,11 +145,15 @@ Ruby, Java and .NET read surfaces, which read labels page by page, cost the
 page count squared. Now one walk builds the handle and every indexed read is
 a lookup; a document with no labels is an empty handle rather than a null
 per page, and an index past the end is `BadArgument` like every other list.
-`the_page_label_handle_is_one_walk_and_outlives_its_document` frees the
-document before reading the first of 300 labels, which a read that went
-back to the document could not answer. Go's `PageLabels()`, Ruby's
-`page_labels`, Java's `pageLabels()` and .NET's `ReadPageLabels()` (a
-`PageLabels` with `Count` and `Label(index)`) each make the one walk;
+`the_page_label_handle_holds_its_own_copy_of_every_label` frees the
+document before reading the first of 300 labels and holds every read to
+the facade's; that the handle is one walk is read off
+`tpdf_document_page_labels`, which makes one `page_labels` call, and is not
+counted by a test. Go's `PageLabels()`, Ruby's `page_labels`, Java's
+`pageLabels()` and .NET's `ReadPageLabels()` (a `PageLabels` with `Count`
+and `Label(index)`) each make the one walk — the .NET one written and
+**never compiled**: this lane's container had no .NET SDK, and
+`cargo xtask bindings-parity` skipped it;
 Python's `page_labels()` and JavaScript's `pageLabels()` call the facade
 directly and always did. The outline, a
 page's links, the attachments and the warnings cross as owned handles on the

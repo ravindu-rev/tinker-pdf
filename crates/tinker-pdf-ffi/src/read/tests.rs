@@ -386,13 +386,18 @@ fn info_version_labels_and_xmp_read_the_same_through_the_abi() {
     unsafe { tpdf_document_free(doc) };
 }
 
-/// The labels are read once, when the handle is built, and every indexed read
-/// after that is a lookup in the handle's own copy: the document is freed
-/// before the first label is asked for, so a read that went back to it — the
-/// per-index walk this handle replaced, which built every label to answer
-/// one — could not answer at all.
+/// The handle holds its own copy of every label: the document is freed
+/// before the first of 300 is asked for, and every indexed read still
+/// answers what the facade's `page_labels` does.
+///
+/// What this does not show, and does not claim to: how many walks were
+/// made — the handle is built by one `Document::page_labels` call, which is
+/// read off `tpdf_document_page_labels` rather than counted here — or that a
+/// read reaching back into the freed document would fail. That read would be
+/// undefined behaviour, which need not fail without a sanitiser; the
+/// ownership this pins is that the reads answer correctly after the free.
 #[test]
-fn the_page_label_handle_is_one_walk_and_outlives_its_document() {
+fn the_page_label_handle_holds_its_own_copy_of_every_label() {
     let mut builder = DocumentBuilder::new();
     for _ in 0..300 {
         let page = builder.begin_page(100.0, 100.0);
