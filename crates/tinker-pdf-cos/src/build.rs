@@ -287,6 +287,12 @@ impl CieSpace {
     /// `X` and `Z` positive and `Y` equal to 1, a black point of non-negative
     /// numbers, positive gammas, a finite matrix, and a range whose minimums
     /// are below its maximums.
+    ///
+    /// Held **as the file will say them**: the writer prints a real to six
+    /// decimal places, so a white `X` or `Z` or a gamma under half a
+    /// millionth would be written as `0`, and a `/Range` pair closer than
+    /// that as one number twice — each a file the tables forbid, which is
+    /// refused here rather than written.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         let (white, black) = match self {
@@ -295,20 +301,24 @@ impl CieSpace {
             | CieSpace::Lab { white, black, .. } => (white, black),
         };
         let finite = |values: &[f64]| values.iter().all(|v| v.is_finite());
+        let written = crate::write::written_real;
+        let positive = |v: f64| v.is_finite() && written(v) > 0.0;
         let points = finite(white)
-            && white[0] > 0.0
+            && positive(white[0])
             && white[1] == 1.0
-            && white[2] > 0.0
+            && positive(white[2])
             && finite(black)
             && black.iter().all(|v| *v >= 0.0);
         points
             && match self {
-                CieSpace::CalGray { gamma, .. } => gamma.is_finite() && *gamma > 0.0,
+                CieSpace::CalGray { gamma, .. } => positive(*gamma),
                 CieSpace::CalRgb { gamma, matrix, .. } => {
-                    gamma.iter().all(|g| g.is_finite() && *g > 0.0) && finite(matrix)
+                    gamma.iter().all(|g| positive(*g)) && finite(matrix)
                 }
                 CieSpace::Lab { range, .. } => {
-                    finite(range) && range[0] < range[1] && range[2] < range[3]
+                    finite(range)
+                        && written(range[0]) < written(range[1])
+                        && written(range[2]) < written(range[3])
                 }
             }
     }
@@ -12875,5 +12885,50 @@ mod cie_tests {
             assert!(!page.set_fill_cie(b"CS", &[0.5]));
             assert!(page.set_fill_icc(b"CS", &[0.5, 0.5, 0.5]));
         });
+    }
+
+    /// The tables are held to what the file **says**, not to the numbers
+    /// handed over: the writer prints a real to six places, so a white `X`
+    /// or `Z` or a gamma under half a millionth is written as 0, which Tables
+    /// 63–65 forbid, and a `/Range` pair a ten-millionth apart is written as
+    /// one number twice. Each is refused; the same values a printable
+    /// distance from those edges register, and are written as themselves.
+    #[test]
+    fn a_value_the_file_would_write_as_forbidden_is_refused() {
+        let gray = |white: [f64; 3], gamma: f64| CieSpace::CalGray {
+            white,
+            black: [0.0; 3],
+            gamma,
+        };
+        let lab = |range: [f64; 4]| CieSpace::Lab {
+            white: D50,
+            black: [0.0; 3],
+            range,
+        };
+        assert!(!gray([1e-7, 1.0, 0.8249], 1.0).is_valid(), "white X");
+        assert!(!gray([0.9642, 1.0, 4e-7], 1.0).is_valid(), "white Z");
+        assert!(!gray(D50, 1e-7).is_valid(), "gamma");
+        assert!(!lab([0.1, 0.100_000_01, -1.0, 1.0]).is_valid(), "a* range");
+        assert!(!CieSpace::CalRgb {
+            white: D50,
+            black: [0.0; 3],
+            gamma: [1.0, 2e-7, 1.0],
+            matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        }
+        .is_valid());
+
+        let mut builder = DocumentBuilder::new();
+        let small = gray([0.000_005, 1.0, 0.000_007], 0.000_003);
+        assert!(small.is_valid());
+        assert!(builder.add_cie_color_space(b"CS", &small));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.set_fill_cie(b"CS", &[0.5]));
+        });
+        let (_, keys) = space(&opened(builder), b"CS");
+        assert!(
+            keys.contains(&(b"Gamma".to_vec(), vec![0.000_003]))
+                && keys.contains(&(b"WhitePoint".to_vec(), vec![0.000_005, 1.0, 0.000_007])),
+            "{keys:?}"
+        );
     }
 }

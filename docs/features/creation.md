@@ -105,7 +105,10 @@ writer leaves `/Alternate` to its default. `CieSpace::is_valid` holds the
 tables: a white point with `X` and `Z` positive and `Y` exactly 1, a black
 point of non-negative numbers, positive gammas, a finite matrix written column
 by column as Table 64 writes it, and a `/Range` whose minimums are below its
-maximums; anything else registers nothing. `set_fill_cie` and
+maximums — each held as the file will state it, since a real is written to
+six places, so a white `X` or a gamma under half a millionth (written `0`) or
+a `/Range` pair closer than that (written as one number) is refused; anything
+else registers nothing. `set_fill_cie` and
 `set_stroke_cie` write `/Name cs c1 … cn sc` with the space's own operand
 count, each component clamped to the space's own range — 0..1 for `/CalGray`
 and `/CalRGB`, and for `/Lab` `L*` to 0..100 and `a*`, `b*` to its `/Range`,

@@ -230,6 +230,21 @@ fn write_real(out: &mut Vec<u8>, value: f64) {
     out.extend_from_slice(if trimmed.is_empty() { "0" } else { trimmed }.as_bytes());
 }
 
+/// The number a reader takes from what [`write_real`] writes for `value`:
+/// `value` to six decimal places, or 0 where it is not finite.
+///
+/// For a caller that must hold a value to a rule **as the file will state
+/// it** — a white point's `X` of a ten-millionth is positive, and is written
+/// as `0`, which Table 63 forbids.
+pub(crate) fn written_real(value: f64) -> f64 {
+    let mut text = Vec::new();
+    write_real(&mut text, value);
+    std::str::from_utf8(&text)
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(0.0)
+}
+
 /// Writes one object.
 pub fn write_object(out: &mut Vec<u8>, object: &Object, names: &NameTable) {
     write_object_at(out, object, names, 0);
