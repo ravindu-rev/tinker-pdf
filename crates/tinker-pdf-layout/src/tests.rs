@@ -702,6 +702,37 @@ fn plaintext_without_a_bidi_provider_is_aligned_by_direction() {
     assert_eq!((first.x, first.paragraph_rtl), (60.0, None));
 }
 
+/// **A paragraph of many inline boxes costs its boxes, not their square**
+/// (found measuring the review of lane 8C).
+///
+/// `<span>a</span>` and a space, 2 048 times: 4 096 pieces in one
+/// formatting context, set ten characters to the line. Measuring a range
+/// and setting a line each walked every span of the context, and the line
+/// filler measures at every break opportunity, so the paragraph cost its
+/// pieces times its opportunities — 10 000 such spans in one `<p>` took
+/// 8.3 s and 20 000 took 37 s, against 0.07 and 0.14 s for the same words
+/// without them. Held by count, not by a clock: every span either walk looks
+/// at is counted ([`crate::flow::SPANS_LOOKED`]), and the paragraph is held
+/// to eight looks a piece.
+#[test]
+fn a_paragraph_of_many_inline_boxes_costs_its_boxes() {
+    const BOXES: usize = 2_048;
+    let mut children = Vec::new();
+    for _ in 0..BOXES {
+        children.push(BoxNode::element(base(), vec![text("a")]));
+        children.push(text(" "));
+    }
+    crate::flow::SPANS_LOOKED.with(|looked| looked.set(0));
+    let laid = run(&BoxNode::element(block(), children), 100.0, 1.0e6);
+    let looked = crate::flow::SPANS_LOOKED.with(std::cell::Cell::get);
+    assert_eq!(laid.text().matches('a').count(), BOXES);
+    let pieces = 2 * BOXES;
+    assert!(
+        looked <= 8 * pieces,
+        "{looked} spans looked at for a paragraph of {pieces} pieces"
+    );
+}
+
 /// [`METRICS`] with UAX #9's P2 over a few characters, counting every
 /// character it is asked about: Hebrew letters are `R`, ASCII letters `L`,
 /// the seven characters of `DerivedBidiClass.txt`'s `B` separators, and

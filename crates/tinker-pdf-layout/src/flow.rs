@@ -5026,7 +5026,19 @@ impl<M: Metrics> Builder<'_, M> {
         line_start: usize,
     ) -> f64 {
         let mut total = 0.0;
-        for (at, (start, end, index)) in spans.iter().enumerate() {
+        // Only the spans the range touches. They are in order and do not
+        // overlap ([`Builder::lines`] builds them so), so the first is found
+        // by search and the walk stops at the first one past the range. This
+        // walked every span of the context, and the line filler measures at
+        // every break opportunity, so a paragraph of many inline boxes cost
+        // its boxes times its opportunities (found measuring the review of
+        // lane 8C).
+        let first = spans.partition_point(|&(_, end, _)| end <= from);
+        for (at, (start, end, index)) in spans.iter().enumerate().skip(first) {
+            look_at_span();
+            if *start >= to {
+                break;
+            }
             let lo = (*start).max(from);
             let hi = (*end).min(to);
             if lo >= hi {
@@ -5173,7 +5185,15 @@ impl<M: Metrics> Builder<'_, M> {
         // in the same pass that gives the runs theirs.
         let mut boxes: Vec<(usize, InlineBox)> = Vec::new();
         let mut width = 0.0;
-        for (span_at, (span_start, span_end, index)) in spans.iter().enumerate() {
+        // The spans the line holds, found as [`Builder::measure`] finds a
+        // range's: a walk over every span of the context, once a line, was a
+        // paragraph's pieces times its lines.
+        let first = spans.partition_point(|&(_, span_end, _)| span_end <= start);
+        for (span_at, (span_start, span_end, index)) in spans.iter().enumerate().skip(first) {
+            look_at_span();
+            if *span_start >= end {
+                break;
+            }
             let lo = (*span_start).max(start);
             let hi = (*span_end).min(end);
             if lo >= hi {
@@ -6648,6 +6668,25 @@ fn context_of<'p>(
             .and_then(|&(s, e, index)| after_of(s, e.min(line.end), text_of(index)?))
     };
     ShapingContext { before, after }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`look_at_span`]'s count, on this thread.
+    pub(crate) static SPANS_LOOKED: core::cell::Cell<usize> =
+        const { core::cell::Cell::new(0) };
+}
+
+/// One span of a formatting context looked at by [`Builder::measure`] or
+/// [`Builder::line`] — the two walks over a context's spans made once for
+/// every break opportunity and every line. Counted only under `cfg(test)`,
+/// where a test holds a paragraph's total to a small multiple of its pieces,
+/// so that a walk over every span put back **fails** rather than runs
+/// slowly. Everywhere else it is nothing.
+#[inline]
+fn look_at_span() {
+    #[cfg(test)]
+    SPANS_LOOKED.with(|looked| looked.set(looked.get().saturating_add(1)));
 }
 
 /// Which piece a byte offset belongs to.
