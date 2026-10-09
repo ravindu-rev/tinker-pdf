@@ -2184,6 +2184,69 @@ fn dir_auto_is_the_direction_of_the_first_strong_character() {
     );
 }
 
+/// **A gradient's angle is turned by the deterministic sine** (ruling 4;
+/// review of lane 8C).
+///
+/// An axial shading's coordinates are bytes in the file, and a platform
+/// `sin` rounds its last bit its own way: at 9.2° the C library's sine and
+/// `tinker-pdf-math`'s differ in the last place on the machine this was
+/// written on. The line's ends are worked out here from
+/// `tinker_pdf_svg::transform::rotation`, the turn `transform: rotate()`
+/// takes, by `paint::gradient_paint`'s own arithmetic — the line through the
+/// centre, `|w sin A| + |h cos A|` long, the end colours held 0.001 pt past
+/// the end stops — and must be those bits. A corner's direction is the box's
+/// sides over its diagonal, with no `atan2`: `to top right` in a 150 by 75
+/// box.
+#[test]
+fn a_gradients_angle_is_turned_by_the_deterministic_sine() {
+    use super::paint::{gradient_paint, GradientPaint};
+    use tinker_pdf_cos::build::Shading;
+    use tinker_pdf_css::property::{
+        Color, ColorStop, Gradient, GradientShape, LengthPercentage, LinearDirection,
+    };
+    let (w, h) = (150.0_f64, 75.0_f64);
+    let stop = |r: u8, b: u8| ColorStop::<LengthPercentage> {
+        color: Color { r, g: 0, b, a: 255 },
+        position: None,
+    };
+    let coords = |direction: LinearDirection| {
+        let gradient = Gradient {
+            shape: GradientShape::Linear(direction),
+            stops: vec![stop(255, 0), stop(0, 255)],
+        };
+        match gradient_paint(&gradient, (w, h)) {
+            Some(GradientPaint::Shaded { shading, .. }) => match *shading {
+                Shading::Axial { coords, .. } => coords,
+                other => panic!("not an axial shading: {other:?}"),
+            },
+            other => panic!("not a shading: {other:?}"),
+        }
+    };
+    let expected = |sin: f64, cos: f64| {
+        let length = (w * sin).abs() + (h * cos).abs();
+        let start = (w / 2.0 - sin * length / 2.0, h / 2.0 - cos * length / 2.0);
+        let point = |along: f64| (start.0 + sin * along, start.1 + cos * along);
+        let (a, b) = (point(-1e-3), point(length + 1e-3));
+        [a.0, a.1, b.0, b.1]
+    };
+    let [cos, sin, ..] = tinker_pdf_svg::transform::rotation(9.2);
+    let bits = |c: [f64; 4]| c.map(f64::to_bits);
+    assert_eq!(
+        bits(coords(LinearDirection::Angle(9.2))),
+        bits(expected(sin, cos)),
+        "9.2deg"
+    );
+    let diagonal = (w * w + h * h).sqrt();
+    assert_eq!(
+        bits(coords(LinearDirection::Corner {
+            right: true,
+            bottom: false,
+        })),
+        bits(expected(h / diagonal, w / diagonal)),
+        "to top right"
+    );
+}
+
 /// `paint::draw_page` keeps the public signature it had before the book path's
 /// tagging moved to a crate-internal form (the review of the tagged-writing
 /// lane found the public function gone): given the element tree, it still

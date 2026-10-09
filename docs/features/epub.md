@@ -249,9 +249,18 @@ repeated as a raster one is, its cell an axial or radial shading
 angle and `|w sin A| + |h cos A|` long, a corner's angle the one that puts the
 other two corners on the 50% line; the ending shape's radii from its size
 keyword, an ellipse a circle in a space squashed by `ry / rx`; and §3.5.3's
-stop fix-up, coincident stops a hard edge. A stop before a radial gradient's
-centre is folded into the colour there, and an ending shape of no size is
-its last colour (§3.2.4). **`box-shadow`** (`css-backgrounds-3` §7.1) is drawn hard-edged: an
+stop fix-up, coincident stops a hard edge. The angle's sine and cosine are
+`tinker-pdf-math`'s, through the SVG crate's `rotation`, and a corner's the
+box's sides over its diagonal, so the shading's coordinates are the same
+bytes on every target (ruling 4). A stop before a radial gradient's
+centre is folded into the colour there, and §3.2.4's degenerate shapes are
+its three cases: a circle of no radius still rings out to stops placed by
+length, a shape of no width is a horizontal gradient mirrored about the
+centre, and only a shape of no height is its last colour. A gradient whose
+book-given numbers make a geometry that is not finite — a stop at `1e308%`,
+radii whose ratio overflows — or whose shading or pattern the writer
+refuses is not drawn and is counted against `background-image` by element,
+where it once wrote `inf` into its pattern or vanished unnamed. **`box-shadow`** (`css-backgrounds-3` §7.1) is drawn hard-edged: an
 outer shadow is the border box offset and grown by the spread — its corners
 grown by §7.1.1's `r + s(1 + (r/s − 1)³)` where the radius is under the
 spread, so a square corner stays square — under the background and clipped to

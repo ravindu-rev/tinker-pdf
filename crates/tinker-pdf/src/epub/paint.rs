@@ -1379,6 +1379,12 @@ pub struct Effects {
     /// annotation's rectangle is the run's, untransformed. Counted against
     /// `transform` by [`Effects::register`].
     turned_links: usize,
+    /// The elements one of whose gradient fragments was not drawn — a
+    /// geometry the book's numbers made infinite, or a shading or pattern
+    /// the writer refused — by element, `u32::MAX` for a fragment nobody
+    /// anchored. Counted against `background-image` by
+    /// [`Effects::register`].
+    refused_gradients: std::collections::BTreeSet<u32>,
 }
 
 /// What [`Effects::register`] could not register, by the property it was for,
@@ -1394,6 +1400,9 @@ pub struct Refused {
     /// Links inside a transformed element, whose active area is the run's
     /// rectangle before the transform.
     pub transform: usize,
+    /// Elements a gradient of which was not drawn: its geometry was not
+    /// finite, or the writer refused its shading or its pattern.
+    pub background_image: usize,
 }
 
 /// A background image as one page draws it, in page points.
@@ -1631,7 +1640,7 @@ pub enum GradientPaint {
         matrix: Option<[f64; 6]>,
     },
     /// One colour over the whole tile: a radial gradient whose ending shape
-    /// has no width or no height (§3.2.4 draws it as its last colour), or
+    /// has width and no height (§3.2.4 draws it as its last colour), or
     /// whose every stop is at or before its centre.
     Solid(Color),
 }
@@ -1781,8 +1790,42 @@ fn held(stops: &[(f64, Color)], before: bool) -> Vec<(f64, Color)> {
     out
 }
 
+/// `sqrt(x² + y²)` from IEEE 754's basic operations and `sqrt`, which every
+/// target rounds alike (ruling 4) — a platform `hypot` need not — scaled by
+/// the larger magnitude first, so a length near `f64::MAX` squares without
+/// overflowing. A NaN stays a NaN.
+fn hypot(x: f64, y: f64) -> f64 {
+    if x.is_nan() || y.is_nan() {
+        return f64::NAN;
+    }
+    let (x, y) = (x.abs(), y.abs());
+    let big = x.max(y);
+    if big == 0.0 || big.is_infinite() {
+        return big;
+    }
+    let (a, b) = (x / big, y / big);
+    big * (a * a + b * b).sqrt()
+}
+
+/// Whether every number is finite: what a shading's geometry and a `cm` must
+/// be before they are written, since the writer spells a non-finite real
+/// `0` and a pattern's content is written here, past its checks.
+fn all_finite(values: &[f64]) -> bool {
+    values.iter().all(|value| value.is_finite())
+}
+
+/// How tall, per point of the tile's height, the ellipse is that stands in
+/// for §3.2.4's ending shape of no width: tall enough that within the tile a
+/// point's ring is its horizontal distance from the centre to a
+/// ten-thousandth of a point.
+const TALL: f64 = 1e4;
+
 /// `gradient` as one tile `width` by `height` points draws it, in the tile's
 /// space: its origin the tile's bottom-left corner, y up.
+///
+/// `None` where the book's numbers make a geometry that is not finite — a
+/// stop at `1e308%`, a centre beyond any page — which the caller counts
+/// rather than writes (review of lane 8C).
 ///
 /// # Linear, §3.1
 ///
@@ -1794,6 +1837,12 @@ fn held(stops: &[(f64, Color)], before: bool) -> Vec<(f64, Color)> {
 /// ways, so a stop before 0% or past 100% is where it says, and the end
 /// colours held a hair past the end stops ([`held`]).
 ///
+/// **The angle's sine and cosine are the SVG crate's** (`rotation`, through
+/// `tinker-pdf-math`), as `transform: rotate()`'s are, and a corner's are
+/// the box's sides over its diagonal: a platform `sin` or `atan2` rounds its
+/// last bit its own way, and the shading's coordinates are bytes in the file
+/// (ruling 4; review of lane 8C).
+///
 /// # Radial, §3.2
 ///
 /// The ending shape's radii come from its size (§3.2.1, a corner keyword's
@@ -1802,21 +1851,42 @@ fn held(stops: &[(f64, Color)], before: bool) -> Vec<(f64, Color)> {
 /// so an ellipse is a circle of radius `rx` there. A stop before the centre
 /// is not a circle PDF can draw: the colour at the centre is interpolated
 /// and the stops before it dropped.
+///
+/// §3.2.4's degenerate shapes are its three cases (review of lane 8C): a
+/// circle of no radius is a circle of a vanishing one, so a stop placed by a
+/// length still rings out from the centre and one placed by a percentage is
+/// at it; a shape of no width is an ellipse of vanishing width and great
+/// height — a horizontal gradient mirrored about the centre, its percentages
+/// at the centre too — drawn as the circles of a space stretched [`TALL`]
+/// times the tile's height; and only a shape of no height, with width, is
+/// its last colour throughout.
 pub fn gradient_paint(
     gradient: &Gradient<LengthPercentage>,
     (width, height): (f64, f64),
 ) -> Option<GradientPaint> {
     match gradient.shape {
         GradientShape::Linear(direction) => {
-            let angle = match direction {
-                LinearDirection::Angle(degrees) => degrees.to_radians(),
+            let (sin, cos) = match direction {
+                LinearDirection::Angle(degrees) => {
+                    // A whole turn off first, which `%` does exactly, so a
+                    // huge angle is the angle it names rather than whatever
+                    // a reduction of a huge argument makes of it.
+                    let [cos, sin, ..] = rotation(degrees % 360.0);
+                    (sin, cos)
+                }
                 LinearDirection::Corner { right, bottom } => {
+                    // The angle whose sine is `across · h` and cosine
+                    // `−down · w`, over the diagonal: no `atan2` and back.
                     let across = if right { 1.0 } else { -1.0 };
                     let down = if bottom { 1.0 } else { -1.0 };
-                    (across * height).atan2(-down * width)
+                    let diagonal = hypot(width, height);
+                    if diagonal > 0.0 {
+                        (across * height / diagonal, -down * width / diagonal)
+                    } else {
+                        (0.0, 1.0)
+                    }
                 }
             };
-            let (sin, cos) = angle.sin_cos();
             let length = (width * sin).abs() + (height * cos).abs();
             let stops = held(&placed_stops(&gradient.stops, length), true);
             let (first, to) = (stops.first()?.0, stops.last()?.0);
@@ -1828,6 +1898,10 @@ pub fn gradient_paint(
             );
             let point = |along: f64| (start.0 + sin * along, start.1 + cos * along);
             let (a, b) = (point(first), point(to));
+            let positions: Vec<f64> = stops.iter().map(|(at, _)| *at).collect();
+            if !all_finite(&[a.0, a.1, b.0, b.1, to - first]) || !all_finite(&positions) {
+                return None;
+            }
             let function = ramp(&stops, first, to)?;
             Some(GradientPaint::Shaded {
                 shading: Box::new(Shading::Axial {
@@ -1864,7 +1938,7 @@ pub fn gradient_paint(
             );
             let corners = [(0.0, 0.0), (width, 0.0), (0.0, height), (width, height)]
                 .map(|(x, y): (f64, f64)| ((x - cx).abs(), (y - cy).abs()));
-            let distance = |(dx, dy): (f64, f64)| dx.hypot(dy);
+            let distance = |(dx, dy): (f64, f64)| hypot(dx, dy);
             let nearest = corners
                 .iter()
                 .copied()
@@ -1880,7 +1954,7 @@ pub fn gradient_paint(
                     return (0.0, 0.0);
                 }
                 let ratio = sx / sy;
-                let ry = (dx / ratio).hypot(dy);
+                let ry = hypot(dx / ratio, dy);
                 (ratio * ry, ry)
             };
             let (rx, ry) = match (radial.size, radial.circle) {
@@ -1900,9 +1974,24 @@ pub fn gradient_paint(
                 (RadialSize::FarthestCorner, false) => through(farthest, far_sides),
                 (RadialSize::Explicit(x, y), _) => (resolve(x, width), resolve(y, height)),
             };
-            let stops = placed_stops(&gradient.stops, rx);
+            if !all_finite(&[cx, cy, rx, ry]) {
+                return None;
+            }
+            // The ray percentages are of, and how the circles of the
+            // shading's space are squashed into the ending shape (§3.2.4).
+            let (ray, squash) = if rx > 0.0 && ry > 0.0 {
+                (rx, ry / rx)
+            } else if radial.circle && rx <= 0.0 {
+                (0.0, 1.0)
+            } else if rx <= 0.0 {
+                (0.0, TALL * height.max(1.0))
+            } else {
+                let last = *placed_stops(&gradient.stops, rx).last()?;
+                return Some(GradientPaint::Solid(last.1));
+            };
+            let stops = placed_stops(&gradient.stops, ray);
             let last = *stops.last()?;
-            if !(rx > 0.0 && ry > 0.0) || last.0 <= 0.0 {
+            if last.0 <= 0.0 {
                 return Some(GradientPaint::Solid(last.1));
             }
             // The colour at the centre, where a stop lies before it.
@@ -1933,6 +2022,13 @@ pub fn gradient_paint(
             let room = kept.first().is_some_and(|(at, _)| *at >= HARD_EDGE);
             let kept = held(&kept, room);
             let (first, to) = (kept.first()?.0, kept.last()?.0);
+            // The centre turned over into the tile's up, and the circle
+            // squashed into the ellipse.
+            let matrix = [1.0, 0.0, 0.0, squash, cx, height - cy];
+            let positions: Vec<f64> = kept.iter().map(|(at, _)| *at).collect();
+            if !all_finite(&matrix) || !all_finite(&positions) || !(to - first).is_finite() {
+                return None;
+            }
             let function = ramp(&kept, first, to)?;
             Some(GradientPaint::Shaded {
                 shading: Box::new(Shading::Radial {
@@ -1941,9 +2037,7 @@ pub fn gradient_paint(
                     function,
                     extend: (true, true),
                 }),
-                // The centre turned over into the tile's up, and the circle
-                // squashed into the ellipse.
-                matrix: Some([1.0, 0.0, 0.0, ry / rx, cx, height - cy]),
+                matrix: Some(matrix),
             })
         }
     }
@@ -1957,6 +2051,10 @@ pub fn gradient_paint(
 /// tiled reason: 8.7.3.1 maps a pattern onto the page's default space, so the
 /// box's transform is in its matrix, and one path is one place for a
 /// gradient to be placed wrong.
+///
+/// `None` where the gradient's geometry is not finite or the writer refuses
+/// its shading or its pattern; [`Effects::plan_backgrounds`] counts each
+/// such element against `background-image` (ruling 10).
 fn gradient_plan(
     builder: &mut DocumentBuilder,
     gradient: &Gradient<LengthPercentage>,
@@ -2157,6 +2255,7 @@ impl Effects {
             transformed_above,
             transforms,
             turned_links,
+            refused_gradients: std::collections::BTreeSet::new(),
         }
     }
 
@@ -2251,6 +2350,7 @@ impl Effects {
         image: impl Fn(&ImageRef) -> Option<(&'i [u8], (f64, f64))>,
         counter: &mut usize,
     ) {
+        let mut refused = std::collections::BTreeSet::new();
         let planned: Vec<Vec<(usize, Plan)>> = pages
             .iter()
             .map(|page| {
@@ -2269,10 +2369,11 @@ impl Effects {
                             let Some(turned) = self.composed(&locals, fragment.anchor) else {
                                 continue;
                             };
-                            if let Some(plan) =
-                                gradient_plan(builder, gradient, &geometry, turned, counter)
-                            {
-                                plans.push((index, plan));
+                            match gradient_plan(builder, gradient, &geometry, turned, counter) {
+                                Some(plan) => plans.push((index, plan)),
+                                None => {
+                                    refused.insert(fragment.anchor.unwrap_or(u32::MAX));
+                                }
                             }
                             continue;
                         }
@@ -2349,6 +2450,7 @@ impl Effects {
             })
             .collect();
         self.backgrounds = planned;
+        self.refused_gradients = refused;
     }
 
     /// This chapter's effects on one laid-out page, the `offset`-th of the
@@ -2412,6 +2514,7 @@ impl Effects {
             }
         }
         refused.transform = self.turned_links;
+        refused.background_image = self.refused_gradients.len();
         refused.box_shadow = shadowed.iter().filter(|(p, _)| *p == "box-shadow").count();
         refused.text_shadow = shadowed.iter().filter(|(p, _)| *p == "text-shadow").count();
         refused

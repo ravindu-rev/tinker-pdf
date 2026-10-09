@@ -1617,6 +1617,102 @@ fn a_gradient_this_build_does_not_draw_is_counted() {
     assert_ne!(tokens(&drawn), tokens(&plain), "a gradient drew nothing");
 }
 
+/// Every stream of a small document, decoded and joined: the page's content
+/// and every pattern cell a gradient wrote.
+fn every_stream(doc: &Document) -> String {
+    let cos = doc.cos();
+    let mut out = String::new();
+    for num in 1..=cos.max_object_number() {
+        if let Ok(data) = cos.stream_decoded(tinker_pdf_cos::ObjRef { num, gen: 0 }) {
+            out.push_str(&String::from_utf8_lossy(&data));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// **A gradient whose numbers are not finite writes no infinity, and is
+/// counted** (ruling 1's arithmetic and ruling 10; review of lane 8C).
+///
+/// Each of these is a finite length in the book that makes an infinite one
+/// on the page: radii of `1e-200px` and `1e200px` squash the circle by their
+/// ratio, `1e308%` of the box's width puts the centre past `f64::MAX`, and
+/// a stop at `1e308%` of the gradient line is past it too. The radial ones
+/// wrote `inf` into the pattern cell's `cm`, which no reader parses; the
+/// linear one drew nothing and said nothing. Each is now refused before it
+/// is written and counted against `background-image`, one element.
+#[test]
+fn a_gradient_whose_numbers_are_not_finite_is_counted_and_writes_no_infinity() {
+    for image in [
+        "radial-gradient(1e-200px 1e200px, #ff0000, #0000ff)",
+        "radial-gradient(circle 10px at 1e308% 50%, #ff0000 0px, #0000ff 10px)",
+        "linear-gradient(#ff0000 1e308%, #0000ff)",
+    ] {
+        let doc = gradient_box(image);
+        let streams = every_stream(&doc);
+        let bad: Vec<&str> = streams
+            .split_whitespace()
+            .filter(|token| token.contains("inf") || token.contains("NaN"))
+            .collect();
+        assert!(bad.is_empty(), "{image} wrote {bad:?}");
+        assert_eq!(counted(&doc, "background-image"), Some(1), "{image}");
+    }
+}
+
+/// **§3.2.4's degenerate radial gradients, as its three cases say** (review
+/// of lane 8C).
+///
+/// - A **circle** of no radius — `closest-side` at a corner — is a circle of
+///   a vanishing one, so stops placed by length still ring out from the
+///   centre: red at the top-left corner to blue 100 px from it, half way at
+///   50 px (30, 40) and a tenth at 10 px (6, 8).
+/// - An ending shape of **no width** — an ellipse's `closest-side` on the
+///   left edge — is a horizontal gradient mirrored about the centre: the
+///   colour is the distance across from the left edge, whatever the height.
+/// - Only one of **no height** with width — `closest-side` on the top edge —
+///   is its last colour throughout, which
+///   `a_radial_gradient_is_the_colour_css_says_at_every_point` holds.
+///
+/// Every degenerate shape used to be drawn as its last colour; with
+/// percentage stops, which all resolve to the centre, the first two are that
+/// too.
+#[test]
+fn a_degenerate_radial_gradient_is_drawn_as_section_3_2_4_says() {
+    let doc = gradient_box(
+        "radial-gradient(circle closest-side at left top, #ff0000 0px, #0000ff 100px)",
+    );
+    near_colours(
+        &colours(&doc, &[(30.0, 40.0), (6.0, 8.0), (120.0, 90.0)]),
+        &[blend(RED, BLUE, 0.5), blend(RED, BLUE, 0.1), BLUE],
+        "a circle of no radius",
+    );
+    let doc = gradient_box("radial-gradient(closest-side at left, #ff0000 0px, #0000ff 100px)");
+    near_colours(
+        &colours(
+            &doc,
+            &[(50.0, 10.0), (50.0, 90.0), (20.0, 50.0), (150.0, 30.0)],
+        ),
+        &[
+            blend(RED, BLUE, 0.5),
+            blend(RED, BLUE, 0.5),
+            blend(RED, BLUE, 0.2),
+            BLUE,
+        ],
+        "an ending shape of no width",
+    );
+    for image in [
+        "radial-gradient(circle closest-side at left top, #ff0000, #0000ff)",
+        "radial-gradient(closest-side at left, #ff0000, #0000ff)",
+    ] {
+        let doc = gradient_box(image);
+        near_colours(
+            &colours(&doc, &[(30.0, 40.0), (150.0, 80.0)]),
+            &[BLUE, BLUE],
+            image,
+        );
+    }
+}
+
 // ---- hyphens -------------------------------------------------------------------
 
 /// **A soft hyphen is drawn as a hyphen where its line breaks at it, and

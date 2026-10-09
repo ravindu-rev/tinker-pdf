@@ -1887,6 +1887,7 @@ fn write_chapters<R: read::Resources + ?Sized>(
         refused_effects.box_shadow += refused.box_shadow;
         refused_effects.text_shadow += refused.text_shadow;
         refused_effects.transform += refused.transform;
+        refused_effects.background_image += refused.background_image;
         // Where each picture reads among the text, over the whole chapter
         // rather than per page: a picture's neighbours in reading order may be
         // on the page before.
@@ -2002,13 +2003,16 @@ fn write_chapters<R: read::Resources + ?Sized>(
     }
     // An alpha the writer refused — a profile that forbids transparency — is an
     // `opacity`, or a translucent shadow colour, this document does not
-    // honour, counted by element as the cascade counts every other one; and a
-    // link under a transform keeps its untransformed active area.
+    // honour, counted by element as the cascade counts every other one; a
+    // link under a transform keeps its untransformed active area; and a
+    // gradient whose numbers are not finite, or whose shading the writer
+    // refused, is not drawn.
     for (property, elements) in [
         ("opacity", refused_effects.opacity),
         ("box-shadow", refused_effects.box_shadow),
         ("text-shadow", refused_effects.text_shadow),
         ("transform", refused_effects.transform),
+        ("background-image", refused_effects.background_image),
     ] {
         if elements > 0 {
             warnings.push(ArchiveWarning::UnimplementedProperty { property, elements });
