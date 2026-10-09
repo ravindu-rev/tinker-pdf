@@ -1635,3 +1635,22 @@ fn a_soft_hyphen_is_drawn_only_where_its_line_breaks() {
     let text = doc.page(0).expect("a page").text().plain_text();
     assert_eq!(text.trim_end(), "aaaa-\nbbbbbbbb\nabcd");
 }
+
+/// **A break inside a word that lands after a soft hyphen draws no hyphen
+/// under `hyphens: none`** (`css-text-3` §5.4; review of lane 8C).
+///
+/// Forty pixels hold four Courier characters at sixteen pixels. Under `none`
+/// the soft hyphen in `aaaa&#173;bbbbbbbb` is no break, so `overflow-wrap:
+/// anywhere` breaks the word inside, four characters a line; the first
+/// break falls just after the soft hyphen, and was drawn with a hyphen there
+/// — `aaaa-` — which `none` never shows.
+#[test]
+fn an_emergency_break_after_a_soft_hyphen_under_none_draws_no_hyphen() {
+    let doc = open(
+        "p { width: 40px; hyphens: none; overflow-wrap: anywhere; \
+         font-family: monospace; font-size: 16px }",
+        "<p>aaaa\u{AD}bbbbbbbb</p>",
+    );
+    let text = doc.page(0).expect("a page").text().plain_text();
+    assert_eq!(text.trim_end(), "aaaa\nbbbb\nbbbb");
+}

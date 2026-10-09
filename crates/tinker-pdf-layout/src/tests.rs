@@ -865,6 +865,42 @@ fn hyphens_none_takes_the_break_away() {
         .any(|(w, _)| *w == Warning::LineOverflowed));
 }
 
+/// **A break inside a word that lands after a soft hyphen shows no hyphen
+/// under `hyphens: none`** (`css-text-3` §5.4: under `none` a soft hyphen is
+/// never a hyphen; review of lane 8C).
+///
+/// `aaaa&#173;bbbbbbbb` at forty-five points under `overflow-wrap: anywhere`:
+/// `none` took the soft hyphen's break away, so the word has no opportunity
+/// and is broken inside, at the largest prefix that fits — `aaaa` and the
+/// soft hyphen, forty points, the soft hyphen measuring nothing. That break
+/// is not a break *at* the soft hyphen, and nothing is drawn after it; the
+/// line used to be flagged as hyphenated because a soft hyphen preceded its
+/// end, whatever its `hyphens` said. The rest is broken the same way.
+#[test]
+fn an_emergency_break_after_a_soft_hyphen_under_none_shows_no_hyphen() {
+    let mut none = base();
+    none.hyphens = Hyphens::None;
+    none.overflow_wrap = OverflowWrap::Anywhere;
+    let laid = run(
+        &BoxNode::element(block(), vec![BoxNode::text(none, "aaaa\u{AD}bbbbbbbb")]),
+        45.0,
+        400.0,
+    );
+    let lines: Vec<(String, f64, bool)> = laid.pages[0]
+        .runs
+        .iter()
+        .map(|run| (run.text.clone(), run.width, run.hyphenated))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            ("aaaa\u{AD}".to_owned(), 40.0, false),
+            ("bbbb".to_owned(), 40.0, false),
+            ("bbbb".to_owned(), 40.0, false),
+        ]
+    );
+}
+
 // ---- CSS 2.2 section 12.5, list markers -------------------------------------
 
 /// The five counting styles, at the boundaries a table would get wrong.

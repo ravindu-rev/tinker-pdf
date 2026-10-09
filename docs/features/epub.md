@@ -154,7 +154,8 @@ first and joined across both span boundaries. **`hyphens`** (`css-text-3`
 nothing and is not drawn where no line breaks at it; a line that breaks at
 one is measured with room for a hyphen and draws one there
 (`TextRun::hyphenated`, `paint::hyphenate`); and `none` takes the break
-away. `auto` asks for a hyphenation dictionary this build does not have and
+away, and shows no hyphen where `overflow-wrap` breaks a word just after
+one. `auto` asks for a hyphenation dictionary this build does not have and
 is refused by value. **`direction` and `unicode-bidi`**
 (`css-writing-modes-3` §2) decide the line, not each line's first letter:
 every run carries its block's direction as its paragraph's base level, so a

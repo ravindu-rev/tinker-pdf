@@ -4543,9 +4543,8 @@ impl<M: Metrics> Builder<'_, M> {
         // `css-text-3` §5.4: under `hyphens: none` a soft hyphen is no place
         // to break a word, though UAX #14 makes it one (class `BA`).
         opportunities.retain(|opportunity| {
-            soft_hyphen_before(&content, opportunity.at).is_none_or(|at| {
-                piece_at(&spans, at).is_none_or(|p| pieces[p].style.hyphens != Hyphens::None)
-            })
+            soft_hyphen_before(&content, opportunity.at).is_none()
+                || hyphen_shown(&content, &spans, pieces, opportunity.at)
         });
 
         let indent = match container.text_indent {
@@ -4615,9 +4614,11 @@ impl<M: Metrics> Builder<'_, M> {
             let justify =
                 container.text_align == TextAlign::Justify && !hard && end < content.len();
             // §5.4: a line that breaks at a soft hyphen ends in a hyphen. The
-            // end of the text is not a break at one.
+            // end of the text is not a break at one, and nor is a break
+            // inside a word (`overflow-wrap`) that lands after a soft hyphen
+            // `hyphens: none` holds: under `none` it is never a hyphen.
             let hyphenated =
-                !hard && end < content.len() && soft_hyphen_before(&content, end).is_some();
+                !hard && end < content.len() && hyphen_shown(&content, &spans, pieces, end);
             self.line(
                 &content,
                 &spans,
@@ -6406,6 +6407,29 @@ fn soft_hyphen_before(content: &str, at: usize) -> Option<usize> {
         .get(..at)
         .filter(|before| before.ends_with(SOFT_HYPHEN))
         .map(|_| at - SOFT_HYPHEN.len_utf8())
+}
+
+/// Whether a line that ends at byte `at` ends in a hyphen: it ends just
+/// after a soft hyphen whose element's `hyphens` is not `none`
+/// (`css-text-3` §5.4).
+///
+/// The one test both halves ask — which soft hyphens are break
+/// opportunities, and which line ends show a hyphen — so that a break that
+/// reaches a soft hyphen another way, `overflow-wrap`'s break inside a word,
+/// cannot show one `none` forbids (review of lane 8C).
+fn hyphen_shown(
+    content: &str,
+    spans: &[(usize, usize, usize)],
+    pieces: &[Piece],
+    at: usize,
+) -> bool {
+    soft_hyphen_before(content, at).is_some_and(|shy| {
+        piece_at(spans, shy).is_none_or(|p| {
+            pieces
+                .get(p)
+                .is_none_or(|piece| piece.style.hyphens != Hyphens::None)
+        })
+    })
 }
 
 /// How many characters of `text` are seen: all but its soft hyphens, which
