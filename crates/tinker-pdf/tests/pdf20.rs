@@ -1020,6 +1020,81 @@ fn a_marked_content_sequence_is_associated_through_its_named_property_list() {
     );
 }
 
+/// A sequence opened inside another is its own: each names its own property
+/// list, so each is listed with the files it was given, and the inner one's
+/// file is not written as an orphan beside the outer one's. The name is
+/// taken when the sequence opens, before what it draws can open another; a
+/// sequence that drew nothing keeps its name unused rather than handing it
+/// to the next.
+#[test]
+fn a_sequence_nested_in_another_keeps_its_own_files() {
+    let file = |name: &str| {
+        NewAssociatedFile::new(
+            name,
+            "text/plain",
+            FileRelationship::Data,
+            name.as_bytes().to_vec(),
+        )
+    };
+    let mut builder = DocumentBuilder::with_version(2, 0);
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(200.0, 200.0, |page| {
+        assert!(page.with_associated_files(vec![file("outer.txt")], |page| {
+            page.text(b"F1", 12.0, 20.0, 150.0, "Outer");
+            assert!(page.with_associated_files(vec![file("inner.txt")], |page| {
+                page.text(b"F1", 12.0, 20.0, 120.0, "Inner");
+                assert!(page.with_associated_files(vec![file("unused.txt")], |_| {}));
+            }));
+        }));
+        assert!(page.with_associated_files(vec![file("after.txt")], |page| {
+            page.text(b"F1", 12.0, 20.0, 90.0, "After");
+        }));
+    });
+    let bytes = builder.finish();
+    assert!(
+        !bytes.windows(10).any(|w| w == b"unused.txt"),
+        "an empty sequence's files are not written"
+    );
+    let doc = Document::open(bytes).expect("opens");
+    structurally_clean(&doc);
+
+    let listed = doc
+        .page(0)
+        .expect("a page")
+        .marked_content_associated_files();
+    let seen: Vec<(&[u8], Vec<Option<&str>>)> = listed
+        .sequences
+        .iter()
+        .map(|sequence| (&sequence.property[..], names(&sequence.files)))
+        .collect();
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    assert_eq!(seen[0].1, [Some("outer.txt")]);
+    assert_eq!(seen[1].1, [Some("inner.txt")], "the inner sequence's own");
+    assert_eq!(seen[2].1, [Some("after.txt")]);
+    let mut properties: Vec<&[u8]> = seen.iter().map(|(property, _)| *property).collect();
+    properties.sort_unstable();
+    properties.dedup();
+    assert_eq!(properties.len(), 3, "three names: {seen:?}");
+
+    // Every embedded file is one a sequence names: none written as an orphan.
+    let cos = doc.cos();
+    let named: Vec<ObjRef> = listed
+        .sequences
+        .iter()
+        .flat_map(|sequence| sequence.files.iter().filter_map(|file| file.stream))
+        .collect();
+    let embedded = (1..=cos.max_object_number())
+        .filter(|&num| {
+            cos.get(ObjRef::new(num, 0)).ok().is_some_and(|object| {
+                object.as_stream().is_some_and(|stream| {
+                    stream.dict.get_name(cos.intern(b"Type")) == Some(cos.intern(b"EmbeddedFile"))
+                })
+            })
+        })
+        .count();
+    assert_eq!(embedded, named.len(), "no embedded file is an orphan");
+}
+
 /// The reader on what another producer may write, held to the clause's last
 /// paragraph: only the `/AF` tag with a **named** list carrying `/MCAF`
 /// connects. An inline list, a named list without `/MCAF`, `/MCAF` under

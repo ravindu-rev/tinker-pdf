@@ -2148,6 +2148,10 @@ pub struct PageBuilder {
     /// something: its property list's resource name and the files its
     /// `/MCAF` names, written into the page's `/Properties` at `finish`.
     marked_files: Vec<(Vec<u8>, Vec<NewAssociatedFile>)>,
+    /// The number the next such sequence's resource name takes: `AF0`,
+    /// `AF1`, ... Taken when the sequence opens, so a sequence its closure
+    /// opens inside it is named after it and never with it.
+    next_marked_file: usize,
 }
 
 /// One structure element under construction, and what it claims.
@@ -3314,9 +3318,22 @@ impl PageBuilder {
             self.scoped(draw);
             return false;
         }
-        let resource = format!("AF{}", self.marked_files.len()).into_bytes();
-        if self.marked_scope(b"/AF ", &resource, draw) {
-            self.marked_files.push((resource, files));
+        // Named and listed before the closure runs: a sequence it opens is
+        // then named after this one and counted against `/Properties` with
+        // it. Named from `marked_files.len()` once the closure had returned,
+        // a nested sequence took the same name as the one around it, the
+        // outer's list overwrote the inner's at `finish`, and the inner's
+        // files were written with nothing naming them. A sequence that drew
+        // nothing is taken out again and its number left unused.
+        let resource = format!("AF{}", self.next_marked_file).into_bytes();
+        self.next_marked_file += 1;
+        let at = self.marked_files.len();
+        self.marked_files.push((resource.clone(), files));
+        if !self.marked_scope(b"/AF ", &resource, draw) {
+            // Everything a nested call pushed sits after `at`, and a nested
+            // sequence that drew something made this one draw something, so
+            // the entry at `at` is this call's own.
+            self.marked_files.truncate(at);
         }
         true
     }
@@ -7378,6 +7395,7 @@ impl DocumentBuilder {
             associated_allowed: self.associated_files_allowed(),
             associated: Vec::new(),
             marked_files: Vec::new(),
+            next_marked_file: 0,
         };
         page.reopen(&self.carried, self.carried_refused);
         page
