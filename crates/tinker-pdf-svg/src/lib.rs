@@ -280,9 +280,8 @@ pub enum Warning {
     /// metric this crate does not have (ruling 8): a caller that has one hands
     /// it in through [`Context::with_measure`], and the box is then measured.
     /// It is not measured through [`read`], which has no measurer; from a
-    /// measurer whose numbers are not finite; for text whose first run
-    /// continues a pen this crate cannot see — a `<text>` whose first
-    /// characters are hidden; or for a `mask` or `clip-path` on a `<tspan>`,
+    /// measurer whose numbers are not finite, or a cell past a double's
+    /// range; or for a `mask` or `clip-path` on a `<tspan>`,
     /// which SVG 2 §11.2 resolves against the box of the **whole** `<text>`,
     /// a box not known until its last run is placed. There the text has no
     /// box, and a fraction of nothing would take the ink away: the element is
