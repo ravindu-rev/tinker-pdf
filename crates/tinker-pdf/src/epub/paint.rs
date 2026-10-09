@@ -4201,7 +4201,7 @@ fn paragraphs(pages: &[LayoutPage]) -> (BTreeMap<usize, Paragraph>, Vec<Vec<Plac
             let shared = paragraph
                 .open
                 .iter()
-                .zip(&run.embeddings)
+                .zip(run.embeddings.iter())
                 .take_while(|(a, b)| a == b)
                 .count();
             while paragraph.open.len() > shared {
@@ -4409,7 +4409,7 @@ fn line_levels(
     for run in line {
         let shared = open
             .iter()
-            .zip(&run.embeddings)
+            .zip(run.embeddings.iter())
             .take_while(|(a, b)| a == b)
             .count();
         while open.len() > shared {

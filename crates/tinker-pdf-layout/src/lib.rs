@@ -128,6 +128,7 @@ pub mod unicode;
 mod tests;
 
 use std::fmt;
+use std::sync::Arc;
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
@@ -648,7 +649,11 @@ pub struct TextRun {
     /// round it, outermost first (`unicode-bidi`, §2.2): what UAX #9's
     /// formatting characters would say, kept beside the text rather than in
     /// it, so that the characters a book wrote are the characters a run holds.
-    pub embeddings: Vec<Embedding>,
+    ///
+    /// **Shared**: every run set under the same inline boxes holds the one
+    /// stack, so a line costs a pointer and not a copy of up to
+    /// [`limits::MAX_EMBEDDING_DEPTH`] levels (review of lane 8C).
+    pub embeddings: Arc<[Embedding]>,
     /// UAX #9's resolved level of every character of this run, once the
     /// caller that orders its line has cut it to one level; `None` as this
     /// crate makes it, since it resolves no levels.

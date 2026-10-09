@@ -61,6 +61,7 @@
 //! is what a book uses to pull a drop cap up.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
@@ -72,6 +73,7 @@ use tinker_pdf_css::property::{
 
 use crate::flex;
 use crate::floats::{Ceilings, FloatContext, Placed};
+use crate::limits::MAX_EMBEDDING_DEPTH;
 use crate::metrics::{FirstStrong, FontRequest, Metrics, Neighbour, ShapingContext, CONTEXT_BYTES};
 use crate::style::{consume, Consumed};
 use crate::table::{self, CellWidths, Edge, Grid, Origin, Slot, TableBox};
@@ -538,8 +540,8 @@ struct Builder<'a, M: Metrics> {
     /// The explicit bidi levels the inline boxes being gathered open, outermost
     /// first: what each [`Piece`] — and so each [`TextRun`] — carries for the
     /// painter's UAX #9. Bounded by UAX #9's own depth, past which X1 ignores
-    /// an embedding anyway.
-    embeddings: Vec<Embedding>,
+    /// an embedding anyway ([`MAX_EMBEDDING_DEPTH`]).
+    embeddings: EmbeddingStack,
     /// The float contexts of the formatting contexts a scroll container
     /// interrupted, innermost last: CSS 2.2 §9.4.1 makes one a block
     /// formatting context of its own, so its children are placed against a
@@ -838,9 +840,68 @@ struct Piece {
     /// [`TextRun::generated`], which is what keeps it out of text conservation
     /// and makes the painter mark it an artifact.
     generated: bool,
-    /// The bidi levels its inline ancestors open. See
+    /// The bidi levels its inline ancestors open, shared with every piece
+    /// and run made under the same ones ([`EmbeddingStack::shared`]). See
     /// [`TextRun::embeddings`].
-    embeddings: Vec<Embedding>,
+    embeddings: Arc<[Embedding]>,
+}
+
+/// [`Builder::embeddings`]: the levels the inline boxes being gathered open,
+/// and the same stack as the pieces carry it.
+///
+/// **Shared, not copied.** Every piece, and every run cut from it, carries
+/// the whole stack, up to [`MAX_EMBEDDING_DEPTH`] levels of twelve bytes —
+/// and a copy each was a kilobyte and a half on every line of a paragraph
+/// inside 125 nested isolating spans: a 400 KB paragraph of one-word lines
+/// peaked at 855 MB against 259 MB without the spans (review of lane 8C).
+/// A stack is made into an [`Arc`] once, when a piece first asks for it, and
+/// every piece and run made under the same boxes holds that one. One is kept
+/// per level, so closing a box goes back to the stack its parent's pieces
+/// already share: a stack is made at most once for each box that opens a
+/// level, and once for the context's own.
+struct EmbeddingStack {
+    open: Vec<Embedding>,
+    /// `shared[i]` is `open[..i]` as a piece carries it, once one has asked:
+    /// always one longer than `open`.
+    shared: Vec<Option<Arc<[Embedding]>>>,
+}
+
+impl Default for EmbeddingStack {
+    fn default() -> Self {
+        Self {
+            open: Vec::new(),
+            shared: vec![None],
+        }
+    }
+}
+
+impl EmbeddingStack {
+    fn len(&self) -> usize {
+        self.open.len()
+    }
+
+    fn push(&mut self, embedding: Embedding) {
+        self.open.push(embedding);
+        self.shared.push(None);
+    }
+
+    fn pop(&mut self) {
+        if self.open.pop().is_some() {
+            self.shared.pop();
+        }
+    }
+
+    /// The open levels as a piece carries them: the one already made for
+    /// this level, or a new one kept for the next piece.
+    fn shared(&mut self) -> Arc<[Embedding]> {
+        let open = &self.open;
+        match self.shared.get_mut(open.len()) {
+            Some(slot) => Arc::clone(slot.get_or_insert_with(|| Arc::from(open.as_slice()))),
+            // Unreachable while `push` and `pop` keep the two in step; a new
+            // stack is still the right answer, only not a shared one.
+            None => Arc::from(open.as_slice()),
+        }
+    }
 }
 
 /// An atomic inline-level box, CSS 2.2 §9.2.2.
@@ -923,7 +984,7 @@ pub(crate) fn build<M: Metrics>(
         sequence: 0,
         paragraphs: 0,
         inside_marker: None,
-        embeddings: Vec::new(),
+        embeddings: EmbeddingStack::default(),
         outer_floats: Vec::new(),
         clipping: 0,
         deferred: None,
@@ -2000,7 +2061,7 @@ impl<M: Metrics> Builder<'_, M> {
             order: self.order(),
             atomic: None,
             generated: false,
-            embeddings: Vec::new(),
+            embeddings: Arc::default(),
         });
         self.lines(&pieces, style, block, content_x, content_width)
     }
@@ -2204,7 +2265,7 @@ impl<M: Metrics> Builder<'_, M> {
                         order: self.order(),
                         atomic: None,
                         generated: false,
-                        embeddings: self.embeddings.clone(),
+                        embeddings: self.embeddings.shared(),
                     });
                 }
             }
@@ -2217,7 +2278,7 @@ impl<M: Metrics> Builder<'_, M> {
                 let opened = (!style.is_block_level())
                     .then(|| embedding_of(&style, node.anchor))
                     .flatten()
-                    .filter(|_| self.embeddings.len() < EMBEDDING_DEPTH);
+                    .filter(|_| self.embeddings.len() < MAX_EMBEDDING_DEPTH);
                 if let Some(embedding) = opened {
                     self.embeddings.push(embedding);
                 }
@@ -2559,7 +2620,7 @@ impl<M: Metrics> Builder<'_, M> {
             anchor: node.anchor,
             order: self.order(),
             generated: false,
-            embeddings: self.embeddings.clone(),
+            embeddings: self.embeddings.shared(),
             atomic: Some(Atomic {
                 items,
                 blocks,
@@ -4422,7 +4483,7 @@ impl<M: Metrics> Builder<'_, M> {
             order,
             atomic: None,
             generated: true,
-            embeddings: Vec::new(),
+            embeddings: Arc::default(),
         });
     }
 
@@ -4501,7 +4562,7 @@ impl<M: Metrics> Builder<'_, M> {
                         features: style.font_features.clone(),
                         paragraph_rtl: Some(style.direction == Direction::Rtl),
                         paragraph: 0,
-                        embeddings: Vec::new(),
+                        embeddings: Arc::default(),
                         bidi_level: None,
                         hyphenated: false,
                         color: style.color,
@@ -6484,12 +6545,6 @@ fn hyphen_shown(
 fn visible_chars(text: &str) -> usize {
     text.chars().filter(|c| *c != SOFT_HYPHEN).count()
 }
-
-/// How many explicit bidi levels a run carries at most: UAX #9's `max_depth`
-/// (X1), past which an embedding or isolate overflows and is ignored by the
-/// algorithm anyway — so a hostile book's thousand nested spans cost each of
-/// their runs a stack no deeper than the algorithm reads.
-const EMBEDDING_DEPTH: usize = 125;
 
 /// The level an inline box opens round its content, from its `unicode-bidi`
 /// and `direction` (`css-writing-modes-3` §2.4.2's table).

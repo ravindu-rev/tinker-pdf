@@ -930,7 +930,8 @@ fn an_inline_boxs_unicode_bidi_is_an_embedding_its_runs_carry() {
 
 /// **A run carries no more levels than UAX #9 reads**: X1's `max_depth` is
 /// 125, past which an embedding overflows and does nothing, so a book of
-/// two hundred nested isolating spans costs each run a stack of 125.
+/// two hundred nested isolating spans costs each run a stack of 125
+/// ([`crate::limits::MAX_EMBEDDING_DEPTH`]).
 #[test]
 fn a_run_carries_no_deeper_a_stack_than_uax9_reads() {
     let mut isolate = base();
@@ -946,6 +947,73 @@ fn a_run_carries_no_deeper_a_stack_than_uax9_reads() {
         .find(|run| run.text == "x")
         .expect("the text is set");
     assert_eq!(deepest.embeddings.len(), 125);
+}
+
+/// How many distinct stacks of levels a layout's runs hold, told apart by
+/// where their levels are: one stack shared by many runs is counted once.
+fn stacks_held(laid: &Layout) -> usize {
+    laid.pages
+        .iter()
+        .flat_map(|page| page.runs.iter())
+        .filter(|run| !run.embeddings.is_empty())
+        .map(|run| run.embeddings.as_ptr())
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
+/// **A paragraph's runs share one stack of levels, not a copy each** (review
+/// of lane 8C).
+///
+/// Two hundred one-letter words inside 125 nested isolating spans, at a
+/// measure of one letter: two hundred lines, each a run carrying the 125
+/// levels. They were a copy each, twelve bytes a level — a kilobyte and a
+/// half a line, which the review measured as 855 MB against 259 MB for a
+/// 400 KB paragraph without the spans. Held by count, not by a clock: the
+/// runs hold one stack between them.
+#[test]
+fn a_paragraphs_runs_share_one_stack_of_levels() {
+    let mut isolate = base();
+    isolate.unicode_bidi = UnicodeBidi::Isolate;
+    let mut node = text(&"a ".repeat(200));
+    for _ in 0..125 {
+        node = BoxNode::element(isolate.clone(), vec![node]);
+    }
+    let laid = run(&BoxNode::element(block(), vec![node]), 10.0, 1.0e6);
+    let runs: Vec<&crate::TextRun> = laid.pages.iter().flat_map(|p| p.runs.iter()).collect();
+    assert_eq!(runs.len(), 200, "not a line a word");
+    assert!(runs.iter().all(|run| run.embeddings.len() == 125));
+    assert_eq!(stacks_held(&laid), 1, "the runs copy their levels");
+}
+
+/// **A stack is made once for each box that opens a level, and closing one
+/// goes back to its parent's.**
+///
+/// Fifty isolating spans of `a`, a space between each, inside three nested
+/// isolates: fifty-one stacks, one for each span's `a` and the one every
+/// space shares — not one for every piece, nor one for every time the
+/// stack changed, which would make a new one for each space after a span
+/// closed.
+#[test]
+fn a_stack_of_levels_is_made_once_for_each_box_that_opens_one() {
+    let mut isolate = base();
+    isolate.unicode_bidi = UnicodeBidi::Isolate;
+    let mut children = Vec::new();
+    for _ in 0..50 {
+        children.push(BoxNode::element(isolate.clone(), vec![text("a")]));
+        children.push(text(" "));
+    }
+    let mut node = BoxNode::element(isolate.clone(), children);
+    for _ in 0..2 {
+        node = BoxNode::element(isolate.clone(), vec![node]);
+    }
+    let laid = run(&BoxNode::element(block(), vec![node]), 2_000.0, 400.0);
+    let spaces = laid.pages[0]
+        .runs
+        .iter()
+        .filter(|run| run.text == " ")
+        .count();
+    assert!(spaces >= 49, "the spaces were not set: {spaces}");
+    assert_eq!(stacks_held(&laid), 51);
 }
 
 /// **A formatting context of its own opens no level for its runs**: an

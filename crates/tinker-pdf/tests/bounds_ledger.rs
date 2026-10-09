@@ -1,5 +1,18 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, October 2026, the review of lane 8C.* **One more row,
+//! `MAX_EMBEDDING_DEPTH`, a cap on copies.** Every text run an EPUB lays out
+//! carries the bidi levels its inline boxes open, and the cap is UAX #9's own
+//! `max_depth`, past which the algorithm ignores a level anyway. The runs now
+//! share one stack rather than a copy each — a copy each was a kilobyte and a
+//! half on every line inside 125 isolating spans — so the cap bounds one
+//! stack, made once for each box that opens a level. Its `fixtures` is the cap
+//! — two hundred nested spans cut at it — its comic and fixed-document
+//! yardsticks are zeros, since neither lays out an inline box, and its book
+//! yardstick is two, a `<bdi>` inside a `dir="rtl"` span, since no committed
+//! book has a `dir`, a `<bdi>` or a `unicode-bidi`. What stands in front of it
+//! is `MAX_BOX_DEPTH`: an inline box at each level opens one.
+//!
 //! *Amended, 9 October 2026, the review of tier 5's formats lane.* **Two more
 //! rows, both HTML's own, and the first of them a bound the lane had written
 //! and not recorded.** `MAX_HTML_ACTIVE_FORMATTING` bounds the list of active
@@ -2566,6 +2579,30 @@ fn ledger() -> Vec<Bound> {
                 CSS_BOUNDS_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_EMBEDDING_DEPTH",
+            cap: layout_limits::MAX_EMBEDDING_DEPTH as u128,
+            published: "125",
+            // Two hundred nested isolating spans, the run inside them cut at
+            // the cap.
+            fixtures: layout_limits::MAX_EMBEDDING_DEPTH as u128,
+            // Neither a comic nor a fixed document lays out an inline box.
+            comic: 0,
+            document: 0,
+            // No committed book has a `dir`, a `<bdi>` or a `unicode-bidi`
+            // (a search of their content documents and sheets); a `<bdi>`
+            // inside a `dir="rtl"` span is two.
+            book: 2,
+            // A level is opened by an inline box, and the box tree is
+            // `MAX_BOX_DEPTH` deep.
+            reachable: layout_limits::MAX_BOX_DEPTH as u128,
+            reachable_because: "an inline box at each of MAX_BOX_DEPTH levels opens one",
+            declared_in: LAYOUT_LIMITS,
+            fires_in: (
+                "a_run_carries_no_deeper_a_stack_than_uax9_reads",
+                LAYOUT_TESTS,
+            ),
+        },
     ]
 }
 
@@ -2613,8 +2650,9 @@ fn segment_size() -> u128 {
 /// table-reconstruction row adds `MAX_TABLE_RULES`; and the review of tier
 /// 5's formats lane adds HTML's `MAX_HTML_ACTIVE_FORMATTING` and
 /// `MAX_HTML_CLONE_BYTES`; and the EPUB CSS row's font features add
-/// `MAX_CSS_FEATURE_SETTINGS`, and its gradients `MAX_CSS_GRADIENT_STOPS`.
-/// All **sixty-four** are here, and a bound added without a row fails this.
+/// `MAX_CSS_FEATURE_SETTINGS`, and its gradients `MAX_CSS_GRADIENT_STOPS`;
+/// and the review of lane 8C adds `MAX_EMBEDDING_DEPTH`. All **sixty-five**
+/// are here, and a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -2685,6 +2723,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_HTML_CLONE_BYTES",
             "MAX_CSS_FEATURE_SETTINGS",
             "MAX_CSS_GRADIENT_STOPS",
+            "MAX_EMBEDDING_DEPTH",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2790,7 +2829,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 64, "the ledger is sixty-four rows");
+    assert_eq!(measured, 65, "the ledger is sixty-five rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2822,7 +2861,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 64, "the ledger is sixty-four rows");
+    assert_eq!(ledger().len(), 65, "the ledger is sixty-five rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
