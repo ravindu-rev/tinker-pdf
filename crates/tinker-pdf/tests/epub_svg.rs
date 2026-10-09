@@ -896,6 +896,83 @@ fn a_marker_is_drawn_at_the_end_of_its_line() {
     );
 }
 
+/// How many rows of one column of the page are dark, and the lengths of the
+/// dark and light runs along one row, from its left edge: a stroke's width
+/// and its dashes, read off the rendered page.
+fn dark_rows_and_runs(doc: &Document, column: f64, row: f64) -> (usize, Vec<(bool, usize)>) {
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    let components = bitmap.components();
+    let width = bitmap.width as usize;
+    let height = bitmap.height as usize;
+    let dark = |x: usize, y: usize| bitmap.data[(y * width + x) * components] < 0x80;
+    let x = ((width as f64 * column) as usize).min(width - 1);
+    let rows = (0..height).filter(|&y| dark(x, y)).count();
+    let y = ((height as f64 * row) as usize).min(height - 1);
+    let mut runs: Vec<(bool, usize)> = Vec::new();
+    for x in 0..width {
+        let d = dark(x, y);
+        match runs.last_mut() {
+            Some((was, length)) if *was == d => *length += 1,
+            _ => runs.push((d, 1)),
+        }
+    }
+    (rows, runs)
+}
+
+/// **A stroke is as wide as its element's user space says** (§11.4), and so
+/// are its dashes. The leaf hands over an outline with every transform in it
+/// and a width with none, and the page wrote that width under the page
+/// mapping alone: `stroke-width="2"` inside `scale(3)` was two units wide
+/// rather than six, and a root `viewBox` mapping twenty units onto two
+/// hundred drew a one-unit stroke one unit wide rather than ten. The page is
+/// 200 points square and the scene is too, so a unit is a pixel here.
+///
+/// A uniform scale holds on this crate's renderer as it stands; a
+/// non-uniform one is the renderer's user-space pen, which the writer now
+/// hands it.
+#[test]
+fn a_stroke_is_as_wide_as_its_elements_user_space_says() {
+    let scaled = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
+              <g transform="scale(3)">
+                <path d="M10 30 H60" stroke="#000000" stroke-width="2" fill="none"/>
+                <path d="M10 60 H60" stroke="#000000" stroke-width="2" fill="none"
+                      stroke-dasharray="4 2"/>
+              </g>
+            </svg>"##,
+    );
+    // The solid line is at y = 90, six rows from 87; the dashed one at
+    // y = 180 from x = 30, in dashes of twelve and gaps of six — so at
+    // x = 90 both are ink.
+    let (rows, runs) = dark_rows_and_runs(&scaled, 0.45, 0.9);
+    assert_eq!(rows, 6 + 6, "two strokes six rows deep each: {rows}");
+    assert_eq!(
+        runs.get(..5),
+        Some(&[(false, 30), (true, 12), (false, 6), (true, 12), (false, 6)][..]),
+        "{runs:?}"
+    );
+
+    let boxed = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"
+                 viewBox="0 0 20 20">
+              <path d="M2 5 H18" stroke="#000000" stroke-width="1" fill="none"/>
+            </svg>"##,
+    );
+    let (rows, _) = dark_rows_and_runs(&boxed, 0.5, 0.25);
+    assert_eq!(rows, 10, "a one-unit stroke in a ten-times view box");
+
+    // And under the identity nothing moves: a two-unit stroke is two rows.
+    let plain = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
+              <path d="M10 100 H190" stroke="#000000" stroke-width="2" fill="none"/>
+            </svg>"##,
+    );
+    assert_eq!(dark_rows_and_runs(&plain, 0.5, 0.5).0, 2);
+}
+
 // ---- what travels out ------------------------------------------------------------
 
 /// Every subsystem the leaf crate declines reaches the caller as an

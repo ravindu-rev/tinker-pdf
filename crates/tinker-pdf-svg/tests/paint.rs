@@ -199,6 +199,34 @@ fn the_stroke_family_reaches_the_node() {
     assert!((stroke.opacity - 0.25).abs() < 1e-12);
 }
 
+/// **A stroke carries the user space its width is in**: the outline has the
+/// group's `scale(3)` and the view box's halving composed in, and the width
+/// stays the two the element said, with the matrix a consumer strokes under
+/// beside it (§11.4).
+#[test]
+fn a_stroke_carries_the_user_space_its_width_is_in() {
+    let scene = scene(
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\" \
+          viewBox=\"0 0 200 200\"><g transform=\"translate(4 0) scale(3)\">\
+          <path d=\"M0 0 H10\" stroke=\"black\" stroke-width=\"2\"/></g></svg>",
+    );
+    let Node::Path { stroke, .. } = path(&scene, 0) else {
+        panic!("a path");
+    };
+    let stroke = stroke.as_ref().expect("a stroke");
+    assert!((stroke.width - 2.0).abs() < 1e-12);
+    let wanted = [1.5, 0.0, 0.0, 1.5, 2.0, 0.0];
+    assert!(
+        stroke
+            .matrix
+            .iter()
+            .zip(wanted)
+            .all(|(got, want)| (got - want).abs() < 1e-12),
+        "{:?}",
+        stroke.matrix
+    );
+}
+
 /// §11.2's `currentColor` is `color`, inherited from wherever it was set.
 #[test]
 fn current_colour_is_the_colour_property() {

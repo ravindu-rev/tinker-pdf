@@ -362,10 +362,41 @@ impl<R: FnMut(&str) -> Option<Vec<u8>>> Writer<'_, '_, '_, R> {
                     }
                     painted
                 });
+                // §11.4 strokes in the element's user space, and the outline
+                // is already in the scene's: so a stroke under any matrix but
+                // the identity is painted under that matrix — the `w` and `d`
+                // set above are read in the user space in force when `S` is,
+                // 8.4.3.2 — with the outline taken back through its inverse.
+                // A space with no area has no stroke either.
+                let user = stroke
+                    .as_ref()
+                    .filter(|_| stroked)
+                    .map(|stroke| stroke.matrix)
+                    .filter(|m| *m != transform::IDENTITY);
+                let (local, stroked) = match user {
+                    None => (None, stroked),
+                    Some(m) => match transform::invert(m)
+                        .map(|inverse| outline.transformed(inverse))
+                        .filter(outline_finite)
+                    {
+                        Some(local) => (Some((m, local)), stroked),
+                        None => (None, false),
+                    },
+                };
                 if filled || stroked {
-                    write_outline(out, outline);
+                    if let Some((m, local)) = &local {
+                        out.extend_from_slice(b"q ");
+                        matrix(out, *m);
+                        out.extend_from_slice(b" cm\n");
+                        write_outline(out, local);
+                    } else {
+                        write_outline(out, outline);
+                    }
                     out.extend_from_slice(operator(filled, stroked, *rule));
                     out.push(b'\n');
+                    if local.is_some() {
+                        out.extend_from_slice(b"Q\n");
+                    }
                 } else if clip.is_some() {
                     // A shape that paints nothing still had a clip pushed, and
                     // `Q` below is what pops it.
@@ -766,6 +797,16 @@ fn operator(filled: bool, stroked: bool, rule: FillRule) -> &'static [u8] {
 }
 
 /// One outline, as `m`/`l`/`c`/`h`.
+/// Whether every point of an outline is a number a content stream can carry —
+/// which one taken back through a nearly singular matrix may not be.
+fn outline_finite(outline: &tinker_pdf_svg::path::Outline) -> bool {
+    outline.segments.iter().all(|segment| match *segment {
+        Segment::Move(p) | Segment::Line(p) => p.iter().all(|v| v.is_finite()),
+        Segment::Cubic(a, b, c) => [a, b, c].iter().flatten().all(|v| v.is_finite()),
+        _ => true,
+    })
+}
+
 fn write_outline(out: &mut Vec<u8>, outline: &tinker_pdf_svg::path::Outline) {
     for segment in &outline.segments {
         match *segment {

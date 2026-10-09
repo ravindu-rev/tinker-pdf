@@ -954,6 +954,9 @@ impl Walk<'_> {
                 dashes: style.dashes.clone(),
                 dash_offset: style.dash_offset,
                 opacity: style.stroke_opacity.clamp(0.0, 1.0),
+                // The outline is taken through this matrix below and the
+                // width is not: §11.4's width is in the shape's user space.
+                matrix,
             }))
         };
         // §14.4's mask on a shape is of its whole rendering — fill, stroke and
@@ -1988,6 +1991,7 @@ impl Walk<'_> {
                 dashes: style.dashes.clone(),
                 dash_offset: style.dash_offset,
                 opacity: style.stroke_opacity.clamp(0.0, 1.0),
+                matrix,
             }))
         };
         self.push(crate::Node::Text {
@@ -2344,9 +2348,11 @@ fn finite(node: &crate::Node) -> bool {
     }
     let paint = paint_finite;
     // A stroke's width and dashes are lengths, read finite and never
-    // multiplied by a transform here, so only its paint — whose matrix is
-    // composed — can overflow.
-    let stroke = |stroke: Option<&Stroke>| stroke.is_none_or(|stroke| paint(&stroke.paint));
+    // multiplied by a transform here; its paint's matrix is composed, and so
+    // is the user space it is drawn in.
+    let stroke = |stroke: Option<&Stroke>| {
+        stroke.is_none_or(|stroke| paint(&stroke.paint) && numbers(&stroke.matrix))
+    };
     match node {
         crate::Node::Path {
             outline: shape,

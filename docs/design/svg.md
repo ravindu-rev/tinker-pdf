@@ -266,6 +266,20 @@ with the corpus test still green because that cover strokes its paths black.
 running pen *and* a per-chunk offset, setting the second run of a chunk two
 words along.
 
+*Corrected 9 October 2026, on the review of the formats lane*: **a stroke is
+as wide as its element's user space says.** A `Node::Path`'s outline has every
+transform composed in and its `Stroke::width` none, and the writer set that
+width under the page mapping alone — so `stroke-width="2"` inside `scale(3)`
+drew two units wide rather than six, dashes likewise, and a root `viewBox`
+mapping twenty units onto two hundred drew every stroke a tenth of its width.
+`Stroke` now carries the element's matrix, and a stroked path under anything
+but the identity is written under it: `q`, that matrix's `cm`, the outline
+taken back through its inverse, the painting operator, `Q` — so 8.4.3.2 reads
+`w` and `d` in the element's space, anisotropically under a non-uniform
+matrix, as §11.4 strokes. A matrix with no inverse has no stroke
+(`a_stroke_is_as_wide_as_its_elements_user_space_says`). Text needed nothing:
+its stroke state is already read under the run's own `cm`.
+
 **What is refused is what this document said it would be**, less one addition:
 `<marker>` earned a warning of its own at milestone 1, because thirty-two of
 them are in the fetched corpus and `ElementUnknown` would have called a real

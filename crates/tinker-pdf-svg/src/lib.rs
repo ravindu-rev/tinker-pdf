@@ -586,6 +586,20 @@ pub struct Stroke {
     pub dash_offset: f64,
     /// `stroke-opacity`, in `[0, 1]`.
     pub opacity: f64,
+    /// The matrix from the user space `width`, `dashes` and `dash_offset`
+    /// are measured in — the stroked element's own — into the space its
+    /// node's geometry is in.
+    ///
+    /// §11.4 strokes in the element's user space, so `stroke-width="2"`
+    /// inside `scale(3)` is six units of the scene wide, and a root `viewBox`
+    /// that maps ten units onto a hundred makes every stroke ten times its
+    /// number. A [`Node::Path`]'s outline has this matrix composed in already
+    /// and its stroke does not: a consumer strokes under it — a `cm` around
+    /// the path, its points taken back through the inverse — and a
+    /// non-uniform one strokes anisotropically, as §11.4 does. For a
+    /// [`Node::Text`] it is the run's own `matrix`, which a consumer sets the
+    /// glyphs under anyway.
+    pub matrix: [f64; 6],
 }
 
 /// One drawable thing.

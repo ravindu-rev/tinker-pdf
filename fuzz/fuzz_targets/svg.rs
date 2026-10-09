@@ -349,6 +349,8 @@ fn sweep_nodes(nodes: &[Node], out: &mut Vec<f64>) {
                         stroke.opacity,
                     ]);
                     out.extend_from_slice(&stroke.dashes);
+                    // The stroke's user space reaches a `cm` the facade writes.
+                    out.extend_from_slice(&stroke.matrix);
                 }
             }
             Node::Image { rect, matrix, .. } => {
