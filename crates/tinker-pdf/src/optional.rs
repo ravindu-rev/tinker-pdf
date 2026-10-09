@@ -24,6 +24,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use tinker_pdf_content::Layer;
 use tinker_pdf_cos::{decode_text_string, CosDocument, Dict, ObjRef, Object};
 
+use crate::resources::read_resolved;
+
 /// How deep a `/VE` visibility expression may nest before it is refused
 /// (8.11.2.3).
 ///
@@ -142,17 +144,31 @@ impl OptionalContent {
     /// `fallback` labels the layer when the dictionary has no `/Name` of its
     /// own: the resource name is what the file called it, and a warning that
     /// cannot say which layer it hid is not actionable (ruling 10).
+    ///
+    /// The entry is read where it lies ([`read_resolved`]) and never copied:
+    /// every `/OC /name BDC` asks, and a direct group is as long as the file
+    /// makes it.
     pub(crate) fn layer_of(&self, doc: &CosDocument, object: &Object, fallback: &str) -> Layer {
         let reference = object.as_objref();
-        let resolved = doc.resolve(object);
-        let Some(dict) = resolved.as_dict() else {
+        read_resolved(doc, object, |resolved| match resolved.as_dict() {
+            Some(dict) => self.layer_of_dict(doc, dict, reference, fallback),
             // Not a dictionary at all: nothing to hide by.
-            return Layer {
+            None => Layer {
                 visible: true,
                 label: fallback.to_string(),
-            };
-        };
+            },
+        })
+    }
 
+    /// [`Self::layer_of`] for the dictionary `object` resolved to, and the
+    /// reference it was reached by, if any.
+    fn layer_of_dict(
+        &self,
+        doc: &CosDocument,
+        dict: &Dict,
+        reference: Option<ObjRef>,
+        fallback: &str,
+    ) -> Layer {
         let name = doc.resolve_key(dict, doc.intern(b"Name"));
         let label = name
             .as_string()

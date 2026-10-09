@@ -1624,13 +1624,15 @@ impl FontSource for PageResources {
         // sub-dictionary of the current resource dictionary. The entry is an
         // optional content group or a membership dictionary; anything else is
         // an ordinary property list and hides nothing.
+        // The table and the entry are read where they lie, as
+        // `with_property_list` reads them: every `/OC` `BDC` asks.
         let resources = self.resources.as_ref()?;
-        let table = self
-            .doc
-            .resolve_key(resources, self.doc.intern(b"Properties"));
-        let entry = table.as_dict()?.get(self.doc.intern(name))?.clone();
-        let label = String::from_utf8_lossy(name).into_owned();
-        Some(self.optional.layer_of(&self.doc, &entry, &label))
+        let table = resources.get(self.doc.intern(b"Properties"))?;
+        read_resolved(&self.doc, table, |table| {
+            let entry = table.as_dict()?.get(self.doc.intern(name))?;
+            let label = String::from_utf8_lossy(name).into_owned();
+            Some(self.optional.layer_of(&self.doc, entry, &label))
+        })
     }
 
     fn xobject_optional_content(&self, name: &[u8]) -> Option<Layer> {

@@ -131,17 +131,19 @@ fn cost_of_more_sequences(
 }
 
 /// **A sequence naming a property list costs what reading the sequence costs,
-/// not what copying the list would.** Four pages, each read once naming the
+/// not what copying the list would.** Five pages, each read once naming the
 /// list and once naming it `SEQUENCES` times:
 ///
 /// - an indirect list beside a `LARGE`-entry array, read as text — the
-///   review's file, and the form real optional-content files use;
+///   review's file, and the indirect form real files write;
 /// - the same list written directly in a direct `/Properties` table;
 /// - a list whose `/MCAF` is itself a direct `LARGE`-entry array, which the
 ///   reading only asks the presence of;
 /// - `/AF` sequences through an indirect list holding one file and the large
 ///   array, listed by `Page::marked_content_associated_files`, which reads the
-///   list again for each.
+///   list again for each;
+/// - `/OC` sequences naming a direct optional content group beside the large
+///   array, which the reading asks for its layer as well as its properties.
 ///
 /// Each extra sequence is held to `PER_SEQUENCE` bytes. A copy per sequence
 /// is `SEQUENCES - 1` copies of the array, megabytes each.
@@ -204,5 +206,17 @@ fn a_named_property_list_is_read_where_it_lies() {
         listed <= budget,
         "{SEQUENCES} /AF sequences cost {listed} bytes more to list than one did, over \
          {budget}: the property list is copied for each"
+    );
+
+    let layer = cost_of_more_sequences(
+        "OC",
+        &format!("<< /P0 << /Type /OCG /Name (Layer) /Big {large} >> >>"),
+        "",
+        text,
+    );
+    assert!(
+        layer <= budget,
+        "{SEQUENCES} /OC sequences naming a direct group cost {layer} bytes more than one \
+         did, over {budget}: the group or its table is copied for each"
     );
 }
