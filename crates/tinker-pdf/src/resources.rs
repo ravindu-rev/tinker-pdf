@@ -392,6 +392,17 @@ fn default_decode(space: &ColorSpace, c: usize) -> Option<(f64, f64)> {
 const WHITE_D50: [f64; 3] = [0.964_212, 1.0, 0.825_188];
 
 impl PageResources {
+    /// The property list this scope's `/Properties` names `name` (14.6.2),
+    /// resolved: what `/Tag /name BDC` refers to.
+    pub(crate) fn property_list(&self, name: &[u8]) -> Option<Dict> {
+        let resources = self.resources.as_ref()?;
+        let table = self
+            .doc
+            .resolve_key(resources, self.doc.intern(b"Properties"));
+        let entry = table.as_dict()?.get(self.doc.intern(name))?.clone();
+        self.doc.resolve(&entry).as_dict().cloned()
+    }
+
     /// The font resource names that could not be resolved.
     #[must_use]
     pub fn missing_fonts(&self) -> Vec<String> {
@@ -1559,13 +1570,8 @@ impl FontSource for PageResources {
         // the seam — the interpreter never sees a dictionary — and it is the
         // reason the inline and named forms arrive at a device
         // indistinguishable from each other.
-        let resources = self.resources.as_ref()?;
-        let table = self
-            .doc
-            .resolve_key(resources, self.doc.intern(b"Properties"));
-        let entry = table.as_dict()?.get(self.doc.intern(name))?.clone();
-        let resolved = self.doc.resolve(&entry);
-        let dict = resolved.as_dict()?;
+        let list = self.property_list(name)?;
+        let dict = &list;
 
         // 14.7.4.2: a non-negative integer. Read through `resolve_key`
         // because 7.3.10 lets any value in a *file* dictionary be indirect —
@@ -1595,6 +1601,16 @@ impl FontSource for PageResources {
             // in, which only the interpreter knows. It stamps this on the way
             // past.
             stream: 0,
+            // ISO 32000-2 14.13.5, Table 409a as the approved errata add it:
+            // a named list with an `/MCAF` array associates files with an
+            // `/AF` sequence. The name is handed on, not the files, which
+            // `Page::marked_content_associated_files` reads in this scope.
+            associated_files: self
+                .doc
+                .resolve_key(dict, self.doc.intern(b"MCAF"))
+                .as_array()
+                .is_some()
+                .then(|| name.to_vec()),
         };
         // An `/OC` group, a `/Type /Pagination` artifact list, a producer's
         // private dictionary: every one of them reaches here and says nothing

@@ -138,6 +138,7 @@ pub fn kept_bytes(event: &Event) -> usize {
                     .saturating_add(text(&p.alt))
                     .saturating_add(text(&p.lang))
                     .saturating_add(text(&p.expansion))
+                    .saturating_add(p.associated_files.as_ref().map_or(0, Vec::len))
             });
             scope
                 .tag

@@ -75,8 +75,13 @@ use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages};
 /// boundary once for all three.
 pub use annotations::{Annotation, AnnotationFlags, AnnotationKind};
 /// Associated files (ISO 32000-2 14.13), as `Document::associated_files`,
-/// `Page::associated_files` and `StructElement::associated_files` read them.
-pub use associated_files::{AssociatedFile, MAX_ASSOCIATED_FILE_BYTES};
+/// `associated_files_of` and `structure_associated_files`,
+/// `Page::associated_files`, `annotation_associated_files` and
+/// `marked_content_associated_files`, and `StructElement::associated_files`
+/// read them.
+pub use associated_files::{
+    AssociatedFile, MarkedContentFileList, MarkedContentFiles, MAX_ASSOCIATED_FILE_BYTES,
+};
 /// Comic archives: what [`Document::open`] does with a `PK\x03\x04` at offset
 /// zero, and what it refuses by name.
 pub use cbz::{

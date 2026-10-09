@@ -2126,7 +2126,8 @@ pub struct PageBuilder {
     archival_space: Option<DeviceSpace>,
     /// Refusals made while drawing, merged into the document's at push.
     refusals: Vec<ArchivalRefusal>,
-    /// How many [`PageBuilder::optional`] scopes are open.
+    /// How many [`PageBuilder::optional`] and
+    /// [`PageBuilder::with_associated_files`] scopes are open.
     optional_depth: usize,
     /// The builder this page was begun on, whose [`LayerId`]s alone it
     /// takes.
@@ -2143,6 +2144,10 @@ pub struct PageBuilder {
     associated_allowed: bool,
     /// The page's `/AF`, in the order given.
     associated: Vec<NewAssociatedFile>,
+    /// Each [`PageBuilder::with_associated_files`] sequence that drew
+    /// something: its property list's resource name and the files its
+    /// `/MCAF` names, written into the page's `/Properties` at `finish`.
+    marked_files: Vec<(Vec<u8>, Vec<NewAssociatedFile>)>,
 }
 
 /// One structure element under construction, and what it claims.
@@ -3197,13 +3202,29 @@ impl PageBuilder {
         if self.optional_depth >= crate::limits::MAX_NEST_DEPTH as usize {
             return false;
         }
+        self.marked_scope(b"/OC ", &resource, draw);
+        true
+    }
+
+    /// Draws `draw` inside `tag resource BDC … EMC`, keeping every `/MCID`
+    /// sequence innermost as [`PageBuilder::optional`] describes, and returns
+    /// whether anything was drawn — a scope that drew nothing is unwritten.
+    ///
+    /// `tag` is the tag already spelled as a name token with its trailing
+    /// space (`/OC `, `/AF `); `resource` is escaped on the way out.
+    fn marked_scope(
+        &mut self,
+        tag: &[u8],
+        resource: &[u8],
+        draw: impl FnOnce(&mut PageBuilder),
+    ) -> bool {
         let tagged = !self.tag_stack.is_empty();
         if tagged {
             self.close_marked();
         }
         let start = self.content.len();
-        self.content.extend_from_slice(b"/OC ");
-        self.resource_name(&resource);
+        self.content.extend_from_slice(tag);
+        self.resource_name(resource);
         self.content.extend_from_slice(b" BDC\n");
         let opened = self.content.len();
         if tagged {
@@ -3217,15 +3238,85 @@ impl PageBuilder {
         if tagged {
             self.close_marked();
         }
-        if self.content.len() == opened {
+        let drew = self.content.len() != opened;
+        if drew {
+            self.content.extend_from_slice(b"EMC\n");
+        } else {
             // Nothing was drawn since the `BDC`, so the bytes from `start`
             // are exactly the ones written above.
             self.content.truncate(start);
-        } else {
-            self.content.extend_from_slice(b"EMC\n");
         }
         if tagged {
             self.resume_parent();
+        }
+        drew
+    }
+
+    /// Draws a marked-content sequence associated with files: `/AF /AFn BDC
+    /// … EMC` (ISO 32000-2 14.13.5), whose named property list carries the
+    /// files in an `/MCAF` array, as the approved errata amend the clause —
+    /// Table 409a: *"An array of one or more file specification dictionaries
+    /// (7.11.3, "File specification dictionaries") which denote the
+    /// associated files for this marked-content sequence. Each file
+    /// specification dictionary in the array shall have an AFRelationship
+    /// entry."*
+    ///
+    /// The property list is a named resource in the page's `/Properties`,
+    /// never inline. The errata's NOTE 4 says why — a file specification
+    /// names its embedded file stream by indirect reference, which a content
+    /// stream cannot write, so *"named property resources are always used"* —
+    /// and the clause's last paragraph connects a sequence to files *"only if
+    /// the tag is AF and the named property list is defined according to
+    /// Table 409a"*. `BDC`, and never `DP` or `MP`, which the clause forbids
+    /// with this tag because they mark a point and not a sequence.
+    ///
+    /// Nesting with tagged content and with layers is
+    /// [`PageBuilder::optional`]'s, and so is the closure being a scope: a
+    /// structure element open around the call has its sequence split around
+    /// this one, every `/MCID` sequence stays innermost, and an element the
+    /// closure opens and leaves open is closed when it returns. A sequence
+    /// whose closure drew nothing writes nothing, its files included.
+    ///
+    /// Returns false — and the closure **still runs**, drawing outside any
+    /// such sequence, as an element [`Tag::associated_file`] could not give
+    /// its file to is still opened — when:
+    ///
+    /// - the document may not carry associated files, for
+    ///   [`DocumentBuilder::associate_file`]'s reasons (under a profile that
+    ///   refuses them the refusal is recorded as
+    ///   [`ArchivalRefusal::AssociatedFile`]);
+    /// - no file is given, or [`NewAssociatedFile::is_writable`] refuses one —
+    ///   Table 409a asks for one or more, and a sequence associated with
+    ///   fewer files than the caller named is not the one asked for;
+    /// - [`crate::limits::MAX_NEST_DEPTH`] layers and associated sequences are
+    ///   already open, or the page's `/Properties` would pass
+    ///   [`crate::limits::MAX_DICT_ENTRIES`], the most entries this crate's
+    ///   reader keeps of one dictionary.
+    pub fn with_associated_files(
+        &mut self,
+        files: Vec<NewAssociatedFile>,
+        draw: impl FnOnce(&mut PageBuilder),
+    ) -> bool {
+        if !self.associated_allowed {
+            if self.archival_space.is_some() {
+                self.refusals.push(ArchivalRefusal::AssociatedFile);
+            }
+            self.scoped(draw);
+            return false;
+        }
+        let properties = self.resources.properties.len() + self.marked_files.len();
+        if files.is_empty()
+            || files.len() > crate::limits::MAX_ARRAY_LEN
+            || !files.iter().all(NewAssociatedFile::is_writable)
+            || self.optional_depth >= crate::limits::MAX_NEST_DEPTH as usize
+            || properties >= crate::limits::MAX_DICT_ENTRIES
+        {
+            self.scoped(draw);
+            return false;
+        }
+        let resource = format!("AF{}", self.marked_files.len()).into_bytes();
+        if self.marked_scope(b"/AF ", &resource, draw) {
+            self.marked_files.push((resource, files));
         }
         true
     }
@@ -3813,8 +3904,40 @@ impl PageBuilder {
             rect,
             target: target.clone(),
             owner,
+            files: Vec::new(),
         });
         true
+    }
+
+    /// Associates `file` with one of this page's link annotations: the
+    /// annotation's `/AF` (ISO 32000-2 14.13; the Arlington model lists every
+    /// annotation subtype among `/AF`'s holders). `link` counts the links
+    /// [`PageBuilder::link`] and [`PageBuilder::link_for`] accepted on this
+    /// page, from zero, in the order they were added — the order they reach
+    /// `/Annots`.
+    ///
+    /// Returns false, adding nothing, for a `link` this page does not have,
+    /// and where [`PageBuilder::associate_file`] would, for the same reasons.
+    pub fn associate_file_with_link(&mut self, link: usize, file: NewAssociatedFile) -> bool {
+        if link >= self.links.len() {
+            return false;
+        }
+        if !self.associated_allowed {
+            if self.archival_space.is_some() {
+                self.refusals.push(ArchivalRefusal::AssociatedFile);
+            }
+            return false;
+        }
+        if !file.is_writable() {
+            return false;
+        }
+        match self.links.get_mut(link) {
+            Some(annotation) if annotation.files.len() < crate::limits::MAX_ARRAY_LEN => {
+                annotation.files.push(file);
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -4000,6 +4123,8 @@ struct LinkAnnotation {
     /// The key of the structure element it belongs to, for one added by
     /// [`PageBuilder::link_for`].
     owner: Option<u64>,
+    /// Its `/AF`, from [`PageBuilder::associate_file_with_link`].
+    files: Vec<NewAssociatedFile>,
 }
 
 /// One outline entry to write (12.3.3).
@@ -4678,6 +4803,9 @@ pub struct DocumentBuilder {
     namespaces: Vec<StructNamespace>,
     /// The catalog's `/AF`. See [`DocumentBuilder::associate_file`].
     associated: Vec<NewAssociatedFile>,
+    /// The structure tree root's `/AF`. See
+    /// [`DocumentBuilder::associate_file_with_structure`].
+    structure_associated: Vec<NewAssociatedFile>,
 }
 
 impl Default for DocumentBuilder {
@@ -4721,6 +4849,7 @@ impl DocumentBuilder {
             role_map: BTreeMap::new(),
             namespaces: Vec::new(),
             associated: Vec::new(),
+            structure_associated: Vec::new(),
         }
     }
 
@@ -4855,6 +4984,34 @@ impl DocumentBuilder {
             return false;
         }
         self.associated.push(file);
+        true
+    }
+
+    /// Associates `file` with the document's logical structure as a whole:
+    /// the structure tree root's `/AF` (ISO 32000-2 14.13; the Arlington
+    /// model lists `StructTreeRoot` among `/AF`'s holders). Each call adds
+    /// one, in order.
+    ///
+    /// **Written only with the tree.** A document whose pages tag nothing has
+    /// no structure tree root, and writing one to hold these would claim a
+    /// logical structure the document does not have — `/MarkInfo /Marked
+    /// true` comes with the root — so the files are then not written at all.
+    /// Tag something, or associate the file with the document
+    /// ([`DocumentBuilder::associate_file`]).
+    ///
+    /// Returns false, adding nothing, where
+    /// [`DocumentBuilder::associate_file`] would, for the same reasons.
+    pub fn associate_file_with_structure(&mut self, file: NewAssociatedFile) -> bool {
+        if !self.associated_files_allowed() {
+            if self.profile.is_some() {
+                self.refuse(ArchivalRefusal::AssociatedFile);
+            }
+            return false;
+        }
+        if !file.is_writable() || self.structure_associated.len() >= crate::limits::MAX_ARRAY_LEN {
+            return false;
+        }
+        self.structure_associated.push(file);
         true
     }
 
@@ -5556,8 +5713,43 @@ impl DocumentBuilder {
     ///
     /// Returns false for a degenerate `/BBox` or a non-finite `/Matrix`.
     pub fn add_form(&mut self, resource: &[u8], form: &FormXObject<'_>) -> bool {
+        self.add_form_with_files(resource, form, &[])
+    }
+
+    /// [`DocumentBuilder::add_form`], with `files` associated with the form:
+    /// its `/AF` (ISO 32000-2 14.13; the Arlington model lists the form
+    /// XObject among `/AF`'s holders), each written once, in order. No files
+    /// is `add_form` exactly.
+    ///
+    /// Refuses everything `add_form` refuses, and — registering nothing,
+    /// because a form registered without the files the caller asked for is
+    /// not the form they asked for — files in a document that may not carry
+    /// associated files, for [`DocumentBuilder::associate_file`]'s reasons
+    /// (under a profile that refuses them, recorded as
+    /// [`ArchivalRefusal::AssociatedFile`]), a file
+    /// [`NewAssociatedFile::is_writable`] refuses, or more files than
+    /// [`crate::limits::MAX_ARRAY_LEN`].
+    pub fn add_form_with_files(
+        &mut self,
+        resource: &[u8],
+        form: &FormXObject<'_>,
+        files: &[NewAssociatedFile],
+    ) -> bool {
         if !is_box(&form.bbox) {
             return false;
+        }
+        if !files.is_empty() {
+            if !self.associated_files_allowed() {
+                if self.profile.is_some() {
+                    self.refuse(ArchivalRefusal::AssociatedFile);
+                }
+                return false;
+            }
+            if files.len() > crate::limits::MAX_ARRAY_LEN
+                || !files.iter().all(NewAssociatedFile::is_writable)
+            {
+                return false;
+            }
         }
         // ISO 19005-1 6.4: a transparency group is transparency, and part 1
         // has none. The form itself is unobjectionable, so only the `/Group`
@@ -5613,6 +5805,12 @@ impl DocumentBuilder {
         }
         let resources = self.resources.dict(&self.names);
         dict.insert(Name::RESOURCES, Object::Dict(resources));
+        // ISO 32000-2 14.13: the files associated with the form, written
+        // before it and only when there are some.
+        if !files.is_empty() {
+            let af = self.write_associated_files(files);
+            dict.insert(self.names.intern(b"AF"), af);
+        }
 
         let reference = self.allocate();
         self.objects.insert_stream(
@@ -7179,6 +7377,7 @@ impl DocumentBuilder {
             output_intents: Vec::new(),
             associated_allowed: self.associated_files_allowed(),
             associated: Vec::new(),
+            marked_files: Vec::new(),
         };
         page.reopen(&self.carried, self.carried_refused);
         page
@@ -7794,7 +7993,24 @@ impl DocumentBuilder {
                 },
             );
 
-            let resources = page.resources.dict(&self.names);
+            let mut resources = page.resources.dict(&self.names);
+            // ISO 32000-2 14.13.5, Table 409a: each associated sequence's
+            // property list, a direct `<< /MCAF [...] >>` beside the layers in
+            // `/Properties`, as the errata's EXAMPLE writes it.
+            if !page.marked_files.is_empty() {
+                let key = self.names.intern(b"Properties");
+                let mut table = match resources.get(key) {
+                    Some(Object::Dict(table)) => table.clone(),
+                    _ => Dict::new(),
+                };
+                for (name, files) in &page.marked_files {
+                    let af = self.write_associated_files(files);
+                    let mut list = Dict::new();
+                    list.insert(self.names.intern(b"MCAF"), af);
+                    table.insert(self.names.intern(name), Object::Dict(list));
+                }
+                resources.insert(key, Object::Dict(table));
+            }
 
             let mut dict = Dict::new();
             dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Page")));
@@ -7928,6 +8144,11 @@ impl DocumentBuilder {
                 // right finds its element through its own key.
                 if let Some(key) = annotation_keys.get(&(at, index)) {
                     annot.insert(self.names.intern(b"StructParent"), Object::Int(*key));
+                }
+                // ISO 32000-2 14.13: the files associated with the annotation.
+                if !link.files.is_empty() {
+                    let af = self.write_associated_files(&link.files);
+                    annot.insert(self.names.intern(b"AF"), af);
                 }
 
                 let annot_ref = self.allocate();
@@ -8278,6 +8499,13 @@ impl DocumentBuilder {
                     listed.push(Object::Ref(*reference));
                 }
                 dict.insert(self.names.intern(b"Namespaces"), Object::Array(listed));
+            }
+            // ISO 32000-2 14.13: the files associated with the structure as a
+            // whole.
+            let files = std::mem::take(&mut self.structure_associated);
+            if !files.is_empty() {
+                let af = self.write_associated_files(&files);
+                dict.insert(self.names.intern(b"AF"), af);
             }
             self.objects.insert(root.num, Object::Dict(dict));
             catalog.insert(self.names.intern(b"StructTreeRoot"), Object::Ref(root));

@@ -10,7 +10,9 @@ use crate::state::{GraphicsState, Matrix};
 
 /// The plain values a `BDC`'s property list carries (14.6.2, 14.9).
 ///
-/// **No COS types, and no bytes that still need a document to read them.**
+/// **No COS types, and no bytes that still need a document to read them** —
+/// but for two identities, [`MarkedProps::stream`] and
+/// [`MarkedProps::associated_files`], each saying *which* rather than *what*.
 /// The two forms a property list takes — an inline `<< … >>` the tokenizer
 /// flattened, and a name into the page's `/Properties` — are resolved on
 /// opposite sides of this crate's boundary, and a struct of plain values is
@@ -49,6 +51,20 @@ pub struct MarkedProps {
     /// running, so it stamps this on the way past — which is why it is the
     /// one field here a producer did not write.
     pub stream: u64,
+    /// The resource name of a **named** property list that carries `/MCAF`:
+    /// the files ISO 32000-2 14.13.5 associates with a sequence tagged `/AF`,
+    /// in the approved errata's Table 409a. `None` for an inline list — the
+    /// errata connect a sequence to files *"only if the tag is AF and the
+    /// named property list is defined"* by that table — and for every list
+    /// without the entry.
+    ///
+    /// A name and not the files, and so the one other field here that is an
+    /// identity rather than a value: a file specification is a COS
+    /// dictionary this crate does not hold. Filled by whatever resolved the
+    /// name ([`crate::FontSource::marked_content_properties`]), which alone
+    /// read the list; a device that wants the files resolves the same name in
+    /// the scope the `BDC` ran in, which [`Device::begin_form`] lets it track.
+    pub associated_files: Option<Vec<u8>>,
 }
 
 impl MarkedProps {
@@ -70,6 +86,7 @@ impl MarkedProps {
             && self.alt.is_none()
             && self.lang.is_none()
             && self.expansion.is_none()
+            && self.associated_files.is_none()
     }
 }
 

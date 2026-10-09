@@ -765,3 +765,460 @@ fn an_output_intent_listing_spends_one_budget_and_says_what_it_cut() {
             .all(|intent| intent.incomplete && intent.info.is_none()));
     }
 }
+
+// ---- the holders and the marked content the 2.0 rows left -----------------
+
+use tinker_pdf::{FormXObject, Target};
+
+/// The reference `/Resources /XObject` gives `name` on the first page.
+fn form_ref(doc: &Document, name: &[u8]) -> ObjRef {
+    let cos = doc.cos();
+    let catalog = cos.catalog().expect("a catalog");
+    let pages = cos.resolve_key(&catalog, cos.intern(b"Pages"));
+    let kids = cos.resolve_key(pages.as_dict().expect("a page tree"), cos.intern(b"Kids"));
+    let page = cos.resolve(&kids.as_array().expect("kids")[0]);
+    let resources = cos.resolve_key(page.as_dict().expect("a page"), cos.intern(b"Resources"));
+    let xobjects = cos.resolve_key(
+        resources.as_dict().expect("resources"),
+        cos.intern(b"XObject"),
+    );
+    xobjects
+        .as_dict()
+        .expect("an /XObject dictionary")
+        .get_ref(cos.intern(name))
+        .expect("the form")
+}
+
+fn names(files: &[AssociatedFile]) -> Vec<Option<&str>> {
+    files.iter().map(|file| file.filename.as_deref()).collect()
+}
+
+/// Written on a link annotation, a form XObject and the structure tree root —
+/// three of the holders the Arlington model lists (`AnnotLink`,
+/// `XObjectFormType1`, `StructTreeRoot`) — and read back from each as given,
+/// beside the catalog's, which none of them disturbs.
+#[test]
+fn associated_files_are_written_on_an_annotation_a_form_and_the_structure_root_and_read_back() {
+    let mut builder = DocumentBuilder::with_version(2, 0);
+    builder.add_base_font(b"F1", b"Helvetica");
+    assert!(builder.add_form_with_files(
+        b"Fm1",
+        &FormXObject {
+            bbox: [0.0, 0.0, 50.0, 50.0],
+            matrix: None,
+            group: None,
+            content: b"0 0 50 50 re f",
+        },
+        &[
+            NewAssociatedFile::new(
+                "chart.csv",
+                "text/csv",
+                FileRelationship::Data,
+                b"x,y\n1,2\n".to_vec()
+            ),
+            NewAssociatedFile::new(
+                "chart.svg",
+                "image/svg+xml",
+                FileRelationship::Source,
+                b"<svg/>".to_vec()
+            ),
+        ],
+    ));
+    assert!(builder.associate_file_with_structure(
+        NewAssociatedFile::new(
+            "structure.xml",
+            "application/xml",
+            FileRelationship::Supplement,
+            b"<s/>".to_vec(),
+        )
+        .description("The source's structure")
+    ));
+    assert!(builder.associate_file(NewAssociatedFile::new(
+        "document.txt",
+        "text/plain",
+        FileRelationship::Unspecified,
+        b"d".to_vec(),
+    )));
+    builder.add_page(200.0, 200.0, |page| {
+        page.tagged(b"P", |page| page.text(b"F1", 12.0, 20.0, 150.0, "Linked"));
+        assert!(page.form(b"Fm1"));
+        assert!(page.link(
+            10.0,
+            10.0,
+            60.0,
+            30.0,
+            &Target::Uri("https://example.org/".into())
+        ));
+        assert!(page.link(
+            70.0,
+            10.0,
+            120.0,
+            30.0,
+            &Target::Uri("https://example.com/".into())
+        ));
+        assert!(page.associate_file_with_link(
+            1,
+            NewAssociatedFile::new(
+                "target.html",
+                "text/html",
+                FileRelationship::Alternative,
+                b"<p/>".to_vec(),
+            ),
+        ));
+        assert!(
+            !page.associate_file_with_link(
+                2,
+                NewAssociatedFile::new("x.txt", "text/plain", FileRelationship::Data, vec![]),
+            ),
+            "a link this page does not have"
+        );
+    });
+    let doc = Document::open(builder.finish()).expect("opens");
+    structurally_clean(&doc);
+
+    let page = doc.page(0).expect("a page");
+    let annotations = page.annotation_associated_files();
+    assert_eq!(annotations.len(), page.annotation_list().annotations.len());
+    assert_eq!(annotations.len(), 2);
+    assert!(annotations[0].is_empty(), "the first link has none");
+    assert_eq!(names(&annotations[1]), [Some("target.html")]);
+    assert_eq!(
+        annotations[1][0].relationship,
+        Some(FileRelationship::Alternative)
+    );
+    let link = page.annotation_list().annotations[1]
+        .reference
+        .expect("an indirect annotation");
+    assert_eq!(
+        doc.associated_files_of(link),
+        annotations[1],
+        "by reference too"
+    );
+
+    let form = doc.associated_files_of(form_ref(&doc, b"Fm1"));
+    assert_eq!(names(&form), [Some("chart.csv"), Some("chart.svg")]);
+    assert_eq!(form[1].mime_type.as_deref(), Some("image/svg+xml"));
+    let stream = form[0].stream.expect("embedded");
+    assert_eq!(
+        doc.cos().stream_decoded(stream).expect("decodes"),
+        b"x,y\n1,2\n"
+    );
+
+    let root = doc.structure_associated_files();
+    assert_eq!(root.len(), 1);
+    assert_eq!(
+        FileView::of(&root[0]),
+        FileView {
+            filename: Some("structure.xml"),
+            description: Some("The source's structure"),
+            relationship: Some(FileRelationship::Supplement),
+            relationship_name: Some("Supplement"),
+            mime_type: Some("application/xml"),
+            size: Some(4),
+        }
+    );
+    assert_eq!(names(&doc.associated_files()), [Some("document.txt")]);
+    assert!(page.associated_files().is_empty(), "the page holds none");
+}
+
+/// ISO 32000-2 14.13.5 as the approved errata amend it: `/AF /AFn BDC … EMC`,
+/// the property list a named resource whose `/MCAF` lists the files (Table
+/// 409a). Read back as one sequence with its files in order; the drawing
+/// inside it is still the page's text; and one inside a structure element
+/// splits the element's sequence around itself, leaving the tree whole.
+#[test]
+fn a_marked_content_sequence_is_associated_through_its_named_property_list() {
+    let mut builder = DocumentBuilder::with_version(2, 0);
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(200.0, 200.0, |page| {
+        assert!(page.with_associated_files(
+            vec![
+                NewAssociatedFile::new(
+                    "formula.mml",
+                    "application/mathml+xml",
+                    FileRelationship::Source,
+                    b"<math/>".to_vec(),
+                ),
+                NewAssociatedFile::new(
+                    "formula.tex",
+                    "application/x-tex",
+                    FileRelationship::Alternative,
+                    b"E=mc^2".to_vec(),
+                ),
+            ],
+            |page| page.text(b"F1", 12.0, 20.0, 150.0, "E = mc2"),
+        ));
+        page.tagged(b"P", |page| {
+            page.text(b"F1", 12.0, 20.0, 120.0, "Before");
+            assert!(page.with_associated_files(
+                vec![NewAssociatedFile::new(
+                    "inner.csv",
+                    "text/csv",
+                    FileRelationship::Data,
+                    b"1".to_vec(),
+                )],
+                |page| page.text(b"F1", 12.0, 20.0, 100.0, "Inside"),
+            ));
+            page.text(b"F1", 12.0, 20.0, 80.0, "After");
+        });
+        assert!(
+            page.with_associated_files(
+                vec![NewAssociatedFile::new(
+                    "empty.txt",
+                    "text/plain",
+                    FileRelationship::Data,
+                    b"e".to_vec(),
+                )],
+                |_| {},
+            ),
+            "accepted, and writes nothing"
+        );
+    });
+    let bytes = builder.finish();
+    assert!(
+        !bytes.windows(9).any(|w| w == b"empty.txt"),
+        "an empty sequence's files are not written"
+    );
+    let doc = Document::open(bytes).expect("opens");
+    structurally_clean(&doc);
+
+    let page = doc.page(0).expect("a page");
+    let listed = page.marked_content_associated_files();
+    assert_eq!(listed.dropped, 0);
+    assert_eq!(listed.sequences.len(), 2);
+    let first = &listed.sequences[0];
+    assert_eq!(first.property, b"AF0");
+    assert_eq!(first.form, None, "the page's own content");
+    assert!(!first.incomplete);
+    assert_eq!(
+        names(&first.files),
+        [Some("formula.mml"), Some("formula.tex")]
+    );
+    assert_eq!(
+        first.files[1].relationship,
+        Some(FileRelationship::Alternative)
+    );
+    let stream = first.files[0].stream.expect("embedded");
+    assert_eq!(
+        doc.cos().stream_decoded(stream).expect("decodes"),
+        b"<math/>"
+    );
+    assert_eq!(names(&listed.sequences[1].files), [Some("inner.csv")]);
+
+    let text = page.text().plain_text();
+    for word in ["E = mc2", "Before", "Inside", "After"] {
+        assert!(text.contains(word), "{word:?} in {text:?}");
+    }
+    let paragraph = elements(&doc)
+        .into_iter()
+        .find(|element| element.standard_type == "P")
+        .expect("the paragraph");
+    assert_eq!(
+        paragraph.kids.len(),
+        3,
+        "its sequence split around the associated one: before, inside, after"
+    );
+}
+
+/// The reader on what another producer may write, held to the clause's last
+/// paragraph: only the `/AF` tag with a **named** list carrying `/MCAF`
+/// connects. An inline list, a named list without `/MCAF`, `/MCAF` under
+/// another tag and an `/AF` point (`DP`) connect nothing; a sequence inside a
+/// form is found through the form's own resources, once per drawing; and an
+/// entry that is not a dictionary is skipped as in every `/AF` array.
+#[test]
+fn only_the_af_tag_with_a_named_mcaf_list_connects_a_sequence() {
+    let page_content = "/AF /MF1 BDC 0 0 1 1 re f EMC\n\
+/AF << /MCAF [ << /Type /Filespec /F (inline.txt) /AFRelationship /Data >> ] >> BDC EMC\n\
+/AF /Plain BDC EMC\n\
+/Span /MF1 BDC EMC\n\
+/AF /MF1 DP\n\
+/Fm1 Do /Fm1 Do\n";
+    let form_content = "/AF /MF1 BDC 0 0 1 1 re f EMC";
+    let bytes = format!(
+        "%PDF-2.0\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 4 0 R\n\
+   /Resources << /XObject << /Fm1 5 0 R >>\n\
+   /Properties << /MF1 << /MCAF [ 10 0 R 7 ] >> /Plain << /Lang (en) >> >> >> >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /Length {}\n\
+   /Resources << /Properties << /MF1 6 0 R >> >> >>\nstream\n{}\nendstream\nendobj\n\
+6 0 obj\n<< /MCAF [ << /Type /Filespec /F (in-form.txt) /AFRelationship /Supplement >> ] >>\nendobj\n\
+10 0 obj\n<< /Type /Filespec /F (page.txt) /UF (page.txt) /AFRelationship /Data >>\nendobj\n\
+trailer\n<< /Size 11 /Root 1 0 R >>\n%%EOF\n",
+        page_content.len(),
+        page_content,
+        form_content.len(),
+        form_content,
+    );
+    let doc = Document::open(bytes.into_bytes()).expect("opens");
+    let listed = doc
+        .page(0)
+        .expect("a page")
+        .marked_content_associated_files();
+    let seen: Vec<(Option<ObjRef>, Vec<Option<&str>>)> = listed
+        .sequences
+        .iter()
+        .map(|sequence| (sequence.form, names(&sequence.files)))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (None, vec![Some("page.txt")]),
+            (Some(ObjRef::new(5, 0)), vec![Some("in-form.txt")]),
+            (Some(ObjRef::new(5, 0)), vec![Some("in-form.txt")]),
+        ]
+    );
+    assert!(listed.sequences.iter().all(|s| s.property == b"MF1"));
+    assert_eq!(listed.dropped, 0);
+}
+
+/// Where the 2.0 holders cannot be written they are refused as the catalog's
+/// are: before 2.0 with no part 3 profile, and under part 2 with the refusal
+/// recorded — and a sequence refused its files still draws what it was
+/// given, outside any `/AF` sequence, as an element refused its file is
+/// still written.
+#[test]
+fn the_new_holders_are_refused_where_an_associated_file_cannot_be_written() {
+    let file =
+        || NewAssociatedFile::new("a.csv", "text/csv", FileRelationship::Data, b"1".to_vec());
+    let form = FormXObject {
+        bbox: [0.0, 0.0, 10.0, 10.0],
+        matrix: None,
+        group: None,
+        content: b"0 0 1 1 re f",
+    };
+
+    let mut old = DocumentBuilder::new();
+    old.add_base_font(b"F1", b"Helvetica");
+    assert!(
+        !old.add_form_with_files(b"Fm1", &form, &[file()]),
+        "the form is not registered"
+    );
+    assert!(
+        old.add_form_with_files(b"Fm2", &form, &[]),
+        "no files is add_form"
+    );
+    assert!(!old.associate_file_with_structure(file()));
+    old.add_page(100.0, 100.0, |page| {
+        assert!(!page.form(b"Fm1"), "never registered");
+        assert!(page.link(
+            1.0,
+            1.0,
+            5.0,
+            5.0,
+            &Target::Uri("https://example.org/".into())
+        ));
+        assert!(!page.associate_file_with_link(0, file()));
+        assert!(!page.with_associated_files(vec![file()], |page| {
+            page.text(b"F1", 12.0, 10.0, 50.0, "still drawn");
+        }));
+    });
+    let bytes = old.finish();
+    assert!(!bytes.windows(14).any(|w| w == b"AFRelationship"));
+    assert!(!bytes.windows(4).any(|w| w == b"MCAF"));
+    let doc = Document::open(bytes).expect("opens");
+    let page = doc.page(0).expect("a page");
+    assert!(page.text().plain_text().contains("still drawn"));
+    assert!(page.marked_content_associated_files().sequences.is_empty());
+
+    // In a 2.0 document: a file the writer refuses refuses the call.
+    let mut new = DocumentBuilder::with_version(2, 0);
+    let bad = || NewAssociatedFile::new("a", "text", FileRelationship::Data, vec![]);
+    assert!(!new.add_form_with_files(b"Fm1", &form, &[file(), bad()]));
+    assert!(!new.associate_file_with_structure(bad()));
+    new.add_page(100.0, 100.0, |page| {
+        assert!(
+            !page.with_associated_files(Vec::new(), |_| {}),
+            "one or more files"
+        );
+        assert!(!page.with_associated_files(vec![file(), bad()], |_| {}));
+    });
+
+    let mut part2 = DocumentBuilder::archival(archival(ArchivalPart::Two, Some(ArchivalLevel::B)));
+    assert!(!part2.add_form_with_files(b"Fm1", &form, &[file()]));
+    assert!(!part2.associate_file_with_structure(file()));
+    part2.add_page(100.0, 100.0, |page| {
+        assert!(page.link(
+            1.0,
+            1.0,
+            5.0,
+            5.0,
+            &Target::Uri("https://example.org/".into())
+        ));
+        assert!(!page.associate_file_with_link(0, file()));
+        assert!(!page.with_associated_files(vec![file()], |page| {
+            page.fill_rect(1.0, 1.0, 2.0, 2.0, 0.0);
+        }));
+    });
+    assert_eq!(
+        part2.refusals(),
+        &vec![ArchivalRefusal::AssociatedFile; 4][..]
+    );
+}
+
+/// One page's annotation listing spends one budget, each file charged for
+/// its record: 4 096 annotations naming one array of 4 096 entries ask for
+/// sixteen million records from a file of under 200 KB, and the listing stops
+/// within [`MAX_ASSOCIATED_FILE_BYTES`] — so does the marked-content listing
+/// over 4 096 sequences naming the same array.
+#[test]
+fn the_annotation_and_marked_content_listings_spend_one_budget() {
+    let annotations = 4_096;
+    let entries = 4_096;
+    let content = "/AF /MF1 BDC EMC\n".repeat(annotations);
+    let bytes = format!(
+        "%PDF-2.0\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Annots 4 0 R /Contents 8 0 R\n\
+   /Resources << /Properties << /MF1 << /MCAF 5 0 R >> >> >> >>\nendobj\n\
+4 0 obj\n[{}]\nendobj\n\
+5 0 obj\n[{}]\nendobj\n\
+6 0 obj\n<< /Type /Filespec /F (x) /AFRelationship /Data >>\nendobj\n\
+7 0 obj\n<< /Type /Annot /Subtype /Square /Rect [0 0 1 1] /AF 5 0 R >>\nendobj\n\
+8 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n\
+trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n",
+        "7 0 R ".repeat(annotations),
+        "6 0 R ".repeat(entries),
+        content.len(),
+        content,
+    );
+    assert!(bytes.len() < 200_000, "a file of {} bytes", bytes.len());
+    let doc = Document::open(bytes.into_bytes()).expect("opens");
+    let page = doc.page(0).expect("a page");
+    let record = std::mem::size_of::<AssociatedFile>();
+
+    let listed = page.annotation_associated_files();
+    assert_eq!(listed.len(), annotations, "one list per annotation");
+    let records: usize = listed.iter().map(Vec::len).sum();
+    assert!(
+        records * record <= MAX_ASSOCIATED_FILE_BYTES,
+        "{records} records"
+    );
+    assert_eq!(
+        listed[0].len(),
+        entries,
+        "the first annotation is read whole"
+    );
+    assert!(
+        listed.last().is_some_and(Vec::is_empty),
+        "the last is not read at all"
+    );
+
+    let marked = page.marked_content_associated_files();
+    let records: usize = marked.sequences.iter().map(|s| s.files.len()).sum();
+    assert!(
+        records * record <= MAX_ASSOCIATED_FILE_BYTES,
+        "{records} records"
+    );
+    assert_eq!(marked.sequences[0].files.len(), entries);
+    assert!(
+        marked.sequences.iter().any(|s| s.incomplete),
+        "one is cut short"
+    );
+    assert!(marked.dropped > 0, "and the rest are counted, not listed");
+    assert_eq!(marked.sequences.len() + marked.dropped, annotations);
+}

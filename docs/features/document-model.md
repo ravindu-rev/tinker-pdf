@@ -173,7 +173,12 @@ one — and pages naming one profile share one stream.
 
 **Associated files** (ISO 32000-2 14.13). `Document::associated_files()`,
 `Page::associated_files()` and `StructElement::associated_files` read the
-`/AF` arrays of the catalog, a page and a structure element: each an
+`/AF` arrays of the catalog, a page and a structure element;
+`Document::structure_associated_files()` the structure tree root's,
+`Page::annotation_associated_files()` each annotation's (one list per
+`/Annots` entry, aligned with `annotation_list`), and
+`Document::associated_files_of(reference)` any other holder's — a form or
+image XObject, a document part — by its reference. Each file is an
 `AssociatedFile` with its `/UF`-preferred filename, `/Desc`, the
 `/AFRelationship` as a `FileRelationship` (and as written, for a name the
 list does not hold), the embedded stream by reference with its `/Subtype`
@@ -183,11 +188,32 @@ stream; nothing is defaulted. One listing copies at most
 naming one specification with a 64 KiB `/Desc` asked for 256 MiB from 90 KB —
 and an entry the budget cut says so with `AssociatedFile::incomplete`; an
 element's files are copied under the structure walk's own
-`MAX_STRUCTURE_BYTES`. They are not the `/EmbeddedFiles` tree's
+`MAX_STRUCTURE_BYTES`, and the annotation listing charges each file its
+record as well as its strings, since 4 096 annotations naming one array of
+4 096 entries ask for sixteen million records from under 200 KB.
+
+**Marked content associated with files** (14.13.5, as the approved errata
+amend it with Table 409a). `Page::marked_content_associated_files()` lists
+every sequence the page draws under the `/AF` tag whose **named** property
+list carries `/MCAF`, in drawing order — forms included, the name looked up
+in the form's own resources as the interpreter does — each a
+`MarkedContentFiles` with the property's name, the form it was drawn in and
+the files. The errata's last paragraph decides what connects: *"only if the
+tag is AF and the named property list is defined according to Table 409a"*,
+so an inline list (which NOTE 4 rules out, since a specification names its
+stream by reference), a named list with no `/MCAF`, `/MCAF` under another
+tag, and an `/AF` point (`DP`) connect nothing. It runs the interpreter, so
+the content crate's `MarkedProps` carries the one thing the facade's resolver
+needs back: `associated_files`, the name of a named list holding `/MCAF`.
+The listing spends one `MAX_ASSOCIATED_FILE_BYTES` budget, sequences and
+files charged for their records, and counts the sequences past it in
+`MarkedContentFileList::dropped`. They are not the `/EmbeddedFiles` tree's
 attachments, which `attachments()` lists: an associated file belongs to an
 object, and the errata say filing it in the tree is not required. The
 builder writes them — `DocumentBuilder::associate_file`,
-`PageBuilder::associate_file`, `Tag::associated_file` — in a 2.0 document or
+`associate_file_with_structure` and `add_form_with_files`,
+`PageBuilder::associate_file`, `associate_file_with_link` and
+`with_associated_files`, `Tag::associated_file` — in a 2.0 document or
 under ISO 19005-3, from a `NewAssociatedFile` whose MIME type has veraPDF's
 PDF/A 6.8-1 shape; [creation](creation.md) has the rest.
 
@@ -387,7 +413,7 @@ and 5 129 annotations carry a normal appearance.
 | An `/OutputIntents` array on a `/Pages` node | none — `Page::output_intents` reads the page's own only (`page_level_intents_are_read_from_the_page_alone_beside_the_catalogs`) | the Arlington model's `PageObject` table does not make the entry inheritable | ISO 32000-2 PageObject |
 | A page's intents merged over the catalog's into one answer | none — the two lists are handed back as written | the PDF Association's example says a page's intent overrides the catalog's; how the two combine when their subtypes differ is not in a source this build could read | [pdf20-deltas](../pdf20-deltas.md) |
 | A page-level output intent below 2.0 or under an archival profile | `PageBuilder::output_intent` → `false` | before 2.0 a page has no such entry; a profile writes the catalog's intent and judges every device colour against that one profile, which a page naming another would bypass | [creation](creation.md) |
-| `/AF` on an annotation, an XObject or the structure tree root, and a marked-content sequence's `/AF` tag with its `/MCAF` property list | none — not read and not written | the catalog, a page and a structure element are what this engine reads and writes; the rest of the Arlington model's holders, and 14.13.5's marked-content form the errata quote as Table 409a, are named in [pdf20-deltas](../pdf20-deltas.md) as left | ISO 32000-2 14.13 |
+| `/AF` written on an annotation other than a link, an image XObject or a document part, or on an existing document | none — read by `associated_files_of`, written only where the builder makes the holder | the builder writes the catalog, a page, a structure element, the tree root, a link annotation, a form XObject and a marked-content sequence; it makes no other annotation, writes images without one and has no document parts, and the editor has no `/AF` setter yet | ISO 32000-2 14.13 |
 | An associated file below 2.0 without ISO 19005-3, or under another archival part | `associate_file` → `false`; under a profile `ArchivalRefusal::AssociatedFile`; a `Tag`'s file is dropped and its element written | `/AF` is a 2.0 key that part 3 carried on 1.7 first; parts 1, 2 and 4 forbid embedded files or require the file itself to conform, which nothing here can check | [creation](creation.md) |
 | An associated file whose MIME type is not one `/` between two runs of letters, digits, `_`, `-`, `+` and `.`, or whose relationship is `EncryptedPayload` | `NewAssociatedFile::is_writable` → `false` | veraPDF's PDF/A rule 6.8-1 tests that shape, which also keeps out the `;`, `=` and `#` the errata's Table 44 forbids; an encrypted payload needs an `/EP` dictionary this writer does not write | ISO 32000-2 7.11.4 |
 | A `/Count` that disagrees with the walk | `WarningKind::PageCountMismatch` | the count is a claim; the walk is the fact | [ruling 10](../rulings.md) |

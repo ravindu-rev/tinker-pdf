@@ -356,6 +356,25 @@ Other parts record `ArchivalRefusal::AssociatedFile`. A structure element
 holding nothing but an associated file is kept, as one holding any other
 property is.
 
+Four more holders, October 2026, each from the Arlington model's list.
+`PageBuilder::associate_file_with_link(index, file)` gives the page's
+`index`th accepted link its `/AF`; `DocumentBuilder::add_form_with_files`
+is `add_form` with an `/AF` on the form, refusing the whole registration
+when a file cannot be written, since a form without the files asked for is
+not the form asked for; `DocumentBuilder::associate_file_with_structure`
+puts one on the structure tree root, which is written only with the tree — a
+document that tags nothing has no root, and writing one would claim a
+structure (`/MarkInfo /Marked true` comes with it) the document does not
+have. `PageBuilder::with_associated_files(files, draw)` draws a
+marked-content sequence associated with files: `/AF /AFn BDC … EMC` with a
+direct `<< /MCAF [...] >>` under `/Properties /AFn`, the shape of the
+errata's 14.13.5 EXAMPLE (Table 409a), nesting with structure elements and
+layers as `optional` does — the two now share one writer, byte for byte —
+and writing nothing for a closure that drew nothing. Where the document may
+not carry associated files, or a file is refused, the closure still draws,
+outside any `/AF` sequence, and the call answers `false`
+(`the_new_holders_are_refused_where_an_associated_file_cannot_be_written`).
+
 ## Refused by name
 
 | What | How it shows | Why | See |
