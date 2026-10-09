@@ -1459,6 +1459,132 @@ fn the_encoding_standards_other_labels_for_utf_8_and_utf_16_name_them() {
     );
 }
 
+/// The text a document reads to through one constructor or the other, or the
+/// first refusal — the constructor's or the reader's — so the two constructors
+/// can be compared on one input.
+fn read_through(bytes: &[u8], declared: bool) -> Result<(String, Encoding, Vec<Warning>), Error> {
+    let source = if declared {
+        Source::with_declared_encoding(bytes)?
+    } else {
+        Source::new(bytes)?
+    };
+    let mut reader = source.reader(&Limits::DEFAULT);
+    let mut text = String::new();
+    for event in &mut reader {
+        if let Event::Text(t) = event? {
+            text.push_str(&t);
+        }
+    }
+    Ok((text, source.encoding(), reader.warnings().to_vec()))
+}
+
+/// **An `encoding` that is not an `EncName` is a malformed declaration, from
+/// both constructors.** XML 1.0 [81] is `[A-Za-z] ([A-Za-z0-9._] | '-')*`. The
+/// Encoding Standard's *get an encoding* trims white space first, and its
+/// table holds labels such as `iso_8859-1:1987` and `866`, so a declared
+/// source that looked every label up read ` utf-8`, `windows-1251 ` and
+/// `\tutf-16` with no warning where [`Source::new`] refused them — and read
+/// `\tutf-16` as strict UTF-16LE, which a big-endian file then "disagreed"
+/// with. The standard's labels that are `EncName`s are still read.
+#[test]
+fn a_declared_encoding_that_is_not_an_enc_name_is_malformed_from_both_constructors() {
+    use crate::encoding::SingleByte;
+    let declare = |label: &str| format!("<?xml version=\"1.0\" encoding=\"{label}\"?><p>x</p>");
+    let wide = |label: &str, big_endian: bool| -> Vec<u8> {
+        let mark: [u8; 2] = if big_endian {
+            [0xFE, 0xFF]
+        } else {
+            [0xFF, 0xFE]
+        };
+        mark.into_iter()
+            .chain(declare(label).encode_utf16().flat_map(|unit| {
+                if big_endian {
+                    unit.to_be_bytes()
+                } else {
+                    unit.to_le_bytes()
+                }
+            }))
+            .collect()
+    };
+    for label in [
+        " utf-8",
+        "utf-8 ",
+        "\tUTF-8",
+        "utf-8\r\n",
+        " unicode-1-1-utf-8",
+        " windows-1251",
+        "koi8-r\n",
+        " ucs-2",
+        "\tutf-16",
+        "iso_8859-1:1987",
+        "iso_8859-2:1987",
+        "866",
+        "utf 8",
+        "-utf-8",
+        "_utf-8",
+        "utf&#45;8",
+        "",
+    ] {
+        let mut inputs = vec![(declare(label).into_bytes(), "ASCII")];
+        inputs.push((wide(label, false), "behind a UTF-16LE mark"));
+        inputs.push((wide(label, true), "behind a UTF-16BE mark"));
+        for (bytes, how) in &inputs {
+            for declared in [true, false] {
+                assert_eq!(
+                    read_through(bytes, declared),
+                    Err(Error::MalformedDeclaration),
+                    "{label:?} {how}, declared: {declared}"
+                );
+            }
+        }
+    }
+    // A single-byte label is not read by its table either: these bytes are
+    // windows-1251's П, and not UTF-8, which is what both constructors say.
+    let cyrillic = b"<?xml version=\"1.0\" encoding=\" windows-1251\"?><p>\xCF</p>";
+    for declared in [true, false] {
+        assert_eq!(
+            read_through(cyrillic, declared),
+            Err(Error::NotUtf8),
+            "declared: {declared}"
+        );
+    }
+
+    // The standard's labels that are `EncName`s — `_` and `.` among their
+    // characters — are read as they were, and refused by `Source::new` as an
+    // encoding it does not decode, as they were.
+    for (label, byte, text, single) in [
+        ("ansi_x3.4-1968", 0xE9, "é", SingleByte::Windows1252),
+        ("ISO_8859-1", 0xE9, "é", SingleByte::Windows1252),
+        ("iso_8859-2", 0xA1, "Ą", SingleByte::Iso8859_2),
+        ("cp866", 0x80, "А", SingleByte::Ibm866),
+    ] {
+        let mut bytes = format!("<?xml version=\"1.0\" encoding=\"{label}\"?><p>").into_bytes();
+        bytes.push(byte);
+        bytes.extend_from_slice(b"</p>");
+        assert_eq!(
+            read_through(&bytes, true),
+            Ok((text.to_owned(), Encoding::SingleByte(single), Vec::new())),
+            "{label}"
+        );
+        assert_eq!(
+            read_through(declare(label).as_bytes(), false),
+            Err(Error::UnsupportedEncoding),
+            "{label} through Source::new"
+        );
+    }
+    for (bytes, encoding) in [
+        (declare("unicode-1-1-utf-8").into_bytes(), Encoding::Utf8),
+        (wide("utf-16", true), Encoding::Utf16BigEndian),
+        (wide("csUnicode", true), Encoding::Utf16BigEndian),
+        (wide("ISO-10646-UCS-2", false), Encoding::Utf16LittleEndian),
+    ] {
+        assert_eq!(
+            read_through(&bytes, true),
+            Ok(("x".to_owned(), encoding, Vec::new()))
+        );
+    }
+}
+
 #[test]
 fn the_encoding_declaration_is_read_case_insensitively_in_both_spellings() {
     // Both appear in one corpus from one vendor: WPF writes `utf-8` and the XPS

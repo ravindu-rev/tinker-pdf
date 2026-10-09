@@ -66,6 +66,18 @@ pub(crate) const fn is_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\r' | '\n')
 }
 
+/// XML 1.0 §4.3.3 [81], `EncName`: `[A-Za-z] ([A-Za-z0-9._] | '-')*`.
+///
+/// The only values a declaration's `encoding` may hold, so white space around
+/// a label is not trimmed here the way the Encoding Standard's *get an
+/// encoding* trims it ([`crate::encoding::lookup`]), and that standard's labels
+/// which are not names — `866`, `iso_8859-1:1987` — are not labels here.
+pub(crate) fn is_enc_name(label: &str) -> bool {
+    let mut chars = label.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
 /// What the first bytes say the encoding is, and the text they decode to.
 ///
 /// §4.3.3 requires a UTF-16 entity to carry a byte order mark and lets a UTF-8
@@ -157,6 +169,11 @@ pub(crate) fn declared_single_byte(bytes: &[u8]) -> Option<crate::encoding::Sing
     let body = rest.get(1..)?;
     let close = body.iter().position(|&b| b == quote)?;
     let label = std::str::from_utf8(body.get(..close)?).ok()?;
+    // A value that is not an `EncName` makes the declaration malformed, which
+    // the reader says; it does not choose how the bytes are read first.
+    if !is_enc_name(label) {
+        return None;
+    }
     match crate::encoding::lookup(label)? {
         crate::encoding::Label::SingleByte(single) => Some(single),
         _ => None,

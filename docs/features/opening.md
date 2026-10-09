@@ -140,8 +140,10 @@ and not text. Pictures are `<img src="#id">`, answered from the book's own
 8-bit encoding is read in it**: a declaration naming one of the WHATWG
 Encoding Standard's twenty-eight single-byte encodings — `windows-1251` and
 `koi8-r`, which a great many real books are, and their siblings, by any of
-the standard's labels — is decoded by that encoding's index, vendored from
-`whatwg/encoding` and compiled into `tinker-pdf-xml`
+the standard's labels that is an XML 1.0 `EncName` (` koi8-r`, with white
+space in it, and `866` are not, and are refused as a malformed declaration)
+— is decoded by that encoding's index, vendored from `whatwg/encoding` and
+compiled into `tinker-pdf-xml`
 (`Source::with_declared_encoding`, `tinker_pdf_xml::encoding`). A byte the
 index leaves unmapped is U+FFFD and counted
 (`TranslationDefect::UnmappedByte`). By the standard's own table

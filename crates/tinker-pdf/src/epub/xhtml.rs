@@ -743,7 +743,8 @@ fn read_reporting(source: &Source<'_>, limits: &XmlLimits) -> (Dom, Option<XmlEr
 /// again would meet the same cap, so the XML reader's tree stands.
 ///
 /// **In the encoding its declaration names**, single-byte ones included, by
-/// any of the Encoding Standard's labels ([`Source::with_declared_encoding`]):
+/// any of the Encoding Standard's labels that is an XML `EncName`
+/// ([`Source::with_declared_encoding`]):
 /// a loose file is not an EPUB chapter, which EPUB 3.3 holds to UTF-8 or
 /// UTF-16, and an XHTML file whose declaration says `windows-1251` is
 /// well-formed XML in windows-1251. Read by

@@ -475,7 +475,10 @@ pub enum Error {
     /// type declaration, which is the only place any of them may appear.
     MarkupDeclaration,
     /// The XML declaration is not `<?xml version="1.0" …?>`: a pseudo-attribute
-    /// out of order, one that is not one of the three, or a missing `?>`.
+    /// out of order, one that is not one of the three, or a missing `?>` — or
+    /// an `encoding` that is not an `EncName` (XML 1.0 [81]: a letter, then
+    /// letters, digits, `.`, `_` and `-`), such as ` utf-8` with white space
+    /// in it, or the Encoding Standard's `866`.
     MalformedDeclaration,
     /// A processing instruction whose target is `xml` in any case, which XML
     /// reserves.
@@ -855,7 +858,7 @@ pub struct Source<'a> {
     encoding: Encoding,
     warnings: Vec<Warning>,
     /// Whether this source was made by [`Source::with_declared_encoding`], which
-    /// decides how a declaration giving any label but `UTF-8`, `UTF8`,
+    /// decides how a declaration giving any `EncName` but `UTF-8`, `UTF8`,
     /// `UTF-16`, `UTF-16LE` or `UTF-16BE` is answered: by the Encoding
     /// Standard's table of labels there — a warning when the label names an
     /// encoding the bytes were not read in — and [`Error::UnsupportedEncoding`]
@@ -905,7 +908,10 @@ impl<'a> Source<'a> {
     /// standard's labels for UTF-8 and UTF-16 — `unicode-1-1-utf-8`, `UCS-2`,
     /// and `ISO-10646-UCS-2`, which §4.3.3 itself recommends — and is checked
     /// against the bytes as `UTF-8` and `UTF-16` are, UCS-2's names giving no
-    /// byte order.
+    /// byte order. Only a label that is an XML `EncName` is looked up: the
+    /// standard trims white space from a label and lists a few that are not
+    /// names (`866`, `iso_8859-1:1987`), and a declaration giving any of those
+    /// is [`Error::MalformedDeclaration`] here as it is from [`Source::new`].
     ///
     /// **A separate constructor rather than [`Source::new`]'s new behaviour**,
     /// because a format can forbid what XML allows: ECMA-388 requires an XPS
@@ -1222,8 +1228,15 @@ impl<'a> Reader<'a> {
     /// `UTF-8` across one corpus from one vendor. A name this crate does not
     /// decode is refused by name; a name it decodes that disagrees with the
     /// bytes is a warning, because a byte order mark is evidence and a
-    /// declaration is a claim.
+    /// declaration is a claim. A value that is not an `EncName` (XML 1.0 [81])
+    /// is [`Error::MalformedDeclaration`] from either constructor, before any
+    /// name is looked up: the Encoding Standard's lookup trims white space and
+    /// holds labels such as `866` and `iso_8859-1:1987`, none of which a
+    /// declaration may give.
     fn check_encoding(&mut self, declared: &str) -> Result<(), Error> {
+        if !text::is_enc_name(declared) {
+            return Err(Error::MalformedDeclaration);
+        }
         let lower = declared.to_ascii_lowercase();
         let named = match lower.as_str() {
             "utf-8" | "utf8" => Encoding::Utf8,
@@ -1248,12 +1261,10 @@ impl<'a> Reader<'a> {
                 // standard's table gives them to UTF-16LE, but here a byte
                 // order mark or UTF-16's shape decided the order before the
                 // declaration was read.
+                // `other` is an `EncName`, so it has no white space for the
+                // lookup to have trimmed: the name it found is this one.
                 Some(encoding::Label::Utf16LittleEndian)
-                    if matches!(
-                        other
-                            .trim_matches(|c: char| matches!(c, '\t' | '\n' | '\x0C' | '\r' | ' ')),
-                        "iso-10646-ucs-2" | "ucs-2" | "unicode" | "csunicode"
-                    ) =>
+                    if matches!(other, "iso-10646-ucs-2" | "ucs-2" | "unicode" | "csunicode") =>
                 {
                     self.utf16_in_either_order()
                 }
