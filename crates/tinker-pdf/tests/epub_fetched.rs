@@ -264,7 +264,10 @@ const FETCHED_SPINES: &[(&str, u32)] = &[
     // walk is unchanged across the two runs.
     ("pg1342-noimages.epub", 17),
     ("pg16328-beowulf.epub", 7),
-    ("pg2701-images.epub", 12),
+    // 13 since the same regeneration: `wrap0000.xhtml` joined this spine too.
+    // The census counted 13 content documents on 26 September and 14 on
+    // 10 October, and run 38033866103 paginated to thirteen origin runs.
+    ("pg2701-images.epub", 13),
     ("pg84-images.epub", 32),
     ("sample-childrens-literature.epub", 3),
     ("sample-childrens-media-query.epub", 1),
