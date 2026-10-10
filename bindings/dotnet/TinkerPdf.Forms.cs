@@ -280,9 +280,9 @@ public sealed class FormData : IDisposable
             for (uint i = 0; i < count; i++)
             {
                 Native.Check(Native.tpdf_form_data_warning(
-                    Raw, i, out var kind, out var what, out var field));
+                    Raw, i, out var kind, out var what, out var fieldName));
                 warnings[i] = new FormDataWarning(
-                    (FormDataWarningKind)kind, Native.TakeString(what), Native.TakeString(field));
+                    (FormDataWarningKind)kind, Native.TakeString(what), Native.TakeString(fieldName));
             }
             return warnings;
         }
