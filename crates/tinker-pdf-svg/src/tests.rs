@@ -279,6 +279,39 @@ fn data_that_goes_wrong_halfway_keeps_the_half_that_parsed() {
     );
 }
 
+/// A closepath takes no parameters, so what follows one that is not a command
+/// is where the data goes wrong — and every turn of the reader consumes a
+/// byte, so a `d` cannot produce more segments than it has characters to
+/// spend. `Z%` once repeated the close without reading anything, a close a
+/// turn until the budget ran out: with `shape::path`'s unbounded budget, 1.8
+/// GB from a 463-byte document (CI's `fuzz-seeds`, 10 October 2026; the input
+/// is the corpus's `document-close-then-junk`).
+#[test]
+fn what_follows_a_closepath_that_is_not_a_command_ends_the_data() {
+    for (data, drawn) in [
+        ("M 0 0 L 5 0 Z%M 1 1", 3),
+        ("M 0 0 L 5 0 Z 7 8", 3),
+        ("M 0 0 L 5 0 z,", 3),
+        ("M 0 0 L 5 0 Z M 1 1 L 2 2", 5),
+    ] {
+        // Generous rather than `shape::path`'s unbounded one, so that a reader
+        // that repeats the close again fails here by name and does not hang.
+        const GRANTED: usize = 1 << 16;
+        let mut budget = GRANTED;
+        let outline = path::parse(data, &mut budget).expect("the moveto parsed");
+        assert_eq!(outline.segments.len(), drawn, "{data:?}: {outline:?}");
+        assert_eq!(GRANTED - budget, drawn, "{data:?}: spent what it drew");
+    }
+    assert_eq!(
+        outline("M 0 0 L 5 0 Z%M 1 1"),
+        vec![
+            Segment::Move([0.0, 0.0]),
+            Segment::Line([5.0, 0.0]),
+            Segment::Close
+        ]
+    );
+}
+
 /// A `d` that does not begin with a moveto has drawn nothing before it went
 /// wrong, so there is no prefix to keep.
 #[test]

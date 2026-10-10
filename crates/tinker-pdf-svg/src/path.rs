@@ -149,6 +149,13 @@ pub fn parse_commands(data: &str, budget: &mut usize) -> Result<(Outline, Vec<us
             match previous {
                 Some(b'M') => b'L',
                 Some(b'm') => b'l',
+                // A closepath takes no parameters, so nothing repeats it:
+                // what follows one that is not a command is the error, and
+                // the path up to it is what is drawn. Repeated, it read no
+                // byte and pushed a close a turn — `Z%` was a close for every
+                // segment the caller's budget allowed, and `shape::path`
+                // allows them all (CI's `fuzz-seeds`, `svg`, 10 October 2026).
+                Some(b'Z' | b'z') => break,
                 Some(other) => other,
                 None => return Err(PathError::Syntax),
             }
