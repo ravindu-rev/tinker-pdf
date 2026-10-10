@@ -159,18 +159,21 @@ comma trailing, where a left-to-right paragraph draws it (the forward check,
 asked before the direction is chosen): the comma tie-break of ruling 14,
 amended 10 October 2026, because both paragraphs draw that line and the
 quoted word is the commoner. Its price is named and pinned: a lone
-right-to-left line that opens with a dash, a bullet-like mark or a straight
-quotation mark reads with the mark at its end, `— שלום` as `שלום —`. An
-opening bracket or quotation mark (`Ps`, `Pi`) is not trailing
-punctuation, so `(١) بند` and `“שלום` read as typed. A European number
+right-to-left line that opens with a mark of `Bidi_Class` `CS`, `ON`, `ES`
+or `ET` that is not `Ps` or `Pi` — a dash, a bullet, `*`, `#`, `%`, an
+ellipsis, or a straight or closing-form quotation mark used to open — reads
+with the mark at its end, `— שלום` as `שלום —`. An opening bracket or
+quotation mark (`Ps`, `Pi`) is not trailing punctuation, so `(١) بند` and
+`“שלום` read as typed where `/ToUnicode` names the typed character; where it
+names the mirrored glyph (`»` for `«`, `)` for `(`), the line ends in a
+closing mark and pays like a dash. A European number
 after the mark spares the line too — `(1) פריט`, `— 2026 שלום` and
 `• 5 תפוחים` read as typed, since no left-to-right paragraph draws the
 number next to the mark — but Arabic-Indic digits (`AN`) do not,
 `— ١ بند` reading `١ بند —`, and neither does a number further on,
 `— שלום 5 חו`. Applying L2 to levels resolved over the drawn line, which
 is what this did first, read `نسبة 50%` back as `نسبة %50`. A visually
-drawn Hebrew word and the
-same word drawn in reading order with the pen moving left extract the same;
+drawn Hebrew word and the same word drawn in reading order with the pen moving left extract the same;
 digits and a percentage inside a right-to-left line keep their own order; a
 line with no right-to-left character is exactly as collected. A line the
 content stream's order cut in pieces is read as one first: `TextDevice` resumes
@@ -669,7 +672,7 @@ crate has an API of its own; see [architecture](../architecture.md).
 | Form XObject / Type 3 / soft-mask nesting past 16 levels | `MAX_FORM_DEPTH` | recursion is refused rather than allowed to overflow the stack | 8.10 |
 | More than 4 096 open marked-content scopes | `MAX_MARKED_CONTENT_DEPTH` | scopes past the cap go unreported, and unreported means *visible* — a runaway stream must not hide a page | 14.6.2 |
 | Text shaping while **reading** — Arabic joining, ligature substitution | — | the producer positioned every glyph and re-shaping them would be wrong; a ligature extracts as whatever its `/ToUnicode` says. Bidi *reordering* is not in this row any more: ruling 14 puts a right-to-left line into logical order | [design/shaping.md](../design/shaping.md) |
-| L4 mirroring undone in extraction, and the paragraph as a bidi unit | — | ruling 14 resolves each line alone and swaps no character: whether a producer's `/ToUnicode` names a mirrored glyph's character or its shape is not on the page. Alone, a line of a right-to-left paragraph that holds nothing left to right and opens with a dash, a bullet-like mark or a straight quotation mark — `— שלום` — draws as a quoted word and its trailing mark, and reads `שלום —`: the comma tie-break's price, pinned by `a_right_to_left_line_opening_with_a_dash_reads_the_dash_last`. Not with an opening bracket or quotation mark (`(١) بند`, `“שלום`; `a_right_to_left_line_opening_with_a_bracket_or_quotation_mark_reads_as_typed`), nor with a European number after the mark (`(1) פריט`, `— 2026 שלום`, `• 5 תפוחים`, which no left-to-right paragraph draws; `a_right_to_left_line_opening_with_a_mark_and_a_number_reads_as_typed`); still with Arabic-Indic digits, `— ١ بند` reading `١ بند —`, or a number further on, `— שלום 5 חו` | ruling 14, amended 10 October 2026 |
+| L4 mirroring undone in extraction, and the paragraph as a bidi unit | — | ruling 14 resolves each line alone and swaps no character: whether a producer's `/ToUnicode` names a mirrored glyph's character or its shape is not on the page. Alone, a line of a right-to-left paragraph that holds nothing left to right and opens with a mark of `Bidi_Class` `CS`, `ON`, `ES` or `ET` that is not `Ps` or `Pi` — a dash, a bullet, `*`, `#`, `%`, an ellipsis, a straight or closing-form quotation mark used to open; `— שלום` — draws as a quoted word and its trailing mark, and reads `שלום —`: the comma tie-break's price, pinned by `a_right_to_left_line_opening_with_a_dash_reads_the_dash_last`. Not with an opening bracket or quotation mark where `/ToUnicode` names the typed character (`(١) بند`, `“שלום`; `a_right_to_left_line_opening_with_a_bracket_or_quotation_mark_reads_as_typed`) — where it names the mirrored glyph, `»` for `«`, the line pays like a dash — nor with a European number after the mark (`(1) פריט`, `— 2026 שלום`, `• 5 תפוחים`, which no left-to-right paragraph draws; `a_right_to_left_line_opening_with_a_mark_and_a_number_reads_as_typed`); still with Arabic-Indic digits, `— ١ بند` reading `١ بند —`, or a number further on, `— שלום 5 חו` | ruling 14, amended 10 October 2026 |
 | Telling apart two texts UAX #9 draws alike | — | the algorithm is not one-to-one, so no reader can: `logical_order` returns the first order its search reaches that draws the line, and says which (`שלום now 2026`, not `שלום 2026 now`). Of `BidiCharacterTest.txt`'s 91 616 drawn lines, 669 read back as another text the same picture could be, each holding a bracket pair (N0 pairs brackets in logical order, and they are drawn mirrored) | ruling 14 |
 | Reading order for an **untagged** document | — | `plain_text()` reports lines and blocks in content-stream order and always has — geometry decides only whether two glyphs are one line and two lines one block, and within a line only where it holds a right-to-left character (ruling 14); a structure tree is read when the document carries one, and never invented when it does not. `Page::text_in(ReadingOrder::Inferred)` is the opt-in request, answered by a type of its own — columns found from the whitespace between lines, blocks ordered down each column, a block across the columns read before the ones under it, running heads, feet and page numbers found by their recurring on the pages around and read first and last with their roles, footnotes read after the body in the order of their reference marks, a ruled table read as one block in its own order — and never the default ([design/reading-order.md](../design/reading-order.md)) | 14.8 |
 | An `/MCR` whose `/Stm` does not name a content stream | `StructureWarning::ContentStreamNotAStream { element, stream }` | a stream is always indirect (7.3.8), so the value names nothing that could hold a sequence; read as though `/Stm` were absent rather than keyed on an object with no content, which would make the sequence findable nowhere | 14.7.4.2 |

@@ -5112,8 +5112,11 @@ fn draw_coded(
 /// anything, as [`piece_order`] does — so a left-to-right page, and a
 /// right-to-left `inside` marker's `1. `, are drawn exactly as before.
 ///
-/// **So is a run of nothing but neutrals at a right-to-left level — a known
-/// limit `epub.md` names, not an answer.** The `.,` between two
+/// **So is a run of nothing but neutrals at a right-to-left level.** On a
+/// line with no right-to-left character that is the right answer —
+/// `<p dir="rtl">?!</p>` reads `?!`, since ruling 14 reads such a line in
+/// content order — and on a line that holds one it is a known limit
+/// `epub.md` names, not an answer. The `.,` between two
 /// right-to-left words (`<p dir="rtl"><i>חו</i>.,<i>וח</i></p>`) is a run of
 /// its own that N1 puts at the paragraph's level, where L2 draws it `,.`;
 /// drawn as typed, the line reads back `חו,.וח`. Reordering every slice at

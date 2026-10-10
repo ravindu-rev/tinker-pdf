@@ -74,13 +74,16 @@
 //!   left-to-right one, and its runs come back each in the right order but
 //!   placed as a left-to-right paragraph would place them. And a line of a
 //!   right-to-left paragraph that holds nothing left to right and *opens*
-//!   with a dash or a bullet-like mark — `— שלום` drawn `םולש —` — or a
-//!   straight quotation mark, which closes as often as it opens, is the
-//!   tie-break's shape, a left-to-right paragraph draws it too, and it reads
-//!   with the mark at its end, `שלום —`: the price of the tie-break, chosen
-//!   because a quoted word's trailing punctuation is far commoner
+//!   with a mark of `Bidi_Class` `CS`, `ON`, `ES` or `ET` that is not `Ps` or
+//!   `Pi` — a dash (`— שלום` drawn `םולש —`), a bullet, `*`, `#`, `%`, an
+//!   ellipsis, or a straight or closing-form quotation mark used to open — is
+//!   the tie-break's shape, a left-to-right paragraph draws it too, and it
+//!   reads with the mark at its end, `שלום —`: the price of the tie-break,
+//!   chosen because a quoted word's trailing punctuation is far commoner
 //!   (`text_logical_order.rs` pins it by name). An opening bracket or
-//!   quotation mark does not pay, `(١) بند`, `“שלום`; nor does a mark a
+//!   quotation mark does not pay where `/ToUnicode` names the typed character,
+//!   `(١) بند`, `“שלום` (where it names the mirrored glyph, `»` for `«`, the
+//!   line ends in a closing mark and pays like a dash); nor does a mark a
 //!   European number follows, `(1) פריט`, `— 2026 שלום`, `• 5 תפוחים`,
 //!   since no left-to-right paragraph draws one next to the mark.
 //!   Arabic-Indic digits (`AN`) do not spare it, `— ١ بند` reading

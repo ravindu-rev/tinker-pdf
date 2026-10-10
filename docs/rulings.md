@@ -426,15 +426,23 @@ living in one feature's head.
     reading wins.
 
     *The price, accepted with that knowledge.* A line of a right-to-left
-    paragraph that opens with a dash or a bullet-like mark — a dialogue
-    dash, `— שלום`, drawn `םולש —` — and is alone on its line, with no
-    left-to-right character, reads with the mark at its end: `שלום —`. So
-    does one that opens with a straight quotation mark, `"שלום` reading
-    `שלום"`: `"` and `'` are `Po`, closing as often as they open.
-    **An opening bracket or quotation mark** does not pay: `(١) بند`,
-    `“שלום` and `«مرحبا` read as typed. Before it was excluded, `(١) بند`,
-    drawn `دنب )١(`, read `١) بند(`, a text a left-to-right paragraph does
-    draw that way.
+    paragraph that is alone on its line, with no left-to-right character,
+    and opens with a mark of `Bidi_Class` `CS`, `ON`, `ES` or `ET` that is
+    not an opening bracket or quotation mark (`Ps`, `Pi`) reads with that
+    mark at its end. That class is wide: a dialogue dash (`— שלום`, drawn
+    `םולש —`, reads `שלום —`), a bullet, `*`, `+`, `#`, `%`, an ellipsis
+    (`…שלום` reads `שלום…`), and a straight or closing-form quotation mark
+    used to open (`"שלום` reads `שלום"`; `”` and `»` likewise) — `"` and
+    `'` are `Po`, closing as often as they open.
+    **An opening bracket or quotation mark** does not pay where the
+    producer's `/ToUnicode` names the typed character: `(١) بند`, `“שלום`
+    and `«مرحبا` read as typed. Before it was excluded, `(١) بند`, drawn
+    `دنب )١(`, read `١) بند(`, a text a left-to-right paragraph does draw
+    that way. Where `/ToUnicode` names the mirrored glyph instead — `»` for
+    `«`, `)` for `(`, as one derived from a font's `cmap` may — the line
+    ends in a closing mark and pays like a dash (`«مرحبا` drawn with a
+    mirrored `»` reads `مرحبا»`), unless a European number follows the
+    mark, as below; which character a producer named is not on the page.
     **A European number after the mark** spares the line: `(1) פריט`,
     `— 2026 שלום` and `• 5 תפוחים` are drawn with the number next to the
     mark, `טירפ )1(`, which no left-to-right paragraph draws — there a

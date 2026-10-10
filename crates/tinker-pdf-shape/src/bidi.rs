@@ -590,11 +590,15 @@ fn read_back(visual: &[&str], direction: BaseDirection) -> Result<Vec<usize>, Ve
 /// # What it costs
 ///
 /// A lone line of a right-to-left paragraph, holding nothing left to right,
-/// that opens with a dash or a bullet-like mark reads with that mark at its
-/// end: `— שלום`, drawn `םולש —`, reads `שלום —`. So does one that opens
-/// with a straight quotation mark, `"` or `'`, which is `Po` because it
-/// closes as often as it opens. An opening bracket or quotation mark does
-/// not pay — `(١) بند`, `“שלום`, `«مرحبا` read as typed — and nor does a
+/// that opens with a mark of `Bidi_Class` `CS`, `ON`, `ES` or `ET` that is not
+/// `Ps` or `Pi` reads with that mark at its end: a dash (`— שלום`, drawn
+/// `םולש —`, reads `שלום —`), a bullet, `*`, `+`, `#`, `%`, an ellipsis, or a
+/// straight or closing-form quotation mark used to open (`"`, `'`, `”`, `»`;
+/// `"` and `'` are `Po`, closing as often as they open). An opening bracket
+/// or quotation mark does not pay where `/ToUnicode` names the typed
+/// character — `(١) بند`, `“שלום`, `«مرحبا` read as typed — but where it
+/// names the mirrored glyph (`»` for `«`) the line ends in a closing mark and
+/// pays like a dash. Nor does a
 /// line whose mark a European number follows: `— 2026 שלום`, `• 5 תפוחים`
 /// and `(1) פריט` are drawn with the number next to the mark, `םולש 2026 —`,
 /// and no left-to-right paragraph draws that, because there a European number
