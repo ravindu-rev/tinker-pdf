@@ -7845,6 +7845,124 @@ fn a_hidden_tail_is_drawn_on_the_page_of_the_line_it_follows() {
     assert_eq!(page_of(&laid, "after"), 1);
 }
 
+/// **A band cut over pages draws what a negative margin pulled above its
+/// top**: a column set's column, a table row's cell and a flex line's item.
+///
+/// A band taller than the page is cut into slices, and each page draws the
+/// items whose tops its slice holds ([`crate::fragment`]). The slices began
+/// at the band's own top, band-local zero, so an item a negative margin had
+/// pulled above that was in none of them. It was drawn on no page, and it was
+/// missing from the text. A band drawn whole was never cut and drew it. The
+/// first slice now begins where a whole band's does, at minus infinity.
+///
+/// The column set is the review's. The clip box's margin and its child's
+/// collapse to `-9.25px`, and on a one- or two-point page each column is an
+/// item or two. The collapsed margin begins one, and the clip box's six-point
+/// line `aaaa` is above that margin's top, in the same column. That kept,
+/// painted line was lost. The table cell holds the other case the review
+/// named: an `overflow: hidden; height: 0` box under a `-14.25px` margin lost
+/// all its text, kept line and hidden tail both. The flex item's paragraph is
+/// pulled up out of a box that clips nothing, and its first lines were lost
+/// on every page short enough to cut the line.
+///
+/// Every case is checked at every page height from one point to forty, and
+/// conservation is the ordered comparison, so the hidden tails in the cell
+/// and in the flex item are read after the lines they follow wherever the
+/// band is cut.
+#[test]
+fn a_band_cut_over_pages_draws_what_a_negative_margin_pulled_above_it() {
+    use tinker_pdf_css::property::Overflow;
+    let column_set = |margin: f64, child: f64| {
+        let mut clipped = narrow_clip();
+        clipped.height = Size::Length(LengthPercentage::Px(6.0));
+        clipped.margin.top = px(margin);
+        let mut first = block();
+        first.margin.top = px(child);
+        BoxNode::element(
+            block(),
+            vec![BoxNode::element(
+                multicol(Some(2), None, Some(10.0)),
+                vec![
+                    para("m n"),
+                    BoxNode::element(
+                        clipped,
+                        vec![BoxNode::element(first, vec![text("aaaa bbbb cccc")])],
+                    ),
+                    para("o p"),
+                ],
+            )],
+        )
+    };
+    for (margin, child, page) in [(-14.25, 5.0, 1.0), (-14.25, 5.0, 2.0), (4.0, -14.25, 1.0)] {
+        let tree = column_set(margin, child);
+        let laid = run(&tree, 100.0, page);
+        let painted: String = (0..laid.pages.len())
+            .map(|at| painted_text(&laid, at))
+            .collect();
+        assert_eq!(painted, "m naaaao p", "{margin} {child} {page}");
+        conserved(&tree, &laid);
+    }
+
+    let mut hidden = overflowing(Overflow::Hidden);
+    hidden.width = Size::Length(LengthPercentage::Px(40.0));
+    hidden.height = Size::Length(LengthPercentage::Px(0.0));
+    hidden.margin.top = px(-14.25);
+    let cell = BoxNode::element(
+        block(),
+        vec![
+            para("x y"),
+            table_of(vec![row_of(vec![
+                BoxNode::element(
+                    styled(Display::TableCell),
+                    vec![BoxNode::element(hidden, vec![text("aaaa bbbb cccc")])],
+                ),
+                cell_of("qq"),
+            ])]),
+            para("after"),
+        ],
+    );
+
+    let mut sized = overflowing(Overflow::Hidden);
+    sized.width = Size::Length(LengthPercentage::Px(40.0));
+    sized.height = Size::Length(LengthPercentage::Px(13.0));
+    let mut pulled = block();
+    pulled.margin.top = px(-14.25);
+    let flex = BoxNode::element(
+        block(),
+        vec![
+            para("x y"),
+            BoxNode::element(
+                flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+                vec![
+                    BoxNode::element(
+                        block(),
+                        vec![BoxNode::element(
+                            sized,
+                            vec![
+                                BoxNode::element(pulled, vec![text("aaaa bbbb cccc")]),
+                                para("dddd"),
+                            ],
+                        )],
+                    ),
+                    flex_item("qq", 0.0, 1.0, Size::Auto),
+                ],
+            ),
+            para("after"),
+        ],
+    );
+
+    for (name, tree) in [("cell", &cell), ("flex", &flex)] {
+        for page in (1..=40).map(f64::from) {
+            let laid = run(tree, 100.0, page);
+            assert_eq!(
+                conservable(&laid.text()),
+                conservable(&tree.source_text()),
+                "{name} {page}"
+            );
+        }
+    }
+}
+
 /// **A clip is written only where the content reaches past the padding box**,
 /// and an axis the box does not clip is unbounded.
 #[test]

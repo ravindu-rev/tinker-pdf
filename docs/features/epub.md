@@ -306,6 +306,11 @@ into the box's own items and broken over pages with it
 column, which is drawn on the page of the line it follows rather than the page
 its height falls on, the two differing once a negative margin takes the column
 back up (`a_hidden_tail_is_drawn_on_the_page_of_the_line_it_follows`). A
+table row, a flex line or a multi-column container cut across pages draws
+what a negative margin pulled above its top on the page that draws its top,
+where no page drew it before, and a hidden tail in a cell or a flex item reads
+after its line wherever the cut falls
+(`a_band_cut_over_pages_draws_what_a_negative_margin_pulled_above_it`). A
 box's `height` is measured from where its content starts, below a top margin
 that collapses into it (§8.3.1 puts that margin outside the border box), so an
 `overflow: clip` box, which opens no formatting context, clips at the height it
@@ -313,7 +318,13 @@ states and keeps its first line inside the clip
 (`a_clip_measures_its_height_from_where_its_content_starts`), and a box that
 does not clip is as tall as it says
 (`a_stated_height_is_measured_below_the_margin_that_collapses_into_the_box`).
-Who is clipped is the
+**Still open**: a flex item that `css-flexbox-1` §9.4 stretches to its line is
+laid out a second time, and its text is stamped after the items laid out
+before that, so a row whose first item is shorter than a later one reads the
+later one first, clip or no clip (`a` beside a three-line `bbbb cccc dddd`
+reads `bbbb cccc dddd a`); and the `layout` fuzz target builds no table, flex
+or multi-column container, so the tests named here hold those three and no
+campaign does. Who is clipped is the
 element tree's question (`paint::Effects`): every fragment is cut by the
 clipping elements above it, an element's own text by its own clip, and an
 absolutely positioned box only through its containing block (CSS 2.2

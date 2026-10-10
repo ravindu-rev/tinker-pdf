@@ -343,16 +343,16 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
                         },
                     );
                 }
-                let mut built = page(
-                    &flow,
-                    cursor,
-                    at + 1,
-                    top,
-                    Cutting {
-                        at,
-                        slice: Slice { from, to: end },
-                    },
-                );
+                // **The first slice is unbounded above**, for the reason
+                // [`Slice::WHOLE`] is: a negative margin can pull an item above
+                // the band's own top, and a first slice that began at zero held
+                // it on no page at all. Each later slice begins where the one
+                // before it ended, so every item is drawn exactly once.
+                let window = Slice {
+                    from: if from > 0.0 { from } else { f64::NEG_INFINITY },
+                    to: end,
+                };
+                let mut built = page(&flow, cursor, at + 1, top, Cutting { at, slice: window });
                 outside(
                     &flow,
                     &mut floats,
