@@ -257,7 +257,12 @@ fn every_fetched_book_paginates_to_its_own_spine() {
 const FETCHED_SPINES: &[(&str, u32)] = &[
     ("pg11-alice-images.epub", 15),
     ("pg11-epub2-images.epub", 14),
-    ("pg1342-noimages.epub", 16),
+    // 17 since Project Gutenberg regenerated the book between 26 September and
+    // 10 October 2026: its spine gained the cover wrapper `wrap0000.html`. The
+    // doctype census counted 16 content documents on 26 September (CI run
+    // 36232667788) and 17 on 10 October (run 38029218301); the engine's spine
+    // walk is unchanged across the two runs.
+    ("pg1342-noimages.epub", 17),
     ("pg16328-beowulf.epub", 7),
     ("pg2701-images.epub", 12),
     ("pg84-images.epub", 32),
@@ -781,8 +786,9 @@ fn the_doctype_census() {
 /// the only place the single-quoted external identifier exists.
 ///
 /// The committed corpus supplies the double-quoted form and this one supplies
-/// the single-quoted one — thirty content documents of it, on every content
-/// document of both Project Gutenberg EPUB 2 books. Neither corpus shows both,
+/// the single-quoted one — thirty-one content documents of it (thirty until
+/// Project Gutenberg's October regeneration of `pg1342` added a cover wrapper),
+/// on every content document of both Project Gutenberg EPUB 2 books. Neither corpus shows both,
 /// which is why milestone 2's own fixtures name both by hand and why this test
 /// and its committed twin are both here.
 ///
