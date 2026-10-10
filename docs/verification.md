@@ -185,22 +185,6 @@ bytes and writes them into a `/FontFile3`.
 | `zip_archive` | 8 | 1 byte | 8/8 carried |
 | `zstd` | 6 | 1 byte | 6/6 carried |
 
-fuzz: ok
-
-fuzz: ok
-
-fuzz: ok
-
-fuzz: ok
-
-fuzz: ok
-
-fuzz: ok
-
-fuzz: ok
-
-fuzz: ok
-
 **"Control prefix" is the number of bytes the target takes off the front
 before decoding**, parsed out of its own `split_at(data.len().min(N))` rather
 than declared anywhere. It is the column that matters, because it is where a
