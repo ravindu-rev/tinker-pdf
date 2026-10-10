@@ -1,6 +1,6 @@
 //! The committed JBIG2 fuzz seeds, replayed on stable.
 //!
-//! `fuzz/corpus/jbig2/` is twenty-four inputs a fuzzer found or a person
+//! `fuzz/corpus/jbig2/` is twenty-five inputs a fuzzer found or a person
 //! wrote,
 //! and the target that consumes them needs nightly. So the seeds were only ever
 //! exercised when somebody ran `cargo fuzz`, which is not on every commit — and
@@ -35,8 +35,13 @@
 //! enough for a symbol a hundred pixels wide, and 257 bytes asked for 38 730 of
 //! them. It is held the same way, by its cause:
 //! [`the_marker_spun_seed_stops_at_the_work_budget`] names the refusal and
-//! counts the symbols. It is the one seed here that spends a whole budget, a
-//! little under a second of this test in a debug build.
+//! counts the symbols. It is the one seed here that spends a whole budget.
+//! `symbol-dictionary-template-0-custom-at` is the same sweep's slow unit, a
+//! dictionary of 3 072 symbols at template 0 with its adaptive pixels off the
+//! figure's places, which stays under the budget and was slow for what each
+//! pixel cost; the replay holds it to the refusal like every other seed, and
+//! `a_decoded_pixel_costs_the_reads_its_rolled_context_needs` holds the cost.
+//! The whole replay is about a second and a half in a debug build.
 
 use std::path::{Path, PathBuf};
 

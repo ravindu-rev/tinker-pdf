@@ -3947,6 +3947,8 @@ impl Bitmap {
     /// refusing — the out-of-range case is the *common* one on row zero, not
     /// an error.
     fn get(&self, x: i32, y: i32) -> u32 {
+        #[cfg(test)]
+        tests::READS.with(|reads| reads.set(reads.get() + 1));
         if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return 0;
         }
@@ -4163,7 +4165,7 @@ const REFINE_1_HERE: [(i8, i8); 4] = [(-1, -1), (0, -1), (1, -1), (-1, 0)];
 const REFINE_1_THERE: [(i8, i8); 6] = [(0, -1), (-1, 0), (0, 0), (1, 0), (0, 1), (1, 1)];
 
 /// 6.3.5.6's TPGRON pseudo-context for each template, **in this file's own
-/// bit order** — see [`refinement_context`] for why that is not the
+/// bit order** — see [`RolledRefinement`] for why that is not the
 /// standard's, and `docs/design/jbig2-symbol-text.md` for how these two
 /// numbers were determined rather than transcribed.
 const TPGRON_0: usize = 0x0010;
@@ -4193,12 +4195,66 @@ impl RefineTemplate<'_> {
     }
 }
 
-/// **T.88 6.3.5.3's refinement context.**
+/// Where one bit of a refinement context is read from, worked out once a call
+/// rather than once a pixel.
+#[derive(Clone, Copy, Debug)]
+enum Tap {
+    /// The target's row above, at a column offset of -1, 0 or 1: the bit of
+    /// [`RolledRefinement::above`] at this shift.
+    Above(u32),
+    /// The target pixel just decided, at `(-1, 0)`.
+    Left,
+    /// The reference's row -1, 0 or +1 about the shifted pixel, at a column
+    /// offset of -1, 0 or 1: the bit of that row's window at this shift.
+    Reference(usize, u32),
+    /// A target position outside the windows — an adaptive pixel the segment
+    /// moved somewhere the fixed set does not reach — read where it is.
+    Here(i32, i32),
+    /// A reference position outside the windows, likewise.
+    There(i32, i32),
+}
+
+impl Tap {
+    fn here((ox, oy): (i8, i8)) -> Tap {
+        match (ox, oy) {
+            (-1..=1, -1) => Tap::Above((1 - ox) as u32),
+            (-1, 0) => Tap::Left,
+            _ => Tap::Here(i32::from(ox), i32::from(oy)),
+        }
+    }
+
+    fn there((ox, oy): (i8, i8)) -> Tap {
+        match (ox, oy) {
+            (-1..=1, -1..=1) => Tap::Reference((oy + 1) as usize, (1 - ox) as u32),
+            _ => Tap::There(i32::from(ox), i32::from(oy)),
+        }
+    }
+}
+
+/// **T.88 6.3.5.3's refinement context, carried along the row.**
 ///
 /// Two layers at once: what has already been decoded of the target, and the
 /// reference the target is a refinement *of*, shifted by the offset the caller
 /// decoded. Template 0 forms thirteen bits, two of them adaptive (7.4.3.1.3's
 /// `SDRAT`, 7.4.4.1.3's `SBRAT`); template 1 forms ten and has none.
+///
+/// [`RolledContext`]'s argument, over two layers. Every fixed position of
+/// either template lies in the target's row above, the target pixel just
+/// decided, or the reference's three-by-three neighbourhood of the shifted
+/// pixel — so each of those is a window, one new pixel enters each of the four
+/// rows per pixel, and the context is read out of the windows bit by bit. That
+/// is four bounds-checked reads a pixel where there were thirteen at template
+/// 0 and ten at 1, and 6.3.5.6's typical-row test, which read the whole
+/// neighbourhood again, becomes a comparison of three windows. A refinement
+/// region as large as the ceiling was the dearest thing the `jbig2` fuzz
+/// target could spend its work budget on.
+///
+/// The layout stays data, a [`RefineTemplate`]. The two the standard draws are
+/// recognised once a call and read out of the windows with fixed shifts —
+/// template 0's two adaptive pixels apart, which may sit anywhere — and any
+/// other order of positions is resolved into a [`Tap`] each, read one at a
+/// time: the same bits, without a branch per position per pixel, which under
+/// the fuzz target's instrumentation is a hook call each.
 ///
 /// # The bit order here is not the standard's, and that is sound
 ///
@@ -4216,6 +4272,187 @@ impl RefineTemplate<'_> {
 /// relabelling. [`decode_refinement_into`] therefore has no TPGRON, and the
 /// one caller that could set it refuses instead of guessing which slot it
 /// names.
+struct RolledRefinement {
+    /// Which of the readings below the template is.
+    layout: Layout,
+    /// Template 0's adaptive pair, the target's then the reference's.
+    adaptive: [Tap; 2],
+    /// Any other layout's positions in context order: the adaptive pair, then
+    /// the target's, then the reference's. Empty for the two standard ones.
+    taps: Vec<Tap>,
+    /// The target's row above, columns `x - 1 ..= x + 1`, the leftmost in
+    /// bit 2.
+    above: u32,
+    /// The target pixel at `(x - 1, y)`.
+    left: u32,
+    /// The reference's rows `y - dy - 1`, `y - dy` and `y - dy + 1`, columns
+    /// `x - dx - 1 ..= x - dx + 1`, each leftmost in bit 2.
+    reference: [u32; 3],
+}
+
+/// Which reading of the windows a refinement template takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layout {
+    /// Figure 12's positions in this file's order, with an adaptive pair.
+    Zero,
+    /// Figure 13's, with none.
+    One,
+    /// Anything else: a [`Tap`] a position.
+    Taps,
+}
+
+impl RolledRefinement {
+    fn new(template: &RefineTemplate<'_>) -> RolledRefinement {
+        let layout = match template.at {
+            Some(_) if template.here == REFINE_0_HERE && template.there == REFINE_0_THERE => {
+                Layout::Zero
+            }
+            None if template.here == REFINE_1_HERE && template.there == REFINE_1_THERE => {
+                Layout::One
+            }
+            _ => Layout::Taps,
+        };
+        let adaptive = template.at.map_or([Tap::Left, Tap::Left], |at| {
+            [Tap::here(at[0]), Tap::there(at[1])]
+        });
+        let mut taps = Vec::new();
+        if layout == Layout::Taps {
+            taps.reserve(template.bits());
+            if template.at.is_some() {
+                taps.extend(adaptive);
+            }
+            taps.extend(template.here.iter().copied().map(Tap::here));
+            taps.extend(template.there.iter().copied().map(Tap::there));
+        }
+        RolledRefinement {
+            layout,
+            adaptive,
+            taps,
+            above: 0,
+            left: 0,
+            reference: [0; 3],
+        }
+    }
+
+    /// One position's bit, out of the windows where it lies in one.
+    fn read(
+        &self,
+        tap: Tap,
+        into: &Bitmap,
+        reference: &Bitmap,
+        (dx, dy): (i32, i32),
+        x: i32,
+        y: i32,
+    ) -> u32 {
+        match tap {
+            Tap::Above(shift) => (self.above >> shift) & 1,
+            Tap::Left => self.left,
+            Tap::Reference(row, shift) => self
+                .reference
+                .get(row)
+                .map_or(0, |window| (window >> shift) & 1),
+            Tap::Here(ox, oy) => {
+                into.get_wide(i64::from(x) + i64::from(ox), i64::from(y) + i64::from(oy))
+            }
+            Tap::There(ox, oy) => reference.get_wide(
+                i64::from(x) - i64::from(dx) + i64::from(ox),
+                i64::from(y) - i64::from(dy) + i64::from(oy),
+            ),
+        }
+    }
+
+    /// The windows for pixel 0 of row `y`. The reference's coordinates are in
+    /// 64 bits for [`Bitmap::get_wide`]'s reason.
+    fn start(&mut self, into: &Bitmap, reference: &Bitmap, (dx, dy): (i32, i32), y: i32) {
+        self.above = (-1..=1).fold(0, |bits, ox| (bits << 1) | into.get(ox, y - 1));
+        self.left = 0;
+        let (rx, ry) = (-i64::from(dx), i64::from(y) - i64::from(dy));
+        for (row, window) in (-1i64..=1).zip(self.reference.iter_mut()) {
+            *window = (-1..=1).fold(0, |bits, ox| {
+                (bits << 1) | reference.get_wide(rx + ox, ry + row)
+            });
+        }
+    }
+
+    /// The context of pixel `(x, y)`.
+    fn context(
+        &self,
+        into: &Bitmap,
+        reference: &Bitmap,
+        (dx, dy): (i32, i32),
+        x: i32,
+        y: i32,
+    ) -> usize {
+        let [up, middle, down] = self.reference;
+        let value = match self.layout {
+            // The adaptive pair, then (0,-1) (1,-1) (-1,0) of the target, then
+            // (0,-1) (1,-1), the middle row and the bottom row of the
+            // reference: REFINE_0_HERE and REFINE_0_THERE, bit for bit.
+            Layout::Zero => {
+                let [target_at, reference_at] = self.adaptive;
+                (self.read(target_at, into, reference, (dx, dy), x, y) << 12)
+                    | (self.read(reference_at, into, reference, (dx, dy), x, y) << 11)
+                    | ((self.above & 3) << 9)
+                    | (self.left << 8)
+                    | ((up & 3) << 6)
+                    | (middle << 3)
+                    | down
+            }
+            // The target's row above and (-1,0), then (0,-1), the middle row,
+            // and (0,1) (1,1) of the reference: REFINE_1_HERE and
+            // REFINE_1_THERE.
+            Layout::One => {
+                (self.above << 7)
+                    | (self.left << 6)
+                    | (((up >> 1) & 1) << 5)
+                    | (middle << 2)
+                    | (down & 3)
+            }
+            Layout::Taps => self.taps.iter().fold(0u32, |value, &tap| {
+                (value << 1) | self.read(tap, into, reference, (dx, dy), x, y)
+            }),
+        };
+        value as usize
+    }
+
+    /// 6.3.5.6's test of a pixel in a typical row: the value its reference's
+    /// whole three-by-three neighbourhood agrees on, if it does.
+    fn uniform(&self) -> Option<u32> {
+        match self.reference {
+            [0, 0, 0] => Some(0),
+            [7, 7, 7] => Some(1),
+            _ => None,
+        }
+    }
+
+    /// Moves the windows from `x` to `x + 1`, with `pixel` the value just
+    /// given to `(x, y)`.
+    fn advance(
+        &mut self,
+        into: &Bitmap,
+        reference: &Bitmap,
+        (dx, dy): (i32, i32),
+        x: i32,
+        y: i32,
+        pixel: u32,
+    ) {
+        self.above = ((self.above << 1) | into.get_wide(i64::from(x) + 2, i64::from(y) - 1)) & 7;
+        self.left = pixel & 1;
+        let (rx, ry) = (
+            i64::from(x) + 2 - i64::from(dx),
+            i64::from(y) - i64::from(dy),
+        );
+        for (row, window) in (-1i64..=1).zip(self.reference.iter_mut()) {
+            *window = ((*window << 1) | reference.get_wide(rx, ry + row)) & 7;
+        }
+    }
+}
+
+/// **T.88 6.3.5.3's refinement context, transcribed position by position** —
+/// what the decoder read until October 2026, kept as what [`RolledRefinement`]
+/// and the tests' encoder are held to. See [`RolledRefinement`] for the bit
+/// order.
+#[cfg(test)]
 fn refinement_context(
     into: &Bitmap,
     reference: &Bitmap,
@@ -4256,7 +4493,7 @@ fn refinement_context(
 /// symbol dictionary, where the adaptive state has to survive from one symbol
 /// to the next.
 ///
-/// TPGRON (6.3.5.6) is deliberately absent — see [`refinement_context`].
+/// TPGRON (6.3.5.6) is deliberately absent — see [`RolledRefinement`].
 fn decode_refinement_into(
     coder: &mut MqDecoder<'_>,
     contexts: &mut MqContexts,
@@ -4268,6 +4505,7 @@ fn decode_refinement_into(
     (dx, dy): (i32, i32),
     into: &mut Bitmap,
 ) {
+    let mut rolled = RolledRefinement::new(template);
     let mut ltp = 0u8;
     for y in 0..into.height {
         if tpgron {
@@ -4276,24 +4514,23 @@ fn decode_refinement_into(
             // picture that barely changed costs almost nothing.
             ltp ^= coder.decode_at(contexts, template.typical);
         }
+        let sy = y as i32;
+        rolled.start(into, reference, (dx, dy), sy);
         for x in 0..into.width {
-            let (sx, sy) = (x as i32, y as i32);
-            if ltp == 1 {
-                // In a typical row a pixel whose whole reference neighbourhood
-                // agrees is not coded at all: it is that value. Only the
-                // pixels on a boundary cost a decision.
-                let (rx, ry) = (i64::from(sx) - i64::from(dx), i64::from(sy) - i64::from(dy));
-                let centre = reference.get_wide(rx, ry);
-                let uniform = (-1..=1)
-                    .all(|oy| (-1..=1).all(|ox| reference.get_wide(rx + ox, ry + oy) == centre));
-                if uniform {
-                    into.set(x, y, centre);
-                    continue;
+            let sx = x as i32;
+            // In a typical row a pixel whose whole reference neighbourhood
+            // agrees is not coded at all: it is that value. Only the pixels on
+            // a boundary cost a decision.
+            let typical = if ltp == 1 { rolled.uniform() } else { None };
+            let pixel = match typical {
+                Some(value) => value,
+                None => {
+                    let cx = rolled.context(into, reference, (dx, dy), sx, sy);
+                    u32::from(coder.decode_at(contexts, cx))
                 }
-            }
-            let cx = refinement_context(into, reference, dx, dy, template, sx, sy);
-            let pixel = coder.decode_at(contexts, cx);
-            into.set(x, y, u32::from(pixel));
+            };
+            into.set(x, y, pixel);
+            rolled.advance(into, reference, (dx, dy), sx, sy, pixel);
         }
     }
 }
@@ -4347,6 +4584,138 @@ fn refine_template(rtemplate: u8, at: [(i8, i8); 2]) -> RefineTemplate<'static> 
 /// into a different shape, and it is 46 pages of it.
 fn refinement_offset(target: i64, reference: u32, coded: i32) -> i64 {
     (target - i64::from(reference)).div_euclid(2) + i64::from(coded)
+}
+
+/// **6.2.5.7's context, carried along the row rather than gathered again at
+/// every pixel.**
+///
+/// [`context`] reads every pixel of a template afresh — sixteen bounds-checked
+/// reads a pixel at template 0, thirteen at 1, ten at 2 and 3 — and a generic
+/// decode spent most of its time there: P-11 measured `context` at 62 % of a
+/// generic page, and under the fuzz target's sanitizers, where every one of
+/// those reads is instrumented, a symbol dictionary spending its whole work
+/// budget at template 0 took 5.5 seconds a call — eleven a fuzz input, which
+/// decodes twice. But a template's *fixed* pixels are runs along at
+/// most three rows, and moving one pixel to the right shifts each run by one:
+/// so each run is kept as a window, one new pixel enters each row above, and
+/// the row being decoded enters through the pixel just decided. That is two
+/// reads a pixel in the rows above at templates 0 to 2 and one at template 3.
+///
+/// **The adaptive pixels at their nominal places are window bits too.** Every
+/// figure puts them on the same two rows, just past the fixed run — template
+/// 0's at `(3,-1)`, `(-3,-1)`, `(2,-2)` and `(-2,-2)` — so a segment that
+/// leaves them there (`NOMINAL_AT`, which is what an encoder writes unless it
+/// has a reason) widens the windows by those columns and reads nothing else.
+/// Anywhere else, and 7.4.6.3 allows a signed byte on either axis, they are
+/// read where the segment put them through [`Bitmap::get`] — including on the
+/// current row to the right, where the pixel is not decided yet and reads as
+/// what the bitmap holds.
+///
+/// The bit order is [`context`]'s, which stays as the transcription of the
+/// figures and as what the encoder and
+/// `the_rolled_context_is_the_transcribed_one_at_every_pixel` hold this to.
+struct RolledContext {
+    template: u8,
+    /// Whether the adaptive pixels are at the figure's own places and in the
+    /// windows, rather than read one at a time.
+    nominal: bool,
+    /// The row two above: its window, the rightmost offset the template reads
+    /// there, and the window's mask. Template 3 reads only one row above, and
+    /// its mask of zero keeps this empty.
+    two: u32,
+    two_right: i32,
+    two_mask: u32,
+    /// The row above, likewise.
+    one: u32,
+    one_right: i32,
+    one_mask: u32,
+    /// The row being decoded: the pixels already decided to the left.
+    here: u32,
+    here_mask: u32,
+}
+
+impl RolledContext {
+    /// The windows for pixel 0 of row `y`.
+    fn start(bitmap: &Bitmap, template: u8, at: &[(i32, i32); 4], y: i32) -> RolledContext {
+        // Templates 1 to 3 use only the first adaptive pixel, so only that one
+        // decides whether the layout is the figure's.
+        let used = if template == 0 { 4 } else { 1 };
+        let nominal = NOMINAL_AT
+            .get(usize::from(template).min(3))
+            .is_some_and(|figure| figure[..used] == at[..used]);
+        // Figures 3 to 6: the leftmost and rightmost offsets each template
+        // reads two rows up and one row up, and how many decided pixels it
+        // reads to the left on its own row — the nominal adaptive pixels'
+        // columns included when they are where the figure draws them.
+        let (two, one, here) = match (template, nominal) {
+            (0, true) => (Some((-2, 2)), (-3, 3), 4),
+            (0, false) => (Some((-1, 1)), (-2, 2), 4),
+            (1, true) => (Some((-1, 2)), (-2, 3), 3),
+            (1, false) => (Some((-1, 2)), (-2, 2), 3),
+            (2, true) => (Some((-1, 1)), (-2, 2), 2),
+            (2, false) => (Some((-1, 1)), (-2, 1), 2),
+            (_, true) => (None, (-3, 2), 4),
+            (_, false) => (None, (-3, 1), 4),
+        };
+        let window = |(left, right): (i32, i32), row: i32| {
+            (left..=right).fold(0u32, |bits, dx| (bits << 1) | bitmap.get(dx, row))
+        };
+        let mask = |(left, right): (i32, i32)| (1u32 << (right - left + 1)) - 1;
+        RolledContext {
+            template,
+            nominal,
+            two: two.map_or(0, |run| window(run, y - 2)),
+            two_right: two.map_or(0, |(_, right)| right),
+            two_mask: two.map_or(0, mask),
+            one: window(one, y - 1),
+            one_right: one.1,
+            one_mask: mask(one),
+            here: 0,
+            here_mask: (1u32 << here) - 1,
+        }
+    }
+
+    /// The context of pixel `(x, y)`: [`context`]'s value, bit for bit.
+    fn at(&self, bitmap: &Bitmap, at: &[(i32, i32); 4], x: i32, y: i32) -> usize {
+        if self.nominal {
+            // Each window is the figure's run with its adaptive pixels at
+            // either end, already in the order the figure numbers them.
+            let value = match self.template {
+                0 => (self.two << 11) | (self.one << 4) | self.here,
+                1 => (self.two << 9) | (self.one << 3) | self.here,
+                2 => (self.two << 7) | (self.one << 2) | self.here,
+                _ => (self.one << 4) | self.here,
+            };
+            return value as usize;
+        }
+        let a = |i: usize| bitmap.get(x + at[i].0, y + at[i].1);
+        let value = match self.template {
+            0 => {
+                (a(3) << 15)
+                    | (self.two << 12)
+                    | (a(2) << 11)
+                    | (a(1) << 10)
+                    | (self.one << 5)
+                    | (a(0) << 4)
+                    | self.here
+            }
+            1 => (self.two << 9) | (self.one << 4) | (a(0) << 3) | self.here,
+            2 => (self.two << 7) | (self.one << 3) | (a(0) << 2) | self.here,
+            _ => (self.one << 5) | (a(0) << 4) | self.here,
+        };
+        value as usize
+    }
+
+    /// Moves the windows from `x` to `x + 1`, with `pixel` the value just
+    /// given to `(x, y)`.
+    fn advance(&mut self, bitmap: &Bitmap, x: i32, y: i32, pixel: u32) {
+        if self.two_mask != 0 {
+            self.two =
+                ((self.two << 1) | bitmap.get(x + 1 + self.two_right, y - 2)) & self.two_mask;
+        }
+        self.one = ((self.one << 1) | bitmap.get(x + 1 + self.one_right, y - 1)) & self.one_mask;
+        self.here = ((self.here << 1) | (pixel & 1)) & self.here_mask;
+    }
 }
 
 fn context(bitmap: &Bitmap, template: u8, at: &[(i32, i32); 4], x: i32, y: i32) -> usize {
@@ -4467,18 +4836,20 @@ fn decode_generic_into(
                 continue;
             }
         }
+        let mut rolled = RolledContext::start(into, template, at, y as i32);
         for x in 0..into.width {
             // 6.2.5.7's USESKIP: a pixel the caller has already decided is
             // outside anything is not coded at all, so it is set to zero and
             // the coder is not asked. Halftone's 6.6.5.1 is the only caller
             // that supplies one.
-            if skip.is_some_and(|map| map.get(x as i32, y as i32) == 1) {
-                into.set(x, y, 0);
-                continue;
-            }
-            let cx = context(into, template, at, x as i32, y as i32);
-            let pixel = coder.decode_at(contexts, cx);
-            into.set(x, y, u32::from(pixel));
+            let pixel = if skip.is_some_and(|map| map.get(x as i32, y as i32) == 1) {
+                0
+            } else {
+                let cx = rolled.at(into, at, x as i32, y as i32);
+                u32::from(coder.decode_at(contexts, cx))
+            };
+            into.set(x, y, pixel);
+            rolled.advance(into, x as i32, y as i32, pixel);
         }
     }
 }
@@ -5408,6 +5779,30 @@ mod tests {
     }
     use super::*;
     use crate::mq::encoder::MqEncoder;
+
+    std::thread_local! {
+        /// Every [`Bitmap::get`] this thread has made, so a test can say how
+        /// many reads a decoded pixel costs — a property of the code rather
+        /// than of the machine, which is what a clock is.
+        pub(super) static READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// A deterministic picture with no structure to lean on: a linear
+    /// congruential generator's top bits, so a context that reads the wrong
+    /// pixel reads a different value about half the time.
+    fn noise(width: u32, height: u32, seed: u64) -> Bitmap {
+        let mut bitmap = Bitmap::new(width, height, 1 << 20).expect("a test bitmap");
+        let mut state = seed;
+        for y in 0..height {
+            for x in 0..width {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                bitmap.set(x, y, (state >> 63) as u32);
+            }
+        }
+        bitmap
+    }
 
     /// A.2's ranges, as `(first magnitude, field width, offset)`.
     ///
@@ -7333,6 +7728,182 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// **The rolled generic context is [`context`], at every pixel.**
+    ///
+    /// [`RolledContext`] replaces the transcription on the decode path, so
+    /// this is the proof that it reads the same positions in the same order:
+    /// every pixel of noise pictures, at every template, with the nominal
+    /// adaptive pixels, the custom ones a fixture uses, and positions no
+    /// figure draws — on the current row to the right, below, and far outside
+    /// the windows. The pictures are fully populated, which is the hard case:
+    /// a decoder's not-yet-decided pixels are zero, and here every one of them
+    /// is a real value both readers must agree on.
+    #[test]
+    fn the_rolled_context_is_the_transcribed_one_at_every_pixel() {
+        let layouts: Vec<[(i32, i32); 4]> = vec![
+            NOMINAL_AT[0],
+            NOMINAL_AT[1],
+            NOMINAL_AT[2],
+            // Template 1's adaptive pixel where the figure draws it and the
+            // other three somewhere else: still the figure's, since only the
+            // first is read.
+            [(3, -1), (5, 5), (-7, 0), (1, 1)],
+            CUSTOM_AT,
+            [(2, 0), (0, 1), (-128, -128), (127, -1)],
+            [(-1, 0), (1, -1), (0, -2), (-3, -1)],
+        ];
+        for template in 0..4u8 {
+            for (seed, at) in layouts.iter().enumerate() {
+                for (width, height) in [(1, 1), (3, 2), (9, 7), (40, 13)] {
+                    let picture = noise(width, height, seed as u64 + u64::from(width));
+                    for y in 0..height as i32 {
+                        let mut rolled = RolledContext::start(&picture, template, at, y);
+                        for x in 0..width as i32 {
+                            assert_eq!(
+                                rolled.at(&picture, at, x, y),
+                                context(&picture, template, at, x, y),
+                                "template {template}, adaptive pixels {at:?}, \
+                                 {width} x {height}, pixel ({x}, {y})"
+                            );
+                            rolled.advance(&picture, x, y, picture.get(x, y));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// **The rolled refinement context is [`refinement_context`], at every
+    /// pixel, and its typical-row test is 6.3.5.6's.**
+    ///
+    /// Both templates, the relabelled order
+    /// `a_relabelled_refinement_template_decodes_identically` uses, adaptive
+    /// pixels at their nominal places and at places outside every window,
+    /// and reference offsets that overlap the target, miss it, and sit at
+    /// either end of 32 bits.
+    #[test]
+    fn the_rolled_refinement_context_is_the_transcribed_one_at_every_pixel() {
+        let reversed_here: Vec<(i8, i8)> = REFINE_0_HERE.iter().rev().copied().collect();
+        let reversed_there: Vec<(i8, i8)> = REFINE_0_THERE.iter().rev().copied().collect();
+        let mut templates = vec![
+            refine_template(0, NOMINAL_REFINE_AT),
+            refine_template(0, [(-2, -1), (2, 2)]),
+            refine_template(0, [(3, -2), (-128, 127)]),
+            refine_template(1, NOMINAL_REFINE_AT),
+        ];
+        templates.push(RefineTemplate {
+            here: &reversed_here,
+            there: &reversed_there,
+            at: Some(NOMINAL_REFINE_AT),
+            typical: TPGRON_0,
+        });
+        let offsets = [
+            (0, 0),
+            (1, -1),
+            (-2, 3),
+            (7, 0),
+            (40, 40),
+            (i32::MIN, i32::MAX),
+        ];
+        for (index, template) in templates.iter().enumerate() {
+            for (seed, &(dx, dy)) in offsets.iter().enumerate() {
+                let target = noise(11, 9, 101 + seed as u64);
+                let reference = noise(10, 12, 202 + index as u64);
+                for y in 0..9 {
+                    let mut rolled = RolledRefinement::new(template);
+                    rolled.start(&target, &reference, (dx, dy), y);
+                    for x in 0..11 {
+                        assert_eq!(
+                            rolled.context(&target, &reference, (dx, dy), x, y),
+                            refinement_context(&target, &reference, dx, dy, template, x, y),
+                            "template {index}, offset ({dx}, {dy}), pixel ({x}, {y})"
+                        );
+                        let (rx, ry) = (i64::from(x) - i64::from(dx), i64::from(y) - i64::from(dy));
+                        let centre = reference.get_wide(rx, ry);
+                        let agrees = (-1..=1).all(|oy| {
+                            (-1..=1).all(|ox| reference.get_wide(rx + ox, ry + oy) == centre)
+                        });
+                        assert_eq!(
+                            rolled.uniform(),
+                            agrees.then_some(centre),
+                            "template {index}, offset ({dx}, {dy}), pixel ({x}, {y})"
+                        );
+                        rolled.advance(&target, &reference, (dx, dy), x, y, target.get(x, y));
+                    }
+                }
+            }
+        }
+    }
+
+    /// **What a decoded pixel costs, counted in reads.**
+    ///
+    /// The `jbig2` fuzz target's slow unit was a symbol dictionary spending
+    /// its work budget at template 0, and its dearest shape a refinement
+    /// region as large as the ceiling: sixteen and thirteen bounds-checked
+    /// reads a pixel, each instrumented under the sanitizers. The rolled
+    /// contexts read one pixel a row above — two at template 0, with its
+    /// nominal adaptive pixels folded into the windows — and four for a
+    /// refinement. Counted through [`READS`], so a change
+    /// that went back to gathering every pixel afresh fails here by its cause
+    /// on any machine, where a clock would pass on a fast one.
+    #[test]
+    fn a_decoded_pixel_costs_the_reads_its_rolled_context_needs() {
+        let (width, height) = (64u32, 32u32);
+        let pixels = u64::from(width * height);
+        let coded = [0x4F, 0xE7, 0x8D, 0x68, 0x1B, 0xA5, 0x3C, 0x91, 0x07, 0xF2];
+
+        let mut generic = Bitmap::new(width, height, 1 << 20).expect("bitmap");
+        READS.with(|reads| reads.set(0));
+        decode_arithmetic(&coded, 0, false, &NOMINAL_AT[0], None, &mut generic);
+        let generic_reads = READS.with(std::cell::Cell::get);
+
+        // And with the adaptive pixels somewhere else, which is the shape of
+        // the slow unit's dictionary — each of the four is then a read.
+        let mut custom = Bitmap::new(width, height, 1 << 20).expect("bitmap");
+        READS.with(|reads| reads.set(0));
+        decode_arithmetic(&coded, 0, false, &CUSTOM_AT, None, &mut custom);
+        let custom_reads = READS.with(std::cell::Cell::get);
+
+        let reference = noise(width, height, 7);
+        let template = refine_template(0, NOMINAL_REFINE_AT);
+        let mut refined = Bitmap::new(width, height, 1 << 20).expect("bitmap");
+        let mut coder = MqDecoder::new(&coded);
+        let mut contexts = MqContexts::new(1 << template.bits());
+        READS.with(|reads| reads.set(0));
+        decode_refinement_into(
+            &mut coder,
+            &mut contexts,
+            &template,
+            false,
+            &reference,
+            (0, 0),
+            &mut refined,
+        );
+        let refinement_reads = READS.with(std::cell::Cell::get);
+
+        // The windows' starts are a few reads a row on top of the per-pixel
+        // figure, which is what the second term allows.
+        assert!(
+            generic_reads <= 2 * pixels + 12 * u64::from(height),
+            "template 0 read {generic_reads} times for {pixels} pixels, which is \
+             {} a pixel; the transcription reads sixteen",
+            generic_reads / pixels
+        );
+        assert!(
+            custom_reads <= 6 * pixels + 8 * u64::from(height),
+            "template 0 with its adaptive pixels moved read {custom_reads} times \
+             for {pixels} pixels, which is {} a pixel; the transcription reads \
+             sixteen",
+            custom_reads / pixels
+        );
+        assert!(
+            refinement_reads <= 4 * pixels + 12 * u64::from(height),
+            "a refinement read {refinement_reads} times for {pixels} pixels, which \
+             is {} a pixel; the transcription reads thirteen",
+            refinement_reads / pixels
+        );
     }
 
     /// [`header`], with 7.2.4's *long* referred-to form, so one segment can

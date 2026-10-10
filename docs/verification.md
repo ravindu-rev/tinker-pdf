@@ -543,6 +543,25 @@ did not have the same standing:
   regions, two thousand placements of one symbol, three hundred references to
   one dictionary and four thousand halftone stamps.
 
+  **A bounded budget still has to be cheap to spend, and it was not.** Under
+  the sanitizers a full budget took 3.5 to 5.5 seconds a call on the sweep's
+  dictionaries and 5.3 on refinement regions: the context was gathered afresh at
+  every pixel, sixteen bounds-checked reads at template 0 and thirteen for a
+  refinement, every one of them instrumented. The contexts now roll along the
+  row — one new pixel enters each row's window, the nominal adaptive pixels
+  are window bits too, and a refinement reads its reference's
+  three-by-three neighbourhood out of three windows — which is two reads a
+  pixel at template 0, six with the adaptive pixels moved, and four for a
+  refinement, pinned by count in
+  `a_decoded_pixel_costs_the_reads_its_rolled_context_needs` and proved to
+  read the transcription's positions at every pixel of noise pictures by
+  `the_rolled_context_is_the_transcribed_one_at_every_pixel` and its
+  refinement twin. Replayed under the sanitizers, both calls: the two
+  timeouts' inputs 2.1-2.3 s, the slow unit's 4.3 s (3.3 s minimised, and
+  committed as `symbol-dictionary-template-0-custom-at`), and a full budget
+  spent on generic regions, refinement regions, placements or halftone stamps
+  2.1, 4.1, 1.3 and 1.3 s, where the timeout is twenty.
+
 ### What a green fuzz run does not mean
 
 **Not one of the thirty-nine targets checks that a decode is right.** They
