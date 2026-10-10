@@ -720,30 +720,30 @@ var formDataDir = Path.Combine(Path.GetDirectoryName(support)!, "form_data");
 var formLines = new List<string>();
 byte[] formed;
 using (var form = Document.Open(formBytes))
-using (var editor = form.CreateEditor())
+using (var formEditor = form.CreateEditor())
 {
     void Added(string label, (uint Object, ushort Generation) reference) =>
         formLines.Add($"added {TextToken(label)} {reference.Object}.{reference.Generation}");
-    Added("person.given", editor.AddTextField(
+    Added("person.given", formEditor.AddTextField(
         "person.given", 0, 300, 700, 500, 720, value: "Ada", maxLen: 20));
-    Added("subscribe", editor.AddCheckbox(
+    Added("subscribe", formEditor.AddCheckbox(
         "subscribe", 0, 300, 660, 320, 680, "Yes", true, flags: 2));
-    Added("size", editor.AddRadioGroup(
+    Added("size", formEditor.AddRadioGroup(
         "size",
         new[] { new RadioButton("S", 0, 300, 620, 320, 640), new RadioButton("M", 0, 330, 620, 350, 640) },
         selected: "M"));
-    Added("country", editor.AddChoiceField(
+    Added("country", formEditor.AddChoiceField(
         "country", 0, 300, 580, 400, 600, new[] { "NZ", "LK", "UK" }, true, value: "LK", fontSize: 10));
-    Added("languages", editor.AddChoiceField(
+    Added("languages", formEditor.AddChoiceField(
         "languages", 0, 300, 500, 400, 560, new[] { "en", "fr" }, false));
     using var fixtureData = FormData.ReadXfdf(File.ReadAllBytes(Path.Combine(formDataDir, "form-fields.xfdf")));
     var widgets = new List<string>();
-    foreach (var widget in editor.ApplyFormData(fixtureData))
+    foreach (var widget in formEditor.ApplyFormData(fixtureData))
     {
         widgets.Add($"{widget.ObjectNumber}.{widget.Generation}");
     }
     formLines.Add("applied " + (widgets.Count == 0 ? "-" : string.Join(",", widgets)));
-    formed = editor.Save(new WriteOptions());
+    formed = formEditor.Save(new WriteOptions());
 }
 Report("forms", formed);
 
