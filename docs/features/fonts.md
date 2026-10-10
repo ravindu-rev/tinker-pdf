@@ -575,7 +575,12 @@ Landed so far:
   `epub_shaped.rs` carries a two-face fixture for it and a left-to-right
   control beside it, because a build that reversed every multi-face run would
   pass the first and set every English sentence with a fallback character in
-  it backwards.
+  it backwards. A **standard-14** segment has no sfnt to shape against and
+  was written a code at a time as typed, so a Hebrew word no face of the
+  book covers was drawn backwards — unseen until ruling 14 read the page and
+  `pg2701-images.epub`'s Hebrew came back reversed. `paint::coded_order` puts
+  a segment holding a right-to-left character in L2's order first
+  (`epub_fallback.rs`); one holding none is written as before.
 
   **And a third level since October 2026: the visual line.** `flow.rs`
   breaks lines over logical text and resolves no levels, so a right-to-left

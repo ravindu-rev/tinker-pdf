@@ -3944,14 +3944,12 @@ fn draw_run_against(
 /// is the case fallback creates — one run, one style, several faces — which is
 /// the case `docs/features/fonts.md` named.
 ///
-/// **And a standard-14 segment is still drawn a character at a time in
-/// logical order**, because [`draw_coded`] addresses codes rather than glyphs
-/// and there is no sfnt in this process to shape or reorder against. A
-/// right-to-left run that falls partly to the standard 14 therefore has its
-/// segments in visual order and that segment's letters in logical order.
-/// It was that way before this: the segments were in logical order too, so
-/// what changes is that half of the answer is now right rather than none of
-/// it. Named rather than implied.
+/// **And a standard-14 segment is put in L2's order by [`coded_order`]**
+/// before [`draw_coded`] writes it a character at a time: there is no sfnt
+/// to shape against, but a code is drawn where the pen is, so the order the
+/// codes are written in is the order the page shows. It was written as
+/// typed, a right-to-left word backwards on the page, until ruling 14's
+/// extraction read it back that way — see [`coded_order`].
 fn right_to_left(text: &str) -> bool {
     Paragraph::new(text, BaseDirection::Auto)
         .base_level()
@@ -5052,7 +5050,7 @@ fn draw_coded(
     // the second's origin is wherever the first's advance left it.
     let mut segment: Option<Segment> = None;
 
-    for ch in slice.chars() {
+    for ch in coded_order(run, slice) {
         let chosen = choose(fonts.faces(), &font, Some(ch));
         let Some(coded) = fonts.encode(chosen, ch) else {
             // No code at all: the character is not drawn. Counted by
@@ -5088,6 +5086,72 @@ fn draw_coded(
     }
     flush(page, segment.take(), size, baseline, run, frame);
     x
+}
+
+/// The characters of a standard-14 `slice` of `run` in the order they are
+/// drawn, left to right: UAX #9's rule L2.
+///
+/// [`draw_coded`] writes a code where the pen stands and moves the pen
+/// right, so the order it is handed is the order the page shows. Handed
+/// `slice` as written, it drew a right-to-left word backwards — `חו` with
+/// its `ח` at the left — which nobody saw while extraction read the content
+/// stream's order, since that order was the logical one too. Ruling 14
+/// (dd50471) reads the line the page **draws**, as it must for every other
+/// producer, and read the word back as `וח`. Every character past
+/// `WinAnsiEncoding` in a standard-14 run comes here — the overflow font in
+/// a default build, the Liberation stand-in with `bundled-fonts` — so a
+/// book's Hebrew or Arabic that no face of its own covers extracted
+/// reversed: the etymology of `pg2701-images.epub` in `epub_fetched.rs`'s
+/// two conservation sweeps, and `epub_fallback.rs`'s
+/// `a_standard_14_hebrew_word_extracts_as_written`.
+///
+/// The level is the run's, as for a shaped slice ([`draw_shaped`]):
+/// [`TextRun::bidi_level`] once its line has cut it to one level, its own
+/// P2 and P3 where nothing has. A slice with no character that reads or
+/// opens right to left keeps the order it was written in without resolving
+/// anything, as [`piece_order`] does — so a left-to-right page, and a
+/// right-to-left `inside` marker's `1. `, are drawn exactly as before.
+///
+/// A character X9 removes — a joiner, a formatting character — is kept, at
+/// the level of the character before it (UAX #9 §5.2, *Retaining BNs and
+/// Explicit Formatting Characters*): the overflow font draws what it is
+/// given, and a page short of a character is what conservation counts.
+/// Mirroring (rule L4) is not applied: a simple font's code names one
+/// character, so a mirrored glyph would extract as the other bracket.
+fn coded_order(run: &TextRun, slice: &str) -> Vec<char> {
+    let chars: Vec<char> = slice.chars().collect();
+    if !chars.iter().copied().any(opens_right_to_left) {
+        return chars;
+    }
+    let direction = match run.bidi_level {
+        Some(level) if level % 2 == 1 => BaseDirection::RightToLeft,
+        Some(_) => BaseDirection::LeftToRight,
+        None => own_direction(slice),
+    };
+    let paragraph = Paragraph::new(slice, direction);
+    let line = paragraph.line(0..paragraph.len());
+    let mut levels: Vec<Level> = Vec::with_capacity(chars.len());
+    let mut before = paragraph.base_level();
+    for (at, level) in line.levels().iter().enumerate() {
+        let level = if paragraph.is_removed(at) {
+            before
+        } else {
+            *level
+        };
+        levels.push(level);
+        before = level;
+    }
+    let order: Vec<char> = reorder(&levels)
+        .into_iter()
+        .filter_map(|at| chars.get(at).copied())
+        .collect();
+    // L2 is a permutation of the line, so this holds; were it ever not to,
+    // the slice is drawn as written rather than short.
+    if order.len() == chars.len() {
+        order
+    } else {
+        chars
+    }
 }
 
 /// Writes one segment as one text object.

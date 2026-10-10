@@ -19,8 +19,9 @@
 
 mod epub_support;
 
-use epub_support::book::faces_book;
-use tinker_pdf::{ArchiveWarning, Document};
+use epub_support::book::{faces_book, styled_book};
+use epub_support::conservation::{conservation, conservation_in_logical_order};
+use tinker_pdf::{ArchiveWarning, Document, TextOptions};
 
 /// Every character of the test text, once each, in code point order.
 fn characters() -> Vec<char> {
@@ -187,4 +188,146 @@ fn a_fallback_character_is_measured_in_the_face_it_is_drawn_in() {
             "{ch:?} is measured in a face it is not drawn in"
         );
     }
+}
+
+// ---- right-to-left fallback text ---------------------------------------------
+
+/// HET and VAV, the Hebrew word Melville's etymology opens with.
+const HET_VAV: &str = "\u{5D7}\u{5D5}";
+
+/// The same two letters as a page that draws them in logical order shows them,
+/// read right to left: the word backwards.
+const VAV_HET: &str = "\u{5D5}\u{5D7}";
+
+/// Where the first character `text` is drawn starts, along the baseline,
+/// read in the order the content stream drew it.
+fn drawn_at(doc: &Document, text: &str) -> f64 {
+    let page = doc.page(0).expect("a page");
+    let drawn = page.text_with(&TextOptions {
+        content_order: true,
+    });
+    drawn
+        .lines()
+        .iter()
+        .flat_map(|line| line.chars.iter())
+        .find(|c| c.text == text)
+        .map(|c| c.quad.bounds().0)
+        .unwrap_or_else(|| panic!("nothing draws {text:?}"))
+}
+
+/// **A right-to-left word set in the standard 14 is drawn right to left, and
+/// extracts as it was written** (UAX #9 rule L2; ruling 14).
+///
+/// The etymology of Project Gutenberg's `pg2701-images.epub` — the word for
+/// whale in each language, then the language — with the lines a `<br/>`
+/// ends. No face in the book covers Hebrew, so `חו` is fallback text: the
+/// overflow font in a default build, the Liberation stand-in with
+/// `bundled-fonts`, and `draw_coded` in both. Its line is left to right and
+/// the word, at level 1, is reversed by L2, so `ו` is drawn left of `ח`.
+///
+/// `draw_coded` wrote a standard-14 piece in the order it was typed, `ח`
+/// at the left, and nothing noticed while extraction read the content
+/// stream's order, which was the typed order too. Ruling 14 (dd50471)
+/// reads the line the page **draws**, and read the word back as `וח`: the
+/// whole book stopped conserving at its first Hebrew word in
+/// `epub_fetched.rs`'s two conservation sweeps, in content order and in the
+/// structure tree's order alike.
+#[test]
+fn a_standard_14_hebrew_word_extracts_as_written() {
+    let body = format!(
+        "<p>{HET_VAV}, <i>Hebrew</i>.<br/>\u{3F0}\u{3B7}\u{3C4}\u{3BF}\u{3C2}, \
+         <i>Greek</i>.<br/>CETUS, <i>Latin</i>.<br/></p>"
+    );
+    let bytes = styled_book("en", "", &body);
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+
+    let (vav, het) = (drawn_at(&doc, "\u{5D5}"), drawn_at(&doc, "\u{5D7}"));
+    assert!(
+        vav < het,
+        "the word is drawn in the order it was typed: \u{5D7} at {het}, \u{5D5} at {vav}"
+    );
+
+    let text = doc.page(0).expect("a page").text().plain_text();
+    assert!(
+        text.contains(&format!("{HET_VAV}, Hebrew.")),
+        "the Hebrew word does not read as written: {text:?}"
+    );
+    for verdict in [
+        conservation(&bytes, &doc),
+        conservation_in_logical_order(&bytes, &doc),
+    ] {
+        assert!(
+            verdict.holds(),
+            "{} extra, {} missing, {:?}",
+            verdict.extra,
+            verdict.missing,
+            verdict.divergences
+        );
+    }
+}
+
+/// **A right-to-left paragraph set in the standard 14 reads as written.**
+///
+/// `dir="rtl"` makes the paragraph level 1, so the run `draw_coded` is handed
+/// is at an odd level with its comma and space at that level too: L2 draws
+/// the punctuation left of the words and the words right to left, `ok` at
+/// level 2 its own run. Drawn as typed, the line read back ` ,חו וחok.`.
+///
+/// The first word carries a zero-width joiner, which rule X9 removes from
+/// the levels L2 orders: it is still drawn, between its two letters, or the
+/// page would be a character short.
+#[test]
+fn a_standard_14_right_to_left_paragraph_extracts_as_written() {
+    let body = format!("<p dir=\"rtl\">\u{5D7}\u{200D}\u{5D5} {VAV_HET}, ok.</p>");
+    let bytes = styled_book("he", "", &body);
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    for verdict in [
+        conservation(&bytes, &doc),
+        conservation_in_logical_order(&bytes, &doc),
+    ] {
+        assert!(
+            verdict.holds(),
+            "{} extra, {} missing, {:?}",
+            verdict.extra,
+            verdict.missing,
+            verdict.divergences
+        );
+    }
+}
+
+/// **The same word alone on its line — the book's own shape, a table with a
+/// cell for the word and one for the language — is drawn right to left and
+/// reads as `חו`.**
+///
+/// What is asserted is the word: drawn `ו` left of `ח`, and read back with
+/// `ח` first, where the page drew it `ח` first and read it back `וח`.
+///
+/// What is **not** asserted is the comma's side. The cell is a left-to-right
+/// paragraph, so its comma, at level 0, is drawn right of the word — the
+/// picture a right-to-left paragraph that *opens* with the comma draws too.
+/// The cell's line holds no left-to-right character for ruling 14's "the two
+/// ends decide" to find, so it reads the line as right to left, and the
+/// comma first: `,חו` — what `text_order.rs` names as "a line is resolved
+/// alone", and the same answer a face that covers Hebrew gets. Which way
+/// such a line reads is ruling 14's to decide, not this painter's.
+#[test]
+fn a_standard_14_hebrew_word_alone_on_its_line_is_drawn_right_to_left() {
+    let body = format!(
+        "<table><tr><td>{HET_VAV},</td><td><i>Hebrew</i>.</td></tr>\
+         <tr><td>\u{3F0}\u{3B7}\u{3C4}\u{3BF}\u{3C2},</td><td><i>Greek</i>.</td></tr>\
+         <tr><td>CETUS,</td><td><i>Latin</i>.</td></tr></table>"
+    );
+    let doc = Document::open(styled_book("en", "", &body)).expect("the book opens");
+
+    let (vav, het) = (drawn_at(&doc, "\u{5D5}"), drawn_at(&doc, "\u{5D7}"));
+    assert!(
+        vav < het,
+        "the word is drawn in the order it was typed: \u{5D7} at {het}, \u{5D5} at {vav}"
+    );
+
+    let text = doc.page(0).expect("a page").text().plain_text();
+    assert!(
+        text.contains(HET_VAV) && !text.contains(VAV_HET),
+        "the Hebrew word reads backwards: {text:?}"
+    );
 }
