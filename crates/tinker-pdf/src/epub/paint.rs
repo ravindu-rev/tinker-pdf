@@ -5243,11 +5243,15 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// not space: in its string, every glyph after it is drawn a `word-spacing`
 /// right of where layout put it (ROADMAP CD-19). In a slice with no mark the
 /// string runs on to the next resource, so its tail moves together, a word
-/// spacing into whatever is drawn next: the gap before the next word, or,
-/// where a run ends inside a word, the glyph after it (`x <b>αλ</b>φα` at
-/// `word-spacing: 4px` draws the λ on the φ in a default build, whose
-/// overflow font draws Greek). That is cd407d5's drawing,
-/// kept byte for byte. In a slice that holds a mark, a mark ends its
+/// spacing into whatever is drawn next: the gap before the next word,
+/// punctuation another resource draws right after the word (`معلم.`'s MEM on
+/// its `WinAnsiEncoding` full stop), or, where a run ends inside a word, the
+/// glyph after it (`x <b>αλ</b>φα` at `word-spacing: 4px` draws the λ on the
+/// φ in a default build, whose overflow font draws Greek). That is cd407d5's
+/// drawing, kept byte for byte — in a book that holds marks too, whose
+/// narrower pointed words can give a mark-free slice the line its mark-free
+/// twin has, and with it that twin's overprint (re-review of 0e58f5f; the
+/// owner accepted it for the October 2026 release). In a slice that holds a mark, a mark ends its
 /// string and the glyph after the marked letter is a piece of its own, drawn
 /// where layout put it, so a glyph the code 32 had moved landed on it:
 /// `مُدَّةَ مُعلِّم.` at `word-spacing: 4px` drew the LAM and the AIN both at

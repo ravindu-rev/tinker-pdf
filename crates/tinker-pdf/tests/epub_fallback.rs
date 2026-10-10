@@ -885,9 +885,10 @@ fn a_standard_14_right_to_left_mark_styled_apart_rides_on_nothing() {
 /// one with four. A slice holding a mark is one text object now, and a mark
 /// is not spaced (`css-text-3` §10.2), so a word of any marks reads whole at
 /// any spacing. `5px`, `8px`, `0.3em`, `0.6em` and `1em` are the review's.
-/// Past half an em every **run** boundary cuts a line, marks or none — a
-/// reader resumes a line across an `ET` only half an em on, and at half an
-/// em exactly the last place of a float decides (`<i>Hebrew</i>.` is cut
+/// Past half an em a **run** boundary cuts a line, marks or none — a reader
+/// resumes a line across an `ET` only half an em on, the millionth after a
+/// mark and a stand-in's half-thousandth `/W` rounding aside (`epub.md`), and
+/// at half an em exactly the last place of a float decides (`<i>Hebrew</i>.` is cut
 /// before its full stop at `8px` with `bundled-fonts`) — so there the text is
 /// asserted with its whitespace left out, the order of every character that
 /// is not a space: what each cut-off piece reads as on its own, and in what
@@ -1430,7 +1431,7 @@ fn a_standard_14_line_at_exactly_half_an_em_is_cut_where_a_last_place_says() {
 /// that conserve at cd407d5 and do not now are this class: this one, and
 /// `CANTILLATED` and `كتب` fourteen times in a right-to-left paragraph at
 /// `1em` (sans-serif) and at `0.5001em` (monospace), every word a piece of
-/// its own, read in drawn order as `שלם כתב` fourteen times is; none with
+/// its own, read in drawn order as `שלם كتب` fourteen times is; none with
 /// `bundled-fonts`.
 #[test]
 fn a_narrower_pointed_word_breaks_its_line_where_the_unpointed_word_does() {

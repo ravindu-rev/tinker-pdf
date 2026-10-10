@@ -284,7 +284,10 @@ an `e`, in either build, or a mark styled apart from its letter — is not cut
 from what follows up to half an em of spacing, and below half an em its line
 reads whole, the four-mark SHIN ending a bold run in a left-to-right line too
 (`a_standard_14_run_ending_on_a_mark_keeps_to_what_follows_to_half_an_em`).
-Past half an em of spacing every run boundary cuts a line, marks or none,
+Past half an em of spacing a run boundary cuts a line, marks or none — past
+it by more than the millionth after a mark and the stand-in's half-thousandth
+`/W` rounding named above, which at `0.5001em` with `bundled-fonts` keep
+`x <b>ə</b>y z.`'s boundary after the schwa whole —
 and each piece is read as a line of its own, so a right-to-left paragraph's
 pieces come in the order they are drawn: `<p dir="rtl">חו … חו.</p>` with a
 Latin run between reads its full stop before its last word at `0.6em`, at
@@ -314,9 +317,23 @@ justification and family styles of three re-reviews over Arabic, Hebrew,
 decomposed Latin, Greek, Cyrillic, IPA and Vietnamese, each marked book
 beside a mark-free twin; no corpus or book was fetched — no book with no mark
 is other bytes or extracts otherwise than at cd407d5, and no glyph is drawn
-over another that cd407d5 did not draw so. Every book that conserves, reads
-whole or is found by search at cd407d5 and not now — 15 in a default build,
-94 with `bundled-fonts` — is in one of two classes, each a known limit:
+over another that cd407d5 did not draw so. The round-4 re-review's own
+probes — 4 914 books under `word-spacing` and justification, each pointed
+word beside its mark-free twin, and 528 pointed paragraphs that hold a
+mark-free bold run — found 14 more such books in a default build (12 of
+class B, 2 of class A) and none of any other class, and one case the round-4
+probe had no row for: a slice with **no** mark, in a book that holds marks,
+still draws ROADMAP CD-19's overprint under `word-spacing` or justification,
+exactly as its mark-free twin does at cd407d5. Narrower pointed words give
+such a book its twin's line breaks, so on that probe 18 books in a default
+build (47 pairs of glyphs) and 4 with `bundled-fonts` (5 pairs) draw a glyph
+over another where cd407d5 did not: `مُدَّةَ مُعلِّم. <b>مدة معلم.</b>` eight
+times at `word-spacing: 4px` draws a MEM over the full stop at `270pt`. The
+owner accepted that for the October 2026 release and put CD-19 first in the
+order of work. Every book that conserves, reads whole or is found by search
+at cd407d5 and not now — on the round-4 probe 15 in a default build, 94 with
+`bundled-fonts` — is in one of two classes, each a known limit; a book that
+meets both is counted in B, as two of a default build's three B books are:
 
 - **A, the half-em band** (12 books in a default build, 94 with
   `bundled-fonts`): a gap a reader tests — a `letter-spacing`, or a letter-
@@ -374,7 +391,7 @@ whole or is found by search at cd407d5 and not now — 15 in a default build,
   the other two are the four-mark SHIN's word `שָּׁ֑לֵם` and `كتب`, fourteen
   times in a right-to-left paragraph, at `1em` (sans-serif) and `0.5001em`
   (monospace): every word a piece of its own, read in drawn order, as
-  `שלם כתב` fourteen times is.
+  `שלם كتب` fourteen times is.
 
 And a mark drawn at its letter's end moves where a reader takes the line to
 stand: `TextDevice` starts a new line where a glyph is drawn more than three
