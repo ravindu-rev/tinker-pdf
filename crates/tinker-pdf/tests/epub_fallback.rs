@@ -295,6 +295,159 @@ fn a_standard_14_right_to_left_paragraph_extracts_as_written() {
     }
 }
 
+/// MELEKH pointed: MEM with SEGOL, LAMED with SEGOL, FINAL KAF with SHEVA —
+/// one nonspacing mark after each letter.
+const MELEKH: &str = "\u{5DE}\u{5B6}\u{5DC}\u{5B6}\u{5DA}\u{5B0}";
+
+/// SHALOM pointed: SHIN with QAMATS and SHIN DOT, LAMED, VAV with HOLAM,
+/// FINAL MEM — a letter with two marks after it.
+const SHALOM: &str = "\u{5E9}\u{5B8}\u{5C1}\u{5DC}\u{5D5}\u{5B9}\u{5DD}";
+
+/// SHALOM as a default build draws it, left to right: each letter, then its
+/// points, which the overflow font gives an advance of their own.
+#[cfg(not(feature = "bundled-fonts"))]
+const SHALOM_DRAWN: &str = "\u{5DD}\u{5D5}\u{5B9}\u{5DC}\u{5E9}\u{5B8}\u{5C1}";
+
+/// SHALOM as a `bundled-fonts` build draws it, left to right: each letter's
+/// points, which the Liberation stand-in draws with no advance, as written
+/// and then the letter.
+#[cfg(feature = "bundled-fonts")]
+const SHALOM_DRAWN: &str = "\u{5DD}\u{5B9}\u{5D5}\u{5DC}\u{5B8}\u{5C1}\u{5E9}";
+
+/// KATABA with its harakat: KAF, FATHA, TEH, FATHA, BEH, FATHA.
+const KATABA: &str = "\u{643}\u{64E}\u{62A}\u{64E}\u{628}\u{64E}";
+
+/// The same word drawn, left to right, each letter followed by its FATHA.
+const KATABA_DRAWN: &str = "\u{628}\u{64E}\u{62A}\u{64E}\u{643}\u{64E}";
+
+/// Page 0's characters in the order the content stream drew them — for a
+/// standard-14 run, left to right along the line — whitespace left out.
+fn drawn_text(doc: &Document) -> String {
+    let page = doc.page(0).expect("a page");
+    page.text_with(&TextOptions {
+        content_order: true,
+    })
+    .lines()
+    .iter()
+    .flat_map(|line| line.chars.iter())
+    .flat_map(|c| c.text.chars())
+    .filter(|c| !c.is_whitespace())
+    .collect()
+}
+
+/// That page 0 of `book` holds `expected`, and that the book conserves in
+/// content order and in logical order alike.
+fn reads_as_written(book: &[u8], doc: &Document, expected: &str) {
+    let text = doc.page(0).expect("a page").text().plain_text();
+    assert!(
+        text.contains(expected),
+        "{expected:?} does not read as written: {text:?}"
+    );
+    for verdict in [
+        conservation(book, doc),
+        conservation_in_logical_order(book, doc),
+    ] {
+        assert!(
+            verdict.holds(),
+            "{} extra, {} missing, {:?}",
+            verdict.extra,
+            verdict.missing,
+            verdict.divergences
+        );
+    }
+}
+
+/// **A pointed Hebrew word set in the standard 14 keeps each point on its
+/// own letter, and reads back as written.**
+///
+/// A nonspacing mark belongs to the letter before it, so the run L2 reverses
+/// is reversed letter by letter, each letter keeping its points (UAX #9 rule
+/// L3). Reversed a character at a time, every point left its letter: in a
+/// default build `שָׁלוֹם, Hebrew.` read back `שָלׁוםֹ, Hebrew.` — the SHIN
+/// DOT on the LAMED, the HOLAM on the FINAL MEM — and `מֶלֶךְ` read back
+/// `מלֶךְֶ`; with `bundled-fonts` the SHIN's two points came back swapped.
+///
+/// Which side of its letter a point is drawn on depends on its advance,
+/// because nothing positions it and extraction (`text_order.rs`) pairs a
+/// mark with the base nearest it along the line. A default build draws a
+/// point with the overflow font, as wide as a letter, after its letter; the
+/// Liberation stand-in draws one with no advance before its letter, where
+/// the letter starts, since a glyph of no advance is read as a box running
+/// right from where it is drawn. Both read `מֶלֶךְ`, one point to a letter,
+/// as written, and `bundled-fonts` reads `שָׁלוֹם` as written too.
+///
+/// A default build's letter with two points is the limit `epub.md` names:
+/// the second point is drawn after the first, as wide, and is nearer the
+/// glyph drawn next than its own letter, so `שָׁלוֹם, ` reads `שָלוֹם,ׁ `
+/// there, the SHIN DOT on the comma. What is asserted of it is the drawing.
+#[test]
+fn a_standard_14_pointed_hebrew_word_keeps_each_point_on_its_letter() {
+    let melekh = styled_book("en", "", &format!("<p>{MELEKH}, <i>Hebrew</i>.</p>"));
+    let doc = Document::open(melekh.clone()).expect("the book opens");
+    reads_as_written(&melekh, &doc, &format!("{MELEKH}, Hebrew."));
+
+    let shalom = styled_book("en", "", &format!("<p>{SHALOM}, <i>Hebrew</i>.</p>"));
+    let doc = Document::open(shalom.clone()).expect("the book opens");
+    let drawn = drawn_text(&doc);
+    assert!(
+        drawn.contains(SHALOM_DRAWN),
+        "a point is not drawn on its own letter's side: {drawn:?}"
+    );
+    #[cfg(feature = "bundled-fonts")]
+    reads_as_written(&shalom, &doc, &format!("{SHALOM}, Hebrew."));
+}
+
+/// **An Arabic word with its harakat, in a right-to-left paragraph set in the
+/// standard 14, is drawn with each haraka after its own letter, and reads
+/// back as written.**
+///
+/// The pointed Hebrew word's rule, in the other script that writes
+/// nonspacing marks over its letters: reversed a character at a time, each
+/// FATHA was drawn before its letter and `كَتَبَ كتب.` read back
+/// `كتَبَ َكتب.`, the first word's last FATHA thrown onto the second. No
+/// Liberation face has an Arabic letter, so both builds draw this with the
+/// overflow font — a haraka as wide as a letter, one to a letter — and both
+/// read it back as written.
+#[test]
+fn a_standard_14_arabic_word_keeps_each_haraka_on_its_letter() {
+    let body = format!("<p dir=\"rtl\">{KATABA} \u{643}\u{62A}\u{628}.</p>");
+    let bytes = styled_book("ar", "", &body);
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+
+    let drawn = drawn_text(&doc);
+    assert!(
+        drawn.contains(KATABA_DRAWN),
+        "a haraka is not drawn after its own letter: {drawn:?}"
+    );
+    reads_as_written(&bytes, &doc, &format!("{KATABA} \u{643}\u{62A}\u{628}."));
+}
+
+/// **A run of nothing but punctuation at a right-to-left level is drawn in
+/// L2's order too.**
+///
+/// The `.,` between two italic Hebrew words is a run of its own, and N1
+/// resolves both marks to the paragraph's level, 1, so L2 draws them `,.`.
+/// The run holds no right-to-left character, and only a slice holding one
+/// was reordered, so it was drawn as typed: the line read back `חו,.וח`.
+/// What decides is the run's level, as for a shaped slice — save for an
+/// `inside` list marker, which is content the book does not hold and is
+/// still drawn as written (`epub_paint.rs` and `epub_shaped.rs` pin its side
+/// and its order).
+#[test]
+fn a_standard_14_punctuation_run_at_a_right_to_left_level_is_drawn_reversed() {
+    let body = format!("<p dir=\"rtl\"><i>{HET_VAV}</i>.,<i>{VAV_HET}</i></p>");
+    let bytes = styled_book("he", "", &body);
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+
+    let (comma, stop) = (drawn_at(&doc, ","), drawn_at(&doc, "."));
+    assert!(
+        comma < stop,
+        "the punctuation is drawn in the order it was typed: . at {stop}, , at {comma}"
+    );
+
+    reads_as_written(&bytes, &doc, &format!("{HET_VAV}.,{VAV_HET}"));
+}
+
 /// **The same word alone on its line — the book's own shape, a table with a
 /// cell for the word and one for the language — is drawn right to left and
 /// reads as `חו,`.**

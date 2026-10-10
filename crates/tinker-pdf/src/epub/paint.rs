@@ -105,7 +105,7 @@ use tinker_pdf_layout::{
     BackgroundLayer, BoxFragment, ClipFragment, Embedding, EmbeddingKind, Page as LayoutPage,
     ReplacedFragment, TextRun,
 };
-use tinker_pdf_shape::bidi::{reorder, BaseDirection, Level, Paragraph};
+use tinker_pdf_shape::bidi::{order_units, reorder, BaseDirection, Level, Paragraph};
 use tinker_pdf_shape::shape::itemize;
 use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
 use tinker_pdf_shape::Tag;
@@ -5050,7 +5050,7 @@ fn draw_coded(
     // the second's origin is wherever the first's advance left it.
     let mut segment: Option<Segment> = None;
 
-    for ch in coded_order(run, slice) {
+    for ch in coded_order(run, slice, |ch| metrics.advance(ch, &font) > 0.0) {
         let chosen = choose(fonts.faces(), &font, Some(ch));
         let Some(coded) = fonts.encode(chosen, ch) else {
             // No code at all: the character is not drawn. Counted by
@@ -5107,20 +5107,65 @@ fn draw_coded(
 ///
 /// The level is the run's, as for a shaped slice ([`draw_shaped`]):
 /// [`TextRun::bidi_level`] once its line has cut it to one level, its own
-/// P2 and P3 where nothing has. A slice with no character that reads or
-/// opens right to left keeps the order it was written in without resolving
-/// anything, as [`piece_order`] does — so a left-to-right page, and a
-/// right-to-left `inside` marker's `1. `, are drawn exactly as before.
+/// P2 and P3 where nothing has. A slice is reordered when it holds a
+/// character that reads or opens right to left, or when its run is at an odd
+/// level: a run of neutrals there — the `.,` between two right-to-left
+/// words, which N1 puts at the paragraph's level — holds nothing
+/// right-to-left, and was drawn as typed until the review of 6d08c6b, where
+/// L2 draws it `,.`. Anything else
+/// keeps the order it was written in without resolving anything, as
+/// [`piece_order`] does, so a left-to-right page is drawn exactly as before.
+/// So is an `inside` list marker ([`TextRun::generated`]) with nothing
+/// right-to-left in it: a right-to-left item's `1. ` is at its paragraph's
+/// odd level, and is still drawn as written, the limit `epub.md` names.
 ///
-/// A character X9 removes — a joiner, a formatting character — is kept, at
-/// the level of the character before it (UAX #9 §5.2, *Retaining BNs and
-/// Explicit Formatting Characters*): the overflow font draws what it is
-/// given, and a page short of a character is what conservation counts.
+/// The units L2 orders are **a character and the nonspacing marks after
+/// it** (`Bidi_Class` `NSM`), kept together as rule L3 keeps a mark with its
+/// base: reversed a character at a time, the marks of a right-to-left run
+/// left their letters, and `שָׁלוֹם` read back `שָלׁוםֹ` in a default build
+/// (review of 6d08c6b). The order is [`order_units`]'s, the function
+/// `bidi_conformance.rs` runs the whole of Unicode's test files through, so
+/// this draws what the reader of the page checks against — a character X9
+/// removes, a joiner or a formatting character, kept at the level of the
+/// unit before it (UAX #9 §5.2, *Retaining BNs and Explicit Formatting
+/// Characters*): the overflow font draws what it is given, and a page short
+/// of a character is what conservation counts.
+///
+/// Inside a unit of a right-to-left slice, which side of its letter a mark
+/// is drawn on is decided by whether it has an advance (`spacing`), because
+/// nothing here positions a mark and ruling 14's extraction pairs a mark
+/// with the base nearest it along the line:
+///
+/// - **a mark with an advance** — the overflow font's, as wide as a letter —
+///   is a glyph of its own, drawn after its letter as L3 has it, and nearer
+///   that letter than the glyph drawn next. A letter's second such mark,
+///   drawn after its first, is nearer the next glyph than its letter: the
+///   limit `epub.md` names.
+/// - **a mark with none** — the Liberation stand-in's Hebrew points — is
+///   drawn before its letter, where the letter starts, a letter's marks in
+///   the order written. `tinker-pdf-content` reads a glyph of no advance as
+///   a box a thousandth of an em wide running right from where it is drawn,
+///   so a mark drawn at its letter's end is read with the glyph that starts
+///   there: drawn after their letters, every point of `מֶלֶךְ` read with its
+///   neighbour in a `bundled-fonts` build. Before its letter is where L2
+///   alone leaves a mark, and where 6d08c6b drew one — but L2 alone also
+///   reverses a letter's marks among themselves, and `שָׁ` read back with
+///   its two swapped. Neither side is where a point should stand, over the
+///   middle of its letter: that is `GPOS`'s to say, and an unshaped run
+///   reads none.
+///
+/// A left-to-right slice keeps every unit as written, marks after, and so do
+/// marks with nothing before them in the slice, their letter in another run.
+///
 /// Mirroring (rule L4) is not applied: a simple font's code names one
-/// character, so a mirrored glyph would extract as the other bracket.
-fn coded_order(run: &TextRun, slice: &str) -> Vec<char> {
+/// character, so a mirrored glyph would extract as the other bracket. A
+/// bracket pair at a right-to-left level is drawn with each bracket's hollow
+/// turned away from what it encloses — the middle of `חו (וח) חו.` is drawn,
+/// left to right, `)` `ח` `ו` `(` — and extracts as written.
+fn coded_order(run: &TextRun, slice: &str, spacing: impl Fn(char) -> bool) -> Vec<char> {
     let chars: Vec<char> = slice.chars().collect();
-    if !chars.iter().copied().any(opens_right_to_left) {
+    let odd = !run.generated && run.bidi_level.is_some_and(|level| level % 2 == 1);
+    if !odd && !chars.iter().copied().any(opens_right_to_left) {
         return chars;
     }
     let direction = match run.bidi_level {
@@ -5128,30 +5173,53 @@ fn coded_order(run: &TextRun, slice: &str) -> Vec<char> {
         Some(_) => BaseDirection::LeftToRight,
         None => own_direction(slice),
     };
-    let paragraph = Paragraph::new(slice, direction);
-    let line = paragraph.line(0..paragraph.len());
-    let mut levels: Vec<Level> = Vec::with_capacity(chars.len());
-    let mut before = paragraph.base_level();
-    for (at, level) in line.levels().iter().enumerate() {
-        let level = if paragraph.is_removed(at) {
-            before
-        } else {
-            *level
-        };
-        levels.push(level);
-        before = level;
-    }
-    let order: Vec<char> = reorder(&levels)
+    let units = mark_clusters(slice);
+    let mut order: Vec<char> = Vec::with_capacity(chars.len());
+    for unit in order_units(&units, direction)
         .into_iter()
-        .filter_map(|at| chars.get(at).copied())
-        .collect();
-    // L2 is a permutation of the line, so this holds; were it ever not to,
-    // the slice is drawn as written rather than short.
+        .filter_map(|at| units.get(at))
+    {
+        let mut inside = unit.chars();
+        match inside.next() {
+            Some(base)
+                if direction == BaseDirection::RightToLeft
+                    && bidi_class(base) != BidiClass::NSM =>
+            {
+                order.extend(inside.clone().filter(|mark| !spacing(*mark)));
+                order.push(base);
+                order.extend(inside.filter(|mark| spacing(*mark)));
+            }
+            _ => order.extend(unit.chars()),
+        }
+    }
+    // L2 is a permutation of the units, which cover the slice, so this
+    // holds; were it ever not to, the slice is drawn as written rather than
+    // short.
     if order.len() == chars.len() {
         order
     } else {
         chars
     }
+}
+
+/// `slice` cut into a character and the nonspacing marks (`Bidi_Class`
+/// `NSM`) that follow it, in order. Marks with nothing before them in the
+/// slice — their base in another run — are a unit of their own.
+///
+/// Every cut is at a `char_indices` boundary, so no `get` here can miss; if
+/// one ever did, the units would not cover the slice and [`coded_order`]
+/// would draw it as written rather than short.
+fn mark_clusters(slice: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for (at, ch) in slice.char_indices() {
+        if at > start && bidi_class(ch) != BidiClass::NSM {
+            out.extend(slice.get(start..at));
+            start = at;
+        }
+    }
+    out.extend(slice.get(start..).filter(|rest| !rest.is_empty()));
+    out
 }
 
 /// Writes one segment as one text object.

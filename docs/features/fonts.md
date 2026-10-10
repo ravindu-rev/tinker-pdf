@@ -579,8 +579,19 @@ Landed so far:
   was written a code at a time as typed, so a Hebrew word no face of the
   book covers was drawn backwards — unseen until ruling 14 read the page and
   `pg2701-images.epub`'s Hebrew came back reversed. `paint::coded_order` puts
-  a segment holding a right-to-left character in L2's order first
-  (`epub_fallback.rs`); one holding none is written as before.
+  a segment holding a right-to-left character, or set at a right-to-left
+  level, in L2's order first (`epub_fallback.rs`); one holding none at a
+  left-to-right level is written as before, and so is a right-to-left
+  `inside` marker's `1. `. *Found on review*, it had reversed a character
+  at a time, so a Hebrew point or Arabic haraka left its letter, and had
+  reordered only a slice holding a right-to-left character, so the `.,`
+  between two right-to-left words was drawn as typed. A letter and the
+  nonspacing marks after it are now one unit; with no `GPOS` to position a
+  mark, which side of its letter one is drawn on follows its advance —
+  after the letter for the overflow font's, which are as wide as a letter,
+  and where the letter starts for the Liberation stand-in's, which have
+  none — and a default build's letter with two marks still reads its second
+  with the next glyph ([epub.md](epub.md)'s `direction` row).
 
   **And a third level since October 2026: the visual line.** `flow.rs`
   breaks lines over logical text and resolves no levels, so a right-to-left
