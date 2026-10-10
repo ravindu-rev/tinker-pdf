@@ -1636,14 +1636,30 @@ impl<M: Metrics> Builder<'_, M> {
             // The current flow's own list of records beside the column, so a
             // sub-flow — a float's, a cell's, a measuring trial's — carries
             // its hidden tail with it and translates it where it goes.
-            self.flow.floats.push(FloatRecord {
-                items: tail,
-                blocks: Vec::new(),
-                top: line,
-                bottom: line,
-                pushable: false,
-                z: 0,
-            });
+            //
+            // **Before every record this box's content made, and not after
+            // them.** A clipping descendant's hidden tail is already among
+            // them, and it is the *end* of that descendant's content, while
+            // this tail begins with whatever of the same content the
+            // descendant kept below this cut — one text node's lines on both
+            // sides, under one reading-order stamp, which the page's stable
+            // sort cannot put back in order. Both end up at this padding
+            // edge, so the order they are drawn in is the order they read
+            // in. Nothing else among them can share a stamp with this tail
+            // (a float's text is its own nodes'), and a hidden record paints
+            // nothing, so the move changes no ink.
+            let at = floats_before.min(self.flow.floats.len());
+            self.flow.floats.insert(
+                at,
+                FloatRecord {
+                    items: tail,
+                    blocks: Vec::new(),
+                    top: line,
+                    bottom: line,
+                    pushable: false,
+                    z: 0,
+                },
+            );
         }
         let mut end = cut;
         if let Some(last) = self.flow.items.last_mut() {

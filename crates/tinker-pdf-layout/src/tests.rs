@@ -7586,6 +7586,41 @@ fn a_block_axis_clip_drops_the_content_past_the_used_height() {
     assert_eq!((clips[0].y, clips[0].height), (0.0, 30.0), "{clips:?}");
 }
 
+/// **A clip inside a clip hides its text in document order.** The inner box
+/// keeps three of five lines and hides the last two; the outer box, one line
+/// tall, then hides the two the inner box kept below it. Both hidden tails
+/// end up at the outer box's padding edge and all five lines are one text
+/// node, so they share one reading-order stamp and nothing but the order the
+/// tails are drawn in says which reads first: the outer box's tail, which
+/// was cut from earlier in the text, comes before the inner one's.
+///
+/// The `layout` fuzz target's conservation assertion found it (the inner
+/// tail read first, `aaaa dddd eeee bbbb cccc`), in a tree of nested
+/// `overflow: hidden` boxes over a paragraph of one-character lines.
+#[test]
+fn a_clip_inside_a_clip_hides_its_text_in_document_order() {
+    use tinker_pdf_css::property::Overflow;
+    let clipped = |height: f64| {
+        let mut style = overflowing(Overflow::Hidden);
+        style.width = Size::Length(LengthPercentage::Px(40.0));
+        style.height = Size::Length(LengthPercentage::Px(height));
+        style
+    };
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            clipped(12.0),
+            vec![BoxNode::element(
+                clipped(36.0),
+                vec![text("aaaa bbbb cccc dddd eeee")],
+            )],
+        )],
+    );
+    let laid = run(&tree, 100.0, 400.0);
+    assert_eq!(painted_text(&laid, 0), "aaaa");
+    conserved(&tree, &laid);
+}
+
 /// **A clip is written only where the content reaches past the padding box**,
 /// and an axis the box does not clip is unbounded.
 #[test]
