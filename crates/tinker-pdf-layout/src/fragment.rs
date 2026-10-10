@@ -79,6 +79,27 @@ enum Tier {
     WithoutAc,
 }
 
+/// How far the column has got on the page whose out-of-flow content is being
+/// drawn: the two questions [`beside`] asks of it.
+#[derive(Clone, Copy, Debug)]
+struct Column {
+    /// Where the next page's column begins. A float that begins at or below
+    /// it is beside the next page's content and not this one's.
+    reach: f64,
+    /// How many of the column's items are on this page or an earlier one,
+    /// counting a margin a break consumed. A clip's hidden tail that follows
+    /// one of them is drawn here ([`crate::flow::FloatRecord::follows`]).
+    done: usize,
+}
+
+impl Column {
+    /// The column has run out: every float and every tail belongs here.
+    const FINISHED: Column = Column {
+        reach: f64::INFINITY,
+        done: usize::MAX,
+    };
+}
+
 /// How much of one float has been drawn.
 #[derive(Clone, Copy, Debug, Default)]
 struct FloatCursor {
@@ -340,8 +361,12 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
                     top,
                     fragmentainer,
                     // The next page carries on inside this same band, so its
-                    // column begins exactly where this slice ended.
-                    flow.items[at].y + end,
+                    // column begins exactly where this slice ended, and every
+                    // item before the band is done.
+                    Column {
+                        reach: flow.items[at].y + end,
+                        done: at,
+                    },
                     &mut warnings,
                 );
                 order(&mut built);
@@ -400,7 +425,10 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             &mut built,
             top,
             fragmentainer,
-            reach,
+            Column {
+                reach,
+                done: cut.next,
+            },
             &mut warnings,
         );
         order(&mut built);
@@ -438,7 +466,7 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             // would be a loop that never ends rather than a page that is
             // wrong: these pages exist only to finish the floats, and a float
             // that is never started never finishes.
-            f64::INFINITY,
+            Column::FINISHED,
             &mut warnings,
         );
         order(&mut built);
@@ -485,11 +513,11 @@ fn outside(
     out: &mut Page,
     top: f64,
     height: f64,
-    reach: f64,
+    column: Column,
     warnings: &mut Vec<(Warning, usize)>,
 ) {
-    beside(&flow.floats, floats, out, top, height, reach, warnings);
-    beside(&flow.positioned, placed, out, top, height, reach, warnings);
+    beside(&flow.floats, floats, out, top, height, column, warnings);
+    beside(&flow.positioned, placed, out, top, height, column, warnings);
     // **§9.6.1's paged answer, in one loop.** *"In the case of paged media,
     // fixed boxes are repeated on every page, and are fixed with respect to the
     // page box."* Their own cursors are not kept, because a box that is drawn
@@ -521,13 +549,37 @@ fn beside(
     out: &mut Page,
     top: f64,
     height: f64,
-    reach: f64,
+    column: Column,
     warnings: &mut Vec<(Warning, usize)>,
 ) {
     for (float, cursor) in records.iter().zip(cursors.iter_mut()) {
         if cursor.next >= float.items.len() {
             continue;
         }
+        // **A clip's hidden tail is drawn whole, on the page that holds the
+        // item it follows**: it is the rest of the text whose first lines
+        // that item ends, under the same reading-order stamp, so this page or
+        // a later one is the only place it reads in order. Not by its height,
+        // which says the same thing only while the column's `y` grows with
+        // its index, and a negative margin moves it back up. Never broken: it
+        // has no height to break, and breaking it spent a page an item.
+        if let Some(after) = float.follows {
+            if after <= column.done {
+                emit(
+                    &float.items,
+                    &float.blocks,
+                    cursor.next,
+                    float.items.len(),
+                    -top,
+                    Cutting::NONE,
+                    out,
+                );
+                cursor.next = float.items.len();
+                cursor.started = true;
+            }
+            continue;
+        }
+        let reach = column.reach;
         let start = cursor.next;
         if !cursor.started {
             // **A page's floats are the ones beside the column it holds**, and

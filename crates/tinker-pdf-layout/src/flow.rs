@@ -352,6 +352,22 @@ pub(crate) struct FloatRecord {
     /// §9.9.1 puts an `auto` positioned box in the same layer as a `z-index: 0`
     /// one, so the two are one number here rather than two.
     pub z: i32,
+    /// **A clipping box's hidden tail, and not a box**: how many of its own
+    /// flow's items come before it — the box's kept content ends with the
+    /// last of them ([`Builder::clip_tail`]). `None` for a float or a
+    /// positioned box.
+    ///
+    /// An index and not a height, because the tail is the rest of the text
+    /// whose first lines that item ends: one text node under one reading-order
+    /// stamp, which reads in order only if the tail is drawn on the same page
+    /// as the item before it or a later one. A height says that only while
+    /// the flow's `y` grows with its index, and a negative margin, or a float
+    /// broken over pages and moved down, is where it does not. So a tail in a
+    /// float's or a positioned box's own flow is folded into that box's items
+    /// at this index ([`fold_tails`]) and is broken over pages with it, and
+    /// one in the column is drawn on the page that holds the item it follows
+    /// ([`crate::fragment`]).
+    pub follows: Option<usize>,
 }
 
 /// A whole book as one continuous column, before it is cut into pages.
@@ -1603,7 +1619,9 @@ impl<M: Metrics> Builder<'_, M> {
     /// next box, follow the used height whatever was kept.
     ///
     /// **Out of the column, and not out of the book.** The items that left are
-    /// kept as an out-of-flow record of no height at the padding edge, with
+    /// kept as an out-of-flow record of no height at the padding edge, which
+    /// follows the last item kept wherever pages break it
+    /// ([`FloatRecord::follows`]), with
     /// every run in them **laid out and not painted** — CSS 2.2 §11.2's
     /// `visibility: hidden`, which is what a clip that hides all of a run makes
     /// it — so the text is still the layout's, in its reading order, and text
@@ -1648,6 +1666,9 @@ impl<M: Metrics> Builder<'_, M> {
             // in. Nothing else among them can share a stamp with this tail
             // (a float's text is its own nodes'), and a hidden record paints
             // nothing, so the move changes no ink.
+            //
+            // **After the last item kept, and not at a height**: see
+            // [`FloatRecord::follows`].
             let at = floats_before.min(self.flow.floats.len());
             self.flow.floats.insert(
                 at,
@@ -1658,6 +1679,7 @@ impl<M: Metrics> Builder<'_, M> {
                     bottom: line,
                     pushable: false,
                     z: 0,
+                    follows: Some(keep),
                 },
             );
         }
@@ -1681,11 +1703,18 @@ impl<M: Metrics> Builder<'_, M> {
             let record = &mut self.flow.blocks[*open];
             record.last = record.last.min(keep);
         }
+        // A descendant's tail that followed an item this cut took away follows
+        // this tail now: what came before it is in this one, which the insert
+        // above put ahead of it.
         for float in &mut self.flow.floats[floats_before..] {
-            if float.top >= line - EPSILON {
+            let taken = float.follows.is_some_and(|after| after > keep);
+            if taken || float.top >= line - EPSILON {
                 hide(&mut float.items, &mut float.blocks, Some(line));
                 float.top = line;
                 float.bottom = line;
+            }
+            if let Some(after) = float.follows.as_mut() {
+                *after = (*after).min(keep);
             }
         }
         self.pending = Pending::default();
@@ -2404,9 +2433,12 @@ impl<M: Metrics> Builder<'_, M> {
         let Sublayout {
             mut items,
             mut blocks,
-            floats: mut nested,
+            floats: nested,
             height,
         } = self.sublayout(node, outer_width, depth, avoid)?;
+        // A clip's hidden tail in the float's own flow is the float's own
+        // content, and is broken over pages with it. See [`fold_tails`].
+        let mut nested = fold_tails(&mut items, &mut blocks, nested);
 
         // A float with `clear` clears before it is placed: §9.5.2's *"the top
         // margin edge is moved below"* is about the box, and a float is a box.
@@ -2459,6 +2491,7 @@ impl<M: Metrics> Builder<'_, M> {
             // belongs whole on the next one.
             pushable: true,
             z: 0,
+            follows: None,
         });
         self.flow.floats.append(&mut nested);
         Ok(())
@@ -2531,6 +2564,9 @@ impl<M: Metrics> Builder<'_, M> {
             floats: nested,
             height,
         } = self.sublayout(node, outer_width, depth, avoid)?;
+        // A positioned box is broken over pages as a float taller than a page
+        // is, so its hidden tails are folded for the float's reason.
+        let nested = fold_tails(&mut items, &mut blocks, nested);
 
         // §10.3.7's third case and §10.6.4's: with neither inset of a pair
         // stated the box stays at its **static position** — where it would have
@@ -2556,6 +2592,7 @@ impl<M: Metrics> Builder<'_, M> {
             bottom: top + height,
             pushable: false,
             z,
+            follows: None,
         };
         if style.position == Position::Fixed {
             self.flow.fixed.push(record);
@@ -5785,6 +5822,72 @@ fn hide(items: &mut [Item], blocks: &mut [BlockRecord], at: Option<f64>) {
             ItemKind::Margin(_) | ItemKind::Edge => {}
         }
     }
+}
+
+/// Folds the hidden tails among a box's own records ([`FloatRecord::follows`])
+/// into the box's items, each after the item it follows, and hands back the
+/// records that are boxes.
+///
+/// **For a float and an absolutely positioned box**, whose items
+/// [`crate::fragment`] breaks over pages one at a time and whose continuation
+/// starts at the top of the next page wherever the column put it. A tail left
+/// as a record of its own was drawn at its column height instead: on an
+/// earlier page than the lines it follows, and on the last column page one
+/// item a page. Folded, it is broken with the box like any other of its
+/// items, and since it is the box's own content nothing else changes about
+/// it — it paints nothing, and its height is none.
+///
+/// Tails that follow the same item keep the order they are in, which is the
+/// order [`Builder::clip_tail`] gave them: the outer box's first. Linear in
+/// the items and the records; a box with no tail in it is not rebuilt.
+fn fold_tails(
+    items: &mut Vec<Item>,
+    blocks: &mut [BlockRecord],
+    records: Vec<FloatRecord>,
+) -> Vec<FloatRecord> {
+    if records.iter().all(|record| record.follows.is_none()) {
+        return records;
+    }
+    let mut boxes = Vec::new();
+    let mut tails: Vec<(usize, FloatRecord)> = Vec::new();
+    for record in records {
+        match record.follows {
+            Some(at) => tails.push((at, record)),
+            None => boxes.push(record),
+        }
+    }
+    // Stable, so two tails after one item stay in the order they were given.
+    tails.sort_by_key(|(at, _)| *at);
+    let old = std::mem::take(items);
+    let mut moved = Vec::with_capacity(old.len());
+    let mut tails = tails.into_iter().peekable();
+    // Only the items move: a tail has no records of its own, because
+    // [`Builder::clip_tail`] takes the range of every box in it away.
+    for (index, item) in old.into_iter().enumerate() {
+        while let Some((_, tail)) = tails.next_if(|(at, _)| *at <= index) {
+            items.extend(tail.items);
+        }
+        moved.push(items.len());
+        items.push(item);
+    }
+    for (_, tail) in tails {
+        items.extend(tail.items);
+    }
+    // Every record's range moves with its own first and last item, so a tail
+    // folded at a box's end is outside it and one folded inside it is inside.
+    for record in blocks.iter_mut() {
+        let Some(first) = record.first else {
+            continue;
+        };
+        let head = moved.get(first).copied().unwrap_or(items.len());
+        let end = match record.last.checked_sub(1) {
+            Some(last) if record.last > first => moved.get(last).map_or(items.len(), |at| at + 1),
+            _ => head,
+        };
+        record.first = Some(head);
+        record.last = end;
+    }
+    boxes
 }
 
 /// A `height` that is a length: §10.5 makes a percentage of an `auto`-height

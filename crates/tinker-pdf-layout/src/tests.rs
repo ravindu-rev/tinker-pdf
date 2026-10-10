@@ -7621,6 +7621,141 @@ fn a_clip_inside_a_clip_hides_its_text_in_document_order() {
     conserved(&tree, &laid);
 }
 
+/// The index of the page a run reading `body` is on.
+fn page_of(laid: &Layout, body: &str) -> usize {
+    laid.pages
+        .iter()
+        .position(|page| page.runs.iter().any(|run| run.text == body))
+        .unwrap_or_else(|| panic!("no run reads {body:?}"))
+}
+
+/// **A hidden tail inside a float is broken over pages with the float**, and
+/// so is one inside an absolutely positioned box.
+///
+/// The box keeps three of five lines and hides the last two. The float is
+/// thirty-six points tall on twenty-point pages, so it is broken after each
+/// line and each continuation starts at the top of the next page. The hidden
+/// tail is the same text node's last two lines under the same reading-order
+/// stamp, so it reads after `cccc` only if it is drawn on `cccc`'s page or a
+/// later one. Drawn as a record of its own at its column height, it was drawn
+/// with `aaaa` and `bbbb`, a line a page, and read `aaaa dddd bbbb eeee cccc`
+/// (at thirty points, `aaaa bbbb dddd cccc eeee`). And on that page and not
+/// a later one: the float's next paragraph is a page further down, and a tail
+/// folded at the end of the float would be drawn with it.
+///
+/// The `layout` fuzz target's conservation assertion found it, in floats
+/// around `overflow: hidden` boxes of a stated height on twenty- and
+/// sixty-point pages.
+#[test]
+fn a_hidden_tail_is_broken_over_pages_with_the_float_it_is_in() {
+    use tinker_pdf_css::property::Overflow;
+    let mut clipped = overflowing(Overflow::Hidden);
+    clipped.height = Size::Length(LengthPercentage::Px(36.0));
+    let tree = |outer: ComputedStyle| {
+        BoxNode::element(
+            block(),
+            vec![BoxNode::element(
+                outer,
+                vec![
+                    BoxNode::element(clipped.clone(), vec![text("aaaa bbbb cccc dddd eeee")]),
+                    para("ffff"),
+                ],
+            )],
+        )
+    };
+    let mut absolute = placed_at(Position::Absolute, None, None, None);
+    absolute.width = Size::Length(LengthPercentage::Px(40.0));
+    for outer in [floated(Float::Right, 40.0), absolute] {
+        let tree = tree(outer);
+        for height in [20.0, 30.0, 400.0] {
+            let laid = run(&tree, 100.0, height);
+            conserved(&tree, &laid);
+            assert_eq!(page_of(&laid, "dddd"), page_of(&laid, "cccc"), "{height}");
+            assert_eq!(page_of(&laid, "eeee"), page_of(&laid, "cccc"), "{height}");
+        }
+        // A line a page, and no page past the box's last line: a hidden
+        // record of no height is not what makes a page.
+        let laid = run(&tree, 100.0, 20.0);
+        assert_eq!(laid.pages.len(), 4);
+        for (at, line) in ["aaaa", "bbbb", "cccc", "ffff"].into_iter().enumerate() {
+            assert_eq!(painted_text(&laid, at), line);
+        }
+    }
+}
+
+/// **A hidden tail in the column is drawn on the page of the line it
+/// follows**, and not on the page its height falls on — the two disagree
+/// once a negative margin takes the column's `y` back up.
+///
+/// The outer box is a scroll container, so the inner box's `-20px` margin is
+/// inside it and takes the inner box from fourteen points up to minus six.
+/// The page breaks in the outer box's ten-point margin, above its four-point
+/// top edge, so the next page's column begins at ten. The inner box, six
+/// points tall, keeps `aaaa` at minus six, on that next page, and hides
+/// `bbbb` at its padding edge, zero, which is above ten: placed by height,
+/// the tail was drawn on the first page and read `bbbbaaaa`.
+///
+/// The `layout` fuzz target's conservation assertion found it, with a
+/// `-14.25px` first-child margin inside an `overflow: hidden` box on a
+/// twenty-point page.
+#[test]
+fn a_hidden_tail_is_drawn_on_the_page_of_the_line_it_follows() {
+    use tinker_pdf_css::property::Overflow;
+    let mut outer = overflowing(Overflow::Hidden);
+    outer.margin.top = px(10.0);
+    outer.padding.top = LengthPercentage::Px(4.0);
+    let mut inner = overflowing(Overflow::Hidden);
+    inner.margin.top = px(-20.0);
+    inner.width = Size::Length(LengthPercentage::Px(40.0));
+    inner.height = Size::Length(LengthPercentage::Px(6.0));
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            outer,
+            vec![BoxNode::element(inner, vec![text("aaaa bbbb")])],
+        )],
+    );
+    let laid = run(&tree, 100.0, 12.0);
+    conserved(&tree, &laid);
+    assert_eq!(page_of(&laid, "aaaa"), 1);
+    assert_eq!(page_of(&laid, "bbbb"), 1);
+    for page in [11.0, 14.0, 20.0, 400.0] {
+        conserved(&tree, &run(&tree, 100.0, page));
+    }
+
+    // **A tail the outer cut took away follows the outer box's line.** The
+    // inner box hides `dddd eeee` after `cccc`; the outer box, one line tall,
+    // then takes `bbbb cccc` out of the column too, and `cccc` with them. Both
+    // tails follow `aaaa` now and are drawn on its page, and not with the
+    // paragraphs that came after, a line a page.
+    let clipped = |height: f64| {
+        let mut style = overflowing(Overflow::Hidden);
+        style.width = Size::Length(LengthPercentage::Px(40.0));
+        style.height = Size::Length(LengthPercentage::Px(height));
+        style
+    };
+    let tree = BoxNode::element(
+        block(),
+        vec![
+            BoxNode::element(
+                clipped(12.0),
+                vec![BoxNode::element(
+                    clipped(36.0),
+                    vec![text("aaaa bbbb cccc dddd eeee")],
+                )],
+            ),
+            para("after"),
+            para("again"),
+        ],
+    );
+    let laid = run(&tree, 100.0, 12.0);
+    conserved(&tree, &laid);
+    for line in ["aaaa", "bbbb", "cccc", "dddd", "eeee"] {
+        assert_eq!(page_of(&laid, line), 0, "{line}");
+    }
+    assert_eq!(page_of(&laid, "after"), 1);
+}
+
 /// **A clip is written only where the content reaches past the padding box**,
 /// and an axis the box does not clip is unbounded.
 #[test]
