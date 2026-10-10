@@ -58,12 +58,12 @@ halves, the first of them M.
 - **Auto-tagging.** No structure is inferred for an untagged file; it is
   reported as untagged. [design/reading-order.md](reading-order.md) infers an
   order and labels it inferred, and nothing it infers reaches a verdict here.
-  *No longer a non-goal, 9 October 2026*: auto-tagging into a new document is
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: auto-tagging into a new document is
   [ROADMAP](../ROADMAP.md) row SD-07; an inferred tree still never reaches a
   verdict about the file it was inferred from.
 - **Fixing a file.** No repair mode; validation reports and the tagged writer
   (`PageBuilder::tagged`) conforms or refuses, as the PDF/A profile does.
-  *No longer a non-goal, 9 October 2026*: structure-tree editing and repair are
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: structure-tree editing and repair are
   [ROADMAP](../ROADMAP.md) rows SD-07 and SD-08.
 - **A full PDF 2.0 namespace model.** ISO 14289-2's role maps are namespaced
   (`/RoleMapNs`, `/NS`), and [design/tagged-pdf.md](tagged-pdf.md) names PDF
@@ -72,7 +72,7 @@ halves, the first of them M.
   designed around it here.
 - **Assistive-technology output.** Bytes to verdicts; a screen-reader bridge
   is an embedder's.
-  *No longer a non-goal, 9 October 2026*: a platform-neutral accessibility tree and
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: a platform-neutral accessibility tree and
   a textual preview are [ROADMAP](../ROADMAP.md) row SD-09; the bridge itself
   stays the embedder's.
 

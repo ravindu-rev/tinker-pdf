@@ -50,16 +50,16 @@ records what they measured.
 - **Output intents and proofing** (14.11.5): `/OutputIntents` handling
   belongs to [pdfa](pdfa.md); this design converts for the screen, to
   sRGB, always.
-  *No longer a non-goal, 9 October 2026*: soft proofing is [ROADMAP](../ROADMAP.md)
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: soft proofing is [ROADMAP](../ROADMAP.md)
   row RC-05.
 - **N-channel output, overprint and spot-ink simulation.** `Separation` /
   `DeviceN` keep flowing through their tint transforms (8.6.6.4, 8.6.6.5);
   simulating ink interaction is a different renderer.
-  *No longer a non-goal, 9 October 2026*: overprint simulation and separations are
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: overprint simulation and separations are
   [ROADMAP](../ROADMAP.md) rows RC-03 and RC-04.
 - **Black point compensation, gamut mapping beyond intent selection,
   iccMAX/v5 profiles, named-colour tags.** Refused by name, per ruling 2.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) rows RC-02 and
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) rows RC-02 and
   RC-20.
 - **Profiles embedded inside image codecs.** JPX colour boxes already have
   their own path in `tinker-pdf-filters`; routing them through this CMM is

@@ -39,17 +39,17 @@ adjudicator.
 
 - **Tables in images.** A scanned table is pixels; OCR is a host seam the
   roadmap keeps as a decision, and nothing here reads a raster.
-  *No longer a non-goal, 9 October 2026*: OCR is the roadmap's last tier, and
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: OCR is the roadmap's last tier, and
   tables in images are its row OC-15a ([ROADMAP](../ROADMAP.md)).
 - **Tables across pages.** A table continued on the next page is two tables
   here, each named `TableWarning::MayContinue` when its last rule is the
   page's bottom margin. Joining them is a document-level question the sibling
   design's cross-page pass would own, and it is not designed here.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row FT-32.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row FT-32.
 - **Nested tables.** A lattice inside another's frame is refused by name
   (`TableWarning::NestedLattice`) and the outer table is returned. Real
   documents have them; the first delivery does not guess at them.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row FT-32.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row FT-32.
 - **Writing a `/Table`.** No inferred grid enters a structure tree, a written
   document, or a PDF/UA verdict — the same line
   [design/reading-order.md](reading-order.md) draws for orders.

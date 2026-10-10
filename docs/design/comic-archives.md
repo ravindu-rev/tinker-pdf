@@ -44,18 +44,18 @@ because a `-sys` crate's manifest says whatever its author typed.
 - **Encryption**, in any of the three. AES-256 is offered by both 7z and RAR 5
   and is a named non-goal shared with `tinker-pdf-zip`, refused as
   `Encrypted` rather than as an unreadable stream three layers down.
-  *No longer a non-goal, 9 October 2026*: through a password seam,
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: through a password seam,
   [ROADMAP](../ROADMAP.md) row SE-14.
 - **Writing** any of these formats. Every reader here is a reader. *No
   longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) rows FO-11 and FO-12c.
 - **Multi-volume sets.** The fragment that happens to be present is not the
   archive, in RAR and in tar's type `M` alike.
-  *No longer a non-goal, 9 October 2026*: a whole set is [ROADMAP](../ROADMAP.md)
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: a whole set is [ROADMAP](../ROADMAP.md)
   row SE-14; a lone fragment still is not the archive.
 - **Sparse files.** Refused rather than returned with their holes closed up,
   which is what a reader that ignored the flag would hand back: bytes in the
   wrong places are a picture that decodes to the wrong thing.
-  *No longer a non-goal, 9 October 2026*: read with their holes, [ROADMAP](../ROADMAP.md)
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: read with their holes, [ROADMAP](../ROADMAP.md)
   row FI-25.
 - **7z coders beyond the ones listed** (BCJ, BCJ2, bzip2 and PPMd joined the
   four on 26 September 2026), and **folders whose coder graph is not a tree**.

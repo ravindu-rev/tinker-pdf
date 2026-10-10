@@ -51,7 +51,7 @@ binding stays a 1:1 projection with no logic of its own.
 - No callbacks into host code. `FontProvider` stays the byte-blob
   `SimpleFontProvider` projection `tpdf_document_set_fonts` already is; no
   host closure ever runs inside the engine, so no unwind crosses the boundary.
-  *No longer a non-goal, 9 October 2026*: a signing callback across the C ABI is the
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: a signing callback across the C ABI is the
   owner's instruction ([ROADMAP](../ROADMAP.md) SG-09), with script host requests
   (FJ-17) and warning and progress callbacks (SU-21) beside it; how each
   crosses is the owner's to settle (H-28).

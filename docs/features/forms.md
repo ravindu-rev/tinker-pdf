@@ -540,7 +540,7 @@ let bytes = editor.save(&WriteOptions::default());
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| `eval`, `try`, `switch`, `for...in`, `typeof`, `delete`, `with`, `class`, `let`/`const`, `import`/`export`, regular expressions, object literals, prototypes — and `function` anywhere but document scope | `ScriptError::Syntax` — each word reserved and refused outright | a construct silently approximated is one rename away from running it | [ROADMAP](../ROADMAP.md) FJ-01…FJ-03 |
+| `eval`, `try`, `switch`, `for...in`, `typeof`, `delete`, `with`, `class`, `let`/`const`, `import`/`export`, regular expressions, object literals, prototypes — and `function` anywhere but document scope | `ScriptError::Syntax` — each word reserved and refused outright | a construct silently approximated is one rename away from running it | [ROADMAP](../ROADMAP.md) FJ-01…FJ-03f |
 | Anything at document scope that is not a function definition | `ScriptError::NotADefinition`, naming the `/Names /JavaScript` key through `CalcError::DocumentScript` | a skipped statement builds a name table silently missing what it would have defined | — |
 | A document-level helper that calls itself, directly or through another | `ScriptError::Recursion` | a depth cap makes the answer depend on a number nobody can predict from the file — the cascade rule's argument | — |
 | More than 256 document-level functions | `ScriptError::TooManyFunctions` | a name table is a lookup scanned per unknown name, so a document-controlled count of them is document-controlled work | — |

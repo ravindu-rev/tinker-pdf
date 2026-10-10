@@ -59,7 +59,7 @@ A picture that quietly drops one of these looks finished.
   rasterising the element inside the writer — at a resolution the book does
   not state, with the vector text under it lost to extraction. The element is
   drawn unfiltered. `Warning::FilterUnsupported`.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row CD-10, exact
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row CD-10, exact
   vector mappings first.
 - ~~**Masks** (§14.4)~~ — **drawn since the milestones**; see *As built*. A
   mask is a rendered alpha channel, and PDF has one: 11.6.5.2's soft mask.
@@ -71,7 +71,7 @@ A picture that quietly drops one of these looks finished.
 - **`<foreignObject>`** (§23). Its content is a different document language;
   reading it here would be a second XHTML reader.
   `Warning::ForeignObjectUnsupported`.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row CD-11, laid
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row CD-11, laid
   out by the facade so this crate stays a leaf.
 - **`<textPath>`, `<tref>` and `<altGlyph>`** (§10.13, §10.10, §10.14).
   Text on a path places each glyph by its advance along the curve and turns
@@ -107,7 +107,7 @@ A picture that quietly drops one of these looks finished.
 - **`switch`/`requiredFeatures` conditional processing** (§5.8). Every branch
   of a `<switch>` in a book is a language variant, and choosing one is a
   reading-system policy this build does not have.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row CD-09.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row CD-09.
 - **Writing an SVG.** This is a reader. The writer is the facade's
   (`crates/tinker-pdf/src/svg_out.rs`, `Page::to_svg`), a `Device` held to
   this crate by reading every file it makes back through it; it never emits

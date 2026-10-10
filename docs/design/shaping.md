@@ -66,21 +66,21 @@ engine.
 - **AAT (`morx`) and Graphite tables.** OpenType Layout only; a face
   carrying only `morx` shapes as if unshaped, with a typed warning under
   ruling 10.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) rows FT-07c and FT-07d.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) rows FT-07c and FT-07d.
 - **Variation-aware shaping.** `fvar`/`avar`/`HVAR` deltas applied to
   GPOS values are deferred until a corpus document demands them
   (ruling 3).
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row FT-07a, with
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row FT-07a, with
   variable fonts themselves FT-05; ruling 3 as amended orders it, and no
   longer decides it.
 - **Vertical text shaping** (`vhea`/`vmtx`, `vert`/`vrt2`). *No longer a
-  non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row FT-07b.
+  non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row FT-07b.
 - **Font selection and fallback.** Which face a run gets stays
   `css-fonts-4` §5 matching above the layout crate; the shaper takes one
   face and never picks another.
 - **Justification beyond space adjustment.** No `JSTF`, no kashida
   elongation; recorded here so it is a decision, not an omission.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row FT-07e.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row FT-07e.
 
 ## Design
 

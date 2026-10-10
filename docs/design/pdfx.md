@@ -63,13 +63,13 @@ no false-negative bar — which is a different proposition from the one
   opposite of what a rule engine over one file can check. X-4p and X-6p, which
   reference only an external *profile*, are in scope because the reference
   itself is checkable.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row SD-11, which
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SD-11, which
   validates what one file can show and names the rest.
 - **PDF/X-1:2001.** The 2001 level that admitted OPI and encryption; the
   application notes call it deprecated and every later part dropped it. A file
   claiming it is reported as claiming a level this build does not validate,
   which is a finding rather than a silence.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row SD-11.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SD-11.
 - **The ICC characterization registry.** 15930's output intent may name a
   registered printing condition instead of embedding a profile, and the
   application notes (2.16.2) expect preflight tools to "be shipped with a list
@@ -77,17 +77,17 @@ no false-negative bar — which is a different proposition from the one
   with a date on it, and vendoring it is a decision to take when a corpus file
   turns on it; until then a `RegistryName` is checked for shape and its
   identifier is not looked up.
-  *No longer a non-goal, 9 October 2026*: the lookup, from registry bytes the host
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: the lookup, from registry bytes the host
   supplies, is [ROADMAP](../ROADMAP.md) row SD-11.
 - **Trapping, screening, proofing.** `/Trapped` is a flag this build reads
   and writes; it traps nothing. Colour-managed rendering with the output
   intent's profile is the renderer's row, not this one.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) rows FO-24 (trapping),
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) rows FO-24 (trapping),
   RC-08 (screening) and RC-05 (proofing).
 - **Conversion.** No "make this file PDF/X". Validation reports; the builder
   conforms; nothing rewrites colour or fonts — the same line
   [design/pdfa.md](pdfa.md) draws.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row SD-12.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SD-12.
 - **Receiver restrictions ("PDF/X Plus").** The notes describe publishers
   forbidding JPEG or TrueType on top of the standard (2.19). That is a policy
   layer a caller writes over the findings, not a rule here.

@@ -50,7 +50,7 @@ those are two different things and a green tick over both would be a lie.
 - **Encoding.** Nothing here writes a JPEG XR file. The fixtures are made by
   the platform encoder, which is a supplier of bytes and not an adjudicator
   (ruling 13).
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row FO-20.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row FO-20.
 - **The interleaved alpha image plane** (8.3.18), refused by name. The
   separate form is what exists in evidence here; the interleaved one would be
   built when something emits it.

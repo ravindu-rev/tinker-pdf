@@ -33,6 +33,9 @@ These are given; this document states each boundary, not the argument.
   open as a `Document` by synthesizing a real PDF at `open`, so every
   downstream capability applies to all four ([cbz](features/cbz.md),
   [xps](features/xps.md), [epub](features/epub.md)).
+  *Since 9 October 2026* every further input format is a row of the
+  [ROADMAP](ROADMAP.md)'s formats-in tier (FI); this locked decision stands
+  until the owner amends it (H-08).
 - **API stability:** everything is 0.x; the facade freezes at 0.1.0.
   Internal crates never gain stability promises at all.
 

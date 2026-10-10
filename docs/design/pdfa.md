@@ -62,12 +62,12 @@ and Level A validation from this design and nothing else of it.
   that lives in a **content stream**: a `/Lang` in a marked-content property
   list (two fixtures), and 6.2.11.7.3's `/ActualText` per character (five).
 - **PDF/X and PDF/E.** Out entirely.
-  *No longer a non-goal, 9 October 2026*: PDF/X has its own design
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: PDF/X has its own design
   ([pdfx.md](pdfx.md)), and PDF/E is [ROADMAP](../ROADMAP.md) row SD-13.
 - **Conversion.** No "fix this file into PDF/A" repair mode. Validation
   reports; building conforms; nothing rewrites an arbitrary document's
   colour or fonts into compliance.
-  *No longer a non-goal, 9 October 2026*: conversion with fix-ups is
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: conversion with fix-ups is
   [ROADMAP](../ROADMAP.md) row SD-02.
 - **A general RDF store.** XMP is RDF/XML, and the amendment on
   `xmp_metadata` in `crates/tinker-pdf-cos/src/outline.rs` already records
@@ -79,7 +79,7 @@ and Level A validation from this design and nothing else of it.
   ([THIRDPARTY.md](../../THIRDPARTY.md)) stands: the writer profile
   requires embedding, therefore the caller must supply face bytes, and the
   API says so instead of shipping a font.
-  *No longer a non-goal, 9 October 2026*: fallback faces and embedding missing
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: fallback faces and embedding missing
   fonts on write are [ROADMAP](../ROADMAP.md) rows FT-01, FT-02 and FT-12.
 
 ## Design

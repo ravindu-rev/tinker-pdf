@@ -47,12 +47,12 @@ work — see "The writer, as built".
   design measures the structure clauses it implements, nothing more.
 - **Auto-tagging.** No structure is inferred for untagged documents; an
   untagged file reports "no structure tree", not a guess.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row SD-07, writing a
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SD-07, writing a
   new document's tree; reading still reports what the file states.
 - **The basic layout model** (14.8.3) and structure attributes (14.8.5):
   `/Placement`, `/BBox`, table row/column spans are parsed no further than
   storage requires.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row SD-08.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SD-08.
 - **Writing complete tagged structure.** `DocumentBuilder` gains
   `/StructParents` allocation and a minimal element tree for its own output;
   a general tagging API is future work. *Amended October 2026: the general

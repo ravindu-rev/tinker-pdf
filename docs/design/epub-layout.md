@@ -59,11 +59,11 @@ table.
   would say otherwise is absent. An author who states a `width` and a `height`
   that disagree with the picture's proportions gets a stretched picture,
   asserted rather than assumed.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row CD-15.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row CD-15.
 - **A second layout pass.** `::first-line` and `::first-letter` select part of
   an already laid-out box; honouring either means laying the box out twice.
   Parsed, no box, named.
-  *No longer a non-goal, 9 October 2026*: `::first-line`'s second pass is
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: `::first-line`'s second pass is
   [ROADMAP](../ROADMAP.md) row CD-15 (`::first-letter` has landed).
 - **`max-height` shorter than its content, on a box that does not clip.** The
   flow is one column whose `y` never goes backwards, so a box already emitted
@@ -71,7 +71,7 @@ table.
   says so. A box that clips its block axis is the exception: what is past its
   padding box is not drawn, so it leaves the column — laid out and not
   painted, its text still conserved — and the box is the height it says.
-  *No longer a non-goal, 9 October 2026*: [ROADMAP](../ROADMAP.md) row CD-02.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row CD-02.
 - **A tree whose depth is unbounded.** `Builder::block` recurses once per level
   of the document, so the frame of that one function is what the depth cap is
   measured in stack against — which is why its steps are methods rather than

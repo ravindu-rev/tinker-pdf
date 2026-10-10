@@ -28,13 +28,13 @@ living in one feature's head.
    documents need it — not before, however interesting it looks.
 
    **Amended 9 October 2026, by the owner's decision on the roadmap's
-   scope.** The owner decided that this engine reaches parity with the field
-   and goes past it: every capability a mature, widely deployed PDF engine
+   scope.** The owner decided that this engine has every capability the field
+   offers, and more: every capability a mature, widely deployed PDF engine
    offers and every capability the rest of the field offers, with speed
    verified by tests, form JavaScript a complete implementation, signing with
-   a private key in the engine, and OCR in scope and last. **Every row of the
-   [roadmap](ROADMAP.md) is in scope by that decision**, and none waits for a
-   corpus to ask for it. What this ruling still decides is the order: inside
+   a private key in the engine, and OCR in scope and last. **Every capability
+   that decision covers is in scope** — the [roadmap](ROADMAP.md)'s rows of
+   9 October 2026 record them — and none waits for a corpus to ask for it. What this ruling still decides is the order: inside
    a tier, corpus hit-rate evidence puts the row a real document needs before
    the row none has asked for yet, and a capability whose count is zero is
    late in its tier rather than refused. The tiers themselves run in the
