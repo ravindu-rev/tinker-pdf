@@ -493,6 +493,48 @@ fn fallback_glyph(face: Face, ch: char) -> Option<(u16, f64)> {
     Some((glyph, advance))
 }
 
+/// How wide `face` sets `ch` where no stand-in draws it — through the simple
+/// font's own encoding or through its overflow font — in thousandths of an
+/// em. The one number for both ends: [`BookMetrics::advance`] measures with
+/// it and [`Fonts::register`] writes the overflow font's `/Widths` from it,
+/// so the pen layout moved and the pen a reader moves agree.
+///
+/// - **A nonspacing mark (`Bidi_Class` `NSM`) is zero.** It is the kind of
+///   character that has no advance of its own, and the standard 14 have no
+///   glyph for one to say otherwise; [`Standard14::advance`] answers with a
+///   space's width for any character its table lacks, and a Hebrew point or
+///   an Arabic haraka measured that way was a glyph as wide as a letter,
+///   drawn after its letter. Extraction pairs a mark with the base it sits
+///   on, and a letter's second such mark sat past its letter's box, nearer
+///   the glyph drawn next, and was read with it:
+///   `sample-regime-anticancer-arabic.epub`'s `يًّا` came back with its
+///   FATHATAN on the letter before (CI run 38041540464). Zero, it is drawn
+///   on its letter ([`draw_coded`]). The class is the one [`mark_clusters`]
+///   and ruling 14's pairing both test, so a character measured as a mark
+///   is drawn and read as one. Zero comes first: a combining kana voiced
+///   sound mark is `W` to UAX #11 and a mark all the same.
+/// - **An East Asian character is one em**, in every face that has one, and
+///   the standard 14 have none at all — so the number cannot come from
+///   `Standard14`, which would set a Japanese line at a third of its width.
+///   UAX #11's own classification is what decides, through the table
+///   `tinker-pdf-layout` already vendors for UAX #14.
+/// - **Anything else is `Standard14`'s**: Adobe's published advance, or its
+///   base letter's, or a space's.
+///
+/// Not [`Standard14::advance`] itself, which a PDF *read* without `/Widths`
+/// also asks: a leaf crate has no `Bidi_Class` table, and whether a document
+/// that names a standard face and maps a code to a mark meant it to advance
+/// is that document's to say, not this painter's.
+fn standard_width(face: Face, ch: char) -> f64 {
+    if bidi_class(ch) == BidiClass::NSM {
+        return 0.0;
+    }
+    if tinker_pdf_layout::unicode::is_east_asian(ch) {
+        return 1000.0;
+    }
+    f64::from(face.standard().advance(ch).0)
+}
+
 /// Advances and line heights for a book, through whichever face each character
 /// resolves to.
 #[derive(Clone, Copy, Debug)]
@@ -539,18 +581,7 @@ impl Metrics for BookMetrics<'_> {
                 if let Some((_, advance)) = fallback_glyph(face, ch) {
                     return advance * font.size;
                 }
-                // An East Asian character is one em wide in every face that has
-                // one, and the standard 14 have none at all — so the number
-                // cannot come from `Standard14`, which would answer with a
-                // Latin space's advance and set a Japanese line at a third of
-                // its width. UAX #11's own classification is what decides,
-                // through the table `tinker-pdf-layout` already vendors for
-                // UAX #14.
-                if tinker_pdf_layout::unicode::is_east_asian(ch) {
-                    return font.size;
-                }
-                let (advance, _) = face.standard().advance(ch);
-                f64::from(advance) / 1000.0 * font.size
+                standard_width(face, ch) / 1000.0 * font.size
             }
         }
     }
@@ -1182,17 +1213,11 @@ impl<'a> Fonts<'a> {
             // whatever glyph it has at that code. They differ for every
             // character in this array by construction, and a `/Widths` that
             // disagreed with the layout would put a viewer's text cursor
-            // somewhere the text is not.
+            // somewhere the text is not — or, for a mark, put it past its
+            // letter. [`standard_width`] is the number layout measured.
             let widths: Vec<u16> = self.overflow[index]
                 .iter()
-                .map(|c| {
-                    let em = if tinker_pdf_layout::unicode::is_east_asian(*c) {
-                        1000.0
-                    } else {
-                        f64::from(face.standard().advance(*c).0)
-                    };
-                    em.round().clamp(0.0, 65535.0) as u16
-                })
+                .map(|c| standard_width(face, *c).round().clamp(0.0, 65535.0) as u16)
                 .collect();
             builder.add_named_font(
                 &face.overflow_resource(),
@@ -5025,7 +5050,58 @@ fn split_after_spaces(slice: &str) -> Vec<&str> {
     out
 }
 
+/// How far short of its base's end a mark [`draw_coded`] positions is drawn,
+/// in ems: a hundredth, or half the base where the base is narrower than two
+/// hundredths.
+///
+/// Extraction (`tinker-pdf-content`) reads a glyph of no advance as a box a
+/// thousandth of an em wide running right from where it is drawn, and ruling
+/// 14 (`text_order.rs`) pairs a mark with the base whose box holds that box's
+/// centre. At its base's end exactly, a mark's box lies in the glyph drawn
+/// next, which is what read a decomposed `e\u{301}` beside a right-to-left
+/// word as an `e` and an accented space. A hundredth of an em inside, its
+/// centre is in its base's box by nine and a half thousandths, far more than
+/// the half thousandth a composite font's `/W` rounds an advance by, and the
+/// distance is not one a reader sees: the Liberation stand-in's Latin marks
+/// are drawn left of their origin, to sit over the letter before them, and
+/// move a tenth of a point at twelve.
+const MARK_INSET: f64 = 0.01;
+
+/// Where a mark of no advance riding on the glyph drawn at `start`, `width`
+/// wide, is drawn: [`MARK_INSET`] short of the glyph's end, inside its box.
+fn mark_at(start: f64, width: f64, font_size: f64) -> f64 {
+    let width = width.max(0.0);
+    start + width - (font_size * MARK_INSET).min(width / 2.0)
+}
+
 /// One standard-14 stretch, a character at a time.
+///
+/// A character is drawn where the pen stands, and the pen moves by its
+/// advance and `letter-spacing`. The one exception is a nonspacing mark of
+/// no advance drawn after its letter ([`coded_order`]'s `rides`): where the
+/// pen stood, at its letter's end, its box lay in the next glyph's and
+/// extraction read it there. So it is drawn **inside its letter's box**, at
+/// [`mark_at`], by a text object of its own, and is read with its letter
+/// whatever the spacing — a letter's second and third marks too, in either
+/// direction — while the pen moves as layout measured. A text object of its
+/// own is the one way to state a position for one glyph that a segment's
+/// single string of codes leaves, and it costs a few dozen bytes of content
+/// stream a mark and nothing in what extraction sees: a line closed by an
+/// `ET` resumes at a text object that starts left of where it stopped, as
+/// the mark's does, and at one that starts within half an em right of it,
+/// as the glyph after the mark does (`tinker-pdf-content`'s `TextDevice`).
+///
+/// A mark whose letter is not in the slice — styled apart from it, or left
+/// to the standard 14 by a face of the book's own that draws its letter —
+/// rides on nothing here. In a left-to-right run its letter was drawn just
+/// before the slice, ending where the slice starts less a `letter-spacing`
+/// (this run's is the one to hand), so a mark that opens the slice is drawn
+/// [`MARK_INSET`] inside that end: drawn at the pen, it was read with the
+/// glyph after it on a line ruling 14 reorders, `x<b>e</b>\u{301}x` beside a
+/// right-to-left word reading `xex\u{301}`. In a right-to-left run the
+/// letter is drawn to the right of the slice, by a run the content stream
+/// may have written earlier, and the mark is drawn where the pen stands: a
+/// known limit `epub.md` names.
 ///
 /// Returns where the pen ended, in layout pixels.
 #[expect(
@@ -5049,8 +5125,21 @@ fn draw_coded(
     // spills into the overflow font is two show operations and not one, and
     // the second's origin is wherever the first's advance left it.
     let mut segment: Option<Segment> = None;
+    // Where the last character drawn that is not a mark started, and its
+    // advance: what the marks drawn after it ride on.
+    let mut base: Option<(f64, f64)> = None;
+    // Whether only marks have been drawn so far in a left-to-right run: a
+    // mark whose letter ended the run or the face segment drawn just before
+    // this one, at its left.
+    let mut leading = !reads_right_to_left(run);
+    let start = x;
 
-    for ch in coded_order(run, slice, |ch| metrics.advance(ch, &font) > 0.0) {
+    for (ch, rides) in coded_order(run, slice) {
+        let mark = rides || bidi_class(ch) == BidiClass::NSM;
+        if !mark {
+            base = None;
+            leading = false;
+        }
         let chosen = choose(fonts.faces(), &font, Some(ch));
         let Some(coded) = fonts.encode(chosen, ch) else {
             // No code at all: the character is not drawn. Counted by
@@ -5058,9 +5147,22 @@ fn draw_coded(
             // exactly as many characters as the report says.
             continue;
         };
-        let same = segment
-            .as_ref()
-            .is_some_and(|open| open.resource == coded.resource());
+        let advance = metrics.advance(ch, &font);
+        let placed = match (mark && advance == 0.0, rides) {
+            (false, _) => None,
+            (true, true) => base.map(|(at, width)| mark_at(at, width, run.font_size)),
+            // Its letter ended where this slice starts, less the spacing
+            // after it — this run's, the one to hand — so the mark goes
+            // inside it as though it rode on it.
+            (true, false) if leading => {
+                Some(start - run.letter_spacing - run.font_size * MARK_INSET)
+            }
+            (true, false) => None,
+        };
+        let same = placed.is_none()
+            && segment
+                .as_ref()
+                .is_some_and(|open| open.resource == coded.resource());
         if !same {
             flush(page, segment.take(), size, baseline, run, frame);
             segment = Some(Segment {
@@ -5069,7 +5171,7 @@ fn draw_coded(
                 codes: Vec::new(),
                 glyphs: Vec::new(),
                 characters: String::new(),
-                x,
+                x: placed.unwrap_or(x),
             });
         }
         if let Some(open) = segment.as_mut() {
@@ -5079,7 +5181,15 @@ fn draw_coded(
             }
             open.characters.push(ch);
         }
-        x += metrics.advance(ch, &font) + run.letter_spacing;
+        if placed.is_some() {
+            // The mark's own text object: what follows is drawn from the
+            // pen, in another.
+            flush(page, segment.take(), size, baseline, run, frame);
+        }
+        if !mark {
+            base = Some((x, advance));
+        }
+        x += advance + run.letter_spacing;
         if ch == ' ' {
             x += run.word_spacing;
         }
@@ -5089,7 +5199,9 @@ fn draw_coded(
 }
 
 /// The characters of a standard-14 `slice` of `run` in the order they are
-/// drawn, left to right: UAX #9's rule L2.
+/// drawn, left to right: UAX #9's rule L2. Each comes with whether it
+/// **rides** on the character drawn before it — a nonspacing mark after its
+/// own base, which [`draw_coded`] draws inside that base's box.
 ///
 /// [`draw_coded`] writes a code where the pen stands and moves the pen
 /// right, so the order it is handed is the order the page shows. Handed
@@ -5143,89 +5255,87 @@ fn draw_coded(
 /// Characters*): the overflow font draws what it is given, and a page short
 /// of a character is what conservation counts.
 ///
-/// Inside a unit of a right-to-left slice, which side of its letter a mark
-/// is drawn on is decided by whether it has an advance (`spacing`), because
-/// nothing here positions a mark and ruling 14's extraction pairs a mark
-/// with the base nearest it along the line:
+/// **Inside a unit, the marks are drawn after their letter, in the order
+/// written, in either direction** — L3's arrangement — and each rides on the
+/// letter. A mark the overflow font draws has no advance ([`standard_width`])
+/// and nor has one the Liberation stand-in draws, but for thirteen of its
+/// bold serif's (the medieval superscript letters, U+0363 to U+036F, which
+/// it sets as glyphs of their own after their letter); a mark of no advance
+/// moves the pen by `letter-spacing` alone, and [`draw_coded`] draws it
+/// inside its letter's box, where ruling 14's extraction pairs it with that
+/// letter: the neighbour, in content order, whose box holds its centre. How
+/// that came to be, since each step was a fix of its own:
 ///
-/// - **a mark with an advance** — the overflow font's, as wide as a letter —
-///   is a glyph of its own, drawn after its letter as L3 has it. Its centre
-///   then lies exactly as far outside its letter's box as outside the box of
-///   the glyph drawn next, and which of the two reads it is decided by how
-///   the two distances round: its letter at most sizes, not at every one —
-///   a default build's `a מֶלֶךְ,` reads back `a מלֶךְ,ֶ` at a `font-size`
-///   of `12.5px` and of `14px`, two of the 32 half-pixel sizes from 9 to
-///   24.5. A letter's second such mark, drawn after its first, is nearer the
-///   next glyph than its letter and is read with it. Both are limits
-///   `epub.md` names. A mark drawn back over its own letter, its centre
-///   inside the letter's box, would end both; it needs a position for one
-///   glyph inside a segment, which a segment's one string of codes cannot
-///   state.
-/// - **a mark with none** — the Liberation stand-in's Hebrew points — is
-///   drawn before its letter, where the letter starts, a letter's marks in
-///   the order written. `tinker-pdf-content` reads a glyph of no advance as
-///   a box a thousandth of an em wide running right from where it is drawn,
-///   so a mark drawn at its letter's end is read with the glyph that starts
-///   there: drawn after their letters, every point of `מֶלֶךְ` read with its
-///   neighbour in a `bundled-fonts` build. Before its letter is where L2
-///   alone leaves a mark, and where 6d08c6b drew one — but L2 alone also
-///   reverses a letter's marks among themselves, and `שָׁ` read back with
-///   its two swapped. Neither side is where a point should stand, over the
-///   middle of its letter: that is `GPOS`'s to say, and an unshaped run
-///   reads none. With no `letter-spacing` there is no tie: every point's
-///   centre lies inside its letter's box. But `letter-spacing` is added
-///   after every character here, a mark too, as layout measures it —
-///   css-text-3 §10.2 spaces typographic character units, and a letter with
-///   its marks is one — so it moves a point off its letter: with a positive
-///   spacing a letter's first of two points is nearer the glyph before
-///   (`שָׁלוֹם` at `0.5px` reads back `שׁלָוֹם`), and with a negative one
-///   even a lone point is (`מֶלֶךְ` at `-0.5px` reads back `מלֶךְֶ`).
+/// - The overflow font gave a mark a space's advance, and a mark drawn
+///   after its letter had its centre exactly as far outside its letter's box
+///   as outside the next glyph's: rounding decided which read it (`a מֶלֶךְ,`
+///   came back `a מלֶךְ,ֶ` at a `font-size` of `12.5px` and of `14px`), and a
+///   letter's second mark was nearer the next glyph and was read with it —
+///   `sample-regime-anticancer-arabic.epub`'s `يًّا`, its FATHATAN on the
+///   letter before (CI run 38041540464).
+/// - A mark of no advance drawn where the pen stood after its letter lies in
+///   the next glyph's box, since `tinker-pdf-content` reads a glyph of no
+///   advance as a box a thousandth of an em wide running right from where it
+///   is drawn: every point of `מֶלֶךְ` was read with its neighbour in a
+///   `bundled-fonts` build. Drawn before its letter, where the letter
+///   starts, it was read with the letter — until `letter-spacing`, which is
+///   added after a mark as after any character, as layout measures it
+///   (css-text-3 §10.2 spaces typographic character units, and a letter with
+///   its marks is one), moved it off: `שָׁלוֹם` at `0.5px` came back
+///   `שׁלָוֹם` and `מֶלֶךְ` at `-0.5px` `מלֶךְֶ`. And a left-to-right slice,
+///   which keeps its marks after their letters, had nowhere else to draw
+///   them: a decomposed `e\u{301}` beside a right-to-left word read as an `e`
+///   and an accented space.
 ///
-/// A left-to-right slice keeps every unit as written, marks after, and so do
-/// marks with nothing before them in the slice, their letter in another run.
+/// Positioned inside its letter, a mark is read with it at any size and any
+/// spacing, however many the letter carries. Where on its letter it stands
+/// is still not where a point should, over the middle: that is `GPOS`'s to
+/// say, and an unshaped run reads none. Marks with nothing before them in
+/// the slice, their letter in another run or face segment, ride on nothing;
+/// [`draw_coded`] says where those are drawn.
 ///
 /// Mirroring (rule L4) is not applied: a simple font's code names one
 /// character, so a mirrored glyph would extract as the other bracket. A
 /// bracket pair at a right-to-left level is drawn with each bracket's hollow
 /// turned away from what it encloses — the middle of `חו (וח) חו.` is drawn,
 /// left to right, `)` `ח` `ו` `(` — and extracts as written.
-fn coded_order(run: &TextRun, slice: &str, spacing: impl Fn(char) -> bool) -> Vec<char> {
-    let chars: Vec<char> = slice.chars().collect();
-    if !chars.iter().copied().any(opens_right_to_left) {
-        return chars;
+fn coded_order(run: &TextRun, slice: &str) -> Vec<(char, bool)> {
+    let units = mark_clusters(slice);
+    let as_written = || units.iter().flat_map(|unit| riding(unit)).collect();
+    if !slice.chars().any(opens_right_to_left) {
+        return as_written();
     }
     let direction = match run.bidi_level {
         Some(level) if level % 2 == 1 => BaseDirection::RightToLeft,
         Some(_) => BaseDirection::LeftToRight,
         None => own_direction(slice),
     };
-    let units = mark_clusters(slice);
-    let mut order: Vec<char> = Vec::with_capacity(chars.len());
-    for unit in order_units(&units, direction)
+    let order: Vec<(char, bool)> = order_units(&units, direction)
         .into_iter()
         .filter_map(|at| units.get(at))
-    {
-        let mut inside = unit.chars();
-        match inside.next() {
-            Some(base)
-                if direction == BaseDirection::RightToLeft
-                    && bidi_class(base) != BidiClass::NSM =>
-            {
-                order.extend(inside.clone().filter(|mark| !spacing(*mark)));
-                order.push(base);
-                order.extend(inside.filter(|mark| spacing(*mark)));
-            }
-            _ => order.extend(unit.chars()),
-        }
-    }
+        .flat_map(|unit| riding(unit))
+        .collect();
     // L2 is a permutation of the units, which cover the slice, so this
     // holds; were it ever not to, the slice is drawn as written rather than
     // short.
-    if order.len() == chars.len() {
+    if order.len() == slice.chars().count() {
         order
     } else {
-        chars
+        as_written()
     }
+}
+
+/// One of [`mark_clusters`]' units as written, each character with whether
+/// it rides on the one before: every mark after the unit's first character,
+/// where that character is a base and not a mark whose base is elsewhere.
+fn riding(unit: &str) -> impl Iterator<Item = (char, bool)> + '_ {
+    let based = unit
+        .chars()
+        .next()
+        .is_some_and(|first| bidi_class(first) != BidiClass::NSM);
+    unit.chars()
+        .enumerate()
+        .map(move |(at, ch)| (ch, based && at > 0))
 }
 
 /// `slice` cut into a character and the nonspacing marks (`Bidi_Class`

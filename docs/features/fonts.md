@@ -588,16 +588,20 @@ Landed so far:
   paragraph, which ruling 14 reads in content order, and was taken back on
   the next. *Found on review* too, it had reversed a character at a time, so a
   Hebrew point or Arabic haraka left its letter. A letter and the
-  nonspacing marks after it are now one unit; with no `GPOS` to position a
-  mark, which side of its letter one is drawn on follows its advance —
-  after the letter for the overflow font's, which are as wide as a letter,
-  and where the letter starts for the Liberation stand-in's, which have
-  none. Neither is a guarantee ([epub.md](epub.md)'s `direction` row): an
-  overflow-font mark sits at an exact tie between its letter and the glyph
-  drawn next, so even a lone one is read with its letter only where the tie
-  rounds that way, and a letter's second is read with the next glyph; and
-  `letter-spacing`, added after a mark as after any character, moves a
-  stand-in point off its letter.
+  nonspacing marks after it are now one unit, the marks drawn after the
+  letter in either direction. With no `GPOS` to position a mark, the painter
+  states where it stands: a mark has no advance (the overflow font measures
+  one at zero, `paint::standard_width`, in layout and in its `/Widths`; the
+  Liberation stand-in's have none) and is drawn by a text object of its own
+  inside its letter's box, a hundredth of an em short of its end, where
+  ruling 14 reads it with its letter at any size and spacing, two or three
+  to a letter as well. Until October 2026 an overflow-font mark was as wide
+  as a letter: a lone one sat at an exact tie between its letter and the
+  glyph drawn next, and a letter's second was read with the next glyph —
+  CI's `epub-corpus` job (run 38041540464) stopped at the FATHATAN of an
+  Arabic book's `يًّا` — while a stand-in point, drawn where its letter
+  starts, was moved off it by `letter-spacing` ([epub.md](epub.md)'s
+  `direction` row).
 
   **And a third level since October 2026: the visual line.** `flow.rs`
   breaks lines over logical text and resolves no levels, so a right-to-left

@@ -21,7 +21,9 @@ mod epub_support;
 
 use epub_support::book::{faces_book, styled_book};
 use epub_support::conservation::{conservation, conservation_in_logical_order};
+use epub_support::typeface::covering;
 use tinker_pdf::{ArchiveWarning, Document, TextOptions};
+use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
 
 /// Every character of the test text, once each, in code point order.
 fn characters() -> Vec<char> {
@@ -190,6 +192,86 @@ fn a_fallback_character_is_measured_in_the_face_it_is_drawn_in() {
     }
 }
 
+/// **A nonspacing mark set in the standard 14 is measured at no advance**, in
+/// either build, and the overflow font's `/Widths` agree — which is what lets
+/// the painter draw it on its letter rather than after it.
+///
+/// `Standard14::advance` has no entry for a mark and answers with a space's
+/// width, and a mark measured that way was as wide as a letter: a letter's
+/// second mark was then read with the glyph drawn next (CI run 38041540464,
+/// `a_standard_14_arabic_letter_with_two_marks_keeps_both`). A combining kana
+/// voiced sound mark is East Asian `W` to UAX #11, which measures one em, and
+/// is a mark first: the order of the two questions is asserted here. HIRAGANA
+/// A, beside it, keeps its em, and a Hebrew letter keeps a letter's width.
+#[test]
+fn a_standard_14_mark_is_measured_at_no_advance() {
+    use tinker_pdf::epub::paint::BookMetrics;
+    use tinker_pdf_css::property::{FontFamily, FontStyle};
+    use tinker_pdf_layout::metrics::{FontRequest, Metrics};
+
+    let families = vec![FontFamily::Serif];
+    let request = FontRequest {
+        families: &families,
+        weight: 400,
+        style: FontStyle::Normal,
+        size: 10.0,
+        kerning: tinker_pdf_css::property::FontKerning::Auto,
+        features: &[],
+    };
+    assert!(
+        tinker_pdf_layout::unicode::is_east_asian('\u{3099}'),
+        "the kana voiced sound mark is no longer East Asian, and the order is untested"
+    );
+    for mark in [
+        '\u{301}', '\u{5B8}', '\u{5C1}', '\u{64B}', '\u{651}', '\u{3099}',
+    ] {
+        assert_eq!(
+            BookMetrics::STANDARD.advance(mark, &request),
+            0.0,
+            "{mark:?} is measured with an advance of its own"
+        );
+    }
+    assert_eq!(BookMetrics::STANDARD.advance('\u{3042}', &request), 10.0);
+    assert!(BookMetrics::STANDARD.advance('\u{5D0}', &request) > 0.0);
+
+    // And the overflow font's `/Widths` say the same: a mark's code is
+    // written at zero, so a reader moves no pen for it either.
+    let book = styled_book(
+        "ar",
+        "",
+        &format!("<p dir=\"rtl\">{AMALIYYAN}</p><p>a\u{3099}\u{3042}</p>"),
+    );
+    let doc = Document::open(book).expect("the book opens");
+    let page = doc.page(0).expect("a page");
+    let drawn = page.text_with(&TextOptions {
+        content_order: true,
+    });
+    for c in drawn.lines().iter().flat_map(|line| line.chars.iter()) {
+        let (x0, _, x1, _) = c.quad.bounds();
+        let mark = c
+            .text
+            .chars()
+            .next()
+            .is_some_and(|first| bidi_class(first) == BidiClass::NSM);
+        // A glyph of no advance is read as a box a thousandth of an em wide.
+        let thousandth = c.size / 1000.0 * 1.001;
+        if mark {
+            assert!(
+                x1 - x0 <= thousandth,
+                "{:?} is written {} wide",
+                c.text,
+                x1 - x0
+            );
+        } else if !c.text.trim().is_empty() {
+            assert!(
+                x1 - x0 > thousandth,
+                "{:?} is written with no width",
+                c.text
+            );
+        }
+    }
+}
+
 // ---- right-to-left fallback text ---------------------------------------------
 
 /// HET and VAV, the Hebrew word Melville's etymology opens with.
@@ -303,16 +385,9 @@ const MELEKH: &str = "\u{5DE}\u{5B6}\u{5DC}\u{5B6}\u{5DA}\u{5B0}";
 /// FINAL MEM — a letter with two marks after it.
 const SHALOM: &str = "\u{5E9}\u{5B8}\u{5C1}\u{5DC}\u{5D5}\u{5B9}\u{5DD}";
 
-/// SHALOM as a default build draws it, left to right: each letter, then its
-/// points, which the overflow font gives an advance of their own.
-#[cfg(not(feature = "bundled-fonts"))]
+/// SHALOM as both builds draw it, left to right: each letter, then its
+/// points as written — inside the letter, since they have no advance.
 const SHALOM_DRAWN: &str = "\u{5DD}\u{5D5}\u{5B9}\u{5DC}\u{5E9}\u{5B8}\u{5C1}";
-
-/// SHALOM as a `bundled-fonts` build draws it, left to right: each letter's
-/// points, which the Liberation stand-in draws with no advance, as written
-/// and then the letter.
-#[cfg(feature = "bundled-fonts")]
-const SHALOM_DRAWN: &str = "\u{5DD}\u{5B9}\u{5D5}\u{5DC}\u{5B8}\u{5C1}\u{5E9}";
 
 /// KATABA with its harakat: KAF, FATHA, TEH, FATHA, BEH, FATHA.
 const KATABA: &str = "\u{643}\u{64E}\u{62A}\u{64E}\u{628}\u{64E}";
@@ -333,6 +408,46 @@ fn drawn_text(doc: &Document) -> String {
     .flat_map(|c| c.text.chars())
     .filter(|c| !c.is_whitespace())
     .collect()
+}
+
+/// That every nonspacing mark on page 0 is drawn inside the box of the glyph
+/// it follows in the content stream — its base, for a page this painter drew
+/// — as ruling 14's extraction measures boxes: a glyph of no advance is a
+/// thousandth of an em wide, and its centre is what is paired.
+///
+/// Inside its base's box is where `text_order.rs` reads a mark with its base
+/// whatever is drawn beside it; past either end of it, rounding or the glyph
+/// drawn next decides.
+fn marks_ride_on_their_letters(doc: &Document) {
+    let page = doc.page(0).expect("a page");
+    let drawn = page.text_with(&TextOptions {
+        content_order: true,
+    });
+    for line in drawn.lines() {
+        let mut base: Option<&tinker_pdf::TextChar> = None;
+        for c in &line.chars {
+            let mark = c
+                .text
+                .chars()
+                .next()
+                .is_some_and(|first| bidi_class(first) == BidiClass::NSM);
+            if !mark {
+                base = Some(c);
+                continue;
+            }
+            let base = base.unwrap_or_else(|| panic!("{:?} rides on nothing", c.text));
+            let (x0, _, x1, _) = c.quad.bounds();
+            let centre = (x0 + x1) / 2.0;
+            let (b0, _, b1, _) = base.quad.bounds();
+            assert!(
+                b0 < centre && centre < b1,
+                "{:?} is drawn at {centre}, outside its letter {:?} from {b0} to {b1}: {:?}",
+                c.text,
+                base.text,
+                line.text
+            );
+        }
+    }
 }
 
 /// That page 0 of `book` holds `expected`, and that the book conserves in
@@ -358,7 +473,8 @@ fn reads_as_written(book: &[u8], doc: &Document, expected: &str) {
 }
 
 /// **A pointed Hebrew word set in the standard 14 is drawn with each point
-/// on its own letter's side, and, in this book, reads back as written.**
+/// on its own letter, and reads back as written — a letter with two points
+/// too, and one with three in a right-to-left paragraph.**
 ///
 /// A nonspacing mark belongs to the letter before it, so the run L2 reverses
 /// is reversed letter by letter, each letter keeping its points (UAX #9 rule
@@ -367,57 +483,57 @@ fn reads_as_written(book: &[u8], doc: &Document, expected: &str) {
 /// DOT on the LAMED, the HOLAM on the FINAL MEM — and `מֶלֶךְ` read back
 /// `מלֶךְֶ`; with `bundled-fonts` the SHIN's two points came back swapped.
 ///
-/// Which side of its letter a point is drawn on depends on its advance,
-/// because nothing positions it and extraction (`text_order.rs`) pairs a
-/// mark with the base nearest it along the line. A default build draws a
-/// point with the overflow font, as wide as a letter, after its letter; the
-/// Liberation stand-in draws one with no advance before its letter, where
-/// the letter starts, since a glyph of no advance is read as a box running
-/// right from where it is drawn. `bundled-fonts` reads `מֶלֶךְ` and
-/// `שָׁלוֹם` as written, with no `letter-spacing` — which is added after a
-/// point as after any character, and moves one off its letter.
-///
-/// A default build reads `מֶלֶךְ` as written here, and that is this book's
-/// size and not a guarantee, which is what `epub.md` names: a point drawn
-/// after its letter has its centre exactly as far outside its letter's box
-/// as outside the next glyph's, and rounding decides the tie — at a
-/// `font-size` of `12.5px` or `14px`, `a מֶלֶךְ,` reads `a מלֶךְ,ֶ`. A
-/// default build's letter with two points is the other limit: the second
-/// point is drawn after the first, as wide, and is nearer the glyph drawn
-/// next than its own letter, so `שָׁלוֹם, ` reads `שָלוֹם,ׁ ` there, the SHIN
-/// DOT on the comma. What is asserted of it is the drawing.
+/// Nothing shapes a standard-14 run, so where a point stands is the
+/// painter's to say, and extraction (`text_order.rs`) pairs a mark with the
+/// base whose box holds its centre. Both builds now draw a point after its
+/// letter, with no advance, inside the letter's box. Until October 2026 a
+/// default build gave a point the overflow font's letter-sized advance, and
+/// its second point was read with the glyph drawn next: `שָׁלוֹם, ` read
+/// `שָלוֹם,ׁ `, which this test asserted only the drawing of, as a limit.
 #[test]
 fn a_standard_14_pointed_hebrew_word_keeps_each_point_on_its_letter() {
     let melekh = styled_book("en", "", &format!("<p>{MELEKH}, <i>Hebrew</i>.</p>"));
     let doc = Document::open(melekh.clone()).expect("the book opens");
     reads_as_written(&melekh, &doc, &format!("{MELEKH}, Hebrew."));
+    marks_ride_on_their_letters(&doc);
 
     let shalom = styled_book("en", "", &format!("<p>{SHALOM}, <i>Hebrew</i>.</p>"));
     let doc = Document::open(shalom.clone()).expect("the book opens");
     let drawn = drawn_text(&doc);
     assert!(
         drawn.contains(SHALOM_DRAWN),
-        "a point is not drawn on its own letter's side: {drawn:?}"
+        "a point is not drawn after its own letter: {drawn:?}"
     );
-    #[cfg(feature = "bundled-fonts")]
     reads_as_written(&shalom, &doc, &format!("{SHALOM}, Hebrew."));
+    marks_ride_on_their_letters(&doc);
+
+    let hashabbat = styled_book(
+        "he",
+        "",
+        &format!("<p dir=\"rtl\">{HASHABBAT} {SHALOM}.</p>"),
+    );
+    let doc = Document::open(hashabbat.clone()).expect("the book opens");
+    reads_as_written(&hashabbat, &doc, &format!("{HASHABBAT} {SHALOM}."));
+    marks_ride_on_their_letters(&doc);
 }
 
+/// HASHABBAT pointed: HE with PATAH, SHIN with DAGESH, SHIN DOT and PATAH —
+/// three marks on one letter — BET with DAGESH and QAMATS, TAV.
+const HASHABBAT: &str = "\u{5D4}\u{5B7}\u{5E9}\u{5BC}\u{5C1}\u{5B7}\u{5D1}\u{5BC}\u{5B8}\u{5EA}";
+
 /// **An Arabic word with its harakat, in a right-to-left paragraph set in the
-/// standard 14, is drawn with each haraka after its own letter, and, in this
-/// book, reads back as written.**
+/// standard 14, is drawn with each haraka after and on its own letter, and
+/// reads back as written.**
 ///
 /// The pointed Hebrew word's rule, in the other script that writes
 /// nonspacing marks over its letters: reversed a character at a time, each
 /// FATHA was drawn before its letter and `كَتَبَ كتب.` read back
 /// `كتَبَ َكتب.`, the first word's last FATHA thrown onto the second. No
 /// Liberation face has an Arabic letter, so both builds draw this with the
-/// overflow font — a haraka as wide as a letter, one to a letter — and both
-/// read it back as written here. That is not a guarantee: in either build a
-/// haraka drawn after its letter has its centre exactly as far from its
-/// letter as from the glyph drawn next, and is read with its letter only
-/// where that tie rounds its way — the limit the pointed Hebrew word's test
-/// and `epub.md` name.
+/// overflow font. Its harakat were as wide as a letter until October 2026,
+/// each with its centre exactly as far from its letter as from the glyph
+/// drawn next, and read with its letter only where that tie rounded its way;
+/// with no advance, each is drawn inside its letter.
 #[test]
 fn a_standard_14_arabic_word_keeps_each_haraka_on_its_letter() {
     let body = format!("<p dir=\"rtl\">{KATABA} \u{643}\u{62A}\u{628}.</p>");
@@ -430,6 +546,246 @@ fn a_standard_14_arabic_word_keeps_each_haraka_on_its_letter() {
         "a haraka is not drawn after its own letter: {drawn:?}"
     );
     reads_as_written(&bytes, &doc, &format!("{KATABA} \u{643}\u{62A}\u{628}."));
+    marks_ride_on_their_letters(&doc);
+}
+
+/// The sentence `sample-regime-anticancer-arabic.epub` stopped conserving
+/// at: `عمليًّا، تتألّف كلّ المواد من ذرّات.` — YEH with SHADDA and then
+/// FATHATAN, two marks on one letter, then a SHADDA on a letter of each of
+/// three words.
+const AMALIYYAN: &str = "\u{639}\u{645}\u{644}\u{64A}\u{651}\u{64B}\u{627}\u{60C} \
+    \u{62A}\u{62A}\u{623}\u{644}\u{651}\u{641} \u{643}\u{644}\u{651} \
+    \u{627}\u{644}\u{645}\u{648}\u{627}\u{62F} \u{645}\u{646} \
+    \u{630}\u{631}\u{651}\u{627}\u{62A}.";
+
+/// MUDDA and MUALLIM: a DAL with SHADDA and FATHA, and a LAM with SHADDA and
+/// KASRA — the two other stacks a SHADDA most often heads.
+const MUDDA_MUALLIM: &str =
+    "\u{645}\u{64F}\u{62F}\u{651}\u{64E}\u{629} \u{645}\u{64F}\u{639}\u{644}\u{651}\u{650}\u{645}.";
+
+/// **An Arabic letter carrying two marks keeps both, in a paragraph of
+/// either direction** — the shape `sample-regime-anticancer-arabic.epub`
+/// stopped conserving at in CI's `epub-corpus` job (run 38041540464, a
+/// default build): `Missing at 287: "ي\u{651}\u{64b}ا،تتأل\u{651}ف…"`,
+/// `Extra at 287: "\u{64b}ي\u{651}ا،تتأل\u{651}ف…"`, the FATHATAN read before
+/// its letter.
+///
+/// No face covers Arabic, so the overflow font draws it in both builds, and
+/// it measured a mark at `Standard14::advance`'s space width: a haraka was a
+/// glyph as wide as a letter, drawn after its letter. Ruling 14's extraction
+/// pairs a mark with the base its centre lies in or nearest; the first of
+/// two marks lay a letter's width past its letter, at a tie, and the second
+/// two widths past, nearer the glyph drawn next — the letter before, in a
+/// right-to-left line — and was read with it. The book conserved on 26
+/// September, before ruling 14 read a line back from where it is drawn.
+///
+/// A mark has no advance now (`paint::standard_width`), in the layout's
+/// measure and the overflow font's `/Widths` alike, and is drawn after its
+/// letter, inside the letter's box: in a `dir="rtl"` paragraph, in one with
+/// no `dir` whose text is Arabic, and quoted in an English sentence.
+#[test]
+fn a_standard_14_arabic_letter_with_two_marks_keeps_both() {
+    for (language, body, expected) in [
+        (
+            "ar",
+            format!("<p dir=\"rtl\">{AMALIYYAN}</p>"),
+            AMALIYYAN.to_owned(),
+        ),
+        ("ar", format!("<p>{AMALIYYAN}</p>"), AMALIYYAN.to_owned()),
+        (
+            "en",
+            format!("<p>It reads {AMALIYYAN} in the book.</p>"),
+            format!("It reads {AMALIYYAN} in the book."),
+        ),
+        (
+            "ar",
+            format!("<p dir=\"rtl\">{MUDDA_MUALLIM}</p>"),
+            MUDDA_MUALLIM.to_owned(),
+        ),
+        (
+            "ar",
+            format!("<p>{MUDDA_MUALLIM}</p>"),
+            MUDDA_MUALLIM.to_owned(),
+        ),
+    ] {
+        let bytes = styled_book(language, "", &body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        reads_as_written(&bytes, &doc, &expected);
+        marks_ride_on_their_letters(&doc);
+    }
+}
+
+/// Latin, Greek and Cyrillic with their accents decomposed: an acute, a
+/// diaeresis, a circumflex and an acute stacked on one `o`, a macron on an
+/// `ǫ` (a letter `WinAnsiEncoding` lacks, so it and its mark share a font), an
+/// acute on an alpha and on a Cyrillic `а`.
+const DECOMPOSED: &str = "cafe\u{301} na\u{308}ive o\u{302}\u{301} \u{1EB}\u{304} \
+    \u{3B1}\u{301}\u{3BB}\u{3C6}\u{3B1} \u{430}\u{301}\u{431}";
+
+/// **A decomposed accent set in the standard 14 reads with its own letter,
+/// on a left-to-right line, beside a right-to-left word, and inside a
+/// right-to-left paragraph.**
+///
+/// A left-to-right slice keeps a mark after its letter, as written. With no
+/// advance and drawn where the pen stood after its letter, a mark's box —
+/// a thousandth of an em running right — lay in the next glyph's, and on a
+/// line ruling 14 reorders (one holding a right-to-left character) it was
+/// read with that glyph: `na\u{308}ive` beside `חו` came back `nai\u{308}ve`.
+/// A default build gave the overflow font's marks a space's advance instead,
+/// which was a tie: `o\u{302}\u{301} ` came back `o\u{302} \u{301}`, the
+/// second accent on the space. Drawn inside its letter, every accent here is
+/// read with it. A line with nothing right-to-left is read in content order
+/// and was right either way; it is here so a fix for the other two cannot
+/// cost it.
+#[test]
+fn a_standard_14_decomposed_accent_keeps_to_its_letter() {
+    for (language, body, expected) in [
+        (
+            "en",
+            format!("<p>{DECOMPOSED} end.</p>"),
+            format!("{DECOMPOSED} end."),
+        ),
+        (
+            "en",
+            format!("<p>{DECOMPOSED} {HET_VAV} {DECOMPOSED}.</p>"),
+            format!("{DECOMPOSED} {HET_VAV} {DECOMPOSED}."),
+        ),
+        (
+            "he",
+            format!("<p dir=\"rtl\">{HET_VAV} {DECOMPOSED} {VAV_HET}.</p>"),
+            format!("{HET_VAV} {DECOMPOSED} {VAV_HET}."),
+        ),
+    ] {
+        let bytes = styled_book(language, "", &body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        reads_as_written(&bytes, &doc, &expected);
+        marks_ride_on_their_letters(&doc);
+    }
+}
+
+/// **A decomposed accent whose letter is drawn by another run reads with
+/// its letter, on a line beside a right-to-left word** — styled apart from
+/// it, or left to the standard 14 by a face of the book's own that draws
+/// its letter and has no glyph for it.
+///
+/// Such a mark opens a standard-14 slice and rides on nothing in it. Drawn
+/// where the pen stood — its letter's end — its box lay in the next glyph's,
+/// and `x<b>e</b>\u{301}x` read back `xex\u{301}`; a default build's overflow
+/// font, as wide as a letter, was a tie there. In a left-to-right run it is
+/// now drawn just inside where its letter ended.
+#[test]
+fn a_standard_14_accent_drawn_apart_from_its_letter_keeps_to_it() {
+    let styled = styled_book(
+        "en",
+        "",
+        &format!("<p>{HET_VAV} x<b>e</b>\u{301}x <i>a</i>\u{308}y.</p>"),
+    );
+    let latin = covering("Fixture Latin", "abcdefghijklmnopqrstuvwxyz .");
+    let own_face = faces_book(
+        &[("Fixture Latin", &latin)],
+        16,
+        &format!("cafe\u{301} {HET_VAV} na\u{308}ive."),
+    );
+    for (bytes, expected) in [
+        (own_face, format!("cafe\u{301} {HET_VAV} na\u{308}ive.")),
+        (styled, format!("{HET_VAV} xe\u{301}x a\u{308}y.")),
+    ] {
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        reads_as_written(&bytes, &doc, &expected);
+        marks_ride_on_their_letters(&doc);
+    }
+}
+
+/// **A mark styled apart from its letter in a right-to-left run is drawn
+/// where the pen stands, and read with the glyph drawn before it — the
+/// known limit `epub.md`'s `direction` row names, pinned so that ending it
+/// is noticed.**
+///
+/// `<b>ח</b>ָו`: the QAMATS opens the second run and rides on nothing in
+/// it. L2 draws it at that run's right end, which is where its letter
+/// starts, but ruling 14 pairs a mark only with a neighbour in the content
+/// stream, and the stream wrote the bold run before this one, beside its
+/// other end: the mark is read with the VAV drawn just before it, as it was
+/// before October 2026, in both builds. When this fails because the line
+/// reads `א חָו ב.`, the limit is gone: drop it from `epub.md` and make this
+/// the test that the line reads as written.
+#[test]
+fn a_standard_14_right_to_left_mark_styled_apart_rides_on_nothing() {
+    let body = "<p dir=\"rtl\">\u{5D0} <b>\u{5D7}</b>\u{5B8}\u{5D5} \u{5D1}.</p>";
+    let doc = Document::open(styled_book("he", "", body)).expect("the book opens");
+    let text = doc.page(0).expect("a page").text().plain_text();
+    assert!(
+        text.contains("\u{5D0} \u{5D7}\u{5D5}\u{5B8} \u{5D1}."),
+        "the known limit no longer reads the QAMATS with the VAV: {text:?}"
+    );
+}
+
+/// **A mark set in the standard 14 reads with its letter at every size and
+/// under `letter-spacing` of either sign.**
+///
+/// The two limits `epub.md` named until October 2026, each measured on
+/// synthetic books (review of 6d08c6b): a default build's lone point, drawn
+/// after its letter at a tie, read `a מֶלֶךְ,` as `a מלֶךְ,ֶ` at a
+/// `font-size` of `12.5px` and `14px`; and `letter-spacing`, which is added
+/// after a mark as after any character (as layout measures it), moved a
+/// point drawn where its letter starts off the letter — `שָׁלוֹם` at `0.5px`
+/// read `שׁלָוֹם` and `מֶלֶךְ` at `-0.5px` `מלֶךְֶ` with `bundled-fonts`. A
+/// mark drawn inside its letter's box at a fixed inset from the letter's
+/// end is read with it whatever the size, and whatever the spacing puts
+/// between the letter and the glyph after it.
+#[test]
+fn a_standard_14_mark_reads_with_its_letter_at_every_size_and_spacing() {
+    let books = [
+        (
+            "en",
+            format!("<p>a {MELEKH}, <i>Hebrew is a language</i>.</p>"),
+            format!("a {MELEKH}, Hebrew is a language."),
+        ),
+        (
+            "en",
+            format!("<p>{SHALOM}, <i>Hebrew</i>.</p>"),
+            format!("{SHALOM}, Hebrew."),
+        ),
+        (
+            "ar",
+            format!("<p dir=\"rtl\">{AMALIYYAN}</p>"),
+            AMALIYYAN.to_owned(),
+        ),
+        (
+            "en",
+            format!("<p>{DECOMPOSED} {HET_VAV}.</p>"),
+            format!("{DECOMPOSED} {HET_VAV}."),
+        ),
+    ];
+    // Every half pixel from 9 to 24.5, the sweep the limit was measured on.
+    let sizes = (18..=49).map(|half| format!("p {{ font-size: {}px }}", f64::from(half) / 2.0));
+    let spacings = ["0.5px", "2px", "-0.5px", "-1px"]
+        .into_iter()
+        .map(|spacing| format!("p {{ letter-spacing: {spacing} }}"));
+    for style in sizes.chain(spacings) {
+        for (language, body, expected) in &books {
+            let bytes = styled_book(language, &style, body);
+            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let text = doc.page(0).expect("a page").text().plain_text();
+            assert!(
+                text.contains(expected.as_str()),
+                "under `{style}`, {expected:?} does not read as written: {text:?}"
+            );
+            for verdict in [
+                conservation(&bytes, &doc),
+                conservation_in_logical_order(&bytes, &doc),
+            ] {
+                assert!(
+                    verdict.holds(),
+                    "under `{style}`: {} extra, {} missing, {:?}",
+                    verdict.extra,
+                    verdict.missing,
+                    verdict.divergences
+                );
+            }
+            marks_ride_on_their_letters(&doc);
+        }
+    }
 }
 
 /// **A line of nothing but neutrals at a right-to-left level is drawn as
