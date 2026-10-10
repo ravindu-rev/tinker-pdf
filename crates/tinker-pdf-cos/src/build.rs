@@ -3654,8 +3654,11 @@ impl PageBuilder {
     /// run, made here of that piece alone, so the rest of the line is still
     /// drawn where it was placed (ruling 2). Returns whether every piece was
     /// drawn: false for any piece left out so, and — having written nothing
-    /// — for no pieces, and for a size, a spacing or a position that is not
-    /// a finite number.
+    /// — for no pieces, for a size, a spacing or a position that is not a
+    /// finite number, and for two pieces drawn one after the other whose
+    /// distance apart is not one (two positions of opposite sign past half
+    /// of `f64::MAX`), since the move between them is written as that
+    /// distance.
     pub fn text_pieces(
         &mut self,
         size: f64,
@@ -3679,6 +3682,16 @@ impl PageBuilder {
             })
             .collect();
         if drawable.is_empty() {
+            return false;
+        }
+        // Each move is written as the difference of two drawn pieces'
+        // positions, and two finite positions of opposite sign past half of
+        // `f64::MAX` differ by an infinity, which 7.3.3 has no spelling for
+        // (`inf 0 Td`): refused as a position that is not finite is.
+        if drawable
+            .windows(2)
+            .any(|pair| matches!(pair, [from, to] if !(to.x - from.x).is_finite()))
+        {
             return false;
         }
 
@@ -12405,6 +12418,17 @@ mod graphics_tests {
             assert!(!page.text_pieces(f64::NAN, 60.0, (0.0, 0.0), &one));
             assert!(!page.text_pieces(12.0, 60.0, (f64::INFINITY, 0.0), &one));
             assert!(!page.text_pieces(12.0, 60.0, (0.0, 0.0), &[]));
+            // Two finite positions whose difference is not finite: the move
+            // between them would be written `inf 0 Td`.
+            let far = |x: f64| TextPiece {
+                font: b"F0",
+                x,
+                text: PieceText::Codes {
+                    codes: b"g",
+                    characters: "g",
+                },
+            };
+            assert!(!page.text_pieces(12.0, 60.0, (0.0, 0.0), &[far(-1.0e308), far(1.0e308)]));
         });
         let doc = opened(builder);
         let content = content(&doc);

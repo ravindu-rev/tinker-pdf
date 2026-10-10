@@ -1676,10 +1676,14 @@ fn draw_text(
 /// lay at the letter's end, in the box of the glyph drawn next, and a line
 /// ruling 14 reorders read it there. It is drawn where a page's is
 /// ([`paint::mark_at`]): inside its letter's box, a string of its own, and
-/// what follows it is drawn from the pen in another. An SVG run has no
-/// `letter-spacing` here, so the glyph after the mark starts nine
-/// thousandths of an em past where the mark's box ends, well inside the
-/// half an em a reader resumes a line across.
+/// what follows it is drawn from the pen in another. Its letter is a simple
+/// font's, drawn exactly as wide as measured, so the mark is placed
+/// [`paint::mark_at`]'s nine hundred and ninety-nine millionths of an em
+/// inside the letter's end, its box a thousandth wide ending a millionth
+/// past it. An SVG run has no `letter-spacing` here, so the glyph after the
+/// mark starts at the letter's end, a millionth of an em before the mark's
+/// box ends: the next string resumes the line, and the mark's centre is in
+/// its letter's box, very nearly half a thousandth of an em from its end.
 fn draw_coded(
     out: &mut Vec<u8>,
     fonts: &Fonts<'_>,

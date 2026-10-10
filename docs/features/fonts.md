@@ -595,11 +595,13 @@ Landed so far:
   Liberation stand-in's have none), takes no `letter-spacing` of its own (a
   letter and its marks are one typographic character unit, `css-text-3`
   §10.2, in layout and every painter alike), and is drawn inside its
-  letter's box — nine ten-thousandths of an em short of its end over a
-  simple font's letter, a hundredth over the stand-in's, whose `/W` is
-  rounded — in one text object with the rest of its slice
-  (`PageBuilder::text_pieces`), where ruling 14 reads it with its letter at
-  every size and spacing [epub.md](epub.md) lists, four to a letter as well.
+  letter's box, its own box ending a millionth of an em past where layout
+  measured the letter to end — a stand-in's letter carrying a mark is drawn
+  where layout put it, a piece of its own — in one text object with the rest
+  of its slice (`PageBuilder::text_pieces`), where ruling 14 reads it with
+  its letter at every size and spacing [epub.md](epub.md) lists, four to a
+  letter as well; a run that ends on a mark is cut where one ending on its
+  letter alone would be.
   Until October 2026 an overflow-font mark was as wide as a letter: a lone
   one sat at an exact tie between its letter and the glyph drawn next, and a
   letter's second was read with the next glyph — CI's `epub-corpus` job
@@ -608,10 +610,13 @@ Landed so far:
   `letter-spacing` ([epub.md](epub.md)'s `direction` row). Drawn next in a
   text object of its own (6d79fa4), a mark left the glyph after it every
   spacing past a reader's pen, and a pointed word read a letter a line from
-  a quarter of an em of spacing. What is left is one limit with
-  `bundled-fonts`, named and pinned in [epub.md](epub.md): a run that ends
-  on a mark over a stand-in letter is cut from `0.491em` of spacing on a line
-  with nothing right to left in it.
+  a quarter of an em of spacing, and drawn a hundredth inside a stand-in's
+  letter (bf081ca) a run ending on it was cut from `0.491em`. What is left is
+  one limit with `bundled-fonts`, a regression from cd407d5 named and pinned
+  in [epub.md](epub.md): cd407d5 drew a stand-in's mark a spacing past its
+  letter, so a run ending on one was cut only past half an em and a
+  thousandth, and is cut just past half an em now, as after its letter
+  alone.
 
   **And a third level since October 2026: the visual line.** `flow.rs`
   breaks lines over logical text and resolves no levels, so a right-to-left

@@ -94,6 +94,7 @@
 //! opt-out: the characters in the order the content stream showed them, as
 //! `TextDevice` collected them.
 
+use tinker_pdf_content::text::RESUME_TIE;
 use tinker_pdf_content::{Quad, TextChar, TextLine, TextPage, WritingMode};
 use tinker_pdf_shape::bidi::{drawn_direction, logical_order, BaseDirection};
 use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
@@ -282,7 +283,9 @@ fn continues_on_page(
     if axis.0 * theirs.0 + axis.1 * theirs.1 < 0.999 {
         return None;
     }
-    let slack = previous.size.max(next.size).max(1.0) * 0.5;
+    // Half an em inclusive, as `TextDevice` resumes a line: a gap of exactly
+    // half an em is within it, whatever its last place (`RESUME_TIE`).
+    let slack = previous.size.max(next.size).max(1.0) * (0.5 + RESUME_TIE);
     // Across the baseline: the two first glyphs' origins, on the normal.
     let normal = (-axis.1, axis.0);
     let across =
@@ -777,6 +780,32 @@ mod tests {
         assert_eq!(lines.len(), 2);
     }
 
+    /// **Two pieces exactly half an em apart are one line, whatever the last
+    /// place of the gap** (`RESUME_TIE`), as `TextDevice` resumes a line —
+    /// and a gap a ten-thousandth of an em wider is not. The first piece
+    /// ends at 5 and half an em at ten points is 5, so the second drawn at
+    /// 10 is half an em on; drawn at the next `f64` past 10 its gap is
+    /// 5.000000000000002, past half an em by the last place alone.
+    #[test]
+    fn lines_half_an_em_apart_are_rejoined_and_wider_ones_are_not() {
+        let apart = |at: f64| {
+            let mut lines = vec![
+                line(vec![ch(ALEF, 0.0, 5.0)], true),
+                line(vec![ch(BET, at, 5.0)], true),
+            ];
+            rejoin_split_lines(&mut lines);
+            lines.len()
+        };
+        assert_eq!(apart(10.0), 1);
+        let next = f64::from_bits(10.0_f64.to_bits() + 1);
+        assert!(
+            next - 5.0 > 5.0,
+            "the gap is past half an em by its last place"
+        );
+        assert_eq!(apart(next), 1, "the last place cut the line");
+        assert_eq!(apart(10.001), 2, "a gap past half an em rejoined the line");
+    }
+
     #[test]
     fn lines_on_two_baselines_stay_apart() {
         let mut lower = ch(BET, 5.0, 5.0);
@@ -916,7 +945,7 @@ mod tests {
             if axis.0 * theirs.0 + axis.1 * theirs.1 < 0.999 {
                 return false;
             }
-            let slack = previous.size.max(next.size).max(1.0) * 0.5;
+            let slack = previous.size.max(next.size).max(1.0) * (0.5 + RESUME_TIE);
             let normal = (-axis.1, axis.0);
             let across = (other.origin.0 - first.origin.0) * normal.0
                 + (other.origin.1 - first.origin.1) * normal.1;

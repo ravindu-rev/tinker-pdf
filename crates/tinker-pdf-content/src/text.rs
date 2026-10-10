@@ -392,6 +392,25 @@ struct Scope {
 /// never loses text.
 const MAX_MCID_PROPS: usize = 1 << 16;
 
+/// How far past half an em, in ems, a line an `ET` closed is still resumed
+/// ([`TextDevice`]'s `show_glyph`): a millionth, so that a gap of **exactly**
+/// half an em is within the slack.
+///
+/// The gap is two positions a producer reached by different sums — where the
+/// last glyph's box ends, from a `Td` and the advances after it, and where the
+/// next text object's `Td` puts the next glyph — and two sums of one length
+/// differ in their last place. A gap a producer meant to be half an em, as an
+/// EPUB set with `letter-spacing: 0.5em` puts between every two runs, was
+/// read as within it or past it by that last place: the same paragraph came
+/// back one line at one run boundary and cut at the next, and ruling 14,
+/// handed a right-to-left word with a neighbour's full stop on its line and
+/// the rest of the sentence on another, read the full stop first (review of
+/// bf081ca, `a <b>שּׁ</b>…לֵם b.` at `8px`). A millionth of an em is a
+/// hundred-thousandth of a point at twelve, ten orders above the rounding
+/// and as far below any gap a reader sees. Ruling 14's rejoin in the facade
+/// (`text_order.rs`) allows the same.
+pub const RESUME_TIE: f64 = 1e-6;
+
 struct PendingLine {
     chars: Vec<TextChar>,
     wmode: WritingMode,
@@ -700,7 +719,9 @@ impl Device for TextDevice {
                 // stopped. Half an em of slack, which is a space and is not a
                 // column: two cells of a table row sit on one baseline and are
                 // two lines, and a paragraph that changed font mid-word is one.
-                let slack = size.max(1.0) * 0.5;
+                // Half an em **inclusive**, by [`RESUME_TIE`]: a gap of exactly
+                // half an em is within it, whatever its last place.
+                let slack = size.max(1.0) * (0.5 + RESUME_TIE);
                 let disjoint = line.closed
                     && match wmode {
                         WritingMode::Horizontal => origin.0 > line.pen + slack,
@@ -923,6 +944,32 @@ mod tests {
             "A\nB\n",
             "two text objects far apart on one baseline became one line"
         );
+    }
+
+    /// **A gap of exactly half an em resumes a closed line, whatever its last
+    /// place, and a gap a ten-thousandth of an em wider does not**
+    /// ([`RESUME_TIE`]).
+    ///
+    /// `A`'s box ends at 5 and half an em at ten points is 5, so `B` drawn at
+    /// 10 is half an em on; drawn at the next `f64` past 10, which is where a
+    /// producer's other sum for the same place can land, it was a line of its
+    /// own, and a paragraph set with `letter-spacing: 0.5em` came back cut at
+    /// some run boundaries and whole at others.
+    #[test]
+    fn a_gap_of_exactly_half_an_em_resumes_the_line_and_a_wider_one_does_not() {
+        let state = GraphicsState::new(Matrix::IDENTITY);
+        let lines = |at: f64| {
+            let mut d = TextDevice::new();
+            d.show_glyph(&glyph("A", 0.0, 700.0, 10.0), &state);
+            d.end_text();
+            d.show_glyph(&glyph("B", at, 700.0, 10.0), &state);
+            d.end_text();
+            d.finish().lines().len()
+        };
+        assert_eq!(lines(10.0), 1);
+        let next = f64::from_bits(10.0_f64.to_bits() + 1);
+        assert_eq!(lines(next), 1, "the last place cut the line");
+        assert_eq!(lines(10.001), 2, "a gap past half an em resumed the line");
     }
 
     #[test]
