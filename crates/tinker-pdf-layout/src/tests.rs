@@ -8037,6 +8037,100 @@ fn a_band_cut_over_pages_draws_what_a_negative_margin_pulled_above_it() {
     }
 }
 
+/// **A stretched flex item keeps its place in reading order.** §9.4 step 11
+/// lays a stretched item out a second time, and that second layout numbered
+/// its text after every item laid out before it, so the item after it was read
+/// first: `a` beside a taller `bbbb cccc dddd` read `bbbb cccc dddd a`. It
+/// became reachable through a clip once 9865459 measured a clip box from where
+/// its content starts, which makes the first item the shorter one (the review
+/// of the clip-tail lane's second round); the re-layout now reuses the stamps
+/// its first layout began at.
+#[test]
+fn a_stretched_flex_item_keeps_its_place_in_reading_order() {
+    use tinker_pdf_css::property::Overflow;
+    // The plain shape: a short item beside a tall one is the one stretched.
+    let plain = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+            vec![
+                flex_item("a", 0.0, 1.0, Size::Auto),
+                flex_item("bbbb cccc dddd", 0.0, 1.0, basis(40.0)),
+            ],
+        )],
+    );
+    // The review's shape: the clip box's height is measured below its own
+    // negative margin, so the first item is shorter than `qq`'s line.
+    let mut clip = overflowing(Overflow::Clip);
+    clip.width = Size::Length(LengthPercentage::Px(40.0));
+    clip.height = Size::Length(LengthPercentage::Px(13.0));
+    clip.margin.top = px(-14.25);
+    let clipped = BoxNode::element(
+        block(),
+        vec![
+            para("x y"),
+            BoxNode::element(
+                flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+                vec![
+                    BoxNode::element(
+                        block(),
+                        vec![BoxNode::element(
+                            clip,
+                            vec![
+                                BoxNode::element(block(), vec![text("aaaa bbbb cccc dddd eeee")]),
+                                para("ffff gggg"),
+                            ],
+                        )],
+                    ),
+                    flex_item("qq", 0.0, 1.0, Size::Auto),
+                ],
+            ),
+            para("zzzz yyyy"),
+        ],
+    );
+    for (name, tree) in [("plain", &plain), ("clipped", &clipped)] {
+        let laid = run(tree, 100.0, 400.0);
+        assert_eq!(
+            conservable(&laid.text()),
+            conservable(&tree.source_text()),
+            "{name}"
+        );
+    }
+}
+
+/// **A band is drawn once when the next band is cut on the same page.** A page
+/// that began partway through one table row, with the rest of that row fitting,
+/// cut the next row — taller than a page — on that page too; the page was told
+/// about the second row's slice only, so the first row was drawn whole again
+/// and its part on the page before appeared twice (`a0a0a1a1a2a2…`). The later
+/// band now waits for a page of its own when the page began inside a band.
+#[test]
+fn a_band_is_drawn_once_when_the_next_band_is_cut_on_the_same_page() {
+    let rows = |prefix: &str| {
+        row_of(vec![BoxNode::element(
+            styled(Display::TableCell),
+            (0..5).map(|n| para(&format!("{prefix}{n}"))).collect(),
+        )])
+    };
+    let tree = BoxNode::element(block(), vec![table_of(vec![rows("a"), rows("b")])]);
+    for page in [50.0, 55.0] {
+        let laid = run(&tree, 100.0, page);
+        assert_eq!(
+            conservable(&laid.text()),
+            conservable(&tree.source_text()),
+            "page {page}"
+        );
+        let painted: String = (0..laid.pages.len())
+            .map(|at| painted_text(&laid, at))
+            .collect();
+        assert_eq!(
+            painted.split_whitespace().collect::<String>(),
+            "a0a1a2a3a4b0b1b2b3b4",
+            "page {page}: every row's text is drawn once"
+        );
+    }
+}
+
 /// **A clip is written only where the content reaches past the padding box**,
 /// and an axis the box does not clip is unbounded.
 #[test]

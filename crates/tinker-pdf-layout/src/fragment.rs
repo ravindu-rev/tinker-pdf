@@ -327,7 +327,10 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             // is worse than a push, because the push gets a whole page to try
             // again with.
             let hopeless = flow.items[at].height - from > fragmentainer + EPSILON;
-            if available > EPSILON && (at == cursor || (hopeless && !forced)) {
+            // A later band is cut here only on a page that did not begin
+            // partway through a band: that page is told about one slice, so
+            // the band it began inside would be drawn whole again.
+            if available > EPSILON && (at == cursor || (hopeless && !forced && drawn == 0.0)) {
                 if forced {
                     // **Narrowed, not gone.** What overflows a page now is one
                     // box *inside* the band that is itself taller than a page,

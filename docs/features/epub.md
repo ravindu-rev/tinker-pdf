@@ -321,13 +321,14 @@ states and keeps its first line inside the clip
 (`a_clip_measures_its_height_from_where_its_content_starts`), and a box that
 does not clip is as tall as it says
 (`a_stated_height_is_measured_below_the_margin_that_collapses_into_the_box`).
-**Still open**: a flex item that `css-flexbox-1` §9.4 stretches to its line is
-laid out a second time, and its text is stamped after the items laid out
-before that, so a row whose first item is shorter than a later one reads the
-later one first, clip or no clip (`a` beside a three-line `bbbb cccc dddd`
-reads `bbbb cccc dddd a`); and the `layout` fuzz target builds no table, flex
-or multi-column container, so the tests named here hold those three and no
-campaign does. Who is clipped is the
+A flex item that `css-flexbox-1` §9.4 stretches to its line is laid out a
+second time and keeps the reading-order place its first layout had
+(`a_stretched_flex_item_keeps_its_place_in_reading_order`: `a` beside a taller
+`bbbb cccc dddd` reads `a` first), and a band cut over pages is drawn once
+when the next band is cut on the same page
+(`a_band_is_drawn_once_when_the_next_band_is_cut_on_the_same_page`).
+**Still open**: the `layout` fuzz target builds no table, flex or multi-column
+container, so the tests named here hold those three and no campaign does. Who is clipped is the
 element tree's question (`paint::Effects`): every fragment is cut by the
 clipping elements above it, an element's own text by its own clip, and an
 absolutely positioned box only through its containing block (CSS 2.2

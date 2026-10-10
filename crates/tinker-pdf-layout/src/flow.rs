@@ -4017,6 +4017,9 @@ impl<M: Metrics> Builder<'_, M> {
         let mut laid: Vec<Option<Sublayout>> = (0..items.len()).map(|_| None).collect();
         let mut outer_cross = vec![0.0f64; items.len()];
         let mut baseline = vec![0.0f64; items.len()];
+        // Where each item's document-order stamps began, so step 11's second
+        // layout of a stretched item numbers its text where the first did.
+        let mut stamp_from = vec![0usize; items.len()];
         for at in 0..items.len() {
             let main = used_main[slot[at]];
             let item = &items[at];
@@ -4032,6 +4035,7 @@ impl<M: Metrics> Builder<'_, M> {
                 }
             };
             self.flex_pass = Some(pass);
+            stamp_from[at] = self.sequence;
             let sub = self.sublayout(boxes[at].node(), content_width, depth + 1, avoid)?;
             outer_cross[at] = if row {
                 sub.height
@@ -4115,7 +4119,14 @@ impl<M: Metrics> Builder<'_, M> {
                     }
                 };
                 self.flex_pass = Some(pass);
+                // The second layout reuses the stamps the first began at:
+                // numbered afresh, the item's text was read after every item
+                // laid out before it was stretched (`a` beside a taller
+                // `bbbb cccc dddd` read `bbbb cccc dddd a`).
+                let resume = self.sequence;
+                self.sequence = stamp_from[at];
                 let sub = self.sublayout(boxes[at].node(), content_width, depth + 1, avoid)?;
+                self.sequence = self.sequence.max(resume);
                 baseline[at] = first_baseline(&sub).unwrap_or(wanted);
                 laid[at] = Some(sub);
                 outer_cross[at] = wanted;
