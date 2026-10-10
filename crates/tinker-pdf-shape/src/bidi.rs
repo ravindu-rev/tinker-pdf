@@ -562,17 +562,21 @@ fn read_back(visual: &[&str], direction: BaseDirection) -> Result<Vec<usize>, Ve
 /// agree, and is right to left — except where it is drawn as a right-to-left
 /// word with punctuation after it **and a left-to-right paragraph draws it**.
 /// The shape: its leftmost unit a strong `R` or `AL` character and its
-/// rightmost **punctuation**, a unit whose class is `CS`, `ON`, `ES` or `ET`
-/// (not a number, `EN` or `AN`, and not a mark, `NSM`). A unit is classed by
-/// its first character that draws something, and units that draw nothing are
-/// passed over at either end, as rule L1 passes them over at a line's end:
-/// whitespace (`WS`, `S`, `B`, and every `White_Space` character, so a
-/// no-break space, which is `CS` because it separates digits, is not
-/// punctuation), the characters X9 removes and the isolate formatting
-/// characters. The check: [`logical_order`]'s search, run for a left-to-right
-/// paragraph, reaches an order that [`order_units`] draws as the line stands.
-/// Where it reaches none, the line is right to left as before. That is one
-/// more search, run only on a line of the tie-break's shape.
+/// rightmost **closing punctuation**, a unit whose class is `CS`, `ON`, `ES`
+/// or `ET` (not a number, `EN` or `AN`, and not a mark, `NSM`) and whose
+/// `General_Category` is not `Ps` or `Pi`: a mark that trails a
+/// left-to-right reading closes, so an opening bracket (every
+/// `Bidi_Paired_Bracket_Type` `Open` one is `Ps`) or an opening quotation
+/// mark at the right is a right-to-left line's first character. A unit is
+/// classed by its first character that draws something, and units that draw
+/// nothing are passed over at either end, as rule L1 passes them over at a
+/// line's end: whitespace (`WS`, `S`, `B`, and the two no-break spaces, which
+/// are `White_Space` but `CS` because they separate digits), the characters
+/// X9 removes and the isolate formatting characters. The check:
+/// [`logical_order`]'s search, run for a left-to-right paragraph, reaches an
+/// order that [`order_units`] draws as the line stands. Where it reaches
+/// none, the line is right to left as before. That is one more search, run
+/// only on a line of the tie-break's shape.
 ///
 /// Where both paragraphs draw the line — a left-to-right one draws a quoted
 /// Hebrew word and its comma `וח,`, and a right-to-left one draws a line
@@ -586,11 +590,14 @@ fn read_back(visual: &[&str], direction: BaseDirection) -> Result<Vec<usize>, Ve
 /// # What it costs
 ///
 /// A lone line of a right-to-left paragraph, holding nothing left to right,
-/// that opens with punctuation — a dialogue dash, a bullet — reads with that
-/// mark at its end: `— שלום`, drawn `םולש —`, reads `שלום —`. Not when a
-/// European number follows the mark: `(1) פריט`, `— 2026 שלום` and
-/// `• 5 תפוחים` are drawn with the number next to the mark, `טירפ )1(`, and
-/// no left-to-right paragraph draws that, because there a European number
+/// that opens with a dash or a bullet-like mark reads with that mark at its
+/// end: `— שלום`, drawn `םולש —`, reads `שלום —`. So does one that opens
+/// with a straight quotation mark, `"` or `'`, which is `Po` because it
+/// closes as often as it opens. An opening bracket or quotation mark does
+/// not pay — `(١) بند`, `“שלום`, `«مرحبا` read as typed — and nor does a
+/// line whose mark a European number follows: `— 2026 שלום`, `• 5 תפוחים`
+/// and `(1) פריט` are drawn with the number next to the mark, `םולש 2026 —`,
+/// and no left-to-right paragraph draws that, because there a European number
 /// with no right-to-left letter before it is left to right (W7) and one with
 /// a letter before it is drawn left of that letter. Arabic-Indic digits are
 /// `AN`, which W7 does not touch, so `— ١ بند` still pays and reads
@@ -634,33 +641,48 @@ pub fn drawn_direction(visual: &[&str]) -> BaseDirection {
 
 /// The comma tie-break's shape ([`drawn_direction`]): whether the leftmost
 /// unit of a drawn line that draws something is a strong right-to-left
-/// character and the rightmost is punctuation.
+/// character and the rightmost is punctuation that opens nothing.
 fn trailing_punctuation(visual: &[&str]) -> bool {
-    let mut drawn = visual.iter().filter_map(|unit| drawn_class(unit));
+    let mut drawn = visual.iter().filter_map(|unit| first_drawn(unit));
     let leftmost = drawn.next();
     let rightmost = drawn.next_back();
-    matches!(leftmost, Some(BidiClass::R | BidiClass::AL))
-        && matches!(
-            rightmost,
-            Some(BidiClass::CS | BidiClass::ON | BidiClass::ES | BidiClass::ET)
-        )
+    matches!(
+        leftmost.map(unicode::bidi_class),
+        Some(BidiClass::R | BidiClass::AL)
+    ) && rightmost.is_some_and(|c| {
+        matches!(
+            unicode::bidi_class(c),
+            BidiClass::CS | BidiClass::ON | BidiClass::ES | BidiClass::ET
+        ) && !unicode::opens(c)
+    })
 }
 
-/// The class of a unit's first character that draws something, or `None`
-/// for a unit that draws nothing: whitespace by `Bidi_Class` or by
-/// `White_Space`, a character X9 removes, or an isolate formatting
-/// character — what L1 resets with whitespace at a line's end.
-fn drawn_class(unit: &str) -> Option<BidiClass> {
-    unit.chars().find_map(|c| {
-        let class = unicode::bidi_class(c);
-        let blank = c.is_whitespace()
+/// The `White_Space` characters whose `Bidi_Class` is not `WS`, `S` or `B`:
+/// U+00A0 NO-BREAK SPACE and U+202F NARROW NO-BREAK SPACE, both `CS`
+/// because they separate digits.
+///
+/// Written out because `White_Space` lives in `PropList.txt`, which the
+/// vendored UCD does not carry, and every other property this module reads
+/// is the vendored one; the standard library's `char::is_whitespace` is the
+/// same property at the toolchain's Unicode version, and a test holds the
+/// two to each other.
+const BLANK_SEPARATORS: [char; 2] = ['\u{A0}', '\u{202F}'];
+
+/// A unit's first character that draws something, or `None` for a unit that
+/// draws nothing: whitespace (`WS`, `S`, `B`, or [`BLANK_SEPARATORS`]), a
+/// character X9 removes, or an isolate formatting character — what L1 resets
+/// with whitespace at a line's end.
+fn first_drawn(unit: &str) -> Option<char> {
+    unit.chars().find(|c| {
+        let class = unicode::bidi_class(*c);
+        let blank = BLANK_SEPARATORS.contains(c)
             || matches!(
                 class,
                 BidiClass::WS | BidiClass::S | BidiClass::B | BidiClass::PDI
             )
             || class.is_removed_by_x9()
             || class.is_isolate_initiator();
-        (!blank).then_some(class)
+        !blank
     })
 }
 
@@ -1298,9 +1320,10 @@ pub fn mirror(c: char, level: Level) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::{
-        drawn_direction, logical_order, mirror, order_units, read_back, reorder, BaseDirection,
-        Level, Paragraph,
+        drawn_direction, logical_order, mirror, order_units, read_back, reorder,
+        trailing_punctuation, BaseDirection, Level, Paragraph, BLANK_SEPARATORS,
     };
+    use crate::unicode::{bidi_class, BidiClass};
 
     fn levels(text: &str, direction: BaseDirection) -> Vec<u8> {
         let paragraph = Paragraph::new(text, direction);
@@ -1746,13 +1769,62 @@ mod tests {
         }
     }
 
+    /// **An opening bracket or quotation mark at the right is not trailing
+    /// punctuation** (review of the amendment). In a left-to-right reading a
+    /// mark after the word closes, so a mark that opens, drawn at the right,
+    /// is the first character of a right-to-left line. `(١) بند` is drawn
+    /// `دنب )١(`, and a left-to-right reading draws it too, `١) بند(`, which
+    /// the tie-break took; `“שלום`, drawn `םולש“`, read `שלום“`. `Ps` and
+    /// `Pi` from the vendored `UnicodeData.txt` keep them right to left.
+    #[test]
+    fn an_opening_bracket_or_quotation_mark_at_the_right_does_not_trail() {
+        let shalom = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}";
+        for typed in [
+            "(\u{661}) \u{628}\u{646}\u{62F}".to_owned(),
+            format!("\u{201C}{shalom}"),
+            format!("\u{201E}{shalom}"),
+            "\u{AB}\u{645}\u{631}\u{62D}\u{628}\u{627}".to_owned(),
+            format!("({shalom}"),
+        ] {
+            let line = drawn(&typed, BaseDirection::RightToLeft);
+            let units = chars(&line);
+            let units: Vec<&str> = units.iter().map(String::as_str).collect();
+            assert!(!trailing_punctuation(&units), "{typed:?} drawn {line:?}");
+            assert_eq!(
+                drawn_direction(&units),
+                BaseDirection::RightToLeft,
+                "{typed:?} drawn {line:?}"
+            );
+            let read = read_in(&units, &logical_order(&units, BaseDirection::Auto));
+            assert_eq!(read, typed, "drawn {line:?}");
+        }
+        // A closing one still trails a quoted word, as a comma does.
+        let units = ["\u{5D5}", "\u{5D7}", "\u{201D}"];
+        assert_eq!(drawn_direction(&units), BaseDirection::LeftToRight);
+    }
+
+    /// [`BLANK_SEPARATORS`] is every `White_Space` character whose class is
+    /// not `WS`, `S` or `B`: the standard library's `char::is_whitespace`
+    /// is that property, and this crate's `Bidi_Class` the vendored one.
+    #[test]
+    fn the_blank_separators_are_the_white_space_that_bidi_class_misses() {
+        let missed: Vec<char> = (0..=0x0010_FFFF_u32)
+            .filter_map(char::from_u32)
+            .filter(|c| {
+                c.is_whitespace()
+                    && !matches!(bidi_class(*c), BidiClass::WS | BidiClass::S | BidiClass::B)
+            })
+            .collect();
+        assert_eq!(missed, BLANK_SEPARATORS);
+    }
+
     /// **The price, named** (ruling 14's amendment): a lone line of a
     /// right-to-left paragraph that opens with punctuation — a dialogue
     /// dash — is drawn as the tie-break's shape and reads with the dash at
     /// its end. Both readings draw it; this is the one the owner chose. So do
-    /// the two shapes of it that a number does not save: Arabic-Indic digits,
-    /// `AN`, which a left-to-right paragraph draws next to the mark too, and a
-    /// number that is not next to the mark.
+    /// three more shapes: Arabic-Indic digits, `AN`, which a left-to-right
+    /// paragraph draws next to the mark too; a number that is not next to the
+    /// mark; and a straight quotation mark, which closes as often as it opens.
     #[test]
     fn a_right_to_left_line_opening_with_a_dash_reads_it_trailing() {
         let shalom = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}";
@@ -1767,6 +1839,7 @@ mod tests {
                 format!("\u{2014} {shalom} 5 \u{5D7}\u{5D5}"),
                 format!("{shalom} 5 \u{5D7}\u{5D5} \u{2014}"),
             ),
+            (format!("\"{shalom}"), format!("{shalom}\"")),
         ] {
             let line = drawn(&typed, BaseDirection::RightToLeft);
             let units = chars(&line);

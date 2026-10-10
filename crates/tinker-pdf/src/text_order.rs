@@ -40,9 +40,10 @@
 //!    Hebrew. **One tie-break** (the ruling as amended 10 October 2026): a
 //!    line with no left-to-right strong character whose leftmost unit is a
 //!    strong right-to-left character and whose rightmost is punctuation
-//!    (`CS`, `ON`, `ES` or `ET`; whitespace and invisible format characters
-//!    passed over) reads as a left-to-right paragraph **if a left-to-right
-//!    paragraph draws it** — a Hebrew or Arabic word quoted in left-to-right
+//!    (`CS`, `ON`, `ES` or `ET`, but not an opening bracket or quotation
+//!    mark; whitespace and invisible format characters passed over) reads
+//!    as a left-to-right paragraph **if a left-to-right paragraph draws
+//!    it** — a Hebrew or Arabic word quoted in left-to-right
 //!    text with its comma after it, `חו,` drawn `וח,`, which both paragraphs
 //!    draw alike and which read right to left came back `,חו`. Where no
 //!    left-to-right reading draws the line, it stays right to left.
@@ -73,15 +74,17 @@
 //!   left-to-right one, and its runs come back each in the right order but
 //!   placed as a left-to-right paragraph would place them. And a line of a
 //!   right-to-left paragraph that holds nothing left to right and *opens*
-//!   with punctuation — a dash, `— שלום` drawn `םולש —`, a bullet — is the
+//!   with a dash or a bullet-like mark — `— שלום` drawn `םולש —` — or a
+//!   straight quotation mark, which closes as often as it opens, is the
 //!   tie-break's shape, a left-to-right paragraph draws it too, and it reads
 //!   with the mark at its end, `שלום —`: the price of the tie-break, chosen
 //!   because a quoted word's trailing punctuation is far commoner
-//!   (`text_logical_order.rs` pins it by name). A European number after the
-//!   mark spares the line, `(1) פריט`, `— 2026 שלום`, `• 5 תפוחים`: no
-//!   left-to-right paragraph draws one next to the mark. Arabic-Indic digits
-//!   (`AN`) do not, `— ١ بند` reading `١ بند —`, nor does a number further
-//!   on, `— שלום 5 חו`.
+//!   (`text_logical_order.rs` pins it by name). An opening bracket or
+//!   quotation mark does not pay, `(١) بند`, `“שלום`; nor does a mark a
+//!   European number follows, `(1) פריט`, `— 2026 שלום`, `• 5 תפוחים`,
+//!   since no left-to-right paragraph draws one next to the mark.
+//!   Arabic-Indic digits (`AN`) do not spare it, `— ١ بند` reading
+//!   `١ بند —`, nor does a number further on, `— שלום 5 חו`.
 //! - **Vertical lines**, which UAX #9 does not describe.
 //!
 //! [`crate::Page::text_with`] with [`TextOptions::content_order`] is the

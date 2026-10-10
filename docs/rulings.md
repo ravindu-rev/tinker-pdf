@@ -386,14 +386,18 @@ living in one feature's head.
     read as a right-to-left paragraph, since both of its ends are right to
     left. It still is, with one exception: where the line, sorted along its
     baseline, has a strong right-to-left character as its **leftmost** unit
-    and **punctuation** as its **rightmost** — a unit of `Bidi_Class` `CS`,
-    `ON`, `ES` or `ET`; not a number (`EN`, `AN`) or a mark (`NSM`) — it is
-    read as a **left-to-right** paragraph, so the punctuation trails the
-    word. Units that draw nothing are passed over at either end, the set
-    rule L1 resets with whitespace at a line's end: `WS`, `S`, `B`, the
-    characters X9 removes and the isolate formatting characters, and also
-    every `White_Space` character, so that a no-break space — `CS`, because
-    it separates digits — is not taken for a comma. Every other line keeps
+    and **closing punctuation** as its **rightmost** — a unit of
+    `Bidi_Class` `CS`, `ON`, `ES` or `ET`; not a number (`EN`, `AN`) or a
+    mark (`NSM`); and not an opening bracket or quotation mark,
+    `General_Category` `Ps` or `Pi`, because a mark that trails a
+    left-to-right reading closes — it is read as a **left-to-right**
+    paragraph, so the punctuation trails the word. Units that draw nothing
+    are passed over at either end, the set rule L1 resets with whitespace
+    at a line's end: `WS`, `S`, `B`, the characters X9 removes and the
+    isolate formatting characters, and also the two `White_Space`
+    characters whose class is `CS` because they separate digits, U+00A0
+    NO-BREAK SPACE and U+202F NARROW NO-BREAK SPACE, so that neither is
+    taken for a comma. Every other line keeps
     the rule above, and a line with an `L` character anywhere is out of the
     tie-break's reach. And the tie-break is taken **only where a
     left-to-right paragraph draws the line**: `logical_order`'s search, run
@@ -401,9 +405,11 @@ living in one feature's head.
     draws as the line stands — the forward check every answer already
     passes, asked once more before the direction is chosen — or the line
     stays right to left. As first written, the shape alone decided, on the
-    belief that both paragraphs always draw it; a line holding a number is
-    the counter-example (the price, below), and review caught it the same
-    day. `tinker_pdf_shape::bidi::drawn_direction` chooses and asks;
+    belief that both paragraphs always draw it, and any mark of those
+    classes counted; a line holding a number is the counter-example to the
+    first and an opening bracket at the right to the second (the price,
+    below), and review caught both the same day.
+    `tinker_pdf_shape::bidi::drawn_direction` chooses and asks;
     `logical_order` for a given direction is untouched, and
     `bidi_conformance.rs` holds it to Unicode's file as before.
 
@@ -420,9 +426,15 @@ living in one feature's head.
     reading wins.
 
     *The price, accepted with that knowledge.* A line of a right-to-left
-    paragraph that opens with punctuation — a dialogue dash, `— שלום`,
-    drawn `םולש —`, a bullet, a bracket — and is alone on its line, with no
-    left-to-right character, reads with the mark at its end: `שלום —`.
+    paragraph that opens with a dash or a bullet-like mark — a dialogue
+    dash, `— שלום`, drawn `םולש —` — and is alone on its line, with no
+    left-to-right character, reads with the mark at its end: `שלום —`. So
+    does one that opens with a straight quotation mark, `"שלום` reading
+    `שלום"`: `"` and `'` are `Po`, closing as often as they open.
+    **An opening bracket or quotation mark** does not pay: `(١) بند`,
+    `“שלום` and `«مرحبا` read as typed. Before it was excluded, `(١) بند`,
+    drawn `دنب )١(`, read `١) بند(`, a text a left-to-right paragraph does
+    draw that way.
     **A European number after the mark** spares the line: `(1) פריט`,
     `— 2026 שלום` and `• 5 תפוחים` are drawn with the number next to the
     mark, `טירפ )1(`, which no left-to-right paragraph draws — there a
@@ -442,7 +454,9 @@ living in one feature's head.
     (`שלום.`, the stop drawn leftmost, unchanged),
     `a_line_holding_a_left_to_right_character_keeps_its_rule`,
     `a_right_to_left_line_opening_with_a_mark_and_a_number_reads_as_typed`
-    (the forward check), `a_right_to_left_line_opening_with_a_dash_reads_the_dash_last`
+    (the forward check),
+    `a_right_to_left_line_opening_with_a_bracket_or_quotation_mark_reads_as_typed`
+    (what opens), `a_right_to_left_line_opening_with_a_dash_reads_the_dash_last`
     (the price) and `no_left_to_right_page_moves`; `epub_fallback.rs`'s
     `a_standard_14_hebrew_word_alone_on_its_line_is_drawn_right_to_left`
     (the book's table, `חו,`); `text_order.rs`'s
@@ -452,9 +466,12 @@ living in one feature's head.
     tie-break's classes and both readings drawing the line
     (`a_right_to_left_word_and_its_punctuation_alone_read_left_to_right`,
     `the_tie_break_reaches_no_other_line`,
-    `a_mark_and_a_number_opening_a_right_to_left_line_read_as_typed`, and
+    `a_mark_and_a_number_opening_a_right_to_left_line_read_as_typed`,
+    `an_opening_bracket_or_quotation_mark_at_the_right_does_not_trail`,
+    `the_blank_separators_are_the_white_space_that_bidi_class_misses`, and
     `a_right_to_left_line_opening_with_a_dash_reads_it_trailing`, which
-    pins the price's three shapes).
+    pins the price's four shapes); `unicode.rs`'s
+    `what_opens_is_general_category_ps_and_pi`.
 
 ## How to add a ruling
 

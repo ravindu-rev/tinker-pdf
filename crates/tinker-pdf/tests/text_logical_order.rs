@@ -45,8 +45,14 @@ const PRIT: &str = "\u{5E4}\u{5E8}\u{5D9}\u{5D8}";
 /// Tav, pe, vav, het, yod, final mem: `tapuchim`, apples, as it is read.
 const TAPUCHIM: &str = "\u{5EA}\u{5E4}\u{5D5}\u{5D7}\u{5D9}\u{5DD}";
 
+/// Arabic beh, noon, dal: `band`, a clause, as it is read.
+const BAND: &str = "\u{628}\u{646}\u{62F}";
+
+/// Arabic meem, reh, hah, beh, alef: `marhaba`, hello, as it is read.
+const MARHABA: &str = "\u{645}\u{631}\u{62D}\u{628}\u{627}";
+
 /// Everything any page here draws.
-const COVERS: &str = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}\u{5B8}\u{646}\u{633}\u{628}\u{629}\u{7CA}\u{7CB}\u{7CC} 0123456789seonwab.%\u{5D7}\u{62D}\u{648}\u{62A},\u{2014}\u{5E4}\u{5E8}\u{5D9}\u{5D8}\u{5EA}()\u{2022}";
+const COVERS: &str = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}\u{5B8}\u{646}\u{633}\u{628}\u{629}\u{7CA}\u{7CB}\u{7CC} 0123456789seonwab.%\u{5D7}\u{62D}\u{648}\u{62A},\u{2014}\u{5E4}\u{5E8}\u{5D9}\u{5D8}\u{5EA}()\u{2022}\u{62F}\u{661}\u{645}\u{631}\u{627}\u{201C}\u{AB}";
 
 /// The font size, and so the advance of every glyph: the face's 500 units of
 /// a 1000-unit em at twenty points is ten.
@@ -372,6 +378,31 @@ fn a_right_to_left_line_opening_with_a_mark_and_a_number_reads_as_typed() {
             (format!("(1) {PRIT}"), true),
             (format!("\u{2014} 2026 {SHALOM}"), true),
             (format!("\u{2022} 5 {TAPUCHIM}"), true),
+        ]
+    );
+}
+
+/// **A right-to-left line that opens with a bracket or a quotation mark
+/// reads as typed** (review of the comma tie-break). In a left-to-right
+/// reading a mark after the word closes, so an opening one drawn at the right
+/// of a line is a right-to-left line's first character. `(١) بند` is drawn
+/// `دنب )١(`, which a left-to-right paragraph draws too, from `١) بند(`, and
+/// the tie-break read it so; `“שלום`, drawn `םולש“`, read `שלום“`, and
+/// `«مرحبا` read `مرحبا«`. An opening bracket or quotation mark,
+/// `General_Category` `Ps` or `Pi`, is not trailing punctuation.
+#[test]
+fn a_right_to_left_line_opening_with_a_bracket_or_quotation_mark_reads_as_typed() {
+    let lines = [
+        visual(&format!("{} )\u{661}(", reversed(BAND))),
+        visual(&format!("{}\u{201C}", reversed(SHALOM))),
+        visual(&format!("{}\u{AB}", reversed(MARHABA))),
+    ];
+    assert_eq!(
+        extract_lines(page_of(&lines)),
+        [
+            (format!("(\u{661}) {BAND}"), true),
+            (format!("\u{201C}{SHALOM}"), true),
+            (format!("\u{AB}{MARHABA}"), true),
         ]
     );
 }
