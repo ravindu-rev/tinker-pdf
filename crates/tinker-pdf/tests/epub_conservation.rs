@@ -689,78 +689,189 @@ fn a_book_with_an_uppercased_heading_conserves() {
     assert!(verdict.holds(), "{verdict:?}");
 }
 
-/// **A known limit, pinned (ROADMAP K-11):** ruling 14 reads a bracketed run
-/// and the full stop after it out of order in right-to-left text.
-///
-/// CI's `epub-corpus` job found it in `sample-regime-anticancer-arabic.epub`,
-/// from character 20 963 (`Missing ").وقد…"`, `Extra ")وقد…"`), once the
-/// standard-14 mark fix let the book past its two-mark letter at 287. These
-/// are two of the shapes a synthetic probe of 240 books failed on — 82 of
-/// them, the same 82 with every mark stripped, so the cause is ruling 14's
-/// reading-back and not where a mark is drawn. In a right-to-left paragraph
-/// narrowed so that `(histone deacetylase).` ends a line, its `).` is read
-/// after the words that open the next sentence; in a dir-less one, `(HDAC).`
-/// comes back as `.)HDAC(`. The owner accepted the limit for the October 2026
-/// release. When K-11 closes, this test flips: both books conserve.
-#[test]
-fn a_bracketed_run_and_its_full_stop_in_right_to_left_text_are_read_out_of_order() {
+/// The paragraph ROADMAP K-11's probe builds: `repeat` sentences, each a
+/// filler, a bracketed `inside` and its full stop, and a tail — the shape
+/// `sample-regime-anticancer-arabic.epub` holds at character 20 963.
+fn bracketed_paragraph(inside: &str, repeat: usize) -> String {
     const FILLERS: [&str; 2] = [
         "إنّ الخلايا السرطانيّة تتكاثر بسرعة كبيرة، ويعتمد ذلك على عوامل عدّة",
         "تتألّف كلّ الموادّ الحيّة على كوكبنا الأرض من خلايا، باستثناء الفيروسات",
     ];
     const TAIL: &str = "وقد أصبحنا نعرف الآن أنّ بعض الموادّ تكبح الهستونات النازعة للأسيتيل، مخفّفة بذلك من نموّ الأورام";
-    let paragraph = |inside: &str, repeat: usize| {
-        (0..repeat)
-            .map(|i| format!("{} ({inside}). {TAIL}. ", FILLERS[i % 2]))
-            .collect::<String>()
-    };
-    let unpointed = |text: &str| -> String {
-        text.chars()
-            .filter(|c| !matches!(c, '\u{064B}'..='\u{065F}' | '\u{0670}'))
-            .collect()
-    };
+    (0..repeat)
+        .map(|i| format!("{} ({inside}). {TAIL}. ", FILLERS[i % 2]))
+        .collect()
+}
+
+/// `text` with its Arabic marks taken out: the probe's mark-free twin.
+fn unpointed(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '\u{064B}'..='\u{065F}' | '\u{0670}'))
+        .collect()
+}
+
+/// **A bracketed run and the full stop after it read as written in
+/// right-to-left text** — ROADMAP K-11, closed 10 October 2026.
+///
+/// CI's `epub-corpus` job found the shape in
+/// `sample-regime-anticancer-arabic.epub`, from character 20 963
+/// (`Missing ").وقد…"`, `Extra ")وقد…"`). A synthetic probe of 240 books
+/// failed 82, the same 82 with every mark stripped, and three causes, none of
+/// them where a mark is drawn, stood behind them; each shape here failed at
+/// 9297d2d, pointed and mark-free alike, in both builds:
+///
+/// - **The writer drew the punctuation backwards.** In a sans-serif book the
+///   brackets, the full stop and the spaces are Helvetica's and the Arabic is
+///   the overflow font's, so ` (` and `). ` are face segments of their own,
+///   and a standard-14 segment with no right-to-left character in it was
+///   drawn as typed even at a right-to-left level: the page itself showed
+///   `عدة( النازعة` and read `.)وقد` — CI's `Missing ").وقد"`,
+///   `Extra ")وقد"`. Such a segment is drawn in its level's order now on a
+///   line that holds a right-to-left character (`paint::coded_order`,
+///   `TextRun::bidi_line_rtl`).
+/// - **The line came back in pieces.** Narrowed so that `(histone
+///   deacetylase).` opens a line, the `(`, the Latin words and the Arabic
+///   are three text objects, and the join of a line's pieces asked whether
+///   either of **two** pieces held a right-to-left character; the `(` and
+///   the Latin hold none, so the `(` was read as a line of its own. The whole
+///   chain is joined now (`text_order::rejoin_split_lines`). And justified
+///   at `margin: 0 35%`, an Arabic line's word spaces were stretched past half
+///   an em, which `TextDevice` cut it at, so the words read in drawn order,
+///   backwards; a word space stretched by `Tw` carries the pen within
+///   right-to-left text now (`tinker-pdf-content`'s `Stretch`).
+/// - **The majority read the line the wrong way.** That narrowed line holds
+///   eighteen Latin letters and seventeen Arabic ones, and ruling 14 read it
+///   left to right, `.)histone deacetylase(`: a text a left-to-right
+///   paragraph draws as the line stands. The pair is drawn facing outward,
+///   which only a pair at a right-to-left level is; ruling 14's bracket
+///   tie-break (amended 10 October 2026) reads it in the direction that pairs
+///   it.
+#[test]
+fn a_bracketed_run_and_its_full_stop_in_right_to_left_text_read_as_written() {
     let read = |style: &str, open: &str, text: &str| {
         let bytes = epub_support::book::styled_book("ar", style, &format!("{open}{text}</p>"));
         let doc = Document::open(bytes.clone()).expect("the book opens");
-        conservation::conservation_in_logical_order(&bytes, &doc)
-    };
-    for (style, open, text) in [
         (
-            "p { margin: 0 25% }",
-            "<p dir=\"rtl\">",
-            paragraph("histone deacetylase", 6),
+            conservation(&bytes, &doc),
+            conservation::conservation_in_logical_order(&bytes, &doc),
+        )
+    };
+    let rtl = "<p dir=\"rtl\">";
+    for (style, open, inside, repeat) in [
+        // The narrowed line that opens with the bracketed Latin words.
+        ("p { margin: 0 25% }", rtl, "histone deacetylase", 6),
+        // CI's shape: the punctuation in a face of its own.
+        (
+            "body { font-family: sans-serif } p { text-align: justify; margin: 0 15% }",
+            rtl,
+            "النازعة للأسيتيل",
+            1,
         ),
-        ("", "<p>", paragraph("HDAC", 1)),
+        (
+            "body { font-family: sans-serif } p { text-align: justify; margin: 0 15% }",
+            rtl,
+            "histone deacetylase",
+            3,
+        ),
+        (
+            "body { font-family: sans-serif } p { text-align: justify; margin: 0 15% }",
+            "<p>",
+            "انظر الفصل الثالث",
+            6,
+        ),
+        // Justified narrow enough that word spaces stretch past half an em.
+        ("p { text-align: justify; margin: 0 35% }", rtl, "HDAC", 3),
+        ("p { text-align: justify; margin: 0 35% }", rtl, "2010", 6),
+        (
+            "p { text-align: justify; margin: 0 35% }",
+            rtl,
+            "النازعة للأسيتيل",
+            6,
+        ),
+        // And the plain shapes, which must stay as they were.
+        ("", rtl, "HDAC", 1),
+        ("p { text-align: justify }", rtl, "2010", 3),
+        ("", "<p>", "2010", 1),
+        ("", "<p>", "النازعة للأسيتيل", 1),
     ] {
-        let pointed = read(style, open, &text);
-        let twin = read(style, open, &unpointed(&text));
-        assert!(
-            !pointed.holds() && !twin.holds(),
-            "K-11 is fixed for {open} {style:?}: flip this pin, close the row and \
-             delete content-and-text.md's limit row ({pointed:?} / {twin:?})"
-        );
-        let shown = |verdict: &conservation::Verdict| -> Vec<String> {
-            verdict
-                .divergences
-                .iter()
-                .filter_map(|divergence| match divergence {
-                    Divergence::Missing { text, .. } | Divergence::Extra { text, .. } => {
-                        Some(unpointed(text))
-                    }
-                    _ => None,
-                })
-                .collect()
-        };
-        assert!(
-            shown(&pointed)
-                .iter()
-                .any(|text| text.contains(").") || text.contains(".)")),
-            "the divergence is at the bracket and its full stop: {pointed:?}"
-        );
-        assert_eq!(
-            shown(&pointed),
-            shown(&twin),
-            "the same text with no mark is read the same way, so marks are not the cause"
-        );
+        let text = bracketed_paragraph(inside, repeat);
+        for text in [text.clone(), unpointed(&text)] {
+            let (content, logical) = read(style, open, &text);
+            assert!(
+                content.holds() && logical.holds(),
+                "{open} {style:?}, ({inside}) x{repeat}: content {content:?}, logical {logical:?}"
+            );
+        }
     }
+}
+
+/// **A dir-less paragraph's line with Arabic at both ends and a Latin run in
+/// brackets between reads as the other text UAX #9 draws alike** — a limit of
+/// ruling 14 (`content-and-text.md`'s "Telling apart two texts UAX #9 draws
+/// alike"), pinned so that a change to it is noticed.
+///
+/// With no `dir`, `… عوامل عدّة (HDAC). وقد …` is a left-to-right paragraph:
+/// the pair is at its level, drawn facing inward, `(HDAC)`, with the Arabic
+/// either side reversed. A right-to-left paragraph whose `/ToUnicode` names
+/// the mirrored glyph draws `وقد … (HDAC) … عوامل عدّة` as exactly that line,
+/// and nothing on the page says which drew it: both readings draw the line
+/// (UAX #9 forwards, asserted here), and the bracket tie-break counts only a
+/// pair facing outward. Both ends of the line are Arabic, so it reads as the
+/// right-to-left paragraph: `(HDAC).` comes back `.)HDAC(`. K-11's probe has
+/// 45 of these 120 dir-less books, every one with a Latin run in the
+/// brackets, each pointed and not, in both builds.
+#[test]
+fn a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_drawn_alike_twin() {
+    use tinker_pdf_shape::bidi::{logical_order, order_units, BaseDirection};
+    let text = unpointed(&bracketed_paragraph("HDAC", 1));
+    let bytes = epub_support::book::styled_book("ar", "", &format!("<p>{text}</p>"));
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    assert!(
+        !conservation::conservation_in_logical_order(&bytes, &doc).holds(),
+        "the dir-less line now reads as written: drop this limit from content-and-text.md"
+    );
+    let page = doc.page(0).expect("a page");
+    let page_text = page.text();
+    let line = page_text
+        .lines()
+        .into_iter()
+        .find(|line| line.text.contains("HDAC"))
+        .expect("the line holding the bracketed run");
+    assert!(
+        line.text.contains(".)HDAC("),
+        "the line reads as the right-to-left twin: {:?}",
+        line.text
+    );
+    // The line as drawn, left to right, and its two readings.
+    let mut drawn: Vec<(f64, &str)> = line
+        .chars
+        .iter()
+        .map(|c| (c.quad.bounds().0, c.text.as_str()))
+        .collect();
+    drawn.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let visual: Vec<&str> = drawn.iter().map(|(_, text)| *text).collect();
+    let opens = visual.iter().position(|unit| *unit == "(");
+    let closes = visual.iter().position(|unit| *unit == ")");
+    assert!(
+        opens < closes,
+        "the pair is drawn facing inward: {visual:?}"
+    );
+    let read = |direction| -> (String, Vec<&str>) {
+        let order = logical_order(&visual, direction);
+        let read: Vec<&str> = order.iter().map(|at| visual[*at]).collect();
+        let redrawn = order_units(&read, direction)
+            .into_iter()
+            .map(|at| read[at])
+            .collect();
+        (read.concat(), redrawn)
+    };
+    let (left_to_right, drawn_ltr) = read(BaseDirection::LeftToRight);
+    let (right_to_left, drawn_rtl) = read(BaseDirection::RightToLeft);
+    assert_eq!(
+        drawn_ltr, visual,
+        "a left-to-right paragraph draws the line"
+    );
+    assert_eq!(drawn_rtl, visual, "and so does a right-to-left one");
+    assert!(left_to_right.contains("(HDAC)."), "{left_to_right:?}");
+    assert_eq!(right_to_left, line.text, "ruling 14 reads the second");
 }

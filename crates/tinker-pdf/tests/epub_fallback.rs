@@ -1548,40 +1548,49 @@ fn a_standard_14_neutral_line_above_a_right_to_left_line_reads_as_written() {
 }
 
 /// **A run of nothing but punctuation between two right-to-left words is
-/// drawn in the order it was typed, and reads back reversed — the known
-/// limit `epub.md`'s `direction` row names, pinned so that ending it is
-/// noticed.**
+/// drawn in its level's order, and reads as written** — the known limit
+/// `epub.md`'s `direction` row named until ROADMAP K-11 closed.
 ///
 /// The `.,` between two italic Hebrew words is a run of its own, and N1
 /// resolves both marks to the paragraph's level, 1, so L2 draws them `,.`.
-/// `coded_order` reorders only a slice that holds a right-to-left character,
-/// and this one holds none, so it is drawn as typed, `.` left of `,`, and
-/// the line, which ruling 14 reads right to left, comes back `חו,.וח`.
+/// `coded_order` reordered only a slice that held a right-to-left character,
+/// so this one was drawn as typed, `.` left of `,`, and the line, which
+/// ruling 14 reads right to left, came back `חו,.וח`. It is drawn `,` left
+/// of `.` now, because its **line** holds a right-to-left character
+/// (`TextRun::bidi_line_rtl`), and a line with none still draws such a run as
+/// typed (the two tests above).
 ///
-/// Reordering every slice at an odd level instead drew this line right and
-/// every line of nothing but neutrals at a right-to-left level backwards
-/// (the two tests above), and was taken back. Which of the two a slice is on
-/// — whether its **line** holds a right-to-left character — is the line's to
-/// say, and `draw_coded` is handed the run and the slice. When this fails
-/// because the line reads `חו.,וח`, the limit is gone: drop it from
-/// `epub.md` and make this the test that the line reads as written.
+/// The same limit drew CI's `sample-regime-anticancer-arabic.epub` wrong:
+/// in a sans-serif book the brackets, the full stop and the spaces are
+/// Helvetica's and the Arabic the overflow font's, so `). ` and ` (` are
+/// face segments of their own inside an Arabic run, and were drawn as
+/// typed — the page showed `عدة( النازعة`, and read `للأسيتيل .)وقد`, the
+/// job's `Missing ").وقد…"`, `Extra ")وقد…"`.
 #[test]
-fn a_standard_14_punctuation_run_between_right_to_left_words_is_drawn_as_typed() {
+fn a_standard_14_punctuation_run_between_right_to_left_words_reads_as_written() {
     let body = format!("<p dir=\"rtl\"><i>{HET_VAV}</i>.,<i>{VAV_HET}</i></p>");
     let bytes = styled_book("he", "", &body);
     let doc = Document::open(bytes.clone()).expect("the book opens");
-
     let (comma, stop) = (drawn_at(&doc, ","), drawn_at(&doc, "."));
     assert!(
-        stop < comma,
-        "the punctuation is no longer drawn as typed: , at {comma}, . at {stop}"
+        comma < stop,
+        "the punctuation is drawn as typed: , at {comma}, . at {stop}"
     );
+    reads_as_written(&bytes, &doc, &format!("{HET_VAV}.,{VAV_HET}"));
 
-    let text = doc.page(0).expect("a page").text().plain_text();
-    assert!(
-        text.contains(&format!("{HET_VAV},.{VAV_HET}")),
-        "the known limit no longer reads the punctuation reversed: {text:?}"
+    let arabic = "عوامل عدّة (النازعة للأسيتيل). وقد أصبحنا نعرف الآن";
+    let bytes = styled_book(
+        "ar",
+        "body { font-family: sans-serif }",
+        &format!("<p dir=\"rtl\">{arabic}</p>"),
     );
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let (open, close) = (drawn_at(&doc, "("), drawn_at(&doc, ")"));
+    assert!(
+        close < open,
+        "the pair is drawn as typed, each bracket facing its word: ( at {open}, ) at {close}"
+    );
+    reads_as_written(&bytes, &doc, arabic);
 }
 
 /// **The same word alone on its line — the book's own shape, a table with a

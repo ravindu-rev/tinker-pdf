@@ -1849,6 +1849,7 @@ fn note_nodes(nodes: &[Node], fonts: &mut Fonts<'_>) {
             embeddings: Default::default(),
             bidi_level: None,
             bidi_gap: None,
+            bidi_line_rtl: false,
             hyphenated: false,
             color: Color::BLACK,
             decoration: TextDecoration::None,

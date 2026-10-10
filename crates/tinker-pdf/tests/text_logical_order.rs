@@ -407,6 +407,75 @@ fn a_right_to_left_line_opening_with_a_bracket_or_quotation_mark_reads_as_typed(
     );
 }
 
+/// A one-page document drawing each of `pieces` as a run of its own — a
+/// text object each — all on one baseline, in the order given. Each
+/// stroke's place is from the line's start, as [`visual`] gives it.
+fn pieces_page(pieces: &[Vec<Stroke>]) -> Vec<u8> {
+    let face = Face::new("Fixture Hebrew", COVERS);
+    let program = face.build();
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_cid_font(b"F0", b"FixtureHebrew", &program));
+    let mut content = Vec::new();
+    for strokes in pieces {
+        let texts: Vec<String> = strokes.iter().map(|(ch, _)| ch.to_string()).collect();
+        let glyphs: Vec<PlacedGlyph<'_>> = strokes
+            .iter()
+            .zip(texts.iter())
+            .map(|((ch, x), text)| PlacedGlyph {
+                glyph: Glyph {
+                    id: face
+                        .glyph_of(*ch)
+                        .expect("the face covers what the page draws"),
+                    text,
+                },
+                x: *x,
+                rise: 0.0,
+            })
+            .collect();
+        assert!(builder.glyph_run(
+            &mut content,
+            b"F0",
+            SIZE,
+            [1.0, 0.0, 0.0, 1.0, 40.0, 100.0],
+            &glyphs
+        ));
+    }
+    builder.add_page(300.0, 200.0, |page| page.raw(&content));
+    builder.finish()
+}
+
+/// **A right-to-left line that opens with a bracketed Latin run reads as
+/// written** — ROADMAP K-11, and ruling 14's bracket tie-break, amended 10
+/// October 2026.
+///
+/// `(seen wan). חו`, a right-to-left paragraph's line, is drawn
+/// `וח .)seen wan(`: the pair at the paragraph's level, typed characters
+/// named, each bracket facing away from the words it encloses. An EPUB
+/// writes it as three runs at three levels, each a text object, in reading
+/// order: the `(` at the right end, the Latin words, then `וח .)` at the
+/// left — three pieces on one baseline.
+///
+/// Two things read it backwards. The `(` and the Latin words hold no
+/// right-to-left character, and the join asked that of each pair of
+/// pieces, so the `(` was read as a line of its own; the whole chain is
+/// joined now. And the line holds seven Latin letters to two Hebrew ones,
+/// its ends disagree, and the majority read it left to right,
+/// `חו .)seen wan(`, which a left-to-right paragraph draws as the line
+/// stands; only a pair at a right-to-left level is drawn facing outward, and
+/// the right-to-left reading pairs it.
+#[test]
+fn a_right_to_left_line_opening_with_a_bracketed_latin_run_reads_as_written() {
+    let drawn = format!("{} .)seen wan(", reversed(HET_VAV));
+    let strokes = visual(&drawn);
+    let (left, rest) = strokes.split_at(5);
+    let (latin, open) = rest.split_at(rest.len() - 1);
+    let pieces = [open.to_vec(), latin.to_vec(), left.to_vec()];
+    assert_eq!(
+        extract_lines(pieces_page(&pieces)),
+        [(format!("(seen wan). {HET_VAV}"), true)]
+    );
+}
+
 /// **A mark stays with its base, whichever side of it the producer wrote it.**
 ///
 /// Qamats on lamed. A producer that shapes and then reverses whole clusters

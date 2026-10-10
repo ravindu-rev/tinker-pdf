@@ -4351,6 +4351,19 @@ fn split_line(
         out.append(line);
         return 0;
     };
+    // Whether a reader of the page finds a right-to-left character on this
+    // line, which is what decides whether it reads a run of neutrals at a
+    // right-to-left level in that level's order or in the order it was drawn
+    // ([`coded_order`]). A generated run is an artifact, which it does not
+    // read: it neither makes a line right to left nor is reordered on one,
+    // so a right-to-left `inside` marker's `1. ` beside an Arabic word is
+    // drawn as written, as it was.
+    let rtl_line = line
+        .iter()
+        .any(|run| !run.generated && run.text.chars().any(opens_right_to_left));
+    for run in line.iter_mut() {
+        run.bidi_line_rtl = rtl_line && !run.generated;
+    }
     let mut cut = 0usize;
     let mut first_char = 0usize;
     let mut placed: Vec<Vec<TextRun>> = Vec::with_capacity(line.len());
@@ -5464,27 +5477,33 @@ fn draw_coded(
 /// The level is the run's, as for a shaped slice ([`draw_shaped`]):
 /// [`TextRun::bidi_level`] once its line has cut it to one level, its own
 /// P2 and P3 where nothing has. A slice with no character that reads or
-/// opens right to left keeps the order it was written in without resolving
-/// anything, as [`piece_order`] does — so a left-to-right page, and a
-/// right-to-left `inside` marker's `1. `, are drawn exactly as before.
+/// opens right to left, on a line that holds none either or in a generated
+/// run, which no reader reads, keeps the order it was written in without
+/// resolving anything, as [`piece_order`] does — so a left-to-right page, and
+/// a right-to-left `inside` marker's `1. ` beside an Arabic word, are drawn
+/// exactly as before.
 ///
-/// **So is a run of nothing but neutrals at a right-to-left level.** On a
-/// line with no right-to-left character that is the right answer —
-/// `<p dir="rtl">?!</p>` reads `?!`, since ruling 14 reads such a line in
-/// content order — and on a line that holds one it is a known limit
-/// `epub.md` names, not an answer. The `.,` between two
-/// right-to-left words (`<p dir="rtl"><i>חו</i>.,<i>וח</i></p>`) is a run of
-/// its own that N1 puts at the paragraph's level, where L2 draws it `,.`;
-/// drawn as typed, the line reads back `חו,.וח`. Reordering every slice at
-/// an odd level, tried on the review of 6d08c6b, drew that line right, and
-/// the next review measured what it broke: ruling 14 reads a line holding no
-/// right-to-left character in the order the content stream drew it, so
-/// every such line at a right-to-left level read back reversed —
+/// **A run of nothing but neutrals at a right-to-left level is drawn in its
+/// level's order on a line that holds a right-to-left character, and as
+/// typed on one that holds none** ([`TextRun::bidi_line_rtl`], which
+/// [`split_line`] sets). On a line with no right-to-left character as typed
+/// is the right answer — `<p dir="rtl">?!</p>` reads `?!`, since ruling 14
+/// reads such a line in content order. On a line that holds one it was a
+/// known limit until ROADMAP K-11: the `.,` between two right-to-left words
+/// (`<p dir="rtl"><i>חו</i>.,<i>וח</i></p>`) is a run of its own that N1 puts
+/// at the paragraph's level, where L2 draws it `,.`, and drawn as typed the
+/// line read back `חו,.וח`; and in a sans-serif book whose Arabic the
+/// overflow font draws, the ` (` and `). ` that Helvetica draws are face
+/// segments of their own inside an Arabic run, drawn as typed, so the page
+/// itself showed `عدة( النازعة` and read `.)وقد` — CI's
+/// `sample-regime-anticancer-arabic.epub` at character 20 963. Reordering
+/// every slice at an odd level, tried on the review of 6d08c6b, drew those
+/// lines right, and the next review measured what it broke: every line of
+/// neutrals alone at a right-to-left level read back reversed —
 /// `<p dir="rtl">?!</p>` as `!?`, a heading's `?!`, `(...)` (drawn `)...(`,
 /// each bracket's hollow turned away from the dots), the first line of
 /// `?!<br/>חו`. Which of the two a slice is on is whether its **line** holds
-/// a right-to-left character, and this is not handed the line; until it is,
-/// a slice is reordered only when it holds one itself (`epub_fallback.rs`
+/// a right-to-left character, and the line says so now (`epub_fallback.rs`
 /// pins both sides).
 ///
 /// The units L2 orders are **a character and the nonspacing marks after
@@ -5561,7 +5580,9 @@ fn draw_coded(
 fn coded_order(run: &TextRun, slice: &str) -> Vec<(char, bool)> {
     let units = mark_clusters(slice);
     let as_written = || units.iter().flat_map(|unit| riding(unit)).collect();
-    if !slice.chars().any(opens_right_to_left) {
+    let neutrals_on_a_right_to_left_line =
+        run.bidi_line_rtl && run.bidi_level.is_some_and(|level| level % 2 == 1);
+    if !neutrals_on_a_right_to_left_line && !slice.chars().any(opens_right_to_left) {
         return as_written();
     }
     let direction = match run.bidi_level {

@@ -674,6 +674,21 @@ pub struct TextRun {
     /// taking the level-2 `ab` with it when L2 reverses it. A run's own
     /// level cannot say that, and the characters are in no run.
     pub bidi_gap: Option<u8>,
+    /// Whether the line this run is set on holds a character that reads
+    /// right to left (`Bidi_Class` `R` or `AL`, or one that opens a
+    /// right-to-left embedding, override or isolate), once the caller that
+    /// orders the line has resolved it; `false` as this crate makes it, and
+    /// for a [generated](Self::generated) run, which no reader of the page
+    /// reads.
+    ///
+    /// A run of neutrals at a right-to-left level is drawn in that level's
+    /// order on such a line, and as typed on a line that holds none: a reader
+    /// of the page reads a line with no right-to-left character in the order
+    /// it was drawn, and one that holds one in the order UAX #9 draws it. The
+    /// run's own text and level cannot say which a run is on — `).` closing a
+    /// bracketed Latin run at the end of an Arabic line is the same run as
+    /// `?!` alone in a right-to-left paragraph.
+    pub bidi_line_rtl: bool,
     /// Whether the line breaks at a soft hyphen at this run's end, so a
     /// hyphen is drawn there (`css-text-3` §5.4, `hyphens: manual`).
     ///

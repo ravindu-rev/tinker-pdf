@@ -481,6 +481,77 @@ living in one feature's head.
     pins the price's four shapes); `unicode.rs`'s
     `what_opens_is_general_category_ps_and_pi`.
 
+    **Amended 10 October 2026, a second time: the bracket tie-break.**
+    *Proposed by the ROADMAP K-11 fix and put to the owner by the
+    integrator; until the owner accepts it this paragraph is a proposal.*
+    After the rules above have chosen a line's paragraph direction, a line
+    that draws a **closing bracket left of an opening one of its kind** —
+    `)histone deacetylase(`, each hollow turned away from what it encloses —
+    is read in the other direction where that direction's reading draws the
+    line as it stands (the forward check) and pairs more of the brackets so
+    drawn, by BD16 over the text it reads, than the reading in the direction
+    chosen — and no fewer brackets in all, so that a reading cannot win by
+    pairing the `)(` between two pairs, `()()` read from the right, and
+    losing both. A pair stands that way on the page in exactly one case: at a
+    right-to-left level, where `/ToUnicode` names the typed character — as
+    this engine's writers name it, and as this ruling's reading, which swaps
+    no character, already takes it. A pair at a left-to-right level faces
+    inward, and so does a pair at a right-to-left level whose `/ToUnicode`
+    names the mirrored glyph; **a pair facing inward is counted for
+    nothing** but that veto, since nothing on the page says which of the two
+    drew it.
+    `tinker_pdf_shape::bidi::drawn_direction` asks it last, of a line that
+    draws a closing bracket left of an opening one and of no other, and
+    `logical_order` for a given direction is untouched: `bidi_conformance.rs`
+    holds it to Unicode's file as before, its 90 947 and its 669 unmoved.
+
+    *Why.* ROADMAP K-11. A right-to-left paragraph narrowed so that a line
+    opens with a bracketed Latin run, `(histone deacetylase). وقد أصبحنا نعرف
+    الآن`, holds eighteen Latin letters and seventeen Arabic ones; its ends
+    disagree, and the majority read it as a left-to-right paragraph,
+    `وقد أصبحنا نعرف الآن .)histone deacetylase(` — a text a left-to-right
+    paragraph draws as that line stands, so the forward check could not
+    refuse it. Both readings draw the line; only the brackets tell them
+    apart, and only because they face outward.
+
+    *What it gains and what it costs, measured.* Over `BidiCharacterTest.txt`,
+    each of its 91 616 drawn lines read in the direction `drawn_direction`
+    chooses: 59 246 draw a pair facing outward, and the tie-break turns
+    27 012 of them — 25 757 to the file's own paragraph level, 1 255 away
+    from it. The lines that read back as the file's own text go from 48 366
+    to 72 652 (the direction is the file's own on 46 054, then 70 556);
+    among the 27 012 turned, from 1 254 to 25 540. **The price is a text
+    whose brackets do not pair as typed** — closing before opening, or one
+    alone — where the other direction's reading pairs them: `x) שלום (y` in a
+    left-to-right paragraph, drawn `x) םולש (y`, now reads `y( שלום )x`. The
+    file has 1 250 such lines, typed so on purpose, that read as typed
+    before and do not now; of its lines whose every bracket pairs as typed,
+    none reads worse. (Counting the pairs facing outward alone, without the
+    veto, turned 4 075 more, and 1 376 of the lines it read worse were
+    `()()`-shaped texts whose brackets all pair.) And **what it leaves** is
+    the pair facing inward: a left-to-right paragraph with no `dir` whose
+    line has Arabic at both ends and a Latin run in brackets between,
+    `… عدة (HDAC). وقد …`, draws exactly what a right-to-left paragraph whose
+    `/ToUnicode` names the mirrored glyph draws for `وقد … (HDAC) … عدة`,
+    and still reads as the second, `(HDAC).` as `.)HDAC(` — two texts drawn
+    alike (`content-and-text.md` names it, with the K-11 probe's count).
+    Taking it the other way would assume the typed character on every page,
+    and would read every such right-to-left line of a producer that names
+    the mirrored glyph with its runs in left-to-right order; that assumption
+    is the owner's to make, and this does not make it.
+
+    *The tests that hold it.* `tinker-pdf-shape`'s `bidi.rs`:
+    `a_pair_drawn_facing_outward_reads_in_the_direction_that_pairs_it`,
+    `a_pair_drawn_facing_inward_decides_nothing`,
+    `two_pairs_side_by_side_are_not_broken_for_the_bracket_between_them`
+    (the veto) and
+    `brackets_typed_closing_first_read_as_the_other_direction_pairs_them`
+    (the price); `text_logical_order.rs`:
+    `a_right_to_left_line_opening_with_a_bracketed_latin_run_reads_as_written`;
+    `epub_conservation.rs`:
+    `a_bracketed_run_and_its_full_stop_in_right_to_left_text_read_as_written`
+    and `a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_drawn_alike_twin`.
+
 ## How to add a ruling
 
 State it in one bold sentence, name the features it binds, give the reason
