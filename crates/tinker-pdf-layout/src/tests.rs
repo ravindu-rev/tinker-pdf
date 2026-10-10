@@ -7683,6 +7683,95 @@ fn a_hidden_tail_is_broken_over_pages_with_the_float_it_is_in() {
     }
 }
 
+/// **A clip measures its height from where its content starts**, which is
+/// below the top margin that collapses into it.
+///
+/// `overflow: clip` opens no formatting context (`css-overflow-3` §3.1), so
+/// the four points of top margin collapse with the paragraph's above it and
+/// are committed by the box's first line, outside its border box. Counting
+/// them as content put the cut four points above the box's own top edge: a
+/// box of `height: 6px` drew its first line under a clip two points tall, and
+/// with `height: 0` the tail was hidden at sixteen points above a first line
+/// kept at twenty, the column's `y` went back up, and a two-point page read
+/// `xybbbbccccaaaa`.
+///
+/// The visible half is asserted at a page that holds everything: the clip is
+/// the padding box at the box's border-box top, six points tall, and the kept
+/// line begins inside it.
+#[test]
+fn a_clip_measures_its_height_from_where_its_content_starts() {
+    use tinker_pdf_css::property::Overflow;
+    let tree = |height: f64| {
+        let mut clipped = overflowing(Overflow::Clip);
+        clipped.width = Size::Length(LengthPercentage::Px(40.0));
+        clipped.height = Size::Length(LengthPercentage::Px(height));
+        clipped.margin.top = px(4.0);
+        BoxNode::element(
+            block(),
+            vec![
+                para("x y"),
+                BoxNode::element(clipped, vec![text("aaaa bbbb cccc")]).with_anchor(7),
+                para("after"),
+            ],
+        )
+    };
+    for height in [0.0, 6.0] {
+        for page in [2.0, 13.0, 20.0, 400.0] {
+            let tree = tree(height);
+            conserved(&tree, &run(&tree, 100.0, page));
+        }
+    }
+    let laid = run(&tree(6.0), 100.0, 400.0);
+    assert_eq!(painted_text(&laid, 0), "x yaaaaafter");
+    // The paragraph's line, the collapsed margin, then the box.
+    assert_eq!(placed(&laid, "aaaa"), (0.0, 16.0));
+    let clips = &laid.pages[0].clips;
+    assert_eq!(clips.len(), 1, "{clips:?}");
+    assert_eq!((clips[0].y, clips[0].height), (16.0, 6.0));
+    // The next box follows the used height and not the content.
+    assert_eq!(placed(&laid, "after"), (0.0, 22.0));
+}
+
+/// **Every box's `height` is measured below the margin that collapses into
+/// it**, and not only a clipping one's: CSS 2.2 §10.6.3's height is the
+/// content box's, and §8.3.1 puts the collapsed margin outside the border box.
+/// A box of `height: 20px` after a paragraph, with a four-point top margin and
+/// one twelve-point line, ends twenty points below where it begins, so the
+/// paragraph after it starts at 12 + 4 + 20. Counting the margin as content
+/// made the box sixteen points tall and put that paragraph at thirty-two.
+#[test]
+fn a_stated_height_is_measured_below_the_margin_that_collapses_into_the_box() {
+    let mut sized = block();
+    sized.height = Size::Length(LengthPercentage::Px(20.0));
+    sized.margin.top = px(4.0);
+    let tree = |style: ComputedStyle| {
+        BoxNode::element(
+            block(),
+            vec![
+                para("x y"),
+                BoxNode::element(style, vec![text("aaaa")]),
+                para("after"),
+            ],
+        )
+    };
+    let laid = run(&tree(sized.clone()), 100.0, 400.0);
+    assert_eq!(placed(&laid, "aaaa"), (0.0, 16.0));
+    assert_eq!(placed(&laid, "after"), (0.0, 36.0));
+    conserved(&tree(sized.clone()), &laid);
+
+    // The other place a box's content starts: below its own top border and
+    // padding, which open its border box and keep the margin out. They are
+    // not content either, so the box is seven points of them and twenty of
+    // content, and the paragraph after it starts at 16 + 7 + 20.
+    let mut bordered = sized;
+    bordered.padding.top = LengthPercentage::Px(5.0);
+    bordered.border_width.top = 2.0;
+    bordered.border_style.top = BorderStyle::Solid;
+    let laid = run(&tree(bordered), 100.0, 400.0);
+    assert_eq!(placed(&laid, "aaaa"), (0.0, 23.0));
+    assert_eq!(placed(&laid, "after"), (0.0, 43.0));
+}
+
 /// **A hidden tail in the column is drawn on the page of the line it
 /// follows**, and not on the page its height falls on — the two disagree
 /// once a negative margin takes the column's `y` back up.

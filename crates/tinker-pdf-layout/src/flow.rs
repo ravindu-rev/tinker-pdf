@@ -1299,7 +1299,8 @@ impl<M: Metrics> Builder<'_, M> {
         if contained {
             self.leave_context(&style);
         }
-        let content_height = self.y - before;
+        let content_height =
+            self.y - self.content_start(block, before, top_edge > 0.0 || contained);
 
         // §10.6.3's height and §10.7's clamp. See [`Builder::fill_height`].
         self.fill_height(
@@ -1509,6 +1510,34 @@ impl<M: Metrics> Builder<'_, M> {
         } else if max_height.is_some_and(|max| content_height > max + EPSILON) {
             self.warn(Warning::MaxHeightAsAuto);
         }
+    }
+
+    /// Where a block box's content begins, which is what its used height is
+    /// measured from.
+    ///
+    /// **Not where the cursor stood when the box was opened**, unless an edge
+    /// opened it. Without a top border, padding or formatting context of its
+    /// own, a box's top margin collapses with the margins adjoining it — its
+    /// first child's, the previous sibling's — and §8.3.1's collapsed margin
+    /// is committed by the box's first content, **outside** its border box
+    /// ([`Builder::commit_margin`]). The box's first item is then where its
+    /// border box begins, and counting the margin as content made a box of
+    /// `height: 6px` and a four-point margin two points tall. Under a clip
+    /// that put [`Builder::clip_tail`]'s cut above the box's own first line,
+    /// which hid that line's ink and hid the rest of its text at a height
+    /// above it.
+    ///
+    /// A box with no item at all has no content, whatever margins were
+    /// committed while it was open: they were committed outside it.
+    #[inline(never)]
+    fn content_start(&self, block: usize, before: f64, opened: bool) -> f64 {
+        if opened {
+            return before;
+        }
+        self.flow.blocks[block]
+            .first
+            .and_then(|first| self.flow.items.get(first))
+            .map_or(self.y, |item| item.y)
     }
 
     /// A box that clips, opened: a scroll container's fresh float context
