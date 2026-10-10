@@ -507,7 +507,12 @@ jobs:
     #
     # The vectors carry no licence, so they cannot be committed. The fetch
     # pins them twice -- to the repository's last commit and to the SHA-256
-    # of every file in `tests/vp8-vectors/SHA256SUMS` -- into `target/`.
+    # of every file in `tests/vp8-vectors/SHA256SUMS` -- into the runner's
+    # temporary directory, not `target/`: rust-cache saves and restores
+    # `target/`, and what it restored there was a non-empty directory that
+    # was no longer the pinned checkout, which `fetch.sh` refuses (it never
+    # deletes). The first run on a branch passed and every cached run after
+    # it failed.
     # And the job greps its own output, for epub-corpus's reason: a skip
     # exits 0 and reads exactly like a pass.
     runs-on: ubuntu-latest
@@ -516,10 +521,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Fetch the VP8 test vectors that cannot be committed
-        run: sh crates/tinker-pdf-filters/tests/vp8-vectors/fetch.sh
+        run: sh crates/tinker-pdf-filters/tests/vp8-vectors/fetch.sh "$RUNNER_TEMP/vp8-test-vectors"
       - name: Decode every key frame and compare its MD5
         env:
-          TINKER_VP8_VECTORS: ${{ github.workspace }}/target/vp8-test-vectors
+          TINKER_VP8_VECTORS: ${{ runner.temp }}/vp8-test-vectors
           # Absence is a failure rather than a skip, and so is any set that
           # is not the pinned commit's 61 files and 182 key frames.
           TINKER_VP8_VECTORS_REQUIRED: "1"
