@@ -364,9 +364,10 @@ pub(crate) struct FloatRecord {
     /// the flow's `y` grows with its index, and a negative margin, or a float
     /// broken over pages and moved down, is where it does not. So a tail in a
     /// float's or a positioned box's own flow is folded into that box's items
-    /// at this index ([`fold_tails`]) and is broken over pages with it, and
-    /// one in the column is drawn on the page that holds the item it follows
-    /// ([`crate::fragment`]).
+    /// at this index ([`fold_tails`]) and is broken over pages with it, one
+    /// in a multi-column container goes in the column that holds the item it
+    /// follows ([`Builder::column_set`]), and one in the column is drawn on
+    /// the page that holds the item it follows ([`crate::fragment`]).
     pub follows: Option<usize>,
 }
 
@@ -3616,12 +3617,23 @@ impl<M: Metrics> Builder<'_, M> {
         // in and there is nothing for the page cutter to carry forward. The
         // same sentence a cell's float already carries. Decided once, here,
         // because each column belongs to exactly one set below.
+        //
+        // **A clip's hidden tail belongs to the column of the item it
+        // follows**, and not to the one its height falls in
+        // ([`FloatRecord::follows`]). It is drawn after its column's items,
+        // and it is the end of the text whose first lines that item ends, so
+        // it reads in order only in that column or a later one. Its height is
+        // the clip's padding edge, and a negative margin can put that above
+        // the top of the kept line's own column.
         let mut per_column: Vec<Vec<FloatRecord>> = (0..ranges.len()).map(|_| Vec::new()).collect();
         for float in inner_floats {
-            let column = ranges
-                .iter()
-                .rposition(|(_, _, top)| float.top + EPSILON >= *top)
-                .unwrap_or(0);
+            let column = match float.follows {
+                Some(after) => ranges.iter().rposition(|(from, _, _)| *from < after),
+                None => ranges
+                    .iter()
+                    .rposition(|(_, _, top)| float.top + EPSILON >= *top),
+            }
+            .unwrap_or(0);
             if let Some(slot) = per_column.get_mut(column) {
                 slot.push(float);
             }

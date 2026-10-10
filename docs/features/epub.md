@@ -302,10 +302,13 @@ The hidden text reads in document order in each case a test holds it to: a
 clip inside a clip (`a_clip_inside_a_clip_hides_its_text_in_document_order`);
 a hidden tail inside a float or an absolutely positioned box, which is folded
 into the box's own items and broken over pages with it
-(`a_hidden_tail_is_broken_over_pages_with_the_float_it_is_in`); and one in the
+(`a_hidden_tail_is_broken_over_pages_with_the_float_it_is_in`); one in the
 column, which is drawn on the page of the line it follows rather than the page
 its height falls on, the two differing once a negative margin takes the column
-back up (`a_hidden_tail_is_drawn_on_the_page_of_the_line_it_follows`). A
+back up (`a_hidden_tail_is_drawn_on_the_page_of_the_line_it_follows`); and one
+in a multi-column container, which goes in the column of the line it follows
+and not the column its height falls in
+(`a_hidden_tail_in_a_column_set_is_drawn_in_the_column_of_its_line`). A
 table row, a flex line or a multi-column container cut across pages draws
 what a negative margin pulled above its top on the page that draws its top,
 where no page drew it before, and a hidden tail in a cell or a flex item reads

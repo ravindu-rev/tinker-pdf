@@ -7845,6 +7845,80 @@ fn a_hidden_tail_is_drawn_on_the_page_of_the_line_it_follows() {
     assert_eq!(page_of(&laid, "after"), 1);
 }
 
+/// **A hidden tail in a column set is drawn in the column of the line it
+/// follows**, and not in the column its height falls in.
+///
+/// A column set lays its content out as one sub-flow and cuts that into
+/// columns, and each of the sub-flow's records beside the column goes into
+/// one of them, after the column's own items. A float goes where its top
+/// falls. A tail went there too, and its height is the clip box's padding
+/// edge, which a negative margin can put above the top of the column that
+/// holds the box's kept line. Here the clip box's `-14.25px` margin takes it
+/// above the paragraph before it, `height: 0` hides all but its first line,
+/// and on a page of ten points or more the tail fell in an earlier column
+/// than `aaaa` and was drawn before it: `mnbbbbccccaaaaop`. It now goes in
+/// the column whose items hold the item it follows (`FloatRecord::follows`),
+/// and a float still goes where its top falls, which the second half holds:
+/// no test had put a float in a multi-column container before.
+///
+/// The review of 9865459 found it: `Builder::content_start` put the clip's
+/// cut at the box's first line, which is where the tail then fell.
+#[test]
+fn a_hidden_tail_in_a_column_set_is_drawn_in_the_column_of_its_line() {
+    let mut clipped = narrow_clip();
+    clipped.height = Size::Length(LengthPercentage::Px(0.0));
+    clipped.margin.top = px(-14.25);
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, Some(10.0)),
+            vec![
+                para("m n"),
+                BoxNode::element(clipped, vec![text("aaaa bbbb cccc")]),
+                para("o p"),
+            ],
+        )],
+    );
+    let laid = run(&tree, 100.0, 400.0);
+    conserved(&tree, &laid);
+    // The hidden lines are in the kept line's column, and nothing is painted
+    // that the clip hides.
+    let (column, _) = placed(&laid, "aaaa");
+    for hidden in ["bbbb", "cccc"] {
+        assert_eq!(placed(&laid, hidden).0, column, "{hidden}");
+    }
+    assert_eq!(painted_text(&laid, 0), "m naaaao p");
+    for page in [2.0, 10.0, 13.0, 20.0, 60.0] {
+        let laid = run(&tree, 100.0, page);
+        assert_eq!(
+            conservable(&laid.text()),
+            conservable(&tree.source_text()),
+            "{page}"
+        );
+    }
+
+    // **A float still goes in the column its top falls in.** Four lines
+    // balance two and two, and the float met before `c` is at the second
+    // column's top, so it is drawn there, forty-five points and a ten-point
+    // gap from the left, and not over `a` in the first.
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, Some(10.0)),
+            vec![
+                para("a"),
+                para("b"),
+                float_box(Float::Left, 20.0, "f"),
+                para("c"),
+                para("d"),
+            ],
+        )],
+    );
+    let laid = run(&tree, 100.0, 400.0);
+    conserved(&tree, &laid);
+    assert_eq!(placed(&laid, "f"), (55.0, 0.0));
+}
+
 /// **A band cut over pages draws what a negative margin pulled above its
 /// top**: a column set's column, a table row's cell and a flex line's item.
 ///
