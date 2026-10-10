@@ -3955,6 +3955,20 @@ impl Bitmap {
         u32::from((byte >> (7 - (x as usize & 7))) & 1)
     }
 
+    /// [`Bitmap::get`] at a coordinate worked out in 64 bits.
+    ///
+    /// For a reader whose offset is a *decoded* 32-bit value: 6.3.5.3's
+    /// `GRREFERENCEDX` and `DY` come out of Annex A, which [`decode_int`] clamps
+    /// to `i32`, so a pixel shifted by one can sit anywhere in 33 bits.
+    /// Anything outside 32 is outside the bitmap too, and reads 0 like every
+    /// other pixel off its edge.
+    fn get_wide(&self, x: i64, y: i64) -> u32 {
+        match (i32::try_from(x), i32::try_from(y)) {
+            (Ok(x), Ok(y)) => self.get(x, y),
+            _ => 0,
+        }
+    }
+
     fn set(&mut self, x: u32, y: u32, value: u32) {
         let at = (y as usize) * self.stride + (x as usize >> 3);
         let mask = 0x80u8 >> (x as usize & 7);
@@ -4213,8 +4227,14 @@ fn refinement_context(
 ) -> usize {
     // The reference is read at the target pixel shifted by the offset the
     // caller decoded, which is what makes a refinement a *difference* rather
-    // than a second picture.
-    let there = |ox: i8, oy: i8| reference.get(x - dx + i32::from(ox), y - dy + i32::from(oy));
+    // than a second picture. In 64 bits, because that offset is decoded and
+    // `0 - i32::MIN` is not a 32-bit number.
+    let there = |ox: i8, oy: i8| {
+        reference.get_wide(
+            i64::from(x) - i64::from(dx) + i64::from(ox),
+            i64::from(y) - i64::from(dy) + i64::from(oy),
+        )
+    };
     let mut value = 0u32;
     if let Some(at) = template.at {
         value = into.get(x + i32::from(at[0].0), y + i32::from(at[0].1));
@@ -4262,10 +4282,10 @@ fn decode_refinement_into(
                 // In a typical row a pixel whose whole reference neighbourhood
                 // agrees is not coded at all: it is that value. Only the
                 // pixels on a boundary cost a decision.
-                let centre = reference.get(sx - dx, sy - dy);
-                let uniform = (-1..=1).all(|oy| {
-                    (-1..=1).all(|ox| reference.get(sx - dx + ox, sy - dy + oy) == centre)
-                });
+                let (rx, ry) = (i64::from(sx) - i64::from(dx), i64::from(sy) - i64::from(dy));
+                let centre = reference.get_wide(rx, ry);
+                let uniform = (-1..=1)
+                    .all(|oy| (-1..=1).all(|ox| reference.get_wide(rx + ox, ry + oy) == centre));
                 if uniform {
                     into.set(x, y, centre);
                     continue;
@@ -7248,6 +7268,71 @@ mod tests {
             vec![Jbig2Refusal::TextRegionWithoutSymbols],
             "exactly at the cap is admitted"
         );
+    }
+
+    /// **A refinement offset at the edge of 32 bits reads outside the
+    /// reference rather than overflowing.**
+    ///
+    /// 6.5.8.2.2's `RDX` and `RDY` come straight out of Annex A, and
+    /// [`decode_int`] clamps a 32-bit magnitude plus its offset to `i32` — so a
+    /// dictionary may hand [`decode_refinement_into`] an offset of `i32::MIN`,
+    /// and the reference's column was `x - dx`: `0 - i32::MIN`, which panicked
+    /// in any build with overflow checks (ruling 1) and wrapped to the wrong
+    /// column in any build without them.
+    ///
+    /// Every offset here puts the whole reference out of reach, so every
+    /// reference pixel the template reads is 0 — which is exactly what an
+    /// offset of a thousand pixels gives, decision for decision. Both
+    /// templates, and with TPGRON on so its uniformity check is reached too.
+    #[test]
+    fn a_refinement_offset_at_the_edge_of_32_bits_reads_outside_the_reference() {
+        let reference = bitmap_from(&["##.#", ".##.", "#..#", "####"]);
+        // Two codings, so that both readers of the reference are reached: any
+        // bytes for the context, and for TPGRON a stream whose first decision
+        // says the first row is typical, so its uniformity check runs.
+        let arbitrary = [0x4F, 0xE7, 0x8D, 0x68, 0x1B, 0xA5, 0x3C, 0x91];
+        let decode_at = |template: &RefineTemplate<'_>, tpgron: bool, offset: (i32, i32)| {
+            let coded = if tpgron {
+                let mut encoder = MqEncoder::new(1 << template.bits());
+                encoder.encode_at(template.typical, 1);
+                encoder.flush()
+            } else {
+                arbitrary.to_vec()
+            };
+            let mut coder = MqDecoder::new(&coded);
+            let mut contexts = MqContexts::new(1 << template.bits());
+            let mut into = Bitmap::new(6, 5, 1 << 10).expect("bitmap");
+            decode_refinement_into(
+                &mut coder,
+                &mut contexts,
+                template,
+                tpgron,
+                &reference,
+                offset,
+                &mut into,
+            );
+            bitmap_rows(&into)
+        };
+        for rtemplate in [0, 1] {
+            let template = refine_template(rtemplate, NOMINAL_REFINE_AT);
+            for tpgron in [false, true] {
+                let far = decode_at(&template, tpgron, (1_000, 1_000));
+                for offset in [
+                    (i32::MIN, 0),
+                    (i32::MAX, 0),
+                    (0, i32::MIN),
+                    (0, i32::MAX),
+                    (i32::MIN, i32::MAX),
+                ] {
+                    assert_eq!(
+                        decode_at(&template, tpgron, offset),
+                        far,
+                        "template {rtemplate}, TPGRON {tpgron}, offset {offset:?}: \
+                         the reference was read somewhere other than nowhere"
+                    );
+                }
+            }
+        }
     }
 
     /// [`header`], with 7.2.4's *long* referred-to form, so one segment can
