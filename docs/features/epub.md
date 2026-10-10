@@ -252,87 +252,148 @@ typographic character unit, spaced once (`css-text-3` §10.2,
 `Metrics::letter_spaced`; `a_standard_14_letter_and_its_marks_are_spaced_once`).
 It is drawn after its letter, inside the letter's box, its own box — a
 thousandth of an em to a reader — ending a millionth of an em past where
-layout measured the letter to end: a letter a simple font draws is as wide as
-layout measured it, and one the Liberation stand-in draws, whose `/W` is
-rounded to a thousandth, is drawn where layout put it, a piece of its own,
-when it carries a mark. A slice holding a mark is **one text object**
-(`PageBuilder::text_pieces`), the mark and what follows it each moved to
-with `Td`, so no line is cut inside it, and a slice that ends on a mark ends
-its text object no further from the next run than layout put its letter: a
-mark adds nothing to where a line is cut. Ruling 14 reads every mark with
-its letter, four to a letter, at every half-pixel size from 9 to 24.5 and at
-every spacing the test sweeps from `-1px` to `1em`, in a line of either
-direction
+layout measured the letter to end (`paint::EXACT_MARK_INSET`): a letter a
+simple font draws is as wide as layout measured it, and one the Liberation
+stand-in draws, whose `/W` is rounded to a thousandth, is drawn where layout
+put it, a piece of its own, when it carries a mark. A slice holding a mark is
+**one text object** (`PageBuilder::text_pieces`), the mark and what follows
+it each moved to with `Td`, so no line is cut inside it — and in it the glyph
+after the overflow font's code 32, a character of the book's that 9.3.3
+moves by `Tw` (ROADMAP CD-19), is a piece of its own too, drawn where layout
+put it, so no letter of it is drawn over another under `word-spacing` or
+`text-align: justify` (f529a47 drew `مُدَّةَ مُعلِّم.`'s LAM and AIN both at
+`48pt` at `word-spacing: 4px`;
+`a_standard_14_pointed_arabic_letter_is_not_drawn_over_the_next_under_word_spacing`).
+A slice that ends on a mark ends its text object a spacing less a millionth
+of an em from the next run, so a run that ends on a mark is not cut from
+what follows up to half an em of spacing, half an em included, and is cut
+past half an em and a millionth. After the same letter alone a reader's pen
+stands where the letter's drawn box ends: where layout measured it to, for a
+simple font's letter, and up to half a thousandth of an em either side of
+that for a stand-in's — so a mark moves where its line is cut by a millionth
+of an em after a simple font's letter and, near half an em, by up to that
+rounding after a stand-in's (`0.5001em` with `bundled-fonts`:
+`x <b>ə</b>y z.` reads `x \nəy z.` and `x <b>ə\u{301}</b>y z.` reads
+`x \nə\u{301}\ny z.`, the schwa's `/W` rounding layout's width up). Ruling 14 reads every
+mark with its letter, four to a letter, at every half-pixel size from 9 to
+24.5 and at every spacing the test sweeps from `-1px` to `1em`, in a line of
+either direction
 (`a_standard_14_mark_reads_with_its_letter_at_every_size_and_spacing`), and a
 run that ends on a mark — over an alpha, a Cyrillic `а`, an eng, a schwa or
-an `e`, in either build, a mark styled apart from its letter, or the
-four-mark SHIN ending a bold run in a left-to-right line — reads on one line
-with what follows up to half an em of spacing, half an em itself included
-(`a_standard_14_run_ending_on_a_mark_reads_whole_to_half_an_em`). A reader
-resumes a line across an `ET` within half an em, a gap of exactly half an em
-whatever its last place (`tinker-pdf-content`'s `RESUME_TIE`, a millionth of
-an em; ruling 14's rejoin allows the same). Past half an em of spacing every
-run boundary cuts a line, marks or none, and each piece is read as a line of
-its own, so a right-to-left paragraph's pieces come in the order they are
-drawn: `<p dir="rtl">חו … חו.</p>` with a Latin run between reads its full
-stop before its last word at `0.6em`, at cd407d5 as now; a slice holding a
-mark is never cut inside. Until October 2026 the overflow font gave a mark a
-space's width, so a letter's second mark lay nearer the glyph drawn next and
-was read with it — `sample-regime-anticancer-arabic.epub`'s `يًّا` came back
-with its FATHATAN on the letter before (CI run 38041540464,
+an `e`, in either build, or a mark styled apart from its letter — is not cut
+from what follows up to half an em of spacing, and below half an em its line
+reads whole, the four-mark SHIN ending a bold run in a left-to-right line too
+(`a_standard_14_run_ending_on_a_mark_keeps_to_what_follows_to_half_an_em`).
+Past half an em of spacing every run boundary cuts a line, marks or none,
+and each piece is read as a line of its own, so a right-to-left paragraph's
+pieces come in the order they are drawn: `<p dir="rtl">חו … חו.</p>` with a
+Latin run between reads its full stop before its last word at `0.6em`, at
+cd407d5 as now; a slice holding a mark is never cut inside. Until October
+2026 the overflow font gave a mark a space's width, so a letter's second
+mark lay nearer the glyph drawn next and was read with it —
+`sample-regime-anticancer-arabic.epub`'s `يًّا` came back with its FATHATAN
+on the letter before (CI run 38041540464,
 `a_standard_14_arabic_letter_with_two_marks_keeps_both`) — and a mark of no
 advance drawn where the pen stood lay in the next glyph's box, which read a
-decomposed `e\u{301}` beside a right-to-left word as an accented space. Drawn
-in a text object of its own (6d79fa4), and spaced like a letter, a mark left
-a reader's pen at its own box with the next glyph every spacing past it — the
-letter's and each mark's — and a reader resumes a line across an `ET` only
-half an em on: from a quarter of an em of spacing a pointed word read a
-letter a line (`The word ךְ\nלֶ\nמֶ\n, quoted`,
-`a_standard_14_pointed_word_under_letter_spacing_reads_on_one_line`), and from
-`3px` a decomposed `Nguye\u{302}\u{303}n` was cut in two and not found by
-search (`a_standard_14_decomposed_accent_is_found_under_letter_spacing`).
+decomposed `e\u{301}` beside a right-to-left word as an accented space.
+Drawn in a text object of its own (6d79fa4), and spaced like a letter, a mark
+left a reader's pen at its own box with the next glyph every spacing past
+it — the letter's and each mark's — and a reader resumes a line across an
+`ET` only half an em on: from a quarter of an em of spacing a pointed word
+read a letter a line (`The word ךְ\nלֶ\nמֶ\n, quoted`,
+`a_standard_14_pointed_word_under_letter_spacing_reads_on_one_line`), and
+from `3px` a decomposed `Nguye\u{302}\u{303}n` was cut in two and not found
+by search (`a_standard_14_decomposed_accent_is_found_under_letter_spacing`).
 Drawn a hundredth of an em inside a stand-in's letter (bf081ca), a mark that
 ended a run left the next run nine thousandths of an em further from the
 reader's pen than its letter would, and from `0.491em` the line was cut
 there — `x <b>α\u{301}</b>y z.` at `0.495em` and `8px` — where cd407d5 read
-it whole. **What is left is one limit, a regression from cd407d5, with
-`bundled-fonts` only:** cd407d5 spaced a mark like a letter and drew a
-stand-in's mark where the pen stood after its letter, so the mark's box lay
-a spacing past the letter and the next run a spacing past that, and a run
-ending on such a mark was cut only past half an em **and a thousandth**,
-less what the stand-in's `/W` rounded off. From just past half an em to
-about `0.501em` such a run boundary is whole at cd407d5 and cut now — `x
-<b>α\u{301}</b>y z.` at `8.01px` reads `x \nα\u{301}\ny z.` where cd407d5
-read `x \nα\u{301}y z.`, and `x <b>α</b>y z.` reads `x \nα\ny z.` at both
-(`a_standard_14_run_ending_on_a_mark_is_cut_past_half_an_em_as_its_letter_is`).
-A search across the cut does not find its word, and on a line that holds a
-right-to-left word the pieces can be read in another order: on the round-3
-probe of the marks fix (9 984 synthetic books a build), every search and
-left-to-right-token regression against cd407d5 is in this band, and every
-plain-text one but six, and one book fails conservation in it
-(`<p>a <b>מֶ</b>לֶךְ b מֶלֶךְ.</p>` at `0.5001em`). A default build drew the
-mark as wide as a space and cut it where it is cut now. The six other books
-that conserve at cd407d5 and not now are `bundled-fonts` lines at exactly
-half an em that ruling 14 reads half joined: four have no mark at all —
-`<p style="font-family: sans-serif">a <b>ש</b>לם b.</p>` at `8px` and three
-like it, where the gap before the Hebrew word, half an em exactly, is
-resumed now (`RESUME_TIE`) where its last place cut it at cd407d5, while the
-gap after it, half an em and what the stand-in's `/W` rounded off the word,
-stays cut, and `a שלם` alone on a line is read right to left by its
-majority — and two are the four-mark SHIN of the review's example under
-`letter-spacing: 0.5em; word-spacing: 0.5em`, whose word space cuts `a `
-off, and whose bold run now ends within half an em of ` b.`, where cd407d5
-cut the line, so `שָּׁ֑לֵם b.` is read `.b שָּׁ֑לֵם`. And a mark drawn
-at its letter's end moves where a reader takes the line to stand:
-`TextDevice` starts a new line where a glyph is drawn more than three ems
-left of the last one drawn, and after a letter with marks the last one drawn
-is its last mark, at the letter's end, not the letter at its start —
-`The words … CANTILLATED, <b>HASHABBAT</b> end.` at `1.7px` draws its bold
-run exactly three ems left of the four-mark SHIN's origin and further than
-that from its last mark, so the run starts a line of its own and the
-paragraph reads `The words … and \n.end שָּׁ֑לֵם, הַשַּׁבָּת`, where the same
-line unpointed reads whole (review of bf081ca; it did not conserve at
-cd407d5 either). Where on its letter a mark
+it whole. **Measured against cd407d5, and what is left.** On the marks fix's
+round-4 probe — 11 646 synthetic books a build: the size, spacing,
+justification and family styles of three re-reviews over Arabic, Hebrew,
+decomposed Latin, Greek, Cyrillic, IPA and Vietnamese, each marked book
+beside a mark-free twin; no corpus or book was fetched — no book with no mark
+is other bytes or extracts otherwise than at cd407d5, and no glyph is drawn
+over another that cd407d5 did not draw so. Every book that conserves, reads
+whole or is found by search at cd407d5 and not now — 15 in a default build,
+94 with `bundled-fonts` — is in one of two classes, each a known limit:
+
+- **A, the half-em band** (12 books in a default build, 94 with
+  `bundled-fonts`): a gap a reader tests — a `letter-spacing`, or a letter-
+  and a word-spacing, at a run boundary — within a thousandth of an em of
+  half an em. `TextDevice` resumes a line across an `ET` only where the next
+  glyph starts within half an em of where the last one's box ended, and at a
+  spacing of half an em the box's end is the reader's sum (a `Td`, plus the
+  glyph's width) and the next glyph's start is the painter's (its own `Td`):
+  two sums of one value, which differ in their last place. In
+  `<p dir="rtl">كَتَبَ كتب …</p>` (fourteen times, sans-serif, `0.5em` at
+  `12pt`) a word space is drawn at `99.31199999999995` and ends, `3.336`
+  wide, at `102.64799999999995`, and the next word is written at
+  `108.64799999999997`: `6.000000000000014` on, past half an em by the last
+  place, so each line is cut before its last word and ruling 14 reads that
+  word in drawn order. The same paragraph with no mark (`بتك` for KATABA, the
+  same glyph widths) is cut at the same places and fails the same way, at
+  cd407d5 and now, and at `0.4999em` and at `0.5001em` both conserve
+  (`a_standard_14_line_at_exactly_half_an_em_is_cut_where_a_last_place_says`).
+  A pointed word was wider at cd407d5, its last places fell elsewhere, and
+  these books — all 12 in a default build, 9 with `bundled-fonts` —
+  conserved or read whole there. Two of the 12 differ from their twin too:
+  at half an em exactly the boundary after a mark is half an em less a
+  millionth, whole, where after the letter alone it is a tie, so
+  `<p dir="rtl">חו x <b>e\u{301}</b>y חו.</p>` (monospace, `0.5em`) keeps
+  `e\u{301}y` on one line where `<b>e</b>y` is cut by its last place, and
+  ruling 14 reads the line's pieces in another order. The other 85 with `bundled-fonts` are runs ending on a mark
+  over a stand-in's letter, at a spacing from just past half an em to
+  `0.501em`. cd407d5 spaced a mark like a letter and drew a stand-in's mark
+  where the pen stood after its letter, so the mark's box, a thousandth of an
+  em wide, lay a spacing past the letter and the next run a spacing past
+  that: such a run was cut only where a spacing less a thousandth of an em
+  passed half an em, less what the stand-in's `/W` rounded off — at
+  `0.501em` a tie — and is cut now past half an em and a millionth. So in
+  that band such a run boundary is whole at cd407d5 and cut now:
+  `x <b>α\u{301}</b>y z.` at `8.01px` reads `x \nα\u{301}\ny z.` where
+  cd407d5 read `x \nα\u{301}y z.`, and `x <b>α</b>y z.` reads `x \nα\ny z.`
+  at both
+  (`a_standard_14_run_ending_on_a_mark_is_cut_past_half_an_em_as_its_letter_is`).
+  A search across the cut does not find its word: every search and
+  left-to-right-token regression on the probe (82 with `bundled-fonts`, none
+  in a default build) is in this band. A default build drew the mark as wide
+  as a space and cut it where it is cut now.
+- **B, narrower pointed words** (3 books in a default build, none with
+  `bundled-fonts`): a letter and its marks are spaced once and the overflow
+  font's marks have no advance, so a pointed word is as wide as the same word
+  unpointed and its paragraph breaks its lines where the unpointed one does
+  — elsewhere than at cd407d5, and into one of ruling 14's known limits. `<p dir="rtl">חו cafe\u{301} na\u{308}ive Nguye\u{302}\u{303}n
+  q\u{307}\u{323} o\u{302}\u{301} חו.</p>` justified at `0.5em` ends on the
+  line `Nguyen q o חו.`: a left-to-right run, then, drawn more than three
+  ems left of where it ended, the right-to-left word with its full stop,
+  which a reader cuts into a line of its own and ruling 14 reads in drawn
+  order, `.חו Nguyen q o`, as the paragraph does unpointed, at cd407d5 and
+  now
+  (`a_narrower_pointed_word_breaks_its_line_where_the_unpointed_word_does`);
+  the other two are the four-mark SHIN's word `שָּׁ֑לֵם` and `كتب`, fourteen
+  times in a right-to-left paragraph, at `1em` (sans-serif) and `0.5001em`
+  (monospace): every word a piece of its own, read in drawn order, as
+  `שלם כתב` fourteen times is.
+
+And a mark drawn at its letter's end moves where a reader takes the line to
+stand: `TextDevice` starts a new line where a glyph is drawn more than three
+ems left of the last one drawn, and after a letter with marks the last one
+drawn is its last mark, at the letter's end, not the letter at its start.
+`The words CANTILLATED, <b>HASHABBAT</b> end.` at `1.7px`, in a default
+build, draws its bold run exactly three ems left of the four-mark SHIN's
+origin and further than that from its last mark, so the run starts a line of
+its own and the paragraph reads `The words \n.end שָּׁ֑לֵם, הַשַּׁבָּת`. Swept over the
+probe's styles against the same line unpointed, the pointed line is read
+otherwise where the unpointed one conserves at `1.7px`, `2px`, `0.1em` and
+`0.12em` and at half an em exactly (`8px`, `0.5em`, `12.5px` at `0.5em`, and
+`0.5em` with a word-spacing of `0.5em`) in a default build, and with
+`bundled-fonts` — where the unpointed line conserves at only six of the 78
+styles — at `-2px`, at half an em exactly at `12.5px` and `13px`, and
+justified at `0.5em`; from just past half an em to `1em`, serif, the pointed
+line conserves where the unpointed one does not, in either build. cd407d5
+conserved the pointed line at none of the 78 (review of bf081ca and of
+f529a47). Where on its letter a mark
 stands is still not where `GPOS` would put it, over the middle: an unshaped
 run reads none. A mark whose letter another
 run draws — styled apart from it, or left to the standard 14 by a face of

@@ -600,8 +600,13 @@ Landed so far:
   where layout put it, a piece of its own — in one text object with the rest
   of its slice (`PageBuilder::text_pieces`), where ruling 14 reads it with
   its letter at every size and spacing [epub.md](epub.md) lists, four to a
-  letter as well; a run that ends on a mark is cut where one ending on its
-  letter alone would be.
+  letter as well. In such a slice the glyph after the overflow font's code
+  32, which 9.3.3 moves by `Tw`, is a piece of its own too, so no letter of
+  it is drawn over another under `word-spacing` (ROADMAP CD-19). A run that
+  ends on a mark is cut past half an em and a millionth of spacing; after a
+  simple font's letter alone, past half an em or at it by a last place, and
+  after a stand-in's, within half a thousandth of an em of it by its `/W`'s
+  rounding.
   Until October 2026 an overflow-font mark was as wide as a letter: a lone
   one sat at an exact tie between its letter and the glyph drawn next, and a
   letter's second was read with the next glyph — CI's `epub-corpus` job
@@ -611,12 +616,20 @@ Landed so far:
   text object of its own (6d79fa4), a mark left the glyph after it every
   spacing past a reader's pen, and a pointed word read a letter a line from
   a quarter of an em of spacing, and drawn a hundredth inside a stand-in's
-  letter (bf081ca) a run ending on it was cut from `0.491em`. What is left is
-  one limit with `bundled-fonts`, a regression from cd407d5 named and pinned
-  in [epub.md](epub.md): cd407d5 drew a stand-in's mark a spacing past its
-  letter, so a run ending on one was cut only past half an em and a
-  thousandth, and is cut just past half an em now, as after its letter
-  alone.
+  letter (bf081ca) a run ending on it was cut from `0.491em`. What is left
+  against cd407d5, measured on synthetic books and named with its arithmetic
+  and pinned in [epub.md](epub.md), is two classes. **A**, at a spacing
+  within a thousandth of an em of half an em: there a run boundary is cut or
+  not by the last place of a reader's sum and a painter's, marks or none, and
+  a pointed word, as wide as the unpointed word now, puts its last places
+  elsewhere than at cd407d5 (`<p dir="rtl">كَتَبَ كتب …</p>` at `0.5em`, which
+  reads as its mark-free twin does); and with `bundled-fonts`, cd407d5 drew
+  a stand-in's mark a spacing past its letter, so a run ending on one was cut
+  only past half an em and a thousandth, and is cut past half an em and a
+  millionth now. **B**, a pointed word narrower than at cd407d5: its
+  paragraph breaks its lines where the unpointed paragraph does, and a line
+  so broken can fall into one of ruling 14's named limits, as the unpointed
+  paragraph's does.
 
   **And a third level since October 2026: the visual line.** `flow.rs`
   breaks lines over logical text and resolves no levels, so a right-to-left

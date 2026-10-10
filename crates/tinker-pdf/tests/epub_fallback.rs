@@ -615,22 +615,24 @@ fn a_standard_14_arabic_letter_with_two_marks_keeps_both() {
     }
 }
 
-/// **A mark rides on its letter where the letter is drawn, when the
-/// overflow font's code 32 has moved the letter under `word-spacing`** —
-/// and the known limit that moves it, ROADMAP CD-19, pinned so that ending
-/// it is noticed.
+/// **A mark rides on its letter under `word-spacing` when its face's code 32
+/// is a letter of its word** — and the known limit that code 32 is, ROADMAP
+/// CD-19, pinned so that ending it is noticed.
 ///
 /// `paint::OVERFLOW_FIRST` is 32, so the first character a face meets past
 /// `WinAnsiEncoding` is drawn at code 32, and 9.3.3 applies `Tw` to every
-/// single-byte code 32: every glyph after it in its string is drawn a word
-/// spacing from where layout measured it. Unpointed, the word space moves —
-/// `مدة معلم.` at `0.5em` extracts `مدةم علم.`, present since the overflow
-/// font. Pointed, a mark placed from layout's pen (6d79fa4) left a letter so
-/// moved: in a bold run whose alpha is its face's code 32,
-/// `αλφα\u{301}` beside a Hebrew word read `αλφαy\u{301}` at a word spacing
-/// of `-2px`, where cd407d5, drawing the mark in its letter's string, read it
-/// whole (round 3 of the marks fix). A mark is placed on its letter where the
-/// letter is drawn now. Writing the overflow font at `0 Tw` instead, which
+/// single-byte code 32: in a slice with no mark, every glyph after it in its
+/// string is drawn a word spacing from where layout measured it. Unpointed,
+/// the word space moves — `مدة معلم.` at `0.5em` extracts `مدةم علم.`,
+/// present since the overflow font. Pointed, a mark placed from layout's pen
+/// (6d79fa4) left a letter so moved: in a bold run whose alpha is its face's
+/// code 32, `αλφα\u{301}` beside a Hebrew word read `αλφαy\u{301}` at a word
+/// spacing of `-2px`, where cd407d5, drawing the mark in its letter's string,
+/// read it whole (round 3 of the marks fix). In a slice that holds a mark
+/// the glyph after the code 32 is a piece of its own now, drawn where layout
+/// put it, so nothing in it is moved and every mark is on its letter
+/// (`a_standard_14_pointed_arabic_letter_is_not_drawn_over_the_next_under_word_spacing`
+/// for what the move did there). Writing the overflow font at `0 Tw` instead, which
 /// ends the limit, was measured on that round's probe: 25 more books
 /// conserve under word spacing and 8 fewer, 6 of them with no mark — they
 /// conserved only because the misplacement closed a word gap past half an
@@ -662,6 +664,96 @@ fn a_standard_14_overflow_letter_at_code_32_takes_word_spacing() {
             &format!("{HET_VAV} x \u{3B1}\u{3BB}\u{3C6}\u{3B1}\u{301}y z."),
         );
         marks_ride_on_their_letters(&doc);
+    }
+}
+
+/// Every two glyphs drawn on one baseline of page 0 whose boxes overlap by
+/// more than a hundredth of an em, sorted along it: a letter drawn over
+/// another. Nonspacing marks, drawn inside their letters, and whitespace are
+/// left out.
+fn overprinted(doc: &Document) -> Vec<String> {
+    let page = doc.page(0).expect("a page");
+    let drawn = page.text_with(&TextOptions {
+        content_order: true,
+    });
+    let mut boxes: Vec<(i64, f64, f64, f64, &str)> = drawn
+        .lines()
+        .iter()
+        .flat_map(|line| line.chars.iter())
+        .filter(|c| {
+            !c.text.trim().is_empty()
+                && c.text
+                    .chars()
+                    .next()
+                    .is_none_or(|first| bidi_class(first) != BidiClass::NSM)
+        })
+        .map(|c| {
+            let (x0, _, x1, _) = c.quad.bounds();
+            // A hundredth of a point groups a baseline.
+            let baseline = (c.origin.1 * 100.0).round() as i64;
+            (baseline, x0, x1, c.size, c.text.as_str())
+        })
+        .collect();
+    boxes.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    boxes
+        .windows(2)
+        .filter_map(|pair| match pair {
+            [before, after] if before.0 == after.0 && after.1 < before.2 - 0.01 * after.3 => {
+                Some(format!(
+                    "{:?} from {:.3} to {:.3} under {:?} from {:.3}",
+                    before.4, before.1, before.2, after.4, after.1
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// **No letter of a pointed Arabic paragraph is drawn over another under
+/// `word-spacing` or `text-align: justify`, in a paragraph of either
+/// direction** (re-review of f529a47, BLOCKING).
+///
+/// The overflow font's code 32 — `MUDDA`'s MEM, the first character past
+/// `WinAnsiEncoding` the face meets — takes `Tw` (9.3.3; ROADMAP CD-19), so
+/// the glyph after it in its string is drawn a word spacing right of where
+/// layout put it. At cd407d5 the rest of the string moved with it and the
+/// shift ended in the word space after it, which is whitespace. A mark ends
+/// its string now and the glyph after the marked letter is a piece of its
+/// own, drawn where layout put it, so the moved LAM was drawn on the AIN
+/// after it: `مُدَّةَ مُعلِّم.` at `word-spacing: 4px` drew both at `48pt`,
+/// and a justified paragraph of the two words ten to fourteen such pairs a
+/// page. In a slice holding a mark the glyph after the overflow font's code
+/// 32 is a piece of its own too, drawn where layout put it.
+#[test]
+fn a_standard_14_pointed_arabic_letter_is_not_drawn_over_the_next_under_word_spacing() {
+    let long: String = (0..14)
+        .map(|_| format!("{MUDDA_MUALLIM} \u{643}\u{62A}\u{628} "))
+        .collect();
+    for style in [
+        "p { word-spacing: 4px }",
+        "p { word-spacing: 0.5em }",
+        "p { word-spacing: 1em }",
+        "p { letter-spacing: 0.25em; word-spacing: 0.25em }",
+        "p { text-align: justify }",
+        "p { text-align: justify; margin: 0 30% }",
+        "p { text-align: justify; letter-spacing: 2px; word-spacing: 6px }",
+    ] {
+        for body in [
+            format!("<p dir=\"rtl\">{MUDDA_MUALLIM}</p>"),
+            format!("<p>{MUDDA_MUALLIM}</p>"),
+            format!("<p dir=\"rtl\">{long}</p>"),
+            format!("<p>{long}</p>"),
+            format!("<p dir=\"rtl\">{AMALIYYAN} {AMALIYYAN} {AMALIYYAN}</p>"),
+        ] {
+            let bytes = styled_book("ar", style, &body);
+            let doc = Document::open(bytes).expect("the book opens");
+            let over = overprinted(&doc);
+            assert!(
+                over.is_empty(),
+                "under `{style}`, {body:?} draws a letter over another: {over:?}"
+            );
+            marks_ride_on_their_letters(&doc);
+        }
     }
 }
 
@@ -1043,13 +1135,27 @@ fn a_standard_14_letter_and_its_marks_are_spaced_once() {
     }
 }
 
-/// **A run that ends on a mark reads on one line with what follows it up to
-/// half an em of `letter-spacing`, in either build, whatever draws its
-/// letter — an alpha, a Cyrillic `а`, an eng and a schwa (the Liberation
-/// stand-in's with `bundled-fonts`, the overflow font's without) and an `e`
-/// — and so does a mark styled apart from its letter, and the four-mark
-/// SHIN ending a bold run inside a left-to-right line** (review of bf081ca,
-/// BLOCKING).
+/// The text of each line of page 0, in the order the content stream drew
+/// it: where a reader's pen was put down and not taken up again, a line
+/// ends.
+fn drawn_lines(doc: &Document) -> Vec<String> {
+    let page = doc.page(0).expect("a page");
+    page.text_with(&TextOptions {
+        content_order: true,
+    })
+    .lines()
+    .iter()
+    .map(|line| line.chars.iter().map(|c| c.text.as_str()).collect())
+    .collect()
+}
+
+/// **A run that ends on a mark is not cut from what follows it up to half an
+/// em of `letter-spacing`, half an em included, in either build, whatever
+/// draws its letter — an alpha, a Cyrillic `а`, an eng and a schwa (the
+/// Liberation stand-in's with `bundled-fonts`, the overflow font's without)
+/// and an `e` — and nor is a mark styled apart from its letter; below half
+/// an em each line reads whole, and so does the four-mark SHIN ending a bold
+/// run inside a left-to-right line** (review of bf081ca, BLOCKING).
 ///
 /// A text object that ends with a mark leaves a reader's pen where the
 /// mark's box, a thousandth of an em, ends, and `TextDevice` resumes the line
@@ -1058,98 +1164,129 @@ fn a_standard_14_letter_and_its_marks_are_spaced_once() {
 /// stand-in's `/W` rounds what layout measured to a whole thousandth: the
 /// box ended nine thousandths short and the next run, one spacing past the
 /// letter, was cut from `0.491em`: `x <b>α\u{301}</b>y z.` read
-/// `x α\u{301}\ny z.` at `0.495em` and `8px`, where cd407d5 read it whole,
-/// and at exactly half an em `<p>a <b>שּׁ ָ֑</b>לֵם b.</p>` read
-/// `שָּׁ֑לֵם a\n b.`. Now a stand-in letter that carries a mark is a piece of
-/// its own, drawn where layout put it, and every mark on a letter in its
-/// slice is placed as on a simple font's, its box ending a millionth of an
-/// em past where layout measured the letter to end: the next run is a
-/// spacing less that away. A mark that opens a run, its letter in the run
-/// before — styled apart, or a sans-serif letter whose mark only the serif
-/// fallback draws — is drawn a hundredth inside where that letter ended
-/// until the spacing nears half an em, and then nearer its end
-/// (`paint::leading_mark_at`): `x<b>e</b><i>\u{301}</i>x y.` was cut from
-/// `0.491em` too, and a sans-serif `Nguye\u{302}\u{303}n` at half an em. At
-/// cd407d5 each of these read whole up to half an em. `TextDevice` takes a
-/// gap of exactly half an em as within it, whatever its last place
-/// (`RESUME_TIE`).
+/// `x α\u{301}\ny z.` at `0.495em` and `8px`, where cd407d5 read it whole.
+/// Now a stand-in letter that carries a mark is a piece of its own, drawn
+/// where layout put it, and every mark on a letter in its slice is placed as
+/// on a simple font's, its box ending a millionth of an em past where layout
+/// measured the letter to end (`paint::EXACT_MARK_INSET`): the next run is a
+/// spacing less a millionth of an em away, within half an em at half an em.
+/// A mark that opens a run, its letter in the run before — styled apart, or
+/// a sans-serif letter whose mark only the serif fallback draws — is drawn a
+/// hundredth inside where that letter ended until the spacing nears half an
+/// em, and then nearer its end (`paint::leading_mark_at`):
+/// `x<b>e</b><i>\u{301}</i>x y.` was cut from `0.491em` too, and a
+/// sans-serif `Nguye\u{302}\u{303}n` at half an em. At cd407d5 each of these
+/// read whole below half an em.
+///
+/// **At exactly half an em only the boundary after the mark is asserted.**
+/// Every other run boundary on these lines — `x ` before the bold run, the
+/// SHIN's word before ` b.` — is a gap a spacing wide that has no mark at
+/// it, and at a spacing of half an em it is cut or not by the last place of
+/// the two sums that put its ends, in either build and at cd407d5, marks or
+/// none (`a_standard_14_line_at_exactly_half_an_em_is_cut_where_a_last_place_says`).
 #[test]
-fn a_standard_14_run_ending_on_a_mark_reads_whole_to_half_an_em() {
-    let read = |style: &str, body: &str| -> String {
-        let bytes = styled_book("en", style, body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
-        for verdict in [
-            conservation(&bytes, &doc),
-            conservation_in_logical_order(&bytes, &doc),
-        ] {
-            assert!(
-                verdict.holds(),
-                "under `{style}`, {body:?}: {:?}",
-                verdict.divergences
-            );
-        }
-        marks_ride_on_their_letters(&doc);
-        doc.page(0).expect("a page").text().plain_text()
-    };
-    // At `16px`, `7.84px` is `0.49em` and `7.92px` `0.495em`.
+fn a_standard_14_run_ending_on_a_mark_keeps_to_what_follows_to_half_an_em() {
+    // At `16px`, `7.84px` is `0.49em` and `7.92px` `0.495em`; the last three
+    // are half an em exactly.
     let spacings = [
-        "p { letter-spacing: 7.84px }",
-        "p { letter-spacing: 7.92px }",
-        "p { letter-spacing: 0.4999em }",
-        "p { letter-spacing: 8px }",
-        "p { letter-spacing: 0.5em }",
-        "p { font-size: 6px; letter-spacing: 3px }",
+        ("p { letter-spacing: 7.84px }", false),
+        ("p { letter-spacing: 7.92px }", false),
+        ("p { letter-spacing: 0.4999em }", false),
+        ("p { letter-spacing: 8px }", true),
+        ("p { letter-spacing: 0.5em }", true),
+        ("p { font-size: 6px; letter-spacing: 3px }", true),
     ];
-    for style in spacings {
-        for letter in ['e', '\u{3B1}', '\u{430}', '\u{14B}', '\u{259}'] {
-            assert_eq!(
-                read(style, &format!("<p>x <b>{letter}\u{301}</b>y z.</p>")),
-                format!("x {letter}\u{301}y z.\n"),
-                "under `{style}`"
+    let mut books: Vec<(String, String, String)> =
+        ['e', '\u{3B1}', '\u{430}', '\u{14B}', '\u{259}']
+            .iter()
+            .map(|letter| {
+                (
+                    format!("<p>x <b>{letter}\u{301}</b>y z.</p>"),
+                    format!("x {letter}\u{301}y z."),
+                    format!("{letter}\u{301}y"),
+                )
+            })
+            .collect();
+    books.push((
+        "<p>x<b>e</b><i>\u{301}</i>x y.</p>".to_owned(),
+        "xe\u{301}x y.".to_owned(),
+        "e\u{301}x".to_owned(),
+    ));
+    books.push((
+        "<p style=\"font-family: sans-serif\">Nguye\u{302}\u{303}n Tha\u{300}nh.</p>".to_owned(),
+        "Nguye\u{302}\u{303}n Tha\u{300}nh.".to_owned(),
+        "e\u{302}\u{303}n".to_owned(),
+    ));
+    for (style, exactly_half) in spacings {
+        for (body, expected, across) in &books {
+            let bytes = styled_book("en", style, body);
+            let doc = Document::open(bytes.clone()).expect("the book opens");
+            for verdict in [
+                conservation(&bytes, &doc),
+                conservation_in_logical_order(&bytes, &doc),
+            ] {
+                assert!(
+                    verdict.holds(),
+                    "under `{style}`, {body:?}: {:?}",
+                    verdict.divergences
+                );
+            }
+            marks_ride_on_their_letters(&doc);
+            let lines = drawn_lines(&doc);
+            assert!(
+                lines.iter().any(|line| line.contains(across.as_str())),
+                "under `{style}` the run ending on a mark is cut from what follows: {lines:?}"
             );
+            if !exactly_half {
+                assert_eq!(
+                    doc.page(0).expect("a page").text().plain_text(),
+                    format!("{expected}\n"),
+                    "under `{style}`"
+                );
+            }
         }
-        assert_eq!(
-            read(style, "<p>x<b>e</b><i>\u{301}</i>x y.</p>"),
-            "xe\u{301}x y.\n",
-            "under `{style}`"
-        );
-        assert_eq!(
-            read(
-                style,
-                "<p style=\"font-family: sans-serif\">Nguye\u{302}\u{303}n Tha\u{300}nh.</p>"
-            ),
-            "Nguye\u{302}\u{303}n Tha\u{300}nh.\n",
-            "under `{style}`"
-        );
-        let shin = "<p>a <b>\u{5E9}\u{5BC}\u{5C1}\u{5B8}\u{591}</b>\u{5DC}\u{5B5}\u{5DD} b.</p>";
-        let bytes = styled_book("en", style, shin);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
-        reads_as_written(&bytes, &doc, &format!("a {CANTILLATED} b."));
-        marks_ride_on_their_letters(&doc);
+        if !exactly_half {
+            let shin =
+                "<p>a <b>\u{5E9}\u{5BC}\u{5C1}\u{5B8}\u{591}</b>\u{5DC}\u{5B5}\u{5DD} b.</p>";
+            let bytes = styled_book("en", style, shin);
+            let doc = Document::open(bytes.clone()).expect("the book opens");
+            reads_as_written(&bytes, &doc, &format!("a {CANTILLATED} b."));
+            marks_ride_on_their_letters(&doc);
+        }
     }
 }
 
 /// **Past half an em of `letter-spacing` a run that ends on a mark is cut
 /// there, as a run that ends on its letter alone is — which, with
 /// `bundled-fonts`, cd407d5 read whole up to a thousandth of an em further:
-/// a known limit, pinned so that ending it is noticed.**
+/// a known limit (class A of the marks fix's round 4, the band at half an
+/// em), pinned so that ending it is noticed.**
 ///
-/// A mark adds nothing to where its line is cut: its box ends a millionth
-/// of an em past where layout measured its letter to end, so the next run is a
-/// spacing less that from it, and past half an em `TextDevice` starts a new
-/// line, as it does after the same word unpointed, in either build and at
-/// cd407d5. cd407d5 spaced a mark like a letter and, with `bundled-fonts`,
-/// drew the stand-in's mark where the pen stood after its letter, so the
-/// mark's thousandth-of-an-em box lay a spacing past the letter and the next
-/// run a spacing past that: the line was cut only past half an em **and a
-/// thousandth**, less what the stand-in's `/W` rounded off. So from
-/// `0.5em` to about `0.501em` that run boundary was whole there and is cut
-/// now: `x <b>α\u{301}</b>y z.` at `8.01px` (`0.500625em`) read
+/// A mark's box ends a millionth of an em past where layout measured its
+/// letter to end (`paint::EXACT_MARK_INSET`), so the next run is a spacing
+/// less a millionth from it, and past half an em and a millionth
+/// `TextDevice` starts a new line. After the same letter alone the reader's
+/// pen is where the letter's drawn box ends: where layout measured it to,
+/// for a simple font's letter, whose widths are the numbers layout measured
+/// with, and up to half a thousandth of an em either side of that for a
+/// letter the stand-in draws, whose `/W` rounds layout's width to a whole
+/// thousandth — so with `bundled-fonts` a run ending on a mark and the same
+/// run ending on its letter alone can be cut differently by up to that much
+/// either side of half an em (`0.5001em`: `x <b>ə</b>y z.` reads
+/// `x \nəy z.` and `x <b>ə\u{301}</b>y z.` reads `x \nə\u{301}\ny z.`, the
+/// schwa's `/W` rounding layout's width up by a ten-thousandth of an em or
+/// more). cd407d5 spaced a mark like a letter and,
+/// with `bundled-fonts`, drew the stand-in's mark where the pen stood after
+/// its letter, so the mark's thousandth-of-an-em box lay a spacing past the
+/// letter and the next run a spacing past that: the line was cut only past
+/// half an em **and a thousandth**, less what the stand-in's `/W` rounded
+/// off. So from `0.5em` to `0.501em` that run boundary was whole there and is
+/// cut now: `x <b>α\u{301}</b>y z.` at `8.01px` (`0.500625em`) read
 /// `x \nα\u{301}y z.` and reads `x \nα\u{301}\ny z.`, and `x <b>α</b>y z.`
 /// reads `x \nα\ny z.` at both. A default build drew the mark as wide as a
-/// space and cut it as now. On the round-3 probe this band holds every
+/// space and cut it as now. On the round-4 probe this band holds every
 /// plain-text, search and left-to-right-token regression against cd407d5
-/// (`bundled-fonts` only) and one conservation regression.
+/// with `bundled-fonts` that is not at half an em exactly.
 #[test]
 fn a_standard_14_run_ending_on_a_mark_is_cut_past_half_an_em_as_its_letter_is() {
     // `8.01px` is `0.500625em`. At `0.5001em` an `e`, whose width is the
@@ -1182,6 +1319,151 @@ fn a_standard_14_run_ending_on_a_mark_is_cut_past_half_an_em_as_its_letter_is() 
             }
         }
     }
+}
+
+/// KATABA and the unpointed word, alternating, fourteen times: two words of
+/// three letters each, so that a line read in another order than written
+/// does not conserve.
+fn kataba_paragraph(first: &str) -> String {
+    let words: String = (0..14)
+        .map(|_| format!("{first} \u{643}\u{62A}\u{628} "))
+        .collect();
+    format!("<p dir=\"rtl\">{words}</p>")
+}
+
+/// **At a spacing of exactly half an em, a run boundary is cut or not by a
+/// floating-point last place, marks or none — class A of the marks fix's
+/// round 4, a known limit pinned so that ending it is noticed.**
+///
+/// `TextDevice` resumes a line across an `ET` only where the next glyph
+/// starts within half an em of where the last one's box ended, and at a
+/// `letter-spacing` of half an em every run boundary puts it half an em on:
+/// the box's end is the reader's sum (the `Td`, plus the glyph's width) and
+/// the next glyph's start is the painter's (its own `Td`), and two sums of
+/// one value differ in their last place. In this paragraph, sans-serif at
+/// `0.5em` (`6pt`), a word space is drawn at `99.31199999999995` and ends,
+/// `3.336` wide, at `102.64799999999995`, and the next word is written at
+/// `108.64799999999997`: `6.000000000000014` on, past half an em by the last
+/// place of the two sums, and cut.
+/// Each line is cut so before its last word, and ruling 14 reads the cut-off
+/// word in the order the pieces are drawn, so the paragraph does not conserve
+/// — pointed, and with no mark at all (`بتك` for KATABA: the same three
+/// glyph widths, so the same lines and the same sums); at `0.4999em` and at
+/// `0.5001em` both conserve, every boundary decided by a ten-thousandth of
+/// an em. A pointed word is as wide as the same word unpointed
+/// (`css-text-3` §10.2), so it is drawn at the same places as the
+/// mark-free twin. At cd407d5 the pointed words were wider, the last places
+/// fell elsewhere and this paragraph conserved: on the round-4 probe, 12 of
+/// a default build's 15 books that conserve, read whole or are found by
+/// search at cd407d5 and not now, and all 94 with `bundled-fonts` (85 of
+/// them the band just past half an em,
+/// `a_standard_14_run_ending_on_a_mark_is_cut_past_half_an_em_as_its_letter_is`),
+/// are at a spacing within a thousandth of an em of half an em.
+#[test]
+fn a_standard_14_line_at_exactly_half_an_em_is_cut_where_a_last_place_says() {
+    let read = |style: &str, first: &str| {
+        let bytes = styled_book("ar", style, &kataba_paragraph(first));
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let holds = conservation(&bytes, &doc).holds()
+            && conservation_in_logical_order(&bytes, &doc).holds();
+        let page = doc.page(0).expect("a page");
+        let starts: Vec<f64> = page
+            .text_with(&TextOptions {
+                content_order: true,
+            })
+            .lines()
+            .iter()
+            .flat_map(|line| line.chars.iter())
+            .filter(|c| {
+                c.text
+                    .chars()
+                    .next()
+                    .is_none_or(|first| bidi_class(first) != BidiClass::NSM)
+            })
+            .map(|c| c.quad.bounds().0)
+            .collect();
+        (holds, drawn_lines(&doc).len(), starts)
+    };
+    for (spacing, conserves) in [("0.4999em", true), ("0.5em", false), ("0.5001em", true)] {
+        let style = format!("p {{ font-family: sans-serif; letter-spacing: {spacing} }}");
+        let pointed = read(&style, KATABA);
+        let plain = read(&style, "\u{628}\u{62A}\u{643}");
+        assert!(
+            pointed.2.len() == plain.2.len()
+                && pointed
+                    .2
+                    .iter()
+                    .zip(&plain.2)
+                    .all(|(a, b)| (a - b).abs() < 1e-9),
+            "at `{spacing}` the pointed words are not drawn where the unpointed ones are"
+        );
+        assert_eq!(
+            pointed.1, plain.1,
+            "at `{spacing}` the pointed paragraph is cut in other places"
+        );
+        assert_eq!(
+            (pointed.0, plain.0),
+            (conserves, conserves),
+            "at `{spacing}`: if half an em now conserves, drop class A from epub.md"
+        );
+    }
+}
+
+/// **A pointed word is as wide as the same word unpointed, so its paragraph
+/// breaks its lines where the unpointed paragraph does — and a line break
+/// that moved so into one of ruling 14's named limits reads as the
+/// unpointed paragraph does: class B of the marks fix's round 4, a known
+/// consequence pinned so that a change to it is noticed.**
+///
+/// `css-text-3` §10.2 spaces a letter and its marks once (bf081ca); at
+/// cd407d5 each decomposed accent of `cafe\u{301} na\u{308}ive …` was spaced
+/// like a letter and, in a default build, as wide as a space besides, so the
+/// pointed words were wider and broke this justified, half-em-spaced
+/// right-to-left paragraph elsewhere — and it conserved. Now its lines are
+/// the unpointed paragraph's, and its last line, `Nguyen q o חו.`, is a
+/// left-to-right run and then, drawn more than three ems left of where it
+/// ended, a right-to-left word with its full stop: `TextDevice` cuts them
+/// into two lines, and ruling 14 reads the two pieces of a right-to-left
+/// paragraph in the order they are drawn (`epub.md`'s `direction` row), the
+/// full stop and word first. The unpointed paragraph reads the same, in either build, at
+/// cd407d5 and now. On the round-4 probe, 3 of a default build's 15 books
+/// that conserve at cd407d5 and do not now are this class: this one, and
+/// `CANTILLATED` and `كتب` fourteen times in a right-to-left paragraph at
+/// `1em` (sans-serif) and at `0.5001em` (monospace), every word a piece of
+/// its own, read in drawn order as `שלם כתב` fourteen times is; none with
+/// `bundled-fonts`.
+#[test]
+fn a_narrower_pointed_word_breaks_its_line_where_the_unpointed_word_does() {
+    let style = "p { text-align: justify; letter-spacing: 0.5em; margin: 0 20% }";
+    let read = |latin: &str| {
+        let body = format!("<p dir=\"rtl\">{HET_VAV} {latin} {HET_VAV}.</p>");
+        let bytes = styled_book("he", style, &body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let holds = conservation(&bytes, &doc).holds()
+            && conservation_in_logical_order(&bytes, &doc).holds();
+        let text: String = doc
+            .page(0)
+            .expect("a page")
+            .text()
+            .plain_text()
+            .chars()
+            .filter(|c| bidi_class(*c) != BidiClass::NSM)
+            .collect();
+        (holds, text)
+    };
+    let pointed =
+        read("cafe\u{301} na\u{308}ive Nguye\u{302}\u{303}n q\u{307}\u{323} o\u{302}\u{301}");
+    let plain = read("cafe naive Nguyen q o");
+    assert_eq!(
+        pointed.1, plain.1,
+        "the pointed paragraph's lines are not the unpointed one's"
+    );
+    assert_eq!(
+        plain.1,
+        format!("{HET_VAV}\ncafe naive\n.{HET_VAV} Nguyen q o\n"),
+        "ruling 14 now reads the last line as written: drop class B from epub.md"
+    );
+    assert_eq!((pointed.0, plain.0), (false, false));
 }
 
 /// **A letter-spaced book with no mark in it is written byte for byte as at

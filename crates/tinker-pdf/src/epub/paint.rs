@@ -5116,22 +5116,27 @@ const MARK_INSET: f64 = 0.01;
 /// A text object that ends with a mark leaves a reader's pen where the mark's
 /// box ends, and the next text object — the next run, on the same line —
 /// resumes the line only within half an em of it (`tinker-pdf-content`'s
-/// `TextDevice`). The box ending where the letter is measured to end, the
-/// next run is as far from the mark as layout put it from the letter, a
-/// spacing on: a mark adds nothing to where its line is cut. A millionth past
-/// that end, not at it, so that at a spacing of exactly half an em the two
-/// sums that put the box's end and the next run's start at one place are not
-/// left to their last place; `TextDevice` itself takes a gap of half an em
-/// and a millionth as within (`RESUME_TIE`), so a run that ends on a mark is
-/// cut, past half an em, where one that ends on its letter alone is. bf081ca
-/// took a ten-thousandth, which put that tie at `0.5001em`, where a
-/// mark-free run boundary is cut and one after a mark was whole or cut by
-/// rounding, and ruling 14 read the half-cut line in the order its majority
-/// runs (`a <b>שּׁ ָ֑</b>לֵם b.` came back `a\n.b שָּׁ֑לֵם`; round 3 of the marks
-/// fix), and a hundredth on a stand-in's letter, which left the next run nine
+/// `TextDevice`). The box ending a millionth of an em past where the letter
+/// is measured to end, the next run is a spacing less a millionth from the
+/// mark: whole up to a spacing of half an em and a millionth, and at half an
+/// em exactly whole by that millionth, not by the last place of two sums. So
+/// a mark moves where its line is cut by that millionth, and by no more,
+/// after a simple font's letter, whose drawn box ends where layout measured
+/// it to; after a stand-in's, which a reader measures by its `/W`, the letter
+/// alone ends up to half a thousandth of an em either side of where layout
+/// measured it, so near half an em a run ending on the letter and the same
+/// run ending on a mark over it can be cut differently, within that
+/// rounding (`0.5001em`, `bundled-fonts`: `x <b>ə</b>y z.` reads
+/// `x \nəy z.` and `x <b>ə\u{301}</b>y z.` reads `x \nə\u{301}\ny z.`, the
+/// schwa's `/W` rounding layout's width up). A run boundary with no mark at it, at a
+/// spacing of half an em exactly, is cut or not by the last place of the
+/// reader's sum and the painter's, marks elsewhere on the line or none
+/// (`epub.md`, class A of the marks fix's round 4). bf081ca took a
+/// ten-thousandth, which put the boundary after a mark at `0.5001em`, and a
+/// hundredth on a stand-in's letter, which left the next run nine
 /// thousandths of an em further from the mark's box than from the letter's
 /// and cut the line from `0.491em`
-/// (`a_standard_14_run_ending_on_a_mark_reads_whole_to_half_an_em`).
+/// (`a_standard_14_run_ending_on_a_mark_keeps_to_what_follows_to_half_an_em`).
 const EXACT_MARK_INSET: f64 = 0.000_999;
 
 /// Where a mark of no advance riding on the glyph drawn at `start`, `width`
@@ -5211,8 +5216,8 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// review of 6d79fa4). A slice holding no mark keeps a text object per
 /// segment, and the pen moves by `advance + letter-spacing` in one sum as it
 /// always did, so a book with no mark is written byte for byte as at cd407d5
-/// (measured on the round-3 probe's mark-free books, letter-spaced ones
-/// among them).
+/// (measured on the round-3 and round-4 probes' mark-free books,
+/// letter-spaced and word-spaced ones among them).
 ///
 /// # Where the letter a mark rides on is drawn
 ///
@@ -5226,26 +5231,47 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// an em inside, which the review of bf081ca found cut a line from
 /// `0.491em`; moving the letter so that it **ended** exactly, tried first,
 /// moved where it **started** by the same rounding, and a line cut there
-/// before a right-to-left word at exactly half an em.) A glyph after the
-/// overflow font's code 32 in its string is drawn a `word-spacing` further
-/// on than layout put it (9.3.3 applies `Tw` to any single-byte code 32;
-/// ROADMAP CD-19), so a mark is placed from where its letter is drawn, not
-/// from where layout put it. Every mark that rides on a letter in its slice
-/// is placed [`EXACT_MARK_INSET`] inside the end layout measured for it.
+/// before a right-to-left word at exactly half an em.) Every mark that rides
+/// on a letter in its slice is placed [`EXACT_MARK_INSET`] inside the end
+/// layout measured for it.
+///
+/// # The overflow font's code 32 in a slice that holds a mark
+///
+/// 9.3.3 applies `Tw` to any single-byte code 32, and the overflow font's
+/// code 32 is a character of the book's — the first past `WinAnsiEncoding`
+/// its face met ([`OVERFLOW_FIRST`]) — not a word space, which layout did
+/// not space: in its string, every glyph after it is drawn a `word-spacing`
+/// right of where layout put it (ROADMAP CD-19). In a slice with no mark the
+/// string runs on to the next resource, so its tail moves together, a word
+/// spacing into whatever is drawn next: the gap before the next word, or,
+/// where a run ends inside a word, the glyph after it (`x <b>αλ</b>φα` at
+/// `word-spacing: 4px` draws the λ on the φ in a default build, whose
+/// overflow font draws Greek). That is cd407d5's drawing,
+/// kept byte for byte. In a slice that holds a mark, a mark ends its
+/// string and the glyph after the marked letter is a piece of its own, drawn
+/// where layout put it, so a glyph the code 32 had moved landed on it:
+/// `مُدَّةَ مُعلِّم.` at `word-spacing: 4px` drew the LAM and the AIN both at
+/// `48pt`, and a justified paragraph of such words ten to fourteen such
+/// pairs a page (re-review of f529a47). So in such a slice the glyph after
+/// the code 32 is a piece of its own too, from the pen, and nothing in the
+/// slice is drawn where `Tw` would put it
+/// (`a_standard_14_pointed_arabic_letter_is_not_drawn_over_the_next_under_word_spacing`).
 ///
 /// # Where a slice ends on a mark
 ///
 /// The next slice, or the next run, is another text object, and its first
 /// glyph starts one spacing past the letter's end. The mark's box ends a
-/// millionth of an em past that end, so that glyph is as far from the
-/// reader's pen as layout put it from the letter: a run that ends on a
-/// mark is read on one line with what follows up to half an em of spacing,
-/// in either build — at `0.495em` and `8px` too, where bf081ca cut a
-/// stand-in letter's line (review of bf081ca) — and past half an em it is
-/// cut where the run would be cut after its letter alone. cd407d5 drew a
-/// stand-in's mark a spacing past its letter, its box a thousandth of an em
-/// wide, and with `bundled-fonts` cut such a line only past half an em and
-/// a thousandth: a known limit `epub.md` names
+/// millionth of an em past that end ([`EXACT_MARK_INSET`]), so that glyph is
+/// a spacing less a millionth of an em from the reader's pen: a run that ends
+/// on a mark is not cut from what follows up to half an em of spacing, half
+/// an em included, in either build — at `0.495em` and `8px` too, where
+/// bf081ca cut a stand-in letter's line (review of bf081ca) — and is cut past
+/// half an em and a millionth. After its letter alone the run is cut past
+/// half an em, or at it by a last place, for a simple font's letter, and
+/// within half a thousandth of an em of it, by the `/W` rounding, for a
+/// stand-in's. cd407d5 drew a stand-in's mark a spacing past its letter, its
+/// box a thousandth of an em wide, and with `bundled-fonts` cut such a line
+/// only past half an em and a thousandth: a known limit `epub.md` names
 /// (`a_standard_14_run_ending_on_a_mark_is_cut_past_half_an_em_as_its_letter_is`).
 ///
 /// # A mark whose letter is not in the slice
@@ -5302,12 +5328,11 @@ fn draw_coded(
     // mark, and what follows one, is a piece of the object open, and only a
     // slice without one starts an object at a new resource.
     let whole = slice.chars().any(|c| bidi_class(c) == BidiClass::NSM);
-    // How far right of where layout put it the open segment draws its next
-    // glyph: a `word-spacing` for every code 32 in it the overflow font gives
-    // a letter, since 9.3.3 applies `Tw` to any single-byte code 32 and
-    // layout spaced only word spaces — a known limit (ROADMAP CD-19). A mark
-    // rides on its letter where the letter is drawn.
-    let mut drawn_ahead = 0.0f64;
+    // Whether the last character drawn was the overflow font's code 32 in a
+    // slice that holds a mark: what follows it is a piece of its own, from
+    // the pen, since 9.3.3 applies `Tw` to any single-byte code 32 and
+    // layout spaced only word spaces (ROADMAP CD-19).
+    let mut after_overflow_space = false;
     let start = x;
     let order = coded_order(run, slice);
 
@@ -5355,6 +5380,7 @@ fn draw_coded(
         );
         let continues = !mark
             && !after_mark
+            && !after_overflow_space
             && !alone
             && object
                 .last()
@@ -5378,16 +5404,12 @@ fn draw_coded(
                 characters: String::new(),
                 x: placed.unwrap_or(x),
             });
-            drawn_ahead = 0.0;
         }
         if !mark {
             // Drawn where layout put it, as wide as measured or within a
             // rounding of it: a simple font's letter, or a stand-in's alone.
             let exact = matches!(coded, Coded::Simple { .. }) || alone;
-            base = Some((x + drawn_ahead, advance, exact));
-        }
-        if overflow_space {
-            drawn_ahead += run.word_spacing;
+            base = Some((x, advance, exact));
         }
         if let Some(open) = object.last_mut() {
             match coded {
@@ -5397,6 +5419,7 @@ fn draw_coded(
             open.characters.push(ch);
         }
         after_mark = mark;
+        after_overflow_space = whole && overflow_space;
         // One sum, `advance + letter-spacing`, as before a mark took none:
         // adding the two to the pen one at a time rounds differently in the
         // last place, and a letter-spaced book with no mark in it was written
