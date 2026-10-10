@@ -513,6 +513,36 @@ did not have the same standing:
   them proportionate; that is what a bound against page geometry buys, and the
   most one can.
 
+  **The residual came back, and a bound against the page was not the most one
+  could do — closed October 2026 by a bound on the decode.** A local sweep of
+  every target on `develop` found two `timeout-`s and a slow unit here, all
+  three that residual: 257 bytes choosing a page of 37 by 56 make a symbol
+  dictionary whose coded data stops describing it after 945 decisions; the
+  coder reaches a marker, E.3.4 has it feed itself 1-bits, and it goes on
+  deciding symbols out of them — **38 730 symbols, 51 532 206 pixels**, twice
+  per input, about twenty seconds a time under the sanitizers. Every per-item
+  cap admitted it, and would have admitted forty such dictionaries in one
+  stream: `MAX_JBIG2_SYMBOL_PIXELS` is per dictionary, regions are per region,
+  placements per region, and nothing was per decode. `MAX_JBIG2_WORK_MULTIPLE`
+  is. One decode spends at most sixteen times the pixels its caller's ceiling
+  holds — arithmetic decisions counted off the coder, regions made, placements
+  composited and bitmaps copied — and stops at the segment that runs it out,
+  with `Jbig2Refusal::WorkCap` and whatever page it had composited. **Set
+  against the ceiling rather than the page, deliberately**: a global dictionary
+  decodes whole for every image that names it, and an image may be a small mask
+  on a large page, so a page-area bound would refuse documents by the shape of
+  their producer; the ceiling is the caller's own statement of scale, and every
+  bitmap here already answers to it. The engine passes 128 MiB, so on the
+  render path the budget is 17 179 869 184 units and binds no real page; this
+  target passes 64 KiB, so it binds at 8 388 608 units, and the seed
+  `symbol-dictionary-spun-past-its-marker` now stops at symbol 6 297.
+  `the_marker_spun_seed_stops_at_the_work_budget` pins that by its refusal and
+  its symbol count, and
+  `the_decode_stops_at_the_work_budget_however_the_work_is_split` holds the
+  cap in five shapes every per-item cap admits — forty dictionaries, forty
+  regions, two thousand placements of one symbol, three hundred references to
+  one dictionary and four thousand halftone stamps.
+
 ### What a green fuzz run does not mean
 
 **Not one of the thirty-nine targets checks that a decode is right.** They
@@ -1530,7 +1560,10 @@ rather than read off a file, and a row that reads like a measurement when it is
 not is the failure this file exists to prevent. The fourth JBIG2 row,
 `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`, does not carry the word, because its yardstick
 *is* a measurement: 88 736 corpus symbols, none of them larger than the page it
-is drawn onto (the `jbig2` fuzz row above).
+is drawn onto (the `jbig2` fuzz row above). The fifth, `MAX_JBIG2_WORK_MULTIPLE`,
+carries it again: its yardstick is arithmetic about the same scan, decoded at a
+ceiling of exactly its own page, and the census figure it is owed is printed by
+`jbig2_census.rs` on the first run that has the corpora.
 The ledger also asserts that no bound is proved by a clock — `Instant::now` is
 banned from every source a row names as firing it — so the caps are properties
 of inputs, not of machines.

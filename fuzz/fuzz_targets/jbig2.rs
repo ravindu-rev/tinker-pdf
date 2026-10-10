@@ -61,6 +61,13 @@ fuzz_target!(|data: &[u8]| {
     // `symbol-dictionary-spends-the-pixel-budget` spending 67 million decoded
     // pixels on a page of one (`docs/verification.md`, the `jbig2` fuzz row).
     // A knob that grew the page would relax that bound as well as the buffer.
+    //
+    // **And the ceiling is the whole decode's budget since October 2026**:
+    // `MAX_JBIG2_WORK_MULTIPLE` times the 524 288 pixels 64 KiB holds, 8 388 608
+    // units of arithmetic decisions, regions, placements and copies. That is
+    // what stopped `symbol-dictionary-spun-past-its-marker` deciding 38 730
+    // symbols out of its coder's marker on a page of 37 by 56, which the page
+    // bound admits. A larger ceiling here is a larger budget per input.
     let width = match knobs & 3 {
         0 => 1,
         1 => 8,

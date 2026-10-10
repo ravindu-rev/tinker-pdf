@@ -135,6 +135,16 @@ pub struct Jbig2SymbolExtent {
     pub symbols: u64,
     /// How many symbol dictionary segments were decoded to the end.
     pub dictionaries: u32,
+    /// The work the whole decode asked for, in
+    /// [`MAX_JBIG2_WORK_MULTIPLE`]'s units — one pixel or one arithmetic
+    /// decision — the charge that was refused included.
+    ///
+    /// Not a symbol figure, and the one field here that is about every
+    /// segment rather than the dictionaries: it is in this struct because
+    /// [`decode_measured`] is the one entry point a census reads, and a census
+    /// is what that cap's corpus row is owed by. Divided by eight times the
+    /// image's packed size, it is the multiple the cap is charged in.
+    pub work: u64,
 }
 
 impl Jbig2SymbolExtent {
@@ -355,6 +365,14 @@ pub enum Jbig2Refusal {
     SymbolLargerThanPage,
     /// 6.5.8.2's `REFAGGNINST` past [`MAX_JBIG2_TEXT_INSTANCES`].
     AggregateInstanceCap,
+    /// The decode as a whole spent [`MAX_JBIG2_WORK_MULTIPLE`] times what the
+    /// caller's output ceiling holds, and stopped there.
+    ///
+    /// Recorded once, at the segment the budget ran out in; nothing after it
+    /// is decoded. Like [`Jbig2Refusal::RegionTooLarge`] it is the caller's
+    /// ceiling speaking rather than the file, which is why the two share a
+    /// warning.
+    WorkCap,
     /// 6.5.10's export-run loop ran longer than [`MAX_JBIG2_SYMBOLS`] turns.
     ExportRunGuard,
     /// 7.4.4.5's `SBNUMINSTANCES` past [`MAX_JBIG2_TEXT_INSTANCES`].
@@ -481,7 +499,7 @@ impl Jbig2Refusal {
             | Self::SymbolIndexOutOfRange
             | Self::SymbolCodeUnbuildable => Warning::Jbig2SymbolLimitHit,
 
-            Self::RegionTooLarge => Warning::Jbig2RegionTooLarge,
+            Self::RegionTooLarge | Self::WorkCap => Warning::Jbig2RegionTooLarge,
             Self::Truncated => Warning::TruncatedInput,
         }
     }
@@ -1521,15 +1539,25 @@ struct SymbolPage {
     /// [`Page`] cannot live across a call that already holds references into
     /// another.
     extent: Jbig2SymbolExtent,
+    /// What the whole decode has left to spend, carried in and out by value
+    /// for `extent`'s reason.
+    work: Work,
 }
 
 impl SymbolPage {
-    fn new(width: u32, height: u32, ceiling: usize, extent: Jbig2SymbolExtent) -> SymbolPage {
+    fn new(
+        width: u32,
+        height: u32,
+        ceiling: usize,
+        extent: Jbig2SymbolExtent,
+        work: Work,
+    ) -> SymbolPage {
         SymbolPage {
             width,
             height,
             ceiling,
             extent,
+            work,
         }
     }
 
@@ -1547,6 +1575,183 @@ impl SymbolPage {
         u64::from(width) > u64::from(self.width.max(1)) * multiple
             || u64::from(height) > u64::from(self.height.max(1)) * multiple
     }
+}
+
+/// **The most work one decode may spend, as a multiple of the pixels its
+/// caller's output ceiling holds.**
+///
+/// Every other bound in this decoder is on *one* thing — a region, a symbol, a
+/// dictionary's symbols, a region's instances — and none of them is on the
+/// decode. They multiply: a stream of `n` dictionaries may spend
+/// [`MAX_JBIG2_SYMBOL_PIXELS`] `n` times, `n` regions may each be as large as
+/// the ceiling, a text region may composite a symbol sixteen times the page's
+/// area [`MAX_JBIG2_TEXT_INSTANCES`] times, and a halftone grid as large as the
+/// ceiling may stamp a pattern as large as the ceiling in every cell. This is
+/// the one bound on the product, and it is set against the one number a caller
+/// gives about how much it wants: the ceiling every bitmap here is already
+/// refused against.
+///
+/// | | Multiples of the ceiling |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 1 |
+/// | The most any file in the corpus spends | not measured |
+/// | A 200-page bilevel scan sharing one global dictionary | 7 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **16 (estimate)** |
+///
+/// **The unit is one pixel or one decision, and it is counted rather than
+/// estimated.** A decode is charged, before the work where the work's size is
+/// known and from [`MqDecoder::take_decisions`] where it is not:
+///
+/// - every arithmetic decision a symbol dictionary or a text region makes,
+///   integers and symbol identifiers included — an adaptive coder decides tens
+///   of thousands of pixels per byte once its contexts are skewed, and none at
+///   all per byte past a marker, so its decisions are the only honest count;
+/// - every bitmap a segment produces — a generic, refinement, text or halftone
+///   region, a pattern dictionary's or a Huffman height class's collective
+///   bitmap, a halftone's grey-scale planes — at its area;
+/// - every placement a text region or a halftone region composites, at the
+///   placed bitmap's area;
+/// - every bitmap one segment copies out of another's — a dictionary's
+///   imports, a text region's symbols, a halftone's patterns, a refinement's
+///   intermediate reference — at its packed bytes, and at least one each,
+///   because a referred-to list may name the same dictionary a thousand times;
+/// - every page information segment that paints the page black, at the
+///   page's packed bytes.
+///
+/// What is **not** charged is work bounded by something that is: compositing a
+/// region onto the page, the window a refinement reads, slicing a collective
+/// bitmap, the Gray-code passes over planes, and exporting symbols each cost at
+/// most what the bitmap they read was charged when it was made.
+///
+/// **The third row is arithmetic and the published figure says so.** The page
+/// is 300 dpi A4, 8 699 840 pixels, decoded at a ceiling of exactly its own
+/// packed size — the tightest a caller can pass and still get the page, so
+/// the multiple is the largest a real caller can see. Its global dictionary
+/// costs 25.4 million — the 25 000 000 pixels [`MAX_JBIG2_SYMBOL_PIXELS`]'s own
+/// ledger estimates for this scan, and the integers that size its 20 000
+/// symbols — copying those symbols into the page's text region 4 million more,
+/// the region itself 8.7 million, its 5 000 placements of a 25 x 50 glyph 6.3
+/// million, and a generic region beside it for the figures another 8.7
+/// million: 53 million, which is 6.1 pages and rounds up to 7. The cap clears it by 2.3x, between
+/// [`MAX_JBIG2_SYMBOL_PIXELS`]'s 2.7x and [`MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`]'s 4x
+/// over theirs. The engine itself passes `MAX_DECODED_STREAM`, 128 MiB, so on
+/// the render path this is 17 179 869 184 units and binds nothing a real page
+/// does; it binds a caller that sized its ceiling to the page it expects —
+/// the `jbig2` fuzz target's 64 KiB, for one, which is now 8 388 608 units.
+///
+/// **The second row is owed rather than zero.** `crates/tinker-pdf/tests/jbig2_census.rs`
+/// reports each image's work as a multiple of its own packed page through
+/// [`Jbig2SymbolExtent::work`], and the fetched corpora were not in the
+/// container this bound was written in. The first row is every other committed
+/// seed at the 64 KiB its fuzz target decodes under: Annex H's whole file is
+/// the most, 5 962 units of 524 288, a hundredth of one rounded up.
+///
+/// **Why the ceiling and not the page.** A dictionary in `/JBIG2Globals` is
+/// decoded whole by every image that names it, and an image may be a small
+/// mask on a large page whose glyphs a shared dictionary holds for two hundred
+/// pages — so a bound on the page's area would refuse a document by the
+/// shape of its producer. The ceiling is the caller's own statement of scale,
+/// and every bitmap in this decoder already answers to it.
+///
+/// Reachable: the fuzz seed `symbol-dictionary-spun-past-its-marker` is 257
+/// bytes whose dictionary makes 51 687 155 arithmetic decisions — 51 532 206
+/// pixels across 38 730 symbols and the integers that size them, all but 945
+/// of the decisions made after its coder reached a marker and was feeding
+/// itself 1-bits — on a 37 x 56 page under a 64 KiB ceiling: **98.6 times**
+/// what that ceiling holds. One dictionary may ask for 128 times it, and a
+/// stream holds as many dictionaries as its bytes have room for, which
+/// `the_decode_stops_at_the_work_budget_however_the_work_is_split` builds in
+/// five shapes.
+pub const MAX_JBIG2_WORK_MULTIPLE: u64 = 16;
+
+/// What one decode has left to spend, in [`MAX_JBIG2_WORK_MULTIPLE`]'s units.
+///
+/// **Refusing is final.** A charge that does not fit spends everything that
+/// was left, so every charge after it refuses too and the segment loop stops:
+/// past the budget nothing more is decoded, which is the only reading of
+/// "bounded" a caller can rely on. The page keeps whatever regions were
+/// composited before it, which is ruling 2's bargain — the decode degrades to
+/// what it had drawn, and the warning says why it stopped.
+#[derive(Clone, Copy, Debug)]
+struct Work {
+    left: u64,
+    /// What the decode has asked for, the refused charge included, which is
+    /// the figure [`Jbig2SymbolExtent::work`] reports.
+    asked: u64,
+    /// Whether a charge has been refused. Not the same as nothing being left:
+    /// a decode that spends its budget exactly has refused nothing, and the
+    /// segment after it — the first that asks for anything — is the one that
+    /// says so.
+    refused: bool,
+}
+
+impl Work {
+    /// The budget for a decode under `ceiling` bytes of output.
+    fn new(ceiling: usize) -> Work {
+        Work {
+            left: (ceiling as u64)
+                .saturating_mul(8)
+                .saturating_mul(MAX_JBIG2_WORK_MULTIPLE),
+            asked: 0,
+            refused: false,
+        }
+    }
+
+    /// Spends `units` of work that is about to be done or was just done.
+    fn spend(&mut self, units: u64) -> bool {
+        self.asked = self.asked.saturating_add(units);
+        match self.left.checked_sub(units) {
+            Some(left) => {
+                self.left = left;
+                true
+            }
+            None => {
+                self.left = 0;
+                self.refused = true;
+                false
+            }
+        }
+    }
+
+    /// Whether `units` of work that a coder is about to do would still fit,
+    /// without spending them: the coder's own count spends them afterwards,
+    /// through [`Work::settle`], so a symbol is checked before it is decoded
+    /// and charged exactly once.
+    fn affords(&mut self, units: u64) -> bool {
+        if units <= self.left {
+            return true;
+        }
+        self.asked = self.asked.saturating_add(units);
+        self.left = 0;
+        self.refused = true;
+        false
+    }
+
+    /// Spends every decision `coder` has made since it was last settled.
+    fn settle(&mut self, coder: &mut MqDecoder<'_>) -> bool {
+        self.spend(coder.take_decisions())
+    }
+
+    /// Whether a charge was refused, which ends the decode.
+    fn stopped(&self) -> bool {
+        self.refused
+    }
+}
+
+/// What copying `bitmaps` out of one segment's list into another's costs:
+/// their packed bytes, and at least one for each, since an empty-looking
+/// bitmap is still an allocation.
+fn copy_cost(bitmaps: &[Bitmap]) -> u64 {
+    bitmaps
+        .iter()
+        .map(|bitmap| (bitmap.bits.len() as u64).max(1))
+        .fold(0, u64::saturating_add)
+}
+
+/// What a bitmap of these dimensions costs to produce, one unit a pixel.
+fn area(width: u32, height: u32) -> u64 {
+    u64::from(width) * u64::from(height)
 }
 
 /// **Clause 6.5.9: a symbol dictionary, Huffman-coded.**
@@ -1642,6 +1847,10 @@ fn symbol_dictionary_huffman(
     // 6.5: imported and new share one index space, as on the arithmetic road,
     // because 6.5.8.2 refines against both.
     let base = imported.len();
+    if !page.work.spend(copy_cost(imported)) {
+        note(warnings, Jbig2Refusal::WorkCap);
+        return None;
+    }
     let mut pool: Vec<Bitmap> = imported.to_vec();
     // **One set of 6.3 states for the whole dictionary.** 6.5.8.1 says a
     // dictionary carries its adaptive states from one symbol to the next, and
@@ -1708,6 +1917,13 @@ fn symbol_dictionary_huffman(
                 note(warnings, Jbig2Refusal::RegionTooLarge);
                 return None;
             };
+            // The refinement below is arithmetic even on this road, so it is
+            // charged by its own coder once it has run; this only asks whether
+            // a symbol this size could still be afforded.
+            if !page.work.affords(area(width as u32, height as u32)) {
+                note(warnings, Jbig2Refusal::WorkCap);
+                return None;
+            }
 
             if instances == 1 {
                 // 6.5.8.2.2: one instance, and the three values it needs come
@@ -1744,6 +1960,10 @@ fn symbol_dictionary_huffman(
                     (i32::try_from(dx).ok()?, i32::try_from(dy).ok()?),
                     &mut symbol,
                 );
+                if !page.work.settle(&mut coder) {
+                    note(warnings, Jbig2Refusal::WorkCap);
+                    return None;
+                }
                 bits.seek_byte(end)?;
             } else {
                 // 6.5.8.2.1: more than one instance and the symbol is a text
@@ -1802,6 +2022,7 @@ fn symbol_dictionary_huffman(
                     },
                     &mut inner,
                     ceiling,
+                    &mut page.work,
                     &mut symbol,
                     warnings,
                 );
@@ -1829,6 +2050,13 @@ fn symbol_dictionary_huffman(
             note(warnings, Jbig2Refusal::RegionTooLarge);
             return None;
         };
+        // One unit a pixel whichever way it is stored: MMR codes a blank row
+        // in a bit and still fills it. The slicing below visits each pixel
+        // once more, which is the constant factor the cap leaves uncharged.
+        if !page.work.spend(area(total as u32, height as u32)) {
+            note(warnings, Jbig2Refusal::WorkCap);
+            return None;
+        }
         if bmsize == 0 {
             let stride = (total as usize).div_ceil(8);
             let needed = stride.checked_mul(height as usize)?;
@@ -2035,11 +2263,23 @@ fn symbol_dictionary(
     // dictionary decoded, which is also the order 6.5.10 exports in — and it
     // is the array 6.5.8.2 refines against, which is why it has to be one.
     let base = imported.len();
+    if !page.work.spend(copy_cost(imported)) {
+        note(warnings, Jbig2Refusal::WorkCap);
+        return None;
+    }
     let mut pool: Vec<Bitmap> = imported.to_vec();
     let mut spent: u64 = 0;
     // 6.5.5: symbols arrive in height classes, each taller than the last.
     let mut height: i64 = 0;
     while ((pool.len() - base) as u32) < num_new {
+        // **Charged a class at a time as well as a symbol at a time**, because
+        // a class may hold no symbols: a height delta and an immediate OOB
+        // width are a few decisions that place nothing, and nothing in 6.5.5
+        // stops a coder that has settled into that pair from repeating it.
+        if !page.work.settle(&mut coder) {
+            note(warnings, Jbig2Refusal::WorkCap);
+            return None;
+        }
         let delta = decode_int(&mut coder, &mut cx.iadh)?;
         height = height.checked_add(i64::from(delta))?;
         if height <= 0 || height > i64::from(u32::MAX) {
@@ -2077,6 +2317,20 @@ fn symbol_dictionary(
             }
             if spent > MAX_JBIG2_SYMBOL_PIXELS {
                 note(warnings, Jbig2Refusal::SymbolPixelCap);
+                return None;
+            }
+            // **The decode's budget, after the dictionary's own and before the
+            // symbol is decoded.** What the coder has decided since the last
+            // symbol is spent; this symbol's pixels are only asked about,
+            // because the coder will count them itself when it decides them.
+            // This is what stops a dictionary whose coder ran past its marker
+            // and is deciding symbols out of the 1-bits E.3.4 feeds it: 257
+            // bytes asked for 38 730 of them, 51 532 206 pixels, on a page of
+            // 37 by 56, and every cap before this one let them through.
+            if !page.work.settle(&mut coder)
+                || !page.work.affords(area(width as u32, height as u32))
+            {
+                note(warnings, Jbig2Refusal::WorkCap);
                 return None;
             }
             let Some(mut symbol) = Bitmap::new(width as u32, height as u32, ceiling) else {
@@ -2164,6 +2418,7 @@ fn symbol_dictionary(
                         },
                         &mut None,
                         ceiling,
+                        &mut page.work,
                         &mut symbol,
                         warnings,
                     )?;
@@ -2216,6 +2471,12 @@ fn symbol_dictionary(
         }
     }
 
+    // The last symbol's decisions and the export runs', which no symbol after
+    // them settled.
+    if !page.work.settle(&mut coder) {
+        note(warnings, Jbig2Refusal::WorkCap);
+        return None;
+    }
     if exported.len() as u32 != num_ex {
         // The count the header promised is what a text region will index
         // against, so a disagreement is not a smaller dictionary.
@@ -2761,6 +3022,7 @@ fn text_region_procedure(
     arith: &mut Arith<'_, '_>,
     huffman: &mut TextHuffman<'_>,
     ceiling: usize,
+    work: &mut Work,
     region: &mut Bitmap,
     warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<()> {
@@ -2800,6 +3062,18 @@ fn text_region_procedure(
         let mut first = true;
 
         loop {
+            // **An instance is charged before it is placed**: what the coder
+            // decided to reach it — the strip's coordinates, the gap, the
+            // identifier, a refinement's pixels — and then the placement
+            // itself, below. `SBNUMINSTANCES` is checked against
+            // [`MAX_JBIG2_TEXT_INSTANCES`] up front, but four million
+            // placements of a symbol sixteen times the page's area is work no
+            // count bounds; on the Huffman road the coder is an empty one and
+            // this spends nothing.
+            if !work.settle(arith.coder) {
+                note(warnings, Jbig2Refusal::WorkCap);
+                return None;
+            }
             if !first {
                 // OOB ends the strip. Anything else is the gap to the next
                 // symbol, measured from the far edge of the last one.
@@ -2907,6 +3181,10 @@ fn text_region_procedure(
                         note(warnings, Jbig2Refusal::RegionTooLarge);
                         return None;
                     };
+                    if !work.affords(area(width as u32, height as u32)) {
+                        note(warnings, Jbig2Refusal::WorkCap);
+                        return None;
+                    }
                     let dx = refinement_offset(width, symbol.width, rdx);
                     let dy = refinement_offset(height, symbol.height, rdy);
                     let offset = (i32::try_from(dx).ok()?, i32::try_from(dy).ok()?);
@@ -2930,6 +3208,10 @@ fn text_region_procedure(
                                 offset,
                                 &mut target,
                             );
+                            if !work.settle(&mut sub) {
+                                note(warnings, Jbig2Refusal::WorkCap);
+                                return None;
+                            }
                             if let Some((_, _, bits)) = huffman.as_mut() {
                                 bits.seek_byte(end)?;
                             }
@@ -2978,6 +3260,12 @@ fn text_region_procedure(
                 };
                 (cur_s, y, width)
             };
+            // The placed bitmap's whole area, which is what the clipped loop in
+            // `composite_signed` may visit, not the part that lands.
+            if !work.spend(area(symbol.width, symbol.height)) {
+                note(warnings, Jbig2Refusal::WorkCap);
+                return None;
+            }
             composite_signed(region, symbol, x, y, params.comb_op);
 
             cur_s = cur_s.checked_add(advance - 1)?;
@@ -2993,6 +3281,7 @@ fn text_region(
     symbols: &[Bitmap],
     tables: &[&HuffTable],
     ceiling: usize,
+    work: &mut Work,
     warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<(RegionInfo, Bitmap)> {
     let mut custom = CustomTables::new(tables);
@@ -3064,6 +3353,10 @@ fn text_region(
         note(warnings, Jbig2Refusal::RegionTooLarge);
         return None;
     };
+    if !work.spend(area(info.width, info.height)) {
+        note(warnings, Jbig2Refusal::WorkCap);
+        return None;
+    }
     if default_pixel {
         region.fill_black();
     }
@@ -3108,9 +3401,15 @@ fn text_region(
         },
         &mut huffman,
         ceiling,
+        work,
         &mut region,
         warnings,
     )?;
+    // The decisions after the last placement, which no placement settled.
+    if !work.settle(&mut coder) {
+        note(warnings, Jbig2Refusal::WorkCap);
+        return None;
+    }
 
     Some((info, region))
 }
@@ -3186,6 +3485,7 @@ fn composite_signed(into: &mut Bitmap, source: &Bitmap, x: i64, y: i64, op: u8) 
 fn pattern_dictionary(
     segment: &Segment<'_>,
     ceiling: usize,
+    work: &mut Work,
     warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<Vec<Bitmap>> {
     let mut reader = Reader::new(segment.data);
@@ -3216,6 +3516,10 @@ fn pattern_dictionary(
         note(warnings, Jbig2Refusal::RegionTooLarge);
         return None;
     };
+    if !work.spend(area(collective_width, height)) {
+        note(warnings, Jbig2Refusal::WorkCap);
+        return None;
+    }
     if mmr {
         if !decode_mmr(reader.rest(), &mut collective, warnings) {
             note(warnings, Jbig2Refusal::CollectiveBitmapNotMmr);
@@ -3394,6 +3698,7 @@ fn halftone_region(
     segment: &Segment<'_>,
     patterns: &[Bitmap],
     ceiling: usize,
+    work: &mut Work,
     warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<(RegionInfo, Bitmap)> {
     let mut reader = Reader::new(segment.data);
@@ -3441,6 +3746,16 @@ fn halftone_region(
         note(warnings, Jbig2Refusal::RegionTooLarge);
         return None;
     }
+    // The region, and then Annex C's planes: one generic decode of the grid
+    // each, and one walk of the grid when there is no plane to decode at all.
+    // The planes' Gray-code and weighting passes visit the same cells again
+    // and are the constant factor the cap leaves uncharged.
+    let planes = bits_for(patterns.len());
+    let grid = area(grid_width, grid_height).saturating_mul(u64::from(planes.max(1)));
+    if !work.spend(area(info.width, info.height)) || !work.spend(grid) {
+        note(warnings, Jbig2Refusal::WorkCap);
+        return None;
+    }
 
     // 6.6.5.2's placement, shared by the skip computation and the drawing so
     // the two cannot disagree about where a cell lands.
@@ -3474,8 +3789,7 @@ fn halftone_region(
         None
     };
 
-    // 6.6.5: as many planes as the pattern count needs.
-    let planes = bits_for(patterns.len());
+    // 6.6.5: as many planes as the pattern count needs, counted above.
     let values = grey_scale_image(
         reader.rest(),
         GreyCoding {
@@ -3504,6 +3818,13 @@ fn halftone_region(
             // The last one is the standard's own answer for that.
             let pattern = patterns.get(value).unwrap_or(patterns.last()?);
             let (x, y) = place(m, n);
+            // A grid as large as the ceiling stamping a pattern as large as
+            // the ceiling in every cell is the product no other bound here
+            // sees, so every stamp is charged its pattern's area.
+            if !work.spend(area(pattern.width, pattern.height)) {
+                note(warnings, Jbig2Refusal::WorkCap);
+                return None;
+            }
             composite_signed(&mut region, pattern, x, y, comb_op);
         }
     }
@@ -4150,6 +4471,7 @@ fn decode_generic_into(
 fn generic_region(
     segment: &Segment<'_>,
     ceiling: usize,
+    work: &mut Work,
     warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<(RegionInfo, Bitmap)> {
     let mut reader = Reader::new(segment.data);
@@ -4199,6 +4521,12 @@ fn generic_region(
         note(warnings, Jbig2Refusal::RegionTooLarge);
         return None;
     };
+    // One decision a pixel on the arithmetic road, and on the MMR road a
+    // region's rows cost what its width does whether or not they change.
+    if !work.spend(area(info.width, info.height)) {
+        note(warnings, Jbig2Refusal::WorkCap);
+        return None;
+    }
     if mmr {
         if !decode_mmr(reader.rest(), &mut bitmap, warnings) {
             // Not one row came out, so this is not T.6 data and there is no
@@ -4343,6 +4671,7 @@ pub fn decode_measured(
         number: None,
         regions: 0,
         extent: Jbig2SymbolExtent::default(),
+        work: Work::new(max_output),
     };
 
     // D.3: the globals stream's segments are read first and are visible to
@@ -4351,6 +4680,12 @@ pub fn decode_measured(
     let globals = segments(params.globals, warnings);
     let own = segments(data, warnings);
     for segment in globals.iter().chain(own.iter()) {
+        if page.work.stopped() {
+            // [`MAX_JBIG2_WORK_MULTIPLE`]: the segment that ran the budget out
+            // recorded why, and nothing after it is decoded. The page keeps
+            // what was composited before it.
+            break;
+        }
         if declares_content(segment.kind) {
             page.declared_content = true;
         }
@@ -4394,6 +4729,7 @@ pub fn decode_measured(
             _ => {}
         }
     }
+    page.extent.work = page.work.asked;
 
     if page.regions == 0 {
         // The refusal. Not polish, and not a fallback: see the module note.
@@ -4459,6 +4795,7 @@ fn refinement_region(
     segment: &Segment<'_>,
     reference: &Bitmap,
     ceiling: usize,
+    work: &mut Work,
     warnings: &mut Vec<Jbig2Refusal>,
 ) -> Option<(RegionInfo, Bitmap)> {
     let mut reader = Reader::new(segment.data);
@@ -4489,6 +4826,10 @@ fn refinement_region(
         note(warnings, Jbig2Refusal::RegionTooLarge);
         return None;
     };
+    if !work.spend(area(info.width, info.height)) {
+        note(warnings, Jbig2Refusal::WorkCap);
+        return None;
+    }
     let mut coder = MqDecoder::new(reader.rest());
     let mut contexts = MqContexts::new(1 << template.bits());
     // 6.3.5.3: the region and its reference are the same size and in the same
@@ -4581,6 +4922,8 @@ struct Page {
     /// `max` per symbol, and a measurement that only the measuring entry point
     /// collects is a measurement of a different decode.
     extent: Jbig2SymbolExtent,
+    /// What the decode has left to spend ([`MAX_JBIG2_WORK_MULTIPLE`]).
+    work: Work,
 }
 
 impl Page {
@@ -4616,6 +4959,12 @@ impl Page {
         // black page is coded as black-by-default with white regions on it,
         // and ignoring this bit renders it as its own negative.
         if flags & 0x04 != 0 {
+            // Charged, because nothing stops a stream repeating this segment
+            // and the page is as large as the ceiling allows.
+            if !self.work.spend((self.bitmap.bits.len() as u64).max(1)) {
+                note(warnings, Jbig2Refusal::WorkCap);
+                return;
+            }
             self.bitmap.bits.fill(0xFF);
         }
     }
@@ -4633,7 +4982,8 @@ impl Page {
         ceiling: usize,
         warnings: &mut Vec<Jbig2Refusal>,
     ) {
-        let Some((info, region)) = generic_region(segment, ceiling, warnings) else {
+        let Some((info, region)) = generic_region(segment, ceiling, &mut self.work, warnings)
+        else {
             return;
         };
         self.bitmap.composite(&region, info.x, info.y, info.op);
@@ -4663,8 +5013,16 @@ impl Page {
         let referred = segment
             .referred
             .iter()
-            .find_map(|number| self.intermediate.get(number))
-            .cloned();
+            .find_map(|number| self.intermediate.get(number));
+        // A copy, and charged as one: any number of refinements may refer to
+        // the same intermediate region.
+        if let Some(bitmap) = referred {
+            if !self.work.spend(copy_cost(std::slice::from_ref(bitmap))) {
+                note(warnings, Jbig2Refusal::WorkCap);
+                return;
+            }
+        }
+        let referred = referred.cloned();
         let reference = match referred {
             Some(bitmap) => bitmap,
             None => {
@@ -4678,7 +5036,9 @@ impl Page {
                 window
             }
         };
-        let Some((info, region)) = refinement_region(segment, &reference, ceiling, warnings) else {
+        let Some((info, region)) =
+            refinement_region(segment, &reference, ceiling, &mut self.work, warnings)
+        else {
             note(warnings, Jbig2Refusal::RefinementRegionRefused);
             return;
         };
@@ -4699,7 +5059,7 @@ impl Page {
         ceiling: usize,
         warnings: &mut Vec<Jbig2Refusal>,
     ) {
-        let Some((_, region)) = generic_region(segment, ceiling, warnings) else {
+        let Some((_, region)) = generic_region(segment, ceiling, &mut self.work, warnings) else {
             note(warnings, Jbig2Refusal::GenericRegionRefused);
             return;
         };
@@ -4726,6 +5086,14 @@ impl Page {
         let mut imported = Vec::new();
         for number in &segment.referred {
             if let Some(exports) = self.symbols.get(number) {
+                // Per reference rather than per dictionary: a referred-to list
+                // may name one dictionary as often as its header has room for.
+                if !self.work.spend(copy_cost(exports)) {
+                    note(warnings, Jbig2Refusal::WorkCap);
+                    self.refused.insert(segment.number);
+                    note(warnings, Jbig2Refusal::SymbolDictionaryRefused);
+                    return;
+                }
                 imported.extend(exports.iter().cloned());
             }
         }
@@ -4750,8 +5118,13 @@ impl Page {
         // Copied out and put back rather than borrowed in place: `tables` holds
         // references into `self.tables` for the length of the call, so nothing
         // else about `self` can be borrowed mutably across it.
-        let mut geometry =
-            SymbolPage::new(self.bitmap.width, self.bitmap.height, ceiling, self.extent);
+        let mut geometry = SymbolPage::new(
+            self.bitmap.width,
+            self.bitmap.height,
+            ceiling,
+            self.extent,
+            self.work,
+        );
         let decoded = symbol_dictionary(
             segment,
             &imported,
@@ -4762,6 +5135,7 @@ impl Page {
             warnings,
         );
         self.extent = geometry.extent;
+        self.work = geometry.work;
         match decoded {
             Some(exported) => {
                 self.extent.dictionaries += 1;
@@ -4816,12 +5190,19 @@ impl Page {
             // ordinary — a text region refers to its custom tables the same
             // way — and contributes nothing to the numbering.
             if let Some(exports) = self.symbols.get(number) {
+                if !self.work.spend(copy_cost(exports)) {
+                    note(warnings, Jbig2Refusal::WorkCap);
+                    note(warnings, Jbig2Refusal::TextRegionRefused);
+                    return;
+                }
                 symbols.extend(exports.iter().cloned());
             }
         }
         let tables = self.referred_tables(segment);
-        let Some((info, region)) = text_region(segment, &symbols, &tables, ceiling, warnings)
-        else {
+        let mut work = self.work;
+        let drawn = text_region(segment, &symbols, &tables, ceiling, &mut work, warnings);
+        self.work = work;
+        let Some((info, region)) = drawn else {
             note(warnings, Jbig2Refusal::TextRegionRefused);
             return;
         };
@@ -4863,7 +5244,7 @@ impl Page {
         ceiling: usize,
         warnings: &mut Vec<Jbig2Refusal>,
     ) {
-        match pattern_dictionary(segment, ceiling, warnings) {
+        match pattern_dictionary(segment, ceiling, &mut self.work, warnings) {
             Some(patterns) => {
                 self.patterns.insert(segment.number, patterns);
             }
@@ -4898,10 +5279,17 @@ impl Page {
         let mut patterns = Vec::new();
         for number in &segment.referred {
             if let Some(declared) = self.patterns.get(number) {
+                if !self.work.spend(copy_cost(declared)) {
+                    note(warnings, Jbig2Refusal::WorkCap);
+                    note(warnings, Jbig2Refusal::HalftoneRegionRefused);
+                    return;
+                }
                 patterns.extend(declared.iter().cloned());
             }
         }
-        let Some((info, region)) = halftone_region(segment, &patterns, ceiling, warnings) else {
+        let Some((info, region)) =
+            halftone_region(segment, &patterns, ceiling, &mut self.work, warnings)
+        else {
             note(warnings, Jbig2Refusal::HalftoneRegionRefused);
             return;
         };
@@ -4946,7 +5334,13 @@ mod tests {
     /// test that fails does so for the reason it was written for. The tests
     /// that *are* about the page-relative bound name their own page.
     fn test_page(ceiling: usize) -> SymbolPage {
-        SymbolPage::new(1 << 16, 1 << 16, ceiling, Jbig2SymbolExtent::default())
+        SymbolPage::new(
+            1 << 16,
+            1 << 16,
+            ceiling,
+            Jbig2SymbolExtent::default(),
+            Work::new(ceiling),
+        )
     }
 
     /// **B.3's code assignment is canonical**, checked against a table small
@@ -5354,8 +5748,8 @@ mod tests {
                 )
             })
             .expect("the page carries a generic region");
-        let (_, bitmap) =
-            generic_region(segment, 1 << 20, &mut warnings).expect("the region decodes");
+        let (_, bitmap) = generic_region(segment, 1 << 20, &mut Work::new(1 << 20), &mut warnings)
+            .expect("the region decodes");
         picture(&bitmap.bits, bitmap.width, bitmap.height)
     }
 
@@ -6597,7 +6991,13 @@ mod tests {
                 unknown_length: false,
             };
             let mut warnings = Vec::new();
-            let mut geometry = SymbolPage::new(page, page, 1 << 20, Jbig2SymbolExtent::default());
+            let mut geometry = SymbolPage::new(
+                page,
+                page,
+                1 << 20,
+                Jbig2SymbolExtent::default(),
+                Work::new(1 << 20),
+            );
             let out = symbol_dictionary(
                 &segment,
                 &[],
@@ -6723,8 +7123,15 @@ mod tests {
             unknown_length: false,
         };
         let mut warnings = Vec::new();
-        let (info, bitmap) = text_region(&segment, &[], &[], 1 << 20, &mut warnings)
-            .unwrap_or_else(|| panic!("a region placing nothing refused: {warnings:?}"));
+        let (info, bitmap) = text_region(
+            &segment,
+            &[],
+            &[],
+            1 << 20,
+            &mut Work::new(1 << 20),
+            &mut warnings,
+        )
+        .unwrap_or_else(|| panic!("a region placing nothing refused: {warnings:?}"));
         assert_eq!((info.width, info.height), (8, 8));
         assert!(
             bitmap.bits.iter().all(|byte| *byte == 0),
@@ -6742,7 +7149,15 @@ mod tests {
             unknown_length: false,
         };
         let mut warnings = Vec::new();
-        assert!(text_region(&segment, &[], &[], 1 << 20, &mut warnings).is_none());
+        assert!(text_region(
+            &segment,
+            &[],
+            &[],
+            1 << 20,
+            &mut Work::new(1 << 20),
+            &mut warnings
+        )
+        .is_none());
         assert_eq!(warnings, vec![Jbig2Refusal::TextRegionWithoutSymbols]);
     }
 
@@ -6788,7 +7203,15 @@ mod tests {
             };
             let mut warnings = Vec::new();
             assert!(
-                text_region(&segment, &[], &[], 1 << 20, &mut warnings).is_none(),
+                text_region(
+                    &segment,
+                    &[],
+                    &[],
+                    1 << 20,
+                    &mut Work::new(1 << 20),
+                    &mut warnings
+                )
+                .is_none(),
                 "{instances} was not refused"
             );
             assert!(
@@ -6811,12 +7234,206 @@ mod tests {
             unknown_length: false,
         };
         let mut warnings = Vec::new();
-        assert!(text_region(&segment, &[], &[], 1 << 20, &mut warnings).is_none());
+        assert!(text_region(
+            &segment,
+            &[],
+            &[],
+            1 << 20,
+            &mut Work::new(1 << 20),
+            &mut warnings
+        )
+        .is_none());
         assert_eq!(
             warnings,
             vec![Jbig2Refusal::TextRegionWithoutSymbols],
             "exactly at the cap is admitted"
         );
+    }
+
+    /// [`header`], with 7.2.4's *long* referred-to form, so one segment can
+    /// name another as many times as a test needs.
+    fn header_referring_long(
+        number: u32,
+        kind: u8,
+        page: u8,
+        refers: &[u32],
+        data: &[u8],
+    ) -> Vec<u8> {
+        assert!(number <= 256, "one-byte referred-to numbers only");
+        let mut out = Vec::new();
+        out.extend_from_slice(&number.to_be_bytes());
+        out.push(kind & 0x3F);
+        // Three set bits and a 29-bit count, then a retain bit for this
+        // segment and each it refers to, rounded up to bytes.
+        out.extend_from_slice(&((7u32 << 29) | refers.len() as u32).to_be_bytes());
+        out.extend(std::iter::repeat_n(0u8, (refers.len() + 1).div_ceil(8)));
+        out.extend(refers.iter().map(|&referred| referred as u8));
+        out.push(page);
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(data);
+        out
+    }
+
+    /// **[`MAX_JBIG2_WORK_MULTIPLE`] fires, whichever way the work is split.**
+    ///
+    /// The test `crates/tinker-pdf/tests/bounds_ledger.rs` names for the cap.
+    /// Each shape below is work that every *other* bound in this decoder
+    /// admits, because each of them bounds one item and the shape multiplies
+    /// items: forty dictionaries each well inside [`MAX_JBIG2_SYMBOL_PIXELS`],
+    /// forty regions each inside the ceiling, two thousand placements inside
+    /// [`MAX_JBIG2_TEXT_INSTANCES`], one dictionary referred to three hundred
+    /// times, and four thousand halftone cells each stamping a pattern. Under
+    /// a ceiling of 256 or 512 bytes the budget is 32 768 or 65 536 units, and
+    /// every shape asks for several times that.
+    ///
+    /// **Proved by cause and by count, not by a clock**: the refusal is named,
+    /// and what the decode spent is at most the budget and one item over it —
+    /// the item whose charge was refused. Without the budget every shape
+    /// decodes to the end and the first assertion fails; each is small enough
+    /// that it does so in milliseconds rather than hanging.
+    #[test]
+    fn the_decode_stops_at_the_work_budget_however_the_work_is_split() {
+        let symbol = [
+            "#.#.#.#.", ".#.#.#.#", "#.#.#.#.", ".#.#.#.#", "#.#.#.#.", ".#.#.#.#", "#.#.#.#.",
+            ".#.#.#.#",
+        ];
+        let run = |stream: &[u8], size: (u32, u32), ceiling: usize| {
+            let params = Jbig2Params {
+                globals: &[],
+                width: size.0,
+                height: size.1,
+            };
+            let mut refusals = Vec::new();
+            let (out, extent) = decode_measured(stream, &params, ceiling, &mut refusals);
+            (out, extent, refusals)
+        };
+        let budget = |ceiling: usize| ceiling as u64 * 8 * MAX_JBIG2_WORK_MULTIPLE;
+        // **Stopped at the budget, and not before it**: the refusal is named,
+        // and what the decode asked for is past the budget by no more than the
+        // one charge that was refused. The lower bound is what holds the
+        // budget's *size* — a budget eight times too small refuses every shape
+        // here too, and only this says it refused them early.
+        let at_budget = |shape: &str,
+                         extent: &Jbig2SymbolExtent,
+                         refusals: &[Jbig2Refusal],
+                         ceiling: usize,
+                         item: u64| {
+            assert!(
+                refusals.contains(&Jbig2Refusal::WorkCap),
+                "{shape}: spent {} units under a budget of {} and was not stopped: {refusals:?}",
+                extent.work,
+                budget(ceiling)
+            );
+            assert!(
+                extent.work > budget(ceiling) && extent.work <= budget(ceiling) + item,
+                "{shape}: stopped after asking for {} units, and the budget is {}",
+                extent.work,
+                budget(ceiling)
+            );
+        };
+
+        // Forty dictionaries of sixteen 8 x 8 symbols: 1 024 pixels each.
+        let class: Vec<&[&str]> = vec![&symbol[..]; 16];
+        let dictionary = symbol_dictionary_data(&[&class[..]], 0);
+        let mut stream = header(0, kind::PAGE_INFORMATION, 1, &page_info(16, 16, 0));
+        for number in 1..=40 {
+            stream.extend(header(number, kind::SYMBOL_DICTIONARY, 1, &dictionary));
+        }
+        let (_, extent, refusals) = run(&stream, (16, 16), 256);
+        at_budget("forty dictionaries", &extent, &refusals, 256, 256);
+        assert!(extent.dictionaries < 40);
+
+        // Forty generic regions, each exactly the ceiling: 2 048 pixels each.
+        let rows = vec!["#".repeat(64); 32];
+        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+        let region = generic_region_data(&rows, 0, false, NOMINAL_AT[0]);
+        let mut stream = header(0, kind::PAGE_INFORMATION, 1, &page_info(64, 32, 0));
+        for number in 1..=40 {
+            stream.extend(header(number, kind::IMMEDIATE_GENERIC_REGION, 1, &region));
+        }
+        let (out, extent, refusals) = run(&stream, (64, 32), 256);
+        at_budget("forty regions", &extent, &refusals, 256, 2_048);
+        // Ruling 2: the regions composited before the budget ran out are the
+        // page, and a page is what comes back.
+        assert!(out.is_ok(), "the decode refused rather than degrading");
+
+        // Two thousand placements of one 8 x 8 symbol, every one on the last.
+        let dictionary = symbol_dictionary_data(&[&[&symbol[..]]], 0);
+        let mut placements = vec![Instance {
+            id: 0,
+            gap: None,
+            t: 0,
+        }];
+        placements.extend((1..2_000).map(|_| Instance {
+            id: 0,
+            gap: Some(-7),
+            t: 0,
+        }));
+        let text = text_region_segment(64, 32, corner::TOPLEFT, 1, 1, &[0], &[(0, placements)]);
+        let mut stream = header(0, kind::PAGE_INFORMATION, 1, &page_info(64, 32, 0));
+        stream.extend(header(1, kind::SYMBOL_DICTIONARY, 1, &dictionary));
+        stream.extend(header_referring(
+            2,
+            kind::IMMEDIATE_TEXT_REGION,
+            1,
+            &[1],
+            &text,
+        ));
+        let (_, extent, refusals) = run(&stream, (64, 32), 256);
+        at_budget("two thousand placements", &extent, &refusals, 256, 128);
+
+        // One dictionary of sixteen symbols, referred to three hundred times
+        // by a region that places nothing: every reference is a copy.
+        let dictionary = symbol_dictionary_data(&[&class[..]], 0);
+        let empty = text_region_segment(8, 8, corner::TOPLEFT, 1, 4_800, &[], &[]);
+        let mut stream = header(0, kind::PAGE_INFORMATION, 1, &page_info(16, 16, 0));
+        stream.extend(header(1, kind::SYMBOL_DICTIONARY, 1, &dictionary));
+        stream.extend(header_referring_long(
+            2,
+            kind::IMMEDIATE_TEXT_REGION,
+            1,
+            &[1; 300],
+            &empty,
+        ));
+        let (_, extent, refusals) = run(&stream, (16, 16), 256);
+        at_budget("three hundred references", &extent, &refusals, 256, 16 * 8);
+
+        // A 64 x 64 halftone grid stamping one 16 x 16 pattern in every cell,
+        // all of them at the origin: 4 096 stamps of 256 pixels.
+        let mut patterns = vec![0u8, 16, 16];
+        patterns.extend_from_slice(&0u32.to_be_bytes()); // GRAYMAX: one pattern
+        let mut halftone = Vec::new();
+        for field in [64u32, 64, 0, 0] {
+            halftone.extend_from_slice(&field.to_be_bytes()); // the region's box
+        }
+        halftone.push(0); // external combination operator
+        halftone.push(0); // arithmetic, template 0, no skip, OR, white
+        for field in [64u32, 64, 0, 0] {
+            halftone.extend_from_slice(&field.to_be_bytes()); // HGW, HGH, HGX, HGY
+        }
+        halftone.extend_from_slice(&[0, 0, 0, 0]); // HRX, HRY: every cell at once
+        let mut stream = header(0, kind::PAGE_INFORMATION, 1, &page_info(64, 64, 0));
+        stream.extend(header(1, kind::PATTERN_DICTIONARY, 1, &patterns));
+        stream.extend(header_referring(
+            2,
+            kind::IMMEDIATE_HALFTONE_REGION,
+            1,
+            &[1],
+            &halftone,
+        ));
+        let (_, extent, refusals) = run(&stream, (64, 64), 512);
+        at_budget("four thousand stamps", &extent, &refusals, 512, 256);
+
+        // **And the other direction**: what the format is for still decodes at
+        // the tightest ceiling a caller can pass, exactly its own packed page.
+        // Annex H's whole file — a dictionary, a text region and a generic
+        // region on a page of 64 by 56 — under 448 bytes.
+        let (out, extent, refusals) = run(&ANNEX_H, (64, 56), 8 * 56);
+        assert!(
+            out.is_ok() && !refusals.contains(&Jbig2Refusal::WorkCap),
+            "Annex H's first page was refused at its own page's ceiling: {refusals:?}"
+        );
+        assert!(extent.work < budget(8 * 56), "{}", extent.work);
     }
 
     /// One generic region's segment data, from the promoted encoder.
@@ -7269,6 +7886,7 @@ mod tests {
             number: None,
             regions: 0,
             extent: Jbig2SymbolExtent::default(),
+            work: Work::new(64),
         };
         let data = page_info(8, 8, 0x04);
         let segment = Segment {
@@ -7302,6 +7920,7 @@ mod tests {
             number: None,
             regions: 0,
             extent: Jbig2SymbolExtent::default(),
+            work: Work::new(64),
         };
         let mut warnings = Vec::new();
         page.begin(
@@ -8047,7 +8666,8 @@ mod tests {
             unknown_length: false,
         };
         let (info, bitmap) =
-            generic_region(&segment, 1 << 20, &mut warnings).expect("the region decodes");
+            generic_region(&segment, 1 << 20, &mut Work::new(1 << 20), &mut warnings)
+                .expect("the region decodes");
         assert_eq!(
             (info.width, info.height, info.x, info.y, info.op),
             (40, 24, 5, 7, 4)
@@ -8945,7 +9565,15 @@ mod tests {
             };
             let mut warnings = Vec::new();
             assert!(
-                text_region(&segment, &symbols, &[], 1 << 20, &mut warnings).is_none(),
+                text_region(
+                    &segment,
+                    &symbols,
+                    &[],
+                    1 << 20,
+                    &mut Work::new(1 << 20),
+                    &mut warnings,
+                )
+                .is_none(),
                 "the region decoded where it should have refused"
             );
             warnings

@@ -49,7 +49,9 @@ use std::path::{Path, PathBuf};
 
 use tinker_pdf::Document;
 use tinker_pdf_cos::{ObjRef, Object, XrefEntry};
-use tinker_pdf_filters::{jbig2_decode_measured, Jbig2Params, MAX_JBIG2_SYMBOL_PAGE_MULTIPLE};
+use tinker_pdf_filters::{
+    jbig2_decode_measured, Jbig2Params, MAX_JBIG2_SYMBOL_PAGE_MULTIPLE, MAX_JBIG2_WORK_MULTIPLE,
+};
 
 /// The ceiling the measurement below decodes under, matching
 /// `jbig2_attribution.rs` so the two censuses are commensurable.
@@ -216,6 +218,16 @@ struct Tally {
     /// another, which is a report that cannot be checked.
     tightest_symbol: (u32, u32),
     tightest_page: (u32, u32),
+    /// **The figure `MAX_JBIG2_WORK_MULTIPLE` is owed**: the most work any one
+    /// image's decode spends — `Jbig2SymbolExtent::work`, one pixel or one
+    /// arithmetic decision — in thousandths of the pixels its own packed page
+    /// holds, which is the cap's currency at the tightest ceiling a caller can
+    /// pass. A global dictionary is decoded whole for every image that names
+    /// it, so this is where a shared dictionary on a small image shows.
+    worst_work_permille: u64,
+    /// The work and the page that produced it, so the figure names its image.
+    worst_work: u64,
+    worst_work_page: (u32, u32),
     /// Symbols decoded, and dictionaries decoded to the end.
     symbols_decoded: u64,
     dictionaries_decoded: u32,
@@ -276,6 +288,11 @@ impl Tally {
             self.tightest_permille = other.tightest_permille;
             self.tightest_symbol = other.tightest_symbol;
             self.tightest_page = other.tightest_page;
+        }
+        if other.worst_work_permille > self.worst_work_permille {
+            self.worst_work_permille = other.worst_work_permille;
+            self.worst_work = other.worst_work;
+            self.worst_work_page = other.worst_work_page;
         }
         self.symbols_decoded += other.symbols_decoded;
         self.dictionaries_decoded += other.dictionaries_decoded;
@@ -668,6 +685,17 @@ fn measure(images: &[Image], tally: &mut Tally) {
             tally.tightest_symbol = (extent.widest, extent.tallest);
             tally.tightest_page = (page_w, page_h);
         }
+
+        // The work, against the pixels the image's own packed page holds:
+        // whole bytes a row, eight pixels a byte, as the decoder's ceiling
+        // counts them.
+        let page_pixels = u64::from(page_w.div_ceil(8)) * 8 * u64::from(page_h);
+        let work_permille = extent.work.saturating_mul(1_000) / page_pixels;
+        if work_permille > tally.worst_work_permille {
+            tally.worst_work_permille = work_permille;
+            tally.worst_work = extent.work;
+            tally.worst_work_page = (page_w, page_h);
+        }
     }
 }
 
@@ -944,6 +972,22 @@ fn census_of_the_corpus_jbig2() {
     println!(
         "the tightest fit, unrounded: {} of the page it is drawn onto",
         permille_of(total.tightest_permille)
+    );
+    println!();
+    println!("--- the most work one decode spends, against its own page ---");
+    // Printed and not asserted. No caller in this repository passes a ceiling
+    // this tight — the engine passes `MAX_DECODED_STREAM`, and this census 4 MiB
+    // — so a corpus image past `MAX_JBIG2_WORK_MULTIPLE` here is the ledger's
+    // yardstick to raise, not a document anything refuses. It is the figure
+    // that row is owed.
+    println!(
+        "{} units on a page of {} x {}: {} pages' worth, against a cap of {}",
+        total.worst_work,
+        total.worst_work_page.0,
+        total.worst_work_page.1,
+        u32::try_from(total.worst_work_permille)
+            .map_or_else(|_| "more than 4 million".to_owned(), permille_of),
+        MAX_JBIG2_WORK_MULTIPLE,
     );
     // **The measurement is load-bearing, so it is asserted and not only
     // printed.** Two directions, and the census is worthless without both.

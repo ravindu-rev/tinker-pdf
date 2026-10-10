@@ -81,7 +81,7 @@ pub use jbig2::{
     generic_region_segment as jbig2_generic_region_segment, Jbig2EncodeError, Jbig2GenericSource,
     Jbig2Params, Jbig2Refusal, Jbig2SymbolExtent, MAX_JBIG2_SYMBOLS,
     MAX_JBIG2_SYMBOL_PAGE_MULTIPLE, MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TABLE_LINES,
-    MAX_JBIG2_TEXT_INSTANCES,
+    MAX_JBIG2_TEXT_INSTANCES, MAX_JBIG2_WORK_MULTIPLE,
 };
 pub use jpeg::{
     decode as jpeg_decode, jpeg_encode, JpegColor, JpegEncodeError, JpegError, JpegImage,
@@ -228,7 +228,9 @@ pub enum Warning {
     /// since the refusal itself is an error and carries no detail.
     Jbig2SegmentSkipped,
     /// JBIG2: a region or page declared more pixels than the output ceiling
-    /// allows, so it was refused rather than allocated.
+    /// allows, so it was refused rather than allocated — or the decode as a
+    /// whole spent `MAX_JBIG2_WORK_MULTIPLE` times what that ceiling holds,
+    /// and stopped.
     Jbig2RegionTooLarge,
     /// JBIG2: a *variant* of a segment this build decodes — the Huffman or the
     /// refinement coding of a symbol dictionary or text region, or a retained

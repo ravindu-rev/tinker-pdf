@@ -1,5 +1,21 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, October 2026, the `jbig2` fuzz sweep.* **One more row,
+//! `MAX_JBIG2_WORK_MULTIPLE`, the second ratio here and the first that bounds a
+//! whole decode rather than one thing inside it.** Every other JBIG2 row caps
+//! an item — a dictionary's count, its pixels, one symbol against its page, a
+//! region's instances — and the sweep's two timeouts were what the items
+//! multiply to: 257 bytes deciding 38 730 symbols on a page of 37 by 56, every
+//! one of them inside every per-item cap. The budget is a multiple of the
+//! pixels the caller's own ceiling holds, so its currency is a *multiple*, as
+//! `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`'s is, and its parameter — the ceiling —
+//! is fixed in the row by [`SCAN_WORK_MULTIPLE`]: the tightest a caller can
+//! pass and still receive its page. Its `fixtures` is every committed seed under
+//! the fuzz target's 64 KiB, a hundredth of one rounded up; its comic and
+//! fixed-document columns carry the bilevel scan, as every JBIG2 row's do; its
+//! book is a zero; and its corpus figure is owed, because the census that
+//! reports it was written where the corpora are not.
+//!
 //! *Amended, October 2026, the review of lane 8C.* **One more row,
 //! `MAX_EMBEDDING_DEPTH`, a cap on copies.** Every text run an EPUB lays out
 //! carries the bidi levels its inline boxes open, and the cap is UAX #9's own
@@ -579,7 +595,8 @@ use tinker_pdf_color::icc::{MAX_ICC_BYTES, MAX_ICC_TAGS};
 use tinker_pdf_css::limits as css_limits;
 use tinker_pdf_filters::{
     MAX_BMP_SAMPLES, MAX_GIF_SAMPLES, MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PAGE_MULTIPLE,
-    MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TEXT_INSTANCES, MAX_PNG_SAMPLES, MAX_WEBP_SAMPLES,
+    MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TEXT_INSTANCES, MAX_JBIG2_WORK_MULTIPLE, MAX_PNG_SAMPLES,
+    MAX_WEBP_SAMPLES,
 };
 use tinker_pdf_layout::limits as layout_limits;
 use tinker_pdf_xml::limits as xml_limits;
@@ -847,6 +864,31 @@ const SCAN_TEXT_INSTANCES: u128 = 5_000;
 /// the page in each dimension is sixteen times its area, which is still nothing
 /// a page can show.
 const SCAN_SYMBOL_PAGE_MULTIPLE: u128 = 1;
+
+/// **The fifth JBIG2 row's yardstick: seven, and arithmetic again.**
+///
+/// `MAX_JBIG2_WORK_MULTIPLE` bounds a whole decode's work against the pixels
+/// its caller's ceiling holds, so the figure depends on the ceiling, and this
+/// file's rule for a caller-parameterised cap is that the parameter is fixed
+/// and written down. It is fixed at the tightest a caller can choose: **a
+/// ceiling of exactly the image's own packed page**, below which the page
+/// itself is refused. The engine passes `MAX_DECODED_STREAM` and spends a
+/// twentieth of one there; the census and attribution suites pass 4 MiB.
+///
+/// The page is one of [`SCAN_SYMBOLS`]'s 200: 300 dpi A4, 8 699 840 pixels.
+/// Its global dictionary decodes whole for every page that names it —
+/// [`SCAN_SYMBOL_PIXELS`] and the integers that size its symbols, 25.4 million
+/// units; copying its symbols into the page's text region 4 million; the region
+/// 8.7 million; [`SCAN_TEXT_INSTANCES`] placements of a 25 x 50 glyph 6.3
+/// million; and a generic region beside it for the figures 8.7 million. That is
+/// 53 million units, 6.1 pages, and seven rounded up — the cap's 16 clears it
+/// by 2.3x. **The real figure is owed rather than taken**: `jbig2_census.rs`
+/// now reports every image's work as a multiple of its own packed page, and
+/// the fetched corpora were not where this row was written. The corpus's
+/// largest real dictionary spends 1 568 118 pixels against the 25 000 000
+/// counted here, so the arithmetic errs the safe way by the same margin
+/// `MAX_JBIG2_SYMBOL_PIXELS`'s own row does.
+const SCAN_WORK_MULTIPLE: u128 = 7;
 
 /// The widest code table anybody has published: B.9 and B.10, at 22 lines.
 ///
@@ -1967,6 +2009,36 @@ fn ledger() -> Vec<Bound> {
                 JBIG2,
             ),
         },
+        Bound {
+            name: "MAX_JBIG2_WORK_MULTIPLE",
+            cap: u128::from(MAX_JBIG2_WORK_MULTIPLE),
+            // **`(estimate)`, for `SCAN_WORK_MULTIPLE`'s reason**: the
+            // yardstick is arithmetic about a scan and the corpus figure is
+            // owed.
+            published: "16 (estimate)",
+            // Every committed seed but the one this cap closes, through
+            // `jbig2_decode_measured` under the target's own 64 KiB, both
+            // ways round: Annex H's whole file is the most, 5 962 units of
+            // 524 288, which rounds up to one. The seed this row was written
+            // for, `symbol-dictionary-spun-past-its-marker`, asks for 98.
+            fixtures: 1,
+            comic: SCAN_WORK_MULTIPLE,
+            document: SCAN_WORK_MULTIPLE,
+            book: 0,
+            // **One dictionary under the fuzz target's ceiling.** A dictionary
+            // may spend `MAX_JBIG2_SYMBOL_PIXELS` and a stream may hold as
+            // many as its bytes have room for; one is already 128 times the
+            // 524 288 pixels 64 KiB holds — the row's parameter, as this
+            // file's rule asks, and the ceiling the finding was made under.
+            reachable: u128::from(MAX_JBIG2_SYMBOL_PIXELS) / (8 << 16),
+            reachable_because:
+                "one dictionary spending `MAX_JBIG2_SYMBOL_PIXELS`, under the `jbig2` fuzz target's 64 KiB ceiling",
+            declared_in: JBIG2,
+            fires_in: (
+                "the_decode_stops_at_the_work_budget_however_the_work_is_split",
+                JBIG2,
+            ),
+        },
         // ---- tier 0, the memory row ------------------------------------
         //
         // The two largest runtime bounds, and the first two rows here that a
@@ -2651,8 +2723,9 @@ fn segment_size() -> u128 {
 /// 5's formats lane adds HTML's `MAX_HTML_ACTIVE_FORMATTING` and
 /// `MAX_HTML_CLONE_BYTES`; and the EPUB CSS row's font features add
 /// `MAX_CSS_FEATURE_SETTINGS`, and its gradients `MAX_CSS_GRADIENT_STOPS`;
-/// and the review of lane 8C adds `MAX_EMBEDDING_DEPTH`. All **sixty-five**
-/// are here, and a bound added without a row fails this.
+/// and the review of lane 8C adds `MAX_EMBEDDING_DEPTH`; and the `jbig2` fuzz
+/// sweep adds `MAX_JBIG2_WORK_MULTIPLE`. All **sixty-six** are here, and a
+/// bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -2701,6 +2774,7 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_JBIG2_SYMBOL_PAGE_MULTIPLE",
             "MAX_JBIG2_TEXT_INSTANCES",
             "MAX_JBIG2_TABLE_LINES",
+            "MAX_JBIG2_WORK_MULTIPLE",
             "MAX_PAGE_PIXELS",
             "MAX_DECODED_STREAM",
             "MAX_ANNOTATION_BYTES",
@@ -2829,7 +2903,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 65, "the ledger is sixty-five rows");
+    assert_eq!(measured, 66, "the ledger is sixty-six rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2861,7 +2935,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 65, "the ledger is sixty-five rows");
+    assert_eq!(ledger().len(), 66, "the ledger is sixty-six rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**

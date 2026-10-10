@@ -265,6 +265,16 @@ pub struct MqDecoder<'a> {
     a: u32,
     /// `CT`, the count of bits left in the current byte.
     ct: i32,
+    /// Decisions made since [`MqDecoder::take_decisions`] last emptied it.
+    ///
+    /// Not a register of the coder: E.3 has no such count, and nothing in
+    /// [`MqDecoder::decode`] reads it. It is here because an adaptive coder's
+    /// decisions per byte are not bounded by anything a caller can see — a
+    /// context that has walked to Table E.1's smallest `Qe` spends about one
+    /// bit per 32 768 decisions, and past a marker it spends no data at all —
+    /// so a caller that has to bound its own work has to count decisions
+    /// rather than bytes. See `MAX_JBIG2_WORK_MULTIPLE`.
+    decisions: u64,
 }
 
 impl<'a> MqDecoder<'a> {
@@ -277,6 +287,7 @@ impl<'a> MqDecoder<'a> {
             c: 0,
             a: 0,
             ct: 0,
+            decisions: 0,
         };
         d.c = u32::from(d.byte_at(0)) << 16;
         d.byte_in();
@@ -294,6 +305,16 @@ impl<'a> MqDecoder<'a> {
     #[must_use]
     pub fn position(&self) -> usize {
         self.bp.min(self.data.len())
+    }
+
+    /// How many decisions this coder has made since the last call, and starts
+    /// counting again from zero.
+    ///
+    /// Emptied rather than read so that a coder shared between two loops — a
+    /// symbol dictionary and the text region it aggregates a symbol with, over
+    /// one decoder (6.5.8.2.1) — is charged once whichever of them asks.
+    pub fn take_decisions(&mut self) -> u64 {
+        std::mem::take(&mut self.decisions)
     }
 
     /// The byte at `at`, or `0xFF` past the end.
@@ -348,6 +369,7 @@ impl<'a> MqDecoder<'a> {
 
     /// `DECODE` (T.88 E.3.2): one decision against one context.
     pub fn decode(&mut self, cx: &mut MqContext) -> u8 {
+        self.decisions = self.decisions.saturating_add(1);
         // `index` is only ever written from the table's own NMPS/NLPS
         // columns, so this cannot miss; a corrupt state would decode as the
         // last row rather than panic.

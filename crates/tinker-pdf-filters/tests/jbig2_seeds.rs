@@ -1,6 +1,6 @@
 //! The committed JBIG2 fuzz seeds, replayed on stable.
 //!
-//! `fuzz/corpus/jbig2/` is twenty-three inputs a fuzzer found or a person
+//! `fuzz/corpus/jbig2/` is twenty-four inputs a fuzzer found or a person
 //! wrote,
 //! and the target that consumes them needs nightly. So the seeds were only ever
 //! exercised when somebody ran `cargo fuzz`, which is not on every commit — and
@@ -29,11 +29,20 @@
 //! cause rather than by its duration, which is the whole discipline here — a
 //! budget proved by a clock passes on a fast machine with the budget removed.
 //! `docs/verification.md` records why the total budget is not lowered instead.
+//!
+//! *Amended, October 2026.* **And the shape that bound left open came back**,
+//! as `symbol-dictionary-spun-past-its-marker`: a page of 37 by 56 is large
+//! enough for a symbol a hundred pixels wide, and 257 bytes asked for 38 730 of
+//! them. It is held the same way, by its cause:
+//! [`the_marker_spun_seed_stops_at_the_work_budget`] names the refusal and
+//! counts the symbols. It is the one seed here that spends a whole budget, a
+//! little under a second of this test in a debug build.
 
 use std::path::{Path, PathBuf};
 
 use tinker_pdf_filters::{
     jbig2_decode, jbig2_decode_measured, Capability, FilterError, Jbig2Params, Jbig2Refusal,
+    MAX_JBIG2_WORK_MULTIPLE,
 };
 
 /// The seed directory, from this crate rather than from the working directory.
@@ -200,4 +209,76 @@ fn the_pixel_budget_seed_is_refused_at_its_first_symbol() {
         "jbig2-seed-budget: RAN; refused at symbol {} of {}x{}",
         extent.symbols, extent.widest, extent.tallest
     );
+}
+
+/// **The seed the October 2026 fuzz sweep timed out on, stopped by the work
+/// budget.**
+///
+/// `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` closed the one-pixel page and nothing else:
+/// on a page of 37 by 56 a symbol may be 148 by 224, and this seed's dictionary
+/// declares a count its coded data stops describing after 945 decisions. The
+/// coder then reaches a marker and E.3.4 has it feed itself 1-bits, which it
+/// goes on deciding as symbols — **38 730 of them, 51 532 206 pixels**, from
+/// 257 bytes, under every per-dictionary bound there is, twice per fuzz input,
+/// at twenty seconds a time under the sanitizers.
+///
+/// What stops it is `MAX_JBIG2_WORK_MULTIPLE`, and that is what is pinned: the
+/// refusal by name, the decode's own count of what it spent, and the symbol
+/// count it got to — a few thousand rather than 38 730. None of it is a clock:
+/// a change that let the dictionary run on would move the symbol count and lose
+/// the refusal on any machine.
+#[test]
+fn the_marker_spun_seed_stops_at_the_work_budget() {
+    let Some(dir) = seeds() else {
+        println!("jbig2-seed-work: SKIPPED (no fuzz/corpus/jbig2)");
+        return;
+    };
+    let path = dir.join("symbol-dictionary-spun-past-its-marker");
+    let data = std::fs::read(&path).expect("the seed reads");
+    assert_eq!(data.len(), 257, "one control byte and 256 of payload");
+    let (width, height, globals, own) = knobs(&data);
+    assert_eq!(
+        (width, height),
+        (37, 56),
+        "the seed's first byte chooses a page the symbol-page bound admits a \
+         hundred-pixel symbol on, which is why that bound did not stop it"
+    );
+
+    // The fuzz target's own ceiling, and so its own budget.
+    let ceiling = 1 << 16;
+    let budget = ceiling as u64 * 8 * MAX_JBIG2_WORK_MULTIPLE;
+    for (label, globals, own) in [("straight", globals, own), ("swapped", own, globals)] {
+        let params = Jbig2Params {
+            globals,
+            width,
+            height,
+        };
+        let mut refusals = Vec::new();
+        let (out, extent) = jbig2_decode_measured(own, &params, ceiling, &mut refusals);
+        assert!(out.is_err(), "{label}: the seed decoded to a page");
+        assert!(
+            refusals.contains(&Jbig2Refusal::WorkCap),
+            "{label}: the work budget is no longer what stops this seed: \
+             {} symbols, {} units, {refusals:?}",
+            extent.symbols,
+            extent.work
+        );
+        // Past the budget — so it was the budget, and not something smaller,
+        // that stopped it — and by at most the one symbol whose charge was
+        // refused, which the symbol-page bound keeps under 148 x 224 here.
+        assert!(
+            extent.work > budget && extent.work <= budget + 148 * 224,
+            "{label}: {} units against a budget of {budget}",
+            extent.work
+        );
+        assert!(
+            extent.symbols < 38_730 / 4,
+            "{label}: the dictionary got to symbol {} of the 38 730 it asks for",
+            extent.symbols
+        );
+        println!(
+            "jbig2-seed-work: RAN {label}; stopped at symbol {} after {} units of {budget}",
+            extent.symbols, extent.work
+        );
+    }
 }
