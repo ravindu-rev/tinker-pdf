@@ -421,20 +421,24 @@ fn no_fetched_page_carries_a_character_its_book_does_not_have() {
     let books = fetched!("text conservation");
     let mut source = 0usize;
     let mut conserved = 0usize;
+    // Every book is read before anything is asserted, so one run names every
+    // book that does not conserve rather than the first of them.
+    let mut failures: Vec<String> = Vec::new();
     for (name, bytes) in &books {
         let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         let verdict = conservation(bytes, &doc);
         let pinned = NOT_CONSERVED.iter().find(|book| book.name == *name);
         let allowed = pinned.map_or((0, 0), |book| (book.extra, book.missing));
-        assert_eq!(
-            (verdict.extra, verdict.missing),
-            allowed,
-            "{name} carries {} characters its book does not have and is missing \
-             {}; {allowed:?} is pinned: {:?}",
-            verdict.extra,
-            verdict.missing,
-            verdict.divergences
-        );
+        if (verdict.extra, verdict.missing) != allowed {
+            failures.push(format!(
+                "{name} carries {} characters its book does not have and is missing \
+                 {}; {allowed:?} is pinned: {:?}",
+                verdict.extra, verdict.missing, verdict.divergences
+            ));
+            source += verdict.source;
+            conserved += verdict.conserved;
+            continue;
+        }
         let report = doc.archive().expect("a report");
         if let Some(book) = pinned {
             match book.because {
@@ -482,6 +486,13 @@ fn no_fetched_page_carries_a_character_its_book_does_not_have() {
         books.len()
     );
     assert!(
+        failures.is_empty(),
+        "{} of {} books do not conserve:\n{}",
+        failures.len(),
+        books.len(),
+        failures.join("\n")
+    );
+    assert!(
         source > 1_000_000,
         "the harness read {source} characters out of twenty books, which is not twenty books"
     );
@@ -510,6 +521,8 @@ fn no_fetched_page_carries_a_character_its_book_does_not_have() {
 fn every_fetched_book_conserves_exactly_in_logical_order() {
     let books = fetched!("logical-order conservation");
     let mut checked = 0usize;
+    // As above: every book is read before anything is asserted.
+    let mut failures: Vec<String> = Vec::new();
     for (name, bytes) in &books {
         let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         // The book with no glyphs cannot conserve in any order: its characters
@@ -522,16 +535,22 @@ fn every_fetched_book_conserves_exactly_in_logical_order() {
             continue;
         }
         let verdict = conservation_in_logical_order(bytes, &doc);
-        assert!(
-            verdict.holds(),
-            "{name} does not conserve in logical order: {} extra, {} missing, {:?}",
-            verdict.extra,
-            verdict.missing,
-            verdict.divergences
-        );
-        checked += 1;
+        if verdict.holds() {
+            checked += 1;
+        } else {
+            failures.push(format!(
+                "{name} does not conserve in logical order: {} extra, {} missing, {:?}",
+                verdict.extra, verdict.missing, verdict.divergences
+            ));
+        }
     }
     println!("  {checked} books conserve exactly in logical order");
+    assert!(
+        failures.is_empty(),
+        "{} books do not conserve in logical order:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
     assert!(
         checked > 15,
         "only {checked} books were read, which is not the corpus"

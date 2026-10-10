@@ -641,3 +641,50 @@ fn record() -> Vec<String> {
         })
         .collect()
 }
+
+/// **A letter in another case is the same letter.** `text-transform` and
+/// synthesised small capitals draw the book's `The Swans` as `THE SWANS`,
+/// and that is conservation, not a loss and a gain: the fetched
+/// `sample-childrens-media-query.epub` read exactly that way once
+/// text-transform landed. Only case is forgiven — `ß` drawn `SS` is two
+/// characters for one and still diverges.
+#[test]
+fn a_letter_set_in_another_case_is_conserved_and_nothing_else_is() {
+    let verdict = compare(
+        &source("The Swans. Ho! pretty swans"),
+        &["THE SWANS. Ho! pretty swans".to_owned()],
+    );
+    assert!(verdict.holds(), "{verdict:?}");
+    assert_eq!(verdict.conserved, verdict.source);
+
+    let verdict = compare(&source("Straße"), &["STRASSE".to_owned()]);
+    assert!(
+        !verdict.holds(),
+        "a two-character mapping is not a case change: {verdict:?}"
+    );
+
+    let verdict = compare(&source("The Swans"), &["The Swins".to_owned()]);
+    assert!(
+        !verdict.holds(),
+        "a different letter is not a case change: {verdict:?}"
+    );
+}
+
+/// The same, end to end: a book whose heading is `text-transform: uppercase`
+/// is drawn in capitals and conserves.
+#[test]
+fn a_book_with_an_uppercased_heading_conserves() {
+    let bytes = epub_support::book::styled_book(
+        "en",
+        "h1 { text-transform: uppercase }",
+        "<h1>The Swans</h1><p>Ho! pretty swans, do you know?</p>",
+    );
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let pages = conservation::paginated_text(&doc).concat();
+    assert!(
+        pages.contains("THE SWANS"),
+        "the heading is drawn in capitals: {pages:?}"
+    );
+    let verdict = conservation(&bytes, &doc);
+    assert!(verdict.holds(), "{verdict:?}");
+}
