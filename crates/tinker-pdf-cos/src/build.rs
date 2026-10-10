@@ -7242,13 +7242,11 @@ impl DocumentBuilder {
             ImageColorSpace::DeviceGray => Object::Name(self.names.intern(b"DeviceGray")),
             ImageColorSpace::DeviceRgb => Object::Name(self.names.intern(b"DeviceRGB")),
             ImageColorSpace::DeviceCmyk => Object::Name(self.names.intern(b"DeviceCMYK")),
+            // `registered` is never `None` here: both arms above returned
+            // `None` or set it.
             ImageColorSpace::Icc { .. }
             | ImageColorSpace::Tint { .. }
-            | ImageColorSpace::Cie { .. } => match registered {
-                Some(reference) => Object::Ref(reference),
-                // Unreachable: both arms above returned `None` or set it.
-                None => return None,
-            },
+            | ImageColorSpace::Cie { .. } => Object::Ref(registered?),
             ImageColorSpace::Lab => {
                 let step = 256.0 / f64::from(1u32 << image.bits_per_component.clamp(1, 16));
                 let numbers = |values: &[f64]| {

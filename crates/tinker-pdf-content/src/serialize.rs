@@ -345,20 +345,14 @@ fn json_page(out: &mut String, frame: &PageFrame, page: &TextPage) {
             out.push(',');
         }
         out.push_str("{\"bbox\":");
-        json_bbox(
-            out,
-            Some(block.quad.bounds()).filter(|_| block.quad.is_finite()),
-        );
+        json_bbox(out, block.quad.is_finite().then(|| block.quad.bounds()));
         out.push_str(",\"lines\":[");
         for (l, line) in block.lines.iter().enumerate() {
             if l > 0 {
                 out.push(',');
             }
             out.push_str("{\"bbox\":");
-            json_bbox(
-                out,
-                Some(line.quad.bounds()).filter(|_| line.quad.is_finite()),
-            );
+            json_bbox(out, line.quad.is_finite().then(|| line.quad.bounds()));
             let _ = write!(
                 out,
                 ",\"wmode\":\"{}\",\"rtl\":{},\"size\":",

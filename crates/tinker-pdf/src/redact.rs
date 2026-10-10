@@ -3718,7 +3718,7 @@ fn appearance_streams(editor: &DocumentEditor, value: &Object) -> Vec<(Option<Na
             }
             editor
                 .get(*r)
-                .and_then(|o| o.as_dict().map(&states))
+                .and_then(|o| o.as_dict().map(states))
                 .unwrap_or_default()
         }
         Object::Dict(dict) => states(dict),

@@ -396,7 +396,7 @@ fn a_loose_xhtml_file_is_the_one_chapter_of_a_book_pixel_for_pixel() {
     let book = drawn(open(&book_of(&page)));
     assert!(loose.page_count() >= 2, "the body needs two pages");
     assert_eq!(loose.page_count(), book.page_count());
-    for at in 0..loose.page_count() as u32 {
+    for at in 0..loose.page_count() {
         assert_eq!(
             loose.page(at).expect("a page").size(),
             DEFAULT_PAGE,

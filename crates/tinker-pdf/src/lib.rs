@@ -921,11 +921,9 @@ impl Bitmap {
                 let (colour, alpha) = pixel.split_at(colours);
                 let a = u32::from(*alpha.first()?);
                 for c in colour {
-                    let straight = if a == 0 {
-                        0
-                    } else {
-                        ((u32::from(*c) * 255 + a / 2) / a).min(255)
-                    };
+                    let straight = (u32::from(*c) * 255 + a / 2)
+                        .checked_div(a)
+                        .map_or(0, |v| v.min(255));
                     data.push(straight as u8);
                 }
                 data.push(a as u8);

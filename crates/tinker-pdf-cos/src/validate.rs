@@ -2267,9 +2267,9 @@ impl Validator<'_> {
             let ok = match value {
                 Object::Name(name) => known(*name),
                 // 11.6.4.4: an array of names, first supported one wins.
-                Object::Array(names) => names
-                    .iter()
-                    .all(|value| value.as_name().is_some_and(&known)),
+                Object::Array(names) => {
+                    names.iter().all(|value| value.as_name().is_some_and(known))
+                }
                 _ => false,
             };
             if !ok {

@@ -604,10 +604,7 @@ impl Parser {
         self.line = std::rc::Rc::from(line.replace('\0', "\u{FFFD}"));
 
         // Phase 1, step 1: which open blocks this line continues.
-        loop {
-            let Some(last) = self.tree.nodes[container].last else {
-                break;
-            };
+        while let Some(last) = self.tree.nodes[container].last {
             if !self.tree.nodes[last].kind.open {
                 break;
             }

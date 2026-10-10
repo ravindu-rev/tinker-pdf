@@ -330,7 +330,7 @@ fn expand_inline_abbreviations(dict: &[u8]) -> Vec<u8> {
         }
         let start = i + 1;
         let mut end = start;
-        while dict.get(end).copied().is_some_and(&is_regular) {
+        while dict.get(end).copied().is_some_and(is_regular) {
             end += 1;
         }
         let name = dict.get(start..end).unwrap_or_default();
