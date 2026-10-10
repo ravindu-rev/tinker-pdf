@@ -128,7 +128,11 @@ the kind this repository has already caught itself making.
 standard-14 overflow font's code 32 under `word-spacing`: a letter drawn
 over the next and read out of order, in books with marks or none — the one
 known overprint the October 2026 release carries, which the owner accepted
-for that release and put on top, 10 October 2026); MS-11 (CI on
+for that release and put on top, 10 October 2026) and K-11 (ruling 14
+reading a bracketed run and its full stop out of order in right-to-left
+text, which leaves `epub-corpus` red on one Arabic book — the second known
+limit the October 2026 release carries, accepted and put on top by the
+owner the same day); MS-11 (CI on
 current code) and K-06 (the fuzz failure), with H-01 and H-02; K-01 (the
 external graphics state) and K-02 (default colour spaces), because both
 change what every page draws; MS-01, MS-04, MS-06 and MS-02 (the speed and
@@ -157,8 +161,8 @@ ED-12, OC-15b, AN-24; ED-26, ED-27 → OC-12; MS-01 lands with every P row;
 MS-13 (the corpus runs) closes AN-01, SG-26, SD-01, SD-04, SD-11, FT-30,
 FT-31, CD-01 and CD-08.
 
-**The count**: 458 capability, gap and finding rows in the tiers — MS 13,
-K 10, P 26, RC 21, FT 43, ED 57, AN 37, FJ 23, SG 28, SE 15, FI 50, FO 42,
+**The count**: 459 capability, gap and finding rows in the tiers — MS 13,
+K 11, P 26, RC 21, FT 43, ED 57, AN 37, FJ 23, SG 28, SE 15, FI 50, FO 42,
 SD 26, SU 24, CD 19, OC 24; 14 hard limits (NG-01…NG-14); 107 rows for a
 person (H-01…H-133). Every row has one size band, every L and XL row names
 its design doc, and no row is larger than XL.
@@ -355,6 +359,7 @@ new rendered surface.
 | K-08 | **Reviewed-golden families for every new rendered surface** — the mechanism of `render_goldens.rs` extended: synthesised annotation appearances, visible signature appearances, fields under formatting scripts, OCR text-layer alignment, sample EPUB/HTML/Markdown/FB2 pages, SVG and XPS pages, `to_svg` output; each family's header names its clause and enters `UNREVIEWED` | nine families, all unreviewed | each family committed with `unreviewed` headers and held byte for byte; the reading is H-73 | S | — | the row that adds the surface |
 | K-09 | **A naming lint over the roadmap** that keeps the names out of the tree too: `cargo xtask check` hashes every word and word pair of `docs/ROADMAP.md` and compares them against a committed list of SHA-256 hashes, so the names are not written in plain text anywhere in the tree. That stops a grep and not a determined reader — a hash of a short public name is reversed by hashing candidate names — so the lint keeps names out of this file and claims nothing about keeping the list secret | the rule is the owner's (9 October 2026); nothing checks it | `cargo xtask check` fails on a hash match anywhere in the file, with no exemption — the corpus table names its suites by role; a test injects a hashed name and sees it caught | S | — | — (H-07 sets whether it reaches beyond this file) |
 | K-10 | **Continuous fuzzing at scale** — the build and seed-corpus files a public continuous-fuzzing service needs, maintained in-tree | 51 targets run nightly for 600 s each on hosted runners | the integration builds every target in the service's container recipe in CI | S | — | H-119 (the application) |
+| K-11 | **Ruling 14 reads a bracketed run and the full stop after it out of order in right-to-left text** — `… الأسيتيل (HDAC). وقد …` extracts with its `)` and `.` out of order in logical order, and a dir-less paragraph's `(HDAC).` comes back as `.)HDAC(` | CI's `epub-corpus` job on `6d86eff`: `sample-regime-anticancer-arabic.epub` does not conserve from character 20 963 (`Missing ").وقد…"`, `Extra ")وقد…"`; 3 300 characters, in content and logical order). A synthetic probe of 240 books — a Latin acronym, Latin words, a year and Arabic words inside brackets before a full stop, in right-to-left and dir-less paragraphs, plain, justified and narrowed — fails 82, and the same 82 with every mark stripped, so it is ruling 14's reading-back and not the standard-14 mark placement. The book conserved at `221d27d` (26 September 2026), before ruling 14 read a line back from where it is drawn; until the mark fix (`6d79fa4`) the book stopped at character 287 and hid this. Accepted by the owner for the October 2026 release (10 October 2026) and first in the order of work with CD-19 | `epub-corpus` green, that book conserving in content and logical order; a first-party test of each probed shape — Latin, number and Arabic inside brackets, right-to-left and dir-less, plain and justified — reading as written in both builds, with `a_bracketed_run_and_its_full_stop_in_right_to_left_text_are_read_out_of_order` flipped; `BidiCharacterTest.txt`'s count and every existing ruling-14 test unchanged | M | [features/content-and-text.md](features/content-and-text.md) | — |
 
 ## Tier P — performance
 
