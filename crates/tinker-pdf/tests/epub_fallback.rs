@@ -308,7 +308,8 @@ fn a_standard_14_right_to_left_paragraph_extracts_as_written() {
 /// left-to-right character, so ruling 14's "the two ends decide" read it as
 /// right to left and the comma first, `,חו`, until the ruling's comma
 /// tie-break (amended 10 October 2026): a strong right-to-left character
-/// leftmost and punctuation rightmost read as a left-to-right paragraph.
+/// leftmost and closing punctuation rightmost read as a left-to-right
+/// paragraph, where a left-to-right paragraph draws the line.
 /// Which way such a line reads is ruling 14's to decide, not this painter's;
 /// this asserts what it decided.
 #[test]
