@@ -53,9 +53,12 @@
 //!    proposal until the owner accepts it): a line that draws a closing
 //!    bracket left of an opening one of its kind, `)histone deacetylase(`,
 //!    is read in the other direction where that direction draws the line,
-//!    pairs more of the brackets so drawn and no fewer in all — a pair faces
-//!    outward only at a right-to-left level whose `/ToUnicode` names the
-//!    typed character, as this engine's writers name it.
+//!    pairs more brackets in all, and pairs more of them facing outward and
+//!    hugging what they enclose — a pair faces outward only at a
+//!    right-to-left level whose `/ToUnicode` names the typed character, as
+//!    this engine's writers name it, and two brackets that are no pair, a
+//!    list marker's `1)` and a later `(`, pair only with the spaces outside
+//!    them turned inside.
 //!    [`TextLine::rtl`] is set to the direction read, for every line this
 //!    touches.
 //!
@@ -85,7 +88,11 @@
 //! - **The paragraph.** A line is resolved on its own. A line of a
 //!   right-to-left paragraph that begins and ends with Latin reads as a
 //!   left-to-right one, and its runs come back each in the right order but
-//!   placed as a left-to-right paragraph would place them. And a line of a
+//!   placed as a left-to-right paragraph would place them. A line holding
+//!   one bracket of a pair a line break parted, or quotation marks, which
+//!   BD16 does not pair, gives the bracket tie-break nothing to count: where
+//!   its ends disagree its majority decides, so `deacetylase). وقد أصبحنا`
+//!   reads `وقد أصبحنا .)deacetylase`. And a line of a
 //!   right-to-left paragraph that holds nothing left to right and *opens*
 //!   with a mark of `Bidi_Class` `CS`, `ON`, `ES` or `ET` that is not `Ps` or
 //!   `Pi` — a dash (`— שלום` drawn `םולש —`), a bullet, `*`, `#`, `%`, an

@@ -875,3 +875,65 @@ fn a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_dr
     assert!(left_to_right.contains("(HDAC)."), "{left_to_right:?}");
     assert_eq!(right_to_left, line.text, "ruling 14 reads the second");
 }
+
+/// **List markers and glosses in left-to-right text conserve** — ruling 14's
+/// bracket tie-break as the review of the K-11 fix revised it.
+///
+/// A left-to-right paragraph's `1)` before a parenthesis, or a parenthesis
+/// that opens at the end of a line and closes on the next, draws a closing
+/// bracket left of an opening one, and a right-to-left paragraph draws the
+/// same line for another text in which the two pair facing outward. As first
+/// proposed, the tie-break read every such line from the right, and books
+/// like these, which conserved before it, stopped conserving at their first
+/// character: `<p>Step 1) read the word (…) aloud and 2) write it down, then
+/// 3) check (…) again.</p>` in six of nine styles, Arabic and Hebrew, pointed
+/// and not, in both builds, and three glosses wrapped at `margin: 0 25%` in a
+/// `bundled-fonts` one. A reading from the right pairs no more of their
+/// brackets than as typed, or pairs them with the spaces that stood outside
+/// them inside the pair, and the tie-break now asks for more pairs, each set
+/// against what it encloses.
+#[test]
+fn list_markers_and_glosses_in_left_to_right_text_conserve() {
+    let words: [(&str, [&str; 4]); 2] = [
+        ("ar", ["إنّ ال", "وقد أ", "عوامل عدّة", "الآن"]),
+        ("he", ["בְּרֵא", "וַיֹּא", "שָׁלוֹם עוֹלָם", "בַּיִת"]),
+    ];
+    for (language, [first, second, gloss, word]) in words {
+        let paragraphs = [
+            format!(
+                "Step 1) read the word ({first}) aloud and 2) write it down, then 3) check \
+                 ({second}) again."
+            ),
+            format!(
+                "Step 1) open the file ({word}) and 2) close it, then 3) read ({gloss}) once \
+                 more and 4) stop here for now."
+            ),
+            format!(
+                "Read peace ({second}) then war ({gloss}) and also ({word}) in this English \
+                 sentence that keeps going on."
+            ),
+        ];
+        for style in ["", "p { text-align: justify }", "p { margin: 0 25% }"] {
+            for paragraph in &paragraphs {
+                for text in [paragraph.clone(), unpointed_hebrew(&unpointed(paragraph))] {
+                    let bytes =
+                        epub_support::book::styled_book(language, style, &format!("<p>{text}</p>"));
+                    let doc = Document::open(bytes.clone()).expect("the book opens");
+                    let content = conservation(&bytes, &doc);
+                    let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+                    assert!(
+                        content.holds() && logical.holds(),
+                        "{style:?}, {text:?}: content {content:?}, logical {logical:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// `text` with its Hebrew points taken out.
+fn unpointed_hebrew(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '\u{0591}'..='\u{05C7}'))
+        .collect()
+}

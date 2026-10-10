@@ -4338,6 +4338,23 @@ fn opens_right_to_left(c: char) -> bool {
     )
 }
 
+/// Whether a line holding `c` is one whose right-to-left levels ruling 14's
+/// reading undoes, so that a run of neutrals at such a level is drawn in that
+/// level's order ([`TextRun::bidi_line_rtl`]): a character whose own class
+/// reads right to left, `R` or `AL`, or a right-to-left isolate's `RLI`,
+/// which stays on the line as a unit of its own and is read back with what it
+/// encloses.
+///
+/// **Not `RLE` or `RLO`.** Ruling 14 reads a line holding one too, but rule
+/// X9 removes both before anything is resolved, so its reading never sees
+/// the embedding they opened, and a run of neutrals drawn in that
+/// embedding's order reads back reversed: `x RLE ?! PDF y`, its `?!` drawn
+/// `!?` because its line held an `RLE`, extracted `x RLE PDF !? y` (review of
+/// the K-11 fix). Drawn as typed, as it was before, it reads as typed.
+fn undoes_its_levels(c: char) -> bool {
+    matches!(bidi_class(c), BidiClass::R | BidiClass::AL | BidiClass::RLI)
+}
+
 /// [`split_at_levels`] over one line, draining `line` into `out`. `places`
 /// are the line's runs' places in their paragraph, one per run.
 fn split_line(
@@ -4357,10 +4374,11 @@ fn split_line(
     // ([`coded_order`]). A generated run is an artifact, which it does not
     // read: it neither makes a line right to left nor is reordered on one,
     // so a right-to-left `inside` marker's `1. ` beside an Arabic word is
-    // drawn as written, as it was.
+    // drawn as written, as it was. See [`undoes_its_levels`] for which
+    // characters say so.
     let rtl_line = line
         .iter()
-        .any(|run| !run.generated && run.text.chars().any(opens_right_to_left));
+        .any(|run| !run.generated && run.text.chars().any(undoes_its_levels));
     for run in line.iter_mut() {
         run.bidi_line_rtl = rtl_line && !run.generated;
     }

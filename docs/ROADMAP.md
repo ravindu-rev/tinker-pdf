@@ -129,7 +129,11 @@ standard-14 overflow font's code 32 under `word-spacing`: a letter drawn
 over the next and read out of order, in books with marks or none — the one
 known overprint the October 2026 release carries, which the owner accepted
 for that release and put on top, 10 October 2026); MS-11 (CI on
-current code) and K-06 (the fuzz failure), with H-01 and H-02; K-01 (the
+current code — whose `epub-corpus` job is still to show that K-11's fix,
+closed 10 October 2026 on synthetic books alone since no corpus is fetched
+here, lets `sample-regime-anticancer-arabic.epub` conserve past character
+20 963; if it does not, the book's divergence is a row here) and K-06 (the
+fuzz failure), with H-01 and H-02; K-01 (the
 external graphics state) and K-02 (default colour spaces), because both
 change what every page draws; MS-01, MS-04, MS-06 and MS-02 (the speed and
 footprint instruments); P-01…P-05 (algorithmic, small, a 3–30× win each on

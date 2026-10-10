@@ -675,11 +675,12 @@ pub struct TextRun {
     /// level cannot say that, and the characters are in no run.
     pub bidi_gap: Option<u8>,
     /// Whether the line this run is set on holds a character that reads
-    /// right to left (`Bidi_Class` `R` or `AL`, or one that opens a
-    /// right-to-left embedding, override or isolate), once the caller that
-    /// orders the line has resolved it; `false` as this crate makes it, and
-    /// for a [generated](Self::generated) run, which no reader of the page
-    /// reads.
+    /// right to left (`Bidi_Class` `R` or `AL`, or the `RLI` that opens a
+    /// right-to-left isolate — not an `RLE` or `RLO`, which rule X9 removes
+    /// before a reader of the page could undo what they opened), once the
+    /// caller that orders the line has resolved it; `false` as this crate
+    /// makes it, and for a [generated](Self::generated) run, which no reader
+    /// of the page reads.
     ///
     /// A run of neutrals at a right-to-left level is drawn in that level's
     /// order on such a line, and as typed on a line that holds none: a reader

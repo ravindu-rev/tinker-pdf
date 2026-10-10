@@ -626,20 +626,26 @@ fn read_back(visual: &[&str], direction: BaseDirection) -> Result<Vec<usize>, Ve
 /// bracket on the **left** of its opening one, each hollow turned away from
 /// what it encloses: `)histone deacetylase(`. Read in the right direction,
 /// the two pair as typed (BD16, over the text read); in the wrong one they
-/// do not. And no other way of drawing a pair puts it so: at a
-/// left-to-right level a pair faces inward, and a producer whose
-/// `/ToUnicode` names the mirrored glyph names a right-to-left pair facing
-/// inward too. So **where the other paragraph direction's reading draws the
-/// line and pairs more brackets that the line draws facing outward than the
-/// reading in the direction chosen above, and no fewer brackets in all, the
-/// other direction is taken** ([`paired_brackets`]). A pair drawn facing
-/// inward is evidence of nothing — `(HDAC)` facing inward in a line with
-/// right-to-left text at both ends is what a left-to-right paragraph draws
-/// and what a right-to-left one whose `/ToUnicode` names the mirrored glyph
-/// draws, and nothing on the page says which — so it never turns a line; it
-/// only keeps one from turning where a reading would pair a `)(` that faces
-/// outward by breaking the two pairs either side of it, `()()` read from the
-/// right.
+/// do not. No other way of drawing a **pair** puts it so: at a left-to-right
+/// level a pair faces inward, and a producer whose `/ToUnicode` names the
+/// mirrored glyph names a right-to-left pair facing inward too. But two
+/// brackets that are no pair stand so all the time in left-to-right text — a
+/// list marker before a parenthesis, `Step 1) open the file (שלום)`, a
+/// smiley, `:)`, or a parenthesis that opens at the end of a line and closes
+/// on the next — and read from the right they pair. So the other direction
+/// is taken only **where its reading draws the line, pairs more brackets in
+/// all than the reading in the direction chosen above, and pairs more of
+/// them facing outward and hugging what they enclose** — no whitespace just
+/// inside either bracket, as a bracket is set against its own text
+/// ([`paired_brackets`]). A pair the line's brackets make only when read the
+/// wrong way round has the spaces that stood outside them inside it,
+/// `see( وقد )b` from `b) وقد (see`. A pair drawn facing inward is evidence
+/// of nothing — `(HDAC)` facing inward in a line with right-to-left text at
+/// both ends is what a left-to-right paragraph draws and what a right-to-left
+/// one whose `/ToUnicode` names the mirrored glyph draws, and nothing on the
+/// page says which — so it never turns a line; it is counted with the rest
+/// only so that a reading cannot win by pairing a `)(` that faces outward
+/// and breaking the two pairs either side of it, `()()` read from the right.
 /// Ruling 14, amended 10 October 2026 a second time, records this as its
 /// bracket tie-break (a proposal until the owner accepts it); it is asked
 /// only of a line that draws a closing bracket left of an opening one, and
@@ -662,7 +668,7 @@ pub fn drawn_direction(visual: &[&str]) -> BaseDirection {
     };
     let (their_outward, their_pairs) = paired_brackets(visual, &theirs);
     let (my_outward, my_pairs) = paired_brackets(visual, &mine);
-    if their_outward > my_outward && their_pairs >= my_pairs {
+    if their_outward > my_outward && their_pairs > my_pairs {
         other
     } else {
         chosen
@@ -670,8 +676,9 @@ pub fn drawn_direction(visual: &[&str]) -> BaseDirection {
 }
 
 /// Whether a drawn line holds a closing bracket left of an opening one of
-/// its kind: the only shape [`outward_pairs`] can count anything in, so the
-/// only line [`drawn_direction`] reads twice for its brackets.
+/// its kind: the only shape in which [`paired_brackets`] can count a pair
+/// facing outward, so the only line [`drawn_direction`] reads twice for its
+/// brackets.
 fn faces_outward(visual: &[&str]) -> bool {
     // The opening brackets each closing one met so far, left to right, by the
     // character an opening bracket of its kind would pair with: an opening
@@ -705,13 +712,23 @@ fn faces_outward(visual: &[&str]) -> bool {
 /// pairs them — over the text read, so in logical order: how many of them
 /// are drawn **with the opening bracket right of the closing one**, a pair
 /// at a right-to-left level with each hollow turned away from what it
-/// encloses ([`drawn_direction`]), and how many there are in all.
+/// encloses, **and hug what they enclose** ([`drawn_direction`]); and how
+/// many pairs there are in all.
 ///
-/// Both, because a reading can make a pair facing outward only by breaking
-/// two facing inward: `()()` drawn as typed, read from the right, pairs the
-/// `)(` between the two pairs and loses both. `BidiCharacterTest.txt` has
-/// 1 376 such lines whose every bracket pairs as typed, which counting the
-/// outward pairs alone read the wrong way.
+/// A pair hugs what it encloses where the unit read just inside each of its
+/// brackets is not whitespace ([`is_blank`]) — `(HDAC)`, and `()`, which
+/// encloses nothing — as a bracket is set against its own text. Two brackets
+/// that are not a pair as typed but stand facing each other, `1)` and the
+/// `(` of a later `(see`, each have their space on the side away from the
+/// other: read the wrong way round they pair, and the spaces fall inside,
+/// `see( … )1`.
+///
+/// The pairs in all, because a reading can make a pair facing outward only
+/// by breaking two facing inward: `()()` drawn as typed, read from the right,
+/// pairs the `)(` between the two pairs and loses both. And a reading that
+/// pairs as many brackets as the other, but differently, has nothing to say
+/// for it: `Step 1) open the file (שלום) and 2) close it.` pairs `(שלום)`
+/// read as typed and `) open the file (` read from the right, one each.
 ///
 /// A unit is a bracket by its first character, the one its marks ride on.
 /// BD16's stack of 63 is kept: past it, nothing more is paired. Positions
@@ -719,10 +736,20 @@ fn faces_outward(visual: &[&str]) -> bool {
 fn paired_brackets(visual: &[&str], order: &[usize]) -> (usize, usize) {
     /// BD16's stack, as [`brackets`] keeps it.
     const STACK: usize = 63;
-    let mut stack: Vec<(char, usize)> = Vec::new();
+    // The units in the order read, so that what stands just inside a bracket
+    // is found by its place in the reading.
+    let read: Vec<&str> = order
+        .iter()
+        .filter_map(|at| visual.get(*at).copied())
+        .collect();
+    let blank_at =
+        |place: Option<usize>| place.and_then(|p| read.get(p)).is_some_and(|u| is_blank(u));
+    // Each opening bracket waiting for its closing one: the character it
+    // pairs with, where it is drawn, and where it is read.
+    let mut stack: Vec<(char, usize, usize)> = Vec::new();
     let mut outward = 0usize;
     let mut pairs = 0usize;
-    for at in order {
+    for (place, at) in order.iter().enumerate() {
         let Some(c) = visual.get(*at).and_then(|unit| unit.chars().next()) else {
             continue;
         };
@@ -734,14 +761,20 @@ fn paired_brackets(visual: &[&str], order: &[usize]) -> (usize, usize) {
                 if stack.len() >= STACK {
                     break;
                 }
-                stack.push((canonical(paired), *at));
+                stack.push((canonical(paired), *at, place));
             }
             BracketKind::Close => {
                 let folded = canonical(c);
-                if let Some(found) = stack.iter().rposition(|(want, _)| *want == folded) {
+                if let Some(found) = stack.iter().rposition(|(want, _, _)| *want == folded) {
                     pairs += 1;
-                    if stack.get(found).is_some_and(|(_, open)| open > at) {
-                        outward += 1;
+                    if let Some((_, open_at, open_place)) = stack.get(found) {
+                        // Of an empty pair, what stands just inside each
+                        // bracket is the other bracket.
+                        let hugs =
+                            !blank_at(open_place.checked_add(1)) && !blank_at(place.checked_sub(1));
+                        if open_at > at && hugs {
+                            outward += 1;
+                        }
                     }
                     stack.truncate(found);
                 }
@@ -749,6 +782,20 @@ fn paired_brackets(visual: &[&str], order: &[usize]) -> (usize, usize) {
         }
     }
     (outward, pairs)
+}
+
+/// Whether a unit is whitespace — every character of it `WS`, `S` or `B`, or
+/// one of the [`BLANK_SEPARATORS`] — which [`paired_brackets`] asks of what
+/// stands just inside a bracket.
+fn is_blank(unit: &str) -> bool {
+    !unit.is_empty()
+        && unit.chars().all(|c| {
+            BLANK_SEPARATORS.contains(&c)
+                || matches!(
+                    unicode::bidi_class(c),
+                    BidiClass::WS | BidiClass::S | BidiClass::B
+                )
+        })
 }
 
 /// [`drawn_direction`] before its bracket tie-break: P2 read off the line's
@@ -2066,22 +2113,91 @@ mod tests {
         );
     }
 
-    /// **The price: brackets typed closing before opening read as the other
-    /// direction pairs them.** `x) שלום (y` in a left-to-right paragraph is
-    /// drawn `x) םולש (y` — a closing bracket left of an opening one — and a
-    /// right-to-left paragraph draws `y( שלום )x` the same, its pair facing
-    /// outward. That reading pairs the brackets and the typed text does not,
-    /// so it is taken: `BidiCharacterTest.txt` has 1 250 lines typed so on
-    /// purpose that read worse for it, and none whose brackets all pair.
+    /// **Brackets that are no pair as typed keep the direction the rules
+    /// before the tie-break give the line** — the review of the K-11 fix.
+    ///
+    /// Each of these left-to-right lines draws a closing bracket left of an
+    /// opening one, and a right-to-left paragraph draws the same picture for
+    /// another text, in which the two pair facing outward. As first written
+    /// the tie-break took that reading wherever it paired more brackets
+    /// facing outward and no fewer in all, and read every one of them
+    /// backwards: `.and 2) close it )שלום( open the file )Step 1`. A list
+    /// marker, a smiley and a parenthesis wrapped onto the next line are
+    /// commoner in running text than any line `BidiCharacterTest.txt` holds,
+    /// whose lines are each a whole paragraph. The first pairs `(שלום)` read
+    /// as typed and `) open the file (` read from the right — one each, so
+    /// nothing is said for the other; the rest pair more read from the right,
+    /// but with the spaces that stood outside the two brackets inside the
+    /// pair, `see( מלחמה )b` — no bracket set against its own text.
     #[test]
-    fn brackets_typed_closing_first_read_as_the_other_direction_pairs_them() {
-        let typed = "x) \u{5E9}\u{5DC}\u{5D5}\u{5DD} (y";
+    fn brackets_that_are_no_pair_as_typed_keep_the_lines_direction() {
+        for typed in [
+            "Step 1) open the file (\u{5E9}\u{5DC}\u{5D5}\u{5DD}) and 2) close it.",
+            "Great :) \u{5E9}\u{5DC}\u{5D5}\u{5DD} (yes) \u{5E2}\u{5D5}\u{5DC}\u{5DD}.",
+            "Peace (\u{639}\u{648}\u{627}\u{645}\u{644} \u{639}\u{62F}\u{629}) and war (\u{648}\u{642}\u{62F}",
+            "a) \u{5E9}\u{5DC}\u{5D5}\u{5DD} b) \u{5DE}\u{5DC}\u{5D7}\u{5DE}\u{5D4} (see",
+            "x) \u{5E9}\u{5DC}\u{5D5}\u{5DD} (y",
+            "The term ( \u{5E9}\u{5DC}\u{5D5}\u{5DD} ) and (",
+        ] {
+            let line = drawn(typed, BaseDirection::LeftToRight);
+            let units = chars(&line);
+            let units: Vec<&str> = units.iter().map(String::as_str).collect();
+            assert_eq!(
+                drawn_direction(&units),
+                BaseDirection::LeftToRight,
+                "{typed:?}"
+            );
+            assert_eq!(
+                read_in(&units, &logical_order(&units, BaseDirection::Auto)),
+                typed
+            );
+        }
+    }
+
+    /// **A reading that pairs no more brackets than the other turns nothing,
+    /// whatever faces outward.** `(a)א(` in a left-to-right paragraph pairs
+    /// `(a)`; a right-to-left paragraph draws the same picture for `(א)a(`,
+    /// whose one pair faces outward and is set against its letter. One pair
+    /// each: the ends and the majority (a tie, so left to right) keep the
+    /// line. `BidiCharacterTest.txt` has 1 250 lines of this kind, typed with
+    /// brackets that do not all pair, that a tie-break asking for no fewer
+    /// pairs in all read worse, whether or not it asked the pairs to hug.
+    #[test]
+    fn a_reading_pairing_no_more_brackets_turns_nothing() {
+        let typed = "(a)\u{5D0}(";
+        let line = drawn(typed, BaseDirection::LeftToRight);
+        let units = chars(&line);
+        let units: Vec<&str> = units.iter().map(String::as_str).collect();
+        let other = read_in(&units, &logical_order(&units, BaseDirection::RightToLeft));
+        assert_eq!(
+            other, "(\u{5D0})a(",
+            "the other reading pairs one, facing outward"
+        );
+        assert_eq!(drawn(&other, BaseDirection::RightToLeft), line);
+        assert_eq!(drawn_direction(&units), BaseDirection::LeftToRight);
+        assert_eq!(
+            read_in(&units, &logical_order(&units, BaseDirection::Auto)),
+            typed
+        );
+    }
+
+    /// **The price: brackets typed closing before opening, each set against
+    /// the text between them, read as the other direction pairs them.**
+    /// `x)שלום(y` in a left-to-right paragraph is drawn `x)םולש(y`, and a
+    /// right-to-left paragraph draws `y(שלום)x` the same, its pair facing
+    /// outward and hugging the word. That reading pairs a bracket and the
+    /// typed text pairs none, so it is taken. `BidiCharacterTest.txt` has no
+    /// line that reads worse for it, nor has the review's probe of wrapped
+    /// sentences; a text typed so is a fragment, not prose.
+    #[test]
+    fn brackets_typed_closing_first_against_a_word_read_as_the_other_direction_pairs_them() {
+        let typed = "x)\u{5E9}\u{5DC}\u{5D5}\u{5DD}(y";
         let line = drawn(typed, BaseDirection::LeftToRight);
         let units = chars(&line);
         let units: Vec<&str> = units.iter().map(String::as_str).collect();
         assert_eq!(drawn_direction(&units), BaseDirection::RightToLeft);
         let read = read_in(&units, &logical_order(&units, BaseDirection::Auto));
-        assert_eq!(read, "y( \u{5E9}\u{5DC}\u{5D5}\u{5DD} )x");
+        assert_eq!(read, "y(\u{5E9}\u{5DC}\u{5D5}\u{5DD})x");
         assert_eq!(drawn(&read, BaseDirection::RightToLeft), line);
     }
 

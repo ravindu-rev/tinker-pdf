@@ -1184,7 +1184,7 @@ fn drawn_lines(doc: &Document) -> Vec<String> {
 /// SHIN's word before ` b.` — is a gap a spacing wide that has no mark at
 /// it, and at a spacing of half an em it is cut or not by the last place of
 /// the two sums that put its ends, in either build and at cd407d5, marks or
-/// none (`a_standard_14_line_at_exactly_half_an_em_is_cut_where_a_last_place_says`).
+/// none, where a left-to-right run stands beside it (class A in `epub.md`).
 #[test]
 fn a_standard_14_run_ending_on_a_mark_keeps_to_what_follows_to_half_an_em() {
     // At `16px`, `7.84px` is `0.49em` and `7.92px` `0.495em`; the last three
@@ -1332,12 +1332,13 @@ fn kataba_paragraph(first: &str) -> String {
     format!("<p dir=\"rtl\">{words}</p>")
 }
 
-/// **At a spacing of exactly half an em, a run boundary is cut or not by a
-/// floating-point last place, marks or none — class A of the marks fix's
-/// round 4, a known limit pinned so that ending it is noticed.**
+/// **A right-to-left line letter-spaced by exactly half an em reads whole,
+/// marks or none** — what was class A of the marks fix's round 4, a known
+/// limit pinned so that ending it would be noticed, and ended by the review
+/// of the K-11 fix.
 ///
 /// `TextDevice` resumes a line across an `ET` only where the next glyph
-/// starts within half an em of where the last one's box ended, and at a
+/// starts within half an em of where the pen stood, and at a
 /// `letter-spacing` of half an em every run boundary puts it half an em on:
 /// the box's end is the reader's sum (the `Td`, plus the glyph's width) and
 /// the next glyph's start is the painter's (its own `Td`), and two sums of
@@ -1345,23 +1346,18 @@ fn kataba_paragraph(first: &str) -> String {
 /// `0.5em` (`6pt`), a word space is drawn at `99.31199999999995` and ends,
 /// `3.336` wide, at `102.64799999999995`, and the next word is written at
 /// `108.64799999999997`: `6.000000000000014` on, past half an em by the last
-/// place of the two sums, and cut.
-/// Each line is cut so before its last word, and ruling 14 reads the cut-off
-/// word in the order the pieces are drawn, so the paragraph does not conserve
-/// — pointed, and with no mark at all (`بتك` for KATABA: the same three
-/// glyph widths, so the same lines and the same sums); at `0.4999em` and at
-/// `0.5001em` both conserve, every boundary decided by a ten-thousandth of
-/// an em. A pointed word is as wide as the same word unpointed
-/// (`css-text-3` §10.2), so it is drawn at the same places as the
-/// mark-free twin. At cd407d5 the pointed words were wider, the last places
-/// fell elsewhere and this paragraph conserved: on the round-4 probe, 12 of
-/// a default build's 15 books that conserve, read whole or are found by
-/// search at cd407d5 and not now, and all 94 with `bundled-fonts` (85 of
-/// them the band just past half an em,
-/// `a_standard_14_run_ending_on_a_mark_is_cut_past_half_an_em_as_its_letter_is`),
-/// are at a spacing within a thousandth of an em of half an em.
+/// place of the two sums. Each line was cut so before its last word, and
+/// ruling 14 read the cut-off word in the order the pieces were drawn, so the
+/// paragraph did not conserve — pointed, and with no mark at all (`بتك` for
+/// KATABA: the same three glyph widths, so the same lines and the same sums);
+/// at `0.4999em` and at `0.5001em` both conserved. Within right-to-left text
+/// the pen is where `Tc` and `Tw` left it now, the next word's own start, so
+/// the boundary is no gap at all. A pointed word is as wide as the same word
+/// unpointed (`css-text-3` §10.2), so it is drawn at the same places as the
+/// mark-free twin. What is left of the band is a boundary beside a
+/// left-to-right run, which nothing carries the pen across.
 #[test]
-fn a_standard_14_line_at_exactly_half_an_em_is_cut_where_a_last_place_says() {
+fn a_standard_14_right_to_left_line_at_exactly_half_an_em_reads_whole() {
     let read = |style: &str, first: &str| {
         let bytes = styled_book("ar", style, &kataba_paragraph(first));
         let doc = Document::open(bytes.clone()).expect("the book opens");
@@ -1385,7 +1381,7 @@ fn a_standard_14_line_at_exactly_half_an_em_is_cut_where_a_last_place_says() {
             .collect();
         (holds, drawn_lines(&doc).len(), starts)
     };
-    for (spacing, conserves) in [("0.4999em", true), ("0.5em", false), ("0.5001em", true)] {
+    for spacing in ["0.4999em", "0.5em", "0.5001em"] {
         let style = format!("p {{ font-family: sans-serif; letter-spacing: {spacing} }}");
         let pointed = read(&style, KATABA);
         let plain = read(&style, "\u{628}\u{62A}\u{643}");
@@ -1402,10 +1398,11 @@ fn a_standard_14_line_at_exactly_half_an_em_is_cut_where_a_last_place_says() {
             pointed.1, plain.1,
             "at `{spacing}` the pointed paragraph is cut in other places"
         );
-        assert_eq!(
-            (pointed.0, plain.0),
-            (conserves, conserves),
-            "at `{spacing}`: if half an em now conserves, drop class A from epub.md"
+        assert!(
+            pointed.0 && plain.0,
+            "at `{spacing}` the paragraph does not conserve: pointed {}, plain {}",
+            pointed.0,
+            plain.0
         );
     }
 }
@@ -1591,6 +1588,108 @@ fn a_standard_14_punctuation_run_between_right_to_left_words_reads_as_written() 
         "the pair is drawn as typed, each bracket facing its word: ( at {open}, ) at {close}"
     );
     reads_as_written(&bytes, &doc, arabic);
+}
+
+/// **A run of neutrals in an embedding, on a line with no right-to-left
+/// letter, is drawn as typed and reads as typed** (review of the K-11 fix).
+///
+/// `x RLE ?! PDF y`: the `?!` is at level 1, and a line that holds an `RLE`
+/// is one ruling 14 reads — but rule X9 removes the `RLE` before anything is
+/// resolved, so its reading never sees the embedding, and a run drawn in the
+/// embedding's order reads back reversed. As first written, K-11's fix drew
+/// it so, because its line held an `RLE`, and the page extracted
+/// `x RLE PDF !? y`; a line decides it by a letter of class `R` or `AL` now,
+/// or an `RLI`, which stays on the line and is read back with what it
+/// isolates — so the isolate's `?!`, which read `!?` before K-11, reads as
+/// typed too.
+#[test]
+fn a_run_of_neutrals_in_an_embedding_with_no_right_to_left_letter_reads_as_typed() {
+    for (control, closer) in [
+        ("&#x202B;", "&#x202C;"),
+        ("&#x202E;", "&#x202C;"),
+        ("&#x2067;", "&#x2069;"),
+    ] {
+        let bytes = styled_book("en", "", &format!("<p>x {control}?!{closer} y</p>"));
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let text = doc.page(0).expect("a page").text().plain_text();
+        assert!(text.contains("?!"), "{control}: {text:?}");
+        for verdict in [
+            conservation(&bytes, &doc),
+            conservation_in_logical_order(&bytes, &doc),
+        ] {
+            assert!(verdict.holds(), "{control}: {text:?} {verdict:?}");
+        }
+    }
+}
+
+/// **The price, pinned: a run of neutrals of its own that opens a
+/// right-to-left line with nothing left to right on it is drawn in its
+/// level's order, and reads after its word in the order drawn.**
+///
+/// `<p dir="rtl"><i>?!</i> שלום</p>`: UAX #9 draws the `?!` at the line's
+/// right end, `?` rightmost, and that is what the page shows. The line is
+/// ruling 14's comma tie-break's shape — a right-to-left letter leftmost,
+/// closing punctuation rightmost, nothing left to right — and a
+/// left-to-right paragraph draws it too, so it is read as one, the
+/// punctuation trailing in the order drawn: `שלום !?`, which is what the same
+/// line in one run has always read. Until K-11 a run of neutrals alone was
+/// drawn as typed, so the page showed `?!` reversed and the run read `?!`
+/// within its own structure element. The comma tie-break's price, as
+/// `content-and-text.md` names it.
+#[test]
+fn a_run_of_neutrals_opening_a_right_to_left_line_is_drawn_in_its_levels_order() {
+    for body in [
+        format!("<p dir=\"rtl\"><i>?!</i> {SHALOM}</p>"),
+        format!("<p dir=\"rtl\">?! {SHALOM}</p>"),
+    ] {
+        let bytes = styled_book("he", "", &body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let (question, bang) = (drawn_at(&doc, "?"), drawn_at(&doc, "!"));
+        assert!(
+            bang < question,
+            "{body}: the run is drawn in its level's order, ? rightmost: ? at {question}, ! at {bang}"
+        );
+        let text = doc.page(0).expect("a page").text().plain_text();
+        assert!(text.contains(&format!("{SHALOM} !?")), "{body}: {text:?}");
+    }
+}
+
+/// **A letter-spaced Arabic line reads its full stop with its word** (review
+/// of the K-11 fix).
+///
+/// `مُدَّة مُعلِّم. مُدَّة مُعلِّم..` in monospace at `letter-spacing: 8px` is one
+/// line, with no `dir`: the `. ` between the two Arabic phrases is at level
+/// 1, drawn ` .` as UAX #9 draws it, and the next phrase is a text object of
+/// its own, written `Tc` past the stop's box — half an em at this size, the
+/// slack a line closed by `ET` is resumed within. Read from the box the line
+/// was cut after the stop, and the piece before the cut read
+/// `مُدَّة مُعلِّم .`, its stop parted from its word. `TextDevice` carries the
+/// pen across `Tc` into a right-to-left glyph now, and the line is one.
+#[test]
+fn a_letter_spaced_arabic_line_reads_its_full_stop_with_its_word() {
+    for style in [
+        "p { font-family: monospace; letter-spacing: 8px }",
+        "p { font-family: monospace; letter-spacing: 0.5em }",
+    ] {
+        let bytes = styled_book(
+            "ar",
+            style,
+            &format!("<p>{MUDDA_MUALLIM} {MUDDA_MUALLIM}.</p>"),
+        );
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let text = doc.page(0).expect("a page").text().plain_text();
+        let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            words.contains(&format!("{MUDDA_MUALLIM} {MUDDA_MUALLIM}.")),
+            "{style}: {text:?}"
+        );
+        for verdict in [
+            conservation(&bytes, &doc),
+            conservation_in_logical_order(&bytes, &doc),
+        ] {
+            assert!(verdict.holds(), "{style}: {text:?} {verdict:?}");
+        }
+    }
 }
 
 /// **The same word alone on its line — the book's own shape, a table with a

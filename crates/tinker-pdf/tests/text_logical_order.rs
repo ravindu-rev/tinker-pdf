@@ -476,6 +476,36 @@ fn a_right_to_left_line_opening_with_a_bracketed_latin_run_reads_as_written() {
     );
 }
 
+/// **Brackets that are no pair as typed keep a left-to-right line's
+/// direction** — ruling 14's bracket tie-break as the review of the K-11 fix
+/// revised it.
+///
+/// A list marker before a parenthesis, `1) see (שלום) as 2) one.`, and a
+/// parenthesis opened at a line's end, `a) שלום b) חו (see`, each draw a
+/// closing bracket left of an opening one, and a right-to-left paragraph
+/// draws each line the same for another text, in which two of them pair
+/// facing outward. As first proposed, the tie-break took that reading and
+/// read both lines backwards: `.as 2) one )שלום( see )1` and
+/// `see( חו )b שלום )a`. The first pairs no
+/// more brackets read from the right than as typed, `(שלום)` against
+/// `) see (`; the second pairs one read from the right, `see( חו )b`, but
+/// with the spaces that stood outside its two brackets inside it, and a
+/// bracket is set against its own text. Both read as typed.
+#[test]
+fn a_list_marker_and_a_wrapped_parenthesis_in_left_to_right_text_read_as_typed() {
+    let first = format!("1) see ({SHALOM}) as 2) one.");
+    let second = format!("a) {SHALOM} b) {HET_VAV} (see");
+    let drawn = |typed: &str| {
+        typed
+            .replace(SHALOM, &reversed(SHALOM))
+            .replace(HET_VAV, &reversed(HET_VAV))
+    };
+    assert_eq!(
+        extract_lines(page_of(&[visual(&drawn(&first)), visual(&drawn(&second))])),
+        [(first, false), (second, false)]
+    );
+}
+
 /// **A mark stays with its base, whichever side of it the producer wrote it.**
 ///
 /// Qamats on lamed. A producer that shapes and then reverses whole clusters
