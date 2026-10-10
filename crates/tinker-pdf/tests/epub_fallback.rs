@@ -422,30 +422,85 @@ fn a_standard_14_arabic_word_keeps_each_haraka_on_its_letter() {
     reads_as_written(&bytes, &doc, &format!("{KATABA} \u{643}\u{62A}\u{628}."));
 }
 
-/// **A run of nothing but punctuation at a right-to-left level is drawn in
-/// L2's order too.**
+/// **A line of nothing but neutrals at a right-to-left level is drawn as
+/// written, and reads as written.**
+///
+/// Ruling 14 reads a line that holds no right-to-left character in the order
+/// the content stream drew it, so such a line conserves exactly when its
+/// standard-14 slices are drawn as typed, whatever level its paragraph puts
+/// them at. Reordering every slice whose run was at an odd level — tried on
+/// the review of 6d08c6b, for the punctuation run below — read every one of
+/// these back reversed: `?!` as `!?`, `(...)` as `)...(` (drawn so too, each
+/// bracket's hollow turned away from the dots), `...!` as `!...`, `[*]` as
+/// `]*[`, `?! 12` as ` !?12` and a heading's `?!` as `!?`, where a66f692,
+/// before that was tried, conserved each.
+#[test]
+fn a_standard_14_neutral_line_at_a_right_to_left_level_reads_as_written() {
+    for (body, expected) in [
+        ("<p dir=\"rtl\">?!</p>", "?!"),
+        ("<h2 dir=\"rtl\">?!</h2>", "?!"),
+        ("<p dir=\"rtl\">(...)</p>", "(...)"),
+        ("<p dir=\"rtl\">...!</p>", "...!"),
+        ("<p dir=\"rtl\">[*]</p>", "[*]"),
+        ("<p dir=\"rtl\">?! 12</p>", "?! 12"),
+    ] {
+        let bytes = styled_book("he", "", body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        reads_as_written(&bytes, &doc, expected);
+    }
+}
+
+/// **The same line, first in a paragraph whose second line is Hebrew, reads
+/// as written too.**
+///
+/// The paragraph holds a right-to-left character and its first line does
+/// not. Ruling 14 resolves a line alone, so that line is read in content
+/// order like any other with nothing right-to-left in it, and has to be
+/// drawn as typed: reordered by its level, it was drawn `!?`, and the page
+/// read `!?` above `חו`.
+#[test]
+fn a_standard_14_neutral_line_above_a_right_to_left_line_reads_as_written() {
+    let body = format!("<p dir=\"rtl\">?!<br/>{HET_VAV}</p>");
+    let bytes = styled_book("he", "", &body);
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    reads_as_written(&bytes, &doc, &format!("?!\n{HET_VAV}"));
+}
+
+/// **A run of nothing but punctuation between two right-to-left words is
+/// drawn in the order it was typed, and reads back reversed — the known
+/// limit `epub.md`'s `direction` row names, pinned so that ending it is
+/// noticed.**
 ///
 /// The `.,` between two italic Hebrew words is a run of its own, and N1
 /// resolves both marks to the paragraph's level, 1, so L2 draws them `,.`.
-/// The run holds no right-to-left character, and only a slice holding one
-/// was reordered, so it was drawn as typed: the line read back `חו,.וח`.
-/// What decides is the run's level, as for a shaped slice — save for an
-/// `inside` list marker, which is content the book does not hold and is
-/// still drawn as written (`epub_paint.rs` and `epub_shaped.rs` pin its side
-/// and its order).
+/// `coded_order` reorders only a slice that holds a right-to-left character,
+/// and this one holds none, so it is drawn as typed, `.` left of `,`, and
+/// the line, which ruling 14 reads right to left, comes back `חו,.וח`.
+///
+/// Reordering every slice at an odd level instead drew this line right and
+/// every line of nothing but neutrals at a right-to-left level backwards
+/// (the two tests above), and was taken back. Which of the two a slice is on
+/// — whether its **line** holds a right-to-left character — is the line's to
+/// say, and `draw_coded` is handed the run and the slice. When this fails
+/// because the line reads `חו.,וח`, the limit is gone: drop it from
+/// `epub.md` and make this the test that the line reads as written.
 #[test]
-fn a_standard_14_punctuation_run_at_a_right_to_left_level_is_drawn_reversed() {
+fn a_standard_14_punctuation_run_between_right_to_left_words_is_drawn_as_typed() {
     let body = format!("<p dir=\"rtl\"><i>{HET_VAV}</i>.,<i>{VAV_HET}</i></p>");
     let bytes = styled_book("he", "", &body);
     let doc = Document::open(bytes.clone()).expect("the book opens");
 
     let (comma, stop) = (drawn_at(&doc, ","), drawn_at(&doc, "."));
     assert!(
-        comma < stop,
-        "the punctuation is drawn in the order it was typed: . at {stop}, , at {comma}"
+        stop < comma,
+        "the punctuation is no longer drawn as typed: , at {comma}, . at {stop}"
     );
 
-    reads_as_written(&bytes, &doc, &format!("{HET_VAV}.,{VAV_HET}"));
+    let text = doc.page(0).expect("a page").text().plain_text();
+    assert!(
+        text.contains(&format!("{HET_VAV},.{VAV_HET}")),
+        "the known limit no longer reads the punctuation reversed: {text:?}"
+    );
 }
 
 /// **The same word alone on its line — the book's own shape, a table with a

@@ -579,13 +579,15 @@ Landed so far:
   was written a code at a time as typed, so a Hebrew word no face of the
   book covers was drawn backwards — unseen until ruling 14 read the page and
   `pg2701-images.epub`'s Hebrew came back reversed. `paint::coded_order` puts
-  a segment holding a right-to-left character, or set at a right-to-left
-  level, in L2's order first (`epub_fallback.rs`); one holding none at a
-  left-to-right level is written as before, and so is a right-to-left
-  `inside` marker's `1. `. *Found on review*, it had reversed a character
-  at a time, so a Hebrew point or Arabic haraka left its letter, and had
-  reordered only a slice holding a right-to-left character, so the `.,`
-  between two right-to-left words was drawn as typed. A letter and the
+  a segment holding a right-to-left character in L2's order first
+  (`epub_fallback.rs`); one holding none is written as before at any level,
+  a right-to-left `inside` marker's `1. ` among them. That leaves the `.,`
+  between two right-to-left words drawn as typed and read back reversed, a
+  known limit: setting a segment by its level instead, tried on review, drew
+  that right and reversed every line of neutrals alone in a right-to-left
+  paragraph, which ruling 14 reads in content order, and was taken back on
+  the next. *Found on review* too, it had reversed a character at a time, so a
+  Hebrew point or Arabic haraka left its letter. A letter and the
   nonspacing marks after it are now one unit; with no `GPOS` to position a
   mark, which side of its letter one is drawn on follows its advance —
   after the letter for the overflow font's, which are as wide as a letter,

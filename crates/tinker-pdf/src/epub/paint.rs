@@ -5107,17 +5107,26 @@ fn draw_coded(
 ///
 /// The level is the run's, as for a shaped slice ([`draw_shaped`]):
 /// [`TextRun::bidi_level`] once its line has cut it to one level, its own
-/// P2 and P3 where nothing has. A slice is reordered when it holds a
-/// character that reads or opens right to left, or when its run is at an odd
-/// level: a run of neutrals there — the `.,` between two right-to-left
-/// words, which N1 puts at the paragraph's level — holds nothing
-/// right-to-left, and was drawn as typed until the review of 6d08c6b, where
-/// L2 draws it `,.`. Anything else
-/// keeps the order it was written in without resolving anything, as
-/// [`piece_order`] does, so a left-to-right page is drawn exactly as before.
-/// So is an `inside` list marker ([`TextRun::generated`]) with nothing
-/// right-to-left in it: a right-to-left item's `1. ` is at its paragraph's
-/// odd level, and is still drawn as written, the limit `epub.md` names.
+/// P2 and P3 where nothing has. A slice with no character that reads or
+/// opens right to left keeps the order it was written in without resolving
+/// anything, as [`piece_order`] does — so a left-to-right page, and a
+/// right-to-left `inside` marker's `1. `, are drawn exactly as before.
+///
+/// **So is a run of nothing but neutrals at a right-to-left level — a known
+/// limit `epub.md` names, not an answer.** The `.,` between two
+/// right-to-left words (`<p dir="rtl"><i>חו</i>.,<i>וח</i></p>`) is a run of
+/// its own that N1 puts at the paragraph's level, where L2 draws it `,.`;
+/// drawn as typed, the line reads back `חו,.וח`. Reordering every slice at
+/// an odd level, tried on the review of 6d08c6b, drew that line right, and
+/// the next review measured what it broke: ruling 14 reads a line holding no
+/// right-to-left character in the order the content stream drew it, so
+/// every such line at a right-to-left level read back reversed —
+/// `<p dir="rtl">?!</p>` as `!?`, a heading's `?!`, `(...)` (drawn `)...(`,
+/// each bracket's hollow turned away from the dots), the first line of
+/// `?!<br/>חו`. Which of the two a slice is on is whether its **line** holds
+/// a right-to-left character, and this is not handed the line; until it is,
+/// a slice is reordered only when it holds one itself (`epub_fallback.rs`
+/// pins both sides).
 ///
 /// The units L2 orders are **a character and the nonspacing marks after
 /// it** (`Bidi_Class` `NSM`), kept together as rule L3 keeps a mark with its
@@ -5164,8 +5173,7 @@ fn draw_coded(
 /// left to right, `)` `ח` `ו` `(` — and extracts as written.
 fn coded_order(run: &TextRun, slice: &str, spacing: impl Fn(char) -> bool) -> Vec<char> {
     let chars: Vec<char> = slice.chars().collect();
-    let odd = !run.generated && run.bidi_level.is_some_and(|level| level % 2 == 1);
-    if !odd && !chars.iter().copied().any(opens_right_to_left) {
+    if !chars.iter().copied().any(opens_right_to_left) {
         return chars;
     }
     let direction = match run.bidi_level {
