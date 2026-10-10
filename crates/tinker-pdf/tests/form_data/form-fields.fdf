@@ -1,0 +1,11 @@
+%FDF-1.2
+1 0 obj
+<< /FDF << /Fields [ << /T (name) /V (Ada Lovelace) >>
+                     << /T (agree) /V /On >>
+                     << /T (colour) /V /blue >>
+                     << /T (notes) /V <FEFF004E006F007400650020201400200032> >> ]
+          /F (form-fields.pdf) >> >>
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF

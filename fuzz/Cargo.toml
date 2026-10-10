@@ -200,6 +200,24 @@ test = false
 doc = false
 
 [[bin]]
+name = "bzip2"
+path = "fuzz_targets/bzip2.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ppmd"
+path = "fuzz_targets/ppmd.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "zstd"
+path = "fuzz_targets/zstd.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "rar"
 path = "fuzz_targets/rar.rs"
 test = false
@@ -214,6 +232,12 @@ doc = false
 [[bin]]
 name = "xml"
 path = "fuzz_targets/xml.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "html"
+path = "fuzz_targets/html.rs"
 test = false
 doc = false
 
@@ -248,6 +272,24 @@ test = false
 doc = false
 
 [[bin]]
+name = "bmp"
+path = "fuzz_targets/bmp.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "gif"
+path = "fuzz_targets/gif.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "webp"
+path = "fuzz_targets/webp.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "brotli"
 path = "fuzz_targets/brotli.rs"
 test = false
@@ -266,7 +308,37 @@ test = false
 doc = false
 
 [[bin]]
+name = "standalone"
+path = "fuzz_targets/standalone.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "markdown"
+path = "fuzz_targets/markdown.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fb2"
+path = "fuzz_targets/fb2.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "woff"
 path = "fuzz_targets/woff.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "form_data"
+path = "fuzz_targets/form_data.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "annotation_appearance"
+path = "fuzz_targets/annotation_appearance.rs"
 test = false
 doc = false

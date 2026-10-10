@@ -43,7 +43,10 @@
 //! says where the rules had to be given up.
 
 use crate::flow::{Abreast, BlockRecord, FloatRecord, Flow, Item, ItemKind};
-use crate::{BoxFragment, Layout, Limits, Options, Page, Refusal, ReplacedFragment, Warning};
+use crate::{
+    BoxFragment, ClipFragment, Layout, Limits, Options, Page, Refusal, ReplacedFragment, Warning,
+};
+use tinker_pdf_css::property::LengthPercentage;
 
 /// Slack for a comparison against a page height, in points.
 ///
@@ -74,6 +77,27 @@ enum Tier {
     WithoutBd,
     /// None of them: *"rules A and C are dropped as well"*.
     WithoutAc,
+}
+
+/// How far the column has got on the page whose out-of-flow content is being
+/// drawn: the two questions [`beside`] asks of it.
+#[derive(Clone, Copy, Debug)]
+struct Column {
+    /// Where the next page's column begins. A float that begins at or below
+    /// it is beside the next page's content and not this one's.
+    reach: f64,
+    /// How many of the column's items are on this page or an earlier one,
+    /// counting a margin a break consumed. A clip's hidden tail that follows
+    /// one of them is drawn here ([`crate::flow::FloatRecord::follows`]).
+    done: usize,
+}
+
+impl Column {
+    /// The column has run out: every float and every tail belongs here.
+    const FINISHED: Column = Column {
+        reach: f64::INFINITY,
+        done: usize::MAX,
+    };
 }
 
 /// How much of one float has been drawn.
@@ -303,7 +327,10 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             // is worse than a push, because the push gets a whole page to try
             // again with.
             let hopeless = flow.items[at].height - from > fragmentainer + EPSILON;
-            if available > EPSILON && (at == cursor || (hopeless && !forced)) {
+            // A later band is cut here only on a page that did not begin
+            // partway through a band: that page is told about one slice, so
+            // the band it began inside would be drawn whole again.
+            if available > EPSILON && (at == cursor || (hopeless && !forced && drawn == 0.0)) {
                 if forced {
                     // **Narrowed, not gone.** What overflows a page now is one
                     // box *inside* the band that is itself taller than a page,
@@ -319,16 +346,16 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
                         },
                     );
                 }
-                let mut built = page(
-                    &flow,
-                    cursor,
-                    at + 1,
-                    top,
-                    Cutting {
-                        at,
-                        slice: Slice { from, to: end },
-                    },
-                );
+                // **The first slice is unbounded above**, for the reason
+                // [`Slice::WHOLE`] is: a negative margin can pull an item above
+                // the band's own top, and a first slice that began at zero held
+                // it on no page at all. Each later slice begins where the one
+                // before it ended, so every item is drawn exactly once.
+                let window = Slice {
+                    from: if from > 0.0 { from } else { f64::NEG_INFINITY },
+                    to: end,
+                };
+                let mut built = page(&flow, cursor, at + 1, top, Cutting { at, slice: window });
                 outside(
                     &flow,
                     &mut floats,
@@ -337,8 +364,12 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
                     top,
                     fragmentainer,
                     // The next page carries on inside this same band, so its
-                    // column begins exactly where this slice ended.
-                    flow.items[at].y + end,
+                    // column begins exactly where this slice ended, and every
+                    // item before the band is done.
+                    Column {
+                        reach: flow.items[at].y + end,
+                        done: at,
+                    },
                     &mut warnings,
                 );
                 order(&mut built);
@@ -397,7 +428,10 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             &mut built,
             top,
             fragmentainer,
-            reach,
+            Column {
+                reach,
+                done: cut.next,
+            },
             &mut warnings,
         );
         order(&mut built);
@@ -435,7 +469,7 @@ pub(crate) fn paginate(flow: Flow, options: &Options, limits: &Limits) -> Result
             // would be a loop that never ends rather than a page that is
             // wrong: these pages exist only to finish the floats, and a float
             // that is never started never finishes.
-            f64::INFINITY,
+            Column::FINISHED,
             &mut warnings,
         );
         order(&mut built);
@@ -482,11 +516,11 @@ fn outside(
     out: &mut Page,
     top: f64,
     height: f64,
-    reach: f64,
+    column: Column,
     warnings: &mut Vec<(Warning, usize)>,
 ) {
-    beside(&flow.floats, floats, out, top, height, reach, warnings);
-    beside(&flow.positioned, placed, out, top, height, reach, warnings);
+    beside(&flow.floats, floats, out, top, height, column, warnings);
+    beside(&flow.positioned, placed, out, top, height, column, warnings);
     // **§9.6.1's paged answer, in one loop.** *"In the case of paged media,
     // fixed boxes are repeated on every page, and are fixed with respect to the
     // page box."* Their own cursors are not kept, because a box that is drawn
@@ -518,13 +552,37 @@ fn beside(
     out: &mut Page,
     top: f64,
     height: f64,
-    reach: f64,
+    column: Column,
     warnings: &mut Vec<(Warning, usize)>,
 ) {
     for (float, cursor) in records.iter().zip(cursors.iter_mut()) {
         if cursor.next >= float.items.len() {
             continue;
         }
+        // **A clip's hidden tail is drawn whole, on the page that holds the
+        // item it follows**: it is the rest of the text whose first lines
+        // that item ends, under the same reading-order stamp, so this page or
+        // a later one is the only place it reads in order. Not by its height,
+        // which says the same thing only while the column's `y` grows with
+        // its index, and a negative margin moves it back up. Never broken: it
+        // has no height to break, and breaking it spent a page an item.
+        if let Some(after) = float.follows {
+            if after <= column.done {
+                emit(
+                    &float.items,
+                    &float.blocks,
+                    cursor.next,
+                    float.items.len(),
+                    -top,
+                    Cutting::NONE,
+                    out,
+                );
+                cursor.next = float.items.len();
+                cursor.started = true;
+            }
+            continue;
+        }
+        let reach = column.reach;
         let start = cursor.next;
         if !cursor.started {
             // **A page's floats are the ones beside the column it holds**, and
@@ -714,7 +772,7 @@ fn emit(
     // Decorations first and in tree order, so an ancestor's background is
     // under its descendants'.
     for block in blocks {
-        if !block.painted && block.replaced.is_none() {
+        if !block.painted && block.replaced.is_none() && !block.clip.any() {
             continue;
         }
         let Some(head) = block.first else {
@@ -737,7 +795,22 @@ fn emit(
         if box_bottom < box_top {
             continue;
         }
+        // `box-decoration-break: slice`'s cut edges: the box began on an
+        // earlier page, or was cut inside its first item; it ends on a later
+        // one, or is cut inside its last.
+        let cut_top = from > head || box_top > head_y;
+        let cut_bottom = to < block.last || box_bottom < tail.y + tail.height;
+        if block.clip.any() {
+            clip(
+                block,
+                box_top + offset + block.dy,
+                (box_bottom - box_top).max(0.0),
+                (cut_top, cut_bottom),
+                out,
+            );
+        }
         if block.painted {
+            let height = (box_bottom - box_top).max(0.0);
             out.boxes.push(BoxFragment {
                 x: block.x,
                 // CSS 2.2 §9.4.3's offset, which the flow deliberately does not
@@ -745,11 +818,19 @@ fn emit(
                 // column and only its ink moves.
                 y: box_top + offset + block.dy,
                 width: block.width,
-                height: (box_bottom - box_top).max(0.0),
+                height,
                 background: block.background,
                 border_width: block.border_width,
                 border_style: block.border_style,
                 border_color: block.border_color,
+                radius: corner_radii(block, block.width, height, cut_top, cut_bottom),
+                outline: block.paint.as_ref().and_then(|paint| paint.outline),
+                image: block.paint.as_ref().and_then(|paint| paint.image.clone()),
+                shadows: block
+                    .paint
+                    .as_ref()
+                    .map_or_else(Vec::new, |paint| paint.shadows.clone()),
+                anchor: block.anchor,
             });
         }
         // The picture, once, on the page its box **begins** on. `from == head`
@@ -811,6 +892,133 @@ fn emit(
     }
 }
 
+/// One clipping box's fragment on this page, as its padding box.
+///
+/// `top` and `height` are the **border box's** on this page; the border is
+/// taken off each edge the fragment really has, and an edge a page boundary
+/// cut is left where the cut put it, since the page clips that edge already.
+/// An axis the box does not clip is unbounded, for [`crate::ClipFragment`]'s
+/// reason.
+fn clip(
+    block: &BlockRecord,
+    top: f64,
+    height: f64,
+    (cut_top, cut_bottom): (bool, bool),
+    out: &mut Page,
+) {
+    let Some(anchor) = block.anchor else {
+        return;
+    };
+    let border = &block.border_width;
+    let inset_top = if cut_top { 0.0 } else { border.top };
+    let inset_bottom = if cut_bottom { 0.0 } else { border.bottom };
+    let (x, width) = if block.clip.x {
+        (
+            block.x + border.left,
+            (block.width - border.left - border.right).max(0.0),
+        )
+    } else {
+        (f64::NEG_INFINITY, f64::INFINITY)
+    };
+    let (y, tall) = if block.clip.y {
+        (
+            top + inset_top,
+            (height - inset_top - inset_bottom).max(0.0),
+        )
+    } else {
+        (f64::NEG_INFINITY, f64::INFINITY)
+    };
+    // §5.3: the padding edge's curve is the border edge's less the border
+    // width on each axis. A clip unbounded in one axis has no corners.
+    let radius = if block.clip.x && block.clip.y {
+        let outer = corner_radii(block, block.width, height, cut_top, cut_bottom);
+        let less = |(h, v): (f64, f64), across: f64, down: f64| {
+            ((h - across).max(0.0), (v - down).max(0.0))
+        };
+        [
+            less(outer[0], border.left, inset_top),
+            less(outer[1], border.right, inset_top),
+            less(outer[2], border.right, inset_bottom),
+            less(outer[3], border.left, inset_bottom),
+        ]
+    } else {
+        [(0.0, 0.0); 4]
+    };
+    out.clips.push(ClipFragment {
+        anchor,
+        x,
+        y,
+        width,
+        height: tall,
+        radius,
+    });
+}
+
+/// A fragment's four corner radii, `css-backgrounds-3` §5, in CSS pixels.
+///
+/// §5.1 resolves a horizontal percentage against the border box's width and a
+/// vertical one against its height; §5.5 then scales **every** radius by one
+/// factor, the smallest `L / S` over the four sides where `S` is the sum of the
+/// two radii meeting that side and `L` its length, when that is below one — so
+/// a 30-pixel radius on a 40-pixel-high box becomes 20 at all four corners and
+/// not only at the two that collided, which keeps a pill shape round.
+///
+/// **`width` and `height` are the fragment's**, so on a box cut across pages
+/// both the percentages and the factor are the slice's: a short last slice of
+/// a box with large radii has smaller corners than the unbroken box, where
+/// `css-break-3` §5.4's `slice` would cut the unbroken box's shape. Stated in
+/// `docs/features/epub.md`; the unbroken shape would need drawing under a clip
+/// to the slice, since its corner can be taller than the slice is.
+fn corner_radii(
+    block: &BlockRecord,
+    width: f64,
+    height: f64,
+    cut_top: bool,
+    cut_bottom: bool,
+) -> [(f64, f64); 4] {
+    let Some(paint) = block.paint.as_ref() else {
+        return [(0.0, 0.0); 4];
+    };
+    let resolve = |length: LengthPercentage, of: f64| match length {
+        LengthPercentage::Px(px) => px.max(0.0),
+        LengthPercentage::Percent(percent) => (of * percent / 100.0).max(0.0),
+    };
+    let mut radii = paint.radius.map(|radius| {
+        (
+            resolve(radius.horizontal, width),
+            resolve(radius.vertical, height),
+        )
+    });
+    // `Corner::ALL`'s order: top-left, top-right, bottom-right, bottom-left.
+    if cut_top {
+        radii[0] = (0.0, 0.0);
+        radii[1] = (0.0, 0.0);
+    }
+    if cut_bottom {
+        radii[2] = (0.0, 0.0);
+        radii[3] = (0.0, 0.0);
+    }
+    let sides = [
+        (width, radii[0].0 + radii[1].0),
+        (height, radii[1].1 + radii[2].1),
+        (width, radii[2].0 + radii[3].0),
+        (height, radii[3].1 + radii[0].1),
+    ];
+    let mut factor: f64 = 1.0;
+    for (length, sum) in sides {
+        if sum > 0.0 {
+            factor = factor.min(length.max(0.0) / sum);
+        }
+    }
+    if factor < 1.0 {
+        for radius in &mut radii {
+            radius.0 *= factor;
+            radius.1 *= factor;
+        }
+    }
+    radii
+}
+
 /// Draws one band, or the part of one that belongs to this page.
 ///
 /// `offset` puts the band's local origin in the page's coordinates. A band
@@ -818,7 +1026,7 @@ fn emit(
 /// the item at band-local `window.from` on this page's top edge.
 fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
     for block in &band.blocks {
-        if !block.painted && block.replaced.is_none() {
+        if !block.painted && block.replaced.is_none() && !block.clip.any() {
             continue;
         }
         let Some(head) = block.first else {
@@ -833,16 +1041,36 @@ fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
         if box_bottom < box_top {
             continue;
         }
+        let cut_top = box_top > band.items[head].y;
+        let cut_bottom = box_bottom < tail.y + tail.height;
+        if block.clip.any() {
+            clip(
+                block,
+                box_top + offset + block.dy,
+                (box_bottom - box_top).max(0.0),
+                (cut_top, cut_bottom),
+                out,
+            );
+        }
         if block.painted {
+            let height = (box_bottom - box_top).max(0.0);
             out.boxes.push(BoxFragment {
                 x: block.x,
                 y: box_top + offset + block.dy,
                 width: block.width,
-                height: (box_bottom - box_top).max(0.0),
+                height,
                 background: block.background,
                 border_width: block.border_width,
                 border_style: block.border_style,
                 border_color: block.border_color,
+                radius: corner_radii(block, block.width, height, cut_top, cut_bottom),
+                outline: block.paint.as_ref().and_then(|paint| paint.outline),
+                image: block.paint.as_ref().and_then(|paint| paint.image.clone()),
+                shadows: block
+                    .paint
+                    .as_ref()
+                    .map_or_else(Vec::new, |paint| paint.shadows.clone()),
+                anchor: block.anchor,
             });
         }
         // A picture inside a band — a table cell, a flex item, a column — on

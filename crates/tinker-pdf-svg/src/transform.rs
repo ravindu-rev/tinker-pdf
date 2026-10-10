@@ -32,6 +32,29 @@ pub fn apply(matrix: [f64; 6], point: [f64; 2]) -> [f64; 2] {
     ]
 }
 
+/// The matrix that undoes `matrix`, or `None` for one that flattens the plane.
+///
+/// A degenerate matrix has no inverse, and §7.6 makes a `scale(0)` legal: the
+/// element draws nothing, and a bounding box of it in its own space has no
+/// answer. `None` says so rather than dividing by zero.
+#[must_use]
+pub fn invert(matrix: [f64; 6]) -> Option<[f64; 6]> {
+    let [a, b, c, d, e, f] = matrix;
+    let determinant = a * d - b * c;
+    if !determinant.is_finite() || determinant == 0.0 {
+        return None;
+    }
+    let out = [
+        d / determinant,
+        -b / determinant,
+        -c / determinant,
+        a / determinant,
+        (c * f - d * e) / determinant,
+        (b * e - a * f) / determinant,
+    ];
+    out.iter().all(|v| v.is_finite()).then_some(out)
+}
+
 /// Reads §7.6's transform list.
 ///
 /// Returns `None` for anything that is not the grammar — a caller turns that
@@ -61,6 +84,20 @@ pub fn list(text: &str) -> Option<[f64; 6]> {
     Some(out)
 }
 
+/// §7.6's `rotate(a)`: a turn of `a` degrees about the origin, clockwise in
+/// SVG's downward space.
+///
+/// Public because §10.5's per-glyph `rotate` is the same turn about each
+/// glyph's own origin, and the caller that places a glyph — which has the
+/// metrics this crate does not — must not compute a second one with a
+/// platform `sin` (ruling 4).
+#[must_use]
+pub fn rotation(degrees: f64) -> [f64; 6] {
+    let radians = math::to_radians(degrees);
+    let (sin, cos) = (math::sin(radians), math::cos(radians));
+    [cos, sin, -sin, cos, 0.0, 0.0]
+}
+
 /// One transform function, as its own matrix.
 fn function(name: &str, n: &[f64]) -> Option<[f64; 6]> {
     Some(match (name, n.len()) {
@@ -70,13 +107,7 @@ fn function(name: &str, n: &[f64]) -> Option<[f64; 6]> {
         // §7.6: one number scales both axes equally.
         ("scale", 1) => [n[0], 0.0, 0.0, n[0], 0.0, 0.0],
         ("scale", 2) => [n[0], 0.0, 0.0, n[1], 0.0, 0.0],
-        ("rotate", 1) => {
-            let (sin, cos) = (
-                math::sin(math::to_radians(n[0])),
-                math::cos(math::to_radians(n[0])),
-            );
-            [cos, sin, -sin, cos, 0.0, 0.0]
-        }
+        ("rotate", 1) => rotation(n[0]),
         // §7.6's three-argument form is a rotation about a point, which is a
         // translate, a rotate and the inverse translate — written out rather
         // than composed, because composing it here would be three matrix

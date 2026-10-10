@@ -1,8 +1,10 @@
-//! The committed `tar`, `sevenz` and `rar` fuzz seeds, replayed on stable.
+//! The committed `tar`, `sevenz`, `bzip2`, `ppmd`, `zstd` and `rar` fuzz
+//! seeds, replayed on stable.
 //!
-//! `fuzz/corpus/tar/` and `fuzz/corpus/sevenz/` are seven inputs each, written
-//! by this crate's own `write_the_fuzz_seeds` tests, and the targets that
-//! consume them need nightly and
+//! `fuzz/corpus/tar/` and `fuzz/corpus/sevenz/` are seven inputs each written
+//! by this crate's own `write_the_fuzz_seeds` tests — plus, in `sevenz/`, one
+//! per coder a real writer made, by `tests/coders/make-coders.py` — and the
+//! targets that consume them need nightly and
 //! a sanitizer runtime. So the seeds were only ever exercised when somebody
 //! ran `cargo fuzz`, which is not on every commit — and a seed corpus nothing
 //! reads is a corpus that stops describing the parser without anybody
@@ -32,7 +34,7 @@
 use std::path::{Path, PathBuf};
 
 use tinker_pdf_archive::tar::{Archive, EntryError, Kind, Limits};
-use tinker_pdf_archive::{rar, sevenz};
+use tinker_pdf_archive::{bzip2, ppmd, rar, sevenz, zstd};
 use tinker_pdf_filters::crc32;
 
 /// Every seed, by name, sorted so a failure names the same file on every
@@ -368,10 +370,14 @@ fn the_committed_sevenz_seeds_replay() {
         }
     }
     println!("RAN: {} sevenz seeds, {read_ok} entries read, {crc_checked} CRC-checked, {refused} refused outright", seeds.len());
+    // Seven hand-built by `write_the_fuzz_seeds`, and one per coder a real
+    // writer made, by `tests/coders/make-coders.py` (`bcj-lzma2`, `bzip2`,
+    // `ppmd`) and `make-bcj2.sh` (`bcj2`).
     assert_eq!(
         seeds.len(),
-        7,
-        "the seed count changed; `write_the_fuzz_seeds` is what should have          changed it, and the new file needs a reason in that test's comment"
+        11,
+        "the seed count changed; `write_the_fuzz_seeds` or `make-coders.py` is \
+         what should have changed it, and the new file needs a reason there"
     );
     assert!(
         crc_checked > 0,
@@ -406,6 +412,173 @@ fn the_crc_mismatch_seed_still_mismatches() {
         "the seed that exists to carry a flipped bit no longer carries one"
     );
     println!("RAN: the crc-mismatch seed refuses entry 0 by name");
+}
+
+/// The seeds a real writer made for one coder **reach** that coder: each opens
+/// and every entry reads, CRC-checked, under the bounds its control byte
+/// picks. A seed refused at open would keep the fuzzer on the header grammar
+/// and never hand it a stream for the coder it is named after.
+#[test]
+fn the_coder_seeds_reach_their_coders() {
+    let Some(seeds) = corpus("sevenz") else {
+        println!("SKIPPED: fuzz/corpus/sevenz is not in this tree");
+        return;
+    };
+    let named = ["bcj-lzma2", "bcj2", "bzip2", "ppmd"];
+    for want in named {
+        let Some((_, data)) = seeds.iter().find(|(name, _)| name == want) else {
+            panic!("the {want} seed is missing");
+        };
+        let (control, body) = data.split_at(data.len().min(1));
+        let limits = sevenz_bounds(control.first().copied().unwrap_or(0));
+        let mut archive = sevenz::Archive::open(body, &limits)
+            .unwrap_or_else(|e| panic!("{want}: the seed opens: {e}"));
+        for index in 0..archive.entries().len() {
+            let crc = archive.entries()[index].crc;
+            let bytes = archive
+                .read(index)
+                .unwrap_or_else(|e| panic!("{want}: entry {index}: {e}"));
+            assert_eq!(Some(crc32(&bytes)), crc, "{want}: entry {index}");
+        }
+    }
+    println!(
+        "RAN: {} coder seeds decode to their recorded CRC-32s",
+        named.len()
+    );
+}
+
+// ---- bzip2 ------------------------------------------------------------------
+
+/// `fuzz_targets/bzip2.rs`'s control-byte table, restated.
+fn bzip2_bounds(knobs: u8) -> bzip2::Limits {
+    bzip2::Limits {
+        max_unpacked: match knobs & 3 {
+            0 => 1,
+            1 => 1 << 10,
+            2 => 1 << 16,
+            _ => 1 << 22,
+        },
+    }
+}
+
+/// Every committed bzip2 seed replays with the target's two invariants — a
+/// decode is within its ceiling, and a roomier ceiling gives the same answer —
+/// and every one of them **decodes**: they are libbzip2's own streams
+/// (`tests/coders/make-coders.py`), so a seed that stopped decoding would be a
+/// corpus quietly reduced to exercising the refusals.
+#[test]
+fn the_committed_bzip2_seeds_replay() {
+    let Some(seeds) = corpus("bzip2") else {
+        println!("SKIPPED: fuzz/corpus/bzip2 is not in this tree");
+        return;
+    };
+    let mut bytes = 0usize;
+    for (name, data) in &seeds {
+        let (control, body) = data.split_at(data.len().min(1));
+        let limits = bzip2_bounds(control.first().copied().unwrap_or(0));
+        let out = bzip2::decode(body, &limits).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(
+            out.len() <= limits.max_unpacked,
+            "{name}: within the ceiling"
+        );
+        let roomier = bzip2::Limits {
+            max_unpacked: 1 << 24,
+        };
+        assert_eq!(
+            bzip2::decode(body, &roomier).as_ref(),
+            Ok(&out),
+            "{name}: a roomier ceiling"
+        );
+        bytes += out.len();
+    }
+    println!("RAN: {} bzip2 seeds, {bytes} bytes decoded", seeds.len());
+    assert_eq!(seeds.len(), 5, "`make-coders.py` writes five bzip2 seeds");
+}
+
+// ---- PPMd -------------------------------------------------------------------
+
+/// Every committed PPMd seed decodes, under the parameters its first three
+/// bytes pick exactly as `fuzz_targets/ppmd.rs` reads them, to the length it
+/// asks for — they are 7-Zip's encoder's streams (`tests/coders/make-coders.py`),
+/// so a seed that stopped decoding would leave the fuzzer exercising refusals.
+/// `x86-o2-2k` is in the smallest arena 7-Zip accepts, where the model
+/// restarts every few dozen symbols.
+#[test]
+fn the_committed_ppmd_seeds_replay() {
+    let Some(seeds) = corpus("ppmd") else {
+        println!("SKIPPED: fuzz/corpus/ppmd is not in this tree");
+        return;
+    };
+    let mut bytes = 0usize;
+    for (name, data) in &seeds {
+        let (control, body) = data.split_at(data.len().min(3));
+        let byte = |i: usize| control.get(i).copied().unwrap_or(0);
+        let order = 2 + byte(0) % 63;
+        let arena = 2048u32 << (byte(1) % 12);
+        let unpacked = usize::from(byte(2)) * 16;
+        let mut props = vec![order];
+        props.extend_from_slice(&arena.to_le_bytes());
+        let limits = ppmd::Limits {
+            max_unpacked: 4096,
+            max_memory: 1 << 22,
+        };
+        let out =
+            ppmd::decode(body, &props, unpacked, &limits).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(out.len(), unpacked, "{name}");
+        bytes += out.len();
+    }
+    println!("RAN: {} ppmd seeds, {bytes} bytes decoded", seeds.len());
+    assert_eq!(seeds.len(), 4, "`make-coders.py` writes four ppmd seeds");
+}
+
+// ---- Zstandard --------------------------------------------------------------
+
+/// `fuzz_targets/zstd.rs`'s control-byte table, restated.
+fn zstd_bounds(knobs: u8) -> zstd::Limits {
+    zstd::Limits {
+        max_unpacked: match knobs & 3 {
+            0 => 1,
+            1 => 1 << 10,
+            2 => 1 << 16,
+            _ => 1 << 22,
+        },
+    }
+}
+
+/// Every committed Zstandard seed replays with the target's two invariants —
+/// a decode is within its ceiling, and a roomier ceiling gives the same
+/// answer — and every one of them **decodes**: they are libzstd's own frames
+/// (`tests/coders/make-zstd.py`), so a seed that stopped decoding would leave
+/// the fuzzer exercising refusals. `frames` is two frames, a skippable one
+/// between them and an empty one after, and `window-1k` six blocks of at
+/// most a kilobyte each.
+#[test]
+fn the_committed_zstd_seeds_replay() {
+    let Some(seeds) = corpus("zstd") else {
+        println!("SKIPPED: fuzz/corpus/zstd is not in this tree");
+        return;
+    };
+    let mut bytes = 0usize;
+    for (name, data) in &seeds {
+        let (control, body) = data.split_at(data.len().min(1));
+        let limits = zstd_bounds(control.first().copied().unwrap_or(0));
+        let out = zstd::decode(body, &limits).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(
+            out.len() <= limits.max_unpacked,
+            "{name}: within the ceiling"
+        );
+        let roomier = zstd::Limits {
+            max_unpacked: 1 << 24,
+        };
+        assert_eq!(
+            zstd::decode(body, &roomier).as_ref(),
+            Ok(&out),
+            "{name}: a roomier ceiling"
+        );
+        bytes += out.len();
+    }
+    println!("RAN: {} zstd seeds, {bytes} bytes decoded", seeds.len());
+    assert_eq!(seeds.len(), 6, "`make-zstd.py` writes six zstd seeds");
 }
 
 // ---- RAR --------------------------------------------------------------------

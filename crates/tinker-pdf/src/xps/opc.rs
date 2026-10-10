@@ -70,9 +70,49 @@
 //!    makes that invalid. [`Package::validate`] refuses rather than picking
 //!    one, because "whichever came first" is directory order and directory
 //!    order is whatever the producing tool walked.
+//!
+//! # Interleaving: one part out of several items
+//!
+//! 7.2.4 lets a producer write a part as a sequence of **pieces**, so it can
+//! stream several parts at once and interleave them in the archive: the part
+//! `/Documents/1/Pages/1.fpage` becomes the items
+//! `Documents/1/Pages/1.fpage/[0].piece`, `…/[1].piece`, and finally
+//! `…/[2].last.piece`, and the part is those items' bytes in piece-number
+//! order. `[Content_Types].xml` may be split the same way. [`Package::open`]
+//! groups the pieces by the item name in front of them and, where a group
+//! assembles, gives the part one index — the item of piece `[0]` — whose
+//! [`Package::read`] joins the pieces; everything above this module sees a part
+//! like any other.
+//!
+//! A group that does not assemble refuses the whole package by name
+//! ([`PackageProblem::Interleaved`]) rather than being half-assembled: a
+//! piece number missing or repeated, no `.last` piece or one that is not the
+//! highest, a number written with a leading zero, or a part stored both whole
+//! and in pieces. Each of those is a part whose bytes the package does not
+//! determine, and a reader that picked an answer would be choosing a page.
+//! The leading zero is the one of these that is this reader's choice rather
+//! than a clause read off the page: pieces count 0, 1, 2 …, and `[01]` beside
+//! `[1]` would be two spellings of one number, so neither is read.
+//!
+//! **Where this came from, stated because it differs from the rest of the
+//! module.** The joining was written from the piece grammar this module
+//! already recognised (`[n].piece`, `[n].last.piece`, numbered from zero, one
+//! `.last`) and not from a fresh reading of 7.2.4: the session that wrote it
+//! could not fetch ECMA-376 from Ecma. Every rule above refuses rather than
+//! guesses where the grammar is silent, so a reading this gets wrong costs a
+//! package by name rather than a page drawn from the wrong bytes — with one
+//! exception, named: pieces out of number order in the archive are joined by
+//! number and not refused, because the numbers are unambiguous about the bytes
+//! whatever the archive order was.
+//! The joined part is held to the archive's own [`tinker_pdf_zip::Limits`]
+//! `max_entry_bytes`, summed over its pieces' declared sizes **before** any of
+//! them is read, and each piece is read, checksummed and charged against the
+//! inflation total exactly as a whole part is — so interleaving adds no budget
+//! and escapes none. The pieces are joined in number order; the order they
+//! happen to sit in the archive is not consulted.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use tinker_pdf_xml::{Doctype, Event, Limits as XmlLimits, Source};
 use tinker_pdf_zip::{Archive, EntryError, Warning as ZipWarning};
@@ -645,10 +685,12 @@ impl core::fmt::Display for PackageDefect {
 /// Why a whole package is refused, before anything is read from it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PackageProblem {
-    /// An interleaved package (7.2.4, 7.3.7): items named `…/[0].piece`.
-    /// Recognised and refused rather than half-assembled — reassembling them is
-    /// a second addressing model layered on the first, and no package in
-    /// milestone 1's corpus uses one.
+    /// Pieces (7.2.4) that do not assemble into a part: a piece number missing
+    /// or repeated, no `.last` piece or one that is not the highest, a number
+    /// with a leading zero, a piece name that is not one, or a part stored
+    /// both whole and in pieces. Refused rather than half-assembled, since the
+    /// package does not determine the part's bytes. An interleaved package
+    /// whose pieces **do** assemble is read — see the module's header.
     Interleaved,
     /// An item that is not a part name and is not the content-types item.
     InvalidPartName,
@@ -669,7 +711,9 @@ pub enum Item {
     ContentTypes,
     /// A directory record (APPNOTE 4.4.17.1). Holds no bytes and is no part.
     Directory,
-    /// A piece of an interleaved part (7.2.4).
+    /// A piece of an interleaved part (7.2.4). A part whose pieces assemble
+    /// is the [`Item::Part`] at its piece `[0]`, and every other piece of it
+    /// stays this.
     Piece,
     /// A part whose name the archive reader **truncated**, so the name in hand
     /// is not the name the package holds. Unresolvable by construction: a
@@ -719,6 +763,17 @@ pub struct Package<'a> {
     /// count is published for the same reason `Archive::inflated` is.
     parses: usize,
     xml: XmlLimits,
+    /// One slot per archive entry: for the entry that stands for an
+    /// interleaved part (its piece `[0]`), the entries of every piece, in
+    /// piece-number order.
+    pieces: Vec<Option<Vec<usize>>>,
+    /// One slot per archive entry: for the same entry, the item name the pieces
+    /// were pieces *of*, which is what [`Package::item_index`] is asked for.
+    joined: Vec<Option<String>>,
+    /// Pieces that do not assemble (7.2.4), which [`Package::validate`]
+    /// refuses. Recorded at open and acted on only there, because open refuses
+    /// nothing.
+    broken_pieces: bool,
 }
 
 impl<'a> Package<'a> {
@@ -745,11 +800,21 @@ impl<'a> Package<'a> {
     #[must_use]
     pub fn open(archive: Archive<'a>, zip_name_len: usize, xml: XmlLimits) -> Package<'a> {
         let truncated = archive.warnings().contains(&ZipWarning::NameTruncated);
-        let items: Vec<Item> = archive
+        let mut items: Vec<Item> = archive
             .entries()
             .iter()
             .map(|entry| classify(&entry.name, entry.is_directory(), truncated, zip_name_len))
             .collect();
+        let mut pieces = vec![None; items.len()];
+        let mut joined = vec![None; items.len()];
+        let broken_pieces = assemble(
+            &archive,
+            &mut items,
+            &mut pieces,
+            &mut joined,
+            truncated,
+            zip_name_len,
+        );
         let cache = vec![None; items.len()];
         let relationships = vec![None; items.len()];
         Package {
@@ -760,6 +825,9 @@ impl<'a> Package<'a> {
             relationships,
             parses: 0,
             xml,
+            pieces,
+            joined,
+            broken_pieces,
         }
     }
 
@@ -806,13 +874,20 @@ impl<'a> Package<'a> {
         })
     }
 
-    /// The entry index of an item, by the name the archive spelled.
+    /// The entry index of an item, by the name the archive spelled — or, for an
+    /// item stored in pieces, the index of its piece `[0]`, by the name in
+    /// front of them.
     #[must_use]
     pub fn item_index(&self, item: &str) -> Option<usize> {
         self.archive
             .entries()
             .iter()
             .position(|entry| entry.name == item)
+            .or_else(|| {
+                self.joined
+                    .iter()
+                    .position(|name| name.as_deref() == Some(item))
+            })
     }
 
     /// The entry index of a part, by 6.2.2.3's equivalence.
@@ -837,7 +912,10 @@ impl<'a> Package<'a> {
     /// [`PackageDefect::Missing`] for an index the archive does not have.
     pub fn read(&mut self, index: usize) -> Result<&[u8], PackageDefect> {
         if !matches!(self.cache.get(index), Some(Some(_))) {
-            let read = self.archive.read(index);
+            let read = match self.pieces.get(index).cloned().flatten() {
+                Some(pieces) => self.join(&pieces),
+                None => self.archive.read(index),
+            };
             if let Some(slot) = self.cache.get_mut(index) {
                 *slot = Some(read);
             }
@@ -847,6 +925,37 @@ impl<'a> Package<'a> {
             Some(Some(Err(why))) => Err(PackageDefect::Entry(*why)),
             _ => Err(PackageDefect::Missing),
         }
+    }
+
+    /// An interleaved part: its pieces' bytes, in piece-number order.
+    ///
+    /// **Bounded before it is believed**, as `tinker-pdf-zip` bounds a single
+    /// entry: the pieces' declared sizes are summed and held to the archive's
+    /// own `max_entry_bytes` before a byte of any of them is read, because a
+    /// part is one object whichever way it was stored and a cap that a producer
+    /// could step around by splitting would be no cap. Each piece is then read
+    /// through [`Archive::read`] — checksummed, length-checked and charged
+    /// against the inflation total like any entry — so the joined bytes are
+    /// exactly the sum just checked.
+    fn join(&mut self, pieces: &[usize]) -> Result<Cow<'a, [u8]>, EntryError> {
+        let cap = self.archive.limits().max_entry_bytes as u64;
+        let entries = self.archive.entries();
+        let declared = pieces.iter().try_fold(0u64, |sum, &piece| {
+            sum.checked_add(entries.get(piece)?.uncompressed_size)
+        });
+        let total = match declared {
+            Some(total) if total < cap => total,
+            _ => return Err(EntryError::EntryTooLarge),
+        };
+        // The sum is a ceiling and a claim, and like `tinker-pdf-zip`'s own
+        // declared sizes it is never a length to allocate: a megabyte up front
+        // at most, and the pieces' real bytes decide the rest.
+        let mut out = Vec::with_capacity(usize::try_from(total.min(1 << 20)).unwrap_or(0));
+        for &piece in pieces {
+            let bytes = self.archive.read(piece)?;
+            out.extend_from_slice(&bytes);
+        }
+        Ok(Cow::Owned(out))
     }
 
     /// Reads one part by name, once.
@@ -952,7 +1061,7 @@ impl<'a> Package<'a> {
     /// # Errors
     /// [`PackageProblem`], one variant per rule, each of them by name.
     pub fn validate(&self, max_parts: usize) -> Result<(), PackageProblem> {
-        if self.items.contains(&Item::Piece) {
+        if self.broken_pieces {
             return Err(PackageProblem::Interleaved);
         }
         if self.items.contains(&Item::NotAPart) {
@@ -1006,7 +1115,127 @@ fn classify(name: &str, directory: bool, truncated: bool, zip_name_len: usize) -
 }
 
 /// 7.2.4's piece names: `…/[0].piece`, `…/[3].last.piece`.
+///
+/// A loose test on purpose — anything whose last segment opens with `[` and
+/// ends `.piece` in either case — so that a malformed piece name is classified
+/// as a piece and refused by [`assemble`] rather than slipping through as a
+/// part named like one.
 fn is_piece(name: &str) -> bool {
     let last = name.rsplit('/').next().unwrap_or(name);
-    last.starts_with('[') && last.ends_with(".piece")
+    last.starts_with('[') && last.to_ascii_lowercase().ends_with(".piece")
+}
+
+/// One piece's name, read: the item it is a piece of, its number, and whether
+/// it is the `.last` one. `None` for a name that is not exactly
+/// `<item>/[<n>].piece` or `<item>/[<n>].last.piece`, with `n` a decimal
+/// number written without leading zeros.
+fn piece_name(name: &str) -> Option<(&str, u32, bool)> {
+    let (base, last) = name.rsplit_once('/')?;
+    if base.is_empty() {
+        return None;
+    }
+    let rest = last.strip_prefix('[')?;
+    let (digits, suffix) = rest.split_once(']')?;
+    let final_piece = if suffix.eq_ignore_ascii_case(".last.piece") {
+        true
+    } else if suffix.eq_ignore_ascii_case(".piece") {
+        false
+    } else {
+        return None;
+    };
+    if digits.is_empty()
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+        || (digits.len() > 1 && digits.starts_with('0'))
+    {
+        return None;
+    }
+    Some((base, digits.parse().ok()?, final_piece))
+}
+
+/// Groups the pieces of every interleaved part and, where a group assembles,
+/// turns its piece `[0]` into the part (7.2.4). Returns whether any piece did
+/// **not** assemble, which [`Package::validate`] refuses.
+///
+/// A group assembles when its numbers are exactly `0` to `n`, each once, and
+/// the one `.last` piece is `n`; when no whole item carries the same name; and
+/// when no piece's name is in the window where the archive reader may have
+/// truncated it. Groups are keyed on the ASCII-folded item name, 6.2.2.3's
+/// equivalence, so `[0].piece` of `/A` and `[1].last.piece` of `/a` are pieces
+/// of one part — and a whole `/a` beside them is the part stored twice.
+fn assemble(
+    archive: &Archive<'_>,
+    items: &mut [Item],
+    pieces: &mut [Option<Vec<usize>>],
+    joined: &mut [Option<String>],
+    truncated: bool,
+    zip_name_len: usize,
+) -> bool {
+    let entries = archive.entries();
+    let mut broken = false;
+    let mut groups: BTreeMap<String, Vec<(u32, bool, usize)>> = BTreeMap::new();
+    for (index, item) in items.iter().enumerate() {
+        if *item != Item::Piece {
+            continue;
+        }
+        let Some(entry) = entries.get(index) else {
+            continue;
+        };
+        let parsed = piece_name(&entry.name)
+            .filter(|_| !(truncated && entry.name.len().saturating_add(3) >= zip_name_len));
+        match parsed {
+            Some((base, number, last)) => groups
+                .entry(base.to_ascii_lowercase())
+                .or_default()
+                .push((number, last, index)),
+            None => broken = true,
+        }
+    }
+    if groups.is_empty() {
+        return broken;
+    }
+
+    let whole: HashSet<String> = entries
+        .iter()
+        .zip(items.iter())
+        .filter(|(_, item)| **item != Item::Piece)
+        .map(|(entry, _)| entry.name.to_ascii_lowercase())
+        .collect();
+    for (folded, mut group) in groups {
+        group.sort_by_key(|(number, _, _)| *number);
+        let count = group.len();
+        let numbered = group
+            .iter()
+            .enumerate()
+            .all(|(at, (number, _, _))| usize::try_from(*number).is_ok_and(|n| n == at));
+        let lasts = group.iter().filter(|(_, last, _)| *last).count();
+        let last_is_last = group.last().is_some_and(|(_, last, _)| *last);
+        if !numbered || lasts != 1 || !last_is_last || count == 0 || whole.contains(&folded) {
+            broken = true;
+            continue;
+        }
+        let order: Vec<usize> = group.iter().map(|(_, _, index)| *index).collect();
+        let Some(&first) = order.first() else {
+            broken = true;
+            continue;
+        };
+        // The part is named as its piece `[0]` spells it.
+        let Some(base) = entries
+            .get(first)
+            .and_then(|entry| piece_name(&entry.name))
+            .map(|(base, _, _)| base.to_string())
+        else {
+            broken = true;
+            continue;
+        };
+        if let Some(slot) = items.get_mut(first) {
+            *slot = classify(&base, false, truncated, zip_name_len);
+        }
+        if let Some(slot) = pieces.get_mut(first) {
+            *slot = Some(order);
+        }
+        if let Some(slot) = joined.get_mut(first) {
+            *slot = Some(base);
+        }
+    }
+    broken
 }

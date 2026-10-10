@@ -51,15 +51,20 @@ const BINDING_ANCHOR: &str = "// <<< the layout proof's binding goes here >>>";
 
 /// The property injected, and it is not an arbitrary one.
 ///
-/// `hyphens` is in `UNSUPPORTED_PROPERTIES` today — `css-text-4`, written by
-/// both of milestone 1's producers, and genuinely unimplemented because
-/// hyphenation needs a dictionary this engine does not have. So the defect is
-/// the exact edit somebody will make when that arrives: promote the name out of
-/// the unsupported list, add the variant, add the three `match` arms the css
-/// crate demands, add the field — and stop, one door short of the page.
-const FIELD: &str = "    pub hyphens: bool,";
-const INITIAL: &str = "            hyphens: false,";
-const BINDING: &str = "        hyphens,";
+/// `writing-mode` is in `UNSUPPORTED_PROPERTIES` today — `css-writing-modes-3`,
+/// and genuinely unimplemented because vertical text needs a block flow that
+/// runs across the page, which this layout's columns do not. So the defect is
+/// the exact edit somebody will make when that arrives: promote the name out
+/// of the unsupported list, add the variant, add the three `match` arms the
+/// css crate demands, add the field — and stop, one door short of the page.
+///
+/// It was `hyphens` until October 2026's eighth wave gave `hyphens` its field
+/// and its consumer, at which point the injected field became a duplicate and
+/// both controls below failed for that reason instead — which is the controls
+/// doing their job.
+const FIELD: &str = "    pub writing_mode: bool,";
+const INITIAL: &str = "            writing_mode: false,";
+const BINDING: &str = "        writing_mode,";
 
 fn css_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -250,7 +255,7 @@ fn a_computed_field_with_no_layout_consumer_does_not_build() {
          field:\n{stderr}"
     );
     assert!(
-        stderr.contains("hyphens"),
+        stderr.contains("writing_mode"),
         "the error does not name the field that was added:\n{stderr}"
     );
 }

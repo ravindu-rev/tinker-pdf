@@ -143,6 +143,8 @@ fn kind(warning: &StructureWarning) -> &'static str {
         StructureWarning::KidCycle { .. } => "kid-cycle",
         StructureWarning::DepthCapped { .. } => "depth-capped",
         StructureWarning::ElementCapped => "element-capped",
+        StructureWarning::ValuesCapped => "values-capped",
+        StructureWarning::BytesCapped { .. } => "bytes-capped",
         StructureWarning::KidsCapped { .. } => "kids-capped",
         StructureWarning::UntypedElement { .. } => "untyped-element",
         StructureWarning::UnreadableKid { .. } => "unreadable-kid",
@@ -151,6 +153,8 @@ fn kind(warning: &StructureWarning) -> &'static str {
         StructureWarning::ContentStreamNotAStream { .. } => "content-stream-not-a-stream",
         StructureWarning::StreamOwnerWithoutStream { .. } => "stream-owner-without-stream",
         StructureWarning::ContentStreamAssumed { .. } => "content-stream-assumed",
+        StructureWarning::AttributeIgnored { .. } => "attribute-ignored",
+        StructureWarning::NamespaceIgnored { .. } => "namespace-ignored",
     }
 }
 

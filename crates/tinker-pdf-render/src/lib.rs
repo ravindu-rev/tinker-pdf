@@ -13,12 +13,14 @@
 use core::mem;
 use tinker_pdf_raster::blend::BlendMode as RasterBlend;
 
+pub mod display;
 pub mod mesh;
 pub mod shading;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+pub use display::{Admission, DisplayRecorder, MAX_DISPLAY_LIST_BYTES};
 pub use mesh::{Mesh, MeshParams};
 pub use shading::Shading;
 use tinker_pdf_content::{
@@ -33,12 +35,78 @@ use tinker_pdf_raster::{
     fragments::Fragments,
     geom::{FillRule, Path},
     image::{
-        accumulate_image, draw_image, image_bounds, image_coverage, ImageDraw, ImageSource,
+        accumulate_image, draw_image, image_bounds_in, image_coverage, ImageDraw, ImageSource,
         Pyramid, Transform,
     },
-    mesh::{draw_mesh, MeshDraw},
-    stroke::{stroke, LineCap, LineJoin, StrokeStyle},
+    mesh::{draw_mesh_over, MeshDraw},
+    stroke::{stretches, stroke, stroke_mapped, LineCap, LineJoin, StrokeStyle},
 };
+
+/// How far apart a map's two stretches may be, as a fraction of the larger,
+/// and still be stroked as a similarity: rounding, and nothing a page states.
+/// A rotation composed of several `cm`s is a similarity whose entries no
+/// longer cancel exactly; one written with five decimals is not, and is
+/// stroked through user space (`Renderer::pen`).
+const SIMILARITY_SLACK: f64 = 1e-9;
+
+/// The most a map may stretch one direction over another before a stroke
+/// under it is no longer taken back to user space: past this, a point's
+/// round trip through the inverse loses more than a thousandth of a pixel
+/// at a page's own coordinates, and the map is all but a collapse anyway.
+const STROKE_CONDITION: f64 = 1e9;
+
+/// Whether a stroke under `to_device` — user space to the device — has to be
+/// drawn in user space, and if so the map's largest stretch.
+///
+/// 8.4.3.2 measures a pen in user space. Under a similarity that is one
+/// device width, the user width times [`Matrix::expansion`], and the answer
+/// is `None`: stroke in device space, which every writer of a pen can say
+/// with one number. Under any other map no single width is the pen, and the
+/// answer is `Some(largest)`, the factor the map stretches its most-stretched
+/// direction by — the renderer strokes through user space
+/// (`tinker_pdf_raster::stroke_mapped`), and the SVG writer states the path
+/// in a space this much larger than user space, where the pen is round.
+///
+/// Also `None` for a map that is not finite or that stretches one direction
+/// more than [`STROKE_CONDITION`] times another — a near-collapse, which is
+/// stroked as a similarity at its expansion, the only answer left once a
+/// round trip through its inverse costs a path its position.
+#[must_use]
+pub fn user_space_pen(to_device: &Matrix) -> Option<f64> {
+    let (largest, smallest) = stretches(&transform(to_device));
+    if !(largest.is_finite() && largest > 0.0) {
+        return None;
+    }
+    // A similarity's two stretches are equal; the slack is rounding, so a
+    // product of rotations that is a similarity in exact arithmetic is
+    // stroked as one.
+    let similar = largest - smallest <= largest * SIMILARITY_SLACK;
+    (!similar && smallest * STROKE_CONDITION >= largest).then_some(largest)
+}
+
+/// `map`'s inverse, or `None` for a map whose inverse is not finite. Unlike
+/// `invert`, no determinant is too small by itself: how far a stroke may
+/// trust the round trip is [`STROKE_CONDITION`]'s question, and it is a ratio.
+fn pen_inverse(map: &Transform) -> Option<Transform> {
+    let det = map.a * map.d - map.b * map.c;
+    if !det.is_finite() || det == 0.0 {
+        return None;
+    }
+    let inverse = Transform {
+        a: map.d / det,
+        b: -map.b / det,
+        c: -map.c / det,
+        d: map.a / det,
+        e: (map.c * map.f - map.d * map.e) / det,
+        f: (map.b * map.e - map.a * map.f) / det,
+    };
+    [
+        inverse.a, inverse.b, inverse.c, inverse.d, inverse.e, inverse.f,
+    ]
+    .iter()
+    .all(|v| v.is_finite())
+    .then_some(inverse)
+}
 
 /// Lets a caller stop a render that is taking too long.
 ///
@@ -76,16 +144,6 @@ impl CancelToken {
 // an `f64`. `PartialEq` is what the deduplication in the renderer uses.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RenderWarning {
-    /// A transparency group declared a blending space this build does not
-    /// composite in, so its contents were blended in RGB instead (11.6.6).
-    ///
-    /// Named rather than silent, which is the whole of ruling 2: a group
-    /// declared in `/DeviceCMYK` has 11.3.5's separable formulas applied to
-    /// subtractive components, and applying them to RGB instead is not a
-    /// near-miss — `Multiply` over ink is `Screen`'s shape over light. The
-    /// page still renders, and it says which group and which space.
-    ///
-    /// One- and three-component spaces are *not* reported, because for those
     /// One of 11.3.5.3's four non-separable blend modes was applied inside a
     /// `/DeviceCMYK` transparency group.
     ///
@@ -115,6 +173,30 @@ pub enum RenderWarning {
         /// The resource name the image was drawn under.
         name: String,
         /// The decoder's own stable identifier for what it tolerated.
+        reason: String,
+    },
+    /// A colour space's parameters said something no space can mean, and
+    /// were read the nearest way that means something.
+    ///
+    /// Ruling 10, for the same reason as [`RenderWarning::DamagedImage`]: the
+    /// page is drawn, and "the colours were read" stays distinguishable from
+    /// "the colours were read as written". `reason` is a stable identifier;
+    /// today there is one, `LabRangeUnordered` — a `/Lab` space whose
+    /// `/Range` writes a pair backwards, `[10 -10 …]`, which 8.6.5.4's
+    /// Table 65 makes a minimum then a maximum, read as the span it covers.
+    ///
+    /// Reported once per name and repair, wherever the facade reports what
+    /// its resources tolerated — a space read through the page's resources
+    /// or a tiling cell's — and not yet through a form XObject's or an
+    /// annotation appearance's own `/Resources`, which keep what they
+    /// tolerate to themselves (`rendering.md`'s refusal table).
+    RepairedColorSpace {
+        /// The resource name the space was reached under: a `/ColorSpace`
+        /// entry's for `cs`, or the image's, shading's, pattern's, form's or
+        /// graphics state's whose dictionary names the space — and `Group`
+        /// for a page's own `/Group`.
+        name: String,
+        /// What was repaired.
         reason: String,
     },
     /// The page was too large to render at the requested resolution, so it
@@ -275,6 +357,11 @@ pub struct TileRequest {
     /// How many tiling patterns are already open above this one, for the
     /// recursion cap.
     pub depth: u32,
+    /// Whether the cell's own edges are anti-aliased, which is the page's
+    /// answer: a cell drawn soft and composited onto a hard page would put
+    /// partial pixels on a page that asked for none. See
+    /// [`Renderer::with_antialias`].
+    pub antialias: bool,
 }
 
 /// One rasterized tiling-pattern cell.
@@ -479,6 +566,15 @@ const MAX_TILE_AREA: u64 = 1 << 24;
 /// the page is 650 pages' worth of compositing.
 const MAX_TILE_WORK: u64 = 1 << 25;
 
+/// The clip and the soft mask, with their page-frame rectangles, as `q` saves
+/// them (8.5.4, 11.6.5).
+struct Held {
+    clip: Option<Mask>,
+    soft: Option<Mask>,
+    clip_bounds: Option<Bounds>,
+    soft_bounds: Option<Bounds>,
+}
+
 /// A transparency group being rendered: everything the parent needs back.
 struct GroupFrame {
     /// The canvas the group will be composited onto.
@@ -489,17 +585,20 @@ struct GroupFrame {
     alpha: f64,
     /// `/BM` at the `Do`, likewise.
     blend: RasterBlend,
-    /// The clip in force at the `Do`, in the parent's coordinates.
+    /// The clip in force at the `Do`, in device pixels.
     clip: Option<Mask>,
-    /// The soft mask in force at the `Do`, in the parent's coordinates.
+    /// The soft mask in force at the `Do`, in device pixels.
     ///
     /// 11.6.6 resets it to None inside the group, so it masks the group's
     /// *result* rather than each element -- which is the whole drop-shadow
     /// idiom: a mask applied element by element shows the seams the group
     /// exists to remove.
     soft: Option<Mask>,
-    /// `base` in the parent's coordinates.
-    base: Matrix,
+    /// The page-frame rectangles of the two masks above, and of the parent's
+    /// canvas. See [`Bounds`].
+    clip_bounds: Option<Bounds>,
+    soft_bounds: Option<Bounds>,
+    frame: Bounds,
     /// `/K`: the buffer as it started, so that each element can be composited
     /// against it rather than against the elements before it (11.4.5).
     ///
@@ -534,10 +633,13 @@ struct MaskFrame {
     outside: u8,
     /// `/TR`, pre-sampled.
     transfer: Option<[u8; 256]>,
-    /// The clip, soft mask and transform to put back afterwards.
+    /// The clip and soft mask to put back afterwards, with their page-frame
+    /// rectangles and the parent canvas's.
     clip: Option<Mask>,
     soft: Option<Mask>,
-    base: Matrix,
+    clip_bounds: Option<Bounds>,
+    soft_bounds: Option<Bounds>,
+    frame: Bounds,
     clip_depth: usize,
 }
 
@@ -594,6 +696,13 @@ struct ImageRun {
     /// mask is identified by its rectangle and the address of its coverage,
     /// which is cheap and cannot collide while the mask is alive.
     masks: (Option<MaskId>, Option<MaskId>),
+    /// The ink every draw in the run painted, when the canvas composites
+    /// ink: a stencil's fill colour's own components (8.9.6.2), handed to
+    /// the canvas as a fill's are. A draw of another ink, or none, ends the
+    /// run, since the run reaches the canvas as one colour per pixel. `None`
+    /// on every canvas that does not composite ink, so no light page's runs
+    /// are split by it.
+    ink: Option<[u8; 4]>,
     /// The device rectangle the run has put coverage in, as
     /// `(x0, y0, x1, y1)` with the far edges exclusive.
     ///
@@ -632,10 +741,31 @@ pub struct Renderer<'g, G: GlyphSource> {
     canvas: Canvas,
     glyphs: Scope<'g, G>,
     /// The transform from PDF user space to device pixels.
+    ///
+    /// **Never translated after construction.** A tile, a transparency group's
+    /// buffer and a soft mask's buffer are each a canvas standing at an origin
+    /// in this one frame ([`Canvas::origin`]), so every coordinate computed
+    /// here — a path point, a sampled pixel centre, an image's inverse — is the
+    /// same floating-point number whichever canvas it lands on (ruling 5).
     base: Matrix,
+    /// The pixels the current canvas would hold on a render of the **whole**
+    /// page: the page itself, or the rectangle a group's or a soft mask's
+    /// buffer would have had there.
+    ///
+    /// Equal to the canvas's own rectangle whenever the render is of the whole
+    /// page, and larger than it in a tile. Decisions about *how* something is
+    /// drawn — whether an image joins a run, how much a tiling lattice may
+    /// cost, which of its cells are composited, which pixels a mesh spreads
+    /// colour from — are taken against this and never against the canvas, so
+    /// that a tile takes the decision the page under it took (ruling 5).
+    frame: Bounds,
     clip: Option<Mask>,
+    /// The clip's rectangle on a render of the whole page. See [`Bounds`].
+    clip_bounds: Option<Bounds>,
+    /// The soft mask's rectangle on a render of the whole page.
+    soft_bounds: Option<Bounds>,
     /// The clip and the soft mask, saved together by `q` (8.5.4, 11.6.5).
-    clip_stack: Vec<(Option<Mask>, Option<Mask>)>,
+    clip_stack: Vec<Held>,
     warnings: Vec<RenderWarning>,
     cancel: CancelToken,
     /// Whether a cancellation check has ever answered yes — that is, whether
@@ -654,6 +784,9 @@ pub struct Renderer<'g, G: GlyphSource> {
     skipped: Arc<AtomicBool>,
     /// Curve flattening tolerance in device pixels.
     tolerance: f64,
+    /// Whether coverage is anti-aliased, or every pixel is whole or empty.
+    /// See [`Renderer::with_antialias`].
+    antialias: bool,
     missing_fonts: u32,
     /// Glyph outlines accumulated by text clipping modes 4–7, applied at `ET`.
     text_clip: Option<Path>,
@@ -665,32 +798,21 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// keying that off the accumulated path alone cannot tell "clipped to
     /// nothing" from "never clipped".
     text_clip_requested: bool,
-    /// Marked-content scopes currently open, innermost last: whether each one
-    /// hides what it encloses (8.11.3.2, 14.6.2).
+    /// The answers to the interpreter's three questions, and what they
+    /// depend on: marked-content visibility, how many groups and masks are
+    /// open, and the group-buffer budget.
     ///
-    /// A stack rather than a counter, because `EMC` has to know whether the
-    /// scope it closes was one of the hiding ones. Bounded by the
-    /// interpreter's own nesting cap, which is why there is no second cap
-    /// here.
-    marked_content: Vec<bool>,
-    /// How many of `marked_content` hide, so the question every paint asks
-    /// is a comparison rather than a scan.
-    hidden_depth: u32,
+    /// Its own type rather than fields here because a page recorded for a
+    /// retained display list has to be recorded with *these* answers, and
+    /// [`DisplayRecorder`] asks the same type rather than a copy of it. See
+    /// [`display`].
+    admission: Admission,
     /// Transparency groups open, innermost last (11.6.6).
     ///
-    /// While one is open `canvas` is the group's own buffer and `base` has
-    /// been translated so that device coordinates land inside it — which is
-    /// what lets the buffer be bounding-box sized rather than page sized
-    /// without a second coordinate system running through every paint.
-    /// Group buffers opened so far, at any depth, against
-    /// [`MAX_GROUP_BUFFERS`]. Spent and never refunded: unwinding a group
-    /// returns its memory but not its budget, because the cost this bounds
-    /// is the work already done rather than the memory still held.
-    group_buffers: u32,
-    /// Whether the budget above ever declined a group, reported once at
-    /// `finish` rather than per decline: a page that has run out asks
-    /// repeatedly, and forty thousand identical warnings is not a report.
-    group_budget_spent: bool,
+    /// While one is open `canvas` is the group's own buffer, standing at its
+    /// corner of the page ([`Canvas::origin`]) — which is what lets the buffer
+    /// be bounding-box sized rather than page sized without a second
+    /// coordinate system running through every paint. `base` is untouched.
     groups: Vec<GroupFrame>,
     /// Resource scopes pushed by the caller rather than by a form, innermost
     /// last.
@@ -716,7 +838,7 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// the rasterizer because *when a run ends* is a question about the
     /// content stream, and only this layer sees that.
     run: Option<ImageRun>,
-    /// The soft mask in force, in the current canvas's coordinates (11.6.5).
+    /// The soft mask in force, in device pixels (11.6.5).
     ///
     /// On the device rather than in the graphics state, because it is pixels
     /// and the graphics state is PDF-level (ruling 8). It follows the clip
@@ -751,26 +873,28 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// PDF counts upward from the bottom-left, a raster counts downward from
     /// the top-left.
     pub fn new(canvas: Canvas, base: Matrix, glyphs: &'g G) -> Renderer<'g, G> {
+        let frame = Bounds::of_rect(canvas.device_rect());
         Renderer {
             canvas,
             glyphs: Scope::Borrowed(glyphs),
             base,
+            frame,
             clip: None,
+            clip_bounds: None,
+            soft_bounds: None,
             clip_stack: Vec::new(),
             warnings: Vec::new(),
             cancel: CancelToken::new(),
             skipped: Arc::new(AtomicBool::new(false)),
             tolerance: 0.2,
+            antialias: true,
             missing_fonts: 0,
             text_clip: None,
             text_clip_requested: false,
             run: None,
             pushed_scopes: Vec::new(),
             form_scopes: Vec::new(),
-            marked_content: Vec::new(),
-            hidden_depth: 0,
-            group_buffers: 0,
-            group_budget_spent: false,
+            admission: Admission::new(),
             groups: Vec::new(),
             soft: None,
             mask_frames: Vec::new(),
@@ -778,6 +902,65 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             #[cfg(test)]
             mask_pixels: 0,
         }
+    }
+
+    /// Says the canvas is a region of a page `width` by `height` pixels.
+    ///
+    /// The canvas carries where in the page it stands ([`Canvas::origin`]);
+    /// this carries how large the page is, which is what every decision about
+    /// *how* to draw rather than *what* to draw is measured against. Without
+    /// it a tile would measure them against itself and could take the other
+    /// branch from the page it is part of. A renderer whose canvas is the
+    /// whole page needs no call: the canvas is the page.
+    #[must_use]
+    pub fn with_page_size(mut self, width: u32, height: u32) -> Self {
+        self.frame = Bounds::of_rect((0, 0, width, height));
+        self
+    }
+
+    /// How many pixels the current canvas would hold on a render of the whole
+    /// page. See the `frame` field.
+    fn frame_area(&self) -> u64 {
+        self.frame.area()
+    }
+
+    /// The rectangle a path's mask would have on a render of the whole page:
+    /// [`paint_region`] over the page-frame rectangles rather than over the
+    /// masks and the canvas.
+    fn page_region(&self, path: &Path) -> Bounds {
+        region_within(path, &[self.clip_bounds, self.soft_bounds], self.frame)
+    }
+
+    /// What the clip and the soft mask leave of the frame, on a render of the
+    /// whole page: the rectangle `sh` paints.
+    fn page_limit(&self) -> Bounds {
+        [self.clip_bounds, self.soft_bounds]
+            .into_iter()
+            .flatten()
+            .fold(self.frame, Bounds::meet)
+    }
+
+    /// The clip and the soft mask as `q` saves them.
+    fn held(&self) -> Held {
+        Held {
+            clip: self.clip.clone(),
+            soft: self.soft.clone(),
+            clip_bounds: self.clip_bounds,
+            soft_bounds: self.soft_bounds,
+        }
+    }
+
+    /// Puts back what [`Renderer::held`] saved.
+    fn restore_held(&mut self, held: Held) {
+        self.clip = held.clip;
+        self.soft = held.soft;
+        self.clip_bounds = held.clip_bounds;
+        self.soft_bounds = held.soft_bounds;
+    }
+
+    /// The device pixels the current canvas holds.
+    fn device(&self) -> (i32, i32, u32, u32) {
+        self.canvas.device_rect()
     }
 
     /// Records that this renderer is drawing a tiling pattern's cell, `depth`
@@ -801,7 +984,54 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// not draw and one which does cannot disagree about what a page
     /// contains.
     fn hidden(&self) -> bool {
-        self.hidden_depth > 0
+        self.admission.hidden()
+    }
+
+    /// Turns anti-aliasing off, or back on: `false` makes every pixel of
+    /// every shape either wholly covered or not covered at all.
+    ///
+    /// **One threshold, applied wherever this crate decides coverage**, so
+    /// that no path through the rasterizer is left soft on a page that asked
+    /// for hard edges:
+    ///
+    /// - every fill, stroke, glyph, clip, text clip and pattern shape goes
+    ///   through `Renderer::coverage`, which hardens the mask `fill` returns
+    ///   before the clip multiplies into it;
+    /// - an image's edge is hardened inside the rasterizer
+    ///   ([`ImageDraw::antialias`]);
+    /// - a mesh shading's silhouette is hardened after `draw_mesh`;
+    /// - a tiling pattern's cell is drawn by a renderer of its own, which is
+    ///   handed the same answer through [`TileRequest::antialias`];
+    /// - `sh` and a shading pattern paint through the clip or the shape, which
+    ///   were hardened when they were made.
+    ///
+    /// The threshold is [`Mask::harden`]'s — half a pixel's coverage — and the
+    /// doc there says why. What is **not** coverage is left alone: a soft
+    /// mask's levels, a constant alpha, an image's own alpha channel and the
+    /// colours of its samples are the document's, not the rasterizer's
+    /// approximation of an edge.
+    ///
+    /// A stroke is at least a whole pixel wide when this is off, where it is
+    /// eight tenths of one otherwise. 8.4.3.2 asks for the thinnest line the
+    /// device can render and a hard-edged device can render a pixel; a line
+    /// narrower than that, straddling two pixels, would leave each less than
+    /// half covered and vanish.
+    #[must_use]
+    pub fn with_antialias(mut self, antialias: bool) -> Self {
+        self.antialias = antialias;
+        self
+    }
+
+    /// The thinnest stroke this render draws, in device pixels: 8.4.3.2's
+    /// "thinnest line that can be rendered", which is `soft` with
+    /// anti-aliasing on and a whole pixel with it off. See
+    /// [`Renderer::with_antialias`].
+    fn thinnest(&self, soft: f64) -> f64 {
+        if self.antialias {
+            soft
+        } else {
+            1.0
+        }
     }
 
     /// Installs a cancellation token.
@@ -878,20 +1108,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             .as_ref()
             .or(self.clip.as_ref())
             .or(self.soft.as_ref());
-        run.fragments.composite_region(
+        run.fragments.composite_region_inked(
             &mut self.canvas,
             run.covered,
             run.alpha,
             run.blend,
             clip,
+            run.ink,
             Some(&stop),
         );
-    }
-
-    /// Record that the group budget declined one, for a single report at
-    /// `finish`.
-    fn note_group_budget(&mut self) {
-        self.group_budget_spent = true;
     }
 
     /// The canvas and everything the render had to tolerate.
@@ -910,9 +1135,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if self.missing_fonts > 0 {
             self.warnings.push(RenderWarning::UnreadableFont);
         }
-        if self.group_budget_spent {
+        if self.admission.budget_spent() {
             self.warnings.push(RenderWarning::GroupBudgetSpent {
-                opened: self.group_buffers,
+                opened: self.admission.buffers(),
             });
         }
         // The flag, not the token. Asking the token here reports a page that
@@ -966,26 +1191,30 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     }
 
     fn open_group(&mut self, group: tinker_pdf_content::Group, state: &GraphicsState) -> bool {
-        if self.groups.len() >= MAX_GROUP_DEPTH {
+        // Hidden content, `MAX_GROUP_DEPTH` and — because depth is not work
+        // once the recursion branches — `MAX_GROUP_BUFFERS`. Asked of the
+        // admission rather than decided here, so that a page recorded for a
+        // display list was recorded with this answer.
+        if !self.admission.begin_group() {
             return false;
         }
-        // Depth is not work once the recursion branches. See
-        // `MAX_GROUP_BUFFERS`.
-        if self.group_buffers >= MAX_GROUP_BUFFERS {
-            self.note_group_budget();
-            return false;
-        }
-        self.group_buffers = self.group_buffers.saturating_add(1);
-        let (x0, y0, width, height) =
-            self.clip
-                .as_ref()
-                .map_or((0, 0, self.canvas.width, self.canvas.height), |clip| {
-                    let (x0, y0, x1, y1) = clip.overlap(self.canvas.width, self.canvas.height);
-                    (x0 as i32, y0 as i32, x1 - x0, y1 - y0)
-                });
-        if width == 0 || height == 0 {
-            return false;
-        }
+        let (x0, y0, width, height) = self.clip.as_ref().map_or(self.device(), |clip| {
+            let (ox, oy) = self.canvas.origin();
+            let (x0, y0, x1, y1) = clip.overlap_at((ox, oy), self.canvas.width, self.canvas.height);
+            (
+                ox.saturating_add(x0 as i32),
+                oy.saturating_add(y0 as i32),
+                x1 - x0,
+                y1 - y0,
+            )
+        });
+        // A group whose clip misses this canvas is still **accepted**, over a
+        // buffer of no pixels. Declining it would make the answer the
+        // interpreter acts on — reset the alphas or not — depend on which
+        // pixels were asked for, and a display list recorded at one scale is
+        // replayed at another: every answer this device gives has to be one
+        // the whole page would give. Nothing painted into an empty buffer is
+        // seen, which is what declining achieved.
 
         // A group buffer must carry alpha whatever the page format is: it
         // starts as nothing and accumulates a shape, and a format without an
@@ -998,7 +1227,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             Some(space) => Self::group_format_of(space),
             None => Self::alpha_format(self.canvas.format),
         };
-        let mut buffer = Canvas::new(width, height, format, Color::TRANSPARENT);
+        let mut buffer = Canvas::new(width, height, format, Color::TRANSPARENT).at_origin(x0, y0);
         // 11.4.4: an isolated group composites against nothing, so its buffer
         // starts empty; a non-isolated one starts with the backdrop composited
         // in, which is what lets a blend mode inside it see through to the
@@ -1021,19 +1250,24 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             blend: blend_mode(state.blend),
             clip: self.clip.clone(),
             soft: self.soft.take(),
-            base: self.base,
+            clip_bounds: self.clip_bounds,
+            soft_bounds: self.soft_bounds.take(),
+            frame: self.frame,
             initial,
             clip_depth: self.clip_stack.len(),
         };
+        // The buffer a whole-page render would have made: the clip's
+        // rectangle on the page, within the parent's.
+        self.frame = self
+            .clip_bounds
+            .map_or(self.frame, |clip| clip.within(self.frame));
 
-        // Everything inside the group draws in the buffer's coordinates. The
-        // translation goes into `base`, which every path, glyph, image and
-        // shading already passes through, rather than into a second origin
-        // that each of them would have to remember to apply.
-        self.base = self
-            .base
-            .then(&Matrix::translate(-f64::from(x0), -f64::from(y0)));
-        self.clip = frame.clip.as_ref().map(|clip| shifted(clip, -x0, -y0));
+        // Everything inside the group draws in the page's own frame, onto a
+        // buffer that stands at `(x0, y0)` in it. The buffer used to carry a
+        // frame of its own — `base` translated by the whole pixels to its
+        // corner — which is exact as arithmetic and not as floating point, and
+        // put a page and a tile over it an ulp apart (ruling 5). The clip is in
+        // the same frame, so it is untouched.
         self.groups.push(frame);
         true
     }
@@ -1075,10 +1309,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let Some(frame) = self.groups.pop() else {
             return;
         };
+        self.admission.end_group();
         self.clip_stack.truncate(frame.clip_depth);
         let mut buffer = std::mem::replace(&mut self.canvas, frame.parent);
-        self.base = frame.base;
         self.clip = frame.clip;
+        self.clip_bounds = frame.clip_bounds;
+        self.frame = frame.frame;
         let soft = frame.soft;
 
         // 11.3.5.3 over a subtractive buffer: reported once per group rather
@@ -1117,6 +1353,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             Some(&stop),
         );
         self.soft = soft;
+        self.soft_bounds = frame.soft_bounds;
     }
 
     /// Opens a soft-mask group: a buffer filled with `/BC`, to be read back
@@ -1126,16 +1363,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         mask: &tinker_pdf_content::MaskGroup,
         bbox: &[PathSegment],
     ) -> bool {
-        if self.mask_frames.len() + self.groups.len() >= MAX_GROUP_DEPTH {
+        // Depth, counting the groups open as well as the masks, and the
+        // group-buffer budget: a mask group is a group buffer and spends from
+        // the same budget -- and it is the one the campaign's timeout actually
+        // recursed through.
+        if !self.admission.begin_soft_mask() {
             return false;
         }
-        // A mask group is a group buffer and spends from the same budget --
-        // and it is the one the campaign's timeout actually recursed through.
-        if self.group_buffers >= MAX_GROUP_BUFFERS {
-            self.note_group_budget();
-            return false;
-        }
-        self.group_buffers = self.group_buffers.saturating_add(1);
         // The group's own bounding box bounds the buffer, and the current
         // clip deliberately does *not*: the mask applies to whatever is
         // painted after the `gs`, which may be anywhere, and clipping the
@@ -1143,13 +1377,17 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // masked by nothing outside it.
         let built = self.to_path(bbox);
         let (x0, y0, width, height) = if built.is_empty() {
-            (0, 0, self.canvas.width, self.canvas.height)
+            self.device()
         } else {
-            paint_region(&built, None, None, self.canvas.width, self.canvas.height)
+            paint_region(&built, None, None, self.device())
         };
-        if width == 0 || height == 0 {
-            return false;
-        }
+        // A box that misses this canvas is accepted over a buffer of no
+        // pixels, for the reason `open_group` gives: declining depends on the
+        // pixels asked for, and so did the *mask*, because a declined mask
+        // left the previous one in force. A tile beside the box then painted
+        // unmasked what the page, whose canvas the box did meet, masked by
+        // `/BC`. Accepted, the mask is `/BC`'s value everywhere, which is
+        // 11.6.5.2's answer outside the group.
 
         // 11.6.5.2. For `/Luminosity` the group is composited against a fully
         // opaque backdrop of `/BC`, and `/BC` absent is the **black** of the
@@ -1182,7 +1420,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         };
 
         let format = Self::alpha_format(self.canvas.format);
-        let buffer = Canvas::new(width, height, format, background);
+        let buffer = Canvas::new(width, height, format, background).at_origin(x0, y0);
 
         let frame = MaskFrame {
             parent: std::mem::replace(&mut self.canvas, buffer),
@@ -1192,15 +1430,19 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             transfer: mask.transfer,
             clip: self.clip.take(),
             soft: self.soft.take(),
-            base: self.base,
+            clip_bounds: self.clip_bounds.take(),
+            soft_bounds: self.soft_bounds.take(),
+            frame: self.frame,
             clip_depth: self.clip_stack.len(),
         };
-        // The mask group draws in its own buffer's coordinates, and under no
-        // clip and no mask of its own: it is a picture of a mask, not a
-        // painting on the page.
-        self.base = self
-            .base
-            .then(&Matrix::translate(-f64::from(x0), -f64::from(y0)));
+        // The buffer a whole-page render would have made, from the same
+        // arithmetic as the one above.
+        if !built.is_empty() {
+            self.frame = region_within(&built, &[], self.frame);
+        }
+        // The mask group draws under no clip and no mask of its own: it is a
+        // picture of a mask, not a painting on the page. It draws in the
+        // page's frame, onto a buffer standing at `(x0, y0)` in it.
         self.mask_frames.push(frame);
         true
     }
@@ -1210,10 +1452,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let Some(frame) = self.mask_frames.pop() else {
             return;
         };
+        self.admission.end_soft_mask();
         self.clip_stack.truncate(frame.clip_depth);
         let buffer = std::mem::replace(&mut self.canvas, frame.parent);
-        self.base = frame.base;
         self.clip = frame.clip;
+        self.clip_bounds = frame.clip_bounds;
+        // The mask's own buffer on the page, before the parent's is restored.
+        let inner_bounds = mem::replace(&mut self.frame, frame.frame);
 
         let inner = buffer.to_mask(frame.at, frame.kind, frame.transfer.as_ref());
         // A `Mask` reads zero outside its own rectangle, which is exactly
@@ -1224,15 +1469,20 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         self.soft = Some(if frame.outside == 0 {
             inner
         } else {
-            let mut field =
-                Mask::uniform(0, 0, self.canvas.width, self.canvas.height, frame.outside);
+            let (ox, oy, width, height) = self.device();
+            let mut field = Mask::uniform(ox, oy, width, height, frame.outside);
             field.overwrite(&inner);
             field
+        });
+        self.soft_bounds = Some(if frame.outside == 0 {
+            inner_bounds
+        } else {
+            self.frame
         });
         // The mask the `gs` replaced is gone, not restored: 11.6.5.1 makes
         // `/SMask` a graphics-state parameter that one `gs` overwrites for
         // the next, and only `Q` puts an older one back.
-        let _ = frame.soft;
+        let _ = (frame.soft, frame.soft_bounds);
     }
 
     /// The clip and the soft mask as one mask, for a consumer that can take
@@ -1376,7 +1626,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // the other route entirely — and it does its own knockout restore,
         // with its own coverage rather than the shape's.
         if let Some(mesh) = shading.mesh() {
-            return self.paint_mesh(mesh, to_device, Some(&area), alpha, mode);
+            let limit = self.page_region(path);
+            return self.paint_mesh(mesh, to_device, Some(&area), limit, alpha, mode);
         }
 
         let Some(inverse) = invert(&to_device) else {
@@ -1388,13 +1639,18 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // The shape's own rectangle. A shading is evaluated per pixel, so a
         // gradient-filled comma used to run the inverse transform and the
         // function over every pixel of the page to paint two hundred of them.
-        let (x_start, y_start, x_end, y_end) = area.overlap(self.canvas.width, self.canvas.height);
-        for py in y_start..y_end {
+        let (ox, oy) = self.canvas.origin();
+        let (x_start, y_start, x_end, y_end) =
+            area.overlap_at((ox, oy), self.canvas.width, self.canvas.height);
+        for row in y_start..y_end {
             if self.stopping() {
                 return true;
             }
-            for px in x_start..x_end {
-                let coverage = area.at(px as i32, py as i32);
+            for col in x_start..x_end {
+                // The device pixel, in the page's frame: the one number a
+                // tile and the page under it both sample at (ruling 5).
+                let (px, py) = (ox.saturating_add(col as i32), oy.saturating_add(row as i32));
+                let coverage = area.at(px, py);
                 if coverage == 0 {
                     continue;
                 }
@@ -1404,7 +1660,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 };
                 let weight = alpha * f64::from(coverage) / 255.0;
                 self.canvas
-                    .blend_pixel_with(px, py, Color { r, g, b, a: 0xFF }, weight, mode);
+                    .blend_pixel_with(col, row, Color { r, g, b, a: 0xFF }, weight, mode);
             }
         }
         true
@@ -1423,11 +1679,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// would anti-alias every shared edge against the canvas and leave a
     /// lattice of pale seams; `draw_mesh` returns colour and coverage over one
     /// rectangle and this composites that rectangle once.
+    ///
+    /// `limit` is `area`'s rectangle on a render of the whole page, which is
+    /// what the mesh's region is taken from: see [`draw_mesh_over`].
     fn paint_mesh(
         &mut self,
         mesh: &Mesh,
         to_device: Matrix,
         area: Option<&Mask>,
+        limit: Bounds,
         alpha: f64,
         mode: RasterBlend,
     ) -> bool {
@@ -1449,17 +1709,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 bbox.line_to(*x, *y);
             }
         }
-        let (x0, y0, width, height) =
-            paint_region(&bbox, area, None, self.canvas.width, self.canvas.height);
-        if width == 0 || height == 0 {
+        //
+        // Taken on the whole page and then narrowed to this canvas by the
+        // rasterizer, which knows how far past the canvas a silhouette pixel
+        // looks for its colour (ruling 5).
+        let whole = region_within(&bbox, &[Some(limit)], self.frame);
+        if whole.is_empty() {
             return true;
         }
-        #[cfg(test)]
-        {
-            self.mask_pixels = self
-                .mask_pixels
-                .saturating_add(u64::from(width) * u64::from(height));
-        }
+        let wanted = Bounds::of_rect(self.device()).meet(whole);
 
         let stop = self.stop_predicate();
         // 8.7.4.5.5: the vertex values are interpolated and *then* converted,
@@ -1479,9 +1737,18 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             color: &convert,
             stop: Some(&stop),
         };
-        let Some(mut buffer) = draw_mesh(&draw, x0, y0, width, height) else {
+        let Some(mut buffer) = draw_mesh_over(&draw, wanted.rect(), whole.rect()) else {
             return false;
         };
+        #[cfg(test)]
+        {
+            self.mask_pixels = self.mask_pixels.saturating_add(
+                u64::from(buffer.coverage.width) * u64::from(buffer.coverage.height),
+            );
+        }
+        if !self.antialias {
+            buffer.coverage.harden();
+        }
 
         // The element's coverage is the mesh's own, not the clip's: 11.4.5's
         // restore has to know where this element actually painted, and `sh`
@@ -1494,23 +1761,26 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             self.knockout_restore(&buffer.coverage);
         }
 
-        let (x_start, y_start, x_end, y_end) = buffer
-            .coverage
-            .overlap(self.canvas.width, self.canvas.height);
-        for py in y_start..y_end {
+        let (ox, oy) = self.canvas.origin();
+        let (x_start, y_start, x_end, y_end) =
+            buffer
+                .coverage
+                .overlap_at((ox, oy), self.canvas.width, self.canvas.height);
+        for row in y_start..y_end {
             if self.stopping() {
                 return true;
             }
-            for px in x_start..x_end {
-                let coverage = buffer.coverage.at(px as i32, py as i32);
+            for col in x_start..x_end {
+                let (px, py) = (ox.saturating_add(col as i32), oy.saturating_add(row as i32));
+                let coverage = buffer.coverage.at(px, py);
                 if coverage == 0 {
                     continue;
                 }
-                let Some(color) = buffer.at(px as i32, py as i32) else {
+                let Some(color) = buffer.at(px, py) else {
                     continue;
                 };
                 let weight = alpha * f64::from(coverage) / 255.0;
-                self.canvas.blend_pixel_with(px, py, color, weight, mode);
+                self.canvas.blend_pixel_with(col, row, color, weight, mode);
             }
         }
         true
@@ -1590,16 +1860,21 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // the lattice has to be bounded *before* a cell is drawn, or a
         // pathological `/XStep` has already cost a rasterization by the time it
         // is refused.
-        let (rx, ry, rw, rh) = paint_region(
-            path,
-            self.clip.as_ref(),
-            self.soft.as_ref(),
-            self.canvas.width,
-            self.canvas.height,
-        );
-        if rw == 0 || rh == 0 {
+        //
+        // **On the whole page, not on this canvas** (ruling 5). A cell's buffer
+        // is its box rounded outward and it lands at a rounded offset, so a
+        // cell whose box stops just short of a rectangle still puts a pixel of
+        // anti-aliased edge inside it. Indexed from a tile's own rectangle,
+        // the lattice left out a cell the page's included, and the tile lost
+        // that pixel; measured on `render_regions.rs`'s tiling fixture, ten
+        // levels at 1x. Indexed from the page's, every canvas composites the
+        // same cells in the same order, and the budgets below refuse the same
+        // lattices.
+        let reach = self.page_region(path);
+        if reach.is_empty() {
             return true;
         }
+        let (rx, ry, rw, rh) = reach.rect();
 
         // That rectangle back in pattern space. A rotated or skewed `/Matrix`
         // turns it into a parallelogram, so the axis-aligned hull of the four
@@ -1682,9 +1957,18 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if area > MAX_TILE_AREA {
             return false;
         }
-        let canvas_area = u64::from(self.canvas.width) * u64::from(self.canvas.height);
+        // The page's frame rather than the canvas, so a tile of a page and
+        // the page take this decision against the same number.
+        let canvas_area = self.frame_area();
         if tiles.saturating_mul(area.min(canvas_area.max(1))) > MAX_TILE_WORK {
             return false;
+        }
+        // Every decision above is the page's. Whether any of it lands on
+        // *this* canvas is not a decision, and a fill that misses it costs no
+        // cell: the coverage below is zero everywhere off the page-frame
+        // rectangle.
+        if reach.meet(Bounds::of_rect(self.device())).is_empty() {
+            return true;
         }
 
         // A cell is a shape over nothing, so its buffer must carry alpha
@@ -1699,6 +1983,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             color: tiling.uncolored.then_some((color.r, color.g, color.b)),
             cancel: self.cancel.clone(),
             depth: self.pattern_depth + 1,
+            antialias: self.antialias,
         };
         let Some(tile) = self.glyphs.tile(name, &request) else {
             return false;
@@ -1745,6 +2030,39 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         true
     }
 
+    /// A **new clip**: a path's coverage times the clip in force — and not the
+    /// soft mask.
+    ///
+    /// 8.5.4's clip and 11.6.5's soft mask are two parameters of the graphics
+    /// state, and a clip installed while a mask is in force is not masked: the
+    /// mask goes on being applied to what is painted, by [`Renderer::coverage`]
+    /// and by a group's composite, as long as it is in force and no longer.
+    /// Folding it into the clip applied it twice to everything painted under
+    /// both — a transparency group under a luminosity mask of grey 0.5 drew
+    /// at a quarter, because the interpreter installs the form's `/BBox` clip
+    /// before the group takes the mask, so the group's content was masked
+    /// through its clip and its composite masked again — and went on applying
+    /// it after an `/SMask /None` had turned it off, for as long as the clip
+    /// lasted.
+    ///
+    /// Returns the clip and its page-frame rectangle, both made with the mask
+    /// out of the way: the rectangle is the clip mask's, and a rectangle
+    /// narrowed by the mask's would stand beside a mask that is not.
+    fn clip_coverage(
+        &mut self,
+        path: &Path,
+        rule: FillRule,
+        stop: Option<&dyn Fn() -> bool>,
+    ) -> (Mask, Bounds) {
+        let soft = self.soft.take();
+        let soft_bounds = self.soft_bounds.take();
+        let bounds = self.page_region(path);
+        let mask = self.coverage(path, rule, stop);
+        self.soft = soft;
+        self.soft_bounds = soft_bounds;
+        (mask, bounds)
+    }
+
     /// The coverage a path contributes, over the pixels it can reach and with
     /// the current clip already multiplied in.
     ///
@@ -1753,13 +2071,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// scan a full page: eight megabytes at 300 dpi, per glyph, twice for
     /// stroked text. It now costs its own bounding box.
     fn coverage(&mut self, path: &Path, rule: FillRule, stop: Option<&dyn Fn() -> bool>) -> Mask {
-        let (x0, y0, width, height) = paint_region(
-            path,
-            self.clip.as_ref(),
-            self.soft.as_ref(),
-            self.canvas.width,
-            self.canvas.height,
-        );
+        let (x0, y0, width, height) =
+            paint_region(path, self.clip.as_ref(), self.soft.as_ref(), self.device());
         #[cfg(test)]
         {
             self.mask_pixels = self
@@ -1767,6 +2080,11 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 .saturating_add(u64::from(width) * u64::from(height));
         }
         let mut mask = fill(path, rule, x0, y0, width, height, self.tolerance, stop);
+        // Before the clip, so the clip multiplies into a hard shape and the
+        // product of two hard masks stays hard. See `with_antialias`.
+        if !self.antialias {
+            mask.harden();
+        }
         // 8.5.4: the clip multiplies rather than replaces, so an anti-aliased
         // edge clipped by another stays soft on both. In place, because the
         // region above is already no larger than the clip: the destination
@@ -1795,6 +2113,23 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// whose rasterization is the expensive part. A caller's entry is a
     /// different moment from this one, and this is the moment the work starts.
     fn paint(&mut self, path: &Path, rule: FillRule, color: Color, alpha: f64, mode: RasterBlend) {
+        self.paint_inked(path, rule, color, None, alpha, mode);
+    }
+
+    /// As [`Renderer::paint`], with the colour's DeviceCMYK components beside
+    /// it (`GraphicsState::fill_ink`): a canvas compositing in ink — the
+    /// page asked for in ink, or a `/DeviceCMYK` group's buffer — composites
+    /// the document's own components rather than the light turned back into
+    /// ink, which would lose every separation the file chose but one.
+    fn paint_inked(
+        &mut self,
+        path: &Path,
+        rule: FillRule,
+        color: Color,
+        ink: Option<[u8; 4]>,
+        alpha: f64,
+        mode: RasterBlend,
+    ) {
         if self.stopping() {
             return;
         }
@@ -1803,7 +2138,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         if self.in_knockout() {
             self.knockout_restore(&mask);
         }
-        self.canvas.fill_mask_with(&mask, color, alpha, mode);
+        self.canvas.fill_mask_inked(&mask, color, ink, alpha, mode);
     }
 
     /// The question the rasterizer asks while it is working.
@@ -1845,8 +2180,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     fn blit(&mut self, image: &DecodedImage, state: &GraphicsState) {
         let unit_to_device = transform(&state.ctm.then(&self.base));
         // 8.9.6.2: a stencil selects where the *current fill colour* is
-        // painted; it has no colour of its own.
+        // painted; it has no colour of its own. That colour is a flat fill
+        // like any other, so a canvas compositing in ink is handed its own
+        // ink beside its light, as a fill is (`GraphicsState::fill_ink`).
         let tint = image.stencil.then(|| fill_color(state));
+        let ink = if image.stencil && self.canvas.format == PixelFormat::CmykA8 {
+            state.fill_ink
+        } else {
+            None
+        };
         // 11.4.5: an image is one element, and its shape is the unit square of
         // its transform (8.9.5.2). Rasterised only inside a knockout group,
         // where it is the coverage the restore needs; everywhere else this
@@ -1870,8 +2212,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // Whether this draw joins the run held back so that abutting images do
         // not conflate, or goes straight to the canvas. Decided here, before
         // the clip is borrowed, because ending a run needs `&mut self`.
-        let bounds = image_bounds(&unit_to_device, self.canvas.width, self.canvas.height);
-        let pixels = u64::from(self.canvas.width) * u64::from(self.canvas.height);
+        let bounds = image_bounds_in(&unit_to_device, self.device());
+        // The page frame's pixels, not this canvas's: a tile, or a group's
+        // buffer inside one, must take the branch the whole page takes,
+        // because a run composites through different rounding from a direct
+        // draw.
+        let pixels = self.frame_area();
         // 11.4.5 gives every element inside a knockout group its own shape, so
         // a run there would restore the wrong one.
         let direct = self.in_knockout() || pixels > MAX_IMAGE_RUN_PIXELS;
@@ -1880,6 +2226,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             run.alpha.to_bits() != state.fill_alpha.to_bits()
                 || run.blend != blend_mode(state.blend)
                 || run.masks != masks
+                || run.ink != ink
         });
         // A different graphics state, or a picture laid *over* another rather
         // than beside it: both end the run. Fragments are added, so an overlap
@@ -1916,7 +2263,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             blend: blend_mode(state.blend),
             clip,
             tint,
+            ink,
             stop: Some(&stop),
+            antialias: self.antialias,
         };
         // Built here and dropped here. The levels are the caller's to keep,
         // and keeping them needs an identity for the image rather than a
@@ -1929,12 +2278,13 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             return;
         }
 
-        let extent = (self.canvas.width, self.canvas.height);
+        let extent = self.device();
         let run = self.run.get_or_insert_with(|| ImageRun {
-            fragments: Fragments::new(0, 0, extent.0, extent.1),
+            fragments: Fragments::new(extent.0, extent.1, extent.2, extent.3),
             alpha: state.fill_alpha,
             blend: blend_mode(state.blend),
             masks,
+            ink,
             covered: (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
         });
         accumulate_image(&mut run.fragments, &draw, &mut pyramid, extent);
@@ -1958,8 +2308,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let Some(run) = &self.run else {
             return false;
         };
-        let Some((bx0, by0, bw, bh)) = image_bounds(t, self.canvas.width, self.canvas.height)
-        else {
+        let Some((bx0, by0, bw, bh)) = image_bounds_in(t, self.device()) else {
             return false;
         };
         let (cx0, cy0, cx1, cy1) = run.covered;
@@ -1972,6 +2321,49 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
         let shape = image_coverage(t, x0, y0, (x1 - x0) as u32, (y1 - y0) as u32, None);
         run.fragments.would_overlap(&shape)
+    }
+
+    /// The outline of a stroke of `path`, which is in device space, with a
+    /// pen whose width, dash array and phase are in **user space** (8.4.3.2,
+    /// 8.4.3.6), at least `floor` device pixels wide.
+    ///
+    /// Under a similarity — a uniform scale with any rotation or reflection,
+    /// which is nearly every page — a user-space pen is a device-space pen
+    /// of the width times the scale, and that is how it is stroked: in device
+    /// space, the dashes scaled alike, the width no thinner than `floor`.
+    /// Under any other map no one device width is the pen: `scale(1, 3)`
+    /// makes a pen two units wide six device units across the stretch and two
+    /// along it, and cuts a dash square in user space and sheared on the
+    /// device. So the path is taken back to user space, stroked there, and
+    /// the outline carried out again (`stroke_mapped`), with `floor` held in
+    /// device pixels in every direction.
+    ///
+    /// Which of the two is [`user_space_pen`]'s decision, shared with the
+    /// SVG writer so the two state one pen.
+    fn pen(
+        &self,
+        path: &Path,
+        state: &GraphicsState,
+        style: StrokeStyle,
+        floor: f64,
+        stop: &dyn Fn() -> bool,
+    ) -> Path {
+        let m = state.ctm.then(&self.base);
+        if user_space_pen(&m).is_some() {
+            let map = transform(&m);
+            if let Some(back) = pen_inverse(&map) {
+                let user = path.mapped(&back);
+                return stroke_mapped(&user, &style, &map, floor, self.tolerance, Some(stop));
+            }
+        }
+        let scale = m.expansion();
+        let style = StrokeStyle {
+            width: (style.width * scale).max(floor),
+            dashes: style.dashes.iter().map(|d| d * scale).collect(),
+            dash_phase: style.dash_phase * scale,
+            ..style
+        };
+        stroke(path, &style, self.tolerance, Some(stop))
     }
 
     /// Converts interpreter path segments into a rasterizer path.
@@ -2030,26 +2422,115 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
 /// invariant that bounding changes no pixel.
 const SLACK: i64 = 1;
 
+/// A rectangle of device pixels in the page's frame, `[left, right)` by
+/// `[top, bottom)`.
+///
+/// **What makes a tile's decisions the page's** (ruling 5). Every mask this
+/// crate draws is only as large as the canvas it was drawn on, so a clip in a
+/// tile knows nothing of the page past the tile's edge — and three things are
+/// decided by a rectangle rather than pixel by pixel: which cells of a tiling
+/// lattice are composited, which pixels a mesh spreads its colour from, and
+/// whether a lattice or a mesh is past its budget. Decided from the masks,
+/// each came out differently in a tile than in the page under it. So the
+/// renderer keeps, beside each mask, the rectangle that mask *would* have had
+/// on a render of the whole page, computed from nothing but the path in device
+/// pixels and the rectangles before it — numbers that are the same in every
+/// frame, because the frame is one frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Bounds {
+    left: i64,
+    top: i64,
+    right: i64,
+    bottom: i64,
+}
+
+impl Bounds {
+    /// A canvas's `(x, y, width, height)`.
+    fn of_rect(rect: (i32, i32, u32, u32)) -> Bounds {
+        let (x, y, width, height) = rect;
+        Bounds {
+            left: i64::from(x),
+            top: i64::from(y),
+            right: i64::from(x) + i64::from(width),
+            bottom: i64::from(y) + i64::from(height),
+        }
+    }
+
+    /// A mask's own rectangle.
+    fn of_mask(mask: &Mask) -> Bounds {
+        Bounds::of_rect((mask.x0, mask.y0, mask.width, mask.height))
+    }
+
+    /// Where the two overlap: empty, never negative, when they do not.
+    fn meet(self, other: Bounds) -> Bounds {
+        let left = self.left.max(other.left);
+        let top = self.top.max(other.top);
+        Bounds {
+            left,
+            top,
+            right: self.right.min(other.right).max(left),
+            bottom: self.bottom.min(other.bottom).max(top),
+        }
+    }
+
+    /// This rectangle clamped into `outer`, corner by corner: the same
+    /// arithmetic as [`Mask::overlap_at`], so a rectangle that misses `outer`
+    /// comes back empty at the edge it missed by, exactly where a canvas's
+    /// overlap with it would have been placed.
+    fn within(self, outer: Bounds) -> Bounds {
+        let span = |v: i64, lo: i64, hi: i64| v.clamp(lo, hi.max(lo));
+        let left = span(self.left, outer.left, outer.right);
+        let top = span(self.top, outer.top, outer.bottom);
+        Bounds {
+            left,
+            top,
+            right: span(self.right, outer.left, outer.right).max(left),
+            bottom: span(self.bottom, outer.top, outer.bottom).max(top),
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self.right <= self.left || self.bottom <= self.top
+    }
+
+    fn area(self) -> u64 {
+        if self.is_empty() {
+            return 0;
+        }
+        (self.right.abs_diff(self.left)).saturating_mul(self.bottom.abs_diff(self.top))
+    }
+
+    /// As `(x, y, width, height)`. Every `Bounds` this crate makes lies
+    /// inside a canvas or a page, both of which are far inside `i32` and
+    /// `u32`; the conversion saturates rather than trusting that.
+    fn rect(self) -> (i32, i32, u32, u32) {
+        let at = |v: i64| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        let span = |lo: i64, hi: i64| hi.saturating_sub(lo).clamp(0, i64::from(u32::MAX)) as u32;
+        (
+            at(self.left),
+            at(self.top),
+            span(self.left, self.right),
+            span(self.top, self.bottom),
+        )
+    }
+}
+
 /// The device pixels a path can put ink on: its bounding box widened by
-/// [`SLACK`], clipped to the canvas and to the clip's own rectangle.
+/// [`SLACK`], clipped to `within` and to every rectangle in `limits`.
 ///
-/// Clipping to the clip's rectangle is safe for the same reason the whole
-/// change is: a clip reports zero coverage outside itself, and coverage
-/// multiplies, so nothing outside it could ever have been painted.
-///
-/// A path with no points at all — which is what a text object that selected a
-/// clipping mode and drew nothing produces — yields an empty region, and an
-/// empty mask reads as zero everywhere. That is the same "clip everything
-/// away" a page-sized mask of zeroes gave, at none of the cost.
-fn paint_region(
-    path: &Path,
-    clip: Option<&Mask>,
-    soft: Option<&Mask>,
-    width: u32,
-    height: u32,
-) -> (i32, i32, u32, u32) {
+/// The one computation behind both [`paint_region`], which clips to masks and
+/// a canvas, and the renderer's page-frame rectangles, which clip to the
+/// rectangles those masks would have had on the whole page. One function, so
+/// the two cannot drift: a page-frame rectangle is the region a render of the
+/// whole page computes, by construction rather than by a second spelling.
+fn region_within(path: &Path, limits: &[Option<Bounds>], within: Bounds) -> Bounds {
     let Some((x0, y0, x1, y1)) = path.bounds() else {
-        return (0, 0, 0, 0);
+        return Bounds {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
     };
 
     // `as` saturates at the integer bounds for floats, and `Path` refuses
@@ -2066,27 +2547,51 @@ fn paint_region(
         (y1.ceil() as i64).saturating_add(SLACK),
     );
 
-    // Both bound the same way and for the same reason: coverage multiplies,
-    // and both report zero outside their own rectangle, so nothing out there
-    // could ever have been painted.
-    for mask in [clip, soft].into_iter().flatten() {
-        left = left.max(i64::from(mask.x0));
-        top = top.max(i64::from(mask.y0));
-        right = right.min(i64::from(mask.x0) + i64::from(mask.width));
-        bottom = bottom.min(i64::from(mask.y0) + i64::from(mask.height));
+    // Every limit bounds the same way and for the same reason: coverage
+    // multiplies, and each reports zero outside its own rectangle, so nothing
+    // out there could ever have been painted.
+    for limit in limits.iter().flatten() {
+        left = left.max(limit.left);
+        top = top.max(limit.top);
+        right = right.min(limit.right);
+        bottom = bottom.min(limit.bottom);
     }
 
-    let left = left.clamp(0, i64::from(width));
-    let top = top.clamp(0, i64::from(height));
-    let right = right.clamp(left, i64::from(width));
-    let bottom = bottom.clamp(top, i64::from(height));
+    let left = left.clamp(within.left, within.right.max(within.left));
+    let top = top.clamp(within.top, within.bottom.max(within.top));
+    let right = right.clamp(left, within.right.max(left));
+    let bottom = bottom.clamp(top, within.bottom.max(top));
+    Bounds {
+        left,
+        top,
+        right,
+        bottom,
+    }
+}
 
-    (
-        left as i32,
-        top as i32,
-        (right - left) as u32,
-        (bottom - top) as u32,
+/// The device pixels a path can put ink on: its bounding box widened by
+/// [`SLACK`], clipped to the canvas and to the clip's own rectangle.
+///
+/// Clipping to the clip's rectangle is safe for the same reason the whole
+/// change is: a clip reports zero coverage outside itself, and coverage
+/// multiplies, so nothing outside it could ever have been painted.
+///
+/// A path with no points at all — which is what a text object that selected a
+/// clipping mode and drew nothing produces — yields an empty region, and an
+/// empty mask reads as zero everywhere. That is the same "clip everything
+/// away" a page-sized mask of zeroes gave, at none of the cost.
+fn paint_region(
+    path: &Path,
+    clip: Option<&Mask>,
+    soft: Option<&Mask>,
+    canvas: (i32, i32, u32, u32),
+) -> (i32, i32, u32, u32) {
+    region_within(
+        path,
+        &[clip.map(Bounds::of_mask), soft.map(Bounds::of_mask)],
+        Bounds::of_rect(canvas),
     )
+    .rect()
 }
 
 /// Which lattice indices of a tiling pattern reach `[lo, hi]` (8.7.3.2).
@@ -2165,10 +2670,11 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
 
         let color = fill_color(state);
-        self.paint(
+        self.paint_inked(
             &built,
             rule,
             color,
+            state.fill_ink,
             state.fill_alpha,
             blend_mode(state.blend),
         );
@@ -2201,7 +2707,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // the region it picks is the two rectangles' overlap, so a clip stack
         // shrinks as it nests instead of carrying a page apiece.
         let stop = self.stop_predicate();
-        self.clip = Some(self.coverage(&built, rule, Some(&stop)));
+        let (clip, bounds) = self.clip_coverage(&built, rule, Some(&stop));
+        self.clip = Some(clip);
+        self.clip_bounds = Some(bounds);
     }
 
     fn end_text(&mut self) {
@@ -2236,11 +2744,14 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             None => return,
         };
         let stop = self.stop_predicate();
-        self.clip = Some(self.coverage(&path, FillRule::NonZero, Some(&stop)));
+        let (clip, bounds) = self.clip_coverage(&path, FillRule::NonZero, Some(&stop));
+        self.clip = Some(clip);
+        self.clip_bounds = Some(bounds);
     }
 
     fn save_state(&mut self) {
-        self.clip_stack.push((self.clip.clone(), self.soft.clone()));
+        let held = self.held();
+        self.clip_stack.push(held);
     }
 
     fn restore_state(&mut self) {
@@ -2248,9 +2759,8 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // graphics state, so `Q` has to put it back -- otherwise an `/SMask`
         // set inside `q ... Q` keeps masking everything drawn after the `Q`,
         // which is content quietly missing from the rest of the page.
-        if let Some((clip, soft)) = self.clip_stack.pop() {
-            self.clip = clip;
-            self.soft = soft;
+        if let Some(held) = self.clip_stack.pop() {
+            self.restore_held(held);
         }
     }
 
@@ -2266,16 +2776,11 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             return;
         }
 
-        // 8.4.3.2: the line width is in user space, so the transform scales
-        // it. A hairline still has to cover a pixel to be visible.
-        //
-        // The dashes scale by the same factor, and for the same reason: a
-        // pattern measured in user space and applied in device space comes out
-        // at the wrong pitch under any zoom.
-        let scale = state.ctm.then(&self.base).expansion();
-        let width = (state.line_width * scale).max(0.8);
+        // 8.4.3.2: the line width is in user space, and so are the dashes —
+        // the pen is stated in user units and `pen` carries it to the device.
+        // A hairline still has to cover a pixel to be visible.
         let style = StrokeStyle {
-            width,
+            width: state.line_width,
             cap: match state.line_cap {
                 ContentCap::Butt => LineCap::Butt,
                 ContentCap::Round => LineCap::Round,
@@ -2287,15 +2792,15 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 ContentJoin::Bevel => LineJoin::Bevel,
             },
             miter_limit: state.miter_limit,
-            dashes: state.dashes.iter().map(|d| d * scale).collect(),
-            dash_phase: state.dash_phase * scale,
+            dashes: state.dashes.clone(),
+            dash_phase: state.dash_phase,
         };
         // The dash expansion below is the part of a stroke that can run away:
         // 8.4.3.6 puts no floor on a dash length, so a page-long rule under a
         // fine array expands into a hundred thousand pieces per segment before
         // a single row of it is filled.
         let stop = self.stop_predicate();
-        let outline = stroke(&built, &style, self.tolerance, Some(&stop));
+        let outline = self.pen(&built, state, style, self.thinnest(0.8), &stop);
 
         // 8.7.3: a stroke painted with a pattern takes its paint from the
         // pattern, exactly as a fill does — and a stroke *is* a fill, of the
@@ -2329,10 +2834,11 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         }
 
         let color = stroke_color(state);
-        self.paint(
+        self.paint_inked(
             &outline,
             FillRule::NonZero,
             color,
+            state.stroke_ink,
             state.stroke_alpha,
             blend_mode(state.blend),
         );
@@ -2448,23 +2954,25 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                     fill_color(state),
                 );
             } else {
-                self.paint(
+                self.paint_inked(
                     &path,
                     FillRule::NonZero,
                     fill_color(state),
+                    state.fill_ink,
                     state.fill_alpha,
                     blend_mode(state.blend),
                 );
             }
         }
         if mode.strokes() {
-            let scale = state.ctm.then(&self.base).expansion();
+            // 9.3.6 strokes a glyph as a path, so its pen is 8.4.3.2's: the
+            // line width in user space — the CTM's, not the text matrix's.
             let style = StrokeStyle {
-                width: (state.line_width * scale).max(0.6),
+                width: state.line_width,
                 ..StrokeStyle::default()
             };
             let stop = self.stop_predicate();
-            let outlined = stroke(&path, &style, self.tolerance, Some(&stop));
+            let outlined = self.pen(&path, state, style, self.thinnest(0.6), &stop);
             if let Some(name) = state.stroke_pattern.clone() {
                 self.fill_with_pattern(
                     &outlined,
@@ -2475,10 +2983,11 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                     stroke_color(state),
                 );
             } else {
-                self.paint(
+                self.paint_inked(
                     &outlined,
                     FillRule::NonZero,
                     stroke_color(state),
+                    state.stroke_ink,
                     state.stroke_alpha,
                     blend_mode(state.blend),
                 );
@@ -2573,7 +3082,8 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // A mesh paints its own geometry rather than the whole clip, so it
         // brings its own coverage and its own knockout restore with it.
         if let Some(mesh) = shading.mesh() {
-            if !self.paint_mesh(mesh, to_device, area.as_ref(), alpha, mode) {
+            let limit = self.page_limit();
+            if !self.paint_mesh(mesh, to_device, area.as_ref(), limit, alpha, mode) {
                 let warning = RenderWarning::UnsupportedShading { kind: mesh.kind };
                 if !self.warnings.contains(&warning) {
                     self.warnings.push(warning);
@@ -2585,27 +3095,28 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         let Some(inverse) = invert(&to_device) else {
             return;
         };
-        let (x_start, y_start, x_end, y_end) = area
-            .as_ref()
-            .map_or((0, 0, self.canvas.width, self.canvas.height), |mask| {
-                mask.overlap(self.canvas.width, self.canvas.height)
+        let (ox, oy, width, height) = self.device();
+        let (x_start, y_start, x_end, y_end) =
+            area.as_ref().map_or((0, 0, width, height), |mask| {
+                mask.overlap_at((ox, oy), width, height)
             });
         // 11.4.5: `sh` paints the whole clip, so the clip *is* this element's
         // coverage — and with no clip in force it really is the whole buffer.
         if self.in_knockout() {
             let restore = area
                 .clone()
-                .unwrap_or_else(|| Mask::uniform(0, 0, self.canvas.width, self.canvas.height, 255));
+                .unwrap_or_else(|| Mask::uniform(ox, oy, width, height, 255));
             self.knockout_restore(&restore);
         }
-        for py in y_start..y_end {
+        for row in y_start..y_end {
             if self.stopping() {
                 return;
             }
-            for px in x_start..x_end {
-                let clip = area
-                    .as_ref()
-                    .map_or(255, |mask| mask.at(px as i32, py as i32));
+            for col in x_start..x_end {
+                // The device pixel, in the page's frame: see
+                // `fill_with_shading`.
+                let (px, py) = (ox.saturating_add(col as i32), oy.saturating_add(row as i32));
+                let clip = area.as_ref().map_or(255, |mask| mask.at(px, py));
                 if clip == 0 {
                     continue;
                 }
@@ -2616,7 +3127,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 };
                 let effective = alpha * f64::from(clip) / 255.0;
                 self.canvas
-                    .blend_pixel_with(px, py, Color::rgb(r, g, b), effective, mode);
+                    .blend_pixel_with(col, row, Color::rgb(r, g, b), effective, mode);
             }
         }
     }
@@ -2632,10 +3143,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         hidden_layer: Option<&str>,
         _props: Option<&tinker_pdf_content::MarkedProps>,
     ) {
-        self.marked_content.push(!visible);
-        if !visible {
-            self.hidden_depth = self.hidden_depth.saturating_add(1);
-        }
+        self.admission.begin_marked_content(visible);
         // Ruling 10. Raised once per layer rather than once per scope: a CAD
         // drawing marks every construction line, and a hundred identical
         // warnings say nothing the first one did not.
@@ -2650,13 +3158,12 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn end_marked_content(&mut self) {
-        if self.marked_content.pop() == Some(true) {
-            self.hidden_depth = self.hidden_depth.saturating_sub(1);
-        }
+        self.admission.end_marked_content();
     }
 
     fn begin_form(&mut self, _id: u64, name: &[u8]) -> bool {
-        self.clip_stack.push((self.clip.clone(), self.soft.clone()));
+        let held = self.held();
+        self.clip_stack.push(held);
         // 8.10.1: a form's own `/Resources`, if it brought any. The
         // interpreter asks its own seam the same question about the same name,
         // so the two scopes open and close together.
@@ -2670,9 +3177,8 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         if let Some(Some(outer)) = self.form_scopes.pop() {
             self.glyphs = outer;
         }
-        if let Some((clip, soft)) = self.clip_stack.pop() {
-            self.clip = clip;
-            self.soft = soft;
+        if let Some(held) = self.clip_stack.pop() {
+            self.restore_held(held);
         }
     }
 
@@ -2723,21 +3229,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // which is what keeps its clip, soft mask and alpha constant.
         self.flush_run();
         self.soft = None;
-    }
-}
-
-/// The same mask, addressed from a different origin.
-///
-/// Group buffers are bounding-box sized, so a clip that came from outside one
-/// has to be re-addressed on the way in and back again on the way out. The
-/// coverage bytes are untouched; only where they are read from moves.
-fn shifted(mask: &Mask, dx: i32, dy: i32) -> Mask {
-    Mask {
-        x0: mask.x0.saturating_add(dx),
-        y0: mask.y0.saturating_add(dy),
-        width: mask.width,
-        height: mask.height,
-        data: mask.data.clone(),
+        self.soft_bounds = None;
     }
 }
 
@@ -2980,52 +3472,56 @@ impl PixelRegion {
     }
 }
 
-/// [`page_view_transform`], moved so that `region`'s top-left corner lands on
-/// the canvas origin.
+/// A white canvas holding `region`'s pixels, standing at `region`'s corner in
+/// the page's frame, in exactly the format asked for.
 ///
-/// This is ruling 5's mechanism in one line: **a clipped render is the same
-/// pipeline with a translated viewport**, never a second implementation. Every
-/// operator, every glyph, every image and every shading goes through the code
-/// that draws a whole page; the only difference is where the page's pixels are
-/// relative to the buffer, and a smaller buffer.
+/// This is ruling 5's mechanism: **a clipped render is the same pipeline over
+/// a smaller canvas**, never a second implementation. The page is drawn through
+/// [`page_view_transform`] whatever part of it is asked for, and the canvas says
+/// which pixels of that picture it holds ([`Canvas::origin`]).
 ///
-/// # The translation is composed *after* the page view, and that is the choice
+/// # Why the canvas moves and the transform does not
 ///
-/// `page_view_transform(..).then(&translate)` puts the shift in device space,
-/// after the crop-box origin, after `/Rotate` and after the y flip — so it
-/// subtracts bitmap pixels from bitmap coordinates. Composing it the other way
-/// round, `translate.then(&page_view_transform(..))`, shifts the page in *user*
-/// space before it is turned, which is the mistake this comment exists to name:
-/// on an unrotated page the two are indistinguishable up to a sign, and on a
-/// `/Rotate 90` page the wrong one still produces a clean, sensible-looking
-/// picture of the page — just not the part of it the caller asked for. Only a
-/// test that knows which part it asked for can tell the difference, which is
-/// why `render_regions.rs` asserts corners on a rotated page as well as
-/// tile equality.
+/// Until September 2026 a region was drawn through the page's transform moved
+/// by the region's corner — `page_view_transform(..)` then a translation by
+/// `(-x, -y)` in device space. The translation is exact as arithmetic and it
+/// changed only `e` and `f`, but a point's device coordinate is `a·x + c·y +
+/// e`, and `fl(u + e)` and `fl(u + e − x)` are two roundings at two
+/// magnitudes. Where the exact value sat on one of the rasterizer's grids — a
+/// sub-scanline, a 1/256 step, a colour step of a shading — the last ulp put a
+/// tile and the page under it a level apart: one shading pixel at 3x, four
+/// miter corners of a stroked rectangle by fifteen levels at 1x. Keeping one
+/// frame and moving the canvas makes every coordinate the same number in both,
+/// so the only arithmetic that differs is an integer subtraction when a pixel is
+/// written.
 ///
-/// The translation is exact: `region.x` and `region.y` are integers small
-/// enough to be exactly representable, so this changes `e` and `f` and nothing
-/// else, and the geometry that reaches the rasterizer is the page's own.
-#[must_use]
-pub fn region_view_transform(
-    crop: (f64, f64, f64, f64),
-    rotation: u16,
-    scale: f64,
-    region: PixelRegion,
-) -> Matrix {
-    page_view_transform(crop, rotation, scale).then(&Matrix::translate(
-        -f64::from(region.x),
-        -f64::from(region.y),
-    ))
-}
-
-/// A white canvas the size of `region`, in exactly the format asked for.
-///
-/// The region's position is not this function's business — it is in the
-/// transform, which is the whole of ruling 5 — so only the size is read.
+/// The composition order the old spelling had to get right — the shift after
+/// the crop-box origin, `/Rotate` and the y flip, so it subtracts bitmap pixels
+/// from bitmap coordinates — is now the canvas's: `region` is a rectangle of the
+/// rendered bitmap, and so is the origin.
 #[must_use]
 pub fn region_canvas_in(region: PixelRegion, format: PixelFormat) -> Canvas {
-    Canvas::new(region.width, region.height, format, Color::WHITE)
+    region_canvas(region, format, Color::WHITE)
+}
+
+/// [`region_canvas_in`] with nothing painted on it: every pixel transparent.
+///
+/// For a page rendered as a layer rather than onto paper. Only a format with
+/// alpha can hold nothing, so the caller asks for this only with one; a format
+/// without it starts opaque whatever it is handed, and would come back black.
+#[must_use]
+pub fn region_canvas_clear(region: PixelRegion, format: PixelFormat) -> Canvas {
+    region_canvas(region, format, Color::TRANSPARENT)
+}
+
+/// The canvas both of the above make.
+fn region_canvas(region: PixelRegion, format: PixelFormat, background: Color) -> Canvas {
+    // A region is a rectangle of a page's pixels, and a page is bounded by
+    // `MAX_PAGE_PIXELS` on each side long before `i32::MAX`; saturating keeps a
+    // caller's absurd corner from wrapping rather than trusting that.
+    let at = |value: u32| i32::try_from(value).unwrap_or(i32::MAX);
+    Canvas::new(region.width, region.height, format, background)
+        .at_origin(at(region.x), at(region.y))
 }
 
 /// The largest canvas this will allocate for one page, in pixels.
@@ -3033,7 +3529,7 @@ pub fn region_canvas_in(region: PixelRegion, format: PixelFormat) -> Canvas {
 /// About 67 million, which is 201 MB at three bytes a pixel — larger than any
 /// legitimate single-page render, and small enough that a hostile file cannot
 /// exhaust memory with it. A caller who genuinely wants more renders in tiles,
-/// which go through the same path with a translated viewport (ruling 7).
+/// which go through the same path over a smaller canvas (ruling 5).
 ///
 /// The cap exists because the page box is attacker-controlled: `/MediaBox
 /// [0 0 1e9 1e9]` is four tokens, and without a ceiling it asks for an
@@ -3209,27 +3705,61 @@ pub fn group_format(space: tinker_pdf_content::GroupSpace) -> PixelFormat {
 
 /// The format a *page* may be handed back in.
 ///
-/// `CmykA8` exists so a transparency group can composite over ink (11.6.6). It
-/// is deliberately not a format a page comes back in, and the reason is that
-/// `Bitmap` says how many components it has and nothing about what they mean:
-/// every consumer that reads three bytes and calls them red, green and blue —
-/// this repository's own `examples/render.rs` writes a PPM that way — would
-/// emit cyan, magenta and yellow under those names and look almost right.
+/// `CmykA8` exists so a transparency group can composite over ink (11.6.6), and
+/// `LabA8` so one can composite in Lab. Neither is a format a page comes back
+/// in, and the reason is that `Bitmap` says how many components it has and
+/// nothing about what they mean: every consumer that reads three bytes and
+/// calls them red, green and blue — this repository's own `examples/render.rs`
+/// writes a PPM that way — would emit cyan, magenta and yellow, or lightness
+/// and two opponent axes, under those names and look almost right.
 ///
-/// So a caller asking for it gets `Rgba8`, which carries the same alpha and
+/// So a caller asking for either gets `Rgba8`, which carries the same alpha and
 /// the colours the name promises. Silently, because there is nothing for the
 /// caller to do about it: the request was for pixels, and pixels are what comes
-/// back.
+/// back. The facade's `RenderOptions::allow_cmyk` is the one way past this for
+/// ink, and it is a second, explicit field rather than a reading of this one,
+/// so that a caller has to say they know the bytes are ink.
+///
+/// *`LabA8` was let through until September 2026*, while its own documentation
+/// and this function's both said a page never came back in it: the `match`
+/// named `CmykA8` alone, so `format: LabA8` handed a caller four bytes of
+/// encoded `L*a*b*` under a format that stores no light at all.
 #[must_use]
 pub fn page_format(format: PixelFormat) -> PixelFormat {
     match format {
-        PixelFormat::CmykA8 => PixelFormat::Rgba8,
+        PixelFormat::CmykA8 | PixelFormat::LabA8 => PixelFormat::Rgba8,
         other => other,
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// Every format a page may come back in, and the two it may not.
+    ///
+    /// Exhaustive over `PixelFormat` on purpose: a seventh format added to the
+    /// rasterizer fails to compile here until somebody decides which side of
+    /// this line it is on.
+    #[test]
+    fn only_formats_that_store_light_are_page_formats() {
+        for format in [
+            PixelFormat::Gray8,
+            PixelFormat::GrayA8,
+            PixelFormat::Rgb8,
+            PixelFormat::Rgba8,
+            PixelFormat::CmykA8,
+            PixelFormat::LabA8,
+        ] {
+            let expected = match format {
+                PixelFormat::Gray8
+                | PixelFormat::GrayA8
+                | PixelFormat::Rgb8
+                | PixelFormat::Rgba8 => format,
+                PixelFormat::CmykA8 | PixelFormat::LabA8 => PixelFormat::Rgba8,
+            };
+            assert_eq!(page_format(format), expected, "{format:?}");
+        }
+    }
 
     /// **The two crates agree about ink and light.**
     ///
@@ -3382,7 +3912,7 @@ mod tests {
         for (name, path) in shapes() {
             for rule in [FillRule::NonZero, FillRule::EvenOdd] {
                 let whole = fill(&path, rule, 0, 0, SIDE, SIDE, 0.2, None);
-                let (x0, y0, w, h) = paint_region(&path, None, None, SIDE, SIDE);
+                let (x0, y0, w, h) = paint_region(&path, None, None, (0, 0, SIDE, SIDE));
                 let bounded = fill(&path, rule, x0, y0, w, h, 0.2, None);
 
                 for y in 0..SIDE as i32 {
@@ -3406,7 +3936,7 @@ mod tests {
         let mut path = Path::new();
         path.rect(4.0, 6.0, 9.0, 7.0);
         assert_eq!(
-            paint_region(&path, None, None, 2000, 2000),
+            paint_region(&path, None, None, (0, 0, 2000, 2000)),
             (3, 5, 11, 9),
             "the bounding box, one pixel of slack on each side"
         );
@@ -3414,16 +3944,22 @@ mod tests {
         // Clamped to the canvas rather than reaching outside it.
         let mut over = Path::new();
         over.rect(-50.0, -50.0, 60.0, 60.0);
-        assert_eq!(paint_region(&over, None, None, 100, 100), (0, 0, 11, 11));
+        assert_eq!(
+            paint_region(&over, None, None, (0, 0, 100, 100)),
+            (0, 0, 11, 11)
+        );
 
         // A path that misses the canvas costs nothing at all.
         let mut away = Path::new();
         away.rect(500.0, 500.0, 10.0, 10.0);
-        assert_eq!(paint_region(&away, None, None, 100, 100), (100, 100, 0, 0));
+        assert_eq!(
+            paint_region(&away, None, None, (0, 0, 100, 100)),
+            (100, 100, 0, 0)
+        );
 
         // Neither does one with no points.
         assert_eq!(
-            paint_region(&Path::new(), None, None, 100, 100),
+            paint_region(&Path::new(), None, None, (0, 0, 100, 100)),
             (0, 0, 0, 0)
         );
     }
@@ -3438,7 +3974,7 @@ mod tests {
         clip_path.rect(30.0, 40.0, 10.0, 10.0);
         let clip = fill(&clip_path, FillRule::NonZero, 29, 39, 12, 12, 0.2, None);
 
-        let (x0, y0, w, h) = paint_region(&path, Some(&clip), None, 200, 200);
+        let (x0, y0, w, h) = paint_region(&path, Some(&clip), None, (0, 0, 200, 200));
         assert_eq!((x0, y0, w, h), (29, 39, 12, 12), "the clip is the smaller");
 
         // And the clipped coverage is unchanged by that: compare against the
@@ -3932,6 +4468,94 @@ mod tests {
 
         assert_eq!(nonzero.pixel(10, 10).map(|c| c.r), Some(0), "filled");
         assert_eq!(evenodd.pixel(10, 10).map(|c| c.r), Some(255), "a hole");
+    }
+
+    /// Which side of the triangle `a b c` a point is on, with a margin.
+    ///
+    /// `Some(true)` when the point is inside by more than `margin` from every
+    /// edge line, `Some(false)` when it is outside by more than `margin` from
+    /// at least one, and `None` in the band along the outline where
+    /// anti-aliasing decides. Half-plane arithmetic and nothing else: the
+    /// answer is the geometry's, not the rasterizer's.
+    fn in_triangle(p: (f64, f64), tri: [(f64, f64); 3], margin: f64) -> Option<bool> {
+        let [a, b, c] = tri;
+        let orient = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+        let sign = if orient < 0.0 { -1.0 } else { 1.0 };
+        let mut inside = true;
+        for (u, v) in [(a, b), (b, c), (c, a)] {
+            let (dx, dy) = (v.0 - u.0, v.1 - u.1);
+            let distance =
+                sign * (dx * (p.1 - u.1) - dy * (p.0 - u.0)) / (dx * dx + dy * dy).sqrt();
+            if distance < -margin {
+                return Some(false);
+            }
+            if distance <= margin {
+                inside = false;
+            }
+        }
+        inside.then_some(true)
+    }
+
+    /// **ISO 32000-1 8.5.3.1: before filling, each open subpath is implicitly
+    /// closed** — and 8.5.4 says the same of a clipping path.
+    ///
+    /// `90 10 m 150 30 l 110 60 l f` names two segments and no `h`. Both of its
+    /// edges run the same way in `y`, so a filler that only builds the edges a
+    /// path states holds one crossing per sub-scanline and paints **nothing**,
+    /// which is what this engine did until September 2026. Every pixel whose
+    /// centre is more than a pixel inside the triangle the implicit close
+    /// makes must be painted and every pixel more than a pixel outside it must
+    /// not, decided by half-plane arithmetic rather than by comparing with a
+    /// closed render (which would pass a filler that ignored `h` as well). The
+    /// same holds for `f*`, for a clip, and for the first of two subpaths,
+    /// which a second `m` ends without closing.
+    #[test]
+    fn an_open_subpath_is_closed_before_it_is_filled_or_clipped() {
+        const SIDE: u32 = 160;
+        let triangle = [(90.0, 10.0), (150.0, 30.0), (110.0, 60.0)];
+        let other = [(10.0, 100.0), (60.0, 150.0), (20.0, 140.0)];
+        type Triangle = [(f64, f64); 3];
+        let cases: [(&str, &[u8], &[Triangle]); 4] = [
+            ("f", b"90 10 m 150 30 l 110 60 l f", &[triangle]),
+            ("f*", b"90 10 m 150 30 l 110 60 l f*", &[triangle]),
+            (
+                "W n",
+                b"90 10 m 150 30 l 110 60 l W n 0 0 160 160 re f",
+                &[triangle],
+            ),
+            (
+                "two subpaths",
+                b"10 100 m 60 150 l 20 140 l 90 10 m 150 30 l 110 60 l f",
+                &[other, triangle],
+            ),
+        ];
+        for (what, content, shapes) in cases {
+            let (canvas, _) = render(content, SIDE);
+            let (mut inside, mut outside) = (0, 0);
+            for y in 0..SIDE {
+                for x in 0..SIDE {
+                    // The pixel's centre in PDF user space: `render` flips y.
+                    let p = (f64::from(x) + 0.5, f64::from(SIDE - y) - 0.5);
+                    let verdicts: Vec<_> = shapes.iter().map(|t| in_triangle(p, *t, 1.0)).collect();
+                    let red = canvas.pixel(x, y).map(|c| c.r);
+                    if verdicts.contains(&Some(true)) {
+                        inside += 1;
+                        assert_eq!(red, Some(0), "{what}: ({x}, {y}) is inside and unpainted");
+                    } else if verdicts.iter().all(|v| *v == Some(false)) {
+                        outside += 1;
+                        assert_eq!(red, Some(255), "{what}: ({x}, {y}) is outside and painted");
+                    }
+                }
+            }
+            assert!(
+                inside > 700,
+                "{what}: only {inside} pixels were deep inside"
+            );
+            assert!(
+                outside > 20_000,
+                "{what}: only {outside} pixels were outside"
+            );
+        }
     }
 
     /// A source that answers with one solid-colour image.
@@ -5046,6 +5670,120 @@ mod tests {
             let (canvas, _) = render(content, 8);
             assert_eq!(canvas.data.len(), 8 * 8 * 3);
         }
+    }
+
+    /// **On a whole page, every page-frame rectangle is the rectangle of the
+    /// mask it stands beside, and `frame` is the canvas's own** — after every
+    /// call, through clips and `q`/`Q`, a group under a clip and one under
+    /// none, soft masks with a black and a pale backdrop, `/SMask /None`, a
+    /// text clip that clips everything away, and a clip wholly off the page.
+    ///
+    /// This is the invariant that makes a tile's decisions the page's
+    /// (ruling 5): the rectangles are computed from device coordinates alone,
+    /// so they are the same numbers in a tile as here, and *here* they are
+    /// provably what the masks were — which is what the page decided with
+    /// before they existed. A tile cannot check it about itself, because in a
+    /// tile the masks are smaller than the rectangles by design; so it is
+    /// checked on the one render where the two must agree.
+    #[test]
+    fn page_frame_rectangles_are_the_masks_rectangles_on_a_whole_page() {
+        #[track_caller]
+        fn check(r: &Renderer<'_, NoGlyphs>, step: &str) {
+            assert_eq!(
+                r.frame,
+                Bounds::of_rect(r.canvas.device_rect()),
+                "{step}: the frame is not the canvas"
+            );
+            assert_eq!(
+                r.clip_bounds,
+                r.clip.as_ref().map(Bounds::of_mask),
+                "{step}: the clip's rectangle"
+            );
+            assert_eq!(
+                r.soft_bounds,
+                r.soft.as_ref().map(Bounds::of_mask),
+                "{step}: the soft mask's rectangle"
+            );
+        }
+        let rect = |x0: f64, y0: f64, x1: f64, y1: f64| {
+            vec![
+                PathSegment::MoveTo { x: x0, y: y0 },
+                PathSegment::LineTo { x: x1, y: y0 },
+                PathSegment::LineTo { x: x1, y: y1 },
+                PathSegment::LineTo { x: x0, y: y1 },
+                PathSegment::Close,
+            ]
+        };
+        let mask = |backdrop: Option<tinker_pdf_content::Rgb>| tinker_pdf_content::MaskGroup {
+            form: tinker_pdf_content::Form {
+                content: Vec::new(),
+                matrix: Matrix::IDENTITY,
+                bbox: None,
+                group: None,
+                stream: 0,
+            },
+            luminosity: true,
+            backdrop,
+            transfer: None,
+        };
+        let group = |isolated| tinker_pdf_content::Group {
+            isolated,
+            knockout: false,
+            space: None,
+        };
+        let state = GraphicsState::default();
+        let canvas = Canvas::new(120, 90, PixelFormat::Rgb8, Color::WHITE);
+        let mut r = Renderer::new(canvas, page_transform(90.0, 1.3), &NoGlyphs);
+        check(&r, "a new renderer");
+
+        r.save_state();
+        r.clip_path(&rect(5.5, 7.25, 60.0, 50.5), &state, false);
+        check(&r, "a clip");
+        assert!(r.begin_group(group(false), &state));
+        check(&r, "a group under the clip");
+        r.clip_path(&rect(20.0, 10.0, 90.0, 80.0), &state, true);
+        check(&r, "a clip inside the group");
+        assert!(r.begin_soft_mask(&mask(None), &rect(0.0, 30.0, 40.0, 95.0), &state));
+        check(&r, "a black-backdrop mask group");
+        r.fill_path(&rect(1.0, 1.0, 30.0, 30.0), &state, false);
+        r.end_soft_mask();
+        check(&r, "the black-backdrop mask installed");
+        r.clip_path(&rect(10.0, 12.0, 44.0, 40.0), &state, false);
+        check(&r, "a clip under the soft mask");
+        r.end_group();
+        check(&r, "the group closed");
+        r.restore_state();
+        check(&r, "Q");
+
+        assert!(r.begin_soft_mask(
+            &mask(Some(tinker_pdf_content::Rgb {
+                r: 200,
+                g: 200,
+                b: 200
+            })),
+            &rect(50.0, -20.0, 200.0, 40.0),
+            &state
+        ));
+        check(&r, "a pale-backdrop mask group off the page's edge");
+        r.end_soft_mask();
+        check(&r, "the pale-backdrop mask installed");
+        assert!(r.begin_group(group(true), &state));
+        check(&r, "an isolated group under no clip");
+        r.end_group();
+        r.clear_soft_mask();
+        check(&r, "/SMask /None");
+
+        r.save_state();
+        r.clip_path(&rect(500.0, 500.0, 520.0, 520.0), &state, false);
+        check(&r, "a clip wholly off the page");
+        assert!(r.begin_group(group(false), &state));
+        check(&r, "a group whose clip misses the page");
+        r.end_group();
+        r.restore_state();
+        r.begin_text();
+        r.text_clip_requested = true;
+        r.end_text();
+        check(&r, "a text clip that clips everything away");
     }
 }
 

@@ -30,6 +30,42 @@ dictionary, never assumed to be `/Yes`. Values decode per type
 state rather than an absence), and choice options come from `/Opt` in both
 its string and `[export, display]` forms (12.7.4.4).
 
+**Creating.** `DocumentEditor::add_field(&NewField)` makes a text field, a
+check box, a radio group or a choice field (a combo box or a list box), and
+the field is a field at once: `fields()` in the same editor finds it and
+`fill_field` fills it, because both walk the tree through the editor's own
+overlay. A text, check box or choice field is merged with its one widget
+(12.7.3.3); a radio group is one field whose `/Kids` are a widget per
+button, each on whatever page the caller put it. Every widget is added to
+its page's `/Annots`, carries `/P` and `/F 4` (Print), and has an appearance
+for every state it can be in: a text or choice field is drawn by **the fill
+layer's own path** from the field as the tree walk reads it back, so creating
+a field with a value and filling it with that value produce the same
+appearance; a check box and each radio button get an `/Off` appearance and
+one for their on state keyed by the export value, drawn as paths rather than
+ZapfDingbats glyphs so no second font has to be in `/DR`, and `/AS` selects
+between them (12.7.4.2). A `/DA` names `/Helv`, and a form whose `/DR` has no
+`/Helv` is given Helvetica — once, however many fields are made; a form that
+has one keeps it. An initial value is written as `/V` and `/DV` both, so a
+reset (12.7.5.3) returns to it. A dotted name is a hierarchy (12.7.3.2):
+`a.b.c` joins or creates the non-terminal fields `a` and `a.b`. `/Ff` is
+written on every created field, zero included, because it is inheritable and
+a check box created under a node carrying the Radio bit would otherwise read
+back as a radio group. Everything that can refuse is checked before anything
+is written, inside a transaction, and each refusal is an `AddFieldError`
+naming what was wrong.
+
+**The `/DA` font is found through the editor.** `text_appearance` used to
+look the `/DA` font up in the *file*, so a field created and filled in one
+editor was laid out against a `/Helv` the file did not have yet — measured
+at half an em a character, which auto-sizes forty `i`s to 4.8 points where
+Helvetica's own widths give 10.8. The font dictionary is now read through the
+view. What is still read from the file is a font's subsidiary objects — its
+descriptor, `/Widths` array and program — because `font::read` takes a
+`CosDocument`: a standard-14 font, which is what a created field names, has
+none, and a composite font an editor adds together with its program is the
+case that remains.
+
 **Filling.** Setting `/V` is the easy half and the useless half: a value
 with no matching appearance shows only in viewers that regenerate, which is
 why filled forms so often print blank. So every fill rebuilds the widget's
@@ -39,8 +75,11 @@ rather than setting it. Layout honours the `/DA` font, size and colour
 (replayed verbatim, so an operator this build does not interpret still
 comes out right), `/Q` quadding, multiline wrap, auto-size for `Tf 0`, and
 comb fields (12.7.4.3): `/MaxLen` equal cells, one character centred in
-each, overflow dropped rather than drawn outside the last box. Non-ASCII
-values are written as UTF-16BE with a byte-order mark (7.9.2.2).
+each, overflow dropped rather than drawn outside the last box. The value is
+a text string written by the shared encoder (7.9.2.2,
+[document-model](document-model.md)): PDFDocEncoding where it carries the
+value, otherwise UTF-16BE behind `FE FF`, or UTF-8 behind `EF BB BF` in a
+document declaring 2.0 or later.
 
 **Non-Latin values are shaped** (milestone 8 of
 [design/shaping.md](../design/shaping.md)). Until it landed, this module
@@ -80,15 +119,44 @@ subset font in the wild has. `Font::cid_for_gid` inverts that last step
 through an index built once per font rather than by scanning the table per
 glyph.
 
+**Three more fonts shape (October 2026).** The ROADMAP named them as the
+refusals left, and each now has a fixture whose operators the test computes:
+
+- **A vertical CMap** (9.7.4.3) is written as a **column**: the glyphs are
+  found as above, `GSUB` runs `vert` and `vrt2` in place of the horizontal
+  features and no `GPOS` runs, and the pen goes down the box's centre line —
+  a glyph is drawn displaced by its position vector, whose horizontal half
+  is half its width, so the column is centred — advancing by each CID's own
+  `/W2` displacement, so the run carries no `TJ` numbers. `/Q` reads down
+  the column (top, centred, bottom); a multiline field's lines are columns
+  from the right; auto-sizing fits the longest column to the height.
+- **A bare CFF** (`/FontFile3 /Subtype /CIDFontType0C` or `/Type1C` under a
+  `CIDFontType0`) has no `cmap`, no `hmtx` and no `GSUB`, and the shaper
+  takes an sfnt, so the program is **wrapped** per line in the smallest
+  sfnt that answers the shaper's questions: a `cmap` from each character to
+  the code the font's own `/ToUnicode` gives it read backwards and checked
+  forwards (`Font::code_for_char`, the lowest code that reads as the
+  character, so a `bfchar` that took over a code inside a `bfrange` is not
+  written for the range's character), that code to a CID through
+  the encoding, kept only where the program's charset carries the CID, and an
+  `hmtx` from `/W`. The value is drawn at the advances a reader will use, in
+  UAX #9's visual order; nothing joins, because a CFF carries nothing to
+  join with.
+- **A simple TrueType font** is shaped against its embedded sfnt, and each
+  glyph written as the lowest byte that reaches it — the code whose
+  `/Encoding` character (9.6.6) the program's `cmap` maps to that glyph — so
+  `GPOS` kerning and placement reach the field as `TJ` numbers and `Ts`. A
+  line that needs a glyph no byte reaches — a ligature, a joined form —
+  keeps the single-byte path whole, which is what it drew before.
+
 Anything else keeps the single-byte path, still draws a `?`, and emits
 `WarningKind::FieldCharacterUnrepresentable { character }` against the
 field's own object for every character it could not write (rulings 2
-and 10) — a simple font; a **vertical** CMap, because 9.7.4.3 advances the
-pen downward and this module places glyphs along a baseline, so drawing
-the right glyphs in a row a viewer will stack is worse than a mark that
-announces itself; a program that is not an sfnt, which is every bare CFF
-(`/FontFile3 /Subtype /Type1C` or `/CIDFontType0C`), because a CFF carries
-no `GSUB`/`GPOS` to execute.
+and 10): a symbolic simple font, or one that is not TrueType or embeds no
+sfnt; a vertical CMap over a CFF; a CFF whose font has no `/ToUnicode`, so
+nothing in the document says which code means which character; a vertical
+**comb** field, whose cells 12.7.4.3 lays across the box; and a program that
+is neither an sfnt nor a CFF.
 
 **The feature gate is declared, not silent.** The registry's code-to-CID
 tables are 1.19 MB behind the `cmap-predefined` cargo feature
@@ -109,13 +177,69 @@ the field refuses — over `/MaxLen`, not among a non-editable list's
 options, or written by a user into a ReadOnly field (12.7.4.1 Table 227) —
 is refused whole, because truncating hides a data error inside a file that
 then looks correctly filled. Checkboxes and radio groups set `/V` and every
-widget's `/AS` together, all widgets or none. `reset_form` restores `/DV`
+widget's `/AS` together, all widgets or none — through `set_checkbox` and
+`select_radio`, or through `fill_field` and `set_field_values` given the
+*name* of the state to show (`On`, `blue`, `Off`), which is what an FDF or
+XFDF file carries for a button. A state no widget's `/AP /N` offers is
+refused rather than written, because a `/V` naming a state nothing can draw
+is a box that reads as ticked and displays as empty. That door is the
+user's: `set_calculated_values` refuses a check box or radio group, as it
+always has, since no calculation in this build computes a button state and
+a ReadOnly box is not one to tick on a script's word. `reset_form` restores `/DV`
 into `/V` and removes `/V` where there is no `/DV` (12.7.5.3) — "never
 filled" and "filled with nothing" are different states.
 
+**Exchanging form data: FDF and XFDF** (`tinker_pdf::form_data`). Both
+directions, through one model: a `FormData` is a list of `FieldData` —
+a fully qualified name and the `FieldValue` the field-tree reader already
+uses — plus the source document's name and the warnings. `FormData::from_fields`
+exports from `Document::form_fields()` or `DocumentEditor::fields()`, the
+walk that joins `/T` with periods and inherits `/V`; `apply(editor, &data)`
+imports through `set_field_values`, so a name resolves against the same
+walk, a value a field would refuse from a user is refused, and the first
+refusal rolls back every field before it. A check box or radio group takes
+the name of its state, as the filling paragraph above says. FDF (12.7.8) is
+read by the same object reader every PDF is: the `/FDF` dictionary's
+`/Fields` tree, `/T` partial names joined as 12.7.3.2 joins them, `/V` as a
+text string, a name or an array of either, and `/F`; `/Kids` is walked with
+a visited set holding every field, every `/Kids` array and every link of a
+reference chain to either — so a `/Kids` array two fields share, or one
+whose entries name it as their own `/Kids`, is walked once and the second
+parent named as a `TreeCut` — and the field tree's own depth bound. What
+both readers hand back is held to one budget, `MAX_FORM_DATA_BYTES` (64 MiB
+of names, values and warnings), charged before each copy is made, because a
+copy is where a small file became a large allocation: a field's name was
+copied into every warning met inside it, and one indirect `/T` or `/V` into
+every field beneath or beside it, so 67 KiB of FDF asked for 184 MB and
+22 KiB for a gigabyte. A file that asks for more is refused whole,
+`FormDataError::TooLarge`, since part of a form's data imports as a
+different form. An entry whose qualified name is empty — no `/T` or `name`,
+or an empty one, and no named ancestor — is not read but named
+(`FormDataWarning::Unnamed`), and `apply` refuses the empty name in data
+built by hand: the field-tree walk gives `""` to every field with no `/T`
+up its tree, so it would land in whichever of those came first. Written, the qualified
+names go back into a tree — `/T` is a *partial* name — a state is a name,
+and a cross-reference table is included although 12.7.8 makes it optional.
+XFDF is the XML form, read by `tinker-pdf-xml` under its default bounds,
+which refuse a document type declaration outright. **What XFDF is read as is
+the commonly documented core** — `<xfdf>`, `<f href>`, `<fields>`, nested
+`<field name>`, repeated `<value>` — because the specification that defines
+it, Adobe's *XML Forms Data Format Specification*, standardised as ISO
+19444-1, was not available to this build; a value is text, and the field it
+lands in decides whether `On` is a state. Everything either reader meets and
+does not read — FDF's `/Annots`, `/Pages`, `/JavaScript`, a field's `/AP`,
+`/Ff`, `/SetFf`, `/Opt`, `/RV`; XFDF's `<annots>`, `<ids>`,
+`<value-richtext>` — is named in `FormData::warnings` rather than skipped.
+A value XML 1.0 cannot carry (a C0 control other than tab, line feed and
+carriage return) is refused by `to_xfdf` rather than written some other way,
+and a carriage return is written `&#13;` so it does not come back a line
+feed. A name with an empty partial name (`.x`, `a..b`) is written whole, and
+a name deeper than a quarter of the object parser's nesting bound keeps its
+tail in the deepest `/T`, so every name reads back as the name it was.
+
 **Transactions.** `DocumentEditor::transaction` snapshots the editor's
-whole mutable state — overlay, deletions, page order and the object-number
-counter — runs a closure, and restores everything on `Err`. A closure
+whole mutable state — overlay, deletions, page order, trailer entries and the
+object-number counter — runs a closure, and restores everything on `Err`. A closure
 rather than a begin/commit/rollback triple because the failure it prevents
 is silent: there is no way to leave the scope without either committing or
 rolling back. It nests, the snapshot copies only what has been edited (the
@@ -172,7 +296,7 @@ value the caller carries: `fields_within`, `document_scripts_within` and
 `catalog_scripts_within` spend one between them, in that order (the order is
 fixed because which scripts come back as source and which as
 `Script::Oversize` depends on it, and determinism is a contract — ruling 4).
-`script_summary` — the one call that reads every script a document has —
+`script_summary` — the one call that reads all three surfaces —
 threads one. The bare `fields`, `document_scripts` and `catalog_scripts` are
 each **one read of one surface** and each start from the full total; a caller
 that reads more than one and wants the document's answer threads a budget.
@@ -328,15 +452,46 @@ On `Document`: `form_fields()` returns the typed `Field` model —
 and `scripts` (a `FieldScripts` of the four `/AA` sources, each a
 `Script::Source` or `Script::Oversize`). `calculation_order()`,
 `document_scripts()` and `catalog_scripts()` surface `/CO` and the
-document's own scripts; `script_summary()` counts everything for a caller
-that has to warn before filling — reading a script runs nothing. Each of the
+document's own scripts; `script_summary()` counts what those walkers see —
+the fields' `/AA` scripts, `/CO`, `/Names /JavaScript` and the catalog's
+`/AA` — for a caller that has to warn before filling; reading a script runs
+nothing. It is a form's count, **not every script a document carries**: it
+does not look at `/OpenAction`, a page's `/AA`, an annotation's `/AA` or
+`/A`, an outline item's `/A` or an action's `/Next` chain, all of which a
+viewer runs. `DocumentEditor::sanitise` sweeps every object for that reason
+([editing](editing.md)). Each of the
 three has a `_within` sibling taking a `ScriptBudget`, for a caller reading
 more than one surface under one total.
 
 Mutation goes through `Document::editor()`, a `DocumentEditor`:
-`fill_field`, `set_field_values`, `set_field_value`, `set_checkbox`,
-`select_radio`, `reset_form`, `transaction`, `recalculate`, and
-`set_calculated_values` for a host that computes values itself.
+`add_field`, `fill_field`, `set_field_values`, `set_field_value`,
+`set_checkbox`, `select_radio`, `reset_form`, `transaction`, `recalculate`,
+and `set_calculated_values` for a host that computes values itself.
+`add_field` takes a `NewField` — a fully qualified name, a `NewFieldKind`
+(`Text`, `Checkbox`, `Radio` with its `RadioButton`s, `Choice`) carrying the
+page, the `Rect` and the initial value, the caller's `/Ff` bits and a `/DA`
+font size — and answers the terminal field's `ObjRef` or an
+`AddFieldError`; the facade re-exports all five, and `Rect` with them.
+
+Form data lives in the facade module `tinker_pdf::form_data`:
+`read_fdf(bytes)`, `read_xfdf(bytes)`, `FormData::{from_fields, to_fdf,
+to_xfdf}`, `apply(editor, &data)`, the types `FormData`, `FieldData`,
+`FormDataWarning` and `FormDataError`, and the readers' budget
+`MAX_FORM_DATA_BYTES`. Both halves cross the C ABI and every binding
+([bindings](bindings.md)): `add_field` as four calls, one per
+`NewFieldKind` arm (`tpdf_editor_add_text_field`, `_add_checkbox`,
+`_add_radio_group`, `_add_choice_field`), and form data as an owned
+`TpdfFormData` — read from FDF or XFDF, taken from a document, or built a
+field at a time; written back as either; applied with
+`tpdf_editor_apply_form_data` — with a reader's or writer's refusal as
+`TpdfStatus::FormDataRefused` (17).
+
+```rust
+let data = form_data::FormData::from_fields(&document.form_fields());
+let xfdf = data.to_xfdf()?;                      // or data.to_fdf()
+let mut editor = other.editor();
+form_data::apply(&mut editor, &form_data::read_xfdf(xfdf.as_bytes())?)?;
+```
 `recalculate_under` takes a `ScriptPolicy`; `formatted_value`, `keystroke`
 and `validate` take one too, and are the format event and the two event entry
 points. The free functions behind them are
@@ -385,28 +540,37 @@ let bytes = editor.save(&WriteOptions::default());
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| `eval`, `try`, `switch`, `for...in`, `typeof`, `delete`, `with`, `class`, `let`/`const`, `import`/`export`, regular expressions, object literals, prototypes — and `function` anywhere but document scope | `ScriptError::Syntax` — each word reserved and refused outright | a construct silently approximated is one rename away from running it | — |
+| `eval`, `try`, `switch`, `for...in`, `typeof`, `delete`, `with`, `class`, `let`/`const`, `import`/`export`, regular expressions, object literals, prototypes — and `function` anywhere but document scope | `ScriptError::Syntax` — each word reserved and refused outright | a construct silently approximated is one rename away from running it | [ROADMAP](../ROADMAP.md) FJ-01…FJ-03f |
 | Anything at document scope that is not a function definition | `ScriptError::NotADefinition`, naming the `/Names /JavaScript` key through `CalcError::DocumentScript` | a skipped statement builds a name table silently missing what it would have defined | — |
 | A document-level helper that calls itself, directly or through another | `ScriptError::Recursion` | a depth cap makes the answer depend on a number nobody can predict from the file — the cascade rule's argument | — |
 | More than 256 document-level functions | `ScriptError::TooManyFunctions` | a name table is a lookup scanned per unknown name, so a document-controlled count of them is document-controlled work | — |
-| `app.*` and `console.*` | inert stubs; assigning a stub's result to a field is `ScriptError::NotStorable` | a stub's result must never become a field value | — |
+| `app.*` and `console.*` | inert stubs; assigning a stub's result to a field is `ScriptError::NotStorable` | a stub's result must never become a field value | [ROADMAP](../ROADMAP.md) FJ-12, FJ-13 |
 | A name or member outside the subset | `ScriptError::UnknownName` / `ScriptError::UnknownMember` | a calculation that guesses is a form that lies | — |
 | A script that does not terminate cheaply, or outgrows the size caps | `ScriptError::OutOfSteps` / `TooDeep` / `TooManyTokens` / `StringTooLong` / `ArrayTooLong` / `TooManyVars` | three independent bounds — depth, work, size — because none substitutes for another | — |
 | Script source past 64 KiB, or past what one read of the document has left of its 4 MiB `ScriptBudget` | `Script::Oversize(len)`; running it is `ScriptError::TooLong` | truncated source means something different from what the file says (ruling 10) | — |
 | More than 4 096 calculating fields in one pass | `CalcError::TooManyFields` | refused rather than truncated, for the same reason a failing script refuses the pass | — |
-| A value the field will not take — over `/MaxLen`, not an option, ReadOnly against a user write | `FillError::ValueRefused` (in a multi-field apply, `FillRejection` names the field) | refusing beats truncating, which hides a data error in a file that looks filled | — |
+| A value the field will not take — over `/MaxLen`, not an option, ReadOnly against a user write, a button state no widget offers | `FillError::ValueRefused` (in a multi-field apply, `FillRejection` names the field) | refusing beats truncating, which hides a data error in a file that looks filled | — |
+| Creating a field under a name that is taken, or beneath a terminal field | `AddFieldError::NameTaken` / `AncestorIsTerminal` | two fields answering to one name are one field a filler cannot address; a terminal field's kids are widgets | — |
+| Creating a field whose flags decide a different kind, or a list box marked editable | `AddFieldError::FlagsContradictKind` | Radio, Pushbutton, Combo and Edit are what `NewFieldKind` says, and a second answer to that question is a field that reads back as something else | — |
+| A button export value that is empty, `Off`, repeated, or not a name | `AddFieldError::ExportUnusable` | 12.7.4.2.3 reserves `Off`, and two buttons answering to one state are one button | — |
+| XFDF beyond the commonly documented core, and FDF beyond `/Fields` and `/F` — annotations, page templates, JavaScript, appearances, flags, rich text | `FormDataWarning::NotRead`, naming the key or element and the field | ISO 19444-1 was not available to this build, and a skipped construct would read as one that was not there | — |
+| An encrypted FDF | `FormDataError::Encrypted` | reading one needs a key, and this reader takes none | — |
+| An FDF or XFDF that asks for more than 64 MiB of names, values and warnings | `FormDataError::TooLarge` (`MAX_FORM_DATA_BYTES`) | each copy repeats something the file says once, so a small file can ask for terabytes; part of a form's data imports as a different form | [ruling 1](../rulings.md) |
+| An entry with no name, read or imported — no `/T` or `name` anywhere up its tree | `FormDataWarning::Unnamed` when read; `FillError::NoSuchField` from `apply` | `""` addresses whichever of the document's nameless fields comes first, not the one the data meant | — |
+| A multiple selection imported into a field | `FillError::ValueRefused` through `FillRejection` | this build fills one value per field; half a selection is a different answer | — |
+| A value XML 1.0 cannot carry, written as XFDF | `FormDataError::NotRepresentable`, naming the field | written any other way it would come back different; FDF carries it | — |
 | A widget missing 12.5.2 Table 164's `/Rect` | `SkippedWidget` with `WidgetDefect::RectMissing` | the value is written and drawable widgets drawn; the damage is named, never silent (rulings 2, 10) | [rulings](../rulings.md) |
-| Shaping a value against a simple `/DA` font, a vertical CMap, or a `/FontFile3` that is a bare CFF | `WarningKind::FieldCharacterUnrepresentable { character }` per character; the single-byte path draws `?` | a byte cannot name a glyph past 255; a vertical run drawn along a baseline is stacked by the viewer; a CFF carries no `GSUB` | [design/shaping.md](../design/shaping.md) |
+| Shaping a value against a symbolic or non-TrueType simple `/DA` font, a vertical CMap over a CFF, a CFF with no `/ToUnicode`, or in a vertical comb field | `WarningKind::FieldCharacterUnrepresentable { character }` per character; the single-byte path draws `?` | a symbolic font's codes name glyphs rather than characters; the wrapper reads codes from `/ToUnicode` and a column from an sfnt; 12.7.4.3 lays comb cells across the box | [design/shaping.md](../design/shaping.md) |
 | Shaping a value under a **registry CMap** in a build without `cmap-predefined` | `WarningKind::PredefinedCMapApproximate(name)` against the field, then the per-character warnings | the code-to-CID tables that would be inverted were never compiled in — a capability that depends on a feature has to say so | [fonts.md](fonts.md) |
-| A CID no code means any more — a `cidchar` took the code its `cidrange` would have given | `WarningKind::FieldCharacterUnrepresentable { character }`; nothing is written for that glyph | the inverse of a CMap is not a function, and an unverified inverse draws a *different* wrong glyph | [rulings](../rulings.md) ruling 10 |
+| A CID no code means any more — a `cidchar` took the code its `cidrange` would have given — or, for a bare CFF, a character no code means any more because a `bfchar` took the code its `bfrange` would have given | `WarningKind::FieldCharacterUnrepresentable { character }`; nothing is written for that glyph | the inverse of a CMap is not a function, and an unverified inverse draws a *different* wrong glyph | [rulings](../rulings.md) ruling 10 |
 | A trigger class the policy denies — keystroke, validate and document-level by default | `CalcError::Refused { trigger, subject }` | a pass that quietly ran nothing reads exactly like a form with no scripts (ruling 10) | — |
 | A computed value a field's own `/AA /V` refuses | `CalcError::Invalid { field, value }`, and the whole pass writes nothing | one total rejected and nine written anyway is a document that disagrees with itself | — |
 | A validate action the policy would not run, over a value the pass wrote anyway | `Recalculation::refused` names the field | a skipped check reads exactly like a form that has none, and the difference is whether the numbers were looked at (ruling 10) | — |
-| A catalog action (`WC`, `WS`, `DS`, `WP`, `DP`) | `Trigger::Catalog` exists and **nothing in this build runs one**; allowing it changes no answer | every one of the five names an event a reader has no notion of, and none of them is document-open | — |
+| A catalog action (`WC`, `WS`, `DS`, `WP`, `DP`) | `Trigger::Catalog` exists and **nothing in this build runs one**; allowing it changes no answer | every one of the five names an event a reader has no notion of, and none of them is document-open | [ROADMAP](../ROADMAP.md) FJ-06 |
 | A format action's display string reaching `/V` | `DisplayString`, which no write door will take — `error[E0308]`, proved by compiling the mistake | 12.7.3.3 keeps value and appearance apart, and a type is a guarantee where an arrangement of code was a convention | — |
-| Automatic recalculation | none offered — `recalculate()` is explicit | when a calculation runs is a host's policy, not the engine's | — |
-| Filling or signing a **signature field** | `FieldKind::Signature` recognises it and this module does neither | a signature field's value is a CMS blob over a `/ByteRange`, not text a fill layer could lay out; producing one is `DocumentEditor::save_signed` and reading one is `Document::verify_signatures` | [signatures](signatures.md) |
-| XFA | not read anywhere | removed in ISO 32000-2; a stated permanent non-goal | [ROADMAP](../ROADMAP.md) |
+| Automatic recalculation | none offered — `recalculate()` is explicit | when a calculation runs is a host's policy, not the engine's | [ROADMAP](../ROADMAP.md) FJ-07 |
+| Filling or signing a **signature field** | `FieldKind::Signature` recognises it and this module does neither | a signature field's value is a CMS blob over a `/ByteRange`, not text a fill layer could lay out; producing one is `DocumentEditor::save_signed` and reading one is `Document::verify_signatures` | [signatures](signatures.md); [ROADMAP](../ROADMAP.md) AN-17 |
+| XFA | not read anywhere | removed in ISO 32000-2, and a named non-goal until 9 October 2026; read, laid out, scripted and flattened as roadmap rows since the owner's parity decision | [ROADMAP](../ROADMAP.md) AN-27…AN-34 |
 
 ## Verified
 
@@ -434,7 +598,46 @@ format string never landing in `/V`. Its module header carries the six
 policy defaults flipped one at a time and how many assertions each flip
 fired, four of which are zero and say so.
 
-`crates/tinker-pdf/tests/shaped_forms.rs` (12 tests, and the same 12 in a
+`crates/tinker-pdf/tests/form_creation.rs` (9 tests) is the creation row's
+exit criterion, on a file with no form and on `testdata/form-fields.pdf`:
+each of the four kinds created, found by `fields()` in the same editor,
+filled through `fill_field`, saved incrementally and as a rewrite, reopened,
+read back with its value and held clean by the strict validator; rendered
+blank where it holds nothing and inked where it holds something, the tick
+and the selected radio button counted against the frames beside them;
+initial values restored by a reset; a dotted name creating its ancestors
+once; the `/DR` font joined or added exactly once; the auto-size that proves
+the `/DA` font is read through the editor; and every `AddFieldError` leaving
+the editor clean. Its header carries six reintroduced defects, each firing.
+
+`crates/tinker-pdf/tests/form_data.rs` (17 tests) is the exchange row's
+exit criterion: export then import reproduces every terminal field's value,
+in both formats, on `testdata/form-fields.pdf` before and after a fill, and
+on a form `add_field` builds with names three deep, a list box, a combo box,
+a check box and a radio group, and values that need every escape both
+formats have. Four hand-written fixtures in `tests/form_data/` — not written
+by this writer, and their README says what was and was not available to
+write them from — are read value by value, and imported into the form they
+were written for. The refusals, the unread keys and a name ten thousand
+partial names deep are asserted; `hostile_input.rs`'s
+`mutated_form_data_never_panics` sweeps the fixtures on every commit, and
+`form_data` is a fuzz target whose body is a round-trip property rather than
+a crash hunt. That property, run once as a stable-toolchain sweep of 360 000
+mutations before the target was committed, found two writer defects — a
+valueless field beneath which other fields sat was lost, and `.x` came back
+as `x` — and both are pinned. Seven reintroduced defects each fire. The
+review of the row found what the sweep could not reach: the copy budget is
+fired on every shape it named and the ones beside them (one field's name in
+four thousand warnings, one indirect `/T` down 127 inline and 256 indirect
+levels, one `/V` in five thousand fields, four thousand kids under one long
+name, the XFDF equivalents) and swept from small to past it by
+`hostile_input.rs`'s `form_data_hands_back_no_more_than_its_budget`; a
+self-naming `/Kids` array returns; a nameless entry is neither read nor
+imported; and a unit test beside the writer counts that writing names back
+into a tree compares each partial name with one sibling at most, where a
+scan of every sibling took seven seconds over forty thousand flat names.
+
+`crates/tinker-pdf/tests/shaped_forms.rs` (19 tests, and the same 19 in a
 `--no-default-features` build — the registry pair swap places) holds up the
 shaped half against a face the file synthesises, so the expected glyph
 indices are ones the test names rather than reads back out of the engine.
@@ -442,10 +645,16 @@ It asserts joined Arabic in visual order under `/Identity-H`, under an
 embedded CMap stream, under a one-byte codespace, under a registry CMap —
 where the codes are checked *forwards* through `CMap::cid`, which is what
 makes it a round trip rather than a restatement — and over a non-identity
-`/CIDToGIDMap`; and it asserts each refusal by name: the vertical CMap, the
-bare CFF, the CID whose code a `cidchar` took, and the registry CMap whose
-table a `cmap-predefined`-off build left out. Its module header carries the
-nine reintroduced defects and how many assertions each one fired.
+`/CIDToGIDMap`; a vertical CMap written as a column at the box's centre,
+with `/Q` read down it; a bare CFF drawn through its wrapper at `/W`'s
+advances, naming a character its `/ToUnicode` never mentions and one whose
+CID the program lacks, and refused with no `/ToUnicode`; a simple TrueType
+font carrying a `GPOS` placement as `TJ` numbers and `Ts`, and keeping the
+byte path for a line whose ligature no byte reaches; and it asserts each
+remaining refusal by name: a program that is no font, the CID whose code a
+`cidchar` took, and the registry CMap whose table a `cmap-predefined`-off
+build left out. Its module header carries milestone 8's nine reintroduced
+defects and how many assertions each one fired.
 
 `crates/tinker-pdf-cos/tests/form_script_budget.rs` (4 tests) builds a
 document that crowds all three surfaces and asserts the four mebibytes are
@@ -486,7 +695,7 @@ with the `DisplayString` handed straight over, each asserted to fail with
 whether this repository's own type refuses a state, and adjudicates nothing
 about a document (ruling 13).
 
-`form_script` is one of the 31 fuzz targets, with a committed seed corpus.
+`form_script` is one of the 51 fuzz targets, with a committed seed corpus.
 It drives every entry point the policy gates from one input, split at the
 first NUL byte: the prefix is offered to `ScriptScope::define` as document
 scope, and the suffix is run as a field script with whatever that produced

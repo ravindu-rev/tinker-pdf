@@ -9,8 +9,9 @@
 //!    cryptography, and the answer a whole class of attacks lives in.
 //! 2. **Do those bytes still hash to what the signature says?** The CMS's
 //!    `messageDigest` signed attribute against a digest recomputed here.
-//! 3. **Was the signature made by the key in the certificate?** RSASSA-PKCS1
-//!    or ECDSA over the re-encoded signed attributes (RFC 5652 §5.4).
+//! 3. **Was the signature made by the key in the certificate?** RSASSA-PKCS1,
+//!    RSASSA-PSS or ECDSA over the re-encoded signed attributes (RFC 5652
+//!    §5.4).
 //! 4. **Whose key is it?** How far the certificate chain reaches toward an
 //!    anchor the *caller* supplied.
 //!
@@ -30,11 +31,16 @@
 //! about determinism: "expired" is a claim about now, and a library that
 //! invents a now gives a different answer on a different day for the same
 //! bytes. A caller that wants validity judged passes the instant to judge it
-//! at; one that does not gets the window reported and decides for itself.
+//! at; one that does not gets the window reported and decides for itself. An
+//! RFC 3161 token's authority is judged at the token's own `genTime`, which
+//! is the token's claim about when it stamped rather than a reading of any
+//! clock.
 //!
 //! **Revocation.** No CRL is fetched and no OCSP responder is asked, because
-//! the engine performs no I/O. Embedded revocation data is surfaced by
-//! `tinker-pdf-pki` and evaluating its freshness is the host's.
+//! the engine performs no I/O. Embedded revocation data is surfaced — a CMS
+//! blob's own by `tinker-pdf-pki`, a document security store's by
+//! `Document::security_store` — and evaluating its freshness is the host's.
+//! Nothing here consults either.
 //!
 //! # The limit ruling 13 imposes, stated once
 //!
@@ -44,17 +50,19 @@
 //! fifteen real signatures from six producers — but the assembly below is this
 //! engine agreeing with itself.
 //!
-//! The ECDSA arm is the one place where that sentence needs a second clause,
-//! because no corpus signature uses ECDSA and none of the four questions could
-//! be asked of a real one. Its evidence is split three ways and
+//! The ECDSA and RSASSA-PSS arms are where that sentence needs a second
+//! clause, because no corpus signature uses either and none of the four
+//! questions could be asked of a real one. Its evidence is split three ways and
 //! `crates/tinker-pdf/tests/ecdsa_verdict.rs` states the split in full: the
 //! curve arithmetic is NIST CAVP's, the CMS and the certificates are OpenSSL's,
 //! and the `/ByteRange` spans are this repository's own on both sides.
+//! `crates/tinker-pdf/tests/signature_shapes.rs` makes the same split for PSS,
+//! whose arithmetic is CAVP's and RSA Laboratories'.
 
 use tinker_pdf_crypto::{Curve, DigestAlgorithm as CryptoDigest, EcPublicKey, RsaPublicKey};
 use tinker_pdf_pki::{
-    oid, Certificate, ContentInfo, DigestAlgorithm as CmsDigest, PublicKey, SignatureAlgorithm,
-    SignerInfo,
+    oid, pss, Certificate, ContentInfo, DigestAlgorithm as CmsDigest, PublicKey,
+    SignatureAlgorithm, SignerInfo, TimeStampToken,
 };
 
 use crate::signature::{Coverage, Signature, SubFilter};
@@ -133,16 +141,31 @@ pub enum Unchecked {
     /// them is true.
     MalformedSignatureValue(String),
     /// There are no signed attributes, so there is no `messageDigest` to
-    /// compare and the signature is over the content directly. Reported
-    /// rather than approximated: one corpus signature is this shape, and
-    /// guessing at what it covers would be a verdict about the wrong bytes.
+    /// compare: the signature is over the content's digest directly (RFC 5652
+    /// §5.4), and questions 2 and 3 are one question.
+    ///
+    /// Only ever the document digest's reason, and only when the signature
+    /// did not verify. A detached signature with no signed attributes that
+    /// verifies is a signature over these covered bytes, and the digest then
+    /// reads [`DocumentDigest::Matches`]; one that does not verify cannot say
+    /// whether the bytes changed or the signature was never theirs, so the
+    /// digest is left unanswered rather than given the signature's answer.
     NoSignedAttributes,
-    /// The blob is an `adbe.pkcs7.sha1` (12.8.3.3.1), whose encapsulated
-    /// content is the document digest rather than a detached signature over
-    /// it. Deprecated in ISO 32000-2, one corpus file, and that file is a
-    /// fuzzer's output — so it is named rather than implemented on a sample
-    /// of one.
-    LegacySha1SubFilter,
+    /// The signature is `adbe.pkcs7.sha1` (12.8.3.3.1), whose `SignedData`
+    /// must encapsulate the SHA-1 digest of the covered bytes — and this one
+    /// is detached, so there is no document digest in it to compare.
+    ///
+    /// Whatever the signature then says: with no signed attributes it may
+    /// verify over the covered bytes' own digest, and the digest still reads
+    /// this, because a message under this subfilter is not that shape.
+    ContentNotEncapsulated,
+    /// The signer has signed attributes and no `messageDigest` among them,
+    /// which RFC 5652 §5.3 requires wherever there are any. The signature is
+    /// over the attributes, and the attributes name no content, so nothing the
+    /// signature covers binds the document — or, for a timestamp token, its
+    /// `TSTInfo`. The signature over the attributes may well verify; that
+    /// proves the key signed *them*, and nothing else.
+    NoMessageDigest,
 }
 
 /// How far the certificate chain reached.
@@ -221,9 +244,8 @@ pub struct SignerDescription {
     /// The signing time the signer *claims*, from the `signingTime` signed
     /// attribute. Nothing countersigned it; it is a number the signer wrote.
     pub claimed_signing_time: Option<i64>,
-    /// Whether the blob carries an RFC 3161 timestamp token. Surfaced, never
-    /// evaluated — validating a token means validating the authority's own
-    /// chain, which is a later tier.
+    /// Whether the blob carries an RFC 3161 timestamp token.
+    /// [`Verdict::timestamps`] says what each one proves.
     pub timestamped: bool,
 }
 
@@ -244,6 +266,9 @@ pub struct Verdict {
     pub weaknesses: Vec<Weakness>,
     /// Who the signer's certificate says they are.
     pub signer: Option<SignerDescription>,
+    /// What each RFC 3161 timestamp token reached proves, in the order the
+    /// signer's unsigned attributes carry them.
+    pub timestamps: Vec<TimestampVerdict>,
 }
 
 impl Verdict {
@@ -254,10 +279,101 @@ impl Verdict {
     /// discards every distinction the fields make. Anything reporting to a
     /// person should read the fields.
     #[must_use]
+    ///
+    /// For a document timestamp the four answers describe the token, and its
+    /// [`TimestampVerdict`] must be trusted too — the authority's certificate
+    /// fit for timestamping is part of what a document timestamp is, where
+    /// for a signature's own countersignature it is a separate matter.
     pub fn is_trusted(&self) -> bool {
         self.coverage == Coverage::WholeFile
             && self.document_digest == DocumentDigest::Matches
             && self.signature == SignatureCheck::Verified
+            && matches!(self.chain, Chain::AnchoredTo { .. })
+            && self
+                .timestamps
+                .iter()
+                .filter(|stamp| stamp.stamps == Stamped::Document)
+                .all(TimestampVerdict::is_trusted)
+    }
+}
+
+/// What an RFC 3161 timestamp token stamps: what its `messageImprint` must
+/// be the digest of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Stamped {
+    /// A signature's `signature` octets, the token being an unsigned
+    /// attribute of that signer (RFC 3161 Appendix A): it says the signature
+    /// existed by `time`.
+    Signature,
+    /// The bytes a document timestamp's `/ByteRange` covers (ISO 32000-2
+    /// 12.8.5, `/SubFilter /ETSI.RFC3161`): it says the document, and every
+    /// signature already in it, existed by `time`.
+    Document,
+}
+
+/// RFC 3161 §2.3 and §2.4.1's two requirements on the certificate a token
+/// was signed with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuthorityCertificate {
+    /// Its only extended key usage is `id-kp-timeStamping`, marked critical,
+    /// and the token's ESS `signingCertificate` or `signingCertificateV2`
+    /// attribute names it by digest.
+    Fit,
+    /// The certificate's extended key usage is absent, not critical, or names
+    /// a purpose besides `id-kp-timeStamping` — not a certificate §2.3 lets
+    /// an authority stamp with.
+    NotForTimestamping,
+    /// No ESS signing-certificate attribute names the certificate the token
+    /// was signed with: the token does not bind itself to the key that signed
+    /// it, which §2.4.1 requires so a certificate cannot be substituted.
+    NotBound,
+    /// The token's certificate set does not carry the signer's certificate.
+    Missing,
+}
+
+/// What one RFC 3161 timestamp token turned out to prove.
+///
+/// The same refusal to collapse as [`Verdict`]: the imprint, the signature,
+/// the certificate's fitness and the chain are asked separately, because a
+/// token correctly signed over a different digest and a token over the right
+/// digest signed by a stranger are different findings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TimestampVerdict {
+    /// What the token stamps.
+    pub stamps: Stamped,
+    /// Whether the token read as a `TimeStampToken`.
+    pub token: CmsState,
+    /// `genTime`, Unix seconds: the instant the authority asserts.
+    pub time: Option<i64>,
+    /// The authority as the token names it: the `TSTInfo`'s `tsa` hint where
+    /// there is one, otherwise the signing certificate's subject.
+    pub authority: Option<String>,
+    /// Whether `messageImprint` is the digest of what the token stamps.
+    pub imprint: DocumentDigest,
+    /// Whether the authority's key signed this `TSTInfo`: the signature
+    /// verifies, and the `messageDigest` it covers is the `TSTInfo`'s own.
+    pub signature: SignatureCheck,
+    /// RFC 3161's requirements on the authority's certificate.
+    pub authority_certificate: AuthorityCertificate,
+    /// How far the authority's chain reached, its validity judged at `time`.
+    pub chain: Chain,
+    /// What was accepted and is worth saying.
+    pub weaknesses: Vec<Weakness>,
+}
+
+impl TimestampVerdict {
+    /// Whether every answer came back the way "a trusted authority vouches
+    /// for this time" needs. The same convenience, with the same caveat, as
+    /// [`Verdict::is_trusted`].
+    #[must_use]
+    pub fn is_trusted(&self) -> bool {
+        matches!(self.token, CmsState::Read { .. })
+            && self.imprint == DocumentDigest::Matches
+            && self.signature == SignatureCheck::Verified
+            && self.authority_certificate == AuthorityCertificate::Fit
             && matches!(self.chain, Chain::AnchoredTo { .. })
     }
 }
@@ -327,10 +443,14 @@ pub(crate) fn verdict(
         chain: Chain::NoSignerCertificate,
         weaknesses,
         signer: None,
+        timestamps: Vec::new(),
     };
     let blob = signature.cms();
     if blob.is_empty() {
         return verdict;
+    }
+    if signature.sub_filter == Some(SubFilter::EtsiRfc3161) {
+        return document_timestamp(document, signature, blob, anchors, verdict);
     }
 
     let content = match ContentInfo::parse(blob) {
@@ -361,7 +481,7 @@ pub(crate) fn verdict(
         .collect();
 
     verdict.document_digest =
-        check_document_digest(document, signature, signer, &mut verdict.weaknesses);
+        check_document_digest(document, signature, signed, signer, &mut verdict.weaknesses);
 
     let signer_certificate = find_signer(signer, &certificates);
     if let Some(certificate) = signer_certificate {
@@ -375,10 +495,28 @@ pub(crate) fn verdict(
         }
     }
 
+    let message = Signed::of(signer, signed, document, signature);
     verdict.signature = match signer_certificate {
-        Some(certificate) => check_signature(signer, certificate, &mut verdict.weaknesses),
+        Some(certificate) => {
+            check_signature(signer, certificate, &message, &mut verdict.weaknesses)
+        }
         None => SignatureCheck::NotChecked(Unchecked::SignerCertificateMissing),
     };
+    // RFC 5652 §5.4's other case: with no signed attributes on a detached
+    // signature, the signature *is* over the document's digest, so questions
+    // 2 and 3 are one question. A signature that verifies answers both; one
+    // that does not cannot say which half failed, and the digest stays
+    // unchecked rather than borrowing the signature's answer.
+    // Not under `adbe.pkcs7.sha1`, whose message must encapsulate the
+    // document's digest: a detached one is not that subfilter's shape, and its
+    // digest stays `NotChecked(ContentNotEncapsulated)` whatever the signature
+    // says.
+    if matches!(message, Signed::Covered { .. })
+        && verdict.signature == SignatureCheck::Verified
+        && signature.sub_filter != Some(SubFilter::Pkcs7Sha1)
+    {
+        verdict.document_digest = DocumentDigest::Matches;
+    }
     verdict.chain = match signer_certificate {
         Some(certificate) => walk(
             certificate,
@@ -389,20 +527,301 @@ pub(crate) fn verdict(
         ),
         None => Chain::NoSignerCertificate,
     };
+    // RFC 3161 Appendix A: a token in the signer's unsigned attributes stamps
+    // the `signature` octets, so its imprint is their digest.
+    verdict.timestamps = signer
+        .timestamp_tokens()
+        .iter()
+        .map(|token| {
+            timestamp(
+                token,
+                Stamped::Signature,
+                &|algorithm| Some(algorithm.digest(signer.signature()).as_bytes().to_vec()),
+                anchors,
+            )
+            .0
+        })
+        .collect();
     verdict
+}
+
+/// A document timestamp (ISO 32000-2 12.8.5): `/Contents` is the token
+/// itself, its imprint the digest of the covered bytes.
+///
+/// The four answers then describe the token — question 2 is the imprint
+/// against the covered bytes, question 3 the authority's signature over its
+/// `TSTInfo`, question 4 the authority's chain at `genTime` — and the token's
+/// own [`TimestampVerdict`] rides in `timestamps` beside them, which is where
+/// its time and its certificate's fitness are.
+fn document_timestamp(
+    document: &Document,
+    signature: &Signature,
+    blob: &[u8],
+    anchors: &TrustAnchors,
+    mut verdict: Verdict,
+) -> Verdict {
+    let (stamp, authority) = timestamp(
+        blob,
+        Stamped::Document,
+        &|algorithm| signature.digest(document, cos_digest(cms_digest(algorithm))),
+        anchors,
+    );
+    verdict.cms = stamp.token.clone();
+    verdict.document_digest = stamp.imprint.clone();
+    verdict.signature = stamp.signature.clone();
+    verdict.chain = stamp.chain.clone();
+    verdict.weaknesses.extend(stamp.weaknesses.iter().cloned());
+    verdict.signer = authority;
+    verdict.timestamps = vec![stamp];
+    verdict
+}
+
+/// The verdict for one RFC 3161 token, whose imprint must be `imprinted`
+/// under the token's own hash.
+///
+/// The authority's chain is judged at the token's own `genTime` rather than
+/// at the caller's instant: §2.3 asks whether the certificate was valid when
+/// it stamped, and the token says when that was. That is the token's claim,
+/// not a clock, so ruling 4 is not touched by it.
+fn timestamp(
+    der: &[u8],
+    stamps: Stamped,
+    imprinted: &dyn Fn(CryptoDigest) -> Option<Vec<u8>>,
+    anchors: &TrustAnchors,
+) -> (TimestampVerdict, Option<SignerDescription>) {
+    let mut verdict = TimestampVerdict {
+        stamps,
+        token: CmsState::Absent,
+        time: None,
+        authority: None,
+        imprint: DocumentDigest::NotChecked(Unchecked::NoCms),
+        signature: SignatureCheck::NotChecked(Unchecked::NoCms),
+        authority_certificate: AuthorityCertificate::Missing,
+        chain: Chain::NoSignerCertificate,
+        weaknesses: Vec::new(),
+    };
+    let token = match TimeStampToken::parse(der) {
+        Ok(token) => token,
+        Err(error) => {
+            verdict.token = CmsState::Unreadable(format!("{error}"));
+            let why = Unchecked::UnsupportedAlgorithm(format!("{error}"));
+            verdict.imprint = DocumentDigest::NotChecked(why.clone());
+            verdict.signature = SignatureCheck::NotChecked(why);
+            return (verdict, None);
+        }
+    };
+    let info = token.info();
+    let signed = token.content_info().signed_data();
+    verdict.token = CmsState::Read {
+        signers: signed.signer_infos().len(),
+    };
+    verdict.time = Some(info.time());
+    verdict.imprint = match info.imprint_digest() {
+        Ok(algorithm) => {
+            if algorithm == CmsDigest::Sha1 {
+                verdict.weaknesses.push(Weakness::Sha1Digest);
+            }
+            match imprinted(crypto_digest(algorithm)) {
+                Some(expected) if expected == info.imprint() => DocumentDigest::Matches,
+                Some(_) => DocumentDigest::Differs,
+                None => DocumentDigest::NotChecked(Unchecked::CoverageUnusable),
+            }
+        }
+        Err(error) => {
+            DocumentDigest::NotChecked(Unchecked::UnsupportedAlgorithm(format!("{error:?}")))
+        }
+    };
+
+    let Some(signer) = signed.signer_infos().first() else {
+        verdict.signature = SignatureCheck::NotChecked(Unchecked::NoSigner);
+        return (verdict, None);
+    };
+    let certificates: Vec<Certificate<'_>> = signed
+        .x509_certificates()
+        .filter_map(|der| Certificate::parse(der).ok())
+        .collect();
+    let certificate = find_signer(signer, &certificates);
+    verdict.authority = info
+        .tsa()
+        .map(ToString::to_string)
+        .or_else(|| certificate.map(|certificate| certificate.subject().to_rfc4514()));
+    let Some(certificate) = certificate else {
+        verdict.signature = SignatureCheck::NotChecked(Unchecked::SignerCertificateMissing);
+        return (verdict, None);
+    };
+    let description = describe(certificate, signer, signed.signer_infos());
+
+    // The token's `messageDigest` must be the digest of this `TSTInfo`, or
+    // the signature is over some other one; with no signed attributes the
+    // signature is over the `TSTInfo` octets themselves. Signed attributes
+    // with no `messageDigest` bind no `TSTInfo` at all (RFC 5652 §5.3), so a
+    // signature over them that verifies has still not been shown to be over
+    // this one.
+    let message = match signer.signed_attrs_to_digest() {
+        Some(attributes) => Signed::Attributes(attributes),
+        None => Signed::Content(info.der()),
+    };
+    let bound = match (signer.message_digest(), signer.effective_digest()) {
+        (None, _) if signer.signed_attrs().is_some() => None,
+        (None, _) => Some(true),
+        (Some(expected), Ok(algorithm)) => {
+            Some(crypto_digest(algorithm).digest(info.der()).as_bytes() == expected)
+        }
+        (Some(_), Err(_)) => Some(false),
+    };
+    verdict.signature =
+        match check_signature(signer, certificate, &message, &mut verdict.weaknesses) {
+            SignatureCheck::Verified if bound.is_none() => {
+                SignatureCheck::NotChecked(Unchecked::NoMessageDigest)
+            }
+            SignatureCheck::Verified if bound == Some(false) => SignatureCheck::Failed,
+            other => other,
+        };
+    verdict.authority_certificate = authority_certificate(signer, certificate);
+    verdict.chain = walk(
+        certificate,
+        &certificates,
+        anchors,
+        Some(info.time()),
+        &mut verdict.weaknesses,
+    );
+    if !certificate.validity().contains(info.time()) {
+        verdict.weaknesses.push(Weakness::OutsideValidity {
+            subject: certificate.subject().to_rfc4514(),
+        });
+    }
+    (verdict, Some(description))
+}
+
+/// RFC 3161 §2.3 and §2.4.1, asked of the certificate a token was signed
+/// with.
+fn authority_certificate(
+    signer: &SignerInfo<'_>,
+    certificate: &Certificate<'_>,
+) -> AuthorityCertificate {
+    // §2.3: "The corresponding certificate MUST contain only one instance of
+    // the extended key usage field extension ... with KeyPurposeID having
+    // value id-kp-timeStamping. This extension MUST be critical."
+    let extensions = certificate.extensions();
+    let critical = extensions
+        .find(oid::CE_EXT_KEY_USAGE)
+        .is_some_and(|extension| extension.is_critical());
+    let only_timestamping = extensions
+        .extended_key_usage()
+        .is_some_and(|usage| usage.purposes().len() == 1 && usage.has(oid::KP_TIME_STAMPING));
+    if !critical || !only_timestamping {
+        return AuthorityCertificate::NotForTimestamping;
+    }
+    // §2.4.1 (and RFC 5816 for the second version): the signed attributes
+    // name the signing certificate by digest, and the first `ESSCertID` is
+    // the one that signed. Where an `issuerSerial` is given it must name the
+    // same certificate too.
+    let ess = signer
+        .signing_certificate_v2()
+        .or_else(|| signer.signing_certificate());
+    let Some(first) = ess.and_then(|ess| ess.certs().first()) else {
+        return AuthorityCertificate::NotBound;
+    };
+    let Ok(algorithm) = first.digest() else {
+        return AuthorityCertificate::NotBound;
+    };
+    if crypto_digest(algorithm)
+        .digest(certificate.der())
+        .as_bytes()
+        != first.hash()
+    {
+        return AuthorityCertificate::NotBound;
+    }
+    match first.issuer_serial_decoded() {
+        None => AuthorityCertificate::Fit,
+        Some(Ok(issuer_serial)) if issuer_serial.identifies(certificate) => {
+            AuthorityCertificate::Fit
+        }
+        Some(_) => AuthorityCertificate::NotBound,
+    }
+}
+
+/// What a signer's signature value was computed over (RFC 5652 §5.4).
+///
+/// Three shapes, and the subfilter does not decide between them — the
+/// `SignerInfo` does. A verifier that assumed signed attributes, which every
+/// corpus signer but one carries, refused the other two by name; one that
+/// guessed would have verified a signature over the wrong bytes.
+enum Signed<'a> {
+    /// The signed attributes, as §5.4 re-encodes them for digesting: the
+    /// stored `[0] IMPLICIT` tag replaced by `SET OF`.
+    Attributes(Vec<u8>),
+    /// No signed attributes, and the message carries its content: the
+    /// signature is over the digest of the `eContent` octets.
+    Content(&'a [u8]),
+    /// No signed attributes, and the message is detached: the signature is
+    /// over the digest of the content itself, which for a PDF is the bytes
+    /// the `/ByteRange` covers.
+    Covered {
+        document: &'a Document,
+        signature: &'a Signature,
+    },
+}
+
+impl<'a> Signed<'a> {
+    fn of(
+        signer: &SignerInfo<'a>,
+        signed: &tinker_pdf_pki::SignedData<'a>,
+        document: &'a Document,
+        signature: &'a Signature,
+    ) -> Signed<'a> {
+        if let Some(attributes) = signer.signed_attrs_to_digest() {
+            return Signed::Attributes(attributes);
+        }
+        match signed.encap_content_info().content() {
+            Some(content) => Signed::Content(content),
+            None => Signed::Covered {
+                document,
+                signature,
+            },
+        }
+    }
+
+    /// The digest the signature value is over, under `algorithm`.
+    ///
+    /// `None` only for [`Signed::Covered`] whose spans do not fit the file —
+    /// a digest over less than the signature covers is not one.
+    fn digest(&self, algorithm: CryptoDigest) -> Option<Vec<u8>> {
+        match self {
+            Signed::Attributes(bytes) => Some(algorithm.digest(bytes).as_bytes().to_vec()),
+            Signed::Content(bytes) => Some(algorithm.digest(bytes).as_bytes().to_vec()),
+            Signed::Covered {
+                document,
+                signature,
+            } => signature.digest(document, cos_digest(cms_digest(algorithm))),
+        }
+    }
 }
 
 /// Question 2: do the covered bytes still hash to what was signed?
 fn check_document_digest(
     document: &Document,
     signature: &Signature,
+    signed: &tinker_pdf_pki::SignedData<'_>,
     signer: &SignerInfo<'_>,
     weaknesses: &mut Vec<Weakness>,
 ) -> DocumentDigest {
     if signature.sub_filter == Some(SubFilter::Pkcs7Sha1) {
-        return DocumentDigest::NotChecked(Unchecked::LegacySha1SubFilter);
+        return check_encapsulated_sha1(document, signature, signed, signer, weaknesses);
     }
     let Some(expected) = signer.message_digest() else {
+        // Signed attributes that name no content: the signature, verified or
+        // not, is over them and binds no document.
+        if signer.signed_attrs().is_some() {
+            return DocumentDigest::NotChecked(Unchecked::NoMessageDigest);
+        }
+        // No `messageDigest` to compare: the signature is over the content
+        // directly and question 3 answers this one too (see `verdict`). The
+        // digest it is over is still a document digest, and still worth
+        // calling weak.
+        if signer.effective_digest() == Ok(CmsDigest::Sha1) {
+            weaknesses.push(Weakness::Sha1Digest);
+        }
         return DocumentDigest::NotChecked(Unchecked::NoSignedAttributes);
     };
     let algorithm = match signer.effective_digest() {
@@ -429,19 +848,74 @@ fn check_document_digest(
     }
 }
 
+/// Question 2 for `adbe.pkcs7.sha1` (ISO 32000-1 12.8.3.3.1), where the
+/// document's digest is *inside* the message: the `eContent` is the SHA-1
+/// digest of the covered bytes, and the signer signs that content like any
+/// other.
+///
+/// So there are two links where a detached signature has one, and both must
+/// hold. The twenty octets the message carries must be the covered bytes'
+/// SHA-1; and where the signer has signed attributes, its `messageDigest` must
+/// be the digest of those twenty octets under the signer's own algorithm —
+/// otherwise the message carries a document digest that nothing signed. With
+/// no signed attributes the signature is over the twenty octets directly, and
+/// question 3 is what checks that link.
+fn check_encapsulated_sha1(
+    document: &Document,
+    signature: &Signature,
+    signed: &tinker_pdf_pki::SignedData<'_>,
+    signer: &SignerInfo<'_>,
+    weaknesses: &mut Vec<Weakness>,
+) -> DocumentDigest {
+    // The subfilter fixes the document digest at SHA-1, whatever the signer
+    // used for the rest — which is why ISO 32000-2 deprecates it.
+    weaknesses.push(Weakness::Sha1Digest);
+    let Some(content) = signed.encap_content_info().content() else {
+        return DocumentDigest::NotChecked(Unchecked::ContentNotEncapsulated);
+    };
+    let Some(actual) = signature.digest(document, tinker_pdf_cos::DigestAlgorithm::Sha1) else {
+        return DocumentDigest::NotChecked(Unchecked::CoverageUnusable);
+    };
+    if content != actual.as_slice() {
+        return DocumentDigest::Differs;
+    }
+    let Some(expected) = signer.message_digest() else {
+        // With no signed attributes the signature is over the twenty octets
+        // themselves, and question 3 checks that link. With attributes that
+        // carry no `messageDigest`, nothing does: the message holds the right
+        // digest and no signature covers it.
+        if signer.signed_attrs().is_some() {
+            return DocumentDigest::NotChecked(Unchecked::NoMessageDigest);
+        }
+        return DocumentDigest::Matches;
+    };
+    let algorithm = match signer.effective_digest() {
+        Ok(algorithm) => algorithm,
+        Err(error) => {
+            return DocumentDigest::NotChecked(Unchecked::UnsupportedAlgorithm(format!(
+                "{error:?}"
+            )))
+        }
+    };
+    if crypto_digest(algorithm).digest(content).as_bytes() == expected {
+        DocumentDigest::Matches
+    } else {
+        DocumentDigest::Differs
+    }
+}
+
 /// Question 3: was the signature made by the key in the certificate?
 fn check_signature(
     signer: &SignerInfo<'_>,
     certificate: &Certificate<'_>,
+    message: &Signed<'_>,
     weaknesses: &mut Vec<Weakness>,
 ) -> SignatureCheck {
     // RFC 5652 §5.4: with signed attributes present the signature is over the
     // DER of a `SET OF Attribute`, which is the stored `[0] IMPLICIT` bytes
     // with the tag replaced. `signed_attrs_to_digest` is the one place that
     // substitution happens, and fifteen real signatures say it is required.
-    let Some(message) = signer.signed_attrs_to_digest() else {
-        return SignatureCheck::NotChecked(Unchecked::NoSignedAttributes);
-    };
+    // Without them it is over the content's own digest; `Signed` says which.
     let algorithm = match signer.signature_algorithm() {
         Ok(algorithm) => algorithm,
         Err(error) => {
@@ -478,8 +952,17 @@ fn check_signature(
                     bits: key.modulus_bits(),
                 });
             }
-            match key.verify_pkcs1_v15_message(crypto_digest(digest), &message, signer.signature())
-            {
+            if !key_permits_pkcs1_v15(certificate) {
+                // RFC 4055 §1.2: the key's owner restricted it to RSASSA-PSS,
+                // so it made no PKCS#1 v1.5 signature, whatever the arithmetic
+                // would say — the same answer `key_permits_pss` gives a
+                // restriction the parameters break.
+                return SignatureCheck::Failed;
+            }
+            let Some(digest_value) = message.digest(crypto_digest(digest)) else {
+                return SignatureCheck::NotChecked(Unchecked::CoverageUnusable);
+            };
+            match key.verify_pkcs1_v15(crypto_digest(digest), &digest_value, signer.signature()) {
                 Ok(()) => SignatureCheck::Verified,
                 Err(_) => SignatureCheck::Failed,
             }
@@ -504,18 +987,95 @@ fn check_signature(
                     )))
                 }
             };
-            match key.verify_message(crypto_digest(digest), &message, r, s) {
+            let Some(digest_value) = message.digest(crypto_digest(digest)) else {
+                return SignatureCheck::NotChecked(Unchecked::CoverageUnusable);
+            };
+            match key.verify(&digest_value, r, s) {
                 Ok(()) => SignatureCheck::Verified,
                 Err(_) => SignatureCheck::Failed,
             }
         }
-        // RSASSA-PSS's parameters live in a structure `tinker-pdf-pki` does
-        // not read, so there is no salt length and no mask generation function
-        // to verify under. Its own roadmap row.
+        // RFC 4056 §3: the parameters are the signer's and come with the
+        // signature; the hash in them is what digests the signed attributes.
+        // That hash and the `digestAlgorithm` that reduced the document are
+        // only a SHOULD apart, so a signer may use two — the document digest
+        // above used the one `effective_digest` names and the signature below
+        // uses the parameters', each where RFC 4056 puts it.
         SignatureAlgorithm::RsaPss => {
-            SignatureCheck::NotChecked(Unchecked::UnsupportedAlgorithm(format!("{algorithm:?}")))
+            let parameters = match pss::parameters(&signer.signature_algorithm_id()) {
+                Ok(parameters) => parameters,
+                Err(error) => {
+                    return SignatureCheck::NotChecked(Unchecked::UnsupportedAlgorithm(format!(
+                        "{error}"
+                    )))
+                }
+            };
+            if parameters.hash == CryptoDigest::Sha1 {
+                weaknesses.push(Weakness::Sha1Signature);
+            }
+            let Some(key) = rsa_key(certificate) else {
+                return SignatureCheck::NotChecked(Unchecked::UnsupportedKey(
+                    "the subject public key is not RSA".to_string(),
+                ));
+            };
+            if key.modulus_bits() < 2048 {
+                weaknesses.push(Weakness::ShortRsaKey {
+                    bits: key.modulus_bits(),
+                });
+            }
+            if !key_permits_pss(certificate, parameters) {
+                // RFC 4056 §3: "If any of the above four steps is not true,
+                // the signature checking algorithm MUST fail validation." A
+                // key that restricted itself to other parameters did not make
+                // this signature, whatever the arithmetic would say.
+                return SignatureCheck::Failed;
+            }
+            let Some(digest_value) = message.digest(parameters.hash) else {
+                return SignatureCheck::NotChecked(Unchecked::CoverageUnusable);
+            };
+            match key.verify_pss(parameters, &digest_value, signer.signature()) {
+                Ok(()) => SignatureCheck::Verified,
+                Err(_) => SignatureCheck::Failed,
+            }
         }
     }
+}
+
+/// Whether the certificate's RSA key may have made an RSASSA-PKCS1-v1_5
+/// signature at all.
+///
+/// RFC 4055 §1.2: `rsaEncryption` leaves a key unrestricted, and a key
+/// published under `id-RSASSA-PSS` is one its owner limited to RSASSA-PSS. The
+/// `RSAPublicKey` is the same either way, so the arithmetic cannot tell them
+/// apart and only the OID can.
+fn key_permits_pkcs1_v15(certificate: &Certificate<'_>) -> bool {
+    certificate.subject_public_key_info().algorithm().oid() != oid::RSASSA_PSS
+}
+
+/// RFC 4056 §3's four checks, where the key's own `SubjectPublicKeyInfo` is
+/// `id-RSASSA-PSS` with parameters: the same hash, the same mask generation,
+/// a salt at least as long as the key's, and the same trailer.
+///
+/// A key under `rsaEncryption`, or under `id-RSASSA-PSS` with no parameters,
+/// restricts nothing (RFC 4055 §3.3, cases 1 and 2). Parameters the key
+/// carries and this build cannot read are a refusal, not a pass — a
+/// restriction nobody read is not one anybody honoured.
+fn key_permits_pss(
+    certificate: &Certificate<'_>,
+    signature: tinker_pdf_crypto::PssParameters,
+) -> bool {
+    let algorithm = certificate.subject_public_key_info().algorithm();
+    if algorithm.oid() != oid::RSASSA_PSS || algorithm.parameters().is_none() {
+        return true;
+    }
+    let Ok(key) = pss::parameters(&algorithm) else {
+        return false;
+    };
+    // Step 4, the trailer field, is `trailerFieldBC(1)` on both sides by
+    // construction: `pss::parameters` refuses any other value.
+    key.hash == signature.hash
+        && key.mask_hash == signature.mask_hash
+        && signature.salt_length >= key.salt_length
 }
 
 /// Question 4: how far up does the chain go?
@@ -631,8 +1191,10 @@ fn verifies(child: &Certificate<'_>, issuer: &Certificate<'_>) -> bool {
             let Some(key) = rsa_key(issuer) else {
                 return false;
             };
-            key.verify_pkcs1_v15_message(crypto_digest(digest), child.tbs(), signature)
-                .is_ok()
+            key_permits_pkcs1_v15(issuer)
+                && key
+                    .verify_pkcs1_v15_message(crypto_digest(digest), child.tbs(), signature)
+                    .is_ok()
         }
         Some(SignatureAlgorithm::Ecdsa { digest }) => {
             let Ok(key) = ec_key(issuer) else {
@@ -644,16 +1206,33 @@ fn verifies(child: &Certificate<'_>, issuer: &Certificate<'_>) -> bool {
             key.verify_message(crypto_digest(digest), child.tbs(), r, s)
                 .is_ok()
         }
+        // RFC 4055 §3.2: a certificate's PSS signature is the same octet
+        // string a CMS one is, carried in a BIT STRING; its parameters are the
+        // child's `signatureAlgorithm`, and the issuer's key may restrict them.
+        Some(SignatureAlgorithm::RsaPss) => {
+            let Ok(parameters) = pss::parameters(&child.signature_algorithm()) else {
+                return false;
+            };
+            let Some(key) = rsa_key(issuer) else {
+                return false;
+            };
+            key_permits_pss(issuer, parameters)
+                && key
+                    .verify_pss_message(parameters, child.tbs(), signature)
+                    .is_ok()
+        }
         // Bare `rsaEncryption` names no digest and is not a legal certificate
-        // `signatureAlgorithm`; PSS's parameters are not read; anything else
-        // this build cannot name. The walk reports the path as broken rather
-        // than pretending to have checked it.
-        Some(SignatureAlgorithm::RsaPkcs1v15 { digest: None })
-        | Some(SignatureAlgorithm::RsaPss)
-        | None => false,
+        // `signatureAlgorithm`; anything else this build cannot name. The walk
+        // reports the path as broken rather than pretending to have checked
+        // it.
+        Some(SignatureAlgorithm::RsaPkcs1v15 { digest: None }) | None => false,
     }
 }
 
+/// The certificate's RSA key, published under either `rsaEncryption` or
+/// `id-RSASSA-PSS`. Which signatures that OID lets it have made is
+/// [`key_permits_pkcs1_v15`]'s and [`key_permits_pss`]'s to say, at every
+/// call site.
 fn rsa_key(certificate: &Certificate<'_>) -> Option<RsaPublicKey> {
     match certificate.subject_public_key_info().public_key() {
         PublicKey::Rsa { modulus, exponent } => RsaPublicKey::new(modulus, exponent).ok(),
@@ -730,6 +1309,17 @@ fn crypto_digest(digest: CmsDigest) -> CryptoDigest {
         CmsDigest::Sha256 => CryptoDigest::Sha256,
         CmsDigest::Sha384 => CryptoDigest::Sha384,
         CmsDigest::Sha512 => CryptoDigest::Sha512,
+    }
+}
+
+/// The other direction, for the one place a digest the arithmetic chose —
+/// RSASSA-PSS's, from its parameters — has to be taken over the covered bytes.
+fn cms_digest(digest: CryptoDigest) -> CmsDigest {
+    match digest {
+        CryptoDigest::Sha1 => CmsDigest::Sha1,
+        CryptoDigest::Sha256 => CmsDigest::Sha256,
+        CryptoDigest::Sha384 => CmsDigest::Sha384,
+        CryptoDigest::Sha512 => CmsDigest::Sha512,
     }
 }
 
@@ -813,6 +1403,7 @@ mod tests {
             },
             weaknesses: Vec::new(),
             signer: None,
+            timestamps: Vec::new(),
         };
         assert!(good.is_trusted());
 
@@ -834,6 +1425,36 @@ mod tests {
             subject: "CN=A".into(),
         };
         assert!(!chain.is_trusted(), "self-signed is not anchored");
+
+        // A token whose authority certificate is not fit for timestamping:
+        // as a signature's countersignature it says nothing about the
+        // signature, and as a document timestamp it is the signature.
+        let unfit = |stamps| TimestampVerdict {
+            stamps,
+            token: CmsState::Read { signers: 1 },
+            time: Some(0),
+            authority: None,
+            imprint: DocumentDigest::Matches,
+            signature: SignatureCheck::Verified,
+            authority_certificate: AuthorityCertificate::NotForTimestamping,
+            chain: Chain::AnchoredTo {
+                anchor: "CN=TSA".into(),
+                links: 0,
+            },
+            weaknesses: Vec::new(),
+        };
+        let mut countersigned = good.clone();
+        countersigned.timestamps = vec![unfit(Stamped::Signature)];
+        assert!(
+            countersigned.is_trusted(),
+            "a bad countersignature is not a bad signature"
+        );
+        let mut document = good.clone();
+        document.timestamps = vec![unfit(Stamped::Document)];
+        assert!(
+            !document.is_trusted(),
+            "a document timestamp's authority must be fit to stamp"
+        );
     }
 
     /// The distinction the whole module exists to keep: "we did not look" is

@@ -1,5 +1,158 @@
 //! Gap 29's seven bounds, gap 30's and gap 31's, swept in one place.
 //!
+//! *Amended, October 2026, the review of lane 8C.* **One more row,
+//! `MAX_EMBEDDING_DEPTH`, a cap on copies.** Every text run an EPUB lays out
+//! carries the bidi levels its inline boxes open, and the cap is UAX #9's own
+//! `max_depth`, past which the algorithm ignores a level anyway. The runs now
+//! share one stack rather than a copy each — a copy each was a kilobyte and a
+//! half on every line inside 125 isolating spans — so the cap bounds one
+//! stack, made once for each box that opens a level. Its `fixtures` is the cap
+//! — two hundred nested spans cut at it — its comic and fixed-document
+//! yardsticks are zeros, since neither lays out an inline box, and its book
+//! yardstick is two, a `<bdi>` inside a `dir="rtl"` span, since no committed
+//! book has a `dir`, a `<bdi>` or a `unicode-bidi`. What stands in front of it
+//! is `MAX_BOX_DEPTH`: an inline box at each level opens one.
+//!
+//! *Amended, 9 October 2026, the review of tier 5's formats lane.* **Two more
+//! rows, both HTML's own, and the first of them a bound the lane had written
+//! and not recorded.** `MAX_HTML_ACTIVE_FORMATTING` bounds the list of active
+//! formatting elements, which the tree builder walks on every formatting tag
+//! and which table cells' markers let grow past the stack of open elements;
+//! the lane held it at four times the depth cap and reported crossing it as
+//! the depth cap, with no constant, no ledger and no test. `MAX_HTML_CLONE_BYTES`
+//! bounds the attribute bytes a clone of a formatting element copies, the one
+//! place an HTML tree is bigger than its input — 116 kB of markup held 200 MB
+//! of attribute values. Each `fixtures` is the cap, for
+//! `MAX_ANNOTATION_BYTES`'s reason, and all three yardsticks are zeros,
+//! because no container path parses HTML: an EPUB chapter is XHTML and is read
+//! by the XML reader.
+//!
+//! *Amended, October 2026, the EPUB CSS row's gradients.* **One more row,
+//! `MAX_CSS_GRADIENT_STOPS`, a cap on output.** A gradient is a stitching
+//! function of one piece per pair of stops, written for every fragment of
+//! its box on every page the box crosses; a stop is four bytes, `red,`. Its
+//! `fixtures` is the cap — the gradient built at it parses — its comic and
+//! fixed-document yardsticks are zeros, since neither has a stylesheet, and
+//! its book yardstick is three, a rule fading in and out, since no committed
+//! book declares a gradient.
+//!
+//! *Amended, October 2026, the EPUB CSS row's font features.* **One more row,
+//! `MAX_CSS_FEATURE_SETTINGS`, a cap on copies.** `font-feature-settings` is
+//! inherited, so a list is copied into the computed style of every element
+//! under the one it is written on and into every run those elements set; a
+//! setting is seven bytes, `"abcd",`. Its `fixtures` is the cap — the list
+//! built at it parses — its comic and fixed-document yardsticks are zeros,
+//! since neither has a stylesheet, and its book yardstick is four, figures
+//! and small capitals on and two ligatures off, since no committed book
+//! declares the property.
+//!
+//! *Amended, 3 October 2026, tier 5's table-reconstruction row.* **One more
+//! row, `MAX_TABLE_RULES`, and the first that bounds work rather than a copy
+//! or an allocation a format asks for.** Finding where a table's rules meet is
+//! every horizontal rule against every vertical one, and a page of hatching is
+//! a square's worth of junctions from a stream of a few bytes a rule. Past the
+//! cap a page's rules are not read at all. Its `fixtures` is the cap, for
+//! `MAX_ANNOTATION_BYTES`'s reason; its comic column is a zero, a comic page
+//! being one image; its fixed-document and book columns are arithmetic about
+//! two thousand stroked rectangles and a bordered forty-cell table, since the
+//! corpus measurement the design asked it be sized from has not been taken.
+//!
+//! *Amended, 3 October 2026, the EPUB CSS row's shadows.* **One more row,
+//! `MAX_CSS_SHADOWS`, output again.** A text shadow is its run drawn again, so
+//! a shadow list is a multiplier on every glyph its element's subtree draws,
+//! and `text-shadow` inherits: four bytes of `0 0,` per shadow asked for a copy
+//! of a whole book's text each. Its `fixtures` is the cap — the list built at
+//! it parses — its comic and fixed-document yardsticks are zeros, since
+//! neither has a stylesheet, and its book yardstick is the two of an embossed
+//! heading, since no committed book declares a shadow.
+//!
+//! *Amended, 3 October 2026, the review of the tagged-writing lane.* **Four
+//! more rows, for the readers ISO 32000-2 added, and three of them caps on
+//! copies.** `MAX_STRUCTURE_VALUES` is the structure walk's budget on the
+//! array entries it reads from elements' `/A`, `/Headers` and `/AF` — one
+//! array shared by every element was read once per element, and for `/A`
+//! that was nine seconds for sixteen elements and two days for the element
+//! cap. `MAX_STRUCTURE_BYTES` bounds what that walk copies out — one `/NS`
+//! URI, `/ID` or `/Headers` string named from every element — and
+//! `MAX_ASSOCIATED_FILE_BYTES` and `MAX_OUTPUT_INTENT_BYTES` the two
+//! document-level listings, where 90 KB of `/AF` asked for 256 MiB of
+//! descriptions. Each `fixtures` is the cap, for `MAX_ANNOTATION_BYTES`'s
+//! reason. The comic and fixed-document columns are zeros because neither
+//! path writes a structure tree, an `/AF` or an intent unasked; the book's
+//! two structure columns are arithmetic about what the EPUB path writes, and
+//! its two listing columns zeros.
+//!
+//! *Amended, 2 October 2026, the review of the redaction row.* **One more
+//! row, `MAX_FORM_COPY_BYTES`, the third cap on copies.** A redaction
+//! measures every placement of a form before it writes any, and kept every
+//! distinct cut of every form — a whole copy of the form's content each, up
+//! to `MAX_PLACEMENTS` of them — until the walk ended, then cloned each into
+//! the editor. A deflate-bombed 128 MiB form placed at 64 offsets under one
+//! rectangle asked for about 8 GiB twice over, from a file of a few hundred
+//! kilobytes. Its `fixtures` is the cap, for `MAX_ANNOTATION_BYTES`'s
+//! reason, and its three yardsticks are zeros, because none of the
+//! container paths redacts.
+//!
+//! *Amended, 2 October 2026, tier 5's Markdown row.* **Two more rows, the
+//! first for a reader whose input is text a caller names rather than a file
+//! that names itself.** `MAX_MARKDOWN_NESTING` bounds how deep containers
+//! open, because every line walks every open container; `MAX_MARKDOWN_REFERENCE_BYTES`
+//! bounds what reference links copy out of their definitions, which is the
+//! one place in CommonMark where a short input asks for a long output. All
+//! three yardsticks are zeros, because no container path reads Markdown.
+//!
+//! *Amended, 2 October 2026, the review of the form data exchange row.* **One
+//! more row, `MAX_FORM_DATA_BYTES`, the second cap on copies.** The FDF and
+//! XFDF readers hand back qualified names, values and warnings, and each of
+//! those repeated something the file says once: a field's name in every
+//! warning met inside it, a shared indirect `/T` in every name beneath it, a
+//! shared `/V` in every field. The review found 67 KiB of FDF asking for
+//! 184 MB and 22 KiB asking for a gigabyte. Its `fixtures` is the cap, for
+//! `MAX_ANNOTATION_BYTES`'s reason, and its three yardsticks are zeros,
+//! because none of the container paths reads form data.
+//!
+//! *Amended, 26 September 2026, the annotation payloads row.* **One more row,
+//! `MAX_ANNOTATION_BYTES`, and it is a cap on copies rather than on anything
+//! parsed.** Everything a page's annotation listing hands back is a copy of an
+//! object the parser already holds, and an indirect object is parsed once and
+//! may be named by every one of the 4 096 entries `/Annots` is read to — so a
+//! file of a few megabytes asks for tens of gigabytes. That was true of
+//! `/Contents`, `/T` and `/M` from the day the listing landed, and the
+//! per-family payloads would have made it true of every array in 12.5.6's
+//! tables. The row's `fixtures` is the cap for `MAX_DECODED_STREAM`'s reason:
+//! the test that fires it spends it.
+//!
+//! *Amended, 26 September 2026, the tier-4 archive row's BMP decoder.* **One
+//! more row, the forty-eighth: `MAX_BMP_SAMPLES`.** It is `MAX_PNG_SAMPLES`'s
+//! figure for `MAX_PNG_SAMPLES`'s reason — a decoded comic page lives under
+//! one ceiling whichever container it came in — and it is a row of its own
+//! rather than that cap under a second name because it bounds a different
+//! header: `biWidth` and `biHeight` are signed 32-bit fields where IHDR's are
+//! 31-bit, so the reachable product is its own arithmetic. Its `document` and
+//! `book` columns are measured zeros, and the comment on each says why: XPS
+//! admits no BMP part and an EPUB `<img>` does not place one.
+//!
+//! *Amended the same day, the archive row's GIF decoder.* **The forty-ninth,
+//! `MAX_GIF_SAMPLES`**, for the same reason and with one difference worth the
+//! sentence: GIF *is* an EPUB core media type, so its `book` column is a
+//! picture rather than a zero.
+//!
+//! *Amended the same day, the archive row's WebP decoder.* **The
+//! fiftieth, `MAX_WEBP_SAMPLES`**, GIF's row again — WebP is a core
+//! media type too, so its `book` column is a picture — with its own
+//! arithmetic: of the two headers that can ask, a `VP8X` canvas's two 24-bit
+//! dimensions reach further than a lossless header's two 14-bit ones.
+//!
+//! *Amended the same day, the review of the SVG writer.* **The fifty-first,
+//! `MAX_SVG_BYTES`**, and the first row whose quantity is output rather than
+//! input: markup grows with what the page draws, one element per operator, so
+//! a short content stream can ask for as much as it likes.
+//!
+//! *Amended the same day, the review of the retained page.* **The
+//! fifty-second, `MAX_DISPLAY_LIST_BYTES`**, output again: a recording grows
+//! with what the page draws, and a page that would pass it is drawn the direct
+//! way rather than refused, so the cap costs a replay and never a picture.
+//!
 //! *Amended, 26 September 2026, the `jbig2` fuzz row.* **One more row, the
 //! forty-fourth, and it is the first here whose cap is a *ratio* rather than a
 //! quantity.**
@@ -413,15 +566,20 @@ use tinker_pdf::cbz::{
 use tinker_pdf::epub::{
     MAX_EPUB_FALLBACK_DEPTH, MAX_EPUB_MANIFEST_ITEMS, MAX_EPUB_SPINE_ITEMS, MAX_OCF_PATH_LEN,
 };
+use tinker_pdf::form_data::MAX_FORM_DATA_BYTES;
+use tinker_pdf::markdown::{MAX_MARKDOWN_NESTING, MAX_MARKDOWN_REFERENCE_BYTES};
+use tinker_pdf::redact::MAX_FORM_COPY_BYTES;
+use tinker_pdf::structure::{MAX_STRUCTURE_BYTES, MAX_STRUCTURE_VALUES};
 use tinker_pdf::xps::{
     MAX_XPS_ELEMENTS, MAX_XPS_GLYPHS, MAX_XPS_PAGES, MAX_XPS_PARTS, MAX_XPS_RESOURCE_DEPTH,
     MAX_XPS_SEGMENTS,
 };
+use tinker_pdf::{MAX_ANNOTATION_BYTES, MAX_ASSOCIATED_FILE_BYTES, MAX_OUTPUT_INTENT_BYTES};
 use tinker_pdf_color::icc::{MAX_ICC_BYTES, MAX_ICC_TAGS};
 use tinker_pdf_css::limits as css_limits;
 use tinker_pdf_filters::{
-    MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PAGE_MULTIPLE, MAX_JBIG2_SYMBOL_PIXELS,
-    MAX_JBIG2_TEXT_INSTANCES, MAX_PNG_SAMPLES,
+    MAX_BMP_SAMPLES, MAX_GIF_SAMPLES, MAX_JBIG2_SYMBOLS, MAX_JBIG2_SYMBOL_PAGE_MULTIPLE,
+    MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_TEXT_INSTANCES, MAX_PNG_SAMPLES, MAX_WEBP_SAMPLES,
 };
 use tinker_pdf_layout::limits as layout_limits;
 use tinker_pdf_xml::limits as xml_limits;
@@ -463,7 +621,47 @@ const JBIG2: &str = include_str!("../../tinker-pdf-filters/src/jbig2.rs");
 const RENDER: &str = include_str!("../../tinker-pdf-render/src/lib.rs");
 const PAGE_GEOMETRY_TESTS: &str = include_str!("page_geometry.rs");
 const COS_LIMITS: &str = include_str!("../../tinker-pdf-cos/src/limits.rs");
+/// The tier-4 archive row's container decoders, which keep their caps beside
+/// the decoder that spends them — `png.rs`'s shape.
+const BMP: &str = include_str!("../../tinker-pdf-filters/src/bmp.rs");
+const BMP_TESTS: &str = include_str!("../../tinker-pdf-filters/src/bmp/tests.rs");
+const GIF: &str = include_str!("../../tinker-pdf-filters/src/gif.rs");
+const GIF_TESTS: &str = include_str!("../../tinker-pdf-filters/src/gif/tests.rs");
+const WEBP: &str = include_str!("../../tinker-pdf-filters/src/webp.rs");
+const WEBP_TESTS: &str = include_str!("../../tinker-pdf-filters/src/webp/tests.rs");
 const INLINE_IMAGE_TESTS: &str = include_str!("inline_images.rs");
+/// The annotation payloads' copy budget: declared beside the payload readers
+/// that spend it, and fired by a test beside the listing that owns the budget.
+const ANNOTATION_PAYLOADS: &str = include_str!("../src/annotations/payload.rs");
+const REDACT: &str = include_str!("../src/redact.rs");
+const ANNOTATION_TESTS: &str = include_str!("../src/annotations.rs");
+/// The form data readers' copy budget, declared beside the two readers that
+/// spend it, and fired by the exchange row's own suite.
+const FORM_DATA: &str = include_str!("../src/form_data.rs");
+const FORM_DATA_TESTS: &str = include_str!("form_data.rs");
+/// Lane 4C's review: the SVG writer's markup, declared beside the writer, and
+/// the retained page's recording, declared beside the recorder.
+const SVG_OUT: &str = include_str!("../src/svg_out.rs");
+const SVG_OUTPUT_TESTS: &str = include_str!("svg_output.rs");
+const RENDER_DISPLAY: &str = include_str!("../../tinker-pdf-render/src/display.rs");
+const DISPLAY_LIST_TESTS: &str = include_str!("display_list.rs");
+const MARKDOWN: &str = include_str!("../src/markdown.rs");
+const MARKDOWN_TESTS: &str = include_str!("markdown.rs");
+/// The review of the tagged-writing lane: the structure walk's two budgets,
+/// declared beside the walk, and the two PDF 2.0 listings' copy budgets,
+/// declared beside each listing; fired by the suites that read them.
+const STRUCTURE: &str = include_str!("../src/structure.rs");
+const TAGGED_PDF_TESTS: &str = include_str!("tagged_pdf.rs");
+const ASSOCIATED_FILES: &str = include_str!("../src/associated_files.rs");
+const OUTPUT_INTENTS: &str = include_str!("../src/output_intents.rs");
+const PDF20_TESTS: &str = include_str!("pdf20.rs");
+/// Tier 5's table-reconstruction row: the rule cap, declared beside the
+/// tables it bounds, fired by the suite that reads them.
+const TABLES: &str = include_str!("../src/tables.rs");
+const TABLES_TESTS: &str = include_str!("tables.rs");
+/// The review of tier 5's formats lane: HTML's two caps live with the XML
+/// reader's four, and its bounds suite fires them.
+const HTML_TESTS: &str = include_str!("../../tinker-pdf-xml/tests/html.rs");
 
 /// One bound, as its own ledger publishes it.
 ///
@@ -505,7 +703,7 @@ struct Bound {
     /// The most gap 31's yardstick spends: **a 300-page reflowable book**.
     ///
     /// The third yardstick, and unlike the first two it is not an estimate.
-    /// Sixteen of these forty-four rows are figures a real book can be
+    /// Sixteen of these forty-seven rows are figures a real book can be
     /// *measured* against, and
     /// [`the_book_yardstick_is_not_below_a_real_book`] measures every book in
     /// both corpora against them on every run — the committed six always, the
@@ -1874,7 +2072,555 @@ fn ledger() -> Vec<Bound> {
                 INLINE_IMAGE_TESTS,
             ),
         },
+        Bound {
+            name: "MAX_ANNOTATION_BYTES",
+            cap: MAX_ANNOTATION_BYTES as u128,
+            published: "64 MiB",
+            // The cap, for `MAX_DECODED_STREAM`'s reason one row up: the test
+            // that proves it fires names one 4 096-number array from four
+            // thousand annotations and spends the budget to the byte it runs
+            // out at. Every other fixture that lists a page's annotations —
+            // measured over all of them on 26 September 2026 — spends at most
+            // 923 bytes.
+            fixtures: MAX_ANNOTATION_BYTES as u128,
+            // A comic page carries no annotation at all.
+            comic: 0,
+            // The XPS path writes `/Link`s with a `/Rect`, a `/Dest` and a
+            // three-zero `/Border`, and the listing copies none of those at a
+            // cost: the budget is spent on strings, names and variable-length
+            // arrays, and a `/Border` of three numbers is none of them.
+            document: 0,
+            // The EPUB path writes the same `/Link`s through the same builder.
+            book: 0,
+            // One page may be read to 4 096 `/Annots` entries, and every one
+            // of them may name the same indirect string or array — parsed
+            // once, copied per annotation — as long as the file, which on the
+            // narrowest target is at most `u32::MAX` bytes.
+            reachable: 4_096 * (1u128 << 32),
+            reachable_because: "4 096 annotations naming one shared object as long as a 4 GiB file",
+            declared_in: ANNOTATION_PAYLOADS,
+            fires_in: (
+                "a_listing_past_its_copy_budget_says_what_it_cut",
+                ANNOTATION_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_FORM_DATA_BYTES",
+            cap: MAX_FORM_DATA_BYTES as u128,
+            published: "64 MiB",
+            // The cap, for `MAX_ANNOTATION_BYTES`'s reason one row up: the
+            // test that proves it fires builds files that ask for more and
+            // spends the budget to the byte it runs out at. Beside it, an
+            // honest form of ten thousand fields spends 4 140 000 bytes, and
+            // every other file `tests/form_data.rs` reads — measured over all
+            // of them on 2 October 2026 — at most 20 125, a name ten thousand
+            // partial names deep.
+            fixtures: MAX_FORM_DATA_BYTES as u128,
+            // None of the three container paths reads FDF or XFDF.
+            comic: 0,
+            document: 0,
+            book: 0,
+            // An FDF's field tree nests 256 deep, and every level may name
+            // one indirect `/T` as long as the file: the deepest name alone
+            // is 256 copies of it, on the narrowest target at most
+            // `u32::MAX` bytes each.
+            reachable: 256 * (1u128 << 32),
+            reachable_because: "256 nested fields naming one shared /T as long as a 4 GiB file",
+            declared_in: FORM_DATA,
+            fires_in: (
+                "a_file_that_asks_for_more_than_the_budget_is_refused",
+                FORM_DATA_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_FORM_COPY_BYTES",
+            cap: MAX_FORM_COPY_BYTES as u128,
+            published: "32 MiB",
+            // The cap, for `MAX_ANNOTATION_BYTES`'s reason: the test that
+            // fires it holds forty cuts of a mebibyte each and lets them go
+            // at the one that would pass it. Every other redaction fixture,
+            // measured over all of them on 2 October 2026, holds at most
+            // 92 920 bytes of cuts — the firing test's own exact half.
+            fixtures: MAX_FORM_COPY_BYTES as u128,
+            // None of the three container paths redacts.
+            comic: 0,
+            document: 0,
+            book: 0,
+            // One form may be placed `MAX_PLACEMENTS` times, each cut
+            // differently, and each cut is as long as the form's content,
+            // which one decode may make `MAX_DECODED_STREAM` long.
+            reachable: 64 * (128u128 << 20),
+            reachable_because: "64 placements of one form cut differently, each cut 128 MiB",
+            declared_in: REDACT,
+            fires_in: ("a_walk_past_its_copy_budget_cuts_the_form_in_place", REDACT),
+        },
+        Bound {
+            name: "MAX_BMP_SAMPLES",
+            cap: MAX_BMP_SAMPLES as u128,
+            published: "67 108 864",
+            // bmpsuite's alpha files: 127 x 64 at four components. The unit
+            // test that proves the cap fires builds a header *at* it, but is
+            // answered by the caller's ceiling and allocates nothing.
+            fixtures: 127 * 64 * 4,
+            // A 2000 x 3000 page with an alpha mask, `MAX_PNG_SAMPLES`'s own
+            // comic figure: a BMP has no pass-through, so every BMP page
+            // spends this.
+            comic: 24_000_000,
+            // Zero, measured rather than absent: ECMA-388 admits JPEG, PNG,
+            // TIFF and JPEG XR image parts and nothing else, so a fixed
+            // document holds no BMP for this cap to count.
+            document: 0,
+            // Zero again: BMP is not one of EPUB 3.3 §3.2's core image media
+            // types, and `epub::read`'s `<img>` path places only those, so a
+            // book's BMP is refused by name before it is decoded.
+            book: 0,
+            // `biWidth` and `biHeight` are signed 32-bit fields, so the widest
+            // positive product is (2^31 - 1)^2, charged at four components.
+            reachable: 0x7FFF_FFFFu128 * 0x8000_0000 * 4,
+            reachable_because: "two signed 32-bit dimensions, times four components",
+            declared_in: BMP,
+            fires_in: (
+                "an_image_past_the_sample_cap_is_refused_before_it_allocates",
+                BMP_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_GIF_SAMPLES",
+            cap: MAX_GIF_SAMPLES as u128,
+            published: "67 108 864",
+            // Pillow's interlaced 40 x 24, indexed at one sample a pixel; the
+            // expanded omggif fixture is 13 x 7 x 4, smaller.
+            fixtures: 40 * 24,
+            // A 2000 x 3000 page expanded to RGBA — the widest a GIF page can
+            // be charged, since a local table on part of the screen expands it.
+            comic: 24_000_000,
+            // Zero: ECMA-388 admits no GIF image part.
+            document: 0,
+            // Not a zero, unlike BMP's: GIF is an EPUB 3.3 §3.2 core media
+            // type and an `<img>` draws one. A full-page 300 dpi plate charged
+            // at four components, `MAX_PNG_SAMPLES`'s book figure.
+            book: 2_550 * 3_300 * 4,
+            // The cap is charged twice, on two buffers, and both clear it. The
+            // canvas reaches furthest: a logical screen left at zero is the
+            // first image's extent, `left + width` by `top + height`, so each
+            // side is a sum of two 16-bit fields, and a local table on part of
+            // it expands it to four components. The image's own indices are
+            // the other charge — one byte each, `width x height` from its
+            // descriptor, at most 65 535 squared whatever the screen is.
+            reachable: (2u128 * 0xFFFF) * (2 * 0xFFFF) * 4,
+            reachable_because: "a zero logical screen is the image's extent, \
+                                two sums of 16-bit fields, times four components",
+            declared_in: GIF,
+            fires_in: (
+                "an_image_past_the_sample_cap_is_refused_before_it_allocates",
+                GIF_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_WEBP_SAMPLES",
+            cap: MAX_WEBP_SAMPLES as u128,
+            published: "67 108 864",
+            // Pillow's mixed 160 x 96, charged at four samples a pixel like
+            // every WebP.
+            fixtures: 160 * 96 * 4,
+            // A 2000 x 3000 page at four samples: a WebP is charged as the
+            // RGBA it decodes to, whether or not it is narrowed to RGB after.
+            comic: 24_000_000,
+            // Zero: ECMA-388 admits no WebP image part.
+            document: 0,
+            // GIF's figure for GIF's reason: WebP is an EPUB 3.3 §3.2 core
+            // media type and an `<img>` draws one. A full-page 300 dpi plate
+            // at four components, `MAX_PNG_SAMPLES`'s book figure.
+            book: 2_550 * 3_300 * 4,
+            // Two 24-bit `VP8X` canvas dimensions, each stored less one,
+            // charged at four; a VP8L or VP8 header's 14-bit pair reaches 2^30.
+            reachable: (1u128 << 24) * (1 << 24) * 4,
+            reachable_because: "two 24-bit VP8X canvas dimensions, times four samples",
+            declared_in: WEBP,
+            fires_in: (
+                "an_image_past_the_sample_cap_is_refused_before_it_allocates",
+                WEBP_TESTS,
+            ),
+        },
+        // ---- lane 4C's review: what a page's drawing allocates ----------
+        //
+        // A process's bound again, like the two above, and the first whose
+        // quantity is *output*: markup grows with what the page does, every
+        // operator an element, so a short stream asks for as much as it likes.
+        Bound {
+            name: "MAX_SVG_BYTES",
+            cap: tinker_pdf::MAX_SVG_BYTES as u128,
+            published: "256 MiB",
+            // Measured: `svg_output.rs`'s 4 100 draws of one picture, the
+            // largest page any suite writes at this cap. The firing test
+            // lowers `SvgOptions::max_bytes`, which is the one parameter this
+            // cap has; it can lower the cap and not raise it, and every column
+            // here is at the default, which is the cap.
+            fixtures: 266_127,
+            // A 2000 x 3000 scan as an incompressible RGBA PNG — 3 000 rows of
+            // a filter byte and 8 000 samples — in base64, rounded up for the
+            // chunks. A picture is the largest thing one element can be.
+            comic: 32_100_000,
+            // A full-page 300 dpi scan, 2 550 x 3 300, the plate
+            // `MAX_DECODED_STREAM` measures with: 44 884 400 bytes of base64,
+            // and a megabyte for the page's own two thousand elements.
+            document: 46_000_000,
+            // The same plate on a page of text written as glyph outlines.
+            book: 46_000_000,
+            // Fourteen bytes of `0 0 m 1 1 l S` write a stroked `<path>` of at
+            // least seventy, and a content stream may be as long as the
+            // ceiling every stream decodes under — before any form fans it out.
+            reachable: (tinker_pdf_cos::limits::MAX_DECODED_STREAM as u128 / 14) * 70,
+            reachable_because: "a `MAX_DECODED_STREAM` content stream of `0 0 m 1 1 l S`, \
+                                at least seventy bytes of `<path>` per fourteen-byte operator",
+            declared_in: SVG_OUT,
+            fires_in: (
+                "markup_past_its_budget_is_cut_short_and_says_so",
+                SVG_OUTPUT_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_DISPLAY_LIST_BYTES",
+            cap: tinker_pdf_render::MAX_DISPLAY_LIST_BYTES as u128,
+            published: "64 MiB",
+            // The cap, for `MAX_PAGE_PIXELS`'s reason: this bound **degrades
+            // rather than refuses** — a page past it is drawn the direct way —
+            // and the firing test records past it, with the recorder's count
+            // never passing it.
+            fixtures: tinker_pdf_render::MAX_DISPLAY_LIST_BYTES as u128,
+            // A synthesised comic page is `q`, the image's `cm` and `Do`, `Q`:
+            // three events and one state, rounded up.
+            comic: 1_000,
+            // Gap 30's own yardstick, two thousand drawable elements each with
+            // its state and forty thousand path segments, at this target's
+            // sizes rather than a remembered number.
+            document: 2_000 * (event_size() + state_size()) + 40_000 * segment_size(),
+            // A 6 x 9 page of text: 2 500 glyphs, each an event, a state and
+            // the character it shows.
+            book: 2_500 * (event_size() + state_size() + 4),
+            // `0 0 1 1 re f`, thirteen bytes of content, records one fill of
+            // five segments, and a content stream may be as long as the
+            // ceiling every stream decodes under — before any form fans it out.
+            reachable: (tinker_pdf_cos::limits::MAX_DECODED_STREAM as u128 / 13)
+                * (event_size() + state_size() + 5 * segment_size()),
+            reachable_because: "a `MAX_DECODED_STREAM` content stream of `0 0 1 1 re f`, one \
+                                recorded five-segment fill per thirteen bytes",
+            declared_in: RENDER_DISPLAY,
+            fires_in: (
+                "a_page_too_large_to_retain_is_drawn_the_direct_way",
+                DISPLAY_LIST_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_MARKDOWN_NESTING",
+            cap: MAX_MARKDOWN_NESTING as u128,
+            published: "100",
+            // The test that fires it nests five past the cap, so it spends the
+            // cap; every other fixture nests at most four (`markdown.rs`'s
+            // release notes and the fuzz seeds).
+            fixtures: MAX_MARKDOWN_NESTING as u128,
+            // None of the three container paths reads Markdown.
+            comic: 0,
+            document: 0,
+            book: 0,
+            // A `>` is a block quote, so a file nests as deep as it is long —
+            // on the narrowest target at most `u32::MAX` bytes.
+            reachable: 1u128 << 32,
+            reachable_because: "one block quote per byte of a 4 GiB file",
+            declared_in: MARKDOWN,
+            fires_in: (
+                "a_container_past_the_nesting_cap_is_read_as_text_and_counted",
+                MARKDOWN_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_MARKDOWN_REFERENCE_BYTES",
+            cap: MAX_MARKDOWN_REFERENCE_BYTES as u128,
+            published: "100 KiB",
+            // The firing test spends the budget to the reference it runs out
+            // at, which is the cap less less than one destination.
+            fixtures: MAX_MARKDOWN_REFERENCE_BYTES as u128,
+            comic: 0,
+            document: 0,
+            book: 0,
+            // Half a file of destination copied by a quarter-file of
+            // three-byte `[a]`s: on the narrowest target, a 4 GiB file asks
+            // for 2^31 × 2^32 / 6 bytes.
+            reachable: (1u128 << 31) * (1u128 << 32) / 6,
+            reachable_because: "a destination half a 4 GiB file long, used by a sixth of it",
+            declared_in: MARKDOWN,
+            fires_in: (
+                "reference_links_past_the_copy_budget_read_as_text_and_are_counted",
+                MARKDOWN_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_CSS_SHADOWS",
+            cap: css_limits::MAX_CSS_SHADOWS as u128,
+            published: "32",
+            // The list built exactly at the cap parses; the one past it is
+            // refused by value.
+            fixtures: css_limits::MAX_CSS_SHADOWS as u128,
+            comic: 0,
+            document: 0,
+            // No committed book declares `box-shadow` or `text-shadow`
+            // (`CENSUS.tsv`, and a search of their sheets); a heading's
+            // embossed pair is the ordinary use, at two.
+            book: 2,
+            // `0 0,` is four bytes.
+            reachable: css_limits::MAX_CSS_BYTES as u128 / 4,
+            reachable_because: "a shadow is four bytes, in a sheet of MAX_CSS_BYTES",
+            declared_in: CSS_LIMITS,
+            fires_in: (
+                "a_shadow_list_past_the_cap_is_refused_by_value",
+                CSS_BOUNDS_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_STRUCTURE_VALUES",
+            cap: MAX_STRUCTURE_VALUES as u128,
+            published: "1 048 576",
+            // The firing test spends the budget to the entry: every element's
+            // `/AF` and `/Headers` together are exactly the cap. Every other
+            // structure fixture is a table whose cells name a few headers
+            // each — an estimate, not a sum anybody took.
+            fixtures: MAX_STRUCTURE_VALUES as u128,
+            // Neither path writes a structure tree.
+            comic: 0,
+            document: 0,
+            // The EPUB path writes `/A` as one dictionary and no `/AF`, so
+            // only `/Headers` spends this: a forty-cell table on each of three
+            // hundred pages, every cell naming three header cells.
+            book: 300 * 40 * 3,
+            // One array of `MAX_ARRAY_LEN` entries, named by each of the walk's
+            // 2^18 elements.
+            reachable: (1u128 << 18) * (tinker_pdf_cos::limits::MAX_ARRAY_LEN as u128),
+            reachable_because: "2^18 elements naming one shared array of 2^20 entries",
+            declared_in: STRUCTURE,
+            fires_in: (
+                "shared_header_and_file_arrays_are_retained_within_one_budget",
+                TAGGED_PDF_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_STRUCTURE_BYTES",
+            cap: MAX_STRUCTURE_BYTES as u128,
+            published: "64 MiB",
+            // The firing test copies to the URI the budget runs out at.
+            fixtures: MAX_STRUCTURE_BYTES as u128,
+            comic: 0,
+            document: 0,
+            // Two 200-byte `/Alt`s, a forty-cell table of 30-byte `/ID`s each
+            // naming three 30-byte headers, and fifty 5-byte `/Lang`s a page,
+            // over three hundred pages, rounded up to 2 MiB.
+            book: 2 << 20,
+            // Each of the walk's 2^18 elements may name one indirect string as
+            // long as the file, on the narrowest target at most `u32::MAX`
+            // bytes.
+            reachable: (1u128 << 18) * (1u128 << 32),
+            reachable_because: "2^18 elements naming one shared string as long as a 4 GiB file",
+            declared_in: STRUCTURE,
+            fires_in: (
+                "a_shared_namespace_is_copied_within_the_walks_copy_budget",
+                TAGGED_PDF_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_ASSOCIATED_FILE_BYTES",
+            cap: MAX_ASSOCIATED_FILE_BYTES as u128,
+            published: "64 MiB",
+            // The firing test copies to the description the budget runs out
+            // at; `pdf20.rs`'s other files are a few short names each.
+            fixtures: MAX_ASSOCIATED_FILE_BYTES as u128,
+            // None of the three paths associates a file with the catalog or a
+            // page.
+            comic: 0,
+            document: 0,
+            book: 0,
+            // `/AF` is read to `MAX_ARRAY_LEN` entries, each of which may name
+            // one specification whose `/Desc` is as long as the file.
+            reachable: (tinker_pdf_cos::limits::MAX_ARRAY_LEN as u128) * (1u128 << 32),
+            reachable_because: "2^20 /AF entries naming one /Desc as long as a 4 GiB file",
+            declared_in: ASSOCIATED_FILES,
+            fires_in: (
+                "an_associated_file_listing_spends_one_budget_and_says_what_it_cut",
+                PDF20_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_OUTPUT_INTENT_BYTES",
+            cap: MAX_OUTPUT_INTENT_BYTES as u128,
+            published: "64 MiB",
+            // The firing test copies to the `/Info` the budget runs out at.
+            fixtures: MAX_OUTPUT_INTENT_BYTES as u128,
+            // None of the three paths writes an intent unless asked for an
+            // archival profile, and then one.
+            comic: 0,
+            document: 0,
+            book: 0,
+            reachable: (tinker_pdf_cos::limits::MAX_ARRAY_LEN as u128) * (1u128 << 32),
+            reachable_because:
+                "2^20 /OutputIntents entries naming one /Info as long as a 4 GiB file",
+            declared_in: OUTPUT_INTENTS,
+            fires_in: (
+                "an_output_intent_listing_spends_one_budget_and_says_what_it_cut",
+                PDF20_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_TABLE_RULES",
+            cap: tinker_pdf::tables::MAX_TABLE_RULES as u128,
+            published: "16 384",
+            // The firing test draws the cap and one more; every other fixture
+            // is a grid of a dozen cells, forty-eight rules at the most.
+            fixtures: tinker_pdf::tables::MAX_TABLE_RULES as u128,
+            // A comic page is one image and draws no rule.
+            comic: 0,
+            // Gap 30's two thousand drawable elements, each a stroked
+            // rectangle of four rules.
+            document: 2_000 * 4,
+            // A forty-cell table bordered cell by cell, four filled
+            // rectangles a border, its frame and a rule under its header:
+            // about 170, rounded up.
+            book: 240,
+            // `0 0 m 9 0 l` is twelve bytes and one rule, in a stream as long
+            // as the ceiling every stream decodes under.
+            reachable: tinker_pdf_cos::limits::MAX_DECODED_STREAM as u128 / 12,
+            reachable_because: "a `MAX_DECODED_STREAM` content stream of `0 0 m 9 0 l`, one \
+                                rule per twelve bytes",
+            declared_in: TABLES,
+            fires_in: ("a_page_past_the_rule_cap_has_no_rules_read", TABLES_TESTS),
+        },
+        Bound {
+            name: "MAX_HTML_ACTIVE_FORMATTING",
+            cap: xml_limits::MAX_HTML_ACTIVE_FORMATTING as u128,
+            published: "1 024",
+            // The firing test builds 1 206 entries and the one beside it
+            // 1 005; html5lib's trees are a few hundred bytes each.
+            fixtures: xml_limits::MAX_HTML_ACTIVE_FORMATTING as u128,
+            // No container path parses HTML: a comic has no markup, a fixed
+            // document is XML, and an EPUB chapter is XHTML.
+            comic: 0,
+            document: 0,
+            book: 0,
+            // Constructive rather than a field width: thirty-two table cells
+            // nested one inside another, each leaving a hundred `<b>`s that a
+            // `</p>` closed behind its marker, with the stack never past 231.
+            reachable: 32 * (100 + 1),
+            reachable_because: "thirty-two nested cells of a hundred closed `<b>`s and a \
+                                marker each, under MAX_XML_DEPTH",
+            declared_in: XML_LIMITS,
+            fires_in: (
+                "the_list_of_active_formatting_elements_stops_at_its_cap",
+                HTML_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_HTML_CLONE_BYTES",
+            cap: xml_limits::MAX_HTML_CLONE_BYTES as u128,
+            published: "64 MiB",
+            // The firing test copies to the clone the budget runs out at, and
+            // the one beside it to the last clone that fits.
+            fixtures: xml_limits::MAX_HTML_CLONE_BYTES as u128,
+            comic: 0,
+            document: 0,
+            book: 0,
+            // A value half a one-megabyte input long, reopened by the eight-byte
+            // `<p>x</p>`s in its other half.
+            reachable: (1u128 << 19) * ((1u128 << 19) / 8),
+            reachable_because: "a 512 KiB attribute value reopened by 65 536 `<p>x</p>`s",
+            declared_in: XML_LIMITS,
+            fires_in: (
+                "attribute_bytes_copied_onto_clones_stop_at_their_cap",
+                HTML_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_CSS_FEATURE_SETTINGS",
+            cap: css_limits::MAX_CSS_FEATURE_SETTINGS as u128,
+            published: "32",
+            // The list built exactly at the cap parses; the one past it is
+            // refused by value.
+            fixtures: css_limits::MAX_CSS_FEATURE_SETTINGS as u128,
+            comic: 0,
+            document: 0,
+            // No committed book declares `font-feature-settings`
+            // (`CENSUS.tsv`, and a search of their sheets); old-style figures
+            // and small capitals on and two ligatures off is a typesetter's
+            // ordinary list.
+            book: 4,
+            // `"abcd",` is seven bytes, a tag with no value being on.
+            reachable: css_limits::MAX_CSS_BYTES as u128 / 7,
+            reachable_because: "a setting is seven bytes, in a sheet of MAX_CSS_BYTES",
+            declared_in: CSS_LIMITS,
+            fires_in: (
+                "a_feature_list_past_the_cap_is_refused_by_value",
+                CSS_BOUNDS_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_CSS_GRADIENT_STOPS",
+            cap: css_limits::MAX_CSS_GRADIENT_STOPS as u128,
+            published: "32",
+            // The gradient built exactly at the cap parses; the one past it is
+            // refused by value.
+            fixtures: css_limits::MAX_CSS_GRADIENT_STOPS as u128,
+            comic: 0,
+            document: 0,
+            // No committed book declares a gradient (a search of their
+            // sheets); a chapter head's rule fading in and out is three.
+            book: 3,
+            // `red,` is four bytes.
+            reachable: css_limits::MAX_CSS_BYTES as u128 / 4,
+            reachable_because: "a stop is four bytes, in a sheet of MAX_CSS_BYTES",
+            declared_in: CSS_LIMITS,
+            fires_in: (
+                "a_gradient_past_the_stop_cap_is_refused_by_value",
+                CSS_BOUNDS_TESTS,
+            ),
+        },
+        Bound {
+            name: "MAX_EMBEDDING_DEPTH",
+            cap: layout_limits::MAX_EMBEDDING_DEPTH as u128,
+            published: "125",
+            // Two hundred nested isolating spans, the run inside them cut at
+            // the cap.
+            fixtures: layout_limits::MAX_EMBEDDING_DEPTH as u128,
+            // Neither a comic nor a fixed document lays out an inline box.
+            comic: 0,
+            document: 0,
+            // No committed book has a `dir`, a `<bdi>` or a `unicode-bidi`
+            // (a search of their content documents and sheets); a `<bdi>`
+            // inside a `dir="rtl"` span is two.
+            book: 2,
+            // A level is opened by an inline box, and the box tree is
+            // `MAX_BOX_DEPTH` deep.
+            reachable: layout_limits::MAX_BOX_DEPTH as u128,
+            reachable_because: "an inline box at each of MAX_BOX_DEPTH levels opens one",
+            declared_in: LAYOUT_LIMITS,
+            fires_in: (
+                "a_run_carries_no_deeper_a_stack_than_uax9_reads",
+                LAYOUT_TESTS,
+            ),
+        },
     ]
+}
+
+/// What one recorded call is before its heap parts, for
+/// `MAX_DISPLAY_LIST_BYTES`'s row: read off this target, as the recorder's own
+/// count reads it.
+fn event_size() -> u128 {
+    std::mem::size_of::<tinker_pdf_content::Event>() as u128
+}
+
+/// What one recorded call's graphics state is.
+fn state_size() -> u128 {
+    std::mem::size_of::<tinker_pdf_content::GraphicsState>() as u128
+}
+
+/// What one recorded path segment is.
+fn segment_size() -> u128 {
+    std::mem::size_of::<tinker_pdf_content::PathSegment>() as u128
 }
 
 /// Gap 29's bounds table has five rows and its code has seven, because two of
@@ -1888,8 +2634,25 @@ fn ledger() -> Vec<Bound> {
 /// JBIG2's three; and tier 0's memory row adds the two largest **runtime**
 /// bounds, `MAX_PAGE_PIXELS` and `MAX_DECODED_STREAM`; and Tier 2's custom
 /// code tables add `MAX_JBIG2_TABLE_LINES`; and the `jbig2` fuzz row adds
-/// `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`. All **forty-four** are here, and
-/// a bound added without a row fails this.
+/// `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`; and the annotation payloads row adds
+/// `MAX_ANNOTATION_BYTES`; and the review of the form data exchange row adds
+/// `MAX_FORM_DATA_BYTES`; and the review of the redaction row adds
+/// `MAX_FORM_COPY_BYTES`; and the tier-4 archive row's BMP decoder adds
+/// `MAX_BMP_SAMPLES`; and the archive row's GIF decoder adds
+/// `MAX_GIF_SAMPLES`; and the archive row's WebP decoder adds
+/// `MAX_WEBP_SAMPLES`; and the review of the SVG writer adds
+/// `MAX_SVG_BYTES`; and the review of the retained page adds
+/// `MAX_DISPLAY_LIST_BYTES`; and tier 5's Markdown row adds
+/// `MAX_MARKDOWN_NESTING` and `MAX_MARKDOWN_REFERENCE_BYTES`; and the EPUB
+/// CSS row's shadows add `MAX_CSS_SHADOWS`; and the review of the
+/// tagged-writing lane adds `MAX_STRUCTURE_VALUES`, `MAX_STRUCTURE_BYTES`,
+/// `MAX_ASSOCIATED_FILE_BYTES` and `MAX_OUTPUT_INTENT_BYTES`; and tier 5's
+/// table-reconstruction row adds `MAX_TABLE_RULES`; and the review of tier
+/// 5's formats lane adds HTML's `MAX_HTML_ACTIVE_FORMATTING` and
+/// `MAX_HTML_CLONE_BYTES`; and the EPUB CSS row's font features add
+/// `MAX_CSS_FEATURE_SETTINGS`, and its gradients `MAX_CSS_GRADIENT_STOPS`;
+/// and the review of lane 8C adds `MAX_EMBEDDING_DEPTH`. All **sixty-five**
+/// are here, and a bound added without a row fails this.
 #[test]
 fn the_sweep_covers_every_bound_these_three_gaps_added() {
     let names: Vec<&str> = ledger().iter().map(|b| b.name).collect();
@@ -1940,6 +2703,27 @@ fn the_sweep_covers_every_bound_these_three_gaps_added() {
             "MAX_JBIG2_TABLE_LINES",
             "MAX_PAGE_PIXELS",
             "MAX_DECODED_STREAM",
+            "MAX_ANNOTATION_BYTES",
+            "MAX_FORM_DATA_BYTES",
+            "MAX_FORM_COPY_BYTES",
+            "MAX_BMP_SAMPLES",
+            "MAX_GIF_SAMPLES",
+            "MAX_WEBP_SAMPLES",
+            "MAX_SVG_BYTES",
+            "MAX_DISPLAY_LIST_BYTES",
+            "MAX_MARKDOWN_NESTING",
+            "MAX_MARKDOWN_REFERENCE_BYTES",
+            "MAX_CSS_SHADOWS",
+            "MAX_STRUCTURE_VALUES",
+            "MAX_STRUCTURE_BYTES",
+            "MAX_ASSOCIATED_FILE_BYTES",
+            "MAX_OUTPUT_INTENT_BYTES",
+            "MAX_TABLE_RULES",
+            "MAX_HTML_ACTIVE_FORMATTING",
+            "MAX_HTML_CLONE_BYTES",
+            "MAX_CSS_FEATURE_SETTINGS",
+            "MAX_CSS_GRADIENT_STOPS",
+            "MAX_EMBEDDING_DEPTH",
         ],
         "a bound was added or renamed without a row in this sweep"
     );
@@ -2045,7 +2829,7 @@ fn no_bound_refuses_a_dense_fixed_document() {
         "gap 30's yardstick covers {measured} rows and the ledger has {}",
         ledger().len(),
     );
-    assert_eq!(measured, 44, "the ledger is forty-four rows");
+    assert_eq!(measured, 65, "the ledger is sixty-five rows");
 }
 
 /// Gap 31's yardstick: **a 300-page reflowable book**, on every row.
@@ -2077,7 +2861,7 @@ fn no_bound_refuses_a_real_book() {
         );
     }
     // A sweep that found nothing to sweep is a sweep that does not run.
-    assert_eq!(ledger().len(), 44, "the ledger is forty-four rows");
+    assert_eq!(ledger().len(), 65, "the ledger is sixty-five rows");
 }
 
 /// **And the yardstick is not a number somebody made up.**
@@ -2381,6 +3165,12 @@ fn every_bound_names_a_test_that_exists() {
         JBIG2,
         PAGE_GEOMETRY_TESTS,
         INLINE_IMAGE_TESTS,
+        ANNOTATION_TESTS,
+        FORM_DATA,
+        FORM_DATA_TESTS,
+        TAGGED_PDF_TESTS,
+        PDF20_TESTS,
+        TABLES_TESTS,
     ] {
         assert!(
             !source.contains("Instant::now"),

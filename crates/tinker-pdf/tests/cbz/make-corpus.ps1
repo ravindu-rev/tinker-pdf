@@ -110,10 +110,11 @@ try {
     # dictionary reset. `d8k` is set alongside it only so the dictionary cannot
     # outlive the block it belongs to.
     #
-    # There is deliberately **no BCJ case**. `-mf=BCJ` writes coder id `03030103`,
-    # which is outside the allow-list in `sevenz.rs` and would be refused at
-    # open; a fixture for it belongs with the work that implements it, not with
-    # coverage of the decoder that exists. See `docs/design/comic-archives.md`.
+    # There is deliberately **no BCJ case** here. When these were written,
+    # `-mf=BCJ`'s coder id `03030103` was outside the allow-list in `sevenz.rs`
+    # and would have been refused at open, so its fixture was left to the work
+    # that implemented it -- and that work used a second writer instead:
+    # `make-py7zr.py`'s `py7zr-bcj.cb7`. See `docs/design/comic-archives.md`.
     foreach ($case in @(@{ name = '7z-deflate.cbz';   args = @('-tzip', '-mx9') },
                         @{ name = '7z-store.cbz';     args = @('-tzip', '-mx0') },
                         @{ name = '7z-lzma2.cb7';     args = @('-t7z', '-m0=LZMA2') },

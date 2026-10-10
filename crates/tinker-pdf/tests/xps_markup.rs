@@ -23,6 +23,37 @@
 //! | a chain past the depth cap is `BrushTooDeep` | a chain that returns to itself is `BrushCyclic` |
 //! | a page that will not read is grey | an element whose paint will not read is grey **and the page is not** |
 //!
+//! # Counted injection, 18.3.2's stop alphas
+//!
+//! Counted over this file, `xps_glyphs.rs` and `xps_conservation.rs`, whose
+//! sweep holds `tests/xps_rows/wpf-stop-alphas.xps`.
+//!
+//! | Defect injected | Tests that failed |
+//! | --- | ---: |
+//! | stop alphas are dropped, as they were | 5 |
+//! | the constant alpha carries the first stop's alpha under the mask too | 1 |
+//! | a uniform alpha is masked too | 8 |
+//! | the alpha mask is set in line and replaces the element's own | 4 |
+//! | a stroke's mask covers the shape and not the stroke's reach | 1 |
+//! | a run's stop alphas are ignored | 1 |
+//! | the census reads no soft mask | 1 |
+//!
+//! # Counted injection, 18.3.1.2's `ColorInterpolationMode`
+//!
+//! Over this file and `xps_conservation.rs`, whose sweep holds
+//! `tests/xps_rows/wpf-colour-interpolation.xps`; the writer's sampled
+//! function is counted in `tinker-pdf-cos`'s own test.
+//!
+//! | Defect injected | Tests that failed |
+//! | --- | ---: |
+//! | `ScRgbLinearInterpolation` blends in sRGB, as it did | 2 |
+//! | the linear blend is not re-encoded to sRGB | 2 |
+//! | the alpha is blended in linear light too | 1 |
+//! | the census reads no middle out of a sampled function | 1 |
+//! | a sampled table that does not add up is accepted | 1 |
+//! | an axis of one sample is accepted | 1 |
+//! | the samples are written little-endian | 1 |
+//!
 //! # And why the assertions are on the content stream
 //!
 //! Gap 30's geometry section keeps the flip in **one** `cm` on purpose, *"so
@@ -1095,14 +1126,177 @@ fn a_fills_alpha_and_a_strokes_alpha_are_two_numbers() {
     assert!(raw.contains("/CA 0.3764"), "{raw}");
 }
 
-/// Gradient stops whose alphas differ from each other reach the page
-/// approximately, and say so.
+/// The red channel of the pixel at an **XPS-unit** position of a page body
+/// rendered at one pixel per point.
+fn red_at(body: &str, x: f64, y: f64) -> u8 {
+    let bitmap = open(&package(body))
+        .expect("an XPS")
+        .page(0)
+        .expect("a page")
+        .render(&tinker_pdf::RenderOptions::default());
+    let px = ((x * 0.75) as usize).min(bitmap.width as usize - 1);
+    let py = ((y * 0.75) as usize).min(bitmap.height as usize - 1);
+    bitmap.data[py * bitmap.stride + px * bitmap.components()]
+}
+
+/// A black square under a 100-unit linear gradient, and the gradient's
+/// `<Path.Fill>` stops, for the stop-alpha tests.
+fn over_black(stops: &str, extra: &str) -> String {
+    format!(
+        r##"<Path Fill="#FF000000" Data="M0,0L100,0 100,100 0,100Z" /><Path Data="M0,0L100,0 100,100 0,100Z">{extra}<Path.Fill><LinearGradientBrush StartPoint="0,0" EndPoint="100,0" MappingMode="Absolute"><LinearGradientBrush.GradientStops>{stops}</LinearGradientBrush.GradientStops></LinearGradientBrush></Path.Fill></Path>"##
+    )
+}
+
+/// **Gradient stops whose alphas differ are a soft mask over the colours**:
+/// 18.3.2 interpolates the alpha between its enclosing stops as it does each
+/// colour component, so red at full alpha fading to red at none, over black,
+/// is red at three quarters a quarter of the way along and at one quarter
+/// three quarters along.
+///
+/// *Since stop alphas are drawn*: this test used to assert the brush was
+/// named approximate and painted at the first stop's alpha.
 #[test]
-fn gradient_stops_with_different_alphas_are_named_as_approximate() {
-    let body = r##"<Path Data="M0,0L10,0 10,10Z"><Path.Fill><LinearGradientBrush StartPoint="0,0" EndPoint="10,0"><LinearGradientBrush.GradientStops><GradientStop Color="#FFFF0000" Offset="0" /><GradientStop Color="#000000FF" Offset="1" /></LinearGradientBrush.GradientStops></LinearGradientBrush></Path.Fill></Path>"##;
-    assert_eq!(body_defects(body), [XpsElementDefect::BrushApproximated]);
-    // And it is still painted: an approximation is not a refusal.
-    assert!(drawn(body).contains(" sh\n"));
+fn gradient_stops_with_different_alphas_fade_across_the_element() {
+    let body = over_black(
+        r##"<GradientStop Color="#FFFF0000" Offset="0" /><GradientStop Color="#00FF0000" Offset="1" />"##,
+        "",
+    );
+    assert_eq!(body_defects(&body), [], "drawn exactly, so nothing to name");
+    let content = drawn(&body);
+    assert!(
+        content.contains(" Do"),
+        "the fill is a masked group: {content}"
+    );
+    for (x, alpha) in [(25.0, 0.75), (50.0, 0.5), (75.0, 0.25)] {
+        let red = f64::from(red_at(&body, x, 50.0));
+        assert!(
+            (red - 255.0 * alpha).abs() < 12.0,
+            "at {x}: {red} against {}",
+            255.0 * alpha
+        );
+    }
+
+    // From half to none: the mask carries the half, and the constant alpha
+    // must not carry it again.
+    let body = over_black(
+        r##"<GradientStop Color="#80FF0000" Offset="0" /><GradientStop Color="#00FF0000" Offset="1" />"##,
+        "",
+    );
+    let red = f64::from(red_at(&body, 25.0, 50.0));
+    let alpha = 128.0 / 255.0 * 0.75;
+    assert!(
+        (red - 255.0 * alpha).abs() < 12.0,
+        "{red} against {}",
+        255.0 * alpha
+    );
+}
+
+/// An element's own `OpacityMask` and its gradient's stop alphas **both**
+/// apply, as their product: the mask fades top to bottom and the stops left
+/// to right, so a quarter of the way along each is three quarters of three
+/// quarters. One soft mask in the graphics state replacing the other would
+/// leave three quarters.
+#[test]
+fn stop_alphas_compose_with_the_elements_own_mask() {
+    let mask = r##"<Path.OpacityMask><LinearGradientBrush StartPoint="0,0" EndPoint="0,100" MappingMode="Absolute"><LinearGradientBrush.GradientStops><GradientStop Color="#FFFFFFFF" Offset="0" /><GradientStop Color="#00FFFFFF" Offset="1" /></LinearGradientBrush.GradientStops></LinearGradientBrush></Path.OpacityMask>"##;
+    let body = over_black(
+        r##"<GradientStop Color="#FFFF0000" Offset="0" /><GradientStop Color="#00FF0000" Offset="1" />"##,
+        mask,
+    );
+    assert_eq!(body_defects(&body), []);
+    let red = f64::from(red_at(&body, 25.0, 25.0));
+    assert!(
+        (red - 255.0 * 0.5625).abs() < 14.0,
+        "the product of the two: {red}"
+    );
+}
+
+/// A **stroke** whose gradient's stops differ in alpha is masked too, over a
+/// box that reaches past the shape by the stroke's own reach.
+#[test]
+fn a_stroke_with_differing_stop_alphas_is_masked() {
+    let body = r##"<Path Fill="#FF000000" Data="M0,0L200,0 200,200 0,200Z" /><Path Data="M20,100L180,100" StrokeThickness="20"><Path.Stroke><LinearGradientBrush StartPoint="20,0" EndPoint="180,0" MappingMode="Absolute"><LinearGradientBrush.GradientStops><GradientStop Color="#FFFF0000" Offset="0" /><GradientStop Color="#00FF0000" Offset="1" /></LinearGradientBrush.GradientStops></LinearGradientBrush></Path.Stroke></Path>"##;
+    assert_eq!(body_defects(body), []);
+    assert!(drawn(body).contains(" Do"));
+    // A quarter of the way along the line, and on its edge — the half of the
+    // stroke outside the shape is inside the mask's box.
+    let red = f64::from(red_at(body, 60.0, 108.0));
+    assert!((red - 255.0 * 0.75).abs() < 14.0, "{red}");
+}
+
+/// A black-to-white linear gradient over 100 units in a given
+/// `ColorInterpolationMode`, over the page's white.
+fn ramp_in(mode: &str, stops: &str) -> String {
+    format!(
+        r##"<Path Data="M0,0L100,0 100,100 0,100Z"><Path.Fill><LinearGradientBrush StartPoint="0,0" EndPoint="100,0" MappingMode="Absolute" ColorInterpolationMode="{mode}"><LinearGradientBrush.GradientStops>{stops}</LinearGradientBrush.GradientStops></LinearGradientBrush></Path.Fill></Path>"##
+    )
+}
+
+/// **18.3.1.2's `ScRgbLinearInterpolation` blends in linear light**: halfway
+/// from black to white is half the light, which sRGB encodes as 0.7354 —
+/// 188 of 255 — where `SRgbLinearInterpolation` gives 128. A quarter of the
+/// way is 0.25 of the light, 137, against 64.
+///
+/// *Since the mode is drawn*: it used to be interpolated in sRGB and named
+/// approximate.
+#[test]
+fn sc_rgb_interpolation_blends_in_linear_light() {
+    let stops = r##"<GradientStop Color="#FF000000" Offset="0" /><GradientStop Color="#FFFFFFFF" Offset="1" />"##;
+    let linear = ramp_in("ScRgbLinearInterpolation", stops);
+    let srgb = ramp_in("SRgbLinearInterpolation", stops);
+    assert_eq!(body_defects(&linear), [], "drawn exactly");
+    for (x, light, gamma) in [(50.0, 188.0, 128.0), (25.0, 137.0, 64.0)] {
+        let got = f64::from(red_at(&linear, x, 50.0));
+        assert!((got - light).abs() < 6.0, "linear light at {x}: {got}");
+        let got = f64::from(red_at(&srgb, x, 50.0));
+        assert!((got - gamma).abs() < 6.0, "sRGB at {x}: {got}");
+    }
+    let document = open(&package(&linear)).expect("an XPS");
+    let raw = String::from_utf8_lossy(document.cos().bytes()).into_owned();
+    assert!(raw.contains("/FunctionType 0"), "a sampled ramp: {raw}");
+}
+
+/// A `ColorInterpolationMode` 18.3.1.2 does not name is blended as the
+/// default and named approximate; the two it names are not.
+#[test]
+fn a_colour_interpolation_mode_18_3_1_2_does_not_name_is_named() {
+    let stops = r##"<GradientStop Color="#FF000000" Offset="0" /><GradientStop Color="#FFFFFFFF" Offset="1" />"##;
+    assert_eq!(
+        body_defects(&ramp_in("LabInterpolation", stops)),
+        [XpsElementDefect::BrushApproximated]
+    );
+    let got = f64::from(red_at(&ramp_in("LabInterpolation", stops), 50.0, 50.0));
+    assert!((got - 128.0).abs() < 6.0, "blended as the default: {got}");
+    assert_eq!(body_defects(&ramp_in("SRgbLinearInterpolation", stops)), []);
+}
+
+/// The mode changes how **colours** blend and not the alpha, which is a
+/// coverage: red fading from opaque to clear in linear light is half as
+/// opaque halfway, over black 128 of 255 rather than 188.
+#[test]
+fn sc_rgb_interpolation_leaves_the_alpha_linear() {
+    let stops = r##"<GradientStop Color="#FFFF0000" Offset="0" /><GradientStop Color="#00FF0000" Offset="1" />"##;
+    let body = format!(
+        r##"<Path Fill="#FF000000" Data="M0,0L100,0 100,100 0,100Z" />{}"##,
+        ramp_in("ScRgbLinearInterpolation", stops)
+    );
+    assert_eq!(body_defects(&body), []);
+    let red = f64::from(red_at(&body, 50.0, 50.0));
+    assert!((red - 128.0).abs() < 8.0, "{red}");
+}
+
+/// One alpha on every stop is still one constant alpha, and no mask.
+#[test]
+fn stops_that_share_one_alpha_are_a_constant_alpha() {
+    let body = over_black(
+        r##"<GradientStop Color="#80FF0000" Offset="0" /><GradientStop Color="#80FF0000" Offset="1" />"##,
+        "",
+    );
+    assert_eq!(body_defects(&body), []);
+    let content = drawn(&body);
+    assert!(!content.contains(" Do"), "{content}");
+    let red = f64::from(red_at(&body, 50.0, 50.0));
+    assert!((red - 128.0).abs() < 8.0, "{red}");
 }
 
 // ---- 14.2, resource dictionaries ----------------------------------------

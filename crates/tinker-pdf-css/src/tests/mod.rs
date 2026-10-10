@@ -2,6 +2,7 @@
 
 mod bounds;
 mod cascade;
+mod counter;
 mod defaulting;
 mod font_face;
 mod parser;
@@ -52,6 +53,15 @@ impl Element for Node {
     }
     fn inline_style(&self) -> Option<&str> {
         self.style.as_deref()
+    }
+    /// `lang`, which is enough document language for a fixture.
+    fn language(&self) -> Option<&str> {
+        self.attribute("lang")
+    }
+    /// A `hint` attribute's declarations, standing in for a document
+    /// language's presentational hints.
+    fn presentational_hints(&self) -> Option<String> {
+        self.attribute("hint").map(str::to_owned)
     }
 }
 

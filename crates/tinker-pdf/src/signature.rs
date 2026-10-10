@@ -204,7 +204,9 @@ pub enum SubFilter {
     Pkcs7Detached,
     /// `adbe.pkcs7.sha1` (12.8.3.3.1) — the legacy shape, where the CMS
     /// encapsulates the SHA-1 digest of the covered bytes rather than being
-    /// detached from it. Deprecated in ISO 32000-2.
+    /// detached from it. Deprecated in ISO 32000-2, and verified: the verdict
+    /// checks the encapsulated digest against the covered bytes and the
+    /// signer's `messageDigest` against the encapsulated digest.
     Pkcs7Sha1,
     /// `adbe.x509.rsa_sha1` (12.8.3.2) — a bare PKCS#1 signature, with the
     /// certificate chain in `/Cert` rather than in `/Contents`.
@@ -367,12 +369,254 @@ impl Signature {
         crate::mdp::modifications(document, self)
     }
 
+    /// The key the document security store files this signature's
+    /// validation material under: the SHA-1 of [`Signature::contents`] as
+    /// uppercase hexadecimal (ETSI EN 319 142-1 §5.4.2.2) — the writer's own
+    /// function, so the two cannot disagree. [`SecurityStore::entry_for`]
+    /// looks it up.
+    #[must_use]
+    pub fn validation_key(&self) -> String {
+        tinker_pdf_cos::sign::validation_key(&self.contents)
+    }
+
     /// Whether this is a usage-rights signature (12.8.4), which grants a
     /// reader capabilities and makes no claim about the document's content.
     #[must_use]
     pub fn is_usage_rights(&self) -> bool {
         matches!(&self.anchor, Anchor::Permissions(key) if key == "UR" || key == "UR3")
     }
+}
+
+/// The document security store (ISO 32000-2 12.8.4.3): the catalog's `/DSS`,
+/// read back as references to its streams.
+///
+/// **References, not bytes**, by the precedent `Document::attachments` set:
+/// listing what a document carries should not cost what it costs to decode
+/// it, and a store may name thousands of streams. `Document::cos` and
+/// `CosDocument::stream_decoded` read any one of them, under the per-stream
+/// bound every stream read has.
+///
+/// **Surfaced, never evaluated.** A CRL or an OCSP response is a statement
+/// about a moment, and whether it is still fresh is a question with a clock in
+/// it, which ruling 4 keeps out of this engine; nothing here parses one, and
+/// the verdict does not consult the store.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SecurityStore {
+    /// The store's own object, when it is an indirect one.
+    pub object: Option<ObjRef>,
+    /// `/Certs`: DER certificates.
+    pub certificates: Vec<ObjRef>,
+    /// `/CRLs`: DER certificate revocation lists.
+    pub crls: Vec<ObjRef>,
+    /// `/OCSPs`: DER OCSP responses.
+    pub ocsp_responses: Vec<ObjRef>,
+    /// `/VRI`: the material filed for particular signatures.
+    pub entries: Vec<ValidationEntry>,
+    /// What was read leniently or skipped (ruling 10).
+    pub warnings: Vec<SecurityStoreWarning>,
+}
+
+impl SecurityStore {
+    /// The `/VRI` entry filed for `signature`, by
+    /// [`Signature::validation_key`].
+    #[must_use]
+    pub fn entry_for(&self, signature: &Signature) -> Option<&ValidationEntry> {
+        let key = signature.validation_key();
+        self.entries.iter().find(|entry| entry.key == key)
+    }
+}
+
+/// One `/VRI` entry: the validation material filed for one signature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ValidationEntry {
+    /// The key, as stored: forty hexadecimal digits naming a signature.
+    pub key: String,
+    /// `/Cert`.
+    pub certificates: Vec<ObjRef>,
+    /// `/CRL`.
+    pub crls: Vec<ObjRef>,
+    /// `/OCSP`.
+    pub ocsp_responses: Vec<ObjRef>,
+    /// `/TU`: when the material was gathered, as the writer said.
+    pub updated: Option<Date>,
+}
+
+/// Something in the security store read leniently or skipped, named by the
+/// store's object (ruling 10).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SecurityStoreWarning {
+    /// A member of `array` that is not a reference to a stream, skipped.
+    NotAStream {
+        /// The store's object.
+        store: Option<ObjRef>,
+        /// Which array: `Certs`, `CRLs`, `OCSPs`, or a `/VRI` entry's
+        /// `Cert`, `CRL` or `OCSP`.
+        array: String,
+    },
+    /// A `/VRI` key that is not forty hexadecimal digits, so it names no
+    /// signature this reader can match. Kept, and named.
+    KeyNotADigest {
+        /// The store's object.
+        store: Option<ObjRef>,
+        /// The key as stored.
+        key: String,
+    },
+    /// A `/VRI` value that is not a dictionary, skipped.
+    EntryNotADictionary {
+        /// The store's object.
+        store: Option<ObjRef>,
+        /// Its key.
+        key: String,
+    },
+    /// The catalog's `/DSS` is there and is not a dictionary, so the store is
+    /// read as empty. A `/DSS` that is absent or null — a reference to no
+    /// object is null (7.3.10) — is no store at all, and not this.
+    NotADictionary {
+        /// The store's object, when `/DSS` was a reference.
+        store: Option<ObjRef>,
+    },
+    /// An entry that must be an array of streams is something else, so none
+    /// of it was read.
+    NotAnArray {
+        /// The store's object.
+        store: Option<ObjRef>,
+        /// Which entry: `Certs`, `CRLs`, `OCSPs`, or a `/VRI` entry's `Cert`,
+        /// `CRL` or `OCSP`.
+        array: String,
+    },
+    /// `/VRI` is there and is not a dictionary, so no entry was read.
+    VriNotADictionary {
+        /// The store's object.
+        store: Option<ObjRef>,
+    },
+    /// A `/VRI` entry's `/TU` is not a date this reader can read (7.9.4), so
+    /// the entry is kept with no `updated` time.
+    DateUnreadable {
+        /// The store's object.
+        store: Option<ObjRef>,
+        /// The entry's key.
+        key: String,
+    },
+}
+
+/// Reads the catalog's `/DSS`, if there is one.
+///
+/// Absent and null are the same (7.3.7), and so is a reference to an object
+/// that does not exist (7.3.10): no store. Anything else that is not a
+/// dictionary is a store that could not be read, and says so.
+pub(crate) fn security_store(document: &Document) -> Option<SecurityStore> {
+    let cos = document.cos();
+    let catalog = cos.catalog()?;
+    let dss_key = cos.intern(b"DSS");
+    let (object, value) = match catalog.get(dss_key)? {
+        Object::Ref(r) => (Some(*r), cos.get(*r).ok()?),
+        other => (None, std::sync::Arc::new(other.clone())),
+    };
+    if matches!(*value, Object::Null) {
+        return None;
+    }
+    let mut store = SecurityStore {
+        object,
+        ..SecurityStore::default()
+    };
+    let Some(dss) = value.as_dict() else {
+        store
+            .warnings
+            .push(SecurityStoreWarning::NotADictionary { store: object });
+        return Some(store);
+    };
+    let mut warnings = Vec::new();
+    store.certificates = streams(cos, dss, b"Certs", object, &mut warnings);
+    store.crls = streams(cos, dss, b"CRLs", object, &mut warnings);
+    store.ocsp_responses = streams(cos, dss, b"OCSPs", object, &mut warnings);
+
+    let vri = cos.resolve_key(dss, cos.intern(b"VRI"));
+    if !matches!(*vri, Object::Null | Object::Dict(_)) {
+        warnings.push(SecurityStoreWarning::VriNotADictionary { store: object });
+    }
+    if let Some(vri) = vri.as_dict() {
+        for (name, value) in vri.iter() {
+            let key = cos
+                .name_bytes(*name)
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                .unwrap_or_default();
+            if key.len() != 40 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                warnings.push(SecurityStoreWarning::KeyNotADigest {
+                    store: object,
+                    key: key.clone(),
+                });
+            }
+            let resolved = cos.resolve(value);
+            let Some(entry) = resolved.as_dict() else {
+                warnings.push(SecurityStoreWarning::EntryNotADictionary { store: object, key });
+                continue;
+            };
+            let tu = cos.intern(b"TU");
+            let updated = text_of(cos, entry, tu)
+                .as_deref()
+                .and_then(tinker_pdf_cos::parse_date);
+            if updated.is_none() && !matches!(*cos.resolve_key(entry, tu), Object::Null) {
+                warnings.push(SecurityStoreWarning::DateUnreadable {
+                    store: object,
+                    key: key.clone(),
+                });
+            }
+            store.entries.push(ValidationEntry {
+                certificates: streams(cos, entry, b"Cert", object, &mut warnings),
+                crls: streams(cos, entry, b"CRL", object, &mut warnings),
+                ocsp_responses: streams(cos, entry, b"OCSP", object, &mut warnings),
+                updated,
+                key,
+            });
+        }
+    }
+    store.warnings = warnings;
+    Some(store)
+}
+
+/// The stream references in `dict`'s array `key`; anything else is skipped
+/// and named.
+fn streams(
+    cos: &CosDocument,
+    dict: &Dict,
+    key: &[u8],
+    store: Option<ObjRef>,
+    warnings: &mut Vec<SecurityStoreWarning>,
+) -> Vec<ObjRef> {
+    let array = cos.resolve_key(dict, cos.intern(key));
+    let Some(items) = array.as_array() else {
+        // Absent is an empty list; anything else is a list that could not be
+        // read, and is named.
+        if !matches!(*array, Object::Null) {
+            warnings.push(SecurityStoreWarning::NotAnArray {
+                store,
+                array: String::from_utf8_lossy(key).into_owned(),
+            });
+        }
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(items.len());
+    let mut skipped = false;
+    for item in items {
+        match item {
+            Object::Ref(r) if matches!(cos.get(*r).as_deref(), Ok(Object::Stream(_))) => {
+                out.push(*r);
+            }
+            _ => skipped = true,
+        }
+    }
+    // One warning per array rather than per member: a store of ten thousand
+    // bad members is one finding, not ten thousand.
+    if skipped {
+        warnings.push(SecurityStoreWarning::NotAStream {
+            store,
+            array: String::from_utf8_lossy(key).into_owned(),
+        });
+    }
+    out
 }
 
 /// One signature dictionary and how it was reached, before it is read.

@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 
 use crate::device::{Device, Glyph, MarkedProps};
+use crate::plain::{PlainText, PlainTextOptions};
 use crate::state::GraphicsState;
 
 /// Four corners, in device space (9.4.4).
@@ -97,6 +98,11 @@ pub struct TextChar {
     ///
     /// `0` whenever [`TextChar::mcid`] is `None`, where it means nothing.
     pub stream: u64,
+    /// The name of the font it was shown in — `/BaseFont` as the dictionary
+    /// writes it, subset tag included, since two subsets of one face are two
+    /// fonts to a file — or `None` where the font has no name this build could
+    /// read. See [`Glyph::font_name`] for why it travels with the character.
+    pub font: Option<std::sync::Arc<str>>,
 }
 
 /// Which way a line runs.
@@ -112,7 +118,13 @@ pub enum WritingMode {
 /// One line of text.
 #[derive(Clone, Debug)]
 pub struct TextLine {
-    /// The characters, in the order the content stream showed them.
+    /// The characters, in the order [`TextDevice`] collected them — the order
+    /// the content stream showed them.
+    ///
+    /// The facade's `Page::text` puts a line holding a right-to-left
+    /// character into **logical** order before a caller sees it (ruling 14,
+    /// `docs/rulings.md`), so for a page read through it this is reading
+    /// order; `Page::text_with` keeps the stream's.
     pub chars: Vec<TextChar>,
     /// The whole line's text.
     pub text: String,
@@ -125,6 +137,13 @@ pub struct TextLine {
     /// Determined from the characters themselves, not from the writing mode:
     /// they are different properties and a vertical Japanese line is not
     /// right-to-left.
+    ///
+    /// [`TextDevice`] counts letters in the Hebrew, Arabic, Syriac and Thaana
+    /// blocks against alphabetic ones. The facade's `Page::text` replaces that
+    /// count, for a line holding a right-to-left character, with the paragraph
+    /// direction it read the line in (ruling 14), which comes from every
+    /// character's `Bidi_Class` and from which end of the line its strong
+    /// characters sit at.
     pub rtl: bool,
     /// The largest font size on the line, which is what the eye reads it as.
     pub size: f64,
@@ -214,6 +233,26 @@ impl TextPage {
         out
     }
 
+    /// The page's text, assembled as `options` asks, with a count of what
+    /// assembling it changed.
+    ///
+    /// With [`PlainTextOptions::default`] the text is [`TextPage::plain_text`]
+    /// to the byte and every count is zero. With
+    /// [`PlainTextOptions::rejoin_hyphens`] soft hyphens are removed and words
+    /// hyphenated across a line end are rejoined — the rule, and why the
+    /// inferred joins are counted apart from the certain ones, is in
+    /// [`crate::plain`].
+    #[must_use]
+    pub fn plain_text_with(&self, options: &PlainTextOptions) -> PlainText {
+        crate::plain::assemble(
+            self.blocks
+                .iter()
+                .flat_map(|b| b.lines.iter())
+                .map(|l| l.text.as_str()),
+            options,
+        )
+    }
+
     /// Finds `needle`, case-insensitively and literally.
     ///
     /// Matches within a line, returning one quad per match. Case folding is
@@ -270,9 +309,23 @@ impl TextPage {
 }
 
 /// The quad covering glyphs `a..=b` of a line.
-fn span_quad(line: &TextLine, a: usize, b: usize) -> Option<Quad> {
-    let first = line.chars.get(a)?;
-    let last = line.chars.get(b)?;
+///
+/// The left edge is taken from whichever of the two ends starts first along
+/// the first one's baseline. For a line in the order it was drawn that is `a`,
+/// and nothing changes; for a right-to-left line in logical order (ruling 14)
+/// the logically first glyph is the rightmost, and a quad taken from it as
+/// though it were the left end would be turned inside out.
+pub(crate) fn span_quad(line: &TextLine, a: usize, b: usize) -> Option<Quad> {
+    let mut first = line.chars.get(a)?;
+    let mut last = line.chars.get(b)?;
+    let (ux, uy) = (
+        first.quad.lr.0 - first.quad.ll.0,
+        first.quad.lr.1 - first.quad.ll.1,
+    );
+    let along = |p: (f64, f64)| p.0 * ux + p.1 * uy;
+    if along(last.quad.lr) < along(first.quad.ll) {
+        core::mem::swap(&mut first, &mut last);
+    }
     Some(Quad {
         ul: first.quad.ul,
         ll: first.quad.ll,
@@ -689,6 +742,7 @@ impl Device for TextDevice {
                 origin,
                 mcid: self.mcids.last().map(|(_, mcid)| *mcid),
                 stream: self.mcids.last().map_or(0, |(stream, _)| *stream),
+                font: glyph.font_name.clone(),
             });
         }
     }
@@ -737,6 +791,7 @@ mod tests {
             size,
             vertical: false,
             font_id: 1,
+            font_name: None,
         }
     }
 
@@ -933,6 +988,42 @@ mod tests {
         assert!(p.blocks.is_empty());
         assert_eq!(p.plain_text(), "");
         assert!(p.search("anything").is_empty());
+    }
+
+    /// A run of glyphs, one per character, half an em apart on one baseline.
+    fn run(text: &str, x: f64, y: f64) -> Vec<Glyph> {
+        text.chars()
+            .enumerate()
+            .map(|(i, c)| glyph(&c.to_string(), x + i as f64 * 5.0, y, 10.0))
+            .collect()
+    }
+
+    /// Hyphen rejoining through a page the device assembled, not only through
+    /// [`crate::plain::assemble`]: the lines it joins are the lines
+    /// extraction made, and the default is `plain_text` to the byte.
+    #[test]
+    fn plain_text_with_rejoins_hyphens_across_the_lines_extraction_made() {
+        let mut glyphs = run("a hyphen-", 0.0, 700.0);
+        glyphs.extend(run("ation and a soft\u{AD}", 0.0, 688.0));
+        glyphs.extend(run("ware well-", 0.0, 676.0));
+        glyphs.extend(run("Known", 0.0, 664.0));
+        let p = page(&glyphs);
+        assert_eq!(p.lines().len(), 4);
+
+        let default = p.plain_text_with(&PlainTextOptions::default());
+        assert_eq!(default.text, p.plain_text(), "the default changes nothing");
+        assert_eq!(default.hyphens.joins(), 0);
+
+        let joined = p.plain_text_with(&PlainTextOptions {
+            rejoin_hyphens: true,
+        });
+        assert_eq!(
+            joined.text, "a hyphenation and a software well-\nKnown\n",
+            "the soft hyphen joined, the hard one before a capital did not"
+        );
+        assert_eq!(joined.hyphens.hard_joins, 1);
+        assert_eq!(joined.hyphens.soft_joins, 1);
+        assert_eq!(joined.hyphens.soft_removed, 1);
     }
 
     #[test]

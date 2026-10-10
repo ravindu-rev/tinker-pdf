@@ -1,0 +1,24 @@
+# Release notes
+
+The *third* release, with **two** fixes and `one` change.
+
+Setext heading
+--------------
+
+- a tight list
+- of two items
+  1. nested
+  2. ordered
+
+> quoted, with a [link][home] and
+lazy continuation.
+
+```rust
+fn main() {}
+```
+
+    indented code
+
+***
+
+[home]: https://example.org/home "Home"

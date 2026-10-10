@@ -147,10 +147,27 @@ pub fn linearize(
     options: &WriteOptions,
     names: &NameTable,
 ) -> Option<Vec<u8>> {
+    linearize_sealed(
+        objects,
+        trailer,
+        options,
+        names,
+        crate::write::Sealing::from_options(options),
+    )
+}
+
+/// [`linearize`], sealed with whichever handler `sealing` names.
+pub(crate) fn linearize_sealed(
+    objects: &ObjectSet,
+    trailer: &Dict,
+    options: &WriteOptions,
+    names: &NameTable,
+    sealing: Option<crate::write::Sealing<'_>>,
+) -> Option<Vec<u8>> {
     // The cipher is built before a single object is serialised, because every
     // length this layout depends on is a length of encrypted bytes.
-    let encryption = match options.encryption.as_ref() {
-        Some(request) => Some(crate::write::build_encryption(request, names)?),
+    let encryption = match sealing {
+        Some(sealing) => Some(crate::write::build_sealing(sealing, names)?),
         None => None,
     };
     let plan = Plan::build(objects, trailer, names, options.compress, encryption)?;
@@ -1361,7 +1378,14 @@ fn write_indirect(
                 None => data,
             };
             dict.insert(Name::LENGTH, Object::Int(data.len() as i64));
-            write_object(out, &Object::Dict(dict), names);
+            // A stream's dictionary holds strings as any object does, and
+            // they are sealed with the object's others, as the ordinary
+            // writer's `write_entry` seals them.
+            let dict = Object::Dict(dict);
+            match crypt {
+                Some(cipher) => write_object(out, &cipher.encrypt_strings(&dict, number), names),
+                None => write_object(out, &dict, names),
+            }
             out.extend_from_slice(b"\nstream\n");
             out.extend_from_slice(&data);
             out.extend_from_slice(b"\nendstream");

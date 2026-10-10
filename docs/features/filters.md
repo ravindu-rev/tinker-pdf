@@ -436,9 +436,12 @@ measured, by injecting two such permutations and watching Annex H.1 still match
 byte for byte. T.88's Figures 8 to 11, transcribed pixel by pixel, are what pin
 it, and they pin all four templates rather than the one the annex uses.
 
-**Nothing in this repository calls either encoder outside the tests**, and the
-writer's contract — it never re-encodes image bytes — is unchanged by their
-existence ([creation](creation.md), [ROADMAP](../ROADMAP.md)).
+**One caller outside the tests, and only when asked**: the facade's save
+door recodes image XObjects through G4 and a JBIG2 generic region (and
+`jpeg_encode`) when `SaveOptions::images` names them, assembling the D.3
+embedded stream this crate leaves to its caller ([writing](writing.md)). The
+cos writer's contract — it never re-encodes image bytes — is unchanged
+([creation](creation.md), [ROADMAP](../ROADMAP.md)).
 
 **And a baseline JPEG encoder joined them on 16 September 2026**, which closes
 the roadmap's image-encoder row with one gap named rather than papered over.
@@ -539,7 +542,46 @@ directory with a cycle guard on the `NextIFD` chain, strips and tiles
 (including edge tiles stored full size and padded), `PlanarConfiguration` 2,
 `PhotometricInterpretation` 0 through 3 with the inversion 0 asks for, and a
 `ColorMap` transposed out of p.23's three consecutive arrays into the RGB
-triples every other palette in this engine is. Output is
+triples every other palette in this engine is.
+
+**The archive row widened it on 26 September 2026**, and each addition is
+its own decision in `tiff.rs`'s module note. `PhotometricInterpretation` 5 with
+`InkSet` 1 is read as `TiffColour::Cmyk` — ink amounts with zero as none, which
+is what `/DeviceCMYK` means by a component, so nothing is converted; an Adobe
+inverted CMYK JPEG strip is un-inverted to match. **BigTIFF** is read by the
+same walk as the classic layout, with eight-byte counts and offsets and
+twenty-byte entries chosen once at the header. **`Compression` 34712** is a JPEG
+2000 codestream per strip or tile, decoded by `jpx` — and placed as
+`/JPXDecode` by `tiff_image` when it is one strip whose header agrees with the
+directory. **`tiff_scan_directory`** scans any directory on the chain and
+carries its `NewSubfileType`, so a caller that pages can tell a page from a
+thumbnail or a mask. **`SampleFormat` 2 and 3 and `Predictor` 3** needed a
+mapping from a number to an intensity, and it is stated rather than inferred:
+§19 (p.80) makes the default `SMinSampleValue`/`SMaxSampleValue` "the full
+range of the data type", so a signed integer is mapped linearly from its type's
+range — an offset by half of it — and a float is read as the intensity itself
+on [0, 1], the range ISO 32000-2 8.6.4 gives a device colour component, and
+clamped; explicit `SMinSampleValue`/`SMaxSampleValue` override either.
+**`PhotometricInterpretation` 8, CIE `L*a*b*`** (§23, 4 October 2026) is read
+at 8 and 16 bits as `TiffColour::Lab` (and `LabAlpha`): `L*` as the file holds
+it and `a*`, `b*` — two's complement in the file — with the top bit flipped,
+which is offset binary and exact. The embed door always decodes it and writes
+`ImageColorSpace::Lab`, a `/Lab` array whose `/Range` is `[-128, 128 −
+256/2^bits]`, so that Table 90 reads every sample as its own value: exactly at
+8 bits, and at 16 to the writer's six decimals (4 × 10⁻⁷ of a unit of `a*`).
+That is a byte transform and no conversion of colour, which is what the row
+asked for; the colour crate's floating-point `lab_to_srgb` is not involved.
+Refused by name: another depth (`UnsupportedBitDepth`), a `SampleFormat` other
+than unsigned (§23 fixes `L*` unsigned and `a*`, `b*` signed, which one tag
+cannot say) and a JPEG or JPEG 2000 coding, whose coders hand back samples of
+their own colour model (`UnsupportedCompression`). The white point written is
+D50; a TIFF `WhitePoint` tag is not read. `image_fixtures.rs` holds the decode
+to tifffile's files from authored pixels and `cbz_images.rs` holds the page to
+8.6.5.4's arithmetic.
+Samples wider than eight bits leave at sixteen, Table 89's widest. `Predictor`
+3 is Photoshop TIFF Technical Note 3's byte-plane predictor and is undone into
+big-endian samples whatever the file's own order; `Predictor` 2 now reaches 32
+bits as well. Output is
 [`PngImage`]'s shape deliberately — grey, grey+alpha, RGB or RGBA at 8 or 16
 bits — so a consumer that splits an alpha channel into an `/SMask` learns one
 layout rather than two. `tiff_scan` is `png_scan`'s counterpart: it walks the
@@ -569,6 +611,93 @@ encoder that forgot p.23's scaling; it is read as one, with
 that is uniformly almost black and reads as a decoder bug rather than as the
 file's.
 
+**BMP** is the third container decoder, and the first with no coding a
+`/Filter` shares: Microsoft's `BITMAPFILEHEADER` and its five info-header
+layouts (`BITMAPCOREHEADER`, `BITMAPINFOHEADER`, the V2 and V3 extensions
+that move the masks into the header, `BITMAPV4HEADER`, `BITMAPV5HEADER`) plus
+OS/2 2.x's, at 1, 2, 4, 8, 16, 24 and 32 bits, bottom-up or top-down, with
+`BI_RGB`, `BI_RLE8`, `BI_RLE4`, `BI_BITFIELDS` and `BI_ALPHABITFIELDS`. What
+comes out is `ImagePixels` — the one shape `bmp_decode` and the two decoders
+that follow it share: **indexed or direct, eight bits**, because a bitmap is
+overwhelmingly paletted and expanding it would triple the allocation the
+comic path argues about. Four decisions the format forces are taken in the
+module note and not left to be inferred: the fourth byte of a 32-bit
+`BI_RGB` pixel is **not** alpha (the header documentation says it is unused,
+and alpha is read only from a stated alpha mask); a bit-field sample is scaled
+to eight bits by rounding `v x 255 / max`, the definition, rather than by bit
+replication; an index past the colour table is black, with
+`Warning::BmpPaletteIndexOutOfRange`; and a pixel an RLE delta or early
+end-of-line skipped is index 0, with `Warning::BmpRleUndefinedPixels`, since
+the documentation says nothing about what it is.
+
+**GIF** is the fourth, 87a and 89a, and it is the one whose LZW could *not*
+be `lzw.rs`: GIF89a Appendix F sizes the root set from a byte in front of the
+data (anything from 2 to 256 roots), packs codes least significant bit first
+into 255-byte sub-blocks, and grows the width a code later than `/LZWDecode`
+does. `tiff.rs`'s old-style transcoder repacks LSB-first codes but assumes 256
+roots, so it would mis-size every code of a GIF whose table is not full; the
+dictionary in `gif.rs` is thirty lines and exists once. `gif_decode` returns
+the **first image** — a page is one picture, and the first is what every
+viewer shows before a timer runs — with `Warning::GifFramesIgnored` when there
+are more; §20.c's four interlace passes are put back in row order; the canvas
+is §18's logical screen, and a first image smaller than it leaves §18's
+background colour around it. A GIF stays `ImagePixels::Indexed` with the
+graphic control extension's transparent index carried as an index, which PDF's
+colour-key `/Mask` expresses exactly — except in one shape: a first image
+that brings its own local table and does not cover its screen puts two index
+spaces on one canvas, and that picture is expanded to RGBA.
+
+**WebP** is the fifth: RFC 9649's RIFF container in all three layouts — simple lossy, simple lossless, and extended (`VP8X`) with its
+`ALPH`, `ANIM` and `ANMF` chunks — and §3's **lossless** bitstream (VP8L):
+the four transforms (predictor, colour, subtract-green, colour-indexing with
+its pixel bundling), canonical prefix codes under both code-length codes,
+meta prefix codes that change the codes block by block, LZ77 back-references
+through the 120-entry distance map, and the colour cache. Three corners the
+RFC leaves open are taken in `webp/vp8l.rs`'s note and marked there:
+`max_symbol` counts reads of the code-length code, which is how libwebp
+writes it; predictor modes 14 and 15, which the RFC does not define, predict
+as mode 0; and a back-reference before the first pixel or past the last, or a
+colour-cache index past the cache, ends the image there with
+`Warning::WebpCorruptData` — the rest transparent black — where damage to
+anything that says *how* to read the pixels (a header, a transform, a prefix
+code) is a `WebpError`, since nothing after it can be read. `webp_decode`
+returns the **first frame** of an animation, at its offset on the `VP8X`
+canvas with the rest of the canvas transparent — §2.7.1.1 calls the `ANIM`
+background colour "a hint" viewers "are not required to use" — and
+`Warning::WebpFramesIgnored` when there are more. The picture comes back RGB
+when every alpha is 255 and RGBA otherwise: VP8L always carries alpha, and
+its `alpha_is_used` bit "SHOULD NOT impact decoding" (§3.4), so opacity is
+read from the samples and an opaque picture needs no soft mask.
+
+**The lossy bitstream** is RFC 6386's VP8 key frame, in `webp/vp8.rs`: the
+boolean entropy decoder (§7), the frame header with its segmentation, loop
+filter, quantizer and probability updates (§9), the key frame's mode trees
+with their above and left contexts (§11), the DCT tokens over up to eight
+partitions (§13), per-segment dequantization (§14.1), the inverse WHT and DCT
+(§14.3, §14.4), the four whole-block and ten subblock predictors with the
+out-of-frame 127s and 129s (§12), and the normal and simple loop filters
+(§15). Where the prose and the reference decoder of §20 ("dixie") say a thing
+differently, `vp8.rs` follows dixie — it is what the test vectors were checked
+against — and marks where: a segment's filter level is clamped before the
+deltas are added, and a segment's quantizer index is not clamped until each
+of its deltas has been. An inter frame, a key frame marked not to be shown
+(libwebp refuses one too), a version past 3 and a missing start code are
+refused by name; a zero dimension is `WebpError::BadDimensions`, the one
+header that can say zero; a partition that ends before the macroblocks it
+codes leaves those macroblocks black, with `Warning::TruncatedInput`. **How
+Y, U and V become a picture is a decision, and the one taken is libwebp's**:
+its "fancy" upsampling, which weights the four nearest chroma samples 9:3:3:1,
+and its 14-bit fixed-point BT.601 conversion — integer arithmetic both, so the
+picture is the same on every machine, and the picture every browser shows.
+The decision is libwebp's and the evidence for it is not: the conversion is
+held to BT.601's matrix and the upsampler to its weights, worked out in exact
+arithmetic, never to libwebp's output (ruling 13). An
+`ALPH` chunk beside a lossy frame is decoded raw or as a headerless VP8L
+stream (its alpha the green channel) and §2.7.1.2's horizontal, vertical or
+gradient filter undone; one that will not decode leaves the picture opaque
+with `Warning::WebpAlphaDropped`, where libwebp refuses the whole file — the
+colour is still the picture, which is ruling 2's trade.
+
 ## API
 
 The filters never appear on the facade — ruling 11 makes `tinker_pdf` the
@@ -591,7 +720,12 @@ Single-filter entry points mirror the `/Filter` names: `flate_decode`,
 `predictor_decode`. The image codecs are `jpeg_decode` (returns `JpegImage`),
 `ccitt_decode` (takes `CcittParams`), `jbig2_decode` (takes `Jbig2Params`,
 which carries the `/JBIG2Globals` bytes) and `jpx_decode` (returns
-`JpxImage`). The encoder half is `deflate`, `zlib_compress`, `png_encode`
+`JpxImage`), with `jpx_header` beside it: every stage of that decode before
+tier-2 and none after, returning a `JpxHeader` — the geometry, output channel
+count, precision, stated colour and opacity a decode would produce. The comic
+path places a `.jp2` page's own bytes as `/JPXDecode` on the strength of it,
+and `jpx_reference.rs`, the seed replay and the `jpx` fuzz target each hold it
+to agree with the decode it stands in for. The encoder half is `deflate`, `zlib_compress`, `png_encode`
 (takes a `PngSource`, returns the file or a `PngEncodeError`), `ccitt_g4_encode`
 (takes a `CcittSource`, returns the coded bits or a `CcittEncodeError`),
 `jbig2_generic_encode` / `jbig2_generic_region_segment` (take a
@@ -600,7 +734,10 @@ which carries the `/JBIG2Globals` bytes) and `jpx_decode` (returns
 `jpeg_encode` (takes a `JpegSource` and a `JpegOptions`, returns the whole
 interchange datastream or a `JpegEncodeError`); the container
 half is `png_decode`, `png_scan`, `tiff_decode`, `tiff_scan`, `packbits_decode`,
-`inflate_raw`, `crc32` and `jxr_decode` (returns `JxrImage`).
+`inflate_raw`, `crc32`, `jxr_decode` (returns `JxrImage`), `bmp_decode`
+(returns `BmpImage`, whose pixels are an `ImagePixels`), `gif_decode`
+(returns `GifImage`, the same pixels) and `webp_decode` (returns `WebpImage`,
+the same pixels, never indexed).
 
 Every one of those six takes plain numbers and a borrowed byte slice and
 returns bytes, which is all ruling 8 asks of a leaf. The parameter names
@@ -608,14 +745,20 @@ returns bytes, which is all ruling 8 asks of a leaf. The parameter names
 `CcittParams` has been public with those names since the decoder landed, and one
 name per concept in a crate beats two.
 
-`png_encode` is the one filter entry point with a visible counterpart on the
-facade, and the shape is a projection rather than a re-export: ruling 11 keeps
+`png_encode` and `png_decode` are the two filter entry points with a visible
+counterpart on the facade, and the shape is a projection rather than a
+re-export: ruling 11 keeps
 `tinker_pdf` the public surface for a *document*, and what a caller has is a
 rendered page, so `tinker_pdf::Bitmap::to_png` maps a `PixelFormat` onto one of
 PNG's colour types and calls this. Two of the six formats have no colour type
 to map onto and are converted there rather than here — `CmykA8` through
 8.6.4.4's device relation and `LabA8` back out of `L*a*b*` — because this crate
-holds no PDF colour and ruling 8 keeps it that way.
+holds no PDF colour and ruling 8 keeps it that way. `tinker_pdf::Bitmap::from_png`
+is the inverse projection: each of the four decoded layouts is one
+`PixelFormat`, sixteen bits round to eight there rather than here, and a raster
+this decoder returns incomplete — a degradation, correctly, for a comic page —
+is refused there, because the caller it exists for compares pictures and would
+score missing rows as a difference.
 
 `ccitt_g4_encode`, `jbig2_generic_encode` and `jpeg_encode` have **no** facade
 counterpart, and
@@ -651,7 +794,7 @@ make both enums wrong.
 | JPX markers SOP and EPH in a header (T.800 A.8) | `Warning::JpxMarkerUnsupported` | **No Table A.2 marker is refused as a capability any more, and these two are refused for where they are rather than for what they are.** A.8 puts both inside the bit stream and tier-2 reads them there; a header is the one place neither has a meaning. **Five markers have left this row, each for its own reason**: CRG, because A.9.1 says it "has no effect on decoding the codestream", so it is parsed, carried and not applied; RGN, because Annex H was implemented; PPM and PPT, because A.7.4 and A.7.5 were; and POC last, on 21 September 2026, because A.6.6's progressions are B.12.2's progression order volumes and tier-2 sequences the packets from them | T.800 A.8.1, A.8.2 |
 | JPX POC field values: a `Ppoc` Table A.16 does not define, a bound outside Table A.32, an `Lpoc` that is not equation (A-6)'s, two POC segments in one header, a tile-part POC with none in the tile's first tile-part header | `Warning::JpxFeatureUnsupported`, `Warning::JpxStructureInvalid` | What is left of POC after the marker was implemented, and the same shape RGN's refusal took: a *value inside* the segment rather than the segment. A volume whose bounds run backwards is not a volume, and clamping one into shape would decode a packet sequence the codestream never described — the same failure as skipping the marker, reached from the other side | T.800 A.6.6, Table A.32, B.12.3 |
 | JPX ROI style: an `Srgn` T.800 Table A.25 reserves | `Warning::JpxFeatureUnsupported` | Table A.25 defines one ROI style — 0, "Implicit ROI (maximum shift)" — and reserves the rest. A reserved style is some other realignment of the coefficients, so running H.1's Maxshift arithmetic over it would put the background at the wrong magnitude and draw a plausible picture. Refused by name rather than stepped over, which is the SOF3/SOF5/SOF6/SOF7 lesson on this page | T.800 A.6.3, Table A.25 |
-| JPX markers Table A.2 does not define (all of ISO/IEC 15444-2) | `Warning::JpxMarkerUnknown` | Part 2 is a non-goal; an unknown marker cannot be measured past | [ROADMAP](../ROADMAP.md) |
+| JPX markers Table A.2 does not define (all of ISO/IEC 15444-2) | `Warning::JpxMarkerUnknown` | Part 2 was a non-goal until 9 October 2026 and is roadmap row FI-13 now; an unknown marker cannot be measured past | [ROADMAP](../ROADMAP.md) |
 | JPX coding features: a code-block style **bit** T.800 Table A.19 does not define, an unmappable `colr`, unequal channel depths | `Warning::JpxFeatureUnsupported` | A wrong JPEG 2000 decode is a plausible photograph; refusal beats a blur nobody can distinguish from a bad scan. **Table A.19 has left this row as a capability**: all six code-block styles decode as of 23 September 2026, and what fires for A.19 now is bit 6 or bit 7, which the table reserves — a *value* the standard does not define rather than a capability this build lacks, the same shape as the `Srgn` row above | [ROADMAP](../ROADMAP.md) |
 | JPX component precision above 16 bits | `Warning::JpxPrecisionUnsupported` | **A limit, not a gap.** T.800 Table A.11 allows 38; E.1 clamps a coefficient to `2^(R_b + 2)` sample units and a coefficient plane is a Q12 `i32`, so 17 bits is where the plane format runs out — and ISO 32000-1 Table 89 has no `/BitsPerComponent` above 16 to hand a widened sample to. Argued in ROADMAP's Named non-goals | [ROADMAP](../ROADMAP.md) Named non-goals |
 | JPX tile-parts out of order, or a codestream with no complete tile | `Warning::JpxStructureInvalid` | Out of order is a codestream contradicting itself, and reassembling in stream order would produce a picture wrong in a way that looks like compression. A tile *short* of its declared parts is a different failure — a file that stopped — so it is left blank and reported as `JpxTruncated` wherever any tile survives, which is `JxrWarning::TileDroppedAsZero`'s bargain; only a codestream with no whole tile at all is refused | [ROADMAP](../ROADMAP.md) |
@@ -659,12 +802,29 @@ make both enums wrong.
 | JPEG lossless frames: SOF3, SOF7, SOF11, SOF15 | `JpegError::Lossless` | Annex H's predictive coder shares nothing with the DCT path — no quantisation, no blocks, no transform. Both entropy coders are on this row because the predictor is what is missing either way: `qm.rs` decodes SOF11's and SOF15's decisions perfectly well with nothing to hand them to. Zero in the corpus | [ROADMAP](../ROADMAP.md) |
 | JPEG differential frames: SOF5, SOF6, SOF13, SOF14 | `JpegError::Differential` | Annex J's hierarchical progression, where a frame codes the difference from an upsampled earlier one. Same shape as the row above: the entropy coder is not the gap. Zero in the corpus | [ROADMAP](../ROADMAP.md) |
 | JPEG precision other than 8 or 12 bits | `JpegError::UnsupportedPrecision` | B.2.2 allows 8 in a baseline frame and 8 or 12 elsewhere; anything else is a header this build will not guess at | [ROADMAP](../ROADMAP.md) |
-| TIFF `PhotometricInterpretation` 4, 5, 8, 32803, and 6 outside compression 7 | `TiffError::UnsupportedPhotometric` | A CMYK or CIELab image read as RGB is not a degraded picture, it is a different one; YCbCr is read only where a JPEG has already undone it | — |
-| TIFF `Compression` 6 (old-style JPEG), 34712 (JPEG 2000) and the rest | `TiffError::UnsupportedCompression` | Named by code, so a refusal says which | — |
-| TIFF `SampleFormat` 2 or 3 (signed, IEEE float) | `TiffError::UnsupportedSampleFormat` | A different number line; reading it as unsigned produces a picture rather than a refusal | — |
-| TIFF `Predictor` 3, `PlanarConfiguration` past 2, `BitsPerSample` outside {1,2,4,8,16}, two depths in one image | `TiffError::UnsupportedPredictor`, `UnsupportedPlanarConfiguration`, `UnsupportedBitDepth`, `UnequalBitDepths` | Nothing in the sample path carries two depths at once, and half-expanding one is worse than saying so | — |
-| BigTIFF (magic 43) | `TiffError::BigTiff` | Eight-byte offsets and a different directory layout wearing the same two order bytes | — |
+| TIFF `PhotometricInterpretation` 4 (transparency mask) — **permanent** | `TiffError::UnsupportedPhotometric` | p.37: the image "is used to define an irregularly shaped region of another image in the same TIFF file". It is not a picture; drawn alone it is a black-and-white stencil of one. The comic path skips such a directory rather than paging it | — |
+| TIFF `PhotometricInterpretation` 32803 (colour filter array) — **permanent** | `TiffError::UnsupportedPhotometric` | TIFF/EP's raw sensor mosaic. Turning it into a picture is demosaicing, which is an algorithm chosen, not a format read, and no data adjudicates one choice over another | — |
+| TIFF `PhotometricInterpretation` 6 outside compression 7 | `TiffError::UnsupportedPhotometric` | YCbCr is read only where a JPEG has already undone it: §21's subsampling and `ReferenceBlackWhite` are not decoded here. 8, CIELab, left this row on 4 October 2026 | — |
+| TIFF CIELab at a depth other than 8 or 16, under a signed or float `SampleFormat`, or under a JPEG or JPEG 2000 coding | `TiffError::UnsupportedBitDepth`, `UnsupportedSampleFormat`, `UnsupportedCompression` | §23 defines 8 and 16 bits, and fixes the number lines itself — `L*` unsigned, `a*` and `b*` signed — which one `SampleFormat` cannot say; a coder hands back samples of its own colour model | — |
+| TIFF `PhotometricInterpretation` 5 with `InkSet` other than 1 | `TiffError::UnsupportedInkSet` | §16: separated inks that are not CMYK, which no device space names | — |
+| TIFF `Compression` 6 (old-style JPEG), and the rest | `TiffError::UnsupportedCompression` | Technical Note 2 replaced compression 6 with 7 because TIFF 6.0 §22's tag-by-tag description of a JPEG could not be implemented consistently, and a file that carries only those tags leaves its tables and its stream boundaries to a reader's guess. **Not every such file does**: one whose `JPEGInterchangeFormat` (tag 513) points at a complete interchange-format stream needs no guess, and the existing JPEG decoder could read it as it stands. So it is owed on the ROADMAP rather than refused for good, with no count recorded (ruling 3). *Corrected 2 October 2026, on review*: this row called the refusal permanent and every reader's handling a guess, which overstated both. The rest are named by code, so a refusal says which | [ROADMAP](../ROADMAP.md) |
+| TIFF `SampleFormat` outside 1–4, two formats in one image, or signed/float on a palette or a JPEG, JPEG 2000 or fax coding | `TiffError::UnsupportedSampleFormat` | Nothing in the sample path carries two number lines at once, and a coder's output is unsigned whatever the tag says | — |
+| TIFF `Predictor` 3 on non-float samples or 2 on float ones, `PlanarConfiguration` past 2, a `BitsPerSample` its `SampleFormat` cannot carry, two depths in one image | `TiffError::UnsupportedPredictor`, `UnsupportedPlanarConfiguration`, `UnsupportedBitDepth`, `UnequalBitDepths` | Technical Note 3's predictor is defined for floating point only; nothing in the sample path carries two depths at once | — |
+| A magic-43 header whose offset size is not 8 | `TiffError::BigTiff` | BigTIFF is read; a header claiming it with any other offset width is not one | — |
 | TIFF past `MAX_TIFF_SAMPLES`, `MAX_TIFF_SEGMENTS` or the caller's ceiling | `TiffError::TooManySamples`, `TooManySegments`, `ExceedsOutputLimit` | Width, height and `StripOffsets`'s count are attacker-controlled 32-bit values; refused before allocation (ruling 1) | [rulings](../rulings.md) |
+| BMP `BI_JPEG` (4) and `BI_PNG` (5), the `BI_CMYK` family (11 to 13), and OS/2 2.x's Huffman 1D and RLE24 under its own numbers 3 and 4 | `BmpError::UnsupportedCompression` | Named by the number the file used. The first two are a whole JPEG or PNG inside the bitmap, which the documentation restricts to printer device contexts; the CMYK family is a print-spooler format; OS/2's two have no writer on any machine this repository has seen | — |
+| BMP at 64 bits a pixel, or a depth its compression cannot carry | `BmpError::UnsupportedBitDepth` | 64 is scRGB fixed point, a number nothing here maps to a display value; `BI_RLE8` at anything but 8 is not RLE8 | — |
+| BMP colour masks that are split, or all zero | `BmpError::BadBitfields` | Shifting a mask with a hole in it produces numbers, and the numbers are not colours | — |
+| BMP past `MAX_BMP_SAMPLES` or the caller's ceiling | `BmpError::TooManySamples`, `ExceedsOutputLimit` | `biWidth` and `biHeight` are signed 32-bit fields; refused before allocation (ruling 1) | [rulings](../rulings.md) |
+| A GIF image with neither a local nor a global colour table | `GifError::NoColourTable` | §18 lets a decoder supply a system default; a guessed palette is a guessed picture | — |
+| A GIF LZW minimum code size outside 1 to 8 | `GifError::BadCodeSize` | The roots are the indices, and an index is a byte | — |
+| A GIF with no image before its trailer | `GifError::NoImage` | There is no picture, as distinct from a damaged one | — |
+| GIF past `MAX_GIF_SAMPLES` or the caller's ceiling | `GifError::TooManySamples`, `ExceedsOutputLimit` | Two buffers, each charged before it exists (ruling 1). The canvas, at one component indexed or four expanded: thirteen bytes declare a 65 535-square logical screen, and a screen left at zero is the image's own extent, up to 131 070 a side. And the first image's indices, one byte each: its descriptor's 16-bit size is not bounded by the screen, so thirty-five bytes ask for a 65 535 x 4 096 image on a one-pixel screen | [rulings](../rulings.md) |
+| A VP8 frame that is not a shown key frame — an inter frame, a hidden key frame — a version past 3, or no start code | `WebpError::Lossy(&str)`, named | A still WebP is one key frame; an inter frame predicts from a picture the file does not have | — |
+| A VP8 header with a zero dimension | `WebpError::BadDimensions` | The only WebP header that stores a dimension as itself rather than less one, so the only one that can say zero | — |
+| A VP8L stream that breaks a rule of RFC 9649 §3: no `0x2f` signature, a version other than 0, a transform used twice, a colour cache outside 1 to 11 bits, a prefix code that is empty, over-subscribed or incomplete, a `max_symbol` or a repeated length past the alphabet | `WebpError::Lossless(&str)`, the rule named | §3.7.2.1: "The described tree must be a complete binary tree"; a stream that says how to read its pixels wrongly has no pixels to read | — |
+| A WebP with no `VP8 `, `VP8L` or `ANMF` chunk, or a `VP8X` or `VP8L` header cut off | `WebpError::NoImage`, `Truncated` | There is no picture, as distinct from a damaged one | — |
+| WebP past `MAX_WEBP_SAMPLES` or the caller's ceiling | `WebpError::TooManySamples`, `ExceedsOutputLimit` | Five bytes of VP8L header or seven of VP8 ask for 16 384 x 16 384, and a `VP8X` canvas for 2^24 on a side; charged at four samples, before allocation (ruling 1) | [rulings](../rulings.md) |
 | JPEG XR fixed-point, half-float and 32-bit float pixel formats (Table A.6's SINT and Float rows) | `JxrRefusal::FloatOrFixedPointFormat` | 9.10.7's postscaling makes those numbers mean something `JxrImage`'s 8- and 16-bit unsigned samples cannot say; reinterpreting them returns a picture whose values are a different quantity | [design](../design/jpeg-xr.md) |
 | JPEG XR CMYK, CMYKDIRECT, NCOMPONENT and RGBE output formats | `JxrRefusal::UnsupportedColourFormat` | A colour pipeline with no consumer in this engine; a CMYK image read as RGB is a different picture, not a degraded one | [design](../design/jpeg-xr.md) |
 | A Table A.6 GUID this build has no row for | `JxrRefusal::UnknownPixelFormat` | The GUID is what names the channel order, so an unknown one cannot be guessed at | [design](../design/jpeg-xr.md) |
@@ -781,6 +941,10 @@ wants the reason to survive it.
   reader: the signature, IHDR first with 11.2.2's thirteen bytes, IEND last and
   empty, every chunk's CRC recomputed over its type and its data, and the IDAT
   payload equal to `zlib_compress` of the filtered stream.
+- `crates/tinker-pdf/tests/png_input.rs` — `Bitmap::from_png`, the other
+  direction of the same mapping: the round trip through `to_png` exact for
+  every page format, and every expectation named from the bytes the test wrote
+  rather than decoded a second way.
 - `crates/tinker-pdf/tests/png_output.rs` — `Bitmap::to_png` over all six
   `PixelFormat`s, which is the half PngSuite cannot see because PngSuite has no
   `Bitmap`. It owns the format mapping: the colour type in IHDR for each, alpha
@@ -789,6 +953,15 @@ wants the reason to survive it.
   pure cyan is `(0, 255, 255)` because 8.6.4.4 says so, and sRGB's green
   primary at its published CIELAB coordinates comes back green rather than the
   mauve its encoded bytes are when read as RGB.
+- `tests/image_fixtures.rs` holds the TIFF additions to **tifffile 2026.3.3**'s
+  files from authored pixels: CMYK uncompressed and deflated, signed 8/16/32
+  (the last with 32-bit horizontal differencing), float 16/32/64 (the 32 under
+  `Predictor` 3) over values that are whole 128ths so every width holds them
+  exactly, BigTIFF in both byte orders, JPEG 2000 as one strip and as a
+  padded 16 x 16 tile grid (OpenJPEG 2.5.4, lossless), and a four-directory
+  file with a reduced-resolution copy in it. Each test reads the tag proving
+  its fixture has the feature before it compares a pixel, and every expected
+  number is the recipe through the stated mapping.
 - In-crate: `tiff.rs` is held to files this repository writes byte by byte
   from TIFF 6.0's own field layouts, and to coded strips written from the
   coding specification that owns each — a real T.4/T.6 coder for compressions
@@ -803,6 +976,76 @@ wants the reason to survive it.
   `cargo-fuzz`. All **seven** of the TIFF warnings are reached by a test that
   asserts them, for the reason `jpx`'s refusal suite exists: a variant nothing
   can reach is a claim rather than a check.
+- `crates/tinker-pdf-filters/tests/image_fixtures.rs` — the BMP decoder held
+  to **pictures a third-party encoder was handed**: `tests/images/make-images.py`
+  authors each as a formula, Pillow 12.3.0 and imagecodecs 2026.3.6 write it,
+  and the test recomputes the formula — ruling 13's lossless rule, where the
+  expected answer is the generator's input. 1, 8 grey, 8 palette, 24, 32
+  `BI_RGB` and 32 `BI_BITFIELDS` with alpha are exact. What no encoder here
+  writes — RLE4, RLE8, 2 bits, 16-bit bit fields, top-down, OS/2 — is held to
+  bmpsuite 2.8's files **as relations**: files that describe one picture must
+  decode to one, so `pal8rle` is `pal8` and `pal8` is pinned by Pillow's
+  authored palette. `src/bmp/tests.rs` reaches every `BmpError` and every BMP
+  warning with a file written from the Win32 structure layouts. **GIF** is held
+  the same way to two encoders: Pillow, whose writer always codes with 256
+  roots, for the palette, grey, interlaced, local-table, transparent and
+  animated files; and omggif 1.0.10, which sizes the root set from the
+  palette, for two- and four-bit roots and for a first image smaller than its
+  screen, on the global table and on a local one. Each test reads the
+  descriptor byte that proves its fixture exercises what it claims — the
+  interlace flag, the local-table flag, the code size.
+  `src/gif/tests.rs` builds Appendix F's KwKwK code, every root size from 1 to
+  8, and one file per `GifError`. **Lossless WebP** is held to libwebp through
+  two bindings: Pillow for RGB, RGBA with `exact=True` (which keeps the colour
+  under a transparent pixel), method 6 at quality 100 (libwebp's exhaustive
+  search, for transforms), two, four and sixteen colours (the colour-indexing
+  transform at each of its bundling widths), a 160 x 96 picture of repeated
+  tiles beside noise (back-references, the colour cache, literals and meta
+  prefix codes in one file), a picture whose every pixel is its top-right
+  neighbour (the top-right predictor in the last column, where §3.5.1's
+  neighbour is the first pixel of the same row) and a two-frame animation;
+  imagecodecs for RGBA. Every pixel is the
+  recipe, and the tests that claim a transform read the fixture's header bits
+  to show it is there. **Lossy WebP** has no exact generator input to be held to, and
+  its answer is still never another decoder's. **VP8 itself is held to the
+  WebM project's published test vectors**: `src/webp/vp8/tests.rs` decodes
+  every key frame of `webmproject/vp8-test-vectors` and compares the MD5 of
+  its I420 planes with the one published beside it — **182 key frames from
+  61 files, 0 failed**, run 2 October 2026 against `8afcf057`. The vectors
+  carry no licence, so they are not committed: `tests/vp8-vectors/fetch.sh`
+  fetches that commit into `target/` and checks every file against
+  `tests/vp8-vectors/SHA256SUMS`, and CI's `vp8-vectors` job runs it, sets
+  `TINKER_VP8_VECTORS_REQUIRED=1` (a missing set is then a failure, and so is
+  any set that is not the pinned 61 files and 182 key frames) and greps for
+  `vp8-test-vectors: RAN`. RFC 6386 ends at the planes, so the conversion to
+  RGB is held beside them to what it claims: BT.601's limited-range matrix,
+  worked out in exact integer arithmetic over all 2^24 inputs, which
+  `yuv_to_rgb` meets to within one level (169 223 channels of 50 331 648 miss
+  by one, none by more); the upsampler's 9:3:3:1 weights, to within one; and
+  which chroma row and column each pixel takes as nearer, by hand on a 4 x 4
+  picture. The Pillow and imagecodecs files — quality 10 at method 6, 55 (a
+  filter level of exactly 15), 80 and 100, sizes that crop inside a
+  macroblock and a chroma sample, alpha unfiltered and horizontally filtered,
+  a two-frame animation — are held to **the recipe they were encoded from, at
+  a stated distance**: a mean squared error per file, about a quarter above
+  what this decoder measured. That bound is coarse on purpose and the test
+  says what it catches, measured by injection — a token read in the wrong
+  context, a prediction from the wrong edge, Cb and Cr swapped, chroma from
+  the wrong row — and what it does not: a decoder that skips the loop filter
+  passes it, and fails 116 of the 182 vector frames. The alpha, lossless at
+  `alpha_quality=100`, is the recipe's exactly. *Corrected 2 October 2026, on
+  review*: these files were first held to libwebp 1.6.0's decode of each,
+  committed as a PNG — an outside program's output as the expected answer,
+  which ruling 13 forbids. The PNGs are deleted; that this decoder's picture
+  matched libwebp's on every pixel of all eight that day is recorded in
+  `tests/images/README.md` as a dated measurement that gates nothing.
+  `src/webp/tests.rs`
+  builds VP8L streams bit by bit — literals, a back-reference, one before the
+  first pixel, subtract-green, an `ANMF` frame at an offset on its canvas, a
+  padded chunk — every `ALPH` filter and both codings, six `ALPH`s that will
+  not decode, and one file per `WebpError`. Beside the vectors, frames
+  built with §7.3's own boolean encoder: prediction alone, a token partition
+  that ends early, and every lossy refusal.
 - In-crate: `jbig2.rs` decodes T.88 Annex H.1's published datastream example
   byte for byte; `mq.rs` holds Annex H.2's test sequence as a permanent
   fixture, because the coder serves two codecs; **`qm.rs` holds T.81 K.4.1's,
@@ -812,12 +1055,14 @@ wants the reason to survive it.
   does *not* reach is visible too; `src/jpx/tests/refusals.rs` reaches every
   entry of the JPX refusal list, so "the refusals are the feature" is checked,
   not claimed.
-- Fuzzing: nine of the 25 fuzz targets exercise this crate —
-  `ascii_filters`, `lzw`, `inflate`, `ccitt`, `jpeg`, `jbig2`, `jpx`, `png`,
-  `tiff`. The last is the first target that reaches five other decoders
-  through one parser, because a two-byte `Compression` field is what chooses
-  between them, and it carries six committed seeds written by an `#[ignore]`d
-  test in this crate so the seeds and the fixtures cannot drift.
+- Fuzzing: fourteen of the 51 fuzz targets drive this crate's decoders —
+  `ascii_filters`, `lzw`, `inflate`, `ccitt`, `jpeg`, `jbig2`, `jpx`, `jxr`,
+  `brotli`, `png`, `bmp`, `gif`, `webp`, `tiff` — and `rar` and `sevenz`
+  borrow its CRC-32. The last is the first target that reaches other decoders
+  through one parser — six of them — because a two-byte `Compression` field is
+  what chooses between them; six of its thirteen committed seeds are written
+  by an `#[ignore]`d test in this crate so those seeds and the fixtures cannot
+  drift.
 - Downstream: the `image`, `jbig2` and `jpx` render fingerprints among the
   15 in `crates/tinker-pdf/tests/determinism.rs` pin decoded pixels
   bit-for-bit across targets ([determinism](determinism.md)), and the whole

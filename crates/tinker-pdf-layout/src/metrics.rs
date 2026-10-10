@@ -24,7 +24,7 @@
 //! request and answers; *which* face that is came from `css-fonts-4` §5's
 //! matching, which is milestone 9's and lives above this crate.
 
-use tinker_pdf_css::property::{FontFamily, FontStyle};
+use tinker_pdf_css::property::{FeatureSetting, FontFamily, FontKerning, FontStyle};
 
 /// Which face a run wants, and at what size.
 ///
@@ -41,6 +41,12 @@ pub struct FontRequest<'a> {
     pub style: FontStyle,
     /// The computed `font-size`, in points.
     pub size: f64,
+    /// The computed `font-kerning`, which a shaper turns into its `kern`
+    /// feature and a provider that does not shape has no use for.
+    pub kerning: FontKerning,
+    /// The computed `font-feature-settings`, in the order written: the
+    /// features a shaper switches on or off over its own plan.
+    pub features: &'a [FeatureSetting],
 }
 
 /// How tall a line of one face is.
@@ -63,6 +69,21 @@ impl Vertical {
     pub fn height(&self) -> f64 {
         self.ascent + self.descent
     }
+}
+
+/// What UAX #9's rule P2 found first in some text: [`Metrics::first_strong`]'s
+/// answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirstStrong {
+    /// A strong left-to-right character (`Bidi_Class` `L`).
+    Left,
+    /// A strong right-to-left character (`R` or `AL`).
+    Right,
+    /// A paragraph separator (`B`) before any strong character: the
+    /// paragraph ended with none, and P3 makes it left to right.
+    Separator,
+    /// None of the three before the text ran out.
+    Neither,
 }
 
 /// One glyph, positioned, in points.
@@ -114,6 +135,65 @@ pub struct ShapedText {
     pub rtl: bool,
 }
 
+/// How much of a neighbour's text a shaper is handed ([`Neighbour::text`]):
+/// its near 64 bytes, cut back to a character boundary — sixteen characters
+/// of any script at the least, four bytes being UTF-8's longest.
+///
+/// **Not a cap: nothing is refused at it.** It is the reach of a shaping
+/// context, and more than the shaping above this crate looks at — joining
+/// reaches past a few transparent marks to the nearest letter, and a pair or
+/// a mark one glyph away; the EPUB provider shapes eight characters of a
+/// neighbour. It is fixed **here** because of what a neighbour is: before a
+/// slice it is everything on the line so far, and a slice is measured at
+/// every break opportunity, so a neighbour handed over whole made the cost
+/// of filling a line depend on every provider reading only its near end — a
+/// provider that counted it to find its last few characters made the line
+/// quadratic in its length, and a paragraph on one line is any book's for a
+/// tiny `font-size` (review of lane 8C). Cut here, no provider can.
+pub const CONTEXT_BYTES: usize = 64;
+
+/// One neighbour of a run on its line: its text and the face it asks for.
+///
+/// The font travels with the text because whether a neighbour is a context
+/// at all is the **provider's** question, not this crate's: a glyph means
+/// something only in the face it came from, so a shaper joins across a span
+/// boundary or kerns a pair across it only where both sides resolve to one
+/// face — and resolving a face is `css-fonts-4` §5.3's matching, which lives
+/// above this crate.
+#[derive(Clone, Copy, Debug)]
+pub struct Neighbour<'a> {
+    /// The near end of the neighbour's text on this line: at most
+    /// [`CONTEXT_BYTES`] of it, cut back to a character boundary — the last
+    /// bytes of what comes before, the first of what comes after. The
+    /// provider takes as much of it as its shaping can see.
+    pub text: &'a str,
+    /// The neighbour's own face request.
+    pub font: FontRequest<'a>,
+}
+
+/// What touches a run on its line, either side: the text a shaper may join
+/// across or position against.
+///
+/// `None` on a side is a line's edge, an atomic box, generated content, text
+/// that is not painted, or no neighbour at all — the places a painter shapes
+/// a run with nothing beside it, so that a run measured with a context is
+/// drawn with the same one.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShapingContext<'a> {
+    /// The text before the run, in logical order.
+    pub before: Option<Neighbour<'a>>,
+    /// The text after it.
+    pub after: Option<Neighbour<'a>>,
+}
+
+impl ShapingContext<'_> {
+    /// No neighbours: a run shaped alone.
+    pub const NONE: ShapingContext<'static> = ShapingContext {
+        before: None,
+        after: None,
+    };
+}
+
 /// Text in, positioned glyphs out: the seam a shaping engine plugs into.
 ///
 /// # One path owns a run
@@ -145,6 +225,41 @@ pub trait Shaper {
     /// re-run UAX #9 per run — the paragraph's levels were resolved once,
     /// above.
     fn shape(&self, text: &str, font: &FontRequest<'_>, rtl: bool) -> ShapedText;
+
+    /// Shapes one run **in its context**: the glyphs and advances of `text`
+    /// alone, as they come out when its neighbours on the line are shaped
+    /// beside it.
+    ///
+    /// # Why a run is not measured alone
+    ///
+    /// A styled span is a run of its own, and a shaper's decisions reach
+    /// across it: an Arabic letter takes its joined form from the letter in
+    /// the next span, and `GPOS` kerns a pair whose second glyph is coloured.
+    /// A painter that shapes each run against its neighbours draws those
+    /// forms and that kerning; a layout that measured each run alone placed
+    /// the next run where the isolated form, or the unkerned pair, would have
+    /// left it, and the difference was a gap or an overlap between the two.
+    /// So a run is measured here with the context it will be drawn with, and
+    /// the line breaker sees a joined form's advance and a kerned pair's.
+    ///
+    /// Only the run's **own** glyphs come back, their clusters indexing
+    /// `text`; a neighbour's glyphs are shaped and dropped, because the
+    /// neighbour's own run is measured — with this run as its context — on
+    /// its own turn.
+    ///
+    /// The default is [`Shaper::shape`], context unread: a provider that has
+    /// no shaping across runs measures every run alone, as every provider did
+    /// before this method existed.
+    fn shape_in(
+        &self,
+        text: &str,
+        font: &FontRequest<'_>,
+        rtl: bool,
+        context: &ShapingContext<'_>,
+    ) -> ShapedText {
+        let _ = context;
+        self.shape(text, font, rtl)
+    }
 }
 
 /// Where advance widths and line heights come from.
@@ -162,6 +277,41 @@ pub trait Metrics {
     /// cheaply than a character at a time.
     fn measure(&self, text: &str, font: &FontRequest<'_>) -> f64 {
         text.chars().map(|ch| self.advance(ch, font)).sum()
+    }
+
+    /// What UAX #9's rule P2 finds first in `text`, skipping what the text's
+    /// own isolate initiators enclose.
+    ///
+    /// Asked for a block container whose `unicode-bidi` is `plaintext`
+    /// (`css-writing-modes-3` §2.2), whose paragraphs take their direction
+    /// from their text — and with it the side `start` aligns to
+    /// (`css-text-3` §7.1). It is asked a box's text at a time, so an inline
+    /// box's own isolate is skipped by the caller rather than found here.
+    /// This crate has no `Bidi_Class` table and is not the place for one, so
+    /// a provider that has UAX #9 answers; `None` — the default — is a
+    /// provider that cannot, and the paragraph is then aligned by
+    /// `direction` and resolved by whoever orders its lines.
+    fn first_strong(&self, text: &str) -> Option<FirstStrong> {
+        let _ = text;
+        None
+    }
+
+    /// Whether `letter-spacing` is added for `ch`: whether it starts a
+    /// typographic character unit rather than belonging to the one before.
+    ///
+    /// `css-text-3` §10.2 adds the spacing between typographic character
+    /// units, and a letter with the nonspacing marks written after it is one
+    /// (§10.2's own example is a base and its combining diacritics). Spaced
+    /// a character at a time, a letter carrying three marks was followed by
+    /// four spacings, and a painter that draws each mark on its letter left a
+    /// gap of all four after it. Which characters are such marks is a
+    /// `Bidi_Class` question, and this crate has no `Bidi_Class` table and is
+    /// not the place for one (as for [`Metrics::first_strong`]), so a
+    /// provider that has one answers; `true` — the default — spaces every
+    /// character, as every provider did before this method existed.
+    fn letter_spaced(&self, ch: char) -> bool {
+        let _ = ch;
+        true
     }
 
     /// The [`Shaper`] this provider is, if it is one.

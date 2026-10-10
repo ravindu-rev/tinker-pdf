@@ -32,6 +32,18 @@
 //!   at a guessed length.
 //! - **The entry list does not change under reading.** A caller enumerates
 //!   pages once and reads them in any order.
+//!
+//! The first pass reads through `tinker_pdf::cbz::read_entry`, which is
+//! `Archive::read_coded` with the LZMA, bzip2 and Zstandard decoders handed
+//! in, so ZIP methods 14, 12 and 93 — APPNOTE 5.8.8's header and the range
+//! decoder behind it, a whole bzip2 stream, and Zstandard frames — are driven
+//! under the same three assertions; the pass under the shipped bounds keeps
+//! plain `Archive::read`, so both doors are fuzzed. `lzma-method-14`,
+//! `bzip2-method-12` and `zstd-method-93` are the seeds that reach the
+//! decoders: CPython 3.11's `zipfile` with `ZIP_LZMA` (one method-14 entry
+//! and one stored) and with `ZIP_BZIP2` (one method-12 entry), and one
+//! method-93 entry of libzstd's frame in a ZIP `make-zstd.py` writes from
+//! APPNOTE 4.3, each behind a control byte of `0xFF`.
 //! # What this target cannot find, and what covers it instead
 //!
 //! Every assertion above is **structural**: a name past the cap is refused,
@@ -110,7 +122,7 @@ fuzz_target!(|data: &[u8]| {
     // viewer scrolls, and any state the reader keeps between reads has to
     // survive that.
     for index in (0..listed.len()).rev() {
-        match archive.read(index) {
+        match tinker_pdf::cbz::read_entry(&mut archive, index) {
             Ok(bytes) => {
                 assert_eq!(
                     bytes.len() as u64,

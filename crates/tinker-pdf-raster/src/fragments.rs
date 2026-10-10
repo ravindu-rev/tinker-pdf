@@ -86,7 +86,7 @@ impl Fragments {
     }
 
     /// The index of a device pixel, or `None` outside the run.
-    fn at(&self, x: u32, y: u32) -> Option<usize> {
+    fn at(&self, x: i32, y: i32) -> Option<usize> {
         let col = i64::from(x) - i64::from(self.x0);
         let row = i64::from(y) - i64::from(self.y0);
         if col < 0 || row < 0 || col >= i64::from(self.width) || row >= i64::from(self.height) {
@@ -109,10 +109,13 @@ impl Fragments {
         /// Coverage levels of overshoot that are rounding rather than overlap.
         const SLACK: u32 = 24;
 
-        let (x0, y0, x1, y1) = shape.overlap(u32::MAX, u32::MAX);
+        // The shape's own rectangle, in device pixels wherever they are.
+        let (x0, y0) = (shape.x0, shape.y0);
+        let x1 = x0.saturating_add(i32::try_from(shape.width).unwrap_or(i32::MAX));
+        let y1 = y0.saturating_add(i32::try_from(shape.height).unwrap_or(i32::MAX));
         for y in y0..y1 {
             for x in x0..x1 {
-                let covered = u32::from(shape.at(x as i32, y as i32));
+                let covered = u32::from(shape.at(x, y));
                 if covered == 0 {
                     continue;
                 }
@@ -128,8 +131,9 @@ impl Fragments {
         false
     }
 
-    /// Adds one fragment: `color` covering `coverage` of the pixel.
-    pub fn add(&mut self, x: u32, y: u32, color: Color, coverage: u8) {
+    /// Adds one fragment at device pixel `(x, y)`: `color` covering
+    /// `coverage` of the pixel.
+    pub fn add(&mut self, x: i32, y: i32, color: Color, coverage: u8) {
         let Some(index) = self.at(x, y) else {
             return;
         };
@@ -179,7 +183,8 @@ impl Fragments {
     /// A run is allocated across the canvas but rarely covers it, and a page
     /// of small stamps would otherwise pay for the paper at every flush. The
     /// caller passes the rectangle it actually painted, as `(x0, y0, x1, y1)`
-    /// with the far edges exclusive.
+    /// with the far edges exclusive, in device pixels — the frame the run and
+    /// the clip are in, which the canvas's own origin places it in.
     pub fn composite_region(
         &self,
         canvas: &mut Canvas,
@@ -189,22 +194,41 @@ impl Fragments {
         clip: Option<&Mask>,
         stop: Option<&dyn Fn() -> bool>,
     ) {
+        self.composite_region_inked(canvas, region, alpha, blend, clip, None, stop);
+    }
+
+    /// As [`Fragments::composite_region`], for a run every draw of which
+    /// painted one ink: a stencil's fill colour's own components, which a
+    /// [`crate::PixelFormat::CmykA8`] canvas composites in place of the run's
+    /// light turned back into ink ([`Canvas::blend_pixel_inked`]). The caller
+    /// keeps a run to one ink; every other format never reads it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn composite_region_inked(
+        &self,
+        canvas: &mut Canvas,
+        region: (i32, i32, i32, i32),
+        alpha: f64,
+        blend: BlendMode,
+        clip: Option<&Mask>,
+        ink: Option<[u8; 4]>,
+        stop: Option<&dyn Fn() -> bool>,
+    ) {
         let alpha = alpha.clamp(0.0, 1.0);
         let (rx0, ry0, rx1, ry1) = region;
         if rx1 <= rx0 || ry1 <= ry0 {
             return;
         }
-        let clamp = |value: i32, limit: u32| value.clamp(0, limit as i32) as u32;
-        let x0 = clamp(rx0.max(self.x0), canvas.width);
-        let y0 = clamp(ry0.max(self.y0), canvas.height);
-        let x1 = clamp(
-            rx1.min(self.x0.saturating_add(self.width as i32)),
-            canvas.width,
-        );
-        let y1 = clamp(
-            ry1.min(self.y0.saturating_add(self.height as i32)),
-            canvas.height,
-        );
+        let (cx, cy, cw, ch) = canvas.device_rect();
+        let clamp = |value: i32, lo: i32, extent: u32| {
+            value.clamp(
+                lo,
+                lo.saturating_add(i32::try_from(extent).unwrap_or(i32::MAX)),
+            )
+        };
+        let x0 = clamp(rx0.max(self.x0), cx, cw);
+        let y0 = clamp(ry0.max(self.y0), cy, ch);
+        let x1 = clamp(rx1.min(self.x0.saturating_add(self.width as i32)), cx, cw);
+        let y1 = clamp(ry1.min(self.y0.saturating_add(self.height as i32)), cy, ch);
 
         for py in y0..y1 {
             if stop.is_some_and(|stop| stop()) {
@@ -221,7 +245,7 @@ impl Fragments {
                 if covered == 0 {
                     continue;
                 }
-                let clipped = clip.map_or(255, |mask| mask.at(px as i32, py as i32));
+                let clipped = clip.map_or(255, |mask| mask.at(px, py));
                 if clipped == 0 {
                     continue;
                 }
@@ -236,7 +260,10 @@ impl Fragments {
                     straight(u32::from(slot[2])),
                 );
                 let effective = alpha * f64::from(covered) / 255.0 * f64::from(clipped) / 255.0;
-                canvas.blend_pixel_with(px, py, color, effective, blend);
+                let Some((x, y)) = canvas.local(px, py) else {
+                    continue;
+                };
+                canvas.blend_pixel_inked(x, y, color, ink, effective, blend);
             }
         }
     }

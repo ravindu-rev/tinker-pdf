@@ -1,0 +1,6 @@
+ÿol { counter-reset: list-item 2 section; list-style: inside lower-roman }
+li { counter-increment: list-item 1 section -1; counter-set: other 7 }
+li::before { content: counter(list-item) ". " counters(section, ".", upper-alpha) attr(id) }
+li::after { counter-reset: reversed(list-item); content: counter(x, lower-greek) }
+.a { list-style: none inside; text-transform: uppercase full-width }
+.b { break-before: page; break-inside: avoid-column; text-transform: capitalize }

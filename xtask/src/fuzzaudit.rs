@@ -61,6 +61,9 @@ const fn sig(within: usize, bytes: &'static [u8]) -> Signature {
 fn signatures() -> BTreeMap<&'static str, Vec<Signature>> {
     let mut m: BTreeMap<&'static str, Vec<Signature>> = BTreeMap::new();
     m.insert("png", vec![sig(0, b"\x89PNG\r\n\x1a\n")]);
+    m.insert("bmp", vec![sig(0, b"BM")]);
+    m.insert("gif", vec![sig(0, b"GIF87a"), sig(0, b"GIF89a")]);
+    m.insert("webp", vec![sig(8, b"WEBP")]);
     m.insert(
         "tiff",
         vec![
@@ -75,6 +78,13 @@ fn signatures() -> BTreeMap<&'static str, Vec<Signature>> {
         vec![sig(0, b"PK\x03\x04"), sig(0, b"PK\x05\x06")],
     );
     m.insert("sevenz", vec![sig(0, b"7z\xbc\xaf\x27\x1c")]);
+    // `BZh` and a level digit; `BZh` is the part every level shares.
+    m.insert("bzip2", vec![sig(0, b"BZh")]);
+    // 7z's range coder opens with a zero byte, after the three parameter bytes.
+    m.insert("ppmd", vec![sig(0, b"\0")]);
+    // RFC 8878's frame magic, `0xFD2FB528` little-endian. A skippable frame
+    // may come first in a stream, but every seed starts with a real one.
+    m.insert("zstd", vec![sig(0, b"\x28\xb5\x2f\xfd")]);
     m.insert(
         "rar",
         vec![sig(0, b"Rar!\x1a\x07\0"), sig(0, b"Rar!\x1a\x07\x01")],
@@ -131,6 +141,10 @@ fn signatures() -> BTreeMap<&'static str, Vec<Signature>> {
 /// `crates/tinker-pdf-svg/src/tests.rs` that restates the target's own split.
 const UNSIGNED: &[(&str, &str)] = &[
     (
+        "annotation_appearance",
+        "one annotation dictionary as COS text, which has no file header",
+    ),
+    (
         "ascii_filters",
         "ASCII85 and ASCIIHex are text with no header",
     ),
@@ -165,7 +179,19 @@ const UNSIGNED: &[(&str, &str)] = &[
         "key, IV and plaintext carved from the body",
     ),
     ("css", "a stylesheet is text"),
+    (
+        "fb2",
+        "FB2 is XML text, and a knob byte picks whether it is framed",
+    ),
+    (
+        "form_data",
+        "FDF and XFDF are text, and both readers see every seed whichever it is",
+    ),
     ("form_script", "a generator over field and action shapes"),
+    (
+        "html",
+        "HTML is text, and tag soup need not begin with any one tag",
+    ),
     ("inflate", "a raw DEFLATE stream begins with a bit field"),
     ("jbig2", "an embedded JBIG2 stream has no file header"),
     (
@@ -173,6 +199,10 @@ const UNSIGNED: &[(&str, &str)] = &[
         "a structured generator: the body names a tree of boxes",
     ),
     ("lzw", "a raw LZW stream begins with a code, not a magic"),
+    (
+        "markdown",
+        "Markdown is text with no header and no control byte",
+    ),
     ("pki_cms", "DER: a SEQUENCE tag, which any DER shares"),
     ("pki_der", "DER: a SEQUENCE tag, which any DER shares"),
     ("render_page", "a generator over page content, not a file"),
@@ -185,6 +215,10 @@ const UNSIGNED: &[(&str, &str)] = &[
         "the face sits after a text run whose length is a knob",
     ),
     ("signatures", "a generator over signature dictionaries"),
+    (
+        "standalone",
+        "SVG and XHTML text and bare images of five formats, the sniff being what is under test",
+    ),
     ("svg", "SVG is XML text"),
     (
         "type1",

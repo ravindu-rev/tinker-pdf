@@ -30,10 +30,16 @@ use tinker_pdf_css::{Budget as CssBudget, Limits as CssLimits};
 use crate::document::Child;
 use crate::document::{self, Node, Tree};
 use crate::gradient;
+use crate::marker::{self, Orient};
+use crate::path::{self, Outline, Segment};
 use crate::shape::{self, Shape};
 use crate::style::{self, PaintSpec, Sheet, Style};
 use crate::transform::{self, IDENTITY};
-use crate::{Limits, Paint, Refusal, Scene, Stroke, TextStyle, Warning};
+use crate::{
+    Colour, Limits, MeasureText, Paint, Refusal, RunMetrics, Scene, Stroke, TextAnchor, TextStyle,
+    Warning,
+};
+use tinker_pdf_math as math;
 
 /// The default viewport, in user units, for a document that states no size.
 ///
@@ -68,6 +74,56 @@ struct Frame {
     depth: usize,
 }
 
+/// §7.11's object bounding box of one element, as far as this crate can take
+/// it — which is everything but text.
+///
+/// Two facts rather than one box, because "the box is empty" and "the box is
+/// text's" are different answers: the first is §13.2.3's zero-area rule, which
+/// disables a bounding-box effect, and the second is a font metric this crate
+/// does not have (ruling 8), which a `mask`, a `clip-path` or a paint server
+/// must not read as a box of nothing and take the ink away with.
+#[derive(Clone, Copy, Debug)]
+struct Extent {
+    /// `[min_x, min_y, max_x, max_y]` of the element's shapes and pictures,
+    /// in its own user space.
+    measured: [f64; 4],
+    /// Whether text was left out of `measured`.
+    text: bool,
+}
+
+impl Extent {
+    /// A run of text, of which nothing is measured.
+    const TEXT: Self = Self {
+        measured: [0.0; 4],
+        text: true,
+    };
+
+    /// A shape's own geometry, which has no text in it.
+    fn shape(measured: [f64; 4]) -> Self {
+        Self {
+            measured,
+            text: false,
+        }
+    }
+
+    /// Whether the measured box has an area to take a fraction of.
+    fn has_area(self) -> bool {
+        let [min_x, min_y, max_x, max_y] = self.measured;
+        max_x - min_x > 0.0 && max_y - min_y > 0.0
+    }
+}
+
+/// What a `<pattern>` comes to for one element.
+enum Tiling {
+    /// Its tiles.
+    Paint(Paint),
+    /// Nothing: a tile with no area, which §13.3 says disables the paint.
+    Disabled,
+    /// No box to take a fraction of — text's, which this crate cannot
+    /// measure — so the paint's own fallback stands.
+    Unmeasured,
+}
+
 /// The walk's own state: what it has spent and what it has to say.
 struct Walk<'a> {
     tree: &'a Tree,
@@ -80,10 +136,9 @@ struct Walk<'a> {
     segments: usize,
     /// Every `<style>` element of the document, read once before the walk.
     sheet: Sheet,
-    /// The last absolute text position seen, so a `<tspan>` that states only a
-    /// `y` keeps the `x` the chunk before it had — §10.4's rule, and the one a
-    /// build that defaulted the missing axis to zero gets wrong.
-    pen: [f64; 2],
+    /// §10.4's current text position, as far as it is a fact about the
+    /// document rather than about a font. See [`Text`].
+    text: Text,
     /// [`Limits::max_uses`], spent across the whole document.
     uses: usize,
     /// The `<use>` targets currently being expanded, innermost last.
@@ -99,6 +154,63 @@ struct Walk<'a> {
     expanding: Vec<usize>,
     /// `tinker-pdf-css`'s own budget, which bounds selector matching.
     css: CssBudget,
+    /// Nodes pushed so far, at every depth.
+    ///
+    /// Counted rather than read off [`Scene::nodes`], because a
+    /// [`crate::Node::Group`] is assembled in a list of its own and moved into
+    /// its parent whole — so the length of whichever list is open is not how
+    /// much of one picture the walk has built, and [`Limits::max_nodes`] is.
+    pushed: usize,
+    /// The caller's measurement of a run, where it gave one
+    /// ([`crate::Context::measure`]).
+    measure: Option<&'a dyn MeasureText>,
+    /// The paints every open `<text>`'s runs wait on for its box, innermost
+    /// last — a `<text>` can open inside another's paint, mask or clip. Empty
+    /// without a measurer. See [`Walk::settle`].
+    waiting: Vec<Waiting>,
+}
+
+/// A `<text>`'s runs whose paint needs the box of the whole `<text>` — SVG 2
+/// §11.2's rule for a `<tspan>`'s paint as for the `<text>`'s own — which is
+/// known only once its last run is placed.
+#[derive(Default)]
+struct Waiting {
+    /// One per paint, in the order marked; a paint's mark is its index here.
+    paints: Vec<Unpainted>,
+}
+
+/// One run's `fill` or `stroke`, held until its `<text>`'s box is known.
+struct Unpainted {
+    spec: PaintSpec,
+    /// The run's matrix: the space the box is wanted in.
+    matrix: [f64; 6],
+    frame: Frame,
+}
+
+/// What a waiting paint stands as until [`Walk::settle`] replaces it: a
+/// colour no document can state — every colour read is in `[0, 1]` — whose
+/// third channel is the paint's index in its [`Waiting`].
+const MARK: f64 = -1.0;
+
+fn mark(number: usize) -> Paint {
+    #[allow(clippy::cast_precision_loss)]
+    let number = number as f64;
+    Paint::Solid(Colour {
+        rgb: [MARK, MARK, number],
+    })
+}
+
+/// The index a paint carries, if it is a mark.
+fn marked(paint: &Paint) -> Option<usize> {
+    match paint {
+        Paint::Solid(Colour { rgb: [a, b, n] })
+            if *a == MARK && *b == MARK && *n >= 0.0 && n.fract() == 0.0 =>
+        {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Some(*n as usize)
+        }
+        _ => None,
+    }
 }
 
 impl Walk<'_> {
@@ -112,13 +224,450 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// Adds one node to the scene, refusing by name when it is full.
+    /// Adds one node to the list being built, refusing by name when the
+    /// scene is full — and dropping it, named, when composing the transforms
+    /// above it carried a number past a double's range.
     fn push(&mut self, node: crate::Node) -> Result<(), Refusal> {
-        if self.scene.nodes.len() >= self.limits.max_nodes {
-            return Err(Refusal::TooManyNodes);
+        if !self.admits(&node) {
+            return Ok(());
         }
+        self.charge()?;
         self.scene.nodes.push(node);
         Ok(())
+    }
+
+    /// Whether every number a node carries is finite, naming the node that is
+    /// not.
+    ///
+    /// Every number this crate *reads* is finite — `1e999` is refused where
+    /// it is parsed — but a product of finite numbers is not: `scale(1e300)`
+    /// inside `scale(1e300)` is two legal transforms and an infinity, and an
+    /// infinity in a coordinate is a rasterizer with nothing to draw in a file
+    /// that looked ordinary. So the check is on what comes **out**, once per
+    /// node: a group's own opacity and clip, since its children were admitted
+    /// one by one on the way in.
+    fn admits(&mut self, node: &crate::Node) -> bool {
+        if finite(node) {
+            return true;
+        }
+        self.warn(Warning::GeometryOverflow);
+        false
+    }
+
+    /// Spends one node of [`Limits::max_nodes`].
+    fn charge(&mut self) -> Result<(), Refusal> {
+        if self.pushed >= self.limits.max_nodes {
+            return Err(Refusal::TooManyNodes);
+        }
+        self.pushed += 1;
+        Ok(())
+    }
+
+    /// Runs `body` with a fresh list open, and hands back what it pushed.
+    ///
+    /// The list it replaces is put back whatever `body` returned, so a refusal
+    /// halfway through a group cannot leave the walk writing into the group's
+    /// list — the stack-that-can-be-unwound-wrong shape [`Frame`]'s own note
+    /// is about.
+    fn collect(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<(), Refusal>,
+    ) -> Result<Vec<crate::Node>, Refusal> {
+        let outer = std::mem::take(&mut self.scene.nodes);
+        let drawn = body(self);
+        let inner = std::mem::replace(&mut self.scene.nodes, outer);
+        drawn.map(|()| inner)
+    }
+
+    /// An element's rendering as §14.5 and §14.3.5 see it: whatever `body`
+    /// draws, faded by the element's own `opacity` and clipped by its own
+    /// `clip-path`, **as one**.
+    ///
+    /// `matrix` is the element's own matrix into the scene, which is the space
+    /// a `userSpaceOnUse` clip is in and the one an `objectBoundingBox` clip's
+    /// box is measured in. Where neither property is set, `body` draws inline
+    /// and no group exists — a group that changes nothing is a transparency
+    /// group a reader composites for no reason.
+    ///
+    /// The box is measured from what `body` drew, which for a container is
+    /// §7.11's union of its children's.
+    fn group(
+        &mut self,
+        style: &Style,
+        matrix: [f64; 6],
+        frame: &Frame,
+        body: impl FnOnce(&mut Self) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        self.group_in(style, matrix, frame, None, body)
+    }
+
+    /// [`Walk::group`], with the box given where the caller has it: a shape's
+    /// own geometry, which is §7.11's box and leaves out the markers `body`
+    /// draws with it.
+    fn group_in(
+        &mut self,
+        style: &Style,
+        matrix: [f64; 6],
+        frame: &Frame,
+        own: Option<[f64; 4]>,
+        body: impl FnOnce(&mut Self) -> Result<(), Refusal>,
+    ) -> Result<(), Refusal> {
+        let opacity = style.opacity;
+        if opacity >= 1.0 && style.clip_path.is_none() && style.mask.is_none() {
+            return body(self);
+        }
+        let mut nodes = self.collect(body)?;
+        // §14.5: an opacity of zero is an element that draws nothing at all.
+        // Walked anyway, so that what it would have asked for is still named.
+        if nodes.is_empty() || opacity <= 0.0 {
+            return Ok(());
+        }
+        let extent = match own {
+            Some(measured) => Extent::shape(measured),
+            None => self.extent_of(&nodes, matrix),
+        };
+        let source = match &style.clip_path {
+            None => None,
+            Some(name) => self.clip_of(name, matrix, extent, style)?,
+        };
+        let (clip, silhouette) = match source {
+            Some(source) if !source.text.is_empty() => {
+                (None, Some(self.silhouette(source, frame)?))
+            }
+            Some(source) => (Some(source.clip), None),
+            None => (None, None),
+        };
+        let mask = match &style.mask {
+            None => None,
+            Some(name) => self.mask_of(name, matrix, extent, frame)?.map(Box::new),
+        };
+        if let Some(silhouette) = silhouette {
+            // A clip that holds text is a mask of its silhouettes, and an
+            // element with a mask of its own as well is masked by both — one
+            // group inside the other, since a group holds one mask.
+            if mask.is_some() {
+                self.charge()?;
+                nodes = vec![crate::Node::Group {
+                    nodes,
+                    opacity: 1.0,
+                    clip: None,
+                    mask,
+                }];
+            }
+            return self.push(crate::Node::Group {
+                nodes,
+                opacity,
+                clip: None,
+                mask: Some(Box::new(silhouette)),
+            });
+        }
+        if mask.is_some() {
+            return self.push(crate::Node::Group {
+                nodes,
+                opacity,
+                clip,
+                mask,
+            });
+        }
+        if clip.is_none() {
+            // Every node here was charged when it was pushed into the group's
+            // own list, so moving them into the parent's spends nothing.
+            if opacity >= 1.0 {
+                // The clip named nothing usable, and ruling 2 draws the
+                // element unclipped rather than losing it.
+                self.scene.nodes.extend(nodes);
+                return Ok(());
+            }
+            if fold(&mut nodes, opacity) {
+                self.scene.nodes.extend(nodes);
+                return Ok(());
+            }
+        }
+        self.push(crate::Node::Group {
+            nodes,
+            opacity,
+            clip,
+            mask: None,
+        })
+    }
+
+    /// §7.11's box of what a container drew, in its own user space, with its
+    /// text's glyph cells in it where the caller measured them.
+    ///
+    /// Not inside a `<text>`: a `<tspan>`'s `mask` or `clip-path` takes the
+    /// box of the whole `<text>` (SVG 2 §11.2: *"in all cases, even when
+    /// different effects are applied to different 'tspan' … elements"*), and
+    /// that box is not known until the `<text>`'s last run is placed — so a
+    /// `<tspan>`'s group keeps its text unmeasured, and named, rather than
+    /// taking its own runs' box, which would be a different picture.
+    fn extent_of(&self, nodes: &[crate::Node], matrix: [f64; 6]) -> Extent {
+        let mut text = gradient::nodes_hold_text(nodes);
+        let mut cells = Vec::new();
+        if text && self.text.stack.len() <= 1 {
+            if let Some(points) = self.measure.and_then(|measure| text_cells(nodes, measure)) {
+                cells = points;
+                text = false;
+            }
+        }
+        Extent {
+            measured: transform::invert(matrix).map_or([0.0; 4], |inverse| {
+                gradient::nodes_bounds_with(nodes, &cells, inverse)
+            }),
+            text,
+        }
+    }
+
+    /// §14.4's `<mask>`, read for one element: its region, and its content
+    /// walked into nodes of its own.
+    ///
+    /// `matrix` and `extent` are the referencing element's, as for a clip:
+    /// `maskUnits` (initially `objectBoundingBox`, with the region
+    /// −10%/−10%/120%/120%) and `maskContentUnits` (initially
+    /// `userSpaceOnUse`) are each a fraction of that box or a length in that
+    /// space. `None` is a reference naming no `<mask>`, which ruling 2 draws
+    /// unmasked and names — and so is a box that is text's alone, which this
+    /// crate cannot measure ([`Walk::measurable`]). A mask whose region has no
+    /// area masks everything away, which is §14.4's answer and an empty
+    /// [`crate::Mask`] here.
+    fn mask_of(
+        &mut self,
+        name: &str,
+        matrix: [f64; 6],
+        extent: Extent,
+        frame: &Frame,
+    ) -> Result<Option<crate::Mask>, Refusal> {
+        let tree = self.tree;
+        let Some(at) = tree
+            .by_id(name)
+            .filter(|at| tree.nodes[*at].is_svg() && tree.nodes[*at].name == "mask")
+        else {
+            self.warn(Warning::MaskUnresolved);
+            return Ok(None);
+        };
+        // A mask whose content wears the same mask is the `<use>` bomb in a
+        // third spelling.
+        if self.expanding.contains(&at) {
+            return Err(Refusal::TooManyUses);
+        }
+        let element = &tree.nodes[at];
+        let user_region = matches!(
+            element.attr("maskUnits").map(str::trim),
+            Some("userSpaceOnUse")
+        );
+        let box_content = matches!(
+            element.attr("maskContentUnits").map(str::trim),
+            Some("objectBoundingBox")
+        );
+        if (!user_region || box_content) && !self.measurable(extent) {
+            return Ok(None);
+        }
+        let nothing = crate::Mask {
+            nodes: Vec::new(),
+            region: Some(Outline::default()),
+        };
+        let [min_x, min_y, max_x, max_y] = extent.measured;
+        let (width, height) = (max_x - min_x, max_y - min_y);
+        let has_area = extent.has_area();
+        let region = if user_region {
+            let (vw, vh) = frame.viewport;
+            [
+                self.length_of(element, "x", Some(vw), -0.1 * vw),
+                self.length_of(element, "y", Some(vh), -0.1 * vh),
+                self.length_of(element, "width", Some(vw), 1.2 * vw),
+                self.length_of(element, "height", Some(vh), 1.2 * vh),
+            ]
+        } else {
+            if !has_area {
+                return Ok(Some(nothing));
+            }
+            let fraction = |walk: &mut Self, name: &str, default: f64| {
+                walk.length_of(element, name, Some(1.0), default)
+            };
+            let (x, y) = (fraction(self, "x", -0.1), fraction(self, "y", -0.1));
+            let (w, h) = (fraction(self, "width", 1.2), fraction(self, "height", 1.2));
+            [min_x + x * width, min_y + y * height, w * width, h * height]
+        };
+        let [x, y, w, h] = region;
+        if !(w > 0.0 && h > 0.0) {
+            return Ok(Some(nothing));
+        }
+        let content = if box_content {
+            if !has_area {
+                return Ok(Some(nothing));
+            }
+            transform::concat([width, 0.0, 0.0, height, min_x, min_y], matrix)
+        } else {
+            matrix
+        };
+        // §14.4: *"properties inherit into the 'mask' element from its
+        // ancestors; properties do not inherit from the element referencing
+        // the 'mask' element"* — the marker's rule, by the marker's code.
+        let style = self.style_of(at)?;
+        let inner = Frame {
+            matrix: content,
+            viewport: frame.viewport,
+            style,
+            depth: frame.depth + 1,
+        };
+        // A `<text>` inside the mask starts a text position of its own, and
+        // the one in force belongs to the run that is being masked.
+        let text = std::mem::take(&mut self.text);
+        self.expanding.push(at);
+        let drawn = self.collect(|walk| walk.children(at, &inner));
+        self.expanding.pop();
+        self.text = text;
+        let nodes = drawn?;
+        let rectangle = Outline {
+            segments: vec![
+                Segment::Move([x, y]),
+                Segment::Line([x + w, y]),
+                Segment::Line([x + w, y + h]),
+                Segment::Line([x, y + h]),
+                Segment::Close,
+            ],
+        };
+        Ok(Some(crate::Mask {
+            nodes,
+            region: Some(rectangle.transformed(matrix)),
+        }))
+    }
+
+    /// §14.3's `<clipPath>`, read for one element: [`gradient::clip`] with the
+    /// walk's segment budget, and its two warnings named.
+    ///
+    /// `None` draws the element unclipped: a reference naming no `<clipPath>`,
+    /// or one in `objectBoundingBox` units on a box that is text's alone
+    /// ([`Walk::measurable`]), which would otherwise clip the text away to
+    /// nothing.
+    fn clip_of(
+        &mut self,
+        name: &str,
+        matrix: [f64; 6],
+        extent: Extent,
+        style: &Style,
+    ) -> Result<Option<gradient::ClipSource>, Refusal> {
+        if gradient::clip_measures_box(self.tree, name) && !self.measurable(extent) {
+            return Ok(None);
+        }
+        let source = gradient::clip(
+            self.tree,
+            name,
+            matrix,
+            extent.measured,
+            style,
+            &mut self.segments,
+        )?;
+        match &source {
+            None => self.warn(Warning::ClipPathUnsupported),
+            Some(source) if source.ignored => self.warn(Warning::ClipChildIgnored),
+            Some(_) => {}
+        }
+        Ok(source)
+    }
+
+    /// Whether a bounding-box effect can be resolved against `extent`, naming
+    /// the text left out of it where there is some.
+    ///
+    /// `false` is a box that is text's alone: the caller draws the element
+    /// without the effect, or takes the paint's fallback — ruling 2's answer —
+    /// rather than reading the empty box as §13.2.3's zero-area rule. Shapes or
+    /// pictures beside the text give the box they span, and that is used.
+    fn measurable(&mut self, extent: Extent) -> bool {
+        if !extent.text {
+            return true;
+        }
+        self.warn(Warning::TextBoxUnmeasured);
+        extent.has_area()
+    }
+
+    /// A `<clipPath>` that holds text, as the mask of its silhouettes.
+    ///
+    /// §14.3.5's clip is *"the raw geometry of each child element exclusive of
+    /// rendering properties such as fill, stroke, stroke-width"*, a one-bit
+    /// mask. Its shapes are already one outline; its text is walked as text —
+    /// styled down the `<clipPath>`'s own ancestry, or the `<use>`'s that
+    /// names it, never the clipped element's (§14.3.5) — and every run and
+    /// the outline are filled white, unstroked and opaque, on the black a
+    /// mask has wherever nothing is drawn. White is the luminance that keeps,
+    /// so the mask is the union of the silhouettes.
+    fn silhouette(
+        &mut self,
+        source: gradient::ClipSource,
+        frame: &Frame,
+    ) -> Result<crate::Mask, Refusal> {
+        // A clip whose text wears the same clip is the `<use>` bomb in a fifth
+        // spelling.
+        if self.expanding.contains(&source.at) {
+            return Err(Refusal::TooManyUses);
+        }
+        let mut nodes = Vec::new();
+        if !source.clip.outline.segments.is_empty() {
+            let shapes = crate::Node::Path {
+                outline: source.clip.outline,
+                fill: Paint::Solid(Colour { rgb: [1.0; 3] }),
+                rule: source.clip.rule,
+                fill_opacity: 1.0,
+                stroke: None,
+                clip: None,
+            };
+            if self.admits(&shapes) {
+                self.charge()?;
+                nodes.push(shapes);
+            }
+        }
+        // The text position belongs to the run being clipped.
+        let text = std::mem::take(&mut self.text);
+        self.expanding.push(source.at);
+        let mut drawn = Ok(());
+        for (at, matrix, parent) in source.text {
+            let walked = self.style_of(parent).and_then(|style| {
+                let inner = Frame {
+                    matrix,
+                    viewport: frame.viewport,
+                    style,
+                    depth: frame.depth + 1,
+                };
+                self.collect(|walk| walk.element(at, &inner))
+            });
+            match walked {
+                Ok(found) => whiten(found, &mut nodes),
+                Err(refusal) => {
+                    drawn = Err(refusal);
+                    break;
+                }
+            }
+        }
+        self.expanding.pop();
+        self.text = text;
+        drawn?;
+        Ok(crate::Mask {
+            nodes,
+            region: None,
+        })
+    }
+
+    /// One node at an element's own `opacity`: pushed as it is, folded into
+    /// its alpha, or wrapped in a group of one — see [`crate::Node::Group`]
+    /// for which and why.
+    fn emit(&mut self, node: crate::Node, opacity: f64) -> Result<(), Refusal> {
+        if opacity >= 1.0 {
+            return self.push(node);
+        }
+        if opacity <= 0.0 || !self.admits(&node) {
+            return Ok(());
+        }
+        let mut nodes = vec![node];
+        self.charge()?;
+        if fold(&mut nodes, opacity) {
+            self.scene.nodes.extend(nodes);
+            return Ok(());
+        }
+        self.push(crate::Node::Group {
+            nodes,
+            opacity,
+            clip: None,
+            mask: None,
+        })
     }
 
     /// Records a warning once, whatever it names.
@@ -251,7 +800,9 @@ impl Walk<'_> {
                     matrix: self.matrix_of(node, frame.matrix),
                     ..frame.clone()
                 };
-                self.children(index, &inner)
+                self.group(&frame.style, inner.matrix, frame, |walk| {
+                    walk.children(index, &inner)
+                })
             }
             // §5.5: `<defs>` is never rendered where it stands. Its contents
             // are reached by reference and nowhere else, so walking into it
@@ -261,6 +812,11 @@ impl Walk<'_> {
             // Not a warning, because nothing was refused — the specification
             // says these do not paint.
             "title" | "desc" | "metadata" => Ok(()),
+            // §6.3: a `<style>` element is never rendered. Its sheet was read
+            // before the walk began (`style::sheet_with`), so it is not an
+            // unknown element either — reporting it as one named a loss that
+            // was not there in every document that styles itself.
+            "style" => Ok(()),
 
             // ---- §9's basic shapes -----------------------------------------
             "path" | "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" => {
@@ -276,10 +832,9 @@ impl Walk<'_> {
                 self.warn(Warning::FilterUnsupported);
                 Ok(())
             }
-            "mask" => {
-                self.warn(Warning::MaskUnsupported);
-                Ok(())
-            }
+            // §14.4: a `<mask>` is reached by a `mask` reference and never
+            // rendered where it stands — `<clipPath>`'s rule.
+            "mask" => Ok(()),
             // §14.3: a `<clipPath>` is never rendered where it stands — it
             // is reached by a `clip-path` reference and nowhere else, so
             // walking into it here would draw every clip's own geometry as
@@ -300,14 +855,13 @@ impl Walk<'_> {
                 self.warn(Warning::TextLayoutUnsupported);
                 Ok(())
             }
-            "pattern" => {
-                self.warn(Warning::PatternUnsupported);
-                Ok(())
-            }
-            "marker" => {
-                self.warn(Warning::MarkerUnsupported);
-                Ok(())
-            }
+            // §13.3: a `<pattern>` is a paint server, reached by reference and
+            // never rendered where it stands.
+            "pattern" => Ok(()),
+            // §11.6.2: a `<marker>` is drawn at the vertices of whatever
+            // references it and never where it stands — `<defs>`'s rule, and
+            // the reason `<clipPath>` is beside it.
+            "marker" => Ok(()),
             "foreignObject" => {
                 self.warn(Warning::ForeignObjectUnsupported);
                 Ok(())
@@ -365,21 +919,25 @@ impl Walk<'_> {
         if !style.visible {
             return Ok(());
         }
-        let fill = self.paint(&style.fill, style, matrix, bounds);
-        let stroke_paint = self.paint(&style.stroke, style, matrix, bounds);
+        let extent = Extent::shape(bounds);
+        let fill = self.paint(&style.fill, style, matrix, extent, frame)?;
+        let stroke_paint = self.paint(&style.stroke, style, matrix, extent, frame)?;
         // §14.3's clip, resolved against the same two numbers a gradient uses.
         // A `clip-path` naming nothing is **not** a clip: §14.3.1 makes a
         // reference to a non-existent element an error, and ruling 2 draws the
         // element rather than losing it.
+        //
+        // A clip that holds text is a mask of silhouettes, which a shape cannot
+        // carry: it is a group around the shape, as a `mask` is.
+        let text_clip = style
+            .clip_path
+            .as_deref()
+            .is_some_and(|name| gradient::clip_holds_text(self.tree, name));
         let clip = match &style.clip_path {
-            None => None,
-            Some(name) => match gradient::clip(self.tree, name, matrix, bounds, style) {
-                Some(clip) => Some(clip),
-                None => {
-                    self.warn(Warning::ClipPathUnsupported);
-                    None
-                }
-            },
+            Some(name) if !text_clip => self
+                .clip_of(name, matrix, extent, style)?
+                .map(|source| source.clip),
+            _ => None,
         };
         // §11.4: a stroke with no paint, no width or a zero width puts no ink
         // on the page. Answered here rather than carried, so a consumer never
@@ -395,24 +953,361 @@ impl Walk<'_> {
                 miter_limit: style.miter_limit,
                 dashes: style.dashes.clone(),
                 dash_offset: style.dash_offset,
-                opacity: (style.stroke_opacity * style.opacity).clamp(0.0, 1.0),
+                opacity: style.stroke_opacity.clamp(0.0, 1.0),
+                // The outline is taken through this matrix below and the
+                // width is not: §11.4's width is in the shape's user space.
+                matrix,
             }))
         };
-        // §14.5's group opacity, flattened into each descendant's own alpha.
-        // Named where it is observable: a shape painted **twice** — once
-        // filled and once stroked — composites the two against each other
-        // before the group is faded, so the overlap is darker here than §14.5
-        // asks for. A shape painted once is exact and says nothing.
-        if style.opacity < 1.0 && fill != Paint::None && stroke.is_some() {
-            self.warn(Warning::GroupOpacityFlattened);
+        // §14.4's mask on a shape is of its whole rendering — fill, stroke and
+        // markers — so it is a group around what follows, with the opacity
+        // and the clip left to the shape itself, which handles both already.
+        // Its box is the shape's own, though: §7.11's object bounding box is
+        // the geometry, and the markers drawn inside the group are not in it.
+        if style.mask.is_some() || text_clip {
+            let masking = Style {
+                opacity: 1.0,
+                clip_path: if text_clip {
+                    style.clip_path.clone()
+                } else {
+                    None
+                },
+                ..style.clone()
+            };
+            let unmasked = Style {
+                mask: None,
+                ..style.clone()
+            };
+            return self.group_in(&masking, matrix, frame, Some(bounds), |walk| {
+                walk.paint_shape(node, &unmasked, matrix, outline, fill, stroke, clip, frame)
+            });
         }
-        self.push(crate::Node::Path {
+        self.paint_shape(node, style, matrix, outline, fill, stroke, clip, frame)
+    }
+
+    /// A shape whose paint is resolved: its node, its markers, and its own
+    /// opacity over both.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_shape(
+        &mut self,
+        node: &Node,
+        style: &Style,
+        matrix: [f64; 6],
+        outline: Outline,
+        fill: Paint,
+        stroke: Option<Box<Stroke>>,
+        clip: Option<crate::Clip>,
+        frame: &Frame,
+    ) -> Result<(), Refusal> {
+        let markers = self.markers(node, style, matrix, &outline, frame)?;
+        let shape = crate::Node::Path {
             outline: outline.transformed(matrix),
             fill,
             rule: style.fill_rule,
-            fill_opacity: (style.fill_opacity * style.opacity).clamp(0.0, 1.0),
+            fill_opacity: style.fill_opacity.clamp(0.0, 1.0),
             stroke,
-            clip,
+            clip: clip.clone(),
+        };
+        if markers.is_empty() {
+            // §14.5's opacity is the shape's own and applies to its rendering
+            // as a whole: exact as an alpha where it paints once, and a group
+            // of one where a fill and a stroke would otherwise darken each
+            // other.
+            return self.emit(shape, style.opacity);
+        }
+        // §11.6.2: markers are painted after the shape's fill and stroke, and
+        // they are part of the **element's** rendering — so its clip and its
+        // opacity are theirs too. The marker nodes were charged when the walk
+        // pushed them; the shape and any wrapper are charged here.
+        let mut nodes = Vec::new();
+        if self.admits(&shape) {
+            self.charge()?;
+            nodes.push(shape);
+        }
+        match clip {
+            Some(clip) => {
+                self.charge()?;
+                nodes.push(crate::Node::Group {
+                    nodes: markers,
+                    opacity: 1.0,
+                    clip: Some(clip),
+                    mask: None,
+                });
+            }
+            None => nodes.extend(markers),
+        }
+        if style.opacity >= 1.0 {
+            self.scene.nodes.extend(nodes);
+            return Ok(());
+        }
+        if style.opacity <= 0.0 {
+            return Ok(());
+        }
+        self.push(crate::Node::Group {
+            nodes,
+            opacity: style.opacity,
+            clip: None,
+            mask: None,
+        })
+    }
+
+    /// §11.6's markers on one shape, as the nodes they draw.
+    ///
+    /// `outline` is the shape **in its own user space**, which is where its
+    /// vertices and their directions are, and where `markerUnits` measures a
+    /// stroke width.
+    fn markers(
+        &mut self,
+        node: &Node,
+        style: &Style,
+        matrix: [f64; 6],
+        outline: &Outline,
+        frame: &Frame,
+    ) -> Result<Vec<crate::Node>, Refusal> {
+        // SVG 1.1 §11.6.2: markers apply to `<path>`, `<line>`, `<polyline>`
+        // and `<polygon>`. SVG 2 adds the other basic shapes; 1.1 is what
+        // this crate reads, and a rectangle with an arrowhead is not a shape
+        // any producer in the corpus draws.
+        if !matches!(node.name.as_str(), "path" | "line" | "polyline" | "polygon")
+            || style.markers.iter().all(Option::is_none)
+        {
+            return Ok(Vec::new());
+        }
+        // A path's arc is several cubics, and a vertex is where a *command*
+        // ends — so the data is read again for its boundaries, against a
+        // budget of what the first reading already spent.
+        let ends = match node.attr("d") {
+            Some(data) if node.name == "path" => {
+                let mut budget = outline.segments.len();
+                path::parse_commands(data, &mut budget)
+                    .ok()
+                    .map(|(_, ends)| ends)
+            }
+            _ => None,
+        };
+        let vertices = marker::vertices(outline, ends.as_deref());
+        let Some(last) = vertices.len().checked_sub(1) else {
+            return Ok(Vec::new());
+        };
+        let mut chosen: [Option<Marker>; 3] = [None, None, None];
+        for (slot, name) in style.markers.iter().enumerate() {
+            let Some(name) = name else {
+                continue;
+            };
+            let target = self.tree.by_id(name).filter(|at| {
+                self.tree.nodes[*at].is_svg() && self.tree.nodes[*at].name == "marker"
+            });
+            match target {
+                Some(at) => chosen[slot] = self.marker_of(at, frame)?,
+                // §11.6.2 makes a reference to nothing an error, and ruling 2
+                // draws the path without the decoration rather than losing it.
+                None => self.warn(Warning::MarkerUnresolved),
+            }
+        }
+        self.collect(|walk| {
+            for (index, vertex) in vertices.iter().enumerate() {
+                let slots: &[usize] = match (index == 0, index == last) {
+                    (true, true) => &[0, 2],
+                    (true, false) => &[0],
+                    (false, true) => &[2],
+                    (false, false) => &[1],
+                };
+                for slot in slots {
+                    if let Some(marker) = &chosen[*slot] {
+                        walk.marker_instance(
+                            marker,
+                            vertex,
+                            index == 0,
+                            style,
+                            matrix,
+                            frame.depth,
+                        )?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// One `<marker>`'s own attributes, and the style its content starts
+    /// from — or `None` for a marker whose rendering is disabled.
+    fn marker_of(&mut self, at: usize, frame: &Frame) -> Result<Option<Marker>, Refusal> {
+        let tree = self.tree;
+        let Some(element) = tree.nodes.get(at) else {
+            return Ok(None);
+        };
+        let width = self.length_of(element, "markerWidth", Some(frame.viewport.0), 3.0);
+        let height = self.length_of(element, "markerHeight", Some(frame.viewport.1), 3.0);
+        // §11.6.2: a zero `markerWidth` or `markerHeight` disables the
+        // marker, and a negative one is an error that does the same.
+        if !(width > 0.0 && height > 0.0) {
+            return Ok(None);
+        }
+        let view = match self.view_box_of(element, width, height) {
+            Ok(view) => view,
+            Err(Disabled) => return Ok(None),
+        };
+        let reference = [
+            self.length_of(element, "refX", Some(width), 0.0),
+            self.length_of(element, "refY", Some(height), 0.0),
+        ];
+        let orient = match marker::orient(element.attr("orient")) {
+            Some(orient) => orient,
+            None => {
+                self.warn(Warning::ValueUnreadable {
+                    attribute: "orient".to_owned(),
+                });
+                Orient::Angle(0.0)
+            }
+        };
+        let stroke_units = !matches!(
+            element.attr("markerUnits").map(str::trim),
+            Some("userSpaceOnUse")
+        );
+        // The user agent style sheet's `marker { overflow: hidden }`: the
+        // content is clipped to the marker's viewport unless the file says
+        // otherwise, in the attribute or in `style=""`.
+        let visible = |value: &str| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "visible" | "auto"
+            )
+        };
+        let overflows = element.attr("overflow").is_some_and(visible)
+            || element.style.as_deref().is_some_and(|text| {
+                text.split(';').any(|piece| {
+                    piece.split_once(':').is_some_and(|(name, value)| {
+                        name.trim().eq_ignore_ascii_case("overflow") && visible(value)
+                    })
+                })
+            });
+        // The viewport a percentage inside the marker resolves against: the
+        // view box's own size where there is one, the marker's otherwise.
+        let viewport = match element.attr("viewBox").and_then(transform::numbers) {
+            Some(numbers) if numbers.len() == 4 && numbers[2] > 0.0 && numbers[3] > 0.0 => {
+                (numbers[2], numbers[3])
+            }
+            _ => (width, height),
+        };
+        let style = self.style_of(at)?;
+        Ok(Some(Marker {
+            at,
+            size: (width, height),
+            view,
+            reference,
+            orient,
+            stroke_units,
+            clipped: !overflows,
+            viewport,
+            style,
+        }))
+    }
+
+    /// §11.6.2's *"properties inherit into the 'marker' element from its
+    /// ancestors; properties do not inherit from the element referencing the
+    /// 'marker' element"* — so a marker's style is resolved down its own
+    /// ancestry, from the root, and not from the shape that drew it.
+    fn style_of(&mut self, at: usize) -> Result<Style, Refusal> {
+        let mut chain = vec![at];
+        let mut cursor = at;
+        while let Some(parent) = self.tree.nodes.get(cursor).and_then(|node| node.parent) {
+            // The tree's own depth was capped when it was read; this is the
+            // same bound, so a malformed parent chain cannot loop.
+            if chain.len() > self.limits.max_depth {
+                return Err(Refusal::TooDeep);
+            }
+            chain.push(parent);
+            cursor = parent;
+        }
+        let mut style = Style::default();
+        for index in chain.iter().rev() {
+            let resolved = style::resolve(self.tree, *index, &self.sheet, &style, &mut self.css)
+                .map_err(|_| Refusal::TooMuchStyle)?;
+            for name in resolved.unreadable {
+                self.warn(Warning::ValueUnreadable { attribute: name });
+            }
+            style = resolved.style;
+        }
+        Ok(style)
+    }
+
+    /// One marker at one vertex: §11.6.2's transform, the viewport clip, and
+    /// the marker's content walked under both.
+    fn marker_instance(
+        &mut self,
+        marker: &Marker,
+        vertex: &marker::Vertex,
+        first: bool,
+        style: &Style,
+        matrix: [f64; 6],
+        depth: usize,
+    ) -> Result<(), Refusal> {
+        // A marker that draws a path carrying the same marker is the `<use>`
+        // bomb in another spelling, and is refused by the same rule.
+        if self.expanding.contains(&marker.at) {
+            return Err(Refusal::TooManyUses);
+        }
+        let angle = marker::angle(vertex, marker.orient, first);
+        let (sin, cos) = (math::sin(angle), math::cos(angle));
+        let scale = if marker.stroke_units {
+            style.stroke_width
+        } else {
+            1.0
+        };
+        // From the vertex outward: the path's own space, the vertex, the
+        // turn, the stroke-width scale, and then the reference point — which
+        // §11.6.2 states *after* the view box, so it is taken through it.
+        let placed = transform::concat(
+            [cos, sin, -sin, cos, 0.0, 0.0],
+            transform::concat([1.0, 0.0, 0.0, 1.0, vertex.at[0], vertex.at[1]], matrix),
+        );
+        let placed = transform::concat([scale, 0.0, 0.0, scale, 0.0, 0.0], placed);
+        let reference = transform::apply(marker.view, marker.reference);
+        let viewport =
+            transform::concat([1.0, 0.0, 0.0, 1.0, -reference[0], -reference[1]], placed);
+        let content = transform::concat(marker.view, viewport);
+        let inner = Frame {
+            matrix: content,
+            viewport: marker.viewport,
+            style: marker.style.clone(),
+            // Where the marker is being *drawn*, which is under the shape that
+            // referenced it: `Frame::depth`'s reason, for a marker inside a
+            // marker inside a marker.
+            depth: depth + 1,
+        };
+        self.expanding.push(marker.at);
+        let drawn = self.collect(|walk| {
+            walk.group(&marker.style, content, &inner, |walk| {
+                walk.children(marker.at, &inner)
+            })
+        });
+        self.expanding.pop();
+        let nodes = drawn?;
+        if nodes.is_empty() {
+            return Ok(());
+        }
+        if !marker.clipped {
+            self.scene.nodes.extend(nodes);
+            return Ok(());
+        }
+        let (width, height) = marker.size;
+        let rectangle = Outline {
+            segments: vec![
+                Segment::Move([0.0, 0.0]),
+                Segment::Line([width, 0.0]),
+                Segment::Line([width, height]),
+                Segment::Line([0.0, height]),
+                Segment::Close,
+            ],
+        };
+        self.push(crate::Node::Group {
+            nodes,
+            opacity: 1.0,
+            clip: Some(crate::Clip {
+                outline: rectangle.transformed(viewport),
+                rule: crate::FillRule::NonZero,
+            }),
+            mask: None,
         })
     }
 
@@ -423,14 +1318,19 @@ impl Walk<'_> {
     /// invention: a file that wrote `fill="url(#g) red"` said what to do when
     /// the server is missing, and a build that drew nothing would be ignoring
     /// the half of the value that was for exactly this.
+    ///
+    /// The fallback stands for one more reason, and it is named: a server in
+    /// `objectBoundingBox` units painting text, whose box this crate cannot
+    /// measure ([`Walk::measurable`]).
     fn paint(
         &mut self,
         spec: &PaintSpec,
         style: &Style,
         matrix: [f64; 6],
-        bounds: [f64; 4],
-    ) -> Paint {
-        match spec {
+        extent: Extent,
+        frame: &Frame,
+    ) -> Result<Paint, Refusal> {
+        Ok(match spec {
             PaintSpec::None => Paint::None,
             PaintSpec::Solid(colour) => Paint::Solid(*colour),
             PaintSpec::Current => Paint::Solid(style.colour),
@@ -438,25 +1338,160 @@ impl Walk<'_> {
                 let target = self.tree.by_id(name);
                 let kind = target.map(|at| self.tree.nodes[at].name.as_str());
                 if let (Some(at), Some("linearGradient" | "radialGradient")) = (target, kind) {
-                    if let Some(resolved) = gradient::resolve(self.tree, at, matrix, bounds, style)
+                    if gradient::measures_box(self.tree, at) && !self.measurable(extent) {
+                        return self.paint(fallback, style, matrix, extent, frame);
+                    }
+                    if let Some(resolved) =
+                        gradient::resolve(self.tree, at, matrix, extent.measured, style)
                     {
-                        if resolved.spread_unsupported {
-                            self.warn(Warning::SpreadMethodUnsupported);
-                        }
-                        return resolved.paint;
+                        return Ok(resolved.paint);
                     }
                     // §13.2.4: a gradient with no stops paints **as if `none`
                     // were specified** — which is not the same as falling
                     // through to the fallback, because the server was found.
-                    return Paint::None;
+                    return Ok(Paint::None);
                 }
-                match kind {
-                    Some("pattern") => self.warn(Warning::PatternUnsupported),
-                    _ => self.warn(Warning::PaintServerUnresolved),
+                if let (Some(at), Some("pattern")) = (target, kind) {
+                    // §13.3: a pattern whose tile has no area paints nothing,
+                    // which — the server having been found — is `none` and not
+                    // the fallback, the gradient's rule.
+                    return match self.pattern_of(at, matrix, extent, frame)? {
+                        Tiling::Paint(paint) => Ok(paint),
+                        Tiling::Disabled => Ok(Paint::None),
+                        Tiling::Unmeasured => self.paint(fallback, style, matrix, extent, frame),
+                    };
                 }
-                self.paint(fallback, style, matrix, bounds)
+                self.warn(Warning::PaintServerUnresolved);
+                return self.paint(fallback, style, matrix, extent, frame);
             }
+        })
+    }
+
+    /// §13.3's `<pattern>` as a paint, for one element: the tile, and its
+    /// content walked into nodes of its own in **pattern space**.
+    ///
+    /// Pattern space is the referencing element's user space with
+    /// `patternTransform` applied, and the tile at `x`, `y`, `width`,
+    /// `height` in it repeats at every multiple of its own size — which is
+    /// 8.7.3's tiling pattern exactly, so that is what [`crate::Tile`]
+    /// describes. Every attribute and the content follow the `xlink:href`
+    /// chain as a gradient's do (§13.3: *"any attributes which are defined on
+    /// the referenced element which are not defined on this element are
+    /// inherited by this element"*, and the children likewise when this one
+    /// has none).
+    ///
+    /// [`Tiling::Disabled`] for a tile with no area, which §13.3 says disables
+    /// the paint, and [`Tiling::Unmeasured`] for a tile or content in
+    /// `objectBoundingBox` units on a box that is text's alone.
+    fn pattern_of(
+        &mut self,
+        at: usize,
+        matrix: [f64; 6],
+        extent: Extent,
+        frame: &Frame,
+    ) -> Result<Tiling, Refusal> {
+        let tree = self.tree;
+        let chain = pattern_chain(tree, at);
+        let along = |name: &str| pattern_along(tree, &chain, name);
+        let length = |name: &str, basis: f64, default: f64| {
+            along(name)
+                .and_then(|text| document::length(text, Some(basis)))
+                .unwrap_or(default)
+        };
+        let units = PatternUnits::of(tree, &chain);
+        if units.measure_box() && !self.measurable(extent) {
+            return Ok(Tiling::Unmeasured);
         }
+        let PatternUnits {
+            user_cell,
+            view,
+            box_content,
+        } = units;
+        let [min_x, min_y, max_x, max_y] = extent.measured;
+        let (box_width, box_height) = (max_x - min_x, max_y - min_y);
+        let box_area = extent.has_area();
+        let cell = if user_cell {
+            let (vw, vh) = frame.viewport;
+            [
+                length("x", vw, 0.0),
+                length("y", vh, 0.0),
+                length("width", vw, 0.0),
+                length("height", vh, 0.0),
+            ]
+        } else {
+            if !box_area {
+                return Ok(Tiling::Disabled);
+            }
+            [
+                min_x + length("x", 1.0, 0.0) * box_width,
+                min_y + length("y", 1.0, 0.0) * box_height,
+                length("width", 1.0, 0.0) * box_width,
+                length("height", 1.0, 0.0) * box_height,
+            ]
+        };
+        let [x, y, width, height] = cell;
+        if !(width > 0.0 && height > 0.0 && cell.iter().all(|v| v.is_finite())) {
+            return Ok(Tiling::Disabled);
+        }
+        // The content's own space, into pattern space: a `viewBox` fitted into
+        // the tile (which makes `patternContentUnits` moot, §13.3 says), or
+        // the tile's corner as the origin, scaled by the box under
+        // `objectBoundingBox`.
+        let content = match view {
+            Some(numbers) => {
+                let Some(fit) = transform::view_box(
+                    [numbers[0], numbers[1], numbers[2], numbers[3]],
+                    width,
+                    height,
+                    along("preserveAspectRatio"),
+                ) else {
+                    return Ok(Tiling::Disabled);
+                };
+                transform::concat(fit, [1.0, 0.0, 0.0, 1.0, x, y])
+            }
+            None if box_content => {
+                if !box_area {
+                    return Ok(Tiling::Disabled);
+                }
+                [box_width, 0.0, 0.0, box_height, x, y]
+            }
+            None => [1.0, 0.0, 0.0, 1.0, x, y],
+        };
+        let own = along("patternTransform")
+            .and_then(transform::list)
+            .unwrap_or(IDENTITY);
+        let source = chain
+            .iter()
+            .copied()
+            .find(|index| tree.element_children(*index).next().is_some())
+            .unwrap_or(at);
+        // A pattern whose tile is painted with itself is the `<use>` bomb's
+        // fourth spelling.
+        if self.expanding.contains(&source) {
+            return Err(Refusal::TooManyUses);
+        }
+        // §13.3: properties inherit into a `<pattern>` from its ancestors and
+        // not from the element it paints.
+        let style = self.style_of(source)?;
+        let inner = Frame {
+            matrix: content,
+            viewport: frame.viewport,
+            style,
+            depth: frame.depth + 1,
+        };
+        // The text position belongs to the run that asked for this paint, and
+        // a `<text>` inside the tile would start its own.
+        let text = std::mem::take(&mut self.text);
+        self.expanding.push(source);
+        let drawn = self.collect(|walk| walk.children(source, &inner));
+        self.expanding.pop();
+        self.text = text;
+        let nodes = drawn?;
+        Ok(Tiling::Paint(Paint::Pattern(Box::new(crate::Tile {
+            nodes,
+            cell,
+            matrix: transform::concat(own, matrix),
+        }))))
     }
 
     /// Whether §11.5's `display: none` applies, from either place it is
@@ -542,8 +1577,15 @@ impl Walk<'_> {
             style: frame.style.clone(),
             depth: frame.depth + 1,
         };
+        // §5.6: the `<use>` becomes a `<g>` carrying its own attributes, so its
+        // `opacity` and `clip-path` are a group around the instance — in the
+        // space that includes `x` and `y`, which the generated `<g>`'s
+        // transform ends with.
+        let style = frame.style.clone();
         self.expanding.push(target);
-        let drawn = self.instance(target, node, &inner);
+        let drawn = self.group(&style, matrix, frame, |walk| {
+            walk.instance(target, node, &inner)
+        });
         self.expanding.pop();
         drawn
     }
@@ -588,50 +1630,212 @@ impl Walk<'_> {
             matrix,
             ..frame.clone()
         };
-        self.text_runs(index, node, &inner, true)
+        // §10.4: a `<text>`'s `x` and `y` are zero where it states none, so
+        // every `<text>` opens a chunk at its first character — and the
+        // position state starts again with it.
+        let mut positions = self.positions(node, frame);
+        if positions.x.is_empty() {
+            positions.x.push(0.0);
+        }
+        if positions.y.is_empty() {
+            positions.y.push(0.0);
+        }
+        self.text = Text {
+            stack: vec![positions],
+            ..Text::default()
+        };
+        let start = self.scene.nodes.len();
+        let measuring = self.measure.is_some();
+        if measuring {
+            self.waiting.push(Waiting::default());
+        }
+        let drawn = self.group(&frame.style, matrix, frame, |walk| {
+            walk.text_runs(index, &inner)
+        });
+        self.text.stack.clear();
+        let waiting = if measuring { self.waiting.pop() } else { None };
+        drawn?;
+        match waiting {
+            Some(waiting) if !waiting.paints.is_empty() => self.settle(start, matrix, waiting),
+            _ => Ok(()),
+        }
     }
 
-    /// One `<text>` or `<tspan>`, and everything under it.
+    /// A run's `fill` or `stroke`: resolved now, or — a paint server that
+    /// takes a fraction of the box, with the caller's measurement — marked to
+    /// wait for the `<text>`'s box ([`Walk::settle`]).
     ///
-    /// `absolute` says whether this element opened a chunk, which §10.9 makes
-    /// true of every `<text>` and of a `<tspan>` that states an `x` or a `y`.
-    fn text_runs(
+    /// Only what would otherwise be [`Warning::TextBoxUnmeasured`] waits, so a
+    /// document with no bounding-box paint on its text reads the same with a
+    /// measurer as without one, warnings in the same order.
+    fn paint_run(
         &mut self,
-        index: usize,
-        node: &Node,
+        spec: &PaintSpec,
+        matrix: [f64; 6],
         frame: &Frame,
-        mut absolute: bool,
-    ) -> Result<(), Refusal> {
-        // §10.4: `x`, `y`, `dx` and `dy` are **lists**, one number per glyph.
-        // The first is used and the rest are named: a build that took the
-        // first silently would set a deliberately-spaced line as an ordinary
-        // one and look entirely correct.
-        let x = self.text_number(node, "x", frame.viewport.0);
-        let y = self.text_number(node, "y", frame.viewport.1);
-        let dx = self
-            .text_number(node, "dx", frame.viewport.0)
-            .unwrap_or(0.0);
-        let dy = self
-            .text_number(node, "dy", frame.viewport.1)
-            .unwrap_or(0.0);
-        if x.is_some() || y.is_some() {
-            absolute = true;
+    ) -> Result<Paint, Refusal> {
+        if self.waits(spec) {
+            if let Some(waiting) = self.waiting.last_mut() {
+                let number = waiting.paints.len();
+                waiting.paints.push(Unpainted {
+                    spec: spec.clone(),
+                    matrix,
+                    frame: frame.clone(),
+                });
+                return Ok(mark(number));
+            }
         }
-        // A `<tspan>` that shifts by `dx`/`dy` and states nothing absolute is
-        // still a continuation — §10.9 opens a chunk on an *absolute*
-        // position — so the shift travels with the run rather than opening one.
-        let anchor =
-            absolute.then(|| [x.unwrap_or(self.pen[0]) + dx, y.unwrap_or(self.pen[1]) + dy]);
-        if let Some(anchor) = anchor {
-            self.pen = anchor;
-        }
-        let mut pending = anchor;
-        let mut shift = if anchor.is_some() {
-            [0.0, 0.0]
-        } else {
-            [dx, dy]
-        };
+        self.paint(spec, &frame.style, matrix, Extent::TEXT, frame)
+    }
 
+    /// Whether `spec` names a paint server that takes a fraction of the
+    /// painted element's box — the question [`Walk::paint`] asks of each.
+    fn waits(&self, spec: &PaintSpec) -> bool {
+        let PaintSpec::Reference(name, _) = spec else {
+            return false;
+        };
+        let tree = self.tree;
+        let Some(at) = tree.by_id(name) else {
+            return false;
+        };
+        match tree.nodes[at].name.as_str() {
+            "linearGradient" | "radialGradient" => gradient::measures_box(tree, at),
+            "pattern" => PatternUnits::of(tree, &pattern_chain(tree, at)).measure_box(),
+            _ => false,
+        }
+    }
+
+    /// The paints a `<text>`'s runs waited on, resolved against the box of
+    /// every run it drew — `nodes[start..]`, the `<text>`'s own output — and
+    /// put where their marks are.
+    ///
+    /// The box is taken in the `<text>`'s space and carried into each run's,
+    /// which differs from it by a `dy` or a `<tspan>`'s own matrix, and a
+    /// hidden run's cells are in it (SVG 2's *Controlling visibility*). A
+    /// `<text>` whose runs cannot be placed — a measurement that is not
+    /// finite, or a cell past a double's range — has no box, and each paint is
+    /// resolved as it is without a measurer, which names it.
+    fn settle(&mut self, start: usize, matrix: [f64; 6], waiting: Waiting) -> Result<(), Refusal> {
+        let whole = self
+            .measure
+            .and_then(|measure| text_cells(self.scene.nodes.get(start..)?, measure))
+            .zip(transform::invert(matrix))
+            .and_then(|(cells, inverse)| {
+                bounds(cells.iter().map(|cell| transform::apply(inverse, *cell)))
+            });
+        let mut painted = Vec::with_capacity(waiting.paints.len());
+        for unpainted in waiting.paints {
+            let extent = whole
+                .and_then(|[x0, y0, x1, y1]| {
+                    let into = transform::invert(unpainted.matrix)?;
+                    bounds(
+                        [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+                            .into_iter()
+                            .map(|corner| transform::apply(into, transform::apply(matrix, corner))),
+                    )
+                })
+                .map_or(Extent::TEXT, Extent::shape);
+            let paint = self.paint(
+                &unpainted.spec,
+                &unpainted.frame.style,
+                unpainted.matrix,
+                extent,
+                &unpainted.frame,
+            )?;
+            // `push` checked the run with its mark in place; what replaces the
+            // mark is checked here, as `push` would have.
+            painted.push(if paint_finite(&paint) {
+                paint
+            } else {
+                self.warn(Warning::GeometryOverflow);
+                Paint::None
+            });
+        }
+        if let Some(nodes) = self.scene.nodes.get_mut(start..) {
+            repaint(nodes, &painted);
+        }
+        Ok(())
+    }
+
+    /// One element's §10.4 lists, read.
+    fn positions(&mut self, node: &Node, frame: &Frame) -> Positions {
+        Positions {
+            x: self.coordinates(node, "x", frame.viewport.0),
+            y: self.coordinates(node, "y", frame.viewport.1),
+            dx: self.coordinates(node, "dx", frame.viewport.0),
+            dy: self.coordinates(node, "dy", frame.viewport.1),
+            rotate: self.coordinates(node, "rotate", 1.0),
+            placed: 0,
+        }
+    }
+
+    /// A `<list-of-coordinates>`, each through §4.2's `<length>` grammar —
+    /// which is what `1em` in an `x` means — or the empty list for an
+    /// attribute that is absent or not the grammar, the second named.
+    fn coordinates(&mut self, node: &Node, name: &str, basis: f64) -> Vec<f64> {
+        let Some(text) = node.attr(name) else {
+            return Vec::new();
+        };
+        let read: Option<Vec<f64>> = text
+            .split(|c: char| c == ',' || c.is_ascii_whitespace())
+            .filter(|piece| !piece.is_empty())
+            .map(|piece| document::length(piece, Some(basis)))
+            .collect();
+        match read {
+            Some(list) => list,
+            None => {
+                self.warn(Warning::ValueUnreadable {
+                    attribute: name.to_owned(),
+                });
+                Vec::new()
+            }
+        }
+    }
+
+    /// The next character's §10.4 positioning, from the innermost element that
+    /// has a value for it, and every open element's count advanced past it.
+    ///
+    /// SVG 1.1 §10.5's rule, per attribute: the `n`th number of an element's
+    /// list belongs to the `n`th character **within that element or any of
+    /// its descendants**; a character past the end of an element's list takes
+    /// the nearest ancestor's number for it, if that one has one. `rotate` is
+    /// the exception the clause makes: past the end of a list, its **last**
+    /// number goes on applying, and an ancestor's is not consulted.
+    fn glyph(&mut self) -> Glyph {
+        let stack = &mut self.text.stack;
+        let pick = |list: fn(&Positions) -> &Vec<f64>| -> Option<f64> {
+            stack
+                .iter()
+                .rev()
+                .find_map(|positions| list(positions).get(positions.placed).copied())
+        };
+        let glyph = Glyph {
+            x: pick(|p| &p.x),
+            y: pick(|p| &p.y),
+            dx: pick(|p| &p.dx).unwrap_or(0.0),
+            dy: pick(|p| &p.dy).unwrap_or(0.0),
+            rotate: stack
+                .iter()
+                .rev()
+                .find(|positions| !positions.rotate.is_empty())
+                .and_then(|positions| {
+                    positions
+                        .rotate
+                        .get(positions.placed)
+                        .or(positions.rotate.last())
+                        .copied()
+                })
+                .unwrap_or(0.0),
+        };
+        for positions in stack.iter_mut() {
+            positions.placed = positions.placed.saturating_add(1);
+        }
+        glyph
+    }
+
+    /// One `<text>` or `<tspan>`, and everything under it, whose §10.4 lists
+    /// are already on [`Text::stack`].
+    fn text_runs(&mut self, index: usize, frame: &Frame) -> Result<(), Refusal> {
         let children = self.tree.nodes[index].children.clone();
         for child in children {
             match child {
@@ -647,9 +1851,7 @@ impl Walk<'_> {
                     if text.is_empty() {
                         continue;
                     }
-                    self.push_text(&text, pending, shift, frame)?;
-                    pending = None;
-                    shift = [0.0, 0.0];
+                    self.characters(&text, frame)?;
                 }
                 Child::Element(at) => {
                     let element = self.tree.nodes[at].clone();
@@ -675,27 +1877,95 @@ impl Walk<'_> {
                     if child_frame.depth >= self.limits.max_depth {
                         return Err(Refusal::TooDeep);
                     }
-                    self.text_runs(at, &element, &child_frame, false)?;
-                    pending = None;
-                    shift = [0.0, 0.0];
+                    let style = child_frame.style.clone();
+                    let positions = self.positions(&element, &child_frame);
+                    self.text.stack.push(positions);
+                    let drawn = self.group(&style, child_frame.matrix, &child_frame, |walk| {
+                        walk.text_runs(at, &child_frame)
+                    });
+                    self.text.stack.pop();
+                    drawn?;
                 }
             }
         }
         Ok(())
     }
 
-    /// One run of characters, as a node.
-    fn push_text(
-        &mut self,
-        text: &str,
-        anchor: Option<[f64; 2]>,
-        shift: [f64; 2],
-        frame: &Frame,
-    ) -> Result<(), Refusal> {
-        let style = &frame.style;
-        if !style.visible {
-            return Ok(());
+    /// One piece of character data, cut into runs wherever §10.4 moves the
+    /// current text position or §10.5 turns a glyph.
+    ///
+    /// A run is as long as nothing interrupts it, which for a `<text>` with
+    /// one `x` and one `y` is the whole string and for one with an `x` per
+    /// character is one character each. What a run carries is what this crate
+    /// knows: an absolute position opens a chunk ([`crate::Node::Text`]'s
+    /// `anchor`), a `y` with no `x` opens one whose `x` continues
+    /// (`continues_x`), and a `dx` or `dy` with neither moves the run off the
+    /// pen by the shifts accumulated since the chunk opened — carried in its
+    /// matrix, the one place a shift can live without a metric.
+    fn characters(&mut self, text: &str, frame: &Frame) -> Result<(), Refusal> {
+        let mut run = Run::default();
+        for character in text.chars() {
+            let glyph = self.glyph();
+            let moved = glyph.x.is_some()
+                || glyph.y.is_some()
+                || glyph.dx != 0.0
+                || glyph.dy != 0.0
+                || glyph.rotate != 0.0
+                || run.rotate != 0.0;
+            if moved && !run.text.is_empty() {
+                let done = std::mem::take(&mut run);
+                self.push_text(done, frame)?;
+            }
+            let state = &mut self.text;
+            if run.text.is_empty() {
+                run.anchor = None;
+                run.continues_x = false;
+                if let Some(x) = glyph.x {
+                    let y = glyph.y.unwrap_or(state.y) + glyph.dy;
+                    run.anchor = Some([x + glyph.dx, y]);
+                    state.shift = 0.0;
+                    state.y = y;
+                    state.chunk_y = y;
+                } else if let Some(y) = glyph.y {
+                    // §10.5's rule (b): no `x` for this character anywhere, so
+                    // it starts where the previous glyph left the pen — with
+                    // every `dx` since the chunk opened, and this one's.
+                    let y = y + glyph.dy;
+                    run.anchor = Some([state.shift + glyph.dx, y]);
+                    run.continues_x = true;
+                    state.shift = 0.0;
+                    state.y = y;
+                    state.chunk_y = y;
+                } else {
+                    state.shift += glyph.dx;
+                    state.y += glyph.dy;
+                }
+                run.offset = [state.shift, state.y - state.chunk_y];
+                run.rotate = glyph.rotate;
+            }
+            run.text.push(character);
         }
+        if !run.text.is_empty() {
+            self.push_text(run, frame)?;
+        }
+        Ok(())
+    }
+
+    /// One run of characters, as a node.
+    fn push_text(&mut self, run: Run, frame: &Frame) -> Result<(), Refusal> {
+        let Run {
+            text,
+            anchor,
+            continues_x,
+            offset: shift,
+            rotate,
+        } = run;
+        let style = &frame.style;
+        // §11.5: a hidden run is laid out and not painted. It is a node all
+        // the same, with no paint, because the pen it advances and the box it
+        // is in are the caller's to measure (see `Node::Text::hidden`); a run
+        // left out set the text after it where the hidden text began.
+        let hidden = !style.visible;
         // A `dx`/`dy` on a **continuing** run is an offset from a pen this
         // crate does not have, so it is carried in the *matrix* — the one
         // place a shift can live without a metric. On a run that opens a chunk
@@ -706,8 +1976,19 @@ impl Walk<'_> {
         } else {
             frame.matrix
         };
-        let fill = self.paint(&style.fill, style, matrix, [0.0, 0.0, 0.0, 0.0]);
-        let stroke_paint = self.paint(&style.stroke, style, matrix, [0.0, 0.0, 0.0, 0.0]);
+        // A run's box is its glyph cells, which are a font's. Measured by the
+        // caller, a paint server in `objectBoundingBox` units waits for the
+        // box of the whole `<text>`; without a measurer it has nothing here to
+        // take a fraction of. A hidden run paints nothing and waits for
+        // nothing.
+        let (fill, stroke_paint) = if hidden {
+            (Paint::None, Paint::None)
+        } else {
+            (
+                self.paint_run(&style.fill, matrix, frame)?,
+                self.paint_run(&style.stroke, matrix, frame)?,
+            )
+        };
         let stroke = if stroke_paint == Paint::None || style.stroke_width <= 0.0 {
             None
         } else {
@@ -719,12 +2000,15 @@ impl Walk<'_> {
                 miter_limit: style.miter_limit,
                 dashes: style.dashes.clone(),
                 dash_offset: style.dash_offset,
-                opacity: (style.stroke_opacity * style.opacity).clamp(0.0, 1.0),
+                opacity: style.stroke_opacity.clamp(0.0, 1.0),
+                matrix,
             }))
         };
         self.push(crate::Node::Text {
-            text: text.to_owned(),
+            text,
             anchor,
+            continues_x,
+            rotate,
             matrix,
             font: TextStyle {
                 families: style.families.clone(),
@@ -734,23 +2018,10 @@ impl Walk<'_> {
                 anchor: style.text_anchor,
             },
             fill,
-            fill_opacity: (style.fill_opacity * style.opacity).clamp(0.0, 1.0),
+            fill_opacity: style.fill_opacity.clamp(0.0, 1.0),
             stroke,
+            hidden,
         })
-    }
-
-    /// The **first** number of a `<list-of-coordinates>`, naming the rest.
-    fn text_number(&mut self, node: &Node, name: &str, basis: f64) -> Option<f64> {
-        let text = node.attr(name)?;
-        let numbers = transform::numbers(text)?;
-        if numbers.len() > 1 {
-            self.warn(Warning::TextPositionListIgnored);
-        }
-        let first = *numbers.first()?;
-        // A bare number is user units; a length with a unit goes through §4.2's
-        // grammar, which is what `1em` in an `x` attribute means.
-        document::length(text.split_whitespace().next().unwrap_or(text), Some(basis))
-            .or(Some(first))
     }
 
     /// §5.7's `<image>`.
@@ -769,12 +2040,18 @@ impl Walk<'_> {
         if !(width > 0.0 && height > 0.0) {
             return Ok(());
         }
-        self.push(crate::Node::Image {
+        // An image's node has no alpha and no clip of its own, so its
+        // `opacity`, its `clip-path` and its `mask` are all a group around it
+        // — the first folds nowhere, which makes a translucent picture a group
+        // of one. Until the group carried them the clip was dropped without a
+        // word, which is the defect `clip-path` on a `<g>` also was.
+        let picture = crate::Node::Image {
             href: href.to_owned(),
             rect: [x, y, width, height],
             matrix,
             preserve: node.attr("preserveAspectRatio").map(str::to_owned),
-        })
+        };
+        self.group(&frame.style, matrix, frame, |walk| walk.push(picture))
     }
 
     /// An `<svg>`, root or nested: §7.9's establishment of a new viewport.
@@ -821,7 +2098,12 @@ impl Walk<'_> {
             style: frame.style.clone(),
             depth: frame.depth,
         };
-        self.children(index, &inner)
+        // A nested `<svg>`'s own `opacity` and `clip-path` are of its whole
+        // rendering, in the space its parent placed it in.
+        let style = frame.style.clone();
+        self.group(&style, frame.matrix, frame, |walk| {
+            walk.children(index, &inner)
+        })
     }
 
     /// Every child element of `index`, in document order.
@@ -840,6 +2122,529 @@ impl Walk<'_> {
 
 /// §7.7's "rendering of the element is disabled".
 struct Disabled;
+
+/// A `<pattern>` and the patterns its `xlink:href` names, nearest first, at
+/// most ten: §13.3's attributes and content are inherited along it as a
+/// gradient's are.
+fn pattern_chain(tree: &Tree, at: usize) -> Vec<usize> {
+    let mut chain = vec![at];
+    while chain.len() < 10 {
+        let Some(next) = chain
+            .last()
+            .and_then(|last| tree.nodes.get(*last))
+            .and_then(Node::href)
+            .and_then(|href| href.trim().strip_prefix('#'))
+            .and_then(|name| tree.by_id(name))
+            .filter(|next| tree.nodes[*next].is_svg() && tree.nodes[*next].name == "pattern")
+        else {
+            break;
+        };
+        chain.push(next);
+    }
+    chain
+}
+
+/// The first value `name` has along a pattern's chain, trimmed.
+fn pattern_along<'t>(tree: &'t Tree, chain: &[usize], name: &str) -> Option<&'t str> {
+    chain
+        .iter()
+        .find_map(|index| tree.nodes.get(*index)?.attr(name))
+        .map(str::trim)
+}
+
+/// §13.3's units of one `<pattern>`, along its chain.
+struct PatternUnits {
+    /// `patternUnits="userSpaceOnUse"`; the initial value is
+    /// `objectBoundingBox`.
+    user_cell: bool,
+    /// A `viewBox` of four numbers, which makes `patternContentUnits` moot.
+    view: Option<Vec<f64>>,
+    /// `patternContentUnits="objectBoundingBox"` with no `viewBox`; the
+    /// initial value is `userSpaceOnUse`.
+    box_content: bool,
+}
+
+impl PatternUnits {
+    fn of(tree: &Tree, chain: &[usize]) -> Self {
+        let along = |name: &str| pattern_along(tree, chain, name);
+        let view = along("viewBox")
+            .and_then(transform::numbers)
+            .filter(|numbers| numbers.len() == 4);
+        Self {
+            user_cell: along("patternUnits") == Some("userSpaceOnUse"),
+            box_content: view.is_none()
+                && along("patternContentUnits") == Some("objectBoundingBox"),
+            view,
+        }
+    }
+
+    /// Whether the tile or its content is a fraction of the painted element's
+    /// box.
+    fn measure_box(&self) -> bool {
+        !self.user_cell || self.box_content
+    }
+}
+
+/// One `<text>` or `<tspan>`'s §10.4 lists, and how many characters within it
+/// have been placed.
+#[derive(Default)]
+struct Positions {
+    x: Vec<f64>,
+    y: Vec<f64>,
+    dx: Vec<f64>,
+    dy: Vec<f64>,
+    rotate: Vec<f64>,
+    placed: usize,
+}
+
+/// One character's §10.4 positioning.
+struct Glyph {
+    x: Option<f64>,
+    y: Option<f64>,
+    dx: f64,
+    dy: f64,
+    /// §10.5's supplemental rotation, in degrees.
+    rotate: f64,
+}
+
+/// The current text position, as far as this crate can know it.
+///
+/// Everything but the **advance** is a fact about the document: an absolute
+/// `x` or `y`, and the `dx` and `dy` added since, are numbers the file states,
+/// and in horizontal text only `y`, `dy` and an absolute `x` move the position
+/// vertically or put it anywhere at all. What a glyph's width adds is a font
+/// metric, which is the caller's (ruling 8). So the state is kept relative to
+/// the chunk the caller is advancing: `shift` is the `dx` added since that
+/// chunk's anchor, and `y` is exact.
+#[derive(Default)]
+struct Text {
+    /// The lists of the `<text>` and every open `<tspan>`, outermost first.
+    stack: Vec<Positions>,
+    /// `dx` accumulated since the chunk's anchor.
+    shift: f64,
+    /// The current text position's `y`.
+    y: f64,
+    /// The `y` of the chunk's anchor, which is where the caller's pen is.
+    chunk_y: f64,
+}
+
+/// A run being gathered.
+#[derive(Default)]
+struct Run {
+    text: String,
+    anchor: Option<[f64; 2]>,
+    continues_x: bool,
+    /// Off the caller's pen, for a run that opens no chunk.
+    offset: [f64; 2],
+    rotate: f64,
+}
+
+/// A `<marker>`, read once per shape that uses it.
+struct Marker {
+    /// The element.
+    at: usize,
+    /// `markerWidth` and `markerHeight`: the viewport, in the space the
+    /// stroke-width scale makes.
+    size: (f64, f64),
+    /// The view box's mapping into that viewport.
+    view: [f64; 6],
+    /// `refX` and `refY`, in the view box's coordinates.
+    reference: [f64; 2],
+    orient: Orient,
+    /// `markerUnits="strokeWidth"`, the initial value.
+    stroke_units: bool,
+    /// Whether the content is clipped to the viewport, which the user agent
+    /// style sheet's `overflow: hidden` makes the default.
+    clipped: bool,
+    /// What a percentage inside the marker is a fraction of.
+    viewport: (f64, f64),
+    /// The style its content starts from: its own ancestry's.
+    style: Style,
+}
+
+/// Whether every number one node carries is finite — not counting a group's
+/// children, which [`Walk::push`] admitted before they were grouped.
+/// A clip's text as silhouettes: every run filled white, opaque and
+/// unstroked, at every depth, onto `out`.
+///
+/// A group inside keeps its own clip and mask — a child of a `<clipPath>`
+/// may be clipped itself, §14.3.5 says, and the silhouette is then the
+/// intersection — and loses its opacity, which a one-bit mask does not have.
+fn whiten(nodes: Vec<crate::Node>, out: &mut Vec<crate::Node>) {
+    let white = Paint::Solid(Colour { rgb: [1.0; 3] });
+    for node in nodes {
+        match node {
+            // A hidden run stays hidden: it is laid out among the others and
+            // is no silhouette (§14.3.5: a child made invisible by
+            // `visibility` does not contribute to the clip).
+            crate::Node::Text {
+                text,
+                anchor,
+                continues_x,
+                matrix,
+                font,
+                rotate,
+                hidden,
+                ..
+            } => out.push(crate::Node::Text {
+                text,
+                anchor,
+                continues_x,
+                matrix,
+                font,
+                rotate,
+                fill: if hidden { Paint::None } else { white.clone() },
+                fill_opacity: 1.0,
+                stroke: None,
+                hidden,
+            }),
+            crate::Node::Path {
+                outline,
+                rule,
+                clip,
+                ..
+            } => out.push(crate::Node::Path {
+                outline,
+                fill: white.clone(),
+                rule,
+                fill_opacity: 1.0,
+                stroke: None,
+                clip,
+            }),
+            crate::Node::Group {
+                nodes, clip, mask, ..
+            } => {
+                let mut inner = Vec::new();
+                whiten(nodes, &mut inner);
+                out.push(crate::Node::Group {
+                    nodes: inner,
+                    opacity: 1.0,
+                    clip,
+                    mask,
+                });
+            }
+            // A picture has no silhouette in a clip: §14.3.5 admits none.
+            crate::Node::Image { .. } => {}
+        }
+    }
+}
+
+/// Whether every number a paint carries is finite: a tile's cell and matrix,
+/// a gradient's geometry and matrix.
+fn paint_finite(paint: &Paint) -> bool {
+    fn numbers(values: &[f64]) -> bool {
+        values.iter().all(|v| v.is_finite())
+    }
+    match paint {
+        Paint::Pattern(tile) => numbers(&tile.cell) && numbers(&tile.matrix),
+        Paint::Linear {
+            from, to, matrix, ..
+        } => numbers(from) && numbers(to) && numbers(matrix),
+        Paint::Radial {
+            centre,
+            radius,
+            focus,
+            matrix,
+            ..
+        } => numbers(centre) && radius.is_finite() && numbers(focus) && numbers(matrix),
+        _ => true,
+    }
+}
+
+fn finite(node: &crate::Node) -> bool {
+    fn outline(outline: &Outline) -> bool {
+        outline.segments.iter().all(|segment| match *segment {
+            Segment::Move(p) | Segment::Line(p) => p.iter().all(|v| v.is_finite()),
+            Segment::Cubic(a, b, c) => [a, b, c].iter().flatten().all(|v| v.is_finite()),
+            Segment::Close => true,
+        })
+    }
+    fn numbers(values: &[f64]) -> bool {
+        values.iter().all(|v| v.is_finite())
+    }
+    let paint = paint_finite;
+    // A stroke's width and dashes are lengths, read finite and never
+    // multiplied by a transform here; its paint's matrix is composed, and so
+    // is the user space it is drawn in.
+    let stroke = |stroke: Option<&Stroke>| {
+        stroke.is_none_or(|stroke| paint(&stroke.paint) && numbers(&stroke.matrix))
+    };
+    match node {
+        crate::Node::Path {
+            outline: shape,
+            fill,
+            stroke: line,
+            clip,
+            ..
+        } => {
+            outline(shape)
+                && paint(fill)
+                && stroke(line.as_deref())
+                && clip.as_ref().is_none_or(|clip| outline(&clip.outline))
+        }
+        crate::Node::Text {
+            anchor,
+            matrix,
+            font,
+            fill,
+            stroke: line,
+            rotate,
+            ..
+        } => {
+            anchor.is_none_or(|anchor| numbers(&anchor))
+                && rotate.is_finite()
+                && numbers(matrix)
+                && font.size.is_finite()
+                && paint(fill)
+                && stroke(line.as_deref())
+        }
+        crate::Node::Image { rect, matrix, .. } => numbers(rect) && numbers(matrix),
+        crate::Node::Group {
+            opacity,
+            clip,
+            mask,
+            ..
+        } => {
+            opacity.is_finite()
+                && clip.as_ref().is_none_or(|clip| outline(&clip.outline))
+                && mask
+                    .as_ref()
+                    .is_none_or(|mask| mask.region.as_ref().is_none_or(outline))
+        }
+    }
+}
+
+/// The corners of every run's glyph cells in `nodes`, in the scene's space,
+/// each run placed where a caller places it — or `None` where that cannot be
+/// said from these nodes alone.
+///
+/// **The facade's `place_text`, replayed with the caller's own numbers**,
+/// groups looked through as it looks through them: a run with an anchor
+/// opens a chunk there (its `x` an offset from the pen where `continues_x`
+/// says so), a run without one begins where the one before it ended, and a
+/// chunk's `text-anchor` moves the whole chunk by its whole width. A cell is
+/// the run's advance by the font's ascent and descent, in glyph space — `y`
+/// up — under the run's own `cm`: the flip at the baseline, §10.5's `rotate`
+/// about the run's origin, the move to that origin, and the run's matrix, as
+/// the caller writes it.
+///
+/// `None` for a first run that continues a chunk, whose pen is wherever text
+/// before these nodes left it; for a measurement that is not finite; and for
+/// a cell that lands past a double's range.
+fn text_cells(nodes: &[crate::Node], measure: &dyn MeasureText) -> Option<Vec<[f64; 2]>> {
+    struct Placed {
+        origin: [f64; 2],
+        metrics: RunMetrics,
+        matrix: [f64; 6],
+        rotate: f64,
+    }
+    #[derive(Default)]
+    struct Pen {
+        runs: Vec<Placed>,
+        /// The runs of the open chunk, by index into `runs`.
+        chunk: Vec<usize>,
+        at: [f64; 2],
+        kind: TextAnchor,
+        started: bool,
+    }
+    // §10.9's shift, of the whole chunk by its whole width.
+    fn flush(pen: &mut Pen) {
+        let total: f64 = pen
+            .chunk
+            .iter()
+            .filter_map(|at| pen.runs.get(*at))
+            .map(|run| run.metrics.advance)
+            .sum();
+        let shift = match pen.kind {
+            TextAnchor::Start => 0.0,
+            TextAnchor::Middle => -total / 2.0,
+            TextAnchor::End => -total,
+        };
+        for at in pen.chunk.drain(..) {
+            if let Some(run) = pen.runs.get_mut(at) {
+                run.origin[0] += shift;
+            }
+        }
+    }
+    fn walk(nodes: &[crate::Node], measure: &dyn MeasureText, pen: &mut Pen) -> Option<()> {
+        for node in nodes {
+            match node {
+                crate::Node::Group { nodes, .. } => walk(nodes, measure, pen)?,
+                crate::Node::Text {
+                    text,
+                    anchor,
+                    continues_x,
+                    rotate,
+                    matrix,
+                    font,
+                    ..
+                } => {
+                    let metrics = measure.measure(text, font);
+                    if ![metrics.advance, metrics.ascent, metrics.descent]
+                        .iter()
+                        .all(|n| n.is_finite())
+                    {
+                        return None;
+                    }
+                    if let Some(start) = anchor {
+                        flush(pen);
+                        let x = if *continues_x {
+                            pen.at[0] + start[0]
+                        } else {
+                            start[0]
+                        };
+                        pen.at = [x, start[1]];
+                        pen.kind = font.anchor;
+                        pen.started = true;
+                    } else if !pen.started {
+                        return None;
+                    }
+                    pen.chunk.push(pen.runs.len());
+                    pen.runs.push(Placed {
+                        origin: pen.at,
+                        metrics,
+                        matrix: *matrix,
+                        rotate: *rotate,
+                    });
+                    pen.at[0] += metrics.advance;
+                }
+                _ => {}
+            }
+        }
+        Some(())
+    }
+    let mut pen = Pen::default();
+    walk(nodes, measure, &mut pen)?;
+    flush(&mut pen);
+    let flip = [1.0, 0.0, 0.0, -1.0, 0.0, 0.0];
+    let mut out = Vec::with_capacity(pen.runs.len().saturating_mul(4));
+    for run in &pen.runs {
+        let turned = if run.rotate == 0.0 {
+            flip
+        } else {
+            transform::concat(flip, transform::rotation(run.rotate))
+        };
+        let local = transform::concat(
+            transform::concat(turned, [1.0, 0.0, 0.0, 1.0, run.origin[0], run.origin[1]]),
+            run.matrix,
+        );
+        let RunMetrics {
+            advance,
+            ascent,
+            descent,
+        } = run.metrics;
+        for corner in [
+            [0.0, -descent],
+            [advance, -descent],
+            [advance, ascent],
+            [0.0, ascent],
+        ] {
+            let [x, y] = transform::apply(local, corner);
+            if !(x.is_finite() && y.is_finite()) {
+                return None;
+            }
+            out.push([x, y]);
+        }
+    }
+    Some(out)
+}
+
+/// The box a set of points spans, or `None` for no points or for one that is
+/// not finite.
+fn bounds(points: impl Iterator<Item = [f64; 2]>) -> Option<[f64; 4]> {
+    let mut out: Option<[f64; 4]> = None;
+    for [x, y] in points {
+        if !(x.is_finite() && y.is_finite()) {
+            return None;
+        }
+        out = Some(match out {
+            None => [x, y, x, y],
+            Some([x0, y0, x1, y1]) => [x0.min(x), y0.min(y), x1.max(x), y1.max(y)],
+        });
+    }
+    out
+}
+
+/// Every marked paint in `nodes` replaced by what [`Walk::settle`] resolved
+/// for it, groups looked through — and a stroke whose paint came to `none`
+/// removed, as `push_text` removes one. A mark with no paint, which nothing
+/// should leave, paints nothing rather than reaching a caller as a colour no
+/// document stated.
+fn repaint(nodes: &mut [crate::Node], painted: &[Paint]) {
+    let find = |paint: &Paint| -> Option<Paint> {
+        let number = marked(paint)?;
+        Some(painted.get(number).cloned().unwrap_or(Paint::None))
+    };
+    for node in nodes {
+        match node {
+            crate::Node::Group { nodes, .. } => repaint(nodes, painted),
+            crate::Node::Text { fill, stroke, .. } => {
+                if let Some(paint) = find(fill) {
+                    *fill = paint;
+                }
+                match stroke.as_ref().and_then(|stroke| find(&stroke.paint)) {
+                    Some(Paint::None) => *stroke = None,
+                    Some(paint) => {
+                        if let Some(stroke) = stroke {
+                            stroke.paint = paint;
+                        }
+                    }
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Folds a group's opacity into its one node, where that is the same picture.
+///
+/// Exactly one node, painting exactly once: a fill and no stroke, a stroke and
+/// no fill, a run of text with no outline, or a group with no clip of its own
+/// (two opacities composited one inside the other are their product). Returns
+/// whether it folded; a `false` leaves `nodes` untouched for the caller to
+/// wrap.
+fn fold(nodes: &mut [crate::Node], opacity: f64) -> bool {
+    let [only] = nodes else {
+        return false;
+    };
+    match only {
+        crate::Node::Path {
+            fill,
+            fill_opacity,
+            stroke,
+            ..
+        } => match (fill, stroke) {
+            (Paint::None, Some(stroke)) => {
+                stroke.opacity = (stroke.opacity * opacity).clamp(0.0, 1.0);
+                true
+            }
+            (_, None) => {
+                *fill_opacity = (*fill_opacity * opacity).clamp(0.0, 1.0);
+                true
+            }
+            _ => false,
+        },
+        crate::Node::Text {
+            fill_opacity,
+            stroke: None,
+            ..
+        } => {
+            *fill_opacity = (*fill_opacity * opacity).clamp(0.0, 1.0);
+            true
+        }
+        crate::Node::Group {
+            opacity: inner,
+            clip: None,
+            mask: None,
+            ..
+        } => {
+            *inner = (*inner * opacity).clamp(0.0, 1.0);
+            true
+        }
+        _ => false,
+    }
+}
 
 /// §10.15's `xml:space="default"`, which is what a document that says nothing
 /// means.
@@ -879,6 +2684,19 @@ fn collapse(text: &str) -> String {
 /// [`Refusal::TooDeep`], [`Refusal::TooManyNodes`] and
 /// [`Refusal::TooManySegments`] are the three ceilings a document can cross.
 pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Result<Scene, Refusal> {
+    build_with(tree, viewport, limits, &crate::Context::NONE)
+}
+
+/// [`build`], with the document's references reaching what `context` names.
+///
+/// # Errors
+/// [`build`]'s.
+pub fn build_with(
+    tree: &Tree,
+    viewport: Option<(f64, f64)>,
+    limits: &Limits,
+    context: &crate::Context<'_>,
+) -> Result<Scene, Refusal> {
     let viewport = match viewport {
         Some((width, height))
             if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 =>
@@ -895,7 +2713,16 @@ pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Resu
     // per element: two of them are one author stylesheet in source order, and
     // that order is what `css-cascade-5` §6.1's last criterion compares.
     let css_limits = CssLimits::DEFAULT;
-    let sheet = style::sheet(tree, css_limits.max_selector_parts);
+    let mut sheet = style::sheet_with(
+        tree,
+        css_limits.max_selector_parts,
+        &style::Reach {
+            imports: context.imports,
+            media: style::print(viewport),
+        },
+    );
+    let font_faces = std::mem::take(&mut sheet.font_faces);
+    let imports_unresolved = sheet.imports_unresolved;
     let mut walk = Walk {
         tree,
         limits,
@@ -905,10 +2732,16 @@ pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Resu
         sheet,
         uses: 0,
         expanding: Vec::new(),
-        pen: [0.0, 0.0],
+        text: Text::default(),
+        pushed: 0,
+        measure: context.measure,
+        waiting: Vec::new(),
     };
     if walk.sheet.at_rules > 0 {
         walk.warn(Warning::AtRuleIgnored);
+    }
+    if imports_unresolved > 0 {
+        walk.warn(Warning::ImportUnresolved);
     }
     let root = tree.root;
     let Some(node) = tree.nodes.get(root) else {
@@ -928,6 +2761,7 @@ pub fn build(tree: &Tree, viewport: Option<(f64, f64)>, limits: &Limits) -> Resu
         },
     )?;
     let mut scene = walk.scene;
+    scene.font_faces = font_faces;
     // The size the root stated, not the size the walk happened to leave
     // behind: a nested `<svg>` sets `Frame::viewport` and must not be able to
     // change what the document says it is.

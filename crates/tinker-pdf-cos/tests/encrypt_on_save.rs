@@ -13,8 +13,8 @@
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
-    pages, AuthLevel, CosDocument, DocumentBuilder, DocumentEditor, Encryption, WriteMode,
-    WriteOptions,
+    pages, AuthLevel, CosDocument, Dict, DocumentBuilder, DocumentEditor, Encryption, Object,
+    PdfString, StreamData, WriteMode, WriteOptions,
 };
 
 /// Forty-eight deterministic bytes. Real callers pass real randomness; a test
@@ -148,6 +148,46 @@ fn an_empty_user_password_opens_with_one() {
     let collected = pages::collect(&doc);
     let content = pages::content_bytes(&doc, &collected[0]);
     assert!(String::from_utf8_lossy(&content).contains("CONFIDENTIAL"));
+}
+
+/// **An empty owner password is not a lock every reader opens.**
+///
+/// Algorithm 2.A tries the owner password first, and every reader tries the
+/// empty password first. So a `/O` derived from the empty string handed the
+/// owner's authority — and with it the file key — to anybody, whatever the
+/// user password was: `user "open-me", owner ""` was a file anyone opened
+/// with every permission, and the user password protected nothing. The C
+/// ABI documents an empty owner password as "none" and the Python binding
+/// defaults to one, so the plainest call made the weakest file. Algorithm 3
+/// step (a) answers this for R2 to R4 — "if there is no owner password, use
+/// the user password instead" — and the writer now takes that answer for R6:
+/// the user password opens the file, with the owner's authority since the two
+/// are one, and nothing else does.
+#[test]
+fn an_empty_owner_password_is_the_user_password() {
+    let no_printing = !0b100i32;
+    let bytes = encrypted("open-me", "", no_printing);
+    let doc = CosDocument::open(bytes.clone()).expect("it opens");
+    assert!(
+        doc.authenticate("").is_err(),
+        "the empty password opens nothing"
+    );
+    assert_eq!(doc.auth_level(), AuthLevel::None);
+
+    let doc = CosDocument::open(bytes).expect("it opens");
+    assert_eq!(
+        doc.authenticate("open-me"),
+        Ok(AuthLevel::Owner),
+        "the user password is the owner's too"
+    );
+    let collected = pages::collect(&doc);
+    let content = pages::content_bytes(&doc, &collected[0]);
+    assert!(String::from_utf8_lossy(&content).contains("CONFIDENTIAL"));
+
+    // With neither password there is nothing to substitute: the empty
+    // password is both, as it always was, and the restrictions bind nobody.
+    let doc = CosDocument::open(encrypted("", "", no_printing)).expect("it opens");
+    assert_eq!(doc.authenticate(""), Ok(AuthLevel::Owner));
 }
 
 /// Two streams with identical plaintext must not encrypt identically, or the
@@ -311,4 +351,149 @@ fn no_object_number_is_written_twice() {
         seen.len(),
         "an object number is written twice: {seen:?}"
     );
+}
+
+const STREAM_SECRET: &[u8] = b"A STREAM DICTIONARY SECRET";
+const NESTED_SECRET: &[u8] = b"A NESTED CHECKSUM SECRET";
+
+/// Whether `bytes` holds `plaintext` as written in the clear: as a literal
+/// string, or as the hex string the writer writes a hex-form one as.
+fn in_the_clear(bytes: &[u8], plaintext: &[u8]) -> bool {
+    let upper: String = plaintext.iter().map(|b| format!("{b:02X}")).collect();
+    let lower = upper.to_ascii_lowercase();
+    [plaintext, upper.as_bytes(), lower.as_bytes()]
+        .iter()
+        .any(|probe| bytes.windows(probe.len()).any(|window| window == *probe))
+}
+
+/// `editor`'s first page with its first content stream replaced by `content`
+/// under a dictionary carrying two strings: `/Secret` at the top, and
+/// `/CheckSum` inside a `/Params` dictionary, where an embedded file stream
+/// carries one (7.11.4 Table 45).
+fn with_strings_in_a_stream_dictionary(editor: &mut DocumentEditor, content: &[u8]) {
+    let doc = editor.shared_document();
+    let page = pages::collect(&doc).into_iter().next().expect("a page");
+    let target = pages::contents(&doc, &page)
+        .into_iter()
+        .next()
+        .expect("a content stream");
+    let mut params = Dict::new();
+    params.insert(
+        editor.intern(b"CheckSum"),
+        Object::String(PdfString::hex(NESTED_SECRET.to_vec())),
+    );
+    let mut dict = Dict::new();
+    dict.insert(
+        editor.intern(b"Secret"),
+        Object::String(PdfString::literal(STREAM_SECRET.to_vec())),
+    );
+    dict.insert(editor.intern(b"Params"), Object::Dict(params));
+    editor.put_stream(
+        target,
+        StreamData {
+            dict,
+            data: content.to_vec(),
+        },
+    );
+}
+
+/// The two strings [`with_strings_in_a_stream_dictionary`] put on the first
+/// page's first content stream, as `doc` reads them.
+fn stream_dictionary_strings(doc: &CosDocument) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    let page = pages::collect(doc).into_iter().next().expect("a page");
+    let target = pages::contents(doc, &page)
+        .into_iter()
+        .next()
+        .expect("a content stream");
+    let object = doc.get(target).expect("the content stream");
+    let Object::Stream(stream) = object.as_ref() else {
+        panic!("a stream: {object:?}");
+    };
+    let secret = stream
+        .dict
+        .get_string(doc.intern(b"Secret"))
+        .map(|s| s.bytes.clone());
+    let nested = stream
+        .dict
+        .get_dict(doc.intern(b"Params"))
+        .and_then(|params| params.get_string(doc.intern(b"CheckSum")))
+        .map(|s| s.bytes.clone());
+    (secret, nested)
+}
+
+/// 7.6.2: every string is encrypted, and a stream's own dictionary is where
+/// an embedded file's `/Params` `/CheckSum` and `/ModDate`, or a form's
+/// `/PieceInfo`, sit — and the reader decrypts strings there as it does
+/// anywhere. The writer sealed a stream's bytes and wrote its dictionary as
+/// given, so every encrypting save put those strings in the clear, and on
+/// reopening decrypted the clear bytes as if they were ciphertext. Each path
+/// that seals is held to it: a rewrite, one that packs objects, a linearized
+/// one, and an incremental update under the key the document was opened with.
+#[test]
+fn strings_in_a_stream_dictionary_are_encrypted_too() {
+    let content = b"BT /F0 12 Tf 10 50 Td (CONFIDENTIAL CONTENT) Tj ET";
+    let sealed = |object_streams: bool, linearize: bool| -> Vec<u8> {
+        let mut editor = DocumentEditor::new(source());
+        with_strings_in_a_stream_dictionary(&mut editor, content);
+        editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            object_streams,
+            linearize,
+            compress: object_streams,
+            encryption: Some(Encryption {
+                user_password: "open-me".to_string(),
+                owner_password: "owner-me".to_string(),
+                permissions: -1,
+                entropy: entropy(),
+            }),
+            ..WriteOptions::default()
+        })
+    };
+    let mut saves = vec![
+        ("a rewrite", sealed(false, false), "open-me"),
+        ("a rewrite packing objects", sealed(true, false), "open-me"),
+        ("a linearized rewrite", sealed(false, true), "open-me"),
+    ];
+
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../testdata/encrypted-aes256.pdf");
+    let original = std::fs::read(&fixture).expect("the fixture");
+    let doc = CosDocument::open(original.clone()).expect("it opens");
+    doc.authenticate("open-sesame")
+        .expect("the password opens it");
+    let mut editor = DocumentEditor::new(Arc::new(doc));
+    with_strings_in_a_stream_dictionary(&mut editor, content);
+    let updated = editor.save(&WriteOptions {
+        mode: WriteMode::Incremental,
+        ..WriteOptions::default()
+    });
+    assert!(updated.starts_with(&original), "an update appends");
+    saves.push((
+        "an incremental update under the inherited key",
+        updated,
+        "open-sesame",
+    ));
+
+    for (how, bytes, password) in saves {
+        for secret in [STREAM_SECRET, NESTED_SECRET, &b"CONFIDENTIAL CONTENT"[..]] {
+            assert!(
+                !in_the_clear(&bytes, secret),
+                "{how}: {:?} is in the file in the clear",
+                String::from_utf8_lossy(secret)
+            );
+        }
+        let doc = CosDocument::open(bytes).expect("it opens");
+        assert_eq!(doc.authenticate(password), Ok(AuthLevel::User), "{how}");
+        assert_eq!(
+            stream_dictionary_strings(&doc),
+            (Some(STREAM_SECRET.to_vec()), Some(NESTED_SECRET.to_vec())),
+            "{how}: the strings decrypt back to themselves"
+        );
+        let page = pages::collect(&doc).into_iter().next().expect("a page");
+        assert!(
+            String::from_utf8_lossy(&pages::content_bytes(&doc, &page))
+                .contains("CONFIDENTIAL CONTENT"),
+            "{how}: and so does the stream"
+        );
+    }
 }

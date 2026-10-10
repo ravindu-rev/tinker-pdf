@@ -115,6 +115,35 @@ descriptor entry 9.9 Table 126 gives it: `/FontFile2`, `/FontFile3
 /Subtype /OpenType`, or `/FontFile3 /Subtype /Type1C` (`/CIDFontType0C` under a
 composite font).
 
+Under a composite font the **descendant** is chosen by the outlines, not by
+the wrapper: a TrueType program is a CIDFontType2 with `/CIDToGIDMap
+/Identity`, and a CFF — bare, or the `CFF ` table of an `OpenType/CFF` face —
+is a CIDFontType0, with no `/CIDToGIDMap`, because 9.7.4.1 makes a
+CIDFontType0 the CFF-based one and Table 126's note on `/Subtype /OpenType`
+admits that wrapper under a CIDFontType2 only when it carries `glyf`. Until
+October 2026 an `OpenType/CFF` face went out as a CIDFontType2 with
+`/CIDToGIDMap /Identity` — the pairing Table 126 rules out
+(`a_composite_font_over_a_cff_face_is_subsetted` pins the correction).
+
+A **CID-keyed** CFF — bare, or in an OpenType wrapper — goes down the
+composite path too. 9.7.4.2 reads a CIDFontType0's CID through the program's
+charset when the program is CID-keyed, and `/Identity-H` makes the code the
+CID, so the code a glyph is written as is **the CID its charset gives it**:
+`add_cid_font` reads the charset once (`Cff::cid_for_gid`), and
+`PageBuilder::glyphs` and `DocumentBuilder::glyph_run` write each glyph's CID
+rather than its index. `/W` and `/ToUnicode` are keyed by that code and
+measured at the glyph it selects, and a run's pen advances by the same width,
+so the `TJ` adjustments and `/W` still cannot disagree. A glyph past the end of
+the font goes out as CID 0, `.notdef`, rather than as its own number, which
+the charset may give to a glyph that exists. A charset that is **not
+one-to-one** — two glyphs claiming one CID, a glyph after `.notdef` claiming
+CID 0, a charset short of the glyph count — is refused whole, because a glyph
+whose CID another glyph also claims is one no code reaches. Until October 2026
+the bare program was refused and the wrapped one went out as a CIDFontType2
+over the index, which this engine's own reader drew as a CID the font did not
+carry (`a_cid_keyed_cff_in_an_opentype_wrapper_writes_each_glyph_s_cid`,
+`a_cid_keyed_program_the_writer_embedded_draws_the_glyph_it_was_given`).
+
 `set_subset_fonts` (on by default) cuts each program down to the glyphs the
 pages drew, and **glyph identifiers are never renumbered** — which is what
 lets `/Widths`, `/W`, `cmap`, `/CIDToGIDMap` and `/ToUnicode` stay as written.
@@ -150,7 +179,9 @@ procedures and every state of every annotation `/AP` — and leaves whole,
 by name, any program it cannot bound. The encoding needs no repair because
 glyph identifiers are never renumbered; only `/BaseFont`, the descendant's
 `/BaseFont` and the descriptor's `/FontName` move, all three to the same
-9.6.4 name, from the same `subset_tag` this page's builder uses. It is an
+9.6.4 name, from the same `subset_tag` this page's builder uses. A Type 3
+font, which has no program, has the procedures nothing shown runs emptied in
+place instead, its dictionary untouched (October 2026). It is an
 editing operation and lives with the rest of them: see
 [editing](editing.md).
 
@@ -177,7 +208,7 @@ embed one, and the corpus census
 (`crates/tinker-pdf/tests/cff_subset_census.rs`) is what found it: nothing in
 this repository writes a collection, so no fixture here could have.
 
-**WOFF 1.0 and WOFF 2.0** ([W3C REC 2012], [W3C REC 2018]). `woff.rs` unpacks
+**WOFF 1.0 and WOFF 2.0** ([W3C REC 2012], [W3C REC 2024]). `woff.rs` unpacks
 both to the sfnt inside them; nothing else in the crate knows they exist, and
 `Sfnt::parse` is what reads what comes out. The two are not variations on each
 other and the code does not pretend they are.
@@ -208,6 +239,26 @@ spellings are both refused — §4.1's table of 63 known tags, and §4.2's font
 collections. §5 says the result "may produce binary results that are different
 from the original data", so byte identity is not the property claimed for it.
 
+**Every transform the Recommendation defines is reversed.** Checked on 3
+October 2026 against the text of the Recommendation of 8 August 2024
+([W3C REC 2024]), which replaced 2018's at the same address. Clause 5 defines three
+transforms: `glyf` version 0 (§5.1, the `overlapSimpleBitmap` included),
+`loca` version 0 (§5.3) and `hmtx` version 1 (§5.4). §4.1 makes version 3 the
+null transform for `glyf` and `loca` and version 0 the null transform for
+everything else. That is the whole of `transform_kind`. Any other pair —
+`glyf` 1 or 2, `hmtx` 2 or 3, any version but 0 for any other table — is one
+§4.1 answers itself: "If a decoder encounters a table entry that specifies an
+unknown transformation version number the entire font MUST be rejected". So
+`WoffError::UnknownTransform` is that rejection and not a transform this
+build lacks. Reading the text again found one MUST the decoder did not keep:
+§5.3's "both glyf and loca tables must either be present in their transformed
+format or with null transform applied to both tables". A transformed `glyf`
+followed by a null-transformed `loca` was taken with that `loca`'s offsets,
+which index the `glyf` the encoder was handed and not the one §5.1
+rebuilds. A transformed `glyf` with no `loca` at all went out as a face with
+nothing to index its glyphs. Both are refused by name now
+(`a_transformed_glyf_needs_its_loca_transformed_with_it`).
+
 Both are bounded by a caller-supplied ceiling that is **not advisory**: a WOFF2
 directory states its lengths in `UIntBase128`, which reaches 2^32 − 1 in five
 bytes, so a forty-byte file can ask for four gigabytes. Metadata and private
@@ -216,7 +267,7 @@ and reading it would give this crate an opinion about markup that ruling 8 says
 it may not have.
 
 [W3C REC 2012]: https://www.w3.org/TR/WOFF/
-[W3C REC 2018]: https://www.w3.org/TR/WOFF2/
+[W3C REC 2024]: https://www.w3.org/TR/WOFF2/
 
 ## API
 
@@ -383,6 +434,16 @@ the document's own `/Widths` array already says. That is twelve of the standard
 14; Symbol and ZapfDingbats are the other two and are declined rather than
 approximated.
 
+They stay declined because **no face carries their glyphs and metrics under a
+licence `deny.toml` admits**. The gate allows OFL-1.1 and the permissive
+licences, and the faces built to stand in for these two — URW's Standard
+Symbols PS and D050000L, from the base-35 set Ghostscript ships — are
+AGPL-3.0 with a font exception. Liberation, the OFL
+family that answers the other twelve, has neither repertoire. A text face is
+not a fallback either: it puts letters where the document meant arrows and
+check marks. A host holding a face it may use supplies it through
+`FontProvider`, which answers before the bundled set does.
+
 ```toml
 tinker-pdf = { version = "0.0.1", features = ["bundled-fonts"] }
 ```
@@ -460,9 +521,14 @@ Landed so far:
   `BookMetrics` implements it over a book's own `@font-face` faces.
 - **Shaped runs into a document.** `tinker_pdf::shaping` turns a run's clusters
   back into the text each glyph stands for and writes it through
-  `DocumentBuilder::glyph_run`. An Arabic string built that way extracts back
-  to itself through the `/ToUnicode` the writer wrote, across a ligature, and
-  the document is clean under the strict structural validator.
+  `DocumentBuilder::glyph_run`. `write_run` draws its text as one line in
+  visual order — rule L2 over the bidi runs, a right-to-left run from its last
+  cluster to its first — where until ruling 14 it drew every run left to
+  right in logical order, a right-to-left word backwards on the page, and the
+  round trip passed only because extraction read content-stream order. An
+  Arabic string built that way extracts back to itself, in reading order,
+  through the `/ToUnicode` the writer wrote, across a ligature, and the
+  document is clean under the strict structural validator.
 
 - **Shaped values into a form field.** `tinker_pdf_cos::Font::program` walks
   `/DescendantFonts` → `/FontDescriptor` → `/FontFile2` (or `/FontFile3`, or
@@ -474,7 +540,14 @@ Landed so far:
   `/Identity-H`, under an embedded CMap stream, and under a predefined
   registry CMap where this build compiled its table in, because
   `CMap::code_for_cid` inverts the encoding and verifies each candidate
-  forwards before answering. Everywhere else the single-byte path stands and
+  forwards before answering. Since October 2026 three more fonts shape: a
+  **vertical** CMap, written as a column at each CID's own `/W2`
+  displacement with `vert`/`vrt2` applied; a **bare CFF** under a
+  `CIDFontType0`, wrapped per line in a synthesised sfnt whose `cmap` is the
+  font's `/ToUnicode` read backwards and checked forwards
+  (`CMap::code_for_unicode`) and whose
+  `hmtx` is `/W`; and a **simple TrueType** font, each glyph written as the
+  lowest byte its encoding reaches it by, so `GPOS` reaches the field. Everywhere else the single-byte path stands and
   every character it could not write is named by
   `WarningKind::FieldCharacterUnrepresentable`, against the field's own
   object; a registry CMap in a `cmap-predefined`-off build is refused with
@@ -502,13 +575,179 @@ Landed so far:
   `epub_shaped.rs` carries a two-face fixture for it and a left-to-right
   control beside it, because a build that reversed every multi-face run would
   pass the first and set every English sentence with a fallback character in
-  it backwards.
+  it backwards. A **standard-14** segment has no sfnt to shape against and
+  was written a code at a time as typed, so a Hebrew word no face of the
+  book covers was drawn backwards — unseen until ruling 14 read the page and
+  `pg2701-images.epub`'s Hebrew came back reversed. `paint::coded_order` puts
+  a segment holding a right-to-left character in L2's order first
+  (`epub_fallback.rs`); one holding none is written as before at any level,
+  a right-to-left `inside` marker's `1. ` among them. That leaves the `.,`
+  between two right-to-left words drawn as typed and read back reversed, a
+  known limit: setting a segment by its level instead, tried on review, drew
+  that right and reversed every line of neutrals alone in a right-to-left
+  paragraph, which ruling 14 reads in content order, and was taken back on
+  the next. *Found on review* too, it had reversed a character at a time, so a
+  Hebrew point or Arabic haraka left its letter. A letter and the
+  nonspacing marks after it are now one unit, the marks drawn after the
+  letter in either direction. With no `GPOS` to position a mark, the painter
+  states where it stands: a mark has no advance (the overflow font measures
+  one at zero, `paint::standard_width`, in layout and in its `/Widths`; the
+  Liberation stand-in's have none), takes no `letter-spacing` of its own (a
+  letter and its marks are one typographic character unit, `css-text-3`
+  §10.2, in layout and every painter alike), and is drawn inside its
+  letter's box, its own box ending a millionth of an em past where layout
+  measured the letter to end — a stand-in's letter carrying a mark is drawn
+  where layout put it, a piece of its own — in one text object with the rest
+  of its slice (`PageBuilder::text_pieces`), where ruling 14 reads it with
+  its letter at every size and spacing [epub.md](epub.md) lists, four to a
+  letter as well. In such a slice the glyph after the overflow font's code
+  32, which 9.3.3 moves by `Tw`, is a piece of its own too, so no letter of
+  it is drawn over another under `word-spacing`; a slice with no mark is
+  drawn as before, CD-19's overprint and all, in a book that holds marks too
+  (ROADMAP CD-19, [epub.md](epub.md)). A run that
+  ends on a mark is cut past half an em and a millionth of spacing; after a
+  simple font's letter alone, past half an em or at it by a last place, and
+  after a stand-in's, within half a thousandth of an em of it by its `/W`'s
+  rounding.
+  Until October 2026 an overflow-font mark was as wide as a letter: a lone
+  one sat at an exact tie between its letter and the glyph drawn next, and a
+  letter's second was read with the next glyph — CI's `epub-corpus` job
+  (run 38041540464) stopped at the FATHATAN of an Arabic book's `يًّا` —
+  while a stand-in point, drawn where its letter starts, was moved off it by
+  `letter-spacing` ([epub.md](epub.md)'s `direction` row). Drawn next in a
+  text object of its own (6d79fa4), a mark left the glyph after it every
+  spacing past a reader's pen, and a pointed word read a letter a line from
+  a quarter of an em of spacing, and drawn a hundredth inside a stand-in's
+  letter (bf081ca) a run ending on it was cut from `0.491em`. What is left
+  against cd407d5, measured on synthetic books and named with its arithmetic
+  and pinned in [epub.md](epub.md), is two classes. **A**, at a spacing
+  within a thousandth of an em of half an em: there a run boundary is cut or
+  not by the last place of a reader's sum and a painter's, marks or none, and
+  a pointed word, as wide as the unpointed word now, puts its last places
+  elsewhere than at cd407d5 (`<p dir="rtl">كَتَبَ كتب …</p>` at `0.5em`, which
+  reads as its mark-free twin does); and with `bundled-fonts`, cd407d5 drew
+  a stand-in's mark a spacing past its letter, so a run ending on one was cut
+  only past half an em and a thousandth, and is cut past half an em and a
+  millionth now. **B**, a pointed word narrower than at cd407d5: its
+  paragraph breaks its lines where the unpointed paragraph does, and a line
+  so broken can fall into one of ruling 14's named limits, as the unpointed
+  paragraph's does.
 
-  One limit remains, named rather than implied: **the unit is the `TextRun`
-  and not the visual line.** `flow.rs` breaks lines over logical text and
-  resolves no levels, so a right-to-left line made of two styled spans is two
-  runs at two `x`s the painter did not choose. Closing that means resolving
-  levels above the line breaker, which is a change to the layout crate.
+  **And a third level since October 2026: the visual line.** `flow.rs`
+  breaks lines over logical text and resolves no levels, so a right-to-left
+  line made of two styled spans was two runs laid left to right in the order
+  written. `paint::visual_lines` resolves UAX #9 over each visual line's whole
+  text after layout and lays its runs out again in L2's order, each at its own
+  measured width, so the line's extent and alignment do not move; drawing,
+  links and tags all read the one placement. A line is consecutive runs whose
+  ends meet on one baseline, which is how `flow.rs` places a line; a line with
+  no right-to-left character is not touched. Inside a run, the pieces
+  `word-spacing` cuts it into (every justified line but the last) are laid
+  in L2's order too, each paying its space where the space is drawn; *found
+  on review*, they had been drawn in written order, so a justified Arabic
+  paragraph read backwards line by line.
+
+- **Shaping across a span.** A styled span is a run of its own and a run
+  shaped alone sees nothing either side of it, so a word with a coloured
+  letter was drawn as isolated letters and a glyph its neighbour positions — a
+  mark, the second glyph of a pair — lost the offset. The painter now shapes
+  each run against up to eight characters of its logical neighbours where
+  they **touch it on its line** and resolve to the same embedded face
+  (`Fonts::set_contexts`), and draws only its own glyphs, placed relative to
+  the first of them. *Corrected on review*: the first version took any
+  neighbour within a font size of the run's baseline, which at a
+  `line-height` of 1 or less is the next line, and joined an Arabic word to
+  the line below; and a context in the other direction could put its glyphs
+  between the run's own, which overprinted the neighbour — such a run is now
+  shaped alone.
+
+  **And layout measures each run in that context** (October 2026's eighth
+  wave). It measured each run alone, so a context that changed an advance —
+  a joined form wider than the isolated one, a pair that kerns — left the
+  difference between the run and the next, and the line breaker never saw
+  it. The `Shaper` seam in `tinker-pdf-layout` takes a context now
+  (`Shaper::shape_in`, with a default that ignores it for every provider
+  that has none): each run's painted neighbours on its line, text and face
+  request, the line's ends and atomic boxes and generated content stopping
+  it, and the slices the line breaker measures between break opportunities
+  take the rest of their own span as theirs. `BookMetrics` applies a
+  neighbour only where both sides of the boundary resolve to one embedded
+  face and shapes the run with up to eight of its characters either side —
+  `one_embedded_face` and `CONTEXT_CHARS` are the painter's own — keeping its
+  own glyphs. `epub_shaped.rs` holds a kerned pair across a span (`V` 5.4 pt
+  after `A`, a 500-unit advance less 200 at 18 pt), a joined form wider than
+  the isolated one (12.6 pt each, not 9), the line breaker setting four
+  kerned words on a measure the unkerned ones overflow, and a mixed-direction
+  line cut and measured in one context; `tinker-pdf-layout/tests/shaper.rs`
+  holds the seam with a provider whose answer depends on its neighbour.
+
+  **A run that mixes directions is cut at its line's level boundaries**
+  (`paint::split_at_levels`, October 2026's eighth wave). A run is one
+  element's text on one line, and `a ب<span>ح</span>م b` is three runs of
+  which two mix directions; each had been one unit of the line's reordering,
+  ordered inside itself by its own P2 and P3, so the Arabic word was drawn
+  in the order it was typed. The line's whole text is resolved, every run
+  is cut wherever the level changes inside it, and each piece takes its
+  share of the run's measured width — the run shaped once, as layout shaped
+  it, each glyph's advance to the piece its cluster starts in, the last
+  piece taking what the others leave — so the line's extent does not move. A
+  character X9 removes takes the level of the one before it, so a joiner does
+  not cut its word. A slice shaped with a context is shaped in its **own**
+  paragraph direction: ` b` after the Arabic word its line draws before it
+  had been shaped as part of a right-to-left paragraph and drawn `b` first.
+  `epub_shaped.rs` holds the positions against the face's `hmtx` and UAX #9's
+  levels worked out by hand.
+
+  **Corrected on review: the levels are the paragraph's, not the line's.**
+  Each visual line had been resolved as a paragraph of its own, so a weak or
+  neutral character at a line's start or end was resolved against `sos` or
+  `eos` rather than the strong character on the line before or after, and
+  where a line wrapped changed its order: `abc (de` in a right-to-left
+  paragraph drew `de(` on its second line where unwrapped it draws `(de`.
+  Layout now numbers the bidi paragraph every run is set in
+  (`TextRun::paragraph`: a block's inline content up to a forced break of
+  `Bidi_Class` `B` — a preserved newline, CR, NEL or U+2029, and not a
+  U+2028 line separator, which ends the line and not the paragraph,
+  `css-writing-modes-3` §2.4), and
+  the painter resolves each paragraph once over every line of it, across
+  pages, and takes each line's levels from `Paragraph::line` — X1 to I2 the
+  paragraph's, L1 and L2 the line's
+  (`a_wrapped_line_is_ordered_by_its_paragraphs_levels`). The white space a
+  line's end hangs is in no run and so not in the resolved text; it is a
+  neutral that L1 resets anyway. A line whose runs are not all of one
+  paragraph — an inline block's own text touching the line it sits in — is
+  resolved by itself.
+
+  **The paragraph's level is the block's `direction`, and an inline box's
+  `unicode-bidi` opens one** (`css-writing-modes-3` §2, October 2026's eighth
+  wave). Every line had been resolved by its own P2 and P3, so a
+  left-to-right paragraph whose line began with an Arabic word was laid out
+  right to left. A run carries its paragraph's direction and the embeddings
+  its inline ancestors open (`TextRun::paragraph_rtl`, `TextRun::embeddings`),
+  and the line is resolved with those as `LRE`/`RLE`/`LRI`/`RLI`/`FSI` …
+  `PDF`/`PDI` written into the text UAX #9 reads and nowhere else, two
+  sibling boxes' isolates told apart by the box that opened each. A cut piece
+  remembers its level (`TextRun::bidi_level`) and is drawn and shaped in
+  that level's direction: a run of neutrals has no strong character to say
+  which way it reads, and read by its own text the space and `!` ending a
+  right-to-left paragraph were drawn ` !`. A `plaintext` block's paragraphs
+  ask the metrics provider for their first strong character
+  (`Metrics::first_strong`), which `BookMetrics` answers from the vendored
+  `Bidi_Class`.
+
+- **A book's feature settings reach the shaper** (October 2026's eighth
+  wave). `tinker_pdf_shape::Shaper::with_settings` switches features on or
+  off **over** the plan a run gets, where `with_features` replaces it: a
+  feature set to `0` leaves every stage it is in and the positioning list,
+  and one set on that the plan lacks joins the last substitution stage and
+  the positioning list — both, a tag saying nothing about which table holds
+  its lookups — so a joining run asked for `smcp` keeps its staged forms. The
+  last setting of a tag wins. The EPUB path hands it `font-kerning: none` as
+  `kern` off and `font-feature-settings` after it, `css-fonts-4` §7.2's
+  order, through the run's `FontRequest`, so layout measures with the
+  settings the painter draws with. A setting above one is an alternate index
+  this crate's alternate substitution does not take, and is refused before it
+  arrives.
 
 - **`GPOS` offsets reach the page.** They did not, and it was a **silent**
   defect: `PageBuilder::glyphs` writes one hex string at one origin, so a mark
@@ -544,10 +783,10 @@ the fixture behind it, and the scripts divide in five:
 | Script | What is behind it |
 |---|---|
 | Latin, Ethiopic | text-rendering-tests sections `CMAP-1`, `CMAP-2`, `GSUB-1`, `GSUB-2`, `GPOS-1`–`GPOS-4`: 48 cases, 38 of them discriminating against an implementation with no shaper at all |
-| Hebrew, Arabic and every other bidirectional script, for **direction only** | `BidiTest.txt` and `BidiCharacterTest.txt` in full — 861 948 resolutions. This says the levels and the visual order are right; it says nothing about the glyphs |
+| Hebrew, Arabic and every other bidirectional script, for **direction only** | `BidiTest.txt` and `BidiCharacterTest.txt` in full — 861 948 resolutions — both again through `bidi::order_units` (the drawing direction for a line given as units), and every visual order `BidiCharacterTest.txt` states read back through `bidi::logical_order`, the entry point text extraction calls (ruling 14): all a permutation, all but three drawing the stated line, 90 947 of 91 616 the file's own text and each of the rest holding a bracket pair. This says the levels and the visual order are right; it says nothing about the glyphs |
 | Arabic *shaping* | `SHARAN-1`: six words of Urdu in Nasta‘līq, all six reproduced glyph for glyph and position for position. It is the corpus's only Arabic-script section, so joining, `rlig` and cursive attachment are adjudicated **for one face of one style of one language**. Naskh, and the vowelled Arabic of a Qur'an, have no fixture here |
 | Balinese, Kannada, Tai Tham | `SHBALI`, `SHKNDA`, `SHLANA`: 333 cases, of which **301 are reproduced and 32 are not**. Seven of the sixteen sections pass whole. `crates/tinker-pdf-shape/tests/text_rendering.rs`'s `PASSING` holds the number per section and is a ratchet — it may rise and may not fall, and its `TRIAGE` says of each remaining failure whether the glyph *set*, their *order* or only a *position* is wrong |
-| Every other Brahmic and Southeast Asian script — Devanagari, Bengali, Gujarati, Gurmukhi, Malayalam, Odia, Sinhala, Tamil, Telugu, Myanmar, Khmer, Lao, Thai, Javanese, Sundanese, Tibetan, Tagalog and the rest — and Syriac, N'Ko, Mongolian, Adlam, Thaana, Mandaic, Hanifi Rohingya, Phags-pa | **shaped, and unverified.** The cluster model runs over them because it is driven by the Unicode properties rather than by a list of scripts — and so, since milestone 5 closed, does the canonical decomposition, which reaches every two-part vowel in Devanagari, Bengali, Oriya, Tamil, Telugu, Malayalam and Sinhala. No fixture in either vendored corpus contains a face for any of them. What that produces is deterministic and plausible; nothing in this repository says it is right |
+| Every other Brahmic and Southeast Asian script — Devanagari, Bengali, Gujarati, Gurmukhi, Malayalam, Odia, Sinhala, Tamil, Telugu, Myanmar, Khmer, Lao, Thai, Javanese, Sundanese, Tibetan, Tagalog and the rest — and Syriac, N'Ko, Mongolian, Adlam, Thaana, Mandaic, Hanifi Rohingya, Phags-pa | **shaped, and unverified.** The cluster model runs over them because it is driven by the Unicode properties rather than by a list of scripts — and so, since milestone 5 closed, does the canonical decomposition, which reaches every two-part vowel in Devanagari, Bengali, Oriya, Tamil, Telugu, Malayalam and Sinhala. No fixture in either vendored corpus contains a face for any of them, and a search of both corpora's upstreams and of HarfBuzz's suite on 3 October 2026 found none that ruling 13 admits (below). What that produces is deterministic and plausible; nothing in this repository says it is right |
 
 Three things milestone 5 **closed**, and the largest of them was not on the
 list of what was wrong:
@@ -706,6 +945,24 @@ on a run that computes syllables instead. Neither has a fixture in either
 vendored corpus, so implementing either would be adding behavior nothing here
 could show was right.
 
+**Searched for once, on 3 October 2026, and nothing found is admissible.**
+Unicode's text-rendering-tests at `26cfb96` — the commit vendored here, and
+its head that day — has no shaping section beyond the seventeen already
+vendored (`SHARAN`, `SHBALI`, `SHKNDA`, `SHLANA`); every other section tests a
+font format (`AVAR`, `CFF`, `GVAR`, `MORX` and the like). HarfBuzz's suite at
+`3c4d303` has in-house cases in eighteen of the scripts this page lists as
+unverified — one of them Syriac, none Sundanese, N'Ko, Thaana, Mandaic,
+Hanifi Rohingya or Tagalog — and none of them can be a fixture here, for two
+reasons that each suffice. Their expected glyphs and positions are
+**recorded by running `hb-shape`** (`test/shape/record-test.sh`), so adopting
+them would make another shaper's output the expected answer, which ruling 13
+forbids by name; text-rendering-tests and aots are admissible because a person
+wrote their expectations. And the faces carry no licence to vendor under: of
+the ones those cases use, two state an open licence in their `name` table, and
+several are macOS system faces the HarfBuzz repository does not contain
+either. HarfBuzz's own `aots` and `text-rendering-tests` directories are the
+two corpora already vendored here. So every name stays on the list.
+
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
@@ -713,15 +970,16 @@ could show was right.
 | Shaping **while reading a PDF**: `TJ` arrays are honored as written | none — the producer positioned every glyph and re-shaping them would be wrong | Permanent, and the only half of the old non-goal that survived; the producing half is `tinker-pdf-shape`, below | [shaping](../design/shaping.md) |
 | A CFF whose `callsubr` operand is not the token before the call, or that calls a subroutine it does not carry, or whose subroutine calls itself, or that declares `CharstringType 1` | `SubsetRefusal::ProgramNotRebuildable`; the whole face is embedded | Each needs the subsetter to invent what the font meant, and a broken subset renders *almost* right | this page |
 | A CFF subset that comes out no smaller than the face | `SubsetRefusal::SubsetNotSmaller`; the whole face is embedded | A producer's own subset has nothing left to remove, and the face is also the one it tested | this page |
-| A **CID-keyed** CFF under `add_cid_font` | `add_cid_font` returns false | Its charset maps a CID onto a glyph and the two are different numbers; `PageBuilder::glyphs` addresses glyphs, and `/Identity-H` would make every one of them a CID (9.7.4.2) | this page |
-| Symbol and ZapfDingbats when nothing embeds them | `RenderWarning::UnreadableFont`, in a `bundled-fonts` build too | Liberation has no equivalent, and a text face drawn for a symbolic font puts letters where the document meant arrows | this page |
+| A **CID-keyed** CFF under `add_cid_font` whose charset is not one-to-one | `add_cid_font` returns false | 9.7.4.2 reads a CID through the charset, which answers with the first glyph claiming it, so a glyph whose CID another also claims is one no code reaches. A one-to-one charset is accepted and each glyph written as its CID (October 2026) | this page |
+| EPUB text past 224 characters outside `WinAnsiEncoding` in one standard face, in a build **without** `bundled-fonts` | `ArchiveWarning::UnrepresentedCharacters` | a simple font has 256 codes and that build carries no face to key a composite font to; with the feature, the Liberation stand-in is embedded as an `/Identity-H` composite font for every character it covers | [epub](epub.md) |
+| Symbol and ZapfDingbats when nothing embeds them | `RenderWarning::UnreadableFont`, in a `bundled-fonts` build too | No face with their repertoire and metrics is under a licence `deny.toml` admits — URW's base-35 stand-ins are AGPL-3.0 with a font exception — and a text face drawn for a symbolic font puts letters where the document meant arrows. A host's `FontProvider` may supply one | this page |
 | A CID the descendant font does not carry | `.notdef` drawn + `RenderWarning::UnreadableFont`; extraction: `TextWarning::UnknownFont` | Drawing whichever glyph the code happens to number is the invisible failure | this page |
 | A predefined CMap name outside Adobe's registry | `WarningKind::PredefinedCMapUnknown` | A guessed codespace mis-splits the string, so glyphs *and* advances go wrong silently | [rulings](../rulings.md) ruling 10 |
 | Registry CID tables in a `cmap-predefined`-off build | `WarningKind::PredefinedCMapApproximate`, `CMap::is_approximate` | Codespaces still ship (4.6 KB) so strings split right; the CIDs are admitted guesses | this page |
 | A `usecmap` parent that cannot be resolved | `WarningKind::CMap(cmap::Warning::ParentUnresolved)` | The child keeps what it declared itself rather than inheriting from nothing | 9.7.5.3 |
 | A `usecmap` chain past 4 links, or one that revisits a source | `cmap::Warning::ParentChainCapped`, `cmap::Warning::ParentCycle` | The names come out of the document; being finite is the property that matters (ruling 1) | [rulings](../rulings.md) |
 | A truncated CMap mapping section | `cmap::Warning::SectionUnterminated(Section)` | What parsed is kept and the section is named, so partial coverage is visible | [rulings](../rulings.md) ruling 10 |
-| TrueType and Type 2 hinting | none — outlines are unhinted by design, not degraded | The bytecode interpreter makes small text differently wrong; subset output keeps `cvt `/`fpgm`/`prep` for readers that disagree | this page |
+| TrueType and Type 2 hinting | none — outlines are unhinted, not degraded | The bytecode interpreter makes small text differently wrong; subset output keeps `cvt `/`fpgm`/`prep` for readers that disagree. Stem darkening, the bytecode interpreter, CFF hints and an autohinter are roadmap rows since 9 October 2026, the small-text judgement a person's | [ROADMAP](../ROADMAP.md) FT-04a…FT-04d |
 
 ## Verified
 
@@ -762,11 +1020,14 @@ could show was right.
   `checkSumAdjustment` this build recomputed correctly. For WOFF 1.0 from the
   producer that preserved the table order it is **byte identity** with the
   source face. Nine counted injections.
-- `crates/tinker-pdf-font/src/woff/tests.rs` — 18 tests over the parts no
+- `crates/tinker-pdf-font/src/woff/tests.rs` — 19 tests over the parts no
   committed file reaches: §3.1's three legal spellings of 506, `UIntBase128`'s
   two forbidden ones, the known-tag table, an unknown tag carried through, the
-  three tables whose legal transform versions differ, and the ceiling refused
-  before a byte is decompressed. 22 counted injections, and one deliberate
+  three tables whose legal transform versions differ, a transformed `glyf`
+  refused without its transformed `loca` (fontTools' file taken apart and
+  rebuilt three ways), and the ceiling refused before a byte is
+  decompressed. 22 assertions fire in the module's counted campaign and 5
+  in the `loca` pairing test's own four injections, and one deliberate
   **non**-refusal — WOFF 2.0 §3.2 says a decoder "MUST NOT reject" a file for
   a non-zero reserved field or a `totalSfntSize` that disagrees, where WOFF 1.0
   §3 and §4 say it MUST reject both.
@@ -776,7 +1037,9 @@ could show was right.
   eight must be refused, both asserted by number; 8 509 prefixes and 11 988
   single-byte flips reach an answer rather than a panic (ruling 1).
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
-  code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect.
+  code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
+  and a CID-keyed program this engine's writer embedded drawing the glyph it
+  was given, bare and in an `OTTO` wrapper.
 - `crates/tinker-pdf-font/src/cff_subset/tests.rs` — 21 tests over fonts built
   byte by byte: local and global subroutine renumbering, a global subroutine
   reached from two Font DICTs, `hintmask` counting stems a subroutine declared,
@@ -788,8 +1051,12 @@ could show was right.
   rewritten charstring against a byte string derived from the renumbering rule
   rather than read back from the subsetter.
 - `crates/tinker-pdf-cos/tests/cff_subsetting.rs` — the writer end: the 9.6.4
-  tag, the Table 126 descriptor entry for each of the three shapes, `/W` from
-  the original program, and each `SubsetRefusal` reported by name.
+  tag, the Table 126 descriptor entry for each of the three shapes, the
+  CIDFontType0 descendant over a `CFF ` table, `/W` from the original
+  program, each `SubsetRefusal` reported by name, and a CID-keyed program's
+  glyphs written as their CIDs — in the string, `/W` (sorted by CID over a
+  charset that runs backwards) and `/ToUnicode` — with a charset two glyphs
+  share refused.
 - `crates/tinker-pdf/tests/cff_subset_census.rs` — every CFF face in the
   fetched corpora cut to nine glyphs: 480 files, 3 313 faces (551 CID-keyed,
   2 735 bare simple, 27 `OpenType/CFF`), 3 311 rebuilt and 2 refused, 25.3 MB
@@ -837,8 +1104,8 @@ could show was right.
   under `/FontMatrix`; `vertical_metrics.rs` — `/W2` both forms, the `/DW2`
   default, and the position vector; `substitute_fonts.rs` — the
   `FontProvider` seam, including declining symbolic fonts.
-- Fuzzing: five of the 24 fuzz targets exercise this feature — `cff`,
-  `cmap`, `sfnt`, `truetype`, `type1` (ruling 1).
+- Fuzzing: seven of the 51 fuzz targets exercise this feature — `cff`,
+  `cff_subset`, `cmap`, `sfnt`, `truetype`, `type1`, `woff` (ruling 1).
 - Determinism: the `text` fixture among the 15 render fingerprints in
   `crates/tinker-pdf/tests/determinism.rs` embeds a synthetic six-glyph face
   built in the test itself and pins glyph rasterisation bit-for-bit across

@@ -6,9 +6,61 @@ fingerprint, render quality is a perceptual budget, coverage of the real
 world is a ratcheted corpus run, and a claim nothing executes is written
 down as a claim.
 
-Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 23 September 2026. `cargo test --workspace --no-fail-fast`
-is **5 030 passed, 0 failed, 60 ignored** across 221 suites on
-`x86_64-pc-windows-msvc`, 26 September 2026, two lanes' work merged. Ten of
+Numbers on this page were measured in August 2026, except the fuzz sessions and the corpus attributions below, which are 5-6 September 2026, and the suite total, which is 9 October 2026. `cargo test --workspace`
+is **6 819 passed, 0 failed, 63 ignored** across 289 suites on
+`x86_64-unknown-linux-gnu` — 245 integration-test files, 24 unit-test
+binaries and 20 doc-test runs, every file accounted for — measured on
+`develop` with the eighth wave merged after five rounds of review: a stroke
+under a stretching transform drawn with its user-space pen, CMYK ink on an
+ink page, CIE spaces on write and CIELab TIFF; HTML that is not XML parsed
+as WHATWG §13.2 parses it and held to html5lib, FB2 in single-byte
+encodings, SVG at-rules and text's measured box; EPUB direction and
+`unicode-bidi`, context-aware shaping, font features, soft hyphens, CSS
+gradients and `<br>` as a forced break; redaction through mask groups,
+tiling cells and editor-only fonts, the CLI's save refusals asked of the
+facade, PDF 2.0 `/AF` on annotations, forms and the structure root, and a
+page-label list handle across the C ABI. Before that it was 6 561 across
+281, with the seventh wave merged after its review: PDF/UA validation
+through the facade with every undecided clause named, eight more PDF/A rule
+classes, PDF/X 2003 from the CGATS notes; reading order and tables inferred
+on request and labelled as inferred; and the owed binding projections with
+Go, Ruby and Java over the C ABI. The three new corpus censuses are ignored
+here and run nightly. Before that it was 6 296 across 271, with the sixth
+wave merged after its review: EPUB paint effects,
+counters, `text-transform` and the layout refusals; tagged writing, PDF 2.0
+namespaces, page output intents and associated files; and ruling 14's
+logical-order extraction, shaped form fields and CID-keyed fallback text.
+Before that it was 6 084 across 266, with signatures (RSASSA-PSS, unattributed signers,
+`adbe.pkcs7.sha1`, `GeneralNames`, RFC 3161 tokens, document timestamps, the
+security store, sealing to certificates), standalone documents, HTML and
+Markdown and FB2 as documents, the CLI's write half, appearance synthesis for
+further annotation subtypes, and SVG, XPS and CID-keyed CFF work merged after
+their review. The step before merged redaction's second pass, the image
+codecs and the retained page — a vertical run measured by `/W2`, a Type 3
+font's own matrix, appearance and glyph-procedure streams rewritten and a
+form cut per placement; BMP, GIF, WebP and the TIFF extras; and a display
+list, PDF to SVG, tiles at every scale and opt-in image recompression — and
+the figure published for it, 5 720 across 269, is withdrawn: that tree had
+250 test targets by the same count, so 269 is not what one run of it
+reports, and the pass total read beside it is not trusted either. Before
+that it was 5 445 across 245,
+with the archive coders — BCJ, bzip2, PPMd var.H, BCJ2 and Zstandard — merged
+after their review, on top of the batch's second wave, which was 5 378 across 244 and itself merged
+after its adversarial review — the editor's document operations,
+sanitise and stream deduplication; field creation, FDF and XFDF, a visible
+signature and the annotation payloads; and Separation and DeviceN, named
+destinations, layers, stamping and image extraction on write and read. Before
+that it was 5 159 across 227, with the first wave of the 26 September batch
+merged — ZIP method 14, JPEG 2000 comic pages, XHTML's
+named character references, interleaved XPS packages, words, search options,
+hyphen rejoining, structured text as JSON, XML and HTML, a PNG read back into a
+`Bitmap`, three render options and a form or annotation rendered alone. It is
+the first total taken on Linux rather than Windows; that is a statement about
+where it was counted and not a determinism claim, which the fingerprints make.
+
+Before that batch it was **5 030 passed, 0 failed, 60 ignored** across 221
+suites on `x86_64-pc-windows-msvc`, 26 September 2026, two lanes' work merged.
+Ten of
 the twenty-nine tests since 4 999 are the facade's save path — the font policy,
 the three-valued `SubsetOutcome`, and the rewrite-path census, which is the
 sixtieth ignored test because it walks the fetched corpora.
@@ -54,11 +106,12 @@ number this page keeps in step.
 
 ## Never panic, fuzz-enforced
 
-Ruling 1 makes a fuzz crash a release blocker. **39 cargo-fuzz targets**
+Ruling 1 makes a fuzz crash a release blocker. **50 cargo-fuzz targets**
 cover every input format, each landing in the same PR as its parser. The
 list is not written out here any more, and that is deliberate: this sentence
-has carried the wrong number twice — it said 33 when there were 38, then 38
-when there were 39, and the 38-name list it carried was missing `woff`.
+has carried the wrong number three times — it said 33 when there were 38,
+then 38 when there were 39, then 39 when there were 46 — and the 38-name list
+it carried was missing `woff`.
 
 `cargo run -p xtask -- fuzz` prints the roster instead, derived from
 `fuzz/fuzz_targets/`, `fuzz/corpus/` and `fuzz/Cargo.toml` and failing if the
@@ -76,12 +129,15 @@ and no other check in the pipeline would see it — the embed path takes the
 bytes and writes them into a `/FontFile3`. 
 ### The roster, and whether the seeds reach the code
 
-<!-- Generated by `cargo run -p xtask -- fuzz --table`. 39 targets, 410 seeds. -->
+<!-- Generated by `cargo run -p xtask -- fuzz --table`. 51 targets, 538 seeds. -->
 
 | Target | Seeds | Control prefix | Signature check |
 | --- | ---: | ---: | --- |
+| `annotation_appearance` | 11 | — | unsignatured |
 | `ascii_filters` | 6 | — | unsignatured |
+| `bmp` | 7 | 1 byte | 7/7 carried |
 | `brotli` | 46 | 1 byte | unsignatured |
+| `bzip2` | 5 | 1 byte | 5/5 carried |
 | `ccitt` | 12 | 2 bytes | unsignatured |
 | `cff` | 4 | — | unsignatured |
 | `cff_subset` | 4 | — | unsignatured |
@@ -91,34 +147,43 @@ bytes and writes them into a `/FontFile3`.
 | `cos_object` | 7 | — | unsignatured |
 | `crypt` | 7 | — | unsignatured |
 | `crypt_ciphers` | 4 | 2 bytes | unsignatured |
-| `css` | 7 | 1 byte | unsignatured |
+| `css` | 10 | 1 byte | unsignatured |
+| `fb2` | 3 | 1 byte | unsignatured |
+| `form_data` | 12 | — | unsignatured |
 | `form_script` | 18 | — | unsignatured |
+| `gif` | 6 | 1 byte | 6/6 carried |
+| `html` | 12 | 1 byte | unsignatured |
 | `icc_profile` | 6 | — | 6/6 carried |
 | `inflate` | 4 | — | unsignatured |
 | `jbig2` | 23 | 1 byte | unsignatured |
 | `jpeg` | 6 | — | 6/6 carried |
 | `jpx` | 25 | 1 byte | 25/25 carried |
 | `jxr` | 42 | 1 byte | 42/42 carried |
-| `layout` | 6 | 2 bytes | unsignatured |
+| `layout` | 9 | 2 bytes | unsignatured |
 | `lzw` | 3 | — | unsignatured |
-| `pki_cms` | 10 | — | unsignatured |
+| `markdown` | 4 | — | unsignatured |
+| `pki_cms` | 12 | — | unsignatured |
 | `pki_der` | 13 | — | unsignatured |
 | `png` | 5 | 1 byte | 5/5 carried |
+| `ppmd` | 4 | 3 bytes | 4/4 carried |
 | `rar` | 7 | 1 byte | 7/7 carried |
-| `render_page` | 15 | — | unsignatured |
-| `sevenz` | 7 | 1 byte | 7/7 carried |
+| `render_page` | 16 | — | unsignatured |
+| `sevenz` | 11 | 1 byte | 11/11 carried |
 | `sfnt` | 5 | — | 5/5 carried |
 | `shape` | 9 | 2 bytes | unsignatured |
 | `shape_text` | 6 | 2 bytes | unsignatured |
 | `signatures` | 5 | — | unsignatured |
-| `svg` | 18 | 1 byte | unsignatured |
+| `standalone` | 12 | 1 byte | unsignatured |
+| `svg` | 28 | 1 byte | unsignatured |
 | `tar` | 8 | 1 byte | 8/8 carried |
-| `tiff` | 7 | 1 byte | 7/7 carried |
+| `tiff` | 14 | 1 byte | 14/14 carried |
 | `truetype` | 7 | — | 7/7 carried |
 | `type1` | 2 | — | unsignatured |
+| `webp` | 10 | 1 byte | 10/10 carried |
 | `woff` | 13 | — | 13/13 carried |
-| `xml` | 12 | 1 byte | unsignatured |
-| `zip_archive` | 5 | 1 byte | 5/5 carried |
+| `xml` | 15 | 1 byte | unsignatured |
+| `zip_archive` | 8 | 1 byte | 8/8 carried |
+| `zstd` | 6 | 1 byte | 6/6 carried |
 
 **"Control prefix" is the number of bytes the target takes off the front
 before decoding**, parsed out of its own `split_at(data.len().min(N))` rather
@@ -1456,8 +1521,8 @@ been.**
 ## Bounds are measured against real inputs
 
 Every hardening cap is a row in
-`crates/tinker-pdf/tests/bounds_ledger.rs` — **44 rows**, each carrying a
-figure for a real book, comic and document rather than a guess. Forty-one of
+`crates/tinker-pdf/tests/bounds_ledger.rs` — **65 rows**, each carrying a
+figure for a real book, comic and document rather than a guess. Sixty-two of
 those figures are measurements or arithmetic about a plausible file; the
 three JBIG2 count-and-total rows publish the word **estimate** in the number
 itself, because their caps were derived as arithmetic about a plausible scan
@@ -1513,24 +1578,49 @@ fix was to sharpen the injection rather than to shrug at the number.
 
 ## Tools
 
-- **`tpdf`** (`tools/tpdf`): debug CLI over the facade — `info`, `text`,
-  `render`, `fields`, `outline`, `objects`, `check`, `probe`. `check --strict`
+- **`tpdf`** (`tools/tpdf`): the CLI over the facade. Ten commands read —
+  `info`, `text`, `render`, `fields`, `fonts`, `images`, `outline`,
+  `objects`, `check`, `probe` — and eight write: `merge`, `split`, `rotate`,
+  `encrypt`, `decrypt`, `attach`, `stamp`, `sanitise`. `check --strict`
   runs the validator and exits by its verdict; `probe` is what the corpus
   runner spawns, and its record carries the strict pass. `render` writes
   `<stem>-NNNN.png` through `Bitmap::to_png` — PNG always, with no flag for
   anything else: it wrote binary PNM until the encoder existed, and a debug
   tool with two output paths has one that is rarely taken and eventually
-  wrong.
+  wrong. The writers are wrappers over editor calls that save through
+  `write::save`, so each takes `--font-policy` and subsets by default
+  (`tools/tpdf/src/writing.rs`). Their tests call each command's function
+  rather than spawning the binary, reopen what it wrote through the facade
+  and hold it to the strict validator: pages and text in order after a merge,
+  a resource three pages share written once, a split piece carrying none of
+  the pages it left out, rotations on top of the existing turn, a whole face
+  cut by default and kept byte for byte under `keep`, each password opening
+  an encrypted file with its own authority and the same `--entropy` giving
+  the same bytes, an owner's restriction refusing `decrypt` from the user, an
+  attachment's bytes and `/Subtype` back as given, a stamp's text over or
+  under the page's, and each thing `sanitise` takes out gone from every
+  stream — each of its four flags alone taking out only what it names, so a
+  permutation of their mapping fires, and no flag at all refused. Fourteen
+  defects put back one at a time each fire one assertion or two. The image flags are held the same way: no flag leaves every stream as
+  stored, `--images flate --bilevel g4` gives back exactly the samples
+  written, `--max-ppi 36` halves a 72 ppi image and names the one-bit image
+  it would not box-filter, and `--images jpeg` writes `DCTDecode` with the
+  tables named; five defects put back fire one each. What a writer would
+  have ignored is refused with nothing written — a flag it does not take
+  (`rotate --fonts keep` subset the face it was asked to keep until it was),
+  `--password` on an input that is not encrypted, and a page or a split
+  piece the list names twice — and four defects put back fire one each.
 - **`pdfcmp`** (`tools/pdfcmp`): the canonical perceptual comparator. Gates
   on the fraction of pixels where any channel moves more than a threshold —
   a glyph moving one pixel barely moves a mean, so the metric is changed
   pixels, not mean difference. `--diff` writes a per-pixel heat map beside
   the verdict, because a number that fails without a picture wastes a
-  human's morning. It reads a `.pnm` or a `.pdf` and **not** a `.png`, so
-  `tpdf render`'s output no longer feeds it directly; reading one would need a
-  PNG decoder, and `xtask`'s `TOOLS` table keeps a tool to the facade, which
-  publishes an encoder and no decoder. The seam is a [ROADMAP](ROADMAP.md) row
-  rather than a silent gap.
+  human's morning. It reads a `.png`, a `.pnm` or a `.pdf`, recognising each
+  by its signature as well as its extension, so `tpdf render`'s output feeds it
+  directly. The PNG goes through `Bitmap::from_png` on the facade rather than
+  through `tinker-pdf-filters`' decoder, which `xtask`'s `TOOLS` table keeps
+  out of a tool's reach; a PNG carrying alpha is compared as it looks over
+  white, and one whose raster stops short is refused rather than scored.
 - **`cargo xtask`**: `dag` (crate-graph enforcement), `libm`
   (transcendental ban on pixel paths), `oracles` (ruling 13's boundary:
   no test may spawn a program the workspace did not build), `vendor`

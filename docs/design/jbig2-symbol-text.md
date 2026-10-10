@@ -74,6 +74,7 @@ placeholder-plus-warning contract of rulings 2 and 10 in
   plane starts one bit late and decodes nothing.
 - **Colour palette segments** (type 54) and the T.88 amendment features
   (EXTTEMPLATE, colour extension) — not emitted by any encoder the corpus sees.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row FI-16.
 - **Retained bitmap-coding contexts across segments** (the used/retained flags
   in the symbol dictionary flags field, 7.4.2) — the census was to decide this
   and the count did **not** stay zero: one file uses a retained context, three
@@ -92,8 +93,13 @@ placeholder-plus-warning contract of rulings 2 and 10 in
   for a lineage could only ever be held to a round trip against this file's own
   decoder, and Annex H.1 publishes no symbol bitmaps to adjudicate it with
   (milestone 3's row says so).
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: lossless symbol and text-region
+  encoding is [ROADMAP](../ROADMAP.md) row ED-27, and lossy symbol coding for
+  scans OC-12; the adjudication question above is ED-27's design doc's
+  to answer.
 - **The random-access file organisation** (Annex D.1) — already refused in
   `segments()`; unchanged.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row FI-16.
 - No new crate, no new public API: `jbig2_decode` keeps its exact signature,
   bytes-in/values-out per ruling 8, and the fuzz target's contract — success
   returns exactly the page the caller sized, failure is exactly

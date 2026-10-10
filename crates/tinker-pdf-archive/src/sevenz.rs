@@ -35,18 +35,38 @@
 //! with, which is what ruling 13 asks for. `docs/design/comic-archives.md`
 //! carries the argument in full.
 //!
+//! # Coders read
+//!
+//! Copy (`00`), LZMA (`030101`), LZMA2 (`21`), Deflate (`040108`), bzip2
+//! (`040202`, in [`crate::bzip2`]), PPMd (`030401`, in [`crate::ppmd`]), BCJ
+//! (`03030103`, the x86 branch filter `-mf=BCJ` puts in front of LZMA2) and
+//! BCJ2 (`0303011B`, the four-stream x86 converter), the last two in the
+//! crate's private `bcj` and `bcj2` modules.
+//!
+//! **A folder is a tree of coders, walked from its output down its bind
+//! pairs**, and never by the order its coders are listed in. Each coder's
+//! inputs are pack streams or other coders' outputs; a chain is the case
+//! where each has one, and BCJ2 is the case where one coder has four — its
+//! main, call and jump streams each out of an LZMA coder, its range-coded
+//! decisions straight from a pack stream. The listing order is the writers'
+//! choice and they disagree: 7-Zip lists BCJ before the LZMA2 feeding it and
+//! py7zr after, and 7-Zip 26 lists BCJ2 *last* of four though its command
+//! line numbers it first. The graph is checked at open to be a tree this
+//! build can walk.
+//!
 //! # Refused by name
 //!
 //! **Encrypted archives** (coder `06F10701`, AES-256 + SHA-256):
 //! [`Error::Encrypted`], a named non-goal shared with `tinker-pdf-zip`.
-//! **Coders this build does not implement** and **folders whose coder graph is
-//! not a chain** — BCJ2 is the one that exists in the wild, and it takes four
-//! input streams — are [`Error::UnsupportedCoder`] and
-//! [`Error::NotAChain`], each carrying enough to say which.
+//! **Coders this build does not implement** are [`Error::UnsupportedCoder`],
+//! by method id. **Folders whose graph has no answer** — a coder with two
+//! outputs, a stream fed twice or by nothing, a cycle, a known coder declaring
+//! a stream count that is not its own — are [`Error::NotAChain`], the name
+//! the variant has always had.
 
 use tinker_pdf_filters::{crc32, inflate_raw, Limits as InflateLimits};
 
-use crate::lzma;
+use crate::{bcj, bcj2, bzip2, lzma, ppmd};
 
 pub mod limits;
 
@@ -81,6 +101,19 @@ const K_NAME: u8 = 0x11;
 const K_ENCODED_HEADER: u8 = 0x17;
 const K_DUMMY: u8 = 0x19;
 
+/// 7z method `03030103`, BCJ: the x86 branch converter (`DOC/Methods.txt`:
+/// `03` branch, `03` x86, `01` version, `03` BCJ).
+const BCJ_X86: &[u8] = &[0x03, 0x03, 0x01, 0x03];
+/// 7z method `040202`, bzip2 (`DOC/Methods.txt`: `04` misc, `02` BZip2,
+/// `02` BZip2).
+const BZIP2: &[u8] = &[0x04, 0x02, 0x02];
+/// 7z method `030401`, PPMd (`DOC/Methods.txt`: `03` 7z, `04` PPMD, `01`
+/// PPMd var.H with 7z's range coder).
+const PPMD: &[u8] = &[0x03, 0x04, 0x01];
+/// 7z method `0303011B`, BCJ2 (`DOC/Methods.txt`: `03` branch, `03` x86,
+/// `01` version, `1B` BCJ2 — "4 packed streams").
+const BCJ2: &[u8] = &[0x03, 0x03, 0x01, 0x1B];
+
 /// Why an archive could not be opened at all.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -108,16 +141,20 @@ pub enum Error {
     /// A coder this build does not implement, by its 7z method id.
     ///
     /// Carries the id so the refusal names the method rather than the file:
-    /// `030401` is PPMd and `040202` is BZip2, and a host that says which is a
-    /// host whose user can re-pack.
+    /// `03` is the delta filter and `0A` ARM64's branch filter, and a host
+    /// that says which is a host whose user can re-pack.
     UnsupportedCoder { id: Vec<u8> },
     /// AES-256 (`06F10701`). A named non-goal, shared with `tinker-pdf-zip`.
     Encrypted,
-    /// A folder whose coder graph is not a chain of one-in/one-out coders.
+    /// A folder whose coder graph is not a tree this build can walk: a coder
+    /// with more than one output, an in-stream fed twice or by nothing, a
+    /// bind pair naming a stream that does not exist, a cycle, or a coder this
+    /// build reads declaring stream counts that are not its own (BCJ2 has four
+    /// inputs, every other coder one).
     ///
-    /// BCJ2 is the one that exists in the wild: four input streams, and a
-    /// reader that treated it as a chain would decode the first and hand back
-    /// a quarter of a file.
+    /// The name is older than the rule. It once refused every folder that was
+    /// not a chain, which was every BCJ2 folder; since BCJ2 is read, it names
+    /// the graphs that have no answer rather than the ones that have four.
     NotAChain,
     /// The header decompressed to something, and it was not a header.
     HeaderNotDecodable,
@@ -136,7 +173,7 @@ impl core::fmt::Display for Error {
                 write!(f, "a 7z coder this build does not read: {}", hex(id))
             }
             Error::Encrypted => f.write_str("an encrypted 7z, which is a named non-goal"),
-            Error::NotAChain => f.write_str("a folder whose coders are not a chain"),
+            Error::NotAChain => f.write_str("a folder whose coders do not form a tree"),
             Error::HeaderNotDecodable => f.write_str("a compressed header that would not decode"),
         }
     }
@@ -160,6 +197,23 @@ pub enum EntryError {
     /// saying so per entry is what turns it into one placeholder page each
     /// (ruling 2) rather than a refused archive.
     FolderFailed(lzma::Error),
+    /// The folder's bzip2 stream would not decode — the same sentence as
+    /// [`EntryError::FolderFailed`] for coder `040202`, carrying bzip2's own
+    /// reason, which includes its block and stream CRCs failing.
+    Bzip2Failed(bzip2::Error),
+    /// The folder's PPMd stream would not decode, carrying the model's
+    /// reason — properties outside 7-Zip's ranges, an arena past the cap, or
+    /// a stream the model cannot follow.
+    PpmdFailed(ppmd::Error),
+    /// The folder's BCJ2 streams are not ones BCJ2's encoder wrote: its
+    /// decision stream does not start as a range-coded stream (its first byte
+    /// is not zero, or its initial code is `FFFFFFFF`), or the header declares
+    /// the streams other coders decode for it longer than its output could
+    /// have read — main, call and jump past the output and three bytes
+    /// between them, or the decisions past the output and five. The second is
+    /// refused before any of those streams is decoded. (One of BCJ2's streams
+    /// running out before its output is [`EntryError::Truncated`].)
+    Bcj2Failed,
     /// The folder decompressed and this entry's CRC-32 does not match what the
     /// archive recorded.
     ///
@@ -183,6 +237,9 @@ impl core::fmt::Display for EntryError {
             EntryError::NoSuchEntry => f.write_str("no entry with that index"),
             EntryError::NotAFile => f.write_str("an entry that holds no file data"),
             EntryError::FolderFailed(e) => write!(f, "a block that would not decompress: {e}"),
+            EntryError::Bzip2Failed(e) => write!(f, "a bzip2 block that would not decompress: {e}"),
+            EntryError::PpmdFailed(e) => write!(f, "a PPMd block that would not decompress: {e}"),
+            EntryError::Bcj2Failed => f.write_str("a BCJ2 block whose streams are not BCJ2's"),
             EntryError::CrcMismatch => f.write_str("an entry whose recorded CRC-32 does not match"),
             EntryError::Truncated => f.write_str("a block shorter than its own substream table"),
             EntryError::UnsupportedCoder => f.write_str("a coder this build does not read"),
@@ -296,7 +353,7 @@ impl Default for Limits {
     }
 }
 
-/// One coder in a folder's chain.
+/// One coder in a folder's graph.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Coder {
     id: Vec<u8>,
@@ -316,18 +373,86 @@ struct Folder {
     /// One per out-stream, in order.
     unpack_sizes: Vec<u64>,
     crc: Option<u32>,
-    /// Where this folder's packed bytes begin, and how many bytes they are.
+    /// Where this folder's packed bytes begin, and how many bytes they are,
+    /// all of its pack streams together.
     packed_at: usize,
     packed_len: usize,
+    /// Each pack stream on its own, `(offset, length)`, in the order of
+    /// `packed`: the `k`th feeds in-stream `packed[k]`.
+    pack_ranges: Vec<(usize, usize)>,
     /// Substreams: `(size, crc)`, in order.
     substreams: Vec<(u64, Option<u32>)>,
 }
 
 impl Folder {
-    /// The out-stream nothing consumes, which is the folder's output.
+    /// The out-stream nothing consumes, which is the folder's output. Every
+    /// coder this build reads has one out-stream, so it is also a coder index.
     fn final_out(&self) -> Option<usize> {
         let total: usize = self.coders.iter().map(|c| c.out_streams).sum();
         (0..total).find(|out| !self.bind_pairs.iter().any(|(_, o)| o == out))
+    }
+
+    /// The index of `coder`'s first in-stream: in-streams are numbered across
+    /// the folder, coder by coder.
+    fn first_in(&self, coder: usize) -> usize {
+        self.coders.iter().take(coder).map(|c| c.in_streams).sum()
+    }
+
+    /// Whether the coders make a tree this build can walk: every coder has one
+    /// out-stream, every bind pair names streams that exist, no in-stream or
+    /// out-stream is bound twice or both bound and packed, and a walk from
+    /// the folder's output down its bind pairs meets every coder exactly once.
+    /// A cycle, a coder no walk reaches, or a stream fed twice is a graph with
+    /// no answer, and refused at open rather than discovered at read.
+    fn is_walkable(&self) -> bool {
+        let coders = self.coders.len();
+        let total_in: usize = self.coders.iter().map(|c| c.in_streams).sum();
+        if self.coders.iter().any(|c| c.out_streams != 1) {
+            return false;
+        }
+        let mut in_used = vec![false; total_in];
+        let mut out_used = vec![false; coders];
+        for &(i, o) in &self.bind_pairs {
+            let (Some(in_slot), Some(out_slot)) = (in_used.get_mut(i), out_used.get_mut(o)) else {
+                return false;
+            };
+            if *in_slot || *out_slot {
+                return false;
+            }
+            *in_slot = true;
+            *out_slot = true;
+        }
+        for &p in &self.packed {
+            match in_used.get_mut(p) {
+                Some(slot) if !*slot => *slot = true,
+                _ => return false,
+            }
+        }
+        if in_used.iter().any(|used| !used) || self.packed.is_empty() {
+            return false;
+        }
+        let Some(root) = self.final_out() else {
+            return false;
+        };
+        // Down from the output, marking each coder as it is reached.
+        let mut seen = vec![false; coders];
+        let mut stack = vec![root];
+        while let Some(coder) = stack.pop() {
+            match seen.get_mut(coder) {
+                Some(slot) if !*slot => *slot = true,
+                _ => return false,
+            }
+            let Some(c) = self.coders.get(coder) else {
+                return false;
+            };
+            let first = self.first_in(coder);
+            for stream in first..first + c.in_streams {
+                if let Some(&(_, feeder)) = self.bind_pairs.iter().find(|(i, _)| *i == stream) {
+                    stack.push(feeder);
+                }
+            }
+        }
+        seen.iter().all(|s| *s)
     }
 
     fn unpack_size(&self) -> u64 {
@@ -483,6 +608,10 @@ impl<'a> Archive<'a> {
                 FolderError::Unsupported => EntryError::UnsupportedCoder,
                 FolderError::TooLarge => EntryError::TooLarge,
                 FolderError::Lzma(e) => EntryError::FolderFailed(e),
+                FolderError::Bzip2(e) => EntryError::Bzip2Failed(e),
+                FolderError::Ppmd(e) => EntryError::PpmdFailed(e),
+                FolderError::Bcj2 => EntryError::Bcj2Failed,
+                FolderError::SizeMismatch => EntryError::Truncated,
             })?;
             self.cached = Some((folder_index, bytes));
         }
@@ -503,48 +632,157 @@ enum FolderError {
     Unsupported,
     TooLarge,
     Lzma(lzma::Error),
+    Bzip2(bzip2::Error),
+    Ppmd(ppmd::Error),
+    /// BCJ2's streams are not ones its encoder wrote: the range-coded stream
+    /// does not open as one, or the header declares the streams other coders
+    /// decode for it longer than its output could have read
+    /// ([`feeders_fit`]).
+    Bcj2,
+    /// A coder produced a length other than the one the header declared for
+    /// its output — for a filter, whose output is its input, the header and
+    /// the stream disagreeing about one number.
+    SizeMismatch,
 }
 
-/// Runs a folder's coder chain over its packed bytes.
+/// Runs a folder's coders over its packed bytes.
 ///
-/// Chains only. The walk starts at the coder fed by the pack stream and
-/// follows bind pairs until an out-stream nothing consumes; a folder whose
-/// graph is not that shape was refused at [`Archive::open`].
+/// From the output down: a coder's inputs are each either a pack stream or
+/// another coder's output, named by the folder's bind pairs, and each is
+/// decoded before the coder that reads it. A chain — the common shape, one
+/// coder feeding the next — is the case where every coder has one input; a
+/// BCJ2 folder is the case where one coder has four. The graph was checked at
+/// [`Archive::open`] to be a tree, and the depth bound here is the second
+/// line of that, so a walk cannot recurse further than there are coders.
+///
+/// **A coder's own declared output is held to the cap, and its feeders to
+/// what it can read, before any feeder is decoded** — so the decompression a
+/// folder does on the way to its output is charged against that output
+/// rather than against nothing ([`feeders_fit`]).
 fn decode_folder(bytes: &[u8], folder: &Folder, limits: &Limits) -> Result<Vec<u8>, FolderError> {
-    let packed = bytes
-        .get(folder.packed_at..folder.packed_at.saturating_add(folder.packed_len))
+    let root = folder.final_out().ok_or(FolderError::Unsupported)?;
+    decode_coder(bytes, folder, root, limits, 0)
+}
+
+fn decode_coder(
+    bytes: &[u8],
+    folder: &Folder,
+    coder: usize,
+    limits: &Limits,
+    depth: usize,
+) -> Result<Vec<u8>, FolderError> {
+    if depth > folder.coders.len() {
+        return Err(FolderError::Unsupported);
+    }
+    let c = folder.coders.get(coder).ok_or(FolderError::Unsupported)?;
+    let out_size = folder
+        .unpack_sizes
+        .get(coder)
+        .copied()
+        .and_then(|n| usize::try_from(n).ok())
         .ok_or(FolderError::TooLarge)?;
-    let mut data: Vec<u8> = packed.to_vec();
-    // Each coder here has one in-stream and one out-stream, so an in-stream
-    // index is a coder index and so is an out-stream index.
-    let mut coder = *folder.packed.first().unwrap_or(&0);
-    for _ in 0..folder.coders.len() {
-        let c = folder.coders.get(coder).ok_or(FolderError::Unsupported)?;
-        let out_size = folder
-            .unpack_sizes
-            .get(coder)
-            .copied()
-            .and_then(|n| usize::try_from(n).ok())
-            .ok_or(FolderError::TooLarge)?;
-        if out_size > limits.max_unpacked {
-            return Err(FolderError::TooLarge);
-        }
-        data = run_coder(c, &data, out_size, limits)?;
-        match folder.bind_pairs.iter().find(|(_, out)| *out == coder) {
-            Some((next, _)) => coder = *next,
-            None => return Ok(data),
+    if out_size > limits.max_unpacked {
+        return Err(FolderError::TooLarge);
+    }
+    feeders_fit(folder, coder, c, out_size)?;
+    let first = folder.first_in(coder);
+    let mut owned: Vec<Vec<u8>> = Vec::new();
+    let mut sources: Vec<Result<usize, &[u8]>> = Vec::with_capacity(c.in_streams);
+    for stream in first..first + c.in_streams {
+        if let Some(&(_, feeder)) = folder.bind_pairs.iter().find(|(i, _)| *i == stream) {
+            owned.push(decode_coder(bytes, folder, feeder, limits, depth + 1)?);
+            sources.push(Ok(owned.len() - 1));
+        } else {
+            let slot = folder
+                .packed
+                .iter()
+                .position(|p| *p == stream)
+                .ok_or(FolderError::Unsupported)?;
+            let &(at, len) = folder.pack_ranges.get(slot).ok_or(FolderError::TooLarge)?;
+            let packed = bytes
+                .get(at..at.saturating_add(len))
+                .ok_or(FolderError::TooLarge)?;
+            sources.push(Err(packed));
         }
     }
-    Ok(data)
+    let inputs: Vec<&[u8]> = sources
+        .iter()
+        .map(|source| match source {
+            Ok(i) => owned.get(*i).map_or(&[][..], Vec::as_slice),
+            Err(packed) => packed,
+        })
+        .collect();
+    run_coder(c, &inputs, out_size, limits)
 }
 
-/// One coder, by its 7z method id.
+/// Whether the inputs other coders decode for `coder` fit what it can read
+/// for its declared `out_size`, judged on the header's sizes before any of
+/// them is decoded.
+///
+/// A pack stream costs nothing to hold — it is the file's own bytes — so only
+/// an input another coder must decompress is bounded here, and only a filter
+/// has a bound to give, because only a filter's output is a function of its
+/// input's length:
+///
+/// - **Copy and BCJ** write exactly what they read, so a decoded input of any
+///   other length is a header not describing them.
+/// - **BCJ2** writes every byte it reads from main, call and jump once — a
+///   main byte as itself, a target as an operand's four bytes, the last cut
+///   short by the output's end by at most three — so those three hold at most
+///   `out_size + 3` bytes it can read between them. Its decision stream is
+///   five opening bytes and at most one more per decision
+///   (`bcj2::Range::bit` normalises once), and there is at most one decision
+///   per output byte, so at most `out_size + 5`. A header declaring more
+///   describes bytes nothing reads; held only to the folder cap one by one,
+///   three feeders under a one-byte output were three caps of decompression
+///   charged to nothing.
+///
+/// A compressor has no such bound — its input may be any length — so a coder
+/// feeding one is held to the folder cap alone, as the folder's output is.
+/// No folder this build reads is written that way: 7-Zip and py7zr feed a
+/// compressor from a pack stream, or from AES, which is refused at open.
+fn feeders_fit(
+    folder: &Folder,
+    coder: usize,
+    c: &Coder,
+    out_size: usize,
+) -> Result<(), FolderError> {
+    let first = folder.first_in(coder);
+    // The declared length of in-stream `first + k` when another coder's
+    // output feeds it. A feeder the header gives no size is taken as the
+    // largest there is, so it fails every bound rather than passing one.
+    let decoded = |k: usize| {
+        let &(_, feeder) = folder.bind_pairs.iter().find(|(i, _)| *i == first + k)?;
+        Some(folder.unpack_sizes.get(feeder).copied().unwrap_or(u64::MAX))
+    };
+    let out = u64::try_from(out_size).unwrap_or(u64::MAX);
+    match c.id.as_slice() {
+        [0x00] | BCJ_X86 => match decoded(0) {
+            Some(n) if n != out => Err(FolderError::SizeMismatch),
+            _ => Ok(()),
+        },
+        BCJ2 => {
+            let copied = (0..3).filter_map(decoded).fold(0u64, u64::saturating_add);
+            let decisions = decoded(3).unwrap_or(0);
+            if copied > out.saturating_add(3) || decisions > out.saturating_add(5) {
+                Err(FolderError::Bcj2)
+            } else {
+                Ok(())
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// One coder, by its 7z method id, over its inputs in in-stream order.
 fn run_coder(
     coder: &Coder,
-    input: &[u8],
+    inputs: &[&[u8]],
     out_size: usize,
     limits: &Limits,
 ) -> Result<Vec<u8>, FolderError> {
+    // Every coder but BCJ2 reads one stream; the arity was checked at open.
+    let input = inputs.first().copied().unwrap_or_default();
     match coder.id.as_slice() {
         // Copy.
         [0x00] => Ok(input.to_vec()),
@@ -560,6 +798,40 @@ fn run_coder(
                 .ok_or(FolderError::Unsupported)?;
             lzma::decode(input, props, out_size, &limits.lzma()).map_err(FolderError::Lzma)
         }
+        // BCJ, the x86 branch converter `-mf=BCJ` puts in front of LZMA2. A
+        // filter rather than a compressor: the output is the input with its
+        // call and jump operands rewritten, so the two lengths are one length
+        // and a header that says otherwise is not describing this coder.
+        BCJ_X86 => {
+            if input.len() != out_size {
+                return Err(FolderError::SizeMismatch);
+            }
+            let mut data = input.to_vec();
+            bcj::x86_decode(&mut data);
+            Ok(data)
+        }
+        // bzip2: a whole stream, `BZh` and all, exactly as ZIP method 12
+        // stores one. Its own block and stream CRCs are checked inside the
+        // decoder, and the folder's CRC-32 one layer up.
+        BZIP2 => {
+            let limits = bzip2::Limits {
+                max_unpacked: out_size,
+            };
+            let data = bzip2::decode(input, &limits).map_err(FolderError::Bzip2)?;
+            if data.len() != out_size {
+                return Err(FolderError::SizeMismatch);
+            }
+            Ok(data)
+        }
+        // PPMd var.H. The model's arena is the one allocation the properties
+        // size, and the folder cap bounds it as it bounds the output.
+        PPMD => {
+            let limits = ppmd::Limits {
+                max_unpacked: out_size,
+                max_memory: limits.max_unpacked,
+            };
+            ppmd::decode(input, &coder.props, out_size, &limits).map_err(FolderError::Ppmd)
+        }
         // Deflate: 7z method `040108` is RFC 1951 with no wrapper, exactly as
         // ZIP method 8 is, which is the second half of this crate's edge into
         // `tinker-pdf-filters`.
@@ -572,6 +844,17 @@ fn run_coder(
             // own CRC-32 is checked one layer up, so short bytes fail the
             // format's check rather than being handed over as a page.
             Ok(r.data)
+        }
+        // BCJ2: the main stream, the CALL targets, the JMP targets and the
+        // range-coded decisions, in that in-stream order.
+        BCJ2 => {
+            let [main, call, jump, rc] = inputs else {
+                return Err(FolderError::Unsupported);
+            };
+            bcj2::decode(main, call, jump, rc, out_size).map_err(|e| match e {
+                bcj2::Error::Truncated => FolderError::SizeMismatch,
+                bcj2::Error::BadRangeStart => FolderError::Bcj2,
+            })
         }
         _ => Err(FolderError::Unsupported),
     }
@@ -718,10 +1001,14 @@ fn streams_info(
     for folder in &mut folders {
         let count = folder.packed.len().max(1);
         let mut len = 0u64;
+        let mut stream_at = at_pack;
         for _ in 0..count {
             let size = pack_sizes.get(taken).copied().ok_or(Error::BadHeader)?;
             taken += 1;
             len = len.saturating_add(size);
+            let size = usize::try_from(size).map_err(|_| Error::HeaderOutOfRange)?;
+            folder.pack_ranges.push((stream_at, size));
+            stream_at = stream_at.saturating_add(size);
         }
         folder.packed_at = at_pack;
         folder.packed_len = usize::try_from(len).map_err(|_| Error::HeaderOutOfRange)?;
@@ -841,11 +1128,6 @@ fn folder(h: &[u8], at: &mut usize, limits: &Limits) -> Result<Folder, Error> {
         if id.as_slice() == [0x06, 0xF1, 0x07, 0x01] {
             return Err(Error::Encrypted);
         }
-        // A chain is what `decode_folder` walks, and a coder with more than
-        // one stream on either side is not part of one. BCJ2 is the case.
-        if in_streams != 1 || out_streams != 1 {
-            return Err(Error::NotAChain);
-        }
         total_in += in_streams;
         total_out += out_streams;
         coders.push(Coder {
@@ -884,17 +1166,38 @@ fn folder(h: &[u8], at: &mut usize, limits: &Limits) -> Result<Folder, Error> {
     // Refused here rather than at read, so an unreadable method is one
     // sentence about the archive rather than five identical page defects.
     for coder in &coders {
-        if !matches!(
-            coder.id.as_slice(),
-            [0x00] | [0x21] | [0x03, 0x01, 0x01] | [0x04, 0x01, 0x08]
-        ) {
+        let id = coder.id.as_slice();
+        let known = matches!(
+            id,
+            [0x00]
+                | [0x21]
+                | [0x03, 0x01, 0x01]
+                | [0x04, 0x01, 0x08]
+                | BCJ_X86
+                | BCJ2
+                | BZIP2
+                | PPMD
+        );
+        // BCJ and BCJ2 have no properties, and 7-Zip since 23 refuses a coder
+        // handed properties it has no use for rather than ignoring them: a
+        // header that carries some is describing a different filter.
+        let bare = !(id == BCJ_X86 || id == BCJ2) || coder.props.is_empty();
+        if !known || !bare {
             return Err(Error::UnsupportedCoder {
                 id: coder.id.clone(),
             });
         }
     }
+    // Every coder this build reads has one output, and one input but BCJ2,
+    // which has four. A known coder declaring other counts is not that coder.
+    for coder in &coders {
+        let inputs = if coder.id.as_slice() == BCJ2 { 4 } else { 1 };
+        if coder.in_streams != inputs || coder.out_streams != 1 {
+            return Err(Error::NotAChain);
+        }
+    }
 
-    Ok(Folder {
+    let folder = Folder {
         coders,
         bind_pairs,
         packed,
@@ -902,8 +1205,13 @@ fn folder(h: &[u8], at: &mut usize, limits: &Limits) -> Result<Folder, Error> {
         crc: None,
         packed_at: 0,
         packed_len: 0,
+        pack_ranges: Vec::new(),
         substreams: Vec::new(),
-    })
+    };
+    if !folder.is_walkable() {
+        return Err(Error::NotAChain);
+    }
+    Ok(folder)
 }
 
 /// `SubStreamsInfo`: how a folder's one output stream is divided into files.

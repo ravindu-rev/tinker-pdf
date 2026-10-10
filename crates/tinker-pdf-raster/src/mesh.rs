@@ -158,29 +158,56 @@ pub fn draw_mesh(
     width: u32,
     height: u32,
 ) -> Option<MeshBuffer> {
-    let pixels = (width as usize).checked_mul(height as usize)?;
-    if pixels == 0 || draw.components == 0 {
-        return Some(MeshBuffer {
+    let region = (x0, y0, width, height);
+    draw_mesh_over(draw, region, region)
+}
+
+/// [`draw_mesh`] for a canvas that is a part of the picture the mesh is in.
+///
+/// `whole` is the region a render of the **whole** picture draws the mesh
+/// over, and `wanted` is the part of it this caller will composite, both as
+/// `(x0, y0, width, height)` in device pixels. The two are what make a tile's
+/// mesh the page's mesh (ruling 5):
+///
+/// - **the budget is measured over `whole`**, so a tile refuses exactly the
+///   meshes the page refuses, rather than accepting one whose part in the tile
+///   happens to be cheap;
+/// - **the mesh is drawn over `wanted` widened by the fringe's reach** and kept
+///   inside `whole`, because the spread that colours an anti-aliased edge
+///   reads [`FRINGE_ROUNDS`] pixels of neighbours. Drawn over `wanted` alone,
+///   a silhouette pixel on the tile's edge had fewer neighbours than the same
+///   pixel on the page and took its colour from a different one — measured
+///   on `render_regions.rs`'s mesh fixture, 10 levels at 1x and 30 at 4x.
+///
+/// The buffer comes back over the widened region; the caller composites the
+/// part it wants. With `wanted` equal to `whole` this is [`draw_mesh`].
+#[must_use]
+pub fn draw_mesh_over(
+    draw: &MeshDraw<'_>,
+    wanted: (i32, i32, u32, u32),
+    whole: (i32, i32, u32, u32),
+) -> Option<MeshBuffer> {
+    let empty = |(x0, y0, width, height): (i32, i32, u32, u32)| {
+        let pixels = (width as usize).checked_mul(height as usize)?;
+        Some(MeshBuffer {
             coverage: Mask::empty(x0, y0, width, height),
             color: vec![[0; 4]; pixels],
-        });
-    }
-
-    let region = Region {
-        x0,
-        y0,
-        x1: i64::from(x0) + i64::from(width),
-        y1: i64::from(y0) + i64::from(height),
+        })
     };
+    if whole.2 == 0 || whole.3 == 0 || draw.components == 0 {
+        return empty(whole);
+    }
+    let whole = Region::of(whole);
 
     // The budget first, over the whole mesh, before a pixel is touched: a
-    // refusal must not depend on how far the render got.
+    // refusal must not depend on how far the render got — nor on how much of
+    // the picture this caller asked for.
     let mut work = 0u64;
     for triangle in draw.triangles {
         let Some(corners) = corners(draw, triangle) else {
             continue;
         };
-        let Some(box_) = clamped_box(&corners, &region) else {
+        let Some(box_) = clamped_box(&corners, &whole) else {
             continue;
         };
         let rows = (box_.y1 - box_.y0) as u64;
@@ -191,6 +218,30 @@ pub fn draw_mesh(
             return None;
         }
     }
+
+    // `wanted`, widened by the fringe's reach and kept inside `whole`.
+    let reach = FRINGE_ROUNDS as i64;
+    let wanted = Region::of(wanted);
+    let left = (i64::from(wanted.x0) - reach).max(i64::from(whole.x0));
+    let top = (i64::from(wanted.y0) - reach).max(i64::from(whole.y0));
+    let right = (wanted.x1 + reach).min(whole.x1).max(left);
+    let bottom = (wanted.y1 + reach).min(whole.y1).max(top);
+    // Both corners are inside `whole`, whose corner is an `i32` and whose
+    // extent is a `u32`, so these conversions are exact.
+    let (x0, y0) = (left as i32, top as i32);
+    let (width, height) = ((right - left) as u32, (bottom - top) as u32);
+
+    let pixels = (width as usize).checked_mul(height as usize)?;
+    if pixels == 0 {
+        return empty((x0, y0, width, height));
+    }
+
+    let region = Region {
+        x0,
+        y0,
+        x1: right,
+        y1: bottom,
+    };
 
     // One path, one fill, one mask.
     let mut path = Path::new();
@@ -236,6 +287,19 @@ struct Region {
     y0: i32,
     x1: i64,
     y1: i64,
+}
+
+impl Region {
+    /// A rectangle given as `(x0, y0, width, height)`.
+    fn of(rect: (i32, i32, u32, u32)) -> Region {
+        let (x0, y0, width, height) = rect;
+        Region {
+            x0,
+            y0,
+            x1: i64::from(x0) + i64::from(width),
+            y1: i64::from(y0) + i64::from(height),
+        }
+    }
 }
 
 /// A triangle's clamped pixel bounds, half-open.

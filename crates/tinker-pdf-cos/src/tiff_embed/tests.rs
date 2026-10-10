@@ -621,12 +621,77 @@ fn a_file_that_is_not_a_tiff_is_refused_rather_than_routed() {
         tiff_image(b"not a tiff", &CAP).err(),
         Some(TiffError::NotTiff)
     ));
-    // A directory that is fine and a photometric that is not.
-    let file = build(base(4, 4, 8, 4, 5, 1), vec![vec![0; 64]]);
+    // A directory that is fine and a photometric that is not: 4, a mask for
+    // another image. This was 5 until CMYK was read, and 8 until CIELab was.
+    let file = build(base(4, 4, 8, 1, 4, 1), vec![vec![0; 16]]);
     assert!(matches!(
         tiff_image(&file, &CAP).err(),
-        Some(TiffError::UnsupportedPhotometric(5))
+        Some(TiffError::UnsupportedPhotometric(4))
     ));
+}
+
+/// A CIE L\*a\*b\* file is decoded — its `a*` and `b*` are two's complement —
+/// and written as a `/Lab` image whose `/Range` makes each offset-binary
+/// sample its own value: `[-128 127]` at 8 bits, with no `/Decode`. The
+/// samples are the file's `L*` and its `a*`, `b*` with the top bit flipped.
+#[test]
+fn a_cielab_tiff_is_decoded_into_a_lab_image() {
+    let samples: Vec<u8> = (0..4 * 4 * 3).map(|i| (i * 11) as u8).collect();
+    let file = build(base(4, 4, 8, 3, 8, 1), vec![samples.clone()]);
+    let prepared = tiff_image(&file, &CAP).expect("decodes");
+    assert_eq!(prepared.route(), TiffRoute::Decoded);
+    let ImageData::Compressed(image) = prepared.image() else {
+        panic!("compressed");
+    };
+    assert_eq!(image.color_space, ImageColorSpace::Lab);
+    let want: Vec<u8> = samples
+        .chunks_exact(3)
+        .flat_map(|px| [px[0], px[1] ^ 0x80, px[2] ^ 0x80])
+        .collect();
+    assert_eq!(
+        tinker_pdf_filters::flate_decode(image.data, &CAP, None)
+            .expect("inflates")
+            .data,
+        want
+    );
+    let (dict, _) = image_stream(&write_one(&prepared));
+    assert!(dict.contains("/Lab"), "{dict}");
+    assert!(dict.contains("/Range [-128 127 -128 127]"), "{dict}");
+    assert!(!dict.contains("/Decode"), "{dict}");
+}
+
+/// A CMYK strip under a coding with a `/Filter` name is placed into
+/// `/DeviceCMYK` as its own bytes, and an uncompressed one is decoded into the
+/// same space — ink amounts both ways, nothing converted.
+#[test]
+fn a_cmyk_tiff_is_placed_or_decoded_into_device_cmyk() {
+    let samples: Vec<u8> = (0..4 * 4 * 4).map(|i| (i * 7) as u8).collect();
+    let raw = build(base(4, 4, 8, 4, 5, 1), vec![samples.clone()]);
+    let decoded = tiff_image(&raw, &CAP).expect("decodes");
+    assert_eq!(decoded.route(), TiffRoute::Decoded);
+    let ImageData::Compressed(image) = decoded.image() else {
+        panic!("compressed");
+    };
+    assert_eq!(image.color_space, ImageColorSpace::DeviceCmyk);
+    assert_eq!(
+        tinker_pdf_filters::flate_decode(image.data, &CAP, None)
+            .expect("inflates")
+            .data,
+        samples
+    );
+
+    let deflated = build(
+        base(4, 4, 8, 4, 5, 8),
+        vec![tinker_pdf_filters::zlib_compress(&samples)],
+    );
+    let placed = tiff_image(&deflated, &CAP).expect("placed");
+    assert_eq!(placed.route(), TiffRoute::Placed);
+    let ImageData::Compressed(image) = placed.image() else {
+        panic!("compressed");
+    };
+    assert_eq!(image.color_space, ImageColorSpace::DeviceCmyk);
+    let (dict, _) = image_stream(&write_one(&placed));
+    assert!(dict.contains("/DeviceCMYK"), "{dict}");
 }
 
 /// The pass-through builds no raster, so the caller's ceiling has nothing to

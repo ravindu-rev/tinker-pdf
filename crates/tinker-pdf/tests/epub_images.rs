@@ -319,18 +319,41 @@ fn a_picture_is_classified_by_its_bytes_and_never_by_its_name() {
     assert_eq!((matrix[0], matrix[3]), points((56, 40)));
 }
 
-/// The same the other way: a `.png` holding a format this build does not read
+/// The same the other way: a `.png` holding a format this build does not place
 /// is named by **that** format, not by the one its name claims.
+///
+/// A BMP, which the comic path decodes and an `<img>` does not: it is not one
+/// of EPUB 3.3 §3.2's core media types. This was a GIF until GIF became one
+/// this build draws.
 #[test]
 fn a_misnamed_unsupported_picture_is_named_by_the_format_it_really_is() {
-    let mut gif = Vec::from(*b"GIF89a");
-    gif.extend_from_slice(&[8, 0, 8, 0, 0x80, 0, 0]);
-    let doc = open(r#"<p>a<img src="pic.png"/>b</p>"#, &[("pic.png", gif)]);
+    let mut bmp = Vec::from(*b"BM");
+    bmp.resize(40, 0);
+    let doc = open(r#"<p>a<img src="pic.png"/>b</p>"#, &[("pic.png", bmp)]);
     assert_eq!(
         not_drawn(&doc),
-        [(ImageDefect::UnsupportedFormat(ImageFormat::Gif), 1)],
-        "a GIF named .png was classified by its name"
+        [(ImageDefect::UnsupportedFormat(ImageFormat::Bmp), 1)],
+        "a BMP named .png was classified by its name"
     );
+}
+
+/// A GIF is a core media type and is drawn: its first image, at its own
+/// pixel size. The file is Pillow's, from `tinker-pdf-filters/tests/images/`,
+/// where the decoder is held to the pixels it was made from.
+#[test]
+fn a_gif_img_is_drawn_at_its_own_size() {
+    let gif = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tinker-pdf-filters/tests/images/gif/pillow-palette-13x7.gif"),
+    )
+    .expect("the committed GIF");
+    let doc = open(
+        r#"<img src="pic.gif" style="display: block"/>"#,
+        &[("pic.gif", gif)],
+    );
+    assert_eq!(not_drawn(&doc), []);
+    let (matrix, _) = only_placement(&doc, 0);
+    assert_eq!((matrix[0], matrix[3]), points((13, 7)));
 }
 
 /// §9.2.2's atomic inline-level box: an `<img>` with no `display` declaration
@@ -351,6 +374,59 @@ fn an_inline_img_sits_on_the_line_beside_its_text() {
         matrix[4] > PAGE_MARGIN,
         "the picture is at the margin rather than on the line: {matrix:?}"
     );
+}
+
+/// How many elements the report counts against `direction`, if any.
+fn direction_counted(doc: &Document) -> Option<usize> {
+    warnings(doc).into_iter().find_map(|warning| match warning {
+        ArchiveWarning::UnimplementedProperty {
+            property: "direction",
+            elements,
+        } => Some(elements),
+        _ => None,
+    })
+}
+
+/// **A block-level picture in a right-to-left containing block is counted
+/// against `direction`** (review of lane 8C).
+///
+/// CSS 2.2 §10.3.4 gives a block-level replaced box the used width an inline
+/// one would have, which is never `auto`, and then applies §10.3.3's margin
+/// rules: with neither margin `auto` the box is over-constrained, and a
+/// right-to-left containing block gives up `margin-left` and puts the picture
+/// against its right edge. This layout places it against the left, as it
+/// would in a left-to-right block — so it is counted, as a `<div>` with a
+/// `width` there is. The placement is asserted beside the count: the left
+/// edge is what makes the count true.
+///
+/// And the pictures direction does not move are not counted: one centred by
+/// two `auto` margins, one floated, one on a line (its line's alignment puts
+/// it), and the same picture in a left-to-right block.
+#[test]
+fn a_block_picture_in_a_right_to_left_block_is_counted_against_direction() {
+    let png = plate(20, 20);
+    let doc = open(
+        r#"<div dir="rtl"><img src="pic.png" style="display: block"/></div>"#,
+        &[("pic.png", png.clone())],
+    );
+    assert_eq!(direction_counted(&doc), Some(1), "{:?}", warnings(&doc));
+    let (matrix, _) = only_placement(&doc, 0);
+    assert_eq!(matrix[4], PAGE_MARGIN, "placed from the left, as counted");
+
+    for body in [
+        r#"<div dir="rtl"><img src="pic.png" style="display: block; margin: 0 auto"/></div>"#,
+        r#"<div dir="rtl"><img src="pic.png" style="display: block; float: left"/></div>"#,
+        r#"<div dir="rtl"><p><img src="pic.png"/></p></div>"#,
+        r#"<img src="pic.png" style="display: block"/>"#,
+    ] {
+        let doc = open(body, &[("pic.png", png.clone())]);
+        assert_eq!(
+            direction_counted(&doc),
+            None,
+            "`{body}`: {:?}",
+            warnings(&doc)
+        );
+    }
 }
 
 // ---- the picture is really in the document ----------------------------------
@@ -469,22 +545,76 @@ fn an_img_with_no_src_at_all_is_unresolved() {
     assert_eq!(not_drawn(&doc), [(ImageDefect::Unresolved, 1)]);
 }
 
-/// A **core media type** this build has no decoder for is named by its format,
-/// not collapsed into "unresolved".
+/// A **lossy** WebP is drawn too, which leaves no EPUB 3.3 §3.2 core raster
+/// type without a decoder.
 ///
-/// EPUB 3.3 §3.2 makes GIF and WebP core image media types a conforming book
-/// may use with no fallback, so a reader meeting one has met a legal book it
-/// cannot draw — a different sentence from a broken reference, and a host acts
-/// on the two differently.
+/// This test was `a_core_media_type_with_no_decoder_here_is_named_by_its_format`:
+/// a GIF until GIF had a decoder, then a WebP, then a lossy WebP once the
+/// lossless bitstream had one. What it asserted — that such a picture is
+/// named by its format rather than collapsed into "unresolved" — still holds
+/// for the foreign resources, and
+/// `a_misnamed_unsupported_picture_is_named_by_the_format_it_really_is` holds
+/// it with a BMP.
 #[test]
-fn a_core_media_type_with_no_decoder_here_is_named_by_its_format() {
+fn a_lossy_webp_img_is_drawn_at_its_own_size() {
+    let webp = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tinker-pdf-filters/tests/images/webp/pillow-lossy-rgba-61x45.webp"),
+    )
+    .expect("the committed WebP");
+    let doc = open(
+        r#"<img src="pic.webp" style="display: block"/>"#,
+        &[("pic.webp", webp)],
+    );
+    assert_eq!(not_drawn(&doc), []);
+    let (matrix, _) = only_placement(&doc, 0);
+    assert_eq!((matrix[0], matrix[3]), points((61, 45)));
+}
+
+/// A lossless WebP is drawn, at its own pixel size — Pillow's file, which
+/// `tinker-pdf-filters/tests/images/` holds the decoder to pixel for pixel.
+#[test]
+fn a_lossless_webp_img_is_drawn_at_its_own_size() {
+    let webp = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tinker-pdf-filters/tests/images/webp/pillow-lossless-rgba-13x7.webp"),
+    )
+    .expect("the committed WebP");
+    let doc = open(
+        r#"<img src="pic.webp" style="display: block"/>"#,
+        &[("pic.webp", webp)],
+    );
+    assert_eq!(not_drawn(&doc), []);
+    let (matrix, _) = only_placement(&doc, 0);
+    assert_eq!((matrix[0], matrix[3]), points((13, 7)));
+}
+
+/// A WebP whose bitstream breaks its RFC's rules is `Undecodable`: the
+/// format is read, the file is not. A lossless one with the wrong signature
+/// byte, and a lossy one whose frame tag says it is not a key frame.
+#[test]
+fn a_webp_that_will_not_decode_is_undecodable() {
+    // The VP8L signature byte is 0x2f; this one says 0x2e.
+    let lossless = b"RIFF\x12\x00\x00\x00WEBPVP8L\x05\x00\x00\x00\x2e\x00\x00\x00\x00\x00".to_vec();
+    // A frame tag with bit 0 set: an inter frame.
+    let lossy =
+        b"RIFF\x16\x00\x00\x00WEBPVP8 \x0a\x00\x00\x00\x11\x00\x00\x9d\x01\x2a\x01\x00\x01\x00"
+            .to_vec();
+    let doc = open(
+        r#"<p>a<img src="a.webp"/>b<img src="b.webp"/></p>"#,
+        &[("a.webp", lossless), ("b.webp", lossy)],
+    );
+    assert_eq!(not_drawn(&doc), [(ImageDefect::Undecodable, 2)]);
+}
+
+/// And a GIF whose bytes do not make an image is `Undecodable`, which is the
+/// sentence a PNG with a broken header gets.
+#[test]
+fn a_gif_that_will_not_decode_is_undecodable() {
     let mut gif = Vec::from(*b"GIF89a");
     gif.extend_from_slice(&[8, 0, 8, 0, 0x80, 0, 0]);
     let doc = open(r#"<p>a<img src="pic.gif"/>b</p>"#, &[("pic.gif", gif)]);
-    assert_eq!(
-        not_drawn(&doc),
-        [(ImageDefect::UnsupportedFormat(ImageFormat::Gif), 1)]
-    );
+    assert_eq!(not_drawn(&doc), [(ImageDefect::Undecodable, 1)]);
 }
 
 /// An SVG in an `<img>` lands in `Unknown`, and that is where it belongs.
@@ -641,4 +771,277 @@ fn a_book_whose_pictures_all_failed_still_opens_and_sets_its_text() {
     assert_eq!(doc.page_count(), 1);
     let text = doc.page(0).expect("a page").text().plain_text();
     assert!(text.contains("before") && text.contains("after"), "{text}");
+}
+
+// ---- background-image -----------------------------------------------------------
+
+/// A one-colour picture, so a tile is ink wherever it lands.
+fn solid(width: u32, height: u32) -> Vec<u8> {
+    rgb_png(width, height, &vec![0u8; (width * height * 3) as usize])
+}
+
+/// The content area's top-left corner in page points, and a CSS pixel in
+/// points.
+fn corner() -> (f64, f64) {
+    (PAGE_MARGIN, DEFAULT_PAGE.1 - PAGE_MARGIN)
+}
+
+/// A page's tiling pattern by resource name: `/XStep`, `/YStep`, `/Matrix` and
+/// `/BBox`, as numbers.
+fn pattern(doc: &Document, page: usize, name: &[u8]) -> (f64, f64, Vec<f64>, Vec<f64>) {
+    let cos = doc.cos();
+    let pages = tinker_pdf_cos::pages::collect(cos);
+    let resources = pages[page].resources.as_ref().expect("/Resources");
+    let patterns = cos.resolve_key(resources, cos.intern(b"Pattern"));
+    let patterns = patterns.as_dict().expect("a /Pattern dictionary");
+    let object = cos.resolve_key(patterns, cos.intern(name));
+    let dict = &object
+        .as_stream()
+        .expect("a tiling pattern is a stream")
+        .dict;
+    let number = |key: &[u8]| {
+        cos.resolve_key(dict, cos.intern(key))
+            .as_number()
+            .expect("a number")
+    };
+    let numbers = |key: &[u8]| -> Vec<f64> {
+        cos.resolve_key(dict, cos.intern(key))
+            .as_array()
+            .expect("an array")
+            .iter()
+            .map(|value| value.as_number().expect("a number"))
+            .collect()
+    };
+    (
+        number(b"XStep"),
+        number(b"YStep"),
+        numbers(b"Matrix"),
+        numbers(b"BBox"),
+    )
+}
+
+#[track_caller]
+fn near(actual: &[f64], expected: &[f64]) {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{actual:?} against {expected:?}"
+    );
+    for (a, e) in actual.iter().zip(expected) {
+        assert!((a - e).abs() < 1e-6, "{actual:?} against {expected:?}");
+    }
+}
+
+/// **A `no-repeat` background image is one placement**, at §2.6's position in
+/// the padding box and the image's own size (§2.4's `auto`), under the box's
+/// colour and inside a clip to its border box.
+#[test]
+fn a_background_image_that_does_not_repeat_is_drawn_once_where_it_is_placed() {
+    let doc = open(
+        r#"<div style="width: 100px; height: 60px; border: 2px solid #000000; background: #ff0000 url(bg.png) no-repeat 10px 20px"></div>"#,
+        &[("bg.png", plate(8, 4))],
+    );
+    let (matrix, name) = only_placement(&doc, 0);
+    let (left, top) = corner();
+    // The padding box begins inside the two-pixel border.
+    let x = left + (2.0 + 10.0) * PX_TO_PT;
+    let y = top - (2.0 + 20.0) * PX_TO_PT;
+    near(
+        &matrix,
+        &[
+            8.0 * PX_TO_PT,
+            0.0,
+            0.0,
+            4.0 * PX_TO_PT,
+            x,
+            y - 4.0 * PX_TO_PT,
+        ],
+    );
+    assert_eq!(name, "/Bg0");
+    let content = page_content(&doc, 0);
+    let colour = content.find("1 0 0 rg").expect("the background colour");
+    let image = content.find("/Bg0 Do").expect("the image");
+    assert!(colour < image, "the colour is under the image: {content}");
+    assert!(warnings(&doc).is_empty(), "{:?}", warnings(&doc));
+
+    // An offset after `right` and `bottom` is from those edges: the image's
+    // right edge 10 pixels in from the padding box's, its bottom 20 up.
+    let from_end = open(
+        r#"<div style="width: 100px; height: 60px; border: 2px solid #000000; background: url(bg.png) no-repeat right 10px bottom 20px"></div>"#,
+        &[("bg.png", plate(8, 4))],
+    );
+    let (matrix, _) = only_placement(&from_end, 0);
+    let x = left + (2.0 + 100.0 - 10.0 - 8.0) * PX_TO_PT;
+    let bottom = top - (2.0 + 60.0 - 20.0) * PX_TO_PT;
+    near(
+        &matrix,
+        &[8.0 * PX_TO_PT, 0.0, 0.0, 4.0 * PX_TO_PT, x, bottom],
+    );
+}
+
+/// **`cover` and `contain` keep the image's ratio** and scale it to cover the
+/// padding box or to fit inside it (§2.4): an 8 by 4 picture in a 100 by 60
+/// box is 15 times its size for one and 12.5 for the other.
+#[test]
+fn cover_and_contain_scale_the_image_by_its_own_ratio() {
+    let (left, top) = corner();
+    for (size, scale) in [("cover", 15.0), ("contain", 12.5)] {
+        let doc = open(
+            &format!(
+                r#"<div style="width: 100px; height: 60px; background: url(bg.png) no-repeat 0 0 / {size}"></div>"#
+            ),
+            &[("bg.png", plate(8, 4))],
+        );
+        let (matrix, _) = only_placement(&doc, 0);
+        let (width, height) = (8.0 * scale * PX_TO_PT, 4.0 * scale * PX_TO_PT);
+        near(&matrix, &[width, 0.0, 0.0, height, left, top - height]);
+    }
+}
+
+/// **A repeating background is a tiling pattern** whose cell is the image,
+/// placed so a tile's corner lands at §2.6's position: `/XStep` and `/YStep`
+/// the image's size, `/Matrix` its bottom-left corner in page space. And it is
+/// drawn: a render shows the tile's ink well away from where the first one
+/// sits, and none below a `repeat-x` row.
+#[test]
+fn a_repeating_background_image_is_a_tiling_pattern() {
+    let doc = open(
+        r#"<div style="width: 200px; height: 100px; background: url(bg.png) repeat-x 0 30px"></div>"#,
+        &[("bg.png", solid(10, 10))],
+    );
+    let content = page_content(&doc, 0);
+    assert!(content.contains("/Pattern cs /BgP0 scn"), "{content}");
+    let (left, top) = corner();
+    let tile = 10.0 * PX_TO_PT;
+    let (x_step, y_step, matrix, bbox) = pattern(&doc, 0, b"BgP0");
+    near(&[x_step, y_step], &[tile, tile]);
+    near(
+        &matrix,
+        &[1.0, 0.0, 0.0, 1.0, left, top - 30.0 * PX_TO_PT - tile],
+    );
+    near(&bbox, &[0.0, 0.0, tile, tile]);
+
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    let ink = |x_px: f64, y_px: f64| {
+        let column = (left + x_px * PX_TO_PT) as usize;
+        let row = (DEFAULT_PAGE.1 - (top - y_px * PX_TO_PT)) as usize;
+        let start = row * bitmap.stride + column * bitmap.components();
+        bitmap.data[start]
+    };
+    assert_eq!(ink(185.0, 35.0), 0, "the row repeats across the box");
+    assert_eq!(ink(185.0, 70.0), 255, "and not down it");
+}
+
+/// **`space` and `round` fit whole images to the box** (§2.3, §2.4): three
+/// 30-pixel images in 100 pixels are spaced five apart under `space`, and
+/// rescaled to a third of the box under `round`, the `auto` height following.
+#[test]
+fn space_and_round_fit_whole_images() {
+    let spaced = open(
+        r#"<div style="width: 100px; height: 40px; background: url(bg.png) space no-repeat"></div>"#,
+        &[("bg.png", solid(30, 10))],
+    );
+    let (x_step, _, _, bbox) = pattern(&spaced, 0, b"BgP0");
+    near(&[x_step], &[35.0 * PX_TO_PT]);
+    near(&bbox, &[0.0, 0.0, 30.0 * PX_TO_PT, 10.0 * PX_TO_PT]);
+
+    let rounded = open(
+        r#"<div style="width: 100px; height: 40px; background: url(bg.png) round no-repeat"></div>"#,
+        &[("bg.png", solid(30, 10))],
+    );
+    let third = 100.0 / 3.0;
+    let (x_step, _, _, bbox) = pattern(&rounded, 0, b"BgP0");
+    near(&[x_step], &[third * PX_TO_PT]);
+    near(
+        &bbox,
+        &[0.0, 0.0, third * PX_TO_PT, 10.0 * third / 30.0 * PX_TO_PT],
+    );
+}
+
+/// **A `url()` in a stylesheet is relative to the stylesheet** (`css-values-4`
+/// §4.5), so `../img/bg.png` in `css/book.css` is `img/bg.png`; and one that
+/// names nothing is said, per element, rather than leaving a box that looks
+/// finished.
+#[test]
+fn a_background_url_is_relative_to_its_sheet_and_a_missing_one_is_named() {
+    let sheet = b"div.a { width: 50px; height: 50px; background: url(../img/bg.png) no-repeat } \
+                  div.b { width: 50px; height: 50px; background-image: url(../img/none.png) }"
+        .to_vec();
+    let doc = open(
+        r#"<link rel="stylesheet" href="css/book.css"/><div class="a"></div><div class="b"></div><div class="b"></div>"#,
+        &[("css/book.css", sheet), ("img/bg.png", plate(8, 4))],
+    );
+    let (_, name) = only_placement(&doc, 0);
+    assert_eq!(name, "/Bg0");
+    assert_eq!(
+        warnings(&doc),
+        [ArchiveWarning::BackgroundImageNotDrawn {
+            item: "EPUB/ch1.xhtml".to_owned(),
+            defect: ImageDefect::Unresolved,
+            elements: 2,
+        }]
+    );
+}
+
+/// **Sixty thousand background references, each its own missing image, are
+/// one warning counting sixty thousand elements** — a chapter near
+/// `MAX_DOM_NODES` giving every box a texture of its own.
+///
+/// The size is the test. Registering a reference looked for it in a list of
+/// every reference already read, and counting a failed element looked for it
+/// in a list of every element already counted, so both were quadratic: this
+/// test took 70 seconds in a debug build. Both are keyed now, and it takes
+/// two. There is no clock here, for `bounds_ledger.rs`'s reason — a timing
+/// passes on a fast machine with the defect present — so what the test
+/// asserts is the count, and what it does on the quadratic is stall the
+/// suite, as `hostile_input.rs`'s quadratic shapes would.
+#[test]
+fn sixty_thousand_missing_backgrounds_are_one_warning_counting_each_element() {
+    const BOXES: usize = 60_000;
+    // One declaration a box, the height in the sheet: two a box would be past
+    // `MAX_CSS_DECLARATIONS` and the chapter would not be styled at all.
+    let mut body = String::from(r#"<link rel="stylesheet" href="s.css"/>"#);
+    for at in 0..BOXES {
+        body.push_str(&format!(
+            r#"<div style="background-image: url(m{at}.png)"></div>"#
+        ));
+    }
+    let doc = open(&body, &[("s.css", b"div { height: 1px }".to_vec())]);
+    assert_eq!(
+        warnings(&doc),
+        [ArchiveWarning::BackgroundImageNotDrawn {
+            item: "EPUB/ch1.xhtml".to_owned(),
+            defect: ImageDefect::Unresolved,
+            elements: BOXES,
+        }]
+    );
+}
+
+/// **A transformed box's repeating image turns with it**: 8.7.3.1 maps a
+/// pattern onto the page's *default* space, which no `cm` reaches, so the
+/// pattern's own `/Matrix` carries the box's transform — here a translation
+/// of ten pixels across and twenty down, on top of the untransformed cell.
+#[test]
+fn a_transformed_boxs_repeating_image_carries_the_transform_in_its_pattern() {
+    let doc = open(
+        r#"<div style="width: 200px; height: 100px; background: url(bg.png) repeat-x 0 30px; transform: translate(10px, 20px)"></div>"#,
+        &[("bg.png", solid(10, 10))],
+    );
+    let (left, top) = corner();
+    let tile = 10.0 * PX_TO_PT;
+    let (_, _, matrix, _) = pattern(&doc, 0, b"BgP0");
+    near(
+        &matrix,
+        &[
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            left + 10.0 * PX_TO_PT,
+            top - 30.0 * PX_TO_PT - tile - 20.0 * PX_TO_PT,
+        ],
+    );
 }

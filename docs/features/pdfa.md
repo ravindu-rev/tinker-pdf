@@ -30,11 +30,16 @@ never happens.
 
 - **Syntax** needs only the opened `CosDocument`: the header and its binary
   comment, the trailer's `/ID`, encryption, external streams, forbidden
-  filters and actions, embedded files, `/Perms`, optional content, XFA,
+  filters and actions, part 1's prohibition on a `/Filter` on the catalog's
+  metadata stream (6.7.2, in the scope veraPDF's published profile gives it;
+  its older wiki statement reads every metadata stream, and that wider
+  reading is staged by name), embedded files, `/Perms`, optional content, XFA,
   part 4's constraints on `/Info` and the catalog's `/Version`, and **every
   annotation** — the subtypes each part admits, the `/F` flag word, `/CA`, and
   the presence and shape of an appearance dictionary.
-- **Metadata** needs the XMP pull parser: the packet's well-formedness; the
+- **Metadata** needs the XMP pull parser: the packet's well-formedness; its
+  header's `bytes` and `encoding` attributes, which every part forbids (6.7.5,
+  6.6.2.1, 6.7.2.1), on the catalog's packet and every page's; the
   eight `/Info` entries ISO 19005-1 6.7.3 pairs with an XMP property, for
   part 1, compared as instants where they are dates; and both halves of the
   predefined-schema rule. **Membership** — every top-level property belongs to
@@ -60,13 +65,38 @@ never happens.
 - **Fonts** needs `tinker-pdf-font` and the content walk: every font embedded
   including the standard 14, the program's format against the key that names
   it, the subset tag's shape, symbolic and non-symbolic `/Encoding`,
-  `/CIDSystemInfo` and `/CIDToGIDMap`, and the determinable half of the
-  Unicode rule.
+  `/CIDSystemInfo` and `/CIDToGIDMap`, the determinable half of the Unicode
+  rule, **font metrics** — every drawn code's `/Widths` or `/W` against the
+  advance of the glyph the engine's own code-to-glyph mapping selects, for a
+  TrueType or CFF program, within a thousandth of an em; a Type 1 program
+  and a glyph reached only by 9.6.6.4's closing guess are not judged — and
+  a composite font's **encoding CMap** — embedded unless the part
+  admits its name (part 1 admits only `Identity-H` and `Identity-V`; parts 2
+  to 4 admit Table 118's sixty-one, carried as names and needing none of the
+  `cmap-predefined` tables), its `/WMode` agreeing with its program, no
+  reference to a CMap off that list (parts 2 to 4), and an embedded CMap's
+  character collection the CIDFont's, `/Supplement` included from part 2 on.
+  The PDF/UA validator runs this group for a PDF/UA claim
+  ([features/pdfua.md](pdfua.md)).
 - **Colour** needs `tinker-pdf-color`'s ICC reader and the same walk: the
-  output intent's shape, device colour spaces against the destination
-  profile's own colour space, an `ICCBased` stream's `/N` against its
-  profile's channel count, the four rendering intents, and part 1's outright
-  prohibition on transparency.
+  output intent's shape, the destination profile's header (version below
+  3.0 under part 1 and 5.0 after, an output or monitor class, a grey, RGB or
+  CMYK space — read at its fixed offsets, so a profile the transform builder
+  refuses is still judged), device colour spaces against that profile's own
+  colour space, an `ICCBased` stream's `/N` against its profile's channel
+  count and its header against the wider list `ICCBased` admits, the four
+  rendering intents, 6.2.4.4's `/Separation` consistency (one name, one
+  alternate and one tint transform, compared as objects — direct against
+  indirect and compression ignored, as the clause says; each pair of objects
+  once however many paths reach it, and within a work budget past which the
+  comparison answers "the same" rather than guess) and its `/DeviceN`
+  colorants described, part 1's outright
+  prohibition on transparency — a group, a graphics state's soft mask, blend
+  mode or alpha, and an `/SMask` on any XObject the pages draw (rule 6.4-2,
+  which until October 2026 did not run) — and the graphics clause's operator list
+  (6.2.10 / 6.2.2): an operator outside ISO 32000-1 Table A.1's seventy-three
+  — `PS` among them — is a finding inside `BX`/`EX` or not, naming the page,
+  form or appearance stream that used it.
 
 **Machinery is built lazily, and it is counted rather than asserted.** Every
 reach past the COS document goes through one counter, so a syntax-only sweep
@@ -137,6 +167,10 @@ exits by verdict.
 | A conformance level the part does not define, or none where the part requires one | `ArchivalRefusal::LevelNotInPart`, `LevelMissing` | part 4 is the only part where declaring no level is correct | 6.7.11 |
 | Level A with an untagged page or no natural language | `ArchivalRefusal::UntaggedPage`, `LanguageMissing` | level A *is* a tagged structure tree with a stated language; claiming it without one would be the claim this profile exists to make honest | 6.8.2, 6.8.4 |
 | A profile with no destination profile bytes | `ArchivalRefusal::DestinationProfileMissing` | there is no vendored default and no `Option`; the licence decision is in [THIRDPARTY.md](../../THIRDPARTY.md) | 6.2.2 |
+| `add_layer` under part 1 | `ArchivalRefusal::OptionalContent` | part 1 forbids `/OCProperties` outright; parts 2 to 4 admit layers, and the builder writes the `/Name` on the default configuration ISO 19005-2 6.9 asks of every configuration | 6.1.13 |
+| A `/DeviceN` naming a spot colour its `/Colorants` does not describe, under parts 2 to 4 | `ArchivalRefusal::UndescribedColorant` | ISO 19005-2 6.2.4.4 asks an entry of every spot colour — every colorant but `/None` and DeviceCMYK's four process names — so a reader rendering one ink alone knows what it looks like | 6.2.4.4 (parts 2 to 4; part 1 has none) |
+| An associated file (`associate_file`, `Tag::associated_file`) under parts 1, 2 or 4 | `ArchivalRefusal::AssociatedFile` | part 1 forbids embedded files; part 2, and part 4 without level F, require the embedded file itself to conform (veraPDF's rules 6.8-5, 6.9-3), which nothing here checks of a caller's bytes; part 4 level F asks for an `/EmbeddedFiles` tree (6.9-5) this writer does not keep. Part 3 admits them, and they are written | 6.1.11 (part 3 admits them) |
+| A second `/Separation` of one colorant with another alternate or tint transform, under parts 2 to 4 | `ArchivalRefusal::InconsistentSeparation` | 6.2.4.4 makes every `/Separation` array of one name agree on both, compared as the objects written; the builder remembers each colorant's first spelling, since a page begun earlier still draws with it | 6.2.4.4 (parts 2 to 4) |
 
 ## Coverage, as a measured number
 
@@ -157,7 +191,7 @@ ISO 19005-1 6.1.2 says the header consists of `%PDF-1.n`, one fixture carries
 Every disagreement has a row in `crates/tinker-pdf/tests/pdfa_ledger.tsv`
 carrying a class — our bug, a staged rule, or a reading — and a **mandatory
 reason**; a row without one is refused by the reader that loads the file, and a
-row whose subject no longer disagrees fails as stale. `PDFA_STAGED` names 39
+row whose subject no longer disagrees fails as stale. `PDFA_STAGED` names 38
 rules this build knows it does not run, each with its clause and what it is
 waiting for, and a `staged` ledger row has to point at one.
 

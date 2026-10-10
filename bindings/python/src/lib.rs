@@ -11,6 +11,12 @@ use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
+mod docops;
+mod forms;
+mod graphics;
+mod read;
+mod signatures;
+
 /// Everything a binding may not invent, gathered where it can be seen.
 ///
 /// Ruling 11: a binding projects the facade and adds no defaults of its own.
@@ -21,6 +27,45 @@ use pyo3::types::PyBytes;
 mod write {
     use pyo3::exceptions::PyValueError;
     use pyo3::PyResult;
+
+    /// The facade's `DestKind` from its name and the five numbers, `None`
+    /// being the file's `null` (12.3.2.2 Table 151).
+    ///
+    /// All eight arms, as the C ABI's `TpdfDestination` carries them. `/FitR`
+    /// takes four numbers that are never `null`, so a missing one is refused
+    /// rather than written as zero.
+    pub fn view(name: &str, numbers: [Option<f64>; 5]) -> PyResult<tinker_pdf::DestKind> {
+        use tinker_pdf::DestKind;
+        let [left, bottom, right, top, zoom] = numbers;
+        Ok(match name {
+            "xyz" => DestKind::Xyz { left, top, zoom },
+            "fit" => DestKind::Fit,
+            "fith" => DestKind::FitH { top },
+            "fitv" => DestKind::FitV { left },
+            "fitr" => match (left, bottom, right, top) {
+                (Some(left), Some(bottom), Some(right), Some(top)) => DestKind::FitR {
+                    left,
+                    bottom,
+                    right,
+                    top,
+                },
+                _ => {
+                    return Err(PyValueError::new_err(
+                        "view 'fitr' needs left, bottom, right and top",
+                    ))
+                }
+            },
+            "fitb" => DestKind::FitB,
+            "fitbh" => DestKind::FitBH { top },
+            "fitbv" => DestKind::FitBV { left },
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "view must be one of xyz, fit, fith, fitv, fitr, fitb, fitbh and \
+                     fitbv, not {other:?}"
+                )))
+            }
+        })
+    }
 
     /// The facade's write mode from its name, or a refusal naming both.
     pub fn mode(name: &str) -> PyResult<tinker_pdf::WriteMode> {
@@ -163,6 +208,97 @@ impl PyDocument {
             .into_iter()
             .map(|defect| defect.kind.as_str().to_string())
             .collect()
+    }
+
+    /// The `/Info` dictionary (14.3.3), decoded: a `Metadata` whose absent
+    /// entries are `None` and whose empty ones are `""`.
+    #[getter]
+    fn metadata(&self) -> read::PyMetadata {
+        read::metadata(&self.inner)
+    }
+
+    /// The version, as "PDF 1.7": the later of the header's and the
+    /// catalog's, never absent.
+    #[getter]
+    fn pdf_version(&self) -> String {
+        self.inner.pdf_version()
+    }
+
+    /// Every page's label (12.4.2), or an empty list when the document
+    /// defines none.
+    fn page_labels(&self) -> Vec<String> {
+        self.inner.page_labels()
+    }
+
+    /// The outline tree (12.3.3); empty when the document has none.
+    fn outline(&self) -> Vec<read::PyOutlineItem> {
+        read::outline(&self.inner)
+    }
+
+    /// A page's link annotations, in `/Annots` order (12.5.6.5).
+    fn links(&self, index: u32) -> PyResult<Vec<read::PyLink>> {
+        read::links(&self.inner, index).ok_or_else(|| PyIndexError::new_err("no such page"))
+    }
+
+    /// Every file attached to the document (7.11.4), in name order.
+    fn attachments(&self) -> Vec<read::PyAttachment> {
+        read::attachments(&self.inner)
+    }
+
+    /// The XMP packet (14.3.2), unparsed, or `None`.
+    fn xmp_metadata<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyBytes>> {
+        self.inner
+            .xmp_metadata()
+            .map(|packet| PyBytes::new(py, &packet))
+    }
+
+    /// One of a page's boundaries (14.11.2) — "media", "crop", "bleed",
+    /// "trim" or "art" — as `(x0, y0, x1, y1)`, resolved the way the reader
+    /// resolves an absent one.
+    fn page_box(&self, index: u32, boundary: &str) -> PyResult<(f64, f64, f64, f64)> {
+        let boundary = docops::boundary(boundary)?;
+        self.inner
+            .page(index)
+            .map(|page| page.boundary(boundary))
+            .ok_or_else(|| PyIndexError::new_err("no such page"))
+    }
+
+    /// The document's digital signatures (12.8), read and checked against
+    /// the file — not verified; that is `verify_signatures`.
+    fn signatures(&self) -> Vec<signatures::PySignature> {
+        signatures::signatures(&self.inner)
+    }
+
+    /// What every signature turns out to prove, in `signatures()`'s order.
+    ///
+    /// `anchors` is required: an empty `TrustAnchors` is how a caller says it
+    /// trusts nothing. `at` is the instant to judge certificate validity at,
+    /// in seconds since the Unix epoch; `None` judges nothing, because
+    /// "expired" is a claim about a moment the caller has to name.
+    #[pyo3(signature = (anchors, at = None))]
+    fn verify_signatures(
+        &self,
+        anchors: &signatures::PyTrustAnchors,
+        at: Option<i64>,
+    ) -> Vec<signatures::PyVerdict> {
+        signatures::verify(&self.inner, anchors, at)
+    }
+
+    /// Everything the engine has tolerated so far, in order (ruling 10).
+    ///
+    /// Reading a page can tolerate more, so asking again later may answer with
+    /// more.
+    fn warnings(&self) -> Vec<read::PyWarning> {
+        read::warnings(&self.inner)
+    }
+
+    /// The data the document's fields hold, in the tree's order: every
+    /// terminal field with a name and its value (`FormData::from_fields`),
+    /// ready to write out as FDF or XFDF.
+    fn form_data(&self) -> forms::PyFormData {
+        forms::PyFormData::new(tinker_pdf::form_data::FormData::from_fields(
+            &self.inner.form_fields(),
+        ))
     }
 
     /// An editor over this document.
@@ -313,6 +449,37 @@ pub struct PyEditor {
 /// difference between a debuggable failure and a `False` nobody checked.
 fn refused(call: &str, detail: &str) -> PyErr {
     PyValueError::new_err(format!("{call} refused: {detail}"))
+}
+
+/// A page call that named a resource nothing is registered under.
+fn unregistered(call: &str, resource: &[u8]) -> PyErr {
+    refused(
+        call,
+        &format!(
+            "nothing of that kind is registered as {:?}",
+            String::from_utf8_lossy(resource)
+        ),
+    )
+}
+
+impl PyEditor {
+    /// `DocumentEditor::add_field` with the field built from its parts, the
+    /// new field's reference as a pair.
+    fn add_field(
+        &mut self,
+        name: String,
+        kind: tinker_pdf::NewFieldKind,
+        flags: i64,
+        font_size: f64,
+    ) -> PyResult<(u32, u16)> {
+        let mut spec = tinker_pdf::NewField::new(name, kind);
+        spec.flags = flags;
+        spec.font_size = font_size;
+        self.inner
+            .add_field(&spec)
+            .map(|reference| (reference.num, reference.gen))
+            .map_err(|error| refused("add_field", &error.to_string()))
+    }
 }
 
 #[pymethods]
@@ -553,6 +720,308 @@ impl PyEditor {
         Ok(PyBytes::new(py, &bytes))
     }
 
+    /// Sets the page labels (12.4.2), replacing any: a list of
+    /// `(first_page, style, prefix, start)` with `style` one of "decimal",
+    /// "roman-upper", "roman-lower", "letters-upper", "letters-lower" and
+    /// "none", and `prefix` `None` for no `/P`. Raises with the facade's own
+    /// reason, writing nothing, when the ranges are refused.
+    fn set_page_labels(&mut self, ranges: Vec<(u32, String, Option<String>, u32)>) -> PyResult<()> {
+        let ranges = docops::label_ranges(ranges)?;
+        self.inner
+            .set_page_labels(&ranges)
+            .map_err(|e| refused("set_page_labels", &e.to_string()))
+    }
+
+    /// Embeds a file (7.11.4) and returns its file specification's
+    /// `(object number, generation)`. Dates are `(year, month, day, hour,
+    /// minute, second, utc_offset_minutes)`, the offset `None` for an
+    /// unspecified zone.
+    #[pyo3(signature = (
+        name, filename, data, description = None, mime_type = None, created = None,
+        modified = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn attach_file(
+        &mut self,
+        name: String,
+        filename: String,
+        data: Vec<u8>,
+        description: Option<String>,
+        mime_type: Option<String>,
+        created: Option<docops::DateTuple>,
+        modified: Option<docops::DateTuple>,
+    ) -> PyResult<(u32, u16)> {
+        let file = tinker_pdf::EmbeddedFile {
+            name,
+            filename,
+            description,
+            mime_type,
+            created: created.map(docops::date),
+            modified: modified.map(docops::date),
+            data,
+        };
+        self.inner
+            .attach_file(&file)
+            .map(|r| (r.num, r.gen))
+            .map_err(|e| refused("attach_file", &e.to_string()))
+    }
+
+    /// Replaces the outline (12.3.3) with these entries.
+    fn set_outline(&mut self, entries: Vec<PyOutlineEntry>) -> PyResult<()> {
+        let entries = entries
+            .iter()
+            .map(PyOutlineEntry::to_facade)
+            .collect::<PyResult<Vec<_>>>()?;
+        if self.inner.set_outline(&entries) {
+            Ok(())
+        } else {
+            Err(refused(
+                "set_outline",
+                "the tree is deeper or wider than this engine's own reader walks",
+            ))
+        }
+    }
+
+    /// Sets `/Info /Title`; answers what it did to the XMP packet, "alone"
+    /// or "other-half-unchanged".
+    fn set_title(&mut self, value: &str) -> &'static str {
+        docops::sync(self.inner.set_title(value))
+    }
+
+    /// Sets `/Info /Author`.
+    fn set_author(&mut self, value: &str) -> &'static str {
+        docops::sync(self.inner.set_author(value))
+    }
+
+    /// Sets `/Info /Subject`.
+    fn set_subject(&mut self, value: &str) -> &'static str {
+        docops::sync(self.inner.set_subject(value))
+    }
+
+    /// Sets `/Info /Keywords`.
+    fn set_keywords(&mut self, value: &str) -> &'static str {
+        docops::sync(self.inner.set_keywords(value))
+    }
+
+    /// Sets `/Info /Creator`.
+    fn set_creator(&mut self, value: &str) -> &'static str {
+        docops::sync(self.inner.set_creator(value))
+    }
+
+    /// Sets `/Info /Producer`.
+    fn set_producer(&mut self, value: &str) -> &'static str {
+        docops::sync(self.inner.set_producer(value))
+    }
+
+    /// Sets `/Info /CreationDate`; raises when the date cannot be spelled.
+    fn set_creation_date(&mut self, date: docops::DateTuple) -> PyResult<&'static str> {
+        self.inner
+            .set_creation_date(docops::date(date))
+            .map(docops::sync)
+            .ok_or_else(|| refused("set_creation_date", &format!("{date:?}")))
+    }
+
+    /// Sets `/Info /ModDate`; raises when the date cannot be spelled.
+    fn set_modification_date(&mut self, date: docops::DateTuple) -> PyResult<&'static str> {
+        self.inner
+            .set_modification_date(docops::date(date))
+            .map(docops::sync)
+            .ok_or_else(|| refused("set_modification_date", &format!("{date:?}")))
+    }
+
+    /// Sets `/Info /Trapped`: "true", "false" or "unknown".
+    fn set_trapped(&mut self, value: &str) -> PyResult<&'static str> {
+        Ok(docops::sync(
+            self.inner.set_trapped(docops::trapped(value)?),
+        ))
+    }
+
+    /// Makes `packet` the XMP metadata (14.3.2), verbatim and uncompressed.
+    fn set_xmp_metadata(&mut self, packet: &[u8]) -> PyResult<&'static str> {
+        self.inner
+            .set_xmp_metadata(packet)
+            .map(docops::sync)
+            .ok_or_else(|| refused("set_xmp_metadata", "the document has no catalog"))
+    }
+
+    /// Sets one of a page's boundaries (14.11.2): "media", "crop", "bleed",
+    /// "trim" or "art".
+    #[allow(clippy::too_many_arguments)]
+    fn set_page_boundary(
+        &mut self,
+        index: u32,
+        boundary: &str,
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+    ) -> PyResult<()> {
+        let boundary = docops::boundary(boundary)?;
+        if self
+            .inner
+            .set_page_boundary(index, boundary, x0, y0, x1, y1)
+        {
+            Ok(())
+        } else {
+            Err(refused(
+                "set_page_boundary",
+                &format!("page {index}, [{x0} {y0} {x1} {y1}]"),
+            ))
+        }
+    }
+
+    /// Sets a page's `/BleedBox`.
+    fn set_bleed_box(&mut self, index: u32, x0: f64, y0: f64, x1: f64, y1: f64) -> PyResult<()> {
+        self.set_page_boundary(index, "bleed", x0, y0, x1, y1)
+    }
+
+    /// Sets a page's `/TrimBox`.
+    fn set_trim_box(&mut self, index: u32, x0: f64, y0: f64, x1: f64, y1: f64) -> PyResult<()> {
+        self.set_page_boundary(index, "trim", x0, y0, x1, y1)
+    }
+
+    /// Sets a page's `/ArtBox`.
+    fn set_art_box(&mut self, index: u32, x0: f64, y0: f64, x1: f64, y1: f64) -> PyResult<()> {
+        self.set_page_boundary(index, "art", x0, y0, x1, y1)
+    }
+
+    /// Takes out what the flags name and reports every change it made. With
+    /// no flag set it takes out nothing, which is `Sanitise::default()`;
+    /// all four is `Sanitise::ALL`.
+    #[pyo3(signature = (javascript = false, actions = false, embedded_files = false, metadata = false))]
+    fn sanitise(
+        &mut self,
+        javascript: bool,
+        actions: bool,
+        embedded_files: bool,
+        metadata: bool,
+    ) -> docops::PySanitiseReport {
+        docops::PySanitiseReport::new(self.inner.sanitise(&tinker_pdf::Sanitise {
+            javascript,
+            actions,
+            embedded_files,
+            metadata,
+        }))
+    }
+
+    /// Creates a text field (12.7.4.3) merged with its one widget, and
+    /// returns the field's `(object number, generation)`.
+    ///
+    /// `rect` is `(x0, y0, x1, y1)` on page `page`; `value` the initial value
+    /// and `max_len` the `/MaxLen`, `None` for neither; `flags` the caller's
+    /// `/Ff` bits and `font_size` the `/DA` size, 0 for auto -- both
+    /// `NewField::new`'s own defaults. Raises with the facade's reason,
+    /// creating nothing, when the field is refused.
+    #[pyo3(signature = (name, page, rect, value = None, max_len = None, flags = 0, font_size = 0.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_text_field(
+        &mut self,
+        name: String,
+        page: u32,
+        rect: (f64, f64, f64, f64),
+        value: Option<String>,
+        max_len: Option<u32>,
+        flags: i64,
+        font_size: f64,
+    ) -> PyResult<(u32, u16)> {
+        let kind = tinker_pdf::NewFieldKind::Text {
+            page,
+            rect: forms::rect(rect),
+            value,
+            max_len,
+        };
+        self.add_field(name, kind, flags, font_size)
+    }
+
+    /// Creates a check box (12.7.4.2.3) whose on state is `export`, ticked
+    /// when `checked`. Otherwise as `add_text_field`.
+    #[pyo3(signature = (name, page, rect, export, checked, flags = 0, font_size = 0.0))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_checkbox(
+        &mut self,
+        name: String,
+        page: u32,
+        rect: (f64, f64, f64, f64),
+        export: String,
+        checked: bool,
+        flags: i64,
+        font_size: f64,
+    ) -> PyResult<(u32, u16)> {
+        let kind = tinker_pdf::NewFieldKind::Checkbox {
+            page,
+            rect: forms::rect(rect),
+            export,
+            checked,
+        };
+        self.add_field(name, kind, flags, font_size)
+    }
+
+    /// Creates a radio group (12.7.4.2.4): one field and one widget per
+    /// button, each `(export, page, (x0, y0, x1, y1))`; `selected` is the
+    /// export value that starts selected, `None` for none. Otherwise as
+    /// `add_text_field`.
+    #[pyo3(signature = (name, buttons, selected = None, flags = 0, font_size = 0.0))]
+    fn add_radio_group(
+        &mut self,
+        name: String,
+        buttons: Vec<forms::Button>,
+        selected: Option<String>,
+        flags: i64,
+        font_size: f64,
+    ) -> PyResult<(u32, u16)> {
+        let kind = tinker_pdf::NewFieldKind::Radio {
+            buttons: forms::buttons(buttons),
+            selected,
+        };
+        self.add_field(name, kind, flags, font_size)
+    }
+
+    /// Creates a choice field (12.7.4.4): a combo box when `combo`, a list
+    /// box otherwise. `options` are each their own export value and display
+    /// text; `editable` lets a combo box's text be typed; `value` is the
+    /// initial selection. Otherwise as `add_text_field`.
+    #[pyo3(signature = (
+        name, page, rect, options, combo, editable = false, value = None, flags = 0,
+        font_size = 0.0
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_choice_field(
+        &mut self,
+        name: String,
+        page: u32,
+        rect: (f64, f64, f64, f64),
+        options: Vec<String>,
+        combo: bool,
+        editable: bool,
+        value: Option<String>,
+        flags: i64,
+        font_size: f64,
+    ) -> PyResult<(u32, u16)> {
+        let kind = tinker_pdf::NewFieldKind::Choice {
+            page,
+            rect: forms::rect(rect),
+            options,
+            combo,
+            editable,
+            value,
+        };
+        self.add_field(name, kind, flags, font_size)
+    }
+
+    /// Imports form data: every field with a value, all of them or none
+    /// (`form_data::apply`). Raises, naming the field and writing nothing,
+    /// when one would not take its value; otherwise returns the widgets that
+    /// took a value and could not be drawn, as `fill_field` does.
+    fn apply_form_data(&mut self, data: &forms::PyFormData) -> PyResult<Vec<PySkippedWidget>> {
+        match tinker_pdf::form_data::apply(&mut self.inner, &data.inner) {
+            Ok(skipped) => Ok(skipped
+                .into_iter()
+                .map(|inner| PySkippedWidget { inner })
+                .collect()),
+            Err(rejection) => Err(PyValueError::new_err(format!("apply refused: {rejection}"))),
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "<tinker_pdf.Editor pages={} dirty={}>",
@@ -632,18 +1101,50 @@ pub struct PyOutlineEntry {
     /// Nested entries.
     #[pyo3(get, set)]
     pub children: Vec<PyOutlineEntry>,
+    /// How the page is positioned, for a page target: one of "xyz", "fit",
+    /// "fith", "fitv", "fitr", "fitb", "fitbh" and "fitbv" (12.3.2.2 Table
+    /// 151), with the numbers below. `None` for a number is the file's `null`,
+    /// "retain the current value".
+    #[pyo3(get, set)]
+    pub view: String,
+    /// The view's left edge.
+    #[pyo3(get, set)]
+    pub left: Option<f64>,
+    /// The view's bottom edge (`/FitR` only).
+    #[pyo3(get, set)]
+    pub bottom: Option<f64>,
+    /// The view's right edge (`/FitR` only).
+    #[pyo3(get, set)]
+    pub right: Option<f64>,
+    /// The view's top edge.
+    #[pyo3(get, set)]
+    pub top: Option<f64>,
+    /// The view's magnification (`/XYZ` only).
+    #[pyo3(get, set)]
+    pub zoom: Option<f64>,
 }
 
 #[pymethods]
 impl PyOutlineEntry {
     #[new]
-    #[pyo3(signature = (title, page = None, uri = None, open = false, children = Vec::new()))]
+    #[pyo3(signature = (
+        title, page = None, uri = None, open = false, children = Vec::new(),
+        view = "fit".to_string(), left = None, bottom = None, right = None, top = None,
+        zoom = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         title: String,
         page: Option<u32>,
         uri: Option<String>,
         open: bool,
         children: Vec<PyOutlineEntry>,
+        view: String,
+        left: Option<f64>,
+        bottom: Option<f64>,
+        right: Option<f64>,
+        top: Option<f64>,
+        zoom: Option<f64>,
     ) -> PyOutlineEntry {
         PyOutlineEntry {
             title,
@@ -651,6 +1152,12 @@ impl PyOutlineEntry {
             uri,
             open,
             children,
+            view,
+            left,
+            bottom,
+            right,
+            top,
+            zoom,
         }
     }
 
@@ -676,7 +1183,10 @@ impl PyOutlineEntry {
             }
             (Some(index), None) => Some(tinker_pdf::Target::Page {
                 index,
-                view: tinker_pdf::DestKind::Fit,
+                view: write::view(
+                    &self.view,
+                    [self.left, self.bottom, self.right, self.top, self.zoom],
+                )?,
             }),
             (None, Some(uri)) => Some(tinker_pdf::Target::Uri(uri.clone())),
             (None, None) => None,
@@ -691,6 +1201,73 @@ impl PyOutlineEntry {
                 .map(PyOutlineEntry::to_facade)
                 .collect::<PyResult<Vec<_>>>()?,
         })
+    }
+}
+
+/// A structure element to open on a page (14.7.2): its type and the
+/// properties a `Tag` carries, each `None` for absent.
+///
+/// `key` is `(key, order)` for one half of an element drawn in several
+/// places (`Tag::keyed`); `keep_empty` writes the element even with nothing
+/// drawn inside it.
+#[pyclass(name = "Tag")]
+#[derive(Clone)]
+pub struct PyTag {
+    inner: tinker_pdf::Tag,
+}
+
+#[pymethods]
+impl PyTag {
+    #[new]
+    #[pyo3(signature = (
+        kind, title = None, lang = None, alt = None, actual_text = None, expansion = None,
+        id = None, key = None, keep_empty = false
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        kind: &[u8],
+        title: Option<&str>,
+        lang: Option<&str>,
+        alt: Option<&str>,
+        actual_text: Option<&str>,
+        expansion: Option<&str>,
+        id: Option<&[u8]>,
+        key: Option<(u64, u64)>,
+        keep_empty: bool,
+    ) -> PyTag {
+        let mut tag = tinker_pdf::Tag::new(kind);
+        if let Some(text) = title {
+            tag = tag.title(text);
+        }
+        if let Some(text) = lang {
+            tag = tag.lang(text);
+        }
+        if let Some(text) = alt {
+            tag = tag.alt(text);
+        }
+        if let Some(text) = actual_text {
+            tag = tag.actual_text(text);
+        }
+        if let Some(text) = expansion {
+            tag = tag.expansion(text);
+        }
+        if let Some(id) = id {
+            tag = tag.id(id);
+        }
+        if let Some((key, order)) = key {
+            tag = tag.keyed(key, order);
+        }
+        if keep_empty {
+            tag = tag.keep_empty();
+        }
+        PyTag { inner: tag }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<tinker_pdf.Tag {}>",
+            String::from_utf8_lossy(self.inner.kind())
+        )
     }
 }
 
@@ -761,8 +1338,103 @@ impl PyPageBuilder {
         Ok(())
     }
 
+    /// Opens the structure element `tag` describes: everything drawn until
+    /// the matching `close_tag` belongs to it, across calls and across
+    /// pages. Raises, opening nothing, past the deepest nesting the reader
+    /// walks (the close is still owed).
+    fn open_tag(&mut self, tag: &PyTag) -> PyResult<()> {
+        if self.get()?.open_tag(&tag.inner) {
+            Ok(())
+        } else {
+            Err(refused(
+                "open_tag",
+                "past the deepest nesting this engine reads back",
+            ))
+        }
+    }
+
+    /// Closes the innermost element `open_tag` opened; raises when none is
+    /// open.
+    fn close_tag(&mut self) -> PyResult<()> {
+        if self.get()?.close_tag() {
+            Ok(())
+        } else {
+            Err(refused("close_tag", "no element is open"))
+        }
+    }
+
+    /// Sets this page's `/BleedBox` (14.11.2).
+    fn set_bleed_box(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) -> PyResult<()> {
+        self.get()?.set_bleed_box(x0, y0, x1, y1);
+        Ok(())
+    }
+
+    /// Writes text in codes the caller chose, with `spacing` as
+    /// `(character, word)` (9.3.2, 9.3.3). `codes` are written and not
+    /// interpreted; `characters`, what they stand for, are recorded and not
+    /// written, so an embedded program is still subset to what was drawn.
+    #[allow(clippy::too_many_arguments)]
+    fn encoded_text(
+        &mut self,
+        font: &[u8],
+        size: f64,
+        x: f64,
+        y: f64,
+        spacing: (f64, f64),
+        codes: &[u8],
+        characters: &str,
+    ) -> PyResult<()> {
+        self.get()?
+            .encoded_text(font, size, x, y, spacing, codes, characters);
+        Ok(())
+    }
+
+    /// Applies a registered graphics state (`gs`); raises when none is
+    /// registered under the name.
+    fn set_ext_gstate(&mut self, resource: &[u8]) -> PyResult<()> {
+        if self.get()?.set_ext_gstate(resource) {
+            Ok(())
+        } else {
+            Err(unregistered("set_ext_gstate", resource))
+        }
+    }
+
+    /// Draws a registered form XObject (`Do`); raises when none is
+    /// registered under the name.
+    fn form(&mut self, resource: &[u8]) -> PyResult<()> {
+        if self.get()?.form(resource) {
+            Ok(())
+        } else {
+            Err(unregistered("form", resource))
+        }
+    }
+
+    /// Sets the non-stroking colour to a registered tiling pattern.
+    fn set_fill_pattern(&mut self, resource: &[u8]) -> PyResult<()> {
+        if self.get()?.set_fill_pattern(resource) {
+            Ok(())
+        } else {
+            Err(unregistered("set_fill_pattern", resource))
+        }
+    }
+
+    /// Sets the stroking colour to a registered tiling pattern.
+    fn set_stroke_pattern(&mut self, resource: &[u8]) -> PyResult<()> {
+        if self.get()?.set_stroke_pattern(resource) {
+            Ok(())
+        } else {
+            Err(unregistered("set_stroke_pattern", resource))
+        }
+    }
+
     /// Adds a link annotation over a rectangle (12.5.6.5).
-    #[pyo3(signature = (x0, y0, x1, y1, page = None, uri = None))]
+    ///
+    /// A page link is positioned as `view` says, with the same keywords
+    /// `OutlineEntry` takes; the default is "fit".
+    #[pyo3(signature = (
+        x0, y0, x1, y1, page = None, uri = None, view = "fit", left = None, bottom = None,
+        right = None, top = None, zoom = None
+    ))]
     #[allow(clippy::too_many_arguments)]
     fn link(
         &mut self,
@@ -772,6 +1444,12 @@ impl PyPageBuilder {
         y1: f64,
         page: Option<u32>,
         uri: Option<String>,
+        view: &str,
+        left: Option<f64>,
+        bottom: Option<f64>,
+        right: Option<f64>,
+        top: Option<f64>,
+        zoom: Option<f64>,
     ) -> PyResult<()> {
         let target = match (page, uri) {
             (Some(_), Some(_)) | (None, None) => {
@@ -782,7 +1460,7 @@ impl PyPageBuilder {
             }
             (Some(index), None) => tinker_pdf::Target::Page {
                 index,
-                view: tinker_pdf::DestKind::Fit,
+                view: write::view(view, [left, bottom, right, top, zoom])?,
             },
             (None, Some(uri)) => tinker_pdf::Target::Uri(uri),
         };
@@ -827,9 +1505,170 @@ impl PyBuilder {
         }
     }
 
+    /// Starts a document whose header declares PDF `major.minor` (7.5.2);
+    /// `DocumentBuilder()` declares the writer's default.
+    #[staticmethod]
+    fn with_version(major: u8, minor: u8) -> PyBuilder {
+        PyBuilder {
+            inner: Some(tinker_pdf::DocumentBuilder::with_version(major, minor)),
+        }
+    }
+
     /// Registers one of the standard 14 fonts under a resource name (9.6.2.2).
     fn add_base_font(&mut self, resource: &[u8], base_font: &[u8]) -> PyResult<()> {
         self.get()?.add_base_font(resource, base_font);
+        Ok(())
+    }
+
+    /// Registers one of the standard 14 under an `/Encoding` the caller wrote
+    /// (9.6.6.1): glyph `names` for the codes from `first_code`, and their
+    /// `widths` in thousandths of an em. Raises, registering nothing, when
+    /// the lists differ in length, either is empty, or the codes run past 255.
+    fn add_named_font(
+        &mut self,
+        resource: &[u8],
+        base_font: &[u8],
+        first_code: u8,
+        names: Vec<String>,
+        widths: Vec<u16>,
+    ) -> PyResult<()> {
+        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+        if self
+            .get()?
+            .add_named_font(resource, base_font, first_code, &borrowed, &widths)
+        {
+            Ok(())
+        } else {
+            Err(refused(
+                "add_named_font",
+                &format!(
+                    "{} names and {} widths from code {first_code}",
+                    names.len(),
+                    widths.len()
+                ),
+            ))
+        }
+    }
+
+    /// Registers a graphics state (Table 58). Every argument left `None`
+    /// writes no entry. `soft_mask` is `"none"` for `/SMask /None`, or
+    /// `"alpha"` / `"luminosity"` for a mask over `mask_form`, a form
+    /// registered with a transparency group, with `backdrop` its `/BC`.
+    #[pyo3(signature = (
+        resource, fill_alpha = None, stroke_alpha = None, blend_mode = None, soft_mask = None,
+        mask_form = None, backdrop = None
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_ext_gstate(
+        &mut self,
+        resource: &[u8],
+        fill_alpha: Option<f64>,
+        stroke_alpha: Option<f64>,
+        blend_mode: Option<&str>,
+        soft_mask: Option<&str>,
+        mask_form: Option<Vec<u8>>,
+        backdrop: Option<Vec<f64>>,
+    ) -> PyResult<()> {
+        let state = tinker_pdf::ExtGState {
+            fill_alpha,
+            stroke_alpha,
+            blend_mode: blend_mode.map(graphics::blend_mode).transpose()?,
+            soft_mask: graphics::soft_mask(soft_mask, mask_form.as_deref(), backdrop.as_deref())?,
+        };
+        if self.get()?.add_ext_gstate(resource, &state) {
+            Ok(())
+        } else {
+            Err(refused("add_ext_gstate", &format!("{state:?}")))
+        }
+    }
+
+    /// Registers a form XObject (8.10): `bbox` as `(x0, y0, x1, y1)`,
+    /// `matrix` six numbers or `None` for the identity, `group` a
+    /// `(color_space, isolated, knockout)` transparency group or `None`.
+    #[pyo3(signature = (resource, bbox, content, matrix = None, group = None))]
+    fn add_form(
+        &mut self,
+        resource: &[u8],
+        bbox: (f64, f64, f64, f64),
+        content: &[u8],
+        matrix: Option<[f64; 6]>,
+        group: Option<(String, bool, bool)>,
+    ) -> PyResult<()> {
+        let form = tinker_pdf::FormXObject {
+            bbox: [bbox.0, bbox.1, bbox.2, bbox.3],
+            matrix,
+            group: group.map(graphics::group).transpose()?,
+            content,
+        };
+        if self.get()?.add_form(resource, &form) {
+            Ok(())
+        } else {
+            Err(refused(
+                "add_form",
+                &format!("bbox {bbox:?}, matrix {matrix:?}"),
+            ))
+        }
+    }
+
+    /// Registers a coloured tiling pattern (8.7.3): `tiling_type` is
+    /// `"constant-spacing"`, `"no-distortion"` or `"faster-tiling"`.
+    #[pyo3(signature = (resource, bbox, x_step, y_step, tiling_type, content, matrix = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_tiling_pattern(
+        &mut self,
+        resource: &[u8],
+        bbox: (f64, f64, f64, f64),
+        x_step: f64,
+        y_step: f64,
+        tiling_type: &str,
+        content: &[u8],
+        matrix: Option<[f64; 6]>,
+    ) -> PyResult<()> {
+        let pattern = tinker_pdf::TilingPattern {
+            bbox: [bbox.0, bbox.1, bbox.2, bbox.3],
+            x_step,
+            y_step,
+            matrix,
+            tiling_type: graphics::tiling_type(tiling_type)?,
+            content,
+        };
+        if self.get()?.add_tiling_pattern(resource, &pattern) {
+            Ok(())
+        } else {
+            Err(refused(
+                "add_tiling_pattern",
+                &format!("bbox {bbox:?}, steps {x_step} {y_step}, matrix {matrix:?}"),
+            ))
+        }
+    }
+
+    /// Sets the document's natural language, the catalog's `/Lang`: a BCP 47
+    /// tag, or `""` for unknown.
+    fn set_language(&mut self, language: &str) -> PyResult<()> {
+        self.get()?.set_language(language);
+        Ok(())
+    }
+
+    /// Maps a structure type of the caller's own to a standard one in the
+    /// `/RoleMap`; raises, mapping nothing, when the facade refuses it.
+    fn map_role(&mut self, custom: &[u8], standard: &[u8]) -> PyResult<()> {
+        if self.get()?.map_role(custom, standard) {
+            Ok(())
+        } else {
+            Err(refused(
+                "map_role",
+                &format!(
+                    "{:?} to {:?}",
+                    String::from_utf8_lossy(custom),
+                    String::from_utf8_lossy(standard)
+                ),
+            ))
+        }
+    }
+
+    /// Stops later pages from inheriting the images registered so far.
+    fn clear_image_resources(&mut self) -> PyResult<()> {
+        self.get()?.clear_image_resources();
         Ok(())
     }
 
@@ -981,5 +1820,10 @@ fn module_init(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyBuilder>()?;
     module.add_class::<PyPageBuilder>()?;
     module.add_class::<PyOutlineEntry>()?;
+    read::register(module)?;
+    module.add_class::<docops::PySanitiseReport>()?;
+    signatures::register(module)?;
+    module.add_class::<forms::PyFormData>()?;
+    module.add_class::<PyTag>()?;
     Ok(())
 }

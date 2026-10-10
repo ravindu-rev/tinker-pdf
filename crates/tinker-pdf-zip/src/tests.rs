@@ -24,7 +24,10 @@
 
 use crate::build::{archive, Damage, File};
 use crate::limits::{MAX_ZIP_ENTRIES, MAX_ZIP_ENTRY_BYTES, MAX_ZIP_NAME_LEN};
-use crate::{Archive, ArchiveError, EntryError, Limits, Method, Route, Warning};
+use crate::{
+    Archive, ArchiveError, Coded, EntryError, Limits, Method, MethodFeature, Route, Warning, BZIP2,
+    ZSTANDARD,
+};
 
 /// A shorthand: open with the shipped bounds.
 fn open(bytes: &[u8]) -> Result<Archive<'_>, ArchiveError> {
@@ -899,6 +902,453 @@ fn an_entry_whose_data_runs_past_the_end_is_refused_as_truncated() {
             assert_ne!(&*data, b"body", "returned data past the end of the file");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Method 14, through a decoder the caller hands in
+// ---------------------------------------------------------------------------
+//
+// Nothing in this crate encodes or decodes LZMA, so the decoder here is a
+// closure that checks what it was handed and returns chosen bytes. That is
+// the right instrument for *this* crate's half of the contract — the header,
+// the budget, the length and the checksum — and the wrong one for the range
+// decoder, which `tinker-pdf`'s `cbz_real.rs` holds to a real archiver's
+// method-14 entries and the pictures that went into them.
+
+/// APPNOTE 5.8.8's header as CPython writes it — SDK version 9.4, five
+/// property bytes, `lc=3 lp=0 pb=2` and a 64 KiB dictionary — then `stream`.
+fn lzma_payload(stream: &[u8]) -> Vec<u8> {
+    let mut out = vec![9, 4, 5, 0, 0x5D, 0x00, 0x00, 0x01, 0x00];
+    out.extend_from_slice(stream);
+    out
+}
+
+/// A one-entry archive whose entry is method 14, holding `payload` and
+/// declaring `data` as what it decodes to.
+fn lzma_archive(data: &[u8], payload: Vec<u8>) -> Vec<u8> {
+    archive(
+        &[File {
+            method: Some(crate::LZMA),
+            raw: Some(payload),
+            ..File::stored(b"page01.png", data)
+        }],
+        Damage::None,
+    )
+}
+
+#[test]
+fn a_method_14_entry_reaches_the_decoder_with_its_header_read() {
+    let zip = lzma_archive(b"the decoded page", lzma_payload(b"\0range coded"));
+    let mut a = open(&zip).unwrap();
+    assert_eq!(a.entries()[0].method, Method::Other(14));
+
+    let mut seen = None;
+    let got = a
+        .read_with(0, |s| {
+            seen = Some(*s);
+            Ok(b"the decoded page".to_vec())
+        })
+        .unwrap();
+    assert_eq!(&*got, b"the decoded page");
+    assert!(matches!(got, std::borrow::Cow::Owned(_)));
+    let seen = seen.expect("the decoder ran");
+    assert_eq!(seen.properties, 0x5D, "the lc/lp/pb byte");
+    assert_eq!(
+        seen.dictionary_size,
+        1 << 16,
+        "the dictionary, little-endian"
+    );
+    assert_eq!(
+        seen.stream, b"\0range coded",
+        "the stream starts after the nine header bytes and ends at the entry's own size"
+    );
+    assert_eq!(
+        seen.unpacked, 16,
+        "the declared size is the decoder's ceiling"
+    );
+    assert_eq!(a.inflated(), 16, "charged like a deflated entry");
+    assert!(a.warnings().is_empty(), "{:?}", a.warnings());
+}
+
+#[test]
+fn read_without_a_decoder_still_refuses_method_14_by_number() {
+    let zip = lzma_archive(b"page", lzma_payload(b"\0"));
+    let mut a = open(&zip).unwrap();
+    assert_eq!(a.read(0), Err(EntryError::UnsupportedMethod(14)));
+    assert_eq!(a.inflated(), 0, "a refusal before reading spends nothing");
+}
+
+#[test]
+fn read_with_leaves_every_other_method_alone() {
+    let zip = archive(
+        &[
+            File::stored(b"a.jpg", b"stored bytes"),
+            File::deflated(b"b.jpg", &b"xyzxyzxyzxyz".repeat(16)),
+        ],
+        Damage::None,
+    );
+    let mut a = open(&zip).unwrap();
+    let never = |_: &crate::LzmaStream<'_>| -> Result<Vec<u8>, EntryError> {
+        panic!("the LZMA decoder was called for an entry that is not method 14")
+    };
+    assert!(matches!(
+        a.read_with(0, never).unwrap(),
+        std::borrow::Cow::Borrowed(b"stored bytes")
+    ));
+    assert_eq!(
+        &*a.read_with(1, never).unwrap(),
+        &b"xyzxyzxyzxyz".repeat(16)[..]
+    );
+
+    // And a method this build has no decoder for at all is refused as it
+    // always was, decoder or no decoder.
+    let mut zip = archive(&[File::stored(b"page01.jpg", b"body")], Damage::None);
+    let local = crate::le::find(&zip, 0, b"PK\x03\x04").unwrap();
+    zip[local + 8..local + 10].copy_from_slice(&12u16.to_le_bytes());
+    let central = crate::le::find(&zip, 0, b"PK\x01\x02").unwrap();
+    zip[central + 10..central + 12].copy_from_slice(&12u16.to_le_bytes());
+    let mut a = open(&zip).unwrap();
+    assert_eq!(
+        a.read_with(0, never),
+        Err(EntryError::UnsupportedMethod(12))
+    );
+}
+
+#[test]
+fn a_damaged_lzma_header_is_refused_by_name_before_anything_is_charged() {
+    let cases: [(&str, Vec<u8>); 4] = [
+        ("shorter than its nine bytes", vec![9, 4, 5, 0, 0x5D, 0, 0]),
+        ("a properties size of one, which is LZMA2's", {
+            let mut p = lzma_payload(b"\0");
+            p[2] = 1;
+            p
+        }),
+        ("a properties size whose high byte is set", {
+            let mut p = lzma_payload(b"\0");
+            p[3] = 1;
+            p
+        }),
+        ("an lc/lp/pb byte the format cannot encode", {
+            let mut p = lzma_payload(b"\0");
+            p[4] = 225;
+            p
+        }),
+    ];
+    for (why, payload) in cases {
+        let zip = lzma_archive(b"page", payload);
+        let mut a = open(&zip).unwrap();
+        let got = a.read_with(0, |_| panic!("{why}: the decoder ran on a damaged header"));
+        assert_eq!(got, Err(EntryError::LzmaHeader), "{why}");
+        assert_eq!(a.inflated(), 0, "{why}: a header refusal did no work");
+    }
+}
+
+#[test]
+fn what_the_decoder_returns_is_held_to_the_archive_s_own_checks() {
+    // Wrong bytes at the right length: the CRC-32 the archive recorded is what
+    // adjudicates a decoder this crate did not write.
+    let zip = lzma_archive(b"the right page", lzma_payload(b"\0"));
+    let mut a = open(&zip).unwrap();
+    assert!(matches!(
+        a.read_with(0, |_| Ok(b"the wrong page".to_vec())),
+        Err(EntryError::ChecksumMismatch { .. })
+    ));
+
+    // The right bytes and one more: the declared length is checked first.
+    let mut a = open(&zip).unwrap();
+    assert_eq!(
+        a.read_with(0, |_| Ok(b"the right page!".to_vec())),
+        Err(EntryError::SizeMismatch {
+            declared: 14,
+            produced: 15
+        })
+    );
+
+    // A decoder's own refusal travels through verbatim.
+    let mut a = open(&zip).unwrap();
+    assert_eq!(
+        a.read_with(0, |_| Err(EntryError::Corrupt)),
+        Err(EntryError::Corrupt)
+    );
+    assert_eq!(a.inflated(), 14, "a decode that failed was still permitted");
+}
+
+/// **A feature a decoder refuses by name is not damage, and does not say it
+/// is** (review of lane 5A): it travels through as itself, and its sentence
+/// names the feature, where [`EntryError::Corrupt`]'s is about a deflate
+/// stream.
+#[test]
+fn a_feature_refused_by_name_says_which_and_not_that_the_entry_is_broken() {
+    let zip = lzma_archive(b"the right page", lzma_payload(b"\0"));
+    let mut a = open(&zip).unwrap();
+    let refused = EntryError::UnsupportedFeature(MethodFeature::ZstandardDictionary);
+    assert_eq!(a.read_with(0, |_| Err(refused)), Err(refused));
+    assert_eq!(
+        refused.to_string(),
+        "a Zstandard frame that names a dictionary, which is not read here"
+    );
+    assert_eq!(
+        EntryError::UnsupportedFeature(MethodFeature::Bzip2Randomised).to_string(),
+        "a randomised bzip2 block, which is not read here"
+    );
+    assert_eq!(
+        (
+            MethodFeature::ZstandardDictionary.method(),
+            MethodFeature::Bzip2Randomised.method()
+        ),
+        (ZSTANDARD, BZIP2)
+    );
+}
+
+#[test]
+fn a_method_14_entry_is_bounded_and_charged_like_a_deflated_one() {
+    // Past the per-entry cap: refused before the decoder is offered anything.
+    let mut zip = lzma_archive(b"small entry, large claim", lzma_payload(b"\0"));
+    let central = crate::le::rfind(&zip, b"PK\x01\x02").unwrap();
+    let huge = (MAX_ZIP_ENTRY_BYTES as u32).wrapping_add(1);
+    zip[central + 24..central + 28].copy_from_slice(&huge.to_le_bytes());
+    let mut a = open(&zip).unwrap();
+    assert_eq!(
+        a.read_with(0, |_| panic!("the decoder ran past the per-entry cap")),
+        Err(EntryError::EntryTooLarge)
+    );
+
+    // Past what the archive has left: the total is shared with deflate and
+    // never refunded.
+    let data = vec![7u8; 600];
+    let zip = archive(
+        &[
+            File {
+                method: Some(crate::LZMA),
+                raw: Some(lzma_payload(b"\0")),
+                ..File::stored(b"a.png", &data)
+            },
+            File {
+                method: Some(crate::LZMA),
+                raw: Some(lzma_payload(b"\0")),
+                ..File::stored(b"b.png", &data)
+            },
+        ],
+        Damage::None,
+    );
+    let limits = Limits {
+        max_inflated_total: 1000,
+        ..Limits::DEFAULT
+    };
+    let mut a = Archive::open(&zip, &limits).unwrap();
+    assert_eq!(&*a.read_with(0, |_| Ok(data.clone())).unwrap(), &data[..]);
+    assert_eq!(
+        a.read_with(1, |_| panic!("the decoder ran past the archive's total")),
+        Err(EntryError::ArchiveBudgetSpent)
+    );
+}
+
+#[test]
+fn a_streamed_method_14_entry_has_its_descriptor_checked_at_its_compressed_size() {
+    let zip = archive(
+        &[File {
+            method: Some(crate::LZMA),
+            raw: Some(lzma_payload(b"\0range coded")),
+            streamed: true,
+            ..File::stored(b"page01.png", b"decoded")
+        }],
+        Damage::None,
+    );
+    let mut a = open(&zip).unwrap();
+    assert_eq!(
+        &*a.read_with(0, |_| Ok(b"decoded".to_vec())).unwrap(),
+        b"decoded"
+    );
+    assert!(
+        !a.warnings().contains(&Warning::DataDescriptorDisagrees),
+        "the descriptor is where the compressed size says: {:?}",
+        a.warnings()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Method 12, and `read_coded`, the door every caller-decoded method takes
+// ---------------------------------------------------------------------------
+//
+// The same instrument as method 14's: a closure that checks what it was
+// handed. The bzip2 decoder itself is `tinker-pdf-archive`'s, held to a real
+// writer's method-12 entries in that crate's `tests/coders.rs` and through the
+// facade in `cbz_real.rs`.
+
+/// A one-entry archive whose entry is `method`, holding `payload` and
+/// declaring `data` as what it decodes to.
+fn coded_archive(method: u16, data: &[u8], payload: Vec<u8>) -> Vec<u8> {
+    archive(
+        &[File {
+            method: Some(method),
+            raw: Some(payload),
+            ..File::stored(b"page01.png", data)
+        }],
+        Damage::None,
+    )
+}
+
+#[test]
+fn a_method_12_entry_reaches_the_decoder_whole() {
+    let zip = coded_archive(crate::BZIP2, b"the decoded page", b"BZh9 a stream".to_vec());
+    let mut a = open(&zip).unwrap();
+    assert_eq!(a.entries()[0].method, Method::Other(12));
+
+    let mut seen = None;
+    let got = a
+        .read_coded(0, |coded| {
+            seen = Some(*coded);
+            Ok(b"the decoded page".to_vec())
+        })
+        .unwrap();
+    assert_eq!(&*got, b"the decoded page");
+    assert_eq!(
+        seen,
+        Some(Coded::Bzip2 {
+            stream: b"BZh9 a stream",
+            unpacked: 16
+        }),
+        "no framing is read off a bzip2 entry: the stream is its whole data"
+    );
+    assert_eq!(seen.map(|c| c.method()), Some(12));
+    assert_eq!(a.inflated(), 16, "charged like a deflated entry");
+
+    // The two doors that carry no bzip2 decoder still refuse it by number,
+    // and spend nothing doing so.
+    let mut a = open(&zip).unwrap();
+    assert_eq!(a.read(0), Err(EntryError::UnsupportedMethod(12)));
+    assert_eq!(
+        a.read_with(0, |_| panic!("the LZMA decoder ran on a bzip2 entry")),
+        Err(EntryError::UnsupportedMethod(12))
+    );
+    assert_eq!(a.inflated(), 0);
+}
+
+#[test]
+fn a_method_93_entry_reaches_the_decoder_whole() {
+    let zip = coded_archive(
+        crate::ZSTANDARD,
+        b"the decoded page",
+        b"\x28\xB5\x2F\xFD frames".to_vec(),
+    );
+    let mut a = open(&zip).unwrap();
+    assert_eq!(a.entries()[0].method, Method::Other(93));
+
+    let mut seen = None;
+    let got = a
+        .read_coded(0, |coded| {
+            seen = Some(*coded);
+            Ok(b"the decoded page".to_vec())
+        })
+        .unwrap();
+    assert_eq!(&*got, b"the decoded page");
+    assert_eq!(
+        seen,
+        Some(Coded::Zstandard {
+            stream: b"\x28\xB5\x2F\xFD frames",
+            unpacked: 16
+        }),
+        "no framing is read off a Zstandard entry: its frames are its whole data"
+    );
+    assert_eq!(seen.map(|c| c.method()), Some(93));
+    assert_eq!(a.inflated(), 16, "charged like a deflated entry");
+
+    let mut a = open(&zip).unwrap();
+    assert_eq!(a.read(0), Err(EntryError::UnsupportedMethod(93)));
+    assert_eq!(
+        a.read_with(0, |_| panic!("the LZMA decoder ran on a Zstandard entry")),
+        Err(EntryError::UnsupportedMethod(93))
+    );
+    assert_eq!(a.inflated(), 0);
+}
+
+#[test]
+fn read_coded_hands_method_14_over_exactly_as_read_with_does() {
+    let zip = lzma_archive(b"the decoded page", lzma_payload(b"\0range coded"));
+    let mut a = open(&zip).unwrap();
+    let mut seen = None;
+    a.read_coded(0, |coded| {
+        seen = Some(*coded);
+        Ok(b"the decoded page".to_vec())
+    })
+    .unwrap();
+    let Some(Coded::Lzma(stream)) = seen else {
+        panic!("method 14 arrives as LZMA: {seen:?}");
+    };
+    assert_eq!(stream.properties, 0x5D);
+    assert_eq!(stream.stream, b"\0range coded");
+    assert_eq!(stream.unpacked, 16);
+
+    // And a damaged header is still refused before the decoder or the budget.
+    let mut payload = lzma_payload(b"\0");
+    payload[2] = 1;
+    let zip = lzma_archive(b"page", payload);
+    let mut a = open(&zip).unwrap();
+    assert_eq!(
+        a.read_coded(0, |_| panic!("the decoder ran on a damaged header")),
+        Err(EntryError::LzmaHeader)
+    );
+    assert_eq!(a.inflated(), 0);
+}
+
+#[test]
+fn read_coded_refuses_a_method_whose_framing_it_does_not_read() {
+    // 20 is Zstandard's deprecated number (APPNOTE 4.4.5), which no writer
+    // should use and this crate does not read as 93.
+    for method in [1u16, 6, 9, 19, 20, 95, 98, 99] {
+        let zip = coded_archive(method, b"page", b"whatever".to_vec());
+        let mut a = open(&zip).unwrap();
+        assert_eq!(
+            a.read_coded(0, |_| panic!("method {method} reached the decoder")),
+            Err(EntryError::UnsupportedMethod(method))
+        );
+        assert_eq!(
+            a.inflated(),
+            0,
+            "method {method}: refused before the charge"
+        );
+    }
+}
+
+#[test]
+fn methods_12_and_93_are_bounded_checked_and_charged_like_the_others() {
+    for method in [crate::BZIP2, crate::ZSTANDARD] {
+        bounded_checked_and_charged(method);
+    }
+}
+
+fn bounded_checked_and_charged(method: u16) {
+    // Past the per-entry cap: refused before the decoder is offered anything.
+    let mut zip = coded_archive(method, b"small entry, large claim", b"BZh9".to_vec());
+    let central = crate::le::rfind(&zip, b"PK\x01\x02").unwrap();
+    let huge = (MAX_ZIP_ENTRY_BYTES as u32).wrapping_add(1);
+    zip[central + 24..central + 28].copy_from_slice(&huge.to_le_bytes());
+    let mut a = open(&zip).unwrap();
+    assert_eq!(
+        a.read_coded(0, |_| panic!("the decoder ran past the per-entry cap")),
+        Err(EntryError::EntryTooLarge)
+    );
+
+    // What the decoder returns is held to the archive's length and CRC-32.
+    let zip = coded_archive(method, b"the right page", b"BZh9".to_vec());
+    let mut a = open(&zip).unwrap();
+    assert!(matches!(
+        a.read_coded(0, |_| Ok(b"the wrong page".to_vec())),
+        Err(EntryError::ChecksumMismatch { .. })
+    ));
+    let mut a = open(&zip).unwrap();
+    assert_eq!(
+        a.read_coded(0, |_| Ok(b"the right page!".to_vec())),
+        Err(EntryError::SizeMismatch {
+            declared: 14,
+            produced: 15
+        })
+    );
+    let mut a = open(&zip).unwrap();
+    assert_eq!(
+        &*a.read_coded(0, |_| Ok(b"the right page".to_vec())).unwrap(),
+        b"the right page"
+    );
 }
 
 // ---------------------------------------------------------------------------

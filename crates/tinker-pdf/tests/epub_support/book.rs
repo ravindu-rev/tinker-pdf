@@ -48,6 +48,20 @@ pub fn one_face_book(family: &str, program: &[u8], size_px: u32, body: &str) -> 
 /// segments in two faces.
 #[must_use]
 pub fn faces_book(faces: &[(&str, &[u8])], size_px: u32, body: &str) -> Vec<u8> {
+    faces_book_with(faces, size_px, "", body)
+}
+
+/// [`faces_book`], with `attributes` written into the paragraph's start tag
+/// — ` dir="rtl"`, ` style="text-align: end"` — for the tests about what a
+/// paragraph's own attributes do to its lines. An empty `attributes` is
+/// [`faces_book`]'s bytes exactly.
+#[must_use]
+pub fn faces_book_with(
+    faces: &[(&str, &[u8])],
+    size_px: u32,
+    attributes: &str,
+    body: &str,
+) -> Vec<u8> {
     let mut items = String::new();
     let mut rules = String::new();
     let mut families: Vec<String> = Vec::with_capacity(faces.len());
@@ -85,11 +99,12 @@ pub fn faces_book(faces: &[(&str, &[u8])], size_px: u32, body: &str) -> Vec<u8> 
             r#"<style>{rules}"#,
             r#" body {{ margin: 0 }}"#,
             r#" p {{ margin: 0; font-family: {families}; font-size: {size}px; }}</style>"#,
-            r#"</head><body><p>{body}</p></body></html>"#
+            r#"</head><body><p{attributes}>{body}</p></body></html>"#
         ),
         rules = rules,
         families = families.join(", "),
         size = size_px,
+        attributes = attributes,
         body = body
     );
     let mut entries = vec![
@@ -104,6 +119,49 @@ pub fn faces_book(faces: &[(&str, &[u8])], size_px: u32, body: &str) -> Vec<u8> 
     for (path, (_, program)) in paths.iter().zip(faces.iter()) {
         entries.push(OcfEntry::deflated(path, program));
     }
+    let directory: Vec<usize> = (0..entries.len()).collect();
+    ocf_zip(&entries, &directory)
+}
+
+/// A book of one chapter whose `<style>` is `style` and whose `<body>` is
+/// `body`, in `language`, set in whatever the user-agent sheet and `style`
+/// say — no embedded face.
+///
+/// For the tests that need a page *laid out* a particular way — two columns,
+/// a ruled table — rather than set in a particular face.
+#[must_use]
+pub fn styled_book(language: &str, style: &str, body: &str) -> Vec<u8> {
+    let package = format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">"#,
+            r#"<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">"#,
+            r#"<dc:identifier id="pub-id">urn:uuid:1f0c2c1e-0000-4000-8000-00000000000c</dc:identifier>"#,
+            r#"<dc:title>A Styled Book</dc:title>"#,
+            r#"<dc:language>{language}</dc:language>"#,
+            r#"</metadata><manifest>"#,
+            r#"<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>"#,
+            r#"</manifest><spine><itemref idref="c1"/></spine></package>"#
+        ),
+        language = language
+    );
+    let chapter = format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{language}"><head>"#,
+            r#"<title>A Chapter</title><style>{style}</style>"#,
+            r#"</head><body>{body}</body></html>"#
+        ),
+        language = language,
+        style = style,
+        body = body
+    );
+    let entries = vec![
+        OcfEntry::stored("mimetype", b"application/epub+zip"),
+        OcfEntry::deflated("META-INF/container.xml", CONTAINER_XML.as_bytes()),
+        OcfEntry::deflated("EPUB/content.opf", package.as_bytes()),
+        OcfEntry::deflated("EPUB/ch1.xhtml", chapter.as_bytes()),
+    ];
     let directory: Vec<usize> = (0..entries.len()).collect();
     ocf_zip(&entries, &directory)
 }

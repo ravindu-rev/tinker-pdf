@@ -7,7 +7,7 @@ use crate::media::{MediaContext, MediaType};
 use crate::parser::{parse, Declared, LayerName, LayerPart};
 use crate::property::{
     AlignContent, AlignItems, AlignSelf, BorderStyle, Color, ColumnCount, ColumnFill, ColumnSpan,
-    Declaration, Defaulting, Display, FlexDirection, FlexWrap, Float, JustifyContent, Len,
+    Declaration, Defaulting, Display, FlexDirection, FlexWrap, Float, Image, JustifyContent, Len,
     LengthPercentage, MarginValue, Position, Property, Side, Size, SpecifiedColumnWidth,
     SpecifiedGap, SpecifiedInset, SpecifiedMargin, SpecifiedMaxSize, SpecifiedMinSize,
     SpecifiedSize, SpecifiedVerticalAlign, ZIndex, IMPLEMENTED_NAMES, UNSUPPORTED_PROPERTIES,
@@ -432,16 +432,94 @@ fn a_layer_statement_leaves_the_import_window_open() {
 /// fixture now uses two at-rules that are still unimplemented — and
 /// `a_font_face_is_no_longer_an_unsupported_at_rule` below is what says the
 /// name left this list rather than the warning quietly changing shape.
+/// `@supports` left it in October 2026 (`supports_applies_its_block_where_this_build_supports_the_test`),
+/// and `@counter-style` took its place in the fixture.
 #[test]
 fn an_unsupported_at_rule_carries_its_name() {
-    let parsed = sheet("@page { margin: 1cm } @supports (x: y) { p { float: left } } @page { }");
+    let parsed =
+        sheet("@page { margin: 1cm } @counter-style x { system: cyclic; symbols: a } @page { }");
     assert_eq!(
         parsed.report.warnings,
         vec![
             (Warning::AtRuleUnsupported("page".to_string()), 2),
-            (Warning::AtRuleUnsupported("supports".to_string()), 1),
+            (Warning::AtRuleUnsupported("counter-style".to_string()), 1),
         ],
         "deduplicated by name, with the count beside each"
+    );
+}
+
+/// **`@supports` applies its block where this build supports what it asks**
+/// (`css-conditional-3` §6): a declaration test is the declaration's own
+/// answer — implemented property and value — so `display: flex` is supported
+/// and `display: grid`, a name in `UNSUPPORTED_PROPERTIES` and a value refused
+/// by value are not; `not`, `and`, `or`, parentheses and `selector()` combine
+/// them; an unknown test is false; a prelude outside the grammar drops the
+/// rule, counted; and no `@supports` is an unsupported at-rule any more.
+#[test]
+fn supports_applies_its_block_where_this_build_supports_the_test() {
+    let applies = |prelude: &str| -> Option<bool> {
+        let parsed = sheet(&format!("@supports {prelude} {{ p {{ float: left }} }}"));
+        assert!(
+            !parsed
+                .report
+                .warnings
+                .iter()
+                .any(|(warning, _)| matches!(warning, Warning::AtRuleUnsupported(_))),
+            "{prelude}: {:?}",
+            parsed.report.warnings
+        );
+        match (parsed.rules.len(), parsed.report.discarded_rules) {
+            (1, 0) => Some(true),
+            (0, 0) => Some(false),
+            (0, 1) => None,
+            other => panic!("{prelude}: {other:?}"),
+        }
+    };
+    for (prelude, expected) in [
+        ("(display: flex)", Some(true)),
+        ("(display:grid)", Some(false)),
+        ("(color: inherit)", Some(true)),
+        ("(margin: 1px 2px !important)", Some(true)),
+        ("(writing-mode: vertical-rl)", Some(false)),
+        ("(no-such-thing: 1)", Some(false)),
+        ("(transform: rotateX(1deg))", Some(false)),
+        ("(transform: rotate(1deg))", Some(true)),
+        ("(display: flexx)", Some(false)),
+        ("(display:)", Some(false)),
+        ("not (display: grid)", Some(true)),
+        ("not (display: flex)", Some(false)),
+        ("(display: flex) and (display: grid)", Some(false)),
+        (
+            "(display: flex) and (opacity: 0.5) and (color: red)",
+            Some(true),
+        ),
+        ("(display: grid) or (display: flex)", Some(true)),
+        (
+            "(display: grid) or (writing-mode: vertical-rl)",
+            Some(false),
+        ),
+        (
+            "((display: grid) or (display: flex)) and (not (display: grid))",
+            Some(true),
+        ),
+        ("(an unknown test)", Some(false)),
+        ("font-tech(color-COLRv1)", Some(false)),
+        ("selector(p > a:nth-child(2n))", Some(true)),
+        ("selector(p::first-line)", Some(false)),
+        ("selector(:hover)", Some(false)),
+        ("selector(p, a)", Some(false)),
+        ("(display: flex) and (display: grid) or (color: red)", None),
+        ("not (display: flex) and (color: red)", None),
+        ("not", None),
+        ("display: flex", None),
+        ("(display: flex) and", None),
+    ] {
+        assert_eq!(applies(prelude), expected, "@supports {prelude}");
+    }
+    // A statement form has no block to apply, and is invalid.
+    assert_eq!(
+        sheet("@supports (display: flex);").report.discarded_rules,
+        1
     );
 }
 
@@ -1510,4 +1588,1102 @@ fn the_multi_column_longhands_and_the_three_shorthands() {
         vec![Property::ColumnGap(SpecifiedGap::Normal)]
     );
     assert!(known("div { gap: -1px }").is_empty());
+}
+
+/// **`break-before`, `break-after` and `break-inside` are the `page-break-*`
+/// longhands under their modern names** (`css-break-3` §3.4).
+///
+/// §3.4's mapping table, row by row, and the refusals by value beside it: a
+/// `column` break or a `verso` page read as its nearest neighbour would be a
+/// break this build put somewhere the author did not ask for.
+#[test]
+fn the_break_properties_are_the_page_break_longhands_under_their_modern_names() {
+    use crate::property::{PageBreak, PageBreakInside};
+    for (value, expected) in [
+        ("auto", PageBreak::Auto),
+        ("page", PageBreak::Always),
+        ("avoid", PageBreak::Avoid),
+        ("avoid-page", PageBreak::Avoid),
+        ("left", PageBreak::Left),
+        ("right", PageBreak::Right),
+    ] {
+        assert_eq!(
+            known(&format!("p {{ break-before: {value} }}")),
+            vec![Property::PageBreakBefore(expected)],
+            "break-before: {value}"
+        );
+        assert_eq!(
+            known(&format!("p {{ break-after: {value} }}")),
+            vec![Property::PageBreakAfter(expected)],
+            "break-after: {value}"
+        );
+    }
+    for (value, expected) in [
+        ("auto", PageBreakInside::Auto),
+        ("avoid", PageBreakInside::Avoid),
+        ("avoid-page", PageBreakInside::Avoid),
+    ] {
+        assert_eq!(
+            known(&format!("p {{ break-inside: {value} }}")),
+            vec![Property::PageBreakInside(expected)],
+            "break-inside: {value}"
+        );
+    }
+    // **The legacy name keeps its legacy grammar.** `page` is the modern
+    // spelling of `always` and is not a `page-break-before` value at all.
+    assert!(known("p { page-break-before: page }").is_empty());
+
+    for (name, value) in [
+        ("break-before", "column"),
+        ("break-before", "avoid-column"),
+        ("break-before", "region"),
+        ("break-before", "avoid-region"),
+        ("break-before", "recto"),
+        ("break-after", "verso"),
+        ("break-inside", "avoid-column"),
+        ("break-inside", "avoid-region"),
+    ] {
+        assert_eq!(
+            declarations(&format!("p {{ {name}: {value} }}"))[0].declaration,
+            Declaration::Unsupported {
+                property: name,
+                value: value.to_owned(),
+            },
+            "{name}: {value} is this build's gap, by value"
+        );
+    }
+}
+
+/// **`text-transform` at its four casing values, and its two others refused by
+/// value** (`css-text-3` §2.1).
+///
+/// `full-width` and `full-size-kana` are inside the grammar and this build's
+/// gap, so they are `Unsupported` whether alone or beside a casing keyword;
+/// two casing keywords, or `none` beside anything, are outside it and the
+/// author's, so they are discarded.
+#[test]
+fn text_transform_reads_its_casing_values_and_refuses_the_rest_by_value() {
+    use crate::property::TextTransform;
+    for (value, expected) in [
+        ("none", TextTransform::None),
+        ("uppercase", TextTransform::Uppercase),
+        ("LOWERCASE", TextTransform::Lowercase),
+        ("capitalize", TextTransform::Capitalize),
+    ] {
+        assert_eq!(
+            known(&format!("p {{ text-transform: {value} }}")),
+            vec![Property::TextTransform(expected)],
+            "text-transform: {value}"
+        );
+    }
+    for value in [
+        "full-width",
+        "uppercase full-width",
+        "full-size-kana capitalize",
+    ] {
+        assert_eq!(
+            declarations(&format!("p {{ text-transform: {value} }}"))[0].declaration,
+            Declaration::Unsupported {
+                property: "text-transform",
+                value: value.to_owned(),
+            },
+            "text-transform: {value}"
+        );
+    }
+    for value in ["uppercase lowercase", "none uppercase", "bold", "3"] {
+        let parsed = sheet(&format!("p {{ text-transform: {value} }}"));
+        assert!(
+            parsed.rules.iter().all(|rule| rule.declarations.is_empty()),
+            "text-transform: {value} is not CSS and is discarded"
+        );
+    }
+}
+
+/// **`border-radius` expands clockwise from the top left, and `/` separates
+/// the horizontal radii from the vertical ones** (`css-backgrounds-3` §5.2);
+/// a negative radius is not CSS.
+#[test]
+fn the_border_radius_shorthand_expands_two_lists_clockwise() {
+    use crate::property::{Corner, SpecifiedRadius};
+    let radius = |h: f64, v: f64| SpecifiedRadius {
+        horizontal: Len::Px(h),
+        vertical: Len::Px(v),
+    };
+    assert_eq!(
+        known("div { border-radius: 1px 2px 3px / 4px 5px }"),
+        vec![
+            Property::BorderRadius(Corner::TopLeft, radius(1.0, 4.0)),
+            Property::BorderRadius(Corner::TopRight, radius(2.0, 5.0)),
+            Property::BorderRadius(Corner::BottomRight, radius(3.0, 4.0)),
+            Property::BorderRadius(Corner::BottomLeft, radius(2.0, 5.0)),
+        ]
+    );
+    assert_eq!(
+        known("div { border-top-right-radius: 10% 2em }"),
+        vec![Property::BorderRadius(
+            Corner::TopRight,
+            SpecifiedRadius {
+                horizontal: Len::Percent(10.0),
+                vertical: Len::Em(2.0),
+            }
+        )]
+    );
+    assert!(known("div { border-radius: -1px }").is_empty());
+    assert!(known("div { border-radius: 1px / }").is_empty());
+}
+
+/// **`background-image` is `none` or one `url()`, in either spelling**
+/// (`css-backgrounds-3` §2.2, `css-values-4` §4.5), or one gradient (see
+/// [`linear_and_radial_gradients_read_their_geometry_and_stops`]); a
+/// repeating gradient, another image function and a second layer are CSS
+/// this build does not draw, refused by value.
+#[test]
+fn background_image_is_none_or_one_url() {
+    use crate::property::ImageRef;
+    let image = |href: &str| {
+        Property::BackgroundImage(Some(Image::Url(ImageRef {
+            href: href.to_owned(),
+            base: None,
+        })))
+    };
+    assert_eq!(
+        known("div { background-image: url(paper.png) }"),
+        vec![image("paper.png")]
+    );
+    assert_eq!(
+        known(r#"div { background-image: url("img/paper.png") }"#),
+        vec![image("img/paper.png")]
+    );
+    assert_eq!(
+        known("div { background-image: none }"),
+        vec![Property::BackgroundImage(None)]
+    );
+    for refused in [
+        "repeating-linear-gradient(red, blue)",
+        "conic-gradient(red, blue)",
+        "url(a.png), url(b.png)",
+        "image-set(url(a.png) 1x)",
+    ] {
+        assert!(
+            matches!(
+                declarations(&format!("div {{ background-image: {refused} }}"))[0].declaration,
+                Declaration::Unsupported {
+                    property: "background-image",
+                    ..
+                }
+            ),
+            "{refused}"
+        );
+    }
+    assert!(known("div { background-image: paper.png }").is_empty());
+}
+
+/// **`linear-gradient()` and `radial-gradient()` read their geometry and
+/// their stops** (`css-images-3` §3, with `css-images-4` §3.5.1's double
+/// positions), every length kept as written for the cascade to compute and
+/// the painter to place.
+///
+/// Refused by value — valid CSS this build does not draw, so counted — are a
+/// translucent stop, an interpolation hint, an interpolation colour space, a
+/// unit this build does not resolve, and a list past
+/// `MAX_CSS_GRADIENT_STOPS`; discarded as not the grammar are one stop, a
+/// `to` with no side or two of one axis, a circle sized by a percentage or
+/// two lengths, an ellipse by one, an extent beside a length, a negative
+/// radius, a hint at either end, and an `at` with no position.
+#[test]
+fn linear_and_radial_gradients_read_their_geometry_and_stops() {
+    use crate::property::{
+        ColorStop, Gradient, GradientOffset, GradientShape, LinearDirection, RadialGradient,
+        RadialSize,
+    };
+    let rgb = |r, g, b| Color { r, g, b, a: 255 };
+    let (red, blue) = (rgb(255, 0, 0), rgb(0, 0, 255));
+    let stop = |color, position| ColorStop { color, position };
+    let one = |source: &str| -> Gradient<Len> {
+        match known(&format!("div {{ background-image: {source} }}")).as_slice() {
+            [Property::BackgroundImage(Some(Image::Gradient(gradient)))] => (**gradient).clone(),
+            other => panic!("{source}: {other:?}"),
+        }
+    };
+    assert_eq!(
+        one("linear-gradient(red, blue)"),
+        Gradient {
+            shape: GradientShape::Linear(LinearDirection::Angle(180.0)),
+            stops: vec![stop(red, None), stop(blue, None)],
+        }
+    );
+    for (direction, expected) in [
+        ("45deg", LinearDirection::Angle(45.0)),
+        ("0.25turn", LinearDirection::Angle(90.0)),
+        ("100grad", LinearDirection::Angle(90.0)),
+        ("0", LinearDirection::Angle(0.0)),
+        ("to top", LinearDirection::Angle(0.0)),
+        ("to right", LinearDirection::Angle(90.0)),
+        ("TO LEFT", LinearDirection::Angle(270.0)),
+        (
+            "to top right",
+            LinearDirection::Corner {
+                right: true,
+                bottom: false,
+            },
+        ),
+        (
+            "to left bottom",
+            LinearDirection::Corner {
+                right: false,
+                bottom: true,
+            },
+        ),
+    ] {
+        assert_eq!(
+            one(&format!("linear-gradient({direction}, red, blue)")).shape,
+            GradientShape::Linear(expected),
+            "{direction}"
+        );
+    }
+    assert_eq!(
+        one("linear-gradient(red 10% 20%, 30px blue, rgb(0, 128, 0) 2em)").stops,
+        vec![
+            stop(red, Some(Len::Percent(10.0))),
+            stop(red, Some(Len::Percent(20.0))),
+            stop(blue, Some(Len::Px(30.0))),
+            stop(rgb(0, 128, 0), Some(Len::Em(2.0))),
+        ]
+    );
+    let offset = |from_end, offset| GradientOffset { from_end, offset };
+    let centre = [
+        offset(false, Len::Percent(50.0)),
+        offset(false, Len::Percent(50.0)),
+    ];
+    for (configuration, expected) in [
+        ("", RadialGradient::DEFAULT),
+        (
+            "circle, ",
+            RadialGradient {
+                circle: true,
+                size: RadialSize::FarthestCorner,
+                at: centre,
+            },
+        ),
+        (
+            "20px, ",
+            RadialGradient {
+                circle: true,
+                size: RadialSize::Explicit(Len::Px(20.0), Len::Px(20.0)),
+                at: centre,
+            },
+        ),
+        (
+            "ellipse 20px 50%, ",
+            RadialGradient {
+                circle: false,
+                size: RadialSize::Explicit(Len::Px(20.0), Len::Percent(50.0)),
+                at: centre,
+            },
+        ),
+        (
+            "closest-side at right 10px top, ",
+            RadialGradient {
+                circle: false,
+                size: RadialSize::ClosestSide,
+                at: [
+                    offset(true, Len::Px(10.0)),
+                    offset(false, Len::Percent(0.0)),
+                ],
+            },
+        ),
+        (
+            "farthest-side circle at 25% 75%, ",
+            RadialGradient {
+                circle: true,
+                size: RadialSize::FarthestSide,
+                at: [
+                    offset(false, Len::Percent(25.0)),
+                    offset(false, Len::Percent(75.0)),
+                ],
+            },
+        ),
+    ] {
+        assert_eq!(
+            one(&format!("radial-gradient({configuration}red, blue)")).shape,
+            GradientShape::Radial(expected),
+            "{configuration}"
+        );
+    }
+    let many: Vec<String> = (0..=crate::limits::MAX_CSS_GRADIENT_STOPS)
+        .map(|_| "red".to_owned())
+        .collect();
+    let at_cap = many[1..].join(", ");
+    assert_eq!(
+        one(&format!("linear-gradient({at_cap})")).stops.len(),
+        crate::limits::MAX_CSS_GRADIENT_STOPS
+    );
+    let past_cap = format!("linear-gradient({})", many.join(", "));
+    for refused in [
+        "linear-gradient(red, rgba(0, 0, 255, 0.5))",
+        "linear-gradient(red, transparent)",
+        "linear-gradient(red, 30%, blue)",
+        "linear-gradient(in oklab, red, blue)",
+        "radial-gradient(10vw, red, blue)",
+        past_cap.as_str(),
+    ] {
+        assert!(
+            matches!(
+                declarations(&format!("div {{ background-image: {refused} }}"))[0].declaration,
+                Declaration::Unsupported {
+                    property: "background-image",
+                    ..
+                }
+            ),
+            "{refused}"
+        );
+    }
+    for malformed in [
+        "linear-gradient(red)",
+        "linear-gradient(to, red, blue)",
+        "linear-gradient(to top bottom, red, blue)",
+        "linear-gradient(, red, blue)",
+        "linear-gradient(red, blue, 10%)",
+        "linear-gradient(red blue, green)",
+        "radial-gradient(circle 10%, red, blue)",
+        "radial-gradient(circle 1px 2px, red, blue)",
+        "radial-gradient(ellipse 1px, red, blue)",
+        "radial-gradient(closest-side 10px, red, blue)",
+        "radial-gradient(-1px, red, blue)",
+        "radial-gradient(at, red, blue)",
+    ] {
+        let parsed = sheet(&format!("div {{ background-image: {malformed} }}"));
+        assert!(
+            parsed.rules.iter().all(|rule| rule.declarations.is_empty()),
+            "{malformed} is not CSS and is discarded"
+        );
+    }
+    // The shorthand takes a gradient as its image.
+    assert!(matches!(
+        known("div { background: linear-gradient(red, blue) no-repeat }").as_slice(),
+        [_, Property::BackgroundImage(Some(Image::Gradient(_))), ..]
+    ));
+}
+
+/// **A relative `url()` remembers the sheet it was written in** — the sheet's
+/// own address, and an `@import`ed sheet's its own — and a `<style>` sheet,
+/// which has none, leaves it to the document.
+#[test]
+fn a_background_url_carries_the_address_of_its_sheet() {
+    struct Table;
+    impl ImportResolver for Table {
+        fn resolve(&self, href: &str, _base: Option<&str>) -> Option<(String, Vec<u8>)> {
+            (href == "inner.css").then(|| {
+                (
+                    "styles/inner.css".to_owned(),
+                    b"p { background-image: url(dots.png) }".to_vec(),
+                )
+            })
+        }
+    }
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let parsed = crate::parse(
+        b"@import url(inner.css); div { background: url(paper.png) }",
+        Some("styles/book.css"),
+        &Table,
+        &MediaContext::screen(432.0, 648.0),
+        &limits,
+        &mut budget,
+    )
+    .expect("under every cap");
+    let bases: Vec<(String, Option<String>)> = parsed
+        .rules
+        .iter()
+        .flat_map(|rule| &rule.declarations)
+        .filter_map(|declared| match &declared.declaration {
+            Declaration::Known(Property::BackgroundImage(Some(Image::Url(image)))) => {
+                Some((image.href.clone(), image.base.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        bases,
+        [
+            ("dots.png".to_owned(), Some("styles/inner.css".to_owned())),
+            ("paper.png".to_owned(), Some("styles/book.css".to_owned())),
+        ]
+    );
+    let inline = known("div { background-image: url(paper.png) }");
+    assert!(matches!(
+        &inline[0],
+        Property::BackgroundImage(Some(Image::Url(image))) if image.base.is_none()
+    ));
+}
+
+/// **`background-repeat`'s two one-word forms and its per-axis pairs**
+/// (§2.3): `repeat-x` is `repeat no-repeat`, and one keyword is both axes.
+#[test]
+fn background_repeat_is_one_keyword_per_axis() {
+    use crate::property::{BackgroundRepeat, RepeatStyle as R};
+    let repeat = |x, y| vec![Property::BackgroundRepeat(BackgroundRepeat { x, y })];
+    assert_eq!(
+        known("div { background-repeat: repeat-x }"),
+        repeat(R::Repeat, R::NoRepeat)
+    );
+    assert_eq!(
+        known("div { background-repeat: repeat-y }"),
+        repeat(R::NoRepeat, R::Repeat)
+    );
+    assert_eq!(
+        known("div { background-repeat: space }"),
+        repeat(R::Space, R::Space)
+    );
+    assert_eq!(
+        known("div { background-repeat: round no-repeat }"),
+        repeat(R::Round, R::NoRepeat)
+    );
+    assert!(known("div { background-repeat: repeat-x repeat }").is_empty());
+}
+
+/// **`<bg-position>`'s one-, two-, three- and four-value forms** (§2.6):
+/// one value centres the other axis, two keywords may come either way round,
+/// and an offset after `right` or `bottom` is measured from that edge.
+#[test]
+fn background_position_reads_every_form() {
+    use crate::property::{PositionOffset, SpecifiedBackgroundPosition};
+    let at = |x: (bool, Len), y: (bool, Len)| {
+        vec![Property::BackgroundPosition(SpecifiedBackgroundPosition {
+            x: PositionOffset {
+                from_end: x.0,
+                offset: x.1,
+            },
+            y: PositionOffset {
+                from_end: y.0,
+                offset: y.1,
+            },
+        })]
+    };
+    let pct = |value: f64| (false, Len::Percent(value));
+    assert_eq!(
+        known("div { background-position: top }"),
+        at(pct(50.0), pct(0.0))
+    );
+    assert_eq!(
+        known("div { background-position: 10px }"),
+        at((false, Len::Px(10.0)), pct(50.0))
+    );
+    assert_eq!(
+        known("div { background-position: bottom left }"),
+        at(pct(0.0), pct(100.0))
+    );
+    assert_eq!(
+        known("div { background-position: 25% 2em }"),
+        at(pct(25.0), (false, Len::Em(2.0)))
+    );
+    assert_eq!(
+        known("div { background-position: right 10px bottom 20% }"),
+        at((true, Len::Px(10.0)), (true, Len::Percent(20.0)))
+    );
+    assert_eq!(
+        known("div { background-position: bottom 5px center }"),
+        at(pct(50.0), (true, Len::Px(5.0)))
+    );
+    assert!(known("div { background-position: top 10px }").is_empty());
+    assert!(known("div { background-position: left right }").is_empty());
+    assert!(known("div { background-position: center 5px left }").is_empty());
+}
+
+/// **`background-size`'s keywords and its one or two lengths** (§2.4): one
+/// length is the width, the height `auto`.
+#[test]
+fn background_size_is_cover_contain_or_two_lengths() {
+    use crate::property::SpecifiedBackgroundSize as S;
+    assert_eq!(
+        known("div { background-size: cover }"),
+        vec![Property::BackgroundSize(S::Cover)]
+    );
+    assert_eq!(
+        known("div { background-size: 50% }"),
+        vec![Property::BackgroundSize(S::Explicit(
+            Some(Len::Percent(50.0)),
+            None
+        ))]
+    );
+    assert_eq!(
+        known("div { background-size: auto 2em }"),
+        vec![Property::BackgroundSize(S::Explicit(
+            None,
+            Some(Len::Em(2.0))
+        ))]
+    );
+    assert!(known("div { background-size: -1px }").is_empty());
+}
+
+/// **The `background` shorthand sets all five longhands this build has**,
+/// each one it does not name at its initial value (§2.11) — so a colour alone
+/// takes away an image — and refuses an attachment or a box by value.
+#[test]
+fn the_background_shorthand_resets_what_it_does_not_name() {
+    use crate::property::{
+        BackgroundRepeat, ImageRef, PositionOffset, RepeatStyle as R, SpecifiedBackgroundPosition,
+        SpecifiedBackgroundSize as S,
+    };
+    let start = |offset| PositionOffset {
+        from_end: false,
+        offset,
+    };
+    assert_eq!(
+        known("div { background: #ff0000 }"),
+        vec![
+            Property::BackgroundColor(Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
+            Property::BackgroundImage(None),
+            Property::BackgroundRepeat(BackgroundRepeat::REPEAT),
+            Property::BackgroundPosition(SpecifiedBackgroundPosition {
+                x: start(Len::Percent(0.0)),
+                y: start(Len::Percent(0.0)),
+            }),
+            Property::BackgroundSize(S::Explicit(None, None)),
+        ]
+    );
+    assert_eq!(
+        known("div { background: url(a.png) no-repeat center / contain transparent }"),
+        vec![
+            Property::BackgroundColor(Color::TRANSPARENT),
+            Property::BackgroundImage(Some(Image::Url(ImageRef {
+                href: "a.png".to_owned(),
+                base: None,
+            }))),
+            Property::BackgroundRepeat(BackgroundRepeat {
+                x: R::NoRepeat,
+                y: R::NoRepeat,
+            }),
+            Property::BackgroundPosition(SpecifiedBackgroundPosition {
+                x: start(Len::Percent(50.0)),
+                y: start(Len::Percent(50.0)),
+            }),
+            Property::BackgroundSize(S::Contain),
+        ]
+    );
+    for refused in [
+        "url(a.png) fixed",
+        "url(a.png) padding-box",
+        "url(a.png), url(b.png)",
+    ] {
+        assert!(
+            matches!(
+                declarations(&format!("div {{ background: {refused} }}"))[0].declaration,
+                Declaration::Unsupported {
+                    property: "background",
+                    ..
+                }
+            ),
+            "{refused}"
+        );
+    }
+    assert!(known("div { background: url(a.png) / cover }").is_empty());
+}
+
+/// **`overflow` is `overflow-x` and then `overflow-y`**, one value standing
+/// for both (`css-overflow-3` §3.1), and `overlay` is §3.1's legacy alias of
+/// `auto`.
+#[test]
+fn the_overflow_shorthand_is_x_then_y() {
+    use crate::property::Overflow;
+    assert_eq!(
+        known("div { overflow: hidden }"),
+        vec![
+            Property::OverflowX(Overflow::Hidden),
+            Property::OverflowY(Overflow::Hidden),
+        ]
+    );
+    assert_eq!(
+        known("div { overflow: clip auto }"),
+        vec![
+            Property::OverflowX(Overflow::Clip),
+            Property::OverflowY(Overflow::Auto),
+        ]
+    );
+    assert_eq!(
+        known("div { overflow-y: overlay }"),
+        vec![Property::OverflowY(Overflow::Auto)]
+    );
+    assert!(known("div { overflow: hidden hidden hidden }").is_empty());
+    assert!(known("div { overflow: 2px }").is_empty());
+}
+
+/// **`outline` is its three longhands**, the omitted ones at their initial
+/// values; `hidden` is not an outline style and `invert` is refused by value.
+#[test]
+fn the_outline_shorthand_is_its_three_longhands() {
+    use crate::property::OutlineStyle;
+    assert_eq!(
+        known("p { outline: thin dotted }"),
+        vec![
+            Property::OutlineWidth(Len::Px(1.0)),
+            Property::OutlineStyle(OutlineStyle::Border(BorderStyle::Dotted)),
+            Property::OutlineColor(None),
+        ]
+    );
+    assert_eq!(
+        known("p { outline-style: auto; outline-offset: -2px }"),
+        vec![
+            Property::OutlineStyle(OutlineStyle::Auto),
+            Property::OutlineOffset(Len::Px(-2.0)),
+        ]
+    );
+    assert!(known("p { outline-style: hidden }").is_empty());
+    assert_eq!(
+        declarations("p { outline-color: invert }")[0].declaration,
+        Declaration::Unsupported {
+            property: "outline-color",
+            value: "invert".to_owned(),
+        }
+    );
+}
+
+/// **`currentColor` is `outline-color`'s initial value, written out**
+/// (`css-ui-4` §5.4), so it is the same value as a colour omitted from the
+/// shorthand, in the shorthand and in the longhand alike.
+#[test]
+fn current_color_in_an_outline_is_its_initial_colour() {
+    use crate::property::OutlineStyle;
+    let solid = |width: f64| {
+        vec![
+            Property::OutlineWidth(Len::Px(width)),
+            Property::OutlineStyle(OutlineStyle::Border(BorderStyle::Solid)),
+            Property::OutlineColor(None),
+        ]
+    };
+    assert_eq!(
+        known("p { outline: medium solid currentColor }"),
+        solid(3.0)
+    );
+    assert_eq!(known("p { outline: currentcolor 2px solid }"), solid(2.0));
+    assert_eq!(known("p { outline: medium solid }"), solid(3.0));
+    assert_eq!(
+        known("p { outline-color: currentColor }"),
+        vec![Property::OutlineColor(None)]
+    );
+    assert!(known("p { outline: solid currentColor currentColor }").is_empty());
+}
+
+/// **A shadow is two to four lengths in a row, a colour and `inset`, in any
+/// order**, a list of them comma-separated (`css-backgrounds-3` §7.1); a text
+/// shadow has no spread and no `inset` (`css-text-decor-3` §4). An omitted
+/// colour and `currentColor` are the same value.
+#[test]
+fn a_shadow_is_its_lengths_a_colour_and_inset_in_any_order() {
+    use crate::property::SpecifiedShadow;
+    let red = Color {
+        r: 255,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
+    let hard = |x: f64, y: f64, spread: f64, color: Option<Color>, inset: bool| SpecifiedShadow {
+        color,
+        x: Len::Px(x),
+        y: Len::Px(y),
+        blur: Len::Px(0.0),
+        spread: Len::Px(spread),
+        inset,
+    };
+    assert_eq!(
+        known("p { box-shadow: 2px 3px 0 4px red, inset red -1px 0 }"),
+        vec![Property::BoxShadow(vec![
+            hard(2.0, 3.0, 4.0, Some(red), false),
+            hard(-1.0, 0.0, 0.0, Some(red), true),
+        ])]
+    );
+    assert_eq!(
+        known("p { box-shadow: currentColor 1px 1px inset }"),
+        vec![Property::BoxShadow(vec![hard(1.0, 1.0, 0.0, None, true)])]
+    );
+    assert_eq!(
+        known("p { text-shadow: 1px 2px; box-shadow: none }"),
+        vec![
+            Property::TextShadow(vec![hard(1.0, 2.0, 0.0, None, false)]),
+            Property::BoxShadow(Vec::new()),
+        ]
+    );
+    // Grammar: lengths broken by a colour, a second colour, `inset` twice, a
+    // percentage, one length, a fourth length or `inset` on text, a trailing
+    // comma, a negative blur — each is invalid, and dropped as invalid rather
+    // than counted as a gap.
+    for malformed in [
+        "box-shadow: 1px red 2px",
+        "box-shadow: 1px 2px red blue",
+        "box-shadow: inset 1px 2px inset",
+        "box-shadow: 10% 2px",
+        "box-shadow: 1px",
+        "box-shadow: 1px 1px 0 1px 1px",
+        "text-shadow: 1px 1px 0 1px",
+        "text-shadow: 1px 1px,",
+        "box-shadow: 1px 1px -2px",
+    ] {
+        assert!(
+            known(&format!("p {{ {malformed} }}")).is_empty(),
+            "{malformed}"
+        );
+        assert!(
+            !declarations(&format!("p {{ {malformed} }}"))
+                .iter()
+                .any(|declared| matches!(declared.declaration, Declaration::Unsupported { .. })),
+            "{malformed} is malformed, not a gap"
+        );
+    }
+    // **A blur is refused by value**, in any list position and in any unit, and
+    // the whole declaration with it — named, not drawn hard.
+    for blurred in [
+        ("box-shadow", "1px 1px 2px"),
+        ("text-shadow", "0 0 0 red, 1px 1px 0.5em"),
+    ] {
+        assert!(
+            matches!(
+                &declarations(&format!("p {{ {}: {} }}", blurred.0, blurred.1))[0].declaration,
+                Declaration::Unsupported { property, .. } if *property == blurred.0
+            ),
+            "{blurred:?}"
+        );
+    }
+}
+
+/// **`transform` is a list of `css-transforms-1` §13.1's two-dimensional
+/// functions**, angles in degrees whatever unit they were written in, the
+/// one-argument forms filling in the identity; a three-dimensional function
+/// is refused by value and anything else outside the grammar is dropped.
+#[test]
+fn transform_reads_the_two_dimensional_functions_and_refuses_the_rest_by_value() {
+    use crate::property::SpecifiedTransform as T;
+    assert_eq!(
+        known(
+            "p { transform: translate(10px, 50%) rotate(0.25turn) scale(2) \
+             skewX(30deg) matrix(1, 0, 0, 1, 5, 6) }"
+        ),
+        vec![Property::Transform(vec![
+            T::Translate(Len::Px(10.0), Len::Percent(50.0)),
+            T::Rotate(90.0),
+            T::Scale(2.0, 2.0),
+            T::Skew(30.0, 0.0),
+            T::Matrix([1.0, 0.0, 0.0, 1.0, 5.0, 6.0]),
+        ])]
+    );
+    assert_eq!(
+        known("p { transform: translateY(2em) scaleX(50%) rotateZ(100grad) skew(0, 10deg) }"),
+        vec![Property::Transform(vec![
+            T::Translate(Len::Px(0.0), Len::Em(2.0)),
+            T::Scale(0.5, 1.0),
+            T::Rotate(90.0),
+            T::Skew(0.0, 10.0),
+        ])]
+    );
+    let Property::Transform(radians) = &known("p { transform: rotate(1rad) }")[0] else {
+        panic!("a transform");
+    };
+    assert_eq!(radians, &vec![T::Rotate(180.0 / std::f64::consts::PI)]);
+    assert_eq!(
+        known("p { transform: none }"),
+        vec![Property::Transform(Vec::new())]
+    );
+    for malformed in [
+        "rotate(90)",
+        "translate(10px 20px)",
+        "translate(10px,)",
+        "scale()",
+        "spin(1turn)",
+        "translate(1px) 2px",
+        "rotate(1px)",
+    ] {
+        let declared = declarations(&format!("p {{ transform: {malformed} }}"));
+        assert!(
+            !declared.iter().any(|d| matches!(
+                d.declaration,
+                Declaration::Known(_) | Declaration::Unsupported { .. }
+            )),
+            "{malformed}: {declared:?}"
+        );
+    }
+    for refused in [
+        "rotateX(10deg)",
+        "translate(1px) translate3d(1px, 2px, 3px)",
+        "perspective(100px)",
+        "translate(10vw)",
+    ] {
+        assert!(
+            matches!(
+                &declarations(&format!("p {{ transform: {refused} }}"))[0].declaration,
+                Declaration::Unsupported {
+                    property: "transform",
+                    ..
+                }
+            ),
+            "{refused}"
+        );
+    }
+}
+
+/// **`transform-origin` is `<bg-position>`'s one- and two-value forms**, two
+/// keywords in either order, and a `z` that may only be zero.
+#[test]
+fn transform_origin_is_a_position_and_a_zero_depth() {
+    use crate::property::SpecifiedTransformOrigin as O;
+    let origin = |source: &str| known(&format!("p {{ transform-origin: {source} }}"));
+    let at = |x: Len, y: Len| vec![Property::TransformOrigin(O { x, y })];
+    assert_eq!(origin("left top"), at(Len::Percent(0.0), Len::Percent(0.0)));
+    assert_eq!(
+        origin("bottom right"),
+        at(Len::Percent(100.0), Len::Percent(100.0))
+    );
+    assert_eq!(origin("top"), at(Len::Percent(50.0), Len::Percent(0.0)));
+    assert_eq!(origin("10px 20%"), at(Len::Px(10.0), Len::Percent(20.0)));
+    assert_eq!(origin("10px 20% 0"), at(Len::Px(10.0), Len::Percent(20.0)));
+    assert!(origin("10px 20% 30%").is_empty());
+    assert!(origin("left 10px top").is_empty());
+    assert!(matches!(
+        &declarations("p { transform-origin: 1px 2px 3px }")[0].declaration,
+        Declaration::Unsupported {
+            property: "transform-origin",
+            ..
+        }
+    ));
+}
+
+/// **A hostile `@supports` prelude is read without a panic and within the
+/// parser's nesting cap**: parentheses past the component-value tree's 256
+/// levels, a `not` chain, and a thousand-term `or`.
+#[test]
+fn a_hostile_supports_prelude_is_bounded() {
+    let deep = format!(
+        "@supports {}(display: flex){} {{ p {{ float: left }} }}",
+        "(".repeat(2_000),
+        ")".repeat(2_000)
+    );
+    let _ = sheet(&deep);
+    let nots = format!(
+        "@supports {}(display: flex){} {{ p {{ float: left }} }}",
+        "(not ".repeat(300),
+        ")".repeat(300)
+    );
+    let _ = sheet(&nots);
+    let wide = format!(
+        "@supports {} {{ p {{ float: left }} }}",
+        vec!["(display: grid)"; 1_000].join(" or ")
+    );
+    assert!(sheet(&wide).rules.is_empty(), "every term is false");
+}
+
+/// **`color-scheme` is read, and a printed page's scheme is the light one**
+/// (`css-color-adjust-1` §2.1).
+///
+/// `normal`, and every list naming `light` whatever else it names, is the
+/// scheme a page is printed in, so each is a value this build draws. A list
+/// naming `dark` and not `light` asks for a scheme this build does not have and
+/// is refused by value; a list of custom identifiers names no scheme at all
+/// and is `normal`. `only` twice, `only` alone or in the middle, and `normal`
+/// beside anything are outside the grammar.
+#[test]
+fn color_scheme_reads_the_light_scheme_and_refuses_a_dark_only_one_by_value() {
+    use crate::property::ColorScheme;
+    for (value, expected) in [
+        ("normal", ColorScheme::Normal),
+        ("light dark", ColorScheme::Light),
+        ("dark light", ColorScheme::Light),
+        ("only light", ColorScheme::Light),
+        ("light only", ColorScheme::Light),
+        ("LIGHT", ColorScheme::Light),
+        ("sepia light", ColorScheme::Light),
+        ("sepia", ColorScheme::Normal),
+    ] {
+        assert_eq!(
+            known(&format!(":root {{ color-scheme: {value} }}")),
+            vec![Property::ColorScheme(expected)],
+            "color-scheme: {value}"
+        );
+    }
+    for value in ["dark", "only dark", "dark sepia"] {
+        assert_eq!(
+            declarations(&format!(":root {{ color-scheme: {value} }}"))[0].declaration,
+            Declaration::Unsupported {
+                property: "color-scheme",
+                value: value.to_owned(),
+            },
+            "color-scheme: {value}"
+        );
+    }
+    for value in [
+        "only",
+        "only only light",
+        "light only dark",
+        "normal light",
+        "default",
+        "light 3",
+        "\"light\"",
+    ] {
+        let parsed = sheet(&format!(":root {{ color-scheme: {value} }}"));
+        assert!(
+            parsed.rules.iter().all(|rule| rule.declarations.is_empty()),
+            "color-scheme: {value} is not CSS and is discarded"
+        );
+    }
+}
+
+/// **`direction` at its two keywords, `unicode-bidi` at the four this build
+/// honours, and the two overrides refused by value** (`css-writing-modes-3`
+/// §2.1, §2.2) — with `text-align`'s `start` and `end` kept as written,
+/// because which side they are is the block's `direction`, decided where the
+/// line is set (`css-text-3` §7.1).
+#[test]
+fn direction_and_unicode_bidi_read_their_keywords_and_refuse_the_overrides() {
+    use crate::property::{Direction, TextAlign, UnicodeBidi};
+    for (value, expected) in [("ltr", Direction::Ltr), ("RTL", Direction::Rtl)] {
+        assert_eq!(
+            known(&format!("p {{ direction: {value} }}")),
+            vec![Property::Direction(expected)],
+            "direction: {value}"
+        );
+    }
+    for (value, expected) in [
+        ("normal", UnicodeBidi::Normal),
+        ("embed", UnicodeBidi::Embed),
+        ("isolate", UnicodeBidi::Isolate),
+        ("Plaintext", UnicodeBidi::Plaintext),
+    ] {
+        assert_eq!(
+            known(&format!("p {{ unicode-bidi: {value} }}")),
+            vec![Property::UnicodeBidi(expected)],
+            "unicode-bidi: {value}"
+        );
+    }
+    for value in ["bidi-override", "isolate-override"] {
+        assert_eq!(
+            declarations(&format!("bdo {{ unicode-bidi: {value} }}"))[0].declaration,
+            Declaration::Unsupported {
+                property: "unicode-bidi",
+                value: value.to_owned(),
+            },
+            "unicode-bidi: {value}"
+        );
+    }
+    for (value, expected) in [
+        ("start", TextAlign::Start),
+        ("end", TextAlign::End),
+        ("left", TextAlign::Left),
+        ("right", TextAlign::Right),
+    ] {
+        assert_eq!(
+            known(&format!("p {{ text-align: {value} }}")),
+            vec![Property::TextAlign(expected)],
+            "text-align: {value}"
+        );
+    }
+}
+
+/// **`hyphens` at `none` and `manual`, and `auto` refused by value**
+/// (`css-text-3` §5.4): `auto` asks for a hyphenation dictionary this build
+/// does not have, so it is counted rather than read as `manual`.
+#[test]
+fn hyphens_reads_none_and_manual_and_refuses_auto() {
+    use crate::property::Hyphens;
+    for (value, expected) in [("none", Hyphens::None), ("Manual", Hyphens::Manual)] {
+        assert_eq!(
+            known(&format!("code {{ hyphens: {value} }}")),
+            vec![Property::Hyphens(expected)],
+            "hyphens: {value}"
+        );
+    }
+    assert_eq!(
+        declarations("p { hyphens: auto }")[0].declaration,
+        Declaration::Unsupported {
+            property: "hyphens",
+            value: "auto".to_owned(),
+        }
+    );
+}
+
+/// **`font-kerning` at its three keywords** (`css-fonts-4` §6.4).
+#[test]
+fn font_kerning_reads_its_three_keywords() {
+    use crate::property::FontKerning;
+    for (value, expected) in [
+        ("auto", FontKerning::Auto),
+        ("normal", FontKerning::Normal),
+        ("NONE", FontKerning::None),
+    ] {
+        assert_eq!(
+            known(&format!("p {{ font-kerning: {value} }}")),
+            vec![Property::FontKerning(expected)],
+            "font-kerning: {value}"
+        );
+    }
+    for value in ["off", "none normal", "0"] {
+        let parsed = sheet(&format!("p {{ font-kerning: {value} }}"));
+        assert!(
+            parsed.rules.iter().all(|rule| rule.declarations.is_empty())
+                || matches!(
+                    parsed.rules[0].declarations[0].declaration,
+                    Declaration::Unsupported { .. }
+                ),
+            "font-kerning: {value} is not one of the three"
+        );
+    }
+}
+
+/// **`font-feature-settings` is its list of tags, each on or off**
+/// (`css-fonts-4` §6.12).
+///
+/// A tag alone is on; `on` and `1` are on, `off` and `0` off. A tag that is not
+/// exactly four printable ASCII characters invalidates the whole declaration,
+/// as §6.12 says, and so does a negative value or a missing string. A value
+/// above one is an alternate index — inside the grammar, and a parameter this
+/// build's shaper does not carry — so the declaration is refused by value.
+#[test]
+fn font_feature_settings_reads_tags_on_and_off_and_refuses_an_alternate_index() {
+    use crate::property::FeatureSetting;
+    let set = |tag: &[u8; 4], value: u32| FeatureSetting { tag: *tag, value };
+    for (value, expected) in [
+        ("normal", vec![]),
+        ("\"liga\"", vec![set(b"liga", 1)]),
+        ("\"liga\" 0", vec![set(b"liga", 0)]),
+        (
+            "\"liga\" off, \"smcp\" on",
+            vec![set(b"liga", 0), set(b"smcp", 1)],
+        ),
+        ("'kern' 1,'dlig'", vec![set(b"kern", 1), set(b"dlig", 1)]),
+        ("\"ss01\" ON", vec![set(b"ss01", 1)]),
+    ] {
+        assert_eq!(
+            known(&format!("p {{ font-feature-settings: {value} }}")),
+            vec![Property::FontFeatureSettings(expected)],
+            "font-feature-settings: {value}"
+        );
+    }
+    for value in ["\"salt\" 2", "\"liga\", \"swsh\" 3"] {
+        assert_eq!(
+            declarations(&format!("p {{ font-feature-settings: {value} }}"))[0].declaration,
+            Declaration::Unsupported {
+                property: "font-feature-settings",
+                value: value.to_owned(),
+            },
+            "font-feature-settings: {value}"
+        );
+    }
+    for value in [
+        "liga",
+        "\"lig\"",
+        "\"ligat\"",
+        "\"li\u{e9}a\"",
+        "\"liga\" -1",
+        "\"liga\" 1.5",
+        "\"liga\",",
+        "\"liga\" on off",
+        "normal, \"liga\"",
+    ] {
+        let parsed = sheet(&format!("p {{ font-feature-settings: {value} }}"));
+        assert!(
+            parsed.rules.iter().all(|rule| rule.declarations.is_empty()),
+            "font-feature-settings: {value} is not CSS and is discarded"
+        );
+    }
 }

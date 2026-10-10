@@ -450,6 +450,163 @@ fn one_manifest_item_named_three_times_is_three_pages() {
         .all(|p| p.name == "EPUB/text/ch1.xhtml"));
 }
 
+/// A content document of the shape Project Gutenberg's `ebookmaker` writes:
+/// the XHTML 1.1 declaration with its identifiers in **single** quotes, and a
+/// file name that is the `.htm` source's with `.html` after it.
+fn gutenberg_chapter(k: usize) -> String {
+    format!(
+        concat!(
+            "<?xml version='1.0' encoding='utf-8'?>\n",
+            "<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.1//EN' ",
+            "'http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd'>\n",
+            r#"<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en"><head>"#,
+            r#"<title>Chapter {k}</title></head><body><div class="chapter">"#,
+            r#"<h2><a id="CHAPTER_{k}"></a>Chapter {k}.</h2>"#,
+            r#"<p>Chapter {k}&#160;&mdash; the {k}th of sixteen.</p></div></body></html>"#
+        ),
+        k = k
+    )
+}
+
+/// The `-h-<k>.htm.html` name `ebookmaker` gives chapter `k`.
+fn gutenberg_name(k: usize) -> String {
+    format!("1306980130634175271_1342-h-{k}.htm.html")
+}
+
+/// An EPUB 2 book shaped like `pg1342-noimages.epub`: sixteen chapters in the
+/// spine, a cover wrapper `wrap0000.html` in the manifest and in `<guide>`,
+/// and `cover` — the wrapper's own `<itemref>`, or nothing — at the head of
+/// the spine.
+fn gutenberg_book(cover: &str) -> Vec<u8> {
+    let mut manifest = String::from(concat!(
+        r#"<item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>"#,
+        r#"<item href="wrap0000.html" id="coverpage-wrapper" media-type="application/xhtml+xml"/>"#
+    ));
+    let mut spine = String::from(cover);
+    for k in 0..16 {
+        manifest.push_str(&format!(
+            r#"<item href="{}" id="item{k}" media-type="application/xhtml+xml"/>"#,
+            gutenberg_name(k)
+        ));
+        spine.push_str(&format!(r#"<itemref idref="item{k}" linear="yes"/>"#));
+    }
+    let package = format!(
+        concat!(
+            "<?xml version='1.0' encoding='UTF-8'?>\n",
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0" unique-identifier="id">"#,
+            r#"<metadata><dc:identifier id="id">http://www.gutenberg.org/1342</dc:identifier>"#,
+            r#"<dc:title>Pride and Prejudice</dc:title><dc:language>en</dc:language>"#,
+            r#"<dc:creator>Jane Austen</dc:creator></metadata>"#,
+            r#"<manifest>{manifest}</manifest><spine toc="ncx">{spine}</spine>"#,
+            r#"<guide><reference type="cover" title="Cover" href="wrap0000.html"/></guide>"#,
+            r#"</package>"#
+        ),
+        manifest = manifest,
+        spine = spine
+    );
+    let wrapper = concat!(
+        "<?xml version='1.0' encoding='utf-8'?>\n",
+        "<!DOCTYPE html PUBLIC '-//W3C//DTD XHTML 1.1//EN' ",
+        "'http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd'>\n",
+        r#"<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en"><head><title>Cover</title>"#,
+        r#"<style type="text/css">body { text-align: center; padding: 0pt; margin: 0pt; }</style>"#,
+        r#"</head><body><div><svg xmlns="http://www.w3.org/2000/svg" "#,
+        r#"xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" width="100%" height="100%" "#,
+        r#"viewBox="0 0 1600 2560" preserveAspectRatio="xMidYMid meet">"#,
+        r#"<image width="1600" height="2560" xlink:href="cover.jpg"/></svg></div></body></html>"#
+    );
+    let ncx = concat!(
+        r#"<?xml version='1.0' encoding='utf-8'?>"#,
+        r#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head/>"#,
+        r#"<docTitle><text>Pride and Prejudice</text></docTitle><navMap/></ncx>"#
+    );
+    let container = CONTAINER_XML.replace("EPUB/content.opf", "OEBPS/content.opf");
+    let mut entries = vec![
+        OcfEntry::stored("mimetype", b"application/epub+zip"),
+        OcfEntry::deflated("META-INF/container.xml", container.as_bytes()),
+        OcfEntry::deflated("OEBPS/content.opf", package.as_bytes()),
+        OcfEntry::deflated("OEBPS/toc.ncx", ncx.as_bytes()),
+        OcfEntry::deflated("OEBPS/wrap0000.html", wrapper.as_bytes()),
+    ];
+    for k in 0..16 {
+        entries.push(OcfEntry::deflated(
+            &format!("OEBPS/{}", gutenberg_name(k)),
+            gutenberg_chapter(k).as_bytes(),
+        ));
+    }
+    let directory: Vec<usize> = (0..entries.len()).collect();
+    ocf_zip(&entries, &directory)
+}
+
+/// **A cover wrapper is a page exactly when the spine names it, and
+/// `linear="no"` does not take it out.**
+///
+/// The shape of `pg1342-noimages.epub`, whose fetched copy paginated to
+/// seventeen distinct origins — `OEBPS/wrap0000.html` first — against the
+/// sixteen itemrefs `epub_fetched.rs` records for it. Gutenberg's
+/// `ebookmaker` writes a cover wrapper three ways: in `<guide>` and out of the
+/// spine, in the spine `linear="no"`, or in the spine `linear="yes"`. All
+/// three are here, around the same sixteen chapters, every content document
+/// carrying the single-quoted XHTML 1.1 declaration that book carries.
+///
+/// What is pinned is the rule both directions of that report depend on:
+/// **one run of page origins per `<itemref>`, in spine order, and nothing
+/// else.** A `<guide>` reference is not the spine (OPF 2.0.1 §2.6 makes it a
+/// pointer to a structural component, not a reading order), so the wrapper it
+/// names is not a page; a `linear="no"` itemref is auxiliary content that
+/// EPUB 3.3 §5.7 still has a reading system give access to, and
+/// `SpineItem::linear` documents it as a page in its own place. So sixteen
+/// itemrefs are sixteen runs and seventeen are seventeen, and a build that
+/// gives the wrapper a page it was not given, or drops the non-linear one,
+/// fails here rather than on a corpus that cannot be committed.
+#[test]
+fn a_cover_wrapper_is_a_page_exactly_when_the_spine_names_it() {
+    let chapters: Vec<String> = (0..16)
+        .map(|k| format!("OEBPS/{}", gutenberg_name(k)))
+        .collect();
+    for (cover, wrapped) in [
+        ("", false),
+        (r#"<itemref idref="coverpage-wrapper" linear="no"/>"#, true),
+        (r#"<itemref idref="coverpage-wrapper" linear="yes"/>"#, true),
+    ] {
+        let doc = Document::open(gutenberg_book(cover)).expect("a book");
+        let report = doc.archive().expect("a report");
+        let mut runs: Vec<&str> = Vec::new();
+        for origin in report.pages() {
+            if runs.last() != Some(&origin.name.as_str()) {
+                runs.push(origin.name.as_str());
+            }
+        }
+        let mut want: Vec<&str> = Vec::new();
+        if wrapped {
+            want.push("OEBPS/wrap0000.html");
+        }
+        want.extend(chapters.iter().map(String::as_str));
+        assert_eq!(runs, want, "spine head {cover:?}");
+        // Every chapter read, under the single-quoted declaration and with
+        // XHTML 1.1's `&mdash;` resolved: a placeholder, or a document the
+        // reader refused and laid out as an empty tree, is still a run of its
+        // own, so the runs alone cannot say so.
+        assert_eq!(spine_defects(&doc), [], "spine head {cover:?}");
+        for (k, name) in chapters.iter().enumerate() {
+            let text: String = report
+                .pages()
+                .iter()
+                .enumerate()
+                .filter(|(_, origin)| origin.name == *name)
+                .map(|(page, _)| {
+                    let page = u32::try_from(page).expect("sixteen chapters' pages");
+                    doc.page(page).expect("a page").text().plain_text()
+                })
+                .collect();
+            assert!(
+                text.contains(&format!("Chapter {k}.")) && text.contains('\u{2014}'),
+                "spine head {cover:?}: {name} reads {text:?}"
+            );
+        }
+    }
+}
+
 // ---- what the report carries -------------------------------------------------
 
 /// **Milestone 3's §4.3.2 warnings now have somewhere to go.**

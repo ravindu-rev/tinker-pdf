@@ -17,7 +17,13 @@ convert as 8.6.4 says; `/Indexed` reads its palette over any base space
 (8.6.6.3); `/Separation` and `/DeviceN` run their real tint transforms into
 the alternate space (8.6.6.4, 8.6.6.5); `/Lab` converts through XYZ at the
 D50 white point (8.6.5.4), kept separate because its components are not in
-0..1 and clamping them there renders the whole space black. An `ICCBased` space is converted
+0..1 and clamping them there renders the whole space black; `a*` and `b*` are
+held to `/Range` in whichever order its pairs come (a backwards pair panicked
+the colour crate until October 2026), and a backwards pair is named —
+`RenderWarning::RepairedColorSpace` with the resource name the space was
+reached by and `LabRangeUnordered`, on a render, every display-list replay and
+a page written as SVG (`an_unordered_lab_range_is_named_wherever_it_is_read`);
+until the third review of lane 8A it was read that way silently. An `ICCBased` space is converted
 through **its own profile** (ICC.1): the header and tag table are read, the
 three `XYZ` columns and three tone curves compile once into fixed-point
 tables, and each colour is a lookup plus an integer matrix multiply, so
@@ -42,8 +48,8 @@ defines; and a CMYK printer profile with a single `kTRC` and no matrix — one
 curve for four channels of ink. Those are `ColorSpace::Approximated`, read by
 component count, which is the alternate-space reading 8.6.5.5 permits.
 
-**`CalGray` and `CalRGB` convert through their own parameters** (8.6.5.1,
-8.6.5.2): the components go through `/Gamma`, `/Matrix` takes them into XYZ
+**`CalGray` and `CalRGB` convert through their own parameters** (8.6.5.2,
+8.6.5.3): the components go through `/Gamma`, `/Matrix` takes them into XYZ
 relative to `/WhitePoint`, and the white point is adapted to D50 before the
 sRGB matrix. They were aliased to `DeviceGray` and `DeviceRGB` until September
 2026, which read neither the white point nor the gamma and left *nothing*
@@ -55,7 +61,14 @@ two whites, and not the Bradford transform baked into the profile path's
 matrix. Named rather than hidden: the two differ on saturated colours far from
 the neutral axis. A bare `/CalGray` or `/CalRGB` *name*, with no parameter
 dictionary behind it, is still the device space — there is nothing else the
-file has said. `[/Pattern base]` carries the underlying space
+file has said. `/G`, `/RGB` and `/CMYK` are Table 93's inline-image
+abbreviations and are read as the device spaces only where no `/ColorSpace`
+resource has the name: 8.6.8 gives `cs` a device space's own name or a
+resource, and until October 2026 a `/CalGray` registered as `/G` was drawn in
+DeviceGray. A `/Lab` image with no `/Decode` takes Table 90's default —
+`L*` over 0..100, `a*` and `b*` over the space's `/Range` — where it used to
+read every sample as a fraction of one and come out all but black;
+`writer_cie.rs` holds both, with the CIE-based spaces this engine now writes. `[/Pattern base]` carries the underlying space
 of an uncoloured pattern (8.7.3.2), so an `scn`'s components reach the paint.
 Initial colours follow 8.6.8 — CMYK starts at full black ink, not all zeros.
 Out-of-range components clamp rather than wrap.
@@ -66,7 +79,38 @@ exponential (`Function::Exponential`, 7.10.3), stitching
 (`Function::PostScript`, 7.10.5, bounded on every axis: a 100-entry stack, 32
 levels of `if`/`ifelse`, 65 536 tokens, no loop operator), plus
 `Function::Array` for the arrays a `/Function` entry may hold — an array no
-longer truncates to its first element.
+longer truncates to its first element. *Corrected 3 October 2026*: a
+shading whose **one** `/Function` was a sampled or calculator stream used to
+read as `Function::Identity` — the entry was resolved before the parser that
+reaches a stream through its reference saw it — so it painted its parameter
+as a ramp in the first component, with no warning; every shading in the suite
+stated its function inline or in an array, which never had the defect.
+`tests/shading_functions.rs` holds both stream types to their own colours.
+*Corrected the same day*: a sampled function of **more than one input** —
+a `/DeviceN` tint transform, a type 1 shading's — was read along its first
+input alone, whatever the others said, though its own note called that a
+nearest-sample read; a two-colorant tint painted every tint of the second
+colorant as none of it. It is 7.10.2's multilinear interpolation now, the
+first input varying fastest, across up to eight inputs and at the nearest
+sample past that, where 2^m corners a lookup stops being a cost worth paying
+(`a_two_input_sampled_function_shades_across_both_inputs`). One input is the
+arithmetic it always was. A type 1 shading's `/Matrix` is still not read.
+*Corrected on review the same day*: an eight-input table of sixteen-bit
+samples cost about 300 µs an evaluation in a debug build (23 µs optimised),
+and an image in a `/DeviceN` space evaluates its tint transform once a pixel —
+a 256 by 256 picture of 64 colours took 15 s to decode. An evaluation now
+enumerates only the axes the point is strictly inside, reads a byte-aligned
+sample in a few instructions and allocates nothing per call (90 µs debug,
+5 µs optimised, every answer the same to the bit), reads no more than 8 192
+samples whatever `/Range` asks for — past that, the nearest sample, as past
+eight inputs (`one_evaluation_reads_no_more_than_its_budget`) — and an image
+in any space other than the device spaces converts each colour once,
+remembered by its samples in a table of 4 096 slots that never answers one
+colour for another (`an_images_repeated_colour_is_converted_once`,
+`a_device_n_images_pixels_are_each_their_own_tint`): the same picture decodes
+in 0.13 s. A picture of a million distinct colours still costs a million
+evaluations, which is the clause's price, as a calculator's 65 536 tokens a
+pixel has always been.
 
 **Shadings** (8.7.4.5). Type 1 (function-based), type 2 (axial) and type 3
 (radial) are evaluated per pixel through `Shading::color_at`; the radial
@@ -132,8 +176,75 @@ averages colour values in the group's own space. The four non-separable modes
 so on a CMYK buffer their operands convert to light, blend, and convert back.
 A page-level group decides the format of the page canvas itself and is
 converted for the caller at the end, which is 11.4.7's own last step; a page is
-never handed back in CMYK, because a `Bitmap` says how many components it has
-and nothing about what they mean.
+never handed back in Lab, and in CMYK only when asked for twice, because a
+`Bitmap` says how many components it has and nothing about what they mean. *Lab was handed back until
+September 2026*: `page_format` named `CmykA8` alone, so `format: LabA8` returned
+four bytes of encoded `L*a*b*` while `PixelFormat::LabA8`'s own documentation
+said it was not a page format;
+`a_page_asked_for_in_lab_comes_back_in_rgb` pins the correction.
+
+**CMYK page output** is the one way past that, and it takes two fields rather
+than one: `format: PixelFormat::CmykA8` *and* `RenderOptions::allow_cmyk`, so a
+caller has said they know the bytes are ink. The page composites over ink on a
+canvas that starts with none — which it already did for `format: CmykA8`, and
+then converted — and the buffer comes back as it stands. **A DeviceCMYK
+colour is the document's own ink**: the interpreter keeps the components a
+fill, stroke or glyph colour was set with in DeviceCMYK — `k`, `K`, and
+`sc`/`scn` in a space the resource seam resolves to DeviceCMYK
+(`FontSource::resolve_ink`) — beside the light it stands for
+(`GraphicsState::fill_ink`, `stroke_ink`), and a CMYK canvas composites those
+(`Canvas::fill_mask_inked`), so `1 0 0 0 k` arrives as `(255, 0, 0, 0)` and a
+rich black `1 1 1 1 k` as all four inks. A stencil mask is painted in the fill
+colour (8.9.6.2), a flat colour like any fill's, so it is handed the fill's ink
+too (`ImageDraw::ink`, and a run of abutting stencils is kept to one ink and
+composited with it); until the review of lane 8A it took only the light, and
+`0.2 0.4 0.6 0.1 k` under a one-bit mask arrived as `(0, 64, 127, 71)` where a
+path fill of it arrived as `(51, 102, 153, 26)`
+(`a_stencil_mask_paints_the_fill_colour_s_own_ink`). A non-isolated group over
+an ink page starts from the page's own ink and takes that ink out again at
+close (11.4.4, 11.4.7.2); until the second review of lane 8A both steps went
+through light, so a `/Multiply` of `0 1 0 0 k` inside the group over a rich
+black was blended against its pure-`K` spelling and came out `(0, 255, 0,
+255)` where the same fill with no group is the rich black
+(`a_non_isolated_group_over_ink_blends_against_the_page_s_own_ink`). Every other colour is light, which a
+CMYK buffer takes through 8.6.4.4's relation inverted with maximum undercolour
+removal — `1 0 0 rg` arrives as `(0, 255, 255, 0)` — and so is what is not a
+flat colour (an image, a shading) and every space whose components are not
+DeviceCMYK's, ink or not: an ICC CMYK profile, and a `/Separation` or
+`/DeviceN` through its alternate. What is drawn on ink keeps its ink wherever
+it is drawn: a form on the page; a coloured tiling pattern's cell
+(`/PaintType 1`), drawn into a buffer of the page's own format and composited
+component for component, so a `k` inside it arrives as its components and an
+`rg` as light turned to ink, as on the page; and a transparency group that
+composites in ink (no `/CS`, or `/CS /DeviceCMYK`) — one that names
+`/CS /DeviceRGB` composites in light (11.6.6), so its rich black arrives as
+pure `K`. An uncoloured pattern (`/PaintType 2`) paints in the colour its
+`scn` operands gave, which is light even over a DeviceCMYK base:
+`[/Pattern /DeviceCMYK]` with `1 1 1 1 /P0 scn` is pure `K` too
+(`a_pattern_or_group_keeps_a_device_cmyk_colour_s_ink_where_it_is_drawn_on_ink`).
+Until the third review of lane 8A this paragraph and `allow_cmyk`'s doc
+called "a pattern's cell" light, which was true of the uncoloured pattern
+only. *Until October 2026 every
+colour was light*, so the rich black arrived as pure `K` and
+`a_page_asked_for_in_ink_with_the_opt_in_comes_back_in_ink` pinned that as the
+limitation it was; it now pins the four inks, and
+`a_device_cmyk_colour_reaches_an_ink_page_unchanged` holds `k`, `/DeviceCMYK cs
+… sc`, a stroke's `K`, a glyph and an RGB fill to `round(255 × component)`
+byte for byte. `cs` selecting DeviceCMYK now resets the colour to 8.6.8's
+`0 0 0 1` — black, where an all-zeros reset had made it white on every page,
+in light as much as in ink — and since the review of lane 8A `cs` selecting a
+`/Separation` or `/DeviceN` space resets it to the whole colorant, a tint of
+1.0 in every component (8.6.6.4, 8.6.6.5), where zeros had made it none
+(`cs_resets_a_spot_space_to_full_tint`); a `/Lab` space starts at zero, or the
+nearest value a `/Range` that leaves zero out allows (8.6.5.4). `Bitmap::to_png` writes an ink page as the light
+it stands for — PNG has no CMYK — and where every partly covered or blended
+pixel is one ink and black those bytes are exactly what the same render
+without the switch returns
+(`an_ink_page_written_as_png_is_the_light_the_switch_would_have_returned`);
+where two inks and black share a partial pixel they are not, because
+compositing is linear in whichever components the canvas holds and 8.6.4.4 is
+a product: half a pixel of rich black is a quarter of white over ink and half
+of it over light (`a_rich_black_edge_composited_over_ink_is_not_the_light_edge`).
 
 **`/Lab` composites in Lab too**, which was the last space that did not. Its
 components are not in the unit interval — `L*` runs 0..100 and `a`/`b` roughly
@@ -157,7 +268,14 @@ to it rather than restated as current. ExtGState
 (fully masked, the default that does not invert every drop shadow), and
 `/TR` pre-sampled to 256 entries. An absent `/SMask` key leaves the mask in
 force where `/None` removes it (11.6.5.1); `q`/`Q` save and restore the mask
-beside the clip (8.5.4). All 16 standard blend modes apply (11.3.5), the
+beside the clip (8.5.4). *Corrected 3 October 2026*: a clip installed while
+a mask was in force used to carry the mask with it, because a clip was built
+by the fill's own coverage function and that multiplies the mask in — so a
+transparency group painted under a mask was masked twice (the interpreter
+installs the form's `/BBox` clip before the group takes the mask; a grey 0.5
+mask kept a quarter) and a clip set under a mask went on masking after
+`/SMask /None`. A clip is now the path times the clip in force and nothing
+else (`tests/soft_mask_clips.rs`). All 16 standard blend modes apply (11.3.5), the
 twelve separable and the four non-separable. Group buffers are a budget, not
 just a depth: nesting caps at 16 and the page as a whole at 2 000 buffers,
 because a soft mask that opens further groups branches rather than descends
@@ -182,7 +300,12 @@ device cannot disagree about what a page contains. Every fallback resolves
 to visible — a malformed `/VE`, an unknown `/P`, an unlisted group, a cycle
 — because content wrongly hidden is invisible to the reader while content
 wrongly shown is theirs to ignore. A hidden layer is reported by its `/Name`
-(8.11.2.1), falling back to the resource name.
+(8.11.2.1), falling back to the resource name. The group an `/OC /name BDC`
+names, the `/Properties` table it sits in and every value read out of the
+group — `/Name`, `/Type`, and a membership dictionary's `/VE` (each operand
+too), `/OCGs` and `/P` — are read where they lie rather than copied at each
+`BDC`, which a long array beside or under any of them made the page's
+sequences times the array (`tests/property_list_work.rs`).
 
 **Page geometry.** `page_view_transform` applies `/Rotate` (7.7.3.3,
 normalised to quarter turns) and the `/CropBox` origin, so the bitmap is the
@@ -203,15 +326,270 @@ top-left — not points, and not PDF user space's upward `y`. The bitmap is
 already turned and already cropped, so a region indexes the picture a reader
 sees: `(0, 0, 32, 32)` of a `/Rotate 90` page is the top-left of the sideways
 picture, never the corner of the upright sheet. The mechanism is ruling 5's
-translated viewport and nothing else — `region_view_transform` composes a
-pixel translation *after* `page_view_transform`, so the same interpreter,
-the same glyphs, the same sampler and a smaller canvas draw the tile. A
-region reaching past the page is **intersected**, never slid back on, because
-a moved rectangle returns real pixels from coordinates the caller did not
-name; one that misses entirely comes back with no pixels. Both trims are
-reported as `RenderWarning::RegionClamped`. Ruling 5's byte-equality guard,
-its fixtures and the one scale-dependent exception are in
-[rulings](../rulings.md).
+one pipeline and nothing else: the page is drawn through `page_view_transform`
+whatever part of it is asked for, onto a canvas that **stands at the region's
+corner of the page** (`Canvas::origin`), so the same interpreter, the same
+glyphs, the same sampler and a smaller canvas draw the tile, and every
+coordinate they compute is the number the whole page computes. (Until
+September 2026 the region was a translation composed after the page view;
+exact as arithmetic, it rounded an ulp apart from the page and reached a byte
+at some scales — [rulings](../rulings.md) 5 records what that was.) A group's
+buffer, a soft mask's and a mesh's stand in the same frame, and the few
+decisions taken by rectangle rather than by pixel — which cells of a tiling
+lattice to composite, which neighbours a mesh's fringe reads, whether a
+lattice, a mesh or an image run is within its budget — are taken on
+rectangles the renderer keeps in the page's frame (`Bounds`), so a tile takes
+the page's decision. **One is not, and it is a known gap rather than a
+guarantee:** whether an image *joins* the run held back so abutting images do
+not conflate is decided by overlap with what the run holds over the canvas
+only, so two images that overlap outside a tile and abut inside it are one run
+in the tile and two on the page — measured on a three-image page at 40 pixels
+of one seam column, 63 levels apart at 1× (`render_regions.rs`'s
+`an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception`,
+and a ROADMAP row). A region reaching past the page is **intersected**, never
+slid back on, because a moved rectangle returns real pixels from coordinates
+the caller did not name; one that misses entirely comes back with no pixels.
+Both trims are reported as `RenderWarning::RegionClamped`. Ruling 5's
+byte-equality guard and its fixtures are in [rulings](../rulings.md).
+
+**A retained page.** `Page::display_list` interprets a page once and keeps
+what it drew: every call the interpreter made, with the graphics state it saw,
+in the space the interpreter runs in — nothing recorded is a pixel — and the
+page's resources beside it, so the images, outlines and form scopes a render
+resolves are resolved once for every render. `DisplayList::render` takes the
+same `RenderOptions` as `Page::render` and returns the same bitmap, because it
+is the same pipeline (`render_layer_with`) with the interpretation replaced by
+`tinker_pdf_content::replay`. The one thing a transcript cannot carry by
+itself is the renderer's answer to the interpreter's three questions — enter
+this form, this transparency group, this soft mask — on which the states
+recorded afterwards depend; so those answers are `Admission`, one type the
+renderer and the recording device (`DisplayRecorder`) both ask, and they
+depend on the content stream alone (hidden optional content, how many groups
+are open, the group-buffer budget), never on a pixel or a scale. A group or
+soft mask whose buffer misses the canvas is accepted over no pixels for the
+same reason ([rulings](../rulings.md) 5). Annotations are recorded with the
+resource scope each appearance resolves in and replayed when the options ask
+for them. **The warnings are the replay's own.** The kept resources are also
+where a render writes down what it tolerated, so each replay gets resources of
+its own over the list's caches (`PageResources::for_one_render`): a cached
+image brings back the damage, or the codec failure, its first decode
+reported, and a cached outline the font that resolved no glyph, so a replay
+that meets them says what a direct render's own decode would; one that does
+not — a region that misses a patterned fill, a render cancelled before it drew
+— says nothing about them. What the recording's interpretation could not
+resolve is kept beside the events and reported by every replay that runs to
+the end; a cancelled one reports none of it, which is what a direct render
+cancelled before the first such font reports — less than a later
+cancellation might, never more (`display_list.rs`'s
+`a_cancelled_replay_reports_no_font_it_never_reached`,
+`a_region_that_draws_no_cell_reports_nothing_a_cell_met`,
+`every_replay_names_the_images_the_page_draws` and
+`every_replay_names_the_glyph_its_font_could_not_resolve`). Caching the codec failure
+changed one thing for a direct render too: an image drawn twice that will not
+decode used to report its codec the first time and, from the cache, its
+resource name standing in for a codec the second.
+
+**A page too large to retain is drawn the direct way.** A recording keeps
+every call with its own copy of the state and the path, so what it holds is
+the interpreter's *work*, and work multiplies through forms: the review of 2
+October 2026 measured a 1 940-byte file of ten forms, each invoking the next
+four times, record 1 310 719 calls at a peak of 635 376 kB, where a direct
+render holds one canvas. So the recording has a budget,
+`tinker_pdf_render::MAX_DISPLAY_LIST_BYTES` (64 MiB), counted by
+`kept_bytes` — each event's size, its state, its path at 56 bytes a segment,
+and every name, string, inline image and mask-group stream it copies. Past
+it `DisplayRecorder` drops what it kept, declines every question and tells
+the interpreter to stop, and the list is **not retained**
+(`DisplayList::is_retained`): it holds no calls, and every `render` is
+`Page::render` and every `to_svg` interprets the page into the writer —
+the same output at a direct render's cost, never a partial picture
+(`display_list.rs`'s `a_page_too_large_to_retain_is_drawn_the_direct_way`, at
+the cap's own value, and `the_review_s_fan_out_of_forms_is_not_retained`).
+The cap clears a dense fixed page's list — two thousand elements and forty
+thousand segments, about 3.2 MB — by 21x, and what it bounds is memory: the
+time a fan of forms costs is the interpreter's, which bounds how deep forms
+nest and not how wide they fan.
+
+**A page as SVG.** `Page::to_svg` writes SVG 1.1 through a third `Device`
+(`crates/tinker-pdf/src/svg_out.rs`), fed by replaying the page's display list
+rather than interpreting the page again, so `DisplayList::to_svg` writes the
+same bytes from a list already held. The decisions, each stated in the
+module header: coordinates are the page's displayed points (crop box and
+`/Rotate` applied, `y` down), with the root sized in `pt` so the picture keeps
+the page's physical size; numbers are rounded to four places, never `-0`,
+`inf` or `NaN`, and a path segment with a point that is not finite is
+dropped as the rasterizer drops it — so a clip whose every point overflows
+installs no clip, as on a render, rather than one of no area that hides the
+page; every path carries its transform already applied, so only an
+image, a gradient and a stroke under a map that is not a similarity carry a
+`transform`; fills and strokes carry colour, opacity, the fill rule and the
+whole pen — width and dashes scaled by the transform's expansion under a
+similarity, as the renderer scales them, and otherwise the path written in
+user space scaled by the map's largest stretch, where the pen is round,
+under a `transform` that takes it to the page, which is SVG 1.1 §11.4
+stroking in user space as 8.4.3.2 does (a zero-width dashed line there is
+written as its dashes, cut in user space); caps, joins, miter limit;
+a clip is a `<clipPath>` in page space, and a clip inside a clip names its
+parent with `clip-path` on the `<clipPath>`, which is §14.3.5's
+intersection; a clipped stroke under its pen's `transform` sits inside a
+`<g>` that names the clip, because §14.3.5 reads a clip named by the
+`<path>` through that path's own `transform`
+(`a_clipped_stroke_under_its_pen_transform_is_clipped_in_page_space`;
+until the review of lane 8A it was named by the path, and a conforming
+viewer cut the line at a third of the clip's width under `scale(1, 3)`); an image is a PNG `data:` URI of its decoded samples — a
+stencil in the fill colour, a soft mask as its alpha — on the unit square,
+inside a `<g>` that names its clip because a clip named by the `<image>`
+would be read through the image's own transform; **a picture drawn again is
+not embedded again** — an image's PNG, or a rasterised paint's, of 512 bytes
+or more is written once into `<defs>` and every draw of the same bytes is a
+`<use>` carrying that draw's transform and opacity, up to the 4 096
+expansions `tinker-pdf-svg` allows, past which pictures are written in place
+so the reader never refuses a file for its references; a transparency group is a
+`<g>` with the group's alpha as `opacity`. **The markup has a budget**,
+`MAX_SVG_BYTES` (256 MiB) of elements or the smaller `SvgOptions::max_bytes`:
+markup grows with what a page *does* — every operator an element, every image
+`Do` a picture — so a short stream asks for as much as it likes, and an element
+that would pass the budget is not written, nothing after it is, the replay is
+told to stop and `SvgWarning::Truncated { limit }` says so; the document is
+well-formed and ends there. A zero-width dashed line under a stretch, written
+as its pieces, stops cutting them once its path data passes what the budget
+has left, so what it holds is the budget and not the pieces: the review of
+lane 8A measured 346 bytes of content (forty segments of `[0.01 0.01]` under
+`scale(1, 3)`) holding 452 679 156 bytes at once under a 1 MiB budget, and it
+now holds 4 201 056 (`svg_dash_memory.rs`). Before both, the review of 2 October 2026 measured
+a 252 112-byte file drawing one 200 x 200 image four hundred times write
+85 550 995 bytes of markup; the same drawing now writes 238 459, and four
+hundred `sh` of a 2 889-byte page whose shading is rasterised write one
+raster and four hundred references. **Text is written as paths**, one
+per glyph, from the outline the renderer draws: SVG 1.1 carries a font only
+as `@font-face` or `<font>`, and the reader this writer is held to reads
+neither, so glyph-positioned `<text>` would look like the page only where the
+viewer happened to have the face. The trade, named: the SVG's text is no
+longer text — not selectable, not searchable. **An axial or radial shading is
+a gradient where that is exact** — DeviceRGB or DeviceGray, a piecewise
+linear function whose values stay inside 0 to 1, both ends extended, and for
+a radial one a first circle that is a point strictly inside the second, which
+is the only radial shape §13.2.3 and 8.7.4.5.4 draw alike — with a stop at
+every breakpoint and two at a discontinuity. Everything else — a mesh, a
+function-based shading, a CMYK ramp, a tiling pattern, a patterned stroke —
+is **rasterised** through the renderer at `SvgOptions::raster_scale`, clipped
+as the page clips it, and embedded as an image, and each is named
+(`SvgWarning::Rasterised`). The writer never emits a `<mask>`, a `<pattern>`
+or a `<filter>`, the three elements `tinker-pdf-svg` refused when the writer
+was built, so a file it writes is one this repository reads back whole (the
+reader has since learnt `<mask>` and `<pattern>`, so emitting those two is
+now open on the writer's side alone); what would need one is the
+writer's own named refusal (below). What a render of the same page reports —
+an undecodable image (drawn as the renderer's grey placeholder), a shading or
+pattern this build does not paint, an unreadable font, a hidden layer, an
+empty text clip, a damaged image, and anything the renderer said while
+drawing a rasterised paint — comes through in the renderer's words as
+`SvgWarning::Render(RenderWarning)`.
+
+One place the reader is short of the file, pinned so that a reader which
+learns it fails a test and the paragraph can be updated: `tinker-pdf-svg`
+follows one `clip-path` per element, so it reads the inner clip of a nested
+pair and not their intersection. The file says it correctly. There were two
+until the reader made a `<g>`'s clip a group node of its own: a clipped image
+now reads back clipped, in page space, and
+`a_clipped_image_is_clipped_in_page_space` asserts the clip as well as the
+placement.
+
+**Anti-aliasing off.** `RenderOptions::antialias` is on by default; off, every
+pixel of every shape is wholly covered or not covered at all. It is one
+threshold — `Mask::harden`, half a pixel's coverage — applied wherever a
+coverage value is produced, and there are four such places rather than one:
+`Renderer::coverage`, through which every fill, stroke, glyph, clip, text clip
+and pattern shape passes; an image's unit square, hardened inside the
+rasterizer through `ImageDraw::antialias`; a mesh shading's silhouette after
+`draw_mesh`; and a tiling pattern's cell, drawn by a renderer of its own and
+handed the same answer on `TileRequest::antialias`. `sh` and a shading pattern
+paint through a clip or a shape that was hardened when it was made. Because the
+threshold is on coverage `fill` already measured, a hard edge lands where the
+soft one is half-way and a shape keeps its area, two shapes sharing an edge
+split its pixels rather than leaving a gap, and a tile still equals the page
+under it. What is not coverage stays as the document wrote it: a constant
+alpha, a soft mask, an image's own alpha and the colours inside an image. A
+stroke is at least a whole pixel wide with the switch off — 8.4.3.2's thinnest
+line, on a device that cannot draw part of one — because a hairline eight
+tenths of a pixel wide straddling two rows leaves each less than half covered
+and vanishes; `a_hard_edged_hairline_leaves_no_column_it_crosses_empty` sweeps
+eight slopes for it. A glyph feature narrower than half a pixel can still
+vanish where it straddles a pixel edge, which is what any threshold costs.
+
+**A stroke under a transform that is not a similarity.** 8.4.3.2 measures
+the line width in user space — a stroke paints every point within half the
+width of the path *in user space* — so under an anisotropic scale or a
+shear the stroke a device shows is wider in one direction than another, and
+8.4.3.6's dashes are measured, and cut square, in the same space. Under a
+similarity — a uniform scale with any rotation or reflection, which is
+nearly every page — that is one device width, the user width times
+`Matrix::expansion`, and `stroke_path` strokes in device space at it, as it
+always has. Under any other map (`user_space_pen` decides, from the map's
+two singular values, and the SVG writer asks the same function) it takes
+the path back to user space, strokes it there with the width, caps, joins,
+miter limit and dashes the content stream gave, and carries the outline out
+(`tinker_pdf_raster::stroke_mapped`); the thinnest-line floor stays in
+device pixels in every direction. A glyph stroked by text rendering modes
+1, 2, 5 and 6 goes the same way, with the CTM's user space and not the text
+matrix's. **Until October 2026 every stroke was drawn at the one width**,
+so under `scale(1, 3)` a circle stroked two wide was 2√3, about 3.46,
+device units all round where the clause makes it six at its top and two at
+its side, and a dash on a sheared line was cut square on the device;
+`stroke_parameters.rs`'s
+`a_circle_under_scale_1_3_is_six_wide_at_its_top_and_two_at_its_side` and
+`a_dash_on_a_sheared_line_is_sheared` hold the clause's arithmetic in
+pixels, and `the_current_transform_scales_the_line_width`, which had
+asserted the defect as the feature (an `x` scale thickening a horizontal
+line), now asserts that only the `y` scale does. A map that stretches one
+direction more than 10⁹ times another is still stroked at its expansion —
+going back to user space through it would cost the path its position — and
+`appearance.rs`'s squiggly underline, drawn diagonal in the quad's frame to
+stay clear of the old defect, is left as it was drawn.
+
+**A page as a layer, and premultiplied alpha.** `RenderOptions::transparent`
+starts the page with nothing on it instead of white — `(0, 0, 0, 0)` where
+nothing paints, a half-opaque fill at half alpha, an anti-aliased edge at the
+alpha its coverage gave it — for a format with alpha to hold it in (`GrayA8`,
+`Rgba8`, and ink with `allow_cmyk`); a format without alpha is on white
+whatever it is asked, because a transparent canvas converted to `Rgb8` would
+keep the black stored under an alpha of zero. The page composites exactly as it
+does over white, against a backdrop alpha of zero, which is 11.3.6's formula and
+what every transparency group's buffer already starts from.
+`RenderOptions::premultiplied` hands the colour back multiplied by alpha, and
+`Bitmap::premultiplied` says which a bitmap is. The canvas stays straight
+throughout — every blend formula in 11.3 is written in straight alpha — so it
+is a conversion at the very end, `round(c·a/255)` with no tie possible because
+255 is odd, and on an opaque page it changes no byte. `Bitmap::to_png` divides
+it back out, because PNG's alpha is straight: exact at full alpha, and below it
+losing only what premultiplying lost, so multiplying the file's samples by their
+alpha again returns the premultiplied bytes exactly, which
+`a_premultiplied_page_writes_a_png_that_multiplies_back_exactly` holds.
+
+**One part of a page.** `Page::render_form` draws one form XObject the page
+names in its `/XObject` dictionary, and `Page::render_annotation` one entry of
+its `/Annots`, each on its own over the page's white. Neither is a second
+renderer: `Page::render` is a paint over one private pipeline,
+`Page::render_layer`, and the two parts are two more paints over it — the same
+scale clamp, view transform, canvas, `Renderer`, warnings and conversion at the
+end — differing only in what is painted and in the default viewport. A form is
+painted by interpreting `/Name Do` at the identity, so the interpreter reaches
+it exactly as the page's content does (`/Matrix`, the `/BBox` clip, a group,
+`/OC`, its own resources), and its viewport is its box on the page: `/BBox`
+through `/Matrix` and the page's view transform, rounded outward and trimmed to
+the page. An annotation is painted by the code the page draws every annotation
+with (`annots.rs`, now split into `prepare` and `draw_prepared` so that one
+piece of code does both), and its viewport is its `/Rect`. `options.region`, if
+set, wins over either. A form is named by its resource name — the only name
+that means "as this page places it"; a form reachable only inside another
+form's resources has no placement to render at — and an annotation by its index
+in `/Annots`, which is its index in `Page::annotations()`, because
+`Annotation::reference` is `None` for a direct dictionary. **Each is byte-equal
+to its rectangle of a page that draws it there and nothing else**, against the
+page rendered with that rectangle as its region and against the whole page
+cropped, at 1x, 1.5x and 2x (`render_parts.rs`). Where a page skips an
+annotation silently, a caller who asked for that one is told why:
+`RenderPartError::AnnotationNotDrawn` with a `NotDrawn` reason.
 
 ## API
 
@@ -219,10 +597,54 @@ The facade is the whole public surface (ruling 11): `Page::render` takes a
 `RenderOptions` — `scale` (pixels per point, or `RenderOptions::at_dpi`),
 `format` (`PixelFormat`), `cancel` (an optional `CancelToken`, cloneable and
 checked between operations and scanline bands), `annotations` (on by
-default) and `region` (an optional `PixelRegion`, `None` for the whole page)
-— and returns a `Bitmap`: `width`, `height`, `format`, `stride`,
-`data`, and `warnings`, the `Vec<RenderWarning>` that carries every named
-degradation. Rendering never fails; it degrades and reports.
+default), `region` (an optional `PixelRegion`, `None` for the whole page) and
+`allow_cmyk` (off; with `format: CmykA8`, hands the page back as ink rather than
+light), `antialias` (on; off makes every pixel of every shape whole or
+empty), `transparent` (off; on starts a page whose format has alpha with
+nothing painted rather than white) and `premultiplied` (off) — and returns a
+`Bitmap`: `width`, `height`, `format`, `stride`, `data`, `warnings`, the
+`Vec<RenderWarning>` that carries every named degradation, and `premultiplied`,
+which says whether `data` is. Rendering never fails; it degrades and reports.
+
+`Page::display_list()` returns a `DisplayList` — the page interpreted once —
+whose `render(&RenderOptions)` returns what `Page::render` returns for the
+same options, at any scale and for any region, without interpreting the page
+again; `len`, `is_empty` and `page_index` say what it holds, and
+`is_retained` whether it holds the page's calls at all — false for a page
+whose recording would pass `tinker_pdf_render::MAX_DISPLAY_LIST_BYTES`, whose
+every render is then a direct one. It owns what it
+needs (the page, its recorded calls and its resources), so it outlives the
+`Page` it came from and crosses threads.
+
+`Page::to_svg(&SvgOptions)` and `DisplayList::to_svg(&SvgOptions)` return an
+`Svg`: `markup` (the document, UTF-8), `width` and `height` (the page's
+displayed size in points, which are the root's `width`, `height` and
+`viewBox`), and `warnings`, a `Vec<SvgWarning>` deduplicated per page.
+`SvgOptions` (`#[non_exhaustive]`, `Default`) has `annotations` (on, as on a
+render), `raster_scale` (pixels per point for what is rasterised, 2 by
+default, clamped to 0.25–16; a value that is not a finite positive number is
+read as the default) and `max_bytes` (the markup's budget in bytes of
+elements, `tinker_pdf::MAX_SVG_BYTES` by default; a larger value is read as
+the cap, so it lowers the ceiling and cannot raise it). `SvgWarning` is
+`Rasterised { what: Rasterised, name }` with
+`Rasterised::{Shading, TilingPattern, PatternedStroke}` and the shading's or
+pattern's resource name, `SoftMaskRefused { group }` with the mask group's
+`ObjRef`, `BlendModeRefused { mode }`, `KnockoutRefused { form }` with the
+group form's resource name, `Truncated { limit }` and
+`Render(RenderWarning)` — each naming what it touched (ruling 10), except
+the blend mode, whose `ExtGState` no device is told: the interpreter hands
+every device the state a `gs` made, never the `gs`.
+The output is the same bytes every time, and nothing on its path calls a
+transcendental, so ruling 4's argument covers it — but no SVG fingerprint is
+committed beside `determinism.rs`'s, so the cross-target claim is argued and
+not yet measured.
+
+`Page::render_form(name, options)` and `Page::render_annotation(index,
+options)` return `Result<Bitmap, RenderPartError>`: one part of the page,
+through the same pipeline, over the part's own rectangle unless
+`options.region` names another. The error is the only way either draws
+nothing — a caller who asked for one part is owed the reason rather than a
+white rectangle.
 
 `Bitmap::to_png` writes the page out as a PNG file (ISO/IEC 15948), eight bits
 a component, through `tinker_pdf_filters::png_encode` — which is where the
@@ -243,6 +665,30 @@ wholly off the page, which trims to nothing and says so. `Bitmap`'s fields
 are public besides, so a caller may always build one by hand. `tpdf render`
 writes `.png` through it, and so does `examples/render.rs`.
 
+`Bitmap::from_png` is the other direction, over the same
+`tinker_pdf_filters::png_decode` CBZ pages go through. The decoder has already
+widened sub-byte samples, applied the palette and applied `tRNS`, so what it
+hands back is one of four layouts and each is one `PixelFormat` byte for byte —
+grey `Gray8`, grey and alpha `GrayA8`, truecolour `Rgb8`, truecolour and alpha
+`Rgba8`. Sixteen-bit samples round to the nearest eight, `round(v / 257)`, the
+exact inverse of the replication that widens eight to sixteen and not the high
+byte. **For the four formats `to_png` writes as they are, the round trip is
+exact** — dimensions, stride and bytes — which
+`render_to_png_and_back_is_byte_identical_for_every_page_format`
+(`crates/tinker-pdf/tests/png_input.rs`) holds over four pages at four formats
+and two scales; `CmykA8` and `LabA8` come back as the `Rgba8` light `to_png`
+wrote for them, because PNG has no colour type that could carry them back.
+Every decoder refusal comes through by name as `PngReadError::Refused`, and one
+more is added: a raster that stops short of its declared height is
+`PngReadError::Incomplete` rather than a picture with zeroes for its missing
+rows, because the caller this exists for — `pdfcmp` — would score the damage as
+a rendering difference. Damage that costs no pixels, an ancillary chunk with a
+bad CRC, is named on `warnings` as `RenderWarning::DamagedImage` with the name
+`PNG`. The decoder's `MAX_PNG_SAMPLES` is the only budget, which leaves one
+asymmetry stated rather than discovered: the largest page this engine renders
+writes a PNG this will not read back, because a reader's budget against a
+thirteen-byte header asking for 2^63 samples is not a writer's.
+
 ```rust
 use tinker_pdf::{Document, RenderOptions, RenderWarning};
 
@@ -261,11 +707,13 @@ interpreter's `Device` trait and pulls outlines, images, shadings, patterns
 and tiles through the `GlyphSource` seam — implemented by the facade's
 `PageResources`, so no COS type enters the render crate. `page_scale`,
 `page_pixels`, `page_canvas` and `page_view_transform` are the geometry
-helpers `Page::render` composes, with `region_view_transform` and
-`region_canvas_in` the two that take a `PixelRegion`. `None` is not a special
-case in the facade: it becomes the region covering the whole page, whose
-translation is zero, so a tile and a page take one code path and there is no
-un-tiled spelling left for a defect to hide in.
+helpers `Page::render` composes, with `region_canvas_in` and
+`region_canvas_clear` the two that take a `PixelRegion` — a canvas standing at
+the region's corner — and `Renderer::with_page_size` telling the renderer how
+large the page around it is. `None` is not a special case in the facade: it
+becomes the region covering the whole page, whose corner is the origin, so a
+tile and a page take one code path and there is no un-tiled spelling left for
+a defect to hide in.
 
 ## Refused by name
 
@@ -277,11 +725,19 @@ un-tiled spelling left for a defect to hide in.
 | A font program that could not be read | `RenderWarning::UnreadableFont` | Its glyphs are not drawn; the rest of the page is | [content and text](content-and-text.md) |
 | A shading that cannot be read into types 1–7 | `RenderWarning::UnsupportedShading` | Reported by type number rather than guessed at | [rulings](../rulings.md) |
 | A pattern whose cell cannot be read, or a lattice past 65 536 positions / 16.7 Mpx / 33.5 Mpx | `RenderWarning::UnsupportedPattern` | Unpainted reads as missing; `/Pattern`'s nominal black reads as content and hides the gap | [rulings](../rulings.md) |
+| A colour space whose parameters no space can mean, read the nearest way that does: today a `/Lab` `/Range` pair written backwards, read as the span it covers | `RenderWarning::RepairedColorSpace { name, reason }`, `reason` `LabRangeUnordered` | Drawn *and* named (ruling 10). Named where the space is reached through the page's resources or a tiling cell's, as every tolerance the resource layer reports is; **not yet** through a form XObject's or an annotation appearance's own `/Resources`, which keep what they tolerate to themselves — a font a form's own resources cannot resolve goes unreported the same way, measured October 2026 | [rulings](../rulings.md) |
 | A layer the default configuration turns off | `RenderWarning::HiddenOptionalContent` | Correct behaviour, reported all the same — the one leniency a reader cannot see | [rulings](../rulings.md) |
 | More than 2 000 transparency-group buffers on one page | `RenderWarning::GroupBudgetSpent` | A budget, not a depth: branching soft-mask recursion stays inside any depth cap | [rulings](../rulings.md) |
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |
 | A `RenderOptions::region` reaching past the page edge | `RenderWarning::RegionClamped` | The part on the page is rendered rather than refused (ruling 2), and a bitmap smaller than the rectangle asked for is named rather than left to arithmetic (ruling 10). A region that misses the page entirely trims to no pixels | [rulings](../rulings.md) |
+| A PNG read back whose raster stops short of its declared height | `PngReadError::Incomplete`, carrying the decoder's own identifiers | The decoder degrades for a comic page; a file read back to be *compared* would have its missing rows scored as a rendering difference. Every refusal the decoder makes is `PngReadError::Refused` with its own reason | [filters](filters.md) |
+| A form render naming an XObject the page does not have, one that is not a form, or one whose stream cannot be read | `RenderPartError::NoSuchXObject`, `NotAForm { subtype }`, `UnreadableForm` | The page renders what it can; a caller who asked for one form asked about that form, and a blank bitmap is a wrong answer that looks right | — |
+| An annotation render at an index past `/Annots`, or of an entry that draws nothing | `RenderPartError::NoSuchAnnotation { count }`, `AnnotationNotDrawn { why }` with `NotDrawn::{NotADictionary, Hidden, Popup, NoRect, NoAppearance, UnreadableAppearance, Degenerate}` | Every reason `Page::render` skips an annotation silently, named where a caller asked for that one | [document model](document-model.md) |
+| A soft mask, a blend mode other than `Normal`, or a knockout group, on a page written as SVG | `SvgWarning::SoftMaskRefused { group }`, `BlendModeRefused { mode }`, `KnockoutRefused { form }` | SVG 1.1 says the first two only with `<mask>` and `<filter>`'s `feBlend`, which `tinker-pdf-svg` refuses, and the third not at all; what was masked is drawn unmasked, the blend as `Normal`, the group as an ordinary one — a file this repository cannot read back whole is not written | [design/svg.md](../design/svg.md) |
+| A shading no SVG gradient states exactly, a tiling pattern or a patterned stroke, on a page written as SVG | `SvgWarning::Rasterised { what, name }` | Drawn through the renderer at `SvgOptions::raster_scale` and embedded as pixels: a fallback rather than a refusal, named because the file is no longer vectors there. A `<pattern>` would be exact for a tiling pattern; the reader refused it when this writer was built and reads it now, so writing one is open | — |
+| A page whose recording would hold more than `MAX_DISPLAY_LIST_BYTES` (64 MiB) | `DisplayList::is_retained()` is false | Not a warning, because nothing is drawn differently: the list keeps no calls and every render and SVG is a direct one, the same output at a direct render's cost. A fan of forms makes a short file record without bound, which a direct render's one canvas never does | `bounds_ledger.rs` |
+| A page whose SVG would pass `MAX_SVG_BYTES` (256 MiB) of elements, or the smaller `SvgOptions::max_bytes` | `SvgWarning::Truncated { limit }` | Markup grows with what the page does rather than with what the file holds, so it has a budget a render's one canvas does not need; what fits is written, the document is well-formed and ends there, and the replay stops | `bounds_ledger.rs` |
 | An ICC profile whose data space and tags contradict each other | `ColorSpace::Approximated`, stated on the type | **6 of the corpus's 3 235 profiles**, September 2026, and `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. The fallback is 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
@@ -292,12 +748,81 @@ un-tiled spelling left for a defect to hide in.
   `text_render_modes.rs`, `images.rs`, `inline_images.rs`,
   `stroke_parameters.rs`, `form_xobjects.rs`, `page_geometry.rs`,
   `annotation_appearances.rs` — each asserting pixels, not absence of error.
-- Regions and ruling 5: `crates/tinker-pdf/tests/render_regions.rs`. Ten
-  fixtures over four rasterizer paths, three of them turned and three cropped,
-  tiled at 64, 37, 23 and 53 pixels against a 91×131 page and down to a
-  one-pixel lattice, each tile asserted **byte-equal** to its rectangle of the
-  whole render with no tolerance; plus the trim at the page edge and its
-  warning, a region wholly off the page, and — because tile equality alone is
+- Parts: `crates/tinker-pdf/tests/render_parts.rs` holds a form — one with
+  text, a fill cut by its `/BBox` and a curve, one with a `/Matrix` and a name
+  that needs escaping — and an annotation drawn at its own `/Rect` and one
+  fitted onto another size, each byte-equal to the page's own render of its
+  rectangle at three scales; every refusal by name; and a fixed-seed campaign
+  of mutated documents that must never panic either entry point.
+- Output options: `crates/tinker-pdf/tests/render_options.rs` pins each
+  `RenderOptions` field that changes what a page's bytes are with its own
+  SHA-256, computed as `determinism.rs` computes one and floored by ink the same
+  way, beside the claim that the default render is unchanged — the blend grid's
+  default render still hashes to `determinism.rs`'s `analytic_blend` value.
+  Those hashes were recorded on `x86_64-unknown-linux-gnu` on 26 September
+  2026 and have not yet been run on the other three targets, which is the
+  difference between them and the nineteen `determinism.rs` carries.
+  The anti-aliasing switch's exit criterion is
+  `with_anti_aliasing_off_every_pixel_is_wholly_covered_or_not_at_all`: text,
+  a diagonal fill, a stroked curve, a hairline and a rotated image's edge, each
+  in its own opaque colour, at 1x, 1.7x and 3x, where every pixel of the
+  hard-edged render must be one of six colours and every element must still be
+  there by its own; `with_anti_aliasing_off_a_shading_is_wholly_covered_or_not_at_all`
+  does the same for a mesh, a clipped `sh`, a shading pattern and a tiling
+  pattern whose cell is drawn by a renderer of its own.
+- Output: `png_output.rs` holds `Bitmap::to_png` over all six formats, and
+  `png_input.rs` holds `Bitmap::from_png` — the round trip over every page
+  format, 16-bit rounding at the samples where truncation would differ, every
+  decoded layout, both refusals, and a fixed-seed campaign of random and
+  mutated files that must never panic and must reach both a picture and a
+  refusal more than five hundred times each.
+- SVG output: `crates/tinker-pdf/tests/svg_output.rs` reads every file the
+  writer makes back through `tinker-pdf-svg` and compares the scene with what
+  the page states, worked out from the content stream's own numbers — a
+  rectangle's corners, every control point of every glyph from `glyf` and
+  the text matrix, an image's samples byte for byte and its corners, a
+  gradient's axis, focus and stops, a dashed stroke's whole pen, and a
+  stroke under a non-uniform scale whose width is also counted in the
+  renderer's rows of ink — never with a second rendering. One noisy image
+  drawn four hundred times is one copy and four hundred references, each read
+  back where its `cm` puts it; a raster drawn three times is one; a tiny
+  picture is written in place, and 4 100 draws of a large one are exactly the
+  4 096 references the reader expands and four copies; three thousand squares
+  under a 4 KiB budget are cut short with `Truncated`, the replay stopping
+  before the operator the page ends on. A soft mask, a blend mode, a knockout group, a mesh and
+  a tiling pattern on one page each produce their warning, no refused element
+  is written and the reader reports none of its own refusals; the nested
+  clip and the clipped image pin the reader's two shortfalls above; a
+  fixed-seed campaign of mutated pages must never panic the writer, and the
+  `render_page` fuzz target writes every page it reaches as SVG.
+- The retained page: `determinism.rs`'s
+  `a_display_list_replays_every_fingerprinted_page_byte_for_byte` records
+  every fingerprinted page once and replays it at 1× (the fingerprints'
+  scale), 0.5×, 1.5× and 2.25×, with and without annotations, byte-equal to a
+  direct render in pixels, size, format and warnings;
+  `render_regions.rs`'s `a_display_list_tiles_as_the_page_does` tiles a
+  replay of every region fixture and an annotated page against the direct
+  render; `display_list.rs` holds the answers on the pages where the renderer
+  says no — past the group budget, inside hidden content — and a cancelled
+  replay against a cancelled render, the warnings a replay reports render
+  after render, and a page past `MAX_DISPLAY_LIST_BYTES` drawn the direct
+  way, pixels, warnings and SVG; `tinker-pdf-render`'s `display.rs` holds the
+  recorder's count, its overflow and the interpreter told to stop;
+  `tinker-pdf-content`'s `replay.rs`
+  holds a replay into a recorder equal to the recording, and what a replay
+  does when the device answers differently.
+- Regions and ruling 5: `crates/tinker-pdf/tests/render_regions.rs`. Sixteen
+  fixtures over four rasterizer paths and the three kinds of canvas that stand
+  somewhere in the page — transparency and soft-mask groups, a tiling
+  pattern's cell, a mesh's buffer — five of them turned and five cropped,
+  tiled at 64, 37, 23 and 53 pixels against a 91×131 page at 0.5×, 0.75×, 1×,
+  1.5×, 2×, 3× and 4× and down to a one-pixel lattice, each tile asserted
+  **byte-equal** to its rectangle of the whole render with no tolerance at any
+  scale; a stroked rectangle whose miter corners sit on a sub-scanline, at 1×;
+  ruling 5's one named exception pinned exactly as measured — an image run
+  whose overlap falls outside the tile, 40 pixels at 63 levels — so a change
+  in either direction fails;
+  plus the trim at the page edge and its warning, a region wholly off the page, and — because tile equality alone is
   satisfied by a *consistent* mistake — two fixtures that assert which quadrant
   of the displayed picture one mark lands in, on a rotated page and on a
   cropped one. Every fixture carries an ink floor, because a blank page tiles
@@ -314,7 +839,7 @@ un-tiled spelling left for a defect to hide in.
   — pin this device's output bit-for-bit across x86_64 Windows, Linux and
   `wasm32-wasip1`, each with an ink floor so a fixture that draws nothing
   fails instead of becoming a baseline ([determinism](determinism.md)).
-- Fuzzing: `render_page` among the 24 fuzz targets renders whole hostile
+- Fuzzing: `render_page` among the 51 fuzz targets renders whole hostile
   documents; `crates/tinker-pdf/tests/hostile_input.rs` replays the sweep on
   stable.
 - Corpus, as of September 2026: 5 525 files, 5 516 rendered every page, zero

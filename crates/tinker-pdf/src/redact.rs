@@ -38,6 +38,27 @@
 //! not, and does not claim to; [`crate::SubsetOutcome::removed`] is how a
 //! caller asks whether this file is finished.
 //!
+//! Nor a **Type 3 glyph's procedure**. A use of a glyph whose procedure
+//! draws under a rectangle is removed, and the procedure — which every use
+//! of that glyph runs — is left in `/CharProcs` exactly as it was (the
+//! module's "A Type 3 glyph's procedure"). A procedure that shows the
+//! covered words as text says them in the file as plainly as an outline
+//! does. The same door is the answer: [`crate::subset::apply`] empties every
+//! procedure nothing the document shows still runs (its "Type 3 fonts"), so
+//! once the redaction removed a procedure's last use the default save
+//! leaves it saying nothing, and a Type 3 font it cannot bound is named
+//! (`a_procedure_whose_last_use_was_redacted_is_emptied_by_the_default_save`).
+//! What a procedure draws is left with it: a form it invokes is not cut,
+//! nor a soft mask's group it sets, and emptying the procedure removes
+//! neither from the file. A group the procedure sets is measured at every
+//! use of the glyph, one its own box removed included, and named
+//! ([`RedactionWarning::PatternOrMask`]) when it shows text or an image
+//! under a rectangle there, whatever removed the use.
+//! Nor an annotation's own text — `/Contents`, a
+//! rich-text `/RC`, a field's `/V`: what a redaction cuts is what a page
+//! draws, and those are what a viewer *says*, with no position to compare
+//! with a rectangle.
+//!
 //! # The cut happens in the run's own frame
 //!
 //! A redaction rectangle is given in page space. A glyph is placed in *text*
@@ -70,14 +91,12 @@
 //! the caller believes the content is gone and distributes the file. So a run
 //! this module cannot *measure* is left whole and named in
 //! [`RedactionReport::warnings`], rather than cut from positions that are
-//! approximately right. Four classes qualify, and two of them were being cut
-//! wrongly before this file carried a matrix — the rotation refusal was
-//! guarding the axis it knew about and none of the others:
+//! approximately right. Two classes qualify, and neither has an exit — a run
+//! with no metrics, or with positions that are not numbers, has nothing to
+//! measure:
 //!
 //! | Class | Why it cannot be measured |
 //! | --- | --- |
-//! | [`RedactionWarning::VerticalRun`] | 9.4.4's vertical branch advances by `w1` **down** the page and takes its metrics from `/W2`; a `TJ` number displaces vertically too. Every one of those is a different formula, not a different matrix |
-//! | [`RedactionWarning::RescaledType3Font`] | 9.6.5: a Type 3 font's `/Widths` are in *its own* glyph space, which `/FontMatrix` maps to text space. `Font::width_of` hands them back raw and this module divides by 1000, which is right for the 1/1000 default and wrong by exactly the matrix for anything else |
 //! | [`RedactionWarning::UnknownFont`] | no metrics at all: the `Tf` named a font the resource dictionary in scope does not have |
 //! | [`RedactionWarning::UnmeasurableFrame`] | a non-finite entry in the text or transformation matrix, or a position that has run away to infinity |
 //!
@@ -86,43 +105,226 @@
 //! which is the whole reason it will not cut one. That is why warnings are
 //! raised only when there is at least one rectangle to fall under.
 //!
-//! # A form drawn twice, and the fifth warning
+//! One more thing is named for the same reason, though it is not a run:
+//! a stream that invokes more XObjects than one stream's walk follows
+//! ([`MAX_XOBJECT_USES`], 4 096). The `Do`s past the bound are written back
+//! as they were and never resolved, so an image they draw is tested against
+//! no rectangle — [`RedactionWarning::TooManyXObjects`] says how many. Until
+//! October 2026 the bound was a bare number in [`rewrite`] and what lay past
+//! it was left with nothing in the report.
+//!
+//! A **tiling pattern's cell** (8.7.3.1) is painted at every tile of
+//! whatever it fills. Until October 2026 it was not read, and a cell that
+//! showed text or drew an image was named instead
+//! ([`RedactionWarning::PatternOrMask`]). It is measured now ([`Cells`],
+//! [`cut_cells`]): every tile of its lattice whose `/BBox` meets a rectangle
+//! is a placement of the cell — its translation, then the pattern's
+//! `/Matrix`, then the space the lattice is anchored to, which is measured
+//! twice where 8.7.2 (the painting stream's default space) and this engine's
+//! renderer (the page's) disagree — and the cell is cut at all of them, in
+//! its own stream, since every tile runs that one stream, and named
+//! [`RedactionWarning::RepeatedForm`]. A tile the fill does not reach is
+//! measured too, because this module does not follow paths: more removed,
+//! never less. Still named and not measured: a cell with more than
+//! [`MAX_PLACEMENTS`] tiles under the rectangles — counted over every space
+//! its lattice is anchored to, so the bound is the cell's and an anchoring
+//! that would pass it is the part not measured ([`cell_tiles`]) — one whose
+//! geometry places no lattice, and what a cell invokes beyond its own text and inline images
+//! (an XObject, a graphics state, another pattern); a glyph procedure's
+//! patterns are named as before ([`unread`]).
+//!
+//! A **soft mask's group** (11.6.5.2) was named the same way until October
+//! 2026 and is measured now. The interpreter draws it when the `gs` that
+//! sets its graphics state runs, under the transform in force there with the
+//! group's `/Matrix` after it — one placement of a form — so [`rewrite`]
+//! records each `gs` whose state sets one as it records a `Do` (once per name
+//! and transform, under the same bound; a state that sets no mask is not a
+//! use, and spends nothing of it), and [`Walk`] enters the group as a form
+//! placement and cuts it. Never through a copy: pointing one `gs` at a
+//! copied group means a copied graphics state under a fresh name as well,
+//! and a stream sets one state nearly always once, so a group is cut in its
+//! own stream, the old way ([`union`]), and [`RedactionWarning::RepeatedForm`]
+//! names it when that is wider than asked — a second placement, or another
+//! page that sets the same state, which the read of what else draws a form
+//! now follows through `gs` ([`Elsewhere`]). Its text is the mask's shape,
+//! not ink, and it is in the file all the same.
+//!
+//! A glyph procedure that sets one is measured through it ([`draws_under`]),
+//! and a use whose group shows text or draws an image under a rectangle is
+//! removed — but the group is **not cut**: it is the procedure's, every use
+//! of the glyph draws it, and the procedure is not rewritten ("A Type 3
+//! glyph's procedure"). So what it showed under the rectangle stays in the
+//! file, and [`RedactionWarning::PatternOrMask`] names the state; until the
+//! lane's review the use went and nothing said so. The group is measured at
+//! every use, and named for what it shows there whatever removed the use:
+//! the glyph's own box under a rectangle, which until the lane's second
+//! review removed the use with the procedure never measured; text the
+//! procedure shows itself, where the measurement used to stop at the first
+//! thing it found; or the group itself. A font with `/Resources` of its own
+//! has both readings of a name measured ([`procedure_draws_under`]), each of
+//! them now even when the other has already decided the use.
+//!
+//! # Vertical writing
+//!
+//! A fourth class, `VerticalRun`, was refused until September 2026 and is
+//! measured now. 9.4.4's vertical branch is a different formula rather than a
+//! different matrix — the pen walks text-space **y** by `/W2`'s `w1`, which is
+//! signed and carries no horizontal scale, the glyph is drawn with its
+//! horizontal origin at minus the position vector `v`, and a `TJ` number
+//! displaces along y in thousandths of `Tfs` alone — so [`Pen`] carries one
+//! position along the run's own axis and asks the font's writing mode which
+//! axis that is. The box is the horizontal one stood on end, placed by the
+//! position vector whole — `v_x` across and `v_y` along, which until
+//! October 2026 was not read ([`Pen::glyph_box`]) — the replacement gap is emitted in the vertical
+//! thousandth ([`Pen::thousandth`]), and nothing else changes: a vertical run
+//! is cut by the same separating-axis test, under the same rotated, skewed
+//! or scaled matrices, as a horizontal one.
+//!
+//! The class had hidden behind the rotation refusal, whose matrix test a
+//! vertical run passes, and was being cut *horizontally* before it was
+//! refused; the variant is gone because nothing raises it.
+//!
+//! # A Type 3 font's own glyph space
+//!
+//! A third class, `RescaledType3Font`, was refused until September 2026 and
+//! is measured now. 9.6.5 puts a Type 3 font's `/Widths` in *its own* glyph
+//! space, which `/FontMatrix` maps to text space; this module divided by
+//! 1000, which is right for the conventional matrix and wrong by exactly the
+//! matrix for any other. [`GlyphSpace`] reads the matrix whole: the advance
+//! is the horizontal component of the width carried through it, and the
+//! glyph box is a glyph-space rectangle carried through all six numbers, so
+//! a skewed or rotated glyph space is cut where its procedures draw rather
+//! than where an upright em would have been.
+//!
+//! # A form drawn twice
 //!
 //! A form XObject drawn in two places is two placements of **one stream**
-//! (8.10), and until September 2026 only the first was ever measured: the
-//! `visited` set in [`follow`] was there to stop a self-referential form
-//! recursing forever and it stopped the second `Do` as well. A rectangle over
-//! the second placement was tested against nothing, the text stayed, and the
-//! report said `glyphs: 0` with no warning — indistinguishable from a
-//! rectangle that covered nothing. That was the one under-redaction this
-//! module did not name, and it is gone.
+//! (8.10), and until September 2026 only the first was ever measured: a
+//! `visited` set keyed by the object was there to stop a self-referential
+//! form recursing forever, and it stopped the second `Do` as well. A
+//! rectangle over the second placement was tested against nothing, the text
+//! stayed, and the report said `glyphs: 0` with no warning — indistinguishable
+//! from a rectangle that covered nothing.
 //!
-//! [`Placements`] now keys the guard by the object **and** the transform in
-//! force, so a form is entered once per distinct placement and each pass
-//! rewrites what the pass before it left. Nothing a rectangle covers at any
-//! placement survives. A form that invokes itself arrives back at the same
-//! object under the same matrix, which is a placement already done, so the
-//! cycle guard still holds; what bounds a matrix that creeps by an ulp a
-//! round is [`MAX_PLACEMENTS`] rather than any comparison of floats, because
-//! two transforms an ulp apart are two placements and calling them one would
-//! be a decision not to cut.
+//! The guard was then keyed by the object **and** the transform in force
+//! ([`placement_key`]), so every placement was measured — and cut, in the one
+//! stream they share, so a glyph a rectangle covered at one placement was
+//! gone at all of them. `RedactionWarning::RepeatedForm` named that widened
+//! cut. What bounds a matrix that creeps by an ulp a round is still
+//! [`MAX_PLACEMENTS`] rather than any comparison of floats, because two
+//! transforms an ulp apart are two placements and calling them one would be a
+//! decision not to cut.
 //!
-//! What that costs is the other direction, and it is named rather than
-//! absorbed. The placements share one stream, so a glyph removed because a
-//! rectangle covered it at one of them is gone at all of them — including
-//! placements no rectangle touched. [`RedactionWarning::RepeatedForm`] says
-//! so, naming the form and how many placements it had, and it is raised only
-//! when a cut was actually made (a form drawn twice that nothing was cut from
-//! is exact, and says nothing). The exact answer is a copy of the form per
-//! placement; it is a roadmap row of its own, and what it waits on is that
-//! [`crate::subset`]'s glyph-usage walk resolves `/XObject` names through the
-//! *document* and cannot see an object an editor has only just allocated.
+//! **Now each placement is cut exactly at its own rectangles.** [`Walk`]
+//! measures every placement against the form as it was, without writing
+//! anything; [`settle`] then gives each distinct outcome a stream of its own
+//! — a copy of the form, cut in that placement's frame — and points each
+//! `Do` at its placement's stream through a fresh resource name
+//! ([`with_names`]). A form whose placements cut the same shares one stream,
+//! and a form nothing was cut from is not written at all. The form's own
+//! object keeps an uncut outcome when there is one, so another page that
+//! draws the form draws it as it was. When every placement cut something,
+//! the answer depends on whether anything else **draws** the form — another
+//! page, a form or an annotation there, a Type 3 glyph's procedure anywhere
+//! ([`Elsewhere`], read once and only when this case arises): if something
+//! does, the object is left as it was for that drawer and every placement
+//! here draws a copy; if nothing does, it takes the first placement's
+//! outcome, so it is still drawn by this page and is never left in the file
+//! holding what a rectangle covered with nothing drawing it. *Drawn*, not
+//! *named*: one `/Resources` dictionary shared by every page names every form
+//! on every page, and counting that would leave exactly that unreferenced
+//! uncut stream. Until October 2026 the first placement's outcome was taken
+//! whatever else drew the form, and a page that shared it lost what this
+//! page's rectangles covered, unreported. [`crate::subset`] walks the editor's
+//! [`view`](tinker_pdf_cos::DocumentEditor::view), where the copies resolve,
+//! so a glyph drawn only in a copy stays in the program.
+//!
+//! Three kinds of form still go the old way — every placement's cut in the
+//! one stream, named by [`RedactionWarning::RepeatedForm`] when that was
+//! wider than a placement asked for — and everything they draw goes with
+//! them ([`settle`] says why): a form that draws itself, directly or through
+//! another, where a copy per placement would be a copy per round of a
+//! recursion; a form with a placement past [`MAX_PLACEMENTS`], which was
+//! never measured, so no copy could say what it should hold; and a form
+//! whose next distinct cut would take what the walk holds past
+//! [`MAX_FORM_COPY_BYTES`], which bounds the copies (ruling 1) — until
+//! October 2026 every distinct cut of every form was held to the end of the
+//! walk and cloned into the editor, up to [`MAX_PLACEMENTS`] copies of a
+//! stream as long as the decoder allows.
 //!
 //! The same guard covered images, with the same hole: an image drawn twice
 //! and covered only at its second placement was left whole and reported
 //! `images: 0`. An image is replaced whole or not at all, so it needs no copy
 //! and no warning — every placement is tested and the first covered one
-//! scrubs it.
+//! scrubs it, at all of them.
+//!
+//! An **inline** image (8.9.7) is scrubbed the same way where it stands in
+//! the stream, and one no rectangle covers is written back byte for byte:
+//! its samples are not tokens, and until September 2026 the rewrite
+//! tokenized them anyway and wrote back whatever tokens they spelled — every
+//! inline image on a redacted page corrupted, none of them ever scrubbed.
+//! One a form draws is a change to the form as much as a glyph removed
+//! ([`FormCut::removed`]): until October 2026 a form's cut was written only
+//! when it removed a glyph, so an inline image in a form drawn once, or
+//! covered at every placement, or in an annotation's appearance, kept its
+//! samples, and the report said `images: 0`.
+//!
+//! # Annotation appearances
+//!
+//! An annotation is drawn by running its appearance stream (12.5.5), a form
+//! XObject placed over the page by 12.5.5's matrix **A**: the form's `/BBox`
+//! carried through its `/Matrix`, and the box that results scaled and moved
+//! onto `/Rect`. Until October 2026 this module cut the page's content and
+//! the forms it drew and nothing else, so the text of a FreeText note, a
+//! stamp or a filled field under a rectangle stayed exactly where it was,
+//! drawn on the page, and the report did not mention it.
+//!
+//! Every appearance an annotation on the page can show is now a placement of
+//! its form, entered by [`Walk`] at the transform the renderer draws it with
+//! ([`appearance_fit`], which is `annots::fit`'s arithmetic): each of `/N`,
+//! `/R` and `/D`, every state of each — not only the one `/AS` selects,
+//! since a viewer switches states with no edit to the file — and the
+//! appearance of an annotation flagged hidden, which is one bit from being
+//! drawn. So an appearance is cut as any form is ("A form drawn twice"): in
+//! place when one annotation draws it, and through a copy when annotations
+//! that share it are covered differently. The covered annotation is pointed
+//! at its copy through an `/AP` of its own ([`repoint_appearances`]),
+//! because the `/AP` dictionary — or the state dictionary under it — may be
+//! an object the others share and none of them draws the copy. An
+//! annotation written into `/Annots` itself is edited where it sits. An
+//! appearance with no `/Resources` names things in the page's, as the
+//! subsetter reads it (8.10.1).
+//!
+//! The annotation is **rewritten, not removed**: what goes is what the
+//! rectangle covers, and the rest of the note stays where it was, which is
+//! what a redaction does to a page's own text. What it does not reach is the
+//! annotation's own text — "What this module does not remove".
+//!
+//! # A Type 3 glyph's procedure
+//!
+//! 9.6.5: a Type 3 glyph is drawn by running its procedure, which can show
+//! text in another font or draw an image anywhere — not only inside the box
+//! a glyph is measured by. So a use of a glyph whose procedure can draw
+//! either is measured through it, under the transform the interpreter runs
+//! it with, and a use whose procedure draws under a rectangle is **removed
+//! whole**, as a glyph partly under one is ([`cut_stream`]). The procedure
+//! itself is not rewritten, and [`cut_stream`]'s doc is the decision: it is
+//! the font's, every use of the glyph on every page runs it, and cutting the
+//! covered text out of it would cut it out of all of them — the over-removal
+//! a form drawn twice used to cost, with no copy to give the uses that were
+//! not covered short of a new glyph in the font. A procedure that shows a
+//! glyph whose procedure shows a glyph is followed down, a fixed budget of
+//! streams per use ([`draws_under`]), past which the answer is *covered* and
+//! [`RedactionWarning::UnboundedProcedure`] says so. What the budget cut
+//! short is said whatever removed the use: a soft mask's group under its
+//! state's name ([`RedactionWarning::PatternOrMask`]), anything else as
+//! `UnboundedProcedure` — a use the glyph's own box removed included, and
+//! one whose measurement after the answer ran out ([`Budget`]). A procedure
+//! is measured where either reader of 9.6.5 runs it: in the scope that
+//! showed the glyph, as this engine's interpreter does, and in the font's
+//! own `/Resources`, where Table 112 puts what it names
+//! ([`procedure_draws_under`]); until October 2026 a `Do` only the font's
+//! resources named was not measured and nothing said so.
 //!
 //! # The injections that were counted
 //!
@@ -162,15 +364,206 @@
 //!
 //! The three caught by exactly one test are each caught by the test written
 //! for them, which is what a count of one is supposed to mean here.
+//!
+//! The vertical and glyph-space defects were counted on 26 September 2026,
+//! over `cargo test --no-fail-fast -p tinker-pdf --lib` (every redaction
+//! test lives in the lib), 308 and then 315 tests. None reports zero, and
+//! every count of one is the test written for that defect:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | a vertical advance read with the horizontal formula, from `/W` | 5 |
+//! | `w1` negated, so the column runs upward | 5 |
+//! | the vertical thousandth carrying `Th` | **1** |
+//! | a vertical box measured rightward from the pen, as a horizontal one is | **1** |
+//! | a Type 3 advance divided by 1000, the old formula | 3 |
+//! | a Type 3 box from the matrix's `a` and `d` alone, upright and untranslated | 3 |
+//! | a Type 3 box without the matrix's translation | **1** |
+//! | `/FontBBox` alone, not joined with the em | **1** |
+//! | `/FontBBox`'s bottom ignored | **1** |
+//! | the font selected inside a `q` surviving its `Q` | **1** |
+//!
+//! The copy-per-placement defects were counted the same way the same day,
+//! over 323 tests. The first campaign found one zero: a guard that marked a
+//! form met again on its own recursion stack as cyclic fired nothing when
+//! removed, because [`settle`]'s ordering already refuses a form that links
+//! to itself; the guard was deleted rather than kept for a count, and the
+//! injection that removes what does the work is the one below.
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | the page's `Do`s never pointed at copies | 8 |
+//! | each placement cut from what the one before it left, which is how it used to be | 7 |
+//! | the form's own object given to the first placement even when another is uncut | **1** |
+//! | a copy per placement rather than per outcome | **1** |
+//! | a form decided before the forms it draws | **1** |
+//! | a form that draws itself neither ordered nor cut the old way | **1** |
+//! | a form placed past the cap cut exactly | 2 |
+//! | the old way not carried down to what such a form draws | **1** |
+//! | a form's content read from the file rather than from the editor | 2 |
+//! | [`crate::subset`]'s walk put back over the file, with the editor's bytes for a rewritten stream | **1** |
+//!
+//! The appearance and glyph-procedure defects were counted on 2 October
+//! 2026, over `cargo test --no-fail-fast -p tinker-pdf --lib`, 339 tests.
+//! None reports zero, and every count of one is the test written for it:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | appearances not walked, which is how it used to be | 6 |
+//! | an appearance placed in its own form space, the fit to `/Rect` ignored | 6 |
+//! | the fit computed from `/BBox` without the form's `/Matrix` | **1** |
+//! | only `/N` walked | **1** |
+//! | only the first state of a state dictionary walked | **1** |
+//! | the appearance of a hidden annotation skipped | **1** |
+//! | the copy written into an `/AP` object two annotations share | **1** |
+//! | annotations never pointed at their copies | 2 |
+//! | an annotation written into `/Annots` itself never edited | **1** |
+//! | an appearance with no `/Resources` measured in an empty scope | **1** |
+//! | glyph procedures never measured, which is how it used to be | 6 |
+//! | a procedure measured without `/FontMatrix` | 3 |
+//! | a procedure measured at the start of its run rather than at its own pen | **1** |
+//! | the second pass not removing the uses the first found covered | 5 |
+//! | one budget for the stream rather than one per use | 2 |
+//! | a spent budget answering *not covered* | **1** |
+//! | an inline image a procedure draws not counted | **1** |
+//! | a form a procedure draws not followed | **1** |
+//! | a procedure that draws only an inline image not recognised as drawing anything | **1** |
+//!
+//! The read of what else draws a form ([`Elsewhere`]) was counted the same
+//! day, over 344 tests. None reports zero:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | a drawer elsewhere never asked about, which is how it used to be | 4 |
+//! | the redacted page counted as a drawer elsewhere | 11 |
+//! | a form a page's resources name counted as one it draws | **1** |
+//! | a form drawn elsewhere not followed into | **1** |
+//! | another page's annotations not read | **1** |
+//! | a Type 3 face's procedures not read | **1** |
+//! | a procedure's `Do` resolved only in its face's own `/Resources` | **1** |
+//!
+//! And [`MAX_FORM_DEPTH`]'s, over 346:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | the walk stopping at thirteen levels of forms, which is how it used to be | 2 |
+//! | the walk's depth test as strict as the interpreter's | 2 |
+//!
+//! And [`MAX_XOBJECT_USES`]'s, over 356:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | the `Do`s past the cap dropped with nothing said, which is how it used to be | 2 |
+//! | the cap one `Do` looser | 2 |
+//! | the cap one `Do` tighter | 3 |
+//! | the warning raised with no rectangle | **1** |
+//! | two passes merged without summing | **1** |
+//!
+//! And the patterns and masks named, over 364:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | the page's own never read, which is how it used to be | 3 |
+//! | a form's never read | **1** |
+//! | a glyph procedure's never read | **1** |
+//! | a stroking pattern (`SCN`) not recognised | **1** |
+//! | a graphics state not read | 2 |
+//! | every pattern and mask named, whatever it draws | 2 |
+//! | named with no rectangle | **1** |
+//! | a procedure that paints with a pattern not measured | **1** |
+//! | a procedure that sets a state not measured | **1** |
+//!
+//! And what the review of lane 3B fixed (2 October 2026), each defect put
+//! back over the suite as it stood when its fix landed, 375 to 387 tests.
+//! None reports zero; the three that did at first — the cell under a
+//! vertical pen, a copy budget one cut loose, a cut in place named whatever
+//! draws it — were answered with the test that now catches each:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | a form's cut a change only when it removed a glyph, which is how it used to be | **1** |
+//! | [`union`] writing only for a glyph | **1** |
+//! | a blank inline image counted again | **1** |
+//! | a written cut's images not reported | **1** |
+//! | a vertical box one advance below the pen whatever `v_y` says, which is how it used to be | **1** |
+//! | the horizontal origin above the pen | 4 |
+//! | `v_y` carrying `Th` | 2 |
+//! | the origin's cell a horizontal em | 3 |
+//! | the cell under the pen dropped | **1** |
+//! | a glyph procedure measured in the enclosing scope alone, which is how it used to be | **1** |
+//! | the font's-own-first pass dropped | **1** |
+//! | the enclosing-first pass without the font's own fonts | **1** |
+//! | the second pass's warnings counted again | **1** |
+//! | a spent budget not named, which is how it used to be | **1** |
+//! | every removed procedure use named as unbounded | 5 |
+//! | the spent flag never set | **1** |
+//! | no copy budget, which is how it used to be | 2 |
+//! | a form over budget not refunded | **1** |
+//! | a form over budget not sent the old way | 2 |
+//! | the copy budget one cut looser | **1** |
+//! | a form cut in place never asking what else draws it, which is how it used to be | **1** |
+//! | a form met shallower not read again, which is how it used to be | **1** |
+//! | a form cut in place named whatever draws it | **1** |
+//!
+//! And October 2026's two clauses of the ROADMAP's Editing row, over
+//! `cargo test --no-fail-fast -p tinker-pdf --lib redact`. Fonts read
+//! through the editor (clause (c)): fonts read from the file, which is how it
+//! used to be, fires 2; a font dictionary read through the editor and what it
+//! reaches through the file fires **1**. A soft mask's group measured (half
+//! of clause (b)):
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | a `gs` never recorded, which is how it used to be | 4 |
+//! | a mask's group given copies like any form | **1** |
+//! | the read of what else draws a form not following `gs` | **1** |
+//! | the group drawn at the identity rather than at its `gs` | **1** |
+//! | a procedure's mask not followed | **1** |
+//! | every `gs` recorded however often it repeats | **1** |
+//! | every `gs` recorded whatever its state sets, which is how it was until the lane's review | 2 |
+//! | a placement remembered before the bound is asked, which is how it was until the lane's review | **1** |
+//! | a procedure's group that removed a use left unnamed, which is how it was until the lane's review | **1** |
+//! | a procedure's group named whatever it drew, which is how it was before October 2026 | 2 |
+//! | a use its own box removed left unmeasured, which is how it was until the lane's second review | 2 |
+//! | a measurement ending at the first thing it found, which is how it was until the lane's second review | 3 |
+//! | the font's own reading skipped once the first decided the use, which is how it was until the lane's second review | **1** |
+//! | the budget a group measured only to be named spent, counted as why the use went | **1** |
+//! | the same, in the font's own reading | **1** |
+//!
+//! And what the lane's third review fixed, over the same filter, 140 tests:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | a group named only when found with the budget unspent, which is how it was until the lane's third review | 2 |
+//! | a use named unbounded only when removed for want of budget, which is how it was until the lane's third review | **1** |
+//! | the font's own reading kept no stream of the budget | 2 |
+//! | a form drawn after the answer not followed, which is how it was until the lane's third review | **1** |
+//! | a glyph shown after the answer not followed, which is how it was until the lane's third review | **1** |
+//! | what a named group's measurement cut short counted as unnamed too | 2 |
+//!
+//! And a tiling pattern's cell measured (the other half of clause (b)), the
+//! same way:
+//!
+//! | Injected | Caught by |
+//! | --- | ---: |
+//! | the page's cells never read, which is how it used to be | 3 |
+//! | a cell anchored only where the renderer anchors it | **1** |
+//! | every tile measured at the lattice's origin | **1** |
+//! | the lattice's last index rounded up | **1** |
+//! | a cut cell named without its pattern's name | 2 |
+//! | the tile cap four times looser | 3 |
+//! | the tile cap an anchoring's alone, which is how it was until the lane's review | 2 |
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::{Arc, OnceLock};
 
 use tinker_pdf_content::{Token, Tokenizer};
 use tinker_pdf_cos::{
-    font as cos_font, pages as cos_pages, CosDocument, Dict, DocumentEditor, Font, Name, ObjRef,
-    Object, Rect, StreamData,
+    font as cos_font, Dict, DocumentEditor, Font, Name, ObjRef, Object, Rect, Resolve, StreamData,
 };
+// Fonts are read through the editor now; the tests still open documents.
+#[cfg(test)]
+use tinker_pdf_cos::CosDocument;
 
 /// What a redaction covers and how it is marked.
 #[derive(Clone, Copy, Debug)]
@@ -188,7 +581,7 @@ pub struct Redaction {
 /// Something a redaction could not do exactly, named rather than left silent
 /// (ruling 10).
 ///
-/// Four of the five are a **run left whole** because this module could not
+/// Two of the six are a **run left whole** because this module could not
 /// measure it, and each names the resource name of the font in force and how
 /// many bytes of showing operand were left in place, because "a run was
 /// skipped" with neither is a sentence a caller cannot act on — and this is
@@ -197,17 +590,36 @@ pub struct Redaction {
 ///
 /// `bytes` rather than glyphs: a run whose font is unknown cannot be decoded
 /// into glyphs at all, and a count that is a guess for one variant and a
-/// measurement for the other three is a count nobody can compare. Warnings
-/// with the same cause and the same resource are merged, so a page of
-/// vertical text yields one entry per font rather than one per operator.
+/// measurement for the other is a count nobody can compare. Warnings with the
+/// same cause and the same resource are merged, so a page of text in a font
+/// that is not in scope yields one entry per font rather than one per
+/// operator.
 ///
-/// The fifth, [`RedactionWarning::RepeatedForm`], is the other direction and
+/// Two more, `VerticalRun` and `RescaledType3Font`, existed until September
+/// 2026 and are gone because nothing raises them: vertical runs and a Type 3
+/// font's own glyph space are measured now (the module's "Vertical writing"
+/// and "A Type 3 font's own glyph space").
+///
+/// The third, [`RedactionWarning::RepeatedForm`], is the other direction and
 /// is the reason this type is no longer only about runs left whole: it says a
-/// cut was made *wider* than the rectangles asked for. Both are leniencies
+/// cut was made *wider* than the rectangles asked for, which since September
+/// 2026 happens only to a form that draws itself or is placed past
+/// [`MAX_PLACEMENTS`] — every other form drawn twice is cut exactly, a copy
+/// per placement that needs one. Both are leniencies
 /// and both are things a caller must be told, so both live here; use
 /// [`RedactionWarning::resource`] to name whichever of the two kinds of
 /// resource a warning is about, since [`RedactionWarning::font`] and
 /// [`RedactionWarning::bytes`] have nothing to say about a form.
+///
+/// The fourth and fifth (October 2026) are content this module does not
+/// read, rather than a run or a form: [`RedactionWarning::TooManyXObjects`],
+/// a stream whose `Do`s ran past what one stream's walk follows, and
+/// [`RedactionWarning::PatternOrMask`], a tiling pattern or a soft mask
+/// whose content shows text or draws an image. Both were silent before they
+/// existed. The sixth, [`RedactionWarning::UnboundedProcedure`] (October
+/// 2026), is `RepeatedForm`'s direction again: a Type 3 glyph's use removed
+/// because measuring its procedure ran out of budget, not because anything
+/// was found under a rectangle.
 ///
 /// Closed rather than `#[non_exhaustive]`, for `WarningKind`'s reason: a new
 /// class this module will not do exactly is a deliberate change to documented
@@ -220,45 +632,6 @@ pub enum RedactionWarning {
     /// placed. `font` is empty when no `Tf` preceded the showing operator.
     UnknownFont {
         /// The resource name the `Tf` named.
-        font: Vec<u8>,
-        /// How many bytes of showing operand were left in place.
-        bytes: usize,
-    },
-    /// The font's writing mode is vertical — 9.7.5's `/WMode` in the encoding
-    /// CMap, which is why only a composite font can have one.
-    ///
-    /// 9.4.4 then computes `ty` from the glyph's *vertical* displacement `w1`
-    /// instead of `tx` from `w0`, and the vertical formula has no horizontal
-    /// scale in it at all, where the horizontal one ends in `× Th`. 9.7.4.3
-    /// puts `w1` in `/W2` and `/DW2`, not in the `/W` and `/DW` this module
-    /// reads. A different formula over different entries, rather than a
-    /// different matrix, and one this module does not implement.
-    ///
-    /// This was being cut *horizontally* until September 2026: the rotation
-    /// refusal it hid behind looked at the matrix, and a vertical run's
-    /// matrix is perfectly ordinary.
-    VerticalRun {
-        /// The resource name of the font.
-        font: Vec<u8>,
-        /// How many bytes of showing operand were left in place.
-        bytes: usize,
-    },
-    /// 9.6.5: a Type 3 font whose `/FontMatrix` is not the 1/1000 default.
-    ///
-    /// `Font::width_of` returns `/Widths` as written, in the font's own glyph
-    /// space, and this module turns that into text space by dividing by 1000
-    /// — which is the `/FontMatrix` for every other font kind and for the
-    /// Type 3 fonts that use the conventional one. A font that picks a
-    /// different glyph space has every advance wrong by exactly that matrix,
-    /// so every position after the first glyph is wrong and the rectangle
-    /// cuts the wrong text.
-    ///
-    /// An absent `/FontMatrix` is read as the default rather than as a
-    /// refusal: 9.6.5 requires the entry, so a font without one is malformed,
-    /// and the conventional reading of a malformed one is what every
-    /// consumer does.
-    RescaledType3Font {
-        /// The resource name of the font.
         font: Vec<u8>,
         /// How many bytes of showing operand were left in place.
         bytes: usize,
@@ -276,35 +649,134 @@ pub enum RedactionWarning {
         /// How many bytes of showing operand were left in place.
         bytes: usize,
     },
-    /// One form XObject is drawn at more than one placement and the redaction
-    /// cut it, so the cut is **wider** than the rectangles asked for.
+    /// One form XObject is drawn at more than one placement — two or more on
+    /// the redacted page, or one there and another wherever else something
+    /// draws it — it could not be given a copy per placement, and the
+    /// redaction cut it — so the cut is **wider** than the rectangles asked
+    /// for. `placements` counts the redacted page's.
     ///
-    /// 8.10: a `Do` executes one stream, and a form drawn in two places is
-    /// two placements of *one object*. Every placement is measured against
-    /// the rectangles — a glyph under a rectangle at any of them is removed,
+    /// A form is ordinarily cut exactly: each placement that cuts differently
+    /// draws a copy of the form cut in its own frame, and this is not raised
+    /// (the module's "A form drawn twice"). Three kinds go the old way
+    /// instead, with everything they draw: a form that draws itself, directly
+    /// or through another, one with a placement past [`MAX_PLACEMENTS`], and
+    /// one whose copies would take the walk past [`MAX_FORM_COPY_BYTES`].
+    /// Every placement of such a form is still measured against the
+    /// rectangles — a glyph under a rectangle at any of them is removed,
     /// which is what keeps a second placement from leaking — but the removal
-    /// happens in the one stream all of them share, so a glyph cut because
-    /// the rectangle covered it at one placement is also gone at placements
-    /// no rectangle touched.
+    /// happens in the one stream all of them share (8.10: a `Do` executes one
+    /// stream), so a glyph cut because the rectangle covered it at one
+    /// placement is also gone at placements no rectangle touched.
     ///
     /// Over-removal is the direction this module errs in everywhere (a partly
     /// covered glyph goes whole, a partly covered image goes whole), because
     /// the alternative is the leak. But it is not free, and it is not
     /// something a caller can see from `glyphs` alone — so it is named here.
-    /// The exact answer is a copy of the form per placement, which is a
-    /// roadmap row of its own.
     ///
-    /// `placements` **saturates** at [`MAX_PLACEMENTS`]. A form drawn at more
-    /// than that many distinct transforms has the placements past the cap
-    /// measured against nothing at all, which is the one case where this
-    /// warning still means text may have *survived* under a rectangle rather
-    /// than only that too much went; a saturated count is how to tell.
+    /// A **tiling pattern's cell** (8.7.3.1) cut at the tiles a rectangle
+    /// meets is named here too, under the pattern's resource name with the
+    /// tiles measured as `placements`: every tile, wherever the pattern
+    /// paints, runs the cell's one stream.
+    ///
+    /// For a form, `placements` **saturates** at [`MAX_PLACEMENTS`]. A form
+    /// drawn at more than that many distinct transforms has the placements
+    /// past the cap measured against nothing at all, which is the one case
+    /// where this warning still means text may have *survived* under a
+    /// rectangle rather than only that too much went; a saturated count is
+    /// how to tell (a form measured whole at exactly that many placements
+    /// reads the same, the safe way to be wrong).
+    ///
+    /// For a cell it does not: `placements` is the number of tiles measured
+    /// and cut, never more than [`MAX_PLACEMENTS`] since the bound is the
+    /// cell's over all its anchorings ([`cell_tiles`]), and it says nothing
+    /// about what went unmeasured. A cell measured whole at exactly the bound
+    /// reports it, and one with anchorings left unmeasured can report fewer.
+    /// What says a cell showing text or an image was not measured whole is
+    /// [`RedactionWarning::PatternOrMask`] under the same name, raised
+    /// whether or not anything measured was cut. Until the lane's review a
+    /// cell's count was clamped as a form's is.
     RepeatedForm {
-        /// The resource name the `Do` gave the form.
+        /// The resource name the `Do` gave the form, or the pattern's.
         form: Vec<u8>,
-        /// How many distinct placements of it were measured, saturating at
-        /// [`MAX_PLACEMENTS`].
+        /// How many distinct placements of it were measured: for a form,
+        /// saturating at [`MAX_PLACEMENTS`]; for a cell, the tiles cut.
         placements: usize,
+    },
+    /// One content stream invoked more XObjects than this module follows in
+    /// one stream (4 096, a private bound), and the `Do`s past it were **not
+    /// followed**: an image they draw was tested against no rectangle, and a
+    /// form was not entered. A `gs` whose graphics state sets a soft mask
+    /// counts toward the bound as a `Do` does — once per name and transform
+    /// — and one past it is counted here, its group not measured; one whose
+    /// state sets no mask draws nothing and counts for nothing.
+    ///
+    /// The cap bounds what one stream's walk holds (ruling 1). Until October
+    /// 2026 it was a bare `4096` in the rewrite, and what lay past it was left
+    /// with nothing in the report — an image under a rectangle as the
+    /// 4 097th `Do` stayed in the file and the report read `images: 0`.
+    /// Raised only when there is a rectangle, as every warning here is.
+    TooManyXObjects {
+        /// How many `Do`s went unfollowed, summed over every pass that
+        /// reached the cap — a form's stream counted once at each of its
+        /// placements, since each is a pass over it.
+        skipped: usize,
+    },
+    /// A stream painted with a **tiling pattern** (8.7.3.1) whose cell shows
+    /// text or draws an image that this module did not measure: what is
+    /// named was tested against no rectangle.
+    ///
+    /// A cell is measured at every tile a rectangle meets, and cut
+    /// ([`RedactionWarning::RepeatedForm`] names that). It is named here
+    /// instead when its tiles under the rectangles, over every space its
+    /// lattice is anchored to, number more than [`MAX_PLACEMENTS`] — the
+    /// tiles measured are then cut and the rest named — or its `/Matrix`,
+    /// `/BBox` or steps place no lattice; when it invokes an XObject, sets a graphics state or paints
+    /// with another pattern, which its measurement does not follow (its own
+    /// text is still cut); and when a Type 3 glyph's procedure paints with
+    /// it. A cell that only paints paths is not named, because nothing it
+    /// draws is anything this module removes. Until October 2026 every such
+    /// cell was named, and a **soft mask's** group with them; both are
+    /// measured now. The variant keeps its name, since a caller matching on
+    /// it should not have to change for a class that got narrower.
+    ///
+    /// One group is named still, under the `/ExtGState` name that set it,
+    /// and it was measured: one a **Type 3 glyph's procedure** sets, when it
+    /// shows text or an image under a rectangle at a use of the glyph —
+    /// measured at every use, one the glyph's own box removed included, and
+    /// named whatever removed the use. The use goes; the group, like the
+    /// procedure, is every use's and is not cut ([`cut_stream`]), so what it
+    /// showed under the rectangle is still in the file — which is what this
+    /// says. Such a group whose measurement at a use the per-use budget cut
+    /// short ([`MAX_PLACEMENTS`] streams) is named as well, since it was
+    /// measured against nothing past that point, and the variant's first
+    /// meaning is exactly that.
+    PatternOrMask {
+        /// The `/Pattern` or `/ExtGState` resource name.
+        resource: Vec<u8>,
+    },
+    /// Measuring a Type 3 glyph's procedure ran past the [`MAX_PLACEMENTS`]
+    /// streams one use of a glyph may run — a procedure that shows glyphs
+    /// whose procedures show glyphs, or one that shows its own — and either
+    /// the use was **removed as though covered**, whatever its procedure
+    /// draws, or what the procedure draws past where the budget stopped was
+    /// **measured against nothing** and is in no soft mask's group named
+    /// for it ([`RedactionWarning::PatternOrMask`]).
+    ///
+    /// The first is over-removal, the direction this module errs in, and
+    /// named for [`RedactionWarning::RepeatedForm`]'s reason: it is not
+    /// something a caller can see from `glyphs` alone. Until October 2026
+    /// the use went and nothing said why. The second is raised whatever
+    /// removed the use — the glyph's own box, or what was found before the
+    /// budget ran out — because a group set where the measurement never
+    /// reached is not cut ([`cut_stream`]) and is in the file unread. Until
+    /// the lane's third review a use its box removed was never named, and a
+    /// measurement made after the answer, only to name what the use paints
+    /// with, said nothing when it ran out.
+    UnboundedProcedure {
+        /// The resource name of the Type 3 font the use was shown in.
+        font: Vec<u8>,
+        /// How many uses were removed this way, summed over every pass.
+        uses: usize,
     },
 }
 
@@ -312,28 +784,35 @@ impl RedactionWarning {
     /// The resource name of the font the run was showing in.
     ///
     /// Empty for [`RedactionWarning::RepeatedForm`], which is about a form
-    /// XObject and not about a font. [`RedactionWarning::resource`] is the
-    /// accessor that answers for every variant.
+    /// XObject and not about a font, and for
+    /// [`RedactionWarning::TooManyXObjects`], which is about a stream.
+    /// [`RedactionWarning::resource`] is the accessor that answers for every
+    /// variant.
     #[must_use]
     pub fn font(&self) -> &[u8] {
         match self {
             RedactionWarning::UnknownFont { font, .. }
-            | RedactionWarning::VerticalRun { font, .. }
-            | RedactionWarning::RescaledType3Font { font, .. }
-            | RedactionWarning::UnmeasurableFrame { font, .. } => font,
-            RedactionWarning::RepeatedForm { .. } => &[],
+            | RedactionWarning::UnmeasurableFrame { font, .. }
+            | RedactionWarning::UnboundedProcedure { font, .. } => font,
+            RedactionWarning::RepeatedForm { .. }
+            | RedactionWarning::TooManyXObjects { .. }
+            | RedactionWarning::PatternOrMask { .. } => &[],
         }
     }
 
-    /// The resource name this warning is about — a font for four of the five
-    /// variants, a form XObject for [`RedactionWarning::RepeatedForm`].
+    /// The resource name this warning is about — a font for the two run
+    /// variants, a form XObject for [`RedactionWarning::RepeatedForm`], a
+    /// pattern or a graphics state for [`RedactionWarning::PatternOrMask`],
+    /// and nothing for [`RedactionWarning::TooManyXObjects`], whose `Do`s past
+    /// the cap were never resolved to a resource at all.
     ///
     /// This is what distinguishes two warnings of the same kind, so it is
-    /// never empty except where the document gave no name to quote.
+    /// never empty except where there is no name to quote.
     #[must_use]
     pub fn resource(&self) -> &[u8] {
         match self {
             RedactionWarning::RepeatedForm { form, .. } => form,
+            RedactionWarning::PatternOrMask { resource } => resource,
             other => other.font(),
         }
     }
@@ -342,15 +821,17 @@ impl RedactionWarning {
     ///
     /// Zero for [`RedactionWarning::RepeatedForm`], which leaves no operand
     /// in place — it counts placements instead
-    /// ([`RedactionWarning::placements`]).
+    /// ([`RedactionWarning::placements`]) — and for
+    /// [`RedactionWarning::TooManyXObjects`], which counts `Do`s.
     #[must_use]
     pub fn bytes(&self) -> usize {
         match self {
             RedactionWarning::UnknownFont { bytes, .. }
-            | RedactionWarning::VerticalRun { bytes, .. }
-            | RedactionWarning::RescaledType3Font { bytes, .. }
             | RedactionWarning::UnmeasurableFrame { bytes, .. } => *bytes,
-            RedactionWarning::RepeatedForm { .. } => 0,
+            RedactionWarning::RepeatedForm { .. }
+            | RedactionWarning::TooManyXObjects { .. }
+            | RedactionWarning::PatternOrMask { .. }
+            | RedactionWarning::UnboundedProcedure { .. } => 0,
         }
     }
 
@@ -372,15 +853,13 @@ impl RedactionWarning {
 
     /// Folds another warning of the same cause into this one.
     ///
-    /// Each variant absorbs its own count — operand bytes for the four run
-    /// classes, placements for a form — because a single `usize` that means
-    /// bytes in one arm and placements in another is a number nobody can
-    /// read.
+    /// Each variant absorbs its own count — operand bytes for the two run
+    /// classes, placements for a form, `Do`s for a stream past the cap —
+    /// because a single `usize` that means bytes in one arm and placements in
+    /// another is a number nobody can read.
     fn absorb(&mut self, other: &RedactionWarning) {
         match self {
             RedactionWarning::UnknownFont { bytes, .. }
-            | RedactionWarning::VerticalRun { bytes, .. }
-            | RedactionWarning::RescaledType3Font { bytes, .. }
             | RedactionWarning::UnmeasurableFrame { bytes, .. } => {
                 *bytes = bytes.saturating_add(other.bytes());
             }
@@ -389,13 +868,38 @@ impl RedactionWarning {
                     .saturating_add(other.placements())
                     .min(MAX_PLACEMENTS);
             }
+            RedactionWarning::TooManyXObjects { skipped } => {
+                if let RedactionWarning::TooManyXObjects { skipped: more } = other {
+                    *skipped = skipped.saturating_add(*more);
+                }
+            }
+            RedactionWarning::UnboundedProcedure { uses, .. } => {
+                if let RedactionWarning::UnboundedProcedure { uses: more, .. } = other {
+                    *uses = uses.saturating_add(*more);
+                }
+            }
+            // A name, and nothing to count: one entry says the resource was
+            // not read, however many times it was painted with.
+            RedactionWarning::PatternOrMask { .. } => {}
         }
     }
 }
 
+/// How many `Do`s of one content stream a redaction follows.
+///
+/// What the walk holds per stream is a use per `Do` — a name, a transform and
+/// where it was written — and a content stream may be as large as
+/// `MAX_DECODED_STREAM`, so without a bound six bytes of `/a Do` a use would
+/// buy a hundred (ruling 1). The `Do`s past it are written back as they were
+/// and not followed, and [`RedactionWarning::TooManyXObjects`] says how many.
+/// A page of more than four thousand XObject placements is a map or a tiled
+/// scan, and one that wants them all measured has to be told it did not get
+/// that, rather than left to believe it did.
+const MAX_XOBJECT_USES: usize = 4096;
+
 /// How many distinct warnings one redaction keeps.
 ///
-/// Five causes times the resources on a page: a document that reaches this cap
+/// Three causes times the resources on a page: a document that reaches this cap
 /// has a resource dictionary a caller is not going to read through anyway, and
 /// the counts of the ones past it are lost rather than the list growing with
 /// the file (ruling 1).
@@ -414,7 +918,56 @@ const MAX_WARNINGS: usize = 64;
 /// that invokes itself under a matrix that changes by a hair each time
 /// generates a fresh placement every round; [`MAX_FORM_DEPTH`] bounds one
 /// such chain and this bounds the rest (ruling 1).
+///
+/// It is also how many streams one use of a Type 3 glyph may run while its
+/// procedure is measured — the procedure, and every form, soft mask's group
+/// and glyph procedure below it, each a placement of a stream under a
+/// transform — past which the use is removed as covered ([`draws_under`])
+/// and what went unmeasured is named: a group as
+/// [`RedactionWarning::PatternOrMask`], anything else as
+/// [`RedactionWarning::UnboundedProcedure`].
 pub const MAX_PLACEMENTS: usize = 64;
+
+/// How many bytes of cut form content one redaction holds before it writes
+/// any.
+///
+/// [`Walk`] measures every placement of a form against the form as it was,
+/// and keeps each distinct outcome until [`settle`] has decided which
+/// placements share a stream; [`decide`] then writes each — a copy of the
+/// form for every placement cut differently. That is up to
+/// [`MAX_PLACEMENTS`] copies of a stream that may be
+/// `MAX_DECODED_STREAM` (128 MiB) long, held in the walk and again in the
+/// editor, for every form on the page: a deflate-bombed 128 MiB form placed
+/// at 64 offsets under one rectangle asked for about 8 GiB of each from a
+/// file of a few hundred kilobytes (the review of lane 3B, October 2026).
+/// So the walk spends one budget on every cut it holds, and a form whose
+/// next distinct cut the budget cannot pay for lets its cuts go and is cut
+/// the old way ([`union`]) — every placement's cut in its one stream, in
+/// place, a transient buffer at a time — with
+/// [`RedactionWarning::RepeatedForm`] naming the widened cut when it has
+/// two placements or more. Nothing a rectangle covers survives either way;
+/// what the cap costs is exactness, and it is said.
+///
+/// | | Bytes |
+/// | --- | --- |
+/// | The most any fixture in this repository spends: the one built to spend it | 32 MiB |
+/// | The most any other fixture spends — the firing test's exact half included — measured over every redaction test on 2 October 2026 | 92 920 |
+/// | A 200-page comic archive | 0 |
+/// | A 200-page fixed document | 0 |
+/// | A 300-page reflowable book | 0 |
+/// | **This cap** | **32 MiB** |
+///
+/// The three zeros are facts about the paths: none of the container formats
+/// redacts. A page's forms are kilobytes in the ordinary case, and one that
+/// is not — a page imported as a form, a map — goes over the budget only
+/// when it is placed several times and cut differently at each, and is then
+/// cut in place, which is what happened to every form drawn twice until
+/// September 2026. `a_walk_past_its_copy_budget_cuts_the_form_in_place`
+/// builds a form of a mebibyte placed forty times, each placement cut at a
+/// different glyph, and is what fires it; `the_copy_budget_is_held_to_the_cut`
+/// holds forty cuts of the budget's fortieth and refuses forty of a byte
+/// more, at the fortieth.
+pub const MAX_FORM_COPY_BYTES: usize = 32 << 20;
 
 /// Records a warning, merging it into one with the same cause and resource.
 fn note(warnings: &mut Vec<RedactionWarning>, warning: RedactionWarning) {
@@ -555,50 +1108,75 @@ pub fn apply(
     page: u32,
     areas: &[Redaction],
 ) -> Option<RedactionReport> {
+    // The page **as this editor has it**: its place in the editor's page
+    // order, its content as the editor now holds it, and its resources read
+    // through the editor. See [`EditorPage`] for the three ways reading the
+    // file instead went wrong.
     let reference = editor.page_refs().get(page as usize).copied()?;
+    let EditorPage {
+        content,
+        existing,
+        resources,
+    } = EditorPage::read(editor, reference)?;
+    let fonts = fonts_in(editor, &resources);
 
-    let (content, existing, fonts) = {
-        let doc = editor.document();
-        let collected = cos_pages::collect(doc);
-        let info = collected.get(page as usize)?;
-        let content = cos_pages::content_bytes(doc, info);
-        let existing = cos_pages::contents(doc, info);
-        let resources = page_resources(doc, reference).unwrap_or_default();
-        (content, existing, fonts_in(doc, &resources))
-    };
-
-    let (mut data, mut report, uses) = rewrite(&content, areas, &fonts, Matrix::IDENTITY);
+    let mut measured = Vec::new();
+    let (data, mut report, uses) = cut_stream(
+        editor,
+        &resources,
+        &content,
+        areas,
+        &fonts,
+        Matrix::IDENTITY,
+        &mut measured,
+    );
+    for warning in measured {
+        note(&mut report.warnings, warning);
+    }
 
     // 8.10: a form XObject holds content like any other, and a redaction that
     // stops at the page stream leaves whatever a form drew exactly where it
     // was. Images the redaction covers are scrubbed for the same reason: a
     // black rectangle over a photograph removes nothing.
-    let mut placements = Placements::default();
-    // The resources of the page being redacted, not of page zero.
-    let resources = page_resources(editor.document(), reference).unwrap_or_default();
-    follow(
-        editor,
-        &resources,
-        &uses,
-        areas,
-        &mut report,
-        &mut placements,
-        0,
-    );
-
-    // Raised here rather than inside the walk, because whether a form's cut
-    // is wider than the rectangles asked for is only knowable once every
-    // placement of it has been measured — the second placement may be the one
-    // that cuts anything at all.
     //
-    // Only when there is a rectangle to fall under, which is the rule every
-    // other warning in this module follows: with no rectangles nothing was
-    // cut and nothing was widened.
-    if !areas.is_empty() {
-        for warning in placements.warnings() {
-            note(&mut report.warnings, warning);
-        }
-    }
+    // Measured first and written after: every placement of a form is cut
+    // from the form as it was, and only once all of them are known is it
+    // decided which placements share a stream and which need a copy of their
+    // own ([`settle`]).
+    let mut walk = Walk::default();
+    walk.cells
+        .read(editor, &resources, &content, Matrix::IDENTITY, areas);
+    let children = walk.uses(editor, &resources, &uses, areas, &mut report, 0);
+
+    // 12.5.5: every appearance stream an annotation on the page can show —
+    // each of `/N`, `/R` and `/D`, every state — is a form XObject the page
+    // draws over itself, placed where the algorithm in 12.5.5 fits it onto
+    // `/Rect`. Measured as a placement like any `Do`, so a stream two
+    // annotations share is cut exactly at each, the covered one drawing a
+    // copy. Hidden ones too: a flag is one bit a viewer or a caller can
+    // clear, and printing ignores `NoView`.
+    let appearances = appearances_on(editor, reference);
+    let shown: Vec<Option<usize>> = appearances
+        .iter()
+        .map(|appearance| walk.appearance(editor, appearance, &resources, areas, &mut report))
+        .collect();
+
+    let targets = settle(editor, &walk, reference, areas, &mut report);
+    // 8.7.3.1: every tiling pattern this page's streams painted with, its cell
+    // cut at each tile the rectangles meet, in its own stream ([`cut_cells`]).
+    cut_cells(editor, &walk.cells, areas, &mut report);
+    let inline_annotations = repoint_appearances(editor, &appearances, &shown, &targets);
+
+    // The page's own `Do`s that draw a copy name it by a resource name the
+    // page did not have, so the page gets a resources dictionary of its own
+    // that carries one.
+    let renames = renames_of(&children, &uses, &targets);
+    let (mut data, scope) = if renames.is_empty() {
+        (data, None)
+    } else {
+        let (data, scope) = with_names(editor, &data, &resources, &renames);
+        (data, Some(scope))
+    };
 
     if areas.iter().any(|r| r.mark) {
         // Painted last, so it covers whatever remains beneath it.
@@ -646,24 +1224,249 @@ pub fn apply(
     };
     let contents = editor.intern(b"Contents");
     dict.insert(contents, Object::Ref(content_ref));
+    // Direct, and on this page alone: the dictionary it replaces may be
+    // inherited from the page tree or shared by other pages (7.7.3.4), none
+    // of which draws the copies.
+    if let Some(scope) = scope {
+        dict.insert(Name::RESOURCES, Object::Dict(scope));
+    }
+    // An annotation written into `/Annots` itself rather than as an object
+    // is edited where it sits.
+    if !inline_annotations.is_empty() {
+        let key = editor.intern(b"Annots");
+        match dict.get(key).cloned() {
+            Some(Object::Array(mut items)) => {
+                for (index, annotation) in inline_annotations {
+                    if let Some(slot) = items.get_mut(index) {
+                        *slot = Object::Dict(annotation);
+                    }
+                }
+                dict.insert(key, Object::Array(items));
+            }
+            Some(Object::Ref(array)) => {
+                if let Some(Object::Array(mut items)) = editor.get(array) {
+                    for (index, annotation) in inline_annotations {
+                        if let Some(slot) = items.get_mut(index) {
+                            *slot = Object::Dict(annotation);
+                        }
+                    }
+                    editor.put(array, Object::Array(items));
+                }
+            }
+            _ => {}
+        }
+    }
     editor.put(reference, Object::Dict(dict));
 
     Some(report)
 }
 
-fn page_resources(doc: &CosDocument, page: ObjRef) -> Option<Dict> {
-    let object = doc.get(page).ok()?;
-    let dict = object.as_dict()?;
-    doc.resolve_key(dict, Name::RESOURCES).as_dict().cloned()
+/// One page, read through the editor rather than out of the file.
+///
+/// Until September 2026 [`apply`] read the page with `pages::collect` and
+/// `content_bytes` over [`DocumentEditor::document`] — the file as it was
+/// opened — and three things followed, each an under-redaction:
+///
+/// - **A second redaction of the same page undid the first.** It read the
+///   file's content, cut its own rectangles out of that, and overwrote the
+///   stream the first redaction had written: the text the first one removed
+///   was back, and its report still said it was gone.
+/// - **A page the editor had moved was read from the wrong place.** The
+///   file's page *n* is not the editor's page *n* after `move_page`, so the
+///   redaction read one page's content and wrote it over another's stream.
+/// - **Inherited resources were not read.** `/Resources` was taken from the
+///   page dictionary alone, and 7.7.3.4 lets it be inherited from the page
+///   tree: every run on such a page was `UnknownFont`, which at least said
+///   so, and every form and image on it was silently not followed at all.
+struct EditorPage {
+    /// The content streams, decoded and joined as the editor has them.
+    content: Vec<u8>,
+    /// The streams `/Contents` names, in order.
+    existing: Vec<ObjRef>,
+    /// `/Resources`, inherited through `/Parent` when the page has none.
+    resources: Dict,
+}
+
+impl EditorPage {
+    fn read(editor: &DocumentEditor, reference: ObjRef) -> Option<EditorPage> {
+        let Some(Object::Dict(dict)) = editor.get(reference) else {
+            return None;
+        };
+
+        // 7.7.3.3: `/Contents` is one stream or an array of them, and the
+        // array may itself be an indirect object.
+        let existing: Vec<ObjRef> = match dict.get(Name::CONTENTS) {
+            Some(Object::Ref(r)) => match editor.get(*r) {
+                Some(Object::Array(items)) => items.iter().filter_map(Object::as_objref).collect(),
+                _ => vec![*r],
+            },
+            Some(Object::Array(items)) => items.iter().filter_map(Object::as_objref).collect(),
+            _ => Vec::new(),
+        };
+        let mut content = Vec::new();
+        for part in &existing {
+            if let Some(bytes) = editor.stream_bytes(*part) {
+                content.extend_from_slice(&bytes);
+                // 7.7.3.3: the parts divide at lexical boundaries only if
+                // separated, and a producer may end one mid-token.
+                content.push(b'\n');
+            }
+        }
+
+        Some(EditorPage {
+            content,
+            existing,
+            resources: inherited_resources(editor, &dict),
+        })
+    }
+}
+
+/// A page's `/Resources`, or the nearest ancestor's (7.7.3.4), read through
+/// the editor.
+///
+/// The walk up `/Parent` is bounded by the same depth the page-tree walker
+/// uses, so a cycle of parents ends rather than spinning.
+fn inherited_resources(editor: &DocumentEditor, page: &Dict) -> Dict {
+    let mut node = page.clone();
+    for _ in 0..tinker_pdf_cos::limits::MAX_NEST_DEPTH {
+        let resources = Resolve::resolve_key(editor, &node, Name::RESOURCES);
+        if let Some(dict) = resources.as_dict() {
+            return dict.clone();
+        }
+        let parent = Resolve::resolve_key(editor, &node, Name::PARENT);
+        match parent.as_dict() {
+            Some(dict) => node = dict.clone(),
+            None => break,
+        }
+    }
+    Dict::new()
 }
 
 /// A font in scope, and what this module knows about measuring it.
 struct RunFont {
     font: Arc<Font>,
-    /// 9.6.5: a Type 3 font whose `/FontMatrix` is not the 1/1000 default, so
-    /// its `/Widths` are in a glyph space this module's `width / 1000` does
-    /// not map out of.
-    rescaled_type3: bool,
+    /// 9.6.5: a Type 3 font's glyph space, which its `/FontMatrix` maps into
+    /// text space. `None` for every other kind, whose widths are thousandths
+    /// of text space by definition (9.2.4).
+    glyph_space: Option<GlyphSpace>,
+    /// A Type 3 font's glyph procedures that can draw text or an image, or
+    /// paint with a pattern or a mask that might ([`carries`]), by code: the
+    /// only things this module redacts, or names, that a procedure could put
+    /// outside its glyph's box. A procedure that only paints paths is not
+    /// here, because nothing it draws is anything a redaction removes.
+    procedures: GlyphProcedures,
+    /// A Type 3 font's own `/Resources`, when it has any entry: where 9.6.5
+    /// puts what a glyph procedure names, and where a reader that follows
+    /// it looks — this engine's interpreter looks in the enclosing scope
+    /// instead, so a procedure is measured in both ([`procedure_draws_under`]).
+    own: Option<Dict>,
+    /// The fonts `own` puts in scope, read the first time a procedure of
+    /// this font is measured there.
+    own_fonts: OnceLock<HashMap<Vec<u8>, Arc<RunFont>>>,
+}
+
+/// A Type 3 font's glyph procedures, decoded, by the code that shows each.
+type GlyphProcedures = HashMap<u32, Arc<[u8]>>;
+
+/// A Type 3 font's glyph space (9.6.5): where its `/Widths` are measured and
+/// its glyph procedures draw, and the matrix that carries both into text
+/// space.
+///
+/// Until September 2026 a Type 3 font whose `/FontMatrix` was not the 1/1000
+/// default was refused as `RescaledType3Font`, because this module turned a
+/// width into text space by dividing by 1000 — right for the conventional
+/// matrix and wrong by exactly the matrix for any other. It is read now,
+/// whole:
+///
+/// - **The advance** is the horizontal component of the width carried
+///   through the matrix, `w0 · a`. The PDF reference's note on a Type 3
+///   font's `/Widths` says so ("if `FontMatrix` specifies a rotation, only
+///   the horizontal component of the transformed width is used"), and it is
+///   what this engine's interpreter advances a Type 3 glyph by.
+/// - **The box** is a rectangle in glyph space — `0` to `w0` along the
+///   baseline, [`GlyphSpace::low`] to [`GlyphSpace::high`] across it —
+///   carried through the *whole* matrix, translation included, which is how
+///   the interpreter places a glyph procedure (`font_matrix.then(transform)`).
+///   A skewed matrix slants the glyph and a rotated one turns it about its
+///   origin, and the ink goes where the matrix sends it whichever way the
+///   advance points, so a box built from `a` alone would cut the neighbour of
+///   the glyph a rectangle actually covers.
+#[derive(Clone, Copy)]
+struct GlyphSpace {
+    matrix: Matrix,
+    /// The bottom of the glyph box, in glyph space: `/FontBBox`'s bottom
+    /// when that is below the baseline, and the baseline otherwise.
+    low: f64,
+    /// The top of the glyph box, in glyph space: one em up the glyph space's
+    /// own y axis — the length the matrix carries to one unit of text space,
+    /// `1 / |(c, d)|`, which is 1000 for the conventional matrix — or
+    /// `/FontBBox`'s top when that is higher.
+    ///
+    /// Joined with the em rather than taken from `/FontBBox` alone because a
+    /// bounding box a producer wrote too small would shrink the box under
+    /// the ink, which is the one direction a redaction may not err in; one
+    /// written too large over-removes, which is the direction this module
+    /// errs in everywhere.
+    high: f64,
+}
+
+impl GlyphSpace {
+    /// 9.6.5's conventional glyph space, the one every other font kind has
+    /// implicitly.
+    const DEFAULT_MATRIX: Matrix = Matrix {
+        a: 0.001,
+        b: 0.0,
+        c: 0.0,
+        d: 0.001,
+        e: 0.0,
+        f: 0.0,
+    };
+
+    /// The conventional glyph space with nothing known about the glyphs'
+    /// extent: one em, from the baseline up.
+    const DEFAULT: GlyphSpace = GlyphSpace {
+        matrix: GlyphSpace::DEFAULT_MATRIX,
+        low: 0.0,
+        high: 1000.0,
+    };
+
+    /// Reads one font dictionary's `/FontMatrix` and `/FontBBox`.
+    ///
+    /// A `/FontMatrix` that is absent, or whose first six entries are not all
+    /// numbers, is read as the default. 9.6.5 requires the entry, so either
+    /// is malformed, and the default is how this engine's renderer reads it
+    /// too: its Type 3 path (`PageResources::type3_glyph`) needs six numbers,
+    /// and a font without them is advanced by `w0 / 1000` like any other — so
+    /// reading it that way measures the run where it is drawn.
+    fn read<R: Resolve + ?Sized>(doc: &R, font: &Dict) -> GlyphSpace {
+        let first = |key: &[u8], count: usize| -> Option<Vec<f64>> {
+            let value = doc.resolve_key(font, doc.intern(key));
+            let array = value.as_array()?;
+            (0..count)
+                .map(|i| array.get(i).and_then(Object::as_number))
+                .collect()
+        };
+        let matrix = first(b"FontMatrix", 6)
+            .and_then(|v| Matrix::from_operands(&v))
+            .unwrap_or(GlyphSpace::DEFAULT_MATRIX);
+
+        let em = 1.0 / (matrix.c * matrix.c + matrix.d * matrix.d).sqrt();
+        let em = if em.is_finite() && em > 0.0 {
+            em
+        } else {
+            1000.0
+        };
+        // Table 112: four zeros mean "no assumptions are made based on the
+        // font bounding box", which is the same as having none.
+        let across = first(b"FontBBox", 4)
+            .filter(|v| v.iter().all(|x| x.is_finite()) && v.iter().any(|x| *x != 0.0))
+            .and_then(|v| Some((*v.get(1)?, *v.get(3)?)));
+        let (low, high) = match across {
+            Some((y0, y1)) => (y0.min(y1).min(0.0), y0.max(y1).max(em)),
+            None => (0.0, em),
+        };
+        GlyphSpace { matrix, low, high }
+    }
 }
 
 /// The fonts one resource dictionary puts in scope, by the raw name bytes.
@@ -671,32 +1474,59 @@ struct RunFont {
 /// Re-keyed by the bytes rather than by an interned [`Name`] because the
 /// rewrite matches against what the `Tf` operator literally says, and it has
 /// no document to intern with.
-fn fonts_in(doc: &CosDocument, resources: &Dict) -> HashMap<Vec<u8>, Arc<RunFont>> {
-    let default_matrix = type3_matrices(doc, resources);
-    cos_font::from_resources(doc, resources)
+///
+/// **Read through the editor**, every object a font reaches — its
+/// dictionary, descriptor, widths, encoding, CMaps, a Type 3 face's
+/// `/CharProcs` and `/Resources` — as the pages, resources and XObjects
+/// around it already were ([`EditorPage`]). Until October 2026 fonts alone
+/// were read from the file (`cos_font::from_resources` took a
+/// `CosDocument`), so a run in a font the editor allocated — a page
+/// [`DocumentEditor::import_page`] copied in, or a font object a caller
+/// wrote — had no metrics and was left whole as
+/// [`RedactionWarning::UnknownFont`]. `cos_font::from_resources_in` reads
+/// through any [`Resolve`], and the editor is one: its names are the
+/// file's, so nothing here re-interns.
+fn fonts_in(editor: &DocumentEditor, resources: &Dict) -> HashMap<Vec<u8>, Arc<RunFont>> {
+    let mut spaces = glyph_spaces(editor, resources);
+    cos_font::from_resources_in(editor, resources)
         .into_iter()
         .filter_map(|(name, font)| {
-            let bytes = doc.name_bytes(name)?.to_vec();
-            let rescaled_type3 = font.kind() == cos_font::FontKind::Type3
-                && !default_matrix.get(&name).copied().unwrap_or(true);
+            let bytes = Resolve::name_bytes(editor, name)?.to_vec();
+            let (glyph_space, procedures, own) = if font.kind() == cos_font::FontKind::Type3 {
+                let (space, procedures, own) =
+                    spaces
+                        .remove(&name)
+                        .unwrap_or((GlyphSpace::DEFAULT, HashMap::new(), None));
+                (Some(space), procedures, own)
+            } else {
+                (None, HashMap::new(), None)
+            };
             Some((
                 bytes,
                 Arc::new(RunFont {
                     font,
-                    rescaled_type3,
+                    glyph_space,
+                    procedures,
+                    own,
+                    own_fonts: OnceLock::new(),
                 }),
             ))
         })
         .collect()
 }
 
-/// Whether each font in `/Font` carries the conventional 1/1000 `/FontMatrix`.
+/// The glyph space each font in `/Font` declares (9.6.5), its glyph
+/// procedures that can draw text or an image, and its own `/Resources` when
+/// they name anything.
 ///
-/// Read here rather than through `cos_font::Font`, which does not carry the
-/// entry: this module is the only caller that needs it, and it needs it only
-/// to decide whether to refuse. A font with no `/FontMatrix` at all answers
-/// `true` — see [`RedactionWarning::RescaledType3Font`].
-fn type3_matrices(doc: &CosDocument, resources: &Dict) -> HashMap<Name, bool> {
+/// Read here rather than through `cos_font::Font`, which carries neither
+/// `/FontMatrix`, `/FontBBox` nor `/CharProcs`: this module is the only
+/// caller that builds a glyph box from them. Only a Type 3 font's answer is
+/// ever used.
+fn glyph_spaces<R: Resolve + ?Sized>(
+    doc: &R,
+    resources: &Dict,
+) -> HashMap<Name, (GlyphSpace, GlyphProcedures, Option<Dict>)> {
     let mut out = HashMap::new();
     let value = doc.resolve_key(resources, doc.intern(b"Font"));
     let Some(fonts) = value.as_dict() else {
@@ -708,28 +1538,614 @@ fn type3_matrices(doc: &CosDocument, resources: &Dict) -> HashMap<Name, bool> {
         let Some(dict) = resolved.as_dict() else {
             continue;
         };
-        let matrix = doc.resolve_key(dict, doc.intern(b"FontMatrix"));
-        let default = match matrix.as_array() {
-            None => true,
-            Some(array) => {
-                let v = array
-                    .iter()
-                    .filter_map(Object::as_number)
-                    .collect::<Vec<f64>>();
-                let wanted = [0.001, 0.0, 0.0, 0.001, 0.0, 0.0];
-                v.len() == 6
-                    && v.iter()
-                        .zip(wanted)
-                        .all(|(got, want)| (got - want).abs() < 1e-12)
-            }
-        };
-        out.insert(*key, default);
+        let own = doc
+            .resolve_key(dict, Name::RESOURCES)
+            .as_dict()
+            .filter(|own| !own.is_empty())
+            .cloned();
+        out.insert(
+            *key,
+            (
+                GlyphSpace::read(doc, dict),
+                carrying_procedures(doc, dict),
+                own,
+            ),
+        );
     }
     out
 }
 
+/// A Type 3 font's glyph procedures that show text or draw an image, by code.
+///
+/// A code reaches its procedure the way the interpreter reaches it
+/// (`PageResources::type3_glyph`): `/Encoding`'s `/Differences` names it and
+/// `/CharProcs` holds the stream under that name — there is no built-in
+/// encoding for a font whose glyphs the document invented. At most 256
+/// codes, one read each.
+fn carrying_procedures<R: Resolve + ?Sized>(doc: &R, font: &Dict) -> GlyphProcedures {
+    let mut out = HashMap::new();
+    let subtype = font
+        .get_name(doc.intern(b"Subtype"))
+        .and_then(|n| doc.name_bytes(n));
+    if subtype.as_deref() != Some(b"Type3".as_slice()) {
+        return out;
+    }
+    let procs = doc.resolve_key(font, doc.intern(b"CharProcs"));
+    let Some(procs) = procs.as_dict() else {
+        return out;
+    };
+    let encoding = doc.resolve_key(font, doc.intern(b"Encoding"));
+    let Some(encoding) = encoding.as_dict() else {
+        return out;
+    };
+    let differences = doc.resolve_key(encoding, doc.intern(b"Differences"));
+    let Some(differences) = differences.as_array() else {
+        return out;
+    };
+
+    // Read exactly as the interpreter reads it, number for number: the first
+    // name a code is given is the one it draws, and a real is truncated (a
+    // negative or a NaN to zero, which is what `as` does).
+    let mut named: HashSet<u32> = HashSet::new();
+    let mut code = 0u32;
+    for item in differences {
+        match doc.resolve(item).as_ref() {
+            Object::Int(v) => code = u32::try_from(*v).unwrap_or(0),
+            Object::Real(v) => code = *v as u32,
+            Object::Name(name) => {
+                if code <= 0xff && named.insert(code) {
+                    let content = procs
+                        .get_ref(*name)
+                        .and_then(|r| doc.stream_decoded(r).ok());
+                    if let Some(content) = content.filter(|c| carries(c)) {
+                        out.insert(code, Arc::from(content.as_slice()));
+                    }
+                }
+                code = code.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Whether content shows text, draws an image, or paints with a pattern or
+/// a graphics state that might: an operator this module would have to
+/// measure, or name ([`unread`]), were it in a page.
+///
+/// `scn` and `SCN` count only with a name last, which is a pattern
+/// (8.6.6.2) — a colour's components are numbers, and a glyph that sets one
+/// draws nothing more than its paths. `gs` always names a state, and the
+/// state may set a mask.
+fn carries(content: &[u8]) -> bool {
+    let mut tokens = Tokenizer::new(content);
+    let mut named = false;
+    while let Some(token) = tokens.next_token() {
+        match token {
+            Token::Operator(op) => {
+                match op.as_slice() {
+                    b"Tj" | b"TJ" | b"'" | b"\"" | b"Do" | b"BI" | b"gs" => return true,
+                    b"scn" | b"SCN" if named => return true,
+                    _ => {}
+                }
+                named = false;
+            }
+            Token::Name(_) => named = true,
+            _ => named = false,
+        }
+    }
+    false
+}
+
+/// Names every tiling pattern a glyph procedure paints with whose cell
+/// [`carries`] text or an image ([`RedactionWarning::PatternOrMask`]).
+///
+/// A procedure is measured rather than cut ([`cut_stream`]), and a cell it
+/// paints with is not measured for it; a page's or a form's cells are, by
+/// [`Cells`] and [`cut_cells`].
+///
+/// A pattern is selected by the name `scn` or `SCN` ends with (8.6.6.2), its
+/// cell the pattern's own stream (8.7.3.1), resolved in `scope`, the
+/// resources of the stream that painted, through the editor. Only when there
+/// is a rectangle, as every warning here is; each name is resolved once. A
+/// soft mask's group was named here too until October 2026, and is measured
+/// now, as a placement of a form ([`Walk::one`]).
+fn unread(
+    editor: &DocumentEditor,
+    scope: &Dict,
+    content: &[u8],
+    areas: &[Redaction],
+    warnings: &mut Vec<RedactionWarning>,
+) {
+    if areas.is_empty() {
+        return;
+    }
+    let mut asked: HashSet<Vec<u8>> = HashSet::new();
+    let mut tokens = Tokenizer::new(content);
+    let mut operands: Vec<Token> = Vec::new();
+    while let Some(token) = tokens.next_token() {
+        let Token::Operator(op) = &token else {
+            operands.push(token);
+            continue;
+        };
+        let pattern = match op.as_slice() {
+            // 8.9.7: the samples are not tokens.
+            b"BI" => {
+                let consumed = tinker_pdf_content::interpret::skip_inline_image(tokens.rest());
+                let at = tokens.position();
+                tokens.seek(at.saturating_add(consumed));
+                false
+            }
+            b"scn" | b"SCN" => true,
+            _ => false,
+        };
+        if let (true, Some(Token::Name(name))) = (pattern, operands.last()) {
+            // Asked once each, while there are few enough names to remember
+            // (ruling 1); past that a new name is asked every time, which
+            // costs a lookup and not memory, and `note` merges what it finds.
+            let key = name.clone();
+            let fresh = if asked.len() < MAX_XOBJECT_USES {
+                asked.insert(key)
+            } else {
+                !asked.contains(&key)
+            };
+            if fresh {
+                let drawn = tiling_cell(editor, scope, name);
+                if drawn.is_some_and(|content| carries(&content)) {
+                    note(
+                        warnings,
+                        RedactionWarning::PatternOrMask {
+                            resource: name.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        operands.clear();
+    }
+}
+
+/// The cell of the pattern `name` selects in `scope`, decoded: a pattern's
+/// stream, which only a tiling pattern has (8.7.3.1) — a shading pattern is
+/// a dictionary, and answers `None`.
+fn tiling_cell(editor: &DocumentEditor, scope: &Dict, name: &[u8]) -> Option<Vec<u8>> {
+    let table = Resolve::resolve_key(editor, scope, editor.intern(b"Pattern"));
+    let reference = table.as_dict()?.get_ref(editor.intern(name))?;
+    editor.stream_bytes(reference)
+}
+
+/// The group of the soft mask the graphics state `name` sets in `scope`
+/// (11.6.5.2's `/G`, a form XObject), and its stream dictionary — `None` for
+/// `/SMask /None` and for a state that sets no mask. Through the editor, as
+/// [`resolve_xobject`] reads a `Do`'s.
+fn resolve_mask_group(
+    editor: &DocumentEditor,
+    scope: &Dict,
+    name: &[u8],
+) -> Option<(ObjRef, Dict)> {
+    let table = Resolve::resolve_key(editor, scope, editor.intern(b"ExtGState"));
+    let state = table.as_dict()?.get(editor.intern(name))?.clone();
+    let state = Resolve::resolve(editor, &state);
+    let mask = Resolve::resolve_key(editor, state.as_dict()?, editor.intern(b"SMask"));
+    let group = mask.as_dict()?.get_ref(editor.intern(b"G"))?;
+    let object = editor.get(group)?;
+    Some((group, object.as_dict()?.clone()))
+}
+
+/// One tiling pattern the page's streams painted with (8.7.3.1).
+struct CellUse {
+    reference: ObjRef,
+    /// The pattern's stream dictionary, as the editor had it.
+    dict: Dict,
+    /// The resource name that first selected it, for a warning.
+    name: Vec<u8>,
+    /// The spaces its lattice is anchored to, each once.
+    bases: Vec<Matrix>,
+}
+
+/// The tiling patterns one page's streams paint with, by object, so a
+/// pattern several streams select is measured once over every anchoring.
+/// Ordered, so the warnings come out in one order whatever order the page
+/// met them in.
+#[derive(Default)]
+struct Cells {
+    by_number: BTreeMap<u32, CellUse>,
+}
+
+impl Cells {
+    /// Records every tiling pattern `content` selects — the name `scn` or
+    /// `SCN` ends with (8.6.6.2) — resolved in `scope`, the resources of the
+    /// stream that painted, through the editor.
+    ///
+    /// Anchored twice when the two readings differ. 8.7.2 puts a pattern's
+    /// space in the default space of the stream that paints with it, which
+    /// for a form is the form's at the `Do`: `initial`. This engine's
+    /// renderer anchors every lattice to the page's own space
+    /// (`tinker-pdf-render`'s `base`, "never translated after
+    /// construction"). A reader either way draws the cell, so it is measured
+    /// at both, as a glyph procedure is measured in both of its scopes.
+    fn read(
+        &mut self,
+        editor: &DocumentEditor,
+        scope: &Dict,
+        content: &[u8],
+        initial: Matrix,
+        areas: &[Redaction],
+    ) {
+        if areas.is_empty() {
+            return;
+        }
+        let mut tokens = Tokenizer::new(content);
+        let mut operands: Vec<Token> = Vec::new();
+        while let Some(token) = tokens.next_token() {
+            let Token::Operator(op) = &token else {
+                operands.push(token);
+                continue;
+            };
+            match op.as_slice() {
+                // 8.9.7: the samples are not tokens.
+                b"BI" => {
+                    let consumed = tinker_pdf_content::interpret::skip_inline_image(tokens.rest());
+                    let at = tokens.position();
+                    tokens.seek(at.saturating_add(consumed));
+                }
+                b"scn" | b"SCN" => {
+                    if let Some(Token::Name(name)) = operands.last() {
+                        self.add(editor, scope, name, initial);
+                    }
+                }
+                _ => {}
+            }
+            operands.clear();
+        }
+    }
+
+    fn add(&mut self, editor: &DocumentEditor, scope: &Dict, name: &[u8], initial: Matrix) {
+        let Some((reference, dict)) = resolve_tiling_cell(editor, scope, name) else {
+            return;
+        };
+        // Bounded like the walk's uses (ruling 1): past the bound a pattern
+        // not yet met is not recorded, and an anchoring not yet met is not
+        // added.
+        if !self.by_number.contains_key(&reference.num) && self.by_number.len() >= MAX_XOBJECT_USES
+        {
+            return;
+        }
+        let cell = self
+            .by_number
+            .entry(reference.num)
+            .or_insert_with(|| CellUse {
+                reference,
+                dict,
+                name: name.to_vec(),
+                bases: Vec::new(),
+            });
+        for base in [Matrix::IDENTITY, initial] {
+            let key = placement_key(base);
+            if cell.bases.len() < MAX_PLACEMENTS
+                && !cell.bases.iter().any(|b| placement_key(*b) == key)
+            {
+                cell.bases.push(base);
+            }
+        }
+    }
+}
+
+/// The tiling pattern `name` selects in `scope`: a pattern stream with
+/// `/PatternType 1` (8.7.3.1), and its dictionary. A shading pattern is a
+/// dictionary and draws no content, and answers `None`.
+fn resolve_tiling_cell(
+    editor: &DocumentEditor,
+    scope: &Dict,
+    name: &[u8],
+) -> Option<(ObjRef, Dict)> {
+    let table = Resolve::resolve_key(editor, scope, editor.intern(b"Pattern"));
+    let reference = table.as_dict()?.get_ref(editor.intern(name))?;
+    // A stream the editor wrote reads back as its dictionary, and one in the
+    // file as a stream; either way the content is `stream_bytes`'.
+    let object = editor.get(reference)?;
+    let dict = match &object {
+        Object::Stream(stream) => stream.dict.clone(),
+        other => other.as_dict()?.clone(),
+    };
+    let kind = Resolve::resolve_key(editor, &dict, editor.intern(b"PatternType")).as_int();
+    (kind == Some(1)).then_some((reference, dict))
+}
+
+/// The inverse of an affine map, when it has one.
+fn invert(m: Matrix) -> Option<Matrix> {
+    let det = m.a * m.d - m.b * m.c;
+    if det == 0.0 || !det.is_finite() {
+        return None;
+    }
+    let inverse = Matrix {
+        a: m.d / det,
+        b: -m.b / det,
+        c: -m.c / det,
+        d: m.a / det,
+        e: (m.c * m.f - m.d * m.e) / det,
+        f: (m.b * m.e - m.a * m.f) / det,
+    };
+    inverse.is_finite().then_some(inverse)
+}
+
+/// The lattice indices `k` whose tile `[b0 + k·step, b1 + k·step]` meets
+/// `[lo, hi]`, as an inclusive range — empty when `first > last` — or `None`
+/// when the step or the numbers cannot index a lattice at all.
+fn lattice_range(lo: f64, hi: f64, b0: f64, b1: f64, step: f64) -> Option<(i64, i64)> {
+    if step == 0.0 || !step.is_finite() {
+        return None;
+    }
+    let (p, q) = ((lo - b1) / step, (hi - b0) / step);
+    let (first, last) = (p.min(q).ceil(), p.max(q).floor());
+    // A lattice index past a billion is a tile no page reaches, and a count
+    // that cannot be held as an integer is not one this walk can bound.
+    let limit = 1e9;
+    if !first.is_finite() || !last.is_finite() || first.abs() > limit || last.abs() > limit {
+        return None;
+    }
+    Some((first as i64, last as i64))
+}
+
+/// The transforms of every tile of a cell's lattice whose `/BBox` meets a
+/// rectangle — pattern space carried to the page by `to_page`, the tile's
+/// translation first (8.7.3.1) — or `None` when there are more than
+/// [`MAX_PLACEMENTS`] of them or the lattice cannot be measured.
+///
+/// Every tile meeting a rectangle, whether or not the area the pattern fills
+/// reaches it: this module does not follow paths, and a tile the fill does
+/// not reach draws nothing, so measuring it can only remove more. That is the
+/// direction this module errs in.
+fn tiles(
+    to_page: Matrix,
+    bbox: [f64; 4],
+    step: (f64, f64),
+    areas: &[Redaction],
+) -> Option<Vec<Matrix>> {
+    let back = invert(to_page)?;
+    let [bx0, by0, bx1, by1] = bbox;
+    let mut seen: BTreeSet<(i64, i64)> = BTreeSet::new();
+    let mut out = Vec::new();
+    for area in areas.iter().map(|r| r.area) {
+        let corners = [
+            back.apply(area.x0, area.y0),
+            back.apply(area.x1, area.y0),
+            back.apply(area.x0, area.y1),
+            back.apply(area.x1, area.y1),
+        ];
+        let (mut px0, mut px1, mut py0, mut py1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        for (x, y) in corners {
+            px0 = px0.min(x);
+            px1 = px1.max(x);
+            py0 = py0.min(y);
+            py1 = py1.max(y);
+        }
+        let (i0, i1) = lattice_range(px0, px1, bx0, bx1, step.0)?;
+        let (j0, j1) = lattice_range(py0, py1, by0, by1, step.1)?;
+        if i0 > i1 || j0 > j1 {
+            continue;
+        }
+        let count = (i1 - i0 + 1).saturating_mul(j1 - j0 + 1);
+        if count > MAX_PLACEMENTS as i64 {
+            return None;
+        }
+        for i in i0..=i1 {
+            for j in j0..=j1 {
+                if seen.insert((i, j)) {
+                    if seen.len() > MAX_PLACEMENTS {
+                        return None;
+                    }
+                    out.push(Matrix::translate(i as f64 * step.0, j as f64 * step.1).then(to_page));
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Every tile one cell is measured at, over every space its lattice is
+/// anchored to ([`CellUse::bases`]), each transform once, and whether any
+/// anchoring went unmeasured — its lattice not placeable, or its tiles past
+/// what the cell has left of [`MAX_PLACEMENTS`].
+///
+/// **The bound is the cell's, not an anchoring's.** A cell keeps up to
+/// [`MAX_PLACEMENTS`] anchorings and [`tiles`] gives each up to as many
+/// tiles, so bounding each anchoring alone let one cell run some four
+/// thousand passes over its stream — a pattern a form paints with, the form
+/// drawn at sixty-four transforms under a band of fifty tiles, ran 3 465 —
+/// and reported them as `placements: 64`. An anchoring whose tiles would
+/// take the cell past the bound is not measured at all, and the caller names
+/// the cell ([`RedactionWarning::PatternOrMask`]), as it names one whose
+/// tiles under the rectangles are too many for one anchoring.
+fn cell_tiles(
+    matrix: Matrix,
+    bases: &[Matrix],
+    bbox: [f64; 4],
+    step: (f64, f64),
+    areas: &[Redaction],
+) -> (Vec<Matrix>, bool) {
+    let mut out: Vec<Matrix> = Vec::new();
+    let mut seen: HashSet<PlacementKey> = HashSet::new();
+    let mut unmeasured = false;
+    for base in bases {
+        let Some(placed) = tiles(matrix.then(*base), bbox, step, areas) else {
+            unmeasured = true;
+            continue;
+        };
+        let fresh: Vec<Matrix> = placed
+            .into_iter()
+            .filter(|tile| !seen.contains(&placement_key(*tile)))
+            .collect();
+        if out.len().saturating_add(fresh.len()) > MAX_PLACEMENTS {
+            unmeasured = true;
+            continue;
+        }
+        for tile in fresh {
+            if seen.insert(placement_key(tile)) {
+                out.push(tile);
+            }
+        }
+    }
+    (out, unmeasured)
+}
+
+/// Whether content invokes what a cell's measurement does not follow: an
+/// XObject (`Do`), a graphics state that may set a soft mask (`gs`), or
+/// another pattern (`scn` or `SCN` ending in a name).
+fn draws_further(content: &[u8]) -> bool {
+    let mut tokens = Tokenizer::new(content);
+    let mut named = false;
+    while let Some(token) = tokens.next_token() {
+        match token {
+            Token::Operator(op) => {
+                match op.as_slice() {
+                    b"Do" | b"gs" => return true,
+                    b"scn" | b"SCN" if named => return true,
+                    b"BI" => {
+                        let consumed =
+                            tinker_pdf_content::interpret::skip_inline_image(tokens.rest());
+                        let at = tokens.position();
+                        tokens.seek(at.saturating_add(consumed));
+                    }
+                    _ => {}
+                }
+                named = false;
+            }
+            Token::Name(_) => named = true,
+            _ => named = false,
+        }
+    }
+    false
+}
+
+/// Cuts every tiling pattern's cell the page painted with, at every tile of
+/// its lattice a rectangle meets (8.7.3.1), in the pattern's own stream.
+///
+/// **In its own stream, so wider than asked, and named.** A cell is one
+/// stream every tile runs, wherever the pattern paints — a glyph a rectangle
+/// covers at one tile is gone at all of them — so a cut is reported as
+/// [`RedactionWarning::RepeatedForm`] under the pattern's resource name, with
+/// the tiles measured. Over-removal is this module's direction, and a copy
+/// per tile would be a pattern per tile.
+///
+/// What is still named rather than measured, [`RedactionWarning::PatternOrMask`]:
+/// a cell whose tiles meeting the rectangles, over every space its lattice
+/// is anchored to, number more than [`MAX_PLACEMENTS`] ([`cell_tiles`]: the
+/// anchorings within the bound are cut, so one cell runs its stream at most
+/// that many times), or whose `/Matrix`, `/BBox` or steps cannot place a
+/// lattice; and a cell that invokes XObjects, sets graphics states or paints
+/// with another pattern, whose text is cut and whose further drawing is not
+/// followed. Each only when the cell carries something this module removes
+/// ([`carries`]).
+fn cut_cells(
+    editor: &mut DocumentEditor,
+    cells: &Cells,
+    areas: &[Redaction],
+    report: &mut RedactionReport,
+) {
+    if areas.is_empty() {
+        return;
+    }
+    for cell in cells.by_number.values() {
+        let Some(content) = editor.stream_bytes(cell.reference) else {
+            continue;
+        };
+        let named = RedactionWarning::PatternOrMask {
+            resource: cell.name.clone(),
+        };
+        let numbers = |key: &[u8], count: usize| -> Option<Vec<f64>> {
+            let value = Resolve::resolve_key(&*editor, &cell.dict, editor.intern(key));
+            let items = value.as_array()?;
+            let out: Vec<f64> = items
+                .iter()
+                .take(count)
+                .filter_map(Object::as_number)
+                .collect();
+            (out.len() == count && out.iter().all(|v| v.is_finite())).then_some(out)
+        };
+        let number = |key: &[u8]| {
+            Resolve::resolve_key(&*editor, &cell.dict, editor.intern(key))
+                .as_number()
+                .filter(|v| v.is_finite() && *v != 0.0)
+        };
+        let matrix =
+            match Resolve::resolve_key(&*editor, &cell.dict, editor.intern(b"Matrix")).is_null() {
+                true => Some(Matrix::IDENTITY),
+                false => numbers(b"Matrix", 6).and_then(|v| Matrix::from_operands(&v)),
+            };
+        let bbox = numbers(b"BBox", 4).and_then(|v| match v.as_slice() {
+            [a, b, c, d] => Some([a.min(*c), b.min(*d), a.max(*c), b.max(*d)]),
+            _ => None,
+        });
+        let (Some(matrix), Some(bbox), Some(xstep), Some(ystep)) =
+            (matrix, bbox, number(b"XStep"), number(b"YStep"))
+        else {
+            if carries(&content) {
+                note(&mut report.warnings, named);
+            }
+            continue;
+        };
+
+        // 8.7.3.1: a tiling pattern's `/Resources` is required; one that
+        // omits it names nothing a cut could resolve.
+        let resources = Resolve::resolve_key(&*editor, &cell.dict, Name::RESOURCES)
+            .as_dict()
+            .cloned()
+            .unwrap_or_default();
+        let fonts = fonts_in(editor, &resources);
+        let mut data = content.clone();
+        let (mut glyphs, mut images, mut operations, mut measured) = (0, 0, 0, 0usize);
+        let (placed, unmeasured) = cell_tiles(matrix, &cell.bases, bbox, (xstep, ystep), areas);
+        for tile in placed {
+            let (next, pass, _) = cut_stream(
+                editor,
+                &resources,
+                &data,
+                areas,
+                &fonts,
+                tile,
+                &mut report.warnings,
+            );
+            data = next;
+            glyphs += pass.glyphs;
+            images += pass.images;
+            operations += pass.operations;
+            measured += 1;
+        }
+        if (unmeasured || draws_further(&content)) && carries(&content) {
+            note(&mut report.warnings, named);
+        }
+        if glyphs > 0 || images > 0 {
+            let dict = plain_stream_dict(editor, &cell.dict);
+            editor.put_stream(cell.reference, StreamData { dict, data });
+            report.glyphs += glyphs;
+            report.images += images;
+            report.operations += operations;
+            note(
+                &mut report.warnings,
+                RedactionWarning::RepeatedForm {
+                    form: cell.name.clone(),
+                    placements: measured,
+                },
+            );
+        }
+    }
+}
+
 /// How deep form XObjects may nest before recursion is refused (8.10).
-const MAX_FORM_DEPTH: u32 = 12;
+///
+/// **At least as deep as this engine draws.** The interpreter enters a form
+/// whose `Do` is made at a depth below its own `MAX_FORM_DEPTH`, 16
+/// (`interpret.rs`): sixteen levels of forms under a page. This was 12 until
+/// October 2026, and a form nested thirteen to sixteen deep was drawn by the
+/// renderer and never measured by a redaction — its text left under the
+/// rectangle with nothing in the report. The walk's test is `depth >` this,
+/// one level looser than the interpreter's `>=`, so a chain under an
+/// annotation's appearance, which the renderer runs as content rather than
+/// through a `Do`, is measured as deep as it is drawn too; a page's chain is
+/// measured one level deeper than it is drawn, which removes nothing the
+/// renderer would have shown.
+const MAX_FORM_DEPTH: u32 = 16;
 
 /// One placement of an XObject: the six entries of the transform in force,
 /// bit for bit.
@@ -760,218 +2176,1749 @@ fn placement_key(m: Matrix) -> PlacementKey {
     ]
 }
 
-/// Which placements of which XObjects this redaction has already handled.
-///
-/// This replaced a `HashSet<u32>` of object numbers, which was both the cycle
-/// guard and — silently — a rule that a form drawn twice is measured once.
-/// Keying by the transform as well as by the object separates the two: a form
-/// that invokes itself arrives at the same object under the same matrix and
-/// is still entered once, and a form drawn somewhere else arrives under a
-/// different matrix and is measured there too.
-#[derive(Default)]
-struct Placements {
-    /// Every (object, transform) pair already rewritten.
-    done: HashSet<(u32, PlacementKey)>,
-    /// How many distinct placements of each form were entered, saturating at
-    /// [`MAX_PLACEMENTS`].
-    count: HashMap<u32, usize>,
-    /// Forms with a placement refused because the cap was reached — the one
-    /// case where a placement is not measured at all.
-    refused: HashSet<u32>,
-    /// Glyphs cut from each form's own content, summed over its placements.
-    cut: HashMap<u32, usize>,
-    /// The resource name each form was first invoked by.
+/// A form XObject this redaction met, as it was before anything was written.
+struct FormEntry {
+    reference: ObjRef,
+    /// The resource name that first invoked it.
     ///
     /// The *first*, because one object can be reached by different names from
     /// different scopes and a caller needs a name that appears in the file,
     /// not a list of the ones that do.
-    name: HashMap<u32, Vec<u8>>,
+    name: Vec<u8>,
+    /// Its stream dictionary, as the editor had it.
+    dict: Dict,
+    /// Its decoded content, as the editor had it. Every placement is cut from
+    /// **this**, never from what another placement's cut left: each
+    /// placement's result is its own, and which of them share a stream is
+    /// decided afterwards ([`settle`]).
+    content: Vec<u8>,
+    /// The distinct outcomes of cutting `content`, one per outcome rather
+    /// than per placement — most placements of most forms cut nothing, and
+    /// all of those share one entry.
+    cuts: Vec<FormCut>,
+    /// Its placements, in the order they were entered.
+    nodes: Vec<usize>,
+    /// A placement was refused because [`MAX_PLACEMENTS`] was reached, so at
+    /// least one `Do` of it was measured against nothing.
+    refused: bool,
+    /// A distinct cut of it would have taken what the walk holds past
+    /// [`MAX_FORM_COPY_BYTES`], so its cuts were let go and it is cut the
+    /// old way ([`union`]), from `content`.
+    over_budget: bool,
+    /// It is a soft mask's group (11.6.5.2), drawn through a `gs`: cut the
+    /// old way, in its own stream ([`settle`]).
+    masked: bool,
+}
+
+/// One outcome of cutting a form's content.
+struct FormCut {
+    data: Vec<u8>,
+    /// Where each `Do`'s operand sits in `data`, one per [`XObjectUse`] the
+    /// cut recorded, so that a `Do` can be pointed at a copy afterwards.
+    names: Vec<std::ops::Range<usize>>,
+    glyphs: usize,
+    operations: usize,
+    /// Inline images the cut scrubbed (8.9.7). A change as much as a glyph
+    /// removed: a cut that scrubbed one and removed no glyph still has to be
+    /// written, or the samples stay in the file.
+    images: usize,
+}
+
+impl FormCut {
+    /// Whether the cut removed anything — a glyph or an inline image.
+    fn removed(&self) -> bool {
+        self.glyphs > 0 || self.images > 0
+    }
+}
+
+/// One placement of a form: which form, under which transform, and what it
+/// drew.
+struct FormPlacement {
+    /// Index into [`Walk::forms`].
+    form: usize,
+    /// The transform mapping the form's space to the page's, its `/Matrix`
+    /// included.
+    ctm: Matrix,
+    /// What the form's content names things in at this placement: its own
+    /// `/Resources`, or the scope that invoked it when it has none (8.10.1).
+    resources: Dict,
+    /// Index into the form's [`FormEntry::cuts`].
+    cut: usize,
+    /// For each `Do` in the cut, the placement it made, when it drew a form
+    /// this walk entered.
+    children: Vec<Option<usize>>,
+}
+
+/// Every form placement one page draws, measured and not yet written.
+///
+/// This replaced a guard that rewrote each form in place, placement after
+/// placement, so the cuts accumulated in the one stream every placement
+/// shared — a glyph a rectangle covered at one placement was gone at all of
+/// them, and `RepeatedForm` said so. Keyed by the object **and** the
+/// transform, as that guard was ([`placement_key`]): a form that invokes
+/// itself arrives back at a placement already entered, and a form drawn
+/// somewhere else arrives under a different matrix and is a placement of its
+/// own.
+#[derive(Default)]
+struct Walk {
+    /// Every form met, in the order first met.
+    forms: Vec<FormEntry>,
+    /// Form object number to index into `forms`.
+    by_number: HashMap<u32, usize>,
+    /// Every placement, in the order entered.
+    nodes: Vec<FormPlacement>,
+    /// The placement guard: (object, transform) to placement.
+    placed: HashMap<(u32, PlacementKey), usize>,
     /// Images already scrubbed, so one image is reported once however many
     /// placements asked for it.
     scrubbed: HashSet<u32>,
+    /// The bytes of every cut held in [`FormEntry::cuts`], against
+    /// [`MAX_FORM_COPY_BYTES`].
+    held: usize,
+    /// Every tiling pattern the page's streams painted with, for
+    /// [`cut_cells`] once the walk is done.
+    cells: Cells,
 }
 
-impl Placements {
-    /// Whether this placement of this form is one to rewrite now.
-    fn enter_form(&mut self, num: u32, name: &[u8], key: PlacementKey) -> bool {
-        if self.done.contains(&(num, key)) {
-            return false;
-        }
-        let seen = self.count.entry(num).or_insert(0);
-        if *seen >= MAX_PLACEMENTS {
-            self.refused.insert(num);
-            return false;
-        }
-        *seen += 1;
-        self.done.insert((num, key));
-        self.name.entry(num).or_insert_with(|| name.to_vec());
-        true
-    }
-
-    /// Records what one placement's pass removed from a form.
-    fn record_cut(&mut self, num: u32, glyphs: usize) {
-        let total = self.cut.entry(num).or_insert(0);
-        *total = total.saturating_add(glyphs);
-    }
-
-    /// Whether this image still needs scrubbing.
-    fn scrub(&mut self, num: u32) -> bool {
-        self.scrubbed.insert(num)
-    }
-
-    /// The forms whose cut is not exactly what the rectangles asked for.
+impl Walk {
+    /// Follows the XObjects one stream invoked, returning for each `Do` the
+    /// form placement it made, if any.
     ///
-    /// A form at one placement is exact. A form at several that nothing was
-    /// cut from is exact too — the file is byte-identical to what a copy per
-    /// placement would have produced — so it says nothing. What is left is a
-    /// form whose one shared stream lost glyphs on behalf of one placement,
-    /// and a form with a placement past the cap, which is the case where
-    /// something may instead have survived.
-    fn warnings(&self) -> Vec<RedactionWarning> {
-        let mut out: Vec<RedactionWarning> = Vec::new();
-        let mut numbers: Vec<u32> = self.count.keys().copied().collect();
-        // Sorted, because a report that depends on a `HashMap`'s iteration
-        // order is a report two runs can disagree about (ruling 4).
-        numbers.sort_unstable();
-        for num in numbers {
-            let placements = self.count.get(&num).copied().unwrap_or(0);
-            let cut = self.cut.get(&num).copied().unwrap_or(0);
-            let refused = self.refused.contains(&num);
-            if placements < 2 || (cut == 0 && !refused) {
-                continue;
-            }
-            out.push(RedactionWarning::RepeatedForm {
-                form: self.name.get(&num).cloned().unwrap_or_default(),
-                placements,
-            });
+    /// A form is cut the way the page was, with the transform in force at the
+    /// `Do` as its starting one — the rectangles stay in page space, so the
+    /// form's own coordinates are brought into it rather than the other way
+    /// round. An image the redaction covers is scrubbed here and now: it is
+    /// replaced whole or not at all, so its placements need no copies.
+    fn uses(
+        &mut self,
+        editor: &mut DocumentEditor,
+        resources: &Dict,
+        uses: &[XObjectUse],
+        areas: &[Redaction],
+        report: &mut RedactionReport,
+        depth: u32,
+    ) -> Vec<Option<usize>> {
+        if depth > MAX_FORM_DEPTH {
+            return vec![None; uses.len()];
         }
-        out
-    }
-}
-
-/// Recurses into the XObjects a stream invoked.
-///
-/// A form is rewritten the way the page was, with the transform in force at
-/// the `Do` as its starting one — the rectangles stay in page space, so the
-/// form's own coordinates are brought into it rather than the other way round.
-/// An image the redaction covers is scrubbed.
-///
-/// **Every placement is measured.** A form drawn in two places is rewritten
-/// once per distinct placement, each pass reading the bytes the pass before
-/// it left ([`DocumentEditor::stream_bytes`], not the file), so the surviving
-/// content is what no rectangle covered at *any* placement. That is what
-/// keeps a rectangle over a second placement from being tested against
-/// nothing — and, because a form is one object however often it is drawn, it
-/// is also why a cut made for one placement shows at the others, which
-/// [`RedactionWarning::RepeatedForm`] names.
-///
-/// [`Placements`] is still the cycle guard: a form that invokes itself
-/// arrives back at the same object under the same matrix, which is a
-/// placement already done.
-#[allow(clippy::too_many_arguments)]
-fn follow(
-    editor: &mut DocumentEditor,
-    resources: &Dict,
-    uses: &[XObjectUse],
-    areas: &[Redaction],
-    report: &mut RedactionReport,
-    placements: &mut Placements,
-    depth: u32,
-) {
-    if depth > MAX_FORM_DEPTH {
-        return;
+        uses.iter()
+            .map(|used| self.one(editor, resources, used, areas, report, depth))
+            .collect()
     }
 
-    for used in uses {
-        let Some((reference, dict)) = resolve_xobject(editor, resources, &used.name) else {
-            continue;
-        };
-
-        let doc = editor.document();
-        let subtype = doc
-            .resolve_key(&dict, doc.intern(b"Subtype"))
+    fn one(
+        &mut self,
+        editor: &mut DocumentEditor,
+        resources: &Dict,
+        used: &XObjectUse,
+        areas: &[Redaction],
+        report: &mut RedactionReport,
+        depth: u32,
+    ) -> Option<usize> {
+        if used.mask {
+            // 11.6.5.2: the group is a form drawn at this placement. It is
+            // measured as one, and cut in its own stream ([`settle`] says why
+            // never through a copy).
+            let (reference, dict) = resolve_mask_group(editor, resources, &used.name)?;
+            let placement = Placing {
+                reference,
+                dict,
+                used,
+                scope: resources,
+            };
+            let node = self.form(editor, placement, areas, report, depth);
+            if let Some(entry) = self
+                .by_number
+                .get(&reference.num)
+                .and_then(|&at| self.forms.get_mut(at))
+            {
+                entry.masked = true;
+            }
+            return node;
+        }
+        let (reference, dict) = resolve_xobject(editor, resources, &used.name)?;
+        let subtype = Resolve::resolve_key(editor, &dict, editor.intern(b"Subtype"))
             .as_name()
-            .and_then(|n| doc.name_bytes(n))
+            .and_then(|n| editor.document().name_bytes(n))
             .map(|b| b.to_vec());
 
         match subtype.as_deref() {
             Some(b"Image") => {
-                // Tested at **every** placement, and scrubbed once. An image
-                // is replaced whole or not at all, so the two placements of
-                // one image do not need two objects the way two placements of
-                // a form need two streams — the only question is whether any
-                // of them is covered, and stopping at the first left an image
-                // covered only at its second in the file with `images: 0`.
-                if covers_unit_square(used, areas) && placements.scrub(reference.num) {
+                // Tested at **every** placement, and scrubbed once. The only
+                // question is whether any placement is covered, and stopping
+                // at the first left an image covered only at its second in
+                // the file with `images: 0`.
+                if covers_unit_square(used, areas) && self.scrubbed.insert(reference.num) {
                     scrub_image(editor, reference, &dict);
                     report.images += 1;
                 }
+                None
             }
             Some(b"Form") => {
-                // 8.10.2: the form's own /Matrix sits between its space and the
-                // one that invoked it, so it composes with the transform the
-                // `Do` was made under.
-                let matrix = doc
-                    .resolve_key(&dict, doc.intern(b"Matrix"))
-                    .as_array()
-                    .map(|a| a.iter().filter_map(Object::as_number).collect::<Vec<f64>>())
-                    .filter(|v| v.len() >= 6 && v.iter().all(|x| x.is_finite()))
-                    .and_then(|v| Matrix::from_operands(&v));
-
-                let inner = match matrix {
-                    Some(m) => m.then(used.ctm),
-                    None => used.ctm,
+                let placement = Placing {
+                    reference,
+                    dict,
+                    used,
+                    scope: resources,
                 };
-
-                if !placements.enter_form(reference.num, &used.name, placement_key(inner)) {
-                    continue;
-                }
-
-                // The bytes this redaction has **now**, not the file's. A
-                // second placement of the same form rewrites what the first
-                // placement left, so the cuts accumulate in the one stream
-                // all the placements share; reading the file here would throw
-                // the earlier placement's cut away and put its text back.
-                let Some(content) = editor.stream_bytes(reference) else {
-                    continue;
-                };
-                // 8.10.1: a form's own `/Resources` is what its content
-                // names things in. A form that omits the dictionary inherits
-                // the scope that invoked it, which is why the fallback is the
-                // caller's rather than the page's.
-                let inner_resources = doc
-                    .resolve_key(&dict, Name::RESOURCES)
-                    .as_dict()
-                    .cloned()
-                    .unwrap_or_else(|| resources.clone());
-                let fonts = fonts_in(doc, &inner_resources);
-
-                let (data, inner_report, inner_uses) = rewrite(&content, areas, &fonts, inner);
-                report.operations += inner_report.operations;
-                report.glyphs += inner_report.glyphs;
-                report.images += inner_report.images;
-                placements.record_cut(reference.num, inner_report.glyphs);
-                for warning in inner_report.warnings {
-                    note(&mut report.warnings, warning);
-                }
-
-                // Overwritten in place, for the same reason the page's content
-                // is: a freshly allocated object leaves the original text in
-                // the file, unreferenced and perfectly readable.
-                editor.put_stream(reference, StreamData { dict, data });
-                follow(
-                    editor,
-                    &inner_resources,
-                    &inner_uses,
-                    areas,
-                    report,
-                    placements,
-                    depth + 1,
-                );
+                self.form(editor, placement, areas, report, depth)
             }
-            _ => {}
+            _ => None,
         }
     }
+
+    fn form(
+        &mut self,
+        editor: &mut DocumentEditor,
+        placing: Placing<'_>,
+        areas: &[Redaction],
+        report: &mut RedactionReport,
+        depth: u32,
+    ) -> Option<usize> {
+        let Placing {
+            reference,
+            dict,
+            used,
+            scope,
+        } = placing;
+
+        let inner = form_transform(editor, &dict, used.ctm);
+
+        let form = match self.by_number.get(&reference.num) {
+            Some(&index) => index,
+            None => {
+                // The bytes this editor has **now**, not the file's: an
+                // earlier redaction of this page, or of another page that
+                // draws the same form, is an edit this one must keep.
+                let content = editor.stream_bytes(reference)?;
+                let index = self.forms.len();
+                self.forms.push(FormEntry {
+                    reference,
+                    name: used.name.clone(),
+                    dict: dict.clone(),
+                    content,
+                    cuts: Vec::new(),
+                    nodes: Vec::new(),
+                    refused: false,
+                    over_budget: false,
+                    masked: false,
+                });
+                self.by_number.insert(reference.num, index);
+                index
+            }
+        };
+
+        // A placement already entered is the same placement again — two
+        // `Do`s under one transform, or a form that invokes itself arriving
+        // back where it started, which is what ends that recursion. Either
+        // way the link is recorded, and a form that links to itself is one
+        // [`settle`] cannot order, which is how it knows.
+        let key = (reference.num, placement_key(inner));
+        if let Some(&node) = self.placed.get(&key) {
+            return Some(node);
+        }
+        let entry = self.forms.get_mut(form)?;
+        if entry.nodes.len() >= MAX_PLACEMENTS {
+            entry.refused = true;
+            return None;
+        }
+
+        // 8.10.1: a form's own `/Resources` is what its content names things
+        // in. A form that omits the dictionary inherits the scope that
+        // invoked it, which is why the fallback is the caller's rather than
+        // the page's.
+        let inner_resources = Resolve::resolve_key(editor, &dict, Name::RESOURCES)
+            .as_dict()
+            .cloned()
+            .unwrap_or_else(|| scope.clone());
+        let fonts = fonts_in(editor, &inner_resources);
+        let (data, pass, inner_uses) = cut_stream(
+            editor,
+            &inner_resources,
+            &entry.content,
+            areas,
+            &fonts,
+            inner,
+            &mut report.warnings,
+        );
+        for warning in pass.warnings {
+            note(&mut report.warnings, warning);
+        }
+        self.cells
+            .read(editor, &inner_resources, &entry.content, inner, areas);
+        // A form over budget holds no cuts: it is cut the old way, from its
+        // content, once every placement is known, and no placement of it
+        // reads a cut.
+        let cut = match entry.cuts.iter().position(|c| c.data == data) {
+            Some(index) => index,
+            None if entry.over_budget => 0,
+            None if self.held.saturating_add(data.len()) > MAX_FORM_COPY_BYTES => {
+                let freed: usize = entry.cuts.iter().map(|c| c.data.len()).sum();
+                self.held = self.held.saturating_sub(freed);
+                entry.cuts = Vec::new();
+                entry.over_budget = true;
+                0
+            }
+            None => {
+                self.held = self.held.saturating_add(data.len());
+                entry.cuts.push(FormCut {
+                    data,
+                    names: inner_uses.iter().map(|u| u.at.clone()).collect(),
+                    glyphs: pass.glyphs,
+                    operations: pass.operations,
+                    images: pass.images,
+                });
+                entry.cuts.len() - 1
+            }
+        };
+
+        let node = self.nodes.len();
+        entry.nodes.push(node);
+        self.nodes.push(FormPlacement {
+            form,
+            ctm: inner,
+            resources: inner_resources.clone(),
+            cut,
+            children: Vec::new(),
+        });
+        self.placed.insert(key, node);
+
+        let children = self.uses(
+            editor,
+            &inner_resources,
+            &inner_uses,
+            areas,
+            report,
+            depth + 1,
+        );
+        if let Some(placement) = self.nodes.get_mut(node) {
+            placement.children = children;
+        }
+        Some(node)
+    }
+}
+
+/// A form `Do` about to be entered.
+struct Placing<'a> {
+    reference: ObjRef,
+    dict: Dict,
+    used: &'a XObjectUse,
+    /// The resources the `Do` was resolved in.
+    scope: &'a Dict,
+}
+
+/// Which object a placement draws once the redaction is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    /// The form's own object, as it was or rewritten.
+    Original,
+    /// A copy of the form, cut at this placement alone.
+    Copy(ObjRef),
+}
+
+/// What one placement needs its stream to be: which cut, and which of its
+/// `Do`s point at copies.
+type Outcome = (usize, Vec<(usize, ObjRef)>);
+
+/// Decides which object each placement draws, and writes every form stream
+/// that changed.
+///
+/// **Each placement is cut exactly at its own rectangles.** A form drawn at
+/// several placements that cut differently gets a copy per distinct outcome
+/// (8.10: a `Do` executes one stream, so two outcomes need two streams), and
+/// each `Do` is pointed at the stream holding its placement's outcome. Which
+/// outcome keeps the form's own object is chosen so that the object is never
+/// left holding anything nothing draws, and never loses anything something
+/// else draws:
+///
+/// - an **uncut** outcome keeps it untouched, when some placement cut nothing
+///   — so every other page that draws the form draws it as it was;
+/// - when every placement cut something and **something other than this
+///   page's walk draws the form** — another page, a form or an annotation
+///   there, a Type 3 glyph's procedure anywhere ([`Elsewhere`]) — it is left
+///   untouched too and every placement here draws a copy: what it holds is
+///   what that other drawer shows, and none of it is under these rectangles
+///   there;
+/// - otherwise the **first** placement's outcome is written into it, which
+///   that placement then draws.
+///
+/// So the form's own object is drawn by this page or by something else, and
+/// never becomes an unreferenced stream still holding what a rectangle
+/// covered — which a copy for every placement, with nothing else drawing the
+/// form, would have made it.
+///
+/// Children are decided before the forms that draw them, because a form
+/// whose `Do` must point at a child's copy is itself a different outcome. A
+/// form this cannot order that way — one that draws itself, directly or
+/// through another, or draws one that does — or one with a placement past
+/// [`MAX_PLACEMENTS`], or one whose cuts went over [`MAX_FORM_COPY_BYTES`],
+/// or a soft mask's group — which a `gs` draws through a graphics state, so
+/// that a copy would need a copy of the state under a fresh name and the
+/// `gs` pointed at it, and the one state a stream sets is nearly always set
+/// once — is cut the old way instead, and so is everything it
+/// draws: every placement's cut in the one stream, and
+/// [`RedactionWarning::RepeatedForm`] naming it when that was wider than a
+/// placement asked for or when a placement went unmeasured ([`union`]). A
+/// copy per placement of a form that draws itself would be a copy per round
+/// of a recursion, and a placement past the cap was never measured, so no
+/// copy could say what it should hold. Everything such a form draws goes
+/// the old way with it because its one stream names its children by their
+/// own objects: a child given copies would be drawn, through that stream,
+/// from an object some other placement left uncut.
+fn settle(
+    editor: &mut DocumentEditor,
+    walk: &Walk,
+    page: ObjRef,
+    areas: &[Redaction],
+    report: &mut RedactionReport,
+) -> Vec<Target> {
+    let count = walk.forms.len();
+    let mut targets = vec![Target::Original; walk.nodes.len()];
+
+    // The forms each form draws.
+    let mut kids: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); count];
+    for node in &walk.nodes {
+        for child in node.children.iter().flatten() {
+            if let (Some(set), Some(c)) = (kids.get_mut(node.form), walk.nodes.get(*child)) {
+                set.insert(c.form);
+            }
+        }
+    }
+
+    let mut old_way: Vec<bool> = walk
+        .forms
+        .iter()
+        .map(|f| f.refused || f.over_budget || f.masked)
+        .collect();
+    close_downward(&mut old_way, &kids);
+
+    // Children first (Kahn's algorithm over the forms still cut exactly).
+    let mut parents: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (form, set) in kids.iter().enumerate() {
+        for &kid in set {
+            if let Some(list) = parents.get_mut(kid) {
+                list.push(form);
+            }
+        }
+    }
+    let exact = |old_way: &[bool], f: usize| !old_way.get(f).copied().unwrap_or(true);
+    let mut waiting: Vec<usize> = kids
+        .iter()
+        .map(|set| set.iter().filter(|&&k| exact(&old_way, k)).count())
+        .collect();
+    let mut ready: VecDeque<usize> = (0..count)
+        .filter(|&f| exact(&old_way, f) && waiting.get(f) == Some(&0))
+        .collect();
+    let mut order = Vec::new();
+    while let Some(form) = ready.pop_front() {
+        order.push(form);
+        for &parent in parents.get(form).map(Vec::as_slice).unwrap_or_default() {
+            if !exact(&old_way, parent) {
+                continue;
+            }
+            if let Some(left) = waiting.get_mut(parent) {
+                *left = left.saturating_sub(1);
+                if *left == 0 {
+                    ready.push_back(parent);
+                }
+            }
+        }
+    }
+    // A form the order never reached is in a cycle, or draws one: a form
+    // that invokes itself links a placement to itself or to its own
+    // descendant, so it never runs out of undecided children.
+    let mut ordered = vec![false; count];
+    for &form in &order {
+        if let Some(slot) = ordered.get_mut(form) {
+            *slot = true;
+        }
+    }
+    for (form, slot) in old_way.iter_mut().enumerate() {
+        if !ordered.get(form).copied().unwrap_or(false) {
+            *slot = true;
+        }
+    }
+    close_downward(&mut old_way, &kids);
+
+    let mut elsewhere = Elsewhere::new(page);
+    for &form in &order {
+        if exact(&old_way, form) {
+            decide(editor, walk, form, &mut targets, report, &mut elsewhere);
+        }
+    }
+
+    // Sorted by object number, because a report that depends on the order a
+    // page happened to invoke its forms in is one two equivalent files can
+    // disagree about.
+    let mut rest: Vec<usize> = (0..count).filter(|&f| !exact(&old_way, f)).collect();
+    rest.sort_by_key(|&f| walk.forms.get(f).map_or(0, |e| e.reference.num));
+    for form in rest {
+        union(editor, walk, form, areas, report, &mut elsewhere);
+    }
+    targets
+}
+
+/// Marks everything a marked form draws, at any depth.
+fn close_downward(marked: &mut [bool], kids: &[BTreeSet<usize>]) {
+    let mut stack: Vec<usize> = (0..marked.len())
+        .filter(|&f| marked.get(f).copied().unwrap_or(false))
+        .collect();
+    while let Some(form) = stack.pop() {
+        for &kid in kids.get(form).into_iter().flatten() {
+            if let Some(slot) = marked.get_mut(kid) {
+                if !*slot {
+                    *slot = true;
+                    stack.push(kid);
+                }
+            }
+        }
+    }
+}
+
+/// Decides one exactly-cut form's placements and writes its streams.
+fn decide(
+    editor: &mut DocumentEditor,
+    walk: &Walk,
+    form: usize,
+    targets: &mut [Target],
+    report: &mut RedactionReport,
+    elsewhere: &mut Elsewhere,
+) {
+    let Some(entry) = walk.forms.get(form) else {
+        return;
+    };
+    let outcomes: Vec<Outcome> = entry
+        .nodes
+        .iter()
+        .map(|&n| {
+            let Some(node) = walk.nodes.get(n) else {
+                return (0, Vec::new());
+            };
+            let renames = node
+                .children
+                .iter()
+                .enumerate()
+                .filter_map(|(i, child)| match targets.get((*child)?) {
+                    Some(Target::Copy(copy)) => Some((i, *copy)),
+                    _ => None,
+                })
+                .collect();
+            (node.cut, renames)
+        })
+        .collect();
+
+    let unchanged = |outcome: &Outcome| {
+        outcome.1.is_empty() && entry.cuts.get(outcome.0).is_none_or(|c| !c.removed())
+    };
+    // The outcome the form's own object holds, or `None` when it is left as
+    // it was for something else to draw and every placement here draws a
+    // copy ([`settle`] says which).
+    let home: Option<Outcome> = match outcomes.iter().find(|o| unchanged(o)) {
+        Some(uncut) => Some(uncut.clone()),
+        None if elsewhere.draws(editor, entry.reference) => None,
+        None => outcomes.first().cloned(),
+    };
+
+    // (object, the placement whose scope it is written in, its outcome)
+    let mut writes: Vec<(ObjRef, usize, Outcome)> = Vec::new();
+    let mut copies: Vec<(Outcome, ObjRef)> = Vec::new();
+    let mut home_written = home.as_ref().is_none_or(unchanged);
+    for (&n, outcome) in entry.nodes.iter().zip(&outcomes) {
+        if home.as_ref() == Some(outcome) {
+            if !home_written {
+                writes.push((entry.reference, n, outcome.clone()));
+                home_written = true;
+            }
+            continue;
+        }
+        let copy = match copies.iter().find(|(o, _)| o == outcome) {
+            Some((_, copy)) => *copy,
+            None => {
+                let copy = editor.allocate();
+                copies.push((outcome.clone(), copy));
+                writes.push((copy, n, outcome.clone()));
+                copy
+            }
+        };
+        if let Some(slot) = targets.get_mut(n) {
+            *slot = Target::Copy(copy);
+        }
+    }
+
+    for (at, n, (cut, renames)) in writes {
+        let (Some(node), Some(cut)) = (walk.nodes.get(n), entry.cuts.get(cut)) else {
+            continue;
+        };
+        // The operators are plain, so the dictionary must stop saying
+        // otherwise ([`plain_stream_dict`]).
+        let mut dict = plain_stream_dict(editor, &entry.dict);
+        let data = if renames.is_empty() {
+            cut.data.clone()
+        } else {
+            let renames: Vec<(std::ops::Range<usize>, ObjRef)> = renames
+                .iter()
+                .filter_map(|(i, copy)| Some((cut.names.get(*i)?.clone(), *copy)))
+                .collect();
+            let (data, scope) = with_names(editor, &cut.data, &node.resources, &renames);
+            dict.insert(Name::RESOURCES, Object::Dict(scope));
+            data
+        };
+        editor.put_stream(at, StreamData { dict, data });
+        report.glyphs += cut.glyphs;
+        report.operations += cut.operations;
+        report.images += cut.images;
+    }
+}
+
+/// Which forms something other than the redacted page's walk draws, read
+/// once, the first time [`decide`] needs to know.
+///
+/// It is asked only about a form every placement of which on this page cut
+/// something — the one case where the form's own object would otherwise take
+/// a cut, and a drawer elsewhere would lose what this page's rectangles
+/// covered — and about a form [`union`] cuts in place at one placement, to
+/// name that loss when it cannot be avoided. Read lazily for that reason, and
+/// for the reason it is safe to: until the first such form, [`decide`] has
+/// written only copies, and [`union`] writes only cuts, which remove text and
+/// keep every `Do` and `Tf` the read follows, so the forms the read follows
+/// are, for it, the objects as they were before this redaction.
+struct Elsewhere {
+    page: ObjRef,
+    drawn: Option<HashSet<u32>>,
+}
+
+impl Elsewhere {
+    fn new(page: ObjRef) -> Elsewhere {
+        Elsewhere { page, drawn: None }
+    }
+
+    /// Whether something other than this page's walk draws `form`.
+    fn draws(&mut self, editor: &DocumentEditor, form: ObjRef) -> bool {
+        let page = self.page;
+        self.drawn
+            .get_or_insert_with(|| drawn_elsewhere(editor, page))
+            .contains(&form.num)
+    }
+}
+
+/// Every form drawn by something other than `page`'s walk, by object
+/// number.
+///
+/// **Drawn, not named.** A page's resources naming a form is not a page
+/// drawing it — one `/Resources` dictionary shared by every page is an
+/// ordinary way to write a file — and counting a name would leave a form
+/// whose every placement here was cut whole in the file with nothing drawing
+/// it, holding exactly what the rectangles covered. So each other page's
+/// content is read for its `Do`s, resolved in the scope that makes them
+/// (8.10.1), into every form at any depth, every appearance of every
+/// annotation on it (12.5.5, every state, as the walk reads them), and the
+/// glyph procedures of every Type 3 face it selects (9.6.5).
+///
+/// This page is read too, for one thing only: the glyph procedures of the
+/// Type 3 faces it selects, whose `Do`s the walk does not enter — it
+/// measures a procedure rather than cutting it ([`cut_stream`]) — and whose
+/// forms are drawn, through the procedure, as they are in the file.
+///
+/// A procedure's `Do` is resolved in the enclosing scope, where this
+/// engine's interpreter runs it, **and** in the face's own `/Resources`,
+/// where 9.6.5 puts it: a drawer either reader would find counts. Every
+/// procedure of a face counts, not only those of the glyphs shown, and a face
+/// is read in the first scope that selects it; both err toward *drawn*,
+/// which costs a copy rather than a cut. A soft mask's group is drawn
+/// through the `gs` that sets its state, and read there. Not read, as the
+/// walk does not read one: a tiling pattern's cell.
+///
+/// One read of each stream for each of the two roles, so the work is the
+/// document's size; [`MAX_FORM_DEPTH`] bounds the nesting, as it bounds the
+/// walk's.
+fn drawn_elsewhere(editor: &DocumentEditor, page: ObjRef) -> HashSet<u32> {
+    let mut scan = Scan {
+        editor,
+        drawn: HashSet::new(),
+        entered: HashMap::new(),
+        faces: HashSet::new(),
+    };
+    for other in editor.page_refs() {
+        let counting = other != page;
+        let Some(read) = EditorPage::read(editor, other) else {
+            continue;
+        };
+        scan.stream(&read.content, &read.resources, counting, 0);
+        for appearance in appearances_on(editor, other) {
+            if counting {
+                scan.drawn.insert(appearance.stream.num);
+            }
+            scan.form(
+                appearance.stream,
+                &appearance.dict,
+                &read.resources,
+                counting,
+                1,
+            );
+        }
+    }
+    scan.drawn
+}
+
+/// One [`drawn_elsewhere`] read in progress.
+struct Scan<'a> {
+    editor: &'a DocumentEditor,
+    drawn: HashSet<u32>,
+    /// Forms read, and whether their `Do`s counted — one drawn on this page
+    /// is read for its procedures, and again if a procedure draws it — with
+    /// the shallowest depth each was read at. A form met again shallower is
+    /// read again, since a read at a depth past [`MAX_FORM_DEPTH`] reads
+    /// nothing and one nearer it reads less; until October 2026 the first
+    /// visit was the only one, however deep. Each form is read at most once
+    /// per depth, so the work stays bounded.
+    entered: HashMap<(u32, bool), u32>,
+    /// Type 3 faces whose procedures were read: by object, or by resource
+    /// name for a face written directly into a resource dictionary.
+    faces: HashSet<Vec<u8>>,
+}
+
+impl Scan<'_> {
+    /// Reads one content stream's `Do`s and `Tf`s.
+    fn stream(&mut self, content: &[u8], scope: &Dict, counting: bool, depth: u32) {
+        if depth > MAX_FORM_DEPTH {
+            return;
+        }
+        let mut tokens = Tokenizer::new(content);
+        let mut operands: Vec<Token> = Vec::new();
+        while let Some(token) = tokens.next_token() {
+            let Token::Operator(op) = &token else {
+                operands.push(token);
+                continue;
+            };
+            match op.as_slice() {
+                // 8.9.7: the samples are not tokens, and a `Do` spelled by
+                // them is not a `Do`.
+                b"BI" => {
+                    let consumed = tinker_pdf_content::interpret::skip_inline_image(tokens.rest());
+                    let at = tokens.position();
+                    tokens.seek(at.saturating_add(consumed));
+                }
+                b"Do" => {
+                    if let Some(Token::Name(name)) = operands.last() {
+                        let name = name.clone();
+                        self.xobject(scope, &name, counting, depth);
+                    }
+                }
+                // 11.6.5.2: a state that sets a soft mask draws its group.
+                b"gs" => {
+                    if let Some(Token::Name(name)) = operands.last() {
+                        if let Some((reference, dict)) =
+                            resolve_mask_group(self.editor, scope, name)
+                        {
+                            if counting {
+                                self.drawn.insert(reference.num);
+                            }
+                            self.form(reference, &dict, scope, counting, depth + 1);
+                        }
+                    }
+                }
+                b"Tf" => {
+                    let named = operands.len().checked_sub(2).and_then(|i| operands.get(i));
+                    if let Some(Token::Name(name)) = named {
+                        let name = name.clone();
+                        self.face(scope, &name, depth);
+                    }
+                }
+                _ => {}
+            }
+            operands.clear();
+        }
+    }
+
+    fn xobject(&mut self, scope: &Dict, name: &[u8], counting: bool, depth: u32) {
+        let Some((reference, dict)) = resolve_xobject(self.editor, scope, name) else {
+            return;
+        };
+        let subtype = Resolve::resolve_key(self.editor, &dict, self.editor.intern(b"Subtype"))
+            .as_name()
+            .and_then(|n| self.editor.document().name_bytes(n));
+        if subtype.as_deref() != Some(b"Form".as_slice()) {
+            return;
+        }
+        if counting {
+            self.drawn.insert(reference.num);
+        }
+        self.form(reference, &dict, scope, counting, depth + 1);
+    }
+
+    /// Reads a form's content in its own resources, or the scope that drew
+    /// it (8.10.1).
+    fn form(&mut self, reference: ObjRef, dict: &Dict, scope: &Dict, counting: bool, depth: u32) {
+        let key = (reference.num, counting);
+        if self.entered.get(&key).is_some_and(|&read| read <= depth) {
+            return;
+        }
+        self.entered.insert(key, depth);
+        let Some(content) = self.editor.stream_bytes(reference) else {
+            return;
+        };
+        let resources = Resolve::resolve_key(self.editor, dict, Name::RESOURCES)
+            .as_dict()
+            .cloned()
+            .unwrap_or_else(|| scope.clone());
+        self.stream(&content, &resources, counting, depth);
+    }
+
+    /// Reads every glyph procedure of the Type 3 face `name` selects, which
+    /// draws for any page that shows its glyphs — so its `Do`s count
+    /// wherever it was selected.
+    fn face(&mut self, scope: &Dict, name: &[u8], depth: u32) {
+        let editor = self.editor;
+        let fonts = Resolve::resolve_key(editor, scope, editor.intern(b"Font"));
+        let Some(entry) = fonts.as_dict().and_then(|f| f.get(editor.intern(name))) else {
+            return;
+        };
+        let (key, font) = match entry {
+            Object::Ref(r) => (
+                format!("R{} {}", r.num, r.gen).into_bytes(),
+                editor.get(*r).and_then(|o| o.as_dict().cloned()),
+            ),
+            Object::Dict(d) => ([b"/".as_slice(), name].concat(), Some(d.clone())),
+            _ => return,
+        };
+        let Some(font) = font else {
+            return;
+        };
+        let subtype = font
+            .get_name(editor.intern(b"Subtype"))
+            .and_then(|n| editor.document().name_bytes(n));
+        if subtype.as_deref() != Some(b"Type3".as_slice()) || !self.faces.insert(key) {
+            return;
+        }
+        let own = Resolve::resolve_key(editor, &font, Name::RESOURCES)
+            .as_dict()
+            .cloned();
+        let procs = Resolve::resolve_key(editor, &font, editor.intern(b"CharProcs"));
+        let Some(procs) = procs.as_dict() else {
+            return;
+        };
+        for (_, value) in procs.iter() {
+            let Some(content) = value.as_objref().and_then(|r| editor.stream_bytes(r)) else {
+                continue;
+            };
+            self.stream(&content, scope, true, depth + 1);
+            if let Some(own) = &own {
+                self.stream(&content, own, true, depth + 1);
+            }
+        }
+    }
+}
+
+/// Cuts a form the old way: every placement's cut in its one stream.
+///
+/// For a form that draws itself, for one with a placement past
+/// [`MAX_PLACEMENTS`], and for one whose cuts went over
+/// [`MAX_FORM_COPY_BYTES`] — and everything any of them draws ([`settle`]
+/// says why).
+/// Overwritten in place, for the same reason the page's content is: a freshly
+/// allocated object would leave the original text in the file, unreferenced
+/// and perfectly readable.
+///
+/// Nothing a rectangle covers at any placement survives; what that costs is
+/// named rather than absorbed. A glyph removed because a rectangle covered
+/// it at one placement is gone at all of them, and
+/// [`RedactionWarning::RepeatedForm`] says so — raised only when a cut was
+/// actually made and something else draws the form too, another placement
+/// here or a drawer elsewhere ([`Elsewhere`]), or when a placement went
+/// unmeasured, since a form drawn twice that nothing was cut from is exact.
+fn union(
+    editor: &mut DocumentEditor,
+    walk: &Walk,
+    form: usize,
+    areas: &[Redaction],
+    report: &mut RedactionReport,
+    elsewhere: &mut Elsewhere,
+) {
+    let Some(entry) = walk.forms.get(form) else {
+        return;
+    };
+    let mut data = entry.content.clone();
+    let mut glyphs = 0usize;
+    let mut images = 0usize;
+    for &n in &entry.nodes {
+        let Some(node) = walk.nodes.get(n) else {
+            continue;
+        };
+        let fonts = fonts_in(editor, &node.resources);
+        let (next, pass, _) = cut_stream(
+            editor,
+            &node.resources,
+            &data,
+            areas,
+            &fonts,
+            node.ctm,
+            &mut report.warnings,
+        );
+        data = next;
+        glyphs += pass.glyphs;
+        images += pass.images;
+        report.operations += pass.operations;
+    }
+    report.glyphs += glyphs;
+    report.images += images;
+    // An inline image scrubbed is a change as much as a glyph removed: until
+    // October 2026 only a glyph wrote the stream, and an image this cut
+    // scrubbed stayed in the file.
+    let removed = glyphs > 0 || images > 0;
+    // A cut in place is a cut for everything that draws the form: with two
+    // placements here it is wider than either asked for, and with one it is
+    // wider for a page, a form or a glyph procedure elsewhere that draws it
+    // ([`Elsewhere`]) — asked before the write, and only then. Until October
+    // 2026 only the first was named, and a page sharing a form this page
+    // cut the old way lost what these rectangles covered with nothing said.
+    let placements = entry.nodes.len();
+    let widened = removed && (placements >= 2 || elsewhere.draws(editor, entry.reference));
+    if removed {
+        let dict = plain_stream_dict(editor, &entry.dict);
+        editor.put_stream(entry.reference, StreamData { dict, data });
+    }
+
+    // Only when there is a rectangle to fall under, which is the rule every
+    // other warning in this module follows: with no rectangles nothing was
+    // cut and nothing was widened.
+    if !areas.is_empty() && (widened || (placements >= 2 && entry.refused)) {
+        note(
+            &mut report.warnings,
+            RedactionWarning::RepeatedForm {
+                form: entry.name.clone(),
+                placements: placements.min(MAX_PLACEMENTS),
+            },
+        );
+    }
+}
+
+/// The transform a form's content is drawn under: its own `/Matrix`, then
+/// the transform in force at the `Do` (8.10.2).
+fn form_transform(editor: &DocumentEditor, dict: &Dict, ctm: Matrix) -> Matrix {
+    let matrix = Resolve::resolve_key(editor, dict, editor.intern(b"Matrix"))
+        .as_array()
+        .map(|a| a.iter().filter_map(Object::as_number).collect::<Vec<f64>>())
+        .filter(|v| v.len() >= 6 && v.iter().all(|x| x.is_finite()))
+        .and_then(|v| Matrix::from_operands(&v));
+    match matrix {
+        Some(m) => m.then(ctm),
+        None => ctm,
+    }
+}
+
+/// Cuts one content stream: [`rewrite`], and then again with every Type 3
+/// glyph removed whose procedure draws text or an image under a rectangle.
+///
+/// # A glyph procedure is measured per use, and is not rewritten
+///
+/// 9.6.5: a Type 3 glyph is drawn by running its procedure, and the
+/// procedure can show text in a font of its own or draw an image — anywhere,
+/// not only inside the box [`Pen::glyph_box`] measures. So every use of such
+/// a glyph is measured through its procedure, under the transform the
+/// interpreter runs it with ([`draws_under`]), and a use whose procedure
+/// draws under a rectangle is **removed whole**, the way a glyph partly under
+/// one is.
+///
+/// The procedure itself is left exactly as it is, and that is the decision
+/// this is written down for. A procedure is the font's: every use of that
+/// glyph, on this page and every other, runs the same stream. Cutting the
+/// covered text out of it would cut it out of every one of those — the
+/// over-removal a form drawn twice used to cost, with nowhere to put a copy
+/// short of a new glyph in the font. Worse, a bitmap face draws each glyph as
+/// an inline image a shade larger than its advance, so a rectangle beside a
+/// word would have blanked that letter throughout the document. Removed per
+/// use, what goes is what the rectangle covers at that use and nothing else.
+/// What that leaves is the procedure's own bytes in the font, as an embedded
+/// program keeps its outlines — see the module's "What this module does not
+/// remove".
+///
+/// A use its own box put under a rectangle is gone after [`rewrite`]
+/// whatever its procedure draws, and is measured all the same: what the
+/// procedure draws with — a soft mask's group, a tiling pattern's cell — is
+/// not cut either, and the measurement is what names it
+/// ([`RedactionWarning::PatternOrMask`]). It decides nothing about the use,
+/// and what the budget cut short of it is named as at any other use
+/// ([`Budget`]).
+fn cut_stream(
+    editor: &DocumentEditor,
+    scope: &Dict,
+    content: &[u8],
+    areas: &[Redaction],
+    fonts: &HashMap<Vec<u8>, Arc<RunFont>>,
+    ctm: Matrix,
+    warnings: &mut Vec<RedactionWarning>,
+) -> (Vec<u8>, RedactionReport, Vec<XObjectUse>) {
+    let sets_mask = |name: &[u8]| resolve_mask_group(editor, scope, name).is_some();
+    let mut procedures = Procedures::default();
+    let first = rewrite(content, areas, &[fonts], ctm, &mut procedures, &sets_mask);
+    if procedures.found.is_empty() {
+        return first;
+    }
+    let measure = Measure {
+        editor,
+        scopes: vec![scope],
+        fonts: vec![fonts],
+        areas,
+    };
+    let mut drop = HashSet::new();
+    for glyph in &procedures.found {
+        // Per use: one glyph's procedures cannot spend another's.
+        let mut budget = Budget {
+            left: MAX_PLACEMENTS,
+            spent: false,
+            unnamed: false,
+        };
+        let drawn = procedure_draws_under(&measure, glyph, warnings, &mut budget);
+        let removed = drawn && !glyph.covered;
+        if removed {
+            drop.insert(glyph.index);
+        }
+        // Named when the use was removed because the measurement could not
+        // finish, not because anything was found under a rectangle — wider
+        // than asked — and when what its procedure draws went unmeasured
+        // past where the budget stopped, in no group named for it, whatever
+        // removed the use: a group set there is in the file unread. Until
+        // the lane's third review a use its own box removed was never
+        // named, so one whose measurement ran out said nothing at all.
+        if (removed && budget.spent) || budget.unnamed {
+            note(
+                warnings,
+                RedactionWarning::UnboundedProcedure {
+                    font: glyph.font_name.clone(),
+                    uses: 1,
+                },
+            );
+        }
+    }
+    if drop.is_empty() {
+        return first;
+    }
+    let mut again = Procedures {
+        drop,
+        ..Procedures::default()
+    };
+    rewrite(content, areas, &[fonts], ctm, &mut again, &sets_mask)
+}
+
+/// How many streams one use of a Type 3 glyph may still run while its
+/// procedure is measured, and whether it ran out.
+///
+/// Nothing a measurement spends is given back: the budget is what bounds the
+/// work (ruling 1), so a measurement made only to name what a use paints
+/// with spends it as one that decides the use does, and whatever is
+/// measured after the budget is gone is measured against nothing. That is
+/// said, never absorbed: a soft mask's group the budget cut short is named
+/// ([`RedactionWarning::PatternOrMask`], [`draws_under`]), and anything
+/// else it cut short is `unnamed`.
+struct Budget {
+    left: usize,
+    /// The budget ran out, and the answer *covered* was given for that
+    /// reason rather than for anything measured.
+    spent: bool,
+    /// The budget ran out somewhere no group named for it covers: what lay
+    /// past that point — a group set there among it — was measured against
+    /// nothing and is named by nothing else, so [`cut_stream`] names the use
+    /// ([`RedactionWarning::UnboundedProcedure`]) whatever removed it. Until
+    /// the lane's third review a measurement made only to name gave back
+    /// `spent` and nothing else, and what it left unmeasured went unsaid.
+    unnamed: bool,
+}
+
+impl Budget {
+    /// Whether the budget is gone, marking that it was found so: a stream
+    /// that would run now is measured against nothing.
+    fn exhausted(&mut self) -> bool {
+        if self.left == 0 {
+            self.spent = true;
+            self.unnamed = true;
+            return true;
+        }
+        false
+    }
+
+    /// Takes one stream, or says the budget is gone and marks that.
+    fn take(&mut self) -> bool {
+        if self.exhausted() {
+            return false;
+        }
+        self.left -= 1;
+        true
+    }
+}
+
+/// What [`draws_under`] measures in.
+struct Measure<'a> {
+    editor: &'a DocumentEditor,
+    /// The resource dictionaries a name is resolved in, the first that has
+    /// it winning: the scope that showed the glyph, which is where this
+    /// engine's interpreter runs a procedure, and — for a procedure of a
+    /// Type 3 font with `/Resources` of its own — those too, in the order
+    /// [`procedure_draws_under`] says.
+    scopes: Vec<&'a Dict>,
+    /// The fonts the same scopes put in scope, in the same order.
+    fonts: Vec<&'a HashMap<Vec<u8>, Arc<RunFont>>>,
+    areas: &'a [Redaction],
+}
+
+/// Whether one use of a Type 3 glyph draws under a rectangle, its procedure
+/// measured where either reader of 9.6.5 runs it.
+///
+/// This engine's interpreter runs a procedure in the scope that showed the
+/// glyph; 9.6.5 (Table 112) puts a procedure's resources in the font's own
+/// `/Resources`, and a reader that follows it looks there. So a font with
+/// `/Resources` of its own has each procedure measured twice — names
+/// resolved in the enclosing scope first and then the font's, and then the
+/// other way round — and a use either measurement finds under a rectangle
+/// is removed: a name only one scope has resolves in both passes, and a
+/// name the two bind differently is measured as each binds it. Until
+/// October 2026 a `Do` the enclosing scope did not have was passed over in
+/// silence, and text in a font only the font's own resources named was
+/// left as `UnknownFont`.
+///
+/// The second pass reads the same names as the first, so a warning it
+/// raises for a cause and a resource the first already named is dropped
+/// rather than counted twice. It runs even when the first decided the use:
+/// a soft mask's group the font's own resources bind is measured there and
+/// nowhere else, and it is named for what it shows under a rectangle
+/// whatever removed the use ([`draws_under`]). Until the lane's second
+/// review it ran only when the first found nothing, and such a group went
+/// unmeasured at that use.
+///
+/// The first pass is held one stream short of the budget, so the second
+/// always reads the procedure itself — a group it sets there is measured,
+/// or named as measured against nothing — rather than finding the budget
+/// gone and leaving the whole of what the font's own resources bind unread
+/// ([`Budget::unnamed`]).
+fn procedure_draws_under(
+    measure: &Measure<'_>,
+    glyph: &GlyphUse,
+    warnings: &mut Vec<RedactionWarning>,
+    budget: &mut Budget,
+) -> bool {
+    let Some(own) = glyph.font.own.as_ref() else {
+        return draws_under(measure, &glyph.procedure, glyph.ctm, warnings, budget);
+    };
+    let own_fonts = glyph
+        .font
+        .own_fonts
+        .get_or_init(|| fonts_in(measure.editor, own));
+
+    let mut scopes = measure.scopes.clone();
+    scopes.push(own);
+    let mut fonts = measure.fonts.clone();
+    fonts.push(own_fonts);
+    let enclosing = Measure {
+        editor: measure.editor,
+        scopes,
+        fonts,
+        areas: measure.areas,
+    };
+    let reserve = budget.left.min(1);
+    budget.left -= reserve;
+    let first = draws_under(&enclosing, &glyph.procedure, glyph.ctm, warnings, budget);
+    budget.left += reserve;
+    // Whether the answer is already one given for want of budget; a second
+    // pass run only to name what it finds decides nothing, so the budget it
+    // spends does not make the answer that. What it leaves unmeasured is
+    // still said (`unnamed` is not put back).
+    let spent = budget.spent;
+
+    let mut scopes = vec![own];
+    scopes.extend(measure.scopes.iter().copied());
+    let mut fonts = vec![own_fonts];
+    fonts.extend(measure.fonts.iter().copied());
+    let theirs = Measure {
+        editor: measure.editor,
+        scopes,
+        fonts,
+        areas: measure.areas,
+    };
+    let mut more = Vec::new();
+    let drawn = draws_under(&theirs, &glyph.procedure, glyph.ctm, &mut more, budget);
+    if first {
+        budget.spent = spent;
+    }
+    for warning in more {
+        if !warnings.iter().any(|w| w.same_cause(&warning)) {
+            note(warnings, warning);
+        }
+    }
+    first || drawn
+}
+
+/// Whether content drawn under `ctm` puts text or an image under a
+/// rectangle. Measured only: nothing is written.
+///
+/// Text and inline images are what [`rewrite`] measures; an XObject is
+/// followed as the walk follows one — an image by its unit square, a form
+/// into its content — and a Type 3 glyph the content shows into its own
+/// procedure.
+///
+/// Every stream run spends one of `budget`, which [`cut_stream`] sets to
+/// [`MAX_PLACEMENTS`] for each use of a glyph: procedures that show glyphs
+/// whose procedures show glyphs branch at every level, a procedure can show
+/// its own glyph, and either would otherwise make the work exponential or
+/// endless. The budget is per use rather than per stream because a page of a
+/// benign two-level face — a glyph whose procedure draws a form, or shows a
+/// word in another Type 3 face — spends a few runs on every use, and a budget
+/// for the stream would run out a few dozen uses in and remove every use
+/// after (`every_use_of_a_glyph_has_a_budget_of_its_own`: two runs a use, so
+/// thirty-two). Past it the answer is *yes*, the direction that removes a
+/// glyph rather than leaving one, and `budget` records that it was spent so
+/// [`cut_stream`] can name the use ([`RedactionWarning::UnboundedProcedure`]);
+/// only a face that recurses ever reaches it.
+///
+/// Once the answer is *yes* nothing decides more, but what the content
+/// paints with is still measured, because it is named and not cut: every
+/// soft mask's group it sets, and every form and glyph procedure it draws,
+/// for a group set inside one. So a group is named whatever comes before it
+/// in the content. Until the lane's third review the measurement after the
+/// answer read groups alone, and a group inside a form or a glyph procedure
+/// drawn after it went unmeasured.
+///
+/// A group the budget cut short is named too, measured against nothing as
+/// it was ([`Budget`]): it stays in the file, and was not measured whole.
+/// Until the lane's third review a group measured only to be named spent
+/// the budget, the answer it gave was put back and the streams were not, so
+/// every group after it met an empty budget, was "found" for want of one,
+/// was not named for that reason, and nothing said the budget had run out.
+fn draws_under(
+    measure: &Measure<'_>,
+    content: &[u8],
+    ctm: Matrix,
+    warnings: &mut Vec<RedactionWarning>,
+    budget: &mut Budget,
+) -> bool {
+    if !budget.take() {
+        return true;
+    }
+
+    let sets_mask = |name: &[u8]| {
+        measure
+            .scopes
+            .iter()
+            .any(|scope| resolve_mask_group(measure.editor, scope, name).is_some())
+    };
+    let mut procedures = Procedures::default();
+    let (_, pass, uses) = rewrite(
+        content,
+        measure.areas,
+        &measure.fonts,
+        ctm,
+        &mut procedures,
+        &sets_mask,
+    );
+    for warning in pass.warnings {
+        note(warnings, warning);
+    }
+    for scope in &measure.scopes {
+        unread(measure.editor, scope, content, measure.areas, warnings);
+    }
+    let mut drawn = pass.glyphs > 0 || pass.images > 0;
+
+    for used in &uses {
+        let resolved = measure.scopes.iter().find_map(|scope| {
+            if used.mask {
+                resolve_mask_group(measure.editor, scope, &used.name)
+            } else {
+                resolve_xobject(measure.editor, scope, &used.name)
+            }
+        });
+        let Some((reference, dict)) = resolved else {
+            continue;
+        };
+        let subtype =
+            Resolve::resolve_key(measure.editor, &dict, measure.editor.intern(b"Subtype"))
+                .as_name()
+                .and_then(|n| measure.editor.document().name_bytes(n));
+        // Once the answer is yes, what is measured is measured only to name
+        // what it paints with, so the budget it spends does not make the
+        // answer one given for want of budget.
+        let decided = drawn;
+        let spent = budget.spent;
+        // What a group's own measurement leaves unmeasured is the group's,
+        // and naming the group says it; the flag is put back after.
+        let unnamed = budget.unnamed;
+        if used.mask {
+            budget.unnamed = false;
+        }
+        let found = match subtype.as_deref() {
+            // An image paints with nothing, so after the answer it has
+            // nothing left to say.
+            Some(b"Image") => !decided && covers_unit_square(used, measure.areas),
+            Some(b"Form") => {
+                // With no stream left the form is measured against nothing,
+                // as `draws_under` would say, without decoding it or loading
+                // its fonts: every form after the answer is followed now, and
+                // a stream of four thousand `Do`s would otherwise decode and
+                // load them all for nothing. A form whose stream does not
+                // decode draws nothing; neither is a `continue`, so a
+                // group's flag is put back below.
+                let content = if budget.exhausted() {
+                    None
+                } else {
+                    Some(measure.editor.stream_bytes(reference))
+                };
+                match content {
+                    None => true,
+                    Some(None) => false,
+                    Some(Some(inner_content)) => {
+                        // 8.10.1, as the walk reads it: the form's own
+                        // resources, or the scopes that drew it.
+                        let own = Resolve::resolve_key(measure.editor, &dict, Name::RESOURCES)
+                            .as_dict()
+                            .cloned();
+                        let placed = form_transform(measure.editor, &dict, used.ctm);
+                        match &own {
+                            Some(resources) => {
+                                let fonts = fonts_in(measure.editor, resources);
+                                let inner = Measure {
+                                    editor: measure.editor,
+                                    scopes: vec![resources],
+                                    fonts: vec![&fonts],
+                                    areas: measure.areas,
+                                };
+                                draws_under(&inner, &inner_content, placed, warnings, budget)
+                            }
+                            None => draws_under(measure, &inner_content, placed, warnings, budget),
+                        }
+                    }
+                }
+            }
+            _ => false,
+        };
+        if used.mask {
+            // A mask's group is the procedure's, as what the procedure shows
+            // is: the use goes, and the group is not cut, since every other
+            // use of the glyph draws it too ([`cut_stream`]'s decision). So
+            // what it showed under the rectangle is still in the file, and
+            // that is named, as a cell a procedure paints with is, whatever
+            // removed the use — and so is a group the budget cut short,
+            // which may show anything there. Until the lane's review a group
+            // that showed covered text went unnamed with `warnings: []`, and
+            // until its third one a group cut short did.
+            if found || budget.unnamed {
+                note(
+                    warnings,
+                    RedactionWarning::PatternOrMask {
+                        resource: used.name.clone(),
+                    },
+                );
+            }
+            budget.unnamed = unnamed;
+        }
+        if found {
+            drawn = true;
+        }
+        if decided {
+            budget.spent = spent;
+        }
+    }
+
+    // A glyph this content shows draws what its procedure draws, measured
+    // the same way: after the answer, only for what it paints with.
+    for glyph in &procedures.found {
+        let decided = drawn;
+        let spent = budget.spent;
+        if procedure_draws_under(measure, glyph, warnings, budget) {
+            drawn = true;
+        }
+        if decided {
+            budget.spent = spent;
+        }
+    }
+    drawn
+}
+
+/// The `Do`s of one stream that must draw a copy, and the copy each draws.
+fn renames_of(
+    children: &[Option<usize>],
+    uses: &[XObjectUse],
+    targets: &[Target],
+) -> Vec<(std::ops::Range<usize>, ObjRef)> {
+    children
+        .iter()
+        .zip(uses)
+        .filter_map(|(child, used)| match targets.get((*child)?)? {
+            Target::Copy(copy) => Some((used.at.clone(), *copy)),
+            Target::Original => None,
+        })
+        .collect()
+}
+
+/// Points `Do`s at copies: a fresh resource name for each copy, added to a
+/// copy of `scope`'s `/XObject`, and written over each `Do`'s operand.
+///
+/// Returns the stream with the names replaced and the resources dictionary
+/// that resolves them — everything in `scope` as it was, with `/XObject` a
+/// direct dictionary holding the old names and the new.
+///
+/// The name is `Rd` and the copy's object number, which no two copies share,
+/// lengthened while `scope` already uses it.
+fn with_names(
+    editor: &DocumentEditor,
+    data: &[u8],
+    scope: &Dict,
+    renames: &[(std::ops::Range<usize>, ObjRef)],
+) -> (Vec<u8>, Dict) {
+    let key = editor.intern(b"XObject");
+    let mut table = Resolve::resolve_key(editor, scope, key)
+        .as_dict()
+        .cloned()
+        .unwrap_or_default();
+
+    let mut chosen: HashMap<u32, Vec<u8>> = HashMap::new();
+    let mut edits: Vec<(std::ops::Range<usize>, Vec<u8>)> = Vec::new();
+    for (range, copy) in renames {
+        let name = match chosen.get(&copy.num) {
+            Some(name) => name.clone(),
+            None => {
+                let mut name = format!("Rd{}", copy.num).into_bytes();
+                // Terminates: each round lengthens the name, and the table
+                // has finitely many.
+                while table.get(editor.intern(&name)).is_some() {
+                    name.push(b'x');
+                }
+                table.insert(editor.intern(&name), Object::Ref(*copy));
+                chosen.insert(copy.num, name.clone());
+                name
+            }
+        };
+        edits.push((range.clone(), name));
+    }
+
+    // Back to front, so each range still means what it meant.
+    edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+    let mut out = data.to_vec();
+    for (range, name) in edits {
+        // Every range is one `rewrite` recorded around a name it wrote, so
+        // it is inside the data and not empty; checked rather than trusted.
+        if range.start >= range.end || range.end > out.len() {
+            continue;
+        }
+        let mut token = Vec::with_capacity(name.len() + 1);
+        token.push(b'/');
+        token.extend_from_slice(&name);
+        out.splice(range, token);
+    }
+
+    let mut resources = scope.clone();
+    resources.insert(key, Object::Dict(table));
+    (out, resources)
+}
+
+/// Where an annotation's dictionary is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnnotationAt {
+    /// An object of its own, which is how nearly every file writes one.
+    Object(ObjRef),
+    /// Written into `/Annots` itself, at this index.
+    Inline(usize),
+}
+
+/// One appearance stream an annotation on the page can show, and where
+/// 12.5.5 puts it.
+struct AppearanceAt {
+    annotation: AnnotationAt,
+    /// The annotation's dictionary as the walk read it, which is where an
+    /// inline one is edited from.
+    annotation_dict: Dict,
+    /// `N`, `R` or `D`.
+    key: &'static [u8],
+    /// The state, when the entry is a dictionary of them.
+    state: Option<Name>,
+    stream: ObjRef,
+    /// The stream's dictionary.
+    dict: Dict,
+    /// 12.5.5's matrix **A**: what maps the form's space, after its own
+    /// `/Matrix`, onto the page. The walk composes the `/Matrix` itself, as
+    /// it does for any form.
+    fit: Matrix,
+}
+
+/// Every appearance stream every annotation on a page can show, read through
+/// the editor.
+///
+/// All of `/N`, `/R` and `/D`, and every state of each — not only the one
+/// `/AS` selects, because a viewer switches states with no edit to the file,
+/// and the state that is off today draws tomorrow. An annotation without a
+/// `/Rect` enclosing any area, or an appearance whose `/BBox` 12.5.5 cannot
+/// fit onto it, is drawn nowhere by this engine's renderer
+/// (`annots::prepare`) and is not measured either.
+fn appearances_on(editor: &DocumentEditor, page: ObjRef) -> Vec<AppearanceAt> {
+    let mut out = Vec::new();
+    let Some(Object::Dict(page)) = editor.get(page) else {
+        return out;
+    };
+    let annots = Resolve::resolve_key(editor, &page, editor.intern(b"Annots"));
+    let Some(entries) = annots.as_array() else {
+        return out;
+    };
+
+    for (index, entry) in entries.iter().enumerate() {
+        let (at, annotation) = match entry {
+            Object::Ref(r) => match editor.get(*r).and_then(|o| o.as_dict().cloned()) {
+                Some(dict) => (AnnotationAt::Object(*r), dict),
+                None => continue,
+            },
+            Object::Dict(dict) => (AnnotationAt::Inline(index), dict.clone()),
+            _ => continue,
+        };
+        let Some(rect) = Resolve::resolve_key(editor, &annotation, editor.intern(b"Rect"))
+            .as_array()
+            .and_then(Rect::from_array)
+            .filter(|r| !r.is_empty())
+        else {
+            continue;
+        };
+        let ap = Resolve::resolve_key(editor, &annotation, editor.intern(b"AP"));
+        let Some(ap) = ap.as_dict() else {
+            continue;
+        };
+
+        for key in [b"N".as_slice(), b"R", b"D"] {
+            let Some(value) = ap.get(editor.intern(key)) else {
+                continue;
+            };
+            for (state, stream) in appearance_streams(editor, value) {
+                let Some(dict) = editor.get(stream).and_then(|o| o.as_dict().cloned()) else {
+                    continue;
+                };
+                let Some(fit) = appearance_fit(editor, &dict, rect) else {
+                    continue;
+                };
+                out.push(AppearanceAt {
+                    annotation: at,
+                    annotation_dict: annotation.clone(),
+                    key,
+                    state,
+                    stream,
+                    dict,
+                    fit,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The streams one `/AP` entry can be: a stream, or a dictionary of states
+/// each naming one — told apart by being a stream, as the renderer tells
+/// them apart, rather than by carrying a `/BBox`.
+fn appearance_streams(editor: &DocumentEditor, value: &Object) -> Vec<(Option<Name>, ObjRef)> {
+    let states = |dict: &Dict| -> Vec<(Option<Name>, ObjRef)> {
+        dict.iter()
+            .filter_map(|(name, v)| Some((Some(*name), v.as_objref()?)))
+            .collect()
+    };
+    match value {
+        Object::Ref(r) => {
+            if editor.stream_bytes(*r).is_some() {
+                return vec![(None, *r)];
+            }
+            editor
+                .get(*r)
+                .and_then(|o| o.as_dict().map(states))
+                .unwrap_or_default()
+        }
+        Object::Dict(dict) => states(dict),
+        _ => Vec::new(),
+    }
+}
+
+/// 12.5.5's matrix **A**, as `annots::fit` computes it for the renderer: the
+/// form's `/BBox` carried through its `/Matrix`, and the axis-aligned box of
+/// the result scaled and moved onto `/Rect`.
+///
+/// `None` where the renderer draws nothing: a box with no extent, or one
+/// that is not finite. A form with no `/BBox` has nothing to fit and is drawn
+/// where its own matrix puts it, so **A** is the identity.
+fn appearance_fit(editor: &DocumentEditor, form: &Dict, rect: Rect) -> Option<Matrix> {
+    let Some(bbox) = Resolve::resolve_key(editor, form, editor.intern(b"BBox"))
+        .as_array()
+        .and_then(Rect::from_array)
+    else {
+        return Some(Matrix::IDENTITY);
+    };
+    if bbox.is_empty() {
+        return None;
+    }
+    let matrix = form_transform(editor, form, Matrix::IDENTITY);
+    let corners = [
+        matrix.apply(bbox.x0, bbox.y0),
+        matrix.apply(bbox.x1, bbox.y0),
+        matrix.apply(bbox.x1, bbox.y1),
+        matrix.apply(bbox.x0, bbox.y1),
+    ];
+    if corners
+        .iter()
+        .any(|(x, y)| !x.is_finite() || !y.is_finite())
+    {
+        return None;
+    }
+    let (mut x0, mut y0) = corners[0];
+    let (mut x1, mut y1) = corners[0];
+    for (x, y) in corners {
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x);
+        y1 = y1.max(y);
+    }
+    let (dx, dy) = (x1 - x0, y1 - y0);
+    if dx <= f64::EPSILON || dy <= f64::EPSILON {
+        return None;
+    }
+    let sx = (rect.x1 - rect.x0) / dx;
+    let sy = (rect.y1 - rect.y0) / dy;
+    Some(Matrix {
+        a: sx,
+        b: 0.0,
+        c: 0.0,
+        d: sy,
+        e: rect.x0 - x0 * sx,
+        f: rect.y0 - y0 * sy,
+    })
+}
+
+impl Walk {
+    /// Enters one annotation appearance as a placement of its form.
+    ///
+    /// Its scope is the page's resources, for an appearance that has none of
+    /// its own (8.10.1), and its name — for a report that has to name it — is
+    /// `AP/` and the entry, with the state when there is one.
+    fn appearance(
+        &mut self,
+        editor: &mut DocumentEditor,
+        appearance: &AppearanceAt,
+        page_resources: &Dict,
+        areas: &[Redaction],
+        report: &mut RedactionReport,
+    ) -> Option<usize> {
+        let mut name = b"AP/".to_vec();
+        name.extend_from_slice(appearance.key);
+        if let Some(state) = appearance.state {
+            name.push(b'/');
+            name.extend_from_slice(&editor.document().name_bytes(state).unwrap_or_default());
+        }
+        let used = XObjectUse {
+            name,
+            ctm: appearance.fit,
+            at: 0..0,
+            mask: false,
+        };
+        let placing = Placing {
+            reference: appearance.stream,
+            dict: appearance.dict.clone(),
+            used: &used,
+            scope: page_resources,
+        };
+        self.form(editor, placing, areas, report, 0)
+    }
+}
+
+/// Points each annotation whose appearance was given a copy at the copy.
+///
+/// The annotation's `/AP` is written as a direct dictionary of its own — and
+/// the state dictionary under it, when the entry is one — because either may
+/// be an object other annotations share, none of which draws the copy.
+/// Returns the edits to annotations written inline in `/Annots`, which the
+/// caller makes where the page is written.
+fn repoint_appearances(
+    editor: &mut DocumentEditor,
+    appearances: &[AppearanceAt],
+    shown: &[Option<usize>],
+    targets: &[Target],
+) -> Vec<(usize, Dict)> {
+    let mut edited: Vec<(AnnotationAt, Dict)> = Vec::new();
+    for (appearance, node) in appearances.iter().zip(shown) {
+        let Some(Target::Copy(copy)) = node.and_then(|n| targets.get(n).copied()) else {
+            continue;
+        };
+        let slot = match edited
+            .iter()
+            .position(|(at, _)| *at == appearance.annotation)
+        {
+            Some(slot) => slot,
+            None => {
+                let dict = match appearance.annotation {
+                    AnnotationAt::Object(r) => editor.get(r).and_then(|o| o.as_dict().cloned()),
+                    AnnotationAt::Inline(_) => Some(appearance.annotation_dict.clone()),
+                };
+                let Some(dict) = dict else {
+                    continue;
+                };
+                edited.push((appearance.annotation, dict));
+                edited.len() - 1
+            }
+        };
+        let Some((_, annotation)) = edited.get_mut(slot) else {
+            continue;
+        };
+
+        let ap_key = editor.intern(b"AP");
+        let key = editor.intern(appearance.key);
+        let mut ap = Resolve::resolve_key(editor, annotation, ap_key)
+            .as_dict()
+            .cloned()
+            .unwrap_or_default();
+        match appearance.state {
+            None => {
+                ap.insert(key, Object::Ref(copy));
+            }
+            Some(state) => {
+                let mut states = Resolve::resolve_key(editor, &ap, key)
+                    .as_dict()
+                    .cloned()
+                    .unwrap_or_default();
+                states.insert(state, Object::Ref(copy));
+                ap.insert(key, Object::Dict(states));
+            }
+        }
+        annotation.insert(ap_key, Object::Dict(ap));
+    }
+
+    let mut inline = Vec::new();
+    for (at, annotation) in edited {
+        match at {
+            AnnotationAt::Object(r) => editor.put(r, Object::Dict(annotation)),
+            AnnotationAt::Inline(index) => inline.push((index, annotation)),
+        }
+    }
+    inline
+}
+
+/// A stream dictionary made fit for bytes this module wrote.
+///
+/// [`StreamData::data`] is the stream's *encoded* bytes, and what a rewrite
+/// hands over is plain operators. So every key that describes an encoding the
+/// data is no longer in goes (7.3.8.2, Table 5): `/Filter` and `/DecodeParms`,
+/// `/DL` (the decoded length of bytes that are gone), `/Length` (the writer
+/// computes it), and the three external-file keys `/F`, `/FFilter` and
+/// `/FDecodeParms`, since the data now lives in the stream rather than in a
+/// file they name. Everything else — `/BBox`, `/Matrix`, `/Resources`,
+/// `/Group` — is the form's and stays.
+///
+/// Until September 2026 a compressed form kept its `/Filter /FlateDecode` over
+/// the plain operators, and the saved file carried a stream no reader can
+/// decode: the form drew nothing at all, the text it was *not* asked to
+/// remove included.
+fn plain_stream_dict(editor: &DocumentEditor, dict: &Dict) -> Dict {
+    let encoding: Vec<Name> = [
+        b"Filter".as_slice(),
+        b"DecodeParms",
+        b"DL",
+        b"Length",
+        b"F",
+        b"FFilter",
+        b"FDecodeParms",
+    ]
+    .iter()
+    .map(|key| editor.intern(key))
+    .collect();
+    dict.iter()
+        .filter(|(key, _)| !encoding.contains(key))
+        .cloned()
+        .collect()
 }
 
 /// The reference and dictionary a resource name selects from `/XObject`.
@@ -994,10 +3941,11 @@ fn resolve_xobject(
     resources: &Dict,
     name: &[u8],
 ) -> Option<(ObjRef, Dict)> {
-    let doc = editor.document();
-    let table = doc.resolve_key(resources, doc.intern(b"XObject"));
-    let reference = table.as_dict()?.get_ref(doc.intern(name))?;
-    let object = doc.get(reference).ok()?;
+    // Through the editor, like every read here: an XObject a redaction has
+    // already rewritten is the editor's, not the file's.
+    let table = Resolve::resolve_key(editor, resources, editor.intern(b"XObject"));
+    let reference = table.as_dict()?.get_ref(editor.intern(name))?;
+    let object = editor.get(reference)?;
     Some((reference, object.as_dict()?.clone()))
 }
 
@@ -1086,27 +4034,176 @@ fn scrub_image(editor: &mut DocumentEditor, reference: ObjRef, dict: &Dict) {
     );
 }
 
-/// One `Do` invocation, and the transform in force when it happened.
+/// The inline image that replaces one a redaction covered: a single blank
+/// sample, as [`scrub_image`] writes for an XObject, and a stencil mask kept a
+/// stencil mask whose one sample paints nothing (8.9.6.2).
+///
+/// `span` is the original's, from after `BI` through `EI`; only its
+/// dictionary is read, for `/IM` (or `/ImageMask`), and none of it is kept.
+fn blank_inline_image(span: &[u8]) -> &'static [u8] {
+    let dictionary = span
+        .windows(2)
+        .position(|w| w == b"ID")
+        .and_then(|end| span.get(..end))
+        .unwrap_or(span);
+    let mut tokens = Tokenizer::new(dictionary);
+    let mut previous: Option<Token> = None;
+    let mut mask = false;
+    while let Some(token) = tokens.next_token() {
+        if let (Some(Token::Name(key)), Token::Bool(true)) = (&previous, &token) {
+            if key.as_slice() == b"IM" || key.as_slice() == b"ImageMask" {
+                mask = true;
+            }
+        }
+        previous = Some(token);
+    }
+    if mask {
+        b"BI /IM true /W 1 /H 1 /BPC 1 ID \x80 EI"
+    } else {
+        b"BI /W 1 /H 1 /CS /G /BPC 8 ID \xFF EI"
+    }
+}
+
+/// Whether `span` — what follows a `BI`, through its `EI` — is already the
+/// blank image [`blank_inline_image`] writes in its place.
+fn is_blank_inline_image(blank: &[u8], span: &[u8]) -> bool {
+    let blank = blank.strip_prefix(b"BI".as_slice()).unwrap_or(blank);
+    blank.trim_ascii_start() == span.trim_ascii_start()
+}
+
+/// One `Do` invocation, or one `gs` that may set a soft mask, and the
+/// transform in force when it happened.
 struct XObjectUse {
+    /// The `/XObject` name a `Do` gave, or the `/ExtGState` name a `gs` gave.
     name: Vec<u8>,
-    /// The transform mapping the XObject's space to the page's.
+    /// The transform mapping the XObject's space to the page's — for a `gs`,
+    /// the one its mask's group is drawn under, before the group's own
+    /// `/Matrix` (11.6.5.2: the group is drawn *now*, at the `gs`).
     ctm: Matrix,
+    /// Where the rewritten stream wrote the operand, `/` included, so that a
+    /// `Do` can be pointed at a copy of the form afterwards.
+    at: std::ops::Range<usize>,
+    /// A `gs` rather than a `Do`: what it draws, if anything, is the group of
+    /// the `/SMask` its graphics state sets ([`resolve_mask_group`]).
+    mask: bool,
+}
+
+/// What one pass of [`rewrite`] follows: every `Do`, and every `gs` whose
+/// graphics state sets a soft mask, under the one bound
+/// [`MAX_XOBJECT_USES`]. Everything it holds is held per use, so nothing in
+/// it outgrows that bound however long the stream (ruling 1).
+struct Followed<'a> {
+    uses: Vec<XObjectUse>,
+    /// The (name, transform) of every `gs` recorded, so that a state set
+    /// again where it was set before is one placement of its mask. Entered
+    /// only beside a use, so it holds no more than `uses` does: entered
+    /// first, it took an entry for every state at a distinct transform past
+    /// the bound too, one per twenty-two bytes of `1 0 0 1 1 0 cm /A gs `.
+    states: HashSet<(Vec<u8>, PlacementKey)>,
+    /// Whether a state name sets a soft mask, asked of `sets_mask` once each
+    /// while there are few enough names to remember; past that a name is
+    /// asked every time, which costs a lookup and not memory.
+    masking: HashMap<Vec<u8>, bool>,
+    /// Whether the graphics state a `gs` names sets a mask whose group the
+    /// walk would enter ([`resolve_mask_group`]): the stream's resources are
+    /// the caller's, and [`rewrite`] has none.
+    sets_mask: &'a dyn Fn(&[u8]) -> bool,
+    /// `Do`s and mask states past the bound, written back and not followed.
+    unfollowed: usize,
+}
+
+impl<'a> Followed<'a> {
+    fn new(sets_mask: &'a dyn Fn(&[u8]) -> bool) -> Self {
+        Followed {
+            uses: Vec::new(),
+            states: HashSet::new(),
+            masking: HashMap::new(),
+            sets_mask,
+            unfollowed: 0,
+        }
+    }
+
+    /// Records a `Do` of `name` under `ctm`, or counts it unfollowed past
+    /// the bound. Whether it was recorded.
+    fn xobject(&mut self, name: &[u8], ctm: Matrix) -> bool {
+        if self.uses.len() < MAX_XOBJECT_USES {
+            self.uses.push(XObjectUse {
+                name: name.to_vec(),
+                ctm,
+                at: 0..0,
+                mask: false,
+            });
+            true
+        } else {
+            self.unfollowed = self.unfollowed.saturating_add(1);
+            false
+        }
+    }
+
+    /// Records a `gs` of `name` under `ctm` when its state sets a soft mask
+    /// and it was not recorded under that transform already, or counts it
+    /// unfollowed past the bound. Whether it was recorded.
+    ///
+    /// A state that sets no mask draws nothing, and is not a use: recorded
+    /// as one, every `gs` at a distinct transform — an alpha set per object
+    /// — spent the bound the `Do`s share, and an image drawn after four
+    /// thousand of them went unscrubbed under a rectangle.
+    fn state(&mut self, name: &[u8], ctm: Matrix) -> bool {
+        if !self.sets_mask(name) {
+            return false;
+        }
+        let key = (name.to_vec(), placement_key(ctm));
+        if self.states.contains(&key) {
+            return false;
+        }
+        if self.uses.len() >= MAX_XOBJECT_USES {
+            self.unfollowed = self.unfollowed.saturating_add(1);
+            return false;
+        }
+        self.states.insert(key);
+        self.uses.push(XObjectUse {
+            name: name.to_vec(),
+            ctm,
+            at: 0..0,
+            mask: true,
+        });
+        true
+    }
+
+    fn sets_mask(&mut self, name: &[u8]) -> bool {
+        if let Some(&known) = self.masking.get(name) {
+            return known;
+        }
+        let answer = (self.sets_mask)(name);
+        if self.masking.len() < MAX_XOBJECT_USES {
+            self.masking.insert(name.to_vec(), answer);
+        }
+        answer
+    }
 }
 
 /// The text state needed to place a glyph: everything in 9.4.4's displacement
 /// formula, and nothing else.
 ///
 /// Positions live in **unscaled text space** — the space the text matrix maps
-/// *out of*. That is the run's own frame: `x` is how far along the baseline
-/// the pen has walked, whatever direction the baseline points on the page, and
-/// `rise` and `size` are the glyph box's bottom and top in the same units. A
-/// `TJ` displacement is defined in exactly this space (9.4.3), which is why a
-/// rewritten run needs no new matrix of its own.
+/// *out of*. That is the run's own frame: `along` is how far the pen has
+/// walked along the run's own axis, whatever direction that axis points on
+/// the page, and the glyph box's other two sides are measured across it in
+/// the same units. A `TJ` displacement is defined in exactly this space
+/// (9.4.3), which is why a rewritten run needs no new matrix of its own.
+///
+/// **The axis is the font's writing mode** (9.7.4.3). Horizontal text walks
+/// text-space x, by `w0` and the horizontal scale; vertical text walks
+/// text-space y, by `/W2`'s `w1`, which is signed — negative, down the page —
+/// and has no horizontal scale in it. A `TJ` number displaces along the same
+/// axis in both. One number therefore carries both, and [`Pen::vertical`]
+/// says which axis it is.
 #[derive(Clone)]
 struct Pen {
-    /// How far along the baseline the pen has walked since the text matrix
-    /// was last set, in unscaled text space.
-    x: f64,
+    /// How far along the run's axis the pen has walked since the text matrix
+    /// was last set, in unscaled text space: text-space x for horizontal
+    /// writing, text-space y for vertical.
+    along: f64,
     /// The text matrix, `T_m` (9.4.2).
     text: Matrix,
     /// The text line matrix, `T_lm`. `Td`, `TD` and `T*` are relative to
@@ -1137,7 +4234,7 @@ struct Pen {
 impl Default for Pen {
     fn default() -> Pen {
         Pen {
-            x: 0.0,
+            along: 0.0,
             text: Matrix::IDENTITY,
             line: Matrix::IDENTITY,
             ctm: Matrix::IDENTITY,
@@ -1161,7 +4258,7 @@ impl Pen {
     fn offset(&mut self, tx: f64, ty: f64) {
         self.line = Matrix::translate(tx, ty).then(self.line);
         self.text = self.line;
-        self.x = 0.0;
+        self.along = 0.0;
     }
 
     /// Moves to the next line, per `T*`.
@@ -1174,12 +4271,47 @@ impl Pen {
         self.text.then(self.ctm)
     }
 
-    /// The displacement of one decoded code, per 9.4.4.
+    /// Whether the font in force writes vertically (9.7.4.3): `/WMode 1` in
+    /// its encoding CMap, which only a composite font has.
+    fn vertical(&self) -> bool {
+        self.font.as_ref().is_some_and(|f| f.font.is_vertical())
+    }
+
+    /// The displacement of one decoded code along the run's axis, per 9.4.4.
     ///
-    /// In unscaled text space: the horizontal scale is in, because 9.4.4 puts
-    /// it there, and the text matrix is *not*, because that is what
-    /// [`Pen::frame`] applies and what a `TJ` number is measured before.
+    /// In unscaled text space: the text matrix is *not* in it, because that
+    /// is what [`Pen::frame`] applies and what a `TJ` number is measured
+    /// before.
+    ///
+    /// The two branches are 9.4.4's two formulas, and they differ in more
+    /// than the axis:
+    ///
+    /// - horizontal, `tx = (w0 · Tfs / 1000 + Tc + Tw) · Th`;
+    /// - vertical, `ty = w1 · Tfs / 1000 + Tc`, where `w1` is the CID's
+    ///   `/W2` entry (or `/DW2`'s) and is **signed** — a run that goes down
+    ///   the page has a negative one, added rather than subtracted — and
+    ///   there is no `Th`, because horizontal scaling scales horizontal
+    ///   motion and a vertical run has none.
+    ///
+    /// Word spacing is left out of the vertical branch because this engine's
+    /// interpreter leaves it out (`interpret.rs`, the glyph loop of `show`),
+    /// and a cut is measured where the renderer draws. It can only matter for
+    /// a single-byte code 32, which a vertical CMap — two bytes a code for
+    /// `Identity-V` and every predefined one — does not produce.
+    ///
+    /// `w0` is in thousandths of text space for every font but a Type 3 one,
+    /// whose `/Widths` are in its own glyph space: there the width in text
+    /// space is `w0 · a`, the horizontal component of the width carried
+    /// through `/FontMatrix` ([`GlyphSpace`]).
     fn advance(&self, code: &tinker_pdf_cos::DecodedCode) -> f64 {
+        if let Some(selected) = self.font.as_ref().filter(|f| f.font.is_vertical()) {
+            let (_, _, w1) = selected.font.vertical_metrics(code.cid);
+            return w1 / 1000.0 * self.size + self.char_spacing;
+        }
+        let width = match self.font.as_ref().and_then(|f| f.glyph_space) {
+            Some(space) => code.width * space.matrix.a,
+            None => code.width / 1000.0,
+        };
         // Word spacing applies to single-byte code 32 only — the classic bug
         // is applying it to a two-byte CID that happens to equal 32.
         let word = if code.code == 32 && code.bytes == 1 {
@@ -1187,7 +4319,88 @@ impl Pen {
         } else {
             0.0
         };
-        (code.width / 1000.0 * self.size + self.char_spacing + word) * self.horizontal_scale
+        (width * self.size + self.char_spacing + word) * self.horizontal_scale
+    }
+
+    /// The box one glyph occupies, as four corners in unscaled text space,
+    /// with the pen at `along` on the run's axis.
+    ///
+    /// Horizontal: from the pen to the pen plus the advance along x, and from
+    /// the rise to one em above it across — the em box, approximated from
+    /// the advance and the font size rather than from an outline, which errs
+    /// toward removal ([`redact_string`] says why that is right).
+    ///
+    /// Vertical, the same box stood on end (9.7.4.3). The glyph is drawn with
+    /// its horizontal origin at *minus* the position vector `v`, so across
+    /// the column it spans `-v_x` to `w0 - v_x` — centred on the pen for the
+    /// default `v_x = w0 / 2`. Along it the box is the glyph's cell, from the
+    /// pen to the pen plus the (negative) advance, joined with the cell a
+    /// vertical glyph's outline fills measured from that horizontal origin,
+    /// `v_y` below the pen ([`DEFAULT_V_Y`]); both are shifted by the rise,
+    /// which 9.4.4 puts in text-space y in both modes. For the default
+    /// metrics the two are one cell. That is where this engine's interpreter
+    /// puts a vertical glyph (`translate(-v_x, -v_y)` inside the size), and
+    /// the ideographic em cell a CJK face fills. Until October 2026 `v_y` was
+    /// not read, and a glyph whose position vector put it anywhere but one
+    /// advance below the pen was measured where it was not drawn.
+    ///
+    /// Type 3, a rectangle in the font's own glyph space carried through its
+    /// `/FontMatrix` and then scaled as any text-space point is (9.4.4):
+    /// `0` to `w0` along, [`GlyphSpace::low`] to [`GlyphSpace::high`] across.
+    /// Without the character and word spacing the other two boxes take from
+    /// the advance, because the glyph procedure draws the glyph and spacing is
+    /// only where the pen goes next.
+    fn glyph_box(&self, code: &tinker_pdf_cos::DecodedCode, along: f64) -> [(f64, f64); 4] {
+        if let Some(space) = self.font.as_ref().and_then(|f| f.glyph_space) {
+            let w0 = code.width;
+            return [
+                (0.0, space.low),
+                (w0, space.low),
+                (w0, space.high),
+                (0.0, space.high),
+            ]
+            .map(|(x, y)| {
+                let (x, y) = space.matrix.apply(x, y);
+                (
+                    along + x * self.size * self.horizontal_scale,
+                    self.rise + y * self.size,
+                )
+            });
+        }
+        let advance = self.advance(code);
+        if let Some(selected) = self.font.as_ref().filter(|f| f.font.is_vertical()) {
+            let (v_x, v_y, _) = selected.font.vertical_metrics(code.cid);
+            let unit = self.size / 1000.0 * self.horizontal_scale;
+            let (x0, x1) = (-v_x * unit, (code.width - v_x) * unit);
+            // Along the column: the glyph's own cell, one advance from the
+            // pen, joined with the cell a glyph drawn for vertical writing
+            // fills measured from its **horizontal origin** — `v_y` below
+            // the pen (9.4.4 sends `v` through the size, and not through
+            // `Th`) — which is where its outline is. Table 115's default
+            // `/DW2 [880 -1000]` places that cell `-120..880` from the
+            // origin, so for the default metrics the two coincide and the
+            // box is the cell; a `v_y` that is not 880 moves the glyph, and
+            // the box follows it rather than staying under the pen.
+            let pen = along + self.rise;
+            let em = self.size / 1000.0;
+            let origin = pen - v_y * em;
+            let ends = [
+                pen,
+                pen + advance,
+                origin + (DEFAULT_V_Y - 1000.0) * em,
+                origin + DEFAULT_V_Y * em,
+            ];
+            let y0 = ends.iter().copied().fold(f64::INFINITY, f64::min);
+            let y1 = ends.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+        }
+        let (y0, y1) = (self.rise, self.rise + self.size);
+        [
+            (along, y0),
+            (along + advance, y0),
+            (along + advance, y1),
+            (along, y1),
+        ]
     }
 
     /// The displacement of a whole string.
@@ -1205,22 +4418,82 @@ impl Pen {
 
     /// The unit a `TJ` number is measured in: one thousandth of this moves the
     /// pen by one (9.4.3).
+    ///
+    /// `Tfs · Th` along a horizontal run and `Tfs` alone along a vertical one:
+    /// 9.4.4's `ty` subtracts `Tj / 1000` inside the product with `Tfs` and
+    /// has no `Th` to multiply by.
     fn thousandth(&self) -> f64 {
-        self.size * self.horizontal_scale
+        if self.vertical() {
+            self.size
+        } else {
+            self.size * self.horizontal_scale
+        }
     }
 }
 
+/// The vertical component of 9.7.4.3's default position vector, Table 115's
+/// `/DW2 [880 -1000]`: how far above a glyph's horizontal baseline its
+/// vertical origin sits when nothing says otherwise, in thousandths of an
+/// em — and so where the top of the cell a vertical glyph fills is,
+/// measured from the origin its outline is drawn at.
+const DEFAULT_V_Y: f64 = 880.0;
+
+/// The Type 3 glyphs one pass over a stream showed through a procedure that
+/// can draw text or an image, and those a second pass is to remove.
+///
+/// Counted by occurrence, in stream order: a pass is deterministic, so the
+/// `n`th such glyph of the first pass is the `n`th of the second.
+#[derive(Default)]
+struct Procedures {
+    /// Occurrences to remove whatever their box says.
+    drop: HashSet<usize>,
+    /// The next occurrence's index.
+    next: usize,
+    /// Every occurrence the pass showed and was not told to remove, with
+    /// where its procedure runs: the ones it kept, and the ones their own
+    /// box removed ([`GlyphUse::covered`]).
+    found: Vec<GlyphUse>,
+}
+
+/// One Type 3 glyph shown, and the transform its procedure runs under: the
+/// font matrix, then the text rendering matrix at the glyph's origin (9.4.4),
+/// then the transform in force — where the interpreter runs it.
+struct GlyphUse {
+    index: usize,
+    procedure: Arc<[u8]>,
+    ctm: Matrix,
+    /// The font, for its own `/Resources` ([`procedure_draws_under`]).
+    font: Arc<RunFont>,
+    /// The resource name the `Tf` gave it, for a report that has to name
+    /// it.
+    font_name: Vec<u8>,
+    /// The glyph's own box met a rectangle, so the pass removed the use
+    /// already. Its procedure is measured all the same, for what it leaves
+    /// in the file — a soft mask's group or a pattern's cell it draws with,
+    /// neither of which is cut — and the measurement decides nothing about
+    /// the use ([`cut_stream`]).
+    covered: bool,
+}
+
 /// Rewrites a content stream with redacted glyphs removed.
+///
+/// A glyph is measured by its box. The Type 3 glyph occurrences `procedures`
+/// names are removed whatever their box says, and the other Type 3 glyphs
+/// whose procedures could draw beyond it are recorded in it, for
+/// [`cut_stream`] to measure. `sets_mask` answers whether the graphics state
+/// a `gs` names sets a soft mask, whose group is then a use ([`Followed`]).
 fn rewrite(
     content: &[u8],
     areas: &[Redaction],
-    fonts: &HashMap<Vec<u8>, Arc<RunFont>>,
+    fonts: &[&HashMap<Vec<u8>, Arc<RunFont>>],
     initial: Matrix,
+    procedures: &mut Procedures,
+    sets_mask: &dyn Fn(&[u8]) -> bool,
 ) -> (Vec<u8>, RedactionReport, Vec<XObjectUse>) {
     let mut out = Vec::with_capacity(content.len());
     let mut tokens = Tokenizer::new(content);
     let mut operands: Vec<Token> = Vec::new();
-    let mut uses: Vec<XObjectUse> = Vec::new();
+    let mut followed = Followed::new(sets_mask);
     let mut pen = Pen {
         ctm: initial,
         ..Pen::default()
@@ -1245,19 +4518,68 @@ fn rewrite(
         };
 
         let mut rewritten = false;
+        // Whether this operator is a `Do` that was recorded as a use.
+        let mut recorded = false;
 
         match op.as_slice() {
+            b"BI" => {
+                // 8.9.7: an inline image's samples are not tokens, so the
+                // span through `EI` is taken whole — where the interpreter
+                // says it ends — and written back byte for byte. Tokenizing
+                // it re-serialized the samples as whatever tokens they
+                // happened to spell, which corrupted every inline image on a
+                // redacted page and scrubbed none of them.
+                let rest = tokens.rest();
+                let consumed = tinker_pdf_content::interpret::skip_inline_image(rest);
+                let span = rest.get(..consumed).unwrap_or(rest);
+                let at = tokens.position();
+                tokens.seek(at.saturating_add(consumed));
+
+                // 8.9.7: it occupies the unit square of the transform in
+                // force, as an XObject image does, and goes whole or not at
+                // all for the same reason ([`scrub_image`]).
+                let placed = XObjectUse {
+                    name: Vec::new(),
+                    ctm: pen.ctm,
+                    at: 0..0,
+                    mask: false,
+                };
+                if covers_unit_square(&placed, areas) {
+                    let blank = blank_inline_image(span);
+                    // One already blank — a scrub an earlier pass wrote —
+                    // is not scrubbed again: nothing is removed, so nothing
+                    // is counted, and a placement cut the old way after
+                    // another does not count the one image twice.
+                    if !is_blank_inline_image(blank, span) {
+                        report.images += 1;
+                    }
+                    out.extend_from_slice(blank);
+                } else {
+                    out.extend_from_slice(b"BI");
+                    out.extend_from_slice(span);
+                }
+                out.push(b'\n');
+                rewritten = true;
+            }
             b"Do" => {
                 // 8.8: the operand names an XObject. Which kind it is, and
                 // what to do about it, is the caller's business — this crate
                 // has the transform, and the caller has the dictionaries.
                 if let Some(Token::Name(name)) = operands.last() {
-                    if uses.len() < 4096 {
-                        uses.push(XObjectUse {
-                            name: name.clone(),
-                            ctm: pen.ctm,
-                        });
-                    }
+                    recorded = followed.xobject(name, pen.ctm);
+                }
+            }
+            b"gs" => {
+                // 11.6.5.2: a state that sets a soft mask draws the mask's
+                // group now, under the transform in force here — a placement
+                // of a form like a `Do`'s, which the walk measures. Recorded
+                // once per name and transform, since a stream that sets one
+                // state at every text object draws one mask, and under the
+                // same bound as the `Do`s: a state past it is not followed,
+                // and `TooManyXObjects` counts it with them. A state that
+                // sets no mask is not a use at all ([`Followed::state`]).
+                if let Some(Token::Name(name)) = operands.last() {
+                    recorded = followed.state(name, pen.ctm);
                 }
             }
             b"cm" => {
@@ -1283,7 +4605,7 @@ fn rewrite(
                 // The text matrices reset; the text *state* does not.
                 pen.text = Matrix::IDENTITY;
                 pen.line = Matrix::IDENTITY;
-                pen.x = 0.0;
+                pen.along = 0.0;
             }
             b"Tf" => {
                 pen.size = number(0);
@@ -1296,7 +4618,10 @@ fn rewrite(
                         _ => None,
                     })
                     .unwrap_or_default();
-                pen.font = fonts.get(&pen.font_name).map(Arc::clone);
+                pen.font = fonts
+                    .iter()
+                    .find_map(|scope| scope.get(&pen.font_name))
+                    .map(Arc::clone);
             }
             b"Tc" => pen.char_spacing = number(0),
             b"Tw" => pen.word_spacing = number(0),
@@ -1321,7 +4646,7 @@ fn rewrite(
                     f: number(0),
                 };
                 pen.text = pen.line;
-                pen.x = 0.0;
+                pen.along = 0.0;
             }
             b"T*" => pen.next_line(),
             b"Tj" | b"'" | b"\"" => {
@@ -1334,7 +4659,7 @@ fn rewrite(
                     pen.char_spacing = number(1);
                 }
                 if let Some(Token::String(bytes)) = operands.last().cloned() {
-                    let cut = redact_string(&bytes, &pen, areas);
+                    let cut = redact_string(&bytes, &pen, areas, procedures);
                     if let Some(warning) = cut.warning {
                         note(&mut report.warnings, warning);
                     }
@@ -1359,7 +4684,7 @@ fn rewrite(
                         emit_array(&mut out, &cut.runs, pen.thousandth());
                         rewritten = true;
                     }
-                    pen.x += pen.advance_of(&bytes);
+                    pen.along += pen.advance_of(&bytes);
                 }
             }
             b"TJ" => {
@@ -1372,20 +4697,20 @@ fn rewrite(
                 for token in &operands {
                     match token {
                         Token::String(s) => {
-                            let cut = redact_string(s, &local, areas);
+                            let cut = redact_string(s, &local, areas, procedures);
                             if let Some(warning) = cut.warning {
                                 note(&mut report.warnings, warning);
                             }
                             removed += cut.removed;
                             runs.extend(cut.runs);
-                            local.x += local.advance_of(s);
+                            local.along += local.advance_of(s);
                         }
                         Token::Number(v) if v.is_finite() => {
                             // 9.4.3: the number moves the pen *backwards* by
                             // its value in thousandths, along the baseline.
                             let shift = -v / 1000.0 * local.thousandth();
                             runs.push(Run::Gap(shift));
-                            local.x += shift;
+                            local.along += shift;
                         }
                         _ => {}
                     }
@@ -1403,9 +4728,19 @@ fn rewrite(
         }
 
         if !rewritten {
+            let mut last = 0..0;
             for operand in &operands {
+                let start = out.len();
                 write_token(&mut out, operand);
+                last = start..out.len();
                 out.push(b' ');
+            }
+            // A `Do` or a `gs` is never rewritten, so its operand is always
+            // written here, and it is the last one.
+            if recorded {
+                if let Some(used) = followed.uses.last_mut() {
+                    used.at = last;
+                }
             }
             out.extend_from_slice(op);
             out.push(b'\n');
@@ -1413,7 +4748,15 @@ fn rewrite(
         operands.clear();
     }
 
-    (out, report, uses)
+    if followed.unfollowed > 0 && !areas.is_empty() {
+        note(
+            &mut report.warnings,
+            RedactionWarning::TooManyXObjects {
+                skipped: followed.unfollowed,
+            },
+        );
+    }
+    (out, report, followed.uses)
 }
 
 /// A piece of a rewritten showing operation.
@@ -1496,8 +4839,9 @@ struct Cut {
 
 /// Removes the glyphs of `bytes` that fall inside a redaction.
 ///
-/// The glyph box is measured in the run's own frame — `x` along the baseline,
-/// `rise` to `rise + size` across it — and carried into page space by
+/// The glyph box is measured in the run's own frame — along the run's axis
+/// by the advance, across it by the em ([`Pen::glyph_box`], which stands the
+/// box on end for vertical writing) — and carried into page space by
 /// [`Pen::frame`], which is the text matrix and the transformation matrix
 /// composed. A rotated or skewed matrix turns that box into a parallelogram
 /// rather than making it unmeasurable, and [`quad_meets_rect`] answers
@@ -1510,7 +4854,15 @@ struct Cut {
 /// `mark`ed rectangle with a bite of blank page beside it where the
 /// over-removed glyph was, which is a thing a reader can see rather than a
 /// thing an extractor can find.
-fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction]) -> Cut {
+///
+/// A Type 3 glyph whose procedure can draw text or an image
+/// ([`RunFont::procedures`]) is counted in `procedures`: removed when a
+/// previous pass found its procedure drawing under a rectangle, and otherwise
+/// recorded, with the transform its procedure runs under, for that pass to
+/// measure ([`cut_stream`]) — a use its own box removes as well, marked
+/// [`GlyphUse::covered`], since what its procedure draws with is named by
+/// that measurement and by nothing else.
+fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction], procedures: &mut Procedures) -> Cut {
     let whole = |warning: Option<RedactionWarning>| Cut {
         runs: vec![Run::Text(bytes.to_vec())],
         removed: 0,
@@ -1533,22 +4885,9 @@ fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction]) -> Cut {
             bytes: left,
         }));
     };
-    if selected.font.is_vertical() {
-        return whole(Some(RedactionWarning::VerticalRun {
-            font: font(),
-            bytes: left,
-        }));
-    }
-    if selected.rescaled_type3 {
-        return whole(Some(RedactionWarning::RescaledType3Font {
-            font: font(),
-            bytes: left,
-        }));
-    }
-
     let frame = pen.frame();
     if !frame.is_finite()
-        || !pen.x.is_finite()
+        || !pen.along.is_finite()
         || !pen.size.is_finite()
         || !pen.rise.is_finite()
         || !pen.horizontal_scale.is_finite()
@@ -1562,22 +4901,17 @@ fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction]) -> Cut {
     // Measured in full before anything is cut, so that a run which turns out
     // to be unmeasurable part-way along is left whole rather than half-cut.
     let codes = selected.font.decode(bytes);
-    let y0 = pen.rise;
-    let y1 = pen.rise + pen.size;
     let mut boxes: Vec<([(f64, f64); 4], f64)> = Vec::with_capacity(codes.len());
-    let mut x = pen.x;
+    let mut origins: Vec<f64> = Vec::with_capacity(codes.len());
+    let mut along = pen.along;
     for code in &codes {
+        origins.push(along);
         let advance = pen.advance(code);
         // The glyph's box, approximated from its advance and the font size.
         // Approximating is right here: an exact outline would let a descender
         // poking one hundredth of a point into the box decide the redaction,
         // and erring towards removal is the safe direction anyway.
-        let quad = [
-            frame.apply(x, y0),
-            frame.apply(x + advance, y0),
-            frame.apply(x + advance, y1),
-            frame.apply(x, y1),
-        ];
+        let quad = pen.glyph_box(code, along).map(|(x, y)| frame.apply(x, y));
         if !advance.is_finite() || quad.iter().any(|p| !p.0.is_finite() || !p.1.is_finite()) {
             return whole(Some(RedactionWarning::UnmeasurableFrame {
                 font: font(),
@@ -1585,7 +4919,7 @@ fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction]) -> Cut {
             }));
         }
         boxes.push((quad, advance));
-        x += advance;
+        along += advance;
     }
 
     let mut runs: Vec<Run> = Vec::new();
@@ -1593,10 +4927,49 @@ fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction]) -> Cut {
     let mut gap = 0.0f64;
     let mut removed = 0usize;
 
-    for (code, (quad, advance)) in codes.iter().zip(&boxes) {
-        let inside = areas
+    for ((code, (quad, advance)), origin) in codes.iter().zip(&boxes).zip(&origins) {
+        let mut inside = areas
             .iter()
             .any(|redaction| quad_meets_rect(quad, redaction.area));
+
+        // 9.6.5: the procedure is what the glyph draws, and it can draw
+        // beyond the box — text in a font of its own, an image. A use whose
+        // procedure draws under a rectangle goes whole, as a glyph partly
+        // under one does; the procedure itself, which every use of the glyph
+        // shares, is left as it is.
+        if let (Some(space), Some(procedure)) =
+            (selected.glyph_space, selected.procedures.get(&code.code))
+        {
+            let index = procedures.next;
+            procedures.next += 1;
+            if procedures.drop.contains(&index) {
+                inside = true;
+            } else {
+                // A use its own box put under a rectangle is recorded too:
+                // it goes whatever its procedure draws, but what the
+                // procedure draws with — a soft mask's group, a pattern's
+                // cell — is not cut, and its measurement is what names it.
+                // Until the lane's second review such a use went unmeasured,
+                // and a group showing text under the same rectangle stayed in
+                // the file with nothing said.
+                let placed = Matrix {
+                    a: pen.size * pen.horizontal_scale,
+                    b: 0.0,
+                    c: 0.0,
+                    d: pen.size,
+                    e: *origin,
+                    f: pen.rise,
+                };
+                procedures.found.push(GlyphUse {
+                    index,
+                    procedure: Arc::clone(procedure),
+                    ctm: space.matrix.then(placed).then(frame),
+                    font: Arc::clone(selected),
+                    font_name: pen.font_name.clone(),
+                    covered: inside,
+                });
+            }
+        }
 
         if inside {
             removed += 1;
@@ -2050,32 +5423,26 @@ endstream\nendobj\n\
 trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n"
     }
 
-    /// **The pin, flipped.** A form drawn twice is measured at *both*
-    /// placements, and the fixture is the one that used to prove it was not.
+    /// **The pin, flipped twice.** A form drawn twice is measured at *both*
+    /// placements and cut **only** at the one the rectangle covers, and the
+    /// fixture is the one that used to prove the second placement was not
+    /// measured at all.
     ///
-    /// The form below draws `SECRET` at page y 50 and again at page y 200;
-    /// the rectangle covers the second placement only. Until September 2026
-    /// the `visited` set — there to stop a self-referential form recursing
-    /// forever — made the second `Do` a no-op too, so the first pass found
-    /// nothing under the rectangle and marked the form done. The text stayed,
-    /// no warning named it, and the report was `glyphs: 0` with no warnings,
-    /// which is exactly what a rectangle covering nothing reports: a silent
-    /// under-redaction reached by a different road from the ones this module
-    /// refuses by name.
+    /// The form draws `SECRET` at page y 50 and again at page y 200; the
+    /// rectangle covers the second placement only. Until the September 2026
+    /// guard keyed by the transform, the second `Do` was a no-op: the text
+    /// stayed and the report said `glyphs: 0`, the silent under-redaction.
+    /// That guard then measured it, and cut it out of the one stream both
+    /// placements shared — so the first placement lost `SECRET` too, and
+    /// `RepeatedForm` named the widened cut.
     ///
-    /// Now the guard is keyed by the transform as well as by the object, so
-    /// the second placement is a placement of its own and is measured. Two
-    /// things follow and both are asserted here, because only the pair of
-    /// them is the property:
+    /// Now the covered placement draws a copy of the form cut at its own
+    /// frame, and the uncovered one draws the form as it was. So, together:
     ///
-    /// - `SECRET` is gone from every stream, and the page draws no ink inside
-    ///   the rectangle.
-    /// - The one stream both placements share lost it, so the *first*
-    ///   placement lost it too although no rectangle covered that one. That
-    ///   is wider than what was asked for, so
-    ///   [`RedactionWarning::RepeatedForm`] names the form — the report is no
-    ///   longer able to look like a rectangle that covered nothing, in either
-    ///   direction.
+    /// - the page draws no ink inside the rectangle, and the form object that
+    ///   still carries `SECRET` is the one the *first* placement draws;
+    /// - the first placement still draws its text, where it was;
+    /// - nothing is reported, because nothing was cut wider than asked.
     #[test]
     fn a_form_drawn_twice_is_cut_at_the_placement_the_rectangle_covers() {
         let doc = Arc::new(CosDocument::open(twice_placed_form()).expect("it opens"));
@@ -2096,37 +5463,42 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n"
         };
 
         let (bytes, report) = redact(doc, &[over_the_second]);
-        let reopened = CosDocument::open(bytes.clone()).expect("it reopens");
-        let streams = all_streams(&reopened);
-
         assert_eq!(
             report.glyphs, 6,
             "the second placement was measured: every glyph of SECRET went"
         );
         assert!(
-            !streams.contains("SECRET"),
-            "and the text under the rectangle is gone from every stream: {streams}"
+            report.warnings.is_empty(),
+            "and nothing was cut wider than asked: {:?}",
+            report.warnings
         );
 
         // The stream check on its own would pass a build that left the glyph
         // in a second, unreferenced copy. The page has to draw nothing there.
-        let bitmap = super::tests_support::render(bytes);
+        let bitmap = super::tests_support::render(bytes.clone());
         assert_eq!(
             super::tests_support::ink_in(&bitmap, 300.0, over_the_second.area),
             0,
-            "and the page draws no ink inside the rectangle"
+            "the page draws no ink inside the rectangle"
+        );
+        // Helvetica is not embedded and this build carries no standard
+        // faces, so the page draws no glyph of it anywhere: the ink check
+        // above is the stream check's partner, not evidence of what stayed.
+        // Extraction is that evidence.
+        assert_eq!(
+            super::tests_support::lines_of(bytes.clone()),
+            vec![(50.0, "SECRET".to_string())],
+            "the first placement, which no rectangle covered, still shows SECRET, \
+             and only there"
         );
 
-        // One stream, two placements: the first placement lost `SECRET` as
-        // well, though no rectangle covered it. That is the cost of the fix
-        // and it is not allowed to be silent.
-        assert_eq!(
-            report.warnings,
-            vec![RedactionWarning::RepeatedForm {
-                form: b"Fm0".to_vec(),
-                placements: 2,
-            }],
-            "the form is named, with how many placements it had"
+        // The page now draws the second placement from a copy: its content
+        // names the copy, and the form object itself is untouched.
+        let reopened = CosDocument::open(bytes).expect("it reopens");
+        let page = super::tests_support::page_content(&reopened);
+        assert!(
+            page.contains("/Fm0 Do") && page.contains("/Rd"),
+            "one `Do` names the form and the other its copy: {page}"
         );
     }
 
@@ -2264,9 +5636,349 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
     /// right for this to be found: the inner form is reached twice, under two
     /// different composed transforms, and the second reach is a placement of
     /// its own.
+    ///
+    /// And cut there only: the inner form's second placement is a copy, and
+    /// the outer form's second placement, whose `Do` has to name that copy,
+    /// is a copy too — a copy of a form is a different outcome for every form
+    /// that draws it. The first placement of both is the file's own objects,
+    /// untouched, and still draws `SECRET`.
     #[test]
     fn a_nested_form_is_measured_at_every_placement_of_its_parent() {
-        let bytes: &[u8] = b"%PDF-1.7\n\
+        let doc = Arc::new(CosDocument::open(bytes_of_nested()).expect("it opens"));
+        assert!(
+            all_streams(&doc).contains("SECRET"),
+            "the needle starts present"
+        );
+
+        let over_the_second = Redaction {
+            area: Rect {
+                x0: 0.0,
+                y0: 190.0,
+                x1: 400.0,
+                y1: 230.0,
+            },
+            mark: false,
+        };
+
+        let (bytes, report) = redact(doc, &[over_the_second]);
+        assert_eq!(report.glyphs, 6, "the inner form was measured at depth two");
+        assert!(
+            report.warnings.is_empty(),
+            "and cut exactly: {:?}",
+            report.warnings
+        );
+
+        let bitmap = super::tests_support::render(bytes.clone());
+        assert_eq!(
+            super::tests_support::ink_in(&bitmap, 300.0, over_the_second.area),
+            0,
+            "no ink under the rectangle"
+        );
+        assert_eq!(
+            super::tests_support::lines_of(bytes.clone()),
+            vec![(50.0, "SECRET".to_string())],
+            "the first placement still draws SECRET, where it was"
+        );
+
+        // Two copies: the inner form's, and the outer form's that names it.
+        let after = CosDocument::open(bytes).expect("it reopens");
+        assert_eq!(
+            super::tests_support::forms_in(&after),
+            4,
+            "the two forms and one copy of each, and no more"
+        );
+    }
+
+    fn area(x0: f64, y0: f64, x1: f64, y1: f64) -> Redaction {
+        Redaction {
+            area: Rect { x0, y0, x1, y1 },
+            mark: false,
+        }
+    }
+
+    /// **The row's exit fixture.** A form whose two placements are cut
+    /// differently is cut exactly at each: one rectangle over `SECRET` at
+    /// the lower placement, another over `PUBLIC` at the upper, and each
+    /// placement loses exactly the word its own rectangle covered.
+    ///
+    /// No placement is uncut, so the form's own object takes the first
+    /// placement's outcome and the second draws a copy. Nothing anywhere
+    /// holds `PUBLIC SECRET` whole: an object no placement draws would still
+    /// be in the file, and a copy for every placement would have left the
+    /// original exactly that.
+    #[test]
+    fn a_form_whose_placements_are_cut_differently_is_cut_exactly_at_each() {
+        let lower = area(56.0, 45.0, 400.0, 70.0);
+        let upper = area(0.0, 195.0, 52.0, 220.0);
+
+        let (bytes, report) = redact(
+            Arc::new(
+                CosDocument::open(super::tests_support::public_secret_twice()).expect("it opens"),
+            ),
+            &[lower, upper],
+        );
+        assert_eq!(report.glyphs, 12, "SECRET below and PUBLIC above");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        let lines = super::tests_support::lines_of(bytes.clone());
+        assert_eq!(
+            lines,
+            vec![(50.0, "PUBLIC".to_string()), (200.0, "SECRET".to_string())],
+            "each placement kept exactly what its own rectangle did not cover"
+        );
+
+        let bitmap = super::tests_support::render(bytes.clone());
+        for (covered, what) in [(lower, "SECRET below"), (upper, "PUBLIC above")] {
+            assert_eq!(
+                super::tests_support::ink_in(&bitmap, 300.0, covered.area),
+                0,
+                "no ink where {what} was"
+            );
+        }
+        let kept_below = Rect {
+            x0: 11.0,
+            y0: 51.0,
+            x1: 51.0,
+            y1: 58.0,
+        };
+        let kept_above = Rect {
+            x0: 57.0,
+            y0: 201.0,
+            x1: 99.0,
+            y1: 208.0,
+        };
+        for (kept, what) in [(kept_below, "PUBLIC below"), (kept_above, "SECRET above")] {
+            assert!(
+                super::tests_support::ink_in(&bitmap, 300.0, kept) > 20,
+                "{what} is still drawn"
+            );
+        }
+
+        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+        assert!(
+            !streams.contains("PUBLIC SECRET"),
+            "no stream holds the uncut text: {streams}"
+        );
+    }
+
+    /// Placements whose outcomes are the same share one stream: a copy is
+    /// per distinct outcome, not per `Do`.
+    ///
+    /// Three placements, at page y 50, 125 and 200; one tall rectangle takes
+    /// `SECRET` from the upper two, which cut identically. The lowest is
+    /// uncut and keeps the form's own object, and the upper two share one
+    /// copy — one object more than the file had, not two.
+    #[test]
+    fn placements_that_cut_the_same_share_one_copy() {
+        let bytes = super::tests_support::public_secret_drawn_by(
+            "q 1 0 0 1 0 0 cm /Fm0 Do Q q 1 0 0 1 0 75 cm /Fm0 Do Q \
+             q 1 0 0 1 0 150 cm /Fm0 Do Q",
+        );
+        let (after, report) = redact(open_arc(bytes), &[area(56.0, 120.0, 400.0, 215.0)]);
+        assert_eq!(report.glyphs, 6, "one copy's six, not twelve");
+        assert_eq!(
+            super::tests_support::lines_of(after.clone()),
+            vec![
+                (50.0, "PUBLIC SECRET".to_string()),
+                (125.0, "PUBLIC".to_string()),
+                (200.0, "PUBLIC".to_string()),
+            ]
+        );
+        let reopened = CosDocument::open(after).expect("it reopens");
+        assert_eq!(
+            super::tests_support::forms_in(&reopened),
+            2,
+            "the form and one copy for the two placements that cut the same"
+        );
+    }
+
+    fn open_arc(bytes: Vec<u8>) -> Arc<CosDocument> {
+        Arc::new(CosDocument::open(bytes).expect("it opens"))
+    }
+
+    /// A second redaction of the page keeps the copies the first one made,
+    /// and cuts them where they are drawn.
+    ///
+    /// The first takes `SECRET` from the lower placement, which gets a copy;
+    /// the second takes `PUBLIC` from the upper, which draws the form's own
+    /// object. Read back, each placement has lost what its rectangle covered
+    /// and nothing else — the same answer as the two rectangles at once.
+    #[test]
+    fn a_second_redaction_keeps_the_copies_the_first_made() {
+        let mut editor = DocumentEditor::new(open_arc(super::tests_support::public_secret_twice()));
+        let first = apply(&mut editor, 0, &[area(56.0, 45.0, 400.0, 70.0)]).expect("page 0");
+        let second = apply(&mut editor, 0, &[area(0.0, 195.0, 52.0, 220.0)]).expect("page 0");
+        assert_eq!((first.glyphs, second.glyphs), (6, 6));
+        assert!(first.warnings.is_empty() && second.warnings.is_empty());
+
+        let bytes = editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        });
+        assert_eq!(
+            super::tests_support::lines_of(bytes),
+            vec![(50.0, "PUBLIC".to_string()), (200.0, "SECRET".to_string())]
+        );
+    }
+
+    /// A second redaction reaches a copy the first one made, and cuts it.
+    ///
+    /// The first takes `SECRET` from the lower placement, which is given a
+    /// copy holding `PUBLIC`; the second takes `PUBLIC` from the same
+    /// placement, which now means from the copy — an object only the editor
+    /// has, so a walk that read forms out of the file would not find it and
+    /// would leave `PUBLIC` under the second rectangle.
+    #[test]
+    fn a_second_redaction_cuts_the_copy_the_first_made() {
+        let mut editor = DocumentEditor::new(open_arc(super::tests_support::public_secret_twice()));
+        let first = apply(&mut editor, 0, &[area(56.0, 45.0, 400.0, 70.0)]).expect("page 0");
+        let second = apply(&mut editor, 0, &[area(0.0, 45.0, 52.0, 70.0)]).expect("page 0");
+        assert_eq!((first.glyphs, second.glyphs), (6, 6));
+
+        let bytes = editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        });
+        assert_eq!(
+            super::tests_support::lines_of(bytes),
+            vec![(200.0, "PUBLIC SECRET".to_string())],
+            "the lower placement lost both words, the upper neither"
+        );
+    }
+
+    /// A second redaction of a form cut in place keeps the first cut: it
+    /// reads the form as the editor has it, not as the file had it.
+    #[test]
+    fn a_second_redaction_of_a_form_keeps_the_first_cut() {
+        let mut editor = DocumentEditor::new(open_arc(
+            super::tests_support::public_secret_drawn_by("/Fm0 Do"),
+        ));
+        apply(&mut editor, 0, &[area(56.0, 45.0, 400.0, 70.0)]).expect("page 0");
+        apply(&mut editor, 0, &[area(0.0, 45.0, 52.0, 70.0)]).expect("page 0");
+
+        let bytes = editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        });
+        let streams = all_streams(&CosDocument::open(bytes.clone()).expect("it reopens"));
+        assert!(
+            !streams.contains("PUBLIC") && !streams.contains("SECRET"),
+            "neither word is anywhere: {streams}"
+        );
+        assert!(super::tests_support::lines_of(bytes).is_empty());
+    }
+
+    /// When a placement on the page is uncut, the form's own object is left
+    /// exactly as it was — so another page that draws the same form still
+    /// draws all of it.
+    ///
+    /// Page one draws the form at y 50 and y 200, page two once at y 50. The
+    /// rectangle takes `SECRET` from page one's **first** placement, so the
+    /// placement that could keep the form's object is the second: choosing by
+    /// order rather than by "uncut" would write page one's cut into the object
+    /// page two draws, and page two would lose a word no rectangle on it
+    /// covered.
+    #[test]
+    fn a_form_another_page_draws_is_left_whole_when_a_placement_here_is_uncut() {
+        let mut builder = DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(
+            b"F0",
+            b"LiberationSerif",
+            &crate::subset::tests_support::face()
+        ));
+        assert!(builder.add_form(
+            b"Fm0",
+            &tinker_pdf_cos::FormXObject {
+                bbox: [0.0, 0.0, 400.0, 300.0],
+                matrix: None,
+                group: None,
+                content: b"BT /F0 12 Tf 10 50 Td (PUBLIC SECRET) Tj ET",
+            }
+        ));
+        builder.add_page(400.0, 300.0, |p| {
+            p.raw(b"q 1 0 0 1 0 0 cm /Fm0 Do Q q 1 0 0 1 0 150 cm /Fm0 Do Q");
+        });
+        builder.add_page(400.0, 300.0, |p| p.raw(b"/Fm0 Do"));
+
+        let (bytes, report) = redact(open_arc(builder.finish()), &[area(56.0, 45.0, 400.0, 70.0)]);
+        assert_eq!(report.glyphs, 6);
+        assert_eq!(
+            super::tests_support::lines_of(bytes.clone()),
+            vec![
+                (50.0, "PUBLIC".to_string()),
+                (200.0, "PUBLIC SECRET".to_string())
+            ]
+        );
+        assert_eq!(
+            super::tests_support::lines_on(bytes, 1),
+            vec![(50.0, "PUBLIC SECRET".to_string())],
+            "page two was not redacted and lost nothing"
+        );
+    }
+
+    /// A form placed more times than [`MAX_PLACEMENTS`] is cut the old way,
+    /// in its one stream — and so is **every form it draws**.
+    ///
+    /// The text is in `Fm1`, drawn only through `Fm0`, and `Fm0` is placed
+    /// past the cap, so `Fm0`'s placements share one stream whose `/Fm1 Do`
+    /// is never pointed at a copy. Were `Fm1` cut exactly, its covered
+    /// placement would get a copy nothing draws, and the stream every `Fm0`
+    /// placement draws would still name `Fm1`'s own object — uncut, because
+    /// most of its placements are. So it is not: `Fm1` is cut in place too,
+    /// `SECRET` is in no stream, and both forms are named.
+    #[test]
+    fn a_form_drawn_by_one_placed_past_the_cap_is_cut_the_old_way_too() {
+        let placements = MAX_PLACEMENTS + 2;
+        let mut content = String::new();
+        for i in 0..placements {
+            content.push_str(&format!("q 1 0 0 1 0 {} cm /Fm0 Do Q\n", i * 4));
+        }
+        let inner = "BT /F0 12 Tf 10 50 Td (SECRET) Tj ET";
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 600]\n\
+             /Resources << /XObject << /Fm0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+        );
+        out.push_str(&super::tests_support::stream_object(4, &content));
+        out.push_str(
+            "5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 600]\n\
+             /Resources << /XObject << /Fm1 7 0 R >> >> /Length 8 >>\nstream\n\
+             /Fm1 Do\nendstream\nendobj\n",
+        );
+        out.push_str("6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
+        out.push_str(&format!(
+            "7 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 600]\n\
+             /Resources << /Font << /F0 6 0 R >> >> /Length {} >>\nstream\n\
+             {inner}\nendstream\nendobj\n",
+            inner.len() + 1
+        ));
+        out.push_str("trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n");
+
+        let (streams, report) =
+            redact_to_streams(open_arc(out.into_bytes()), &[area(0.0, 45.0, 400.0, 65.0)]);
+        assert!(!streams.contains("SECRET"), "got: {streams}");
+        assert_eq!(
+            report.warnings,
+            vec![
+                RedactionWarning::RepeatedForm {
+                    form: b"Fm0".to_vec(),
+                    placements: MAX_PLACEMENTS,
+                },
+                RedactionWarning::RepeatedForm {
+                    form: b"Fm1".to_vec(),
+                    placements: MAX_PLACEMENTS,
+                },
+            ]
+        );
+    }
+
+    /// `SECRET` in `Fm1`, drawn only through `Fm0`, which the page draws at
+    /// page y 0 and again 150 points up.
+    fn bytes_of_nested() -> Vec<u8> {
+        b"%PDF-1.7\n\
 1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
 2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
 3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300]\n\
@@ -2283,35 +5995,8 @@ endstream\nendobj\n\
    /Resources << /Font << /F0 6 0 R >> >> /Length 39 >>\nstream\n\
 BT /F0 12 Tf 10 50 Td (SECRET) Tj ET\n\
 endstream\nendobj\n\
-trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n";
-
-        let doc = Arc::new(CosDocument::open(bytes).expect("it opens"));
-        assert!(
-            all_streams(&doc).contains("SECRET"),
-            "the needle starts present"
-        );
-
-        let over_the_second = Redaction {
-            area: Rect {
-                x0: 0.0,
-                y0: 190.0,
-                x1: 400.0,
-                y1: 230.0,
-            },
-            mark: false,
-        };
-
-        let (streams, report) = redact_to_streams(doc, &[over_the_second]);
-        assert_eq!(report.glyphs, 6, "the inner form was measured at depth two");
-        assert!(!streams.contains("SECRET"), "got: {streams}");
-        assert_eq!(
-            report.warnings,
-            vec![RedactionWarning::RepeatedForm {
-                form: b"Fm1".to_vec(),
-                placements: 2,
-            }],
-            "the form the cut was made in is the one named, not its parent"
-        );
+trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n"
+            .to_vec()
     }
 
     /// An image drawn twice and covered only at its **second** placement is
@@ -2384,6 +6069,92 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n";
         let doc = Arc::new(CosDocument::open(bytes).expect("it opens"));
         let (_, report) = redact_to_streams(doc, &[second_word()]);
         assert_eq!(report.glyphs, 0, "there is no text, and it terminated");
+    }
+
+    /// A page drawing `/Fm1`, which draws `/Fm2`, and so on down to
+    /// `/Fm{levels}`, which draws `PUBLIC SECRET` in Helvetica at 12 points
+    /// from (10, 50) — the line [`document`] draws, at the bottom of a chain.
+    fn nested(levels: u32) -> Arc<CosDocument> {
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 100]\n\
+             /Resources << /XObject << /Fm1 10 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+        );
+        out.push_str("4 0 obj\n<< /Length 8 >>\nstream\n/Fm1 Do\nendstream\nendobj\n");
+        out.push_str("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
+        for level in 1..=levels {
+            let body = if level == levels {
+                "BT /F0 12 Tf 10 50 Td (PUBLIC SECRET) Tj ET".to_string()
+            } else {
+                format!("/Fm{} Do", level + 1)
+            };
+            out.push_str(&format!(
+                "{} 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 100]\n\
+                 /Resources << /XObject << /Fm{} {} 0 R >> /Font << /F0 5 0 R >> >>\n\
+                 /Length {} >>\nstream\n{body}\nendstream\nendobj\n",
+                9 + level,
+                level + 1,
+                10 + level,
+                body.len() + 1
+            ));
+        }
+        out.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+            10 + levels
+        ));
+        Arc::new(CosDocument::open(out.into_bytes()).expect("it opens"))
+    }
+
+    fn plain_text(bytes: Vec<u8>) -> String {
+        crate::Document::open(bytes)
+            .expect("it opens")
+            .page(0)
+            .expect("the page")
+            .text()
+            .plain_text()
+    }
+
+    /// Text sixteen forms down — as deep as this engine's interpreter draws
+    /// — is redacted. Until October 2026 the walk stopped at thirteen, and
+    /// this line stayed on the page, extracted and drawn, with `glyphs: 0`
+    /// and no warning.
+    #[test]
+    fn text_as_deep_in_forms_as_the_renderer_draws_is_redacted() {
+        let doc = nested(16);
+        let before = plain_text(doc.bytes().to_vec());
+        assert!(
+            before.contains("PUBLIC SECRET"),
+            "the renderer draws all sixteen levels: {before:?}"
+        );
+        let (bytes, report) = redact(doc, &[second_word()]);
+        assert_eq!(report.glyphs, 6, "SECRET, sixteen forms down");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let text = plain_text(bytes.clone());
+        assert!(
+            text.contains("PUBLIC") && !text.contains("SECRET"),
+            "{text:?}"
+        );
+        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+        assert!(!streams.contains("SECRET"), "{streams}");
+    }
+
+    /// The other side of the same line, pinned so that the two limits cannot
+    /// drift apart unseen: seventeen levels down the interpreter draws
+    /// nothing, and the walk still measures — the one level it goes past the
+    /// renderer, toward removal — so a renderer that one day draws deeper
+    /// fails this before it leaves a redaction behind.
+    #[test]
+    fn the_renderer_draws_no_deeper_than_the_walk_measures() {
+        let doc = nested(17);
+        let before = plain_text(doc.bytes().to_vec());
+        assert!(
+            !before.contains("SECRET"),
+            "the interpreter stops at sixteen: {before:?}"
+        );
+        let (_, report) = redact(doc, &[second_word()]);
+        assert_eq!(report.glyphs, 6, "the walk measured the seventeenth level");
     }
 
     /// A form that invokes itself under a transform that **moves each round**
@@ -2515,6 +6286,166 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
         );
     }
 
+    /// A form, as object `number`, showing `glyphs` boxed glyphs one point
+    /// wide along y 50 — glyph `j` at x `j` — and then an inline image of
+    /// `filler` samples well clear of any rectangle near the origin, which
+    /// every cut carries back whole: so each cut is as large as `filler`
+    /// says.
+    fn wide_form(number: u32, glyphs: usize, filler: usize) -> Vec<u8> {
+        let mut form = Vec::new();
+        for j in 0..glyphs {
+            form.extend_from_slice(format!("BT /F0 1 Tf {j} 50 Td (A) Tj ET\n").as_bytes());
+        }
+        form.extend_from_slice(
+            format!("q 1 0 0 1 190 190 cm BI /W {filler} /H 1 /CS /G /BPC 8 ID ").as_bytes(),
+        );
+        form.extend(std::iter::repeat_n(0u8, filler));
+        form.extend_from_slice(b" EI Q");
+        let mut out = format!(
+            "{number} 0 obj\n<< /Type /XObject /Subtype /Form /BBox [-50 0 250 200]\n\
+             /Resources << /Font << /F0 4 0 R >> >> /Length {} >>\nstream\n",
+            form.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(&form);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+        out
+    }
+
+    /// A page drawing `/Fm0` `placements` times, placement `i` moved `i`
+    /// points left, so a rectangle over x 0.25..0.75 covers the form's glyph
+    /// `i` at placement `i` and no other: as many distinct cuts as
+    /// placements, of `filler` bytes or so each ([`wide_form`]), and every
+    /// one the same length. With `second`, the page then draws `/Fm1` — two
+    /// glyphs and that many samples — twice, cut at a different glyph at
+    /// each.
+    fn forty_cuts(placements: usize, filler: usize, second: Option<usize>) -> (Vec<u8>, Redaction) {
+        let mut page: String = (0..placements)
+            .map(|i| format!("q 1 0 0 1 -{i} 0 cm /Fm0 Do Q\n"))
+            .collect();
+        if second.is_some() {
+            page.push_str("/Fm1 Do q 1 0 0 1 -1 0 cm /Fm1 Do Q\n");
+        }
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"%PDF-1.7\n");
+        out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+              /Resources << /Font << /F0 4 0 R >> /XObject << /Fm0 8 0 R /Fm1 9 0 R >> >>\n\
+              /Contents 7 0 R >>\nendobj\n",
+        );
+        out.extend_from_slice(
+            super::tests_support::boxed_font(4, super::tests_support::DEFAULT_FONT_MATRIX)
+                .as_bytes(),
+        );
+        out.extend_from_slice(
+            super::tests_support::stream_object(5, super::tests_support::BOX_PROCEDURE).as_bytes(),
+        );
+        out.extend_from_slice(super::tests_support::stream_object(7, &page).as_bytes());
+        out.extend_from_slice(&wide_form(8, 40, filler));
+        if let Some(filler) = second {
+            out.extend_from_slice(&wide_form(9, 2, filler));
+        }
+        out.extend_from_slice(b"trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n");
+
+        let over = Redaction {
+            area: Rect {
+                x0: 0.25,
+                y0: 49.5,
+                x1: 0.75,
+                y1: 51.5,
+            },
+            mark: false,
+        };
+        (out, over)
+    }
+
+    /// [`MAX_FORM_COPY_BYTES`] fires: forty cuts of a mebibyte each are more
+    /// than a redaction holds, so the form lets its cuts go and is cut in
+    /// place, every placement's glyph gone from the one stream and the
+    /// widened cut named. What it let go is given back: `/Fm1`, drawn after
+    /// it with two cuts of three quarters of a mebibyte, is still cut
+    /// exactly, a copy for its second placement. Below the budget the first
+    /// page is cut exactly too, a copy per placement, and nothing is named.
+    ///
+    /// Until October 2026 there was no budget: every distinct cut of every
+    /// form was held to the end of the walk and cloned into the editor, up
+    /// to [`MAX_PLACEMENTS`] copies of a stream as long as the decoder
+    /// allows.
+    #[test]
+    fn a_walk_past_its_copy_budget_cuts_the_form_in_place() {
+        let (bytes, over) = forty_cuts(40, 1 << 20, Some(768 << 10));
+        let (after, report) = redact(open_arc(bytes), &[over]);
+        assert_eq!(report.glyphs, 42, "glyph i at placement i, forty-two times");
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::RepeatedForm {
+                form: b"Fm0".to_vec(),
+                placements: 40,
+            }]
+        );
+        let doc = CosDocument::open(after).expect("it reopens");
+        assert_eq!(
+            super::tests_support::forms_in(&doc),
+            3,
+            "/Fm0 cut in place, /Fm1 and its copy"
+        );
+
+        let (bytes, over) = forty_cuts(40, 1 << 10, None);
+        let (after, report) = redact(open_arc(bytes), &[over]);
+        assert_eq!(report.glyphs, 40);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let doc = CosDocument::open(after).expect("it reopens");
+        assert_eq!(
+            super::tests_support::forms_in(&doc),
+            40,
+            "a copy per placement"
+        );
+    }
+
+    /// The budget is held to the cut: forty cuts that fit in
+    /// [`MAX_FORM_COPY_BYTES`] are cut exactly, and forty that pass it by
+    /// less than one cut are not — the fortieth is the one it cannot pay
+    /// for, and is refused before it is held rather than after.
+    ///
+    /// Every cut of [`forty_cuts`] is the same length, `filler` plus what
+    /// the forty glyph runs rewrite to, and that overhead is measured here
+    /// rather than assumed: one placement's cut, written back in place, is
+    /// one cut. The probe's filler has as many digits as the two below, so
+    /// `/W` writes the same width in all three.
+    #[test]
+    fn the_copy_budget_is_held_to_the_cut() {
+        let probe = 500_000;
+        let (bytes, over) = forty_cuts(1, probe, None);
+        let (after, _) = redact(open_arc(bytes), &[over]);
+        let doc = CosDocument::open(after).expect("it reopens");
+        let cut = doc
+            .stream_decoded(ObjRef::new(8, 0))
+            .expect("the form decodes")
+            .len();
+        let overhead = cut - probe;
+
+        // Forty cuts of exactly the budget's fortieth, and forty of one byte
+        // more than its fortieth: the first fits, the second passes it in
+        // its fortieth cut and in nothing before.
+        let fits = MAX_FORM_COPY_BYTES / 40;
+        let passes = MAX_FORM_COPY_BYTES / 40 + 1;
+        assert!(39 * passes <= MAX_FORM_COPY_BYTES && 40 * passes > MAX_FORM_COPY_BYTES);
+        for (each, named) in [(fits, false), (passes, true)] {
+            let (bytes, over) = forty_cuts(40, each - overhead, None);
+            let (_, report) = redact(open_arc(bytes), &[over]);
+            assert_eq!(report.glyphs, 40);
+            assert_eq!(
+                !report.warnings.is_empty(),
+                named,
+                "cuts of {each} bytes: {:?}",
+                report.warnings
+            );
+        }
+    }
+
     /// An image under a redaction is scrubbed, not covered. A rectangle
     /// painted over a photograph removes nothing at all: the samples stay in
     /// the file for anyone who decompresses it.
@@ -2572,6 +6503,254 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
             !streams.contains("SECRETPIXEL"),
             "and its samples are gone from every stream: {streams}"
         );
+    }
+
+    /// A page with an inline image of four gray samples at x 100..150,
+    /// y 100..150, and `SECRET` in the boxed Type 3 font at x 10..70, y 10..20.
+    fn inline_image_page(dictionary: &str) -> Vec<u8> {
+        let mut content = format!("q 50 0 0 50 100 100 cm BI {dictionary} ID ").into_bytes();
+        content.extend_from_slice(&[0x10, 0x20, 0x30, 0x40]);
+        content.extend_from_slice(b" EI Q BT /F0 10 Tf 10 10 Td (SECRET) Tj ET");
+        let body = String::from_utf8(content).expect("ASCII");
+        super::tests_support::boxed_glyph_document(
+            200.0,
+            200.0,
+            super::tests_support::DEFAULT_FONT_MATRIX,
+            &body,
+        )
+    }
+
+    /// An inline image on a redacted page comes back **byte for byte**.
+    ///
+    /// 8.9.7's samples are not tokens. Until September 2026 the rewrite
+    /// tokenized them like the rest of the stream and wrote back whatever
+    /// tokens they spelled: these four samples — a control byte, a space, a
+    /// `0` and an `@` — came back as three bytes, and every inline image on
+    /// every redacted page was corrupted, the redaction reporting success.
+    #[test]
+    fn an_inline_image_is_carried_through_a_rewrite_byte_for_byte() {
+        let bytes = inline_image_page("/W 2 /H 2 /CS /G /BPC 8");
+        let text = Rect {
+            x0: 0.0,
+            y0: 5.0,
+            x1: 200.0,
+            y1: 25.0,
+        };
+        let before = super::tests_support::render(bytes.clone());
+
+        let (after, report) = redact(
+            Arc::new(CosDocument::open(bytes).expect("it opens")),
+            &[Redaction {
+                area: text,
+                mark: false,
+            }],
+        );
+        assert_eq!((report.glyphs, report.images), (6, 0));
+        let streams = all_streams(&CosDocument::open(after.clone()).expect("it reopens"));
+        assert!(
+            streams.contains("ID \u{10} 0@ EI"),
+            "the samples are there as they were: {streams:?}"
+        );
+        assert_eq!(
+            super::tests_support::differing_outside(
+                &before,
+                &super::tests_support::render(after),
+                200.0,
+                text
+            ),
+            0,
+            "and the image draws exactly as it did"
+        );
+    }
+
+    /// An inline image under a rectangle is scrubbed, as an XObject image is:
+    /// whole, to one blank sample, and counted.
+    #[test]
+    fn an_inline_image_under_a_redaction_is_scrubbed() {
+        for (dictionary, what) in [
+            ("/W 2 /H 2 /CS /G /BPC 8", "an image"),
+            ("/IM true /W 2 /H 2 /BPC 1", "a stencil mask"),
+        ] {
+            let bytes = inline_image_page(dictionary);
+            let over = Rect {
+                x0: 120.0,
+                y0: 120.0,
+                x1: 130.0,
+                y1: 130.0,
+            };
+            let image = Rect {
+                x0: 101.0,
+                y0: 101.0,
+                x1: 149.0,
+                y1: 149.0,
+            };
+            assert!(
+                super::tests_support::ink_in(
+                    &super::tests_support::render(bytes.clone()),
+                    200.0,
+                    image
+                ) > 0,
+                "{what} starts inked"
+            );
+
+            let (after, report) = redact(
+                Arc::new(CosDocument::open(bytes).expect("it opens")),
+                &[Redaction {
+                    area: over,
+                    mark: false,
+                }],
+            );
+            assert_eq!((report.glyphs, report.images), (0, 1), "{what}");
+            let streams = all_streams(&CosDocument::open(after.clone()).expect("it reopens"));
+            assert!(
+                !streams.contains("\u{10} 0@"),
+                "{what}'s samples are gone: {streams:?}"
+            );
+            // A stencil stays a stencil: a gray sample in its place would
+            // paint a white square over whatever the mask left showing.
+            assert_eq!(
+                streams.contains("BI /IM true /W 1 /H 1 /BPC 1 ID"),
+                dictionary.starts_with("/IM"),
+                "{what} is replaced by its own kind: {streams:?}"
+            );
+            assert_eq!(
+                super::tests_support::ink_in(&super::tests_support::render(after), 200.0, image),
+                0,
+                "{what} draws nothing"
+            );
+        }
+    }
+
+    /// A page whose form `/Fm0` (object 8) draws a two-by-two inline image
+    /// over (100, 100)–(150, 150) of its own space, then `form_tail`. The
+    /// page's content is `page`, and `page_extra` is written into the page
+    /// dictionary — an `/Annots` array that shows the same form as an
+    /// appearance, for one.
+    fn inline_image_form_document(page: &str, form_tail: &str, page_extra: &str) -> Vec<u8> {
+        let mut form = b"q 50 0 0 50 100 100 cm BI /W 2 /H 2 /CS /G /BPC 8 ID ".to_vec();
+        form.extend_from_slice(&[0x10, 0x20, 0x30, 0x40]);
+        form.extend_from_slice(b" EI Q ");
+        form.extend_from_slice(form_tail.as_bytes());
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"%PDF-1.7\n");
+        out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.extend_from_slice(
+            format!(
+                "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+                 /Resources << /XObject << /Fm0 8 0 R >> >> /Contents 7 0 R {page_extra} >>\n\
+                 endobj\n"
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(super::tests_support::stream_object(7, page).as_bytes());
+        out.extend_from_slice(
+            format!(
+                "8 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 200 200]\n\
+                 /Resources << /XObject << /Fm0 8 0 R >> >> /Length {} >>\nstream\n",
+                form.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(&form);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+        out.extend_from_slice(b"trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n");
+        out
+    }
+
+    /// An inline image a **form** draws is scrubbed when a rectangle covers
+    /// it — at a form drawn once, at one drawn twice with both placements
+    /// covered, in an annotation's appearance, and in a form that draws
+    /// itself, which is cut the old way.
+    ///
+    /// Until October 2026 a form's cut counted as a change only when it
+    /// removed a glyph: the scrubbed image was in the cut data, and the
+    /// form's own object was never written, so the samples stayed in the
+    /// file and drew where they were, and the report said `images: 0`. Only
+    /// a form placed twice with the placements cut *differently* happened to
+    /// write the scrub, as a copy.
+    #[test]
+    fn an_inline_image_a_form_draws_under_a_redaction_is_scrubbed() {
+        let annotation = "/Annots [<< /Type /Annot /Subtype /Square /Rect [0 0 200 200] \
+                          /AP << /N 8 0 R >> >>]";
+        for (page, tail, extra, what) in [
+            ("/Fm0 Do", "", "", "a form drawn once"),
+            (
+                "/Fm0 Do q 1 0 0 1 0.5 0 cm /Fm0 Do Q",
+                "",
+                "",
+                "a form drawn twice, both placements covered",
+            ),
+            ("", "", annotation, "an annotation's appearance"),
+            ("/Fm0 Do", "/Fm0 Do", "", "a form that draws itself"),
+        ] {
+            let bytes = inline_image_form_document(page, tail, extra);
+            let over = Rect {
+                x0: 120.0,
+                y0: 120.0,
+                x1: 130.0,
+                y1: 130.0,
+            };
+            let image = Rect {
+                x0: 101.0,
+                y0: 101.0,
+                x1: 149.0,
+                y1: 149.0,
+            };
+            assert!(
+                super::tests_support::ink_in(
+                    &super::tests_support::render(bytes.clone()),
+                    200.0,
+                    image
+                ) > 0,
+                "{what}: the image starts inked"
+            );
+
+            let (after, report) = redact(
+                Arc::new(CosDocument::open(bytes).expect("it opens")),
+                &[Redaction {
+                    area: over,
+                    mark: false,
+                }],
+            );
+            assert_eq!(report.images, 1, "{what}: {report:?}");
+            let streams = all_streams(&CosDocument::open(after.clone()).expect("it reopens"));
+            assert!(
+                !streams.contains("\u{10} 0@"),
+                "{what}: the samples are gone: {streams:?}"
+            );
+            assert_eq!(
+                super::tests_support::ink_in(&super::tests_support::render(after), 200.0, image),
+                0,
+                "{what}: the image draws nothing"
+            );
+        }
+    }
+
+    /// An inline image already scrubbed is not scrubbed again: a second
+    /// redaction over it reports nothing removed, because nothing was.
+    #[test]
+    fn an_inline_image_already_blank_is_not_counted_again() {
+        let bytes = inline_image_page("/W 2 /H 2 /CS /G /BPC 8");
+        let over = Redaction {
+            area: Rect {
+                x0: 120.0,
+                y0: 120.0,
+                x1: 130.0,
+                y1: 130.0,
+            },
+            mark: false,
+        };
+        let (once, first) = redact(
+            Arc::new(CosDocument::open(bytes).expect("it opens")),
+            &[over],
+        );
+        let (_, second) = redact(
+            Arc::new(CosDocument::open(once).expect("it reopens")),
+            &[over],
+        );
+        assert_eq!((first.images, second.images), (1, 0));
     }
 
     /// An image the redaction does not touch is left alone. Scrubbing every
@@ -2665,15 +6844,234 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
         assert!(!streams.contains("BBB"), "the middle word is gone");
     }
 
+    /// A form whose content was **compressed** is written back as a stream
+    /// that decodes.
+    ///
+    /// The rewrite hands the writer plain operators, and until September 2026
+    /// it handed them over with the file's own stream dictionary, so a
+    /// `/FlateDecode` form kept its `/Filter` over bytes that were never
+    /// deflated. The saved file then carried a stream no reader can decode:
+    /// the form drew nothing — the text nobody asked to remove included — and
+    /// the strict validator names it (7.4). Every level is asserted, because
+    /// the failure showed at all of them: the validator, the streams,
+    /// extraction and the ink. Both writer settings too, since `compress`
+    /// is the path that would have encoded plain bytes and so hidden the
+    /// defect on half the saves.
+    #[test]
+    fn a_compressed_form_is_written_back_as_a_stream_that_decodes() {
+        use super::tests_support::{compressed_form_document, ink_in, open, render};
+
+        // Ten-point boxes one em wide from x 20: `PUBLIC` is x 20..80 and
+        // `SECRET` is x 80..140, all on y 100..110. The Helvetica line below
+        // is for the extractor: `PUBLIC ` ends near x 59 at ten point.
+        let doc = open(compressed_form_document(
+            "BT /F0 10 Tf 20 100 Td (PUBLICSECRET) Tj ET \
+             BT /F1 10 Tf 20 50 Td (PUBLIC SECRET) Tj ET",
+        ));
+        assert!(
+            all_streams(&doc).contains("PUBLICSECRET"),
+            "the needle starts present, compressed"
+        );
+        let band = Redaction {
+            area: Rect {
+                x0: 82.0,
+                y0: 95.0,
+                x1: 150.0,
+                y1: 115.0,
+            },
+            mark: false,
+        };
+
+        let line = Redaction {
+            area: Rect {
+                x0: 60.0,
+                y0: 45.0,
+                x1: 150.0,
+                y1: 65.0,
+            },
+            mark: false,
+        };
+
+        for compress in [false, true] {
+            let mut editor = DocumentEditor::new(Arc::clone(&doc));
+            let report = apply(&mut editor, 0, &[band, line]).expect("the page exists");
+            assert_eq!(report.glyphs, 12, "SECRET twice, measured inside the form");
+            let bytes = editor.save(&WriteOptions {
+                mode: WriteMode::Rewrite,
+                compress,
+                ..WriteOptions::default()
+            });
+
+            let reopened = CosDocument::open(bytes.clone()).expect("it reopens");
+            let defects = tinker_pdf_cos::validate(&reopened);
+            assert!(
+                defects.is_empty(),
+                "the saved file is clean (compress: {compress}): {defects:?}"
+            );
+            let streams = all_streams(&reopened);
+            assert!(!streams.contains("SECRET"), "got: {streams}");
+            assert!(streams.contains("PUBLIC"), "got: {streams}");
+
+            let text = crate::Document::open(bytes.clone())
+                .expect("it reopens")
+                .page(0)
+                .expect("a page")
+                .text()
+                .plain_text();
+            assert!(
+                text.contains("PUBLIC") && !text.contains("SECRET"),
+                "the form still draws what it kept (compress: {compress}): {text:?}"
+            );
+
+            let bitmap = render(bytes);
+            assert_eq!(ink_in(&bitmap, 200.0, band.area), 0, "no ink under it");
+            assert!(
+                ink_in(
+                    &bitmap,
+                    200.0,
+                    Rect {
+                        x0: 22.0,
+                        y0: 102.0,
+                        x1: 78.0,
+                        y1: 108.0,
+                    }
+                ) > 100,
+                "and the first word still renders (compress: {compress})"
+            );
+        }
+    }
+
     /// A content stream the tokenizer cannot make sense of must come back
     /// intact rather than truncated — never fail the page (ruling 2).
     #[test]
     fn garbage_content_survives_the_rewrite() {
         let fonts = HashMap::new();
         let content = b"q 1 0 0 1 0 0 cm ) ) ) >> BI garbage EI Q";
-        let (out, report, _) = rewrite(content, &[second_word()], &fonts, Matrix::IDENTITY);
+        let (out, report, _) = rewrite(
+            content,
+            &[second_word()],
+            &[&fonts],
+            Matrix::IDENTITY,
+            &mut Procedures::default(),
+            &|_| false,
+        );
         assert_eq!(report, RedactionReport::default());
         assert!(out.contains(&b'q'), "the operators survive");
+    }
+
+    /// The page `import_page` copied in, its font numbered past everything
+    /// the file has: the font object is the editor's alone.
+    ///
+    /// The font is no standard face, so its only metrics are its `/Widths`,
+    /// and they are an object of their own: a reader that resolved the font
+    /// dictionary through the editor and what it reaches through the file
+    /// would place every glyph at the run's start, and cut nothing.
+    fn editor_with_an_imported_page() -> (DocumentEditor, ObjRef) {
+        let content = "BT /F9 12 Tf 10 50 Td (PUBLIC SECRET) Tj ET";
+        let widths = vec!["1000"; 59].join(" ");
+        let source = format!(
+            "%PDF-1.7\n\
+             1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+             2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+             3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 100]\n\
+             /Resources << /Font << /F9 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+             4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+             5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Monospaced\n\
+             /FirstChar 32 /LastChar 90 /Widths 6 0 R >>\nendobj\n\
+             6 0 obj\n[{widths}]\nendobj\n\
+             trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
+            content.len() + 1
+        );
+        let source = CosDocument::open(source.into_bytes()).expect("it opens");
+        let mut editor = DocumentEditor::new(document("PUBLIC"));
+        editor
+            .import_page(&source, 0, 1)
+            .expect("the page is imported");
+        let page = editor.page_refs()[1];
+        let page = editor.get(page).expect("the imported page");
+        let resources =
+            Resolve::resolve_key(&editor, page.as_dict().expect("a page"), Name::RESOURCES);
+        let fonts = Resolve::resolve_key(
+            &editor,
+            resources.as_dict().expect("resources"),
+            editor.intern(b"Font"),
+        );
+        let font = fonts
+            .as_dict()
+            .and_then(|fonts| fonts.get_ref(editor.intern(b"F9")))
+            .expect("the font is an object of its own");
+        (editor, font)
+    }
+
+    /// Clause (c) of the ROADMAP's Editing row: a run in a font only the
+    /// editor holds is measured through the editor and cut, where until
+    /// October 2026 it was left whole as `UnknownFont` because fonts alone
+    /// were read from the file.
+    #[test]
+    fn a_run_in_a_font_only_the_editor_holds_is_cut() {
+        let (mut editor, font) = editor_with_an_imported_page();
+        assert!(
+            editor
+                .document()
+                .get(font)
+                .map_or(true, |object| object.is_null()),
+            "the file does not have the font, or the test proves nothing"
+        );
+        // At its own widths, one em each, `SECRET` stands from x = 94 to 166
+        // and `PUBLIC` ends at 82; at any other a reader would substitute,
+        // the word starts well left of this band and part of it survives.
+        let band = Redaction {
+            area: Rect {
+                x0: 92.0,
+                y0: 45.0,
+                x1: 400.0,
+                y1: 70.0,
+            },
+            mark: false,
+        };
+        let report = apply(&mut editor, 1, &[band]).expect("the page exists");
+        assert!(report.glyphs > 0, "glyphs were removed");
+        assert!(
+            report.warnings.is_empty(),
+            "nothing left unmeasured: {:?}",
+            report.warnings
+        );
+        let bytes = editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        });
+        let reopened = CosDocument::open(bytes.clone()).expect("it reopens");
+        let streams = all_streams(&reopened);
+        assert_eq!(streams.matches("PUBLIC").count(), 2, "{streams}");
+        // Every string either page's stream still shows, `PUBLIC` taken out
+        // of it: no letter of `SECRET` in any piece of any spelling.
+        let rest = super::tests_support::literals(&streams).replace("PUBLIC", "");
+        assert!(
+            !rest.chars().any(|c| "SECRET".contains(c)),
+            "no letter of it survives: {rest:?} in {streams}"
+        );
+        let text = crate::Document::open(bytes)
+            .expect("it reopens")
+            .page(1)
+            .expect("the imported page")
+            .text()
+            .plain_text();
+        assert_eq!(text.trim(), "PUBLIC", "the extractor reads what is left");
+    }
+
+    /// The same run through the file's own font reader names the font it
+    /// cannot find: the difference the editor's view makes is the whole of
+    /// clause (c), so it is pinned from both sides.
+    #[test]
+    fn the_file_alone_does_not_have_the_imported_font() {
+        let (editor, _) = editor_with_an_imported_page();
+        let page = editor.page_refs()[1];
+        let page = editor.get(page).expect("the imported page");
+        let resources =
+            Resolve::resolve_key(&editor, page.as_dict().expect("a page"), Name::RESOURCES);
+        let resources = resources.as_dict().expect("resources");
+        assert!(cos_font::from_resources(editor.document(), resources).is_empty());
+        assert_eq!(fonts_in(&editor, resources).len(), 1);
     }
 }
 
@@ -3150,11 +7548,16 @@ mod rotated_runs {
     /// faces differ, which is the "approximately right" cut this whole module
     /// refuses.
     ///
-    /// Inside the pair the font is a Type 3 face with a non-default
-    /// `/FontMatrix`, which redaction refuses to measure. The run after the
-    /// `Q` names no font of its own — the `Tf` before the `q` is the one that
-    /// still applies — so a selection that leaked past the `Q` would refuse
-    /// the outer run too and cut nothing.
+    /// Inside the pair the font is a Type 3 face whose glyph space is ten
+    /// times the conventional one, so each of its glyphs is ten ems wide. The
+    /// run after the `Q` names no font of its own — the `Tf` before the `q`
+    /// is the one that still applies — so a selection that leaked past the
+    /// `Q` would measure the outer run a hundred points a glyph, and the band
+    /// over `SECRET` would take `P` and `U` instead.
+    ///
+    /// Until September 2026 the inner face was one redaction refused to
+    /// measure, and the leak showed as a refusal in the report; it shows in
+    /// the geometry now, which is where the cut is.
     #[test]
     fn a_font_selected_inside_a_q_does_not_outlive_it() {
         let doc = open(two_font_document(
@@ -3163,15 +7566,17 @@ mod rotated_runs {
              BT 0 1 -1 0 100 20 Tm (PUBLICSECRET) Tj ET",
         ));
 
-        let (_, report) = redact(doc, &[upper_band()]);
+        let (bytes, report) = redact(doc, &[upper_band()]);
         assert_eq!(report.glyphs, 6, "the outer run was measured and cut");
-        assert_eq!(
-            report.warnings,
-            vec![RedactionWarning::RescaledType3Font {
-                font: b"F1".to_vec(),
-                bytes: 6,
-            }],
-            "and only the inner run was refused"
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+        assert!(
+            streams.contains("PUBLIC") && !streams.contains("SECRET"),
+            "the six it cut were SECRET's: {streams}"
+        );
+        assert!(
+            streams.contains("INSIDE"),
+            "and the inner run, whose ten-em glyphs start above the band, is whole"
         );
     }
 }
@@ -3199,78 +7604,6 @@ mod refusals {
             },
             mark: false,
         }
-    }
-
-    /// 9.4.4's vertical branch: the pen advances downward by `/W2`'s `w1`,
-    /// and a `TJ` number displaces along that axis too.
-    ///
-    /// This is the class that arrived *with* the rotation cut rather than
-    /// surviving it. A vertical run's text matrix is perfectly ordinary, so
-    /// the old rotation guard never looked at it, and every vertical run on
-    /// every page was being measured left to right and cut from the result.
-    #[test]
-    fn a_vertical_run_is_left_uncut_and_reported() {
-        let doc = open(vertical_document("BT /F0 10 Tf 100 100 Td (SECRET) Tj ET"));
-        assert!(all_streams(&doc).contains("SECRET"));
-
-        let (bytes, report) = redact(doc, &[everywhere()]);
-        assert_eq!(report.glyphs, 0, "nothing was cut");
-        assert_eq!(
-            report.warnings,
-            vec![RedactionWarning::VerticalRun {
-                font: b"F0".to_vec(),
-                bytes: 6,
-            }],
-            "and the caller was told which font and how much"
-        );
-
-        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
-        assert!(
-            streams.contains("SECRET"),
-            "the run is intact rather than half-removed: {streams}"
-        );
-    }
-
-    /// 9.6.5: a Type 3 font's `/Widths` are in its own glyph space.
-    ///
-    /// `/FontMatrix [0.01 0 0 0.01 0 0]` makes every advance ten times what
-    /// this module's `width / 1000` computes, so the third glyph is already a
-    /// full em from where the rectangle thinks it is.
-    #[test]
-    fn a_rescaled_type3_font_is_left_uncut_and_reported() {
-        let doc = open(boxed_glyph_document(
-            200.0,
-            200.0,
-            "[0.01 0 0 0.01 0 0]",
-            "BT /F0 10 Tf 10 100 Td (SECRET) Tj ET",
-        ));
-        assert!(all_streams(&doc).contains("SECRET"));
-
-        let (bytes, report) = redact(doc, &[everywhere()]);
-        assert_eq!(report.glyphs, 0, "nothing was cut");
-        assert_eq!(
-            report.warnings,
-            vec![RedactionWarning::RescaledType3Font {
-                font: b"F0".to_vec(),
-                bytes: 6,
-            }]
-        );
-        assert!(all_streams(&CosDocument::open(bytes).expect("it reopens")).contains("SECRET"));
-    }
-
-    /// The same font with the conventional matrix is measured and cut, which
-    /// is what says the refusal is about the matrix and not about Type 3.
-    #[test]
-    fn a_type3_font_with_the_conventional_matrix_is_cut() {
-        let doc = open(boxed_glyph_document(
-            200.0,
-            200.0,
-            DEFAULT_FONT_MATRIX,
-            "BT /F0 10 Tf 10 100 Td (SECRET) Tj ET",
-        ));
-        let (_, report) = redact(doc, &[everywhere()]);
-        assert_eq!(report.glyphs, 6);
-        assert!(report.warnings.is_empty());
     }
 
     /// A `Tf` naming a font the resource dictionary does not have leaves the
@@ -3335,31 +7668,627 @@ mod refusals {
     }
 
     /// A refusal is about a rectangle, so with no rectangles there is nothing
-    /// to refuse. Warning on every vertical run of every page a caller merely
-    /// opened would make the list say nothing.
+    /// to refuse. Warning on every unmeasurable run of every page a caller
+    /// merely opened would make the list say nothing.
+    ///
+    /// Written over a vertical run until September 2026, when vertical runs
+    /// stopped being refused; a font that is not in scope is the refusal now.
     #[test]
     fn nothing_is_refused_when_there_is_nothing_to_redact() {
-        let doc = open(vertical_document("BT /F0 10 Tf 100 100 Td (SECRET) Tj ET"));
+        let doc = open(boxed_glyph_document(
+            200.0,
+            200.0,
+            DEFAULT_FONT_MATRIX,
+            "BT /Missing 10 Tf 100 100 Td (SECRET) Tj ET",
+        ));
         let (_, report) = redact(doc, &[]);
         assert_eq!(report, RedactionReport::default());
     }
 
     /// Warnings with the same cause and the same font merge, so a page of
-    /// vertical text yields one entry rather than one per operator.
+    /// text in a font that is not in scope yields one entry rather than one
+    /// per operator.
     #[test]
     fn refusals_of_the_same_cause_and_font_merge() {
-        let doc = open(vertical_document(
-            "BT /F0 10 Tf 100 100 Td (SECRET) Tj 0 -12 Td (AGAIN) Tj ET",
+        let doc = open(boxed_glyph_document(
+            200.0,
+            200.0,
+            DEFAULT_FONT_MATRIX,
+            "BT /Missing 10 Tf 100 100 Td (SECRET) Tj 0 -12 Td (AGAIN) Tj ET",
         ));
         let (_, report) = redact(doc, &[everywhere()]);
         assert_eq!(
             report.warnings,
-            vec![RedactionWarning::VerticalRun {
-                font: b"F0".to_vec(),
+            vec![RedactionWarning::UnknownFont {
+                font: b"Missing".to_vec(),
                 bytes: 11,
             }],
             "one entry, carrying both runs' operand lengths"
         );
+    }
+}
+
+/// Vertical runs (9.7.4.3), which this module refused until September 2026.
+///
+/// # What is adjudicated by what
+///
+/// The fixture's font writes every one of its metrics out — `/W`, `/W2` with
+/// one glyph of a different height — so the expected column is arithmetic
+/// from 9.4.4 and 9.7.4.3 done by hand and written into the comments: glyph
+/// by glyph, where each box starts and ends. What reads the result back is
+/// this engine's own extractor, and the positions it reports are compared
+/// **with themselves**, before and after the cut: the property is that every
+/// glyph the redaction kept is exactly where it was. That is
+/// self-consistency and is labelled as such — it says the rewrite moved
+/// nothing, and it is the interpreter's placement (`interpret.rs`, `show`)
+/// that says where "where it was" is. The font has no program, so there is no
+/// ink to read; the needle bytes are read out of every decoded stream as
+/// everywhere else in this file.
+#[cfg(test)]
+mod vertical_runs {
+    use super::tests_support::*;
+    use super::*;
+
+    fn band(x0: f64, y0: f64, x1: f64, y1: f64) -> Redaction {
+        Redaction {
+            area: Rect { x0, y0, x1, y1 },
+            mark: false,
+        }
+    }
+
+    /// `PUBLICSECRET` down a column from page (100, 180), ten point.
+    ///
+    /// Each glyph advances ten points down and `I` five, so the boxes run
+    /// P 170..180, U 160..170, B 150..160, L 140..150, **I 135..140**,
+    /// C 125..135, S 115..125, E 105..115, C 95..105, R 85..95, E 75..85,
+    /// T 65..75 — all at x 95..105.
+    fn column(prefix: &str) -> Vec<u8> {
+        cid_vertical_document(&format!(
+            "BT /F0 10 Tf {prefix} 100 180 Td {} Tj ET",
+            cid_hex("PUBLICSECRET")
+        ))
+    }
+
+    /// The needle as it sits in a stream: two bytes a code.
+    fn wide(text: &str) -> String {
+        text.chars().flat_map(|c| ['\0', c]).collect()
+    }
+
+    /// What survived, in order, with where it was drawn.
+    fn kept_positions(before: &[(String, (f64, f64))], kept: &str) -> Vec<(String, (f64, f64))> {
+        let mut out = Vec::new();
+        let mut wanted = kept.chars().peekable();
+        for (text, origin) in before {
+            if wanted.peek().map(|c| c.to_string()) == Some(text.clone()) {
+                wanted.next();
+                out.push((text.clone(), *origin));
+            }
+        }
+        out
+    }
+
+    fn assert_same_places(after: &[(String, (f64, f64))], expected: &[(String, (f64, f64))]) {
+        assert_eq!(
+            after.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+            expected.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+            "the kept glyphs, in order"
+        );
+        for ((text, got), (_, want)) in after.iter().zip(expected) {
+            assert!(
+                (got.0 - want.0).abs() < 1e-6 && (got.1 - want.1).abs() < 1e-6,
+                "{text} moved from {want:?} to {got:?}"
+            );
+        }
+    }
+
+    /// **The pin, flipped.** The fixture the refusal was written against —
+    /// `Identity-V` with nothing but `/DW` — is measured and cut now, and
+    /// nothing is reported, because nothing was left unmeasured.
+    #[test]
+    fn a_vertical_run_is_measured_rather_than_refused() {
+        let doc = open(vertical_document("BT /F0 10 Tf 100 100 Td (SECRET) Tj ET"));
+        assert!(all_streams(&doc).contains("SECRET"));
+
+        let (bytes, report) = redact(doc, &[band(0.0, 0.0, 200.0, 200.0)]);
+        assert_eq!(report.glyphs, 3, "three two-byte codes: SE, CR and ET");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+        assert!(!streams.contains("SECRET"), "got: {streams}");
+    }
+
+    /// The row's exit criterion: a rectangle over part of a column cuts
+    /// exactly the glyphs it covers, and every glyph it does not cover is
+    /// still drawn exactly where it was.
+    ///
+    /// The band is y 64..124: `T`'s box (65..75) is inside it and `S`'s
+    /// (115..125) reaches into it; `C`'s (125..135) stops a point above its
+    /// top. So `SECRET` goes and `PUBLIC` stays — and a build that walked the
+    /// column horizontally would find every glyph at y 180 and cut nothing.
+    #[test]
+    fn a_vertical_run_is_cut_exactly_at_the_covered_glyphs() {
+        let bytes = column("");
+        let before = extracted(bytes.clone());
+        assert_eq!(
+            before.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+            "PUBLICSECRET",
+            "the extractor reads the column before the cut"
+        );
+
+        let secret = band(90.0, 64.0, 110.0, 124.0);
+        let (after_bytes, report) = redact(open(bytes), &[secret]);
+        assert_eq!(report.glyphs, 6, "S, E, C, R, E and T");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        let streams = all_streams(&CosDocument::open(after_bytes.clone()).expect("it reopens"));
+        assert!(!streams.contains(&wide("SECRET")), "the codes are gone");
+        assert!(
+            streams.contains(&wide("PUBLIC")),
+            "the kept codes are there"
+        );
+
+        let after = extracted(after_bytes);
+        assert_same_places(&after, &kept_positions(&before, "PUBLIC"));
+    }
+
+    /// A cut in the middle of the column leaves the tail where it was, which
+    /// is only true if the gap was emitted **down** the column and in the
+    /// vertical thousandth.
+    ///
+    /// The band (y 136..149) takes `L` (140..150) and the short `I`
+    /// (135..140) and neither neighbour: the gap is fifteen points, not
+    /// twenty, so a gap computed from `/W` or from a uniform `w1` puts the
+    /// tail five points off. The run is at `50 Tz` as well, which 9.4.4 puts
+    /// in `tx` and not in `ty`: a gap divided by `Tfs · Th` rather than `Tfs`
+    /// is emitted twice as long.
+    #[test]
+    fn removing_a_vertical_glyph_leaves_the_tail_where_it_was() {
+        let bytes = column("50 Tz");
+        let before = extracted(bytes.clone());
+
+        // At `50 Tz` the box is x 97.5..102.5; the band still spans it.
+        let (after_bytes, report) = redact(open(bytes), &[band(90.0, 136.0, 110.0, 149.0)]);
+        assert_eq!(report.glyphs, 2, "L and I");
+
+        let after = extracted(after_bytes);
+        assert_same_places(&after, &kept_positions(&before, "PUBCSECRET"));
+    }
+
+    /// A `TJ` number in a vertical run displaces **down** the column, and one
+    /// the array already carried keeps its sign and its size.
+    ///
+    /// `[P 500 SECRET]`: the adjustment carries the pen five points further
+    /// down after `P`, so `S` is 165..160 — its box 155..165 — and the band
+    /// (y 156..164) takes it alone.
+    #[test]
+    fn a_tj_number_in_a_vertical_run_keeps_its_axis() {
+        let bytes = cid_vertical_document(&format!(
+            "BT /F0 10 Tf 100 180 Td [{} 500 {}] TJ ET",
+            cid_hex("P"),
+            cid_hex("SECRET")
+        ));
+        let before = extracted(bytes.clone());
+
+        let (after_bytes, report) = redact(open(bytes), &[band(90.0, 156.0, 110.0, 164.0)]);
+        assert_eq!(report.glyphs, 1, "the S alone");
+        let streams = all_streams(&CosDocument::open(after_bytes.clone()).expect("it reopens"));
+        assert!(
+            streams.contains("500"),
+            "the adjustment came back: {streams}"
+        );
+
+        let after = extracted(after_bytes);
+        assert_same_places(&after, &kept_positions(&before, "PECRET"));
+    }
+
+    /// A vertical glyph is drawn centred on its pen — its horizontal origin
+    /// at minus the position vector, `v_x = 500` — so a rectangle over the
+    /// left half of the column covers it.
+    ///
+    /// The band is x 94..99 over `S` (y 116..124): all of it left of the
+    /// pen at x 100. A box measured from the pen rightward, as a horizontal
+    /// glyph's is, starts at x 100 and misses it.
+    #[test]
+    fn a_vertical_glyph_is_centred_on_its_pen() {
+        let (after_bytes, report) = redact(open(column("")), &[band(94.0, 116.0, 99.0, 124.0)]);
+        assert_eq!(report.glyphs, 1, "the S");
+        let after = extracted(after_bytes);
+        assert_eq!(
+            after.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+            "PUBLICECRET"
+        );
+    }
+
+    /// A vertical glyph is drawn with its horizontal origin at the pen minus
+    /// the position vector **`v` whole** (9.7.4.3), and its box goes with
+    /// it: `v_y` moves the glyph along the column as `v_x` moves it across.
+    ///
+    /// CID 80, `P`, is given its own `/W2` entry. At `v_y = 0` its
+    /// horizontal origin is the pen, (95, 100) at ten point, so the glyph
+    /// stands *above* the pen; at `v_y = 1500` its origin is fifteen points
+    /// below it. Until October 2026 the box was one advance below the pen
+    /// whatever `v_y` said — right for the default 880 — so a band over
+    /// either glyph cut nothing and reported nothing. And the cell under the
+    /// pen still counts: a two-em glyph (`w1 = -2000`, a long dash) at the
+    /// default `v_y` fills twenty points of column, ten more than the cell
+    /// measured from its origin.
+    #[test]
+    fn a_vertical_glyph_is_measured_where_its_position_vector_puts_it() {
+        // At `50 Tz` the glyph narrows about the pen and `v_y` does not
+        // shrink with it: 9.4.4 scales `v` by `Tfs`, and `Th` only across.
+        for (w1, v_y, scale, area, at) in [
+            (
+                -1000,
+                0,
+                100,
+                band(96.0, 101.0, 104.0, 109.0),
+                (95.0, 100.0),
+            ),
+            (
+                -1000,
+                1500,
+                100,
+                band(96.0, 80.0, 104.0, 89.0),
+                (95.0, 85.0),
+            ),
+            (-1000, 1500, 50, band(98.0, 80.0, 102.0, 89.0), (97.5, 85.0)),
+            (-2000, 880, 100, band(96.0, 82.0, 104.0, 88.0), (95.0, 91.2)),
+        ] {
+            let what = format!("w1 {w1}, v_y {v_y} at {scale} Tz");
+            let bytes = String::from_utf8(cid_vertical_document(&format!(
+                "BT /F0 10 Tf {scale} Tz 100 100 Td {} Tj ET",
+                cid_hex("P")
+            )))
+            .expect("ASCII")
+            .replacen(
+                "74 90 -1000 500 880]",
+                &format!("74 79 -1000 500 880 80 80 {w1} 500 {v_y} 81 90 -1000 500 880]"),
+                1,
+            )
+            .into_bytes();
+            let before = extracted(bytes.clone());
+            assert_eq!(before.len(), 1, "{what}");
+            let (text, origin) = &before[0];
+            assert!(
+                text == "P" && (origin.0 - at.0).abs() < 1e-9 && (origin.1 - at.1).abs() < 1e-9,
+                "{what}: drawn at {origin:?}"
+            );
+
+            let (after, report) = redact(open(bytes), &[area]);
+            assert_eq!(report.glyphs, 1, "{what}: the P");
+            assert!(extracted(after).is_empty(), "{what}");
+        }
+    }
+
+    /// A column turned a quarter turn runs **left to right** across the
+    /// page, and is cut along its own axis all the same.
+    ///
+    /// `0 1 -1 0 20 100 Tm` maps text `(x, y)` to page `(20 - y, 100 + x)`,
+    /// so a pen walking text-space y downward walks page x rightward: glyph
+    /// boxes P 20..30, U 30..40, B 40..50, L 50..60, I 60..65, C 65..75 and
+    /// then S 75..85 onwards, all at page y 95..105.
+    #[test]
+    fn a_turned_vertical_run_is_cut_along_its_own_axis() {
+        let bytes = cid_vertical_document(&format!(
+            "BT /F0 10 Tf 0 1 -1 0 20 100 Tm {} Tj ET",
+            cid_hex("PUBLICSECRET")
+        ));
+        let before = extracted(bytes.clone());
+
+        let (after_bytes, report) = redact(open(bytes), &[band(76.0, 90.0, 200.0, 110.0)]);
+        assert_eq!(report.glyphs, 6, "SECRET");
+        let after = extracted(after_bytes);
+        assert_same_places(&after, &kept_positions(&before, "PUBLIC"));
+    }
+}
+
+/// A Type 3 font's own glyph space (9.6.5), which this module refused to
+/// measure until September 2026 whenever its `/FontMatrix` was not the
+/// 1/1000 default.
+///
+/// # What is adjudicated by what
+///
+/// Each fixture's glyph procedure fills a known rectangle of glyph space, so
+/// where every glyph's ink lands is arithmetic from 9.4.4 and the font matrix,
+/// done by hand in each test's comment. The render is this engine's own and
+/// is compared **with itself**: the property is that the redacted page draws
+/// nothing inside the rectangle, draws every pixel outside the removed
+/// glyphs' own boxes exactly as it did before the cut, and that the codes
+/// removed are the ones the arithmetic says were covered. A box built from
+/// the matrix's `a` alone — the plausible half-fix — cuts the neighbour of
+/// the covered glyph in the skewed and rotated fixtures, and each of those
+/// says which neighbour.
+#[cfg(test)]
+mod type3_glyph_space {
+    use super::tests_support::*;
+    use super::*;
+
+    fn area(x0: f64, y0: f64, x1: f64, y1: f64) -> Rect {
+        Rect { x0, y0, x1, y1 }
+    }
+
+    fn band(area: Rect) -> Redaction {
+        Redaction { area, mark: false }
+    }
+
+    /// A glyph space in hundredths: `/FontMatrix [0.01 0 0 0.01 0 0]`, each
+    /// glyph 100 units wide and filling `0 0 100 100` — one em square.
+    ///
+    /// At `10 Tf` from `10 100 Td`, glyph `k` of `PUBLICSECRET` is page
+    /// x `10 + 10k` .. `20 + 10k`, y 100..110; `SECRET` is x 70..130. The
+    /// band (x 72..125) reaches into `S` and `T` and covers the four between.
+    /// `width / 1000` would put all twelve glyphs in x 10..22 and cut none.
+    #[test]
+    fn a_glyph_space_in_hundredths_is_cut_exactly_at_the_covered_glyphs() {
+        let bytes = type3_document(
+            200.0,
+            "[0.01 0 0 0.01 0 0]",
+            "/FontBBox [0 0 100 100]",
+            100,
+            "100 0 d0 0 0 100 100 re f",
+            "BT /F0 10 Tf 10 100 Td (PUBLICSECRET) Tj ET",
+        );
+        let over = area(72.0, 95.0, 125.0, 115.0);
+        let before = render(bytes.clone());
+        assert!(ink_in(&before, 200.0, over) > 0, "the band starts inked");
+
+        let (after_bytes, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 6, "S, E, C, R, E and T");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let streams = all_streams(&CosDocument::open(after_bytes.clone()).expect("it reopens"));
+        assert!(
+            streams.contains("PUBLIC") && !streams.contains("SECRET"),
+            "{streams}"
+        );
+
+        let after = render(after_bytes);
+        assert_eq!(ink_in(&after, 200.0, over), 0, "no ink under the band");
+        assert_eq!(
+            differing_outside(&before, &after, 200.0, area(70.0, 100.0, 130.0, 110.0)),
+            0,
+            "PUBLIC renders exactly as it did"
+        );
+    }
+
+    /// A skewed glyph space: `/FontMatrix [0.001 0 0.0005 0.001 0 0]` slants
+    /// each glyph half an em to the right over its height.
+    ///
+    /// At `20 Tf` from `10 100 Td` glyph `k`'s pen is at x `10 + 20k` and
+    /// its ink is the parallelogram whose bottom edge is pen..pen+20 at
+    /// y 100 and whose top edge is pen+10..pen+30 at y 120. `S` (k = 6, pen
+    /// 130) spans x 137.5..157.5 at y 115 and 139.5..159.5 at y 119; the
+    /// band x 151..157, y 115..119 is inside it. `E` (pen 150) starts at
+    /// x 157.5 at y 115, past the band. An upright box from `a` alone puts
+    /// `S` at x 130..150 and `E` at 150..170 — and cuts `E`.
+    #[test]
+    fn a_skewed_glyph_space_is_cut_at_the_glyph_its_slant_carries_under_the_band() {
+        let bytes = type3_document(
+            300.0,
+            "[0.001 0 0.0005 0.001 0 0]",
+            "/FontBBox [0 0 1500 1000]",
+            1000,
+            "1000 0 d0 0 0 1000 1000 re f",
+            "BT /F0 20 Tf 10 100 Td (PUBLICSECRET) Tj ET",
+        );
+        let over = area(151.0, 115.0, 157.0, 119.0);
+        let before = render(bytes.clone());
+        assert!(ink_in(&before, 200.0, over) > 0, "the band starts inked");
+
+        let (after_bytes, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 1, "S alone");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let streams = all_streams(&CosDocument::open(after_bytes.clone()).expect("it reopens"));
+        assert!(
+            streams.contains("PUBLIC") && streams.contains("ECRET") && !streams.contains("SECRET"),
+            "{streams}"
+        );
+
+        let after = render(after_bytes);
+        assert_eq!(ink_in(&after, 200.0, over), 0, "no ink under the band");
+        assert!(
+            ink_in(&after, 200.0, area(159.0, 115.0, 162.0, 119.0)) > 0,
+            "E, the glyph an upright box would have cut, is still drawn beside it"
+        );
+        assert_eq!(
+            differing_outside(&before, &after, 200.0, area(130.0, 100.0, 160.0, 120.0)),
+            0,
+            "every other glyph renders exactly as it did"
+        );
+    }
+
+    /// A rotated glyph space: `/FontMatrix [0.0008 0.0006 -0.0006 0.0008 0 0]`
+    /// turns each glyph about 36.87° about its origin, at the conventional
+    /// scale.
+    ///
+    /// Table 112's advance is the horizontal component of the transformed
+    /// width, `1000 · 0.0008`: sixteen points at `20 Tf`, so glyph `k`'s pen
+    /// is at x `30 + 16k`. Its ink is the square with corners pen + (0, 0),
+    /// (16, 12), (4, 28) and (−12, 16) at baseline y 100. The band
+    /// x 127..133, y 122..126 sits under `S`'s top corner (k = 6, pen 126,
+    /// the corner at 130, 128): `S` spans x 122..134.5 at y 122, `E` (pen
+    /// 142) starts at x 138 there and `C` (pen 110) ends at 118.5. An upright
+    /// box from `a` alone reaches y 120 and cuts nothing at all.
+    #[test]
+    fn a_rotated_glyph_space_is_cut_where_its_glyphs_are_turned_to() {
+        let bytes = type3_document(
+            300.0,
+            "[0.0008 0.0006 -0.0006 0.0008 0 0]",
+            "/FontBBox [0 0 1000 1000]",
+            1000,
+            "1000 0 d0 0 0 1000 1000 re f",
+            "BT /F0 20 Tf 30 100 Td (PUBLICSECRET) Tj ET",
+        );
+        let over = area(127.0, 122.0, 133.0, 126.0);
+        let before = render(bytes.clone());
+        assert!(ink_in(&before, 200.0, over) > 0, "the band starts inked");
+
+        let (after_bytes, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 1, "S alone");
+        let streams = all_streams(&CosDocument::open(after_bytes.clone()).expect("it reopens"));
+        assert!(
+            streams.contains("PUBLIC") && streams.contains("ECRET") && !streams.contains("SECRET"),
+            "{streams}"
+        );
+
+        let after = render(after_bytes);
+        assert_eq!(ink_in(&after, 200.0, over), 0, "no ink under the band");
+        // S's own bounding box: x 114..142, y 100..128.
+        assert_eq!(
+            differing_outside(&before, &after, 200.0, area(114.0, 100.0, 142.0, 128.0)),
+            0,
+            "every other glyph renders exactly as it did"
+        );
+    }
+
+    /// A glyph space with a translation: `/FontMatrix [0.001 0 0 0.001 0.5 0]`
+    /// draws every glyph half an em to the right of its pen, and advances it
+    /// by the width alone — a width is a displacement, which a translation
+    /// does not move.
+    ///
+    /// At `10 Tf` glyph `k`'s pen is x `10 + 10k` and its ink x `15 + 10k` ..
+    /// `25 + 10k`. The band x 81..84 is inside `S`'s ink (75..85); a box that
+    /// dropped the translation puts `S` at 70..80 and `E` at 80..90, and cuts
+    /// `E`.
+    #[test]
+    fn a_translated_glyph_space_is_cut_where_it_is_drawn() {
+        let bytes = type3_document(
+            200.0,
+            "[0.001 0 0 0.001 0.5 0]",
+            "/FontBBox [0 0 1000 1000]",
+            1000,
+            "1000 0 d0 0 0 1000 1000 re f",
+            "BT /F0 10 Tf 10 100 Td (PUBLICSECRET) Tj ET",
+        );
+        let over = area(81.0, 101.0, 84.0, 109.0);
+        let before = render(bytes.clone());
+        assert!(ink_in(&before, 200.0, over) > 0, "the band starts inked");
+
+        let (after_bytes, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 1, "S alone");
+        let after = render(after_bytes);
+        assert_eq!(ink_in(&after, 200.0, over), 0, "no ink under the band");
+        assert_eq!(
+            differing_outside(&before, &after, 200.0, area(75.0, 100.0, 85.0, 110.0)),
+            0,
+            "E, the glyph a box without the translation would have cut, and \
+             every other glyph render exactly as they did"
+        );
+    }
+
+    /// **The pin, flipped.** The fixture the refusal was written against —
+    /// `/FontMatrix [0.01 0 0 0.01 0 0]` over thousand-unit widths, so each
+    /// glyph is ten ems wide — is measured and cut, and nothing is reported.
+    ///
+    /// At `10 Tf` from x 10 the glyphs of `SECRET` are a hundred points each:
+    /// `S` x 10..110 and `E` x 110..210 meet a rectangle over the whole
+    /// 200-point page, and the four after them are past its edge.
+    #[test]
+    fn a_rescaled_type3_font_is_measured_rather_than_refused() {
+        let doc = open(boxed_glyph_document(
+            200.0,
+            200.0,
+            "[0.01 0 0 0.01 0 0]",
+            "BT /F0 10 Tf 10 100 Td (SECRET) Tj ET",
+        ));
+        let (bytes, report) = redact(doc, &[band(area(0.0, 0.0, 200.0, 200.0))]);
+        assert_eq!(report.glyphs, 2, "the two on the page");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+        assert!(
+            streams.contains("CRET") && !streams.contains("SE"),
+            "{streams}"
+        );
+    }
+
+    /// The conventional matrix is the same arithmetic as before any of this:
+    /// every glyph one em, cut where the rectangle is.
+    #[test]
+    fn a_type3_font_with_the_conventional_matrix_is_cut() {
+        let doc = open(boxed_glyph_document(
+            200.0,
+            200.0,
+            DEFAULT_FONT_MATRIX,
+            "BT /F0 10 Tf 10 100 Td (SECRET) Tj ET",
+        ));
+        let (_, report) = redact(doc, &[band(area(0.0, 0.0, 200.0, 200.0))]);
+        assert_eq!(report.glyphs, 6);
+        assert!(report.warnings.is_empty());
+    }
+
+    /// A `/FontMatrix` this engine cannot read — here three numbers — is read
+    /// as the default, which is where the renderer places the run too: its
+    /// Type 3 path needs six numbers, and without them it advances each code
+    /// by `w0 / 1000` like any other font.
+    ///
+    /// Read that way `SECRET` is x 70..130 at `10 Tf`, and the band over it
+    /// takes exactly those six.
+    #[test]
+    fn a_font_matrix_that_cannot_be_read_is_measured_as_the_default() {
+        for matrix in ["[0.01 0 0]", "(not an array)"] {
+            let doc = open(boxed_glyph_document(
+                200.0,
+                200.0,
+                matrix,
+                "BT /F0 10 Tf 10 100 Td (PUBLICSECRET) Tj ET",
+            ));
+            let (bytes, report) = redact(doc, &[band(area(72.0, 95.0, 125.0, 115.0))]);
+            assert_eq!(report.glyphs, 6, "{matrix}");
+            let streams = all_streams(&CosDocument::open(bytes).expect("it reopens"));
+            assert!(
+                streams.contains("PUBLIC") && !streams.contains("SECRET"),
+                "{matrix}"
+            );
+        }
+    }
+
+    /// A `/FontBBox` that reaches below the baseline carries the box down
+    /// with it: these glyphs are drawn from half an em below the baseline to
+    /// one em above it, and a band under the baseline alone covers their
+    /// descenders.
+    ///
+    /// `S` is x 70..80 at `10 Tf`; its descender is y 95..100. The band
+    /// x 72..78, y 96..99 is inside that and nowhere else. An em box from the
+    /// baseline up misses it and leaves the ink.
+    #[test]
+    fn a_bounding_box_below_the_baseline_carries_the_glyph_box_down() {
+        let bytes = type3_document(
+            200.0,
+            DEFAULT_FONT_MATRIX,
+            "/FontBBox [0 -500 1000 1000]",
+            1000,
+            "1000 0 d0 0 -500 1000 1500 re f",
+            "BT /F0 10 Tf 10 100 Td (PUBLICSECRET) Tj ET",
+        );
+        let under = area(72.0, 96.0, 78.0, 99.0);
+        assert!(ink_in(&render(bytes.clone()), 200.0, under) > 0);
+
+        let (after, report) = redact(open(bytes), &[band(under)]);
+        assert_eq!(report.glyphs, 1, "S, by its descender");
+        assert_eq!(ink_in(&render(after), 200.0, under), 0);
+    }
+
+    /// A `/FontBBox` written too small does not shrink the box under the
+    /// ink: the box is joined with one em, because a bounding box that
+    /// understates the glyphs would leave exactly the ink a rectangle
+    /// covered.
+    ///
+    /// These glyphs fill the whole em square and the font claims a tenth of
+    /// it. The band x 72..78, y 105..109 is over the top half of `S`.
+    #[test]
+    fn a_bounding_box_written_too_small_does_not_shrink_the_glyph_box() {
+        let bytes = type3_document(
+            200.0,
+            DEFAULT_FONT_MATRIX,
+            "/FontBBox [0 0 1000 100]",
+            1000,
+            "1000 0 d0 0 0 1000 1000 re f",
+            "BT /F0 10 Tf 10 100 Td (PUBLICSECRET) Tj ET",
+        );
+        let top = area(72.0, 105.0, 78.0, 109.0);
+        assert!(ink_in(&render(bytes.clone()), 200.0, top) > 0);
+
+        let (after, report) = redact(open(bytes), &[band(top)]);
+        assert_eq!(report.glyphs, 1, "S");
+        assert_eq!(ink_in(&render(after), 200.0, top), 0);
     }
 }
 
@@ -3562,7 +8491,7 @@ mod showing_operators {
 /// glyph procedure is a different question and is still refused — see
 /// `docs/features/editing.md`.
 #[cfg(test)]
-mod tests_support {
+pub(crate) mod tests_support {
     use super::*;
 
     /// 9.6.5's conventional Type 3 glyph space, and the one every other font
@@ -3582,6 +8511,44 @@ mod tests_support {
             }
         }
         String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// Every literal string `content` holds, the parentheses taken off, in
+    /// order and run together: what is left of a covered word in the raw
+    /// decoded bytes whatever spelling — a `Tj`, a `TJ` array of pieces —
+    /// the cut wrote it in. The fixtures write no hex strings.
+    pub fn literals(content: &str) -> String {
+        let mut out = String::new();
+        let mut depth = 0usize;
+        let mut escaped = false;
+        for c in content.chars() {
+            if depth == 0 {
+                if c == '(' {
+                    depth = 1;
+                }
+                continue;
+            }
+            if escaped {
+                escaped = false;
+                out.push(c);
+                continue;
+            }
+            match c {
+                '\\' => escaped = true,
+                '(' => {
+                    depth += 1;
+                    out.push(c);
+                }
+                ')' => {
+                    depth -= 1;
+                    if depth > 0 {
+                        out.push(c);
+                    }
+                }
+                _ => out.push(c),
+            }
+        }
+        out
     }
 
     pub fn redact(doc: Arc<CosDocument>, areas: &[Redaction]) -> (Vec<u8>, RedactionReport) {
@@ -3638,11 +8605,101 @@ mod tests_support {
         )
     }
 
-    fn stream_object(number: u32, body: &str) -> String {
+    /// The boxed Type 3 font as object `number`, drawing every letter with
+    /// the procedure in object 5 (which the caller writes, with
+    /// [`stream_object`] and [`BOX_PROCEDURE`]).
+    pub fn boxed_font(number: u32, font_matrix: &str) -> String {
+        let (differences, widths) = every_letter();
+        format!(
+            "{number} 0 obj\n<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000]\n\
+             /FontMatrix {font_matrix}\n\
+             /CharProcs << /g 5 0 R >>\n\
+             /Encoding << /Type /Encoding /Differences {differences} >>\n\
+             /FirstChar 65 /LastChar 90 /Widths [{widths}]\n\
+             /Resources << >> >>\nendobj\n"
+        )
+    }
+
+    /// The glyph procedure every letter of [`boxed_font`] draws: its whole em
+    /// square, filled.
+    pub const BOX_PROCEDURE: &str = "1000 0 d0 0 0 1000 1000 re f";
+
+    pub fn stream_object(number: u32, body: &str) -> String {
         format!(
             "{number} 0 obj\n<< /Length {} >>\nstream\n{body}\nendstream\nendobj\n",
             body.len() + 1
         )
+    }
+
+    /// How many pixels differ between two renders of one page, counting only
+    /// those whose centre lies **outside** a page-space rectangle.
+    ///
+    /// What says a cut was exact: everything a redaction did not remove
+    /// renders as it did before, bit for bit, so every pixel outside the
+    /// removed glyphs' own boxes is unchanged.
+    pub fn differing_outside(
+        before: &crate::Bitmap,
+        after: &crate::Bitmap,
+        page_height: f64,
+        area: Rect,
+    ) -> usize {
+        assert_eq!(
+            (before.width, before.height),
+            (after.width, after.height),
+            "the same page"
+        );
+        let mut differ = 0;
+        for y in 0..before.height {
+            let py = page_height - (f64::from(y) + 0.5);
+            for x in 0..before.width {
+                let px = f64::from(x) + 0.5;
+                if (area.x0..=area.x1).contains(&px) && (area.y0..=area.y1).contains(&py) {
+                    continue;
+                }
+                let at = (y as usize) * before.stride + (x as usize) * before.components();
+                if before.data.get(at) != after.data.get(at) {
+                    differ += 1;
+                }
+            }
+        }
+        differ
+    }
+
+    /// A one-page document, `width` by 200 points, whose one font `/F0` is a
+    /// Type 3 face in the glyph space `font_matrix` declares.
+    ///
+    /// Codes 65..=90 are each `em` wide in that glyph space and drawn by
+    /// `procedure` (object 5); `font_bbox` is written as given, so a test can
+    /// make it honest, too small or absent.
+    pub fn type3_document(
+        width: f64,
+        font_matrix: &str,
+        font_bbox: &str,
+        em: u32,
+        procedure: &str,
+        content: &str,
+    ) -> Vec<u8> {
+        let widths = vec![em.to_string(); 26].join(" ");
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(&format!(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} 200]\n\
+             /Resources << /Font << /F0 4 0 R >> >> /Contents 7 0 R >>\nendobj\n"
+        ));
+        out.push_str(&format!(
+            "4 0 obj\n<< /Type /Font /Subtype /Type3 {font_bbox}\n\
+             /FontMatrix {font_matrix}\n\
+             /CharProcs << /g 5 0 R >>\n\
+             /Encoding << /Type /Encoding /Differences [65 {}] >>\n\
+             /FirstChar 65 /LastChar 90 /Widths [{widths}]\n\
+             /Resources << >> >>\nendobj\n",
+            ["/g"; 26].join(" ")
+        ));
+        out.push_str(&stream_object(5, procedure));
+        out.push_str(&stream_object(7, content));
+        out.push_str("trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n");
+        out.into_bytes()
     }
 
     /// A one-page document with one Type 3 font whose every glyph fills its em
@@ -3675,9 +8732,10 @@ mod tests_support {
         out.into_bytes()
     }
 
-    /// The same page with a second font, `/F1`, whose `/FontMatrix` redaction
-    /// refuses to measure — so which font is in force is visible in the
-    /// report rather than only in the geometry.
+    /// The same page with a second font, `/F1`, whose glyph space is ten
+    /// times the conventional one (`/FontMatrix [0.01 0 0 0.01 0 0]` over the
+    /// same thousand-unit widths and procedure), so each of its glyphs is ten
+    /// ems wide and which font is in force shows in where a cut lands.
     pub fn two_font_document(content: &str) -> Vec<u8> {
         let (differences, widths) = every_letter();
         let font = |number: u32, matrix: &str| {
@@ -3704,6 +8762,205 @@ mod tests_support {
         out.push_str(&font(8, "[0.01 0 0 0.01 0 0]"));
         out.push_str("trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n");
         out.into_bytes()
+    }
+
+    /// A one-page document drawing `/Fm0`, a form XObject whose content is
+    /// `form` **compressed** (`/FlateDecode`). Two fonts are in its scope:
+    /// `/F0`, a Type 3 font whose every glyph fills its em square, for the
+    /// ink, and `/F1`, Helvetica, for extraction — this engine's extractor
+    /// reports no glyph for a Type 3 font, whose procedure it runs instead.
+    pub fn compressed_form_document(form: &str) -> Vec<u8> {
+        let letters: Vec<String> = (b'A'..=b'Z').map(|c| format!("/{}", c as char)).collect();
+        let procs: Vec<String> = (b'A'..=b'Z')
+            .map(|c| format!("/{} 5 0 R", c as char))
+            .collect();
+        let packed = tinker_pdf_filters::zlib_compress(form.as_bytes());
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"%PDF-1.7\n");
+        out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+              /Resources << /XObject << /Fm0 8 0 R >> >> /Contents 7 0 R >>\nendobj\n",
+        );
+        out.extend_from_slice(
+            format!(
+                // `/BaseFont` is not a Type 3 entry (Table 112); it is here
+                // because the strict validator asks every simple font for
+                // one, and this fixture is held to that validator.
+                "4 0 obj\n<< /Type /Font /Subtype /Type3 /BaseFont /Boxed\n\
+                 /FontBBox [0 0 1000 1000]\n\
+                 /FontMatrix {DEFAULT_FONT_MATRIX}\n/CharProcs << {} >>\n\
+                 /Encoding << /Type /Encoding /Differences [65 {}] >>\n\
+                 /FirstChar 65 /LastChar 90 /Widths [{}]\n/Resources << >> >>\nendobj\n",
+                procs.join(" "),
+                letters.join(" "),
+                ["1000"; 26].join(" ")
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(stream_object(5, "1000 0 d0 0 0 1000 1000 re f").as_bytes());
+        out.extend_from_slice(
+            b"6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        );
+        out.extend_from_slice(stream_object(7, "q /Fm0 Do Q").as_bytes());
+        out.extend_from_slice(
+            format!(
+                "8 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 200 200]\n\
+                 /Resources << /Font << /F0 4 0 R /F1 6 0 R >> >>\n\
+                 /Filter /FlateDecode /Length {} >>\nstream\n",
+                packed.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(&packed);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+        out.extend_from_slice(b"trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n");
+        out
+    }
+
+    /// A one-page document with an `/Identity-V` font whose metrics are all
+    /// written out, and a `/ToUnicode` so that extraction reads letters back.
+    ///
+    /// CIDs 65..=90 are the capital letters, each `/W` 1000. `/W2` gives each
+    /// `w1 = -1000` and the position vector `(500, 880)` — except CID 73,
+    /// `I`, whose `w1` is `-500`, so the column is not a lattice and a gap of
+    /// the wrong length moves every glyph after it. At `10 Tf` a glyph's box
+    /// is x `-5..5` about the pen and one advance tall below it.
+    pub fn cid_vertical_document(content: &str) -> Vec<u8> {
+        let to_unicode = "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+            /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+            /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+            1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n\
+            1 beginbfrange\n<0041> <005A> <0041>\nendbfrange\n\
+            endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend";
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+             /Resources << /Font << /F0 4 0 R >> >> /Contents 7 0 R >>\nendobj\n",
+        );
+        out.push_str(
+            "4 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Column\n\
+             /Encoding /Identity-V /DescendantFonts [5 0 R] /ToUnicode 6 0 R >>\nendobj\n",
+        );
+        out.push_str(
+            "5 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Column\n\
+             /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>\n\
+             /DW 1000 /W [65 90 1000]\n\
+             /W2 [65 72 -1000 500 880 73 [-500 500 880] 74 90 -1000 500 880] >>\nendobj\n",
+        );
+        out.push_str(&stream_object(6, to_unicode));
+        out.push_str(&stream_object(7, content));
+        out.push_str("trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n");
+        out.into_bytes()
+    }
+
+    /// Two-byte `Identity` codes for capital letters, as a hex string.
+    pub fn cid_hex(text: &str) -> String {
+        let mut out = String::from("<");
+        for c in text.chars() {
+            out.push_str(&format!("{:04X}", c as u32));
+        }
+        out.push('>');
+        out
+    }
+
+    /// Each line the facade's extractor reads on page zero: the page y of its
+    /// first character's baseline, rounded to a hundredth, and its text with
+    /// the ends trimmed — bottom to top.
+    ///
+    /// Extraction reports PDF user space, y upward, so the y is the page's.
+    pub fn lines_of(bytes: Vec<u8>) -> Vec<(f64, String)> {
+        lines_on(bytes, 0)
+    }
+
+    /// [`lines_of`] for any page.
+    pub fn lines_on(bytes: Vec<u8>, page: u32) -> Vec<(f64, String)> {
+        let doc = crate::Document::open(bytes).expect("it reopens");
+        let text = doc.page(page).expect("a page").text();
+        let mut out: Vec<(f64, String)> = text
+            .lines()
+            .into_iter()
+            .filter_map(|line| {
+                let y = line.chars.first()?.origin.1;
+                Some(((y * 100.0).round() / 100.0, line.text.trim().to_string()))
+            })
+            .filter(|(_, text)| !text.is_empty())
+            .collect();
+        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+        out
+    }
+
+    /// One form drawing `PUBLIC SECRET` in 12-point Liberation Serif from
+    /// x 10, at page y 50 and again at page y 200.
+    ///
+    /// The face is embedded — the vendored third-party bytes the subsetting
+    /// tests use — so the page both draws ink and extracts, and neither is
+    /// this repository's arithmetic about its own fixture. Its widths are
+    /// Times', so `PUBLIC` is x 10..52.67, the space 52.67..55.67 and `SECRET`
+    /// 55.67..100.35.
+    pub fn public_secret_twice() -> Vec<u8> {
+        public_secret_drawn_by("q 1 0 0 1 0 0 cm /Fm0 Do Q q 1 0 0 1 0 150 cm /Fm0 Do Q")
+    }
+
+    /// The same form, drawn by `page`.
+    pub fn public_secret_drawn_by(page: &str) -> Vec<u8> {
+        let mut builder = tinker_pdf_cos::DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(
+            b"F0",
+            b"LiberationSerif",
+            &crate::subset::tests_support::face()
+        ));
+        assert!(builder.add_form(
+            b"Fm0",
+            &tinker_pdf_cos::FormXObject {
+                bbox: [0.0, 0.0, 400.0, 300.0],
+                matrix: None,
+                group: None,
+                content: b"BT /F0 12 Tf 10 50 Td (PUBLIC SECRET) Tj ET",
+            }
+        ));
+        builder.add_page(400.0, 300.0, |p| p.raw(page.as_bytes()));
+        builder.finish()
+    }
+
+    /// How many form XObjects a document holds.
+    pub fn forms_in(doc: &CosDocument) -> usize {
+        doc.xref()
+            .iter()
+            .filter_map(|(number, _)| doc.get(ObjRef::new(number, 0)).ok())
+            .filter(|object| {
+                object
+                    .as_dict()
+                    .and_then(|d| d.get_name(doc.intern(b"Subtype")))
+                    .and_then(|n| doc.name_bytes(n))
+                    .as_deref()
+                    == Some(b"Form".as_slice())
+            })
+            .count()
+    }
+
+    /// Page zero's content, decoded, as text.
+    pub fn page_content(doc: &CosDocument) -> String {
+        let pages = tinker_pdf_cos::pages::collect(doc);
+        let page = pages.first().expect("a page");
+        String::from_utf8_lossy(&tinker_pdf_cos::pages::content_bytes(doc, page)).into_owned()
+    }
+
+    /// Every character the facade's extractor reports on page zero, with the
+    /// origin it placed it at.
+    pub fn extracted(bytes: Vec<u8>) -> Vec<(String, (f64, f64))> {
+        let doc = crate::Document::open(bytes).expect("it reopens");
+        let text = doc.page(0).expect("a page").text();
+        text.lines()
+            .into_iter()
+            .flat_map(|line| line.chars.iter())
+            .map(|c| (c.text.clone(), c.origin))
+            .collect()
     }
 
     /// A one-page document whose font writes vertically (`/Identity-V`).
@@ -3733,6 +8990,182 @@ mod tests_support {
         out.push_str(&stream_object(7, content));
         out.push_str("trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n");
         out.into_bytes()
+    }
+}
+
+/// A redaction reads the page the **editor** has, not the page the file had.
+///
+/// Each of these failed before [`EditorPage`], and each failure was an
+/// under-redaction with a report that looked like success.
+#[cfg(test)]
+mod editor_reads {
+    use super::tests_support::*;
+    use super::*;
+
+    fn saved(editor: &DocumentEditor) -> Vec<u8> {
+        editor.save(&tinker_pdf_cos::WriteOptions {
+            mode: tinker_pdf_cos::WriteMode::Rewrite,
+            ..tinker_pdf_cos::WriteOptions::default()
+        })
+    }
+
+    fn area(x0: f64, y0: f64, x1: f64, y1: f64) -> Redaction {
+        Redaction {
+            area: Rect { x0, y0, x1, y1 },
+            mark: false,
+        }
+    }
+
+    /// Two redactions of one page, one after the other, both hold.
+    ///
+    /// The second used to read the file's content, cut its own rectangle out
+    /// of that and overwrite the stream the first had written — so `SECRET`,
+    /// which the first redaction removed and reported removed, was back.
+    #[test]
+    fn a_second_redaction_of_a_page_keeps_the_first() {
+        // `PUBLICSECRET` in ten-point boxes from x 20: `PUB` is x 20..50 and
+        // `SECRET` x 80..140, on y 100..110.
+        let doc = open(boxed_glyph_document(
+            200.0,
+            200.0,
+            DEFAULT_FONT_MATRIX,
+            "BT /F0 10 Tf 20 100 Td (PUBLICSECRET) Tj ET",
+        ));
+        let secret = area(82.0, 95.0, 150.0, 115.0);
+        let pub_ = area(15.0, 95.0, 48.0, 115.0);
+
+        let mut editor = DocumentEditor::new(doc);
+        let first = apply(&mut editor, 0, &[secret]).expect("the page exists");
+        assert_eq!(first.glyphs, 6);
+        let second = apply(&mut editor, 0, &[pub_]).expect("the page exists");
+        assert_eq!(second.glyphs, 3, "P, U and B");
+
+        let bytes = saved(&editor);
+        let streams = all_streams(&CosDocument::open(bytes.clone()).expect("it reopens"));
+        assert!(
+            !streams.contains("SECRET") && !streams.contains("SECR"),
+            "the first redaction survived the second: {streams}"
+        );
+        assert!(
+            !streams.contains("PUB"),
+            "and the second happened: {streams}"
+        );
+        assert!(streams.contains("LIC"), "and the rest is there: {streams}");
+
+        let bitmap = render(bytes);
+        assert_eq!(ink_in(&bitmap, 200.0, secret.area), 0);
+        assert_eq!(ink_in(&bitmap, 200.0, pub_.area), 0);
+    }
+
+    /// Two pages of boxed text, `AAAA` on the first and `BBBB` on the second.
+    fn two_pages() -> Vec<u8> {
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 2 /Kids [3 0 R 6 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+             /Resources << /Font << /F0 4 0 R >> >> /Contents 7 0 R >>\nendobj\n",
+        );
+        out.push_str(&boxed_font(4, DEFAULT_FONT_MATRIX));
+        out.push_str(&stream_object(5, BOX_PROCEDURE));
+        out.push_str(
+            "6 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+             /Resources << /Font << /F0 4 0 R >> >> /Contents 8 0 R >>\nendobj\n",
+        );
+        out.push_str(&stream_object(7, "BT /F0 10 Tf 20 100 Td (AAAA) Tj ET"));
+        out.push_str(&stream_object(8, "BT /F0 10 Tf 20 100 Td (BBBB) Tj ET"));
+        out.push_str("trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n");
+        out.into_bytes()
+    }
+
+    /// A page the editor has moved is redacted where the editor has it.
+    ///
+    /// The file's page zero is not the editor's page zero after `move_page`.
+    /// Reading the file, the redaction of the editor's page zero cut the
+    /// *file's* page zero and wrote the result over that page's stream, then
+    /// pointed the page it was asked about at it: `BBBB` stayed in the file,
+    /// unreferenced and readable, and `AAAA` was gone from a page nobody
+    /// redacted.
+    #[test]
+    fn a_moved_page_is_redacted_where_the_editor_has_it() {
+        let mut editor = DocumentEditor::new(open(two_pages()));
+        assert!(editor.move_page(1, 0), "BBBB is now first");
+
+        let report =
+            apply(&mut editor, 0, &[area(0.0, 0.0, 200.0, 200.0)]).expect("the page exists");
+        assert_eq!(report.glyphs, 4, "the four Bs");
+
+        let bytes = saved(&editor);
+        let streams = all_streams(&CosDocument::open(bytes.clone()).expect("it reopens"));
+        assert!(!streams.contains("BBBB"), "got: {streams}");
+        assert!(
+            streams.contains("AAAA"),
+            "the other page is untouched: {streams}"
+        );
+
+        let reopened = crate::Document::open(bytes).expect("it reopens");
+        let second = reopened
+            .page(1)
+            .expect("two pages")
+            .render(&crate::RenderOptions::default());
+        assert!(
+            ink_in(&second, 200.0, area(22.0, 102.0, 58.0, 108.0).area) > 100,
+            "and still draws its text"
+        );
+    }
+
+    /// A page whose `/Resources` live on the page tree node above it
+    /// (7.7.3.4) has its forms and images followed and its fonts measured.
+    ///
+    /// Read from the page dictionary alone, the resources were empty: the run
+    /// was refused as `UnknownFont`, which at least said so, and the image was
+    /// **not followed at all**, which said nothing.
+    #[test]
+    fn inherited_resources_are_read() {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"%PDF-1.7\n");
+        out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.extend_from_slice(
+            b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R]\n\
+              /Resources << /Font << /F0 4 0 R >> /XObject << /Im0 6 0 R >> >> >>\nendobj\n",
+        );
+        out.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+              /Contents 7 0 R >>\nendobj\n",
+        );
+        out.extend_from_slice(boxed_font(4, DEFAULT_FONT_MATRIX).as_bytes());
+        out.extend_from_slice(stream_object(5, BOX_PROCEDURE).as_bytes());
+        let samples = b"SECRETPIXELDATA!";
+        out.extend_from_slice(
+            format!(
+                "6 0 obj\n<< /Type /XObject /Subtype /Image /Width 4 /Height 4\n\
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length {} >>\nstream\n",
+                samples.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(samples);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+        out.extend_from_slice(
+            stream_object(
+                7,
+                "q 40 0 0 40 120 20 cm /Im0 Do Q BT /F0 10 Tf 20 100 Td (SECRET) Tj ET",
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(b"trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n");
+
+        let doc = open(out);
+        assert!(all_streams(&doc).contains("SECRETPIXEL"));
+        let mut editor = DocumentEditor::new(doc);
+        let report =
+            apply(&mut editor, 0, &[area(0.0, 0.0, 200.0, 200.0)]).expect("the page exists");
+        assert_eq!(report.images, 1, "the inherited /Im0 was followed");
+        assert_eq!(report.glyphs, 6, "and the inherited /F0 measured");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        let streams = all_streams(&CosDocument::open(saved(&editor)).expect("it reopens"));
+        assert!(!streams.contains("SECRET"), "got: {streams}");
     }
 }
 
@@ -3845,5 +9278,2669 @@ trailer\n<< /Size 9 /Root 1 0 R >>\n%%EOF\n",
 
         assert!(!text.contains("PAGE"), "page zero's samples are gone");
         assert!(text.contains("SECR"), "page one is untouched");
+    }
+}
+
+/// Annotation appearance streams (12.5.5), cut where 12.5.5 draws them.
+///
+/// Every fixture is one 400 by 300 page whose font is the vendored Liberation
+/// Serif, embedded whole, so an appearance both renders and — flattened into
+/// the page, which is how an extractor that does not read annotations comes
+/// to read one — extracts. The standard appearance draws `PUBLIC SECRET` at
+/// 24 points in a `/BBox` of `0 0 400 40`, and 12.5.5 fits that box onto a
+/// `/Rect` half its size, so on the page the words are 12 points tall:
+/// `PUBLIC` x 10..52.67, the space to 55.67 and `SECRET` to 100.35, on a
+/// baseline 5 points above the rectangle's bottom. None of that is in page
+/// space until the fit is applied, so a walk that drew an appearance where its
+/// form space lands — at the origin, twice the size — cuts nothing at all.
+///
+/// The positions read back are this engine's extractor and renderer compared
+/// with themselves before and after the cut: self-consistency, as the other
+/// modules here label it.
+#[cfg(test)]
+mod appearance_streams {
+    use super::tests_support::*;
+    use super::*;
+
+    fn area(x0: f64, y0: f64, x1: f64, y1: f64) -> Rect {
+        Rect { x0, y0, x1, y1 }
+    }
+
+    fn band(area: Rect) -> Redaction {
+        Redaction { area, mark: false }
+    }
+
+    /// Over `SECRET` where the standard appearance puts it on a `/Rect`
+    /// whose bottom is y 40, and clear of the space before it.
+    fn over_secret_at(bottom: f64) -> Rect {
+        area(56.0, bottom, 400.0, bottom + 30.0)
+    }
+
+    fn numbers(values: &[f64]) -> Object {
+        Object::Array(values.iter().map(|v| Object::Real(*v)).collect())
+    }
+
+    /// The page: `KEEP` in Liberation Serif at the top, drawn by the builder
+    /// so the font is registered, and nothing else. Returns it opened, with
+    /// the font's object.
+    fn page() -> (Arc<CosDocument>, ObjRef) {
+        let mut builder = tinker_pdf_cos::DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(
+            b"F0",
+            b"LiberationSerif",
+            &crate::subset::tests_support::face()
+        ));
+        builder.add_page(400.0, 300.0, |p| p.text(b"F0", 12.0, 300.0, 280.0, "KEEP"));
+        let doc = open(builder.finish());
+        let font = crate::subset::tests_support::only_font(&doc);
+        (doc, font)
+    }
+
+    /// An appearance stream drawing `content` in `/F0`, the page's font.
+    fn appearance(
+        editor: &mut DocumentEditor,
+        font: ObjRef,
+        bbox: [f64; 4],
+        matrix: Option<[f64; 6]>,
+        content: &str,
+    ) -> ObjRef {
+        let mut fonts = Dict::new();
+        fonts.insert(editor.intern(b"F0"), Object::Ref(font));
+        let mut resources = Dict::new();
+        resources.insert(editor.intern(b"Font"), Object::Dict(fonts));
+        let mut dict = Dict::new();
+        dict.insert(
+            editor.intern(b"Type"),
+            Object::Name(editor.intern(b"XObject")),
+        );
+        dict.insert(
+            editor.intern(b"Subtype"),
+            Object::Name(editor.intern(b"Form")),
+        );
+        dict.insert(editor.intern(b"BBox"), numbers(&bbox));
+        if let Some(matrix) = matrix {
+            dict.insert(editor.intern(b"Matrix"), numbers(&matrix));
+        }
+        dict.insert(Name::RESOURCES, Object::Dict(resources));
+        let stream = editor.allocate();
+        editor.put_stream(
+            stream,
+            StreamData {
+                dict,
+                data: content.as_bytes().to_vec(),
+            },
+        );
+        stream
+    }
+
+    /// The standard appearance: `PUBLIC SECRET` at 24 points in a box twice
+    /// the size of the `/Rect` it is fitted onto.
+    fn public_secret(editor: &mut DocumentEditor, font: ObjRef) -> ObjRef {
+        appearance(
+            editor,
+            font,
+            [0.0, 0.0, 400.0, 40.0],
+            None,
+            "BT /F0 24 Tf 0 10 Td (PUBLIC SECRET) Tj ET",
+        )
+    }
+
+    /// The `/Rect` the standard appearance is fitted onto, with its bottom at
+    /// `bottom`.
+    fn rect_at(bottom: f64) -> [f64; 4] {
+        [10.0, bottom, 210.0, bottom + 20.0]
+    }
+
+    /// An annotation dictionary of `subtype` whose `/AP` is `ap`.
+    fn annotation(editor: &DocumentEditor, subtype: &[u8], rect: [f64; 4], ap: Object) -> Dict {
+        let mut dict = Dict::new();
+        dict.insert(
+            editor.intern(b"Type"),
+            Object::Name(editor.intern(b"Annot")),
+        );
+        dict.insert(
+            editor.intern(b"Subtype"),
+            Object::Name(editor.intern(subtype)),
+        );
+        dict.insert(editor.intern(b"Rect"), numbers(&rect));
+        dict.insert(editor.intern(b"AP"), ap);
+        dict
+    }
+
+    /// `/AP << /N stream >>`, direct.
+    fn normal(editor: &DocumentEditor, stream: ObjRef) -> Object {
+        let mut ap = Dict::new();
+        ap.insert(editor.intern(b"N"), Object::Ref(stream));
+        Object::Dict(ap)
+    }
+
+    /// An annotation as an object of its own.
+    fn object(editor: &mut DocumentEditor, annotation: Dict) -> Object {
+        let reference = editor.allocate();
+        editor.put(reference, Object::Dict(annotation));
+        Object::Ref(reference)
+    }
+
+    /// Page zero's `/Annots`, set to `entries`.
+    fn annots(editor: &mut DocumentEditor, entries: Vec<Object>) {
+        let page = editor.page_refs()[0];
+        let Some(Object::Dict(mut dict)) = editor.get(page) else {
+            panic!("the page is a dictionary");
+        };
+        dict.insert(editor.intern(b"Annots"), Object::Array(entries));
+        editor.put(page, Object::Dict(dict));
+    }
+
+    fn saved(editor: &DocumentEditor) -> Vec<u8> {
+        editor.save(&tinker_pdf_cos::WriteOptions {
+            mode: tinker_pdf_cos::WriteMode::Rewrite,
+            ..tinker_pdf_cos::WriteOptions::default()
+        })
+    }
+
+    /// What the extractor reads once page zero's annotations are flattened
+    /// into its content (12.5.5's fit, as `flatten_annotations` writes it),
+    /// bottom to top.
+    fn flattened_lines(bytes: Vec<u8>) -> Vec<(f64, String)> {
+        let mut editor = DocumentEditor::new(open(bytes));
+        editor.flatten_annotations(0).expect("page zero");
+        lines_of(saved(&editor))
+    }
+
+    /// The annotation at `index` in page zero's `/Annots`, resolved.
+    fn annotation_at(doc: &CosDocument, index: usize) -> Dict {
+        let pages = tinker_pdf_cos::pages::collect(doc);
+        let page = doc.get(pages[0].reference).expect("the page");
+        let annots = doc.resolve_key(page.as_dict().expect("a dict"), doc.intern(b"Annots"));
+        let entry = annots.as_array().expect("an array")[index].clone();
+        doc.resolve(&entry).as_dict().expect("a dict").clone()
+    }
+
+    /// The stream an annotation's `/AP` `/N` names.
+    fn normal_of(doc: &CosDocument, annotation: &Dict) -> ObjRef {
+        let ap = doc.resolve_key(annotation, doc.intern(b"AP"));
+        ap.as_dict()
+            .expect("an /AP")
+            .get_ref(doc.intern(b"N"))
+            .expect("an /N stream")
+    }
+
+    /// The row's exit, for an annotation: a FreeText annotation whose
+    /// appearance draws `PUBLIC SECRET`, and a rectangle over `SECRET` where
+    /// 12.5.5 puts it on the page.
+    ///
+    /// `SECRET` is gone from every stream, from the extractor and from the
+    /// render; `PUBLIC` is in all three, and renders exactly as it did. The
+    /// appearance is cut **in place**: one annotation draws it, so it needs
+    /// no copy, and its object is the one the annotation still names.
+    #[test]
+    fn an_appearance_under_a_redaction_is_cut_where_its_annotation_draws_it() {
+        let (doc, font) = page();
+        let mut editor = DocumentEditor::new(doc);
+        let stream = public_secret(&mut editor, font);
+        let ap = normal(&editor, stream);
+        let note = annotation(&editor, b"FreeText", rect_at(40.0), ap);
+        let entry = object(&mut editor, note);
+        annots(&mut editor, vec![entry]);
+        let bytes = saved(&editor);
+
+        assert_eq!(
+            flattened_lines(bytes.clone()),
+            vec![
+                (45.0, "PUBLIC SECRET".to_string()),
+                (280.0, "KEEP".to_string())
+            ],
+            "the fixture draws what its comment says, where it says"
+        );
+        let before = render(bytes.clone());
+        let over = over_secret_at(40.0);
+        assert!(ink_in(&before, 300.0, over) > 20, "SECRET starts inked");
+
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 6, "S, E, C, R, E and T");
+        assert_eq!(report.operations, 1);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        assert_eq!(
+            flattened_lines(after.clone()),
+            vec![(45.0, "PUBLIC".to_string()), (280.0, "KEEP".to_string())]
+        );
+        let rendered = render(after.clone());
+        assert_eq!(ink_in(&rendered, 300.0, over), 0, "no ink under the band");
+        assert_eq!(
+            differing_outside(&before, &rendered, 300.0, area(55.0, 40.0, 101.0, 60.0)),
+            0,
+            "PUBLIC, and everything else, renders exactly as it did"
+        );
+
+        let reopened = CosDocument::open(after).expect("it reopens");
+        let streams = all_streams(&reopened);
+        assert!(
+            streams.contains("PUBLIC") && !streams.contains("SECRET"),
+            "{streams}"
+        );
+        let annotation = annotation_at(&reopened, 0);
+        let drawn = reopened
+            .stream_decoded(normal_of(&reopened, &annotation))
+            .expect("the appearance decodes");
+        assert!(
+            String::from_utf8_lossy(&drawn).contains("PUBLIC"),
+            "the annotation still names the stream that was cut"
+        );
+        assert_eq!(forms_in(&reopened), 1, "and no copy was made");
+    }
+
+    /// 12.5.5 maps the form's `/BBox` **through its `/Matrix`** before
+    /// fitting it, so an appearance turned a quarter turn runs up the page.
+    ///
+    /// `/Matrix [0 1 -1 0 0 0]` turns form (x, y) to (−y, x); the box
+    /// 0 0 400 40 turns to x −40..0, y 0..400, and fitted onto
+    /// `[300 10 320 210]` that is a halving and a move: page
+    /// (320 − y/2, 10 + x/2). `PUBLIC` runs up from y 10 to 52.67 and
+    /// `SECRET` from 55.67 to 100.35, both between x 303 and 315. A fit that
+    /// ignored the matrix squeezes the 400-wide box into 20 points across and
+    /// stretches it five times up, and cuts something else entirely.
+    #[test]
+    fn a_turned_appearance_is_cut_where_its_matrix_turns_it() {
+        let (doc, font) = page();
+        let mut editor = DocumentEditor::new(doc);
+        let stream = appearance(
+            &mut editor,
+            font,
+            [0.0, 0.0, 400.0, 40.0],
+            Some([0.0, 1.0, -1.0, 0.0, 0.0, 0.0]),
+            "BT /F0 24 Tf 0 10 Td (PUBLIC SECRET) Tj ET",
+        );
+        let ap = normal(&editor, stream);
+        let stamp = annotation(&editor, b"Stamp", [300.0, 10.0, 320.0, 210.0], ap);
+        let entry = object(&mut editor, stamp);
+        annots(&mut editor, vec![entry]);
+        let bytes = saved(&editor);
+
+        let over = area(295.0, 56.0, 325.0, 120.0);
+        let before = render(bytes.clone());
+        assert!(ink_in(&before, 300.0, over) > 20, "SECRET starts inked");
+
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 6, "SECRET, and not PUBLIC");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        let rendered = render(after.clone());
+        assert_eq!(ink_in(&rendered, 300.0, over), 0, "no ink under the band");
+        assert_eq!(
+            differing_outside(&before, &rendered, 300.0, area(300.0, 55.0, 318.0, 101.0)),
+            0,
+            "PUBLIC renders exactly as it did"
+        );
+        let streams = all_streams(&CosDocument::open(after).expect("it reopens"));
+        assert!(
+            streams.contains("PUBLIC") && !streams.contains("SECRET"),
+            "{streams}"
+        );
+    }
+
+    /// Every stream a viewer can show is cut, not only the one it shows
+    /// today: both states of `/N` and of `/D`, the single `/R`, and the
+    /// appearance of an annotation flagged hidden.
+    ///
+    /// A checkbox's off state is what `/AS` selects; its on state draws on the
+    /// next click with no edit to the file, and a hidden annotation is one
+    /// bit from being drawn. Six streams, six glyphs each. Turned on after
+    /// the cut, the checkbox still draws nothing under the band.
+    #[test]
+    fn every_appearance_a_viewer_can_show_is_cut() {
+        let (doc, font) = page();
+        let mut editor = DocumentEditor::new(doc);
+        let states = |editor: &mut DocumentEditor| {
+            let on = public_secret(editor, font);
+            let off = public_secret(editor, font);
+            let mut dict = Dict::new();
+            dict.insert(editor.intern(b"On"), Object::Ref(on));
+            dict.insert(editor.intern(b"Off"), Object::Ref(off));
+            Object::Dict(dict)
+        };
+        let n = states(&mut editor);
+        let d = states(&mut editor);
+        let r = public_secret(&mut editor, font);
+        let mut ap = Dict::new();
+        ap.insert(editor.intern(b"N"), n);
+        ap.insert(editor.intern(b"D"), d);
+        ap.insert(editor.intern(b"R"), Object::Ref(r));
+        let mut checkbox = annotation(&editor, b"Widget", rect_at(40.0), Object::Dict(ap));
+        checkbox.insert(editor.intern(b"AS"), Object::Name(editor.intern(b"Off")));
+        let checkbox = object(&mut editor, checkbox);
+
+        let hidden_stream = public_secret(&mut editor, font);
+        let ap = normal(&editor, hidden_stream);
+        let mut hidden = annotation(&editor, b"FreeText", rect_at(40.0), ap);
+        hidden.insert(editor.intern(b"F"), Object::Int(2));
+        let hidden = object(&mut editor, hidden);
+        annots(&mut editor, vec![checkbox, hidden]);
+        let bytes = saved(&editor);
+
+        let over = over_secret_at(40.0);
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 36, "six streams, SECRET from each");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let reopened = CosDocument::open(after.clone()).expect("it reopens");
+        let streams = all_streams(&reopened);
+        assert!(!streams.contains("SECRET"), "{streams}");
+        assert_eq!(forms_in(&reopened), 6, "each cut in place, no copies");
+
+        // Ticked: the state that was not drawn when the page was redacted.
+        let mut editor = DocumentEditor::new(open(after));
+        let page_ref = editor.page_refs()[0];
+        let Some(Object::Dict(page)) = editor.get(page_ref) else {
+            panic!("the page is a dictionary");
+        };
+        let checkbox = Resolve::resolve_key(&editor, &page, editor.intern(b"Annots"))
+            .as_array()
+            .and_then(|a| a.first().and_then(Object::as_objref))
+            .expect("the checkbox is an object");
+        let Some(Object::Dict(mut dict)) = editor.get(checkbox) else {
+            panic!("the checkbox is a dictionary");
+        };
+        dict.insert(editor.intern(b"AS"), Object::Name(editor.intern(b"On")));
+        editor.put(checkbox, Object::Dict(dict));
+        let ticked = render(saved(&editor));
+        assert_eq!(ink_in(&ticked, 300.0, over), 0, "the on state is cut too");
+        assert!(
+            ink_in(&ticked, 300.0, area(11.0, 46.0, 51.0, 53.0)) > 20,
+            "and still draws PUBLIC"
+        );
+    }
+
+    /// One appearance stream, and one `/AP` dictionary, shared by two
+    /// annotations — one under the band and one not.
+    ///
+    /// Both are fitted onto `/Rect`s of the same size, at y 40 and y 190, so
+    /// they are one form at two placements and are cut exactly at each: the
+    /// covered annotation is given a copy, cut, through an `/AP` of its own,
+    /// and the other keeps the shared dictionary and the stream exactly as
+    /// they were. Writing the copy into the shared `/AP` would cut both.
+    #[test]
+    fn an_appearance_two_annotations_share_is_cut_only_where_it_is_covered() {
+        let (doc, font) = page();
+        let mut editor = DocumentEditor::new(doc);
+        let stream = public_secret(&mut editor, font);
+        let shared_ap = editor.allocate();
+        let ap = normal(&editor, stream);
+        editor.put(shared_ap, ap);
+        let lower = annotation(&editor, b"FreeText", rect_at(40.0), Object::Ref(shared_ap));
+        let upper = annotation(&editor, b"FreeText", rect_at(190.0), Object::Ref(shared_ap));
+        let lower = object(&mut editor, lower);
+        let upper = object(&mut editor, upper);
+        annots(&mut editor, vec![lower, upper]);
+        let bytes = saved(&editor);
+
+        let over = over_secret_at(40.0);
+        let before = render(bytes.clone());
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 6, "one placement's SECRET");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        assert_eq!(
+            flattened_lines(after.clone()),
+            vec![
+                (45.0, "PUBLIC".to_string()),
+                (195.0, "PUBLIC SECRET".to_string()),
+                (280.0, "KEEP".to_string())
+            ],
+            "each annotation lost what its own placement put under the band"
+        );
+        let rendered = render(after.clone());
+        assert_eq!(ink_in(&rendered, 300.0, over), 0, "no ink under the band");
+        assert_eq!(
+            differing_outside(&before, &rendered, 300.0, area(55.0, 40.0, 101.0, 60.0)),
+            0,
+            "the upper annotation, and the lower's PUBLIC, render as they did"
+        );
+
+        let reopened = CosDocument::open(after).expect("it reopens");
+        let (lower, upper) = (annotation_at(&reopened, 0), annotation_at(&reopened, 1));
+        let (cut, whole) = (normal_of(&reopened, &lower), normal_of(&reopened, &upper));
+        assert_ne!(cut, whole, "the covered annotation draws a copy");
+        let text = |r: ObjRef| {
+            String::from_utf8_lossy(&reopened.stream_decoded(r).expect("it decodes")).into_owned()
+        };
+        assert!(text(whole).contains("PUBLIC SECRET"), "{}", text(whole));
+        assert!(
+            text(cut).contains("PUBLIC") && !text(cut).contains("SECRET"),
+            "{}",
+            text(cut)
+        );
+        assert!(
+            matches!(upper.get(reopened.intern(b"AP")), Some(Object::Ref(_))),
+            "the uncovered annotation still names the shared /AP"
+        );
+    }
+
+    /// The covered annotation is written **into** `/Annots` rather than as an
+    /// object, and shares its appearance with one that is not covered. It is
+    /// pointed at its copy where it sits, in the page's own array.
+    #[test]
+    fn an_annotation_written_into_annots_itself_is_pointed_at_its_copy() {
+        let (doc, font) = page();
+        let mut editor = DocumentEditor::new(doc);
+        let stream = public_secret(&mut editor, font);
+        let ap = normal(&editor, stream);
+        let lower = annotation(&editor, b"FreeText", rect_at(40.0), ap.clone());
+        let upper = annotation(&editor, b"FreeText", rect_at(190.0), ap);
+        let upper = object(&mut editor, upper);
+        annots(&mut editor, vec![Object::Dict(lower), upper]);
+        let bytes = saved(&editor);
+
+        let over = over_secret_at(40.0);
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 6);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        let rendered = render(after.clone());
+        assert_eq!(ink_in(&rendered, 300.0, over), 0, "no ink under the band");
+        assert!(
+            ink_in(&rendered, 300.0, area(57.0, 196.0, 99.0, 203.0)) > 20,
+            "the upper annotation still draws SECRET"
+        );
+        let reopened = CosDocument::open(after).expect("it reopens");
+        let (lower, upper) = (annotation_at(&reopened, 0), annotation_at(&reopened, 1));
+        assert_ne!(normal_of(&reopened, &lower), normal_of(&reopened, &upper));
+    }
+
+    /// A rectangle that covers no appearance writes no appearance: every
+    /// stream, every `/AP` and every annotation is the object it was, and
+    /// nothing is copied.
+    #[test]
+    fn an_appearance_no_rectangle_touches_is_left_as_it_was() {
+        let (doc, font) = page();
+        let mut editor = DocumentEditor::new(doc);
+        let stream = public_secret(&mut editor, font);
+        let ap = normal(&editor, stream);
+        let note = annotation(&editor, b"FreeText", rect_at(40.0), ap);
+        let note = object(&mut editor, note);
+        annots(&mut editor, vec![note]);
+        let bytes = saved(&editor);
+        let original = open(bytes.clone());
+        let was = annotation_at(&original, 0);
+
+        let mut editor = DocumentEditor::new(Arc::clone(&original));
+        let report =
+            apply(&mut editor, 0, &[band(area(0.0, 100.0, 400.0, 150.0))]).expect("page zero");
+        assert_eq!(report, RedactionReport::default());
+        let reopened = CosDocument::open(saved(&editor)).expect("it reopens");
+        let is = annotation_at(&reopened, 0);
+        let (before, after) = (normal_of(&original, &was), normal_of(&reopened, &is));
+        assert_eq!(
+            original.stream_decoded(before).expect("it decodes"),
+            reopened.stream_decoded(after).expect("it decodes"),
+            "the appearance is byte for byte what it was"
+        );
+        assert_eq!(forms_in(&reopened), 1, "and was not copied");
+    }
+
+    /// An appearance with no `/Resources` of its own names its font in the
+    /// page's (8.10.1, as the subsetter reads an appearance too), and is
+    /// measured there — not left as a run in a font no scope has.
+    #[test]
+    fn an_appearance_without_resources_is_measured_in_the_pages() {
+        let (doc, font) = page();
+        let mut editor = DocumentEditor::new(doc);
+        let stream = public_secret(&mut editor, font);
+        let Some(Object::Dict(dict)) = editor.get(stream) else {
+            panic!("the appearance has a dictionary");
+        };
+        let dict: Dict = dict
+            .iter()
+            .filter(|(key, _)| *key != Name::RESOURCES)
+            .cloned()
+            .collect();
+        let data = editor
+            .stream_bytes(stream)
+            .expect("the appearance's content");
+        editor.put_stream(stream, StreamData { dict, data });
+        let ap = normal(&editor, stream);
+        let note = annotation(&editor, b"FreeText", rect_at(40.0), ap);
+        let note = object(&mut editor, note);
+        annots(&mut editor, vec![note]);
+
+        let (after, report) = redact(open(saved(&editor)), &[band(over_secret_at(40.0))]);
+        assert_eq!(report.glyphs, 6);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let streams = all_streams(&CosDocument::open(after).expect("it reopens"));
+        assert!(
+            streams.contains("PUBLIC") && !streams.contains("SECRET"),
+            "{streams}"
+        );
+    }
+}
+
+/// Type 3 glyph procedures (9.6.5) that draw text or an image, measured at
+/// each use and removed at the use that draws under a rectangle.
+///
+/// The fixture's face, `/T3`, has glyphs one point wide at `1 Tf` whose
+/// procedures draw far outside that point: `A` shows `SECRET` and `B`
+/// `PUBLIC` in 12-point Liberation Serif from the glyph's origin, `C` draws
+/// a twelve-point square as an inline image, `D` draws `/Fm0` — a form
+/// showing `SECRET` — `E` shows its own glyph twice, and `F` shows text in a
+/// font no scope has. `G`, `H` and `I` name what only the font's own
+/// `/Resources` has, or has differently: `G` draws `/Im0`, a fifty-point
+/// image, `H` shows `SECRET` in `/Own`, and `I` draws `/Fm1`, which the page
+/// binds to an empty form and the font to `/Fm0`'s. So a rectangle over a procedure's text, clear of the
+/// glyph's own one-point box, is a rectangle only the procedure's
+/// measurement can see, and every test here puts one there.
+///
+/// The extractor reads a Type 3 glyph by running its procedure, so what it
+/// reads back is the procedure's text: this engine's extractor and renderer,
+/// compared with themselves before and after.
+#[cfg(test)]
+mod glyph_procedures {
+    use super::tests_support::*;
+    use super::*;
+
+    fn area(x0: f64, y0: f64, x1: f64, y1: f64) -> Rect {
+        Rect { x0, y0, x1, y1 }
+    }
+
+    fn band(area: Rect) -> Redaction {
+        Redaction { area, mark: false }
+    }
+
+    /// Each glyph's procedure, by its name in `/CharProcs`, in code order
+    /// from 65 (`A`).
+    const PROCEDURES: [(&str, &[u8]); 9] = [
+        ("secret", b"1000 0 d0 BT /F0 12000 Tf 0 0 Td (SECRET) Tj ET"),
+        ("public", b"1000 0 d0 BT /F0 12000 Tf 0 0 Td (PUBLIC) Tj ET"),
+        (
+            "square",
+            b"1000 0 d0 q 12000 0 0 12000 0 0 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x00 EI Q",
+        ),
+        ("form", b"1000 0 d0 /Fm0 Do"),
+        ("itself", b"1000 0 d0 BT /T3 1000 Tf (EE) Tj ET"),
+        ("lost", b"1000 0 d0 BT /Nowhere 12000 Tf (SECRET) Tj ET"),
+        ("image", b"1000 0 d0 q 50000 0 0 50000 0 0 cm /Im0 Do Q"),
+        ("own", b"1000 0 d0 BT /Own 12000 Tf 0 0 Td (SECRET) Tj ET"),
+        ("theirs", b"1000 0 d0 /Fm1 Do"),
+    ];
+
+    fn stream(editor: &mut DocumentEditor, dict: Dict, data: &[u8]) -> ObjRef {
+        let reference = editor.allocate();
+        editor.put_stream(
+            reference,
+            StreamData {
+                dict,
+                data: data.to_vec(),
+            },
+        );
+        reference
+    }
+
+    /// A 400 by 300 page drawing `content` with `/T3` in scope, and `/F0`
+    /// (Liberation Serif, embedded whole) and `/Fm0` beside it — in the
+    /// page's scope, which is where this engine runs a procedure, and in the
+    /// Type 3 font's own `/Resources`, which is where 9.6.5 says to look.
+    fn document(content: &str) -> Vec<u8> {
+        let mut builder = tinker_pdf_cos::DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(
+            b"F0",
+            b"LiberationSerif",
+            &crate::subset::tests_support::face()
+        ));
+        builder.add_page(400.0, 300.0, |p| p.text(b"F0", 12.0, 300.0, 280.0, "KEEP"));
+        let doc = open(builder.finish());
+        let font = crate::subset::tests_support::only_font(&doc);
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+        let name = |editor: &DocumentEditor, n: &str| editor.intern(n.as_bytes());
+
+        let mut fonts = Dict::new();
+        fonts.insert(name(&editor, "F0"), Object::Ref(font));
+        let mut form_resources = Dict::new();
+        form_resources.insert(name(&editor, "Font"), Object::Dict(fonts.clone()));
+        let mut form = Dict::new();
+        form.insert(
+            name(&editor, "Subtype"),
+            Object::Name(name(&editor, "Form")),
+        );
+        form.insert(
+            name(&editor, "BBox"),
+            Object::Array(
+                [0, 0, 60000, 15000]
+                    .iter()
+                    .map(|v| Object::Int(*v))
+                    .collect(),
+            ),
+        );
+        form.insert(Name::RESOURCES, Object::Dict(form_resources));
+        let empty = stream(&mut editor, form.clone(), b"");
+        let form = stream(&mut editor, form, b"BT /F0 12000 Tf 0 0 Td (SECRET) Tj ET");
+        let mut image = Dict::new();
+        for (key, value) in [
+            ("Subtype", Object::Name(name(&editor, "Image"))),
+            ("Width", Object::Int(1)),
+            ("Height", Object::Int(1)),
+            ("ColorSpace", Object::Name(name(&editor, "DeviceGray"))),
+            ("BitsPerComponent", Object::Int(8)),
+        ] {
+            image.insert(name(&editor, key), value);
+        }
+        let image = stream(&mut editor, image, &[0]);
+
+        let mut procs = Dict::new();
+        let mut differences = vec![Object::Int(65)];
+        for (glyph, body) in PROCEDURES {
+            let procedure = stream(&mut editor, Dict::new(), body);
+            procs.insert(name(&editor, glyph), Object::Ref(procedure));
+            differences.push(Object::Name(name(&editor, glyph)));
+        }
+        let mut xobjects = Dict::new();
+        xobjects.insert(name(&editor, "Fm0"), Object::Ref(form));
+        let mut own = Dict::new();
+        let mut own_fonts = fonts.clone();
+        own_fonts.insert(name(&editor, "Own"), Object::Ref(font));
+        own.insert(name(&editor, "Font"), Object::Dict(own_fonts));
+        let mut own_xobjects = xobjects.clone();
+        own_xobjects.insert(name(&editor, "Im0"), Object::Ref(image));
+        own_xobjects.insert(name(&editor, "Fm1"), Object::Ref(form));
+        own.insert(name(&editor, "XObject"), Object::Dict(own_xobjects));
+        xobjects.insert(name(&editor, "Fm1"), Object::Ref(empty));
+
+        let mut encoding = Dict::new();
+        encoding.insert(name(&editor, "Differences"), Object::Array(differences));
+        let mut type3 = Dict::new();
+        for (key, value) in [
+            ("Type", Object::Name(name(&editor, "Font"))),
+            ("Subtype", Object::Name(name(&editor, "Type3"))),
+            ("FontMatrix", {
+                let m = [0.001, 0.0, 0.0, 0.001, 0.0, 0.0];
+                Object::Array(m.iter().map(|v| Object::Real(*v)).collect())
+            }),
+            (
+                "FontBBox",
+                Object::Array([0, 0, 1000, 1000].iter().map(|v| Object::Int(*v)).collect()),
+            ),
+            ("CharProcs", Object::Dict(procs)),
+            ("Encoding", Object::Dict(encoding)),
+            ("FirstChar", Object::Int(65)),
+            ("LastChar", Object::Int(73)),
+            ("Widths", Object::Array(vec![Object::Int(1000); 9])),
+            ("Resources", Object::Dict(own)),
+        ] {
+            type3.insert(name(&editor, key), value);
+        }
+        let type3_ref = editor.allocate();
+        editor.put(type3_ref, Object::Dict(type3));
+
+        let mut page_fonts = fonts;
+        page_fonts.insert(name(&editor, "T3"), Object::Ref(type3_ref));
+        let mut resources = Dict::new();
+        resources.insert(name(&editor, "Font"), Object::Dict(page_fonts));
+        resources.insert(name(&editor, "XObject"), Object::Dict(xobjects));
+        let content = stream(&mut editor, Dict::new(), content.as_bytes());
+        let page_ref = editor.page_refs()[0];
+        let Some(Object::Dict(mut page)) = editor.get(page_ref) else {
+            panic!("the page is a dictionary");
+        };
+        page.insert(Name::RESOURCES, Object::Dict(resources));
+        page.insert(Name::CONTENTS, Object::Ref(content));
+        editor.put(page_ref, Object::Dict(page));
+        editor.save(&tinker_pdf_cos::WriteOptions {
+            mode: tinker_pdf_cos::WriteMode::Rewrite,
+            ..tinker_pdf_cos::WriteOptions::default()
+        })
+    }
+
+    /// The decoded procedure `/CharProcs` names `glyph` by.
+    fn procedure(doc: &CosDocument, glyph: &str) -> Vec<u8> {
+        for (_, dict) in crate::subset::tests_support::font_dicts(doc) {
+            let procs = doc.resolve_key(&dict, doc.intern(b"CharProcs"));
+            if let Some(r) = procs
+                .as_dict()
+                .and_then(|p| p.get_ref(doc.intern(glyph.as_bytes())))
+            {
+                return doc.stream_decoded(r).expect("the procedure decodes");
+            }
+        }
+        panic!("no procedure is named {glyph}");
+    }
+
+    /// The row's exit, for a glyph procedure: `A`, whose procedure shows
+    /// `SECRET`, at y 125 and again at y 200, and `B`, whose procedure shows
+    /// `PUBLIC`, at y 50; a band over the middle `SECRET` from x 20, ten
+    /// points clear of the glyph's own box (x 10..11).
+    ///
+    /// That use is removed — one glyph, gone from the extractor and the
+    /// render — and the other use of the same glyph, and `B`, are not. The
+    /// procedure, which both uses of `A` run, is byte for byte what it was:
+    /// the decision in [`cut_stream`]'s doc, pinned.
+    #[test]
+    fn a_glyph_whose_procedure_shows_text_under_a_rectangle_is_removed_at_that_use() {
+        let bytes = document("BT /T3 1 Tf 10 50 Td (B) Tj 0 75 Td (A) Tj 0 75 Td (A) Tj ET");
+        assert_eq!(
+            lines_of(bytes.clone()),
+            vec![
+                (50.0, "PUBLIC".to_string()),
+                (125.0, "SECRET".to_string()),
+                (200.0, "SECRET".to_string()),
+            ],
+            "the fixture draws what its comment says, where it says"
+        );
+        let over = area(20.0, 120.0, 80.0, 140.0);
+        let before = render(bytes.clone());
+        assert!(ink_in(&before, 300.0, over) > 20, "SECRET starts inked");
+
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 1, "the one use of A under the band");
+        assert_eq!(report.operations, 1);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+
+        assert_eq!(
+            lines_of(after.clone()),
+            vec![(50.0, "PUBLIC".to_string()), (200.0, "SECRET".to_string())]
+        );
+        let rendered = render(after.clone());
+        assert_eq!(ink_in(&rendered, 300.0, over), 0, "no ink under the band");
+        assert_eq!(
+            differing_outside(&before, &rendered, 300.0, area(9.0, 120.0, 60.0, 140.0)),
+            0,
+            "the other SECRET and PUBLIC render exactly as they did"
+        );
+        let reopened = CosDocument::open(after).expect("it reopens");
+        assert_eq!(
+            procedure(&reopened, "secret"),
+            PROCEDURES[0].1,
+            "the procedure every use of A runs is left as it was"
+        );
+    }
+
+    /// `C`'s procedure draws a twelve-point square as an inline image, the
+    /// way a bitmap face draws every glyph. Two uses in one `TJ`, the second
+    /// moved a hundred points along by the array's number, so it is a pen
+    /// position along the run rather than a line start; the band takes the
+    /// corner of the second square, not the glyph's own box (x 110..111).
+    /// That use goes, and the first square — the same procedure — stays.
+    #[test]
+    fn a_glyph_whose_procedure_draws_an_image_under_a_rectangle_is_removed_at_that_use() {
+        let bytes = document("BT /T3 1 Tf 10 50 Td [(C) -99000 (C)] TJ ET");
+        let over = area(116.0, 55.0, 130.0, 70.0);
+        let second = area(109.0, 49.0, 123.0, 63.0);
+        let before = render(bytes.clone());
+        assert!(ink_in(&before, 300.0, over) > 20, "the square starts inked");
+        assert!(
+            ink_in(&before, 300.0, area(9.0, 49.0, 23.0, 63.0)) > 100,
+            "and so does the first"
+        );
+
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 1);
+        assert_eq!(report.images, 0, "nothing was scrubbed: a use was removed");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let rendered = render(after);
+        assert_eq!(ink_in(&rendered, 300.0, second), 0);
+        assert_eq!(
+            differing_outside(&before, &rendered, 300.0, second),
+            0,
+            "the first square renders exactly as it did"
+        );
+    }
+
+    /// Forty uses of `D`, each of whose measurements runs two streams — the
+    /// procedure and the form it draws — and a band nowhere near any of
+    /// them. Nothing is removed: the budget is each use's, so a page of an
+    /// ordinary two-level face does not run a shared one out a few dozen
+    /// glyphs in and remove every use after.
+    #[test]
+    fn every_use_of_a_glyph_has_a_budget_of_its_own() {
+        let uses = "D".repeat(40);
+        let bytes = document(&format!("BT /T3 1 Tf 10 50 Td ({uses}) Tj ET"));
+        let (_, report) = redact(open(bytes), &[band(area(300.0, 0.0, 400.0, 10.0))]);
+        assert_eq!(report, RedactionReport::default());
+    }
+
+    /// `D`'s procedure draws a form, and the form shows `SECRET`: measured
+    /// through the form, under the transform the procedure draws it with.
+    #[test]
+    fn a_glyph_whose_procedure_draws_a_form_is_measured_through_the_form() {
+        let bytes = document("BT /T3 1 Tf 10 50 Td (D) Tj 0 150 Td (D) Tj ET");
+        assert_eq!(
+            lines_of(bytes.clone()),
+            vec![(50.0, "SECRET".to_string()), (200.0, "SECRET".to_string())]
+        );
+        let over = area(20.0, 45.0, 80.0, 65.0);
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 1);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(lines_of(after.clone()), vec![(200.0, "SECRET".to_string())]);
+        assert_eq!(ink_in(&render(after), 300.0, over), 0);
+    }
+
+    /// `E`'s procedure shows `E` twice, so measuring it never bottoms out.
+    /// It ends — the budget is spent — and the use is removed, which is the
+    /// direction a measurement that could not finish errs in, and named,
+    /// because a caller cannot tell that removal from a covered one by
+    /// `glyphs` (until October 2026 nothing said so). A face that draws
+    /// itself is not one a reader is looking at.
+    #[test]
+    fn a_glyph_procedure_that_shows_its_own_glyph_ends_and_errs_toward_removal() {
+        let bytes = document("BT /T3 1 Tf 10 50 Td (E) Tj 100 0 Td (B) Tj ET");
+        let far = area(300.0, 0.0, 400.0, 10.0);
+        let (after, report) = redact(open(bytes), &[band(far)]);
+        assert_eq!(report.glyphs, 1, "E, and not B");
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::UnboundedProcedure {
+                font: b"T3".to_vec(),
+                uses: 1,
+            }]
+        );
+        assert_eq!(
+            lines_of(after.clone()),
+            vec![(50.0, "PUBLIC".to_string())],
+            "B's PUBLIC is still read"
+        );
+        let reopened = CosDocument::open(after).expect("it reopens");
+        assert_eq!(procedure(&reopened, "itself"), PROCEDURES[4].1);
+    }
+
+    /// `F`'s procedure shows text in `/Nowhere`, which no scope has: its run
+    /// cannot be measured, so it is named — under the name the procedure
+    /// gave — and the glyph is left, as every unmeasurable run is. The
+    /// renderer draws nothing for it either.
+    #[test]
+    fn a_procedure_showing_text_in_a_font_no_scope_has_is_reported_and_left() {
+        let bytes = document("BT /T3 1 Tf 10 50 Td (F) Tj ET");
+        let (_, report) = redact(open(bytes), &[band(area(20.0, 45.0, 80.0, 65.0))]);
+        assert_eq!(report.glyphs, 0);
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::UnknownFont {
+                font: b"Nowhere".to_vec(),
+                bytes: 6,
+            }]
+        );
+    }
+
+    /// 9.6.5 puts a procedure's resources in the font's own `/Resources`,
+    /// and this engine runs a procedure in the enclosing scope instead. A
+    /// reader either way draws the glyph, so a procedure is measured in
+    /// both: `G`'s `/Im0` and `H`'s `/Own` are only in the font's, and `I`'s
+    /// `/Fm1` is an empty form in the page's and `SECRET` in the font's.
+    /// Each use under its band goes, and nothing is reported, because
+    /// nothing was left unmeasured. Until October 2026 the `Do` was resolved
+    /// in the enclosing scope alone and passed over when it missed —
+    /// `glyphs: 0, warnings: []` — and the text was named `UnknownFont`.
+    #[test]
+    fn a_procedure_is_measured_in_the_fonts_own_resources_too() {
+        for (glyph, over, what) in [
+            (
+                "G",
+                area(30.0, 70.0, 40.0, 80.0),
+                "an image only the font names",
+            ),
+            (
+                "H",
+                area(20.0, 45.0, 80.0, 65.0),
+                "text in a font only the font names",
+            ),
+            (
+                "I",
+                area(20.0, 45.0, 80.0, 65.0),
+                "a form the font binds differently",
+            ),
+        ] {
+            let bytes = document(&format!("BT /T3 1 Tf 10 50 Td ({glyph}) Tj ET"));
+            let (_, report) = redact(open(bytes), &[band(over)]);
+            assert_eq!(report.glyphs, 1, "{what}");
+            assert!(report.warnings.is_empty(), "{what}: {:?}", report.warnings);
+        }
+    }
+
+    /// The decision's cost, paid by the default save: the procedure a
+    /// redaction leaves in the font is emptied once the redaction removed its
+    /// last use. `A` is shown once, under the band, and `B` once beside it;
+    /// after [`crate::write::save`] with its defaults `A`'s procedure is the
+    /// empty one and no longer says `SECRET`, `B`'s still says `PUBLIC`, and
+    /// the page reads as the redaction left it.
+    #[test]
+    fn a_procedure_whose_last_use_was_redacted_is_emptied_by_the_default_save() {
+        let bytes = document("BT /T3 1 Tf 10 50 Td (B) Tj 0 75 Td (A) Tj ET");
+        let mut editor = DocumentEditor::new(open(bytes));
+        let report = apply(&mut editor, 0, &[band(area(20.0, 120.0, 80.0, 140.0))])
+            .expect("the page exists");
+        assert_eq!(report.glyphs, 1);
+        let saved = crate::write::save(&mut editor, &crate::SaveOptions::default());
+        let subset = saved.fonts.report().expect("the pass ran");
+        assert_eq!(
+            subset.type3.iter().map(|t| t.kept).collect::<Vec<_>>(),
+            vec![1],
+            "of the six procedures, B's alone is still run"
+        );
+
+        let reopened = CosDocument::open(saved.bytes.clone()).expect("it reopens");
+        assert_eq!(procedure(&reopened, "secret").trim_ascii_end(), b"0 0 d0");
+        assert_eq!(procedure(&reopened, "public"), PROCEDURES[1].1);
+        assert_eq!(lines_of(saved.bytes), vec![(50.0, "PUBLIC".to_string())]);
+    }
+
+    /// The procedure's measurement composes with every transform above it: a
+    /// use of `A` inside a form placed twice is measured where each placement
+    /// draws it — the walk's placements, with a procedure under each.
+    #[test]
+    fn a_glyph_in_a_form_drawn_twice_is_measured_at_each_placement() {
+        let mut editor = DocumentEditor::new(open(document("")));
+        let page_ref = editor.page_refs()[0];
+        let Some(Object::Dict(mut page)) = editor.get(page_ref) else {
+            panic!("the page is a dictionary");
+        };
+        let resources = Resolve::resolve_key(&editor, &page, Name::RESOURCES)
+            .as_dict()
+            .cloned()
+            .expect("resources");
+        let mut form = Dict::new();
+        form.insert(
+            editor.intern(b"Subtype"),
+            Object::Name(editor.intern(b"Form")),
+        );
+        form.insert(
+            editor.intern(b"BBox"),
+            Object::Array([0, 0, 400, 100].iter().map(|v| Object::Int(*v)).collect()),
+        );
+        form.insert(Name::RESOURCES, Object::Dict(resources.clone()));
+        let form_ref = stream(&mut editor, form, b"BT /T3 1 Tf 10 50 Td (A) Tj ET");
+        let mut xobjects = Resolve::resolve_key(&editor, &resources, editor.intern(b"XObject"))
+            .as_dict()
+            .cloned()
+            .expect("an /XObject");
+        xobjects.insert(editor.intern(b"Twice"), Object::Ref(form_ref));
+        let mut resources = resources;
+        resources.insert(editor.intern(b"XObject"), Object::Dict(xobjects));
+        page.insert(Name::RESOURCES, Object::Dict(resources));
+        let content = stream(
+            &mut editor,
+            Dict::new(),
+            b"/Twice Do q 1 0 0 1 0 150 cm /Twice Do Q",
+        );
+        page.insert(Name::CONTENTS, Object::Ref(content));
+        editor.put(page_ref, Object::Dict(page));
+        let bytes = editor.save(&tinker_pdf_cos::WriteOptions {
+            mode: tinker_pdf_cos::WriteMode::Rewrite,
+            ..tinker_pdf_cos::WriteOptions::default()
+        });
+        assert_eq!(
+            lines_of(bytes.clone()),
+            vec![(50.0, "SECRET".to_string()), (200.0, "SECRET".to_string())]
+        );
+
+        let over = area(20.0, 195.0, 80.0, 215.0);
+        let (after, report) = redact(open(bytes), &[band(over)]);
+        assert_eq!(report.glyphs, 1, "the upper placement's A");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(lines_of(after), vec![(50.0, "SECRET".to_string())]);
+    }
+}
+
+/// A form the redacted page shares with something else, cut at **every**
+/// placement on the redacted page.
+///
+/// Every fixture is two pages over one form, `/Fm0`, drawing `PUBLIC SECRET`
+/// in the vendored Liberation Serif at y 50 (the form of
+/// [`tests_support::public_secret_drawn_by`]). Page one draws it at y 50 and
+/// at y 200, and the two rectangles take `SECRET` from the lower placement
+/// and `PUBLIC` from the upper, so no placement on page one is uncut. Page
+/// two draws the form some other way, or only names it.
+///
+/// Until October 2026 the form's own object took page one's first outcome
+/// whatever else drew it, and page two lost `SECRET` to a rectangle on page
+/// one, unreported.
+#[cfg(test)]
+mod forms_elsewhere {
+    use super::tests_support::*;
+    use super::*;
+
+    fn band(x0: f64, y0: f64, x1: f64, y1: f64) -> Redaction {
+        Redaction {
+            area: Rect { x0, y0, x1, y1 },
+            mark: false,
+        }
+    }
+
+    /// `SECRET` from the lower placement, `PUBLIC` from the upper.
+    fn bands() -> [Redaction; 2] {
+        [band(56.0, 45.0, 400.0, 70.0), band(0.0, 195.0, 52.0, 220.0)]
+    }
+
+    const PAGE_ONE: &[u8] = b"q 1 0 0 1 0 0 cm /Fm0 Do Q q 1 0 0 1 0 150 cm /Fm0 Do Q";
+
+    /// Two pages: `/Fm0`, then `/Fm1` drawing `/Fm0` (registered after it, so
+    /// its resources name it), page one as above, and page two drawing
+    /// `page_two`.
+    fn two_pages(page_two: &[u8]) -> Vec<u8> {
+        let mut builder = tinker_pdf_cos::DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(
+            b"F0",
+            b"LiberationSerif",
+            &crate::subset::tests_support::face()
+        ));
+        for (name, content) in [
+            (
+                b"Fm0".as_slice(),
+                b"BT /F0 12 Tf 10 50 Td (PUBLIC SECRET) Tj ET".as_slice(),
+            ),
+            (b"Fm1", b"/Fm0 Do"),
+        ] {
+            assert!(builder.add_form(
+                name,
+                &tinker_pdf_cos::FormXObject {
+                    bbox: [0.0, 0.0, 400.0, 300.0],
+                    matrix: None,
+                    group: None,
+                    content,
+                }
+            ));
+        }
+        builder.add_page(400.0, 300.0, |p| p.raw(PAGE_ONE));
+        builder.add_page(400.0, 300.0, |p| p.raw(page_two));
+        builder.finish()
+    }
+
+    /// Page `index`, rendered with its annotations.
+    fn render_page(bytes: Vec<u8>, index: u32) -> crate::Bitmap {
+        crate::Document::open(bytes)
+            .expect("it reopens")
+            .page(index)
+            .expect("the page")
+            .render(&crate::RenderOptions::default())
+    }
+
+    /// Page one lost exactly what its rectangles covered, at each placement.
+    fn page_one_is_cut_exactly(bytes: &[u8], report: &RedactionReport) {
+        assert_eq!(report.glyphs, 12, "SECRET below and PUBLIC above");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(
+            lines_of(bytes.to_vec()),
+            vec![(50.0, "PUBLIC".to_string()), (200.0, "SECRET".to_string())]
+        );
+        let rendered = render_page(bytes.to_vec(), 0);
+        for redaction in bands() {
+            assert_eq!(ink_in(&rendered, 300.0, redaction.area), 0);
+        }
+    }
+
+    fn saved(editor: &DocumentEditor) -> Vec<u8> {
+        editor.save(&tinker_pdf_cos::WriteOptions {
+            mode: tinker_pdf_cos::WriteMode::Rewrite,
+            ..tinker_pdf_cos::WriteOptions::default()
+        })
+    }
+
+    /// The row's exit: page two draws `/Fm0` itself, and still draws all of
+    /// it. The form's own object is left as it was — page two is what draws
+    /// it now — and each of page one's placements draws a copy of its own.
+    #[test]
+    fn a_form_another_page_draws_is_left_whole_when_every_placement_here_is_cut() {
+        let bytes = two_pages(b"/Fm0 Do");
+        let before = render_page(bytes.clone(), 1);
+        let (after, report) = redact(open(bytes), &bands());
+        page_one_is_cut_exactly(&after, &report);
+
+        assert_eq!(
+            lines_on(after.clone(), 1),
+            vec![(50.0, "PUBLIC SECRET".to_string())],
+            "page two was not redacted and lost nothing"
+        );
+        assert_eq!(
+            differing_outside(
+                &before,
+                &render_page(after.clone(), 1),
+                300.0,
+                Rect {
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: 0.0,
+                    y1: 0.0
+                }
+            ),
+            0,
+            "page two renders exactly as it did"
+        );
+        let reopened = CosDocument::open(after).expect("it reopens");
+        assert_eq!(
+            forms_in(&reopened),
+            4,
+            "Fm0 and Fm1 as they were, and a copy for each placement on page one"
+        );
+    }
+
+    /// Page two draws `/Fm0` only through `/Fm1`: drawn at a depth is drawn.
+    #[test]
+    fn a_form_another_page_draws_through_a_form_of_its_own_is_left_whole() {
+        let (after, report) = redact(open(two_pages(b"/Fm1 Do")), &bands());
+        page_one_is_cut_exactly(&after, &report);
+        assert_eq!(
+            lines_on(after, 1),
+            vec![(50.0, "PUBLIC SECRET".to_string())]
+        );
+    }
+
+    /// Page two draws `/Fm0` as an annotation's appearance, not from its
+    /// content: 12.5.5 draws it there all the same.
+    #[test]
+    fn a_form_an_annotation_on_another_page_shows_is_left_whole() {
+        let bytes = two_pages(b"");
+        let mut editor = DocumentEditor::new(open(bytes));
+        let page_two = editor.page_refs()[1];
+        let Some(Object::Dict(page)) = editor.get(page_two) else {
+            panic!("page two is a dictionary");
+        };
+        let resources = inherited_resources(&editor, &page);
+        let (form, _) = resolve_xobject(&editor, &resources, b"Fm0").expect("Fm0 is in scope");
+        let mut ap = Dict::new();
+        ap.insert(editor.intern(b"N"), Object::Ref(form));
+        let mut annotation = Dict::new();
+        annotation.insert(
+            editor.intern(b"Subtype"),
+            Object::Name(editor.intern(b"Stamp")),
+        );
+        annotation.insert(
+            editor.intern(b"Rect"),
+            Object::Array([0, 0, 400, 300].iter().map(|v| Object::Int(*v)).collect()),
+        );
+        annotation.insert(editor.intern(b"AP"), Object::Dict(ap));
+        let mut page = page;
+        page.insert(
+            editor.intern(b"Annots"),
+            Object::Array(vec![Object::Dict(annotation)]),
+        );
+        editor.put(page_two, Object::Dict(page));
+        let bytes = saved(&editor);
+        let before = render_page(bytes.clone(), 1);
+        assert!(
+            ink_in(
+                &before,
+                300.0,
+                Rect {
+                    x0: 57.0,
+                    y0: 51.0,
+                    x1: 99.0,
+                    y1: 58.0
+                }
+            ) > 20,
+            "page two's stamp draws SECRET"
+        );
+
+        let (after, report) = redact(open(bytes), &bands());
+        page_one_is_cut_exactly(&after, &report);
+        assert_eq!(
+            differing_outside(
+                &before,
+                &render_page(after, 1),
+                300.0,
+                Rect {
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: 0.0,
+                    y1: 0.0
+                }
+            ),
+            0,
+            "page two's stamp renders exactly as it did"
+        );
+    }
+
+    /// Page two draws `/Fm0` from a Type 3 glyph's procedure, which runs it
+    /// in page two's scope: a glyph shown is a form drawn.
+    #[test]
+    fn a_form_a_glyph_procedure_on_another_page_draws_is_left_whole() {
+        let bytes = two_pages(b"");
+        let mut editor = DocumentEditor::new(open(bytes));
+        let page_two = editor.page_refs()[1];
+        let Some(Object::Dict(mut page)) = editor.get(page_two) else {
+            panic!("page two is a dictionary");
+        };
+        let procedure = editor.allocate();
+        editor.put_stream(
+            procedure,
+            StreamData {
+                dict: Dict::new(),
+                data: b"1000 0 d0 1000 0 0 1000 0 0 cm /Fm0 Do".to_vec(),
+            },
+        );
+        let mut face = Dict::new();
+        let mut procs = Dict::new();
+        procs.insert(editor.intern(b"a"), Object::Ref(procedure));
+        let mut encoding = Dict::new();
+        encoding.insert(
+            editor.intern(b"Differences"),
+            Object::Array(vec![Object::Int(65), Object::Name(editor.intern(b"a"))]),
+        );
+        for (key, value) in [
+            (b"Type".as_slice(), Object::Name(editor.intern(b"Font"))),
+            (b"Subtype", Object::Name(editor.intern(b"Type3"))),
+            (
+                b"FontMatrix",
+                Object::Array(
+                    [0.001, 0.0, 0.0, 0.001, 0.0, 0.0]
+                        .iter()
+                        .map(|v| Object::Real(*v))
+                        .collect(),
+                ),
+            ),
+            (
+                b"FontBBox",
+                Object::Array([0, 0, 1000, 1000].iter().map(|v| Object::Int(*v)).collect()),
+            ),
+            (b"CharProcs", Object::Dict(procs)),
+            (b"Encoding", Object::Dict(encoding)),
+            (b"FirstChar", Object::Int(65)),
+            (b"LastChar", Object::Int(65)),
+            (b"Widths", Object::Array(vec![Object::Int(1000)])),
+        ] {
+            face.insert(editor.intern(key), value);
+        }
+        let face_ref = editor.allocate();
+        editor.put(face_ref, Object::Dict(face));
+
+        let mut resources = inherited_resources(&editor, &page);
+        let mut fonts = Resolve::resolve_key(&editor, &resources, editor.intern(b"Font"))
+            .as_dict()
+            .cloned()
+            .unwrap_or_default();
+        fonts.insert(editor.intern(b"T3"), Object::Ref(face_ref));
+        resources.insert(editor.intern(b"Font"), Object::Dict(fonts));
+        page.insert(Name::RESOURCES, Object::Dict(resources));
+        let content = editor.allocate();
+        editor.put_stream(
+            content,
+            StreamData {
+                dict: Dict::new(),
+                data: b"BT /T3 1 Tf 0 0 Td (A) Tj ET".to_vec(),
+            },
+        );
+        page.insert(Name::CONTENTS, Object::Ref(content));
+        editor.put(page_two, Object::Dict(page));
+        let bytes = saved(&editor);
+        assert_eq!(
+            lines_on(bytes.clone(), 1),
+            vec![(50.0, "PUBLIC SECRET".to_string())],
+            "page two's one glyph draws the form"
+        );
+
+        let (after, report) = redact(open(bytes), &bands());
+        page_one_is_cut_exactly(&after, &report);
+        assert_eq!(
+            lines_on(after, 1),
+            vec![(50.0, "PUBLIC SECRET".to_string())]
+        );
+    }
+
+    /// [`two_pages`] with page one drawing `/Fs` instead, a form that draws
+    /// `/Fm0` and then itself — so `/Fs` and everything it draws go the old
+    /// way, each with a single placement.
+    fn drawn_by_a_form_that_draws_itself(page_two: &[u8]) -> Vec<u8> {
+        let mut editor = DocumentEditor::new(open(two_pages(page_two)));
+        let page_one = editor.page_refs()[0];
+        let Some(Object::Dict(mut page)) = editor.get(page_one) else {
+            panic!("page one is a dictionary");
+        };
+        let mut resources = inherited_resources(&editor, &page);
+        let (fm0, _) = resolve_xobject(&editor, &resources, b"Fm0").expect("Fm0 is in scope");
+        let fs = editor.allocate();
+        let mut xobjects = Dict::new();
+        xobjects.insert(editor.intern(b"Fm0"), Object::Ref(fm0));
+        xobjects.insert(editor.intern(b"Fs"), Object::Ref(fs));
+        let mut own = Dict::new();
+        own.insert(editor.intern(b"XObject"), Object::Dict(xobjects.clone()));
+        let mut dict = Dict::new();
+        dict.insert(
+            editor.intern(b"Subtype"),
+            Object::Name(editor.intern(b"Form")),
+        );
+        dict.insert(
+            editor.intern(b"BBox"),
+            Object::Array([0, 0, 400, 300].iter().map(|v| Object::Int(*v)).collect()),
+        );
+        dict.insert(Name::RESOURCES, Object::Dict(own));
+        editor.put_stream(
+            fs,
+            StreamData {
+                dict,
+                data: b"/Fm0 Do /Fs Do".to_vec(),
+            },
+        );
+        resources.insert(editor.intern(b"XObject"), Object::Dict(xobjects));
+        page.insert(Name::RESOURCES, Object::Dict(resources));
+        let content = editor.allocate();
+        editor.put_stream(
+            content,
+            StreamData {
+                dict: Dict::new(),
+                data: b"/Fs Do".to_vec(),
+            },
+        );
+        page.insert(Name::CONTENTS, Object::Ref(content));
+        editor.put(page_one, Object::Dict(page));
+        saved(&editor)
+    }
+
+    /// A form cut the old way is cut in place, so a page that shares it
+    /// loses there what this page's rectangles covered — a widened cut, and
+    /// it is named. Page two draws `/Fm0`, which page one draws through a
+    /// form that draws itself. Until October 2026 `union` named a widened
+    /// cut only for a form placed twice on the redacted page, and page two
+    /// lost `SECRET` with nothing said. When page two draws nothing, the cut
+    /// in place is exact, and nothing is named.
+    #[test]
+    fn a_form_cut_in_place_that_another_page_draws_is_named() {
+        let bytes = drawn_by_a_form_that_draws_itself(b"/Fm0 Do");
+        assert_eq!(
+            lines_on(bytes.clone(), 1),
+            vec![(50.0, "PUBLIC SECRET".to_string())]
+        );
+        let secret = band(56.0, 45.0, 400.0, 70.0);
+        let (after, report) = redact(open(bytes), &[secret]);
+        assert_eq!(report.glyphs, 6, "SECRET");
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::RepeatedForm {
+                form: b"Fm0".to_vec(),
+                placements: 1,
+            }],
+            "the cut reaches page two, and is named"
+        );
+        assert_eq!(lines_on(after, 1), vec![(50.0, "PUBLIC".to_string())]);
+
+        let (_, report) = redact(open(drawn_by_a_form_that_draws_itself(b"")), &[secret]);
+        assert_eq!(report.glyphs, 6, "SECRET");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    /// A form first met deep in another page's forms and then shallow is
+    /// read the second time. Page two draws a chain of sixteen forms whose
+    /// last draws `/Fm1`, one level past where the read stops, and then
+    /// draws `/Fm1` itself, which draws `/Fm0`. Until October 2026 the read
+    /// remembered `/Fm1` from the deep visit it did not read and skipped the
+    /// shallow one, so `/Fm0` counted as drawn by nothing else, took page
+    /// one's cut, and page two lost `SECRET` unreported.
+    #[test]
+    fn a_form_met_deep_and_then_shallow_on_another_page_is_read() {
+        let mut builder = tinker_pdf_cos::DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(
+            b"F0",
+            b"LiberationSerif",
+            &crate::subset::tests_support::face()
+        ));
+        let mut forms: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (
+                b"Fm0".to_vec(),
+                b"BT /F0 12 Tf 10 50 Td (PUBLIC SECRET) Tj ET".to_vec(),
+            ),
+            (b"Fm1".to_vec(), b"/Fm0 Do".to_vec()),
+        ];
+        for level in (1..=16).rev() {
+            let next = if level == 16 {
+                "Fm1".to_string()
+            } else {
+                format!("C{}", level + 1)
+            };
+            forms.push((
+                format!("C{level}").into_bytes(),
+                format!("/{next} Do").into_bytes(),
+            ));
+        }
+        for (name, content) in &forms {
+            assert!(builder.add_form(
+                name,
+                &tinker_pdf_cos::FormXObject {
+                    bbox: [0.0, 0.0, 400.0, 300.0],
+                    matrix: None,
+                    group: None,
+                    content,
+                }
+            ));
+        }
+        builder.add_page(400.0, 300.0, |p| p.raw(PAGE_ONE));
+        builder.add_page(400.0, 300.0, |p| p.raw(b"/C1 Do /Fm1 Do"));
+        let bytes = builder.finish();
+        assert!(
+            lines_on(bytes.clone(), 1)
+                .iter()
+                .any(|(_, text)| text.contains("SECRET")),
+            "page two draws SECRET"
+        );
+
+        let (after, report) = redact(open(bytes), &bands());
+        page_one_is_cut_exactly(&after, &report);
+        assert!(
+            lines_on(after, 1)
+                .iter()
+                .any(|(_, text)| text.contains("PUBLIC SECRET")),
+            "page two still draws all of /Fm0"
+        );
+    }
+
+    /// Page two's resources **name** `/Fm0` and its content never draws it.
+    /// Named is not drawn: the form's own object takes page one's first
+    /// outcome, as it does when nothing else names it, so the uncut text is
+    /// in no stream — leaving it whole for a page that never draws it would
+    /// have left it in the file with nothing drawing it.
+    #[test]
+    fn a_form_another_page_only_names_is_still_cut_in_place() {
+        let bytes = two_pages(b"");
+        let doc = open(bytes.clone());
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+        let page_two = editor.page_refs()[1];
+        let Some(Object::Dict(page)) = editor.get(page_two) else {
+            panic!("page two is a dictionary");
+        };
+        let resources = inherited_resources(&editor, &page);
+        assert!(
+            resolve_xobject(&editor, &resources, b"Fm0").is_some(),
+            "the fixture: page two's resources name the form"
+        );
+
+        let report = apply(&mut editor, 0, &bands()).expect("page one");
+        let after = saved(&editor);
+        page_one_is_cut_exactly(&after, &report);
+        let reopened = CosDocument::open(after).expect("it reopens");
+        let streams = all_streams(&reopened);
+        assert!(
+            !streams.contains("PUBLIC SECRET"),
+            "no stream holds the uncut text: {streams}"
+        );
+        assert_eq!(forms_in(&reopened), 3, "Fm0, Fm1 and one copy");
+    }
+}
+
+/// [`MAX_XOBJECT_USES`], at the line and one past it.
+#[cfg(test)]
+mod xobject_cap {
+    use super::tests_support::*;
+    use super::*;
+
+    /// A page whose content draws `/Im0` — two by two gray samples spelling
+    /// `SECR` — `placements` times: every placement but the last at
+    /// (300, 300), clear of the rectangle, and the last at the origin, under
+    /// it.
+    fn many(placements: usize) -> Vec<u8> {
+        let mut content = "q 10 0 0 10 300 300 cm /Im0 Do Q\n".repeat(placements - 1);
+        content.push_str("q 10 0 0 10 0 0 cm /Im0 Do Q\n");
+        page(&content)
+    }
+
+    /// One page drawing `content`, with `/Im0` the image [`many`] draws and
+    /// `/GS1` a graphics state that sets a constant alpha and no soft mask.
+    fn page(content: &str) -> Vec<u8> {
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400]\n\
+             /Resources << /XObject << /Im0 5 0 R >> /ExtGState << /GS1 << /CA 0.5 >> >> >>\n\
+             /Contents 4 0 R >>\nendobj\n",
+        );
+        out.push_str(&stream_object(4, content));
+        out.push_str(
+            "5 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2\n\
+             /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\n\
+             stream\nSECR\nendstream\nendobj\n",
+        );
+        out.push_str("trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n");
+        out.into_bytes()
+    }
+
+    fn under() -> Redaction {
+        Redaction {
+            area: Rect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 20.0,
+                y1: 20.0,
+            },
+            mark: false,
+        }
+    }
+
+    /// Exactly as many `Do`s as the walk follows: the last is followed, and
+    /// the image it draws under the rectangle is scrubbed.
+    #[test]
+    fn as_many_xobjects_as_the_walk_follows_are_all_followed() {
+        let (bytes, report) = redact(open(many(MAX_XOBJECT_USES)), &[under()]);
+        assert_eq!(report.images, 1);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert!(!all_streams(&open(bytes)).contains("SECR"));
+    }
+
+    /// One more, and the one past the cap is the one under the rectangle. It
+    /// is not followed and the image is not scrubbed — and the report says
+    /// so, where until October 2026 it read `images: 0` and nothing else.
+    #[test]
+    fn a_stream_of_more_xobjects_than_the_walk_follows_is_reported() {
+        let (bytes, report) = redact(open(many(MAX_XOBJECT_USES + 1)), &[under()]);
+        assert_eq!(report.images, 0, "the last Do was not followed");
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::TooManyXObjects { skipped: 1 }]
+        );
+        assert!(
+            all_streams(&open(bytes)).contains("SECR"),
+            "which is what the warning is for"
+        );
+    }
+
+    /// A `gs` whose state sets no soft mask draws nothing and is not a use.
+    /// As many of them as the walk follows `Do`s, each at a transform of its
+    /// own — an alpha set per object — and then the image under the
+    /// rectangle: it is followed and scrubbed, and nothing is reported.
+    /// Recorded as uses, the states spent the bound and the image was the
+    /// one past it: `images: 0`, `TooManyXObjects { skipped: 1 }`, its
+    /// samples still in the file, where before soft masks were measured at
+    /// all it was removed.
+    #[test]
+    fn a_state_that_sets_no_mask_does_not_spend_the_bound() {
+        let mut content: String = (0..MAX_XOBJECT_USES)
+            .map(|i| format!("q 1 0 0 1 {i} 0 cm /GS1 gs Q\n"))
+            .collect();
+        content.push_str("q 10 0 0 10 0 0 cm /Im0 Do Q\n");
+        let (bytes, report) = redact(open(page(&content)), &[under()]);
+        assert_eq!(report.images, 1, "{:?}", report.warnings);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert!(!all_streams(&open(bytes)).contains("SECR"));
+    }
+
+    /// What one pass remembers of the states it met is bounded by what it
+    /// records: three times the bound of mask states at distinct transforms
+    /// records the bound and counts the rest unfollowed, and remembers no
+    /// more placements than it recorded — where it used to take an entry for
+    /// every one, recorded or not, a set as long as the stream. A state set
+    /// again where it was recorded is still one placement, past the bound
+    /// too; and as many names as the bound are asked about and remembered,
+    /// the rest asked every time.
+    #[test]
+    fn what_a_pass_remembers_of_its_states_is_bounded() {
+        let masks = |_: &[u8]| true;
+        let mut followed = Followed::new(&masks);
+        let at = |x: usize| Matrix {
+            e: x as f64,
+            ..Matrix::IDENTITY
+        };
+        for x in 0..3 * MAX_XOBJECT_USES {
+            followed.state(b"A", at(x));
+        }
+        assert_eq!(followed.uses.len(), MAX_XOBJECT_USES);
+        assert_eq!(followed.unfollowed, 2 * MAX_XOBJECT_USES);
+        assert_eq!(followed.states.len(), MAX_XOBJECT_USES);
+        assert!(!followed.state(b"A", at(0)), "already recorded");
+        assert_eq!(followed.unfollowed, 2 * MAX_XOBJECT_USES);
+
+        let none = |_: &[u8]| false;
+        let mut followed = Followed::new(&none);
+        for n in 0..3 * MAX_XOBJECT_USES {
+            assert!(!followed.state(format!("S{n}").as_bytes(), at(n)));
+        }
+        assert!(followed.uses.is_empty());
+        assert_eq!(
+            followed.unfollowed, 0,
+            "a state that sets no mask is no use"
+        );
+        assert!(followed.states.is_empty());
+        assert_eq!(followed.masking.len(), MAX_XOBJECT_USES);
+    }
+
+    /// No rectangle, nothing to be uncertain about, as for every warning.
+    #[test]
+    fn the_cap_raises_nothing_when_there_is_no_rectangle() {
+        let (_, report) = redact(open(many(MAX_XOBJECT_USES + 1)), &[]);
+        assert_eq!(report, RedactionReport::default());
+    }
+
+    /// A form whose content is past the cap, drawn at two placements: each
+    /// placement is a pass over the stream, each leaves one `Do` unfollowed,
+    /// and the one warning sums them.
+    #[test]
+    fn a_form_past_the_cap_counts_at_each_placement() {
+        let form = "/Im0 Do\n".repeat(MAX_XOBJECT_USES + 1);
+        let page = "/Fm0 Do q 1 0 0 1 0 50 cm /Fm0 Do Q";
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400]\n\
+             /Resources << /XObject << /Fm0 6 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+        );
+        out.push_str(&stream_object(4, page));
+        out.push_str(
+            "5 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2\n\
+             /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\n\
+             stream\nSECR\nendstream\nendobj\n",
+        );
+        out.push_str(&format!(
+            "6 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n\
+             /Resources << /XObject << /Im0 5 0 R >> >> /Length {} >>\n\
+             stream\n{form}\nendstream\nendobj\n",
+            form.len() + 1
+        ));
+        out.push_str("trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n");
+
+        let (_, report) = redact(open(out.into_bytes()), &[under()]);
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::TooManyXObjects { skipped: 2 }]
+        );
+    }
+}
+
+/// Tiling patterns and soft masks: not read, and named when what they draw is
+/// text or an image ([`RedactionWarning::PatternOrMask`]).
+///
+/// One page, in Helvetica: `/P0`, a tiling pattern whose cell shows `SECRET`,
+/// and `/P1`, one whose cell is a filled square; `/GS0`, a graphics state
+/// whose luminosity mask's group shows `SECRET`, `/GS1` setting
+/// `/SMask /None`, and `/GS2` — by reference — a mask whose group is a filled
+/// square; and `/Fm0`, a form with resources of its own that paints with its
+/// own `/Q0`, the same cell as `/P0`.
+#[cfg(test)]
+mod patterns_and_masks {
+    use super::tests_support::*;
+    use super::*;
+
+    fn document(content: &str) -> Vec<u8> {
+        let text_cell = "BT /F0 12 Tf 0 5 Td (SECRET) Tj ET";
+        let square = "0 0 25 10 re f";
+        let mask_text = "BT /F0 48 Tf 10 10 Td (SECRET) Tj ET";
+        let form = "/Pattern cs /Q0 scn 0 0 100 100 re f";
+        let pattern = |number: u32, body: &str| {
+            format!(
+                "{number} 0 obj\n<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1\n\
+                 /BBox [0 0 50 20] /XStep 50 /YStep 20 /Resources << /Font << /F0 6 0 R >> >>\n\
+                 /Length {} >>\nstream\n{body}\nendstream\nendobj\n",
+                body.len() + 1
+            )
+        };
+        let group = |number: u32, body: &str| {
+            format!(
+                "{number} 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n\
+                 /Group << /S /Transparency /CS /DeviceGray >>\n\
+                 /Resources << /Font << /F0 6 0 R >> >> /Length {} >>\n\
+                 stream\n{body}\nendstream\nendobj\n",
+                body.len() + 1
+            )
+        };
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400]\n\
+             /Resources << /Font << /F0 6 0 R /T3 13 0 R >> /Pattern << /P0 7 0 R /P1 8 0 R >>\n\
+             /ExtGState << /GS0 << /SMask << /S /Luminosity /G 9 0 R >> >>\n\
+             /GS1 << /SMask /None >> /GS2 10 0 R >>\n\
+             /XObject << /Fm0 11 0 R >> >> /Contents 4 0 R >>\nendobj\n",
+        );
+        out.push_str(&stream_object(4, content));
+        out.push_str("6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
+        out.push_str(&pattern(7, text_cell));
+        out.push_str(&pattern(8, square));
+        out.push_str(&group(9, mask_text));
+        out.push_str(
+            "10 0 obj\n<< /Type /ExtGState /SMask << /S /Luminosity /G 12 0 R >> >>\nendobj\n",
+        );
+        out.push_str(&format!(
+            "11 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n\
+             /Resources << /Pattern << /Q0 7 0 R >> >> /Length {} >>\n\
+             stream\n{form}\nendstream\nendobj\n",
+            form.len() + 1
+        ));
+        out.push_str(&group(12, square));
+        out.push_str(
+            "13 0 obj\n<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000]\n\
+             /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /p 14 0 R /q 15 0 R >>\n\
+             /Encoding << /Type /Encoding /Differences [65 /p /q] >>\n\
+             /FirstChar 65 /LastChar 66 /Widths [1000 1000] >>\nendobj\n",
+        );
+        out.push_str(&stream_object(
+            14,
+            "1000 0 d0 /Pattern cs /P0 scn 0 0 1000 1000 re f",
+        ));
+        out.push_str(&stream_object(15, "1000 0 d0 /GS0 gs 0 0 1000 1000 re f"));
+        out.push_str("trailer\n<< /Size 16 /Root 1 0 R >>\n%%EOF\n");
+        out.into_bytes()
+    }
+
+    fn anywhere() -> Redaction {
+        Redaction {
+            area: Rect {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 400.0,
+                y1: 400.0,
+            },
+            mark: false,
+        }
+    }
+
+    fn warnings(content: &str, areas: &[Redaction]) -> Vec<RedactionWarning> {
+        redact(open(document(content)), areas).1.warnings
+    }
+
+    fn named(resource: &[u8]) -> RedactionWarning {
+        RedactionWarning::PatternOrMask {
+            resource: resource.to_vec(),
+        }
+    }
+
+    /// Everything the facade's extractor reads on page zero, one line each,
+    /// bottom to top.
+    ///
+    /// The extractor never reads a tiling cell or a mask's group, so for
+    /// these fixtures it reads nothing before a redaction as after, and only
+    /// [`shown`], the raw decoded bytes, says what a cut kept. It is asserted
+    /// all the same, as every redaction fixture's is.
+    fn text_of(bytes: Vec<u8>) -> String {
+        lines_of(bytes)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every string every stream of `bytes` still shows, run together in
+    /// object order ([`literals`]): what a search of the raw decoded bytes
+    /// for a covered letter looks through, whatever spelling a cut wrote.
+    fn shown(bytes: &[u8]) -> String {
+        let doc = CosDocument::open(bytes.to_vec()).expect("it reopens");
+        literals(&all_streams(&doc))
+    }
+
+    /// Past [`MAX_PLACEMENTS`] tiles a cell is not measured: the page-sized
+    /// rectangle meets 220 of `/P0`'s 50 by 20 tiles, so it is named.
+    #[test]
+    fn a_tiling_pattern_whose_cell_shows_text_is_named() {
+        assert_eq!(
+            warnings(
+                "/Pattern cs /P0 scn 0 0 200 200 re f /P0 scn",
+                &[anywhere()]
+            ),
+            vec![named(b"P0")],
+            "once, however often it is painted with"
+        );
+    }
+
+    /// Clause (b) of the ROADMAP's Editing row, its cell half: a tiling
+    /// pattern's cell is cut at every tile of its lattice a rectangle meets
+    /// (8.7.3.1). `/P0`'s cell shows `SECRET` at (0, 5) in a 50 by 20 cell,
+    /// so tile (1, 1) draws it from x = 50 at y = 25; the band covers that
+    /// tile's `ECRE` and nothing of tiles (1, 0) and (1, 2), which it also
+    /// meets. In the cell's one stream, so at every tile, and named.
+    #[test]
+    fn a_tiling_cell_whose_text_is_under_a_rectangle_is_cut_at_its_tiles() {
+        let (bytes, report) = redact(
+            open(document("/Pattern cs /P0 scn 0 0 200 200 re f")),
+            &[band(60.0, 20.0, 90.0, 40.0)],
+        );
+        assert_eq!(report.glyphs, 4, "E, C, R and E: {:?}", report.warnings);
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::RepeatedForm {
+                form: b"P0".to_vec(),
+                placements: 3,
+            }]
+        );
+        // The fixture's other `SECRET` is `/GS0`'s group, which this page
+        // does not set; of the cell's, `S` and `T` are left and nothing the
+        // band covered, in whatever pieces the cut wrote it.
+        let shown = shown(&bytes);
+        assert_eq!(shown.matches("SECRET").count(), 1, "{shown:?}");
+        assert_eq!(shown.replacen("SECRET", "", 1), "ST", "{shown:?}");
+        assert_eq!(text_of(bytes), "");
+    }
+
+    /// A pattern a form paints with is measured where 8.7.2 anchors it —
+    /// the form's space at its `Do` — as well as where this engine's renderer
+    /// does, the page's. The form is drawn ten points up, so its lattice's
+    /// rows of text stand at y = 15 to 27 and 35 to 47 where the page's stand
+    /// at 5 to 17 and 25 to 37: the band from 18 to 24 meets only the
+    /// form's.
+    #[test]
+    fn a_cell_a_form_paints_with_is_measured_in_the_forms_space_too() {
+        let (bytes, report) = redact(
+            open(document("q 1 0 0 1 0 10 cm /Fm0 Do Q")),
+            &[band(0.0, 18.0, 400.0, 24.0)],
+        );
+        assert!(report.glyphs > 0, "{:?}", report.warnings);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| matches!(w, RedactionWarning::RepeatedForm { form, .. } if form == b"Q0")));
+        // The band spans every column of the form's rows, so the whole word
+        // goes from the cell's one stream: what is left is `/GS0`'s group's,
+        // which this page does not set.
+        let shown = shown(&bytes);
+        assert_eq!(shown, "SECRET", "only the group's");
+        assert_eq!(text_of(bytes), "");
+    }
+
+    /// One cell is measured at no more than [`MAX_PLACEMENTS`] tiles, over
+    /// every space its lattice is anchored to. Sixty-four anchorings, each a
+    /// lattice of 50 by 20 tiles of which the band meets about fifty: the
+    /// first anchoring's tiles are measured, and every anchoring whose tiles
+    /// would take the cell past the bound is not, and says so. Bounded per
+    /// anchoring alone, the cell ran 3 465 passes.
+    #[test]
+    fn a_cell_is_measured_at_no_more_tiles_than_the_bound_over_all_its_anchorings() {
+        let bases: Vec<Matrix> = (0..MAX_PLACEMENTS)
+            .map(|i| Matrix::translate(i as f64 * 0.37, i as f64 * 0.11))
+            .collect();
+        let (placed, unmeasured) = cell_tiles(
+            Matrix::IDENTITY,
+            &bases,
+            [0.0, 0.0, 50.0, 20.0],
+            (50.0, 20.0),
+            &[band(0.0, 0.0, 350.0, 100.0)],
+        );
+        assert!(
+            !placed.is_empty() && placed.len() <= MAX_PLACEMENTS,
+            "{}",
+            placed.len()
+        );
+        assert!(unmeasured, "the anchorings past the bound are said to be");
+
+        // One anchoring within the bound is measured whole — nine columns by
+        // seven rows, the tiles that only touch the band's edges among them
+        // — and nothing is left unmeasured.
+        let (placed, unmeasured) = cell_tiles(
+            Matrix::IDENTITY,
+            &bases[..1],
+            [0.0, 0.0, 50.0, 20.0],
+            (50.0, 20.0),
+            &[band(0.0, 0.0, 350.0, 100.0)],
+        );
+        assert_eq!(placed.len(), 9 * 7);
+        assert!(!unmeasured);
+    }
+
+    /// The same through a page: `/Fm0`, which paints with `/Q0`, drawn at
+    /// sixty-four transforms, under the reviewer's band. The cell is cut at
+    /// the tiles it was measured at — `RepeatedForm` counts them, and they
+    /// are no more than the bound — and named, because the tiles of the
+    /// anchorings past it were measured against nothing.
+    #[test]
+    fn a_cell_anchored_past_its_bound_is_cut_where_measured_and_named() {
+        let content: String = (0..MAX_PLACEMENTS)
+            .map(|i| format!("q 1 0 0 1 {} {} cm /Fm0 Do Q\n", i * 3, i * 2))
+            .collect();
+        let (_, report) = redact(open(document(&content)), &[band(0.0, 0.0, 350.0, 100.0)]);
+        assert!(report.glyphs > 0, "{:?}", report.warnings);
+        let placements = report
+            .warnings
+            .iter()
+            .find_map(|w| match w {
+                RedactionWarning::RepeatedForm { form, placements } if form == b"Q0" => {
+                    Some(*placements)
+                }
+                _ => None,
+            })
+            .expect("the cell was cut");
+        assert!(
+            placements > 0 && placements <= MAX_PLACEMENTS,
+            "{placements}"
+        );
+        assert!(
+            report.warnings.contains(&named(b"Q0")),
+            "the anchorings past the bound: {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn a_stroking_pattern_is_named_too() {
+        assert_eq!(
+            warnings("/Pattern CS /P0 SCN 0 0 m 100 100 l S", &[anywhere()]),
+            vec![named(b"P0")]
+        );
+    }
+
+    #[test]
+    fn a_tiling_pattern_of_paths_is_not_named() {
+        assert_eq!(
+            warnings("/Pattern cs /P1 scn 0 0 200 200 re f", &[anywhere()]),
+            Vec::new()
+        );
+    }
+
+    fn band(x0: f64, y0: f64, x1: f64, y1: f64) -> Redaction {
+        Redaction {
+            area: Rect { x0, y0, x1, y1 },
+            mark: false,
+        }
+    }
+
+    /// Clause (b) of the ROADMAP's Editing row, its mask half: a soft mask's
+    /// group (11.6.5.2) is a form drawn at the `gs` that sets its state, and
+    /// it is measured there and cut. Until October 2026 it was named
+    /// (`PatternOrMask`) and not read.
+    #[test]
+    fn a_soft_mask_whose_group_shows_text_under_a_rectangle_is_cut() {
+        let (bytes, report) = redact(open(document("/GS0 gs 0 0 200 200 re f")), &[anywhere()]);
+        assert!(report.glyphs > 0, "the group's glyphs went");
+        assert_eq!(report.warnings, Vec::new(), "nothing left unmeasured");
+        // The fixture's other `SECRET` is `/P0`'s cell, which this page does
+        // not paint with: every string any stream shows is that one, so no
+        // letter of the group's is left in any spelling.
+        assert_eq!(shown(&document("/GS0 gs 0 0 200 200 re f")), "SECRETSECRET");
+        assert_eq!(shown(&bytes), "SECRET");
+        assert_eq!(text_of(bytes), "");
+    }
+
+    /// The group is drawn under the transform in force at the `gs`, not at
+    /// the identity: half size at (200, 200), `SECRET` stands about
+    /// x = 205 to 290, y = 205 to 225. A band there cuts it; a band where it
+    /// would stand at the identity, and only there, does not.
+    #[test]
+    fn a_soft_mask_group_is_measured_where_its_gs_places_it() {
+        let placed = "q 0.5 0 0 0.5 200 200 cm /GS0 gs Q 0 0 400 400 re f";
+        let (bytes, report) = redact(open(document(placed)), &[band(200.0, 200.0, 400.0, 400.0)]);
+        assert!(report.glyphs > 0);
+        assert_eq!(shown(&bytes), "SECRET", "only /P0's cell");
+        assert_eq!(text_of(bytes), "");
+
+        let (bytes, report) = redact(open(document(placed)), &[band(0.0, 0.0, 190.0, 190.0)]);
+        assert_eq!(report.glyphs, 0, "the identity's place is not the group's");
+        assert_eq!(shown(&bytes), "SECRETSECRET");
+    }
+
+    /// One group two pages draw through one graphics state: it cannot be
+    /// given a copy (the walk cuts a mask's group in its own stream), so the
+    /// cut on page one is a cut on page two, and `RepeatedForm` says so —
+    /// which needs the read of what else draws a form to follow `gs`.
+    #[test]
+    fn a_mask_group_another_page_draws_is_cut_in_place_and_named() {
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 2 /Kids [3 0 R 5 0 R] >>\nendobj\n");
+        for (page, content) in [(3, 4), (5, 7)] {
+            out.push_str(&format!(
+                "{page} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400]\n\
+                 /Resources << /ExtGState << /GS0 << /SMask << /S /Luminosity /G 9 0 R >> >> >> >>\n\
+                 /Contents {content} 0 R >>\nendobj\n"
+            ));
+            out.push_str(&stream_object(content, "/GS0 gs 0 0 400 400 re f"));
+        }
+        out.push_str("6 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
+        let body = "BT /F0 48 Tf 10 10 Td (SECRET) Tj ET";
+        out.push_str(&format!(
+            "9 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n\
+             /Group << /S /Transparency /CS /DeviceGray >>\n\
+             /Resources << /Font << /F0 6 0 R >> >> /Length {} >>\n\
+             stream\n{body}\nendstream\nendobj\n",
+            body.len() + 1
+        ));
+        out.push_str("trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n");
+        let (bytes, report) = redact(open(out.into_bytes()), &[anywhere()]);
+        assert!(report.glyphs > 0);
+        assert_eq!(
+            report.warnings,
+            vec![RedactionWarning::RepeatedForm {
+                form: b"GS0".to_vec(),
+                placements: 1,
+            }]
+        );
+        assert_eq!(shown(&bytes), "", "no letter of it, in either page's group");
+        assert_eq!(text_of(bytes.clone()), "");
+        assert_eq!(lines_on(bytes, 1), Vec::new());
+    }
+
+    #[test]
+    fn no_mask_and_a_mask_of_paths_are_not_named() {
+        assert_eq!(
+            warnings("/GS1 gs /GS2 gs 0 0 200 200 re f", &[anywhere()]),
+            Vec::new()
+        );
+    }
+
+    /// The name resolves in the resources of the stream that painted: the
+    /// page has no `/Q0`, the form does.
+    #[test]
+    fn a_pattern_a_form_paints_with_is_named_in_the_forms_scope() {
+        assert_eq!(warnings("/Fm0 Do", &[anywhere()]), vec![named(b"Q0")]);
+    }
+
+    #[test]
+    fn what_a_glyph_procedure_paints_with_is_named() {
+        // `/T3`'s `A` fills its em with `/P0` and its `B` under `/GS0`:
+        // each measured as a procedure that might draw text, and the
+        // pattern it paints with named. The band is clear of the glyphs' own
+        // boxes, so the uses stay; one a box removes is measured too
+        // (`what_a_covered_glyphs_procedure_paints_with_is_named`).
+        let clear = Redaction {
+            area: Rect {
+                x0: 200.0,
+                y0: 200.0,
+                x1: 400.0,
+                y1: 400.0,
+            },
+            mark: false,
+        };
+        // `B`'s mask is measured now, as a form its procedure draws, and
+        // its text stands nowhere near the band: nothing is named for it.
+        assert_eq!(
+            warnings("BT /T3 10 Tf 10 10 Td (AB) Tj ET", &[clear]),
+            vec![named(b"P0")]
+        );
+    }
+
+    /// A glyph procedure that sets a soft mask draws the mask's group, and a
+    /// use whose group draws text under a rectangle is removed like one
+    /// whose procedure shows the text itself. `B`'s procedure is rewritten
+    /// here — the same length, so the fixture's `/Length` holds — to draw
+    /// the group at a hundred times glyph space: one point to the unit, its
+    /// `SECRET` from about (20, 20) to (210, 55), well clear of the glyph's
+    /// own box at (10, 10) to (20, 20).
+    ///
+    /// The group is the procedure's, and like the procedure it is not cut
+    /// (`cut_stream`'s decision: every use of the glyph draws it), so its
+    /// `SECRET` — whose `C`, `R`, `E` and `T` the band covers at this use —
+    /// is still in the file. That is named: `PatternOrMask`, under the state
+    /// the procedure set, as a cell a procedure paints with is. Until the
+    /// lane's review the use went and nothing said the text had stayed.
+    #[test]
+    fn a_glyph_whose_procedure_masks_text_under_a_rectangle_is_removed() {
+        let original = b"1000 0 d0 /GS0 gs 0 0 1000 1000 re f";
+        let scaled = b"1000 0 d0 100 0 0 100 0 0 cm /GS0 gs";
+        assert_eq!(original.len(), scaled.len());
+        let mut bytes = document("BT /T3 10 Tf 10 10 Td (B) Tj ET");
+        let at = bytes
+            .windows(original.len())
+            .position(|w| w == original)
+            .expect("the procedure");
+        bytes[at..at + scaled.len()].copy_from_slice(scaled);
+        let (after, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(
+            report.warnings,
+            vec![named(b"GS0")],
+            "the group it drew is left, and said to be"
+        );
+        let streams = all_streams(&CosDocument::open(after.clone()).expect("it reopens"));
+        assert!(
+            !streams.contains("(B) Tj"),
+            "the use is gone from the page: {streams}"
+        );
+        assert!(
+            streams.contains("BT /F0 48 Tf 10 10 Td (SECRET) Tj ET"),
+            "the group is left byte for byte, which is what is named: {streams}"
+        );
+        assert_eq!(text_of(after), "", "nothing on the page reads");
+    }
+
+    /// The same procedure, and a band clear of where the group draws: the
+    /// use is not under a rectangle and stays, and nothing is named, since
+    /// nothing the group shows was covered.
+    #[test]
+    fn a_procedure_mask_clear_of_the_rectangles_is_not_named() {
+        let original = b"1000 0 d0 /GS0 gs 0 0 1000 1000 re f";
+        let scaled = b"1000 0 d0 100 0 0 100 0 0 cm /GS0 gs";
+        let mut bytes = document("BT /T3 10 Tf 10 10 Td (B) Tj ET");
+        let at = bytes
+            .windows(original.len())
+            .position(|w| w == original)
+            .expect("the procedure");
+        bytes[at..at + scaled.len()].copy_from_slice(scaled);
+        let (after, report) = redact(open(bytes), &[band(300.0, 300.0, 400.0, 400.0)]);
+        assert_eq!(report, RedactionReport::default());
+        let streams = all_streams(&CosDocument::open(after).expect("it reopens"));
+        assert!(streams.contains("(B) Tj"), "{streams}");
+    }
+
+    /// [`document`] showing `content`, with `B`'s procedure replaced by
+    /// `procedure`, the Type 3 font given `resources` of its own (empty for
+    /// none), and `objects` added. The fixture has no cross-reference table,
+    /// so an object may change length.
+    fn with_procedure(content: &str, procedure: &str, resources: &str, objects: &str) -> Vec<u8> {
+        let original = stream_object(15, "1000 0 d0 /GS0 gs 0 0 1000 1000 re f");
+        let fixture = String::from_utf8(document(content)).expect("the fixture is ASCII");
+        assert!(fixture.contains(&original), "B's procedure");
+        fixture
+            .replace(&original, &stream_object(15, procedure))
+            .replace("/FirstChar 65", &format!("{resources} /FirstChar 65"))
+            .replace(
+                "trailer\n<< /Size 16",
+                &format!("{objects}trailer\n<< /Size 17"),
+            )
+            .into_bytes()
+    }
+
+    /// `B` drawing `/GS0`'s group at one point to the unit, from its origin
+    /// at (10, 10): `SECRET` from about (20, 20) to (210, 55).
+    const MASKS: &str = "1000 0 d0 100 0 0 100 0 0 cm /GS0 gs";
+
+    /// A band over the glyph's own box and over the group's `SECRET`
+    /// alike, as a band over a Type 3 word usually is. The box alone
+    /// removes the use, and until the lane's second review it did so with
+    /// the procedure never measured — so the group, which is not cut, kept
+    /// `SECRET` under the band and nothing named it. A procedure is measured
+    /// at every use now, for what it leaves in the file, and the group is
+    /// named as it is where the box is clear.
+    #[test]
+    fn a_covered_glyph_whose_procedure_masks_text_under_a_rectangle_names_the_group() {
+        let bytes = with_procedure("BT /T3 10 Tf 10 10 Td (B) Tj ET", MASKS, "", "");
+        let (after, report) = redact(open(bytes), &[band(0.0, 0.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(
+            report.warnings,
+            vec![named(b"GS0")],
+            "the group it drew is left, and said to be"
+        );
+        let streams = all_streams(&CosDocument::open(after.clone()).expect("it reopens"));
+        assert!(!streams.contains("(B) Tj"), "{streams}");
+        assert!(
+            streams.contains("BT /F0 48 Tf 10 10 Td (SECRET) Tj ET"),
+            "the group is left byte for byte, which is what is named: {streams}"
+        );
+        assert_eq!(text_of(after), "", "nothing on the page reads");
+    }
+
+    /// A procedure that shows text of its own under the rectangle, `X` at
+    /// about (150, 25), as well as setting the group: what it shows decides
+    /// the use, and the group is measured all the same, since it is named
+    /// for what it leaves in the file and not for what removed the use.
+    /// Until the lane's second review the measurement stopped at the first
+    /// thing it found under a rectangle, and the group went unmeasured.
+    #[test]
+    fn a_procedure_whose_own_text_removed_the_use_still_names_its_group() {
+        let procedure = format!("{MASKS} BT /F0 10 Tf 140 15 Td (X) Tj ET");
+        let bytes = with_procedure("BT /T3 10 Tf 10 10 Td (B) Tj ET", &procedure, "", "");
+        let (after, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(report.warnings, vec![named(b"GS0")]);
+        let streams = all_streams(&CosDocument::open(after).expect("it reopens"));
+        assert!(!streams.contains("(B) Tj"), "{streams}");
+        assert!(streams.contains("(SECRET) Tj"), "{streams}");
+    }
+
+    /// The font's own `/Resources` bind `/GS0` to a second group, whose
+    /// `OTHER` stands at about (20, 310) to (200, 345), under the band; the
+    /// page's `/GS0` group is clear of it. The procedure's own `X`, at about
+    /// (150, 300), is under the band too, so the first measurement — names
+    /// resolved in the page's scope first — removes the use. The second,
+    /// the font's own resources first, is where `/GS0` is the group under
+    /// the band, and it is run all the same: until the lane's second review
+    /// it ran only when the first found nothing, and the font's group was
+    /// never measured at this use.
+    #[test]
+    fn a_group_the_fonts_own_resources_bind_is_measured_when_the_first_reading_removed_the_use() {
+        let procedure = format!("{MASKS} BT /F0 10 Tf 140 290 Td (X) Tj ET");
+        let resources = "/Resources << /Font << /F0 6 0 R >>\n\
+                         /ExtGState << /GS0 << /SMask << /S /Luminosity /G 16 0 R >> >> >> >>";
+        let other = "BT /F0 48 Tf 10 300 Td (OTHER) Tj ET";
+        let group = format!(
+            "16 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n\
+             /Group << /S /Transparency /CS /DeviceGray >>\n\
+             /Resources << /Font << /F0 6 0 R >> >> /Length {} >>\n\
+             stream\n{other}\nendstream\nendobj\n",
+            other.len() + 1
+        );
+        let bytes = with_procedure(
+            "BT /T3 10 Tf 10 10 Td (B) Tj ET",
+            &procedure,
+            resources,
+            &group,
+        );
+        let (after, report) = redact(open(bytes), &[band(100.0, 290.0, 400.0, 400.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(report.warnings, vec![named(b"GS0")]);
+        let streams = all_streams(&CosDocument::open(after).expect("it reopens"));
+        assert!(streams.contains("(OTHER) Tj"), "not cut: {streams}");
+    }
+
+    /// A group measured after its procedure's own `X` decided the use is
+    /// measured to be named, and the budget it spends is not why the use
+    /// went. Here the group, bound by the font's own `/GS9`, shows `B`
+    /// again, whose procedure sets it again: the measurement recurses until
+    /// the use's budget runs out. Every level found its `X` under the band
+    /// before that, so the use was decided by measurement and is not
+    /// `UnboundedProcedure`; and the group, which shows `B` and so that `X`,
+    /// is named. Counting the budget the naming spent as the reason the use
+    /// went — in `draws_under`, or in `procedure_draws_under`'s second
+    /// reading, which then finds the budget gone — names the font instead.
+    #[test]
+    fn a_group_measured_only_to_be_named_does_not_make_the_use_unbounded() {
+        let procedure = "1000 0 d0 100 0 0 100 0 0 cm /GS9 gs BT /F0 10 Tf 140 15 Td (X) Tj ET";
+        let resources = "/Resources << /Font << /F0 6 0 R >>\n\
+                         /ExtGState << /GS9 << /SMask << /S /Luminosity /G 16 0 R >> >> >> >>";
+        let again = "BT /T3 10 Tf 0 0 Td (B) Tj ET";
+        let group = format!(
+            "16 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n\
+             /Group << /S /Transparency /CS /DeviceGray >>\n\
+             /Resources << /Font << /F0 6 0 R /T3 13 0 R >> >> /Length {} >>\n\
+             stream\n{again}\nendstream\nendobj\n",
+            again.len() + 1
+        );
+        let bytes = with_procedure(
+            "BT /T3 10 Tf 10 10 Td (B) Tj ET",
+            procedure,
+            resources,
+            &group,
+        );
+        let (_, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(report.warnings, vec![named(b"GS9")]);
+    }
+
+    /// A group that shows `B` again — so a measurement of it that recurses
+    /// until the use's budget is gone — as object 16, and `/Fm9`, a form
+    /// that does the same, as object 17. `B` stands at (300, 300) in each,
+    /// far from every band below, so neither ever finds anything under a
+    /// rectangle: each is cut short by the budget, and by nothing else.
+    const RECURSES: &str = "BT /T3 10 Tf 300 300 Td (B) Tj ET";
+
+    fn recursing_objects() -> String {
+        let mut objects = String::new();
+        for (number, extra) in [
+            (16, "/Group << /S /Transparency /CS /DeviceGray >>\n"),
+            (17, ""),
+        ] {
+            objects.push_str(&format!(
+                "{number} 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n{extra}\
+                 /Resources << /Font << /F0 6 0 R /T3 13 0 R >> >> /Length {} >>\n\
+                 stream\n{RECURSES}\nendstream\nendobj\n",
+                RECURSES.len() + 1
+            ));
+        }
+        objects
+    }
+
+    /// [`with_procedure`] showing `content` with `B`'s procedure replaced by
+    /// `procedure`, the font's own `/Resources` binding `/GS7` to the
+    /// recursing group and `/Fm9` to the recursing form, and both objects
+    /// added.
+    fn recursing(content: &str, procedure: &str) -> Vec<u8> {
+        let resources = "/Resources << /Font << /F0 6 0 R >>\n\
+             /ExtGState << /GS7 << /SMask << /S /Luminosity /G 16 0 R >> >> >>\n\
+             /XObject << /Fm9 17 0 R >> >>";
+        let bytes = with_procedure(content, procedure, resources, &recursing_objects());
+        String::from_utf8(bytes)
+            .expect("the fixture is ASCII")
+            .replace("trailer\n<< /Size 17", "trailer\n<< /Size 18")
+            .into_bytes()
+    }
+
+    /// The reviewer's first probe. `B`'s own `X` is under the band and
+    /// decides the use; then `/GS7`'s group, measured only to be named,
+    /// recurses until the use's budget is gone; then `/GS0`'s group, whose
+    /// `SECRET` the band covers, is measured against what is left — nothing.
+    /// Until the lane's third review the budget a naming spent was given
+    /// back as a flag and not as streams, so `/GS0` met an empty budget, was
+    /// not named because it was "found" only for want of one, and the flag
+    /// was then put back: `warnings: []`, with the group's covered text in
+    /// the file. Each group the budget cut short is named now — it stays in
+    /// the file, and was not measured whole — and the use, which the `X`
+    /// decided, is not unbounded.
+    #[test]
+    fn a_group_after_a_naming_that_spent_the_budget_is_named() {
+        let bytes = recursing(
+            "BT /T3 10 Tf 10 10 Td (B) Tj ET",
+            "1000 0 d0 100 0 0 100 0 0 cm BT /F0 10 Tf 140 15 Td (X) Tj ET /GS7 gs /GS0 gs",
+        );
+        let (after, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(report.warnings, vec![named(b"GS7"), named(b"GS0")]);
+        let streams = all_streams(&CosDocument::open(after).expect("it reopens"));
+        assert!(
+            streams.contains("BT /F0 48 Tf 10 10 Td (SECRET) Tj ET"),
+            "the group is not cut, which is what is named: {streams}"
+        );
+    }
+
+    /// The reviewer's second probe: a use its own box removed, whose
+    /// procedure draws `/Fm9` — which recurses until the budget is gone —
+    /// and then sets `/GS0`, whose `SECRET` the band covers. Until the lane's
+    /// third review `/GS0` met the empty budget and went unnamed, and a use
+    /// its box removed was never named `UnboundedProcedure`, so the covered
+    /// text stayed with `warnings: []`. Now the group is named, and so is
+    /// the font: what `/Fm9` draws past where the budget stopped it was
+    /// measured against nothing, and is in no group named for it.
+    #[test]
+    fn a_covered_use_whose_measurement_ran_out_says_so() {
+        let procedure = "1000 0 d0 q 100 0 0 100 0 0 cm /Fm9 Do Q 100 0 0 100 0 0 cm /GS0 gs";
+        let bytes = recursing("BT /T3 10 Tf 10 10 Td (B) Tj ET", procedure);
+        let (_, report) = redact(open(bytes), &[band(0.0, 0.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(
+            report.warnings,
+            vec![
+                named(b"GS0"),
+                RedactionWarning::UnboundedProcedure {
+                    font: b"T3".to_vec(),
+                    uses: 1,
+                },
+            ]
+        );
+
+        // The same use with the band clear of its box: removed as though
+        // covered, as before, and the group named all the same.
+        let bytes = recursing("BT /T3 10 Tf 10 10 Td (B) Tj ET", procedure);
+        let (_, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "{:?}", report.warnings);
+        assert_eq!(
+            report.warnings,
+            vec![
+                named(b"GS0"),
+                RedactionWarning::UnboundedProcedure {
+                    font: b"T3".to_vec(),
+                    uses: 1,
+                },
+            ]
+        );
+    }
+
+    /// The reviewer's nit: `B`'s own `X` decides the use, and then it draws
+    /// `/Fm8`, a form whose own `/ExtGState` sets `/GS0`, whose `SECRET` the
+    /// band covers. Until the lane's third review a form after the answer
+    /// was skipped, so a group set inside one was named only when nothing
+    /// earlier in the procedure had decided the use. A form, and a glyph's
+    /// procedure, is followed after the answer now, to name what it sets.
+    #[test]
+    fn what_a_form_or_a_glyph_drawn_after_the_answer_paints_with_is_named() {
+        let procedure = "1000 0 d0 100 0 0 100 0 0 cm BT /F0 10 Tf 140 15 Td (X) Tj ET /Fm8 Do";
+        let resources = "/Resources << /Font << /F0 6 0 R >> /XObject << /Fm8 16 0 R >> >>";
+        let body = "/GS0 gs";
+        let form = format!(
+            "16 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 400 400]\n\
+             /Resources << /ExtGState << /GS0 << /SMask << /S /Luminosity /G 9 0 R >> >> >> >>\n\
+             /Length {} >>\nstream\n{body}\nendstream\nendobj\n",
+            body.len() + 1
+        );
+        let bytes = with_procedure(
+            "BT /T3 10 Tf 10 10 Td (B) Tj ET",
+            procedure,
+            resources,
+            &form,
+        );
+        let (_, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(report.warnings, vec![named(b"GS0")]);
+
+        // A glyph the procedure shows after its `X` is followed the same
+        // way: `A`, at about (10, 10), clear of the band, whose procedure
+        // fills its em with `/P0` — the cell is named, as one a procedure
+        // paints with is (`what_a_glyph_procedure_paints_with_is_named`).
+        // Until the lane's third review the glyph was never measured once
+        // the `X` had decided the use, and nothing was named.
+        let procedure = "1000 0 d0 100 0 0 100 0 0 cm BT /F0 10 Tf 140 15 Td (X) Tj ET \
+                         BT /T3 1 Tf 0 0 Td (A) Tj ET";
+        let bytes = with_procedure("BT /T3 10 Tf 10 10 Td (B) Tj ET", procedure, "", "");
+        let (_, report) = redact(open(bytes), &[band(100.0, 25.0, 300.0, 60.0)]);
+        assert_eq!(report.glyphs, 1, "the use went: {:?}", report.warnings);
+        assert_eq!(report.warnings, vec![named(b"P0")]);
+    }
+
+    /// A pattern a covered glyph's procedure paints with is named as one an
+    /// uncovered glyph's is (`what_a_glyph_procedure_paints_with_is_named`):
+    /// the cell is not measured for a procedure, and the use going does not
+    /// take it out of the file.
+    #[test]
+    fn what_a_covered_glyphs_procedure_paints_with_is_named() {
+        assert_eq!(
+            warnings(
+                "BT /T3 10 Tf 10 10 Td (A) Tj ET",
+                &[band(0.0, 0.0, 30.0, 30.0)]
+            ),
+            vec![named(b"P0")]
+        );
+    }
+
+    /// A stream that sets one state at every text object sets it under one
+    /// transform thousands of times, and that is one placement of one mask:
+    /// it is recorded once, and does not spend the bound `Do`s and states
+    /// share. Recorded every time, five thousand `gs`es would pass it and be
+    /// reported as unfollowed. `/GS2`, whose mask is a group of paths: a
+    /// state that sets no mask is no use at all, and would pin nothing here.
+    #[test]
+    fn a_state_set_again_under_one_transform_is_one_placement() {
+        let content = "/GS2 gs ".repeat(5_000);
+        assert_eq!(warnings(&content, &[anywhere()]), Vec::new());
+    }
+
+    #[test]
+    fn nothing_is_named_without_a_rectangle() {
+        assert_eq!(
+            warnings("/Pattern cs /P0 scn /GS0 gs 0 0 200 200 re f", &[]),
+            Vec::new()
+        );
+    }
+}
+
+/// Ruling 1 over everything a redaction now reads: annotation appearances
+/// and their states, Type 3 glyph procedures that show text, draw a form or
+/// paint with a pattern, forms drawn twice and on a second page, tiling
+/// patterns and soft masks — in one small file, put through deterministic
+/// damage and then redacted, subsetted and saved. Nothing is asserted but
+/// that nothing panics; `tests/hostile_input.rs` does the same for the
+/// reading surface, and this is the editing one.
+#[cfg(test)]
+mod hostile {
+    use super::*;
+
+    /// xorshift64, as `tests/hostile_input.rs` has it: the same damage on
+    /// every machine (ruling 4).
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            if bound == 0 {
+                0
+            } else {
+                (self.next() % bound as u64) as usize
+            }
+        }
+    }
+
+    fn stream(number: u32, dict: &str, body: &str) -> String {
+        format!(
+            "{number} 0 obj\n<< {dict} /Length {} >>\nstream\n{body}\nendstream\nendobj\n",
+            body.len() + 1
+        )
+    }
+
+    /// Two pages over everything the walk and its reads follow.
+    fn everything() -> Vec<u8> {
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 2 /Kids [3 0 R 20 0 R] >>\nendobj\n");
+        let resources = "/Resources << /Font << /F0 5 0 R /T3 6 0 R >>\n\
+             /XObject << /Fm0 9 0 R /Im0 10 0 R >> /Pattern << /P0 11 0 R >>\n\
+             /ExtGState << /GS0 << /SMask << /S /Luminosity /G 12 0 R >> >> >> >>";
+        out.push_str(&format!(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300]\n{resources}\n\
+             /Annots [13 0 R << /Subtype /FreeText /Rect [10 100 210 120]\n\
+             /AP << /N 15 0 R >> >>] /Contents 4 0 R >>\nendobj\n"
+        ));
+        out.push_str(&stream(
+            4,
+            "",
+            "q 1 0 0 1 0 0 cm /Fm0 Do Q q 1 0 0 1 0 150 cm /Fm0 Do Q\n\
+             BT /T3 1 Tf 10 50 Td (ABC) Tj 0 20 Td [(A) -5000 (B)] TJ ET\n\
+             /Pattern cs /P0 scn /GS0 gs 0 0 50 50 re f\n\
+             q 20 0 0 20 300 200 cm /Im0 Do Q\n\
+             q 10 0 0 10 350 250 cm BI /W 1 /H 1 /CS /G /BPC 8 ID \x7f EI Q",
+        ));
+        out.push_str("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n");
+        out.push_str(
+            "6 0 obj\n<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000]\n\
+             /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 7 0 R /b 8 0 R /c 16 0 R >>\n\
+             /Encoding << /Type /Encoding /Differences [65 /a /b /c] >>\n\
+             /FirstChar 65 /LastChar 67 /Widths [1000 1000 1000]\n\
+             /Resources << /Font << /F0 5 0 R >> >> >>\nendobj\n",
+        );
+        out.push_str(&stream(
+            7,
+            "",
+            "1000 0 d0 BT /F0 12000 Tf 0 0 Td (SECRET) Tj ET",
+        ));
+        out.push_str(&stream(8, "", "1000 0 d0 /Fm0 Do /Pattern cs /P0 scn"));
+        out.push_str(&stream(
+            9,
+            "/Type /XObject /Subtype /Form /BBox [0 0 400 300]\n\
+             /Resources << /Font << /F0 5 0 R >> /XObject << /Im0 10 0 R >> >>",
+            "BT /F0 12 Tf 10 60 Td (PUBLIC SECRET) Tj ET q 5 0 0 5 200 60 cm /Im0 Do Q",
+        ));
+        out.push_str(
+            "10 0 obj\n<< /Type /XObject /Subtype /Image /Width 2 /Height 2\n\
+             /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\n\
+             stream\nSECR\nendstream\nendobj\n",
+        );
+        out.push_str(&stream(
+            11,
+            "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 50 20]\n\
+             /XStep 50 /YStep 20 /Resources << /Font << /F0 5 0 R >> >>",
+            "BT /F0 12 Tf 0 5 Td (SECRET) Tj ET",
+        ));
+        out.push_str(&stream(
+            12,
+            "/Type /XObject /Subtype /Form /BBox [0 0 400 300] /Group << /S /Transparency >>\n\
+             /Resources << /Font << /F0 5 0 R >> >>",
+            "BT /F0 48 Tf 10 10 Td (SECRET) Tj ET",
+        ));
+        out.push_str(
+            "13 0 obj\n<< /Type /Annot /Subtype /Widget /Rect [10 200 90 220] /AS /Off\n\
+             /AP << /N << /On 14 0 R /Off 15 0 R >> /D 14 0 R >> /F 2 >>\nendobj\n",
+        );
+        out.push_str(&stream(
+            14,
+            "/Type /XObject /Subtype /Form /BBox [0 0 80 20] /Matrix [0 1 -1 0 0 0]\n\
+             /Resources << /Font << /F0 5 0 R >> >>",
+            "BT /F0 10 Tf 2 2 Td (SECRET) Tj ET /Fm0 Do",
+        ));
+        out.push_str(&stream(
+            15,
+            "/Type /XObject /Subtype /Form /BBox [0 0 400 40]\n\
+             /Resources << /Font << /F0 5 0 R /T3 6 0 R >> /XObject << /Fm0 9 0 R >> >>",
+            "BT /F0 24 Tf 0 10 Td (PUBLIC SECRET) Tj /T3 1000 Tf (A) Tj ET",
+        ));
+        out.push_str(&stream(16, "", "1000 0 d0 BT /T3 1000 Tf (CC) Tj ET"));
+        out.push_str(&format!(
+            "20 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 300]\n{resources}\n\
+             /Contents 21 0 R >>\nendobj\n"
+        ));
+        out.push_str(&stream(21, "", "/Fm0 Do BT /T3 1 Tf 10 10 Td (B) Tj ET"));
+        out.push_str("trailer\n<< /Size 22 /Root 1 0 R >>\n%%EOF\n");
+        out.into_bytes()
+    }
+
+    /// One deterministic injury: flipped bytes, a deleted span, a repeated
+    /// span, or a digit run replaced with a large or negative number.
+    fn mutate(original: &[u8], rng: &mut Rng) -> Vec<u8> {
+        let mut bytes = original.to_vec();
+        match rng.below(4) {
+            0 => {
+                for _ in 0..1 + rng.below(8) {
+                    let at = rng.below(bytes.len());
+                    if let Some(b) = bytes.get_mut(at) {
+                        *b ^= 1 << rng.below(8);
+                    }
+                }
+            }
+            1 => {
+                let at = rng.below(bytes.len());
+                let end = (at + 1 + rng.below(64)).min(bytes.len());
+                bytes.drain(at..end);
+            }
+            2 => {
+                let at = rng.below(bytes.len());
+                let end = (at + 1 + rng.below(64)).min(bytes.len());
+                let span: Vec<u8> = bytes.get(at..end).map(<[u8]>::to_vec).unwrap_or_default();
+                let _ = bytes.splice(at..at, span);
+            }
+            _ => {
+                let digits: Vec<usize> = bytes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| b.is_ascii_digit())
+                    .map(|(i, _)| i)
+                    .collect();
+                if let Some(&at) = digits.get(rng.below(digits.len())) {
+                    let with: &[u8] = match rng.below(4) {
+                        0 => b"99999999999",
+                        1 => b"-1",
+                        2 => b"0",
+                        _ => b"1e308",
+                    };
+                    let _ = bytes.splice(at..at + 1, with.iter().copied());
+                }
+            }
+        }
+        bytes
+    }
+
+    fn exercise(bytes: Vec<u8>) {
+        let Ok(doc) = CosDocument::open(bytes) else {
+            return;
+        };
+        let mut editor = DocumentEditor::new(Arc::new(doc));
+        let areas = [
+            Redaction {
+                area: Rect {
+                    x0: 56.0,
+                    y0: 40.0,
+                    x1: 400.0,
+                    y1: 70.0,
+                },
+                mark: true,
+            },
+            Redaction {
+                area: Rect {
+                    x0: 0.0,
+                    y0: 190.0,
+                    x1: 120.0,
+                    y1: 230.0,
+                },
+                mark: false,
+            },
+        ];
+        for page in 0..2 {
+            let _ = apply(&mut editor, page, &areas);
+        }
+        let _ = apply(&mut editor, 0, &areas[..1]);
+        let saved = crate::write::save(&mut editor, &crate::SaveOptions::default());
+        let _ = saved.fonts.removed();
+    }
+
+    #[test]
+    fn the_fixture_redacts_cleanly_before_it_is_damaged() {
+        let doc = Arc::new(CosDocument::open(everything()).expect("it opens"));
+        let mut editor = DocumentEditor::new(doc);
+        let report = apply(
+            &mut editor,
+            0,
+            &[Redaction {
+                area: Rect {
+                    x0: 56.0,
+                    y0: 40.0,
+                    x1: 400.0,
+                    y1: 70.0,
+                },
+                mark: false,
+            }],
+        )
+        .expect("page zero");
+        assert!(report.glyphs > 0, "{report:?}");
+    }
+
+    #[test]
+    fn damaged_fixtures_never_panic_through_redaction_and_the_save() {
+        let original = everything();
+        let mut rng = Rng(0x00C0_FFEE_D1CE_4003);
+        for case in 0..300 {
+            let mutated = mutate(&original, &mut rng);
+            let result = std::panic::catch_unwind(|| exercise(mutated));
+            assert!(result.is_ok(), "case {case} panicked");
+        }
     }
 }

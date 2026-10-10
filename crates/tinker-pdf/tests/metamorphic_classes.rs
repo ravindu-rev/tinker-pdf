@@ -170,6 +170,7 @@ fn dpi_relation(bytes: Vec<u8>) -> (u64, u64) {
         cancel: None,
         annotations: true,
         region: None,
+        ..RenderOptions::default()
     };
     let base = page.render(&options);
     let doubled = page.render(&RenderOptions {
@@ -487,6 +488,7 @@ fn rotate_relation(bytes: Vec<u8>) -> (u64, u64) {
         cancel: None,
         annotations: true,
         region: None,
+        ..RenderOptions::default()
     };
     let base = document.page(0).expect("a page").render(&options);
 
@@ -529,6 +531,7 @@ fn crop_relation(bytes: Vec<u8>) -> (u64, u64) {
         cancel: None,
         annotations: true,
         region: None,
+        ..RenderOptions::default()
     };
     let page = document.page(0).expect("a page");
     let base = page.render(&options);

@@ -90,9 +90,11 @@
 //!         content: Content::Text("the sea, the sea".into()),
 //!         anchor: None,
 //!         span: CellSpan::ONE,
+//!         marker: None,
 //!     }]),
 //!     anchor: None,
 //!     span: CellSpan::ONE,
+//!     marker: None,
 //! };
 //! let laid = layout(
 //!     &tree,
@@ -107,6 +109,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod case;
 pub mod flex;
 pub mod floats;
 pub mod flow;
@@ -115,6 +118,7 @@ pub mod limits;
 pub mod metrics;
 mod position;
 pub mod style;
+pub use style::{BackgroundLayer, Outline};
 pub mod table;
 pub mod text;
 pub mod uax14;
@@ -124,10 +128,12 @@ pub mod unicode;
 mod tests;
 
 use std::fmt;
+use std::sync::Arc;
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    BorderStyle, Color, FontFamily, FontStyle, FontVariant, Sides, TextDecoration,
+    BorderStyle, Color, FeatureSetting, FontFamily, FontKerning, FontStyle, FontVariant, Sides,
+    TextDecoration,
 };
 
 /// One node of the tree layout is given.
@@ -173,6 +179,22 @@ pub struct BoxNode {
     /// Ignored on every node that is not a `display: table-cell`, which is what
     /// HTML says of the attributes themselves.
     pub span: CellSpan,
+    /// A `display: list-item`'s marker text, where the caller has it.
+    ///
+    /// **The number is a counter and a counter is not this crate's to keep.**
+    /// `css-lists-3` §4 makes a list item's number its `list-item` counter, and
+    /// a counter is a walk of the whole document in tree order — reset by an
+    /// `<ol start>`, set by an `<li value>`, carried through every element that
+    /// generated a box. A caller with a cascade has done that walk
+    /// (`tinker_pdf_css::cascade::StyleTree::marker`) and puts the text here,
+    /// already in its counter style and with its `.` suffix.
+    ///
+    /// `None` on a list item is a caller with no counters, and gets CSS 2.2
+    /// §12.5's older model: the item's position among its list-item siblings,
+    /// counted here, in [`crate::flow::marker_text`]'s style — which is also
+    /// what [`BoxNode::text`], [`BoxNode::element`] and [`BoxNode::replaced`]
+    /// leave it at. Ignored on a node that is not a list item.
+    pub marker: Option<String>,
 }
 
 /// How many grid slots a table cell takes, CSS 2.2 §17.5.
@@ -293,6 +315,7 @@ impl BoxNode {
             content: Content::Text(text.into()),
             anchor: None,
             span: CellSpan::ONE,
+            marker: None,
         }
     }
 
@@ -304,6 +327,7 @@ impl BoxNode {
             content: Content::Children(children),
             anchor: None,
             span: CellSpan::ONE,
+            marker: None,
         }
     }
 
@@ -320,6 +344,7 @@ impl BoxNode {
             content: Content::Replaced(intrinsic),
             anchor: None,
             span: CellSpan::ONE,
+            marker: None,
         }
     }
 
@@ -445,6 +470,19 @@ pub struct Page {
     /// Text, in **reading order**, which is what makes text conservation a
     /// comparison rather than a search.
     pub runs: Vec<TextRun>,
+    /// The overflow clips on this page, `css-overflow-3` §3.1: one per
+    /// fragment of a box whose `overflow` clips **and whose content reached
+    /// past its padding box** — a clip that would remove nothing is not
+    /// written, so a book's `pre { overflow: auto }` around code that fits
+    /// costs its page nothing.
+    ///
+    /// A fourth list rather than a field on what it clips, for
+    /// [`Page::replaced`]'s reason: what a clip applies to is every fragment
+    /// **descended** from its element, which is an element-tree question —
+    /// a float, a positioned box and a table cell inside it are all clipped
+    /// by it and none of them is beside it here. The caller has the tree;
+    /// [`ClipFragment::anchor`] says whose clip this is.
+    pub clips: Vec<ClipFragment>,
 }
 
 /// A block box's decoration on one page.
@@ -467,6 +505,66 @@ pub struct BoxFragment {
     pub border_style: Sides<BorderStyle>,
     /// `border-*-color`.
     pub border_color: Sides<Color>,
+    /// The four corners' radii in CSS pixels, `css-backgrounds-3` §5, in
+    /// `Corner::ALL`'s order — each `(horizontal, vertical)` — resolved
+    /// against **this fragment's** border box and scaled by §5.5's factor so
+    /// no two curves on a side overlap.
+    ///
+    /// A fragment cut at a page boundary has **square corners on the cut
+    /// edge**: `box-decoration-break: slice`, the initial value, draws the box
+    /// as though unbroken and slices it, so the curves are at the box's real
+    /// top and bottom and not at the page's. Percentages resolve against the
+    /// fragment rather than the whole box, which is where this differs from a
+    /// slice: the box's whole height is not known on the page that draws its
+    /// top.
+    pub radius: [(f64, f64); 4],
+    /// The outline, `css-ui-4` §5: drawn outside the border edge, moving no
+    /// box.
+    pub outline: Option<Outline>,
+    /// The background image, `css-backgrounds-3` §2, drawn over
+    /// [`BoxFragment::background`] and under the border, positioned against
+    /// **this fragment's** padding box for [`BoxFragment::radius`]'s reason.
+    pub image: Option<BackgroundLayer>,
+    /// `box-shadow`, first on top, each colour resolved: the outer ones are
+    /// drawn under the background and outside the border box, the `inset`
+    /// ones over the background and inside the padding box (§7.1).
+    pub shadows: Vec<tinker_pdf_css::property::Shadow>,
+    /// The [`BoxNode::anchor`] of the box this decorates, carried unchanged.
+    ///
+    /// For the painter, which applies what belongs to an **element** rather
+    /// than to a box — `opacity` is the first — and needs to know whose
+    /// background this is to apply it to the right one. `None` for a box
+    /// nobody anchored: an anonymous one, or a column rule.
+    pub anchor: Option<u32>,
+}
+
+/// One box's overflow clip on one page: its **padding box** there, which
+/// `css-overflow-3` §3.1 clips to, with `css-backgrounds-3` §5.3's padding-edge
+/// curves where the box has rounded corners.
+///
+/// An axis the box does not clip — `overflow-x: clip` beside `overflow-y:
+/// visible` — is unbounded: `x` is negative infinity and `width` infinity, or
+/// `y` and `height` likewise, and the caller cuts that to its page. A fragment
+/// cut by a page boundary is unbounded on the cut edge too, as its border is
+/// absent there: the page is that edge's clip.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipFragment {
+    /// The [`BoxNode::anchor`] of the clipping box. Never `None`: a box no
+    /// caller anchored has no descendants the caller could find, so its clip
+    /// is not reported.
+    pub anchor: u32,
+    /// Padding-box left edge.
+    pub x: f64,
+    /// Padding-box top edge on this page.
+    pub y: f64,
+    /// Padding-box width.
+    pub width: f64,
+    /// Padding-box height on this page.
+    pub height: f64,
+    /// The padding edge's corner radii, `(horizontal, vertical)` in
+    /// `Corner::ALL`'s order: the border edge's less the border widths, never
+    /// below zero (§5.3). Square on a cut edge, as [`BoxFragment::radius`] is.
+    pub radius: [(f64, f64); 4],
 }
 
 /// A replaced element's content box on one page.
@@ -521,6 +619,69 @@ pub struct TextRun {
     pub style: FontStyle,
     /// `font-variant`.
     pub variant: FontVariant,
+    /// `font-kerning`, for the shaper the painter draws the run with.
+    pub kerning: FontKerning,
+    /// `font-feature-settings`, likewise; empty for `normal`.
+    pub features: Vec<FeatureSetting>,
+    /// The base direction of the paragraph this run is set in: its block
+    /// container's `direction` (`css-writing-modes-3` §2.1), or `None` where
+    /// the container's `unicode-bidi: plaintext` asks for UAX #9's P2 and P3.
+    ///
+    /// Carried rather than resolved, because this crate breaks lines over
+    /// logical text and resolves no levels: the caller that orders a line
+    /// needs the paragraph's direction to do it.
+    pub paragraph_rtl: Option<bool>,
+    /// Which bidi paragraph the run is part of: one block container's inline
+    /// content up to a forced break of `Bidi_Class` `B` — a preserved
+    /// newline, CR, NEL or U+2029, but not U+2028 LINE SEPARATOR, which ends
+    /// the line and not the paragraph (`css-writing-modes-3` §2.4) — numbered
+    /// from one in the order this crate sets them, across the whole layout;
+    /// zero for a run set outside every paragraph, an outside list marker.
+    ///
+    /// UAX #9 resolves a **paragraph** — rules X1 to I2 — and only then
+    /// breaks it into lines, so a neutral at a line's start takes its level
+    /// from the strong character ending the line before. A caller that
+    /// resolved each line as a paragraph of its own ordered a wrapped line
+    /// differently from the same text unwrapped (review of lane 8C); this is
+    /// what it gathers the paragraph's lines by, across pages as well.
+    pub paragraph: usize,
+    /// The explicit embeddings and isolates this run's inline ancestors open
+    /// round it, outermost first (`unicode-bidi`, §2.2): what UAX #9's
+    /// formatting characters would say, kept beside the text rather than in
+    /// it, so that the characters a book wrote are the characters a run holds.
+    ///
+    /// **Shared**: every run set under the same inline boxes holds the one
+    /// stack, so a line costs a pointer and not a copy of up to
+    /// [`limits::MAX_EMBEDDING_DEPTH`] levels (review of lane 8C).
+    pub embeddings: Arc<[Embedding]>,
+    /// UAX #9's resolved level of every character of this run, once the
+    /// caller that orders its line has cut it to one level; `None` as this
+    /// crate makes it, since it resolves no levels.
+    ///
+    /// A run of neutrals — a space and a `!` at the end of a right-to-left
+    /// paragraph — has no strong character to say which way it reads, and
+    /// its level is the only thing that does.
+    pub bidi_level: Option<u8>,
+    /// The lowest level UAX #9 gives the isolate formatting characters —
+    /// `LRI`, `RLI`, `FSI` and `PDI`, which [`Embedding`]s stand for —
+    /// between this run and the one before it on its line, once the caller
+    /// that orders the line has resolved it; `None` where no such character
+    /// stands between them, and as this crate makes it.
+    ///
+    /// X9 keeps those characters, so L2 reverses them with the text, and one
+    /// at a level below both its neighbours keeps them apart: in `<span
+    /// dir="ltr">ab</span>بحم` the `PDI` at level 0 stops the level-1 word
+    /// taking the level-2 `ab` with it when L2 reverses it. A run's own
+    /// level cannot say that, and the characters are in no run.
+    pub bidi_gap: Option<u8>,
+    /// Whether the line breaks at a soft hyphen at this run's end, so a
+    /// hyphen is drawn there (`css-text-3` §5.4, `hyphens: manual`).
+    ///
+    /// The run's `text` keeps the soft hyphen and gains no hyphen — the text
+    /// is the book's, and every character of it is conserved — and its
+    /// `width` is the text's with the hyphen set after it. A soft hyphen
+    /// anywhere else in a run is invisible and measured as nothing.
+    pub hyphenated: bool,
     /// `color`.
     pub color: Color,
     /// `text-decoration`.
@@ -569,6 +730,33 @@ pub struct TextRun {
     /// it is holding; a caller that wants the order the words were written in
     /// has this.
     pub order: usize,
+}
+
+/// One explicit level an inline box opens round its content
+/// (`css-writing-modes-3` §2.2): the bidi formatting character its
+/// `unicode-bidi` and `direction` stand for, as §2.4.2 maps them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Embedding {
+    /// Which formatting character opens it.
+    pub kind: EmbeddingKind,
+    /// `direction: rtl` on the box. Unread for [`EmbeddingKind::FirstStrong`].
+    pub rtl: bool,
+    /// The [`BoxNode::anchor`] of the inline box that opened it: two sibling
+    /// spans each isolating their content are two isolates, not one, and the
+    /// difference is where a neutral between them goes.
+    pub anchor: Option<u32>,
+}
+
+/// Which bidi formatting character an [`Embedding`] stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmbeddingKind {
+    /// `unicode-bidi: embed` — `LRE` or `RLE`, closed by `PDF`.
+    Embed,
+    /// `unicode-bidi: isolate` — `LRI` or `RLI`, closed by `PDI`.
+    Isolate,
+    /// `unicode-bidi: plaintext` on an inline box — `FSI`, closed by `PDI`:
+    /// an isolate whose direction is its content's first strong character.
+    FirstStrong,
 }
 
 /// A whole book, paginated.
@@ -825,9 +1013,17 @@ pub enum Warning {
     /// so is the difference between a known gap and a figure that quietly
     /// straddles a page.
     FloatBrokenAcrossPages,
-    /// An inline box with a block-level child, laid out as a block container.
-    /// CSS 2.2 §9.2.1.1 splits the inline instead.
-    BlockInInline,
+    /// An absolutely positioned or fixed box written inside a line, placed
+    /// at the top left of its inline formatting context where an inset pair
+    /// leaves it at its static position.
+    ///
+    /// The box itself is out of flow and laid out as one (CSS 2.2 §9.6),
+    /// taken out of the line as a float is; until October 2026's eighth wave
+    /// its text was set in the line instead. Its static position is where it
+    /// would have been in flow — on the line it was written in, or below that
+    /// line for a block-level box — and the lines do not exist yet when it is
+    /// taken out, so it is the context's top left, as a float's is.
+    PositionedInLine,
     /// A line whose content does not fit and had nowhere to break — the word
     /// is longer than the line and `overflow-wrap` is `normal`, which is what
     /// the specification says to do and is still worth reporting.
@@ -856,20 +1052,6 @@ pub enum Warning {
     /// clamped to it. CSS 2.2 §17.5: *"the cell is clamped so that it does not
     /// extend beyond the last row"*.
     RowspanPastTheRowGroup,
-    /// `display: inline-flex`, laid out as a **block-level** flex container.
-    ///
-    /// `css-flexbox-1` §3 makes it inline-level, and this build has no
-    /// inline-level box that is not text. The two available answers are to set
-    /// it as inline text, which throws the flex layout away entirely, or to lay
-    /// it out as a block-level flex container, which gets the box's *outside*
-    /// wrong and everything inside it right. It takes the second.
-    ///
-    /// **Distinct from an approximation, which takes the other
-    /// answer**, and the two disagree for a reason rather than by accident: an
-    /// `inline-block` holding a sentence set as inline text is very nearly
-    /// right, and a flex container set as inline text is a column of words with
-    /// no layout in it at all.
-    InlineFlexAsBlock,
     /// A flex line taller than a whole page, drawn past the page bottom.
     ///
     /// **The same staged half as [`Warning::TableRowTallerThanPage`] and for
@@ -903,19 +1085,25 @@ pub enum Warning {
     /// band inside it -- is itself taller than a whole page, which no cut can
     /// halve.
     ColumnTallerThanPage,
-    /// `column-span: all`, laid out in its column.
+    /// `column-span: all` on a box **below** a multi-column container's own
+    /// children, laid out in its column.
     ///
     /// `css-multicol-1` §6: a spanning box interrupts the columns, is laid out
     /// across the full width of the container, and the columns resume beneath
-    /// it. That is three column sets where this build has one, so the box is
-    /// laid out in the column it fell in and the fact is named. Counted per
-    /// box, for `UnimplementedProperty`'s reason: the same declaration on four
-    /// hundred figures is four hundred.
+    /// it. On a child of the container that is done — a column set either
+    /// side, the spanner a block between — and this is not raised. A spanner
+    /// inside one of the children would split that child round itself, which
+    /// this build does not, so that box is laid out in the column it fell in
+    /// and the fact is named. Counted per box, for `UnimplementedProperty`'s
+    /// reason: the same declaration on four hundred figures is four hundred.
     ColumnSpanAsNone,
-    /// `display: table-column` or `table-column-group` carrying a `width`,
-    /// which this build reads, beside anything else on it, which it does not:
-    /// a column box's background and borders are §17.5.1's two rendering
-    /// layers and neither is painted here.
+    /// A `table-column` or `table-column-group` with a background **image**,
+    /// which is not painted. Its background colour is §17.5.1's layer and is
+    /// painted under each cell that originates in it; its borders are
+    /// resolved with the cells' in the collapsing model and ignored in the
+    /// separated one, which is §17.6.1's own rule. The image would be
+    /// positioned against the column's whole box while painted only over its
+    /// cells, which is a second geometry this build does not carry.
     ColumnBoxNotPainted,
 }
 
@@ -925,9 +1113,10 @@ impl fmt::Display for Warning {
             Warning::FloatBrokenAcrossPages => {
                 f.write_str("a float did not fit its page and was broken across the boundary")
             }
-            Warning::BlockInInline => {
-                f.write_str("an inline box holds a block, and is laid out as one")
-            }
+            Warning::PositionedInLine => f.write_str(
+                "an absolutely positioned box inside a line was placed at the top of its \
+                 inline formatting context",
+            ),
             Warning::LineOverflowed => f.write_str("a line had nowhere to break and overflowed"),
             Warning::BreakForcedPastTheRules => {
                 f.write_str("a page break was taken where CSS 2.2 13.3.3 permits none")
@@ -942,17 +1131,14 @@ impl fmt::Display for Warning {
             Warning::ColumnTallerThanPage => {
                 f.write_str("a multi-column container holds a box taller than a page")
             }
-            Warning::ColumnSpanAsNone => {
-                f.write_str("column-span: all is laid out in its own column")
-            }
+            Warning::ColumnSpanAsNone => f.write_str(
+                "column-span: all below a container's own children is laid out in its column",
+            ),
             Warning::ColumnBoxNotPainted => {
-                f.write_str("a table column box's background and borders are not painted")
+                f.write_str("a table column box's background image is not painted")
             }
             Warning::MaxHeightAsAuto => {
                 f.write_str("a max-height shorter than the content did not shorten the box")
-            }
-            Warning::InlineFlexAsBlock => {
-                f.write_str("display: inline-flex is laid out as a block-level flex container")
             }
             Warning::FlexLineTallerThanPage => {
                 f.write_str("a flex line is taller than a page and overflows it")

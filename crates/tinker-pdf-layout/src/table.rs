@@ -36,14 +36,18 @@
 //! is the point of the list:
 //!
 //! - **Rule 8** — *"for each `table-cell` box whose parent is not a
-//!   `table-row`, generate an anonymous row"* — is not implemented separately,
-//!   because it is unreachable once rule 9 and rule 5 are. A misparented cell
-//!   is wrapped in an anonymous table by [`misparented_run`], and that table's
-//!   children are then not proper table children, so [`Step::RowForTableChild`]
-//!   generates the row. A second enforcement would be the same rule twice with
-//!   only one half reachable — which is exactly what the injection matrix
-//!   found hides a defect in `epub/xhtml.rs`'s end-tag handling, and the reason
-//!   it is written down here rather than left as an omission.
+//!   `table-row`, generate an anonymous row"* — is not a step of its own,
+//!   because rules 5 and 6 already generate that row: a cell is not a proper
+//!   table child, so a table's or a row group's run of cells is the run those
+//!   rules wrap. What makes it rule 8's row and not merely *a* row is what is
+//!   inside it: **the cells themselves**, with rule 7 applied to the run so
+//!   only what is not a cell is wrapped in an anonymous one
+//!   ([`anonymous_row_cells`]). Until October 2026 the whole run went into one
+//!   anonymous cell, so `<table><td>a</td><td>b</td></table>` was one column
+//!   holding both, with no spacing between them — a table that looks right
+//!   until it has two rows. A misparented cell reaches the same place through
+//!   rule 9: [`misparented_run`] wraps it in an anonymous table, whose run of
+//!   cells rule 5 wraps in this row.
 //! - **The row group a book leaves out** is not one of §17.2.1's rules at all;
 //!   it is §17.2's box tree, where a table's rows are in row groups. It is
 //!   [`Step::GroupForBareRows`] and it is the step this build exists to have.
@@ -359,6 +363,7 @@ fn anonymous_cell(parent: &ComputedStyle, run: Vec<BoxNode>) -> CellBox<'static>
         content: Content::Children(run),
         anchor: None,
         span: CellSpan::ONE,
+        marker: None,
     }))
 }
 
@@ -373,6 +378,7 @@ fn anonymous_text_cell(parent: &ComputedStyle, text: &str) -> CellBox<'static> {
             content: Content::Text(text.to_owned()),
             anchor: None,
             span: CellSpan::ONE,
+            marker: None,
         }],
     )
 }
@@ -557,20 +563,17 @@ fn surrounded_by_table_boxes(children: &[BoxNode], at: usize) -> bool {
 }
 
 /// Step 5: the run of a table's children that are not proper table children,
-/// wrapped in one anonymous row holding one anonymous cell.
+/// wrapped in one anonymous row — whose cells are the run's cells, with rule
+/// 7 wrapping what is not one ([`anonymous_row_cells`]).
 fn flush_stray<'a>(stray: &mut Vec<&'a BoxNode>, out: &mut TableBox<'a>, table: &'a BoxNode) {
     if stray.is_empty() {
         return;
     }
-    let run: Vec<BoxNode> = stray.drain(..).cloned().collect();
+    let run: Vec<&'a BoxNode> = std::mem::take(stray);
     out.generated.bump(Step::RowForTableChild);
-    out.generated.bump(Step::CellForRowChild);
     let row = Row {
         node: None,
-        cells: vec![Cell {
-            content: anonymous_cell(&table.style, run),
-            span: CellSpan::ONE,
-        }],
+        cells: anonymous_row_cells(&run, &table.style, &mut out.generated),
     };
     match out.groups.last_mut() {
         Some(group) if group.node.is_none() && group.kind == GroupKind::Body => {
@@ -587,8 +590,8 @@ fn flush_stray<'a>(stray: &mut Vec<&'a BoxNode>, out: &mut TableBox<'a>, table: 
     }
 }
 
-/// Step 6: a run of a row group's non-row children, in one anonymous row
-/// holding one anonymous cell.
+/// Step 6: a run of a row group's non-row children, in one anonymous row —
+/// the cells among them its cells, as step 5's.
 fn flush_group_stray<'a>(
     stray: &mut Vec<&'a BoxNode>,
     rows: &mut Vec<Row<'a>>,
@@ -598,16 +601,47 @@ fn flush_group_stray<'a>(
     if stray.is_empty() {
         return;
     }
-    let run: Vec<BoxNode> = stray.drain(..).cloned().collect();
+    let run: Vec<&'a BoxNode> = std::mem::take(stray);
     generated.bump(Step::RowForRowGroupChild);
-    generated.bump(Step::CellForRowChild);
     rows.push(Row {
         node: None,
-        cells: vec![Cell {
-            content: anonymous_cell(&group.style, run),
-            span: CellSpan::ONE,
-        }],
+        cells: anonymous_row_cells(&run, &group.style, generated),
     });
+}
+
+/// The cells of an anonymous row around `run`, §17.2.1 rules 7 and 8: each
+/// `table-cell` in it is a cell of the row as written, and each run of
+/// consecutive boxes that are not one is wrapped in one anonymous cell.
+fn anonymous_row_cells<'a>(
+    run: &[&'a BoxNode],
+    parent: &ComputedStyle,
+    generated: &mut Generated,
+) -> Vec<Cell<'a>> {
+    let mut cells = Vec::new();
+    let mut loose: Vec<BoxNode> = Vec::new();
+    let mut wrap = |loose: &mut Vec<BoxNode>, cells: &mut Vec<Cell<'a>>| {
+        if loose.is_empty() {
+            return;
+        }
+        generated.bump(Step::CellForRowChild);
+        cells.push(Cell {
+            content: anonymous_cell(parent, std::mem::take(loose)),
+            span: CellSpan::ONE,
+        });
+    };
+    for node in run {
+        if node.style.display == Display::TableCell {
+            wrap(&mut loose, &mut cells);
+            cells.push(Cell {
+                content: CellBox::Real(node),
+                span: node.span,
+            });
+        } else {
+            loose.push((*node).clone());
+        }
+    }
+    wrap(&mut loose, &mut cells);
+    cells
 }
 
 /// Step 7: a run of a row's non-cell children, in one anonymous cell.
@@ -718,12 +752,22 @@ fn row_cells<'a>(row: &'a BoxNode, generated: &mut Generated) -> Vec<Cell<'a>> {
 /// wraps the newline between two misparented `<td>`s in a cell of its own, and
 /// the table it draws has an extra empty column in it.
 #[must_use]
-pub fn is_whitespace_between_table_boxes(children: &[BoxNode], at: usize) -> bool {
-    if !is_whitespace(&children[at]) {
+pub fn is_whitespace_between_table_boxes<N: std::borrow::Borrow<BoxNode>>(
+    children: &[N],
+    at: usize,
+) -> bool {
+    if !is_whitespace(children[at].borrow()) {
         return false;
     }
-    let before = children[..at].iter().rev().find(|node| !is_none(node));
-    let after = children[at + 1..].iter().find(|node| !is_none(node));
+    let before = children[..at]
+        .iter()
+        .map(N::borrow)
+        .rev()
+        .find(|node| !is_none(node));
+    let after = children[at + 1..]
+        .iter()
+        .map(N::borrow)
+        .find(|node| !is_none(node));
     matches!((before, after), (Some(b), Some(a))
         if b.style.display.is_internal_table() && a.style.display.is_internal_table())
 }
@@ -738,14 +782,14 @@ pub fn is_whitespace_between_table_boxes(children: &[BoxNode], at: usize) -> boo
 /// Returns `from` when the child at `from` is not an internal table box at all,
 /// which is the caller's "no anonymous table here".
 #[must_use]
-pub fn misparented_run(children: &[BoxNode], from: usize) -> usize {
-    if from >= children.len() || !children[from].style.display.is_internal_table() {
+pub fn misparented_run<N: std::borrow::Borrow<BoxNode>>(children: &[N], from: usize) -> usize {
+    if from >= children.len() || !children[from].borrow().style.display.is_internal_table() {
         return from;
     }
     let mut end = from + 1;
     let mut at = from + 1;
     while at < children.len() {
-        let child = &children[at];
+        let child = children[at].borrow();
         if is_none(child) {
             at += 1;
             continue;

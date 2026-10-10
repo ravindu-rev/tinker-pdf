@@ -41,7 +41,7 @@
 //! decision 5's `Unsupported` shape one level up from a property.
 
 use crate::media::MediaContext;
-use crate::property::{self, Declaration};
+use crate::property::{self, Declaration, Image, Property};
 use crate::selector::{self, Selector};
 use crate::tokenizer::{tokenize, Token};
 use crate::{Budget, ImportResolver, Limits, Refusal, Warning};
@@ -206,7 +206,7 @@ impl Report {
         }
     }
 
-    fn note_unsupported(&mut self, property: &'static str) {
+    pub(crate) fn note_unsupported(&mut self, property: &'static str) {
         if let Some(slot) = self.unsupported.iter_mut().find(|(p, _)| *p == property) {
             slot.1 += 1;
         } else {
@@ -471,6 +471,21 @@ impl Parse<'_> {
                 }
             }
         }
+        // A relative `url()` is relative to the sheet it was written in, so
+        // each image this sheet's own rules name is told which sheet that was.
+        // An `@import`ed sheet's rules were told by their own call, before
+        // they were spliced in here, and keep it.
+        for rule in &mut rules {
+            for declared in &mut rule.declarations {
+                if let Declaration::Known(Property::BackgroundImage(Some(Image::Url(image)))) =
+                    &mut declared.declaration
+                {
+                    if image.base.is_none() {
+                        image.base = href.map(str::to_owned);
+                    }
+                }
+            }
+        }
         Ok(rules)
     }
 
@@ -554,6 +569,22 @@ impl Parse<'_> {
                 };
                 if crate::media::evaluate(&prelude, self.media) {
                     self.descend(block, href, rules, imports_still_allowed, budget)?;
+                }
+            }
+            // `css-conditional-3` §6: the block applies where this build
+            // supports what the prelude asks about. See [`crate::supports`].
+            "supports" => {
+                *imports_still_allowed = false;
+                let Some(block) = block else {
+                    self.report.discarded_rules += 1;
+                    return Ok(());
+                };
+                match crate::supports::evaluate(&prelude, self.limits.max_selector_parts) {
+                    Some(true) => {
+                        self.descend(block, href, rules, imports_still_allowed, budget)?;
+                    }
+                    Some(false) => {}
+                    None => self.report.discarded_rules += 1,
                 }
             }
             "import" => {
@@ -1224,7 +1255,7 @@ pub fn parse_inline(
 /// §5.4.4's rule is the last two non-whitespace values, and it is
 /// case-insensitive: `!IMPORTANT` is important. A `!` followed by anything else
 /// is an ordinary part of the value.
-fn strip_important(values: &mut Vec<ComponentValue>) -> bool {
+pub(crate) fn strip_important(values: &mut Vec<ComponentValue>) -> bool {
     let mut significant: Vec<usize> = values
         .iter()
         .enumerate()

@@ -134,6 +134,35 @@ fn a_separation_runs_its_tint_transform() {
     );
 }
 
+/// Every pixel of a `/DeviceN` image is its own tint transform's colour,
+/// however often its samples repeat and in whatever order — the decoder
+/// remembers conversions by their samples, and a colour it has seen must never
+/// answer for one it has not. The transform is `{ 0 }`, so the two colorants
+/// are red and green: four columns of full A, full B, full A again, and both —
+/// which shares its first sample with A and must not be taken for it.
+#[test]
+fn a_device_n_images_pixels_are_each_their_own_tint() {
+    let program = "{ 0 }";
+    let bitmap = page_with_objects(
+        "/XObject << /Im 5 0 R >>",
+        "q 40 0 0 40 0 0 cm /Im Do Q",
+        &format!(
+            "5 0 obj\n<< /Type /XObject /Subtype /Image /Width 4 /Height 1 \
+               /BitsPerComponent 8 /ColorSpace [/DeviceN [/A /B] /DeviceRGB 6 0 R] \
+               /Filter /ASCIIHexDecode /Length 17 >>\nstream\nFF0000FFFF00FFFF>\nendstream\nendobj\n\
+             6 0 obj\n<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1] \
+               /Length {} >>\nstream\n{program}\nendstream\nendobj\n",
+            program.len()
+        ),
+    );
+    let columns = [5, 15, 25, 35].map(|x| pixel(&bitmap, x, 20));
+    assert_eq!(
+        columns,
+        [(255, 0, 0), (0, 255, 0), (255, 0, 0), (255, 255, 0)],
+        "red, green, red again, and yellow"
+    );
+}
+
 /// The same space at zero tint is white, which proves the transform is being
 /// evaluated rather than the answer being black regardless.
 #[test]
@@ -146,6 +175,164 @@ fn a_separation_at_zero_tint_is_blank() {
 
     let (r, g, b) = pixel(&bitmap, 20, 20);
     assert!(r > 220 && g > 220 && b > 220, "got ({r}, {g}, {b})");
+}
+
+/// **`cs` resets a spot space to full tint.** 8.6.8 resets the colour to the
+/// space's initial value, and for `/Separation` that is a tint of 1.0
+/// (8.6.6.4) and for `/DeviceN` 1.0 in every component (8.6.6.5) — not the
+/// zeros of the device spaces. Each space here is black at full tint and
+/// white at none, so `cs` then a fill with no `sc` is black; it was white,
+/// no colorant at all. The stroke slot (`CS`) is reset the same way.
+#[test]
+fn cs_resets_a_spot_space_to_full_tint() {
+    let program = "{ add 2 div 1 exch sub }";
+    let objects = format!(
+        "5 0 obj\n<< /FunctionType 4 /Domain [0 1 0 1] /Range [0 1] /Length {} >>\n\
+         stream\n{program}\nendstream\nendobj\n",
+        program.len()
+    );
+    let resources = "/ColorSpace << \
+           /Spot [ /Separation /Ink /DeviceGray \
+             << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >> ] \
+           /Two [ /DeviceN [/A /B] /DeviceGray 5 0 R ] >>";
+    let bitmap = page_with_objects(
+        resources,
+        "/Spot cs 0 0 10 40 re f \
+         /Two cs 10 0 10 40 re f \
+         /Spot CS 10 w 25 0 m 25 40 l S \
+         /Spot cs 0 scn 30 0 10 40 re f",
+        &objects,
+    );
+    assert_eq!(pixel(&bitmap, 5, 20), (0, 0, 0), "/Separation: tint 1.0");
+    assert_eq!(pixel(&bitmap, 15, 20), (0, 0, 0), "/DeviceN: 1.0 each");
+    assert_eq!(pixel(&bitmap, 25, 20), (0, 0, 0), "and the stroke slot");
+    assert_eq!(
+        pixel(&bitmap, 35, 20),
+        (255, 255, 255),
+        "the space's tint 0 is white, so the black above is the reset's"
+    );
+}
+
+/// **A `/Lab` `/Range` written backwards draws as the range it spans**
+/// rather than panicking (ruling 1). `[10 -10 -100 100]` is four numbers a
+/// file may write, and the colour crate handed them to `f64::clamp` as its
+/// minimum and maximum, which panics when the first is above the second.
+#[test]
+fn an_unordered_lab_range_draws_as_the_range_it_spans() {
+    let lab = |range: &str| {
+        page(
+            &format!(
+                "/ColorSpace << /Lb [ /Lab << /WhitePoint [0.9642 1 0.8249] \
+                   /Range [{range}] >> ] >>"
+            ),
+            "/Lb cs 50 40 0 scn 0 0 40 40 re f",
+        )
+    };
+    let backwards = lab("10 -10 -100 100");
+    let forwards = lab("-10 10 -100 100");
+    assert_eq!(pixel(&backwards, 20, 20), pixel(&forwards, 20, 20));
+    // Ruling 10: the leniency is named, once, by the space's resource name.
+    assert_eq!(
+        backwards.warnings,
+        vec![tinker_pdf::RenderWarning::RepairedColorSpace {
+            name: "Lb".to_string(),
+            reason: "LabRangeUnordered".to_string(),
+        }],
+    );
+    assert!(forwards.warnings.is_empty(), "{:?}", forwards.warnings);
+}
+
+/// **A `/Lab` `/Range` written backwards is named wherever it is read**: by
+/// a `cs` resource, by an image XObject's own `/ColorSpace` and by an inline
+/// image's, each under the name it was reached by — on a render, on every
+/// replay of a display list (the `cs` was resolved once, when the list was
+/// recorded, and the image's decode is cached after the first replay), and
+/// on a page written as SVG. Until the third review of lane 8A the space was
+/// read as the span it covers and nothing said so.
+#[test]
+fn an_unordered_lab_range_is_named_wherever_it_is_read() {
+    let lab = |range: &str| format!("[/Lab << /WhitePoint [0.9642 1 0.8249] /Range [{range}] >>]");
+    let document = |a: &str, b: &str| {
+        let content = format!(
+            "/Lb cs 50 40 0 scn 0 0 10 40 re f \
+             q 10 0 0 40 10 0 cm /Im0 Do Q \
+             q 10 0 0 40 20 0 cm BI /W 1 /H 1 /BPC 8 /CS {} ID \u{80}\u{80}\u{80} EI Q",
+            lab(b)
+        );
+        let image = "\u{80}\u{80}\u{80}";
+        let bytes = format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
+   /Resources << /ColorSpace << /Lb {} >> /XObject << /Im0 5 0 R >> >> \
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Image /Width 1 /Height 1 \
+   /BitsPerComponent 8 /ColorSpace {} /Length 3 >>\nstream\n{image}\nendstream\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+            lab(a),
+            content.len() + 1,
+            lab(b),
+        );
+        // `\u{80}` is two bytes in a Rust string and one in the stream.
+        let bytes: Vec<u8> = bytes
+            .chars()
+            .map(|c| u8::try_from(u32::from(c)).expect("one byte"))
+            .collect();
+        Document::open(bytes).expect("it opens")
+    };
+    let repaired = |name: &str| tinker_pdf::RenderWarning::RepairedColorSpace {
+        name: name.to_string(),
+        reason: "LabRangeUnordered".to_string(),
+    };
+    let named = |warnings: &[tinker_pdf::RenderWarning]| -> Vec<String> {
+        let mut names: Vec<String> = warnings
+            .iter()
+            .filter_map(|w| match w {
+                tinker_pdf::RenderWarning::RepairedColorSpace { name, reason } => {
+                    assert_eq!(reason, "LabRangeUnordered");
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    let all = vec!["Im0".to_string(), "Lb".to_string(), "inline".to_string()];
+
+    let backwards = document("10 -10 -100 100", "-10 10 100 -100");
+    let page = backwards.page(0).expect("a page");
+    let direct = page.render(&RenderOptions::default());
+    assert_eq!(named(&direct.warnings), all, "{:?}", direct.warnings);
+    assert!(direct.warnings.contains(&repaired("Lb")));
+
+    let list = page.display_list();
+    assert!(list.is_retained());
+    for replay in 0..2 {
+        let bitmap = list.render(&RenderOptions::default());
+        assert_eq!(named(&bitmap.warnings), all, "replay {replay}");
+        assert_eq!(bitmap.data, direct.data, "replay {replay}");
+    }
+
+    let svg = page.to_svg(&tinker_pdf::SvgOptions::default());
+    let in_svg: Vec<tinker_pdf::RenderWarning> = svg
+        .warnings
+        .iter()
+        .filter_map(|w| match w {
+            tinker_pdf::SvgWarning::Render(w) => Some(w.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(named(&in_svg), all, "{:?}", svg.warnings);
+
+    let forwards = document("-10 10 -100 100", "-10 10 -100 100");
+    let bitmap = forwards
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    assert!(named(&bitmap.warnings).is_empty(), "{:?}", bitmap.warnings);
 }
 
 /// L* of 100 with no chroma is white. Read as RGB it clamps to (1, 0, 0) after
@@ -1112,7 +1299,7 @@ fn fill_in_space(space: &str, components: &str) -> tinker_pdf::Bitmap {
         .render(&RenderOptions::default())
 }
 
-/// **A `/CalGray` gamma is read** (8.6.5.1), which is the assertion that fails
+/// **A `/CalGray` gamma is read** (8.6.5.2), which is the assertion that fails
 /// if the space is aliased to `/DeviceGray`.
 ///
 /// The same component through two different gammas must not produce the same
@@ -1160,7 +1347,7 @@ fn a_cal_gray_reads_its_gamma_rather_than_aliasing_to_device_gray() {
     assert!(white.0 > 243, "1 is white: {white:?}");
 }
 
-/// **A `/CalRGB` matrix is read** (8.6.5.2), and Table 65 writes it column by
+/// **A `/CalRGB` matrix is read** (8.6.5.3), and Table 64 writes it column by
 /// column.
 ///
 /// The matrix below is the identity with its *A* and *C* columns exchanged, so

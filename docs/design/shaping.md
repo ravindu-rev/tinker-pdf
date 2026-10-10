@@ -59,18 +59,28 @@ engine.
 - **Shaping while rendering existing PDFs.** The original non-goal's
   reasoning survives for the consuming half: `TJ` arrays are honored as
   written, forever. Nothing in `tinker-pdf-render` calls this crate.
+  Reordering is not shaping: ruling 14 puts an extracted right-to-left line
+  into logical order with this crate's UAX #9 (`bidi::logical_order`), called
+  from the facade, so `tinker-pdf-content` still has no edge here and no
+  glyph is re-shaped.
 - **AAT (`morx`) and Graphite tables.** OpenType Layout only; a face
   carrying only `morx` shapes as if unshaped, with a typed warning under
   ruling 10.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) rows FT-07c and FT-07d.
 - **Variation-aware shaping.** `fvar`/`avar`/`HVAR` deltas applied to
   GPOS values are deferred until a corpus document demands them
   (ruling 3).
-- **Vertical text shaping** (`vhea`/`vmtx`, `vert`/`vrt2`).
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row FT-07a, with
+  variable fonts themselves FT-05; ruling 3 as amended orders it, and no
+  longer decides it.
+- **Vertical text shaping** (`vhea`/`vmtx`, `vert`/`vrt2`). *No longer a
+  non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row FT-07b.
 - **Font selection and fallback.** Which face a run gets stays
   `css-fonts-4` §5 matching above the layout crate; the shaper takes one
   face and never picks another.
 - **Justification beyond space adjustment.** No `JSTF`, no kashida
   elongation; recorded here so it is a decision, not an omission.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row FT-07e.
 
 ## Design
 
@@ -115,7 +125,13 @@ documents the two-paths-disagree failure and one path must own a run.
 `FixedPitch` keeps serving the structured fuzz generator unchanged; the
 facade's `BookMetrics` (`crates/tinker-pdf/src/epub/paint.rs`) implements
 `Shaper` over the book's `FaceSet`. Layout stays a leaf: the trait is
-plain structs, and `tinker-pdf-layout` gains no dependency edge.
+plain structs, and `tinker-pdf-layout` gains no dependency edge. *Amended
+October 2026, eighth wave:* the seam takes a run's **context** —
+`Shaper::shape_in`, the text and face request of its painted neighbours on
+its line — because a span is a run of its own and a shaper's decisions
+cross it; measured alone, a joined form or a kerned pair across a span left
+its difference between two runs. The default ignores the context, so a
+provider with no shaping across runs is unchanged.
 
 **Creation and forms.** A shaped run maps 1:1 onto
 `DocumentBuilder::glyph_run`'s `Glyph` (index plus the characters it

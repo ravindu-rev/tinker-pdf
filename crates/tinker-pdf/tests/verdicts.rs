@@ -96,6 +96,24 @@ struct Tally {
     sha1_signature: usize,
     short_key: usize,
     timestamped: usize,
+    /// Signatures whose first signer carries no signed attributes, tallied
+    /// apart from the counters above — see the note at the assertions.
+    unattributed: usize,
+}
+
+/// Whether the blob's first signer carries no signed attributes, which is the
+/// one shape whose verdict changed when RFC 5652 §5.4's other case was wired.
+fn unattributed(signature: &tinker_pdf::Signature) -> bool {
+    tinker_pdf_pki::ContentInfo::parse(signature.cms())
+        .ok()
+        .and_then(|content| {
+            content
+                .signed_data()
+                .signer_infos()
+                .first()
+                .map(|signer| signer.signed_attrs().is_none())
+        })
+        .unwrap_or(false)
 }
 
 #[test]
@@ -136,12 +154,39 @@ fn every_corpus_signature_gets_a_verdict() {
             let _ = document.authenticate("");
         }
 
-        for verdict in document.verify_signatures(&anchors, None) {
+        let signatures = document.signatures();
+        let verdicts = document.verify_signatures(&anchors, None);
+        for (verdict, signature) in verdicts.into_iter().zip(&signatures) {
             tally.signatures += 1;
             match &verdict.cms {
                 CmsState::Read { .. } => tally.cms_read += 1,
                 CmsState::Absent => tally.cms_absent += 1,
                 CmsState::Unreadable(_) => tally.cms_unreadable += 1,
+            }
+            if verdict.chain == Chain::NoAnchors {
+                tally.no_anchors += 1;
+            }
+            if unattributed(signature) {
+                tally.unattributed += 1;
+                println!(
+                    "  {name}\n    NO SIGNED ATTRIBUTES: coverage {:?}, digest {:?}, signature {:?}",
+                    short(&verdict.coverage),
+                    verdict.document_digest,
+                    verdict.signature
+                );
+                // Wired 2 October 2026: the signature is checked over the
+                // covered bytes' own digest rather than refused by name, so
+                // whatever it says, it no longer says it did not look. An
+                // expectation, not a measurement: it was written where the
+                // corpus could not be fetched, and an MD5 digest, unusable
+                // coverage or a missing certificate would still make it
+                // `NotChecked` (the roadmap's Signatures row).
+                assert!(
+                    !matches!(verdict.signature, SignatureCheck::NotChecked(_)),
+                    "{name}: an unattributed signer's signature is checked now, {:?}",
+                    verdict.signature
+                );
+                continue;
             }
             match &verdict.document_digest {
                 DocumentDigest::Matches => tally.digest_matches += 1,
@@ -152,9 +197,6 @@ fn every_corpus_signature_gets_a_verdict() {
                 SignatureCheck::Verified => tally.signature_verified += 1,
                 SignatureCheck::Failed => tally.signature_failed += 1,
                 SignatureCheck::NotChecked(_) => tally.signature_unchecked += 1,
-            }
-            if verdict.chain == Chain::NoAnchors {
-                tally.no_anchors += 1;
             }
             for weakness in &verdict.weaknesses {
                 match weakness {
@@ -181,6 +223,21 @@ fn every_corpus_signature_gets_a_verdict() {
             );
             if let Some(signer) = &verdict.signer {
                 println!("    signer {:?}", signer.subject);
+            }
+            // Printed, not yet pinned: the first run with RFC 3161 validation
+            // is owed its numbers (the roadmap's Signatures row).
+            for stamp in &verdict.timestamps {
+                println!(
+                    "    timestamp {:?} at {:?}: token {}, imprint {}, signature {}, \
+                     certificate {:?}, chain {}",
+                    stamp.authority,
+                    stamp.time,
+                    short(&stamp.token),
+                    short(&stamp.imprint),
+                    short(&stamp.signature),
+                    stamp.authority_certificate,
+                    short(&stamp.chain)
+                );
             }
         }
     }
@@ -229,6 +286,20 @@ fn every_corpus_signature_gets_a_verdict() {
     assert_eq!(
         tally.cms_unreadable, 0,
         "every blob the coverage classifier vouches for now parses; this was          3 until BER indefinite lengths were read, and those three files came          from two independent producer lineages"
+    );
+
+    // **The one signer with no signed attributes is tallied apart**, from
+    // 2 October 2026. It is `bug854315.pdf`'s (`cms_census.rs` names it), and
+    // until that day its signature and its digest were both
+    // `NotChecked(NoSignedAttributes)` — so the counts below, measured with it
+    // contributing to neither, are exactly the counts over the other
+    // twenty. Wiring RFC 5652 §5.4's other case moves that one verdict, and
+    // the commit that wired it ran where the corpus could not be fetched: its
+    // answer is printed above as `NO SIGNED ATTRIBUTES` and is owed a
+    // measured pin here, which is what the roadmap's Signatures row says.
+    assert_eq!(
+        tally.unattributed, 1,
+        "`bug854315.pdf`'s outer signer, the corpus's only one without signed attributes"
     );
 
     // Twenty of twenty-seven, and nine of those twenty arrived with the

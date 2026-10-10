@@ -113,6 +113,8 @@ use libfuzzer_sys::fuzz_target;
 
 use tinker_pdf_pki::cms::{CertificateChoice, ContentInfo, RevocationChoice, SignerIdentifier};
 use tinker_pdf_pki::der::{Budget, Cursor, Limits, Tag};
+use tinker_pdf_pki::pss;
+use tinker_pdf_pki::tsp::{TimeStampToken, TstInfo};
 use tinker_pdf_pki::x509::Certificate;
 
 /// Deep enough for a timestamp token, shallow enough to run fast.
@@ -173,6 +175,11 @@ fn read_every_way(data: &[u8], limits: Limits) {
                     assert_eq!(&der[certificate.tbs_range()], certificate.tbs());
                     let _ = certificate.key_identifier_sha1();
                     let _ = certificate.subject_public_key_info().public_key();
+                    // RSASSA-PSS parameters live in two places on a
+                    // certificate: its own signature algorithm and, for an
+                    // `id-RSASSA-PSS` key, the key's restrictions.
+                    let _ = pss::parameters(&certificate.signature_algorithm());
+                    let _ = pss::parameters(&certificate.subject_public_key_info().algorithm());
                 }
             }
             CertificateChoice::Other { der, .. } => assert!(inside(data, der)),
@@ -199,6 +206,10 @@ fn read_every_way(data: &[u8], limits: Limits) {
         let _ = signer.digest_algorithm();
         let _ = signer.signature_algorithm();
         let _ = signer.effective_digest();
+        // A parameter block nested at whatever depth the walker reached it,
+        // which is what made the first version of this reader refuse every
+        // real one: its ceiling was counted from the top of the message.
+        let _ = pss::parameters(&signer.signature_algorithm_id());
         let _ = signed.content_type_matches(signer);
         match signer.sid() {
             SignerIdentifier::IssuerAndSerialNumber { issuer, serial, der } => {
@@ -218,6 +229,11 @@ fn read_every_way(data: &[u8], limits: Limits) {
             for id in attribute.certs() {
                 assert!(inside(data, id.hash()));
                 let _ = id.digest();
+                if let Some(Ok(issuer_serial)) = id.issuer_serial_decoded() {
+                    for name in issuer_serial.issuer().names() {
+                        let _ = name.to_string();
+                    }
+                }
             }
         }
         // RFC 5652 §5.4: whatever the envelope was encoded as, what a
@@ -323,6 +339,16 @@ fn read_every_way(data: &[u8], limits: Limits) {
                     let _ = nested.effective_digest();
                 }
             }
+            // And as RFC 3161 reads it: the `TSTInfo` inside, whose bytes
+            // are what the authority's `messageDigest` is the digest of.
+            if let Ok(stamp) = TimeStampToken::parse(token) {
+                let info = stamp.info();
+                assert!(inside(data, info.der()));
+                assert!(inside(data, info.imprint()));
+                let _ = info.imprint_digest();
+                let _ = (info.time(), info.nanoseconds(), info.accuracy());
+                let _ = info.tsa().map(ToString::to_string);
+            }
         }
     }
 }
@@ -342,4 +368,8 @@ fuzz_target!(|data: &[u8]| {
     // And a node budget too small for anything real, so the other ceiling is
     // reached as well — including by the scan, which spends against it.
     read_every_way(data, Limits::new(40, 8).allowing_indefinite_lengths());
+    // A token's two readers straight over the input, so a `TSTInfo` is
+    // reachable without first being a well-formed unsigned attribute.
+    let _ = TstInfo::parse(data);
+    let _ = TimeStampToken::parse(data);
 });

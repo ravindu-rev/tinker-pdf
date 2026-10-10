@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "ZIP containers, hand-rolled: end-of-central-directory, central directory, local-header recovery, Zip64, stored and deflated entries, CRC-32 checked on every one. No PDF types"
+description = "ZIP containers, hand-rolled: end-of-central-directory, central directory, local-header recovery, Zip64, stored and deflated entries and LZMA through a decoder the caller hands in, CRC-32 checked on every one. No PDF types"
 
 [dependencies]
 # Raw DEFLATE and CRC-32, and nothing else from anywhere. A ZIP entry stored

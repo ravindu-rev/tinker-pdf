@@ -17,8 +17,8 @@ pub use fill::{fill, Mask};
 pub use fragments::Fragments;
 pub use geom::{flatten, FillRule, Path, Point, Verb};
 pub use image::{
-    accumulate_image, draw_image, image_bounds, image_coverage, Filter, ImageDraw, ImageSource,
-    Pyramid, Sampling, Transform,
+    accumulate_image, draw_image, image_bounds, image_bounds_in, image_coverage, Filter, ImageDraw,
+    ImageSource, Pyramid, Sampling, Transform,
 };
-pub use mesh::{draw_mesh, MeshBuffer, MeshDraw};
-pub use stroke::{stroke, LineCap, LineJoin, StrokeStyle};
+pub use mesh::{draw_mesh, draw_mesh_over, MeshBuffer, MeshDraw};
+pub use stroke::{dash, stretches, stroke, stroke_mapped, LineCap, LineJoin, StrokeStyle};

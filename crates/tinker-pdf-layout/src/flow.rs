@@ -61,23 +61,28 @@
 //! is what a book uses to pull a drop cap up.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignItems, BorderCollapse, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
-    ColumnSpan, ColumnWidth, Display, Float, LengthPercentage, ListStyleType, MarginValue,
-    OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size, TableLayout, TextAlign,
-    VerticalAlign, ZIndex,
+    ColumnSpan, ColumnWidth, Direction, Display, Float, Hyphens, Inset, LengthPercentage,
+    ListStylePosition, ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside,
+    Position, Side, Sides, Size, TableLayout, TextAlign, UnicodeBidi, VerticalAlign, ZIndex,
 };
 
 use crate::flex;
 use crate::floats::{Ceilings, FloatContext, Placed};
-use crate::metrics::{FontRequest, Metrics};
+use crate::limits::MAX_EMBEDDING_DEPTH;
+use crate::metrics::{FirstStrong, FontRequest, Metrics, Neighbour, ShapingContext, CONTEXT_BYTES};
 use crate::style::{consume, Consumed};
 use crate::table::{self, CellWidths, Edge, Grid, Origin, Slot, TableBox};
 use crate::text::{self, Collapser};
 use crate::uax14;
-use crate::{BoxNode, Budget, Content, Intrinsic, Limits, Options, Refusal, TextRun, Warning};
+use crate::{
+    BoxNode, Budget, Content, Embedding, EmbeddingKind, Intrinsic, Limits, Options, Refusal,
+    TextRun, Warning,
+};
 
 /// Slack for the comparisons a float's geometry needs, in points.
 ///
@@ -134,6 +139,54 @@ pub(crate) struct BlockRecord {
     /// *"does not affect the layout of any other box"*, and this field is that
     /// sentence: the flow keeps the box where it was and only the ink moves.
     pub dy: f64,
+    /// The node's [`crate::BoxNode::anchor`], for [`crate::BoxFragment::anchor`].
+    pub anchor: Option<u32>,
+    /// What else the box paints — its corners' radii and its outline — boxed
+    /// because almost no box has either and a record is in the frame of every
+    /// recursion of [`Builder::block`].
+    pub paint: Option<Box<crate::style::BoxPaint>>,
+    /// The axes its overflow clip cuts, `css-overflow-3` §3.1 — **set only
+    /// once its content is found to reach past its padding box**, by
+    /// [`Builder::note_overflow`] or [`Builder::clip_tail`]. A box whose
+    /// `overflow` clips and whose content fits keeps [`Clip::NONE`], and the
+    /// page it is on carries no clip for it: a clip that removes nothing is
+    /// not written.
+    pub clip: Clip,
+}
+
+/// Which axes a box's overflow clips, `css-overflow-3` §3.1.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Clip {
+    /// `overflow-x` is not `visible`.
+    pub x: bool,
+    /// `overflow-y` is not `visible`.
+    pub y: bool,
+}
+
+impl Clip {
+    /// No clip.
+    pub const NONE: Clip = Clip { x: false, y: false };
+
+    /// The axes a box clips, from its computed style.
+    ///
+    /// **`overflow` applies to block containers** (§3.1's *"Applies to"*), so
+    /// a table box — whose content is a grid and not a flow — and a replaced
+    /// box — whose content is a picture sized to it — clip nothing whatever
+    /// they declare. A table **cell** is a block container and does clip.
+    fn of(style: &Consumed, replaced: bool) -> Clip {
+        if replaced || style.is_table() {
+            return Clip::NONE;
+        }
+        Clip {
+            x: style.overflow_x.clips(),
+            y: style.overflow_y.clips(),
+        }
+    }
+
+    /// Either axis.
+    pub fn any(self) -> bool {
+        self.x || self.y
+    }
 }
 
 /// A replaced box's picture, as an inset from the box's own border-box corner.
@@ -299,6 +352,23 @@ pub(crate) struct FloatRecord {
     /// §9.9.1 puts an `auto` positioned box in the same layer as a `z-index: 0`
     /// one, so the two are one number here rather than two.
     pub z: i32,
+    /// **A clipping box's hidden tail, and not a box**: how many of its own
+    /// flow's items come before it — the box's kept content ends with the
+    /// last of them ([`Builder::clip_tail`]). `None` for a float or a
+    /// positioned box.
+    ///
+    /// An index and not a height, because the tail is the rest of the text
+    /// whose first lines that item ends: one text node under one reading-order
+    /// stamp, which reads in order only if the tail is drawn on the same page
+    /// as the item before it or a later one. A height says that only while
+    /// the flow's `y` grows with its index, and a negative margin, or a float
+    /// broken over pages and moved down, is where it does not. So a tail in a
+    /// float's or a positioned box's own flow is folded into that box's items
+    /// at this index ([`fold_tails`]) and is broken over pages with it, one
+    /// in a multi-column container goes in the column that holds the item it
+    /// follows ([`Builder::column_set`]), and one in the column is drawn on
+    /// the page that holds the item it follows ([`crate::fragment`]).
+    pub follows: Option<usize>,
 }
 
 /// A whole book as one continuous column, before it is cut into pages.
@@ -465,6 +535,77 @@ struct Builder<'a, M: Metrics> {
     /// text conservation — an *ordered* comparison — would fail on a book that
     /// lost nothing at all.
     sequence: usize,
+    /// The last bidi paragraph number handed out ([`TextRun::paragraph`]):
+    /// one per inline formatting context's text up to a paragraph separator
+    /// (a forced break of `Bidi_Class` `B`, [`separates_paragraphs`]), counted
+    /// across the whole layout as `sequence` is, so a paragraph's lines are
+    /// one number wherever they land.
+    paragraphs: usize,
+    /// An `inside` list marker waiting for the first line of its list item,
+    /// CSS 2.2 §12.5.1 and `css-lists-3` §3.2.
+    ///
+    /// **It is the list item's first inline box**, so where it lands depends on
+    /// what the item's content turns out to be, which is not known when the item
+    /// is opened: an item that starts with text sets the marker at the head of
+    /// that text's first line, and one that starts with a block sets it on an
+    /// anonymous line of its own above the block — §9.2.1.1, the marker being
+    /// inline content beside a block sibling. So it is armed by
+    /// [`Builder::block`] and `take`n by whichever of those happens first, and
+    /// a sub-flow — a float's, a column's — saves and clears it, because a float
+    /// that leads a list item is not where its marker goes.
+    inside_marker: Option<Piece>,
+    /// The explicit bidi levels the inline boxes being gathered open, outermost
+    /// first: what each [`Piece`] — and so each [`TextRun`] — carries for the
+    /// painter's UAX #9. Bounded by UAX #9's own depth, past which X1 ignores
+    /// an embedding anyway ([`MAX_EMBEDDING_DEPTH`]).
+    embeddings: EmbeddingStack,
+    /// The float contexts of the formatting contexts a scroll container
+    /// interrupted, innermost last: CSS 2.2 §9.4.1 makes one a block
+    /// formatting context of its own, so its children are placed against a
+    /// fresh [`FloatContext`] and the outer one is put back when it closes.
+    ///
+    /// A stack on the builder rather than a local in [`Builder::block`], for
+    /// [`Builder::fill_height`]'s reason: a `FloatContext` in `block`'s frame
+    /// is twenty-four bytes at every level of the depth cap.
+    outer_floats: Vec<FloatContext>,
+    /// How many boxes that clip are open, **across** sub-flows — a float's, a
+    /// cell's, an `inline-block`'s — which [`Builder::subflow`] does not swap.
+    ///
+    /// [`Builder::note_overflow`] reads a box's whole subtree to decide whether
+    /// it overflowed, so a clipping box inside a clipping box reads its subtree
+    /// twice, and a nest of them reads the innermost content once per level.
+    /// That multiplication is the work a book chooses, so the reads are charged
+    /// to [`Budget::spend_layout`] — **the nested ones only**: the outermost
+    /// clipping box's read is linear in what it contains, the same order as
+    /// laying the content out at all, and charging it would be counting the
+    /// book's text a second time.
+    clipping: usize,
+    /// A refusal [`Builder::note_overflow`] met, kept until the next box asks
+    /// for its budget or the walk ends.
+    ///
+    /// **Deferred and not returned**, which is a stack measurement: a fallible
+    /// call holds a `Result` in the caller's frame, `note_overflow`'s caller
+    /// is [`Builder::block`], and a fourth one there overflowed
+    /// `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name`'s stack. The
+    /// bound is no weaker for it: every box spends from the budget before it
+    /// is laid out, so the walk stops at the very next box, having done at
+    /// most the one subtree the charge was for.
+    deferred: Option<Refusal>,
+    /// How far into its own bottom padding a clipped box's kept content
+    /// reaches, which [`Builder::clip_tail`] sets and [`Builder::block`]
+    /// takes off the bottom edge it emits next, so the border box still ends
+    /// at the padding box's used bottom.
+    overhang: f64,
+}
+
+/// What [`Builder::horizontal`] decided about one block box.
+struct Horizontal {
+    /// Border-box left edge, never left of the page.
+    left: f64,
+    /// The used `width`, as a content-box width.
+    content_width: f64,
+    /// The picture's used size, for a replaced box.
+    replaced: Option<(f64, f64)>,
 }
 
 /// What laying a subtree out in its own formatting context came to.
@@ -581,9 +722,9 @@ impl FlexPass {
     /// `inline-flex` arm changes anything: [`Builder::block`] reads `display`
     /// to ask whether the box is `none`, a `list-item`, a table or a flex
     /// container, and an `inline` or `inline-block` item answers all four the
-    /// same way a `block` one does. The `inline-flex` arm is what stops a
-    /// nested inline-flex item raising [`crate::Warning::InlineFlexAsBlock`]
-    /// about a box whose outside §4 has already made block-level, and
+    /// same way a `block` one does. The `inline-flex` arm is what makes an
+    /// inline-flex **item** a block-level flex container rather than an atomic
+    /// inline in a line of its own, and
     /// `an_inline_flex_item_is_blockified_and_does_not_warn` is its fixture.
     /// The other two arms are kept because they are what §4 says, and recorded
     /// here as unobservable so a later reader does not go looking for the test.
@@ -712,6 +853,72 @@ struct Piece {
     anchor: Option<u32>,
     /// Its position in document order. See [`Builder::sequence`].
     order: usize,
+    /// Text the source does not contain: an `inside` list marker. Carried to
+    /// [`TextRun::generated`], which is what keeps it out of text conservation
+    /// and makes the painter mark it an artifact.
+    generated: bool,
+    /// The bidi levels its inline ancestors open, shared with every piece
+    /// and run made under the same ones ([`EmbeddingStack::shared`]). See
+    /// [`TextRun::embeddings`].
+    embeddings: Arc<[Embedding]>,
+}
+
+/// [`Builder::embeddings`]: the levels the inline boxes being gathered open,
+/// and the same stack as the pieces carry it.
+///
+/// **Shared, not copied.** Every piece, and every run cut from it, carries
+/// the whole stack, up to [`MAX_EMBEDDING_DEPTH`] levels of twelve bytes —
+/// and a copy each was a kilobyte and a half on every line of a paragraph
+/// inside 125 nested isolating spans: a 400 KB paragraph of one-word lines
+/// peaked at 855 MB against 259 MB without the spans (review of lane 8C).
+/// A stack is made into an [`Arc`] once, when a piece first asks for it, and
+/// every piece and run made under the same boxes holds that one. One is kept
+/// per level, so closing a box goes back to the stack its parent's pieces
+/// already share: a stack is made at most once for each box that opens a
+/// level, and once for the context's own.
+struct EmbeddingStack {
+    open: Vec<Embedding>,
+    /// `shared[i]` is `open[..i]` as a piece carries it, once one has asked:
+    /// always one longer than `open`.
+    shared: Vec<Option<Arc<[Embedding]>>>,
+}
+
+impl Default for EmbeddingStack {
+    fn default() -> Self {
+        Self {
+            open: Vec::new(),
+            shared: vec![None],
+        }
+    }
+}
+
+impl EmbeddingStack {
+    fn len(&self) -> usize {
+        self.open.len()
+    }
+
+    fn push(&mut self, embedding: Embedding) {
+        self.open.push(embedding);
+        self.shared.push(None);
+    }
+
+    fn pop(&mut self) {
+        if self.open.pop().is_some() {
+            self.shared.pop();
+        }
+    }
+
+    /// The open levels as a piece carries them: the one already made for
+    /// this level, or a new one kept for the next piece.
+    fn shared(&mut self) -> Arc<[Embedding]> {
+        let open = &self.open;
+        match self.shared.get_mut(open.len()) {
+            Some(slot) => Arc::clone(slot.get_or_insert_with(|| Arc::from(open.as_slice()))),
+            // Unreachable while `push` and `pop` keep the two in step; a new
+            // stack is still the right answer, only not a shared one.
+            None => Arc::from(open.as_slice()),
+        }
+    }
 }
 
 /// An atomic inline-level box, CSS 2.2 §9.2.2.
@@ -792,8 +999,18 @@ pub(crate) fn build<M: Metrics>(
         cell: None,
         flex_pass: None,
         sequence: 0,
+        paragraphs: 0,
+        inside_marker: None,
+        embeddings: EmbeddingStack::default(),
+        outer_floats: Vec::new(),
+        clipping: 0,
+        deferred: None,
+        overhang: 0.0,
     };
     builder.block(root, options.width, 0.0, 0, false, 0)?;
+    if let Some(refusal) = builder.deferred.take() {
+        return Err(refusal);
+    }
     // The last pending margin is committed so the flow's height includes it,
     // which matters for a book whose last block has a bottom margin: without
     // it the final page is short by that margin and the page count can differ.
@@ -923,13 +1140,11 @@ impl<M: Metrics> Builder<'_, M> {
         {
             return self.positioned_box(node, &style, x, depth, avoid);
         }
-        self.budget.spend_box()?;
+        self.spend_box()?;
         let avoid = avoid || style.page_break_inside == PageBreakInside::Avoid;
 
         let margin_top = style.margin_px(Side::Top, containing);
         let margin_bottom = style.margin_px(Side::Bottom, containing);
-        let margin_left = style.margin_px(Side::Left, containing);
-        let margin_right = style.margin_px(Side::Right, containing);
         let padding = Sides {
             top: style.padding_px(Side::Top, containing),
             right: style.padding_px(Side::Right, containing),
@@ -937,7 +1152,226 @@ impl<M: Metrics> Builder<'_, M> {
             left: style.padding_px(Side::Left, containing),
         };
         let border = style.border_width;
+        // `css-box-3` §4's `box-sizing` and the whole of §10.3's horizontal
+        // half. See [`Builder::horizontal`].
+        let extra = padding.left + padding.right + border.left + border.right;
+        let Horizontal {
+            left,
+            content_width,
+            replaced,
+        } = self.horizontal(node, &style, containing, x, extra);
+        let border_box_width = content_width + extra;
+        // `css-overflow-3` §3.1. The axes it clips, and whether it is a scroll
+        // container and so a formatting context of its own (CSS 2.2 §9.4.1).
+        let clip = Clip::of(&style, replaced.is_some());
+        let contained = clip.any() && style.is_scroll_container();
 
+        let painted = style.background_color.a != 0
+            || border.top > 0.0
+            || border.right > 0.0
+            || border.bottom > 0.0
+            || border.left > 0.0
+            || draws_beyond_its_border(&style);
+        let record = BlockRecord {
+            x: left,
+            width: border_box_width,
+            first: None,
+            last: 0,
+            background: style.background_color,
+            border_width: border,
+            border_style: style.border_style,
+            border_color: style.border_color,
+            painted: painted && style.visible,
+            // Filled in below, once `content_x` and the used height exist.
+            replaced: None,
+            dy: 0.0,
+            anchor: node.anchor,
+            paint: style.paint.clone(),
+            clip: Clip::NONE,
+        };
+        let block = self.flow.blocks.len();
+        self.flow.blocks.push(record);
+
+        // §9.5.2's clearance, which goes **between** the margins already
+        // adjoining here and this box's own top margin — so it is introduced
+        // before the top margin joins them, and introducing it is what stops
+        // the two from collapsing through each other.
+        self.clear(&style, margin_top, contained, left, border_box_width)?;
+
+        // The top margin joins whatever is adjoining, and the box's
+        // `page-break-before` joins the break position that margin is. The
+        // avoid set is taken **before** this box is opened, because an element
+        // is not its own ancestor.
+        self.pending.breaks.push(style.page_break_before);
+        self.pending.meet(&self.open_avoid.clone());
+        self.pending.add(margin_top);
+        // §9.5.1's rule 5 counts this box from here on. The border-box top is
+        // where the margins standing at this position have taken it, which is
+        // not `self.y` — they have not been committed yet and will not be
+        // until something that is not a margin arrives.
+        self.ceiling_box = self.ceiling_box.max(self.y + self.pending.value());
+
+        self.open.push(block);
+        if style.page_break_inside == PageBreakInside::Avoid {
+            self.open_avoid.push(block);
+        }
+        // §9.6: a box with a `position` other than `static` is a containing
+        // block for its absolutely positioned descendants. Its **padding box**
+        // and not its content box, which §10.1 says in as many words and which
+        // a build reading `content_x` here would get wrong by the padding. So
+        // is a transformed box (`css-transforms-1` §2), whose descendants turn
+        // with it.
+        let anchors = style.position != Position::Static || style.transformed();
+        if anchors {
+            self.positioned.push(crate::position::Containing {
+                left: left + border.left,
+                top: self.cursor() + border.top,
+                width: (border_box_width - border.left - border.right).max(0.0),
+                height: None,
+            });
+        }
+        let floats_before = self.flow.floats.len();
+        let top_edge = border.top + padding.top;
+        // **And so does a formatting context of its own**, with nothing
+        // between the two at all: §8.3.1 says *"margins of elements that
+        // establish new block formatting contexts ... do not collapse with
+        // their in-flow children"*. An edge of no height is what opens the
+        // box's border box here, so the first child's margin is committed
+        // **inside** it rather than beside it.
+        if top_edge > 0.0 || contained {
+            // A border or a padding between the parent and its first child is
+            // exactly what stops case 2 from happening, so the margin is
+            // committed here and the two do not meet.
+            self.commit_margin();
+            self.emit(top_edge, ItemKind::Edge, true);
+        }
+
+        let content_x = left + border.left + padding.left;
+        let before = self.y;
+        // Rule 4's containing block for any float among the children. It is
+        // `before` plus the margins standing here rather than `before` itself,
+        // for the reason above: an uncommitted margin has not moved `self.y`
+        // yet and it will.
+        let outer_top = std::mem::replace(&mut self.content_top, before + self.pending.value());
+        self.open_clip(clip, contained);
+        self.arm_marker(node, &style, ordinal);
+        if let Some(size) = replaced {
+            self.replaced_content(
+                block,
+                node,
+                &style,
+                (border.left + padding.left, top_edge),
+                size,
+            );
+        } else if style.is_table() {
+            // CSS 2.2 §17. Everything above this line -- the margins, the
+            // border, the padding, `width`, `box-sizing`, the page-break
+            // properties -- is the ordinary block box a table also is, and
+            // reusing it is what stops a table from being a second, quietly
+            // different, box model.
+            self.table(node, &style, content_x, content_width, depth, avoid, block)?;
+        } else if style.is_flex() {
+            // `css-flexbox-1` §9, and the same sentence as the table above it:
+            // a flex container is an ordinary block box on the outside. An
+            // `inline-flex` arrives here only as an atomic inline's inside
+            // ([`Builder::atomic_inline`]) or blockified — floated, positioned,
+            // the root, a flex item — and in every one of those a flex
+            // container is what it is.
+            self.flex(node, &style, content_x, content_width, depth, avoid)?;
+        } else if style.is_multicol() {
+            // `css-multicol-1`, and the same sentence a third time: a
+            // multi-column container is an ordinary block box on the outside,
+            // and everything above this line is that box.
+            self.columns(node, &style, content_x, content_width, depth, avoid)?;
+        } else {
+            self.children(
+                node,
+                None,
+                &style,
+                content_x,
+                content_width,
+                depth,
+                avoid,
+                block,
+            )?;
+        }
+        self.disarm_marker();
+        self.content_top = outer_top;
+        if contained {
+            self.leave_context(&style);
+        }
+        let content_height =
+            self.y - self.content_start(block, before, top_edge > 0.0 || contained);
+
+        // §10.6.3's height and §10.7's clamp. See [`Builder::fill_height`].
+        self.fill_height(
+            &style,
+            content_height,
+            block,
+            floats_before,
+            clip,
+            padding.bottom,
+        );
+
+        let bottom_edge = border.bottom + padding.bottom - std::mem::take(&mut self.overhang);
+        if bottom_edge > 0.0 {
+            self.commit_margin();
+            self.emit(bottom_edge, ItemKind::Edge, true);
+        }
+        self.open.pop();
+        if anchors {
+            self.positioned.pop();
+        }
+        if style.page_break_inside == PageBreakInside::Avoid {
+            self.open_avoid.pop();
+        }
+        self.offset_relative(&style, block, floats_before, content_x, before, containing);
+        if clip.any() {
+            self.note_overflow(block, clip, floats_before, &border);
+        }
+
+        // The bottom margin joins the next adjoining position. When the box had
+        // no border, no padding, no content and no height, its top margin is
+        // still sitting in the same accumulator — which is case 3, collapsing
+        // through, with no code of its own.
+        self.pending.breaks.push(style.page_break_after);
+        self.pending.meet(&self.open_avoid.clone());
+        self.pending.add(margin_bottom);
+
+        // The marker of a `list-item` is generated content and goes on the
+        // box's first line, which is why it is placed after the children.
+        // An `inside` one went into that line as its first inline box instead.
+        if style.display == Display::ListItem
+            && style.list_style_position == ListStylePosition::Outside
+        {
+            self.marker(node, &style, block, (content_x, content_width), ordinal);
+        }
+        Ok(())
+    }
+
+    /// A block box's used width and left edge: CSS 2.2 §10.3.3, §10.3.4 and
+    /// §10.4, with `css-box-3`'s `box-sizing`, and the picture's size where
+    /// the box is replaced.
+    ///
+    /// **A method and not sixty lines inside [`Builder::block`]**, and the
+    /// reason is [`Builder::offset_relative`]'s: `block` recurses once per
+    /// level of the document and its frame is what the depth cap is measured
+    /// in stack against. These locals — two margins, a closure, a stated, a
+    /// tentative and a used width, the picture — were `block`'s own until the
+    /// overflow milestone needed room in that frame, and
+    /// `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name` overflowed
+    /// until they moved here.
+    #[inline(never)]
+    fn horizontal(
+        &mut self,
+        node: &BoxNode,
+        style: &Consumed,
+        containing: f64,
+        x: f64,
+        extra: f64,
+    ) -> Horizontal {
+        let margin_left = style.margin_px(Side::Left, containing);
+        let margin_right = style.margin_px(Side::Right, containing);
         // `css-box-3` §4: `content-box` measures `width` as the content, and
         // `border-box` measures it as content plus padding plus border. The
         // difference is invisible on a box with neither, which is why a fixture
@@ -950,7 +1384,6 @@ impl<M: Metrics> Builder<'_, M> {
         // for `width`. A build that converted `width` and not `max-width` gets
         // every `box-sizing: border-box; max-width: 40em` figure wrong by the
         // padding and the page looks entirely reasonable.
-        let extra = padding.left + padding.right + border.left + border.right;
         let to_content = |specified: f64| {
             match style.box_sizing {
                 tinker_pdf_css::property::BoxSizing::ContentBox => specified,
@@ -974,7 +1407,7 @@ impl<M: Metrics> Builder<'_, M> {
         // display type"*. `img { display: flex }` is a block-level picture and
         // not an empty flex container, and a build that asked `is_flex` first
         // would produce the second.
-        let replaced = replaced_box(node, &style, containing);
+        let replaced = replaced_box(node, style, containing);
         // §10.4: the tentative used width comes from §10.3, and then the whole
         // of §10.3 is *"applied again"* with `max-width` as the width, and
         // again with `min-width`. `style::clamp_size` is that order, which is
@@ -1001,7 +1434,7 @@ impl<M: Metrics> Builder<'_, M> {
         // `auto` margins centre a picture exactly as they centre a `<div>` with
         // a stated width.
         let definite = replaced.is_some() || stated_width.is_some() || content_width < tentative;
-        let mut left = if both_auto && definite {
+        let left = if both_auto && definite {
             x + ((containing - (content_width + extra)) / 2.0).max(0.0)
         } else {
             x + margin_left
@@ -1009,148 +1442,11 @@ impl<M: Metrics> Builder<'_, M> {
         if content_width + extra > containing + 0.001 {
             self.warn(Warning::ContentOverflowedPage);
         }
-        left = left.max(0.0);
-        let border_box_width = content_width + extra;
-
-        let painted = style.background_color.a != 0
-            || border.top > 0.0
-            || border.right > 0.0
-            || border.bottom > 0.0
-            || border.left > 0.0;
-        let record = BlockRecord {
-            x: left,
-            width: border_box_width,
-            first: None,
-            last: 0,
-            background: style.background_color,
-            border_width: border,
-            border_style: style.border_style,
-            border_color: style.border_color,
-            painted: painted && style.visible,
-            // Filled in below, once `content_x` and the used height exist.
-            replaced: None,
-            dy: 0.0,
-        };
-        let block = self.flow.blocks.len();
-        self.flow.blocks.push(record);
-
-        // §9.5.2's clearance, which goes **between** the margins already
-        // adjoining here and this box's own top margin — so it is introduced
-        // before the top margin joins them, and introducing it is what stops
-        // the two from collapsing through each other.
-        self.clear(&style, margin_top)?;
-
-        // The top margin joins whatever is adjoining, and the box's
-        // `page-break-before` joins the break position that margin is. The
-        // avoid set is taken **before** this box is opened, because an element
-        // is not its own ancestor.
-        self.pending.breaks.push(style.page_break_before);
-        self.pending.meet(&self.open_avoid.clone());
-        self.pending.add(margin_top);
-        // §9.5.1's rule 5 counts this box from here on. The border-box top is
-        // where the margins standing at this position have taken it, which is
-        // not `self.y` — they have not been committed yet and will not be
-        // until something that is not a margin arrives.
-        self.ceiling_box = self.ceiling_box.max(self.y + self.pending.value());
-
-        self.open.push(block);
-        if style.page_break_inside == PageBreakInside::Avoid {
-            self.open_avoid.push(block);
+        Horizontal {
+            left: left.max(0.0),
+            content_width,
+            replaced,
         }
-        // §9.6: a box with a `position` other than `static` is a containing
-        // block for its absolutely positioned descendants. Its **padding box**
-        // and not its content box, which §10.1 says in as many words and which
-        // a build reading `content_x` here would get wrong by the padding.
-        let anchors = style.position != Position::Static;
-        if anchors {
-            self.positioned.push(crate::position::Containing {
-                left: left + border.left,
-                top: self.cursor() + border.top,
-                width: (border_box_width - border.left - border.right).max(0.0),
-                height: None,
-            });
-        }
-        let floats_before = self.flow.floats.len();
-        let top_edge = border.top + padding.top;
-        if top_edge > 0.0 {
-            // A border or a padding between the parent and its first child is
-            // exactly what stops case 2 from happening, so the margin is
-            // committed here and the two do not meet.
-            self.commit_margin();
-            self.emit(top_edge, ItemKind::Edge, true);
-        }
-
-        let content_x = left + border.left + padding.left;
-        let before = self.y;
-        // Rule 4's containing block for any float among the children. It is
-        // `before` plus the margins standing here rather than `before` itself,
-        // for the reason above: an uncommitted margin has not moved `self.y`
-        // yet and it will.
-        let outer_top = std::mem::replace(&mut self.content_top, before + self.pending.value());
-        if let Some(size) = replaced {
-            self.replaced_content(
-                block,
-                node,
-                &style,
-                (border.left + padding.left, top_edge),
-                size,
-            );
-        } else if style.is_table() {
-            // CSS 2.2 §17. Everything above this line -- the margins, the
-            // border, the padding, `width`, `box-sizing`, the page-break
-            // properties -- is the ordinary block box a table also is, and
-            // reusing it is what stops a table from being a second, quietly
-            // different, box model.
-            self.table(node, &style, content_x, content_width, depth, avoid, block)?;
-        } else if style.is_flex() {
-            // `css-flexbox-1` §9, and the same sentence as the table above it:
-            // a flex container is an ordinary block box on the outside.
-            if style.display == Display::InlineFlex {
-                self.warn(Warning::InlineFlexAsBlock);
-            }
-            self.flex(node, &style, content_x, content_width, depth, avoid)?;
-        } else if style.is_multicol() {
-            // `css-multicol-1`, and the same sentence a third time: a
-            // multi-column container is an ordinary block box on the outside,
-            // and everything above this line is that box.
-            self.columns(node, &style, content_x, content_width, depth, avoid)?;
-        } else {
-            self.children(node, &style, content_x, content_width, depth, avoid, block)?;
-        }
-        self.content_top = outer_top;
-        let content_height = self.y - before;
-
-        // §10.6.3's height and §10.7's clamp. See [`Builder::fill_height`].
-        self.fill_height(&style, content_height);
-
-        let bottom_edge = border.bottom + padding.bottom;
-        if bottom_edge > 0.0 {
-            self.commit_margin();
-            self.emit(bottom_edge, ItemKind::Edge, true);
-        }
-        self.open.pop();
-        if anchors {
-            self.positioned.pop();
-        }
-        if style.page_break_inside == PageBreakInside::Avoid {
-            self.open_avoid.pop();
-        }
-        self.offset_relative(&style, block, floats_before, content_x, before, containing);
-
-        // The bottom margin joins the next adjoining position. When the box had
-        // no border, no padding, no content and no height, its top margin is
-        // still sitting in the same accumulator — which is case 3, collapsing
-        // through, with no code of its own.
-        self.pending.breaks.push(style.page_break_after);
-        self.pending.meet(&self.open_avoid.clone());
-        self.pending.add(margin_bottom);
-
-        // The marker of a `list-item` is generated content and goes on the
-        // box's first line, which is why it is placed after the children.
-        if style.display == Display::ListItem {
-            self.marker(&style, block, content_x, ordinal);
-        }
-        Ok(())
     }
 
     /// §10.6.3's `height`, §10.7's clamp, and the padding that makes the flow
@@ -1182,11 +1478,23 @@ impl<M: Metrics> Builder<'_, M> {
     /// The percentages resolve against `None` for §10.5's reason: this box's
     /// containing block has an `auto` height at this point in the pass, so a
     /// percentage `min-height` or `max-height` behaves as `auto` and `none`.
-    fn fill_height(&mut self, style: &Consumed, content_height: f64) {
-        let stated_height = match style.height {
-            Size::Length(LengthPercentage::Px(px)) => Some(px.max(0.0)),
-            Size::Length(LengthPercentage::Percent(_)) | Size::Auto => None,
-        };
+    ///
+    /// **A box that clips its block axis is the exception, and makes both
+    /// halves implementable.** `css-overflow-3` §3.1 clips its content to its
+    /// padding box, so the content past the used height is not drawn and the
+    /// box that follows is placed after the used height and not after the
+    /// content: [`Builder::clip_tail`] takes it back out of the flow, and a
+    /// `max-height: 4em; overflow: hidden` box is exactly four ems tall.
+    fn fill_height(
+        &mut self,
+        style: &Consumed,
+        content_height: f64,
+        block: usize,
+        floats_before: usize,
+        clip: Clip,
+        padding_bottom: f64,
+    ) {
+        let stated_height = definite_height(style);
         let min_height = crate::style::min_length(style.min_height, None);
         let max_height = crate::style::max_length(style.max_height, None);
         let wanted = crate::style::clamp_size(
@@ -1197,9 +1505,337 @@ impl<M: Metrics> Builder<'_, M> {
         if wanted > content_height {
             self.commit_margin();
             self.emit(wanted - content_height, ItemKind::Edge, true);
+        } else if clip.y && content_height > wanted + EPSILON {
+            let cut = self.y - content_height + wanted;
+            self.clip_tail(block, floats_before, (cut, cut + padding_bottom), clip);
         } else if max_height.is_some_and(|max| content_height > max + EPSILON) {
             self.warn(Warning::MaxHeightAsAuto);
         }
+    }
+
+    /// Where a block box's content begins, which is what its used height is
+    /// measured from.
+    ///
+    /// **Not where the cursor stood when the box was opened**, unless an edge
+    /// opened it. Without a top border, padding or formatting context of its
+    /// own, a box's top margin collapses with the margins adjoining it — its
+    /// first child's, the previous sibling's — and §8.3.1's collapsed margin
+    /// is committed by the box's first content, **outside** its border box
+    /// ([`Builder::commit_margin`]). The box's first item is then where its
+    /// border box begins, and counting the margin as content made a box of
+    /// `height: 6px` and a four-point margin two points tall. Under a clip
+    /// that put [`Builder::clip_tail`]'s cut above the box's own first line,
+    /// which hid that line's ink and hid the rest of its text at a height
+    /// above it.
+    ///
+    /// A box with no item at all has no content, whatever margins were
+    /// committed while it was open: they were committed outside it.
+    #[inline(never)]
+    fn content_start(&self, block: usize, before: f64, opened: bool) -> f64 {
+        if opened {
+            return before;
+        }
+        self.flow.blocks[block]
+            .first
+            .and_then(|first| self.flow.items.get(first))
+            .map_or(self.y, |item| item.y)
+    }
+
+    /// A box that clips, opened: a scroll container's fresh float context
+    /// (see [`Builder::outer_floats`]) and the count of open clipping boxes
+    /// (see [`Builder::clipping`]).
+    ///
+    /// Never inlined, for [`Builder::disarm_marker`]'s reason: the context it
+    /// moves is a value in its own frame rather than in `block`'s.
+    #[inline(never)]
+    fn open_clip(&mut self, clip: Clip, contained: bool) {
+        if contained {
+            let outer = std::mem::take(&mut self.floats);
+            self.outer_floats.push(outer);
+        }
+        if clip.any() {
+            self.clipping += 1;
+        }
+    }
+
+    /// A scroll container's own block formatting context, closed: CSS 2.2
+    /// §9.4.1's three consequences that are not the clip.
+    ///
+    /// 1. The last child's bottom margin is committed **inside** the box, which
+    ///    is §8.3.1's *"do not collapse with their in-flow children"* at the
+    ///    bottom as the zero-height edge [`Builder::block`] emits is at the
+    ///    top.
+    /// 2. §10.6.7: with an `auto` height, *"if the element has any floating
+    ///    descendants whose bottom margin edge is below the element's bottom
+    ///    content edge, then the height is increased to include those
+    ///    edges"* — which is what `overflow: hidden` round a floated picture is
+    ///    written for, and the reason a book writes it.
+    /// 3. The float context the box interrupted is put back, so the floats it
+    ///    placed are nobody else's to flow round.
+    #[inline(never)]
+    fn leave_context(&mut self, style: &Consumed) {
+        self.commit_margin();
+        let inner = std::mem::replace(
+            &mut self.floats,
+            self.outer_floats.pop().unwrap_or_default(),
+        );
+        if definite_height(style).is_some() {
+            return;
+        }
+        if let Some(bottom) = inner.clearance_bottom(Clear::Both) {
+            if bottom > self.y + EPSILON {
+                self.emit(bottom - self.y, ItemKind::Edge, true);
+            }
+        }
+    }
+
+    /// CSS 2.2 §9.5: *"The border box of ... an element in the normal flow that
+    /// establishes a new block formatting context (such as an element with
+    /// `overflow` other than `visible`) must not overlap the margin box of any
+    /// floats in the same block formatting context"*, and *"if necessary,
+    /// implementations should clear the said element by placing it below any
+    /// preceding floats"*.
+    ///
+    /// **The *should*, and not the *may* that follows it.** §9.5 also permits
+    /// placing the box beside the floats, narrowed, *"if there is sufficient
+    /// space"*, and leaves *sufficient* undefined; a browser narrows. This
+    /// build clears, which is the sentence's own first answer: the box keeps
+    /// the width its containing block gives it and starts below the floats it
+    /// would have overlapped. A float that only begins below the box's top
+    /// edge is not looked for, since this box's height is not known yet.
+    #[inline(never)]
+    fn clear_beside_floats(
+        &mut self,
+        left: f64,
+        width: f64,
+        margin_top: f64,
+    ) -> Result<(), Refusal> {
+        if self.floats.is_empty() {
+            return Ok(());
+        }
+        self.budget.spend_layout(self.floats.len())?;
+        let top = self.cursor() + margin_top;
+        let (lo, hi) = self.floats.band(top, top + 1.0, left, left + width);
+        if lo <= left + EPSILON && hi >= left + width - EPSILON {
+            return Ok(());
+        }
+        let Some(bottom) = self.floats.clearance_bottom(Clear::Both) else {
+            return Ok(());
+        };
+        let clearance = bottom - top;
+        if clearance <= 0.0 {
+            return Ok(());
+        }
+        let inside = self.inside_open();
+        self.commit_margin();
+        self.emit(clearance, ItemKind::Edge, inside);
+        Ok(())
+    }
+
+    /// **The content past a clipping box's used height, taken back out of the
+    /// flow**, `css-overflow-3` §3.1.
+    ///
+    /// The flow is one column whose `y` never goes backwards, so a box shorter
+    /// than its content cannot be drawn with the content running on under the
+    /// next box: everything is placed in order. What a block-axis clip makes
+    /// possible is to take out what the clip would hide. `edges` is the
+    /// content box's bottom edge and the padding box's: every item that begins
+    /// at or below the second leaves the column, the one that straddles it is
+    /// kept and shortened to end there (its ink is cut at the same edge by the
+    /// page's clip, not here), and the cursor goes back to wherever the kept
+    /// content ends — the content edge at the least. What the kept content
+    /// reaches into the bottom padding is [`Builder::overhang`], taken off the
+    /// bottom edge, so the box's bottom padding, border and margin, and the
+    /// next box, follow the used height whatever was kept.
+    ///
+    /// **Out of the column, and not out of the book.** The items that left are
+    /// kept as an out-of-flow record of no height at the padding edge, which
+    /// follows the last item kept wherever pages break it
+    /// ([`FloatRecord::follows`]), with
+    /// every run in them **laid out and not painted** — CSS 2.2 §11.2's
+    /// `visibility: hidden`, which is what a clip that hides all of a run makes
+    /// it — so the text is still the layout's, in its reading order, and text
+    /// conservation stays an equality rather than learning an exception. The
+    /// floats this box's content placed below the padding edge are hidden the
+    /// same way where they stand, and the margins still adjoining, which
+    /// belonged to the last child, are dropped: a margin is not content.
+    ///
+    /// Its work is charged by [`Builder::note_overflow`], which runs over the
+    /// same subtree once the box is closed and is the one fallible call of the
+    /// two: `block`'s frame holds one `Result` for both.
+    #[inline(never)]
+    fn clip_tail(&mut self, block: usize, floats_before: usize, edges: (f64, f64), clip: Clip) {
+        let (cut, line) = edges;
+        let Some(first) = self.flow.blocks[block].first else {
+            return;
+        };
+        // The box's own first item is always kept: it is its top edge, or
+        // the zero-height one a scroll container opens with, or its first
+        // line, and a box with no first item has no border box to draw.
+        let from = (first + 1).min(self.flow.items.len());
+        let keep = from
+            + self.flow.items[from..]
+                .iter()
+                .position(|item| item.y >= line - EPSILON)
+                .unwrap_or(self.flow.items.len() - from);
+        let mut tail = self.flow.items.split_off(keep);
+        if !tail.is_empty() {
+            hide(&mut tail, &mut [], Some(line));
+            // The current flow's own list of records beside the column, so a
+            // sub-flow — a float's, a cell's, a measuring trial's — carries
+            // its hidden tail with it and translates it where it goes.
+            //
+            // **Before every record this box's content made, and not after
+            // them.** A clipping descendant's hidden tail is already among
+            // them, and it is the *end* of that descendant's content, while
+            // this tail begins with whatever of the same content the
+            // descendant kept below this cut — one text node's lines on both
+            // sides, under one reading-order stamp, which the page's stable
+            // sort cannot put back in order. Both end up at this padding
+            // edge, so the order they are drawn in is the order they read
+            // in. Nothing else among them can share a stamp with this tail
+            // (a float's text is its own nodes'), and a hidden record paints
+            // nothing, so the move changes no ink.
+            //
+            // **After the last item kept, and not at a height**: see
+            // [`FloatRecord::follows`].
+            let at = floats_before.min(self.flow.floats.len());
+            self.flow.floats.insert(
+                at,
+                FloatRecord {
+                    items: tail,
+                    blocks: Vec::new(),
+                    top: line,
+                    bottom: line,
+                    pushable: false,
+                    z: 0,
+                    follows: Some(keep),
+                },
+            );
+        }
+        let mut end = cut;
+        if let Some(last) = self.flow.items.last_mut() {
+            if last.y + last.height > line {
+                last.height = (line - last.y).max(0.0);
+            }
+            end = last.y + last.height;
+        }
+        for record in &mut self.flow.blocks[block..] {
+            match record.first {
+                Some(head) if head >= keep => {
+                    record.first = None;
+                    record.last = 0;
+                }
+                _ => record.last = record.last.min(keep),
+            }
+        }
+        for open in &self.open {
+            let record = &mut self.flow.blocks[*open];
+            record.last = record.last.min(keep);
+        }
+        // A descendant's tail that followed an item this cut took away follows
+        // this tail now: what came before it is in this one, which the insert
+        // above put ahead of it.
+        for float in &mut self.flow.floats[floats_before..] {
+            let taken = float.follows.is_some_and(|after| after > keep);
+            if taken || float.top >= line - EPSILON {
+                hide(&mut float.items, &mut float.blocks, Some(line));
+                float.top = line;
+                float.bottom = line;
+            }
+            if let Some(after) = float.follows.as_mut() {
+                *after = (*after).min(keep);
+            }
+        }
+        self.pending = Pending::default();
+        self.ceiling_box = self.ceiling_box.min(line);
+        self.ceiling_line = self.ceiling_line.min(line);
+        self.y = end.min(line);
+        if self.y < cut {
+            self.emit(cut - self.y, ItemKind::Edge, true);
+        }
+        self.overhang = (self.y - cut).max(0.0);
+        self.flow.blocks[block].clip = clip;
+    }
+
+    /// Whether a clipping box's content reached past its padding box, and so
+    /// whether its clip removes anything at all.
+    ///
+    /// Horizontally: every run, every atomic inline, every descendant box and
+    /// every float its content placed, against the padding box's two sides —
+    /// a word longer than the measure, a table wider than its container, a
+    /// list marker hung outside it. Vertically: the floats, which §10.6.7
+    /// contains only under an `auto` height; the in-flow content past a
+    /// stated one is [`Builder::clip_tail`]'s, which marks the box itself.
+    ///
+    /// **Extents, not ink**, which is `css-overflow-3` §2.2's scrollable
+    /// overflow rather than §2.1's ink overflow: an italic's overhang past
+    /// the last advance is not measured, so a box whose text fits exactly
+    /// writes no clip and the overhang is drawn.
+    ///
+    /// It also closes the count [`Builder::open_clip`] opened, and charges the
+    /// subtree's size where the box is nested in another clipping box —
+    /// for this read and for [`Builder::clip_tail`]'s, which covered the same
+    /// items.
+    #[inline(never)]
+    fn note_overflow(
+        &mut self,
+        block: usize,
+        clip: Clip,
+        floats_before: usize,
+        border: &Sides<f64>,
+    ) {
+        self.clipping = self.clipping.saturating_sub(1);
+        let record = &self.flow.blocks[block];
+        let first = record.first.unwrap_or(self.flow.items.len());
+        let last = record.last.min(self.flow.items.len());
+        if self.clipping > 0 {
+            let spent = self.budget.spend_layout(
+                last.saturating_sub(first)
+                    + (self.flow.blocks.len() - block)
+                    + (self.flow.floats.len() - floats_before),
+            );
+            if let Err(refusal) = spent {
+                self.deferred.get_or_insert(refusal);
+                return;
+            }
+        }
+        let record = &self.flow.blocks[block];
+        if record.clip.any() || first >= last {
+            return;
+        }
+        let left = record.x + border.left - EPSILON;
+        let right = record.x + record.width - border.right + EPSILON;
+        let tail = &self.flow.items[last - 1];
+        let bottom = tail.y + tail.height - border.bottom + EPSILON;
+        let mut reach = Reach::default();
+        reach.items(&self.flow.items[first..last]);
+        for descendant in &self.flow.blocks[block + 1..] {
+            if descendant.first.is_some() {
+                reach.span(descendant.x, descendant.x + descendant.width);
+            }
+        }
+        let mut below = false;
+        for float in &self.flow.floats[floats_before..] {
+            reach.items(&float.items);
+            for record in &float.blocks {
+                reach.span(record.x, record.x + record.width);
+            }
+            below |= float.bottom > bottom;
+        }
+        let across = reach.lo < left || reach.hi > right;
+        if (clip.x && across) || (clip.y && below) {
+            self.flow.blocks[block].clip = clip;
+        }
+    }
+
+    /// [`Budget::spend_box`], after any refusal [`Builder::note_overflow`]
+    /// deferred.
+    fn spend_box(&mut self) -> Result<(), Refusal> {
+        if let Some(refusal) = self.deferred.take() {
+            return Err(refusal);
+        }
+        self.budget.spend_box()
     }
 
     /// A replaced box's one flow item and the picture recorded against it.
@@ -1317,10 +1953,16 @@ impl<M: Metrics> Builder<'_, M> {
 
     /// A block container's children: block-level ones recursed into, runs of
     /// inline-level ones wrapped in an anonymous block box.
+    ///
+    /// `run`, where it is given, stands in for `node`'s own children: a run of
+    /// a multi-column container's children between two spanners, laid out in
+    /// the container's box **without a copy of the container** — see
+    /// [`Builder::column_run`].
     #[allow(clippy::too_many_arguments)]
     fn children(
         &mut self,
         node: &BoxNode,
+        run: Option<&[BoxNode]>,
         style: &Consumed,
         content_x: f64,
         content_width: f64,
@@ -1328,34 +1970,38 @@ impl<M: Metrics> Builder<'_, M> {
         avoid: bool,
         block: usize,
     ) -> Result<(), Refusal> {
-        match &node.content {
+        let content = match run {
+            Some(run) => Written::Children(run),
+            None => match &node.content {
+                Content::Replaced(_) => Written::Replaced,
+                Content::Text(source) => Written::Text(source),
+                Content::Children(written) => Written::Children(written),
+            },
+        };
+        match content {
             // Unreachable: [`Builder::block`] sizes a replaced box and emits
             // its one item before the dispatch that calls this, for
             // `css-display-3` §2.2's reason. An arm rather than a `_`, so that
             // a fourth kind of content cannot be added without this file
             // deciding what a block container does with it.
-            Content::Replaced(_) => Ok(()),
-            Content::Text(source) => {
-                let mut pieces = Vec::new();
-                let mut collapser = Collapser::new();
-                let text = collapser.push(source, style.white_space);
-                pieces.push(Piece {
-                    text,
-                    style: style.clone(),
-                    anchor: node.anchor,
-                    order: self.order(),
-                    atomic: None,
-                });
-                self.lines(&pieces, style, block, content_x, content_width)
+            Written::Replaced => Ok(()),
+            Written::Text(source) => {
+                self.text_block(node, source, style, block, content_x, content_width)
             }
-            Content::Children(children) => {
+            Written::Children(written) => {
+                // §9.2.1.1: an inline box holding a block-level box is split
+                // round it, which is this container's child list with that
+                // inline box's children standing in its place.
+                let children = self.split_inlines(written, depth, false)?;
+                let children = children.as_slice();
                 let styles: Vec<Consumed> = children.iter().map(|c| consume(&c.style)).collect();
                 let any_block = styles.iter().any(|s| !s.is_none() && s.is_block_level());
                 if !any_block {
                     // CSS 2.2 §9.4.2: an inline formatting context.
                     let mut pieces = Vec::new();
+                    self.lead_with_marker(&mut pieces);
                     let mut collapser = Collapser::new();
-                    for child in children {
+                    for child in children.iter().copied() {
                         self.gather(
                             child,
                             &mut pieces,
@@ -1379,7 +2025,7 @@ impl<M: Metrics> Builder<'_, M> {
                 let mut ordinal = 0usize;
                 // §17.2.1 rule 9's run, once it has been wrapped.
                 let mut wrapped_until = 0usize;
-                for (index, (child, child_style)) in children.iter().zip(&styles).enumerate() {
+                for (index, (&child, child_style)) in children.iter().zip(&styles).enumerate() {
                     if index < wrapped_until {
                         continue;
                     }
@@ -1400,8 +2046,14 @@ impl<M: Metrics> Builder<'_, M> {
                         }
                         let end = table::misparented_run(children, index);
                         self.budget.spend_box()?;
-                        let wrapper = anonymous_table(&node.style, &children[index..end]);
-                        self.block(&wrapper, content_width, content_x, depth + 1, avoid, 0)?;
+                        self.misparented(
+                            node,
+                            &children[index..end],
+                            content_width,
+                            content_x,
+                            depth,
+                            avoid,
+                        )?;
                         wrapped_until = end;
                         continue;
                     }
@@ -1433,6 +2085,9 @@ impl<M: Metrics> Builder<'_, M> {
                             self.anonymous(&run, style, block, content_x, content_width, depth)?;
                             run.clear();
                         }
+                        // An `inside` marker with no inline content before the
+                        // block: its own anonymous line, §9.2.1.1.
+                        self.marker_line(style, block, content_x, content_width)?;
                         let here = ordinal;
                         if child_style.display == Display::ListItem {
                             ordinal += 1;
@@ -1450,6 +2105,137 @@ impl<M: Metrics> Builder<'_, M> {
         }
     }
 
+    /// A block whose content is one text node: one inline formatting context
+    /// of one piece.
+    ///
+    /// **A function of its own for the stack's sake**, as
+    /// [`Builder::misparented`] is: [`Builder::children`] is in the frame of
+    /// every level of the block recursion, and an unoptimised build gives every
+    /// local of every arm its own slot whichever arm runs — a [`Piece`] holds a
+    /// whole [`Consumed`]. Kept here, the bytes are spent only by the arm that
+    /// needs them, and `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name`
+    /// keeps its margin under the depth cap as the computed style grows.
+    #[inline(never)]
+    fn text_block(
+        &mut self,
+        node: &BoxNode,
+        source: &str,
+        style: &Consumed,
+        block: usize,
+        content_x: f64,
+        content_width: f64,
+    ) -> Result<(), Refusal> {
+        let mut pieces = Vec::new();
+        let mut collapser = Collapser::new();
+        self.lead_with_marker(&mut pieces);
+        let text = collapser.push_transformed(source, style.white_space, style.text_transform);
+        pieces.push(Piece {
+            text,
+            style: style.clone(),
+            anchor: node.anchor,
+            order: self.order(),
+            atomic: None,
+            generated: false,
+            embeddings: Arc::default(),
+        });
+        self.lines(&pieces, style, block, content_x, content_width)
+    }
+
+    /// CSS 2.2 §9.2.1.1: *"when an inline box contains an in-flow block-level
+    /// box, the inline box (and its inline ancestors within the same line box)
+    /// are broken around the block-level box"*. A child list in which an
+    /// inline box holds such a box — at any depth through inline boxes — is
+    /// returned with that inline box replaced by its own children, recursively,
+    /// so the caller's run of inline content ends at the block and a new one
+    /// begins after it: the content before and after are anonymous block boxes
+    /// of their own, and the block is a block between them. The text keeps its
+    /// own computed style and anchor, which are what an inline box gives its
+    /// content; what is lost is the inline box's own box — a background,
+    /// border or horizontal margin on the `<span>` — which this build does not
+    /// draw on an inline box in any case.
+    ///
+    /// An inline box with no such descendant is left whole, and the search
+    /// that found so is linear in it and is not charged: the gather that sets
+    /// it next walks the same nodes. **Inside a box that splits**, every node a
+    /// search visits is charged to the layout work, because there the same
+    /// nested inline boxes are searched once per level that splits.
+    #[inline(never)]
+    fn split_inlines<'n>(
+        &mut self,
+        children: &'n [BoxNode],
+        depth: usize,
+        charged: bool,
+    ) -> Result<Vec<&'n BoxNode>, Refusal> {
+        let mut out = Vec::with_capacity(children.len());
+        for child in children {
+            if self.holds_block(child, depth + 1, charged)? {
+                let Content::Children(inner) = &child.content else {
+                    out.push(child);
+                    continue;
+                };
+                out.extend(self.split_inlines(inner, depth + 1, true)?);
+            } else {
+                out.push(child);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether `node` is a non-atomic inline box with an in-flow block-level
+    /// box inside it, reached through inline boxes only — an inline-block, a
+    /// picture, a float and an absolutely positioned box are each a boundary.
+    fn holds_block(
+        &mut self,
+        node: &BoxNode,
+        depth: usize,
+        charged: bool,
+    ) -> Result<bool, Refusal> {
+        if depth > self.limits.max_depth {
+            return Err(Refusal::TooDeep { depth });
+        }
+        let style = &node.style;
+        if style.display != Display::Inline || style.float != Float::None {
+            return Ok(false);
+        }
+        let Content::Children(children) = &node.content else {
+            return Ok(false);
+        };
+        if charged {
+            self.budget.spend_layout(children.len())?;
+        }
+        for child in children {
+            let inner = &child.style;
+            let in_flow = inner.float == Float::None
+                && !matches!(inner.position, Position::Absolute | Position::Fixed);
+            let block_level = matches!(
+                inner.display,
+                Display::Block | Display::ListItem | Display::Table | Display::Flex
+            );
+            if (in_flow && block_level) || self.holds_block(child, depth + 1, charged)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// §17.2.1 rule 9's anonymous table round a run of misparented internal
+    /// table boxes, laid out as the block it is. A function of its own for
+    /// [`Builder::text_block`]'s reason: the wrapper is a whole [`BoxNode`].
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn misparented(
+        &mut self,
+        node: &BoxNode,
+        run: &[&BoxNode],
+        content_width: f64,
+        content_x: f64,
+        depth: usize,
+        avoid: bool,
+    ) -> Result<(), Refusal> {
+        let wrapper = anonymous_table(&node.style, run);
+        self.block(&wrapper, content_width, content_x, depth + 1, avoid, 0)
+    }
+
     /// One anonymous block box holding a run of inline-level siblings.
     #[allow(clippy::too_many_arguments)]
     fn anonymous(
@@ -1463,6 +2249,7 @@ impl<M: Metrics> Builder<'_, M> {
     ) -> Result<(), Refusal> {
         self.budget.spend_box()?;
         let mut pieces = Vec::new();
+        self.lead_with_marker(&mut pieces);
         let mut collapser = Collapser::new();
         for child in run {
             self.gather(
@@ -1507,6 +2294,19 @@ impl<M: Metrics> Builder<'_, M> {
         if style.float != Float::None {
             return self.float_box(node, &style, content_width, content_x, depth, false);
         }
+        // §9.6: `absolute` and `fixed` are out of flow wherever they are
+        // written, so one inside a line is taken out of it the way a float is
+        // and laid out as the positioned box it is, against its containing
+        // block. Where an inset pair leaves it at its static position, that is
+        // the context's top left — the float's limit, for the float's reason
+        // — and it is named.
+        if matches!(style.position, Position::Absolute | Position::Fixed) {
+            let auto = |side| style.inset.get(side) == Inset::Auto;
+            if (auto(Side::Top) && auto(Side::Bottom)) || (auto(Side::Left) && auto(Side::Right)) {
+                self.warn(Warning::PositionedInLine);
+            }
+            return self.positioned_box(node, &style, content_x, depth, false);
+        }
         self.budget.spend_box()?;
         // §9.2.2's own list: *"inline-level boxes that are not inline boxes
         // (such as replaced inline-level elements, inline-block elements and
@@ -1514,7 +2314,9 @@ impl<M: Metrics> Builder<'_, M> {
         // picture is the first of the three and takes the same path as the
         // second — one box on the line, placed rather than set, with nothing
         // inside it a line breaker may split.
-        if style.display == Display::InlineBlock || matches!(node.content, Content::Replaced(_)) {
+        if matches!(style.display, Display::InlineBlock | Display::InlineFlex)
+            || matches!(node.content, Content::Replaced(_))
+        {
             // Here rather than beside the block builder for the reason the
             // warning that used to stand here gave: an `inline-block` is not
             // block-level, so it arrives in an inline formatting context — and
@@ -1528,7 +2330,8 @@ impl<M: Metrics> Builder<'_, M> {
             // block dispatch did not claim first.
             Content::Replaced(_) => {}
             Content::Text(source) => {
-                let text = collapser.push(source, style.white_space);
+                let text =
+                    collapser.push_transformed(source, style.white_space, style.text_transform);
                 if !text.is_empty() {
                     out.push(Piece {
                         text,
@@ -1536,20 +2339,39 @@ impl<M: Metrics> Builder<'_, M> {
                         anchor: node.anchor,
                         order: self.order(),
                         atomic: None,
+                        generated: false,
+                        embeddings: self.embeddings.shared(),
                     });
                 }
             }
             Content::Children(children) => {
-                for child in children {
-                    let child_style = consume(&child.style);
-                    // A float is not the §9.2.1.1 case: it is taken out of the
-                    // inline flow rather than splitting the inline box that
-                    // holds it, so warning about it would name the wrong rule.
-                    if child_style.float == Float::None && child_style.is_block_level() {
-                        self.warn(Warning::BlockInInline);
-                    }
-                    self.gather(child, out, collapser, depth + 1, content_x, content_width)?;
+                // `css-writing-modes-3` §2.2: an inline box whose
+                // `unicode-bidi` is not `normal` opens a level round its
+                // content, which every piece inside it carries. A block
+                // container's `embed` and `isolate` do nothing, and its
+                // `plaintext` is its paragraphs' (see [`Builder::line`]).
+                let opened = (!style.is_block_level())
+                    .then(|| embedding_of(&style, node.anchor))
+                    .flatten()
+                    .filter(|_| self.embeddings.len() < MAX_EMBEDDING_DEPTH);
+                if let Some(embedding) = opened {
+                    self.embeddings.push(embedding);
                 }
+                let mut gathered = Ok(());
+                // An in-flow block among the children was split out before
+                // this (§9.2.1.1, [`Builder::split_inlines`]), and a float or a
+                // positioned box is taken out of the line by its own `gather`.
+                for child in children {
+                    gathered =
+                        self.gather(child, out, collapser, depth + 1, content_x, content_width);
+                    if gathered.is_err() {
+                        break;
+                    }
+                }
+                if opened.is_some() {
+                    self.embeddings.pop();
+                }
+                gathered?;
             }
         }
         Ok(())
@@ -1583,7 +2405,21 @@ impl<M: Metrics> Builder<'_, M> {
     /// margins above it, so the cleared box moves down and stays down. Adding
     /// the distance to the margin instead would let the next box's margin
     /// collapse it away again.
-    fn clear(&mut self, style: &Consumed, margin_top: f64) -> Result<(), Refusal> {
+    ///
+    /// A scroll container is cleared a second time, past the floats its border
+    /// box would overlap: see [`Builder::clear_beside_floats`]. The two are
+    /// one call from [`Builder::block`] for that function's frame.
+    fn clear(
+        &mut self,
+        style: &Consumed,
+        margin_top: f64,
+        contained: bool,
+        left: f64,
+        width: f64,
+    ) -> Result<(), Refusal> {
+        if contained {
+            self.clear_beside_floats(left, width, margin_top)?;
+        }
         if style.clear == Clear::None {
             return Ok(());
         }
@@ -1627,9 +2463,12 @@ impl<M: Metrics> Builder<'_, M> {
         let Sublayout {
             mut items,
             mut blocks,
-            floats: mut nested,
+            floats: nested,
             height,
         } = self.sublayout(node, outer_width, depth, avoid)?;
+        // A clip's hidden tail in the float's own flow is the float's own
+        // content, and is broken over pages with it. See [`fold_tails`].
+        let mut nested = fold_tails(&mut items, &mut blocks, nested);
 
         // A float with `clear` clears before it is placed: §9.5.2's *"the top
         // margin edge is moved below"* is about the box, and a float is a box.
@@ -1682,6 +2521,7 @@ impl<M: Metrics> Builder<'_, M> {
             // belongs whole on the next one.
             pushable: true,
             z: 0,
+            follows: None,
         });
         self.flow.floats.append(&mut nested);
         Ok(())
@@ -1754,6 +2594,9 @@ impl<M: Metrics> Builder<'_, M> {
             floats: nested,
             height,
         } = self.sublayout(node, outer_width, depth, avoid)?;
+        // A positioned box is broken over pages as a float taller than a page
+        // is, so its hidden tails are folded for the float's reason.
+        let nested = fold_tails(&mut items, &mut blocks, nested);
 
         // §10.3.7's third case and §10.6.4's: with neither inset of a pair
         // stated the box stays at its **static position** — where it would have
@@ -1779,6 +2622,7 @@ impl<M: Metrics> Builder<'_, M> {
             bottom: top + height,
             pushable: false,
             z,
+            follows: None,
         };
         if style.position == Position::Fixed {
             self.flow.fixed.push(record);
@@ -1828,8 +2672,15 @@ impl<M: Metrics> Builder<'_, M> {
         // §10.8.1: *"the baseline of the last line box in the normal flow"*,
         // and the bottom margin edge where there is none. The **last** and not
         // the first, which is the difference between a two-line inline-block
-        // sitting on the line and hanging from it.
-        let baseline = last_baseline(&sub).unwrap_or(sub.height);
+        // sitting on the line and hanging from it. An `inline-flex` is the
+        // other way round: `css-flexbox-1` §8.5 gives a flex container its
+        // items' **first** baseline set.
+        let baseline = if style.display == Display::InlineFlex {
+            first_baseline(&sub)
+        } else {
+            last_baseline(&sub)
+        }
+        .unwrap_or(sub.height);
         // A float inside an inline-block belongs to the inline-block's own
         // formatting context — §9.4.2 makes it one — so it is folded into the
         // box rather than escaping to the paragraph's.
@@ -1851,6 +2702,8 @@ impl<M: Metrics> Builder<'_, M> {
             style: style.clone(),
             anchor: node.anchor,
             order: self.order(),
+            generated: false,
+            embeddings: self.embeddings.shared(),
             atomic: Some(Atomic {
                 items,
                 blocks,
@@ -1994,7 +2847,7 @@ impl<M: Metrics> Builder<'_, M> {
         depth: usize,
         avoid: bool,
     ) -> Result<Sublayout, Refusal> {
-        self.subflow(node, None, measure, depth, avoid)
+        self.subflow(node, None, None, measure, depth, avoid)
     }
 
     /// The same, for a box whose **own** box model has already been paid.
@@ -2002,11 +2855,14 @@ impl<M: Metrics> Builder<'_, M> {
     /// `inside` lays out only the node's children at the stated width, which is
     /// what a multi-column container needs: [`Builder::block`] has already
     /// applied its margins, border, padding and width, and laying the box out
-    /// again would pay for every one of them twice.
+    /// again would pay for every one of them twice. `run`, with `inside`, is
+    /// the children to lay out in place of the node's own — see
+    /// [`Builder::children`].
     fn subflow(
         &mut self,
         node: &BoxNode,
         inside: Option<&Consumed>,
+        run: Option<&[BoxNode]>,
         measure: f64,
         depth: usize,
         avoid: bool,
@@ -2022,6 +2878,12 @@ impl<M: Metrics> Builder<'_, M> {
         let ceiling_box = std::mem::replace(&mut self.ceiling_box, f64::NEG_INFINITY);
         let ceiling_line = std::mem::replace(&mut self.ceiling_line, f64::NEG_INFINITY);
         let content_top = std::mem::replace(&mut self.content_top, 0.0);
+        let inside_marker = self.inside_marker.take();
+        // A sub-flow is a formatting context of its own and its paragraphs
+        // are their own: an inline-block, a float or a positioned box inside
+        // an isolating span opens no level for the runs inside it, which UAX
+        // #9 reads as one neutral of the line outside.
+        let embeddings = std::mem::take(&mut self.embeddings);
 
         let result = match inside {
             None => self.block(node, measure, 0.0, depth, avoid, 0),
@@ -2035,7 +2897,7 @@ impl<M: Metrics> Builder<'_, M> {
                 record.painted = false;
                 self.flow.blocks.push(record);
                 self.open.push(0);
-                self.children(node, style, 0.0, measure, depth, avoid, 0)
+                self.children(node, run, style, 0.0, measure, depth, avoid, 0)
             }
         };
         if result.is_ok() {
@@ -2056,6 +2918,8 @@ impl<M: Metrics> Builder<'_, M> {
         self.ceiling_box = ceiling_box;
         self.ceiling_line = ceiling_line;
         self.content_top = content_top;
+        self.inside_marker = inside_marker;
+        self.embeddings = embeddings;
         result?;
         Ok(Sublayout {
             items: inner,
@@ -2143,26 +3007,29 @@ impl<M: Metrics> Builder<'_, M> {
             }
         }
 
-        // The column boxes: §17.5.2's widths, and §17.5.1's two rendering
-        // layers this build does not paint.
+        // The column boxes: §17.5.2's widths. Their backgrounds are §17.5.1's
+        // second and third layers, painted per cell by [`Builder::band`]; their
+        // borders are §17.6.2.1's to resolve in the collapsing model, and
+        // §17.6.1 says to ignore them in the separated one. A background
+        // **image** on one is not painted, and is the one thing named.
         let mut declared: Vec<Option<f64>> = vec![None; grid.columns];
         let collapsing = style.border_collapse == BorderCollapse::Collapse;
         for (at, width) in declared.iter_mut().enumerate() {
             let Some(column) = tree.columns.get(at) else {
                 break;
             };
+            for described in [column.node, column.group].into_iter().flatten() {
+                if consume(&described.style)
+                    .paint
+                    .is_some_and(|paint| paint.image.is_some())
+                {
+                    self.warn(Warning::ColumnBoxNotPainted);
+                }
+            }
             let Some(described) = column.node.or(column.group) else {
                 continue;
             };
             let consumed = consume(&described.style);
-            let bordered = !collapsing
-                && (consumed.border_width.top > 0.0
-                    || consumed.border_width.right > 0.0
-                    || consumed.border_width.bottom > 0.0
-                    || consumed.border_width.left > 0.0);
-            if consumed.background_color.a != 0 || bordered {
-                self.warn(Warning::ColumnBoxNotPainted);
-            }
             if let Size::Length(length) = consumed.width {
                 *width = Some(resolve_length(length, content_width).max(0.0));
             }
@@ -2557,21 +3424,146 @@ impl<M: Metrics> Builder<'_, M> {
         // carried unresolved as far as here.
         let gap = style.gap_px(style.column_gap, content_width);
         let (count, width) = column_geometry(style, content_width, gap);
-        // §6's `column-span` is a property of a **child** of the container and
-        // not of the container, which is why this reads the children: a
-        // spanning box interrupts the columns and resumes them below itself,
-        // and this build has one column set per container. Counted per box, so
-        // a book with one spanning heading and a book with four hundred are
-        // different numbers.
-        if let Content::Children(children) = &node.content {
-            for child in children {
-                if consume(&child.style).column_span == ColumnSpan::All {
+        // §6's `column-span: all`: a spanning box *"interrupts"* the columns,
+        // is laid out across the container's whole width, and the columns
+        // resume beneath it — so a container with spanning children is
+        // several column sets, one per run of the children between them, each
+        // balanced on its own, with the spanners as ordinary blocks between.
+        // A spanner is an in-flow block-level **child** here; one deeper in
+        // the tree is laid out in its column and counted.
+        let Content::Children(children) = &node.content else {
+            return self.column_set(
+                node,
+                None,
+                style,
+                content_x,
+                depth,
+                avoid,
+                (count, width, gap),
+            );
+        };
+        self.note_deep_spanners(children, depth)?;
+        let spans = |child: &BoxNode| {
+            let inner = &child.style;
+            inner.column_span == ColumnSpan::All
+                && inner.display != Display::None
+                && inner.float == Float::None
+                && !matches!(inner.position, Position::Absolute | Position::Fixed)
+        };
+        if !children.iter().any(spans) {
+            return self.column_set(
+                node,
+                None,
+                style,
+                content_x,
+                depth,
+                avoid,
+                (count, width, gap),
+            );
+        }
+        let mut from = 0;
+        for (at, child) in children.iter().enumerate() {
+            if !spans(child) {
+                continue;
+            }
+            self.column_run(
+                node,
+                &children[from..at],
+                style,
+                content_x,
+                depth,
+                avoid,
+                (count, width, gap),
+            )?;
+            self.commit_margin();
+            self.block(child, content_width, content_x, depth + 1, avoid, 0)?;
+            self.commit_margin();
+            from = at + 1;
+        }
+        self.column_run(
+            node,
+            &children[from..],
+            style,
+            content_x,
+            depth,
+            avoid,
+            (count, width, gap),
+        )
+    }
+
+    /// One run of a multi-column container's children between two spanners,
+    /// as a column set of its own: the container's box with only these
+    /// children laid out in it, so [`Builder::column_set`] lays them out and
+    /// balances them as it does a whole container's. A run of nothing is no
+    /// set.
+    ///
+    /// **The run is borrowed, not copied.** A copy of the container holding a
+    /// copy of the run was the first way of saying this, and it is a copy of
+    /// the whole subtree, alive while that subtree is laid out — so nested
+    /// multi-column containers each with a spanner held one copy per level at
+    /// once, a few hundred kilobytes of markup becoming gigabytes.
+    #[allow(clippy::too_many_arguments)]
+    fn column_run(
+        &mut self,
+        node: &BoxNode,
+        run: &[BoxNode],
+        style: &Consumed,
+        content_x: f64,
+        depth: usize,
+        avoid: bool,
+        geometry: (usize, f64, f64),
+    ) -> Result<(), Refusal> {
+        if run.iter().all(|child| child.style.display == Display::None) {
+            return Ok(());
+        }
+        self.column_set(node, Some(run), style, content_x, depth, avoid, geometry)
+    }
+
+    /// `column-span: all` below a multi-column container's own children,
+    /// counted per box and laid out in its column: a spanner nested in a
+    /// child is §6's too, and splitting the container round a box inside one
+    /// of its children would split that child, which this build does not.
+    /// Nested multi-column containers are their own question and are not
+    /// entered. Every node visited is charged to the layout work.
+    fn note_deep_spanners(&mut self, children: &[BoxNode], depth: usize) -> Result<(), Refusal> {
+        if depth > self.limits.max_depth {
+            return Err(Refusal::TooDeep { depth });
+        }
+        for child in children {
+            let Content::Children(inner) = &child.content else {
+                continue;
+            };
+            if child.style.display == Display::None || consume(&child.style).is_multicol() {
+                continue;
+            }
+            self.budget.spend_layout(inner.len())?;
+            for grandchild in inner {
+                if grandchild.style.column_span == ColumnSpan::All
+                    && grandchild.style.display != Display::None
+                {
                     self.warn(Warning::ColumnSpanAsNone);
                 }
             }
+            self.note_deep_spanners(inner, depth + 1)?;
         }
+        Ok(())
+    }
 
-        let sub = self.subflow(node, Some(style), width, depth, avoid)?;
+    /// One column set: `node`'s children — or `run`, a run of them — laid out
+    /// once at one column's width, balanced, sliced and placed side by side.
+    /// See [`Builder::columns`].
+    #[allow(clippy::too_many_arguments)]
+    fn column_set(
+        &mut self,
+        node: &BoxNode,
+        run: Option<&[BoxNode]>,
+        style: &Consumed,
+        content_x: f64,
+        depth: usize,
+        avoid: bool,
+        (count, width, gap): (usize, f64, f64),
+    ) -> Result<(), Refusal> {
+        let sub = self.subflow(node, Some(style), run, width, depth, avoid)?;
         if sub.items.is_empty() {
             return Ok(());
         }
@@ -2625,12 +3617,23 @@ impl<M: Metrics> Builder<'_, M> {
         // in and there is nothing for the page cutter to carry forward. The
         // same sentence a cell's float already carries. Decided once, here,
         // because each column belongs to exactly one set below.
+        //
+        // **A clip's hidden tail belongs to the column of the item it
+        // follows**, and not to the one its height falls in
+        // ([`FloatRecord::follows`]). It is drawn after its column's items,
+        // and it is the end of the text whose first lines that item ends, so
+        // it reads in order only in that column or a later one. Its height is
+        // the clip's padding edge, and a negative margin can put that above
+        // the top of the kept line's own column.
         let mut per_column: Vec<Vec<FloatRecord>> = (0..ranges.len()).map(|_| Vec::new()).collect();
         for float in inner_floats {
-            let column = ranges
-                .iter()
-                .rposition(|(_, _, top)| float.top + EPSILON >= *top)
-                .unwrap_or(0);
+            let column = match float.follows {
+                Some(after) => ranges.iter().rposition(|(from, _, _)| *from < after),
+                None => ranges
+                    .iter()
+                    .rposition(|(_, _, top)| float.top + EPSILON >= *top),
+            }
+            .unwrap_or(0);
             if let Some(slot) = per_column.get_mut(column) {
                 slot.push(float);
             }
@@ -2682,6 +3685,11 @@ impl<M: Metrics> Builder<'_, M> {
                     painted: true,
                     replaced: None,
                     dy: 0.0,
+                    // The rule belongs to the container: an `opacity` on it
+                    // fades its rules with its text.
+                    anchor: node.anchor,
+                    paint: None,
+                    clip: Clip::NONE,
                 });
             }
             for (at, &(from, to, top)) in chunk.iter().enumerate() {
@@ -2935,6 +3943,12 @@ impl<M: Metrics> Builder<'_, M> {
             // declaration says.
             let min = match stated_min_main {
                 Some(stated) => stated,
+                // §4.5 again: the content-based minimum is for an item *"that
+                // is not a scroll container"*; *"for scroll containers the
+                // automatic minimum size is zero, as usual"*. So a `pre {
+                // overflow: auto }` in a row shrinks below its longest line
+                // and clips it, which is what the declaration is for.
+                None if consumed.is_scroll_container() => 0.0,
                 None => match specified_main {
                     Some(specified) => min_main.min(specified),
                     None => min_main,
@@ -3003,6 +4017,9 @@ impl<M: Metrics> Builder<'_, M> {
         let mut laid: Vec<Option<Sublayout>> = (0..items.len()).map(|_| None).collect();
         let mut outer_cross = vec![0.0f64; items.len()];
         let mut baseline = vec![0.0f64; items.len()];
+        // Where each item's document-order stamps began, so step 11's second
+        // layout of a stretched item numbers its text where the first did.
+        let mut stamp_from = vec![0usize; items.len()];
         for at in 0..items.len() {
             let main = used_main[slot[at]];
             let item = &items[at];
@@ -3018,6 +4035,7 @@ impl<M: Metrics> Builder<'_, M> {
                 }
             };
             self.flex_pass = Some(pass);
+            stamp_from[at] = self.sequence;
             let sub = self.sublayout(boxes[at].node(), content_width, depth + 1, avoid)?;
             outer_cross[at] = if row {
                 sub.height
@@ -3101,7 +4119,14 @@ impl<M: Metrics> Builder<'_, M> {
                     }
                 };
                 self.flex_pass = Some(pass);
+                // The second layout reuses the stamps the first began at:
+                // numbered afresh, the item's text was read after every item
+                // laid out before it was stretched (`a` beside a taller
+                // `bbbb cccc dddd` read `bbbb cccc dddd a`).
+                let resume = self.sequence;
+                self.sequence = stamp_from[at];
                 let sub = self.sublayout(boxes[at].node(), content_width, depth + 1, avoid)?;
+                self.sequence = self.sequence.max(resume);
                 baseline[at] = first_baseline(&sub).unwrap_or(wanted);
                 laid[at] = Some(sub);
                 outer_cross[at] = wanted;
@@ -3308,7 +4333,69 @@ impl<M: Metrics> Builder<'_, M> {
         let mut blocks: Vec<BlockRecord> = Vec::new();
         let band_top = tops[from];
 
-        // The row boxes first, so a cell's background covers a row's rather
+        // CSS 2.2 §17.5.1's second and third layers, under everything else in
+        // the band: a column group's and a column's background *"covers
+        // exactly the full area of all cells that originate in"* it, so each
+        // is painted once per such cell, over that cell's box.
+        //
+        // **Only where nothing above it hides it.** A cell, its rows or its
+        // row group with an opaque background covers the cell's whole area,
+        // and painting the column under it would leave the column's colour in
+        // the anti-aliased seam where the two rectangles' edges meet — a
+        // hairline round every cell that the same table without the column
+        // does not have. Where the layers above are transparent the column
+        // shows, as §17.5.1 says; where the row group's is translucent, its
+        // record was painted once round the whole group before this band
+        // began, so it is painted over the column again in the cell's area,
+        // which is what keeps the order.
+        let opaque = |node: Option<&BoxNode>| {
+            node.is_some_and(|node| {
+                let style = consume(&node.style);
+                style.visible && style.background_color.a == u8::MAX
+            })
+        };
+        for grid_row in from..to {
+            for slot in grid.slots.iter().filter(|slot| slot.top == grid_row) {
+                let rows_covered = (slot.top..slot.top + slot.rows).all(|row| {
+                    rows_of
+                        .get(row)
+                        .is_some_and(|(group, row)| opaque(tree.groups[*group].rows[*row].node))
+                });
+                let cell = &tree.groups[slot.group].rows[slot.row].cells[slot.cell];
+                if opaque(Some(cell.content.node()))
+                    || rows_covered
+                    || opaque(tree.groups[slot.group].node)
+                {
+                    continue;
+                }
+                let column = tree.columns.get(slot.left);
+                let layers = [
+                    column.and_then(|column| column.group),
+                    column.and_then(|column| column.node),
+                ];
+                let area = (
+                    lefts[slot.left],
+                    columns[slot.left..slot.left + slot.columns]
+                        .iter()
+                        .sum::<f64>()
+                        + slot.columns.saturating_sub(1) as f64 * hspacing,
+                    tops[slot.top] - band_top,
+                    heights[slot.top..slot.top + slot.rows].iter().sum::<f64>()
+                        + slot.rows.saturating_sub(1) as f64 * vspacing,
+                );
+                let mut painted_any = false;
+                for node in layers.into_iter().flatten() {
+                    painted_any |= self.background_layer(node, area, &mut items, &mut blocks)?;
+                }
+                if painted_any {
+                    if let Some(group) = tree.groups[slot.group].node {
+                        self.background_layer(group, area, &mut items, &mut blocks)?;
+                    }
+                }
+            }
+        }
+
+        // The row boxes next, so a cell's background covers a row's rather
         // than the other way round -- CSS 2.2 §17.5.1's layer order, and the
         // reason these records come before the cells' in this vector.
         for grid_row in from..to {
@@ -3417,6 +4504,39 @@ impl<M: Metrics> Builder<'_, M> {
         Ok(Abreast { items, blocks })
     }
 
+    /// One of §17.5.1's layers over one cell's area — `(x, width, top,
+    /// height)`, the top relative to the band — as a spacer and a record that
+    /// paints the box's background colour and nothing else: a column's or a
+    /// row group's border is §17.6.2.1's (collapsing) or ignored (§17.6.1,
+    /// separated). Whether anything was painted.
+    fn background_layer(
+        &mut self,
+        node: &BoxNode,
+        (x, width, top, height): (f64, f64, f64, f64),
+        items: &mut Vec<Item>,
+        blocks: &mut Vec<BlockRecord>,
+    ) -> Result<bool, Refusal> {
+        let style = consume(&node.style);
+        if !style.visible || style.background_color.a == 0 {
+            return Ok(false);
+        }
+        self.budget.spend_box()?;
+        let mut record = decorate(node, x, width);
+        record.border_width = Sides::all(0.0);
+        record.paint = None;
+        record.painted = true;
+        let spacer = items.len();
+        items.push(Item {
+            y: top,
+            height,
+            kind: ItemKind::Edge,
+        });
+        record.first = Some(spacer);
+        record.last = spacer + 1;
+        blocks.push(record);
+        Ok(true)
+    }
+
     /// A block record for a box this module lays out itself — a row or a row
     /// group, neither of which goes through [`Builder::block`].
     fn record(&mut self, node: &BoxNode, x: f64, width: f64) -> usize {
@@ -3426,9 +4546,85 @@ impl<M: Metrics> Builder<'_, M> {
         index
     }
 
+    /// A marker no line took — an item with no inline content anywhere in it —
+    /// is not carried into the next item's first line.
+    ///
+    /// **A method that is never inlined, for the sake of one assignment.** The
+    /// slot holds a [`Piece`], and a [`Consumed`] inside that is hundreds of
+    /// bytes: assigning to it in [`Builder::block`] put the old value's drop in
+    /// `block`'s frame, and `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name`
+    /// overflowed its stack the first time this was written that way.
+    #[inline(never)]
+    fn disarm_marker(&mut self) {
+        self.inside_marker = None;
+    }
+
+    /// An `inside` list marker, armed for the item's first line. A method and
+    /// not lines in [`Builder::block`], for [`Builder::fill_height`]'s reason,
+    /// and never inlined for [`Builder::disarm_marker`]'s.
+    #[inline(never)]
+    fn arm_marker(&mut self, node: &BoxNode, style: &Consumed, ordinal: usize) {
+        if style.display != Display::ListItem
+            || style.list_style_position != ListStylePosition::Inside
+        {
+            return;
+        }
+        let mut text = marker_of(node, style, ordinal);
+        if text.is_empty() {
+            return;
+        }
+        // `css-counter-styles-3` §6's suffix ends in a space, which an
+        // `outside` marker replaces with its own gap and an `inside` one sets.
+        text.push(' ');
+        let order = self.order();
+        self.inside_marker = Some(Piece {
+            text,
+            style: style.clone(),
+            // The item's own, so that whatever the painter applies to the item
+            // — its `opacity` — reaches its marker. Generated text stays out of
+            // the structure tree and out of conservation by `generated`, not by
+            // having no anchor.
+            anchor: node.anchor,
+            order,
+            atomic: None,
+            generated: true,
+            embeddings: Arc::default(),
+        });
+    }
+
+    /// The armed `inside` marker, at the head of an inline formatting context.
+    fn lead_with_marker(&mut self, pieces: &mut Vec<Piece>) {
+        if let Some(marker) = self.inside_marker.take() {
+            pieces.insert(0, marker);
+        }
+    }
+
+    /// The armed `inside` marker on an anonymous line of its own, where the
+    /// item's first content is a block.
+    fn marker_line(
+        &mut self,
+        style: &Consumed,
+        block: usize,
+        content_x: f64,
+        content_width: f64,
+    ) -> Result<(), Refusal> {
+        let Some(marker) = self.inside_marker.take() else {
+            return Ok(());
+        };
+        self.lines(&[marker], style, block, content_x, content_width)
+    }
+
     /// A `list-item`'s marker, on the first line of its own box.
-    fn marker(&mut self, style: &Consumed, block: usize, content_x: f64, ordinal: usize) {
-        let text = marker_text(style.list_style_type, ordinal + 1);
+    #[inline(never)]
+    fn marker(
+        &mut self,
+        node: &BoxNode,
+        style: &Consumed,
+        block: usize,
+        (content_x, content_width): (f64, f64),
+        ordinal: usize,
+    ) {
+        let text = marker_of(node, style, ordinal);
         if text.is_empty() {
             return;
         }
@@ -3450,7 +4646,15 @@ impl<M: Metrics> Builder<'_, M> {
                         // Outside the content box, half an em clear of it,
                         // which is `list-style-position: outside`'s initial
                         // value.
-                        x: content_x - width - style.font_size * 0.5,
+                        // On the item's start side: the left in a
+                        // left-to-right item and the right in a right-to-left
+                        // one (`css-lists-3` §3.1's marker box stands outside
+                        // the principal box on its inline-start side).
+                        x: if style.direction == Direction::Rtl {
+                            content_x + content_width + style.font_size * 0.5
+                        } else {
+                            content_x - width - style.font_size * 0.5
+                        },
                         y: 0.0,
                         width,
                         text,
@@ -3459,13 +4663,22 @@ impl<M: Metrics> Builder<'_, M> {
                         weight: style.font_weight,
                         style: style.font_style,
                         variant: style.font_variant,
+                        kerning: style.font_kerning,
+                        features: style.font_features.clone(),
+                        paragraph_rtl: Some(style.direction == Direction::Rtl),
+                        paragraph: 0,
+                        embeddings: Arc::default(),
+                        bidi_level: None,
+                        bidi_gap: None,
+                        hyphenated: false,
                         color: style.color,
                         decoration: style.text_decoration,
                         painted: style.visible,
                         letter_spacing: 0.0,
                         word_spacing: 0.0,
                         generated: true,
-                        anchor: None,
+                        // The item's, for the painter; see `arm_marker`.
+                        anchor: node.anchor,
                         order,
                     },
                 );
@@ -3501,7 +4714,13 @@ impl<M: Metrics> Builder<'_, M> {
             return Ok(());
         }
         self.budget.spend_breaks(content.chars().count())?;
-        let opportunities = uax14::opportunities(&content, container.tailoring);
+        let mut opportunities = uax14::opportunities(&content, container.tailoring);
+        // `css-text-3` §5.4: under `hyphens: none` a soft hyphen is no place
+        // to break a word, though UAX #14 makes it one (class `BA`).
+        opportunities.retain(|opportunity| {
+            soft_hyphen_before(&content, opportunity.at).is_none()
+                || hyphen_shown(&content, &spans, pieces, opportunity.at)
+        });
 
         let indent = match container.text_indent {
             LengthPercentage::Px(px) => px,
@@ -3513,7 +4732,26 @@ impl<M: Metrics> Builder<'_, M> {
         let mut lines_here = 0usize;
         let mut cursor = 0usize;
         let first_item = self.flow.items.len();
+        // A paragraph separator ends a bidi paragraph as well as a line, so a
+        // `plaintext` container's direction is asked again of the text after
+        // each one. **Only a separator**: `css-writing-modes-3` §2.4 bounds a
+        // bidi paragraph by a block boundary or a *"bidi type B"* forced
+        // break, and three of UAX #14's seven forced breaks are not one
+        // ([`separates_paragraphs`]). A U+2028 LINE SEPARATOR ends the line
+        // and not the paragraph, and a paragraph started after one asked its
+        // direction of everything to the next separator — so a block of
+        // line separators was asked `O(n^2)` characters, and each line after
+        // one could take a direction its paragraph did not have (review of
+        // lane 8C).
+        let mut paragraph = None;
+        let mut paragraph_starts = true;
+        let mut paragraph_number = 0usize;
         while start < content.len() {
+            if paragraph_starts {
+                paragraph = self.paragraph_direction(container, &content, &spans, pieces, start);
+                self.paragraphs += 1;
+                paragraph_number = self.paragraphs;
+            }
             // `cursor` is where the previous line stopped looking, and it is
             // not an optimisation. Restarting the scan at zero for every line
             // makes filling a paragraph `O(lines x opportunities)`, which for a
@@ -3524,6 +4762,11 @@ impl<M: Metrics> Builder<'_, M> {
                 cursor += 1;
             }
             let indent_here = if first_line { indent } else { 0.0 };
+            // `css-text-3` §8.1: the indent is a margin on the line box's
+            // **start** edge, which is the right in a right-to-left
+            // paragraph — the side `line` aligns `start` to, by the same
+            // test.
+            let rtl = paragraph.unwrap_or(container.direction == Direction::Rtl);
             // §9.5's other half: the measure is what the floats beside this
             // line have left of it, and where nothing is left the line goes
             // under them. Both are decided **before** the line is filled,
@@ -3532,7 +4775,7 @@ impl<M: Metrics> Builder<'_, M> {
                 container,
                 content_x,
                 content_width,
-                indent_here,
+                (indent_here, rtl),
                 &content,
                 &spans,
                 pieces,
@@ -3556,12 +4799,31 @@ impl<M: Metrics> Builder<'_, M> {
             // wrong until somebody counted.
             let justify =
                 container.text_align == TextAlign::Justify && !hard && end < content.len();
+            // §5.4: a line that breaks at a soft hyphen ends in a hyphen. The
+            // end of the text is not a break at one, and nor is a break
+            // inside a word (`overflow-wrap`) that lands after a soft hyphen
+            // `hyphens: none` holds: under `none` it is never a hyphen.
+            let hyphenated =
+                !hard && end < content.len() && hyphen_shown(&content, &spans, pieces, end);
             self.line(
-                &content, &spans, pieces, container, block, line_x, available, trim_start,
-                trim_end, justify, lines_here,
+                &content,
+                &spans,
+                pieces,
+                container,
+                block,
+                line_x,
+                available,
+                (trim_start, trim_end),
+                (justify, (paragraph, paragraph_number), hyphenated),
+                lines_here,
             );
             lines_here += 1;
             first_line = false;
+            paragraph_starts = hard
+                && content
+                    .get(..end)
+                    .and_then(|before| before.chars().next_back())
+                    .is_some_and(separates_paragraphs);
             start = end;
         }
         // `lines_in_block` cannot be known when a line is made, so it is
@@ -3574,6 +4836,58 @@ impl<M: Metrics> Builder<'_, M> {
             }
         }
         Ok(())
+    }
+
+    /// The base direction of the paragraph that starts at `from`: the block
+    /// container's `direction`, or, under `unicode-bidi: plaintext`, what P2
+    /// and P3 find in the paragraph's own text (`css-writing-modes-3` §2.2).
+    ///
+    /// The text is asked a box at a time, and what an inline box isolates is
+    /// skipped rather than asked: P2 does not look inside an isolate. A
+    /// separator inside one — any of the seven ([`separates_paragraphs`]) —
+    /// still ends the paragraph, since P1 splits the text before any isolate
+    /// is opened. The separator is what keeps the scan to this paragraph
+    /// rather than the rest of the container, so a container of a thousand
+    /// preserved newlines is not scanned a thousand times over; and since
+    /// [`Builder::lines`] starts a paragraph only after a separator, a
+    /// thousand line separators are one paragraph, scanned once (review of
+    /// lane 8C). `None` is a provider with no UAX #9
+    /// ([`Metrics::first_strong`]).
+    fn paragraph_direction(
+        &self,
+        container: &Consumed,
+        content: &str,
+        spans: &[(usize, usize, usize)],
+        pieces: &[Piece],
+        from: usize,
+    ) -> Option<bool> {
+        if container.unicode_bidi != UnicodeBidi::Plaintext {
+            return Some(container.direction == Direction::Rtl);
+        }
+        let first = spans.partition_point(|&(_, end, _)| end <= from);
+        for &(start, end, index) in spans.get(first..).unwrap_or_default() {
+            let Some(slice) = content.get(start.max(from)..end) else {
+                continue;
+            };
+            let isolated = pieces.get(index).is_some_and(|piece| {
+                piece
+                    .embeddings
+                    .iter()
+                    .any(|e| e.kind != EmbeddingKind::Embed)
+            });
+            if isolated {
+                if slice.contains(separates_paragraphs) {
+                    return Some(false);
+                }
+                continue;
+            }
+            match self.metrics.first_strong(slice)? {
+                FirstStrong::Left | FirstStrong::Separator => return Some(false),
+                FirstStrong::Right => return Some(true),
+                FirstStrong::Neither => {}
+            }
+        }
+        Some(false)
     }
 
     /// Where the next line box starts and how wide it is, given the floats.
@@ -3592,13 +4906,17 @@ impl<M: Metrics> Builder<'_, M> {
     /// line in a book of uniform text meets exactly, and the case it gets
     /// wrong — one oversized inline in the last line beside a float — is worth
     /// less than the circularity it avoids.
+    ///
+    /// `indent` is the line's `text-indent` and whether the line reads right
+    /// to left, which decides the side it is taken from (`css-text-3` §8.1:
+    /// the line box's start edge).
     #[allow(clippy::too_many_arguments)]
     fn beside(
         &mut self,
         container: &Consumed,
         content_x: f64,
         content_width: f64,
-        indent: f64,
+        (indent, rtl): (f64, bool),
         content: &str,
         spans: &[(usize, usize, usize)],
         pieces: &[Piece],
@@ -3606,8 +4924,11 @@ impl<M: Metrics> Builder<'_, M> {
         start: usize,
     ) -> Result<(f64, f64), Refusal> {
         let full = (content_width - indent).max(0.0);
+        // The indent's place is the start edge: a right-to-left line keeps
+        // its left edge and gives the indent up from its right.
+        let shift = if rtl { 0.0 } else { indent };
         if self.floats.is_empty() {
-            return Ok((content_x + indent, full));
+            return Ok((content_x + shift, full));
         }
         let left = content_x;
         let right = content_x + content_width;
@@ -3618,7 +4939,7 @@ impl<M: Metrics> Builder<'_, M> {
         // never fit anywhere, so it is not a reason to go looking below a
         // float — that line overflows wherever it is put.
         let first = opportunities.first().map_or(content.len(), |o| o.at);
-        let word = self.measure(content, spans, pieces, start, first)
+        let word = self.measure(content, spans, pieces, start, first, start)
             - self.trailing(content, spans, pieces, start, first);
         let mut chosen = top;
         let (band_left, band_right) = loop {
@@ -3648,7 +4969,7 @@ impl<M: Metrics> Builder<'_, M> {
             self.emit(chosen - top, ItemKind::Edge, true);
         }
         Ok((
-            band_left + indent,
+            band_left + shift,
             (band_right - band_left - indent).max(0.0),
         ))
     }
@@ -3684,10 +5005,17 @@ impl<M: Metrics> Builder<'_, M> {
             if !self.wrappable(spans, pieces, opportunity.at) && !hard {
                 continue;
             }
-            width += self.measure(content, spans, pieces, cursor, opportunity.at);
+            width += self.measure(content, spans, pieces, cursor, opportunity.at, start);
             cursor = opportunity.at;
             let trailing = self.trailing(content, spans, pieces, start, opportunity.at);
-            if width - trailing <= available {
+            // A break at a soft hyphen sets a hyphen at the line's end, and
+            // the line has to have room for it (§5.4).
+            let hyphen = if hard || opportunity.at >= content.len() {
+                0.0
+            } else {
+                self.hyphen_width(content, spans, pieces, opportunity.at)
+            };
+            if width - trailing + hyphen <= available {
                 if hard {
                     return (opportunity.at, true);
                 }
@@ -3732,7 +5060,7 @@ impl<M: Metrics> Builder<'_, M> {
         for (offset, ch) in content[start..limit].char_indices() {
             let at = start + offset;
             let next = at + ch.len_utf8();
-            width += self.measure(content, spans, pieces, at, next);
+            width += self.measure(content, spans, pieces, at, next, start);
             if width > available && last.is_some() {
                 return last;
             }
@@ -3763,7 +5091,37 @@ impl<M: Metrics> Builder<'_, M> {
         piece_at(spans, at).map_or(OverflowWrap::Normal, |p| pieces[p].style.overflow_wrap)
     }
 
-    /// The advance of one byte range, spanning as many pieces as it must.
+    /// The width of the hyphen a line breaking at byte `at` would end in: the
+    /// advance of a hyphen in the style of the soft hyphen just before it,
+    /// with its `letter-spacing`, or nothing where there is no soft hyphen
+    /// there (§5.4).
+    fn hyphen_width(
+        &self,
+        content: &str,
+        spans: &[(usize, usize, usize)],
+        pieces: &[Piece],
+        at: usize,
+    ) -> f64 {
+        let Some(style) = soft_hyphen_before(content, at)
+            .and_then(|shy| piece_at(spans, shy))
+            .map(|piece| &pieces[piece].style)
+        else {
+            return 0.0;
+        };
+        let mut buffer = [0u8; 4];
+        self.advance_of(HYPHEN.encode_utf8(&mut buffer), &style.font()) + style.letter_spacing
+    }
+
+    /// The advance of one byte range, spanning as many pieces as it must, on
+    /// a line that starts at `line_start`.
+    ///
+    /// Each piece's slice is measured **in its context** ([`context_of`]):
+    /// the text either side of it on the line, which a shaper joins across
+    /// and kerns against. Where the line ends is not known yet while it is
+    /// being filled, so the text after a slice is taken as far as the
+    /// neighbour goes; the line's own runs are measured again with both ends
+    /// known when the line is set ([`Builder::line`]).
+    #[allow(clippy::too_many_arguments)]
     fn measure(
         &self,
         content: &str,
@@ -3771,9 +5129,22 @@ impl<M: Metrics> Builder<'_, M> {
         pieces: &[Piece],
         from: usize,
         to: usize,
+        line_start: usize,
     ) -> f64 {
         let mut total = 0.0;
-        for (start, end, index) in spans {
+        // Only the spans the range touches. They are in order and do not
+        // overlap ([`Builder::lines`] builds them so), so the first is found
+        // by search and the walk stops at the first one past the range. This
+        // walked every span of the context, and the line filler measures at
+        // every break opportunity, so a paragraph of many inline boxes cost
+        // its boxes times its opportunities (found measuring the review of
+        // lane 8C).
+        let first = spans.partition_point(|&(_, end, _)| end <= from);
+        for (at, (start, end, index)) in spans.iter().enumerate().skip(first) {
+            look_at_span();
+            if *start >= to {
+                break;
+            }
             let lo = (*start).max(from);
             let hi = (*end).min(to);
             if lo >= hi {
@@ -3789,8 +5160,16 @@ impl<M: Metrics> Builder<'_, M> {
             }
             let style = &pieces[*index].style;
             let slice = &content[lo..hi];
-            total += self.advance_of(slice, &style.font());
-            total += style.letter_spacing * slice.chars().count() as f64;
+            let context = context_of(
+                content,
+                spans,
+                pieces,
+                at,
+                lo..hi,
+                line_start..content.len(),
+            );
+            total += self.advance_in(slice, &style.font(), &context);
+            total += style.letter_spacing * self.spaced_chars(slice) as f64;
             total += style.word_spacing * slice.chars().filter(|c| *c == ' ').count() as f64;
         }
         total
@@ -3813,8 +5192,38 @@ impl<M: Metrics> Builder<'_, M> {
     /// lines over logical text and never reorders, so what it needs from
     /// direction is the run's *width*, which the two agree on.
     fn advance_of(&self, text: &str, font: &FontRequest<'_>) -> f64 {
+        self.advance_in(text, font, &ShapingContext::NONE)
+    }
+
+    /// How many times `letter-spacing` is added over `text`: once for each
+    /// character that is seen — not a soft hyphen, which is invisible where
+    /// no line breaks at it — and that starts a typographic character unit
+    /// ([`Metrics::letter_spaced`]), so a letter and the marks after it are
+    /// spaced once (`css-text-3` §10.2).
+    fn spaced_chars(&self, text: &str) -> usize {
+        text.chars()
+            .filter(|c| *c != SOFT_HYPHEN && self.metrics.letter_spaced(*c))
+            .count()
+    }
+
+    /// [`Builder::advance_of`], with the text either side of the slice on its
+    /// line: what the shaper joins across and kerns against
+    /// ([`crate::metrics::Shaper::shape_in`]). A provider with no shaper has
+    /// no use for it and measures the slice alone, as it always has.
+    ///
+    /// A soft hyphen measures nothing: it is invisible where no line breaks at
+    /// it (`css-text-3` §5.4), and where one does the hyphen it becomes is
+    /// added by whoever set the break ([`Builder::hyphen_width`]).
+    fn advance_in(&self, text: &str, font: &FontRequest<'_>, context: &ShapingContext<'_>) -> f64 {
+        let visible;
+        let text = if text.contains(SOFT_HYPHEN) {
+            visible = text.replace(SOFT_HYPHEN, "");
+            visible.as_str()
+        } else {
+            text
+        };
         match self.metrics.shaper() {
-            Some(shaper) => shaper.shape(text, font, false).advance,
+            Some(shaper) => shaper.shape_in(text, font, false, context).advance,
             None => self.metrics.measure(text, font),
         }
     }
@@ -3831,7 +5240,7 @@ impl<M: Metrics> Builder<'_, M> {
     ) -> f64 {
         let slice = &content[from..to];
         let trimmed = slice.trim_end_matches([' ', '\n']);
-        self.measure(content, spans, pieces, from + trimmed.len(), to)
+        self.measure(content, spans, pieces, from + trimmed.len(), to, from)
     }
 
     /// Phase II, §4.1.2: the two ends of one line.
@@ -3868,9 +5277,8 @@ impl<M: Metrics> Builder<'_, M> {
         block: usize,
         x: f64,
         available: f64,
-        start: usize,
-        end: usize,
-        justify: bool,
+        (start, end): (usize, usize),
+        (justify, (paragraph, paragraph_number), hyphenated): (bool, (Option<bool>, usize), bool),
         index_in_block: usize,
     ) {
         // CSS 2.2 §10.8.1's strut: every line box carries the block
@@ -3894,7 +5302,15 @@ impl<M: Metrics> Builder<'_, M> {
         // in the same pass that gives the runs theirs.
         let mut boxes: Vec<(usize, InlineBox)> = Vec::new();
         let mut width = 0.0;
-        for (span_start, span_end, index) in spans {
+        // The spans the line holds, found as [`Builder::measure`] finds a
+        // range's: a walk over every span of the context, once a line, was a
+        // paragraph's pieces times its lines.
+        let first = spans.partition_point(|&(_, span_end, _)| span_end <= start);
+        for (span_at, (span_start, span_end, index)) in spans.iter().enumerate().skip(first) {
+            look_at_span();
+            if *span_start >= end {
+                break;
+            }
             let lo = (*span_start).max(start);
             let hi = (*span_end).min(end);
             if lo >= hi {
@@ -3983,6 +5399,14 @@ impl<M: Metrics> Builder<'_, M> {
                     weight: style.font_weight,
                     style: style.font_style,
                     variant: style.font_variant,
+                    kerning: style.font_kerning,
+                    features: style.font_features.clone(),
+                    paragraph_rtl: paragraph,
+                    paragraph: paragraph_number,
+                    embeddings: pieces[*index].embeddings.clone(),
+                    bidi_level: None,
+                    bidi_gap: None,
+                    hyphenated: false,
                     color: style.color,
                     decoration: style.text_decoration,
                     painted: false,
@@ -3996,8 +5420,21 @@ impl<M: Metrics> Builder<'_, M> {
                 continue;
             }
             let text = content[lo..hi].to_string();
-            let advance = self.advance_of(&text, &font)
-                + style.letter_spacing * text.chars().count() as f64
+            // The run in the context it is drawn in: its neighbours on this
+            // line, both ends of which are known now.
+            let context = context_of(content, spans, pieces, span_at, lo..hi, start..end);
+            // The run that ends a hyphenated line is measured with the hyphen
+            // set after it, in its context, as the painter draws it.
+            let ends_hyphenated = hyphenated && hi == end && text.ends_with(SOFT_HYPHEN);
+            let measured = if ends_hyphenated {
+                let mut drawn = text.clone();
+                drawn.push(HYPHEN);
+                self.advance_in(&drawn, &font, &context) + style.letter_spacing
+            } else {
+                self.advance_in(&text, &font, &context)
+            };
+            let advance = measured
+                + style.letter_spacing * self.spaced_chars(&text) as f64
                 + style.word_spacing * text.chars().filter(|c| *c == ' ').count() as f64;
             runs.push(TextRun {
                 x: 0.0,
@@ -4009,12 +5446,20 @@ impl<M: Metrics> Builder<'_, M> {
                 weight: style.font_weight,
                 style: style.font_style,
                 variant: style.font_variant,
+                kerning: style.font_kerning,
+                features: style.font_features.clone(),
+                paragraph_rtl: paragraph,
+                paragraph: paragraph_number,
+                embeddings: pieces[*index].embeddings.clone(),
+                bidi_level: None,
+                bidi_gap: None,
+                hyphenated: ends_hyphenated,
                 color: style.color,
                 decoration: style.text_decoration,
                 painted: style.visible,
                 letter_spacing: style.letter_spacing,
                 word_spacing: style.word_spacing,
-                generated: false,
+                generated: pieces[*index].generated,
                 anchor: pieces[*index].anchor,
                 order: pieces[*index].order,
             });
@@ -4051,15 +5496,26 @@ impl<M: Metrics> Builder<'_, M> {
             .map(|run| run.text.chars().filter(|c| *c == ' ').count())
             .sum();
         let mut extra_per_space = 0.0;
+        // `css-text-3` §7.1: `start` and `end` are the block container's
+        // inline-start and -end sides, and a justified paragraph's last line
+        // is `text-align-last: auto`, which is `start` (§7.2).
+        // A provider that cannot say what P2 finds leaves a `plaintext`
+        // paragraph aligned by `direction`, as [`Metrics::first_strong`] says.
+        let rtl = paragraph.unwrap_or(container.direction == Direction::Rtl);
+        let start_side = if rtl { slack } else { 0.0 };
         let mut offset = match container.text_align {
             TextAlign::Left => 0.0,
             TextAlign::Right => slack,
             TextAlign::Center => slack / 2.0,
+            TextAlign::Start => start_side,
+            TextAlign::End => slack - start_side,
             TextAlign::Justify => {
                 if justify && spaces > 0 {
                     extra_per_space = slack / spaces as f64;
+                    0.0
+                } else {
+                    start_side
                 }
-                0.0
             }
         };
         offset += x;
@@ -4359,13 +5815,23 @@ fn resolve_length(length: LengthPercentage, containing: f64) -> f64 {
 }
 
 /// One box's decorations, as a record with no items in it yet.
+/// What a block container holds, as [`Builder::children`] lays it out: the
+/// node's own [`Content`], or a run of its children in their place.
+#[derive(Clone, Copy)]
+enum Written<'n> {
+    Replaced,
+    Text(&'n str),
+    Children(&'n [BoxNode]),
+}
+
 fn decorate(node: &BoxNode, x: f64, width: f64) -> BlockRecord {
     let style = consume(&node.style);
     let painted = style.background_color.a != 0
         || style.border_width.top > 0.0
         || style.border_width.right > 0.0
         || style.border_width.bottom > 0.0
-        || style.border_width.left > 0.0;
+        || style.border_width.left > 0.0
+        || draws_beyond_its_border(&style);
     BlockRecord {
         x,
         width,
@@ -4378,7 +5844,185 @@ fn decorate(node: &BoxNode, x: f64, width: f64) -> BlockRecord {
         painted: painted && style.visible,
         replaced: None,
         dy: 0.0,
+        anchor: node.anchor,
+        paint: style.paint.clone(),
+        clip: Clip::NONE,
     }
+}
+
+/// Content a block-axis clip hid, kept as `visibility: hidden` content is: laid
+/// out, carrying its reading-order stamps, and painting nothing — no run, no
+/// background, no border, no picture. See [`Builder::clip_tail`].
+///
+/// `at` moves the outermost items to one height and gives them none, so a
+/// hidden tail of any length occupies the single point where it was cut and
+/// can never be what makes a page; the items inside a band or an atomic inline
+/// keep their own coordinates, which nothing reads once nothing paints.
+fn hide(items: &mut [Item], blocks: &mut [BlockRecord], at: Option<f64>) {
+    for record in blocks.iter_mut() {
+        record.painted = false;
+        record.replaced = None;
+        record.clip = Clip::NONE;
+    }
+    for item in items {
+        if let Some(y) = at {
+            item.y = y;
+            item.height = 0.0;
+        }
+        match &mut item.kind {
+            ItemKind::Line(line) => {
+                for run in &mut line.runs {
+                    run.painted = false;
+                }
+                for placed in &mut line.boxes {
+                    hide(&mut placed.items, &mut placed.blocks, None);
+                }
+            }
+            ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
+                let Abreast { items, blocks } = &mut **band;
+                hide(items, blocks, None);
+            }
+            ItemKind::Margin(_) | ItemKind::Edge => {}
+        }
+    }
+}
+
+/// Folds the hidden tails among a box's own records ([`FloatRecord::follows`])
+/// into the box's items, each after the item it follows, and hands back the
+/// records that are boxes.
+///
+/// **For a float and an absolutely positioned box**, whose items
+/// [`crate::fragment`] breaks over pages one at a time and whose continuation
+/// starts at the top of the next page wherever the column put it. A tail left
+/// as a record of its own was drawn at its column height instead: on an
+/// earlier page than the lines it follows, and on the last column page one
+/// item a page. Folded, it is broken with the box like any other of its
+/// items, and since it is the box's own content nothing else changes about
+/// it — it paints nothing, and its height is none.
+///
+/// Tails that follow the same item keep the order they are in, which is the
+/// order [`Builder::clip_tail`] gave them: the outer box's first. Linear in
+/// the items and the records; a box with no tail in it is not rebuilt.
+fn fold_tails(
+    items: &mut Vec<Item>,
+    blocks: &mut [BlockRecord],
+    records: Vec<FloatRecord>,
+) -> Vec<FloatRecord> {
+    if records.iter().all(|record| record.follows.is_none()) {
+        return records;
+    }
+    let mut boxes = Vec::new();
+    let mut tails: Vec<(usize, FloatRecord)> = Vec::new();
+    for record in records {
+        match record.follows {
+            Some(at) => tails.push((at, record)),
+            None => boxes.push(record),
+        }
+    }
+    // Stable, so two tails after one item stay in the order they were given.
+    tails.sort_by_key(|(at, _)| *at);
+    let old = std::mem::take(items);
+    let mut moved = Vec::with_capacity(old.len());
+    let mut tails = tails.into_iter().peekable();
+    // Only the items move: a tail has no records of its own, because
+    // [`Builder::clip_tail`] takes the range of every box in it away.
+    for (index, item) in old.into_iter().enumerate() {
+        while let Some((_, tail)) = tails.next_if(|(at, _)| *at <= index) {
+            items.extend(tail.items);
+        }
+        moved.push(items.len());
+        items.push(item);
+    }
+    for (_, tail) in tails {
+        items.extend(tail.items);
+    }
+    // Every record's range moves with its own first and last item, so a tail
+    // folded at a box's end is outside it and one folded inside it is inside.
+    for record in blocks.iter_mut() {
+        let Some(first) = record.first else {
+            continue;
+        };
+        let head = moved.get(first).copied().unwrap_or(items.len());
+        let end = match record.last.checked_sub(1) {
+            Some(last) if record.last > first => moved.get(last).map_or(items.len(), |at| at + 1),
+            _ => head,
+        };
+        record.first = Some(head);
+        record.last = end;
+    }
+    boxes
+}
+
+/// A `height` that is a length: §10.5 makes a percentage of an `auto`-height
+/// containing block `auto`, and at this point in the pass every containing
+/// block's height is `auto`.
+fn definite_height(style: &Consumed) -> Option<f64> {
+    match style.height {
+        Size::Length(LengthPercentage::Px(px)) => Some(px.max(0.0)),
+        Size::Length(LengthPercentage::Percent(_)) | Size::Auto => None,
+    }
+}
+
+/// The horizontal extent some content reached, for [`Builder::note_overflow`].
+struct Reach {
+    lo: f64,
+    hi: f64,
+}
+
+impl Default for Reach {
+    fn default() -> Self {
+        Reach {
+            lo: f64::INFINITY,
+            hi: f64::NEG_INFINITY,
+        }
+    }
+}
+
+impl Reach {
+    fn span(&mut self, from: f64, to: f64) {
+        self.lo = self.lo.min(from);
+        self.hi = self.hi.max(to);
+    }
+
+    /// Every run and box in some items, into bands and atomic inlines — the
+    /// same walk `measure_content` makes, on both sides.
+    fn items(&mut self, items: &[Item]) {
+        for item in items {
+            match &item.kind {
+                ItemKind::Line(line) => {
+                    for run in &line.runs {
+                        self.span(run.x, run.x + run.width);
+                    }
+                    for placed in &line.boxes {
+                        self.items(&placed.items);
+                        for record in &placed.blocks {
+                            self.span(record.x, record.x + record.width);
+                        }
+                    }
+                }
+                ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
+                    self.items(&band.items);
+                    for record in &band.blocks {
+                        self.span(record.x, record.x + record.width);
+                    }
+                }
+                ItemKind::Margin(_) | ItemKind::Edge => {}
+            }
+        }
+    }
+}
+
+/// Whether a box draws an outline, a background image or a shadow, any of
+/// which makes it painted with no background colour or border at all — or is
+/// transformed, whose fragment the painter needs as the reference box its
+/// content turns about.
+fn draws_beyond_its_border(style: &Consumed) -> bool {
+    style.paint.as_ref().is_some_and(|paint| {
+        paint.transformed
+            || paint.outline.is_some()
+            || paint.image.is_some()
+            || !paint.shadows.is_empty()
+    })
 }
 
 /// One box's **specified** border on one side, for §17.6.2.1.
@@ -4846,6 +6490,7 @@ fn anonymous_flex_item(parent: &ComputedStyle, run: Vec<BoxNode>) -> BoxNode {
         content: Content::Children(run),
         anchor: None,
         span: crate::CellSpan::ONE,
+        marker: None,
     }
 }
 
@@ -4963,14 +6608,15 @@ fn place_flex_item(
     }
 }
 
-fn anonymous_table(parent: &ComputedStyle, run: &[BoxNode]) -> BoxNode {
+fn anonymous_table(parent: &ComputedStyle, run: &[&BoxNode]) -> BoxNode {
     let mut style = ComputedStyle::inherit_from(parent);
     style.display = Display::Table;
     BoxNode {
         style,
-        content: Content::Children(run.to_vec()),
+        content: Content::Children(run.iter().map(|node| (*node).clone()).collect()),
         anchor: None,
         span: crate::CellSpan::ONE,
+        marker: None,
     }
 }
 
@@ -5041,6 +6687,187 @@ fn translate(items: &mut [Item], blocks: &mut [BlockRecord], dx: f64, dy: f64) {
     }
 }
 
+/// U+00AD SOFT HYPHEN: a place a word may break, invisible unless it does
+/// (`css-text-3` §5.4).
+pub(crate) const SOFT_HYPHEN: char = '\u{AD}';
+
+/// What a line that breaks at a soft hyphen ends in: U+002D, the hyphen every
+/// face has — the standard 14 have no U+2010 — and the one a reader joining
+/// hyphenated words already looks for.
+pub(crate) const HYPHEN: char = '-';
+
+/// Whether `c` is a paragraph separator, `Bidi_Class` `B`: what ends a bidi
+/// paragraph inside a block (`css-writing-modes-3` §2.4) and stops UAX #9's
+/// P2.
+///
+/// The seven characters of `DerivedBidiClass.txt`'s `B`, written out because
+/// this crate has no `Bidi_Class` table ([`Metrics::first_strong`] says why)
+/// and the class is closed and small. Four of them are also UAX #14 forced
+/// breaks — LF, CR, NEL and U+2029 — and the other three forced breaks are
+/// not separators: U+000B is `S`, U+000C and U+2028 LINE SEPARATOR `WS`.
+/// U+001C to U+001E are separators that are not forced breaks; one ends the
+/// scan for a paragraph's direction, as P2 says, but no line is cut there,
+/// so the text after it stays in the layout's paragraph until the next
+/// forced break that is a separator, where P1 would start one. They are C0
+/// controls XML 1.0 does not admit, so only markup read as HTML holds one.
+fn separates_paragraphs(c: char) -> bool {
+    matches!(c, '\n' | '\r' | '\u{1C}'..='\u{1E}' | '\u{85}' | '\u{2029}')
+}
+
+/// Where the soft hyphen just before byte `at` of `content` is, if one is.
+fn soft_hyphen_before(content: &str, at: usize) -> Option<usize> {
+    content
+        .get(..at)
+        .filter(|before| before.ends_with(SOFT_HYPHEN))
+        .map(|_| at - SOFT_HYPHEN.len_utf8())
+}
+
+/// Whether a line that ends at byte `at` ends in a hyphen: it ends just
+/// after a soft hyphen whose element's `hyphens` is not `none`
+/// (`css-text-3` §5.4).
+///
+/// The one test both halves ask — which soft hyphens are break
+/// opportunities, and which line ends show a hyphen — so that a break that
+/// reaches a soft hyphen another way, `overflow-wrap`'s break inside a word,
+/// cannot show one `none` forbids (review of lane 8C).
+fn hyphen_shown(
+    content: &str,
+    spans: &[(usize, usize, usize)],
+    pieces: &[Piece],
+    at: usize,
+) -> bool {
+    soft_hyphen_before(content, at).is_some_and(|shy| {
+        piece_at(spans, shy).is_none_or(|p| {
+            pieces
+                .get(p)
+                .is_none_or(|piece| piece.style.hyphens != Hyphens::None)
+        })
+    })
+}
+
+/// The level an inline box opens round its content, from its `unicode-bidi`
+/// and `direction` (`css-writing-modes-3` §2.4.2's table).
+fn embedding_of(style: &Consumed, anchor: Option<u32>) -> Option<Embedding> {
+    let kind = match style.unicode_bidi {
+        UnicodeBidi::Normal => return None,
+        UnicodeBidi::Embed => EmbeddingKind::Embed,
+        UnicodeBidi::Isolate => EmbeddingKind::Isolate,
+        UnicodeBidi::Plaintext => EmbeddingKind::FirstStrong,
+    };
+    Some(Embedding {
+        kind,
+        rtl: style.direction == Direction::Rtl,
+        anchor,
+    })
+}
+
+/// The text either side of `slice` — part of span `at` — on a line that
+/// covers `line`, as a shaper sees it ([`ShapingContext`]).
+///
+/// The rule is the painter's, because a run measured in one context and drawn
+/// in another is the two-paths failure [`crate::metrics::Shaper`] warns
+/// about: a context is a **painted** neighbour of **text** on **the same
+/// line**. An atomic box, generated content (a marker, `::before`) and text
+/// that is laid out and not drawn (`visibility: hidden`) are no one's
+/// context and take none, and a line's edges stop it. Inside one span the
+/// rest of the span is the context — a slice between two break
+/// opportunities is part of a run the painter shapes whole. Empty spans are
+/// passed over, since they draw nothing to stand between two runs.
+///
+/// Whether a neighbour that qualifies is in the same **face** — the other
+/// half of the painter's rule — is the provider's to decide, which is why each
+/// side carries its own [`FontRequest`].
+///
+/// A neighbour is handed over as its near [`CONTEXT_BYTES`] and no more —
+/// the last bytes of what comes before, the first of what comes after — so
+/// that what a provider does with it costs the same on a line of any length
+/// (review of lane 8C).
+fn context_of<'p>(
+    content: &'p str,
+    spans: &[(usize, usize, usize)],
+    pieces: &'p [Piece],
+    at: usize,
+    slice: core::ops::Range<usize>,
+    line: core::ops::Range<usize>,
+) -> ShapingContext<'p> {
+    let text_of = |index: usize| {
+        pieces
+            .get(index)
+            .filter(|piece| piece.atomic.is_none() && !piece.generated && piece.style.visible)
+    };
+    let Some(&(start, end, own)) = spans.get(at) else {
+        return ShapingContext::NONE;
+    };
+    let Some(piece) = text_of(own) else {
+        return ShapingContext::NONE;
+    };
+    let neighbour = |from: usize, to: usize, piece: &'p Piece| {
+        (from < to)
+            .then(|| content.get(from..to))
+            .flatten()
+            .map(|text| Neighbour {
+                text,
+                font: piece.style.font(),
+            })
+    };
+    // Only the near end of either, [`CONTEXT_BYTES`] of it cut back to a
+    // character boundary: before a slice the neighbour is the line so far,
+    // and the slice is measured at every break opportunity.
+    let before_of = |from: usize, to: usize, piece: &'p Piece| {
+        let mut from = from.max(to.saturating_sub(CONTEXT_BYTES));
+        while from < to && !content.is_char_boundary(from) {
+            from += 1;
+        }
+        neighbour(from, to, piece)
+    };
+    let after_of = |from: usize, to: usize, piece: &'p Piece| {
+        let mut to = to.min(from.saturating_add(CONTEXT_BYTES));
+        while to > from && !content.is_char_boundary(to) {
+            to -= 1;
+        }
+        neighbour(from, to, piece)
+    };
+    let before = if slice.start > start {
+        before_of(start.max(line.start), slice.start, piece)
+    } else {
+        spans[..at]
+            .iter()
+            .rev()
+            .find(|(s, e, _)| s < e)
+            .and_then(|&(s, e, index)| before_of(s.max(line.start), e, text_of(index)?))
+    };
+    let after = if slice.end < end {
+        after_of(slice.end, end.min(line.end), piece)
+    } else {
+        spans
+            .get(at + 1..)
+            .unwrap_or(&[])
+            .iter()
+            .find(|(s, e, _)| s < e)
+            .and_then(|&(s, e, index)| after_of(s, e.min(line.end), text_of(index)?))
+    };
+    ShapingContext { before, after }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`look_at_span`]'s count, on this thread.
+    pub(crate) static SPANS_LOOKED: core::cell::Cell<usize> =
+        const { core::cell::Cell::new(0) };
+}
+
+/// One span of a formatting context looked at by [`Builder::measure`] or
+/// [`Builder::line`] — the two walks over a context's spans made once for
+/// every break opportunity and every line. Counted only under `cfg(test)`,
+/// where a test holds a paragraph's total to a small multiple of its pieces,
+/// so that a walk over every span put back **fails** rather than runs
+/// slowly. Everywhere else it is nothing.
+#[inline]
+fn look_at_span() {
+    #[cfg(test)]
+    SPANS_LOOKED.with(|looked| looked.set(looked.get().saturating_add(1)));
+}
+
 /// Which piece a byte offset belongs to.
 ///
 /// A binary search rather than a scan, and for the same reason the line
@@ -5061,73 +6888,21 @@ fn piece_at(spans: &[(usize, usize, usize)], at: usize) -> Option<usize> {
     found.ok().map(|index| spans[index].2)
 }
 
-/// A list marker's text, CSS 2.2 §12.5.
+/// A list marker's text, CSS 2.2 §12.5, for a caller with no counters.
 ///
-/// The three alphabetic and two Roman forms are computed rather than tabled,
-/// because a table stops at whatever length its author thought of and a book
-/// with more list items than that gets a marker that is silently wrong.
+/// `css-counter-styles-3` §6's predefined styles, from the one place this
+/// workspace formats them, [`tinker_pdf_css::counter::marker_text`], so a
+/// marker this crate counts and one a cascade counted cannot be drawn two ways.
 #[must_use]
 pub fn marker_text(kind: ListStyleType, ordinal: usize) -> String {
-    match kind {
-        ListStyleType::None => String::new(),
-        ListStyleType::Disc => "\u{2022}".to_string(),
-        ListStyleType::Circle => "\u{25e6}".to_string(),
-        ListStyleType::Square => "\u{25aa}".to_string(),
-        ListStyleType::Decimal => format!("{ordinal}."),
-        ListStyleType::LowerAlpha => format!("{}.", alphabetic(ordinal, b'a')),
-        ListStyleType::UpperAlpha => format!("{}.", alphabetic(ordinal, b'A')),
-        ListStyleType::LowerRoman => format!("{}.", roman(ordinal).to_lowercase()),
-        ListStyleType::UpperRoman => format!("{}.", roman(ordinal)),
-    }
+    tinker_pdf_css::counter::marker_text(kind, i64::try_from(ordinal).unwrap_or(i64::MAX))
 }
 
-/// Bijective base 26: 1 is `a`, 26 is `z`, 27 is `aa`.
-///
-/// **Not** ordinary base 26, which is the mistake: `z` is 26 and the next is
-/// `aa`, not `ba`, and there is no digit for zero.
-fn alphabetic(ordinal: usize, first: u8) -> String {
-    if ordinal == 0 {
-        return String::new();
+/// A list item's marker text: the caller's, where it counted one, and this
+/// crate's own sibling count where it did not. See [`BoxNode::marker`].
+fn marker_of(node: &BoxNode, style: &Consumed, ordinal: usize) -> String {
+    match &node.marker {
+        Some(text) => text.clone(),
+        None => marker_text(style.list_style_type, ordinal + 1),
     }
-    let mut out = Vec::new();
-    let mut n = ordinal;
-    while n > 0 {
-        let digit = (n - 1) % 26;
-        out.push(first + digit as u8);
-        n = (n - 1) / 26;
-    }
-    out.reverse();
-    String::from_utf8(out).unwrap_or_default()
-}
-
-/// Roman numerals, subtractive, up to 3 999; above that the number itself,
-/// because there is no agreed spelling and a wrong one is worse than a digit.
-fn roman(ordinal: usize) -> String {
-    const TABLE: [(usize, &str); 13] = [
-        (1000, "M"),
-        (900, "CM"),
-        (500, "D"),
-        (400, "CD"),
-        (100, "C"),
-        (90, "XC"),
-        (50, "L"),
-        (40, "XL"),
-        (10, "X"),
-        (9, "IX"),
-        (5, "V"),
-        (4, "IV"),
-        (1, "I"),
-    ];
-    if ordinal == 0 || ordinal > 3_999 {
-        return ordinal.to_string();
-    }
-    let mut out = String::new();
-    let mut n = ordinal;
-    for (value, sign) in TABLE {
-        while n >= value {
-            out.push_str(sign);
-            n -= value;
-        }
-    }
-    out
 }

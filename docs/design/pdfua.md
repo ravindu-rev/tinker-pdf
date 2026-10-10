@@ -52,11 +52,19 @@ halves, the first of them M.
   and this design keeps that sentence. Every such clause is an `undecidable`
   entry with its reason, printed as abstention and never counted as
   agreement.
+  *Narrowed, 9 October 2026*: colour contrast measured as a ratio by the renderer
+  is [ROADMAP](../ROADMAP.md) row SD-06; whether a ratio suffices for a reader,
+  and every other clause here, stays a person's.
 - **Auto-tagging.** No structure is inferred for an untagged file; it is
   reported as untagged. [design/reading-order.md](reading-order.md) infers an
   order and labels it inferred, and nothing it infers reaches a verdict here.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: auto-tagging into a new document is
+  [ROADMAP](../ROADMAP.md) row SD-07; an inferred tree still never reaches a
+  verdict about the file it was inferred from.
 - **Fixing a file.** No repair mode; validation reports and the tagged writer
   (`PageBuilder::tagged`) conforms or refuses, as the PDF/A profile does.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: structure-tree editing and repair are
+  [ROADMAP](../ROADMAP.md) rows SD-07 and SD-08.
 - **A full PDF 2.0 namespace model.** ISO 14289-2's role maps are namespaced
   (`/RoleMapNs`, `/NS`), and [design/tagged-pdf.md](tagged-pdf.md) names PDF
   2.0 namespaces a non-goal that [pdf20-deltas.md](../pdf20-deltas.md) tracks.
@@ -64,6 +72,9 @@ halves, the first of them M.
   designed around it here.
 - **Assistive-technology output.** Bytes to verdicts; a screen-reader bridge
   is an embedder's.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: a platform-neutral accessibility tree and
+  a textual preview are [ROADMAP](../ROADMAP.md) row SD-09; the bridge itself
+  stays the embedder's.
 
 ## What the corpus carries, measured
 
@@ -331,7 +342,7 @@ grid model serve two designs.
   records no scope at all; the real-content group here needs `structure:
   true`, and that sentence should be corrected when milestone 5 lands.
 - **`Page::annotations()`** — the 28-subtype model with `/F`, `/Contents`
-  and `/Popup`. Exists; the per-family payloads the roadmap lists as unread
+  and `/Popup`. Exists; the per-family payloads (read since 26 September 2026)
   are not needed here.
 - **PDF 2.0 namespaced structure types** — a tier 3 roadmap row; milestone 6
   waits on it for the `/RoleMapNs` fixtures.
@@ -361,6 +372,158 @@ grid model serve two designs.
 
 ## As built
 
-*Filled in as milestones land.* Nothing has landed beyond what this document
-measures: the nine-rule census in `tests/pdfua.rs`, at 29 of 239 with zero
-false alarms, which predates this design and is its starting point.
+*Filled in as milestones land.* The starting point was the nine-rule census in
+`tests/pdfua.rs`, at 29 of 239 with zero false alarms on 16 September 2026,
+which predates this design.
+
+**Milestone 1 landed in October 2026, with its corpus exit criterion owed.**
+`crates/tinker-pdf/src/pdfua.rs` and `pdfua/` hold the validator;
+`Document::validate_pdfua` and `validate_pdfua_with(PdfUaCoverage)` surface it;
+`tpdf check --pdfua` prints it, abstentions included; `hostile_input.rs` calls
+it twice per input. The nine census rules moved in deciding what they decided,
+now as typed findings numbered by the claimed part, and four things changed
+in the move, each because a published source said so:
+
+- **The kernel is shared by opening it, not by moving it.** `Machinery::new`
+  and `reaches`, and the UTF-32 transcode `readable`, are `pub(crate)` in
+  `pdfa.rs`; `FindingKind` gains the ten kinds ISO 19005 has no rule for. This
+  design and [pdfx.md](pdfx.md) both left the shape of the move to whichever
+  landed first, and opening the items is the smallest move that shares them.
+- **Two rules have no row under ISO 14289-2.** The census fired `/Suspects`
+  and heading order under both parts; veraPDF's `PDFUA-2.xml` states neither
+  (PDF 2.0 deprecates `/Suspects`, and the part forbids `H` at 8.2.5.12
+  instead of ordering `Hn`), so neither runs under part 2.
+- **The claim's spelling and revision are findings.** `pdfuaid:rev` is read
+  for part 2 as a four-digit year, and an identification property in the
+  namespace under another prefix is reported, both under clause 5 as the
+  profiles number them.
+- **A Type 3 font is not reported as unembedded.** The census read a font
+  with no `/FontDescriptor` as one of the standard 14, which a Type 3 font
+  also is not; its glyphs are content streams (ISO 32000-1 9.6.5) and there
+  is no program to embed. `PDFUA-1.xml`'s 7.21.4.1-1 exempts `Type3` by name,
+  as the PDF/A font group already did.
+
+`PDFUA_STAGED` and `PDFUA_UNDECIDABLE` carry an entry for every clause
+directory the corpus holds under each part; `every_part_abstains_on_something_in_both_classes`
+is the unit test, and `crates/tinker-pdf/tests/pdfua_rules.rs` holds one
+fixture and one twin per rule. The census now finds `corpus/files` without
+`TINKER_CORPUS` — it read that variable alone, the nightly job sets none, and
+so it had been a skip every night — and honours `TINKER_CORPUS_REQUIRED`.
+
+**What is owed**: the milestone's first exit criterion, "the census through
+the facade still reads 29 caught, 0 false alarms", has not been measured. The
+corpus was not reachable where this landed; the census was run to prove it
+skips cleanly and fails when required, and the next nightly run records the
+figure.
+
+**Milestone 2 landed in October 2026, with its corpus exit criteria owed.**
+Twenty-four rules, each in `pdfua_rules.rs` with a fixture at the edge of its
+clause and the twin that must not fire, each citing the clause and sentence
+of veraPDF's published rule (the wiki's statements at `109b482`). What the
+milestone table priced, and what it became:
+
+- **Second clause tables on the shared rules.** The PDF/A font group runs for
+  a PDF/UA claim under a part 2, level U reading — `pdfa::fonts::run`, split
+  from the group's counted reach so the PDF/UA group reaches once — and
+  `pdfua::fonts::ua_clause_of` re-numbers what it finds kind by kind:
+  `FontNotEmbedded`, `CidToGidMapMalformed`, `EncodingNotStandard`,
+  `SymbolicFontHasEncoding`, `ToUnicodeMissing`. Its `/ToUnicode` exemptions
+  are a superset of 7.21.7's, so what it reports 7.21.7 reports. Four kinds
+  are dropped rather than given the nearest number: the subset tag, the
+  program/key pairing, an unreadable program, part 1's `/Differences`.
+  **`CidSystemInfoIncomplete` is dropped too, against this table's first
+  draft**: 7.21.3.1 is a relationship between two dictionaries, and veraPDF's
+  test passes any CIDFont collection under `Identity-H`, so a missing entry
+  there is not a 7.21.3.1 failure; the relationship is a new rule instead.
+  Embedding is now judged over the fonts drawn at a visible rendering mode,
+  as the PDF/A group judges it, not over every font a page's resources name —
+  the census's reading, and the one veraPDF's 7.21.4.1-1 (`renderingMode ==
+  3` exempt) does not take.
+- **`/Lang` with the empty-string flag**: `pdfa::logical::LanguageGrammar`,
+  one function and one flag; PDF/UA reads RFC 3066 and refuses `()`, as
+  7.2-29's and 8.4.4-2's published pattern does. Part 2 also asks for the
+  catalog's own (8.4.4-1), which subsumes "a language stated somewhere", so
+  that rule has no part 2 row any more.
+- **Role map and structure types** (UA-1 7.1-5, -7, -12; UA-2 8.2.1-2): the
+  level A rule re-numbered, a standard type remapped (read off what the
+  structure reader resolved, so `/P /P` is not a remap), and an element's own
+  `/P`. UA-2's 8.2.4 is stated over PDF 2.0's namespaces and stays staged.
+- **Optional content, embedded files, the three metadata rules**, as the
+  table said; the two parts' sentences differ on naming a lone default
+  configuration and on what a file specification carries (`/F`, `/UF` under
+  part 1; `/Desc` in `/EmbeddedFiles` under part 2), and each part's fixture
+  is the other's twin.
+- **Small rules the table did not list**, COS reads the published profiles
+  state: no reference XObject (7.20-1), the accessibility permission bit
+  (7.16-1), no XFA under part 2 (8.10.1-3).
+- **The three font rules with no PDF/A analogue**: `WMode` agreement landed
+  (7.21.3.3-2) with the rest of the CMap clause — a CMap outside Table 118
+  embedded, no `usecmap` outside it, an embedded CMap's collection the
+  CIDFont's — over the sixty-one names veraPDF's test conditions enumerate,
+  which needs none of the `cmap-predefined` tables. The forbidden `ToUnicode`
+  values landed over the codes a page draws. **The `/Differences` name absent
+  from the Adobe Glyph List did not**: the glyph list is not vendored in this
+  tree, and it stays in the 7.21 residue with glyph presence, `CharSet` and
+  `CIDSet`, `/Widths` and `.notdef`.
+
+`PDFUA_STAGED` went from twenty-five entries to seventeen, and five of those narrowed. **What is owed**:
+every exit criterion of this milestone that is a corpus figure — 7.21's
+abstentions falling to the staged residue, 8.4.5's likewise, the caught floor
+re-recorded, and above all **false alarms still zero over the 195 conforming
+files** — has not been measured, for the same reason as milestone 1's. The
+one exit criterion that is not a corpus figure, "`/Lang ()` reported under
+PDF/UA and admitted under PDF/A in one test", is
+`the_empty_language_is_pdfa_conforming_and_pdfua_not`. Until the nightly run
+reports, each of the twenty-four is held only to the fixture and twin built
+here, which read the clause the same way in both directions.
+
+**Milestone 3's tree half landed in October 2026; its grid half and the
+attribute reader did not, and its corpus exit is owed.** What the milestone
+table priced as the structure-grammar group turned out, rule by published
+rule, to need nothing the structure reader does not already hold: an
+element's standard type, its parent's and its kids'. So it landed without the
+attribute reader — the content models of tables, lists and TOCs (veraPDF's
+7.2-3 to 7.2-20, 7.2-26 to 7.2-28 and 7.2-36 to 7.2-40), 7.4.4's one `H` per
+node and no `H` beside an `Hn`, 7.9's `Note` identifiers present and unique,
+and 7.7's `Formula`, each in `pdfua_rules.rs` with its twin. Two readings,
+both towards silence: a kid whose type resolves to nothing standard is not
+judged here, since the structure-type rule already reports it; and the
+structure tree root, as a parent, is no standard type. The corpus reading
+this document records — "a `List` may contain a `List`" while an `L` in an
+`LI` fails — is what the published conditions give (7.2-19 admits `L` in `L`;
+7.2-20 admits only `Lbl` and `LBody` in `LI`). And the empty-`/Alt` reading
+recorded above landed with it: under part 1 an empty `/Alt` no longer
+describes a `Figure`, which the milestone 1 rule had let through, and under
+part 2, whose condition is `Alt != null`, it still does. This engine's own
+output — the EPUB conversion and the tagged builder in `pdfua.rs` — is silent
+under every new rule.
+
+Left of milestone 3: the table's grid — cells that intersect, rows and
+columns that disagree across `/RowSpan` and `/ColSpan` (7.2-15, 7.2-41 to
+7.2-43) — and the header association over it (7.5), which is where the grid
+model [table-reconstruction.md](table-reconstruction.md) shares would come in.
+`PDFUA_STAGED` went from seventeen entries to fourteen, and 7.2's narrowed.
+**Owed by the nightly census**: 7.2's, 7.4's, 7.7's and 7.9's `-fail-` files
+caught, and false alarms still zero over the 195 conforming files.
+
+**Milestone 4's part 1 half landed in October 2026; part 2's (8.9, 8.10,
+8.14) did not, and the corpus exit is owed.** `pdfua/annotations.rs` reads
+each page's `/Annots` against the element whose `/OBJR` kid names the
+annotation — not through `/StructParent` and the `/ParentTree`, as veraPDF
+does; the two agree on a well-formed file, and where an `/OBJR` has no
+`/StructParent` back to it this reading finds an enclosing element veraPDF
+does not, which errs towards silence. Every rule is veraPDF's statement of a
+7.18 rule with its own exemptions, and the corpus readings this document
+records above: hidden or off the crop box is exempt, a widget's `/TU` is its
+field's, an undefined subtype is not judged. With no tree at all the
+enclosing rules do not run, since the missing tree is already the finding.
+Staged: a `Form` element without a `Role` holding one widget (7.18.4-2 —
+the structure reader does not read `PrintField` attributes), a media clip's
+`/CT` and `/Alt` (7.18.6.2 — it sits behind a `Screen` annotation's rendition
+action), and a `Popup`'s own tagging, which the published condition does not
+exempt and this build does not judge until the census says whether
+veraPDF's does. **This engine's own output is reported by three of the new
+rules**: its link annotations carry no `/Contents`, their `Link` elements no
+`/Alt`, and their pages no `/Tabs /S` — `pdfua.rs` names all three as the
+tagged writer's to close. **Owed**: 7.18's 23 `-fail-` files caught, and
+false alarms still zero.

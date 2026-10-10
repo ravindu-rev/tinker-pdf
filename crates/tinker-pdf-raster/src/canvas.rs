@@ -29,8 +29,9 @@ pub enum PixelFormat {
     ///
     /// It exists for transparency groups that declare `/DeviceCMYK` as their
     /// `/Group /CS` (11.6.6), which is a group whose blends the specification
-    /// says happen over ink. It is not offered as a page format: see
-    /// `Page::render`.
+    /// says happen over ink. A page comes back in it only when the caller
+    /// asks for it by name and opts in (`RenderOptions::allow_cmyk` in the
+    /// facade): see `Page::render`.
     CmykA8,
     /// Lightness, `a`, `b` and alpha.
     ///
@@ -179,6 +180,21 @@ pub struct Canvas {
     pub stride: usize,
     /// The pixels.
     pub data: Vec<u8>,
+    /// The device pixel this canvas's top-left is, as `(x, y)`.
+    ///
+    /// **Ruling 5's lattice.** A canvas that is a region of a page — a tile, or
+    /// a transparency group's bounding box — used to be drawn in a frame of its
+    /// own: the page's transform with a whole number of pixels taken off `e`
+    /// and `f`. That is exact as arithmetic and not as floating point,
+    /// `fl(u + e)` and `fl(u + e − tx)` being two roundings at two magnitudes,
+    /// and the last ulp reached a byte wherever the exact value sat on a grid
+    /// the rasterizer quantises to. So a region now keeps the page's frame and
+    /// says where in it it is: every mask, every sampled coordinate and every
+    /// `at` this crate is handed is in **device** pixels, and only the index
+    /// into [`Canvas::data`] subtracts the origin — an integer subtraction,
+    /// which cannot round. `(0, 0)` for a canvas that is the whole page, which
+    /// is every canvas that existed before this field did.
+    origin: (i32, i32),
     /// The initial backdrop of a *non-isolated* transparency group (11.4.4).
     ///
     /// A non-isolated group starts with its backdrop composited in, so that a
@@ -225,11 +241,47 @@ impl Canvas {
             format,
             stride,
             data: vec![0; len],
+            origin: (0, 0),
             backdrop: None,
             approximated_blends: 0,
         };
         canvas.clear(background);
         canvas
+    }
+
+    /// The same canvas, standing at device pixel `(x, y)` rather than at the
+    /// origin.
+    ///
+    /// What a region of a page is: the page's own frame, with this canvas
+    /// holding the `width` by `height` pixels whose top-left is `(x, y)`. See
+    /// the field's documentation for why a region is not a frame of its own.
+    #[must_use]
+    pub fn at_origin(mut self, x: i32, y: i32) -> Canvas {
+        self.origin = (x, y);
+        self
+    }
+
+    /// The device pixel this canvas's top-left is.
+    #[must_use]
+    pub const fn origin(&self) -> (i32, i32) {
+        self.origin
+    }
+
+    /// The device pixels this canvas holds, as `(x0, y0, width, height)`.
+    #[must_use]
+    pub const fn device_rect(&self) -> (i32, i32, u32, u32) {
+        (self.origin.0, self.origin.1, self.width, self.height)
+    }
+
+    /// The canvas pixel holding device pixel `(x, y)`, or `None` off it.
+    #[must_use]
+    pub fn local(&self, x: i32, y: i32) -> Option<(u32, u32)> {
+        let col = i64::from(x) - i64::from(self.origin.0);
+        let row = i64::from(y) - i64::from(self.origin.1);
+        if col < 0 || row < 0 || col >= i64::from(self.width) || row >= i64::from(self.height) {
+            return None;
+        }
+        Some((col as u32, row as u32))
     }
 
     /// Repaints every pixel.
@@ -249,16 +301,19 @@ impl Canvas {
     ///
     /// # Why the same-format path is correctness and not speed
     ///
-    /// For the formats that exist today the two paths produce the same bytes —
+    /// For the additive formats the two paths produce the same bytes —
     /// `Gray8`'s round trip survives because `luma` of a replicated grey is
-    /// that grey exactly, its weights summing to 1000 — so this could be
-    /// deleted tomorrow and no test would notice. It is here for the format
-    /// after them. A buffer holding *subtractive* components has no lossless
-    /// trip through an RGB `Color`: the relation is exact in one direction and
-    /// a projection in the other, so a group nested inside another group of
-    /// its own kind would have its ink re-derived at every composite — a
-    /// picture, and a different one. Same-format copies must not go through
-    /// `Color`, and the cheapest way to guarantee that is for them never to.
+    /// that grey exactly, its weights summing to 1000. A buffer holding
+    /// *subtractive* components has no lossless trip through an RGB `Color`:
+    /// the relation is exact in one direction and a projection in the other,
+    /// and an ink buffer holds ink the projection never makes — a DeviceCMYK
+    /// colour reaches it as the document's own components, so a rich black is
+    /// all four inks there and pure K after the trip. A group nested inside
+    /// another group of its own kind would have its ink re-derived at every
+    /// composite — a picture, and a different one. Same-format copies must not
+    /// go through `Color`, and the cheapest way to guarantee that is for them
+    /// never to; `adopt_backdrop` and `remove_backdrop` read through here for
+    /// that reason.
     ///
     /// `a_same_format_copy_is_the_bytes_it_started_as` pins the equivalence.
     fn source_from(&self, src: &Canvas, sx: u32, sy: u32) -> Option<([u8; 5], u32)> {
@@ -309,6 +364,26 @@ impl Canvas {
 
     /// As [`Canvas::fill_mask`], with a blend mode (11.3.5).
     pub fn fill_mask_with(&mut self, mask: &Mask, color: Color, alpha: f64, mode: BlendMode) {
+        self.fill_mask_inked(mask, color, None, alpha, mode);
+    }
+
+    /// As [`Canvas::fill_mask_with`], with the colour's own ink beside it.
+    ///
+    /// `ink` is cyan, magenta, yellow and black as bytes, the components the
+    /// colour was chosen in, and a [`PixelFormat::CmykA8`] canvas composites
+    /// **those** rather than `color` turned back into ink. The two are not the
+    /// same: `color` is light, and light has one ink for each colour — maximum
+    /// undercolour removal, so a rich black of all four inks comes back as
+    /// black ink alone. Every other format composites `color` and never reads
+    /// `ink`, and so does this one when `ink` is `None`.
+    pub fn fill_mask_inked(
+        &mut self,
+        mask: &Mask,
+        color: Color,
+        ink: Option<[u8; 4]>,
+        alpha: f64,
+        mode: BlendMode,
+    ) {
         let alpha = if alpha.is_finite() {
             (alpha.clamp(0.0, 1.0) * 255.0).round() as u32
         } else {
@@ -322,17 +397,23 @@ impl Canvas {
             self.approximated_blends = self.approximated_blends.saturating_add(1);
         }
         let components = self.format.components();
-        let source = self.encode(color);
+        let source = match (ink, self.format) {
+            (Some([c, m, y, k]), PixelFormat::CmykA8) => [c, m, y, k, color.a],
+            _ => self.encode(color),
+        };
         let color_alpha = u32::from(color.a);
 
         // The mask's own rectangle, not the canvas. Outside it `Mask::at`
         // returns zero and every pixel is skipped, so walking the page was
         // always the same answer at the price of the page: a comma on A4 at
         // 300 dpi visited 8.4 million pixels to composite about two hundred.
-        let (x0, y0, x1, y1) = mask.overlap(self.width, self.height);
+        let (x0, y0, x1, y1) = mask.overlap_at(self.origin, self.width, self.height);
+        let (ox, oy) = self.origin;
         for row in y0..y1 {
             for col in x0..x1 {
-                let coverage = u32::from(mask.at(col as i32, row as i32));
+                let coverage = u32::from(
+                    mask.at(ox.saturating_add(col as i32), oy.saturating_add(row as i32)),
+                );
                 if coverage == 0 {
                     continue;
                 }
@@ -379,6 +460,22 @@ impl Canvas {
 
     /// As [`Canvas::blend_pixel`], with a blend mode (11.3.5).
     pub fn blend_pixel_with(&mut self, x: u32, y: u32, color: Color, alpha: f64, mode: BlendMode) {
+        self.blend_pixel_inked(x, y, color, None, alpha, mode);
+    }
+
+    /// As [`Canvas::blend_pixel_with`], with the colour's own ink beside it,
+    /// which a [`PixelFormat::CmykA8`] canvas composites in place of `color`
+    /// turned back into ink — what [`Canvas::fill_mask_inked`] does for a
+    /// mask, for a caller that samples. Every other format never reads `ink`.
+    pub fn blend_pixel_inked(
+        &mut self,
+        x: u32,
+        y: u32,
+        color: Color,
+        ink: Option<[u8; 4]>,
+        alpha: f64,
+        mode: BlendMode,
+    ) {
         if x >= self.width || y >= self.height {
             return;
         }
@@ -396,7 +493,12 @@ impl Canvas {
             self.approximated_blends = self.approximated_blends.saturating_add(1);
         }
         let components = self.format.components();
-        let source = self.encode(color);
+        let source = match (ink, self.format) {
+            (Some([cyan, magenta, yellow, black]), PixelFormat::CmykA8) => {
+                [cyan, magenta, yellow, black, color.a]
+            }
+            _ => self.encode(color),
+        };
         let base = (y as usize) * self.stride + (x as usize) * components;
         let backdrop = self.backdrop_alpha(x, y);
         blend(
@@ -432,7 +534,7 @@ impl Canvas {
     }
 
     /// Composites another canvas onto this one, `src`'s top-left landing at
-    /// `at` (11.3.6).
+    /// device pixel `at` (11.3.6).
     ///
     /// The missing primitive: a `Canvas` could be rendered into but never
     /// blitted onto another, so a transparency group had nowhere to go and a
@@ -445,7 +547,7 @@ impl Canvas {
     ///
     /// `alpha` scales the whole operation (`ca`/`CA` at the invoking `Do`),
     /// `mode` is the blend mode in force there, and `mask` multiplies in a
-    /// clip or a soft mask in *this* canvas's coordinates. `src`'s own alpha
+    /// clip or a soft mask, in device pixels like `at`. `src`'s own alpha
     /// is honoured, which is what makes a group buffer composite as a unit:
     /// the shape it painted comes from its alpha channel, not from a path.
     pub fn composite(
@@ -467,7 +569,12 @@ impl Canvas {
         }
 
         // The source rectangle, mapped into this canvas and clipped to it.
-        let (x0, y0, x1, y1) = place(at, src.width, src.height, self.width, self.height);
+        let (ox, oy) = self.origin;
+        let at_local = (
+            i64::from(at.0) - i64::from(ox),
+            i64::from(at.1) - i64::from(oy),
+        );
+        let (x0, y0, x1, y1) = place(at_local, src.width, src.height, self.width, self.height);
         let components = self.format.components();
         if mode.is_nonseparable() && self.format == PixelFormat::CmykA8 {
             self.approximated_blends = self.approximated_blends.saturating_add(1);
@@ -479,13 +586,15 @@ impl Canvas {
             for col in x0..x1 {
                 // `place` guarantees these subtractions stay in range.
                 let (sx, sy) = (
-                    (i64::from(col) - i64::from(at.0)) as u32,
-                    (i64::from(row) - i64::from(at.1)) as u32,
+                    (i64::from(col) - at_local.0) as u32,
+                    (i64::from(row) - at_local.1) as u32,
                 );
                 let Some((source, own)) = self.source_from(src, sx, sy) else {
                     continue;
                 };
-                let coverage = mask.map_or(255, |mask| u32::from(mask.at(col as i32, row as i32)));
+                let coverage = mask.map_or(255, |mask| {
+                    u32::from(mask.at(ox.saturating_add(col as i32), oy.saturating_add(row as i32)))
+                });
                 if coverage == 0 {
                     continue;
                 }
@@ -510,17 +619,24 @@ impl Canvas {
 
     /// A copy of a rectangle of this canvas, in `format`.
     ///
+    /// `at` is the rectangle's top-left in device pixels, and the copy stands
+    /// there: its [`Canvas::origin`] is `at`.
+    ///
     /// Pixels outside this canvas come back transparent, which is the right
     /// answer for a group whose bounding box hangs off the edge of the page:
     /// there is no backdrop out there to blend against.
     #[must_use]
     pub fn extract(&self, at: (i32, i32), width: u32, height: u32, format: PixelFormat) -> Canvas {
-        let mut out = Canvas::new(width, height, format, Color::TRANSPARENT);
+        let mut out = Canvas::new(width, height, format, Color::TRANSPARENT).at_origin(at.0, at.1);
         for row in 0..height {
             for col in 0..width {
                 let (Some(x), Some(y)) = (
-                    (i64::from(at.0) + i64::from(col)).try_into().ok(),
-                    (i64::from(at.1) + i64::from(row)).try_into().ok(),
+                    (i64::from(at.0) + i64::from(col) - i64::from(self.origin.0))
+                        .try_into()
+                        .ok(),
+                    (i64::from(at.1) + i64::from(row) - i64::from(self.origin.1))
+                        .try_into()
+                        .ok(),
                 ) else {
                     continue;
                 };
@@ -559,16 +675,22 @@ impl Canvas {
         if backdrop.width != self.width
             || backdrop.height != self.height
             || backdrop.format != self.format
+            || backdrop.origin != self.origin
         {
             return;
         }
+        // The backdrop's own bytes, through `source_from`'s same-format path —
+        // the formats are equal, checked above. Going through `pixel` and
+        // `encode` instead re-derived an ink buffer's ink from its light, and
+        // an ink page holds ink that light has no spelling for: a rich black
+        // the document chose came back as pure K, and a blend inside the group
+        // saw a backdrop the page never had.
         let channels = color_channels(self.format);
         for row in 0..self.height {
             for col in 0..self.width {
-                let Some(color) = backdrop.pixel(col, row) else {
+                let Some((pixel, _)) = self.source_from(&backdrop, col, row) else {
                     continue;
                 };
-                let pixel = self.encode(color);
                 let components = self.format.components();
                 let base = (row as usize) * self.stride + (col as usize) * components;
                 for (i, slot) in self.data.iter_mut().skip(base).take(channels).enumerate() {
@@ -612,7 +734,10 @@ impl Canvas {
                 // painted, which is the known instability of the removal step
                 // and is why every channel clamps.
                 let factor = (i64::from(initial) * 255 / i64::from(own)) - i64::from(initial);
-                let Some(base0) = backdrop.pixel(col, row).map(|c| backdrop.encode(c)) else {
+                // `C0` is the backdrop's own bytes, as `adopt_backdrop` copied
+                // them in: the backdrop is in this buffer's format, so this is
+                // `source_from`'s same-format read and no trip through light.
+                let Some((base0, _)) = self.source_from(&backdrop, col, row) else {
                     continue;
                 };
                 let base = (row as usize) * self.stride + (col as usize) * components;
@@ -643,6 +768,7 @@ impl Canvas {
             format: self.format,
             stride: self.stride,
             data: self.data.clone(),
+            origin: self.origin,
             backdrop: None,
             approximated_blends: 0,
         }
@@ -669,10 +795,13 @@ impl Canvas {
             return;
         }
         let components = self.format.components();
-        let (x0, y0, x1, y1) = mask.overlap(self.width, self.height);
+        let (x0, y0, x1, y1) = mask.overlap_at(self.origin, self.width, self.height);
+        let (ox, oy) = self.origin;
         for row in y0..y1 {
             for col in x0..x1 {
-                let coverage = u32::from(mask.at(col as i32, row as i32));
+                let coverage = u32::from(
+                    mask.at(ox.saturating_add(col as i32), oy.saturating_add(row as i32)),
+                );
                 if coverage == 0 {
                     continue;
                 }
@@ -816,15 +945,17 @@ impl Canvas {
 /// coordinate a content stream can name, and `at.0 + width` overflows an `i32`
 /// long before anything about it is unreasonable.
 fn place(
-    at: (i32, i32),
+    at: (i64, i64),
     width: u32,
     height: u32,
     dst_width: u32,
     dst_height: u32,
 ) -> (u32, u32, u32, u32) {
-    let span = |origin: i32, extent: u32, limit: u32| {
-        let lo = i64::from(origin).clamp(0, i64::from(limit)) as u32;
-        let hi = (i64::from(origin) + i64::from(extent)).clamp(0, i64::from(limit)) as u32;
+    let span = |origin: i64, extent: u32, limit: u32| {
+        let lo = origin.clamp(0, i64::from(limit)) as u32;
+        let hi = origin
+            .saturating_add(i64::from(extent))
+            .clamp(0, i64::from(limit)) as u32;
         (lo, hi.max(lo))
     };
     let (x0, x1) = span(at.0, width, dst_width);
@@ -898,11 +1029,15 @@ pub fn cmyk_to_rgb(c: u8, m: u8, y: u8, k: u8) -> (u8, u8, u8) {
 /// The other direction is *not* an identity, and the difference matters. A
 /// CMYK value that did not come from here — a rich black, say — comes back as
 /// the pure-K black with the same colour, because that is the only split this
-/// function produces. Nothing in this engine authors CMYK components: a source
-/// colour is flattened to sRGB at the resource seam long before a buffer sees
-/// it, so every CMYK value in a group buffer originated here and round-trips.
-/// The day components are carried through that seam, this comment is the one
-/// to revisit.
+/// function produces. And ink buffers hold such values: a DeviceCMYK colour
+/// reaches a [`PixelFormat::CmykA8`] canvas as the document's own components
+/// ([`Canvas::fill_mask_inked`], [`Canvas::blend_pixel_inked`]), so `1 1 1 1 k`
+/// is all four inks there, a value this function never returns. So nothing
+/// that copies an ink buffer into another of the same format may go through
+/// light and back — `source_from` reads the bytes across, and a non-isolated
+/// group's backdrop is adopted and removed that way — and the one place that
+/// must take the round trip, 11.3.5.3's non-separable blends, counts it as
+/// `approximated_blends`.
 #[must_use]
 pub fn rgb_to_cmyk(r: u8, g: u8, b: u8) -> (u8, u8, u8, u8) {
     let white = u32::from(r.max(g).max(b));
@@ -1304,6 +1439,68 @@ mod tests {
 
         assert_eq!(canvas.pixel(3, 3), Some(Color::BLACK), "inside");
         assert_eq!(canvas.pixel(0, 0), Some(Color::WHITE), "outside");
+    }
+
+    /// An ink canvas composites a colour's own ink when it is handed one, and
+    /// light turned into ink when it is not; any other canvas never reads the
+    /// ink. Black light becomes black ink alone — maximum undercolour removal
+    /// — where the ink it was chosen as may be all four.
+    #[test]
+    fn an_ink_canvas_composites_the_ink_it_is_handed() {
+        let mask = square_mask(0.0, 0.0, 4.0, 4.0, 4);
+        let rich = Some([255, 255, 255, 255]);
+        let at = |canvas: &Canvas| canvas.data[..5].to_vec();
+
+        let mut ink = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
+        ink.fill_mask_inked(&mask, Color::BLACK, rich, 1.0, BlendMode::Normal);
+        assert_eq!(at(&ink), [255, 255, 255, 255, 255], "the four inks");
+
+        let mut light = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
+        light.fill_mask_inked(&mask, Color::BLACK, None, 1.0, BlendMode::Normal);
+        assert_eq!(at(&light), [0, 0, 0, 255, 255], "black light is K");
+
+        let mut rgb = Canvas::new(4, 4, PixelFormat::Rgba8, Color::WHITE);
+        rgb.fill_mask_inked(&mask, Color::BLACK, rich, 1.0, BlendMode::Normal);
+        assert_eq!(&rgb.data[..4], &[0, 0, 0, 255], "light reads no ink");
+    }
+
+    /// A non-isolated group over ink starts from the backdrop's own ink and
+    /// takes the same ink out again (11.4.4, 11.4.7.2). A rich black is a value
+    /// `rgb_to_cmyk` never produces, so a backdrop copied through light came
+    /// in as pure K, and the removal step, reading it the same way, recovered
+    /// a colour the group never painted.
+    #[test]
+    fn a_backdrop_of_ink_is_adopted_and_removed_as_that_ink() {
+        let mask = square_mask(0.0, 0.0, 4.0, 4.0, 4);
+        let mut page = Canvas::new(4, 4, PixelFormat::CmykA8, Color::WHITE);
+        page.fill_mask_inked(
+            &mask,
+            Color::BLACK,
+            Some([255, 255, 255, 255]),
+            1.0,
+            BlendMode::Normal,
+        );
+
+        let mut group = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
+        group.adopt_backdrop(page.extract((0, 0), 4, 4, PixelFormat::CmykA8));
+        assert_eq!(
+            group.data[..5],
+            [255, 255, 255, 255, 0],
+            "the rich black, with none of the group's own alpha"
+        );
+
+        // Half of magenta, then the backdrop out: what is left is the group's
+        // own colour, magenta, whatever it was painted over.
+        let magenta = Color::rgb(255, 0, 255);
+        group.fill_mask_inked(&mask, magenta, Some([0, 255, 0, 0]), 0.5, BlendMode::Normal);
+        group.remove_backdrop();
+        let own = &group.data[..4];
+        assert!(
+            own.iter()
+                .zip([0u8, 255, 0, 0])
+                .all(|(got, want)| got.abs_diff(want) <= 3),
+            "the group's own ink is magenta, got {own:?}"
+        );
     }
 
     #[test]

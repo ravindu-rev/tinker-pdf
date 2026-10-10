@@ -334,21 +334,19 @@ fn a_root_with_no_size_takes_the_viewport_it_was_given() {
 /// refused list without a warning fails here rather than passing a test about
 /// the ones that are left.
 ///
-/// **`<clipPath>` left this list at milestone 4** and the fixture still holds
-/// one, which is the point: it is now reached by reference like a `<defs>`
-/// child and draws nothing where it stands, so an element that produced a
-/// warning here again would mean the walk had started rendering it.
+/// **`<clipPath>` left this list at milestone 4, and `<marker>` after the
+/// milestones**, and the fixture still holds one of each, which is the point:
+/// both are reached by reference like a `<defs>` child and draw nothing where
+/// they stand, so an element that produced a warning here again would mean
+/// the walk had started rendering it.
 #[test]
 fn every_named_non_goal_is_a_warning_that_says_which() {
     let scene = scene(NON_GOALS, Some((100.0, 100.0)));
     let expected = [
         Warning::FilterUnsupported,
-        Warning::MaskUnsupported,
-        Warning::PatternUnsupported,
         Warning::ForeignObjectUnsupported,
         Warning::AnimationIgnored,
         Warning::ScriptIgnored,
-        Warning::MarkerUnsupported,
         Warning::ElementUnknown("nonsuch".to_owned()),
     ];
     for warning in &expected {
@@ -392,7 +390,7 @@ fn a_disabled_subtree_is_not_walked_at_all() {
         scene.warnings
     );
     assert!(
-        !scene.warnings.contains(&Warning::MaskUnsupported),
+        !scene.warnings.contains(&Warning::ForeignObjectUnsupported),
         "a degenerate viewBox kept the walk out: {:?}",
         scene.warnings
     );
@@ -454,27 +452,67 @@ fn warnings_are_deduplicated_and_capped() {
 /// `tests/shapes.rs` is where it is held.
 #[test]
 fn a_nested_viewport_with_no_area_draws_nothing() {
-    // The probe is a `<mask>` inside the innermost viewport: it is reached
+    // The probe is a `<foreignObject>` inside the innermost viewport: it is reached
     // only if the walk went in at all.
     let markup = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
       <svg width="10%" height="10%">
-        <svg width="5%" height="5%"><mask id="deep"/></svg>
+        <svg width="5%" height="5%"><foreignObject id="deep"/></svg>
       </svg>
     </svg>"#;
     let nested = scene(markup, Some((100.0, 100.0)));
     assert!(
-        nested.warnings.contains(&Warning::MaskUnsupported),
+        nested.warnings.contains(&Warning::ForeignObjectUnsupported),
         "every viewport on the way down has an area: {:?}",
         nested.warnings
     );
 
     let empty = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
-      <svg width="0%" height="10%"><mask id="deep"/></svg>
+      <svg width="0%" height="10%"><foreignObject id="deep"/></svg>
     </svg>"#;
     assert!(
         !scene(empty, Some((100.0, 100.0)))
             .warnings
-            .contains(&Warning::MaskUnsupported),
+            .contains(&Warning::ForeignObjectUnsupported),
         "a viewport of no width is not entered"
     );
+}
+
+/// A product of finite numbers past a double's range is **not drawn**, and is
+/// named.
+///
+/// `scale(1e300)` inside `scale(1e300)` is two legal transforms, each finite
+/// where it was read, and a rectangle under both has infinite corners — which
+/// reach a consumer as a rasterizer with nothing to draw and a file that
+/// looked ordinary. The fuzz target asserts every number in a scene is
+/// finite; this is the document it would have found. The line carries a
+/// marker because a shape with markers is assembled with them rather than
+/// pushed alone, and both have to be checked. The shape beside the two groups
+/// is unaffected.
+#[test]
+fn a_product_past_a_doubles_range_is_not_drawn_and_is_named() {
+    let markup = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+      <defs><marker id="m" markerUnits="userSpaceOnUse"><rect width="1" height="1"/></marker></defs>
+      <g transform="scale(1e300)"><g transform="scale(1e300)">
+        <rect width="1" height="1"/>
+        <image width="1" height="1" href="a.png"/>
+        <line x1="0" y1="0" x2="1" y2="0" stroke="black" marker-end="url(#m)"/>
+      </g></g>
+      <rect width="1" height="1"/>
+      <path d="M0 0 L1e308 0" transform="scale(10)" stroke="black" marker-start="url(#m)"/>
+    </svg>"#;
+    let scene = scene(markup, Some((100.0, 100.0)));
+    // The ordinary rectangle, and the path's start marker — which sits at the
+    // origin, where ten times nothing is still finite — but not the path,
+    // whose far end is ten times 1e308.
+    assert_eq!(scene.nodes.len(), 2, "{:?}", scene.nodes);
+    assert!(matches!(scene.nodes[0], tinker_pdf_svg::Node::Path { .. }));
+    assert!(
+        matches!(
+            &scene.nodes[1],
+            tinker_pdf_svg::Node::Group { clip: Some(_), .. }
+        ),
+        "the marker, clipped to its viewport: {:?}",
+        scene.nodes[1]
+    );
+    assert_eq!(scene.warnings, [Warning::GeometryOverflow]);
 }

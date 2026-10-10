@@ -545,9 +545,24 @@ pub struct ImageDraw<'a> {
     /// What a one-bit stencil needs, expressed without naming one: the image
     /// says *where*, the caller says *what*.
     pub tint: Option<Color>,
+    /// The tint's own ink — cyan, magenta, yellow and black as bytes, the
+    /// components it was chosen in — which a [`crate::PixelFormat::CmykA8`]
+    /// canvas composites in place of the tint turned back into ink, as
+    /// [`Canvas::fill_mask_inked`] does for a fill. Read only with a `tint`,
+    /// and only by an ink canvas.
+    pub ink: Option<[u8; 4]>,
     /// Asked once per destination row; drawing stops as soon as it answers
     /// `true`.
     pub stop: Option<&'a dyn Fn() -> bool>,
+    /// Whether the image's own edge is anti-aliased.
+    ///
+    /// `false` hardens the unit square's coverage through [`Mask::harden`],
+    /// the same threshold every path takes when anti-aliasing is off, so an
+    /// image edge and a filled edge beside it still agree about which pixels
+    /// are in. Only the *edge*: the samples inside are resampled exactly as
+    /// before, because what a pixel's colour is and whether the pixel is
+    /// covered at all are different questions.
+    pub antialias: bool,
 }
 
 impl<'a> ImageDraw<'a> {
@@ -562,7 +577,9 @@ impl<'a> ImageDraw<'a> {
             blend: BlendMode::Normal,
             clip: None,
             tint: None,
+            ink: None,
             stop: None,
+            antialias: true,
         }
     }
 }
@@ -577,23 +594,23 @@ impl<'a> ImageDraw<'a> {
 /// throw them away, or keep one beside the image to reuse them.
 pub fn draw_image(canvas: &mut Canvas, draw: &ImageDraw<'_>, pyramid: &mut Pyramid) {
     let alpha = draw.alpha.clamp(0.0, 1.0);
-    let (width, height) = (canvas.width, canvas.height);
-    walk(
-        draw,
-        pyramid,
-        width,
-        height,
-        |px, py, color, covered, own| {
-            let clip = draw.clip.map_or(255, |mask| mask.at(px as i32, py as i32));
-            if clip == 0 {
-                return;
-            }
-            let effective = alpha * f64::from(covered) / 255.0 * f64::from(own) / 255.0
-                * f64::from(clip)
-                / 255.0;
-            canvas.blend_pixel_with(px, py, color, effective, draw.blend);
-        },
-    );
+    // The canvas's own device pixels, which is all a draw can reach. The walk
+    // is in device pixels — the frame every placement is stated in — and only
+    // the write below turns one into a canvas index (ruling 5).
+    let rect = canvas.device_rect();
+    let ink = draw.tint.and(draw.ink);
+    walk(draw, pyramid, rect, |px, py, color, covered, own| {
+        let clip = draw.clip.map_or(255, |mask| mask.at(px, py));
+        if clip == 0 {
+            return;
+        }
+        let Some((x, y)) = canvas.local(px, py) else {
+            return;
+        };
+        let effective =
+            alpha * f64::from(covered) / 255.0 * f64::from(own) / 255.0 * f64::from(clip) / 255.0;
+        canvas.blend_pixel_inked(x, y, color, ink, effective, draw.blend);
+    });
 }
 
 /// Adds an image draw to a run instead of compositing it.
@@ -603,41 +620,44 @@ pub fn draw_image(canvas: &mut Canvas, draw: &ImageDraw<'_>, pyramid: &mut Pyram
 /// element for compositing purposes, which is the whole reason abutting strips
 /// stop conflating. See [`crate::fragments`].
 ///
-/// `bounds` is the canvas extent the draw is clipped to, which is the same
+/// `canvas` is the device rectangle the draw is clipped to, as `(x0, y0,
+/// width, height)` — the canvas's [`Canvas::device_rect`], which is the same
 /// extent [`draw_image`] would have used.
 pub fn accumulate_image(
     fragments: &mut Fragments,
     draw: &ImageDraw<'_>,
     pyramid: &mut Pyramid,
-    canvas: (u32, u32),
+    canvas: (i32, i32, u32, u32),
 ) {
-    walk(
-        draw,
-        pyramid,
-        canvas.0,
-        canvas.1,
-        |px, py, color, covered, own| {
-            fragments.add(
-                px,
-                py,
-                color,
-                mul255(u32::from(covered), u32::from(own)) as u8,
-            );
-        },
-    );
+    walk(draw, pyramid, canvas, |px, py, color, covered, own| {
+        fragments.add(
+            px,
+            py,
+            color,
+            mul255(u32::from(covered), u32::from(own)) as u8,
+        );
+    });
 }
 
-/// The device pixels an image draw can reach, as `(x0, y0, width, height)`.
+/// The device pixels an image draw can reach on a canvas at the origin, as
+/// `(x0, y0, width, height)`.
 ///
 /// What a caller needs to size a run before accumulating into one, and the
 /// same rectangle the draw itself will visit.
 #[must_use]
 pub fn image_bounds(t: &Transform, width: u32, height: u32) -> Option<(i32, i32, u32, u32)> {
-    let (x0, x1, y0, y1) = device_bounds(t, width, height)?;
+    image_bounds_in(t, (0, 0, width, height))
+}
+
+/// [`image_bounds`] against a canvas's device rectangle, `(x0, y0, width,
+/// height)`, wherever it stands.
+#[must_use]
+pub fn image_bounds_in(t: &Transform, rect: (i32, i32, u32, u32)) -> Option<(i32, i32, u32, u32)> {
+    let (x0, x1, y0, y1) = device_bounds(t, rect)?;
     if x1 <= x0 || y1 <= y0 {
         return None;
     }
-    Some((x0 as i32, y0 as i32, x1 - x0, y1 - y0))
+    Some((x0, y0, x1.abs_diff(x0), y1.abs_diff(y0)))
 }
 
 /// The coverage an image draw puts on each device pixel of a region.
@@ -670,9 +690,8 @@ pub fn image_coverage(
 fn walk(
     draw: &ImageDraw<'_>,
     pyramid: &mut Pyramid,
-    width: u32,
-    height: u32,
-    mut emit: impl FnMut(u32, u32, Color, u8, u8),
+    rect: (i32, i32, u32, u32),
+    mut emit: impl FnMut(i32, i32, Color, u8, u8),
 ) {
     let image = &draw.image;
     if image.width == 0 || image.height == 0 {
@@ -682,7 +701,7 @@ fn walk(
         return; // A degenerate transform maps the image to nothing.
     };
 
-    let Some((x0, x1, y0, y1)) = device_bounds(&draw.unit_to_device, width, height) else {
+    let Some((x0, x1, y0, y1)) = device_bounds(&draw.unit_to_device, rect) else {
         return;
     };
 
@@ -702,14 +721,17 @@ fn walk(
     // measured a second time here, so an image edge anti-aliases exactly as a
     // filled path does — same sub-scanline grid, same fixed point, same
     // cancellation. `docs/design/image-edges.md` records what this trades.
-    let shape = unit_quad(
+    let mut shape = unit_quad(
         &draw.unit_to_device,
-        x0 as i32,
-        y0 as i32,
-        x1 - x0,
-        y1 - y0,
+        x0,
+        y0,
+        x1.abs_diff(x0),
+        y1.abs_diff(y0),
         draw.stop,
     );
+    if !draw.antialias {
+        shape.harden();
+    }
 
     let sampling = sampling_for(image, &draw.unit_to_device, draw.interpolate);
     let filter = sampling.filter;
@@ -722,7 +744,7 @@ fn walk(
             return;
         }
         for px in x0..x1 {
-            let covered = shape.at(px as i32, py as i32);
+            let covered = shape.at(px, py);
             if covered == 0 {
                 continue;
             }
@@ -819,8 +841,13 @@ fn unit_quad(
     )
 }
 
-/// The destination pixels the unit square can reach, clipped to the canvas.
-fn device_bounds(t: &Transform, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
+/// The destination pixels the unit square can reach, clipped to the canvas's
+/// device rectangle, as `(x0, x1, y0, y1)` with the far edges exclusive.
+///
+/// Each edge is clamped into the rectangle independently, so an image wholly
+/// off one side comes back with its far edge at or below its near one — which
+/// every caller reads as "nothing to draw".
+fn device_bounds(t: &Transform, rect: (i32, i32, u32, u32)) -> Option<(i32, i32, i32, i32)> {
     let corners = [
         t.apply(0.0, 0.0),
         t.apply(1.0, 0.0),
@@ -835,10 +862,20 @@ fn device_bounds(t: &Transform, width: u32, height: u32) -> Option<(u32, u32, u3
     }
     let xs = corners.iter().map(|(x, _)| *x);
     let ys = corners.iter().map(|(_, y)| *y);
-    let x0 = xs.clone().fold(f64::INFINITY, f64::min).floor().max(0.0) as u32;
-    let x1 = (xs.fold(f64::NEG_INFINITY, f64::max).ceil().max(0.0) as u32).min(width);
-    let y0 = ys.clone().fold(f64::INFINITY, f64::min).floor().max(0.0) as u32;
-    let y1 = (ys.fold(f64::NEG_INFINITY, f64::max).ceil().max(0.0) as u32).min(height);
+    let (left, top) = (f64::from(rect.0), f64::from(rect.1));
+    let right = left + f64::from(rect.2);
+    let bottom = top + f64::from(rect.3);
+    // In `f64` until the clamp is done: a corner at 1e300 must land on the
+    // canvas edge rather than saturate somewhere past it. Both ends of the
+    // clamp are integers well inside `i32`, so the conversion is exact.
+    let x0 = xs.clone().fold(f64::INFINITY, f64::min).floor().max(left);
+    let x1 = xs.fold(f64::NEG_INFINITY, f64::max).ceil().min(right);
+    let y0 = ys.clone().fold(f64::INFINITY, f64::min).floor().max(top);
+    let y1 = ys.fold(f64::NEG_INFINITY, f64::max).ceil().min(bottom);
+    let x0 = x0.min(right) as i32;
+    let y0 = y0.min(bottom) as i32;
+    let x1 = x1.max(left) as i32;
+    let y1 = y1.max(top) as i32;
     Some((x0, x1, y0, y1))
 }
 
@@ -1081,6 +1118,59 @@ mod tests {
         );
     }
 
+    /// With anti-aliasing off, a rotated image's edge is whole or absent at
+    /// every pixel — and the same draw with it on is not, so the fixture has
+    /// an edge worth hardening. One colour of samples, so every covered pixel
+    /// must be exactly that colour and every other one exactly the page.
+    #[test]
+    fn a_hard_edged_image_covers_each_pixel_wholly_or_not_at_all() {
+        let rgb = [0u8, 160, 40].repeat(4);
+        let image = ImageSource {
+            width: 2,
+            height: 2,
+            rgb: &rgb,
+            alpha: &[],
+        };
+        // A quarter of a turn and a bit, with a translation off the grid.
+        let placement = Transform {
+            a: 20.0,
+            b: 11.0,
+            c: -11.0,
+            d: 20.0,
+            e: 17.3,
+            f: 4.6,
+        };
+        let render = |antialias: bool| {
+            let mut canvas = Canvas::new(48, 48, PixelFormat::Rgb8, Color::WHITE);
+            let draw = ImageDraw {
+                antialias,
+                ..ImageDraw::new(image, placement)
+            };
+            draw_image(&mut canvas, &draw, &mut Pyramid::new());
+            canvas
+        };
+        let partial = |canvas: &Canvas| {
+            canvas
+                .data
+                .chunks_exact(3)
+                .filter(|p| *p != [255, 255, 255] && *p != [0, 160, 40])
+                .count()
+        };
+        let (soft, hard) = (render(true), render(false));
+        assert!(partial(&soft) > 20, "the soft edge has partial pixels");
+        assert_eq!(partial(&hard), 0, "the hard edge has none");
+        let inked = hard
+            .data
+            .chunks_exact(3)
+            .filter(|p| *p == [0, 160, 40])
+            .count();
+        // The quad's area is 20² + 11² = 521 pixels.
+        assert!(
+            inked.abs_diff(521) < 30,
+            "a hard edge keeps the image's area, {inked} against 521"
+        );
+    }
+
     #[test]
     fn a_one_to_one_blit_preserves_every_byte() {
         let rgb = ramp(8);
@@ -1159,6 +1249,53 @@ mod tests {
 
         assert_eq!(canvas.pixel(0, 0), Some(Color::WHITE), "still transparent");
         assert_eq!(canvas.pixel(3, 0), Some(Color::rgb(255, 0, 0)), "tinted");
+    }
+
+    /// A tint's own ink reaches an ink canvas, drawn directly and through a
+    /// run alike; without a tint, or on a light canvas, it is never read.
+    /// The tint is black light, which maximum undercolour removal would make
+    /// black ink alone, and the ink it was chosen as is all four.
+    #[test]
+    fn an_ink_canvas_composites_a_tint_s_own_ink() {
+        let rgb = vec![0u8; 3];
+        let image = ImageSource {
+            width: 1,
+            height: 1,
+            rgb: &rgb,
+            alpha: &[255],
+        };
+        let rich = Some([255, 255, 255, 255]);
+        let at = |canvas: &Canvas| canvas.data[..5].to_vec();
+
+        let mut draw = ImageDraw::new(image, over(4.0));
+        draw.tint = Some(Color::BLACK);
+        draw.ink = rich;
+        let mut direct = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
+        draw_image(&mut direct, &draw, &mut Pyramid::new());
+        assert_eq!(at(&direct), [255, 255, 255, 255, 255], "drawn directly");
+
+        let mut run = Fragments::new(0, 0, 4, 4);
+        accumulate_image(&mut run, &draw, &mut Pyramid::new(), (0, 0, 4, 4));
+        let mut held = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
+        run.composite_region_inked(
+            &mut held,
+            (0, 0, 4, 4),
+            1.0,
+            BlendMode::Normal,
+            None,
+            rich,
+            None,
+        );
+        assert_eq!(at(&held), [255, 255, 255, 255, 255], "through a run");
+
+        let mut light = Canvas::new(4, 4, PixelFormat::Rgb8, Color::WHITE);
+        draw_image(&mut light, &draw, &mut Pyramid::new());
+        assert_eq!(light.pixel(0, 0), Some(Color::BLACK), "light reads no ink");
+
+        draw.tint = None;
+        let mut untinted = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
+        draw_image(&mut untinted, &draw, &mut Pyramid::new());
+        assert_eq!(at(&untinted), [0, 0, 0, 255, 255], "no tint, no ink");
     }
 
     #[test]

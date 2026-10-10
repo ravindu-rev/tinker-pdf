@@ -29,6 +29,33 @@
 //! | an `<image>` is not fitted by `preserveAspectRatio` | 1 |
 //! | an unresolved `<image>` is not counted | 1 |
 //! | `text-anchor`'s shift is not applied | 2 |
+//! | a translucent group is drawn inline, each node at full alpha | 1 |
+//! | a group's form is painted under the page mapping | 1 |
+//! | a group's clip is not written | 1 |
+//! | the leaf crate draws no marker instance | 1 |
+//! | `reflect` and `repeat` are written as `pad` | 3 |
+//! | the leaf crate reads `repeat` as `reflect` | 2 |
+//! | a reflected period is not turned back | 1 |
+//! | a linear domain reaches only the stated axis | 2 |
+//! | a radial gradient's rings stop at the stated circle | 1 |
+//! | a `y`-only chunk resets the pen's `x` | 1 |
+//! | a glyph's rotation is applied after the move to its origin | 1 |
+//! | a mask's `gs` is set under the page mapping | 1 |
+//! | a mask's colours are not turned to their grey | 1 |
+//! | the mask region is not clipped | 1 |
+//! | a masked group is drawn unmasked | 4 |
+//! | a pattern's tile does not carry the page mapping | 1 |
+//! | a pattern is painted as nothing | 1 |
+//! | the registry does not note a tile's runs | 1 |
+//! | the registry does not note a mask's runs | 1 |
+//! | a mask with no region is clipped to nothing | 1 |
+//! | the reader ignores a container's `clip-path`, as it did until groups | 1 |
+//!
+//! The form row fired **zero** the first time: its fixture's shapes covered
+//! the page top to bottom, and the page mapping composed twice is a flip
+//! composed twice — the identity, on a square page — so the shapes landed
+//! where they belonged. They cover the top half now, and the bottom half has
+//! to be white.
 //!
 //! The first row is the one this file exists for. **It was a real defect, not
 //! a hypothetical**: `begin_page` snapshots the document's resource set, so the
@@ -50,6 +77,7 @@ mod cbz_support;
 mod epub_support;
 
 use cbz_support::rgb_png;
+use epub_support::typeface::covering;
 use epub_support::{ocf_zip, OcfEntry};
 use tinker_pdf::epub::SpineDefect;
 use tinker_pdf::{ArchiveWarning, Document, OpenOptions, RenderOptions};
@@ -143,6 +171,34 @@ fn text_origins(doc: &Document) -> Vec<f64> {
                 if (a, b, c, d) == ("1", "0", "0", "-1") {
                     previous = e.parse().ok();
                 }
+            }
+        }
+    }
+    out
+}
+
+/// The whole `cm` that immediately precedes each text object, as six numbers
+/// — [`text_origins`]' reading, for runs that are turned as well as moved.
+fn text_matrices(doc: &Document) -> Vec<[f64; 6]> {
+    let pdf = doc.editor().save(&Default::default());
+    let text = String::from_utf8_lossy(&pdf);
+    let mut out = Vec::new();
+    let mut previous: Option<[f64; 6]> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("BT ") {
+            if let Some(matrix) = previous.take() {
+                out.push(matrix);
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_suffix(" cm") {
+            let numbers: Vec<f64> = rest
+                .split_whitespace()
+                .filter_map(|n| n.parse().ok())
+                .collect();
+            if let [a, b, c, d, e, f] = numbers[..] {
+                previous = Some([a, b, c, d, e, f]);
             }
         }
     }
@@ -337,6 +393,586 @@ fn a_gradients_matrix_carries_the_page_mapping() {
     );
 }
 
+/// The red channel along the page's middle row, at fractions of its width.
+fn row(doc: &Document, at: &[f64]) -> Vec<u8> {
+    at.iter().map(|x| rgb_at(doc, *x, 0.5)[0]).collect()
+}
+
+/// A black-to-white ramp fifty wide, across a rectangle two hundred wide, with
+/// the given `spreadMethod`.
+fn spread_page(method: &str) -> Document {
+    square(&format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <defs>
+                <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="50" y2="0"
+                                spreadMethod="{method}">
+                  <stop offset="0" stop-color="#000000"/>
+                  <stop offset="1" stop-color="#ffffff"/>
+                </linearGradient>
+              </defs>
+              <rect width="200" height="200" fill="url(#g)"/>
+            </svg>"##
+    ))
+}
+
+/// §13.2.3's `repeat`: the ramp again from its start, every fifty units.
+///
+/// Sampled a fifth of a period into each of the first three periods (x = 10,
+/// 60 and 110) and four fifths in (x = 40, 90, 140): dark, dark, dark and
+/// light, light, light. Padded — what this build drew until now — everything
+/// past fifty is the last stop's white.
+#[test]
+fn a_repeated_gradient_starts_again_every_period() {
+    let doc = spread_page("repeat");
+    let early = row(&doc, &[0.05, 0.3, 0.55]);
+    let late = row(&doc, &[0.2, 0.45, 0.7]);
+    for value in &early {
+        assert!((40..=62).contains(value), "a fifth of the way: {early:?}");
+    }
+    for value in &late {
+        assert!(
+            (193..=215).contains(value),
+            "four fifths of the way: {late:?}"
+        );
+    }
+}
+
+/// §13.2.3's `reflect`: forwards, then backwards, then forwards.
+///
+/// A fifth into the second period (x = 60) is the ramp read **backwards**, so
+/// it is light where `repeat` is dark; a fifth into the third (x = 110) is
+/// forwards again and dark.
+#[test]
+fn a_reflected_gradient_runs_back_on_every_other_period() {
+    let doc = spread_page("reflect");
+    let [first, second, third] = row(&doc, &[0.05, 0.3, 0.55])[..] else {
+        unreachable!("three samples")
+    };
+    assert!((40..=62).contains(&first), "forwards: {first}");
+    assert!((193..=215).contains(&second), "backwards: {second}");
+    assert!((40..=62).contains(&third), "forwards again: {third}");
+}
+
+/// `pad`, the initial value, is unchanged: the last stop's white past the axis.
+#[test]
+fn a_padded_gradient_is_its_end_colour_past_the_axis() {
+    let doc = spread_page("pad");
+    for value in row(&doc, &[0.3, 0.55, 0.9]) {
+        assert!(value > 0xF0, "white past the axis: {value}");
+    }
+}
+
+/// `repeat` on a **radial** gradient is rings: the stated circle, and then a
+/// second ring as wide outside it, from black again.
+///
+/// The circle is twenty in radius at the page's centre, so a sample four
+/// units out and one twenty-four units out are both a fifth into a period —
+/// dark — and sixteen and thirty-six units out are both four fifths — light.
+#[test]
+fn a_repeated_radial_gradient_is_rings() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <defs>
+                <radialGradient id="g" gradientUnits="userSpaceOnUse" cx="100" cy="100" r="20"
+                                spreadMethod="repeat">
+                  <stop offset="0" stop-color="#000000"/>
+                  <stop offset="1" stop-color="#ffffff"/>
+                </radialGradient>
+              </defs>
+              <rect width="200" height="200" fill="url(#g)"/>
+            </svg>"##,
+    );
+    let at = |units: f64| rgb_at(&doc, (100.0 + units) / 200.0, 0.5)[0];
+    for units in [4.0, 24.0] {
+        let value = at(units);
+        assert!((40..=70).contains(&value), "{units} out, dark: {value}");
+    }
+    for units in [16.0, 36.0] {
+        let value = at(units);
+        assert!((185..=215).contains(&value), "{units} out, light: {value}");
+    }
+}
+
+// ---- §14.5's groups --------------------------------------------------------------
+
+/// A page's colour at a fraction of its width and height, as `[r, g, b]`.
+fn rgb_at(doc: &Document, x: f64, y: f64) -> [u8; 3] {
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    let components = bitmap.components();
+    let width = bitmap.width as usize;
+    let height = bitmap.height as usize;
+    let column = ((width as f64 * x) as usize).min(width - 1);
+    let row = ((height as f64 * y) as usize).min(height - 1);
+    let at = (row * width + column) * components;
+    if components >= 3 {
+        [bitmap.data[at], bitmap.data[at + 1], bitmap.data[at + 2]]
+    } else {
+        [bitmap.data[at]; 3]
+    }
+}
+
+fn square(svg: &str) -> Document {
+    Document::open_with(book(svg, &[]), &OpenOptions::at_page(200.0, 200.0))
+        .expect("the book opens")
+}
+
+/// **A group's opacity is composited once**, which is the whole of §14.5.
+///
+/// A red and a blue rectangle overlap inside one `<g opacity="0.5">`. Inside
+/// the group the blue covers the red, so where they overlap the group is
+/// *blue*, and faded once over white that is `(128, 128, 255)`. Faded one
+/// shape at a time — which is what this build drew until the group became a
+/// node — the blue is laid at a half over a red already laid at a half, and
+/// the overlap is a purple `(128, 64, 191)` the file never described.
+#[test]
+fn a_groups_opacity_is_composited_once() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <g opacity="0.5">
+                <rect x="0" y="0" width="120" height="200" fill="#ff0000"/>
+                <rect x="80" y="0" width="120" height="200" fill="#0000ff"/>
+              </g>
+            </svg>"##,
+    );
+    let red = rgb_at(&doc, 0.2, 0.5);
+    let overlap = rgb_at(&doc, 0.5, 0.5);
+    let blue = rgb_at(&doc, 0.8, 0.5);
+    let near = |got: [u8; 3], want: [u8; 3]| {
+        got.iter()
+            .zip(want)
+            .all(|(g, w)| (i32::from(*g) - i32::from(w)).abs() <= 3)
+    };
+    assert!(
+        near(red, [255, 128, 128]),
+        "red at a half over white: {red:?}"
+    );
+    assert!(
+        near(blue, [128, 128, 255]),
+        "blue at a half over white: {blue:?}"
+    );
+    assert!(
+        near(overlap, [128, 128, 255]),
+        "and where they overlap, the group is blue before it is faded: {overlap:?}"
+    );
+}
+
+/// A shape and its gradient **inside a group's form** land where they would
+/// outside it.
+///
+/// 8.7.3.1 reads a pattern used in a form against the form's default space at
+/// the moment it is painted, and this writer paints every form with the page's
+/// own default space in force so that the two are one. The shapes cover only
+/// the **top** half of the drawing, so a form painted under the page mapping —
+/// which composes the flip twice — puts them in the bottom half, where the
+/// page must be white; and the axis is vertical, for
+/// `a_gradients_matrix_carries_the_page_mapping`'s reason.
+#[test]
+fn a_gradient_inside_a_group_keeps_the_page_mapping() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <defs>
+                <linearGradient id="down" gradientUnits="userSpaceOnUse"
+                                x1="0" y1="0" x2="0" y2="200">
+                  <stop offset="0" stop-color="#ffffff"/>
+                  <stop offset="1" stop-color="#000000"/>
+                </linearGradient>
+              </defs>
+              <g opacity="0.999">
+                <rect x="0" y="0" width="100" height="100" fill="url(#down)"/>
+                <rect x="100" y="0" width="100" height="100" fill="url(#down)"/>
+              </g>
+            </svg>"##,
+    );
+    let head = rgb_at(&doc, 0.25, 0.05)[0];
+    let middle = rgb_at(&doc, 0.25, 0.45)[0];
+    let foot = rgb_at(&doc, 0.25, 0.9)[0];
+    assert!(
+        head > 0xD8 && middle < 0xA0 && head > middle,
+        "the ramp runs light to dark down the top half, inside the group as \
+         outside: {head} at the head, {middle} at the middle"
+    );
+    assert!(foot > 0xF0, "and the bottom half is the page: {foot}");
+}
+
+/// §14.3.5: a `clip-path` on a `<g>` clips the group's rendering.
+///
+/// It used to clip nothing: the property does not inherit, so the children
+/// were drawn whole and the clip — on an element that is not a shape — went
+/// nowhere. The left half of a black square is kept and the right is white.
+#[test]
+fn a_groups_clip_path_reaches_the_page() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <clipPath id="left"><rect width="100" height="200"/></clipPath>
+              <g clip-path="url(#left)">
+                <rect width="200" height="200" fill="#000000"/>
+              </g>
+            </svg>"##,
+    );
+    assert!(rgb_at(&doc, 0.25, 0.5)[0] < 0x40, "the left half is kept");
+    assert!(
+        rgb_at(&doc, 0.75, 0.5)[0] > 0xC0,
+        "and the right half is clipped away"
+    );
+}
+
+// ---- §14.3.5's clip paths of `<use>` and `<text>` ------------------------------
+
+/// **A clip of a shape and a run reaches the page as the mask of both.**
+///
+/// The left half of the clip is a rectangle and the right half holds a word.
+/// A standard-14 face draws no outline in this build, so the word's half is
+/// white either way; what is asserted is that the shape's half of the union
+/// keeps the blue under it, the word is written into the mask, and its face
+/// is one the file holds.
+#[test]
+fn a_clip_of_a_shape_and_text_masks_by_both() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <clipPath id="c">
+                <rect width="100" height="200"/>
+                <text x="120" y="100" font-family="serif" font-size="40">Clip</text>
+              </clipPath>
+              <rect width="200" height="200" fill="#0000ff" clip-path="url(#c)"/>
+            </svg>"##,
+    );
+    assert_eq!(rgb_at(&doc, 0.25, 0.5), [0, 0, 255], "inside the rectangle");
+    assert_eq!(rgb_at(&doc, 0.75, 0.1), [255, 255, 255], "outside both");
+    let pdf = doc.editor().save(&Default::default());
+    let text = String::from_utf8_lossy(&pdf);
+    assert!(text.contains("/Luminosity"), "a luminosity mask is written");
+    let fonts = fonts_named_and_defined(&doc);
+    assert!(!fonts.is_empty(), "the word is written into the mask");
+    assert!(fonts.iter().all(|(_, defined)| *defined), "{fonts:?}");
+}
+
+/// A `<use>` of a shape in a clip is that shape, and clips like one.
+#[test]
+fn a_use_in_a_clip_clips_like_its_shape() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <defs><rect id="r" width="100" height="200"/></defs>
+              <clipPath id="c"><use href="#r" x="100"/></clipPath>
+              <rect width="200" height="200" fill="#0000ff" clip-path="url(#c)"/>
+            </svg>"##,
+    );
+    assert_eq!(
+        rgb_at(&doc, 0.25, 0.5),
+        [255, 255, 255],
+        "left of the moved square"
+    );
+    assert_eq!(rgb_at(&doc, 0.75, 0.5), [0, 0, 255], "inside it");
+}
+
+// ---- §13.3's patterns ---------------------------------------------------------
+
+/// Every font resource a `Tf` names in the saved file, and whether a `/Font`
+/// dictionary somewhere defines it.
+fn fonts_named_and_defined(doc: &Document) -> Vec<(String, bool)> {
+    let pdf = doc.editor().save(&Default::default());
+    let text = String::from_utf8_lossy(&pdf);
+    let mut named: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        for (at, word) in words.iter().enumerate() {
+            if *word == "Tf" && at >= 2 {
+                if let Some(font) = words[at - 2].strip_prefix('/') {
+                    if !named.iter().any(|n| n == font) {
+                        named.push(font.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    named
+        .into_iter()
+        .map(|font| {
+            let defined = text.split("/Font").skip(1).any(|after| {
+                let dictionary = after.split(">>").next().unwrap_or("");
+                dictionary.contains(&format!("/{font} "))
+            });
+            (font, defined)
+        })
+        .collect()
+}
+
+/// **Text that only a pattern's tile or a mask draws has its face
+/// registered.** The registry notes every run it will draw so that each face
+/// is written once; a run inside a tile or a mask was not noted, so its `Tf`
+/// named a resource no `/Font` dictionary held, and the text was gone.
+#[test]
+fn text_inside_a_tile_or_a_mask_names_a_font_the_file_has() {
+    for markup in [
+        r##"<pattern id="p" patternUnits="userSpaceOnUse" width="50" height="50">
+              <text x="5" y="20" font-family="serif" font-size="12">Tile</text>
+            </pattern>
+            <rect width="100" height="100" fill="url(#p)"/>"##,
+        r##"<mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+              <text x="5" y="20" font-family="serif" font-size="12" fill="white">Mask</text>
+            </mask>
+            <rect width="100" height="100" mask="url(#m)"/>"##,
+    ] {
+        let doc = open(&format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">{markup}</svg>"##
+        ));
+        let fonts = fonts_named_and_defined(&doc);
+        assert!(!fonts.is_empty(), "the run is written: {markup}");
+        assert!(
+            fonts.iter().all(|(_, defined)| *defined),
+            "{fonts:?} in {markup}"
+        );
+    }
+}
+
+/// **A pattern reaches the page as tiles**: a checkerboard twenty units a
+/// tile, black in its top-left and bottom-right quarters.
+///
+/// Sampled in the first tile and in the next one along and the next one
+/// down, so a tile that did not repeat, repeated at the wrong step, or came
+/// out upside down — the page mapping composed twice, or not at all — each
+/// puts black where white is asserted.
+#[test]
+fn a_pattern_fills_a_shape_with_its_tiles() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <pattern id="p" patternUnits="userSpaceOnUse" width="20" height="20">
+                <rect width="10" height="10" fill="#000000"/>
+                <rect x="10" y="10" width="10" height="10" fill="#000000"/>
+              </pattern>
+              <rect width="200" height="200" fill="url(#p)"/>
+            </svg>"##,
+    );
+    let at = |x: f64, y: f64| rgb_at(&doc, x / 200.0, y / 200.0)[0];
+    for (x, y, black) in [
+        (5.0, 5.0, true),
+        (15.0, 5.0, false),
+        (5.0, 15.0, false),
+        (15.0, 15.0, true),
+        (25.0, 5.0, true),
+        (35.0, 5.0, false),
+        (5.0, 25.0, true),
+        (125.0, 185.0, true),
+        (135.0, 185.0, false),
+        (135.0, 195.0, true),
+    ] {
+        let value = at(x, y);
+        if black {
+            assert!(value < 0x20, "black at ({x}, {y}): {value}");
+        } else {
+            assert!(value > 0xE0, "white at ({x}, {y}): {value}");
+        }
+    }
+}
+
+// ---- §14.4's masks ------------------------------------------------------------
+
+/// **A mask reaches the page**: what is under its white is kept, what is under
+/// its black is gone.
+///
+/// A black square fills the page; its mask is white on the left half and
+/// nothing — black, the backdrop — on the right.
+#[test]
+fn a_mask_keeps_what_is_under_its_white() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="200" height="200">
+                <rect width="100" height="200" fill="#ffffff"/>
+              </mask>
+              <rect width="200" height="200" fill="#000000" mask="url(#m)"/>
+            </svg>"##,
+    );
+    assert!(rgb_at(&doc, 0.25, 0.5)[0] < 0x10, "kept under the white");
+    assert!(
+        rgb_at(&doc, 0.75, 0.5)[0] > 0xF0,
+        "and gone under the black"
+    );
+}
+
+/// The mask lands **where the drawing is**, the right way up.
+///
+/// Its white covers the drawing's top half. 11.6.5.2 places a soft mask's
+/// group in the space in force when the `gs` is set, so a state set under the
+/// page mapping — which the mask's form then applies again — composes the
+/// flip twice and turns the mask over: the bottom kept and the top gone. A
+/// mask symmetric about the page's middle cannot see that, and the first
+/// three tests here are.
+#[test]
+fn a_mask_is_placed_the_right_way_up() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="200" height="200">
+                <rect width="200" height="100" fill="#ffffff"/>
+              </mask>
+              <rect width="200" height="200" fill="#000000" mask="url(#m)"/>
+            </svg>"##,
+    );
+    assert!(rgb_at(&doc, 0.5, 0.25)[0] < 0x10, "the top half is kept");
+    assert!(
+        rgb_at(&doc, 0.5, 0.75)[0] > 0xF0,
+        "and the bottom half is gone"
+    );
+}
+
+/// The mask is a **luminance**, and CSS Masking's: a pure green mask keeps
+/// 0.7154 of what is under it.
+///
+/// A black square under it is `255 × (1 − 0.7154) = 72.6` over white. Read by
+/// 11.6.5.3's own RGB weights the green would be 0.59 and the square 104 —
+/// which is why the writer turns every colour in a mask into its grey first.
+#[test]
+fn a_masks_luminance_is_css_maskings() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="200" height="200">
+                <rect width="200" height="200" fill="#00ff00"/>
+              </mask>
+              <rect width="200" height="200" fill="#000000" mask="url(#m)"/>
+            </svg>"##,
+    );
+    let value = rgb_at(&doc, 0.5, 0.5)[0];
+    assert!(
+        (68..=78).contains(&value),
+        "a black square kept at 0.7154: {value}"
+    );
+}
+
+/// The mask **region** bounds it, and outside the region the mask is black.
+///
+/// The mask's white covers the whole page, but its region — in user space, x
+/// from 0 to 100 — is half of it: the square keeps its left half and loses its
+/// right however white the content is there.
+#[test]
+fn a_masks_region_bounds_it() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="200">
+                <rect width="200" height="200" fill="#ffffff"/>
+              </mask>
+              <rect width="200" height="200" fill="#000000" mask="url(#m)"/>
+            </svg>"##,
+    );
+    assert!(rgb_at(&doc, 0.25, 0.5)[0] < 0x10, "inside the region");
+    assert!(
+        rgb_at(&doc, 0.75, 0.5)[0] > 0xF0,
+        "and outside it, black, however white the content"
+    );
+}
+
+// ---- §11.6's markers ----------------------------------------------------------
+
+/// **A marker reaches the page**: an arrowhead drawn past the end of a line.
+///
+/// The arrow is ten by ten in marker units with its reference at its back
+/// edge's middle, and `markerUnits` is the initial `strokeWidth`, so on a line
+/// four wide it is forty long — from x = 100, where the line ends, to 140. The
+/// page is white there unless the marker was drawn, because the line itself
+/// stops at 100.
+#[test]
+fn a_marker_is_drawn_at_the_end_of_its_line() {
+    let doc = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <defs>
+                <marker id="arrow" markerWidth="10" markerHeight="10" refX="0" refY="5"
+                        orient="auto">
+                  <path d="M0 0 L10 5 L0 10 z" fill="#000000"/>
+                </marker>
+              </defs>
+              <line x1="20" y1="100" x2="100" y2="100" stroke="#000000" stroke-width="4"
+                    marker-end="url(#arrow)"/>
+            </svg>"##,
+    );
+    assert!(rgb_at(&doc, 0.3, 0.5)[0] < 0x40, "the line is drawn");
+    assert!(
+        rgb_at(&doc, 0.6, 0.5)[0] < 0x40,
+        "and the arrowhead past its end: {:?}",
+        rgb_at(&doc, 0.6, 0.5)
+    );
+    assert!(
+        rgb_at(&doc, 0.75, 0.5)[0] > 0xC0,
+        "and nothing past the arrow's tip"
+    );
+}
+
+/// How many rows of one column of the page are dark, and the lengths of the
+/// dark and light runs along one row, from its left edge: a stroke's width
+/// and its dashes, read off the rendered page.
+fn dark_rows_and_runs(doc: &Document, column: f64, row: f64) -> (usize, Vec<(bool, usize)>) {
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    let components = bitmap.components();
+    let width = bitmap.width as usize;
+    let height = bitmap.height as usize;
+    let dark = |x: usize, y: usize| bitmap.data[(y * width + x) * components] < 0x80;
+    let x = ((width as f64 * column) as usize).min(width - 1);
+    let rows = (0..height).filter(|&y| dark(x, y)).count();
+    let y = ((height as f64 * row) as usize).min(height - 1);
+    let mut runs: Vec<(bool, usize)> = Vec::new();
+    for x in 0..width {
+        let d = dark(x, y);
+        match runs.last_mut() {
+            Some((was, length)) if *was == d => *length += 1,
+            _ => runs.push((d, 1)),
+        }
+    }
+    (rows, runs)
+}
+
+/// **A stroke is as wide as its element's user space says** (§11.4), and so
+/// are its dashes. The leaf hands over an outline with every transform in it
+/// and a width with none, and the page wrote that width under the page
+/// mapping alone: `stroke-width="2"` inside `scale(3)` was two units wide
+/// rather than six, and a root `viewBox` mapping twenty units onto two
+/// hundred drew a one-unit stroke one unit wide rather than ten. The page is
+/// 200 points square and the scene is too, so a unit is a pixel here.
+///
+/// A uniform scale holds on this crate's renderer as it stands; a
+/// non-uniform one is the renderer's user-space pen, which the writer now
+/// hands it.
+#[test]
+fn a_stroke_is_as_wide_as_its_elements_user_space_says() {
+    let scaled = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
+              <g transform="scale(3)">
+                <path d="M10 30 H60" stroke="#000000" stroke-width="2" fill="none"/>
+                <path d="M10 60 H60" stroke="#000000" stroke-width="2" fill="none"
+                      stroke-dasharray="4 2"/>
+              </g>
+            </svg>"##,
+    );
+    // The solid line is at y = 90, six rows from 87; the dashed one at
+    // y = 180 from x = 30, in dashes of twelve and gaps of six — so at
+    // x = 90 both are ink.
+    let (rows, runs) = dark_rows_and_runs(&scaled, 0.45, 0.9);
+    assert_eq!(rows, 6 + 6, "two strokes six rows deep each: {rows}");
+    assert_eq!(
+        runs.get(..5),
+        Some(&[(false, 30), (true, 12), (false, 6), (true, 12), (false, 6)][..]),
+        "{runs:?}"
+    );
+
+    let boxed = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"
+                 viewBox="0 0 20 20">
+              <path d="M2 5 H18" stroke="#000000" stroke-width="1" fill="none"/>
+            </svg>"##,
+    );
+    let (rows, _) = dark_rows_and_runs(&boxed, 0.5, 0.25);
+    assert_eq!(rows, 10, "a one-unit stroke in a ten-times view box");
+
+    // And under the identity nothing moves: a two-unit stroke is two rows.
+    let plain = square(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
+              <path d="M10 100 H190" stroke="#000000" stroke-width="2" fill="none"/>
+            </svg>"##,
+    );
+    assert_eq!(dark_rows_and_runs(&plain, 0.5, 0.5).0, 2);
+}
+
 // ---- what travels out ------------------------------------------------------------
 
 /// Every subsystem the leaf crate declines reaches the caller as an
@@ -346,7 +982,7 @@ fn a_gradients_matrix_carries_the_page_mapping() {
 fn every_refusal_travels_out_named_with_its_item() {
     let doc = open(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
-             <filter id="f"/><mask id="m"/><pattern id="p"/><marker id="k"/>
+             <filter id="f"/>
              <foreignObject width="1" height="1"/><animate/><script/>
              <rect width="10" height="10" fill="#000"/>
            </svg>"##,
@@ -363,9 +999,6 @@ fn every_refusal_travels_out_named_with_its_item() {
         .collect();
     for expected in [
         tinker_pdf_svg::Warning::FilterUnsupported,
-        tinker_pdf_svg::Warning::MaskUnsupported,
-        tinker_pdf_svg::Warning::PatternUnsupported,
-        tinker_pdf_svg::Warning::MarkerUnsupported,
         tinker_pdf_svg::Warning::ForeignObjectUnsupported,
         tinker_pdf_svg::Warning::AnimationIgnored,
         tinker_pdf_svg::Warning::ScriptIgnored,
@@ -599,6 +1232,111 @@ fn text_anchor_is_applied_where_the_metrics_are() {
     );
 }
 
+/// **A decomposed accent in SVG text set in the standard 14 is drawn inside
+/// its letter**, where ruling 14's extraction pairs a mark with the glyph
+/// whose box holds its centre (review of 6d79fa4).
+///
+/// The standard 14 measure a nonspacing mark at no advance
+/// (`paint::standard_width`), and SVG text is measured with the book's own
+/// metrics, so the mark drawn where the pen stood after its letter lay at
+/// the letter's end: its box, a thousandth of an em running right, was the
+/// `s`'s, not the `e`'s. It is drawn where a page's mark is, inside its
+/// letter's box. A default build only: with `bundled-fonts` the stand-in
+/// draws the accent, and SVG text draws no stand-in glyph at all.
+#[cfg(not(feature = "bundled-fonts"))]
+#[test]
+fn a_standard_14_mark_in_svg_text_is_drawn_inside_its_letter() {
+    let doc = open(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"60\">\
+           <text x=\"10\" y=\"40\" font-family=\"serif\" font-size=\"24\">cafe\u{301}s</text>\
+         </svg>",
+    );
+    let page = doc.page(0).expect("a page");
+    assert_eq!(page.text().plain_text().trim(), "cafe\u{301}s");
+    let drawn = page.text_with(&tinker_pdf::TextOptions {
+        content_order: true,
+    });
+    let chars: Vec<_> = drawn
+        .lines()
+        .iter()
+        .flat_map(|line| line.chars.iter())
+        .collect();
+    let at = chars
+        .iter()
+        .position(|c| c.text == "\u{301}")
+        .expect("the accent is drawn");
+    let (letter, mark, next) = (chars[at - 1], chars[at], chars[at + 1]);
+    let (m0, _, m1, _) = mark.quad.bounds();
+    let centre = (m0 + m1) / 2.0;
+    let (l0, _, l1, _) = letter.quad.bounds();
+    let (n0, _, _, _) = next.quad.bounds();
+    assert_eq!(letter.text, "e");
+    assert!(
+        l0 < centre && centre < l1 && centre < n0,
+        "the accent is drawn at {centre}, outside its letter from {l0} to {l1} \
+         (the `s` starts at {n0})"
+    );
+}
+
+/// §10.4's per-glyph `x`: a number per character, each set where its number
+/// says — which a build that took the first number set as one word at 10.
+#[test]
+fn an_x_per_character_sets_each_where_it_says() {
+    let doc = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="60">
+             <text x="10 50 90" y="40" font-family="serif" font-size="20">abc</text>
+           </svg>"##,
+    );
+    let origins = text_origins(&doc);
+    assert_eq!(origins.len(), 3, "a text object per character: {origins:?}");
+    for (got, want) in origins.iter().zip([10.0, 50.0, 90.0]) {
+        assert!((got - want).abs() < 1e-6, "{origins:?}");
+    }
+}
+
+/// §10.5's rule (b), where the metrics are: a `<tspan>` with a `y` and no `x`
+/// starts where the run before it ended, at its own `y`.
+#[test]
+fn a_y_without_an_x_continues_where_the_pen_is() {
+    let doc = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="80">
+             <text x="10" y="40" font-family="serif" font-size="20">One<tspan y="60">two</tspan></text>
+           </svg>"##,
+    );
+    let matrices = text_matrices(&doc);
+    assert_eq!(matrices.len(), 2, "{matrices:?}");
+    // `One` in Times-Roman at twenty: 0.722 + 0.5 + 0.444 em.
+    let advance = (0.722 + 0.5 + 0.444) * 20.0;
+    assert!(
+        (matrices[1][4] - (10.0 + advance)).abs() < 0.5,
+        "after `One`, not back at 10: {matrices:?}"
+    );
+    assert!((matrices[1][5] - 60.0).abs() < 1e-6, "at the y it stated");
+}
+
+/// §10.5's `rotate`: the glyph turns about its own origin, which is the run
+/// matrix's linear part turned and its translation untouched.
+#[test]
+fn a_rotated_glyph_turns_about_its_own_origin() {
+    let doc = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="80">
+             <text x="10" y="40" rotate="90" font-family="serif" font-size="20">a</text>
+           </svg>"##,
+    );
+    let matrices = text_matrices(&doc);
+    let [a, b, c, d, e, f] = matrices[0];
+    // The flip, then a quarter turn clockwise in the downward space:
+    // [1 0 0 -1] after [0 1 -1 0] is [0 1 1 0].
+    for (got, want) in [a, b, c, d].iter().zip([0.0, 1.0, 1.0, 0.0]) {
+        assert!((got - want).abs() < 1e-9, "the turn: {:?}", matrices[0]);
+    }
+    assert!(
+        (e - 10.0).abs() < 1e-9 && (f - 40.0).abs() < 1e-9,
+        "about the glyph's own origin: {:?}",
+        matrices[0]
+    );
+}
+
 /// A `<tspan>` that states no position of its own continues the run before it.
 ///
 /// The pen is the caller's, because where a continuation begins depends on how
@@ -637,5 +1375,426 @@ fn a_continuing_run_is_set_after_the_one_before_it() {
         "the second run begins where the first ended: {} against {}",
         origins[1],
         10.0 + advance
+    );
+}
+
+/// **A hidden run is laid out and not painted** (§11.5; SVG 2's *Controlling
+/// visibility*: a hidden element still affects text layout). `Two` hidden
+/// between `One` and `Six` moves the pen by its own advance, so `Six` is set
+/// where it would be were `Two` visible, and `Two` is no text object at all —
+/// not a glyph and not 9.3.6's invisible text a reader would extract. A
+/// hidden first run opens its chunk at the `<text>`'s `x` as a visible one
+/// would.
+///
+/// Until the review of the formats lane the run was left out of the scene,
+/// so `Six` began where `Two` began, and after a hidden first run at the pen's
+/// zero rather than at `x`.
+#[test]
+fn a_hidden_run_moves_the_pen_and_draws_nothing() {
+    // Times-Roman, in thousandths of an em: O 722, n 500, e 444; T 611,
+    // w 722, o 500. At twenty units `One` is 33.32 and `Two` 36.66.
+    let one = (0.722 + 0.5 + 0.444) * 20.0;
+    let two = (0.611 + 0.722 + 0.5) * 20.0;
+    let between = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="60">
+             <text x="10" y="40" font-family="serif" font-size="20">One<tspan
+               visibility="hidden">Two</tspan>Six</text>
+           </svg>"##,
+    );
+    let origins = text_origins(&between);
+    assert_eq!(origins.len(), 2, "two runs drawn: {origins:?}");
+    assert!((origins[0] - 10.0).abs() < 1e-6, "{origins:?}");
+    assert!(
+        (origins[1] - (10.0 + one + two)).abs() < 0.5,
+        "Six is set past the hidden Two: {} against {}",
+        origins[1],
+        10.0 + one + two
+    );
+    let text = between
+        .page(0)
+        .expect("a page")
+        .text()
+        .plain_text()
+        .split_whitespace()
+        .collect::<String>();
+    assert_eq!(text, "OneSix", "the hidden run extracts as nothing");
+
+    let first = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="60">
+             <text x="10" y="40" font-family="serif" font-size="20"><tspan
+               visibility="hidden">Two</tspan>Six</text>
+           </svg>"##,
+    );
+    let origins = text_origins(&first);
+    assert_eq!(origins.len(), 1, "one run drawn: {origins:?}");
+    assert!(
+        (origins[0] - (10.0 + two)).abs() < 0.5,
+        "after a hidden first run: {} against {}",
+        origins[0],
+        10.0 + two
+    );
+}
+
+// ---- a `<style>` element's at-rules --------------------------------------------
+
+/// The `ArchiveWarning::Svg` warnings a book's report carries.
+fn svg_warnings(doc: &Document) -> Vec<tinker_pdf_svg::Warning> {
+    warnings(doc)
+        .into_iter()
+        .filter_map(|warning| match warning {
+            ArchiveWarning::Svg { warning, .. } => Some(warning),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **An SVG spine item's `@import` and `@font-face` reach the container**, and
+/// its `@media` is asked about paper.
+///
+/// The `<style>` element imports `style/draw.css` against the document's own
+/// path, and that sheet declares a face whose `src` is relative to *it* —
+/// `../fonts/drawn.ttf` — and sets a run in it. A second face is declared in
+/// the `<style>` element itself, against the document. Both reach
+/// `typeface::load` through the list a chapter's faces do, so each run is set
+/// in its own face rather than in the standard 14, and nothing in the report
+/// says a face, a sheet or an at-rule was lost. The band at the bottom is the
+/// `@media print` block's black, which a page is.
+#[test]
+fn an_svg_reaches_its_container_for_its_imports_and_faces() {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+         <style>
+           @import url(style/draw.css);
+           @font-face { font-family: Local; src: url(fonts/local.ttf) }
+           .local { font-family: Local }
+           rect { fill: #00ff00 }
+           @media print { rect { fill: #000000 } }
+           @media screen { rect { fill: #ff0000 } }
+         </style>
+         <rect x="0" y="60" width="100" height="40"/>
+         <text class="drawn" x="10" y="20" font-size="12">ABC</text>
+         <text class="local" x="10" y="40" font-size="12">DEF</text>
+       </svg>"##;
+    let sheet = b"@font-face { font-family: Drawn; src: url(../fonts/drawn.ttf) }\n\
+                  .drawn { font-family: Drawn }"
+        .to_vec();
+    let doc = Document::open_with(
+        book(
+            svg,
+            &[
+                ("EPUB/style/draw.css", sheet),
+                ("EPUB/fonts/drawn.ttf", covering("Drawn", "ABC")),
+                ("EPUB/fonts/local.ttf", covering("Local", "DEF")),
+            ],
+        ),
+        &OpenOptions::at_page(200.0, 200.0),
+    )
+    .expect("the book opens");
+
+    assert_eq!(svg_warnings(&doc), [], "every at-rule was read");
+    assert!(
+        !warnings(&doc)
+            .iter()
+            .any(|w| matches!(w, ArchiveWarning::FontFace { .. })),
+        "{:?}",
+        warnings(&doc)
+    );
+    let fonts = fonts_named_and_defined(&doc);
+    assert_eq!(fonts.len(), 2, "one face per run: {fonts:?}");
+    assert!(
+        fonts
+            .iter()
+            .all(|(name, defined)| *defined && name.starts_with("Bf")),
+        "both runs are in the book's own faces, not the standard 14: {fonts:?}"
+    );
+    assert_eq!(rgb_at(&doc, 0.5, 0.9), [0, 0, 0], "the print block's rule");
+}
+
+/// **An import the container does not hold is `ImportUnresolved`**, and the
+/// rules after it apply; a loose SVG, which has nothing beside it, reaches a
+/// `data:` URL and nothing else.
+#[test]
+fn an_import_the_container_lacks_is_named_and_a_loose_svg_reads_data_urls() {
+    let doc = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+             <style>@import 'missing.css'; rect { fill: #000 }</style>
+             <rect width="10" height="10" fill="#fff"/>
+           </svg>"##,
+    );
+    assert_eq!(
+        svg_warnings(&doc),
+        [tinker_pdf_svg::Warning::ImportUnresolved]
+    );
+    assert!(greys(&doc, 0).contains(&0), "the rule after it applied");
+
+    let loose = |style: &str| {
+        let markup = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+                 <style>{style}</style>
+                 <rect width="10" height="10" fill="#fff"/>
+               </svg>"##
+        );
+        Document::open(markup.into_bytes()).expect("a loose SVG opens")
+    };
+    let doc = loose("@import url('data:text/css,rect%20%7B%20fill%3A%20%23000%20%7D');");
+    assert_eq!(svg_warnings(&doc), [], "{:?}", warnings(&doc));
+    assert!(greys(&doc, 0).contains(&0), "the data: sheet's rule");
+    let doc = loose("@import 'beside.css'; rect { fill: #000 }");
+    assert_eq!(
+        svg_warnings(&doc),
+        [tinker_pdf_svg::Warning::ImportUnresolved]
+    );
+}
+
+// ---- how a run is painted ---------------------------------------------------------
+
+/// The first page's content stream, decoded.
+fn page_content(doc: &Document) -> String {
+    let cos = doc.cos();
+    let pages = tinker_pdf_cos::pages::collect(cos);
+    let page = pages.first().expect("one page");
+    String::from_utf8_lossy(&tinker_pdf_cos::pages::content_bytes(cos, page)).into_owned()
+}
+
+/// The operators between the run's `q` and its text object: what it is
+/// painted with.
+fn run_paint(doc: &Document) -> String {
+    let content = page_content(doc);
+    let end = content.find("BT").expect("a text object");
+    let start = content[..end].rfind("q\n").expect("the run's q");
+    content[start..end].to_owned()
+}
+
+/// **A run is painted as its `fill` and `stroke` say**, through 9.3.6's
+/// rendering modes, which are SVG's four combinations exactly: a fill alone
+/// is mode 0, a stroke alone 1, both 2, and neither 3 — invisible, and still
+/// text a reader extracts, which is what `fill="none"` on a label is. A
+/// gradient or a pattern is the shading or tiling pattern a shape would get.
+///
+/// Until this, `epub::svg::draw_text` set a solid fill and nothing else: a
+/// run filled with a gradient or a pattern, or with `none`, was drawn in
+/// whatever colour the state held — black — and a stroke was never drawn.
+#[test]
+fn svg_text_is_painted_as_its_fill_and_stroke_say() {
+    let gradient = r##"<linearGradient id="g" gradientUnits="userSpaceOnUse" x2="200">
+         <stop offset="0" stop-color="#ff0000"/><stop offset="1" stop-color="#0000ff"/>
+       </linearGradient>"##;
+    let run = |paint: &str| {
+        open(&format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">{gradient}
+                 <text x="10" y="50" font-family="serif" font-size="24" {paint}>Hello</text>
+               </svg>"##
+        ))
+    };
+    for (paint, wanted, unwanted) in [
+        (
+            r##"fill="#0000ff""##,
+            &["0 0 1 rg"][..],
+            &[" Tr", " RG"][..],
+        ),
+        (
+            r##"fill="url(#g)""##,
+            &["/Pattern cs", " scn"],
+            &[" Tr", " rg"],
+        ),
+        (
+            r##"fill="none" stroke="#ff0000" stroke-width="2""##,
+            &["1 0 0 RG", "2 w", "1 Tr"],
+            &[" rg"],
+        ),
+        (
+            r##"fill="#0000ff" stroke="url(#g)""##,
+            &["0 0 1 rg", "/Pattern CS", " SCN", "2 Tr"],
+            &[],
+        ),
+        (r##"fill="none""##, &["3 Tr"], &[" rg", " RG"]),
+        // A stroke's opacity is the run's as a shape's is: its `CA` in the
+        // run's `gs`.
+        (
+            r##"fill="none" stroke="#ff0000" stroke-opacity="0.5""##,
+            &[" gs", "1 0 0 RG", "1 Tr"],
+            &[],
+        ),
+    ] {
+        let doc = run(paint);
+        let ops = run_paint(&doc);
+        for operator in wanted {
+            assert!(
+                ops.contains(operator),
+                "{paint}: no `{operator}` in {ops:?}"
+            );
+        }
+        for operator in unwanted {
+            assert!(!ops.contains(operator), "{paint}: `{operator}` in {ops:?}");
+        }
+        assert_eq!(
+            doc.page(0).expect("a page").text().plain_text().trim(),
+            "Hello",
+            "{paint}: the run is still text"
+        );
+        assert_eq!(svg_warnings(&doc), [], "{paint}");
+    }
+}
+
+// ---- a run's box, measured --------------------------------------------------------
+
+/// The six numbers of the first `cm` in a page's content: the page mapping,
+/// `[s 0 0 -s left top]`, under which every scene coordinate is written.
+fn page_mapping(doc: &Document) -> [f64; 6] {
+    let content = page_content(doc);
+    let line = content
+        .lines()
+        .find(|line| line.trim_end().ends_with(" cm"))
+        .expect("the page mapping");
+    let numbers: Vec<f64> = line
+        .split_whitespace()
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    let [a, b, c, d, e, f] = numbers[..] else {
+        panic!("six numbers: {line}");
+    };
+    [a, b, c, d, e, f]
+}
+
+/// The `/Matrix` of the first shading pattern in the saved file.
+fn shading_matrix(doc: &Document) -> [f64; 6] {
+    let pdf = doc.editor().save(&Default::default());
+    let text = String::from_utf8_lossy(&pdf);
+    let at = text.find("/PatternType 2").expect("a shading pattern");
+    let dictionary = &text[at..];
+    let end = dictionary.find(">>").expect("the dictionary ends");
+    let dictionary = &dictionary[..end];
+    let from = dictionary.find("/Matrix [").expect("a matrix") + "/Matrix [".len();
+    let numbers: Vec<f64> = dictionary[from..]
+        .split(']')
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    let [a, b, c, d, e, f] = numbers[..] else {
+        panic!("six numbers: {dictionary}");
+    };
+    [a, b, c, d, e, f]
+}
+
+/// **A bounding-box gradient on SVG text spans the text it paints**, in a
+/// book and in a loose file.
+///
+/// Until this the leaf had no box for text: the run was drawn in the paint's
+/// fallback — the green here — and named `TextBoxUnmeasured`. The facade
+/// reads such a scene a second time with the faces it sets the runs in
+/// measuring them, so the gradient's unit square is the run's glyph cells:
+/// from where the run is set, as wide as four `M`s of Times-Roman at twenty
+/// units — 4 × 0.889 × 20 = 71.12, Adobe's AFM number, not a figure read
+/// back out of this build — and from above the baseline to below it.
+#[test]
+fn a_bounding_box_gradient_on_svg_text_spans_the_text_it_paints() {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">
+         <linearGradient id="g">
+           <stop offset="0" stop-color="#ff0000"/><stop offset="1" stop-color="#0000ff"/>
+         </linearGradient>
+         <text x="20" y="50" font-family="serif" font-size="20" fill="url(#g) #00ff00">MMMM</text>
+       </svg>"##;
+    for (doc, what) in [
+        (open(svg), "a book"),
+        (
+            Document::open(svg.as_bytes().to_vec()).expect("a loose SVG opens"),
+            "a loose file",
+        ),
+    ] {
+        assert_eq!(svg_warnings(&doc), [], "{what}: {:?}", warnings(&doc));
+        let ops = run_paint(&doc);
+        assert!(ops.contains("/Pattern cs"), "{what}: a gradient: {ops:?}");
+        assert!(!ops.contains(" rg"), "{what}: not the fallback: {ops:?}");
+        assert_eq!(text_origins(&doc), [20.0], "{what}: set where it says");
+
+        // The pattern's matrix is the box's unit square under the page
+        // mapping: [w s, 0, 0, -h s, x s + left, -y s + top].
+        let [s, _, _, _, left, top] = page_mapping(&doc);
+        let [a, _, _, d, e, f] = shading_matrix(&doc);
+        let (x, y, width, height) = ((e - left) / s, (top - f) / s, a / s, -d / s);
+        assert!(
+            (x - 20.0).abs() < 1e-6,
+            "{what}: the box begins at the run: {x}"
+        );
+        assert!(
+            (width - 71.12).abs() < 0.5,
+            "{what}: as wide as the run: {width}"
+        );
+        assert!(
+            y < 50.0 && y + height > 50.0,
+            "{what}: the box straddles the baseline: {y} + {height}"
+        );
+        assert!(
+            (16.0..26.0).contains(&height),
+            "{what}: an ascent and a descent tall: {height}"
+        );
+        assert_eq!(
+            doc.page(0).expect("a page").text().plain_text().trim(),
+            "MMMM"
+        );
+    }
+}
+
+/// **A bounding-box mask on SVG text masks it**, rather than drawing it
+/// unmasked and naming the box unmeasured: the page carries 11.6.5.2's
+/// luminosity soft mask, and the text still extracts.
+#[test]
+fn a_bounding_box_mask_on_svg_text_masks_it() {
+    let doc = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">
+             <mask id="m"><rect width="1000" height="1000" fill="#ffffff"/></mask>
+             <text x="20" y="50" font-family="serif" font-size="20" mask="url(#m)">MMMM</text>
+           </svg>"##,
+    );
+    assert_eq!(svg_warnings(&doc), [], "{:?}", warnings(&doc));
+    let pdf = doc.editor().save(&Default::default());
+    assert!(
+        String::from_utf8_lossy(&pdf).contains("/Luminosity"),
+        "a soft mask"
+    );
+    assert_eq!(
+        doc.page(0).expect("a page").text().plain_text().trim(),
+        "MMMM"
+    );
+}
+
+/// **The report follows the second read.** A warning the measured read no
+/// longer raises leaves the item's, one only it raises joins them, and one
+/// both raise is there once.
+///
+/// - A bounding-box pattern on text whose tile holds an unknown element: the
+///   first read took the fallback and never walked the tile; the second walks
+///   it, so `ElementUnknown("blink")` is in the report and
+///   `TextBoxUnmeasured` is not.
+/// - A `<tspan>`'s mask, which waits on the whole `<text>`'s box and is
+///   still unmeasured after the second read: named once, not twice.
+#[test]
+fn the_report_is_the_measured_reads() {
+    let doc = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">
+             <pattern id="p" width="0.5" height="0.5"><rect width="5" height="5"/><blink/></pattern>
+             <text x="20" y="50" font-family="serif" font-size="20" fill="url(#p) #00ff00">MMMM</text>
+             <unknown/>
+           </svg>"##,
+    );
+    assert_eq!(
+        svg_warnings(&doc),
+        [
+            tinker_pdf_svg::Warning::ElementUnknown("unknown".into()),
+            tinker_pdf_svg::Warning::ElementUnknown("blink".into()),
+        ]
+    );
+    assert!(run_paint(&doc).contains("/Pattern cs"), "the tiles");
+
+    let doc = open(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">
+             <mask id="m"><rect width="1000" height="1000" fill="#ffffff"/></mask>
+             <text x="20" y="50" font-family="serif" font-size="20">MM<tspan mask="url(#m)">MM</tspan></text>
+           </svg>"##,
+    );
+    assert_eq!(
+        svg_warnings(&doc),
+        [tinker_pdf_svg::Warning::TextBoxUnmeasured]
     );
 }

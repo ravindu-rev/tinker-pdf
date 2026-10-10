@@ -733,6 +733,10 @@ fn read_collection_directory(r: &mut Reader<'_>, tables: usize) -> Result<Collec
     Ok(Collection { version, fonts })
 }
 
+/// Why a transformed `glyf` is refused when its `loca` is not transformed with
+/// it, or is not there (§5.3).
+pub(crate) const UNPAIRED_GLYF: &str = "a transformed glyf whose loca is not transformed with it";
+
 /// Slices the decompressed block into tables, reversing the three transforms.
 fn reconstruct(
     flavor: u32,
@@ -760,6 +764,13 @@ fn reconstruct(
 
         let data = match (entry.tag, entry.transformed) {
             (TAG_GLYF, true) => {
+                // §5.3: "both glyf and loca tables must either be present in
+                // their transformed format or with null transform applied to
+                // both tables" — so a second transformed glyf while the first
+                // still waits for its loca is a glyf that has none.
+                if pending_loca.is_some() {
+                    return Err(WoffError::Malformed(UNPAIRED_GLYF));
+                }
                 let (glyf, loca) = reverse_glyf(slice, max_output)?;
                 pending_loca = Some((index, loca));
                 Some(glyf)
@@ -806,6 +817,16 @@ fn reconstruct(
                 order: index,
             });
         }
+    }
+
+    // A transformed glyf whose transformed loca never came. Either there is
+    // no loca, and the font would go out with a glyf and nothing to index it,
+    // or the loca is a null transform, whose offsets index the glyf the
+    // encoder was handed rather than the one reconstructed here — which §5.1
+    // says need not be the same bytes — so taking it would read glyphs at
+    // offsets into other glyphs' records.
+    if pending_loca.is_some() {
+        return Err(WoffError::Malformed(UNPAIRED_GLYF));
     }
 
     let mut built: Vec<Table> = Vec::with_capacity(tables.len());

@@ -34,12 +34,30 @@
 //! - and any of those over a non-identity `/CIDToGIDMap`, which is what every
 //!   subset font in the wild has.
 //!
+//! # Three refusals that closed in October 2026
+//!
+//! They were named by the ROADMAP's shaping-consumers row, and each now has a
+//! fixture whose expected operators are computed in the test:
+//!
+//! - **A vertical CMap** is written as a column down the box's centre line,
+//!   each glyph where its own `/DW2` displacement puts it
+//!   ([`a_vertical_encoding_is_written_as_a_column`],
+//!   [`quadding_runs_down_a_column`]).
+//! - **A bare CFF** under a `CIDFontType0` is wrapped, per line, in the
+//!   smallest sfnt the shaper can read — a `cmap` from the font's own
+//!   `/ToUnicode` read backwards and an `hmtx` from `/W` — and drawn at `/W`'s
+//!   advances ([`a_bare_cff_is_shaped_through_a_wrapper_and_drawn`] and the
+//!   three beside it). Nothing joins: a CFF carries nothing to join with.
+//! - **A simple TrueType `/DA` font** is shaped, each glyph written as the
+//!   lowest byte its encoding reaches it by, so `GPOS` positions reach the
+//!   field ([`a_simple_font_carries_gpos_positions_into_the_field`]); a line
+//!   needing a glyph no byte reaches keeps the single-byte path whole.
+//!
 //! Still refused, each with a typed warning naming the field and the
-//! character (ruling 10): a vertical CMap, because this module places glyphs
-//! along a baseline and a viewer would stack them; a `/FontFile3` that is a
-//! bare CFF, which carries no `GSUB`; and — in a build without
-//! `cmap-predefined` — every registry CMap, whose refusal names the missing
-//! table rather than writing a silent `?`.
+//! character (ruling 10): a vertical CMap over a CFF, a CFF with no
+//! `/ToUnicode`, a vertical comb field, a symbolic or non-TrueType simple
+//! font, and — in a build without `cmap-predefined` — every registry CMap,
+//! whose refusal names the missing table rather than writing a silent `?`.
 //!
 //! # What the fixture face proves, and what it cannot
 //!
@@ -73,6 +91,11 @@
 //! | `Font::cid_for_gid` answers the glyph as its own CID, ignoring `/CIDToGIDMap` | 1 of 12 | 0 of 30 | 0 of 13 |
 //! | `Composite::of` shapes a vertical CMap as though it were horizontal | 1 of 12 | 0 of 30 | 0 of 13 |
 //!
+//! The table above was measured over the twelve tests milestone 8 left, when
+//! the type was `Composite`; it is `Shapeable` since it stopped being only
+//! that. The October 2026 widening's own campaign, over all nineteen, is in
+//! its commit message, row by row, and is not repeated here.
+//!
 //! The sixth row's zero in the last column is worth reading rather than
 //! skipping: `90ms-RKSJ-H` states no single that overrides a range it also
 //! covers, so the registry suite cannot see an unverified inverse. That guard
@@ -89,7 +112,7 @@ mod epub_support;
 
 use std::sync::Arc;
 
-use epub_support::typeface::{Face, Form, Joining};
+use epub_support::typeface::{Face, Form, Joining, Ligature, Placement};
 use tinker_pdf_cos::{
     CosDocument, DocumentEditor, ObjRef, ProgramKey, WarningKind, WriteMode, WriteOptions,
 };
@@ -198,6 +221,17 @@ struct Fixture<'a> {
     cid_to_gid_map: &'a str,
     /// A `/CIDToGIDMap` stream, placed at object 21.
     cid_to_gid: Option<Vec<u8>>,
+    /// The descendant's `/Subtype`: `CIDFontType2` over an sfnt,
+    /// `CIDFontType0` over a CFF.
+    descendant: &'a str,
+    /// The descendant's widths, written verbatim — `/DW 500`, or a `/W`.
+    widths: &'a str,
+    /// The program stream's own `/Subtype`, which `/FontFile3` requires.
+    program_subtype: Option<&'a str>,
+    /// A `/ToUnicode` CMap stream for the Type 0 font, placed at object 22.
+    to_unicode: Option<&'a [u8]>,
+    /// The field's `/Q`: 0 left, 1 centred, 2 right (12.7.4.3).
+    quadding: i64,
 }
 
 impl<'a> Fixture<'a> {
@@ -211,6 +245,11 @@ impl<'a> Fixture<'a> {
             cmap: None,
             cid_to_gid_map: "/Identity",
             cid_to_gid: None,
+            descendant: "CIDFontType2",
+            widths: "/DW 500",
+            program_subtype: None,
+            to_unicode: None,
+            quadding: 0,
         }
     }
 
@@ -247,17 +286,22 @@ fn form_document(fixture: &Fixture<'_>) -> Arc<CosDocument> {
     pdf.extend_from_slice(
         format!(
             "5 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Fixture\n   \
-             /Encoding {} /DescendantFonts [6 0 R] >>\nendobj\n",
-            fixture.encoding
+             /Encoding {} /DescendantFonts [6 0 R]{} >>\nendobj\n",
+            fixture.encoding,
+            if fixture.to_unicode.is_some() {
+                " /ToUnicode 22 0 R"
+            } else {
+                ""
+            }
         )
         .as_bytes(),
     );
     pdf.extend_from_slice(
         format!(
-            "6 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Fixture\n   \
+            "6 0 obj\n<< /Type /Font /Subtype /{} /BaseFont /Fixture\n   \
              /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>\n   \
-             /FontDescriptor 7 0 R /DW 500 /CIDToGIDMap {} >>\nendobj\n",
-            fixture.cid_to_gid_map
+             /FontDescriptor 7 0 R {} /CIDToGIDMap {} >>\nendobj\n",
+            fixture.descendant, fixture.widths, fixture.cid_to_gid_map
         )
         .as_bytes(),
     );
@@ -271,14 +315,22 @@ fn form_document(fixture: &Fixture<'_>) -> Arc<CosDocument> {
         .as_bytes(),
     );
     let length = fixture.program.len();
+    let subtype = fixture
+        .program_subtype
+        .map(|name| format!(" /Subtype /{name}"))
+        .unwrap_or_default();
     pdf.extend_from_slice(
-        format!("8 0 obj\n<< /Length {length} /Length1 {length} >>\nstream\n").as_bytes(),
+        format!("8 0 obj\n<< /Length {length} /Length1 {length}{subtype} >>\nstream\n").as_bytes(),
     );
     pdf.extend_from_slice(fixture.program);
     pdf.extend_from_slice(b"\nendstream\nendobj\n");
     pdf.extend_from_slice(
-        b"10 0 obj\n<< /FT /Tx /T (name) /Rect [10 150 190 175]\n\
-   /Subtype /Widget /Type /Annot >>\nendobj\n",
+        format!(
+            "10 0 obj\n<< /FT /Tx /T (name) /Rect [10 150 190 175] /Q {}\n   \
+             /Subtype /Widget /Type /Annot >>\nendobj\n",
+            fixture.quadding
+        )
+        .as_bytes(),
     );
     if let Some(cmap) = fixture.cmap {
         pdf.extend_from_slice(
@@ -294,7 +346,14 @@ fn form_document(fixture: &Fixture<'_>) -> Arc<CosDocument> {
         pdf.extend_from_slice(table);
         pdf.extend_from_slice(b"\nendstream\nendobj\n");
     }
-    pdf.extend_from_slice(b"trailer\n<< /Size 22 /Root 1 0 R >>\n%%EOF\n");
+    if let Some(cmap) = fixture.to_unicode {
+        pdf.extend_from_slice(
+            format!("22 0 obj\n<< /Length {} >>\nstream\n", cmap.len()).as_bytes(),
+        );
+        pdf.extend_from_slice(cmap);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+    }
+    pdf.extend_from_slice(b"trailer\n<< /Size 23 /Root 1 0 R >>\n%%EOF\n");
 
     // Hand-written bytes carry no cross-reference table, so they open through
     // the repair scanner; a rewrite puts the same object graph inside a
@@ -310,7 +369,7 @@ fn form_document(fixture: &Fixture<'_>) -> Arc<CosDocument> {
 /// Fills the field and returns the widget's regenerated appearance stream.
 ///
 /// Saved and reopened rather than read out of the editor's overlay, which is
-/// the pattern `edit.rs`'s own appearance tests use: what a viewer will see is
+/// the pattern `edit/tests.rs`'s own appearance tests use: what a viewer will see is
 /// what the writer emitted, and a stream still in the overlay has no encoded
 /// bytes to decode.
 fn filled(doc: &Arc<CosDocument>, value: &str) -> (Arc<CosDocument>, String) {
@@ -622,40 +681,130 @@ fn a_non_identity_cid_to_gid_map_is_inverted_on_the_way_out() {
     }
 }
 
-/// A **vertical** CMap keeps the single-byte path, and says what it dropped.
+/// A **vertical** CMap is written as a column, down the middle of the box.
 ///
-/// 9.7.4.3: a vertical writing mode advances the pen downward, and this module
-/// places every glyph along a baseline. Selecting the right glyphs and drawing
-/// them in a row a viewer will stack is a worse answer than a question mark,
-/// because the question mark announces itself.
+/// 9.7.4.3: a vertical writing mode advances the pen downward by each CID's
+/// `w1`, and draws each glyph displaced by its position vector, whose
+/// horizontal half is half the glyph's width. So the column's pen goes on the
+/// box's vertical centre line, starting at the top less the padding, and the
+/// glyphs are written in the order the value was typed — top to bottom — with
+/// no `TJ` numbers, because every glyph sits where a reader's own `/DW2`
+/// displacement puts it.
+///
+/// Everything asserted is computed here rather than read back: the codes are
+/// the face's own glyph indices (`/Identity-V` and `/CIDToGIDMap /Identity`
+/// make code, CID and glyph one number), and the origin is the widget's
+/// rectangle — 180 by 25 — halved across and less two points of padding down.
 #[test]
-fn a_vertical_encoding_keeps_the_single_byte_path() {
-    let face = joining_face();
+fn a_vertical_encoding_is_written_as_a_column() {
+    let face = Face::new("Fixture Latin", "ABC");
     let doc = form_document(&Fixture::named(&face.build(), "/Identity-V"));
-    let (_, content) = filled(&doc, WORD);
+    let (_, content) = filled(&doc, "ABC");
 
+    let expected: Vec<(u32, u8)> = "ABC"
+        .chars()
+        .map(|ch| (u32::from(face.glyph_of(ch).expect("covered")), 2))
+        .collect();
+    assert_draws(&content, &expected);
     assert!(
-        content.contains("(???)"),
-        "a vertical CMap was shaped as though it were horizontal:\n{content}"
+        content.contains("1 0 0 1 90.00 23.00 Tm"),
+        "the column does not start at the top of the box's centre line:\n{content}"
     );
-    assert_eq!(
-        unrepresentable(&doc),
-        WORD.chars().collect::<Vec<_>>(),
-        "the single-byte fallback wrote question marks and named nothing"
+    let run: String = expected
+        .iter()
+        .map(|(code, _)| format!("<{code:04X}>"))
+        .collect();
+    assert!(
+        content.contains(&format!("[{run}] TJ")),
+        "the column carries a position a reader's own metrics would not give:\n{content}"
+    );
+    assert!(
+        unrepresentable(&doc).is_empty(),
+        "a column that drew every character named one as undrawable"
     );
 }
 
-/// A `/FontFile3` that is a bare CFF is refused, and every character is named.
+/// Quadding reads **down** a column: `/Q 1` centres it in the box and `/Q 2`
+/// ends it at the bottom.
 ///
-/// A CFF is not an sfnt and carries no `GSUB`/`GPOS` for this crate to
-/// execute, so a CIDFontType0 face is outside what shaped filling claims —
-/// whatever its encoding is. The refusal has to reach the caller as
-/// characters rather than as silence, which is the whole of ruling 10 here.
+/// One glyph at twelve points under `/DW2`'s default `w1` of −1000 is twelve
+/// points of column. In a box 25 high with two points of padding, a column
+/// that starts at the top starts at 23; a centred one at `(25 + 12) / 2 =
+/// 18.5`; one that ends at the bottom at `2 + 12 = 14`.
 #[test]
-fn a_bare_cff_program_is_refused_and_every_character_is_named() {
-    // A CFF header — major 1, minor 0, four-byte header, one-byte offsets —
-    // and nothing after it. `Sfnt::parse` must decline it rather than read
-    // past its end.
+fn quadding_runs_down_a_column() {
+    let face = Face::new("Fixture Latin", "ABC");
+    let program = face.build();
+    for (quadding, top) in [(0, "23.00"), (1, "18.50"), (2, "14.00")] {
+        let doc = form_document(&Fixture {
+            quadding,
+            ..Fixture::named(&program, "/Identity-V")
+        });
+        let (_, content) = filled(&doc, "A");
+        assert!(
+            content.contains(&format!("1 0 0 1 90.00 {top} Tm")),
+            "/Q {quadding} does not put the column's top at {top}:\n{content}"
+        );
+    }
+}
+
+/// **A column runs `vert` and `vrt2`, and not the horizontal features**
+/// (a nit of the review of lane 6C: no fixture had a vertical substitution, so
+/// dropping either feature from the column's set fired nothing).
+///
+/// One face per feature, each with an `A`+`B` ligature under that one
+/// feature, so whether the pair becomes one glyph says whether the feature
+/// ran. In a column `vert` and `vrt2` join it and `liga` does not; across a
+/// row `liga` joins it and neither vertical feature does.
+#[test]
+fn a_column_runs_the_vertical_features_and_not_the_horizontal_ones() {
+    for (feature, in_a_column) in [(*b"vert", true), (*b"vrt2", true), (*b"liga", false)] {
+        let face = Face::new("Fixture Latin", "ABC").with_ligature(Ligature {
+            first: 'A',
+            second: 'B',
+            script: *b"DFLT",
+            feature,
+        });
+        let joined = vec![(u32::from(face.ligature_glyph().expect("a ligature")), 2)];
+        let apart: Vec<(u32, u8)> = "AB"
+            .chars()
+            .map(|ch| (u32::from(face.glyph_of(ch).expect("covered")), 2))
+            .collect();
+        let program = face.build();
+        let name = String::from_utf8_lossy(&feature).into_owned();
+
+        let column = form_document(&Fixture::named(&program, "/Identity-V"));
+        let (_, content) = filled(&column, "AB");
+        assert_eq!(
+            codes(&content),
+            if in_a_column {
+                joined.clone()
+            } else {
+                apart.clone()
+            },
+            "{name} in a column:\n{content}"
+        );
+
+        let row = form_document(&Fixture::named(&program, "/Identity-H"));
+        let (_, content) = filled(&row, "AB");
+        assert_eq!(
+            codes(&content),
+            if in_a_column { apart } else { joined },
+            "{name} across a row:\n{content}"
+        );
+    }
+}
+
+/// A program that is neither an sfnt nor a CFF is refused, and every
+/// character is named.
+///
+/// Eight bytes of CFF header and nothing after it: the shape of a `/FontFile3`
+/// that is damaged rather than one that is merely a CFF. Neither `Sfnt::parse`
+/// nor `Cff::parse` may read past its end, and with nothing to shape against
+/// the refusal has to reach the caller as characters rather than as silence,
+/// which is the whole of ruling 10 here.
+#[test]
+fn a_program_that_is_neither_sfnt_nor_cff_is_refused_and_every_character_is_named() {
     let program: Vec<u8> = vec![0x01, 0x00, 0x04, 0x01, 0x00, 0x01, 0x01, 0x01];
     let doc = form_document(&Fixture {
         program_key: "FontFile3",
@@ -665,7 +814,7 @@ fn a_bare_cff_program_is_refused_and_every_character_is_named() {
 
     assert!(
         content.contains("(???)"),
-        "a bare CFF was shaped as though it were an sfnt:\n{content}"
+        "a program that is no font was shaped against:\n{content}"
     );
     assert_eq!(
         unrepresentable(&doc),
@@ -683,6 +832,345 @@ fn a_bare_cff_program_is_refused_and_every_character_is_named() {
         vec![Some(10); 3],
         "the warnings do not name the field they happened to"
     );
+}
+
+// ---- a bare CFF ----------------------------------------------------------------
+
+/// A CFF INDEX with four-byte offsets.
+fn cff_index(items: &[Vec<u8>]) -> Vec<u8> {
+    if items.is_empty() {
+        return vec![0, 0];
+    }
+    let mut out = (items.len() as u16).to_be_bytes().to_vec();
+    out.push(4);
+    let mut offset = 1u32;
+    out.extend_from_slice(&offset.to_be_bytes());
+    for item in items {
+        offset += item.len() as u32;
+        out.extend_from_slice(&offset.to_be_bytes());
+    }
+    for item in items {
+        out.extend_from_slice(item);
+    }
+    out
+}
+
+/// One DICT entry, operands in the fixed five-byte form so offsets can be
+/// computed before they are known.
+fn cff_entry(op: u16, operands: &[i32]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for value in operands {
+        out.push(29);
+        out.extend_from_slice(&value.to_be_bytes());
+    }
+    if op > 0xFF {
+        out.push(12);
+        out.push((op & 0xFF) as u8);
+    } else {
+        out.push(op as u8);
+    }
+    out
+}
+
+/// A **CID-keyed** CFF whose glyphs 1, 2 and 3 carry CIDs 10, 11 and 12, each
+/// an empty charstring: `ROS`, a format 0 charset, a format 3 FDSelect with
+/// every glyph in Font DICT 0, and one Private DICT. The shape is
+/// `crates/tinker-pdf/tests/cff_fonts.rs`'s `Program` with `cid: true`,
+/// trimmed to what this file needs.
+fn cid_keyed_cff() -> Vec<u8> {
+    let private = cff_entry(20, &[600]);
+    let header = [1u8, 0, 4, 4];
+    let names = cff_index(&[b"Fixture".to_vec()]);
+    let strings = cff_index(&[b"Adobe".to_vec(), b"Identity".to_vec()]);
+    let gsubrs = cff_index(&[]);
+    let charstrings = cff_index(&[vec![14], vec![14], vec![14], vec![14]]);
+    let mut charset = vec![0u8];
+    for cid in [10u16, 11, 12] {
+        charset.extend_from_slice(&cid.to_be_bytes());
+    }
+    let fd_select = vec![3u8, 0, 1, 0, 0, 0, 0, 4];
+    let top = |at: &[i32; 5]| {
+        let mut out = cff_entry(0x0C1E, &[391, 392, 0]);
+        out.extend(cff_entry(15, &[at[0]]));
+        out.extend(cff_entry(17, &[at[1]]));
+        out.extend(cff_entry(18, &[at[2], at[3]]));
+        out.extend(cff_entry(0x0C24, &[at[4]]));
+        out.extend(cff_entry(0x0C25, &[at[0] + charset.len() as i32]));
+        out
+    };
+    let top_len = top(&[0; 5]).len();
+    let mut cursor =
+        header.len() + names.len() + (2 + 1 + 8 + top_len) + strings.len() + gsubrs.len();
+    let charset_at = cursor;
+    cursor += charset.len() + fd_select.len();
+    let charstrings_at = cursor;
+    cursor += charstrings.len();
+    let private_at = cursor;
+    cursor += private.len();
+    let fd_array_at = cursor;
+    let at = [
+        charset_at as i32,
+        charstrings_at as i32,
+        private.len() as i32,
+        private_at as i32,
+        fd_array_at as i32,
+    ];
+    let mut out = header.to_vec();
+    out.extend_from_slice(&names);
+    out.extend_from_slice(&cff_index(&[top(&at)]));
+    out.extend_from_slice(&strings);
+    out.extend_from_slice(&gsubrs);
+    out.extend_from_slice(&charset);
+    out.extend_from_slice(&fd_select);
+    out.extend_from_slice(&charstrings);
+    out.extend_from_slice(&private);
+    let font_dict = cff_entry(18, &[private.len() as i32, private_at as i32]);
+    out.extend_from_slice(&cff_index(&[font_dict]));
+    out
+}
+
+/// What the CFF font's codes mean: `A`, `B` and `C` at the CIDs the program
+/// carries, and `D` at CID 13, which it does **not**.
+const CFF_TO_UNICODE: &[u8] = b"/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+4 beginbfchar
+<000A> <0041>
+<000B> <0042>
+<000C> <0043>
+<000D> <0044>
+endbfchar
+endcmap
+end end";
+
+/// The CFF fixture: a CIDFontType0 over [`cid_keyed_cff`], `/Identity-H`,
+/// widths 600, 300 and 450 for the three CIDs it carries.
+fn cff_fixture(program: &[u8]) -> Fixture<'_> {
+    Fixture {
+        program_key: "FontFile3",
+        program_subtype: Some("CIDFontType0C"),
+        descendant: "CIDFontType0",
+        widths: "/W [10 [600 300 450]]",
+        to_unicode: Some(CFF_TO_UNICODE),
+        ..Fixture::named(program, "/Identity-H")
+    }
+}
+
+/// **A bare CFF is shaped through a wrapper**, and the value is drawn rather
+/// than written as question marks.
+///
+/// `Shaper::new` takes an sfnt and a CFF is not one, so `fill.rs` wraps it:
+/// each character of the line goes to the code its `/ToUnicode` gives it, the
+/// code to a CID, and the CID is kept where the program's charset carries it.
+/// The codes expected here are read off the fixture's own `/ToUnicode` table,
+/// in the order the value was typed — the value reads left to right — and the
+/// run carries no `TJ` numbers, because the wrapper's advances are `/W`'s and
+/// a reader advances by `/W` too.
+#[test]
+fn a_bare_cff_is_shaped_through_a_wrapper_and_drawn() {
+    let program = cid_keyed_cff();
+    let doc = form_document(&cff_fixture(&program));
+    let (_, content) = filled(&doc, "CAB");
+
+    assert_draws(&content, &[(0x000C, 2), (0x000A, 2), (0x000B, 2)]);
+    assert!(
+        content.contains("[<000C><000A><000B>] TJ"),
+        "the run moved a glyph from where /W puts it:\n{content}"
+    );
+    assert!(unrepresentable(&doc).is_empty());
+}
+
+/// **Positioned at `/W`'s advances**, which differ per glyph: in a box 180
+/// wide with two points of padding, `/Q 1` and a twelve-point line of `C`,
+/// `A` and `B`, the line is `(450 + 600 + 300) × 12 / 1000 = 16.2` points
+/// wide, so it starts at `2 + (176 − 16.2) / 2 = 81.9`. A line measured at
+/// any uniform advance would start somewhere else.
+#[test]
+fn a_bare_cff_line_is_measured_by_its_own_widths() {
+    let program = cid_keyed_cff();
+    let doc = form_document(&Fixture {
+        quadding: 1,
+        ..cff_fixture(&program)
+    });
+    let (_, content) = filled(&doc, "CAB");
+    assert!(
+        content.contains("1 0 0 1 81.90 "),
+        "the line was not measured by the widths it is drawn at:\n{content}"
+    );
+}
+
+/// What the wrapper cannot draw is **named**: a character the `/ToUnicode`
+/// never mentions, and one it maps to a CID the program does not carry.
+#[test]
+fn a_bare_cff_names_what_it_cannot_draw() {
+    let program = cid_keyed_cff();
+    let doc = form_document(&cff_fixture(&program));
+    let (_, content) = filled(&doc, "AEDB");
+    assert_draws(&content, &[(0x000A, 2), (0x000B, 2)]);
+    assert_eq!(
+        unrepresentable(&doc),
+        vec!['E', 'D'],
+        "a character with no code and one whose CID the program lacks are \
+         both named, in the order the value meets them"
+    );
+}
+
+/// A `/ToUnicode` whose `bfrange` says `<000B>` is `B` and whose `bfchar`
+/// says it is `X`: the `bfchar` wins when the code is read (9.10.3), so
+/// `<000B>` means `X`.
+const OVERRIDDEN_TO_UNICODE: &[u8] = b"/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+1 beginbfchar
+<000B> <0058>
+endbfchar
+1 beginbfrange
+<000A> <000C> <0041>
+endbfrange
+endcmap
+end end";
+
+/// **A code another entry took over is not written for the character it no
+/// longer means** (review of lane 6C).
+///
+/// Read backwards, the range alone answers `B` with `<000B>`; read forwards,
+/// `<000B>` is `X`, so the field would have drawn and extracted `AX` for a
+/// value of `AB` and said nothing. `B` has no code in this font and is named;
+/// `X` is written with `<000B>`, because that is what it means.
+#[test]
+fn a_bare_cff_code_another_entry_took_over_is_not_written() {
+    let program = cid_keyed_cff();
+    let doc = form_document(&Fixture {
+        to_unicode: Some(OVERRIDDEN_TO_UNICODE),
+        ..cff_fixture(&program)
+    });
+    let (_, content) = filled(&doc, "ABX");
+    assert_draws(&content, &[(0x000A, 2), (0x000B, 2)]);
+    assert_eq!(unrepresentable(&doc), vec!['B']);
+}
+
+/// A bare CFF with **no** `/ToUnicode` keeps the single-byte path: nothing in
+/// the document says which code means which character.
+#[test]
+fn a_bare_cff_without_a_to_unicode_is_refused() {
+    let program = cid_keyed_cff();
+    let doc = form_document(&Fixture {
+        to_unicode: None,
+        ..cff_fixture(&program)
+    });
+    let (_, content) = filled(&doc, "CAB");
+    assert!(
+        content.contains("(CAB) Tj"),
+        "a CFF with nothing to read backwards was shaped:\n{content}"
+    );
+}
+
+// ---- a simple TrueType font ------------------------------------------------------
+
+/// A one-page form whose `/DA` font is a **simple** TrueType font over
+/// `program`, under `/WinAnsiEncoding`, every code 500 wide — the advance the
+/// synthesised faces give every glyph.
+fn simple_form_document(program: &[u8]) -> Arc<CosDocument> {
+    let mut pdf: Vec<u8> = Vec::new();
+    pdf.extend_from_slice(b"%PDF-1.7\n");
+    pdf.extend_from_slice(
+        b"1 0 obj\n\
+<< /Type /Catalog /Pages 2 0 R /AcroForm\n\
+   << /Fields [10 0 R] /DA (/F0 12 Tf 0 g)\n\
+      /DR << /Font << /F0 5 0 R >> >> >> >>\nendobj\n",
+    );
+    pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+    pdf.extend_from_slice(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200]\n\
+   /Annots [10 0 R] >>\nendobj\n",
+    );
+    let widths: String = (32..=126).map(|_| "500 ").collect();
+    pdf.extend_from_slice(
+        format!(
+            "5 0 obj\n<< /Type /Font /Subtype /TrueType /BaseFont /Fixture\n   \
+             /FirstChar 32 /LastChar 126 /Widths [{widths}]\n   \
+             /Encoding /WinAnsiEncoding /FontDescriptor 7 0 R >>\nendobj\n"
+        )
+        .as_bytes(),
+    );
+    pdf.extend_from_slice(
+        b"7 0 obj\n<< /Type /FontDescriptor /FontName /Fixture /Flags 32\n   \
+          /FontBBox [0 -200 1000 800] /ItalicAngle 0 /Ascent 800 /Descent -200\n   \
+          /CapHeight 700 /StemV 80 /FontFile2 8 0 R >>\nendobj\n",
+    );
+    let length = program.len();
+    pdf.extend_from_slice(
+        format!("8 0 obj\n<< /Length {length} /Length1 {length} >>\nstream\n").as_bytes(),
+    );
+    pdf.extend_from_slice(program);
+    pdf.extend_from_slice(b"\nendstream\nendobj\n");
+    pdf.extend_from_slice(
+        b"10 0 obj\n<< /FT /Tx /T (name) /Rect [10 150 190 175]\n\
+   /Subtype /Widget /Type /Annot >>\nendobj\n",
+    );
+    pdf.extend_from_slice(b"trailer\n<< /Size 11 /Root 1 0 R >>\n%%EOF\n");
+    let raw = Arc::new(CosDocument::open(pdf).expect("the fixture opens"));
+    let written = DocumentEditor::new(raw).save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        ..WriteOptions::default()
+    });
+    Arc::new(CosDocument::open(written).expect("the rewrite reopens"))
+}
+
+/// **A simple `/DA` font is shaped, and `GPOS` positions reach the field.**
+///
+/// The face displaces `B` by 120 units along the baseline and 80 up, under
+/// `kern`, without moving the pen. At a thousand units to the em both are
+/// already thousandths of text space, so — computed here, not read back — `B`
+/// is drawn 120 past where `A`'s advance leaves the pen (a `TJ` number of
+/// −120) and raised 0.08 em (`Ts`), and `C` comes back 120 (a number of 120)
+/// with the rise cleared. Each code is one byte, the character's
+/// `WinAnsiEncoding` code.
+#[test]
+fn a_simple_font_carries_gpos_positions_into_the_field() {
+    let face = Face::new("Fixture Latin", "ABC").with_placement(Placement {
+        ch: 'B',
+        script: *b"DFLT",
+        feature: *b"kern",
+        x: 120,
+        y: 80,
+    });
+    let doc = simple_form_document(&face.build());
+    let (_, content) = filled(&doc, "ABC");
+
+    assert_draws(&content, &[(0x41, 1), (0x42, 1), (0x43, 1)]);
+    for operator in ["0.08 Ts", "[-120 <42>] TJ", "0 Ts", "[120 <43>] TJ"] {
+        assert!(
+            content.contains(operator),
+            "the positioned run lacks {operator:?}:\n{content}"
+        );
+    }
+    assert!(unrepresentable(&doc).is_empty());
+}
+
+/// **A line that needs a glyph no byte reaches keeps the single-byte path.**
+///
+/// The face ligates `A` and `B` under `liga`, and a ligature has no code in
+/// `WinAnsiEncoding`; so the shaped line would lose two letters. It is not
+/// taken, and the field draws exactly what it drew before simple fonts were
+/// shaped at all.
+#[test]
+fn a_simple_font_line_with_an_unreachable_glyph_keeps_the_byte_path() {
+    let face = Face::new("Fixture Latin", "ABC").with_ligature(Ligature {
+        first: 'A',
+        second: 'B',
+        script: *b"DFLT",
+        feature: *b"liga",
+    });
+    let doc = simple_form_document(&face.build());
+    let (_, content) = filled(&doc, "ABC");
+    assert!(
+        content.contains("(ABC) Tj"),
+        "a line whose ligature no byte can name was written shaped:\n{content}"
+    );
+    assert!(unrepresentable(&doc).is_empty());
 }
 
 /// A **predefined registry CMap** fills with joined Arabic rather than `?`.

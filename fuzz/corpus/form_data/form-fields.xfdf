@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve">
+  <f href="form-fields.pdf"/>
+  <fields>
+    <field name="name"><value>Ada Lovelace</value></field>
+    <field name="agree"><value>On</value></field>
+    <field name="colour"><value>blue</value></field>
+    <field name="notes"><value>Note &#x2014; 2</value></field>
+  </fields>
+  <ids original="0123456789ABCDEF0123456789ABCDEF" modified="0123456789ABCDEF0123456789ABCDEF"/>
+</xfdf>

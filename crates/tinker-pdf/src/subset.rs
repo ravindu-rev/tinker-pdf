@@ -39,6 +39,7 @@
 //! | A page's own content stream | the obvious case |
 //! | A form XObject the page draws, at any depth | 8.10: a form's content is the page's content |
 //! | A Type 3 glyph procedure entered because its own glyph was shown | 9.6.5 runs the procedure as a content stream, and the text *inside* it is drawn with a font of its own |
+//! | A tiling pattern's cell a stream paints with, and a soft mask's group a `gs` sets — each in its own `/Resources` or the scope that painted, and a group in both | 8.7.3.2 and 11.6.5.2: both are content the page draws, and the interpreter runs neither — the renderer paints a cell itself, and this walk's device declines a mask. Until October 2026 neither was walked ([`Unrun`]) |
 //! | **Every** appearance stream under an annotation's `/AP` — `/N`, `/D` and `/R`, and every state of each, whatever `/AS` currently selects | 12.5.5: a viewer swaps states on its own. The checkbox that is off today is on tomorrow with no edit to the file, and a subset cut to the state that happened to be selected loses the tick |
 //! | An appearance of an annotation whose `/F` says hidden | the flag is a viewer's instruction, not a statement that the stream is dead; clearing it is one bit |
 //!
@@ -111,6 +112,46 @@
 //! `/FontFile2` program (Table 126), so it is rewritten to the subset's
 //! length. A `/FontFile3` has no `/Length1` — its `/Subtype` is what says what
 //! the bytes are — so a stale one is dropped rather than carried.
+//!
+//! # Type 3 fonts
+//!
+//! A Type 3 font has no program (9.6.5): each glyph is a content stream in
+//! `/CharProcs`, and those streams are the font's outlines — a face of
+//! procedures for nothing but `J`, `o`, `h` and `n` names them as plainly as
+//! a `glyf` does — and can show text and draw images besides. A redaction
+//! that removes a Type 3 glyph's use leaves its procedure in the font
+//! ([`crate::redact`]'s "A Type 3 glyph's procedure" says why), so until
+//! October 2026 a procedure that showed the covered words still said them in
+//! the file after the default save, and [`crate::SubsetOutcome::removed`]
+//! said nothing of it.
+//!
+//! So the same pass **empties every procedure nothing the document shows
+//! runs**, writing `0 0 d0` over the stream in place, and leaves the font
+//! dictionary — `/CharProcs`, `/Encoding`, `/Widths` — exactly as it was, for
+//! the reason a program is cut without renumbering: every name and code in
+//! the file still means what it meant. Which procedures run is learned where
+//! the interpreter asks for one: [`Recorded`] wraps the walk's scope and
+//! writes down every `(font, code)` [`FontSource::type3_glyph`] answers,
+//! since a Type 3 glyph is run rather than shown and no device hears of it.
+//! The rules are this module's, toward inclusion: a procedure is kept for
+//! **every** name `/Differences` gives a shown code, not only the first one
+//! this engine draws; a stream two fonts share is kept if either keeps it;
+//! and a font is left whole, in [`SubsetReport::type3_untouched`], for the
+//! reasons a program is — no walked scope names it, the AcroForm `/DR` does,
+//! a Type 3 font's own `/Resources` does, or it has no object. A font left
+//! whole makes [`crate::SubsetOutcome::removed`] `false`, as a program left
+//! whole does.
+//!
+//! A code is shown whether or not this engine ran its procedure. One it
+//! could not run — no `/FontMatrix`, which this engine needs six numbers of
+//! and another reader defaults; a procedure that does not decode here — is
+//! drawn as an ordinary glyph instead, and that glyph is counted too, so its
+//! procedure is kept for the reader that does run it. A shown code
+//! `/Differences` gives **no** name reaches no procedure this pass can name,
+//! and a reader may find one through a base encoding, so the font is left
+//! whole as [`UntouchedReason::CodeNotMapped`]. Until October 2026 only a
+//! procedure this engine ran counted, and every procedure of a font without
+//! a `/FontMatrix` was emptied though its glyphs were on the page.
 //!
 //! # One program, two font dictionaries
 //!
@@ -188,14 +229,14 @@
 //!   this pass after it, the program itself 393 576 down to 28 332, and the
 //!   six redacted letters' outlines are not among what is left.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use tinker_pdf_content::record::{Capture, Event, RecordingDevice};
-use tinker_pdf_content::{interpret, FontSource, Form, Matrix};
+use tinker_pdf_content::{interpret, FontSource, Matrix};
 use tinker_pdf_cos::{
     font as cos_font, pages as cos_pages, subset_tag, CosDocument, Dict, DocumentEditor, Name,
-    ObjRef, Object, StreamData,
+    ObjRef, Object, Resolve, StreamData,
 };
 
 use crate::resources::PageResources;
@@ -206,7 +247,7 @@ use crate::resources::PageResources;
 /// document this pass must still return from (ruling 1). Reached only by a
 /// file that is lying about its size, since the sweep is one dictionary read
 /// per entry.
-const MAX_SWEPT_OBJECTS: usize = 1 << 21;
+pub(crate) const MAX_SWEPT_OBJECTS: usize = 1 << 21;
 
 /// Why a font's program was written through whole (ruling 10).
 ///
@@ -226,14 +267,17 @@ pub enum UntouchedReason {
     SubsetNotSmaller,
     /// Some code shown through this font resolved to a glyph only by 9.6.6.4's
     /// closing guess, so which glyphs the file needs is not something this
-    /// build can state.
+    /// build can state. For a Type 3 font (9.6.5): a shown code its
+    /// `/Differences` gives no name, so which procedure a reader runs for it
+    /// is a guess too.
     CodeNotMapped,
     /// A form field's `/DA` may draw this font at any character the field is
     /// ever given (12.7.3.3), so there is no set of glyphs to bound.
     FieldResource,
     /// No walked resource dictionary named this font, so nothing was measured
     /// about it — a font reached only from a form XObject nothing draws, or
-    /// from a scope this pass never opened.
+    /// from a scope this pass never opened. Every font, when the editor's
+    /// state could not be viewed as a document to walk ([`apply`]).
     ScopeNotWalked,
     /// A Type 3 font's own `/Resources` names this font (9.6.5), and this
     /// engine's interpreter runs a glyph procedure in the enclosing scope, so
@@ -261,7 +305,7 @@ impl core::fmt::Display for UntouchedReason {
             UntouchedReason::ProgramNotRebuildable => "the font program cannot be rebuilt",
             UntouchedReason::SubsetNotSmaller => "the subset is no smaller than the face",
             UntouchedReason::CodeNotMapped => {
-                "a code shown through it selects a glyph only by guess (9.6.6.4)"
+                "a code shown through it selects a glyph only by guess (9.6.6.4, 9.6.5)"
             }
             UntouchedReason::FieldResource => {
                 "a form field's /DA may draw it at any character (12.7.3.3)"
@@ -277,7 +321,10 @@ impl core::fmt::Display for UntouchedReason {
 /// One font program written through whole, and why (ruling 10).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Untouched {
-    /// The stream the program is in.
+    /// The stream the program is in — or, in
+    /// [`SubsetReport::type3_untouched`], the Type 3 font dictionary, which
+    /// has no program; for one written directly into a resource dictionary,
+    /// which has no object either, its first procedure.
     pub program: ObjRef,
     /// The `/BaseFont` of the first font dictionary that names it, as written.
     pub base_font: String,
@@ -314,6 +361,31 @@ pub struct Subsetted {
     pub glyphs: usize,
 }
 
+/// One Type 3 font whose unused glyph procedures were emptied (9.6.5).
+///
+/// A Type 3 font has no program to cut: its glyphs are content streams in
+/// `/CharProcs`, one per glyph name, and they disclose what the outlines of
+/// an embedded face do — and more, since a procedure can show text. So the
+/// pass empties every procedure no glyph the document shows still runs, in
+/// place, and leaves the font dictionary as it was ("Type 3 fonts").
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Type3Subsetted {
+    /// The font dictionary.
+    pub font: ObjRef,
+    /// Its `/BaseFont`, or its `/Name` when it has none, as written; empty
+    /// when it has neither, which 9.6.5 permits.
+    pub base_font: String,
+    /// How many bytes its procedures carried before, decoded.
+    pub before: usize,
+    /// How many they carry now.
+    pub after: usize,
+    /// How many procedures were left as they were: one a shown glyph runs,
+    /// or one whose stream another font keeps or leaves whole.
+    pub kept: usize,
+    /// How many were emptied.
+    pub emptied: usize,
+}
+
 /// What a subsetting pass did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SubsetReport {
@@ -325,14 +397,32 @@ pub struct SubsetReport {
     /// and reports nothing here; a document whose every face is already a
     /// tight subset reports every one of them, and is right to.
     pub untouched: Vec<Untouched>,
+    /// Every Type 3 font whose procedures were measured against the glyphs
+    /// the document shows, in object order — those whose every procedure is
+    /// still run included, with nothing emptied.
+    pub type3: Vec<Type3Subsetted>,
+    /// Every Type 3 font whose procedures were all left as they were, and
+    /// why, in object order: [`Untouched::program`] is the font dictionary,
+    /// since a Type 3 font has no program stream, and [`Untouched::bytes`] the
+    /// procedures' total.
+    ///
+    /// A list of its own rather than more of [`SubsetReport::untouched`],
+    /// whose every entry is a program stream and is read as one; a non-empty
+    /// one is what makes [`crate::SubsetOutcome::removed`] `false` for the
+    /// same reason an untouched program does — its procedures are in the
+    /// file.
+    pub type3_untouched: Vec<Untouched>,
 }
 
 impl SubsetReport {
-    /// How many bytes of font program the document carried before.
+    /// How many bytes of font program the document carried before, a Type 3
+    /// font's procedures counted as its program.
     #[must_use]
     pub fn bytes_before(&self) -> usize {
         self.subsetted.iter().map(|s| s.before).sum::<usize>()
             + self.untouched.iter().map(|u| u.bytes).sum::<usize>()
+            + self.type3.iter().map(|t| t.before).sum::<usize>()
+            + self.type3_untouched.iter().map(|u| u.bytes).sum::<usize>()
     }
 
     /// How many it carries now.
@@ -340,6 +430,8 @@ impl SubsetReport {
     pub fn bytes_after(&self) -> usize {
         self.subsetted.iter().map(|s| s.after).sum::<usize>()
             + self.untouched.iter().map(|u| u.bytes).sum::<usize>()
+            + self.type3.iter().map(|t| t.after).sum::<usize>()
+            + self.type3_untouched.iter().map(|u| u.bytes).sum::<usize>()
     }
 }
 
@@ -349,19 +441,44 @@ impl SubsetReport {
 /// two's glyphs however thoroughly page one was redacted, so there is no
 /// per-page form of this operation that is not wrong.
 ///
-/// **Run it after every other edit.** It reads the content streams as the
-/// editor now has them — [`DocumentEditor::stream_bytes`], not the file — so a
-/// redaction applied first is a redaction this sees, and the glyphs it removed
-/// are glyphs this drops. Run the other way round, it would keep exactly what
-/// the redaction was for.
+/// **Run it after every other edit.** It walks the document as the editor now
+/// has it — [`DocumentEditor::view`], not the file — so a redaction applied
+/// first is a redaction this sees, and the glyphs it removed are glyphs this
+/// drops. Run the other way round, it would keep exactly what the redaction
+/// was for.
+///
+/// The view is the whole of the editor's state, not only its rewritten
+/// streams: the editor's page order, a page it inserted, and every object it
+/// allocated resolve in it, at the numbers the editor gave them. That is what
+/// lets the walk enter the **copy of a form** a redaction makes for a
+/// placement cut differently from the others ([`crate::redact`]'s
+/// "A form drawn twice"): the copy is an object the file never had, named by
+/// a resource the file's page never carried, and a glyph drawn only there is
+/// a glyph this must keep. Until September 2026 the walk resolved names
+/// through the file and substituted the editor's bytes for a stream the
+/// editor had rewritten — which saw a form rewritten in place and could not
+/// see a copy at all.
+///
+/// A view that cannot be built — the editor's own update failing to reopen,
+/// which is a defect rather than a property of the input — walks nothing, and
+/// every program is then written through whole as
+/// [`UntouchedReason::ScopeNotWalked`]: the rule here is to include.
 ///
 /// **Save with [`tinker_pdf_cos::WriteMode::Rewrite`]** if the removal has to
 /// be real. An incremental save appends, leaving the original program's bytes
 /// in the file where anyone scanning it finds them — the same caveat
 /// [`crate::redact`] carries, for the same reason.
 pub fn apply(editor: &mut DocumentEditor) -> SubsetReport {
+    // Everything the walk reads, it reads from the view and nothing else: the
+    // view's names are its own table's, and a name from it looked up in a
+    // dictionary the editor holds would find nothing (or the wrong thing).
+    // What crosses back is object numbers and glyph ids, which the view
+    // shares with the editor by construction.
+    let usage = match editor.view() {
+        Ok(view) => collect(&view),
+        Err(_) => Usage::default(),
+    };
     let doc = editor.shared_document();
-    let usage = collect(editor, &doc);
     rewrite(editor, &doc, &usage)
 }
 
@@ -389,132 +506,119 @@ struct Usage {
     /// reported**, and one that a direct font and an indirect font share would
     /// be cut to the indirect font's glyphs and lose the direct font's.
     direct: BTreeMap<ObjRef, Vec<u8>>,
+    /// The codes shown through each Type 3 font object: every glyph whose
+    /// procedure the interpreter ran, which no device is told about
+    /// ([`Recorded`]), and every glyph it showed instead because it could
+    /// not run one ([`walk_one`]).
+    type3: BTreeMap<ObjRef, BTreeSet<u32>>,
+    /// Which font objects are Type 3 fonts, as [`Usage::is_type3`] read them.
+    kinds: BTreeMap<ObjRef, bool>,
+    /// The procedures of each Type 3 font written **directly** into a
+    /// resource dictionary, keyed by its first, with its name: for the
+    /// reason [`Usage::direct`] is kept, these can be neither cut nor found
+    /// by a sweep of objects.
+    direct_type3: BTreeMap<ObjRef, (Vec<u8>, Vec<ObjRef>)>,
 }
 
 impl Usage {
     fn refuse(&mut self, font: ObjRef, reason: UntouchedReason) {
         self.unbounded.entry(font).or_insert(reason);
     }
-}
 
-/// A scope of the walk: one resource dictionary, with the editor's current
-/// content substituted for any stream it has already rewritten.
-///
-/// The one thing this adds to [`PageResources`] is that seam. Everything else
-/// delegates, because a second answer to "what does this code decode to" is a
-/// second engine, and the glyphs kept have to be the glyphs *this* engine
-/// draws.
-struct Walk<'a> {
-    inner: Arc<PageResources>,
-    editor: &'a DocumentEditor,
-    /// The object number of every form XObject the interpreter entered.
-    ///
-    /// Recorded here rather than derived from the event log because
-    /// [`Event::BeginForm`] carries the resource *name*, and resolving each
-    /// name again afterwards would decode every form's content a second time.
-    entered: Arc<Mutex<HashSet<u32>>>,
-}
-
-impl<'a> Walk<'a> {
-    fn new(inner: Arc<PageResources>, editor: &'a DocumentEditor) -> Arc<Walk<'a>> {
-        Arc::new(Walk {
-            inner,
-            editor,
-            entered: Arc::new(Mutex::new(HashSet::new())),
+    /// Whether a font object is a Type 3 font, read once per object.
+    fn is_type3(&mut self, doc: &CosDocument, font: ObjRef) -> bool {
+        *self.kinds.entry(font).or_insert_with(|| {
+            doc.get(font)
+                .ok()
+                .and_then(|object| {
+                    object
+                        .as_dict()
+                        .and_then(|d| d.get_name(doc.intern(b"Subtype")))
+                        .and_then(|n| doc.name_bytes(n))
+                        .map(|b| b.as_ref() == b"Type3")
+                })
+                .unwrap_or(false)
         })
-    }
-
-    fn nested(&self, inner: Arc<PageResources>) -> Arc<Walk<'a>> {
-        Arc::new(Walk {
-            inner,
-            editor: self.editor,
-            entered: Arc::clone(&self.entered),
-        })
-    }
-}
-
-impl FontSource for Walk<'_> {
-    fn decode(&self, font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
-        self.inner.decode(font, bytes)
-    }
-
-    fn is_vertical(&self, font: &[u8]) -> bool {
-        self.inner.is_vertical(font)
-    }
-
-    fn vertical_metrics(&self, font: &[u8], code: u32) -> (f64, f64, f64) {
-        self.inner.vertical_metrics(font, code)
-    }
-
-    fn font_id(&self, font: &[u8]) -> u64 {
-        self.inner.font_id(font)
-    }
-
-    fn type3_glyph(&self, font: &[u8], code: u32) -> Option<(Vec<u8>, Matrix)> {
-        self.inner.type3_glyph(font, code)
-    }
-
-    fn form(&self, name: &[u8]) -> Option<Form> {
-        let mut form = self.inner.form(name)?;
-        let reference = ObjRef::new(
-            u32::try_from(form.stream >> 16).unwrap_or(0),
-            u16::try_from(form.stream & 0xffff).unwrap_or(0),
-        );
-        if let Ok(mut entered) = self.entered.lock() {
-            entered.insert(reference.num);
-        }
-        // The editor's own rewrite of this form, when it has one. Without
-        // this the walk reads the form's *original* text out of the file and
-        // credits the font with every glyph a redaction just removed.
-        if let Some(bytes) = self.editor.stream_bytes(reference) {
-            form.content = bytes;
-        }
-        Some(form)
-    }
-
-    fn form_scope(&self, name: &[u8]) -> Option<Arc<Self>> {
-        let inner = FontSource::form_scope(&*self.inner, name)?;
-        Some(self.nested(inner))
     }
 }
 
 /// Walks every content stream the document draws and records what it showed.
-fn collect(editor: &DocumentEditor, doc: &Arc<CosDocument>) -> Usage {
+///
+/// `doc` is the editor's view ([`apply`]), so every page, stream and
+/// resource here is the editor's.
+fn collect(doc: &Arc<CosDocument>) -> Usage {
     let mut usage = Usage::default();
 
     for page in cos_pages::collect(doc) {
         let resources = Arc::new(PageResources::new(doc, &page, None));
-        let content = page_content(editor, doc, page.reference);
-        walk(&mut usage, editor, doc, &content, resources);
+        let content = cos_pages::content_bytes(doc, &page);
+        walk(&mut usage, doc, &content, resources);
 
-        for appearance in appearances_of(editor, doc, page.reference) {
-            let Some(content) = editor.stream_bytes(appearance.stream) else {
+        for appearance in appearances_of(doc, page.reference) {
+            let Ok(content) = doc.stream_decoded(appearance.stream) else {
                 continue;
             };
             let resources = Arc::new(PageResources::from_dict(doc, appearance.resources, None));
-            walk(&mut usage, editor, doc, &content, resources);
+            walk(&mut usage, doc, &content, resources);
         }
     }
 
     // 12.7.3.3: a field's `/DA` names a font from the AcroForm `/DR`, and what
     // it will be asked to draw is whatever the field is next given.
-    for font in default_resource_fonts(editor, doc) {
+    for font in default_resource_fonts(doc) {
         usage.refuse(font, UntouchedReason::FieldResource);
     }
 
     usage
 }
 
+/// Interprets one content stream, and every tiling pattern's cell and soft
+/// mask's group it paints with, and folds what they showed into `usage`.
+///
+/// Over [`PageResources`]: a second answer to "what does this code decode
+/// to" would be a second engine, and the glyphs kept have to be the glyphs
+/// *this* engine draws. A wrapper used to sit between the two to hand the
+/// interpreter the editor's bytes for a form the editor had rewritten; the
+/// view has those bytes already, and has the forms the editor added, which
+/// the wrapper could not give it. The one wrapper here now, [`Recorded`],
+/// changes no answer: it writes down the Type 3 glyphs the interpreter runs,
+/// which the device is never told about, and the cells and groups the
+/// interpreter does not run at all ([`Unrun`]).
+///
+/// Those are walked after the stream, each as a stream of its own in the
+/// scope its names resolve in, and what they paint with is found the same
+/// way. Until October 2026 neither was walked: a glyph shown only in a
+/// cell or a group was dropped from its program, and a Type 3 procedure
+/// shown only there emptied — the pattern drew a blank.
+fn walk(usage: &mut Usage, doc: &CosDocument, content: &[u8], root: Arc<PageResources>) {
+    let unrun = Arc::new(Mutex::new(Unrun::default()));
+    if let Ok(mut unrun) = unrun.lock() {
+        unrun.cells(content, &root);
+    }
+    walk_one(usage, doc, content, root, &unrun);
+    loop {
+        let next = unrun.lock().ok().and_then(|mut u| u.queue.pop_front());
+        let Some((stream, scope)) = next else {
+            break;
+        };
+        let Ok(content) = doc.stream_decoded(stream) else {
+            continue;
+        };
+        if let Ok(mut unrun) = unrun.lock() {
+            unrun.cells(&content, &scope);
+        }
+        walk_one(usage, doc, &content, scope, &unrun);
+    }
+}
+
 /// Interprets one content stream and folds what it showed into `usage`.
-fn walk(
+fn walk_one(
     usage: &mut Usage,
-    editor: &DocumentEditor,
     doc: &CosDocument,
     content: &[u8],
-    resources: Arc<PageResources>,
+    root: Arc<PageResources>,
+    unrun: &Arc<Mutex<Unrun>>,
 ) {
-    let root = Walk::new(resources, editor);
-
     // Glyphs and the form brackets that say which scope a glyph's font id is
     // relative to — see this module's note on `Capture::GLYPHS`, which is not
     // enough on its own. Nothing else is recorded: no state copies, no paths,
@@ -524,10 +628,21 @@ fn walk(
         structure: true,
         ..Capture::NONE
     });
-    interpret(content, Matrix::IDENTITY, &mut device, &*root);
+    let ran = Arc::new(Mutex::new(BTreeSet::new()));
+    let recorded = Recorded {
+        inner: Arc::clone(&root),
+        ran: Arc::clone(&ran),
+        unrun: Arc::clone(unrun),
+    };
+    interpret(content, Matrix::IDENTITY, &mut device, &recorded);
+    if let Ok(ran) = ran.lock() {
+        for &(font, code) in ran.iter() {
+            usage.type3.entry(font).or_default().insert(code);
+        }
+    }
 
-    let mut stack: Vec<Arc<Walk<'_>>> = vec![Arc::clone(&root)];
-    note_scope(usage, doc, &root.inner);
+    let mut stack: Vec<Arc<PageResources>> = vec![Arc::clone(&root)];
+    note_scope(usage, doc, &root);
 
     for event in device.events() {
         match event {
@@ -541,7 +656,7 @@ fn walk(
                 // `None` means and what the interpreter does with it.
                 let next = match FontSource::form_scope(&*current, name) {
                     Some(scope) => {
-                        note_scope(usage, doc, &scope.inner);
+                        note_scope(usage, doc, &scope);
                         scope
                     }
                     None => current,
@@ -557,11 +672,124 @@ fn walk(
                 let Some(scope) = stack.last() else {
                     continue;
                 };
-                show(usage, &scope.inner, glyph.font_id, glyph.code);
+                show(usage, scope, glyph.font_id, glyph.code);
+                // A Type 3 glyph the interpreter *showed* is one whose
+                // procedure it did not run — no `/FontMatrix`, a code
+                // `/Differences` does not name, a procedure that does not
+                // decode — and still a code shown: a reader that defaults
+                // the matrix or decodes the stream runs the procedure.
+                if let Some(object) = scope.font_object(glyph.font_id) {
+                    if usage.is_type3(doc, object) {
+                        usage.type3.entry(object).or_default().insert(glyph.code);
+                    }
+                }
             }
             _ => {}
         }
     }
+}
+
+/// Content a stream draws that the interpreter does not run, found as it
+/// runs ([`Recorded`]) and walked after it ([`walk`]).
+///
+/// Two kinds. A **tiling pattern's cell** (8.7.3.2) is painted by the
+/// renderer itself, at every tile of what the pattern fills, from the
+/// pattern's own `/Resources` or the scope that painted. A **soft mask's
+/// group** (11.6.5.2) is offered to the device, and this walk's device keeps
+/// no pixels to make a mask of, so it declines; this engine's interpreter
+/// runs an accepted group in the scope that set it, and 8.10.1 puts its
+/// names in its own `/Resources`, so it is walked in both — a reader either
+/// way draws it.
+///
+/// One per [`walk`], and each stream is walked once per scope: a cell drawn
+/// at a thousand tiles, or painted with from a thousand forms in one scope,
+/// is one walk, and a cell that paints with itself is not walked again.
+/// Every scope a key names by address is held until the walk ends, so no
+/// address is reused for another scope while it could match.
+#[derive(Default)]
+struct Unrun {
+    /// Streams to walk, and the scope each is walked in.
+    queue: VecDeque<(ObjRef, Arc<PageResources>)>,
+    /// What has been queued: the stream's number, and the scope's address —
+    /// or `usize::MAX` for the stream's own `/Resources`, which is one scope
+    /// however often it is built.
+    queued: HashSet<(u32, usize)>,
+    held: Vec<Arc<PageResources>>,
+}
+
+impl Unrun {
+    fn push(&mut self, stream: ObjRef, scope: Arc<PageResources>, own: bool) {
+        let at = if own {
+            usize::MAX
+        } else {
+            Arc::as_ptr(&scope) as usize
+        };
+        if self.queued.insert((stream.num, at)) {
+            self.held.push(Arc::clone(&scope));
+            self.queue.push_back((stream, scope));
+        }
+    }
+
+    /// Queues the cell of every tiling pattern `content` paints with, by the
+    /// name `scn` or `SCN` ends with (8.6.8), resolved in `scope`.
+    fn cells(&mut self, content: &[u8], scope: &Arc<PageResources>) {
+        for name in pattern_names(content) {
+            let Some(cell) = scope.tiling_cell(&name) else {
+                continue;
+            };
+            match scope.own_scope(cell) {
+                Some(own) => self.push(cell, Arc::new(own), true),
+                None => self.push(cell, Arc::clone(scope), false),
+            }
+        }
+    }
+
+    /// Queues a soft mask's group: in the scope that set it, and in its own
+    /// `/Resources` when it has them.
+    fn group(&mut self, stream: ObjRef, scope: &Arc<PageResources>) {
+        self.push(stream, Arc::clone(scope), false);
+        if let Some(own) = scope.own_scope(stream) {
+            self.push(stream, Arc::new(own), true);
+        }
+    }
+}
+
+/// Every pattern name a stream paints with: the name `scn` or `SCN` ends
+/// with (8.6.8), once each, in the order first met. An inline image's
+/// samples are skipped (8.9.7). Linear in the stream: a set answers "met
+/// already", so a stream of a million distinct names costs a million
+/// lookups rather than their square (ruling 1).
+fn pattern_names(content: &[u8]) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut met: HashSet<Vec<u8>> = HashSet::new();
+    let mut tokens = tinker_pdf_content::Tokenizer::new(content);
+    let mut last: Option<Vec<u8>> = None;
+    while let Some(token) = tokens.next_token() {
+        match token {
+            tinker_pdf_content::Token::Operator(op) => {
+                match op.as_slice() {
+                    b"BI" => {
+                        let consumed =
+                            tinker_pdf_content::interpret::skip_inline_image(tokens.rest());
+                        let at = tokens.position();
+                        tokens.seek(at.saturating_add(consumed));
+                    }
+                    b"scn" | b"SCN" => {
+                        if let Some(name) = last.take() {
+                            if met.insert(name.clone()) {
+                                out.push(name);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                last = None;
+            }
+            tinker_pdf_content::Token::Name(name) => last = Some(name),
+            _ => last = None,
+        }
+    }
+    out
 }
 
 /// Records that a scope was walked, and what it named.
@@ -581,6 +809,17 @@ fn note_scope(usage: &mut Usage, doc: &CosDocument, scope: &PageResources) {
     // report to find out whether a disclosure is still in the file would
     // otherwise be told nothing at all about it.
     for dict in scope.direct_fonts() {
+        // A Type 3 font has no program, and is said the same way: its
+        // procedures are what it carries.
+        let procedures = type3_procedures(doc, &dict);
+        if let Some(&(first, _)) = procedures.first() {
+            let streams = procedures.iter().map(|(r, _)| *r).collect();
+            usage
+                .direct_type3
+                .entry(first)
+                .or_insert_with(|| (type3_name(doc, &dict), streams));
+            continue;
+        }
         let Some(program) = embedded_program(doc, &dict) else {
             continue;
         };
@@ -590,6 +829,189 @@ fn note_scope(usage: &mut Usage, doc: &CosDocument, scope: &PageResources) {
             .map(|b| b.to_vec())
             .unwrap_or_default();
         usage.direct.entry(program).or_insert(base_font);
+    }
+}
+
+/// A Type 3 font's procedure streams with the glyph name each is under, in
+/// `/CharProcs` order; empty for any other font, or a Type 3 font with no
+/// procedure that is a reference.
+///
+/// Through any [`Resolve`] — the view during the walk, the editor in the
+/// rewrite — so that both read one dictionary the same way.
+fn type3_procedures(doc: &impl Resolve, font: &Dict) -> Vec<(ObjRef, Name)> {
+    let names = doc.document();
+    let subtype = font
+        .get_name(names.intern(b"Subtype"))
+        .and_then(|n| names.name_bytes(n));
+    if subtype.as_deref() != Some(b"Type3".as_slice()) {
+        return Vec::new();
+    }
+    let procs = doc.resolve_key(font, names.intern(b"CharProcs"));
+    procs
+        .as_dict()
+        .map(|procs| {
+            procs
+                .iter()
+                .filter_map(|(name, value)| Some((value.as_objref()?, *name)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The name a Type 3 font is reported by: `/BaseFont`, else `/Name` (9.6.5
+/// makes both optional), as written.
+fn type3_name(doc: &impl Resolve, font: &Dict) -> Vec<u8> {
+    let names = doc.document();
+    [b"BaseFont".as_slice(), b"Name"]
+        .iter()
+        .find_map(|key| {
+            font.get_name(names.intern(key))
+                .and_then(|n| names.name_bytes(n))
+                .map(|b| b.to_vec())
+        })
+        .unwrap_or_default()
+}
+
+/// [`PageResources`], with every Type 3 glyph the interpreter runs written
+/// down as `(font object, code)`.
+///
+/// A Type 3 glyph is not shown, it is run (9.6.5): the interpreter asks
+/// [`FontSource::type3_glyph`] for the procedure and interprets it, and no
+/// [`Event::ShowGlyph`] is recorded for the glyph itself — only for whatever
+/// the procedure shows. So the one place this walk can learn which
+/// procedures the document still draws is that question, asked of the scope
+/// that resolves it, and the answer it gets back is passed through
+/// unchanged. Every other method is the inner scope's; a form's scope is
+/// wrapped again so that a glyph in a form is written down in the form's own
+/// scope, where its name means what it says.
+///
+/// **Every method is forwarded by hand**, and a method the trait gains later
+/// with a default would quietly answer with the default here — a form not
+/// entered, a colour not resolved — rather than the page's. Forty lines of
+/// forwarding is the cost of not changing the interpreter's crate for one
+/// consumer.
+struct Recorded {
+    inner: Arc<PageResources>,
+    ran: Arc<Mutex<BTreeSet<(ObjRef, u32)>>>,
+    /// The cells and mask groups found as the interpreter went.
+    unrun: Arc<Mutex<Unrun>>,
+}
+
+impl Recorded {
+    /// Queues the cells `content` paints with, resolved in `scope`.
+    fn cells(&self, content: &[u8], scope: &Arc<PageResources>) {
+        if let Ok(mut unrun) = self.unrun.lock() {
+            unrun.cells(content, scope);
+        }
+    }
+}
+
+impl FontSource for Recorded {
+    fn decode(&self, font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+        self.inner.decode(font, bytes)
+    }
+
+    fn is_vertical(&self, font: &[u8]) -> bool {
+        self.inner.is_vertical(font)
+    }
+
+    fn vertical_metrics(&self, font: &[u8], code: u32) -> (f64, f64, f64) {
+        self.inner.vertical_metrics(font, code)
+    }
+
+    fn font_id(&self, font: &[u8]) -> u64 {
+        self.inner.font_id(font)
+    }
+
+    fn font_name(&self, font: &[u8]) -> Option<Arc<str>> {
+        self.inner.font_name(font)
+    }
+
+    fn form(&self, name: &[u8]) -> Option<tinker_pdf_content::Form> {
+        let form = self.inner.form(name)?;
+        // The form's content runs in its own scope, or this one (8.10.1),
+        // and the cells it paints with resolve there.
+        let scope =
+            FontSource::form_scope(&*self.inner, name).unwrap_or_else(|| Arc::clone(&self.inner));
+        self.cells(&form.content, &scope);
+        Some(form)
+    }
+
+    fn form_scope(&self, name: &[u8]) -> Option<Arc<Self>> {
+        let inner = FontSource::form_scope(&*self.inner, name)?;
+        Some(Arc::new(Recorded {
+            inner,
+            ran: Arc::clone(&self.ran),
+            unrun: Arc::clone(&self.unrun),
+        }))
+    }
+
+    fn type3_glyph(&self, font: &[u8], code: u32) -> Option<(Vec<u8>, Matrix)> {
+        let procedure = self.inner.type3_glyph(font, code)?;
+        // A Type 3 font written directly into the resources has no object;
+        // [`note_scope`] names it instead.
+        if let Some(object) = self.inner.font_object(self.inner.font_id(font)) {
+            if let Ok(mut ran) = self.ran.lock() {
+                ran.insert((object, code));
+            }
+        }
+        // The procedure runs in this scope, and paints with what it names.
+        self.cells(&procedure.0, &self.inner);
+        Some(procedure)
+    }
+
+    fn resolve_color(&self, space: &[u8], components: &[f64]) -> Option<tinker_pdf_content::Rgb> {
+        self.inner.resolve_color(space, components)
+    }
+
+    fn ext_g_state_alpha(&self, name: &[u8]) -> Option<(Option<f64>, Option<f64>)> {
+        self.inner.ext_g_state_alpha(name)
+    }
+
+    fn ext_g_state_blend(&self, name: &[u8]) -> Option<tinker_pdf_content::BlendMode> {
+        self.inner.ext_g_state_blend(name)
+    }
+
+    fn ext_g_state_soft_mask(&self, name: &[u8]) -> Option<tinker_pdf_content::SoftMask> {
+        let answer = self.inner.ext_g_state_soft_mask(name);
+        // 11.6.5.2: the group is content the page draws, and this walk's
+        // device declines to run it; it is walked afterwards instead.
+        if let Some(tinker_pdf_content::SoftMask::Group(mask)) = &answer {
+            let stream = ObjRef::new(
+                u32::try_from(mask.form.stream >> 16).unwrap_or(0),
+                (mask.form.stream & 0xFFFF) as u16,
+            );
+            if mask.form.stream != 0 {
+                if let Ok(mut unrun) = self.unrun.lock() {
+                    unrun.group(stream, &self.inner);
+                }
+            }
+        }
+        answer
+    }
+
+    fn color_components(&self, space: &[u8]) -> Option<usize> {
+        self.inner.color_components(space)
+    }
+
+    fn resolve_ink(&self, space: &[u8], components: &[f64]) -> Option<[u8; 4]> {
+        self.inner.resolve_ink(space, components)
+    }
+
+    fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
+        self.inner.initial_color(space)
+    }
+
+    fn optional_content(&self, name: &[u8]) -> Option<tinker_pdf_content::Layer> {
+        self.inner.optional_content(name)
+    }
+
+    fn xobject_optional_content(&self, name: &[u8]) -> Option<tinker_pdf_content::Layer> {
+        self.inner.xobject_optional_content(name)
+    }
+
+    fn marked_content_properties(&self, name: &[u8]) -> Option<tinker_pdf_content::MarkedProps> {
+        self.inner.marked_content_properties(name)
     }
 }
 
@@ -651,28 +1073,6 @@ fn show(usage: &mut Usage, scope: &PageResources, font_id: u64, code: u32) {
     }
 }
 
-/// A page's content as the editor now has it.
-fn page_content(editor: &DocumentEditor, doc: &CosDocument, page: ObjRef) -> Vec<u8> {
-    let Some(Object::Dict(dict)) = editor.get(page) else {
-        return Vec::new();
-    };
-    let refs: Vec<ObjRef> = match dict.get(Name::CONTENTS) {
-        Some(Object::Ref(r)) => vec![*r],
-        Some(Object::Array(items)) => items.iter().filter_map(Object::as_objref).collect(),
-        _ => Vec::new(),
-    };
-    let _ = doc;
-
-    let mut out = Vec::new();
-    for r in refs {
-        if let Some(bytes) = editor.stream_bytes(r) {
-            out.extend_from_slice(&bytes);
-        }
-        out.push(b'\n');
-    }
-    out
-}
-
 /// One appearance stream to walk.
 struct Appearance {
     stream: ObjRef,
@@ -686,32 +1086,31 @@ struct Appearance {
 /// so a subset cut to today's state loses tomorrow's tick. [`crate::annots`]
 /// picks one because it draws one; this counts them all because it is deciding
 /// what the file must still be able to draw.
-fn appearances_of(editor: &DocumentEditor, doc: &CosDocument, page: ObjRef) -> Vec<Appearance> {
+fn appearances_of(doc: &CosDocument, page: ObjRef) -> Vec<Appearance> {
     let mut out = Vec::new();
-    let Some(Object::Dict(dict)) = editor.get(page) else {
+    let Ok(page) = doc.get(page) else {
+        return out;
+    };
+    let Some(dict) = page.as_dict() else {
         return out;
     };
     let page_resources = doc
-        .resolve_key(&dict, Name::RESOURCES)
+        .resolve_key(dict, Name::RESOURCES)
         .as_dict()
         .cloned()
         .unwrap_or_default();
 
-    let annots = doc.resolve_key(&dict, doc.intern(b"Annots"));
+    let annots = doc.resolve_key(dict, doc.intern(b"Annots"));
     let Some(entries) = annots.as_array() else {
         return out;
     };
 
     for entry in entries {
-        let annotation = match entry {
-            Object::Ref(r) => editor.get(*r).and_then(|o| o.as_dict().cloned()),
-            Object::Dict(d) => Some(d.clone()),
-            _ => None,
-        };
-        let Some(annotation) = annotation else {
+        let annotation = doc.resolve(entry);
+        let Some(annotation) = annotation.as_dict() else {
             continue;
         };
-        let ap = doc.resolve_key(&annotation, doc.intern(b"AP"));
+        let ap = doc.resolve_key(annotation, doc.intern(b"AP"));
         let Some(ap) = ap.as_dict() else { continue };
 
         for key in [b"N".as_slice(), b"D", b"R"] {
@@ -753,22 +1152,13 @@ fn appearance_streams(doc: &CosDocument, value: &Object) -> Vec<ObjRef> {
 }
 
 /// Every font the AcroForm `/DR` puts in scope for a `/DA` (12.7.3.3).
-fn default_resource_fonts(editor: &DocumentEditor, doc: &CosDocument) -> Vec<ObjRef> {
+fn default_resource_fonts(doc: &CosDocument) -> Vec<ObjRef> {
     let Some(catalog) = doc.catalog() else {
         return Vec::new();
     };
-    let Some(acro) = catalog.get_ref(doc.intern(b"AcroForm")) else {
-        // A directly written AcroForm is read from the catalog itself.
-        let form = doc.resolve_key(&catalog, doc.intern(b"AcroForm"));
-        return form
-            .as_dict()
-            .map(|form| default_resource_fonts_in(doc, form))
-            .unwrap_or_default();
-    };
-    editor
-        .get(acro)
-        .and_then(|o| o.as_dict().cloned())
-        .map(|form| default_resource_fonts_in(doc, &form))
+    let form = doc.resolve_key(&catalog, doc.intern(b"AcroForm"));
+    form.as_dict()
+        .map(|form| default_resource_fonts_in(doc, form))
         .unwrap_or_default()
 }
 
@@ -936,13 +1326,210 @@ fn rewrite(editor: &mut DocumentEditor, doc: &Arc<CosDocument>, usage: &Usage) -
         });
     }
     report.untouched.extend(orphans(editor, doc, &covered));
+    type3(editor, doc, usage, &mut report);
 
-    // Object order, as both fields promise. The jobs are already in it — a
+    // Object order, as every field promises. The jobs are already in it — a
     // `BTreeMap` keyed by the program — but the directly-written fonts above
     // were appended before the loop ran.
     report.untouched.sort_by_key(|u| u.program.num);
     report.subsetted.sort_by_key(|s| s.program.num);
+    report.type3.sort_by_key(|t| t.font.num);
+    report.type3_untouched.sort_by_key(|u| u.program.num);
     report
+}
+
+/// What an emptied procedure is written as: the width a `d0` must declare
+/// first (9.6.5) and nothing after it, so a code that still reached it
+/// would draw nothing and advance by `/Widths`, which is what a Type 3
+/// glyph always advances by.
+const EMPTY_PROCEDURE: &[u8] = b"0 0 d0";
+
+/// Empties every Type 3 glyph procedure nothing the document shows runs.
+///
+/// The sweep is [`sweep`]'s — every `/Type /Font /Subtype /Type3` the file's
+/// cross-reference table holds, read through the editor — and the rule is
+/// the module's: include, and leave a font whole wherever inclusion cannot
+/// be bounded. A font is left whole for the reasons a program is: the
+/// AcroForm `/DR` names it ([`UntouchedReason::FieldResource`]), a Type 3
+/// font's own `/Resources` names it ([`UntouchedReason::Type3Resource`]), no
+/// walked scope names it ([`UntouchedReason::ScopeNotWalked`]), or it has no
+/// object to address ([`UntouchedReason::NotAnObject`]).
+///
+/// A procedure is kept when a code shown through its font reaches it —
+/// through **any** name `/Differences` gives that code, not only the first,
+/// which is the one this engine draws: a reader that takes the last is a
+/// reader whose glyph this must not empty. A procedure **stream** is kept
+/// when any font keeps it, or any font left whole has it, since two fonts
+/// may share one, and emptying it for one would blank the other.
+///
+/// Emptied in place, as a program is cut in place: the object is
+/// overwritten, so the old procedure's bytes are not left in the file
+/// unreferenced, and the font dictionary — `/CharProcs`, `/Encoding`,
+/// `/Widths` — is exactly what it was.
+fn type3(
+    editor: &mut DocumentEditor,
+    doc: &Arc<CosDocument>,
+    usage: &Usage,
+    report: &mut SubsetReport,
+) {
+    let numbers: Vec<u32> = doc
+        .xref()
+        .iter()
+        .map(|(number, _)| number)
+        .take(MAX_SWEPT_OBJECTS)
+        .collect();
+
+    struct Face {
+        font: ObjRef,
+        name: Vec<u8>,
+        procedures: Vec<(ObjRef, Name)>,
+        refused: Option<UntouchedReason>,
+        used: HashSet<Name>,
+    }
+    let mut faces: Vec<Face> = Vec::new();
+    for number in numbers {
+        let font = ObjRef::new(number, 0);
+        let Some(dict) = editor.get(font).and_then(|o| o.as_dict().cloned()) else {
+            continue;
+        };
+        let kind = dict
+            .get_name(doc.intern(b"Type"))
+            .and_then(|n| doc.name_bytes(n));
+        if kind.as_deref() != Some(b"Font".as_slice()) {
+            continue;
+        }
+        let procedures = type3_procedures(&*editor, &dict);
+        if procedures.is_empty() {
+            continue;
+        }
+        let shown = usage.type3.get(&font);
+        let names = names_of(&*editor, &dict);
+        // A shown code `/Differences` gives no name reaches no procedure
+        // this pass can name — a reader may look it up through a base
+        // encoding — so which procedures the font needs is not something
+        // this pass can state.
+        let named: HashSet<u32> = names.iter().map(|(code, _)| *code).collect();
+        let unnamed = shown.is_some_and(|codes| codes.iter().any(|code| !named.contains(code)));
+        let refused = usage
+            .unbounded
+            .get(&font)
+            .copied()
+            .or_else(|| (!usage.seen.contains(&font)).then_some(UntouchedReason::ScopeNotWalked))
+            .or_else(|| unnamed.then_some(UntouchedReason::CodeNotMapped));
+        let used = names
+            .into_iter()
+            .filter(|(code, _)| shown.is_some_and(|codes| codes.contains(code)))
+            .map(|(_, name)| name)
+            .collect();
+        faces.push(Face {
+            font,
+            name: type3_name(&*editor, &dict),
+            procedures,
+            refused,
+            used,
+        });
+    }
+
+    // The streams that stay, whichever font asks.
+    let mut keep: HashSet<u32> = HashSet::new();
+    for face in &faces {
+        for (stream, name) in &face.procedures {
+            if face.refused.is_some() || face.used.contains(name) {
+                keep.insert(stream.num);
+            }
+        }
+    }
+    for (_, streams) in usage.direct_type3.values() {
+        keep.extend(streams.iter().map(|s| s.num));
+    }
+
+    let size = |editor: &DocumentEditor, stream: ObjRef| {
+        editor.stream_bytes(stream).map_or(0, |bytes| bytes.len())
+    };
+    for face in faces {
+        let before: usize = face
+            .procedures
+            .iter()
+            .map(|(stream, _)| size(editor, *stream))
+            .sum();
+        let base_font = String::from_utf8_lossy(&face.name).into_owned();
+        if let Some(reason) = face.refused {
+            report.type3_untouched.push(Untouched {
+                program: face.font,
+                base_font,
+                bytes: before,
+                reason,
+            });
+            continue;
+        }
+        let mut emptied: HashSet<u32> = HashSet::new();
+        let mut kept = 0usize;
+        for (stream, _) in &face.procedures {
+            if keep.contains(&stream.num) {
+                kept += 1;
+            } else if emptied.insert(stream.num) {
+                editor.put_stream(
+                    *stream,
+                    StreamData {
+                        dict: Dict::new(),
+                        data: EMPTY_PROCEDURE.to_vec(),
+                    },
+                );
+            }
+        }
+        let after: usize = face
+            .procedures
+            .iter()
+            .map(|(stream, _)| size(editor, *stream))
+            .sum();
+        report.type3.push(Type3Subsetted {
+            font: face.font,
+            base_font,
+            before,
+            after,
+            kept,
+            emptied: face.procedures.len().saturating_sub(kept),
+        });
+    }
+
+    for (first, (name, streams)) in &usage.direct_type3 {
+        report.type3_untouched.push(Untouched {
+            program: *first,
+            base_font: String::from_utf8_lossy(name).into_owned(),
+            bytes: streams.iter().map(|s| size(editor, *s)).sum(),
+            reason: UntouchedReason::NotAnObject,
+        });
+    }
+}
+
+/// Every `(code, glyph name)` a Type 3 font's `/Differences` assigns, read
+/// as the interpreter reads the array (`PageResources::type3_glyph`): an
+/// integer or a real sets the code, a name takes it and moves to the next —
+/// and **every** assignment kept, where the interpreter stops at the first.
+fn names_of(doc: &impl Resolve, font: &Dict) -> Vec<(u32, Name)> {
+    let names = doc.document();
+    let encoding = doc.resolve_key(font, names.intern(b"Encoding"));
+    let Some(encoding) = encoding.as_dict() else {
+        return Vec::new();
+    };
+    let differences = doc.resolve_key(encoding, names.intern(b"Differences"));
+    let Some(differences) = differences.as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut code = 0u32;
+    for item in differences {
+        match doc.resolve(item).as_ref() {
+            Object::Int(v) => code = u32::try_from(*v).unwrap_or(0),
+            Object::Real(v) => code = *v as u32,
+            Object::Name(name) => {
+                out.push((code, *name));
+                code = code.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Every font dictionary in the document that embeds a program.
@@ -1893,6 +2480,91 @@ mod disclosure {
     }
 }
 
+/// The walk enters the **copies of a form** a redaction makes, which are
+/// objects the file never had.
+///
+/// The fixture is `redact`'s exit fixture for the row: one form drawing
+/// `PUBLIC SECRET` in the vendored Liberation Serif, at two placements cut
+/// differently — `SECRET` taken from the lower, `PUBLIC` from the upper. No
+/// placement is uncut, so the form's own object keeps the lower outcome
+/// (`PUBLIC`) and the upper draws a copy holding `SECRET`. `S`, `E`, `R` and
+/// `T` are then drawn by the copy and by nothing else: a walk that resolved
+/// names through the file, as this one did until September 2026, never enters
+/// it, and cuts those four letters out of the program the copy still draws
+/// them from — blank glyphs, with nothing in the file saying so.
+#[cfg(test)]
+mod redacted_copies {
+    use super::tests_support::*;
+    use super::*;
+
+    use crate::redact::{apply as redact_apply, Redaction};
+    use tinker_pdf_cos::pages::Rect;
+
+    fn cuts() -> [Redaction; 2] {
+        [
+            Redaction {
+                area: Rect {
+                    x0: 56.0,
+                    y0: 45.0,
+                    x1: 400.0,
+                    y1: 70.0,
+                },
+                mark: false,
+            },
+            Redaction {
+                area: Rect {
+                    x0: 0.0,
+                    y0: 195.0,
+                    x1: 52.0,
+                    y1: 220.0,
+                },
+                mark: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_glyph_drawn_only_in_a_copy_survives_the_subset() {
+        let built = crate::redact::tests_support::public_secret_twice();
+        let mut editor = DocumentEditor::new(open(built));
+        let report = redact_apply(&mut editor, 0, &cuts()).expect("the page exists");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.glyphs, 12);
+        let redacted_only = saved(&editor);
+
+        let subset = apply(&mut editor);
+        assert_eq!(subset.subsetted.len(), 1, "the face was cut: {subset:?}");
+        let and_subsetted = saved(&editor);
+
+        let program = only_program(&open(and_subsetted.clone()));
+        for ch in "PUBLICSERT".chars() {
+            let glyph = glyph_of(&program, ch);
+            assert!(
+                draws(&program, glyph),
+                "{ch:?} is still drawn at one placement or the other, and its outline \
+                 (glyph {glyph}) is gone"
+            );
+        }
+        for ch in "QXZ".chars() {
+            let glyph = glyph_of(&program, ch);
+            assert!(
+                !draws(&program, glyph),
+                "{ch:?} is drawn nowhere and was kept"
+            );
+        }
+
+        // What that means on the page: both placements draw what they drew
+        // before the program was cut.
+        let before = render(redacted_only);
+        let after = render(and_subsetted);
+        assert!(before.data.iter().any(|b| *b < 200), "there is ink to lose");
+        assert!(
+            before.data == after.data,
+            "cutting the program changed what a placement draws"
+        );
+    }
+}
+
 /// Which glyphs count as used, argued one inclusion at a time.
 #[cfg(test)]
 mod what_counts_as_used {
@@ -2016,6 +2688,110 @@ mod what_counts_as_used {
                 whole.len()
             )
         );
+    }
+
+    /// A tiling pattern's cell (8.7.3.2) and a soft mask's group (11.6.5.2)
+    /// are content streams the page draws, and the interpreter runs neither:
+    /// the renderer paints a cell itself, and a mask group is offered to a
+    /// device that may decline it. A glyph shown only there is a glyph shown,
+    /// and until October 2026 the walk never saw it — the subset dropped it
+    /// and the cell drew a blank.
+    #[test]
+    fn a_glyph_shown_only_in_a_tiling_cell_or_a_mask_group_is_kept() {
+        for (paint, what) in [
+            (
+                "/Pattern cs /P0 scn 100 10 80 80 re f",
+                "a tiling pattern's cell",
+            ),
+            ("/GS0 gs 0 0 300 100 re f", "a soft mask's group"),
+        ] {
+            let doc = open(whole_face_document(&[(40.0, "aaa")]));
+            let font = only_font(&doc);
+            let mut editor = DocumentEditor::new(Arc::clone(&doc));
+
+            let mut fonts = Dict::new();
+            fonts.insert(editor.intern(b"F0"), Object::Ref(font));
+            let mut resources = Dict::new();
+            resources.insert(editor.intern(b"Font"), Object::Dict(fonts));
+            let number = |n: i64| Object::Int(n);
+
+            let cell = editor.allocate();
+            let mut dict = Dict::new();
+            for (key, value) in [
+                (b"PatternType".as_slice(), number(1)),
+                (b"PaintType", number(1)),
+                (b"TilingType", number(1)),
+                (b"XStep", number(40)),
+                (b"YStep", number(40)),
+            ] {
+                dict.insert(editor.intern(key), value);
+            }
+            dict.insert(
+                editor.intern(b"BBox"),
+                Object::Array(vec![number(0), number(0), number(40), number(40)]),
+            );
+            dict.insert(editor.intern(b"Resources"), Object::Dict(resources.clone()));
+            editor.put_stream(
+                cell,
+                StreamData {
+                    dict,
+                    data: b"BT /F0 24 Tf 2 10 Td (zzz) Tj ET".to_vec(),
+                },
+            );
+
+            let group = editor.allocate();
+            let mut dict = Dict::new();
+            dict.insert(
+                editor.intern(b"Subtype"),
+                Object::Name(editor.intern(b"Form")),
+            );
+            dict.insert(
+                editor.intern(b"BBox"),
+                Object::Array(vec![number(0), number(0), number(300), number(100)]),
+            );
+            let mut transparency = Dict::new();
+            transparency.insert(
+                editor.intern(b"S"),
+                Object::Name(editor.intern(b"Transparency")),
+            );
+            dict.insert(editor.intern(b"Group"), Object::Dict(transparency));
+            dict.insert(editor.intern(b"Resources"), Object::Dict(resources));
+            editor.put_stream(
+                group,
+                StreamData {
+                    dict,
+                    data: b"BT /F0 24 Tf 100 10 Td (zzz) Tj ET".to_vec(),
+                },
+            );
+            let mut mask = Dict::new();
+            mask.insert(editor.intern(b"S"), Object::Name(editor.intern(b"Alpha")));
+            mask.insert(editor.intern(b"G"), Object::Ref(group));
+            let mut state = Dict::new();
+            state.insert(editor.intern(b"SMask"), Object::Dict(mask));
+
+            assert_eq!(
+                editor.add_resource(0, b"Pattern", b"P", Object::Ref(cell)),
+                Some(b"P0".to_vec())
+            );
+            assert_eq!(
+                editor.add_resource(0, b"ExtGState", b"GS", Object::Dict(state)),
+                Some(b"GS0".to_vec())
+            );
+            assert!(editor.append_content(0, paint.as_bytes()));
+
+            let (after, report) = subset(saved(&editor));
+            assert!(
+                report.untouched.is_empty(),
+                "{what}: {:?}",
+                report.untouched
+            );
+            let cut = only_program(&open(after));
+            let z = glyph_of(&cut, 'z');
+            assert!(
+                draws(&cut, z),
+                "{what} shows 'z' (glyph {z}) and the subset dropped it"
+            );
+        }
     }
 
     /// A font a resource dictionary names and nothing draws through keeps
@@ -2510,5 +3286,434 @@ mod identity_and_naming {
             let name = base_font(&doc, &dict);
             assert_eq!(String::from_utf8_lossy(&name), named);
         }
+    }
+}
+
+/// Type 3 fonts (9.6.5): procedures nothing shown runs, emptied in place.
+///
+/// One page, three Type 3 fonts, every procedure a filled box of its own
+/// height so a wrongly emptied one shows in the render:
+///
+/// - `/T3` (object 4): `A` is procedure `a` (object 5, the full em) and `B`
+///   is `b` (object 6, half of it), through `differences`;
+/// - `/U3` (object 10): `A` is `a` — **the same stream**, object 5 — and `B`
+///   is `d` (object 12, a quarter);
+/// - `/V3` (object 8): `A` is `c` (object 11), named only by `/Fm0`
+///   (object 9), which the page draws only when `content` says so.
+///
+/// The render is this engine's compared with itself; what is adjudicated is
+/// bytes — which streams still hold what they held.
+#[cfg(test)]
+mod type3_fonts {
+    use super::tests_support::*;
+    use super::*;
+
+    const A: &str = "1000 0 d0 0 0 1000 1000 re f";
+    const B: &str = "1000 0 d0 0 0 1000 500 re f";
+    const C: &str = "1000 0 d0 0 0 1000 1000 re f";
+    const D: &str = "1000 0 d0 0 0 1000 250 re f";
+
+    fn stream(number: u32, body: &str) -> String {
+        format!(
+            "{number} 0 obj\n<< /Length {} >>\nstream\n{body}\nendstream\nendobj\n",
+            body.len() + 1
+        )
+    }
+
+    fn face(number: u32, procs: &str, differences: &str) -> String {
+        format!(
+            "{number} 0 obj\n<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000]\n\
+             /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << {procs} >>\n\
+             /Encoding << /Type /Encoding /Differences {differences} >>\n\
+             /FirstChar 65 /LastChar 66 /Widths [1000 1000] >>\nendobj\n"
+        )
+    }
+
+    fn document(differences: &str, content: &str) -> Vec<u8> {
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
+             /Resources << /Font << /T3 4 0 R /U3 10 0 R >> /XObject << /Fm0 9 0 R >> >>\n\
+             /Contents 7 0 R >>\nendobj\n",
+        );
+        out.push_str(&face(4, "/a 5 0 R /b 6 0 R", differences));
+        out.push_str(&stream(5, A));
+        out.push_str(&stream(6, B));
+        out.push_str(&stream(7, content));
+        out.push_str(&face(8, "/c 11 0 R", "[65 /c]"));
+        let form = "BT /V3 20 Tf 100 10 Td (A) Tj ET";
+        out.push_str(&format!(
+            "9 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 200 100]\n\
+             /Resources << /Font << /V3 8 0 R >> >> /Length {} >>\nstream\n{form}\nendstream\nendobj\n",
+            form.len() + 1
+        ));
+        out.push_str(&face(10, "/a 5 0 R /d 12 0 R", "[65 /a /d]"));
+        out.push_str(&stream(11, C));
+        out.push_str(&stream(12, D));
+        out.push_str("trailer\n<< /Size 13 /Root 1 0 R >>\n%%EOF\n");
+        out.into_bytes()
+    }
+
+    /// A procedure's operators, without the end of line [`stream`] writes
+    /// before `endstream`.
+    fn procedure(doc: &CosDocument, number: u32) -> String {
+        String::from_utf8_lossy(
+            &doc.stream_decoded(ObjRef::new(number, 0))
+                .expect("the procedure decodes"),
+        )
+        .trim_end()
+        .to_string()
+    }
+
+    /// The page shows `A` in `/T3` and nothing in `/U3`. `b` and `d` are run
+    /// by nothing and are emptied; `a` is kept for `/T3`, and so for `/U3`,
+    /// which shares the stream; `/V3` is named only by a form nothing draws
+    /// and is left whole, reported. The page renders exactly as it did.
+    #[test]
+    fn a_procedure_no_shown_glyph_runs_is_emptied_in_place() {
+        let bytes = document("[65 /a /b]", "BT /T3 20 Tf 10 10 Td (A) Tj ET");
+        let before = render(bytes.clone());
+        let (after, report) = subset(bytes);
+
+        let doc = open(after.clone());
+        assert_eq!(procedure(&doc, 5), A, "a: shown through /T3");
+        assert_eq!(procedure(&doc, 6), "0 0 d0", "b: shown by nothing");
+        assert_eq!(procedure(&doc, 12), "0 0 d0", "d: shown by nothing");
+        assert_eq!(procedure(&doc, 11), C, "c: its font was never walked");
+
+        let fonts: Vec<(u32, usize, usize)> = report
+            .type3
+            .iter()
+            .map(|t| (t.font.num, t.kept, t.emptied))
+            .collect();
+        assert_eq!(fonts, vec![(4, 1, 1), (10, 1, 1)]);
+        assert_eq!(
+            report.type3_untouched,
+            vec![Untouched {
+                program: ObjRef::new(8, 0),
+                base_font: String::new(),
+                bytes: C.len() + 1,
+                reason: UntouchedReason::ScopeNotWalked,
+            }]
+        );
+        assert!(report.subsetted.is_empty() && report.untouched.is_empty());
+
+        assert_eq!(
+            render(after).data,
+            before.data,
+            "the page renders as it did"
+        );
+    }
+
+    /// `/Differences [65 /a 65 /b]` gives code 65 two names. This engine
+    /// draws the first; a reader that takes the last draws `b`. Both are
+    /// kept, because emptying the one this engine does not draw would blank
+    /// the glyph in that reader.
+    #[test]
+    fn every_name_a_shown_code_is_given_is_kept() {
+        let (after, report) = subset(document("[65 /a 65 /b]", "BT /T3 20 Tf 10 10 Td (A) Tj ET"));
+        let doc = open(after);
+        assert_eq!(procedure(&doc, 5), A);
+        assert_eq!(procedure(&doc, 6), B, "b is code 65's second name");
+        assert_eq!(report.type3[0].emptied, 0);
+    }
+
+    /// Drawn through the form, `/V3` is walked and cut like the others; a
+    /// glyph a form shows is a glyph shown.
+    #[test]
+    fn a_glyph_a_form_shows_keeps_its_procedure() {
+        let (after, report) = subset(document(
+            "[65 /a /b]",
+            "/Fm0 Do BT /U3 20 Tf 10 10 Td (B) Tj ET",
+        ));
+        let doc = open(after);
+        assert_eq!(procedure(&doc, 11), C, "c, through the form");
+        assert_eq!(procedure(&doc, 12), D, "d, through /U3's B");
+        assert_eq!(procedure(&doc, 5), "0 0 d0", "a: neither font shows A");
+        assert!(
+            report.type3_untouched.is_empty(),
+            "{:?}",
+            report.type3_untouched
+        );
+    }
+
+    /// A Type 3 font left whole means its procedures are in the file, and the
+    /// save door says so: [`crate::SubsetOutcome::removed`] is `false` for
+    /// the unwalked `/V3`, as it is for an unwalked program.
+    #[test]
+    fn a_type3_font_left_whole_means_the_disclosure_is_not_out_of_the_file() {
+        let doc = open(document("[65 /a /b]", "BT /T3 20 Tf 10 10 Td (A) Tj ET"));
+        let mut editor = DocumentEditor::new(doc);
+        let saved = crate::write::save(&mut editor, &crate::SaveOptions::default());
+        assert!(
+            !saved.fonts.removed(),
+            "/V3's procedure is still in the file"
+        );
+
+        let doc = open(document(
+            "[65 /a /b]",
+            "/Fm0 Do BT /T3 20 Tf 10 10 Td (A) Tj ET",
+        ));
+        let mut editor = DocumentEditor::new(doc);
+        let saved = crate::write::save(&mut editor, &crate::SaveOptions::default());
+        assert!(saved.fonts.removed(), "every procedure was measured");
+    }
+
+    /// A page that shows `A` in `/T3` and paints with what `content` names:
+    /// `/P0` (object 13) is a tiling pattern whose cell shows `B` in the
+    /// same font, and `/GS0`'s soft mask's group (object 14) shows `B` too.
+    /// When `own` says so each names the font `/X3` in `/Resources` of its
+    /// own, a name the page does not have, so only a walk in that scope
+    /// finds it; when not, each says `/T3` and resolves in the page's.
+    /// `/Fm0` (object 15), a form with no resources of its own, paints with
+    /// `/P0`, and so does `/P1`'s cell (object 16).
+    fn unrun_document(content: &str, own: bool) -> Vec<u8> {
+        let (resources, font) = if own {
+            ("/Resources << /Font << /X3 4 0 R >> >>", "/X3")
+        } else {
+            ("", "/T3")
+        };
+        let cell = format!("BT {font} 10 Tf 0 4 Td (B) Tj ET");
+        let group = format!("BT {font} 20 Tf 120 10 Td (B) Tj ET");
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
+             /Resources << /Font << /T3 4 0 R >> /Pattern << /P0 13 0 R /P1 16 0 R >>\n\
+             /ExtGState << /GS0 << /SMask << /S /Alpha /G 14 0 R >> >> >>\n\
+             /XObject << /Fm0 15 0 R >> >>\n\
+             /Contents 7 0 R >>\nendobj\n",
+        );
+        out.push_str(&face(4, "/a 5 0 R /b 6 0 R", "[65 /a /b]"));
+        out.push_str(&stream(5, A));
+        out.push_str(&stream(6, B));
+        out.push_str(&stream(7, content));
+        out.push_str(&format!(
+            "13 0 obj\n<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1\n\
+             /BBox [0 0 20 20] /XStep 20 /YStep 20 {resources} /Length {} >>\n\
+             stream\n{cell}\nendstream\nendobj\n",
+            cell.len() + 1
+        ));
+        out.push_str(&format!(
+            "14 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 200 100]\n\
+             /Group << /S /Transparency >> {resources} /Length {} >>\n\
+             stream\n{group}\nendstream\nendobj\n",
+            group.len() + 1
+        ));
+        out.push_str(&format!(
+            "15 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /Length {} >>\n\
+             stream\n{PAINT}\nendstream\nendobj\n",
+            PAINT.len() + 1
+        ));
+        let nested = "/Pattern cs /P0 scn 0 0 20 20 re f";
+        out.push_str(&format!(
+            "16 0 obj\n<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1\n\
+             /BBox [0 0 20 20] /XStep 20 /YStep 20 /Length {} >>\n\
+             stream\n{nested}\nendstream\nendobj\n",
+            nested.len() + 1
+        ));
+        out.push_str("trailer\n<< /Size 17 /Root 1 0 R >>\n%%EOF\n");
+        out.into_bytes()
+    }
+
+    /// What paints with the cell of [`unrun_document`]'s `/P0`.
+    const PAINT: &str = "/Pattern cs /P0 scn 100 10 80 80 re f";
+
+    /// `B` is shown only inside a tiling pattern's cell, filled or stroked,
+    /// or a soft mask's group, which the interpreter does not run — the
+    /// renderer paints a cell itself, and a mask's group is offered to a
+    /// device that may decline it. Until October 2026 the walk never saw
+    /// either, `b` was emptied as shown by nothing, and the pattern drew a
+    /// blank where it had drawn `B`.
+    #[test]
+    fn a_glyph_shown_only_in_a_tiling_cell_or_a_mask_group_keeps_its_procedure() {
+        for own in [true, false] {
+            for (paint, what) in [
+                (
+                    "/Pattern cs /P0 scn 100 10 80 80 re f",
+                    "a tiling pattern's cell",
+                ),
+                (
+                    "/Pattern CS /P0 SCN 8 w 100 10 80 80 re S",
+                    "a stroking pattern's cell",
+                ),
+                ("/GS0 gs 0 0 200 100 re f", "a soft mask's group"),
+                ("/Fm0 Do", "a tiling pattern's cell a form paints with"),
+                (
+                    "/Pattern cs /P1 scn 100 10 80 80 re f",
+                    "a tiling pattern's cell another cell paints with",
+                ),
+            ] {
+                let bytes =
+                    unrun_document(&format!("BT /T3 20 Tf 10 10 Td (A) Tj ET {paint}"), own);
+                let before = render(bytes.clone());
+                let (after, report) = subset(bytes);
+                let doc = open(after.clone());
+                assert_eq!(procedure(&doc, 5), A, "{what}, own resources {own}");
+                assert_eq!(
+                    procedure(&doc, 6),
+                    B,
+                    "{what}, own resources {own}: b is shown there"
+                );
+                assert_eq!(report.type3[0].emptied, 0, "{what}, own resources {own}");
+                assert_eq!(
+                    render(after).data,
+                    before.data,
+                    "{what}, own resources {own}: the page renders as it did"
+                );
+            }
+        }
+    }
+
+    /// A glyph procedure is content too: `a`'s paints with `/P0`, whose cell
+    /// shows `B`, so showing `A` keeps `b`.
+    #[test]
+    fn a_cell_a_glyph_procedure_paints_with_keeps_its_procedure() {
+        let painting = format!("1000 0 d0 {PAINT}");
+        let bytes = String::from_utf8(unrun_document("BT /T3 20 Tf 10 10 Td (A) Tj ET", true))
+            .expect("ASCII")
+            .replacen(&stream(5, A), &stream(5, &painting), 1);
+        let (after, report) = subset(bytes.into_bytes());
+        let doc = open(after);
+        assert_eq!(procedure(&doc, 5), painting);
+        assert_eq!(
+            procedure(&doc, 6),
+            B,
+            "b is shown in the cell a's procedure paints"
+        );
+        assert_eq!(report.type3[0].emptied, 0);
+    }
+
+    /// A cell nothing paints with is not a use: `/P0` is named and never
+    /// selected, so its `B` is shown by nothing and `b` is emptied.
+    #[test]
+    fn a_tiling_cell_nothing_paints_with_is_not_a_use() {
+        let (after, report) = subset(unrun_document("BT /T3 20 Tf 10 10 Td (A) Tj ET", false));
+        assert_eq!(procedure(&open(after), 6), "0 0 d0");
+        assert_eq!(report.type3[0].emptied, 1);
+    }
+
+    /// A code shown through a Type 3 font whose procedure this engine did not
+    /// run is still a code shown. With no `/FontMatrix`, or a procedure that
+    /// does not decode, the interpreter draws the glyph as an ordinary one —
+    /// and a reader that defaults the matrix, or decodes the stream, runs the
+    /// procedure. Until October 2026 only a procedure this engine ran was
+    /// counted, and every procedure of such a font was emptied.
+    #[test]
+    fn a_code_shown_without_its_procedure_running_keeps_the_procedure() {
+        let content = "BT /T3 20 Tf 10 10 Td (AB) Tj ET";
+        let without_matrix = String::from_utf8(document("[65 /a /b]", content))
+            .expect("ASCII")
+            .replacen("/FontMatrix [0.001 0 0 0.001 0 0] ", "", 1);
+        let (after, report) = subset(without_matrix.into_bytes());
+        let doc = open(after);
+        assert_eq!(procedure(&doc, 5), A, "no /FontMatrix: a");
+        assert_eq!(procedure(&doc, 6), B, "no /FontMatrix: b");
+        assert_eq!(report.type3[0].emptied, 0);
+
+        let undecodable = String::from_utf8(document("[65 /a /b]", content))
+            .expect("ASCII")
+            .replacen(
+                &stream(6, B),
+                "6 0 obj\n<< /Filter /FlateDecode /Length 4 >>\nstream\nnope\nendstream\nendobj\n",
+                1,
+            );
+        let (_, report) = subset(undecodable.into_bytes());
+        assert_eq!(
+            (report.type3[0].kept, report.type3[0].emptied),
+            (2, 0),
+            "an undecodable b is kept"
+        );
+    }
+
+    /// A code `/Differences` gives no name has no procedure this pass can
+    /// say it reaches — a reader may look it up through a base encoding —
+    /// so the font is left whole and named, as a program whose codes map
+    /// only by guess is.
+    #[test]
+    fn a_code_with_no_name_leaves_the_font_whole() {
+        for (differences, content, what) in [
+            (
+                "/Differences [65 /a /b] ",
+                "BT /T3 20 Tf 10 10 Td (AC) Tj ET",
+                "C is not in /Differences",
+            ),
+            (
+                "",
+                "BT /T3 20 Tf 10 10 Td (A) Tj ET",
+                "there is no /Differences",
+            ),
+        ] {
+            let bytes = String::from_utf8(document("[65 /a /b]", content))
+                .expect("ASCII")
+                .replacen(
+                    "/Encoding << /Type /Encoding /Differences [65 /a /b] >>",
+                    &format!("/Encoding << /Type /Encoding {differences}>>"),
+                    1,
+                );
+            let (after, report) = subset(bytes.into_bytes());
+            let doc = open(after);
+            assert_eq!(procedure(&doc, 5), A, "{what}: a is left with its font");
+            assert_eq!(procedure(&doc, 6), B, "{what}: b is left with its font");
+            assert!(
+                report
+                    .type3_untouched
+                    .iter()
+                    .any(|u| u.program.num == 4 && u.reason == UntouchedReason::CodeNotMapped),
+                "{what}: {:?}",
+                report.type3_untouched
+            );
+        }
+    }
+
+    /// A Type 3 font written into the page's `/Font` itself has no object
+    /// for the sweep to find or for a glyph to be credited to: its
+    /// procedures are left as they were, and it is named by its first one.
+    /// `/I3`, an object, shares the direct font's `b` and shows nothing; the
+    /// stream is kept for the font that cannot be measured.
+    #[test]
+    fn a_type3_font_written_into_the_resources_is_left_whole_and_reported() {
+        let mut out = String::from("%PDF-1.7\n");
+        out.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        out.push_str("2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n");
+        out.push_str(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
+             /Resources << /Font << /D3 << /Type /Font /Subtype /Type3 /Name /Direct\n\
+             /FontBBox [0 0 1000 1000] /FontMatrix [0.001 0 0 0.001 0 0]\n\
+             /CharProcs << /a 5 0 R /b 6 0 R >>\n\
+             /Encoding << /Type /Encoding /Differences [65 /a /b] >>\n\
+             /FirstChar 65 /LastChar 66 /Widths [1000 1000] >> /I3 7 0 R >> >>\n\
+             /Contents 4 0 R >>\nendobj\n",
+        );
+        out.push_str(&stream(4, "BT /D3 20 Tf 10 10 Td (A) Tj ET"));
+        out.push_str(&stream(5, A));
+        out.push_str(&stream(6, B));
+        out.push_str(&face(7, "/b 6 0 R", "[65 /b]"));
+        out.push_str("trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n");
+
+        let (after, report) = subset(out.into_bytes());
+        let doc = open(after);
+        assert_eq!(procedure(&doc, 6), B, "b is shown by nothing and kept");
+        assert_eq!(
+            report
+                .type3
+                .iter()
+                .map(|t| (t.font.num, t.kept, t.emptied))
+                .collect::<Vec<_>>(),
+            vec![(7, 1, 0)],
+            "/I3 keeps the stream the direct font has"
+        );
+        assert_eq!(
+            report.type3_untouched,
+            vec![Untouched {
+                program: ObjRef::new(5, 0),
+                base_font: "Direct".to_string(),
+                bytes: A.len() + B.len() + 2,
+                reason: UntouchedReason::NotAnObject,
+            }]
+        );
     }
 }

@@ -30,7 +30,75 @@ use crate::optional::OptionalContent;
 ///
 /// `None` records that a glyph was looked for and is not there, so a missing
 /// one costs the extraction attempt once rather than on every occurrence.
-type OutlineCache = HashMap<(u64, u32), Option<Arc<Outline>>>;
+/// Beside it, the font the extraction reported as resolving no glyph for the
+/// code, if it did — so a later render that meets the code from the cache
+/// says what the first one said ([`PageResources::for_one_render`]).
+type OutlineCache = HashMap<(u64, u32), (Option<Arc<Outline>>, Option<String>)>;
+
+/// A decoded image, or the codec that could not decode it, and the damage the
+/// decode tolerated as `(resource name, what was tolerated)`.
+///
+/// The failure is kept in the words the decode used and the damage beside
+/// the picture, because both are reported **per render**: a render that meets
+/// the image from the cache reports what the decode reported, rather than
+/// nothing (the damage) or the resource name standing in for a codec (the
+/// failure, which is what a cached `None` used to come back as).
+struct CachedImage {
+    image: Result<Arc<DecodedImage>, String>,
+    damage: Vec<(String, String)>,
+    /// What [`PageResources::repaired_spaces`] gained under the image's name
+    /// while it decoded, said again by every render that meets the image
+    /// here, as `damage` is.
+    repairs: Vec<(String, String)>,
+}
+
+/// What a page's resources work out once and every render of the page can
+/// reuse: font programs, decoded images, compiled ICC transforms, glyph
+/// outlines and the nested scopes of forms.
+///
+/// Behind one `Arc` so a retained page can give each render resources of its
+/// own — fresh lists of what that render had to tolerate — over the same
+/// caches ([`PageResources::for_one_render`]).
+#[derive(Default)]
+struct Caches {
+    /// The embedded font program of each font, by the id the interpreter uses.
+    ///
+    /// **Decoded on first use, not at construction.** A font program is an
+    /// inflate of a stream that is routinely a megabyte, and since a form
+    /// XObject's own `/Resources` became a scope of their own there is one of
+    /// these per form rather than one per page — a document of nine hundred
+    /// objects went from 537 ms to 24.7 s doing it eagerly, and one corpus
+    /// file stopped making progress at all. Most scopes are opened to resolve
+    /// an image or a pattern and never ask for a glyph.
+    ///
+    /// `None` is cached as firmly as a hit: a font with no embedded program
+    /// must not be looked up again on every glyph.
+    programs: Mutex<HashMap<u64, Option<Arc<Vec<u8>>>>>,
+    /// Decoded images, kept because a page may draw one many times.
+    images: Mutex<HashMap<Vec<u8>, CachedImage>>,
+    /// Compiled ICC transforms, by the profile stream's object number.
+    ///
+    /// A transform is three 4 096-entry tables, and a page may name the same
+    /// `ICCBased` space at every one of a thousand `cs` operators. The `None`
+    /// is cached too: a profile that would not parse must be refused once
+    /// rather than re-read and re-refused a thousand times.
+    icc: Mutex<IccCache>,
+    /// Outlines already extracted, keyed by font and code.
+    outlines: RwLock<OutlineCache>,
+    /// Nested scopes already built, by the form's own object number.
+    ///
+    /// A page may invoke one form a thousand times — a stamp, a rule, a
+    /// letterhead — and building its resources is not cheap: every font in the
+    /// dictionary is parsed and the optional-content configuration is bound
+    /// again. Two pdf.js corpus files stopped making progress at all when this
+    /// was rebuilt per invocation, which is what put the cache here.
+    ///
+    /// Keyed by the XObject's reference rather than by the resource name,
+    /// because two names can reach one form and a name means nothing outside
+    /// the dictionary it was looked up in. `None` is cached too: "this form
+    /// brought no resources" is an answer worth not recomputing.
+    form_scopes: Mutex<HashMap<u64, Option<Arc<PageResources>>>>,
+}
 
 /// Compiled ICC transforms, by the profile stream's object number and
 /// generation.
@@ -85,32 +153,13 @@ pub struct PageResources {
     doc: Arc<CosDocument>,
     fonts: HashMap<Vec<u8>, Arc<cos_font::Font>>,
     font_ids: HashMap<Vec<u8>, u64>,
-    /// The embedded font program of each font, by the id the interpreter uses.
-    ///
-    /// **Decoded on first use, not at construction.** A font program is an
-    /// inflate of a stream that is routinely a megabyte, and since a form
-    /// XObject's own `/Resources` became a scope of their own there is one of
-    /// these per form rather than one per page — a document of nine hundred
-    /// objects went from 537 ms to 24.7 s doing it eagerly, and one corpus
-    /// file stopped making progress at all. Most scopes are opened to resolve
-    /// an image or a pattern and never ask for a glyph.
-    ///
-    /// `None` is cached as firmly as a hit: a font with no embedded program
-    /// must not be looked up again on every glyph.
-    programs: Mutex<HashMap<u64, Option<Arc<Vec<u8>>>>>,
     /// Which glyph a code selects, per font, resolved lazily.
     resources: Option<Dict>,
-    /// Decoded images, kept because a page may draw one many times.
-    images: Mutex<HashMap<Vec<u8>, Option<Arc<DecodedImage>>>>,
-    /// Compiled ICC transforms, by the profile stream's object number.
-    ///
-    /// A transform is three 4 096-entry tables, and a page may name the same
-    /// `ICCBased` space at every one of a thousand `cs` operators. The `None`
-    /// is cached too: a profile that would not parse must be refused once
-    /// rather than re-read and re-refused a thousand times.
-    icc: Mutex<IccCache>,
-    /// Outlines already extracted, keyed by font and code.
-    outlines: RwLock<OutlineCache>,
+    /// Everything worked out once and reusable by every render: programs,
+    /// images, ICC transforms, outlines, form scopes. Shared, so
+    /// [`PageResources::for_one_render`] can hand a render its own lists of
+    /// what it tolerated over the same caches.
+    caches: Arc<Caches>,
     /// Resource names that named no font this build could resolve, and — when
     /// glyphs were being drawn — names whose font resolved no glyph for a
     /// code the page used.
@@ -119,19 +168,20 @@ pub struct PageResources {
     /// what the decoder tolerated)`. Ruling 10: the leaf crate says what it
     /// forgave, and this is where the object it happened in gets attached.
     damaged_images: Mutex<Vec<(String, String)>>,
-    /// Nested scopes already built, by the form's own object number.
-    ///
-    /// A page may invoke one form a thousand times — a stamp, a rule, a
-    /// letterhead — and building its resources is not cheap: every font in the
-    /// dictionary is parsed and the optional-content configuration is bound
-    /// again. Two pdf.js corpus files stopped making progress at all when this
-    /// was rebuilt per invocation, which is what put the cache here.
-    ///
-    /// Keyed by the XObject's reference rather than by the resource name,
-    /// because two names can reach one form and a name means nothing outside
-    /// the dictionary it was looked up in. `None` is cached too: "this form
-    /// brought no resources" is an answer worth not recomputing.
-    form_scopes: Mutex<HashMap<u64, Option<Arc<PageResources>>>>,
+    /// Colour spaces whose parameters were read the nearest way that means
+    /// something, as `(resource name, what was repaired)` — reported as
+    /// [`tinker_pdf_render::RenderWarning::RepairedColorSpace`] (ruling 10).
+    repaired_spaces: Mutex<Vec<(String, String)>>,
+    /// While [`crate::Page::images`] decodes one image, what the decoders
+    /// tolerated for **that** image, so the leniency lands on the
+    /// [`crate::PageImage`] it happened to rather than only on the page's
+    /// list above — which dedups by resource name, and which `images` has no
+    /// bitmap to carry out on (ruling 10). `None` when nothing is capturing.
+    image_capture: Mutex<Option<Vec<String>>>,
+    /// The font the glyph lookup under way reported as resolving no glyph,
+    /// taken by [`GlyphSource::outline`] into the cache entry beside the
+    /// outline so a render that meets it there can say it again.
+    unresolved: Mutex<Option<String>>,
     /// The host's substitute faces, kept so a resource dictionary *inside*
     /// this one can be read with the same configuration.
     ///
@@ -149,7 +199,7 @@ pub struct PageResources {
     /// render — this build has no layer-toggle API to change it with — and a
     /// page that marks every drawing operator would otherwise walk
     /// `/OCProperties` thousands of times for one constant.
-    optional: OptionalContent,
+    optional: Arc<OptionalContent>,
 }
 
 /// Applies `/Decode [1 0]` to already-decoded samples.
@@ -171,7 +221,24 @@ fn invert_if_decode_reverses(decode: &[(f64, f64)], rgb: &mut [u8]) {
 
 /// What an inline image is called in a warning. It has no resource name to be
 /// called anything else by, which is also why it is not cached.
-const INLINE_NAME: &str = "inline";
+pub(crate) const INLINE_NAME: &str = "inline";
+
+/// What an inline image's filter chain produced: samples, or the still-coded
+/// bytes of a codec that returns its own pixels.
+pub(crate) enum InlineSamples {
+    /// Samples for the sample loop; `fax` when they are a fax's packed
+    /// one-bit samples, whatever `/BitsPerComponent` said.
+    Samples {
+        /// The samples.
+        bytes: Vec<u8>,
+        /// Whether a CCITT decode produced them.
+        fax: bool,
+    },
+    /// A JPEG, for [`jpeg_samples`].
+    Jpeg(Vec<u8>),
+    /// A JPEG 2000 codestream, for [`PageResources::jpx_samples`].
+    Jpx(Vec<u8>),
+}
 
 /// A JPEG's pixels, ready to blit (7.4.8).
 ///
@@ -188,7 +255,7 @@ fn jpeg_image(
     decode: &[(f64, f64)],
     interpolate: bool,
 ) -> Result<DecodedImage, String> {
-    let image = jpeg_decode(raw, 1 << 28).map_err(|e| format!("{e:?}"))?;
+    let image = jpeg_samples(raw)?;
     let mut rgb = jpeg_to_rgb(&image);
     invert_if_decode_reverses(decode, &mut rgb);
     Ok(DecodedImage {
@@ -199,6 +266,17 @@ fn jpeg_image(
         stencil: false,
         interpolate,
     })
+}
+
+/// A JPEG's samples, decoded and **not** converted: one byte a component, in
+/// the components the frame carries — YCbCr already turned into RGB and an
+/// Adobe-inverted CMYK already turned back into ink values, which are the
+/// decoder's to undo, and nothing else (7.4.8).
+///
+/// The one decode both [`jpeg_image`] and [`crate::Page::images`] make, under
+/// the one ceiling.
+fn jpeg_samples(raw: &[u8]) -> Result<tinker_pdf_filters::JpegImage, String> {
+    jpeg_decode(raw, 1 << 28).map_err(|e| format!("{e:?}"))
 }
 
 /// Rewrites an inline image's dictionary into the long spellings the shared
@@ -252,7 +330,7 @@ fn expand_inline_abbreviations(dict: &[u8]) -> Vec<u8> {
         }
         let start = i + 1;
         let mut end = start;
-        while dict.get(end).copied().is_some_and(&is_regular) {
+        while dict.get(end).copied().is_some_and(is_regular) {
             end += 1;
         }
         let name = dict.get(start..end).unwrap_or_default();
@@ -292,15 +370,102 @@ fn group_space(space: tinker_pdf_color::ColorSpace) -> tinker_pdf_content::Group
     }
 }
 
+/// Table 90's default `/Decode` pair for component `c` of an image in
+/// `space`, where it is not `[0 1]` and so not what a sample's fraction
+/// already is: a `/Lab` sample spans `L*` over `0..100` and `a*`, `b*` over
+/// the space's `/Range` (8.6.5.4, Table 90).
+///
+/// Until October 2026 an image in `/Lab` with no `/Decode` read every
+/// sample as a fraction of one, so `L*` ran 0 to 1 and the image was all but
+/// black. Every other space's default is `[0 1]` — an `/Indexed` one's is
+/// its index range, which the sample loop reads as the index itself.
+fn default_decode(space: &ColorSpace, c: usize) -> Option<(f64, f64)> {
+    match space {
+        ColorSpace::Lab { range } => match c {
+            0 => Some((0.0, 100.0)),
+            1 => Some((range[0], range[1])),
+            2 => Some((range[2], range[3])),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The D50 white point, and the default when a CIE-based space names none.
 ///
-/// 8.6.5.1 and 8.6.5.2 make `/WhitePoint` required, so this is the answer for a
+/// 8.6.5.2 and 8.6.5.3 make `/WhitePoint` required, so this is the answer for a
 /// dictionary that omits it or writes fewer than three numbers — a file that
 /// has not described a white point rather than one that described a different
 /// one.
 const WHITE_D50: [f64; 3] = [0.964_212, 1.0, 0.825_188];
 
+/// `read` of `object` resolved, **where it lies**: an indirect object is the
+/// document's cached one and a direct one is `object` itself.
+///
+/// Not [`CosDocument::resolve`], which hands a direct object back as a fresh
+/// `Arc` of a deep copy. That is nothing for a number and everything for a
+/// long array, and the readers this serves run once per operator: a review
+/// measured a page of 2 000 `/X /P0 BDC EMC` naming one list beside a
+/// 1 048 576-entry array at 150 s to extract text from while each `BDC` was
+/// handed a copy, against 0.38 s with the list borrowed.
+pub(crate) fn read_resolved<R>(
+    doc: &CosDocument,
+    object: &Object,
+    read: impl FnOnce(&Object) -> R,
+) -> R {
+    if object.as_objref().is_some() {
+        read(&doc.resolve(object))
+    } else {
+        read(object)
+    }
+}
+
+/// `read` of the value of `key` in `dict`, resolved where it lies
+/// ([`read_resolved`]): what [`CosDocument::resolve_key`] answers, `Null` for
+/// an absent key, without its copy of a direct value.
+///
+/// For the readers that take values **out of** a dictionary read where it
+/// lies: the dictionary is not copied, and a value under one of the keys
+/// they read must not be either, or a long array under `/Alt` costs what it
+/// cost beside the keys before.
+pub(crate) fn read_key<R>(
+    doc: &CosDocument,
+    dict: &Dict,
+    key: &[u8],
+    read: impl FnOnce(&Object) -> R,
+) -> R {
+    match dict.get(doc.intern(key)) {
+        Some(value) => read_resolved(doc, value, read),
+        None => read(&Object::Null),
+    }
+}
+
 impl PageResources {
+    /// `read` of the property list this scope's `/Properties` names `name`
+    /// (14.6.2), resolved: what `/Tag /name BDC` refers to. `None` when there
+    /// is no such list or it is not a dictionary.
+    ///
+    /// Lent rather than returned, because neither the table nor the list is
+    /// copied to answer: each is the document's cached object when it is
+    /// indirect and the resource dictionary's own when it is direct (see
+    /// [`read_resolved`]). Every named `BDC` on every reading of a page asks,
+    /// so a copy here is the list's size times the page's sequences —
+    /// `tests/property_list_work.rs` counts it. The same holds for every value
+    /// `read` takes out of the list, which is why the readers lent it read
+    /// each through [`read_key`] rather than `resolve_key`.
+    pub(crate) fn with_property_list<R>(
+        &self,
+        name: &[u8],
+        read: impl FnOnce(&Dict) -> R,
+    ) -> Option<R> {
+        let resources = self.resources.as_ref()?;
+        let table = resources.get(self.doc.intern(b"Properties"))?;
+        read_resolved(&self.doc, table, |table| {
+            let entry = table.as_dict()?.get(self.doc.intern(name))?;
+            read_resolved(&self.doc, entry, |list| list.as_dict().map(read))
+        })
+    }
+
     /// The font resource names that could not be resolved.
     #[must_use]
     pub fn missing_fonts(&self) -> Vec<String> {
@@ -317,6 +482,64 @@ impl PageResources {
             .lock()
             .map(|images| images.clone())
             .unwrap_or_default()
+    }
+
+    /// Colour spaces read with a repair, and which repair (ruling 10).
+    #[must_use]
+    pub(crate) fn repaired_spaces(&self) -> Vec<(String, String)> {
+        self.repaired_spaces
+            .lock()
+            .map(|spaces| spaces.clone())
+            .unwrap_or_default()
+    }
+
+    /// Adds repairs some other pass over the same content met — the
+    /// interpretation a retained page recorded — to what this render reports,
+    /// as [`PageResources::note_missing_fonts`] does for fonts.
+    pub(crate) fn note_repaired_spaces(&self, entries: &[(String, String)]) {
+        for entry in entries {
+            self.note_repaired_space(entry.clone());
+        }
+    }
+
+    /// These resources again, for **one render** of a page whose resources
+    /// are kept across renders — a retained page's: every cache shared, so
+    /// nothing decoded or extracted is paid for twice, and nothing tolerated
+    /// yet, so what the render reports is what it met.
+    ///
+    /// A direct render builds its resources fresh and reports what its own
+    /// interpretation and drawing ran into. A retained page's resources
+    /// outlive its renders, and their lists used to as well: a cancelled
+    /// replay reported a font the recording had met, and a region reported
+    /// what a pattern cell drawn by an earlier render had met. What a cache
+    /// hit stands for — an image's damage, a glyph its font could not resolve —
+    /// is kept in the cache entry and said again by every render that meets
+    /// it, as that render's own decode would have.
+    #[must_use]
+    pub(crate) fn for_one_render(&self) -> PageResources {
+        PageResources {
+            doc: Arc::clone(&self.doc),
+            fonts: self.fonts.clone(),
+            font_ids: self.font_ids.clone(),
+            resources: self.resources.clone(),
+            caches: Arc::clone(&self.caches),
+            missing_fonts: Mutex::new(Vec::new()),
+            damaged_images: Mutex::new(Vec::new()),
+            repaired_spaces: Mutex::new(Vec::new()),
+            image_capture: Mutex::new(None),
+            unresolved: Mutex::new(None),
+            provider: self.provider.clone(),
+            optional: Arc::clone(&self.optional),
+        }
+    }
+
+    /// Adds fonts some other pass over the same content could not resolve —
+    /// the interpretation a retained page recorded — to what this render
+    /// reports, as though its own interpretation had met them.
+    pub(crate) fn note_missing_fonts(&self, names: &[String]) {
+        for name in names {
+            self.note_missing_font(name.clone());
+        }
     }
 
     /// Reads a page's resource dictionary.
@@ -346,16 +569,15 @@ impl PageResources {
             doc: doc.clone(),
             fonts,
             font_ids,
-            programs: Mutex::new(HashMap::new()),
-            form_scopes: Mutex::new(HashMap::new()),
             resources,
-            images: Mutex::new(HashMap::new()),
-            icc: Mutex::new(HashMap::new()),
-            outlines: RwLock::new(HashMap::new()),
+            caches: Arc::default(),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
+            repaired_spaces: Mutex::new(Vec::new()),
+            image_capture: Mutex::new(None),
+            unresolved: Mutex::new(None),
             provider: provider.cloned(),
-            optional: OptionalContent::bind(doc),
+            optional: Arc::new(OptionalContent::bind(doc)),
         }
     }
 
@@ -374,7 +596,7 @@ impl PageResources {
         reference: tinker_pdf_cos::ObjRef,
     ) -> Option<Arc<tinker_pdf_color::icc::Transform>> {
         let key = (reference.num, reference.gen);
-        if let Ok(cache) = self.icc.lock() {
+        if let Ok(cache) = self.caches.icc.lock() {
             if let Some(found) = cache.get(&key) {
                 return found.clone();
             }
@@ -387,7 +609,7 @@ impl PageResources {
             .as_ref()
             .and_then(tinker_pdf_color::icc::Transform::compile)
             .map(Arc::new);
-        if let Ok(mut cache) = self.icc.lock() {
+        if let Ok(mut cache) = self.caches.icc.lock() {
             cache.insert(key, compiled.clone());
         }
         compiled
@@ -421,7 +643,7 @@ impl PageResources {
             return None;
         }
         let cs = group.get(self.doc.intern(b"CS")).cloned()?;
-        self.parse_space(&cs, 0).map(group_space)
+        self.parse_space(&cs, 0, b"Group").map(group_space)
     }
 
     /// Reads a resource dictionary that is not a page's.
@@ -451,16 +673,15 @@ impl PageResources {
             doc: doc.clone(),
             fonts,
             font_ids,
-            programs: Mutex::new(HashMap::new()),
-            form_scopes: Mutex::new(HashMap::new()),
             resources: Some(dict),
-            images: Mutex::new(HashMap::new()),
-            icc: Mutex::new(HashMap::new()),
-            outlines: RwLock::new(HashMap::new()),
+            caches: Arc::default(),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
+            repaired_spaces: Mutex::new(Vec::new()),
+            image_capture: Mutex::new(None),
+            unresolved: Mutex::new(None),
             provider: provider.cloned(),
-            optional: OptionalContent::bind(doc),
+            optional: Arc::new(OptionalContent::bind(doc)),
         }
     }
 
@@ -480,6 +701,40 @@ impl PageResources {
         let reference = table.get_ref(key);
         let entry = self.doc.resolve_key(table, key);
         Some((entry.as_dict()?.clone(), reference))
+    }
+
+    /// The stream of the tiling pattern `name` selects in this scope, whose
+    /// bytes are its cell (8.7.3.2) — the stream [`GlyphSource::tile`]
+    /// paints. `None` for a shading pattern, which has no cell, and for a
+    /// name this scope does not have.
+    ///
+    /// For [`crate::subset`], whose walk has to enter a cell the interpreter
+    /// never runs: the renderer paints it itself.
+    pub(crate) fn tiling_cell(&self, name: &[u8]) -> Option<ObjRef> {
+        let (dict, reference) = self.pattern_entry(name)?;
+        let kind = self
+            .doc
+            .resolve_key(&dict, self.doc.intern(b"PatternType"))
+            .as_int();
+        (kind == Some(1)).then_some(reference).flatten()
+    }
+
+    /// The scope a stream's own `/Resources` makes: a tiling pattern's, a
+    /// mask group's or a form's, built as [`PageResources::from_dict`]
+    /// builds any. `None` when the stream has none, and its names resolve
+    /// where it was painted (8.7.3.2, 8.10.1).
+    pub(crate) fn own_scope(&self, stream: ObjRef) -> Option<PageResources> {
+        let object = self.doc.get(stream).ok()?;
+        let own = self
+            .doc
+            .resolve_key(object.as_dict()?, Name::RESOURCES)
+            .as_dict()?
+            .clone();
+        Some(PageResources::from_dict(
+            &self.doc,
+            own,
+            self.provider.as_ref(),
+        ))
     }
 
     /// A pattern's `/Matrix`, which maps pattern space to the parent content
@@ -575,13 +830,13 @@ impl PageResources {
     fn form_resources(&self, name: &[u8]) -> Option<Arc<PageResources>> {
         let (dict, reference) = self.xobject(name)?;
         let key = (u64::from(reference.num) << 16) | u64::from(reference.gen);
-        if let Ok(cache) = self.form_scopes.lock() {
+        if let Ok(cache) = self.caches.form_scopes.lock() {
             if let Some(hit) = cache.get(&key) {
                 return hit.clone();
             }
         }
         let built = self.build_form_resources(&dict);
-        if let Ok(mut cache) = self.form_scopes.lock() {
+        if let Ok(mut cache) = self.caches.form_scopes.lock() {
             cache.insert(key, built.clone());
         }
         built
@@ -608,7 +863,25 @@ impl PageResources {
         )))
     }
 
-    fn xobject(&self, name: &[u8]) -> Option<(Dict, tinker_pdf_cos::ObjRef)> {
+    /// Whether this scope's `/XObject` dictionary names `name` and, if it
+    /// does, the XObject's `/Subtype` — `Some(None)` for one with none.
+    ///
+    /// The one question `Page::render_form` needs answered that `form` cannot:
+    /// `form` answers `None` alike for a name that is not there, an image and a
+    /// stream that will not decode, and a caller who asked for one form is owed
+    /// the difference.
+    pub(crate) fn xobject_subtype(&self, name: &[u8]) -> Option<Option<Vec<u8>>> {
+        let (dict, _) = self.xobject(name)?;
+        Some(
+            self.doc
+                .resolve_key(&dict, self.doc.intern(b"Subtype"))
+                .as_name()
+                .and_then(|n| self.doc.name_bytes(n))
+                .map(|bytes| bytes.to_vec()),
+        )
+    }
+
+    pub(crate) fn xobject(&self, name: &[u8]) -> Option<(Dict, tinker_pdf_cos::ObjRef)> {
         let resources = self.resources.as_ref()?;
         let value = self.doc.resolve_key(resources, self.doc.intern(b"XObject"));
         let dict = value.as_dict()?;
@@ -626,23 +899,39 @@ impl PageResources {
             // A bare `/CalGray` or `/CalRGB` name carries no parameter
             // dictionary at all, so there is no white point or gamma to read
             // and the device space *is* the whole of what the file said.
-            b"DeviceGray" | b"G" | b"CalGray" => return Some(ColorSpace::DeviceGray),
-            b"DeviceRGB" | b"RGB" | b"CalRGB" => return Some(ColorSpace::DeviceRgb),
-            b"DeviceCMYK" | b"CMYK" => return Some(ColorSpace::DeviceCmyk),
+            b"DeviceGray" | b"CalGray" => return Some(ColorSpace::DeviceGray),
+            b"DeviceRGB" | b"CalRGB" => return Some(ColorSpace::DeviceRgb),
+            b"DeviceCMYK" => return Some(ColorSpace::DeviceCmyk),
             b"Pattern" => return Some(ColorSpace::Pattern { base: None }),
             _ => {}
         }
 
-        let resources = self.resources.as_ref()?;
-        let table = self
-            .doc
-            .resolve_key(resources, self.doc.intern(b"ColorSpace"));
-        let dict = table.as_dict()?;
-        let entry = dict.get(self.doc.intern(name))?.clone();
-        self.parse_space(&entry, 0)
+        // `/G`, `/RGB` and `/CMYK` are Table 93's abbreviations, which an
+        // inline image may use and a content stream's `cs` may not — 8.6.8
+        // gives `cs` a device space's own name or a `/ColorSpace` resource,
+        // and `/G` is a perfectly good resource name. So the resources are
+        // asked first and the abbreviation is the fallback. Until October
+        // 2026 the abbreviation won, and a page that registered its
+        // `/CalGray` as `/G` was drawn in DeviceGray, gamma and white point
+        // unread.
+        let entry = self.resources.as_ref().and_then(|resources| {
+            let table = self
+                .doc
+                .resolve_key(resources, self.doc.intern(b"ColorSpace"));
+            table.as_dict()?.get(self.doc.intern(name)).cloned()
+        });
+        match entry {
+            Some(entry) => self.parse_space(&entry, 0, name),
+            None => match name {
+                b"G" => Some(ColorSpace::DeviceGray),
+                b"RGB" => Some(ColorSpace::DeviceRgb),
+                b"CMYK" => Some(ColorSpace::DeviceCmyk),
+                _ => None,
+            },
+        }
     }
 
-    fn parse_space(&self, object: &Object, depth: u32) -> Option<ColorSpace> {
+    fn parse_space(&self, object: &Object, depth: u32, name: &[u8]) -> Option<ColorSpace> {
         if depth > 8 {
             return None;
         }
@@ -692,7 +981,7 @@ impl PageResources {
                 Some(ColorSpace::Approximated { components })
             }
             b"Indexed" | b"I" => {
-                let base = self.parse_space(items.get(1)?, depth + 1)?;
+                let base = self.parse_space(items.get(1)?, depth + 1, name)?;
                 let high = items.get(2).and_then(|o| self.doc.resolve(o).as_int())?;
                 let lookup = match items.get(3).map(|o| self.doc.resolve(o)) {
                     Some(value) => match value.as_string() {
@@ -720,7 +1009,7 @@ impl PageResources {
                         .as_array()
                         .map_or(1, <[Object]>::len)
                 };
-                let alternate = self.parse_space(items.get(2)?, depth + 1)?;
+                let alternate = self.parse_space(items.get(2)?, depth + 1, name)?;
 
                 // 8.6.6.4: the fourth element converts tint values into the
                 // alternate space. Left as the identity, a one-ink Separation
@@ -748,10 +1037,10 @@ impl PageResources {
             b"Pattern" => Some(ColorSpace::Pattern {
                 base: items
                     .get(1)
-                    .and_then(|o| self.parse_space(o, depth + 1))
+                    .and_then(|o| self.parse_space(o, depth + 1, name))
                     .map(Box::new),
             }),
-            // 8.6.5.1 and 8.6.5.2. These were aliased to the device spaces,
+            // 8.6.5.2 and 8.6.5.3. These were aliased to the device spaces,
             // which read neither the white point nor the gamma and left
             // *nothing* recording that an approximation had happened — unlike
             // an ICC profile this build refuses, where `Approximated` says so
@@ -778,7 +1067,7 @@ impl PageResources {
                     .and_then(|d| self.numbers(d, b"Gamma", 3))
                     .map_or([1.0; 3], |v| [v[0], v[1], v[2]]);
                 let matrix = dict.and_then(|d| self.numbers(d, b"Matrix", 9)).map_or(
-                    // Table 65's default is the identity, which makes the
+                    // Table 64's default is the identity, which makes the
                     // components XYZ directly.
                     [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
                     |v| {
@@ -808,6 +1097,16 @@ impl PageResources {
                         (values.len() >= 4).then(|| [values[0], values[1], values[2], values[3]])
                     })
                     .unwrap_or([-100.0, 100.0, -100.0, 100.0]);
+                // Table 65: `[amin amax bmin bmax]`. A pair written backwards
+                // is read as the span it covers — `tinker_pdf_color`'s
+                // `within`, which is what stopped it panicking — and that is a
+                // leniency, so it is named (ruling 10).
+                if range[0] > range[1] || range[2] > range[3] {
+                    self.note_repaired_space((
+                        String::from_utf8_lossy(name).into_owned(),
+                        "LabRangeUnordered".to_string(),
+                    ));
+                }
                 Some(ColorSpace::Lab { range })
             }
             _ => None,
@@ -840,7 +1139,12 @@ impl PageResources {
     /// a type 4 to 7 shading is a **stream** (8.7.4.5.5), and its vertices are
     /// the stream's bytes. A mesh written as a direct dictionary has no
     /// vertices at all, which is reported rather than drawn as an empty area.
-    fn read_shading(&self, dict: &Dict, reference: Option<ObjRef>) -> Result<Option<Shading>, i64> {
+    fn read_shading(
+        &self,
+        dict: &Dict,
+        reference: Option<ObjRef>,
+        name: &[u8],
+    ) -> Result<Option<Shading>, i64> {
         let kind = self
             .doc
             .resolve_key(dict, self.doc.intern(b"ShadingType"))
@@ -848,7 +1152,9 @@ impl PageResources {
             .unwrap_or(0);
 
         let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
-        let space = self.parse_space(&space, 0).unwrap_or(ColorSpace::DeviceRgb);
+        let space = self
+            .parse_space(&space, 0, name)
+            .unwrap_or(ColorSpace::DeviceRgb);
         let function = self.function(dict).unwrap_or(Function::Identity);
 
         let coords = self.doc.resolve_key(dict, self.doc.intern(b"Coords"));
@@ -1081,6 +1387,14 @@ impl FontSource for PageResources {
         self.font_ids.get(font).copied().unwrap_or(0)
     }
 
+    /// `/BaseFont` as the dictionary writes it; `None` for a name this scope
+    /// does not define and for a font that states none (a Type 3 font may
+    /// omit it, 9.6.5 Table 110).
+    fn font_name(&self, font: &[u8]) -> Option<Arc<str>> {
+        let name = self.fonts.get(font)?.base_font();
+        (!name.is_empty()).then(|| Arc::from(name))
+    }
+
     fn type3_glyph(&self, font: &[u8], code: u32) -> Option<(Vec<u8>, Matrix)> {
         // 9.6.5: only a Type 3 font has glyph procedures. Every other kind
         // returns None here, which leaves the ordinary outline path untouched.
@@ -1159,7 +1473,7 @@ impl FontSource for PageResources {
         if subtype.as_ref() != b"Form" {
             return None;
         }
-        self.form_from(&dict, reference)
+        self.form_from(&dict, reference, name)
     }
 
     fn resolve_color(&self, space: &[u8], components: &[f64]) -> Option<Rgb> {
@@ -1170,6 +1484,28 @@ impl FontSource for PageResources {
 
     fn color_components(&self, space: &[u8]) -> Option<usize> {
         Some(self.color_space(space)?.components())
+    }
+
+    fn resolve_ink(&self, space: &[u8], components: &[f64]) -> Option<[u8; 4]> {
+        // 8.6.4.4: DeviceCMYK's own components, clamped as `to_rgb` clamps
+        // them. Every other space — an ICC CMYK profile included, whose
+        // components are a profile's to interpret — stays light.
+        if self.color_space(space)? != ColorSpace::DeviceCmyk {
+            return None;
+        }
+        let byte = |i: usize| {
+            let v = components.get(i).copied().unwrap_or(0.0);
+            if v.is_finite() {
+                (v.clamp(0.0, 1.0) * 255.0).round() as u8
+            } else {
+                0
+            }
+        };
+        Some([byte(0), byte(1), byte(2), byte(3)])
+    }
+
+    fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
+        Some(self.color_space(space)?.initial())
     }
 
     fn ext_g_state_alpha(&self, name: &[u8]) -> Option<(Option<f64>, Option<f64>)> {
@@ -1244,7 +1580,7 @@ impl FontSource for PageResources {
         // `/G` is required, and is a form XObject with a transparency group.
         let reference = mask.get_ref(self.doc.intern(b"G"))?;
         let group_dict = self.doc.get(reference).ok()?.as_dict()?.clone();
-        let form = self.form_from(&group_dict, reference)?;
+        let form = self.form_from(&group_dict, reference, name)?;
 
         // 11.6.5.2: `/S` selects what the rendered group is read as. A name
         // this build does not know is `/Alpha`'s opposite rather than an
@@ -1274,7 +1610,7 @@ impl FontSource for PageResources {
                     .resolve_key(&group_dict, self.doc.intern(b"Group"))
                     .as_dict()
                     .and_then(|g| g.get(self.doc.intern(b"CS")).cloned())
-                    .and_then(|cs| self.parse_space(&cs, 0));
+                    .and_then(|cs| self.parse_space(&cs, 0, name));
                 let (r, g, b) = match space {
                     Some(space) => space.to_rgb(&components),
                     None => by_component_count(&components),
@@ -1310,13 +1646,15 @@ impl FontSource for PageResources {
         // sub-dictionary of the current resource dictionary. The entry is an
         // optional content group or a membership dictionary; anything else is
         // an ordinary property list and hides nothing.
+        // The table and the entry are read where they lie, as
+        // `with_property_list` reads them: every `/OC` `BDC` asks.
         let resources = self.resources.as_ref()?;
-        let table = self
-            .doc
-            .resolve_key(resources, self.doc.intern(b"Properties"));
-        let entry = table.as_dict()?.get(self.doc.intern(name))?.clone();
-        let label = String::from_utf8_lossy(name).into_owned();
-        Some(self.optional.layer_of(&self.doc, &entry, &label))
+        let table = resources.get(self.doc.intern(b"Properties"))?;
+        read_resolved(&self.doc, table, |table| {
+            let entry = table.as_dict()?.get(self.doc.intern(name))?;
+            let label = String::from_utf8_lossy(name).into_owned();
+            Some(self.optional.layer_of(&self.doc, entry, &label))
+        })
     }
 
     fn xobject_optional_content(&self, name: &[u8]) -> Option<Layer> {
@@ -1335,32 +1673,35 @@ impl FontSource for PageResources {
         // the seam — the interpreter never sees a dictionary — and it is the
         // reason the inline and named forms arrive at a device
         // indistinguishable from each other.
-        let resources = self.resources.as_ref()?;
-        let table = self
-            .doc
-            .resolve_key(resources, self.doc.intern(b"Properties"));
-        let entry = table.as_dict()?.get(self.doc.intern(name))?.clone();
-        let resolved = self.doc.resolve(&entry);
-        let dict = resolved.as_dict()?;
+        let props = self.with_property_list(name, |dict| self.marked_props(name, dict))?;
+        // An `/OC` group, a `/Type /Pagination` artifact list, a producer's
+        // private dictionary: every one of them reaches here and says nothing
+        // 14.6.2 or 14.9 defines. `None` rather than an empty struct, so the
+        // interpreter's own filter and this one cannot disagree.
+        (!props.is_empty()).then_some(props)
+    }
+}
 
-        // 14.7.4.2: a non-negative integer. Read through `resolve_key`
-        // because 7.3.10 lets any value in a *file* dictionary be indirect —
-        // which is exactly the difference between this form and the inline
-        // one, where it cannot be.
-        let mcid = self
-            .doc
-            .resolve_key(dict, self.doc.intern(b"MCID"))
-            .as_int()
-            .and_then(|n| u32::try_from(n).ok());
+impl PageResources {
+    /// What the property list `dict`, named `name`, says to a device: the
+    /// body of [`FontSource::marked_content_properties`], run on the list
+    /// where it lies.
+    fn marked_props(&self, name: &[u8], dict: &Dict) -> MarkedProps {
+        // 14.7.4.2: a non-negative integer. Resolved because 7.3.10 lets any
+        // value in a *file* dictionary be indirect — which is exactly the
+        // difference between this form and the inline one, where it cannot
+        // be. Every value here is read where it lies (`read_key`), as the
+        // list is: a copy of one is its size at every `BDC`.
+        let mcid =
+            read_key(&self.doc, dict, b"MCID", Object::as_int).and_then(|n| u32::try_from(n).ok());
 
         let text = |key: &[u8]| {
-            self.doc
-                .resolve_key(dict, self.doc.intern(key))
-                .as_string()
-                .map(|s| decode_text_string(&s.bytes))
+            read_key(&self.doc, dict, key, |value| {
+                value.as_string().map(|s| decode_text_string(&s.bytes))
+            })
         };
 
-        let props = MarkedProps {
+        MarkedProps {
             mcid,
             actual_text: text(b"ActualText"),
             alt: text(b"Alt"),
@@ -1371,12 +1712,15 @@ impl FontSource for PageResources {
             // in, which only the interpreter knows. It stamps this on the way
             // past.
             stream: 0,
-        };
-        // An `/OC` group, a `/Type /Pagination` artifact list, a producer's
-        // private dictionary: every one of them reaches here and says nothing
-        // 14.6.2 or 14.9 defines. `None` rather than an empty struct, so the
-        // interpreter's own filter and this one cannot disagree.
-        (!props.is_empty()).then_some(props)
+            // ISO 32000-2 14.13.5, Table 409a as the approved errata add it:
+            // a named list with an `/MCAF` array associates files with an
+            // `/AF` sequence. The name is handed on, not the files, which
+            // `Page::marked_content_associated_files` reads in this scope.
+            // Asked whether it is an array where it lies, since a direct
+            // `/MCAF` is the list's own and as long as the file makes it.
+            associated_files: read_key(&self.doc, dict, b"MCAF", |mcaf| mcaf.as_array().is_some())
+                .then(|| name.to_vec()),
+        }
     }
 }
 
@@ -1386,17 +1730,30 @@ impl GlyphSource for PageResources {
     }
 
     fn outline(&self, font_id: u64, code: u32) -> Option<Outline> {
-        if let Ok(cache) = self.outlines.read() {
-            if let Some(hit) = cache.get(&(font_id, code)) {
+        if let Ok(cache) = self.caches.outlines.read() {
+            if let Some((hit, unresolved)) = cache.get(&(font_id, code)) {
+                // What the extraction reported, reported again: this render
+                // met the glyph too, and a render of its own would have.
+                if let Some(name) = unresolved {
+                    self.note_missing_font(name.clone());
+                }
                 return hit.as_ref().map(|o| (**o).clone());
             }
         }
 
+        if let Ok(mut marker) = self.unresolved.lock() {
+            *marker = None;
+        }
         let outline = self.extract_outline(font_id, code).map(Arc::new);
-        if let Ok(mut cache) = self.outlines.write() {
+        let unresolved = self
+            .unresolved
+            .lock()
+            .ok()
+            .and_then(|mut marker| marker.take());
+        if let Ok(mut cache) = self.caches.outlines.write() {
             // Bounded: a hostile document could ask for millions of codes.
             if cache.len() < 1 << 16 {
-                cache.insert((font_id, code), outline.clone());
+                cache.insert((font_id, code), (outline.clone(), unresolved));
             }
         }
         outline.map(|o| (*o).clone())
@@ -1417,7 +1774,7 @@ impl GlyphSource for PageResources {
             return Ok(None);
         };
 
-        self.read_shading(dict, reference)
+        self.read_shading(dict, reference, name)
     }
 
     fn pattern(&self, name: &[u8]) -> Option<PatternPaint> {
@@ -1446,7 +1803,7 @@ impl GlyphSource for PageResources {
                 // A mesh that cannot be read at all is as unpaintable inside a
                 // pattern as anywhere else, and reports as an unpainted
                 // pattern rather than as a missing one.
-                let Ok(Some(shading)) = self.read_shading(shading, reference) else {
+                let Ok(Some(shading)) = self.read_shading(shading, reference, name) else {
                     return Some(PatternPaint::Unsupported);
                 };
                 Some(PatternPaint::Shading(Box::new(shading), matrix))
@@ -1497,7 +1854,8 @@ impl GlyphSource for PageResources {
         );
         let mut renderer = tinker_pdf_render::Renderer::new(canvas, request.to_pixels, resources)
             .with_cancel(request.cancel.clone())
-            .with_pattern_depth(request.depth);
+            .with_pattern_depth(request.depth)
+            .with_antialias(request.antialias);
 
         // 8.7.3.2: the cell is clipped to its `/BBox`. The buffer is already
         // that box rounded outward, so this only takes back the part of a
@@ -1549,6 +1907,9 @@ impl GlyphSource for PageResources {
                     }
                 }
             }
+            for entry in resources.repaired_spaces() {
+                self.note_repaired_space(entry);
+            }
         }
 
         Some(tinker_pdf_render::Tile { canvas, warnings })
@@ -1567,17 +1928,59 @@ impl GlyphSource for PageResources {
     }
 
     fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
-        if let Ok(cache) = self.images.lock() {
+        if let Ok(cache) = self.caches.images.lock() {
             if let Some(hit) = cache.get(name) {
-                return Ok(hit.as_ref().map(|i| (**i).clone()));
+                // What the decode said, said again: a render that meets the
+                // image here met it as surely as the one that decoded it.
+                for entry in &hit.damage {
+                    self.note_damaged_image(entry.clone());
+                }
+                for entry in &hit.repairs {
+                    self.note_repaired_space(entry.clone());
+                }
+                return match &hit.image {
+                    Ok(image) => Ok(Some((**image).clone())),
+                    Err(codec) => Err(codec.clone()),
+                };
             }
         }
 
+        let label = String::from_utf8_lossy(name).into_owned();
         let decoded = self.decode_image(name);
-        let stored = decoded.as_ref().ok().cloned().map(Arc::new);
-        if let Ok(mut cache) = self.images.lock() {
+        // The damage this decode reported: every entry under this name, which
+        // only this image's decode (and its soft mask's, part of it) writes.
+        let damage: Vec<(String, String)> = self
+            .damaged_images
+            .lock()
+            .map(|damaged| {
+                damaged
+                    .iter()
+                    .filter(|(named, _)| *named == label)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        // And the repairs, by the same rule: the decode names its colour
+        // space by the image's name.
+        let repairs: Vec<(String, String)> = self
+            .repaired_spaces()
+            .into_iter()
+            .filter(|(named, _)| *named == label)
+            .collect();
+        let image = match &decoded {
+            Ok(image) => Ok(Arc::new(image.clone())),
+            Err(codec) => Err(codec.clone()),
+        };
+        if let Ok(mut cache) = self.caches.images.lock() {
             if cache.len() < 256 {
-                cache.insert(name.to_vec(), stored);
+                cache.insert(
+                    name.to_vec(),
+                    CachedImage {
+                        image,
+                        damage,
+                        repairs,
+                    },
+                );
             }
         }
         decoded.map(Some)
@@ -1594,7 +1997,12 @@ impl PageResources {
     /// resource table, and a second reader for the same dictionary is how
     /// `/Matrix` or `/BBox` comes to be honoured on one route and not the
     /// other.
-    fn form_from(&self, dict: &Dict, reference: ObjRef) -> Option<tinker_pdf_content::Form> {
+    fn form_from(
+        &self,
+        dict: &Dict,
+        reference: ObjRef,
+        name: &[u8],
+    ) -> Option<tinker_pdf_content::Form> {
         let content = self.doc.stream_decoded(reference).ok()?;
         // 8.10.2: /Matrix maps the form's space into the one that invoked it.
         let matrix = self
@@ -1667,7 +2075,7 @@ impl PageResources {
                     space: group
                         .get(self.doc.intern(b"CS"))
                         .cloned()
-                        .and_then(|cs| self.parse_space(&cs, 0))
+                        .and_then(|cs| self.parse_space(&cs, 0, name))
                         .map(group_space),
                 })
             });
@@ -1701,7 +2109,8 @@ impl PageResources {
     /// Reads a `/Function` entry, which is one function or an array of them,
     /// one per output component (7.10).
     fn function(&self, dict: &Dict) -> Option<Function> {
-        let value = self.doc.resolve_key(dict, self.doc.intern(b"Function"));
+        let key = self.doc.intern(b"Function");
+        let value = self.doc.resolve_key(dict, key);
         if let Some(items) = value.as_array() {
             // 7.10.1: every member supplies one output component. Reading only
             // the first turns an RGB gradient into a red ramp on black, and
@@ -1717,7 +2126,14 @@ impl PageResources {
                 _ => Some(Function::Array(parsed)),
             };
         }
-        self.parse_function(&value, 0)
+        // The entry **as written**, not resolved: a type 0 or type 4 function
+        // is a stream (7.10.2, 7.10.5), which `parse_function` reaches through
+        // its reference — and handed the resolved object it found no reference
+        // and read nothing, so every shading whose one function was sampled or
+        // a calculator painted as `Function::Identity`'s grey ramp, silently.
+        // The array arm above never had the defect: its members are read
+        // unresolved.
+        dict.get(key).and_then(|raw| self.parse_function(raw, 0))
     }
 
     fn parse_function(&self, object: &Object, depth: u32) -> Option<Function> {
@@ -1825,17 +2241,47 @@ impl PageResources {
     /// what its name says for the extraction path, which turns it into
     /// `TextWarning::UnknownFont`.
     fn report_unresolved_glyph(&self, font: &[u8]) {
+        let name = String::from_utf8_lossy(font).into_owned();
+        if let Ok(mut marker) = self.unresolved.lock() {
+            *marker = Some(name.clone());
+        }
+        self.note_missing_font(name);
+    }
+
+    /// Adds a font to what this render could not resolve, once.
+    fn note_missing_font(&self, name: String) {
         if let Ok(mut missing) = self.missing_fonts.lock() {
-            let name = String::from_utf8_lossy(font).into_owned();
             if missing.len() < 64 && !missing.contains(&name) {
                 missing.push(name);
             }
         }
     }
 
+    /// Adds an image's tolerated damage to what this render met, once.
+    fn note_damaged_image(&self, entry: (String, String)) {
+        if let Ok(mut damaged) = self.damaged_images.lock() {
+            if damaged.len() < 64 && !damaged.contains(&entry) {
+                damaged.push(entry);
+            }
+        }
+    }
+
+    /// Adds a colour space read with a repair to what this render met, once.
+    ///
+    /// Once per name and repair rather than per use: the `cs` path asks for
+    /// the space at every `sc`, and a page that sets a colour a thousand times
+    /// has one space to report.
+    fn note_repaired_space(&self, entry: (String, String)) {
+        if let Ok(mut repaired) = self.repaired_spaces.lock() {
+            if repaired.len() < 64 && !repaired.contains(&entry) {
+                repaired.push(entry);
+            }
+        }
+    }
+
     /// The embedded font program behind a font id, decoded once.
     fn program(&self, font_id: u64) -> Option<Arc<Vec<u8>>> {
-        if let Ok(cache) = self.programs.lock() {
+        if let Ok(cache) = self.caches.programs.lock() {
             if let Some(hit) = cache.get(&font_id) {
                 return hit.clone();
             }
@@ -1850,7 +2296,7 @@ impl PageResources {
             let resources = self.resources.as_ref()?;
             program_for(&self.doc, name, resources, font, self.provider.as_deref())
         });
-        if let Ok(mut cache) = self.programs.lock() {
+        if let Ok(mut cache) = self.caches.programs.lock() {
             cache.insert(font_id, built.clone());
         }
         built
@@ -2166,6 +2612,36 @@ impl PageResources {
                 damaged.push(entry);
             }
         }
+        if let Ok(mut capture) = self.image_capture.lock() {
+            if let Some(caught) = capture.as_mut() {
+                // Bounded without a cap: the warning set is closed, and each
+                // is kept once.
+                let reason = warning.as_str().to_string();
+                if !caught.contains(&reason) {
+                    caught.push(reason);
+                }
+            }
+        }
+    }
+
+    /// Runs `decode`, and returns with its result every leniency
+    /// [`Self::report_damaged_image`] heard while it ran — the warnings of the
+    /// one image `decode` is decoding. Whatever was capturing before is
+    /// restored, so a mask decoded inside an image keeps its own.
+    fn capturing<T>(&self, decode: impl FnOnce() -> T) -> (T, Vec<String>) {
+        let outer = self
+            .image_capture
+            .lock()
+            .ok()
+            .and_then(|mut capture| capture.replace(Vec::new()));
+        let result = decode();
+        let caught = self
+            .image_capture
+            .lock()
+            .ok()
+            .and_then(|mut capture| std::mem::replace(&mut *capture, outer))
+            .unwrap_or_default();
+        (result, caught)
     }
 
     /// Decodes a CCITT stream into the packed one-bit samples the sample loop
@@ -2361,12 +2837,7 @@ impl PageResources {
             return Err("JPXDecode with /ImageMask".to_string());
         }
 
-        let image = tinker_pdf_filters::jpx_decode(
-            raw,
-            &tinker_pdf_filters::Limits::new(limits::MAX_DECODED_STREAM),
-            warnings,
-        )
-        .map_err(|e| format!("{e:?}"))?;
+        let image = Self::jpx_samples(raw, warnings)?;
 
         let count = (image.width as usize) * (image.height as usize);
         let mut rgb = Vec::with_capacity(count * 3);
@@ -2467,6 +2938,107 @@ impl PageResources {
         })
     }
 
+    /// The final filter a stream dictionary names (7.4), which decides how
+    /// its bytes are read.
+    fn last_filter(&self, dict: &Dict) -> Option<Vec<u8>> {
+        let filters = self.doc.resolve_key(dict, Name::FILTER);
+        match filters.as_name() {
+            Some(n) => self.doc.name_bytes(n).map(|b| b.to_vec()),
+            None => filters
+                .as_array()
+                .and_then(|a| a.last())
+                .and_then(Object::as_name)
+                .and_then(|n| self.doc.name_bytes(n))
+                .map(|b| b.to_vec()),
+        }
+    }
+
+    /// An image XObject's samples as the sample loop reads them — **before**
+    /// any colour conversion — and the depth they are at, for every final
+    /// filter but the two codecs that describe themselves (`/DCTDecode` and
+    /// `/JPXDecode`, whose samples come from [`jpeg_samples`] and
+    /// [`Self::jpx_samples`]).
+    ///
+    /// Split out of [`Self::decode_image_at`] so the renderer and
+    /// [`crate::Page::images`] read one set of samples through one set of
+    /// rules: a fax or a JBIG2 stream is packed one-bit samples in PDF's
+    /// polarity whatever `/BitsPerComponent` says, and anything else is the
+    /// stream with its filters applied. `geometry` is the dictionary's
+    /// width, height and clamped depth.
+    fn stream_samples(
+        &self,
+        dict: &Dict,
+        reference: ObjRef,
+        last_filter: Option<&[u8]>,
+        geometry: (u32, u32, u32),
+        name: &[u8],
+    ) -> Result<(Vec<u8>, u32), String> {
+        let (width, height, bpc) = geometry;
+        // CCITT data likewise arrives still coded, and carries its own
+        // parameters in /DecodeParms — but unlike a JPEG it decodes to
+        // *samples*, one bit per pixel, which is what the image dictionary
+        // says it is. So it joins the path below rather than returning its own
+        // pixels: `/ImageMask`, `/Decode` and `/ColorSpace` are read once,
+        // where they have always been read, and apply to a fax because a fax
+        // now arrives there like everything else.
+        let fax = matches!(last_filter, Some(b"CCITTFaxDecode") | Some(b"CCF"));
+        // JBIG2 takes the same road, and for the same reason (gap 17). Both
+        // are bilevel codecs that produce samples rather than pixels, and a
+        // scanned page is an `/ImageMask` about as often as it is a DeviceGray
+        // image — so composing correctly means arriving where those keys are
+        // read, not reimplementing them.
+        let jbig2 = matches!(last_filter, Some(b"JBIG2Decode"));
+        let data = if jbig2 {
+            let raw = self
+                .doc
+                .stream_image_input(reference)
+                .map_err(|_| "JBIG2Decode".to_string())?;
+            // The refusal. A stream whose regions this build cannot decode —
+            // the symbol-dictionary lineage an OCR pipeline emits — comes back
+            // `None`, and the caller draws the neutral placeholder. Returning
+            // the blank page it was composited onto would be indistinguishable
+            // from a correct decode of a blank scan.
+            self.jbig2_samples(dict, &raw, width, height, name)
+                .ok_or_else(|| "JBIG2Decode".to_string())?
+        } else if fax {
+            let raw = self
+                .doc
+                .stream_image_input(reference)
+                .map_err(|_| "CCITTFaxDecode".to_string())?;
+            self.ccitt_samples(dict, &raw, width, height, name)
+        } else {
+            // Everything else decodes to raw samples.
+            self.doc
+                .stream_decoded(reference)
+                .map_err(|_| "undecodable".to_string())?
+        };
+        // 7.4.6 and 7.4.7: both bilevel codecs produce one bit per pixel,
+        // whatever the dictionary claims. Producers that omit
+        // `/BitsPerComponent` are common and the clamp already reads an absent
+        // key as 1; one that writes 8 would otherwise read each row eight
+        // times too wide.
+        let bpc = if fax || jbig2 { 1 } else { bpc };
+        Ok((data, bpc))
+    }
+
+    /// A JPEG 2000 codestream's samples, decoded and **not** converted: the
+    /// codestream's own components at its own precision, big-endian pairs
+    /// past eight bits, with any opacity channel carried apart (8.9.5.4).
+    ///
+    /// The one decode both [`Self::jpx_image`] and [`crate::Page::images`]
+    /// make, under the one ceiling.
+    fn jpx_samples(
+        raw: &[u8],
+        warnings: &mut Vec<tinker_pdf_filters::Warning>,
+    ) -> Result<tinker_pdf_filters::JpxImage, String> {
+        tinker_pdf_filters::jpx_decode(
+            raw,
+            &tinker_pdf_filters::Limits::new(limits::MAX_DECODED_STREAM),
+            warnings,
+        )
+        .map_err(|e| format!("{e:?}"))
+    }
+
     /// Decodes an image from its dictionary, wherever that came from.
     fn decode_image_at(
         &self,
@@ -2528,16 +3100,7 @@ impl PageResources {
             .unwrap_or_default();
 
         // The final filter decides how the bytes are read.
-        let filters = self.doc.resolve_key(&dict, Name::FILTER);
-        let last_filter = match filters.as_name() {
-            Some(n) => self.doc.name_bytes(n).map(|b| b.to_vec()),
-            None => filters
-                .as_array()
-                .and_then(|a| a.last())
-                .and_then(Object::as_name)
-                .and_then(|n| self.doc.name_bytes(n))
-                .map(|b| b.to_vec()),
-        };
+        let last_filter = self.last_filter(&dict);
 
         // DCTDecode data comes out of the stream tier still encoded, which is
         // exactly what the JPEG decoder wants.
@@ -2574,57 +3137,17 @@ impl PageResources {
             return decoded;
         }
 
-        // CCITT data likewise arrives still coded, and carries its own
-        // parameters in /DecodeParms — but unlike a JPEG it decodes to
-        // *samples*, one bit per pixel, which is what the image dictionary
-        // says it is. So it joins the path below rather than returning its own
-        // pixels: `/ImageMask`, `/Decode` and `/ColorSpace` are read once,
-        // where they have always been read, and apply to a fax because a fax
-        // now arrives there like everything else.
-        let fax = matches!(
+        let (data, bpc) = self.stream_samples(
+            &dict,
+            reference,
             last_filter.as_deref(),
-            Some(b"CCITTFaxDecode") | Some(b"CCF")
-        );
-        // JBIG2 takes the same road, and for the same reason (gap 17). Both
-        // are bilevel codecs that produce samples rather than pixels, and a
-        // scanned page is an `/ImageMask` about as often as it is a DeviceGray
-        // image — so composing correctly means arriving where those keys are
-        // read, not reimplementing them.
-        let jbig2 = matches!(last_filter.as_deref(), Some(b"JBIG2Decode"));
-        let data = if jbig2 {
-            let raw = self
-                .doc
-                .stream_image_input(reference)
-                .map_err(|_| "JBIG2Decode".to_string())?;
-            // The refusal. A stream whose regions this build cannot decode —
-            // the symbol-dictionary lineage an OCR pipeline emits — comes back
-            // `None`, and the caller draws the neutral placeholder. Returning
-            // the blank page it was composited onto would be indistinguishable
-            // from a correct decode of a blank scan.
-            self.jbig2_samples(&dict, &raw, width, height, name)
-                .ok_or_else(|| "JBIG2Decode".to_string())?
-        } else if fax {
-            let raw = self
-                .doc
-                .stream_image_input(reference)
-                .map_err(|_| "CCITTFaxDecode".to_string())?;
-            self.ccitt_samples(&dict, &raw, width, height, name)
-        } else {
-            // Everything else decodes to raw samples.
-            self.doc
-                .stream_decoded(reference)
-                .map_err(|_| "undecodable".to_string())?
-        };
-        // 7.4.6 and 7.4.7: both bilevel codecs produce one bit per pixel,
-        // whatever the dictionary claims. Producers that omit
-        // `/BitsPerComponent` are common and the clamp already reads an absent
-        // key as 1; one that writes 8 would otherwise read each row eight
-        // times too wide.
-        let bpc = if fax || jbig2 { 1 } else { bpc };
+            (width, height, bpc),
+            name,
+        )?;
 
         let space = self.doc.resolve_key(&dict, self.doc.intern(b"ColorSpace"));
         let space = self
-            .parse_space(&space, 0)
+            .parse_space(&space, 0, name)
             .unwrap_or(ColorSpace::DeviceGray);
         let n = space.components();
 
@@ -2646,10 +3169,16 @@ impl PageResources {
         let row_bits = (width as usize) * n * (bpc as usize);
         let row_bytes = row_bits.div_ceil(8);
         let max = ((1u32 << bpc.min(16)) - 1) as f64;
+        let mut remembered = if is_mask {
+            None
+        } else {
+            Remembered::for_image(&space, n, bpc)
+        };
 
         for y in 0..height as usize {
             for x in 0..width as usize {
                 let mut components = Vec::with_capacity(n);
+                let mut samples = 0u128;
                 // "Shall be masked ... if min_i <= sample_i <= max_i for *all*
                 // i" — one component outside its range paints the pixel, which
                 // is why this starts true and is narrowed rather than widened.
@@ -2657,6 +3186,7 @@ impl PageResources {
                 for c in 0..n {
                     let bit = y * row_bytes * 8 + (x * n + c) * bpc as usize;
                     let value = read_bits(&data, bit, bpc);
+                    samples = Remembered::key(samples, c, value);
                     if let Some(ranges) = &color_key {
                         // An absent range can never match, so a short array
                         // masks nothing rather than everything.
@@ -2668,15 +3198,19 @@ impl PageResources {
                         ColorSpace::Indexed { .. } => f64::from(value),
                         _ => f64::from(value) / max,
                     };
-                    components.push(match decode.get(c) {
-                        // The interpolation is over the *sample* range, so an
-                        // indexed image maps its index rather than a fraction.
-                        Some((dmin, dmax)) => match &space {
-                            ColorSpace::Indexed { .. } => dmin + raw * (dmax - dmin) / max.max(1.0),
-                            _ => dmin + raw * (dmax - dmin),
+                    components.push(
+                        match decode.get(c).copied().or_else(|| default_decode(&space, c)) {
+                            // The interpolation is over the *sample* range, so an
+                            // indexed image maps its index rather than a fraction.
+                            Some((dmin, dmax)) => match &space {
+                                ColorSpace::Indexed { .. } => {
+                                    dmin + raw * (dmax - dmin) / max.max(1.0)
+                                }
+                                _ => dmin + raw * (dmax - dmin),
+                            },
+                            None => raw,
                         },
-                        None => raw,
-                    });
+                    );
                 }
 
                 if is_mask {
@@ -2685,7 +3219,10 @@ impl PageResources {
                     rgb.extend_from_slice(&[0, 0, 0]);
                     alpha.push(if paints { 255 } else { 0 });
                 } else {
-                    let (r, g, b) = space.to_rgb(&components);
+                    let (r, g, b) = match remembered.as_mut() {
+                        Some(table) => table.convert(samples, || space.to_rgb(&components)),
+                        None => space.to_rgb(&components),
+                    };
                     rgb.extend_from_slice(&[r, g, b]);
                     if color_key.is_some() {
                         alpha.push(if keyed { 0 } else { 255 });
@@ -2740,60 +3277,20 @@ impl PageResources {
         Some(ranges)
     }
 
-    /// Decodes an inline image's samples (8.9.7).
+    /// An inline image's samples as its filter chain leaves them (8.9.7), or
+    /// the still-coded bytes of a codec that describes itself.
     ///
-    /// Separate from [`Self::decode_image_at`] because an inline image has no
-    /// object number: its bytes are in hand rather than behind a stream tier,
-    /// so the filter chain is run here instead of by the document.
-    fn decode_inline(&self, dict: &Dict, data: &[u8]) -> Result<DecodedImage, String> {
+    /// Split out of [`Self::decode_inline`] so the renderer and
+    /// [`crate::Page::images`] run one chain: the one the document would have
+    /// built had these bytes been an object.
+    fn inline_samples(
+        &self,
+        dict: &Dict,
+        data: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<InlineSamples, String> {
         use tinker_pdf_filters::{apply_chain, ChainOutput, ImageCodec, Limits};
-
-        let int = |key: &[u8]| {
-            self.doc
-                .resolve_key(dict, self.doc.intern(key))
-                .as_int()
-                .unwrap_or(0)
-        };
-        let width = int(b"Width").clamp(0, 1 << 16) as u32;
-        let height = int(b"Height").clamp(0, 1 << 16) as u32;
-        if width == 0 || height == 0 {
-            return Err("inline".to_string());
-        }
-
-        let is_mask = self
-            .doc
-            .resolve_key(dict, self.doc.intern(b"ImageMask"))
-            .as_bool()
-            .unwrap_or(false);
-        // 8.9.6.2: a mask is one bit per sample whatever /BPC claims.
-        let bpc = if is_mask {
-            1
-        } else {
-            int(b"BitsPerComponent").clamp(1, 16) as u32
-        };
-
-        // Table 93 abbreviates /Interpolate to /I, and the caller has already
-        // rewritten the short form, so only the long one is looked for here.
-        let interpolate = self
-            .doc
-            .resolve_key(dict, self.doc.intern(b"Interpolate"))
-            .as_bool()
-            .unwrap_or(false);
-
-        // 8.9.5.2. Read before the chain rather than after it, because the DCT
-        // branch below returns its own pixels and would otherwise never see
-        // this — which is the mistake the XObject path made until gap 16.
-        let decode: Vec<(f64, f64)> = self
-            .doc
-            .resolve_key(dict, self.doc.intern(b"Decode"))
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|o| self.doc.resolve(o).as_number())
-                    .collect::<Vec<f64>>()
-            })
-            .map(|v| v.chunks_exact(2).map(|c| (c[0], c[1])).collect())
-            .unwrap_or_default();
 
         // The filters, in the order they were applied — read here only to name
         // one in a warning, since the chain itself is built by the document.
@@ -2868,10 +3365,7 @@ impl PageResources {
                 warnings,
             }) => {
                 report(warnings);
-                // The same decoder, through the same helper, as an image
-                // XObject: a JPEG returns its own dimensions and its own
-                // colour, so it does not join the sample loop below.
-                return jpeg_image(&data, &decode, interpolate);
+                return Ok(InlineSamples::Jpeg(data));
             }
             Ok(ChainOutput::EncodedImage {
                 kind: ImageCodec::Ccitt,
@@ -2897,18 +3391,92 @@ impl PageResources {
                 warnings,
             }) => {
                 report(warnings);
+                // 8.9.7 does not list JPXDecode among the inline abbreviations
+                // and `/JPXDecode` cannot be spelled in a content stream's
+                // dictionary, so this arm is reachable only through a file
+                // that writes the full name. It exists anyway: the cost is one
+                // arm, and the alternative is a second call site drifting from
+                // the XObject path's.
+                return Ok(InlineSamples::Jpx(data));
+            }
+            // JBIG2 stays a gated capability wherever it appears (ruling 2),
+            // inline included -- and unlike JPX it has no inline path at all,
+            // since `/JBIG2Globals` cannot be an indirect reference inside a
+            // content stream.
+            Ok(ChainOutput::EncodedImage { .. }) => {
+                return Err(named(chain.len().saturating_sub(1)))
+            }
+            Err(_) => return Err(named(chain.len())),
+        };
+        Ok(InlineSamples::Samples { bytes, fax })
+    }
+
+    /// Decodes an inline image's samples (8.9.7).
+    ///
+    /// Separate from [`Self::decode_image_at`] because an inline image has no
+    /// object number: its bytes are in hand rather than behind a stream tier,
+    /// so the filter chain is run here instead of by the document.
+    fn decode_inline(&self, dict: &Dict, data: &[u8]) -> Result<DecodedImage, String> {
+        let int = |key: &[u8]| {
+            self.doc
+                .resolve_key(dict, self.doc.intern(key))
+                .as_int()
+                .unwrap_or(0)
+        };
+        let width = int(b"Width").clamp(0, 1 << 16) as u32;
+        let height = int(b"Height").clamp(0, 1 << 16) as u32;
+        if width == 0 || height == 0 {
+            return Err("inline".to_string());
+        }
+
+        let is_mask = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"ImageMask"))
+            .as_bool()
+            .unwrap_or(false);
+        // 8.9.6.2: a mask is one bit per sample whatever /BPC claims.
+        let bpc = if is_mask {
+            1
+        } else {
+            int(b"BitsPerComponent").clamp(1, 16) as u32
+        };
+
+        // Table 93 abbreviates /Interpolate to /I, and the caller has already
+        // rewritten the short form, so only the long one is looked for here.
+        let interpolate = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Interpolate"))
+            .as_bool()
+            .unwrap_or(false);
+
+        // 8.9.5.2. Read before the chain rather than after it, because the DCT
+        // branch below returns its own pixels and would otherwise never see
+        // this — which is the mistake the XObject path made until gap 16.
+        let decode: Vec<(f64, f64)> = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Decode"))
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| self.doc.resolve(o).as_number())
+                    .collect::<Vec<f64>>()
+            })
+            .map(|v| v.chunks_exact(2).map(|c| (c[0], c[1])).collect())
+            .unwrap_or_default();
+
+        let (bytes, fax) = match self.inline_samples(dict, data, width, height)? {
+            InlineSamples::Samples { bytes, fax } => (bytes, fax),
+            // The same decoder, through the same helper, as an image XObject:
+            // a JPEG returns its own dimensions and its own colour, so it does
+            // not join the sample loop below.
+            InlineSamples::Jpeg(data) => return jpeg_image(&data, &decode, interpolate),
+            InlineSamples::Jpx(data) => {
                 // The same entry point the XObject path takes, for the same
                 // reason gap 16 gave the fax one and gap 08 was reordered
                 // behind it: a second call site here would not change any
                 // signature, so nothing in the build could notice it drifting
                 // from 8.9.5.4's rules about which of the dictionary's claims
                 // survive a codestream that describes itself.
-                //
-                // 8.9.7 does not list JPXDecode among the inline abbreviations
-                // and `/JPXDecode` cannot be spelled in a content stream's
-                // dictionary, so this arm is reachable only through a file
-                // that writes the full name. It exists anyway: the cost is one
-                // arm, and the alternative is the divergence above.
                 let smask_in_data = dict.get_int(self.doc.intern(b"SMaskInData")).unwrap_or(0);
                 let image_mask = dict
                     .get_bool(self.doc.intern(b"ImageMask"))
@@ -2926,14 +3494,6 @@ impl PageResources {
                 }
                 return decoded;
             }
-            // JBIG2 stays a gated capability wherever it appears (ruling 2),
-            // inline included -- and unlike JPX it has no inline path at all,
-            // since `/JBIG2Globals` cannot be an indirect reference inside a
-            // content stream.
-            Ok(ChainOutput::EncodedImage { .. }) => {
-                return Err(named(chain.len().saturating_sub(1)))
-            }
-            Err(_) => return Err(named(chain.len())),
         };
         // 7.4.6: fax output is one bit per pixel whatever the dictionary
         // claims, exactly as on the XObject path.
@@ -2941,7 +3501,7 @@ impl PageResources {
 
         let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
         let space = self
-            .parse_space(&space, 0)
+            .parse_space(&space, 0, INLINE_NAME.as_bytes())
             .unwrap_or(ColorSpace::DeviceGray);
         let n = if is_mask { 1 } else { space.components() };
 
@@ -2949,24 +3509,35 @@ impl PageResources {
         let max = ((1u32 << bpc.min(16)) - 1) as f64;
         let mut rgb = Vec::with_capacity((width as usize) * (height as usize) * 3);
         let mut alpha = Vec::new();
+        let mut remembered = if is_mask {
+            None
+        } else {
+            Remembered::for_image(&space, n, bpc)
+        };
 
         for y in 0..height as usize {
             for x in 0..width as usize {
                 let mut components = Vec::with_capacity(n);
+                let mut samples = 0u128;
                 for c in 0..n {
                     let bit = y * row_bytes * 8 + (x * n + c) * bpc as usize;
                     let value = read_bits(&bytes, bit, bpc);
+                    samples = Remembered::key(samples, c, value);
                     let raw = match &space {
                         ColorSpace::Indexed { .. } => f64::from(value),
                         _ => f64::from(value) / max,
                     };
-                    components.push(match decode.get(c) {
-                        Some((dmin, dmax)) => match &space {
-                            ColorSpace::Indexed { .. } => dmin + raw * (dmax - dmin) / max.max(1.0),
-                            _ => dmin + raw * (dmax - dmin),
+                    components.push(
+                        match decode.get(c).copied().or_else(|| default_decode(&space, c)) {
+                            Some((dmin, dmax)) => match &space {
+                                ColorSpace::Indexed { .. } => {
+                                    dmin + raw * (dmax - dmin) / max.max(1.0)
+                                }
+                                _ => dmin + raw * (dmax - dmin),
+                            },
+                            None => raw,
                         },
-                        None => raw,
-                    });
+                    );
                 }
 
                 if is_mask {
@@ -2974,7 +3545,10 @@ impl PageResources {
                     rgb.extend_from_slice(&[0, 0, 0]);
                     alpha.push(if paints { 255 } else { 0 });
                 } else {
-                    let (r, g, b) = space.to_rgb(&components);
+                    let (r, g, b) = match remembered.as_mut() {
+                        Some(table) => table.convert(samples, || space.to_rgb(&components)),
+                        None => space.to_rgb(&components),
+                    };
                     rgb.extend_from_slice(&[r, g, b]);
                 }
             }
@@ -2999,6 +3573,509 @@ impl PageResources {
         // decoding it through the top-level entry point would recurse.
         self.decode_image_at(&mask, reference, "SMask").ok()
     }
+}
+
+// ---- extraction: the samples before conversion -----------------------------
+//
+// `crate::Page::images` reads here. Every sample it hands out comes from the
+// same four functions the renderer's decode calls — `stream_samples`,
+// `jpeg_samples`, `jpx_samples`, `inline_samples` — so the two cannot disagree
+// about what an image's samples are. What differs is only what happens next:
+// the renderer converts, and this describes.
+
+impl PageResources {
+    /// An image XObject as [`crate::PageImage`] reports it, or `None` when
+    /// the dictionary is not `/Subtype /Image`.
+    pub(crate) fn extract_image(
+        &self,
+        dict: &Dict,
+        reference: ObjRef,
+        name: &[u8],
+    ) -> Option<crate::PageImage> {
+        let subtype = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"Subtype"))
+            .as_name()
+            .and_then(|n| self.doc.name_bytes(n));
+        if subtype.as_deref() != Some(b"Image".as_slice()) {
+            return None;
+        }
+        Some(self.extract_at(dict, reference, name, 0))
+    }
+
+    /// An image dictionary and its stream, described; `depth` is 1 for a mask
+    /// or soft mask, which carries no mask of its own (11.6.5.3, 8.9.6.3).
+    fn extract_at(
+        &self,
+        dict: &Dict,
+        reference: ObjRef,
+        name: &[u8],
+        depth: u32,
+    ) -> crate::PageImage {
+        let (width, height, stencil, bpc) = self.geometry(dict);
+        let space = if stencil {
+            None
+        } else {
+            dict.get(self.doc.intern(b"ColorSpace"))
+                .map(|space| self.describe_space(space, false, 0))
+        };
+        let mut image = crate::PageImage {
+            reference: Some(reference),
+            name: name.to_vec(),
+            width,
+            height,
+            bits_per_component: bpc as u8,
+            components: components_of(stencil, space.as_ref()),
+            color_space: space,
+            decode: self.decode_array(dict),
+            stencil,
+            samples: Vec::new(),
+            codec: crate::SampleCodec::Stream,
+            mask: None,
+            soft_mask: None,
+            placements: Vec::new(),
+            refused: None,
+            warnings: Vec::new(),
+        };
+        if width == 0 || height == 0 {
+            image.refused = Some("empty".to_string());
+            return image;
+        }
+
+        let last = self.last_filter(dict);
+        let ((), warnings) = self.capturing(|| match last.as_deref() {
+            Some(b"DCTDecode" | b"DCT") => {
+                image.codec = crate::SampleCodec::Dct;
+                let decoded = self
+                    .doc
+                    .stream_image_input(reference)
+                    .map_err(|_| "DCTDecode".to_string())
+                    .and_then(|raw| jpeg_samples(&raw));
+                match decoded {
+                    Ok(jpeg) => take_jpeg(&mut image, jpeg),
+                    Err(why) => image.refused = Some(why),
+                }
+            }
+            Some(b"JPXDecode") => {
+                image.codec = crate::SampleCodec::Jpx;
+                let mut warnings = Vec::new();
+                let decoded = self
+                    .doc
+                    .stream_image_input(reference)
+                    .map_err(|_| "JPXDecode".to_string())
+                    .and_then(|raw| Self::jpx_samples(&raw, &mut warnings));
+                for warning in &warnings {
+                    self.report_damaged_image(name, *warning);
+                }
+                match decoded {
+                    Ok(jpx) => take_jpx(&mut image, jpx),
+                    Err(why) => image.refused = Some(why),
+                }
+            }
+            other => {
+                image.codec = match other {
+                    Some(b"CCITTFaxDecode" | b"CCF") => crate::SampleCodec::CcittFax,
+                    Some(b"JBIG2Decode") => crate::SampleCodec::Jbig2,
+                    _ => crate::SampleCodec::Stream,
+                };
+                match self.stream_samples(dict, reference, other, (width, height, bpc), name) {
+                    Ok((data, bits)) => take_samples(&mut image, data, bits),
+                    Err(why) => image.refused = Some(why),
+                }
+            }
+        });
+        image.warnings = warnings;
+
+        if depth == 0 {
+            let mask_key = self.doc.intern(b"Mask");
+            // 8.9.6.3 and 8.9.6.4: `/Mask` is a stencil-mask stream or a
+            // colour-key *array*, and a reference can name either — so what
+            // decides is the object the reference reaches, not that it is one.
+            // `color_key` resolves the entry, as the renderer's decode does,
+            // so an indirect `[0 0]` is a colour key here as it is there. It
+            // used to be taken for a stencil mask that would not open, and
+            // dropped, while the render of the same image honoured it.
+            let stencil = match dict.get(mask_key) {
+                Some(Object::Ref(r)) => self
+                    .doc
+                    .get(*r)
+                    .ok()
+                    .filter(|object| object.as_array().is_none())
+                    .map(|object| (object, *r)),
+                _ => None,
+            };
+            if let Some((object, r)) = stencil {
+                if let Some(mask) = object.as_dict() {
+                    image.mask = Some(crate::ImageMask::Stencil(Box::new(self.extract_at(
+                        mask,
+                        r,
+                        b"",
+                        depth + 1,
+                    ))));
+                }
+            } else if dict.get(mask_key).is_some() {
+                image.mask = self
+                    .color_key(dict, usize::from(image.components), bpc)
+                    .map(crate::ImageMask::ColorKey);
+            }
+            if let Some(r) = dict.get_ref(self.doc.intern(b"SMask")) {
+                let mask = self.doc.get(r).ok();
+                if let Some(mask) = mask.as_deref().and_then(Object::as_dict) {
+                    image.soft_mask = Some(Box::new(self.extract_at(mask, r, b"", depth + 1)));
+                }
+            }
+        }
+        image
+    }
+
+    /// An inline image (8.9.7) as [`crate::PageImage`] reports it, or `None`
+    /// when its dictionary is not one.
+    pub(crate) fn extract_inline(&self, dict: &[u8], data: &[u8]) -> Option<crate::PageImage> {
+        let text = expand_inline_abbreviations(dict);
+        let mut sink = tinker_pdf_cos::WarningSink::new();
+        let parsed = tinker_pdf_cos::parse_object_at(&text, 0, self.doc.names_table(), &mut sink);
+        let dict = parsed.object.as_dict()?;
+
+        let (width, height, stencil, bpc) = self.geometry(dict);
+        let space = if stencil {
+            None
+        } else {
+            dict.get(self.doc.intern(b"ColorSpace"))
+                .map(|space| self.describe_space(space, true, 0))
+        };
+        let mut image = crate::PageImage {
+            reference: None,
+            name: Vec::new(),
+            width,
+            height,
+            bits_per_component: bpc as u8,
+            components: components_of(stencil, space.as_ref()),
+            color_space: space,
+            decode: self.decode_array(dict),
+            stencil,
+            samples: Vec::new(),
+            codec: crate::SampleCodec::Stream,
+            mask: None,
+            soft_mask: None,
+            placements: Vec::new(),
+            refused: None,
+            warnings: Vec::new(),
+        };
+        if width == 0 || height == 0 {
+            image.refused = Some("empty".to_string());
+            return Some(image);
+        }
+        let ((), warnings) =
+            self.capturing(|| match self.inline_samples(dict, data, width, height) {
+                Ok(InlineSamples::Samples { bytes, fax }) => {
+                    if fax {
+                        image.codec = crate::SampleCodec::CcittFax;
+                    }
+                    take_samples(&mut image, bytes, if fax { 1 } else { bpc });
+                }
+                Ok(InlineSamples::Jpeg(bytes)) => {
+                    image.codec = crate::SampleCodec::Dct;
+                    match jpeg_samples(&bytes) {
+                        Ok(jpeg) => take_jpeg(&mut image, jpeg),
+                        Err(why) => image.refused = Some(why),
+                    }
+                }
+                Ok(InlineSamples::Jpx(bytes)) => {
+                    image.codec = crate::SampleCodec::Jpx;
+                    let mut warnings = Vec::new();
+                    match Self::jpx_samples(&bytes, &mut warnings) {
+                        Ok(jpx) => take_jpx(&mut image, jpx),
+                        Err(why) => image.refused = Some(why),
+                    }
+                    for warning in &warnings {
+                        self.report_damaged_image(INLINE_NAME.as_bytes(), *warning);
+                    }
+                }
+                Err(why) => image.refused = Some(why),
+            });
+        image.warnings = warnings;
+        // 8.9.7: an inline image's `/Mask` can only be the colour-key array,
+        // since there is nothing inline a reference could name.
+        if dict.get(self.doc.intern(b"Mask")).is_some() {
+            image.mask = self
+                .color_key(dict, usize::from(image.components), bpc)
+                .map(crate::ImageMask::ColorKey);
+        }
+        Some(image)
+    }
+
+    /// `/Width`, `/Height`, `/ImageMask` and the depth, read as the renderer's
+    /// decode reads them: the geometry clamped to what it will allocate, and a
+    /// stencil mask one bit a sample whatever `/BitsPerComponent` says
+    /// (8.9.6.2).
+    fn geometry(&self, dict: &Dict) -> (u32, u32, bool, u32) {
+        let int = |key: &[u8]| {
+            self.doc
+                .resolve_key(dict, self.doc.intern(key))
+                .as_int()
+                .unwrap_or(0)
+        };
+        let width = int(b"Width").clamp(0, 1 << 16) as u32;
+        let height = int(b"Height").clamp(0, 1 << 16) as u32;
+        let stencil = self
+            .doc
+            .resolve_key(dict, self.doc.intern(b"ImageMask"))
+            .as_bool()
+            .unwrap_or(false);
+        let bpc = if stencil {
+            1
+        } else {
+            int(b"BitsPerComponent").clamp(1, 16) as u32
+        };
+        (width, height, stencil, bpc)
+    }
+
+    /// `/Decode` as written, in pairs (8.9.5.2).
+    fn decode_array(&self, dict: &Dict) -> Vec<(f64, f64)> {
+        self.doc
+            .resolve_key(dict, self.doc.intern(b"Decode"))
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|o| self.doc.resolve(o).as_number())
+                    .collect::<Vec<f64>>()
+            })
+            .map(|v| v.chunks_exact(2).map(|c| (c[0], c[1])).collect())
+            .unwrap_or_default()
+    }
+
+    /// A colour space as an image states it, described rather than
+    /// evaluated (8.6).
+    ///
+    /// `inline` admits 8.9.7's one extra spelling: an inline image may name a
+    /// space in the page's `/ColorSpace` resources, which an image XObject's
+    /// dictionary may not (8.6.3). Depth-capped like the renderer's own
+    /// parser, since an `/Indexed` base and a tint alternate are spaces too.
+    fn describe_space(&self, object: &Object, inline: bool, depth: u32) -> crate::ImageSpace {
+        use crate::ImageSpace;
+        let unreadable = |family: &[u8]| ImageSpace::Unreadable {
+            family: family.to_vec(),
+        };
+        if depth > 8 {
+            return unreadable(b"");
+        }
+        let resolved = self.doc.resolve(object);
+
+        if let Some(name) = resolved.as_name() {
+            let Some(bytes) = self.doc.name_bytes(name) else {
+                return unreadable(b"");
+            };
+            return match bytes.as_ref() {
+                b"DeviceGray" | b"G" => ImageSpace::DeviceGray,
+                b"DeviceRGB" | b"RGB" => ImageSpace::DeviceRgb,
+                b"DeviceCMYK" | b"CMYK" => ImageSpace::DeviceCmyk,
+                other if inline => {
+                    let entry = self.resources.as_ref().and_then(|resources| {
+                        let table = self
+                            .doc
+                            .resolve_key(resources, self.doc.intern(b"ColorSpace"));
+                        table.as_dict()?.get(self.doc.intern(other)).cloned()
+                    });
+                    match entry {
+                        // A resource entry is the space itself, so it is read
+                        // as an XObject's would be: it cannot name another.
+                        Some(entry) => self.describe_space(&entry, false, depth + 1),
+                        None => unreadable(other),
+                    }
+                }
+                other => unreadable(other),
+            };
+        }
+
+        let Some(items) = resolved.as_array() else {
+            return unreadable(b"");
+        };
+        let Some(family) = items
+            .first()
+            .and_then(Object::as_name)
+            .and_then(|n| self.doc.name_bytes(n))
+        else {
+            return unreadable(b"");
+        };
+        let parameters = || {
+            items
+                .get(1)
+                .map(|o| self.doc.resolve(o))
+                .and_then(|p| p.as_dict().cloned())
+        };
+        let triple = |dict: Option<&Dict>, key: &[u8], default: [f64; 3]| {
+            dict.and_then(|d| self.numbers(d, key, 3))
+                .map_or(default, |v| [v[0], v[1], v[2]])
+        };
+        match family.as_ref() {
+            b"ICCBased" => {
+                let stream = items.get(1).and_then(Object::as_objref);
+                let header = items.get(1).map(|o| self.doc.resolve(o));
+                let dict = header.as_deref().and_then(Object::as_dict);
+                let components = dict
+                    .and_then(|d| d.get_int(self.doc.intern(b"N")))
+                    .unwrap_or(0)
+                    .clamp(0, 255) as u8;
+                let alternate = dict
+                    .and_then(|d| d.get(self.doc.intern(b"Alternate")))
+                    .map(|a| Box::new(self.describe_space(a, inline, depth + 1)));
+                let profile = stream
+                    .and_then(|r| self.doc.stream_decoded(r).ok())
+                    .unwrap_or_default();
+                ImageSpace::Icc {
+                    components,
+                    profile,
+                    alternate,
+                }
+            }
+            b"Indexed" | b"I" => {
+                let base = items.get(1).map_or_else(
+                    || unreadable(b""),
+                    |b| self.describe_space(b, inline, depth + 1),
+                );
+                let high = items
+                    .get(2)
+                    .and_then(|o| self.doc.resolve(o).as_int())
+                    .unwrap_or(0)
+                    .clamp(0, 255) as u8;
+                let lookup = match items.get(3).map(|o| self.doc.resolve(o)) {
+                    Some(value) => match value.as_string() {
+                        Some(s) => s.bytes.clone(),
+                        None => items
+                            .get(3)
+                            .and_then(Object::as_objref)
+                            .and_then(|r| self.doc.stream_decoded(r).ok())
+                            .unwrap_or_default(),
+                    },
+                    None => Vec::new(),
+                };
+                ImageSpace::Indexed {
+                    base: Box::new(base),
+                    high,
+                    lookup,
+                }
+            }
+            b"Separation" => ImageSpace::Separation {
+                colorant: items
+                    .get(1)
+                    .and_then(|o| self.doc.resolve(o).as_name())
+                    .and_then(|n| self.doc.name_bytes(n))
+                    .map(|b| b.to_vec())
+                    .unwrap_or_default(),
+                alternate: Box::new(items.get(2).map_or_else(
+                    || unreadable(b""),
+                    |a| self.describe_space(a, inline, depth + 1),
+                )),
+            },
+            b"DeviceN" => ImageSpace::DeviceN {
+                colorants: items
+                    .get(1)
+                    .map(|o| self.doc.resolve(o))
+                    .and_then(|names| {
+                        names.as_array().map(|names| {
+                            names
+                                .iter()
+                                .take(limits::MAX_ARRAY_LEN)
+                                .filter_map(|n| {
+                                    self.doc
+                                        .resolve(n)
+                                        .as_name()
+                                        .and_then(|n| self.doc.name_bytes(n))
+                                        .map(|b| b.to_vec())
+                                })
+                                .collect()
+                        })
+                    })
+                    .unwrap_or_default(),
+                alternate: Box::new(items.get(2).map_or_else(
+                    || unreadable(b""),
+                    |a| self.describe_space(a, inline, depth + 1),
+                )),
+            },
+            b"CalGray" => {
+                let dict = parameters();
+                ImageSpace::CalGray {
+                    white: triple(dict.as_ref(), b"WhitePoint", WHITE_D50),
+                    gamma: dict
+                        .as_ref()
+                        .map(|d| self.doc.resolve_key(d, self.doc.intern(b"Gamma")))
+                        .and_then(|g| g.as_number())
+                        .unwrap_or(1.0),
+                }
+            }
+            b"CalRGB" => {
+                let dict = parameters();
+                let mut matrix = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+                if let Some(values) = dict.as_ref().and_then(|d| self.numbers(d, b"Matrix", 9)) {
+                    matrix.copy_from_slice(&values[..9]);
+                }
+                ImageSpace::CalRgb {
+                    white: triple(dict.as_ref(), b"WhitePoint", WHITE_D50),
+                    gamma: triple(dict.as_ref(), b"Gamma", [1.0; 3]),
+                    matrix,
+                }
+            }
+            b"Lab" => {
+                let dict = parameters();
+                let range = dict
+                    .as_ref()
+                    .and_then(|d| self.numbers(d, b"Range", 4))
+                    .map_or([-100.0, 100.0, -100.0, 100.0], |v| [v[0], v[1], v[2], v[3]]);
+                ImageSpace::Lab {
+                    white: triple(dict.as_ref(), b"WhitePoint", WHITE_D50),
+                    range,
+                }
+            }
+            other => unreadable(other),
+        }
+    }
+}
+
+/// Values a pixel of an image with this space, as far as it says: one for a
+/// stencil mask and for a space nothing describes, which is the count the
+/// renderer's own fallback to grey reads the samples with.
+fn components_of(stencil: bool, space: Option<&crate::ImageSpace>) -> u8 {
+    if stencil {
+        return 1;
+    }
+    space.and_then(crate::ImageSpace::components).unwrap_or(1)
+}
+
+/// Keeps as many samples as the geometry lays out and no more (8.9.3): rows
+/// of `width × components × bits`, each padded to a byte.
+fn take_samples(image: &mut crate::PageImage, mut data: Vec<u8>, bits: u32) {
+    image.bits_per_component = bits as u8;
+    let row_bits = u64::from(image.width)
+        .saturating_mul(u64::from(image.components))
+        .saturating_mul(u64::from(bits));
+    let wanted = row_bits.div_ceil(8).saturating_mul(u64::from(image.height));
+    if let Ok(wanted) = usize::try_from(wanted) {
+        data.truncate(wanted);
+    }
+    image.samples = data;
+}
+
+/// A JPEG's own geometry and samples, which describe the image rather than
+/// the dictionary.
+fn take_jpeg(image: &mut crate::PageImage, jpeg: tinker_pdf_filters::JpegImage) {
+    image.width = jpeg.width;
+    image.height = jpeg.height;
+    image.components = match jpeg.color {
+        JpegColor::Gray => 1,
+        JpegColor::Rgb => 3,
+        JpegColor::Cmyk | JpegColor::CmykInverted => 4,
+    };
+    take_samples(image, jpeg.data, 8);
+}
+
+/// A JPEG 2000 codestream's own geometry, components, precision and
+/// samples (8.9.5.4).
+fn take_jpx(image: &mut crate::PageImage, jpx: tinker_pdf_filters::JpxImage) {
+    image.width = jpx.width;
+    image.height = jpx.height;
+    image.components = jpx.components;
+    let bits = if jpx.precision > 8 { 16 } else { 8 };
+    take_samples(image, jpx.samples, bits);
 }
 
 /// Applies a soft mask's luminance as the image's per-sample opacity
@@ -3050,6 +4127,93 @@ fn read_bits(data: &[u8], at: usize, bits: u32) -> u32 {
         value = (value << 1) | u32::from(bit);
     }
     value
+}
+
+/// How many conversions one image remembers at once.
+///
+/// A fixed table rather than a cap on anything a document states: it bounds
+/// what [`Remembered`] holds, 4 096 slots of a key and a colour each, and a
+/// picture with more colours than that converts some of them more than once.
+const REMEMBERED_COLOURS: usize = 4096;
+
+/// One image's colour conversions, remembered by the raw samples that asked
+/// for them.
+///
+/// An image reaches [`ColorSpace::to_rgb`] once a pixel, and for a space other
+/// than the device spaces that runs a tint transform, a profile or a power —
+/// a `/DeviceN` tint transform sampled across eight colorants weighs 256
+/// corners of its table (7.10.2), and an `/ICCBased` profile interpolates a
+/// lookup table of its own. A picture repeats its colours, so a conversion is
+/// remembered by the samples it was asked for, in a slot those samples choose.
+/// The slot keeps the samples beside the answer, so two colours that share a
+/// slot convert again rather than answer for each other: every pixel is the
+/// one `to_rgb` gives, and only the work is shared.
+///
+/// *Added on review of lane 5C, 3 October 2026*, when a sampled function of
+/// several inputs began to be read across all of them: one evaluation of an
+/// eight-input table costs what 7.10.2 makes it cost, and this is what keeps
+/// an image from paying it at every pixel of a colour it has already drawn.
+struct Remembered {
+    slots: Vec<Option<Conversion>>,
+}
+
+/// One remembered conversion: the samples, packed by [`Remembered::key`], and
+/// the colour `to_rgb` gave them.
+type Conversion = (u128, (u8, u8, u8));
+
+impl Remembered {
+    /// A table for an image of `n` components of `bpc` bits each in `space`,
+    /// or `None` where it would not pay or the samples do not fit one key —
+    /// a device space converts in a few operations, and a key holds eight
+    /// samples of sixteen bits.
+    fn for_image(space: &ColorSpace, n: usize, bpc: u32) -> Option<Self> {
+        let cheap = matches!(
+            space,
+            ColorSpace::DeviceGray
+                | ColorSpace::DeviceRgb
+                | ColorSpace::DeviceCmyk
+                | ColorSpace::Approximated { .. }
+                | ColorSpace::Pattern { .. }
+        );
+        (!cheap && n <= 8 && bpc <= 16).then(|| Self {
+            slots: vec![None; REMEMBERED_COLOURS],
+        })
+    }
+
+    /// Adds the `index`th sample of a pixel to its key. A sample is at most
+    /// sixteen bits — [`read_bits`] reads no more — and a table exists only
+    /// for at most eight of them, so nothing is shifted out.
+    fn key(key: u128, index: usize, sample: u32) -> u128 {
+        if index >= 8 {
+            return key;
+        }
+        key | (u128::from(sample & 0xFFFF) << (16 * index))
+    }
+
+    /// The colour the samples `key` stand for, converted by `convert` unless
+    /// this table holds it already.
+    fn convert(&mut self, key: u128, convert: impl FnOnce() -> (u8, u8, u8)) -> (u8, u8, u8) {
+        let at = Self::slot(key);
+        if let Some(Some((held, colour))) = self.slots.get(at) {
+            if *held == key {
+                return *colour;
+            }
+        }
+        let colour = convert();
+        if let Some(slot) = self.slots.get_mut(at) {
+            *slot = Some((key, colour));
+        }
+        colour
+    }
+
+    /// The slot a key's colour is kept in: Fibonacci hashing of the key's two
+    /// halves folded together, shifted to leave as many bits as the table is
+    /// a power of two.
+    fn slot(key: u128) -> usize {
+        let folded = (key as u64) ^ ((key >> 64) as u64);
+        let shift = 64 - REMEMBERED_COLOURS.trailing_zeros();
+        (folded.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> shift) as usize
+    }
 }
 
 /// Components read as a colour by how many of them there are.
@@ -3206,8 +4370,55 @@ fn scale(outline: &Outline, factor: f64) -> Outline {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_inline_abbreviations, PageResources};
+    use super::{expand_inline_abbreviations, PageResources, Remembered};
+    use tinker_pdf_color::ColorSpace;
     use tinker_pdf_content::FontSource;
+
+    /// An image's colour is converted once however many pixels repeat it, and
+    /// two colours whose samples share a slot each get their own answer — the
+    /// table shares work, never a colour. A device space, and a pixel of more
+    /// samples than a key holds, are converted directly.
+    #[test]
+    fn an_images_repeated_colour_is_converted_once() {
+        let lab = ColorSpace::Lab {
+            range: [-100.0, 100.0, -100.0, 100.0],
+        };
+        let mut table = Remembered::for_image(&lab, 3, 8).expect("a Lab image is remembered");
+        let key = |samples: [u32; 3]| {
+            samples
+                .iter()
+                .enumerate()
+                .fold(0u128, |key, (index, sample)| {
+                    Remembered::key(key, index, *sample)
+                })
+        };
+        let first = key([10, 20, 30]);
+        let mut calls = 0;
+        for _ in 0..1000 {
+            let colour = table.convert(first, || {
+                calls += 1;
+                (1, 2, 3)
+            });
+            assert_eq!(colour, (1, 2, 3));
+        }
+        assert_eq!(calls, 1, "a thousand pixels of one colour, converted once");
+
+        let slot = Remembered::slot(first);
+        let neighbour = (0..=255u32)
+            .flat_map(|a| (0..=255u32).map(move |b| [a, b, 7]))
+            .map(key)
+            .find(|other| *other != first && Remembered::slot(*other) == slot)
+            .expect("some colour shares the slot");
+        assert_eq!(table.convert(neighbour, || (4, 5, 6)), (4, 5, 6));
+        assert_eq!(
+            table.convert(first, || (1, 2, 3)),
+            (1, 2, 3),
+            "the first colour converts again rather than answering as its neighbour"
+        );
+
+        assert!(Remembered::for_image(&ColorSpace::DeviceCmyk, 4, 8).is_none());
+        assert!(Remembered::for_image(&lab, 9, 8).is_none());
+    }
 
     fn expand(dict: &str) -> String {
         String::from_utf8(expand_inline_abbreviations(dict.as_bytes()))
@@ -3307,5 +4518,80 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
             res.resolve_color(b"Pbare", &[1.0, 0.0, 0.0]),
             Some(tinker_pdf_content::Rgb { r: 0, g: 0, b: 0 }),
         );
+    }
+
+    /// A page's resources built over `DocumentEditor::view` resolve an object
+    /// the editor has only just allocated; built over the editor's own
+    /// document they cannot, because that document never had it.
+    ///
+    /// This is the resolution path a redaction that copies a form per
+    /// placement needs: `PageResources` holds an `Arc<CosDocument>`, and the
+    /// view is one in which the copy exists at the number the editor gave it.
+    #[test]
+    fn resources_over_an_editors_view_resolve_what_it_allocated() {
+        use std::sync::Arc;
+        use tinker_pdf_cos::{
+            pages, CosDocument, Dict, DocumentBuilder, DocumentEditor, Name, Object, StreamData,
+        };
+
+        let mut builder = DocumentBuilder::new();
+        builder.add_page(100.0, 100.0, |page| {
+            page.fill_rect(10.0, 10.0, 20.0, 20.0, 0.0);
+        });
+        let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+
+        let form = editor.allocate();
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, Object::Name(editor.intern(b"XObject")));
+        dict.insert(
+            editor.intern(b"Subtype"),
+            Object::Name(editor.intern(b"Form")),
+        );
+        dict.insert(
+            editor.intern(b"BBox"),
+            Object::Array(vec![
+                Object::Int(0),
+                Object::Int(0),
+                Object::Int(10),
+                Object::Int(10),
+            ]),
+        );
+        editor.put_stream(
+            form,
+            StreamData {
+                dict,
+                data: b"0 0 1 rg 0 0 10 10 re f".to_vec(),
+            },
+        );
+        let page_ref = editor.page_refs()[0];
+        let Some(Object::Dict(mut page)) = editor.get(page_ref) else {
+            panic!("a page dictionary");
+        };
+        let mut resources = page.get_dict(Name::RESOURCES).cloned().unwrap_or_default();
+        let mut xobjects = Dict::new();
+        xobjects.insert(editor.intern(b"Fm9"), Object::Ref(form));
+        resources.insert(editor.intern(b"XObject"), Object::Dict(xobjects));
+        page.insert(Name::RESOURCES, Object::Dict(resources));
+        editor.put(page_ref, Object::Dict(page));
+
+        let view = editor.view().expect("the view opens");
+        let viewed = &pages::collect(&view)[0];
+
+        let over_view = PageResources::new(&view, viewed, None);
+        let (form_dict, reference) = over_view.xobject(b"Fm9").expect("the form resolves");
+        assert_eq!(reference, form);
+        assert_eq!(
+            form_dict
+                .get_name(view.intern(b"Subtype"))
+                .and_then(|n| view.name_bytes(n))
+                .as_deref(),
+            Some(b"Form".as_slice())
+        );
+
+        // The same page dictionary over the document the editor was opened
+        // with names the form and cannot reach it.
+        let over_original = PageResources::new(&editor.shared_document(), viewed, None);
+        assert!(over_original.xobject(b"Fm9").is_none());
     }
 }

@@ -62,12 +62,12 @@ pub const MAX_7Z_FOLDERS: usize = 4_096;
 /// The most coders in one folder, **and** the most streams one coder may
 /// declare on either side.
 ///
-/// A chain is what this build decodes and the longest one a real writer emits
-/// is three — a filter, a compressor and, historically, a second filter.
+/// The largest folder a real writer emits is BCJ2's: four coders, BCJ2 and
+/// an LZMA for each of its three compressible streams.
 ///
 /// | | Coders |
 /// | --- | --- |
-/// | The most any fixture here spends | 1 (every `.cb7` here — no fixture has a filter, and one written with `-mf=BCJ` would be refused by the coder allow-list before it counted) |
+/// | The most any fixture here spends | 4 (`7zz-bcj2.cb7` and `tests/coders/7zz-bcj2.7z`: BCJ2 fed by three LZMA coders), and 4 streams into one coder |
 /// | `-mf=BCJ -m0=LZMA2` with a delta filter | 3 |
 /// | **This cap** | **32** |
 ///
@@ -102,6 +102,32 @@ pub const MAX_7Z_CODERS: usize = 32;
 /// a terabyte — which
 /// `a_folder_declaring_more_than_the_cap_is_refused_before_it_allocates`
 /// builds, and which is refused *before* the `Vec` rather than after.
+///
+/// **It is checked on every coder's output, not only the folder's**, and
+/// before that coder's inputs are decoded — and that alone is not a folder
+/// bound, because a folder of several coders decodes each of them. A coder's
+/// inputs that other coders decode are therefore held to what it can read for
+/// its own declared output, wherever there is such a number: a Copy's or a
+/// BCJ's to exactly that output, and BCJ2's main, call and jump streams to
+/// that output and three bytes between them, its decisions to that output and
+/// five. Before that rule a BCJ2 folder declaring a one-byte file decoded
+/// whatever its three feeders declared, up to this cap apiece: a 9 676-byte
+/// archive decoded 64 MiB of call targets nothing read, in 1.2 s, and three
+/// caps was the ceiling. `bcj2_s_feeders_are_held_to_what_it_can_read_before_they_are_decoded`
+/// holds both bounds at their edges. A compressor's input has no such number,
+/// so a coder feeding one is held to this cap alone; no writer emits that
+/// shape.
+///
+/// **It bounds a PPMd folder's model arena too**, and that is one cap on two
+/// allocations by design rather than a second constant: the arena is the only
+/// other allocation a folder's header sizes (four property bytes, up to
+/// `2^32 - 37`), it is a cost of decoding the folder exactly as the output is,
+/// and a separate number would have to be argued against this one anyway. The
+/// most a fixture here asks for is 16 MiB (`py7zr-ppmd.7z`); the most 7-Zip's
+/// own presets ask for is 256 MiB, `1 << (level + 19)` at level 9, and less
+/// for a file small enough that 7-Zip shrinks it to fit. `crate::ppmd`'s
+/// `the_arena_and_the_output_are_bounded_before_anything_is_allocated` is
+/// where the refusal fires, before the arena exists.
 pub const MAX_7Z_UNPACKED: usize = 1 << 30;
 
 /// The most bytes of one stored path.

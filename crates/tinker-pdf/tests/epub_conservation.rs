@@ -641,3 +641,126 @@ fn record() -> Vec<String> {
         })
         .collect()
 }
+
+/// **A letter in another case is the same letter.** `text-transform` and
+/// synthesised small capitals draw the book's `The Swans` as `THE SWANS`,
+/// and that is conservation, not a loss and a gain: the fetched
+/// `sample-childrens-media-query.epub` read exactly that way once
+/// text-transform landed. Only case is forgiven — `ß` drawn `SS` is two
+/// characters for one and still diverges.
+#[test]
+fn a_letter_set_in_another_case_is_conserved_and_nothing_else_is() {
+    let verdict = compare(
+        &source("The Swans. Ho! pretty swans"),
+        &["THE SWANS. Ho! pretty swans".to_owned()],
+    );
+    assert!(verdict.holds(), "{verdict:?}");
+    assert_eq!(verdict.conserved, verdict.source);
+
+    let verdict = compare(&source("Straße"), &["STRASSE".to_owned()]);
+    assert!(
+        !verdict.holds(),
+        "a two-character mapping is not a case change: {verdict:?}"
+    );
+
+    let verdict = compare(&source("The Swans"), &["The Swins".to_owned()]);
+    assert!(
+        !verdict.holds(),
+        "a different letter is not a case change: {verdict:?}"
+    );
+}
+
+/// The same, end to end: a book whose heading is `text-transform: uppercase`
+/// is drawn in capitals and conserves.
+#[test]
+fn a_book_with_an_uppercased_heading_conserves() {
+    let bytes = epub_support::book::styled_book(
+        "en",
+        "h1 { text-transform: uppercase }",
+        "<h1>The Swans</h1><p>Ho! pretty swans, do you know?</p>",
+    );
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let pages = conservation::paginated_text(&doc).concat();
+    assert!(
+        pages.contains("THE SWANS"),
+        "the heading is drawn in capitals: {pages:?}"
+    );
+    let verdict = conservation(&bytes, &doc);
+    assert!(verdict.holds(), "{verdict:?}");
+}
+
+/// **A known limit, pinned (ROADMAP K-11):** ruling 14 reads a bracketed run
+/// and the full stop after it out of order in right-to-left text.
+///
+/// CI's `epub-corpus` job found it in `sample-regime-anticancer-arabic.epub`,
+/// from character 20 963 (`Missing ").وقد…"`, `Extra ")وقد…"`), once the
+/// standard-14 mark fix let the book past its two-mark letter at 287. These
+/// are two of the shapes a synthetic probe of 240 books failed on — 82 of
+/// them, the same 82 with every mark stripped, so the cause is ruling 14's
+/// reading-back and not where a mark is drawn. In a right-to-left paragraph
+/// narrowed so that `(histone deacetylase).` ends a line, its `).` is read
+/// after the words that open the next sentence; in a dir-less one, `(HDAC).`
+/// comes back as `.)HDAC(`. The owner accepted the limit for the October 2026
+/// release. When K-11 closes, this test flips: both books conserve.
+#[test]
+fn a_bracketed_run_and_its_full_stop_in_right_to_left_text_are_read_out_of_order() {
+    const FILLERS: [&str; 2] = [
+        "إنّ الخلايا السرطانيّة تتكاثر بسرعة كبيرة، ويعتمد ذلك على عوامل عدّة",
+        "تتألّف كلّ الموادّ الحيّة على كوكبنا الأرض من خلايا، باستثناء الفيروسات",
+    ];
+    const TAIL: &str = "وقد أصبحنا نعرف الآن أنّ بعض الموادّ تكبح الهستونات النازعة للأسيتيل، مخفّفة بذلك من نموّ الأورام";
+    let paragraph = |inside: &str, repeat: usize| {
+        (0..repeat)
+            .map(|i| format!("{} ({inside}). {TAIL}. ", FILLERS[i % 2]))
+            .collect::<String>()
+    };
+    let unpointed = |text: &str| -> String {
+        text.chars()
+            .filter(|c| !matches!(c, '\u{064B}'..='\u{065F}' | '\u{0670}'))
+            .collect()
+    };
+    let read = |style: &str, open: &str, text: &str| {
+        let bytes = epub_support::book::styled_book("ar", style, &format!("{open}{text}</p>"));
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        conservation::conservation_in_logical_order(&bytes, &doc)
+    };
+    for (style, open, text) in [
+        (
+            "p { margin: 0 25% }",
+            "<p dir=\"rtl\">",
+            paragraph("histone deacetylase", 6),
+        ),
+        ("", "<p>", paragraph("HDAC", 1)),
+    ] {
+        let pointed = read(style, open, &text);
+        let twin = read(style, open, &unpointed(&text));
+        assert!(
+            !pointed.holds() && !twin.holds(),
+            "K-11 is fixed for {open} {style:?}: flip this pin, close the row and \
+             delete content-and-text.md's limit row ({pointed:?} / {twin:?})"
+        );
+        let shown = |verdict: &conservation::Verdict| -> Vec<String> {
+            verdict
+                .divergences
+                .iter()
+                .filter_map(|divergence| match divergence {
+                    Divergence::Missing { text, .. } | Divergence::Extra { text, .. } => {
+                        Some(unpointed(text))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(
+            shown(&pointed)
+                .iter()
+                .any(|text| text.contains(").") || text.contains(".)")),
+            "the divergence is at the bracket and its full stop: {pointed:?}"
+        );
+        assert_eq!(
+            shown(&pointed),
+            shown(&twin),
+            "the same text with no mark is read the same way, so marks are not the cause"
+        );
+    }
+}

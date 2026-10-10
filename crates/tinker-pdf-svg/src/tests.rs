@@ -279,6 +279,39 @@ fn data_that_goes_wrong_halfway_keeps_the_half_that_parsed() {
     );
 }
 
+/// A closepath takes no parameters, so what follows one that is not a command
+/// is where the data goes wrong — and every turn of the reader consumes a
+/// byte, so a `d` cannot produce more segments than it has characters to
+/// spend. `Z%` once repeated the close without reading anything, a close a
+/// turn until the budget ran out: with `shape::path`'s unbounded budget, 1.8
+/// GB from a 463-byte document (CI's `fuzz-seeds`, 10 October 2026; the input
+/// is the corpus's `document-close-then-junk`).
+#[test]
+fn what_follows_a_closepath_that_is_not_a_command_ends_the_data() {
+    for (data, drawn) in [
+        ("M 0 0 L 5 0 Z%M 1 1", 3),
+        ("M 0 0 L 5 0 Z 7 8", 3),
+        ("M 0 0 L 5 0 z,", 3),
+        ("M 0 0 L 5 0 Z M 1 1 L 2 2", 5),
+    ] {
+        // Generous rather than `shape::path`'s unbounded one, so that a reader
+        // that repeats the close again fails here by name and does not hang.
+        const GRANTED: usize = 1 << 16;
+        let mut budget = GRANTED;
+        let outline = path::parse(data, &mut budget).expect("the moveto parsed");
+        assert_eq!(outline.segments.len(), drawn, "{data:?}: {outline:?}");
+        assert_eq!(GRANTED - budget, drawn, "{data:?}: spent what it drew");
+    }
+    assert_eq!(
+        outline("M 0 0 L 5 0 Z%M 1 1"),
+        vec![
+            Segment::Move([0.0, 0.0]),
+            Segment::Line([5.0, 0.0]),
+            Segment::Close
+        ]
+    );
+}
+
 /// A `d` that does not begin with a moveto has drawn nothing before it went
 /// wrong, so there is no prefix to keep.
 #[test]
@@ -358,6 +391,7 @@ fn every_committed_fuzz_seed_still_parses_to_finite_numbers() {
         .canonicalize()
         .expect("the seed corpus is committed beside the target");
     let mut seen = 0usize;
+    let mut boxes = 0usize;
     for entry in std::fs::read_dir(&dir).expect("the seed corpus reads") {
         let file = entry.expect("a seed").path();
         if !file.is_file() {
@@ -420,6 +454,12 @@ fn every_committed_fuzz_seed_still_parses_to_finite_numbers() {
                 scene.size.0.is_finite() && scene.size.1.is_finite(),
                 "{name}: a scene's size is not numbers"
             );
+            let mut numbers = Vec::new();
+            sweep_nodes(&scene.nodes, &mut numbers);
+            assert!(
+                numbers.iter().all(|n| n.is_finite()),
+                "{name}: a node carries something that is not a number"
+            );
             assert!(
                 scene.warnings.len() <= limits.max_warnings,
                 "{name}: past the warning cap"
@@ -436,6 +476,50 @@ fn every_committed_fuzz_seed_still_parses_to_finite_numbers() {
                 "{name}: reading a document is not deterministic"
             );
         }
+        // The runs measured, as the target's third read measures them: no
+        // mark reaches the caller, and a document with nothing to measure
+        // reads the same.
+        let plain = crate::read(body, Some((100.0, 50.0)), &limits).ok();
+        let pitch = Pitch(if control.first().copied().unwrap_or(0) & 0x40 == 0 {
+            0.5
+        } else {
+            1e300
+        });
+        let measured = crate::read_with(
+            body,
+            Some((100.0, 50.0)),
+            &limits,
+            &crate::Context::NONE.with_measure(&pitch),
+        );
+        if let Ok(scene) = &measured {
+            let mut numbers = Vec::new();
+            sweep_nodes(&scene.nodes, &mut numbers);
+            assert!(
+                numbers.iter().all(|n| n.is_finite()),
+                "{name}: a measured node carries something that is not a number"
+            );
+            assert!(
+                colours_in_range(&scene.nodes),
+                "{name}: a colour no document states reached the caller"
+            );
+        }
+        if let Some(plain) = &plain {
+            let named = plain.warnings.contains(&crate::Warning::TextBoxUnmeasured);
+            if !named && plain.warnings.len() < limits.max_warnings {
+                assert_eq!(
+                    measured.as_ref().ok(),
+                    Some(plain),
+                    "{name}: nothing to measure, and it read differently"
+                );
+            }
+            if named
+                && measured
+                    .as_ref()
+                    .is_ok_and(|scene| !scene.warnings.contains(&crate::Warning::TextBoxUnmeasured))
+            {
+                boxes += 1;
+            }
+        }
         seen += 1;
     }
     // A corpus that emptied itself would pass every assertion above.
@@ -444,6 +528,143 @@ fn every_committed_fuzz_seed_still_parses_to_finite_numbers() {
         "only {seen} seeds were read from {}",
         dir.display()
     );
+    assert!(
+        boxes >= 1,
+        "no seed reaches a box that only a measurer gives"
+    );
+}
+
+/// Every character `.0` ems wide, eight tenths of one above the baseline and
+/// two below — the fuzz target's measurer.
+struct Pitch(f64);
+
+impl crate::MeasureText for Pitch {
+    fn measure(&self, text: &str, font: &crate::TextStyle) -> crate::RunMetrics {
+        #[allow(clippy::cast_precision_loss)]
+        let count = text.chars().count() as f64;
+        crate::RunMetrics {
+            advance: self.0 * font.size * count,
+            ascent: 0.8 * font.size,
+            descent: 0.2 * font.size,
+        }
+    }
+}
+
+/// Whether every colour a list of nodes paints with, at every depth of a
+/// group, a mask and a tile, is one a document can state.
+fn colours_in_range(nodes: &[crate::Node]) -> bool {
+    fn paint(server: &crate::Paint) -> bool {
+        match server {
+            crate::Paint::Solid(colour) => colour.rgb.iter().all(|c| (0.0..=1.0).contains(c)),
+            crate::Paint::Pattern(tile) => colours_in_range(&tile.nodes),
+            _ => true,
+        }
+    }
+    nodes.iter().all(|node| match node {
+        crate::Node::Path { fill, stroke, .. } | crate::Node::Text { fill, stroke, .. } => {
+            paint(fill) && stroke.as_ref().is_none_or(|stroke| paint(&stroke.paint))
+        }
+        crate::Node::Group { nodes, mask, .. } => {
+            colours_in_range(nodes) && mask.as_ref().is_none_or(|m| colours_in_range(&m.nodes))
+        }
+        crate::Node::Image { .. } => true,
+    })
+}
+
+/// Every number a list of nodes carries, at every depth — the fuzz target's
+/// own sweep, so a seed proves on `cargo test` what the target asserts.
+fn sweep_nodes(nodes: &[crate::Node], out: &mut Vec<f64>) {
+    let outline = |outline: &path::Outline, out: &mut Vec<f64>| {
+        for segment in &outline.segments {
+            match *segment {
+                Segment::Move(p) | Segment::Line(p) => out.extend(p),
+                Segment::Cubic(a, b, c) => out.extend([a, b, c].concat()),
+                Segment::Close => {}
+            }
+        }
+    };
+    let paint = |paint: &crate::Paint, out: &mut Vec<f64>| match paint {
+        crate::Paint::Linear {
+            from, to, matrix, ..
+        } => {
+            out.extend(from);
+            out.extend(to);
+            out.extend(matrix);
+        }
+        crate::Paint::Radial {
+            centre,
+            radius,
+            focus,
+            matrix,
+            ..
+        } => {
+            out.extend(centre);
+            out.push(*radius);
+            out.extend(focus);
+            out.extend(matrix);
+        }
+        crate::Paint::Pattern(tile) => {
+            out.extend(tile.cell);
+            out.extend(tile.matrix);
+            sweep_nodes(&tile.nodes, out);
+        }
+        _ => {}
+    };
+    for node in nodes {
+        match node {
+            crate::Node::Path {
+                outline: shape,
+                fill,
+                fill_opacity,
+                stroke,
+                clip,
+                ..
+            } => {
+                outline(shape, out);
+                paint(fill, out);
+                out.push(*fill_opacity);
+                if let Some(clip) = clip {
+                    outline(&clip.outline, out);
+                }
+                if let Some(stroke) = stroke {
+                    paint(&stroke.paint, out);
+                    out.extend([stroke.width, stroke.opacity, stroke.dash_offset]);
+                }
+            }
+            crate::Node::Text {
+                anchor,
+                matrix,
+                font,
+                ..
+            } => {
+                out.extend(anchor.unwrap_or_default());
+                out.extend(matrix);
+                out.push(font.size);
+            }
+            crate::Node::Image { rect, matrix, .. } => {
+                out.extend(rect);
+                out.extend(matrix);
+            }
+            crate::Node::Group {
+                nodes,
+                opacity,
+                clip,
+                mask,
+            } => {
+                out.push(*opacity);
+                if let Some(clip) = clip {
+                    outline(&clip.outline, out);
+                }
+                if let Some(mask) = mask {
+                    if let Some(region) = &mask.region {
+                        outline(region, out);
+                    }
+                    sweep_nodes(&mask.nodes, out);
+                }
+                sweep_nodes(nodes, out);
+            }
+        }
+    }
 }
 
 /// `1e999` is a number a person can type and `f64` cannot hold, and it must

@@ -21,7 +21,11 @@
 //!    `as_time` refuse on, and the refusal paths are as much of the surface as
 //!    the acceptance paths.
 //! 2. **The X.509 profile**, which is the walker plus the extension decoders,
-//!    the distinguished-name reader and the time arithmetic.
+//!    the distinguished-name reader and the time arithmetic — and RFC 5280
+//!    §4.2.1.6's `GeneralNames`, read out of the alternative-name extensions
+//!    and `authorityCertIssuer` on a certificate that parses, and straight
+//!    over the raw input as a SEQUENCE, as an implicitly tagged one's content,
+//!    and as a single alternative.
 //! 3. **The walker again under a one-level depth cap**, so `DepthExceeded` is
 //!    reached on ordinary inputs rather than only on adversarially deep ones.
 //!    Without this the cap is a branch nothing takes.
@@ -150,6 +154,7 @@
 use libfuzzer_sys::fuzz_target;
 
 use tinker_pdf_pki::der::{Budget, Cursor, Limits, Tlv};
+use tinker_pdf_pki::general_name::{GeneralName, GeneralNames};
 use tinker_pdf_pki::x509::Certificate;
 
 /// Deep enough for anything real, shallow enough that the cap is reachable.
@@ -305,5 +310,28 @@ fuzz_target!(|data: &[u8]| {
             let _ = extension.value();
         }
         let _ = certificate.extensions().unrecognised_critical().count();
+        // `GeneralNames`, decoded on request in three places a certificate
+        // carries one; every name renders, and a directory name matches itself.
+        let extensions = certificate.extensions();
+        let alternatives = [
+            extensions.subject_alt_names(),
+            extensions.issuer_alt_names(),
+            extensions
+                .authority_key_identifier()
+                .and_then(|authority| authority.issuer()),
+        ];
+        for names in alternatives.into_iter().flatten().flatten() {
+            for name in names.names() {
+                let _ = name.to_string();
+            }
+            if let Some(directory) = names.directory_name() {
+                assert!(directory.matches(directory));
+            }
+        }
     }
+    // And the two readers straight over the input: as a SEQUENCE, and as the
+    // content of an implicitly tagged one.
+    let _ = GeneralNames::parse(data);
+    let _ = GeneralNames::from_content(data);
+    let _ = GeneralName::parse_one(data);
 });

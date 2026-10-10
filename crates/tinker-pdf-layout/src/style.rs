@@ -36,12 +36,14 @@
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    AlignContent, AlignItems, AlignSelf, BorderCollapse, BorderSpacing, BorderStyle, BoxSizing,
-    Clear, Color, ColumnCount, ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection,
-    FlexWrap, Float, FontFamily, FontStyle, FontVariant, Gap, Inset, JustifyContent,
-    LengthPercentage, LineHeight, ListStyleType, MarginValue, MaxSize, MinSize, OverflowWrap,
-    PageBreak, PageBreakInside, Position, Side, Sides, Size, Spacing, TableLayout, TextAlign,
-    TextDecoration, VerticalAlign, Visibility, WhiteSpace, ZIndex,
+    AlignContent, AlignItems, AlignSelf, BackgroundPosition, BackgroundRepeat, BackgroundSize,
+    BorderCollapse, BorderSpacing, BorderStyle, BoxSizing, Clear, Color, ColumnCount, ColumnFill,
+    ColumnSpan, ColumnWidth, Direction, Display, FeatureSetting, FlexDirection, FlexWrap, Float,
+    FontFamily, FontKerning, FontStyle, FontVariant, Gap, Hyphens, Image, Inset, JustifyContent,
+    LengthPercentage, LineHeight, ListStylePosition, ListStyleType, MarginValue, MaxSize, MinSize,
+    OutlineStyle, Overflow, OverflowWrap, PageBreak, PageBreakInside, Position, Radius, Shadow,
+    Side, Sides, Size, Spacing, TableLayout, TextAlign, TextDecoration, TextTransform, UnicodeBidi,
+    VerticalAlign, Visibility, WhiteSpace, ZIndex,
 };
 
 use crate::metrics::FontRequest;
@@ -70,6 +72,20 @@ pub struct Consumed {
     pub font_weight: u16,
     /// `font-variant`, carried to the painter.
     pub font_variant: FontVariant,
+    /// `font-kerning`, for the shaper.
+    pub font_kerning: FontKerning,
+    /// `font-feature-settings`, for the shaper; empty for `normal`.
+    pub font_features: Vec<FeatureSetting>,
+    /// `direction`: a block container's paragraphs' base direction, which
+    /// side `start` aligns to and where an outside marker stands; an inline
+    /// box's embedding direction.
+    pub direction: Direction,
+    /// `unicode-bidi`: an inline box's embedding, or a block container's
+    /// `plaintext`.
+    pub unicode_bidi: UnicodeBidi,
+    /// `hyphens`: whether a soft hyphen is a break, and a hyphen where the
+    /// line breaks at it.
+    pub hyphens: Hyphens,
     /// `color`.
     pub color: Color,
     /// `text-decoration`.
@@ -86,8 +102,17 @@ pub struct Consumed {
     pub text_indent: LengthPercentage,
     /// `white-space`.
     pub white_space: WhiteSpace,
-    /// `list-style-type`, for a `display: list-item` marker.
+    /// `text-transform`, `css-text-3` §2.1. Read by [`crate::case`], after
+    /// white-space collapsing and before line breaking, which is §1.3's order
+    /// of operations: a transformed run is **measured** as the characters it
+    /// becomes, so `ß` set in capitals is two advances wide.
+    pub text_transform: TextTransform,
+    /// `list-style-type`, for a `display: list-item` marker that its caller
+    /// did not supply the text of. See [`crate::BoxNode::marker`].
     pub list_style_type: ListStyleType,
+    /// `list-style-position`, CSS 2.2 §12.5.1: whether the marker stands
+    /// outside the principal box or is its first inline box.
+    pub list_style_position: ListStylePosition,
     /// `box-sizing`.
     pub box_sizing: BoxSizing,
     /// `width`.
@@ -106,6 +131,21 @@ pub struct Consumed {
     pub border_color: Sides<Color>,
     /// `background-color`.
     pub background_color: Color,
+    /// The box's corners and outline, where it has either: `None` for the
+    /// box with square corners and no outline, which is nearly every box.
+    ///
+    /// **Boxed, and that is a stack measurement rather than a style.** A
+    /// `Consumed` lives in the frame of every recursion of
+    /// `flow::Builder::block`, and the frame is what the depth cap is sized
+    /// against: four radii and an outline unboxed are a hundred and seventy
+    /// bytes a level, and `a_tree_of_blocks_past_the_depth_cap_is_refused_by_name`
+    /// overflowed its stack the first time they were written that way.
+    pub paint: Option<Box<BoxPaint>>,
+    /// `overflow-x`, `css-overflow-3` §3.1, computed — so `visible` here means
+    /// the other axis does not scroll either.
+    pub overflow_x: Overflow,
+    /// `overflow-y`.
+    pub overflow_y: Overflow,
     /// `page-break-before`, CSS 2.2 §13.3.1.
     pub page_break_before: PageBreak,
     /// `page-break-after`.
@@ -241,8 +281,56 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         text_indent,
         white_space,
         list_style_type,
+        list_style_position,
+        // `css-lists-3` §4's three, read by `tinker_pdf_css::counter` over the
+        // whole element tree before a box tree exists — the walk a counter
+        // needs is the document's and not one box's — and arriving here as
+        // [`crate::BoxNode::marker`] and as `::before`/`::after` text. Named so
+        // that the pattern stays exhaustive and a fourth counter property still
+        // fails to build here.
+        counter_reset: _,
+        counter_increment: _,
+        counter_set: _,
+        // `css-content-3`'s `quotes`, the same walk's: the marks arrive as
+        // `::before`/`::after` text.
+        quotes: _,
+        // `css-color-4`'s `opacity` is paint and not layout: it moves no box
+        // and the painter reads it, per element, from the cascade's own tree
+        // (`tinker_pdf::epub::paint::Effects`), where an element's ancestors
+        // are — an inline box has no fragment of its own to carry it on.
+        opacity: _,
+        // `css-transforms-1` §5: a transform moves ink and no box, so the list
+        // and its origin are the painter's, read from the cascade's tree with
+        // the fragment the box left on each page. Layout takes the one thing
+        // §2 makes it layout's: a transformed box is a containing block.
+        transform,
+        transform_origin: _,
         visibility,
         text_decoration,
+        // `css-text-decor-3`'s `text-shadow` is paint, inherited, and drawn
+        // per run: the painter reads it from the cascade's tree by each run's
+        // element (`tinker_pdf::epub::paint::Effects`), as it reads `opacity`.
+        text_shadow: _,
+        box_shadow,
+        text_transform,
+        // `css-color-adjust-1`'s `color-scheme` chooses a scheme for the
+        // canvas and the system colours, and a printed page's is the light one
+        // (`mediaqueries-5` §12.5): every value that reaches a computed style
+        // is a scheme this build already draws, the dark-only lists having
+        // been refused by value. It moves no box and paints nothing
+        // differently, which is the whole of what it means on paper.
+        color_scheme: _,
+        // `css-fonts-4` §6.4 and §6.12 change which features the shaper
+        // applies, so they reach the provider in the run's `FontRequest` —
+        // measured with them, and drawn with them, by one shaper.
+        font_kerning,
+        font_feature_settings,
+        // `css-writing-modes-3` §2: a block container's base direction and an
+        // inline box's embedding, carried to the runs for the painter's
+        // UAX #9, and `start` and `end` resolved against the first here.
+        direction,
+        unicode_bidi,
+        hyphens,
         display,
         float,
         clear,
@@ -255,6 +343,17 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         border_style,
         border_color,
         background_color,
+        background_image,
+        background_repeat,
+        background_position,
+        background_size,
+        border_radius,
+        outline_width,
+        outline_style,
+        outline_color,
+        outline_offset,
+        overflow_x,
+        overflow_y,
         page_break_before,
         page_break_after,
         page_break_inside,
@@ -343,6 +442,11 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         font_style: *font_style,
         font_weight: *font_weight,
         font_variant: *font_variant,
+        font_kerning: *font_kerning,
+        font_features: font_feature_settings.clone(),
+        direction: *direction,
+        unicode_bidi: *unicode_bidi,
+        hyphens: *hyphens,
         color: *color,
         text_decoration: *text_decoration,
         line_height,
@@ -351,7 +455,9 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         text_align: *text_align,
         text_indent: *text_indent,
         white_space: *white_space,
+        text_transform: *text_transform,
         list_style_type: *list_style_type,
+        list_style_position: *list_style_position,
         box_sizing: *box_sizing,
         width: *width,
         height: *height,
@@ -361,6 +467,21 @@ pub fn consume(style: &ComputedStyle) -> Consumed {
         border_style: *border_style,
         border_color: *border_color,
         background_color: *background_color,
+        paint: box_paint(
+            border_radius,
+            (outline_width, outline_style, outline_color, outline_offset),
+            color,
+            background_image.as_ref().map(|image| BackgroundLayer {
+                image: image.clone(),
+                repeat: *background_repeat,
+                position: *background_position,
+                size: *background_size,
+            }),
+            box_shadow,
+            !transform.is_empty(),
+        ),
+        overflow_x: *overflow_x,
+        overflow_y: *overflow_y,
         page_break_before: *page_break_before,
         page_break_after: *page_break_after,
         page_break_inside: *page_break_inside,
@@ -429,6 +550,8 @@ impl Consumed {
             weight: self.font_weight,
             style: self.font_style,
             size: self.font_size,
+            kerning: self.font_kerning,
+            features: &self.font_features,
         }
     }
 
@@ -440,26 +563,17 @@ impl Consumed {
     /// two halves are separate predicates for that reason — a build that folded
     /// the internal values in here would put a stray `<td>` on a line of its
     /// own as a block, which is a page that looks entirely reasonable.
-    /// **`inline-flex` is here and it is not block-level**, which is the one
-    /// disagreement with the specification in this predicate and is deliberate.
-    /// `css-flexbox-1` §3 makes it inline-level, and this build has no
-    /// inline-level box that is not text — so the two available answers are to
-    /// set it as inline text, which throws the whole flex layout away, or to
-    /// lay it out as a block-level flex container, which gets the *outside*
-    /// wrong and the inside right. It takes the second and says so by name:
-    /// [`crate::Warning::InlineFlexAsBlock`]. `inline-table` took the first
-    /// answer one milestone earlier for the opposite reason — a table's
-    /// contents are nothing like a line of text either way, so there was
-    /// nothing to keep.
+    /// **`inline-flex` is not here**: `css-flexbox-1` §3 makes it
+    /// inline-level, and since October 2026 it is an atomic inline-level box
+    /// as `inline-block` is — a flex container on the outside of which the
+    /// line is set. It was block-level here before, laid out as a flex
+    /// container on a line of its own and named `InlineFlexAsBlock`, because
+    /// this build had no inline-level box that was not text.
     #[must_use]
     pub fn is_block_level(&self) -> bool {
         matches!(
             self.display,
-            Display::Block
-                | Display::ListItem
-                | Display::Table
-                | Display::Flex
-                | Display::InlineFlex
+            Display::Block | Display::ListItem | Display::Table | Display::Flex
         )
     }
 
@@ -482,6 +596,26 @@ impl Consumed {
     #[must_use]
     pub fn is_internal_table(&self) -> bool {
         self.display.is_internal_table()
+    }
+
+    /// Whether `transform` is anything but `none` ([`BoxPaint::transformed`]).
+    #[must_use]
+    pub fn transformed(&self) -> bool {
+        self.paint.as_ref().is_some_and(|paint| paint.transformed)
+    }
+
+    /// Whether this box is a **scroll container**, `css-overflow-3` §3: one
+    /// whose `overflow` is `hidden`, `scroll` or `auto` in either axis, and
+    /// which therefore establishes a block formatting context of its own (CSS
+    /// 2.2 §9.4.1) — its margins do not collapse with its children's, it
+    /// contains its floats, and the floats outside it do not reach in.
+    ///
+    /// Not `clip`, which §3.1 says *"does not cause the element to establish a
+    /// new formatting context"*: `overflow: clip` cuts the ink and nothing
+    /// else.
+    #[must_use]
+    pub fn is_scroll_container(&self) -> bool {
+        self.overflow_x.scrolls() || self.overflow_y.scrolls()
     }
 
     /// Whether this element generates no box at all.
@@ -550,6 +684,108 @@ impl Consumed {
             LengthPercentage::Percent(percent) => (containing * percent / 100.0).max(0.0),
         }
     }
+}
+
+/// An outline, `css-ui-4` §5, resolved: `currentColor` is a colour by now.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Outline {
+    /// `outline-width`, CSS pixels.
+    pub width: f64,
+    /// `outline-offset`, CSS pixels, out from the border edge; negative draws
+    /// inside it.
+    pub offset: f64,
+    /// `outline-color`.
+    pub color: Color,
+    /// `outline-style`, with `auto` drawn solid.
+    pub style: BorderStyle,
+}
+
+/// One background image, `css-backgrounds-3` §2, as the painter draws it:
+/// a `url()` still a reference, because what it resolves to is the caller's
+/// container and not this crate's, or a gradient, which the painter draws
+/// into the box it is given — and nothing about either moves a box.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackgroundLayer {
+    /// `background-image`, a URL unresolved.
+    pub image: Image,
+    /// `background-repeat`.
+    pub repeat: BackgroundRepeat,
+    /// `background-position`, percentages unresolved: the positioning area
+    /// they are a percentage of is a fragment's.
+    pub position: BackgroundPosition,
+    /// `background-size`, likewise.
+    pub size: BackgroundSize,
+}
+
+/// A box's paint beyond its background colour and border:
+/// `css-backgrounds-3` §2's image, §5's corners, and `css-ui-4` §5's outline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoxPaint {
+    /// `border-*-*-radius`, in `Corner::ALL`'s order, percentages unresolved:
+    /// the box they are a percentage of is a fragment's, and a fragment is
+    /// decided at pagination.
+    pub radius: [Radius; 4],
+    /// The outline, where one is drawn at all: `None` for `outline-style:
+    /// none` or a zero width, which §5.2 makes the same.
+    pub outline: Option<Outline>,
+    /// The background image, where there is one.
+    pub image: Option<BackgroundLayer>,
+    /// `box-shadow`, `css-backgrounds-3` §7.1, first on top, each colour
+    /// resolved — `currentColor` is the element's `color` by now.
+    pub shadows: Vec<Shadow>,
+    /// Whether `transform` is anything but `none`, `css-transforms-1` §2: the
+    /// box is then the containing block of its absolutely positioned
+    /// descendants, as a positioned one is, and it leaves a fragment on every
+    /// page it crosses even with nothing of its own to paint, because that
+    /// fragment is the reference box the painter turns its content about.
+    /// Here and not on [`Consumed`] for [`Consumed::paint`]'s reason: a
+    /// `Consumed` is in every recursion's frame.
+    pub transformed: bool,
+}
+
+/// [`Consumed::paint`], resolved at the one door.
+fn box_paint(
+    radius: &[Radius; 4],
+    (width, style, colour, offset): (&f64, &OutlineStyle, &Option<Color>, &f64),
+    current: &Color,
+    image: Option<BackgroundLayer>,
+    shadows: &[Shadow],
+    transformed: bool,
+) -> Option<Box<BoxPaint>> {
+    // §5.3: `auto` is the user agent's to draw, and a solid line is that
+    // drawing here; `none` draws nothing whatever the width says, which is
+    // `border-width`'s rule and is resolved at this door for its reason.
+    let outline = match style {
+        OutlineStyle::Border(BorderStyle::None | BorderStyle::Hidden) => None,
+        _ if *width <= 0.0 => None,
+        style => Some(Outline {
+            width: *width,
+            offset: *offset,
+            // §5.4's initial `currentColor` is the element's `color`.
+            color: colour.unwrap_or(*current),
+            style: match style {
+                OutlineStyle::Auto => BorderStyle::Solid,
+                OutlineStyle::Border(style) => *style,
+            },
+        }),
+    };
+    let square = radius.iter().all(|corner| *corner == Radius::ZERO);
+    if square && outline.is_none() && image.is_none() && shadows.is_empty() && !transformed {
+        return None;
+    }
+    Some(Box::new(BoxPaint {
+        radius: *radius,
+        outline,
+        image,
+        shadows: shadows
+            .iter()
+            .map(|shadow| Shadow {
+                color: Some(shadow.color.unwrap_or(*current)),
+                ..*shadow
+            })
+            .collect(),
+        transformed,
+    }))
 }
 
 /// CSS 2.2 §10.4's and §10.7's `min-width`/`min-height` as a used length.

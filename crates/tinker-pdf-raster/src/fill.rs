@@ -130,11 +130,26 @@ impl Mask {
     /// the page for a comma. Every consumer walks this.
     #[must_use]
     pub fn overlap(&self, width: u32, height: u32) -> (u32, u32, u32, u32) {
+        self.overlap_at((0, 0), width, height)
+    }
+
+    /// [`Mask::overlap`] for a canvas standing at device pixel `origin`: the
+    /// canvas pixels this mask can reach, **in the canvas's own indices**, so
+    /// device pixel `(origin.0 + x, origin.1 + y)` is canvas pixel `(x, y)`.
+    ///
+    /// The mask stays in device pixels and the canvas says where it is, which
+    /// is what keeps a tile's arithmetic in the page's frame (ruling 5).
+    #[must_use]
+    pub fn overlap_at(&self, origin: (i32, i32), width: u32, height: u32) -> (u32, u32, u32, u32) {
         let clamp = |value: i64, limit: u32| value.clamp(0, i64::from(limit)) as u32;
-        let x0 = clamp(i64::from(self.x0), width);
-        let y0 = clamp(i64::from(self.y0), height);
-        let x1 = clamp(i64::from(self.x0) + i64::from(self.width), width);
-        let y1 = clamp(i64::from(self.y0) + i64::from(self.height), height);
+        let (left, top) = (
+            i64::from(self.x0) - i64::from(origin.0),
+            i64::from(self.y0) - i64::from(origin.1),
+        );
+        let x0 = clamp(left, width);
+        let y0 = clamp(top, height);
+        let x1 = clamp(left + i64::from(self.width), width);
+        let y1 = clamp(top + i64::from(self.height), height);
         (x0, y0, x1.max(x0), y1.max(y0))
     }
 
@@ -149,6 +164,31 @@ impl Mask {
         }
         let index = (row as usize) * (self.width as usize) + (col as usize);
         self.data.get(index).copied().unwrap_or(0)
+    }
+
+    /// Every pixel fully covered or fully uncovered: coverage of at least half
+    /// becomes 255, anything less becomes 0.
+    ///
+    /// What turning anti-aliasing off means here. The threshold is on the
+    /// coverage `fill` already measured rather than a second sampling rule
+    /// beside it, so a hard edge lands where the soft one is half-way — the
+    /// shape keeps its area rather than growing by a pixel on every side —
+    /// and it is a function of one pixel's coverage alone, so a tile and the
+    /// page under it still agree (ruling 5).
+    ///
+    /// **Two shapes sharing an edge partition the pixels along it.** A value
+    /// here is `floor(units / 16)` of the 4 096 units a pixel holds, so it is
+    /// at least 128 exactly when the shape holds at least 2 048 units; two
+    /// shapes that split a pixel's units between them therefore split the
+    /// pixel too, except at an exact half, where both take it. Neither leaves
+    /// a gap, which a threshold above one half would.
+    ///
+    /// The price is the one every such threshold pays: a feature narrower than
+    /// half a pixel can vanish where it straddles a pixel edge.
+    pub fn harden(&mut self) {
+        for value in &mut self.data {
+            *value = if *value >= 128 { 255 } else { 0 };
+        }
     }
 
     /// Intersects with another mask, multiplying coverages.
@@ -508,9 +548,25 @@ fn add_span(accumulator: &mut [u16], x0: i32, width: u32, from: i64, to: i64) {
 }
 
 /// Turns a polyline into edges, dropping horizontal ones (they contribute no
-/// crossings).
+/// crossings), and **closes it**.
+///
+/// ISO 32000-1 8.5.3.1: "before filling, each open subpath is implicitly
+/// closed" — and 8.5.4 applies the same to a clipping path, which reaches this
+/// function through the same `fill`. So the segment from the last point back
+/// to the first is an edge whether or not the path said `h`. Until September
+/// 2026 it was not, and `90 10 m 150 30 l 110 60 l f` painted nothing at all:
+/// its two edges both run downward, every sub-scanline holds one crossing and
+/// never a span. A subpath the stroker or a `re` closed already ends on its
+/// first point, so the closing pair is degenerate there and adds no edge.
 fn build_edges(poly: &[Point], edges: &mut Vec<Edge>) {
-    for pair in poly.windows(2) {
+    let closing = match (poly.first(), poly.last()) {
+        (Some(first), Some(last)) if first != last => Some([*last, *first]),
+        _ => None,
+    };
+    for pair in poly
+        .windows(2)
+        .chain(closing.as_ref().map(|pair| &pair[..]))
+    {
         let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else {
             continue;
         };
@@ -630,6 +686,68 @@ mod tests {
         assert_eq!(mask.at(2, 7), 0, "below it");
     }
 
+    /// A hardened mask holds the two extremes and nothing between, and where
+    /// the soft one was already whole or empty it is unchanged.
+    #[test]
+    fn a_hardened_mask_is_whole_or_empty_everywhere() {
+        let mut path = Path::new();
+        path.move_to(1.3, 2.7);
+        path.curve_to(18.1, 0.4, 19.9, 16.5, 2.2, 17.1);
+        path.close();
+        let soft = fill(&path, FillRule::NonZero, 0, 0, 20, 20, 0.1, None);
+        assert!(
+            soft.data.iter().any(|v| *v != 0 && *v != 255),
+            "the fixture has partial pixels to harden"
+        );
+        let mut hard = soft.clone();
+        hard.harden();
+        for (soft, hard) in soft.data.iter().zip(&hard.data) {
+            assert!(*hard == 0 || *hard == 255, "{hard} is neither");
+            let expected = if *soft >= 128 { 255 } else { 0 };
+            assert_eq!(*hard, expected, "a soft {soft} hardens to {expected}");
+        }
+    }
+
+    /// **Two shapes sharing an edge leave no gap and no double-painting
+    /// between them once hardened**, except at an exact half. The edge is a
+    /// diagonal across a square, so every pixel along it is split between the
+    /// two triangles at a different ratio.
+    #[test]
+    fn hardened_shapes_sharing_an_edge_partition_its_pixels() {
+        let triangle = |corner: (f64, f64)| {
+            let mut path = Path::new();
+            path.move_to(0.5, 0.5);
+            path.line_to(corner.0, corner.1);
+            path.line_to(19.25, 17.75);
+            path.close();
+            let mut mask = fill(&path, FillRule::NonZero, 0, 0, 20, 20, 0.1, None);
+            mask.harden();
+            mask
+        };
+        let (upper, lower) = (triangle((19.25, 0.5)), triangle((0.5, 17.75)));
+        let mut square = Path::new();
+        square.rect(0.5, 0.5, 18.75, 17.25);
+        let whole = fill(&square, FillRule::NonZero, 0, 0, 20, 20, 0.1, None);
+
+        let mut both = 0;
+        for y in 0..20 {
+            for x in 0..20 {
+                if whole.at(x, y) != 255 {
+                    continue; // the square's own soft rim is not the edge's business
+                }
+                let (a, b) = (upper.at(x, y), lower.at(x, y));
+                assert!(a == 255 || b == 255, "a gap at ({x}, {y})");
+                if a == 255 && b == 255 {
+                    both += 1;
+                }
+            }
+        }
+        assert!(
+            both <= 2,
+            "{both} pixels taken by both: only an exact half may be"
+        );
+    }
+
     #[test]
     fn a_half_pixel_edge_is_half_covered() {
         let mask = rect_mask(0.0, 0.0, 4.5, 4.0);
@@ -666,6 +784,25 @@ mod tests {
         let a = fill(&path, FillRule::NonZero, 0, 0, 16, 16, 0.1, None);
         let b = fill(&path, FillRule::NonZero, 0, 0, 16, 16, 0.1, None);
         assert_eq!(a.data, b.data, "ruling 4: the same input, the same bytes");
+    }
+
+    /// 8.5.3.1: a subpath is closed before it is filled, whether or not it
+    /// said so. The open triangle's two stated edges both run downward, so
+    /// without the implicit third edge no sub-scanline holds a span and the
+    /// mask is empty; with it, the mask is the closed triangle's exactly.
+    #[test]
+    fn an_open_subpath_fills_as_if_it_were_closed() {
+        let mut open = Path::new();
+        open.move_to(9.0, 1.0);
+        open.line_to(15.0, 3.0);
+        open.line_to(11.0, 6.0);
+        let mut closed = open.clone();
+        closed.close();
+
+        let a = fill(&open, FillRule::NonZero, 0, 0, 16, 8, 0.1, None);
+        let b = fill(&closed, FillRule::NonZero, 0, 0, 16, 8, 0.1, None);
+        assert!(b.data.contains(&255), "the fixture has an inside");
+        assert_eq!(a.data, b.data, "the open subpath is the closed one");
     }
 
     #[test]

@@ -176,6 +176,33 @@ impl Matrix {
         let [a, b, c, d, _, _] = self.0;
         (a * a + b * b).sqrt().max((c * c + d * d).sqrt())
     }
+
+    /// The scale an em takes under a text matrix that may be **sheared**:
+    /// the advance axis's length, or the height the other axis stands to it
+    /// at — the area over the base — whichever is larger.
+    ///
+    /// The same as [`Matrix::scale`] for every unsheared matrix. Under 12.1.5's
+    /// italic shear the second axis is longer than the glyph is tall by
+    /// `1 / cos 20°`, and an em read off its length would be 6% too large.
+    #[must_use]
+    pub fn em_scale(self) -> f64 {
+        let [a, b, c, d, _, _] = self.0;
+        let base = (a * a + b * b).sqrt();
+        if base == 0.0 {
+            return self.scale();
+        }
+        base.max((a * d - b * c).abs() / base)
+    }
+
+    /// How far the second axis leans from perpendicular to the first, in
+    /// degrees, positive when the top of a glyph leans along the advance.
+    #[must_use]
+    pub fn lean(self) -> f64 {
+        let [a, b, c, d, _, _] = self.0;
+        let along = a * c + b * d;
+        let across = (a * d - b * c).abs();
+        along.atan2(across).to_degrees()
+    }
 }
 
 /// Which gradient, since 8.7.4.5.3 and 8.7.4.5.4 are different shadings and
@@ -203,7 +230,43 @@ pub enum Paint {
         kind: Gradient,
         geometry: Vec<f64>,
         stops: Vec<(f64, [f64; 3])>,
+        /// The stops' alphas, as `(offset, alpha)`, where they differ.
+        ///
+        /// `None` where every stop states one alpha, which is then the mark's
+        /// own constant [`Mark::alpha`]. On the document side this is the
+        /// `/DeviceGray` ramp of the `/Luminosity` soft mask in force when the
+        /// gradient was painted — 18.3.2 interpolates the alpha between stops
+        /// as it does each colour component, and a mask over a ramp is the one
+        /// PDF construction that says so.
+        alphas: Option<Vec<(f64, f64)>>,
+        /// The colour halfway along each interval between stops, as
+        /// `(offset, colour)`, the ends padded to `0` and `1` as 15.4.2 pads
+        /// them and intervals narrower than a thousandth left out.
+        ///
+        /// The stops are where a ramp is pinned and these are how it bends:
+        /// 18.3.1.2's `ColorInterpolationMode` changes nothing at a stop and
+        /// everything between, so a census of stops alone conserves a ramp
+        /// blended in the wrong space. The markup side computes each from the
+        /// clause — the plain mean in sRGB, the mean of the linear light
+        /// re-encoded in scRGB — and the document side evaluates the
+        /// function there.
+        middles: Vec<(f64, [f64; 3])>,
+        /// Whether any stop's colour came from a `ContextColor` evaluated
+        /// through its profile, on the markup side.
+        ///
+        /// Such a stop is converted to sRGB through an eight-bit transform
+        /// (18.3.1.2), so its colour, and the middles beside it, are held to a
+        /// byte rather than to [`COLOUR`]: the conversion's own resolution, and
+        /// not a loosening of any stop the file stated in sRGB.
+        profiled: bool,
     },
+    /// 15.2.5's `ContextColor`: the components in the profile's own space,
+    /// as the markup states them and as the content stream's `scn` writes
+    /// them under a colour space that is not a device one.
+    ///
+    /// Compared as numbers, because a translation is the claim: the profile
+    /// does the colour management and the components must arrive unchanged.
+    Context { values: Vec<f64> },
     /// A picture, at the pixel count of the part it came from, over the
     /// rectangle it covers in user space.
     ///
@@ -233,6 +296,7 @@ impl Paint {
                 ..
             } => "a radial gradient",
             Paint::Image { .. } => "an image",
+            Paint::Context { .. } => "a context colour",
         }
     }
 }
@@ -276,6 +340,14 @@ pub struct Run {
     /// wrote and the `TJ` adjustments beside it; the comparison is only over
     /// the positions the markup states.
     pub advances: Vec<Option<f64>>,
+    /// 12.1.5's emboldening: on the markup side, `BoldSimulation` or
+    /// `BoldItalicSimulation`; on the document side, Table 106's fill-and-stroke
+    /// mode with a line width of 2% of the em.
+    pub bold: bool,
+    /// 12.1.5's italic: on the markup side, `ItalicSimulation` or
+    /// `BoldItalicSimulation`; on the document side, a text matrix whose
+    /// second axis leans 20° along the advance.
+    pub italic: bool,
 }
 
 /// One fixed page, and the document page made from it.
@@ -323,10 +395,10 @@ impl Census {
         self.count(|paint| matches!(paint, Paint::Image { .. }))
     }
 
-    /// Every solid fill.
+    /// Every solid fill — a `ContextColor` is one, in its profile's space.
     #[must_use]
     pub fn solids(&self) -> usize {
-        self.count(|paint| matches!(paint, Paint::Solid { .. }))
+        self.count(|paint| matches!(paint, Paint::Solid { .. } | Paint::Context { .. }))
     }
 
     /// Every glyph of every run.
@@ -379,6 +451,14 @@ fn colour_converted_bitmap(uri: &str) -> Option<&str> {
 /// XPS 1.0 writes `ImageSource="/Resources/x.png"` and OpenXPS writes it
 /// relative to the page part, and resolving both to one spelling is the only
 /// way a census over the two dialects compares like with like.
+///
+/// **Interleaved pieces are joined here, by this harness's own reading of
+/// 7.2.4** and not by `xps::opc`'s: an item named `<part>/[<n>].piece` or
+/// `<part>/[<n>].last.piece` is piece `n` of `<part>`, and the part is its
+/// pieces in number order. Crude on purpose — it checks nothing a reader
+/// should refuse — because its job is to find the part the markup is in, and
+/// a harness that asked the reader how to do that would inherit the reader's
+/// answer.
 fn parts(package: &[u8]) -> BTreeMap<String, Vec<u8>> {
     let mut out = BTreeMap::new();
     let Ok(mut archive) = Archive::open(package, &Limits::DEFAULT) else {
@@ -390,10 +470,37 @@ fn parts(package: &[u8]) -> BTreeMap<String, Vec<u8>> {
         .enumerate()
         .map(|(index, entry)| (index, entry.name.clone()))
         .collect();
+    let mut pieces: BTreeMap<String, Vec<(u64, Vec<u8>)>> = BTreeMap::new();
     for (index, name) in names {
-        if let Ok(bytes) = archive.read(index) {
-            out.insert(format!("/{name}"), bytes.into_owned());
+        let Ok(bytes) = archive.read(index) else {
+            continue;
+        };
+        let piece = name.rsplit_once('/').and_then(|(part, last)| {
+            let number = last
+                .strip_suffix(".last.piece")
+                .or_else(|| last.strip_suffix(".piece"))?
+                .strip_prefix('[')?
+                .strip_suffix(']')?
+                .parse::<u64>()
+                .ok()?;
+            Some((part.to_owned(), number))
+        });
+        match piece {
+            Some((part, number)) => pieces
+                .entry(format!("/{part}"))
+                .or_default()
+                .push((number, bytes.into_owned())),
+            None => {
+                out.insert(format!("/{name}"), bytes.into_owned());
+            }
         }
+    }
+    for (part, mut group) in pieces {
+        group.sort_by_key(|(number, _)| *number);
+        out.insert(
+            part,
+            group.into_iter().flat_map(|(_, bytes)| bytes).collect(),
+        );
     }
     out
 }
@@ -563,6 +670,19 @@ fn colour(value: &str) -> Option<([f64; 3], f64)> {
         *slot = f64::from(byte(offset + index * 2)?) / 255.0;
     }
     Some((rgb, alpha))
+}
+
+/// 15.2.5's `ContextColor <uri> a,c1,…,cn`, as `(components, alpha)`, each
+/// clamped to `[0, 1]` as 15.2.5 says before any further processing.
+fn context(value: &str) -> Option<(Vec<f64>, f64)> {
+    let rest = value.trim().strip_prefix("ContextColor")?;
+    let (_, numbers) = rest.trim_start().split_once(char::is_whitespace)?;
+    let numbers = scalars(numbers);
+    let (alpha, values) = numbers.split_first()?;
+    Some((
+        values.iter().map(|v| v.clamp(0.0, 1.0)).collect(),
+        alpha.clamp(0.0, 1.0),
+    ))
 }
 
 /// The bounds of a `Data` attribute, in the element's own space.
@@ -823,10 +943,21 @@ fn pixels(part: &[u8]) -> Option<(u32, u32)> {
 #[derive(Clone, Debug)]
 enum Brush {
     Solid([f64; 3], f64),
+    /// A `ContextColor`'s components and its alpha.
+    Context(Vec<f64>, f64),
     Gradient {
         kind: Gradient,
         geometry: Vec<f64>,
         stops: Vec<(f64, [f64; 3])>,
+        /// Where the stops' alphas differ, each stop's.
+        alphas: Option<Vec<(f64, f64)>>,
+        /// See [`Paint::Gradient::middles`].
+        middles: Vec<(f64, [f64; 3])>,
+        /// See [`Paint::Gradient::profiled`].
+        profiled: bool,
+        /// The one alpha the stops share, times the brush's `Opacity`; the
+        /// `Opacity` alone where they differ.
+        alpha: f64,
     },
     Image {
         source: String,
@@ -845,37 +976,204 @@ enum Brush {
     },
 }
 
-/// The stops of a gradient brush, in the order the markup wrote them.
-fn stops(inner: &str) -> Vec<(f64, [f64; 3])> {
+/// The stops of a gradient brush, in the order the markup wrote them, with
+/// each stop's alpha and whether its colour came through a profile.
+fn stops(
+    inner: &str,
+    part: &str,
+    parts: &BTreeMap<String, Vec<u8>>,
+) -> Vec<(f64, [f64; 3], f64, bool)> {
     tags(inner)
         .iter()
         .filter(|tag| tag.name.ends_with("GradientStop"))
         .filter_map(|tag| {
             let offset = attribute(tag.attributes, "Offset")?.parse::<f64>().ok()?;
-            let (rgb, _) = colour(attribute(tag.attributes, "Color")?)?;
-            Some((offset, rgb))
+            let value = attribute(tag.attributes, "Color")?;
+            if let Some((values, alpha)) = context(value) {
+                let rgb = profiled_srgb(value, &values, part, parts)?;
+                return Some((offset, rgb, alpha, true));
+            }
+            let (rgb, alpha) = colour(value)?;
+            Some((offset, rgb, alpha, false))
+        })
+        .collect()
+}
+
+/// The sRGB a `ContextColor` comes to, by 18.3.1.2's conversion, for the one
+/// kind of profile this harness evaluates itself: a `GRAY` profile over an
+/// `XYZ` connection space whose `kTRC` is the identity or one gamma.
+///
+/// Written out from ICC.1 rather than borrowed: `Y = v^γ` from the curve
+/// (`curv` with no entries is the identity, with one a `u8Fixed8` gamma), and
+/// an achromatic `Y` is that light in each sRGB channel, encoded by
+/// IEC 61966-2-1. Anything else answers `None`, and a census that cannot read
+/// a stop states one fewer — which the comparison then reports.
+fn profiled_srgb(
+    value: &str,
+    components: &[f64],
+    part: &str,
+    parts: &BTreeMap<String, Vec<u8>>,
+) -> Option<[f64; 3]> {
+    let rest = value.trim().strip_prefix("ContextColor")?;
+    let (uri, _) = rest.trim_start().split_once(char::is_whitespace)?;
+    let bytes = parts.get(&resolve(part, uri))?;
+    if bytes.get(16..20)? != b"GRAY" || bytes.get(20..24)? != b"XYZ " {
+        return None;
+    }
+    let count = u32::from_be_bytes(bytes.get(128..132)?.try_into().ok()?) as usize;
+    let curve = (0..count.min(64)).find_map(|index| {
+        let at = 132 + index * 12;
+        let entry = bytes.get(at..at + 12)?;
+        (&entry[0..4] == b"kTRC").then(|| {
+            let offset = u32::from_be_bytes(entry[4..8].try_into().ok()?) as usize;
+            bytes.get(offset..offset + 14)
+        })?
+    })?;
+    if &curve[0..4] != b"curv" {
+        return None;
+    }
+    let gamma = match u32::from_be_bytes(curve[8..12].try_into().ok()?) {
+        0 => 1.0,
+        1 => f64::from(u16::from_be_bytes([curve[12], curve[13]])) / 256.0,
+        _ => return None,
+    };
+    let v = components.first().copied().unwrap_or(0.0).clamp(0.0, 1.0);
+    let light = v.powf(gamma);
+    let encoded = if light <= 0.003_130_8 {
+        light * 12.92
+    } else {
+        1.055 * light.powf(1.0 / 2.4) - 0.055
+    };
+    Some([encoded; 3])
+}
+
+/// A gradient brush from its kind, its geometry, its stops and its start tag.
+///
+/// The stops' alphas are one fact when they agree — a constant alpha over the
+/// whole element, with the brush's `Opacity` — and a ramp of their own when
+/// they do not.
+fn gradient_brush(
+    kind: Gradient,
+    geometry: Vec<f64>,
+    attributes: &str,
+    inner: &str,
+    part: &str,
+    parts: &BTreeMap<String, Vec<u8>>,
+) -> Brush {
+    let read = stops(inner, part, parts);
+    let profiled = read.iter().any(|stop| stop.3);
+    let read: Vec<(f64, [f64; 3], f64)> = read
+        .into_iter()
+        .map(|(offset, rgb, alpha, _)| (offset, rgb, alpha))
+        .collect();
+    let opacity = attribute(attributes, "Opacity")
+        .and_then(|o| o.parse::<f64>().ok())
+        .unwrap_or(1.0);
+    // 18.3.1.1's artificial stops: a gradient whose stops do not reach 0 or 1
+    // takes its nearest stop's colour out to them.
+    let mut read = read;
+    read.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if let (Some(first), Some(last)) = (read.first().copied(), read.last().copied()) {
+        if first.0 > 0.0 {
+            read.insert(0, (0.0, first.1, first.2));
+        }
+        if last.0 < 1.0 {
+            read.push((1.0, last.1, last.2));
+        }
+    }
+    let uniform = read.first().map_or(1.0, |stop| stop.2);
+    let varying = read.iter().any(|stop| stop.2 != uniform);
+    let linear_light =
+        attribute(attributes, "ColorInterpolationMode") == Some("ScRgbLinearInterpolation");
+    Brush::Gradient {
+        kind,
+        geometry,
+        stops: read.iter().map(|stop| (stop.0, stop.1)).collect(),
+        alphas: varying.then(|| read.iter().map(|stop| (stop.0, stop.2)).collect()),
+        alpha: if varying { opacity } else { uniform * opacity },
+        middles: stated_middles(&read, linear_light),
+        profiled,
+    }
+}
+
+/// [`Paint::Gradient::middles`], from the markup's stops, by 18.3.1.2.
+fn stated_middles(read: &[(f64, [f64; 3], f64)], linear_light: bool) -> Vec<(f64, [f64; 3])> {
+    // IEC 61966-2-1 both ways, written out here rather than borrowed.
+    let decode = |c: f64| {
+        if c <= 0.040_45 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let encode = |l: f64| {
+        if l <= 0.003_130_8 {
+            l * 12.92
+        } else {
+            1.055 * l.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    let mut points: Vec<(f64, [f64; 3])> = read.iter().map(|stop| (stop.0, stop.1)).collect();
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if let (Some(first), Some(last)) = (points.first().copied(), points.last().copied()) {
+        if first.0 > 0.0 {
+            points.insert(0, (0.0, first.1));
+        }
+        if last.0 < 1.0 {
+            points.push((1.0, last.1));
+        }
+    }
+    points
+        .windows(2)
+        .filter(|pair| pair[1].0 - pair[0].0 >= 1e-3)
+        .map(|pair| {
+            let (a, b) = (pair[0].1, pair[1].1);
+            let mut mid = [0.0; 3];
+            for (channel, slot) in mid.iter_mut().enumerate() {
+                *slot = if linear_light {
+                    encode((decode(a[channel]) + decode(b[channel])) / 2.0)
+                } else {
+                    (a[channel] + b[channel]) / 2.0
+                };
+            }
+            ((pair[0].0 + pair[1].0) / 2.0, mid)
         })
         .collect()
 }
 
 /// One brush element, from its start tag and everything under it.
-fn brush(name: &str, attributes: &str, inner: &str) -> Option<Brush> {
+fn brush(
+    name: &str,
+    attributes: &str,
+    inner: &str,
+    part: &str,
+    parts: &BTreeMap<String, Vec<u8>>,
+) -> Option<Brush> {
     let local = name.rsplit(':').next().unwrap_or(name);
     match local {
         "SolidColorBrush" => {
-            let (rgb, alpha) = colour(attribute(attributes, "Color")?)?;
+            let value = attribute(attributes, "Color")?;
             let opacity = attribute(attributes, "Opacity")
                 .and_then(|o| o.parse::<f64>().ok())
                 .unwrap_or(1.0);
+            if let Some((values, alpha)) = context(value) {
+                return Some(Brush::Context(values, alpha * opacity));
+            }
+            let (rgb, alpha) = colour(value)?;
             Some(Brush::Solid(rgb, alpha * opacity))
         }
         "LinearGradientBrush" => {
             let start = scalars(attribute(attributes, "StartPoint")?);
             let end = scalars(attribute(attributes, "EndPoint")?);
-            (start.len() == 2 && end.len() == 2).then(|| Brush::Gradient {
-                kind: Gradient::Linear,
-                geometry: vec![start[0], start[1], end[0], end[1]],
-                stops: stops(inner),
+            (start.len() == 2 && end.len() == 2).then(|| {
+                gradient_brush(
+                    Gradient::Linear,
+                    vec![start[0], start[1], end[0], end[1]],
+                    attributes,
+                    inner,
+                    part,
+                    parts,
+                )
             })
         }
         "RadialGradientBrush" => {
@@ -887,10 +1185,15 @@ fn brush(name: &str, attributes: &str, inner: &str) -> Option<Brush> {
                 .map(scalars)
                 .filter(|o| o.len() == 2)
                 .unwrap_or_else(|| centre.clone());
-            (centre.len() == 2).then(|| Brush::Gradient {
-                kind: Gradient::Radial,
-                geometry: vec![origin[0], origin[1], 0.0, centre[0], centre[1], radius],
-                stops: stops(inner),
+            (centre.len() == 2).then(|| {
+                gradient_brush(
+                    Gradient::Radial,
+                    vec![origin[0], origin[1], 0.0, centre[0], centre[1], radius],
+                    attributes,
+                    inner,
+                    part,
+                    parts,
+                )
             })
         }
         "ImageBrush" => Some(Brush::Image {
@@ -1070,7 +1373,7 @@ fn page_census(markup: &str, part: &str, parts: &BTreeMap<String, Vec<u8>>) -> P
         };
         let (inner, next) = span(resources, tag.name, at);
         at = next;
-        if let Some(brush) = brush(tag.name, tag.attributes, inner) {
+        if let Some(brush) = brush(tag.name, tag.attributes, inner, part, parts) {
             keyed.insert(key.to_owned(), brush);
         }
     }
@@ -1191,7 +1494,9 @@ fn path_mark(
     let brush = match attribute(attributes, "Fill") {
         Some(fill) => match fill.strip_prefix("{StaticResource ") {
             Some(key) => keyed.get(key.trim_end_matches('}').trim()).cloned(),
-            None => colour(fill).map(|(rgb, a)| Brush::Solid(rgb, a)),
+            None => context(fill)
+                .map(|(values, a)| Brush::Context(values, a))
+                .or_else(|| colour(fill).map(|(rgb, a)| Brush::Solid(rgb, a))),
         },
         None => {
             let (fill, _) = span(inner, "Path.Fill", 0);
@@ -1203,7 +1508,7 @@ fn path_mark(
                 }
                 let (nested, next) = span(fill, tag.name, at);
                 at = next;
-                if let Some(brush) = brush(tag.name, tag.attributes, nested) {
+                if let Some(brush) = brush(tag.name, tag.attributes, nested, part, parts) {
                     found = Some(brush);
                     break;
                 }
@@ -1214,17 +1519,25 @@ fn path_mark(
 
     let (paint, brush_alpha) = match brush {
         Brush::Solid(rgb, a) => (Paint::Solid { rgb }, a),
+        Brush::Context(values, a) => (Paint::Context { values }, a),
         Brush::Gradient {
             kind,
             geometry,
             stops,
+            alphas,
+            alpha,
+            middles,
+            profiled,
         } => (
             Paint::Gradient {
                 kind,
                 geometry,
                 stops,
+                alphas,
+                middles,
+                profiled,
             },
-            1.0,
+            alpha,
         ),
         Brush::Image {
             source,
@@ -1310,6 +1623,23 @@ fn glyph_run(attributes: &str, transform: Matrix) -> Option<Run> {
     let (rgb, _) = attribute(attributes, "Fill")
         .and_then(colour)
         .unwrap_or(([0.0, 0.0, 0.0], 1.0));
+    let simulation = attribute(attributes, "StyleSimulations").unwrap_or("None");
+    let bold = matches!(simulation, "BoldSimulation" | "BoldItalicSimulation");
+    let italic = matches!(simulation, "ItalicSimulation" | "BoldItalicSimulation");
+    // 12.1.5's S5.6, written out from the clause: an emboldened glyph moves
+    // up and to the right by 1% of the em, which in the element's own
+    // y-down space is `+x, −y` upright and, for a sideways run whose advance
+    // runs down the page and whose glyphs stand to its right, `+x, +y`.
+    let (x, y) = if bold {
+        let offset = em * 0.01;
+        if attribute(attributes, "IsSideways") == Some("true") {
+            (x + offset, y + offset)
+        } else {
+            (x + offset, y - offset)
+        }
+    } else {
+        (x, y)
+    };
     let (x, y) = transform.apply(x, y);
     Some(Run {
         origin: (x, y),
@@ -1318,6 +1648,8 @@ fn glyph_run(attributes: &str, transform: Matrix) -> Option<Run> {
         glyphs,
         rgb,
         advances,
+        bold,
+        italic,
     })
 }
 
@@ -1449,32 +1781,190 @@ fn array(cos: &CosDocument, dict: &Dict, name: &[u8]) -> Option<Vec<f64>> {
 /// Type 2 is one interpolation and states two; type 3 stitches several and
 /// states one more than it has bounds. Read from the dictionaries rather than
 /// through `parse_function`, which defaults a missing `/Domain`.
-fn function_stops(cos: &CosDocument, function: &Object) -> Vec<(f64, [f64; 3])> {
-    let Some(dict) = function.as_dict() else {
+fn function_stops(
+    cos: &CosDocument,
+    function: &Object,
+    reference: Option<ObjRef>,
+) -> Vec<(f64, [f64; 3])> {
+    let values = function_values(cos, function, reference);
+    if values.iter().any(|(_, value)| value.len() != 3) {
         return Vec::new();
-    };
-    let colour_of = |name: &[u8]| -> Option<[f64; 3]> {
-        let values = array(cos, dict, name)?;
-        (values.len() == 3).then(|| [values[0], values[1], values[2]])
-    };
-    match key(cos, dict, b"FunctionType").as_int() {
-        Some(2) => match (colour_of(b"C0"), colour_of(b"C1")) {
-            (Some(c0), Some(c1)) => vec![(0.0, c0), (1.0, c1)],
-            _ => Vec::new(),
+    }
+    values
+        .into_iter()
+        .map(|(offset, value)| (offset, [value[0], value[1], value[2]]))
+        .collect()
+}
+
+/// [`Paint::Gradient::middles`], out of a 7.10 function: each interval's
+/// colour halfway along it, evaluated.
+///
+/// Type 2 is `C0 + x^N (C1 − C0)` at `x = ½`; a one-input type 0 is its
+/// samples interpolated at the middle of its domain, by 7.10.2's default
+/// linear order; type 3 is its pieces, placed by its bounds, with any piece
+/// narrower than a thousandth — the nudge a hard stop is written with — left
+/// out, as the markup side leaves out the interval it stands for.
+fn function_middles(
+    cos: &CosDocument,
+    function: &Object,
+    reference: Option<ObjRef>,
+) -> Vec<(f64, [f64; 3])> {
+    let dict = match function {
+        Object::Stream(stream) => &stream.dict,
+        other => match other.as_dict() {
+            Some(dict) => dict,
+            None => return Vec::new(),
         },
+    };
+    let three = |values: &[f64]| (values.len() == 3).then(|| [values[0], values[1], values[2]]);
+    match key(cos, dict, b"FunctionType").as_int() {
+        Some(2) => {
+            let (Some(c0), Some(c1)) = (array(cos, dict, b"C0"), array(cos, dict, b"C1")) else {
+                return Vec::new();
+            };
+            let n = key(cos, dict, b"N").as_number().unwrap_or(1.0);
+            let t = 0.5f64.powf(n);
+            let mid: Vec<f64> = c0.iter().zip(&c1).map(|(a, b)| a + t * (b - a)).collect();
+            three(&mid).map_or_else(Vec::new, |mid| vec![(0.5, mid)])
+        }
+        Some(0) => {
+            let size = array(cos, dict, b"Size").unwrap_or_default();
+            let range = array(cos, dict, b"Range").unwrap_or_default();
+            let bits = key(cos, dict, b"BitsPerSample").as_int().unwrap_or(0);
+            let (Some(reference), [points], 6, 8 | 16) =
+                (reference, size.as_slice(), range.len(), bits)
+            else {
+                return Vec::new();
+            };
+            let Ok(data) = cos.stream_decoded(reference) else {
+                return Vec::new();
+            };
+            let points = *points as usize;
+            let width = if bits == 16 { 2 } else { 1 };
+            let max = if bits == 16 { 65_535.0 } else { 255.0 };
+            let sample = |index: usize, channel: usize| -> f64 {
+                let at = (index * 3 + channel) * width;
+                let raw = if width == 2 {
+                    data.get(at..at + 2)
+                        .map_or(0.0, |b| f64::from(u16::from_be_bytes([b[0], b[1]])))
+                } else {
+                    data.get(at).map_or(0.0, |b| f64::from(*b))
+                };
+                let (lo, hi) = (range[channel * 2], range[channel * 2 + 1]);
+                lo + raw / max * (hi - lo)
+            };
+            let position = (points as f64 - 1.0) / 2.0;
+            let (low, frac) = (position.floor() as usize, position - position.floor());
+            let high = (low + 1).min(points - 1);
+            let mut mid = [0.0; 3];
+            for (channel, slot) in mid.iter_mut().enumerate() {
+                let (a, b) = (sample(low, channel), sample(high, channel));
+                *slot = a + frac * (b - a);
+            }
+            vec![(0.5, mid)]
+        }
         Some(3) => {
             let bounds = array(cos, dict, b"Bounds").unwrap_or_default();
             let parts = key(cos, dict, b"Functions");
             let Some(parts) = parts.as_array() else {
                 return Vec::new();
             };
-            let mut out: Vec<(f64, [f64; 3])> = Vec::new();
+            let mut out = Vec::new();
             for (index, part) in parts.iter().enumerate() {
-                let resolved = match part.as_objref() {
-                    Some(reference) => cos.get(reference).unwrap_or(Arc::new(Object::Null)),
-                    None => Arc::new(part.clone()),
+                let from = if index == 0 {
+                    0.0
+                } else {
+                    bounds.get(index - 1).copied().unwrap_or(0.0)
                 };
-                let inner = function_stops(cos, &resolved);
+                let to = bounds.get(index).copied().unwrap_or(1.0);
+                if to - from < 1e-3 {
+                    continue;
+                }
+                let (resolved, inner_ref) = match part.as_objref() {
+                    Some(r) => (cos.get(r).unwrap_or(Arc::new(Object::Null)), Some(r)),
+                    None => (Arc::new(part.clone()), None),
+                };
+                for (offset, mid) in function_middles(cos, &resolved, inner_ref) {
+                    out.push((from + offset * (to - from), mid));
+                }
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// [`function_stops`] for a function of any number of outputs — one, for the
+/// `/DeviceGray` ramp a soft mask's alphas are painted as.
+///
+/// A one-input type 0 states its two ends, its first and last samples
+/// through `/Range` — which is where the writer pins each stop of a ramp it
+/// had to sample — and needs its `reference` to be decoded.
+fn function_values(
+    cos: &CosDocument,
+    function: &Object,
+    reference: Option<ObjRef>,
+) -> Vec<(f64, Vec<f64>)> {
+    let dict = match function {
+        Object::Stream(stream) => &stream.dict,
+        other => match other.as_dict() {
+            Some(dict) => dict,
+            None => return Vec::new(),
+        },
+    };
+    let colour_of = |name: &[u8]| -> Option<Vec<f64>> { array(cos, dict, name) };
+    match key(cos, dict, b"FunctionType").as_int() {
+        Some(2) => match (colour_of(b"C0"), colour_of(b"C1")) {
+            (Some(c0), Some(c1)) if c0.len() == c1.len() => vec![(0.0, c0), (1.0, c1)],
+            _ => Vec::new(),
+        },
+        Some(0) => {
+            let size = array(cos, dict, b"Size").unwrap_or_default();
+            let range = array(cos, dict, b"Range").unwrap_or_default();
+            let bits = key(cos, dict, b"BitsPerSample").as_int().unwrap_or(0);
+            let outputs = range.len() / 2;
+            let (Some(reference), [points], 8 | 16) = (reference, size.as_slice(), bits) else {
+                return Vec::new();
+            };
+            let Ok(data) = cos.stream_decoded(reference) else {
+                return Vec::new();
+            };
+            let width = if bits == 16 { 2 } else { 1 };
+            let max = if bits == 16 { 65_535.0 } else { 255.0 };
+            let at = |index: usize| -> Vec<f64> {
+                (0..outputs)
+                    .map(|channel| {
+                        let byte = (index * outputs + channel) * width;
+                        let raw = if width == 2 {
+                            data.get(byte..byte + 2)
+                                .map_or(0.0, |b| f64::from(u16::from_be_bytes([b[0], b[1]])))
+                        } else {
+                            data.get(byte).map_or(0.0, |b| f64::from(*b))
+                        };
+                        let (lo, hi) = (range[channel * 2], range[channel * 2 + 1]);
+                        lo + raw / max * (hi - lo)
+                    })
+                    .collect()
+            };
+            let last = (*points as usize).saturating_sub(1);
+            vec![(0.0, at(0)), (1.0, at(last))]
+        }
+        Some(3) => {
+            let bounds = array(cos, dict, b"Bounds").unwrap_or_default();
+            let parts = key(cos, dict, b"Functions");
+            let Some(parts) = parts.as_array() else {
+                return Vec::new();
+            };
+            let mut out: Vec<(f64, Vec<f64>)> = Vec::new();
+            for (index, part) in parts.iter().enumerate() {
+                let (resolved, inner_ref) = match part.as_objref() {
+                    Some(reference) => (
+                        cos.get(reference).unwrap_or(Arc::new(Object::Null)),
+                        Some(reference),
+                    ),
+                    None => (Arc::new(part.clone()), None),
+                };
+                let inner = function_values(cos, &resolved, inner_ref);
                 let (from, to) = (
                     if index == 0 {
                         0.0
@@ -1512,12 +2002,62 @@ fn shading_paint(cos: &CosDocument, shading: &Object) -> Option<Paint> {
         _ => return None,
     };
     let geometry = array(cos, dict, b"Coords")?;
-    let stops = function_stops(cos, &key(cos, dict, b"Function"));
+    let function = key(cos, dict, b"Function");
+    let reference = dict.get_ref(cos.intern(b"Function"));
+    let stops = function_stops(cos, &function, reference);
     Some(Paint::Gradient {
         kind,
         geometry,
         stops,
+        alphas: None,
+        middles: function_middles(cos, &function, reference),
+        profiled: false,
     })
+}
+
+/// The alphas a `/Luminosity` soft mask paints: the `(offset, grey)` ramp of
+/// the one shading its group form floods with `sh`.
+///
+/// Read out of the form's own stream, because that is where the writer puts
+/// the grey — the mask is a group whose content is the alphas.
+fn mask_alphas(cos: &CosDocument, resources: &Dict, state: &Dict) -> Option<Vec<(f64, f64)>> {
+    let mask = key(cos, state, b"SMask");
+    let mask = mask.as_dict()?;
+    let form = mask.get_ref(cos.intern(b"G"))?;
+    let content = cos.stream_decoded(form).ok()?;
+    let object = cos.get(form).ok()?;
+    let Object::Stream(stream) = object.as_ref() else {
+        return None;
+    };
+    let own = key(cos, &stream.dict, b"Resources");
+    let scope = own.as_dict().cloned().unwrap_or_else(|| resources.clone());
+    let mut tokens = Tokenizer::new(&content);
+    let mut last: Option<Vec<u8>> = None;
+    while let Some(token) = tokens.next_token() {
+        match token {
+            Token::Name(name) => last = Some(name),
+            Token::Operator(operator) if operator.as_slice() == b"sh" => {
+                let shading = entry(cos, &scope, b"Shading", last.as_deref()?)?;
+                let dict = shading.as_dict()?;
+                let values = function_values(
+                    cos,
+                    &key(cos, dict, b"Function"),
+                    dict.get_ref(cos.intern(b"Function")),
+                );
+                if values.iter().any(|(_, value)| value.len() != 1) {
+                    return None;
+                }
+                return Some(
+                    values
+                        .into_iter()
+                        .map(|(at, value)| (at, value[0]))
+                        .collect(),
+                );
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// A tiling or shading pattern, as the paint it stands for.
@@ -1582,6 +2122,17 @@ struct Frame {
     rgb: [f64; 3],
     alpha: f64,
     pattern: Option<Vec<u8>>,
+    /// Table 106's text rendering mode, which is graphics state.
+    render: i64,
+    /// The alphas the `/Luminosity` soft mask in force paints, if any — see
+    /// [`Paint::Gradient::alphas`].
+    soft: Option<Vec<(f64, f64)>>,
+    /// The components an `scn` set under a colour space that is not one of
+    /// the device spaces — an `/ICCBased` or a `/DeviceN` — and `Some` from
+    /// the moment such a space is set.
+    components: Option<Vec<f64>>,
+    /// `w`, in user space.
+    width: f64,
 }
 
 /// The content stream, walked for what it paints.
@@ -1643,6 +2194,10 @@ impl<'a> Walk<'a> {
                 rgb: [0.0, 0.0, 0.0],
                 alpha: 1.0,
                 pattern: None,
+                render: 0,
+                width: 1.0,
+                soft: None,
+                components: None,
             },
             saved: Vec::new(),
             path: Rect::empty(),
@@ -1725,24 +2280,32 @@ impl Walk<'_> {
             }
             b"gs" => {
                 if let Some(Token::Name(name)) = operands.last() {
-                    if let Some(alpha) =
-                        entry(self.cos, resources, b"ExtGState", name).and_then(|state| {
-                            state
-                                .as_dict()
-                                .and_then(|dict| key(self.cos, dict, b"ca").as_number())
-                        })
-                    {
+                    let state = entry(self.cos, resources, b"ExtGState", name);
+                    if let Some(alpha) = state.as_ref().and_then(|state| {
+                        state
+                            .as_dict()
+                            .and_then(|dict| key(self.cos, dict, b"ca").as_number())
+                    }) {
                         self.frame.alpha = alpha;
+                    }
+                    if let Some(soft) = state
+                        .as_ref()
+                        .and_then(|state| state.as_dict())
+                        .and_then(|dict| mask_alphas(self.cos, resources, dict))
+                    {
+                        self.frame.soft = Some(soft);
                     }
                 }
             }
             b"rg" if numbers.len() == 3 => {
                 self.frame.rgb = [numbers[0], numbers[1], numbers[2]];
                 self.frame.pattern = None;
+                self.frame.components = None;
             }
             b"g" if numbers.len() == 1 => {
                 self.frame.rgb = [numbers[0]; 3];
                 self.frame.pattern = None;
+                self.frame.components = None;
             }
             b"k" if numbers.len() == 4 => {
                 // The conversion 10.4.2.4 states, so that a census over a CMYK
@@ -1754,10 +2317,29 @@ impl Walk<'_> {
                     (1.0 - y) * (1.0 - k),
                 ];
                 self.frame.pattern = None;
+                self.frame.components = None;
             }
-            b"cs" => self.frame.pattern = None,
+            b"cs" => {
+                self.frame.pattern = None;
+                // A named space that is not a device one — a resource — sets
+                // components rather than a colour.
+                self.frame.components = match operands.last() {
+                    Some(Token::Name(name))
+                        if !matches!(
+                            name.as_slice(),
+                            b"DeviceRGB" | b"DeviceGray" | b"DeviceCMYK" | b"Pattern"
+                        ) =>
+                    {
+                        Some(Vec::new())
+                    }
+                    _ => None,
+                };
+            }
             b"scn" | b"sc" => match operands.last() {
                 Some(Token::Name(name)) => self.frame.pattern = Some(name.clone()),
+                _ if self.frame.components.is_some() => {
+                    self.frame.components = Some(numbers.clone());
+                }
                 _ if numbers.len() == 3 => {
                     self.frame.rgb = [numbers[0], numbers[1], numbers[2]];
                 }
@@ -1788,7 +2370,7 @@ impl Walk<'_> {
                 if operator != b"n" {
                     if let Some(paint) = self.paint(resources) {
                         self.marks.push(Mark {
-                            paint,
+                            paint: self.faded(paint),
                             bounds: self.path,
                             alpha: self.frame.alpha,
                         });
@@ -1806,7 +2388,7 @@ impl Walk<'_> {
                         .and_then(|shading| shading_paint(self.cos, &shading))
                     {
                         self.marks.push(Mark {
-                            paint,
+                            paint: self.faded(paint),
                             // 8.7.4.2: `sh` paints the current clip, and the
                             // writer states one for exactly that reason.
                             bounds: self.clip.unwrap_or(self.path),
@@ -1834,6 +2416,8 @@ impl Walk<'_> {
                     self.widths = self.widths_of(resources, name);
                 }
             }
+            b"Tr" if numbers.len() == 1 => self.frame.render = numbers[0] as i64,
+            b"w" if numbers.len() == 1 => self.frame.width = numbers[0],
             b"Tm" if numbers.len() == 6 => {
                 self.text = Matrix([
                     numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5],
@@ -1849,7 +2433,13 @@ impl Walk<'_> {
                 if self.glyphs > 0 {
                     if let Some(origin) = self.origin {
                         let placed = self.frame.ctm.compose(self.text);
-                        let em = self.size * placed.scale();
+                        let em = self.size * placed.em_scale();
+                        // Mode 2 fills and then strokes, and the stroke is the
+                        // emboldening only at 12.1.5's width: 2% of the em, in
+                        // the user space the CTM carries to points.
+                        let stroke = self.frame.width * self.frame.ctm.scale();
+                        let bold = self.frame.render == 2 && near(stroke, em * 0.02, em * 1e-3);
+                        let italic = near(placed.lean(), 20.0, 0.05);
                         self.runs.push(Run {
                             origin,
                             em,
@@ -1865,6 +2455,8 @@ impl Walk<'_> {
                                 .iter()
                                 .map(|width| Some(width / 1_000.0 * em))
                                 .collect(),
+                            bold,
+                            italic,
                         });
                     }
                 }
@@ -2005,6 +2597,28 @@ impl Walk<'_> {
             == Some(&b"Type0"[..])
     }
 
+    /// A gradient painted under a soft mask of alphas carries them.
+    fn faded(&self, paint: Paint) -> Paint {
+        match paint {
+            Paint::Gradient {
+                kind,
+                geometry,
+                stops,
+                middles,
+                profiled,
+                ..
+            } => Paint::Gradient {
+                kind,
+                geometry,
+                stops,
+                alphas: self.frame.soft.clone(),
+                middles,
+                profiled,
+            },
+            other => other,
+        }
+    }
+
     /// What the current colour operators say this fill is painted with.
     fn paint(&self, resources: &Dict) -> Option<Paint> {
         match &self.frame.pattern {
@@ -2013,8 +2627,13 @@ impl Walk<'_> {
                 let reference = entry_ref(self.cos, resources, b"Pattern", name);
                 pattern_paint(self.cos, &pattern, reference)
             }
-            None => Some(Paint::Solid {
-                rgb: self.frame.rgb,
+            None => Some(match &self.frame.components {
+                Some(values) => Paint::Context {
+                    values: values.clone(),
+                },
+                None => Paint::Solid {
+                    rgb: self.frame.rgb,
+                },
             }),
         }
     }
@@ -2065,8 +2684,12 @@ impl Walk<'_> {
                     .and_then(|reference| self.cos.stream_decoded(reference).ok())
                     .unwrap_or_default();
                 let mut inner = Walk::new(self.cos);
+                // 11.6.6: a transparency group starts with no soft mask of its
+                // own; the one in force applies to the group's result.
+                let group = !matches!(key(self.cos, dict, b"Group").as_ref(), Object::Null);
                 inner.frame = Frame {
                     ctm: base,
+                    soft: if group { None } else { self.frame.soft.clone() },
                     ..self.frame.clone()
                 };
                 inner.run(&content, &inherited, base, depth + 1);
@@ -2151,6 +2774,29 @@ pub enum Divergence {
         markup: Vec<(f64, [f64; 3])>,
         document: Vec<(f64, [f64; 3])>,
     },
+    /// A `ContextColor`'s components, not the ones the markup stated.
+    Components {
+        page: usize,
+        mark: usize,
+        markup: Vec<f64>,
+        document: Vec<f64>,
+    },
+    /// A gradient's colours between its stops: blended in a space the
+    /// markup's `ColorInterpolationMode` does not name.
+    Middles {
+        page: usize,
+        mark: usize,
+        markup: Vec<(f64, [f64; 3])>,
+        document: Vec<(f64, [f64; 3])>,
+    },
+    /// A gradient's stop alphas: stated and not masked, masked and not
+    /// stated, or a different ramp.
+    StopAlphas {
+        page: usize,
+        mark: usize,
+        markup: Option<Vec<(f64, f64)>>,
+        document: Option<Vec<(f64, f64)>>,
+    },
     Pixels {
         page: usize,
         mark: usize,
@@ -2210,6 +2856,13 @@ pub enum Divergence {
         glyph: usize,
         markup: f64,
         document: f64,
+    },
+    /// 12.1.5's simulations, as `(bold, italic)` on each side.
+    Simulation {
+        page: usize,
+        run: usize,
+        markup: (bool, bool),
+        document: (bool, bool),
     },
 }
 
@@ -2350,13 +3003,64 @@ fn compare_mark(
                 kind: wanted_kind,
                 geometry: wanted_geometry,
                 stops: wanted_stops,
+                alphas: wanted_alphas,
+                middles: wanted_middles,
+                profiled,
             },
             Paint::Gradient {
                 kind: got_kind,
                 geometry: got_geometry,
                 stops: got_stops,
+                alphas: got_alphas,
+                middles: got_middles,
+                ..
             },
         ) => {
+            // Half an eight-bit step: the writer samples a linear-light ramp
+            // at sixteen bits and interpolates between samples, and 0.0018 is
+            // the most that comes to anywhere (`brush.rs`'s own measurement).
+            // A byte, where a stop came through a profile's eight-bit
+            // transform — see `Paint::Gradient::profiled`.
+            let byte = 1.5 / 255.0;
+            let (stop_tolerance, middle_tolerance) = if *profiled {
+                (byte, byte)
+            } else {
+                (COLOUR, 2e-3)
+            };
+            let middles_agree = wanted_middles.len() == got_middles.len()
+                && wanted_middles.iter().zip(got_middles).all(|(a, b)| {
+                    near(a.0, b.0, GEOMETRY)
+                        && a.1
+                            .iter()
+                            .zip(&b.1)
+                            .all(|(x, y)| near(*x, *y, middle_tolerance))
+                });
+            if !middles_agree {
+                out.push(Divergence::Middles {
+                    page,
+                    mark,
+                    markup: wanted_middles.clone(),
+                    document: got_middles.clone(),
+                });
+            }
+            let alphas_agree = match (wanted_alphas, got_alphas) {
+                (None, None) => true,
+                (Some(a), Some(b)) => {
+                    a.len() == b.len()
+                        && a.iter()
+                            .zip(b)
+                            .all(|(x, y)| near(x.0, y.0, COLOUR) && near(x.1, y.1, COLOUR))
+                }
+                _ => false,
+            };
+            if !alphas_agree {
+                out.push(Divergence::StopAlphas {
+                    page,
+                    mark,
+                    markup: wanted_alphas.clone(),
+                    document: got_alphas.clone(),
+                });
+            }
             if wanted_kind != got_kind {
                 out.push(Divergence::PaintKind {
                     page,
@@ -2378,10 +3082,13 @@ fn compare_mark(
                 });
             }
             let stops_agree = wanted_stops.len() == got_stops.len()
-                && wanted_stops
-                    .iter()
-                    .zip(got_stops)
-                    .all(|(a, b)| near(a.0, b.0, COLOUR) && rgb_near(a.1, b.1));
+                && wanted_stops.iter().zip(got_stops).all(|(a, b)| {
+                    near(a.0, b.0, COLOUR)
+                        && a.1
+                            .iter()
+                            .zip(&b.1)
+                            .all(|(x, y)| near(*x, *y, stop_tolerance))
+                });
             if !stops_agree {
                 out.push(Divergence::Stops {
                     page,
@@ -2427,6 +3134,18 @@ fn compare_mark(
                     mark,
                     markup: *wanted_area,
                     document: *got_area,
+                });
+            }
+        }
+        (Paint::Context { values: wanted }, Paint::Context { values: got }) => {
+            if wanted.len() != got.len()
+                || !wanted.iter().zip(got).all(|(a, b)| near(*a, *b, COLOUR))
+            {
+                out.push(Divergence::Components {
+                    page,
+                    mark,
+                    markup: wanted.clone(),
+                    document: got.clone(),
                 });
             }
         }
@@ -2481,6 +3200,14 @@ fn compare_run(page: usize, run: usize, stated: &Run, drawn: &Run, out: &mut Vec
             run,
             markup: stated.origin,
             document: drawn.origin,
+        });
+    }
+    if (stated.bold, stated.italic) != (drawn.bold, drawn.italic) {
+        out.push(Divergence::Simulation {
+            page,
+            run,
+            markup: (stated.bold, stated.italic),
+            document: (drawn.bold, drawn.italic),
         });
     }
     if !near(stated.em, drawn.em, EM) {

@@ -16,6 +16,72 @@
 
 #![warn(missing_docs)]
 
+/// Reads a C enum the caller handed over, which crosses as a `c_int`.
+///
+/// A Rust `#[repr(C)] enum` holding a number it does not declare is undefined
+/// behaviour the moment the value exists -- before any `match` could refuse
+/// it -- and a hand-written binding in a memory-safe language passes whatever
+/// integer its caller gave it. So no enum a caller supplies crosses as the
+/// enum type: every one is a `c_int`, as a parameter or a struct field, read
+/// through the `checked` this generates, and a number the enum does not
+/// declare is [`TpdfStatus::BadArgument`] naming the argument, exactly as a
+/// null pointer or bad UTF-8 is. The enums stay in the header, through
+/// `cbindgen.toml`'s `[export] include`, as the names of their numbers.
+/// Enums only the engine writes -- out pointers, struct fields it fills --
+/// keep their own type, because every value written is one the enum declares.
+macro_rules! raw_enum {
+    ($name:ident { $($variant:ident),+ $(,)? }) => {
+        // A variant added to the enum and not to this list stops the build
+        // here, rather than becoming a number `checked` refuses.
+        const _: fn($name) = |value| match value {
+            $($name::$variant => ()),+
+        };
+
+        impl $name {
+            /// Every variant, in declaration order.
+            #[allow(dead_code)]
+            pub(crate) const ALL: &'static [$name] = &[$($name::$variant),+];
+
+            /// The variant numbered `raw`, or `None` for a number this enum
+            /// does not declare.
+            pub(crate) fn from_raw(raw: ::std::ffi::c_int) -> Option<Self> {
+                Self::ALL
+                    .iter()
+                    .copied()
+                    .find(|variant| *variant as ::std::ffi::c_int == raw)
+            }
+
+            /// The variant numbered `raw`, or [`TpdfStatus::BadArgument`]
+            /// with a message naming `what` and the number.
+            pub(crate) fn checked(
+                raw: ::std::ffi::c_int,
+                what: &str,
+            ) -> Result<Self, $crate::TpdfStatus> {
+                Self::from_raw(raw).ok_or_else(|| {
+                    $crate::set_error(&format!(
+                        "{what} is {raw}, which is not a {}",
+                        stringify!($name)
+                    ));
+                    $crate::TpdfStatus::BadArgument
+                })
+            }
+        }
+    };
+}
+
+mod docops;
+mod forms;
+mod graphics;
+#[cfg(test)]
+mod raw_enum_tests;
+mod read;
+mod tagging;
+pub use docops::*;
+pub use forms::*;
+pub use graphics::*;
+pub use read::*;
+pub use tagging::*;
+
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
@@ -125,6 +191,29 @@ pub enum TpdfStatus {
     /// and inventing seven codes for seven refusals would be this crate
     /// growing a vocabulary the facade does not have (ruling 11).
     ScriptRefused = 15,
+
+    // ---- the read surface, appended at 16 -----------------------------------
+    /// A stream the document names could not be read: an attachment whose
+    /// embedded file is not a stream, or whose filters refused it.
+    ///
+    /// Distinct from `Ok` with a null result, which is the document naming no
+    /// stream at all — "there is nothing here" and "there is something here
+    /// that could not be read" are different answers, and the engine's reason,
+    /// with the object it was reading, is in [`tpdf_last_error_message`].
+    StreamUnreadable = 16,
+
+    // ---- the forms surface, appended at 17 ----------------------------------
+    /// Form data this reader would not read in the format asked for, or that
+    /// format cannot carry: not an FDF, no `/FDF` dictionary, an encrypted
+    /// FDF, XML that is not well formed or not XFDF, a value XML 1.0 cannot
+    /// hold, or more than `form_data::MAX_FORM_DATA_BYTES`.
+    ///
+    /// One status for all of them, as `ScriptRefused` is one: from a caller's
+    /// side the answer is the same -- nothing was read, or nothing written --
+    /// and the reader's own sentence, naming the field where it can, is in
+    /// [`tpdf_last_error_message`]. Distinct from `NotAPdf` because an FDF is
+    /// not a PDF and was never claimed to be one.
+    FormDataRefused = 17,
 }
 
 /// A document's bytes, as ranges the host answers (7.5.6, Annex F).
@@ -261,6 +350,13 @@ pub enum TpdfPixelFormat {
     /// Red, green, blue, alpha.
     Rgba8 = 3,
 }
+
+raw_enum!(TpdfPixelFormat {
+    Gray8,
+    GrayA8,
+    Rgb8,
+    Rgba8
+});
 
 impl From<TpdfPixelFormat> for PixelFormat {
     fn from(value: TpdfPixelFormat) -> Self {
@@ -899,7 +995,9 @@ pub unsafe extern "C" fn tpdf_document_set_fonts(
 
 /// Renders a page.
 ///
-/// The caller frees the result with [`tpdf_bitmap_free`].
+/// `format` is a [`TpdfPixelFormat`]; any other number is
+/// [`TpdfStatus::BadArgument`]. The caller frees the result with
+/// [`tpdf_bitmap_free`].
 ///
 /// # Safety
 ///
@@ -909,12 +1007,16 @@ pub unsafe extern "C" fn tpdf_page_render(
     doc: *const TpdfDocument,
     index: u32,
     scale: f64,
-    format: TpdfPixelFormat,
+    format: c_int,
     out: *mut *mut TpdfBitmap,
 ) -> TpdfStatus {
     let (Some(doc), false) = (unsafe { doc.as_ref() }, out.is_null()) else {
         set_error("null pointer");
         return TpdfStatus::BadArgument;
+    };
+    let format = match TpdfPixelFormat::checked(format, "pixel format") {
+        Ok(format) => format,
+        Err(status) => return status,
     };
     let Some(page) = doc.inner.page(index) else {
         set_error("no such page");
@@ -1967,6 +2069,11 @@ pub enum TpdfWriteMode {
     Incremental = 1,
 }
 
+raw_enum!(TpdfWriteMode {
+    Rewrite,
+    Incremental
+});
+
 impl From<TpdfWriteMode> for WriteMode {
     fn from(value: TpdfWriteMode) -> Self {
         match value {
@@ -1992,7 +2099,11 @@ pub struct TpdfEncryption {
     /// UTF-8 string. Null or empty means none.
     pub user_password: *const c_char,
     /// The password that lifts the document's restrictions. Null or empty
-    /// means none.
+    /// means none, and then the user password is the owner's too — the
+    /// facade's rule (`Encryption::owner_password`), because an owner
+    /// password written as the empty string would open the file with every
+    /// permission for anybody who tries the empty password, as every reader
+    /// does first.
     pub owner_password: *const c_char,
     /// The permission bits, as `/P` stores them.
     pub permissions: i32,
@@ -2011,16 +2122,18 @@ pub const TPDF_ENTROPY_LEN: usize = 48;
 
 /// Options for writing, as C sees `WriteOptions`.
 ///
-/// Field for field, with the two `bool`s and the version pair widened to
-/// integers so the layout has no packing surprises for a hand-written
-/// P/Invoke. Fill it with [`tpdf_write_options_init`] and change what you
+/// Field for field but one, with the two `bool`s and the version pair widened
+/// to integers so the layout has no packing surprises for a hand-written
+/// P/Invoke. The one is `WriteOptions::deduplicate_streams`, which this struct
+/// does not carry yet and which crosses at its default, off. Fill it with [`tpdf_write_options_init`] and change what you
 /// mean, rather than zeroing it: a zeroed struct is a *rewrite* at version
 /// 0.0, which is not the facade's default and not a version any reader knows.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct TpdfWriteOptions {
-    /// Rewrite or incremental.
-    pub mode: TpdfWriteMode,
+    /// Rewrite or incremental: a [`TpdfWriteMode`]. Any other number is
+    /// [`TpdfStatus::BadArgument`].
+    pub mode: c_int,
     /// Lay the file out for the first page to arrive first (Annex F). A
     /// request rather than a guarantee: it is quietly dropped for an
     /// incremental update and for a document with no catalog or no pages,
@@ -2065,7 +2178,7 @@ pub unsafe extern "C" fn tpdf_write_options_init(out: *mut TpdfWriteOptions) -> 
         mode: match defaults.mode {
             WriteMode::Rewrite => TpdfWriteMode::Rewrite,
             WriteMode::Incremental => TpdfWriteMode::Incremental,
-        },
+        } as c_int,
         linearize: c_int::from(defaults.linearize),
         version_major: u32::from(defaults.version.0),
         version_minor: u32::from(defaults.version.1),
@@ -2110,6 +2223,7 @@ unsafe fn write_options(options: *const TpdfWriteOptions) -> Result<WriteOptions
         set_error("null write options");
         return Err(TpdfStatus::BadArgument);
     };
+    let mode = TpdfWriteMode::checked(options.mode, "write mode")?;
 
     let (Ok(major), Ok(minor)) = (
         u8::try_from(options.version_major),
@@ -2145,13 +2259,18 @@ unsafe fn write_options(options: *const TpdfWriteOptions) -> Result<WriteOptions
     };
 
     Ok(WriteOptions {
-        mode: options.mode.into(),
+        mode: mode.into(),
         linearize: options.linearize != 0,
         version: (major, minor),
         object_streams: options.object_streams != 0,
         compress: options.compress != 0,
         garbage_collect: options.garbage_collect != 0,
         encryption,
+        // Not projected yet: `TpdfWriteOptions` is a C struct whose layout the
+        // header and every binding pin, and a field added here is a layout
+        // change owed to the bindings row rather than made in passing. The
+        // facade's default is what crosses until then.
+        deduplicate_streams: false,
     })
 }
 
@@ -2293,7 +2412,8 @@ pub unsafe extern "C" fn tpdf_editor_move_page(
 }
 
 /// Rotates a page by a quarter-turn multiple, relative to its current
-/// rotation.
+/// rotation. Any other turn is [`TpdfStatus::EditRefused`], as the facade
+/// refuses it, and changes nothing.
 ///
 /// # Safety
 ///
@@ -2961,6 +3081,17 @@ pub enum TpdfDestKind {
     FitBV = 7,
 }
 
+raw_enum!(TpdfDestKind {
+    Xyz,
+    Fit,
+    FitH,
+    FitV,
+    FitR,
+    FitB,
+    FitBH,
+    FitBV
+});
+
 /// A destination, as C sees `DestKind`.
 ///
 /// All eight arms cross, rather than a convenient subset, because 12.3.2.2
@@ -2976,8 +3107,9 @@ pub enum TpdfDestKind {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct TpdfDestination {
-    /// Which of the eight.
-    pub kind: TpdfDestKind,
+    /// Which of the eight: a [`TpdfDestKind`]. Any other number is
+    /// [`TpdfStatus::BadArgument`] where a destination is taken.
+    pub kind: c_int,
     /// `/XYZ`'s and `/FitV`'s and `/FitBV`'s left edge.
     pub left: f64,
     /// `/FitR`'s bottom edge.
@@ -3000,35 +3132,38 @@ fn optional_number(value: f64) -> Option<f64> {
 }
 
 impl TpdfDestination {
-    /// The facade's own destination.
-    fn to_facade(self) -> DestKind {
-        match self.kind {
-            TpdfDestKind::Xyz => DestKind::Xyz {
-                left: optional_number(self.left),
-                top: optional_number(self.top),
-                zoom: optional_number(self.zoom),
+    /// The facade's own destination, or a refusal of a `kind` that is not a
+    /// [`TpdfDestKind`].
+    fn to_facade(self) -> Result<DestKind, TpdfStatus> {
+        Ok(
+            match TpdfDestKind::checked(self.kind, "destination kind")? {
+                TpdfDestKind::Xyz => DestKind::Xyz {
+                    left: optional_number(self.left),
+                    top: optional_number(self.top),
+                    zoom: optional_number(self.zoom),
+                },
+                TpdfDestKind::Fit => DestKind::Fit,
+                TpdfDestKind::FitH => DestKind::FitH {
+                    top: optional_number(self.top),
+                },
+                TpdfDestKind::FitV => DestKind::FitV {
+                    left: optional_number(self.left),
+                },
+                TpdfDestKind::FitR => DestKind::FitR {
+                    left: self.left,
+                    bottom: self.bottom,
+                    right: self.right,
+                    top: self.top,
+                },
+                TpdfDestKind::FitB => DestKind::FitB,
+                TpdfDestKind::FitBH => DestKind::FitBH {
+                    top: optional_number(self.top),
+                },
+                TpdfDestKind::FitBV => DestKind::FitBV {
+                    left: optional_number(self.left),
+                },
             },
-            TpdfDestKind::Fit => DestKind::Fit,
-            TpdfDestKind::FitH => DestKind::FitH {
-                top: optional_number(self.top),
-            },
-            TpdfDestKind::FitV => DestKind::FitV {
-                left: optional_number(self.left),
-            },
-            TpdfDestKind::FitR => DestKind::FitR {
-                left: self.left,
-                bottom: self.bottom,
-                right: self.right,
-                top: self.top,
-            },
-            TpdfDestKind::FitB => DestKind::FitB,
-            TpdfDestKind::FitBH => DestKind::FitBH {
-                top: optional_number(self.top),
-            },
-            TpdfDestKind::FitBV => DestKind::FitBV {
-                left: optional_number(self.left),
-            },
-        }
+        )
     }
 }
 
@@ -3049,7 +3184,7 @@ pub unsafe extern "C" fn tpdf_destination_init_fit(out: *mut TpdfDestination) ->
         return TpdfStatus::BadArgument;
     };
     *slot = TpdfDestination {
-        kind: TpdfDestKind::Fit,
+        kind: TpdfDestKind::Fit as c_int,
         left: f64::NAN,
         bottom: f64::NAN,
         right: f64::NAN,
@@ -3070,12 +3205,15 @@ pub enum TpdfTargetKind {
     Uri = 1,
 }
 
+raw_enum!(TpdfTargetKind { Page, Uri });
+
 /// A target, as C sees `Target`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct TpdfTarget {
-    /// Which of the two.
-    pub kind: TpdfTargetKind,
+    /// Which of the two: a [`TpdfTargetKind`]. Any other number is
+    /// [`TpdfStatus::BadArgument`].
+    pub kind: c_int,
     /// The zero-based page index, for [`TpdfTargetKind::Page`].
     pub page_index: u32,
     /// How that page is positioned, for [`TpdfTargetKind::Page`].
@@ -3092,10 +3230,10 @@ impl TpdfTarget {
     ///
     /// `self.uri` must be a null-terminated string when `kind` is `Uri`.
     unsafe fn to_facade(self) -> Result<Target, TpdfStatus> {
-        match self.kind {
+        match TpdfTargetKind::checked(self.kind, "target kind")? {
             TpdfTargetKind::Page => Ok(Target::Page {
                 index: self.page_index,
-                view: self.view.to_facade(),
+                view: self.view.to_facade()?,
             }),
             TpdfTargetKind::Uri => Ok(Target::Uri(unsafe { required_str(self.uri, "uri") }?)),
         }
@@ -3127,12 +3265,15 @@ pub enum TpdfImageKind {
     Gray8 = 2,
 }
 
+raw_enum!(TpdfImageKind { Jpeg, Rgb8, Gray8 });
+
 /// An image to register, as C sees `ImageData`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct TpdfImage {
-    /// Which arm.
-    pub kind: TpdfImageKind,
+    /// Which arm: a [`TpdfImageKind`]. Any other number is
+    /// [`TpdfStatus::BadArgument`].
+    pub kind: c_int,
     /// Width in pixels; ignored for [`TpdfImageKind::Jpeg`].
     pub width: u32,
     /// Height in pixels; ignored for [`TpdfImageKind::Jpeg`].
@@ -3336,11 +3477,15 @@ pub unsafe extern "C" fn tpdf_builder_add_image(
         set_error("null image");
         return TpdfStatus::BadArgument;
     };
+    let kind = match TpdfImageKind::checked(image.kind, "image kind") {
+        Ok(kind) => kind,
+        Err(status) => return status,
+    };
     let Ok(data) = (unsafe { required_bytes(image.data, image.data_len, "image data") }) else {
         return TpdfStatus::BadArgument;
     };
 
-    let described = match image.kind {
+    let described = match kind {
         TpdfImageKind::Jpeg => ImageData::Jpeg(data),
         TpdfImageKind::Rgb8 => ImageData::Rgb8 {
             width: image.width,
@@ -3360,7 +3505,7 @@ pub unsafe extern "C" fn tpdf_builder_add_image(
             "add_image",
             &format!(
                 "{:?}, {} by {}, {} bytes",
-                image.kind,
+                kind,
                 image.width,
                 image.height,
                 data.len()
@@ -4520,7 +4665,8 @@ endobj
         assert_eq!(status, TpdfStatus::Ok);
 
         let mut before: *mut TpdfBitmap = std::ptr::null_mut();
-        let status = unsafe { tpdf_page_render(doc, 0, 1.0, TpdfPixelFormat::Rgb8, &mut before) };
+        let status =
+            unsafe { tpdf_page_render(doc, 0, 1.0, TpdfPixelFormat::Rgb8 as c_int, &mut before) };
         assert_eq!(status, TpdfStatus::Ok);
         assert_eq!(
             inked(unsafe { &*before }),
@@ -4545,7 +4691,8 @@ endobj
         assert_eq!(status, TpdfStatus::Ok);
 
         let mut after: *mut TpdfBitmap = std::ptr::null_mut();
-        let status = unsafe { tpdf_page_render(doc, 0, 1.0, TpdfPixelFormat::Rgb8, &mut after) };
+        let status =
+            unsafe { tpdf_page_render(doc, 0, 1.0, TpdfPixelFormat::Rgb8 as c_int, &mut after) };
         assert_eq!(status, TpdfStatus::Ok);
         assert!(inked(unsafe { &*after }) > 0, "and with one, text draws");
 
@@ -4653,7 +4800,7 @@ endobj
         let doc = open("simple-text.pdf");
         let mut bitmap: *mut TpdfBitmap = ptr::null_mut();
         assert_eq!(
-            unsafe { tpdf_page_render(doc, 0, 1.0, TpdfPixelFormat::Rgb8, &mut bitmap) },
+            unsafe { tpdf_page_render(doc, 0, 1.0, TpdfPixelFormat::Rgb8 as c_int, &mut bitmap) },
             TpdfStatus::Ok
         );
 
@@ -4891,6 +5038,10 @@ endobj
         // Streaming's one, and the script policy's one, appended in turn.
         assert_eq!(TpdfStatus::SourceMiss as i32, 14);
         assert_eq!(TpdfStatus::ScriptRefused as i32, 15);
+
+        // The read surface's one, and the forms surface's.
+        assert_eq!(TpdfStatus::StreamUnreadable as i32, 16);
+        assert_eq!(TpdfStatus::FormDataRefused as i32, 17);
     }
 
     /// A `TpdfStatus` crosses as an `int`, and the three hand-written bindings
@@ -4901,7 +5052,7 @@ endobj
     #[test]
     fn every_status_the_abi_carries_is_pinned_by_number() {
         // Nothing in Rust enumerates a `#[repr(C)]` enum's variants, so this
-        // is the list, written out. It is exactly the sixteen pinned above.
+        // is the list, written out. It is exactly the eighteen pinned above.
         const EVERY: &[(TpdfStatus, i32)] = &[
             (TpdfStatus::Ok, 0),
             (TpdfStatus::BadArgument, 1),
@@ -4919,11 +5070,13 @@ endobj
             (TpdfStatus::EditRefused, 13),
             (TpdfStatus::SourceMiss, 14),
             (TpdfStatus::ScriptRefused, 15),
+            (TpdfStatus::StreamUnreadable, 16),
+            (TpdfStatus::FormDataRefused, 17),
         ];
         for (status, number) in EVERY {
             assert_eq!(*status as i32, *number, "{status:?}");
         }
-        assert_eq!(EVERY.len(), 16, "append only, and say how many there are");
+        assert_eq!(EVERY.len(), 18, "append only, and say how many there are");
     }
 
     /// The write surface's other two enums, pinned for the reason
@@ -5587,7 +5740,7 @@ endobj
     /// Incremental save options, as both sides of every comparison use them.
     fn incremental_options() -> TpdfWriteOptions {
         let mut options = TpdfWriteOptions {
-            mode: TpdfWriteMode::Rewrite,
+            mode: TpdfWriteMode::Rewrite as c_int,
             linearize: 0,
             version_major: 0,
             version_minor: 0,
@@ -5600,7 +5753,7 @@ endobj
             unsafe { tpdf_write_options_init(&mut options) },
             TpdfStatus::Ok
         );
-        options.mode = TpdfWriteMode::Incremental;
+        options.mode = TpdfWriteMode::Incremental as c_int;
         options
     }
 
@@ -6071,7 +6224,7 @@ endobj
     #[test]
     fn the_default_write_options_are_the_facades_own() {
         let mut options = TpdfWriteOptions {
-            mode: TpdfWriteMode::Incremental,
+            mode: TpdfWriteMode::Incremental as c_int,
             linearize: 1,
             version_major: 9,
             version_minor: 9,
@@ -6086,7 +6239,7 @@ endobj
         );
 
         let facade = WriteOptions::default();
-        assert_eq!(options.mode, TpdfWriteMode::Rewrite);
+        assert_eq!(options.mode, TpdfWriteMode::Rewrite as c_int);
         assert_eq!(options.linearize, c_int::from(facade.linearize));
         assert_eq!(options.version_major, u32::from(facade.version.0));
         assert_eq!(options.version_minor, u32::from(facade.version.1));
@@ -6129,7 +6282,7 @@ endobj
         unsafe { tpdf_document_free(doc) };
 
         let mut options = incremental_options();
-        options.mode = TpdfWriteMode::Rewrite;
+        options.mode = TpdfWriteMode::Rewrite as c_int;
 
         // Short entropy first: the refusal must come before anything is
         // written.
@@ -6183,6 +6336,43 @@ endobj
 
         let reopened = Document::open(through_abi).expect("the encrypted output opens");
         assert!(reopened.is_encrypted());
+    }
+
+    /// An owner password left null — "none", as the struct documents it — is
+    /// the user's too, so the file opens with the user password and not with
+    /// the empty one. Before the facade took Algorithm 3 step (a)'s rule, the
+    /// plainest call through this door wrote a file anybody opened with every
+    /// permission.
+    #[test]
+    fn an_owner_password_left_null_is_the_users() {
+        let entropy: Vec<u8> = (0..TPDF_ENTROPY_LEN).map(|i| (i * 5) as u8).collect();
+        let user = c("open-sesame");
+        let doc = open("simple-text.pdf");
+        let editor = editor_over(doc);
+        unsafe { tpdf_document_free(doc) };
+
+        let mut options = incremental_options();
+        options.mode = TpdfWriteMode::Rewrite as c_int;
+        let encryption = TpdfEncryption {
+            user_password: user.as_ptr(),
+            owner_password: ptr::null(),
+            permissions: -2056,
+            entropy: entropy.as_ptr(),
+            entropy_len: TPDF_ENTROPY_LEN,
+        };
+        options.encryption = &encryption;
+        let mut buffer: *mut TpdfBuffer = ptr::null_mut();
+        assert_eq!(
+            unsafe { tpdf_editor_save(editor, &options, &mut buffer) },
+            TpdfStatus::Ok
+        );
+        let bytes = take_buffer(buffer);
+        unsafe { tpdf_editor_free(editor) };
+
+        let locked = Document::open(bytes.clone()).expect("it opens");
+        assert!(locked.authenticate("").is_err(), "the empty password fails");
+        let locked = Document::open(bytes).expect("it opens");
+        assert_eq!(locked.authenticate("open-sesame"), Ok(AuthLevel::Owner));
     }
 
     /// Null handles are refused rather than dereferenced, and every new free
@@ -6334,7 +6524,7 @@ endobj
 
         let resource = b"Im1";
         let image = TpdfImage {
-            kind: TpdfImageKind::Gray8,
+            kind: TpdfImageKind::Gray8 as c_int,
             width: 8,
             height: 8,
             data: samples.as_ptr(),
@@ -6427,7 +6617,7 @@ endobj
         );
 
         let mut fit = TpdfDestination {
-            kind: TpdfDestKind::Fit,
+            kind: TpdfDestKind::Fit as c_int,
             left: 0.0,
             bottom: 0.0,
             right: 0.0,
@@ -6447,7 +6637,7 @@ endobj
                 TpdfStatus::Ok
             );
             let target = TpdfTarget {
-                kind: TpdfTargetKind::Page,
+                kind: TpdfTargetKind::Page as c_int,
                 page_index: index,
                 view: fit,
                 uri: ptr::null(),
@@ -6844,10 +7034,11 @@ endobj
                 zoom,
             }
             .to_facade()
+            .expect("every kind here is one TpdfDestKind declares")
         };
 
         assert_eq!(
-            with(TpdfDestKind::Xyz, 10.0, 20.0, f64::NAN),
+            with(TpdfDestKind::Xyz as c_int, 10.0, 20.0, f64::NAN),
             DestKind::Xyz {
                 left: Some(10.0),
                 top: Some(20.0),
@@ -6856,7 +7047,7 @@ endobj
             "a NaN zoom is /XYZ's null, which is not the same as a zoom of 0"
         );
         assert_eq!(
-            with(TpdfDestKind::Xyz, f64::NAN, f64::NAN, f64::NAN),
+            with(TpdfDestKind::Xyz as c_int, f64::NAN, f64::NAN, f64::NAN),
             DestKind::Xyz {
                 left: None,
                 top: None,
@@ -6864,19 +7055,19 @@ endobj
             }
         );
         assert_eq!(
-            with(TpdfDestKind::Fit, f64::NAN, f64::NAN, f64::NAN),
+            with(TpdfDestKind::Fit as c_int, f64::NAN, f64::NAN, f64::NAN),
             DestKind::Fit
         );
         assert_eq!(
-            with(TpdfDestKind::FitH, f64::NAN, 5.0, f64::NAN),
+            with(TpdfDestKind::FitH as c_int, f64::NAN, 5.0, f64::NAN),
             DestKind::FitH { top: Some(5.0) }
         );
         assert_eq!(
-            with(TpdfDestKind::FitV, 5.0, f64::NAN, f64::NAN),
+            with(TpdfDestKind::FitV as c_int, 5.0, f64::NAN, f64::NAN),
             DestKind::FitV { left: Some(5.0) }
         );
         assert_eq!(
-            with(TpdfDestKind::FitR, 3.0, 4.0, f64::NAN),
+            with(TpdfDestKind::FitR as c_int, 3.0, 4.0, f64::NAN),
             DestKind::FitR {
                 left: 3.0,
                 bottom: 1.0,
@@ -6885,22 +7076,22 @@ endobj
             }
         );
         assert_eq!(
-            with(TpdfDestKind::FitB, f64::NAN, f64::NAN, f64::NAN),
+            with(TpdfDestKind::FitB as c_int, f64::NAN, f64::NAN, f64::NAN),
             DestKind::FitB
         );
         assert_eq!(
-            with(TpdfDestKind::FitBH, f64::NAN, 7.0, f64::NAN),
+            with(TpdfDestKind::FitBH as c_int, f64::NAN, 7.0, f64::NAN),
             DestKind::FitBH { top: Some(7.0) }
         );
         assert_eq!(
-            with(TpdfDestKind::FitBV, 7.0, f64::NAN, f64::NAN),
+            with(TpdfDestKind::FitBV as c_int, 7.0, f64::NAN, f64::NAN),
             DestKind::FitBV { left: Some(7.0) }
         );
 
         // And the initialiser is /Fit rather than a zeroed struct, which would
         // be /XYZ 0 0 0 -- a different destination that merely looks default.
         let mut fit = TpdfDestination {
-            kind: TpdfDestKind::Xyz,
+            kind: TpdfDestKind::Xyz as c_int,
             left: 0.0,
             bottom: 0.0,
             right: 0.0,
@@ -6911,7 +7102,7 @@ endobj
             unsafe { tpdf_destination_init_fit(&mut fit) },
             TpdfStatus::Ok
         );
-        assert_eq!(fit.to_facade(), DestKind::Fit);
+        assert_eq!(fit.to_facade(), Ok(DestKind::Fit));
     }
 
     /// Null handles across the builder surface, and every new free taking
@@ -6920,10 +7111,10 @@ endobj
     fn null_handles_across_the_builder_surface_are_refused() {
         let name = b"F1";
         let target = TpdfTarget {
-            kind: TpdfTargetKind::Page,
+            kind: TpdfTargetKind::Page as c_int,
             page_index: 0,
             view: TpdfDestination {
-                kind: TpdfDestKind::Fit,
+                kind: TpdfDestKind::Fit as c_int,
                 left: f64::NAN,
                 bottom: f64::NAN,
                 right: f64::NAN,
@@ -6933,7 +7124,7 @@ endobj
             uri: ptr::null(),
         };
         let image = TpdfImage {
-            kind: TpdfImageKind::Gray8,
+            kind: TpdfImageKind::Gray8 as c_int,
             width: 1,
             height: 1,
             data: ptr::null(),

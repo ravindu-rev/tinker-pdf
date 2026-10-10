@@ -27,6 +27,30 @@ living in one feature's head.
    corpus hit-rate report ([verification.md](verification.md)) says real
    documents need it — not before, however interesting it looks.
 
+   **Amended 9 October 2026, by the owner's decision on the roadmap's
+   scope.** The owner decided that this engine has every capability the field
+   offers, and more: every capability a mature, widely deployed PDF engine
+   offers and every capability the rest of the field offers, with speed
+   verified by tests, form JavaScript a complete implementation, signing with
+   a private key in the engine, and OCR in scope and last. **Every capability
+   that decision covers is in scope** — the [roadmap](ROADMAP.md)'s rows of
+   9 October 2026 record them — and none waits for a corpus to ask for it. What this ruling still decides is the order: inside
+   a tier, corpus hit-rate evidence puts the row a real document needs before
+   the row none has asked for yet, and a capability whose count is zero is
+   late in its tier rather than refused. The tiers themselves run in the
+   order the roadmap states.
+
+   What the amendment does not change is the half that kept this ruling
+   honest. A count is still what a scheduling argument cites, and "however
+   interesting it looks" still binds the order inside a tier; a capability
+   not yet built still refuses by name (ruling 2) until its row closes; and a
+   scope choice is never filed as a limit — the roadmap's named non-goals
+   hold only what is outside this repository's power, and a capability
+   declined for want of a count is a row, however late its tier. The
+   amendment is recorded here rather than left in the roadmap's preamble
+   because a ruling is amended by the owner, not drifted past; the roadmap's
+   last section asks the owner to ratify this wording.
+
 4. **Determinism is a contract, not a hope.** Binds
    [rasterizer](features/rasterizer.md) and
    [rendering](features/rendering.md). Fixed-point coverage accumulation,
@@ -48,12 +72,15 @@ living in one feature's head.
 5. **Tiles share the full-page code path.** Binds
    [rasterizer](features/rasterizer.md) and
    [rendering](features/rendering.md). A clipped render is the same pipeline
-   with a translated viewport — never a second implementation. A tile must be
-   pinned byte-equal to the full-page subregion, and that test is the
-   permanent guard.
+   over a smaller canvas that stands at its corner of the page — never a
+   second implementation, and never a second frame. A tile must be pinned
+   byte-equal to the full-page subregion, and that test is the permanent
+   guard.
 
    *Corrected 13 September 2026; satisfied, with one stated exception,
-   15 September 2026.* The correction is kept rather than overwritten,
+   15 September 2026; that exception closed 26 September 2026, and a
+   second, geometric rather than a scale, stated and pinned 2 October 2026.*
+   The correction is kept rather than overwritten,
    because it is the reason the present entry can be read at face value.
    This ruling used to say the tile rows "are pinned byte-equal" and that
    the test "is the permanent guard", in the present tense, when **there was
@@ -68,46 +95,89 @@ living in one feature's head.
    `every_tile_is_byte_equal_to_the_page_under_it` renders each of ten
    fixtures whole and then one tile at a time through
    `RenderOptions::region`, and asserts each tile equals its rectangle of
-   the whole render byte for byte, with no tolerance. The ten are text, a
-   diagonal axial shading, an image and strokes — four different paths
-   through the rasterizer, only one of which the scanline filler
+   the whole render byte for byte, with no tolerance. The first ten are
+   text, a diagonal axial shading, an image and strokes — four different
+   paths through the rasterizer, only one of which the scanline filler
    anti-aliases — three of them turned a quarter or three-quarter turn, two
    with a crop box offset from the media box on both axes, and one with both
-   at once. The tile sizes are 64, 37 and 23 against a 91×131 page, so no
+   at once; six more put a canvas somewhere inside the page — transparency
+   and soft-mask groups, a tiling pattern's cell and a Gouraud mesh's
+   buffer. The tile sizes are 64, 37 and 23 against a 91×131 page, so no
    lattice divides it and the last row and column are always partial.
    `tiles_at_other_scales_are_byte_equal_too` repeats the whole set at 0.5×,
-   2× and 4×; `single_pixel_tiles_are_byte_equal` runs a one-pixel lattice;
-   `annotations_are_tiled_with_the_page` covers the annotation layer, which
-   no other fixture there draws from.
+   2× and 4×, and
+   `tiles_at_the_scales_where_two_frames_rounded_apart_are_byte_equal` at
+   0.75×, 1.5× and 3×; `single_pixel_tiles_are_byte_equal` runs a one-pixel
+   lattice; `a_stroke_whose_corners_sit_on_a_sub_scanline_tiles_exactly_at_1x`
+   holds the stroke described below; `annotations_are_tiled_with_the_page`
+   covers the annotation layer, which no other fixture there draws from.
 
-   **It is byte-equal at those scales and not at every scale, and the
-   exception is measured rather than waved at.** A tile's transform is the
-   page's with a whole number of pixels taken off `e` and `f`, which is
-   exact as arithmetic and not as floating point: `fl(u + e)` and
-   `fl(u + e − tx)` are two roundings at two magnitudes and differ in the
-   last ulp, which reaches a byte only where the exact value sits on one of
-   the rasterizer's 1/256 steps. Measured 15 September 2026 over all ten
-   fixtures at 0.75×, 1.5× and 3×, tiling at 53: **29 of the 30 lattices
-   are exact, and the thirtieth — the axial shading at 3× — differs on one
-   pixel of 107 289 by one level of 255.**
-   `at_the_scales_where_two_frames_round_apart_the_gap_is_one_level` pins
-   that as the bound rather than above it, so a change makes it fail
-   whichever way it moves.
+   **Every fixture in the guard is byte-equal at every scale** — which is
+   not the same claim as "a tile is byte-equal to the page", and the one
+   page shape known to part them is named below. From 15 to 26
+   September 2026 even the guard's fixtures were not, and what the exception
+   was is kept because
+   it is the reason the mechanism is what it is. A tile used to be drawn
+   in a frame of its own — the page's transform with a whole number of
+   pixels taken off `e` and `f` — which is exact as arithmetic and not as
+   floating point: `fl(u + e)` and `fl(u + e − tx)` are two roundings at
+   two magnitudes, and the last ulp reached a byte wherever the exact value
+   sat on one of the rasterizer's grids. Measured then: the axial shading
+   at 3× differed on one pixel of 107 289 by one level, because a shading
+   sampler goes from the affine to a colour with nothing to absorb an ulp;
+   and a stroked rectangle (`3 3 54 34 re` at width 4, found by
+   `render_parts.rs`) differed **at 1×** on its four miter corners by 15
+   levels, because `fill`, which rounds a crossing's `x` to the nearest
+   1/256 and so is immune across, takes an edge's first sub-scanline as
+   `ceil(y × 16)` and so was not immune down. The ruling said `fill` was
+   immune; that was true of one axis.
 
-   Which sampler is left is the useful half of that measurement. `fill`
-   reduces a crossing to the *nearest* 1/256 unit by adding a half and
-   shifting, which is a `floor` of a shifted value and commutes with moving
-   a shape a whole number of pixels; `draw_image` snaps its quad to the same
-   grid, which [rasterizer](features/rasterizer.md) records was put there
-   for this reason. A shading sampler does neither — it takes the axial
-   parameter from `a·x + c·y + e` straight into a colour with no grid in
-   between — and the one lattice that diverges is a shading. Closing it
-   means carrying the canvas's origin through the sampler, the mesh and the
-   image run so that both frames compute in one lattice; that is a change to
-   `tinker-pdf-raster`'s shape and it has its own [roadmap](ROADMAP.md) row.
-   Until it lands, this ruling is a byte-equality claim **with a named
-   exception** rather than an unconditional one, and saying so is the whole
-   point of the September correction above.
+   **The mechanism now is one frame.** The page is drawn through the one
+   transform whatever part of it is asked for; the canvas carries its
+   origin (`Canvas::origin`), every mask, sampled coordinate, mesh buffer
+   and image run is in device pixels of the page, and only the index into a
+   canvas subtracts the corner — an integer subtraction, which cannot
+   round. A group's buffer and a soft mask's stand in the same frame rather
+   than translating `base`. So every coordinate a tile computes is the
+   number the page computes, and the sampler, the filler's `ceil`, the
+   image's quad and the mesh all see one lattice.
+
+   **What one frame does not reach, and what reaches it instead.** A few
+   things are decided by a *rectangle* rather than pixel by pixel, and a
+   mask in a tile only knows the tile's rectangle: which cells of a tiling
+   lattice are composited (a cell's rounded-out buffer spills a pixel past
+   its box, so a lattice indexed from the tile dropped a cell the page
+   kept — 10 levels at 1×), which neighbours a mesh's anti-aliased fringe
+   takes its colour from (two pixels of them — 10 levels at 1×, 30 at 4×),
+   and whether a lattice, a mesh or an image run is within its budget. The
+   renderer keeps, beside each clip and soft mask, the rectangle it would
+   have on a render of the whole page, computed from nothing but device
+   coordinates (`Bounds`), and takes all of those decisions there. Both
+   defects were found by the canvases-in-the-page fixtures the day the
+   frame became one.
+
+   **One decision is still the canvas's, so this ruling has an open
+   exception, and it is pinned.** Whether an image joins the run of images
+   held back so that abutting ones do not conflate is decided by whether it
+   *overlaps* what the run already holds, and the run holds fragments only
+   over the canvas. Two images that overlap outside a tile and abut inside
+   it are one run in the tile and two on the page, and the abutting edge
+   then conflates on the page and not in the tile. On 26 September 2026
+   this paragraph said no fixture had that shape and called the ruling
+   satisfied; a review on 2 October built one in three images — a 100×100
+   page, the first and third abutting at `x = 40.5` across the top forty
+   rows, the third overlapping the second at the bottom — and the tile over
+   the top half differs from the page on 40 pixels, all of column 40, by
+   **63 levels at 1×**.
+   `render_regions.rs`'s
+   `an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception`
+   pins exactly that, so the day it changes the test says so, and the
+   ROADMAP keeps the row ("A tile byte-equal to the page when an image
+   run's overlap falls outside it") that a satisfied ruling would have had
+   no need of. What reaches it is holding the run's coverage over the whole
+   page rather than over the canvas, which costs a tile the image work of
+   the page — every image of a run walked over the page frame, per tile —
+   and that trade is the row's to make, not a fix's to slip in.
 
    *What the guard found on its first run is worth recording, because none
    of it was about tiles:* two defects in `tinker-pdf-raster`'s scanline
@@ -126,11 +196,11 @@ living in one feature's head.
 
 7. **The `Device` trait is the only seam between interpretation and
    consumers.** Binds [content-and-text](features/content-and-text.md) and
-   [rendering](features/rendering.md). Text extraction and rasterization are
-   both devices; nothing reaches around the interpreter to read content
-   streams directly, except the `ContentFilter` rewrite path built for
-   redaction ([editing](features/editing.md)) — which is itself part of the
-   interpreter.
+   [rendering](features/rendering.md). Text extraction, rasterization and
+   SVG output are all devices; nothing reaches around the interpreter to
+   read content streams directly, except the `ContentFilter` rewrite path
+   built for redaction ([editing](features/editing.md)) — which is itself
+   part of the interpreter.
 
 8. **Leaf crates stay PDF-free.** Binds every leaf crate. Bytes and plain
    parameters in, bytes and values out; no COS types, no PDF-spec vocabulary
@@ -243,6 +313,173 @@ living in one feature's head.
     its date. A check is *evidence about now*, and a check this project does
     not own is one it cannot answer for on the day it breaks. The two
     failure modes are different enough to be worth different words.
+
+14. **Extracted text is in logical order.** Binds
+    [content-and-text](features/content-and-text.md),
+    [fonts](features/fonts.md), [epub](features/epub.md) and
+    [forms](features/forms.md), and every output that reads `Page::text`:
+    `plain_text`, `search`, the structured view and the JSON, XML and HTML
+    formats alike. A page draws right-to-left text in visual order, and
+    reading it in the order the content stream drew it reads an Arabic or
+    Hebrew line backwards — a searchable Arabic PDF that searches as nothing
+    and a screen reader that reads every word from its last letter. So a line
+    holding a right-to-left character is put back into the order it is read
+    in by **UAX #9 read backwards and checked forwards**: the line is sorted
+    along its baseline, marks kept with the base glyph they sit on, and the
+    order returned is one whose text the algorithm draws as the line stands
+    (`tinker_pdf_shape::bidi::logical_order`). It is not L2 applied to levels
+    resolved over the drawn line: L2 undoes itself only with the logical
+    line's levels, and rules W2, W5, W7 and N1 read neighbours, so the drawn
+    line resolves to other levels — `نسبة 50%` is drawn with the `%` on the
+    number's left and read that way came back as `نسبة %50`. The paragraph
+    direction is P2 read off the drawn line, by `Bidi_Class`: a
+    left-to-right paragraph draws its first strong character leftmost and a
+    right-to-left one rightmost, so the two ends decide, and the majority
+    only where they disagree — with one tie-break for a line with no
+    left-to-right character, the amendment below.
+
+    *Decided 3 October 2026, and why this way.* The pin in
+    `crates/tinker-pdf/tests/epub_shaped.rs` asserted the backwards line by
+    name and said the decision was not a book's to take: reversing by
+    `TextLine::rtl` would be a decision about every PDF this engine reads.
+    That is the reason it is a ruling and not a fix, and the three properties
+    that make it safe for every PDF are each asserted rather than argued:
+
+    - **A line with no right-to-left character is untouched**, byte for byte
+      and quad for quad — `text_logical_order.rs`'s
+      `no_left_to_right_page_moves` compares every committed `testdata`
+      document and every committed EPUB book against the opt-out.
+    - **Both producer habits give one answer.** A producer that draws a
+      right-to-left word in visual order and one that draws it in reading
+      order with the pen moving left describe the same page; the line is
+      sorted by where its glyphs are before it is read back, so the content
+      stream's order decides nothing. Reversing the stream instead would
+      have broken the second habit, which extracted right before this.
+    - **The algorithm is Unicode's, held to Unicode's file in the direction
+      extraction uses it.** `bidi_conformance.rs` feeds every visual order
+      `BidiCharacterTest.txt` states (the 91 616 cases with nothing X9
+      removes) back through `logical_order`: every answer is a permutation,
+      every answer but three draws the stated line, and 90 947 come back to
+      the file's own text. Each of the other 669 holds a bracket pair. Before
+      the forward check, 8 100 came back as other text. The drawing
+      direction, `order_units`, which the check calls, runs the whole of
+      both files.
+
+    UAX #9 is not one-to-one, so "back to the text that was typed" is not a
+    property any reader can have: in a right-to-left paragraph
+    `שלום 2026 now` and `שלום now 2026` are one picture, and this reads it
+    as the second. What it does not undo is named in
+    `crates/tinker-pdf/src/text_order.rs`: texts drawn alike; mirroring (L4),
+    because whether a producer's `/ToUnicode` names a mirrored glyph's
+    character or its shape is not on the page, and bracket pairs, which N0
+    reads off the logical text; a paragraph, because a line is resolved
+    alone; and vertical lines. The opt-out is
+    additive — `Page::text_with(&TextOptions { content_order: true })` is the
+    order the content stream drew, which is what `Page::text` returned before
+    this ruling — and the reordering lives in the facade, so
+    `tinker-pdf-content` keeps no edge to `tinker-pdf-shape` and
+    `TextDevice` itself still collects in stream order.
+
+    **Amended 10 October 2026 by the owner, Ravindu Wijegunawardhana: the
+    comma tie-break.** A line that holds at least one right-to-left strong
+    character (`R` or `AL`) and **no** left-to-right one (`L`) was always
+    read as a right-to-left paragraph, since both of its ends are right to
+    left. It still is, with one exception: where the line, sorted along its
+    baseline, has a strong right-to-left character as its **leftmost** unit
+    and **closing punctuation** as its **rightmost** — a unit of
+    `Bidi_Class` `CS`, `ON`, `ES` or `ET`; not a number (`EN`, `AN`) or a
+    mark (`NSM`); and not an opening bracket or quotation mark,
+    `General_Category` `Ps` or `Pi`, because a mark that trails a
+    left-to-right reading closes — it is read as a **left-to-right**
+    paragraph, so the punctuation trails the word. Units that draw nothing
+    are passed over at either end, the set rule L1 resets with whitespace
+    at a line's end: `WS`, `S`, `B`, the characters X9 removes and the
+    isolate formatting characters, and also the two `White_Space`
+    characters whose class is `CS` because they separate digits, U+00A0
+    NO-BREAK SPACE and U+202F NARROW NO-BREAK SPACE, so that neither is
+    taken for a comma. Every other line keeps
+    the rule above, and a line with an `L` character anywhere is out of the
+    tie-break's reach. And the tie-break is taken **only where a
+    left-to-right paragraph draws the line**: `logical_order`'s search, run
+    for a left-to-right reading, must reach an order that `order_units`
+    draws as the line stands — the forward check every answer already
+    passes, asked once more before the direction is chosen — or the line
+    stays right to left. As first written, the shape alone decided, on the
+    belief that both paragraphs always draw it, and any mark of those
+    classes counted; a line holding a number is the counter-example to the
+    first and an opening bracket at the right to the second (the price,
+    below), and review caught both the same day.
+    `tinker_pdf_shape::bidi::drawn_direction` chooses and asks;
+    `logical_order` for a given direction is untouched, and
+    `bidi_conformance.rs` holds it to Unicode's file as before.
+
+    *Why.* CI's `epub-corpus` job reads Project Gutenberg's Moby-Dick, whose
+    etymology table sets the Hebrew `חו,` alone in a cell: a left-to-right
+    paragraph, which draws the comma right of the word. Once the word was
+    drawn right (6d08c6b), the cell's line held nothing left to right, was
+    read as right to left, and extracted `,חו` — the comma first — which the
+    conservation sweep counts as a transposition. A right-to-left paragraph
+    whose line *opens* with punctuation draws the same picture, so nothing
+    on the line decides between the two; trailing punctuation after a
+    right-to-left word quoted in left-to-right text is far commoner than a
+    lone right-to-left line that opens with punctuation, so the commoner
+    reading wins.
+
+    *The price, accepted with that knowledge.* A line of a right-to-left
+    paragraph that is alone on its line, with no left-to-right character,
+    and opens with a mark of `Bidi_Class` `CS`, `ON`, `ES` or `ET` that is
+    not an opening bracket or quotation mark (`Ps`, `Pi`) reads with that
+    mark at its end. That class is wide: a dialogue dash (`— שלום`, drawn
+    `םולש —`, reads `שלום —`), a bullet, `*`, `+`, `#`, `%`, an ellipsis
+    (`…שלום` reads `שלום…`), and a straight or closing-form quotation mark
+    used to open (`"שלום` reads `שלום"`; `”` and `»` likewise) — `"` and
+    `'` are `Po`, closing as often as they open.
+    **An opening bracket or quotation mark** does not pay where the
+    producer's `/ToUnicode` names the typed character: `(١) بند`, `“שלום`
+    and `«مرحبا` read as typed. Before it was excluded, `(١) بند`, drawn
+    `دنب )١(`, read `١) بند(`, a text a left-to-right paragraph does draw
+    that way. Where `/ToUnicode` names the mirrored glyph instead — `»` for
+    `«`, `)` for `(`, as one derived from a font's `cmap` may — the line
+    ends in a closing mark and pays like a dash (`«مرحبا` drawn with a
+    mirrored `»` reads `مرحبا»`), unless a European number follows the
+    mark, as below; which character a producer named is not on the page.
+    **A European number after the mark** spares the line: `(1) פריט`,
+    `— 2026 שלום` and `• 5 תפוחים` are drawn with the number next to the
+    mark, `טירפ )1(`, which no left-to-right paragraph draws — there a
+    European number with no right-to-left letter before it is left to right
+    (W7), and one with a letter before it is drawn left of that letter — so
+    they read as typed. Before the forward check was asked they read
+    `פריט )1(`, an order that draws another line. **Two shapes still pay**:
+    Arabic-Indic digits, which are `AN` and untouched by W7, so `— ١ بند`
+    reads `١ بند —`; and a number that is not next to the mark,
+    `— שלום 5 חו`, which reads `שלום 5 חו —`. All of it is pinned by name,
+    so that changing the decision is a visible one.
+
+    *The tests that hold it.* `text_logical_order.rs`:
+    `a_right_to_left_word_and_its_comma_alone_on_a_line_read_as_written`
+    (`חו,` and `حوت,` on a left-to-right page),
+    `a_right_to_left_line_ending_in_a_full_stop_still_reads_right_to_left`
+    (`שלום.`, the stop drawn leftmost, unchanged),
+    `a_line_holding_a_left_to_right_character_keeps_its_rule`,
+    `a_right_to_left_line_opening_with_a_mark_and_a_number_reads_as_typed`
+    (the forward check),
+    `a_right_to_left_line_opening_with_a_bracket_or_quotation_mark_reads_as_typed`
+    (what opens), `a_right_to_left_line_opening_with_a_dash_reads_the_dash_last`
+    (the price) and `no_left_to_right_page_moves`; `epub_fallback.rs`'s
+    `a_standard_14_hebrew_word_alone_on_its_line_is_drawn_right_to_left`
+    (the book's table, `חו,`); `text_order.rs`'s
+    `a_word_and_its_comma_alone_read_as_their_paragraph_drew_them` (the
+    comma drawn at either end of the word, and `TextLine::rtl` saying which
+    direction was read); and in `tinker-pdf-shape`'s `bidi.rs`, the
+    tie-break's classes and both readings drawing the line
+    (`a_right_to_left_word_and_its_punctuation_alone_read_left_to_right`,
+    `the_tie_break_reaches_no_other_line`,
+    `a_mark_and_a_number_opening_a_right_to_left_line_read_as_typed`,
+    `an_opening_bracket_or_quotation_mark_at_the_right_does_not_trail`,
+    `the_blank_separators_are_the_white_space_that_bidi_class_misses`, and
+    `a_right_to_left_line_opening_with_a_dash_reads_it_trailing`, which
+    pins the price's four shapes); `unicode.rs`'s
+    `what_opens_is_general_category_ps_and_pi`.
 
 ## How to add a ruling
 

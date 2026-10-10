@@ -669,6 +669,7 @@ fn dictionary(
         // part 4 file for carrying a signature, which is what this branch
         // exists to stop.
         filters(doc, part, dict, at, out);
+        unfiltered_metadata(doc, part, dict, at, out);
     }
     action_rules(doc, flavour, dict, at, out);
     trigger_rules(doc, flavour, dict, at, out);
@@ -676,6 +677,57 @@ fn dictionary(
     // The annotation group rides this walk rather than reaching for machinery
     // of its own; `pdfa/annotations.rs` says why at length.
     super::annotations::rules(doc, flavour, dict, at, out);
+}
+
+/// ISO 19005-1 6.7.2, part 1 only: "Metadata object stream dictionaries
+/// shall not contain the Filter key". Parts 2 to 4 state no such rule (their
+/// published rules have none), which is why the part is checked first.
+///
+/// **The scope is the catalog's metadata stream, and the two sources in hand
+/// disagree about it.** veraPDF's published profile, the one this group's
+/// rules are read from (`PDFA-1B.xml` at `070d39f`, rule 6.7.2-2), says "The
+/// Metadata object stream dictionary in the document's catalog shall not
+/// contain the Filter key" and tests `isCatalogMetadata == false || Filter ==
+/// null`. The older wiki statement of the same rule (`109b482`) tests
+/// `Filter == null` on every metadata stream, and its working group's note
+/// reads the clause as "explicitly" requiring "all XMP Metadata streams" to
+/// be unfiltered — the reason it gives being that the prohibition "has the
+/// implicit effect of preserving the contents of XMP metadata streams as
+/// plain text that is visible to non-PDF aware tools". The wider reading is
+/// the stricter, nothing has measured it against the corpus, and a rule too
+/// strict reports conforming files: so the catalog's stream is judged and
+/// every other metadata stream is `super::STAGED`'s.
+///
+/// A metadata stream is a stream whose `/Type` is `/Metadata` (ISO 32000-1
+/// 14.3.2 Table 315 requires the entry), and the catalog's is the one its
+/// `/Metadata` names.
+fn unfiltered_metadata(
+    doc: &CosDocument,
+    part: Option<Part>,
+    dict: &Dict,
+    at: ObjRef,
+    out: &mut Vec<Raw>,
+) {
+    if part != Some(Part::One) {
+        return;
+    }
+    let is_metadata = doc
+        .resolve_key(dict, Name::TYPE)
+        .as_name()
+        .and_then(|name| doc.name_bytes(name))
+        .is_some_and(|name| name.as_ref() == b"Metadata");
+    let is_catalogs = || {
+        doc.catalog()
+            .and_then(|catalog| catalog.get_ref(doc.intern(b"Metadata")))
+            == Some(at)
+    };
+    if is_metadata && dict.contains_key(Name::FILTER) && is_catalogs() {
+        out.push(Raw {
+            rule: clauses::METADATA,
+            object: Some(at),
+            kind: FindingKind::MetadataStreamFiltered,
+        });
+    }
 }
 
 /// ISO 19005-1 6.1.7 (parts 2 and 3: 6.1.7.1; part 4: 6.1.6).

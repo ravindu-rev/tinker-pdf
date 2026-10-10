@@ -6,7 +6,8 @@ certificates instead of to a password. A recipient unseals a CMS
 seed, and the file key is a digest over that seed and every envelope in the
 array. Everything after the key — Algorithm 1's per-object salting, the four
 crypt methods, the decryptor a document installs — is what the standard
-handler already does.
+handler already does. Since 2 October 2026 it is written as well as read:
+a document can be sealed on save to certificates the caller supplies.
 
 This design doc exists for a reason the roadmap's size band does not capture.
 The item is **M**, and by the letter of this repository's process an M-sized
@@ -25,17 +26,47 @@ unlike anything else in the tree.
 - Derive the file key per 7.6.5 and install the same decryptor the standard
   handler installs.
 - A `Recipient` seam so the host does the private-key operation.
+- Write `/Filter /Adobe.PubSec /SubFilter /adbe.pkcs7.s5` at `/V 5`, one
+  `/AESV3` crypt filter carrying the envelope: `PublicKeyEncryption::seal`
+  seals a fresh seed and `/P` to the caller's certificates, and
+  `DocumentEditor::save_sealed` writes a rewrite under the key 7.6.5 derives
+  from them.
 
 ## Non-goals
 
-- **Writing.** Nothing produces a public-key-encrypted document. Encrypting on
+- ~~**Writing.** Nothing produces a public-key-encrypted document. Encrypting on
   save would need to choose recipients, generate a seed and seal it — and the
   sealing is the private-key side's public half, which needs a certificate
-  the engine has no business choosing.
+  the engine has no business choosing.~~ *No longer a non-goal, 2 October
+  2026.* The reason was a scope choice and not a limit: the engine need not
+  choose a certificate when the caller hands it one, and sealing is the
+  public half of key transport, which needs no private key. See
+  [Writing](#writing).
+- **Recipients with different permissions.** 7.6.5 allows one envelope per
+  group of recipients, each sealing its own `/P`. The writer seals every
+  recipient into one envelope under one `/P`.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SE-07.
+- **Writing below `/V 5`** — `s3`, `s4`, RC4, AES-128. The writer emits
+  `AESV3` and nothing else, as the standard handler's emits R6 and nothing
+  else; reading all of them is unchanged.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SE-01, behind an
+  explicit legacy option with a typed weakness warning.
+- **Sealing to a key that is not RSA.** Key agreement is not read, so it is
+  not written: an EC certificate is `SealError::NotRsa`.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SE-07.
+- **Sealing to an RSA key restricted to signing.** RFC 4055 §1.2 makes a key
+  published under `id-RSASSA-PSS` an RSASSA-PSS key and nothing else, so it
+  is `SealError::KeyRestricted`; only `rsaEncryption` is sealed to. Until
+  review on 3 October 2026 the writer sealed to one anyway, and wrote
+  `rsaEncryption` in its recipient info.
 - **Key material of any kind.** No PKCS#8, no PKCS#12, no passphrase handling,
   no RSA private-key arithmetic. The same rule signing follows.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: the owner's parity decision puts private-key
+  signing in the engine; key import is [ROADMAP](../ROADMAP.md) row SG-05 and
+  RSA signing SG-01.
 - **`KeyAgreeRecipientInfo`, `KEKRecipientInfo`, `PasswordRecipientInfo`** and
   the `other` shape (§6.2.2–§6.2.5). Recognised by tag and refused by name.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SE-07.
 - **Content-encryption algorithms beyond AES-128/256-CBC, RC4 and
   `des-ede3-cbc`.** Triple DES used to be listed here as the one real gap; it
   is implemented now (`tinker_pdf_crypto::des`, FIPS 46-3 tables, 500 NIST
@@ -46,6 +77,8 @@ unlike anything else in the tree.
   keys only, and neither has ever been a PDF default. They are named where
   they are met rather than guessed at, which is the same answer Triple DES
   used to get.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: AES-192 and RC2 are [ROADMAP](../ROADMAP.md)
+  row SE-07.
 - **Writing a `des-ede3-cbc` envelope**, or any DES encryption at all. The new
   module decrypts and nothing more; its single-block encrypt exists only
   because EDE3 decryption is `D(K1, E(K2, D(K3, c)))` and the middle step is
@@ -56,6 +89,8 @@ unlike anything else in the tree.
   (see [encryption](../features/encryption.md)), so honouring a second source
   of them would add a code path whose only effect is to disagree with the
   first.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: applying an envelope's `/P` is
+  [ROADMAP](../ROADMAP.md) row SE-07.
 
 ## Design
 
@@ -83,6 +118,146 @@ stored bytes because of it. 7.6.5 digests each envelope in full, in file order;
 a reader that re-serialised one, or sorted the array, would derive a key that
 decrypts nothing, with no error anywhere to say why.
 
+## Writing
+
+**The API is beside `save`, not inside `WriteOptions`.** The roadmap row
+named `Encryption::PublicKey { recipients }`, with an additive design to be
+preferred if one existed. That variant is not one. `Encryption` is a struct
+with public fields that callers build by name, seventeen times in this tree
+before this change, the FFI and both bindings among them, so turning it into
+an enum would break every one of them and every caller's. And
+`DocumentEditor::save` returns bytes and nothing else, while sealing can
+fail in ways that are the caller's to hear about: a
+certificate that does not parse, a key that is not RSA, a source that will
+not fill. So sealing is its own step, `PublicKeyEncryption::seal(certificates,
+permissions, entropy)`, and writing is `DocumentEditor::save_sealed(options,
+&sealed)`. The writer is shared through a crate-private `Sealing` that
+`rewrite` and `linearize` take in place of `options.encryption`, so neither
+public type changed. A sealed save is refused when it is incremental
+(`SealError::NotRewrite`), because an update appends under an `/Encrypt` that
+still stands, and when a password is asked for as well
+(`SealError::PasswordAlsoRequested`).
+
+**Three crates, one job each.** `tinker_pdf_crypto::rsa::encrypt_pkcs1_v15`
+is RSAES-PKCS1-v1_5 (RFC 8017 §7.2.1), taking its padding from the caller,
+because this tree has no randomness and because a caller-supplied `PS` is
+what makes RSA Laboratories' vectors exact known answers.
+`tinker_pdf_pki::seal` is the one encoder in that crate: a `ContentInfo`
+around a version-0 `EnvelopedData` with a version-0 `KeyTransRecipientInfo`
+for each certificate (issuer and serial, `rsaEncryption` with `NULL`), DER
+`SET OF` order, and AES-256-CBC content under a 16-octet IV — field for field
+what `openssl cms -encrypt -aes256` writes. `PublicKeyEncryption` in
+`pubsec.rs` draws a twenty-octet seed, seals the seed followed by `/P`'s four
+octets most significant first, and derives the file key with the same
+`derive` the reader calls.
+
+**Randomness is the caller's.** The seed, 48 octets the file identifier is
+mixed with (as a password-encrypted write mixes its own), the content key, the
+IV and each recipient's padding all come from the `EntropySource`. Every
+certificate is checked first, in a dry run against a source that refuses, so a
+bad certificate costs no entropy. A zero padding octet is redrawn, not
+replaced, and a source that returns 64 zeros running is refused as broken.
+
+**The crypt filter's `/Length` is 256, in bits.** ISO 32000-1 Table 25 has
+the standard handler give that entry in bytes and public-key handlers give it
+"as is", so the password writer's AESV3 filter says 32 and this one says 256.
+Until review on 3 October 2026 this one said 32 too, copied from the password
+writer; the reader here takes the key length from `/V` and ignores the
+filter's (`decrypt.rs` calls the entry ambiguous), so no test of this tree's
+could have noticed.
+
+**`/EncryptMetadata` is not written.** ISO 32000-1 Table 27 puts the public-key handler's
+flag in the crypt filter, and this tree's reader looks for it on `/Encrypt`
+itself (see Risks). Both default to true, and the writer always encrypts the
+metadata, so writing it in neither place is the one choice every reader
+agrees on.
+
+### What the writing is held to
+
+- **The envelope is RFC 5652's, and so is OpenSSL's.**
+  `a_sealed_envelope_is_the_rfcs_and_so_is_openssls_outside_their_random_fields`
+  (`tinker-pdf-pki/tests/enveloped.rs`) writes the expected encoding from RFC
+  5652 §6 and RFC 3565, seals the content OpenSSL 3.5.5 sealed in
+  `aes-256-cbc.der` to the same certificate, and holds both envelopes to it:
+  the same 484 octets outside the encrypted key, the IV and the ciphertext.
+  OpenSSL's bytes are an input checked against the clause, not the expected
+  answer (ruling 13); until review on 3 October 2026 the test compared the
+  writer to OpenSSL's bytes directly, which made them the answer.
+- **RSAES-PKCS1-v1_5 is RSA Laboratories'.** All 300 encryption known answers
+  in `pkcs1v15crypt-vectors.txt`, across fifteen keys from 1024 to 2048 bits,
+  including the 1025- to 1031-bit moduli whose leading octet is not full.
+- **The file opens.** `crates/tinker-pdf/tests/pubsec_write.rs`, ten tests: a
+  sealed `simple-text.pdf` reopened with a `Recipient` that holds the
+  committed `visible-signer-key.der` and does RFC 8017 §7.2.2 itself, text
+  and `/P` intact; the dictionary 7.6.5 asks for; the envelope opened by hand
+  to twenty octets and then the permissions, big-endian; a stranger told
+  `NoMatchingRecipient` and a password `UnsupportedHandler`; two recipients
+  in one envelope; object streams and the linearized layout; the same
+  entropy giving the same bytes (ruling 4); the `/ID` mixed with the
+  entropy; each refusal by name; a `Debug` that prints no key.
+- **OpenSSL opens what this writes.** A dated record, not a test (ruling 13).
+  Measured 2 October 2026 with OpenSSL 3.0.13, on `simple-text.pdf` sealed to
+  `visible-signer.der` with a counting source, `/P` −3392: `openssl cms
+  -decrypt -inform DER -recip visible-signer.pem -inkey visible-signer-key.pem`
+  opened the file's 481-octet `/Recipients` envelope to 24 octets,
+  `0102…1314` then `fffff2c0`, the seed and `/P` big-endian. And `openssl
+  enc -d -aes-256-cbc`, keyed with SHA-256 of that seed and the envelope and
+  with each stream's first sixteen octets as its IV, decrypted all three
+  content streams to the fixture's own bytes. So an independent
+  implementation reads the envelope and the cipher. **The derivation is still
+  this author's reading**: the key OpenSSL was handed was computed from the
+  same clause the reader and the writer share.
+
+### Counted injections: the writer
+
+Each defect injected in turn and `cargo test --no-fail-fast` run on
+`tinker-pdf-crypto`'s `rsa` tests, `tinker-pdf-pki`'s `seal` tests and
+`tests/enveloped.rs`, and `tests/pubsec_write.rs`, as far as each layer
+reaches. Measured 2 October 2026.
+
+| Injected | Tests that failed |
+| --- | ---: |
+| the permissions sealed least significant octet first | **0, then 1** |
+| the `/ID` mixed with a constant rather than the sealing's entropy | 1 |
+| the `/ID` derived without the sealing's entropy | 1 |
+| `/EncryptMetadata false` in the crypt filter | **0** — the entry was removed instead |
+| the file key derived as if the metadata were clear | 2 |
+| the file key derived at `/V 4` | 8 |
+| `/V 4` written | 4 |
+| `/CFM /AESV2` written | 1 |
+| `/SubFilter /adbe.pkcs7.s4` written | 1 |
+| sixteen octets of seed sealed rather than twenty | 4 |
+| the certificates not checked before entropy is drawn | 1 |
+| the linearized writer ignoring the sealing | 1 |
+| `save_sealed` accepting an incremental save | 1 |
+| `save_sealed` accepting a password too | 1 |
+| `Debug` printing the file key | 1 |
+| the recipients' `SET OF` left unsorted | 1 |
+| the IV left in front of the ciphertext | 5 |
+| `encryptedContent` tagged constructed | 1 |
+| a `KeyTransRecipientInfo` at version 2 | 1 |
+| `rsaEncryption` without its `NULL` | 1 |
+| one constant padding for every recipient | 2 |
+| a zero padding octet not redrawn | 14 |
+| the redraw left unbounded | hangs — the zero source's test never ends |
+| block type 1 rather than 2 | 5 |
+| a zero allowed in `PS` | 1 |
+| the separating zero dropped | 1 |
+| capacity `k − 10` rather than `k − 11` | 1 |
+| the padding length one octet long | 4 |
+
+**The two zeros are the rows worth reading.** The reader takes the seed and
+ignores the four permission octets (Non-goals), so sealing them in the wrong
+order broke nothing; the test that opens the envelope by hand is what reads
+them now. And `/EncryptMetadata false` written into the crypt filter broke
+nothing because the reader never looks there, which is the reader gap in
+Risks; the writer stopped writing the entry rather than keep a value nothing
+checked. Three rows reach only the OpenSSL comparison — a constructed
+`encryptedContent`, a version-2 recipient, a missing `NULL` — because this
+tree's own reader accepts all three, which is exactly why the writer is held
+to an encoding written from the RFCs — and OpenSSL's envelope to the same one
+— and not to its own reader.
+
 ## The evidence, and what it is not
 
 **No corpus file uses this handler.** Zero of 5 605, re-measured on 15
@@ -106,6 +281,9 @@ The layers are not equally weak and the difference matters:
 | Content decryption | AES-CBC and RC4, gated on FIPS 197 and RFC 6229; `des-ede3-cbc`, gated on 500 NIST CAVP known answers, its tables read twice from FIPS 46-3 | Published vectors |
 | **7.6.5 key derivation** | A second implementation in Python, written from the same clause by the same author, generating the end-to-end fixture | **Catches a transcription slip; cannot catch a misreading** |
 | The document decrypting | `pubsec.rs`'s tests read "Public key" back out of the page and `PubSec fixture` out of `/Info` | Ties every layer together, on one file |
+| `EnvelopedData` writing | Byte-equal to OpenSSL 3.5.5's outside the random fields; opened by OpenSSL 3.0.13's `cms -decrypt` (dated record, 2 October 2026) | Real interop, both directions |
+| RSAES-PKCS1-v1_5 encryption | 300 RSA Laboratories known answers | Published vectors |
+| A written document's streams | `openssl enc -d -aes-256-cbc` decrypted them under the key derived from what OpenSSL unsealed (the same record) | Real interop for the cipher; the key is still the derivation's |
 
 **What `des-ede3-cbc.der` proves, and what it does not.** That fixture is one
 of the three OpenSSL 3.5.5 wrote, 475 bytes, and it was committed with the
@@ -226,3 +404,5 @@ entry, wrong for only some inputs, which a spot check passes.
 | A wrong key reads as a decrypted document | 7.6.5 has no verifier the way `/U` is one, so this cannot be caught at authentication; a test pins that the failure stays visible as garbage rather than becoming plausible text | Partly |
 | An attacker-chosen envelope drives the parser | The parser is `tinker-pdf-pki`'s, under ruling 1 with its own fuzz targets; the tests sweep every single-byte mutation of a real envelope | Yes |
 | A password offered to a public-key document reads as a wrong password | `AuthError::UnsupportedHandler`, asserted — `WrongPassword` would send a caller looking for a better password when none exists | Yes |
+| A `/V 4` or `/V 5` document whose crypt filter says `/EncryptMetadata false` opens with the wrong key | Found by the writer's injection campaign, 2 October 2026: Table 27 puts the public-key handler's flag in the crypt filter, and `decrypt.rs` reads it from `/Encrypt` only, so the key is derived as if the metadata were encrypted. The writer avoids it by writing the flag nowhere; a third-party file that writes it there would fail to open here | **No** |
+| A sealed document is only as unpredictable as the host's entropy | The source is the caller's by design, because the engine links no random number generator; a source that cannot fill, or returns zeros, is refused; a predictable one is not detectable and is documented as the caller's | Partly |

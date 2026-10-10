@@ -31,6 +31,15 @@ pub struct Encryption {
     /// The password a reader needs to open the document. Empty means none.
     pub user_password: String,
     /// The password that lifts the document's restrictions.
+    ///
+    /// **Empty means none, and then the user password is the owner's too**
+    /// (Algorithm 3 step (a)'s rule for R2 to R4, taken for R6). It is not
+    /// written as the empty string: a reader tries the owner password first
+    /// and the empty password before any other, so an empty owner password
+    /// would open the file with every permission for anybody, and the user
+    /// password would protect nothing. The cost of the rule is that whoever
+    /// has the user password has the owner's authority, so `permissions`
+    /// restrict nobody unless an owner password is given.
     pub owner_password: String,
     /// The permission bits, as `/P` stores them.
     pub permissions: i32,
@@ -47,10 +56,11 @@ pub struct Encryption {
 
 /// Options for writing.
 ///
-/// Seven fields, all of them about **bytes on disk**: layout, declared
-/// version, containers, compression, encryption and what is dropped on the
-/// way. That is deliberate and there is one absence worth naming, because it
-/// is the field the next person will reach for.
+/// Eight fields, all of them about **bytes on disk**: layout, declared
+/// version, containers, compression, encryption, what is dropped on the way
+/// and what is written once instead of twice. That is deliberate and there is
+/// one absence worth naming, because it is the field the next person will
+/// reach for.
 ///
 /// **There is no font-subsetting switch here, and there must not be.**
 /// Subsetting a rewrite's embedded font programs means walking every content
@@ -121,6 +131,24 @@ pub struct WriteOptions {
     /// it, and that is a guarantee it should keep making for itself rather
     /// than inheriting from a flag.
     pub garbage_collect: bool,
+    /// Merge identical streams into one object, on a rewrite.
+    ///
+    /// Identical means identical: equal dictionaries (`/Length` aside) and
+    /// equal decoded bytes, compared byte for byte — SHA-256 only chooses
+    /// which streams to compare. A wrong merge silently draws one font with
+    /// another's program, so nothing short of equality merges. Only streams
+    /// are merged, never the dictionaries whose object number carries
+    /// identity (pages, annotations, groups, structure elements, signatures),
+    /// nor a stream an `/OBJR` names or a cross-reference or object stream.
+    /// Runs after [`WriteOptions::garbage_collect`].
+    ///
+    /// Off by default: it decodes every filtered stream to compare it, and a
+    /// file whose streams all differ pays that for nothing. Ignored on an
+    /// incremental update, which appends and must not rewrite what a
+    /// signature's revision covers. Unlike the font-subsetting switch this
+    /// type's documentation refuses, this one is acted on here: the pass needs
+    /// the object set and the filters, and this crate has both.
+    pub deduplicate_streams: bool,
 }
 
 impl Default for WriteOptions {
@@ -133,6 +161,7 @@ impl Default for WriteOptions {
             compress: false,
             encryption: None,
             garbage_collect: false,
+            deduplicate_streams: false,
         }
     }
 }
@@ -199,6 +228,21 @@ fn write_real(out: &mut Vec<u8>, value: f64) {
     let text = format!("{value:.6}");
     let trimmed = text.trim_end_matches('0').trim_end_matches('.');
     out.extend_from_slice(if trimmed.is_empty() { "0" } else { trimmed }.as_bytes());
+}
+
+/// The number a reader takes from what [`write_real`] writes for `value`:
+/// `value` to six decimal places, or 0 where it is not finite.
+///
+/// For a caller that must hold a value to a rule **as the file will state
+/// it** — a white point's `X` of a ten-millionth is positive, and is written
+/// as `0`, which Table 63 forbids.
+pub(crate) fn written_real(value: f64) -> f64 {
+    let mut text = Vec::new();
+    write_real(&mut text, value);
+    std::str::from_utf8(&text)
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(0.0)
 }
 
 /// Writes one object.
@@ -468,14 +512,124 @@ fn walk_strings(
     }
 }
 
+/// Which security handler a rewrite seals with: the standard one's password
+/// ([`WriteOptions::encryption`]) or the public-key one's recipients
+/// ([`crate::DocumentEditor::save_sealed`]). Crate-private, so that neither
+/// public type had to change to carry the other.
+#[derive(Clone, Copy)]
+pub(crate) enum Sealing<'a> {
+    /// 7.6.4's standard handler at R6.
+    Password(&'a Encryption),
+    /// 7.6.5's `/Adobe.PubSec`, its file key already sealed.
+    PublicKey(&'a crate::pubsec::PublicKeyEncryption),
+}
+
+impl<'a> Sealing<'a> {
+    /// The scheme `options` asks for on its own.
+    pub(crate) fn from_options(options: &'a WriteOptions) -> Option<Sealing<'a>> {
+        options.encryption.as_ref().map(Sealing::Password)
+    }
+
+    /// The caller's entropy the file identifier is mixed with, which is what
+    /// keeps an encrypted file's `/ID` from confirming a guess at its
+    /// plaintext (see [`with_identifier`]).
+    fn identifier_entropy(self) -> &'a [u8; 48] {
+        match self {
+            Sealing::Password(encryption) => &encryption.entropy,
+            Sealing::PublicKey(sealed) => sealed.identifier_entropy(),
+        }
+    }
+}
+
+/// The `/Encrypt` dictionary and the cipher for either handler.
+pub(crate) fn build_sealing(
+    sealing: Sealing<'_>,
+    names: &NameTable,
+) -> Option<(Dict, StreamCipher)> {
+    match sealing {
+        Sealing::Password(encryption) => build_encryption(encryption, names),
+        Sealing::PublicKey(sealed) => Some(build_public_key(sealed, names)),
+    }
+}
+
+/// 7.6.5's `/Encrypt` for a public-key handler at AES-256: `/Filter
+/// /Adobe.PubSec`, `/SubFilter /adbe.pkcs7.s5` (crypt filters carry the
+/// recipients), `/V 5`, and one crypt filter — `/AESV3`, its `/Recipients`
+/// the sealed envelopes in the order the key was derived over.
+///
+/// From the file key on, everything is the standard handler's R6: AESV3
+/// takes the file key as it is, so the cipher is the same [`StreamCipher`]
+/// a password-encrypted rewrite uses, and only this dictionary differs.
+fn build_public_key(
+    sealed: &crate::pubsec::PublicKeyEncryption,
+    names: &NameTable,
+) -> (Dict, StreamCipher) {
+    let filter_name = names.intern(b"DefaultCryptFilter");
+    let mut filter = Dict::new();
+    filter.insert(Name::TYPE, Object::Name(names.intern(b"CryptFilter")));
+    filter.insert(names.intern(b"CFM"), Object::Name(names.intern(b"AESV3")));
+    filter.insert(
+        names.intern(b"AuthEvent"),
+        Object::Name(names.intern(b"DocOpen")),
+    );
+    // ISO 32000-1 Table 25: the standard handler gives a crypt filter's
+    // `/Length` in bytes, "public-key security handlers express it as is" —
+    // in bits. So a public-key AESV3 filter says 256 where `build_encryption`
+    // says 32. This tree's reader takes the key length from `/V` and ignores
+    // the filter's, so nothing here would notice either; another reader might.
+    filter.insert(names.intern(b"Length"), Object::Int(256));
+    filter.insert(
+        names.intern(b"Recipients"),
+        Object::Array(
+            sealed
+                .recipients()
+                .iter()
+                .map(|envelope| Object::String(PdfString::hex(envelope.clone())))
+                .collect(),
+        ),
+    );
+    // No `/EncryptMetadata`: Table 27 puts the public-key handler's in the
+    // crypt filter and this tree's reader looks for it on `/Encrypt` itself,
+    // so the one value every reader agrees on is the default both places
+    // share — true, which is what this writer does.
+    let mut cf = Dict::new();
+    cf.insert(filter_name, Object::Dict(filter));
+
+    let mut dict = Dict::new();
+    dict.insert(Name::FILTER, Object::Name(names.intern(b"Adobe.PubSec")));
+    dict.insert(
+        names.intern(b"SubFilter"),
+        Object::Name(names.intern(b"adbe.pkcs7.s5")),
+    );
+    dict.insert(names.intern(b"V"), Object::Int(5));
+    dict.insert(names.intern(b"Length"), Object::Int(256));
+    dict.insert(
+        names.intern(b"P"),
+        Object::Int(i64::from(sealed.permissions())),
+    );
+    dict.insert(names.intern(b"CF"), Object::Dict(cf));
+    dict.insert(names.intern(b"StmF"), Object::Name(filter_name));
+    dict.insert(names.intern(b"StrF"), Object::Name(filter_name));
+    (dict, StreamCipher::new(sealed.file_key()))
+}
+
 /// Builds the `/Encrypt` dictionary and the cipher that goes with it.
 pub(crate) fn build_encryption(
     encryption: &Encryption,
     names: &NameTable,
 ) -> Option<(Dict, StreamCipher)> {
+    // Algorithm 2.A tries the owner password first and every reader tries
+    // the empty one first, so a `/O` derived from "" would hand the owner's
+    // authority, and the file key, to anybody whatever the user password
+    // was. Algorithm 3 step (a)'s rule for R2 to R4 — "if there is no owner
+    // password, use the user password instead" — is taken for R6 as well.
+    let owner = match encryption.owner_password.is_empty() {
+        true => &encryption.user_password,
+        false => &encryption.owner_password,
+    };
     let built = tinker_pdf_crypto::handler::build_r6(
         encryption.user_password.as_bytes(),
-        encryption.owner_password.as_bytes(),
+        owner.as_bytes(),
         encryption.permissions,
         true,
         &encryption.entropy,
@@ -554,6 +708,13 @@ pub(crate) fn maybe_compress(
     if !compress || data.is_empty() || dict.contains_key(Name::FILTER) {
         return data.to_vec();
     }
+    // 14.3.2: a metadata stream is written for tools that read XMP without
+    // reading PDF — a packet scanner looks for `<?xpacket` in the raw bytes —
+    // and ISO 19005 forbids a `/Filter` on one outright. So compression never
+    // reaches it, whatever the caller asked for.
+    if dict.get_name(Name::TYPE) == Some(names.intern(b"Metadata")) {
+        return data.to_vec();
+    }
 
     let packed = tinker_pdf_filters::zlib_compress(data);
     if packed.len() >= data.len() {
@@ -602,7 +763,22 @@ fn write_entry(
                 None => data,
             };
             dict.insert(Name::LENGTH, Object::Int(data.len() as i64));
-            write_dict(out, &dict, names, 0);
+            match crypt {
+                // 7.6.2 again: a stream's dictionary holds strings as any
+                // object does — an embedded file's `/Params` `/CheckSum` and
+                // `/ModDate`, a form's `/PieceInfo` — and the reader decrypts
+                // them there. Writing it as given put those in the clear in a
+                // file sealed everywhere else, and a reader then decrypted the
+                // clear bytes into garbage. One walk over the whole dictionary,
+                // so its strings take the object's string nonces, which start
+                // above the stream's own.
+                Some(cipher) => write_object(
+                    out,
+                    &cipher.encrypt_strings(&Object::Dict(dict), num),
+                    names,
+                ),
+                None => write_dict(out, &dict, names, 0),
+            }
             out.extend_from_slice(
                 b"
 stream
@@ -864,13 +1040,30 @@ pub fn rewrite(
     options: &WriteOptions,
     names: &NameTable,
 ) -> Vec<u8> {
+    rewrite_sealed(
+        objects,
+        trailer,
+        options,
+        names,
+        Sealing::from_options(options),
+    )
+}
+
+/// [`rewrite`], sealed with whichever handler `sealing` names.
+pub(crate) fn rewrite_sealed(
+    objects: &ObjectSet,
+    trailer: &Dict,
+    options: &WriteOptions,
+    names: &NameTable,
+    sealing: Option<Sealing<'_>>,
+) -> Vec<u8> {
     // Before the layout is chosen, so the linearized writer receives the same
     // trailer the ordinary one would.
     let identified = with_identifier(
         trailer,
         objects,
         names,
-        options.encryption.as_ref().map(|e| &e.entropy),
+        sealing.map(Sealing::identifier_entropy),
     );
     // 7.5.6: a rewrite is one revision, so it has no earlier section to chain
     // to. Both keys arrive from the *source* document's trailer — every file
@@ -893,7 +1086,9 @@ pub fn rewrite(
         // Encryption used to be a second reason to fall through here, and the
         // caller was told nothing: they asked for both and got an encrypted
         // file with an ordinary layout. `linearize` owns the cipher now.
-        if let Some(bytes) = crate::linearize::linearize(objects, trailer, options, names) {
+        if let Some(bytes) =
+            crate::linearize::linearize_sealed(objects, trailer, options, names, sealing)
+        {
             return bytes;
         }
     }
@@ -906,10 +1101,7 @@ pub fn rewrite(
 
     // 7.6.1: the /Encrypt dictionary is written in the clear and everything
     // else is not. Built first so the cipher exists before the first object.
-    let encryption = options
-        .encryption
-        .as_ref()
-        .and_then(|e| build_encryption(e, names));
+    let encryption = sealing.and_then(|sealing| build_sealing(sealing, names));
     let crypt: Option<&dyn ObjectCipher> = encryption
         .as_ref()
         .map(|(_, cipher)| cipher as &dyn ObjectCipher);

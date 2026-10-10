@@ -704,21 +704,28 @@ pub enum XpsElementDefect {
     /// with an `/ICCBased` stream it cannot use, and 15.2.5's syntax carries
     /// no sRGB fallback of its own to prefer over it.
     ColourProfileUnresolved,
-    /// A `ContextColor` whose profile takes a number of components PDF's
-    /// `/ICCBased` cannot state.
+    /// A `ContextColor` whose `nCLR` profile cannot be placed as a `/DeviceN`
+    /// space: more than [`profiles::MAX_XPS_DEVICE_N_CHANNELS`] channels —
+    /// ECMA-388 15.2.5 names `2CLR` through `8CLR` — or no transform this
+    /// build can evaluate.
     ///
-    /// Table 66 permits **1, 3 or 4** and no others, and ICC.1's `nCLR` family
-    /// runs to fifteen. PDF's other n-channel space, `/DeviceN`, needs a tint
-    /// transform into an alternate space that only *evaluating* the profile
-    /// could supply — so this is a **narrowing** and is named as one, and the
-    /// element takes the placeholder grey rather than a colour picked by
-    /// dropping components.
+    /// Table 66 permits `/ICCBased` **1, 3 or 4** components and no others,
+    /// so an `nCLR` profile of any other count — `2CLR`, `5CLR` to `8CLR` — is
+    /// placed as 8.6.6.5's `/DeviceN`, its tint transform the profile
+    /// evaluated over a grid (since 3 October 2026). `3CLR` and `4CLR` are
+    /// `/ICCBased`, as the named spaces of three and four channels are.
+    /// Where that cannot be done this is a **narrowing** and is named as one,
+    /// and the element takes the placeholder grey rather than a colour picked
+    /// by dropping components.
     ColourProfileChannels,
     /// A colour or a gradient that is not 15's syntax. **Painted grey.**
     BrushUnreadable,
-    /// The brush reached the page and not exactly: gradient stops whose alphas
-    /// differ from each other, which one constant alpha cannot express, or a
-    /// `ColorInterpolationMode` this build does not interpolate in.
+    /// The brush reached the page and not exactly: a `ContextColor` gradient
+    /// stop whose profile this build cannot evaluate, painted in 8.6.5.5's
+    /// alternate reading, or a `ColorInterpolationMode` 18.3.1.2 does not name,
+    /// blended as the default. Stops whose alphas differ, `ScRgbLinear`
+    /// interpolation and a stop whose profile evaluates are **drawn** since
+    /// 3 October 2026, and are not approximations.
     BrushApproximated,
     /// A `ResourceDictionary` whose `Source` names no part this package holds,
     /// or names one that cannot be read (14.2.4).
@@ -762,11 +769,17 @@ pub enum XpsElementDefect {
     /// which is the geometry rule: a run at an origin this reader invented is
     /// text in the wrong place.
     GlyphsUnreadable,
-    /// A `StyleSimulations` other than `None` (12.1). The run **is painted**,
-    /// at exactly the glyphs, widths and positions the file states, without
-    /// the synthetic slant or weight — which is the paint-unreadable side of
-    /// the asymmetry rather than the geometry side, and dropping the text
-    /// would lose far more than the simulation does.
+    /// A `StyleSimulations` value 12.1.5 does not name — none of `None`,
+    /// `BoldSimulation`, `ItalicSimulation` and `BoldItalicSimulation`. The run
+    /// **is painted**, unsimulated, at exactly the glyphs, widths and positions
+    /// the file states: the paint-unreadable side of the asymmetry rather than
+    /// the geometry side, and dropping the text would lose far more than the
+    /// simulation does.
+    ///
+    /// The four values 12.1.5 names are **drawn** since its clause was read
+    /// (3 October 2026): emboldening as a stroke of 2% of the em in the fill's
+    /// paint, with every font-supplied advance widened by 2% and the glyphs
+    /// moved up and right by 1%; italicising as a 20° shear of the text matrix.
     GlyphsStyleSimulated,
     /// An `ImageSource` that resolves to no part in the package, or to one the
     /// package does not hold.
@@ -824,7 +837,7 @@ impl core::fmt::Display for XpsElementDefect {
                 "a `ContextColor` whose profile part is not a profile"
             }
             XpsElementDefect::ColourProfileChannels => {
-                "a colour profile with a channel count `/ICCBased` cannot state"
+                "an `nCLR` colour profile that cannot be placed as a `/DeviceN` space"
             }
             XpsElementDefect::BrushUnreadable => "a colour or gradient that is not 15's syntax",
             XpsElementDefect::BrushApproximated => "a brush that reached the page approximately",
@@ -843,7 +856,7 @@ impl core::fmt::Display for XpsElementDefect {
             XpsElementDefect::GlyphsIndicesUnreadable => "`Indices` that is not 12.1.3's grammar",
             XpsElementDefect::GlyphsUnreadable => "a `Glyphs` stating no usable origin or em size",
             XpsElementDefect::GlyphsStyleSimulated => {
-                "a `StyleSimulations` this build does not simulate"
+                "a `StyleSimulations` value 12.1.5 does not name"
             }
             XpsElementDefect::ImageUnresolved => "an image the package does not hold",
             XpsElementDefect::ImageFormatUnsupported => {

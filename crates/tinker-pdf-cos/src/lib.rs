@@ -43,15 +43,18 @@
 #![deny(missing_docs)]
 
 pub mod appearance;
+pub mod bmp_embed;
 pub mod build;
 pub mod calc;
 pub mod decrypt;
+pub(crate) mod dedup;
 pub mod dest;
 pub mod doc;
 pub mod edit;
 pub mod fill;
 pub mod font;
 pub mod form;
+pub mod gif_embed;
 pub mod jxr_embed;
 pub mod lexer;
 pub mod limits;
@@ -63,6 +66,8 @@ pub mod pages;
 pub mod parse;
 pub mod png_embed;
 pub mod pubsec;
+pub mod raster_embed;
+pub mod resolve;
 pub mod script;
 pub mod security;
 pub mod sign;
@@ -71,7 +76,9 @@ pub mod text_string;
 pub mod tiff_embed;
 pub mod trees;
 pub mod validate;
+pub mod viewer;
 pub mod warn;
+pub mod webp_embed;
 pub mod write;
 pub mod xref;
 
@@ -84,12 +91,17 @@ mod store;
 mod streams;
 
 pub use appearance::synthesize as synthesize_appearance;
+pub use bmp_embed::bmp_image;
 pub use build::{
-    jpeg_shape, subset_tag, ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal,
-    BlendMode, CompressedImage, DeviceSpace, DocumentBuilder, EmbeddedWhole, ExtGState,
-    FormXObject, Function, Glyph, ImageColorSpace, ImageData, ImageFilter, MaskKind, OutlineEntry,
-    PageBuilder, PlacedGlyph, Shading, ShadingPattern, SoftMask, StateMask, SubsetRefusal, Target,
-    TilingPattern, TilingType, TransparencyGroup,
+    is_language_tag, is_standard_namespace, is_standard_structure_type, jpeg_shape, subset_tag,
+    ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal, BlendMode, CalculatorOp,
+    CieSpace, CompressedImage, DeviceNAttributes, DeviceSpace, DocumentBuilder, EmbeddedWhole,
+    ExtGState, FileRelationship, FormXObject, Function, Glyph, ImageColorSpace, ImageData,
+    ImageFilter, LayerId, MaskKind, NamespaceId, NewAssociatedFile, NewOutputIntent, OutlineEntry,
+    PageBuilder, PieceText, PlacedGlyph, Shading, ShadingPattern, SoftMask, StateMask,
+    SubsetRefusal, TableAttributes, TableScope, Tag, Target, TextPiece, TilingPattern, TilingType,
+    TransparencyGroup, MATHML_NAMESPACE, PDF_1_7_NAMESPACE, PDF_2_0_NAMESPACE,
+    STANDARD_STRUCTURE_TYPES,
 };
 // `calc::keystroke` and `calc::validate` are deliberately *not* re-exported
 // here: this root already has a `validate`, which is the strict structural
@@ -104,8 +116,16 @@ pub use calc::{
 pub use decrypt::{CryptFilterParams, Decryptor, EncryptParams, IdentityDecryptor};
 pub use dest::{links, Action, DestKind, Destination, Link, Resolver};
 pub use doc::{CosDocument, CosError, LadderLevel, OpenError};
+pub use edit::StampPlacement;
 pub use edit::{
-    annot, DocumentEditor, EditCheckpoint, FillError, FillRejection, SkippedWidget, WidgetDefect,
+    annot, AddFieldError, DocumentEditor, EditCheckpoint, FillError, FillRejection, NewField,
+    NewFieldKind, RadioButton, SkippedWidget, WidgetDefect,
+};
+// Document operations on the editor: page labels, embedded files and
+// metadata, each read back by the readers in `outline`.
+pub use edit::{
+    AttachError, DeletedObject, EmbeddedFile, EntryHolder, MetadataSync, PageLabelError,
+    PageLabelRange, PathStep, Removal, RemovedEntry, Sanitise, SanitiseReport, SaveRefusal,
 };
 pub use fill::{text_appearance, TextLayout};
 pub use font::{DecodedCode, EmbeddedProgram, Font, FontKind, ProgramKey};
@@ -114,6 +134,7 @@ pub use form::{
     document_scripts_within, field_value, fields, fields_within, script_summary, DocumentScript,
     Field, FieldKind, FieldScripts, FieldValue, Script, ScriptBudget, ScriptSummary,
 };
+pub use gif_embed::gif_image;
 pub use jxr_embed::{jxr_image, JxrImageData};
 pub use lexer::{Keyword, Lexer, Token, TokenKind};
 pub use name::{Name, NameTable, NAMES};
@@ -122,21 +143,34 @@ pub use outline::{
     attachments, metadata, outline, page_labels, xmp_metadata, Attachment, LabelStyle, Metadata,
     OutlineItem, Trapped,
 };
-pub use pages::{Page, Rect};
+pub use pages::{Page, PageBoundary, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
 pub use png_embed::{png_image, PngImageData, PngRoute};
-pub use pubsec::{PubSecError, Recipient};
+pub use pubsec::{PubSecError, PublicKeyEncryption, Recipient, SealError};
+pub use raster_embed::RasterImageData;
+pub use resolve::Resolve;
 pub use script::{Budget, Event, Host, Outcome, ScriptError, ScriptPolicy, ScriptScope, Trigger};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use sign::{
-    digest_spans, Certification, DigestAlgorithm, FieldLock, SignError, SignRefused, Signer,
-    SigningRequest, SigningTarget,
+    digest_spans, Certification, DigestAlgorithm, FieldLock, SignError, SignRefused,
+    SignatureAppearance, SignatureImage, Signer, SigningRequest, SigningTarget, TimestampRequest,
+    Timestamper, ValidationData,
 };
 pub use source::{ByteSource, CountingSource, ShreddedSource, SliceSource, SourceMiss, CHUNK_SIZE};
-pub use text_string::{decode_text_string, parse_date, Date};
-pub use tiff_embed::{tiff_image, TiffImageData, TiffRoute};
-pub use trees::{name_tree, name_tree_lookup, number_tree};
+pub use text_string::{decode_text_string, encode_text_string, parse_date, Date};
+pub use tiff_embed::{tiff_image, tiff_image_directory, TiffImageData, TiffRoute};
+/// The host's randomness, which a public-key encrypted save draws its seed,
+/// its content key and every recipient's padding from.
+pub use tinker_pdf_crypto::EntropySource;
+pub use trees::{
+    name_tree, name_tree_lookup, number_tree, write_name_tree, write_number_tree, TreeWriteError,
+};
 pub use validate::{kind_counts, tier_counts, validate, Defect, DefectKind, Tier};
+pub use viewer::{
+    viewer_preferences, Duplex, EnforcedPreference, NonFullScreenPageMode, PrintScaling,
+    ReadingDirection, ViewerPreferences,
+};
 pub use warn::{Warning, WarningKind, WarningSink};
+pub use webp_embed::webp_image;
 pub use write::{Encryption, ObjectSet, StreamData, WriteMode, WriteOptions, Written};
 pub use xref::{Revision, XrefEntry, XrefTable};

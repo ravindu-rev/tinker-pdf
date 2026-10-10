@@ -32,14 +32,21 @@
 //! is a projection over it — it maps a `PixelFormat` onto one of PNG's colour
 //! types and calls this — because ruling 11 makes the facade the public surface
 //! for a *document* and a rendered page is what a caller has.
+//!
+//! [`bmp_decode`] and [`gif_decode`] are container decoders of the tier-4
+//! archive row's, the first with no coding a `/Filter` shares. Each hands back
+//! [`ImagePixels`] — indexed or direct, eight bits — which is the one output
+//! shape the archive row's decoders share, so the embedder learns it once.
 
 #![forbid(unsafe_code)]
 
 mod ascii;
+mod bmp;
 mod brotli;
 mod ccitt;
 mod crc32;
 pub mod deflate;
+mod gif;
 mod inflate;
 mod jbig2;
 mod jpeg;
@@ -51,11 +58,14 @@ mod packbits;
 mod png;
 mod predictors;
 mod qm;
+mod raster;
 mod runlength;
 mod tiff;
+mod webp;
 
 use core::fmt;
 
+pub use bmp::{bmp_decode, BmpError, BmpImage, MAX_BMP_SAMPLES};
 pub use brotli::{brotli_decode, BrotliError};
 pub use ccitt::{
     decode as ccitt_decode, g4_encode as ccitt_g4_encode, CcittEncodeError, CcittParams,
@@ -63,6 +73,7 @@ pub use ccitt::{
 };
 pub use crc32::{crc32, Crc32};
 pub use deflate::{deflate, zlib_compress};
+pub use gif::{gif_decode, GifError, GifImage, MAX_GIF_SAMPLES};
 pub use inflate::{inflate_raw, RawInflated};
 pub use jbig2::{
     decode as jbig2_decode, decode_attributed as jbig2_decode_attributed,
@@ -76,7 +87,10 @@ pub use jpeg::{
     decode as jpeg_decode, jpeg_encode, JpegColor, JpegEncodeError, JpegError, JpegImage,
     JpegOptions, JpegQuantisation, JpegSampling, JpegSource, JpegSourceColour,
 };
-pub use jpx::{jpx_decode, jpx_decode_attributed, JpxColour, JpxImage, Refusal as JpxRefusal};
+pub use jpx::{
+    jpx_decode, jpx_decode_attributed, jpx_header, JpxColour, JpxHeader, JpxImage,
+    Refusal as JpxRefusal,
+};
 pub use jxr::{
     jxr_decode, JxrChannels, JxrError, JxrImage, JxrPixelFormat, JxrRefusal, JxrWarning,
 };
@@ -87,10 +101,13 @@ pub use png::{
     MAX_PNG_SAMPLES, PNG_SIGNATURE,
 };
 pub use predictors::PredictorParams;
+pub use raster::ImagePixels;
 pub use tiff::{
-    tiff_decode, tiff_scan, TiffCcitt, TiffColour, TiffCompression, TiffError, TiffImage,
-    TiffLayout, TiffPhotometric, TiffPlanar, TiffResolution, TiffScan, MAX_TIFF_SAMPLES,
+    tiff_decode, tiff_scan, tiff_scan_directory, TiffCcitt, TiffColour, TiffCompression, TiffError,
+    TiffImage, TiffLayout, TiffPhotometric, TiffPlanar, TiffResolution, TiffSampleFormat,
+    TiffSampleRange, TiffScan, MAX_TIFF_SAMPLES,
 };
+pub use webp::{webp_decode, WebpError, WebpImage, MAX_WEBP_SAMPLES};
 
 /// Resource ceilings. Mandatory: a 1 KB flate stream can legally expand to
 /// gigabytes, and a lenient decoder without a ceiling is a denial-of-service
@@ -343,8 +360,9 @@ pub enum Warning {
     /// TIFF: every `ColorMap` value was at or below 255, so the map was read
     /// as an 8-bit one rather than as the 16-bit one p.23 describes.
     TiffColorMapIsEightBit,
-    /// TIFF: the file holds more than one image file directory. The first is
-    /// the image; the rest are not read.
+    /// TIFF: the file holds more than one image file directory and was read
+    /// through `tiff_scan`, which takes the first. `tiff_scan_directory` reads
+    /// the others by index, and a caller that pages uses it instead.
     TiffExtraPagesIgnored,
 
     // ---- PNG (ISO/IEC 15948) ---------------------------------------------
@@ -370,6 +388,48 @@ pub enum Warning {
     /// ruling 2 makes it a black pixel here, because refusing the image would
     /// throw away every pixel that was fine.
     PngPaletteIndexOutOfRange,
+
+    // ---- BMP -------------------------------------------------------------
+    //
+    // Three, and every one of them is a *leniency*: what a bitmap can get
+    // wrong that costs meaning is a [`bmp::BmpError`], for `png.rs`'s reason.
+    /// BMP: a pixel indexed past the end of the colour table the file
+    /// supplied. The table is padded with black to the depth's own size, so the
+    /// pixel is black — [`Warning::PngPaletteIndexOutOfRange`]'s bargain.
+    BmpPaletteIndexOutOfRange,
+    /// BMP: an RLE delta or an early end-of-line or end-of-bitmap left pixels
+    /// the stream never defined. The documentation does not say what they
+    /// are, and they are index 0 here.
+    BmpRleUndefinedPixels,
+    /// BMP: an RLE run or literal reached past the end of its row or of the
+    /// image. The excess was dropped rather than wrapped onto the next row.
+    BmpRleOverrun,
+
+    // ---- GIF -------------------------------------------------------------
+    //
+    // Three, and each a *leniency*; LZW damage reuses [`Warning::BadLzwCode`]
+    // and [`Warning::TruncatedInput`], which already say it.
+    /// GIF: an index past the end of the active colour table. The table is
+    /// padded with black to 256 entries, so the pixel is black.
+    GifPaletteIndexOutOfRange,
+    /// GIF: the file holds more than one image. The first is the picture; the
+    /// rest are not decoded — an animation drawn as its first frame.
+    GifFramesIgnored,
+    /// GIF: the first image reaches past its logical screen, and the part
+    /// outside it was clipped.
+    GifFrameOutsideScreen,
+
+    // ---- WebP (RFC 9649) -------------------------------------------------
+    //
+    // Three leniencies; a cut-off stream reuses [`Warning::TruncatedInput`].
+    /// WebP: a back-reference reached before the image or past its end, or a
+    /// colour-cache index past the cache — data that is well formed and
+    /// impossible. The image stops there and the rest is transparent black.
+    WebpCorruptData,
+    /// WebP: an animation's frames after the first are not decoded.
+    WebpFramesIgnored,
+    /// WebP: an `ALPH` chunk would not decode, so the picture is opaque.
+    WebpAlphaDropped,
 }
 
 impl Warning {
@@ -425,6 +485,15 @@ impl Warning {
             Self::PngChunkCrcMismatch => "png-chunk-crc-mismatch",
             Self::PngChunkDropped => "png-chunk-dropped",
             Self::PngPaletteIndexOutOfRange => "png-palette-index-out-of-range",
+            Self::BmpPaletteIndexOutOfRange => "bmp-palette-index-out-of-range",
+            Self::BmpRleUndefinedPixels => "bmp-rle-undefined-pixels",
+            Self::BmpRleOverrun => "bmp-rle-overrun",
+            Self::GifPaletteIndexOutOfRange => "gif-palette-index-out-of-range",
+            Self::GifFramesIgnored => "gif-frames-ignored",
+            Self::GifFrameOutsideScreen => "gif-frame-outside-screen",
+            Self::WebpCorruptData => "webp-corrupt-data",
+            Self::WebpFramesIgnored => "webp-frames-ignored",
+            Self::WebpAlphaDropped => "webp-alpha-dropped",
         }
     }
 }
@@ -478,6 +547,15 @@ impl fmt::Display for Warning {
             Self::PngChunkCrcMismatch => "PNG ancillary chunk CRC-32 mismatch, chunk dropped",
             Self::PngChunkDropped => "PNG chunk dropped as misplaced or malformed",
             Self::PngPaletteIndexOutOfRange => "PNG sample indexed past the end of PLTE",
+            Self::BmpPaletteIndexOutOfRange => "BMP pixel indexed past the end of its colour table",
+            Self::BmpRleUndefinedPixels => "BMP RLE stream left pixels undefined; index 0 used",
+            Self::BmpRleOverrun => "BMP RLE run past the end of its row, clipped",
+            Self::GifPaletteIndexOutOfRange => "GIF pixel indexed past the end of its colour table",
+            Self::GifFramesIgnored => "GIF images after the first are not decoded",
+            Self::GifFrameOutsideScreen => "GIF image reaches past its logical screen, clipped",
+            Self::WebpCorruptData => "WebP pixel data refers outside the image; decode stopped",
+            Self::WebpFramesIgnored => "WebP animation frames after the first are not decoded",
+            Self::WebpAlphaDropped => "WebP alpha chunk undecodable; picture drawn opaque",
         };
         f.write_str(s)
     }

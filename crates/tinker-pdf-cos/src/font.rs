@@ -21,6 +21,7 @@ use tinker_pdf_font::{base_char, base_glyph_name, glyph_name_to_char, BaseEncodi
 use crate::doc::CosDocument;
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
+use crate::resolve::Resolve;
 use crate::warn::{WarningKind, WarningSink};
 
 /// Which of 9.6/9.7's font families a dictionary belongs to.
@@ -515,6 +516,58 @@ impl Font {
         base_char(self.base_encoding, byte)
     }
 
+    /// The character a simple font's code draws, for a writer choosing the
+    /// byte to show a character with: the character its encoding (9.6.6)
+    /// gives the code, when `/ToUnicode` — where it maps the code at all —
+    /// says the same.
+    ///
+    /// `None` for a code the two disagree on, since which of them a reader
+    /// draws by depends on the font program; for a composite or Type 3 font,
+    /// whose codes are not one byte through an encoding; and for every code
+    /// of a symbolic font — the descriptor's flag, or the standard `Symbol`
+    /// and `ZapfDingbats` — whose codes name the program's own glyphs
+    /// (9.6.6.4) rather than characters an encoding table here knows.
+    pub(crate) fn char_drawn_by(&self, code: u8) -> Option<char> {
+        if !matches!(self.kind, FontKind::Type1 | FontKind::TrueType) || self.symbolic {
+            return None;
+        }
+        if matches!(
+            Standard14::from_base_font(&self.base_font),
+            Some(Standard14::Symbol | Standard14::ZapfDingbats)
+        ) {
+            return None;
+        }
+        let c = self.char_of(u32::from(code))?;
+        let mapped = self
+            .to_unicode
+            .as_ref()
+            .and_then(|cmap| cmap.to_unicode_string(u32::from(code)))
+            .filter(|text| !text.is_empty());
+        match mapped {
+            Some(text) if text.chars().ne(std::iter::once(c)) => None,
+            _ => Some(c),
+        }
+    }
+
+    /// Whether the document gave this font a `/ToUnicode` that read.
+    #[must_use]
+    pub fn has_to_unicode(&self) -> bool {
+        self.to_unicode.is_some()
+    }
+
+    /// The lowest code that the font's `/ToUnicode` reads as exactly `c`
+    /// ([`CMap::code_for_unicode`]: read backwards,
+    /// checked forwards).
+    ///
+    /// The writer's direction, for a font whose program cannot answer it: a
+    /// bare CFF carries no `cmap`, so the only statement in a document of
+    /// which code means which character is the font's own `/ToUnicode`. `None`
+    /// for a font with none, or a character it never maps.
+    #[must_use]
+    pub fn code_for_char(&self, c: char) -> Option<u32> {
+        self.to_unicode.as_ref()?.code_for_unicode(c)
+    }
+
     /// The text a code stands for.
     ///
     /// `/ToUnicode` wins where it exists, because it is the producer's own
@@ -545,7 +598,7 @@ impl Font {
 /// Every source on the chain is remembered beside the stream it came from, so
 /// a parent's own `/UseCMap` can be answered too, and every leniency comes
 /// back attributed to the CMap stream that caused it rather than to the font.
-fn read_cmap(doc: &CosDocument, r: ObjRef, sink: &mut WarningSink) -> Option<CMap> {
+fn read_cmap<R: Resolve + ?Sized>(doc: &R, r: ObjRef, sink: &mut WarningSink) -> Option<CMap> {
     let bytes = doc.stream_decoded(r).ok()?;
 
     use tinker_pdf_font::cmap::{ParentRef, ParentSource, Warning as CMapWarning};
@@ -622,6 +675,19 @@ fn read_cmap(doc: &CosDocument, r: ObjRef, sink: &mut WarningSink) -> Option<CMa
 /// Reads a font dictionary.
 #[must_use]
 pub fn read(doc: &CosDocument, dict: &Dict) -> Font {
+    read_in(doc, dict)
+}
+
+/// [`read`] through any view of the document: every object the font
+/// dictionary reaches — its descriptor, `/Widths`, `/Encoding`, CMaps and
+/// descendant — read through `view`, so a font an editor allocated or
+/// changed is read as the editor has it. [`crate::edit::DocumentEditor`] is a
+/// [`Resolve`]; through the document it is [`read`] exactly.
+///
+/// The leniencies a CMap needed are recorded against `view`'s document
+/// (ruling 10), as [`read`] records them.
+#[must_use]
+pub fn read_in<R: Resolve + ?Sized>(doc: &R, dict: &Dict) -> Font {
     let subtype = doc
         .resolve_key(dict, doc.intern(b"Subtype"))
         .as_name()
@@ -682,11 +748,15 @@ pub fn read(doc: &CosDocument, dict: &Dict) -> Font {
         _ => read_simple(doc, dict, &mut font, &base_font),
     }
 
-    doc.absorb(sink);
+    doc.document().absorb(sink);
     font
 }
 
-fn read_to_unicode(doc: &CosDocument, dict: &Dict, sink: &mut WarningSink) -> Option<CMap> {
+fn read_to_unicode<R: Resolve + ?Sized>(
+    doc: &R,
+    dict: &Dict,
+    sink: &mut WarningSink,
+) -> Option<CMap> {
     let r = dict.get_ref(doc.intern(b"ToUnicode"))?;
     read_cmap(doc, r, sink)
 }
@@ -694,7 +764,12 @@ fn read_to_unicode(doc: &CosDocument, dict: &Dict, sink: &mut WarningSink) -> Op
 /// `/Encoding` is a name, or a dictionary with `/BaseEncoding` and
 /// `/Differences` (9.6.6), or for a composite font a predefined CMap name or
 /// an embedded CMap stream (9.7.5).
-fn read_encoding(doc: &CosDocument, dict: &Dict, font: &mut Font, sink: &mut WarningSink) {
+fn read_encoding<R: Resolve + ?Sized>(
+    doc: &R,
+    dict: &Dict,
+    font: &mut Font,
+    sink: &mut WarningSink,
+) {
     let key = doc.intern(b"Encoding");
 
     let named = |bytes: &[u8], font: &mut Font, sink: &mut WarningSink| match bytes {
@@ -795,7 +870,7 @@ fn read_encoding(doc: &CosDocument, dict: &Dict, font: &mut Font, sink: &mut War
     }
 }
 
-fn read_simple(doc: &CosDocument, dict: &Dict, font: &mut Font, base_font: &str) {
+fn read_simple<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font, base_font: &str) {
     let first = doc
         .resolve_key(dict, doc.intern(b"FirstChar"))
         .as_int()
@@ -835,7 +910,7 @@ fn read_simple(doc: &CosDocument, dict: &Dict, font: &mut Font, base_font: &str)
     }
 }
 
-fn read_composite(doc: &CosDocument, dict: &Dict, font: &mut Font) {
+fn read_composite<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font) {
     // 9.7.1: exactly one descendant, in an array.
     let descendants = doc.resolve_key(dict, doc.intern(b"DescendantFonts"));
     let Some(first) = descendants.as_array().and_then(<[Object]>::first).cloned() else {
@@ -996,7 +1071,7 @@ fn read_composite(doc: &CosDocument, dict: &Dict, font: &mut Font) {
     }
 }
 
-fn descriptor(doc: &CosDocument, dict: &Dict) -> Option<Arc<Dict>> {
+fn descriptor<R: Resolve + ?Sized>(doc: &R, dict: &Dict) -> Option<Arc<Dict>> {
     let value = doc.resolve_key(dict, doc.intern(b"FontDescriptor"));
     value.as_dict().map(|d| Arc::new(d.clone()))
 }
@@ -1009,7 +1084,7 @@ fn descriptor(doc: &CosDocument, dict: &Dict) -> Option<Arc<Dict>> {
 /// present with a null value is a key absent — `get_ref` answers `None` for
 /// anything that is not an indirect reference, and a font program is always
 /// one because it is a stream.
-fn embedded_program(doc: &CosDocument, desc: &Dict) -> Option<EmbeddedProgram> {
+fn embedded_program<R: Resolve + ?Sized>(doc: &R, desc: &Dict) -> Option<EmbeddedProgram> {
     for (name, key) in [
         (&b"FontFile2"[..], ProgramKey::FontFile2),
         (b"FontFile3", ProgramKey::FontFile3),
@@ -1025,6 +1100,17 @@ fn embedded_program(doc: &CosDocument, desc: &Dict) -> Option<EmbeddedProgram> {
 /// The font dictionaries in one resource dictionary, by resource name.
 #[must_use]
 pub fn from_resources(doc: &CosDocument, resources: &Dict) -> HashMap<Name, Arc<Font>> {
+    from_resources_in(doc, resources)
+}
+
+/// [`from_resources`] through any view of the document, each font read by
+/// [`read_in`]: a resource dictionary an editor holds names fonts the file
+/// may not have, and through the editor they resolve.
+#[must_use]
+pub fn from_resources_in<R: Resolve + ?Sized>(
+    doc: &R,
+    resources: &Dict,
+) -> HashMap<Name, Arc<Font>> {
     let mut out = HashMap::new();
     let value = doc.resolve_key(resources, doc.intern(b"Font"));
     let Some(fonts) = value.as_dict() else {
@@ -1034,7 +1120,7 @@ pub fn from_resources(doc: &CosDocument, resources: &Dict) -> HashMap<Name, Arc<
     for (key, entry) in fonts.iter() {
         let resolved = doc.resolve(entry);
         if let Some(dict) = resolved.as_dict() {
-            out.insert(*key, Arc::new(read(doc, dict)));
+            out.insert(*key, Arc::new(read_in(doc, dict)));
         }
     }
     out
@@ -1045,5 +1131,5 @@ pub fn from_resources(doc: &CosDocument, resources: &Dict) -> HashMap<Name, Arc<
 pub fn at(doc: &CosDocument, r: ObjRef) -> Option<Font> {
     let object = doc.get(r).ok()?;
     let dict = object.as_dict()?;
-    Some(read(doc, dict))
+    Some(read_in(doc, dict))
 }

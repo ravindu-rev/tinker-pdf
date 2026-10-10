@@ -1496,7 +1496,7 @@ fn every_face_has_its_own_index_and_its_own_base_font() {
 #[test]
 fn a_family_this_build_does_not_have_falls_through_to_the_next() {
     use super::paint::{Face, Generic};
-    use tinker_pdf_css::property::{FontFamily, FontStyle};
+    use tinker_pdf_css::property::{FontFamily, FontKerning, FontStyle};
     use tinker_pdf_layout::metrics::FontRequest;
 
     let face = |families: Vec<FontFamily>, weight: u16, style: FontStyle| {
@@ -1505,6 +1505,8 @@ fn a_family_this_build_does_not_have_falls_through_to_the_next() {
             weight,
             style,
             size: 16.0,
+            kerning: FontKerning::Auto,
+            features: &[],
         })
     };
 
@@ -1576,7 +1578,9 @@ fn the_encoding_covers_what_it_covers_and_says_so() {
 #[test]
 fn an_unencodable_character_gets_one_stable_code() {
     use super::paint::{Chosen, Coded, Face, Fonts, Generic, OVERFLOW_FIRST};
-    use tinker_pdf_css::property::{FontFamily, FontStyle, FontVariant, TextDecoration};
+    use tinker_pdf_css::property::{
+        FontFamily, FontKerning, FontStyle, FontVariant, TextDecoration,
+    };
     use tinker_pdf_layout::TextRun;
 
     let run = |text: &str| TextRun {
@@ -1589,6 +1593,14 @@ fn an_unencodable_character_gets_one_stable_code() {
         weight: 400,
         style: FontStyle::Normal,
         variant: FontVariant::Normal,
+        kerning: FontKerning::Auto,
+        features: Vec::new(),
+        paragraph_rtl: Some(false),
+        paragraph: 0,
+        embeddings: Default::default(),
+        bidi_level: None,
+        bidi_gap: None,
+        hyphenated: false,
         color: tinker_pdf_css::property::Color::BLACK,
         decoration: TextDecoration::None,
         painted: true,
@@ -1683,7 +1695,9 @@ fn an_unencodable_character_gets_one_stable_code() {
 #[test]
 fn characters_past_the_overflow_font_are_counted() {
     use super::paint::{Fonts, OVERFLOW_CODES};
-    use tinker_pdf_css::property::{Color, FontFamily, FontStyle, FontVariant, TextDecoration};
+    use tinker_pdf_css::property::{
+        Color, FontFamily, FontKerning, FontStyle, FontVariant, TextDecoration,
+    };
     use tinker_pdf_layout::TextRun;
 
     // 300 distinct CJK ideographs, of which 224 fit.
@@ -1702,6 +1716,14 @@ fn characters_past_the_overflow_font_are_counted() {
         weight: 400,
         style: FontStyle::Normal,
         variant: FontVariant::Normal,
+        kerning: FontKerning::Auto,
+        features: Vec::new(),
+        paragraph_rtl: Some(false),
+        paragraph: 0,
+        embeddings: Default::default(),
+        bidi_level: None,
+        bidi_gap: None,
+        hyphenated: false,
         color: Color::BLACK,
         decoration: TextDecoration::None,
         painted: true,
@@ -1724,7 +1746,7 @@ fn characters_past_the_overflow_font_are_counted() {
 #[test]
 fn an_east_asian_character_is_one_em_wide() {
     use super::paint::BookMetrics;
-    use tinker_pdf_css::property::{FontFamily, FontStyle};
+    use tinker_pdf_css::property::{FontFamily, FontKerning, FontStyle};
     use tinker_pdf_layout::metrics::{FontRequest, Metrics};
 
     let families = vec![FontFamily::Serif];
@@ -1733,6 +1755,8 @@ fn an_east_asian_character_is_one_em_wide() {
         weight: 400,
         style: FontStyle::Normal,
         size: 20.0,
+        kerning: FontKerning::Auto,
+        features: &[],
     };
     let metrics = BookMetrics::STANDARD;
     assert!((metrics.advance('\u{65e5}', &font) - 20.0).abs() < 1e-9);
@@ -1742,6 +1766,114 @@ fn an_east_asian_character_is_one_em_wide() {
     let vertical = metrics.vertical(&font);
     assert!((vertical.ascent - 20.0 * 0.683).abs() < 1e-9);
     assert!((vertical.descent - 20.0 * 0.217).abs() < 1e-9);
+}
+
+// ---- A run cut at its levels -------------------------------------------------
+
+/// **Each glyph finds its piece by a search, not a scan** (review of lane 8C).
+///
+/// `cut_run` shapes a run once and hands each glyph's advance to the piece
+/// its cluster starts in. It found that piece by walking the pieces from the
+/// first, so a run cut into a piece per character cost `O(glyphs x pieces)`,
+/// and one line can be such a run: a paragraph at a tiny `font-size` is one
+/// line, and a word of each direction in turn cuts it in two pieces a word.
+/// The review timed `ab بحم ` x 20 000 at 51.8 s to open, against 8.0 s for
+/// as many characters of `ab ab ab `.
+///
+/// The bound is held by count, not by a clock: `paint::step` counts each
+/// piece the lookup looks at, under `cfg(test)` only, and a run of 4 096
+/// one-character pieces is held to `glyphs x (log2 pieces + 2)` steps — a
+/// binary search's — where the scan takes `n (n + 1) / 2`, 8 390 656. And
+/// the pieces still partition the run: each has its own character, the
+/// level it was cut at and its glyph's advance, and the last ends where the
+/// run did.
+#[test]
+fn a_run_cut_in_a_piece_per_character_finds_each_glyphs_piece_by_search() {
+    use super::paint::{cut_run, BookMetrics, STEPS};
+    use tinker_pdf_css::property::{
+        Color, FontFamily, FontKerning, FontStyle, FontVariant, TextDecoration,
+    };
+    use tinker_pdf_layout::metrics::{Metrics, ShapingContext};
+    use tinker_pdf_layout::TextRun;
+    use tinker_pdf_shape::bidi::Level;
+
+    const N: usize = 4096;
+    let text = "ab".repeat(N / 2);
+    let pieces: Vec<(core::ops::Range<usize>, Level)> = (0..N)
+        .map(|at| {
+            (
+                at..at + 1,
+                if at % 2 == 0 { Level::LTR } else { Level::RTL },
+            )
+        })
+        .collect();
+    let metrics = BookMetrics::STANDARD;
+    let mut run = TextRun {
+        x: 7.0,
+        y: 0.0,
+        width: 0.0,
+        text,
+        font_size: 10.0,
+        families: vec![FontFamily::Serif],
+        weight: 400,
+        style: FontStyle::Normal,
+        variant: FontVariant::Normal,
+        kerning: FontKerning::Auto,
+        features: Vec::new(),
+        paragraph_rtl: Some(false),
+        paragraph: 1,
+        embeddings: Default::default(),
+        bidi_level: None,
+        bidi_gap: None,
+        hyphenated: false,
+        color: Color::BLACK,
+        decoration: TextDecoration::None,
+        painted: true,
+        letter_spacing: 0.0,
+        word_spacing: 0.0,
+        generated: false,
+        anchor: None,
+        order: 1,
+    };
+    let font = super::paint::request(&run);
+    let (a, b) = (metrics.advance('a', &font), metrics.advance('b', &font));
+    run.width = (a + b) * (N / 2) as f64;
+
+    STEPS.with(|steps| steps.set(0));
+    let cut = cut_run(&run, &pieces, &metrics, &ShapingContext::NONE);
+    let steps = STEPS.with(core::cell::Cell::get);
+
+    let search = N * (N.ilog2() as usize + 2);
+    assert!(
+        steps <= search,
+        "{steps} pieces looked at for {N} glyphs in {N} pieces; a search looks at {search}"
+    );
+    assert_eq!(cut.len(), N);
+    let mut x = run.x;
+    for (at, piece) in cut.iter().enumerate() {
+        let (ch, width, level) = if at % 2 == 0 {
+            ("a", a, 0)
+        } else {
+            ("b", b, 1)
+        };
+        assert_eq!(piece.text, ch, "piece {at}");
+        assert_eq!(piece.bidi_level, Some(level), "piece {at}");
+        assert!(
+            (piece.x - x).abs() < 1e-6,
+            "piece {at} is at {}, not {x}",
+            piece.x
+        );
+        assert!(
+            (piece.width - width).abs() < 1e-6,
+            "piece {at}: {}",
+            piece.width
+        );
+        x += piece.width;
+    }
+    assert!(
+        (x - (run.x + run.width)).abs() < 1e-9,
+        "the pieces end at {x}"
+    );
 }
 
 // ---- The table of contents ---------------------------------------------------
@@ -1836,4 +1968,489 @@ fn a_navigation_document_with_no_epub_type_still_has_a_list() {
     let entries = super::nav::from_navigation_document(&dom(markup));
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].title, "One");
+}
+
+// ---- Where a content document's references are read from --------------------
+
+/// A provider over a handful of named files, recording every question it was
+/// asked — the shape a loose document's own resolver has, with nothing behind
+/// it but this list.
+struct Files {
+    files: Vec<(&'static str, &'static [u8])>,
+    asked: Vec<(String, String)>,
+}
+
+impl super::read::Resources for Files {
+    fn fetch(
+        &mut self,
+        referring: &str,
+        reference: &str,
+        limits: &Limits,
+    ) -> Result<(String, Vec<u8>), super::read::Unavailable> {
+        self.asked
+            .push((referring.to_owned(), reference.to_owned()));
+        let path = resolve_reference(referring, reference, limits)
+            .map_err(|_| super::read::Unavailable::Missing)?;
+        self.files
+            .iter()
+            .find(|(name, _)| *name == path)
+            .map(|(name, bytes)| ((*name).to_owned(), bytes.to_vec()))
+            .ok_or(super::read::Unavailable::Missing)
+    }
+}
+
+/// Reads `markup` as `text/doc.xhtml` against `resources`, with no user-agent
+/// sheet, and hands back the `<p>`'s computed `font-size` and the reading.
+fn read_through<R: super::read::Resources>(
+    resources: &mut R,
+    markup: &str,
+) -> (f64, super::read::Reading) {
+    use tinker_pdf_css::cascade::ComputedStyle;
+    use tinker_pdf_css::media::MediaContext;
+    use tinker_pdf_css::Budget as CssBudget;
+
+    let l = limits();
+    let media = MediaContext::screen(400.0, 600.0);
+    let initial = ComputedStyle::initial();
+    let context = super::read::Context {
+        ua: &[],
+        author: &[],
+        limits: &l,
+        css_limits: &l.css,
+        media: &media,
+        pre_paginated: false,
+        initial: &initial,
+    };
+    let mut budget = CssBudget::new(&l.css);
+    let reading = super::read::read_document(
+        resources,
+        "text/doc.xhtml",
+        markup.as_bytes(),
+        &context,
+        &mut budget,
+    )
+    .expect("a cascade");
+    let p = reading
+        .dom
+        .nodes
+        .iter()
+        .position(|node| node.name == "p")
+        .expect("a paragraph");
+    (reading.styles.styles[p].font_size, reading)
+}
+
+/// **Every reference a content document makes goes through its provider, and
+/// each is asked against the document that wrote it** — the `<link>` against
+/// the content document, the `@import` against the sheet that imported it, and
+/// the `<img>` against the content document again.
+///
+/// The `@import` is the one no committed book exercises (`epub_css.rs` asserts
+/// that none uses it), so before the provider seam nothing in the tree held the
+/// resolver that answers it: a build that dropped it would set this paragraph
+/// at the linked sheet's size and every other test would still pass.
+#[test]
+fn every_reference_a_document_makes_is_asked_of_its_provider() {
+    const MARKUP: &str = concat!(
+        r#"<html xmlns="http://www.w3.org/1999/xhtml"><head>"#,
+        r#"<link rel="stylesheet" href="../css/a.css"/></head>"#,
+        r#"<body><p>text</p><img src="../img/missing.png"/></body></html>"#
+    );
+    let mut files = Files {
+        files: vec![
+            (
+                "css/a.css",
+                b"@import url(b.css); p { font-size: 20px }".as_slice(),
+            ),
+            ("css/b.css", b"p { font-size: 30px !important }".as_slice()),
+        ],
+        asked: Vec::new(),
+    };
+    let (size, reading) = read_through(&mut files, MARKUP);
+    assert_eq!(size, 30.0, "the imported sheet's rule did not apply");
+    assert_eq!(
+        files.asked,
+        [
+            ("text/doc.xhtml".to_owned(), "../css/a.css".to_owned()),
+            ("css/a.css".to_owned(), "b.css".to_owned()),
+            ("text/doc.xhtml".to_owned(), "../img/missing.png".to_owned()),
+        ],
+        "a reference was asked against the wrong base, or not asked at all"
+    );
+    assert_eq!(
+        reading.pictures.refused.len(),
+        1,
+        "the missing picture is named rather than guessed at"
+    );
+}
+
+/// **A document with nothing beside it** reads every reference as missing:
+/// the stylesheet is not applied, and the picture is refused by name.
+#[test]
+fn a_document_with_no_resources_reads_every_reference_as_missing() {
+    const MARKUP: &str = concat!(
+        r#"<html xmlns="http://www.w3.org/1999/xhtml"><head>"#,
+        r#"<link rel="stylesheet" href="a.css"/></head>"#,
+        r#"<body><p>text</p><img src="cover.png"/></body></html>"#
+    );
+    let (size, reading) = read_through(&mut super::read::NoResources, MARKUP);
+    assert_eq!(
+        size,
+        tinker_pdf_css::cascade::ComputedStyle::initial().font_size
+    );
+    let img = reading
+        .dom
+        .nodes
+        .iter()
+        .position(|node| node.name == "img")
+        .expect("an img");
+    assert_eq!(
+        reading.pictures.refused,
+        [(img, crate::cbz::ImageDefect::Unresolved)]
+    );
+}
+
+/// **HTML §15.3.8's list attributes, as the presentational hints they are**,
+/// with §2.3.4.1's integer rules: leading white space and a sign are read,
+/// anything after the digits is not, and a value with no digit has no effect.
+/// `reversed` becomes the `reversed()` counter this build refuses by value, so
+/// it is counted against `counter-reset` rather than numbered upwards.
+#[test]
+fn list_attributes_are_presentational_hints() {
+    use tinker_pdf_css::Element;
+    let tree = dom(
+        "<body><ol start=\" 3x\"><li value=\"-2\">a</li><li value=\"x\">b</li></ol>\
+         <ol reversed=\"reversed\" start=\"9\"><li>c</li></ol><ol start=\"\"><li>d</li></ol>\
+         <ol start=\"99999999999\"><li>e</li></ol></body>",
+    );
+    let hints: Vec<Option<String>> = tree
+        .nodes
+        .iter()
+        .filter(|node| node.name == "ol" || node.name == "li")
+        .map(|node| node.presentational_hints())
+        .collect();
+    let some = |text: &str| Some(text.to_owned());
+    assert_eq!(
+        hints,
+        [
+            some("counter-reset: list-item 2"),
+            some("counter-set: list-item -2"),
+            None,
+            some("counter-reset: reversed(list-item)"),
+            None,
+            None,
+            None,
+            some("counter-reset: list-item 2147483646"),
+            None,
+        ]
+    );
+}
+
+/// **HTML §15.3.5's `dir`, as presentational hints**: `ltr` and `rtl` set
+/// `direction` and isolate, `auto` and a bare `<bdi>` isolate with the
+/// direction their content's first strong character gives them (`c` and `e`
+/// are `L`), and `<bdo>` is the override this build refuses by value. The
+/// keyword is ASCII
+/// case-insensitive, a value that is none of the three is no `dir`, an
+/// element outside XHTML's namespace has none of HTML's hints, and a list's
+/// hint and its `dir` are one declaration block.
+#[test]
+fn dir_is_a_presentational_hint() {
+    use tinker_pdf_css::Element;
+    let tree = dom(
+        "<body><p dir=\"RTL\">a</p><p dir=\"ltr\">b</p><p dir=\"auto\">c</p>\
+         <p dir=\"sideways\">d</p><bdi>e</bdi><bdi dir=\"rtl\">f</bdi><bdo dir=\"rtl\">g</bdo>\
+         <bdo>h</bdo><ol dir=\"rtl\" start=\"3\"><li>i</li></ol>\
+         <x:p xmlns:x=\"urn:x\" dir=\"rtl\">j</x:p></body>",
+    );
+    let hints: Vec<Option<String>> = tree
+        .nodes
+        .iter()
+        .filter(|node| node.name != "body" && node.name != "li")
+        .map(|node| node.presentational_hints())
+        .collect();
+    let some = |text: &str| Some(text.to_owned());
+    assert_eq!(
+        hints,
+        [
+            some("direction: rtl; unicode-bidi: isolate"),
+            some("direction: ltr; unicode-bidi: isolate"),
+            some("direction: ltr; unicode-bidi: isolate"),
+            None,
+            some("direction: ltr; unicode-bidi: isolate"),
+            some("direction: rtl; unicode-bidi: isolate"),
+            some("direction: rtl; unicode-bidi: isolate-override"),
+            some("unicode-bidi: isolate-override"),
+            some("counter-reset: list-item 2; direction: rtl; unicode-bidi: isolate"),
+            None,
+        ]
+    );
+}
+
+/// **`dir="auto"` is HTML's auto directionality**: the first character of
+/// type `L`, `R` or `AL` in the element's text, in tree order, skipping every
+/// `bdi`, `script`, `style` and `textarea` inside it and every element with a
+/// `dir` of its own, with what they hold — `ltr` where there is none — and
+/// only `<pre dir="auto">` and `<textarea dir="auto">` are `plaintext`
+/// (HTML §3.2.6.4 and §15.3.5; review of lane 8C).
+///
+/// The digits in the first paragraph are `EN`, which is not strong, so its
+/// `ب` decides. The second paragraph's `a` is in a `span` with its own `dir`,
+/// its `b` in a `bdi` and its `c` in a `script`, all skipped, so `ب` decides
+/// there too, while the `bdi` resolves itself from its own `b`. Digits alone
+/// are `ltr`. The `pre` says `AUTO`, the keyword being ASCII
+/// case-insensitive, and is the one `plaintext`. An `em` is walked into.
+#[test]
+fn dir_auto_is_resolved_on_the_tree_htmls_parser_builds() {
+    use tinker_pdf_css::Element;
+    // Not XML — a `<p>` left open and an attribute unquoted — so the tree is
+    // the one HTML's parser builds, and it is in the auto state as an XHTML
+    // chapter's is: the first strong character decides, digits passed over.
+    let tree = super::xhtml::read_markup_or_html(
+        "<!DOCTYPE html><body><p dir=auto>1 \u{628} a<p dir=\"auto\">2 a \u{628}<p>b".as_bytes(),
+        &XmlLimits::DEFAULT,
+    );
+    assert!(
+        tree.defects.contains(&super::xhtml::MarkupDefect::NotXml),
+        "{:?}",
+        tree.defects
+    );
+    let paragraphs: Vec<(Option<bool>, Option<String>)> = tree
+        .nodes
+        .iter()
+        .filter(|node| node.name == "p")
+        .map(|node| (node.auto_rtl, node.presentational_hints()))
+        .collect();
+    assert_eq!(
+        paragraphs,
+        [
+            (
+                Some(true),
+                Some("direction: rtl; unicode-bidi: isolate".to_owned())
+            ),
+            (
+                Some(false),
+                Some("direction: ltr; unicode-bidi: isolate".to_owned())
+            ),
+            (None, None),
+        ]
+    );
+}
+
+#[test]
+fn dir_auto_is_the_direction_of_the_first_strong_character() {
+    use tinker_pdf_css::Element;
+    let tree = dom("<body><p dir=\"auto\">1 \u{628} a</p>\
+         <p dir=\"auto\"><span dir=\"ltr\">a</span><bdi>b</bdi><script>c</script>\u{628}</p>\
+         <p dir=\"auto\">1 2</p><pre dir=\"AUTO\">\u{628}\na</pre>\
+         <p dir=\"auto\"><em>\u{628}</em></p></body>");
+    let read: Vec<(&str, Option<bool>, Option<String>)> = tree
+        .nodes
+        .iter()
+        .filter(|node| node.name != "body")
+        .map(|node| {
+            (
+                node.name.as_str(),
+                node.auto_rtl,
+                node.presentational_hints(),
+            )
+        })
+        .collect();
+    let some = |text: &str| Some(text.to_owned());
+    assert_eq!(
+        read,
+        [
+            (
+                "p",
+                Some(true),
+                some("direction: rtl; unicode-bidi: isolate")
+            ),
+            (
+                "p",
+                Some(true),
+                some("direction: rtl; unicode-bidi: isolate")
+            ),
+            ("span", None, some("direction: ltr; unicode-bidi: isolate")),
+            (
+                "bdi",
+                Some(false),
+                some("direction: ltr; unicode-bidi: isolate")
+            ),
+            ("script", None, None),
+            (
+                "p",
+                Some(false),
+                some("direction: ltr; unicode-bidi: isolate")
+            ),
+            (
+                "pre",
+                Some(true),
+                some("direction: rtl; unicode-bidi: plaintext")
+            ),
+            (
+                "p",
+                Some(true),
+                some("direction: rtl; unicode-bidi: isolate")
+            ),
+            ("em", None, None),
+        ]
+    );
+}
+
+/// **A gradient's angle is turned by the deterministic sine** (ruling 4;
+/// review of lane 8C).
+///
+/// An axial shading's coordinates are bytes in the file, and a platform
+/// `sin` rounds its last bit its own way: at 9.2° the C library's sine and
+/// `tinker-pdf-math`'s differ in the last place on the machine this was
+/// written on. The line's ends are worked out here from
+/// `tinker_pdf_svg::transform::rotation`, the turn `transform: rotate()`
+/// takes, by `paint::gradient_paint`'s own arithmetic — the line through the
+/// centre, `|w sin A| + |h cos A|` long, the end colours held 0.001 pt past
+/// the end stops — and must be those bits. A corner's direction is the box's
+/// sides over its diagonal, with no `atan2`: `to top right` in a 150 by 75
+/// box.
+#[test]
+fn a_gradients_angle_is_turned_by_the_deterministic_sine() {
+    use super::paint::{gradient_paint, GradientPaint};
+    use tinker_pdf_cos::build::Shading;
+    use tinker_pdf_css::property::{
+        Color, ColorStop, Gradient, GradientShape, LengthPercentage, LinearDirection,
+    };
+    let (w, h) = (150.0_f64, 75.0_f64);
+    let stop = |r: u8, b: u8| ColorStop::<LengthPercentage> {
+        color: Color { r, g: 0, b, a: 255 },
+        position: None,
+    };
+    let coords = |direction: LinearDirection| {
+        let gradient = Gradient {
+            shape: GradientShape::Linear(direction),
+            stops: vec![stop(255, 0), stop(0, 255)],
+        };
+        match gradient_paint(&gradient, (w, h)) {
+            Some(GradientPaint::Shaded { shading, .. }) => match *shading {
+                Shading::Axial { coords, .. } => coords,
+                other => panic!("not an axial shading: {other:?}"),
+            },
+            other => panic!("not a shading: {other:?}"),
+        }
+    };
+    let expected = |sin: f64, cos: f64| {
+        let length = (w * sin).abs() + (h * cos).abs();
+        let start = (w / 2.0 - sin * length / 2.0, h / 2.0 - cos * length / 2.0);
+        let point = |along: f64| (start.0 + sin * along, start.1 + cos * along);
+        let (a, b) = (point(-1e-3), point(length + 1e-3));
+        [a.0, a.1, b.0, b.1]
+    };
+    let [cos, sin, ..] = tinker_pdf_svg::transform::rotation(9.2);
+    let bits = |c: [f64; 4]| c.map(f64::to_bits);
+    assert_eq!(
+        bits(coords(LinearDirection::Angle(9.2))),
+        bits(expected(sin, cos)),
+        "9.2deg"
+    );
+    let diagonal = (w * w + h * h).sqrt();
+    assert_eq!(
+        bits(coords(LinearDirection::Corner {
+            right: true,
+            bottom: false,
+        })),
+        bits(expected(h / diagonal, w / diagonal)),
+        "to top right"
+    );
+}
+
+/// `paint::draw_page` keeps the public signature it had before the book path's
+/// tagging moved to a crate-internal form (the review of the tagged-writing
+/// lane found the public function gone): given the element tree, it still
+/// tags the page into it, each element under its standard type, and the run
+/// reads back through the structure tree.
+#[test]
+fn the_public_draw_page_still_tags_a_page_from_its_element_tree() {
+    use super::paint::{draw_page, Effects, Fonts, Frame};
+    use tinker_pdf_css::property::{
+        FontFamily, FontKerning, FontStyle, FontVariant, TextDecoration,
+    };
+    use tinker_pdf_layout::{Page as LayoutPage, TextRun};
+
+    let dom = super::xhtml::read(
+        br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>Words</p></body></html>"#,
+        &XmlLimits::DEFAULT,
+    )
+    .expect("well-formed");
+    let paragraph = dom
+        .nodes
+        .iter()
+        .position(|node| node.name == "p")
+        .and_then(|at| u32::try_from(at).ok());
+    let run = TextRun {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        text: "Words".to_owned(),
+        font_size: 16.0,
+        families: vec![FontFamily::Serif],
+        weight: 400,
+        style: FontStyle::Normal,
+        variant: FontVariant::Normal,
+        kerning: FontKerning::Auto,
+        features: Vec::new(),
+        paragraph_rtl: Some(false),
+        paragraph: 0,
+        embeddings: Default::default(),
+        bidi_level: None,
+        bidi_gap: None,
+        hyphenated: false,
+        color: tinker_pdf_css::property::Color::BLACK,
+        decoration: TextDecoration::None,
+        painted: true,
+        letter_spacing: 0.0,
+        word_spacing: 0.0,
+        generated: false,
+        anchor: paragraph,
+        order: 1,
+    };
+    let faces = super::typeface::FaceSet::new();
+    let mut fonts = Fonts::new(&faces);
+    fonts.note(&run);
+    let mut builder = tinker_pdf_cos::build::DocumentBuilder::new();
+    fonts.register(&mut builder);
+    let frame = Frame {
+        page: (300.0, 200.0),
+        margin: 10.0,
+    };
+    let laid = LayoutPage {
+        boxes: Vec::new(),
+        replaced: Vec::new(),
+        runs: vec![run],
+        clips: Vec::new(),
+    };
+    // No element of this one asks for an effect, so the page is drawn under
+    // none — the default the book path gives a chapter with no styles.
+    let effects = Effects::default();
+    let mut page = builder.begin_page(300.0, 200.0);
+    let refused = draw_page(
+        &mut builder,
+        &mut page,
+        &laid,
+        &frame,
+        &fonts,
+        &[],
+        Some(&dom),
+        0,
+        &effects.on(&laid, &frame, 0),
+    );
+    assert_eq!(refused, 0);
+    builder.push_page(page);
+
+    let doc = crate::Document::open(builder.finish()).expect("opens");
+    let tree = doc.structure().expect("the page is tagged");
+    let kinds: Vec<String> = tree
+        .elements()
+        .iter()
+        .map(|element| element.standard_type.clone())
+        .collect();
+    assert_eq!(kinds, ["Document", "P"]);
+    let text = tree.text_for_page(0, &doc.page(0).expect("a page").text());
+    assert_eq!(text.plain_text().trim(), "Words");
+    assert_eq!(text.unmarked, 0);
 }

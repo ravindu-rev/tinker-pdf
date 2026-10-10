@@ -170,7 +170,7 @@ fn unset_is_inherit_for_an_inherited_property_and_initial_for_the_rest() {
 /// build implements.
 ///
 /// §7.1's definition and [`ComputedStyle::inherit_from`]'s behaviour are the
-/// same rule written twice, so this asserts they agree — over all eighty-three
+/// same rule written twice, so this asserts they agree — over all one hundred and fourteen
 /// longhands rather than a sample, because the two are only the same rule if
 /// they are the same rule everywhere.
 #[test]
@@ -192,7 +192,32 @@ fn unset_is_the_same_as_never_declaring_it_for_every_longhand() {
         );
         checked += 1;
     }
-    assert_eq!(checked, 83, "every longhand, not a sample");
+    assert_eq!(checked, 114, "every longhand, not a sample");
+}
+
+/// **`text-shadow` inherits without being asked to** (`css-text-decor-3` §4:
+/// *inherited: yes*), which `Property::inherited` and `Longhand::inherited`
+/// both say — a heading's shadow is its text's, through every `<em>` in it.
+/// `ComputedStyle::inherit_from` copied every other inherited property and not
+/// this one, so a child had its parent's shadow only when it said `inherit` or
+/// `unset`: the two statements of §7.2 disagreed, and the test above could not
+/// see it, since its parent declares no shadow. `box-shadow` is the control:
+/// *inherited: no*.
+#[test]
+fn text_shadow_inherits_and_box_shadow_does_not() {
+    let source = "div { text-shadow: 1px 2px red; box-shadow: 3px 4px blue }";
+    let style = child(source);
+    let unset = child(&format!("{source} p {{ text-shadow: unset }}"));
+    assert_eq!(
+        style.text_shadow.len(),
+        1,
+        "the parent's shadow is inherited"
+    );
+    assert_eq!(
+        style.text_shadow, unset.text_shadow,
+        "`text-shadow: unset` is the same as not declaring it"
+    );
+    assert!(style.box_shadow.is_empty(), "a box shadow is not inherited");
 }
 
 /// **`inherit` takes the parent's computed value, not its specified one.**
@@ -421,8 +446,11 @@ fn every_implemented_name_is_defaultable() {
             panic!("`{name}: inherit` names a property nothing here can default");
         }
     }
-    assert_eq!(longhands, 83, "eighty-three longhands");
-    assert_eq!(shorthands, 16, "sixteen shorthands");
+    assert_eq!(longhands, 114, "a hundred and fourteen longhands");
+    assert_eq!(
+        shorthands, 23,
+        "twenty shorthands and `css-break-3` §3.4's three aliases"
+    );
     assert_eq!(exceptions, 1, "`content`, and nothing else");
     assert_eq!(longhands + shorthands + exceptions, IMPLEMENTED_NAMES.len());
 
@@ -460,7 +488,7 @@ fn every_implemented_name_is_defaultable() {
 /// would say so rather than passing on two empty sets.
 #[test]
 fn every_shorthand_expands_the_same_way_for_a_value_and_a_keyword() {
-    let samples: [(&str, &str); 16] = [
+    let samples: [(&str, &str); 23] = [
         ("background", "#ff0000"),
         ("border", "1px solid #ff0000"),
         ("border-bottom", "1px solid #ff0000"),
@@ -470,10 +498,17 @@ fn every_shorthand_expands_the_same_way_for_a_value_and_a_keyword() {
         ("border-style", "solid"),
         ("border-top", "1px solid #ff0000"),
         ("border-width", "1px"),
+        ("break-after", "page"),
+        ("break-before", "avoid-page"),
+        ("break-inside", "avoid"),
         ("column-rule", "1px solid #ff0000"),
         ("columns", "2 auto"),
         ("flex", "1 1 auto"),
         ("flex-flow", "row wrap"),
+        ("list-style", "square inside"),
+        ("border-radius", "4px 2px / 3px"),
+        ("outline", "1px solid red"),
+        ("overflow", "hidden auto"),
         ("gap", "10px"),
         ("margin", "0"),
         ("padding", "0"),

@@ -65,12 +65,57 @@ comes out the same on every target. Every fixture asserts a minimum ink count
 and the absence of `UnreadableFont` before it is hashed, so a fixture that
 draws nothing fails on the day it is added rather than becoming a baseline.
 
+**The options that change what a page's bytes are** — ink instead of light,
+hard edges, a page with nothing under it, premultiplied alpha — are pinned
+beside these rather than among them, in
+`crates/tinker-pdf/tests/render_options.rs`: this file's `Fixture` renders
+with the default options and nothing else, and its table is the one place a
+determinism bug shows, so a row meaning "this page, but differently" does not
+join it. Each is hashed the same way and floored by ink the same way, and the
+same file holds that the defaults did not move: the blend grid's default render
+there is this table's `analytic_blend`, copied. Those hashes were recorded on
+`x86_64-unknown-linux-gnu` in September 2026 and are *claimed*, not measured, for
+the other three targets until a run there says otherwise.
+
+**One fingerprint moved on purpose in September 2026, and the reason is the
+commit's rather than a target's.** `curves` fills `20 20 m 60 75 l 100 25 l f`,
+an open triangle, and the filler used to leave its third side out; ISO
+32000-1 8.5.3.1 closes an open subpath before a fill
+([rasterizer](rasterizer.md)), and fixing that moved exactly this one hash. The
+new value was produced on `x86_64-unknown-linux-gnu` and reproduced under
+`wasm32-wasip1` before it was committed, so the table's cross-target claim for
+that row rests on those two until the Windows and macOS legs next run. This is
+the first of this file's two failure modes — the same target renders
+differently — and not the second, which is why the hash was updated rather than
+investigated.
+
+**The canvas-origin change of the same month moved none of them, and that was
+its check.** Every canvas — a tile, a group's buffer, a soft mask's, a mesh's —
+is now drawn in the page's one frame rather than in a frame translated to its
+corner ([rulings](../rulings.md) 5). That changed what a *region* computes and
+was meant to leave every whole page's pixels where they were; the fingerprints
+are all of whole pages, so every one of them holding still, natively and under
+`wasm32-wasip1`, is the evidence that it did.
+
 Beside them, **three document byte-hashes** pin the writer as well as the
 renderer: a synthesised PDF, a synthesised fixed-layout document and a
 synthesised book are each hashed as *bytes*, which is where object
 numbering, dictionary key order and stream framing are pinned — none of
 which a rendered hash can see. The `epub` fixture asserts the two-box claim
 above: seven pages at one box, six at another, both stable.
+
+**The book's two byte-hashes moved on purpose in October 2026, and the reason
+is again the commit's.** Tagged writing made the EPUB path write the book's
+language as the catalog's `/Lang`, each `<a>` holding an annotation as a
+`/Link` structure element with its `/OBJR`, and each element's XHTML name
+under a `/RoleMap`; the 432 x 648 book went from `dcd5912d…` to `bcc9bb59…`
+and the 600 x 800 one from `51748067…` to `3b288a03…`, in three measured
+steps that `determinism.rs` lists one by one, each reverted alone to show it
+was the whole of its step. No raster fingerprint moved, the CSS and shaping
+work merged in the same wave moved neither hash, and the new values were
+produced on `x86_64-unknown-linux-gnu` and reproduced under `wasm32-wasip1`
+before they were committed — this file's first failure mode, the same target
+writing different bytes, and so updated rather than investigated.
 
 Three fixtures carry guarantees of different kinds: one is synthesised
 rather than parsed, so it pins the writer and parser to each other; one is

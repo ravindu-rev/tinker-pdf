@@ -1661,6 +1661,8 @@ fn the_three_generic_families_measure_at_their_own_published_advances() {
             weight: 400,
             style: FontStyle::Normal,
             size: 1000.0,
+            kerning: tinker_pdf_css::property::FontKerning::Auto,
+            features: &[],
         };
         BookMetrics::STANDARD.advance('a', &font)
     };
@@ -1678,6 +1680,8 @@ fn the_three_generic_families_measure_at_their_own_published_advances() {
             weight: 400,
             style: FontStyle::Normal,
             size: 1000.0,
+            kerning: tinker_pdf_css::property::FontKerning::Auto,
+            features: &[],
         };
         let v = BookMetrics::STANDARD.vertical(&font);
         (v.ascent, v.descent)

@@ -29,7 +29,9 @@
 //! as one paragraph. Under `pre-line` it is a break and the spaces around it go
 //! away. Under `pre` and `pre-wrap` everything is kept, tabs included.
 
-use tinker_pdf_css::property::WhiteSpace;
+use tinker_pdf_css::property::{TextTransform, WhiteSpace};
+
+use crate::case::{self, CaseContext};
 
 /// U+200B ZERO WIDTH SPACE, whose adjacency to a segment break removes the
 /// break entirely (§4.1.1).
@@ -90,6 +92,12 @@ pub struct Collapser {
     /// of a line is removed"* applied at the start of the context, where there
     /// is no line yet to trim.
     started: bool,
+    /// What `text-transform` needs to know about the text before this run:
+    /// whether a word is open and whether a cased letter precedes. Carried
+    /// here because it is carried exactly as far as this is — one inline
+    /// formatting context, run after run — and for the same reason: a word
+    /// split across two elements is one word to `capitalize`.
+    case: CaseContext,
 }
 
 impl Collapser {
@@ -97,6 +105,24 @@ impl Collapser {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// One text run through phase I and then `text-transform`, which is
+    /// `css-text-3` §1.3's order: collapsing first, transformation second, and
+    /// line breaking after both.
+    ///
+    /// Every run goes through [`case::transform`], `none` included, because
+    /// the context it keeps is about the **text** and not about the property:
+    /// `he<span>llo</span>` with `capitalize` on the span is the middle of a
+    /// word, and only a context that saw the `he` knows it.
+    pub fn push_transformed(
+        &mut self,
+        source: &str,
+        white_space: WhiteSpace,
+        transform: TextTransform,
+    ) -> String {
+        let collapsed = self.push(source, white_space);
+        case::transform(&collapsed, transform, &mut self.case)
     }
 
     /// One text run through phase I.

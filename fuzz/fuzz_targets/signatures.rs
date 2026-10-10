@@ -9,8 +9,9 @@
 //!
 //! # What this target checks, and what it does not
 //!
-//! **Only that the code did not panic, hang, or exhaust memory.** Seven
-//! calls, every one discarded. A signature reported as covering the wrong
+//! **Only that the code did not panic, hang, or exhaust memory.** Nine
+//! calls, every one discarded, and the document security store read and
+//! matched against every signature. A signature reported as covering the wrong
 //! byte ranges, or as valid when it is not, passes here. So a run that
 //! returned the *wrong* answer passes this target exactly as a correct one
 //! does, and a green `cargo fuzz` here is evidence about ruling 1 and about
@@ -63,5 +64,13 @@ fuzz_target!(|data: &[u8]| {
         let _ = signature.digest(&doc, DigestAlgorithm::Sha512);
         let _ = signature.covers_whole_file();
         let _ = signature.is_usage_rights();
+        let _ = signature.validation_key();
+    }
+    // The document security store: arrays and a `/VRI` dictionary the file
+    // shapes however it likes, every member checked for being a stream.
+    if let Some(store) = doc.security_store() {
+        for signature in doc.signatures() {
+            let _ = store.entry_for(&signature);
+        }
     }
 });

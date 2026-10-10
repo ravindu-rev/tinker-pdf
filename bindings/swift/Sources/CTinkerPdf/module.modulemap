@@ -1,0 +1,5 @@
+module CTinkerPdf [system] {
+    header "shim.h"
+    link "tinker_pdf_ffi"
+    export *
+}

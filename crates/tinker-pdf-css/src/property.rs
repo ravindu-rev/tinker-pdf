@@ -889,7 +889,13 @@ pub enum SpecifiedSpacing {
     Length(Len),
 }
 
-/// `text-align`, at CSS 2.1's four values.
+/// `text-align`, at CSS 2.1's four values and `css-text-3`'s two logical
+/// ones.
+///
+/// `start` and `end` are kept as written rather than read as `left` and
+/// `right`: which side they are is the **block container's** `direction`
+/// (`css-text-3` §7.1), and that is known where the line is set, not where
+/// the declaration is parsed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextAlign {
     /// `left`
@@ -900,6 +906,584 @@ pub enum TextAlign {
     Center,
     /// `justify`
     Justify,
+    /// `start`, the initial value: `left` in a left-to-right block, `right`
+    /// in a right-to-left one.
+    Start,
+    /// `end`: the other side.
+    End,
+}
+
+/// `direction`, `css-writing-modes-3` §2.1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    /// `ltr`, the initial value.
+    Ltr,
+    /// `rtl`
+    Rtl,
+}
+
+/// `unicode-bidi`, `css-writing-modes-3` §2.2, at the four values this build
+/// honours.
+///
+/// `bidi-override` and `isolate-override` are refused by value: an override
+/// makes every character inside it strong in one direction, so a Latin word
+/// under `rtl` is drawn letter by letter backwards — a glyph order the
+/// painter's shaper never produces, since it shapes a slice in that slice's
+/// own direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnicodeBidi {
+    /// `normal`, the initial value: no embedding.
+    Normal,
+    /// `embed`: on an inline box, an embedding — `LRE` or `RLE` and `PDF`
+    /// round its content. No effect on a block container.
+    Embed,
+    /// `isolate`: on an inline box, an isolate — `LRI` or `RLI` and `PDI`. No
+    /// effect on a block container.
+    Isolate,
+    /// `plaintext`: on an inline box, `FSI` and `PDI`; on a block container,
+    /// each of its paragraphs takes its direction from UAX #9's P2 and P3
+    /// rather than from `direction`.
+    Plaintext,
+}
+
+/// `hyphens`, `css-text-3` §5.4, at the two values this build sets.
+///
+/// `auto` is refused by value: it asks for a word to be hyphenated where a
+/// hyphenation dictionary for its language says it may be, and this build
+/// has none — so a book that asks is counted rather than set as `manual`
+/// and called honoured. The declaration then does not apply, and the
+/// element keeps the `manual` it inherits or starts with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hyphens {
+    /// `none`: a word breaks nowhere inside itself, a soft hyphen included,
+    /// and a soft hyphen is never seen.
+    None,
+    /// `manual`, the initial value: a word breaks inside itself only where it
+    /// says it may — after a hyphen, or at a soft hyphen (U+00AD), which is
+    /// invisible unless the line breaks at it and a hyphen where it does.
+    Manual,
+}
+
+/// `text-transform`, `css-text-3` §2.1, at the four values this build sets.
+///
+/// `full-width` and `full-size-kana` are refused by value rather than
+/// approximated: both are mappings to *other characters* (U+FF01 to U+FF5E, and
+/// the small kana to their full-size forms), not casing, and a build that read
+/// `uppercase full-width` as `uppercase` would set a heading half-width that
+/// the author asked to be full-width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextTransform {
+    /// `none`
+    None,
+    /// `capitalize`: the first letter unit of each word in titlecase.
+    Capitalize,
+    /// `uppercase`
+    Uppercase,
+    /// `lowercase`
+    Lowercase,
+}
+
+/// `font-kerning`, `css-fonts-4` §6.4.
+///
+/// A face's kerning is its `GPOS` `kern` feature, which the shaper applies by
+/// default; so `auto` and `normal` are the default plan and `none` is `kern`
+/// switched off over it ([`FeatureSetting`]'s route into the shaper). The
+/// standard 14 are not shaped and this build carries their widths and not
+/// their AFM kerning pairs, so a run set in one of them is unkerned whatever
+/// this says — and where it says `normal` the element is counted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontKerning {
+    /// `auto`, the initial value: the user agent's choice, which is the
+    /// face's own kerning wherever the face is shaped.
+    Auto,
+    /// `normal`: kerning applied.
+    Normal,
+    /// `none`: kerning not applied.
+    None,
+}
+
+/// One `<feature-tag-value>` of `font-feature-settings`, `css-fonts-4` §6.12:
+/// an OpenType feature tag and whether it is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeatureSetting {
+    /// The tag, four bytes of printable ASCII (§6.12's `<opentype-tag>`).
+    pub tag: [u8; 4],
+    /// `0` off and `1` on. A larger value is an alternate index, which the
+    /// shaper's alternate substitution does not carry, and is refused by
+    /// value before it reaches here.
+    pub value: u32,
+}
+
+/// `color-scheme`, `css-color-adjust-1` §2.1, as far as a printed page reads
+/// it.
+///
+/// A page is printed in the **light** scheme: paper is the light canvas, and
+/// print media's `prefers-color-scheme` is `light` (`mediaqueries-5` §12.5).
+/// So `normal`, and every list that names `light` — `light dark`, which is
+/// what pandoc writes on every book's `:root` — is one answer here: the used
+/// scheme is light, which is the one this build draws everywhere, and the
+/// property draws nothing differently. A list of nothing but `<custom-ident>`s
+/// names no scheme this build supports and is `normal` by §2.1. A list that
+/// names `dark` and not `light` asks for the dark scheme, whose canvas and
+/// system colours this build does not have, and is refused by value rather
+/// than drawn light.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorScheme {
+    /// `normal`, or a list naming no scheme this build knows.
+    Normal,
+    /// A list naming `light`, with or without `dark`, `only` and custom
+    /// identifiers: the scheme a printed page uses.
+    Light,
+}
+
+/// A `url()` as written, and the stylesheet it was written in.
+///
+/// **Unresolved, and that is ruling 8**: a relative URL in a stylesheet is
+/// relative to the **sheet** (`css-values-4` §4.5), and only the caller knows
+/// where a sheet was — an OCF path, a file, nothing at all. The parser records
+/// the `href` it was handed for the sheet in `base` — a `<style>` element's is
+/// its document's — and leaves `None` where it was handed none, which is a
+/// `style=""` attribute's case: the caller resolves that against the document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageRef {
+    /// The reference, exactly as the `url()` held it.
+    pub href: String,
+    /// The `href` of the stylesheet it was written in, where that sheet has
+    /// one.
+    pub base: Option<String>,
+}
+
+/// One `background-image` layer, `css-images-3` §2's `<image>` at the two
+/// kinds this build draws: a `url()`, and a gradient.
+///
+/// Generic over its lengths, because a gradient's stop positions, radii and
+/// centre are written with units: [`Len`] as specified, and
+/// [`LengthPercentage`] — the default — once [`Image::compute`] has resolved
+/// `em` and `rem`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Image<L = LengthPercentage> {
+    /// A `url()`, unresolved.
+    Url(ImageRef),
+    /// `linear-gradient()` or `radial-gradient()`, §3.
+    Gradient(Box<Gradient<L>>),
+}
+
+impl Image<Len> {
+    /// The computed value: every length's `em` and `rem` resolved against
+    /// the element's and the root's font sizes. Percentages stay: a stop's
+    /// is of a gradient line, and a radius's and a centre's of a gradient
+    /// box, that only a laid-out box decides.
+    #[must_use]
+    pub fn compute(&self, font_size: f64, root_font_size: f64) -> Image {
+        match self {
+            Image::Url(image) => Image::Url(image.clone()),
+            Image::Gradient(gradient) => Image::Gradient(Box::new(
+                gradient.map(|len| len.compute(font_size, root_font_size)),
+            )),
+        }
+    }
+}
+
+/// A gradient, `css-images-3` §3: its geometry, and at least two colour
+/// stops, every one opaque.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gradient<L> {
+    /// Linear or radial, and which way.
+    pub shape: GradientShape<L>,
+    /// The colour stops in the order written, a double position (`red 10%
+    /// 20%`, `css-images-4` §3.5.1) already two. Positions are as written:
+    /// §3.5.3's fix-up is the painter's, because a percentage is of a
+    /// gradient line a box's size decides.
+    pub stops: Vec<ColorStop<L>>,
+}
+
+impl<L: Copy> Gradient<L> {
+    /// The same gradient with every length passed through `f`.
+    fn map<M: Copy>(&self, f: impl Fn(L) -> M) -> Gradient<M> {
+        let offset = |o: GradientOffset<L>| GradientOffset {
+            from_end: o.from_end,
+            offset: f(o.offset),
+        };
+        let shape = match self.shape {
+            GradientShape::Linear(direction) => GradientShape::Linear(direction),
+            GradientShape::Radial(radial) => GradientShape::Radial(RadialGradient {
+                circle: radial.circle,
+                size: match radial.size {
+                    RadialSize::ClosestSide => RadialSize::ClosestSide,
+                    RadialSize::FarthestSide => RadialSize::FarthestSide,
+                    RadialSize::ClosestCorner => RadialSize::ClosestCorner,
+                    RadialSize::FarthestCorner => RadialSize::FarthestCorner,
+                    RadialSize::Explicit(x, y) => RadialSize::Explicit(f(x), f(y)),
+                },
+                at: [offset(radial.at[0]), offset(radial.at[1])],
+            }),
+        };
+        Gradient {
+            shape,
+            stops: self
+                .stops
+                .iter()
+                .map(|stop| ColorStop {
+                    color: stop.color,
+                    position: stop.position.map(&f),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A gradient's geometry, `css-images-3` §3.1 and §3.2.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GradientShape<L> {
+    /// `linear-gradient()`.
+    Linear(LinearDirection),
+    /// `radial-gradient()`.
+    Radial(RadialGradient<L>),
+}
+
+/// Which way a linear gradient's line points, §3.1.1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LinearDirection {
+    /// An angle, in degrees clockwise from up: an `<angle>`, or `to top`
+    /// (0), `to right` (90), `to bottom` (180, the default) and `to left`
+    /// (270).
+    Angle(f64),
+    /// `to` a corner. Its angle is the box's own — the one that puts the
+    /// two other corners on the 50% line — so it is known only once the box
+    /// is.
+    Corner {
+        /// Towards the right edge rather than the left.
+        right: bool,
+        /// Towards the bottom edge rather than the top.
+        bottom: bool,
+    },
+}
+
+/// A radial gradient's ending shape, its size and its centre, §3.2.1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RadialGradient<L> {
+    /// `circle` rather than `ellipse`. `ellipse` is the default, unless the
+    /// size is one length.
+    pub circle: bool,
+    /// The ending shape's size.
+    pub size: RadialSize<L>,
+    /// The centre, `at <position>`, horizontal then vertical; `center` when
+    /// it is not given. A percentage is of the gradient box.
+    pub at: [GradientOffset<L>; 2],
+}
+
+impl RadialGradient<Len> {
+    /// `radial-gradient()` with no configuration: an ellipse to the farthest
+    /// corner, centred.
+    pub const DEFAULT: RadialGradient<Len> = RadialGradient {
+        circle: false,
+        size: RadialSize::FarthestCorner,
+        at: [
+            GradientOffset {
+                from_end: false,
+                offset: Len::Percent(50.0),
+            },
+            GradientOffset {
+                from_end: false,
+                offset: Len::Percent(50.0),
+            },
+        ],
+    };
+}
+
+/// §3.2.1's `<radial-size>`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RadialSize<L> {
+    /// `closest-side`.
+    ClosestSide,
+    /// `farthest-side`.
+    FarthestSide,
+    /// `closest-corner`.
+    ClosestCorner,
+    /// `farthest-corner`, the default.
+    FarthestCorner,
+    /// Explicit radii, horizontal then vertical: a circle's one length twice,
+    /// or an ellipse's two `<length-percentage>`s.
+    Explicit(L, L),
+}
+
+/// One axis of a radial gradient's centre: an offset from the left or top
+/// edge, or, for `right 10px`, from the right or bottom one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GradientOffset<L> {
+    /// Measured from the right or bottom edge.
+    pub from_end: bool,
+    /// The offset.
+    pub offset: L,
+}
+
+/// One colour stop, `css-images-3` §3.5.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColorStop<L> {
+    /// The colour, opaque: a translucent stop is refused by value.
+    pub color: Color,
+    /// Where it is on the gradient line or ray; `None` for §3.5.3 to place.
+    pub position: Option<L>,
+}
+
+/// One axis of `background-repeat`, `css-backgrounds-3` §2.3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepeatStyle {
+    /// `repeat`: tiled from the positioned image outwards, clipped.
+    Repeat,
+    /// `space`: as many whole images as fit, the leftover space between them.
+    Space,
+    /// `round`: as many whole images as fit once each is rescaled to fill.
+    Round,
+    /// `no-repeat`: one image.
+    NoRepeat,
+}
+
+/// `background-repeat`, both axes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackgroundRepeat {
+    /// Across.
+    pub x: RepeatStyle,
+    /// Down.
+    pub y: RepeatStyle,
+}
+
+impl BackgroundRepeat {
+    /// `repeat`, the initial value.
+    pub const REPEAT: BackgroundRepeat = BackgroundRepeat {
+        x: RepeatStyle::Repeat,
+        y: RepeatStyle::Repeat,
+    };
+}
+
+/// One axis of a specified `background-position`: an offset in from the
+/// start edge (left or top) or, for `right 10px` and `bottom 2em`, from the end
+/// edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PositionOffset {
+    /// Measured from the right or bottom edge rather than the left or top.
+    pub from_end: bool,
+    /// The offset; a percentage is of the positioning area less the image
+    /// (§2.6), which is why `50%` centres.
+    pub offset: Len,
+}
+
+/// `background-position` as written, both axes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpecifiedBackgroundPosition {
+    /// Across.
+    pub x: PositionOffset,
+    /// Down.
+    pub y: PositionOffset,
+}
+
+/// One axis of a computed `background-position`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ComputedOffset {
+    /// See [`PositionOffset::from_end`].
+    pub from_end: bool,
+    /// The offset, `em` resolved.
+    pub offset: LengthPercentage,
+}
+
+/// `background-position`, computed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BackgroundPosition {
+    /// Across.
+    pub x: ComputedOffset,
+    /// Down.
+    pub y: ComputedOffset,
+}
+
+impl BackgroundPosition {
+    /// `0% 0%`, the initial value: the image's top left at the positioning
+    /// area's.
+    pub const INITIAL: BackgroundPosition = BackgroundPosition {
+        x: ComputedOffset {
+            from_end: false,
+            offset: LengthPercentage::Percent(0.0),
+        },
+        y: ComputedOffset {
+            from_end: false,
+            offset: LengthPercentage::Percent(0.0),
+        },
+    };
+}
+
+/// `background-size` as written, `css-backgrounds-3` §2.4. `None` is `auto`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpecifiedBackgroundSize {
+    /// `cover`
+    Cover,
+    /// `contain`
+    Contain,
+    /// A width and a height, each a non-negative length or `auto`.
+    Explicit(Option<Len>, Option<Len>),
+}
+
+/// `background-size`, computed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BackgroundSize {
+    /// `cover`: the smallest size that covers the positioning area, the image's
+    /// own ratio kept.
+    Cover,
+    /// `contain`: the largest that fits inside it.
+    Contain,
+    /// A width and a height; `None` is `auto`, which takes the image's own
+    /// size or, beside a stated one, its ratio.
+    Explicit(Option<LengthPercentage>, Option<LengthPercentage>),
+}
+
+impl BackgroundSize {
+    /// `auto`, the initial value.
+    pub const AUTO: BackgroundSize = BackgroundSize::Explicit(None, None);
+}
+
+/// One shadow as written, `css-backgrounds-3` §7.1 and `css-text-decor-3`
+/// §4: two offsets, a blur, a spread, a colour, and whether it is `inset`.
+/// `text-shadow` has no spread and no `inset`, and its parse refuses both.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpecifiedShadow {
+    /// `None` is `currentColor`, the colour a shadow with none takes.
+    pub color: Option<Color>,
+    /// Horizontal offset, positive to the right.
+    pub x: Len,
+    /// Vertical offset, positive downwards.
+    pub y: Len,
+    /// Blur radius, never negative.
+    pub blur: Len,
+    /// Spread distance, which may be negative.
+    pub spread: Len,
+    /// An `inset` box shadow, drawn inside the padding box.
+    pub inset: bool,
+}
+
+/// One shadow, computed: lengths in CSS pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shadow {
+    /// `None` is `currentColor`.
+    pub color: Option<Color>,
+    /// Horizontal offset.
+    pub x: f64,
+    /// Vertical offset.
+    pub y: f64,
+    /// Blur radius: zero, since a blurred shadow is refused by value.
+    pub blur: f64,
+    /// Spread distance.
+    pub spread: f64,
+    /// Drawn inside the padding box.
+    pub inset: bool,
+}
+
+/// One two-dimensional `<transform-function>` of `css-transforms-1` §13.1,
+/// as written. Every angle is in **degrees**, whatever unit it was written
+/// in: the sine and cosine are the painter's, through the one deterministic
+/// implementation this repository has (ruling 4), and a conversion from
+/// `rad`, `grad` or `turn` is a multiplication.
+///
+/// `rotateZ()` is `rotate()` (`css-transforms-2` §12), and `translateX()`,
+/// `scaleY()` and the rest are the two-argument forms with the other argument
+/// at its identity.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpecifiedTransform {
+    /// `matrix(a, b, c, d, e, f)`; `e` and `f` are CSS pixels.
+    Matrix([f64; 6]),
+    /// `translate()`: a percentage is of the reference box — the border box —
+    /// on its own axis.
+    Translate(Len, Len),
+    /// `scale()`.
+    Scale(f64, f64),
+    /// `rotate()`, clockwise on the page, in degrees.
+    Rotate(f64),
+    /// `skew()`: the x angle and the y angle, in degrees.
+    Skew(f64, f64),
+}
+
+/// [`SpecifiedTransform`], computed: `em` resolved, a percentage still owed
+/// to the box it is drawn on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Transform {
+    /// See [`SpecifiedTransform::Matrix`].
+    Matrix([f64; 6]),
+    /// See [`SpecifiedTransform::Translate`].
+    Translate(LengthPercentage, LengthPercentage),
+    /// See [`SpecifiedTransform::Scale`].
+    Scale(f64, f64),
+    /// See [`SpecifiedTransform::Rotate`].
+    Rotate(f64),
+    /// See [`SpecifiedTransform::Skew`].
+    Skew(f64, f64),
+}
+
+/// `transform-origin`, `css-transforms-1` §6, as written: a point in the
+/// reference box, `50% 50%` initially. A third, `z`, value is accepted only as
+/// zero.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpecifiedTransformOrigin {
+    /// Across, from the border box's left edge.
+    pub x: Len,
+    /// Down, from its top edge.
+    pub y: Len,
+}
+
+/// `transform-origin`, computed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TransformOrigin {
+    /// Across, from the border box's left edge.
+    pub x: LengthPercentage,
+    /// Down, from its top edge.
+    pub y: LengthPercentage,
+}
+
+impl TransformOrigin {
+    /// `50% 50%`: the border box's centre.
+    pub const INITIAL: TransformOrigin = TransformOrigin {
+        x: LengthPercentage::Percent(50.0),
+        y: LengthPercentage::Percent(50.0),
+    };
+}
+
+/// `overflow-x` and `overflow-y`, `css-overflow-3` §3.1.
+///
+/// **Five values and two questions**, and the two are not the same split:
+///
+/// - *does the box clip its content?* — every value but `visible`;
+/// - *is the box a scroll container?* — `hidden`, `scroll` and `auto`, which
+///   establish an independent formatting context (CSS 2.2 §9.4.1's *"elements
+///   with `overflow` other than `visible`"*), and not `clip`, which §3.1 says
+///   *"does not cause the element to establish a new formatting context"*.
+///
+/// `scroll` and `auto` clip exactly as `hidden` does here: a page has no
+/// scrolling mechanism, so a scroll container is printed at its initial scroll
+/// position, which is its padding box from the top left — what CSS 2.2
+/// §11.1.1 permits for print and what a browser's own print does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overflow {
+    /// `visible`, the initial value.
+    Visible,
+    /// `hidden`
+    Hidden,
+    /// `clip`
+    Clip,
+    /// `scroll`
+    Scroll,
+    /// `auto`, and `overlay`, which §3.1 makes *"a legacy value alias of
+    /// `auto`"*.
+    Auto,
+}
+
+impl Overflow {
+    /// Whether content outside the padding box is clipped in this axis.
+    #[must_use]
+    pub fn clips(self) -> bool {
+        self != Overflow::Visible
+    }
+
+    /// Whether this value makes the box a scroll container.
+    #[must_use]
+    pub fn scrolls(self) -> bool {
+        matches!(self, Overflow::Hidden | Overflow::Scroll | Overflow::Auto)
+    }
 }
 
 /// `text-decoration`, as the line it draws.
@@ -953,6 +1537,115 @@ pub enum ListStyleType {
     None,
 }
 
+/// `list-style-position`, CSS 2.2 §12.5.1 and `css-lists-3` §3.2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListStylePosition {
+    /// `outside`: the marker stands in the margin, outside the principal box.
+    Outside,
+    /// `inside`: the marker is the first inline box of the list item, and the
+    /// lines wrap under it.
+    Inside,
+}
+
+/// One of a box's four corners, `css-backgrounds-3` §5.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Corner {
+    /// `border-top-left-radius`
+    TopLeft,
+    /// `border-top-right-radius`
+    TopRight,
+    /// `border-bottom-right-radius`
+    BottomRight,
+    /// `border-bottom-left-radius`
+    BottomLeft,
+}
+
+impl Corner {
+    /// The four, in the order the shorthand states them.
+    pub const ALL: [Corner; 4] = [
+        Corner::TopLeft,
+        Corner::TopRight,
+        Corner::BottomRight,
+        Corner::BottomLeft,
+    ];
+
+    /// The index into a `[_; 4]` laid out in [`Corner::ALL`]'s order.
+    #[must_use]
+    pub fn index(self) -> usize {
+        match self {
+            Corner::TopLeft => 0,
+            Corner::TopRight => 1,
+            Corner::BottomRight => 2,
+            Corner::BottomLeft => 3,
+        }
+    }
+}
+
+/// One corner's radii as written, before `em` is resolved: §5.1's two
+/// `<length-percentage [0,∞]>`, horizontal then vertical.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpecifiedRadius {
+    /// The horizontal semi-axis; a percentage is of the border box's width.
+    pub horizontal: Len,
+    /// The vertical semi-axis; a percentage is of its height.
+    pub vertical: Len,
+}
+
+/// One corner's computed radii: an ellipse's two semi-axes, each still a
+/// percentage if it was one, since the box it is a percentage of is layout's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Radius {
+    /// The horizontal semi-axis.
+    pub horizontal: LengthPercentage,
+    /// The vertical semi-axis.
+    pub vertical: LengthPercentage,
+}
+
+impl Radius {
+    /// A square corner, `border-*-radius`'s initial value.
+    pub const ZERO: Radius = Radius {
+        horizontal: LengthPercentage::ZERO,
+        vertical: LengthPercentage::ZERO,
+    };
+}
+
+/// `outline-style`, `css-ui-4` §5.3: `border-style`'s values less `hidden`,
+/// plus `auto`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutlineStyle {
+    /// `auto`: §5.3 leaves the drawing to the user agent, and this one draws a
+    /// solid line — the outline is there, at its width and colour.
+    Auto,
+    /// One of `border-style`'s.
+    Border(BorderStyle),
+}
+
+/// `quotes`, `css-content-3` §3.2: the marks `open-quote` and `close-quote`
+/// produce, a pair per nesting level.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Quotes {
+    /// `auto`, the initial value: *"appropriate quote marks for the content
+    /// language of the element"*. **Not resolved here**: the marks are a table
+    /// per language this build does not vendor, and guessing English marks
+    /// would be wrong in every other language. A quote keyword under `auto`
+    /// produces nothing and is counted against `quotes`.
+    Auto,
+    /// `none`: the keywords produce no marks, and still move the depth.
+    None,
+    /// `[<string> <string>]+`: open and close, outermost first. Never empty.
+    Pairs(Vec<(String, String)>),
+}
+
+/// One counter a `counter-reset`, `counter-increment` or `counter-set` names,
+/// and the integer it gives it (`css-lists-3` §4.2 to §4.4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CounterChange {
+    /// The counter's name, a `<custom-ident>`, so compared case-sensitively.
+    pub name: String,
+    /// The value it is reset or set to, or the amount it is incremented by.
+    pub value: i32,
+}
+
 /// `visibility`, at the two values that are not `collapse`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Visibility {
@@ -995,10 +1688,13 @@ pub enum PageBreak {
     Right,
 }
 
-/// `page-break-inside`, CSS 2.2 §13.3.1.
+/// `page-break-inside`, CSS 2.2 §13.3.1, and `css-break-3` §3.2's
+/// `break-inside`, which it is a legacy alias of.
 ///
-/// Two values and not three: `avoid-page` and the `break-inside` longhand's
-/// `avoid-column` are about fragmentation contexts this build has none of.
+/// Two values: `break-inside: avoid-page` is [`PageBreakInside::Avoid`],
+/// because the page is the one fragmentation context this build breaks
+/// across, and `avoid-column` and `avoid-region` are about two it has none of
+/// and are refused by value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageBreakInside {
     /// `auto`
@@ -1114,10 +1810,62 @@ pub enum Property {
     TextIndent(Len),
     /// `text-decoration`
     TextDecoration(TextDecoration),
+    /// `text-transform`, `css-text-3` §2.1.
+    TextTransform(TextTransform),
+    /// `color-scheme`, `css-color-adjust-1` §2.1. See [`ColorScheme`].
+    ColorScheme(ColorScheme),
+    /// `font-kerning`, `css-fonts-4` §6.4.
+    FontKerning(FontKerning),
+    /// `direction`, `css-writing-modes-3` §2.1.
+    Direction(Direction),
+    /// `hyphens`, `css-text-3` §5.4.
+    Hyphens(Hyphens),
+    /// `unicode-bidi`, §2.2.
+    UnicodeBidi(UnicodeBidi),
+    /// `font-feature-settings`, §6.12, in the order written; empty for
+    /// `normal`.
+    FontFeatureSettings(Vec<FeatureSetting>),
+    /// `text-shadow`, `css-text-decor-3` §4: the list, first on top. Empty
+    /// for `none`.
+    TextShadow(Vec<SpecifiedShadow>),
+    /// `box-shadow`, `css-backgrounds-3` §7.1, likewise.
+    BoxShadow(Vec<SpecifiedShadow>),
     /// `white-space`
     WhiteSpace(WhiteSpace),
     /// `list-style-type`
     ListStyleType(ListStyleType),
+    /// `list-style-position`
+    ListStylePosition(ListStylePosition),
+    /// `counter-reset`, `css-lists-3` §4.2. Empty for `none`.
+    CounterReset(Vec<CounterChange>),
+    /// `counter-increment`, §4.3. Empty for `none`.
+    CounterIncrement(Vec<CounterChange>),
+    /// `counter-set`, §4.4. Empty for `none`.
+    CounterSet(Vec<CounterChange>),
+    /// `quotes`, `css-content-3` §3.2.
+    Quotes(Quotes),
+    /// `opacity`, `css-color-4` §15.1, as written: a value outside `[0, 1]` is
+    /// valid and clamped at computed-value time, so the clamp is the cascade's.
+    Opacity(f64),
+    /// `transform`, `css-transforms-1` §5: the list, leftmost outermost.
+    /// Empty for `none`.
+    Transform(Vec<SpecifiedTransform>),
+    /// `transform-origin`, §6.
+    TransformOrigin(SpecifiedTransformOrigin),
+    /// `border-*-*-radius`, `css-backgrounds-3` §5.1.
+    BorderRadius(Corner, SpecifiedRadius),
+    /// `outline-width`, `css-ui-4` §5.2.
+    OutlineWidth(Len),
+    /// `outline-style`, §5.3.
+    OutlineStyle(OutlineStyle),
+    /// `outline-color`, §5.4. `None` is `currentColor`, its initial value.
+    OutlineColor(Option<Color>),
+    /// `outline-offset`, §5.5. May be negative.
+    OutlineOffset(Len),
+    /// `overflow-x`, `css-overflow-3` §3.1.
+    OverflowX(Overflow),
+    /// `overflow-y`, §3.1.
+    OverflowY(Overflow),
     /// `visibility`
     Visibility(Visibility),
     /// `display`
@@ -1144,6 +1892,15 @@ pub enum Property {
     BorderColor(Side, Color),
     /// `background-color`
     BackgroundColor(Color),
+    /// `background-image`, `css-backgrounds-3` §2.2, one layer. `None` is
+    /// `none`.
+    BackgroundImage(Option<Image<Len>>),
+    /// `background-repeat`, §2.3.
+    BackgroundRepeat(BackgroundRepeat),
+    /// `background-position`, §2.6.
+    BackgroundPosition(SpecifiedBackgroundPosition),
+    /// `background-size`, §2.4.
+    BackgroundSize(SpecifiedBackgroundSize),
     /// `page-break-before`
     PageBreakBefore(PageBreak),
     /// `page-break-after`
@@ -1245,8 +2002,37 @@ impl Property {
             Property::TextAlign(_) => "text-align",
             Property::TextIndent(_) => "text-indent",
             Property::TextDecoration(_) => "text-decoration",
+            Property::TextShadow(_) => "text-shadow",
+            Property::BoxShadow(_) => "box-shadow",
+            Property::TextTransform(_) => "text-transform",
+            Property::ColorScheme(_) => "color-scheme",
+            Property::FontKerning(_) => "font-kerning",
+            Property::Direction(_) => "direction",
+            Property::UnicodeBidi(_) => "unicode-bidi",
+            Property::Hyphens(_) => "hyphens",
+            Property::FontFeatureSettings(_) => "font-feature-settings",
             Property::WhiteSpace(_) => "white-space",
             Property::ListStyleType(_) => "list-style-type",
+            Property::ListStylePosition(_) => "list-style-position",
+            Property::CounterReset(_) => "counter-reset",
+            Property::CounterIncrement(_) => "counter-increment",
+            Property::CounterSet(_) => "counter-set",
+            Property::Quotes(_) => "quotes",
+            Property::Opacity(_) => "opacity",
+            Property::Transform(_) => "transform",
+            Property::TransformOrigin(_) => "transform-origin",
+            Property::BorderRadius(corner, _) => match corner {
+                Corner::TopLeft => "border-top-left-radius",
+                Corner::TopRight => "border-top-right-radius",
+                Corner::BottomRight => "border-bottom-right-radius",
+                Corner::BottomLeft => "border-bottom-left-radius",
+            },
+            Property::OutlineWidth(_) => "outline-width",
+            Property::OutlineStyle(_) => "outline-style",
+            Property::OutlineColor(_) => "outline-color",
+            Property::OutlineOffset(_) => "outline-offset",
+            Property::OverflowX(_) => "overflow-x",
+            Property::OverflowY(_) => "overflow-y",
             Property::Visibility(_) => "visibility",
             Property::Display(_) => "display",
             Property::Float(_) => "float",
@@ -1285,6 +2071,10 @@ impl Property {
                 Side::Left => "border-left-color",
             },
             Property::BackgroundColor(_) => "background-color",
+            Property::BackgroundImage(_) => "background-image",
+            Property::BackgroundRepeat(_) => "background-repeat",
+            Property::BackgroundPosition(_) => "background-position",
+            Property::BackgroundSize(_) => "background-size",
             Property::PageBreakBefore(_) => "page-break-before",
             Property::PageBreakAfter(_) => "page-break-after",
             Property::PageBreakInside(_) => "page-break-inside",
@@ -1350,8 +2140,31 @@ impl Property {
             | Property::WordSpacing(_)
             | Property::TextAlign(_)
             | Property::TextIndent(_)
+            // `css-text-3` §2.1's table says *inherited: yes*, which is what
+            // lets `h1 { text-transform: uppercase }` reach the text inside an
+            // `<em>` in the heading.
+            | Property::TextTransform(_)
+            // `css-color-adjust-1` §2.1: *inherited: yes*, which is how
+            // pandoc's one `:root { color-scheme: light dark }` reaches every
+            // element of the book.
+            | Property::ColorScheme(_)
+            // `css-fonts-4` §6.4 and §6.12: both *inherited: yes*, as every
+            // font property is — a `<p>`'s `font-feature-settings` reaches the
+            // text in its `<em>`.
+            | Property::FontKerning(_)
+            | Property::FontFeatureSettings(_)
+            // `css-writing-modes-3` §2.1: *inherited: yes*. `unicode-bidi` is
+            // not (§2.2): an embedding is opened by the box that declares it.
+            | Property::Direction(_)
+            // `css-text-3` §5.4: *inherited: yes*.
+            | Property::Hyphens(_)
             | Property::WhiteSpace(_)
             | Property::ListStyleType(_)
+            | Property::ListStylePosition(_)
+            // `css-content-3` §3.2: *inherited: yes*, which is how a book's one
+            // `q { quotes: … }` or `:root { quotes: … }` reaches the generated
+            // boxes that read it.
+            | Property::Quotes(_)
             | Property::Visibility(_)
             | Property::Orphans(_)
             | Property::Widows(_)
@@ -1367,8 +2180,44 @@ impl Property {
             // collapse }` to the table and separate borders to every cell under
             // it, which draws a plausible table with two border models in it.
             | Property::BorderCollapse(_)
-            | Property::BorderSpacing(_, _) => true,
+            | Property::BorderSpacing(_, _)
+            // `css-text-decor-3` §4: *inherited: yes* — a heading's shadow is
+            // its text's, through every `<em>` in it.
+            | Property::TextShadow(_) => true,
             Property::TextDecoration(_)
+            | Property::UnicodeBidi(_)
+            // `css-backgrounds-3` §7.1: *inherited: no*; a box's shadow is its
+            // own box's.
+            | Property::BoxShadow(_)
+            // `css-lists-3` §4.2 to §4.4: all three *inherited: no*. A
+            // counter is inherited through the **counter tree** (§4.5), which
+            // is a different walk from the property's; an inherited
+            // `counter-increment` would bump the counter once per descendant.
+            | Property::CounterReset(_)
+            | Property::CounterIncrement(_)
+            | Property::CounterSet(_)
+            // `css-color-4` §15.1: *inherited: no*. A group's opacity is
+            // applied to the group once; inheriting it would apply it again at
+            // every level, and a paragraph at 0.5 inside a section at 0.5 would
+            // come out at a sixteenth rather than a quarter of its colour.
+            | Property::Opacity(_)
+            // `css-transforms-1` §5 and §6: *inherited: no*. A child of a
+            // rotated box is rotated with it by being drawn inside it, which
+            // is the composition, not inheritance.
+            | Property::Transform(_)
+            | Property::TransformOrigin(_)
+            // `css-backgrounds-3` §5.1 and `css-ui-4` §5: *inherited: no*,
+            // like the borders they belong beside.
+            | Property::BorderRadius(_, _)
+            | Property::OutlineWidth(_)
+            | Property::OutlineStyle(_)
+            | Property::OutlineColor(_)
+            | Property::OutlineOffset(_)
+            // `css-overflow-3` §3.1: *inherited: no*. A clip is the box's own
+            // padding edge, and an inherited one would clip every descendant
+            // to its own box as well.
+            | Property::OverflowX(_)
+            | Property::OverflowY(_)
             | Property::Display(_)
             | Property::Float(_)
             | Property::Clear(_)
@@ -1381,6 +2230,13 @@ impl Property {
             | Property::BorderStyle(_, _)
             | Property::BorderColor(_, _)
             | Property::BackgroundColor(_)
+            // `css-backgrounds-3` §2: none of the four is inherited, which is
+            // what stops a section's texture being drawn again in every
+            // paragraph inside it.
+            | Property::BackgroundImage(_)
+            | Property::BackgroundRepeat(_)
+            | Property::BackgroundPosition(_)
+            | Property::BackgroundSize(_)
             | Property::PageBreakBefore(_)
             | Property::PageBreakAfter(_)
             // `page-break-inside` is the one row here that disagrees with the
@@ -1568,30 +2424,15 @@ pub enum Parsed {
 pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "animation",
     "background-attachment",
-    "background-image",
-    "background-position",
-    "background-repeat",
-    "background-size",
     "border-image",
-    "border-radius",
-    "box-shadow",
-    "break-after",
-    "break-before",
-    "break-inside",
     "caption-side",
     "clip",
     "clip-path",
-    "color-scheme",
-    "counter-increment",
-    "counter-reset",
     "cursor",
-    "direction",
     "empty-cells",
     "filter",
     "font",
     "font-display",
-    "font-feature-settings",
-    "font-kerning",
     "font-stretch",
     "font-variant-numeric",
     "grid",
@@ -1602,24 +2443,11 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "grid-template-areas",
     "grid-template-columns",
     "grid-template-rows",
-    "hyphens",
     "justify-items",
     "justify-self",
-    "list-style",
     "list-style-image",
-    "list-style-position",
     "mix-blend-mode",
-    "opacity",
-    "outline",
-    "outline-color",
-    "outline-offset",
-    "outline-style",
-    "outline-width",
-    "overflow",
-    "overflow-x",
-    "overflow-y",
     "page",
-    "quotes",
     "resize",
     "speak",
     "src",
@@ -1627,12 +2455,7 @@ pub const UNSUPPORTED_PROPERTIES: &[&str] = &[
     "text-emphasis",
     "text-emphasis-style",
     "text-overflow",
-    "text-shadow",
-    "text-transform",
-    "transform",
-    "transform-origin",
     "transition",
-    "unicode-bidi",
     "unicode-range",
     "word-wrap",
     "writing-mode",
@@ -1783,7 +2606,16 @@ impl Defaulting {
 /// Two tables that must agree are worth one test; two tables that quietly
 /// disagree are `border: inherit` leaving the border colour behind.
 pub const DEFAULTABLE_SHORTHANDS: &[(&str, &[&str])] = &[
-    ("background", &["background-color"]),
+    (
+        "background",
+        &[
+            "background-color",
+            "background-image",
+            "background-repeat",
+            "background-position",
+            "background-size",
+        ],
+    ),
     (
         "border",
         &[
@@ -1856,6 +2688,14 @@ pub const DEFAULTABLE_SHORTHANDS: &[(&str, &[&str])] = &[
             "border-left-width",
         ],
     ),
+    // `css-break-3` §3.4's aliases, and in the other direction from every
+    // other row here: the name a book writes today is the modern one and the
+    // longhand this build keeps is named for the legacy one. One property with
+    // two names, so `break-before: inherit` defaults exactly what
+    // `page-break-before: inherit` does.
+    ("break-after", &["page-break-after"]),
+    ("break-before", &["page-break-before"]),
+    ("break-inside", &["page-break-inside"]),
     (
         "column-rule",
         &[
@@ -1866,6 +2706,23 @@ pub const DEFAULTABLE_SHORTHANDS: &[(&str, &[&str])] = &[
     ),
     ("columns", &["column-width", "column-count"]),
     ("flex", &["flex-grow", "flex-shrink", "flex-basis"]),
+    // `css-lists-3` §3.4's shorthand, without `list-style-image`, which is
+    // unimplemented and which the shorthand refuses by value when it is named.
+    ("list-style", &["list-style-type", "list-style-position"]),
+    (
+        "border-radius",
+        &[
+            "border-top-left-radius",
+            "border-top-right-radius",
+            "border-bottom-right-radius",
+            "border-bottom-left-radius",
+        ],
+    ),
+    (
+        "outline",
+        &["outline-width", "outline-style", "outline-color"],
+    ),
+    ("overflow", &["overflow-x", "overflow-y"]),
     ("flex-flow", &["flex-direction", "flex-wrap"]),
     ("gap", &["row-gap", "column-gap"]),
     (
@@ -1916,6 +2773,43 @@ pub enum ContentItem {
     /// `attr(name)`: the originating element's attribute, or the empty string
     /// when it has none -- which is §2.4's own fallback and not a guess.
     Attr(String),
+    /// `counter(name, style)`, `css-lists-3` §4.8: the innermost counter of
+    /// that name, in a predefined counter style. `style` is `decimal` where
+    /// the author wrote none.
+    Counter {
+        /// The counter's name.
+        name: String,
+        /// The `<counter-style>` it is drawn in.
+        style: ListStyleType,
+    },
+    /// `open-quote`, `close-quote`, `no-open-quote`, `no-close-quote`
+    /// (`css-content-3` §3.3): a mark from `quotes` at the current nesting
+    /// depth, and the depth moved.
+    Quote(QuoteKeyword),
+    /// `counters(name, separator, style)`: every counter of that name in
+    /// scope, outermost first, joined by the separator — the `1.2.3` of a
+    /// nested list.
+    Counters {
+        /// The counter's name.
+        name: String,
+        /// The string between two values.
+        separator: String,
+        /// The `<counter-style>` each value is drawn in.
+        style: ListStyleType,
+    },
+}
+
+/// The four quote keywords of `css-content-3` §3.3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuoteKeyword {
+    /// `open-quote`: the open mark at this depth, then one level deeper.
+    Open,
+    /// `close-quote`: one level out, then that level's close mark.
+    Close,
+    /// `no-open-quote`: one level deeper and no mark.
+    NoOpen,
+    /// `no-close-quote`: one level out and no mark.
+    NoClose,
 }
 
 /// What this build reads inside `content`, and what it refuses.
@@ -1926,14 +2820,10 @@ pub enum ContentItem {
 /// * `<image>` / `url()` -- generated content that is a replaced element. The
 ///   box would need a size before the image is fetched, which is a different
 ///   layout question from the one this closes.
-/// * `counter()` / `counters()` -- these need `counter-reset` and
-///   `counter-increment`, a scoped counter tree, and §4's nesting rules. None
-///   of the three is here, and a `counter()` resolved to nothing would number
-///   every list item zero.
-/// * `open-quote` / `close-quote` / `no-open-quote` / `no-close-quote` -- these
-///   read the `quotes` property, which is still in [`UNSUPPORTED_PROPERTIES`]
-///   and which pandoc writes. Guessing `"` would be wrong in every language
-///   that does not use it.
+/// * `counter()` / `counters()` in a `<counter-style>` this build does not
+///   format (see [`list_style_type_named`]). The two functions themselves are
+///   read, and resolved over `css-lists-3` §4.5's counter tree by
+///   `crate::counter`.
 ///
 /// The five §7.1 defaulting keywords are refused here too, and for a reason
 /// worth stating: `content` has no `ComputedStyle` field, so there is nothing
@@ -1963,6 +2853,30 @@ fn parse_content(values: &[ComponentValue], significant: &[&ComponentValue]) -> 
             ComponentValue::Token(Token::Str(text)) => {
                 items.push(ContentItem::Text(text.clone()));
             }
+            ComponentValue::Token(Token::Ident(word)) => {
+                let keyword = match word.to_ascii_lowercase().as_str() {
+                    "open-quote" => QuoteKeyword::Open,
+                    "close-quote" => QuoteKeyword::Close,
+                    "no-open-quote" => QuoteKeyword::NoOpen,
+                    "no-close-quote" => QuoteKeyword::NoClose,
+                    // `none` and `normal` only stand alone; any other word is
+                    // not `content`'s grammar at all.
+                    _ => return Parsed::Invalid,
+                };
+                items.push(ContentItem::Quote(keyword));
+            }
+            ComponentValue::Function { name, arguments }
+                if name.eq_ignore_ascii_case("counter")
+                    || name.eq_ignore_ascii_case("counters") =>
+            {
+                match counter_function(name.eq_ignore_ascii_case("counters"), arguments) {
+                    Some(Ok(item)) => items.push(item),
+                    // A `<counter-style>` this build does not format, or a
+                    // `symbols()` function: inside the grammar, this build's.
+                    Some(Err(())) => return refuse(),
+                    None => return Parsed::Invalid,
+                }
+            }
             ComponentValue::Function { name, arguments } if name.eq_ignore_ascii_case("attr") => {
                 let inner: Vec<&ComponentValue> =
                     arguments.iter().filter(|v| !v.is_whitespace()).collect();
@@ -1989,6 +2903,65 @@ fn parse_content(values: &[ComponentValue], significant: &[&ComponentValue]) -> 
     Parsed::Content(ContentValue::Items(items))
 }
 
+/// `counter( <counter-name>, <counter-style>? )` and `counters(
+/// <counter-name>, <string>, <counter-style>? )`, `css-lists-3` §4.8.
+///
+/// `None` outside the grammar, `Some(Err(()))` for a counter style this build
+/// does not format — §4.8 makes an unknown name `decimal`, but a *known*
+/// predefined style drawn as decimal is a Greek or Armenian list numbered in
+/// the wrong alphabet, so those are refused rather than resolved.
+fn counter_function(plural: bool, arguments: &[ComponentValue]) -> Option<Result<ContentItem, ()>> {
+    let parts: Vec<Vec<&ComponentValue>> = arguments
+        .split(|v| matches!(v, ComponentValue::Token(Token::Comma)))
+        .map(|part| part.iter().filter(|v| !v.is_whitespace()).collect())
+        .collect();
+    let name = match parts.first().map(Vec::as_slice) {
+        Some([ComponentValue::Token(Token::Ident(name))]) => {
+            let lower = name.to_ascii_lowercase();
+            if lower == "none" || Defaulting::from_name(&lower).is_some() {
+                return None;
+            }
+            name.clone()
+        }
+        _ => return None,
+    };
+    let (separator, rest) = if plural {
+        match parts.get(1).map(Vec::as_slice) {
+            Some([ComponentValue::Token(Token::Str(separator))]) => {
+                (separator.clone(), parts.get(2..).unwrap_or_default())
+            }
+            _ => return None,
+        }
+    } else {
+        (String::new(), parts.get(1..).unwrap_or_default())
+    };
+    let style = match rest {
+        [] => ListStyleType::Decimal,
+        [one] => match one.as_slice() {
+            [ComponentValue::Token(Token::Ident(word))] => {
+                match list_style_type_named(&word.to_ascii_lowercase()) {
+                    Some(style) => style,
+                    None => return Some(Err(())),
+                }
+            }
+            [ComponentValue::Function { name, .. }] if name.eq_ignore_ascii_case("symbols") => {
+                return Some(Err(()));
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(Ok(if plural {
+        ContentItem::Counters {
+            name,
+            separator,
+            style,
+        }
+    } else {
+        ContentItem::Counter { name, style }
+    }))
+}
+
 /// Reading a value that is supposed to be a length, three ways.
 ///
 /// The split is what keeps the `Unsupported` census honest, and it is the
@@ -2000,6 +2973,7 @@ fn parse_content(values: &[ComponentValue], significant: &[&ComponentValue]) -> 
 /// gaps would inflate the one figure the whole milestone is measured by, in
 /// the flattering direction for the author and the damning one for this
 /// engine.
+#[derive(Clone, Copy)]
 enum LenOutcome {
     /// A length this build resolves.
     Ok(Len),
@@ -2356,9 +3330,15 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "align-self",
     "background",
     "background-color",
+    "background-image",
+    "background-position",
+    "background-repeat",
+    "background-size",
     "border",
     "border-bottom",
     "border-bottom-color",
+    "border-bottom-left-radius",
+    "border-bottom-right-radius",
     "border-bottom-style",
     "border-bottom-width",
     "border-collapse",
@@ -2367,6 +3347,7 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "border-left-color",
     "border-left-style",
     "border-left-width",
+    "border-radius",
     "border-right",
     "border-right-color",
     "border-right-style",
@@ -2375,13 +3356,20 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "border-style",
     "border-top",
     "border-top-color",
+    "border-top-left-radius",
+    "border-top-right-radius",
     "border-top-style",
     "border-top-width",
     "border-width",
     "bottom",
+    "box-shadow",
     "box-sizing",
+    "break-after",
+    "break-before",
+    "break-inside",
     "clear",
     "color",
+    "color-scheme",
     "column-count",
     "column-fill",
     "column-gap",
@@ -2393,6 +3381,10 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "column-width",
     "columns",
     "content",
+    "counter-increment",
+    "counter-reset",
+    "counter-set",
+    "direction",
     "display",
     "flex",
     "flex-basis",
@@ -2403,17 +3395,22 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "flex-wrap",
     "float",
     "font-family",
+    "font-feature-settings",
+    "font-kerning",
     "font-size",
     "font-style",
     "font-variant",
     "font-weight",
     "gap",
     "height",
+    "hyphens",
     "justify-content",
     "left",
     "letter-spacing",
     "line-break",
     "line-height",
+    "list-style",
+    "list-style-position",
     "list-style-type",
     "margin",
     "margin-bottom",
@@ -2424,9 +3421,18 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "max-width",
     "min-height",
     "min-width",
+    "opacity",
     "order",
     "orphans",
+    "outline",
+    "outline-color",
+    "outline-offset",
+    "outline-style",
+    "outline-width",
+    "overflow",
     "overflow-wrap",
+    "overflow-x",
+    "overflow-y",
     "padding",
     "padding-bottom",
     "padding-left",
@@ -2436,13 +3442,19 @@ pub const IMPLEMENTED_NAMES: &[&str] = &[
     "page-break-before",
     "page-break-inside",
     "position",
+    "quotes",
     "right",
     "row-gap",
     "table-layout",
     "text-align",
     "text-decoration",
     "text-indent",
+    "text-shadow",
+    "text-transform",
     "top",
+    "transform",
+    "transform-origin",
+    "unicode-bidi",
     "vertical-align",
     "visibility",
     "white-space",
@@ -2463,14 +3475,14 @@ fn implemented(
     Some(match name {
         "color" => colour_property(one, single, Property::Color),
         "background-color" => colour_property(one, single, Property::BackgroundColor),
-        // The `background` shorthand at the one form a book writes: a colour
-        // alone. Anything else names an image, a position or a repeat, none of
-        // which this build has — and expanding the colour out of it and
-        // dropping the rest would paint a background the author did not ask for.
-        "background" => match (single, one.and_then(color)) {
-            (true, Some(c)) => Implemented::Known(vec![Property::BackgroundColor(c)]),
-            _ => Implemented::BadValue,
+        "background" => background_shorthand(significant),
+        "background-image" => background_image(significant),
+        "background-repeat" => match background_repeat(significant) {
+            Some(repeat) => Implemented::Known(vec![Property::BackgroundRepeat(repeat)]),
+            None => Implemented::Malformed,
         },
+        "background-position" => background_position_property(significant),
+        "background-size" => background_size_property(significant),
         "display" => keyword(one, single, |word| {
             Some(Property::Display(match word {
                 "inline" => Display::Inline,
@@ -2696,8 +3708,10 @@ fn implemented(
         }),
         "text-align" => keyword(one, single, |word| {
             Some(Property::TextAlign(match word {
-                "left" | "start" => TextAlign::Left,
-                "right" | "end" => TextAlign::Right,
+                "left" => TextAlign::Left,
+                "right" => TextAlign::Right,
+                "start" => TextAlign::Start,
+                "end" => TextAlign::End,
                 "center" => TextAlign::Center,
                 "justify" => TextAlign::Justify,
                 _ => return None,
@@ -2712,6 +3726,14 @@ fn implemented(
                 _ => return None,
             }))
         }),
+        // `css-text-3` §2.1's grammar is `none | [capitalize | uppercase |
+        // lowercase] || full-width || full-size-kana`. A value inside that
+        // grammar that this build does not set — either of the last two, alone
+        // or beside a casing keyword — is `BadValue` and counted; a value
+        // outside it is the author's and `Malformed`. Read here rather than
+        // through `keyword`, because that helper would call
+        // `uppercase full-width` malformed for having two words.
+        "text-transform" => text_transform(significant),
         "white-space" => keyword(one, single, |word| {
             Some(Property::WhiteSpace(match word {
                 "normal" => WhiteSpace::Normal,
@@ -2723,19 +3745,211 @@ fn implemented(
             }))
         }),
         "list-style-type" => keyword(one, single, |word| {
-            Some(Property::ListStyleType(match word {
-                "disc" => ListStyleType::Disc,
-                "circle" => ListStyleType::Circle,
-                "square" => ListStyleType::Square,
-                "decimal" => ListStyleType::Decimal,
-                "lower-alpha" | "lower-latin" => ListStyleType::LowerAlpha,
-                "upper-alpha" | "upper-latin" => ListStyleType::UpperAlpha,
-                "lower-roman" => ListStyleType::LowerRoman,
-                "upper-roman" => ListStyleType::UpperRoman,
-                "none" => ListStyleType::None,
+            list_style_type_named(word).map(Property::ListStyleType)
+        }),
+        "list-style-position" => keyword(one, single, |word| {
+            list_style_position_named(word).map(Property::ListStylePosition)
+        }),
+        // `css-lists-3` §3.4: `<'list-style-position'> || <'list-style-image'>
+        // || <'list-style-type'>`, and **both implemented longhands are always
+        // emitted**, for `flex-flow`'s reason. `none` is the one word two of
+        // the three accept, and §3.4 resolves it the way it is resolved here:
+        // a `none` that is not needed for the image is the type.
+        "list-style" => list_style_shorthand(significant),
+        "counter-reset" => counter_list(significant, 0, true)
+            .map_or(Implemented::Malformed, |outcome| {
+                outcome.map(Property::CounterReset)
+            }),
+        "counter-increment" => counter_list(significant, 1, false)
+            .map_or(Implemented::Malformed, |outcome| {
+                outcome.map(Property::CounterIncrement)
+            }),
+        "border-top-left-radius"
+        | "border-top-right-radius"
+        | "border-bottom-right-radius"
+        | "border-bottom-left-radius" => {
+            let corner = match name {
+                "border-top-left-radius" => Corner::TopLeft,
+                "border-top-right-radius" => Corner::TopRight,
+                "border-bottom-right-radius" => Corner::BottomRight,
+                _ => Corner::BottomLeft,
+            };
+            match significant {
+                [one] | [one, _] => {
+                    let horizontal = radius_length(one);
+                    let vertical = significant.get(1).map_or(horizontal, |v| radius_length(v));
+                    match (horizontal, vertical) {
+                        (LenOutcome::Ok(horizontal), LenOutcome::Ok(vertical)) => {
+                            Implemented::Known(vec![Property::BorderRadius(
+                                corner,
+                                SpecifiedRadius {
+                                    horizontal,
+                                    vertical,
+                                },
+                            )])
+                        }
+                        (LenOutcome::Unsupported, _) | (_, LenOutcome::Unsupported) => {
+                            Implemented::BadValue
+                        }
+                        _ => Implemented::Malformed,
+                    }
+                }
+                _ => Implemented::Malformed,
+            }
+        }
+        "border-radius" => border_radius_shorthand(significant),
+        "outline-width" => match border_width_outcome(one, single) {
+            LenOutcome::Ok(len) => Implemented::Known(vec![Property::OutlineWidth(len)]),
+            LenOutcome::Unsupported => Implemented::BadValue,
+            LenOutcome::Invalid => Implemented::Malformed,
+        },
+        "outline-style" => keyword(one, single, |word| {
+            outline_style_named(word).map(Property::OutlineStyle)
+        }),
+        "outline-color" => match (single, one) {
+            // `css-ui-4` §5.4's `invert` is a value this build does not draw.
+            (true, Some(ComponentValue::Token(Token::Ident(word))))
+                if word.eq_ignore_ascii_case("invert") =>
+            {
+                Implemented::BadValue
+            }
+            // §5.4's initial value, which is what `None` is.
+            (true, Some(value)) if is_current_colour(value) => {
+                Implemented::Known(vec![Property::OutlineColor(None)])
+            }
+            _ => colour_property(one, single, |c| Property::OutlineColor(Some(c))),
+        },
+        "outline-offset" => match (single, one.map(length_outcome)) {
+            (true, Some(LenOutcome::Ok(Len::Percent(_)))) => Implemented::Malformed,
+            (true, Some(LenOutcome::Ok(len))) => {
+                Implemented::Known(vec![Property::OutlineOffset(len)])
+            }
+            (true, Some(LenOutcome::Unsupported)) => Implemented::BadValue,
+            _ => Implemented::Malformed,
+        },
+        "outline" => outline_shorthand(significant),
+        "box-shadow" => match shadows(values, true) {
+            Ok(list) => Implemented::Known(vec![Property::BoxShadow(list)]),
+            Err(outcome) => outcome,
+        },
+        "text-shadow" => match shadows(values, false) {
+            Ok(list) => Implemented::Known(vec![Property::TextShadow(list)]),
+            Err(outcome) => outcome,
+        },
+        "overflow-x" => keyword(one, single, |word| {
+            overflow_named(word).map(Property::OverflowX)
+        }),
+        "overflow-y" => keyword(one, single, |word| {
+            overflow_named(word).map(Property::OverflowY)
+        }),
+        // §3.1: `<'overflow-x'>{1,2}`, the first value `overflow-x` and the
+        // second `overflow-y`; one value is both.
+        "overflow" => {
+            let named = |value: &ComponentValue| match value {
+                ComponentValue::Token(Token::Ident(word)) => {
+                    overflow_named(&word.to_ascii_lowercase())
+                }
+                _ => None,
+            };
+            match significant {
+                [x] | [x, _] => {
+                    let y = significant.get(1).copied().unwrap_or(x);
+                    match (named(x), named(y)) {
+                        (Some(x), Some(y)) => {
+                            Implemented::Known(vec![Property::OverflowX(x), Property::OverflowY(y)])
+                        }
+                        _ => Implemented::Malformed,
+                    }
+                }
+                _ => Implemented::Malformed,
+            }
+        }
+        "transform" => transform_list(significant),
+        "transform-origin" => transform_origin(significant),
+        "color-scheme" => color_scheme(significant),
+        "font-kerning" => keyword(one, single, |word| {
+            Some(Property::FontKerning(match word {
+                "auto" => FontKerning::Auto,
+                "normal" => FontKerning::Normal,
+                "none" => FontKerning::None,
                 _ => return None,
             }))
         }),
+        "font-feature-settings" => font_feature_settings(values, significant),
+        "direction" => keyword(one, single, |word| {
+            Some(Property::Direction(match word {
+                "ltr" => Direction::Ltr,
+                "rtl" => Direction::Rtl,
+                _ => return None,
+            }))
+        }),
+        // `auto` is inside the grammar and refused by value; see [`Hyphens`].
+        "hyphens" => keyword(one, single, |word| {
+            Some(Property::Hyphens(match word {
+                "none" => Hyphens::None,
+                "manual" => Hyphens::Manual,
+                _ => return None,
+            }))
+        }),
+        // `bidi-override` and `isolate-override` are inside the grammar and
+        // refused by value; see [`UnicodeBidi`].
+        "unicode-bidi" => keyword(one, single, |word| {
+            Some(Property::UnicodeBidi(match word {
+                "normal" => UnicodeBidi::Normal,
+                "embed" => UnicodeBidi::Embed,
+                "isolate" => UnicodeBidi::Isolate,
+                "plaintext" => UnicodeBidi::Plaintext,
+                _ => return None,
+            }))
+        }),
+        // `css-color-4` §15.1: `<alpha-value>`, a number or a percentage.
+        "opacity" => match (single, one) {
+            (true, Some(ComponentValue::Token(Token::Number { value, .. }))) => {
+                Implemented::Known(vec![Property::Opacity(*value)])
+            }
+            (true, Some(ComponentValue::Token(Token::Percentage(value)))) => {
+                Implemented::Known(vec![Property::Opacity(*value / 100.0)])
+            }
+            _ => Implemented::Malformed,
+        },
+        // `css-content-3` §3.2: `auto | none | match-parent | [<string>
+        // <string>]+`. `match-parent` is inside the grammar and refused by
+        // value; an odd number of strings is outside it.
+        "quotes" => match significant {
+            [ComponentValue::Token(Token::Ident(word))] => {
+                match word.to_ascii_lowercase().as_str() {
+                    "auto" => Implemented::Known(vec![Property::Quotes(Quotes::Auto)]),
+                    "none" => Implemented::Known(vec![Property::Quotes(Quotes::None)]),
+                    "match-parent" => Implemented::BadValue,
+                    _ => Implemented::Malformed,
+                }
+            }
+            _ => {
+                let mut strings = Vec::new();
+                for value in significant {
+                    match value {
+                        ComponentValue::Token(Token::Str(text)) => strings.push(text.clone()),
+                        _ => return Some(Implemented::Malformed),
+                    }
+                }
+                if strings.is_empty() || strings.len() % 2 != 0 {
+                    Implemented::Malformed
+                } else {
+                    let pairs = strings
+                        .chunks(2)
+                        .filter_map(|pair| match pair {
+                            [open, close] => Some((open.clone(), close.clone())),
+                            _ => None,
+                        })
+                        .collect();
+                    Implemented::Known(vec![Property::Quotes(Quotes::Pairs(pairs))])
+                }
+            }
+        },
+        "counter-set" => counter_list(significant, 0, false)
+            .map_or(Implemented::Malformed, |outcome| {
+                outcome.map(Property::CounterSet)
+            }),
         "page-break-before" | "page-break-after" => {
             let before = name == "page-break-before";
             keyword(one, single, move |word| {
@@ -2758,6 +3972,54 @@ fn implemented(
             Some(Property::PageBreakInside(match word {
                 "auto" => PageBreakInside::Auto,
                 "avoid" => PageBreakInside::Avoid,
+                _ => return None,
+            }))
+        }),
+        // `css-break-3` §3.1's modern spelling, and **one property with two
+        // names rather than two properties**: §3.4 makes `page-break-before`,
+        // `-after` and `-inside` legacy shorthands that alias these three, so
+        // both spellings write the one longhand and a later declaration of
+        // either beats an earlier one of the other, which is what cascading a
+        // single property means. The table §3.4 states is the mapping:
+        // `page-break-before: always` is `break-before: page`, and `auto`,
+        // `avoid`, `left` and `right` are themselves.
+        //
+        // `avoid-page` is `avoid` here and not an approximation of it: §3.1
+        // makes `avoid` avoid a break in *every* fragmentation context and
+        // `avoid-page` in the page one, and the page is the only context this
+        // build fragments across — a multi-column container is laid out as
+        // one item and never broken between its columns.
+        //
+        // **Refused by value**, each `BadValue` and so each counted against the
+        // property rather than mapped onto a neighbour: `column` and
+        // `avoid-column` (a column break, which this build's balanced columns
+        // have no position for), `region` and `avoid-region` (no regions), and
+        // `recto` and `verso`, which §3.1 resolves through the page
+        // progression direction — this build sets every book left to right,
+        // and a `verso` read as `left` would be wrong in exactly the
+        // right-to-left books that write it.
+        "break-before" | "break-after" => {
+            let before = name == "break-before";
+            keyword(one, single, move |word| {
+                let value = match word {
+                    "auto" => PageBreak::Auto,
+                    "page" => PageBreak::Always,
+                    "avoid" | "avoid-page" => PageBreak::Avoid,
+                    "left" => PageBreak::Left,
+                    "right" => PageBreak::Right,
+                    _ => return None,
+                };
+                Some(if before {
+                    Property::PageBreakBefore(value)
+                } else {
+                    Property::PageBreakAfter(value)
+                })
+            })
+        }
+        "break-inside" => keyword(one, single, |word| {
+            Some(Property::PageBreakInside(match word {
+                "auto" => PageBreakInside::Auto,
+                "avoid" | "avoid-page" => PageBreakInside::Avoid,
                 _ => return None,
             }))
         }),
@@ -3174,6 +4436,1466 @@ fn keyword(
         }
         Some(_) if single => Implemented::BadValue,
         _ => Implemented::Malformed,
+    }
+}
+
+/// `color-scheme`, `css-color-adjust-1` §2.1:
+/// `normal | [ light | dark | <custom-ident> ]+ && only?`.
+///
+/// `only` once, at either end; `normal` alone; and a `<custom-ident>` is any
+/// identifier but the CSS-wide keywords and `default` (`css-values-4` §4.2),
+/// which are outside the grammar. See [`ColorScheme`] for what is refused by
+/// value and why.
+fn color_scheme(significant: &[&ComponentValue]) -> Implemented {
+    let mut words: Vec<String> = Vec::with_capacity(significant.len());
+    for value in significant {
+        match value.token() {
+            Some(Token::Ident(word)) => words.push(word.to_ascii_lowercase()),
+            _ => return Implemented::Malformed,
+        }
+    }
+    if words.len() == 1 && words[0] == "normal" {
+        return Implemented::Known(vec![Property::ColorScheme(ColorScheme::Normal)]);
+    }
+    let only = words.iter().filter(|w| *w == "only").count();
+    let at_an_end =
+        words.first().is_some_and(|w| w == "only") || words.last().is_some_and(|w| w == "only");
+    if only > 1 || (only == 1 && !at_an_end) || only == words.len() {
+        return Implemented::Malformed;
+    }
+    let outside = |w: &str| {
+        matches!(
+            w,
+            "normal" | "initial" | "inherit" | "unset" | "revert" | "revert-layer" | "default"
+        )
+    };
+    if words.iter().any(|w| outside(w)) {
+        return Implemented::Malformed;
+    }
+    let names = |scheme: &str| words.iter().any(|w| w == scheme);
+    match (names("light"), names("dark")) {
+        (true, _) => Implemented::Known(vec![Property::ColorScheme(ColorScheme::Light)]),
+        (false, true) => Implemented::BadValue,
+        (false, false) => Implemented::Known(vec![Property::ColorScheme(ColorScheme::Normal)]),
+    }
+}
+
+/// `font-feature-settings`, `css-fonts-4` §6.12:
+/// `normal | <feature-tag-value>#`, where a `<feature-tag-value>` is
+/// `<opentype-tag> [ <integer [0,∞]> | on | off ]?`.
+///
+/// A tag is a string of exactly four characters from U+20 to U+7E, and any
+/// other string makes the whole declaration invalid, as §6.12 says. A value
+/// above one is inside the grammar and an alternate index this build's shaper
+/// does not carry, so the declaration is refused by value; so is a list longer
+/// than [`crate::limits::MAX_CSS_FEATURE_SETTINGS`], since the list is copied
+/// into every element that inherits it.
+fn font_feature_settings(
+    values: &[ComponentValue],
+    significant: &[&ComponentValue],
+) -> Implemented {
+    if let [one] = significant {
+        if one
+            .token()
+            .is_some_and(|t| matches!(t, Token::Ident(w) if w.eq_ignore_ascii_case("normal")))
+        {
+            return Implemented::Known(vec![Property::FontFeatureSettings(Vec::new())]);
+        }
+    }
+    let mut out: Vec<FeatureSetting> = Vec::new();
+    let mut indexed = false;
+    for group in values.split(|v| matches!(v, ComponentValue::Token(Token::Comma))) {
+        let parts: Vec<&ComponentValue> = group.iter().filter(|v| !v.is_whitespace()).collect();
+        let Some((ComponentValue::Token(Token::Str(tag)), rest)) = parts.split_first() else {
+            return Implemented::Malformed;
+        };
+        let Ok(tag) = <[u8; 4]>::try_from(tag.as_bytes()) else {
+            return Implemented::Malformed;
+        };
+        if !tag.iter().all(|b| (0x20..=0x7E).contains(b)) {
+            return Implemented::Malformed;
+        }
+        let value = match rest {
+            [] => 1,
+            [ComponentValue::Token(Token::Ident(word))] if word.eq_ignore_ascii_case("on") => 1,
+            [ComponentValue::Token(Token::Ident(word))] if word.eq_ignore_ascii_case("off") => 0,
+            [ComponentValue::Token(Token::Number {
+                value,
+                integer: true,
+            })] if *value >= 0.0 && value.is_finite() => {
+                if *value > 1.0 {
+                    indexed = true;
+                }
+                u32::from(*value > 0.0)
+            }
+            _ => return Implemented::Malformed,
+        };
+        out.push(FeatureSetting { tag, value });
+    }
+    if indexed || out.len() > crate::limits::MAX_CSS_FEATURE_SETTINGS {
+        return Implemented::BadValue;
+    }
+    Implemented::Known(vec![Property::FontFeatureSettings(out)])
+}
+
+/// One radius: a non-negative `<length-percentage>` (§5.1).
+fn radius_length(value: &ComponentValue) -> LenOutcome {
+    match length_outcome(value) {
+        LenOutcome::Ok(len) if len_is_negative(len) => LenOutcome::Invalid,
+        other => other,
+    }
+}
+
+fn len_is_negative(len: Len) -> bool {
+    match len {
+        Len::Px(v) | Len::Em(v) | Len::Rem(v) | Len::Percent(v) => v < 0.0,
+    }
+}
+
+/// `border-radius`, `css-backgrounds-3` §5.2: one to four horizontal radii,
+/// then optionally `/` and one to four vertical ones, each list expanded
+/// clockwise from the top left as `margin`'s is from the top.
+fn border_radius_shorthand(significant: &[&ComponentValue]) -> Implemented {
+    let slash = significant
+        .iter()
+        .position(|v| matches!(v, ComponentValue::Token(Token::Delim('/'))));
+    let (first, second) = match slash {
+        Some(at) => (&significant[..at], Some(&significant[at + 1..])),
+        None => (significant, None),
+    };
+    let expand = |list: &[&ComponentValue]| -> Result<[Len; 4], Implemented> {
+        let mut lens = Vec::with_capacity(4);
+        for value in list {
+            match radius_length(value) {
+                LenOutcome::Ok(len) => lens.push(len),
+                LenOutcome::Unsupported => return Err(Implemented::BadValue),
+                LenOutcome::Invalid => return Err(Implemented::Malformed),
+            }
+        }
+        // §5.2: *"if the bottom-right is omitted it is the same as the top-left;
+        // if the bottom-left is omitted it is the same as the top-right"*.
+        match lens.as_slice() {
+            [a] => Ok([*a, *a, *a, *a]),
+            [a, b] => Ok([*a, *b, *a, *b]),
+            [a, b, c] => Ok([*a, *b, *c, *b]),
+            [a, b, c, d] => Ok([*a, *b, *c, *d]),
+            _ => Err(Implemented::Malformed),
+        }
+    };
+    let horizontal = match expand(first) {
+        Ok(list) => list,
+        Err(outcome) => return outcome,
+    };
+    let vertical = match second {
+        Some(list) => match expand(list) {
+            Ok(list) => list,
+            Err(outcome) => return outcome,
+        },
+        None => horizontal,
+    };
+    Implemented::Known(
+        Corner::ALL
+            .iter()
+            .map(|corner| {
+                Property::BorderRadius(
+                    *corner,
+                    SpecifiedRadius {
+                        horizontal: horizontal[corner.index()],
+                        vertical: vertical[corner.index()],
+                    },
+                )
+            })
+            .collect(),
+    )
+}
+
+/// `box-shadow` (`boxed` true) or `text-shadow`: `none`, or a comma-separated
+/// list of shadows, each an optional colour, two to four lengths in a row for
+/// a box (two or three for text) and, for a box, an optional `inset`, the
+/// three in any order (`css-backgrounds-3` §7.1, `css-text-decor-3` §4).
+/// `currentColor` is accepted here, and is what an omitted colour is.
+///
+/// **A blur is refused by value**, and the whole declaration with it: a
+/// blurred shadow is a soft edge this build does not draw, and drawing it hard
+/// would be a different picture from the one written — a counted gap is the
+/// honest answer. A zero blur is a hard shadow and is drawn. So is a list
+/// longer than [`crate::limits::MAX_CSS_SHADOWS`], which bounds how many
+/// times a page draws its text.
+fn shadows(values: &[ComponentValue], boxed: bool) -> Result<Vec<SpecifiedShadow>, Implemented> {
+    let significant: Vec<&ComponentValue> = values.iter().filter(|v| !v.is_whitespace()).collect();
+    if let [ComponentValue::Token(Token::Ident(word))] = significant[..] {
+        if word.eq_ignore_ascii_case("none") {
+            return Ok(Vec::new());
+        }
+    }
+    let mut out = Vec::new();
+    let mut blurred = false;
+    for group in values.split(|v| matches!(v, ComponentValue::Token(Token::Comma))) {
+        // `Some(None)` is `currentColor` written; `None` is no colour written.
+        let mut colour: Option<Option<Color>> = None;
+        let mut inset = false;
+        let mut lengths: Vec<Len> = Vec::new();
+        // The lengths are one component: once something else follows them,
+        // another length is a second run of them, which the grammar refuses.
+        let mut lengths_done = false;
+        for value in group.iter().filter(|v| !v.is_whitespace()) {
+            match length_outcome(value) {
+                LenOutcome::Ok(Len::Percent(_)) => return Err(Implemented::Malformed),
+                LenOutcome::Ok(_) if lengths_done => return Err(Implemented::Malformed),
+                LenOutcome::Ok(len) => {
+                    lengths.push(len);
+                    continue;
+                }
+                LenOutcome::Unsupported => return Err(Implemented::BadValue),
+                LenOutcome::Invalid => {}
+            }
+            lengths_done |= !lengths.is_empty();
+            if let ComponentValue::Token(Token::Ident(word)) = value {
+                if boxed && word.eq_ignore_ascii_case("inset") {
+                    if inset {
+                        return Err(Implemented::Malformed);
+                    }
+                    inset = true;
+                    continue;
+                }
+                if word.eq_ignore_ascii_case("currentcolor") {
+                    if colour.is_some() {
+                        return Err(Implemented::Malformed);
+                    }
+                    colour = Some(None);
+                    continue;
+                }
+            }
+            if colour.is_some() {
+                return Err(Implemented::Malformed);
+            }
+            match colour_outcome(value) {
+                ColourOutcome::Ok(found) => colour = Some(Some(found)),
+                ColourOutcome::Unsupported => return Err(Implemented::BadValue),
+                ColourOutcome::Invalid => return Err(Implemented::Malformed),
+            }
+        }
+        let most = if boxed { 4 } else { 3 };
+        let (x, y, rest) = match lengths[..] {
+            [x, y, ref rest @ ..] if rest.len() <= most - 2 => (x, y, rest),
+            _ => return Err(Implemented::Malformed),
+        };
+        let blur = rest.first().copied().unwrap_or(Len::Px(0.0));
+        if len_is_negative(blur) {
+            return Err(Implemented::Malformed);
+        }
+        blurred |= !matches!(blur, Len::Px(px) | Len::Em(px) | Len::Rem(px) if px == 0.0);
+        out.push(SpecifiedShadow {
+            color: colour.flatten(),
+            x,
+            y,
+            blur,
+            spread: rest.get(1).copied().unwrap_or(Len::Px(0.0)),
+            inset,
+        });
+    }
+    if blurred || out.len() > crate::limits::MAX_CSS_SHADOWS {
+        return Err(Implemented::BadValue);
+    }
+    Ok(out)
+}
+
+/// `transform`, `css-transforms-1` §5: `none`, or a whitespace-separated list
+/// of §13.1's two-dimensional functions, each with comma-separated arguments.
+///
+/// **A three-dimensional function is refused by value** — `matrix3d()`,
+/// `translate3d()`, `translateZ()`, `scale3d()`, `scaleZ()`, `rotate3d()`,
+/// `rotateX()`, `rotateY()` and `perspective()` — and the whole declaration
+/// with it: a page is flat, and dropping the one function would draw a
+/// different flat picture from the one a 3D renderer projects. A name in
+/// neither list is not the grammar.
+fn transform_list(significant: &[&ComponentValue]) -> Implemented {
+    if let [ComponentValue::Token(Token::Ident(word))] = significant {
+        if word.eq_ignore_ascii_case("none") {
+            return Implemented::Known(vec![Property::Transform(Vec::new())]);
+        }
+    }
+    if significant.is_empty() {
+        return Implemented::Malformed;
+    }
+    let mut list = Vec::with_capacity(significant.len());
+    let mut refused = false;
+    for value in significant {
+        let ComponentValue::Function { name, arguments } = value else {
+            return Implemented::Malformed;
+        };
+        match transform_function(&name.to_ascii_lowercase(), arguments) {
+            Ok(Some(function)) => list.push(function),
+            Ok(None) => refused = true,
+            Err(outcome) => return outcome,
+        }
+    }
+    if refused {
+        return Implemented::BadValue;
+    }
+    Implemented::Known(vec![Property::Transform(list)])
+}
+
+/// One `<transform-function>`: `Ok(None)` for a three-dimensional one, which
+/// the caller refuses by value once it knows the rest is the grammar.
+fn transform_function(
+    name: &str,
+    arguments: &[ComponentValue],
+) -> Result<Option<SpecifiedTransform>, Implemented> {
+    // Comma-separated, `css-transforms-1` §13.1's `#` multiplier: an empty
+    // argument between two commas is not one.
+    let mut values: Vec<&ComponentValue> = Vec::new();
+    let mut expect_value = true;
+    for value in arguments.iter().filter(|v| !v.is_whitespace()) {
+        if is_comma(value) {
+            if expect_value {
+                return Err(Implemented::Malformed);
+            }
+            expect_value = true;
+            continue;
+        }
+        if !expect_value {
+            return Err(Implemented::Malformed);
+        }
+        values.push(value);
+        expect_value = false;
+    }
+    if expect_value && !values.is_empty() {
+        return Err(Implemented::Malformed);
+    }
+    let number = |value: &ComponentValue| match value {
+        ComponentValue::Token(Token::Number { value, .. }) => Ok(*value),
+        _ => Err(Implemented::Malformed),
+    };
+    // `css-transforms-2` §12 admits a percentage in `scale()`; it is the
+    // number a hundredth of it.
+    let factor = |value: &ComponentValue| match value {
+        ComponentValue::Token(Token::Percentage(percent)) => Ok(*percent / 100.0),
+        other => number(other),
+    };
+    let length = |value: &ComponentValue| match length_outcome(value) {
+        LenOutcome::Ok(len) => Ok(len),
+        LenOutcome::Unsupported => Err(Implemented::BadValue),
+        LenOutcome::Invalid => Err(Implemented::Malformed),
+    };
+    let angle = |value: &ComponentValue| angle_degrees(value).ok_or(Implemented::Malformed);
+    let zero = Len::Px(0.0);
+    Ok(Some(match (name, values.as_slice()) {
+        ("matrix", [a, b, c, d, e, f]) => SpecifiedTransform::Matrix([
+            number(a)?,
+            number(b)?,
+            number(c)?,
+            number(d)?,
+            number(e)?,
+            number(f)?,
+        ]),
+        ("translate", [x]) => SpecifiedTransform::Translate(length(x)?, zero),
+        ("translate", [x, y]) => SpecifiedTransform::Translate(length(x)?, length(y)?),
+        ("translatex", [x]) => SpecifiedTransform::Translate(length(x)?, zero),
+        ("translatey", [y]) => SpecifiedTransform::Translate(zero, length(y)?),
+        ("scale", [s]) => {
+            let s = factor(s)?;
+            SpecifiedTransform::Scale(s, s)
+        }
+        ("scale", [x, y]) => SpecifiedTransform::Scale(factor(x)?, factor(y)?),
+        ("scalex", [x]) => SpecifiedTransform::Scale(factor(x)?, 1.0),
+        ("scaley", [y]) => SpecifiedTransform::Scale(1.0, factor(y)?),
+        ("rotate" | "rotatez", [a]) => SpecifiedTransform::Rotate(angle(a)?),
+        ("skew", [x]) => SpecifiedTransform::Skew(angle(x)?, 0.0),
+        ("skew", [x, y]) => SpecifiedTransform::Skew(angle(x)?, angle(y)?),
+        ("skewx", [x]) => SpecifiedTransform::Skew(angle(x)?, 0.0),
+        ("skewy", [y]) => SpecifiedTransform::Skew(0.0, angle(y)?),
+        (
+            "matrix3d" | "translate3d" | "translatez" | "scale3d" | "scalez" | "rotate3d"
+            | "rotatex" | "rotatey" | "perspective",
+            _,
+        ) => return Ok(None),
+        _ => return Err(Implemented::Malformed),
+    }))
+}
+
+/// An `<angle>` in degrees, `css-values-4` §7.1, or `<zero>`, which
+/// `rotate()` and `skew()` also take. `None` for anything else.
+fn angle_degrees(value: &ComponentValue) -> Option<f64> {
+    match value {
+        ComponentValue::Token(Token::Number { value, .. }) if *value == 0.0 => Some(0.0),
+        ComponentValue::Token(Token::Dimension { value, unit }) => {
+            let degrees = match unit.to_ascii_lowercase().as_str() {
+                "deg" => *value,
+                // 180/π, written out: the conversion is a multiplication and
+                // the constant is the double nearest it.
+                "rad" => *value * (180.0 / std::f64::consts::PI),
+                "grad" => *value * 0.9,
+                "turn" => *value * 360.0,
+                _ => return None,
+            };
+            degrees.is_finite().then_some(degrees)
+        }
+        _ => None,
+    }
+}
+
+/// `transform-origin`, `css-transforms-1` §6: one or two values in
+/// `<bg-position>`'s one- and two-value forms, and an optional third that is
+/// the `z` offset — accepted as zero, refused by value as anything else,
+/// since a page has no depth to move the origin along.
+fn transform_origin(significant: &[&ComponentValue]) -> Implemented {
+    let (planar, depth) = match significant {
+        [_] | [_, _] => (significant, None),
+        [_, _, z] => (&significant[..2], Some(*z)),
+        _ => return Implemented::Malformed,
+    };
+    if let Some(z) = depth {
+        match length_outcome(z) {
+            LenOutcome::Ok(Len::Percent(_)) | LenOutcome::Invalid => return Implemented::Malformed,
+            LenOutcome::Ok(Len::Px(v) | Len::Em(v) | Len::Rem(v)) if v == 0.0 => {}
+            LenOutcome::Ok(_) | LenOutcome::Unsupported => return Implemented::BadValue,
+        }
+    }
+    let mut tokens = Vec::with_capacity(planar.len());
+    for value in planar {
+        match position_token(value) {
+            Ok(Some(token)) => tokens.push(token),
+            Ok(None) => return Implemented::Malformed,
+            Err(outcome) => return outcome,
+        }
+    }
+    match background_position(&tokens) {
+        Ok(position) => {
+            Implemented::Known(vec![Property::TransformOrigin(SpecifiedTransformOrigin {
+                x: position.x.offset,
+                y: position.y.offset,
+            })])
+        }
+        Err(outcome) => outcome,
+    }
+}
+
+/// Whether a value is the comma that separates `css-backgrounds-3` §2's layers.
+fn is_comma(value: &ComponentValue) -> bool {
+    matches!(value, ComponentValue::Token(Token::Comma))
+}
+
+/// A `url()`, in either of the two spellings `css-values-4` §4.5 gives it: the
+/// unquoted token, or the function round one string.
+fn url_of(value: &ComponentValue) -> Option<String> {
+    match value {
+        ComponentValue::Token(Token::Url(href)) => Some(href.clone()),
+        ComponentValue::Function { name, arguments } if name.eq_ignore_ascii_case("url") => {
+            let mut inside = arguments.iter().filter(|value| !value.is_whitespace());
+            match (inside.next(), inside.next()) {
+                (Some(ComponentValue::Token(Token::Str(href))), None) => Some(href.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// An `<image>` this build does not draw: a gradient, or one of the other
+/// image functions `css-images-4` defines. Valid CSS, so refused by value.
+fn unimplemented_image(value: &ComponentValue) -> bool {
+    let ComponentValue::Function { name, .. } = value else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with("gradient")
+        || matches!(
+            lower.as_str(),
+            "image" | "image-set" | "-webkit-image-set" | "cross-fade" | "element" | "paint"
+        )
+}
+
+/// `background-image`: `none`, one `url()` or one gradient ([`gradient`]).
+///
+/// More than one layer is §2's comma-separated list, which is valid CSS and
+/// this build's gap — refused by value, so a book that layers two textures is
+/// counted rather than given the first.
+fn background_image(significant: &[&ComponentValue]) -> Implemented {
+    if significant.iter().any(|value| is_comma(value)) {
+        return Implemented::BadValue;
+    }
+    let [one] = significant else {
+        return Implemented::Malformed;
+    };
+    if let ComponentValue::Token(Token::Ident(word)) = one {
+        if word.eq_ignore_ascii_case("none") {
+            return Implemented::Known(vec![Property::BackgroundImage(None)]);
+        }
+        return Implemented::Malformed;
+    }
+    if let Some(href) = url_of(one) {
+        return Implemented::Known(vec![Property::BackgroundImage(Some(Image::Url(
+            ImageRef { href, base: None },
+        )))]);
+    }
+    match gradient(one) {
+        Some(Ok(found)) => Implemented::Known(vec![Property::BackgroundImage(Some(
+            Image::Gradient(Box::new(found)),
+        ))]),
+        Some(Err(outcome)) => outcome,
+        None if unimplemented_image(one) => Implemented::BadValue,
+        None => Implemented::Malformed,
+    }
+}
+
+/// `linear-gradient()` and `radial-gradient()`, `css-images-3` §3 — `None`
+/// for any other value.
+///
+/// `Err` is `Malformed` for what is not the grammar, and `BadValue` for what
+/// is and this build does not draw: a translucent stop (a PDF shading has no
+/// alpha, and a soft mask per gradient is not written here), a colour
+/// interpolation hint (§3.5.2), an `in <color-space>` (`css-images-4`), a
+/// stop list past [`crate::limits::MAX_CSS_GRADIENT_STOPS`], or a unit this
+/// build does not resolve. The `repeating-` forms and `conic-gradient()` are
+/// [`unimplemented_image`]'s.
+fn gradient(value: &ComponentValue) -> Option<Result<Gradient<Len>, Implemented>> {
+    let ComponentValue::Function { name, arguments } = value else {
+        return None;
+    };
+    let linear = if name.eq_ignore_ascii_case("linear-gradient") {
+        true
+    } else if name.eq_ignore_ascii_case("radial-gradient") {
+        false
+    } else {
+        return None;
+    };
+    Some(gradient_arguments(linear, arguments))
+}
+
+fn gradient_arguments(
+    linear: bool,
+    arguments: &[ComponentValue],
+) -> Result<Gradient<Len>, Implemented> {
+    let mut parts: Vec<Vec<&ComponentValue>> = vec![Vec::new()];
+    for value in arguments {
+        if is_comma(value) {
+            parts.push(Vec::new());
+        } else if !value.is_whitespace() {
+            if let Some(last) = parts.last_mut() {
+                last.push(value);
+            }
+        }
+    }
+    if parts.iter().any(Vec::is_empty) {
+        return Err(Implemented::Malformed);
+    }
+    let first = parts.first().map_or(&[][..], Vec::as_slice);
+    let (shape, stops) = if linear {
+        match linear_direction(first)? {
+            Some(direction) => (GradientShape::Linear(direction), &parts[1..]),
+            None => (
+                GradientShape::Linear(LinearDirection::Angle(180.0)),
+                &parts[..],
+            ),
+        }
+    } else {
+        match radial_configuration(first)? {
+            Some(radial) => (GradientShape::Radial(radial), &parts[1..]),
+            None => (GradientShape::Radial(RadialGradient::DEFAULT), &parts[..]),
+        }
+    };
+    Ok(Gradient {
+        shape,
+        stops: color_stops(stops)?,
+    })
+}
+
+/// Whether `value` is the identifier `word`, in any case.
+fn is_ident(value: &ComponentValue, word: &str) -> bool {
+    matches!(value, ComponentValue::Token(Token::Ident(found)) if found.eq_ignore_ascii_case(word))
+}
+
+/// A linear gradient's first argument, where it is a direction rather than a
+/// stop: `to` a side or a corner, or an `<angle>` — `<zero>` included, as
+/// `rotate()` takes it.
+fn linear_direction(part: &[&ComponentValue]) -> Result<Option<LinearDirection>, Implemented> {
+    if part.iter().any(|value| is_ident(value, "in")) {
+        return Err(Implemented::BadValue);
+    }
+    match part {
+        [to, sides @ ..] if is_ident(to, "to") => {
+            if sides.is_empty() || sides.len() > 2 {
+                return Err(Implemented::Malformed);
+            }
+            let mut horizontal: Option<bool> = None;
+            let mut vertical: Option<bool> = None;
+            for side in sides {
+                let ComponentValue::Token(Token::Ident(word)) = side else {
+                    return Err(Implemented::Malformed);
+                };
+                match word.to_ascii_lowercase().as_str() {
+                    "left" if horizontal.is_none() => horizontal = Some(false),
+                    "right" if horizontal.is_none() => horizontal = Some(true),
+                    "top" if vertical.is_none() => vertical = Some(false),
+                    "bottom" if vertical.is_none() => vertical = Some(true),
+                    _ => return Err(Implemented::Malformed),
+                }
+            }
+            Ok(Some(match (horizontal, vertical) {
+                (Some(right), Some(bottom)) => LinearDirection::Corner { right, bottom },
+                (Some(true), None) => LinearDirection::Angle(90.0),
+                (Some(false), None) => LinearDirection::Angle(270.0),
+                (None, Some(true)) => LinearDirection::Angle(180.0),
+                (None, Some(false)) => LinearDirection::Angle(0.0),
+                (None, None) => return Err(Implemented::Malformed),
+            }))
+        }
+        [one] => Ok(angle_degrees(one).map(LinearDirection::Angle)),
+        _ => Ok(None),
+    }
+}
+
+/// A radial gradient's first argument, where it is the ending shape, its
+/// size or its centre rather than a stop: §3.2.1's
+/// `[ <ending-shape> || <radial-size> ]? [ at <position> ]?`.
+fn radial_configuration(
+    part: &[&ComponentValue],
+) -> Result<Option<RadialGradient<Len>>, Implemented> {
+    const WORDS: [&str; 8] = [
+        "circle",
+        "ellipse",
+        "closest-side",
+        "closest-corner",
+        "farthest-side",
+        "farthest-corner",
+        "at",
+        "in",
+    ];
+    let keyworded = part
+        .iter()
+        .any(|value| WORDS.iter().any(|word| is_ident(value, word)));
+    let lengths_only = part
+        .iter()
+        .all(|value| !matches!(length_outcome(value), LenOutcome::Invalid));
+    if !keyworded && !lengths_only {
+        return Ok(None);
+    }
+    if part.iter().any(|value| is_ident(value, "in")) {
+        return Err(Implemented::BadValue);
+    }
+    let (head, position) = match part.iter().position(|value| is_ident(value, "at")) {
+        Some(at) => (&part[..at], Some(&part[at + 1..])),
+        None => (part, None),
+    };
+    let mut circle: Option<bool> = None;
+    let mut extent: Option<RadialSize<Len>> = None;
+    let mut lengths: Vec<Len> = Vec::new();
+    for value in head {
+        if let ComponentValue::Token(Token::Ident(word)) = value {
+            let word = word.to_ascii_lowercase();
+            match word.as_str() {
+                "circle" | "ellipse" if circle.is_none() => circle = Some(word == "circle"),
+                "closest-side" if extent.is_none() => extent = Some(RadialSize::ClosestSide),
+                "farthest-side" if extent.is_none() => extent = Some(RadialSize::FarthestSide),
+                "closest-corner" if extent.is_none() => extent = Some(RadialSize::ClosestCorner),
+                "farthest-corner" if extent.is_none() => {
+                    extent = Some(RadialSize::FarthestCorner);
+                }
+                _ => return Err(Implemented::Malformed),
+            }
+            continue;
+        }
+        match length_outcome(value) {
+            LenOutcome::Ok(len) if !len_is_negative(len) && lengths.len() < 2 => lengths.push(len),
+            LenOutcome::Unsupported => return Err(Implemented::BadValue),
+            _ => return Err(Implemented::Malformed),
+        }
+    }
+    let size = match (extent, lengths.as_slice()) {
+        (Some(_), [_, ..]) => return Err(Implemented::Malformed),
+        (Some(extent), []) => extent,
+        (None, []) => RadialSize::FarthestCorner,
+        // §3.2.1: a circle's size is one `<length>`, never a percentage.
+        (None, [radius]) => {
+            if circle == Some(false) || matches!(radius, Len::Percent(_)) {
+                return Err(Implemented::Malformed);
+            }
+            RadialSize::Explicit(*radius, *radius)
+        }
+        (None, [x, y]) => {
+            if circle == Some(true) {
+                return Err(Implemented::Malformed);
+            }
+            RadialSize::Explicit(*x, *y)
+        }
+        (None, _) => return Err(Implemented::Malformed),
+    };
+    let at = match position {
+        None => RadialGradient::DEFAULT.at,
+        Some([]) => return Err(Implemented::Malformed),
+        Some(values) => {
+            let mut tokens = Vec::with_capacity(values.len());
+            for value in values {
+                match position_token(value) {
+                    Ok(Some(token)) => tokens.push(token),
+                    Ok(None) => return Err(Implemented::Malformed),
+                    Err(outcome) => return Err(outcome),
+                }
+            }
+            let position = background_position(&tokens)?;
+            [
+                GradientOffset {
+                    from_end: position.x.from_end,
+                    offset: position.x.offset,
+                },
+                GradientOffset {
+                    from_end: position.y.from_end,
+                    offset: position.y.offset,
+                },
+            ]
+        }
+    };
+    Ok(Some(RadialGradient {
+        circle: circle.unwrap_or(lengths.len() == 1),
+        size,
+        at,
+    }))
+}
+
+/// §3.5's `<color-stop-list>`: each stop a colour and up to two positions,
+/// on either side of it (`css-images-4`'s `&&`), and at least two stops.
+fn color_stops(parts: &[Vec<&ComponentValue>]) -> Result<Vec<ColorStop<Len>>, Implemented> {
+    let mut stops: Vec<ColorStop<Len>> = Vec::new();
+    let mut hinted = false;
+    let mut previous_was_hint = false;
+    for (index, part) in parts.iter().enumerate() {
+        let mut color: Option<Color> = None;
+        let mut before: Vec<Len> = Vec::new();
+        let mut after: Vec<Len> = Vec::new();
+        for value in part {
+            match length_outcome(value) {
+                LenOutcome::Ok(len) => {
+                    if color.is_some() {
+                        after.push(len);
+                    } else {
+                        before.push(len);
+                    }
+                    continue;
+                }
+                LenOutcome::Unsupported => return Err(Implemented::BadValue),
+                LenOutcome::Invalid => {}
+            }
+            if color.is_some() {
+                return Err(Implemented::Malformed);
+            }
+            color = Some(match colour_outcome(value) {
+                ColourOutcome::Ok(found) if found.a == 255 => found,
+                ColourOutcome::Ok(_) | ColourOutcome::Unsupported => {
+                    return Err(Implemented::BadValue)
+                }
+                ColourOutcome::Invalid => return Err(Implemented::Malformed),
+            });
+        }
+        let Some(color) = color else {
+            // An interpolation hint, §3.5.2: one position alone, and only
+            // between two stops.
+            if before.len() != 1 || index == 0 || index + 1 == parts.len() || previous_was_hint {
+                return Err(Implemented::Malformed);
+            }
+            hinted = true;
+            previous_was_hint = true;
+            continue;
+        };
+        previous_was_hint = false;
+        let positions = match (before.len(), after.len()) {
+            (0, n) if n <= 2 => after,
+            (n, 0) if n <= 2 => before,
+            _ => return Err(Implemented::Malformed),
+        };
+        if positions.is_empty() {
+            stops.push(ColorStop {
+                color,
+                position: None,
+            });
+        }
+        for position in positions {
+            stops.push(ColorStop {
+                color,
+                position: Some(position),
+            });
+        }
+    }
+    if stops.len() < 2 {
+        return Err(Implemented::Malformed);
+    }
+    if hinted || stops.len() > crate::limits::MAX_CSS_GRADIENT_STOPS {
+        return Err(Implemented::BadValue);
+    }
+    Ok(stops)
+}
+
+fn repeat_named(word: &str) -> Option<RepeatStyle> {
+    Some(match word {
+        "repeat" => RepeatStyle::Repeat,
+        "space" => RepeatStyle::Space,
+        "round" => RepeatStyle::Round,
+        "no-repeat" => RepeatStyle::NoRepeat,
+        _ => return None,
+    })
+}
+
+/// `background-repeat`, §2.3: `repeat-x`, `repeat-y`, or one or two of the
+/// four per-axis keywords — one standing for both axes.
+fn background_repeat(significant: &[&ComponentValue]) -> Option<BackgroundRepeat> {
+    let word = |value: &ComponentValue| match value {
+        ComponentValue::Token(Token::Ident(word)) => Some(word.to_ascii_lowercase()),
+        _ => None,
+    };
+    match significant {
+        [one] => {
+            let one = word(one)?;
+            match one.as_str() {
+                "repeat-x" => Some(BackgroundRepeat {
+                    x: RepeatStyle::Repeat,
+                    y: RepeatStyle::NoRepeat,
+                }),
+                "repeat-y" => Some(BackgroundRepeat {
+                    x: RepeatStyle::NoRepeat,
+                    y: RepeatStyle::Repeat,
+                }),
+                other => repeat_named(other).map(|style| BackgroundRepeat { x: style, y: style }),
+            }
+        }
+        [x, y] => Some(BackgroundRepeat {
+            x: repeat_named(&word(x)?)?,
+            y: repeat_named(&word(y)?)?,
+        }),
+        _ => None,
+    }
+}
+
+/// One component of a `<bg-position>`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PositionToken {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Center,
+    Length(Len),
+}
+
+/// A value's [`PositionToken`], or why it is not one: `Ok(None)` for a value
+/// that is no part of a position, `Err` for a length this build does not have.
+fn position_token(value: &ComponentValue) -> Result<Option<PositionToken>, Implemented> {
+    if let ComponentValue::Token(Token::Ident(word)) = value {
+        return Ok(match word.to_ascii_lowercase().as_str() {
+            "left" => Some(PositionToken::Left),
+            "right" => Some(PositionToken::Right),
+            "top" => Some(PositionToken::Top),
+            "bottom" => Some(PositionToken::Bottom),
+            "center" => Some(PositionToken::Center),
+            _ => None,
+        });
+    }
+    match length_outcome(value) {
+        LenOutcome::Ok(len) => Ok(Some(PositionToken::Length(len))),
+        LenOutcome::Unsupported => Err(Implemented::BadValue),
+        LenOutcome::Invalid => Ok(None),
+    }
+}
+
+/// `<bg-position>`, `css-backgrounds-3` §2.6: one to four values.
+///
+/// One value names one axis and centres the other; two are horizontal then
+/// vertical, except that two keywords may come in either order; three and four
+/// pair a keyword with an offset from that edge — `right 10px bottom 20%`.
+/// `Err` carries `Malformed` for a value that is not the grammar.
+fn background_position(
+    tokens: &[PositionToken],
+) -> Result<SpecifiedBackgroundPosition, Implemented> {
+    use PositionToken as T;
+    let start = |offset: Len| PositionOffset {
+        from_end: false,
+        offset,
+    };
+    let keyword = |token: T| match token {
+        T::Left | T::Top => Some(start(Len::Percent(0.0))),
+        T::Right | T::Bottom => Some(start(Len::Percent(100.0))),
+        T::Center => Some(start(Len::Percent(50.0))),
+        T::Length(len) => Some(start(len)),
+    };
+    let horizontal = |token: T| matches!(token, T::Left | T::Right | T::Center | T::Length(_));
+    let vertical = |token: T| matches!(token, T::Top | T::Bottom | T::Center | T::Length(_));
+    let bad = Err(Implemented::Malformed);
+    match *tokens {
+        [one] => {
+            let (x, y) = match one {
+                T::Top | T::Bottom => (T::Center, one),
+                _ => (one, T::Center),
+            };
+            Ok(SpecifiedBackgroundPosition {
+                x: keyword(x).ok_or(Implemented::Malformed)?,
+                y: keyword(y).ok_or(Implemented::Malformed)?,
+            })
+        }
+        [first, second] => {
+            let both_keywords = !matches!(first, T::Length(_)) && !matches!(second, T::Length(_));
+            let swapped = both_keywords
+                && (matches!(first, T::Top | T::Bottom) || matches!(second, T::Left | T::Right));
+            let (x, y) = if swapped {
+                (second, first)
+            } else {
+                (first, second)
+            };
+            if !horizontal(x) || !vertical(y) {
+                return bad;
+            }
+            Ok(SpecifiedBackgroundPosition {
+                x: keyword(x).ok_or(Implemented::Malformed)?,
+                y: keyword(y).ok_or(Implemented::Malformed)?,
+            })
+        }
+        [_, _, _] | [_, _, _, _] => {
+            // Keyword-and-offset groups: every group starts with a keyword,
+            // `center` takes no offset, and a bare length is never first.
+            let mut groups: Vec<(T, Option<Len>)> = Vec::new();
+            let mut at = 0;
+            while at < tokens.len() {
+                let edge = tokens[at];
+                if matches!(edge, T::Length(_)) {
+                    return bad;
+                }
+                let offset = match tokens.get(at + 1) {
+                    Some(T::Length(len)) if edge != T::Center => {
+                        at += 1;
+                        Some(*len)
+                    }
+                    _ => None,
+                };
+                groups.push((edge, offset));
+                at += 1;
+            }
+            let [first, second] = groups[..] else {
+                return bad;
+            };
+            let (x, y) = if matches!(first.0, T::Top | T::Bottom)
+                || matches!(second.0, T::Left | T::Right)
+            {
+                (second, first)
+            } else {
+                (first, second)
+            };
+            if !matches!(x.0, T::Left | T::Right | T::Center)
+                || !matches!(y.0, T::Top | T::Bottom | T::Center)
+            {
+                return bad;
+            }
+            let side = |(edge, offset): (T, Option<Len>)| match offset {
+                None => keyword(edge),
+                Some(len) => Some(PositionOffset {
+                    from_end: matches!(edge, T::Right | T::Bottom),
+                    offset: len,
+                }),
+            };
+            Ok(SpecifiedBackgroundPosition {
+                x: side(x).ok_or(Implemented::Malformed)?,
+                y: side(y).ok_or(Implemented::Malformed)?,
+            })
+        }
+        _ => bad,
+    }
+}
+
+/// `background-size`, §2.4: `cover`, `contain`, or one or two of a
+/// non-negative `<length-percentage>` and `auto`, one standing for the width
+/// with an `auto` height.
+fn background_size(
+    significant: &[&ComponentValue],
+) -> Result<SpecifiedBackgroundSize, Implemented> {
+    let one = |value: &ComponentValue| -> Result<Option<Len>, Implemented> {
+        if let ComponentValue::Token(Token::Ident(word)) = value {
+            if word.eq_ignore_ascii_case("auto") {
+                return Ok(None);
+            }
+            return Err(Implemented::Malformed);
+        }
+        match length_outcome(value) {
+            LenOutcome::Ok(len) if !len_is_negative(len) => Ok(Some(len)),
+            LenOutcome::Unsupported => Err(Implemented::BadValue),
+            _ => Err(Implemented::Malformed),
+        }
+    };
+    match significant {
+        [ComponentValue::Token(Token::Ident(word))] if word.eq_ignore_ascii_case("cover") => {
+            Ok(SpecifiedBackgroundSize::Cover)
+        }
+        [ComponentValue::Token(Token::Ident(word))] if word.eq_ignore_ascii_case("contain") => {
+            Ok(SpecifiedBackgroundSize::Contain)
+        }
+        [width] => Ok(SpecifiedBackgroundSize::Explicit(one(width)?, None)),
+        [width, height] => Ok(SpecifiedBackgroundSize::Explicit(one(width)?, one(height)?)),
+        _ => Err(Implemented::Malformed),
+    }
+}
+
+/// `background-position` as a declaration: one layer's position, a list of
+/// them refused by value as `background-image` refuses one.
+fn background_position_property(significant: &[&ComponentValue]) -> Implemented {
+    if significant.iter().any(|value| is_comma(value)) {
+        return Implemented::BadValue;
+    }
+    let mut tokens = Vec::with_capacity(significant.len());
+    for value in significant {
+        match position_token(value) {
+            Ok(Some(token)) => tokens.push(token),
+            Ok(None) => return Implemented::Malformed,
+            Err(outcome) => return outcome,
+        }
+    }
+    match background_position(&tokens) {
+        Ok(position) => Implemented::Known(vec![Property::BackgroundPosition(position)]),
+        Err(outcome) => outcome,
+    }
+}
+
+/// `background-size` as a declaration, likewise.
+fn background_size_property(significant: &[&ComponentValue]) -> Implemented {
+    if significant.iter().any(|value| is_comma(value)) {
+        return Implemented::BadValue;
+    }
+    match background_size(significant) {
+        Ok(size) => Implemented::Known(vec![Property::BackgroundSize(size)]),
+        Err(outcome) => outcome,
+    }
+}
+
+/// The initial `background-position`, as written.
+const POSITION_INITIAL: SpecifiedBackgroundPosition = SpecifiedBackgroundPosition {
+    x: PositionOffset {
+        from_end: false,
+        offset: Len::Percent(0.0),
+    },
+    y: PositionOffset {
+        from_end: false,
+        offset: Len::Percent(0.0),
+    },
+};
+
+/// The `background` shorthand, `css-backgrounds-3` §2.11, one layer:
+/// `<bg-image> || <bg-position> [ / <bg-size> ]? || <repeat-style> ||
+/// <attachment> || <box> || <box> || <'background-color'>`, every longhand not
+/// given reset to its initial value — so `background: #fff` takes away an
+/// image an earlier rule set, as it does in every browser.
+///
+/// `background-attachment` is unimplemented, so an attachment other than its
+/// initial `scroll` is refused by value; `background-origin` and
+/// `background-clip`, which the two `<box>`es set, are unimplemented too, and
+/// a box keyword is refused the same way. A second layer is a comma, refused
+/// as `background-image` refuses it.
+fn background_shorthand(significant: &[&ComponentValue]) -> Implemented {
+    if significant.is_empty() {
+        return Implemented::Malformed;
+    }
+    if significant.iter().any(|value| is_comma(value)) {
+        return Implemented::BadValue;
+    }
+    let mut image: Option<Option<Image<Len>>> = None;
+    let mut colour: Option<Color> = None;
+    let mut repeat: Option<BackgroundRepeat> = None;
+    let mut position: Option<SpecifiedBackgroundPosition> = None;
+    let mut size: Option<SpecifiedBackgroundSize> = None;
+    let mut at = 0;
+    while at < significant.len() {
+        let value = significant[at];
+        let word = match value {
+            ComponentValue::Token(Token::Ident(word)) => Some(word.to_ascii_lowercase()),
+            _ => None,
+        };
+        if image.is_none() {
+            if word.as_deref() == Some("none") {
+                image = Some(None);
+                at += 1;
+                continue;
+            }
+            if let Some(href) = url_of(value) {
+                image = Some(Some(Image::Url(ImageRef { href, base: None })));
+                at += 1;
+                continue;
+            }
+            match gradient(value) {
+                Some(Ok(found)) => {
+                    image = Some(Some(Image::Gradient(Box::new(found))));
+                    at += 1;
+                    continue;
+                }
+                Some(Err(outcome)) => return outcome,
+                None => {}
+            }
+        }
+        if unimplemented_image(value) {
+            return Implemented::BadValue;
+        }
+        if let Some(word) = word.as_deref() {
+            if repeat.is_none()
+                && (word == "repeat-x" || word == "repeat-y" || repeat_named(word).is_some())
+            {
+                let pair = &significant[at..(at + 2).min(significant.len())];
+                let two = word != "repeat-x"
+                    && word != "repeat-y"
+                    && pair.len() == 2
+                    && matches!(pair[1], ComponentValue::Token(Token::Ident(next))
+                        if repeat_named(&next.to_ascii_lowercase()).is_some());
+                let taken = if two { pair } else { &pair[..1] };
+                repeat = background_repeat(taken);
+                if repeat.is_none() {
+                    return Implemented::Malformed;
+                }
+                at += taken.len();
+                continue;
+            }
+            if word == "scroll" {
+                at += 1;
+                continue;
+            }
+            if matches!(
+                word,
+                "fixed" | "local" | "border-box" | "padding-box" | "content-box" | "text"
+            ) {
+                return Implemented::BadValue;
+            }
+        }
+        match position_token(value) {
+            Err(outcome) => return outcome,
+            Ok(Some(_)) if position.is_none() => {
+                let mut tokens = Vec::new();
+                while at < significant.len() && tokens.len() < 4 {
+                    match position_token(significant[at]) {
+                        Ok(Some(token)) => tokens.push(token),
+                        Err(outcome) => return outcome,
+                        Ok(None) => break,
+                    }
+                    at += 1;
+                }
+                position = match background_position(&tokens) {
+                    Ok(found) => Some(found),
+                    Err(outcome) => return outcome,
+                };
+                // `/ <bg-size>`, which may only follow a position.
+                if matches!(
+                    significant.get(at),
+                    Some(ComponentValue::Token(Token::Delim('/')))
+                ) {
+                    at += 1;
+                    let mut end = at;
+                    while end < significant.len() && end < at + 2 {
+                        let fits = match significant[end] {
+                            ComponentValue::Token(Token::Ident(word)) => {
+                                matches!(
+                                    word.to_ascii_lowercase().as_str(),
+                                    "auto" | "cover" | "contain"
+                                )
+                            }
+                            other => !matches!(length_outcome(other), LenOutcome::Invalid),
+                        };
+                        if !fits {
+                            break;
+                        }
+                        end += 1;
+                    }
+                    size = match background_size(&significant[at..end]) {
+                        Ok(found) => Some(found),
+                        Err(outcome) => return outcome,
+                    };
+                    at = end;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        if colour.is_none() {
+            match colour_outcome(value) {
+                ColourOutcome::Ok(found) => {
+                    colour = Some(found);
+                    at += 1;
+                    continue;
+                }
+                ColourOutcome::Unsupported => return Implemented::BadValue,
+                ColourOutcome::Invalid => return Implemented::Malformed,
+            }
+        }
+        return Implemented::Malformed;
+    }
+    Implemented::Known(vec![
+        Property::BackgroundColor(colour.unwrap_or(Color::TRANSPARENT)),
+        Property::BackgroundImage(image.unwrap_or(None)),
+        Property::BackgroundRepeat(repeat.unwrap_or(BackgroundRepeat::REPEAT)),
+        Property::BackgroundPosition(position.unwrap_or(POSITION_INITIAL)),
+        Property::BackgroundSize(size.unwrap_or(SpecifiedBackgroundSize::Explicit(None, None))),
+    ])
+}
+
+/// `css-overflow-3` §3.1's five keywords and its one legacy alias.
+fn overflow_named(word: &str) -> Option<Overflow> {
+    Some(match word {
+        "visible" => Overflow::Visible,
+        "hidden" => Overflow::Hidden,
+        "clip" => Overflow::Clip,
+        "scroll" => Overflow::Scroll,
+        "auto" | "overlay" => Overflow::Auto,
+        _ => return None,
+    })
+}
+
+fn outline_style_named(word: &str) -> Option<OutlineStyle> {
+    match word {
+        "auto" => Some(OutlineStyle::Auto),
+        // §5.3: *"the same as border-style, except that hidden is not a legal
+        // outline style"*.
+        "hidden" => None,
+        other => border_style_named(other).map(OutlineStyle::Border),
+    }
+}
+
+/// `outline`, `css-ui-4` §5.1: `<'outline-color'> || <'outline-style'> ||
+/// <'outline-width'>`, the omitted ones reset to their initial values, as
+/// `border`'s are. `currentColor` written is the initial colour, the same
+/// value as one omitted.
+fn outline_shorthand(significant: &[&ComponentValue]) -> Implemented {
+    if significant.is_empty() || significant.len() > 3 {
+        return Implemented::Malformed;
+    }
+    let mut width: Option<Len> = None;
+    let mut style: Option<OutlineStyle> = None;
+    // `Some(None)` is `currentColor` written; `None` is no colour written.
+    let mut paint: Option<Option<Color>> = None;
+    for value in significant {
+        if style.is_none() {
+            if let ComponentValue::Token(Token::Ident(word)) = value {
+                if let Some(found) = outline_style_named(&word.to_ascii_lowercase()) {
+                    style = Some(found);
+                    continue;
+                }
+            }
+        }
+        if width.is_none() {
+            if let Some(found) = border_width(Some(value), true) {
+                width = Some(found);
+                continue;
+            }
+        }
+        if paint.is_none() {
+            if is_current_colour(value) {
+                paint = Some(None);
+                continue;
+            }
+            if let Some(found) = color(value) {
+                paint = Some(Some(found));
+                continue;
+            }
+        }
+        return Implemented::BadValue;
+    }
+    Implemented::Known(vec![
+        Property::OutlineWidth(width.unwrap_or(Len::Px(3.0))),
+        Property::OutlineStyle(style.unwrap_or(OutlineStyle::Border(BorderStyle::None))),
+        Property::OutlineColor(paint.flatten()),
+    ])
+}
+
+/// `list-style-type`'s keywords, `css-counter-styles-3` §6's predefined
+/// styles this build formats.
+///
+/// Every other predefined style — `decimal-leading-zero`, `lower-greek`,
+/// `armenian`, the CJK and Indic numbering systems — is a value of the property
+/// this build does not have, and is refused by value rather than drawn as
+/// decimal, which would number a Greek list in the wrong alphabet.
+pub fn list_style_type_named(word: &str) -> Option<ListStyleType> {
+    Some(match word {
+        "disc" => ListStyleType::Disc,
+        "circle" => ListStyleType::Circle,
+        "square" => ListStyleType::Square,
+        "decimal" => ListStyleType::Decimal,
+        "lower-alpha" | "lower-latin" => ListStyleType::LowerAlpha,
+        "upper-alpha" | "upper-latin" => ListStyleType::UpperAlpha,
+        "lower-roman" => ListStyleType::LowerRoman,
+        "upper-roman" => ListStyleType::UpperRoman,
+        "none" => ListStyleType::None,
+        _ => return None,
+    })
+}
+
+fn list_style_position_named(word: &str) -> Option<ListStylePosition> {
+    match word {
+        "outside" => Some(ListStylePosition::Outside),
+        "inside" => Some(ListStylePosition::Inside),
+        _ => None,
+    }
+}
+
+/// The `list-style` shorthand, `css-lists-3` §3.4.
+fn list_style_shorthand(significant: &[&ComponentValue]) -> Implemented {
+    let mut kind: Option<ListStyleType> = None;
+    let mut position: Option<ListStylePosition> = None;
+    let mut nones = 0usize;
+    let mut image = false;
+    for value in significant {
+        match value {
+            ComponentValue::Token(Token::Ident(word)) => {
+                let word = word.to_ascii_lowercase();
+                if word == "none" {
+                    nones += 1;
+                } else if let Some(found) = list_style_position_named(&word) {
+                    if position.replace(found).is_some() {
+                        return Implemented::Malformed;
+                    }
+                } else if let Some(found) = list_style_type_named(&word) {
+                    if kind.replace(found).is_some() {
+                        return Implemented::Malformed;
+                    }
+                } else {
+                    // A keyword outside the predefined styles this build
+                    // formats is a `<counter-style>` this build does not have.
+                    return Implemented::BadValue;
+                }
+            }
+            // `list-style-image` is unimplemented, so an image in the
+            // shorthand is this build's gap and not the author's.
+            ComponentValue::Token(Token::Url(_)) => image = true,
+            ComponentValue::Function { name, .. }
+                if name.eq_ignore_ascii_case("url")
+                    || name.to_ascii_lowercase().ends_with("gradient") =>
+            {
+                image = true;
+            }
+            ComponentValue::Token(Token::Str(_)) => return Implemented::BadValue,
+            _ => return Implemented::Malformed,
+        }
+    }
+    if image {
+        return Implemented::BadValue;
+    }
+    // §3.4: one `none` sets whichever of the type and the image is not
+    // otherwise given. Beside a type it is the image's, whose initial value is
+    // `none` already, so `disc outside none` is `disc` and no image; alone it
+    // is the type. Two set both, so a type beside them is a second type, and
+    // three is not the grammar.
+    match (nones, kind) {
+        (0, _) | (1, Some(_)) => {}
+        (1, None) | (2, None) => kind = Some(ListStyleType::None),
+        _ => return Implemented::Malformed,
+    }
+    Implemented::Known(vec![
+        Property::ListStyleType(kind.unwrap_or(ListStyleType::Disc)),
+        Property::ListStylePosition(position.unwrap_or(ListStylePosition::Outside)),
+    ])
+}
+
+/// What one `counter-*` value read as.
+enum CounterOutcome {
+    Known(Vec<CounterChange>),
+    BadValue,
+}
+
+impl CounterOutcome {
+    fn map(self, build: impl Fn(Vec<CounterChange>) -> Property) -> Implemented {
+        match self {
+            CounterOutcome::Known(list) => Implemented::Known(vec![build(list)]),
+            CounterOutcome::BadValue => Implemented::BadValue,
+        }
+    }
+}
+
+/// `none | [ <counter-name> <integer>? ]+`, `css-lists-3` §4.2 to §4.4, with
+/// the property's own default integer.
+///
+/// `None` for a value outside the grammar. `counter-reset`'s
+/// `reversed(<counter-name>)` is inside it and refused by value: a reversed
+/// counter's initial value is the number of list items it counts, which is a
+/// count this build does not take, and counting up from zero instead would
+/// number an `<ol reversed>` upwards.
+fn counter_list(
+    significant: &[&ComponentValue],
+    default: i32,
+    allows_reversed: bool,
+) -> Option<CounterOutcome> {
+    if let [ComponentValue::Token(Token::Ident(word))] = significant {
+        if word.eq_ignore_ascii_case("none") {
+            return Some(CounterOutcome::Known(Vec::new()));
+        }
+    }
+    let mut out: Vec<CounterChange> = Vec::new();
+    let mut reversed = false;
+    // Whether the last name already has its integer: `a 1 2` is not the
+    // grammar, and comparing against the default would not see it when the
+    // first integer happens to be the default.
+    let mut numbered = true;
+    for value in significant {
+        match value {
+            ComponentValue::Token(Token::Ident(name)) => {
+                // `css-values-4` §3.2: a `<custom-ident>` may not be one of
+                // the CSS-wide keywords or `default`, and §4.2 excludes
+                // `none` too.
+                let lower = name.to_ascii_lowercase();
+                if lower == "none" || lower == "default" || Defaulting::from_name(&lower).is_some()
+                {
+                    return None;
+                }
+                out.push(CounterChange {
+                    name: name.clone(),
+                    value: default,
+                });
+                numbered = false;
+            }
+            ComponentValue::Token(Token::Number {
+                value,
+                integer: true,
+            }) => {
+                let last = out.last_mut()?;
+                if std::mem::replace(&mut numbered, true) {
+                    return None;
+                }
+                // `css-values-4` §5.1: an integer past the implementation's
+                // range is clamped, which is what `as` does from an `f64`.
+                last.value = *value as i32;
+            }
+            ComponentValue::Function { name, .. }
+                if allows_reversed && name.eq_ignore_ascii_case("reversed") =>
+            {
+                reversed = true;
+                numbered = false;
+            }
+            _ => return None,
+        }
+    }
+    if reversed {
+        return Some(CounterOutcome::BadValue);
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(CounterOutcome::Known(out))
+}
+
+/// `text-transform`'s value, `css-text-3` §2.1.
+fn text_transform(significant: &[&ComponentValue]) -> Implemented {
+    let mut casing: Option<TextTransform> = None;
+    let mut other = 0usize;
+    let mut none = false;
+    for value in significant {
+        let Some(Token::Ident(word)) = value.token() else {
+            return Implemented::Malformed;
+        };
+        match word.to_ascii_lowercase().as_str() {
+            "none" => none = true,
+            "capitalize" | "uppercase" | "lowercase" if casing.is_some() => {
+                return Implemented::Malformed
+            }
+            "capitalize" => casing = Some(TextTransform::Capitalize),
+            "uppercase" => casing = Some(TextTransform::Uppercase),
+            "lowercase" => casing = Some(TextTransform::Lowercase),
+            "full-width" | "full-size-kana" => other += 1,
+            _ => return Implemented::Malformed,
+        }
+    }
+    match (none, casing, other) {
+        (true, None, 0) if significant.len() == 1 => {
+            Implemented::Known(vec![Property::TextTransform(TextTransform::None)])
+        }
+        (true, _, _) => Implemented::Malformed,
+        (false, Some(casing), 0) => Implemented::Known(vec![Property::TextTransform(casing)]),
+        _ => Implemented::BadValue,
     }
 }
 
@@ -3731,6 +6453,12 @@ fn from_rgb(packed: u32) -> Color {
 }
 
 /// A `<color>`: a name, a hex, `rgb()`/`rgba()` or `hsl()`/`hsla()`.
+/// Whether `value` is the `currentColor` keyword, which [`color`] does not
+/// read because most colour properties here have no value for it.
+fn is_current_colour(value: &ComponentValue) -> bool {
+    matches!(value, ComponentValue::Token(Token::Ident(word)) if word.eq_ignore_ascii_case("currentcolor"))
+}
+
 fn color(value: &ComponentValue) -> Option<Color> {
     match value {
         ComponentValue::Token(Token::Ident(word)) => {
@@ -3942,7 +6670,15 @@ fn write_values(values: &[ComponentValue], out: &mut String) {
 
 fn write_token(token: &Token, out: &mut String) {
     match token {
-        Token::Ident(name) | Token::Url(name) => out.push_str(name),
+        Token::Ident(name) => out.push_str(name),
+        // `css-syntax-3` §4.3.6's `<url-token>` holds what is between the
+        // parentheses; a warning that carried only that would report
+        // `list-style: dot.png disc`, a value nobody wrote.
+        Token::Url(name) => {
+            out.push_str("url(");
+            out.push_str(name);
+            out.push(')');
+        }
         Token::Function(name) => {
             out.push_str(name);
             out.push('(');

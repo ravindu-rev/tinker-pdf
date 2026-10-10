@@ -1,20 +1,27 @@
-//! `cargo xtask bindings-parity` — the four write surfaces, compared to one
+//! `cargo xtask bindings-parity` — every binding surface, compared to one
 //! recorded answer (gap 32 milestone 6).
 //!
 //! Ruling 11 says a binding projects the facade 1:1 and adds no logic of its
-//! own. That is a claim, and this is the check: two scripts with every input
-//! pinned, run through the facade, the wheel, the npm package and the NuGet
-//! package, must produce **byte-identical** output. Four surfaces disagreeing
-//! means one of them added something.
+//! own. That is a claim, and this is the check: scripts with every input
+//! pinned, run through the facade, the wheel, the npm package, the NuGet
+//! package and the Go, Ruby and Java bindings over the C ABI, must produce
+//! **byte-identical** output. Nine of them write a document and print
+//! `WROTE sha256=` of its bytes; `sanitise-report`, `read-surface`,
+//! `signatures` and `form-data` write down what a sanitise reported,
+//! everything the read surface says about documents, and what form data says,
+//! in a text whose every byte is specified
+//! (`crates/tinker-pdf/examples/write_parity.rs`) and print `READ sha256=` of
+//! that. Surfaces disagreeing means one of them added something — or, on the
+//! read side, dropped or reordered something.
 //!
 //! **Two failures this is built to catch, and they are different.**
 //!
 //! - A *mismatch*: a surface printed a hash and it is not the recorded one.
 //!   That is the one everybody thinks of.
 //! - An *absent line*: a surface ran, exited zero, and printed no
-//!   `WROTE sha256=` at all. That is the one that gets shipped, because a
-//!   script that silently does nothing looks exactly like a passing one from
-//!   the outside. Both exit non-zero here.
+//!   `WROTE sha256=` or `READ sha256=` for a script at all. That is the one
+//!   that gets shipped, because a script that silently does nothing looks
+//!   exactly like a passing one from the outside. Both exit non-zero here.
 //!
 //! And a third thing, which is not a failure and must not be silence: a
 //! surface whose artefact is not installed on this machine is **SKIPPED**, and
@@ -24,13 +31,13 @@
 //! what CI passes.
 //!
 //! **Agreement is not enough, and the surfaces know it.** Four byte-identical
-//! outputs tell you nothing if all four are wrong, so every surface re-opens
+//! outputs tell you nothing if all of them are wrong, so every surface re-opens
 //! its own artefact through this engine's strict structural validator before
 //! it prints a hash, and refuses to print one if the artefact is not clean.
 //! Under ruling 13 that validator is first-party, which is exactly why it can
 //! be relied on here instead of being an external step somebody might not have
 //! installed. A `WROTE` line is therefore already a statement that the bytes
-//! are a valid document; this program's job is that the four agree about
+//! are a valid document; this program's job is that the surfaces agree about
 //! *which* one.
 
 use std::collections::BTreeMap;
@@ -46,15 +53,32 @@ use std::process::Command;
 /// writer change look like a determinism regression to whoever reads that file
 /// next.
 ///
-/// One place, and four surfaces compared to *it* rather than to each other:
-/// a legitimate writer change is then one recorded update here, not four
-/// flaky suites. If these move, the reason belongs in the commit message —
-/// a hash that moves without one is indistinguishable from a hash that broke.
+/// One place, and every surface compared to *it* rather than to each other:
+/// a legitimate writer change is then one recorded update here, not a flaky
+/// suite per language. If these move, the reason belongs in the commit
+/// message — a hash that moves without one is indistinguishable from a hash
+/// that broke.
 ///
-/// Recorded August 2026 on windows/x86_64, and target-independent by ruling 4:
-/// the writer's output is fixed-point and integer throughout, and the one
-/// input that would otherwise vary — encryption entropy — is not used by
-/// either script.
+/// The two write hashes were recorded August 2026 on windows/x86_64, and are
+/// target-independent by ruling 4: the writer's output is fixed-point and
+/// integer throughout, and the one input that would otherwise vary —
+/// encryption entropy — is not used by either script; nor by `document-ops`
+/// and `sanitise`, recorded October 2026 on linux/x86_64 with the read hashes.
+/// `read-surface` moved when it gained the document-ops artefact and every
+/// page's five boundaries, from be7deb04... to c02151fc.... The read texts
+/// spell every number by its IEEE bits or as an integer, so they are as
+/// target-independent as the reads under them. `signatures` judges validity
+/// only at the instant it names, never at "now", so it does not move with the
+/// calendar. It moved from e2f5e33c... to c3490eb5... when it gained
+/// `ecdsa-p256-altered`, the one verdict whose digest and signature check
+/// disagree: before it, a surface reading either answer from the other's
+/// accessor agreed with every other surface, which the Ruby binding's
+/// injection campaign showed. `forms` and `form-data` were recorded October
+/// 2026 on linux/x86_64 when the forms surface crossed; the form-data text
+/// hashes the FDF and XFDF the writer makes, both of which are text with no
+/// date or identifier in them, so they are as fixed as the rest. `graphics`
+/// was recorded the same way when the builder's graphics resources crossed,
+/// and `tagged` when tagged writing did.
 const EXPECTED: &[(&str, &str)] = &[
     (
         "fill-and-save",
@@ -64,7 +88,55 @@ const EXPECTED: &[(&str, &str)] = &[
         "build-a-document",
         "1dbb7ace2a5787016efa257ab8c3efdb6ceae1b339f8597266ad47c5828dac62",
     ),
+    (
+        "document-ops",
+        "a8c436d092a929ce9ddfbc53b5fe1f48f7ff2141d23148a7b1e003a4dfb445e9",
+    ),
+    (
+        "sanitise",
+        "f6f9cedc25ac039b7b45d4baf8507ca38610228a8c3867ed3898b72ec239451d",
+    ),
+    (
+        "save-options",
+        "652c7cd32149a0f6fd06e921fa9762e2c8411aa09fbfc732ea6a2c991e369704",
+    ),
+    (
+        "save-linearized",
+        "e64bffa59ffbc7a4b7335abdc634bc567a615d9f29e23ef1673c51e07f3ac7fc",
+    ),
+    (
+        "sanitise-report",
+        "a73b92e55800b856cb0f46107d89ce26d51ca9f8c941e536790305255d26300f",
+    ),
+    (
+        "read-surface",
+        "c02151fc924133fe2864d1b05bc57e5eaafaddab86f0be2b2088549fd91af5c0",
+    ),
+    (
+        "signatures",
+        "c3490eb5f9a5c893893494bf0c51269ef718f915051053d6b30ff7ae7c1ad2ff",
+    ),
+    (
+        "forms",
+        "84b2daef81a1d6342fec8052971b25ea6ab82a366cd3afcd068c490806f1bc3b",
+    ),
+    (
+        "form-data",
+        "f81ce8279205bd2ce3058b3d2f5e0fd4347ef4e00300e367d1a54c873ad2aa51",
+    ),
+    (
+        "graphics",
+        "8bf69d84af79241a94e6770e315ce79dfa9cf1d6f85052af122444c3b94dac5f",
+    ),
+    (
+        "tagged",
+        "ca75ed2bff10974b46fcc9a55a77fd0b75411085b37a5f263c1559b4d3fba29f",
+    ),
 ];
+
+/// The two prefixes a surface's evidence line starts with: a written
+/// document's hash, and the read-surface text's.
+const EVIDENCE: [&str; 2] = ["WROTE sha256=", "READ sha256="];
 
 /// What one surface's run came to.
 enum Outcome {
@@ -82,6 +154,28 @@ struct Surface {
     name: &'static str,
     /// Why it was skipped, or the command to run.
     plan: Result<Command, String>,
+    /// Commands that must succeed first — the Java surface's compile. One
+    /// that fails is a failure of the surface, never a skip: the toolchain
+    /// was there, so "could not build" is an answer about the binding.
+    prepare: Vec<Command>,
+}
+
+impl Surface {
+    fn ready(name: &'static str, command: Command) -> Self {
+        Self {
+            name,
+            plan: Ok(command),
+            prepare: Vec::new(),
+        }
+    }
+
+    fn skipped(name: &'static str, why: String) -> Self {
+        Self {
+            name,
+            plan: Err(why),
+            prepare: Vec::new(),
+        }
+    }
 }
 
 /// `cargo xtask bindings-parity`.
@@ -126,6 +220,9 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         python_surface(root, &fixture, &python),
         js_surface(root, &fixture, node_dir.as_deref()),
         dotnet_surface(root, &fixture),
+        go_surface(root, &fixture),
+        ruby_surface(root, &fixture),
+        java_surface(root, &fixture),
     ];
 
     let mut ran = Vec::new();
@@ -135,7 +232,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     for surface in surfaces {
         match evaluate(surface) {
             (name, Outcome::Ran) => {
-                println!("bindings-parity: {name} RAN, both hashes agree");
+                println!("bindings-parity: {name} RAN, every hash agrees");
                 ran.push(name);
             }
             (name, Outcome::Skipped(why)) => {
@@ -204,7 +301,11 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     }
 
     if skipped.is_empty() {
-        println!("bindings-parity: all four surfaces wrote the same bytes");
+        println!(
+            "bindings-parity: every surface agrees ({} of {})",
+            ran.len(),
+            ran.len()
+        );
     } else {
         println!(
             "bindings-parity: the surfaces that ran agree; {} did not run and \
@@ -221,6 +322,29 @@ fn evaluate(surface: Surface) -> (&'static str, Outcome) {
         Ok(command) => command,
         Err(why) => return (surface.name, Outcome::Skipped(why)),
     };
+
+    for mut step in surface.prepare {
+        let failed = match step.output() {
+            Ok(output) if output.status.success() => None,
+            Ok(output) => Some(format!(
+                "{:?} exited {}; stderr: {}",
+                step.get_program(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+                    .trim()
+                    .lines()
+                    .next()
+                    .unwrap_or("(empty)")
+            )),
+            Err(error) => Some(format!(
+                "{:?} could not be run: {error}",
+                step.get_program()
+            )),
+        };
+        if let Some(problem) = failed {
+            return (surface.name, Outcome::Failed(vec![problem]));
+        }
+    }
 
     let output = match command.output() {
         Ok(output) => output,
@@ -249,12 +373,13 @@ fn evaluate(surface: Surface) -> (&'static str, Outcome) {
             // The failure that gets shipped: a script that ran, exited zero
             // and produced no evidence looks exactly like a passing one.
             None => problems.push(format!(
-                "printed no `WROTE sha256=` line for {script}, which is not the \
-                 same as printing a wrong one — a surface that silently writes \
-                 nothing passes every check that only compares what it printed"
+                "printed no `WROTE sha256=` or `READ sha256=` line for {script}, \
+                 which is not the same as printing a wrong one — a surface that \
+                 silently writes nothing passes every check that only compares \
+                 what it printed"
             )),
             Some(actual) if actual != expected => problems.push(format!(
-                "{script}: wrote {actual}, and the recorded answer is {expected}"
+                "{script}: printed {actual}, and the recorded answer is {expected}"
             )),
             Some(_) => {}
         }
@@ -277,7 +402,8 @@ fn evaluate(surface: Surface) -> (&'static str, Outcome) {
     }
 }
 
-/// Every `WROTE sha256=<hex> ... script=<name>` line, as script to hash.
+/// Every `WROTE sha256=<hex> ... script=<name>` and `READ sha256=<hex> ...
+/// script=<name>` line, as script to hash.
 ///
 /// Parsed by key rather than by position so a surface may print whatever else
 /// it likes around them — the .NET smoke prefixes its own name, the JavaScript
@@ -285,7 +411,7 @@ fn evaluate(surface: Surface) -> (&'static str, Outcome) {
 fn harvest(stdout: &str) -> BTreeMap<String, String> {
     let mut found = BTreeMap::new();
     for line in stdout.lines() {
-        let Some(start) = line.find("WROTE sha256=") else {
+        let Some(start) = EVIDENCE.iter().filter_map(|prefix| line.find(prefix)).min() else {
             continue;
         };
         let rest = &line[start..];
@@ -321,10 +447,7 @@ fn facade(root: &Path, fixture: &Path) -> Surface {
             "--",
         ])
         .arg(fixture);
-    Surface {
-        name: "facade",
-        plan: Ok(command),
-    }
+    Surface::ready("facade", command)
 }
 
 /// The wheel, through whichever interpreter has it installed.
@@ -341,14 +464,14 @@ fn python_surface(root: &Path, fixture: &Path, python: &str) -> Surface {
         .unwrap_or(false);
 
     if !importable {
-        return Surface {
-            name: "python",
-            plan: Err(format!(
+        return Surface::skipped(
+            "python",
+            format!(
                 "`{python} -c \"import tinker_pdf\"` failed, so no wheel is \
                  installed for this interpreter; `maturin build` and `pip \
                  install` it, or pass --python"
-            )),
-        };
+            ),
+        );
     }
 
     let mut command = Command::new(python);
@@ -356,10 +479,7 @@ fn python_surface(root: &Path, fixture: &Path, python: &str) -> Surface {
         .current_dir(root)
         .arg(root.join("bindings/python/tests/write_parity.py"))
         .arg(fixture);
-    Surface {
-        name: "python",
-        plan: Ok(command),
-    }
+    Surface::ready("python", command)
 }
 
 /// The npm package, from a directory where it has been installed.
@@ -371,15 +491,15 @@ fn js_surface(root: &Path, fixture: &Path, node_dir: Option<&Path>) -> Surface {
     let default = root.join("target/js-parity");
     let dir = node_dir.map_or(default, Path::to_path_buf);
     if !dir.join("node_modules/tinker-pdf-js").is_dir() {
-        return Surface {
-            name: "js",
-            plan: Err(format!(
+        return Surface::skipped(
+            "js",
+            format!(
                 "{} holds no installed tinker-pdf-js; `wasm-pack build --target \
                  web`, `npm pack` and `npm install` the tarball there, or pass \
                  --node-dir",
                 dir.display()
-            )),
-        };
+            ),
+        );
     }
 
     let mut command = Command::new("node");
@@ -387,10 +507,7 @@ fn js_surface(root: &Path, fixture: &Path, node_dir: Option<&Path>) -> Surface {
         .current_dir(&dir)
         .arg(root.join("bindings/js/tests/write_parity.mjs"))
         .arg(fixture);
-    Surface {
-        name: "js",
-        plan: Ok(command),
-    }
+    Surface::ready("js", command)
 }
 
 /// The NuGet package, through the smoke project that consumes it.
@@ -402,25 +519,23 @@ fn js_surface(root: &Path, fixture: &Path, node_dir: Option<&Path>) -> Surface {
 fn dotnet_surface(root: &Path, fixture: &Path) -> Surface {
     let package = root.join("target/nuget");
     if !package.is_dir() {
-        return Surface {
-            name: "dotnet",
-            plan: Err(format!(
+        return Surface::skipped(
+            "dotnet",
+            format!(
                 "{} holds no packed TinkerPdf; `cargo xtask nuget-stage` then \
                  `dotnet pack bindings/dotnet/TinkerPdf.csproj -c Release -o \
                  target/nuget`",
                 package.display()
-            )),
-        };
+            ),
+        );
     }
     let Some(face) = system_face() else {
-        return Surface {
-            name: "dotnet",
-            plan: Err(
-                "no system face was found, and the smoke's read leg asserts \
-                 blank-then-inked before its write leg runs"
-                    .to_string(),
-            ),
-        };
+        return Surface::skipped(
+            "dotnet",
+            "no system face was found, and the smoke's read leg asserts \
+             blank-then-inked before its write leg runs"
+                .to_string(),
+        );
     };
 
     let mut command = Command::new("dotnet");
@@ -437,9 +552,190 @@ fn dotnet_surface(root: &Path, fixture: &Path) -> Surface {
         .arg(root.join("testdata/simple-text.pdf"))
         .arg(face)
         .arg(fixture);
+    Surface::ready("dotnet", command)
+}
+
+/// The engine as a C library, where `cargo build -p tinker-pdf-ffi --release`
+/// leaves it. The three bindings over the C ABI load this file and nothing
+/// else, so without it they are skipped, by name, rather than run against
+/// whatever a system search path happens to hold.
+fn release_library(root: &Path) -> Result<PathBuf, String> {
+    let library = root.join("target/release").join(format!(
+        "{}tinker_pdf_ffi{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    ));
+    if library.is_file() {
+        Ok(library)
+    } else {
+        Err(format!(
+            "{} is not built; `cargo build -p tinker-pdf-ffi --release`",
+            library.display()
+        ))
+    }
+}
+
+/// Whether a program is on this machine, asked the cheapest way it answers.
+fn present(program: &str, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+/// The Go binding: cgo over the committed header, linked against the release
+/// library with that directory as its run-time path.
+fn go_surface(root: &Path, fixture: &Path) -> Surface {
+    let library = match release_library(root) {
+        Ok(library) => library,
+        Err(why) => return Surface::skipped("go", why),
+    };
+    if !present("go", &["version"]) {
+        return Surface::skipped("go", "no `go` toolchain on PATH".to_string());
+    }
+    // The search path is the release directory and nothing else. Under
+    // `cargo run` it otherwise holds target/debug/deps, where a test build may
+    // have left an older libtinker_pdf_ffi — and the loader prefers the
+    // search path to the program's own run path, so the parity program would
+    // run against that one and die on the first symbol it lacks.
+    let directory = library.parent().unwrap_or(root).to_path_buf();
+    let mut command = Command::new("go");
+    command
+        .current_dir(root.join("bindings/go"))
+        .env("LD_LIBRARY_PATH", &directory)
+        .env("DYLD_LIBRARY_PATH", &directory)
+        .args(["run", "./cmd/parity"])
+        .arg(fixture);
+    Surface::ready("go", command)
+}
+
+/// The Ruby binding: Fiddle, from Ruby's standard library, so there is no gem
+/// to install and the interpreter is the whole toolchain.
+fn ruby_surface(root: &Path, fixture: &Path) -> Surface {
+    let library = match release_library(root) {
+        Ok(library) => library,
+        Err(why) => return Surface::skipped("ruby", why),
+    };
+    if !present("ruby", &["-e", "require 'fiddle'"]) {
+        return Surface::skipped("ruby", "no `ruby` with Fiddle on PATH".to_string());
+    }
+    let mut command = Command::new("ruby");
+    command
+        .current_dir(root.join("bindings/ruby"))
+        .env("TINKER_PDF_LIB", &library)
+        .args(["-Ilib", "test/write_parity.rb"])
+        .arg(fixture);
+    Surface::ready("ruby", command)
+}
+
+/// The flags `java.lang.foreign` needs on a JDK of this feature release: on
+/// 21 it is a preview API, so both the compile and the run name the release
+/// and enable previews; from 22 it is final and needs neither. Below 21 it
+/// does not exist, which is `None`.
+fn jdk_flags(feature: u32) -> Option<(Vec<String>, Vec<String>)> {
+    match feature {
+        21 => Some((
+            vec![
+                "--enable-preview".to_string(),
+                "--release".to_string(),
+                "21".to_string(),
+            ],
+            vec!["--enable-preview".to_string()],
+        )),
+        22.. => Some((
+            vec!["--release".to_string(), feature.to_string()],
+            Vec::new(),
+        )),
+        _ => None,
+    }
+}
+
+/// The feature release from `javac -version`'s `javac 21.0.10`.
+fn jdk_feature(version: &str) -> Option<u32> {
+    let number = version.split_whitespace().nth(1)?;
+    number.split(['.', '-', '+']).next()?.parse().ok()
+}
+
+/// Every `.java` file under a directory, sorted, so the compile is the same
+/// command on every machine.
+fn java_sources(dir: &Path, found: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            java_sources(&path, found);
+        } else if path.extension().is_some_and(|ext| ext == "java") {
+            found.push(path);
+        }
+    }
+}
+
+/// The Java binding: the Foreign Function and Memory API, compiled here into
+/// `target/java-parity` and run with the release library named explicitly.
+fn java_surface(root: &Path, fixture: &Path) -> Surface {
+    let library = match release_library(root) {
+        Ok(library) => library,
+        Err(why) => return Surface::skipped("java", why),
+    };
+    let version = Command::new("javac")
+        .arg("-version")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| {
+            // javac printed its version on stderr before JDK 9 and stdout
+            // since; either way the line is `javac <version>`.
+            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&out.stderr));
+            text
+        });
+    let Some(version) = version else {
+        return Surface::skipped("java", "no `javac` on PATH".to_string());
+    };
+    let line = version
+        .lines()
+        .find(|line| line.starts_with("javac "))
+        .unwrap_or("");
+    let Some((compile_flags, run_flags)) = jdk_feature(line).and_then(jdk_flags) else {
+        return Surface::skipped(
+            "java",
+            format!(
+                "`{}` is older than JDK 21, which is the first with java.lang.foreign",
+                line.trim()
+            ),
+        );
+    };
+
+    let classes = root.join("target/java-parity");
+    let mut sources = Vec::new();
+    java_sources(&root.join("bindings/java/src"), &mut sources);
+    java_sources(&root.join("bindings/java/test"), &mut sources);
+    sources.sort();
+    let mut compile = Command::new("javac");
+    compile
+        .current_dir(root)
+        .args(&compile_flags)
+        .arg("-d")
+        .arg(&classes)
+        .args(&sources);
+
+    let mut command = Command::new("java");
+    command
+        .current_dir(root)
+        .args(&run_flags)
+        .arg("--enable-native-access=ALL-UNNAMED")
+        .arg(format!("-Dtinkerpdf.library={}", library.display()))
+        .arg("-cp")
+        .arg(&classes)
+        .arg("WriteParity")
+        .arg(fixture);
     Surface {
-        name: "dotnet",
+        name: "java",
         plan: Ok(command),
+        prepare: vec![compile],
     }
 }
 
@@ -483,6 +779,21 @@ DOTNET-PARITY: RAN
         assert_eq!(found.len(), 2);
     }
 
+    /// The read script's line is evidence on the same terms as a write's: it
+    /// is keyed by its script, and a surface that printed the text's hash
+    /// under the other prefix would still be counted for the right script.
+    #[test]
+    fn a_read_line_is_harvested_beside_the_written_ones() {
+        let stdout = "\
+WROTE sha256=aaaa surface=go script=fill-and-save bytes=10
+GO-PARITY: READ sha256=cccc surface=go script=read-surface bytes=30
+";
+        let found = harvest(stdout);
+        assert_eq!(found.get("read-surface").map(String::as_str), Some("cccc"));
+        assert_eq!(found.len(), 2);
+        assert!(harvest("READ sha256=cccc surface=go\n").is_empty());
+    }
+
     /// A line without a `script=` is not a hash about anything, so it is not
     /// counted — otherwise a malformed line would satisfy the presence check
     /// for whichever script happened to be missing.
@@ -492,14 +803,51 @@ DOTNET-PARITY: RAN
         assert!(harvest("nothing here at all\n").is_empty());
     }
 
+    /// JDK 21 needs the preview flags on both sides, 22 and later need
+    /// neither, and anything older has no java.lang.foreign to bind with.
+    #[test]
+    fn the_jdk_feature_release_picks_the_flags() {
+        assert_eq!(jdk_feature("javac 21.0.10"), Some(21));
+        assert_eq!(jdk_feature("javac 22"), Some(22));
+        assert_eq!(jdk_feature("javac 23-ea"), Some(23));
+        assert_eq!(jdk_feature("javac 1.8.0_402"), Some(1));
+        assert_eq!(jdk_feature("nonsense"), None);
+
+        let (compile, run) = jdk_flags(21).expect("21 has the preview API");
+        assert_eq!(compile, ["--enable-preview", "--release", "21"]);
+        assert_eq!(run, ["--enable-preview"]);
+        let (compile, run) = jdk_flags(22).expect("22 has the final API");
+        assert_eq!(compile, ["--release", "22"]);
+        assert!(run.is_empty());
+        assert!(jdk_flags(17).is_none());
+        assert!(jdk_flags(1).is_none());
+    }
+
     /// The two scripts are named once and the names are what every surface
     /// prints, so a rename that reached only one of them is a mismatch rather
     /// than a silent pass.
     #[test]
     fn the_recorded_answer_names_both_scripts_once() {
-        assert_eq!(EXPECTED.len(), 2);
+        assert_eq!(EXPECTED.len(), 13);
         let names: Vec<&str> = EXPECTED.iter().map(|(name, _)| *name).collect();
-        assert_eq!(names, ["fill-and-save", "build-a-document"]);
+        assert_eq!(
+            names,
+            [
+                "fill-and-save",
+                "build-a-document",
+                "document-ops",
+                "sanitise",
+                "save-options",
+                "save-linearized",
+                "sanitise-report",
+                "read-surface",
+                "signatures",
+                "forms",
+                "form-data",
+                "graphics",
+                "tagged"
+            ]
+        );
         for (name, hash) in EXPECTED {
             assert_eq!(hash.len(), 64, "{name}: a SHA-256 is 64 hex characters");
             assert!(

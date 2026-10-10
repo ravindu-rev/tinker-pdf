@@ -12,10 +12,10 @@
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
     AlignContent, AlignItems, AlignSelf, BorderStyle, BoxSizing, Clear, Color, ColumnCount,
-    ColumnFill, ColumnSpan, ColumnWidth, Display, FlexDirection, FlexWrap, Float, Gap, Inset,
-    JustifyContent, LengthPercentage, LineHeight, ListStyleType, MarginValue, MaxSize, MinSize,
-    OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size, TextAlign,
-    VerticalAlign, Visibility, WhiteSpace, ZIndex,
+    ColumnFill, ColumnSpan, ColumnWidth, Direction, Display, FlexDirection, FlexWrap, Float, Gap,
+    Hyphens, Inset, JustifyContent, LengthPercentage, LineHeight, ListStyleType, MarginValue,
+    MaxSize, MinSize, OverflowWrap, PageBreak, PageBreakInside, Position, Side, Sides, Size,
+    TextAlign, UnicodeBidi, VerticalAlign, Visibility, WhiteSpace, ZIndex,
 };
 
 use crate::flex;
@@ -23,8 +23,8 @@ use crate::flow::marker_text;
 use crate::metrics::FixedPitch;
 use crate::table;
 use crate::{
-    layout, layout_with, BoxNode, Budget, Content, Intrinsic, Layout, Limits, Options, Refusal,
-    Warning,
+    layout, layout_with, BoxNode, Budget, Content, EmbeddingKind, Intrinsic, Layout, Limits,
+    Options, Refusal, Warning,
 };
 
 /// One point of advance per point of font size.
@@ -426,6 +426,37 @@ fn phase_two_trims_the_space_a_line_broke_at() {
     assert_eq!(laid.pages[0].runs[0].width, 60.0);
 }
 
+/// **Every run carries the bidi paragraph it is part of** (`TextRun::paragraph`),
+/// which is what a caller resolving UAX #9 over a paragraph rather than a line
+/// gathers its lines by (review of lane 8C).
+///
+/// `aa bb cc` wrapped to three lines is one paragraph; a preserved newline
+/// under `white-space: pre`, a forced break of bidi type `B`, starts the next
+/// (`css-writing-modes-3` §2.4), and the next block's text another. Numbered
+/// from one in the order they are set.
+#[test]
+fn every_run_carries_its_bidi_paragraph() {
+    let mut pre = block();
+    pre.white_space = WhiteSpace::Pre;
+    let tree = BoxNode::element(
+        block(),
+        vec![
+            para("aa bb cc"),
+            BoxNode::element(pre.clone(), vec![BoxNode::text(pre, "dd\nee")]),
+        ],
+    );
+    let laid = run(&tree, 30.0, 400.0);
+    let numbered: Vec<(&str, usize)> = laid.pages[0]
+        .runs
+        .iter()
+        .map(|run| (run.text.as_str(), run.paragraph))
+        .collect();
+    assert_eq!(
+        numbered,
+        [("aa", 1), ("bb", 1), ("cc", 1), ("dd", 2), ("ee", 3)]
+    );
+}
+
 /// `white-space: pre` preserves both the spaces and the segment breaks;
 /// `pre-line` preserves the breaks and collapses the spaces.
 #[test]
@@ -558,6 +589,663 @@ fn text_indent_is_the_first_line_only() {
     let xs: Vec<f64> = laid.pages[0].runs.iter().map(|r| r.x).collect();
     assert_eq!(xs, vec![20.0, 0.0]);
     assert_eq!(page_text(&laid, 0), "aabb cc");
+}
+
+/// **`text-indent` is a margin on the line box's start edge** (`css-text-3`
+/// §8.1), and a right-to-left block's start edge is its right (review of
+/// lane 8C).
+///
+/// `aa bb cc dd ee` in a hundred points, twenty of indent: the first line has
+/// eighty to fill and holds `aa bb cc` exactly, the second holds `dd ee`. Left
+/// to right the first line starts at the indent. Right to left the indent is
+/// at the right, so the first line — flush with its start, the right — runs
+/// from 0 to 80 and the second, fifty points, starts at fifty. A build that
+/// put the indent on the left in both directions started the right-to-left
+/// first line at twenty and drew it over the indent's place at the right.
+///
+/// And beside a float the same holds of the band: a ten-point left float
+/// leaves the first line 10 to 110 of a 110-point block, so the left-to-right
+/// line starts at 30 and the right-to-left one at 10.
+#[test]
+fn text_indent_is_on_the_start_side_of_a_right_to_left_line() {
+    let xs = |direction: Direction, width: f64, float: bool| {
+        let mut style = block();
+        style.direction = direction;
+        style.text_indent = LengthPercentage::Px(20.0);
+        let mut children = Vec::new();
+        if float {
+            children.push(float_box(Float::Left, 10.0, "F"));
+        }
+        children.push(text("aa bb cc dd ee"));
+        let laid = run(&BoxNode::element(style, children), width, 400.0);
+        assert_eq!(baselines(&laid, 0).len(), 2 + usize::from(float));
+        laid.pages[0]
+            .runs
+            .iter()
+            .filter(|run| run.text != "F")
+            .map(|run| run.x)
+            .collect::<Vec<f64>>()
+    };
+    assert_eq!(xs(Direction::Ltr, 100.0, false), [20.0, 0.0]);
+    assert_eq!(xs(Direction::Rtl, 100.0, false), [0.0, 50.0]);
+    assert_eq!(xs(Direction::Ltr, 110.0, true), [30.0, 0.0]);
+    assert_eq!(xs(Direction::Rtl, 110.0, true), [10.0, 60.0]);
+}
+
+// ---- css-writing-modes-3 section 2, direction and unicode-bidi --------------
+
+/// **`start` and `end` are the block's sides** (`css-text-3` §7.1), `left`
+/// and `right` the page's, and every run carries its paragraph's direction
+/// for whoever orders the line — this crate resolves no levels.
+///
+/// `abcd` is forty points in a hundred, so a line flush with the far edge
+/// starts at sixty.
+#[test]
+fn start_and_end_follow_the_blocks_direction() {
+    let at = |align: TextAlign, direction: Direction| {
+        let mut style = block();
+        style.text_align = align;
+        style.direction = direction;
+        let laid = run(&BoxNode::element(style, vec![text("abcd")]), 100.0, 400.0);
+        let first = &laid.pages[0].runs[0];
+        (first.x, first.paragraph_rtl)
+    };
+    assert_eq!(at(TextAlign::Start, Direction::Ltr), (0.0, Some(false)));
+    assert_eq!(at(TextAlign::End, Direction::Ltr), (60.0, Some(false)));
+    assert_eq!(at(TextAlign::Start, Direction::Rtl), (60.0, Some(true)));
+    assert_eq!(at(TextAlign::End, Direction::Rtl), (0.0, Some(true)));
+    assert_eq!(at(TextAlign::Left, Direction::Rtl), (0.0, Some(true)));
+    assert_eq!(at(TextAlign::Right, Direction::Ltr), (60.0, Some(false)));
+    // The initial value is `start`, so a right-to-left block that says
+    // nothing about alignment is set flush right.
+    let mut style = block();
+    style.direction = Direction::Rtl;
+    let laid = run(&BoxNode::element(style, vec![text("abcd")]), 100.0, 400.0);
+    assert_eq!(laid.pages[0].runs[0].x, 60.0);
+}
+
+/// **A justified right-to-left paragraph's last line is set at its start,
+/// the right** (`css-text-3` §7.2: `text-align-last: auto` is `start`).
+///
+/// `aa bb cc` fills the first line of a hundred points and is stretched to
+/// it; `dd ee` is fifty points, so flush right it starts at fifty.
+#[test]
+fn a_justified_right_to_left_paragraphs_last_line_is_flush_right() {
+    let mut style = block();
+    style.text_align = TextAlign::Justify;
+    style.direction = Direction::Rtl;
+    let laid = run(
+        &BoxNode::element(style, vec![text("aa bb cc dd ee")]),
+        100.0,
+        400.0,
+    );
+    assert_eq!(baselines(&laid, 0).len(), 2);
+    let last = laid.pages[0].runs.last().expect("a last line");
+    assert_eq!(last.text, "dd ee");
+    assert_eq!(last.x, 50.0, "the last line is not flush right");
+    let first = &laid.pages[0].runs[0];
+    assert_eq!(first.x, 0.0, "a justified line fills the measure");
+}
+
+/// **`unicode-bidi: plaintext` leaves a paragraph's direction to UAX #9**,
+/// which this crate asks its metrics provider for — and [`FixedPitch`] has
+/// no `Bidi_Class` table, so it cannot say: the run carries `None` and the
+/// line is aligned by `direction`, as [`crate::metrics::Metrics::first_strong`]
+/// says.
+#[test]
+fn plaintext_without_a_bidi_provider_is_aligned_by_direction() {
+    let mut style = block();
+    style.unicode_bidi = UnicodeBidi::Plaintext;
+    style.direction = Direction::Rtl;
+    let laid = run(&BoxNode::element(style, vec![text("abcd")]), 100.0, 400.0);
+    let first = &laid.pages[0].runs[0];
+    assert_eq!((first.x, first.paragraph_rtl), (60.0, None));
+}
+
+/// **A paragraph of many inline boxes costs its boxes, not their square**
+/// (found measuring the review of lane 8C).
+///
+/// `<span>a</span>` and a space, 2 048 times: 4 096 pieces in one
+/// formatting context, set ten characters to the line. Measuring a range
+/// and setting a line each walked every span of the context, and the line
+/// filler measures at every break opportunity, so the paragraph cost its
+/// pieces times its opportunities — 10 000 such spans in one `<p>` took
+/// 8.3 s and 20 000 took 37 s, against 0.07 and 0.14 s for the same words
+/// without them. Held by count, not by a clock: every span either walk looks
+/// at is counted ([`crate::flow::SPANS_LOOKED`]), and the paragraph is held
+/// to eight looks a piece.
+#[test]
+fn a_paragraph_of_many_inline_boxes_costs_its_boxes() {
+    const BOXES: usize = 2_048;
+    let mut children = Vec::new();
+    for _ in 0..BOXES {
+        children.push(BoxNode::element(base(), vec![text("a")]));
+        children.push(text(" "));
+    }
+    crate::flow::SPANS_LOOKED.with(|looked| looked.set(0));
+    let laid = run(&BoxNode::element(block(), children), 100.0, 1.0e6);
+    let looked = crate::flow::SPANS_LOOKED.with(std::cell::Cell::get);
+    assert_eq!(laid.text().matches('a').count(), BOXES);
+    let pieces = 2 * BOXES;
+    assert!(
+        looked <= 8 * pieces,
+        "{looked} spans looked at for a paragraph of {pieces} pieces"
+    );
+}
+
+/// [`METRICS`] with UAX #9's P2 over a few characters, counting every
+/// character it is asked about: Hebrew letters are `R`, ASCII letters `L`,
+/// the seven characters of `DerivedBidiClass.txt`'s `B` separators, and
+/// everything else is neutral.
+struct FirstStrongCounted {
+    looked: std::cell::Cell<usize>,
+}
+
+impl crate::metrics::Metrics for FirstStrongCounted {
+    fn advance(&self, ch: char, font: &crate::metrics::FontRequest<'_>) -> f64 {
+        METRICS.advance(ch, font)
+    }
+
+    fn vertical(&self, font: &crate::metrics::FontRequest<'_>) -> crate::metrics::Vertical {
+        METRICS.vertical(font)
+    }
+
+    fn first_strong(&self, text: &str) -> Option<crate::metrics::FirstStrong> {
+        use crate::metrics::FirstStrong;
+        for c in text.chars() {
+            self.looked.set(self.looked.get() + 1);
+            match c {
+                '\n' | '\r' | '\u{1C}'..='\u{1E}' | '\u{85}' | '\u{2029}' => {
+                    return Some(FirstStrong::Separator)
+                }
+                'a'..='z' | 'A'..='Z' => return Some(FirstStrong::Left),
+                '\u{5D0}'..='\u{5EA}' => return Some(FirstStrong::Right),
+                _ => {}
+            }
+        }
+        Some(FirstStrong::Neither)
+    }
+}
+
+/// [`run`] through [`FirstStrongCounted`], and how many characters it was
+/// asked about.
+fn run_counted(tree: &BoxNode, width: f64, height: f64) -> (Layout, usize) {
+    let metrics = FirstStrongCounted {
+        looked: std::cell::Cell::new(0),
+    };
+    let laid = layout(
+        tree,
+        &metrics,
+        &Options::new(width, height),
+        &Limits::DEFAULT,
+    )
+    .expect("the fixture is under every cap");
+    (laid, metrics.looked.get())
+}
+
+/// [`METRICS`] with one combining mark, U+0301, that belongs to the
+/// typographic character unit before it.
+struct MarkAware;
+
+impl crate::metrics::Metrics for MarkAware {
+    fn advance(&self, ch: char, font: &crate::metrics::FontRequest<'_>) -> f64 {
+        METRICS.advance(ch, font)
+    }
+
+    fn vertical(&self, font: &crate::metrics::FontRequest<'_>) -> crate::metrics::Vertical {
+        METRICS.vertical(font)
+    }
+
+    fn letter_spaced(&self, ch: char) -> bool {
+        ch != '\u{301}'
+    }
+}
+
+/// **`letter-spacing` is added once per typographic character unit**
+/// (`css-text-3` §10.2): a letter and the mark after it are spaced once,
+/// where the provider says which characters are such marks, and a soft
+/// hyphen is spaced not at all.
+///
+/// `ae\u{301}b\u{AD}` in a ten-point face of ten-point characters, at two
+/// points of `letter-spacing`: four characters drawn, forty points, and
+/// three units spaced, six — forty-six. A provider that says nothing spaces
+/// every character it draws, as every provider did before
+/// [`crate::metrics::Metrics::letter_spaced`]: forty-eight. The painter
+/// moves its pen by the same answer, so a word drawn as wide as it was
+/// measured has no gap after a mark that layout did not leave room for.
+#[test]
+fn letter_spacing_is_added_once_for_a_letter_and_its_marks() {
+    let mut spaced = base();
+    spaced.letter_spacing = tinker_pdf_css::property::Spacing::Px(2.0);
+    let tree = BoxNode::element(block(), vec![BoxNode::text(spaced, "ae\u{301}b\u{AD}")]);
+    fn width<M: crate::metrics::Metrics>(tree: &BoxNode, metrics: &M) -> f64 {
+        let laid = layout(tree, metrics, &Options::new(200.0, 200.0), &Limits::DEFAULT)
+            .expect("the fixture is under every cap");
+        laid.pages[0].runs.iter().map(|run| run.width).sum()
+    }
+    assert_eq!(width(&tree, &MarkAware), 46.0);
+    assert_eq!(width(&tree, &METRICS), 48.0);
+}
+
+/// **A bidi paragraph ends at a paragraph separator, not at every forced
+/// break** (`css-writing-modes-3` §2.4: UAX #9 is applied to every sequence
+/// of inline-level boxes *"uninterrupted by any block boundary or 'bidi type
+/// B' forced paragraph break"*; review of lane 8C).
+///
+/// `א`, a forced break, then `ab`, in a `plaintext` block a hundred points
+/// wide. UAX #14 breaks the line at all seven: `BK` (U+000B, U+000C, U+2028,
+/// U+2029), `CR`, `LF` and `NL`. Four of them are `Bidi_Class` `B` — LF, CR,
+/// NL and U+2029 — and start a paragraph of their own, so `ab` finds `a` and
+/// is left to right, at the left. U+2028 LINE SEPARATOR is `WS`, U+000C `WS`
+/// and U+000B `S`: the line ends and the paragraph does not, so `ab` is the
+/// second line of `א`'s right-to-left paragraph, one paragraph number with
+/// it, flush right at eighty. The layout started a paragraph at every forced
+/// break, and the second line re-decided its direction after each of the
+/// three.
+#[test]
+fn a_bidi_paragraph_ends_at_a_paragraph_separator_not_at_every_forced_break() {
+    for (separator, white_space, one_paragraph) in [
+        ('\u{2028}', WhiteSpace::Normal, true),
+        ('\u{B}', WhiteSpace::Normal, true),
+        ('\u{C}', WhiteSpace::Pre, true),
+        ('\n', WhiteSpace::Pre, false),
+        ('\r', WhiteSpace::Pre, false),
+        ('\u{85}', WhiteSpace::Normal, false),
+        ('\u{2029}', WhiteSpace::Normal, false),
+    ] {
+        let mut style = block();
+        style.unicode_bidi = UnicodeBidi::Plaintext;
+        style.white_space = white_space;
+        let mut inner = base();
+        inner.white_space = white_space;
+        let body = format!("\u{5D0}{separator}ab");
+        let tree = BoxNode::element(style, vec![BoxNode::text(inner, body)]);
+        let (laid, _) = run_counted(&tree, 100.0, 400.0);
+        let runs = &laid.pages[0].runs;
+        assert_eq!(runs.len(), 2, "{separator:?} is not two lines: {runs:?}");
+        let (first, second) = (&runs[0], &runs[1]);
+        assert_eq!(second.text, "ab", "{separator:?}");
+        assert_eq!(first.paragraph_rtl, Some(true), "{separator:?}");
+        let expected = if one_paragraph {
+            (first.paragraph, Some(true), 80.0)
+        } else {
+            (first.paragraph + 1, Some(false), 0.0)
+        };
+        assert_eq!(
+            (second.paragraph, second.paragraph_rtl, second.x),
+            expected,
+            "{separator:?}: the line after it is the wrong paragraph's"
+        );
+    }
+}
+
+/// **A paragraph separator inside an isolate ends the paragraph**, whichever
+/// of the four it is: P1 splits the text before any isolate is opened, so
+/// P2 does not look past it for the paragraph's first strong character.
+///
+/// `<span isolate>1␤</span>א` in a `plaintext` block: the first paragraph
+/// has nothing strong outside its isolate before its separator, so P3 makes
+/// it left to right, and `א` is the next paragraph's. The layout asked an
+/// isolate's text for `\n` and U+2029 only, so after a CR or a NEL in one it
+/// went on to `א` and set the first paragraph right to left.
+#[test]
+fn every_paragraph_separator_inside_an_isolate_ends_the_paragraph() {
+    for separator in ['\n', '\r', '\u{85}', '\u{2029}'] {
+        let mut style = block();
+        style.unicode_bidi = UnicodeBidi::Plaintext;
+        style.white_space = WhiteSpace::Pre;
+        let mut inner = base();
+        inner.white_space = WhiteSpace::Pre;
+        let mut isolate = inner.clone();
+        isolate.unicode_bidi = UnicodeBidi::Isolate;
+        let tree = BoxNode::element(
+            style,
+            vec![
+                BoxNode::element(
+                    isolate,
+                    vec![BoxNode::text(inner.clone(), format!("1{separator}"))],
+                ),
+                BoxNode::text(inner, "\u{5D0}"),
+            ],
+        );
+        let (laid, _) = run_counted(&tree, 100.0, 400.0);
+        let directions: Vec<(&str, Option<bool>)> = laid.pages[0]
+            .runs
+            .iter()
+            .map(|run| (run.text.trim_end_matches(separator), run.paragraph_rtl))
+            .collect();
+        assert_eq!(
+            directions,
+            [("1", Some(false)), ("\u{5D0}", Some(true))],
+            "{separator:?}"
+        );
+    }
+}
+
+/// **A `plaintext` block of a thousand line separators asks each character
+/// its direction once**, not once per paragraph after it (review of lane
+/// 8C).
+///
+/// `1` then U+2028, 2 048 times: 4 096 characters, 2 048 lines, one
+/// paragraph with no strong character. Held by count, not by a clock:
+/// [`FirstStrongCounted`] counts every character P2 is asked about, and the
+/// block is held to twice its length. When every forced break started a
+/// paragraph, each line asked from its own start to the block's end, past
+/// every separator after it — none of them `B`, so nothing stopped the scan
+/// — which is `n^2 / 2`, 4 196 352.
+#[test]
+fn a_plaintext_block_of_line_separators_asks_each_character_once() {
+    const LINES: usize = 2_048;
+    let mut style = block();
+    style.unicode_bidi = UnicodeBidi::Plaintext;
+    let body = "1\u{2028}".repeat(LINES);
+    let tree = BoxNode::element(style, vec![text(&body)]);
+    let (laid, looked) = run_counted(&tree, 100.0, 1.0e6);
+    let lines = laid.pages.iter().map(|page| page.runs.len()).sum::<usize>();
+    assert_eq!(lines, LINES);
+    let characters = 2 * LINES;
+    assert!(
+        looked <= 2 * characters,
+        "{looked} characters looked at for a block of {characters}"
+    );
+}
+
+/// **An inline box whose `unicode-bidi` is not `normal` opens a level every
+/// run inside it carries, outermost first, and a block's opens none**
+/// (`css-writing-modes-3` §2.2).
+///
+/// The level is kept beside the text rather than written into it as a
+/// formatting character, so `a b c` is the page's text and no `RLI` is in
+/// it; each embedding names the box that opened it.
+#[test]
+fn an_inline_boxs_unicode_bidi_is_an_embedding_its_runs_carry() {
+    let mut paragraph = block();
+    paragraph.unicode_bidi = UnicodeBidi::Isolate;
+    let mut isolate = base();
+    isolate.unicode_bidi = UnicodeBidi::Isolate;
+    isolate.direction = Direction::Rtl;
+    let mut embed = base();
+    embed.unicode_bidi = UnicodeBidi::Embed;
+    let mut inner = BoxNode::element(embed, vec![text("c")]);
+    inner.anchor = Some(2);
+    let mut outer = BoxNode::element(isolate, vec![text("b "), inner]);
+    outer.anchor = Some(1);
+    let tree = BoxNode::element(paragraph, vec![text("a "), outer]);
+    let laid = run(&tree, 200.0, 400.0);
+    type Carried = (EmbeddingKind, bool, Option<u32>);
+    let carried: Vec<(&str, Vec<Carried>)> = laid.pages[0]
+        .runs
+        .iter()
+        .map(|run| {
+            (
+                run.text.as_str(),
+                run.embeddings
+                    .iter()
+                    .map(|e| (e.kind, e.rtl, e.anchor))
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        carried,
+        vec![
+            ("a ", vec![]),
+            ("b ", vec![(EmbeddingKind::Isolate, true, Some(1))]),
+            (
+                "c",
+                vec![
+                    (EmbeddingKind::Isolate, true, Some(1)),
+                    (EmbeddingKind::Embed, false, Some(2)),
+                ]
+            ),
+        ]
+    );
+    assert_eq!(laid.text(), "a b c");
+}
+
+/// **A run carries no more levels than UAX #9 reads**: X1's `max_depth` is
+/// 125, past which an embedding overflows and does nothing, so a book of
+/// two hundred nested isolating spans costs each run a stack of 125
+/// ([`crate::limits::MAX_EMBEDDING_DEPTH`]).
+#[test]
+fn a_run_carries_no_deeper_a_stack_than_uax9_reads() {
+    let mut isolate = base();
+    isolate.unicode_bidi = UnicodeBidi::Isolate;
+    let mut node = text("x");
+    for _ in 0..200 {
+        node = BoxNode::element(isolate.clone(), vec![node]);
+    }
+    let laid = run(&BoxNode::element(block(), vec![node]), 200.0, 400.0);
+    let deepest = laid.pages[0]
+        .runs
+        .iter()
+        .find(|run| run.text == "x")
+        .expect("the text is set");
+    assert_eq!(deepest.embeddings.len(), 125);
+}
+
+/// How many distinct stacks of levels a layout's runs hold, told apart by
+/// where their levels are: one stack shared by many runs is counted once.
+fn stacks_held(laid: &Layout) -> usize {
+    laid.pages
+        .iter()
+        .flat_map(|page| page.runs.iter())
+        .filter(|run| !run.embeddings.is_empty())
+        .map(|run| run.embeddings.as_ptr())
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
+/// **A paragraph's runs share one stack of levels, not a copy each** (review
+/// of lane 8C).
+///
+/// Two hundred one-letter words inside 125 nested isolating spans, at a
+/// measure of one letter: two hundred lines, each a run carrying the 125
+/// levels. They were a copy each, twelve bytes a level — a kilobyte and a
+/// half a line, which the review measured as 855 MB against 259 MB for a
+/// 400 KB paragraph without the spans. Held by count, not by a clock: the
+/// runs hold one stack between them.
+#[test]
+fn a_paragraphs_runs_share_one_stack_of_levels() {
+    let mut isolate = base();
+    isolate.unicode_bidi = UnicodeBidi::Isolate;
+    let mut node = text(&"a ".repeat(200));
+    for _ in 0..125 {
+        node = BoxNode::element(isolate.clone(), vec![node]);
+    }
+    let laid = run(&BoxNode::element(block(), vec![node]), 10.0, 1.0e6);
+    let runs: Vec<&crate::TextRun> = laid.pages.iter().flat_map(|p| p.runs.iter()).collect();
+    assert_eq!(runs.len(), 200, "not a line a word");
+    assert!(runs.iter().all(|run| run.embeddings.len() == 125));
+    assert_eq!(stacks_held(&laid), 1, "the runs copy their levels");
+}
+
+/// **A stack is made once for each box that opens a level, and closing one
+/// goes back to its parent's.**
+///
+/// Fifty isolating spans of `a`, a space between each, inside three nested
+/// isolates: fifty-one stacks, one for each span's `a` and the one every
+/// space shares — not one for every piece, nor one for every time the
+/// stack changed, which would make a new one for each space after a span
+/// closed.
+#[test]
+fn a_stack_of_levels_is_made_once_for_each_box_that_opens_one() {
+    let mut isolate = base();
+    isolate.unicode_bidi = UnicodeBidi::Isolate;
+    let mut children = Vec::new();
+    for _ in 0..50 {
+        children.push(BoxNode::element(isolate.clone(), vec![text("a")]));
+        children.push(text(" "));
+    }
+    let mut node = BoxNode::element(isolate.clone(), children);
+    for _ in 0..2 {
+        node = BoxNode::element(isolate.clone(), vec![node]);
+    }
+    let laid = run(&BoxNode::element(block(), vec![node]), 2_000.0, 400.0);
+    let spaces = laid.pages[0]
+        .runs
+        .iter()
+        .filter(|run| run.text == " ")
+        .count();
+    assert!(spaces >= 49, "the spaces were not set: {spaces}");
+    assert_eq!(stacks_held(&laid), 51);
+}
+
+/// **A formatting context of its own opens no level for its runs**: an
+/// inline-block inside an isolating span is one neutral of the line outside
+/// (UAX #9 reads it as U+FFFC), and the text inside it is its own paragraph,
+/// so its runs carry none of the span's embeddings while the span's own text
+/// carries its one.
+#[test]
+fn a_formatting_context_inside_an_isolate_opens_no_level_for_its_runs() {
+    let mut isolate = base();
+    isolate.unicode_bidi = UnicodeBidi::Isolate;
+    isolate.direction = Direction::Rtl;
+    let mut atomic = base();
+    atomic.display = Display::InlineBlock;
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            isolate,
+            vec![text("a "), BoxNode::element(atomic, vec![text("b")])],
+        )],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let levels = |body: &str| {
+        laid.pages[0]
+            .runs
+            .iter()
+            .find(|run| run.text == body)
+            .map(|run| run.embeddings.len())
+    };
+    assert_eq!(levels("a "), Some(1));
+    assert_eq!(levels("b"), Some(0));
+}
+
+/// **An outside marker stands on its item's inline-start side**
+/// (`css-lists-3` §3.1): the right of a right-to-left item, half an em past
+/// its content box, where a left-to-right one's stands half an em before it.
+#[test]
+fn a_right_to_left_items_marker_stands_on_its_right() {
+    let mut item = block();
+    item.display = Display::ListItem;
+    item.list_style_type = ListStyleType::Decimal;
+    item.direction = Direction::Rtl;
+    let laid = run(
+        &BoxNode::element(block(), vec![BoxNode::element(item, vec![text("first")])]),
+        200.0,
+        400.0,
+    );
+    let marker = laid.pages[0]
+        .runs
+        .iter()
+        .find(|run| run.generated)
+        .expect("a marker");
+    assert_eq!(marker.x, 205.0);
+    assert_eq!(marker.paragraph_rtl, Some(true));
+}
+
+// ---- css-text-3 section 5.4, hyphens --------------------------------------------
+
+/// **A soft hyphen where no line breaks is invisible and measures nothing**,
+/// and stays in the run's text: the text is the book's, and conservation
+/// counts every character of it.
+#[test]
+fn a_soft_hyphen_inside_a_line_measures_nothing() {
+    let laid = run(&para("ab\u{AD}cd"), 200.0, 400.0);
+    let first = &laid.pages[0].runs[0];
+    assert_eq!(first.text, "ab\u{AD}cd");
+    assert_eq!(first.width, 40.0, "four characters of ten points");
+    assert!(!first.hyphenated);
+}
+
+/// **A line that breaks at a soft hyphen ends in a hyphen, and has to have
+/// room for it** (`css-text-3` §5.4).
+///
+/// `aaa bbbb&#173;cc` at ninety points: the soft hyphen is eight characters
+/// in, and a break there needs room for a ninth, the hyphen — which ninety
+/// points has, so the first line is `aaa bbbb` and the hyphen, ninety wide,
+/// flagged for the painter. At eighty-five it does not, and the line breaks at
+/// the space instead.
+#[test]
+fn a_line_broken_at_a_soft_hyphen_has_room_for_its_hyphen() {
+    let lines = |width: f64| {
+        let laid = run(&para("aaa bbbb\u{AD}cc"), width, 400.0);
+        laid.pages[0]
+            .runs
+            .iter()
+            .map(|run| (run.text.clone(), run.width, run.hyphenated))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        lines(90.0),
+        vec![
+            ("aaa bbbb\u{AD}".to_owned(), 90.0, true),
+            ("cc".to_owned(), 20.0, false),
+        ]
+    );
+    assert_eq!(
+        lines(85.0),
+        vec![
+            ("aaa".to_owned(), 30.0, false),
+            ("bbbb\u{AD}cc".to_owned(), 60.0, false),
+        ]
+    );
+}
+
+/// **Under `hyphens: none` a soft hyphen is no break** — though UAX #14
+/// makes it one — and is still invisible.
+#[test]
+fn hyphens_none_takes_the_break_away() {
+    let mut none = base();
+    none.hyphens = Hyphens::None;
+    let laid = run(
+        &BoxNode::element(block(), vec![BoxNode::text(none, "aaaa\u{AD}bbbb")]),
+        60.0,
+        400.0,
+    );
+    assert_eq!(baselines(&laid, 0).len(), 1, "the word was broken");
+    assert_eq!(laid.pages[0].runs[0].width, 80.0);
+    assert!(laid
+        .warnings
+        .iter()
+        .any(|(w, _)| *w == Warning::LineOverflowed));
+}
+
+/// **A break inside a word that lands after a soft hyphen shows no hyphen
+/// under `hyphens: none`** (`css-text-3` §5.4: under `none` a soft hyphen is
+/// never a hyphen; review of lane 8C).
+///
+/// `aaaa&#173;bbbbbbbb` at forty-five points under `overflow-wrap: anywhere`:
+/// `none` took the soft hyphen's break away, so the word has no opportunity
+/// and is broken inside, at the largest prefix that fits — `aaaa` and the
+/// soft hyphen, forty points, the soft hyphen measuring nothing. That break
+/// is not a break *at* the soft hyphen, and nothing is drawn after it; the
+/// line used to be flagged as hyphenated because a soft hyphen preceded its
+/// end, whatever its `hyphens` said. The rest is broken the same way.
+#[test]
+fn an_emergency_break_after_a_soft_hyphen_under_none_shows_no_hyphen() {
+    let mut none = base();
+    none.hyphens = Hyphens::None;
+    none.overflow_wrap = OverflowWrap::Anywhere;
+    let laid = run(
+        &BoxNode::element(block(), vec![BoxNode::text(none, "aaaa\u{AD}bbbbbbbb")]),
+        45.0,
+        400.0,
+    );
+    let lines: Vec<(String, f64, bool)> = laid.pages[0]
+        .runs
+        .iter()
+        .map(|run| (run.text.clone(), run.width, run.hyphenated))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            ("aaaa\u{AD}".to_owned(), 40.0, false),
+            ("bbbb".to_owned(), 40.0, false),
+            ("bbbb".to_owned(), 40.0, false),
+        ]
+    );
 }
 
 // ---- CSS 2.2 section 12.5, list markers -------------------------------------
@@ -1644,17 +2332,22 @@ fn a_float_with_no_width_is_shrunk_to_fit() {
 /// is plausible and wrong is the failure this whole plan is organised against.
 #[test]
 fn an_unimplemented_property_is_named_rather_than_approximated() {
-    // `column-span: all` rather than `display: inline-block`, which used to
-    // stand here and is now built. The claim is about the **shape** and not
-    // about either property: a value this build does not implement reaches the
-    // caller by name instead of being approximated into something plausible.
+    // `column-span: all` **below a child** of the container rather than
+    // `display: inline-block`, which used to stand here and is now built — and
+    // below a child because on a child it is built too, since October 2026.
+    // The claim is about the **shape** and not about either property: a value
+    // this build does not implement reaches the caller by name instead of
+    // being approximated into something plausible.
     let mut spanning = block();
     spanning.column_span = ColumnSpan::All;
     let tree = BoxNode::element(
         block(),
         vec![BoxNode::element(
             multicol(Some(2), None, Some(0.0)),
-            vec![BoxNode::element(spanning, vec![text("a")])],
+            vec![BoxNode::element(
+                block(),
+                vec![BoxNode::element(spanning, vec![text("a")])],
+            )],
         )],
     );
     let laid = run(&tree, 200.0, 400.0);
@@ -1677,7 +2370,7 @@ fn warnings_are_deduplicated_with_a_count() {
         block(),
         vec![BoxNode::element(
             multicol(Some(2), None, Some(0.0)),
-            children,
+            vec![BoxNode::element(block(), children)],
         )],
     );
     let laid = run(&tree, 200.0, 400.0);
@@ -3795,10 +4488,13 @@ fn a_column_rule_is_drawn_down_the_middle_of_the_gap() {
     );
 }
 
-/// §6: `column-span: all` is read on the **child** and named, because a
-/// spanning box makes three column sets where this build has one.
+/// §6: a `column-span: all` child **interrupts the columns**: the children
+/// before it are one balanced column set, it is a block across the whole
+/// container, and the children after it are a second set beneath it — so
+/// two paragraphs either side of a spanning heading sit side by side above
+/// and below it, and nothing is named.
 #[test]
-fn column_span_all_is_named_on_the_child_that_asked_for_it() {
+fn column_span_all_on_a_child_makes_a_column_set_either_side() {
     let mut spanning = block();
     spanning.column_span = ColumnSpan::All;
     let tree = BoxNode::element(
@@ -3807,18 +4503,30 @@ fn column_span_all_is_named_on_the_child_that_asked_for_it() {
             multicol(Some(2), None, Some(0.0)),
             vec![
                 para("a"),
-                BoxNode::element(spanning, vec![text("b")]),
+                para("b"),
+                BoxNode::element(spanning, vec![text("span")]),
                 para("c"),
+                para("d"),
             ],
         )],
     );
     let laid = run(&tree, 200.0, 400.0);
-    assert!(
-        laid.warnings.contains(&(Warning::ColumnSpanAsNone, 1)),
-        "{:?}",
-        laid.warnings
+    assert!(laid.warnings.is_empty(), "{:?}", laid.warnings);
+    assert_eq!(laid.text(), "abspancd", "in reading order");
+    let (a, b, span, c, d) = (
+        placed(&laid, "a"),
+        placed(&laid, "b"),
+        placed(&laid, "span"),
+        placed(&laid, "c"),
+        placed(&laid, "d"),
     );
-    assert_eq!(laid.text(), "abc", "and it is still on the page");
+    assert_eq!(a, (0.0, 0.0), "the first set's first column");
+    assert_eq!(b, (100.0, 0.0), "balanced into its second");
+    assert_eq!(span.0, 0.0, "the spanner starts at the container's left");
+    assert!(span.1 > a.1, "below the first set: {span:?}");
+    assert_eq!(c.0, 0.0, "the second set begins again in column one");
+    assert!(c.1 > span.1, "below the spanner: {c:?}");
+    assert_eq!(d, (100.0, c.1), "and balances beside it");
 }
 
 /// A container taller than a page becomes **several column sets**, stacked —
@@ -5310,28 +6018,75 @@ fn a_flex_container_puts_its_items_on_one_line() {
     assert_eq!(laid.text(), "aabb");
 }
 
-/// `display: inline-flex` is the same layout inside and a **warning** about the
-/// outside, `css-flexbox-1` §3.
-///
-/// Two assertions and not one: the layout is a flex layout, *and* the fact that
-/// this build makes the box block-level is said out loud. A build that laid it
-/// out as a flex container and said nothing would be a silent partial
-/// implementation of the kind this whole plan exists to prevent.
+/// `display: inline-flex` is a flex layout inside and an **atomic inline** on
+/// the outside, `css-flexbox-1` §3: in a paragraph, the text before it, its
+/// two items and the text after it are on one line, the items side by side,
+/// and nothing is warned about. As the root it is blockified (CSS 2.2 §9.7)
+/// and is the flex container it says it is.
 #[test]
-fn inline_flex_lays_out_as_flex_and_says_it_is_block_level() {
+fn inline_flex_is_a_flex_container_set_on_the_line() {
     let mut style = flex_container(FlexDirection::Row, FlexWrap::NoWrap);
     style.display = Display::InlineFlex;
-    let tree = BoxNode::element(
+    let flex = BoxNode::element(
+        style.clone(),
+        vec![
+            flex_item("aa", 0.0, 1.0, Size::Auto),
+            flex_item("bb", 0.0, 1.0, Size::Auto),
+        ],
+    );
+    let tree = BoxNode::element(block(), vec![text("x "), flex, text(" y")]);
+    let laid = run(&tree, 200.0, 400.0);
+    let x = lefts(&laid);
+    let y = baselines(&laid, 0);
+    assert_eq!(laid.text().replace(' ', ""), "xaabby");
+    assert_eq!(x.len(), 4, "{x:?}");
+    assert!(
+        x.windows(2).all(|pair| pair[1] > pair[0]),
+        "left to right on one line: {x:?}"
+    );
+    assert!(
+        y.iter().all(|baseline| close(*baseline, y[0])),
+        "one baseline: {y:?}"
+    );
+    assert!(laid.warnings.is_empty(), "{:?}", laid.warnings);
+    let root = BoxNode::element(
         style,
         vec![
             flex_item("aa", 0.0, 1.0, Size::Auto),
             flex_item("bb", 0.0, 1.0, Size::Auto),
         ],
     );
-    let laid = run(&tree, 200.0, 400.0);
+    let laid = run(&root, 200.0, 400.0);
     let x = lefts(&laid);
-    assert!(x[1] > x[0], "it is still a flex layout: {x:?}");
-    assert_eq!(laid.warnings, vec![(Warning::InlineFlexAsBlock, 1)]);
+    assert!(x[1] > x[0], "a flex layout: {x:?}");
+    assert!(laid.warnings.is_empty(), "{:?}", laid.warnings);
+    // §8.5: a flex container's baseline is its **first** baseline set, where
+    // an inline-block's is its last line's — so the text beside a column of
+    // two items sits on the first item's baseline.
+    let mut column = flex_container(FlexDirection::Column, FlexWrap::NoWrap);
+    column.display = Display::InlineFlex;
+    let stacked = BoxNode::element(
+        column,
+        vec![
+            flex_item("aa", 0.0, 1.0, Size::Auto),
+            flex_item("bb", 0.0, 1.0, Size::Auto),
+        ],
+    );
+    let laid = run(
+        &BoxNode::element(block(), vec![text("x "), stacked]),
+        200.0,
+        400.0,
+    );
+    let at = |word: &str| {
+        laid.pages[0]
+            .runs
+            .iter()
+            .find(|run| run.text.trim() == word)
+            .map(|run| run.y)
+            .unwrap_or_else(|| panic!("no run {word}"))
+    };
+    assert!(close(at("x"), at("aa")), "{} {}", at("x"), at("aa"));
+    assert!(at("bb") > at("aa"), "the second item is below the first");
 }
 
 /// `flex-direction: column` stacks the items and `row` sets them side by side,
@@ -6648,4 +7403,899 @@ fn step_two_freezes_before_step_three_measures_the_free_space() {
         "a quarter of the ninety-point deficit, not of the fifty-point one: \
          {shrunk:?}"
     );
+}
+
+/// **`P*` and `S*` together, from the vendored categories** — CommonMark
+/// 0.31's punctuation, which the facade's Markdown reader asks of the
+/// characters beside an emphasis delimiter. One of each of the twelve
+/// categories, a letter, a digit, a mark and a space that are none of them,
+/// and `Pi`/`Pf` agreeing with the line breaker's own two sets.
+#[test]
+fn punctuation_or_symbol_is_every_p_and_s_category() {
+    use crate::unicode::{is_final_punctuation, is_initial_punctuation, is_punctuation_or_symbol};
+    for (c, category) in [
+        ('_', "Pc"),
+        ('\u{2014}', "Pd"),
+        ('(', "Ps"),
+        (')', "Pe"),
+        ('\u{AB}', "Pi"),
+        ('\u{BB}', "Pf"),
+        ('\u{066A}', "Po"),
+        ('+', "Sm"),
+        ('\u{A3}', "Sc"),
+        ('^', "Sk"),
+        ('\u{A9}', "So"),
+        ('\u{20AC}', "Sc"),
+    ] {
+        assert!(is_punctuation_or_symbol(c), "{c:?} is {category}");
+    }
+    for c in ['a', '\u{0416}', '7', '\u{0301}', ' ', '\u{A0}'] {
+        assert!(!is_punctuation_or_symbol(c), "{c:?} is neither");
+    }
+    for c in ['\u{AB}', '\u{BB}', '\u{201C}', '\u{201D}'] {
+        assert!(is_initial_punctuation(c) || is_final_punctuation(c));
+        assert!(is_punctuation_or_symbol(c));
+    }
+}
+
+// ---- `css-overflow-3` ---------------------------------------------------------
+
+/// The text a page **paints**: what [`page_text`] reads, less the runs laid
+/// out and not painted.
+fn painted_text(laid: &Layout, page: usize) -> String {
+    laid.pages[page]
+        .runs
+        .iter()
+        .filter(|run| run.painted && !run.generated)
+        .map(|run| run.text.as_str())
+        .collect()
+}
+
+/// A block box with `overflow` set on both axes.
+fn overflowing(value: tinker_pdf_css::property::Overflow) -> ComputedStyle {
+    let mut style = block();
+    style.overflow_x = value;
+    style.overflow_y = value;
+    style
+}
+
+/// **A scroll container does not collapse its margin with its first child's**
+/// (CSS 2.2 §8.3.1, *"margins of elements that establish new block formatting
+/// contexts ... do not collapse with their in-flow children"*), and
+/// `overflow: clip`, which §3.1 says establishes no formatting context, still
+/// does.
+#[test]
+fn a_scroll_container_keeps_its_first_childs_margin_inside_it() {
+    use tinker_pdf_css::property::Overflow;
+    let tree = |value: Overflow| {
+        let mut parent = overflowing(value);
+        parent.margin.top = px(20.0);
+        let mut child = block();
+        child.margin.top = px(30.0);
+        BoxNode::element(
+            block(),
+            vec![BoxNode::element(
+                parent,
+                vec![BoxNode::element(child, vec![text("a")])],
+            )],
+        )
+    };
+    // 20 of the container's margin, then 30 of the child's inside it.
+    assert_eq!(
+        baselines(&run(&tree(Overflow::Hidden), 200.0, 400.0), 0),
+        vec![59.0]
+    );
+    assert_eq!(
+        baselines(&run(&tree(Overflow::Auto), 200.0, 400.0), 0),
+        vec![59.0]
+    );
+    // max(20, 30), as `margins_collapse_between_a_parent_and_its_first_child`.
+    assert_eq!(
+        baselines(&run(&tree(Overflow::Clip), 200.0, 400.0), 0),
+        vec![39.0]
+    );
+    assert_eq!(
+        baselines(&run(&tree(Overflow::Visible), 200.0, 400.0), 0),
+        vec![39.0]
+    );
+}
+
+/// **A scroll container grows to contain its floats** (§10.6.7), which is what
+/// a book's `overflow: hidden` round a floated picture is for: the paragraph
+/// after it starts below the picture and not beside it.
+#[test]
+fn a_scroll_container_grows_to_contain_its_floats() {
+    use tinker_pdf_css::property::Overflow;
+    let tree = |value: Overflow| {
+        BoxNode::element(
+            block(),
+            vec![
+                BoxNode::element(
+                    overflowing(value),
+                    vec![float_box(Float::Left, 40.0, "aaaa bbbb cccc"), text("x")],
+                ),
+                para("after"),
+            ],
+        )
+    };
+    let laid = run(&tree(Overflow::Hidden), 100.0, 400.0);
+    // Three lines of float, thirty-six points, and the next block below them.
+    assert_eq!(placed(&laid, "after"), (0.0, 36.0));
+    conserved(&tree(Overflow::Hidden), &laid);
+    // The control: an ordinary block is one line tall and the next one flows
+    // round the float it did not contain.
+    assert_eq!(
+        placed(&run(&tree(Overflow::Visible), 100.0, 400.0), "after"),
+        (40.0, 12.0)
+    );
+
+    // **Its own floats and nobody else's**: a right float beside a narrow
+    // scroll container — not overlapping it, so not cleared — is in the
+    // formatting context outside it, and the container is one line tall.
+    let mut narrow = overflowing(Overflow::Hidden);
+    narrow.width = Size::Length(LengthPercentage::Px(50.0));
+    let beside = BoxNode::element(
+        block(),
+        vec![
+            float_box(Float::Right, 40.0, "aaaa bbbb cccc"),
+            BoxNode::element(narrow, vec![text("x")]),
+            para("after"),
+        ],
+    );
+    assert_eq!(placed(&run(&beside, 100.0, 400.0), "after"), (0.0, 12.0));
+}
+
+/// **A scroll container beside a float is cleared below it** — §9.5's *"should
+/// clear the said element by placing it below any preceding floats"* — where an
+/// ordinary block's lines would be shortened beside it.
+#[test]
+fn a_scroll_container_beside_a_float_is_cleared_below_it() {
+    use tinker_pdf_css::property::Overflow;
+    let tree = |value: Overflow| {
+        BoxNode::element(
+            block(),
+            vec![
+                float_box(Float::Left, 40.0, "aaaa bbbb cccc"),
+                BoxNode::element(overflowing(value), vec![text("x")]),
+            ],
+        )
+    };
+    assert_eq!(
+        placed(&run(&tree(Overflow::Hidden), 100.0, 400.0), "x"),
+        (0.0, 36.0)
+    );
+    assert_eq!(
+        placed(&run(&tree(Overflow::Visible), 100.0, 400.0), "x"),
+        (40.0, 0.0)
+    );
+}
+
+/// **A block-axis clip drops what is past the used height, and the next box
+/// follows the height** — `height` and `max-height` alike, which is what makes
+/// `max-height` implementable on a clipping box and lets
+/// `Warning::MaxHeightAsAuto` stay silent for it.
+#[test]
+fn a_block_axis_clip_drops_the_content_past_the_used_height() {
+    use tinker_pdf_css::property::Overflow;
+    for max in [false, true] {
+        let mut style = overflowing(Overflow::Hidden);
+        style.width = Size::Length(LengthPercentage::Px(40.0));
+        if max {
+            style.max_height = MaxSize::Length(LengthPercentage::Px(24.0));
+        } else {
+            style.height = Size::Length(LengthPercentage::Px(24.0));
+        }
+        let tree = BoxNode::element(
+            block(),
+            vec![
+                BoxNode::element(style, vec![text("aaaa bbbb cccc dddd")]).with_anchor(7),
+                para("after"),
+            ],
+        );
+        let laid = run(&tree, 100.0, 400.0);
+        assert_eq!(painted_text(&laid, 0), "aaaabbbbafter", "max-height: {max}");
+        // Hidden, not lost: the two lines past the clip are laid out and not
+        // painted, so the book's text is all still the layout's.
+        conserved(&tree, &laid);
+        assert_eq!(placed(&laid, "after"), (0.0, 24.0), "max-height: {max}");
+        assert!(laid.warnings.is_empty(), "{:?}", laid.warnings);
+        let clips = &laid.pages[0].clips;
+        assert_eq!(clips.len(), 1, "{clips:?}");
+        assert_eq!(
+            (clips[0].x, clips[0].y, clips[0].width, clips[0].height),
+            (0.0, 0.0, 40.0, 24.0)
+        );
+    }
+
+    // **The clip is the padding box, so a bottom padding shows what reaches
+    // into it**: the third line begins at the content edge, inside the six
+    // points of padding, and is kept and cut there; the fourth begins below
+    // the padding edge and is not. The box is still thirty points tall.
+    let mut padded = overflowing(Overflow::Hidden);
+    padded.width = Size::Length(LengthPercentage::Px(40.0));
+    padded.height = Size::Length(LengthPercentage::Px(24.0));
+    padded.padding.bottom = LengthPercentage::Px(6.0);
+    let tree = BoxNode::element(
+        block(),
+        vec![
+            BoxNode::element(padded, vec![text("aaaa bbbb cccc dddd")]).with_anchor(7),
+            para("after"),
+        ],
+    );
+    let laid = run(&tree, 100.0, 400.0);
+    assert_eq!(painted_text(&laid, 0), "aaaabbbbccccafter");
+    conserved(&tree, &laid);
+    assert_eq!(placed(&laid, "after"), (0.0, 30.0));
+    let clips = &laid.pages[0].clips;
+    assert_eq!((clips[0].y, clips[0].height), (0.0, 30.0), "{clips:?}");
+}
+
+/// **A clip inside a clip hides its text in document order.** The inner box
+/// keeps three of five lines and hides the last two; the outer box, one line
+/// tall, then hides the two the inner box kept below it. Both hidden tails
+/// end up at the outer box's padding edge and all five lines are one text
+/// node, so they share one reading-order stamp and nothing but the order the
+/// tails are drawn in says which reads first: the outer box's tail, which
+/// was cut from earlier in the text, comes before the inner one's.
+///
+/// The `layout` fuzz target's conservation assertion found it (the inner
+/// tail read first, `aaaa dddd eeee bbbb cccc`), in a tree of nested
+/// `overflow: hidden` boxes over a paragraph of one-character lines.
+#[test]
+fn a_clip_inside_a_clip_hides_its_text_in_document_order() {
+    use tinker_pdf_css::property::Overflow;
+    let clipped = |height: f64| {
+        let mut style = overflowing(Overflow::Hidden);
+        style.width = Size::Length(LengthPercentage::Px(40.0));
+        style.height = Size::Length(LengthPercentage::Px(height));
+        style
+    };
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            clipped(12.0),
+            vec![BoxNode::element(
+                clipped(36.0),
+                vec![text("aaaa bbbb cccc dddd eeee")],
+            )],
+        )],
+    );
+    let laid = run(&tree, 100.0, 400.0);
+    assert_eq!(painted_text(&laid, 0), "aaaa");
+    conserved(&tree, &laid);
+}
+
+/// The index of the page a run reading `body` is on.
+fn page_of(laid: &Layout, body: &str) -> usize {
+    laid.pages
+        .iter()
+        .position(|page| page.runs.iter().any(|run| run.text == body))
+        .unwrap_or_else(|| panic!("no run reads {body:?}"))
+}
+
+/// **A hidden tail inside a float is broken over pages with the float**, and
+/// so is one inside an absolutely positioned box.
+///
+/// The box keeps three of five lines and hides the last two. The float is
+/// thirty-six points tall on twenty-point pages, so it is broken after each
+/// line and each continuation starts at the top of the next page. The hidden
+/// tail is the same text node's last two lines under the same reading-order
+/// stamp, so it reads after `cccc` only if it is drawn on `cccc`'s page or a
+/// later one. Drawn as a record of its own at its column height, it was drawn
+/// with `aaaa` and `bbbb`, a line a page, and read `aaaa dddd bbbb eeee cccc`
+/// (at thirty points, `aaaa bbbb dddd cccc eeee`). And on that page and not
+/// a later one: the float's next paragraph is a page further down, and a tail
+/// folded at the end of the float would be drawn with it.
+///
+/// The `layout` fuzz target's conservation assertion found it, in floats
+/// around `overflow: hidden` boxes of a stated height on twenty- and
+/// sixty-point pages.
+#[test]
+fn a_hidden_tail_is_broken_over_pages_with_the_float_it_is_in() {
+    use tinker_pdf_css::property::Overflow;
+    let mut clipped = overflowing(Overflow::Hidden);
+    clipped.height = Size::Length(LengthPercentage::Px(36.0));
+    let tree = |outer: ComputedStyle| {
+        BoxNode::element(
+            block(),
+            vec![BoxNode::element(
+                outer,
+                vec![
+                    BoxNode::element(clipped.clone(), vec![text("aaaa bbbb cccc dddd eeee")]),
+                    para("ffff"),
+                ],
+            )],
+        )
+    };
+    let mut absolute = placed_at(Position::Absolute, None, None, None);
+    absolute.width = Size::Length(LengthPercentage::Px(40.0));
+    for outer in [floated(Float::Right, 40.0), absolute] {
+        let tree = tree(outer);
+        for height in [20.0, 30.0, 400.0] {
+            let laid = run(&tree, 100.0, height);
+            conserved(&tree, &laid);
+            assert_eq!(page_of(&laid, "dddd"), page_of(&laid, "cccc"), "{height}");
+            assert_eq!(page_of(&laid, "eeee"), page_of(&laid, "cccc"), "{height}");
+        }
+        // A line a page, and no page past the box's last line: a hidden
+        // record of no height is not what makes a page.
+        let laid = run(&tree, 100.0, 20.0);
+        assert_eq!(laid.pages.len(), 4);
+        for (at, line) in ["aaaa", "bbbb", "cccc", "ffff"].into_iter().enumerate() {
+            assert_eq!(painted_text(&laid, at), line);
+        }
+    }
+}
+
+/// **A clip measures its height from where its content starts**, which is
+/// below the top margin that collapses into it.
+///
+/// `overflow: clip` opens no formatting context (`css-overflow-3` §3.1), so
+/// the four points of top margin collapse with the paragraph's above it and
+/// are committed by the box's first line, outside its border box. Counting
+/// them as content put the cut four points above the box's own top edge: a
+/// box of `height: 6px` drew its first line under a clip two points tall, and
+/// with `height: 0` the tail was hidden at sixteen points above a first line
+/// kept at twenty, the column's `y` went back up, and a two-point page read
+/// `xybbbbccccaaaa`.
+///
+/// The visible half is asserted at a page that holds everything: the clip is
+/// the padding box at the box's border-box top, six points tall, and the kept
+/// line begins inside it.
+#[test]
+fn a_clip_measures_its_height_from_where_its_content_starts() {
+    use tinker_pdf_css::property::Overflow;
+    let tree = |height: f64| {
+        let mut clipped = overflowing(Overflow::Clip);
+        clipped.width = Size::Length(LengthPercentage::Px(40.0));
+        clipped.height = Size::Length(LengthPercentage::Px(height));
+        clipped.margin.top = px(4.0);
+        BoxNode::element(
+            block(),
+            vec![
+                para("x y"),
+                BoxNode::element(clipped, vec![text("aaaa bbbb cccc")]).with_anchor(7),
+                para("after"),
+            ],
+        )
+    };
+    for height in [0.0, 6.0] {
+        for page in [2.0, 13.0, 20.0, 400.0] {
+            let tree = tree(height);
+            conserved(&tree, &run(&tree, 100.0, page));
+        }
+    }
+    let laid = run(&tree(6.0), 100.0, 400.0);
+    assert_eq!(painted_text(&laid, 0), "x yaaaaafter");
+    // The paragraph's line, the collapsed margin, then the box.
+    assert_eq!(placed(&laid, "aaaa"), (0.0, 16.0));
+    let clips = &laid.pages[0].clips;
+    assert_eq!(clips.len(), 1, "{clips:?}");
+    assert_eq!((clips[0].y, clips[0].height), (16.0, 6.0));
+    // The next box follows the used height and not the content.
+    assert_eq!(placed(&laid, "after"), (0.0, 22.0));
+}
+
+/// **Every box's `height` is measured below the margin that collapses into
+/// it**, and not only a clipping one's: CSS 2.2 §10.6.3's height is the
+/// content box's, and §8.3.1 puts the collapsed margin outside the border box.
+/// A box of `height: 20px` after a paragraph, with a four-point top margin and
+/// one twelve-point line, ends twenty points below where it begins, so the
+/// paragraph after it starts at 12 + 4 + 20. Counting the margin as content
+/// made the box sixteen points tall and put that paragraph at thirty-two.
+#[test]
+fn a_stated_height_is_measured_below_the_margin_that_collapses_into_the_box() {
+    let mut sized = block();
+    sized.height = Size::Length(LengthPercentage::Px(20.0));
+    sized.margin.top = px(4.0);
+    let tree = |style: ComputedStyle| {
+        BoxNode::element(
+            block(),
+            vec![
+                para("x y"),
+                BoxNode::element(style, vec![text("aaaa")]),
+                para("after"),
+            ],
+        )
+    };
+    let laid = run(&tree(sized.clone()), 100.0, 400.0);
+    assert_eq!(placed(&laid, "aaaa"), (0.0, 16.0));
+    assert_eq!(placed(&laid, "after"), (0.0, 36.0));
+    conserved(&tree(sized.clone()), &laid);
+
+    // The other place a box's content starts: below its own top border and
+    // padding, which open its border box and keep the margin out. They are
+    // not content either, so the box is seven points of them and twenty of
+    // content, and the paragraph after it starts at 16 + 7 + 20.
+    let mut bordered = sized;
+    bordered.padding.top = LengthPercentage::Px(5.0);
+    bordered.border_width.top = 2.0;
+    bordered.border_style.top = BorderStyle::Solid;
+    let laid = run(&tree(bordered), 100.0, 400.0);
+    assert_eq!(placed(&laid, "aaaa"), (0.0, 23.0));
+    assert_eq!(placed(&laid, "after"), (0.0, 43.0));
+}
+
+/// **A hidden tail in the column is drawn on the page of the line it
+/// follows**, and not on the page its height falls on — the two disagree
+/// once a negative margin takes the column's `y` back up.
+///
+/// The outer box is a scroll container, so the inner box's `-20px` margin is
+/// inside it and takes the inner box from fourteen points up to minus six.
+/// The page breaks in the outer box's ten-point margin, above its four-point
+/// top edge, so the next page's column begins at ten. The inner box, six
+/// points tall, keeps `aaaa` at minus six, on that next page, and hides
+/// `bbbb` at its padding edge, zero, which is above ten: placed by height,
+/// the tail was drawn on the first page and read `bbbbaaaa`.
+///
+/// The `layout` fuzz target's conservation assertion found it, with a
+/// `-14.25px` first-child margin inside an `overflow: hidden` box on a
+/// twenty-point page.
+#[test]
+fn a_hidden_tail_is_drawn_on_the_page_of_the_line_it_follows() {
+    use tinker_pdf_css::property::Overflow;
+    let mut outer = overflowing(Overflow::Hidden);
+    outer.margin.top = px(10.0);
+    outer.padding.top = LengthPercentage::Px(4.0);
+    let mut inner = overflowing(Overflow::Hidden);
+    inner.margin.top = px(-20.0);
+    inner.width = Size::Length(LengthPercentage::Px(40.0));
+    inner.height = Size::Length(LengthPercentage::Px(6.0));
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            outer,
+            vec![BoxNode::element(inner, vec![text("aaaa bbbb")])],
+        )],
+    );
+    let laid = run(&tree, 100.0, 12.0);
+    conserved(&tree, &laid);
+    assert_eq!(page_of(&laid, "aaaa"), 1);
+    assert_eq!(page_of(&laid, "bbbb"), 1);
+    for page in [11.0, 14.0, 20.0, 400.0] {
+        conserved(&tree, &run(&tree, 100.0, page));
+    }
+
+    // **A tail the outer cut took away follows the outer box's line.** The
+    // inner box hides `dddd eeee` after `cccc`; the outer box, one line tall,
+    // then takes `bbbb cccc` out of the column too, and `cccc` with them. Both
+    // tails follow `aaaa` now and are drawn on its page, and not with the
+    // paragraphs that came after, a line a page.
+    let clipped = |height: f64| {
+        let mut style = overflowing(Overflow::Hidden);
+        style.width = Size::Length(LengthPercentage::Px(40.0));
+        style.height = Size::Length(LengthPercentage::Px(height));
+        style
+    };
+    let tree = BoxNode::element(
+        block(),
+        vec![
+            BoxNode::element(
+                clipped(12.0),
+                vec![BoxNode::element(
+                    clipped(36.0),
+                    vec![text("aaaa bbbb cccc dddd eeee")],
+                )],
+            ),
+            para("after"),
+            para("again"),
+        ],
+    );
+    let laid = run(&tree, 100.0, 12.0);
+    conserved(&tree, &laid);
+    for line in ["aaaa", "bbbb", "cccc", "dddd", "eeee"] {
+        assert_eq!(page_of(&laid, line), 0, "{line}");
+    }
+    assert_eq!(page_of(&laid, "after"), 1);
+}
+
+/// **A hidden tail in a column set is drawn in the column of the line it
+/// follows**, and not in the column its height falls in.
+///
+/// A column set lays its content out as one sub-flow and cuts that into
+/// columns, and each of the sub-flow's records beside the column goes into
+/// one of them, after the column's own items. A float goes where its top
+/// falls. A tail went there too, and its height is the clip box's padding
+/// edge, which a negative margin can put above the top of the column that
+/// holds the box's kept line. Here the clip box's `-14.25px` margin takes it
+/// above the paragraph before it, `height: 0` hides all but its first line,
+/// and on a page of ten points or more the tail fell in an earlier column
+/// than `aaaa` and was drawn before it: `mnbbbbccccaaaaop`. It now goes in
+/// the column whose items hold the item it follows (`FloatRecord::follows`),
+/// and a float still goes where its top falls, which the second half holds:
+/// no test had put a float in a multi-column container before.
+///
+/// The review of 9865459 found it: `Builder::content_start` put the clip's
+/// cut at the box's first line, which is where the tail then fell.
+#[test]
+fn a_hidden_tail_in_a_column_set_is_drawn_in_the_column_of_its_line() {
+    let mut clipped = narrow_clip();
+    clipped.height = Size::Length(LengthPercentage::Px(0.0));
+    clipped.margin.top = px(-14.25);
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, Some(10.0)),
+            vec![
+                para("m n"),
+                BoxNode::element(clipped, vec![text("aaaa bbbb cccc")]),
+                para("o p"),
+            ],
+        )],
+    );
+    let laid = run(&tree, 100.0, 400.0);
+    conserved(&tree, &laid);
+    // The hidden lines are in the kept line's column, and nothing is painted
+    // that the clip hides.
+    let (column, _) = placed(&laid, "aaaa");
+    for hidden in ["bbbb", "cccc"] {
+        assert_eq!(placed(&laid, hidden).0, column, "{hidden}");
+    }
+    assert_eq!(painted_text(&laid, 0), "m naaaao p");
+    for page in [2.0, 10.0, 13.0, 20.0, 60.0] {
+        let laid = run(&tree, 100.0, page);
+        assert_eq!(
+            conservable(&laid.text()),
+            conservable(&tree.source_text()),
+            "{page}"
+        );
+    }
+
+    // **A float still goes in the column its top falls in.** Four lines
+    // balance two and two, and the float met before `c` is at the second
+    // column's top, so it is drawn there, forty-five points and a ten-point
+    // gap from the left, and not over `a` in the first.
+    let tree = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            multicol(Some(2), None, Some(10.0)),
+            vec![
+                para("a"),
+                para("b"),
+                float_box(Float::Left, 20.0, "f"),
+                para("c"),
+                para("d"),
+            ],
+        )],
+    );
+    let laid = run(&tree, 100.0, 400.0);
+    conserved(&tree, &laid);
+    assert_eq!(placed(&laid, "f"), (55.0, 0.0));
+}
+
+/// **A band cut over pages draws what a negative margin pulled above its
+/// top**: a column set's column, a table row's cell and a flex line's item.
+///
+/// A band taller than the page is cut into slices, and each page draws the
+/// items whose tops its slice holds ([`crate::fragment`]). The slices began
+/// at the band's own top, band-local zero, so an item a negative margin had
+/// pulled above that was in none of them. It was drawn on no page, and it was
+/// missing from the text. A band drawn whole was never cut and drew it. The
+/// first slice now begins where a whole band's does, at minus infinity.
+///
+/// The column set is the review's. The clip box's margin and its child's
+/// collapse to `-9.25px`, and on a one- or two-point page each column is an
+/// item or two. The collapsed margin begins one, and the clip box's six-point
+/// line `aaaa` is above that margin's top, in the same column. That kept,
+/// painted line was lost. The table cell holds the other case the review
+/// named: an `overflow: hidden; height: 0` box under a `-14.25px` margin lost
+/// all its text, kept line and hidden tail both. The flex item's paragraph is
+/// pulled up out of a box that clips nothing, and its first lines were lost
+/// on every page short enough to cut the line.
+///
+/// Every case is checked at every page height from one point to forty, and
+/// conservation is the ordered comparison, so the hidden tails in the cell
+/// and in the flex item are read after the lines they follow wherever the
+/// band is cut.
+#[test]
+fn a_band_cut_over_pages_draws_what_a_negative_margin_pulled_above_it() {
+    use tinker_pdf_css::property::Overflow;
+    let column_set = |margin: f64, child: f64| {
+        let mut clipped = narrow_clip();
+        clipped.height = Size::Length(LengthPercentage::Px(6.0));
+        clipped.margin.top = px(margin);
+        let mut first = block();
+        first.margin.top = px(child);
+        BoxNode::element(
+            block(),
+            vec![BoxNode::element(
+                multicol(Some(2), None, Some(10.0)),
+                vec![
+                    para("m n"),
+                    BoxNode::element(
+                        clipped,
+                        vec![BoxNode::element(first, vec![text("aaaa bbbb cccc")])],
+                    ),
+                    para("o p"),
+                ],
+            )],
+        )
+    };
+    for (margin, child, page) in [(-14.25, 5.0, 1.0), (-14.25, 5.0, 2.0), (4.0, -14.25, 1.0)] {
+        let tree = column_set(margin, child);
+        let laid = run(&tree, 100.0, page);
+        let painted: String = (0..laid.pages.len())
+            .map(|at| painted_text(&laid, at))
+            .collect();
+        assert_eq!(painted, "m naaaao p", "{margin} {child} {page}");
+        conserved(&tree, &laid);
+    }
+
+    let mut hidden = overflowing(Overflow::Hidden);
+    hidden.width = Size::Length(LengthPercentage::Px(40.0));
+    hidden.height = Size::Length(LengthPercentage::Px(0.0));
+    hidden.margin.top = px(-14.25);
+    let cell = BoxNode::element(
+        block(),
+        vec![
+            para("x y"),
+            table_of(vec![row_of(vec![
+                BoxNode::element(
+                    styled(Display::TableCell),
+                    vec![BoxNode::element(hidden, vec![text("aaaa bbbb cccc")])],
+                ),
+                cell_of("qq"),
+            ])]),
+            para("after"),
+        ],
+    );
+
+    let mut sized = overflowing(Overflow::Hidden);
+    sized.width = Size::Length(LengthPercentage::Px(40.0));
+    sized.height = Size::Length(LengthPercentage::Px(13.0));
+    let mut pulled = block();
+    pulled.margin.top = px(-14.25);
+    let flex = BoxNode::element(
+        block(),
+        vec![
+            para("x y"),
+            BoxNode::element(
+                flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+                vec![
+                    BoxNode::element(
+                        block(),
+                        vec![BoxNode::element(
+                            sized,
+                            vec![
+                                BoxNode::element(pulled, vec![text("aaaa bbbb cccc")]),
+                                para("dddd"),
+                            ],
+                        )],
+                    ),
+                    flex_item("qq", 0.0, 1.0, Size::Auto),
+                ],
+            ),
+            para("after"),
+        ],
+    );
+
+    for (name, tree) in [("cell", &cell), ("flex", &flex)] {
+        for page in (1..=40).map(f64::from) {
+            let laid = run(tree, 100.0, page);
+            assert_eq!(
+                conservable(&laid.text()),
+                conservable(&tree.source_text()),
+                "{name} {page}"
+            );
+        }
+    }
+}
+
+/// **A stretched flex item keeps its place in reading order.** §9.4 step 11
+/// lays a stretched item out a second time, and that second layout numbered
+/// its text after every item laid out before it, so the item after it was read
+/// first: `a` beside a taller `bbbb cccc dddd` read `bbbb cccc dddd a`. It
+/// became reachable through a clip once 9865459 measured a clip box from where
+/// its content starts, which makes the first item the shorter one (the review
+/// of the clip-tail lane's second round); the re-layout now reuses the stamps
+/// its first layout began at.
+#[test]
+fn a_stretched_flex_item_keeps_its_place_in_reading_order() {
+    use tinker_pdf_css::property::Overflow;
+    // The plain shape: a short item beside a tall one is the one stretched.
+    let plain = BoxNode::element(
+        block(),
+        vec![BoxNode::element(
+            flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+            vec![
+                flex_item("a", 0.0, 1.0, Size::Auto),
+                flex_item("bbbb cccc dddd", 0.0, 1.0, basis(40.0)),
+            ],
+        )],
+    );
+    // The review's shape: the clip box's height is measured below its own
+    // negative margin, so the first item is shorter than `qq`'s line.
+    let mut clip = overflowing(Overflow::Clip);
+    clip.width = Size::Length(LengthPercentage::Px(40.0));
+    clip.height = Size::Length(LengthPercentage::Px(13.0));
+    clip.margin.top = px(-14.25);
+    let clipped = BoxNode::element(
+        block(),
+        vec![
+            para("x y"),
+            BoxNode::element(
+                flex_container(FlexDirection::Row, FlexWrap::NoWrap),
+                vec![
+                    BoxNode::element(
+                        block(),
+                        vec![BoxNode::element(
+                            clip,
+                            vec![
+                                BoxNode::element(block(), vec![text("aaaa bbbb cccc dddd eeee")]),
+                                para("ffff gggg"),
+                            ],
+                        )],
+                    ),
+                    flex_item("qq", 0.0, 1.0, Size::Auto),
+                ],
+            ),
+            para("zzzz yyyy"),
+        ],
+    );
+    for (name, tree) in [("plain", &plain), ("clipped", &clipped)] {
+        let laid = run(tree, 100.0, 400.0);
+        assert_eq!(
+            conservable(&laid.text()),
+            conservable(&tree.source_text()),
+            "{name}"
+        );
+    }
+}
+
+/// **A band is drawn once when the next band is cut on the same page.** A page
+/// that began partway through one table row, with the rest of that row fitting,
+/// cut the next row — taller than a page — on that page too; the page was told
+/// about the second row's slice only, so the first row was drawn whole again
+/// and its part on the page before appeared twice (`a0a0a1a1a2a2…`). The later
+/// band now waits for a page of its own when the page began inside a band.
+#[test]
+fn a_band_is_drawn_once_when_the_next_band_is_cut_on_the_same_page() {
+    let rows = |prefix: &str| {
+        row_of(vec![BoxNode::element(
+            styled(Display::TableCell),
+            (0..5).map(|n| para(&format!("{prefix}{n}"))).collect(),
+        )])
+    };
+    let tree = BoxNode::element(block(), vec![table_of(vec![rows("a"), rows("b")])]);
+    for page in [50.0, 55.0] {
+        let laid = run(&tree, 100.0, page);
+        assert_eq!(
+            conservable(&laid.text()),
+            conservable(&tree.source_text()),
+            "page {page}"
+        );
+        let painted: String = (0..laid.pages.len())
+            .map(|at| painted_text(&laid, at))
+            .collect();
+        assert_eq!(
+            painted.split_whitespace().collect::<String>(),
+            "a0a1a2a3a4b0b1b2b3b4",
+            "page {page}: every row's text is drawn once"
+        );
+    }
+}
+
+/// **A clip is written only where the content reaches past the padding box**,
+/// and an axis the box does not clip is unbounded.
+#[test]
+fn a_clip_is_written_only_where_the_content_overflows() {
+    use tinker_pdf_css::property::Overflow;
+    let tree = |style: ComputedStyle, body: &str| {
+        // Anchored: a clip is reported against the element whose descendants it
+        // cuts, and a box nobody anchored has none a caller could find.
+        BoxNode::element(
+            block(),
+            vec![BoxNode::element(style, vec![text(body)]).with_anchor(7)],
+        )
+    };
+    let mut narrow = overflowing(Overflow::Hidden);
+    narrow.width = Size::Length(LengthPercentage::Px(40.0));
+    narrow.padding.left = LengthPercentage::Px(5.0);
+    narrow.border_width.left = 2.0;
+    narrow.border_style.left = BorderStyle::Solid;
+    // Four characters fit the forty points; eight do not, and an unbreakable
+    // word under `overflow-wrap: normal` overflows rather than breaking.
+    assert!(run(&tree(narrow.clone(), "aaaa"), 200.0, 400.0).pages[0]
+        .clips
+        .is_empty());
+    let laid = run(&tree(narrow, "aaaaaaaa"), 200.0, 400.0);
+    let clips = &laid.pages[0].clips;
+    assert_eq!(clips.len(), 1, "{clips:?}");
+    // The padding box: the border box less the two-point border on the left.
+    assert_eq!((clips[0].x, clips[0].width), (2.0, 45.0));
+
+    let mut sideways = narrow_clip();
+    sideways.overflow_y = Overflow::Visible;
+    let laid = run(&tree(sideways, "aaaaaaaa"), 200.0, 400.0);
+    let clips = &laid.pages[0].clips;
+    assert_eq!(clips.len(), 1, "{clips:?}");
+    assert_eq!((clips[0].x, clips[0].width), (0.0, 40.0));
+    assert_eq!(
+        (clips[0].y, clips[0].height),
+        (f64::NEG_INFINITY, f64::INFINITY)
+    );
+}
+
+/// A forty-point box that clips both axes and establishes no formatting
+/// context.
+fn narrow_clip() -> ComputedStyle {
+    let mut style = overflowing(tinker_pdf_css::property::Overflow::Clip);
+    style.width = Size::Length(LengthPercentage::Px(40.0));
+    style
+}
+
+/// **A flex item that is a scroll container has no content-based minimum**,
+/// `css-flexbox-1` §4.5: *"for scroll containers the automatic minimum size is
+/// zero"*, so it shrinks below its longest word and clips it.
+#[test]
+fn a_scroll_container_flex_item_shrinks_below_its_content() {
+    use tinker_pdf_css::property::Overflow;
+    let width_of = |value: Overflow| {
+        let mut container = flex_container(FlexDirection::Row, FlexWrap::NoWrap);
+        container.width = Size::Length(LengthPercentage::Px(50.0));
+        let mut item = overflowing(value);
+        item.background_color = Color {
+            r: 1,
+            g: 2,
+            b: 3,
+            a: 255,
+        };
+        let tree = BoxNode::element(
+            block(),
+            vec![BoxNode::element(
+                container,
+                vec![BoxNode::element(item, vec![text("aaaaaaaa")])],
+            )],
+        );
+        run(&tree, 200.0, 400.0).pages[0].boxes[0].width
+    };
+    assert_eq!(width_of(Overflow::Hidden), 50.0);
+    assert_eq!(width_of(Overflow::Visible), 80.0);
+}
+
+/// **§9.2.1.1 splits every inline ancestor of the block**, not only its
+/// parent: `a <i>b <b>c <div>d</div> e</b> f</i> g` is the line `a b c`, the
+/// block `d`, and the line `e f g`, with nothing warned about — and a block
+/// inside nested inline boxes past the depth cap is refused by name rather
+/// than searched for without end.
+#[test]
+fn a_block_inside_nested_inlines_splits_every_level() {
+    let inline = |children: Vec<BoxNode>| BoxNode::element(base(), children);
+    let tree = BoxNode::element(
+        block(),
+        vec![
+            text("a "),
+            inline(vec![
+                text("b "),
+                inline(vec![
+                    text("c "),
+                    BoxNode::element(block(), vec![text("d")]),
+                    text(" e"),
+                ]),
+                text(" f"),
+            ]),
+            text(" g"),
+        ],
+    );
+    let laid = run(&tree, 200.0, 400.0);
+    let y = baselines(&laid, 0);
+    let lines: Vec<&str> = laid.pages[0].runs.iter().map(|r| r.text.trim()).collect();
+    assert_eq!(lines, ["a", "b", "c", "d", "e", "f", "g"], "{lines:?}");
+    assert!(close(y[0], y[2]), "a b c on one line: {y:?}");
+    assert!(y[3] > y[2] && y[4] > y[3], "then d, then the rest: {y:?}");
+    assert!(close(y[4], y[6]), "e f g on one line: {y:?}");
+    assert!(laid.warnings.is_empty(), "{:?}", laid.warnings);
+
+    let mut deep = BoxNode::element(block(), vec![text("x")]);
+    for _ in 0..(Limits::DEFAULT.max_depth + 2) {
+        deep = inline(vec![deep]);
+    }
+    let refusal = layout(
+        &BoxNode::element(block(), vec![deep]),
+        &METRICS,
+        &Options::new(200.0, 400.0),
+        &Limits::DEFAULT,
+    )
+    .expect_err("past the depth cap");
+    assert!(matches!(refusal, Refusal::TooDeep { .. }));
 }

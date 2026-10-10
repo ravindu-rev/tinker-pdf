@@ -7,14 +7,15 @@
 //! [`Property`] is not one -- it always holds a specified value, and six of its
 //! variants stand for four names each, carrying a [`Side`].
 //!
-//! Hence eighty-three unit variants, one per name this build implements as a
-//! longhand. The sixteen shorthands are not here, because a shorthand is not a
-//! property: `crate::property::DEFAULTABLE_SHORTHANDS` expands each into the
-//! longhands it sets, which is what `margin: inherit` means.
+//! Hence a hundred and fourteen unit variants, one per name this build implements as a
+//! longhand. The twenty shorthands and `css-break-3`'s three aliases are not
+//! here, because a shorthand is not a property:
+//! `crate::property::DEFAULTABLE_SHORTHANDS` expands each into the longhands
+//! it sets, which is what `margin: inherit` means.
 //!
 //! # This file is generated, and it is checked in to be read
 //!
-//! Eighty-three variants across four consumers is not hand-written code, and a
+//! A hundred and fourteen variants across four consumers is not hand-written code, and a
 //! macro would put it somewhere nobody can grep. So it is generated from
 //! `property.rs` itself -- the variants, the names out of [`Property::name`],
 //! the inheritance out of [`Property::inherited`] -- and written here as
@@ -64,10 +65,64 @@ pub enum Longhand {
     TextIndent,
     /// `text-decoration`
     TextDecoration,
+    /// `text-shadow`
+    TextShadow,
+    /// `box-shadow`
+    BoxShadow,
+    /// `text-transform`
+    TextTransform,
+    /// `color-scheme`
+    ColorScheme,
+    /// `font-kerning`
+    FontKerning,
+    /// `font-feature-settings`
+    FontFeatureSettings,
+    /// `direction`
+    Direction,
+    /// `unicode-bidi`
+    UnicodeBidi,
+    /// `hyphens`
+    Hyphens,
     /// `white-space`
     WhiteSpace,
     /// `list-style-type`
     ListStyleType,
+    /// `list-style-position`
+    ListStylePosition,
+    /// `counter-reset`
+    CounterReset,
+    /// `counter-increment`
+    CounterIncrement,
+    /// `counter-set`
+    CounterSet,
+    /// `quotes`
+    Quotes,
+    /// `opacity`
+    Opacity,
+    /// `transform`
+    Transform,
+    /// `transform-origin`
+    TransformOrigin,
+    /// `border-top-left-radius`
+    BorderTopLeftRadius,
+    /// `border-top-right-radius`
+    BorderTopRightRadius,
+    /// `border-bottom-right-radius`
+    BorderBottomRightRadius,
+    /// `border-bottom-left-radius`
+    BorderBottomLeftRadius,
+    /// `outline-width`
+    OutlineWidth,
+    /// `outline-style`
+    OutlineStyle,
+    /// `outline-color`
+    OutlineColor,
+    /// `outline-offset`
+    OutlineOffset,
+    /// `overflow-x`
+    OverflowX,
+    /// `overflow-y`
+    OverflowY,
     /// `visibility`
     Visibility,
     /// `display`
@@ -124,6 +179,14 @@ pub enum Longhand {
     BorderColorLeft,
     /// `background-color`
     BackgroundColor,
+    /// `background-image`
+    BackgroundImage,
+    /// `background-repeat`
+    BackgroundRepeat,
+    /// `background-position`
+    BackgroundPosition,
+    /// `background-size`
+    BackgroundSize,
     /// `page-break-before`
     PageBreakBefore,
     /// `page-break-after`
@@ -227,8 +290,35 @@ impl Longhand {
         Longhand::TextAlign,
         Longhand::TextIndent,
         Longhand::TextDecoration,
+        Longhand::TextShadow,
+        Longhand::BoxShadow,
+        Longhand::TextTransform,
+        Longhand::ColorScheme,
+        Longhand::FontKerning,
+        Longhand::FontFeatureSettings,
+        Longhand::Direction,
+        Longhand::UnicodeBidi,
+        Longhand::Hyphens,
         Longhand::WhiteSpace,
         Longhand::ListStyleType,
+        Longhand::ListStylePosition,
+        Longhand::CounterReset,
+        Longhand::CounterIncrement,
+        Longhand::CounterSet,
+        Longhand::Quotes,
+        Longhand::Opacity,
+        Longhand::Transform,
+        Longhand::TransformOrigin,
+        Longhand::BorderTopLeftRadius,
+        Longhand::BorderTopRightRadius,
+        Longhand::BorderBottomRightRadius,
+        Longhand::BorderBottomLeftRadius,
+        Longhand::OutlineWidth,
+        Longhand::OutlineStyle,
+        Longhand::OutlineColor,
+        Longhand::OutlineOffset,
+        Longhand::OverflowX,
+        Longhand::OverflowY,
         Longhand::Visibility,
         Longhand::Display,
         Longhand::Float,
@@ -257,6 +347,10 @@ impl Longhand {
         Longhand::BorderColorBottom,
         Longhand::BorderColorLeft,
         Longhand::BackgroundColor,
+        Longhand::BackgroundImage,
+        Longhand::BackgroundRepeat,
+        Longhand::BackgroundPosition,
+        Longhand::BackgroundSize,
         Longhand::PageBreakBefore,
         Longhand::PageBreakAfter,
         Longhand::PageBreakInside,
@@ -316,8 +410,35 @@ impl Longhand {
             Longhand::TextAlign => "text-align",
             Longhand::TextIndent => "text-indent",
             Longhand::TextDecoration => "text-decoration",
+            Longhand::TextShadow => "text-shadow",
+            Longhand::BoxShadow => "box-shadow",
+            Longhand::TextTransform => "text-transform",
+            Longhand::ColorScheme => "color-scheme",
+            Longhand::FontKerning => "font-kerning",
+            Longhand::FontFeatureSettings => "font-feature-settings",
+            Longhand::Direction => "direction",
+            Longhand::UnicodeBidi => "unicode-bidi",
+            Longhand::Hyphens => "hyphens",
             Longhand::WhiteSpace => "white-space",
             Longhand::ListStyleType => "list-style-type",
+            Longhand::ListStylePosition => "list-style-position",
+            Longhand::CounterReset => "counter-reset",
+            Longhand::CounterIncrement => "counter-increment",
+            Longhand::CounterSet => "counter-set",
+            Longhand::Quotes => "quotes",
+            Longhand::Opacity => "opacity",
+            Longhand::Transform => "transform",
+            Longhand::TransformOrigin => "transform-origin",
+            Longhand::BorderTopLeftRadius => "border-top-left-radius",
+            Longhand::BorderTopRightRadius => "border-top-right-radius",
+            Longhand::BorderBottomRightRadius => "border-bottom-right-radius",
+            Longhand::BorderBottomLeftRadius => "border-bottom-left-radius",
+            Longhand::OutlineWidth => "outline-width",
+            Longhand::OutlineStyle => "outline-style",
+            Longhand::OutlineColor => "outline-color",
+            Longhand::OutlineOffset => "outline-offset",
+            Longhand::OverflowX => "overflow-x",
+            Longhand::OverflowY => "overflow-y",
             Longhand::Visibility => "visibility",
             Longhand::Display => "display",
             Longhand::Float => "float",
@@ -346,6 +467,10 @@ impl Longhand {
             Longhand::BorderColorBottom => "border-bottom-color",
             Longhand::BorderColorLeft => "border-left-color",
             Longhand::BackgroundColor => "background-color",
+            Longhand::BackgroundImage => "background-image",
+            Longhand::BackgroundRepeat => "background-repeat",
+            Longhand::BackgroundPosition => "background-position",
+            Longhand::BackgroundSize => "background-size",
             Longhand::PageBreakBefore => "page-break-before",
             Longhand::PageBreakAfter => "page-break-after",
             Longhand::PageBreakInside => "page-break-inside",
@@ -411,8 +536,16 @@ impl Longhand {
             | Longhand::WordSpacing
             | Longhand::TextAlign
             | Longhand::TextIndent
+            | Longhand::TextTransform
+            | Longhand::ColorScheme
+            | Longhand::FontKerning
+            | Longhand::FontFeatureSettings
+            | Longhand::Direction
+            | Longhand::Hyphens
             | Longhand::WhiteSpace
             | Longhand::ListStyleType
+            | Longhand::ListStylePosition
+            | Longhand::Quotes
             | Longhand::Visibility
             | Longhand::Orphans
             | Longhand::Widows
@@ -420,8 +553,27 @@ impl Longhand {
             | Longhand::LineBreak
             | Longhand::WordBreak
             | Longhand::BorderCollapse
-            | Longhand::BorderSpacing => true,
+            | Longhand::BorderSpacing
+            | Longhand::TextShadow => true,
             Longhand::TextDecoration
+            | Longhand::UnicodeBidi
+            | Longhand::BoxShadow
+            | Longhand::CounterReset
+            | Longhand::CounterIncrement
+            | Longhand::CounterSet
+            | Longhand::Opacity
+            | Longhand::Transform
+            | Longhand::TransformOrigin
+            | Longhand::BorderTopLeftRadius
+            | Longhand::BorderTopRightRadius
+            | Longhand::BorderBottomRightRadius
+            | Longhand::BorderBottomLeftRadius
+            | Longhand::OutlineWidth
+            | Longhand::OutlineStyle
+            | Longhand::OutlineColor
+            | Longhand::OutlineOffset
+            | Longhand::OverflowX
+            | Longhand::OverflowY
             | Longhand::Display
             | Longhand::Float
             | Longhand::Clear
@@ -449,6 +601,10 @@ impl Longhand {
             | Longhand::BorderColorBottom
             | Longhand::BorderColorLeft
             | Longhand::BackgroundColor
+            | Longhand::BackgroundImage
+            | Longhand::BackgroundRepeat
+            | Longhand::BackgroundPosition
+            | Longhand::BackgroundSize
             | Longhand::PageBreakBefore
             | Longhand::PageBreakAfter
             | Longhand::PageBreakInside
@@ -490,7 +646,7 @@ impl Longhand {
     /// The longhand a name refers to, or `None` when this build does not
     /// implement that name as one.
     ///
-    /// Linear over eighty-three entries, which a declaration pays once and
+    /// Linear over ninety-eight entries, which a declaration pays once and
     /// only when it carries a defaulting keyword.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Longhand> {
@@ -519,8 +675,37 @@ impl Property {
             Property::TextAlign(..) => Longhand::TextAlign,
             Property::TextIndent(..) => Longhand::TextIndent,
             Property::TextDecoration(..) => Longhand::TextDecoration,
+            Property::TextShadow(..) => Longhand::TextShadow,
+            Property::BoxShadow(..) => Longhand::BoxShadow,
+            Property::TextTransform(..) => Longhand::TextTransform,
+            Property::ColorScheme(..) => Longhand::ColorScheme,
+            Property::FontKerning(..) => Longhand::FontKerning,
+            Property::FontFeatureSettings(..) => Longhand::FontFeatureSettings,
+            Property::Direction(..) => Longhand::Direction,
+            Property::UnicodeBidi(..) => Longhand::UnicodeBidi,
+            Property::Hyphens(..) => Longhand::Hyphens,
             Property::WhiteSpace(..) => Longhand::WhiteSpace,
             Property::ListStyleType(..) => Longhand::ListStyleType,
+            Property::ListStylePosition(..) => Longhand::ListStylePosition,
+            Property::CounterReset(..) => Longhand::CounterReset,
+            Property::CounterIncrement(..) => Longhand::CounterIncrement,
+            Property::CounterSet(..) => Longhand::CounterSet,
+            Property::Quotes(..) => Longhand::Quotes,
+            Property::Opacity(..) => Longhand::Opacity,
+            Property::Transform(..) => Longhand::Transform,
+            Property::TransformOrigin(..) => Longhand::TransformOrigin,
+            Property::BorderRadius(corner, ..) => match corner {
+                crate::property::Corner::TopLeft => Longhand::BorderTopLeftRadius,
+                crate::property::Corner::TopRight => Longhand::BorderTopRightRadius,
+                crate::property::Corner::BottomRight => Longhand::BorderBottomRightRadius,
+                crate::property::Corner::BottomLeft => Longhand::BorderBottomLeftRadius,
+            },
+            Property::OutlineWidth(..) => Longhand::OutlineWidth,
+            Property::OutlineStyle(..) => Longhand::OutlineStyle,
+            Property::OutlineColor(..) => Longhand::OutlineColor,
+            Property::OutlineOffset(..) => Longhand::OutlineOffset,
+            Property::OverflowX(..) => Longhand::OverflowX,
+            Property::OverflowY(..) => Longhand::OverflowY,
             Property::Visibility(..) => Longhand::Visibility,
             Property::Display(..) => Longhand::Display,
             Property::Float(..) => Longhand::Float,
@@ -559,6 +744,10 @@ impl Property {
                 Side::Left => Longhand::BorderColorLeft,
             },
             Property::BackgroundColor(..) => Longhand::BackgroundColor,
+            Property::BackgroundImage(..) => Longhand::BackgroundImage,
+            Property::BackgroundRepeat(..) => Longhand::BackgroundRepeat,
+            Property::BackgroundPosition(..) => Longhand::BackgroundPosition,
+            Property::BackgroundSize(..) => Longhand::BackgroundSize,
             Property::PageBreakBefore(..) => Longhand::PageBreakBefore,
             Property::PageBreakAfter(..) => Longhand::PageBreakAfter,
             Property::PageBreakInside(..) => Longhand::PageBreakInside,

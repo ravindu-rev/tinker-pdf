@@ -257,9 +257,17 @@ fn every_fetched_book_paginates_to_its_own_spine() {
 const FETCHED_SPINES: &[(&str, u32)] = &[
     ("pg11-alice-images.epub", 15),
     ("pg11-epub2-images.epub", 14),
-    ("pg1342-noimages.epub", 16),
+    // 17 since Project Gutenberg regenerated the book between 26 September and
+    // 10 October 2026: its spine gained the cover wrapper `wrap0000.html`. The
+    // doctype census counted 16 content documents on 26 September (CI run
+    // 36232667788) and 17 on 10 October (run 38029218301); the engine's spine
+    // walk is unchanged across the two runs.
+    ("pg1342-noimages.epub", 17),
     ("pg16328-beowulf.epub", 7),
-    ("pg2701-images.epub", 12),
+    // 13 since the same regeneration: `wrap0000.xhtml` joined this spine too.
+    // The census counted 13 content documents on 26 September and 14 on
+    // 10 October, and run 38033866103 paginated to thirteen origin runs.
+    ("pg2701-images.epub", 13),
     ("pg84-images.epub", 32),
     ("sample-childrens-literature.epub", 3),
     ("sample-childrens-media-query.epub", 1),
@@ -413,20 +421,24 @@ fn no_fetched_page_carries_a_character_its_book_does_not_have() {
     let books = fetched!("text conservation");
     let mut source = 0usize;
     let mut conserved = 0usize;
+    // Every book is read before anything is asserted, so one run names every
+    // book that does not conserve rather than the first of them.
+    let mut failures: Vec<String> = Vec::new();
     for (name, bytes) in &books {
         let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         let verdict = conservation(bytes, &doc);
         let pinned = NOT_CONSERVED.iter().find(|book| book.name == *name);
         let allowed = pinned.map_or((0, 0), |book| (book.extra, book.missing));
-        assert_eq!(
-            (verdict.extra, verdict.missing),
-            allowed,
-            "{name} carries {} characters its book does not have and is missing \
-             {}; {allowed:?} is pinned: {:?}",
-            verdict.extra,
-            verdict.missing,
-            verdict.divergences
-        );
+        if (verdict.extra, verdict.missing) != allowed {
+            failures.push(format!(
+                "{name} carries {} characters its book does not have and is missing \
+                 {}; {allowed:?} is pinned: {:?}",
+                verdict.extra, verdict.missing, verdict.divergences
+            ));
+            source += verdict.source;
+            conserved += verdict.conserved;
+            continue;
+        }
         let report = doc.archive().expect("a report");
         if let Some(book) = pinned {
             match book.because {
@@ -474,6 +486,13 @@ fn no_fetched_page_carries_a_character_its_book_does_not_have() {
         books.len()
     );
     assert!(
+        failures.is_empty(),
+        "{} of {} books do not conserve:\n{}",
+        failures.len(),
+        books.len(),
+        failures.join("\n")
+    );
+    assert!(
         source > 1_000_000,
         "the harness read {source} characters out of twenty books, which is not twenty books"
     );
@@ -502,6 +521,8 @@ fn no_fetched_page_carries_a_character_its_book_does_not_have() {
 fn every_fetched_book_conserves_exactly_in_logical_order() {
     let books = fetched!("logical-order conservation");
     let mut checked = 0usize;
+    // As above: every book is read before anything is asserted.
+    let mut failures: Vec<String> = Vec::new();
     for (name, bytes) in &books {
         let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         // The book with no glyphs cannot conserve in any order: its characters
@@ -514,16 +535,22 @@ fn every_fetched_book_conserves_exactly_in_logical_order() {
             continue;
         }
         let verdict = conservation_in_logical_order(bytes, &doc);
-        assert!(
-            verdict.holds(),
-            "{name} does not conserve in logical order: {} extra, {} missing, {:?}",
-            verdict.extra,
-            verdict.missing,
-            verdict.divergences
-        );
-        checked += 1;
+        if verdict.holds() {
+            checked += 1;
+        } else {
+            failures.push(format!(
+                "{name} does not conserve in logical order: {} extra, {} missing, {:?}",
+                verdict.extra, verdict.missing, verdict.divergences
+            ));
+        }
     }
     println!("  {checked} books conserve exactly in logical order");
+    assert!(
+        failures.is_empty(),
+        "{} books do not conserve in logical order:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
     assert!(
         checked > 15,
         "only {checked} books were read, which is not the corpus"
@@ -781,8 +808,9 @@ fn the_doctype_census() {
 /// the only place the single-quoted external identifier exists.
 ///
 /// The committed corpus supplies the double-quoted form and this one supplies
-/// the single-quoted one — thirty content documents of it, on every content
-/// document of both Project Gutenberg EPUB 2 books. Neither corpus shows both,
+/// the single-quoted one — thirty-one content documents of it (thirty until
+/// Project Gutenberg's October regeneration of `pg1342` added a cover wrapper),
+/// on every content document of both Project Gutenberg EPUB 2 books. Neither corpus shows both,
 /// which is why milestone 2's own fixtures name both by hand and why this test
 /// and its committed twin are both here.
 ///
@@ -1047,4 +1075,25 @@ fn the_six_svg_spine_items_draw_rather_than_placehold() {
     }
     println!("  {drawn} SVG spine items drew");
     assert_eq!(drawn, 6);
+
+    // §11.6's markers, the one SVG refusal this book carried a count of —
+    // thirty-two, every one on a path that also fills. They are drawn now, so
+    // the only marker warning left is a reference naming nothing, and this
+    // book has none of those.
+    let unresolved = doc
+        .archive()
+        .expect("a book carries a report")
+        .warnings()
+        .iter()
+        .filter(|warning| {
+            matches!(
+                warning,
+                ArchiveWarning::Svg {
+                    warning: tinker_pdf_svg::Warning::MarkerUnresolved,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(unresolved, 0, "every marker reference names a <marker>");
 }

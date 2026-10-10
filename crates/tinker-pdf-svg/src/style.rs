@@ -11,7 +11,9 @@
 //!    cascade with a specificity of zero, as if they were at the start of the
 //!    author style sheet"* — so every `<style>` rule beats every presentation
 //!    attribute, whatever the rule's selector.
-//! 2. **`<style>` rules**, by `selectors-4` specificity and then source order.
+//! 2. **`<style>` rules**, by `selectors-4` specificity and then source order
+//!    — an imported sheet's in place of its `@import`, and an `@media`
+//!    block's where its query matches print ([`sheet_with`]).
 //! 3. **`style=""`**, which beats both.
 //!
 //! `!important` inverts each comparison, which is `css-cascade-5` §6.1 and is
@@ -38,11 +40,16 @@
 //! `display`, `clip-path`, `mask` and `filter`, and getting that split wrong is
 //! invisible in a flat document and wrong in every real one.
 
+use tinker_pdf_css::font_face::{self, FontFace};
+use tinker_pdf_css::media::{self, MediaContext, MediaType};
 use tinker_pdf_css::parser::{component_values, BlockKind, ComponentValue};
 use tinker_pdf_css::property::{self, Parsed, Property};
 use tinker_pdf_css::selector::{self, Selector, Specificity, UiState};
 use tinker_pdf_css::tokenizer::{tokenize, Token};
-use tinker_pdf_css::{Budget, Element as CssElement, Refusal as CssRefusal};
+use tinker_pdf_css::{
+    Budget, Element as CssElement, ImportResolver, Limits as CssLimits, NoImports,
+    Refusal as CssRefusal,
+};
 
 use crate::document::{Node, Tree};
 use crate::{Colour, FillRule, LineCap, LineJoin, TextAnchor};
@@ -145,8 +152,16 @@ struct Rule {
 pub struct Sheet {
     rules: Vec<Rule>,
     blocks: Vec<Vec<Declaration>>,
-    /// Whether an at-rule was skipped, so a caller can say so (ruling 10).
+    /// At-rules skipped — any but `@media`, `@import`, `@font-face` and
+    /// `@charset`, or one of those that was invalid or past a bound — so a
+    /// caller can say a sheet was not read whole (ruling 10).
     pub at_rules: usize,
+    /// Every `@font-face` read, in source order, imported sheets' in place.
+    /// A face's `base` is the sheet it was written in, or `None` for a
+    /// `<style>` element, whose base is the document's.
+    pub font_faces: Vec<FontFace>,
+    /// `@import`s whose sheet the resolver did not hand back.
+    pub imports_unresolved: usize,
 }
 
 impl Sheet {
@@ -236,7 +251,89 @@ pub fn inline_declarations(text: &str) -> Vec<Declaration> {
 /// from.
 #[must_use]
 pub fn sheet(tree: &Tree, max_parts: usize) -> Sheet {
+    sheet_with(
+        tree,
+        max_parts,
+        &Reach {
+            imports: &NoImports,
+            media: print(crate::scene::DEFAULT_VIEWPORT),
+        },
+    )
+}
+
+/// What a `<style>` element's at-rules are read against: where an `@import`
+/// is fetched from, and the medium an `@media` — or the element's own `media`
+/// attribute — is asked about.
+pub struct Reach<'a> {
+    /// The resolver an `@import` goes through — the container the document
+    /// came out of, which this crate does not have (ruling 8).
+    /// [`tinker_pdf_css::NoImports`] for a caller with nothing beside the
+    /// document.
+    pub imports: &'a dyn ImportResolver,
+    /// The medium. [`print()`] of the viewport: an SVG here is set on a page.
+    pub media: MediaContext,
+}
+
+/// `@media`'s context for a drawing set on paper: `print`, the viewport in
+/// CSS pixels, in colour.
+///
+/// **Print, not the EPUB cascade's `screen`**, and the two answer different
+/// questions. A reflowable book is read on a screen whatever this engine does
+/// with it, and its sheets are written for one; an SVG spine item is a page,
+/// and a drawing that says `@media print { … }` is saying what it looks like
+/// on one.
+#[must_use]
+pub fn print(viewport: (f64, f64)) -> MediaContext {
+    MediaContext {
+        media: MediaType::Print,
+        ..MediaContext::screen(viewport.0, viewport.1)
+    }
+}
+
+/// [`sheet`], with `@import` resolved through `reach` and `@media` asked about
+/// its medium.
+///
+/// The at-rules that change what a drawing looks like are read, and every
+/// other one is skipped by CSS's own recovery and counted in
+/// [`Sheet::at_rules`]:
+///
+/// - **`@media`**: its rules apply when `css-mediaqueries` says the query
+///   list matches [`Reach::media`] — `tinker_pdf_css::media::evaluate`, the
+///   evaluator the EPUB cascade uses, over a different medium. A `<style>`
+///   element's own `media` attribute (SVG 2 §6.2) is the same question asked
+///   of the whole sheet: one whose list does not match is not read, and
+///   nothing it imports is fetched.
+/// - **`@import`**: fetched through [`Reach::imports`] and read in place,
+///   before every rule after it, as `css-cascade-5` §6.4.1 orders it; one
+///   with a media query list is read when the list matches. One that does not
+///   resolve is counted in [`Sheet::imports_unresolved`]; one after a rule is
+///   invalid (§3.3) and counted with the skipped at-rules. Nesting stops at
+///   `tinker_pdf_css::limits::MAX_CSS_IMPORT_DEPTH`, a sheet importing one of
+///   its own ancestors is not read again, every imported sheet's tokens are
+///   spent against one `tinker_pdf_css::Budget`, and their bytes together are
+///   held to `MAX_CSS_BYTES` — an import is spliced into the sheet that names
+///   it, so a document's sheet and its imports are one sheet's source — so a
+///   thousand imports of one large sheet stop at one bound or the other, and
+///   nothing past it is fetched, rather than being read a thousand times.
+/// - **`@font-face`**: read by `tinker_pdf_css::font_face::parse_rule` into
+///   [`Sheet::font_faces`], for the caller to load through its container —
+///   a face is a font program, which this crate has no vocabulary for.
+/// - **`@charset`** means nothing inside a document that is already text, and
+///   is dropped without a count.
+#[must_use]
+pub fn sheet_with(tree: &Tree, max_parts: usize, reach: &Reach<'_>) -> Sheet {
     let mut out = Sheet::default();
+    let limits = CssLimits::DEFAULT;
+    let mut read = Reading {
+        reach,
+        max_parts,
+        budget: Budget::new(&limits),
+        max_depth: limits.max_import_depth,
+        max_bytes: limits.max_bytes,
+        imported_bytes: 0,
+        chain: Vec::new(),
+        exhausted: false,
+    };
     for node in &tree.nodes {
         if !node.is_svg() || node.name != "style" {
             continue;
@@ -250,69 +347,232 @@ pub fn sheet(tree: &Tree, max_parts: usize) -> Sheet {
         {
             continue;
         }
-        read_into(&mut out, &node.text(), max_parts);
+        // SVG 2 §6.2's `media`: a media query list the medium must match for
+        // the sheet to apply at all — an `@import`'s list, on the element, and
+        // asked the same way. An absent one is `all`, and so is an empty one.
+        if node
+            .attr("media")
+            .is_some_and(|query| !media::evaluate(&component_values(tokenize(query)), &reach.media))
+        {
+            continue;
+        }
+        read.text(&mut out, &node.text(), None, 0);
     }
     out
 }
 
-/// One stylesheet's text, appended to a sheet.
-fn read_into(sheet: &mut Sheet, text: &str, max_parts: usize) {
-    let values = component_values(tokenize(text));
-    let mut prelude: Vec<ComponentValue> = Vec::new();
-    for value in values {
-        match value {
-            ComponentValue::Block {
-                kind: BlockKind::Curly,
-                values,
-            } => {
-                // An at-rule's block — `@media { … }` — is skipped whole
-                // rather than read as a qualified rule, because its prelude is
-                // not a selector list and `parse_list` would refuse it anyway.
-                // Counted, so a caller can say a sheet was not read whole.
-                if prelude
-                    .iter()
-                    .any(|v| matches!(v, ComponentValue::Token(Token::AtKeyword(_))))
-                {
-                    sheet.at_rules += 1;
-                    prelude.clear();
-                    continue;
-                }
-                let Ok(selectors) = selector::parse_list(&prelude, max_parts) else {
-                    // §3.1: an invalid selector list invalidates the rule, and
-                    // §5.4.2 discards it to the end of its block — which is
-                    // where we already are.
-                    prelude.clear();
-                    continue;
-                };
-                let block = declarations(&values);
-                prelude.clear();
-                if block.is_empty() {
-                    continue;
-                }
-                let at = sheet.blocks.len();
-                sheet.blocks.push(block);
-                for selector in selectors {
-                    let order = sheet.rules.len();
-                    sheet.rules.push(Rule {
-                        selector,
-                        block: at,
-                        order,
-                    });
-                }
-            }
-            // A statement at-rule — `@import url(…);` — ends at its semicolon
-            // and has no block.
-            ComponentValue::Token(Token::Semicolon) => {
-                if prelude
-                    .iter()
-                    .any(|v| matches!(v, ComponentValue::Token(Token::AtKeyword(_))))
-                {
-                    sheet.at_rules += 1;
-                }
-                prelude.clear();
-            }
-            other => prelude.push(other),
+/// One `<style>` element's reading, and every sheet it imports.
+struct Reading<'a, 'r> {
+    reach: &'a Reach<'r>,
+    max_parts: usize,
+    budget: Budget,
+    max_depth: usize,
+    /// What every imported sheet's bytes may come to, together.
+    max_bytes: usize,
+    /// What they have come to so far.
+    imported_bytes: usize,
+    /// The addresses of the imported sheets being read, outermost first:
+    /// what makes a sheet that imports its own ancestor a cycle.
+    chain: Vec<String>,
+    /// Whether the token budget or the byte total has refused an imported
+    /// sheet. Neither is refunded, so every later import would be refused too
+    /// — after being fetched and tokenized, which is the work they are there
+    /// to stop.
+    exhausted: bool,
+}
+
+/// The at-keyword a prelude opens with, lower-cased, and what follows it.
+fn at_keyword(prelude: &[ComponentValue]) -> Option<(String, &[ComponentValue])> {
+    let start = prelude.iter().position(|v| !v.is_whitespace())?;
+    match prelude.get(start) {
+        Some(ComponentValue::Token(Token::AtKeyword(name))) => Some((
+            name.to_ascii_lowercase(),
+            prelude.get(start + 1..).unwrap_or_default(),
+        )),
+        _ => None,
+    }
+}
+
+impl Reading<'_, '_> {
+    /// One sheet's text, appended. `base` is its own address — `None` for a
+    /// `<style>` element, whose base is the document's.
+    ///
+    /// Only an imported sheet is spent against the budget: a `<style>`
+    /// element's text is the document's own, already bounded by its size, and
+    /// a drawing that read whole before imports were followed reads whole now.
+    fn text(&mut self, sheet: &mut Sheet, text: &str, base: Option<&str>, depth: usize) {
+        let tokens = tokenize(text);
+        if depth > 0 && self.budget.spend_tokens(tokens.len()).is_err() {
+            self.exhausted = true;
+            sheet.at_rules += 1;
+            return;
         }
+        let mut imports_allowed = true;
+        self.values(
+            sheet,
+            component_values(tokens),
+            base,
+            depth,
+            &mut imports_allowed,
+        );
+    }
+
+    fn values(
+        &mut self,
+        sheet: &mut Sheet,
+        values: Vec<ComponentValue>,
+        base: Option<&str>,
+        depth: usize,
+        imports_allowed: &mut bool,
+    ) {
+        let max_parts = self.max_parts;
+        let mut prelude: Vec<ComponentValue> = Vec::new();
+        for value in values {
+            match value {
+                ComponentValue::Block {
+                    kind: BlockKind::Curly,
+                    values,
+                } => {
+                    if let Some((name, rest)) = at_keyword(&prelude) {
+                        *imports_allowed = false;
+                        match name.as_str() {
+                            "media" if depth < self.max_depth => {
+                                if media::evaluate(rest, &self.reach.media) {
+                                    self.values(sheet, values, base, depth + 1, imports_allowed);
+                                }
+                            }
+                            "font-face" => match font_face::parse_rule(&values, base) {
+                                Some(face) => sheet.font_faces.push(face),
+                                // §4.1: no family or no source is an invalid
+                                // rule, discarded and counted.
+                                None => sheet.at_rules += 1,
+                            },
+                            _ => sheet.at_rules += 1,
+                        }
+                        prelude.clear();
+                        continue;
+                    }
+                    *imports_allowed = false;
+                    let Ok(selectors) = selector::parse_list(&prelude, max_parts) else {
+                        // §3.1: an invalid selector list invalidates the rule,
+                        // and §5.4.2 discards it to the end of its block — which
+                        // is where we already are.
+                        prelude.clear();
+                        continue;
+                    };
+                    let block = declarations(&values);
+                    prelude.clear();
+                    if block.is_empty() {
+                        continue;
+                    }
+                    let at = sheet.blocks.len();
+                    sheet.blocks.push(block);
+                    for selector in selectors {
+                        let order = sheet.rules.len();
+                        sheet.rules.push(Rule {
+                            selector,
+                            block: at,
+                            order,
+                        });
+                    }
+                }
+                // A statement at-rule — `@import url(…);` — ends at its
+                // semicolon and has no block.
+                ComponentValue::Token(Token::Semicolon) => {
+                    if let Some((name, rest)) = at_keyword(&prelude) {
+                        match name.as_str() {
+                            "charset" => {}
+                            "import" if *imports_allowed => {
+                                let rest = rest.to_vec();
+                                self.import(sheet, &rest, base, depth);
+                            }
+                            _ => {
+                                *imports_allowed = false;
+                                sheet.at_rules += 1;
+                            }
+                        }
+                    }
+                    prelude.clear();
+                }
+                other => prelude.push(other),
+            }
+        }
+    }
+
+    /// `@import`'s target and media query list, read as `tinker-pdf-css`
+    /// reads them, and the sheet it names read in place.
+    fn import(
+        &mut self,
+        sheet: &mut Sheet,
+        prelude: &[ComponentValue],
+        base: Option<&str>,
+        depth: usize,
+    ) {
+        let mut values = prelude.iter().filter(|v| !v.is_whitespace());
+        let target = match values.next() {
+            Some(ComponentValue::Token(Token::Url(url) | Token::Str(url))) => url.clone(),
+            Some(ComponentValue::Function { name, arguments })
+                if name.eq_ignore_ascii_case("url") =>
+            {
+                match arguments.iter().find(|v| !v.is_whitespace()) {
+                    Some(ComponentValue::Token(Token::Str(url))) => url.clone(),
+                    _ => {
+                        sheet.at_rules += 1;
+                        return;
+                    }
+                }
+            }
+            _ => {
+                sheet.at_rules += 1;
+                return;
+            }
+        };
+        let queries: Vec<ComponentValue> = values.cloned().collect();
+        // A cascade layer is a thing this sheet has no model of: an import into
+        // one is skipped and counted rather than read into no layer, which
+        // would give its rules a priority the file did not.
+        if queries.iter().any(|v| match v {
+            ComponentValue::Token(Token::Ident(name)) => name.eq_ignore_ascii_case("layer"),
+            ComponentValue::Function { name, .. } => name.eq_ignore_ascii_case("layer"),
+            _ => false,
+        }) {
+            sheet.at_rules += 1;
+            return;
+        }
+        if !media::evaluate(&queries, &self.reach.media) {
+            return;
+        }
+        if depth >= self.max_depth || self.exhausted {
+            sheet.at_rules += 1;
+            return;
+        }
+        let Some((address, bytes)) = self.reach.imports.resolve(&target, base) else {
+            sheet.imports_unresolved += 1;
+            return;
+        };
+        // An imported sheet is spliced into the one that names it, so a
+        // document's sheet and everything it imports are one sheet's source,
+        // held to `MAX_CSS_BYTES` together. The token budget alone would not
+        // bound this: a comment is no tokens, and a sheet of one comment
+        // imported a million times would be read a million times.
+        //
+        // Counted **before** the cycle is looked for, because the fetch is
+        // what costs and a cycle is only known once its address is: a sheet
+        // naming its own ancestor a million times is a million fetches.
+        self.imported_bytes = self.imported_bytes.saturating_add(bytes.len());
+        if self.imported_bytes > self.max_bytes {
+            self.exhausted = true;
+            sheet.at_rules += 1;
+            return;
+        }
+        if self.chain.contains(&address) {
+            sheet.at_rules += 1;
+            return;
+        }
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        self.chain.push(address.clone());
+        self.text(sheet, &text, Some(&address), depth + 1);
+        self.chain.pop();
     }
 }
 
@@ -371,10 +631,12 @@ pub struct Style {
     /// `visibility`. §11.5 lays the element out and does not paint it, which
     /// is why it is not `display`.
     pub visible: bool,
-    /// The product of every `opacity` from the root down to this element.
+    /// This element's **own** `opacity`, which §14.5 does not inherit.
     ///
-    /// **A product rather than a group**, and the flattening is named where it
-    /// is observable — see [`crate::Warning::GroupOpacityFlattened`].
+    /// It applies to the element's rendering as a whole, so the walk turns it
+    /// into a [`crate::Node::Group`] around what the element drew rather than
+    /// into a number its descendants multiply in — see that variant for why
+    /// the product is the wrong picture.
     pub opacity: f64,
     /// §13.2.4's `stop-color`, which only a `<stop>` reads.
     pub stop_colour: Colour,
@@ -382,6 +644,16 @@ pub struct Style {
     pub stop_opacity: f64,
     /// §14.3's `clip-path`, as the bare fragment name it referenced.
     pub clip_path: Option<String>,
+    /// §14.4's `mask`, as the bare fragment name it referenced. Not
+    /// inherited, for `clip-path`'s reason.
+    pub mask: Option<String>,
+    /// §11.6.2's `marker-start`, `marker-mid` and `marker-end`, in that order,
+    /// as the bare fragment names they referenced.
+    ///
+    /// **Inherited**, which §11.6.2's property table says and which is the
+    /// reason a `<g marker-end="url(#arrow)">` puts an arrowhead on every
+    /// line inside it.
+    pub markers: [Option<String>; 3],
     /// `font-family`, in the author's order, generics left in.
     pub families: Vec<String>,
     /// `font-size`, in user units, already resolved through `em` and `%`.
@@ -428,6 +700,8 @@ impl Default for Style {
             },
             stop_opacity: 1.0,
             clip_path: None,
+            mask: None,
+            markers: [None, None, None],
             // §10.10's initial `font-family` is the user agent's, and CSS 2.1
             // §15.7 makes the initial `font-size` `medium`. The first is the
             // caller's to decide and is named rather than guessed: an empty
@@ -444,7 +718,7 @@ impl Default for Style {
 
 /// The properties this build reads, so a presentation attribute that is not one
 /// is left alone rather than read as a property nobody consumes.
-pub const PROPERTIES: [&str; 23] = [
+pub const PROPERTIES: [&str; 28] = [
     "fill",
     "fill-rule",
     "fill-opacity",
@@ -468,6 +742,11 @@ pub const PROPERTIES: [&str; 23] = [
     "font-weight",
     "font-style",
     "text-anchor",
+    "marker",
+    "marker-start",
+    "marker-mid",
+    "marker-end",
+    "mask",
 ];
 
 /// What resolving one declaration did.
@@ -496,10 +775,9 @@ impl Style {
     /// - `clip-path` clips **the element that states it**; inherited, every
     ///   descendant would be clipped again by the same path, which is the same
     ///   picture until a descendant moves.
-    ///
-    /// `opacity` is the fourth exception and it is not reset either: it is held
-    /// here as the *product* from the root down, because §14.5 composes a
-    /// group's opacity with everything under it.
+    /// - `opacity` fades **the element's rendering as a whole** (§14.5), which
+    ///   the walk makes a [`crate::Node::Group`]. Inherited, a child would be
+    ///   faded a second time inside a group already faded once.
     #[must_use]
     pub fn inherit(&self) -> Style {
         let initial = Style::default();
@@ -507,6 +785,8 @@ impl Style {
             stop_colour: initial.stop_colour,
             stop_opacity: initial.stop_opacity,
             clip_path: None,
+            mask: None,
+            opacity: initial.opacity,
             ..self.clone()
         }
     }
@@ -567,22 +847,54 @@ impl Style {
                 }
                 None => false,
             },
-            "clip-path" => match significant.first() {
-                Some(ComponentValue::Token(Token::Ident(word)))
-                    if significant.len() == 1 && word.eq_ignore_ascii_case("none") =>
-                {
-                    self.clip_path = None;
-                    true
-                }
-                Some(value) => match reference(value) {
-                    Some(name) => {
-                        self.clip_path = Some(name);
+            "clip-path" | "mask" => {
+                let read = match significant.first() {
+                    Some(ComponentValue::Token(Token::Ident(word)))
+                        if significant.len() == 1 && word.eq_ignore_ascii_case("none") =>
+                    {
+                        Some(None)
+                    }
+                    Some(value) => reference(value).map(Some),
+                    None => None,
+                };
+                match read {
+                    Some(value) => {
+                        if name == "mask" {
+                            self.mask = value;
+                        } else {
+                            self.clip_path = value;
+                        }
                         true
                     }
                     None => false,
-                },
-                None => false,
-            },
+                }
+            }
+            // §11.6.2: `none` or a reference, and `marker` sets all three —
+            // the shorthand is a property of its own in §11.6.2's table, so it
+            // is read wherever the longhands are.
+            "marker" | "marker-start" | "marker-mid" | "marker-end" => {
+                let read = match significant.first() {
+                    Some(ComponentValue::Token(Token::Ident(word)))
+                        if significant.len() == 1 && word.eq_ignore_ascii_case("none") =>
+                    {
+                        Some(None)
+                    }
+                    Some(value) if significant.len() == 1 => reference(value).map(Some),
+                    _ => None,
+                };
+                match read {
+                    Some(value) => {
+                        match name {
+                            "marker-start" => self.markers[0] = value,
+                            "marker-mid" => self.markers[1] = value,
+                            "marker-end" => self.markers[2] = value,
+                            _ => self.markers = [value.clone(), value.clone(), value],
+                        }
+                        true
+                    }
+                    None => false,
+                }
+            }
             "color" => match colour(values) {
                 // §11.2 makes `color`'s own `inherit` the only way to reach a
                 // parent's, and this build implements no CSS-wide keyword —
@@ -610,10 +922,10 @@ impl Style {
                     match name {
                         "fill-opacity" => self.fill_opacity = value,
                         "stroke-opacity" => self.stroke_opacity = value,
-                        // §14.5's group opacity **multiplies** down the tree;
-                        // it is the one property that is neither inherited nor
-                        // reset, because it composes.
-                        _ => self.opacity *= value,
+                        // §14.5's group opacity: the element's own, never
+                        // inherited — `inherit` resets it, and the walk makes
+                        // the group that applies it.
+                        _ => self.opacity = value,
                     }
                     true
                 }

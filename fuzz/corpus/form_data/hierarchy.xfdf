@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve">
+  <f href="application.pdf"/>
+  <fields>
+    <field name="applicant">
+      <field name="name">
+        <field name="first"><value>Ada</value></field>
+        <field name="last"><value>Lovelace</value></field>
+      </field>
+      <field name="born"><value>1815-12-10</value></field>
+    </field>
+    <field name="languages"><value>English</value><value>French</value></field>
+    <field name="consent"><value>Yes</value></field>
+    <field name="remarks"><value>a &lt;bracketed&gt; aside &amp; more</value></field>
+    <field name="untouched"/>
+    <field name="address.city"><value>London</value></field>
+    <field name="styled"><value-richtext><body>plain</body></value-richtext></field>
+  </fields>
+  <annots>
+    <text page="0" rect="10,10,30,30"><contents>a note</contents></text>
+  </annots>
+</xfdf>

@@ -58,6 +58,15 @@
 *.cb7 binary
 *.cbt binary
 
+# The coder fixtures (tier 4's archive row): archives and Zstandard streams
+# real writers made over `input/`, whose files are held byte for byte against
+# what each entry decodes to. `prose.txt` is text, and a normalised line ending in it would make every
+# decode "wrong" against an original that had changed underneath it.
+crates/tinker-pdf-archive/tests/coders/input/** binary
+*.7z binary
+*.zst binary
+*.zip binary
+
 # Fuzz seeds are bytes chosen for what they make a parser do; a normalized
 # line ending is a different input, and several of them have no extension.
 fuzz/corpus/** binary
@@ -86,6 +95,10 @@ crates/tinker-pdf-layout/data/** -text linguist-vendored
 # `linguist-vendored` keeps a megabyte of test faces out of the diff a
 # reviewer reads and out of the language statistics.
 crates/tinker-pdf-shape/data/** -text linguist-vendored
+# The UCD a third time (THIRDPARTY.md), for `tinker-pdf-content`'s UAX #29 word
+# boundaries and its search's diacritic folding. `-text` and
+# `linguist-vendored` for the layout tree's reasons.
+crates/tinker-pdf-content/data/** -text linguist-vendored
 # RFC 7932's static dictionary (THIRDPARTY.md). `-text` because it is binary --
 # the RFC publishes it as hexadecimal and this is that dump decoded, so it is
 # 122 784 bytes of arbitrary values with no line structure to normalise, and
@@ -93,6 +106,12 @@ crates/tinker-pdf-shape/data/** -text linguist-vendored
 # `linguist-vendored` keeps it out of the diff a reviewer reads and out of the
 # repository's language statistics.
 crates/tinker-pdf-filters/data/** -text linguist-vendored
+# The zstd project's golden decompression files (THIRDPARTY.md). `-text`
+# because they are frames and not text, and a rewritten byte is another frame:
+# the three in `golden-decompression-errors/` are refused for one fault each,
+# and a normalised line ending could have one refused for a different reason
+# and the test still pass. `linguist-vendored` for the trees' reason above.
+crates/tinker-pdf-archive/data/** -text linguist-vendored
 
 # The committed Brotli reference streams (`tests/brotli_vectors.rs`). Bytes an
 # encoder emitted once, on a named day; a normalised line ending inside one is
@@ -125,3 +144,14 @@ crates/tinker-pdf-filters/tests/brotli/** binary
 *.woff binary
 *.woff2 binary
 crates/tinker-pdf-font/tests/woff/*.ttf binary
+
+# The container images the tier-4 archive row's decoders are held to
+# (`crates/tinker-pdf-filters/tests/images/`). Bytes a third-party encoder
+# wrote once from authored pixels; a normalised line ending inside one is a
+# different picture, and a GIF or a WebP of a small image is short enough to
+# carry no NUL in the first 8 KB for `text=auto` to find.
+*.bmp binary
+*.gif binary
+*.webp binary
+*.tif binary
+*.tiff binary

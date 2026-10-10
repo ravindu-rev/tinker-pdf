@@ -22,6 +22,23 @@ pub mod icc;
 
 pub use function::Function;
 
+/// `value` held between `a` and `b`, in whichever order they come.
+///
+/// `f64::clamp` panics when its minimum is above its maximum or either is
+/// NaN, and a `/Lab` `/Range` is the document's: `[10 -10 -100 100]` is
+/// four numbers a file may write, and it panicked here until October 2026
+/// (ruling 1). An unordered pair is read as the range it spans, as
+/// `function.rs`'s `clamp` reads a function's; a pair with no order at all
+/// — both NaN — holds nothing.
+fn within(value: f64, a: f64, b: f64) -> f64 {
+    let (low, high) = (a.min(b), a.max(b));
+    if low <= high {
+        value.clamp(low, high)
+    } else {
+        value
+    }
+}
+
 /// A colour space, reduced to what conversion needs.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ColorSpace {
@@ -75,7 +92,7 @@ pub enum ColorSpace {
         /// How many components.
         components: usize,
     },
-    /// **CIE-based grey (8.6.5.1).**
+    /// **CIE-based grey (8.6.5.2).**
     ///
     /// One component through a gamma, scaled by a white point. Aliased to
     /// [`ColorSpace::DeviceGray`] until now, which meant `/WhitePoint` and
@@ -88,7 +105,7 @@ pub enum ColorSpace {
         /// `/Gamma`, defaulting to 1.
         gamma: f64,
     },
-    /// **CIE-based RGB (8.6.5.2).**
+    /// **CIE-based RGB (8.6.5.3).**
     ///
     /// Three components, each through its own gamma, then a 3×3 matrix into
     /// XYZ relative to `/WhitePoint`.
@@ -97,7 +114,7 @@ pub enum ColorSpace {
         white: [f64; 3],
         /// `/Gamma`, defaulting to `[1, 1, 1]`.
         gamma: [f64; 3],
-        /// `/Matrix`, column-major as Table 65 writes it —
+        /// `/Matrix`, column-major as Table 64 writes it —
         /// `[XA YA ZA XB YB ZB XC YC ZC]` — defaulting to the identity.
         matrix: [f64; 9],
     },
@@ -147,21 +164,31 @@ impl ColorSpace {
         }
     }
 
-    /// The colour this space's initial value is (8.6.8).
+    /// The colour this space's initial value is (8.6.8), which each space's
+    /// own clause gives.
     #[must_use]
     pub fn initial(&self) -> Vec<f64> {
         match self {
             // Black in every device space, which for CMYK means all zeros
             // except the black ink.
             ColorSpace::DeviceCmyk => vec![0.0, 0.0, 0.0, 1.0],
+            // 8.6.6.4 and 8.6.6.5: a `/Separation`'s initial tint is 1.0 and
+            // a `/DeviceN`'s is 1.0 in every component — the whole colorant,
+            // where zeros would be none of it.
+            ColorSpace::Separation { components, .. } => vec![1.0; *components],
             // 8.6.8: an ICCBased space's initial colour is all zeros, whatever
             // the profile makes of them — which for a subtractive profile is
             // white rather than black, and is what the clause says.
             ColorSpace::Icc { components, .. } => vec![0.0; *components],
-            // 8.6.5.4: black is L=0 with no chroma, and zero is inside every
-            // legal /Range, so the generic all-zeros answer is right here for
-            // a different reason than it is elsewhere.
-            ColorSpace::Lab { .. } => vec![0.0, 0.0, 0.0],
+            // 8.6.5.4: all three zero, unless a component's range leaves zero
+            // out, when it is the nearest value the range allows. Table 65
+            // does not make `/Range` straddle zero, so `a*` and `b*` are each
+            // held to theirs, read as `to_rgb` reads them.
+            ColorSpace::Lab { range } => vec![
+                0.0,
+                within(0.0, range[0], range[1]),
+                within(0.0, range[2], range[3]),
+            ],
             other => vec![0.0; other.components()],
         }
     }
@@ -210,7 +237,7 @@ impl ColorSpace {
                 alternate.to_rgb(&converted)
             }
             ColorSpace::CalGray { white, gamma } => {
-                // 8.6.5.1: A^G scales the white point. `at` clamps to 0..1,
+                // 8.6.5.2: A^G scales the white point. `at` clamps to 0..1,
                 // which is this space's own range.
                 let a = math::pow(at(0), *gamma);
                 xyz_to_rgb([white[0] * a, white[1] * a, white[2] * a], *white)
@@ -220,8 +247,8 @@ impl ColorSpace {
                 gamma,
                 matrix,
             } => {
-                // 8.6.5.2: each component through its own gamma, then Table
-                // 65's matrix — which is written column by column, so the
+                // 8.6.5.3: each component through its own gamma, then Table
+                // 64's matrix — which is written column by column, so the
                 // first three numbers are the *A* column and not the X row.
                 let a = math::pow(at(0), gamma[0]);
                 let b = math::pow(at(1), gamma[1]);
@@ -238,8 +265,8 @@ impl ColorSpace {
                 // clamping them there is precisely the bug this variant fixes.
                 let raw = |i: usize| components.get(i).copied().unwrap_or(0.0);
                 let l = raw(0).clamp(0.0, 100.0);
-                let a = raw(1).clamp(range[0], range[1]);
-                let b = raw(2).clamp(range[2], range[3]);
+                let a = within(raw(1), range[0], range[1]);
+                let b = within(raw(2), range[2], range[3]);
                 lab_to_rgb(l, a, b)
             }
             // The profile's own transform, which is what this whole module
@@ -315,7 +342,7 @@ pub(crate) fn xyz_d50_to_linear_srgb(x: f64, y: f64, z: f64) -> [f64; 3] {
 /// own white point and D65 is as common as D50 in the wild, so the two have to
 /// be reconciled. Scaling each axis by the ratio of the two whites is the
 /// simplest transform that maps one white exactly onto the other, and it is
-/// what 8.6.5.2's own note describes when it says the components are relative
+/// what 8.6.5.3's own note describes when it says the components are relative
 /// to the diffuse white.
 ///
 /// It is not Bradford, which is what [`XYZ_D50_TO_SRGB`] already has baked in
@@ -462,6 +489,67 @@ mod tests {
         assert_eq!(
             ColorSpace::DeviceRgb.to_rgb(&ColorSpace::DeviceRgb.initial()),
             (0, 0, 0)
+        );
+    }
+
+    /// A `/Lab` `/Range` is the document's, and no order or value of it
+    /// panics: an unordered pair is the range it spans, the same colour as
+    /// the ordered one, and a NaN pair holds nothing.
+    #[test]
+    fn a_lab_range_in_any_order_converts() {
+        let lab = |range: [f64; 4], c: [f64; 3]| ColorSpace::Lab { range }.to_rgb(&c);
+        let ordered = lab([-10.0, 10.0, -100.0, 100.0], [50.0, 40.0, 0.0]);
+        assert_eq!(
+            lab([10.0, -10.0, -100.0, 100.0], [50.0, 40.0, 0.0]),
+            ordered
+        );
+        assert_eq!(
+            lab([10.0, -10.0, 100.0, -100.0], [50.0, 40.0, 0.0]),
+            ordered
+        );
+        let _ = lab([f64::NAN, f64::NAN, f64::NAN, 1.0], [50.0, 40.0, 0.0]);
+        let _ = ColorSpace::Lab {
+            range: [f64::NAN, f64::NAN, 5.0, -5.0],
+        }
+        .initial();
+    }
+
+    /// Each space's own clause gives its initial colour: a spot space's is
+    /// the whole colorant, 1.0 in every component (8.6.6.4, 8.6.6.5), and a
+    /// `/Lab` one's is zero or, where a `/Range` leaves zero out, the nearest
+    /// value it allows (8.6.5.4).
+    #[test]
+    fn every_space_starts_where_its_clause_says() {
+        let spot = |components: usize| ColorSpace::Separation {
+            components,
+            alternate: Box::new(ColorSpace::DeviceGray),
+            tint: Box::new(Function::Exponential {
+                domain: (0.0, 1.0),
+                c0: vec![1.0],
+                c1: vec![0.0],
+                n: 1.0,
+            }),
+        };
+        assert_eq!(spot(1).initial(), vec![1.0], "/Separation");
+        assert_eq!(spot(3).initial(), vec![1.0; 3], "/DeviceN");
+        assert_eq!(spot(1).to_rgb(&spot(1).initial()), (0, 0, 0), "full tint");
+
+        let lab = |range: [f64; 4]| ColorSpace::Lab { range }.initial();
+        assert_eq!(lab([-100.0, 100.0, -100.0, 100.0]), vec![0.0; 3]);
+        assert_eq!(lab([10.0, 20.0, -30.0, -5.0]), vec![0.0, 10.0, -5.0]);
+        assert_eq!(
+            lab([20.0, 10.0, 0.0, 1.0]),
+            vec![0.0, 10.0, 0.0],
+            "unordered"
+        );
+        assert_eq!(
+            ColorSpace::Indexed {
+                base: Box::new(ColorSpace::DeviceRgb),
+                lookup: vec![0; 3],
+                high: 0,
+            }
+            .initial(),
+            vec![0.0]
         );
     }
 

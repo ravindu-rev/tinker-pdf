@@ -39,22 +39,29 @@ adjudicator.
 
 - **Tables in images.** A scanned table is pixels; OCR is a host seam the
   roadmap keeps as a decision, and nothing here reads a raster.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: OCR is the roadmap's last tier, and
+  tables in images are its row OC-15a ([ROADMAP](../ROADMAP.md)).
 - **Tables across pages.** A table continued on the next page is two tables
   here, each named `TableWarning::MayContinue` when its last rule is the
   page's bottom margin. Joining them is a document-level question the sibling
   design's cross-page pass would own, and it is not designed here.
-- **Nested tables.** A lattice inside a cell is refused by name
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row FT-32.
+- **Nested tables.** A lattice inside another's frame is refused by name
   (`TableWarning::NestedLattice`) and the outer table is returned. Real
   documents have them; the first delivery does not guess at them.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row FT-32.
 - **Writing a `/Table`.** No inferred grid enters a structure tree, a written
   document, or a PDF/UA verdict — the same line
   [design/reading-order.md](reading-order.md) draws for orders.
+  *Narrowed, 9 October 2026*: auto-tagging a new document is [ROADMAP](../ROADMAP.md)
+  row SD-07; no inferred grid ever reaches a verdict about its input.
 - **Semantics.** `Scope`, `/Headers`, a caption's relation to its table, a
   merged cell's meaning: a producer states them or nobody does.
 - **A probability.** Evidence is named (`Ruled`, `Aligned`) and warnings are
   typed; no score pretends to a calibration nobody has.
 - **Serialisation.** CSV and JSON are the structured-text-serialisation
   row's; `InferredTable` is shaped so that row can write it.
+  That row is [ROADMAP](../ROADMAP.md) FT-32 since 9 October 2026.
 
 ## What the corpus carries, measured
 
@@ -151,9 +158,11 @@ What it does not give: **bounding boxes** (computed from segments; a path
 with a curve is not a rule and is not one), **classification** (a rule is the
 consumer's threshold — axis-aligned to within 0.5 pt over its length, at
 least two ems long, at most 2 pt thick or a filled rectangle at most 2 pt in
-one dimension), **line assembly** (`TextDevice`'s, as ever), and **a
-replay** — the second interpretation per page until the retained-page row
-lands, exactly as the reading-order design records.
+one dimension), **line assembly** (`TextDevice`'s, as ever), and — until
+September 2026 — **a replay**. The retained-page row landed then:
+`tinker_pdf_content::replay` hands a transcript to any device, so the
+`TextDevice` can be fed the recording rather than a second interpretation of
+the page.
 
 ### The lattice
 
@@ -250,8 +259,9 @@ sentence.
 
 - **`RecordingDevice`** — exists; this consumer is the one that pays for
   `state: true`.
-- **A replay of a transcript into a device** — does not exist (the
-  retained-page row); two interpretations per page until it does.
+- **A replay of a transcript into a device** — exists since September
+  2026 (`tinker_pdf_content::replay`, the retained-page row's deliverable);
+  one interpretation per page.
 - **`structure.rs`** — exists; **reads no attributes**, and milestone 1 is
   where the reader lands for both this design and
   [design/pdfua.md](pdfua.md).
@@ -278,7 +288,200 @@ sentence.
 
 ## As built
 
-*Filled in as milestones land.* Nothing has landed; the roadmap row is not
-scheduled. The census numbers above were produced by a scratch program that
-is not in the tree, which is why milestone 1's first exit criterion is a test
-that re-derives them.
+**Milestone 1 (3 October 2026): stated tables.** The attribute reader the
+design asked for had already landed with the tagged-writing row —
+`StructElement::table` reads `/A`'s `/Table`-owned `/Headers`, `/Scope`,
+`/Summary`, `/RowSpan` and `/ColSpan`, and `StructElement::id` reads `/ID` —
+so this milestone shrank to the walk. `Page::stated_tables`
+(`crates/tinker-pdf/src/tables.rs`) finds every `Table` element, its `TR`
+rows through `THead`, `TBody`, `TFoot` and any other grouping element, and
+each row's `TH` and `TD` cells, never walking into a `Table` inside a cell;
+each cell's characters are the ones the structure join claims for its
+subtree over the **same** `TextPage` (`StructureTree::element_runs`, the
+page's sequences grouped once — once a page, every table's cells joined in
+one call, since the review of this lane found a call a table, which was the
+page's characters times its tables: four thousand one-cell tables took 86
+seconds unoptimised and take under one). Cells are placed as a table model places
+them — each in its row's first column no span above still holds — and what
+the file's arithmetic does not allow is named rather than repaired:
+`TableWarning::SpanInconsistent` for a cell over a held slot, a row span
+past the last row, or a column span past the most columns a table of that
+many cells can have (the clamp that keeps a `/ColSpan` of four billion from
+being an allocation; each span is compared with what is left of the table,
+never added to where it starts, which on a 32-bit target overflowed), and
+`TableWarning::RaggedRows` for a row whose width is
+not the table's. Placement asks a segment tree over the columns where the
+next free one is, so a table whose every cell spans every row is a logarithm
+per cell and not a walk.
+
+Measured, first-party (`crates/tinker-pdf/tests/tables.rs`): an EPUB table
+with a header row, a column span and a row span reads back as its markup
+states it — 5 rows, 3 columns, 13 cells at their places, the header cells
+`TH` with `/Scope /Column`, every cell's characters spelling its text; five
+of the nine committed books carry one twelve-cell table each, all regular.
+`table_census.rs` counts the family per corpus by `standard_type` and reads
+every stated table on the pages it scores, in `corpus.yml`'s census step.
+**The corpus counts are owed**: the census has not run where this landed,
+so the 207 files, 1 908 tables and 74 474 `TD`s above are printed beside
+what the first run measures rather than asserted, and the eight span
+fixtures' spans are printed by name for the same reason.
+
+**Milestone 2 (3 October 2026): rules, through the same one
+interpretation.** The tee device the reading-order inference reads text
+through (`crates/tinker-pdf/src/observe.rs`) now keeps the ink beside the
+glyphs: every straight stroked segment axis-aligned to within 0.5 pt over its
+length and at most 2 pt wide, every filled rectangle at most 2 pt in one
+dimension, as a `TableRule` (`horizontal`, `at`, `from`, `to`, `width`) in
+default user space; curves, diagonals, bars and specks are not rules. It
+accumulates the clip itself — `q`, `Q` and a form's bracket save and restore
+it, each `W` intersects it while it stays a rectangle — cuts a rule to it,
+and refuses and counts one drawn under a clip that is not a rectangle
+(`TableWarning::ClipNotRectangular`). A rule in a hidden layer is not on the
+page and is not kept. `MAX_TABLE_RULES` (16 384, a `bounds_ledger.rs` row)
+bounds the page: past it no rule is read and `TableWarning::TooManyRules`
+says how many were drawn. `Page::table_rules` exposes the rules as the
+evidence an inferred table is built on. **The cap is not sized from the
+corpus**, which the design asked for; its yardsticks are arithmetic, and the
+census prints the most rules any scored page draws so the number can be
+checked against the first run.
+
+Measured, first-party (`crates/tinker-pdf/tests/tables.rs`): a grid of three
+rows of four cells stroked as lines yields exactly its nine lines at the
+coordinates and weight drawn; the same grid drawn as twelve cells' CSS-style
+borders yields forty-eight rules, four a cell, centred on each border
+rectangle; a rectangular clip cuts a rule and `Q` lifts it; a triangular
+clip refuses the rule and names it; the cap plus one rules reads none.
+
+**Milestone 3 (3 October 2026): ruled tables.** `Page::inferred_tables`
+(opt-in, `TableEvidence::Ruled`, never a structure element) merges rules
+along one axis within `LATTICE_MERGE_EMS` (half an em) into one lattice line
+— the halves of a collapsed CSS border, or the two borders of cells with the
+default 2 px spacing between them — and collinear pieces whose gaps are no
+wider into one segment; joins lines that reach each other to within the same
+distance; and reads each maximal joined set as a lattice whose lines bound
+the cells. Each character goes to the cell holding its box's centre, so a
+text-device line across two cells is split at the rule, and a glyph a rule
+runs through the middle of is counted (`TextCrossesRule`). Rows read top to
+bottom, cells left to right, a cell's lines top first; the permutation gives
+every character's stream position. Refused rather than guessed: a lattice of
+one cell (a box), one with text in fewer than two cells or fewer than one in
+`LATTICE_TEXT_SHARE` (four) — a form, or hatching, checked before any cell is
+made, so a lattice of forty thousand cells around one word costs nothing —
+and a lattice inside another's frame, in one of its cells or in one merged
+from several (`NestedLattice` on the outer); two whose frames overlap with
+neither inside the other are both refused (`LatticesCross`), so no character
+is in two tables, and each lattice reads only the characters within its frame.
+A table whose last rule lies in the foot band is `MayContinue`. On a page whose tree
+states a table, the stated one is the answer (`TreePresent`), and
+`Page::tables(TableSource)` labels which it gave. **Two departures**:
+`RULE_MIN_EMS` is one em, not two, because a one-line row with CSS's ordinary
+padding is about 1.75 em tall; and the design's "at least a 2 × 2 lattice"
+is read as at least two cells, since one cell is a framed paragraph.
+
+Measured, first-party (`crates/tinker-pdf/tests/tables.rs`): an untagged
+ruled grid of three rows by four columns drawn a column at a time is read row
+by row, every cell its own text; tagged row by row, with the tree hidden, it
+is found over the stated table with the same grid and 48 of 48 characters in
+their stated cells; an EPUB table of five rows by three columns with every
+cell bordered is recovered exactly in both of CSS 2.2 §17.6's border models,
+63 of 63 characters each, against the tree the EPUB writer made from the
+XHTML; and **no table is inferred on any of the 53 committed pages** — every
+`testdata` page and every book page whose tree states none — nor in a framed
+paragraph, a form of sixteen boxes and two labels, or a page of hatching. The
+committed books' five stated tables are not ruled, so they wait for aligned
+tables. The census prints found, grid agreement, cell assignment and extra
+tables per corpus with the tree hidden — cell assignment cell by cell, a
+character placed only in a cell at its stated row and column with its stated
+spans, and the stated spans reproduced counted beside it, since the review
+of this lane found spans never scored — and asserts the veraPDF zero;
+**those corpus scores, and that zero's first run, are owed**.
+
+**Milestone 4 (3 October 2026): spans, header evidence, direction.** A grid
+cell whose boundary with a neighbour no lattice segment rules — a segment at
+that line covering at least half the boundary, within the lattice's reach —
+is one cell with it, and the shape the missing rules leave is a span when it
+is a rectangle; when it is not (an L), it stays grid cells and
+`TableWarning::SpanNotRectangular` says where, a typed name of its own
+because `SpanInconsistent` is about a producer's stated arithmetic, not about
+ink. `InferredTable::header` is `HeaderEvidence`: `FillBeneath` when every
+first-row cell is shaded and no second-row cell is (the observer now keeps
+filled rectangles that are not rules, with whether they inked anything);
+`RuleBeneath` when the rule under the first row is half again as heavy as the
+table's other interior rules, or doubled where they are single; `FirstRow`
+otherwise, which is no evidence and says so; `None` for one row. Columns are
+counted, and cells read, right to left when most of the table's characters are
+on right-to-left lines.
+
+Measured, first-party: the EPUB table with a column span and a row span,
+bordered cell by cell, is recovered with exactly its stated spans in both
+border models, 59 of 59 characters in their stated cells; a missing rule is a
+column span of two and an L of missing rules is named; a grey first row is
+`FillBeneath`, its unfilled twin `FirstRow`, a striped table `FirstRow`, a
+rule three times as heavy or doubled `RuleBeneath`, and an EPUB table whose
+`th` cells have a background `FillBeneath`; a Hebrew ruled grid reads from its
+rightmost cell. **Two of the milestone's exits are not met here.** The design's
+eight veraPDF span fixtures are in the fetched corpus, so the census prints
+their stated and inferred spans by name and the reproduction is owed; and
+"an Arabic EPUB table orders cells right to left" cannot be built, because the
+EPUB path does not lay out `direction: rtl` (a refused property), so the
+right-to-left fixture is a builder grid whose glyphs are set in visual order.
+
+**Milestone 5 (3 October 2026): aligned tables, labelled.** Where no ruled
+table stands, each text-device line is cut into fragments at every gap of an
+em or more between glyphs that are not spaces (`ALIGNED_GAP_EMS`; a word
+space is a quarter to a third of one, and a run of space glyphs a producer
+pads columns with is the gap, not ink across it),
+fragments sharing a baseline to within half an em are a row, and a run of at
+least three consecutive rows (`ALIGNED_REPEATS`), each of two fragments or
+more and no more than two lines apart, is a candidate. Its columns are the
+left edges — right edges when most of its text is right to left — that three
+rows share to within a quarter em (`ALIGNED_EDGE_EMS`); each fragment belongs
+to the last column starting at or before it, which is what lets a header row
+centred over its columns land in them. The result is `TableEvidence::Aligned`
+with `TableWarning::NoRules`. Not a table: a run whose columns do not recur,
+text in fewer than one cell in four (checked before any cell is made), and —
+the false positive that matters — **two or more columns as wide as a column
+of prose** (`COLUMN_MIN_WIDTH_EMS`, the reading-order inference's constant),
+which is a page set in columns rather than a table. The census scores
+`Ruled` and `Aligned` separately and never averages them.
+
+Measured, first-party: the two calibre books' unruled twelve-cell table — a
+centred header row over three body columns at recurring left edges — is found
+`Aligned` over the stated table, the same 4 × 3 grid, 135 of 135 characters in
+their stated cells; an unruled table tagged row by row and drawn column by
+column, each row set up to a point off the others, is found with 51 of 51; a
+report whose columns are padded with spaces inside one string per row is cut
+into its 4 × 3 cells; a paragraph of prose, two columns of prose, two aligned
+rows and a Courier listing whose every word starts under the one above are
+not tables; and still no table is inferred on any of the
+53 committed pages that state none. Recall over the committed books' five
+stated tables is **two of five, both by alignment**. The other three are the
+pandoc books', which this engine lays out as running text rather than a grid:
+pandoc's stylesheet sets `table { display: block }`, and CSS 2.2 §17.2.1 would
+still wrap the orphaned rows in an anonymous table, which the EPUB path does
+not — a layout gap recorded here and not fixed in this row. The census's
+recall-by-evidence figures over the corpus are **owed**.
+
+**Milestone 6 (3 October 2026): the surface and the handoff.**
+`tpdf text --tables` prints each page's tables instead of its text — the ones
+its structure tree states, or else the inferred ones labelled by their
+evidence, with their header evidence and warnings — a line for each table and
+one for each cell, a span written as a range, so the output is as long as the
+cells and not as the grid. The reading-order handoff is the sibling design's
+`TableSuspected`: the reading-order inference asks for the page's **ruled**
+tables only (`ruled_tables`, the lattice half of the inference without the
+aligned pass) and reads each as one block in the permutation's order; here,
+on a page whose tree states a table, the answer stays the stated one
+(`TreePresent`). A fault in milestone 3 was found on the way and fixed in its
+own commit: nesting was asked as "inside one grid cell", so a small grid set
+in a cell merged from two was nested in neither and both tables claimed its
+characters — which the handoff would have read twice. Nesting is now frame
+containment, lattices whose frames cross are refused and named
+(`LatticesCross`), and each lattice reads only the characters whose centres
+fall in its frame, by binary search over two sorted copies, rather than every
+character on the page. Every `TableWarning` variant is reached by a fixture.
+**The roadmap row stays, narrowed**: the census's counts (the 207 files,
+1 908 tables and 74 474 `TD`s), its found, grid, cell and extras scores, zero
+extras over the veraPDF fixtures, the eight span fixtures and
+`MAX_TABLE_RULES` against the corpus's most rules on a page are all owed —
+the census has not run where this was written.

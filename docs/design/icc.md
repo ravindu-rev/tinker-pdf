@@ -50,11 +50,17 @@ records what they measured.
 - **Output intents and proofing** (14.11.5): `/OutputIntents` handling
   belongs to [pdfa](pdfa.md); this design converts for the screen, to
   sRGB, always.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: soft proofing is [ROADMAP](../ROADMAP.md)
+  row RC-05.
 - **N-channel output, overprint and spot-ink simulation.** `Separation` /
   `DeviceN` keep flowing through their tint transforms (8.6.6.4, 8.6.6.5);
   simulating ink interaction is a different renderer.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: overprint simulation and separations are
+  [ROADMAP](../ROADMAP.md) rows RC-03 and RC-04.
 - **Black point compensation, gamut mapping beyond intent selection,
   iccMAX/v5 profiles, named-colour tags.** Refused by name, per ruling 2.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) rows RC-02 and
+  RC-20.
 - **Profiles embedded inside image codecs.** JPX colour boxes already have
   their own path in `tinker-pdf-filters`; routing them through this CMM is
   scheduled by corpus evidence (ruling 3), not assumed here.
@@ -165,11 +171,19 @@ error smaller than half a level, so RGB→CMYK→RGB is the identity for all
 sixteen million colours — swept exhaustively as 32 896 `(v, max)` pairs, since
 `K` is fixed by the maximum and each channel is then independent. What *is*
 approximate is the other direction: a CMYK value that did not come from the
-inverse — a rich black — comes back as its pure-K equivalent. Nothing in this
-engine authors CMYK components (`resolve_color` flattens every source colour to
-sRGB at the resource seam), so every value in a group buffer originated from
-the inverse and round-trips. The day components cross that seam, this is the
-paragraph to revisit. Soft-mask luminosity (11.6.5.2) reads the group's
+inverse — a rich black — comes back as its pure-K equivalent. **Since October
+2026 such values exist**: a DeviceCMYK colour's own components cross the
+resource seam beside its light (`FontSource::resolve_ink`,
+`GraphicsState::fill_ink`), and a CMYK buffer — a `/DeviceCMYK` group's, or a
+page asked for in ink — composites them. Leaving a CMYK group for an additive
+parent takes them through 8.6.4.4 forward, which needs no inverse and is exact;
+a non-isolated group over a parent of its own format adopts the backdrop as the
+parent's bytes and takes the same bytes out at close (`Canvas::adopt_backdrop`,
+`remove_backdrop`), where until the lane's review both went through light and
+a rich black under the group was blended against as pure K; what does not
+round-trip is a non-separable blend inside the group, whose operands go to
+light and back, and `RenderWarning::ApproximatedGroupBlend` already names
+that. Soft-mask luminosity (11.6.5.2) reads the group's
 own space — but **not for free, and not where this doc expected**. `to_mask`
 reads through `Canvas::pixel`, which already applies the group's own relation,
 so the space arrives on its own. The real defect was the *weighting*:
@@ -309,6 +323,9 @@ actually asks for is that the **default** be right, and 8.6.5.8 makes that
 `RelativeColorimetric` — which is `A2B1`, which is what the parser reaches for
 first. Selecting a non-default intent is left unbuilt and said so here, rather
 than built for five files that may not even exercise it.
+*In scope since 9 October 2026*: the owner's parity decision makes every intent
+[ROADMAP](../ROADMAP.md) row RC-01, and ruling 3 as amended uses this count to
+order the row inside its tier rather than to decline it.
 
 The wrinkle if it is ever wanted: an intent is graphics state and a transform
 is compiled per colour space, so a space would need one compiled transform per

@@ -50,8 +50,13 @@ oids! {
     /// say which weak algorithm it was.
     SHA1_WITH_RSA = "1.2.840.113549.1.1.5",
         [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05];
-    /// RSASSA-PSS. Named, not decoded: its parameters are a structure of
-    /// their own and reading them is CMS work.
+    /// MGF1 (RFC 8017 B.2.1), the one mask generation function an
+    /// `RSASSA-PSS-params` may name ([`crate::pss`]).
+    MGF1 = "1.2.840.113549.1.1.8",
+        [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x08];
+    /// RSASSA-PSS, whose parameters [`crate::pss::parameters`] reads. Also a
+    /// SubjectPublicKeyInfo algorithm, whose key is an `RSAPublicKey` exactly
+    /// as under `rsaEncryption` (RFC 4055 §1.2).
     RSASSA_PSS = "1.2.840.113549.1.1.10",
         [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0A];
     SHA256_WITH_RSA = "1.2.840.113549.1.1.11",
@@ -105,6 +110,10 @@ oids! {
     /// `/Recipients` (ISO 32000-1 7.6.5), read by [`crate::enveloped`].
     ID_ENVELOPED_DATA = "1.2.840.113549.1.7.3",
         [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x03];
+    /// `id-ct-TSTInfo` (RFC 3161 §2.4.2): the encapsulated content of a
+    /// timestamp token, read by [`crate::tsp`].
+    ID_CT_TST_INFO = "1.2.840.113549.1.9.16.1.4",
+        [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x10, 0x01, 0x04];
     /// `id-signedData`: the only `ContentInfo` [`crate::cms`] reads.
     ID_SIGNED_DATA = "1.2.840.113549.1.7.2",
         [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02];
@@ -131,6 +140,12 @@ oids! {
     /// it against a clock when it was written.
     AA_SIGNING_TIME = "1.2.840.113549.1.9.5",
         [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x05];
+    /// `id-aa-signingCertificate` (RFC 2634 §5.4): the first version, whose
+    /// certificate digests are SHA-1 with no algorithm field. What RFC 3161
+    /// §2.4.1 requires in a timestamp token, and what OpenSSL's TSA writes by
+    /// default.
+    AA_SIGNING_CERTIFICATE = "1.2.840.113549.1.9.16.2.12",
+        [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x10, 0x02, 0x0C];
     /// `id-aa-signingCertificateV2` (RFC 5035 §3): digests of the
     /// certificates the signer says it used.
     AA_SIGNING_CERTIFICATE_V2 = "1.2.840.113549.1.9.16.2.47",
