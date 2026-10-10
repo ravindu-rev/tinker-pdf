@@ -39,8 +39,14 @@ const HET_VAV: &str = "\u{5D7}\u{5D5}";
 /// Arabic hah, waw, teh: `hut`, a whale, as it is read.
 const HUT: &str = "\u{62D}\u{648}\u{62A}";
 
+/// Pe, resh, yod, tet: `prit`, an item, as it is read.
+const PRIT: &str = "\u{5E4}\u{5E8}\u{5D9}\u{5D8}";
+
+/// Tav, pe, vav, het, yod, final mem: `tapuchim`, apples, as it is read.
+const TAPUCHIM: &str = "\u{5EA}\u{5E4}\u{5D5}\u{5D7}\u{5D9}\u{5DD}";
+
 /// Everything any page here draws.
-const COVERS: &str = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}\u{5B8}\u{646}\u{633}\u{628}\u{629}\u{7CA}\u{7CB}\u{7CC} 0123456789seonwab.%\u{5D7}\u{62D}\u{648}\u{62A},\u{2014}";
+const COVERS: &str = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}\u{5B8}\u{646}\u{633}\u{628}\u{629}\u{7CA}\u{7CB}\u{7CC} 0123456789seonwab.%\u{5D7}\u{62D}\u{648}\u{62A},\u{2014}\u{5E4}\u{5E8}\u{5D9}\u{5D8}\u{5EA}()\u{2022}";
 
 /// The font size, and so the advance of every glyph: the face's 500 units of
 /// a 1000-unit em at twenty points is ten.
@@ -340,6 +346,33 @@ fn a_right_to_left_line_opening_with_a_dash_reads_the_dash_last() {
     assert_eq!(
         extract_lines(page(&visual(&drawn))),
         [(format!("{SHALOM} \u{2014}"), false)]
+    );
+}
+
+/// **A right-to-left line that opens with a mark and a number reads as
+/// typed** (review of the comma tie-break). `(1) פריט`, `— 2026 שלום` and
+/// `• 5 תפוחים`, each a right-to-left paragraph's line alone, are drawn with
+/// the number next to the mark, `טירפ )1(`: a letter leftmost, punctuation
+/// rightmost and nothing left to right, the tie-break's shape. But no
+/// left-to-right paragraph draws a European number there, so a left-to-right
+/// reading has no order that checks, and the tie-break taken regardless
+/// returned the search's first candidate, which draws another line:
+/// `פריט )1(`. The tie-break now takes left to right only where a
+/// left-to-right reading draws the line as it stands.
+#[test]
+fn a_right_to_left_line_opening_with_a_mark_and_a_number_reads_as_typed() {
+    let lines = [
+        visual(&format!("{} )1(", reversed(PRIT))),
+        visual(&format!("{} 2026 \u{2014}", reversed(SHALOM))),
+        visual(&format!("{} 5 \u{2022}", reversed(TAPUCHIM))),
+    ];
+    assert_eq!(
+        extract_lines(page_of(&lines)),
+        [
+            (format!("(1) {PRIT}"), true),
+            (format!("\u{2014} 2026 {SHALOM}"), true),
+            (format!("\u{2022} 5 {TAPUCHIM}"), true),
+        ]
     );
 }
 

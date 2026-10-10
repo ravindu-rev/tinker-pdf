@@ -395,11 +395,17 @@ living in one feature's head.
     every `White_Space` character, so that a no-break space — `CS`, because
     it separates digits — is not taken for a comma. Every other line keeps
     the rule above, and a line with an `L` character anywhere is out of the
-    tie-break's reach. The forward check is unchanged: both paragraphs draw
-    the tie-break's line, and the order returned draws it under the
-    direction chosen (`tinker_pdf_shape::bidi::drawn_direction` chooses;
+    tie-break's reach. And the tie-break is taken **only where a
+    left-to-right paragraph draws the line**: `logical_order`'s search, run
+    for a left-to-right reading, must reach an order that `order_units`
+    draws as the line stands — the forward check every answer already
+    passes, asked once more before the direction is chosen — or the line
+    stays right to left. As first written, the shape alone decided, on the
+    belief that both paragraphs always draw it; a line holding a number is
+    the counter-example (the price, below), and review caught it the same
+    day. `tinker_pdf_shape::bidi::drawn_direction` chooses and asks;
     `logical_order` for a given direction is untouched, and
-    `bidi_conformance.rs` holds it to Unicode's file as before).
+    `bidi_conformance.rs` holds it to Unicode's file as before.
 
     *Why.* CI's `epub-corpus` job reads Project Gutenberg's Moby-Dick, whose
     etymology table sets the Hebrew `חו,` alone in a cell: a left-to-right
@@ -414,10 +420,20 @@ living in one feature's head.
     reading wins.
 
     *The price, accepted with that knowledge.* A line of a right-to-left
-    paragraph that opens with punctuation — a dialogue dash, `— שלום`, drawn
-    `םולש —` — and is alone on its line, with no left-to-right character,
-    reads with the mark at its end: `שלום —`. That is pinned by name, so
-    that changing the decision is a visible one.
+    paragraph that opens with punctuation — a dialogue dash, `— שלום`,
+    drawn `םולש —`, a bullet, a bracket — and is alone on its line, with no
+    left-to-right character, reads with the mark at its end: `שלום —`.
+    **A European number after the mark** spares the line: `(1) פריט`,
+    `— 2026 שלום` and `• 5 תפוחים` are drawn with the number next to the
+    mark, `טירפ )1(`, which no left-to-right paragraph draws — there a
+    European number with no right-to-left letter before it is left to right
+    (W7), and one with a letter before it is drawn left of that letter — so
+    they read as typed. Before the forward check was asked they read
+    `פריט )1(`, an order that draws another line. **Two shapes still pay**:
+    Arabic-Indic digits, which are `AN` and untouched by W7, so `— ١ بند`
+    reads `١ بند —`; and a number that is not next to the mark,
+    `— שלום 5 חו`, which reads `שלום 5 חו —`. All of it is pinned by name,
+    so that changing the decision is a visible one.
 
     *The tests that hold it.* `text_logical_order.rs`:
     `a_right_to_left_word_and_its_comma_alone_on_a_line_read_as_written`
@@ -425,8 +441,9 @@ living in one feature's head.
     `a_right_to_left_line_ending_in_a_full_stop_still_reads_right_to_left`
     (`שלום.`, the stop drawn leftmost, unchanged),
     `a_line_holding_a_left_to_right_character_keeps_its_rule`,
-    `a_right_to_left_line_opening_with_a_dash_reads_the_dash_last` (the
-    price) and `no_left_to_right_page_moves`; `epub_fallback.rs`'s
+    `a_right_to_left_line_opening_with_a_mark_and_a_number_reads_as_typed`
+    (the forward check), `a_right_to_left_line_opening_with_a_dash_reads_the_dash_last`
+    (the price) and `no_left_to_right_page_moves`; `epub_fallback.rs`'s
     `a_standard_14_hebrew_word_alone_on_its_line_is_drawn_right_to_left`
     (the book's table, `חו,`); `text_order.rs`'s
     `a_word_and_its_comma_alone_read_as_their_paragraph_drew_them` (the
@@ -435,7 +452,9 @@ living in one feature's head.
     tie-break's classes and both readings drawing the line
     (`a_right_to_left_word_and_its_punctuation_alone_read_left_to_right`,
     `the_tie_break_reaches_no_other_line`,
-    `a_right_to_left_line_opening_with_a_dash_reads_it_trailing`).
+    `a_mark_and_a_number_opening_a_right_to_left_line_read_as_typed`, and
+    `a_right_to_left_line_opening_with_a_dash_reads_it_trailing`, which
+    pins the price's three shapes).
 
 ## How to add a ruling
 

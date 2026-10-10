@@ -482,6 +482,19 @@ pub fn logical_order(visual: &[&str], direction: BaseDirection) -> Vec<usize> {
         BaseDirection::Auto => drawn_direction(visual),
         given => given,
     };
+    match read_back(visual, direction) {
+        Ok(order) | Err(order) => order,
+    }
+}
+
+/// [`logical_order`]'s search, for a paragraph direction already known:
+/// `Ok` with the first order that checks — drawn by [`order_units`] under
+/// `direction`, it is `visual` unit for unit — or `Err` with the first
+/// candidate, every unit placed once, where none does.
+///
+/// [`drawn_direction`]'s comma tie-break asks the same question of a
+/// left-to-right reading, and takes it only on `Ok`.
+fn read_back(visual: &[&str], direction: BaseDirection) -> Result<Vec<usize>, Vec<usize>> {
     let count = visual.len();
     let as_drawn = unit_levels(visual, direction);
     let backwards: Vec<&str> = visual.iter().rev().copied().collect();
@@ -511,7 +524,7 @@ pub fn logical_order(visual: &[&str], direction: BaseDirection) -> Vec<usize> {
                     .zip(visual)
                     .all(|(at, unit)| read.get(*at) == Some(unit))
             {
-                return order;
+                return Ok(order);
             }
             let mut carried = levels.clone();
             for (position, at) in order.iter().enumerate() {
@@ -526,7 +539,7 @@ pub fn logical_order(visual: &[&str], direction: BaseDirection) -> Vec<usize> {
             levels = carried;
         }
     }
-    first.unwrap_or_else(|| (0..count).collect())
+    Err(first.unwrap_or_else(|| (0..count).collect()))
 }
 
 /// P2 for a line given in **visual** order: which way its paragraph runs.
@@ -547,26 +560,42 @@ pub fn logical_order(visual: &[&str], direction: BaseDirection) -> Vec<usize> {
 ///
 /// A line whose strong characters are all right to left has two ends that
 /// agree, and is right to left — except where it is drawn as a right-to-left
-/// word with punctuation after it: its leftmost unit a strong `R` or `AL`
-/// character and its rightmost **punctuation**, a unit whose class is `CS`,
-/// `ON`, `ES` or `ET` (not a number, `EN` or `AN`, and not a mark, `NSM`).
-/// That line is left to right. A unit is classed by its first character
-/// that draws something, and units that draw nothing are passed over at
-/// either end, as rule L1 passes them over at a line's end: whitespace
-/// (`WS`, `S`, `B`, and every `White_Space` character, so a no-break space,
-/// which is `CS` because it separates digits, is not punctuation), the
-/// characters X9 removes and the isolate formatting characters.
+/// word with punctuation after it **and a left-to-right paragraph draws it**.
+/// The shape: its leftmost unit a strong `R` or `AL` character and its
+/// rightmost **punctuation**, a unit whose class is `CS`, `ON`, `ES` or `ET`
+/// (not a number, `EN` or `AN`, and not a mark, `NSM`). A unit is classed by
+/// its first character that draws something, and units that draw nothing are
+/// passed over at either end, as rule L1 passes them over at a line's end:
+/// whitespace (`WS`, `S`, `B`, and every `White_Space` character, so a
+/// no-break space, which is `CS` because it separates digits, is not
+/// punctuation), the characters X9 removes and the isolate formatting
+/// characters. The check: [`logical_order`]'s search, run for a left-to-right
+/// paragraph, reaches an order that [`order_units`] draws as the line stands.
+/// Where it reaches none, the line is right to left as before. That is one
+/// more search, run only on a line of the tie-break's shape.
 ///
-/// Both paragraphs draw that line — a left-to-right one draws a quoted
+/// Where both paragraphs draw the line — a left-to-right one draws a quoted
 /// Hebrew word and its comma `וח,`, and a right-to-left one draws a line
-/// that *opens* with the comma the same — so P2 cannot be read off it, and
+/// that *opens* with the comma the same — P2 cannot be read off it, and
 /// this takes the commoner of the two: a right-to-left word quoted in a
 /// left-to-right text, followed by its comma or full stop. [`logical_order`]
 /// reads the line either way as an order that draws it; only which order is
-/// returned depends on this. The cost is the other reading: a lone line of
-/// a right-to-left paragraph that opens with punctuation, a dialogue dash,
-/// reads with that mark at its end. Ruling 14 (`docs/rulings.md`), amended
+/// returned depends on this. Ruling 14 (`docs/rulings.md`), amended
 /// 10 October 2026 by the owner, records the choice.
+///
+/// # What it costs
+///
+/// A lone line of a right-to-left paragraph, holding nothing left to right,
+/// that opens with punctuation — a dialogue dash, a bullet — reads with that
+/// mark at its end: `— שלום`, drawn `םולש —`, reads `שלום —`. Not when a
+/// European number follows the mark: `(1) פריט`, `— 2026 שלום` and
+/// `• 5 תפוחים` are drawn with the number next to the mark, `טירפ )1(`, and
+/// no left-to-right paragraph draws that, because there a European number
+/// with no right-to-left letter before it is left to right (W7) and one with
+/// a letter before it is drawn left of that letter. Arabic-Indic digits are
+/// `AN`, which W7 does not touch, so `— ١ بند` still pays and reads
+/// `١ بند —`; so does a line whose number is not next to the mark,
+/// `— שלום 5 חו`.
 #[must_use]
 pub fn drawn_direction(visual: &[&str]) -> BaseDirection {
     let strong = |c: char| match unicode::bidi_class(c) {
@@ -590,7 +619,11 @@ pub fn drawn_direction(visual: &[&str]) -> BaseDirection {
     }
     match (leftmost, rightmost) {
         (Some(false), Some(false)) => BaseDirection::LeftToRight,
-        (Some(true), Some(true)) if ltr == 0 && trailing_punctuation(visual) => {
+        (Some(true), Some(true))
+            if ltr == 0
+                && trailing_punctuation(visual)
+                && read_back(visual, BaseDirection::LeftToRight).is_ok() =>
+        {
             BaseDirection::LeftToRight
         }
         (Some(true), Some(true)) => BaseDirection::RightToLeft,
@@ -1265,8 +1298,8 @@ pub fn mirror(c: char, level: Level) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::{
-        drawn_direction, logical_order, mirror, order_units, reorder, BaseDirection, Level,
-        Paragraph,
+        drawn_direction, logical_order, mirror, order_units, read_back, reorder, BaseDirection,
+        Level, Paragraph,
     };
 
     fn levels(text: &str, direction: BaseDirection) -> Vec<u8> {
@@ -1672,26 +1705,87 @@ mod tests {
         }
     }
 
+    /// `text` as one-character units.
+    fn chars(text: &str) -> Vec<String> {
+        text.chars().map(String::from).collect()
+    }
+
+    /// **The tie-break takes left to right only where a left-to-right
+    /// paragraph draws the line** (review of the amendment). A right-to-left
+    /// paragraph's line that opens with a mark and a European number is drawn
+    /// with the number next to the mark, `טירפ )1(`: the tie-break's shape,
+    /// which no left-to-right paragraph draws. Taken left to right regardless,
+    /// [`logical_order`] found no order that checks and returned its first
+    /// candidate, `פריט )1(`, which draws another line. Such a line is right to
+    /// left again and reads as typed. The last is Persian digits, which are
+    /// `EN` too.
+    #[test]
+    fn a_mark_and_a_number_opening_a_right_to_left_line_read_as_typed() {
+        let shalom = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}";
+        for typed in [
+            "(1) \u{5E4}\u{5E8}\u{5D9}\u{5D8}".to_owned(),
+            format!("\u{2014} 2026 {shalom}"),
+            "\u{2022} 5 \u{5EA}\u{5E4}\u{5D5}\u{5D7}\u{5D9}\u{5DD}".to_owned(),
+            format!("- 5 {shalom}"),
+            "\u{2014} \u{6F1} \u{628}\u{646}\u{62F}".to_owned(),
+        ] {
+            let line = drawn(&typed, BaseDirection::RightToLeft);
+            let units = chars(&line);
+            let units: Vec<&str> = units.iter().map(String::as_str).collect();
+            assert!(
+                read_back(&units, BaseDirection::LeftToRight).is_err(),
+                "a left-to-right paragraph draws {line:?}"
+            );
+            assert_eq!(
+                drawn_direction(&units),
+                BaseDirection::RightToLeft,
+                "{typed:?} drawn {line:?}"
+            );
+            let read = read_in(&units, &logical_order(&units, BaseDirection::Auto));
+            assert_eq!(read, typed, "drawn {line:?}");
+        }
+    }
+
     /// **The price, named** (ruling 14's amendment): a lone line of a
     /// right-to-left paragraph that opens with punctuation — a dialogue
     /// dash — is drawn as the tie-break's shape and reads with the dash at
-    /// its end. Both readings draw it; this is the one the owner chose.
+    /// its end. Both readings draw it; this is the one the owner chose. So do
+    /// the two shapes of it that a number does not save: Arabic-Indic digits,
+    /// `AN`, which a left-to-right paragraph draws next to the mark too, and a
+    /// number that is not next to the mark.
     #[test]
     fn a_right_to_left_line_opening_with_a_dash_reads_it_trailing() {
         let shalom = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}";
-        let typed = format!("\u{2014} {shalom}");
-        let line = drawn(&typed, BaseDirection::RightToLeft);
-        let units: Vec<String> = line.chars().map(String::from).collect();
-        let units: Vec<&str> = units.iter().map(String::as_str).collect();
-        assert_eq!(drawn_direction(&units), BaseDirection::LeftToRight);
-        assert_eq!(
-            read_in(&units, &logical_order(&units, BaseDirection::Auto)),
-            format!("{shalom} \u{2014}")
-        );
-        assert_eq!(
-            read_in(&units, &logical_order(&units, BaseDirection::RightToLeft)),
-            typed,
-            "a reader told the paragraph's direction still reads it as typed"
-        );
+        let band = "\u{628}\u{646}\u{62F}";
+        for (typed, read) in [
+            (format!("\u{2014} {shalom}"), format!("{shalom} \u{2014}")),
+            (
+                format!("\u{2014} \u{661} {band}"),
+                format!("\u{661} {band} \u{2014}"),
+            ),
+            (
+                format!("\u{2014} {shalom} 5 \u{5D7}\u{5D5}"),
+                format!("{shalom} 5 \u{5D7}\u{5D5} \u{2014}"),
+            ),
+        ] {
+            let line = drawn(&typed, BaseDirection::RightToLeft);
+            let units = chars(&line);
+            let units: Vec<&str> = units.iter().map(String::as_str).collect();
+            assert_eq!(
+                drawn_direction(&units),
+                BaseDirection::LeftToRight,
+                "{typed:?}"
+            );
+            assert_eq!(
+                read_in(&units, &logical_order(&units, BaseDirection::Auto)),
+                read
+            );
+            assert_eq!(drawn(&read, BaseDirection::LeftToRight), line, "{typed:?}");
+            assert_eq!(
+                read_in(&units, &logical_order(&units, BaseDirection::RightToLeft)),
+                typed,
+                "a reader told the paragraph's direction still reads it as typed"
+            );
+        }
     }
 }
