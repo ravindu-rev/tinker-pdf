@@ -335,7 +335,8 @@ living in one feature's head.
     direction is P2 read off the drawn line, by `Bidi_Class`: a
     left-to-right paragraph draws its first strong character leftmost and a
     right-to-left one rightmost, so the two ends decide, and the majority
-    only where they disagree.
+    only where they disagree — with one tie-break for a line with no
+    left-to-right character, the amendment below.
 
     *Decided 3 October 2026, and why this way.* The pin in
     `crates/tinker-pdf/tests/epub_shaped.rs` asserted the backwards line by
@@ -378,6 +379,63 @@ living in one feature's head.
     this ruling — and the reordering lives in the facade, so
     `tinker-pdf-content` keeps no edge to `tinker-pdf-shape` and
     `TextDevice` itself still collects in stream order.
+
+    **Amended 10 October 2026 by the owner, Ravindu Wijegunawardhana: the
+    comma tie-break.** A line that holds at least one right-to-left strong
+    character (`R` or `AL`) and **no** left-to-right one (`L`) was always
+    read as a right-to-left paragraph, since both of its ends are right to
+    left. It still is, with one exception: where the line, sorted along its
+    baseline, has a strong right-to-left character as its **leftmost** unit
+    and **punctuation** as its **rightmost** — a unit of `Bidi_Class` `CS`,
+    `ON`, `ES` or `ET`; not a number (`EN`, `AN`) or a mark (`NSM`) — it is
+    read as a **left-to-right** paragraph, so the punctuation trails the
+    word. Units that draw nothing are passed over at either end, the set
+    rule L1 resets with whitespace at a line's end: `WS`, `S`, `B`, the
+    characters X9 removes and the isolate formatting characters, and also
+    every `White_Space` character, so that a no-break space — `CS`, because
+    it separates digits — is not taken for a comma. Every other line keeps
+    the rule above, and a line with an `L` character anywhere is out of the
+    tie-break's reach. The forward check is unchanged: both paragraphs draw
+    the tie-break's line, and the order returned draws it under the
+    direction chosen (`tinker_pdf_shape::bidi::drawn_direction` chooses;
+    `logical_order` for a given direction is untouched, and
+    `bidi_conformance.rs` holds it to Unicode's file as before).
+
+    *Why.* CI's `epub-corpus` job reads Project Gutenberg's Moby-Dick, whose
+    etymology table sets the Hebrew `חו,` alone in a cell: a left-to-right
+    paragraph, which draws the comma right of the word. Once the word was
+    drawn right (6d08c6b), the cell's line held nothing left to right, was
+    read as right to left, and extracted `,חו` — the comma first — which the
+    conservation sweep counts as a transposition. A right-to-left paragraph
+    whose line *opens* with punctuation draws the same picture, so nothing
+    on the line decides between the two; trailing punctuation after a
+    right-to-left word quoted in left-to-right text is far commoner than a
+    lone right-to-left line that opens with punctuation, so the commoner
+    reading wins.
+
+    *The price, accepted with that knowledge.* A line of a right-to-left
+    paragraph that opens with punctuation — a dialogue dash, `— שלום`, drawn
+    `םולש —` — and is alone on its line, with no left-to-right character,
+    reads with the mark at its end: `שלום —`. That is pinned by name, so
+    that changing the decision is a visible one.
+
+    *The tests that hold it.* `text_logical_order.rs`:
+    `a_right_to_left_word_and_its_comma_alone_on_a_line_read_as_written`
+    (`חו,` and `حوت,` on a left-to-right page),
+    `a_right_to_left_line_ending_in_a_full_stop_still_reads_right_to_left`
+    (`שלום.`, the stop drawn leftmost, unchanged),
+    `a_line_holding_a_left_to_right_character_keeps_its_rule`,
+    `a_right_to_left_line_opening_with_a_dash_reads_the_dash_last` (the
+    price) and `no_left_to_right_page_moves`; `epub_fallback.rs`'s
+    `a_standard_14_hebrew_word_alone_on_its_line_is_drawn_right_to_left`
+    (the book's table, `חו,`); `text_order.rs`'s
+    `a_word_and_its_comma_alone_read_as_their_paragraph_drew_them` (the
+    comma drawn at either end of the word, and `TextLine::rtl` saying which
+    direction was read); and in `tinker-pdf-shape`'s `bidi.rs`, the
+    tie-break's classes and both readings drawing the line
+    (`a_right_to_left_word_and_its_punctuation_alone_read_left_to_right`,
+    `the_tie_break_reaches_no_other_line`,
+    `a_right_to_left_line_opening_with_a_dash_reads_it_trailing`).
 
 ## How to add a ruling
 

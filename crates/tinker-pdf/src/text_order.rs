@@ -37,8 +37,15 @@
 //!    the rightmost for a right-to-left one, so a line whose two ends agree is
 //!    that direction, and a line whose ends disagree goes by its majority.
 //!    Classes are `Bidi_Class`, so N'Ko and Adlam read right to left like
-//!    Hebrew. [`TextLine::rtl`] is set to the direction read, for every line
-//!    this touches.
+//!    Hebrew. **One tie-break** (the ruling as amended 10 October 2026): a
+//!    line with no left-to-right strong character whose leftmost unit is a
+//!    strong right-to-left character and whose rightmost is punctuation
+//!    (`CS`, `ON`, `ES` or `ET`; whitespace and invisible format characters
+//!    passed over) reads as a left-to-right paragraph — a Hebrew or Arabic
+//!    word quoted in left-to-right text with its comma after it, `חו,` drawn
+//!    `וח,`, which both paragraphs draw alike and which read right to left
+//!    came back `,חו`. [`TextLine::rtl`] is set to the direction read, for
+//!    every line this touches.
 //!
 //! A line with no right-to-left character is left exactly as it was
 //! collected, byte for byte: no sort, no reorder. That is what keeps every
@@ -62,7 +69,12 @@
 //! - **The paragraph.** A line is resolved on its own. A line of a
 //!   right-to-left paragraph that begins and ends with Latin reads as a
 //!   left-to-right one, and its runs come back each in the right order but
-//!   placed as a left-to-right paragraph would place them.
+//!   placed as a left-to-right paragraph would place them. And a line of a
+//!   right-to-left paragraph that holds nothing left to right and *opens*
+//!   with punctuation — a dialogue dash, `— שלום` drawn `םולש —` — is the
+//!   tie-break's shape and reads with the mark at its end, `שלום —`: the
+//!   price of the tie-break, chosen because a quoted word's trailing
+//!   punctuation is far commoner (`text_logical_order.rs` pins it by name).
 //! - **Vertical lines**, which UAX #9 does not describe.
 //!
 //! [`crate::Page::text_with`] with [`TextOptions::content_order`] is the
@@ -640,6 +652,40 @@ mod tests {
         assert!(logical_line(&mut l));
         assert_eq!(l.text, format!("a {ALEF}{BET}{GIMEL} b"));
         assert!(!l.rtl, "the line was read left to right");
+    }
+
+    /// **The comma tie-break** (ruling 14, amended 10 October 2026): a word
+    /// and the comma after it, alone on a line, drawn by a left-to-right
+    /// paragraph — the comma at the right — read as that paragraph, and the
+    /// line says so. The same word with its comma drawn at the left, as a
+    /// right-to-left paragraph draws a trailing one, is still right to left.
+    #[test]
+    fn a_word_and_its_comma_alone_read_as_their_paragraph_drew_them() {
+        let mut quoted = line(
+            vec![
+                ch(GIMEL, 0.0, 5.0),
+                ch(BET, 5.0, 5.0),
+                ch(ALEF, 10.0, 5.0),
+                ch(",", 15.0, 3.0),
+            ],
+            true,
+        );
+        assert!(logical_line(&mut quoted));
+        assert_eq!(quoted.text, format!("{ALEF}{BET}{GIMEL},"));
+        assert!(!quoted.rtl, "the line was read left to right");
+
+        let mut own = line(
+            vec![
+                ch(",", 0.0, 3.0),
+                ch(GIMEL, 3.0, 5.0),
+                ch(BET, 8.0, 5.0),
+                ch(ALEF, 13.0, 5.0),
+            ],
+            false,
+        );
+        assert!(logical_line(&mut own));
+        assert_eq!(own.text, format!("{ALEF}{BET}{GIMEL},"));
+        assert!(own.rtl, "the line was read right to left");
     }
 
     /// A percentage after Arabic digits, the `%` drawn on the number's left.

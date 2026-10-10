@@ -33,8 +33,14 @@ const NISBA: &str = "\u{646}\u{633}\u{628}\u{629}";
 /// none of the Hebrew or Arabic blocks.
 const NKO: &str = "\u{7CA}\u{7CB} \u{7CC}.";
 
+/// Het, vav: the Hebrew of Moby-Dick's etymology, as it is read.
+const HET_VAV: &str = "\u{5D7}\u{5D5}";
+
+/// Arabic hah, waw, teh: `hut`, a whale, as it is read.
+const HUT: &str = "\u{62D}\u{648}\u{62A}";
+
 /// Everything any page here draws.
-const COVERS: &str = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}\u{5B8}\u{646}\u{633}\u{628}\u{629}\u{7CA}\u{7CB}\u{7CC} 0123456789seonwab.%";
+const COVERS: &str = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}\u{5B8}\u{646}\u{633}\u{628}\u{629}\u{7CA}\u{7CB}\u{7CC} 0123456789seonwab.%\u{5D7}\u{62D}\u{648}\u{62A},\u{2014}";
 
 /// The font size, and so the advance of every glyph: the face's 500 units of
 /// a 1000-unit em at twenty points is ten.
@@ -47,35 +53,60 @@ type Stroke = (char, f64);
 
 /// A one-page document drawing `strokes`, in the order given, as one run.
 fn page(strokes: &[Stroke]) -> Vec<u8> {
+    page_of(&[strokes.to_vec()])
+}
+
+/// The distance between the baselines of [`page_of`]'s lines.
+const LEADING: f64 = 30.0;
+
+/// A one-page document drawing each of `lines` as a run of its own, the
+/// first at the top and each a line under the last. The last line's
+/// baseline is where [`page`]'s one line's is.
+fn page_of(lines: &[Vec<Stroke>]) -> Vec<u8> {
     let face = Face::new("Fixture Hebrew", COVERS);
     let program = face.build();
     let mut builder = DocumentBuilder::new();
     assert!(builder.add_cid_font(b"F0", b"FixtureHebrew", &program));
-    let texts: Vec<String> = strokes.iter().map(|(ch, _)| ch.to_string()).collect();
-    let glyphs: Vec<PlacedGlyph<'_>> = strokes
-        .iter()
-        .zip(texts.iter())
-        .map(|((ch, x), text)| PlacedGlyph {
-            glyph: Glyph {
-                id: face
-                    .glyph_of(*ch)
-                    .expect("the face covers what the page draws"),
-                text,
-            },
-            x: *x,
-            rise: 0.0,
-        })
-        .collect();
+    let below = LEADING * lines.len().saturating_sub(1) as f64;
     let mut content = Vec::new();
-    assert!(builder.glyph_run(
-        &mut content,
-        b"F0",
-        SIZE,
-        [1.0, 0.0, 0.0, 1.0, 40.0, 100.0],
-        &glyphs
-    ));
-    builder.add_page(300.0, 200.0, |page| page.raw(&content));
+    for (row, strokes) in lines.iter().enumerate() {
+        let texts: Vec<String> = strokes.iter().map(|(ch, _)| ch.to_string()).collect();
+        let glyphs: Vec<PlacedGlyph<'_>> = strokes
+            .iter()
+            .zip(texts.iter())
+            .map(|((ch, x), text)| PlacedGlyph {
+                glyph: Glyph {
+                    id: face
+                        .glyph_of(*ch)
+                        .expect("the face covers what the page draws"),
+                    text,
+                },
+                x: *x,
+                rise: 0.0,
+            })
+            .collect();
+        let baseline = 100.0 + below - LEADING * row as f64;
+        assert!(builder.glyph_run(
+            &mut content,
+            b"F0",
+            SIZE,
+            [1.0, 0.0, 0.0, 1.0, 40.0, baseline],
+            &glyphs
+        ));
+    }
+    builder.add_page(300.0, 200.0 + below, |page| page.raw(&content));
     builder.finish()
+}
+
+/// Every line of the page's text through [`tinker_pdf::Page::text`], with
+/// the direction ruling 14 read it in (`true` for right to left).
+fn extract_lines(bytes: Vec<u8>) -> Vec<(String, bool)> {
+    let doc = Document::open(bytes).expect("the page opens");
+    let text = doc.page(0).expect("a page").text();
+    text.lines()
+        .into_iter()
+        .map(|line| (line.text.clone(), line.rtl))
+        .collect()
 }
 
 /// `text` drawn in visual order: its characters laid left to right in the
@@ -222,6 +253,94 @@ fn a_right_to_left_word_in_a_left_to_right_line() {
     let read = format!("see {SHALOM} now");
     let drawn = format!("see {} now", reversed(SHALOM));
     assert_eq!(extract(page(&visual(&drawn))), read);
+}
+
+/// **A right-to-left word and its comma alone on a line of a left-to-right
+/// page read with the comma after the word**: ruling 14's comma tie-break,
+/// amended 10 October 2026.
+///
+/// Moby-Dick's etymology sets `חו,` alone in a table cell. A left-to-right
+/// paragraph draws the comma right of the word, `וח,`. The line holds no
+/// left-to-right character, so both its ends are right to left, and the rule
+/// before the amendment read it as a right-to-left paragraph, comma first:
+/// `,חו`, which CI's conservation sweep of the book counted as a
+/// transposition. A strong right-to-left character leftmost and punctuation
+/// rightmost now read as a left-to-right paragraph, and say so. The Arabic
+/// `حوت,` is the same shape; the Latin lines around them are untouched.
+#[test]
+fn a_right_to_left_word_and_its_comma_alone_on_a_line_read_as_written() {
+    let lines = [
+        visual("see"),
+        visual(&format!("{},", reversed(HET_VAV))),
+        visual(&format!("{},", reversed(HUT))),
+        visual("now"),
+    ];
+    assert_eq!(
+        extract_lines(page_of(&lines)),
+        [
+            ("see".to_owned(), false),
+            (format!("{HET_VAV},"), false),
+            (format!("{HUT},"), false),
+            ("now".to_owned(), false),
+        ]
+    );
+}
+
+/// **A right-to-left line ending in a full stop still reads right to left.**
+/// Its paragraph draws the stop leftmost, `.םולש`, so the line's rightmost
+/// unit is a letter and the tie-break does not reach it.
+#[test]
+fn a_right_to_left_line_ending_in_a_full_stop_still_reads_right_to_left() {
+    let drawn = format!(".{}", reversed(SHALOM));
+    assert_eq!(
+        extract_lines(page(&visual(&drawn))),
+        [(format!("{SHALOM}."), true)]
+    );
+}
+
+/// **A line holding a left-to-right character is out of the tie-break's
+/// reach**, whatever its ends. Two lines a right-to-left paragraph typed, each
+/// drawn with a right-to-left letter leftmost and a dash rightmost, the
+/// tie-break's shape. In `— a שלום`, drawn `םולש a —`, the `a` makes the ends
+/// of the strong characters disagree, and the majority reads it right to
+/// left. In `— שלום a חו`, drawn `וח a םולש —`, the strong characters are
+/// Hebrew at both ends and the `a` lies between them: the ends agree, and
+/// only the `a` itself keeps the tie-break off the line. Both read right to
+/// left, as before the amendment.
+#[test]
+fn a_line_holding_a_left_to_right_character_keeps_its_rule() {
+    let lines = [
+        visual(&format!("{} a \u{2014}", reversed(SHALOM))),
+        visual(&format!(
+            "{} a {} \u{2014}",
+            reversed(HET_VAV),
+            reversed(SHALOM)
+        )),
+    ];
+    assert_eq!(
+        extract_lines(page_of(&lines)),
+        [
+            (format!("\u{2014} a {SHALOM}"), true),
+            (format!("\u{2014} {SHALOM} a {HET_VAV}"), true),
+        ]
+    );
+}
+
+/// **The amendment's price, pinned so that changing it is a decision.** A
+/// right-to-left paragraph's line that opens with punctuation and holds
+/// nothing left to right — a dialogue dash, `— שלום`, alone on its line —
+/// is drawn `םולש —`, the tie-break's shape, and reads with the dash at its
+/// end: `שלום —`. Both paragraphs draw that line, and nothing on it says
+/// which one did; ruling 14, amended 10 October 2026, takes the commoner, a
+/// right-to-left word quoted in left-to-right text with its punctuation
+/// after it. The owner was told this is the cost.
+#[test]
+fn a_right_to_left_line_opening_with_a_dash_reads_the_dash_last() {
+    let drawn = format!("{} \u{2014}", reversed(SHALOM));
+    assert_eq!(
+        extract_lines(page(&visual(&drawn))),
+        [(format!("{SHALOM} \u{2014}"), false)]
+    );
 }
 
 /// **A mark stays with its base, whichever side of it the producer wrote it.**

@@ -297,19 +297,20 @@ fn a_standard_14_right_to_left_paragraph_extracts_as_written() {
 
 /// **The same word alone on its line — the book's own shape, a table with a
 /// cell for the word and one for the language — is drawn right to left and
-/// reads as `חו`.**
+/// reads as `חו,`.**
 ///
-/// What is asserted is the word: drawn `ו` left of `ח`, and read back with
-/// `ח` first, where the page drew it `ח` first and read it back `וח`.
+/// The word: drawn `ו` left of `ח`, and read back with `ח` first, where the
+/// page drew it `ח` first and read it back `וח`.
 ///
-/// What is **not** asserted is the comma's side. The cell is a left-to-right
-/// paragraph, so its comma, at level 0, is drawn right of the word — the
-/// picture a right-to-left paragraph that *opens* with the comma draws too.
-/// The cell's line holds no left-to-right character for ruling 14's "the two
-/// ends decide" to find, so it reads the line as right to left, and the
-/// comma first: `,חו` — what `text_order.rs` names as "a line is resolved
-/// alone", and the same answer a face that covers Hebrew gets. Which way
-/// such a line reads is ruling 14's to decide, not this painter's.
+/// The comma: the cell is a left-to-right paragraph, so its comma, at level
+/// 0, is drawn right of the word — the picture a right-to-left paragraph
+/// that *opens* with the comma draws too. The cell's line holds no
+/// left-to-right character, so ruling 14's "the two ends decide" read it as
+/// right to left and the comma first, `,חו`, until the ruling's comma
+/// tie-break (amended 10 October 2026): a strong right-to-left character
+/// leftmost and punctuation rightmost read as a left-to-right paragraph.
+/// Which way such a line reads is ruling 14's to decide, not this painter's;
+/// this asserts what it decided.
 #[test]
 fn a_standard_14_hebrew_word_alone_on_its_line_is_drawn_right_to_left() {
     let body = format!(
@@ -329,5 +330,9 @@ fn a_standard_14_hebrew_word_alone_on_its_line_is_drawn_right_to_left() {
     assert!(
         text.contains(HET_VAV) && !text.contains(VAV_HET),
         "the Hebrew word reads backwards: {text:?}"
+    );
+    assert!(
+        text.contains(&format!("{HET_VAV},")) && !text.contains(&format!(",{HET_VAV}")),
+        "the cell's comma does not trail its word: {text:?}"
     );
 }

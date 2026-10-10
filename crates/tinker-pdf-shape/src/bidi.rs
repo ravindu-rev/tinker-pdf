@@ -542,6 +542,31 @@ pub fn logical_order(visual: &[&str], direction: BaseDirection) -> Vec<usize> {
 ///
 /// Never [`BaseDirection::Auto`]. Classes are the characters' own
 /// `Bidi_Class`, so no script is missed by a table of blocks.
+///
+/// # The comma tie-break
+///
+/// A line whose strong characters are all right to left has two ends that
+/// agree, and is right to left — except where it is drawn as a right-to-left
+/// word with punctuation after it: its leftmost unit a strong `R` or `AL`
+/// character and its rightmost **punctuation**, a unit whose class is `CS`,
+/// `ON`, `ES` or `ET` (not a number, `EN` or `AN`, and not a mark, `NSM`).
+/// That line is left to right. A unit is classed by its first character
+/// that draws something, and units that draw nothing are passed over at
+/// either end, as rule L1 passes them over at a line's end: whitespace
+/// (`WS`, `S`, `B`, and every `White_Space` character, so a no-break space,
+/// which is `CS` because it separates digits, is not punctuation), the
+/// characters X9 removes and the isolate formatting characters.
+///
+/// Both paragraphs draw that line — a left-to-right one draws a quoted
+/// Hebrew word and its comma `וח,`, and a right-to-left one draws a line
+/// that *opens* with the comma the same — so P2 cannot be read off it, and
+/// this takes the commoner of the two: a right-to-left word quoted in a
+/// left-to-right text, followed by its comma or full stop. [`logical_order`]
+/// reads the line either way as an order that draws it; only which order is
+/// returned depends on this. The cost is the other reading: a lone line of
+/// a right-to-left paragraph that opens with punctuation, a dialogue dash,
+/// reads with that mark at its end. Ruling 14 (`docs/rulings.md`), amended
+/// 10 October 2026 by the owner, records the choice.
 #[must_use]
 pub fn drawn_direction(visual: &[&str]) -> BaseDirection {
     let strong = |c: char| match unicode::bidi_class(c) {
@@ -565,10 +590,45 @@ pub fn drawn_direction(visual: &[&str]) -> BaseDirection {
     }
     match (leftmost, rightmost) {
         (Some(false), Some(false)) => BaseDirection::LeftToRight,
+        (Some(true), Some(true)) if ltr == 0 && trailing_punctuation(visual) => {
+            BaseDirection::LeftToRight
+        }
         (Some(true), Some(true)) => BaseDirection::RightToLeft,
         _ if rtl > ltr => BaseDirection::RightToLeft,
         _ => BaseDirection::LeftToRight,
     }
+}
+
+/// The comma tie-break's shape ([`drawn_direction`]): whether the leftmost
+/// unit of a drawn line that draws something is a strong right-to-left
+/// character and the rightmost is punctuation.
+fn trailing_punctuation(visual: &[&str]) -> bool {
+    let mut drawn = visual.iter().filter_map(|unit| drawn_class(unit));
+    let leftmost = drawn.next();
+    let rightmost = drawn.next_back();
+    matches!(leftmost, Some(BidiClass::R | BidiClass::AL))
+        && matches!(
+            rightmost,
+            Some(BidiClass::CS | BidiClass::ON | BidiClass::ES | BidiClass::ET)
+        )
+}
+
+/// The class of a unit's first character that draws something, or `None`
+/// for a unit that draws nothing: whitespace by `Bidi_Class` or by
+/// `White_Space`, a character X9 removes, or an isolate formatting
+/// character — what L1 resets with whitespace at a line's end.
+fn drawn_class(unit: &str) -> Option<BidiClass> {
+    unit.chars().find_map(|c| {
+        let class = unicode::bidi_class(c);
+        let blank = c.is_whitespace()
+            || matches!(
+                class,
+                BidiClass::WS | BidiClass::S | BidiClass::B | BidiClass::PDI
+            )
+            || class.is_removed_by_x9()
+            || class.is_isolate_initiator();
+        (!blank).then_some(class)
+    })
 }
 
 // --- P2, P3 --------------------------------------------------------------
@@ -1487,5 +1547,151 @@ mod tests {
         assert_eq!(dir("abc \u{5D1}\u{5D0}"), BaseDirection::LeftToRight);
         // No strong character at all.
         assert_eq!(dir("12 %"), BaseDirection::LeftToRight);
+    }
+
+    /// `units` read in `order`.
+    fn read_in(units: &[&str], order: &[usize]) -> String {
+        order
+            .iter()
+            .filter_map(|at| units.get(*at).copied())
+            .collect()
+    }
+
+    /// `text`, one unit per character, as `direction`'s paragraph draws it.
+    fn drawn(text: &str, direction: BaseDirection) -> String {
+        drawn_and_read(text, direction).0
+    }
+
+    /// **The comma tie-break** (ruling 14, amended 10 October 2026): a
+    /// right-to-left word and the punctuation after it, alone on a line of a
+    /// left-to-right paragraph, read with the punctuation trailing.
+    ///
+    /// The line holds no left-to-right character, so its two ends agree and
+    /// were read as right to left, which put the comma first: Moby-Dick's
+    /// etymology cell `חו,` read back `,חו`. A right-to-left paragraph that
+    /// opens with the comma draws the same line, so both readings draw it —
+    /// asserted for each, because the tie-break chooses between two answers
+    /// the forward check accepts and must never pick one it refuses.
+    #[test]
+    fn a_right_to_left_word_and_its_punctuation_alone_read_left_to_right() {
+        for typed in [
+            // Moby-Dick's Hebrew, and an Arabic word; CS.
+            "\u{5D7}\u{5D5},",
+            "\u{62D}\u{648}\u{62A},",
+            "\u{5E9}\u{5DC}\u{5D5}\u{5DD}.",
+            "\u{62D}\u{648}\u{62A}\u{60C}",
+            // ON, ES, ET.
+            "\u{5D7}\u{5D5}?",
+            "\u{5D7}\u{5D5})",
+            "\u{5D7}\u{5D5}-",
+            "\u{5D7}\u{5D5}%",
+            // Two words, and two marks after them.
+            "\u{5D7}\u{5D5} \u{5E9}\u{5DC}\u{5D5}\u{5DD}.\u{201D}",
+        ] {
+            let line = drawn(typed, BaseDirection::LeftToRight);
+            let units: Vec<String> = line.chars().map(String::from).collect();
+            let units: Vec<&str> = units.iter().map(String::as_str).collect();
+            assert_eq!(
+                drawn_direction(&units),
+                BaseDirection::LeftToRight,
+                "{typed:?} drawn {line:?}"
+            );
+            assert_eq!(
+                read_in(&units, &logical_order(&units, BaseDirection::Auto)),
+                typed
+            );
+            // Both readings draw the line as it stands.
+            for direction in [BaseDirection::LeftToRight, BaseDirection::RightToLeft] {
+                let read = read_in(&units, &logical_order(&units, direction));
+                assert_eq!(drawn(&read, direction), line, "{typed:?} {direction:?}");
+            }
+        }
+        // What draws nothing is passed over at either end: a space, a
+        // no-break space (`CS`, as a digit separator), a joiner (`BN`).
+        for line in [
+            "\u{5D5}\u{5D7}, ",
+            "\u{5D5}\u{5D7},\u{A0}",
+            "\u{5D5}\u{5D7},\u{200D}",
+            " \u{5D5}\u{5D7},",
+        ] {
+            let units: Vec<String> = line.chars().map(String::from).collect();
+            let units: Vec<&str> = units.iter().map(String::as_str).collect();
+            assert_eq!(
+                drawn_direction(&units),
+                BaseDirection::LeftToRight,
+                "{line:?}"
+            );
+        }
+    }
+
+    /// **And every other line keeps the rule it had.** A right-to-left line
+    /// ending in a full stop draws it leftmost; a line holding any `L`
+    /// character is out of the tie-break's reach, whatever its ends —
+    /// including one whose strong characters are right to left at both ends
+    /// and Latin only between them, which the ends alone would have handed
+    /// to the tie-break; a number, a mark or a blank at the right is not
+    /// punctuation, and punctuation at the left is not a strong right-to-left
+    /// character.
+    #[test]
+    fn the_tie_break_reaches_no_other_line() {
+        let dir = |line: &str| {
+            let units: Vec<String> = line.chars().map(String::from).collect();
+            let borrowed: Vec<&str> = units.iter().map(String::as_str).collect();
+            drawn_direction(&borrowed)
+        };
+        let shalom = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}";
+        // As a right-to-left paragraph types and draws it.
+        for typed in [
+            format!("{shalom}."),
+            format!("\u{2014} a {shalom}"),
+            format!("\u{2014} {shalom} a \u{5D7}\u{5D5}"),
+            format!("{shalom} 12"),
+            format!("({shalom}),"),
+        ] {
+            let line = drawn(&typed, BaseDirection::RightToLeft);
+            assert_eq!(dir(&line), BaseDirection::RightToLeft, "{typed:?} {line:?}");
+        }
+        // A right-to-left word and its punctuation with a Latin letter on the
+        // line, at an end of its strong characters or between them: the ends,
+        // then the majority, as before the tie-break.
+        assert_eq!(dir("\u{5D5}\u{5D7} a ,"), BaseDirection::RightToLeft);
+        assert_eq!(
+            dir("\u{5D5}\u{5D7} a \u{5DD}\u{5D5}\u{5DC}\u{5E9},"),
+            BaseDirection::RightToLeft
+        );
+        // At the right a European and an Arabic digit, a mark and a no-break
+        // space; at the left an opening quote.
+        for line in [
+            "\u{5D5}\u{5D7} 5",
+            "\u{5D5}\u{5D7} \u{661}",
+            "\u{5D5}\u{5D7}\u{5B8}",
+            "\u{5D5}\u{5D7}\u{A0}",
+            "\u{201C}\u{5D5}\u{5D7},",
+        ] {
+            assert_eq!(dir(line), BaseDirection::RightToLeft, "{line:?}");
+        }
+    }
+
+    /// **The price, named** (ruling 14's amendment): a lone line of a
+    /// right-to-left paragraph that opens with punctuation — a dialogue
+    /// dash — is drawn as the tie-break's shape and reads with the dash at
+    /// its end. Both readings draw it; this is the one the owner chose.
+    #[test]
+    fn a_right_to_left_line_opening_with_a_dash_reads_it_trailing() {
+        let shalom = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}";
+        let typed = format!("\u{2014} {shalom}");
+        let line = drawn(&typed, BaseDirection::RightToLeft);
+        let units: Vec<String> = line.chars().map(String::from).collect();
+        let units: Vec<&str> = units.iter().map(String::as_str).collect();
+        assert_eq!(drawn_direction(&units), BaseDirection::LeftToRight);
+        assert_eq!(
+            read_in(&units, &logical_order(&units, BaseDirection::Auto)),
+            format!("{shalom} \u{2014}")
+        );
+        assert_eq!(
+            read_in(&units, &logical_order(&units, BaseDirection::RightToLeft)),
+            typed,
+            "a reader told the paragraph's direction still reads it as typed"
+        );
     }
 }
