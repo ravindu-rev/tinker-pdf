@@ -280,9 +280,12 @@ and one beside a float is cleared below it (§9.5's *should*); `clip` cuts and
 does nothing else. A box that clips its block axis is as tall as its `height`
 or `max-height` says, and the content past its padding box leaves the column
 — kept as text laid out and not painted, as `visibility: hidden` text is, so
-conservation loses nothing and reorders nothing, a clip inside a clip
-included (`a_clip_inside_a_clip_hides_its_text_in_document_order`) — and the
-box after it follows the used height. Who is clipped is the
+conservation loses nothing, and a clip inside a clip reorders nothing
+(`a_clip_inside_a_clip_hides_its_text_in_document_order`) — and the box after
+it follows the used height. Two orderings of the hidden text are still open
+and fuzzing finds both: a hidden tail inside a float or positioned box, which
+pagination places at its column position rather than with its box, and a kept
+line separated from its own hidden tail by a page break. Who is clipped is the
 element tree's question (`paint::Effects`): every fragment is cut by the
 clipping elements above it, an element's own text by its own clip, and an
 absolutely positioned box only through its containing block (CSS 2.2
