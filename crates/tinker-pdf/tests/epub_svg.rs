@@ -1232,6 +1232,52 @@ fn text_anchor_is_applied_where_the_metrics_are() {
     );
 }
 
+/// **A decomposed accent in SVG text set in the standard 14 is drawn inside
+/// its letter**, where ruling 14's extraction pairs a mark with the glyph
+/// whose box holds its centre (review of 6d79fa4).
+///
+/// The standard 14 measure a nonspacing mark at no advance
+/// (`paint::standard_width`), and SVG text is measured with the book's own
+/// metrics, so the mark drawn where the pen stood after its letter lay at
+/// the letter's end: its box, a thousandth of an em running right, was the
+/// `s`'s, not the `e`'s. It is drawn where a page's mark is, inside its
+/// letter's box. A default build only: with `bundled-fonts` the stand-in
+/// draws the accent, and SVG text draws no stand-in glyph at all.
+#[cfg(not(feature = "bundled-fonts"))]
+#[test]
+fn a_standard_14_mark_in_svg_text_is_drawn_inside_its_letter() {
+    let doc = open(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"60\">\
+           <text x=\"10\" y=\"40\" font-family=\"serif\" font-size=\"24\">cafe\u{301}s</text>\
+         </svg>",
+    );
+    let page = doc.page(0).expect("a page");
+    assert_eq!(page.text().plain_text().trim(), "cafe\u{301}s");
+    let drawn = page.text_with(&tinker_pdf::TextOptions {
+        content_order: true,
+    });
+    let chars: Vec<_> = drawn
+        .lines()
+        .iter()
+        .flat_map(|line| line.chars.iter())
+        .collect();
+    let at = chars
+        .iter()
+        .position(|c| c.text == "\u{301}")
+        .expect("the accent is drawn");
+    let (letter, mark, next) = (chars[at - 1], chars[at], chars[at + 1]);
+    let (m0, _, m1, _) = mark.quad.bounds();
+    let centre = (m0 + m1) / 2.0;
+    let (l0, _, l1, _) = letter.quad.bounds();
+    let (n0, _, _, _) = next.quad.bounds();
+    assert_eq!(letter.text, "e");
+    assert!(
+        l0 < centre && centre < l1 && centre < n0,
+        "the accent is drawn at {centre}, outside its letter from {l0} to {l1} \
+         (the `s` starts at {n0})"
+    );
+}
+
 /// §10.4's per-glyph `x`: a number per character, each set where its number
 /// says — which a build that took the first number set as one word at 10.
 #[test]

@@ -58,7 +58,12 @@ separately, the characters they stand for, so subsetting still sees what
 the page drew; `glyphs(font, size, x, y,
 &[Glyph])` places glyphs by index with explicit advances through a CID font,
 which is how a format that addresses glyphs by index (XPS) or a layout engine
-that already measured every run (EPUB) sets text. `glyph_run` on the
+that already measured every run (EPUB) sets text; `text_pieces(size, y,
+spacing, &[TextPiece])` writes several such strings, each in its own font at
+its own position along one baseline, as **one** text object, moving between
+them with `Td` — what a mark drawn back over its letter, and the glyph after
+it, need to stay one line to a reader that ends a line where a text object
+ends. `glyph_run` on the
 builder records which glyphs a document draws, so that `set_subset_fonts`
 can embed only those.
 

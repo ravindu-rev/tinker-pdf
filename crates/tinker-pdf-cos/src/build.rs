@@ -1249,6 +1249,35 @@ pub struct Glyph<'a> {
     pub text: &'a str,
 }
 
+/// What one piece of a [`PageBuilder::text_pieces`] text object shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PieceText<'a> {
+    /// Codes in a simple font and the characters they stand for, as
+    /// [`PageBuilder::encoded_text`] takes them.
+    Codes {
+        /// The codes, written and not interpreted.
+        codes: &'a [u8],
+        /// What they stand for, recorded and not written.
+        characters: &'a str,
+    },
+    /// Glyphs of a composite font, as [`PageBuilder::glyphs`] takes them.
+    Glyphs(&'a [Glyph<'a>]),
+}
+
+/// One piece of a [`PageBuilder::text_pieces`] text object: a font, where
+/// along the baseline the piece starts, in points from the page's left, and
+/// what it shows from there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextPiece<'a> {
+    /// The font resource, registered with the document as
+    /// [`PageBuilder::encoded_text`] or [`PageBuilder::glyphs`] needs it.
+    pub font: &'a [u8],
+    /// Where the piece's first glyph is drawn.
+    pub x: f64,
+    /// What it draws.
+    pub text: PieceText<'a>,
+}
+
 /// One glyph of a run the **caller** laid out, for
 /// [`DocumentBuilder::glyph_run`] (gap 30, milestone 7).
 ///
@@ -2038,6 +2067,23 @@ fn to_unicode_cmap(mapping: &BTreeMap<u16, String>) -> Option<Vec<u8>> {
     }
     out.extend_from_slice(b"endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
     Some(out)
+}
+
+/// Writes `codes` as the inside of a literal string (7.3.4.2): the three
+/// bytes that must be escaped, and the two a viewer would read as an
+/// end-of-line inside a literal and fold away.
+fn literal_codes(out: &mut Vec<u8>, codes: &[u8]) {
+    for byte in codes {
+        match byte {
+            b'(' | b')' | b'\\' => {
+                out.push(b'\\');
+                out.push(*byte);
+            }
+            b'\r' => out.extend_from_slice(b"\\r"),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            _ => out.push(*byte),
+        }
+    }
 }
 
 /// One number, as 7.3.3 spells it, rounded to a ten-thousandth.
@@ -3570,20 +3616,140 @@ impl PageBuilder {
         self.content.extend_from_slice(
             format!(" {size} Tf {character_spacing} Tc {word_spacing} Tw {x} {y} Td (").as_bytes(),
         );
-        for byte in codes {
-            // 7.3.4.2's three, plus the two that a viewer would read as an
-            // end-of-line inside a literal string and fold away.
-            match byte {
-                b'(' | b')' | b'\\' => {
-                    self.content.push(b'\\');
-                    self.content.push(*byte);
+        literal_codes(&mut self.content, codes);
+        self.content.extend_from_slice(b") Tj ET\n");
+    }
+
+    /// Writes several pieces of text on one baseline, each in its own font
+    /// and at its own position, as **one** text object (9.4).
+    ///
+    /// [`PageBuilder::encoded_text`] and [`PageBuilder::glyphs`] each write a
+    /// text object of their own, one string from one position, and let the
+    /// font's advances and `Tc` place every glyph after the first. That
+    /// cannot state a position for one glyph in the middle of a run — a mark
+    /// drawn back over the letter before it — and two text objects in a row
+    /// are not one line to a reader that finds lines in a content stream:
+    /// the end of a text object puts the pen down, and this crate's own
+    /// `tinker-pdf-content` resumes a line after one only where the next
+    /// glyph starts within half an em of where the last glyph ended. A mark
+    /// drawn inside its letter ended short of where the next glyph started,
+    /// by every `letter-spacing` in between, and a word set wide enough came
+    /// back a line a letter. Here the pieces are moved between with `Td`
+    /// inside one `BT`/`ET` pair, so nothing between them ends a text object.
+    ///
+    /// `size` is every piece's, `y` the baseline, in points from the bottom;
+    /// `spacing` is the character and the word spacing, written once as
+    /// [`PageBuilder::encoded_text`] writes them. A composite font's piece is
+    /// drawn with a word spacing of zero, as [`PageBuilder::glyphs`]'s callers
+    /// arrange: 9.3.3 applies `Tw` to a single-byte code 32 only, and a
+    /// reader that applied it to a two-byte one would move every glyph after
+    /// a glyph whose index is 32.
+    ///
+    /// Each piece's characters or glyphs are recorded exactly as the
+    /// single-piece writers record them, so subsetting, `/W` and `/ToUnicode`
+    /// see what the page drew.
+    ///
+    /// A piece of glyphs whose font is not a registered composite font is
+    /// not drawn — the refusal [`PageBuilder::glyphs`] makes of its whole
+    /// run, made here of that piece alone, so the rest of the line is still
+    /// drawn where it was placed (ruling 2). Returns whether every piece was
+    /// drawn: false for any piece left out so, and — having written nothing
+    /// — for no pieces, and for a size, a spacing or a position that is not
+    /// a finite number.
+    pub fn text_pieces(
+        &mut self,
+        size: f64,
+        y: f64,
+        spacing: (f64, f64),
+        pieces: &[TextPiece<'_>],
+    ) -> bool {
+        let (character_spacing, word_spacing) = spacing;
+        if ![size, y, character_spacing, word_spacing]
+            .iter()
+            .chain(pieces.iter().map(|piece| &piece.x))
+            .all(|value| value.is_finite())
+        {
+            return false;
+        }
+        let drawable: Vec<&TextPiece<'_>> = pieces
+            .iter()
+            .filter(|piece| match piece.text {
+                PieceText::Codes { .. } => true,
+                PieceText::Glyphs(_) => self.composite.contains_key(piece.font),
+            })
+            .collect();
+        if drawable.is_empty() {
+            return false;
+        }
+
+        self.content.extend_from_slice(b"BT");
+        let mut font: Option<&[u8]> = None;
+        let mut spaced: Option<f64> = None;
+        let mut at: Option<f64> = None;
+        for piece in &drawable {
+            if font != Some(piece.font) {
+                self.content.push(b' ');
+                self.resource_name(piece.font);
+                self.content
+                    .extend_from_slice(format!(" {size} Tf").as_bytes());
+                font = Some(piece.font);
+            }
+            if at.is_none() {
+                self.content
+                    .extend_from_slice(format!(" {character_spacing} Tc").as_bytes());
+            }
+            let words = match piece.text {
+                PieceText::Codes { .. } => word_spacing,
+                PieceText::Glyphs(_) => 0.0,
+            };
+            if spaced != Some(words) {
+                self.content
+                    .extend_from_slice(format!(" {words} Tw").as_bytes());
+                spaced = Some(words);
+            }
+            // 9.4.2: `Td` moves from the start of the current line, which is
+            // where the last `Td` put it, not from where the last glyph left
+            // the pen — so the move is from piece to piece.
+            match at {
+                None => self
+                    .content
+                    .extend_from_slice(format!(" {} {y} Td", piece.x).as_bytes()),
+                Some(from) => self
+                    .content
+                    .extend_from_slice(format!(" {} 0 Td", piece.x - from).as_bytes()),
+            }
+            at = Some(piece.x);
+            match piece.text {
+                PieceText::Codes { codes, characters } => {
+                    self.used
+                        .entry(piece.font.to_vec())
+                        .or_default()
+                        .extend(characters.chars());
+                    self.content.extend_from_slice(b" (");
+                    literal_codes(&mut self.content, codes);
+                    self.content.extend_from_slice(b") Tj");
                 }
-                b'\r' => self.content.extend_from_slice(b"\\r"),
-                b'\n' => self.content.extend_from_slice(b"\\n"),
-                _ => self.content.push(*byte),
+                PieceText::Glyphs(glyphs) => {
+                    let hex = self
+                        .composite
+                        .get(piece.font)
+                        .map(|codes| codes.hex(glyphs.iter().map(|glyph| glyph.id)))
+                        .unwrap_or_default();
+                    let mapping = self.drawn.entry(piece.font.to_vec()).or_default();
+                    for glyph in glyphs {
+                        let text = mapping.entry(glyph.id).or_default();
+                        if text.is_empty() && !glyph.text.is_empty() {
+                            *text = glyph.text.to_string();
+                        }
+                    }
+                    self.content.extend_from_slice(b" <");
+                    self.content.extend_from_slice(hex.as_bytes());
+                    self.content.extend_from_slice(b"> Tj");
+                }
             }
         }
-        self.content.extend_from_slice(b") Tj ET\n");
+        self.content.extend_from_slice(b" ET\n");
+        drawable.len() == pieces.len()
     }
 
     /// Fills a rectangle in device grey, from black (0) to white (1).
@@ -12153,6 +12319,126 @@ mod graphics_tests {
         );
         // Two codes, not three: the repeat is the same glyph.
         assert!(text.contains("2 beginbfchar"), "{text}");
+    }
+
+    /// **`text_pieces` writes its pieces as one text object**, moving from
+    /// one to the next with `Td` and changing font with `Tf` inside it, and
+    /// records each piece as the single-piece writers do.
+    ///
+    /// One object is the point: the end of a text object puts a reader's pen
+    /// down, and a line resumes after it only near where the last glyph
+    /// ended, so a glyph drawn back over the one before it — a mark on its
+    /// letter — and the glyph after it, in two objects, read as two lines
+    /// once the spacing between them passed half an em. `Td` moves from the
+    /// last `Td`, so each move is the difference between two pieces'
+    /// positions; a composite piece is drawn at a word spacing of zero, the
+    /// simple ones at the caller's.
+    ///
+    /// A piece in a font that is not composite is left out alone, as
+    /// [`PageBuilder::glyphs`] refuses its run, and the rest are drawn where
+    /// they were put; a number a content stream cannot carry writes nothing.
+    #[test]
+    fn text_pieces_are_one_text_object_moved_between_with_td() {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        assert!(builder.add_cid_font(b"C0", b"Metric", &metric_font(1000, true)));
+        builder.add_page(200.0, 200.0, |page| {
+            assert!(page.text_pieces(
+                12.0,
+                100.0,
+                (0.5, 2.0),
+                &[
+                    TextPiece {
+                        font: b"F0",
+                        x: 10.0,
+                        text: PieceText::Codes {
+                            codes: b"a(",
+                            characters: "a(",
+                        },
+                    },
+                    TextPiece {
+                        font: b"C0",
+                        x: 9.5,
+                        text: PieceText::Glyphs(&[Glyph {
+                            id: 2,
+                            text: "\u{301}",
+                        }]),
+                    },
+                    TextPiece {
+                        font: b"F0",
+                        x: 20.0,
+                        text: PieceText::Codes {
+                            codes: b"b c",
+                            characters: "b c",
+                        },
+                    },
+                ]
+            ));
+            assert!(!page.text_pieces(
+                12.0,
+                80.0,
+                (0.0, 0.0),
+                &[
+                    TextPiece {
+                        font: b"F0",
+                        x: 10.0,
+                        text: PieceText::Codes {
+                            codes: b"d",
+                            characters: "d",
+                        },
+                    },
+                    TextPiece {
+                        font: b"F0",
+                        x: 20.0,
+                        text: PieceText::Glyphs(&[Glyph { id: 3, text: "e" }]),
+                    },
+                ]
+            ));
+            let one = [TextPiece {
+                font: b"F0",
+                x: 10.0,
+                text: PieceText::Codes {
+                    codes: b"f",
+                    characters: "f",
+                },
+            }];
+            assert!(!page.text_pieces(f64::NAN, 60.0, (0.0, 0.0), &one));
+            assert!(!page.text_pieces(12.0, 60.0, (f64::INFINITY, 0.0), &one));
+            assert!(!page.text_pieces(12.0, 60.0, (0.0, 0.0), &[]));
+        });
+        let doc = opened(builder);
+        let content = content(&doc);
+        assert!(
+            content.contains(
+                "BT /F0 12 Tf 0.5 Tc 2 Tw 10 100 Td (a\\() Tj /C0 12 Tf 0 Tw -0.5 0 Td <0002> Tj \
+                 /F0 12 Tf 2 Tw 10.5 0 Td (b c) Tj ET\n"
+            ),
+            "the pieces are not one text object: {content}"
+        );
+        assert!(
+            content.contains("BT /F0 12 Tf 0 Tc 0 Tw 10 80 Td (d) Tj ET\n"),
+            "the piece in a simple font was not drawn beside the one left out: {content}"
+        );
+        assert_eq!(
+            content.matches("BT").count(),
+            2,
+            "a refused call wrote something: {content}"
+        );
+
+        let font = resource(&doc, b"Font", b"C0");
+        let stream = font
+            .get_ref(doc.intern(b"ToUnicode"))
+            .expect("a /ToUnicode stream");
+        let cmap = doc.stream_decoded(stream).expect("it decodes");
+        let text = String::from_utf8_lossy(&cmap).into_owned();
+        assert!(
+            text.contains("<0002> <0301>"),
+            "the composite piece's glyph was not recorded: {text}"
+        );
+        assert!(
+            !text.contains("<0003>"),
+            "the piece left out was recorded: {text}"
+        );
     }
 
     /// `/ToUnicode` takes many glyphs to one character **and** one glyph to

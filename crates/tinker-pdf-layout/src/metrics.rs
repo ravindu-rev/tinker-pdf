@@ -296,6 +296,24 @@ pub trait Metrics {
         None
     }
 
+    /// Whether `letter-spacing` is added for `ch`: whether it starts a
+    /// typographic character unit rather than belonging to the one before.
+    ///
+    /// `css-text-3` §10.2 adds the spacing between typographic character
+    /// units, and a letter with the nonspacing marks written after it is one
+    /// (§10.2's own example is a base and its combining diacritics). Spaced
+    /// a character at a time, a letter carrying three marks was followed by
+    /// four spacings, and a painter that draws each mark on its letter left a
+    /// gap of all four after it. Which characters are such marks is a
+    /// `Bidi_Class` question, and this crate has no `Bidi_Class` table and is
+    /// not the place for one (as for [`Metrics::first_strong`]), so a
+    /// provider that has one answers; `true` — the default — spaces every
+    /// character, as every provider did before this method existed.
+    fn letter_spaced(&self, ch: char) -> bool {
+        let _ = ch;
+        true
+    }
+
     /// The [`Shaper`] this provider is, if it is one.
     ///
     /// `None` — the default — is a provider that measures a character at a

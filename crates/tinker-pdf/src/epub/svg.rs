@@ -69,6 +69,7 @@ use tinker_pdf_font::Sfnt;
 use tinker_pdf_layout::metrics::{FontRequest, Metrics};
 use tinker_pdf_layout::TextRun;
 use tinker_pdf_shape::bidi::BaseDirection;
+use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
 use tinker_pdf_svg::path::Segment;
 use tinker_pdf_svg::{
     transform, Clip, FillRule, LineCap, LineJoin, Node, Paint, Scene, Spread, Stop, TextAnchor,
@@ -1669,6 +1670,16 @@ fn draw_text(
 /// standard 14 are registered without a program, so there is no subset for the
 /// characters to be recorded against, and the operators are the same whether
 /// they land on a page or in a group's form.
+///
+/// A nonspacing mark has no advance in the standard 14 ([`BookMetrics`]
+/// measures it at zero), so drawn where the pen stood after its letter it
+/// lay at the letter's end, in the box of the glyph drawn next, and a line
+/// ruling 14 reorders read it there. It is drawn where a page's is
+/// ([`paint::mark_at`]): inside its letter's box, a string of its own, and
+/// what follows it is drawn from the pen in another. An SVG run has no
+/// `letter-spacing` here, so the glyph after the mark starts nine
+/// thousandths of an em past where the mark's box ends, well inside the
+/// half an em a reader resumes a line across.
 fn draw_coded(
     out: &mut Vec<u8>,
     fonts: &Fonts<'_>,
@@ -1711,8 +1722,22 @@ fn draw_coded(
         }
         out.extend_from_slice(b") Tj ET\n");
     };
+    // Where the last character that is not a mark started, and its advance:
+    // what a mark after it rides on.
+    let mut base: Option<(f64, f64)> = None;
+    // Whether the string being written holds a mark drawn inside its letter,
+    // so what follows starts a string of its own at the pen.
+    let mut after_placed = false;
     for ch in text.chars() {
         let advance = metrics.advance(ch, request);
+        let mark = bidi_class(ch) == BidiClass::NSM;
+        let placed = base
+            .filter(|_| mark && advance == 0.0)
+            // Exact: what this draws, it draws in a simple font.
+            .map(|(from, width)| paint::mark_at(from, width, size, true));
+        if !mark {
+            base = Some((pen, advance));
+        }
         let Some(coded) = fonts.encode(chosen, ch) else {
             // No code anywhere for this character; the run keeps its width so
             // that what follows stays where the document put it, and the
@@ -1721,19 +1746,22 @@ fn draw_coded(
             continue;
         };
         match &mut current {
-            Some((resource, codes)) if resource == coded.resource() => {
+            Some((resource, codes))
+                if placed.is_none() && !after_placed && resource == coded.resource() =>
+            {
                 if let Coded::Simple { code, .. } = coded {
                     codes.push(code);
                 }
             }
             _ => {
                 flush(out, current.take(), at);
-                at = pen;
+                at = placed.unwrap_or(pen);
                 if let Coded::Simple { resource, code } = coded {
                     current = Some((resource, vec![code]));
                 }
             }
         }
+        after_placed = placed.is_some();
         pen += advance;
     }
     flush(out, current.take(), at);

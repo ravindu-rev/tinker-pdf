@@ -83,8 +83,8 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use tinker_pdf_cos::build::{
-    DeviceSpace, DocumentBuilder, ExtGState, Function, Glyph, PageBuilder, Shading, Target,
-    TilingPattern, TilingType,
+    DeviceSpace, DocumentBuilder, ExtGState, Function, Glyph, PageBuilder, PieceText, Shading,
+    Target, TextPiece, TilingPattern, TilingType,
 };
 use tinker_pdf_css::cascade::StyleTree;
 
@@ -606,9 +606,31 @@ impl Metrics for BookMetrics<'_> {
         Some(first_strong(text))
     }
 
+    fn letter_spaced(&self, ch: char) -> bool {
+        letter_spaced(ch)
+    }
+
     fn shaper(&self) -> Option<&dyn Shaper> {
         Some(self)
     }
+}
+
+/// Whether `letter-spacing` is added for `ch`: every character but a
+/// nonspacing mark (`Bidi_Class` `NSM`), which belongs to the typographic
+/// character unit of the letter before it (`css-text-3` §10.2).
+///
+/// The one answer layout ([`Metrics::letter_spaced`]) and every painter ask:
+/// [`draw_coded`] moves its pen by it, [`shaped_glyphs`] charges a cluster
+/// by it, and [`cut_run`] cuts a run's width by it, so a run is
+/// drawn as wide as it was measured. Spaced a character at a time, as it
+/// was, a letter with a mark was followed by two spacings and one with four
+/// marks by five; drawn on its letter, the mark left all of them as a gap
+/// after it, and an Arabic or pointed Hebrew word set with `letter-spacing`
+/// was wider than the same word unpointed, by a spacing a mark. The class is
+/// the one [`mark_clusters`] and ruling 14's pairing test, so what is drawn
+/// as a mark is spaced as one.
+fn letter_spaced(ch: char) -> bool {
+    bidi_class(ch) != BidiClass::NSM
 }
 
 /// UAX #9's P2 over one box's text, for a `unicode-bidi: plaintext`
@@ -3577,8 +3599,9 @@ fn drawable(style: BorderStyle) -> bool {
     !matches!(style, BorderStyle::None | BorderStyle::Hidden)
 }
 
-/// One stretch of a run sharing a font resource: what will become one text
-/// object.
+/// One stretch of a run sharing a font resource, one string of codes from one
+/// position: a text object of its own, or a piece of one that holds a mark
+/// ([`flush`]).
 struct Segment {
     resource: Vec<u8>,
     composite: bool,
@@ -3701,12 +3724,13 @@ fn head(text: &str, n: usize) -> String {
 /// Not a preference. `glyph_run`'s pen model does not know about `Tc`, so a
 /// non-zero one would push glyph *k* by *k* × `Tc` past where this put it. And
 /// `Tc` is applied by a reader per **glyph** while `tinker-pdf-layout`
-/// measures `letter_spacing × chars().count()` per **character**
-/// (`flow.rs`'s `measure`), so a ligature or a joined Arabic word was drawn
-/// *narrower* than the line box it was measured into. Folding the spacing in
-/// at cluster boundaries — one character's worth per character, none between a
-/// mark and its base — makes the drawn width the measured width by
-/// construction.
+/// measures `letter_spacing` per **character** that starts a typographic
+/// character unit (`flow.rs`'s `measure`, asking [`letter_spaced`]), so a
+/// ligature or a joined Arabic word was drawn *narrower* than the line box
+/// it was measured into. Folding the spacing in at cluster boundaries — one
+/// spacing for each character of the cluster that is not a nonspacing mark,
+/// none between a mark and its base — makes the drawn width the measured
+/// width by construction.
 ///
 /// # Context
 ///
@@ -3793,10 +3817,10 @@ fn shaped_glyphs(
     let mut origin: Option<f64> = None;
     // `word-spacing` paid so far, after own spaces already drawn.
     let mut widened = 0.0f64;
-    // Characters whose clusters are already behind the pen, and the characters
+    // Spaced characters whose clusters are already behind the pen, and those
     // of the cluster it is inside. `letter-spacing` is charged once per
-    // character and paid at the cluster boundary, so a mark keeps the position
-    // its anchor gave it.
+    // character that is not a mark ([`letter_spaced`]) and paid at the
+    // cluster boundary, so a mark keeps the position its anchor gave it.
     let mut spaced = 0usize;
     let mut pending = 0usize;
     let mut cluster: Option<u32> = None;
@@ -3832,7 +3856,7 @@ fn shaped_glyphs(
             }
             let stands_for = texts.get(at).copied().unwrap_or("");
             if !stands_for.is_empty() {
-                pending = stands_for.chars().count();
+                pending = stands_for.chars().filter(|c| letter_spaced(*c)).count();
             }
             cluster = Some(glyph.cluster);
             out.push(Placed {
@@ -3861,7 +3885,8 @@ fn shaped_glyphs(
         // clusters', so the pen agrees with `flow.rs`'s `measure` exactly even
         // where a shaper dropped a character that started no cluster of its
         // own.
-        advance: own_advance + letter_spacing * text.chars().count() as f64,
+        advance: own_advance
+            + letter_spacing * text.chars().filter(|c| letter_spaced(*c)).count() as f64,
         glyphs: out,
     })
 }
@@ -4703,7 +4728,7 @@ pub(crate) fn cut_run(
     }
     for (width, (range, _)) in widths.iter_mut().zip(pieces) {
         let slice = run.text.get(range.clone()).unwrap_or("");
-        *width += run.letter_spacing * slice.chars().count() as f64
+        *width += run.letter_spacing * slice.chars().filter(|c| letter_spaced(*c)).count() as f64
             + run.word_spacing * slice.chars().filter(|c| *c == ' ').count() as f64;
     }
     let mut x = run.x;
@@ -5050,9 +5075,11 @@ fn split_after_spaces(slice: &str) -> Vec<&str> {
     out
 }
 
-/// How far short of its base's end a mark [`draw_coded`] positions is drawn,
-/// in ems: a hundredth, or half the base where the base is narrower than two
-/// hundredths.
+/// How far short of its base's end a mark [`draw_coded`] positions is drawn
+/// where a reader may set the base narrower than layout measured it — a
+/// letter the Liberation stand-in draws — or where the base is another
+/// run's, in ems: a hundredth, or half the base where the base is narrower
+/// than two hundredths. A simple font's base takes [`EXACT_MARK_INSET`].
 ///
 /// Extraction (`tinker-pdf-content`) reads a glyph of no advance as a box a
 /// thousandth of an em wide running right from where it is drawn, and ruling
@@ -5067,41 +5094,97 @@ fn split_after_spaces(slice: &str) -> Vec<&str> {
 /// move a tenth of a point at twelve.
 const MARK_INSET: f64 = 0.01;
 
+/// How far short of its base's end a mark is drawn on a base a reader sets
+/// exactly as wide as layout measured it, in ems: nine ten-thousandths, so
+/// the mark's box, a thousandth wide, ends a ten-thousandth **past** its
+/// base's and its centre is four ten-thousandths inside it.
+///
+/// A simple font's base is such a base: the standard 14's widths, and the
+/// overflow font's `/Widths`, are whole thousandths of an em and are the
+/// numbers layout measured with ([`standard_width`]). A text object that
+/// ends with a mark leaves a reader's pen where the mark's box ends, and the
+/// next text object — the next run, on the same line — resumes the line
+/// only within half an em of it (`tinker-pdf-content`'s `TextDevice`). With
+/// [`MARK_INSET`] the next run started `letter-spacing` and nine thousandths
+/// of an em past the mark's box, and in a default build
+/// `<b>cafe\u{301}</b>s` at a `letter-spacing` of `8px`, half an em, read
+/// `cafe\u{301}` and `s` on two lines, where cd407d5 read one. Here the next
+/// run starts `letter-spacing` less a ten-thousandth past the mark's box, no
+/// further than past the letter itself. A stand-in's base keeps
+/// [`MARK_INSET`]: its `/W` rounds what layout measured to a whole
+/// thousandth, up to half a thousandth narrower, and a centre four
+/// ten-thousandths inside the measured end could lie outside the drawn one,
+/// and with a negative spacing inside the next glyph's box.
+const EXACT_MARK_INSET: f64 = 0.0009;
+
 /// Where a mark of no advance riding on the glyph drawn at `start`, `width`
-/// wide, is drawn: [`MARK_INSET`] short of the glyph's end, inside its box.
-fn mark_at(start: f64, width: f64, font_size: f64) -> f64 {
+/// wide, is drawn: short of the glyph's end, inside its box —
+/// [`EXACT_MARK_INSET`] where `exact`, the glyph drawn by a simple font,
+/// [`MARK_INSET`] where not, or half the glyph if it is narrower than twice
+/// that.
+pub(super) fn mark_at(start: f64, width: f64, font_size: f64, exact: bool) -> f64 {
     let width = width.max(0.0);
-    start + width - (font_size * MARK_INSET).min(width / 2.0)
+    let inset = if exact { EXACT_MARK_INSET } else { MARK_INSET };
+    start + width - (font_size * inset).min(width / 2.0)
 }
 
 /// One standard-14 stretch, a character at a time.
 ///
 /// A character is drawn where the pen stands, and the pen moves by its
-/// advance and `letter-spacing`. The one exception is a nonspacing mark of
-/// no advance drawn after its letter ([`coded_order`]'s `rides`): where the
-/// pen stood, at its letter's end, its box lay in the next glyph's and
-/// extraction read it there. So it is drawn **inside its letter's box**, at
-/// [`mark_at`], by a text object of its own, and is read with its letter
-/// whatever the spacing — a letter's second and third marks too, in either
-/// direction — while the pen moves as layout measured. A text object of its
-/// own is the one way to state a position for one glyph that a segment's
-/// single string of codes leaves, and it costs a few dozen bytes of content
-/// stream a mark and nothing in what extraction sees: a line closed by an
-/// `ET` resumes at a text object that starts left of where it stopped, as
-/// the mark's does, and at one that starts within half an em right of it,
-/// as the glyph after the mark does (`tinker-pdf-content`'s `TextDevice`).
+/// advance and, but for a nonspacing mark, `letter-spacing`
+/// ([`letter_spaced`]: a letter and its marks are one typographic character
+/// unit, spaced once, as layout measured them). The one exception to where
+/// is a nonspacing mark of no advance drawn after its letter
+/// ([`coded_order`]'s `rides`): where the pen stood, at its letter's end,
+/// its box lay in the next glyph's and extraction read it there. So it is
+/// drawn **inside its letter's box**, at [`mark_at`], and is read with its
+/// letter — a letter's second, third and fourth marks too, in either
+/// direction — while the pen moves as layout measured.
 ///
-/// A mark whose letter is not in the slice — styled apart from it, or left
-/// to the standard 14 by a face of the book's own that draws its letter —
-/// rides on nothing here. In a left-to-right run its letter was drawn just
-/// before the slice, ending where the slice starts less a `letter-spacing`
-/// (this run's is the one to hand), so a mark that opens the slice is drawn
-/// [`MARK_INSET`] inside that end: drawn at the pen, it was read with the
-/// glyph after it on a line ruling 14 reorders, `x<b>e</b>\u{301}x` beside a
-/// right-to-left word reading `xex\u{301}`. In a right-to-left run the
-/// letter is drawn to the right of the slice, by a run the content stream
-/// may have written earlier, and the mark is drawn where the pen stands: a
-/// known limit `epub.md` names.
+/// # One text object for a slice that holds a mark
+///
+/// A segment is one string of codes from one position, which states no
+/// position for one glyph inside it, so a mark is a segment of its own and
+/// so is what follows it, from the pen. Those segments are written into
+/// **one text object** ([`PageBuilder::text_pieces`]), as is every segment
+/// of a slice that holds a mark: `tinker-pdf-content`'s `TextDevice`
+/// resumes a line after an `ET` only within half an em of where the last
+/// glyph's box ended, and ruling 14's rejoin allows the same half em. Drawn
+/// in a text object of its own (6d79fa4), a mark left a reader's pen at
+/// its own box, short of its letter's end, and the glyph after it was every
+/// spacing past that: a word's pointed letters became lines of their own
+/// from a quarter of an em of spacing (`The word ךְ\nלֶ\nמֶ\n, quoted`;
+/// review of 6d79fa4). A slice holding no mark keeps a text object per
+/// segment, byte for byte as before: a book with no mark is drawn as it
+/// was.
+///
+/// # Where a slice ends on a mark
+///
+/// The next slice, or the next run, is another text object, and its first
+/// glyph starts one spacing past the letter's end. A mark on a letter a
+/// simple font draws ends its box a ten-thousandth of an em past the
+/// letter's ([`EXACT_MARK_INSET`]), so that glyph starts no further from the
+/// pen than after the letter alone, and the line is resumed across the half
+/// em it would be without the mark. A mark on a letter the Liberation stand-in
+/// draws is drawn [`MARK_INSET`] inside it, its box ending nine thousandths
+/// of an em short: from a spacing of `0.491em` such a line is cut there
+/// where nothing in it reads right to left — a known limit `epub.md` names
+/// (`a_standard_14_mark_ending_a_run_on_a_stand_in_letter_cuts_its_line_near_half_an_em`).
+/// Past half an em of spacing every run boundary cuts a line, mark or none.
+///
+/// # A mark whose letter is not in the slice
+///
+/// Styled apart from it, or left to the standard 14 by a face of the book's
+/// own that draws its letter, a mark rides on nothing here. In a
+/// left-to-right run its letter was drawn just before the slice, ending
+/// where the slice starts less a `letter-spacing` (this run's is the one to
+/// hand), so a mark that opens the slice is drawn [`MARK_INSET`] inside that
+/// end: drawn at the pen, it was read with the glyph after it on a line
+/// ruling 14 reorders, `x<b>e</b>\u{301}x` beside a right-to-left word
+/// reading `xex\u{301}`. In a right-to-left run the letter is drawn to the
+/// right of the slice, by a run the content stream may have written
+/// earlier, and the mark is drawn where the pen stands: a known limit
+/// `epub.md` names.
 ///
 /// Returns where the pen ended, in layout pixels.
 #[expect(
@@ -5120,18 +5203,28 @@ fn draw_coded(
 ) -> f64 {
     let font = request(run);
     let metrics = BookMetrics::with(fonts.faces());
-    // One text object per contiguous stretch of characters sharing a font
-    // resource, because a PDF string is bytes in **one** font: a stretch that
-    // spills into the overflow font is two show operations and not one, and
-    // the second's origin is wherever the first's advance left it.
-    let mut segment: Option<Segment> = None;
-    // Where the last character drawn that is not a mark started, and its
-    // advance: what the marks drawn after it ride on.
-    let mut base: Option<(f64, f64)> = None;
+    // The text object being written: its pieces, each a stretch of one font
+    // resource from one position. A PDF string is bytes in **one** font, so
+    // a stretch that spills into the overflow font is a piece of its own,
+    // and the second's origin is wherever the first's advance left it. A
+    // stretch of a new resource starts a new text object, as it always has,
+    // except in a slice that holds a mark (see above).
+    let mut object: Vec<Segment> = Vec::new();
+    // Where the last character drawn that is not a mark started, its
+    // advance, and whether a reader sets it as wide as it was measured
+    // ([`mark_at`]).
+    let mut base: Option<(f64, f64, bool)> = None;
     // Whether only marks have been drawn so far in a left-to-right run: a
     // mark whose letter ended the run or the face segment drawn just before
     // this one, at its left.
     let mut leading = !reads_right_to_left(run);
+    // Whether the last character drawn was a mark: what follows it is a
+    // piece of its own, from the pen, in the same text object.
+    let mut after_mark = false;
+    // Whether the slice holds a mark, and is drawn as one text object: a
+    // mark, and what follows one, is a piece of the object open, and only a
+    // slice without one starts an object at a new resource.
+    let whole = slice.chars().any(|c| bidi_class(c) == BidiClass::NSM);
     let start = x;
 
     for (ch, rides) in coded_order(run, slice) {
@@ -5150,7 +5243,7 @@ fn draw_coded(
         let advance = metrics.advance(ch, &font);
         let placed = match (mark && advance == 0.0, rides) {
             (false, _) => None,
-            (true, true) => base.map(|(at, width)| mark_at(at, width, run.font_size)),
+            (true, true) => base.map(|(at, width, exact)| mark_at(at, width, run.font_size, exact)),
             // Its letter ended where this slice starts, less the spacing
             // after it — this run's, the one to hand — so the mark goes
             // inside it as though it rode on it.
@@ -5159,13 +5252,23 @@ fn draw_coded(
             }
             (true, false) => None,
         };
-        let same = placed.is_none()
-            && segment
-                .as_ref()
+        let continues = !mark
+            && !after_mark
+            && object
+                .last()
                 .is_some_and(|open| open.resource == coded.resource());
-        if !same {
-            flush(page, segment.take(), size, baseline, run, frame);
-            segment = Some(Segment {
+        if !continues {
+            if !whole {
+                flush(
+                    page,
+                    std::mem::take(&mut object),
+                    size,
+                    baseline,
+                    run,
+                    frame,
+                );
+            }
+            object.push(Segment {
                 resource: coded.resource().to_vec(),
                 composite: matches!(coded, Coded::Composite { .. }),
                 codes: Vec::new(),
@@ -5174,27 +5277,26 @@ fn draw_coded(
                 x: placed.unwrap_or(x),
             });
         }
-        if let Some(open) = segment.as_mut() {
+        if let Some(open) = object.last_mut() {
             match coded {
                 Coded::Simple { code, .. } => open.codes.push(code),
                 Coded::Composite { id, .. } => open.glyphs.push((id, ch)),
             }
             open.characters.push(ch);
         }
-        if placed.is_some() {
-            // The mark's own text object: what follows is drawn from the
-            // pen, in another.
-            flush(page, segment.take(), size, baseline, run, frame);
-        }
         if !mark {
-            base = Some((x, advance));
+            base = Some((x, advance, matches!(coded, Coded::Simple { .. })));
         }
-        x += advance + run.letter_spacing;
+        after_mark = mark;
+        x += advance;
+        if letter_spaced(ch) {
+            x += run.letter_spacing;
+        }
         if ch == ' ' {
             x += run.word_spacing;
         }
     }
-    flush(page, segment.take(), size, baseline, run, frame);
+    flush(page, object, size, baseline, run, frame);
     x
 }
 
@@ -5260,11 +5362,12 @@ fn draw_coded(
 /// letter. A mark the overflow font draws has no advance ([`standard_width`])
 /// and nor has one the Liberation stand-in draws, but for thirteen of its
 /// bold serif's (the medieval superscript letters, U+0363 to U+036F, which
-/// it sets as glyphs of their own after their letter); a mark of no advance
-/// moves the pen by `letter-spacing` alone, and [`draw_coded`] draws it
-/// inside its letter's box, where ruling 14's extraction pairs it with that
-/// letter: the neighbour, in content order, whose box holds its centre. How
-/// that came to be, since each step was a fix of its own:
+/// it sets as glyphs of their own after their letter); no mark takes
+/// `letter-spacing` ([`letter_spaced`]), so a mark of no advance does not
+/// move the pen, and [`draw_coded`] draws it inside its letter's box, where
+/// ruling 14's extraction pairs it with that letter: the neighbour, in
+/// content order, whose box holds its centre. How that came to be, since
+/// each step was a fix of its own:
 ///
 /// - The overflow font gave a mark a space's advance, and a mark drawn
 ///   after its letter had its centre exactly as far outside its letter's box
@@ -5278,21 +5381,28 @@ fn draw_coded(
 ///   advance as a box a thousandth of an em wide running right from where it
 ///   is drawn: every point of `מֶלֶךְ` was read with its neighbour in a
 ///   `bundled-fonts` build. Drawn before its letter, where the letter
-///   starts, it was read with the letter — until `letter-spacing`, which is
-///   added after a mark as after any character, as layout measures it
-///   (css-text-3 §10.2 spaces typographic character units, and a letter with
-///   its marks is one), moved it off: `שָׁלוֹם` at `0.5px` came back
-///   `שׁלָוֹם` and `מֶלֶךְ` at `-0.5px` `מלֶךְֶ`. And a left-to-right slice,
-///   which keeps its marks after their letters, had nowhere else to draw
-///   them: a decomposed `e\u{301}` beside a right-to-left word read as an `e`
-///   and an accented space.
+///   starts, it was read with the letter — until `letter-spacing`, which was
+///   added after a mark as after any character, moved it off: `שָׁלוֹם` at
+///   `0.5px` came back `שׁלָוֹם` and `מֶלֶךְ` at `-0.5px` `מלֶךְֶ`. And a
+///   left-to-right slice, which keeps its marks after their letters, had
+///   nowhere else to draw them: a decomposed `e\u{301}` beside a
+///   right-to-left word read as an `e` and an accented space.
+/// - Drawn inside its letter by a text object of its own (6d79fa4), a mark
+///   left a reader's pen at its own box, and the glyph after it started
+///   every spacing past — the letter's and each mark's: from a quarter of an
+///   em of `letter-spacing` a pointed word was read a letter a line. A slice
+///   holding a mark is one text object now ([`draw_coded`]), and a mark is
+///   not spaced (`css-text-3` §10.2 spaces typographic character units, and
+///   a letter with its marks is one).
 ///
-/// Positioned inside its letter, a mark is read with it at any size and any
-/// spacing, however many the letter carries. Where on its letter it stands
-/// is still not where a point should, over the middle: that is `GPOS`'s to
-/// say, and an unshaped run reads none. Marks with nothing before them in
-/// the slice, their letter in another run or face segment, ride on nothing;
-/// [`draw_coded`] says where those are drawn.
+/// Positioned inside its letter, a mark is read with it at every size and
+/// spacing the tests sweep, four to a letter, and its line is not cut
+/// inside its slice; where a slice ends on a mark, [`draw_coded`] says how
+/// far the next run may be. Where on its letter it stands is still not where
+/// a point should, over the middle: that is `GPOS`'s to say, and an unshaped
+/// run reads none. Marks with nothing before them in the slice, their letter
+/// in another run or face segment, ride on nothing; [`draw_coded`] says
+/// where those are drawn.
 ///
 /// Mirroring (rule L4) is not applied: a simple font's code names one
 /// character, so a mirrored glyph would extract as the other bracket. A
@@ -5358,7 +5468,10 @@ fn mark_clusters(slice: &str) -> Vec<&str> {
     out
 }
 
-/// Writes one segment as one text object.
+/// Writes one text object [`draw_coded`] assembled: its one segment as
+/// [`PageBuilder::encoded_text`] or [`PageBuilder::glyphs`] writes it, or
+/// its several — a mark and what follows it, each at its own position — as
+/// one text object through [`PageBuilder::text_pieces`].
 ///
 /// # This is the caller of [`PageBuilder::glyphs`] that survived, and it is
 /// the right one
@@ -5369,60 +5482,103 @@ fn mark_clusters(slice: &str) -> Vec<&str> {
 /// run is unshaped and one glyph per character at the face's own advances, so
 /// letting the font's advances place it is not a limitation here but the whole
 /// of what it needs. Writing it through `glyph_run` would state a position for
-/// every glyph that the advances already give, and would buy nothing.
+/// every glyph that the advances already give, and would buy nothing. The
+/// one position the advances do not give — a mark drawn back inside its
+/// letter, and the glyph after it, from the pen — is a segment of its own,
+/// and [`PageBuilder::text_pieces`] states it.
 ///
 /// Recorded rather than left to be found, because "one path was migrated and
 /// one was not" reads as an unfinished migration until someone works out that
 /// the two paths are not the same path.
 fn flush(
     page: &mut PageBuilder,
-    segment: Option<Segment>,
+    object: Vec<Segment>,
     size: f64,
     y: f64,
     run: &TextRun,
     frame: &Frame,
 ) {
-    let Some(segment) = segment else { return };
-    let x = frame.x(segment.x);
-    if segment.composite {
-        if segment.glyphs.is_empty() {
+    let spacing = (run.letter_spacing * PX_TO_PT, run.word_spacing * PX_TO_PT);
+    let texts: Vec<Vec<String>> = object
+        .iter()
+        .map(|segment| {
+            segment
+                .glyphs
+                .iter()
+                .map(|(_, ch)| ch.to_string())
+                .collect()
+        })
+        .collect();
+    let drawn: Vec<Vec<Glyph<'_>>> = object
+        .iter()
+        .zip(&texts)
+        .map(|(segment, texts)| {
+            segment
+                .glyphs
+                .iter()
+                .zip(texts)
+                .map(|((id, _), text)| Glyph {
+                    id: *id,
+                    text: text.as_str(),
+                })
+                .collect()
+        })
+        .collect();
+    if let [segment] = object.as_slice() {
+        let x = frame.x(segment.x);
+        if segment.composite {
+            let Some(glyphs) = drawn.first().filter(|glyphs| !glyphs.is_empty()) else {
+                return;
+            };
+            // `PageBuilder::glyphs` writes no `Tc` and no `Tw` of its own, and
+            // both are **text state** that survives a `BT`/`ET` pair — so a
+            // composite draw after a simple one would inherit the simple one's
+            // spacing. Setting them here is what keeps a composite segment's
+            // spacing the run's own rather than whatever was set last.
+            page.raw(format!("{} Tc 0 Tw", spacing.0).as_bytes());
+            page.glyphs(&segment.resource, size, x, y, glyphs);
             return;
         }
-        // `PageBuilder::glyphs` writes no `Tc` and no `Tw` of its own, and both
-        // are **text state** that survives a `BT`/`ET` pair — so a composite
-        // draw after a simple one would inherit the simple one's spacing.
-        // Setting them here is what keeps a composite segment's spacing the
-        // run's own rather than whatever was set last.
-        page.raw(format!("{} Tc 0 Tw", run.letter_spacing * PX_TO_PT).as_bytes());
-        let texts: Vec<String> = segment
-            .glyphs
-            .iter()
-            .map(|(_, ch)| ch.to_string())
-            .collect();
-        let drawn: Vec<Glyph<'_>> = segment
-            .glyphs
-            .iter()
-            .zip(texts.iter())
-            .map(|((id, _), text)| Glyph {
-                id: *id,
-                text: text.as_str(),
-            })
-            .collect();
-        page.glyphs(&segment.resource, size, x, y, &drawn);
+        if segment.codes.is_empty() {
+            return;
+        }
+        page.encoded_text(
+            &segment.resource,
+            size,
+            x,
+            y,
+            spacing,
+            &segment.codes,
+            &segment.characters,
+        );
         return;
     }
-    if segment.codes.is_empty() {
-        return;
+    let pieces: Vec<TextPiece<'_>> = object
+        .iter()
+        .zip(&drawn)
+        .filter(|(segment, glyphs)| {
+            if segment.composite {
+                !glyphs.is_empty()
+            } else {
+                !segment.codes.is_empty()
+            }
+        })
+        .map(|(segment, glyphs)| TextPiece {
+            font: &segment.resource,
+            x: frame.x(segment.x),
+            text: if segment.composite {
+                PieceText::Glyphs(glyphs)
+            } else {
+                PieceText::Codes {
+                    codes: &segment.codes,
+                    characters: &segment.characters,
+                }
+            },
+        })
+        .collect();
+    if !pieces.is_empty() {
+        page.text_pieces(size, y, spacing, &pieces);
     }
-    page.encoded_text(
-        &segment.resource,
-        size,
-        x,
-        y,
-        (run.letter_spacing * PX_TO_PT, run.word_spacing * PX_TO_PT),
-        &segment.codes,
-        &segment.characters,
-    );
 }
 
 /// `text-decoration`, as a filled rectangle at the position CSS 2.2 §16.3.1

@@ -5169,7 +5169,7 @@ impl<M: Metrics> Builder<'_, M> {
                 line_start..content.len(),
             );
             total += self.advance_in(slice, &style.font(), &context);
-            total += style.letter_spacing * visible_chars(slice) as f64;
+            total += style.letter_spacing * self.spaced_chars(slice) as f64;
             total += style.word_spacing * slice.chars().filter(|c| *c == ' ').count() as f64;
         }
         total
@@ -5193,6 +5193,17 @@ impl<M: Metrics> Builder<'_, M> {
     /// direction is the run's *width*, which the two agree on.
     fn advance_of(&self, text: &str, font: &FontRequest<'_>) -> f64 {
         self.advance_in(text, font, &ShapingContext::NONE)
+    }
+
+    /// How many times `letter-spacing` is added over `text`: once for each
+    /// character that is seen — not a soft hyphen, which is invisible where
+    /// no line breaks at it — and that starts a typographic character unit
+    /// ([`Metrics::letter_spaced`]), so a letter and the marks after it are
+    /// spaced once (`css-text-3` §10.2).
+    fn spaced_chars(&self, text: &str) -> usize {
+        text.chars()
+            .filter(|c| *c != SOFT_HYPHEN && self.metrics.letter_spaced(*c))
+            .count()
     }
 
     /// [`Builder::advance_of`], with the text either side of the slice on its
@@ -5423,7 +5434,7 @@ impl<M: Metrics> Builder<'_, M> {
                 self.advance_in(&text, &font, &context)
             };
             let advance = measured
-                + style.letter_spacing * visible_chars(&text) as f64
+                + style.letter_spacing * self.spaced_chars(&text) as f64
                 + style.word_spacing * text.chars().filter(|c| *c == ' ').count() as f64;
             runs.push(TextRun {
                 x: 0.0,
@@ -6732,12 +6743,6 @@ fn hyphen_shown(
                 .is_none_or(|piece| piece.style.hyphens != Hyphens::None)
         })
     })
-}
-
-/// How many characters of `text` are seen: all but its soft hyphens, which
-/// take no `letter-spacing` either.
-fn visible_chars(text: &str) -> usize {
-    text.chars().filter(|c| *c != SOFT_HYPHEN).count()
 }
 
 /// The level an inline box opens round its content, from its `unicode-bidi`

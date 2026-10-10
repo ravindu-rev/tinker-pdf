@@ -617,7 +617,8 @@ fn spaced_book(spacing: u32) -> Vec<u8> {
 /// it, and every offset this file is about would be wrong by a growing amount.
 ///
 /// And `Tc` is applied by a reader per **glyph** while `tinker-pdf-layout`
-/// measures `letter_spacing × chars().count()` per **character**, so a
+/// measures `letter_spacing` per **character** — every one but a nonspacing
+/// mark, since October 2026 — so a
 /// ligature or a joined Arabic word — fewer glyphs than characters — was drawn
 /// narrower than the line box it was measured into. Folding at cluster
 /// boundaries makes the drawn width the measured width by construction, and
@@ -650,6 +651,78 @@ fn letter_spacing_is_folded_into_the_positions() {
         plain[0].1.contains("[<0001><0002><0003>] TJ"),
         "an unspaced run carries an adjustment, so the pair proves nothing: {}",
         plain[0].1
+    );
+}
+
+/// **A nonspacing mark takes no `letter-spacing` of its own in a shaped run
+/// either** (`css-text-3` §10.2: the spacing goes between typographic
+/// character units, and a letter with the marks after it is one).
+///
+/// `A\u{301}B` at six CSS pixels — 250 thousandths of the em at 18 points —
+/// in a face that covers all three with no `GPOS`: the run is spaced once,
+/// after its `A` and acute, so its `TJ` adjustments come to 250. Charged a
+/// character at a time, as layout measured and this painter drew until
+/// October 2026, they came to 500: a mark's spacing drawn as a gap after
+/// it. Layout asks the same question (`Metrics::letter_spaced`), so the run
+/// is drawn as wide as it was measured — and the pen leaves the shaped
+/// piece by the same answer: the `z` the face lacks, drawn by the standard
+/// 14 right after it in the same run, starts `B`'s advance and one spacing
+/// past `B`, 9 and 4.5 points.
+#[test]
+fn a_mark_takes_no_letter_spacing_of_its_own_in_a_shaped_run() {
+    let face = Face::new("Fixture Marks", "AB\u{301}").build();
+    let book = one_face_book(
+        "Fixture Marks",
+        &face,
+        24,
+        "<span style=\"letter-spacing: 6px\">A\u{301}Bz</span>",
+    );
+    let doc = Document::open(book).expect("a book");
+    let content = page_content(&doc);
+    let objects = text_objects(&content);
+    assert_eq!(
+        objects.len(),
+        2,
+        "the face's piece and the standard 14's: {content}"
+    );
+    let array = objects[0]
+        .1
+        .split_once('[')
+        .and_then(|(_, rest)| rest.split_once("] TJ"))
+        .map(|(inside, _)| inside.to_owned())
+        .unwrap_or_else(|| panic!("no TJ array: {content}"));
+    // The numbers between the hex strings: every `<…>` taken out first.
+    let numbers: String = array
+        .split('<')
+        .map(|piece| piece.split_once('>').map_or(piece, |(_, after)| after))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let adjustments: f64 = numbers
+        .split_whitespace()
+        .filter_map(|token| token.parse::<f64>().ok())
+        .sum();
+    assert_eq!(
+        adjustments, -250.0,
+        "the run is not spaced once per letter: {array}"
+    );
+    let page = doc.page(0).expect("a page");
+    assert_eq!(page.text().plain_text(), "A\u{301}Bz\n");
+    let drawn = page.text_with(&TextOptions {
+        content_order: true,
+    });
+    let starts = |text: &str| -> f64 {
+        drawn
+            .lines()
+            .iter()
+            .flat_map(|line| line.chars.iter())
+            .find(|c| c.text == text)
+            .map(|c| c.quad.bounds().0)
+            .unwrap_or_else(|| panic!("nothing draws {text:?}"))
+    };
+    let after = starts("z") - starts("B");
+    assert!(
+        (after - 13.5).abs() < 0.01,
+        "the pen left the shaped piece {after} points past its B, not 13.5"
     );
 }
 

@@ -783,6 +783,50 @@ fn run_counted(tree: &BoxNode, width: f64, height: f64) -> (Layout, usize) {
     (laid, metrics.looked.get())
 }
 
+/// [`METRICS`] with one combining mark, U+0301, that belongs to the
+/// typographic character unit before it.
+struct MarkAware;
+
+impl crate::metrics::Metrics for MarkAware {
+    fn advance(&self, ch: char, font: &crate::metrics::FontRequest<'_>) -> f64 {
+        METRICS.advance(ch, font)
+    }
+
+    fn vertical(&self, font: &crate::metrics::FontRequest<'_>) -> crate::metrics::Vertical {
+        METRICS.vertical(font)
+    }
+
+    fn letter_spaced(&self, ch: char) -> bool {
+        ch != '\u{301}'
+    }
+}
+
+/// **`letter-spacing` is added once per typographic character unit**
+/// (`css-text-3` §10.2): a letter and the mark after it are spaced once,
+/// where the provider says which characters are such marks, and a soft
+/// hyphen is spaced not at all.
+///
+/// `ae\u{301}b\u{AD}` in a ten-point face of ten-point characters, at two
+/// points of `letter-spacing`: four characters drawn, forty points, and
+/// three units spaced, six — forty-six. A provider that says nothing spaces
+/// every character it draws, as every provider did before
+/// [`crate::metrics::Metrics::letter_spaced`]: forty-eight. The painter
+/// moves its pen by the same answer, so a word drawn as wide as it was
+/// measured has no gap after a mark that layout did not leave room for.
+#[test]
+fn letter_spacing_is_added_once_for_a_letter_and_its_marks() {
+    let mut spaced = base();
+    spaced.letter_spacing = tinker_pdf_css::property::Spacing::Px(2.0);
+    let tree = BoxNode::element(block(), vec![BoxNode::text(spaced, "ae\u{301}b\u{AD}")]);
+    fn width<M: crate::metrics::Metrics>(tree: &BoxNode, metrics: &M) -> f64 {
+        let laid = layout(tree, metrics, &Options::new(200.0, 200.0), &Limits::DEFAULT)
+            .expect("the fixture is under every cap");
+        laid.pages[0].runs.iter().map(|run| run.width).sum()
+    }
+    assert_eq!(width(&tree, &MarkAware), 46.0);
+    assert_eq!(width(&tree, &METRICS), 48.0);
+}
+
 /// **A bidi paragraph ends at a paragraph separator, not at every forced
 /// break** (`css-writing-modes-3` §2.4: UAX #9 is applied to every sequence
 /// of inline-level boxes *"uninterrupted by any block boundary or 'bidi type
