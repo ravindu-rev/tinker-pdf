@@ -357,8 +357,8 @@ fn reads_as_written(book: &[u8], doc: &Document, expected: &str) {
     }
 }
 
-/// **A pointed Hebrew word set in the standard 14 keeps each point on its
-/// own letter, and reads back as written.**
+/// **A pointed Hebrew word set in the standard 14 is drawn with each point
+/// on its own letter's side, and, in this book, reads back as written.**
 ///
 /// A nonspacing mark belongs to the letter before it, so the run L2 reverses
 /// is reversed letter by letter, each letter keeping its points (UAX #9 rule
@@ -373,13 +373,19 @@ fn reads_as_written(book: &[u8], doc: &Document, expected: &str) {
 /// point with the overflow font, as wide as a letter, after its letter; the
 /// Liberation stand-in draws one with no advance before its letter, where
 /// the letter starts, since a glyph of no advance is read as a box running
-/// right from where it is drawn. Both read `מֶלֶךְ`, one point to a letter,
-/// as written, and `bundled-fonts` reads `שָׁלוֹם` as written too.
+/// right from where it is drawn. `bundled-fonts` reads `מֶלֶךְ` and
+/// `שָׁלוֹם` as written, with no `letter-spacing` — which is added after a
+/// point as after any character, and moves one off its letter.
 ///
-/// A default build's letter with two points is the limit `epub.md` names:
-/// the second point is drawn after the first, as wide, and is nearer the
-/// glyph drawn next than its own letter, so `שָׁלוֹם, ` reads `שָלוֹם,ׁ `
-/// there, the SHIN DOT on the comma. What is asserted of it is the drawing.
+/// A default build reads `מֶלֶךְ` as written here, and that is this book's
+/// size and not a guarantee, which is what `epub.md` names: a point drawn
+/// after its letter has its centre exactly as far outside its letter's box
+/// as outside the next glyph's, and rounding decides the tie — at a
+/// `font-size` of `12.5px` or `14px`, `a מֶלֶךְ,` reads `a מלֶךְ,ֶ`. A
+/// default build's letter with two points is the other limit: the second
+/// point is drawn after the first, as wide, and is nearer the glyph drawn
+/// next than its own letter, so `שָׁלוֹם, ` reads `שָלוֹם,ׁ ` there, the SHIN
+/// DOT on the comma. What is asserted of it is the drawing.
 #[test]
 fn a_standard_14_pointed_hebrew_word_keeps_each_point_on_its_letter() {
     let melekh = styled_book("en", "", &format!("<p>{MELEKH}, <i>Hebrew</i>.</p>"));
@@ -398,8 +404,8 @@ fn a_standard_14_pointed_hebrew_word_keeps_each_point_on_its_letter() {
 }
 
 /// **An Arabic word with its harakat, in a right-to-left paragraph set in the
-/// standard 14, is drawn with each haraka after its own letter, and reads
-/// back as written.**
+/// standard 14, is drawn with each haraka after its own letter, and, in this
+/// book, reads back as written.**
 ///
 /// The pointed Hebrew word's rule, in the other script that writes
 /// nonspacing marks over its letters: reversed a character at a time, each
@@ -407,7 +413,11 @@ fn a_standard_14_pointed_hebrew_word_keeps_each_point_on_its_letter() {
 /// `كتَبَ َكتب.`, the first word's last FATHA thrown onto the second. No
 /// Liberation face has an Arabic letter, so both builds draw this with the
 /// overflow font — a haraka as wide as a letter, one to a letter — and both
-/// read it back as written.
+/// read it back as written here. That is not a guarantee: in either build a
+/// haraka drawn after its letter has its centre exactly as far from its
+/// letter as from the glyph drawn next, and is read with its letter only
+/// where that tie rounds its way — the limit the pointed Hebrew word's test
+/// and `epub.md` name.
 #[test]
 fn a_standard_14_arabic_word_keeps_each_haraka_on_its_letter() {
     let body = format!("<p dir=\"rtl\">{KATABA} \u{643}\u{62A}\u{628}.</p>");

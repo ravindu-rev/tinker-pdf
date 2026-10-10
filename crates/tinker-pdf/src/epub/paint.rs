@@ -5146,10 +5146,18 @@ fn draw_coded(
 /// with the base nearest it along the line:
 ///
 /// - **a mark with an advance** — the overflow font's, as wide as a letter —
-///   is a glyph of its own, drawn after its letter as L3 has it, and nearer
-///   that letter than the glyph drawn next. A letter's second such mark,
-///   drawn after its first, is nearer the next glyph than its letter: the
-///   limit `epub.md` names.
+///   is a glyph of its own, drawn after its letter as L3 has it. Its centre
+///   then lies exactly as far outside its letter's box as outside the box of
+///   the glyph drawn next, and which of the two reads it is decided by how
+///   the two distances round: its letter at most sizes, not at every one —
+///   a default build's `a מֶלֶךְ,` reads back `a מלֶךְ,ֶ` at a `font-size`
+///   of `12.5px` and of `14px`, two of the 32 half-pixel sizes from 9 to
+///   24.5. A letter's second such mark, drawn after its first, is nearer the
+///   next glyph than its letter and is read with it. Both are limits
+///   `epub.md` names. A mark drawn back over its own letter, its centre
+///   inside the letter's box, would end both; it needs a position for one
+///   glyph inside a segment, which a segment's one string of codes cannot
+///   state.
 /// - **a mark with none** — the Liberation stand-in's Hebrew points — is
 ///   drawn before its letter, where the letter starts, a letter's marks in
 ///   the order written. `tinker-pdf-content` reads a glyph of no advance as
@@ -5161,7 +5169,14 @@ fn draw_coded(
 ///   reverses a letter's marks among themselves, and `שָׁ` read back with
 ///   its two swapped. Neither side is where a point should stand, over the
 ///   middle of its letter: that is `GPOS`'s to say, and an unshaped run
-///   reads none.
+///   reads none. With no `letter-spacing` there is no tie: every point's
+///   centre lies inside its letter's box. But `letter-spacing` is added
+///   after every character here, a mark too, as layout measures it —
+///   css-text-3 §10.2 spaces typographic character units, and a letter with
+///   its marks is one — so it moves a point off its letter: with a positive
+///   spacing a letter's first of two points is nearer the glyph before
+///   (`שָׁלוֹם` at `0.5px` reads back `שׁלָוֹם`), and with a negative one
+///   even a lone point is (`מֶלֶךְ` at `-0.5px` reads back `מלֶךְֶ`).
 ///
 /// A left-to-right slice keeps every unit as written, marks after, and so do
 /// marks with nothing before them in the slice, their letter in another run.

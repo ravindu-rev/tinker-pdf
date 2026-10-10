@@ -592,8 +592,12 @@ Landed so far:
   mark, which side of its letter one is drawn on follows its advance —
   after the letter for the overflow font's, which are as wide as a letter,
   and where the letter starts for the Liberation stand-in's, which have
-  none — and a default build's letter with two marks still reads its second
-  with the next glyph ([epub.md](epub.md)'s `direction` row).
+  none. Neither is a guarantee ([epub.md](epub.md)'s `direction` row): an
+  overflow-font mark sits at an exact tie between its letter and the glyph
+  drawn next, so even a lone one is read with its letter only where the tie
+  rounds that way, and a letter's second is read with the next glyph; and
+  `letter-spacing`, added after a mark as after any character, moves a
+  stand-in point off its letter.
 
   **And a third level since October 2026: the visual line.** `flow.rs`
   breaks lines over logical text and resolves no levels, so a right-to-left
