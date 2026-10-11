@@ -358,7 +358,16 @@ build — and one hunt book in each build that conserved and read whole at
 `letter-spacing: 0.45em`, whose italic `?!` the writer draws as typed for a
 reader that reads it alone, now starts within three ems left of the bold
 word's last glyph, where `TextDevice` resumes a line drawn backwards, and
-reads `يوم !?` (ROADMAP CD-19 keeps these).
+reads `يوم !?` (ROADMAP CD-19 keeps these). Ruling 14's price probe (15 523
+books a build), measured with the K-11 review's sentence-end rule on top,
+finds three more in a default build and two with `bundled-fonts`, each
+letter-spaced by half an em and justified and each lost with or without
+that rule, one of which conserved at 9297d2d: `?!` before styled braces
+opening a Hebrew line, whose word after the closing brace, drawn after it
+and ending 47pt left of it, now reads as a line of its own (ROADMAP CD-19
+names them). On that probe, too, no glyph is drawn over another under
+`word-spacing` or justification, where 56dfd93 drew one so in 574 books
+(286 with `bundled-fonts`).
 A slice that ends on a mark ends its text object a spacing less a millionth
 of an em from the next run, so a run that ends on a mark is not cut from
 what follows up to half an em of spacing, half an em included, and is cut

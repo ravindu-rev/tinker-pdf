@@ -671,21 +671,41 @@ living in one feature's head.
     not now; none of them conserved at 9297d2d. A probe of the price — 342
     books for each opening, in each build: Arabic, Hebrew and pointed
     Hebrew, three kinds of bracket, styled and not, nineteen styles — counts
-    the books that read worse than at 56dfd93, opening after a `<br/>` with
-    `…` 291 (241 with `bundled-fonts`), U+2024 297 (273), U+2025 297
-    (270), U+FE19 270 (195), `..` 288 (270) and `...` 277 (236); with `!!`
-    273 (212), `!?` 291 (231), `?!` 270 (231) and `??` 267 (192); and with
+    the books that read worse than at 56dfd93, with the standard-14
+    overflow font written at `0 Tw` (ROADMAP CD-19) under the rule as it
+    landed, opening after a `<br/>` with `…` 291 (241 with
+    `bundled-fonts`), U+2024 297 (273), U+2025 297 (270), U+FE19 270
+    (195), `..` 288 (270) and `...` 277 (236); with `!!`
+    267 (212), `!?` 291 (231), `?!` 274 (231) and `??` 267 (192); and with
     a closing quotation mark before stops, `".` 297 (256), `'.` 300 (285),
     `».` 305 (239), `”.` 297 (237), `"...` 295 (257) and `”…` 315 (300) —
-    4 630 (3 925) in all, 4 618 (3 916) of which conserved there; `.`, `?`,
+    4 628 (3 925) in all, 4 613 (3 916) of which conserved there; `.`, `?`,
     the ARABIC COMMA, `"` and `”` alone, which pay nothing more, are its
-    controls. None of those books conserved at 9297d2d, and none that read
-    whole or was found by search there fails to now; but with styled
-    brackets 667 of the closing quotation marks' (543), whose structure tree
-    read in order at 9297d2d where their page did not, lose that too: the
-    line's `".` comes back `."`. Opening after a space, where a soft wrap
-    may put `"`, `'`, `”…` or an ellipsis first on a line, 22 of the
-    probe's 1 197 books pay it (20). The owner's decision names the
+    controls. (Measured with the rule alone on 56dfd93, `!!` was 273 and
+    `?!` 270 in a default build, 4 630 in all and 4 618 conserving there:
+    the font at `0 Tw` reads six `!!` books right that the rule alone did
+    not, and four more `?!` books worse, below.) None of those books but one
+    conserved at 9297d2d, and none that read whole or was found by search
+    there fails to now; the one is CD-19's, not the rule's — `?!` before
+    styled braces opening a Hebrew line letter-spaced by half an em and
+    justified, in a default build, which conserved at 9297d2d, at 56dfd93
+    and with the rule alone and does not with the font at `0 Tw`, with or
+    without the rule (ROADMAP CD-19 names it). With styled brackets 667 of
+    the closing quotation marks' (543), whose structure tree read in order
+    at 9297d2d where their page did not, lose that too: the line's `".`
+    comes back `."`; and so do three `'.` books in each build at
+    `word-spacing: 0.5em`, whose structure tree read in order at 9297d2d
+    and with the rule alone but not at 56dfd93, nor with the font at
+    `0 Tw` under the rule. Under the font at `0 Tw`, too, nine of the
+    price's books in a default build and six with `bundled-fonts` — `!?`
+    and `?!` before styled brackets at `word-spacing: 0.6em` and `1em` —
+    lose their structure tree's order, which neither the rule alone nor
+    the font at `0 Tw` alone loses. Opening after a space, where a soft
+    wrap may put `"`, `'`, `”…` or an ellipsis first on a line, 22 of the
+    probe's 1 197 books pay it (20); one more in each build, the ARABIC
+    COMMA's control letter-spaced by half an em and justified, reads worse
+    than at 56dfd93 with the font at `0 Tw`, with or without the rule
+    (ROADMAP CD-19). The owner's decision names the
     ellipsis; the price of a run of `!` and `?` and of a closing quotation
     mark before stops, the same picture's, came with the fix the owner
     approved (K-11 review, finding V1), and is recorded here with it.
