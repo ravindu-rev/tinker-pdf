@@ -228,10 +228,18 @@ pub enum Warning {
     /// since the refusal itself is an error and carries no detail.
     Jbig2SegmentSkipped,
     /// JBIG2: a region or page declared more pixels than the output ceiling
-    /// allows, so it was refused rather than allocated — or the decode as a
-    /// whole spent `MAX_JBIG2_WORK_MULTIPLE` times what that ceiling holds,
-    /// and stopped.
+    /// allows, so it was refused rather than allocated.
     Jbig2RegionTooLarge,
+    /// JBIG2: the decode as a whole spent `MAX_JBIG2_WORK_MULTIPLE` times
+    /// what its caller's ceiling holds, and stopped at the segment that ran
+    /// the budget out. The page keeps what was drawn before it.
+    ///
+    /// Not [`Warning::Jbig2RegionTooLarge`], which it was reported as until
+    /// October 2026: nothing here was too large. Every item was inside every
+    /// bound and there were too many of them, which is
+    /// [`Warning::JpxBudgetSpent`]'s shape and wants its own name for the same
+    /// reason.
+    Jbig2BudgetSpent,
     /// JBIG2: a *variant* of a segment this build decodes — the Huffman or the
     /// refinement coding of a symbol dictionary or text region, or a retained
     /// context from another segment.
@@ -462,6 +470,7 @@ impl Warning {
             Self::MissingEndOfLine => "missing-end-of-line",
             Self::Jbig2SegmentSkipped => "jbig2-segment-skipped",
             Self::Jbig2RegionTooLarge => "jbig2-region-too-large",
+            Self::Jbig2BudgetSpent => "jbig2-budget-spent",
             Self::Jbig2VariantSkipped => "jbig2-variant-skipped",
             Self::Jbig2SymbolLimitHit => "jbig2-symbol-limit-hit",
             Self::PackBitsNoOp => "packbits-no-op",
@@ -524,6 +533,7 @@ impl fmt::Display for Warning {
             Self::MissingEndOfLine => "expected end-of-line code absent",
             Self::Jbig2SegmentSkipped => "JBIG2 segment type not decoded",
             Self::Jbig2RegionTooLarge => "JBIG2 region larger than the output ceiling",
+            Self::Jbig2BudgetSpent => "JBIG2 decode work budget spent",
             Self::Jbig2VariantSkipped => "JBIG2 coding variant not decoded here",
             Self::Jbig2SymbolLimitHit => "JBIG2 symbol dictionary past its bounds",
             Self::PackBitsNoOp => "PackBits no-op tag skipped",

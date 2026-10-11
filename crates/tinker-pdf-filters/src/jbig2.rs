@@ -281,7 +281,7 @@ fn note_warning(warnings: &mut Vec<Warning>, warning: Warning) {
 /// closed list a test can assert against, so "every refusal this decoder
 /// performs is named" is checkable rather than claimed.
 ///
-/// It exists because the four `Warning` variants are too coarse to schedule
+/// It exists because the JBIG2 `Warning` variants are too coarse to schedule
 /// against. [`Warning::Jbig2SegmentSkipped`] alone covers the random-access
 /// organisation, an unknown segment data length, a segment type nobody has
 /// implemented, and a region whose callee already refused for a reason of its
@@ -370,8 +370,8 @@ pub enum Jbig2Refusal {
     ///
     /// Recorded once, at the segment the budget ran out in; nothing after it
     /// is decoded. Like [`Jbig2Refusal::RegionTooLarge`] it is the caller's
-    /// ceiling speaking rather than the file, which is why the two share a
-    /// warning.
+    /// ceiling speaking rather than the file, and it has its own warning,
+    /// [`Warning::Jbig2BudgetSpent`], because nothing it refused was large.
     WorkCap,
     /// 6.5.10's export-run loop ran longer than [`MAX_JBIG2_SYMBOLS`] turns.
     ExportRunGuard,
@@ -453,7 +453,11 @@ impl Jbig2Refusal {
     /// Coarser than the refusal itself on purpose: [`Warning`] is a closed set
     /// recorded at most once per decode, and a variant per condition would
     /// make it neither. The grouping is the one this decoder has always
-    /// reported, so adding this type moved no corpus number.
+    /// reported, so adding this type moved no corpus number. The one change
+    /// since is [`Jbig2Refusal::WorkCap`]'s, which reported
+    /// [`Warning::Jbig2RegionTooLarge`] for a decode that had refused nothing
+    /// for its size and now reports [`Warning::Jbig2BudgetSpent`]; no corpus
+    /// image spends its budget, so that moved none either.
     #[must_use]
     pub const fn warning(self) -> Warning {
         match self {
@@ -499,7 +503,8 @@ impl Jbig2Refusal {
             | Self::SymbolIndexOutOfRange
             | Self::SymbolCodeUnbuildable => Warning::Jbig2SymbolLimitHit,
 
-            Self::RegionTooLarge | Self::WorkCap => Warning::Jbig2RegionTooLarge,
+            Self::RegionTooLarge => Warning::Jbig2RegionTooLarge,
+            Self::WorkCap => Warning::Jbig2BudgetSpent,
             Self::Truncated => Warning::TruncatedInput,
         }
     }
@@ -8742,6 +8747,38 @@ mod tests {
         let out = decode(&[], &params, 1 << 20, &mut warnings);
         assert_eq!(out, Err(FilterError::Unsupported(Capability::Jbig2)));
         assert_eq!(warnings, vec![Warning::Jbig2RegionTooLarge]);
+    }
+
+    /// **A decode that runs its work budget out says so by name.**
+    ///
+    /// [`Jbig2Refusal::WorkCap`] used to reach a caller as
+    /// [`Warning::Jbig2RegionTooLarge`], which is what a caller reads for a
+    /// region its ceiling cannot hold, and nothing here is large: a page of
+    /// eight by eight painted black 1 025 times under a ceiling of 64 bytes,
+    /// eight units a painting with 8 192 to spend.
+    #[test]
+    fn a_spent_work_budget_is_its_own_warning() {
+        let info = page_info(8, 8, 0x04);
+        let stream: Vec<u8> = (0..1_025u32)
+            .flat_map(|number| header(number, kind::PAGE_INFORMATION, 1, &info))
+            .collect();
+        let params = Jbig2Params {
+            globals: &[],
+            width: 8,
+            height: 8,
+        };
+        let mut warnings = Vec::new();
+        let out = decode(&stream, &params, 64, &mut warnings);
+        assert_eq!(out, Err(FilterError::Unsupported(Capability::Jbig2)));
+        assert!(
+            warnings.contains(&Warning::Jbig2BudgetSpent),
+            "{warnings:?}"
+        );
+        assert!(
+            !warnings.contains(&Warning::Jbig2RegionTooLarge),
+            "nothing was too large: {warnings:?}"
+        );
+        assert_eq!(Warning::Jbig2BudgetSpent.as_str(), "jbig2-budget-spent");
     }
 
     /// Both halves of the bound, because they catch on different targets.
