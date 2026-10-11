@@ -184,14 +184,32 @@ as 7330cd5 had them, all but 32 (40) read as at 7330cd5, and 163 (195) that
 read right at 9297d2d read wrong. A word is its glyphs since the white
 space before it, a mark taking its base letter's direction, and a word with a
 left-to-right letter anywhere in it is a left-to-right word; a word a cut on
-one baseline interrupted goes on into the next piece, where it counts against
-a carry and never for one: `[ŋ̊ə̃] חו` letter-spaced by half an em does not
-carry the `] ` into the Hebrew, and a table cell's last Hebrew word, its cell
-and the next with no space between, does not carry the next cell's `[` into
-its Hebrew. `Tw` is
-taken after any code 32 the font decodes, as the interpreter moves the pen,
-though 9.3.3 applies it to a single-byte one alone: the device is carried to
-where the interpreter drew the next glyph.
+one baseline interrupted goes on into the next piece where the spacing put
+that piece, give or take the same twentieth of an em, and there counts
+against a carry and never for one: `[ŋ̊ə̃] חו` letter-spaced by half an em
+does not carry the `] ` into the Hebrew, and a table cell's last Hebrew word,
+its cell and the next with no space between, does not carry the next cell's
+`[` into its Hebrew. A gap no spacing accounts for — a table cell's or a
+column's — ends the word as white space does (ROADMAP CD-19): in a
+right-to-left table at `word-spacing: 1em`, `<td>def</td><td>أصبحنا نعرف</td>`,
+no space between the cells and the Arabic cell's first drawn glyph 4.7 em
+right of `def`, the Arabic letters went on in `def`'s left-to-right word, the
+stretched space after them carried nothing, and the device cut the cell in two
+there; ruling 14 rejoined the pieces only because the glyph after the overflow
+font's code-32 letter, moved on by `Tw`, had closed most of the gap between
+them. Ended where the cell starts, the cell's own right-to-left word carries
+the pen across its stretched space as any other does, so the cell is one line
+to the device whether or not a moved glyph closes the gap: on the third
+review's probe, the right-to-left tables at `word-spacing: 1em` that conserve
+go from 20 to 42 of 48 Hebrew ones (40 with `bundled-fonts`) and from 28 to
+36 of 48 Arabic ones, and no book of K-11's probes that conserved, read
+whole or was found by search before stops doing so. `Tw` is taken after a
+code 32 the font decodes to white space — a two-byte one too, as the
+interpreter moves the pen, though 9.3.3 applies it to a single-byte one
+alone — so the device is carried to where the interpreter drew the next
+glyph; after a code 32 that decodes to anything else, a letter such as the
+overflow font's, the interpreter moves the pen on by `Tw` all the same and
+the device takes no `Tw` from it.
 Writing mode and directionality are separate properties: `TextLine::wmode`
 is the font's 9.7.4.3 wmode, `TextLine::rtl` is counted from the characters
 themselves, because vertical Japanese and right-to-left Arabic are not the

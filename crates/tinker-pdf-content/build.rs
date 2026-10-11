@@ -359,8 +359,8 @@ fn right_to_left(data: &Path, out: &mut String) {
     }
     let _ = writeln!(
         out,
-        "/// {} ranges of `Bidi_Class` `R` and `AL` and of the right-to-left \
-         scripts' punctuation, from the vendored UCD.\n\
+        "/// {} ranges of `Bidi_Class` `R` and `AL` and the ARABIC COMMA, from \
+         the vendored UCD.\n\
          pub(crate) static RIGHT_TO_LEFT: &[(u32, u32)] = &[\n{body}];",
         merged.len()
     );

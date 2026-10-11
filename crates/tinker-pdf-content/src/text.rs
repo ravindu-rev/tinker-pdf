@@ -410,16 +410,17 @@ struct PendingLine {
     /// word — see [`Stretch`]; `None` otherwise.
     stretched: Option<Stretch>,
     /// Whether the line holds a left-to-right letter, counting the word a cut
-    /// on its baseline interrupted ([`Stretch`]), which counts against a carry.
+    /// on its baseline interrupted where the spacing put the next glyph
+    /// ([`Stretch`]), which counts against a carry.
     holds_ltr: bool,
     /// Whether the line holds a right-to-left letter of its own — one of its
     /// glyphs, not of the word a cut interrupted ([`Stretch`]).
     holds_rtl: bool,
     /// The direction of the last word on the line — its glyphs since the
     /// white space before it, taken together ([`Strong::with`]) — counting
-    /// the word a cut on its baseline interrupted; `None` before the line
-    /// holds one, of anything but white space and marks with no letter
-    /// before them.
+    /// the word a cut on its baseline interrupted where the spacing put the
+    /// next glyph ([`Stretch`]); `None` before the line holds one, of
+    /// anything but white space and marks with no letter before them.
     word: Option<Strong>,
     /// Whether the last word holds a right-to-left letter of the line's own,
     /// not only of the word a cut interrupted ([`Stretch`]).
@@ -644,7 +645,8 @@ const STRETCH_ROUNDING: f64 = 0.05;
 /// and only after a right-to-left word or, after neutrals, on a line that
 /// holds a right-to-left letter **of its own** and no left-to-right one: a
 /// line the device starts at a cut holds nothing from before the cut but the
-/// word the cut interrupted, which counts against a carry and never for one.
+/// word the cut interrupted where the spacing put the next glyph, which
+/// counts against a carry and never for one.
 /// A left-to-right page is collected exactly as before, and so is every line
 /// that holds a left-to-right letter but after a right-to-left word on it:
 /// the two words of a Hebrew gloss in an English sentence, `peace (עוֹלָם
@@ -655,12 +657,23 @@ const STRETCH_ROUNDING: f64 = 0.05;
 /// word space first, where the stretch stays inside it (`paint`'s
 /// `opens_with_its_word_space`).
 ///
-/// **A word cut on one baseline goes on into the next piece.** A word is all of
-/// its glyphs since the white space before it; a line the device cut inside a
-/// word holds that word's left-to-right letter, if it has one, from its first
-/// glyph: `[ŋ̊ə̃] חו`, letter-spaced by half an em and cut before its `]`, does
-/// not carry the pen from the `] ` into the Hebrew word (review of the K-11
-/// fix).
+/// **A word cut on one baseline goes on into the next piece where the spacing
+/// put it.** A word is all of its glyphs since the white space before it; a
+/// line the device cut inside a word, at a gap the spacing accounts for
+/// ([`Stretch::reaches`]), holds that word's left-to-right letter, if it has
+/// one, from its first glyph: `[ŋ̊ə̃] חו`, letter-spaced by half an em and cut
+/// before its `]`, does not carry the pen from the `] ` into the Hebrew word
+/// (review of the K-11 fix). A gap no spacing accounts for — a table cell's,
+/// a column's — ends the word as white space does (ROADMAP CD-19): two cells
+/// of a right-to-left table row at `word-spacing: 1em`,
+/// `<td>def</td><td>أصبحنا نعرف</td>`, have no white space between them, and
+/// the Arabic cell's first drawn glyph starts 4.7 em right of `def`'s end.
+/// Taken on into it, `def`'s left-to-right word took in the Arabic letters
+/// drawn after it, the stretched space after them carried nothing, and the
+/// cell was cut in two at that space; ruling 14 rejoins two pieces only where
+/// they meet end to end, and these met only because the glyph after the
+/// overflow font's code-32 letter, moved on by `Tw`, had closed most of the
+/// gap.
 #[derive(Clone, Copy, Debug)]
 struct Stretch {
     /// Where the pen stood after the glyph, along the baseline.
@@ -676,17 +689,26 @@ impl Stretch {
     /// own, or, after neutrals, the line holds a right-to-left letter of its
     /// own and no left-to-right one; the glyph after the gap is itself right
     /// to left — not a neutral, which says nothing of the word it opens; and
-    /// it starts where the spacing left the pen, give or take
-    /// [`STRETCH_ROUNDING`] of an em, so that a gap the spacing does not
-    /// account for, a cell's or a column's, is never carried across. A word a
-    /// cut on the baseline interrupted counts against a carry — a
-    /// left-to-right letter of it is the line's — and never for one.
+    /// it starts where the spacing left the pen ([`Stretch::reaches`]), so
+    /// that a gap the spacing does not account for, a cell's or a column's,
+    /// is never carried across. A word a cut on the baseline interrupted, at
+    /// a gap the spacing accounts for, counts against a carry — a
+    /// left-to-right letter of it is the line's — and never for one; at any
+    /// other gap it ended there, and counts for nothing.
     fn carries(self, line: &PendingLine, next: Option<Strong>, origin: f64, size: f64) -> bool {
         let after_its_word = line.word == Some(Strong::RightToLeft) && line.word_rtl;
         let after_neutrals = line.holds_rtl && !line.holds_ltr;
         (after_its_word || after_neutrals)
             && next == Some(Strong::RightToLeft)
-            && (origin - self.pen).abs() <= size.max(1.0) * STRETCH_ROUNDING
+            && self.reaches(origin, size)
+    }
+
+    /// Whether a glyph drawn at `origin` along the baseline by a font of
+    /// `size` starts where the spacing left the pen, give or take
+    /// [`STRETCH_ROUNDING`] of an em: a gap the spacing accounts for, and
+    /// no other — not a cell's, a column's or a margin's.
+    fn reaches(self, origin: f64, size: f64) -> bool {
+        (origin - self.pen).abs() <= size.max(1.0) * STRETCH_ROUNDING
     }
 }
 
@@ -920,10 +942,16 @@ impl Device for TextDevice {
                 let elsewhere = turned || far || backwards || (line.wmode != wmode && !same_font);
                 // A line cut only where the pen moved on along the same
                 // baseline goes on with the word its last glyph was in, unless
-                // white space ended it: `[ŋ̊ə̃]` letter-spaced by half an em
-                // and cut before its `]` is still one left-to-right word, and
-                // the `]` begins a line that holds it ([`Stretch`]).
-                let word = if elsewhere || !line.in_word {
+                // white space ended it or a gap no spacing accounts for did:
+                // `[ŋ̊ə̃]` letter-spaced by half an em and cut before its `]`
+                // is still one left-to-right word, and the `]` begins a line
+                // that holds it, but a table cell that starts past where the
+                // spacing left the pen begins a word of its own ([`Stretch`]).
+                let spaced = wmode == WritingMode::Horizontal
+                    && line
+                        .stretched
+                        .is_some_and(|stretch| stretch.reaches(origin.0, size));
+                let word = if elsewhere || !line.in_word || (disjoint && !spaced) {
                     None
                 } else {
                     line.word
@@ -982,12 +1010,15 @@ impl Device for TextDevice {
             line.stretched = match wmode {
                 // 9.4.4: `tx = (w0 × Tfs + Tc + Tw) × Th`, which is
                 // `w0 + (Tc + Tw) / Tfs` in glyph space; `Tw` only after a
-                // code 32, and only horizontally. As the interpreter moves
-                // the pen: [`crate::FontSource::decode`] does not say how
-                // many bytes a code took, so a two-byte code 32 of a Type 0
-                // font is moved by `Tw` there too, which 9.3.3 applies to a
-                // single-byte code alone — and the pen is carried to where
-                // the interpreter drew the next glyph.
+                // code 32 that decodes to white space — not after a letter a
+                // font draws at code 32, after which the interpreter moves
+                // the pen on by `Tw` all the same (ROADMAP CD-19) — and only
+                // horizontally. As the interpreter moves the pen otherwise:
+                // [`crate::FontSource::decode`] does not say how many bytes a
+                // code took, so a two-byte code 32 of a Type 0 font is moved
+                // by `Tw` there too, which 9.3.3 applies to a single-byte code
+                // alone — and the pen is carried to where the interpreter drew
+                // the next glyph.
                 WritingMode::Horizontal if line.word.is_some() => {
                     let tw = if glyph.code == 32 && blank {
                         state.text.word_spacing
@@ -1490,6 +1521,45 @@ mod tests {
         assert_eq!(
             objects(&[first, bracket, second], 6.0),
             ["\u{5D0}", "[", "\u{5D1}"]
+        );
+    }
+
+    /// **A word goes on across a cut only where the spacing put the glyph
+    /// after it** (ROADMAP CD-19). Two cells of a right-to-left table row at
+    /// `word-spacing: 1em`, `<td>def</td><td>أصبحنا نعرف</td>`, have no white
+    /// space between them, and the Arabic cell's first drawn glyph starts 4.7
+    /// em past the end of `def`, where no spacing put it. The line it began
+    /// went on with `def`'s left-to-right word, so the Arabic letters joined
+    /// that word, the stretched space after them carried nothing, and the
+    /// device cut the cell in two at that space. A gap no spacing accounts
+    /// for ends the word as white space does: here 0.8 em with no spacing at
+    /// all, and 0.45 em past where a tenth of an em of letter-spacing left
+    /// the pen. Where the spacing did put the next glyph the word goes on,
+    /// and still counts against a carry: `a` letter-spaced by 0.6 em and cut
+    /// before a Hebrew letter is one left-to-right word with it, as `[ŋ̊ə̃]`
+    /// cut before its `]` is
+    /// (`letter_spacing_carries_nothing_into_a_neutral_or_beside_left_to_right_text`).
+    #[test]
+    fn a_gap_no_spacing_accounts_for_ends_the_word_before_it() {
+        let pieces = [
+            ("a", 0.0),
+            ("\u{5D0}", 13.0),
+            (" ", 18.0),
+            ("\u{5D1}", 31.0),
+        ];
+        assert_eq!(justified(&pieces, 8.0), ["a", "\u{5D0} \u{5D1}"]);
+        let latin: &[(&str, f64)] = &[("a", 0.0)];
+        let hebrew: &[(&str, f64)] = &[("\u{5D0}", 10.5), (" ", 15.5)];
+        let next: &[(&str, f64)] = &[("\u{5D1}", 29.5)];
+        assert_eq!(
+            objects_spaced(&[latin, hebrew, next], 1.0, 8.0),
+            ["a", "\u{5D0} \u{5D1}"]
+        );
+        let hebrew: &[(&str, f64)] = &[("\u{5D0}", 11.0), (" ", 22.0)];
+        let next: &[(&str, f64)] = &[("\u{5D1}", 41.0)];
+        assert_eq!(
+            objects_spaced(&[latin, hebrew, next], 6.0, 8.0),
+            ["a", "\u{5D0} ", "\u{5D1}"]
         );
     }
 
