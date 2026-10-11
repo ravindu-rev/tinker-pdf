@@ -597,6 +597,18 @@ did not have the same standing:
   now asserts that no corpus image spends past it, a figure owed to the first
   run with the corpora.
 
+  **What the seeds cost the window they replay in.** CI's `fuzz-seeds` gives
+  this target twenty seconds, replay included, and the twenty-six seeds replay
+  in about 5.4 s under the sanitizers. Two of them are most of it:
+  `symbol-dictionary-template-0-custom-at` at 3.1 s and
+  `symbol-dictionary-spun-past-its-marker` at 2.2 s. The export-run seed takes
+  66 ms. Both slow seeds stay, because neither only costs time. Without the
+  slow unit's seed the replay reaches 1 821 edges and 2 802 features rather
+  than 1 828 and 2 849. It is the one seed that reaches
+  `MoreSymbolsThanDeclared` in an arithmetic dictionary under the target's
+  ceiling, since the spun seed is stopped by the budget first, and it covers
+  four edges of `decode_generic_into` that no other seed does.
+
 ### What a green fuzz run does not mean
 
 **Not one of the thirty-nine targets checks that a decode is right.** They
@@ -1605,19 +1617,20 @@ been.**
 ## Bounds are measured against real inputs
 
 Every hardening cap is a row in
-`crates/tinker-pdf/tests/bounds_ledger.rs` — **65 rows**, each carrying a
+`crates/tinker-pdf/tests/bounds_ledger.rs` — **66 rows**, each carrying a
 figure for a real book, comic and document rather than a guess. Sixty-two of
-those figures are measurements or arithmetic about a plausible file; the
-three JBIG2 count-and-total rows publish the word **estimate** in the number
-itself, because their caps were derived as arithmetic about a plausible scan
-rather than read off a file, and a row that reads like a measurement when it is
-not is the failure this file exists to prevent. The fourth JBIG2 row,
-`MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`, does not carry the word, because its yardstick
-*is* a measurement: 88 736 corpus symbols, none of them larger than the page it
-is drawn onto (the `jbig2` fuzz row above). The fifth, `MAX_JBIG2_WORK_MULTIPLE`,
-carries it again: its yardstick is arithmetic about the same scan, decoded at a
-ceiling of exactly its own page, and the census figure it is owed is printed by
-`jbig2_census.rs` on the first run that has the corpora.
+those figures are measurements or arithmetic about a plausible file; **four
+JBIG2 rows** publish the word **estimate** in the number itself, because their
+caps were derived as arithmetic about a plausible scan rather than read off a
+file, and a row that reads like a measurement when it is not is the failure
+this file exists to prevent. Three of the four are the count-and-total rows.
+The fourth JBIG2 row, `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`, does not carry the word,
+because its yardstick *is* a measurement: 88 736 corpus symbols, none of them
+larger than the page it is drawn onto (the `jbig2` fuzz row above). The fifth,
+`MAX_JBIG2_WORK_MULTIPLE`, is the fourth estimate: its yardstick is arithmetic
+about the same scan, decoded at a ceiling of exactly its own page, and the
+census figure it is owed is printed by `jbig2_census.rs` on the first run that
+has the corpora.
 The ledger also asserts that no bound is proved by a clock — `Instant::now` is
 banned from every source a row names as firing it — so the caps are properties
 of inputs, not of machines.
