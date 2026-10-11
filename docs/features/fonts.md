@@ -604,7 +604,10 @@ Landed so far:
   32, which 9.3.3 moves by `Tw`, is a piece of its own too, so no letter of
   it is drawn over another under `word-spacing`; a slice with no mark is
   drawn as before, CD-19's overprint and all, in a book that holds marks too
-  (ROADMAP CD-19, [epub.md](epub.md)). A run that
+  — but for one drawn left to right inside right-to-left text, a number or a
+  Latin word, which a reader reads after what is drawn on its right and
+  which draws its glyph after the code 32 where layout put it too (ROADMAP
+  CD-19, [epub.md](epub.md)). A run that
   ends on a mark is cut past half an em and a millionth of spacing; after a
   simple font's letter alone, past half an em or at it by a last place, and
   after a stand-in's, within half a thousandth of an em of it by its `/W`'s

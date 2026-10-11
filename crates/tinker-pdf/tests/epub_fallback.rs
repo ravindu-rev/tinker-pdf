@@ -624,7 +624,11 @@ fn a_standard_14_arabic_letter_with_two_marks_keeps_both() {
 /// single-byte code 32: in a slice with no mark, every glyph after it in its
 /// string is drawn a word spacing from where layout measured it. Unpointed,
 /// the word space moves — `مدة معلم.` at `0.5em` extracts `مدةم علم.`,
-/// present since the overflow font. Pointed, a mark placed from layout's pen
+/// present since the overflow font. (A number or a word drawn left to right
+/// inside right-to-left text is the exception since the third review of the
+/// K-11 fix: its glyph after the code 32 is a piece of its own,
+/// `a_number_in_word_spaced_right_to_left_text_is_not_drawn_over_its_bracket`.)
+/// Pointed, a mark placed from layout's pen
 /// (6d79fa4) left a letter so moved: in a bold run whose alpha is its face's
 /// code 32, `αλφα\u{301}` beside a Hebrew word read `αλφαy\u{301}` at a word
 /// spacing of `-2px`, where cd407d5, drawing the mark in its letter's string,
@@ -1728,6 +1732,182 @@ fn a_run_of_neutrals_a_reader_cannot_undo_is_drawn_as_typed() {
     assert!(text.contains("?!"), "{spaced}: {text:?}");
     let logical = conservation_in_logical_order(&bytes, &doc);
     assert!(logical.holds(), "{spaced}: {text:?} {logical:?}");
+}
+
+/// `text` with its Arabic and Hebrew marks taken out.
+fn unpointed(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '\u{064B}'..='\u{065F}' | '\u{0670}' | '\u{0591}'..='\u{05C7}'))
+        .collect()
+}
+
+/// **A run of neutrals its word spaces part from the words either side of it
+/// is drawn as typed, and reads as written** (third review of the K-11 fix).
+///
+/// `<i>?!</i>` between two Arabic words is a run of its own at the
+/// paragraph's right-to-left level, and K-11's fix draws it in that level's
+/// order, `!?`, for ruling 14 to undo with its neighbours. Justified at
+/// `letter-spacing: 0.3em`, or at `word-spacing: 1em`, the word space on each
+/// side of it is drawn more than half an em from the glyphs beside it, so a
+/// reader cuts the line there and reads the run on its own, in the order it
+/// was drawn: `!?`. Drawn as typed, as at 9297d2d, it reads `?!`
+/// (`paint::neutrals_drawn_as_typed`, which counts the gap a reader sees —
+/// the run's `letter-spacing`, and its `word-spacing` after a word space —
+/// on each side of the run). Fifteen probe books in a default build, and
+/// eighteen with `bundled-fonts`, conserved at 9297d2d and did not with the
+/// run in its level's order; `letter-spacing` of half an em was the only gap
+/// the writer counted.
+#[test]
+fn a_run_of_neutrals_its_word_spaces_part_is_drawn_as_typed() {
+    let text = "عوامل <i>?!</i> عدّة <b>;</b> وقد <i>…</i> أصبحنا";
+    for style in [
+        "p { letter-spacing: 0.3em; text-align: justify; margin: 0 25% }",
+        "p { word-spacing: 1em; margin: 0 18% }",
+    ] {
+        for body in [
+            format!("<p dir=\"rtl\">{text}</p>"),
+            format!("<p>{text}</p>"),
+            format!("<div style=\"direction: rtl\"><p>{text}</p></div>"),
+        ] {
+            for body in [body.clone(), unpointed(&body)] {
+                let bytes = styled_book("ar", style, &body);
+                let doc = Document::open(bytes.clone()).expect("the book opens");
+                let text = doc.page(0).expect("a page").text().plain_text();
+                assert!(text.contains("?!"), "{style}, {body}: {text:?}");
+                for verdict in [
+                    conservation(&bytes, &doc),
+                    conservation_in_logical_order(&bytes, &doc),
+                ] {
+                    assert!(verdict.holds(), "{style}, {body}: {text:?} {verdict:?}");
+                }
+            }
+        }
+    }
+}
+
+/// **A word-spaced slice whose glyph reads alike either way round is drawn
+/// with its word space first, where the overflow font's overrun falls**
+/// (ROADMAP CD-19; third review of the K-11 fix).
+///
+/// In a monospace Arabic paragraph, justified, Courier draws ` #` and the
+/// overflow font the Arabic words. The overflow font's code 32 is a letter of
+/// the book's, moved by `Tw` all the same, so the last glyphs of its string
+/// are drawn up to a word spacing right of where layout put them — over what
+/// is drawn next. Drawn in its level's order, `# `, the `#` stood there: the
+/// NOON of `نعرف` and the `#` overlapped and the line read `أصبحنا ن#عرف`.
+/// Drawn as typed, as at 9297d2d, the space stands there, which draws
+/// nothing (`paint::opens_with_its_word_space`); the slice's one glyph reads
+/// the same either way. Four books in each build conserved at 9297d2d and
+/// did not with the slice in its level's order.
+#[test]
+fn a_word_spaced_slice_reading_alike_is_drawn_with_its_space_first() {
+    let words = [
+        "عوامل",
+        "عدّة",
+        "وقد",
+        "أصبحنا",
+        "نعرف",
+        "الآن",
+        "الموادّ",
+        "تكبح",
+        "الخلايا",
+        "السرطانيّة",
+        "تتكاثر",
+        "بسرعة",
+    ];
+    let text: Vec<String> = (0..6)
+        .map(|k| {
+            let at = |i: usize| words[(3 * k + i) % words.len()];
+            format!("{} #{} {} {}.", at(0), at(1), at(2), at(3))
+        })
+        .collect();
+    let text = text.join(" ");
+    let style = "body { font-family: monospace } p { text-align: justify; margin: 0 20% }";
+    for body in [
+        format!("<p dir=\"rtl\">{text}</p>"),
+        format!("<p>{text}</p>"),
+    ] {
+        for body in [body.clone(), unpointed(&body)] {
+            let bytes = styled_book("ar", style, &body);
+            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let text = doc.page(0).expect("a page").text().plain_text();
+            for verdict in [
+                conservation(&bytes, &doc),
+                conservation_in_logical_order(&bytes, &doc),
+            ] {
+                assert!(verdict.holds(), "{body}: {text:?} {verdict:?}");
+            }
+        }
+    }
+}
+
+/// **A number or a word drawn left to right inside word-spaced right-to-left
+/// text is not drawn over the bracket before it** (third review of the K-11
+/// fix).
+///
+/// The overflow font's code 32 is a character of the book's, the first past
+/// `WinAnsiEncoding` its face met, and 9.3.3 moves every glyph after it in
+/// its string by `Tw` (ROADMAP CD-19): in a slice with no mark, a word
+/// spacing into whatever is drawn on its right. In a slice drawn left to
+/// right inside right-to-left text, what is drawn on its right is what a
+/// reader reads before it, and a glyph moved past it is read before it too:
+/// with `bundled-fonts`, whose overflow font draws a Hebrew book's
+/// Arabic-Indic digits and the ONE at code 32, `(١٢٣),` opening a justified
+/// line letter-spaced by `0.3em` drew its THREE on its `(` and read
+/// `٣(١٢),`. Such a book conserved at 9297d2d only while its lines were read
+/// word by word; K-11's carry joins them, and the number was found by no
+/// search (3 books). A number or a Greek word the book meets first, so that
+/// it opens with its face's code 32, did the same under `word-spacing` from
+/// the overflow font on. The glyph after the code 32 is a piece of its own in
+/// such a slice now, drawn where layout put it, in the slice's text object.
+/// (In a default build the justified book breaks a line after its second
+/// `(` and does not conserve, at 9297d2d as now: a bracket a line break
+/// parted, `content-and-text.md`.)
+#[test]
+fn a_number_in_word_spaced_right_to_left_text_is_not_drawn_over_its_bracket() {
+    let justified = "שלום עולם מלחמה (١٢٣), ספר בית גדול אור. \
+                     עולם מלחמה ספר (١٢٣), בית גדול אור יום. \
+                     מלחמה ספר בית (١٢٣), גדול אור יום שלום.";
+    let mut books = vec![
+        (
+            "p { word-spacing: 0.5em }",
+            "(١٢٣) שלום עולם (١٢٣) מלחמה.",
+            "(١٢٣)",
+            2,
+        ),
+        (
+            "p { word-spacing: 0.5em }",
+            "(\u{3B1}\u{3BB}\u{3C6}\u{3B1}) שלום עולם (\u{3B1}\u{3BB}\u{3C6}\u{3B1}) מלחמה.",
+            "(\u{3B1}\u{3BB}\u{3C6}\u{3B1})",
+            2,
+        ),
+    ];
+    if cfg!(feature = "bundled-fonts") {
+        books.push((
+            "p { letter-spacing: 0.3em; text-align: justify; margin: 0 25% }",
+            justified,
+            "(١٢٣)",
+            3,
+        ));
+    }
+    for (style, text, expected, times) in books {
+        let body = format!("<p dir=\"rtl\">{text}</p>");
+        let bytes = styled_book("he", style, &body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        reads_as_written(&bytes, &doc, expected);
+        let page = doc.page(0).expect("a page");
+        assert_eq!(
+            page.text().search(expected).len(),
+            times,
+            "under `{style}`, {body:?}: {expected:?} is not found {times} times in {:?}",
+            page.text().plain_text()
+        );
+        let over = overprinted(&doc);
+        assert!(
+            over.is_empty(),
+            "under `{style}`, {body:?} draws a glyph over another: {over:?}"
+        );
+    }
 }
 
 /// **A letter-spaced Arabic line reads its full stop with its word** (review

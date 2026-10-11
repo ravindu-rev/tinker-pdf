@@ -21,7 +21,9 @@
 //! - `UnicodeData.txt` supplies two fields for the search options' diacritic
 //!   folding: field 5, `Decomposition_Mapping`, whose untagged values are the
 //!   canonical decompositions — the UCD publishes them nowhere else — and
-//!   field 2, `General_Category`, for `Mn`.
+//!   field 2, `General_Category`, for `Mn`. And field 4, `Bidi_Class`, for
+//!   the letters the text device takes to read right to left (`R` and `AL`)
+//!   when it decides whether spacing carries the pen.
 //! - `PropList.txt` supplies `Diacritic`, the property Unicode defines for
 //!   "linguistically modifies the meaning of another character". A nonspacing
 //!   mark that is also `Diacritic` is what diacritic-insensitive search
@@ -66,6 +68,7 @@ fn main() {
         "EXTENDED_PICTOGRAPHIC",
         &mut out,
     );
+    right_to_left(&data, &mut out);
     std::fs::write(out_dir.join("ucd.rs"), out).expect("the generated table could not be written");
 
     let mut out = String::new();
@@ -270,6 +273,81 @@ fn word_break(data: &Path, out: &mut String) {
         "/// {} ranges, from the vendored UCD. The value is an enum variant \
          rather than an index, so a value this crate does not know **does not \
          build**.\npub(crate) static WORD_BREAK: &[(u32, u32, WordBreak)] = &[\n{body}];",
+        merged.len()
+    );
+}
+
+/// The right-to-left scripts' blocks: Hebrew to Arabic Extended-A, the
+/// Hebrew and Arabic presentation forms, and the supplementary planes'
+/// right-to-left blocks — the ranges `DerivedBidiClass.txt` gives `R` or `AL`
+/// by default.
+const RIGHT_TO_LEFT_BLOCKS: [(u32, u32); 5] = [
+    (0x0590, 0x08FF),
+    (0xFB1D, 0xFDFF),
+    (0xFE70, 0xFEFF),
+    (0x1_0800, 0x1_0FFF),
+    (0x1_E800, 0x1_EFFF),
+];
+
+/// Every assigned code point that reads right to left to the text device —
+/// `Bidi_Class` `R` or `AL`, field 4 of `UnicodeData.txt`, and the
+/// punctuation of the right-to-left scripts (`General_Category` `P*` in
+/// their blocks), whose class is a neutral's: the ARABIC COMMA is `CS`, and
+/// it is the glyph a right-to-left word that ends in one is drawn from — as
+/// bare ranges. Not the digits (`AN`, `EN`), marks (`NSM`) or symbols that
+/// share those blocks. A `<…, First>` and `<…, Last>` pair is the range
+/// between.
+fn right_to_left(data: &Path, out: &mut String) {
+    let text = std::fs::read_to_string(data.join("UnicodeData.txt"))
+        .unwrap_or_else(|e| panic!("the vendored UCD is missing: UnicodeData.txt ({e})"));
+    let mut map: BTreeMap<u32, String> = BTreeMap::new();
+    let mut first: Option<u32> = None;
+    for line in text.lines() {
+        let fields: Vec<&str> = line.trim_end_matches('\r').split(';').collect();
+        let (Some(code), Some(name), Some(category), Some(class)) =
+            (fields.first(), fields.get(1), fields.get(2), fields.get(4))
+        else {
+            continue;
+        };
+        let code = hex(code);
+        let from = if name.ends_with(", Last>") {
+            first.take().unwrap_or(code)
+        } else {
+            if name.ends_with(", First>") {
+                first = Some(code);
+            }
+            code
+        };
+        let punctuation = category.starts_with('P')
+            && RIGHT_TO_LEFT_BLOCKS
+                .iter()
+                .any(|(lo, hi)| (*lo..=*hi).contains(&code));
+        if matches!(*class, "R" | "AL") || punctuation {
+            for code in from..=code {
+                map.insert(code, String::new());
+            }
+        }
+    }
+    let merged = ranges(&map);
+    assert!(
+        map.contains_key(&0x05D0)
+            && map.contains_key(&0x0627)
+            && map.contains_key(&0x060C)
+            && map.contains_key(&0x200F)
+            && !map.contains_key(&0x0660)
+            && !map.contains_key(&0x06F0)
+            && !map.contains_key(&0x064B),
+        "the right-to-left characters are not the set this crate documents"
+    );
+    let mut body = String::new();
+    for (first, last, _) in &merged {
+        let _ = writeln!(body, "    ({first:#x}, {last:#x}),");
+    }
+    let _ = writeln!(
+        out,
+        "/// {} ranges of `Bidi_Class` `R` and `AL` and of the right-to-left \
+         scripts' punctuation, from the vendored UCD.\n\
+         pub(crate) static RIGHT_TO_LEFT: &[(u32, u32)] = &[\n{body}];",
         merged.len()
     );
 }

@@ -489,9 +489,9 @@ living in one feature's head.
     `what_opens_is_general_category_ps_and_pi`.
 
     **Amended 10 October 2026, a second time: the bracket tie-break.**
-    *Proposed by the ROADMAP K-11 fix, revised on its review the same day, and
-    put to the owner by the integrator; until the owner accepts it this
-    paragraph is a proposal.* After the rules above have chosen a line's
+    *Proposed by the ROADMAP K-11 fix and revised on its reviews; accepted by
+    the owner, Ravindu Wijegunawardhana, on 11 October 2026, with the cost
+    measured below and its named price.* After the rules above have chosen a line's
     paragraph direction, a line that draws a **closing bracket left of an
     opening one of its kind** — `)histone deacetylase(`, each hollow turned
     away from what it encloses — is read in the other direction where three
@@ -515,6 +515,18 @@ living in one feature's head.
     the typed text (`(שלום)` read as typed, `) open the file (` read from the
     right: one each), or pairs them with the spaces that stood outside the two
     brackets now inside the pair (`see( מלחמה )b` from `b) מלחמה (see`).
+    And **a pair that may have taken its level from the line before is no
+    evidence**: N0 resolves a pair enclosing only the other direction's
+    letters by the strong character before its opening bracket, which for a
+    pair that opens a line is on the line above, so a left-to-right
+    paragraph's line opening with `(הארץ)` after a line that ended in Hebrew
+    draws the pair facing outward at its left end, as a right-to-left
+    paragraph draws a pair that ends it. A pair with a bracket at the end of
+    the line where a reading in the direction chosen starts, enclosing no
+    strong character of that direction, is passed over by both readings where
+    the line's letters say the direction chosen — they outnumber the other's
+    and the reading in that direction pairs a bracket facing outward of its
+    own, or they are twice the other's and eight more.
     `tinker_pdf_shape::bidi::drawn_direction` asks it last, of a line that
     draws a closing bracket left of an opening one and of no other, and
     `logical_order` for a given direction is untouched: `bidi_conformance.rs`
@@ -527,7 +539,14 @@ living in one feature's head.
     أصبحنا نعرف الآن .)histone deacetylase(` — a text a left-to-right
     paragraph draws as that line stands, so the forward check could not refuse
     it. Both readings draw the line; only the brackets tell them apart, and
-    only because they face outward.
+    only because they face outward. And the third review of the K-11 fix
+    found the pair from the line before: a justified English paragraph
+    quoting Hebrew in brackets, `Words שלום עולם (מלחמה) and more English
+    text, …`, whose third line opens with `(הארץ)` and holds fifty Latin
+    letters to fifteen Hebrew ones, was turned and read backwards (4 books in
+    a default build, 1 with `bundled-fonts`, under `text-align: justify` and
+    `word-spacing: 0.3em`; `bidi.rs`'s
+    `a_pair_the_line_above_resolved_turns_no_line`).
 
     *What it gains and what it costs, measured.* Over `BidiCharacterTest.txt`,
     each of its 91 616 drawn lines read in the direction `drawn_direction`
@@ -544,10 +563,15 @@ living in one feature's head.
     fragments typed closing first, 57 better and none worse; of the second
     review's 13 300, its sentences typed and with each bracket's mirrored
     glyph named, 413 better and 62 worse, every one of the 62 the price below;
-    and of the books K-11's probe and its two reviews built — 480, 3 276 and
-    2 880 in each build, with 1 034, 120 and 90 more of their neighbours and
-    the marks fix's 11 646 — none that conserved, read whole or was found by
-    search at 9297d2d fails. **The price** is a text typed with
+    and of the books K-11's probe and its three reviews built — 480, 3 276,
+    2 880 and 11 184 in each build, with 1 034, 120 and 90 more of their
+    neighbours and the marks fix's 11 646 — none that conserved, read whole
+    or was found by search at 9297d2d fails. Passing over the pair from the
+    line before changes none of those lines, nor any line of the file: none
+    of the file's lines the tie-break turns holds more than six letters
+    against the turn, and asked of every line it opens whose letters
+    outnumber the other's it read 1 341 of them worse, asked wherever the
+    reading as chosen pairs a bracket facing outward too, 8. **The price** is a text typed with
     brackets that pair only read the other way round, each set against the
     text between them: `x)שלום(y` in a left-to-right paragraph, drawn
     `x)םולש(y`, reads `y(שלום)x`. No book above pays it, and of the lines
@@ -595,8 +619,9 @@ living in one feature's head.
     `a_list_marker_and_a_wrapped_parenthesis_in_left_to_right_text_read_as_typed`;
     `epub_conservation.rs`:
     `a_bracketed_run_and_its_full_stop_in_right_to_left_text_read_as_written`,
-    `a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_drawn_alike_twin`
-    and `list_markers_and_glosses_in_left_to_right_text_conserve`.
+    `a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_drawn_alike_twin`,
+    `list_markers_and_glosses_in_left_to_right_text_conserve` and
+    `a_bracket_pair_the_line_above_resolved_turns_no_line`.
 
 ## How to add a ruling
 

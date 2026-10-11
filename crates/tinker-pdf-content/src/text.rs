@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use crate::device::{Device, Glyph, MarkedProps};
 use crate::plain::{PlainText, PlainTextOptions};
 use crate::state::GraphicsState;
-use crate::words::{word_break, WordBreak};
+use crate::words::{reads_right_to_left, word_break, WordBreak};
 
 /// Four corners, in device space (9.4.4).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -410,14 +410,20 @@ struct PendingLine {
     /// word — see [`Stretch`]; `None` otherwise.
     stretched: Option<Stretch>,
     /// Whether the line holds a left-to-right letter, counting the word a cut
-    /// on its baseline interrupted ([`Stretch`]).
+    /// on its baseline interrupted ([`Stretch`]), which counts against a carry.
     holds_ltr: bool,
+    /// Whether the line holds a right-to-left letter of its own — one of its
+    /// glyphs, not of the word a cut interrupted ([`Stretch`]).
+    holds_rtl: bool,
     /// The direction of the last word on the line — its glyphs since the
     /// white space before it, taken together ([`Strong::with`]) — counting
     /// the word a cut on its baseline interrupted; `None` before the line
     /// holds one, of anything but white space and marks with no letter
     /// before them.
     word: Option<Strong>,
+    /// Whether the last word holds a right-to-left letter of the line's own,
+    /// not only of the word a cut interrupted ([`Stretch`]).
+    word_rtl: bool,
     /// Whether the last glyph was part of a word, not white space, so that
     /// the next one that is not continues that word.
     in_word: bool,
@@ -523,9 +529,11 @@ impl TextDevice {
     }
 }
 
-/// Which way a glyph's text reads, by the same character blocks
-/// [`is_rtl`] counts ([`rtl_char`]): right to left, left to right (any other
-/// letter), or neither (digits, punctuation, symbols).
+/// Which way a glyph's text reads: right to left (a letter of `Bidi_Class`
+/// `R` or `AL`, or the punctuation of the right-to-left scripts — the ARABIC
+/// COMMA among it — [`reads_right_to_left`]), left to right (any other
+/// letter), or neither (digits — an Arabic-Indic one too, which is `AN` —
+/// other punctuation, symbols).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Strong {
     RightToLeft,
@@ -558,7 +566,7 @@ fn strong(text: &str) -> Option<Strong> {
         )
     }) {
         None
-    } else if text.chars().any(rtl_char) {
+    } else if text.chars().any(reads_right_to_left) {
         Some(Strong::RightToLeft)
     } else if text.chars().any(char::is_alphabetic) {
         Some(Strong::LeftToRight)
@@ -608,15 +616,37 @@ const STRETCH_ROUNDING: f64 = 0.05;
 /// - carried after a word of neutrals, `- ` in `שָׁלוֹם - (HDAC) - עוֹלָם`
 ///   with no `dir`, it joined the Hebrew after it to a line that held the
 ///   Latin, read right to left as its two Hebrew ends say;
-/// - and carried a little further than the spacing reaches, it crossed from
+/// - carried a little further than the spacing reaches, it crossed from
 ///   one table cell to the next: `td { letter-spacing: 0.5em }` with
-///   `border-spacing: 2px` read two Hebrew cells as one word, `גדולספר`.
+///   `border-spacing: 2px` read two Hebrew cells as one word, `גדולספר`;
+/// - carried after neutrals on a line that held no left-to-right letter, it
+///   joined a neutral the device had cut from the Latin text it belongs to,
+///   and that starts a line afresh, to the right-to-left word after it — an
+///   opening `«`, `"`, `(`, `#` or `...` in a text object of its own, `<i>?!</i>`
+///   and its stretched space before `שָׁלוֹם`, a table cell's `[` — and the
+///   line read its mark at the wrong end: `«שָׁלוֹם עוֹלָם»` letter-spaced as
+///   `שָׁלוֹם עוֹלָם«`, `<td>[שָׁלוֹם]</td>` as `שָׁלוֹם[` (third review of the
+///   K-11 fix, 163 books of its probe in a default build, about 201 with
+///   `bundled-fonts`, 128 of them tables);
+/// - and carried into an Arabic-Indic digit, which the block table counted as
+///   right to left, it read `(١٢٣)` after a Hebrew word as `٢٣ (١)`, and a
+///   search for `١٢٣` found nothing (6 books with `bundled-fonts`).
 ///
-/// A left-to-right page is collected exactly as before, and so is every
-/// line that holds a left-to-right letter but after a right-to-left word on
-/// it: the two words of a Hebrew gloss in an English sentence, `peace
-/// (עוֹלָם מִלְחָמָה)`, justified, are one piece of right-to-left text as
-/// they were in a right-to-left paragraph.
+/// So the pen is carried only into a glyph that reads right to left by its
+/// own class ([`reads_right_to_left`]), only as far as the spacing reaches,
+/// and only after a right-to-left word or, after neutrals, on a line that
+/// holds a right-to-left letter **of its own** and no left-to-right one: a
+/// line the device starts at a cut holds nothing from before the cut but the
+/// word the cut interrupted, which counts against a carry and never for one.
+/// A left-to-right page is collected exactly as before, and so is every line
+/// that holds a left-to-right letter but after a right-to-left word on it:
+/// the two words of a Hebrew gloss in an English sentence, `peace (עוֹלָם
+/// מִלְחָמָה)`, justified, are one piece of right-to-left text as they were in
+/// a right-to-left paragraph. A run of neutrals the EPUB writer draws at the
+/// start of a right-to-left run, the ` (` of a sans-serif book's Helvetica,
+/// is a text object no right-to-left letter precedes, so the writer draws its
+/// word space first, where the stretch stays inside it (`paint`'s
+/// `opens_with_its_word_space`).
 ///
 /// **A word cut on one baseline goes on into the next piece.** A word is all of
 /// its glyphs since the white space before it; a line the device cut inside a
@@ -632,26 +662,22 @@ struct Stretch {
 
 impl Stretch {
     /// Whether a glyph of direction `next`, drawn at `origin` along the
-    /// baseline by a font of `size`, continues a line that holds a
-    /// left-to-right letter if `holds_ltr` and whose last word reads `word`,
-    /// from the stretched pen.
+    /// baseline by a font of `size`, continues `line` from the stretched pen.
     ///
     /// Three things, each of which a carry once crossed (see [`Stretch`]):
-    /// the line so far holds no left-to-right letter, or the word before the
-    /// gap is a right-to-left one; the glyph after the gap is itself right to
-    /// left — not a neutral, which says nothing of the word it opens; and it
-    /// starts where the spacing left the pen, give or take
+    /// the word before the gap reads right to left by a letter of the line's
+    /// own, or, after neutrals, the line holds a right-to-left letter of its
+    /// own and no left-to-right one; the glyph after the gap is itself right
+    /// to left — not a neutral, which says nothing of the word it opens; and
+    /// it starts where the spacing left the pen, give or take
     /// [`STRETCH_ROUNDING`] of an em, so that a gap the spacing does not
-    /// account for, a cell's or a column's, is never carried across.
-    fn carries(
-        self,
-        holds_ltr: bool,
-        word: Option<Strong>,
-        next: Option<Strong>,
-        origin: f64,
-        size: f64,
-    ) -> bool {
-        (!holds_ltr || word == Some(Strong::RightToLeft))
+    /// account for, a cell's or a column's, is never carried across. A word a
+    /// cut on the baseline interrupted counts against a carry — a
+    /// left-to-right letter of it is the line's — and never for one.
+    fn carries(self, line: &PendingLine, next: Option<Strong>, origin: f64, size: f64) -> bool {
+        let after_its_word = line.word == Some(Strong::RightToLeft) && line.word_rtl;
+        let after_neutrals = line.holds_rtl && !line.holds_ltr;
+        (after_its_word || after_neutrals)
             && next == Some(Strong::RightToLeft)
             && (origin - self.pen).abs() <= size.max(1.0) * STRETCH_ROUNDING
     }
@@ -666,14 +692,15 @@ impl Stretch {
 /// Arabic Extended-C and Sogdian among them, and U+1E800 to U+1EFFF, Adlam's).
 /// Until the review of the K-11 fix the table left out the Arabic Supplement
 /// (U+0750 to U+077F), N'Ko to Arabic Extended-B (U+07C0 to U+089F) and both
-/// supplementary ranges, so a word in one of their letters was a
-/// left-to-right one to [`Stretch`] and to [`is_rtl`].
+/// supplementary ranges.
 ///
-/// By block and not by each character's own class: this crate keeps no edge to
-/// `tinker-pdf-shape`, which holds the vendored table, and a character of
-/// another class inside these blocks — an Arabic-Indic digit, a mark, a
-/// separator — is counted with the script it belongs to, as it always was
-/// here.
+/// By block, for [`is_rtl`]'s count of a line's direction alone, which a
+/// character of another class inside these blocks — an Arabic-Indic digit, a
+/// mark, a separator — has always been counted in with the script it belongs
+/// to. Whether spacing carries the pen into a glyph is asked of its own
+/// class instead ([`reads_right_to_left`]): carried into an Arabic-Indic
+/// digit, which is `AN`, a Hebrew paragraph's `(١٢٣)` read `٢٣ (١)` (third
+/// review of the K-11 fix).
 fn rtl_char(c: char) -> bool {
     let code = u32::from(c);
     (0x0590..=0x08FF).contains(&code)
@@ -875,13 +902,7 @@ impl Device for TextDevice {
                 let slack = size.max(1.0) * 0.5;
                 let carried = wmode == WritingMode::Horizontal
                     && line.stretched.is_some_and(|stretch| {
-                        stretch.carries(
-                            line.holds_ltr,
-                            line.word,
-                            strong(&glyph.text),
-                            origin.0,
-                            size,
-                        )
+                        stretch.carries(line, strong(&glyph.text), origin.0, size)
                     });
                 let disjoint = line.closed
                     && !carried
@@ -919,7 +940,9 @@ impl Device for TextDevice {
                 closed: false,
                 stretched: None,
                 holds_ltr: word == Some(Strong::LeftToRight),
+                holds_rtl: false,
                 word,
+                word_rtl: false,
                 in_word: word.is_some(),
             });
         }
@@ -940,12 +963,14 @@ impl Device for TextDevice {
             if blank {
                 line.in_word = false;
             } else if let Some(own) = strong(&glyph.text) {
-                line.word = Some(match line.word {
-                    Some(word) if line.in_word => word.with(own),
-                    _ => own,
-                });
+                let rtl = own == Strong::RightToLeft;
+                (line.word, line.word_rtl) = match line.word {
+                    Some(word) if line.in_word => (Some(word.with(own)), line.word_rtl || rtl),
+                    _ => (Some(own), rtl),
+                };
                 line.in_word = true;
                 line.holds_ltr |= own == Strong::LeftToRight;
+                line.holds_rtl |= rtl;
             }
             line.stretched = match wmode {
                 // 9.4.4: `tx = (w0 × Tfs + Tc + Tw) × Th`, which is
@@ -1197,13 +1222,18 @@ mod tests {
         assert_eq!(justified(&pieces, 8.0), ["\u{5D0} \u{5D1}"]);
         // With no `Tw` the same gap is a gap, and cuts the line as before.
         assert_eq!(justified(&pieces, 0.0), ["\u{5D0} ", "\u{5D1}"]);
-        // And a neutral before the space carries it too: the `(` that opens
-        // a bracketed Arabic phrase, in a face of its own.
-        let pieces = [("(", 0.0), (" ", 5.0), ("\u{5D1}", 18.0)];
-        assert_eq!(justified(&pieces, 8.0), ["( \u{5D1}"]);
-        // In every right-to-left script's block: the Arabic Supplement's
-        // letters, N'Ko's and Adlam's read right to left too (review of the
-        // K-11 fix; the table stopped short of all three).
+        // And a neutral before the space carries it too, on a line that holds
+        // a right-to-left letter of its own: the `(` that opens a bracketed
+        // Arabic phrase, in a face of its own.
+        let neutral: &[(&str, f64)] = &[("\u{5D0}", 0.0), (" ", 5.0), ("(", 18.0), (" ", 23.0)];
+        let hebrew: &[(&str, f64)] = &[("\u{5D1}", 36.0)];
+        assert_eq!(
+            objects_spaced(&[neutral, hebrew], 0.0, 8.0),
+            ["\u{5D0} ( \u{5D1}"]
+        );
+        // Every letter of `Bidi_Class` `R` or `AL` reads right to left: the
+        // Arabic Supplement's letters, N'Ko's and Adlam's among them (review
+        // of the K-11 fix; the block table stopped short of all three).
         for (first, second) in [
             ("\u{750}", "\u{751}"),
             ("\u{7CA}", "\u{7CB}"),
@@ -1391,8 +1421,8 @@ mod tests {
         assert_eq!(justified(&pieces, 8.0), ["\u{5D0} \u{5D1}"]);
     }
 
-    /// **And only on a line holding no left-to-right letter, or after a
-    /// right-to-left word.** `שָׁלוֹם - (HDAC) - עוֹלָם` with no `dir`, its
+    /// **And after neutrals only on a line holding a right-to-left letter of
+    /// its own and no left-to-right one, or after a right-to-left word.** `שָׁלוֹם - (HDAC) - עוֹלָם` with no `dir`, its
     /// `- (HDAC) - ` one text object: the stretched space after the second
     /// `-` carried the pen into the Hebrew, and the line, which held the
     /// Latin, was read by its two Hebrew ends as a right-to-left paragraph's.
@@ -1408,6 +1438,76 @@ mod tests {
         assert_eq!(objects_spaced(&[hebrew_dash, hebrew], 0.0, 8.0).len(), 1);
         let latin_word: &[(&str, f64)] = &[("a", 0.0), (" ", 5.0), ("\u{5D0}", 10.0), (" ", 15.0)];
         assert_eq!(objects_spaced(&[latin_word, hebrew], 0.0, 8.0).len(), 1);
+    }
+
+    /// **After neutrals, only on a line that holds a right-to-left letter of
+    /// its own** (third review of the K-11 fix). The device starts a line
+    /// afresh at every cut, so a neutral cut from the Latin text it belongs
+    /// to — an opening `«`, `"`, `(` or `#` in a text object of its own,
+    /// `<p><i>«</i>שָׁלוֹם עוֹלָם<i>»</i></p>` letter-spaced by `0.55em` — begins
+    /// a line that holds no left-to-right letter, and carried from it into
+    /// the Hebrew word the line read right to left with its `«` last,
+    /// `שָׁלוֹם עוֹלָם«`; and `<i>?!</i> שָׁלוֹם` at `word-spacing: 1em`, its `?!`
+    /// and a stretched space before the word, read `שָׁלוֹם !?`. Taken where
+    /// the line holds a right-to-left letter of its own, the pen still goes on
+    /// after `- ` or `( ` in a right-to-left line.
+    #[test]
+    fn spacing_carries_nothing_out_of_a_line_of_neutrals_alone() {
+        let hebrew: &[(&str, f64)] = &[("\u{5D1}", 11.0)];
+        for opening in ["\u{AB}", "\"", "(", "#"] {
+            let mark: &[(&str, f64)] = &[(opening, 0.0)];
+            assert_eq!(
+                objects(&[mark, hebrew], 6.0),
+                [opening, "\u{5D1}"],
+                "{opening:?}: carried out of a line of neutrals"
+            );
+        }
+        let marks: &[(&str, f64)] = &[("?", 0.0), ("!", 5.0), (" ", 10.0)];
+        let hebrew: &[(&str, f64)] = &[("\u{5D1}", 23.0)];
+        assert_eq!(objects_spaced(&[marks, hebrew], 0.0, 8.0).len(), 2);
+    }
+
+    /// **A word a cut interrupted counts against a carry, and never for
+    /// one** (third review of the K-11 fix). Two table cells with no space
+    /// between them, letter-spaced: the first cell's Hebrew word and the
+    /// second's `[` are one word to the device, cut where the cell ended, and
+    /// the line the `[` begins went on with that right-to-left word — so the
+    /// pen was carried from the `[` into the second cell's Hebrew, and
+    /// `[שָׁלוֹם]` read `שָׁלוֹם[`. A left-to-right word interrupted so still
+    /// stops a carry: `[ŋ̊ə̃] חו` (`letter_spacing_carries_nothing_into_a_neutral_or_beside_left_to_right_text`).
+    #[test]
+    fn a_word_a_cut_interrupted_never_enables_a_carry() {
+        let first: &[(&str, f64)] = &[("\u{5D0}", 0.0)];
+        let bracket: &[(&str, f64)] = &[("[", 11.0)];
+        let second: &[(&str, f64)] = &[("\u{5D1}", 22.0)];
+        assert_eq!(
+            objects(&[first, bracket, second], 6.0),
+            ["\u{5D0}", "[", "\u{5D1}"]
+        );
+    }
+
+    /// **A glyph reads right to left by its own class, not its block** (third
+    /// review of the K-11 fix). A digit is no right-to-left letter, an
+    /// Arabic-Indic one either: its `Bidi_Class` is `AN`, though it stands in
+    /// the Arabic block, which the device counted by. Carried into `(١٢٣)`
+    /// after a Hebrew word in a justified paragraph, the digits read `٢٣ (١)`,
+    /// and a search for `١٢٣` that found them found nothing. The punctuation
+    /// of the right-to-left scripts does read right to left, the ARABIC COMMA
+    /// among it though its class is `CS`: a right-to-left word that ends in
+    /// one is drawn from it, and a justified K-11 probe line at `margin: 0
+    /// 35%` not carried into it read `منخلايا،`, its words apart.
+    #[test]
+    fn a_glyph_reads_right_to_left_by_its_class() {
+        for digit in ["\u{661}", "\u{6F1}", "1"] {
+            let pieces = [("\u{5D0}", 0.0), (" ", 5.0), (digit, 18.0)];
+            assert_eq!(justified(&pieces, 8.0).len(), 2, "{digit:?}");
+        }
+        let pieces = [("\u{627}", 0.0), (" ", 5.0), ("\u{60C}", 18.0)];
+        assert_eq!(justified(&pieces, 8.0), ["\u{627} \u{60C}"]);
+        assert!(!reads_right_to_left('\u{661}'));
+        assert!(!reads_right_to_left('\u{64B}'));
+        assert!(reads_right_to_left('\u{627}') && reads_right_to_left('\u{5D0}'));
+        assert!(reads_right_to_left('\u{200F}'), "RIGHT-TO-LEFT MARK is `R`");
     }
 
     /// **And only as far as the spacing reaches**, give or take a rounding.

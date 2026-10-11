@@ -686,7 +686,7 @@ fn read_back(visual: &[&str], direction: BaseDirection) -> Result<Vec<usize>, Ve
 /// only so that a reading cannot win by pairing a `)(` that faces outward
 /// and breaking the two pairs either side of it, `()()` read from the right.
 /// Ruling 14, amended 10 October 2026 a second time, records this as its
-/// bracket tie-break (a proposal until the owner accepts it). It is asked
+/// bracket tie-break, which the owner accepted on 11 October 2026. It is asked
 /// only of a line that draws a closing bracket left of an opening one
 /// ([`faces_outward`]), and costs that line one search in each direction;
 /// [`drawn_reading`] returns the one chosen, so reading the line then costs
@@ -714,8 +714,15 @@ fn decide(visual: &[&str]) -> (BaseDirection, Option<Vec<usize>>, bool) {
     let mine = found.unwrap_or_else(|| match read_back(visual, chosen) {
         Ok(order) | Err(order) => order,
     });
-    let (their_outward, their_pairs) = paired_brackets(visual, &theirs);
-    let (my_outward, my_pairs) = paired_brackets(visual, &mine);
+    let (mut my_outward, mut my_pairs) = paired_brackets(visual, &mine, None);
+    // A pair opening the line in the direction chosen may have taken its
+    // level from the line before, and is no evidence for the other one
+    // where the line's letters say the direction chosen ([`OpenedBefore`]).
+    let before = OpenedBefore::of(visual, chosen, my_outward > 0);
+    if before.is_some() {
+        (my_outward, my_pairs) = paired_brackets(visual, &mine, before);
+    }
+    let (their_outward, their_pairs) = paired_brackets(visual, &theirs, before);
     if their_outward > my_outward && their_pairs > my_pairs {
         (other, Some(theirs), true)
     } else {
@@ -784,7 +791,11 @@ pub fn faces_outward(visual: &[&str]) -> bool {
 /// A unit is a bracket by its first character, the one its marks ride on.
 /// BD16's stack of 63 is kept: past it, nothing more is paired. Positions
 /// `order` does not hold are skipped, as [`logical_order`] never returns.
-fn paired_brackets(visual: &[&str], order: &[usize]) -> (usize, usize) {
+fn paired_brackets(
+    visual: &[&str],
+    order: &[usize],
+    before: Option<OpenedBefore>,
+) -> (usize, usize) {
     /// BD16's stack, as [`brackets`] keeps it.
     const STACK: usize = 63;
     // The units in the order read, so that what stands just inside a bracket
@@ -817,6 +828,21 @@ fn paired_brackets(visual: &[&str], order: &[usize]) -> (usize, usize) {
             BracketKind::Close => {
                 let folded = canonical(c);
                 if let Some(found) = stack.iter().rposition(|(want, _, _)| *want == folded) {
+                    let from_before = stack.get(found).is_some_and(|(_, open_at, open_place)| {
+                        before.is_some_and(|before| {
+                            before.opens(*open_at, *at)
+                                && !read
+                                    .get(open_place + 1..place)
+                                    .unwrap_or_default()
+                                    .iter()
+                                    .flat_map(|unit| unit.chars())
+                                    .any(|c| before.reads_its_way(c))
+                        })
+                    });
+                    if from_before {
+                        stack.truncate(found);
+                        continue;
+                    }
                     pairs += 1;
                     if let Some((_, open_at, open_place)) = stack.get(found) {
                         // Of an empty pair, what stands just inside each
@@ -833,6 +859,103 @@ fn paired_brackets(visual: &[&str], order: &[usize]) -> (usize, usize) {
         }
     }
     (outward, pairs)
+}
+
+/// **A pair that may have taken its level from the line before** — the
+/// bracket tie-break's evidence it does not count ([`drawn_direction`]).
+///
+/// N0 resolves a pair enclosing only letters of the paragraph's other
+/// direction by the strong character before its opening bracket, and for a
+/// pair that opens a line that character is on the line above. So a
+/// left-to-right paragraph's line opening with `(הָאָרֶץ)`, after a line that
+/// ended in Hebrew, draws the pair facing outward, `)ץֶרָאָה(`, at its left
+/// end, exactly as a right-to-left paragraph draws a pair that ends it — and
+/// read from the right, the line pairs it. The review of the K-11 fix found
+/// an English paragraph quoting Hebrew in brackets, justified, whose third
+/// line was turned so, though it held fifty Latin letters to fifteen Hebrew
+/// ones, and read backwards (4 books in a default build, 1 with
+/// `bundled-fonts`): its reading from the right paired that pair and the
+/// `(מִלְחָמָה)` later on the line, the reading as chosen only the second.
+///
+/// Such a pair is passed over by both readings — matched, as BD16 matches
+/// it, and counted neither among the pairs nor among those facing outward —
+/// where it holds a bracket at the end of the line a reading in the
+/// direction chosen starts from (the first unit that draws something, from
+/// the left for a left-to-right reading, from the right for a right-to-left
+/// one) and encloses no strong character of that direction; and only where
+/// the line's letters say the direction chosen: where they outnumber the
+/// other's and the reading in that direction pairs a bracket facing outward
+/// of its own, or where they are twice the other's and eight more
+/// ([`OpenedBefore::WIDE_MARGIN`]) — the same paragraph's last line,
+/// `(מלחמה) and more English text,.`, its pair the only one, with 22 Latin
+/// letters to 5 Hebrew ones. So the tie-break reads every line of
+/// `BidiCharacterTest.txt` — whole paragraphs, where nothing comes from a
+/// line before, and none of whose turned lines holds more than six letters
+/// against the turn — and the reviews' 2 235 wrapped and 13 300 sentence
+/// lines as it did without this: passed over wherever it opens the line and
+/// the letters outnumber the other's, it read 1 341 of the file's lines
+/// worse; wherever the reading as chosen also pairs one facing outward, 8,
+/// each with an unpaired bracket.
+#[derive(Clone, Copy, Debug)]
+struct OpenedBefore {
+    /// Where the unit at the start of the line, for the direction chosen, is
+    /// drawn.
+    edge: usize,
+    /// Whether the direction chosen is left to right.
+    ltr: bool,
+}
+
+impl OpenedBefore {
+    /// How many more letters of the direction chosen than of the other a
+    /// line holds, at twice as many or more, for them to say that direction
+    /// whatever its reading pairs ([`OpenedBefore`]).
+    const WIDE_MARGIN: usize = 8;
+
+    /// The line's [`OpenedBefore`] for `chosen`, where `own_outward` says
+    /// whether its reading in that direction pairs a bracket facing outward
+    /// itself — or `None` where its letters do not say `chosen`: as many of
+    /// the other direction or more, or, where the reading pairs none facing
+    /// outward, fewer than twice as many and eight more.
+    fn of(visual: &[&str], chosen: BaseDirection, own_outward: bool) -> Option<OpenedBefore> {
+        let ltr = chosen != BaseDirection::RightToLeft;
+        let draws = |at: &usize| visual.get(*at).and_then(|unit| first_drawn(unit)).is_some();
+        let edge = if ltr {
+            (0..visual.len()).find(draws)
+        } else {
+            (0..visual.len()).rev().find(draws)
+        }?;
+        let found = OpenedBefore { edge, ltr };
+        let (mut chosen_letters, mut other_letters) = (0usize, 0usize);
+        for c in visual.iter().flat_map(|unit| unit.chars()) {
+            if found.reads_its_way(c) {
+                chosen_letters += 1;
+            } else if matches!(
+                unicode::bidi_class(c),
+                BidiClass::L | BidiClass::R | BidiClass::AL
+            ) {
+                other_letters += 1;
+            }
+        }
+        let more = chosen_letters > other_letters;
+        let wide = chosen_letters >= 2 * other_letters
+            && chosen_letters >= other_letters + OpenedBefore::WIDE_MARGIN;
+        ((own_outward && more) || wide).then_some(found)
+    }
+
+    /// Whether a pair drawn with its brackets at `open` and `close` has one
+    /// at the line's start.
+    fn opens(self, open: usize, close: usize) -> bool {
+        open == self.edge || close == self.edge
+    }
+
+    /// Whether `c` is a strong character of the direction chosen.
+    fn reads_its_way(self, c: char) -> bool {
+        match unicode::bidi_class(c) {
+            BidiClass::L => self.ltr,
+            BidiClass::R | BidiClass::AL => !self.ltr,
+            _ => false,
+        }
+    }
 }
 
 /// Whether a unit is whitespace — every character of it `WS`, `S` or `B`, or
@@ -2285,6 +2408,59 @@ mod tests {
                 "{typed:?} drawn {line:?}, read {chosen:?}"
             );
         }
+    }
+
+    /// **A pair that may have taken its level from the line before turns no
+    /// line** ([`OpenedBefore`]; the third review of the K-11 fix).
+    ///
+    /// A justified English paragraph quoting Hebrew in brackets, `… Words
+    /// שלום עולם (מלחמה) and more English text, …`, wraps so that a line
+    /// opens with `(הארץ)`: N0 resolved that pair by the Hebrew word that
+    /// ended the line above, so it is drawn facing outward at the line's left
+    /// end, `)ץראה(`. Read from the right the line pairs it and `(מלחמה)`; as
+    /// the strong letters choose, left to right, only `(מלחמה)`. The bracket
+    /// tie-break took the reading from the right, which reads the English
+    /// backwards. That pair opens the line a left-to-right reading starts
+    /// from and encloses no Latin letter, so it is no evidence: the reading as
+    /// chosen pairs a bracket facing outward of its own and the line's Latin
+    /// letters outnumber its Hebrew ones, and the line keeps its direction.
+    /// The paragraph's last line, `(מלחמה) and more English text,.`, pairs
+    /// nothing else; its Latin letters are more than three times its Hebrew
+    /// ones and eight more, and it keeps its direction too.
+    #[test]
+    fn a_pair_the_line_above_resolved_turns_no_line() {
+        let ltr = BaseDirection::LeftToRight;
+        let rtl = BaseDirection::RightToLeft;
+        let rest = "and more English text, Words \u{5E9}\u{5DC}\u{5D5}\u{5DD} \
+                    \u{5E2}\u{5D5}\u{5DC}\u{5DD} (\u{5DE}\u{5DC}\u{5D7}\u{5DE}\u{5D4}) \
+                    and more English text,";
+        let opened = ")\u{5E5}\u{5E8}\u{5D0}\u{5D4}(";
+        let last = ")\u{5D4}\u{5DE}\u{5D7}\u{5DC}\u{5DE}( and more English text,.";
+        for (line, pair) in [
+            (
+                format!("{opened} {}", drawn(rest, ltr)),
+                "(\u{5D4}\u{5D0}\u{5E8}\u{5E5})",
+            ),
+            (last.to_owned(), "(\u{5DE}\u{5DC}\u{5D7}\u{5DE}\u{5D4})"),
+        ] {
+            let units = chars(&line);
+            let units: Vec<&str> = units.iter().map(String::as_str).collect();
+            let reading = read_in(&units, &logical_order(&units, rtl));
+            assert!(
+                reading.contains(pair),
+                "read from the right, the line pairs the pair that opens it: {reading:?}"
+            );
+            assert_eq!(drawn(&reading, rtl), line, "and both directions draw it");
+            assert_eq!(drawn_direction(&units), ltr, "{line:?}");
+            let read = read_in(&units, &logical_order(&units, BaseDirection::Auto));
+            assert!(read.contains("and more English text,"), "{read:?}");
+        }
+        // Where the line pairs no other bracket facing outward and its
+        // letters are not so many more, the pair still counts — a line of
+        // `BidiCharacterTest.txt`, a whole right-to-left paragraph, ends so.
+        let units = chars(")\u{5D0}( ab");
+        let units: Vec<&str> = units.iter().map(String::as_str).collect();
+        assert_eq!(drawn_direction(&units), rtl);
     }
 
     /// **[`drawn_reading`] is [`drawn_direction`] and [`logical_order`] in

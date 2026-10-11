@@ -959,11 +959,13 @@ fn conserves_pointed_and_not(language: &str, style: &str, body: &str) {
 ///
 /// K-11's fix took the pen across a gap `Tw` or `Tc` made where a line closed
 /// by `ET` met the next text object, so that a justified or letter-spaced
-/// Arabic line was not cut into words read backwards. Each book here
+/// Arabic line was not cut into words read backwards. Each pointed book here
 /// conserved at 9297d2d, which cut its line at the gap, and did not when the
 /// pen was carried across it — the line so joined, each piece of it read
 /// right alone, fell into ruling 14's limits, read by its two Hebrew ends or
-/// by its majority as a right-to-left paragraph's:
+/// by its majority as a right-to-left paragraph's. Their mark-free twins are
+/// held to conserve too, which not all of them did at 9297d2d (the `-` line
+/// under `word-spacing: 0.6em` did not):
 ///
 /// - carried after a right-to-left word into a neutral, the `(` or `⟨` that
 ///   opens a Latin run, and into the Hebrew after `( ` in an English line;
@@ -1054,5 +1056,118 @@ fn a_line_whose_pieces_read_right_apart_is_read_in_them() {
         format!("<div style=\"direction: rtl\"><p>{text}</p></div>"),
     ] {
         conserves_pointed_and_not("he", style, &body);
+    }
+}
+
+/// **A neutral the device cut from its line carries no pen into the
+/// right-to-left word after it** — the third review of the K-11 fix.
+///
+/// The text device starts a line afresh at every cut, so an opening mark
+/// cut from the Latin text it belongs to — `«`, `"`, `#` or `?!` in a text
+/// object of its own, a table cell's `[` — began a line that held no
+/// left-to-right letter, and the pen was carried from it across the spacing
+/// into the Hebrew or Arabic word after it. The line so joined read right
+/// to left, its mark at the wrong end: `«שָׁלוֹם עוֹלָם»` letter-spaced by
+/// `0.55em` as `שָׁלוֹם עוֹלָם«`, `<td>[שָׁלוֹם]</td>` as `שָׁלוֹם[`, and `<i>?!</i>
+/// שָׁלוֹם עוֹלָם` at `word-spacing: 1em` as `שָׁלוֹם עוֹלָם !?`. Each book
+/// conserved at 9297d2d (pointed; its mark-free twin did not, nor does it
+/// now). After neutrals the pen goes on now only on a line that holds a
+/// right-to-left letter of its own (`tinker-pdf-content`'s `Stretch`).
+#[test]
+fn a_neutral_cut_from_its_line_carries_no_pen_into_the_word_after_it() {
+    let spaced = "p, li, td { letter-spacing: 0.55em; text-align: justify; margin: 0 20% }";
+    let worded = "p, li { word-spacing: 1em; margin: 0 18% }";
+    let table = "<table style=\"border-spacing: 0; letter-spacing: 0.6em\">\
+                 <tr><td>שָׁלוֹם</td><td>עוֹלָם</td><td>מִלְחָמָה.</td><td>(HDAC)</td></tr>\
+                 <tr><td>סֵפֶר בַּיִת</td><td>גָּדוֹל</td><td>(2010)</td><td>x</td></tr>\
+                 <tr><td>«אוֹר»</td><td>יוֹם</td><td>[שָׁלוֹם]</td><td>עוֹלָם</td></tr>\
+                 <tr><td>abc</td><td>מִלְחָמָה</td><td>def</td><td>סֵפֶר בַּיִת</td></tr></table>";
+    for (language, style, body) in [
+        ("he", spaced, "<p><i>«</i>שָׁלוֹם עוֹלָם<i>»</i></p>"),
+        ("he", spaced, "<p><b>\"</b>שָׁלוֹם עוֹלָם<b>\"</b></p>"),
+        ("he", spaced, "<p><i>#</i>שָׁלוֹם עוֹלָם</p>"),
+        ("ar", spaced, "<p><i>«</i>عوامل عدّة<i>»</i></p>"),
+        ("he", "", table),
+        ("he", worded, "<p><i>?!</i> שָׁלוֹם עוֹלָם</p>"),
+        ("ar", worded, "<p><i>(1)</i> عوامل عدّة</p>"),
+    ] {
+        let bytes = epub_support::book::styled_book(language, style, body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let content = conservation(&bytes, &doc);
+        let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+        assert!(
+            content.holds() && logical.holds(),
+            "{style:?}, {body}: content {content:?}, logical {logical:?}"
+        );
+    }
+}
+
+/// **A justified English paragraph quoting Hebrew in brackets reads as
+/// written** — the third review of the K-11 fix.
+///
+/// `Words <b>שָׁלוֹם</b> <i>עוֹלָם</i> (<b>מִלְחָמָה</b>) and more English
+/// text,`, five times over with the Hebrew words changing, under `text-align:
+/// justify` and under `word-spacing: 0.3em`. A line that opens with a
+/// bracketed Hebrew word the line above ended next to — `(הָאָרֶץ) and more
+/// English text, Words …` — draws that pair facing outward, since N0 took
+/// its level from the Hebrew word before it, on the line above; read from the
+/// right the line pairs it, and the bracket tie-break turned the line,
+/// fifty Latin letters to fifteen Hebrew ones, and read it backwards. Such a
+/// pair is no evidence for the other direction (`tinker-pdf-shape`'s
+/// `OpenedBefore`). In a default build each conserved in logical order at
+/// 9297d2d, pointed and not; with `bundled-fonts`, whose wider Hebrew breaks
+/// these lines elsewhere, the pointed paragraph set in monospace, justified,
+/// at `margin: 0 20%` did.
+#[test]
+fn a_bracket_pair_the_line_above_resolved_turns_no_line() {
+    let words = [
+        "שָׁלוֹם",
+        "עוֹלָם",
+        "מִלְחָמָה",
+        "סֵפֶר",
+        "בַּיִת",
+        "גָּדוֹל",
+        "אוֹר",
+        "יוֹם",
+        "בְּרֵאשִׁית",
+        "בָּרָא",
+        "אֱלֹהִים",
+        "הָאָרֶץ",
+    ];
+    let text: Vec<String> = (0..5)
+        .map(|k| {
+            format!(
+                "Words <b>{}</b> <i>{}</i> (<b>{}</b>) and more English text,",
+                words[3 * k % 12],
+                words[(3 * k + 1) % 12],
+                words[(3 * k + 2) % 12]
+            )
+        })
+        .collect();
+    let body = format!("<p>{}.</p>", text.join(" "));
+    // Each style, and whether its unpointed twin conserved at 9297d2d too.
+    let styles: &[(&str, bool)] = if cfg!(feature = "bundled-fonts") {
+        &[(
+            "body { font-family: monospace } p { text-align: justify; margin: 0 20% }",
+            false,
+        )]
+    } else {
+        &[
+            ("p { text-align: justify }", true),
+            ("p { word-spacing: 0.3em; margin: 0 20% }", true),
+        ]
+    };
+    for &(style, twin) in styles {
+        let bodies = if twin {
+            vec![body.clone(), unpointed_hebrew(&body)]
+        } else {
+            vec![body.clone()]
+        };
+        for body in bodies {
+            let bytes = epub_support::book::styled_book("en", style, &body);
+            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+            assert!(logical.holds(), "{style:?}, {body}: {logical:?}");
+        }
     }
 }

@@ -4368,19 +4368,30 @@ fn undoes_its_levels(c: char) -> bool {
 /// character in the order UAX #9 draws it. Where the reader would not undo
 /// it, a piece so drawn reads back reversed, and drawn as typed, as every
 /// such piece was before ROADMAP K-11, it reads back as typed. Two kinds,
-/// each measured (review of the K-11 fix):
+/// each measured (reviews of the K-11 fix), and a third whose order a
+/// reader does not read:
 ///
-/// - **A piece of a run letter-spaced by half an em or more.** `TextDevice`
-///   resumes a line across a text object's end only where the next glyph
-///   starts within half an em of where the last one's box ended, and the
-///   join of the pieces it cut only within the same half em; a line is
-///   written a run at a time in reading order, each run a text object of its
-///   own. Letter-spaced by half an em a line is read run by run, and a run of
-///   neutrals alone, in the order the content stream drew it: at
-///   `letter-spacing: 0.5em`, `שָׁלוֹם עוֹלָם (HDAC) (SIRT).` drew its `) (`
-///   `( )` and read it so (`bundled-fonts`), and in monospace at `8px`
+/// - **A piece read alone for its spacing.** `TextDevice` resumes a line
+///   across a text object's end only where the next glyph starts within half
+///   an em of where the last one's box ended, and the join of the pieces it
+///   cut only within the same half em; a line is written a run at a time in
+///   reading order, each run a text object of its own, and spacing carries
+///   the pen only into a right-to-left letter, never into or out of a run of
+///   neutrals alone. So a piece is read on its own, in the order the content
+///   stream drew it, where it is half an em or more from what it is drawn
+///   beside on both sides — or on one side, the other being the line's end —
+///   counting the spacing after each glyph from the piece to the nearest one
+///   that is not white space: its run's `letter-spacing`, and after a word
+///   space its `word-spacing`, which justification stretches. A run
+///   letter-spaced by half an em is read run by run, whatever stands beside
+///   it: at `letter-spacing: 0.5em`, `שָׁלוֹם עוֹלָם (HDAC) (SIRT).` drew its
+///   `) (` `( )` and read it so (`bundled-fonts`), and in monospace at `8px`
 ///   `שָׁלוֹם <i>?!</i> עוֹלָם` read its `?!` on a line with the word after
-///   it, by the comma tie-break, `עוֹלָם !?`.
+///   it, by the comma tie-break, `עוֹלָם !?`. And a run whose word spaces
+///   stretch apart from the words either side of it is read alone too:
+///   `عوامل <i>?!</i> عدّة` at `letter-spacing: 0.3em`, justified, and at
+///   `word-spacing: 1em`, drawn `!?`, read back `!?` (third review of the
+///   K-11 fix, 15 books in a default build and 18 with `bundled-fonts`).
 /// - **A piece its line alone resolves otherwise.** Ruling 14 reads a line by
 ///   itself, in the direction [`drawn_direction`] reads it in as it is drawn,
 ///   and UAX #9 resolves a paragraph: where the levels the line alone gives a
@@ -4404,6 +4415,12 @@ fn undoes_its_levels(c: char) -> bool {
 ///   `… عدّة (2010). وقد …` read its full stop away from its bracket — CI's
 ///   K-11 failure itself, `Missing ").وقد…"` (73 probe books, 75 with
 ///   `bundled-fonts`).
+/// - **A slice of a word-spaced run whose glyphs read alike either way
+///   round**, ` (` or ` #`, which [`coded_order`] draws as typed itself, its
+///   word space first ([`opens_with_its_word_space`]): what a reader reads is
+///   the same either way, and the space stands where the overflow font's
+///   string before it overruns (ROADMAP CD-19) and is stretched inside the
+///   slice's own text object.
 fn neutrals_drawn_as_typed(
     line: &[TextRun],
     pieces: &[Vec<(core::ops::Range<usize>, Level)>],
@@ -4438,14 +4455,28 @@ fn neutrals_drawn_as_typed(
             *slot = true;
         }
     };
-    // A run letter-spaced by half an em: a reader resumes a line across a
-    // text object's end only within half an em of where it stopped, so it
-    // reads the line run by run.
+    // Where each piece stands in the order the line is drawn, every piece in
+    // its level's order: its first and last place.
+    let units = line_units(line, pieces, levels);
+    let order = reorder(&units.iter().map(|unit| unit.level).collect::<Vec<_>>());
+    let mut stands: BTreeMap<(usize, usize), (usize, usize)> = BTreeMap::new();
+    for (place, unit) in order.iter().enumerate() {
+        let Some(unit) = units.get(*unit) else {
+            continue;
+        };
+        let (lo, hi) = stands
+            .get(&(unit.run, unit.piece))
+            .copied()
+            .unwrap_or((place, place));
+        stands.insert((unit.run, unit.piece), (lo.min(place), hi.max(place)));
+    }
+    let drawn: Vec<&LineUnit> = order.iter().filter_map(|unit| units.get(*unit)).collect();
+    let gaps = Gaps::of(line, &drawn);
     for (at, piece, _) in &neutral {
-        if line
-            .get(*at)
-            .is_some_and(|run| run.letter_spacing >= run.font_size * 0.5)
-        {
+        let (Some(run), Some(&(lo, hi))) = (line.get(*at), stands.get(&(*at, *piece))) else {
+            continue;
+        };
+        if gaps.read_alone(run, lo, hi) {
             mark(&mut typed, *at, *piece);
         }
     }
@@ -4462,22 +4493,125 @@ fn neutrals_drawn_as_typed(
     typed
 }
 
-/// The units a reader of the page finds on `line`, its runs cut into
-/// `pieces` and its characters at `levels`: each character and the
-/// nonspacing marks after it, in the order UAX #9's L2 draws them — but for
-/// the pieces `typed` marks, each drawn as typed where it stands — less a
-/// generated run's, which no reader reads.
-fn drawn_units(
+/// The widest gap a reader sees between each place of a line, drawn in its
+/// level's order, and the nearest unit on each side of it that draws
+/// something, through the white space between ([`Gaps::read_alone`]) —
+/// found for every place in two passes, so that asking it of every piece of
+/// a line costs the line once.
+struct Gaps {
+    /// For each place, the widest spacing after a unit from the nearest unit
+    /// left of it that draws something up to the place, or `None` where the
+    /// line holds nothing but white space left of it.
+    left: Vec<Option<f64>>,
+    /// For each place, the widest spacing after a unit of white space from
+    /// the place up to the nearest unit that draws something, that unit
+    /// included as `0.0`, or `None` where the line ends first.
+    right: Vec<Option<f64>>,
+    /// The spacing after the unit at each place.
+    after: Vec<f64>,
+}
+
+impl Gaps {
+    /// The gaps of `drawn`, the units of `line` in the order they are drawn.
+    fn of(line: &[TextRun], drawn: &[&LineUnit]) -> Gaps {
+        // The spacing 9.4.4 moves the pen on by after a unit: `Tc` but after
+        // a mark, and `Tw` after a word space.
+        let after: Vec<f64> = drawn
+            .iter()
+            .map(|unit| {
+                let Some(own) = line.get(unit.run) else {
+                    return 0.0;
+                };
+                let first = unit.text.chars().next();
+                let letter = if first.is_some_and(letter_spaced) {
+                    own.letter_spacing
+                } else {
+                    0.0
+                };
+                letter
+                    + if first == Some(' ') {
+                        own.word_spacing
+                    } else {
+                        0.0
+                    }
+            })
+            .collect();
+        let blank: Vec<bool> = drawn
+            .iter()
+            .map(|unit| unit.text.chars().all(char::is_whitespace))
+            .collect();
+        // Left to right: what stands left of each place is what stood left of
+        // the place before, widened by the spacing after the unit there if
+        // it is white space, or that spacing alone if it draws something.
+        let mut left: Vec<Option<f64>> = Vec::with_capacity(after.len());
+        let mut carried: Option<f64> = None;
+        for (gap, blank) in after.iter().zip(&blank) {
+            left.push(carried);
+            carried = if *blank {
+                carried.map(|wider| wider.max(*gap))
+            } else {
+                Some(*gap)
+            };
+        }
+        // And right to left for what stands right of each place.
+        let mut right: Vec<Option<f64>> = Vec::with_capacity(after.len());
+        let mut carried: Option<f64> = None;
+        for (gap, blank) in after.iter().zip(&blank).rev() {
+            carried = if *blank {
+                carried.map(|wider| wider.max(*gap))
+            } else {
+                Some(0.0)
+            };
+            right.push(carried);
+        }
+        right.reverse();
+        Gaps { left, right, after }
+    }
+
+    /// Whether the piece of `run` drawn from place `lo` to place `hi` of its
+    /// line, in its level's order, is read on its own for its spacing
+    /// ([`neutrals_drawn_as_typed`]): a run letter-spaced by half an em or
+    /// more, or one half an em or more from what is drawn beside it on each
+    /// side — or on one side, the line ending on the other — counting the
+    /// spacing after each glyph from the piece to the nearest one that is not
+    /// white space.
+    fn read_alone(&self, run: &TextRun, lo: usize, hi: usize) -> bool {
+        let half = run.font_size * 0.5;
+        if run.letter_spacing >= half {
+            return true;
+        }
+        let left = self.left.get(lo).copied().flatten();
+        let own = self.after.get(hi).copied().unwrap_or(0.0);
+        let right = self
+            .right
+            .get(hi + 1)
+            .copied()
+            .flatten()
+            .map(|wider| wider.max(own));
+        let apart = |side: Option<f64>| side.is_none_or(|gap| gap >= half);
+        (left.is_some() || right.is_some()) && apart(left) && apart(right)
+    }
+}
+
+/// A unit of a line as a reader of the page finds it ([`line_units`]): a
+/// character and the nonspacing marks after it, its level, and the run and
+/// the piece of that run's [`level_pieces`] it is in.
+struct LineUnit {
+    text: String,
+    level: Level,
+    run: usize,
+    piece: usize,
+}
+
+/// The [`LineUnit`]s of `line`, its runs cut into `pieces` and its
+/// characters at `levels`, in the order written — less a generated run's,
+/// which no reader reads.
+fn line_units(
     line: &[TextRun],
     pieces: &[Vec<(core::ops::Range<usize>, Level)>],
     levels: &[Level],
-    typed: &[Vec<bool>],
-) -> Vec<String> {
-    let mut units: Vec<String> = Vec::new();
-    let mut unit_levels: Vec<Level> = Vec::new();
-    // The piece each unit is of, as its run and its place among the run's
-    // pieces, and whether that piece is drawn as typed.
-    let mut owners: Vec<(usize, usize, bool)> = Vec::new();
+) -> Vec<LineUnit> {
+    let mut units: Vec<LineUnit> = Vec::new();
     let mut place = 0usize;
     for (at, (run, own)) in line.iter().zip(pieces).enumerate() {
         // The piece the character is in, walked with the characters.
@@ -4491,39 +4625,60 @@ fn drawn_units(
             while own.get(piece).is_some_and(|(range, _)| offset >= range.end) {
                 piece += 1;
             }
-            let as_typed = typed
-                .get(at)
-                .and_then(|own| own.get(piece))
-                .copied()
-                .unwrap_or(false);
-            if bidi_class(c) == BidiClass::NSM
-                && owners
-                    .last()
-                    .is_some_and(|(r, p, _)| (*r, *p) == (at, piece))
-            {
-                if let Some(unit) = units.last_mut() {
-                    unit.push(c);
+            if bidi_class(c) == BidiClass::NSM {
+                if let Some(unit) = units
+                    .last_mut()
+                    .filter(|unit| (unit.run, unit.piece) == (at, piece))
+                {
+                    unit.text.push(c);
                     continue;
                 }
             }
-            units.push(c.to_string());
-            unit_levels.push(level);
-            owners.push((at, piece, as_typed));
+            units.push(LineUnit {
+                text: c.to_string(),
+                level,
+                run: at,
+                piece,
+            });
         }
     }
-    let mut order = reorder(&unit_levels);
+    units
+}
+
+/// The units a reader of the page finds on `line`, its runs cut into
+/// `pieces` and its characters at `levels` ([`line_units`]), in the order
+/// UAX #9's L2 draws them — but for the pieces `typed` marks, each drawn as
+/// typed where it stands.
+fn drawn_units(
+    line: &[TextRun],
+    pieces: &[Vec<(core::ops::Range<usize>, Level)>],
+    levels: &[Level],
+    typed: &[Vec<bool>],
+) -> Vec<String> {
+    let units = line_units(line, pieces, levels);
+    let as_typed = |unit: &LineUnit| {
+        typed
+            .get(unit.run)
+            .and_then(|own| own.get(unit.piece))
+            .copied()
+            .unwrap_or(false)
+    };
+    let mut order = reorder(&units.iter().map(|unit| unit.level).collect::<Vec<_>>());
     // Where each typed piece's units stand in the drawn order: a piece is at
     // one level, so it stands whole, and is put back as typed there.
     let mut stands: BTreeMap<(usize, usize), (usize, usize, usize)> = BTreeMap::new();
-    for (drawn_at, unit) in order.iter().enumerate() {
-        let Some(&(at, piece, true)) = owners.get(*unit) else {
+    for (drawn_at, at) in order.iter().enumerate() {
+        let Some(unit) = units.get(*at).filter(|unit| as_typed(unit)) else {
             continue;
         };
         let (lo, hi, count) = stands
-            .get(&(at, piece))
+            .get(&(unit.run, unit.piece))
             .copied()
             .unwrap_or((drawn_at, drawn_at, 0));
-        stands.insert((at, piece), (lo.min(drawn_at), hi.max(drawn_at), count + 1));
+        stands.insert(
+            (unit.run, unit.piece),
+            (lo.min(drawn_at), hi.max(drawn_at), count + 1),
+        );
     }
     for (lo, hi, count) in stands.into_values() {
         if hi + 1 - lo == count {
@@ -4534,7 +4689,7 @@ fn drawn_units(
     }
     order
         .iter()
-        .filter_map(|unit| units.get(*unit).cloned())
+        .filter_map(|at| units.get(*at).map(|unit| unit.text.clone()))
         .collect()
 }
 
@@ -5465,7 +5620,10 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// segment, and the pen moves by `advance + letter-spacing` in one sum as it
 /// always did, so a book with no mark is written byte for byte as at cd407d5
 /// (measured on the round-3 and round-4 probes' mark-free books,
-/// letter-spaced and word-spaced ones among them).
+/// letter-spaced and word-spaced ones among them) — but for the overflow
+/// font's code 32 in a word-spaced slice drawn left to right inside
+/// right-to-left text, the rest of whose string is a piece of the same text
+/// object since the third review of ROADMAP K-11 (below).
 ///
 /// # Where the letter a mark rides on is drawn
 ///
@@ -5483,7 +5641,7 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// on a letter in its slice is placed [`EXACT_MARK_INSET`] inside the end
 /// layout measured for it.
 ///
-/// # The overflow font's code 32 in a slice that holds a mark
+/// # The overflow font's code 32
 ///
 /// 9.3.3 applies `Tw` to any single-byte code 32, and the overflow font's
 /// code 32 is a character of the book's — the first past `WinAnsiEncoding`
@@ -5508,6 +5666,24 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// the code 32 is a piece of its own too, from the pen, and nothing in the
 /// slice is drawn where `Tw` would put it
 /// (`a_standard_14_pointed_arabic_letter_is_not_drawn_over_the_next_under_word_spacing`).
+///
+/// And so it is in a word-spaced slice with no mark drawn left to right
+/// inside right-to-left text — at an even level inside an odd one, drawn in
+/// its level's order ([`TextRun::bidi_line_rtl`]) — whose right neighbour is
+/// what a reader reads before it, so that a glyph moved past that neighbour
+/// is read before it too: with `bundled-fonts`, whose overflow font draws a
+/// Hebrew book's Arabic-Indic digits and the ONE at code 32, `(١٢٣),`
+/// opening a justified line letter-spaced by `0.3em` drew its THREE on its
+/// `(` and read `٣(١٢),` once K-11's carry read the line whole (third review
+/// of the K-11 fix;
+/// `a_number_in_word_spaced_right_to_left_text_is_not_drawn_over_its_bracket`).
+/// The rest of the string is another piece of the slice's text object, from
+/// the pen, so that a reader goes on with the line wherever the spacing puts
+/// it. A right-to-left word's string moves on into the word space before
+/// the word, and keeps cd407d5's drawing: placed where layout put it as
+/// well, a word's glyphs left a stretched gap that a reader no longer
+/// bridged between two table cells, and 24 books in each build of that
+/// review's probe that conserved at 9297d2d did not.
 ///
 /// # Where a slice ends on a mark
 ///
@@ -5563,7 +5739,8 @@ fn draw_coded(
     // a stretch that spills into the overflow font is a piece of its own,
     // and the second's origin is wherever the first's advance left it. A
     // stretch of a new resource starts a new text object, as it always has,
-    // except in a slice that holds a mark (see above).
+    // except in a slice that holds a mark, and the rest of a string after the
+    // overflow font's code 32 in one drawn so does not (see above).
     let mut object: Vec<Segment> = Vec::new();
     // Where the last character drawn that is not a mark started, its
     // advance, and whether a reader sets it as wide as it was measured
@@ -5581,10 +5758,21 @@ fn draw_coded(
     // slice without one starts an object at a new resource.
     let whole = slice.chars().any(|c| bidi_class(c) == BidiClass::NSM);
     // Whether the last character drawn was the overflow font's code 32 in a
-    // slice that holds a mark: what follows it is a piece of its own, from
+    // slice that holds a mark, or in a word-spaced slice drawn left to right
+    // inside right-to-left text: what follows it is a piece of its own, from
     // the pen, since 9.3.3 applies `Tw` to any single-byte code 32 and
     // layout spaced only word spaces (ROADMAP CD-19).
     let mut after_overflow_space = false;
+    // Whether this slice places what follows the overflow font's code 32 so
+    // (see above): one that holds a mark, or a word-spaced one at an even
+    // level inside an odd one, drawn in its level's order, whose glyph on
+    // its right a reader reads before it.
+    let unspaced_code_32 = whole
+        || (run.bidi_line_rtl
+            && run.word_spacing != 0.0
+            && run
+                .bidi_level
+                .is_some_and(|level| level >= 2 && level % 2 == 0));
     let start = x;
     let order = coded_order(run, slice);
 
@@ -5630,15 +5818,16 @@ fn draw_coded(
             (Coded::Simple { resource, code: 32 }, Chosen::Standard(face))
                 if *resource == face.overflow_resource()
         );
-        let continues = !mark
-            && !after_mark
-            && !after_overflow_space
-            && !alone
-            && object
-                .last()
-                .is_some_and(|open| open.resource == coded.resource());
+        let same = object
+            .last()
+            .is_some_and(|open| open.resource == coded.resource());
+        let continues = !mark && !after_mark && !after_overflow_space && !alone && same;
         if !continues {
-            if !whole {
+            // The rest of a string after the overflow font's code 32 is
+            // another piece of the same text object, so that a reader goes
+            // on with the line wherever the spacing puts it.
+            let one_object = whole || (after_overflow_space && same);
+            if !one_object {
                 flush(
                     page,
                     std::mem::take(&mut object),
@@ -5671,7 +5860,7 @@ fn draw_coded(
             open.characters.push(ch);
         }
         after_mark = mark;
-        after_overflow_space = whole && overflow_space;
+        after_overflow_space = unspaced_code_32 && overflow_space;
         // One sum, `advance + letter-spacing`, as before a mark took none:
         // adding the two to the pen one at a time rounds differently in the
         // last place, and a letter-spaced book with no mark in it was written
@@ -5819,7 +6008,8 @@ fn coded_order(run: &TextRun, slice: &str) -> Vec<(char, bool)> {
     let as_written = || units.iter().flat_map(|unit| riding(unit)).collect();
     let neutrals_on_a_right_to_left_line =
         run.bidi_line_rtl && run.bidi_level.is_some_and(|level| level % 2 == 1);
-    if !neutrals_on_a_right_to_left_line && !slice.chars().any(opens_right_to_left) {
+    let neutrals = !slice.chars().any(opens_right_to_left);
+    if neutrals && (!neutrals_on_a_right_to_left_line || opens_with_its_word_space(run, &units)) {
         return as_written();
     }
     let direction = match run.bidi_level {
@@ -5840,6 +6030,55 @@ fn coded_order(run: &TextRun, slice: &str) -> Vec<(char, bool)> {
     } else {
         as_written()
     }
+}
+
+/// Whether a slice of neutrals of `run`, cut into `units` ([`mark_clusters`]),
+/// is drawn as typed on a right-to-left line all the same ([`coded_order`]):
+/// where its run is word-spaced, it opens with a word space as typed, and its
+/// glyphs read alike either way round — one glyph, or a run of them that
+/// reads the same reversed — so that drawn in its level's order or as typed
+/// it reads the same, and the two differ only in which end its word space is
+/// drawn at (third review of the K-11 fix).
+///
+/// Drawn as typed, the space is drawn first and the glyph after it, where
+/// layout put the slice's end:
+///
+/// - **No glyph is drawn where the one before it overruns** (ROADMAP CD-19).
+///   The overflow font's code 32 is a letter of the book's and is moved by
+///   `Tw` all the same, so under `word-spacing` or justification the last
+///   glyphs of its string are drawn up to a word spacing right of where
+///   layout put them, over whatever is drawn next: drawn in its level's order
+///   the monospace `#` of `أصبحنا #نعرف`, justified, stood on the NOON the
+///   overflow font moved, and the line read `أصبحنا ن#عرف` (4 books in each
+///   build); drawn as typed, the space stands there, which draws nothing, as
+///   at 9297d2d.
+/// - **The space is stretched inside the slice's own text object**, and the
+///   glyph meets what is drawn after it. `TextDevice` carries a reader's pen
+///   across a gap `Tw` made into a right-to-left letter only on a line that
+///   holds one of its own, and the ` (` that a sans-serif book's Helvetica
+///   draws at the left end of a justified Arabic line's run, `( ` in its
+///   level's order, is a text object no right-to-left letter precedes: its
+///   stretched space parted it from the Arabic word after it, and the `(`
+///   was read as a line of its own, out of its place (the K-11 probe's
+///   sans-serif books at `margin: 0 15%`, `(histone deacetylase)` three and
+///   six times over, pointed and not).
+///
+/// Its glyphs, read in either order, are the same, so nothing a reader reads
+/// moves but the space. Where that space parts a bracket from what it
+/// encloses the bracket tie-break counts the pair no more: with
+/// `bundled-fonts`, the third review's sans-serif Hebrew paragraph quoting
+/// `(histone deacetylase)` four times, pointed and not, which 7330cd5 read
+/// whole, reads one line left to right again, as 9297d2d did.
+fn opens_with_its_word_space(run: &TextRun, units: &[&str]) -> bool {
+    if run.word_spacing <= 0.0 || units.first() != Some(&" ") {
+        return false;
+    }
+    let glyphs: Vec<&str> = units
+        .iter()
+        .copied()
+        .filter(|unit| !unit.chars().all(char::is_whitespace))
+        .collect();
+    glyphs.iter().eq(glyphs.iter().rev())
 }
 
 /// One of [`mark_clusters`]' units as written, each character with whether

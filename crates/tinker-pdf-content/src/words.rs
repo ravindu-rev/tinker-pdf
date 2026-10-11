@@ -119,6 +119,16 @@ fn extended_pictographic(c: char) -> bool {
     member(EXTENDED_PICTOGRAPHIC, u32::from(c))
 }
 
+/// Whether a character reads right to left to the text device: its
+/// `Bidi_Class` is `R` or `AL`, as `UnicodeData.txt` assigns it, or it is
+/// the punctuation of a right-to-left script (`General_Category` `P*` in
+/// those scripts' blocks), the ARABIC COMMA (`CS`) among it. Not a digit, an
+/// Arabic-Indic one (`AN`) included, nor a mark. An unassigned code point is
+/// not one.
+pub(crate) fn reads_right_to_left(c: char) -> bool {
+    member(RIGHT_TO_LEFT, u32::from(c))
+}
+
 /// `AHLetter`: `ALetter | Hebrew_Letter`.
 fn ah_letter(wb: Option<WordBreak>) -> bool {
     matches!(wb, Some(WordBreak::ALetter | WordBreak::HebrewLetter))

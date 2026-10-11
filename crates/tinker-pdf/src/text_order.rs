@@ -51,8 +51,8 @@
 //!    text with its comma after it, `חו,` drawn `וח,`, which both paragraphs
 //!    draw alike and which read right to left came back `,חו`. Where no
 //!    left-to-right reading draws the line, it stays right to left. **And a
-//!    bracket tie-break** (amended 10 October 2026, a second time; a
-//!    proposal until the owner accepts it): a line that draws a closing
+//!    bracket tie-break** (amended 10 October 2026, a second time;
+//!    accepted by the owner on 11 October 2026): a line that draws a closing
 //!    bracket left of an opening one of its kind, `)histone deacetylase(`,
 //!    is read in the other direction where that direction draws the line,
 //!    pairs more brackets in all, and pairs more of them facing outward and

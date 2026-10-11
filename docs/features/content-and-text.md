@@ -146,21 +146,43 @@ words in the order they were drawn, backwards (ROADMAP K-11); and a line
 letter-spaced by half an em was cut where one text object met the next, so
 that `مُدَّة مُعلِّم.` in monospace at `letter-spacing: 8px` read
 `مُدَّة مُعلِّم .` (review of the K-11 fix). The pen is carried there only
-into a glyph that is itself right to left, starting where the spacing put
-it give or take a twentieth of an em, on a line that holds no left-to-right
-letter or after a right-to-left word. Every other carry joined pieces that
-each read right alone into a line that fell into ruling 14's limits, in books
-that conserved before: carried everywhere, 29 of the marks probe; and 20 of
-the second review's 2 880 in a default build, carried after a right-to-left
-word into a neutral, the `(` or `⟨` that opens a Latin run
-(`שָׁלוֹם עוֹלָם <b>(HDAC)</b>.` justified, with no `dir`), after a word of
-neutrals on a line that held the Latin (`שָׁלוֹם - (HDAC) - עוֹלָם`), and a
-little further than the spacing reaches, from one table cell into the next
-(`td { letter-spacing: 0.5em }`, two Hebrew cells read as one word). A word is its glyphs since the white
+into a glyph that reads right to left by its own class — a letter of
+`Bidi_Class` `R` or `AL`, or the punctuation of the right-to-left scripts,
+the ARABIC COMMA (`CS`) among it, which a right-to-left word that ends in one
+is drawn from; not a digit, an Arabic-Indic one (`AN`) included, though it
+stands in the Arabic block (`tinker-pdf-content`'s `reads_right_to_left`,
+from the vendored `UnicodeData.txt`) — starting where the spacing put it
+give or take a twentieth of an em, after a right-to-left word, or after
+neutrals on a line that holds a right-to-left letter **of its own** and no
+left-to-right one. Every other carry joined pieces that each read right
+alone into a line that fell into ruling 14's limits, in books that conserved
+before: carried everywhere, 29 of the marks probe; 20 of the second review's
+2 880 in a default build, carried after a right-to-left word into a neutral,
+the `(` or `⟨` that opens a Latin run (`שָׁלוֹם עוֹלָם <b>(HDAC)</b>.`
+justified, with no `dir`), after a word of neutrals on a line that held the
+Latin (`שָׁלוֹם - (HDAC) - עוֹלָם`), and a little further than the spacing
+reaches, from one table cell into the next (`td { letter-spacing: 0.5em }`,
+two Hebrew cells read as one word); and 163 of the third review's 9 504 in a
+default build (about 201 with `bundled-fonts`, 128 of them tables), carried
+after a neutral the device had cut from the Latin text it belongs to — a line
+starts afresh at every cut, so an opening `«`, `"`, `#`, `?!` or a table
+cell's `[` began one that held no left-to-right letter and was carried into
+the word after it, `«שָׁלוֹם עוֹלָם»` letter-spaced reading `שָׁלוֹם עוֹלָם«` —
+and, with `bundled-fonts`, into Arabic-Indic digits counted right to left by
+their block, `(١٢٣)` after a Hebrew word reading `٢٣ (١)` (6 books). Those
+carries also read whole books 9297d2d did not, and taking them out takes
+that back: of the books K-11's probe and its three reviews built, 558 in a
+default build (612 with `bundled-fonts`) that 7330cd5 read better than
+9297d2d read as 9297d2d did again, none worse; with the three rules put back
+as 7330cd5 had them, all but 32 (40) read as at 7330cd5, and 163 (195) that
+read right at 9297d2d read wrong. A word is its glyphs since the white
 space before it, a mark taking its base letter's direction, and a word with a
 left-to-right letter anywhere in it is a left-to-right word; a word a cut on
-one baseline interrupted goes on into the next piece, so `[ŋ̊ə̃] חו`
-letter-spaced by half an em does not carry the `] ` into the Hebrew. `Tw` is
+one baseline interrupted goes on into the next piece, where it counts against
+a carry and never for one: `[ŋ̊ə̃] חו` letter-spaced by half an em does not
+carry the `] ` into the Hebrew, and a table cell's last Hebrew word, its cell
+and the next with no space between, does not carry the next cell's `[` into
+its Hebrew. `Tw` is
 taken after any code 32 the font decodes, as the interpreter moves the pen,
 though 9.3.3 applies it to a single-byte one alone: the device is carried to
 where the interpreter drew the next glyph.
@@ -205,8 +227,8 @@ reads in the paragraph direction whose reading pairs those brackets, where
 both directions draw the line, the other one's reading pairs more brackets
 in all, and more of its pairs face outward and hug what they enclose (no
 whitespace just inside either bracket): the bracket tie-break of ruling 14,
-amended 10 October 2026 a second time (a proposal until the owner accepts
-it), which took `(histone deacetylase). وقد أصبحنا نعرف الآن`, eighteen
+amended 10 October 2026 a second time (accepted by the owner on 11 October
+2026), which took `(histone deacetylase). وقد أصبحنا نعرف الآن`, eighteen
 Latin letters to seventeen Arabic ones, from the majority's
 `… .)histone deacetylase(` to as written. A pair facing inward turns
 nothing, since a left-to-right paragraph draws one so and so does a
@@ -216,7 +238,20 @@ that are no pair as typed — a list marker before a parenthesis,
 wrapped onto the next line — stand facing outward in left-to-right text and
 pair read from the right, but no more of them than as typed, or with the
 spaces that stood outside them inside the pair (`see( מלחמה )b` from
-`b) מלחמה (see`): those lines keep their direction. As first proposed the
+`b) מלחמה (see`): those lines keep their direction. Nor is a pair that may
+have taken its level from the line before evidence: N0 resolves a pair
+enclosing only the other direction's letters by the strong character before
+its opening bracket, on the line above for a pair that opens a line, so an
+English paragraph's line opening with `(הארץ)` after a line that ended in
+Hebrew draws it facing outward at its left end. Such a pair — a bracket at the
+end where a reading in the direction chosen starts, nothing of that
+direction inside — counts for neither reading where the line's letters say
+the direction chosen (more of them, and that reading pairs a bracket facing
+outward itself, or twice as many and eight more): a justified English
+paragraph quoting Hebrew in brackets, fifty Latin letters to fifteen Hebrew
+on the line, was turned and read backwards until the third review of the
+K-11 fix, and no line of `BidiCharacterTest.txt` or of the reviews' wrapped
+and sentence lines reads otherwise for it. As first proposed the
 tie-break asked neither, and read every such line backwards
 (`.and 2) close it )שלום( open the file )Step 1`; review of the K-11 fix).
 Applying L2 to levels resolved over the drawn line, which
@@ -735,8 +770,8 @@ crate has an API of its own; see [architecture](../architecture.md).
 | Text shaping while **reading** — Arabic joining, ligature substitution | — | the producer positioned every glyph and re-shaping them would be wrong; a ligature extracts as whatever its `/ToUnicode` says. Bidi *reordering* is not in this row any more: ruling 14 puts a right-to-left line into logical order | [design/shaping.md](../design/shaping.md) |
 | L4 mirroring undone in extraction, and the paragraph as a bidi unit | — | ruling 14 resolves each line alone and swaps no character: whether a producer's `/ToUnicode` names a mirrored glyph's character or its shape is not on the page. Alone, a line of a right-to-left paragraph that holds nothing left to right and opens with a mark of `Bidi_Class` `CS`, `ON`, `ES` or `ET` that is not `Ps` or `Pi` — a dash, a bullet, `*`, `#`, `%`, an ellipsis, a straight or closing-form quotation mark used to open; `— שלום` — draws as a quoted word and its trailing mark, and reads `שלום —`: the comma tie-break's price, pinned by `a_right_to_left_line_opening_with_a_dash_reads_the_dash_last`. Not with an opening bracket or quotation mark where `/ToUnicode` names the typed character (`(١) بند`, `“שלום`; `a_right_to_left_line_opening_with_a_bracket_or_quotation_mark_reads_as_typed`) — where it names the mirrored glyph, `»` for `«`, the line pays like a dash — nor with a European number after the mark (`(1) פריט`, `— 2026 שלום`, `• 5 תפוחים`, which no left-to-right paragraph draws; `a_right_to_left_line_opening_with_a_mark_and_a_number_reads_as_typed`); still with Arabic-Indic digits, `— ١ بند` reading `١ بند —`, or a number further on, `— שלום 5 חו`. A mark of several characters reads reversed as well, in the order drawn: `<p dir="rtl">?! שלום</p>` reads `שלום !?`. The same mark styled apart, `<p dir="rtl"><i>?!</i> שלום</p>`, is a run of neutrals of its own, which the EPUB writer draws as typed on such a line so that it reads `שלום ?!`, the mark as typed (`a_run_of_neutrals_opening_a_right_to_left_line_is_drawn_as_typed`): drawn in its level's order, as the review of the K-11 fix found it, it read `שלום !?`, and 51 probe books that conserved in logical order at 9297d2d did not | ruling 14, amended 10 October 2026 |
 | Telling apart two texts UAX #9 draws alike | — | the algorithm is not one-to-one, so no reader can: `logical_order` returns the first order its search reaches that draws the line, and says which (`שלום now 2026`, not `שלום 2026 now`). Of `BidiCharacterTest.txt`'s 91 616 drawn lines, 669 read back as another text the same picture could be, each holding a bracket pair (N0 pairs brackets in logical order, and they are drawn mirrored). The paragraph's direction is such a choice where the line alone cannot make it: with no `dir`, a line with Arabic at both ends and a Latin run in brackets between, `… عوامل عدّة (HDAC). وقد …`, is a left-to-right paragraph's, its pair drawn facing inward — exactly the line a right-to-left paragraph whose `/ToUnicode` names the mirrored glyph draws for `وقد … (HDAC) … عوامل عدّة` — and it reads as that one, `(HDAC).` coming back `.)HDAC(`: both readings draw the line, and ruling 14's bracket tie-break counts only a pair facing outward. Of ROADMAP K-11's probe's 120 dir-less books, 45 of the 48 with a Latin run in the brackets do not conserve, pointed and not, in both builds; in 40 of them reading some of those lines the other way makes the book conserve, and the other 5 also hold a line whose comma its paragraph's next line put at a right-to-left level, which no line read alone recovers. Pinned by `a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_drawn_alike_twin` | ruling 14 |
-| Brackets typed closing before opening, each set against the text between them | — | the price of ruling 14's bracket tie-break (amended 10 October 2026, a second time; a proposal until the owner accepts it): where both paragraph directions draw a line that draws a closing bracket left of an opening one, and the other direction's reading pairs more brackets in all and more of them facing outward and set against what they enclose, that reading is taken — so `x)שלום(y` in a left-to-right paragraph, drawn `x)םולש(y`, reads `y(שלום)x`. No line of `BidiCharacterTest.txt` reads worse for the tie-break, nor any book of the reviews' probes, which hold list markers, smileys, glosses and parentheses a line break parted; of their sentence lines only the 62 of 13 300 written in this shape do, `x)שלום(y and a)עולם(b` — a text typed so is a fragment rather than prose. Pinned by `brackets_typed_closing_first_against_a_word_read_as_the_other_direction_pairs_them` | ruling 14, amended 10 October 2026 |
-| A line holding one bracket of a pair a line break parted, or quotation marks, whose two ends disagree | — | ruling 14 reads a line alone, and BD16 pairs no quotation mark, so the bracket tie-break has no pair to count on such a line: where its ends disagree its majority decides, and where its Latin letters outnumber its right-to-left ones it reads as a left-to-right paragraph's. A right-to-left paragraph's line that holds the second half of a bracketed Latin run, `deacetylase). وقد أصبحنا`, reads `وقد أصبحنا .)deacetylase`; one whose `(see` the line before holds, `[HDAC] here). وقد …`, is read as a text in which `[HDAC]`, drawn facing inward because the paragraph's `see` stood before it, pairs nothing, `HDAC] here[).`; and `“histone deacetylase”` closing a paragraph reads `”histone deacetylase“`. Of the review of ROADMAP K-11's probe of right-to-left paragraphs (2 016 books, Arabic and Hebrew, nine styles, pointed and not), those quoting a Latin run fail 100 of 432 in either build, nested brackets 32 of 144, `(histone deacetylase)` 20 of 144 (22 with `bundled-fonts`) and `(USD 1,234.56)` 4 of 144 — each of them failing at 9297d2d too, where these shapes failed 139, 54, 53 and 30 (154, 56, 59 and 44) — and none of K-11's own probe's right-to-left books. Reading a line with its block's other lines would be the paragraph as a bidi unit, which the mirroring row names | ruling 14 |
+| Brackets typed closing before opening, each set against the text between them | — | the price of ruling 14's bracket tie-break (amended 10 October 2026, a second time; accepted by the owner on 11 October 2026): where both paragraph directions draw a line that draws a closing bracket left of an opening one, and the other direction's reading pairs more brackets in all and more of them facing outward and set against what they enclose, that reading is taken — so `x)שלום(y` in a left-to-right paragraph, drawn `x)םולש(y`, reads `y(שלום)x`. No line of `BidiCharacterTest.txt` reads worse for the tie-break, nor any book of the reviews' probes, which hold list markers, smileys, glosses and parentheses a line break parted; of their sentence lines only the 62 of 13 300 written in this shape do, `x)שלום(y and a)עולם(b` — a text typed so is a fragment rather than prose. Pinned by `brackets_typed_closing_first_against_a_word_read_as_the_other_direction_pairs_them` | ruling 14, amended 10 October 2026 |
+| A line holding one bracket of a pair a line break parted, or quotation marks, whose two ends disagree | — | ruling 14 reads a line alone, and BD16 pairs no quotation mark, so the bracket tie-break has no pair to count on such a line: where its ends disagree its majority decides, and where its Latin letters outnumber its right-to-left ones it reads as a left-to-right paragraph's. A right-to-left paragraph's line that holds the second half of a bracketed Latin run, `deacetylase). وقد أصبحنا`, reads `وقد أصبحنا .)deacetylase`; one whose `(see` the line before holds, `[HDAC] here). وقد …`, is read as a text in which `[HDAC]`, drawn facing inward because the paragraph's `see` stood before it, pairs nothing, `HDAC] here[).`; and `“histone deacetylase”` closing a paragraph reads `”histone deacetylase“`. Of the review of ROADMAP K-11's probe of right-to-left paragraphs (2 016 books, Arabic and Hebrew, nine styles, pointed and not), those quoting a Latin run fail 100 of 432 in either build, nested brackets 32 of 144, `(histone deacetylase)` 21 of 144 (25 with `bundled-fonts`) and `(USD 1,234.56)` 6 of 144 — each of them failing at 9297d2d too, where these shapes failed 139, 54, 53 and 30 (154, 56, 59 and 44) — and none of K-11's own probe's right-to-left books. Five of them with `bundled-fonts`, three in a default build, read whole at 7330cd5 and fail again as at 9297d2d since its third review: three because a reader's pen no longer goes on after a line of neutrals alone — `( ` opening a justified line, parted from the right-to-left word after it by its own stretched space (the device paragraph above) — and, with `bundled-fonts`, the sans-serif Hebrew paragraph quoting `(histone deacetylase)` four times, pointed and not, whose ` (` is drawn with its word space first again (`paint::opens_with_its_word_space`): the space falls inside the pair, which then hugs nothing, and the bracket tie-break leaves the line left to right. Reading a line with its block's other lines would be the paragraph as a bidi unit, which the mirroring row names | ruling 14 |
 | Reading order for an **untagged** document | — | `plain_text()` reports lines and blocks in content-stream order and always has — geometry decides only whether two glyphs are one line and two lines one block, and within a line only where it holds a right-to-left character (ruling 14); a structure tree is read when the document carries one, and never invented when it does not. `Page::text_in(ReadingOrder::Inferred)` is the opt-in request, answered by a type of its own — columns found from the whitespace between lines, blocks ordered down each column, a block across the columns read before the ones under it, running heads, feet and page numbers found by their recurring on the pages around and read first and last with their roles, footnotes read after the body in the order of their reference marks, a ruled table read as one block in its own order — and never the default ([design/reading-order.md](../design/reading-order.md)) | 14.8 |
 | An `/MCR` whose `/Stm` does not name a content stream | `StructureWarning::ContentStreamNotAStream { element, stream }` | a stream is always indirect (7.3.8), so the value names nothing that could hold a sequence; read as though `/Stm` were absent rather than keyed on an object with no content, which would make the sequence findable nowhere | 14.7.4.2 |
 | An `/MCR` carrying `/StmOwn` without the `/Stm` it qualifies | `StructureWarning::StreamOwnerWithoutStream { element, owner }` | Table 324 permits the owner only beside a stream; an owner alone names the owner of a stream nobody named, so it is dropped | 14.7.4.2 |
