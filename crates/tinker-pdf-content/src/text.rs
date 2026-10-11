@@ -530,10 +530,10 @@ impl TextDevice {
 }
 
 /// Which way a glyph's text reads: right to left (a letter of `Bidi_Class`
-/// `R` or `AL`, or the punctuation of the right-to-left scripts — the ARABIC
-/// COMMA among it — [`reads_right_to_left`]), left to right (any other
-/// letter), or neither (digits — an Arabic-Indic one too, which is `AN` —
-/// other punctuation, symbols).
+/// `R` or `AL`, or the ARABIC COMMA — [`reads_right_to_left`]), left to right
+/// (any other letter), or neither (digits — an Arabic-Indic one too, which is
+/// `AN` — other punctuation, the right-to-left scripts' own among it but for
+/// that comma, symbols).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Strong {
     RightToLeft,
@@ -628,9 +628,16 @@ const STRETCH_ROUNDING: f64 = 0.05;
 ///   `שָׁלוֹם עוֹלָם«`, `<td>[שָׁלוֹם]</td>` as `שָׁלוֹם[` (third review of the
 ///   K-11 fix, 163 books of its probe in a default build, about 201 with
 ///   `bundled-fonts`, 128 of them tables);
-/// - and carried into an Arabic-Indic digit, which the block table counted as
+/// - carried into an Arabic-Indic digit, which the block table counted as
 ///   right to left, it read `(١٢٣)` after a Hebrew word as `٢٣ (١)`, and a
-///   search for `١٢٣` found nothing (6 books with `bundled-fonts`).
+///   search for `١٢٣` found nothing (6 books with `bundled-fonts`);
+/// - and carried out of or into an ORNATE PARENTHESIS, which is `ON` like
+///   `(` but which the table took in with the Arabic block's punctuation, a
+///   `﴿` in a text object of its own went on into the word after it,
+///   `﴿عوامل عدّة﴾` letter-spaced reading `﴾عوامل عدّة﴿`; and the ARABIC
+///   PERCENT SIGN, `ET`, so taken in, joined a justified line whole that
+///   then read the sign at its far end (review of the third review's fix,
+///   22 books in a default build and 24 with `bundled-fonts`).
 ///
 /// So the pen is carried only into a glyph that reads right to left by its
 /// own class ([`reads_right_to_left`]), only as far as the spacing reaches,

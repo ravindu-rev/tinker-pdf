@@ -4414,7 +4414,23 @@ fn undoes_its_levels(c: char) -> bool {
 ///   bracketed year is a piece of other levels too, drawn as typed, and
 ///   `… عدّة (2010). وقد …` read its full stop away from its bracket — CI's
 ///   K-11 failure itself, `Missing ").وقد…"` (73 probe books, 75 with
-///   `bundled-fonts`).
+///   `bundled-fonts`). So too a piece that holds a letter, where any of its
+///   other characters the line alone resolves otherwise: a face that draws
+///   its neutrals and not its letters draws them as a slice of neutrals of
+///   their own. `<p dir="rtl">جميل بيت كبير نور 5% يوم</p>` in sans-serif,
+///   broken before the `5`: W2 makes it `AN` for the Arabic letter on the
+///   line above, so the `%` is a neutral at the paragraph's level, in a
+///   piece with `يوم`, and Helvetica's `% ` drawn in its level's order read
+///   back `%5`, where alone the `5` is a European number and W5 makes the
+///   `%` one too; as typed it reads as at 9297d2d (review of the third review's
+///   fix, 85 books in a default build and 86 with `bundled-fonts`, `%`, `‰`,
+///   `°`, `¢` and `£` after a number in Arabic and Persian).
+/// - **A piece that ends, on its right, what a reader reads together, where
+///   that reads left to right** ([`Gaps::left_to_right_ends`]): a reader
+///   reads the units between two gaps of half an em by themselves, and read
+///   left to right the neutrals that end them stand at level 0, in the order
+///   drawn — the comma tie-break's shape where they follow nothing but
+///   right-to-left letters.
 /// - **A slice of a word-spaced run whose glyphs read alike either way
 ///   round**, ` (` or ` #`, which [`coded_order`] draws as typed itself, its
 ///   word space first ([`opens_with_its_word_space`]): what a reader reads is
@@ -4432,6 +4448,11 @@ fn neutrals_drawn_as_typed(
     // its place among the run's pieces, and where its characters are in
     // `levels`.
     let mut neutral: Vec<(usize, usize, core::ops::Range<usize>)> = Vec::new();
+    // And every piece at a right-to-left level that holds a strong character
+    // too, with where its other characters are in `levels`: a face that
+    // draws its neutrals and not its letters draws them as a slice of
+    // neutrals of their own ([`coded_order`]).
+    let mut mixed: Vec<(usize, usize, Vec<usize>)> = Vec::new();
     let mut first = 0usize;
     for (at, (run, own)) in line.iter().zip(pieces).enumerate() {
         // The pieces cover the run's text in order, so each starts where the
@@ -4440,14 +4461,26 @@ fn neutrals_drawn_as_typed(
         for (piece, (range, level)) in own.iter().enumerate() {
             let text = run.text.get(range.clone()).unwrap_or("");
             let count = text.chars().count();
-            if !run.generated && level.is_rtl() && count > 0 && !text.chars().any(strong) {
-                neutral.push((at, piece, start..start + count));
+            if !run.generated && level.is_rtl() && count > 0 {
+                if text.chars().any(strong) {
+                    let others = text
+                        .chars()
+                        .enumerate()
+                        .filter(|(_, c)| !strong(*c))
+                        .map(|(offset, _)| start + offset)
+                        .collect::<Vec<_>>();
+                    if !others.is_empty() {
+                        mixed.push((at, piece, others));
+                    }
+                } else {
+                    neutral.push((at, piece, start..start + count));
+                }
             }
             start += count;
         }
         first += run.text.chars().count();
     }
-    if neutral.is_empty() {
+    if neutral.is_empty() && mixed.is_empty() {
         return typed;
     }
     let mark = |typed: &mut Vec<Vec<bool>>, at: usize, piece: usize| {
@@ -4472,11 +4505,20 @@ fn neutrals_drawn_as_typed(
     }
     let drawn: Vec<&LineUnit> = order.iter().filter_map(|unit| units.get(*unit)).collect();
     let gaps = Gaps::of(line, &drawn);
+    // Asked only where a piece of neutrals alone may end one.
+    let ends = if neutral.is_empty() {
+        Vec::new()
+    } else {
+        gaps.left_to_right_ends(line, &drawn)
+    };
     for (at, piece, _) in &neutral {
         let (Some(run), Some(&(lo, hi))) = (line.get(*at), stands.get(&(*at, *piece))) else {
             continue;
         };
-        if gaps.read_alone(run, lo, hi) {
+        let ends_one = ends
+            .get(lo..=hi)
+            .is_some_and(|places| places.iter().any(|end| *end));
+        if gaps.read_alone(run, lo, hi) || ends_one {
             mark(&mut typed, *at, *piece);
         }
     }
@@ -4487,6 +4529,14 @@ fn neutrals_drawn_as_typed(
     let alone = levels_alone(line, drawn_direction(&drawn));
     for (at, piece, chars) in &neutral {
         if levels.get(chars.clone()) != alone.levels.get(chars.clone()) {
+            mark(&mut typed, *at, *piece);
+        }
+    }
+    for (at, piece, others) in &mixed {
+        if others
+            .iter()
+            .any(|place| levels.get(*place) != alone.levels.get(*place))
+        {
             mark(&mut typed, *at, *piece);
         }
     }
@@ -4509,6 +4559,8 @@ struct Gaps {
     right: Vec<Option<f64>>,
     /// The spacing after the unit at each place.
     after: Vec<f64>,
+    /// Whether the unit at each place is white space, drawing nothing.
+    blank: Vec<bool>,
 }
 
 impl Gaps {
@@ -4565,7 +4617,72 @@ impl Gaps {
             right.push(carried);
         }
         right.reverse();
-        Gaps { left, right, after }
+        Gaps {
+            left,
+            right,
+            after,
+            blank,
+        }
+    }
+
+    /// For each place of `drawn`, the units of `line` in the order they are
+    /// drawn, whether the unit there is the last that draws something of a
+    /// stretch a reader reads together and reads left to right
+    /// ([`drawn_direction`]): a stretch is the units between two that draw
+    /// something half an em or more apart, counting the spacing after each
+    /// unit from the one to the other as [`Gaps::read_alone`] does —
+    /// `TextDevice` joins nothing further apart, nor the pieces it cut.
+    ///
+    /// A piece of neutrals that ends such a stretch on its right is read in
+    /// the order drawn: read left to right, the last neutrals of a line stand
+    /// between what is before them and its end, a left-to-right paragraph's,
+    /// at level 0 (N1, N2). `كتاب <i>?!</i> مدرسة <b>?!</b>الطالب جميل.`,
+    /// justified at `letter-spacing: 0.25em`, has the bold `?!` drawn against
+    /// the word after it and a stretched word space before it, so a reader
+    /// reads `الطالب` and the `?!` together, and by the comma tie-break left
+    /// to right: drawn `!?`, in its level's order, it read `!?` (review of the
+    /// third review's fix, 3 books in a default build and 4 with
+    /// `bundled-fonts` that conserved at 9297d2d). Linear in the line: each
+    /// stretch is read once.
+    fn left_to_right_ends(&self, line: &[TextRun], drawn: &[&LineUnit]) -> Vec<bool> {
+        let mut ends = vec![false; drawn.len()];
+        let mut close = |from: usize, to: usize, last: Option<usize>| {
+            let Some(last) = last else {
+                return;
+            };
+            let texts: Vec<&str> = drawn
+                .get(from..to)
+                .unwrap_or_default()
+                .iter()
+                .map(|unit| unit.text.as_str())
+                .collect();
+            if drawn_direction(&texts) == BaseDirection::LeftToRight {
+                if let Some(end) = ends.get_mut(last) {
+                    *end = true;
+                }
+            }
+        };
+        let mut from = 0usize;
+        let mut last: Option<usize> = None;
+        for (place, unit) in drawn.iter().enumerate() {
+            if self.blank.get(place).copied().unwrap_or(true) {
+                continue;
+            }
+            let half = line.get(unit.run).map_or(0.0, |run| run.font_size * 0.5);
+            let parted = self
+                .left
+                .get(place)
+                .copied()
+                .flatten()
+                .is_some_and(|gap| gap >= half);
+            if parted {
+                close(from, place, last);
+                from = place;
+            }
+            last = Some(place);
+        }
+        close(from, drawn.len(), last);
+        ends
     }
 
     /// Whether the piece of `run` drawn from place `lo` to place `hi` of its

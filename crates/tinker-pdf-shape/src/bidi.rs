@@ -711,6 +711,8 @@ fn decide(visual: &[&str]) -> (BaseDirection, Option<Vec<usize>>, bool) {
     let Ok(theirs) = read_back(visual, other) else {
         return (chosen, found, false);
     };
+    // The comma tie-break chose the direction, by the line's shape.
+    let by_comma = found.is_some();
     let mine = found.unwrap_or_else(|| match read_back(visual, chosen) {
         Ok(order) | Err(order) => order,
     });
@@ -718,7 +720,10 @@ fn decide(visual: &[&str]) -> (BaseDirection, Option<Vec<usize>>, bool) {
     // A pair opening the line in the direction chosen may have taken its
     // level from the line before, and is no evidence for the other one
     // where the line's letters say the direction chosen ([`OpenedBefore`]).
-    let before = OpenedBefore::of(visual, chosen, my_outward > 0);
+    let before = by_comma
+        .then(|| OpenedBefore::before_its_punctuation(visual))
+        .flatten()
+        .or_else(|| OpenedBefore::of(visual, chosen, my_outward > 0));
     if before.is_some() {
         (my_outward, my_pairs) = paired_brackets(visual, &mine, before);
     }
@@ -885,17 +890,22 @@ fn paired_brackets(
 /// one) and encloses no strong character of that direction; and only where
 /// the line's letters say the direction chosen: where they outnumber the
 /// other's and the reading in that direction pairs a bracket facing outward
-/// of its own, or where they are twice the other's and eight more
-/// ([`OpenedBefore::WIDE_MARGIN`]) — the same paragraph's last line,
+/// of its own, or where they are at least twice the other's and at least
+/// eight more ([`OpenedBefore::WIDE_MARGIN`]) — the same paragraph's last line,
 /// `(מלחמה) and more English text,.`, its pair the only one, with 22 Latin
 /// letters to 5 Hebrew ones. So the tie-break reads every line of
 /// `BidiCharacterTest.txt` — whole paragraphs, where nothing comes from a
 /// line before, and none of whose turned lines holds more than six letters
 /// against the turn — and the reviews' 2 235 wrapped and 13 300 sentence
 /// lines as it did without this: passed over wherever it opens the line and
-/// the letters outnumber the other's, it read 1 341 of the file's lines
-/// worse; wherever the reading as chosen also pairs one facing outward, 8,
-/// each with an unpaired bracket.
+/// the letters outnumber the other's, it read 1 393 of the file's lines worse
+/// and 52 better (1 341 fewer read as typed), and 2 of the sentence lines
+/// worse; wherever the reading as chosen also pairs one facing outward, 8
+/// worse and none better, each with an unpaired bracket.
+///
+/// And where the comma tie-break chose left to right for a line that ends in
+/// a mark no line opens with, the line opens just left of that mark
+/// ([`OpenedBefore::before_its_punctuation`]).
 #[derive(Clone, Copy, Debug)]
 struct OpenedBefore {
     /// Where the unit at the start of the line, for the direction chosen, is
@@ -905,17 +915,24 @@ struct OpenedBefore {
     ltr: bool,
 }
 
+/// The marks [`OpenedBefore::before_its_punctuation`] reads as a line's
+/// end: UAX #14's `IS` and `EX` of the comma tie-break's classes, which no
+/// soft wrap puts at a line's start (LB13) — the full stop, the comma, the
+/// colon, the semicolon, `!`, `?` and the ARABIC COMMA.
+const ENDS_A_LINE: [char; 7] = ['.', ',', ':', ';', '!', '?', '\u{060C}'];
+
 impl OpenedBefore {
     /// How many more letters of the direction chosen than of the other a
-    /// line holds, at twice as many or more, for them to say that direction
-    /// whatever its reading pairs ([`OpenedBefore`]).
+    /// line holds at least, as well as at least twice as many, for them to
+    /// say that direction whatever its reading pairs ([`OpenedBefore`]): 20
+    /// against 10 is enough, not only 28.
     const WIDE_MARGIN: usize = 8;
 
     /// The line's [`OpenedBefore`] for `chosen`, where `own_outward` says
     /// whether its reading in that direction pairs a bracket facing outward
     /// itself — or `None` where its letters do not say `chosen`: as many of
     /// the other direction or more, or, where the reading pairs none facing
-    /// outward, fewer than twice as many and eight more.
+    /// outward, fewer than twice as many or fewer than eight more.
     fn of(visual: &[&str], chosen: BaseDirection, own_outward: bool) -> Option<OpenedBefore> {
         let ltr = chosen != BaseDirection::RightToLeft;
         let draws = |at: &usize| visual.get(*at).and_then(|unit| first_drawn(unit)).is_some();
@@ -940,6 +957,42 @@ impl OpenedBefore {
         let wide = chosen_letters >= 2 * other_letters
             && chosen_letters >= other_letters + OpenedBefore::WIDE_MARGIN;
         ((own_outward && more) || wide).then_some(found)
+    }
+
+    /// The line's [`OpenedBefore`] where the comma tie-break chose left to
+    /// right ([`first_strong_drawn`]) for a line that ends in a mark no line
+    /// opens with, a full stop, a comma, a colon, a semicolon, `!` or `?`
+    /// ([`ENDS_A_LINE`]) — or `None`, where [`OpenedBefore::of`] decides as
+    /// for any other line.
+    ///
+    /// A left-to-right paragraph drew such a line as right-to-left text with
+    /// its mark after it, so the line opens where that text does, at the unit
+    /// drawn just left of the mark — the last unit that draws something but
+    /// the rightmost — and a pair with a bracket there is one N0 resolved by
+    /// the line above. The letters say nothing here, all of them right to
+    /// left; the mark does. `<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم.</p>`,
+    /// with no `dir` and broken before the bracket, draws its second line
+    /// `موي )رون(.`, and read from the right it paired `(نور)` but read its
+    /// full stop first, `.(نور) يوم` (review of the third review's fix: 32
+    /// books in a default build and 29 with `bundled-fonts` whose stop read
+    /// last at 9297d2d, and a line opening with `(١٬٢٣٤),` that the join
+    /// read whole for the turn). A right-to-left paragraph draws the same
+    /// line only where it opens with the mark, which a soft wrap never puts
+    /// first on a line (UAX #14 LB13 breaks before none of them); the line
+    /// that opens with a symbol, `⚀(א)ב` drawn `ב)א(⚀`, is still turned:
+    /// with every mark the comma tie-break takes passed over so, 215 lines of
+    /// `BidiCharacterTest.txt` read worse and 12 better; with these, the
+    /// file, the wrapped and the sentence lines read as without it.
+    fn before_its_punctuation(visual: &[&str]) -> Option<OpenedBefore> {
+        let draws = |at: &usize| visual.get(*at).and_then(|unit| first_drawn(unit)).is_some();
+        let mut drawing = (0..visual.len()).rev().filter(draws);
+        let mark = drawing.next()?;
+        let ends = visual
+            .get(mark)
+            .and_then(|unit| first_drawn(unit))
+            .is_some_and(|c| ENDS_A_LINE.contains(&c));
+        let edge = drawing.next()?;
+        ends.then_some(OpenedBefore { edge, ltr: true })
     }
 
     /// Whether a pair drawn with its brackets at `open` and `close` has one
@@ -2461,6 +2514,39 @@ mod tests {
         let units = chars(")\u{5D0}( ab");
         let units: Vec<&str> = units.iter().map(String::as_str).collect();
         assert_eq!(drawn_direction(&units), rtl);
+    }
+
+    /// **A pair before the comma tie-break's full stop that the line above
+    /// resolved turns no line** — the review of the third review's K-11 fix.
+    ///
+    /// `جميل بيت كبير (نور) يوم.` with no `dir`, broken before the bracket:
+    /// N0 took the pair's level from the Arabic on the line above, and the
+    /// line is drawn `موي )رون(.`. The comma tie-break reads it left to
+    /// right for its full stop; read from the right it pairs `(نور)` and the
+    /// bracket tie-break took that reading, which reads the stop first. The
+    /// pair has a bracket just left of the stop, where such a line opens, and
+    /// encloses no Latin letter, so it is no evidence and the line keeps the
+    /// comma tie-break's direction. A line that opens with a symbol rather
+    /// than ends in such a mark, `⚀(א)ב` drawn `ב)א(⚀` — a whole
+    /// right-to-left paragraph of `BidiCharacterTest.txt` — is still turned.
+    #[test]
+    fn a_pair_before_a_full_stop_the_line_above_resolved_turns_no_line() {
+        let ltr = BaseDirection::LeftToRight;
+        let rtl = BaseDirection::RightToLeft;
+        let line = "\u{645}\u{648}\u{64A} )\u{631}\u{648}\u{646}(.";
+        let units = chars(line);
+        let units: Vec<&str> = units.iter().map(String::as_str).collect();
+        let theirs = read_in(&units, &logical_order(&units, rtl));
+        assert!(
+            theirs.contains("(\u{646}\u{648}\u{631})"),
+            "read from the right, the line pairs the pair: {theirs:?}"
+        );
+        assert_eq!(drawn_direction(&units), ltr, "{line:?}");
+        let read = drawn_reading(&units);
+        assert!(!read.turned_by_brackets);
+        let symbol = chars("\u{5D1})\u{5D0}(\u{2680}");
+        let symbol: Vec<&str> = symbol.iter().map(String::as_str).collect();
+        assert_eq!(drawn_direction(&symbol), rtl);
     }
 
     /// **[`drawn_reading`] is [`drawn_direction`] and [`logical_order`] in

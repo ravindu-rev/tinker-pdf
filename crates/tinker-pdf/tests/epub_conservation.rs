@@ -1171,3 +1171,159 @@ fn a_bracket_pair_the_line_above_resolved_turns_no_line() {
         }
     }
 }
+
+/// **A cut ORNATE PARENTHESIS, or an ARABIC PERCENT SIGN, carries no pen**
+/// (review of the third review's K-11 fix).
+///
+/// The text device carries the pen across spacing only into a glyph that
+/// reads right to left by its class. The third review's table took in every
+/// punctuation mark of the right-to-left blocks, the ORNATE PARENTHESES `﴿`
+/// and `﴾` among them, which are `ON` like `(`: cut into a text object of
+/// its own, a `﴿` began a line the pen went on from into the Arabic or
+/// Hebrew word after it, and `﴿عوامل عدّة﴾` letter-spaced read
+/// `﴾عوامل عدّة﴿`, `عوامل ﴿HDAC﴾ عدّة` at `word-spacing: 1em` `﴾HDAC﴿ عوامل`.
+/// And the ARABIC PERCENT SIGN, `ET`, joined a justified line whole that then
+/// read the sign at its far end, `٥٠ بيت ٫ كبير٪`. Each conserved at
+/// 9297d2d, in both builds; the table holds `R`, `AL` and the ARABIC COMMA
+/// now (`tinker-pdf-content`'s `reads_right_to_left`).
+#[test]
+fn an_ornate_parenthesis_or_an_arabic_percent_sign_carries_no_pen() {
+    let spaced = "p, li, td { letter-spacing: 0.55em; text-align: justify; margin: 0 20% }";
+    let worded = "p, li { word-spacing: 1em; margin: 0 18% }";
+    let justified = "p { text-align: justify; margin: 0 41% }";
+    for (language, style, body) in [
+        (
+            "ar",
+            spaced,
+            "<p><i>\u{FD3F}</i>عوامل عدّة<i>\u{FD3E}</i></p>",
+        ),
+        (
+            "he",
+            spaced,
+            "<p><i>\u{FD3F}</i>שָׁלוֹם עוֹלָם<i>\u{FD3E}</i></p>",
+        ),
+        ("ar", worded, "<p>عوامل \u{FD3F}HDAC\u{FD3E} عدّة وقد.</p>"),
+        (
+            "ar",
+            justified,
+            "<p dir=\"rtl\">الطالب ﴿جميل﴾. جميل <b>٪</b>٥٠ بيت <i>٫</i> كبير ﴿نور﴾.</p>",
+        ),
+        (
+            "ar",
+            justified,
+            "<p dir=\"rtl\">الطالب ﴿جميل﴾. جميل ٪٥٠ بيت ٫ كبير ﴿نور﴾.</p>",
+        ),
+    ] {
+        let bytes = epub_support::book::styled_book(language, style, body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let content = conservation(&bytes, &doc);
+        let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+        assert!(
+            content.holds() && logical.holds(),
+            "{style:?}, {body}: content {content:?}, logical {logical:?}"
+        );
+    }
+}
+
+/// **A sign after a number that opens a wrapped Arabic line reads after
+/// it** (review of the third review's K-11 fix).
+///
+/// `<p dir="rtl">جميل بيت كبير نور 5% يوم</p>` in sans-serif, broken
+/// before the `5`. W2 makes the `5` an Arabic number for the Arabic letter on
+/// the line above, so the `%` is a neutral at the paragraph's level, in one
+/// piece with `يوم`; Helvetica draws it and the overflow font the Arabic, and
+/// drawn in its level's order Helvetica's `% ` read back `%5 يوم`: a reader
+/// of the line alone finds no Arabic letter before the `5`, and W5 makes
+/// the `%` a European number's. Such a piece's neutrals are drawn as typed
+/// now, as every one was at 9297d2d, which conserved each of these in both
+/// builds (`paint::neutrals_drawn_as_typed`).
+#[test]
+fn a_sign_after_a_number_opening_a_wrapped_arabic_line_reads_as_typed() {
+    let style = "body { font-family: sans-serif } p { margin: 0 42% }";
+    for body in [
+        "<p dir=\"rtl\">جميل بيت كبير نور 5% يوم</p>",
+        "<p dir=\"rtl\">جميل بيت كبير نور 5‰ يوم</p>",
+        "<p dir=\"rtl\">جميل بيت كبير نور 10–20% يوم</p>",
+    ] {
+        let bytes = epub_support::book::styled_book("ar", style, body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let content = conservation(&bytes, &doc);
+        let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+        assert!(
+            content.holds() && logical.holds(),
+            "{body}: content {content:?}, logical {logical:?}"
+        );
+    }
+}
+
+/// **A styled `?!` glued to the word after it, letter-spaced and justified,
+/// reads as typed** (review of the third review's K-11 fix).
+///
+/// `كتاب <i>?!</i> مدرسة <b>?!</b>الطالب جميل.` justified at
+/// `letter-spacing: 0.25em`: the bold `?!` is drawn against `الطالب` and a
+/// stretched word space before it, so a reader reads the two together and,
+/// by the comma tie-break, left to right — the `?!` in the order it was
+/// drawn. Drawn in its level's order it read `!?`; as typed, as at 9297d2d,
+/// which conserved it in logical order in both builds, it reads `?!`
+/// (`paint::Gaps::left_to_right_ends`).
+#[test]
+fn a_styled_pair_glued_to_the_word_after_it_reads_as_typed_letter_spaced() {
+    let style = "p { letter-spacing: 0.25em; text-align: justify; margin: 0 25% }";
+    let body = "<p dir=\"rtl\">كتاب <i>?!</i> مدرسة <b>?!</b>الطالب جميل.</p>";
+    let bytes = epub_support::book::styled_book("ar", style, body);
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+    assert!(logical.holds(), "{body}: {logical:?}");
+}
+
+/// **A line of a paragraph with no `dir` that opens with a bracket pair
+/// reads its full stop last** (review of the third review's K-11 fix).
+///
+/// `<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم.</p>`, broken before the
+/// bracket: N0 takes the pair's level from the Arabic on the line above, so
+/// the second line is drawn `موي )رون(.`, its stop at the right. The comma
+/// tie-break reads that left to right; read from the right the line pairs
+/// `(نور)`, and the bracket tie-break turned it and read the stop first,
+/// `(نور). يوم` in logical order. A pair with a bracket just left of the
+/// mark the comma tie-break took is one the line above resolved, and counts
+/// for neither reading (`tinker-pdf-shape`'s `OpenedBefore`). And the line
+/// `(١٬٢٣٤), الآن الموادّ تكبح عوامل.`, letter-spaced, in pieces the device
+/// cut, was joined whole for that turn and read `.(١٬٢٣٤), …`. Each conserved
+/// in logical order at 9297d2d — the number's book in content order too —
+/// in the build it is listed for.
+#[test]
+fn a_dirless_line_opening_with_a_bracket_pair_reads_its_full_stop_last() {
+    let narrow = "p { margin: 0 42% }";
+    let books: &[(&str, &str)] = if cfg!(feature = "bundled-fonts") {
+        &[
+            ("ar", "<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم.</p>"),
+            (
+                "he",
+                "<p>שלום עולם ספר בית יום אור יום <b>(</b>בית<b>)</b> יום.</p>",
+            ),
+        ]
+    } else {
+        &[
+            ("ar", "<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم.</p>"),
+            ("he", "<p>שלום עולם ספר <b>(</b>בית<b>)</b> יום.</p>"),
+        ]
+    };
+    for (language, body) in books {
+        let bytes = epub_support::book::styled_book(language, narrow, body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+        assert!(logical.holds(), "{body}: {logical:?}");
+    }
+    let body = "<p>عوامل عدّة وقد (١٬٢٣٤), أصبحنا نعرف الآن الموادّ. عدّة وقد أصبحنا \
+                (١٬٢٣٤), نعرف الآن الموادّ تكبح. وقد أصبحنا نعرف (١٬٢٣٤), الآن الموادّ \
+                تكبح عوامل. </p>";
+    let style = "p, li, td { letter-spacing: 0.5em }";
+    let bytes = epub_support::book::styled_book("ar", style, body);
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let content = conservation(&bytes, &doc);
+    let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+    assert!(
+        content.holds() && logical.holds(),
+        "content {content:?}, logical {logical:?}"
+    );
+}

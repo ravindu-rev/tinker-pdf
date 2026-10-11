@@ -526,7 +526,13 @@ living in one feature's head.
     strong character of that direction, is passed over by both readings where
     the line's letters say the direction chosen — they outnumber the other's
     and the reading in that direction pairs a bracket facing outward of its
-    own, or they are twice the other's and eight more.
+    own, or they are at least twice the other's and at least eight more. And
+    where the comma tie-break chose left to right for a line that ends in a
+    mark no soft wrap puts first on a line — a full stop, a comma, a colon, a
+    semicolon, `!`, `?` or the ARABIC COMMA (UAX #14's `IS` and `EX`) — a
+    left-to-right paragraph drew that line as right-to-left text with its
+    mark after it, and the line opens just left of the mark: a pair with a
+    bracket there, enclosing no left-to-right letter, is passed over too.
     `tinker_pdf_shape::bidi::drawn_direction` asks it last, of a line that
     draws a closing bracket left of an opening one and of no other, and
     `logical_order` for a given direction is untouched: `bidi_conformance.rs`
@@ -546,7 +552,16 @@ living in one feature's head.
     letters to fifteen Hebrew ones, was turned and read backwards (4 books in
     a default build, 1 with `bundled-fonts`, under `text-align: justify` and
     `word-spacing: 0.3em`; `bidi.rs`'s
-    `a_pair_the_line_above_resolved_turns_no_line`).
+    `a_pair_the_line_above_resolved_turns_no_line`). Its review found the
+    same pair in a paragraph with no `dir`: `جميل بيت كبير (نور) يوم.` broken
+    before the bracket draws `موي )رون(.`, which the comma tie-break reads
+    left to right and which, read from the right, pairs `(نور)` and reads
+    its full stop first (32 books in a default build and 29 with
+    `bundled-fonts` that read their stop last at 9297d2d, styled brackets
+    under `margin: 0 42%`, and a letter-spaced line opening with `(١٬٢٣٤),`
+    that the join of split lines read whole for the turn;
+    `a_dirless_line_opening_with_a_bracket_pair_reads_its_full_stop_last`,
+    `bidi.rs`'s `a_pair_before_a_full_stop_the_line_above_resolved_turns_no_line`).
 
     *What it gains and what it costs, measured.* Over `BidiCharacterTest.txt`,
     each of its 91 616 drawn lines read in the direction `drawn_direction`
@@ -570,8 +585,13 @@ living in one feature's head.
     line before changes none of those lines, nor any line of the file: none
     of the file's lines the tie-break turns holds more than six letters
     against the turn, and asked of every line it opens whose letters
-    outnumber the other's it read 1 341 of them worse, asked wherever the
-    reading as chosen pairs a bracket facing outward too, 8. **The price** is a text typed with
+    outnumber the other's it read 1 393 of them worse and 52 better (1 341
+    fewer read as typed) and 2 of the sentence lines worse, asked wherever
+    the reading as chosen pairs a bracket facing outward too, 8 worse and
+    none better. Passing over a pair before the comma tie-break's mark
+    changes none of them either; asked of every mark that tie-break takes,
+    it read 215 of the file's lines worse and 12 better — lines that open
+    with a symbol, `⚀(א)ב`, drawn as such a line is. **The price** is a text typed with
     brackets that pair only read the other way round, each set against the
     text between them: `x)שלום(y` in a left-to-right paragraph, drawn
     `x)םולש(y`, reads `y(שלום)x`. No book above pays it, and of the lines

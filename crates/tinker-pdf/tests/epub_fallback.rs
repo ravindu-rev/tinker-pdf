@@ -1841,6 +1841,34 @@ fn a_word_spaced_slice_reading_alike_is_drawn_with_its_space_first() {
     }
 }
 
+/// **A word-spaced slice of more than one glyph that does not read alike
+/// either way round is drawn in its level's order, its word space and all**
+/// (review of the third review's K-11 fix).
+///
+/// `paint::opens_with_its_word_space` draws a word-spaced slice of neutrals
+/// as typed, its word space first, only where its glyphs read the same
+/// reversed. The italic ` ?!` glued to `عوامل` here, under `word-spacing:
+/// 0.3em` and `letter-spacing: 0.1em`, is a slice whose glyphs do not: drawn
+/// as typed it read `عوامل!?  عدّة` and neither content nor logical order
+/// held; in its level's order it reads as typed. The one-glyph ` #` of the
+/// test above reads alike trivially, so without this book nothing failed
+/// when the condition was dropped. 9297d2d failed this book too: it pins
+/// the third review's gain, not a book 9297d2d conserved.
+#[test]
+fn a_word_spaced_slice_not_reading_alike_is_drawn_in_its_levels_order() {
+    let body = "<p dir=\"rtl\">عوامل<i> ?!</i> عدّة وقد أصبحنا</p>";
+    let style = "p { word-spacing: 0.3em; letter-spacing: 0.1em }";
+    let bytes = styled_book("ar", style, body);
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let text = doc.page(0).expect("a page").text().plain_text();
+    for verdict in [
+        conservation(&bytes, &doc),
+        conservation_in_logical_order(&bytes, &doc),
+    ] {
+        assert!(verdict.holds(), "{body}: {text:?} {verdict:?}");
+    }
+}
+
 /// **A number or a word drawn left to right inside word-spaced right-to-left
 /// text is not drawn over the bracket before it** (third review of the K-11
 /// fix).
