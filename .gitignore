@@ -59,8 +59,11 @@ bindings/js/demo/package-lock.json
 # Playwright MCP scratch, and the screenshots a manual demo run leaves behind.
 .playwright-mcp/
 
-# Claude Code scratch: agent worktrees and tool results.
-.claude/
+# Claude Code: .claude/ belongs to the repository (shared settings, skills,
+# agents). Only its scratch stays out: agent worktrees, which are checkouts of
+# their own, and settings.local.json, which is one person's.
+.claude/worktrees/
+.claude/settings.local.json
 # JPEG XR fixture sources. The raster is defined once, by `raster()` in
 # `crates/tinker-pdf-filters/tests/jxr_fixtures.rs`; the `.raw` files are what
 # the `#[ignore]`d writer hands `make-fixtures.ps1`, and committing a second
