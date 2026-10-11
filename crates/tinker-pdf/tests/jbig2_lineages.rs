@@ -271,6 +271,7 @@ fn decoded(name: &str) -> Option<(Vec<u8>, Vec<String>, u32, u32)> {
         globals: &globals,
         width,
         height,
+        work_ceiling: None,
     };
     let mut warnings = Vec::new();
     let bits = jbig2_decode(&data, &params, 1 << 22, &mut warnings).ok()?;

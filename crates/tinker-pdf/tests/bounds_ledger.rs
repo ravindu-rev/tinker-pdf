@@ -872,8 +872,10 @@ const SCAN_SYMBOL_PAGE_MULTIPLE: u128 = 1;
 /// file's rule for a caller-parameterised cap is that the parameter is fixed
 /// and written down. It is fixed at the tightest a caller can choose: **a
 /// ceiling of exactly the image's own packed page**, below which the page
-/// itself is refused. The engine passes `MAX_DECODED_STREAM` and spends a
-/// twentieth of one there; the census and attribution suites pass 4 MiB.
+/// itself is refused. The engine names a work ceiling of the image's own
+/// pixels plus 8 388 608 for a shared dictionary (`jbig2_work_ceiling` in
+/// `src/resources.rs`), against which this scan spends 3.1; the census and
+/// attribution suites pass 4 MiB and no work ceiling.
 ///
 /// The page is one of [`SCAN_SYMBOLS`]'s 200: 300 dpi A4, 8 699 840 pixels.
 /// Its global dictionary decodes whole for every page that names it —

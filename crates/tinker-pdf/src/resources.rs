@@ -15,7 +15,7 @@ use tinker_pdf_cos::{
 };
 use tinker_pdf_filters::{
     ccitt_decode, jbig2_decode, jpeg_decode, CcittParams, Jbig2Params, JpegColor,
-    Warning as FilterWarning,
+    Warning as FilterWarning, MAX_JBIG2_SYMBOL_PIXELS, MAX_JBIG2_WORK_MULTIPLE,
 };
 use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
 use tinker_pdf_raster::canvas::{Canvas, Color};
@@ -277,6 +277,33 @@ fn jpeg_image(
 /// the one ceiling.
 fn jpeg_samples(raw: &[u8]) -> Result<tinker_pdf_filters::JpegImage, String> {
     jpeg_decode(raw, 1 << 28).map_err(|e| format!("{e:?}"))
+}
+
+/// What a JBIG2 image's decode is allowed to cost, as the pixels
+/// [`Jbig2Params::work_ceiling`] measures it against: the image's own
+/// `/Width` x `/Height`, plus a floor that holds one shared dictionary.
+///
+/// **Not the output ceiling.** The decoder is handed `MAX_DECODED_STREAM` for
+/// every image, which is a bound on any stream rather than a statement about
+/// this one, and [`MAX_JBIG2_WORK_MULTIPLE`] times the 2^30 pixels it holds was
+/// a budget of 17 179 869 184 units: sixteen copies of a 117-byte dictionary
+/// deciding symbols past its marker, 2 078 bytes in all, decoded for 10.2 s in
+/// release and were not refused. The image is what the page asked for, so its
+/// area is the scale.
+///
+/// **The floor is for `/JBIG2Globals`.** A global dictionary is decoded whole
+/// for every image that names it (7.4.7), and an image may be a small mask on a
+/// page whose glyphs a dictionary shared by two hundred pages holds, so the
+/// image's area alone would refuse a document for the shape its producer
+/// chose. One dictionary may decode `MAX_JBIG2_SYMBOL_PIXELS` pixels, each of
+/// them an arithmetic decision; the integers that size and export its symbols
+/// and the copy a text region takes of them are less than that again. So the
+/// floor is that cap twice over, in units — 134 217 728, which at sixteen units
+/// a pixel is 8 388 608 pixels, about one 300 dpi A4 page — and a dictionary the
+/// cap admits is never refused by the budget, whatever image names it.
+fn jbig2_work_ceiling(width: u32, height: u32) -> u64 {
+    let globals = 2 * MAX_JBIG2_SYMBOL_PIXELS / MAX_JBIG2_WORK_MULTIPLE;
+    (u64::from(width) * u64::from(height)).saturating_add(globals)
 }
 
 /// Rewrites an inline image's dictionary into the long spellings the shared
@@ -2775,6 +2802,7 @@ impl PageResources {
             globals: &globals,
             width,
             height,
+            work_ceiling: Some(jbig2_work_ceiling(width, height)),
         };
         let decoded = jbig2_decode(coded, &params, limits::MAX_DECODED_STREAM, &mut warnings);
         for warning in &warnings {

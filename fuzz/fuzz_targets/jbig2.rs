@@ -68,6 +68,9 @@ fuzz_target!(|data: &[u8]| {
     // what stopped `symbol-dictionary-spun-past-its-marker` deciding 38 730
     // symbols out of its coder's marker on a page of 37 by 56, which the page
     // bound admits. A larger ceiling here is a larger budget per input.
+    // `work_ceiling` is left `None` so that this ceiling stays the measure:
+    // the engine names the image's own pixels plus a floor for a shared
+    // dictionary instead, which here would be sixteen times as much.
     let width = match knobs & 3 {
         0 => 1,
         1 => 8,
@@ -98,6 +101,7 @@ fuzz_target!(|data: &[u8]| {
         globals,
         width,
         height,
+        work_ceiling: None,
     };
     let ceiling = 1 << 16;
     match jbig2_decode(own, &params, ceiling, &mut warnings) {
@@ -146,6 +150,7 @@ fuzz_target!(|data: &[u8]| {
         globals: own,
         width,
         height,
+        work_ceiling: None,
     };
     let mut other = Vec::new();
     let _ = jbig2_decode(globals, &swapped, ceiling, &mut other);

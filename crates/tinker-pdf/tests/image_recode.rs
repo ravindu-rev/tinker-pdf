@@ -372,6 +372,7 @@ fn lossless_codings_give_back_exactly_the_samples_written() {
                             globals: &[],
                             width: 37,
                             height: 20,
+                            work_ceiling: None,
                         },
                         1 << 20,
                         &mut warnings,

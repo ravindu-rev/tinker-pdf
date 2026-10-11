@@ -532,10 +532,11 @@ did not have the same standing:
   decodes whole for every image that names it, and an image may be a small mask
   on a large page, so a page-area bound would refuse documents by the shape of
   their producer; the ceiling is the caller's own statement of scale, and every
-  bitmap here already answers to it. The engine passes 128 MiB, so on the
-  render path the budget is 17 179 869 184 units and binds no real page; this
-  target passes 64 KiB, so it binds at 8 388 608 units, and the seed
-  `symbol-dictionary-spun-past-its-marker` now stops at symbol 6 297.
+  bitmap here already answers to it. This target passes 64 KiB, so it binds
+  at 8 388 608 units, and the seed `symbol-dictionary-spun-past-its-marker`
+  now stops at symbol 6 297. (The engine passed 128 MiB, and so had
+  17 179 869 184 units to spend on any image; the last paragraph of this row
+  says what it passes now.)
   `the_marker_spun_seed_stops_at_the_work_budget` pins that by its refusal and
   its symbol count, and
   `the_decode_stops_at_the_work_budget_however_the_work_is_split` holds the
@@ -574,6 +575,27 @@ did not have the same standing:
   in release. `export_runs_of_nothing_are_charged_as_they_are_decoded` holds
   both halves, one under a budget the runs reach and one under a budget they
   cannot.
+
+  **And the render path had the budget only in name.** The engine decodes
+  every stream under `MAX_DECODED_STREAM`, so sixteen times what that holds was
+  17 179 869 184 units for any image on any page: sixteen copies of the spun
+  dictionary, 2 078 bytes, decoded for 7.6 to 10.2 s in release and nothing
+  refused them. The budget is now measured against the image: the facade
+  passes `Jbig2Params::work_ceiling`, the image's own `/Width` x `/Height` plus
+  8 388 608 pixels, which at sixteen units a pixel is twice what one shared
+  `/JBIG2Globals` dictionary at `MAX_JBIG2_SYMBOL_PIXELS` costs, so that cap
+  and this one never disagree about a dictionary. The filters crate takes the
+  number and knows nothing of `/Width` (ruling 8). Those 2 078 bytes now stop
+  at 134 251 481 units in 1.3 s; the most any stream can cost a small image is
+  that, and an A4 page at 300 dpi twice it. **Nothing committed moved**: every
+  fuzz seed and every Annex H stream decodes to the same bytes and the same
+  refusals under both budgets — Annex H's whole file spends 5 962 units, the
+  spun seed 51 685 820 of the 134 250 880 its image is given — and the
+  facade's JBIG2, image and determinism suites are unchanged.
+  `the_render_path_measures_a_jbig2_decode_against_its_own_image` holds the
+  derivation at its exact boundary for two image sizes, and `jbig2_census.rs`
+  now asserts that no corpus image spends past it, a figure owed to the first
+  run with the corpora.
 
 ### What a green fuzz run does not mean
 

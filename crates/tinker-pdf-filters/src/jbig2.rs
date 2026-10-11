@@ -99,6 +99,17 @@ pub struct Jbig2Params<'a> {
     pub width: u32,
     /// The image's declared height in pixels.
     pub height: u32,
+    /// **The pixels this decode's work is measured against**, or `None` for
+    /// the pixels its output ceiling holds.
+    ///
+    /// One decode spends at most [`MAX_JBIG2_WORK_MULTIPLE`] times this, and
+    /// never more than that multiple of the output ceiling either: it can only
+    /// tighten the budget. It exists because an output ceiling is often one
+    /// figure for every stream a caller will ever decode rather than a
+    /// statement about this one — 128 MiB for any image at all, say — and a
+    /// budget sixteen times *that* is minutes of decoding that no page asked
+    /// for. A caller that knows what this image is for says so here.
+    pub work_ceiling: Option<u64>,
 }
 
 /// **What one stream's symbol dictionaries asked for, in pixels.**
@@ -1615,7 +1626,8 @@ impl SymbolPage {
 }
 
 /// **The most work one decode may spend, as a multiple of the pixels its
-/// caller's output ceiling holds.**
+/// caller's ceiling holds** — the output ceiling's, or the smaller
+/// [`Jbig2Params::work_ceiling`] a caller that knows the image names.
 ///
 /// Every other bound in this decoder is on *one* thing — a region, a symbol, a
 /// dictionary's symbols, a region's instances — and none of them is on the
@@ -1672,10 +1684,22 @@ impl SymbolPage {
 /// million, and a generic region beside it for the figures another 8.7
 /// million: 53 million, which is 6.1 pages and rounds up to 7. The cap clears it by 2.3x, between
 /// [`MAX_JBIG2_SYMBOL_PIXELS`]'s 2.7x and [`MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`]'s 4x
-/// over theirs. The engine itself passes `MAX_DECODED_STREAM`, 128 MiB, so on
-/// the render path this is 17 179 869 184 units and binds nothing a real page
-/// does; it binds a caller that sized its ceiling to the page it expects —
-/// the `jbig2` fuzz target's 64 KiB, for one, which is now 8 388 608 units.
+/// over theirs. It binds a caller that sized its ceiling to the page it
+/// expects — the `jbig2` fuzz target's 64 KiB, for one, which is 8 388 608
+/// units.
+///
+/// **The engine names a work ceiling, because its output ceiling says
+/// nothing about one image.** It decodes every stream under
+/// `MAX_DECODED_STREAM`, 128 MiB, and sixteen times the 2^30 pixels that holds
+/// was 17 179 869 184 units on the render path: sixteen copies of a 117-byte
+/// dictionary spun past its marker, 2 078 bytes, decoded for 7.6 to 10.2 s in
+/// release and nothing refused them. The engine now passes the image's own
+/// `/Width` x `/Height` plus 8 388 608 pixels, so that one shared dictionary
+/// as large as [`MAX_JBIG2_SYMBOL_PIXELS`] admits is twice covered on the
+/// smallest image that names it (`jbig2_work_ceiling` in
+/// `crates/tinker-pdf/src/resources.rs` has the argument). The scan above
+/// spends 3.1 of those multiples; the same 2 078 bytes stop at 134 251 481
+/// units in 1.3 s.
 ///
 /// **The second row is owed rather than zero.** `crates/tinker-pdf/tests/jbig2_census.rs`
 /// reports each image's work as a multiple of its own packed page through
@@ -1684,12 +1708,13 @@ impl SymbolPage {
 /// seed at the 64 KiB its fuzz target decodes under: Annex H's whole file is
 /// the most, 5 962 units of 524 288, a hundredth of one rounded up.
 ///
-/// **Why the ceiling and not the page.** A dictionary in `/JBIG2Globals` is
+/// **Why a ceiling and not the page.** A dictionary in `/JBIG2Globals` is
 /// decoded whole by every image that names it, and an image may be a small
 /// mask on a large page whose glyphs a shared dictionary holds for two hundred
-/// pages — so a bound on the page's area would refuse a document by the
-/// shape of its producer. The ceiling is the caller's own statement of scale,
-/// and every bitmap in this decoder already answers to it.
+/// pages — so a bound on the page's area alone would refuse a document by the
+/// shape of its producer. A ceiling is the caller's own statement of scale:
+/// the output ceiling, which every bitmap in this decoder already answers to,
+/// or a work ceiling whose caller has put a floor for that dictionary in it.
 ///
 /// Reachable: the fuzz seed `symbol-dictionary-spun-past-its-marker` is 257
 /// bytes whose dictionary makes 51 687 155 arithmetic decisions — 51 532 206
@@ -1725,11 +1750,20 @@ struct Work {
 
 impl Work {
     /// The budget for a decode under `ceiling` bytes of output.
+    #[cfg(test)]
     fn new(ceiling: usize) -> Work {
+        Work::within(ceiling, None)
+    }
+
+    /// The budget for a decode under `ceiling` bytes of output whose caller
+    /// measures its work against `work_ceiling` pixels
+    /// ([`Jbig2Params::work_ceiling`]): the smaller of the two, times
+    /// [`MAX_JBIG2_WORK_MULTIPLE`].
+    fn within(ceiling: usize, work_ceiling: Option<u64>) -> Work {
+        let pixels = (ceiling as u64).saturating_mul(8);
+        let pixels = work_ceiling.map_or(pixels, |work| work.min(pixels));
         Work {
-            left: (ceiling as u64)
-                .saturating_mul(8)
-                .saturating_mul(MAX_JBIG2_WORK_MULTIPLE),
+            left: pixels.saturating_mul(MAX_JBIG2_WORK_MULTIPLE),
             asked: 0,
             refused: false,
         }
@@ -5114,7 +5148,7 @@ pub fn decode_measured(
         number: None,
         regions: 0,
         extent: Jbig2SymbolExtent::default(),
-        work: Work::new(max_output),
+        work: Work::within(max_output, params.work_ceiling),
     };
 
     // D.3: the globals stream's segments are read first and are visible to
@@ -6837,6 +6871,7 @@ mod tests {
             globals: &[],
             width: 12,
             height: 6,
+            work_ceiling: None,
         };
         let bits = decode(&stream, &params, 1 << 20, &mut warnings)
             .expect("an arithmetic text region is decoded");
@@ -6874,6 +6909,7 @@ mod tests {
             globals: &[],
             width: 64,
             height: 56,
+            work_ceiling: None,
         };
         let bits = decode(&ANNEX_H[PAGE_2], &params, 1 << 20, &mut warnings)
             .expect("the page's generic region still decodes");
@@ -8010,6 +8046,7 @@ mod tests {
                 globals: &[],
                 width: size.0,
                 height: size.1,
+                work_ceiling: None,
             };
             let mut refusals = Vec::new();
             let (out, extent) = decode_measured(stream, &params, ceiling, &mut refusals);
@@ -8180,6 +8217,7 @@ mod tests {
             globals: &[],
             width: 8,
             height: 8,
+            work_ceiling: None,
         };
 
         let ceiling = 1 << 10;
@@ -8270,6 +8308,7 @@ mod tests {
             globals: &[],
             width: rows.first().map_or(0, |row| row.len()) as u32,
             height: rows.len() as u32,
+            work_ceiling: None,
         };
         let bits = decode(&stream, &params, 1 << 20, &mut warnings).expect("a region was decoded");
         assert!(warnings.is_empty(), "a clean stream warned: {warnings:?}");
@@ -8610,6 +8649,7 @@ mod tests {
             globals: &[],
             width: 64,
             height: 56,
+            work_ceiling: None,
         };
         let out = decode(&stream, &params, 1 << 20, &mut warnings);
         assert_eq!(out, Err(FilterError::Unsupported(Capability::Jbig2)));
@@ -8627,6 +8667,7 @@ mod tests {
             globals: &globals,
             width: 8,
             height: 8,
+            work_ceiling: None,
         };
         assert_eq!(
             decode(&stream, &params, 1 << 20, &mut warnings),
@@ -8743,6 +8784,7 @@ mod tests {
             globals: &[],
             width: u32::MAX,
             height: u32::MAX,
+            work_ceiling: None,
         };
         let out = decode(&[], &params, 1 << 20, &mut warnings);
         assert_eq!(out, Err(FilterError::Unsupported(Capability::Jbig2)));
@@ -8766,6 +8808,7 @@ mod tests {
             globals: &[],
             width: 8,
             height: 8,
+            work_ceiling: None,
         };
         let mut warnings = Vec::new();
         let out = decode(&stream, &params, 64, &mut warnings);
@@ -8779,6 +8822,54 @@ mod tests {
             "nothing was too large: {warnings:?}"
         );
         assert_eq!(Warning::Jbig2BudgetSpent.as_str(), "jbig2-budget-spent");
+    }
+
+    /// **[`Jbig2Params::work_ceiling`] tightens the budget and never loosens
+    /// it.**
+    ///
+    /// The engine's output ceiling is 128 MiB for every image, so it names a
+    /// work ceiling per image instead, and the decode spends
+    /// [`MAX_JBIG2_WORK_MULTIPLE`] times the smaller of the two. Counted in
+    /// paintings of an eight-by-eight page, eight units each:
+    /// - a work ceiling of 64 pixels under a ceiling of 1 MiB is 1 024 units,
+    ///   so 128 paintings decode and 129 are refused;
+    /// - a work ceiling of 2^30 pixels under a ceiling of 64 bytes is still
+    ///   the 8 192 units the ceiling holds, so 1 024 decode and 1 025 do not;
+    /// - and `None` is the output ceiling's, as it always was.
+    #[test]
+    fn a_work_ceiling_tightens_the_budget_and_never_loosens_it() {
+        let info = page_info(8, 8, 0x04);
+        let paintings = |count: u32| -> Vec<u8> {
+            (0..count)
+                .flat_map(|number| header(number, kind::PAGE_INFORMATION, 1, &info))
+                .collect()
+        };
+        let refused = |count: u32, ceiling: usize, work_ceiling: Option<u64>| {
+            let params = Jbig2Params {
+                globals: &[],
+                width: 8,
+                height: 8,
+                work_ceiling,
+            };
+            let mut refusals = Vec::new();
+            let _ = decode_measured(&paintings(count), &params, ceiling, &mut refusals);
+            refusals.contains(&Jbig2Refusal::WorkCap)
+        };
+        for (ceiling, work_ceiling, fits) in [
+            (1 << 20, Some(64), 128),
+            (64, Some(1 << 30), 1_024),
+            (64, None, 1_024),
+        ] {
+            assert!(
+                !refused(fits, ceiling, work_ceiling),
+                "{fits} paintings under {ceiling} bytes and {work_ceiling:?} were refused"
+            );
+            assert!(
+                refused(fits + 1, ceiling, work_ceiling),
+                "{} paintings under {ceiling} bytes and {work_ceiling:?} were not",
+                fits + 1
+            );
+        }
     }
 
     /// Both halves of the bound, because they catch on different targets.
@@ -8827,6 +8918,7 @@ mod tests {
             globals: &[],
             width: 64,
             height: 56,
+            work_ceiling: None,
         };
         let bits = decode(&ANNEX_H[PAGE_2], &params, 1 << 20, &mut warnings)
             .expect("the page carries a generic region, so it is not refused");
@@ -9022,6 +9114,7 @@ mod tests {
             globals: &[],
             width: 64,
             height: 56,
+            work_ceiling: None,
         };
         let bits = decode(&ANNEX_H[PAGE_2], &params, 1 << 20, &mut warnings).expect("decodes");
         let page = picture(&bits, 64, 56);
@@ -9117,6 +9210,7 @@ mod tests {
             globals: &[],
             width: 64,
             height: 56,
+            work_ceiling: None,
         };
         let mut mmr_warnings = Vec::new();
         let mmr = decode(&ANNEX_H[PAGE_1], &params, 1 << 20, &mut mmr_warnings)
@@ -9160,6 +9254,7 @@ mod tests {
             globals: &[],
             width: 64,
             height: 56,
+            work_ceiling: None,
         };
         let bits = decode(&ANNEX_H, &params, 1 << 20, &mut warnings).expect("page 1 decodes");
         let page = picture(&bits, 64, 56);
@@ -9196,6 +9291,7 @@ mod tests {
             globals: &[],
             width: 16,
             height: 16,
+            work_ceiling: None,
         };
         assert_eq!(
             decode(&stream, &params, 1 << 20, &mut warnings),
@@ -9710,6 +9806,7 @@ mod tests {
                 globals: &bytes,
                 width: 32,
                 height: 32,
+                work_ceiling: None,
             };
             let _ = decode(&bytes, &params, 1 << 16, &mut warnings);
         }
@@ -9737,6 +9834,7 @@ mod tests {
             globals: &[],
             width: 37,
             height: 8,
+            work_ceiling: None,
         };
         let mut warnings = Vec::new();
         let bits = decode(&ANNEX_H[PAGE_3], &params, 1 << 20, &mut warnings)
@@ -10019,6 +10117,7 @@ mod tests {
             globals: &[],
             width: size.0,
             height: size.1,
+            work_ceiling: None,
         };
         let bits = decode(stream, &params, 1 << 20, &mut warnings).expect("the page decodes");
         assert!(warnings.is_empty(), "a clean stream warned: {warnings:?}");
@@ -10738,6 +10837,7 @@ mod tests {
             globals: &[],
             width: 8,
             height: 8,
+            work_ceiling: None,
         };
         // A table draws nothing, so the page is the module's refusal and only
         // that: the table itself was read without complaint.
@@ -10863,6 +10963,7 @@ mod tests {
             globals: &[],
             width: 16,
             height: 16,
+            work_ceiling: None,
         };
 
         // One page information segment, and nothing else.

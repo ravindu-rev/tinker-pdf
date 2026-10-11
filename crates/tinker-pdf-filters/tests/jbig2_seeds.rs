@@ -122,6 +122,7 @@ fn every_committed_seed_decodes_or_refuses_by_name() {
             globals,
             width,
             height,
+            work_ceiling: None,
         };
         let ceiling = 1 << 16;
         match jbig2_decode(own, &params, ceiling, &mut warnings) {
@@ -197,6 +198,7 @@ fn the_pixel_budget_seed_is_refused_at_its_first_symbol() {
         globals,
         width,
         height,
+        work_ceiling: None,
     };
     let mut refusals = Vec::new();
     let (out, extent) = jbig2_decode_measured(own, &params, 1 << 16, &mut refusals);
@@ -263,6 +265,7 @@ fn the_marker_spun_seed_stops_at_the_work_budget() {
             globals,
             width,
             height,
+            work_ceiling: None,
         };
         let mut refusals = Vec::new();
         let (out, extent) = jbig2_decode_measured(own, &params, ceiling, &mut refusals);
@@ -322,6 +325,7 @@ fn the_export_run_seed_stops_at_the_turn_guard() {
             globals,
             width,
             height,
+            work_ceiling: None,
         };
         let mut refusals = Vec::new();
         let (out, extent) = jbig2_decode_measured(own, &params, 1 << 16, &mut refusals);
