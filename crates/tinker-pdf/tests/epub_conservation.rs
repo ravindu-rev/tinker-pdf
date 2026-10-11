@@ -641,3 +641,533 @@ fn record() -> Vec<String> {
         })
         .collect()
 }
+
+/// **A letter in another case is the same letter.** `text-transform` and
+/// synthesised small capitals draw the book's `The Swans` as `THE SWANS`,
+/// and that is conservation, not a loss and a gain: the fetched
+/// `sample-childrens-media-query.epub` read exactly that way once
+/// text-transform landed. Only case is forgiven — `ß` drawn `SS` is two
+/// characters for one and still diverges.
+#[test]
+fn a_letter_set_in_another_case_is_conserved_and_nothing_else_is() {
+    let verdict = compare(
+        &source("The Swans. Ho! pretty swans"),
+        &["THE SWANS. Ho! pretty swans".to_owned()],
+    );
+    assert!(verdict.holds(), "{verdict:?}");
+    assert_eq!(verdict.conserved, verdict.source);
+
+    let verdict = compare(&source("Straße"), &["STRASSE".to_owned()]);
+    assert!(
+        !verdict.holds(),
+        "a two-character mapping is not a case change: {verdict:?}"
+    );
+
+    let verdict = compare(&source("The Swans"), &["The Swins".to_owned()]);
+    assert!(
+        !verdict.holds(),
+        "a different letter is not a case change: {verdict:?}"
+    );
+}
+
+/// The same, end to end: a book whose heading is `text-transform: uppercase`
+/// is drawn in capitals and conserves.
+#[test]
+fn a_book_with_an_uppercased_heading_conserves() {
+    let bytes = epub_support::book::styled_book(
+        "en",
+        "h1 { text-transform: uppercase }",
+        "<h1>The Swans</h1><p>Ho! pretty swans, do you know?</p>",
+    );
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let pages = conservation::paginated_text(&doc).concat();
+    assert!(
+        pages.contains("THE SWANS"),
+        "the heading is drawn in capitals: {pages:?}"
+    );
+    let verdict = conservation(&bytes, &doc);
+    assert!(verdict.holds(), "{verdict:?}");
+}
+
+/// The paragraph ROADMAP K-11's probe builds: `repeat` sentences, each a
+/// filler, a bracketed `inside` and its full stop, and a tail — the shape
+/// `sample-regime-anticancer-arabic.epub` holds at character 20 963.
+fn bracketed_paragraph(inside: &str, repeat: usize) -> String {
+    const FILLERS: [&str; 2] = [
+        "إنّ الخلايا السرطانيّة تتكاثر بسرعة كبيرة، ويعتمد ذلك على عوامل عدّة",
+        "تتألّف كلّ الموادّ الحيّة على كوكبنا الأرض من خلايا، باستثناء الفيروسات",
+    ];
+    const TAIL: &str = "وقد أصبحنا نعرف الآن أنّ بعض الموادّ تكبح الهستونات النازعة للأسيتيل، مخفّفة بذلك من نموّ الأورام";
+    (0..repeat)
+        .map(|i| format!("{} ({inside}). {TAIL}. ", FILLERS[i % 2]))
+        .collect()
+}
+
+/// `text` with its Arabic marks taken out: the probe's mark-free twin.
+fn unpointed(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '\u{064B}'..='\u{065F}' | '\u{0670}'))
+        .collect()
+}
+
+/// **A bracketed run and the full stop after it read as written in
+/// right-to-left text** — ROADMAP K-11, closed 10 October 2026.
+///
+/// CI's `epub-corpus` job found the shape in
+/// `sample-regime-anticancer-arabic.epub`, from character 20 963
+/// (`Missing ").وقد…"`, `Extra ")وقد…"`). A synthetic probe of 240 books
+/// failed 82, the same 82 with every mark stripped, and three causes, none of
+/// them where a mark is drawn, stood behind them; each shape here failed at
+/// 9297d2d, pointed and mark-free alike, in both builds:
+///
+/// - **The writer drew the punctuation backwards.** In a sans-serif book the
+///   brackets, the full stop and the spaces are Helvetica's and the Arabic is
+///   the overflow font's, so ` (` and `). ` are face segments of their own,
+///   and a standard-14 segment with no right-to-left character in it was
+///   drawn as typed even at a right-to-left level: the page itself showed
+///   `عدة( النازعة` and read `.)وقد` — CI's `Missing ").وقد"`,
+///   `Extra ")وقد"`. Such a segment is drawn in its level's order now on a
+///   line that holds a right-to-left character (`paint::coded_order`,
+///   `TextRun::bidi_line_rtl`).
+/// - **The line came back in pieces.** Narrowed so that `(histone
+///   deacetylase).` opens a line, the `(`, the Latin words and the Arabic
+///   are three text objects, and the join of a line's pieces asked whether
+///   either of **two** pieces held a right-to-left character; the `(` and
+///   the Latin hold none, so the `(` was read as a line of its own. The
+///   chain the pieces make is joined whole now where, read whole, the
+///   bracket tie-break turns it (`text_order::rejoin_split_lines`). And justified
+///   at `margin: 0 35%`, an Arabic line's word spaces were stretched past half
+///   an em, which `TextDevice` cut it at, so the words read in drawn order,
+///   backwards; a word space stretched by `Tw` carries the pen within
+///   right-to-left text now (`tinker-pdf-content`'s `Stretch`).
+/// - **The majority read the line the wrong way.** That narrowed line holds
+///   eighteen Latin letters and seventeen Arabic ones, and ruling 14 read it
+///   left to right, `.)histone deacetylase(`: a text a left-to-right
+///   paragraph draws as the line stands. The pair is drawn facing outward,
+///   which only a pair at a right-to-left level is; ruling 14's bracket
+///   tie-break (amended 10 October 2026) reads it in the direction that pairs
+///   it.
+#[test]
+fn a_bracketed_run_and_its_full_stop_in_right_to_left_text_read_as_written() {
+    let read = |style: &str, open: &str, text: &str| {
+        let bytes = epub_support::book::styled_book("ar", style, &format!("{open}{text}</p>"));
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        (
+            conservation(&bytes, &doc),
+            conservation::conservation_in_logical_order(&bytes, &doc),
+        )
+    };
+    let rtl = "<p dir=\"rtl\">";
+    for (style, open, inside, repeat) in [
+        // The narrowed line that opens with the bracketed Latin words.
+        ("p { margin: 0 25% }", rtl, "histone deacetylase", 6),
+        // CI's shape: the punctuation in a face of its own.
+        (
+            "body { font-family: sans-serif } p { text-align: justify; margin: 0 15% }",
+            rtl,
+            "النازعة للأسيتيل",
+            1,
+        ),
+        (
+            "body { font-family: sans-serif } p { text-align: justify; margin: 0 15% }",
+            rtl,
+            "histone deacetylase",
+            3,
+        ),
+        (
+            "body { font-family: sans-serif } p { text-align: justify; margin: 0 15% }",
+            "<p>",
+            "انظر الفصل الثالث",
+            6,
+        ),
+        // Justified narrow enough that word spaces stretch past half an em.
+        ("p { text-align: justify; margin: 0 35% }", rtl, "HDAC", 3),
+        ("p { text-align: justify; margin: 0 35% }", rtl, "2010", 6),
+        (
+            "p { text-align: justify; margin: 0 35% }",
+            rtl,
+            "النازعة للأسيتيل",
+            6,
+        ),
+        // And the plain shapes, which must stay as they were.
+        ("", rtl, "HDAC", 1),
+        ("p { text-align: justify }", rtl, "2010", 3),
+        ("", "<p>", "2010", 1),
+        ("", "<p>", "النازعة للأسيتيل", 1),
+    ] {
+        let text = bracketed_paragraph(inside, repeat);
+        for text in [text.clone(), unpointed(&text)] {
+            let (content, logical) = read(style, open, &text);
+            assert!(
+                content.holds() && logical.holds(),
+                "{open} {style:?}, ({inside}) x{repeat}: content {content:?}, logical {logical:?}"
+            );
+        }
+    }
+}
+
+/// **A dir-less paragraph's line with Arabic at both ends and a Latin run in
+/// brackets between reads as the other text UAX #9 draws alike** — a limit of
+/// ruling 14 (`content-and-text.md`'s "Telling apart two texts UAX #9 draws
+/// alike"), pinned so that a change to it is noticed.
+///
+/// With no `dir`, `… عوامل عدّة (HDAC). وقد …` is a left-to-right paragraph:
+/// the pair is at its level, drawn facing inward, `(HDAC)`, with the Arabic
+/// either side reversed. A right-to-left paragraph whose `/ToUnicode` names
+/// the mirrored glyph draws `وقد … (HDAC) … عوامل عدّة` as exactly that line,
+/// and nothing on the page says which drew it: both readings draw the line
+/// (UAX #9 forwards, asserted here), and the bracket tie-break counts only a
+/// pair facing outward. Both ends of the line are Arabic, so it reads as the
+/// right-to-left paragraph: `(HDAC).` comes back `.)HDAC(`. K-11's probe has
+/// 45 of these 120 dir-less books, every one with a Latin run in the
+/// brackets, each pointed and not, in both builds.
+#[test]
+fn a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_drawn_alike_twin() {
+    use tinker_pdf_shape::bidi::{logical_order, order_units, BaseDirection};
+    let text = unpointed(&bracketed_paragraph("HDAC", 1));
+    let bytes = epub_support::book::styled_book("ar", "", &format!("<p>{text}</p>"));
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    assert!(
+        !conservation::conservation_in_logical_order(&bytes, &doc).holds(),
+        "the dir-less line now reads as written: drop this limit from content-and-text.md"
+    );
+    let page = doc.page(0).expect("a page");
+    let page_text = page.text();
+    let line = page_text
+        .lines()
+        .into_iter()
+        .find(|line| line.text.contains("HDAC"))
+        .expect("the line holding the bracketed run");
+    assert!(
+        line.text.contains(".)HDAC("),
+        "the line reads as the right-to-left twin: {:?}",
+        line.text
+    );
+    // The line as drawn, left to right, and its two readings.
+    let mut drawn: Vec<(f64, &str)> = line
+        .chars
+        .iter()
+        .map(|c| (c.quad.bounds().0, c.text.as_str()))
+        .collect();
+    drawn.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let visual: Vec<&str> = drawn.iter().map(|(_, text)| *text).collect();
+    let opens = visual.iter().position(|unit| *unit == "(");
+    let closes = visual.iter().position(|unit| *unit == ")");
+    assert!(
+        opens < closes,
+        "the pair is drawn facing inward: {visual:?}"
+    );
+    let read = |direction| -> (String, Vec<&str>) {
+        let order = logical_order(&visual, direction);
+        let read: Vec<&str> = order.iter().map(|at| visual[*at]).collect();
+        let redrawn = order_units(&read, direction)
+            .into_iter()
+            .map(|at| read[at])
+            .collect();
+        (read.concat(), redrawn)
+    };
+    let (left_to_right, drawn_ltr) = read(BaseDirection::LeftToRight);
+    let (right_to_left, drawn_rtl) = read(BaseDirection::RightToLeft);
+    assert_eq!(
+        drawn_ltr, visual,
+        "a left-to-right paragraph draws the line"
+    );
+    assert_eq!(drawn_rtl, visual, "and so does a right-to-left one");
+    assert!(left_to_right.contains("(HDAC)."), "{left_to_right:?}");
+    assert_eq!(right_to_left, line.text, "ruling 14 reads the second");
+}
+
+/// **List markers and glosses in left-to-right text conserve** — ruling 14's
+/// bracket tie-break as the review of the K-11 fix revised it.
+///
+/// A left-to-right paragraph's `1)` before a parenthesis, or a parenthesis
+/// that opens at the end of a line and closes on the next, draws a closing
+/// bracket left of an opening one, and a right-to-left paragraph draws the
+/// same line for another text in which the two pair facing outward. As first
+/// proposed, the tie-break read every such line from the right, and books
+/// like these, which conserved before it, stopped conserving at their first
+/// character: `<p>Step 1) read the word (…) aloud and 2) write it down, then
+/// 3) check (…) again.</p>` in six of nine styles, Arabic and Hebrew, pointed
+/// and not, in both builds, and three glosses wrapped at `margin: 0 25%` in a
+/// `bundled-fonts` one. A reading from the right pairs no more of their
+/// brackets than as typed, or pairs them with the spaces that stood outside
+/// them inside the pair, and the tie-break now asks for more pairs, each set
+/// against what it encloses.
+#[test]
+fn list_markers_and_glosses_in_left_to_right_text_conserve() {
+    let words: [(&str, [&str; 4]); 2] = [
+        ("ar", ["إنّ ال", "وقد أ", "عوامل عدّة", "الآن"]),
+        ("he", ["בְּרֵא", "וַיֹּא", "שָׁלוֹם עוֹלָם", "בַּיִת"]),
+    ];
+    for (language, [first, second, gloss, word]) in words {
+        let paragraphs = [
+            format!(
+                "Step 1) read the word ({first}) aloud and 2) write it down, then 3) check \
+                 ({second}) again."
+            ),
+            format!(
+                "Step 1) open the file ({word}) and 2) close it, then 3) read ({gloss}) once \
+                 more and 4) stop here for now."
+            ),
+            format!(
+                "Read peace ({second}) then war ({gloss}) and also ({word}) in this English \
+                 sentence that keeps going on."
+            ),
+        ];
+        for style in ["", "p { text-align: justify }", "p { margin: 0 25% }"] {
+            for paragraph in &paragraphs {
+                for text in [paragraph.clone(), unpointed_hebrew(&unpointed(paragraph))] {
+                    let bytes =
+                        epub_support::book::styled_book(language, style, &format!("<p>{text}</p>"));
+                    let doc = Document::open(bytes.clone()).expect("the book opens");
+                    let content = conservation(&bytes, &doc);
+                    let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+                    assert!(
+                        content.holds() && logical.holds(),
+                        "{style:?}, {text:?}: content {content:?}, logical {logical:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// `text` with its Hebrew points taken out.
+fn unpointed_hebrew(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '\u{0591}'..='\u{05C7}'))
+        .collect()
+}
+
+/// Whether `body`, set in `language` under `style`, conserves in content
+/// and in logical order, pointed and with every mark taken out.
+fn conserves_pointed_and_not(language: &str, style: &str, body: &str) {
+    for body in [body.to_owned(), unpointed_hebrew(&unpointed(body))] {
+        let bytes = epub_support::book::styled_book(language, style, &body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let content = conservation(&bytes, &doc);
+        let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+        assert!(
+            content.holds() && logical.holds(),
+            "{style:?}, {body}: content {content:?}, logical {logical:?}"
+        );
+    }
+}
+
+/// **Spacing carries a reader's pen only within right-to-left text** —
+/// the review of the K-11 fix.
+///
+/// K-11's fix took the pen across a gap `Tw` or `Tc` made where a line closed
+/// by `ET` met the next text object, so that a justified or letter-spaced
+/// Arabic line was not cut into words read backwards. Each pointed book here
+/// conserved at 9297d2d, which cut its line at the gap, and did not when the
+/// pen was carried across it — the line so joined, each piece of it read
+/// right alone, fell into ruling 14's limits, read by its two Hebrew ends or
+/// by its majority as a right-to-left paragraph's. Their mark-free twins are
+/// held to conserve too, which not all of them did at 9297d2d (the `-` line
+/// under `word-spacing: 0.6em` did not):
+///
+/// - carried after a right-to-left word into a neutral, the `(` or `⟨` that
+///   opens a Latin run, and into the Hebrew after `( ` in an English line;
+/// - carried after a word of neutrals, the `-` of `שָׁלוֹם - (HDAC) - עוֹלָם`,
+///   on a line that held the Latin;
+/// - carried a little further than the spacing reaches, from one table cell
+///   into the next, two Hebrew cells read as one word, `גדולספר`.
+///
+/// The pen is carried now only into a right-to-left glyph that starts where
+/// the spacing put it, on a line holding no left-to-right letter or after a
+/// right-to-left word (`tinker-pdf-content`'s `Stretch`). And the last,
+/// a right-to-left paragraph letter-spaced by half an em, whose `) (` between
+/// two Latin runs a reader read on its own (`bundled-fonts`): such a run of
+/// neutrals is drawn as typed, as it was (`paint::neutrals_drawn_as_typed`).
+#[test]
+fn spacing_carries_the_pen_only_within_right_to_left_text() {
+    let justified = "p, td { letter-spacing: 0.3em; text-align: justify; margin: 0 25% }";
+    let spaced = "p { word-spacing: 0.6em; margin: 0 20% }";
+    let cells = "p, td { letter-spacing: 0.5em }";
+    for (language, style, body) in [
+        ("he", spaced, "<p>שָׁלוֹם - (HDAC) - עוֹלָם מִלְחָמָה.</p>"),
+        ("he", justified, "<p>שָׁלוֹם - (HDAC) - עוֹלָם מִלְחָמָה.</p>"),
+        ("he", spaced, "<p>שָׁלוֹם עוֹלָם ⟨HDAC⟩. מִלְחָמָה סֵפֶר בַּיִת.</p>"),
+        (
+            "he",
+            spaced,
+            "<p>שָׁלוֹם עוֹלָם <b>(HDAC)</b>. מִלְחָמָה סֵפֶר בַּיִת.</p>",
+        ),
+        (
+            "ar",
+            justified,
+            "<p>عوامل عدّة <b>(HDAC)</b>. وقد أصبحنا نعرف.</p>",
+        ),
+        (
+            "ar",
+            justified,
+            "<p>عوامل عدّة <i>(histone deacetylase)</i>. وقد أصبحنا نعرف.</p>",
+        ),
+        (
+            "en",
+            justified,
+            "<p>Note ( שָׁלוֹם ) spaced (x) and ( עוֹלָם מִלְחָמָה ) spaced again in the line.</p>",
+        ),
+    ] {
+        conserves_pointed_and_not(language, style, body);
+    }
+    // Pointed only: these books' mark-free twins do not conserve in every
+    // build, at 9297d2d either.
+    let table = "<table style=\"border-spacing: 2px\"><tr><td>שָׁלוֹם</td><td>(HDAC)</td>\
+                 <td>עוֹלָם.</td><td>מִלְחָמָה</td></tr><tr><td>סֵפֶר בַּיִת</td>\
+                 <td>גָּדוֹל</td><td>(2010)</td><td>x</td></tr></table>";
+    let mut pointed = vec![table];
+    if cfg!(feature = "bundled-fonts") {
+        pointed.push("<p dir=\"rtl\">שָׁלוֹם עוֹלָם (HDAC) (SIRT). מִלְחָמָה סֵפֶר בַּיִת.</p>");
+    }
+    for body in pointed {
+        let bytes = epub_support::book::styled_book("he", cells, body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let content = conservation(&bytes, &doc);
+        let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+        assert!(
+            content.holds() && logical.holds(),
+            "{body}: content {content:?}, logical {logical:?}"
+        );
+    }
+}
+
+/// **A line whose pieces read right apart is read in them** — the review of
+/// the K-11 fix.
+///
+/// K-11's fix joined the whole chain of pieces a line came to the reader
+/// in, wherever any piece held a right-to-left character, so that a
+/// right-to-left line opening with `(histone deacetylase).` kept its `(`
+/// for the bracket tie-break to pair. The line after it, `deacetylase).
+/// מִלְחָמָה סֵפֶר בַּיִת.`, is three pieces too, and read as two — `deacetylase`
+/// and `). מִלְחָמָה …`, as 9297d2d joined them — each reads right; joined
+/// whole it fell into the limit of a bracket a line break parted, its
+/// Latin letters as many as its Hebrew ones, and read `.מִלְחָמָה סֵפֶר בַּיִת
+/// .)deacetylase`. A chain is joined whole now only where the bracket
+/// tie-break turns it read whole (`text_order::rejoin_split_lines`), and
+/// otherwise as 9297d2d joined its pieces.
+#[test]
+fn a_line_whose_pieces_read_right_apart_is_read_in_them() {
+    let style = "body { font-family: monospace } p { margin: 0 22% }";
+    let text = "שָׁלוֹם עוֹלָם <i>(histone deacetylase)</i>. מִלְחָמָה סֵפֶר בַּיִת.";
+    for body in [
+        format!("<p dir=\"rtl\">{text}</p>"),
+        format!("<div style=\"direction: rtl\"><p>{text}</p></div>"),
+    ] {
+        conserves_pointed_and_not("he", style, &body);
+    }
+}
+
+/// **A neutral the device cut from its line carries no pen into the
+/// right-to-left word after it** — the third review of the K-11 fix.
+///
+/// The text device starts a line afresh at every cut, so an opening mark
+/// cut from the Latin text it belongs to — `«`, `"`, `#` or `?!` in a text
+/// object of its own, a table cell's `[` — began a line that held no
+/// left-to-right letter, and the pen was carried from it across the spacing
+/// into the Hebrew or Arabic word after it. The line so joined read right
+/// to left, its mark at the wrong end: `«שָׁלוֹם עוֹלָם»` letter-spaced by
+/// `0.55em` as `שָׁלוֹם עוֹלָם«`, `<td>[שָׁלוֹם]</td>` as `שָׁלוֹם[`, and `<i>?!</i>
+/// שָׁלוֹם עוֹלָם` at `word-spacing: 1em` as `שָׁלוֹם עוֹלָם !?`. Each book
+/// conserved at 9297d2d (pointed; its mark-free twin did not, nor does it
+/// now). After neutrals the pen goes on now only on a line that holds a
+/// right-to-left letter of its own (`tinker-pdf-content`'s `Stretch`).
+#[test]
+fn a_neutral_cut_from_its_line_carries_no_pen_into_the_word_after_it() {
+    let spaced = "p, li, td { letter-spacing: 0.55em; text-align: justify; margin: 0 20% }";
+    let worded = "p, li { word-spacing: 1em; margin: 0 18% }";
+    let table = "<table style=\"border-spacing: 0; letter-spacing: 0.6em\">\
+                 <tr><td>שָׁלוֹם</td><td>עוֹלָם</td><td>מִלְחָמָה.</td><td>(HDAC)</td></tr>\
+                 <tr><td>סֵפֶר בַּיִת</td><td>גָּדוֹל</td><td>(2010)</td><td>x</td></tr>\
+                 <tr><td>«אוֹר»</td><td>יוֹם</td><td>[שָׁלוֹם]</td><td>עוֹלָם</td></tr>\
+                 <tr><td>abc</td><td>מִלְחָמָה</td><td>def</td><td>סֵפֶר בַּיִת</td></tr></table>";
+    for (language, style, body) in [
+        ("he", spaced, "<p><i>«</i>שָׁלוֹם עוֹלָם<i>»</i></p>"),
+        ("he", spaced, "<p><b>\"</b>שָׁלוֹם עוֹלָם<b>\"</b></p>"),
+        ("he", spaced, "<p><i>#</i>שָׁלוֹם עוֹלָם</p>"),
+        ("ar", spaced, "<p><i>«</i>عوامل عدّة<i>»</i></p>"),
+        ("he", "", table),
+        ("he", worded, "<p><i>?!</i> שָׁלוֹם עוֹלָם</p>"),
+        ("ar", worded, "<p><i>(1)</i> عوامل عدّة</p>"),
+    ] {
+        let bytes = epub_support::book::styled_book(language, style, body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let content = conservation(&bytes, &doc);
+        let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+        assert!(
+            content.holds() && logical.holds(),
+            "{style:?}, {body}: content {content:?}, logical {logical:?}"
+        );
+    }
+}
+
+/// **A justified English paragraph quoting Hebrew in brackets reads as
+/// written** — the third review of the K-11 fix.
+///
+/// `Words <b>שָׁלוֹם</b> <i>עוֹלָם</i> (<b>מִלְחָמָה</b>) and more English
+/// text,`, five times over with the Hebrew words changing, under `text-align:
+/// justify` and under `word-spacing: 0.3em`. A line that opens with a
+/// bracketed Hebrew word the line above ended next to — `(הָאָרֶץ) and more
+/// English text, Words …` — draws that pair facing outward, since N0 took
+/// its level from the Hebrew word before it, on the line above; read from the
+/// right the line pairs it, and the bracket tie-break turned the line,
+/// fifty Latin letters to fifteen Hebrew ones, and read it backwards. Such a
+/// pair is no evidence for the other direction (`tinker-pdf-shape`'s
+/// `OpenedBefore`). In a default build each conserved in logical order at
+/// 9297d2d, pointed and not; with `bundled-fonts`, whose wider Hebrew breaks
+/// these lines elsewhere, the pointed paragraph set in monospace, justified,
+/// at `margin: 0 20%` did.
+#[test]
+fn a_bracket_pair_the_line_above_resolved_turns_no_line() {
+    let words = [
+        "שָׁלוֹם",
+        "עוֹלָם",
+        "מִלְחָמָה",
+        "סֵפֶר",
+        "בַּיִת",
+        "גָּדוֹל",
+        "אוֹר",
+        "יוֹם",
+        "בְּרֵאשִׁית",
+        "בָּרָא",
+        "אֱלֹהִים",
+        "הָאָרֶץ",
+    ];
+    let text: Vec<String> = (0..5)
+        .map(|k| {
+            format!(
+                "Words <b>{}</b> <i>{}</i> (<b>{}</b>) and more English text,",
+                words[3 * k % 12],
+                words[(3 * k + 1) % 12],
+                words[(3 * k + 2) % 12]
+            )
+        })
+        .collect();
+    let body = format!("<p>{}.</p>", text.join(" "));
+    // Each style, and whether its unpointed twin conserved at 9297d2d too.
+    let styles: &[(&str, bool)] = if cfg!(feature = "bundled-fonts") {
+        &[(
+            "body { font-family: monospace } p { text-align: justify; margin: 0 20% }",
+            false,
+        )]
+    } else {
+        &[
+            ("p { text-align: justify }", true),
+            ("p { word-spacing: 0.3em; margin: 0 20% }", true),
+        ]
+    };
+    for &(style, twin) in styles {
+        let bodies = if twin {
+            vec![body.clone(), unpointed_hebrew(&body)]
+        } else {
+            vec![body.clone()]
+        };
+        for body in bodies {
+            let bytes = epub_support::book::styled_book("en", style, &body);
+            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+            assert!(logical.holds(), "{style:?}, {body}: {logical:?}");
+        }
+    }
+}

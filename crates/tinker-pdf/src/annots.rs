@@ -13,23 +13,104 @@
 
 use std::sync::Arc;
 
-use tinker_pdf_content::{interpret, Matrix};
+use tinker_pdf_content::{interpret, Device, Event, Matrix};
 use tinker_pdf_cos::{pages as cos_pages, CosDocument, Dict, Object, Rect};
-use tinker_pdf_render::Renderer;
+use tinker_pdf_render::{DisplayRecorder, Renderer};
 
 use crate::fonts::FontProvider;
+use crate::render_part::NotDrawn;
 use crate::resources::PageResources;
 
 /// 12.5.3: the flags that keep an annotation off the page.
 const HIDDEN: i64 = 1 << 1;
 const NO_VIEW: i64 = 1 << 5;
 
+/// A device an appearance can be drawn through: one that resolves images,
+/// shadings and patterns by name in a scope it is handed, because an
+/// appearance's names are its own (12.5.5). The renderer, and the SVG writer
+/// when it draws a page the direct way.
+pub(crate) trait AppearanceDevice: Device {
+    /// Resolves names in `scope` until the matching [`pop_scope`].
+    ///
+    /// [`pop_scope`]: AppearanceDevice::pop_scope
+    fn push_scope(&mut self, scope: Arc<PageResources>);
+    /// Goes back to the scope in force before the last [`push_scope`].
+    ///
+    /// [`push_scope`]: AppearanceDevice::push_scope
+    fn pop_scope(&mut self);
+}
+
+impl AppearanceDevice for Renderer<'_, PageResources> {
+    fn push_scope(&mut self, scope: Arc<PageResources>) {
+        self.push_resources(scope);
+    }
+
+    fn pop_scope(&mut self) {
+        self.pop_resources();
+    }
+}
+
 /// Draws every visible annotation of a page.
-pub fn draw(
+pub(crate) fn draw(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
     provider: Option<&Arc<dyn FontProvider>>,
-    device: &mut Renderer<'_, PageResources>,
+    device: &mut impl AppearanceDevice,
+) {
+    each_appearance(doc, page, |appearance| {
+        draw_prepared(doc, appearance, provider, device);
+    });
+}
+
+/// One annotation's appearance as a retained page keeps it: the scope the
+/// renderer resolves its names in, and the calls its content makes.
+pub(crate) struct Recorded {
+    pub(crate) scope: Arc<PageResources>,
+    pub(crate) events: Vec<Event>,
+}
+
+/// Every visible annotation of a page, recorded rather than drawn.
+///
+/// The same appearances [`draw`] draws, in the same order, through the same
+/// [`prepare`] and the same interpretation — only the device differs, and it
+/// is the `recorder` the page's content was recorded through, so the answers
+/// it gives carry on from where the content left them exactly as a renderer's
+/// do when it draws the annotations after the content.
+pub(crate) fn record(
+    doc: &Arc<CosDocument>,
+    page: &cos_pages::Page,
+    provider: Option<&Arc<dyn FontProvider>>,
+    recorder: &mut DisplayRecorder,
+) -> Vec<Recorded> {
+    let mut out = Vec::new();
+    each_appearance(doc, page, |appearance| {
+        // Two resource objects over one dictionary, as `draw_prepared` makes
+        // them: the interpreter's, used up here, and the renderer's, kept.
+        let resources = PageResources::from_dict(doc, appearance.resources.clone(), provider);
+        let scope = Arc::new(PageResources::from_dict(
+            doc,
+            appearance.resources.clone(),
+            provider,
+        ));
+        interpret(
+            &appearance.content,
+            appearance.transform,
+            recorder,
+            &resources,
+        );
+        out.push(Recorded {
+            scope,
+            events: recorder.take(),
+        });
+    });
+    out
+}
+
+/// Every annotation of a page that draws, prepared, in `/Annots` order.
+fn each_appearance(
+    doc: &Arc<CosDocument>,
+    page: &cos_pages::Page,
+    mut each: impl FnMut(&Appearance),
 ) {
     let Ok(object) = doc.get(page.reference) else {
         return;
@@ -51,21 +132,43 @@ pub fn draw(
             Object::Dict(d) => Some(d.clone()),
             _ => None,
         };
-        if let Some(annotation) = annotation {
-            draw_one(doc, &annotation, provider, device);
+        // Every reason `prepare` gives for drawing nothing is a reason a page
+        // draws nothing there and says nothing: ruling 2, a page renders what
+        // it can. `Page::render_annotation` is the caller that names them.
+        if let Some(Ok(appearance)) = annotation.map(|a| prepare(doc, &a)) {
+            each(&appearance);
         }
     }
 }
 
-fn draw_one(
-    doc: &Arc<CosDocument>,
-    annotation: &Dict,
-    provider: Option<&Arc<dyn FontProvider>>,
-    device: &mut Renderer<'_, PageResources>,
-) {
+/// An annotation's normal appearance, ready to draw: the content with its
+/// `/BBox` clip in front, where 12.5.5's fit puts it, the resources it resolves
+/// names in, and the `/Rect` it was fitted onto.
+///
+/// Split out of `draw_one` so that the page and `Page::render_annotation`
+/// draw an annotation with one piece of code: the page ignores why a
+/// `prepare` failed, and a caller asking for one annotation is told.
+pub(crate) struct Appearance {
+    rect: Rect,
+    content: Vec<u8>,
+    transform: Matrix,
+    resources: Dict,
+}
+
+impl Appearance {
+    /// `/Rect` in default user space, as `(x0, y0, x1, y1)` with the corners
+    /// in order: the rectangle the appearance is fitted onto and drawn within.
+    pub(crate) fn rect(&self) -> (f64, f64, f64, f64) {
+        (self.rect.x0, self.rect.y0, self.rect.x1, self.rect.y1)
+    }
+}
+
+/// Everything `draw_one` decided before drawing, with each reason it had for
+/// drawing nothing named.
+pub(crate) fn prepare(doc: &Arc<CosDocument>, annotation: &Dict) -> Result<Appearance, NotDrawn> {
     let flags = annotation.get_int(doc.intern(b"F")).unwrap_or(0);
     if flags & HIDDEN != 0 || flags & NO_VIEW != 0 {
-        return;
+        return Err(NotDrawn::Hidden);
     }
 
     // A pop-up is the window that opens when its parent is clicked, not
@@ -75,28 +178,23 @@ fn draw_one(
         .and_then(|n| doc.name_bytes(n))
     {
         if subtype.as_ref() == b"Popup" {
-            return;
+            return Err(NotDrawn::Popup);
         }
     }
 
-    let Some(rect) = doc
+    let rect = doc
         .resolve_key(annotation, doc.intern(b"Rect"))
         .as_array()
         .and_then(Rect::from_array)
-    else {
-        return;
-    };
+        .filter(|rect| !rect.is_empty())
+        .ok_or(NotDrawn::NoRect)?;
 
-    let Some(form) = normal_appearance(doc, annotation) else {
-        return;
-    };
-    let Ok(content) = doc.stream_decoded(form) else {
-        return;
-    };
-    let Ok(object) = doc.get(form) else { return };
-    let Some(form_dict) = object.as_dict() else {
-        return;
-    };
+    let form = normal_appearance(doc, annotation).ok_or(NotDrawn::NoAppearance)?;
+    let content = doc
+        .stream_decoded(form)
+        .map_err(|_| NotDrawn::UnreadableAppearance)?;
+    let object = doc.get(form).map_err(|_| NotDrawn::UnreadableAppearance)?;
+    let form_dict = object.as_dict().ok_or(NotDrawn::UnreadableAppearance)?;
 
     let matrix = matrix_of(doc, form_dict);
     let bbox = doc
@@ -104,9 +202,7 @@ fn draw_one(
         .as_array()
         .and_then(Rect::from_array);
 
-    let Some(transform) = fit(bbox, matrix, rect) else {
-        return;
-    };
+    let transform = fit(bbox, matrix, rect).ok_or(NotDrawn::Degenerate)?;
 
     // 8.10.2: the bounding box is expressed in form space and clips whatever
     // the form draws. An appearance stream that paints outside its box —
@@ -135,26 +231,46 @@ fn draw_one(
         _ => content,
     };
 
-    let resources_dict = doc
+    let resources = doc
         .resolve_key(form_dict, tinker_pdf_cos::Name::RESOURCES)
         .as_dict()
         .cloned()
         .unwrap_or_default();
-    let resources = resources_dict.clone();
-    let resources = PageResources::from_dict(doc, resources, provider);
+
+    Ok(Appearance {
+        rect,
+        content,
+        transform,
+        resources,
+    })
+}
+
+/// Draws a prepared appearance through `device`.
+pub(crate) fn draw_prepared(
+    doc: &Arc<CosDocument>,
+    appearance: &Appearance,
+    provider: Option<&Arc<dyn FontProvider>>,
+    device: &mut impl AppearanceDevice,
+) {
+    let resources = PageResources::from_dict(doc, appearance.resources.clone(), provider);
 
     // 12.5.5: the appearance is a form XObject reached by reference, so there
     // is no name for the interpreter to announce and the caller announces it
     // instead. Both seams have to change: the device resolves images,
     // shadings and patterns, and an appearance that names one the page does
     // not define is the ordinary case, not the odd one.
-    device.push_resources(Arc::new(PageResources::from_dict(
+    device.push_scope(Arc::new(PageResources::from_dict(
         doc,
-        resources_dict,
+        appearance.resources.clone(),
         provider,
     )));
-    interpret(&content, transform, device, &resources);
-    device.pop_resources();
+    interpret(
+        &appearance.content,
+        appearance.transform,
+        device,
+        &resources,
+    );
+    device.pop_scope();
 }
 
 /// The `/AP` `/N` stream, following `/AS` when the appearance has states.

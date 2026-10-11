@@ -32,6 +32,8 @@
 //!
 //! [`MAX_BOX_DEPTH`] is per-item and bounds a recursion rather than a total.
 //! [`MAX_LAYOUT_PAGES`] is per-book and bounds an output.
+//! [`MAX_EMBEDDING_DEPTH`] is per-item and bounds a copy: UAX #9's own depth,
+//! which every run's stack of bidi levels stops at.
 //!
 //! # `MAX_BOX_DEPTH` exists where gap 31's plan said a depth cap would not
 //!
@@ -296,6 +298,30 @@ pub const MAX_LAYOUT_PAGES: usize = 65_536;
 /// multiplier rather than charge for it, and it is not this milestone's.
 pub const MAX_LAYOUT_WORK: usize = 16_000_000;
 
+/// Explicit bidi levels one run carries: the inline boxes round it whose
+/// `unicode-bidi` opens an embedding or an isolate (`css-writing-modes-3`
+/// §2.2).
+///
+/// | | Levels |
+/// | --- | --- |
+/// | The most any fixture in this repository spends | 125 (two hundred nested isolating spans, cut at this cap; no committed book has a `dir`, a `<bdi>` or a `unicode-bidi` at all) |
+/// | A 400-page novel | 2 (a `<bdi>` inside a `dir="rtl"` span) |
+/// | A 200-page comic | 0 |
+/// | A 200-page fixed document | 0 |
+/// | **This cap** | **125** |
+///
+/// **UAX #9's own `max_depth`** (rule X1), past which an embedding or isolate
+/// overflows and the algorithm ignores it, so the cap costs no level the
+/// painter would have read. A per-item cap on a **copy**: every run carries
+/// its stack ([`crate::TextRun::embeddings`]). The layout shares one stack
+/// between every piece and run made under the same boxes rather than copying
+/// it into each — a copy each was a kilobyte and a half on every line of a
+/// paragraph inside 125 isolating spans (review of lane 8C) — so what this
+/// still bounds is one stack, made once for each box that opens or closes a
+/// level. [`MAX_BOX_DEPTH`] stands in front of it: an inline box at every one
+/// of its 256 levels opens one each.
+pub const MAX_EMBEDDING_DEPTH: usize = 125;
+
 /// The relations, in a `const` block so a build that broke one **does not
 /// compile**.
 ///
@@ -325,6 +351,11 @@ const _: () = {
         (MAX_LAYOUT_WORK as u128) < (MAX_BOX_TREE_NODES as u128) * (MAX_BOX_TREE_NODES as u128),
         "placing the last of MAX_BOX_TREE_NODES floats examines the others, so a float-work \
          cap at or above the square of the box cap could never fire"
+    );
+    assert!(
+        MAX_EMBEDDING_DEPTH < MAX_BOX_DEPTH,
+        "a level is opened by an inline box, one per level of the box tree, so an embedding \
+         cap at or above the depth cap could never fire"
     );
     assert!(
         MAX_LAYOUT_PAGES < MAX_LINE_BREAK_WORK,

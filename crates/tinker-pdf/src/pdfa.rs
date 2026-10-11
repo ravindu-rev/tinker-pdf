@@ -49,10 +49,10 @@ use tinker_pdf_xml::{Event, Source};
 use crate::Document;
 
 mod annotations;
-mod colour;
-mod content;
-mod fonts;
-mod logical;
+pub(crate) mod colour;
+pub(crate) mod content;
+pub(crate) mod fonts;
+pub(crate) mod logical;
 mod structure;
 mod syntax;
 mod xmp;
@@ -240,6 +240,16 @@ pub(crate) mod clauses {
         four: "6.7.2",
     };
 
+    /// The XMP packet header's `bytes` and `encoding` attributes: 6.7.5 in
+    /// part 1 ("XMP header"), 6.6.2.1 in parts 2 and 3, 6.7.2.1 in part 4,
+    /// as veraPDF's published rules number them (6.7.5-1 and -2, 6.6.2.1-2
+    /// and -3, 6.7.2.1-2 and -3).
+    pub(crate) const XMP_HEADER: ClauseTable = ClauseTable {
+        one: "6.7.5",
+        two_three: "6.6.2.1",
+        four: "6.7.2.1",
+    };
+
     /// The predefined schemas: which properties a packet may carry, and what
     /// value type each of them declares.
     ///
@@ -402,6 +412,14 @@ pub(crate) mod clauses {
         four: "6.2.10.7",
     };
 
+    /// Font metrics: the dictionary's widths against the program's (6.3.6 /
+    /// 6.2.11.5 / 6.2.10.5).
+    pub(crate) const FONT_METRICS: ClauseTable = ClauseTable {
+        one: "6.3.6",
+        two_three: "6.2.11.5",
+        four: "6.2.10.5",
+    };
+
     /// Composite fonts: the CIDFont dictionary (6.3.3.2 / 6.2.11.3.2 /
     /// 6.2.10.3.2).
     pub(crate) const CID_FONTS: ClauseTable = ClauseTable {
@@ -410,7 +428,41 @@ pub(crate) mod clauses {
         four: "6.2.10.3.2",
     };
 
+    /// Composite fonts: the CIDFont's character collection against its
+    /// CMap's (6.3.3.1 / 6.2.11.3.1 / 6.2.10.3.1, as veraPDF's published
+    /// rules number them).
+    pub(crate) const CID_SYSTEM_INFO: ClauseTable = ClauseTable {
+        one: "6.3.3.1",
+        two_three: "6.2.11.3.1",
+        four: "6.2.10.3.1",
+    };
+
+    /// Composite fonts: the CMap embedded, its `/WMode`, its references
+    /// (6.3.3.3 / 6.2.11.3.3 / 6.2.10.3.3).
+    pub(crate) const CMAPS: ClauseTable = ClauseTable {
+        one: "6.3.3.3",
+        two_three: "6.2.11.3.3",
+        four: "6.2.10.3.3",
+    };
+
     // ---- the colour group (milestone 5) ----------------------------------
+
+    /// Separation and DeviceN colour spaces: colorants described, and every
+    /// `/Separation` of one name the same (6.2.4.4 in parts 2 to 4; part 1
+    /// states neither rule, so its arm is never reached).
+    pub(crate) const SEPARATIONS: ClauseTable = ClauseTable {
+        one: "6.2.3.4",
+        two_three: "6.2.4.4",
+        four: "6.2.4.4",
+    };
+
+    /// Content streams: the operators they may use (6.2.10 in part 1, 6.2.2
+    /// in parts 2 to 4, as veraPDF's published rules number them).
+    pub(crate) const CONTENT_STREAMS: ClauseTable = ClauseTable {
+        one: "6.2.10",
+        two_three: "6.2.2",
+        four: "6.2.2",
+    };
 
     /// The output intent (6.2.2 in part 1, 6.2.3 in parts 2 to 4).
     pub(crate) const OUTPUT_INTENT: ClauseTable = ClauseTable {
@@ -543,8 +595,28 @@ pub const STAGED: &[StagedRule] = &[
     },
     StagedRule {
         clause: "6.6.2.1",
-        rule: "the `bytes` and `encoding` attributes of the XMP packet                header's `<?xpacket?>` processing instruction, which a                conforming file may not write",
-        because: "nothing blocks it, and that is why it is named here rather                   than slipped in: the packet reaches this group whole and                   `tinker-pdf-xml` reports the instruction as an event the                   walk does not read. It is a different clause from the                   predefined-schema rules this group serves, with four                   fixtures of its own - `6-6-2-1-t01-fail-b` and `-fail-c`                   under parts 2 and 3, which name the two attributes in their                   own outlines, and two Isartor files under part 1 - and a                   rule landed without its own fixtures and its own counted                   injection beside it is a rule nobody measured",
+        rule: "the `bytes` and `encoding` attributes of the header of an XMP \
+               packet in a metadata stream that is neither the catalog's nor \
+               a page's - a font's, an image's, a form XObject's",
+        because: "the rule runs over the two packets this group already reads: \
+                  the catalog's and every page's. A metadata stream attached \
+                  anywhere else is a packet this group does not open, and \
+                  finding every one of them is an object-graph walk over every \
+                  stream's /Metadata that the metadata group, keyed to the XML \
+                  parser, does not make",
+    },
+    StagedRule {
+        clause: "6.7.2",
+        rule: "part 1: a `/Filter` on a metadata stream other than the \
+               catalog's - a font's, an image's, a page's",
+        because: "the two statements of the rule in hand disagree about its \
+                  scope. veraPDF's published profile (070d39f) judges the \
+                  catalog's metadata stream only; its older wiki statement \
+                  (109b482) tests every metadata stream, and its working \
+                  group's note says the clause requires all of them \
+                  unfiltered. The catalog's is judged; the wider reading is \
+                  the stricter one, and until the corpus measures it a rule \
+                  read that way could report conforming files",
     },
     StagedRule {
         clause: "6.7.8",
@@ -555,10 +627,18 @@ pub const STAGED: &[StagedRule] = &[
                   membership rule reads the properties it describes. What is \
                   not checked is the second hop - `pdfaProperty:valueType` \
                   naming a type, and that type being either one XMP defines or \
-                  one `pdfaSchema:valueType` describes. It needs a list of the \
-                  value type names each cited XMP revision defines, which is a \
-                  table this build does not have; four Isartor fixtures turn \
-                  on it",
+                  one `pdfaSchema:valueType` describes. The names are not what \
+                  is missing: both revisions this build transcribes its \
+                  predefined property tables from print them (January 2004's \
+                  \"Property Value Types\" from p. 62, September 2005's from \
+                  p. 73), and the transcription is work not yet done. What no \
+                  source in hand states is how a declared type string is \
+                  matched against that list - the array forms and their \
+                  letter case, the Choice forms, a structure type's prefix - \
+                  which veraPDF's published rule 6.7.8-9 leaves to an \
+                  `isValueTypeDefined` it does not define, and a matcher \
+                  guessed too strict reports conforming files. Four Isartor \
+                  fixtures turn on it",
     },
     StagedRule {
         clause: "6.1.6",
@@ -617,9 +697,11 @@ pub const STAGED: &[StagedRule] = &[
     },
     StagedRule {
         clause: "6.2.2",
-        rule: "the destination profile's own conformance: its ICC version, \
-               its device class, and whether it is a well-formed profile at \
-               all",
+        rule: "the destination profile's own conformance past its header: \
+               whether its tag table, its required tags and their types are \
+               a well-formed profile of the ICC revision its version names \
+               (the version, the device class and the data colour space are \
+               read from the header and run)",
         because: "tinker-pdf-color's icc::Profile::parse is a transform \
                   builder, not a validator. It refuses a profile it cannot \
                   build a transform from - a v4 profile whose only route to \
@@ -628,17 +710,6 @@ pub const STAGED: &[StagedRule] = &[
                   one of them would report conforming files, so a profile \
                   this build cannot read leaves the intent's colour space \
                   unknown and the rules that need it do not fire",
-    },
-    StagedRule {
-        clause: "6.2.3.4",
-        rule: "Separation and DeviceN: the tint transform function, and two \
-               colourants of the same name having the same transform",
-        because: "the alternate space is read and judged, which is the half \
-                  that decides whether the colour can be reproduced. The tint \
-                  transform is a PDF function, and comparing two of them for \
-                  equality means comparing sampled or PostScript-calculator \
-                  functions - a definition of equality this build has not \
-                  written down",
     },
     StagedRule {
         clause: "6.2.4",
@@ -668,12 +739,16 @@ pub const STAGED: &[StagedRule] = &[
     },
     StagedRule {
         clause: "6.2.10",
-        rule: "content streams: the operators a conforming stream may use, \
-               and the resources every name in it must resolve to",
-        because: "the walk this group runs over content streams is a \
-                  tokenizer with a text state, not an interpreter, and \
-                  deciding that an operator is forbidden means knowing the \
-                  operand stack it was given. That is a renderer's job",
+        rule: "content streams: a stream that names a resource has an \
+               explicitly associated /Resources dictionary (parts 2 to 4, \
+               6.2.2)",
+        because: "the operator half runs: an operator outside ISO 32000's \
+                  Table A.1 is a finding whatever its operands, which a \
+                  tokenizer decides. Whether a form or an appearance stream \
+                  that names a font or an image is relying on resources it \
+                  inherited is a question about which dictionary was in scope \
+                  where, and the walk resolves an inherited dictionary without \
+                  recording that it did",
     },
     StagedRule {
         clause: "6.4",
@@ -689,27 +764,34 @@ pub const STAGED: &[StagedRule] = &[
     },
     StagedRule {
         clause: "6.3.6",
-        rule: "font metrics: the /Widths array against the embedded \
-               program's own advances",
-        because: "the advance is one call into tinker-pdf-font away, and the \
-                  mapping from a character code to the glyph whose advance it \
-                  is, is not: a symbolic TrueType font resolves a code \
-                  through a (3, 0) cmap subtable with the code offset into \
-                  the private-use area, a Type 1 font through the program's \
-                  own encoding vector, and a rule that got either wrong would \
-                  report conforming files by the hundred",
+        rule: "font metrics where the glyph is not one the font maps the \
+               code to by index: a Type 1 program, and a code a reader \
+               reaches only by 9.6.6.4's closing guess",
+        because: "a TrueType or CFF program's advance is judged now, for every \
+                  drawn code, through the glyph the renderer and the subsetter \
+                  themselves select (PageResources::selection) - a symbolic \
+                  face through its (3, 0) subtable, a composite one through \
+                  /CIDToGIDMap. A Type 1 program addresses its charstrings by \
+                  name through its own encoding vector, which that selection \
+                  does not answer as an index, and a glyph reached by guess is \
+                  not one the font stated: a width compared against it would \
+                  report conforming files whenever two readers guess apart",
     },
     StagedRule {
-        clause: "6.3.3.3",
-        rule: "composite fonts: the CMap, its agreement with the CIDFont's \
-               /CIDSystemInfo, and the predefined-CMap list a /Encoding name \
-               must come from",
-        because: "the predefined CMaps are a published table this build \
-                  carries behind the cmap-predefined feature rather than as \
-                  validation data, so a default build and a --no-default-\
-                  features build would disagree about whether a file \
-                  conforms. A conformance verdict that depends on a cargo \
-                  feature is not a verdict",
+        clause: "6.3.3",
+        rule: "composite fonts: a predefined CMap's character collection \
+               against the CIDFont's /CIDSystemInfo, in the parts that let a \
+               file use one unembedded",
+        because: "the rest of the CMap clauses run: a CMap embedded unless the \
+                  part admits its name (only Identity-H and Identity-V under \
+                  part 1, Table 118's sixty-one under parts 2 to 4, the names \
+                  carried as validation data independent of any feature), an \
+                  embedded CMap's /WMode against its program, a reference off \
+                  the list, and an embedded CMap's collection against the \
+                  CIDFont's. A predefined CMap's own collection is in its \
+                  table, which this build carries behind the cmap-predefined \
+                  feature, and a conformance verdict that depended on a cargo \
+                  feature would not be a verdict",
     },
     StagedRule {
         clause: "6.3.2",
@@ -955,7 +1037,12 @@ pub(crate) struct Machinery {
 }
 
 impl Machinery {
-    fn new(groups: Coverage) -> Machinery {
+    /// Machinery for the groups `groups` asks for, with every counter at zero.
+    ///
+    /// `pub(crate)` because the PDF/UA validator counts its reaches with the
+    /// same instrument (`docs/design/pdfua.md`, "the kernel shared"), and a
+    /// second counter would be a second claim about laziness nobody checks.
+    pub(crate) fn new(groups: Coverage) -> Machinery {
         Machinery {
             groups,
             ..Machinery::default()
@@ -979,7 +1066,7 @@ impl Machinery {
     }
 
     /// How many times each group's machinery was reached for.
-    fn reaches(&self) -> (u32, u32, u32) {
+    pub(crate) fn reaches(&self) -> (u32, u32, u32) {
         (self.metadata.get(), self.fonts.get(), self.colour.get())
     }
 }
@@ -1335,7 +1422,7 @@ pub enum FindingKind {
         key: String,
     },
     /// A PostScript XObject, by `/Subtype /PS` or by the `/Subtype2` that
-    /// makes a form one (ISO 19005-1 6.2.7).
+    /// makes a form one (ISO 19005-1 6.2.7; under PDF/X, AN 2.26).
     PostScriptXObjectForbidden,
     /// An image asking to be smoothed on the way up (ISO 19005-1 6.2.4).
     ImageInterpolated,
@@ -1357,7 +1444,8 @@ pub enum FindingKind {
         measured: u64,
     },
     /// The document is encrypted. Every part of ISO 19005 forbids it: a file
-    /// nobody can open without a key is not archival.
+    /// nobody can open without a key is not archival. So does every PDF/X
+    /// level this build validates (AN 2.11).
     Encrypted,
 
     // ---- the syntax group (milestone 2) ----------------------------------
@@ -1394,7 +1482,8 @@ pub enum FindingKind {
         /// Which of `/F`, `/FFilter`, `/FDecodeParms` was there.
         key: String,
     },
-    /// A filter the part forbids by name — `LZWDecode` (6.1.10).
+    /// A filter the part forbids by name — `LZWDecode` (6.1.10); under the
+    /// 2003 PDF/X levels `JBIG2Decode` as well (AN 2.8).
     FilterForbidden {
         /// The filter, as the file spelled it.
         filter: String,
@@ -1565,6 +1654,57 @@ pub enum FindingKind {
         /// role map does not mention it.
         mapped: String,
     },
+    /// A drawn code whose width the font dictionary states and the embedded
+    /// program states differently, by more than one thousandth of an em
+    /// (6.3.6 / 6.2.11.5 / 6.2.10.5).
+    GlyphWidthInconsistent {
+        /// The character code.
+        code: u32,
+        /// The dictionary's width, in 1/1000 em, rounded.
+        dictionary: i64,
+        /// The program's advance, in 1/1000 em, rounded.
+        program: i64,
+    },
+    /// Two `/Separation` arrays of one colorant name with different
+    /// alternate spaces or tint transforms, compared as objects (6.2.4.4).
+    SeparationsDisagree {
+        /// The colorant.
+        colorant: String,
+    },
+    /// A spot colorant a `/DeviceN` space names that its `/Colorants`
+    /// dictionary does not describe (6.2.4.4).
+    ColorantUndescribed {
+        /// The colorant.
+        colorant: String,
+    },
+    /// An ICC profile whose header says it is not a profile the clause
+    /// admits: its version, its device class or its data colour space (the
+    /// output intent's 6.2.2 / 6.2.3; an `ICCBased` space's 6.2.3.2 /
+    /// 6.2.4.2), or a header too short to say.
+    IccProfileHeader {
+        /// `version`, `device class`, `colour space`, or `header` when the
+        /// profile is shorter than the twenty bytes those three occupy.
+        field: String,
+        /// What the header says, as text: `4.2`, `scnr`, `Lab `.
+        found: String,
+    },
+    /// A content stream using an operator ISO 32000 does not define, inside
+    /// `BX`/`EX` or not (6.2.10 / 6.2.2).
+    OperatorUndefined {
+        /// The operator, as written.
+        operator: String,
+    },
+    /// Part 1: a metadata stream whose dictionary carries `/Filter` (6.7.2:
+    /// "Metadata object stream dictionaries shall not contain the Filter
+    /// key"), which keeps a packet readable by a tool that reads no PDF.
+    MetadataStreamFiltered,
+    /// An XMP packet header (`<?xpacket begin=…?>`) carrying the `bytes` or
+    /// the `encoding` attribute, which every part forbids (6.7.5 / 6.6.2.1 /
+    /// 6.7.2.1).
+    XmpPacketHeaderAttribute {
+        /// `bytes` or `encoding`.
+        attribute: String,
+    },
     /// A `/Lang` entry whose value is not a language identifier
     /// (6.8.4 / 6.7.4).
     LanguageMalformed {
@@ -1580,7 +1720,9 @@ pub enum FindingKind {
         key: String,
     },
     /// A `GTS_PDFA1` output intent with no `/DestOutputProfile`
-    /// (6.2.2 / 6.2.3).
+    /// (6.2.2 / 6.2.3); or a `GTS_PDFX` one that embeds no profile and names
+    /// no registered characterization, or that a PDF/X-3 file's
+    /// device-independent colour needs a profile in (AN 2.16).
     DestOutputProfileMissing,
     /// Two `GTS_PDFA1` output intents naming different destination profiles
     /// (6.2.2 / 6.2.3).
@@ -1611,11 +1753,298 @@ pub enum FindingKind {
         /// What the file said.
         declared: String,
     },
-    /// Transparency in a part 1 file, which forbids it outright (6.4).
+    /// Transparency in a part 1 file, which forbids it outright (6.4) — and
+    /// in a 2003 PDF/X file, which does too (AN 2.25).
     TransparencyForbidden {
         /// Which construct: the group, the soft mask, the blend mode or the
         /// constant alpha.
         feature: String,
+    },
+
+    // ---- PDF/UA (ISO 14289), behind `Document::validate_pdfua` ------------
+    //
+    // One closed enum for both standards, which is `docs/design/pdfua.md`'s
+    // decision: a finding kind is a statement about the file, and the clause
+    // is the statement about which standard asked. Where ISO 14289 asks what
+    // ISO 19005 already asks — an unembedded font, a structure tree that is
+    // not there — the kind above is reused and only the clause differs. The
+    // kinds below are the ones ISO 19005 has no rule for.
+    /// No `pdfuaid:part` in the catalog's XMP packet (ISO 14289-1 5,
+    /// ISO 14289-2 5), so the file does not say it is a PDF/UA file at all.
+    PdfUaIdentifierMissing,
+    /// `pdfuaid:part` names a part ISO 14289 does not define.
+    PdfUaPartUnknown {
+        /// What the file said.
+        declared: String,
+    },
+    /// A part 2 claim with no `pdfuaid:rev` (ISO 14289-2 5).
+    PdfUaRevisionMissing,
+    /// A `pdfuaid:rev` that is not a four-digit year (ISO 14289-2 5).
+    PdfUaRevisionMalformed {
+        /// What the file said.
+        declared: String,
+    },
+    /// An identification property written under a prefix other than the
+    /// `pdfuaid` the identification schema fixes (ISO 14289-1 5, ISO 14289-2
+    /// 5).
+    PdfUaIdentifierPrefix {
+        /// The property's local name: `part`, `rev`, `amd` or `corr`.
+        property: String,
+        /// The prefix the packet bound, empty where it bound none.
+        found: String,
+    },
+    /// `/MarkInfo /Suspects true`: the producer says its own tagging may be
+    /// wrong (ISO 14289-1 7.1).
+    MarkedSuspects,
+    /// A structure element whose content is not text — a `Figure` or a
+    /// `Formula` — with no alternative description (ISO 14289-1 7.3, 7.7,
+    /// ISO 14289-2 8.2.5.28.2).
+    AlternativeDescriptionMissing {
+        /// The element's standard type, after the role map.
+        structure_type: String,
+    },
+    /// A numbered heading that skips a level on the way down, or a first
+    /// heading that is not `H1` (ISO 14289-1 7.4.2).
+    HeadingLevelSkipped {
+        /// The level of the heading before it in reading order, 0 for none.
+        previous: u8,
+        /// This heading's level.
+        level: u8,
+    },
+    /// The document states no natural language anywhere it could — not on
+    /// the catalog and not on any structure element (ISO 14289-1 7.2).
+    NaturalLanguageMissing,
+    /// The structure tree's `/K` graph could not be walked as written: a
+    /// cycle, a role-map loop, an unreadable kid (ISO 14289-1 7.1,
+    /// ISO 14289-2 8.2.1). A tree that cannot be walked cannot be the
+    /// hierarchy either clause asks for.
+    StructureTreeUnwalkable,
+    /// A structure element whose `/S` is one of ISO 32000-1 14.8.4's standard
+    /// types and which the `/RoleMap` maps to another type (ISO 14289-1 7.1:
+    /// "standard tags … shall not be remapped").
+    StandardTypeRemapped {
+        /// The standard type the element names.
+        declared: String,
+        /// What the role map resolves it to.
+        mapped: String,
+    },
+    /// A structure element dictionary with no `/P` (ISO 14289-1 7.1,
+    /// ISO 14289-2 8.2.1, citing ISO 32000 14.7.2's table of entries).
+    StructureParentMissing,
+    /// The catalog's packet carries no `dc:title` (ISO 14289-1 7.1,
+    /// ISO 14289-2 8.11.1).
+    DocumentTitleMissing,
+    /// The catalog's `/ViewerPreferences` does not set `/DisplayDocTitle
+    /// true` (ISO 14289-1 7.1, ISO 14289-2 8.11.2), so a viewer's title bar
+    /// shows a file name rather than the document's title.
+    DisplayDocTitleNotSet,
+    /// The catalog's `/Metadata` is not a stream with `/Type /Metadata` and
+    /// `/Subtype /XML` (ISO 14289-1 7.1, ISO 14289-2 8.11.1).
+    MetadataStreamMalformed {
+        /// The entry that is missing or wrong: `Type` or `Subtype`.
+        key: String,
+    },
+    /// Part 2: the catalog has no `/Lang`, or an empty one (ISO 14289-2
+    /// 8.4.4: the default natural language "shall be specified using the
+    /// Lang entry, with a non-empty value, in the catalog dictionary").
+    CatalogLanguageMissing,
+    /// An optional content configuration dictionary with no `/Name`, or an
+    /// empty one (ISO 14289-1 7.10, ISO 14289-2 8.7).
+    OptionalContentConfigUnnamed,
+    /// An optional content configuration dictionary carrying `/AS`
+    /// (ISO 14289-1 7.10, ISO 14289-2 8.7).
+    OptionalContentConfigAutoState,
+    /// A form XObject carrying `/Ref`, which makes it a reference XObject
+    /// (ISO 14289-1 7.20).
+    ReferenceXObjectForbidden,
+    /// An encryption dictionary whose `/P` is absent or leaves bit 10 clear,
+    /// so assistive technology may not extract the text (ISO 14289-1 7.16,
+    /// ISO 32000-1 7.6.3.2 Table 22).
+    AccessibilityPermissionWithheld {
+        /// The `/P` value, or `None` where the dictionary carries none.
+        permissions: Option<i64>,
+    },
+    /// A composite font whose `/Encoding` names a CMap that is neither one of
+    /// ISO 32000-1 9.7.5.2 Table 118's predefined CMaps nor embedded
+    /// (ISO 14289-1 7.21.3.3, ISO 14289-2 8.4.5.4).
+    CMapNotEmbedded {
+        /// The name the font gave.
+        name: String,
+    },
+    /// An embedded CMap whose stream dictionary's `/WMode` and the `/WMode`
+    /// its own program defines differ (ISO 14289-1 7.21.3.3, ISO 14289-2
+    /// 8.4.5.4). Both default to 0, horizontal.
+    CMapWritingModeMismatch {
+        /// The stream dictionary's value.
+        dictionary: i64,
+        /// The program's value.
+        program: i64,
+    },
+    /// An embedded CMap whose `/UseCMap` names a CMap outside Table 118
+    /// (ISO 14289-1 7.21.3.3, ISO 14289-2 8.4.5.4).
+    CMapReferenceNotStandard {
+        /// The referenced CMap's name, or its `/CMapName` where the
+        /// reference is a stream.
+        name: String,
+    },
+    /// A composite font whose CIDFont and embedded CMap name different
+    /// character collections, or whose CIDFont's `/Supplement` exceeds the
+    /// CMap's (ISO 14289-1 7.21.3.1, ISO 14289-2 8.4.5.3.1).
+    CidSystemInfoMismatch {
+        /// Which entry disagrees: `Registry`, `Ordering` or `Supplement`.
+        key: String,
+    },
+    /// A code a page draws that the font's `/ToUnicode` maps to U+0000,
+    /// U+FEFF or U+FFFE (ISO 14289-1 7.21.7, ISO 14289-2 8.4.5.8).
+    ToUnicodeValueForbidden {
+        /// The character code.
+        code: u32,
+        /// The forbidden scalar value it maps to.
+        value: u32,
+    },
+    /// A structure element of a type ISO 32000-1 14.8.4 places — a row, a
+    /// cell, a list item, a TOC item — under a parent that type may not sit
+    /// in (ISO 14289-1 7.2).
+    StructureParentNotAdmitted {
+        /// The element's standard type.
+        element: String,
+        /// Its parent's standard type, or `StructTreeRoot`.
+        parent: String,
+    },
+    /// A structure element whose kids include one its type may not contain
+    /// (ISO 14289-1 7.2): the first such kid.
+    StructureKidNotAdmitted {
+        /// The element's standard type.
+        element: String,
+        /// The kid's standard type.
+        kid: String,
+    },
+    /// A structure element with more kids of one type than it may have: a
+    /// second `THead`, `TFoot` or `Caption` in a `Table` (ISO 14289-1 7.2), a
+    /// second `H` under any node (7.4.4).
+    StructureKidRepeated {
+        /// The element's standard type.
+        element: String,
+        /// The repeated kid's standard type.
+        kid: String,
+        /// How many there are.
+        count: u32,
+    },
+    /// A `Caption` where its container may not have one: between a table's
+    /// first and last kids, after a list's or a TOC's first (ISO 14289-1 7.2).
+    CaptionMisplaced {
+        /// `Table`, `L` or `TOC`.
+        element: String,
+    },
+    /// A `Table` with a `THead` or a `TFoot` and no `TBody` (ISO 14289-1 7.2).
+    TableBodyMissing {
+        /// `THead` or `TFoot`.
+        beside: String,
+    },
+    /// Unnumbered `H` and numbered `Hn` headings in one document (ISO 14289-1
+    /// 7.4.4): "either strongly or weakly structured, but not both".
+    HeadingKindsMixed,
+    /// A `Note` with no `/ID`, or an empty one (ISO 14289-1 7.9).
+    NoteIdMissing,
+    /// A `Note` whose `/ID` another `Note` already carries (ISO 14289-1 7.9).
+    NoteIdDuplicate {
+        /// The identifier, as text.
+        id: String,
+    },
+
+    /// An annotation not in the structure element its kind belongs in — an
+    /// `Annot`, a `Form` for a widget, a `Link` for a link (ISO 14289-1
+    /// 7.18.1, 7.18.4, 7.18.5).
+    AnnotationNotEnclosed {
+        /// The annotation's `/Subtype`.
+        subtype: String,
+        /// The standard type it belongs in.
+        expected: String,
+        /// The standard type of the element it is in, or `None` for none.
+        enclosing: Option<String>,
+    },
+    /// A visible annotation with neither `/Contents` nor an `/Alt` on its
+    /// element — for a widget, neither its field's `/TU` nor the `/Alt`
+    /// (ISO 14289-1 7.18.1).
+    AnnotationDescriptionMissing {
+        /// The annotation's `/Subtype`.
+        subtype: String,
+    },
+    /// A visible annotation of a subtype the claimed part forbids: `TrapNet`
+    /// (ISO 14289-1 7.18.2).
+    AnnotationForbidden {
+        /// The annotation's `/Subtype`.
+        subtype: String,
+    },
+    /// A page with annotations whose `/Tabs` is not `/S` (ISO 14289-1
+    /// 7.18.3).
+    TabOrderNotStructure {
+        /// The `/Tabs` value, or `None` for none.
+        found: Option<String>,
+    },
+    /// A visible link annotation with no `/Contents` (ISO 14289-1 7.18.5).
+    LinkContentsMissing,
+    /// A visible `PrinterMark` annotation inside the structure tree, which
+    /// makes it content rather than the artifact it is (ISO 14289-1 7.18.8).
+    PrinterMarkInStructure,
+
+    // ---- PDF/X (ISO 15930), behind `Document::validate_pdfx` -------------
+    //
+    // The same decision PDF/UA took: where ISO 15930 asks what ISO 19005
+    // already asks — no encryption, no LZW, no transparency, no PostScript,
+    // every font embedded, a device colour the output intent can reproduce —
+    // the kind above is reused and only the clause differs. The kinds below
+    // are the ones ISO 19005 has no rule for. Each cites the section of the
+    // CGATS application notes it is transcribed from (`crate::pdfx`).
+    /// No `/Trapped` in the document information dictionary (AN 2.17).
+    TrappedMissing,
+    /// `/Trapped` present as anything but the name `/True` or `/False`
+    /// (AN 2.17): `/Unknown`, a boolean, a string.
+    TrappedInvalid {
+        /// What was there: the name with its slash, `true` or `false` for a
+        /// boolean, or a word for anything else.
+        found: String,
+    },
+    /// A page with no box the standard requires — `/MediaBox`, its own or
+    /// inherited (AN 2.10).
+    PageBoxMissing {
+        /// The box's key.
+        key: String,
+    },
+    /// A page carrying neither a `/TrimBox` nor an `/ArtBox` (AN 2.10).
+    TrimOrArtBoxMissing,
+    /// A page carrying both a `/TrimBox` and an `/ArtBox` (AN 2.10: "either
+    /// an ArtBox or TrimBox, but not both").
+    TrimAndArtBox,
+    /// A page's trim or art box extending beyond its bleed or crop box
+    /// (AN 2.10).
+    PageBoxOutside {
+        /// `TrimBox` or `ArtBox`.
+        inner: String,
+        /// `BleedBox` or `CropBox`.
+        outer: String,
+    },
+    /// An annotation whose `/Rect` shares area with the box it must stay
+    /// outside (AN 2.28).
+    AnnotationInsideBox {
+        /// The annotation's `/Subtype`.
+        subtype: String,
+        /// The box: `BleedBox`, or `TrimBox` or `ArtBox`.
+        boundary: String,
+    },
+    /// The `PS` operator in a content stream the pages render (AN 2.26).
+    PostScriptOperatorForbidden,
+    /// No output intent of the subtype the claimed standard requires
+    /// (AN 2.16).
+    OutputIntentMissing {
+        /// The `/S` value looked for: `GTS_PDFX`.
+        subtype: String,
+    },
+    /// A private document information entry whose value is not a text string
+    /// (AN 2.29).
+    InfoValueNotText {
+        /// The entry's key.
+        key: String,
     },
 }
 
@@ -2024,7 +2453,10 @@ fn is_pdfaid(name: &tinker_pdf_xml::Name<'_>) -> bool {
 /// Ruling 8's line — format semantics stay in the facade — is the same line.
 ///
 /// Returns the packet unchanged when it is not UTF-32, which is nearly always.
-fn readable(packet: &[u8]) -> Cow<'_, [u8]> {
+///
+/// Shared with the PDF/UA identification reader, which has the same packet in
+/// the same encodings and the same reason to read it.
+pub(crate) fn readable(packet: &[u8]) -> Cow<'_, [u8]> {
     match utf32_endianness(packet) {
         Some(big_endian) => Cow::Owned(from_utf32(packet, big_endian)),
         None => Cow::Borrowed(packet),

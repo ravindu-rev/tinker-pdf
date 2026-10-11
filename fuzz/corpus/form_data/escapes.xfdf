@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xfdf xmlns="http://ns.adobe.com/xfdf/" xml:space="preserve">
+<fields>
+<field name="a&#9;b"><field name="c.d"><value>one&#13;
+two &amp; &lt;three&gt;</value><value><![CDATA[<raw>]]></value></field></field>
+<field><value>nameless</value></field>
+</fields>
+</xfdf>

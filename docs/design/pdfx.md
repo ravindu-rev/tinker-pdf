@@ -63,10 +63,13 @@ no false-negative bar — which is a different proposition from the one
   opposite of what a rule engine over one file can check. X-4p and X-6p, which
   reference only an external *profile*, are in scope because the reference
   itself is checkable.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SD-11, which
+  validates what one file can show and names the rest.
 - **PDF/X-1:2001.** The 2001 level that admitted OPI and encryption; the
   application notes call it deprecated and every later part dropped it. A file
   claiming it is reported as claiming a level this build does not validate,
   which is a finding rather than a silence.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SD-11.
 - **The ICC characterization registry.** 15930's output intent may name a
   registered printing condition instead of embedding a profile, and the
   application notes (2.16.2) expect preflight tools to "be shipped with a list
@@ -74,12 +77,17 @@ no false-negative bar — which is a different proposition from the one
   with a date on it, and vendoring it is a decision to take when a corpus file
   turns on it; until then a `RegistryName` is checked for shape and its
   identifier is not looked up.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: the lookup, from registry bytes the host
+  supplies, is [ROADMAP](../ROADMAP.md) row SD-11.
 - **Trapping, screening, proofing.** `/Trapped` is a flag this build reads
   and writes; it traps nothing. Colour-managed rendering with the output
   intent's profile is the renderer's row, not this one.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) rows FO-24 (trapping),
+  RC-08 (screening) and RC-05 (proofing).
 - **Conversion.** No "make this file PDF/X". Validation reports; the builder
   conforms; nothing rewrites colour or fonts — the same line
   [design/pdfa.md](pdfa.md) draws.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SD-12.
 - **Receiver restrictions ("PDF/X Plus").** The notes describe publishers
   forbidding JPEG or TrueType on top of the standard (2.19). That is a policy
   layer a caller writes over the findings, not a rule here.
@@ -291,9 +299,9 @@ carries — `PdfA { part, level }`, `PdfX(flavour)`, or both — with the shared
 fields shared and three new ones: `trapped: bool`, the `/Info` identification
 strings derived from the flavour rather than supplied, and the box the writer
 puts on every page. `PageBuilder` has `set_crop_box` and `set_bleed_box` and
-**no `set_trim_box` or `set_art_box`**; the flavour needs one of the two, and
-the roadmap already lists trim and art boxes as neither read nor written on
-the editor. Refusals, in `ArchivalRefusal`'s style: `DeviceRGB` and
+**no `set_trim_box` or `set_art_box`**; the flavour needs one of the two.
+(The page reader reads all five boundaries, and the *editor* writes the trim
+and art boxes, since September 2026 — the builder is the half still owed.) Refusals, in `ArchivalRefusal`'s style: `DeviceRGB` and
 `ICCBased` under X-1a, transparency under any 2003 level, a page with no trim
 or art box, an annotation inside the trim box, `add_base_font` under any
 flavour (the variant exists). Nothing is discovered at validation time that
@@ -373,5 +381,82 @@ document, and saying so is its job.
 
 ## As built
 
-*Filled in as milestones land.* Nothing has landed; the roadmap row is not
-scheduled.
+**October 2026: milestone 1, and milestones 3 to 5 as far as the notes
+restate them. Milestones 2, 6 and 7 have not landed, and nothing is
+measured.**
+
+**Milestone 1.** `Document::validate_pdfx`, `validate_pdfx_with` and
+`tpdf check --pdfx`, in `crates/tinker-pdf/src/pdfx.rs` with `pdfx/syntax.rs`
+and `pdfx/print.rs`. The claim is read from `/Info` by exact string, and six
+levels are identified — PDF/X-1:2001 (the version key without the X-1a
+conformance key), PDF/X-1a:2001, PDF/X-3:2002, PDF/X-1a:2003, PDF/X-3:2003
+and PDF/X-4 — each held by a unit fixture beside a trailing-space string, an
+empty one and `PDF/X-5g`, which are carried as claims this build does not
+identify. The PDF/X-4p and PDF/X-6 strings are in no source in hand and are
+not guessed. A claim in an XMP packet with none in `/Info` is no claim
+(`pdfx_rules.rs`). `Machinery`'s counters show a PDF/X read costs no XML
+parse: the metadata counter stays at zero. `hostile_input.rs` calls the
+validator. The census, `pdfx_census.rs`, is written and joined to the nightly
+`corpus.yml`; it skips here, where the corpora are not reachable, so **the
+flavour of each of the 23 real claims is owed by its first nightly run**.
+
+The kernel is shared the way the PDF/UA validator shared it — items opened to
+the crate rather than moved: the content walk's visitor and its record
+(`pdfa::colour::{scan, Used}`), part 1's transparency rule
+(`pdfa::colour::transparency`), and the embedding rule alone
+(`pdfa::fonts::embedding`, which opens no program). `Coverage` is `syntax`,
+`print` and `fonts`; "print" rather than "colour" because transparency and
+PostScript ride the same walk as the colour rules.
+
+**Two departures from the text above, both deliberate.** The design asks for
+X-1:2001 to be "a finding rather than a silence"; it is an `Unread`
+abstention naming the part instead, since every `FindingKind` is a statement
+that the file breaks something, and claiming a deprecated level does not. And
+the design's rule that a part not in hand gets no clause-table row would have
+left PDF/X-3:2003 with no rule at all — not even ISO 15930-6's contents are
+in hand — so under that level a finding cites the application note's section
+(`AN 2.11`), which is the source the rule was transcribed from. Under
+PDF/X-1a:2003 it cites 15930-4's contents as planned.
+
+**Milestones 3 to 5, for what the notes restate.** Held to `pdfx_rules.rs`,
+one fixture and twin per rule under both levels, with the injections counted
+in the commit: encryption (AN 2.11), LZW and JBIG2 (2.8), `/Trapped` (2.17),
+the boxes (2.10), annotations against them (2.28), private `/Info` keys
+(2.29), the `GTS_PDFX` intent and its profile-or-registry shape (2.16),
+`DeviceRGB` under a CMYK profile (2.16), PDF/X-3's profile for
+device-independent colour (2.16), transparency (2.25), PostScript (2.26) and
+embedding (2.18). The readings a sentence did not settle, each written beside
+its rule: with no bleed box, an annotation stays outside the trim or art box
+rather than the crop box ISO 32000 would default to; containment is exact;
+"used" is drawn at a visible rendering mode, as ISO 19005 reads it; the first
+`GTS_PDFX` intent is judged; the registry identifier is checked for shape;
+`DeviceRGB` is judged only where the profile's header says CMYK. Every
+clause the notes do not restate — 15930-4's 6.1, 6.4, 6.7 past the version
+string, 6.9, 6.12, 6.14, 6.15, 6.17, TrapNet, Table 2's shapes, JPEG 2000,
+X-1a's device-independent colour — is an `Unread` gap by name, and what is in
+hand but not decided is `Staged`. (6.7 was neither run nor named until the
+review of the lane: `pdfx_rules.rs` now holds every one of the seventeen
+titles to one or the other.)
+
+**What the exit criteria asked that is not met.** Milestone 3's and 4's
+"zero findings over every pinned suite file" and "the Ghent CMYK and SPOT
+patches" — nothing is pinned. Milestone 4's 19005-2 multiple-intent question
+— not read; the PDF/A colour group still skips an intent that is not
+`GTS_PDFA1`, and no fixture claims both standards. Milestone 3's ledger class
+`secondary-source` — there is no PDF/X ledger, because there is no annotated
+file to disagree with. **And one thing this document did not see:** the
+evidence it names for the false-positive bar does not reach the levels the
+rules run under. Altona 1.2 is a PDF/X-3:2002 suite (its own table above),
+Ghent 5.0 a PDF/X-4 one, and the real claims' readable strings named
+`PDF/X-4`, `PDF/X-3:2002`, `PDF/X-1:2001` and an empty string. So for
+PDF/X-1a:2003 and PDF/X-3:2003 no third party's file is in reach at all; the
+census's no-finding assertion over real 2003 claims may hold over zero files,
+and it prints how many.
+
+**Milestone 2** — not attempted: the corpora are not fetchable in the
+environment this was built in, and the Ghent package's licence is still
+unestablished. **Milestone 6** — not attempted: `ArchivalProfile` and
+`PageBuilder` live in `tinker-pdf-cos`, `PageBuilder` has no `set_trim_box`,
+and the writer's third leg is a shape comparison against a pinned suite file,
+which waits on milestone 2. **Milestone 7** — unpriced; every 15930-7 clause
+is an `Unread` gap by its title.

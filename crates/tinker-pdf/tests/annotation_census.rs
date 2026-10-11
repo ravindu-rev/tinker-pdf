@@ -18,7 +18,24 @@
 //! **`RAN`/`SKIPPED` is printed on the first line of each**, because a census
 //! whose corpus is missing would otherwise be a passing test that measured
 //! nothing. Point it at the tree with `TINKER_CORPUS`; the default is
-//! `corpus/files` beside the workspace.
+//! `corpus/files` beside the workspace. With `TINKER_CORPUS_REQUIRED` set, a
+//! missing corpus is a failure rather than a skip, as the other censuses
+//! read it. The nightly `corpus.yml` job runs both, beside every other census,
+//! since 26 September 2026 — until then neither ran anywhere but by hand.
+//!
+//! # The payload half, and what it has not yet measured
+//!
+//! Since 26 September 2026 the annotation census also counts **12.5.6's
+//! per-family payloads**: for each family, how many annotations it covers and
+//! how many carry the entries their table marks required
+//! (`AnnotationPayload::carries_required`), and it asserts the invariants that
+//! hold whatever the corpus holds — every covered subtype reads into its own
+//! family and no other, every refused one into none, and no page's listing is
+//! cut by either bound. **The per-family counts have not been measured**: the
+//! fetched corpora were not available in the container that wrote them, so
+//! there are no floors on them yet, and the roadmap row says the corpus count
+//! per family is owed. The first nightly run prints them; the floors follow
+//! from it.
 //!
 //! # What adjudicates what
 //!
@@ -34,9 +51,24 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use tinker_pdf::{AnnotationKind, Document, FontKind, ProgramKey};
+use tinker_pdf::{AnnotationKind, AnnotationPayload, Document, FontKind, ProgramKey};
 
 // ---- finding the corpus ---------------------------------------------------
+
+/// Whether a missing corpus is a failure rather than a skip.
+fn required() -> bool {
+    std::env::var_os("TINKER_CORPUS_REQUIRED").is_some_and(|value| value != "0")
+}
+
+/// The skip, said out loud — and refused when the corpus was required.
+fn skip() {
+    println!("SKIPPED (no corpus; set TINKER_CORPUS)");
+    assert!(
+        !required(),
+        "TINKER_CORPUS_REQUIRED is set and there is no corpus at TINKER_CORPUS: \
+         this census would have passed over nothing"
+    );
+}
 
 fn corpus_root() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("TINKER_CORPUS") {
@@ -114,6 +146,54 @@ fn print_tally(heading: &str, counts: &BTreeMap<String, usize>) {
 
 // ---- the annotation census ------------------------------------------------
 
+/// Which 12.5.6 family each subtype belongs to — the census's own
+/// transcription of the clause's grouping, made independently of
+/// `AnnotationPayload::family` and compared against it on every annotation.
+fn expected_family(kind: &AnnotationKind) -> &'static str {
+    match kind {
+        AnnotationKind::Text => "text",
+        AnnotationKind::Link => "link",
+        AnnotationKind::FreeText => "free text",
+        AnnotationKind::Line => "line",
+        AnnotationKind::Square | AnnotationKind::Circle => "square and circle",
+        AnnotationKind::Polygon | AnnotationKind::PolyLine => "polygon and polyline",
+        AnnotationKind::Highlight
+        | AnnotationKind::Underline
+        | AnnotationKind::Squiggly
+        | AnnotationKind::StrikeOut => "text markup",
+        AnnotationKind::Caret => "caret",
+        AnnotationKind::Stamp => "rubber stamp",
+        AnnotationKind::Ink => "ink",
+        AnnotationKind::Popup => "pop-up",
+        AnnotationKind::FileAttachment => "file attachment",
+        AnnotationKind::Sound => "sound",
+        AnnotationKind::Movie => "movie",
+        AnnotationKind::Screen => "screen",
+        AnnotationKind::Widget => "widget",
+        AnnotationKind::PrinterMark => "printer's mark",
+        AnnotationKind::TrapNet => "trap network",
+        AnnotationKind::Watermark => "watermark",
+        AnnotationKind::Redact => "redaction",
+        AnnotationKind::ThreeD => "3D",
+        AnnotationKind::Projection => "projection",
+        AnnotationKind::RichMedia => "rich media",
+        _ => "none",
+    }
+}
+
+/// One family's tally.
+#[derive(Default)]
+struct FamilyCount {
+    /// Annotations of the family's subtypes.
+    total: usize,
+    /// Of those, how many carry what the family's table requires.
+    required_present: usize,
+    /// And how many do not.
+    required_missing: usize,
+    /// Where the first few that do not came from.
+    missing_from: Vec<String>,
+}
+
 /// How the refusals are labelled when the subtype gave no name to use.
 const NO_SUBTYPE: &str = "(no /Subtype)";
 const NOT_A_DICTIONARY: &str = "(not a dictionary)";
@@ -124,7 +204,7 @@ const NOT_A_DICTIONARY: &str = "(not a dictionary)";
 #[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
 fn census_of_the_corpus_annotations() {
     let Some(root) = corpus_root() else {
-        println!("SKIPPED (no corpus; set TINKER_CORPUS)");
+        skip();
         return;
     };
 
@@ -167,6 +247,11 @@ fn census_of_the_corpus_annotations() {
     let mut popups_taking_parent_text = 0usize;
     let mut hidden = 0usize;
     let mut biggest_page = (0usize, String::new());
+    // The payloads, per 12.5.6 family, and the two bounds' counts.
+    let mut families: BTreeMap<&'static str, FamilyCount> = BTreeMap::new();
+    let mut family_mismatches: Vec<String> = Vec::new();
+    let mut entries_dropped = 0usize;
+    let mut annotations_incomplete = 0usize;
 
     // Self-consistency, named as such: `Page::links` walks the same `/Annots`
     // array through `cos::dest`, independently of this model. Every `/Link` one
@@ -190,7 +275,10 @@ fn census_of_the_corpus_annotations() {
         let mut link_annotations_here = 0usize;
 
         for page in document.pages() {
-            let annotations = page.annotations();
+            let list = page.annotation_list();
+            entries_dropped += list.dropped;
+            annotations_incomplete += list.incomplete;
+            let annotations = list.annotations;
             if annotations.len() > biggest_page.0 {
                 biggest_page = (annotations.len(), name.clone());
             }
@@ -226,6 +314,30 @@ fn census_of_the_corpus_annotations() {
                     }
                     // Covered is the first arm; nothing else reaches here.
                     _ => unreachable!("a covered kind is tallied above"),
+                }
+
+                // The payload's family is the one the subtype's clause puts it
+                // in, and a subtype the model refuses has none.
+                let family = annotation.payload.family();
+                if family != expected_family(&annotation.kind) && family_mismatches.len() < 20 {
+                    family_mismatches.push(format!(
+                        "{name}: /{} read as {family}",
+                        annotation.kind.as_name()
+                    ));
+                }
+                if !matches!(annotation.payload, AnnotationPayload::None) {
+                    let count = families.entry(family).or_default();
+                    count.total += 1;
+                    match annotation.payload.carries_required() {
+                        Some(true) => count.required_present += 1,
+                        Some(false) => {
+                            count.required_missing += 1;
+                            if count.missing_from.len() < 3 && !count.missing_from.contains(&name) {
+                                count.missing_from.push(name.clone());
+                            }
+                        }
+                        None => {}
+                    }
                 }
 
                 if annotation.kind.is_markup() {
@@ -307,6 +419,55 @@ fn census_of_the_corpus_annotations() {
          and {popups_taking_parent_text} report text through it (12.5.6.14)"
     );
 
+    // The payloads, per family. Printed for the roadmap row's measurement
+    // and not yet held to floors: this half of the census was written where
+    // the corpus could not be reached, so no number here has been taken.
+    println!("payload families ({} distinct)", families.len());
+    for (family, count) in &families {
+        println!(
+            "  {:>8}  {family}: {} carry what the table requires, {} do not{}",
+            count.total,
+            count.required_present,
+            count.required_missing,
+            if count.missing_from.is_empty() {
+                String::new()
+            } else {
+                format!(" (first seen in {})", count.missing_from.join(", "))
+            }
+        );
+    }
+    println!(
+        "listing bounds: {entries_dropped} /Annots entries past the cap, \
+         {annotations_incomplete} annotations cut by the copy budget"
+    );
+    for line in &family_mismatches {
+        println!("  FAMILY MISMATCH {line}");
+    }
+    assert!(
+        family_mismatches.is_empty(),
+        "{} annotations read into a family their subtype's clause does not name",
+        family_mismatches.len()
+    );
+    // Every covered subtype has a family, so every one of them is counted.
+    assert_eq!(
+        families.values().map(|c| c.total).sum::<usize>(),
+        covered_total,
+        "every covered annotation is counted in exactly one family"
+    );
+    for (family, count) in &families {
+        assert!(
+            count.required_present + count.required_missing <= count.total,
+            "{family}: more required-entry answers than annotations"
+        );
+    }
+    // Neither bound touches a real page: the busiest carries 122 entries, and
+    // the copy budget is sixty-four mebibytes.
+    assert_eq!(entries_dropped, 0, "a corpus page past the 4 096-entry cap");
+    assert_eq!(
+        annotations_incomplete, 0,
+        "a corpus page past the annotation copy budget"
+    );
+
     // **The totality claim, on real files.** Nothing is dropped, so the two
     // tallies account for every annotation read.
     assert_eq!(
@@ -357,7 +518,7 @@ fn census_of_the_corpus_annotations() {
 #[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
 fn census_of_the_corpus_fonts() {
     let Some(root) = corpus_root() else {
-        println!("SKIPPED (no corpus; set TINKER_CORPUS)");
+        skip();
         return;
     };
     let files = all_pdfs(&root);

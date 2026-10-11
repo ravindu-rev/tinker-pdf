@@ -240,3 +240,68 @@ pub fn is_initial_punctuation(c: char) -> bool {
 pub fn is_final_punctuation(c: char) -> bool {
     member(FINAL_PUNCTUATION, c as u32)
 }
+
+/// General_Category `P*` or `S*`: CommonMark 0.31 §2.1's *Unicode punctuation
+/// character*, which the facade's Markdown reader asks of the character either
+/// side of an emphasis delimiter run. From the same vendored
+/// `DerivedGeneralCategory.txt` as every other category here.
+#[must_use]
+pub fn is_punctuation_or_symbol(c: char) -> bool {
+    member(PUNCTUATION_OR_SYMBOL, c as u32)
+}
+
+/// A code point's entry in a sorted `(code, mapped)` case table.
+fn mapped(table: &'static [(u32, &'static str)], code: u32) -> Option<&'static str> {
+    table
+        .binary_search_by_key(&code, |(at, _)| *at)
+        .ok()
+        .and_then(|index| table.get(index))
+        .map(|(_, mapped)| *mapped)
+}
+
+/// The character's full uppercase mapping, Unicode §3.13, or `None` where it
+/// maps to itself. `ß` is `SS`: the mapping is a string because it can be
+/// longer than the character.
+#[must_use]
+pub fn to_upper(c: char) -> Option<&'static str> {
+    mapped(UPPER_MAP, c as u32)
+}
+
+/// The full lowercase mapping, **without** Final_Sigma, which needs the
+/// characters around this one and is [`crate::case`]'s to apply.
+#[must_use]
+pub fn to_lower(c: char) -> Option<&'static str> {
+    mapped(LOWER_MAP, c as u32)
+}
+
+/// The full titlecase mapping. `ǆ` is `ǅ` and not `Ǆ`: three mappings and not
+/// two, which is why `capitalize` is not `uppercase` on one letter.
+#[must_use]
+pub fn to_title(c: char) -> Option<&'static str> {
+    mapped(TITLE_MAP, c as u32)
+}
+
+/// `Cased`, Unicode §3.13 D135.
+#[must_use]
+pub fn is_cased(c: char) -> bool {
+    member(CASED, c as u32)
+}
+
+/// `Case_Ignorable`, §3.13 D136.
+#[must_use]
+pub fn is_case_ignorable(c: char) -> bool {
+    member(CASE_IGNORABLE, c as u32)
+}
+
+/// `Lowercase`, from `DerivedCoreProperties.txt` — `Ll` and
+/// `Other_Lowercase`, so `ª` is lowercase and `ʰ` is too.
+#[must_use]
+pub fn is_lowercase(c: char) -> bool {
+    member(LOWERCASE, c as u32)
+}
+
+/// General_Category `L*` or `N*`.
+#[must_use]
+pub fn is_letter_or_number(c: char) -> bool {
+    member(LETTER_OR_NUMBER, c as u32)
+}

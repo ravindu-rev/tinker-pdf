@@ -102,17 +102,28 @@ fn before_and_after_are_two_boxes() {
     assert!(one.pseudo(1, PseudoElement::After).is_none());
 }
 
-/// The two that generate nothing here return `None` from the same door, rather
-/// than being absent from the enum.
+/// `::first-line` generates nothing here and returns `None` from the same door
+/// rather than being absent from the enum. `::first-letter` returns its style
+/// wherever a rule matches — with no `content` needed, and none generated: its
+/// text is the element's own first letter, found by `epub::read` — and
+/// inheriting from the originating element as the other two do.
 #[test]
-fn first_line_and_first_letter_generate_no_box() {
+fn first_line_generates_no_box_and_first_letter_a_style_without_text() {
     let nodes = pair();
     let styles = styled(
-        "p::first-line { content: \"x\" } p::first-letter { content: \"y\" }",
+        "p { color: #00ff00 } p::first-line { content: \"x\" } \
+         p::first-letter { font-size: 30px }",
         &nodes,
     );
     assert!(styles.pseudo(1, PseudoElement::FirstLine).is_none());
-    assert!(styles.pseudo(1, PseudoElement::FirstLetter).is_none());
+    let letter = styles
+        .pseudo(1, PseudoElement::FirstLetter)
+        .expect("a first-letter style");
+    assert!(letter.text.is_empty() && letter.content.is_empty());
+    assert_eq!(letter.style.font_size, 30.0);
+    assert_eq!(letter.style.color, styles.styles[1].color, "inherited");
+    let none = styled("p { color: red }", &nodes);
+    assert!(none.pseudo(1, PseudoElement::FirstLetter).is_none());
 }
 
 // ---- what it inherits from ---------------------------------------------------

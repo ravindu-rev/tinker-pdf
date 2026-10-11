@@ -1,12 +1,19 @@
 //! `tpdf` — the engine's command-line front end.
 //!
-//! It exists for two reasons. It is how a person looks at what the engine
+//! It exists for three reasons. It is how a person looks at what the engine
 //! thinks of a file without writing Rust, which is most of debugging a corpus
-//! failure; and it is the thing a corpus runner invokes, so every capability
-//! the runner needs has to be reachable from here.
+//! failure; it is the thing a corpus runner invokes, so every capability the
+//! runner needs has to be reachable from here; and its write half (`writing`)
+//! is how a person merges, splits, rotates, encrypts, decrypts, attaches to,
+//! stamps and sanitises a document without writing Rust either — each a
+//! wrapper over the facade (ruling 11), with the two refusals of its own that
+//! `writing`'s documentation names and the facade does not make yet.
 //!
 //! Argument parsing is hand-rolled along with everything else. It is a
 //! sub-command plus flags, which needs no library.
+
+mod images;
+mod writing;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -15,8 +22,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tinker_pdf::{
-    Bitmap, CosDocument, Dict, Document, LadderLevel, ObjRef, Object, Page, RenderOptions,
-    SimpleFontProvider, StreamObj, StructureTree, Tier, WriteMode, WriteOptions, XrefEntry,
+    BilevelCodec, Bitmap, CosDocument, Dict, Document, FontPolicy, HeaderEvidence, LadderLevel,
+    ObjRef, Object, OrderedText, Page, PageTables, ReadingOrder, RenderOptions, Sanitise,
+    SimpleFontProvider, StreamObj, StructureTree, TableEvidence, TableSource, TextFormat,
+    TextWriter, Tier, WriteMode, WriteOptions, XrefEntry,
 };
 
 const USAGE: &str = "\
@@ -24,18 +33,35 @@ tpdf — inspect and convert PDFs with the tinker-pdf engine
 
 usage:
   tpdf info    <file.pdf> [--password P]
-  tpdf text    <file.pdf> [--page N] [--password P]
-  tpdf render  <file.pdf> --out DIR [--page N] [--dpi D] [--jobs N]
-                                    [--no-annotations]
+  tpdf text    <file.pdf> [--page N | --pages LIST] [--password P]
+                          [--json | --xml | --html | --order ORDER | --tables]
+  tpdf render  <file.pdf> --out DIR [--page N | --pages LIST] [--dpi D]
+                                    [--jobs N] [--no-annotations]
   tpdf fields  <file.pdf> [--password P]
   tpdf fonts   <file.pdf> [--out DIR] [--password P]
+  tpdf images  <file.pdf> [--out DIR] [--page N | --pages LIST] [--password P]
   tpdf outline <file.pdf> [--password P]
   tpdf objects <file.pdf> [--object N [--stream [--raw]]] [--password P]
-  tpdf check   <file.pdf>... [--strict] [--pdfa]
+  tpdf check   <file.pdf>... [--strict] [--pdfa] [--pdfua] [--pdfx]
   tpdf probe   <file.pdf>... [--dpi D] [--fonts PATH]
+
+writing (each writes a new file, and takes --font-policy and the image flags):
+  tpdf merge    <a.pdf> <b.pdf>... --out FILE
+  tpdf split    <file.pdf> --out DIR [--pages LIST]
+  tpdf rotate   <file.pdf> --by DEGREES --out FILE [--page N | --pages LIST]
+  tpdf encrypt  <file.pdf> --out FILE [--user-password U] [--owner-password O]
+                           [--permissions P] [--entropy FILE] [--password P]
+  tpdf decrypt  <file.pdf> --out FILE [--password P]
+  tpdf attach   <file.pdf> --attach FILE --out FILE [--name NAME]
+                           [--mime TYPE] [--description TEXT]
+  tpdf stamp    <file.pdf> --stamp FILE --out FILE [--stamp-page N] [--under]
+                           [--page N | --pages LIST]
+  tpdf sanitise <file.pdf> --out FILE [--javascript] [--actions]
+                           [--embedded-files] [--metadata] [--all]
 
 options:
   --page N     one page, 1-based; the default is every page
+  --pages LIST pages and ranges, 1-based: `1-3,5`, acted on in that order
   --object N   one object, by number; the default is a summary of all
   --stream     with --object, write that object's stream data to stdout
   --raw        with --stream, before the filters rather than after
@@ -49,6 +75,74 @@ options:
   --quiet      only report failures
   --strict     with check, also validate against ISO 32000 strictly
   --pdfa       with check, also validate against ISO 19005 (PDF/A)
+  --pdfua      with check, also validate against ISO 14289 (PDF/UA), and
+               print the clauses it abstains on
+  --pdfx       with check, also validate against ISO 15930 (PDF/X): the 2003
+               levels only, and the clauses it did not read
+  --json       with text, the structured text as JSON: pages, blocks, lines,
+               spans with their font and size, and characters with their boxes
+  --xml        the same model as XML
+  --html       the same model as an HTML page that shows each line where the
+               page puts it
+  --order stream|stated|inferred
+               with text, the order the text is read in: the content
+               stream's (the default); the structure tree's, refused for a
+               document that carries none; or one inferred from the page's
+               geometry (columns, running heads and feet, page numbers,
+               footnotes, ruled tables), which is the tree's wherever the
+               document carries one. Standard error says which each page
+               got, and what an inference had to tolerate
+  --tables     with text, each page's tables instead of its text: the ones its
+               structure tree states, or else ones inferred from what the page
+               draws, labelled as such; a line for each table, then one for
+               each cell
+
+writing options:
+  --out FILE   the file a writing command writes; for split, a directory
+  --font-policy subset|keep
+               what happens to embedded font programs on the way out: cut to
+               the glyphs the document still draws (the default), or kept
+  --images keep|flate|jpeg
+               how images of more than one bit are coded on the way out; with
+               none of --images, --bilevel and --max-ppi every image is
+               written as the file stored it (the default)
+  --jpeg-tables FILE
+               with --images jpeg, the quantisation tables: 128 bytes, the
+               luminance table then the chrominance one, natural order
+  --jpeg-subsampled
+               with --images jpeg, 4:2:0 chrominance rather than 4:4:4
+  --bilevel keep|flate|g4|jbig2
+               how one-bit images are coded on the way out
+  --max-ppi N  no placement of an image finer than N pixels an inch
+  --by DEGREES with rotate, a multiple of 90, clockwise, on top of the turn
+               each page already has
+  --owner-password O
+               with encrypt, the password that lifts every restriction
+               (default none: the user password is the owner's too, so it
+               opens the file with every permission)
+  --user-password U
+               with encrypt, the password a reader needs to open the file
+               (default empty: anyone opens it, and the permissions ask; with
+               neither password, anyone opens it with every permission)
+  --permissions P
+               with encrypt, /P as ISO 32000 Table 22 stores it (default -1,
+               everything permitted)
+  --entropy FILE
+               with encrypt, where the 48 random bytes come from (default the
+               system's /dev/urandom, where there is one)
+  --attach FILE, --name NAME, --mime TYPE, --description TEXT
+               with attach, the file, the name it is filed under (default its
+               own), its MIME type and its description
+  --stamp FILE, --stamp-page N, --under
+               with stamp, the document whose page is drawn, which page
+               (default 1), and beneath the page's content rather than over it
+  --javascript, --actions, --embedded-files, --metadata
+               with sanitise, what to take out, at least one of them
+  --all        with sanitise, all four
+
+Passwords are taken on the command line, where another user of the machine
+can read a running process's arguments and a shell may keep them in its
+history. There is no file, environment or prompt alternative yet.
 
 `--jobs` is the one flag that is meant to change nothing but the clock. A
 `Document` is `Send + Sync` and the pages of one are independent — each
@@ -79,6 +173,19 @@ build does not implement all of ISO 19005, and \"no findings\" from a partial
 sweep is not \"it conforms\". A file claiming no flavour is reported and is not
 a failure: most PDFs are not PDF/A and are not pretending to be.
 
+`--pdfua` asks the accessibility question of ISO 14289 the same way, with
+one line more: most of that standard is a judgement about meaning no reader
+can make, so each file also prints how many clauses this build abstained on,
+staged and undecidable, beside the groups that ran. A file claiming no part
+is reported, numbered as part 1 numbers it, and is not a failure.
+
+`--pdfx` asks the print-exchange question of ISO 15930. Rules run under
+PDF/X-1a:2003 and PDF/X-3:2003 only, transcribed from the CGATS application
+notes because the standard's own text is not in hand; any other level a file
+claims is named and not checked, and the line beside the findings counts the
+clauses abstained on, staged and unread. A file claiming no level is reported
+and is not a failure.
+
 `probe` is the one the corpus runner spawns, one child process per file. It
 opens the file, renders every page, rewrites it and validates the rewrite, and
 writes a line-oriented record of what happened to stdout, ending in `done`. That last line is the whole point: a
@@ -108,6 +215,61 @@ at with, which is why it prints the cross-reference kind alongside each
 object — an object the table says lives in an object stream and an object
 found by the repair scanner read the same afterwards, and the difference
 is usually the bug.
+
+`images` lists every image each page draws — once however often it is drawn,
+with how many times — and its geometry, depth, component count, the codec
+that produced its samples and the colour space they are in. `--out DIR`
+writes each image's samples to `<stem>-pNNNN-NNN.raw` exactly as the engine
+decoded them: before any colour conversion, `/Decode` not applied, rows from
+the top padded to a byte. A soft mask's samples go beside them as
+`-smask.raw` and a stencil mask's as `-mask.raw`. The colour space goes with
+them: a CIE space's parameters on the listing line, an indexed palette as
+`-palette.raw`, and every ICC profile in the space as `.icc` — `-base.icc`
+for the space a palette's entries are in, `-alternate.icc` for an alternate.
+A separation's tint transform is not written; the engine does not hand it
+over. Nothing is converted to a picture format, because that would mean
+evaluating the colour space; the listing and those files are what reading
+the bytes needs instead.
+
+The writing commands each make the editor calls their name says and save
+through the library's own save door, so each takes `--font-policy`, and each
+subsets the embedded fonts by default as the library does: a program cut down
+to the glyphs the document still draws no longer carries the outlines of the
+ones it does not. What the pass did is printed with every file written, and a
+program it left whole is named with the reason, because that program still
+carries every outline it had. The image flags are the library's image policy
+on the same door, off unless one is given: a coding per kind of image and a
+resolution, each image recoded or named with why it was left as stored. JPEG
+codes with the tables `--jpeg-tables` names, because the library takes the
+caller's and this tool chooses none.
+
+Every one of them writes the whole file afresh, never an update appended to
+the old bytes: an update keeps the original as its prefix, so the pages a
+split left out or the scripts a sanitise removed would still be in the file.
+A signature over the original bytes does not cover the new ones.
+
+A writing command refuses a flag it would ignore rather than writing the file
+without it — `--fonts` (faces to draw with; the font policy is
+`--font-policy`), another command's flags, or `--password` on an input that is
+not encrypted — and refuses a page `--pages` names twice, which `rotate` would
+turn twice and `stamp` stamp twice. `split` pieces may overlap; the same piece
+twice is refused.
+
+`merge` keeps the first file's catalog — outline, form, labels — and appends
+the pages of each later one, writing a resource those pages share once.
+`split` writes one file per item of `--pages`, or one per page, and each piece
+carries only what its pages reach, with one exception it does not fix: a page
+the outline, a named destination or a link still names stays in the file,
+outside the page tree. `split` is not a redaction.
+
+An encrypted input is refused by every writing command but `encrypt` and
+`decrypt`, because a rewrite that asks for no encryption writes the
+plaintext; so is an encrypted later input to `merge` or `--stamp` file,
+whose pages would be written so too. `decrypt`, and `encrypt` over a file
+that already is, need the owner password unless the owner withheld nothing
+from the user: they would lift the restrictions, which the library reports
+rather than enforcing. Both are the library's answers, which this tool asks
+before it writes; the library's own save, and its bindings, do not ask yet.
 ";
 
 fn main() -> ExitCode {
@@ -131,10 +293,19 @@ fn main() -> ExitCode {
         "render" => run(&options, render),
         "fields" => run(&options, fields),
         "fonts" => run(&options, fonts),
+        "images" => run(&options, images::images),
         "outline" => run(&options, outline),
         "objects" => run(&options, objects),
         "check" => check(&options),
         "probe" => probe(&options),
+        "merge" => writing::print(&options, writing::merge(&options)),
+        "split" => writing::print(&options, writing::split(&options)),
+        "rotate" => writing::print(&options, writing::rotate(&options)),
+        "encrypt" => writing::print(&options, writing::encrypt(&options)),
+        "decrypt" => writing::print(&options, writing::decrypt(&options)),
+        "attach" => writing::print(&options, writing::attach(&options)),
+        "stamp" => writing::print(&options, writing::stamp(&options)),
+        "sanitise" => writing::print(&options, writing::sanitise(&options)),
         other => Err(format!("unknown command `{other}`; try --help")),
     };
 
@@ -173,6 +344,18 @@ struct Options {
     /// valid PDF, `--pdfa` asks whether it is a valid *archival* PDF. A file
     /// can be one and not the other in both directions.
     pdfa: bool,
+    /// Validate against ISO 14289 (PDF/UA) as well, and exit by the verdict.
+    pdfua: bool,
+    /// Validate against ISO 15930 (PDF/X) as well, and exit by the verdict.
+    pdfx: bool,
+    /// `text` in a structured format rather than as plain text: one of
+    /// `--json`, `--xml` and `--html`, and at most one.
+    format: Option<TextFormat>,
+    /// `--order`, for `text`: which order plain text is read in. The
+    /// content stream's unless asked, so no existing invocation changes.
+    order: ReadingOrder,
+    /// `--tables`, for `text`: the page's tables rather than its text.
+    tables: bool,
     /// Print the record format version and stop, naming no file.
     ///
     /// The corpus runner asks before it spawns anything, because a child one
@@ -181,6 +364,82 @@ struct Options {
     /// rendering rather than as a binary that needs rebuilding. Asking costs
     /// one process at the start of a run that spawns thousands.
     record_version: bool,
+    /// `--pages LIST`: inclusive ranges, 0-based. Exclusive with `--page`.
+    page_ranges: Option<Vec<(u32, u32)>>,
+    /// `--font-policy`: what a command that rewrites a document does to its
+    /// embedded font programs on the way out. The facade's default, subset.
+    font_policy: FontPolicy,
+    /// `--by DEGREES`, for `rotate`: a quarter-turn multiple, clockwise.
+    by: Option<i64>,
+    /// `--user-password`, for `encrypt`: what a reader needs to open the file.
+    user_password: Option<String>,
+    /// `--owner-password`, for `encrypt`: what lifts the restrictions.
+    owner_password: Option<String>,
+    /// `--permissions P`, for `encrypt`: `/P` as Table 22 stores it.
+    permissions: Option<i32>,
+    /// `--entropy FILE`, for `encrypt`: where the 48 random bytes come from.
+    entropy: Option<String>,
+    /// `--attach FILE`, for `attach`.
+    attach: Option<String>,
+    /// `--name NAME`, for `attach`: the key the file is filed under.
+    name: Option<String>,
+    /// `--mime TYPE`, for `attach`: the embedded file stream's `/Subtype`.
+    mime: Option<String>,
+    /// `--description TEXT`, for `attach`: the file specification's `/Desc`.
+    description: Option<String>,
+    /// `--stamp FILE`, for `stamp`: the document whose page is drawn.
+    stamp: Option<String>,
+    /// `--stamp-page N`, for `stamp`: which of its pages, 0-based here.
+    stamp_page: u32,
+    /// `--under`, for `stamp`: beneath the page's content rather than over it.
+    under: bool,
+    /// `--javascript`, `--actions`, `--embedded-files` and `--metadata`, for
+    /// `sanitise`, each one field; `--all` is `Sanitise::ALL`.
+    sanitise: Sanitise,
+    /// `--images`, for every writing command: how a continuous-tone image is
+    /// coded on the way out. With `--bilevel` and `--max-ppi`, the image
+    /// policy; none of the three is the facade's default, keep every image.
+    images: Option<writing::Continuous>,
+    /// `--bilevel`: how a one-bit image is coded on the way out.
+    bilevel: Option<BilevelCodec>,
+    /// `--max-ppi N`: the finest resolution any placement of an image is left
+    /// at.
+    max_ppi: Option<f64>,
+    /// `--jpeg-tables FILE`, with `--images jpeg`: the caller's quantisation
+    /// tables, 64 luminance bytes and then 64 chrominance, natural order.
+    jpeg_tables: Option<String>,
+    /// `--jpeg-subsampled`, with `--images jpeg`: 4:2:0 chrominance.
+    jpeg_subsampled: bool,
+    /// Every flag given, as spelt, in order: what a writing command checks
+    /// against the flags it takes, so one it would ignore is refused instead
+    /// (`writing::takes`).
+    given: Vec<String>,
+}
+
+/// `--pages 1-3,5` as inclusive 0-based ranges, in the order given.
+///
+/// A range that runs backwards is refused rather than reversed: `5-3` is more
+/// often a typo than a request for three pages in reverse, and the pages are
+/// acted on in the order given, so guessing would produce a different answer.
+fn page_ranges(raw: &str) -> Result<Vec<(u32, u32)>, String> {
+    let mut ranges = Vec::new();
+    for item in raw.split(',') {
+        let (first, last) = item.split_once('-').unwrap_or((item, item));
+        let number = |text: &str| -> Result<u32, String> {
+            let n: u32 = text
+                .trim()
+                .parse()
+                .map_err(|_| format!("`--pages {raw}`: `{item}` is not a page or a range"))?;
+            n.checked_sub(1)
+                .ok_or_else(|| "pages are numbered from 1".to_string())
+        };
+        let (first, last) = (number(first)?, number(last)?);
+        if first > last {
+            return Err(format!("`--pages {raw}`: `{item}` runs backwards"));
+        }
+        ranges.push((first, last));
+    }
+    Ok(ranges)
 }
 
 impl Options {
@@ -200,12 +459,41 @@ impl Options {
             stream: false,
             strict: false,
             pdfa: false,
+            pdfua: false,
+            pdfx: false,
+            format: None,
+            order: ReadingOrder::Stream,
+            tables: false,
             record_version: false,
+            page_ranges: None,
+            font_policy: FontPolicy::default(),
+            by: None,
+            user_password: None,
+            owner_password: None,
+            permissions: None,
+            entropy: None,
+            attach: None,
+            name: None,
+            mime: None,
+            description: None,
+            stamp: None,
+            stamp_page: 0,
+            under: false,
+            sanitise: Sanitise::default(),
+            images: None,
+            bilevel: None,
+            max_ppi: None,
+            jpeg_tables: None,
+            jpeg_subsampled: false,
+            given: Vec::new(),
         };
 
         let mut index = 0;
         while index < args.len() {
             let arg = args[index].as_str();
+            if arg.starts_with("--") {
+                options.given.push(arg.to_string());
+            }
             // A flag that takes a value consumes the next argument, and
             // running off the end is an error rather than a default.
             let mut value = || -> Result<String, String> {
@@ -264,7 +552,138 @@ impl Options {
                 "--stream" => options.stream = true,
                 "--strict" => options.strict = true,
                 "--pdfa" => options.pdfa = true,
+                "--pdfua" => options.pdfua = true,
+                "--pdfx" => options.pdfx = true,
                 "--record-version" => options.record_version = true,
+                "--json" | "--xml" | "--html" => {
+                    let format = match arg {
+                        "--json" => TextFormat::Json,
+                        "--xml" => TextFormat::Xml,
+                        _ => TextFormat::Html,
+                    };
+                    if options.format.is_some_and(|f| f != format) {
+                        return Err("choose one of --json, --xml and --html".to_string());
+                    }
+                    options.format = Some(format);
+                }
+                "--pages" => options.page_ranges = Some(page_ranges(&value()?)?),
+                // The three orders `ReadingOrder` names. Anything else is
+                // refused: a typo that fell back to the stream would print a
+                // page in the one order the caller asked to be spared.
+                "--order" => {
+                    let raw = value()?;
+                    options.order = match raw.as_str() {
+                        "stream" => ReadingOrder::Stream,
+                        "stated" => ReadingOrder::Stated,
+                        "inferred" => ReadingOrder::Inferred,
+                        _ => {
+                            return Err(format!(
+                                "`--order {raw}`: the orders are `stream`, `stated` and `inferred`"
+                            ))
+                        }
+                    };
+                }
+                "--tables" => options.tables = true,
+                // The two values `FontPolicy` has, by the names it gives them.
+                // Anything else is refused: a typo that fell back to the
+                // default would subset a document somebody asked to keep
+                // whole, or the other way round.
+                "--font-policy" => {
+                    let raw = value()?;
+                    options.font_policy = match raw.as_str() {
+                        "subset" => FontPolicy::Subset,
+                        "keep" => FontPolicy::Keep,
+                        _ => {
+                            return Err(format!(
+                                "`--font-policy {raw}`: the policies are `subset` and `keep`"
+                            ))
+                        }
+                    };
+                }
+                // Passed to `rotate_page` as given: a turn that is not a
+                // multiple of 90 is the facade's to refuse (7.7.3.3).
+                "--by" => {
+                    let raw = value()?;
+                    let degrees: i64 = raw
+                        .parse()
+                        .map_err(|_| format!("`--by {raw}` is not a number"))?;
+                    options.by = Some(degrees);
+                }
+                "--user-password" => options.user_password = Some(value()?),
+                "--owner-password" => options.owner_password = Some(value()?),
+                "--permissions" => {
+                    let raw = value()?;
+                    options.permissions = Some(
+                        raw.parse()
+                            .map_err(|_| format!("`--permissions {raw}` is not a /P value"))?,
+                    );
+                }
+                "--entropy" => options.entropy = Some(value()?),
+                "--attach" => options.attach = Some(value()?),
+                "--name" => options.name = Some(value()?),
+                "--mime" => options.mime = Some(value()?),
+                "--description" => options.description = Some(value()?),
+                "--stamp" => options.stamp = Some(value()?),
+                "--stamp-page" => {
+                    let raw = value()?;
+                    let n: u32 = raw
+                        .parse()
+                        .map_err(|_| format!("`--stamp-page {raw}` is not a number"))?;
+                    options.stamp_page = n
+                        .checked_sub(1)
+                        .ok_or_else(|| "pages are numbered from 1".to_string())?;
+                }
+                "--under" => options.under = true,
+                "--javascript" => options.sanitise.javascript = true,
+                "--actions" => options.sanitise.actions = true,
+                "--embedded-files" => options.sanitise.embedded_files = true,
+                "--metadata" => options.sanitise.metadata = true,
+                "--all" => options.sanitise = Sanitise::ALL,
+                // The codings `ContinuousCodec` and `BilevelCodec` have, by
+                // their names, and refused otherwise for `--font-policy`'s
+                // reason.
+                "--images" => {
+                    let raw = value()?;
+                    options.images = Some(match raw.as_str() {
+                        "keep" => writing::Continuous::Keep,
+                        "flate" => writing::Continuous::Flate,
+                        "jpeg" => writing::Continuous::Jpeg,
+                        _ => {
+                            return Err(format!(
+                                "`--images {raw}`: the codings are `keep`, `flate` and `jpeg`"
+                            ))
+                        }
+                    });
+                }
+                "--bilevel" => {
+                    let raw = value()?;
+                    options.bilevel = Some(match raw.as_str() {
+                        "keep" => BilevelCodec::Keep,
+                        "flate" => BilevelCodec::Flate,
+                        "g4" => BilevelCodec::CcittG4,
+                        "jbig2" => BilevelCodec::Jbig2Generic,
+                        _ => {
+                            return Err(format!(
+                            "`--bilevel {raw}`: the codings are `keep`, `flate`, `g4` and `jbig2`"
+                        ))
+                        }
+                    });
+                }
+                // The facade resamples nothing for a value that is not a
+                // finite positive number; a person who typed one asked for
+                // something, so it is refused here rather than ignored there.
+                "--max-ppi" => {
+                    let raw = value()?;
+                    let ppi: f64 = raw
+                        .parse()
+                        .map_err(|_| format!("`--max-ppi {raw}` is not a number"))?;
+                    if !ppi.is_finite() || ppi <= 0.0 {
+                        return Err(format!("`--max-ppi {raw}` is not a resolution"));
+                    }
+                    options.max_ppi = Some(ppi);
+                }
+                "--jpeg-tables" => options.jpeg_tables = Some(value()?),
+                "--jpeg-subsampled" => options.jpeg_subsampled = true,
                 _ if arg.starts_with("--") => return Err(format!("unknown option `{arg}`")),
                 _ => options.files.push(arg.to_string()),
             }
@@ -276,14 +695,49 @@ impl Options {
         if options.files.is_empty() && !options.record_version {
             return Err("no input file".to_string());
         }
+        if options.page.is_some() && options.page_ranges.is_some() {
+            return Err("choose one of --page and --pages".to_string());
+        }
+        // The structured formats write the text device's model, which is the
+        // stream's order; tables are not text in any order.
+        if options.format.is_some() && (options.order != ReadingOrder::Stream || options.tables) {
+            return Err(
+                "--json, --xml and --html write the page in its stream order: \
+                 --order and --tables are for plain text"
+                    .to_string(),
+            );
+        }
+        if options.tables && options.order != ReadingOrder::Stream {
+            return Err("choose one of --order and --tables".to_string());
+        }
         Ok(options)
     }
 
-    /// The pages to act on: the one asked for, or all of them.
+    /// `--page` or `--pages` as inclusive 0-based ranges, or `None` when
+    /// neither was given and every page is meant.
+    fn ranges(&self) -> Option<Vec<(u32, u32)>> {
+        match (&self.page_ranges, self.page) {
+            (Some(ranges), _) => Some(ranges.clone()),
+            (None, Some(page)) => Some(vec![(page, page)]),
+            (None, None) => None,
+        }
+    }
+
+    /// The pages a reading command acts on: the ones asked for, or all of
+    /// them.
+    ///
+    /// A page past the end is skipped rather than refused, as `--page` always
+    /// was here — a reading command over a directory of files is the normal
+    /// case — and a range is cut at the last page before it is counted out, so
+    /// `--pages 1-4000000000` costs what the document has.
     fn pages(&self, doc: &Document) -> Vec<u32> {
-        match self.page {
-            Some(n) => vec![n],
-            None => (0..doc.page_count()).collect(),
+        let count = doc.page_count();
+        match self.ranges() {
+            Some(ranges) => ranges
+                .into_iter()
+                .flat_map(|(first, last)| first..=last.min(count.saturating_sub(1)))
+                .collect(),
+            None => (0..count).collect(),
         }
     }
 
@@ -503,11 +957,32 @@ fn info(_options: &Options, path: &str, doc: &Document) -> Result<(), String> {
 }
 
 fn text(options: &Options, _path: &str, doc: &Document) -> Result<(), String> {
+    // The model and every escape are the library's (`TextWriter`); this loop
+    // only chooses the pages and prints what it is handed, a page at a time.
+    if let Some(format) = options.format {
+        let mut writer = TextWriter::new(format);
+        for index in options.pages(doc) {
+            if let Some(page) = doc.page(index) {
+                writer.page(&page.text_frame(), &page.text());
+                print!("{}", writer.take());
+            }
+        }
+        print!("{}", writer.finish());
+        return Ok(());
+    }
     for index in options.pages(doc) {
         let Some(page) = doc.page(index) else {
             continue;
         };
-        print!("{}", page.text().plain_text());
+        if options.tables {
+            print!("{}", page_tables(&page, index));
+            continue;
+        }
+        let (text, label) = page_text(&page, index, options.order)?;
+        if let (Some(label), false) = (label, options.quiet) {
+            eprintln!("{label}");
+        }
+        print!("{text}");
         // A form feed between pages, which is what every other text extractor
         // emits and what makes the output splittable again.
         if options.page.is_none() {
@@ -515,6 +990,122 @@ fn text(options: &Options, _path: &str, doc: &Document) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Page `index`'s plain text in `order`, and, for any order but the stream's,
+/// the line that labels it: which order the page got — the tree's, for an
+/// inference asked of a tagged page — and what an inference had to tolerate.
+/// An error for the stated order of a document that states none.
+fn page_text(
+    page: &Page,
+    index: u32,
+    order: ReadingOrder,
+) -> Result<(String, Option<String>), String> {
+    if order == ReadingOrder::Stream {
+        return Ok((page.text().plain_text(), None));
+    }
+    let number = index + 1;
+    let Some(text) = page.text_in(order) else {
+        return Err(format!(
+            "page {number}: no order is stated: the document carries no structure tree"
+        ));
+    };
+    let label = match &text {
+        OrderedText::Stream(_) => format!("page {number}: the content stream's order"),
+        OrderedText::Stated(_) => format!("page {number}: the structure tree's order"),
+        OrderedText::Inferred(inferred) => {
+            let mut label = format!(
+                "page {number}: an inferred order, {} column{}",
+                inferred.columns,
+                if inferred.columns == 1 { "" } else { "s" }
+            );
+            if !inferred.warnings.is_empty() {
+                let warnings: Vec<String> =
+                    inferred.warnings.iter().map(|w| format!("{w:?}")).collect();
+                label.push_str(&format!("; {}", warnings.join(", ")));
+            }
+            label
+        }
+    };
+    Ok((text.plain_text(), Some(label)))
+}
+
+/// Page `index`'s tables as lines: one naming each table — where it came
+/// from, its size, and for an inferred one its evidence and what it had to
+/// tolerate — then one for each cell, `row R, column C: text`, a span written
+/// as a range. A line a cell, so a table of a million columns that states
+/// three cells is three lines.
+fn page_tables(page: &Page, index: u32) -> String {
+    let number = index + 1;
+    let flat = |text: &str| -> String {
+        text.chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect()
+    };
+    let place = |first: usize, span: usize| -> String {
+        if span > 1 {
+            format!("{}-{}", first + 1, first.saturating_add(span))
+        } else {
+            (first + 1).to_string()
+        }
+    };
+    let mut out = String::new();
+    match page.tables(TableSource::Inferred) {
+        PageTables::Stated(tables) => {
+            for (at, table) in tables.iter().enumerate() {
+                out.push_str(&format!(
+                    "page {number}, table {}: stated by the structure tree, {} rows by {} columns\n",
+                    at + 1,
+                    table.rows,
+                    table.columns
+                ));
+                for cell in &table.cells {
+                    out.push_str(&format!(
+                        "  row {}, column {}{}: {}\n",
+                        place(cell.row, cell.row_span),
+                        place(cell.column, cell.col_span),
+                        if cell.header { " (header)" } else { "" },
+                        flat(&cell.text)
+                    ));
+                }
+            }
+        }
+        PageTables::Inferred(found) => {
+            for (at, table) in found.tables.iter().enumerate() {
+                let evidence = match table.evidence {
+                    TableEvidence::Ruled => "inferred from the page's rules",
+                    TableEvidence::Aligned => "inferred from aligned text, no rule drawn",
+                    _ => "inferred",
+                };
+                let header = match table.header {
+                    HeaderEvidence::FillBeneath => ", the first row shaded",
+                    HeaderEvidence::RuleBeneath => ", a heavier rule under the first row",
+                    _ => "",
+                };
+                out.push_str(&format!(
+                    "page {number}, table {}: {evidence}, {} rows by {} columns{header}",
+                    at + 1,
+                    table.rows,
+                    table.columns
+                ));
+                if !table.warnings.is_empty() {
+                    let warnings: Vec<String> =
+                        table.warnings.iter().map(|w| format!("{w:?}")).collect();
+                    out.push_str(&format!("; {}", warnings.join(", ")));
+                }
+                out.push('\n');
+                for cell in &table.cells {
+                    out.push_str(&format!(
+                        "  row {}, column {}: {}\n",
+                        place(cell.row, cell.row_span),
+                        place(cell.column, cell.col_span),
+                        flat(&cell.text)
+                    ));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn render(options: &Options, path: &str, doc: &Document) -> Result<(), String> {
@@ -646,9 +1237,9 @@ fn render_pages(
 /// `--format` switch is the one consumer in this repository that reads what
 /// this writes, `tools/pdfcmp`; the case against is that a debug tool with two
 /// output paths has one that is rarely taken and eventually wrong, and that
-/// PNM was only ever here because there was no encoder. `pdfcmp` still reads a
-/// `.pnm` from any source and takes a `.pdf` directly, which its own usage
-/// text calls the usual shape of a comparison.
+/// PNM was only ever here because there was no encoder. `pdfcmp` reads what
+/// this writes through `Bitmap::from_png`, as well as a `.pnm` from any source
+/// and a `.pdf` directly.
 ///
 /// Alpha is **kept** rather than dropped, which the PNM path could not do:
 /// `Bitmap::to_png` maps `Rgba8` onto colour type 6 and `Gray8` onto type 0.
@@ -1060,6 +1651,10 @@ fn check(options: &Options) -> Result<(), String> {
     let mut invalid = 0usize;
     let mut nonconforming = 0usize;
     let mut unclaimed = 0usize;
+    let mut inaccessible = 0usize;
+    let mut ua_unclaimed = 0usize;
+    let mut unprintable = 0usize;
+    let mut x_unclaimed = 0usize;
 
     for path in &options.files {
         match open(path, options.password.as_deref(), fonts.as_ref()) {
@@ -1124,6 +1719,98 @@ fn check(options: &Options) -> Result<(), String> {
                         println!("      pdfa ran {}", verdict.coverage);
                     }
                 }
+
+                if options.pdfua {
+                    let verdict = doc.validate_pdfua();
+                    match verdict.part {
+                        Some(part) => {
+                            if !verdict.found_nothing() {
+                                inaccessible += 1;
+                            }
+                            if !options.quiet {
+                                println!("      pdfua claims {part}");
+                            }
+                        }
+                        // Not a failure, for the reason a missing PDF/A claim
+                        // is not: most PDFs claim neither.
+                        None => {
+                            ua_unclaimed += 1;
+                            if !options.quiet {
+                                println!("      pdfua claims nothing");
+                            }
+                        }
+                    }
+                    for finding in &verdict.findings {
+                        println!("      pdfua {finding}");
+                    }
+                    // The groups that ran and, beside them, how much was not
+                    // decided — as counts with their words, never as a rate,
+                    // because an abstention is not a pass.
+                    if !options.quiet {
+                        let staged = verdict
+                            .abstained
+                            .iter()
+                            .filter(|a| a.class == tinker_pdf::PdfUaAbstentionClass::Staged)
+                            .count();
+                        let undecidable = verdict.abstained.len() - staged;
+                        println!(
+                            "      pdfua ran {}; abstained on {staged} staged and \
+                             {undecidable} undecidable clauses",
+                            verdict.coverage
+                        );
+                    }
+                }
+
+                if options.pdfx {
+                    let verdict = doc.validate_pdfx();
+                    match (&verdict.claim, verdict.flavour) {
+                        (Some(_), Some(flavour)) => {
+                            if !verdict.found_nothing() {
+                                unprintable += 1;
+                            }
+                            if !options.quiet {
+                                let validated = if flavour.is_validated() {
+                                    ""
+                                } else {
+                                    " (not validated by this build)"
+                                };
+                                println!("      pdfx claims {flavour}{validated}");
+                            }
+                        }
+                        (Some(claim), None) => {
+                            if !options.quiet {
+                                println!(
+                                    "      pdfx claims {:?}, a level this build does not identify",
+                                    claim.version
+                                );
+                            }
+                        }
+                        // Not a failure, for the reason a missing PDF/A claim
+                        // is not.
+                        (None, _) => {
+                            x_unclaimed += 1;
+                            if !options.quiet {
+                                println!("      pdfx claims nothing");
+                            }
+                        }
+                    }
+                    for finding in &verdict.findings {
+                        println!("      pdfx {finding}");
+                    }
+                    if !options.quiet && verdict.claim.is_some() {
+                        let staged = verdict
+                            .abstained
+                            .iter()
+                            .filter(|a| a.class == tinker_pdf::PdfXAbstentionClass::Staged)
+                            .count();
+                        let unread = verdict.abstained.len() - staged;
+                        println!(
+                            "      pdfx ran {}; abstained on {staged} staged and \
+                             {unread} unread clauses",
+                            verdict.coverage
+                        );
+                    }
+                }
             }
             Err(message) => {
                 failed += 1;
@@ -1144,6 +1831,12 @@ fn check(options: &Options) -> Result<(), String> {
     if options.pdfa {
         println!("{nonconforming} with conformance findings, {unclaimed} claiming no flavour");
     }
+    if options.pdfua {
+        println!("{inaccessible} with PDF/UA findings, {ua_unclaimed} claiming no PDF/UA part");
+    }
+    if options.pdfx {
+        println!("{unprintable} with PDF/X findings, {x_unclaimed} claiming no PDF/X level");
+    }
     if failed > 0 {
         return Err(format!("{failed} files could not be opened"));
     }
@@ -1153,6 +1846,16 @@ fn check(options: &Options) -> Result<(), String> {
     if nonconforming > 0 {
         return Err(format!(
             "{nonconforming} files did not conform to the flavour they claim"
+        ));
+    }
+    if inaccessible > 0 {
+        return Err(format!(
+            "{inaccessible} files broke a PDF/UA clause of the part they claim"
+        ));
+    }
+    if unprintable > 0 {
+        return Err(format!(
+            "{unprintable} files broke a PDF/X requirement of the level they claim"
         ));
     }
     Ok(())
@@ -2151,6 +2854,7 @@ fn render_warning_label(warning: &tinker_pdf::RenderWarning) -> String {
     match warning {
         W::UnsupportedImage { codec } => format!("UnsupportedImage({codec})"),
         W::DamagedImage { reason, .. } => format!("DamagedImage({reason})"),
+        W::RepairedColorSpace { reason, .. } => format!("RepairedColorSpace({reason})"),
         W::PageScaledDown { .. } => "PageScaledDown".to_string(),
         W::EmptyTextClip => "EmptyTextClip".to_string(),
         W::UnreadableFont => "UnreadableFont".to_string(),
@@ -2461,6 +3165,248 @@ mod tests {
         }
     }
 
+    /// Plain text unless a format is asked for, and one format at most: two
+    /// would be two documents on one stdout with nothing to split them by.
+    #[test]
+    fn text_takes_one_structured_format_or_none() {
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        let plain = Options::parse(&args(&["a.pdf"])).expect("parses");
+        assert_eq!(plain.format, None);
+        for (flag, format) in [
+            ("--json", TextFormat::Json),
+            ("--xml", TextFormat::Xml),
+            ("--html", TextFormat::Html),
+        ] {
+            let asked = Options::parse(&args(&[flag, "a.pdf"])).expect("parses");
+            assert_eq!(asked.format, Some(format), "{flag}");
+            let twice = Options::parse(&args(&[flag, flag, "a.pdf"])).expect("parses");
+            assert_eq!(twice.format, Some(format), "{flag} twice is still {flag}");
+        }
+        assert_eq!(
+            Options::parse(&args(&["--json", "--html", "a.pdf"]))
+                .err()
+                .as_deref(),
+            Some("choose one of --json, --xml and --html")
+        );
+    }
+
+    /// The stream's order unless another is asked for, by the names
+    /// `ReadingOrder` gives them; neither another order nor tables combine
+    /// with a structured format, which writes the stream's model, nor with
+    /// each other.
+    #[test]
+    fn text_takes_an_order_or_tables_for_plain_text_only() {
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        let plain = Options::parse(&args(&["a.pdf"])).expect("parses");
+        assert_eq!((plain.order, plain.tables), (ReadingOrder::Stream, false));
+        for (raw, order) in [
+            ("stream", ReadingOrder::Stream),
+            ("stated", ReadingOrder::Stated),
+            ("inferred", ReadingOrder::Inferred),
+        ] {
+            let asked = Options::parse(&args(&["--order", raw, "a.pdf"])).expect("parses");
+            assert_eq!(asked.order, order, "{raw}");
+        }
+        assert_eq!(
+            Options::parse(&args(&["--order", "geometric", "a.pdf"]))
+                .err()
+                .as_deref(),
+            Some("`--order geometric`: the orders are `stream`, `stated` and `inferred`")
+        );
+        assert!(
+            Options::parse(&args(&["--tables", "a.pdf"]))
+                .expect("parses")
+                .tables
+        );
+        for refused in [
+            &["--json", "--order", "inferred", "a.pdf"][..],
+            &["--tables", "--html", "a.pdf"][..],
+        ] {
+            assert!(
+                Options::parse(&args(refused))
+                    .err()
+                    .is_some_and(|e| e.contains("are for plain text")),
+                "{refused:?}"
+            );
+        }
+        // The stream's order named is the default, and combines with anything.
+        assert!(Options::parse(&args(&["--json", "--order", "stream", "a.pdf"])).is_ok());
+        assert_eq!(
+            Options::parse(&args(&["--tables", "--order", "inferred", "a.pdf"]))
+                .err()
+                .as_deref(),
+            Some("choose one of --order and --tables")
+        );
+    }
+
+    /// Two columns of twelve lines drawn across the page, line by line, and a
+    /// ruled table of two rows by two columns under them, its second row one
+    /// cell across both — no rule between them: untagged.
+    fn columns_and_a_table() -> Document {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        builder.add_page(612.0, 792.0, |page| {
+            for row in 0..12 {
+                let y = 680.0 - f64::from(row) * 12.0;
+                page.text(
+                    b"F0",
+                    10.0,
+                    72.0,
+                    y,
+                    &format!("left column line {row} of the page"),
+                );
+                page.text(
+                    b"F0",
+                    10.0,
+                    324.0,
+                    y,
+                    &format!("right column line {row} of the page"),
+                );
+            }
+            page.raw(
+                b"0.5 w 72 500 m 272 500 l S 72 470 m 272 470 l S 72 440 m 272 440 l S\n\
+                  72 440 m 72 500 l S 172 470 m 172 500 l S 272 440 m 272 500 l S\n",
+            );
+            for (x, y, text) in [(76.0, 482.0, "a"), (176.0, 482.0, "b"), (76.0, 452.0, "c")] {
+                page.text(b"F0", 10.0, x, y, text);
+            }
+        });
+        Document::open(builder.finish()).expect("it opens")
+    }
+
+    /// **`--order inferred` reads down each column and says so**; the stream
+    /// order is the one `text` always printed; `--order stated` of an
+    /// untagged document is refused; and `--tables` lists the table's cells.
+    #[test]
+    fn text_prints_the_order_asked_for_and_the_tables() {
+        let doc = columns_and_a_table();
+        let page = doc.page(0).expect("a page");
+        let (stream, label) = page_text(&page, 0, ReadingOrder::Stream).expect("the stream");
+        assert_eq!(stream, page.text().plain_text());
+        assert_eq!(label, None);
+
+        let (inferred, label) = page_text(&page, 0, ReadingOrder::Inferred).expect("an inference");
+        let lines: Vec<&str> = inferred.lines().collect();
+        let left = lines
+            .iter()
+            .position(|l| *l == "left column line 11 of the page")
+            .expect("the left column's last line");
+        let right = lines
+            .iter()
+            .position(|l| *l == "right column line 0 of the page")
+            .expect("the right column's first line");
+        assert!(left < right, "{inferred}");
+        let label = label.expect("a label");
+        assert!(
+            label.starts_with("page 1: an inferred order, 2 columns"),
+            "{label}"
+        );
+        assert!(label.contains("TableSuspected"), "{label}");
+
+        assert_eq!(
+            page_text(&page, 0, ReadingOrder::Stated).err().as_deref(),
+            Some("page 1: no order is stated: the document carries no structure tree")
+        );
+
+        assert_eq!(
+            page_tables(&page, 0),
+            "page 1, table 1: inferred from the page's rules, 2 rows by 2 columns\n\
+             \x20 row 1, column 1: a\n\
+             \x20 row 1, column 2: b\n\
+             \x20 row 2, column 1-2: c\n"
+        );
+    }
+
+    /// **`--order stated` prints the order the tree states** (reading-order
+    /// milestone 1's exit): on a tagged page drawn last paragraph first, it is
+    /// `structured_text().plain_text()` — the tree's order, the paragraphs
+    /// first to last — and not the stream's, which `text` prints otherwise;
+    /// and it says on standard error that the order is the tree's.
+    #[test]
+    fn text_prints_the_stated_order_of_a_tagged_page() {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        let paragraphs = ["first paragraph", "second paragraph", "third paragraph"];
+        builder.add_page(612.0, 792.0, |page| {
+            for (at, text) in paragraphs.iter().enumerate().rev() {
+                let y = 700.0 - 40.0 * at as f64;
+                page.tagged_keyed(b"P", at as u64 + 1, at as u64, |page| {
+                    page.text(b"F0", 10.0, 72.0, y, text);
+                });
+            }
+        });
+        let doc = Document::open(builder.finish()).expect("it opens");
+        let page = doc.page(0).expect("a page");
+        let structured = page.structured_text().expect("a tagged page");
+        let (stated, label) = page_text(&page, 0, ReadingOrder::Stated).expect("a stated order");
+        assert_eq!(stated, structured.plain_text());
+        assert_eq!(label.as_deref(), Some("page 1: the structure tree's order"));
+        let order: Vec<&str> = stated.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(order, paragraphs);
+        let (stream, _) = page_text(&page, 0, ReadingOrder::Stream).expect("the stream");
+        let drawn: Vec<&str> = stream.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            drawn,
+            ["third paragraph", "second paragraph", "first paragraph"]
+        );
+    }
+
+    /// `--pages` is pages and ranges, 1-based, in the order given; what it
+    /// cannot mean is refused rather than guessed at, and it does not combine
+    /// with `--page`.
+    #[test]
+    fn page_lists_parse_in_order_and_refuse_what_they_cannot_mean() {
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        let asked = Options::parse(&args(&["--pages", "5-6,1,2-4", "a.pdf"])).expect("parses");
+        assert_eq!(asked.ranges(), Some(vec![(4, 5), (0, 0), (1, 3)]));
+        let one = Options::parse(&args(&["--page", "3", "a.pdf"])).expect("parses");
+        assert_eq!(
+            one.ranges(),
+            Some(vec![(2, 2)]),
+            "--page N is the range N-N"
+        );
+        let neither = Options::parse(&args(&["a.pdf"])).expect("parses");
+        assert_eq!(neither.ranges(), None, "every page");
+
+        for (raw, why) in [
+            ("3-1", "`--pages 3-1`: `3-1` runs backwards"),
+            ("0-2", "pages are numbered from 1"),
+            ("1,,2", "`--pages 1,,2`: `` is not a page or a range"),
+            ("one", "`--pages one`: `one` is not a page or a range"),
+            ("1-2-3", "`--pages 1-2-3`: `1-2-3` is not a page or a range"),
+        ] {
+            assert_eq!(
+                Options::parse(&args(&["--pages", raw, "a.pdf"]))
+                    .err()
+                    .as_deref(),
+                Some(why),
+                "--pages {raw}"
+            );
+        }
+        assert_eq!(
+            Options::parse(&args(&["--page", "1", "--pages", "2", "a.pdf"]))
+                .err()
+                .as_deref(),
+            Some("choose one of --page and --pages")
+        );
+    }
+
+    /// A reading command cuts a range at the last page rather than counting
+    /// out pages the document does not have.
+    #[test]
+    fn a_reading_command_cuts_a_range_at_the_last_page() {
+        let doc = many_pages(3);
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        let huge = Options::parse(&args(&["--pages", "2-4000000000", "a.pdf"])).expect("parses");
+        assert_eq!(huge.pages(&doc), vec![1, 2]);
+        let past = Options::parse(&args(&["--pages", "7-9,1", "a.pdf"])).expect("parses");
+        assert_eq!(
+            past.pages(&doc),
+            vec![0],
+            "a range wholly past the end is empty"
+        );
+    }
+
     /// A page that will not write is counted, and every other page still runs.
     ///
     /// `run`'s policy over files, applied to pages. Rendering used to `?` on
@@ -2541,6 +3487,57 @@ mod tests {
         let strict =
             Options::parse(&["--strict".to_string(), "a.pdf".to_string()]).expect("parses");
         assert!(strict.strict && !strict.pdfa, "nor the other way round");
+
+        // ISO 14289 is a third question, and the same independence holds.
+        let accessible =
+            Options::parse(&["--pdfua".to_string(), "a.pdf".to_string()]).expect("parses");
+        assert!(accessible.pdfua && !accessible.pdfa && !accessible.strict);
+        assert!(!neither.pdfua);
+
+        // ISO 15930 is a fourth, and implies none of the others.
+        let print = Options::parse(&["--pdfx".to_string(), "a.pdf".to_string()]).expect("parses");
+        assert!(print.pdfx && !print.pdfua && !print.pdfa && !print.strict);
+        assert!(!neither.pdfx && !accessible.pdfx);
+    }
+
+    /// `check --pdfx` exits by the verdict, as `--pdfa` and `--pdfua` do and
+    /// as `docs/features/pdfx.md` says it does: a file that breaks a
+    /// requirement of the level it claims is an error, and a file that claims
+    /// no level is not. The review of lane 7A found the count printed and
+    /// never returned.
+    #[test]
+    fn check_pdfx_exits_by_the_verdict() {
+        let dir = scratch("check-pdfx");
+        let write = |name: &str, claim: Option<&str>| {
+            let mut builder = DocumentBuilder::new();
+            builder.add_base_font(b"F0", b"Helvetica");
+            if let Some(claim) = claim {
+                builder.set_info(b"GTS_PDFXVersion", claim);
+            }
+            builder.add_page(200.0, 100.0, |page| {
+                page.text(b"F0", 12.0, 10.0, 50.0, "hello");
+            });
+            let path = format!("{dir}/{name}.pdf");
+            std::fs::write(&path, builder.finish()).expect("written");
+            path
+        };
+        let check_pdfx = |path: String| {
+            check(
+                &Options::parse(&["--pdfx".to_string(), "--quiet".to_string(), path])
+                    .expect("parses"),
+            )
+        };
+        // No output intent, no trim box, an unembedded font: anything but
+        // clean under PDF/X-1a:2003.
+        let claiming = write("claiming", Some("PDF/X-1a:2003"));
+        let verdict = check_pdfx(claiming);
+        assert!(
+            verdict
+                .as_ref()
+                .is_err_and(|message| message.contains("PDF/X")),
+            "{verdict:?}"
+        );
+        assert_eq!(check_pdfx(write("unclaimed", None)), Ok(()));
     }
 
     /// A finding prints its clause first, then its object when it has one.

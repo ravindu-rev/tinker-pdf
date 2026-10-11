@@ -60,76 +60,23 @@ use super::{clauses, FindingKind, Flavour, Level, Machinery, Part, Raw, RuleGrou
 use crate::structure::StructureTree;
 use crate::Document;
 
-/// The standard structure types (ISO 32000-1 14.8.4, Tables 334 to 337).
-///
-/// **One list for parts 1 to 3, and that is the safe direction.** Part 1's
-/// reference specification is PDF 1.4, which did not define `Annot`, `THead`,
-/// `TBody` or `TFoot`; parts 2 and 3's is ISO 32000-1, which does. Modelling
-/// that as two lists would make a part 1 file carrying `/TBody` a finding, and
-/// the cost of being wrong about it is a conforming file reported — so the
-/// wider list is used for every part and the narrower reading is not taken on
-/// four names no corpus fixture tests.
-///
-/// `H1` to `H6` and no further: ISO 32000-1 stops there, and the open-ended
-/// `Hn` arrived with ISO 32000-2, which no part that has a level A is defined
-/// on.
-const STANDARD_STRUCTURE_TYPES: &[&str] = &[
-    // 14.8.4.2, grouping elements.
-    "Document",
-    "Part",
-    "Art",
-    "Sect",
-    "Div",
-    "BlockQuote",
-    "Caption",
-    "TOC",
-    "TOCI",
-    "Index",
-    "NonStruct",
-    "Private",
-    // 14.8.4.3, block-level: paragraphlike.
-    "P",
-    "H",
-    "H1",
-    "H2",
-    "H3",
-    "H4",
-    "H5",
-    "H6",
-    // 14.8.4.3, block-level: lists.
-    "L",
-    "LI",
-    "Lbl",
-    "LBody",
-    // 14.8.4.3, block-level: tables.
-    "Table",
-    "TR",
-    "TH",
-    "TD",
-    "THead",
-    "TBody",
-    "TFoot",
-    // 14.8.4.4, inline-level.
-    "Span",
-    "Quote",
-    "Note",
-    "Reference",
-    "BibEntry",
-    "Code",
-    "Link",
-    "Annot",
-    "Ruby",
-    "RB",
-    "RT",
-    "RP",
-    "Warichu",
-    "WT",
-    "WP",
-    // 14.8.4.5, illustrations.
-    "Figure",
-    "Formula",
-    "Form",
-];
+// The standard structure types (ISO 32000-1 14.8.4), from the writer's crate
+// since the tagged-writing row: `DocumentBuilder::map_role` refuses to remap
+// exactly the types this rule accepts, and one list is what keeps those the
+// same question.
+//
+// **One list for parts 1 to 3, and that is the safe direction.** Part 1's
+// reference specification is PDF 1.4, which did not define `Annot`, `THead`,
+// `TBody` or `TFoot`; parts 2 and 3's is ISO 32000-1, which does. Modelling
+// that as two lists would make a part 1 file carrying `/TBody` a finding, and
+// the cost of being wrong about it is a conforming file reported — so the
+// wider list is used for every part and the narrower reading is not taken on
+// four names no corpus fixture tests.
+//
+// `H1` to `H6` and no further: ISO 32000-1 stops there, and the open-ended
+// `Hn` arrived with ISO 32000-2, which no part that has a level A is defined
+// on.
+use tinker_pdf_cos::STANDARD_STRUCTURE_TYPES;
 
 /// How many structure elements one document is judged over.
 ///
@@ -227,7 +174,7 @@ fn mark_info(doc: &CosDocument, catalog: &Dict, out: &mut Vec<Raw>) {
 /// reported under the requirement it actually breaks — that a consumer cannot
 /// tell what the element is — rather than under a description of how its role
 /// map is spelled.
-fn structure_types(tree: &StructureTree, out: &mut Vec<Raw>) {
+pub(crate) fn structure_types(tree: &StructureTree, out: &mut Vec<Raw>) {
     let mut reported = 0usize;
     for element in tree.elements() {
         if reported >= MAX_TYPE_FINDINGS {
@@ -291,7 +238,7 @@ fn element_languages(tree: &StructureTree, flavour: Flavour, out: &mut Vec<Raw>)
 
 /// Pushes a finding when `value` is not a language identifier.
 fn report_language(value: &str, flavour: Flavour, object: Option<ObjRef>, out: &mut Vec<Raw>) {
-    if language_is_well_formed(value, flavour.part) {
+    if language_is_well_formed(value, LanguageGrammar::of_part(flavour.part)) {
         return;
     }
     out.push(Raw {
@@ -324,12 +271,12 @@ fn report_language(value: &str, flavour: Flavour, object: Option<ObjRef>, out: &
 ///
 /// The empty string is admitted before the grammar is reached: `pass-d` in
 /// both parts writes `/Lang ()` and says in its own outline that an empty text
-/// string is permitted.
-fn language_is_well_formed(value: &str, part: Part) -> bool {
+/// string is permitted. **ISO 14289 does not admit it**, and that is the one
+/// flag [`LanguageGrammar`] carries for it.
+pub(crate) fn language_is_well_formed(value: &str, grammar: LanguageGrammar) -> bool {
     if value.is_empty() {
-        return true;
+        return grammar.empty_permitted;
     }
-    let digits_in_subtags = part != Part::One;
     let mut tags = value.split('-');
     let Some(primary) = tags.next() else {
         return false;
@@ -337,7 +284,49 @@ fn language_is_well_formed(value: &str, part: Part) -> bool {
     if !is_tag(primary, false) {
         return false;
     }
-    tags.all(|subtag| is_tag(subtag, digits_in_subtags))
+    tags.all(|subtag| is_tag(subtag, grammar.digits_in_subtags))
+}
+
+/// Which reading of a `/Lang` value a standard asks for.
+///
+/// **One function, two flags, three readers** — `docs/design/pdfua.md`'s
+/// "one shared grammar, split by one flag". The grammar is RFC 1766's or RFC
+/// 3066's (the only difference being digits in a subtag), and the empty string
+/// is permitted or not:
+///
+/// | | digits in a subtag | `/Lang ()` |
+/// | --- | --- | --- |
+/// | ISO 19005-1 (PDF Reference 9.8.1, RFC 1766) | no | permitted |
+/// | ISO 19005-2/3 (ISO 32000-1 14.9.2, RFC 3066) | yes | permitted |
+/// | ISO 14289-1 and -2 (RFC 3066) | yes | **refused** |
+///
+/// The PDF/A fixtures `6-8-4-t01-pass-d` and `6-7-4-t01-pass-d` say in
+/// their own outlines that an empty text string "is permitted"; veraPDF's
+/// published PDF/UA rules 7.2-29 and 8.4.4-2 test the value against
+/// `^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$`, which does not match it, and the
+/// PDF/UA corpus annotates "Value of Lang is empty" `fail`
+/// (`7.2-t29-fail-n` to `-p`, as the design records them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LanguageGrammar {
+    digits_in_subtags: bool,
+    empty_permitted: bool,
+}
+
+impl LanguageGrammar {
+    /// The grammar ISO 19005 `part` cites.
+    pub(crate) fn of_part(part: Part) -> LanguageGrammar {
+        LanguageGrammar {
+            digits_in_subtags: part != Part::One,
+            empty_permitted: true,
+        }
+    }
+
+    /// The grammar both parts of ISO 14289 ask for: RFC 3066, and never
+    /// empty.
+    pub(crate) const PDF_UA: LanguageGrammar = LanguageGrammar {
+        digits_in_subtags: true,
+        empty_permitted: false,
+    };
 }
 
 /// One tag of a language identifier: one to eight letters, or letters and
@@ -377,7 +366,7 @@ mod tests {
             ("fr-ca", true),  // 6-8-4-t01-pass-e
         ] {
             assert_eq!(
-                language_is_well_formed(value, Part::One),
+                language_is_well_formed(value, LanguageGrammar::of_part(Part::One)),
                 well_formed,
                 "part 1: {value:?}"
             );
@@ -397,7 +386,7 @@ mod tests {
         ] {
             for part in [Part::Two, Part::Three] {
                 assert_eq!(
-                    language_is_well_formed(value, part),
+                    language_is_well_formed(value, LanguageGrammar::of_part(part)),
                     well_formed,
                     "part {}: {value:?}",
                     part.number()
@@ -415,23 +404,81 @@ mod tests {
     /// `ru-petr1708`, which the suite annotates `pass`.
     #[test]
     fn digits_in_a_subtag_are_part_ones_defect_and_nobody_elses() {
-        assert!(!language_is_well_formed("en-12", Part::One));
-        assert!(language_is_well_formed("en-12", Part::Two));
-        assert!(language_is_well_formed("en-12", Part::Three));
+        assert!(!language_is_well_formed(
+            "en-12",
+            LanguageGrammar::of_part(Part::One)
+        ));
+        assert!(language_is_well_formed(
+            "en-12",
+            LanguageGrammar::of_part(Part::Two)
+        ));
+        assert!(language_is_well_formed(
+            "en-12",
+            LanguageGrammar::of_part(Part::Three)
+        ));
         // The primary tag is `1*8ALPHA` in both RFCs, so this is not a split.
-        assert!(!language_is_well_formed("12-BE", Part::One));
-        assert!(!language_is_well_formed("12-BE", Part::Two));
+        assert!(!language_is_well_formed(
+            "12-BE",
+            LanguageGrammar::of_part(Part::One)
+        ));
+        assert!(!language_is_well_formed(
+            "12-BE",
+            LanguageGrammar::of_part(Part::Two)
+        ));
+    }
+
+    /// `/Lang ()` is permitted by ISO 19005 and refused by ISO 14289, with
+    /// one function deciding both and a test on each side of the flag
+    /// (`docs/design/pdfua.md`, milestone 2's exit criterion).
+    #[test]
+    fn the_empty_language_is_pdfa_conforming_and_pdfua_not() {
+        for part in [Part::One, Part::Two, Part::Three] {
+            assert!(language_is_well_formed("", LanguageGrammar::of_part(part)));
+        }
+        assert!(!language_is_well_formed("", LanguageGrammar::PDF_UA));
+        // Otherwise PDF/UA reads RFC 3066 as parts 2 and 3 do: the values the
+        // design records from the PDF/UA corpus's 7.2-t29 outlines.
+        for (value, well_formed) in [
+            ("portugue", true),
+            ("portugues", false),
+            ("en-1234abcd", true),
+            ("en-1234abcde", false),
+            ("12-BE", false),
+            ("\u{430}\u{43d}-\u{421}\u{410}", false),
+            ("en-12", true),
+        ] {
+            assert_eq!(
+                language_is_well_formed(value, LanguageGrammar::PDF_UA),
+                well_formed,
+                "PDF/UA: {value:?}"
+            );
+        }
     }
 
     /// Eight characters is the cap both RFCs put on a tag, and nine is not.
     #[test]
     fn a_tag_is_one_to_eight_characters() {
-        assert!(language_is_well_formed("abcdefgh", Part::One));
-        assert!(!language_is_well_formed("abcdefghi", Part::One));
-        assert!(language_is_well_formed("en-abcdefgh", Part::One));
-        assert!(!language_is_well_formed("en-abcdefghi", Part::One));
+        assert!(language_is_well_formed(
+            "abcdefgh",
+            LanguageGrammar::of_part(Part::One)
+        ));
+        assert!(!language_is_well_formed(
+            "abcdefghi",
+            LanguageGrammar::of_part(Part::One)
+        ));
+        assert!(language_is_well_formed(
+            "en-abcdefgh",
+            LanguageGrammar::of_part(Part::One)
+        ));
+        assert!(!language_is_well_formed(
+            "en-abcdefghi",
+            LanguageGrammar::of_part(Part::One)
+        ));
         // A trailing hyphen leaves an empty subtag, which is not `1*8`.
-        assert!(!language_is_well_formed("en-", Part::One));
+        assert!(!language_is_well_formed(
+            "en-",
+            LanguageGrammar::of_part(Part::One)
+        ));
     }
 
     /// Every name in the table is distinct, and the count is the one ISO

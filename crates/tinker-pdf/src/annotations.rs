@@ -61,7 +61,12 @@
 
 use std::sync::Arc;
 
-use tinker_pdf_cos::{decode_text_string, parse_date, CosDocument, Date, Dict, ObjRef, Object};
+use tinker_pdf_cos::{parse_date, CosDocument, Date, Dict, ObjRef, Object};
+
+mod payload;
+
+use payload::Read;
+pub use payload::{AnnotationPayload, BorderEffect, FileSpec, Linked, MAX_ANNOTATION_BYTES};
 
 /// How many `/Annots` entries one page reports.
 ///
@@ -70,17 +75,18 @@ use tinker_pdf_cos::{decode_text_string, parse_date, CosDocument, Date, Dict, Ob
 /// corpus census is 122, three orders of magnitude below — so nothing a
 /// producer writes is truncated by it.
 ///
-/// **Past the cap the list is shortened and says nothing.** There is no
-/// warning, and that is forced rather than chosen: a warning would have to go
-/// on [`crate::Document::warnings`], and appending to it here would make a
-/// read change what the document reports about itself, which is the module
-/// comment's second argument against building this on `cos::font::read`. The
-/// two honest options left are to say so — which this comment, the method's
-/// own documentation and the roadmap row all now do — and to pin the bound so
-/// it cannot quietly go away: `a_hostile_annots_array_is_capped` does that,
-/// and before it existed raising this constant to `usize::MAX` passed every
-/// other test in the crate.
-const MAX_ANNOTS: usize = 4096;
+/// **Past the cap the list is shortened, and the returned value says by how
+/// much**: [`AnnotationList::dropped`], from [`crate::Page::annotation_list`].
+/// Not a warning: a warning would have to go on
+/// [`crate::Document::warnings`], and appending to it here would make a read
+/// change what the document reports about itself, which is the module
+/// comment's second argument against building this on `cos::font::read`.
+/// Until September 2026 that argument ended at "so it says nothing", and the
+/// roadmap carried the gap; the count in the returned value is the answer that
+/// does not mutate anything. `a_hostile_annots_array_is_capped` pins the bound
+/// and the count — before it existed raising this constant to `usize::MAX`
+/// passed every other test in the crate.
+pub(crate) const MAX_ANNOTS: usize = 4096;
 
 /// How far a pop-up's `/Parent` chain is followed before it is abandoned.
 ///
@@ -386,14 +392,78 @@ impl AnnotationFlags {
     }
 }
 
+/// The border an annotation is drawn with (12.5.4): `/BS` (Table 166) where
+/// the annotation has one, and the older `/Border` array (Table 164) where it
+/// does not — 12.5.2 has `/BS` supersede it.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Border {
+    /// The width in points: `/BS /W`, or `/Border`'s third number. 1 by
+    /// default, and 0 for no border.
+    pub width: f64,
+    /// `/BS /S`: `S` solid (the default), `D` dashed, `B` beveled, `I` inset,
+    /// `U` underline. `/Border` has no style and reads as `S`, or `D` with a
+    /// dash array.
+    pub style: String,
+    /// The dash array: `/BS /D`, `[3]` where a `/BS` has none (Table 166),
+    /// which only the `D` style draws; or `/Border`'s optional fourth
+    /// element, empty where it has none, for which Table 164 states no
+    /// default.
+    pub dash: Vec<f64>,
+    /// `/Border`'s horizontal and vertical corner radii. `/BS` has none.
+    pub corner_radii: Option<(f64, f64)>,
+}
+
+/// `/RC`, a markup annotation's rich text (Table 170): an XHTML body, as the
+/// file carries it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RichText {
+    /// A text string, decoded (7.9.2.2).
+    Text(String),
+    /// A text stream, by reference and **not decoded**: decoding it would add
+    /// its warnings to [`crate::Document::warnings`], and a read must not
+    /// change what the document reports. `Document::cos` reads it.
+    Stream(ObjRef),
+}
+
+/// A page's annotations, and what the listing could not read (ruling 10).
+///
+/// [`crate::Page::annotation_list`]'s answer. The counts are how a cap names
+/// what it dropped **in the value it returns** — the read changes nothing,
+/// and the same page read twice says the same thing twice.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct AnnotationList {
+    /// One entry per `/Annots` entry read, in the array's order.
+    pub annotations: Vec<Annotation>,
+    /// How many `/Annots` entries past the listing's 4 096 were not read at all.
+    /// Zero for every page the corpus held when it was last measured, whose
+    /// busiest carried 122.
+    pub dropped: usize,
+    /// How many of [`AnnotationList::annotations`] are
+    /// [`Annotation::incomplete`]: listed, with an entry left unread because
+    /// the page spent [`MAX_ANNOTATION_BYTES`].
+    pub incomplete: usize,
+}
+
+impl AnnotationList {
+    /// Whether every entry of `/Annots` was read whole.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.dropped == 0 && self.incomplete == 0
+    }
+}
+
 /// One entry of a page's `/Annots` array, read (12.5.2).
 ///
-/// The entries every annotation dictionary may carry (Table 164), plus the
-/// markup entries (Table 170) the roadmap row named. **No per-subtype
-/// geometry**: `/QuadPoints`, `/InkList`, `/Vertices`, `/L` and their
-/// relatives are one payload per family and belong to their own commit — see
-/// the roadmap row this one left behind.
+/// The entries every annotation dictionary may carry (Table 164), the markup
+/// entries (Table 170), and the family's own in [`Annotation::payload`]
+/// (12.5.6's tables, one variant per family).
+///
+/// `#[non_exhaustive]` since the payloads arrived: a struct a caller only
+/// reads should be able to grow a field without breaking them.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Annotation {
     /// The annotation dictionary's own reference, or `None` when `/Annots`
     /// wrote it inline.
@@ -446,32 +516,81 @@ pub struct Annotation {
     ///
     /// Whether one exists, not what it draws — drawing is `annots.rs`'s job.
     pub has_appearance: bool,
+    /// `/AS`: which of the appearance's states is shown (12.5.5).
+    pub appearance_state: Option<String>,
+    /// `/NM`: a name unique among the page's annotations (Table 164).
+    pub unique_name: Option<String>,
+    /// `/C` (Table 164): the colour of the background when closed, the title
+    /// bar of a pop-up, a link's border. Zero components (transparent), one
+    /// (grey), three (RGB) or four (CMYK), as the file wrote them.
+    pub colour: Option<Vec<f64>>,
+    /// `/BS` or `/Border` (12.5.4).
+    pub border: Option<Border>,
+    /// `/CA` (Table 170): the opacity a markup annotation is drawn at.
+    /// `None` when the file says nothing, which 12.5.6.2 makes 1.0; only read
+    /// on a markup annotation.
+    pub opacity: Option<f64>,
+    /// `/RC` (Table 170): rich text. Markup annotations only.
+    pub rich_text: Option<RichText>,
+    /// `/Subj` (Table 170): the subject. Markup annotations only.
+    pub subject: Option<String>,
+    /// `/CreationDate` (Table 170), as the file wrote it. Markup annotations
+    /// only.
+    pub created: Option<String>,
+    /// [`Annotation::created`] parsed as a 7.9.4 date, when it is one.
+    pub created_date: Option<Date>,
+    /// `/IRT` (Table 170): the annotation this one replies to.
+    pub in_reply_to: Option<ObjRef>,
+    /// `/RT` (Table 170): `R` for a reply (the default when `/IRT` is
+    /// present) or `Group`.
+    pub reply_type: Option<String>,
+    /// `/IT` (Table 170): the intent — `FreeTextCallout`, `LineArrow`,
+    /// `PolygonCloud`, … Markup annotations only.
+    pub intent: Option<String>,
+    /// The family's own entries (12.5.6).
+    pub payload: AnnotationPayload,
+    /// Whether an entry was left unread because this page's listing spent
+    /// [`MAX_ANNOTATION_BYTES`]. Every entry of an incomplete annotation that
+    /// reads as absent may have been present; the rest were read whole.
+    pub incomplete: bool,
 }
 
 /// Reads one page's `/Annots`, in the array's own order.
 ///
 /// The returned list is the same length as the array, capped at
-/// [`MAX_ANNOTS`]; see the module comment for why nothing is dropped.
-pub(crate) fn of_page(doc: &Arc<CosDocument>, page: ObjRef) -> Vec<Annotation> {
+/// [`MAX_ANNOTS`]; the list says how many entries the cap left unread, and
+/// how many it read with an entry left out.
+pub(crate) fn of_page(doc: &Arc<CosDocument>, page: ObjRef) -> AnnotationList {
+    let mut list = AnnotationList {
+        annotations: Vec::new(),
+        dropped: 0,
+        incomplete: 0,
+    };
     let Ok(object) = doc.get(page) else {
-        return Vec::new();
+        return list;
     };
     let Some(dict) = object.as_dict() else {
-        return Vec::new();
+        return list;
     };
     let annots = doc.resolve_key(dict, doc.intern(b"Annots"));
     let Some(entries) = annots.as_array() else {
-        return Vec::new();
+        return list;
     };
 
-    entries
+    let mut read = Read::new(doc, MAX_ANNOTATION_BYTES);
+    list.annotations = entries
         .iter()
         .take(MAX_ANNOTS)
-        .map(|entry| read_one(doc, entry))
-        .collect()
+        .map(|entry| read_one(&mut read, entry))
+        .collect();
+    list.dropped = entries.len().saturating_sub(MAX_ANNOTS);
+    list.incomplete = list.annotations.iter().filter(|a| a.incomplete).count();
+    list
 }
 
-fn read_one(doc: &CosDocument, entry: &Object) -> Annotation {
+fn read_one(read: &mut Read<'_>, entry: &Object) -> Annotation {
+    let doc = read.doc;
+    read.cut = false;
     let reference = entry.as_objref();
     let resolved = doc.resolve(entry);
     let Some(dict) = resolved.as_dict() else {
@@ -487,15 +606,29 @@ fn read_one(doc: &CosDocument, entry: &Object) -> Annotation {
             popup: None,
             parent: None,
             has_appearance: false,
+            appearance_state: None,
+            unique_name: None,
+            colour: None,
+            border: None,
+            opacity: None,
+            rich_text: None,
+            subject: None,
+            created: None,
+            created_date: None,
+            in_reply_to: None,
+            reply_type: None,
+            intent: None,
+            payload: AnnotationPayload::None,
+            incomplete: false,
         };
     };
 
-    let kind = match doc
+    let subtype = doc
         .resolve_key(dict, doc.intern(b"Subtype"))
         .as_name()
-        .and_then(|n| doc.name_bytes(n))
-    {
-        Some(name) => AnnotationKind::from_name(&name),
+        .and_then(|n| doc.name_bytes(n));
+    let kind = match &subtype {
+        Some(name) => AnnotationKind::from_name(name),
         None => AnnotationKind::Unnamed,
     };
 
@@ -507,13 +640,22 @@ fn read_one(doc: &CosDocument, entry: &Object) -> Annotation {
         _ => dict.clone(),
     };
 
-    let modified = text_of(doc, &text_source, b"M");
-    Annotation {
+    let modified = read.text(&text_source, b"M");
+    let markup = kind.is_markup();
+    let created = if markup {
+        read.text(dict, b"CreationDate")
+    } else {
+        None
+    };
+    let payload = match (&subtype, kind.is_covered()) {
+        (Some(name), true) => read.payload(name, dict),
+        _ => AnnotationPayload::None,
+    };
+    let mut annotation = Annotation {
         reference,
-        kind,
         rect: rect_of(doc, dict),
-        contents: text_of(doc, &text_source, b"Contents"),
-        title: text_of(doc, &text_source, b"T"),
+        contents: read.text(&text_source, b"Contents"),
+        title: read.text(&text_source, b"T"),
         modified_date: modified.as_deref().and_then(parse_date),
         modified,
         flags: AnnotationFlags::from_raw(
@@ -524,7 +666,93 @@ fn read_one(doc: &CosDocument, entry: &Object) -> Annotation {
         popup: dict.get_ref(doc.intern(b"Popup")),
         parent: dict.get_ref(doc.intern(b"Parent")),
         has_appearance: has_normal_appearance(doc, dict),
+        appearance_state: read.name(dict, b"AS"),
+        unique_name: read.text(dict, b"NM"),
+        // 12.5.6.14 names `/C` among the entries a parent overrides.
+        colour: read.colour(&text_source, b"C"),
+        border: border_of(read, dict),
+        opacity: if markup {
+            doc.resolve_key(dict, doc.intern(b"CA"))
+                .as_number()
+                .filter(|n| n.is_finite())
+        } else {
+            None
+        },
+        rich_text: if markup {
+            rich_text_of(read, dict)
+        } else {
+            None
+        },
+        subject: if markup {
+            read.text(dict, b"Subj")
+        } else {
+            None
+        },
+        created_date: created.as_deref().and_then(parse_date),
+        created,
+        in_reply_to: if markup {
+            dict.get_ref(doc.intern(b"IRT"))
+        } else {
+            None
+        },
+        reply_type: if markup { read.name(dict, b"RT") } else { None },
+        intent: if markup { read.name(dict, b"IT") } else { None },
+        payload,
+        kind,
+        incomplete: false,
+    };
+    annotation.incomplete = read.cut;
+    annotation
+}
+
+/// `/BS`, or `/Border` where there is no `/BS` (12.5.4).
+fn border_of(read: &mut Read<'_>, dict: &Dict) -> Option<Border> {
+    let doc = read.doc;
+    let style = doc.resolve_key(dict, doc.intern(b"BS"));
+    if let Some(bs) = style.as_dict() {
+        return Some(Border {
+            width: doc
+                .resolve_key(bs, doc.intern(b"W"))
+                .as_number()
+                .filter(|w| w.is_finite())
+                .unwrap_or(1.0),
+            style: read.name(bs, b"S").unwrap_or_else(|| "S".to_string()),
+            dash: read.numbers(bs, b"D").unwrap_or_else(|| vec![3.0]),
+            corner_radii: None,
+        });
     }
+    let border = dict.get(doc.intern(b"Border"))?.clone();
+    let resolved = doc.resolve(&border);
+    let items = resolved.as_array()?;
+    let number = |i: usize| {
+        items
+            .get(i)
+            .and_then(|v| doc.resolve(v).as_number())
+            .filter(|n| n.is_finite())
+    };
+    let (h, v, w) = (number(0)?, number(1)?, number(2)?);
+    let dash = match items.get(3) {
+        Some(dash) => read.numbers_of(dash).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    Some(Border {
+        width: w,
+        style: if dash.is_empty() { "S" } else { "D" }.to_string(),
+        dash,
+        corner_radii: Some((h, v)),
+    })
+}
+
+/// `/RC`: a text string, decoded, or a stream, named (Table 170).
+fn rich_text_of(read: &mut Read<'_>, dict: &Dict) -> Option<RichText> {
+    let doc = read.doc;
+    let entry = dict.get(doc.intern(b"RC"))?;
+    if let Some(r) = entry.as_objref() {
+        if doc.resolve(entry).as_stream().is_some() {
+            return Some(RichText::Stream(r));
+        }
+    }
+    read.text(dict, b"RC").map(RichText::Text)
 }
 
 /// The dictionary a pop-up's `/Parent` names, if it names one.
@@ -558,17 +786,6 @@ fn parent_dict(doc: &CosDocument, popup: &Dict) -> Option<Dict> {
     None
 }
 
-/// A text-string entry, decoded (7.9.2.2).
-///
-/// An entry that is present but empty comes back as `Some("")`: a file that
-/// wrote an empty `/Contents` said something different from one that wrote
-/// none, and collapsing the two would lose it.
-fn text_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Option<String> {
-    let value = doc.resolve_key(dict, doc.intern(key));
-    let string = value.as_string()?;
-    Some(decode_text_string(&string.bytes))
-}
-
 /// `/Rect`, ordered (12.5.2 Table 164).
 ///
 /// The clause says the rectangle "shall" be written with the lower-left
@@ -577,7 +794,10 @@ fn text_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Option<String> {
 /// it backwards.
 fn rect_of(doc: &CosDocument, dict: &Dict) -> (f64, f64, f64, f64) {
     let value = doc.resolve_key(dict, doc.intern(b"Rect"));
-    let Some(items) = value.as_array() else {
+    // Four or it is not a rectangle, and checked before anything is copied:
+    // a `/Rect` of a million numbers shared by every annotation on the page
+    // would otherwise be copied once per annotation.
+    let Some(items) = value.as_array().filter(|items| items.len() == 4) else {
         return (0.0, 0.0, 0.0, 0.0);
     };
     let numbers: Vec<f64> = items
@@ -731,6 +951,20 @@ mod tests {
         assert!(!note.flags.hidden());
     }
 
+    /// 12.5.6.14 names `/C` beside `/Contents`, `/M` and `/T`: a pop-up's
+    /// colour is its parent's too.
+    #[test]
+    fn a_popup_takes_its_colour_from_its_parent() {
+        let doc = page_with(
+            "/Annots [21 0 R]",
+            "20 0 obj\n<< /Type /Annot /Subtype /Text /Rect [0 0 10 10] /C [0 0 1] >>\nendobj\n\
+             21 0 obj\n<< /Type /Annot /Subtype /Popup /Rect [10 0 20 10] /C [1 0 0] \
+             /Parent 20 0 R >>\nendobj\n",
+        );
+        let annots = doc.page(0).expect("a page").annotations();
+        assert_eq!(annots[0].colour, Some(vec![0.0, 0.0, 1.0]));
+    }
+
     /// **12.5.6.14, both directions.**
     ///
     /// The parent's `/Contents`, `/T` and `/M` override the pop-up's own; and
@@ -880,10 +1114,11 @@ mod tests {
     /// reach the cap. The census cannot reach it either, the corpus's largest
     /// page being 122.
     ///
-    /// It pins the truncation as well as the bound. The entries past the cap
-    /// are dropped and nothing says so — see [`MAX_ANNOTS`] for why a warning
-    /// is not available to a read surface — so this is the only place that
-    /// records what a page over the cap actually gets back.
+    /// It pins the truncation as well as the bound, and since September 2026
+    /// the count: the entries past the cap are dropped, and
+    /// [`AnnotationList::dropped`] says how many — see [`MAX_ANNOTS`] for why
+    /// that is in the returned value rather than on `Document::warnings`,
+    /// which this test also holds unchanged.
     ///
     /// **The sizes are literals on purpose.** A fixture sized from the
     /// constant it is meant to pin grows along with it: written as
@@ -893,20 +1128,597 @@ mod tests {
     /// contract, so it is spelled out and the constant is checked against it.
     #[test]
     fn a_hostile_annots_array_is_capped() {
-        let entries = "<< /Subtype /Square >> ".repeat(4097);
+        let entries = "<< /Subtype /Square >> ".repeat(4099);
         let doc = page_with(&format!("/Annots [{entries}]"), "");
-        let annotations = doc.page(0).expect("a page").annotations();
+        let warnings = doc.warnings().len();
+        let list = doc.page(0).expect("a page").annotation_list();
+        let annotations = &list.annotations;
 
         assert_eq!(
             annotations.len(),
             4096,
-            "4 097 entries went in and ruling 1's bound is 4 096"
+            "4 099 entries went in and ruling 1's bound is 4 096"
         );
         assert_eq!(MAX_ANNOTS, 4096, "and that bound is this constant");
+        assert_eq!(list.dropped, 3, "and the list says how many it left out");
+        assert!(!list.is_complete());
         assert!(
             annotations.iter().all(|a| a.kind == AnnotationKind::Square),
             "the entries kept are the array's own, read normally"
         );
+        assert_eq!(
+            doc.page(0).expect("a page").annotations().len(),
+            4096,
+            "`annotations()` is the same list"
+        );
+        assert_eq!(
+            doc.warnings().len(),
+            warnings,
+            "and reading it, twice, told the document nothing"
+        );
+    }
+
+    /// Ruling 1 for the copies: four thousand annotations naming one shared
+    /// `/InkList` of 4 096 numbers ask for 128 MiB of copies, past
+    /// [`MAX_ANNOTATION_BYTES`]. The listing stops copying when the budget is
+    /// spent, and says so on each annotation it cut and in the count.
+    ///
+    /// The sizes are literals for `a_hostile_annots_array_is_capped`'s
+    /// reason, and the constant is checked against the one this is built to
+    /// exceed.
+    #[test]
+    fn a_listing_past_its_copy_budget_says_what_it_cut() {
+        let path = "1 2 ".repeat(2048);
+        let entries = "<< /Subtype /Ink /Rect [0 0 1 1] /InkList [20 0 R] >> ".repeat(4096);
+        let doc = page_with(
+            &format!("/Annots [{entries}]"),
+            &format!("20 0 obj\n[{path}]\nendobj\n"),
+        );
+        assert_eq!(
+            MAX_ANNOTATION_BYTES,
+            64 << 20,
+            "the cap this is sized against"
+        );
+        let warnings = doc.warnings().len();
+        let list = doc.page(0).expect("a page").annotation_list();
+
+        assert_eq!(list.annotations.len(), 4096, "every entry is still listed");
+        assert_eq!(list.dropped, 0);
+        // 2 048 annotations' strokes fit in 64 MiB at 32 KiB each (4 096
+        // numbers of eight bytes, and eight for the one path), less the one
+        // the outer arrays' charges push over.
+        assert!(
+            list.incomplete > 2000 && list.incomplete < 2100,
+            "about half were cut: {}",
+            list.incomplete
+        );
+        let first = &list.annotations[0];
+        assert!(!first.incomplete);
+        assert!(matches!(
+            &first.payload,
+            AnnotationPayload::Ink { strokes } if strokes.len() == 1 && strokes[0].len() == 2048
+        ));
+        let last = &list.annotations[4095];
+        assert!(last.incomplete, "the last one lost its strokes and says so");
+        assert!(matches!(
+            &last.payload,
+            AnnotationPayload::Ink { strokes } if strokes.is_empty()
+        ));
+        assert_eq!(doc.warnings().len(), warnings);
+    }
+
+    /// The common entries this model reads beside the payload (Table 164,
+    /// Table 170, 12.5.4).
+    #[test]
+    fn the_common_and_markup_entries_are_read() {
+        let doc = page_with(
+            "/Annots [20 0 R 21 0 R 22 0 R]",
+            "20 0 obj\n<< /Type /Annot /Subtype /Square /Rect [0 0 10 10] /NM (sq-1) \
+             /C [1 0 0] /BS << /W 2 /S /D /D [3 1] >> /CA 0.5 /Subj (Review) \
+             /RC (<body>rich</body>) /CreationDate (D:20260102030405Z) \
+             /IRT 21 0 R /RT /Group /IT /SquareCloud /AS /N >>\nendobj\n\
+             21 0 obj\n<< /Type /Annot /Subtype /Link /Rect [0 0 1 1] \
+             /Border [2 3 1.5 [4 2]] /C [] /CA 0.25 >>\nendobj\n\
+             22 0 obj\n<< /Type /Annot /Subtype /FreeText /Rect [0 0 1 1] /DA (/Helv 9 Tf) \
+             /RC 23 0 R >>\nendobj\n\
+             23 0 obj\n<< /Length 4 >>\nstream\n<p/>\nendstream\nendobj\n",
+        );
+        let annots = doc.page(0).expect("a page").annotations();
+        let square = &annots[0];
+        assert_eq!(square.unique_name.as_deref(), Some("sq-1"));
+        assert_eq!(square.appearance_state.as_deref(), Some("N"));
+        assert_eq!(square.colour, Some(vec![1.0, 0.0, 0.0]));
+        assert_eq!(
+            square.border,
+            Some(Border {
+                width: 2.0,
+                style: "D".into(),
+                dash: vec![3.0, 1.0],
+                corner_radii: None,
+            })
+        );
+        assert_eq!(square.opacity, Some(0.5));
+        assert_eq!(square.subject.as_deref(), Some("Review"));
+        assert_eq!(
+            square.rich_text,
+            Some(RichText::Text("<body>rich</body>".into()))
+        );
+        assert_eq!(square.created.as_deref(), Some("D:20260102030405Z"));
+        assert_eq!(square.created_date.map(|d| d.year), Some(2026));
+        assert_eq!(square.in_reply_to.map(|r| r.num), Some(21));
+        assert_eq!(square.reply_type.as_deref(), Some("Group"));
+        assert_eq!(square.intent.as_deref(), Some("SquareCloud"));
+        assert!(!square.incomplete);
+
+        // A link is not a markup annotation: `/CA` is not read on it.
+        let link = &annots[1];
+        assert_eq!(link.colour, Some(Vec::new()), "an empty /C is transparent");
+        assert_eq!(
+            link.border,
+            Some(Border {
+                width: 1.5,
+                style: "D".into(),
+                dash: vec![4.0, 2.0],
+                corner_radii: Some((2.0, 3.0)),
+            }),
+            "the legacy /Border, with its dash array"
+        );
+        assert_eq!(link.opacity, None, "Table 170 is markup-only");
+
+        // A stream `/RC` is named, not decoded.
+        assert_eq!(
+            annots[2].rich_text,
+            Some(RichText::Stream(ObjRef::new(23, 0)))
+        );
+    }
+
+    /// **Every family's payload**, one annotation each, against its table.
+    ///
+    /// The values are chosen so that a default and a read cannot be confused
+    /// — every entry the table defaults is given something else here — and
+    /// a second page of each family with nothing but `/Subtype` and `/Rect`
+    /// checks the defaults themselves.
+    #[test]
+    fn every_family_payload_is_read() {
+        let objects = "\
+20 0 obj\n<< /Subtype /Text /Rect [0 0 1 1] /Open true /Name /Key /State (Accepted) /StateModel (Review) >>\nendobj\n\
+21 0 obj\n<< /Subtype /Link /Rect [0 0 1 1] /H /P /QuadPoints [0 10 20 10 0 0 20 0] >>\nendobj\n\
+22 0 obj\n<< /Subtype /FreeText /Rect [0 0 1 1] /DA (/Helv 12 Tf 0 g) /Q 2 /DS (font: 12pt) /CL [1 2 3 4 5 6] /BE << /S /C /I 1 >> /RD [1 2 3 4] /LE /OpenArrow >>\nendobj\n\
+23 0 obj\n<< /Subtype /Line /Rect [0 0 1 1] /L [1 2 30 40] /LE [/Circle /ClosedArrow] /IC [0 1 0] /LL 5 /LLE 2 /LLO 1 /Cap true /CP /Top /CO [3 4] >>\nendobj\n\
+24 0 obj\n<< /Subtype /Circle /Rect [0 0 1 1] /IC [0.5] /BE << /S /C >> /RD [1 1 1 1] >>\nendobj\n\
+25 0 obj\n<< /Subtype /PolyLine /Rect [0 0 1 1] /Vertices [0 0 10 10 20 0] /LE [/Butt /Slash] /IC [0 0 0 1] >>\nendobj\n\
+26 0 obj\n<< /Subtype /Squiggly /Rect [0 0 1 1] /QuadPoints [0 10 20 10 0 0 20 0 30 10 40 10 30 0 40 0] >>\nendobj\n\
+27 0 obj\n<< /Subtype /Caret /Rect [0 0 1 1] /RD [0 1 0 1] /Sy /P >>\nendobj\n\
+28 0 obj\n<< /Subtype /Stamp /Rect [0 0 1 1] /Name /Approved >>\nendobj\n\
+29 0 obj\n<< /Subtype /Ink /Rect [0 0 1 1] /InkList [[0 0 1 1 2 2] [5 5 6 6]] >>\nendobj\n\
+30 0 obj\n<< /Subtype /Popup /Rect [0 0 1 1] /Open true >>\nendobj\n\
+31 0 obj\n<< /Subtype /FileAttachment /Rect [0 0 1 1] /Name /Paperclip /FS << /Type /Filespec /F (data.csv) /UF (data \\(1\\).csv) /Desc (the data) /EF << /F 50 0 R >> >> >>\nendobj\n\
+32 0 obj\n<< /Subtype /Sound /Rect [0 0 1 1] /Sound 51 0 R /Name /Mic >>\nendobj\n\
+33 0 obj\n<< /Subtype /Movie /Rect [0 0 1 1] /T (Trailer) /Movie << /F (clip.mov) >> >>\nendobj\n\
+34 0 obj\n<< /Subtype /Screen /Rect [0 0 1 1] /T (Player) /A << /S /Rendition >> >>\nendobj\n\
+35 0 obj\n<< /Subtype /Widget /Rect [0 0 1 1] /H /O /MK << /BC [0] >> >>\nendobj\n\
+36 0 obj\n<< /Subtype /PrinterMark /Rect [0 0 1 1] /MN /ColorBar >>\nendobj\n\
+37 0 obj\n<< /Subtype /TrapNet /Rect [0 0 1 1] /LastModified (D:20260101) >>\nendobj\n\
+38 0 obj\n<< /Subtype /Watermark /Rect [0 0 1 1] /FixedPrint << /Type /FixedPrint >> >>\nendobj\n\
+39 0 obj\n<< /Subtype /Redact /Rect [0 0 1 1] /QuadPoints [0 10 20 10 0 0 20 0] /IC [0 0 0] /RO 52 0 R /OverlayText (REDACTED) /Repeat true /DA (/Helv 8 Tf) /Q 1 >>\nendobj\n\
+40 0 obj\n<< /Subtype /3D /Rect [0 0 1 1] /3DD 53 0 R >>\nendobj\n\
+41 0 obj\n<< /Subtype /Projection /Rect [0 0 1 1] >>\nendobj\n\
+42 0 obj\n<< /Subtype /RichMedia /Rect [0 0 1 1] /RichMediaContent << /Assets << >> >> /RichMediaSettings 54 0 R >>\nendobj\n\
+43 0 obj\n<< /Subtype /Polygon /Rect [0 0 1 1] /Vertices [0 0 10 0 5 5] /LE [/Slash /Slash] >>\nendobj\n\
+50 0 obj\n<< /Type /EmbeddedFile /Length 3 >>\nstream\na,b\nendstream\nendobj\n\
+51 0 obj\n<< /Type /Sound /R 8000 /Length 1 >>\nstream\n\x00\nendstream\nendobj\n\
+52 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 1 1] /Length 0 >>\nstream\n\nendstream\nendobj\n\
+53 0 obj\n<< /Type /3D /Subtype /U3D /Length 0 >>\nstream\n\nendstream\nendobj\n\
+54 0 obj\n<< /Type /RichMediaSettings >>\nendobj\n";
+        let refs: String = (20..=43).map(|n| format!("{n} 0 R ")).collect();
+        let doc = page_with(&format!("/Annots [{refs}]"), objects);
+        let annots = doc.page(0).expect("a page").annotations();
+        assert_eq!(annots.len(), 24);
+        assert!(annots.iter().all(|a| !a.incomplete));
+        let payload = |i: usize| annots[i].payload.clone();
+
+        assert_eq!(
+            payload(0),
+            AnnotationPayload::Text {
+                open: true,
+                icon: "Key".into(),
+                state: Some("Accepted".into()),
+                state_model: Some("Review".into()),
+            }
+        );
+        assert_eq!(
+            payload(1),
+            AnnotationPayload::Link {
+                highlight: "P".into(),
+                quads: vec![[0.0, 10.0, 20.0, 10.0, 0.0, 0.0, 20.0, 0.0]],
+            }
+        );
+        assert_eq!(
+            payload(2),
+            AnnotationPayload::FreeText {
+                default_appearance: Some("/Helv 12 Tf 0 g".into()),
+                quadding: 2,
+                default_style: Some("font: 12pt".into()),
+                callout: vec![(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)],
+                border_effect: Some(BorderEffect {
+                    style: "C".into(),
+                    intensity: 1.0,
+                }),
+                rect_differences: Some([1.0, 2.0, 3.0, 4.0]),
+                line_ending: "OpenArrow".into(),
+            }
+        );
+        assert_eq!(
+            payload(3),
+            AnnotationPayload::Line {
+                line: Some(((1.0, 2.0), (30.0, 40.0))),
+                endings: ("Circle".into(), "ClosedArrow".into()),
+                interior_colour: Some(vec![0.0, 1.0, 0.0]),
+                leader_length: 5.0,
+                leader_extension: 2.0,
+                leader_offset: 1.0,
+                caption: true,
+                caption_position: "Top".into(),
+                caption_offset: Some((3.0, 4.0)),
+            }
+        );
+        assert_eq!(
+            payload(4),
+            AnnotationPayload::Shape {
+                interior_colour: Some(vec![0.5]),
+                border_effect: Some(BorderEffect {
+                    style: "C".into(),
+                    intensity: 0.0,
+                }),
+                rect_differences: Some([1.0; 4]),
+            }
+        );
+        assert_eq!(
+            payload(5),
+            AnnotationPayload::Polygon {
+                vertices: vec![(0.0, 0.0), (10.0, 10.0), (20.0, 0.0)],
+                endings: ("Butt".into(), "Slash".into()),
+                interior_colour: Some(vec![0.0, 0.0, 0.0, 1.0]),
+                border_effect: None,
+            }
+        );
+        assert_eq!(
+            payload(6),
+            AnnotationPayload::TextMarkup {
+                quads: vec![
+                    [0.0, 10.0, 20.0, 10.0, 0.0, 0.0, 20.0, 0.0],
+                    [30.0, 10.0, 40.0, 10.0, 30.0, 0.0, 40.0, 0.0],
+                ],
+            }
+        );
+        assert_eq!(
+            payload(7),
+            AnnotationPayload::Caret {
+                rect_differences: Some([0.0, 1.0, 0.0, 1.0]),
+                symbol: "P".into(),
+            }
+        );
+        assert_eq!(
+            payload(8),
+            AnnotationPayload::Stamp {
+                icon: "Approved".into()
+            }
+        );
+        assert_eq!(
+            payload(9),
+            AnnotationPayload::Ink {
+                strokes: vec![
+                    vec![(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)],
+                    vec![(5.0, 5.0), (6.0, 6.0)],
+                ],
+            }
+        );
+        assert_eq!(payload(10), AnnotationPayload::Popup { open: true });
+        assert_eq!(
+            payload(11),
+            AnnotationPayload::FileAttachment {
+                file: Some(FileSpec {
+                    name: Some("data (1).csv".into()),
+                    description: Some("the data".into()),
+                    embedded: Some(ObjRef::new(50, 0)),
+                }),
+                icon: "Paperclip".into(),
+            },
+            "/UF before /F (7.11.3)"
+        );
+        assert_eq!(
+            payload(12),
+            AnnotationPayload::Sound {
+                sound: Some(Linked::Object(ObjRef::new(51, 0))),
+                icon: "Mic".into(),
+            }
+        );
+        assert_eq!(
+            payload(13),
+            AnnotationPayload::Movie {
+                title: Some("Trailer".into()),
+                movie: Some(Linked::Direct),
+                file: Some(FileSpec {
+                    name: Some("clip.mov".into()),
+                    description: None,
+                    embedded: None,
+                }),
+            }
+        );
+        assert_eq!(
+            payload(14),
+            AnnotationPayload::Screen {
+                title: Some("Player".into()),
+                has_action: true,
+            }
+        );
+        assert_eq!(
+            payload(15),
+            AnnotationPayload::Widget {
+                highlight: "O".into(),
+                has_characteristics: true,
+                has_action: false,
+            }
+        );
+        assert_eq!(
+            payload(16),
+            AnnotationPayload::PrinterMark {
+                name: Some("ColorBar".into())
+            }
+        );
+        assert_eq!(
+            payload(17),
+            AnnotationPayload::TrapNet {
+                last_modified: Some("D:20260101".into()),
+                has_version: false,
+            }
+        );
+        assert_eq!(
+            payload(18),
+            AnnotationPayload::Watermark { fixed_print: true }
+        );
+        assert_eq!(
+            payload(19),
+            AnnotationPayload::Redact {
+                quads: vec![[0.0, 10.0, 20.0, 10.0, 0.0, 0.0, 20.0, 0.0]],
+                interior_colour: Some(vec![0.0, 0.0, 0.0]),
+                overlay: Some(Linked::Object(ObjRef::new(52, 0))),
+                overlay_text: Some("REDACTED".into()),
+                repeat: true,
+                default_appearance: Some("/Helv 8 Tf".into()),
+                quadding: 1,
+            }
+        );
+        assert_eq!(
+            payload(20),
+            AnnotationPayload::ThreeD {
+                artwork: Some(Linked::Object(ObjRef::new(53, 0)))
+            }
+        );
+        assert_eq!(payload(21), AnnotationPayload::Projection);
+        assert_eq!(
+            payload(22),
+            AnnotationPayload::RichMedia {
+                content: Some(Linked::Direct),
+                settings: Some(Linked::Object(ObjRef::new(54, 0))),
+            }
+        );
+        assert_eq!(
+            payload(23),
+            AnnotationPayload::Polygon {
+                vertices: vec![(0.0, 0.0), (10.0, 0.0), (5.0, 5.0)],
+                endings: ("None".into(), "None".into()),
+                interior_colour: None,
+                border_effect: None,
+            },
+            "a polygon has no ends, whatever /LE says"
+        );
+
+        // Every family whose table requires something carries it here.
+        for a in &annots {
+            assert_ne!(
+                a.payload.carries_required(),
+                Some(false),
+                "{}",
+                a.payload.family()
+            );
+        }
+        let families: std::collections::BTreeSet<&str> =
+            annots.iter().map(|a| a.payload.family()).collect();
+        assert_eq!(families.len(), 23, "one variant per 12.5.6 family");
+    }
+
+    /// Each table's defaults, read off annotations that carry nothing but
+    /// `/Subtype` and `/Rect` — and the required entries' absence, which
+    /// [`AnnotationPayload::carries_required`] reports.
+    #[test]
+    fn each_family_reads_its_tables_defaults() {
+        let subtypes = [
+            "Text",
+            "Link",
+            "FreeText",
+            "Line",
+            "Square",
+            "Polygon",
+            "PolyLine",
+            "Highlight",
+            "Caret",
+            "Stamp",
+            "Ink",
+            "Popup",
+            "FileAttachment",
+            "Sound",
+            "Movie",
+            "Screen",
+            "Widget",
+            "PrinterMark",
+            "TrapNet",
+            "Watermark",
+            "Redact",
+            "3D",
+            "Projection",
+            "RichMedia",
+        ];
+        let entries: String = subtypes
+            .iter()
+            .map(|s| format!("<< /Subtype /{s} /Rect [0 0 1 1] >> "))
+            .collect();
+        let doc = page_with(&format!("/Annots [{entries}]"), "");
+        let annots = doc.page(0).expect("a page").annotations();
+        let by = |subtype: &str| {
+            annots
+                .iter()
+                .find(|a| a.kind.as_name() == subtype)
+                .map(|a| a.payload.clone())
+                .expect("listed")
+        };
+        assert!(matches!(
+            by("Text"),
+            AnnotationPayload::Text { open: false, ref icon, state: None, .. } if icon == "Note"
+        ));
+        assert!(
+            matches!(by("Link"), AnnotationPayload::Link { ref highlight, .. } if highlight == "I")
+        );
+        assert!(matches!(
+            by("FreeText"),
+            AnnotationPayload::FreeText { quadding: 0, ref line_ending, .. } if line_ending == "None"
+        ));
+        assert!(matches!(
+            by("Line"),
+            AnnotationPayload::Line { ref endings, ref caption_position, caption: false, .. }
+                if endings.0 == "None" && endings.1 == "None" && caption_position == "Inline"
+        ));
+        assert!(
+            matches!(
+                by("Line"),
+                AnnotationPayload::Line {
+                    caption_offset: Some((0.0, 0.0)),
+                    ..
+                }
+            ),
+            "Table 175: no /CO is [0 0]"
+        );
+        assert!(
+            matches!(by("Caret"), AnnotationPayload::Caret { ref symbol, .. } if symbol == "None")
+        );
+        assert!(matches!(by("Stamp"), AnnotationPayload::Stamp { ref icon } if icon == "Draft"));
+        assert!(matches!(
+            by("FileAttachment"),
+            AnnotationPayload::FileAttachment { file: None, ref icon } if icon == "PushPin"
+        ));
+        assert!(matches!(
+            by("Sound"),
+            AnnotationPayload::Sound { sound: None, ref icon } if icon == "Speaker"
+        ));
+        assert!(
+            matches!(by("Widget"), AnnotationPayload::Widget { ref highlight, .. } if highlight == "I")
+        );
+        assert!(matches!(
+            by("Redact"),
+            AnnotationPayload::Redact {
+                repeat: false,
+                quadding: 0,
+                ..
+            }
+        ));
+
+        let missing: Vec<&str> = annots
+            .iter()
+            .filter(|a| a.payload.carries_required() == Some(false))
+            .map(|a| a.kind.as_name())
+            .collect();
+        assert_eq!(
+            missing,
+            vec![
+                "FreeText",
+                "Line",
+                "Polygon",
+                "PolyLine",
+                "Highlight",
+                "Ink",
+                "FileAttachment",
+                "Sound",
+                "Movie",
+                "TrapNet",
+                "3D",
+                "RichMedia",
+            ],
+            "the families whose tables require an entry, and only those"
+        );
+
+        // The defaults that hang on another entry: Table 172's `/State` by
+        // its `/StateModel`, Table 166's `/D` wherever a `/BS` leaves it out,
+        // and a `/CO` that is there but not two numbers, which is not read
+        // as the default either.
+        let doc = page_with(
+            "/Annots [\
+             << /Subtype /Text /Rect [0 0 1 1] /StateModel (Marked) >> \
+             << /Subtype /Text /Rect [0 0 1 1] /StateModel (Review) >> \
+             << /Subtype /Square /Rect [0 0 1 1] /BS << /W 2 /S /D >> >> \
+             << /Subtype /Line /Rect [0 0 1 1] /L [0 0 1 1] /CO [1] >> ]",
+            "",
+        );
+        let annots = doc.page(0).expect("a page").annotations();
+        let state = |a: &Annotation| match &a.payload {
+            AnnotationPayload::Text { state, .. } => state.clone(),
+            other => panic!("{}", other.family()),
+        };
+        assert_eq!(state(&annots[0]).as_deref(), Some("Unmarked"));
+        assert_eq!(state(&annots[1]).as_deref(), Some("None"));
+        assert_eq!(
+            annots[2].border,
+            Some(Border {
+                width: 2.0,
+                style: "D".into(),
+                dash: vec![3.0],
+                corner_radii: None,
+            })
+        );
+        assert!(matches!(
+            annots[3].payload,
+            AnnotationPayload::Line {
+                caption_offset: None,
+                ..
+            }
+        ));
+    }
+
+    /// Geometry that is not what its table says is not half read: a partial
+    /// quad, an odd vertex, a non-number in an ink path and a `/L` of three
+    /// numbers each come back as nothing rather than as a guess.
+    #[test]
+    fn malformed_geometry_is_not_guessed_at() {
+        let doc = page_with(
+            "/Annots [20 0 R 21 0 R 22 0 R 23 0 R]",
+            "20 0 obj\n<< /Subtype /Highlight /Rect [0 0 1 1] /QuadPoints [0 1 2 3 4 5 6 7 8 9] >>\nendobj\n\
+             21 0 obj\n<< /Subtype /Polygon /Rect [0 0 1 1] /Vertices [0 0 1 1 2] >>\nendobj\n\
+             22 0 obj\n<< /Subtype /Ink /Rect [0 0 1 1] /InkList [[0 0 /x 1] [1 1 2 2]] >>\nendobj\n\
+             23 0 obj\n<< /Subtype /Line /Rect [0 0 1 1] /L [0 0 1] >>\nendobj\n",
+        );
+        let annots = doc.page(0).expect("a page").annotations();
+        assert!(
+            matches!(
+                &annots[0].payload,
+                AnnotationPayload::TextMarkup { quads } if quads.len() == 1
+            ),
+            "the whole quad, and not the two numbers after it"
+        );
+        assert!(matches!(
+            &annots[1].payload,
+            AnnotationPayload::Polygon { vertices, .. } if vertices.len() == 2
+        ));
+        assert!(
+            matches!(
+                &annots[2].payload,
+                AnnotationPayload::Ink { strokes } if strokes == &vec![vec![(1.0, 1.0), (2.0, 2.0)]]
+            ),
+            "the path with a name in it is not a path"
+        );
+        assert!(matches!(
+            &annots[3].payload,
+            AnnotationPayload::Line { line: None, .. }
+        ));
+        assert_eq!(annots[3].payload.carries_required(), Some(false));
     }
 
     /// A page with no `/Annots` has no annotations, which is an ordinary

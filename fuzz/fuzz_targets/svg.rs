@@ -63,6 +63,38 @@
 //! - **A text run's font size is a number.** It reaches a `Tf` operator, and an
 //!   infinity there is a content stream a reader refuses outright — which is a
 //!   worse failure than a page that looks wrong, not a better one.
+//!
+//! # A `<style>` element's imports, from the same bytes
+//!
+//! The document is read a second time through [`tinker_pdf_svg::read_with`]
+//! and a resolver that answers **every** `@import` with the input itself,
+//! under the address it was asked for — so a mutation that puts an `@import`
+//! at the front of the file makes the file its own stylesheet, a chain of
+//! distinct names nests it, and a repeated name is a cycle. What is asserted
+//! beyond the scene's own invariants above:
+//!
+//! - **The bytes every import shares hold**: what the resolver handed back
+//!   never comes to more than `MAX_CSS_BYTES` and one sheet past it, the one
+//!   that crossed it — a comment is no tokens, so the token budget alone
+//!   would let a file read itself without end.
+//! - **Reading with imports is deterministic**, the same scene and the same
+//!   number of fetches twice.
+//!
+//! # The runs measured, from the same bytes
+//!
+//! A third read hands the walk a measurer, [`tinker_pdf_svg::Context::with_measure`]:
+//! every character a fixed fraction of an em, or — under the control byte's
+//! `0x40` — `1e300` ems, so a box at the edge of a double's range is reached.
+//! A bounding-box paint on a run waits for its `<text>`'s box as a mark in its
+//! place, so what is asserted beyond the scene's own invariants is:
+//!
+//! - **No mark reaches the caller**: every colour in the scene, at every
+//!   depth of a group, a mask or a tile, is in `[0, 1]`.
+//! - **A document with nothing to measure reads the same**: where the
+//!   unmeasured read named no `TextBoxUnmeasured`, and its warnings were not
+//!   capped short of naming one, the measured scene is that scene.
+//! - **Reading with a measurer is deterministic.**
+//!
 //! # What this target cannot find, and what covers it instead
 //!
 //! Every assertion above is **structural**: a scene carries only finite
@@ -79,8 +111,110 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
+use std::cell::Cell;
+
+use tinker_pdf_css::ImportResolver;
 use tinker_pdf_svg::path::{self, Outline, Segment};
-use tinker_pdf_svg::{transform, Limits, Node, Paint, Scene};
+use tinker_pdf_svg::{
+    transform, Context, Limits, MeasureText, Node, Paint, RunMetrics, Scene, TextStyle, Warning,
+};
+
+/// Every character `.0` ems wide, eight tenths of an em above the baseline
+/// and two below.
+struct Pitch(f64);
+
+impl MeasureText for Pitch {
+    fn measure(&self, text: &str, font: &TextStyle) -> RunMetrics {
+        let count = text.chars().count() as f64;
+        RunMetrics {
+            advance: self.0 * font.size * count,
+            ascent: 0.8 * font.size,
+            descent: 0.2 * font.size,
+        }
+    }
+}
+
+/// Every colour a list of nodes paints with, at every depth of a group, a
+/// mask and a tile, is in `[0, 1]`: no paint left waiting reaches a caller.
+fn colours_are_colours(nodes: &[Node]) {
+    fn paint(server: &Paint) {
+        match server {
+            Paint::Solid(colour) => assert!(
+                colour.rgb.iter().all(|c| (0.0..=1.0).contains(c)),
+                "a colour no document can state reached the caller: {colour:?}"
+            ),
+            Paint::Linear { stops, .. } | Paint::Radial { stops, .. } => {
+                for stop in stops {
+                    paint(&Paint::Solid(stop.colour));
+                }
+            }
+            Paint::Pattern(tile) => colours_are_colours(&tile.nodes),
+            _ => {}
+        }
+    }
+    for node in nodes {
+        match node {
+            Node::Path { fill, stroke, .. } | Node::Text { fill, stroke, .. } => {
+                paint(fill);
+                if let Some(stroke) = stroke {
+                    paint(&stroke.paint);
+                }
+            }
+            Node::Group { nodes, mask, .. } => {
+                colours_are_colours(nodes);
+                if let Some(mask) = mask {
+                    colours_are_colours(&mask.nodes);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Every `@import` answered with the input, under the address asked for, and
+/// what was handed back counted.
+struct Itself<'a> {
+    body: &'a [u8],
+    fetched: Cell<usize>,
+    bytes: Cell<usize>,
+}
+
+impl ImportResolver for Itself<'_> {
+    fn resolve(&self, href: &str, _base: Option<&str>) -> Option<(String, Vec<u8>)> {
+        self.fetched.set(self.fetched.get() + 1);
+        self.bytes.set(self.bytes.get() + self.body.len());
+        Some((href.to_owned(), self.body.to_vec()))
+    }
+}
+
+/// The scene's own invariants: finite numbers, the node cap, and warnings
+/// deduplicated inside theirs.
+fn check(scene: &Scene, limits: &Limits) {
+    for number in numbers(scene) {
+        assert!(
+            number.is_finite(),
+            "a scene carries something that is not a number: {number}"
+        );
+    }
+    // At every depth: a group is assembled in a list of its own, so the
+    // top-level length is not the number the cap is about.
+    assert!(
+        count(&scene.nodes) <= limits.max_nodes,
+        "{} nodes came out of a cap of {}",
+        count(&scene.nodes),
+        limits.max_nodes
+    );
+    assert!(
+        scene.warnings.len() <= limits.max_warnings,
+        "the warning cap did not hold"
+    );
+    for (index, warning) in scene.warnings.iter().enumerate() {
+        assert!(
+            !scene.warnings[..index].contains(warning),
+            "a warning was reported twice: {warning:?}"
+        );
+    }
+}
 
 /// Every point a segment carries.
 fn points(segment: &Segment) -> Vec<[f64; 2]> {
@@ -121,6 +255,7 @@ fn sweep_paint(paint: &Paint, out: &mut Vec<f64>) {
             to,
             matrix,
             stops,
+            ..
         } => {
             out.extend_from_slice(&[from[0], from[1], to[0], to[1]]);
             out.extend_from_slice(matrix);
@@ -132,12 +267,28 @@ fn sweep_paint(paint: &Paint, out: &mut Vec<f64>) {
             focus,
             matrix,
             stops,
+            ..
         } => {
             out.extend_from_slice(&[centre[0], centre[1], *radius, focus[0], focus[1]]);
             out.extend_from_slice(matrix);
             out.extend(stops.iter().flat_map(|stop| [stop.offset, stop.opacity]));
         }
+        // A tile's cell reaches a `/BBox` and `/XStep`, its matrix a
+        // `/Matrix`, and its nodes a cell's content stream.
+        Paint::Pattern(tile) => {
+            out.extend_from_slice(&tile.cell);
+            out.extend_from_slice(&tile.matrix);
+            sweep_nodes(&tile.nodes, out);
+        }
         _ => {}
+    }
+}
+
+/// The nodes a paint's tile holds, at every depth.
+fn count_paint(paint: &Paint) -> usize {
+    match paint {
+        Paint::Pattern(tile) => count(&tile.nodes),
+        _ => 0,
     }
 }
 
@@ -149,7 +300,31 @@ fn sweep_paint(paint: &Paint, out: &mut Vec<f64>) {
 /// that looked ordinary.
 fn numbers(scene: &Scene) -> Vec<f64> {
     let mut out = vec![scene.size.0, scene.size.1];
-    for node in &scene.nodes {
+    sweep_nodes(&scene.nodes, &mut out);
+    out
+}
+
+/// Every node a list holds, at every depth of `Node::Group`.
+fn count(nodes: &[Node]) -> usize {
+    nodes
+        .iter()
+        .map(|node| match node {
+            Node::Group { nodes, mask, .. } => {
+                1 + count(nodes) + mask.as_ref().map_or(0, |mask| count(&mask.nodes))
+            }
+            // A pattern's tile is charged as it is built, once per shape it
+            // paints.
+            Node::Path { fill, stroke, .. } | Node::Text { fill, stroke, .. } => {
+                1 + count_paint(fill) + stroke.as_ref().map_or(0, |s| count_paint(&s.paint))
+            }
+            _ => 1,
+        })
+        .sum()
+}
+
+/// [`numbers`] over one list, groups looked through.
+fn sweep_nodes(nodes: &[Node], out: &mut Vec<f64>) {
+    for node in nodes {
         match node {
             Node::Path {
                 outline,
@@ -159,14 +334,14 @@ fn numbers(scene: &Scene) -> Vec<f64> {
                 clip,
                 ..
             } => {
-                sweep(outline, &mut out);
+                sweep(outline, out);
                 if let Some(clip) = clip {
-                    sweep(&clip.outline, &mut out);
+                    sweep(&clip.outline, out);
                 }
-                sweep_paint(fill, &mut out);
+                sweep_paint(fill, out);
                 out.push(*fill_opacity);
                 if let Some(stroke) = stroke {
-                    sweep_paint(&stroke.paint, &mut out);
+                    sweep_paint(&stroke.paint, out);
                     out.extend_from_slice(&[
                         stroke.width,
                         stroke.miter_limit,
@@ -174,6 +349,8 @@ fn numbers(scene: &Scene) -> Vec<f64> {
                         stroke.opacity,
                     ]);
                     out.extend_from_slice(&stroke.dashes);
+                    // The stroke's user space reaches a `cm` the facade writes.
+                    out.extend_from_slice(&stroke.matrix);
                 }
             }
             Node::Image { rect, matrix, .. } => {
@@ -187,27 +364,50 @@ fn numbers(scene: &Scene) -> Vec<f64> {
                 fill,
                 fill_opacity,
                 stroke,
+                rotate,
                 ..
             } => {
                 if let Some(anchor) = anchor {
                     out.extend_from_slice(anchor);
                 }
+                out.push(*rotate);
                 out.extend_from_slice(matrix);
                 // The size reaches a `Tf` operator, where an infinity is a
                 // content stream a reader refuses rather than a page that
                 // looks wrong — which is worse, not better.
                 out.push(font.size);
-                sweep_paint(fill, &mut out);
+                sweep_paint(fill, out);
                 out.push(*fill_opacity);
                 if let Some(stroke) = stroke {
-                    sweep_paint(&stroke.paint, &mut out);
+                    sweep_paint(&stroke.paint, out);
                     out.push(stroke.width);
                 }
+            }
+            // A group's opacity reaches an `/ExtGState` and its clip a `W`,
+            // exactly as a shape's do.
+            Node::Group {
+                nodes,
+                opacity,
+                clip,
+                mask,
+            } => {
+                out.push(*opacity);
+                if let Some(clip) = clip {
+                    sweep(&clip.outline, out);
+                }
+                // A mask's region reaches a `W` and its content a soft mask's
+                // form, so both are swept like the group's own.
+                if let Some(mask) = mask {
+                    if let Some(region) = &mask.region {
+                        sweep(region, out);
+                    }
+                    sweep_nodes(&mask.nodes, out);
+                }
+                sweep_nodes(nodes, out);
             }
             _ => {}
         }
     }
-    out
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -243,32 +443,66 @@ fuzz_target!(|data: &[u8]| {
     } else {
         Some((100.0, 50.0))
     };
-    if let Ok(scene) = tinker_pdf_svg::read(body, viewport, &limits) {
-        for number in numbers(&scene) {
-            assert!(
-                number.is_finite(),
-                "a scene carries something that is not a number: {number}"
-            );
-        }
-        assert!(
-            scene.nodes.len() <= limits.max_nodes,
-            "{} nodes came out of a cap of {}",
-            scene.nodes.len(),
-            limits.max_nodes
-        );
-        assert!(
-            scene.warnings.len() <= limits.max_warnings,
-            "the warning cap did not hold"
-        );
-        for (index, warning) in scene.warnings.iter().enumerate() {
-            assert!(
-                !scene.warnings[..index].contains(warning),
-                "a warning was reported twice: {warning:?}"
-            );
-        }
+    let plain = tinker_pdf_svg::read(body, viewport, &limits).ok();
+    if let Some(scene) = &plain {
+        check(scene, &limits);
+        colours_are_colours(&scene.nodes);
         let again = tinker_pdf_svg::read(body, viewport, &limits)
             .expect("the same bytes refused on a second run");
-        assert!(again == scene, "reading a document is not deterministic");
+        assert!(again == *scene, "reading a document is not deterministic");
+    }
+
+    // ---- the runs measured ---------------------------------------------------
+    let pitch = Pitch(if knobs & 0x40 == 0 { 0.5 } else { 1e300 });
+    let measuring = Context::NONE.with_measure(&pitch);
+    let measured = tinker_pdf_svg::read_with(body, viewport, &limits, &measuring);
+    if let Ok(scene) = &measured {
+        check(scene, &limits);
+        colours_are_colours(&scene.nodes);
+        let again = tinker_pdf_svg::read_with(body, viewport, &limits, &measuring)
+            .expect("the same bytes refused on a second run");
+        assert!(
+            again == *scene,
+            "reading with a measurer is not deterministic"
+        );
+    }
+    if let Some(plain) = &plain {
+        // Only a paint that would be `TextBoxUnmeasured` waits for a box; a
+        // capped warning list may have had no room to name one.
+        if !plain.warnings.contains(&Warning::TextBoxUnmeasured)
+            && plain.warnings.len() < limits.max_warnings
+        {
+            assert!(
+                measured.as_ref() == Ok(plain),
+                "a document with nothing to measure read differently with a measurer"
+            );
+        }
+    }
+
+    // ---- the same bytes as their own stylesheet ------------------------------
+    let itself = Itself {
+        body,
+        fetched: Cell::new(0),
+        bytes: Cell::new(0),
+    };
+    let read = tinker_pdf_svg::read_with(body, viewport, &limits, &Context::new(&itself));
+    let cap = tinker_pdf_css::limits::MAX_CSS_BYTES;
+    assert!(
+        itself.bytes.get() <= cap.saturating_add(body.len()),
+        "{} bytes were imported past a cap of {cap}",
+        itself.bytes.get()
+    );
+    if let Ok(scene) = read {
+        check(&scene, &limits);
+        let fetched = itself.fetched.replace(0);
+        let again = tinker_pdf_svg::read_with(body, viewport, &limits, &Context::new(&itself))
+            .expect("the same bytes refused on a second run");
+        assert!(again == scene, "reading with imports is not deterministic");
+        assert_eq!(
+            itself.fetched.get(),
+            fetched,
+            "imports were fetched differently"
+        );
     }
 
     let Ok(text) = core::str::from_utf8(body) else {

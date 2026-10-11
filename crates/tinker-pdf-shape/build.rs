@@ -30,6 +30,9 @@
 //! - `BidiMirroring.txt` is `Bidi_Mirroring_Glyph`, rule L4.
 //! - `Scripts.txt` is UAX #24's `Script` property, which is what itemization
 //!   splits a paragraph on.
+//! - `UnicodeData.txt` is `Canonical_Decomposition_Mapping` (field 5) and
+//!   `General_Category` (field 2), of which only `Ps` and `Pi` are kept: which
+//!   marks open something.
 //! - `PropertyValueAliases.txt` supplies each script's ISO 15924 code, which
 //!   is where an OpenType script tag comes from. See
 //!   [`crate::unicode::Script::opentype_tag`] for what that derivation does
@@ -87,6 +90,7 @@ fn main() {
     joining(&data, &mut out);
     indic(&data, &mut out);
     decomposition(&data, &mut out);
+    opening_punctuation(&data, &mut out);
 
     let target = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets this")).join("ucd.rs");
     std::fs::write(&target, out).expect("the generated table could not be written");
@@ -543,6 +547,61 @@ fn decomposition(data: &Path, out: &mut String) {
         out.push_str("]),\n");
     }
     out.push_str("];\n");
+}
+
+/// The characters whose `General_Category` is `Ps` (an opening bracket, or a
+/// low-9 quotation mark) or `Pi` (an initial quotation mark), from field 2 of
+/// `UnicodeData.txt`, sorted.
+///
+/// `bidi::drawn_direction`'s comma tie-break needs the one fact
+/// `Bidi_Class` does not carry: whether a mark *opens* something. Every one of
+/// these is `ON`, as `)` and `?` are, and only a mark that closes can trail a
+/// left-to-right reading. `BidiBrackets.txt`'s opening brackets are all here
+/// (a test in `unicode.rs` asserts it), and so are the quotation marks, which
+/// that file does not list.
+///
+/// No range row of the file (`<..., First>`, `<..., Last>`) is punctuation,
+/// and one that became punctuation stops the build rather than being read as
+/// its two end points.
+fn opening_punctuation(data: &Path, out: &mut String) {
+    let text = read(&data.join("UnicodeData.txt"));
+    let mut codes = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        let fields: Vec<&str> = line.split(';').collect();
+        let (Some(code), Some(name), Some(category)) =
+            (fields.first(), fields.get(1), fields.get(2))
+        else {
+            continue;
+        };
+        if !matches!(*category, "Ps" | "Pi") {
+            continue;
+        }
+        assert!(
+            !name.ends_with(", First>") && !name.ends_with(", Last>"),
+            "UnicodeData.txt has a range of {category} at {code}"
+        );
+        codes.push(hex(code));
+    }
+    assert!(
+        codes.windows(2).all(|pair| pair[0] < pair[1]),
+        "UnicodeData.txt is not sorted"
+    );
+    assert!(
+        !codes.is_empty(),
+        "UnicodeData.txt yielded no opening punctuation"
+    );
+    let mut body = String::new();
+    for code in &codes {
+        let _ = writeln!(body, "    {code:#x},");
+    }
+    let _ = writeln!(
+        out,
+        "/// The {} characters whose `General_Category` is `Ps` or `Pi`, from the \
+         vendored UCD, sorted.\n\
+         pub(crate) static OPENING_PUNCTUATION: &[u32] = &[\n{body}];",
+        codes.len()
+    );
 }
 
 /// One character's canonical decomposition, appended to `out`.

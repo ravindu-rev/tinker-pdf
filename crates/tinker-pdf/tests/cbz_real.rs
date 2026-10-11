@@ -105,18 +105,40 @@ const ZIPS: &[&str] = &[
 /// check of their own: what is worth asserting about a `.cbt` is not that it
 /// opens, it is that it opens as *the same five pictures* a `.cbz` of the same
 /// pages does.
-/// The three `.cb7`s are one producer asked for three *shapes* rather than
+/// 7-Zip's three `.cb7`s are one producer asked for three *shapes* rather than
 /// three producers, and the difference is stated here because it is the row's
 /// own caveat: `-m0=LZMA2` writes one folder holding one LZMA2 chunk, so the
 /// folder walk and the chunk loop each ran exactly once for every committed
 /// archive until `-ms=off` and `-m0=LZMA2:d8k:c8k` were added.
 /// `the_two_cb7s_added_for_coverage_have_the_structure_they_are_named_for` in
 /// `tinker-pdf-archive` asserts that they really hold those shapes.
+///
+/// `python-lzma.cbz` is a ZIP and is here rather than in `ZIPS`, because
+/// `ZIPS` is the list `INVENTORY.tsv` describes and .NET — the second reader
+/// that wrote it — infers a method from two lengths and would call a method-14
+/// entry `deflate`. Its entries are held to the files that went into them in
+/// `a_real_archiver_s_lzma_entries_are_the_files_that_went_in` instead, and
+/// `python-bzip2.cbz` (method 12) and `python-zstd.cbz` (method 93) are here
+/// for the same reason.
+///
+/// The `py7zr-*.cb7`s are the second 7z writer (`tests/cbz/make-py7zr.py`),
+/// each asked for a coder 7-Zip's three were not: `py7zr-bcj.cb7` puts BCJ in
+/// front of LZMA2, and lists the two coders in the opposite order from 7-Zip;
+/// `py7zr-bzip2.cb7` is coder `040202` and `py7zr-ppmd.cb7` coder `030401`.
+/// `7zz-bcj2.cb7` is 7-Zip's own BCJ2 folder, four coders meeting in one,
+/// written by the Linux build of the program that wrote the three above it.
 const READ_CONTAINERS: &[(&str, Container)] = &[
     ("7z-tar.cbt", Container::Tar),
     ("7z-lzma2.cb7", Container::SevenZip),
     ("7z-nonsolid.cb7", Container::SevenZip),
     ("7z-dictreset.cb7", Container::SevenZip),
+    ("py7zr-bcj.cb7", Container::SevenZip),
+    ("py7zr-bzip2.cb7", Container::SevenZip),
+    ("py7zr-ppmd.cb7", Container::SevenZip),
+    ("7zz-bcj2.cb7", Container::SevenZip),
+    ("python-lzma.cbz", Container::Zip),
+    ("python-bzip2.cbz", Container::Zip),
+    ("python-zstd.cbz", Container::Zip),
 ];
 
 /// The containers that open but do **not** produce all five pages, and what
@@ -491,6 +513,626 @@ fn the_7z_a_real_archiver_wrote_pages_in_natural_order() {
             );
         }
     }
+}
+
+/// **ZIP method 14, from a real writer, decodes to the files that went in.**
+///
+/// `python-lzma.cbz` is CPython's `zipfile` with `ZIP_LZMA` over the five
+/// pages in `source/` (`tests/cbz/make-lzma.py`): every entry method 14, every
+/// one carrying APPNOTE 5.8.8's header and an end-of-stream marker. LZMA is
+/// lossless, so the expected answer is not another decoder's output — it is
+/// the committed file each entry was made from, byte for byte, which is a
+/// stronger claim than the recorded CRC-32 `read_entry` already enforces.
+///
+/// The pictures are then held to the other writers' by
+/// `five_zip_writers_produce_the_same_five_pictures`, which this archive joins
+/// through `READ_CONTAINERS`.
+#[test]
+fn a_real_archiver_s_lzma_entries_are_the_files_that_went_in() {
+    let bytes = read("python-lzma.cbz");
+    let mut archive = Archive::open(&bytes, &ZipLimits::DEFAULT).expect("the archive opens");
+    let sources = source_pages();
+    assert_eq!(archive.entries().len(), sources.len(), "one entry per page");
+    for index in 0..archive.entries().len() {
+        let entry = archive.entries()[index].clone();
+        assert_eq!(
+            entry.method,
+            Method::Other(tinker_pdf_zip::LZMA),
+            "{}: CPython wrote method 14",
+            entry.name
+        );
+        // The reader without a decoder is unchanged: it still names the method.
+        assert_eq!(
+            archive.read(index),
+            Err(cbz::ZipEntryError::UnsupportedMethod(14)),
+            "{}: `Archive::read` carries no LZMA decoder",
+            entry.name
+        );
+        let decoded =
+            cbz::read_entry(&mut archive, index).unwrap_or_else(|e| panic!("{}: {e}", entry.name));
+        let (_, want) = sources
+            .iter()
+            .find(|(name, _)| *name == entry.name)
+            .unwrap_or_else(|| panic!("{} is one of the source pages", entry.name));
+        assert!(
+            *decoded == want[..],
+            "{}: the decoded entry is the file that went into it",
+            entry.name
+        );
+    }
+    assert!(
+        archive.warnings().is_empty(),
+        "a real writer's method-14 archive is not a damaged one: {:?}",
+        archive.warnings()
+    );
+    assert_eq!(
+        archive.inflated(),
+        sources.iter().map(|(_, b)| b.len()).sum::<usize>(),
+        "each entry charged its declared size against the archive's total, once"
+    );
+
+    let document = Document::open(bytes).expect("the method-14 comic opens");
+    let report = document.archive().expect("a synthesised document");
+    let order: Vec<&str> = report.pages().iter().map(|p| p.name.as_str()).collect();
+    let want: Vec<&str> = PAGES.iter().map(|(name, _, _)| *name).collect();
+    assert_eq!(order, want, "page order");
+    assert!(
+        report.pages().iter().all(|page| page.defect.is_none()),
+        "every page is its entry's own picture: {:?}",
+        report.pages().iter().map(|p| p.defect).collect::<Vec<_>>()
+    );
+}
+
+/// **ZIP method 12, from a real writer, decodes to the files that went in** —
+/// through `cbz::read_entry`, the door the comic path reads every ZIP entry
+/// by, and so through `tinker-pdf-zip`'s `read_coded` and the bzip2 decoder
+/// `tinker-pdf-archive` also runs for 7z's `040202`.
+///
+/// Two archives. `python-bzip2.cbz` is CPython's `zipfile` with `ZIP_BZIP2`
+/// over the five pages (`tests/cbz/make-bzip2.py`), which also joins the
+/// cross-producer identity through `READ_CONTAINERS`. The other is
+/// `tinker-pdf-archive/tests/coders/python-bzip2.zip`, the same writer at
+/// `compresslevel=1` over files shaped for the coder: `prose.txt` is two bzip2
+/// blocks and `empty.txt` a stream with none. Each entry is held to the file it
+/// was made from, byte for byte, and `Archive::read` still names the method it
+/// has no decoder for.
+#[test]
+fn a_real_archiver_s_bzip2_entries_are_the_files_that_went_in() {
+    let coders = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tinker-pdf-archive/tests/coders");
+    let pages = source_pages();
+    let archives: [(Vec<u8>, &str); 2] = [
+        (read("python-bzip2.cbz"), "python-bzip2.cbz"),
+        (
+            std::fs::read(coders.join("python-bzip2.zip")).expect("the coder fixture"),
+            "python-bzip2.zip",
+        ),
+    ];
+    let mut read_entries = 0usize;
+    for (bytes, name) in &archives {
+        let mut archive = Archive::open(bytes, &ZipLimits::DEFAULT).expect("the archive opens");
+        for index in 0..archive.entries().len() {
+            let entry = archive.entries()[index].clone();
+            assert_eq!(
+                entry.method,
+                Method::Other(tinker_pdf_zip::BZIP2),
+                "{name}: {}: CPython wrote method 12",
+                entry.name
+            );
+            assert_eq!(
+                archive.read(index),
+                Err(cbz::ZipEntryError::UnsupportedMethod(12)),
+                "{name}: {}: `Archive::read` carries no bzip2 decoder",
+                entry.name
+            );
+            let decoded = cbz::read_entry(&mut archive, index)
+                .unwrap_or_else(|e| panic!("{name}: {}: {e}", entry.name));
+            let want = match pages.iter().find(|(page, _)| *page == entry.name) {
+                Some((_, page)) => page.clone(),
+                None => std::fs::read(coders.join("input").join(&entry.name))
+                    .unwrap_or_else(|e| panic!("{name}: {}: {e}", entry.name)),
+            };
+            assert!(
+                *decoded == want[..],
+                "{name}: {} is the file that went into it",
+                entry.name
+            );
+            read_entries += 1;
+        }
+        assert!(
+            archive.warnings().is_empty(),
+            "{name}: {:?}",
+            archive.warnings()
+        );
+    }
+    assert_eq!(read_entries, 9, "five pages and four coder inputs");
+}
+
+/// **ZIP method 93, libzstd's frames, decodes to the files that went in** —
+/// through `cbz::read_entry`, and so through `tinker-pdf-zip`'s `read_coded`
+/// and `tinker-pdf-archive`'s Zstandard decoder.
+///
+/// No ZIP writer on hand makes method 93 (CPython's `zipfile` learned it in
+/// 3.14), so both archives are libzstd's frames — python-zstandard's
+/// compressor, the reference encoder — inside a ZIP written field by field
+/// from APPNOTE 4.3 by the script beside each: `python-zstd.cbz` holds the
+/// five pages (`tests/cbz/make-zstd.py`) and joins the cross-producer
+/// identity through `READ_CONTAINERS`, and
+/// `tinker-pdf-archive/tests/coders/zstd-method-93.zip` the four coder inputs
+/// (`make-zstd.py` there), one of them streamed with no content size and one
+/// empty. Each entry is held to the file it was made from, byte for byte, and
+/// `Archive::read` still names the method it has no decoder for.
+#[test]
+fn libzstd_s_method_93_entries_are_the_files_that_went_in() {
+    let coders = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tinker-pdf-archive/tests/coders");
+    let pages = source_pages();
+    let archives: [(Vec<u8>, &str); 2] = [
+        (read("python-zstd.cbz"), "python-zstd.cbz"),
+        (
+            std::fs::read(coders.join("zstd-method-93.zip")).expect("the coder fixture"),
+            "zstd-method-93.zip",
+        ),
+    ];
+    let mut read_entries = 0usize;
+    for (bytes, name) in &archives {
+        let mut archive = Archive::open(bytes, &ZipLimits::DEFAULT).expect("the archive opens");
+        for index in 0..archive.entries().len() {
+            let entry = archive.entries()[index].clone();
+            assert_eq!(
+                entry.method,
+                Method::Other(tinker_pdf_zip::ZSTANDARD),
+                "{name}: {}: method 93",
+                entry.name
+            );
+            assert_eq!(
+                archive.read(index),
+                Err(cbz::ZipEntryError::UnsupportedMethod(93)),
+                "{name}: {}: `Archive::read` carries no Zstandard decoder",
+                entry.name
+            );
+            let decoded = cbz::read_entry(&mut archive, index)
+                .unwrap_or_else(|e| panic!("{name}: {}: {e}", entry.name));
+            let want = match pages.iter().find(|(page, _)| *page == entry.name) {
+                Some((_, page)) => page.clone(),
+                None => std::fs::read(coders.join("input").join(&entry.name))
+                    .unwrap_or_else(|e| panic!("{name}: {}: {e}", entry.name)),
+            };
+            assert!(
+                *decoded == want[..],
+                "{name}: {} is the file that went into it",
+                entry.name
+            );
+            read_entries += 1;
+        }
+        assert!(
+            archive.warnings().is_empty(),
+            "{name}: {:?}",
+            archive.warnings()
+        );
+    }
+    assert_eq!(read_entries, 9, "five pages and four coder inputs");
+}
+
+/// **A damaged LZMA header costs its page and names itself.**
+///
+/// The committed archive with one byte changed: `page3.jpg`'s 5.8.8
+/// properties size, 5 becoming 1 — LZMA2's, which is the likeliest way a
+/// header is wrong rather than random. The entry is refused before any byte of
+/// it is decoded, the page keeps its number as a placeholder saying why, and
+/// the four pages around it are untouched (ruling 2).
+#[test]
+fn a_damaged_lzma_header_is_a_placeholder_page_naming_it() {
+    let mut bytes = read("python-lzma.cbz");
+    let at = {
+        let archive = Archive::open(&bytes, &ZipLimits::DEFAULT).expect("the archive opens");
+        let entry = archive
+            .entries()
+            .iter()
+            .find(|e| e.name == "page3.jpg")
+            .expect("page3.jpg")
+            .clone();
+        let header = entry.header_offset as usize;
+        let name_len = u16::from_le_bytes([bytes[header + 26], bytes[header + 27]]) as usize;
+        let extra_len = u16::from_le_bytes([bytes[header + 28], bytes[header + 29]]) as usize;
+        header + 30 + name_len + extra_len
+    };
+    assert_eq!(
+        &bytes[at + 2..at + 4],
+        &[5, 0],
+        "the properties size CPython wrote"
+    );
+    bytes[at + 2] = 1;
+
+    let document = Document::open(bytes).expect("four pages are still a comic");
+    let report = document.archive().expect("a synthesised document");
+    let defects: Vec<(&str, Option<cbz::PageDefect>)> = report
+        .pages()
+        .iter()
+        .map(|p| (p.name.as_str(), p.defect))
+        .collect();
+    assert_eq!(
+        defects,
+        [
+            ("page1.png", None),
+            ("page2.png", None),
+            (
+                "page3.jpg",
+                Some(cbz::PageDefect::EntryRefused(
+                    cbz::ZipEntryError::LzmaHeader
+                ))
+            ),
+            ("page10.png", None),
+            ("page11.png", None),
+        ],
+        "the damaged entry is a placeholder naming its header"
+    );
+    assert!(
+        report
+            .warnings()
+            .contains(&ArchiveWarning::PlaceholderPage {
+                page: 2,
+                defect: cbz::PageDefect::EntryRefused(cbz::ZipEntryError::LzmaHeader),
+            }),
+        "and the report says so: {:?}",
+        report.warnings()
+    );
+}
+
+/// Where `name`'s data begins in a ZIP: its local header, read the way
+/// APPNOTE 4.3.7 lays it out, past the name and the extra field.
+fn entry_data_at(bytes: &[u8], name: &str) -> usize {
+    let archive = Archive::open(bytes, &ZipLimits::DEFAULT).expect("the archive opens");
+    let entry = archive
+        .entries()
+        .iter()
+        .find(|e| e.name == name)
+        .unwrap_or_else(|| panic!("{name}"))
+        .clone();
+    let header = entry.header_offset as usize;
+    let name_len = u16::from_le_bytes([bytes[header + 26], bytes[header + 27]]) as usize;
+    let extra_len = u16::from_le_bytes([bytes[header + 28], bytes[header + 29]]) as usize;
+    header + 30 + name_len + extra_len
+}
+
+/// **A feature refused by name is a placeholder naming it, not a broken
+/// stream** (review of lane 5A).
+///
+/// The committed archives with one bit changed in `page3.jpg`'s stream: in
+/// `python-zstd.cbz` the frame header's `Dictionary_ID_flag` (RFC 8878
+/// §3.1.1.1.1.6) goes from 0 to 1, so the byte after it — the content size,
+/// 169 — names dictionary 169; in `python-bzip2.cbz` the first block's
+/// randomised bit, the bit after its CRC, is set. Each page is refused naming
+/// the feature, where before both were `ZipEntryError::Corrupt`, whose
+/// sentence is "the deflate stream is structurally invalid" — a host told an
+/// entry that may be well formed that it is broken, and broken as the wrong
+/// format.
+#[test]
+fn a_feature_refused_by_name_is_a_placeholder_naming_it() {
+    let cases = [
+        (
+            "python-zstd.cbz",
+            4,
+            (0x24, 0x25),
+            cbz::ZipMethodFeature::ZstandardDictionary,
+        ),
+        (
+            "python-bzip2.cbz",
+            14,
+            (0x00, 0x80),
+            cbz::ZipMethodFeature::Bzip2Randomised,
+        ),
+    ];
+    for (name, offset, (was, now), feature) in cases {
+        let mut bytes = read(name);
+        let at = entry_data_at(&bytes, "page3.jpg") + offset;
+        assert_eq!(bytes[at], was, "{name}: the byte its writer wrote");
+        bytes[at] = now;
+
+        let document = Document::open(bytes).expect("four pages are still a comic");
+        let report = document.archive().expect("a synthesised document");
+        let refused =
+            cbz::PageDefect::EntryRefused(cbz::ZipEntryError::UnsupportedFeature(feature));
+        let defects: Vec<(&str, Option<cbz::PageDefect>)> = report
+            .pages()
+            .iter()
+            .map(|p| (p.name.as_str(), p.defect))
+            .collect();
+        assert_eq!(
+            defects,
+            [
+                ("page1.png", None),
+                ("page2.png", None),
+                ("page3.jpg", Some(refused)),
+                ("page10.png", None),
+                ("page11.png", None),
+            ],
+            "{name}: the entry is a placeholder naming the feature"
+        );
+        assert!(
+            report
+                .warnings()
+                .contains(&ArchiveWarning::PlaceholderPage {
+                    page: 2,
+                    defect: refused,
+                }),
+            "{name}: and the report says so: {:?}",
+            report.warnings()
+        );
+    }
+}
+
+/// T.800 J.10.5: "After the inverse 5-3 reversible filter and level shifting,
+/// the component samples in decimal are: 101, 103, 104, 105, 96, 97, 96, 102,
+/// 109". The same nine numbers `tinker-pdf-filters`' `jpx_annex_j.rs` holds
+/// its decoder to, one column of them, top to bottom.
+const ANNEX_J10_SAMPLES: [u8; 9] = [101, 103, 104, 105, 96, 97, 96, 102, 109];
+
+/// Every image XObject in a document whose `/Filter` is `/JPXDecode`, with
+/// its dictionary and the bytes its stream carries before that filter runs.
+fn jpx_images(document: &Document) -> Vec<(tinker_pdf::Dict, Vec<u8>)> {
+    let cos = document.cos();
+    (1..=cos.max_object_number())
+        .map(|num| tinker_pdf::ObjRef::new(num, 0))
+        .filter_map(|r| {
+            let dict = cos.get(r).ok()?.as_dict()?.clone();
+            let filter = dict.get_name(Name::FILTER)?;
+            if cos.name_bytes(filter).as_deref() != Some(b"JPXDecode".as_slice()) {
+                return None;
+            }
+            Some((dict, cos.stream_raw(r).ok()?))
+        })
+        .collect()
+}
+
+/// **A JPEG 2000 page reaches the document as its own bytes under
+/// `/JPXDecode`, and draws the samples T.800 publishes.**
+///
+/// `python-jpx.cbz` is CPython's `zipfile` over T.800 Annex J.10's 100-byte
+/// codestream twice (`tests/cbz/make-jpx.py`): bare as `page1.j2k`, and inside
+/// Annex I's JP2 boxes as `page2.jp2`. J.10.5 publishes the decoded samples,
+/// so both pages have an expected picture no decoder here produced.
+///
+/// Three claims, in the order they would fail:
+///
+/// - **the pass-through**: each page's image XObject is `/JPXDecode`, its
+///   stream is the entry's bytes exactly, and its dictionary states **no**
+///   `/ColorSpace` and **no** `/BitsPerComponent` — Table 89 lets a JPX image
+///   omit both, and a `/ColorSpace` would override the JP2's own `colr` box;
+/// - **the geometry**: each page is 1 x 9 points, J.10.1's `Xsiz` and `Ysiz`,
+///   read from the header at plan time;
+/// - **the picture**: rendered at one pixel a point, the nine pixels of each
+///   page are J.10.5's nine samples, grey.
+#[test]
+fn a_jpeg_2000_page_is_placed_as_jpxdecode_and_draws_the_samples_t800_publishes() {
+    let bytes = read("python-jpx.cbz");
+    let mut archive = Archive::open(&bytes, &ZipLimits::DEFAULT).expect("the archive opens");
+    let entries: Vec<(String, Vec<u8>)> = (0..archive.entries().len())
+        .map(|i| {
+            let name = archive.entries()[i].name.clone();
+            let data = archive.read(i).expect("a stored entry").into_owned();
+            (name, data)
+        })
+        .collect();
+    assert_eq!(
+        entries.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        ["page1.j2k", "page2.jp2"]
+    );
+    assert_eq!(
+        cbz::image_format(&entries[0].1),
+        Some(cbz::ImageFormat::Jpeg2000),
+        "a bare codestream is recognised by SOC and SIZ"
+    );
+    assert_eq!(
+        cbz::image_format(&entries[1].1),
+        Some(cbz::ImageFormat::Jpeg2000),
+        "a JP2 by its signature box"
+    );
+
+    let document = Document::open(bytes).expect("the comic opens");
+    let report = document.archive().expect("a synthesised document");
+    assert_eq!(
+        report
+            .pages()
+            .iter()
+            .map(|p| (p.name.as_str(), p.defect))
+            .collect::<Vec<_>>(),
+        [("page1.j2k", None), ("page2.jp2", None)],
+        "both pages are their entries' own pictures, not placeholders"
+    );
+    assert!(
+        report.warnings().is_empty(),
+        "nothing about J.10 is degraded: {:?}",
+        report.warnings()
+    );
+
+    let images = jpx_images(&document);
+    assert_eq!(images.len(), 2, "one /JPXDecode image per page");
+    let cos = document.cos();
+    for ((name, entry), (dict, stream)) in entries.iter().zip(&images) {
+        assert!(
+            stream == entry,
+            "{name}: the /JPXDecode stream is the entry's bytes, untouched"
+        );
+        assert_eq!(
+            dict.get_int(cos.intern(b"Width")),
+            Some(1),
+            "{name}: J.10.1's Xsiz"
+        );
+        assert_eq!(
+            dict.get_int(cos.intern(b"Height")),
+            Some(9),
+            "{name}: J.10.1's Ysiz"
+        );
+        assert!(
+            !dict.contains_key(cos.intern(b"ColorSpace")),
+            "{name}: no /ColorSpace, so the codestream's own applies"
+        );
+        assert!(
+            !dict.contains_key(cos.intern(b"BitsPerComponent")),
+            "{name}: no /BitsPerComponent, so the codestream's precision applies"
+        );
+    }
+
+    for (index, (name, _)) in entries.iter().enumerate() {
+        let bitmap = document
+            .page(index as u32)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        assert_eq!(
+            (bitmap.width, bitmap.height),
+            (1, 9),
+            "{name}: one pixel a point"
+        );
+        let column: Vec<(u8, u8, u8)> = (0..9)
+            .map(|y| {
+                let at = y * bitmap.stride;
+                let p = &bitmap.data[at..at + 3];
+                (p[0], p[1], p[2])
+            })
+            .collect();
+        let want: Vec<(u8, u8, u8)> = ANNEX_J10_SAMPLES.iter().map(|&s| (s, s, s)).collect();
+        assert_eq!(column, want, "{name}: T.800 J.10.5's nine samples");
+    }
+}
+
+/// **A JPEG 2000 entry whose header this build refuses is a placeholder page
+/// that names it** — the page keeps its number and its neighbours' size.
+///
+/// The JP2 page with its codestream damaged inside the `jp2c` box. The
+/// signature box still says JPEG 2000, so the classifier does too, and only
+/// the plan-time header read can say no — which is the case that read exists
+/// for. Two damages: SIZ's marker code changed, and an `Lsiz` reaching past
+/// the codestream. (A *bare* codestream with its SIZ broken is not JPEG 2000
+/// to the classifier at all, which wants SOC and SIZ together, so it is not a
+/// page — the same answer any unrecognised entry gets.)
+#[test]
+fn a_jpeg_2000_entry_whose_header_is_refused_is_a_placeholder_naming_it() {
+    let bytes = read("python-jpx.cbz");
+    let mut archive = Archive::open(&bytes, &ZipLimits::DEFAULT).expect("the archive opens");
+    let jp2 = archive.read(1).expect("page2.jp2").into_owned();
+    let good = archive.read(0).expect("page1.j2k").into_owned();
+
+    // `jp2c`'s contents start with SOC, SIZ; break the SIZ marker inside the
+    // box, which the box walk passes and the codestream header refuses.
+    let at = jp2
+        .windows(4)
+        .position(|w| w == b"jp2c")
+        .expect("a jp2c box")
+        + 4;
+    assert_eq!(&jp2[at..at + 4], &[0xFF, 0x4F, 0xFF, 0x51]);
+    let mut broken = jp2.clone();
+    broken[at + 3] = 0x52;
+    // Lsiz past the codestream, the other header damage a file can carry.
+    let mut long = jp2.clone();
+    long[at + 4..at + 6].copy_from_slice(&[0x7F, 0xFF]);
+
+    for (why, damaged) in [("SIZ is not SIZ", &broken), ("Lsiz past the end", &long)] {
+        let comic = cbz_support::zip(
+            &[
+                cbz_support::ZipFile::stored("page1.j2k", &good),
+                cbz_support::ZipFile::stored("page2.jp2", damaged),
+            ],
+            cbz_support::Damage::None,
+        );
+        let document = Document::open(comic).unwrap_or_else(|e| panic!("{why}: {e:?}"));
+        let report = document.archive().expect("a synthesised document");
+        assert_eq!(
+            report
+                .pages()
+                .iter()
+                .map(|p| (p.name.as_str(), p.defect))
+                .collect::<Vec<_>>(),
+            [
+                ("page1.j2k", None),
+                ("page2.jp2", Some(cbz::PageDefect::Undecodable))
+            ],
+            "{why}: the damaged page is a named placeholder and the other is a picture"
+        );
+        let bitmap = document
+            .page(1)
+            .expect("page 2")
+            .render(&RenderOptions::default());
+        assert_eq!(
+            (bitmap.width, bitmap.height),
+            (1, 9),
+            "{why}: the placeholder takes its neighbour's size"
+        );
+    }
+}
+
+/// **Hostile bytes through the method-14 path never panic** (ruling 1).
+///
+/// The LZMA decoder was written for 7z, where a header CRC stands in front of
+/// every stream it is handed; through ZIP method 14 it is reached with nothing
+/// in front of it but APPNOTE 5.8.8's nine bytes. So every byte of
+/// `page3.jpg`'s whole entry — the header and all 68 bytes of range-coded
+/// stream — is flipped at both ends of the byte, the entry is cut at every
+/// length, and one byte in every 29 of the rest of the archive is flipped
+/// too. What is asserted is only what `hostile_input.rs` asserts: nothing
+/// panics, and a read that succeeds is the length it declared.
+#[test]
+fn hostile_bytes_through_the_lzma_path_never_panic() {
+    let original = read("python-lzma.cbz");
+    let (start, len, header) = {
+        let archive = Archive::open(&original, &ZipLimits::DEFAULT).expect("the archive opens");
+        let entry = archive
+            .entries()
+            .iter()
+            .find(|e| e.name == "page3.jpg")
+            .expect("page3.jpg")
+            .clone();
+        let header = entry.header_offset as usize;
+        let name_len = u16::from_le_bytes([original[header + 26], original[header + 27]]) as usize;
+        let extra_len = u16::from_le_bytes([original[header + 28], original[header + 29]]) as usize;
+        (
+            header + 30 + name_len + extra_len,
+            entry.compressed_size as usize,
+            header,
+        )
+    };
+    let exercise = |bytes: &[u8]| {
+        if let Ok(mut archive) = Archive::open(bytes, &ZipLimits::DEFAULT) {
+            for index in 0..archive.entries().len() {
+                let declared = archive.entries()[index].uncompressed_size;
+                if let Ok(data) = cbz::read_entry(&mut archive, index) {
+                    assert_eq!(data.len() as u64, declared, "a read is its declared length");
+                }
+            }
+        }
+    };
+
+    let mut tried = 0usize;
+    for at in start..start + len {
+        for bit in [0x01u8, 0x80] {
+            let mut bytes = original.clone();
+            bytes[at] ^= bit;
+            exercise(&bytes);
+            tried += 1;
+        }
+    }
+    // The entry cut short at every length, by lowering the size both headers
+    // declare for it, so the directory still parses and the stream really ends.
+    let central = original
+        .windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == b"PK\x01\x02")
+        .map(|(i, _)| i)
+        .find(|&i| original[i + 46..].starts_with(b"page3.jpg"))
+        .expect("page3.jpg's directory record");
+    for cut in 0..len {
+        let mut bytes = original.clone();
+        let size = (cut as u32).to_le_bytes();
+        bytes[header + 18..header + 22].copy_from_slice(&size);
+        bytes[central + 20..central + 24].copy_from_slice(&size);
+        exercise(&bytes);
+        tried += 1;
+    }
+    for at in (0..original.len()).step_by(29) {
+        let mut bytes = original.clone();
+        bytes[at] ^= 0x5A;
+        exercise(&bytes);
+        tried += 1;
+    }
+    assert!(tried > 300, "the sweep ran: {tried} inputs");
 }
 
 /// The five pages of the corpus, as `source/` holds them.

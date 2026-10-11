@@ -814,9 +814,11 @@ fn an_alpha_one_part_in_ten_million_from_opaque_is_opaque() {
 /// find is a silent pass with extra steps.
 #[test]
 fn every_staged_colour_rule_is_named_with_its_clause_and_its_reason() {
-    for clause in [
-        "6.2.2", "6.2.3.4", "6.2.4", "6.2.5", "6.2.8", "6.2.10", "6.4",
-    ] {
+    // 6.2.3.4 left this list when 6.2.4.4's two rules landed
+    // (`two_separations_of_one_name_with_different_transforms_are_a_finding`,
+    // `a_devicen_spot_colorant_is_described_in_its_colorants`): the clause
+    // defines the equality it asks for, which was the staged entry's reason.
+    for clause in ["6.2.2", "6.2.4", "6.2.5", "6.2.8", "6.2.10", "6.4"] {
         let found = tinker_pdf::PDFA_STAGED
             .iter()
             .find(|rule| rule.clause == clause)
@@ -842,15 +844,25 @@ fn every_staged_colour_rule_is_named_with_its_clause_and_its_reason() {
 /// that need it do not fire — in **either** direction.
 ///
 /// The document below paints in `DeviceCMYK` under an intent whose profile is
-/// twelve bytes of rubbish. A build that guessed would report it; a build that
-/// treated an unreadable profile as absent would report it too, under the
-/// other kind. Neither happens, and that is what "staged, not guessed" means
-/// when you can see it.
+/// a well-formed ICC header — an output-class CMYK profile, version 2.1 —
+/// with no tags behind it, which the transform builder cannot read. A build
+/// that guessed would report it; a build that treated an unreadable profile
+/// as absent would report it too, under the other kind. Neither happens, and
+/// that is what "staged, not guessed" means when you can see it.
+///
+/// The profile was thirteen bytes of rubbish until the header rule landed,
+/// and thirteen bytes are a finding now in their own right
+/// (`a_destination_profile_header_the_clause_does_not_admit_is_a_finding`);
+/// a header with nothing behind it keeps this test about what it was about.
 #[test]
 fn an_unreadable_destination_profile_makes_the_intents_space_unknown() {
     let mut fixture = conforming();
     fixture.content = "0 0 0 1 k 10 10 50 50 re f".to_string();
-    fixture.profile = Some(b"not a profile".to_vec());
+    fixture.profile = Some(header_only(2, b"prtr", b"CMYK"));
+    assert!(
+        tinker_pdf_color::icc::Profile::parse(&header_only(2, b"prtr", b"CMYK")).is_err(),
+        "the fixture is only about an unreadable profile if it is one"
+    );
     assert_eq!(
         fixture.findings(),
         Vec::<FindingKind>::new(),
@@ -1070,4 +1082,508 @@ fn a_prohibited_entry_on_an_xobject_nothing_draws_is_not_reported() {
     let mut unused = drawing_an_image("/OPI << /F (elsewhere.tif) >>");
     unused.content = "0.5 g 10 10 50 50 re f".to_string();
     assert_eq!(unused.findings(), Vec::<FindingKind>::new());
+}
+
+// ---- 6.2.10 / 6.2.2: the operators a content stream may use -----------------
+
+/// Every finding as `(clause, object number, kind)`.
+fn located(fixture: &Fixture) -> Vec<(String, Option<u32>, FindingKind)> {
+    Document::open(fixture.build())
+        .expect("the fixture opens")
+        .validate_pdfa()
+        .findings
+        .into_iter()
+        .map(|finding| {
+            (
+                finding.clause.0,
+                finding.object.map(|r| r.num),
+                finding.kind,
+            )
+        })
+        .collect()
+}
+
+/// ISO 19005-2 6.2.2, in veraPDF's statement of rule 6.2.2-1: "Content
+/// streams shall not contain any operators not defined in ISO 32000-1 even if
+/// such operators are bracketed by the BX/EX compatibility operators". Part 1
+/// numbers it 6.2.10 and says "PDF Reference". One finding per distinct
+/// operator, naming the page whose content used it.
+#[test]
+fn an_operator_iso_32000_does_not_define_is_a_finding_inside_bx_ex_too() {
+    for (part, clause) in [("1", "6.2.10"), ("2", "6.2.2")] {
+        let mut bracketed = Fixture::new(part, Some("B"));
+        bracketed.content = "1 0 0 rg BX 5 xyz xyz EX 10 10 50 50 re f".to_string();
+        assert_eq!(
+            located(&bracketed),
+            [(
+                clause.to_string(),
+                Some(3),
+                FindingKind::OperatorUndefined {
+                    operator: "xyz".to_string()
+                }
+            )],
+            "part {part}"
+        );
+    }
+    // `PS`, which earlier PDF defined and ISO 32000 does not: veraPDF's note
+    // reads its prohibition out of this same rule.
+    let mut postscript = conforming();
+    postscript.content = "1 0 0 rg (showpage) PS 10 10 50 50 re f".to_string();
+    assert_eq!(
+        postscript.one_finding(),
+        FindingKind::OperatorUndefined {
+            operator: "PS".to_string()
+        }
+    );
+}
+
+/// The twin: Table A.1's less common operators — the compatibility pair,
+/// the four marked-content ones, the graphics-state and text-state setters,
+/// `T*` — are admitted, and so is an inline image, whose data is not
+/// operators at all.
+#[test]
+fn the_operators_table_a1_defines_are_admitted() {
+    let mut rare = conforming();
+    rare.content = "BX EX /Span BMC EMC /P << /MCID 0 >> BDC EMC /X MP /X << >> DP \
+                    q 1 0 0 1 0 0 cm 0 i 1 j 1 J 4 M [] 0 d 1 w Q \
+                    BT /F1 1 Tf 0 Tc 0 Tw 100 Tz 0 TL 0 Ts 0 Tr 1 0 0 1 0 0 Tm \
+                    0 0 Td 0 0 TD T* ET \
+                    BI /W 1 /H 1 /BPC 8 /CS /G ID \u{1} EI \
+                    1 0 0 rg 10 10 50 50 re f"
+        .to_string();
+    assert_eq!(located(&rare), []);
+}
+
+/// A form XObject's content is a content stream too, and the finding names the
+/// form rather than the page that invoked it (ruling 10).
+#[test]
+fn an_undefined_operator_in_a_form_names_the_form() {
+    let mut fixture = conforming();
+    fixture.resources = "<< /XObject << /X1 7 0 R >> >>".to_string();
+    fixture.content = "/X1 Do".to_string();
+    fixture.extra.push((
+        7,
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 10 10]",
+            b"1 0 0 rg 0 0 5 5 re f zzz",
+        ),
+    ));
+    assert_eq!(
+        located(&fixture),
+        [(
+            "6.2.2".to_string(),
+            Some(7),
+            FindingKind::OperatorUndefined {
+                operator: "zzz".to_string()
+            }
+        )]
+    );
+}
+
+// ---- 6.2.2 / 6.2.3 and 6.2.3.2 / 6.2.4.2: a profile's own header ------------
+
+/// An ICC profile that is a 128-byte header and an empty tag table: version
+/// `major.1`, device class `class`, data colour space `space`, PCS `Lab `,
+/// and the `acsp` signature where ICC.1 puts it.
+fn header_only(major: u8, class: &[u8; 4], space: &[u8; 4]) -> Vec<u8> {
+    let mut profile = vec![0u8; 132];
+    profile[0..4].copy_from_slice(&132u32.to_be_bytes());
+    profile[8] = major;
+    profile[9] = 0x10;
+    profile[12..16].copy_from_slice(class);
+    profile[16..20].copy_from_slice(space);
+    profile[20..24].copy_from_slice(b"Lab ");
+    profile[36..40].copy_from_slice(b"acsp");
+    profile
+}
+
+/// Every finding as `(clause, kind)`.
+fn by_clause(fixture: &Fixture) -> Vec<(String, FindingKind)> {
+    Document::open(fixture.build())
+        .expect("the fixture opens")
+        .validate_pdfa()
+        .findings
+        .into_iter()
+        .map(|finding| (finding.clause.0, finding.kind))
+        .collect()
+}
+
+fn header(field: &str, found: &str) -> FindingKind {
+    FindingKind::IccProfileHeader {
+        field: field.to_string(),
+        found: found.to_string(),
+    }
+}
+
+/// ISO 19005-2 6.2.3, in veraPDF's statement of rule 6.2.3-1: "The profile
+/// stream that is the value of the DestOutputProfile key shall either be an
+/// output profile (Device Class = "prtr") or a monitor profile (Device Class
+/// = "mntr"). The profiles shall have a colour space of either "GRAY", "RGB",
+/// or "CMYK"" — and its test condition bounds the version below 5.0, and part
+/// 1's (6.2.2-1) below 3.0. Each of the three is read from the header and
+/// nothing else, so a profile the transform builder refuses is judged all
+/// the same.
+#[test]
+fn a_destination_profile_header_the_clause_does_not_admit_is_a_finding() {
+    let with = |part: &str, profile: Vec<u8>| {
+        let mut fixture = Fixture::new(part, Some("B"));
+        fixture.content = "0 g 10 10 50 50 re f".to_string();
+        fixture.profile = Some(profile);
+        by_clause(&fixture)
+    };
+    assert_eq!(
+        with("2", header_only(2, b"scnr", b"GRAY")),
+        [("6.2.3".to_string(), header("device class", "scnr"))]
+    );
+    assert_eq!(
+        with("2", header_only(2, b"prtr", b"Lab ")),
+        [("6.2.3".to_string(), header("colour space", "Lab "))]
+    );
+    assert_eq!(
+        with("2", header_only(5, b"mntr", b"GRAY")),
+        [("6.2.3".to_string(), header("version", "5.1"))]
+    );
+    // Version 4 is below part 2's bound and above part 1's.
+    assert_eq!(with("2", header_only(4, b"mntr", b"GRAY")), []);
+    assert_eq!(
+        with("1", header_only(4, b"mntr", b"GRAY")),
+        [("6.2.2".to_string(), header("version", "4.1"))]
+    );
+    // Thirteen bytes say nothing a header must, which is a finding by itself.
+    assert_eq!(
+        with("2", b"not a profile".to_vec()),
+        [("6.2.3".to_string(), header("header", "13 bytes"))]
+    );
+}
+
+/// ISO 19005-2 6.2.4.2 for an `ICCBased` colour space's profile: the input
+/// and colour-space classes are admitted too (`scnr`, `spac`), and `Lab ` is
+/// a colour space it may have, which the destination profile may not — the
+/// test conditions of veraPDF's 6.2.3.2-1 and 6.2.4.2-1. An abstract profile
+/// (`abst`) is not.
+#[test]
+fn an_icc_based_profile_header_is_judged_against_its_own_list() {
+    let with = |profile: Vec<u8>| {
+        let mut fixture = conforming();
+        fixture.resources = "<< /ColorSpace << /Cs [/ICCBased 7 0 R] >> >>".to_string();
+        fixture.content = "/Cs cs 0.5 sc 10 10 50 50 re f".to_string();
+        fixture.extra.push((7, stream("/N 1", &profile)));
+        by_clause(&fixture)
+    };
+    assert_eq!(with(header_only(2, b"scnr", b"GRAY")), []);
+    assert_eq!(
+        with(header_only(2, b"abst", b"GRAY")),
+        [("6.2.4.2".to_string(), header("device class", "abst"))]
+    );
+}
+
+// ---- 6.2.4.4: Separation and DeviceN colour spaces ---------------------------
+
+/// A type 2 function from 0 to `c1` in RGB, as a dictionary's entries.
+fn tint(c1: &str) -> String {
+    format!("/FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [{c1}] /N 1")
+}
+
+/// The baseline painting with two colour spaces, `/A` and `/B`, as written.
+fn two_spaces(part: &str, a: &str, b: &str) -> Fixture {
+    let mut fixture = Fixture::new(part, Some("B"));
+    fixture.resources = format!("<< /ColorSpace << /A {a} /B {b} >> >>");
+    fixture.content = "/A cs 1 scn 10 10 20 20 re f /B cs 1 scn 40 40 20 20 re f".to_string();
+    fixture
+}
+
+/// ISO 19005-2 6.2.4.4, in veraPDF's statement of rule 6.2.4.4-2: "All
+/// Separation arrays … that have the same name shall have the same
+/// tintTransform and alternateSpace. In evaluating equivalence, the PDF
+/// objects shall be compared, rather than the computational result of the use
+/// of those PDF objects. Compression and whether or not an object is direct
+/// or indirect shall be ignored."
+#[test]
+fn two_separations_of_one_name_with_different_transforms_are_a_finding() {
+    let mut differing = two_spaces(
+        "2",
+        "[/Separation /Ink /DeviceRGB 7 0 R]",
+        &format!("[/Separation /Ink /DeviceRGB << {} >>]", tint("0 0 1")),
+    );
+    differing
+        .extra
+        .push((7, format!("<< {} >>", tint("1 0 0")).into_bytes()));
+    assert_eq!(
+        differing.one_finding(),
+        FindingKind::SeparationsDisagree {
+            colorant: "Ink".to_string()
+        }
+    );
+    // Part 1 states no such rule.
+    let mut part_one = differing.clone();
+    part_one.part = "1".to_string();
+    assert_eq!(part_one.findings(), Vec::<FindingKind>::new());
+
+    // A different alternate space under one tint transform is the other half
+    // of the sentence.
+    let one_function = "<< /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>";
+    let alternates = two_spaces(
+        "2",
+        &format!("[/Separation /Ink /DeviceRGB {one_function}]"),
+        &format!("[/Separation /Ink /DeviceGray {one_function}]"),
+    );
+    assert_eq!(
+        alternates.one_finding(),
+        FindingKind::SeparationsDisagree {
+            colorant: "Ink".to_string()
+        }
+    );
+}
+
+/// The twins the clause's own last sentence makes: the same function once by
+/// reference and once written in place, and a sampled function once plain and
+/// once hex-encoded, are one function. Two names are two colorants.
+#[test]
+fn the_same_transform_direct_or_indirect_or_encoded_is_the_same() {
+    let mut direct_and_indirect = two_spaces(
+        "2",
+        "[/Separation /Ink /DeviceRGB 7 0 R]",
+        &format!("[/Separation /Ink /DeviceRGB << {} >>]", tint("1 0 0")),
+    );
+    direct_and_indirect
+        .extra
+        .push((7, format!("<< {} >>", tint("1.0 0 0")).into_bytes()));
+    assert_eq!(direct_and_indirect.findings(), Vec::<FindingKind>::new());
+
+    let sampled = "/FunctionType 0 /Domain [0 1] /Range [0 1 0 1 0 1] /Size [2] \
+                   /BitsPerSample 8";
+    let mut encoded = two_spaces(
+        "2",
+        "[/Separation /Ink /DeviceRGB 7 0 R]",
+        "[/Separation /Ink /DeviceRGB 8 0 R]",
+    );
+    encoded
+        .extra
+        .push((7, stream(sampled, &[255, 255, 255, 255, 0, 0])));
+    encoded.extra.push((
+        8,
+        stream(
+            &format!("{sampled} /Filter /ASCIIHexDecode"),
+            b"FFFFFFFF0000>",
+        ),
+    ));
+    assert_eq!(encoded.findings(), Vec::<FindingKind>::new());
+
+    let two_names = two_spaces(
+        "2",
+        &format!("[/Separation /Ink /DeviceRGB << {} >>]", tint("1 0 0")),
+        &format!("[/Separation /Other /DeviceRGB << {} >>]", tint("0 0 1")),
+    );
+    assert_eq!(two_names.findings(), Vec::<FindingKind>::new());
+}
+
+/// Two parallel chains of stitching functions, one per side. The top of a
+/// side, object 100 or 200, names its chain and then a type 2 function
+/// ending at `after`; level `j` of the chain names level `j + 1` thirty-two
+/// times, and the bottom, six levels down, is a type 2 function ending at
+/// `bottom`.
+fn parallel_chains(bottom: [&str; 2], after: [&str; 2]) -> Fixture {
+    const LEVELS: u32 = 6;
+    let mut fixture = two_spaces(
+        "2",
+        "[/Separation /Ink /DeviceRGB 100 0 R]",
+        "[/Separation /Ink /DeviceRGB 200 0 R]",
+    );
+    for (side, base) in [100, 200].into_iter().enumerate() {
+        fixture.extra.push((
+            base,
+            format!(
+                "<< /FunctionType 3 /Domain [0 1] /Functions [{} 0 R << {} >>] >>",
+                base + 1,
+                tint(after[side])
+            )
+            .into_bytes(),
+        ));
+        for level in 1..=LEVELS {
+            let next = format!("{} 0 R ", base + level + 1);
+            fixture.extra.push((
+                base + level,
+                format!(
+                    "<< /FunctionType 3 /Domain [0 1] /Functions [{}] >>",
+                    next.repeat(32)
+                )
+                .into_bytes(),
+            ));
+        }
+        fixture.extra.push((
+            base + LEVELS + 1,
+            format!("<< {} >>", tint(bottom[side])).into_bytes(),
+        ));
+    }
+    fixture
+}
+
+/// Ruling 1, from the review of the PDF/A staged rules: the comparison
+/// 6.2.4.4 asks for walked a pair of objects once per path to it, so two
+/// chains of equal stitching functions, each level naming the next thirty-two
+/// times, asked for 32^6 comparisons of the bottom from a file of a few
+/// kilobytes and never finished. A pair is now compared once per question:
+/// the chains cost a few hundred comparisons, and a difference *after* them
+/// is still within the rule's budget and found. And a difference *beneath*
+/// them is found too, because remembering a pair is assuming it equal only
+/// while the answer is a conjunction that any difference ends.
+#[test]
+fn a_tint_transform_reached_by_many_paths_is_compared_once() {
+    let red = "1 0 0";
+    let blue = "0 0 1";
+    let equal = parallel_chains([red, red], [red, red]);
+    assert_eq!(equal.findings(), Vec::<FindingKind>::new());
+
+    let ink = FindingKind::SeparationsDisagree {
+        colorant: "Ink".to_string(),
+    };
+    assert_eq!(parallel_chains([red, red], [red, blue]).one_finding(), ink);
+    assert_eq!(parallel_chains([red, blue], [red, red]).one_finding(), ink);
+}
+
+/// The comparison's work budget, which is what bounds it once no pair is
+/// compared twice: side A's level of `fan` functions names the leaves in a
+/// different order from each function, side B's in one order, so every leaf
+/// of A meets every leaf of B — `fan`² pairs, each a leaf's worth of work —
+/// before the last entry of the top-level `/Functions`, where the two sides
+/// differ. Sixteen leaves is well inside the budget and the difference is
+/// found; a hundred and sixty is past it, and a comparison that cannot finish
+/// answers "the same", as a nesting past the depth cap always has: a finding
+/// has to be one the file shows.
+#[test]
+fn a_comparison_past_its_work_budget_answers_the_same() {
+    let rotated = |fan: u32| {
+        let mut fixture = two_spaces(
+            "2",
+            "[/Separation /Ink /DeviceRGB 100 0 R]",
+            "[/Separation /Ink /DeviceRGB 200 0 R]",
+        );
+        let leaf = format!(
+            "<< /FunctionType 0 /Domain [0 1] /Range [{}] >>",
+            "0 1 ".repeat(32)
+        );
+        // Side A is object 100, its middle level 1000.., its leaves 3000..;
+        // side B is 200, 2000.. and 4000...
+        for (top, middle, leaves, rotate, last) in [
+            (100, 1000, 3000, true, "1 0 0"),
+            (200, 2000, 4000, false, "0 0 1"),
+        ] {
+            let names: String = (0..fan).map(|j| format!("{} 0 R ", middle + j)).collect();
+            fixture.extra.push((
+                top,
+                format!(
+                    "<< /FunctionType 3 /Functions [{names} << {} >>] >>",
+                    tint(last)
+                )
+                .into_bytes(),
+            ));
+            for j in 0..fan {
+                let names: String = (0..fan)
+                    .map(|m| {
+                        let leaf = if rotate { (j + m) % fan } else { m };
+                        format!("{} 0 R ", leaves + leaf)
+                    })
+                    .collect();
+                fixture.extra.push((
+                    middle + j,
+                    format!("<< /FunctionType 3 /Functions [{names}] >>").into_bytes(),
+                ));
+            }
+            for m in 0..fan {
+                fixture.extra.push((leaves + m, leaf.clone().into_bytes()));
+            }
+        }
+        fixture
+    };
+    assert_eq!(
+        rotated(16).one_finding(),
+        FindingKind::SeparationsDisagree {
+            colorant: "Ink".to_string()
+        }
+    );
+    assert_eq!(rotated(160).findings(), Vec::<FindingKind>::new());
+}
+
+/// Rule 6.2.4.4-1: "For any spot colour used in a DeviceN or NChannel colour
+/// space, an entry in the Colorants dictionary shall be present". The process
+/// colorants need none, and a `/Colorants` entry is the twin — whose own
+/// `/Separation` the consistency rule then reads ("including those in
+/// Colorants dictionaries").
+#[test]
+fn a_devicen_spot_colorant_is_described_in_its_colorants() {
+    let device_n = |attributes: &str| {
+        let mut fixture = conforming();
+        fixture.resources = format!(
+            "<< /ColorSpace << /N [/DeviceN [/Cyan /Spot] /DeviceRGB 7 0 R {attributes}] >> >>"
+        );
+        fixture.content = "/N cs 0.5 0.5 scn 10 10 50 50 re f".to_string();
+        fixture.extra.push((
+            7,
+            stream(
+                "/FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1]",
+                b"{ pop pop 0 0 0 }",
+            ),
+        ));
+        fixture
+    };
+    assert_eq!(
+        device_n("").one_finding(),
+        FindingKind::ColorantUndescribed {
+            colorant: "Spot".to_string()
+        }
+    );
+    let described = device_n(&format!(
+        "<< /Colorants << /Spot [/Separation /Spot /DeviceRGB << {} >>] >> >>",
+        tint("0 0 1")
+    ));
+    assert_eq!(described.findings(), Vec::<FindingKind>::new());
+
+    // The Colorants entry against a page-level Separation of the same name.
+    let mut against = described;
+    against.resources = against.resources.replace(
+        "/ColorSpace << /N",
+        &format!(
+            "/ColorSpace << /S [/Separation /Spot /DeviceRGB << {} >>] /N",
+            tint("1 0 0")
+        ),
+    );
+    against.content = format!("/S cs 1 scn 0 0 5 5 re f {}", against.content);
+    assert_eq!(
+        against.one_finding(),
+        FindingKind::SeparationsDisagree {
+            colorant: "Spot".to_string()
+        }
+    );
+}
+
+/// Rule 6.4-2, veraPDF's statement of ISO 19005-1 6.4 (with Cor.2:2011): "An
+/// XObject dictionary shall not contain the SMask key." The image the page
+/// draws carries a soft mask; the twins are the same image without one, and
+/// the same document claiming part 2, which permits transparency.
+#[test]
+fn an_xobject_soft_mask_is_part_one_transparency() {
+    let mut masked = drawing_an_image("/SMask 8 0 R");
+    masked.part = "1".to_string();
+    masked.extra.push((
+        8,
+        stream(
+            "/Type /XObject /Subtype /Image /Width 1 /Height 1 \
+             /BitsPerComponent 8 /ColorSpace /DeviceGray",
+            &[0xFF],
+        ),
+    ));
+    assert_eq!(
+        masked.one_finding(),
+        FindingKind::TransparencyForbidden {
+            feature: "SMask".to_string()
+        }
+    );
+
+    let mut plain = drawing_an_image("");
+    plain.part = "1".to_string();
+    assert_eq!(plain.findings(), Vec::<FindingKind>::new());
+
+    let mut two = masked;
+    two.part = "2".to_string();
+    assert_eq!(two.findings(), Vec::<FindingKind>::new());
 }

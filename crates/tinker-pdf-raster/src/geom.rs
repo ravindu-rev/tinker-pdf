@@ -106,6 +106,29 @@ impl Path {
         self.push(Verb::Close);
     }
 
+    /// The same path with every point, control points included, carried
+    /// through `map` — which is exact for a Bézier, since an affine map of
+    /// the control polygon is the map of the curve. A point the map takes
+    /// past the finite is dropped as [`Path::line_to`] drops one.
+    #[must_use]
+    pub fn mapped(&self, map: &crate::image::Transform) -> Path {
+        let at = |p: Point| {
+            let (x, y) = map.apply(p.x, p.y);
+            Point::new(x, y)
+        };
+        let mut out = Path::new();
+        for verb in &self.verbs {
+            out.push(match *verb {
+                Verb::MoveTo(p) => Verb::MoveTo(at(p)),
+                Verb::LineTo(p) => Verb::LineTo(at(p)),
+                Verb::QuadTo(c, p) => Verb::QuadTo(at(c), at(p)),
+                Verb::CurveTo(a, b, c) => Verb::CurveTo(at(a), at(b), at(c)),
+                Verb::Close => Verb::Close,
+            });
+        }
+        out
+    }
+
     /// Adds a rectangle as its own subpath.
     pub fn rect(&mut self, x: f64, y: f64, w: f64, h: f64) {
         self.move_to(x, y);
@@ -173,6 +196,9 @@ const MAX_VERBS: usize = 1 << 20;
 /// control polygon, which is cheap, deterministic, and — unlike recursive
 /// subdivision with a floating-point termination test — produces the same
 /// output on every platform (ruling 4).
+///
+/// A tolerance of a millionth of a device unit or less, or one that is not a
+/// finite number, is read as a mistake and replaced with 0.1.
 #[must_use]
 pub fn flatten(path: &Path, tolerance: f64) -> Vec<Vec<Point>> {
     let tolerance = if tolerance.is_finite() && tolerance > 1e-6 {
@@ -180,7 +206,33 @@ pub fn flatten(path: &Path, tolerance: f64) -> Vec<Vec<Point>> {
     } else {
         0.1
     };
+    flatten_at(path, tolerance)
+}
 
+/// [`flatten`] for a path in a space some map will carry far, at a tolerance
+/// in **that** space: any finite positive tolerance is honoured, however
+/// small, and only one that is not is replaced with 0.1.
+///
+/// `flatten`'s floor guards a tolerance stated in device units, where a
+/// millionth is nonsense. A path in a pen's own space under a map that
+/// stretches it 400 000 times is flattened at the device tolerance over that
+/// stretch — half a millionth for 0.2 — which is under the floor and exactly
+/// right; read as 0.1 of the path's own units it was 20 000 device units, and
+/// a circle of four Béziers came out a diamond. The work stays bounded
+/// however small the tolerance: a curve takes at most 512 steps.
+#[must_use]
+pub(crate) fn flatten_mapped(path: &Path, tolerance: f64) -> Vec<Vec<Point>> {
+    let tolerance = if tolerance.is_finite() && tolerance > 0.0 {
+        tolerance
+    } else {
+        0.1
+    };
+    flatten_at(path, tolerance)
+}
+
+/// The flattening itself, at a tolerance already known to be finite and
+/// positive.
+fn flatten_at(path: &Path, tolerance: f64) -> Vec<Vec<Point>> {
     let mut out: Vec<Vec<Point>> = Vec::new();
     let mut current: Vec<Point> = Vec::new();
     let mut start = Point::new(0.0, 0.0);
@@ -488,6 +540,33 @@ mod tests {
 
         for poly in flatten(&path, 0.1) {
             assert!(poly.iter().all(Point::is_finite));
+        }
+    }
+
+    /// A tolerance in a pen's space is honoured below a millionth: a quarter
+    /// circle of radius 1e-4 at 5e-7 is the same number of steps as one of
+    /// radius 100 at 0.5 — the ratio is what counts — where `flatten`'s
+    /// floor for a device tolerance makes it one chord.
+    #[test]
+    fn a_mapped_tolerance_is_honoured_below_a_millionth() {
+        let quarter = |r: f64| {
+            let k = 0.552_284_75 * r;
+            let mut path = Path::new();
+            path.move_to(r, 0.0);
+            path.curve_to(r, k, k, r, 0.0, r);
+            path
+        };
+        let count = |polys: Vec<Vec<Point>>| polys.first().map_or(0, Vec::len);
+        let large = count(flatten(&quarter(100.0), 0.5));
+        assert!(large > 2, "a curve, not a chord: {large}");
+        assert_eq!(count(flatten_mapped(&quarter(1e-4), 5e-7)), large);
+        assert_eq!(count(flatten(&quarter(1e-4), 5e-7)), 2, "the floor's chord");
+        // Only a tolerance that is not a positive number is replaced.
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                flatten_mapped(&quarter(1.0), bad),
+                flatten(&quarter(1.0), 0.1)
+            );
         }
     }
 

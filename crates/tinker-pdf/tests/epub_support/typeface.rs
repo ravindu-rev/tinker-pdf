@@ -120,6 +120,63 @@ pub struct Face {
     /// one that dropped them. `Some` is the smallest face that can tell them
     /// apart.
     pub placement: Option<Placement>,
+    /// A `GPOS` `PairPos` that displaces the second glyph of one pair — a
+    /// position that depends on a **neighbour**, which a run shaped alone
+    /// cannot see.
+    ///
+    /// `None` — the default — is a face with no pair positioning. When both
+    /// this and [`Face::placement`] are set, the placement wins: one `GPOS`
+    /// lookup per face is all any fixture here has needed.
+    pub pair: Option<Pair>,
+    /// A `GPOS` `PairPos` that changes the **advance** of the first glyph of
+    /// one pair: kerning, as a face's `kern` feature states it.
+    ///
+    /// The difference from [`Face::pair`] is the whole point. A placement
+    /// moves a glyph and leaves the pen where it was, so a layout that never
+    /// saw it measured the line right anyway; an advance moves the pen, and
+    /// everything after the pair with it, so a layout that measured the first
+    /// glyph without the second beside it measured the line wrong. `None` is
+    /// a face with no kerning; [`Face::placement`] and [`Face::pair`] win over
+    /// it, one lookup per face.
+    pub kern: Option<Kern>,
+}
+
+/// The first glyph of one pair narrowed or widened, by a `GPOS`
+/// `PairPosFormat1` whose second value record is empty and whose first is an
+/// `XAdvance` alone.
+#[derive(Clone, Copy, Debug)]
+pub struct Kern {
+    /// The first character of the pair, whose advance changes.
+    pub first: char,
+    /// The second.
+    pub second: char,
+    /// The script tag the lookup is declared under; `DFLT` reaches every run.
+    pub script: [u8; 4],
+    /// The feature tag, `kern` for kerning.
+    pub feature: [u8; 4],
+    /// `XAdvance` of the first glyph, in font units: negative draws the pair
+    /// closer.
+    pub x_advance: i16,
+}
+
+/// The second glyph of one pair displaced, by a `GPOS` `PairPosFormat1` whose
+/// first value record is empty — so neither advance changes and only the
+/// position of the second glyph does, which is an offset a shaper can only
+/// produce when both glyphs are in one buffer.
+#[derive(Clone, Copy, Debug)]
+pub struct Pair {
+    /// The first character of the pair.
+    pub first: char,
+    /// The second, whose glyph is displaced.
+    pub second: char,
+    /// The script tag the lookup is declared under; `DFLT` reaches every run.
+    pub script: [u8; 4],
+    /// The feature tag, one the default shaper turns on.
+    pub feature: [u8; 4],
+    /// `XPlacement` of the second glyph, in font units.
+    pub x: i16,
+    /// `YPlacement` of the second glyph, in font units.
+    pub y: i16,
 }
 
 /// One glyph displaced from its advance, by a `GPOS` `SinglePos`.
@@ -231,7 +288,23 @@ impl Face {
             joining: None,
             joined_advance: None,
             placement: None,
+            pair: None,
+            kern: None,
         }
+    }
+
+    /// The same face, kerning one pair through `GPOS`.
+    #[must_use]
+    pub fn with_kern(mut self, kern: Kern) -> Face {
+        self.kern = Some(kern);
+        self
+    }
+
+    /// The same face, displacing the second glyph of one pair through `GPOS`.
+    #[must_use]
+    pub fn with_pair(mut self, pair: Pair) -> Face {
+        self.pair = Some(pair);
+        self
     }
 
     /// The same face, displacing one character's glyph through `GPOS`.
@@ -434,9 +507,12 @@ fn build(face: &Face) -> Vec<u8> {
         (None, Some(joining)) => Some(gsub_joining(face, joining)),
         (None, None) => None,
     };
-    let gpos = face
-        .placement
-        .map(|placement| gpos_placement(face, placement));
+    let gpos = match (face.placement, face.pair, face.kern) {
+        (Some(placement), _, _) => Some(gpos_placement(face, placement)),
+        (None, Some(pair), _) => Some(gpos_pair(face, pair)),
+        (None, None, Some(kern)) => Some(gpos_kern(face, kern)),
+        (None, None, None) => None,
+    };
 
     // Built as a list rather than as two hard-coded arrays, because `GPOS` and
     // `GSUB` are independent: a face may have either, both or neither, and the
@@ -494,13 +570,72 @@ fn build(face: &Face) -> Vec<u8> {
 /// | 44 | `LookupList`: one `Lookup` of type 1, one subtable |
 fn gpos_placement(face: &Face, placement: Placement) -> Vec<u8> {
     let glyph = face.glyph_of(placement.ch).unwrap_or(0);
+    let mut subtable = Vec::new();
+    single_pos(&mut subtable, glyph, placement);
+    gpos_of_one_lookup(1, &subtable, placement.script, placement.feature)
+}
 
+/// A `GPOS` with one `PairPosFormat1` lookup: one pair, the second glyph's
+/// value record an `XPlacement` and a `YPlacement`, the first's empty.
+///
+/// | At | What |
+/// | --- | --- |
+/// | 0 | `posFormat`, coverage, `valueFormat1` 0, `valueFormat2` 0x0003, one `PairSet` |
+/// | 12 | the `PairSet`: one record — the second glyph and its two `int16`s |
+/// | 20 | coverage format 1, the first glyph |
+fn gpos_pair(face: &Face, pair: Pair) -> Vec<u8> {
+    let first = face.glyph_of(pair.first).unwrap_or(0);
+    let second = face.glyph_of(pair.second).unwrap_or(0);
+    let mut subtable = Vec::new();
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // posFormat 1
+    subtable.extend_from_slice(&20u16.to_be_bytes()); // coverage, from here
+    subtable.extend_from_slice(&0u16.to_be_bytes()); // valueFormat1
+    subtable.extend_from_slice(&0x0003u16.to_be_bytes()); // valueFormat2
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // pairSetCount
+    subtable.extend_from_slice(&12u16.to_be_bytes()); // pairSetOffsets[0]
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // pairValueCount
+    subtable.extend_from_slice(&second.to_be_bytes()); // secondGlyph
+    subtable.extend_from_slice(&pair.x.to_be_bytes()); // XPlacement
+    subtable.extend_from_slice(&pair.y.to_be_bytes()); // YPlacement
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // coverage format 1
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // glyphCount
+    subtable.extend_from_slice(&first.to_be_bytes());
+    gpos_of_one_lookup(2, &subtable, pair.script, pair.feature)
+}
+
+/// A `GPOS` with one `PairPosFormat1` lookup changing the first glyph's
+/// advance when the second follows it.
+///
+/// `valueFormat1` is `0x0004`, `X_ADVANCE` alone, and `valueFormat2` is zero,
+/// so a pair value record is the second glyph and one `int16`: four bytes,
+/// and the pair set six. The header is twelve bytes, so the pair set starts
+/// at twelve and the coverage at eighteen.
+fn gpos_kern(face: &Face, kern: Kern) -> Vec<u8> {
+    let first = face.glyph_of(kern.first).unwrap_or(0);
+    let second = face.glyph_of(kern.second).unwrap_or(0);
+    let mut subtable = Vec::new();
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // posFormat 1
+    subtable.extend_from_slice(&18u16.to_be_bytes()); // coverage, from here
+    subtable.extend_from_slice(&0x0004u16.to_be_bytes()); // valueFormat1: XAdvance
+    subtable.extend_from_slice(&0u16.to_be_bytes()); // valueFormat2
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // pairSetCount
+    subtable.extend_from_slice(&12u16.to_be_bytes()); // pairSetOffsets[0]
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // pairValueCount
+    subtable.extend_from_slice(&second.to_be_bytes()); // secondGlyph
+    subtable.extend_from_slice(&kern.x_advance.to_be_bytes()); // XAdvance
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // coverage format 1
+    subtable.extend_from_slice(&1u16.to_be_bytes()); // glyphCount
+    subtable.extend_from_slice(&first.to_be_bytes());
+    gpos_of_one_lookup(2, &subtable, kern.script, kern.feature)
+}
+
+/// `SinglePosFormat1` displacing `glyph`, appended to `subtable`.
+fn single_pos(subtable: &mut Vec<u8>, glyph: u16, placement: Placement) {
     // ---- the subtable: `SinglePosFormat1` ----------------------------------
     //
     // `valueFormat` 0x0003 is `X_PLACEMENT | Y_PLACEMENT`, so the value record
     // is two `int16`s and the header is six bytes — which is why the coverage
     // begins at ten and not at eight.
-    let mut subtable = Vec::new();
     subtable.extend_from_slice(&1u16.to_be_bytes()); // posFormat 1
     subtable.extend_from_slice(&10u16.to_be_bytes()); // coverage, from here
     subtable.extend_from_slice(&0x0003u16.to_be_bytes()); // valueFormat
@@ -509,20 +644,29 @@ fn gpos_placement(face: &Face, placement: Placement) -> Vec<u8> {
     subtable.extend_from_slice(&1u16.to_be_bytes()); // coverage format 1
     subtable.extend_from_slice(&1u16.to_be_bytes()); // glyphCount
     subtable.extend_from_slice(&glyph.to_be_bytes());
+}
 
+/// A whole `GPOS` around one lookup of `lookup_type` holding `subtable`, under
+/// one feature of one script's default language system.
+fn gpos_of_one_lookup(
+    lookup_type: u16,
+    subtable: &[u8],
+    script: [u8; 4],
+    feature: [u8; 4],
+) -> Vec<u8> {
     let mut lookup_list = Vec::new();
     lookup_list.extend_from_slice(&1u16.to_be_bytes()); // lookupCount
     lookup_list.extend_from_slice(&4u16.to_be_bytes()); // lookups[0]
-    lookup_list.extend_from_slice(&1u16.to_be_bytes()); // lookupType: single
+    lookup_list.extend_from_slice(&lookup_type.to_be_bytes()); // lookupType
     lookup_list.extend_from_slice(&0u16.to_be_bytes()); // lookupFlag
     lookup_list.extend_from_slice(&1u16.to_be_bytes()); // subTableCount
     lookup_list.extend_from_slice(&8u16.to_be_bytes()); // subtables[0]
-    lookup_list.extend_from_slice(&subtable);
+    lookup_list.extend_from_slice(subtable);
 
     // ---- one feature, holding that one lookup ------------------------------
     let mut feature_list = Vec::new();
     feature_list.extend_from_slice(&1u16.to_be_bytes()); // featureCount
-    feature_list.extend_from_slice(&placement.feature);
+    feature_list.extend_from_slice(&feature);
     feature_list.extend_from_slice(&8u16.to_be_bytes()); // Feature, from here
     feature_list.extend_from_slice(&0u16.to_be_bytes()); // featureParams
     feature_list.extend_from_slice(&1u16.to_be_bytes()); // lookupIndexCount
@@ -531,7 +675,7 @@ fn gpos_placement(face: &Face, placement: Placement) -> Vec<u8> {
     // ---- one script, one default language system, that one feature ---------
     let mut script_list = Vec::new();
     script_list.extend_from_slice(&1u16.to_be_bytes()); // scriptCount
-    script_list.extend_from_slice(&placement.script);
+    script_list.extend_from_slice(&script);
     script_list.extend_from_slice(&8u16.to_be_bytes()); // Script, from the list
     script_list.extend_from_slice(&4u16.to_be_bytes()); // defaultLangSys
     script_list.extend_from_slice(&0u16.to_be_bytes()); // langSysCount

@@ -55,7 +55,8 @@
 //! the font dictionary, so no rule over font dictionaries can find it. What
 //! *is* determinable is checked; the rest is named rather than guessed.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use tinker_pdf_cos::{CosDocument, Dict, ObjRef, Object};
 
@@ -88,7 +89,7 @@ const PREDEFINED_ENCODINGS: &[&[u8]] = &[
 
 /// Runs every font rule that applies to `flavour`.
 pub(super) fn rules(
-    doc: &CosDocument,
+    doc: &Arc<CosDocument>,
     machinery: &Machinery,
     flavour: Option<Flavour>,
     out: &mut Vec<Raw>,
@@ -96,6 +97,17 @@ pub(super) fn rules(
     if !machinery.reach(RuleGroup::Fonts) {
         return;
     }
+    run(doc, flavour, out);
+}
+
+/// The font rules, once the group has been reached for.
+///
+/// Split from [`rules`] so that the PDF/UA validator, which reads the same
+/// fonts under ISO 14289's numbering (`docs/design/pdfua.md`, "one rule, two
+/// standards"), runs them behind its own counted reach rather than counting
+/// a second one.
+pub(crate) fn run(doc: &Arc<CosDocument>, flavour: Option<Flavour>, out: &mut Vec<Raw>) {
+    widths(doc, out);
     let mut budget = MAX_PROGRAM_PARSES;
     for reference in usage(doc) {
         let Ok(object) = doc.get(reference) else {
@@ -108,6 +120,59 @@ pub(super) fn rules(
     }
 }
 
+/// The embedding rule alone, over the fonts the pages draw with: no program
+/// is parsed, and no other font rule runs.
+///
+/// For ISO 15930, whose application notes ask one thing of a font — that it
+/// is embedded (`crate::pdfx`) — and ask it in the sentence ISO 19005-1 6.3.4
+/// uses. The findings are this module's own, `FontNotEmbedded` among them,
+/// read exactly as [`run`] reads them: a Type 3 font has no program to embed,
+/// a composite font's program is its descendant's, and a `/FontFile3 null` is
+/// a key present and a program absent. A zero parse budget is what keeps the
+/// programs closed.
+pub(crate) fn embedding(doc: &CosDocument, out: &mut Vec<Raw>) {
+    let mut budget = 0usize;
+    for reference in usage(doc) {
+        let Ok(object) = doc.get(reference) else {
+            continue;
+        };
+        let Some(dict) = object.as_dict() else {
+            continue;
+        };
+        let subtype = name_of(doc, dict, b"Subtype").unwrap_or_default();
+        let (descriptor_owner, at, program_subtype) = match subtype.as_slice() {
+            b"Type3" => continue,
+            b"Type0" => {
+                let descendants = doc.resolve_key(dict, doc.intern(b"DescendantFonts"));
+                let Some(first) = descendants.as_array().and_then(|values| values.first()) else {
+                    continue;
+                };
+                let at = first.as_objref().unwrap_or(reference);
+                let resolved = doc.resolve(first);
+                let Some(descendant) = resolved.as_dict() else {
+                    continue;
+                };
+                let descendant_subtype = name_of(doc, descendant, b"Subtype").unwrap_or_default();
+                (descendant.clone(), at, descendant_subtype)
+            }
+            _ => (dict.clone(), reference, subtype.clone()),
+        };
+        let descriptor = doc.resolve_key(&descriptor_owner, doc.intern(b"FontDescriptor"));
+        match descriptor.as_dict() {
+            Some(descriptor) => {
+                embedded_program(doc, descriptor, &program_subtype, at, &mut budget, out);
+            }
+            None => out.push(Raw {
+                rule: clauses::FONT_EMBEDDING,
+                object: Some(at),
+                kind: FindingKind::FontNotEmbedded {
+                    subtype: String::from_utf8_lossy(&program_subtype).into_owned(),
+                },
+            }),
+        }
+    }
+}
+
 // ---- what the file actually draws with ------------------------------------
 
 /// Every font a text-showing operator drew with at a visible rendering mode.
@@ -116,7 +181,7 @@ pub(super) fn rules(
 /// is the visitor over it. Returned as an ordered set so the findings come out
 /// in object-number order whatever order the pages happened to reach them in —
 /// a verdict is compared by tests and read by people, and both want it stable.
-fn usage(doc: &CosDocument) -> BTreeSet<ObjRef> {
+pub(crate) fn usage(doc: &CosDocument) -> BTreeSet<ObjRef> {
     let mut rendered = BTreeSet::new();
     content::walk(doc, &mut |op| {
         if !matches!(op.operator, b"Tj" | b"TJ" | b"'" | b"\"") {
@@ -151,7 +216,7 @@ fn font(
     unicode(doc, flavour, dict, &subtype, at, out);
 
     match subtype.as_slice() {
-        b"Type0" => composite(doc, dict, at, budget, out),
+        b"Type0" => composite(doc, flavour, dict, at, budget, out),
         // 9.6.5: a Type 3 font's glyphs *are* content streams, so there is no
         // program to embed and no descriptor to embed it in. The embedding
         // clause has nothing to say about one, and a rule that reported every
@@ -599,7 +664,29 @@ fn published_collection(doc: &CosDocument, dict: &Dict) -> bool {
 /// rule below is about that element rather than about the Type 0 dictionary
 /// that names it — which is why the findings carry the *descendant's* object
 /// number where there is one.
-fn composite(doc: &CosDocument, dict: &Dict, at: ObjRef, budget: &mut usize, out: &mut Vec<Raw>) {
+fn composite(
+    doc: &CosDocument,
+    flavour: Option<Flavour>,
+    dict: &Dict,
+    at: ObjRef,
+    budget: &mut usize,
+    out: &mut Vec<Raw>,
+) {
+    let reading = match flavour.map(|f| f.part) {
+        Some(Part::One) | None => CMapReading::PDF_A_1,
+        Some(_) => CMapReading::TABLE_118,
+    };
+    for (object, kind) in cmap_findings(doc, dict, at, reading) {
+        let rule = match kind {
+            FindingKind::CidSystemInfoMismatch { .. } => clauses::CID_SYSTEM_INFO,
+            _ => clauses::CMAPS,
+        };
+        out.push(Raw {
+            rule,
+            object: Some(object),
+            kind,
+        });
+    }
     let descendants = doc.resolve_key(dict, doc.intern(b"DescendantFonts"));
     let Some(values) = descendants.as_array() else {
         return;
@@ -710,6 +797,498 @@ fn cid_to_gid(doc: &CosDocument, descendant: &Dict, at: ObjRef, out: &mut Vec<Ra
         object: Some(at),
         kind: FindingKind::CidToGidMapMalformed { declared },
     });
+}
+
+// ---- 6.3.6 / 6.2.11.5 / 6.2.10.5 Font metrics -----------------------------
+
+/// How many distinct codes one font contributes to the width rule.
+const MAX_CODES_PER_FONT: usize = 1 << 12;
+
+/// How many fonts the width rule reads programs for.
+const MAX_WIDTH_FONTS: usize = 1 << 10;
+
+/// The tolerance veraPDF's published test gives the comparison, in 1/1000
+/// em: `Math.abs(widthFromFontProgram - widthFromDictionary) <= 1`.
+const WIDTH_TOLERANCE: f64 = 1.0;
+
+/// One font the pages drew with at a visible rendering mode, and the codes.
+struct Drawn {
+    /// The page or form scope it was drawn in, which is what decides which
+    /// glyph of the program a code selects.
+    scope: crate::resources::PageResources,
+    /// The resource name it was drawn under, in that scope.
+    name: Vec<u8>,
+    codes: BTreeSet<u32>,
+}
+
+/// ISO 19005-1 6.3.6, ISO 19005-2/3 6.2.11.5, ISO 19005-4 6.2.10.5: "For
+/// every font embedded in a conforming file and used for rendering, the glyph
+/// width information in the font dictionary and in the embedded font program
+/// shall be consistent" — veraPDF's statement of rules 6.3.6-1, 6.2.11.5-1 and
+/// 6.2.10.5-1, judged per glyph with a tolerance of one thousandth of an em.
+///
+/// **The mapping is the engine's, not a second one.** `PDFA_STAGED` held this
+/// rule back because the code-to-glyph mapping is where a rule goes wrong — a
+/// symbolic TrueType font reaches its glyph through a (3,0) subtable offset
+/// into the private-use area, a composite one through `/CIDToGIDMap` — and a
+/// rule that got either wrong "would report conforming files by the hundred".
+/// So it asks [`crate::resources::PageResources::selection`], the one the
+/// renderer and the subsetter both draw with, and judges a code only where
+/// that answer is **stated** by the font: a glyph a reader reaches by 9.6.6.4's
+/// closing guess is one another reader may not reach, and a width compared
+/// against it is a width compared against a guess. `.notdef` is not judged
+/// either; drawing it is a defect of its own.
+///
+/// The dictionary's width is judged only where the dictionary states one —
+/// `/Widths` or `/W` — not a `/MissingWidth` or `/DW` default, which veraPDF's
+/// `widthFromDictionary == null` exempts. A Type 1 program, whose charstrings
+/// are addressed by name rather than by a glyph index, is not judged; nor is
+/// a Type 3 font, which has no program.
+fn widths(doc: &Arc<CosDocument>, out: &mut Vec<Raw>) {
+    let mut drawn: BTreeMap<ObjRef, Drawn> = BTreeMap::new();
+    content::walk(doc, &mut |op| {
+        if !matches!(op.operator, b"Tj" | b"TJ" | b"'" | b"\"")
+            || op.mode == content::RENDER_MODE_INVISIBLE
+        {
+            return;
+        }
+        let (Some(name), Some(resources)) = (op.font, op.resources) else {
+            return;
+        };
+        let Some(reference) = content::lookup(doc, resources, b"Font", name) else {
+            return;
+        };
+        if !drawn.contains_key(&reference) {
+            if drawn.len() >= MAX_WIDTH_FONTS {
+                return;
+            }
+            drawn.insert(
+                reference,
+                Drawn {
+                    scope: crate::resources::PageResources::from_dict(doc, resources.clone(), None),
+                    name: name.to_vec(),
+                    codes: BTreeSet::new(),
+                },
+            );
+        }
+        let Some(entry) = drawn.get_mut(&reference) else {
+            return;
+        };
+        for token in op.operands {
+            if let tinker_pdf_content::Token::String(bytes) = token {
+                for (code, _, _) in
+                    tinker_pdf_content::FontSource::decode(&entry.scope, &entry.name, bytes)
+                {
+                    if entry.codes.len() < MAX_CODES_PER_FONT {
+                        entry.codes.insert(code);
+                    }
+                }
+            }
+        }
+    });
+
+    for (reference, entry) in &drawn {
+        let Some(font) = tinker_pdf_cos::font::at(doc, *reference) else {
+            continue;
+        };
+        let Some(program) = font.program() else {
+            continue;
+        };
+        let Ok(bytes) = doc.stream_decoded(program.stream) else {
+            continue;
+        };
+        let Some(metrics) = ProgramMetrics::read(&bytes) else {
+            continue;
+        };
+        let id = tinker_pdf_content::FontSource::font_id(&entry.scope, &entry.name);
+        for code in &entry.codes {
+            let (dictionary, stated) = font.width_of(*code);
+            if !stated {
+                continue;
+            }
+            let Some(selection) = entry.scope.selection(id, *code) else {
+                continue;
+            };
+            if !selection.stated || selection.glyph == 0 {
+                continue;
+            }
+            let Some(program) = metrics.advance(selection.glyph) else {
+                continue;
+            };
+            if (program - dictionary).abs() > WIDTH_TOLERANCE {
+                out.push(Raw {
+                    rule: clauses::FONT_METRICS,
+                    object: Some(*reference),
+                    kind: FindingKind::GlyphWidthInconsistent {
+                        code: *code,
+                        dictionary: dictionary.round() as i64,
+                        program: program.round() as i64,
+                    },
+                });
+                // One per font: the first disagreement says the dictionary
+                // and the program describe different faces, and a finding
+                // per glyph would be the same statement many times.
+                break;
+            }
+        }
+    }
+}
+
+/// A font program's advances in 1/1000 em, whichever outline format it is.
+enum ProgramMetrics<'a> {
+    /// `glyf` outlines: `hmtx` in font units over `head`'s units per em, for
+    /// the `maxp` glyph count's glyphs — `hmtx` repeats its last advance for
+    /// every index past `numberOfHMetrics`, and an index past the count is a
+    /// glyph the program does not have, whose "advance" is no statement.
+    TrueType(tinker_pdf_font::Sfnt<'a>, f64, u16),
+    /// CFF outlines, bare or inside an OpenType wrapper: charstring widths
+    /// through the font matrix. Boxed: a parsed CFF carries its indexes and
+    /// dictionaries, and one value of this type lives per font for a moment.
+    Cff(Box<tinker_pdf_font::Cff<'a>>),
+}
+
+impl<'a> ProgramMetrics<'a> {
+    fn read(bytes: &'a [u8]) -> Option<ProgramMetrics<'a>> {
+        const GLYF: u32 = 0x676C_7966;
+        const HEAD: u32 = 0x6865_6164;
+        const CFF: u32 = 0x4346_4620;
+        const MAXP: u32 = 0x6D61_7870;
+        if let Some(sfnt) = tinker_pdf_font::Sfnt::parse(bytes) {
+            if sfnt.table(GLYF).is_some() {
+                let head = sfnt.table(HEAD)?;
+                let units = u16::from_be_bytes([*head.get(18)?, *head.get(19)?]);
+                if units == 0 {
+                    return None;
+                }
+                let maxp = sfnt.table(MAXP)?;
+                let glyphs = u16::from_be_bytes([*maxp.get(4)?, *maxp.get(5)?]);
+                return Some(ProgramMetrics::TrueType(sfnt, f64::from(units), glyphs));
+            }
+            return tinker_pdf_font::Cff::parse(sfnt.table(CFF)?)
+                .map(|cff| ProgramMetrics::Cff(Box::new(cff)));
+        }
+        tinker_pdf_font::Cff::parse(bytes).map(|cff| ProgramMetrics::Cff(Box::new(cff)))
+    }
+
+    fn advance(&self, glyph: u16) -> Option<f64> {
+        match self {
+            ProgramMetrics::TrueType(sfnt, units, glyphs) => {
+                if glyph >= *glyphs {
+                    return None;
+                }
+                Some(f64::from(sfnt.advance(glyph)?) * 1000.0 / units)
+            }
+            ProgramMetrics::Cff(cff) => {
+                let scale = cff.font_matrix_for(glyph).first().copied()?;
+                Some(cff.advance(glyph)? * scale * 1000.0)
+            }
+        }
+    }
+}
+
+// ---- the encoding CMap of a composite font ---------------------------------
+
+/// ISO 32000-1 9.7.5.2 Table 118: the predefined CMaps, by name.
+///
+/// **The names, not the data.** `PDFA_STAGED`'s 6.3.3.3 row stages the CMap
+/// rules because the predefined *tables* are built in only behind the
+/// `cmap-predefined` feature, and a verdict that changed with a cargo feature
+/// would not be a verdict. Whether a name is on this list does not need the
+/// tables: it is sixty-one strings, transcribed from veraPDF's published
+/// rules 7.21.3.3-1 and -3 (`veraPDF-validation-profiles` wiki at `109b482`,
+/// PDF/UA part 1), whose test conditions enumerate Table 118 name by name, and
+/// the same list stands in ISO 32000-2's Table 116 (rules 8.4.5.4-1 and -3).
+pub(crate) const PREDEFINED_CMAPS: &[&[u8]] = &[
+    b"Identity-H",
+    b"Identity-V",
+    b"GB-EUC-H",
+    b"GB-EUC-V",
+    b"GBpc-EUC-H",
+    b"GBpc-EUC-V",
+    b"GBK-EUC-H",
+    b"GBK-EUC-V",
+    b"GBKp-EUC-H",
+    b"GBKp-EUC-V",
+    b"GBK2K-H",
+    b"GBK2K-V",
+    b"UniGB-UCS2-H",
+    b"UniGB-UCS2-V",
+    b"UniGB-UTF16-H",
+    b"UniGB-UTF16-V",
+    b"B5pc-H",
+    b"B5pc-V",
+    b"HKscs-B5-H",
+    b"HKscs-B5-V",
+    b"ETen-B5-H",
+    b"ETen-B5-V",
+    b"ETenms-B5-H",
+    b"ETenms-B5-V",
+    b"CNS-EUC-H",
+    b"CNS-EUC-V",
+    b"UniCNS-UCS2-H",
+    b"UniCNS-UCS2-V",
+    b"UniCNS-UTF16-H",
+    b"UniCNS-UTF16-V",
+    b"83pv-RKSJ-H",
+    b"90ms-RKSJ-H",
+    b"90ms-RKSJ-V",
+    b"90msp-RKSJ-H",
+    b"90msp-RKSJ-V",
+    b"90pv-RKSJ-H",
+    b"Add-RKSJ-H",
+    b"Add-RKSJ-V",
+    b"EUC-H",
+    b"EUC-V",
+    b"Ext-RKSJ-H",
+    b"Ext-RKSJ-V",
+    b"H",
+    b"V",
+    b"UniJIS-UCS2-H",
+    b"UniJIS-UCS2-V",
+    b"UniJIS-UCS2-HW-H",
+    b"UniJIS-UCS2-HW-V",
+    b"UniJIS-UTF16-H",
+    b"UniJIS-UTF16-V",
+    b"KSC-EUC-H",
+    b"KSC-EUC-V",
+    b"KSCms-UHC-H",
+    b"KSCms-UHC-V",
+    b"KSCms-UHC-HW-H",
+    b"KSCms-UHC-HW-V",
+    b"KSCpc-EUC-H",
+    b"UniKS-UCS2-H",
+    b"UniKS-UCS2-V",
+    b"UniKS-UTF16-H",
+    b"UniKS-UTF16-V",
+];
+
+/// How many tokens of an embedded CMap program are read for its `/WMode`
+/// and its `usecmap`.
+const MAX_CMAP_TOKENS: usize = 1 << 16;
+
+/// The two CMaps ISO 19005-1 lets a file leave unembedded.
+const IDENTITY_CMAPS: &[&[u8]] = &[b"Identity-H", b"Identity-V"];
+
+/// Which reading of the encoding-CMap clauses a standard takes.
+///
+/// **ISO 19005-1 is the strict one, and in two directions.** Its 6.3.3.3
+/// says "All CMaps used within a conforming file, except Identity-H and
+/// Identity-V, shall be embedded" — every predefined CMap of Table 118
+/// included — and its 6.3.3.1 makes the collections' `/Registry` and
+/// `/Ordering` identical with no word on `/Supplement`, and it states no rule
+/// about one CMap referencing another. ISO 19005-2 to -4 and both parts of
+/// ISO 14289 admit Table 118, add the `/Supplement` ordering and forbid a
+/// reference outside the table. Each sentence is veraPDF's published
+/// statement of the rule (6.3.3.1-1, 6.3.3.3-1 and -2 for part 1; 6.2.11.3.1-1
+/// and 6.2.11.3.3-1 to -3 for parts 2 and 3; 6.2.10.3.x for part 4; 7.21.3.x
+/// and 8.4.5.x for PDF/UA).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CMapReading {
+    /// The CMaps a file may name without embedding.
+    unembedded: &'static [&'static [u8]],
+    /// Whether the CIDFont's `/Supplement` may not exceed the CMap's.
+    supplement: bool,
+    /// Whether a CMap's reference to another is judged.
+    references: bool,
+}
+
+impl CMapReading {
+    /// ISO 19005-1's reading.
+    pub(crate) const PDF_A_1: CMapReading = CMapReading {
+        unembedded: IDENTITY_CMAPS,
+        supplement: false,
+        references: false,
+    };
+
+    /// Every later standard's: Table 118, `/Supplement`, references.
+    pub(crate) const TABLE_118: CMapReading = CMapReading {
+        unembedded: PREDEFINED_CMAPS,
+        supplement: true,
+        references: true,
+    };
+}
+
+/// What is wrong with a composite font's encoding CMap, as `(object, kind)`.
+///
+/// Four requirements ISO 14289-1 states at 7.21.3.1 and 7.21.3.3, and ISO
+/// 14289-2 at 8.4.5.3.1 and 8.4.5.4, in the words of veraPDF's published rules
+/// for them:
+///
+/// - a CMap not in Table 118 is embedded (7.21.3.3-1);
+/// - an embedded CMap's dictionary `/WMode` is "identical to the WMode value
+///   in the embedded CMap stream" (-2), both 0 when unwritten (Table 120);
+/// - a CMap references no CMap outside Table 118 (-3), whether by the stream
+///   dictionary's `/UseCMap` or by the program's own `usecmap`;
+/// - an embedded CMap's character collection is the CIDFont's: `/Registry`
+///   and `/Ordering` identical and the CIDFont's `/Supplement` not exceeding
+///   the CMap's (7.21.3.1). Decided only where both dictionaries carry a
+///   `/CIDSystemInfo`; a predefined CMap's collection is in the tables this
+///   build does not carry by default, and the identity CMaps admit any.
+///
+/// Returned as kinds rather than pushed as findings, because the clause is
+/// the caller's: the same four sentences are numbered differently by each
+/// standard that asks them.
+pub(crate) fn cmap_findings(
+    doc: &CosDocument,
+    font: &Dict,
+    at: ObjRef,
+    reading: CMapReading,
+) -> Vec<(ObjRef, FindingKind)> {
+    let mut out = Vec::new();
+    let key = doc.intern(b"Encoding");
+    let encoding = doc.resolve_key(font, key);
+    match encoding.as_ref() {
+        Object::Name(name) => {
+            let name = doc
+                .name_bytes(*name)
+                .map(|n| n.to_vec())
+                .unwrap_or_default();
+            if !reading.unembedded.contains(&name.as_slice()) {
+                out.push((
+                    at,
+                    FindingKind::CMapNotEmbedded {
+                        name: String::from_utf8_lossy(&name).into_owned(),
+                    },
+                ));
+            }
+        }
+        Object::Stream(stream) => {
+            // 7.3.8: a stream is indirect, so the entry is a reference.
+            let reference = font.get_ref(key).unwrap_or(at);
+            let program = doc.stream_decoded(reference).unwrap_or_default();
+            let (program_mode, used) = cmap_program(&program);
+            let dictionary_mode = doc
+                .resolve_key(&stream.dict, doc.intern(b"WMode"))
+                .as_int()
+                .unwrap_or(0);
+            if dictionary_mode != program_mode {
+                out.push((
+                    reference,
+                    FindingKind::CMapWritingModeMismatch {
+                        dictionary: dictionary_mode,
+                        program: program_mode,
+                    },
+                ));
+            }
+            let mut referenced: Vec<Vec<u8>> = used.into_iter().collect();
+            match doc
+                .resolve_key(&stream.dict, doc.intern(b"UseCMap"))
+                .as_ref()
+            {
+                Object::Name(name) => {
+                    referenced.extend(doc.name_bytes(*name).map(|n| n.to_vec()));
+                }
+                Object::Stream(parent) => {
+                    referenced.push(name_of(doc, &parent.dict, b"CMapName").unwrap_or_default())
+                }
+                _ => {}
+            }
+            for name in referenced.into_iter().filter(|_| reading.references) {
+                if !PREDEFINED_CMAPS.contains(&name.as_slice()) {
+                    out.push((
+                        reference,
+                        FindingKind::CMapReferenceNotStandard {
+                            name: String::from_utf8_lossy(&name).into_owned(),
+                        },
+                    ));
+                }
+            }
+            let descendant = doc
+                .resolve_key(font, doc.intern(b"DescendantFonts"))
+                .as_array()
+                .and_then(<[Object]>::first)
+                .map(|first| doc.resolve(first));
+            let descendant_info = descendant
+                .as_deref()
+                .and_then(Object::as_dict)
+                .map(|d| doc.resolve_key(d, doc.intern(b"CIDSystemInfo")));
+            let cmap_info = doc.resolve_key(&stream.dict, doc.intern(b"CIDSystemInfo"));
+            if let (Some(font_info), Some(cmap_info)) = (
+                descendant_info.as_deref().and_then(Object::as_dict),
+                cmap_info.as_dict(),
+            ) {
+                for key in collection_disagreements(doc, font_info, cmap_info, reading.supplement) {
+                    out.push((
+                        at,
+                        FindingKind::CidSystemInfoMismatch {
+                            key: key.to_string(),
+                        },
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// What an embedded CMap's own program says: its `/WMode` (0 when it writes
+/// none, Table 120's default) and every name it `usecmap`s.
+fn cmap_program(program: &[u8]) -> (i64, BTreeSet<Vec<u8>>) {
+    use tinker_pdf_content::{Token, Tokenizer};
+    let mut mode = None;
+    let mut used = BTreeSet::new();
+    let mut previous: Vec<Token> = Vec::new();
+    let mut tokenizer = Tokenizer::new(program);
+    let mut seen = 0usize;
+    while let Some(token) = tokenizer.next_token() {
+        seen += 1;
+        if seen > MAX_CMAP_TOKENS {
+            break;
+        }
+        if let Token::Operator(operator) = &token {
+            match (operator.as_slice(), previous.as_slice()) {
+                // `/WMode 1 def`: the first definition is the CMap's own.
+                (b"def", [.., Token::Name(key), Token::Number(value)])
+                    if key.as_slice() == b"WMode" && mode.is_none() =>
+                {
+                    mode = Some(*value as i64);
+                }
+                (b"usecmap", [.., Token::Name(name)]) => {
+                    used.insert(name.clone());
+                }
+                _ => {}
+            }
+            previous.clear();
+            continue;
+        }
+        if previous.len() >= 2 {
+            previous.remove(0);
+        }
+        previous.push(token);
+    }
+    (mode.unwrap_or(0), used)
+}
+
+/// Which of `/Registry`, `/Ordering` and `/Supplement` break 7.21.3.1's
+/// relationship between a CIDFont's collection and its CMap's.
+fn collection_disagreements(
+    doc: &CosDocument,
+    font: &Dict,
+    cmap: &Dict,
+    supplement: bool,
+) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for key in ["Registry", "Ordering"] {
+        let a = doc.resolve_key(font, doc.intern(key.as_bytes()));
+        let b = doc.resolve_key(cmap, doc.intern(key.as_bytes()));
+        let same = match (a.as_string(), b.as_string()) {
+            (Some(a), Some(b)) => a.bytes == b.bytes,
+            _ => false,
+        };
+        if !same {
+            out.push(key);
+        }
+    }
+    if !supplement {
+        return out;
+    }
+    let font_supplement = doc.resolve_key(font, doc.intern(b"Supplement")).as_int();
+    let cmap_supplement = doc.resolve_key(cmap, doc.intern(b"Supplement")).as_int();
+    if !matches!((font_supplement, cmap_supplement), (Some(a), Some(b)) if a <= b) {
+        out.push("Supplement");
+    }
+    out
 }
 
 // ---- shared ---------------------------------------------------------------

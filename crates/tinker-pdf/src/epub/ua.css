@@ -16,12 +16,17 @@
  * property of the book rather than of this file. The table rules below are
  * exactly that case: HTML sets `table { display: table }`, this build has no
  * table box, and a sheet that stayed silent about it would set every table in
- * the corpus as inline text with nothing anywhere saying so. Everything else
- * §15 declares that this build has no consumer for -- `border-spacing`,
- * `border-collapse`, `vertical-align`, `quotes`, `counter-reset`,
- * `list-style-position`, `unicode-bidi` -- is **not** here, because none of
- * them changes which boxes exist and charging them would bury the one that
- * does. `tests/epub_reading.rs`'s census assertions pin what is charged.
+ * the corpus as inline text with nothing anywhere saying so. §15.3.5's
+ * bidirectional rules are not here either, since October 2026's eighth wave
+ * gave `direction` and `unicode-bidi` a consumer: they are the `dir`
+ * attribute's, and `epub::xhtml` answers them as presentational hints, as it
+ * does `<ol start>`, because a rule keyed on an attribute alone is tried
+ * against every element of every book and the hint is asked of each element
+ * once. `counter-reset` and the `<q>` rules arrived
+ * with `css-lists-3`'s counters and `css-content-3`'s quotes and are below,
+ * and HTML's per-language `quotes` table is not, for the reason the `q` rule
+ * gives.
+ * `tests/epub_reading.rs`'s census assertions pin what is charged.
  *
  * **`[hidden]` is here and `[hidden=until-found]` is not.** HTML §15.3.1
  * spells the rule `[hidden]:not([hidden=until-found])`, and the exception is
@@ -182,7 +187,13 @@ h6 {
   margin-bottom: 2.33em;
 }
 
-/* ---- §15.3.4: the phrasing elements ------------------------------------ */
+/* ---- §15.3.4: the phrasing elements ------------------------------------
+ *
+ * Its `br { display-outside: newline; }` is not here: `newline` is a value no
+ * CSS specification defines, so the rule would be charged to the census on
+ * every `<br>` of every book and change nothing. The newline is the element's
+ * own, and `epub::read` lays it out as the line feed it is (`push_newline`),
+ * as `epub::xhtml` answers `dir`. */
 b, strong, th {
   font-weight: bold;
 }
@@ -223,6 +234,27 @@ mark {
 }
 
 /* ---- §15.3.3's list markers -------------------------------------------- */
+
+/* §15.3.6's quotes, as generated content. The marks themselves are HTML's
+ * per-language `:lang()` table, which this sheet does not carry, so `quotes`
+ * stays at `auto` unless a book says otherwise, and a `<q>` under `auto` is
+ * counted against `quotes` rather than given English marks in every language
+ * (`tinker_pdf_css::counter`). */
+q::before {
+  content: open-quote;
+}
+
+q::after {
+  content: close-quote;
+}
+
+/* §15.3.8: every list starts its own `list-item` count. `<ol start>`,
+ * `<li value>` and `<ol reversed>` are presentational hints the element
+ * answers itself (`epub::xhtml`), because the number is in an attribute. */
+ol, ul, menu {
+  counter-reset: list-item;
+}
+
 ul, menu, dir {
   list-style-type: disc;
 }

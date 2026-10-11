@@ -673,7 +673,7 @@ pub fn compare(source: &SpineText, pages: &[String]) -> Verdict {
 
     let (mut i, mut j) = (0usize, 0usize);
     while i < s.len() && j < p.len() {
-        if s[i] == p[j] {
+        if same_letter(s[i], p[j]) {
             verdict.conserved += 1;
             i += 1;
             j += 1;
@@ -752,7 +752,23 @@ fn run_matches(s: &[char], i: usize, p: &[char], j: usize) -> bool {
     if run == 0 {
         return false;
     }
-    (0..run).all(|k| s[i + k] == p[j + k])
+    (0..run).all(|k| same_letter(s[i + k], p[j + k]))
+}
+
+/// Whether a character on the page is the book's character, or the same
+/// letter in another case.
+///
+/// `text-transform` (`css-text-3` §2.1) and synthesised small capitals change
+/// a letter's case on the page, legitimately: a heading the book types
+/// `The Swans` and styles `uppercase` is drawn, and extracted, `THE SWANS`.
+/// Exact comparison read that as every character after the first missing
+/// and as many extra (the fetched `sample-childrens-media-query.epub`, once
+/// text-transform landed). The layout fuzz target folds case for the same
+/// reason. Only a case mapping that is one character long either way is
+/// accepted (`char::to_lowercase` of each side compared whole), so `ß` drawn
+/// `SS` still reads as a divergence, and nothing but case is forgiven.
+fn same_letter(source: char, page: char) -> bool {
+    source == page || source.to_lowercase().eq(page.to_lowercase())
 }
 
 /// The whole harness in one call: read the book, page it, compare.

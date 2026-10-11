@@ -115,12 +115,266 @@ pub(super) fn rules(
     if part == Some(Part::One) {
         annotation_colours(doc, &destination, out);
     }
-    icc_spaces(doc, &used, out);
+    icc_spaces(doc, &used, part, out);
     rendering_intents(&used, out);
     xobject_entries(doc, &used, out);
     transfer_functions(doc, &used, out);
     if part == Some(Part::One) {
         transparency(doc, &used, out);
+    }
+    undefined_operators(&used, out);
+    if part.is_some() && part != Some(Part::One) {
+        separations_agree(doc, &used, out);
+        colorants_described(doc, &used, out);
+    }
+}
+
+/// ISO 19005-2/3/4 6.2.4.4, in veraPDF's statement of rule 6.2.4.4-2: "All
+/// Separation arrays within a single PDF/A-2 file (including those in
+/// Colorants dictionaries) that have the same name shall have the same
+/// tintTransform and alternateSpace. In evaluating equivalence, the PDF
+/// objects shall be compared, rather than the computational result of the use
+/// of those PDF objects. Compression and whether or not an object is direct or
+/// indirect shall be ignored."
+///
+/// **The clause defines its own equality**, which is what `PDFA_STAGED` said
+/// this build had not written down: objects, not functions — so two sampled
+/// functions that compute the same colour from different tables are
+/// different, and the same function written once directly and once by
+/// reference, or once deflated and once not, is the same. [`Comparison::same`]
+/// is that sentence. Part 1 states no such rule.
+fn separations_agree(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
+    let mut reported: BTreeSet<&[u8]> = BTreeSet::new();
+    let mut work = 0;
+    for (index, (name, alternate, tint, at)) in used.separations.iter().enumerate() {
+        if reported.contains(name.as_slice()) {
+            continue;
+        }
+        let Some((_, first_alternate, first_tint, _)) = used.separations[..index]
+            .iter()
+            .find(|(other, ..)| other == name)
+        else {
+            continue;
+        };
+        let mut comparison = Comparison {
+            doc,
+            assumed: BTreeSet::new(),
+            work: &mut work,
+        };
+        if !comparison.same(first_alternate, alternate, 0) || !comparison.same(first_tint, tint, 0)
+        {
+            reported.insert(name);
+            out.push(Raw {
+                rule: clauses::SEPARATIONS,
+                object: *at,
+                kind: FindingKind::SeparationsDisagree {
+                    colorant: String::from_utf8_lossy(name).into_owned(),
+                },
+            });
+        }
+    }
+}
+
+/// One question 6.2.4.4 asks — are these two `/Separation` arrays' members
+/// the same object? — and what answering it has cost the rule so far.
+struct Comparison<'a> {
+    doc: &'a CosDocument,
+    /// Pairs of indirect objects this question is already comparing, or has
+    /// compared. Meeting one again answers "the same" at once.
+    ///
+    /// **That is sound because the answer is a conjunction.** Every step of
+    /// [`Comparison::same`] is "these parts, and those, and those": a pair
+    /// already entered is either still being compared, and its own answer
+    /// will carry any difference beneath it to the top, or it was compared
+    /// and found the same — or found different, and then the question's
+    /// answer is already "different", whatever this second visit says. So
+    /// a pair costs its work once per question, however many paths lead to
+    /// it, and a reference cycle ends here too. Without it, two chains of
+    /// equal stitching functions, each level naming the next thirty-two times,
+    /// cost 32^6 comparisons of their bottoms.
+    ///
+    /// It is per question, never per document: an assumption made while one
+    /// pair of arrays was being compared is not evidence about another.
+    assumed: BTreeSet<(ObjRef, ObjRef)>,
+    /// The rule's work so far, across every question it asks of the file.
+    work: &'a mut usize,
+}
+
+impl Comparison<'_> {
+    /// Whether two PDF objects are the same object in 6.2.4.4's sense:
+    /// compared as objects, with direct against indirect and compression
+    /// ignored.
+    ///
+    /// Numbers compare by value, so `1` and `1.0` are one number. A stream
+    /// compares by its dictionary less the entries that describe its encoding
+    /// (`/Length`, `/Filter`, `/DecodeParms`, `/DL`) and by its decoded bytes.
+    /// A comparison this build cannot finish — a stream that will not decode,
+    /// a nesting past [`MAX_COMPARE_DEPTH`], a rule past
+    /// [`MAX_COMPARE_WORK`] — answers "the same": a finding has to be one the
+    /// file shows, never one the reader failed to rule out.
+    fn same(&mut self, a: &Object, b: &Object, depth: u32) -> bool {
+        if depth > MAX_COMPARE_DEPTH || !self.spend(1) {
+            return true;
+        }
+        if let (Some(x), Some(y)) = (a.as_objref(), b.as_objref()) {
+            if x == y || !self.assumed.insert((x, y)) {
+                return true;
+            }
+        }
+        let doc = self.doc;
+        let (left, right) = (doc.resolve(a), doc.resolve(b));
+        match (left.as_ref(), right.as_ref()) {
+            (Object::Null, Object::Null) => true,
+            (Object::Bool(x), Object::Bool(y)) => x == y,
+            (Object::Int(_) | Object::Real(_), Object::Int(_) | Object::Real(_)) => {
+                left.as_number() == right.as_number()
+            }
+            (Object::String(x), Object::String(y)) => x.bytes == y.bytes,
+            (Object::Name(x), Object::Name(y)) => x == y,
+            (Object::Array(x), Object::Array(y)) => {
+                x.len() == y.len() && x.iter().zip(y).all(|(p, q)| self.same(p, q, depth + 1))
+            }
+            (Object::Dict(x), Object::Dict(y)) => self.same_dict(x, y, &[], depth),
+            (Object::Stream(x), Object::Stream(y)) => {
+                let encoding = [
+                    doc.intern(b"Length"),
+                    doc.intern(b"Filter"),
+                    doc.intern(b"DecodeParms"),
+                    doc.intern(b"DL"),
+                ];
+                if !self.same_dict(&x.dict, &y.dict, &encoding, depth) {
+                    return false;
+                }
+                match (a.as_objref(), b.as_objref()) {
+                    (Some(x), Some(y)) => match (doc.stream_decoded(x), doc.stream_decoded(y)) {
+                        // The decoded bytes are the rule's work too, a unit
+                        // a kibibyte, so a file of many large equal streams
+                        // spends the budget rather than the reader's time.
+                        (Ok(p), Ok(q)) => !self.spend(p.len() / 1024) || p == q,
+                        _ => true,
+                    },
+                    _ => true,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Two dictionaries with the same keys, `ignored` aside, and the same
+    /// values.
+    fn same_dict(
+        &mut self,
+        x: &Dict,
+        y: &Dict,
+        ignored: &[tinker_pdf_cos::Name],
+        depth: u32,
+    ) -> bool {
+        let keys = |d: &Dict| -> BTreeSet<tinker_pdf_cos::Name> {
+            d.entries()
+                .iter()
+                .map(|(key, _)| *key)
+                .filter(|key| !ignored.contains(key))
+                .collect()
+        };
+        let (left, right) = (keys(x), keys(y));
+        left == right
+            && left.iter().all(|key| match (x.get(*key), y.get(*key)) {
+                (Some(p), Some(q)) => self.same(p, q, depth + 1),
+                _ => false,
+            })
+    }
+
+    /// Charges `units` to the rule's budget: false once it is spent, and from
+    /// then on every comparison answers at once.
+    fn spend(&mut self, units: usize) -> bool {
+        *self.work = self.work.saturating_add(units);
+        *self.work <= MAX_COMPARE_WORK
+    }
+}
+
+/// The process colorants a `/DeviceN` space may name without describing
+/// them: DeviceCMYK's four (ISO 32000-1 8.6.6.5), and `/None`.
+const PROCESS_COLORANTS: &[&[u8]] = &[b"Cyan", b"Magenta", b"Yellow", b"Black", b"None"];
+
+/// ISO 19005-2/3/4 6.2.4.4, in veraPDF's statement of rule 6.2.4.4-1: "For
+/// any spot colour used in a DeviceN or NChannel colour space, an entry in
+/// the Colorants dictionary shall be present." A spot colour is a colorant
+/// that is not a process one: DeviceCMYK's four, `/None`, and the components
+/// an `NChannel` space's `/Process` dictionary names — the same reading the
+/// writer's `ArchivalRefusal::UndescribedColorant` refuses at the call.
+fn colorants_described(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
+    let mut reported: BTreeSet<Vec<u8>> = BTreeSet::new();
+    for (members, at) in &used.device_n {
+        let names = members.get(1).map(|n| doc.resolve(n));
+        let Some(names) = names.as_deref().and_then(Object::as_array) else {
+            continue;
+        };
+        let attributes = members.get(4).map(|a| doc.resolve(a));
+        let attributes = attributes.as_deref().and_then(Object::as_dict);
+        let colorants = attributes.map(|a| doc.resolve_key(a, doc.intern(b"Colorants")));
+        let colorants = colorants.as_deref().and_then(Object::as_dict);
+        let process: Vec<Vec<u8>> = attributes
+            .map(|a| doc.resolve_key(a, doc.intern(b"Process")))
+            .as_deref()
+            .and_then(Object::as_dict)
+            .map(|p| doc.resolve_key(p, doc.intern(b"Components")))
+            .as_deref()
+            .and_then(Object::as_array)
+            .map(|components| {
+                components
+                    .iter()
+                    .filter_map(|c| doc.resolve(c).as_name())
+                    .filter_map(|n| doc.name_bytes(n).map(|b| b.to_vec()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for name in names {
+            let Some(name) = doc.resolve(name).as_name() else {
+                continue;
+            };
+            let Some(bytes) = doc.name_bytes(name) else {
+                continue;
+            };
+            if PROCESS_COLORANTS.contains(&bytes.as_ref())
+                || process.iter().any(|p| p.as_slice() == bytes.as_ref())
+                || colorants.is_some_and(|c| c.contains_key(name))
+                || reported.contains(bytes.as_ref())
+            {
+                continue;
+            }
+            reported.insert(bytes.to_vec());
+            out.push(Raw {
+                rule: clauses::SEPARATIONS,
+                object: *at,
+                kind: FindingKind::ColorantUndescribed {
+                    colorant: String::from_utf8_lossy(&bytes).into_owned(),
+                },
+            });
+        }
+    }
+}
+
+/// ISO 19005-1 6.2.10, ISO 19005-2/3/4 6.2.2: "Content streams shall not
+/// contain any operators not defined in ISO 32000-1 even if such operators are
+/// bracketed by the BX/EX compatibility operators" (part 1: "in PDF
+/// Reference"; part 4: "in ISO 32000-2:2020"), as veraPDF's published rules
+/// 6.2.10-1 and 6.2.2-1 quote them.
+///
+/// **No operand stack is needed for this.** `PDFA_STAGED` held the rule back
+/// on the reading that deciding an operator is forbidden needs the operands it
+/// was given; an operator outside Table A.1 is forbidden whatever it was given,
+/// and the tokenizer that already walks every page, form and appearance names
+/// each one. One finding per distinct operator, naming the first object whose
+/// content used it.
+fn undefined_operators(used: &Used, out: &mut Vec<Raw>) {
+    for (operator, container) in &used.undefined {
+        out.push(Raw {
+            rule: clauses::CONTENT_STREAMS,
+            object: Some(*container),
+            kind: FindingKind::OperatorUndefined {
+                operator: String::from_utf8_lossy(operator).into_owned(),
+            },
+        });
     }
 }
 
@@ -228,6 +482,15 @@ fn output_intents(doc: &CosDocument, part: Option<Part>, out: &mut Vec<Raw>) -> 
             continue;
         };
         profiles.insert(profile_ref);
+        if let Ok(bytes) = doc.stream_decoded(profile_ref) {
+            for (field, found) in header_defects(&bytes, OUTPUT_CLASSES, OUTPUT_SPACES, part) {
+                out.push(Raw {
+                    rule: clauses::OUTPUT_INTENT,
+                    object: Some(profile_ref),
+                    kind: FindingKind::IccProfileHeader { field, found },
+                });
+            }
+        }
         destination = profile_space(doc, profile_ref);
     }
 
@@ -256,6 +519,67 @@ fn output_intents(doc: &CosDocument, part: Option<Part>, out: &mut Vec<Raw>) -> 
     }
 
     destination
+}
+
+/// The device classes a destination profile may declare: output and monitor.
+const OUTPUT_CLASSES: &[&[u8; 4]] = &[b"prtr", b"mntr"];
+
+/// The data colour spaces a destination profile may declare.
+const OUTPUT_SPACES: &[&[u8; 4]] = &[b"RGB ", b"CMYK", b"GRAY"];
+
+/// The device classes an `ICCBased` colour space's profile may declare: input
+/// and colour-space conversion as well.
+const ICC_BASED_CLASSES: &[&[u8; 4]] = &[b"prtr", b"mntr", b"scnr", b"spac"];
+
+/// The data colour spaces an `ICCBased` colour space's profile may declare.
+const ICC_BASED_SPACES: &[&[u8; 4]] = &[b"RGB ", b"CMYK", b"GRAY", b"Lab "];
+
+/// What a profile's header says that the clause does not admit, as
+/// `(field, found)`.
+///
+/// **The header, and only the header.** `PDFA_STAGED` held this rule back
+/// because `icc::Profile::parse` is a transform builder that refuses profiles
+/// which conform perfectly well — a v4 profile whose only route to the
+/// connection space is an `mAB ` tag — so "cannot be parsed" was never "does
+/// not conform". The three things the clause names sit at fixed offsets of
+/// ICC.1's 128-byte header — the version at byte 8, the device class at 12,
+/// the data colour space at 16 — and reading them needs no transform. The
+/// sentences are veraPDF's statements of rules 6.2.2-1 (part 1), 6.2.3-1
+/// (parts 2 to 4) and 6.2.3.2-1 / 6.2.4.2-1 (`ICCBased`), and their test
+/// conditions give the version bound: below 3.0 under part 1, whose
+/// reference is ICC.1:1998-09, and below 5.0 under the later parts.
+fn header_defects(
+    bytes: &[u8],
+    classes: &[&[u8; 4]],
+    spaces: &[&[u8; 4]],
+    part: Option<Part>,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let (Some(version), Some(class), Some(space)) =
+        (bytes.get(8..10), bytes.get(12..16), bytes.get(16..20))
+    else {
+        out.push(("header".to_string(), format!("{} bytes", bytes.len())));
+        return out;
+    };
+    let major = version.first().copied().unwrap_or_default();
+    let minor = version.get(1).copied().unwrap_or_default() >> 4;
+    let below = if part == Some(Part::One) { 3 } else { 5 };
+    if major >= below {
+        out.push(("version".to_string(), format!("{major}.{minor}")));
+    }
+    if !classes.iter().any(|admitted| admitted.as_slice() == class) {
+        out.push((
+            "device class".to_string(),
+            String::from_utf8_lossy(class).into_owned(),
+        ));
+    }
+    if !spaces.iter().any(|admitted| admitted.as_slice() == space) {
+        out.push((
+            "colour space".to_string(),
+            String::from_utf8_lossy(space).into_owned(),
+        ));
+    }
+    out
 }
 
 /// The destination profile of a part 4 page-level output intent, if there is
@@ -307,40 +631,100 @@ fn profile_space(doc: &CosDocument, reference: ObjRef) -> Destination {
 // ---- what the pages paint with --------------------------------------------
 
 /// What one walk of the content streams found, for every colour rule at once.
+///
+/// `pub(crate)`, with the fields another standard reads, because ISO 15930's
+/// print rules ask what a page paints with the same question ISO 19005's
+/// colour group asks (`crate::pdfx`), and one walk answers both.
 #[derive(Default)]
-struct Used {
+pub(crate) struct Used {
     /// Device colour spaces painted with, and one object that did.
-    devices: BTreeMap<&'static str, Option<ObjRef>>,
+    pub(crate) devices: BTreeMap<&'static str, Option<ObjRef>>,
     /// Device colour spaces a `/Default…` entry in the resources standing over
     /// them excuses (ISO 32000-1 8.6.5.6).
-    defaulted: BTreeSet<&'static str>,
+    pub(crate) defaulted: BTreeSet<&'static str>,
     /// `ICCBased` streams the pages selected.
-    icc_streams: BTreeSet<ObjRef>,
+    pub(crate) icc_streams: BTreeSet<ObjRef>,
+    /// The other device-independent families the pages selected —
+    /// `CalGray`, `CalRGB`, `Lab` — and one object that did. No ISO 19005
+    /// rule reads it; PDF/X-3's profile requirement does.
+    pub(crate) independent: BTreeMap<&'static str, Option<ObjRef>>,
     /// Rendering intents named, by the `ri` operator or an `/ExtGState`.
     intents: BTreeMap<Vec<u8>, Option<ObjRef>>,
     /// Extended graphics states the pages selected.
     ext_g_states: BTreeSet<ObjRef>,
     /// Form XObjects the pages invoked.
-    forms: BTreeSet<ObjRef>,
+    pub(crate) forms: BTreeSet<ObjRef>,
     /// Image XObjects the pages drew.
     images: BTreeSet<ObjRef>,
     /// XObjects the pages drew that are neither a form nor an image, which
     /// 8.8.2 leaves exactly one of: a PostScript XObject.
-    postscript: BTreeSet<ObjRef>,
+    pub(crate) postscript: BTreeSet<ObjRef>,
     /// Device-independent blending colour spaces a transparency group named,
     /// by the device family each stands in for (11.6.6).
     group_spaces: BTreeSet<&'static str>,
+    /// Operators no table of ISO 32000 defines, each with the first object
+    /// whose content used it.
+    pub(crate) undefined: BTreeMap<Vec<u8>, ObjRef>,
+    /// Every `/Separation` array met — in a space the pages use, or in a
+    /// `/DeviceN` space's `/Colorants` — as `(name, alternate, tint transform,
+    /// where)`.
+    separations: Vec<(Vec<u8>, Object, Object, Option<ObjRef>)>,
+    /// Every `/DeviceN` space met, as its array and where.
+    device_n: Vec<(Vec<Object>, Option<ObjRef>)>,
 }
+
+/// How many `/Separation` and `/DeviceN` arrays one document contributes to
+/// the consistency rules.
+const MAX_SEPARATIONS: usize = 256;
+
+/// How deep two tint transforms are compared before the comparison gives up
+/// and calls them the same — a stitching function nests functions, and a
+/// nesting deeper than this is not a colour.
+const MAX_COMPARE_DEPTH: u32 = 16;
+
+/// How much work the consistency rule spends comparing, across every pair of
+/// arrays it compares in one document: a unit an object compared and a unit a
+/// kibibyte of decoded stream. Remembering the pairs already compared makes a
+/// question cost what its two objects hold rather than how many paths reach
+/// them; this bounds what they may hold. A tint transform is tens of units,
+/// and two hundred and fifty-six of them a few thousand.
+const MAX_COMPARE_WORK: usize = 1 << 18;
+
+/// Every operator ISO 32000-1 Annex A Table A.1 lists — seventy-three, the
+/// same set PDF Reference 1.4 (ISO 19005-1's reference) and ISO 32000-2
+/// (ISO 19005-4's) define. `PS` is not among them, which is how veraPDF's
+/// statement of the rule reads its prohibition: "In earlier versions of the
+/// PDF format a PostScript operator "PS" was defined. As this operator is not
+/// defined in PDF Reference its use is implicitly prohibited".
+const DEFINED_OPERATORS: &[&[u8]] = &[
+    b"b", b"B", b"b*", b"B*", b"BDC", b"BI", b"BMC", b"BT", b"BX", b"c", b"cm", b"CS", b"cs", b"d",
+    b"d0", b"d1", b"Do", b"DP", b"EI", b"EMC", b"ET", b"EX", b"f", b"F", b"f*", b"G", b"g", b"gs",
+    b"h", b"i", b"ID", b"j", b"J", b"K", b"k", b"l", b"m", b"M", b"MP", b"n", b"q", b"Q", b"re",
+    b"RG", b"rg", b"ri", b"s", b"S", b"SC", b"sc", b"SCN", b"scn", b"sh", b"T*", b"Tc", b"Td",
+    b"TD", b"Tf", b"Tj", b"TJ", b"TL", b"Tm", b"Tr", b"Ts", b"Tw", b"Tz", b"v", b"w", b"W", b"W*",
+    b"y", b"'", b"\"",
+];
+
+/// How many distinct undefined operators one document contributes.
+const MAX_UNDEFINED_OPERATORS: usize = 64;
 
 /// The three uncalibrated spaces, spelled as the operators and the names spell
 /// them.
 const DEVICE_GRAY: &str = "DeviceGray";
-const DEVICE_RGB: &str = "DeviceRGB";
+pub(crate) const DEVICE_RGB: &str = "DeviceRGB";
 const DEVICE_CMYK: &str = "DeviceCMYK";
 
 /// One walk, filling [`Used`].
-fn scan(doc: &CosDocument, used: &mut Used) {
+pub(crate) fn scan(doc: &CosDocument, used: &mut Used) {
     content::walk(doc, &mut |op| {
+        if !DEFINED_OPERATORS.contains(&op.operator)
+            && (used.undefined.len() < MAX_UNDEFINED_OPERATORS
+                || used.undefined.contains_key(op.operator))
+        {
+            used.undefined
+                .entry(op.operator.to_vec())
+                .or_insert(op.container);
+        }
         match op.operator {
             // 8.6.8: the colour operators that select a device space and a
             // value in it, in one operator.
@@ -495,18 +879,48 @@ fn colour_space(
                         used.icc_streams.insert(stream);
                     }
                 }
+                b"CalGray" => {
+                    used.independent.entry("CalGray").or_insert(at);
+                }
+                b"CalRGB" => {
+                    used.independent.entry("CalRGB").or_insert(at);
+                }
+                b"Lab" => {
+                    used.independent.entry("Lab").or_insert(at);
+                }
                 // 8.6.6.3 and 8.6.6.4: the value a `/Separation` or `/DeviceN`
                 // produces lives in its **alternate** space, and 8.6.6.2 says
                 // the same of an `/Indexed` space's base. So a `/Separation`
                 // over `DeviceCMYK` uses `DeviceCMYK`, which is the reading
                 // that makes 6.2.3.4's fixtures make sense.
                 b"Separation" => {
+                    record_separation(doc, members, at, used);
                     if let Some(alternate) = members.get(2) {
                         let resolved = doc.resolve(alternate);
                         colour_space(doc, &resolved, at, used, depth + 1);
                     }
                 }
                 b"DeviceN" => {
+                    if used.device_n.len() < MAX_SEPARATIONS {
+                        used.device_n.push((members.clone(), at));
+                    }
+                    // 6.2.4.4: "All Separation arrays … (including those in
+                    // Colorants dictionaries)".
+                    let attributes = members.get(4).map(|a| doc.resolve(a));
+                    if let Some(colorants) = attributes
+                        .as_deref()
+                        .and_then(Object::as_dict)
+                        .map(|a| doc.resolve_key(a, doc.intern(b"Colorants")))
+                    {
+                        if let Some(colorants) = colorants.as_dict() {
+                            for (_, value) in colorants.entries() {
+                                let resolved = doc.resolve(value);
+                                if let Some(separation) = resolved.as_array() {
+                                    record_separation(doc, separation, at, used);
+                                }
+                            }
+                        }
+                    }
                     if let Some(alternate) = members.get(2) {
                         let resolved = doc.resolve(alternate);
                         colour_space(doc, &resolved, at, used, depth + 1);
@@ -532,6 +946,30 @@ fn colour_space(
             }
         }
         _ => {}
+    }
+}
+
+/// One `/Separation` array, kept for the consistency rule.
+fn record_separation(doc: &CosDocument, members: &[Object], at: Option<ObjRef>, used: &mut Used) {
+    if used.separations.len() >= MAX_SEPARATIONS {
+        return;
+    }
+    let is_separation = members
+        .first()
+        .and_then(|first| doc.resolve(first).as_name())
+        .and_then(|name| doc.name_bytes(name))
+        .is_some_and(|name| name.as_ref() == b"Separation");
+    let (Some(name), Some(alternate), Some(tint)) =
+        (members.get(1), members.get(2), members.get(3))
+    else {
+        return;
+    };
+    let Some(name) = doc.resolve(name).as_name().and_then(|n| doc.name_bytes(n)) else {
+        return;
+    };
+    if is_separation {
+        used.separations
+            .push((name.to_vec(), alternate.clone(), tint.clone(), at));
     }
 }
 
@@ -810,7 +1248,7 @@ fn annotation_colours(doc: &CosDocument, destination: &Destination, out: &mut Ve
 /// profile this build cannot read leaves the second half unasked; the first —
 /// `/N` present and one of the three values ISO 32000-1 8.6.5.5 admits — is
 /// asked either way.
-fn icc_spaces(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
+fn icc_spaces(doc: &CosDocument, used: &Used, part: Option<Part>, out: &mut Vec<Raw>) {
     for reference in &used.icc_streams {
         let Ok(object) = doc.get(*reference) else {
             continue;
@@ -832,6 +1270,13 @@ fn icc_spaces(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
         let Ok(bytes) = doc.stream_decoded(*reference) else {
             continue;
         };
+        for (field, found) in header_defects(&bytes, ICC_BASED_CLASSES, ICC_BASED_SPACES, part) {
+            out.push(Raw {
+                rule: clauses::ICC_SPACES,
+                object: Some(*reference),
+                kind: FindingKind::IccProfileHeader { field, found },
+            });
+        }
         let Ok(profile) = icc::Profile::parse(&bytes) else {
             continue;
         };
@@ -1040,15 +1485,20 @@ fn transfer_functions(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
 
 /// ISO 19005-1 6.4: a part 1 file has no transparency at all.
 ///
-/// Four ways to have some, and each is its own finding because they are
+/// Five ways to have some, and each is its own finding because they are
 /// different things to fix: a transparency group on a page or a form, a soft
-/// mask in a graphics state, a blend mode that is not one of the two meaning
-/// "do not blend", and a constant alpha below one.
+/// mask in a graphics state or on an XObject the pages draw, a blend mode that
+/// is not one of the two meaning "do not blend", and a constant alpha below
+/// one.
 ///
 /// **Parts 2 to 4 permit transparency** and constrain it instead — the group's
 /// colour space, the blend modes, the mask — and none of that runs here.
 /// `super::STAGED` names it.
-fn transparency(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
+///
+/// `pub(crate)` because the 2003 PDF/X levels forbid transparency outright as
+/// well (`crate::pdfx`), and one reading of "no transparency" is better than
+/// two that drift.
+pub(crate) fn transparency(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
     for page in pages::collect_upto(doc, MAX_PAGES) {
         let Ok(object) = doc.get(page.reference) else {
             continue;
@@ -1080,6 +1530,31 @@ fn transparency(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
                 object: Some(*reference),
                 kind: FindingKind::TransparencyForbidden {
                     feature: "Group".to_string(),
+                },
+            });
+        }
+    }
+
+    // Rule 6.4-2, as veraPDF's published statement quotes ISO 19005-1 6.4
+    // (with Cor.2:2011): "An XObject dictionary shall not contain the SMask
+    // key." An image's own soft mask is transparency as surely as a graphics
+    // state's, and until this loop only the graphics state's was judged. The
+    // key at all, not its value: `/SMask` on an XObject has no `/None`
+    // spelling the way a graphics state's has, and the rule's test condition
+    // is `containsSMask == false`.
+    for reference in used.images.iter().chain(used.forms.iter()) {
+        let Ok(object) = doc.get(*reference) else {
+            continue;
+        };
+        let Some(stream) = object.as_stream() else {
+            continue;
+        };
+        if stream.dict.contains_key(doc.intern(b"SMask")) {
+            out.push(Raw {
+                rule: clauses::TRANSPARENCY,
+                object: Some(*reference),
+                kind: FindingKind::TransparencyForbidden {
+                    feature: "SMask".to_string(),
                 },
             });
         }

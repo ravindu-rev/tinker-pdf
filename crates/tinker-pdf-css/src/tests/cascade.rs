@@ -24,9 +24,9 @@
 use super::{sheet, tree, Node};
 use crate::cascade::{cascade, cascade_from, rank, resolve_lazily, ComputedStyle, Origin};
 use crate::property::{
-    Color, ColumnCount, Display, Float, FontStyle, Gap, Inset, LengthPercentage, LineHeight,
-    MarginValue, MaxSize, MinSize, Position, Side, Size, Spacing, TextAlign, VerticalAlign,
-    Visibility, ZIndex,
+    Color, ColumnCount, Direction, Display, Float, FontStyle, Gap, Inset, LengthPercentage,
+    LineHeight, MarginValue, MaxSize, MinSize, Position, Side, Size, Spacing, TextAlign,
+    UnicodeBidi, VerticalAlign, Visibility, ZIndex,
 };
 use crate::{Budget, Limits, Refusal, Stylesheet};
 
@@ -861,6 +861,111 @@ fn the_unsupported_census_counts_elements_reached() {
     assert_eq!(tree_styles.report.unsupported, vec![("box-shadow", 3)]);
 }
 
+/// **`direction` inherits and `unicode-bidi` does not, and a right-to-left
+/// element this layout sets left to right is counted against `direction`**
+/// (`css-writing-modes-3` §2.1, §2.2).
+///
+/// An embedding is opened by the box that declares it, so the `span` inside
+/// the isolating `div` reads `normal` while it reads `rtl`. The table lays
+/// its columns from the left here and the `p` — a definite width, neither
+/// margin `auto`, in the right-to-left `div` that is its containing block (the
+/// root's is the initial containing block, in the root's direction) — gives
+/// up its right margin where CSS 2.2 §10.3.3 gives up its left: two elements.
+/// The `div` and the `span` are inline and lose nothing.
+#[test]
+fn direction_inherits_and_is_counted_where_layout_does_not_turn() {
+    let nodes = tree(&[
+        ("div", None),
+        ("table", Some(0)),
+        ("p", Some(0)),
+        ("span", Some(2)),
+    ]);
+    let parsed = sheet(
+        "div { direction: rtl; unicode-bidi: isolate } table { display: table } \
+         p { display: block; width: 10px }",
+    );
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let styled = cascade(&[(Origin::Author, &parsed)], &nodes, &limits, &mut budget)
+        .expect("under every cap");
+    assert_eq!(styled.styles[0].unicode_bidi, UnicodeBidi::Isolate);
+    assert_eq!(styled.styles[3].direction, Direction::Rtl, "inherited");
+    assert_eq!(
+        styled.styles[3].unicode_bidi,
+        UnicodeBidi::Normal,
+        "not inherited"
+    );
+    assert_eq!(styled.report.unsupported, vec![("direction", 2)]);
+}
+
+/// **`hyphens` is inherited** (`css-text-3` §5.4), so a `<code>` inside a
+/// paragraph that says `none` breaks at no soft hyphen either, and its initial
+/// value is `manual`.
+#[test]
+fn hyphens_is_inherited_and_starts_manual() {
+    use crate::property::Hyphens;
+    let nodes = tree(&[("div", None), ("code", Some(0)), ("p", None)]);
+    let styled = styles("div { hyphens: none }", &nodes);
+    assert_eq!(styled[1].hyphens, Hyphens::None, "inherited");
+    assert_eq!(styled[2].hyphens, Hyphens::Manual, "the initial value");
+}
+
+/// **A gradient's lengths are computed with its element's font size**: an
+/// `em` in a stop, a radius or a centre is pixels once cascaded, and a
+/// percentage stays for the box the painter is given.
+#[test]
+fn a_gradients_lengths_are_computed_with_the_elements_font_size() {
+    use crate::property::{Gradient, GradientShape, Image, RadialSize};
+    let nodes = tree(&[("div", None)]);
+    let styled = styles(
+        "div { font-size: 20px; \
+         background-image: radial-gradient(2em 50% at 1em 10%, red 1em, blue 50%) }",
+        &nodes,
+    );
+    let Some(Image::Gradient(gradient)) = &styled[0].background_image else {
+        panic!("no gradient: {:?}", styled[0].background_image);
+    };
+    let Gradient { shape, stops } = gradient.as_ref();
+    let GradientShape::Radial(radial) = shape else {
+        panic!("not radial: {shape:?}");
+    };
+    assert_eq!(
+        radial.size,
+        RadialSize::Explicit(LengthPercentage::Px(40.0), LengthPercentage::Percent(50.0))
+    );
+    assert_eq!(radial.at[0].offset, LengthPercentage::Px(20.0));
+    assert_eq!(radial.at[1].offset, LengthPercentage::Percent(10.0));
+    assert_eq!(stops[0].position, Some(LengthPercentage::Px(20.0)));
+    assert_eq!(stops[1].position, Some(LengthPercentage::Percent(50.0)));
+}
+
+/// **A declaration an element carries itself is counted once for it**, as
+/// one a sheet sends it is.
+///
+/// A `style=""` or a presentational hint is parsed when its element is
+/// cascaded, and was parsed into the cascade's own report — whose parse
+/// counted each refused or unknown declaration, before the walk over the
+/// element's matched declarations counted it again. One element, two in the
+/// census: `<ol reversed>` was two lists and `<bdo>` two overrides.
+#[test]
+fn a_declaration_an_element_carries_is_counted_once_for_it() {
+    let mut nodes = tree(&[("p", None), ("p", Some(0)), ("p", Some(0))]);
+    nodes[1].style = Some("box-shadow: 0 0 2px #000; -x-typo: 1".to_owned());
+    nodes[2]
+        .attributes
+        .push(("hint".into(), "unicode-bidi: bidi-override".into()));
+    let parsed = sheet("");
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let tree_styles = cascade(&[(Origin::Author, &parsed)], &nodes, &limits, &mut budget)
+        .expect("under every cap");
+    assert_eq!(
+        tree_styles.report.unsupported,
+        vec![("box-shadow", 1), ("unicode-bidi", 1)]
+    );
+    assert_eq!(tree_styles.report.unknown, vec![("-x-typo".to_owned(), 1)]);
+}
+
 /// A caller that hands elements out of document order is refused **by name**.
 ///
 /// The alternative is reading a computed style before it was written, which in
@@ -1076,5 +1181,171 @@ fn a_vertical_align_percentage_survives_and_an_em_does_not() {
     assert_eq!(
         styled[0].vertical_align,
         VerticalAlign::Length(LengthPercentage::Px(10.0))
+    );
+}
+
+/// **Two names, one property**: a `break-*` declaration and a `page-break-*`
+/// one compete for the same longhand, and the later of two equal ones wins
+/// whichever name each was written under (`css-break-3` §3.4,
+/// `css-cascade-5` §6.1 criterion 6).
+///
+/// The shape that two separate properties would get wrong: an author sheet that
+/// sets the legacy name and then overrides it with the modern one. Read as two
+/// properties, both would be set and the layout would have to pick.
+#[test]
+fn a_break_alias_and_its_legacy_name_are_one_property_in_the_cascade() {
+    use crate::property::{PageBreak, PageBreakInside};
+    let nodes = one("p");
+    let modern_last = &styles(
+        "p { page-break-before: always; break-before: avoid; \
+             page-break-inside: avoid; break-inside: auto }",
+        &nodes,
+    )[0];
+    assert_eq!(modern_last.page_break_before, PageBreak::Avoid);
+    assert_eq!(modern_last.page_break_inside, PageBreakInside::Auto);
+    let legacy_last = &styles("p { break-after: page; page-break-after: avoid }", &nodes)[0];
+    assert_eq!(legacy_last.page_break_after, PageBreak::Avoid);
+    // And the alias defaults the legacy longhand, which is the same claim
+    // through §7.1's door.
+    let parent_child = tree(&[("div", None), ("p", Some(0))]);
+    let inherited = &styles(
+        "div { page-break-after: always } p { break-after: inherit }",
+        &parent_child,
+    )[1];
+    assert_eq!(inherited.page_break_after, PageBreak::Always);
+}
+
+/// **`text-transform` inherits, and in Lithuanian, Turkish and Azeri it is
+/// counted as unimplemented** (`css-text-3` §2.1).
+///
+/// §2.1 makes the language-specific mappings mandatory when the element's
+/// language is known, and the layout crate that applies the transform is never
+/// told a language. So an element in one of the three with a casing transform
+/// is a `text-transform` gap, by element; one in any other language, or with
+/// no transform, is not.
+#[test]
+fn text_transform_inherits_and_is_counted_where_its_language_conditions_it() {
+    use crate::property::TextTransform;
+    let mut nodes = tree(&[
+        ("html", None),
+        ("body", Some(0)),
+        ("h1", Some(1)),
+        ("em", Some(2)),
+        ("p", Some(1)),
+        ("q", Some(4)),
+    ]);
+    nodes[0].attributes.push(("lang".into(), "tr".into()));
+    nodes[5].attributes.push(("lang".into(), "en-GB".into()));
+    let parsed = sheet("h1 { text-transform: uppercase } p { text-transform: lowercase }");
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let styled = cascade(&[(Origin::Author, &parsed)], &nodes, &limits, &mut budget)
+        .expect("under every cap");
+    assert_eq!(
+        styled.styles[3].text_transform,
+        TextTransform::Uppercase,
+        "inherited"
+    );
+    assert_eq!(styled.styles[1].text_transform, TextTransform::None);
+    // `h1`, its `em`, and `p` are Turkish with a transform; `q` is English and
+    // `html` and `body` have none.
+    assert_eq!(
+        styled
+            .report
+            .unsupported
+            .iter()
+            .find(|(name, _)| *name == "text-transform")
+            .map(|(_, count)| *count),
+        Some(3)
+    );
+}
+
+/// **`overflow-x: auto` alone makes a box that clips in both axes**
+/// (`css-overflow-3` §3.1's computed value): `visible` beside a scrolling axis
+/// computes to `auto` and `clip` to `hidden`, while two non-scrolling values
+/// are left as written. Neither longhand is inherited.
+#[test]
+fn a_scrolling_axis_turns_the_other_one_from_visible_to_auto() {
+    use crate::property::Overflow;
+    let nodes = tree(&[
+        ("table", None),
+        ("div", None),
+        ("p", Some(1)),
+        ("pre", None),
+    ]);
+    let styled = styles(
+        "table { overflow-x: auto }
+         div { overflow-x: clip; overflow-y: scroll }
+         pre { overflow: clip visible }",
+        &nodes,
+    );
+    assert_eq!(
+        (styled[0].overflow_x, styled[0].overflow_y),
+        (Overflow::Auto, Overflow::Auto)
+    );
+    assert_eq!(
+        (styled[1].overflow_x, styled[1].overflow_y),
+        (Overflow::Hidden, Overflow::Scroll)
+    );
+    assert_eq!(
+        (styled[2].overflow_x, styled[2].overflow_y),
+        (Overflow::Visible, Overflow::Visible),
+        "not inherited"
+    );
+    assert_eq!(
+        (styled[3].overflow_x, styled[3].overflow_y),
+        (Overflow::Clip, Overflow::Visible),
+        "clip beside visible is left alone: neither axis scrolls"
+    );
+}
+
+/// **`transform` is not inherited, `em` in it is resolved against the element's
+/// own font size, and a fixed box under a transformed one is counted** —
+/// `css-transforms-1` §2 makes the transformed box its containing block, and
+/// the layout places a fixed box against the page.
+#[test]
+fn transform_is_not_inherited_and_a_fixed_box_under_one_is_counted() {
+    use crate::property::{Transform, TransformOrigin};
+    let nodes = tree(&[
+        ("html", None),
+        ("body", Some(0)),
+        ("div", Some(1)),
+        ("p", Some(2)),
+        ("span", Some(3)),
+        ("aside", Some(1)),
+    ]);
+    let parsed = sheet(
+        "div { font-size: 10px; transform: translate(2em, 50%); transform-origin: 1em 0 } \
+         span { position: fixed } aside { position: fixed }",
+    );
+    let limits = Limits::DEFAULT;
+    let mut budget = Budget::new(&limits);
+    let styled = cascade(&[(Origin::Author, &parsed)], &nodes, &limits, &mut budget)
+        .expect("under every cap");
+    assert_eq!(
+        styled.styles[2].transform,
+        vec![Transform::Translate(
+            LengthPercentage::Px(20.0),
+            LengthPercentage::Percent(50.0)
+        )]
+    );
+    assert_eq!(
+        styled.styles[2].transform_origin,
+        TransformOrigin {
+            x: LengthPercentage::Px(10.0),
+            y: LengthPercentage::Px(0.0),
+        }
+    );
+    assert!(styled.styles[3].transform.is_empty(), "not inherited");
+    assert_eq!(styled.styles[3].transform_origin, TransformOrigin::INITIAL);
+    // The `span` is fixed under the `div`; the `aside` is fixed under nothing.
+    assert_eq!(
+        styled
+            .report
+            .unsupported
+            .iter()
+            .find(|(name, _)| *name == "transform")
+            .map(|(_, count)| *count),
+        Some(1)
     );
 }

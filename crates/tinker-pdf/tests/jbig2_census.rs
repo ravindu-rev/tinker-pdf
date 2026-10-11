@@ -49,7 +49,10 @@ use std::path::{Path, PathBuf};
 
 use tinker_pdf::Document;
 use tinker_pdf_cos::{ObjRef, Object, XrefEntry};
-use tinker_pdf_filters::{jbig2_decode_measured, Jbig2Params, MAX_JBIG2_SYMBOL_PAGE_MULTIPLE};
+use tinker_pdf_filters::{
+    jbig2_decode_measured, Jbig2Params, MAX_JBIG2_SYMBOL_PAGE_MULTIPLE, MAX_JBIG2_SYMBOL_PIXELS,
+    MAX_JBIG2_WORK_MULTIPLE,
+};
 
 /// The ceiling the measurement below decodes under, matching
 /// `jbig2_attribution.rs` so the two censuses are commensurable.
@@ -216,6 +219,22 @@ struct Tally {
     /// another, which is a report that cannot be checked.
     tightest_symbol: (u32, u32),
     tightest_page: (u32, u32),
+    /// **The figure `MAX_JBIG2_WORK_MULTIPLE` is owed**: the most work any one
+    /// image's decode spends — `Jbig2SymbolExtent::work`, one pixel or one
+    /// arithmetic decision — in thousandths of the pixels its own packed page
+    /// holds, which is the cap's currency at the tightest ceiling a caller can
+    /// pass. A global dictionary is decoded whole for every image that names
+    /// it, so this is where a shared dictionary on a small image shows.
+    worst_work_permille: u64,
+    /// The work and the page that produced it, so the figure names its image.
+    worst_work: u64,
+    worst_work_page: (u32, u32),
+    /// The most of [`render_budget`] any one image spends, in thousandths:
+    /// what the render path's own budget leaves, which is the figure that
+    /// decides whether a document draws.
+    worst_render_permille: u64,
+    /// Images whose decode the render path's budget would refuse.
+    render_refused: u32,
     /// Symbols decoded, and dictionaries decoded to the end.
     symbols_decoded: u64,
     dictionaries_decoded: u32,
@@ -277,6 +296,13 @@ impl Tally {
             self.tightest_symbol = other.tightest_symbol;
             self.tightest_page = other.tightest_page;
         }
+        if other.worst_work_permille > self.worst_work_permille {
+            self.worst_work_permille = other.worst_work_permille;
+            self.worst_work = other.worst_work;
+            self.worst_work_page = other.worst_work_page;
+        }
+        self.worst_render_permille = self.worst_render_permille.max(other.worst_render_permille);
+        self.render_refused += other.render_refused;
         self.symbols_decoded += other.symbols_decoded;
         self.dictionaries_decoded += other.dictionaries_decoded;
         self.images_refused += other.images_refused;
@@ -633,6 +659,7 @@ fn measure(images: &[Image], tally: &mut Tally) {
             globals: &image.globals,
             width: image.width,
             height: image.height,
+            work_ceiling: None,
         };
         let mut refusals = Vec::new();
         let (out, extent) = jbig2_decode_measured(&image.data, &params, CEILING, &mut refusals);
@@ -668,7 +695,43 @@ fn measure(images: &[Image], tally: &mut Tally) {
             tally.tightest_symbol = (extent.widest, extent.tallest);
             tally.tightest_page = (page_w, page_h);
         }
+
+        // The work, against the pixels the image's own packed page holds:
+        // whole bytes a row, eight pixels a byte, as the decoder's ceiling
+        // counts them.
+        let page_pixels = u64::from(page_w.div_ceil(8)) * 8 * u64::from(page_h);
+        let work_permille = extent.work.saturating_mul(1_000) / page_pixels;
+        if work_permille > tally.worst_work_permille {
+            tally.worst_work_permille = work_permille;
+            tally.worst_work = extent.work;
+            tally.worst_work_page = (page_w, page_h);
+        }
+        let budget = render_budget(image.width, image.height);
+        tally.worst_render_permille = tally
+            .worst_render_permille
+            .max(extent.work.saturating_mul(1_000) / budget.max(1));
+        if extent.work > budget {
+            tally.render_refused += 1;
+        }
     }
+}
+
+/// The work budget the render path gives one image, restated from
+/// `jbig2_work_ceiling` in `crates/tinker-pdf/src/resources.rs`: sixteen units
+/// a pixel of the image's own `/Width` x `/Height` plus a floor of twice
+/// `MAX_JBIG2_SYMBOL_PIXELS` for a shared dictionary, and never more than the
+/// output ceiling's 2^30 pixels allow.
+///
+/// Restated rather than called because that function is the facade's
+/// arithmetic and not its API (ruling 11). The original is held at its exact
+/// boundary by `the_render_path_measures_a_jbig2_decode_against_its_own_image`
+/// in `jbig2.rs`, so a change there fails a test that runs on every commit,
+/// and this copy is what lets the nightly census say whether the change
+/// refuses a real document.
+fn render_budget(width: u32, height: u32) -> u64 {
+    let globals = 2 * MAX_JBIG2_SYMBOL_PIXELS / MAX_JBIG2_WORK_MULTIPLE;
+    let image = u64::from(width) * u64::from(height) + globals;
+    image.min(1 << 30) * MAX_JBIG2_WORK_MULTIPLE
 }
 
 /// The corpora, if they have been fetched.
@@ -945,6 +1008,30 @@ fn census_of_the_corpus_jbig2() {
         "the tightest fit, unrounded: {} of the page it is drawn onto",
         permille_of(total.tightest_permille)
     );
+    println!();
+    println!("--- the most work one decode spends, against its own page ---");
+    // Printed and not asserted. No caller in this repository passes a ceiling
+    // this tight — the engine measures against the image plus a floor for a
+    // shared dictionary, and this census decodes under 4 MiB — so a corpus
+    // image past `MAX_JBIG2_WORK_MULTIPLE` here is the ledger's yardstick to
+    // raise, not a document anything refuses. It is the figure that row is
+    // owed. The render path's own budget is the next line, and is asserted.
+    println!(
+        "{} units on a page of {} x {}: {} pages' worth, against a cap of {}",
+        total.worst_work,
+        total.worst_work_page.0,
+        total.worst_work_page.1,
+        u32::try_from(total.worst_work_permille)
+            .map_or_else(|_| "more than 4 million".to_owned(), permille_of),
+        MAX_JBIG2_WORK_MULTIPLE,
+    );
+    println!(
+        "the most of the render path's own budget one image spends: {}; images it \
+         would refuse: {}",
+        u32::try_from(total.worst_render_permille)
+            .map_or_else(|_| "more than 4 million".to_owned(), permille_of),
+        total.render_refused,
+    );
     // **The measurement is load-bearing, so it is asserted and not only
     // printed.** Two directions, and the census is worthless without both.
     //
@@ -969,6 +1056,13 @@ fn census_of_the_corpus_jbig2() {
          `jbig2_attribution.rs`'s refused count to have moved with it",
         total.worst_multiple,
         MAX_JBIG2_SYMBOL_PAGE_MULTIPLE,
+    );
+    assert_eq!(
+        total.render_refused, 0,
+        "{} corpus images spend more than the render path's work budget gives \
+         them, so each draws the placeholder: the floor in `jbig2_work_ceiling` \
+         (and `render_budget` here) is what to raise, not this assertion",
+        total.render_refused,
     );
     let mut ratios: Vec<Fit<'_>> = per_file
         .iter()

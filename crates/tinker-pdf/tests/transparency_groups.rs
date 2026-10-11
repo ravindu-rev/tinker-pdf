@@ -1363,7 +1363,11 @@ fn a_lab_group_composites_in_lab_rather_than_in_rgb() {
     }
 }
 
-/// **A page cannot come back in CMYK**, however it is asked for.
+/// **A page does not come back in CMYK for asking by format alone.**
+///
+/// `RenderOptions::allow_cmyk` is the opt-in, and `render_options.rs` holds it;
+/// this is the half that has to stay true for every caller that never heard of
+/// it.
 ///
 /// `CmykA8` exists so a group can composite over ink; it is not a shape a
 /// `Bitmap` is handed back in, because `Bitmap` says how many components it
@@ -1381,6 +1385,30 @@ fn a_page_asked_for_in_cmyk_comes_back_in_rgb() {
     });
     assert_eq!(bitmap.format, tinker_pdf::PixelFormat::Rgba8);
     assert_eq!(bitmap.components(), 4);
+}
+
+/// **Nor in Lab**, which is the same hazard with different letters: `LabA8`
+/// stores `L*`, `a` and `b` encoded into bytes, and a consumer reading its first
+/// three as red, green and blue gets a picture of the encoding.
+///
+/// `page_format` named `CmykA8` alone until September 2026, so this request
+/// came back as `LabA8` while `PixelFormat::LabA8`'s own documentation said it
+/// was "not offered as a page format". Both a page whose own group is `/Lab`
+/// and one with no page group are asked, because the two reach a Lab canvas by
+/// different routes — one through 11.4.7's page group, one through the format.
+#[test]
+fn a_page_asked_for_in_lab_comes_back_in_rgb() {
+    for group in [Some("/Lab"), None] {
+        let doc = Document::open(group_in_space(None, group)).expect("it opens");
+        let page = doc.page(0).expect("a page");
+        let bitmap = page.render(&RenderOptions {
+            format: tinker_pdf::PixelFormat::LabA8,
+            ..RenderOptions::default()
+        });
+        assert_eq!(bitmap.format, tinker_pdf::PixelFormat::Rgba8, "{group:?}");
+        // White is white: an encoded Lab white would read (255, 128, 128).
+        assert_eq!(&bitmap.data[..4], &[255, 255, 255, 255], "{group:?}");
+    }
 }
 
 /// **A non-separable blend inside a CMYK group is reported** (ruling 10).
@@ -1443,4 +1471,88 @@ fn a_non_separable_blend_over_ink_is_named_and_a_separable_one_is_not() {
         "an RGB group blends non-separably without any conversion: {:?}",
         rgb.warnings
     );
+}
+
+/// **A non-isolated group over ink starts from the page's own ink** (11.4.4),
+/// not from that ink turned into light and back.
+///
+/// Since a DeviceCMYK colour reaches an ink page as its components, a page
+/// can hold ink that 8.6.4.4 inverted with maximum undercolour removal never
+/// produces — a rich black of all four inks, where the inversion makes the
+/// same shade pure K. A non-isolated group that copied its backdrop through
+/// light started from that pure K instead, and a separable blend inside it
+/// saw the wrong backdrop: `0 1 0 0 k` multiplied over the rich black is
+/// all four inks again (complements `(0,0,0,0)` times anything), and over
+/// pure K it is `(0, 255, 0, 255)`. Drawn with no group the page is the
+/// former, and 11.4.4 makes an opaque non-isolated group composited
+/// Normally the same as no group at all.
+///
+/// Both routes to a CMYK group buffer are asked: a group that declares
+/// `/DeviceCMYK` and one that inherits the ink page's space. And the backdrop
+/// is taken out again (11.4.7.2) as the same ink it was put in as: half of
+/// `0 1 0 0 k` over the rich black is half of every ink but magenta, which a
+/// removal step reading the backdrop as pure K pushes to a full cyan, magenta
+/// and yellow at half black — the opaque square above cannot see that,
+/// because at full coverage the removal term is zero.
+#[test]
+fn a_non_isolated_group_over_ink_blends_against_the_page_s_own_ink() {
+    let ink = |bytes: Vec<u8>| -> [u8; 5] {
+        let bitmap = Document::open(bytes)
+            .expect("it opens")
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions {
+                format: tinker_pdf::PixelFormat::CmykA8,
+                allow_cmyk: true,
+                ..RenderOptions::default()
+            });
+        assert_eq!(bitmap.format, tinker_pdf::PixelFormat::CmykA8);
+        let (x, y) = (bitmap.width / 2, bitmap.height / 2);
+        let base = y as usize * bitmap.stride + x as usize * 5;
+        bitmap.data[base..base + 5].try_into().expect("five bytes")
+    };
+    let under = "1 1 1 1 k 0 0 60 60 re f";
+    let form = "/Mul gs 0 1 0 0 k 10 10 40 40 re f";
+    let gs = "/Mul << /BM /Multiply >>";
+
+    let ungrouped = ink(over_backdrop("", under, form, gs));
+    assert_eq!(
+        ungrouped,
+        [255, 255, 255, 255, 255],
+        "magenta multiplied over a rich black is the rich black"
+    );
+    for group in [
+        "/Group << /S /Transparency /I false >>",
+        "/Group << /S /Transparency /I false /CS /DeviceCMYK >>",
+    ] {
+        assert_eq!(
+            ink(over_backdrop(group, under, form, gs)),
+            ungrouped,
+            "{group}: the group blended against the rich black's pure-K \
+             spelling, the page's ink turned into light and back"
+        );
+    }
+
+    let form = "/Half gs 0 1 0 0 k 10 10 40 40 re f";
+    let gs = "/Half << /ca 0.5 >>";
+    let ungrouped = ink(over_backdrop("", under, form, gs));
+    assert_eq!(
+        ungrouped,
+        [127, 255, 127, 127, 255],
+        "half of magenta over a rich black"
+    );
+    for group in [
+        "/Group << /S /Transparency /I false >>",
+        "/Group << /S /Transparency /I false /CS /DeviceCMYK >>",
+    ] {
+        let grouped = ink(over_backdrop(group, under, form, gs));
+        assert!(
+            grouped
+                .iter()
+                .zip(ungrouped)
+                .all(|(got, want)| got.abs_diff(want) <= 2),
+            "{group}: {grouped:?} against {ungrouped:?}. The backdrop was \
+             taken out as pure K rather than the rich black put in"
+        );
+    }
 }

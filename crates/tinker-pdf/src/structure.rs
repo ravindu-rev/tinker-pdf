@@ -28,11 +28,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
-use tinker_pdf_content::{TextChar, TextPage};
+use tinker_pdf_content::{PlainText, PlainTextOptions, TextChar, TextPage};
 use tinker_pdf_cos::{
-    decode_text_string, limits, number_tree, pages as cos_pages, CosDocument, Dict, Name, ObjRef,
-    Object,
+    limits, number_tree, pages as cos_pages, CosDocument, Dict, Name, ObjRef, Object,
+    PDF_1_7_NAMESPACE,
 };
+
+use crate::copies::{decodes_to_nothing, value, Copies};
 
 /// How deep the `/K` tree may nest before a subtree is refused (14.7.2).
 ///
@@ -55,6 +57,70 @@ const MAX_STRUCTURE_DEPTH: u32 = limits::MAX_NEST_DEPTH;
 /// The largest honest trees are long documents tagged paragraph by paragraph
 /// and run to the low hundreds of thousands.
 const MAX_STRUCTURE_ELEMENTS: usize = 1 << 18;
+
+/// How many array entries the whole walk reads from elements' `/A`,
+/// `/Headers` and `/AF` arrays together.
+///
+/// **A per-array cap does not bound them**, for the reason the depth cap
+/// does not bound the walk: one array of [`limits::MAX_ARRAY_LEN`] entries,
+/// shared by reference among [`MAX_STRUCTURE_ELEMENTS`] elements, would be
+/// read once per element — 2^38 entries from a file of a few megabytes. For
+/// `/Headers` and `/AF` that is what is kept; for `/A` it is what is visited,
+/// each entry an attribute object resolved and asked for its owner, which is
+/// time rather than memory and the same arithmetic. Past this every array is
+/// read as empty and [`StructureWarning::ValuesCapped`] says so, once.
+///
+/// | | Entries |
+/// | --- | --- |
+/// | The most any fixture in this repository spends: the one built to spend it | 1 048 576 |
+/// | Any other fixture here: tables whose cells name a few headers each | under 100 (estimate, not summed) |
+/// | A 200-page comic archive | 0 |
+/// | A 200-page fixed document | 0 |
+/// | A 300-page reflowable book | 36 000 |
+/// | **This cap** | **1 048 576** |
+///
+/// The comic and fixed-document paths write no structure tree. The book's
+/// figure is arithmetic about what the EPUB path writes: `/A` as one
+/// dictionary rather than an array, so it costs nothing here; no `/AF`; and
+/// `/Headers` only where a cell's `headers` attribute names cells — taken as
+/// a forty-cell table on every one of three hundred pages, every cell naming
+/// three headers. A real table's cell names a handful of header cells and a
+/// real element a handful of files, so a million across a tree is far past
+/// any honest one.
+pub const MAX_STRUCTURE_VALUES: usize = 1 << 20;
+
+/// How many bytes the whole walk copies out of the document: every string
+/// and name an element, its attributes, its associated files and the tree's
+/// namespaces hand back.
+///
+/// `MAX_ANNOTATION_BYTES`'s reason, for a tree: an indirect string is parsed
+/// once and may be named from every element, every `/Headers` entry, every
+/// associated file and every namespace dictionary, so a reader that copies
+/// it once per mention turns a file of kilobytes into gigabytes — one shared
+/// `/NS` URI of a megabyte named by [`MAX_STRUCTURE_ELEMENTS`] elements is a
+/// quarter of a terabyte. The walk spends one budget, charged before each
+/// copy; a string it cannot pay for reads as absent, and
+/// [`StructureWarning::BytesCapped`] says so once, naming the element it
+/// stopped at. Type names are not charged: `/S` is a name, which the parser
+/// caps at [`limits::MAX_NAME_LEN`].
+///
+/// A string costs its bytes before decoding and a name its bytes.
+///
+/// | | Bytes |
+/// | --- | --- |
+/// | The most any fixture in this repository spends: the one built to spend it | 64 MiB |
+/// | Any other fixture here: a few dozen elements' short strings | under 4 KiB (estimate, not summed) |
+/// | A 200-page comic archive | 0 |
+/// | A 200-page fixed document | 0 |
+/// | A 300-page reflowable book | 2 MiB |
+/// | **This cap** | **64 MiB** |
+///
+/// The comic and fixed-document paths write no structure tree. The book's
+/// figure is arithmetic about what the EPUB path writes, rounded up: per page
+/// two pictures with a 200-byte `/Alt`, a forty-cell table whose cells carry
+/// a 30-byte `/ID` and three 30-byte `/Headers`, and fifty elements stating a
+/// language — about 5 500 bytes a page, 1.6 MB a book.
+pub const MAX_STRUCTURE_BYTES: usize = 64 << 20;
 
 /// How many entries of one element's `/K` array are examined.
 ///
@@ -102,6 +168,18 @@ pub enum StructureWarning {
     /// [`MAX_STRUCTURE_ELEMENTS`] was reached; the rest of the tree was not
     /// read.
     ElementCapped,
+    /// [`MAX_STRUCTURE_VALUES`] entries of elements' `/A`, `/Headers` and
+    /// `/AF` arrays were read, and every entry after them was dropped.
+    /// Reported once.
+    ValuesCapped,
+    /// [`MAX_STRUCTURE_BYTES`] were copied out of the document, and a string
+    /// or name after them was read as absent. Reported once.
+    BytesCapped {
+        /// The element being read when the budget ran out, when it could be
+        /// named: `None` for an element written inline, or for the root's
+        /// `/Namespaces`.
+        element: Option<ObjRef>,
+    },
     /// [`MAX_KIDS`] entries of one `/K` array were read and the rest dropped.
     KidsCapped {
         /// The element whose kid list was truncated.
@@ -189,6 +267,35 @@ pub enum StructureWarning {
         /// The `/MCID` the reference named.
         mcid: u32,
     },
+    /// 14.8.5: an attribute of a standard owner carried a value its table
+    /// does not define — a `/Scope` that is not `/Row`, `/Column` or `/Both`,
+    /// a span below one, a `/Headers` entry that is not a string — and was
+    /// read as absent.
+    ///
+    /// Not a fault in the tree's shape: the element and everything under it
+    /// are read as usual, and only the one attribute is dropped. Named so
+    /// that a table whose header cells head nothing is distinguishable from
+    /// a table that said they head something this reader could not read.
+    AttributeIgnored {
+        /// The element whose `/A` held it, when it could be named.
+        element: Option<ObjRef>,
+        /// The attribute's owner, as `/O` names it.
+        owner: String,
+        /// The attribute's key.
+        key: String,
+    },
+    /// ISO 32000-2 Table 355: an element's `/NS` did not name a namespace —
+    /// it was not an indirect reference, or what it referred to was not a
+    /// dictionary with Table 356's required `/NS` URI.
+    ///
+    /// Read as naming none, which puts the element in the default standard
+    /// structure namespace after the role map, as for an element written
+    /// before namespaces existed. Like [`StructureWarning::AttributeIgnored`],
+    /// not a fault in the tree's shape.
+    NamespaceIgnored {
+        /// The element whose `/NS` it was, when it could be named.
+        element: Option<ObjRef>,
+    },
 }
 
 /// One kid of a structure element — the three shapes 14.7.4 gives, never
@@ -264,9 +371,31 @@ pub struct StructElement {
     ///
     /// An unmapped custom type resolving to itself is ruling 2: a `/Foo` no
     /// role map explains is a `/Foo`, not an error and not a `/Span`.
+    ///
+    /// For an element in a PDF 2.0 namespace whose `/RoleMapNS` maps its type,
+    /// that map is followed instead, into the namespace each entry names
+    /// ([`StructElement::standard_namespace`]).
     pub standard_type: String,
+    /// `/NS` (ISO 32000-2 Table 355): the URI of the namespace the element
+    /// names, or `None` when it names none — which 2.0 reads as the default
+    /// standard structure namespace ([`PDF_1_7_NAMESPACE`]) once its type is
+    /// role-mapped.
+    pub namespace: Option<String>,
+    /// The namespace [`StructElement::standard_type`] is in: where the last
+    /// `/RoleMapNS` entry followed led, the element's own when none applied,
+    /// and [`PDF_1_7_NAMESPACE`] for an element naming no namespace (14.8.6.1).
+    ///
+    /// `None` where no text this build could read says which namespace the
+    /// type ended in, rather than a guess: a `/RoleMapNS` entry that is a
+    /// bare name rather than a `[type namespace]` pair (the errata quote only
+    /// the pair's form), or an element naming a namespace whose type the
+    /// global `/RoleMap` moved.
+    pub standard_namespace: Option<String>,
     /// `/T`, the human-readable title.
     pub title: Option<String>,
+    /// `/AF` (ISO 32000-2 14.13): files associated with the element, in the
+    /// array's order. Empty when it names none.
+    pub associated_files: Vec<crate::AssociatedFile>,
     /// `/Lang`, the natural language of this element's content (14.9.2).
     pub lang: Option<String>,
     /// `/Alt`, a description for content that is not text (14.9.3).
@@ -276,6 +405,18 @@ pub struct StructElement {
     pub actual_text: Option<String>,
     /// `/E`, what an abbreviation stands for (14.9.5).
     pub expansion: Option<String>,
+    /// `/ID`, the element's identifier (14.7.2 Table 323): a byte string,
+    /// which is what a table cell's `/Headers` names and what
+    /// [`StructureTree::element_by_id`] looks up.
+    pub id: Option<Vec<u8>>,
+    /// The attributes of the `/Table` owner in `/A` (14.8.5.7, Table 349):
+    /// `/Headers`, `/Scope`, `/Summary`, `/RowSpan`, `/ColSpan` — the type the
+    /// writer takes, so a write followed by a read is an equality. `None`
+    /// when `/A` holds no attribute object owned by `/Table`.
+    ///
+    /// Attributes reached through `/C` and the root's `/ClassMap` (14.7.6.2)
+    /// are not read; see the refusal table in `content-and-text.md`.
+    pub table: Option<tinker_pdf_cos::TableAttributes>,
     /// `/Pg`, resolved to a zero-based page index.
     pub page: Option<u32>,
     /// `/K`, in the order the file wrote it — which 14.8 makes reading order.
@@ -298,6 +439,10 @@ pub struct StructureTree {
     pub suspects: bool,
     /// `/MarkInfo /UserProperties`: the tree carries user properties.
     pub user_properties: bool,
+    /// The structure tree root's `/Namespaces` (ISO 32000-2 Table 354), as
+    /// each namespace dictionary's `/NS` URI, in the array's order. Empty for
+    /// a document before 2.0, or one whose elements name no namespace.
+    pub namespaces: Vec<String>,
     /// What the walk had to tolerate (ruling 10).
     pub warnings: Vec<StructureWarning>,
     /// How many pages the document has, for the one-page leniency in
@@ -335,6 +480,20 @@ impl StructureTree {
         let mut out = Vec::new();
         collect_elements(&self.kids, &mut out);
         out
+    }
+
+    /// The element carrying the identifier `id` (14.7.2), the first in
+    /// reading order where a file gives two elements one identifier.
+    ///
+    /// Found by walking the elements rather than through the root's
+    /// `/IDTree`: the walk is what this tree already is, and a file whose
+    /// `/IDTree` and elements disagree is answered by the elements, the way
+    /// the `/K` walk wins over the `/ParentTree`.
+    #[must_use]
+    pub fn element_by_id(&self, id: &[u8]) -> Option<&StructElement> {
+        self.elements()
+            .into_iter()
+            .find(|element| element.id.as_deref() == Some(id))
     }
 
     /// One page's text in structure order, joined with this tree (14.8).
@@ -407,6 +566,43 @@ impl StructureTree {
     }
 }
 
+impl StructureTree {
+    /// The runs each of `elements` claims on page `index`, one list per
+    /// element and each in structure order — [`StructureTree::text_for_page`]'s
+    /// join, over one element's subtree at a time and the **same**
+    /// [`TextPage`].
+    ///
+    /// For a reader that wants the content of particular elements — a table's
+    /// cells — rather than the page's. The page's characters are grouped by
+    /// sequence once **per call**, so the cost of a call is the page plus the
+    /// subtrees walked, and a caller asks for every element it wants in one
+    /// call: a call per table was the page's characters times its tables.
+    pub(crate) fn element_runs(
+        &self,
+        elements: &[&StructElement],
+        index: u32,
+        page: &TextPage,
+    ) -> Vec<Vec<StructuredNode>> {
+        let mut join = Join {
+            index,
+            unpaged_is_here: self.page_count <= 1,
+            by_mcid: chars_by_mcid(page),
+            page,
+            claimed: BTreeSet::new(),
+            nodes: Vec::new(),
+            warnings: Vec::new(),
+        };
+        elements
+            .iter()
+            .map(|element| {
+                join.nodes.clear();
+                join.element(element, 0, false);
+                std::mem::take(&mut join.nodes)
+            })
+            .collect()
+    }
+}
+
 /// A page's text in structure order (14.8).
 #[derive(Clone, Debug)]
 pub struct StructuredText {
@@ -447,6 +643,32 @@ impl StructuredText {
             out.push('\n');
         }
         out
+    }
+
+    /// The page's text in structure order, assembled as `options` asks, with
+    /// a count of what assembling it changed.
+    ///
+    /// With [`PlainTextOptions::default`] this is
+    /// [`StructuredText::plain_text`] to the byte. With
+    /// [`PlainTextOptions::rejoin_hyphens`] the rule is the one
+    /// [`TextPage::plain_text_with`] applies — the same function applies it —
+    /// with one difference that comes from what a run is rather than from a
+    /// second rule: **a run holds no line ends.** Its characters are
+    /// concatenated across the visual lines they were drawn on, so a word
+    /// hyphenated inside one paragraph already reads `hyphen-ation` here, and
+    /// its hyphen cannot be told from a compound's without the geometry. Soft
+    /// hyphens are removed wherever they stand, which is exactly right inside
+    /// a run; a hard hyphen is joined only where a run ends in one and the
+    /// next begins lower-case.
+    #[must_use]
+    pub fn plain_text_with(&self, options: &PlainTextOptions) -> PlainText {
+        tinker_pdf_content::plain::assemble(
+            self.nodes
+                .iter()
+                .filter(|node| !node.text.is_empty())
+                .map(|node| node.text.as_str()),
+            options,
+        )
     }
 }
 
@@ -529,8 +751,13 @@ pub(crate) fn bind(doc: &Arc<CosDocument>) -> Option<StructureTree> {
         role_map: &role_map,
         path: HashSet::new(),
         budget: MAX_STRUCTURE_ELEMENTS,
+        values: MAX_STRUCTURE_VALUES,
+        values_capped: false,
+        copies: Copies::new(MAX_STRUCTURE_BYTES),
+        bytes_capped: false,
         stopped: false,
         warnings: Vec::new(),
+        namespaces: BTreeMap::new(),
     };
     // `get`, not `resolve_key`: an indirect `/K` must arrive at the walk
     // **still a reference**, or the element it names has no object number and
@@ -539,6 +766,26 @@ pub(crate) fn bind(doc: &Arc<CosDocument>) -> Option<StructureTree> {
     // one level too late.
     let k = root.get(doc.intern(b"K")).cloned().unwrap_or(Object::Null);
     let kids = walk.kids(&k, None, None, 0);
+
+    // ISO 32000-2 Table 354: every namespace the elements use, within the
+    // walk's copy budget — the array may name one dictionary with a long
+    // `/NS` as often as the elements may.
+    let listed = doc.resolve_key(root, doc.intern(b"Namespaces"));
+    let mut namespaces: Vec<String> = Vec::new();
+    for entry in listed
+        .as_array()
+        .unwrap_or_default()
+        .iter()
+        .take(limits::MAX_ARRAY_LEN)
+    {
+        let resolved = doc.resolve(entry);
+        let Some(dict) = resolved.as_dict() else {
+            continue;
+        };
+        if let Some(uri) = walk.text(dict, b"NS", None) {
+            namespaces.push(uri);
+        }
+    }
     let warnings = walk.warnings;
 
     let (struct_parents, parent_tree) = read_parent_tree(doc, root, &pages);
@@ -548,6 +795,7 @@ pub(crate) fn bind(doc: &Arc<CosDocument>) -> Option<StructureTree> {
         marked: flag(b"Marked"),
         suspects: flag(b"Suspects"),
         user_properties: flag(b"UserProperties"),
+        namespaces,
         warnings,
         page_count,
         struct_parents,
@@ -555,11 +803,15 @@ pub(crate) fn bind(doc: &Arc<CosDocument>) -> Option<StructureTree> {
     })
 }
 
-/// A text string entry, decoded by 7.9.2.2's rules.
-fn text_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Option<String> {
-    doc.resolve_key(dict, doc.intern(key))
-        .as_string()
-        .map(|s| decode_text_string(&s.bytes))
+/// One `/RoleMapNS` value, looked up in the document for the one type being
+/// resolved rather than copied out of it with the rest of the map.
+enum RoleTarget {
+    /// `[/Type ns]`: a type in the namespace the dictionary names — the form
+    /// the errata's EXAMPLE 1 shows (`/section [/H1 11 0 R]`).
+    In(Vec<u8>, ObjRef),
+    /// A bare name. The model allows it (the Arlington TSV's `array;name`);
+    /// which namespace it means is not in any text this build could read.
+    Bare(Vec<u8>),
 }
 
 /// `/RoleMap`, as raw name to mapped name (14.7.3).
@@ -636,10 +888,30 @@ struct Walk<'a> {
     path: HashSet<u32>,
     /// Elements left before the walk stops.
     budget: usize,
+    /// Array entries left to read from `/A`, `/Headers` and `/AF`; see
+    /// [`MAX_STRUCTURE_VALUES`].
+    values: usize,
+    /// Whether [`StructureWarning::ValuesCapped`] has been reported.
+    values_capped: bool,
+    /// What the walk may still copy out of the document; see
+    /// [`MAX_STRUCTURE_BYTES`].
+    copies: Copies,
+    /// Whether [`StructureWarning::BytesCapped`] has been reported.
+    bytes_capped: bool,
     /// Set when a cap ends the walk, so every loop above unwinds without
     /// visiting more of a bomb than the budget allowed.
     stopped: bool,
     warnings: Vec<StructureWarning>,
+    /// Whether each namespace dictionary asked about so far names a
+    /// namespace, by reference.
+    ///
+    /// **Only that bit is kept.** The dictionary's `/NS` is copied where an
+    /// element hands it back, under the copy budget, and its `/RoleMapNS` is
+    /// looked up one type at a time and never copied: a map kept per
+    /// dictionary was copied once per dictionary, and any number of them may
+    /// share one map of [`limits::MAX_DICT_ENTRIES`] entries by reference — a
+    /// file of 269 KB asked for 650 MB that way.
+    namespaces: BTreeMap<ObjRef, bool>,
 }
 
 impl Walk<'_> {
@@ -793,7 +1065,44 @@ impl Walk<'_> {
             }
         }
         let raw = raw.unwrap_or_default();
-        let standard_type = self.resolve_role(&raw);
+        // ISO 32000-2 Table 355: `/NS` is an indirect reference to a namespace
+        // dictionary. An element in a namespace whose `/RoleMapNS` maps its
+        // type follows that map; otherwise the 1.7 resolution stands — the
+        // errata quote the global `/RoleMap` applying to elements in an
+        // undefined namespace, and do not quote whether it is withheld from
+        // the rest, so this reader keeps its 1.7 behaviour there.
+        let ns_key = self.doc.intern(b"NS");
+        let namespace_ref = dict
+            .get_ref(ns_key)
+            .filter(|namespace| self.is_namespace(*namespace));
+        if namespace_ref.is_none() && dict.get(ns_key).is_some() {
+            self.warn(StructureWarning::NamespaceIgnored { element: reference });
+        }
+        let namespace = namespace_ref.and_then(|r| self.namespace_uri(r, reference));
+        let (standard_type, standard_namespace) =
+            match namespace_ref.and_then(|r| self.resolve_role_ns(&raw, r)) {
+                Some((resolved, landed)) => {
+                    let landed = landed.and_then(|r| self.namespace_uri(r, reference));
+                    (resolved, landed)
+                }
+                None => {
+                    let resolved = self.resolve_role(&raw);
+                    let landed = match namespace_ref {
+                        // 14.8.6.1: no namespace, so the default one, after
+                        // the role map.
+                        None => Some(PDF_1_7_NAMESPACE.to_string()),
+                        // Its own namespace, where nothing moved it.
+                        Some(own) if resolved.as_bytes() == raw.as_slice() => {
+                            self.namespace_uri(own, reference)
+                        }
+                        // The global map moved a type that named a namespace:
+                        // which namespace the result is in is not stated in
+                        // anything this build could read, so it is not said.
+                        Some(_) => None,
+                    };
+                    (resolved, landed)
+                }
+            };
 
         // 14.7.2 does not say `/Pg` is inherited. It is treated as inherited
         // here because a producer that writes it on the element holding the
@@ -820,18 +1129,311 @@ impl Walk<'_> {
             self.path.remove(&reference.num);
         }
 
+        let table = self.table_attributes(dict, reference);
+        let associated_files = self.associated_files(dict, reference);
+        let refused = self.copies.refused();
+        let id = self.copies.bytes(self.doc, dict, b"ID");
+        self.note_copies(refused, reference);
         Some(StructElement {
             reference,
             raw_type: String::from_utf8_lossy(&raw).into_owned(),
             standard_type,
-            title: text_of(self.doc, dict, b"T"),
-            lang: text_of(self.doc, dict, b"Lang"),
-            alt: text_of(self.doc, dict, b"Alt"),
-            actual_text: text_of(self.doc, dict, b"ActualText"),
-            expansion: text_of(self.doc, dict, b"E"),
+            namespace,
+            standard_namespace,
+            associated_files,
+            title: self.text(dict, b"T", reference),
+            lang: self.text(dict, b"Lang", reference),
+            alt: self.text(dict, b"Alt", reference),
+            actual_text: self.text(dict, b"ActualText", reference),
+            expansion: self.text(dict, b"E", reference),
+            id,
+            table,
             page,
             kids,
         })
+    }
+
+    /// The `/Table` owner's attributes among an element's `/A` (14.7.6.1,
+    /// 14.8.5.7).
+    ///
+    /// `/A` is one attribute object or an array of them, each a dictionary or
+    /// a stream and each optionally followed by a revision number; only those
+    /// whose `/O` is `/Table` are read. Where two such objects state one
+    /// attribute, the first stands. A value Table 349 does not define is
+    /// dropped with [`StructureWarning::AttributeIgnored`].
+    fn table_attributes(
+        &mut self,
+        dict: &Dict,
+        element: Option<ObjRef>,
+    ) -> Option<tinker_pdf_cos::TableAttributes> {
+        let value = self.doc.resolve_key(dict, self.doc.intern(b"A"));
+        // Held, not cloned: an attribute object may be named from every entry
+        // of a shared array, and each clone was a copy of the whole
+        // dictionary. An array is visited within the walk's values budget.
+        let objects: Vec<Arc<Object>> = match value.as_array() {
+            Some(items) => {
+                let allowed = self.values(items.len().min(limits::MAX_ARRAY_LEN));
+                items
+                    .iter()
+                    .take(allowed)
+                    .map(|item| self.doc.resolve(item))
+                    .collect()
+            }
+            None => vec![value.clone()],
+        };
+
+        let owner_key = self.doc.intern(b"O");
+        let mut found: Option<tinker_pdf_cos::TableAttributes> = None;
+        for object in &objects {
+            let attributes = match (object.as_dict(), object.as_stream()) {
+                (Some(attributes), _) => attributes,
+                (None, Some(stream)) => &stream.dict,
+                (None, None) => continue,
+            };
+            let owner = self
+                .doc
+                .resolve_key(attributes, owner_key)
+                .as_name()
+                .and_then(|n| self.doc.name_bytes(n))
+                .map(|n| n.to_vec());
+            if owner.as_deref() != Some(b"Table") {
+                continue;
+            }
+            let table = found.get_or_insert_with(tinker_pdf_cos::TableAttributes::default);
+            let ignored = |key: &str| StructureWarning::AttributeIgnored {
+                element,
+                owner: "Table".to_string(),
+                key: key.to_string(),
+            };
+
+            let headers = self
+                .doc
+                .resolve_key(attributes, self.doc.intern(b"Headers"));
+            if let Some(items) = headers.as_array() {
+                if table.headers.is_empty() {
+                    let allowed = self.values(items.len().min(limits::MAX_ARRAY_LEN));
+                    let refused = self.copies.refused();
+                    for item in items.iter().take(allowed) {
+                        match self.doc.resolve(item).as_string() {
+                            Some(id) => {
+                                if let Some(id) = self.copies.string(&id.bytes) {
+                                    table.headers.push(id);
+                                }
+                            }
+                            None => self.warn(ignored("Headers")),
+                        }
+                    }
+                    self.note_copies(refused, element);
+                }
+            } else if !headers.is_null() {
+                self.warn(ignored("Headers"));
+            }
+
+            let scope = self.doc.resolve_key(attributes, self.doc.intern(b"Scope"));
+            if !scope.is_null() {
+                let named = scope
+                    .as_name()
+                    .and_then(|n| self.doc.name_bytes(n))
+                    .and_then(|n| tinker_pdf_cos::TableScope::from_name(&n));
+                match named {
+                    Some(scope) => {
+                        table.scope.get_or_insert(scope);
+                    }
+                    None => self.warn(ignored("Scope")),
+                }
+            }
+
+            if table.summary.is_none() {
+                table.summary = self.text(attributes, b"Summary", element);
+            }
+
+            for (key, slot) in [
+                ("RowSpan", &mut table.row_span),
+                ("ColSpan", &mut table.col_span),
+            ] {
+                let span = self
+                    .doc
+                    .resolve_key(attributes, self.doc.intern(key.as_bytes()));
+                if span.is_null() {
+                    continue;
+                }
+                match span
+                    .as_int()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| *n > 0)
+                {
+                    Some(span) => {
+                        slot.get_or_insert(span);
+                    }
+                    None => self.warn(ignored(key)),
+                }
+            }
+        }
+        found
+    }
+
+    /// How many of `wanted` array entries may still be read, taking them
+    /// from [`MAX_STRUCTURE_VALUES`]; reports [`StructureWarning::ValuesCapped`]
+    /// the first time fewer than wanted are.
+    fn values(&mut self, wanted: usize) -> usize {
+        let allowed = wanted.min(self.values);
+        if allowed < wanted && !self.values_capped {
+            self.values_capped = true;
+            self.warn(StructureWarning::ValuesCapped);
+        }
+        self.values -= allowed;
+        allowed
+    }
+
+    /// Reports [`StructureWarning::BytesCapped`] the first time the copy
+    /// budget has refused anything since `refused`, naming `element`.
+    fn note_copies(&mut self, refused: usize, element: Option<ObjRef>) {
+        if self.copies.refused() > refused && !self.bytes_capped {
+            self.bytes_capped = true;
+            self.warn(StructureWarning::BytesCapped { element });
+        }
+    }
+
+    /// A text string entry of `dict`, decoded (7.9.2.2) and charged to
+    /// [`MAX_STRUCTURE_BYTES`].
+    fn text(&mut self, dict: &Dict, key: &[u8], element: Option<ObjRef>) -> Option<String> {
+        let refused = self.copies.refused();
+        let text = self.copies.text(self.doc, dict, key);
+        self.note_copies(refused, element);
+        text
+    }
+
+    /// `/AF` (ISO 32000-2 14.13), within the walk's values and copy budgets.
+    fn associated_files(
+        &mut self,
+        dict: &Dict,
+        element: Option<ObjRef>,
+    ) -> Vec<crate::AssociatedFile> {
+        let listed = self.doc.resolve_key(dict, self.doc.intern(b"AF"));
+        let Some(entries) = listed.as_array() else {
+            return Vec::new();
+        };
+        let allowed = self.values(entries.len().min(limits::MAX_ARRAY_LEN));
+        let refused = self.copies.refused();
+        let files = crate::associated_files::files_in(
+            self.doc,
+            entries.get(..allowed).unwrap_or_default(),
+            &mut self.copies,
+        );
+        self.note_copies(refused, element);
+        files
+    }
+
+    /// Whether `reference` names a namespace dictionary (ISO 32000-2 Table
+    /// 356): a dictionary whose `/NS` is a text string that says something —
+    /// Table 356 makes it required, and a namespace with no name identifies
+    /// nothing. Answered once per reference, without copying the URI.
+    fn is_namespace(&mut self, reference: ObjRef) -> bool {
+        if let Some(known) = self.namespaces.get(&reference) {
+            return *known;
+        }
+        let known = self.doc.get(reference).ok().is_some_and(|object| {
+            object.as_dict().is_some_and(|dict| {
+                let mut held = None;
+                value(self.doc, dict, b"NS", &mut held)
+                    .and_then(Object::as_string)
+                    .is_some_and(|uri| !decodes_to_nothing(&uri.bytes))
+            })
+        });
+        self.namespaces.insert(reference, known);
+        known
+    }
+
+    /// The URI of the namespace dictionary `reference` names, copied under
+    /// [`MAX_STRUCTURE_BYTES`] for `element`. `None` for a reference that is
+    /// not one, or when the budget is spent.
+    fn namespace_uri(&mut self, reference: ObjRef, element: Option<ObjRef>) -> Option<String> {
+        if !self.is_namespace(reference) {
+            return None;
+        }
+        let object = self.doc.get(reference).ok()?;
+        let dict = object.as_dict()?;
+        self.text(dict, b"NS", element)
+    }
+
+    /// The `/RoleMapNS` entry of the namespace dictionary `namespace` for the
+    /// type `kind`, looked up where the document holds it.
+    ///
+    /// Nothing is copied but the entry's own names, and a direct map or a
+    /// direct entry is borrowed rather than resolved — which would copy it —
+    /// because any number of namespace dictionaries may share one map, and
+    /// one map may hold [`limits::MAX_DICT_ENTRIES`] entries of any length.
+    fn role_ns_target(&self, namespace: ObjRef, kind: &[u8]) -> Option<RoleTarget> {
+        let object = self.doc.get(namespace).ok()?;
+        let dict = object.as_dict()?;
+        let mut held_map = None;
+        let map = value(self.doc, dict, b"RoleMapNS", &mut held_map)?.as_dict()?;
+        let mut held_entry = None;
+        let entry = value(self.doc, map, kind, &mut held_entry)?;
+        let name_of = |object: &Object| {
+            object
+                .as_name()
+                .and_then(|n| self.doc.name_bytes(n))
+                .map(|n| n.to_vec())
+        };
+        match entry.as_array() {
+            Some([kind, ns, ..]) => match (name_of(kind), ns.as_objref()) {
+                (Some(kind), Some(ns)) => Some(RoleTarget::In(kind, ns)),
+                _ => None,
+            },
+            Some(_) => None,
+            None => name_of(entry).map(RoleTarget::Bare),
+        }
+    }
+
+    /// ISO 32000-2 14.8.6.2: a type in a namespace whose `/RoleMapNS` maps it
+    /// is followed through that map, entry by entry, into the namespace each
+    /// `[type namespace]` pair names — the shape of the errata's EXAMPLE 1.
+    ///
+    /// Returns the type it ended at and the namespace dictionary that type is
+    /// in, which is `None` for a bare name. `None` overall when the element's
+    /// namespace does not map its type, which leaves the 1.7 resolution to
+    /// answer. Bounded as `/RoleMap` is, by [`MAX_ROLE_MAP_HOPS`] and a
+    /// visited set, and a loop is reported the same way.
+    fn resolve_role_ns(
+        &mut self,
+        raw: &[u8],
+        namespace: ObjRef,
+    ) -> Option<(String, Option<ObjRef>)> {
+        let mut current = (raw.to_vec(), namespace);
+        let mut seen: BTreeSet<(Vec<u8>, ObjRef)> = BTreeSet::new();
+        seen.insert(current.clone());
+        let mut moved = false;
+        for _ in 0..MAX_ROLE_MAP_HOPS {
+            match self.role_ns_target(current.1, &current.0) {
+                None => break,
+                Some(RoleTarget::Bare(kind)) => {
+                    return Some((String::from_utf8_lossy(&kind).into_owned(), None));
+                }
+                Some(RoleTarget::In(kind, ns)) => {
+                    let next = (kind, ns);
+                    // A type mapped to itself is a statement that it is what
+                    // it is, as `resolve_role` reads one, not a loop.
+                    if next == current {
+                        break;
+                    }
+                    moved = true;
+                    if !seen.insert(next.clone()) {
+                        let role = String::from_utf8_lossy(raw).into_owned();
+                        self.warn(StructureWarning::RoleMapLoop { role });
+                        break;
+                    }
+                    current = next;
+                }
+            }
+        }
+        if !moved {
+            return None;
+        }
+        Some((
+            String::from_utf8_lossy(&current.0).into_owned(),
+            Some(current.1),
+        ))
     }
 
     /// `/Pg`, resolved to a page index.
@@ -1310,6 +1912,60 @@ trailer\n<< /Size 400 /Root 1 0 R >>\n%%EOF\n"
 
     fn tree(root: &str, objects: &str) -> StructureTree {
         bind(&document(root, objects)).expect("a structure tree")
+    }
+
+    /// A structured view of paragraphs, one run each, for the assembly tests.
+    fn runs(texts: &[&str]) -> StructuredText {
+        StructuredText {
+            nodes: texts
+                .iter()
+                .map(|text| StructuredNode {
+                    raw_type: "P".to_string(),
+                    standard_type: "P".to_string(),
+                    depth: 0,
+                    text: (*text).to_string(),
+                    source: TextSource::Glyphs,
+                    alt: None,
+                    lang: None,
+                    expansion: None,
+                    chars: Vec::new(),
+                })
+                .collect(),
+            matched: 0,
+            orphans: 0,
+            unmarked: 0,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// The structured view's hyphen rejoining is the page's rule over runs:
+    /// soft hyphens go wherever they stand, a run ending in a hard hyphen
+    /// joins a run starting lower-case, and the default is `plain_text` to
+    /// the byte — empty runs skipped the same way.
+    #[test]
+    fn the_structured_view_rejoins_hyphens_between_runs() {
+        let text = runs(&[
+            "a soft\u{AD}ware hyphen-ation",
+            "",
+            "cross-",
+            "run",
+            "Kept-",
+            "Apart",
+        ]);
+        let default = text.plain_text_with(&PlainTextOptions::default());
+        assert_eq!(default.text, text.plain_text());
+        assert_eq!(default.hyphens.joins(), 0);
+
+        let joined = text.plain_text_with(&PlainTextOptions {
+            rejoin_hyphens: true,
+        });
+        assert_eq!(
+            joined.text, "a software hyphen-ation\ncrossrun\nKept-\nApart\n",
+            "a hyphen inside a run is a line end nobody can see, and stays"
+        );
+        assert_eq!(joined.hyphens.soft_removed, 1);
+        assert_eq!(joined.hyphens.soft_joins, 0);
+        assert_eq!(joined.hyphens.hard_joins, 1);
     }
 
     /// The simplest tagged shape there is, and the baseline every hostile

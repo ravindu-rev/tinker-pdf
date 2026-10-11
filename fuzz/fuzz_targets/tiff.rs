@@ -62,7 +62,8 @@
 use libfuzzer_sys::fuzz_target;
 
 use tinker_pdf_filters::{
-    tiff_decode, tiff_scan, Limits, TiffError, TiffLayout, TiffPhotometric, TiffPlanar,
+    tiff_decode, tiff_scan, tiff_scan_directory, Limits, TiffError, TiffLayout, TiffPhotometric,
+    TiffPlanar, TiffSampleFormat,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -84,8 +85,10 @@ fuzz_target!(|data: &[u8]| {
             scan.width > 0 && scan.height > 0,
             "a zero dimension is refused, not scanned"
         );
-        assert!(matches!(scan.bits_per_sample, 1 | 2 | 4 | 8 | 16));
-        assert!(scan.predictor == 1 || scan.predictor == 2);
+        assert!(matches!(scan.bits_per_sample, 1 | 2 | 4 | 8 | 16 | 32 | 64));
+        assert!(matches!(scan.predictor, 1..=3));
+        // Technical Note 3's predictor travels with floats and nothing else.
+        assert!(scan.predictor != 3 || scan.sample_format == TiffSampleFormat::Float);
 
         // The geometry's own segment count, recomputed here rather than read
         // back, so the two arithmetics have to agree.
@@ -160,6 +163,25 @@ fuzz_target!(|data: &[u8]| {
             tiff_decode(body, &limits).is_err(),
             "the decoder accepted a file the scan refused"
         );
+    }
+
+    // Every directory on the chain is a door of its own since the archive row
+    // paged multi-page files, and the first of them is the same file
+    // `tiff_scan` reads — so the two must agree about whether it scans.
+    assert_eq!(
+        tiff_scan(body).is_ok(),
+        tiff_scan_directory(body, 0).is_ok(),
+        "directory 0 is the first directory"
+    );
+    if let Ok(first) = tiff_scan(body) {
+        for index in 1..(first.pages as usize).min(4) {
+            if let Ok(scan) = tiff_scan_directory(body, index) {
+                assert!(scan.width > 0 && scan.height > 0);
+                if let Ok(img) = scan.decode(&limits) {
+                    assert!(img.data.len() <= limits.max_output);
+                }
+            }
+        }
     }
 
     // The tightest ceiling there is, on every input: `ExceedsOutputLimit` is

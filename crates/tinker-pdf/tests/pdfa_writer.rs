@@ -456,12 +456,14 @@ fn level_a_is_written_when_the_pages_are_tagged_and_refused_when_they_are_not() 
 /// 14.8.4 does not define, produces a file the validator reports — so the zero
 /// findings above are a verdict rather than a silence.
 ///
-/// It is also an honest statement of a writer gap. `PageBuilder::tagged` takes
-/// the caller's own name for a type and `DocumentBuilder` writes no
-/// `/RoleMap`, so a custom tag at level A is a file the writer will emit and
-/// its own validator will refuse. That is the right way round — the refusal is
-/// visible rather than silent — and it is `docs/design/tagged-pdf.md`'s to
-/// close rather than this one's.
+/// It was also an honest statement of a writer gap, closed by the
+/// tagged-writing row: `PageBuilder::tagged` takes the caller's own name for a
+/// type, and until `DocumentBuilder::map_role` there was no `/RoleMap` to say
+/// what it meant, so a custom tag at level A was a file the writer would emit
+/// and its own validator would refuse. It still is when the caller maps
+/// nothing — the refusal is visible rather than silent — and the third twin
+/// below is the same document with the mapping stated, which nothing
+/// reports.
 #[test]
 fn a_level_a_document_tagged_with_a_type_nobody_defines_is_reported_by_its_own_validator() {
     let mut profile = rgb_profile(ArchivalPart::Two, Some(ArchivalLevel::A));
@@ -487,7 +489,7 @@ fn a_level_a_document_tagged_with_a_type_nobody_defines_is_reported_by_its_own_v
 
     // The twin, one token away: the same document tagged `/P`, which is a
     // standard type, is reported by nothing.
-    let mut builder = DocumentBuilder::archival(profile);
+    let mut builder = DocumentBuilder::archival(profile.clone());
     assert!(builder.add_embedded_font(b"F1", b"Fixture", &face()));
     builder.add_page(200.0, 200.0, |page| {
         page.tagged(b"P", |page| {
@@ -496,6 +498,20 @@ fn a_level_a_document_tagged_with_a_type_nobody_defines_is_reported_by_its_own_v
     });
     let bytes = builder.finish_archival().expect("satisfiable");
     assert_eq!(judged(&bytes).0, Vec::<FindingKind>::new());
+
+    // The third: `Chapitre` again, with the `/RoleMap` saying it is a `/Sect`
+    // (14.7.3). Level A's rule reads the type after the role map, and finds
+    // nothing to report.
+    let mut builder = DocumentBuilder::archival(profile);
+    assert!(builder.add_embedded_font(b"F1", b"Fixture", &face()));
+    assert!(builder.map_role(b"Chapitre", b"Sect"));
+    builder.add_page(200.0, 200.0, |page| {
+        page.tagged(b"Chapitre", |page| {
+            page.text(b"F1", 12.0, 20.0, 100.0, "ABC");
+        });
+    });
+    let bytes = builder.finish_archival().expect("satisfiable");
+    assert_eq!(judged(&bytes), (Vec::<FindingKind>::new(), Vec::new()));
 }
 
 /// A level the part does not define, and a part 1-to-3 profile with none, are
@@ -773,6 +789,13 @@ fn every_refusal_names_the_clause_it_refuses_under() {
         ArchivalRefusal::UntaggedPage { page: 3 },
         ArchivalRefusal::LanguageMissing,
         ArchivalRefusal::DestinationProfileMissing,
+        ArchivalRefusal::OptionalContent,
+        ArchivalRefusal::UndescribedColorant {
+            colorant: b"Spot".to_vec(),
+        },
+        ArchivalRefusal::InconsistentSeparation {
+            colorant: b"Spot".to_vec(),
+        },
     ];
     for refusal in &refusals {
         assert!(refusal.clause().starts_with("6."), "{refusal:?}");

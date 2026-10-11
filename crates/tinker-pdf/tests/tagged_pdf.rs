@@ -765,3 +765,289 @@ fn a_stream_owner_without_a_stream_is_a_warning_and_is_dropped() {
     assert_eq!(structured.plain_text(), "body\n");
     assert_eq!(structured.orphans, 0);
 }
+
+// ---------------------------------------------------------------------------
+// ISO 32000-2 14.7.4's namespaces, as another producer may write them
+// ---------------------------------------------------------------------------
+
+/// The shapes this crate's writer never produces, read from bytes: a
+/// `/RoleMapNS` chain through two namespaces, a bare-name entry, a loop, an
+/// `/NS` that is not an indirect reference to a namespace dictionary, and a
+/// global `/RoleMap` moving a type that named a namespace, and a type
+/// mapped to itself.
+///
+/// Each answer is either what the errata state or, where they state nothing
+/// this build could read, `None` rather than a guess — and each tolerated
+/// oddity is named, by the warning its documentation gives it.
+#[test]
+fn namespaces_another_producer_wrote_are_read_and_their_oddities_named() {
+    let content: String = ["a", "b", "c", "d", "e", "f", "g"]
+        .iter()
+        .enumerate()
+        .map(|(at, text)| marked(at as u32, 50 - 8 * at as u32, text))
+        .collect();
+    let doc = Document::open(build(
+        "",
+        "/K 10 0 R /Namespaces [20 0 R 21 0 R 22 0 R] /RoleMap << /glob /Sect >>",
+        &content,
+        "10 0 obj\n<< /S /Document /Pg 3 0 R /K [11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R 17 0 R] >>\nendobj\n\
+         11 0 obj\n<< /S /x /NS 20 0 R /Pg 3 0 R /K [0] >>\nendobj\n\
+         12 0 obj\n<< /S /bare /NS 20 0 R /Pg 3 0 R /K [1] >>\nendobj\n\
+         13 0 obj\n<< /S /loop1 /NS 20 0 R /Pg 3 0 R /K [2] >>\nendobj\n\
+         14 0 obj\n<< /S /P /NS << /Type /Namespace /NS (urn:direct) >> /Pg 3 0 R /K [3] >>\nendobj\n\
+         15 0 obj\n<< /S /glob /NS 21 0 R /Pg 3 0 R /K [4] >>\nendobj\n\
+         16 0 obj\n<< /S /P /NS 23 0 R /Pg 3 0 R /K [5] >>\nendobj\n\
+         17 0 obj\n<< /S /same /NS 20 0 R /Pg 3 0 R /K [6] >>\nendobj\n\
+         20 0 obj\n<< /Type /Namespace /NS (urn:a)\n\
+            /RoleMapNS << /x [/y 21 0 R] /bare /P /loop1 [/loop2 21 0 R] /same [/same 20 0 R] >> >>\nendobj\n\
+         21 0 obj\n<< /Type /Namespace /NS (urn:b)\n\
+            /RoleMapNS << /y [/H1 22 0 R] /loop2 [/loop1 20 0 R] >> >>\nendobj\n\
+         22 0 obj\n<< /Type /Namespace /NS (http://iso.org/pdf/ssn) >>\nendobj\n\
+         23 0 obj\n<< /Type /Namespace /RoleMapNS << /P [/H1 22 0 R] >> >>\nendobj\n",
+    ))
+    .expect("it opens");
+
+    let tree = doc.structure().expect("a structure tree");
+    assert_eq!(
+        tree.namespaces,
+        ["urn:a", "urn:b", "http://iso.org/pdf/ssn"]
+    );
+    assert_eq!(
+        tree.warnings,
+        vec![
+            StructureWarning::RoleMapLoop {
+                role: "loop1".to_string()
+            },
+            StructureWarning::NamespaceIgnored {
+                element: Some(ObjRef::new(14, 0))
+            },
+            StructureWarning::NamespaceIgnored {
+                element: Some(ObjRef::new(16, 0))
+            },
+        ]
+    );
+
+    let by_number = |num: u32| {
+        tree.elements()
+            .into_iter()
+            .find(|element| element.reference == Some(ObjRef::new(num, 0)))
+            .cloned()
+            .expect("the element was read")
+    };
+    let read = |num: u32| {
+        let element = by_number(num);
+        (
+            element.namespace,
+            element.standard_type,
+            element.standard_namespace,
+        )
+    };
+    let some = |uri: &str| Some(uri.to_string());
+
+    // Two hops, `urn:a` to `urn:b` to the 1.7 namespace: EXAMPLE 1's shape.
+    assert_eq!(
+        read(11),
+        (
+            some("urn:a"),
+            "H1".to_string(),
+            some(tinker_pdf::PDF_1_7_NAMESPACE)
+        )
+    );
+    // A bare name: the type is read, the namespace it is in is not said.
+    assert_eq!(read(12), (some("urn:a"), "P".to_string(), None));
+    // The loop is cut where it closes, as `/RoleMap`'s is.
+    assert_eq!(
+        read(13),
+        (some("urn:a"), "loop2".to_string(), some("urn:b"))
+    );
+    // A direct dictionary is not Table 355's indirect reference.
+    assert_eq!(
+        read(14),
+        (None, "P".to_string(), some(tinker_pdf::PDF_1_7_NAMESPACE))
+    );
+    // `urn:b` does not map `glob`; the global map does, into no stated
+    // namespace.
+    assert_eq!(read(15), (some("urn:b"), "Sect".to_string(), None));
+    // A namespace dictionary with no `/NS` names no namespace, and its map
+    // maps nothing.
+    assert_eq!(
+        read(16),
+        (None, "P".to_string(), some(tinker_pdf::PDF_1_7_NAMESPACE))
+    );
+    // Mapped to itself in its own namespace: what it is, and not a loop —
+    // the reading `/RoleMap` gives the same entry.
+    assert_eq!(read(17), (some("urn:a"), "same".to_string(), some("urn:a")));
+
+    let page = doc.page(0).expect("a page");
+    let structured = tree.text_for_page(0, &page.text());
+    assert_eq!(structured.plain_text(), "a\nb\nc\nd\ne\nf\ng\n");
+    assert_eq!(structured.orphans, 0, "namespaces lose no content");
+}
+
+/// **One shared array, read once per element, is an amplification**, and
+/// the walk's retention budget is what bounds it: 500 elements naming one
+/// `/AF` array of 1 100 entries and 500 naming one `/Headers` array of as many
+/// ask for 1 100 000 entries from a file of a few kilobytes. The walk keeps
+/// 2^20 of them — the files first, since they come first — says so once, and
+/// reads every element all the same.
+#[test]
+fn shared_header_and_file_arrays_are_retained_within_one_budget() {
+    let per_array = 1_100;
+    let elements = 500;
+    let af: String = "21 0 R ".repeat(per_array);
+    let headers: String = "(h) ".repeat(per_array);
+    let kids: String = (0..elements)
+        .map(|_| "<< /S /P /AF 19 0 R >> ")
+        .chain((0..elements).map(|_| "<< /S /TD /A << /O /Table /Headers 20 0 R >> >> "))
+        .collect();
+    let doc = Document::open(build(
+        "",
+        "/K 10 0 R",
+        "",
+        &format!(
+            "10 0 obj\n<< /S /Document /K [{kids}] >>\nendobj\n\
+             19 0 obj\n[{af}]\nendobj\n\
+             20 0 obj\n[{headers}]\nendobj\n\
+             21 0 obj\n<< /Type /Filespec /F (x) /AFRelationship /Data >>\nendobj\n"
+        ),
+    ))
+    .expect("it opens");
+
+    let tree = doc.structure().expect("a structure tree");
+    assert_eq!(tree.warnings, vec![StructureWarning::ValuesCapped], "once");
+    assert_eq!(tree.element_count(), 2 * elements + 1, "every element read");
+    let found = tree.elements();
+    let files: usize = found.iter().map(|e| e.associated_files.len()).sum();
+    let header_ids: usize = found
+        .iter()
+        .filter_map(|e| e.table.as_ref())
+        .map(|t| t.headers.len())
+        .sum();
+    assert_eq!(files, elements * per_array, "the files came first, and fit");
+    assert_eq!(
+        files + header_ids,
+        1 << 20,
+        "exactly the budget, and no more"
+    );
+}
+
+/// **A shared `/A` array is visited once per element**, and the walk's values
+/// budget bounds the visits as it bounds what `/Headers` and `/AF` keep: five
+/// elements naming one array of 250 000 attribute objects ask for 1 250 000
+/// visits, each a resolution and a look at `/O`, from a file of under 2 MB.
+/// The array's one `/Table` object is its last entry, so an element whose
+/// visit the budget cut short says so by having no table attributes.
+///
+/// Before the budget covered `/A`, sixteen elements naming an array of 2^20
+/// took nine seconds and said nothing; 2^18 of them would take two days.
+#[test]
+fn a_shared_attribute_array_is_visited_within_the_walks_values_budget() {
+    let per_array = 250_000;
+    let elements = 5;
+    let layout = "21 0 R ".repeat(per_array - 1);
+    let kids: String = (0..elements).map(|_| "<< /S /TH /A 19 0 R >> ").collect();
+    let doc = Document::open(build(
+        "",
+        "/K 10 0 R",
+        "",
+        &format!(
+            "10 0 obj\n<< /S /Table /K [{kids}] >>\nendobj\n\
+             19 0 obj\n[{layout} 20 0 R]\nendobj\n\
+             20 0 obj\n<< /O /Table /Scope /Row >>\nendobj\n\
+             21 0 obj\n<< /O /Layout /Placement /Block >>\nendobj\n"
+        ),
+    ))
+    .expect("it opens");
+
+    let tree = doc.structure().expect("a structure tree");
+    assert_eq!(tree.warnings, vec![StructureWarning::ValuesCapped], "once");
+    assert_eq!(tree.element_count(), elements + 1, "every element read");
+    let scopes: Vec<bool> = tree
+        .elements()
+        .into_iter()
+        .filter(|element| element.raw_type == "TH")
+        .map(|element| element.table.is_some())
+        .collect();
+    let paid = tinker_pdf::structure::MAX_STRUCTURE_VALUES / per_array;
+    assert_eq!(paid, 4);
+    assert_eq!(
+        scopes,
+        [true, true, true, true, false],
+        "the budget paid for four whole visits and cut the fifth short"
+    );
+}
+
+/// **A shared namespace URI is copied once per element**, and the walk's copy
+/// budget bounds it: seventy elements, each in a namespace dictionary of its
+/// own, every one of which names one `/NS` string of a mebibyte — 70 MiB of
+/// copies from a file of about one. The walk copies what the budget pays for,
+/// says so once naming the element it stopped at, and reads every element's
+/// type all the same.
+///
+/// The seventy dictionaries also share one `/RoleMapNS` of four thousand
+/// entries, which the walk used to copy once per dictionary — a 269 KB file
+/// asked for 650 MB that way. It is now looked up a type at a time and never
+/// copied, so it costs this budget nothing; what the test can see of that is
+/// that every element's type still resolves through the map's last entry.
+#[test]
+fn a_shared_namespace_is_copied_within_the_walks_copy_budget() {
+    let elements: u32 = 70;
+    let uri_len: usize = 1 << 20;
+    let ssn = "http://iso.org/pdf/ssn";
+    let map: String = (0..4_000).map(|i| format!("/t{i} [/P 22 0 R] ")).collect();
+    let kids: String = (0..elements).map(|i| format!("{} 0 R ", 100 + i)).collect();
+    let mut objects = format!(
+        "10 0 obj\n<< /S /Document /K [{kids}] >>\nendobj\n\
+         20 0 obj\n<< {map}>>\nendobj\n\
+         21 0 obj\n({})\nendobj\n\
+         22 0 obj\n<< /Type /Namespace /NS ({ssn}) >>\nendobj\n",
+        "a".repeat(uri_len)
+    );
+    for i in 0..elements {
+        objects.push_str(&format!(
+            "{} 0 obj\n<< /S /t3999 /P 10 0 R /NS {} 0 R >>\nendobj\n\
+             {} 0 obj\n<< /Type /Namespace /NS 21 0 R /RoleMapNS 20 0 R >>\nendobj\n",
+            100 + i,
+            200 + i,
+            200 + i,
+        ));
+    }
+    let bytes = build("", "/K 10 0 R /Namespaces [22 0 R 200 0 R]", "", &objects);
+    assert!(bytes.len() < 1_200_000, "a file of {} bytes", bytes.len());
+    let doc = Document::open(bytes).expect("it opens");
+
+    let tree = doc.structure().expect("a structure tree");
+    // Each whole element costs its own namespace's URI and the URI of the
+    // namespace its type landed in.
+    let whole = tinker_pdf::structure::MAX_STRUCTURE_BYTES / (uri_len + ssn.len());
+    assert_eq!(whole, 63);
+    assert_eq!(
+        tree.warnings,
+        vec![StructureWarning::BytesCapped {
+            element: Some(ObjRef::new(100 + whole as u32, 0))
+        }],
+        "once, naming the element the budget ran out at"
+    );
+    let found = tree.elements();
+    let named: Vec<&tinker_pdf::StructElement> = found
+        .iter()
+        .copied()
+        .filter(|element| element.raw_type == "t3999")
+        .collect();
+    assert_eq!(named.len(), elements as usize, "every element read");
+    assert!(
+        named.iter().all(|element| element.standard_type == "P"
+            && element.standard_namespace.as_deref() == Some(ssn)),
+        "every type resolved through the shared map"
+    );
+    let copied = named
+        .iter()
+        .filter(|element| element.namespace.is_some())
+        .count();
+    assert_eq!(copied, whole, "the URIs the budget paid for, and no more");
+    assert_eq!(
+        tree.namespaces,
+        [ssn],
+        "the root's list is read within what was left"
+    );
+}

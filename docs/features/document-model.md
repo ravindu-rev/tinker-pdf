@@ -21,7 +21,17 @@ string, read as `Trapped::True`/`False`/`Unknown`, where `Some(Unknown)` is
 the document answering — including with a name outside the three — and
 `None` is the document silent. Text strings decode per 7.9.2.2: UTF-16BE
 behind `FE FF`, PDF 2.0's UTF-8 behind `EF BB BF`, PDFDocEncoding (Annex D)
-otherwise, with damage becoming U+FFFD rather than an error. Dates parse
+otherwise, with damage becoming U+FFFD rather than an error; 0xA0 is the
+Euro sign Table D.2 puts there, not Latin-1's no-break space.
+`encode_text_string(text, version)` is the inverse and the only writer of
+text: PDFDocEncoding when every character has a code Annex D defines,
+otherwise UTF-8 behind `EF BB BF` for a document declaring 2.0 or later and
+UTF-16BE behind `FE FF` for one declaring less — the UTF-8 form is new in
+2.0, and a 1.x reader would show its mark as three characters. Text whose
+PDFDocEncoding would itself begin `FE FF` or `EF BB BF` (`þÿ…`, `ï»¿…`)
+takes a marked form, since it would otherwise read back as a mark. `/Info`,
+outline titles, field values and the editor's annotation text all go
+through it, and read back byte-exact (`text_string_roundtrip.rs`). Dates parse
 leniently per 7.9.4 through `Metadata::created()`/`modified()`, with the raw
 strings kept beside them.
 
@@ -47,6 +57,27 @@ reporting the displayed size with the quarter-turn axis swap applied.
 `/Count` is a claim like any other: a document that lies about it gets
 counted by walking instead of believed.
 
+The three production boundaries of 14.11.2 — `/BleedBox`, `/TrimBox`,
+`/ArtBox` — are read beside them and are **not** inherited: Table 30 marks
+four attributes inheritable and these are not among them, so a value on a
+`/Pages` node describes no page. Each defaults to the page's crop box
+(Table 30) and is reduced to its intersection with the media box
+(14.11.2.1); one that misses the media box entirely reads as the crop box,
+the way a crop box that misses it reads as the media box. `PageBoundary`
+names the five, and is also what a viewer preference's area and clip
+entries hold.
+
+**Viewer preferences.** `/ViewerPreferences` (12.2) is read whole and typed:
+all eighteen entries of ISO 32000-2 Table 147, the six flags, the page mode,
+the reading direction, the four area and clip boundaries, print scaling,
+duplex, tray selection, the page ranges (numbered from 1, as the table numbers
+them), the copy count and 2.0's `/Enforce`. Each is an `Option`, because
+absent-not-default is the same contract `/Info` keeps: a document stating
+`/Direction /L2R` said something a document stating nothing did not. A value of
+the wrong type or a name the table does not define reads as absent — the table
+has a processor use the default then, which is what absent means — and a
+half pair in `/PrintPageRange` is dropped.
+
 **Name and number trees.** One module (7.9.6, 7.9.7) serves `/Dests`,
 `/EmbeddedFiles` and `/PageLabels`. Keys are byte strings matched literally,
 never text-decoded first. Full enumeration walks every leaf and sorts
@@ -55,6 +86,21 @@ targeted lookup (`name_tree_lookup`) descends by `/Limits`, skipping
 subtrees whose declared range excludes the key — and a node whose `/Limits`
 are missing or malformed is descended into anyway, since a damaged index is
 no evidence the entry is gone.
+
+The writers sit beside those readers. `write_name_tree` and
+`write_number_tree` sort their entries (bytes for names, integers for
+numbers), write up to 64 as a single root with `/Names` or `/Nums`, and past
+that as leaves of 64 with `/Limits` under intermediate nodes of up to 64
+`/Kids`, under a root with no `/Limits` (Table 36). Each node goes to a sink
+the caller supplies, which is how both the editor
+(`DocumentEditor::add_name_tree`, `add_number_tree`) and a caller assembling
+an `ObjectSet` allocate. A key given twice is refused with
+`TreeWriteError::DuplicateName` or `DuplicateNumber`, naming it — which of two
+values the caller meant is theirs to decide, and a reader handed both finds
+whichever its search reaches first — and more than `MAX_TREE_ENTRIES` entries
+is refused as `TooManyEntries`, since the reader stops there. A refusal
+writes nothing. `tree_writer.rs` reads every shape back through the three
+readers above, `/Limits` descent included.
 
 **Destinations.** `Destination` is a three-variant enum — `Explicit` (a
 page and a `DestKind` view), `Named` (bytes to look up in the document's own
@@ -67,7 +113,21 @@ are read, with `null` components kept as `None` — "leave the current value" �
 and a zoom of 0 folded onto `None` because 12.3.2.2 gives both spellings
 one meaning. Named destinations resolve through the `/Names` → `/Dests`
 name tree (12.3.2.3) and the legacy catalog `/Dests` dictionary, accepting
-the entry as a bare array or a dictionary carrying it under `/D`.
+the entry as a bare array or a dictionary carrying it under `/D`. `/Names`
+may be a direct dictionary or a reference (7.7.2); only the reference was
+followed until September 2026, so a tree under a direct `/Names` resolved no
+name at all.
+
+**Named destinations are written too.** `DocumentBuilder::add_named_destination`
+registers a name for a page index and a view, and `finish` writes the
+catalog's `/Names /Dests` tree through `write_name_tree`; `Target::Named`
+puts the name in a link's or an outline entry's `/Dest` as a byte string, and
+it reads back as `Destination::Named` — the name, never the array it stands
+for. A name that is not registered at `finish`, or whose page never arrived,
+is dangling and is refused: the link is not written and the outline entry is
+written as a heading, and `dangling_destinations()` names each such name
+beforehand. `DocumentEditor::add_named_destination` adds one to an existing
+document, rewriting the tree with every old entry plus the new one.
 
 **Outline.** The `/First`/`/Next` walk of 12.3.3, cycle-guarded on both
 axes, titles decoded as text strings, the open state from the sign of
@@ -90,6 +150,91 @@ so listing costs less than extracting. The catalog's `/Metadata` stream
 (14.3.2) comes back as decoded raw bytes: XMP is RDF/XML, and a caller that
 wants it parsed already has a reader.
 
+**Output intents, the catalog's and a page's.** `Document::output_intents()`
+reads the catalog's `/OutputIntents` (14.11.5) and `Page::output_intents()`
+a page's own, which PDF 2.0 added and which the PDF Association's example
+file describes as able to *override the output intent for the document in
+the catalog*. Each is an `OutputIntent`: `/S`, the required
+`/OutputConditionIdentifier`, `/OutputCondition`, `/RegistryName`, `/Info`,
+and the `/DestOutputProfile` stream by reference with its `/N` — every field
+`None` where the dictionary says nothing usable, nothing defaulted. A page's
+list is the page's alone: the Arlington model does not make the entry
+inheritable, and the two lists are not merged, because how a page's intents
+combine with the catalog's when their subtypes differ is not in a source this
+build could read. One listing copies at most `MAX_OUTPUT_INTENT_BYTES`
+(64 MiB) of strings and names, because every entry may name one intent whose
+`/Info` is as long as the file; an entry the budget cut reads `None` where it
+was cut and says so with `OutputIntent::incomplete`. The PDF/A validator keeps its own reading (`pdfa/colour.rs`),
+which judges intents against the part claimed and is untouched by this one.
+On the write side `PageBuilder::output_intent(NewOutputIntent)` gives a page
+its own, in a document declaring 2.0 and not under an archival profile — the
+profile writes the catalog's intent and checks device colour against that
+one — and pages naming one profile share one stream.
+
+**Associated files** (ISO 32000-2 14.13). `Document::associated_files()`,
+`Page::associated_files()` and `StructElement::associated_files` read the
+`/AF` arrays of the catalog, a page and a structure element;
+`Document::structure_associated_files()` the structure tree root's,
+`Page::annotation_associated_files()` each annotation's (one list per
+`/Annots` entry, aligned with `annotation_list`), and
+`Document::associated_files_of(reference)` any other holder's — a form or
+image XObject, a document part — by its reference. Each file is an
+`AssociatedFile` with its `/UF`-preferred filename, `/Desc`, the
+`/AFRelationship` as a `FileRelationship` (and as written, for a name the
+list does not hold), the embedded stream by reference with its `/Subtype`
+MIME type and declared `/Params /Size`. A file outside the document has no
+stream; nothing is defaulted. One listing copies at most
+`MAX_ASSOCIATED_FILE_BYTES` (64 MiB) of strings and names — 4 096 entries
+naming one specification with a 64 KiB `/Desc` asked for 256 MiB from 90 KB —
+and an entry the budget cut says so with `AssociatedFile::incomplete`; an
+element's files are copied under the structure walk's own
+`MAX_STRUCTURE_BYTES`, and the annotation listing charges each file its
+record as well as its strings, since 4 096 annotations naming one array of
+4 096 entries ask for sixteen million records from under 200 KB.
+
+**Marked content associated with files** (14.13.5, as the approved errata
+amend it with Table 409a). `Page::marked_content_associated_files()` lists
+every sequence the page draws under the `/AF` tag whose **named** property
+list carries `/MCAF`, in drawing order — forms included, the name looked up
+in the form's own resources as the interpreter does — each a
+`MarkedContentFiles` with the property's name, the form it was drawn in and
+the files. The errata's last paragraph decides what connects: *"only if the
+tag is AF and the named property list is defined according to Table 409a"*,
+so an inline list (which NOTE 4 rules out, since a specification names its
+stream by reference), a named list with no `/MCAF`, `/MCAF` under another
+tag, and an `/AF` point (`DP`) connect nothing. It runs the interpreter, so
+the content crate's `MarkedProps` carries the one thing the facade's resolver
+needs back: `associated_files`, the name of a named list holding `/MCAF`.
+The listing spends one `MAX_ASSOCIATED_FILE_BYTES` budget, sequences and
+files charged for their records, and counts the sequences past it in
+`MarkedContentFileList::dropped`. A named property list — this listing's,
+and the one every named `BDC` asks for on every reading of a page — is read
+where it lies, the document's cached object or the resource dictionary's
+own, and never copied per sequence: while it was, a review measured 2 000
+sequences naming one list beside a 1 048 576-entry array at 150 s of text
+extraction, against 0.38 s borrowed. So is each value read out of it —
+`/MCID`, `/ActualText`, `/Alt`, `/Lang`, `/E`, `/MCAF` — since a list read
+where it lies still copied a long array under one of those keys at every
+`BDC`, as it did before the list was ever copied
+(`tests/property_list_work.rs` counts the bytes, a page per key). They are
+not the `/EmbeddedFiles` tree's
+attachments, which `attachments()` lists: an associated file belongs to an
+object, and the errata say filing it in the tree is not required. The
+builder writes them — `DocumentBuilder::associate_file`,
+`associate_file_with_structure` and `add_form_with_files`,
+`PageBuilder::associate_file`, `associate_file_with_link` and
+`with_associated_files`, `Tag::associated_file` — in a 2.0 document or
+under ISO 19005-3, from a `NewAssociatedFile` whose MIME type has veraPDF's
+PDF/A 6.8-1 shape; [creation](creation.md) has the rest.
+
+**The writing side, on an existing document.** Each of these — page labels,
+an attachment, an outline, every `/Info` entry, a caller's XMP packet, viewer
+preferences and the production boxes — has a typed setter on
+`DocumentEditor` that this section's readers read back as it was given
+([editing](editing.md)). `/Info` and the packet are deliberately not kept in
+step by the editor, and each setter says whether it left the other half
+standing (`MetadataSync`).
+
 **Page labels.** The `/PageLabels` number tree (12.4.2) yields one label
 per page: all five styles of Table 159 plus the bare prefix, with the
 letter styles repeating — 27 is "AA", not spreadsheet base-26 — and roman
@@ -99,14 +244,20 @@ numerals capped so a hostile `/St` cannot emit a page of M's.
 
 Everything is on the facade `Document` and `Page`: `metadata()`,
 `pdf_version()`, `outline()`, `page_labels()`, `attachments()`,
-`xmp_metadata()`, `page_count()`, `pages()`, `page(index)`, `layers()`,
-`fonts()`, and `Page::media_box()`, `crop_box()`, `rotation()`, `size()`,
-`links()`, `annotations()`. The types they hand back — `Metadata`, `Trapped`,
-`OutlineItem`, `Destination`, `DestKind`, `Action`, `Link`, `Attachment`,
-`OptionalGroup`, `Annotation`, `AnnotationKind`, `AnnotationFlags` — are
-re-exported from the same crate. The writing side takes the same vocabulary: `Target` wraps a page
-plus `DestKind` or a URI for `PageBuilder::link` and `OutlineEntry`, so a
-write followed by a read is an equality, not a translation.
+`xmp_metadata()`, `viewer_preferences()`, `output_intents()`,
+`associated_files()`, `page_count()`, `pages()`, `page(index)`, `layers()`,
+`fonts()`, and `Page::media_box()`, `crop_box()`, `bleed_box()`,
+`trim_box()`, `art_box()`, `boundary(PageBoundary)`, `rotation()`, `size()`,
+`links()`, `annotations()`, `output_intents()`, `associated_files()`. The
+types they hand back — `Metadata`, `Trapped`, `OutlineItem`, `Destination`,
+`DestKind`, `Action`, `Link`, `Attachment`, `LabelStyle`,
+`ViewerPreferences`, `NonFullScreenPageMode`, `ReadingDirection`,
+`PrintScaling`, `Duplex`, `EnforcedPreference`, `PageBoundary`,
+`OptionalGroup`, `Annotation`, `AnnotationKind`, `AnnotationFlags`,
+`OutputIntent`, `AssociatedFile`, `FileRelationship` — are re-exported from the same crate. The writing side takes the same vocabulary: `Target` wraps a page
+plus `DestKind`, a registered name or a URI for `PageBuilder::link` and
+`OutlineEntry`, so a write followed by a read is an equality, not a
+translation.
 
 ```rust
 let doc = tinker_pdf::Document::open(bytes)?;
@@ -134,14 +285,28 @@ and the painted page cannot disagree about the same file. A group with no
 toggling layers still has to see it. Most documents declare no optional
 content and get an empty list, which is an ordinary answer.
 
-Writing groups — `DocumentBuilder::add_layer`, and an editor that toggles a
-default configuration — is the other half of that roadmap row and is not in
-this build.
+**Layers are written too.** `DocumentBuilder::add_layer(name, visible)`
+writes an `/OCG` and returns a `LayerId`; `PageBuilder::optional(layer, |page|
+...)` draws inside `/OC /OCn BDC … EMC` with the group in the page's
+`/Properties`; `finish` writes `/OCProperties` with every group in `/OCGs`, and
+a default configuration `/D` whose `/Order` is the order they were added and
+whose `/OFF` names the hidden ones. A layer opened inside a structure element
+splits the element's marked-content sequence around itself, so every `/MCID`
+sequence stays innermost and each `EMC` closes the scope it was written for.
+`DocumentEditor::set_layer_visible(reference, visible)` changes a group's
+state in `/D` — out of both `/ON` and `/OFF`, then into whichever disagrees
+with `/BaseState` — replacing an indirect `/D` or `/OCProperties` at its own
+number. The reference is the one `layers()` reports, so a caller lists, picks
+and toggles through one vocabulary. Under a part 1 archival profile a layer is
+refused with `ArchivalRefusal::OptionalContent` (ISO 19005-1 6.1.13).
 
 ### Annotations, as built
 
 `Page::annotations()` returns one `Annotation` per entry of the page's
-`/Annots`, in the array's own order (12.5.2). It is **total by construction up
+`/Annots`, in the array's own order (12.5.2). That order is the index
+`Page::render_annotation` takes ([rendering](rendering.md)): `reference` is
+`None` for a direct dictionary, so a position is the one handle every entry
+has. It is **total by construction up
 to ruling 1's bound of 4 096 entries per page**: a `/Subtype` no edition of ISO
 32000 defines comes back as `AnnotationKind::Other` carrying the name the file
 used, a dictionary with no `/Subtype` as `Unnamed`, and an entry that is not a
@@ -150,15 +315,29 @@ how ruling 10's "name what you touched" is satisfied for a list: a caller
 auditing a file counts what this build does not model instead of comparing
 lengths to find out what went missing.
 
-Past 4 096 the list is shortened and **nothing says so**. That is forced
-rather than chosen: the only place a truncation could be reported is
-`Document::warnings()`, and appending to it from a read would make the
-warnings depend on whether anyone had called `annotations()` first — the same
-argument that keeps `fonts()` off `cos::font::read`. The bound is pinned by
+Past 4 096 the list is shortened, and **the value it returns says by how
+much**: `Page::annotation_list()` is the same read as an `AnnotationList`,
+whose `dropped` counts the entries past the bound. Not a warning: appending to
+`Document::warnings()` from a read would make the warnings depend on whether
+anyone had called `annotations()` first — the same argument that keeps
+`fonts()` off `cos::font::read` — and until September 2026 that argument ended
+at "so nothing says so". A count in the answer mutates nothing, and the same
+page read twice says the same thing twice. The bound is pinned by
 `a_hostile_annots_array_is_capped`, which exists because raising the constant
-to a hundred thousand previously failed nothing in the crate; the corpus's
-largest page carries 122, three orders of magnitude below it, so no real file
-is affected. Reporting the truncation is a roadmap row, not a claim made here.
+to a hundred thousand previously failed nothing in the crate, and which now
+holds the count and the warnings too; the corpus's largest page carries 122,
+three orders of magnitude below it.
+
+**The listing's copies are bounded too**, by `MAX_ANNOTATION_BYTES` (64 MiB a
+page). Everything an `Annotation` carries is a copy of an object the parser
+already holds, and an indirect object is parsed once and may be named by
+every one of the 4 096 entries — so one 9 MB `/Contents` string, or one
+`/InkList` of a million numbers, named four thousand times asked for tens of
+gigabytes. That was true of `/Contents`, `/T` and `/M` from the day the model
+landed, and the payloads below would have made it true of every array in
+12.5.6's tables. Each copy is charged before it is made; one the budget
+cannot pay for reads as absent, the annotation says `incomplete`, and the
+list counts them in `incomplete`. It has a `bounds_ledger.rs` row.
 
 `AnnotationKind` covers ISO 32000-1 Table 169's twenty-six subtypes and ISO
 32000-2's two, and the table is transcribed a second time in the test beside
@@ -166,17 +345,43 @@ it and compared. Each entry carries Table 164's common entries and Table 170's
 markup ones: `/Rect` normalised so `x0 <= x1` (7.9.5), `/Contents`, `/T`, `/M`
 both as the file's own text *and* as a parsed 7.9.4 date, `/F` as a raw
 `AnnotationFlags` with Table 165's ten bit accessors, `/Popup`, `/Parent`, and
-whether `/AP` carries an `/N`. A pop-up's `/Contents`, `/T` and `/M` come from
-its `/Parent` (12.5.6.14 Table 183) — and only that way: a markup annotation's
-text is never read through its own `/Popup`, which the clause does not licence
-and which would report a note's text as whatever its window happened to carry.
+whether `/AP` carries an `/N`; and `/AS`, `/NM`, `/C`, the border (`/BS`, or
+the legacy `/Border` with its corner radii and dash array, 12.5.4), and on a
+markup annotation `/CA`, `/RC` (a text string decoded, a stream named by
+reference and not decoded, since decoding would add to the document's
+warnings), `/Subj`, `/CreationDate` as text and as a date, `/IRT`, `/RT` and
+`/IT`. A pop-up's `/Contents`, `/T`, `/M` and `/C` come from its `/Parent`
+(12.5.6.14 Table 183, whose list includes `/C`) — and only that way: a markup
+annotation's text is never read through its own `/Popup`, which the clause
+does not licence and which would report a note's text as whatever its window
+happened to carry.
+
+**The per-family payloads.** `Annotation::payload` is an `AnnotationPayload`,
+one variant per 12.5.6 family — a family being a clause, so `/Square` and
+`/Circle` share `Shape`, the four text markup subtypes share `TextMarkup`,
+`/Polygon` and `/PolyLine` share `Polygon` — twenty-three in all, and `None`
+for an entry the model could not type. Each variant's fields are its table's
+entries with its table's defaults: `Text` (Table 172: `/Open`, `/Name`,
+`/State`, `/StateModel`), `Link` (173: `/H`, `/QuadPoints`), `FreeText` (174:
+`/DA`, `/Q`, `/DS`, `/CL`, `/BE`, `/RD`, `/LE`), `Line` (175: `/L`, `/LE`,
+`/IC`, `/LL`, `/LLE`, `/LLO`, `/Cap`, `/CP`, `/CO`), `Shape` (177), `Polygon`
+(178: `/Vertices`, a polyline's `/LE`), `TextMarkup` (179: `/QuadPoints` as
+the file orders the corners), `Caret` (180), `Stamp` (181), `Ink` (182:
+`/InkList`, one path per stroke), `Popup` (183), `FileAttachment` (184: `/FS`
+as a `FileSpec` — `/UF` before `/F`, `/Desc`, the embedded stream), `Sound`
+(185), `Movie` (186), `Screen` (187), `Widget` (188), `PrinterMark`,
+`TrapNet`, `Watermark` (190), `Redact` (191), `ThreeD` (13.6.2), and ISO
+32000-2's `Projection` and `RichMedia`. What is referenced rather than read —
+a sound, a movie, 3D artwork, rich media, a redaction's overlay — is a
+`Linked`: the reference, or `Direct` for one written inline. Geometry that is
+not what its table says is not half read: a partial quad, an odd vertex, a
+non-number in an ink path, a `/L` of three numbers each come back as nothing.
+`carries_required()` says whether the entries the family's table marks
+required are present, and is what the census counts.
 
 `Page::links()` is unchanged and stays the narrower navigation view over the
 same array: `/Link` annotations with their destinations **resolved**, which is
-a question about targets rather than about annotations (ruling 6). What is
-*not* here is per-subtype geometry — `/QuadPoints`, `/InkList`, `/Vertices`,
-`/L` and their relatives — which is one payload per 12.5.6 family and has a
-roadmap row of its own.
+a question about targets rather than about annotations (ruling 6).
 
 **Measured over the corpus.** `crates/tinker-pdf/tests/annotation_census.rs`,
 `#[ignore]`d and run with `-- --ignored --nocapture`, over the 1 012 fetched
@@ -213,11 +418,19 @@ and 5 129 annotations carry a normal appearance.
 | A `/Kids` graph that revisits a node | `WarningKind::PageTreeCycle` | 7.7.3.2 makes the tree a tree; following a repeat duplicates pages forever | [ruling 10](../rulings.md) |
 | A page tree past the depth or page cap | `WarningKind::PageTreeTruncated` | bounded truncation beats an unbounded walk over hostile input | [ruling 1](../rulings.md) |
 | No usable `/MediaBox` on the whole path | `WarningKind::MediaBoxMissing` | 7.7.3.3 requires one; US Letter is guessed and the guess recorded | [ruling 10](../rulings.md) |
+| A `/BleedBox`, `/TrimBox` or `/ArtBox` on a `/Pages` node | none — the page reads its own or its crop box (`the_production_boxes_are_not_inherited`) | 7.7.3.3 Table 30 does not make them inheritable; taking a parent's would report a box the page never stated | 14.11.2 |
+| A viewer preference of the wrong type, or a name Table 147 does not define | none — the field reads `None` (`malformed_entries_read_as_absent`) | the table has a processor use the default, which is what absent means; a read that warned would make `Document::warnings` depend on who asked first | 12.2 |
+| An `/OutputIntents` array on a `/Pages` node | none — `Page::output_intents` reads the page's own only (`page_level_intents_are_read_from_the_page_alone_beside_the_catalogs`) | the Arlington model's `PageObject` table does not make the entry inheritable | ISO 32000-2 PageObject |
+| A page's intents merged over the catalog's into one answer | none — the two lists are handed back as written | the PDF Association's example says a page's intent overrides the catalog's; how the two combine when their subtypes differ is not in a source this build could read | [pdf20-deltas](../pdf20-deltas.md) |
+| A page-level output intent below 2.0 or under an archival profile | `PageBuilder::output_intent` → `false` | before 2.0 a page has no such entry; a profile writes the catalog's intent and judges every device colour against that one profile, which a page naming another would bypass | [creation](creation.md) |
+| `/AF` written on an annotation other than a link, an image XObject or a document part, or on an existing document | none — read by `associated_files_of`, written only where the builder makes the holder | the builder writes the catalog, a page, a structure element, the tree root, a link annotation, a form XObject and a marked-content sequence; it makes no other annotation, writes images without one and has no document parts, and the editor has no `/AF` setter yet | ISO 32000-2 14.13 |
+| An associated file below 2.0 without ISO 19005-3, or under another archival part | `associate_file` → `false`; under a profile `ArchivalRefusal::AssociatedFile`; a `Tag`'s file is dropped and its element written | `/AF` is a 2.0 key that part 3 carried on 1.7 first; parts 1, 2 and 4 forbid embedded files or require the file itself to conform, which nothing here can check | [creation](creation.md) |
+| An associated file whose MIME type is not one `/` between two runs of letters, digits, `_`, `-`, `+` and `.`, or whose relationship is `EncryptedPayload` | `NewAssociatedFile::is_writable` → `false` | veraPDF's PDF/A rule 6.8-1 tests that shape, which also keeps out the `;`, `=` and `#` the errata's Table 44 forbids; an encrypted payload needs an `/EP` dictionary this writer does not write | ISO 32000-2 7.11.4 |
 | A `/Count` that disagrees with the walk | `WarningKind::PageCountMismatch` | the count is a claim; the walk is the fact | [ruling 10](../rulings.md) |
 | An outline `/First`/`/Next` loop, or one past the caps | `WarningKind::OutlineCycle`, `OutlineTruncated` | a looping sibling chain never ends on its own | [ruling 1](../rulings.md) |
 | A name/number tree cycle, cap breach, or odd-length leaf | `WarningKind::TreeCycle`, `TreeTruncated`, `TreeOddEntries` | the last key of an odd `/Names` array has no value | [ruling 10](../rulings.md) |
 | No readable version in header or catalog | `WarningKind::HeaderMissing` | the 1.7 baseline is reported and the guess stays on the record | [ruling 10](../rulings.md) |
-| `/Launch` and every other action | `Action::Launch`, `Action::Other` | reported, never executed — running a program because a document asked is not a service | [architecture](../architecture.md) |
+| `/Launch` and every other action | `Action::Launch`, `Action::Other` | reported, never executed — running a program because a document asked is not a service; every action typed and handed to the host as a request is a roadmap row, and the engine still launches nothing | [architecture](../architecture.md); [ROADMAP](../ROADMAP.md) AN-20 |
 | Writing a view with a NaN coordinate, a negative zoom or an empty `/FitR` | `DestKind::is_writable` → `false` | `NaN` is not a PDF number, and an empty rectangle asks for infinite magnification | [ruling 6](../rulings.md) |
 | Writing a URI that is empty, non-ASCII or control-bearing | `is_writable_uri` → `false`; `PageBuilder::link` returns `false` | 12.6.4.7 makes `/URI` 7-bit ASCII; percent-encoding is the caller's, since only the caller knows the bytes' encoding | [ruling 6](../rulings.md) |
 
@@ -227,15 +440,20 @@ As of 15 September 2026, in the workspace suite of 4 779 passing tests
 (0 failed, 58 ignored, 218 suites, Windows x86_64, measured on this
 branch — other lanes are moving the total in parallel):
 
-- `crates/tinker-pdf/src/layers.rs` and `src/annotations.rs` — 6 and 13 unit
+- `crates/tinker-pdf/src/layers.rs` and `src/annotations.rs` — 6 and 19 unit
   tests beside the code: `/BaseState` inverted by `/ON`, a nameless group
   still listed, the listing reading the renderer's own bound configuration;
   Table 169 transcribed a second time and compared against the enum, nothing
-  in `/Annots` dropped, 12.5.6.14 in both directions, a pop-up parent cycle
-  that terminates, Table 165 bit by bit, a reversed `/Rect` ordered, a
-  `/M` that is not a date carried as text, and a 4 097-entry `/Annots` array
-  cut to ruling 1's bound — the last written after an injection found the cap
-  guarded by nothing at all.
+  in `/Annots` dropped, 12.5.6.14 in both directions and for `/C`, a pop-up
+  parent cycle that terminates, Table 165 bit by bit, a reversed `/Rect`
+  ordered, a `/M` that is not a date carried as text, and a 4 099-entry
+  `/Annots` array cut to ruling 1's bound with the three it left out counted
+  and the warnings untouched — the cap test written after an injection found
+  the cap guarded by nothing at all. The payloads: every family's read against
+  its table on one page, every family's defaults and required entries on
+  another, the common and markup entries, malformed geometry refused rather
+  than guessed at, and four thousand annotations naming one shared array cut
+  by the copy budget and saying so. Ten reintroduced defects each fire.
 - `crates/tinker-pdf/tests/facade_read.rs` — 7 tests over one fixture, run
   from **outside** the crate the way ruling 11 makes the contract: each is
   named for the defect it re-creates rather than for the feature, and one of
@@ -243,7 +461,14 @@ branch — other lanes are moving the total in parallel):
   `Document::warnings()` where it was.
 - `crates/tinker-pdf/tests/annotation_census.rs` — the two `#[ignore]`d corpus
   censuses above, printing `RAN`/`SKIPPED` so a missing corpus cannot read as
-  a pass, with floors at the counts recorded here.
+  a pass, with floors at the counts recorded here, honouring
+  `TINKER_CORPUS_REQUIRED`, and run nightly by `corpus.yml` since 26 September
+  2026. The annotation census also counts the payloads per family, asserts
+  that each covered subtype reads into its own family (a second transcription
+  of 12.5.6's grouping) and that neither listing bound touches a corpus page —
+  **and the per-family counts themselves are owed**: that half was written
+  where the fetched corpora could not be reached, so it has printed nothing
+  yet and holds no floors.
 - `crates/tinker-pdf/tests/tinker_parity.rs` — the ported parity tests
   ([ruling 12](../rulings.md)): `pdf_version()` returns exactly `"PDF 1.7"`, the three-level
   outline nests with zero-based page indices, and a document without an
@@ -257,17 +482,25 @@ branch — other lanes are moving the total in parallel):
   `/Rotate` moves ink to the right corner at every quarter turn and a
   shifted `/CropBox` origin lands content where it should.
 - `crates/tinker-pdf/tests/hostile_input.rs` — mutation rounds that call
-  `metadata()`, `pdf_version()`, `outline()` and `page_labels()` on every
-  damaged document that still opens.
+  `metadata()`, `pdf_version()`, `outline()`, `page_labels()`,
+  `viewer_preferences()` and every page boundary on every damaged document
+  that still opens.
 - `crates/tinker-pdf-cos/tests/semantics.rs` and `semantics_extras.rs` —
   fixture-based assertions on geometry, version, metadata, outlines and
   explicit-not-named destinations, plus attachments, XMP bytes, and
   `/Limits` descent including a node whose limits lie.
 - Unit tests beside the code in `pages.rs`, `outline.rs`, `dest.rs`,
-  `trees.rs` and `text_string.rs`: version comparison as numbers, blank
-  against absent for every `/Info` field, `/Trapped`'s three names, corner
-  ordering, rotation normalisation, the 27 → "AA" letter repetition, and
+  `trees.rs`, `text_string.rs` and `viewer.rs`: version comparison as numbers,
+  blank against absent for every `/Info` field, `/Trapped`'s three names,
+  corner ordering, rotation normalisation, the production boxes neither
+  inherited nor left outside the media box, the 27 → "AA" letter repetition,
+  every Table 147 entry read and a stated default told from an absent one, and
   the URI/named-destination distinction pinned as a type inequality.
+- `crates/tinker-pdf/tests/editor_docops.rs` — the writing side: page
+  labels, attachments, an outline, every `/Info` entry, an XMP packet, viewer
+  preferences and the production boxes, each set on an existing document by
+  `DocumentEditor`, saved both ways and read back here
+  ([editing](editing.md)).
 - The `cos_document` fuzz target — one of the 24 — walks the page tree and
   reads content bytes after every successful open, so a document that opens
   and then panics on use counts as a crash. The corpus run backs it at

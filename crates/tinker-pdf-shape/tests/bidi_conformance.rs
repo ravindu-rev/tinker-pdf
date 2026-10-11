@@ -43,7 +43,7 @@
 
 use std::collections::BTreeMap;
 
-use tinker_pdf_shape::bidi::{BaseDirection, Level, Paragraph};
+use tinker_pdf_shape::bidi::{logical_order, order_units, BaseDirection, Level, Paragraph};
 use tinker_pdf_shape::unicode::{bidi_class, bracket, BidiClass};
 
 const BIDI_TEST: &str = include_str!("../data/ucd/BidiTest.txt");
@@ -440,6 +440,337 @@ fn the_whole_of_unicodes_own_bidi_character_test() {
             .cloned()
             .collect::<Vec<_>>()
             .join("\n")
+    );
+}
+
+/// `BidiCharacterTest.txt` again, through [`order_units`] — the drawing
+/// direction for a line handed over as units, which [`logical_order`] calls to
+/// check every order it gives the facade's text extraction (ruling 14,
+/// `docs/rulings.md`). The reading direction itself is the next test.
+///
+/// [`order_units`] places every unit, X9's removed characters included, and
+/// the file lists none of those in its order; so the comparison drops them
+/// from this crate's answer and asserts that **nothing else** moves: a soft
+/// hyphen or a joiner in a line keeps its neighbours where the algorithm put
+/// them.
+///
+/// Each character is its own unit here, which is the shape of a page whose
+/// every glyph stands for one character. A ligature's unit holds several and
+/// is placed by its first; `tinker-pdf`'s `text_order.rs` tests that case on
+/// a page.
+#[test]
+fn the_whole_of_bidi_character_test_through_order_units() {
+    let mut failures: Vec<String> = Vec::new();
+    let mut ran = 0usize;
+    let mut with_removed = 0usize;
+    for (number, raw) in CHARACTER_TEST.lines().enumerate() {
+        let raw = raw.trim_end_matches('\r');
+        let body = match raw.find('#') {
+            Some(0) => continue,
+            Some(at) => &raw[..at],
+            None => raw,
+        };
+        let body = body.trim();
+        if body.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = body.split(';').collect();
+        assert_eq!(fields.len(), 5, "line {}: {body}", number + 1);
+        let chars: Vec<char> = fields[0]
+            .split_whitespace()
+            .map(|hex| {
+                let code = u32::from_str_radix(hex, 16).expect("a code point");
+                char::from_u32(code).expect("BidiCharacterTest.txt holds no surrogates")
+            })
+            .collect();
+        let direction = match fields[1].trim() {
+            "0" => BaseDirection::LeftToRight,
+            "1" => BaseDirection::RightToLeft,
+            "2" => BaseDirection::Auto,
+            other => panic!("line {}: paragraph direction {other}", number + 1),
+        };
+        let expected: Vec<usize> = fields[4]
+            .split_whitespace()
+            .map(|token| token.parse::<usize>().expect("an index"))
+            .collect();
+        let units: Vec<String> = chars.iter().map(char::to_string).collect();
+        let borrowed: Vec<&str> = units.iter().map(String::as_str).collect();
+        let order = order_units(&borrowed, direction);
+        ran += 1;
+
+        // Every unit is placed exactly once.
+        let mut placed = order.clone();
+        placed.sort_unstable();
+        if placed != (0..chars.len()).collect::<Vec<_>>() {
+            failures.push(format!(
+                "line {}: {body}\n  not a permutation: {order:?}",
+                number + 1
+            ));
+            continue;
+        }
+        let removed = |at: usize| bidi_class(chars[at]).is_removed_by_x9();
+        if chars.iter().any(|c| bidi_class(*c).is_removed_by_x9()) {
+            with_removed += 1;
+        }
+        let kept: Vec<usize> = order.into_iter().filter(|at| !removed(*at)).collect();
+        if kept != expected {
+            failures.push(format!(
+                "line {}: {body}\n  expected order {expected:?}\n  ours           {kept:?}",
+                number + 1
+            ));
+        }
+    }
+    assert_eq!(ran, 91_707, "BidiCharacterTest.txt changed size");
+    // The cases that hold a character X9 removes are the ones where
+    // `order_units`'s own rule — a removed unit takes its predecessor's level —
+    // is exercised rather than merely present. This file holds few of them;
+    // `BidiTest.txt` through the same function, below, holds the rest.
+    assert_eq!(
+        with_removed, 91,
+        "the number of BidiCharacterTest.txt cases holding an X9-removed \
+         character moved"
+    );
+    assert!(
+        failures.is_empty(),
+        "{} of {ran} BidiCharacterTest.txt cases disagree through order_units:\n{}",
+        failures.len(),
+        failures
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// **The reading direction**: every visual order `BidiCharacterTest.txt`
+/// states, fed back through [`logical_order`] — the function the facade's
+/// text extraction calls (ruling 14, `docs/rulings.md`) — with the file's own
+/// resolved paragraph level.
+///
+/// UAX #9 is not one-to-one, so "comes back to the file's text" cannot hold
+/// for every case, and this asserts what can:
+///
+/// - **every order is a permutation**, on every case;
+/// - **every order reads as something that draws the line**: the text read
+///   in [`logical_order`]'s order, drawn by [`order_units`], is the file's
+///   visual order, character for character — on every case but three, named
+///   below, which no text the search reaches draws;
+/// - **how many come back to the file's own text** is pinned, and **every
+///   case that does not holds a paired bracket**. Rule N0 pairs brackets in
+///   the logical text, and a right-to-left line draws them mirrored, so that
+///   residue is the mirroring `text_order.rs` names, and nothing else.
+///
+/// A case holding a character X9 removes is not in it: the file's visual
+/// order leaves those out, so there is no drawn line to read them back from.
+/// Before the forward check, when extraction applied L2 with levels resolved
+/// over the line as drawn (`order_units` on the visual order), 8 100 of these
+/// 91 616 cases came back as other text, 6 636 of them holding a
+/// right-to-left letter; now 669 do, every one holding a bracket pair.
+#[test]
+fn every_visual_order_in_bidi_character_test_reads_back() {
+    let mut ran = 0usize;
+    let mut typed = 0usize;
+    let mut drawn_alike = 0usize;
+    let mut undrawn: Vec<String> = Vec::new();
+    let mut unbracketed: Vec<String> = Vec::new();
+    for (number, raw) in CHARACTER_TEST.lines().enumerate() {
+        let raw = raw.trim_end_matches('\r');
+        let body = match raw.find('#') {
+            Some(0) => continue,
+            Some(at) => &raw[..at],
+            None => raw,
+        };
+        let body = body.trim();
+        if body.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = body.split(';').collect();
+        assert_eq!(fields.len(), 5, "line {}: {body}", number + 1);
+        let chars: Vec<char> = fields[0]
+            .split_whitespace()
+            .map(|hex| {
+                let code = u32::from_str_radix(hex, 16).expect("a code point");
+                char::from_u32(code).expect("BidiCharacterTest.txt holds no surrogates")
+            })
+            .collect();
+        if chars.iter().any(|c| bidi_class(*c).is_removed_by_x9()) {
+            continue;
+        }
+        let direction = match fields[2].trim() {
+            "0" => BaseDirection::LeftToRight,
+            "1" => BaseDirection::RightToLeft,
+            other => panic!("line {}: resolved paragraph level {other}", number + 1),
+        };
+        let units: Vec<String> = chars.iter().map(char::to_string).collect();
+        let visual: Vec<&str> = fields[4]
+            .split_whitespace()
+            .map(|token| token.parse::<usize>().expect("an index"))
+            .map(|at| units[at].as_str())
+            .collect();
+        assert_eq!(visual.len(), chars.len(), "line {}: {body}", number + 1);
+        ran += 1;
+
+        let order = logical_order(&visual, direction);
+        let mut placed = order.clone();
+        placed.sort_unstable();
+        assert_eq!(
+            placed,
+            (0..visual.len()).collect::<Vec<_>>(),
+            "line {}: {body}\n  not a permutation: {order:?}",
+            number + 1
+        );
+        let read: Vec<&str> = order.iter().map(|at| visual[*at]).collect();
+        let redrawn: Vec<&str> = order_units(&read, direction)
+            .into_iter()
+            .map(|at| read[at])
+            .collect();
+        if redrawn == visual {
+            drawn_alike += 1;
+        } else {
+            undrawn.push(format!("line {}: {body}", number + 1));
+        }
+        if read.concat() == units.concat() {
+            typed += 1;
+        } else if !chars.iter().any(|c| bracket(*c).is_some()) {
+            unbracketed.push(format!(
+                "line {}: {body}\n  read as {:?}",
+                number + 1,
+                read.concat()
+            ));
+        }
+    }
+    assert_eq!(
+        ran, 91_616,
+        "the BidiCharacterTest.txt cases with nothing X9 removes moved"
+    );
+    assert!(
+        unbracketed.is_empty(),
+        "{} cases with no paired bracket read back as other text:\n{}",
+        unbracketed.len(),
+        unbracketed
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    // The three lines for which no order the search reaches draws the line
+    // as stated, every one holding a bracket pair: Arabic-Indic digits around
+    // a tab (which L1 puts at the paragraph's level wherever it falls), and
+    // two lines of isolates nested three deep. The first order is returned
+    // for each, and is still a permutation (asserted above).
+    assert_eq!(
+        undrawn,
+        vec![
+            "line 256: 0661 0009 0028 0662 0029;2;0;2 0 1 2 1;0 1 4 3 2".to_owned(),
+            "line 295: 0061 0028 0062 2067 05D0 005B 05D1 2066 0063 05D3 2069 0065 005D \
+             0066 2069 05D4 0029 05D5;0;0;0 0 0 0 1 1 1 1 2 3 1 2 1 2 0 1 0 1;0 1 2 3 13 \
+             12 11 10 8 9 7 6 5 4 14 15 16 17"
+                .to_owned(),
+            "line 307: 05D0 0028 05D1 2066 0061 005B 0062 2067 05D2 0064 2069 05D4 005D \
+             05D5 2069 0065 0029 0066;1;1;1 1 1 1 2 2 2 2 3 4 2 3 2 3 1 2 1 2;17 16 15 14 \
+             4 5 6 7 9 8 10 11 12 13 3 2 1 0"
+                .to_owned(),
+        ],
+        "the cases whose reading does not draw the line moved"
+    );
+    assert_eq!(drawn_alike, ran - undrawn.len());
+    assert_eq!(
+        typed, TYPED,
+        "the BidiCharacterTest.txt cases that read back as typed moved"
+    );
+}
+
+/// How many of the 91 616 cases come back to the file's own text, measured
+/// when the forward check went in. A change that moves it is a change in
+/// which of several drawings-alike the search reaches first.
+const TYPED: usize = 90_947;
+
+/// `BidiTest.txt` through [`order_units`], for the X9-removed classes.
+///
+/// `BidiCharacterTest.txt` holds only ninety-one cases with a character X9
+/// removes, and `order_units`'s one rule of its own is about exactly those:
+/// a removed unit is placed at its predecessor's level and must move nothing
+/// else. This file is every combination of classes up to length four, `BN`,
+/// the embeddings, the overrides and `PDF` among them, so it is where that
+/// rule meets every neighbour it can have.
+#[test]
+fn the_whole_of_bidi_test_through_order_units() {
+    let mut order: Vec<usize> = Vec::new();
+    let mut failures = 0usize;
+    let mut first: Vec<String> = Vec::new();
+    let mut ran = 0usize;
+    let mut with_removed = 0usize;
+    for raw in BIDI_TEST.lines() {
+        let raw = raw.trim_end_matches('\r');
+        let body = match raw.find('#') {
+            Some(0) => continue,
+            Some(at) => &raw[..at],
+            None => raw,
+        };
+        let body = body.trim();
+        if body.is_empty() || body.starts_with("@Levels:") {
+            continue;
+        }
+        if let Some(rest) = body.strip_prefix("@Reorder:") {
+            order = rest
+                .split_whitespace()
+                .map(|token| token.parse::<usize>().expect("an index"))
+                .collect();
+            continue;
+        }
+        if body.starts_with('@') {
+            continue;
+        }
+        let Some((classes, bitset)) = body.split_once(';') else {
+            continue;
+        };
+        let chars: Vec<char> = classes.split_whitespace().map(representative).collect();
+        let removed: Vec<bool> = chars
+            .iter()
+            .map(|c| bidi_class(*c).is_removed_by_x9())
+            .collect();
+        if removed.iter().any(|r| *r) {
+            with_removed += 1;
+        }
+        let units: Vec<String> = chars.iter().map(char::to_string).collect();
+        let borrowed: Vec<&str> = units.iter().map(String::as_str).collect();
+        let bitset = u8::from_str_radix(bitset.trim(), 16).expect("a hex bitset");
+        for (bit, direction) in [
+            (1u8, BaseDirection::Auto),
+            (2, BaseDirection::LeftToRight),
+            (4, BaseDirection::RightToLeft),
+        ] {
+            if bitset & bit == 0 {
+                continue;
+            }
+            ran += 1;
+            let ours = order_units(&borrowed, direction);
+            let mut placed = ours.clone();
+            placed.sort_unstable();
+            let whole = placed == (0..chars.len()).collect::<Vec<_>>();
+            let kept: Vec<usize> = ours.into_iter().filter(|at| !removed[*at]).collect();
+            if !whole || kept != order {
+                failures += 1;
+                if first.len() < 20 {
+                    first.push(format!(
+                        "{body} [{direction:?}]: expected {order:?}, ours {kept:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert_eq!(ran, 770_241, "the number of resolutions that ran moved");
+    assert_eq!(
+        with_removed, 343_857,
+        "the number of BidiTest.txt lines holding an X9-removed class moved"
+    );
+    assert_eq!(
+        failures,
+        0,
+        "{failures} of {ran} BidiTest.txt resolutions disagree through order_units:\n{}",
+        first.join("\n")
     );
 }
 

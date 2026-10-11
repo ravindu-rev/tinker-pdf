@@ -112,6 +112,16 @@ fn corpus(name: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
 }
 
+/// A package this repository derived from one in `tests/xps`, kept apart from
+/// that directory because its README's first claim is that nothing here wrote
+/// a byte of anything in it.
+fn derived(name: &str) -> Vec<u8> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join(name);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+}
+
 /// A package whose one 816 x 1056 fixed page carries `body`.
 fn package(body: &str) -> Vec<u8> {
     package_with_resources("", body)
@@ -192,6 +202,8 @@ fn a_document_that_carries_the_markup_conserves_every_fact() {
             glyphs: 8,
             rgb: [0.0, 0.0, 0.0],
             advances: Vec::new(),
+            bold: false,
+            italic: false,
         }],
     );
     let verdict = conserve(&census, &census);
@@ -354,6 +366,9 @@ fn a_gradient_axis_the_wrong_way_round_is_reported() {
             kind: Gradient::Linear,
             geometry,
             stops: vec![(0.0, RED), (1.0, GREEN)],
+            alphas: None,
+            middles: Vec::new(),
+            profiled: false,
         },
         bounds: Rect::of(0.0, 0.0, 400.0, 200.0),
         alpha: 1.0,
@@ -383,6 +398,9 @@ fn a_radial_gradient_read_as_an_axial_one_is_a_paint_kind() {
                 kind: Gradient::Radial,
                 geometry: vec![120.0, 120.0, 0.0, 150.0, 150.0, 150.0],
                 stops: vec![(0.0, RED), (1.0, BLUE)],
+                alphas: None,
+                middles: Vec::new(),
+                profiled: false,
             },
             bounds: Rect::of(0.0, 0.0, 300.0, 300.0),
             alpha: 1.0,
@@ -394,6 +412,9 @@ fn a_radial_gradient_read_as_an_axial_one_is_a_paint_kind() {
         kind: Gradient::Linear,
         geometry: vec![120.0, 120.0, 0.0, 150.0, 150.0, 150.0],
         stops: vec![(0.0, RED), (1.0, BLUE)],
+        alphas: None,
+        middles: Vec::new(),
+        profiled: false,
     };
 
     let verdict = conserve(&markup, &document);
@@ -401,6 +422,73 @@ fn a_radial_gradient_read_as_an_axial_one_is_a_paint_kind() {
         verdict.divergences.first(),
         Some(Divergence::PaintKind { .. })
     ));
+}
+
+/// **Stop alphas the document dropped, and a ramp it ran the wrong way.**
+///
+/// A gradient whose stops' alphas differ is two ramps — colour and alpha —
+/// and a build that painted the colours at one constant alpha draws a
+/// plausible gradient that does not fade. So the alphas are a fact of their
+/// own beside the stops.
+#[test]
+fn stop_alphas_dropped_or_reversed_are_reported() {
+    let mark = |alphas: Option<Vec<(f64, f64)>>| Mark {
+        paint: Paint::Gradient {
+            kind: Gradient::Linear,
+            geometry: vec![0.0, 0.0, 400.0, 200.0],
+            stops: vec![(0.0, RED), (1.0, RED)],
+            alphas,
+            middles: Vec::new(),
+            profiled: false,
+        },
+        bounds: Rect::of(0.0, 0.0, 400.0, 200.0),
+        alpha: 1.0,
+    };
+    let stated = Some(vec![(0.0, 1.0), (1.0, 0.0)]);
+    let markup = one(vec![mark(stated.clone())], Vec::new());
+    for drawn in [None, Some(vec![(0.0, 0.0), (1.0, 1.0)])] {
+        let verdict = conserve(&markup, &one(vec![mark(drawn.clone())], Vec::new()));
+        assert_eq!(
+            verdict.divergences,
+            [Divergence::StopAlphas {
+                page: 0,
+                mark: 0,
+                markup: stated.clone(),
+                document: drawn,
+            }]
+        );
+    }
+    assert!(conserve(&markup, &markup).holds());
+}
+
+/// **A ramp blended in the wrong space.**
+///
+/// Its stops are all where the markup put them and the colour between them is
+/// not: 18.3.1.2's `ColorInterpolationMode` decides nothing at a stop and
+/// everything halfway, which is what the census compares.
+#[test]
+fn a_ramp_blended_in_the_wrong_space_is_reported() {
+    let mark = |middle: [f64; 3]| Mark {
+        paint: Paint::Gradient {
+            kind: Gradient::Linear,
+            geometry: vec![0.0, 0.0, 400.0, 200.0],
+            stops: vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])],
+            alphas: None,
+            middles: vec![(0.5, middle)],
+            profiled: false,
+        },
+        bounds: Rect::of(0.0, 0.0, 400.0, 200.0),
+        alpha: 1.0,
+    };
+    // Halfway from black to white: 0.7354 in linear light, 0.5 in sRGB.
+    let markup = one(vec![mark([0.7354; 3])], Vec::new());
+    let verdict = conserve(&markup, &one(vec![mark([0.5; 3])], Vec::new()));
+    assert!(
+        matches!(verdict.divergences.as_slice(), [Divergence::Middles { .. }]),
+        "{:?}",
+        verdict.divergences
+    );
+    assert!(conserve(&markup, &one(vec![mark([0.7360; 3])], Vec::new())).holds());
 }
 
 /// **A stop the document lost, and a radius taken from the wrong one.**
@@ -415,6 +503,9 @@ fn a_gradient_that_lost_a_stop_is_reported_with_both_stop_lists() {
                 kind: Gradient::Linear,
                 geometry: vec![0.0, 0.0, 400.0, 200.0],
                 stops: vec![(0.0, RED), (0.5, GREEN), (1.0, BLUE)],
+                alphas: None,
+                middles: Vec::new(),
+                profiled: false,
             },
             bounds: Rect::of(0.0, 0.0, 400.0, 200.0),
             alpha: 1.0,
@@ -554,6 +645,8 @@ fn a_run_that_lost_glyphs_and_one_that_changed_letters_are_both_reported() {
         glyphs,
         rgb: [0.0, 0.0, 0.0],
         advances: Vec::new(),
+        bold: false,
+        italic: false,
     };
     let markup = one(Vec::new(), vec![run("Page one", 8)]);
 
@@ -593,6 +686,8 @@ fn a_run_at_the_wrong_origin_and_one_at_the_wrong_size_are_separate() {
         glyphs: 8,
         rgb: [0.0, 0.0, 0.0],
         advances: Vec::new(),
+        bold: false,
+        italic: false,
     };
     let markup = one(Vec::new(), vec![run((75.0, 492.0), 18.0)]);
 
@@ -607,6 +702,46 @@ fn a_run_at_the_wrong_origin_and_one_at_the_wrong_size_are_separate() {
         resized.divergences.first(),
         Some(Divergence::EmSize { .. })
     ));
+}
+
+/// **A simulation the document did not draw, and one it drew that the markup
+/// did not ask for.**
+///
+/// 12.1.5's two simulations are independent of each other and of where the
+/// run is: an emboldened run is at its place in its glyphs at its size, and so
+/// is the same run drawn plain. Each is its own fact and each way round is a
+/// divergence.
+#[test]
+fn a_simulation_dropped_or_invented_is_reported() {
+    let run = |bold: bool, italic: bool| Run {
+        origin: (75.0, 492.0),
+        em: 18.0,
+        text: "Page one".to_owned(),
+        glyphs: 8,
+        rgb: [0.0, 0.0, 0.0],
+        advances: Vec::new(),
+        bold,
+        italic,
+    };
+    for (stated, drawn) in [
+        ((true, false), (false, false)),
+        ((false, true), (false, false)),
+        ((false, false), (true, true)),
+    ] {
+        let verdict = conserve(
+            &one(Vec::new(), vec![run(stated.0, stated.1)]),
+            &one(Vec::new(), vec![run(drawn.0, drawn.1)]),
+        );
+        assert_eq!(
+            verdict.divergences,
+            [Divergence::Simulation {
+                page: 0,
+                run: 0,
+                markup: stated,
+                document: drawn,
+            }]
+        );
+    }
 }
 
 /// **A stated advance the document dropped.**
@@ -625,6 +760,8 @@ fn a_stated_advance_the_document_dropped_is_reported_per_glyph() {
         glyphs: 2,
         rgb: [0.0, 0.0, 0.0],
         advances: vec![Some(advance), None],
+        bold: false,
+        italic: false,
     };
     // 53 hundredths of a 24-unit em is 9.54 points; the face's own 586
     // thousandths is 10.548, which is what a build that dropped the override
@@ -1046,7 +1183,7 @@ fn the_document_census_reads_a_document_this_test_wrote() {
     assert!(
         matches!(
             &page.marks[1].paint,
-            Paint::Gradient { kind: Gradient::Linear, geometry, stops }
+            Paint::Gradient { kind: Gradient::Linear, geometry, stops, .. }
                 if *geometry == vec![10.0, 0.0, 50.0, 0.0] && stops.len() == 2
         ),
         "{:?}",
@@ -1111,8 +1248,11 @@ fn the_document_census_reads_the_pages_in_page_order() {
 fn every_committed_package_conserves_the_figure_the_record_states() {
     let recorded = record();
     let mut measured: Vec<String> = Vec::new();
-    for name in COMMITTED {
-        let bytes = corpus(name);
+    let packages = COMMITTED
+        .iter()
+        .map(|name| (*name, corpus(name)))
+        .chain(DERIVED.iter().map(|name| (*name, derived(name))));
+    for (name, bytes) in packages {
         let markup = markup_census(&bytes);
         let verdict = conservation(&bytes);
 
@@ -1154,7 +1294,85 @@ fn every_committed_package_conserves_the_figure_the_record_states() {
         measured, recorded,
         "tests/xps/CONSERVATION.tsv is out of date"
     );
-    assert_eq!(recorded.len(), 13, "the sweep covers thirteen packages");
+    assert_eq!(
+        recorded.len(),
+        COMMITTED.len() + DERIVED.len(),
+        "the sweep covers thirteen real packages and those derived from them"
+    );
+    assert_eq!(COMMITTED.len(), 13);
+}
+
+/// The packages the sweep covers that no producer wrote, by their path under
+/// `tests/`.
+///
+/// **One**, and it exists because no producer on hand writes an interleaved
+/// package (OPC 7.2.4). `wpf-image-and-text-pieces.xps` is
+/// `wpf-image-and-text.xps` with six of its eight items cut into pieces and
+/// the pieces written round-robin — `[Content_Types].xml`, both relationships
+/// parts, the page, the PNG and the ODTTF font — by
+/// `tests/xps_interleaved/make-interleaved.py`, so every byte of every part is
+/// a real producer's and only the container is this repository's.
+/// `an_interleaved_package_states_the_census_of_the_one_it_was_cut_from` holds
+/// the two to one census.
+const DERIVED: &[&str] = &[
+    "xps_interleaved/wpf-image-and-text-pieces.xps",
+    // One per `XpsElementDefect` row closed since, each `wpf-image-and-text.xps`
+    // with its page replaced (`tests/xps_rows/README.md`).
+    "xps_rows/wpf-style-simulations.xps",
+    "xps_rows/wpf-stop-alphas.xps",
+    "xps_rows/wpf-colour-interpolation.xps",
+    "xps_rows/wpf-n-channel.xps",
+    "xps_rows/wpf-context-stops.xps",
+];
+
+/// **An interleaved package conserves, and states the census of the package
+/// it was cut from.**
+///
+/// The two carry the same parts byte for byte, so anything the pieces changed
+/// about the page — a part joined out of order, a piece dropped, a font whose
+/// obfuscation key came from the wrong name — is a divergence between two
+/// censuses that must be equal.
+#[test]
+fn an_interleaved_package_states_the_census_of_the_one_it_was_cut_from() {
+    let whole = markup_census(&corpus("wpf-image-and-text.xps"));
+    let pieces_bytes = derived("xps_interleaved/wpf-image-and-text-pieces.xps");
+    let pieces = markup_census(&pieces_bytes);
+    assert_eq!(whole.facts(), pieces.facts());
+    assert!(
+        conserve(&whole, &pieces).holds(),
+        "{:?}",
+        conserve(&whole, &pieces).divergences
+    );
+    let verdict = conservation(&pieces_bytes);
+    assert!(verdict.holds(), "{:?}", verdict.divergences);
+    assert_eq!(verdict.figure(), (3, 3), "the image, the run and the page");
+
+    // And the page is the same picture, which the census's counts and places
+    // do not say: a font joined from its pieces in the wrong order still
+    // yields a run at the right place, in glyphs that are not the file's.
+    let render = |bytes: Vec<u8>| {
+        let document = Document::open(bytes).expect("the package opens");
+        assert!(
+            document.archive().expect("a report").warnings().is_empty(),
+            "{:?}",
+            document.archive().map(|r| r.warnings().to_vec())
+        );
+        document
+            .page(0)
+            .expect("a page")
+            .render(&tinker_pdf::RenderOptions::default())
+    };
+    let one = render(corpus("wpf-image-and-text.xps"));
+    let other = render(pieces_bytes);
+    assert_eq!((one.width, one.height), (other.width, other.height));
+    assert!(
+        one.data == other.data,
+        "the two packages draw different pages"
+    );
+    assert!(
+        one.data.iter().any(|&b| b != 0xFF),
+        "the page drew something, so agreeing means something"
+    );
 }
 
 /// The packages the sweep covers, which is the list rather than the record of

@@ -30,7 +30,7 @@ use crate::path::Outline;
 use crate::shape::{self, Shape};
 use crate::style::Style;
 use crate::transform::{self, IDENTITY};
-use crate::{Clip, Paint, Stop};
+use crate::{Clip, Paint, Refusal, Spread, Stop};
 
 /// How far an `xlink:href` chain between paint servers may run.
 ///
@@ -99,12 +99,18 @@ enum Units {
     BoundingBox,
 }
 
-/// What a gradient resolved to, plus what could not be honoured.
+/// What a gradient resolved to.
 pub struct Resolved {
     /// The paint.
     pub paint: Paint,
-    /// Whether `spreadMethod` was one this build does not draw.
-    pub spread_unsupported: bool,
+}
+
+/// Whether resolving the gradient at `at` needs the painted element's box:
+/// its `gradientUnits`, along the `xlink:href` chain, are §13.2.3's initial
+/// `objectBoundingBox`.
+#[must_use]
+pub fn measures_box(tree: &Tree, at: usize) -> bool {
+    along(tree, &chain(tree, at), "gradientUnits") != Some("userSpaceOnUse")
 }
 
 /// Resolves a `<linearGradient>` or `<radialGradient>` into a [`Paint`].
@@ -131,8 +137,13 @@ pub fn resolve(
         // §13.2.3's initial value, and the one a file that says nothing means.
         _ => Units::BoundingBox,
     };
-    let spread = along(tree, &chain, "spreadMethod");
-    let spread_unsupported = matches!(spread, Some("reflect" | "repeat"));
+    // §13.2.3: inherited along the chain like every other attribute, and
+    // `pad` for anything that is not one of the three.
+    let spread = match along(tree, &chain, "spreadMethod") {
+        Some("reflect") => Spread::Reflect,
+        Some("repeat") => Spread::Repeat,
+        _ => Spread::Pad,
+    };
 
     // §13.2.3: `gradientTransform` is applied *inside* the units mapping, so
     // a translate on a bounding-box gradient moves it by a fraction of the box
@@ -186,6 +197,7 @@ pub fn resolve(
             to,
             matrix,
             stops,
+            spread,
         }
     } else {
         let half = basis / 2.0;
@@ -201,7 +213,6 @@ pub fn resolve(
             let last = stops.last()?;
             return Some(Resolved {
                 paint: Paint::Solid(last.colour),
-                spread_unsupported,
             });
         }
         Paint::Radial {
@@ -210,12 +221,10 @@ pub fn resolve(
             focus,
             matrix,
             stops,
+            spread,
         }
     };
-    Some(Resolved {
-        paint,
-        spread_unsupported,
-    })
+    Some(Resolved { paint })
 }
 
 /// §13.2.4's stops, from the first element of the chain that has any.
@@ -285,73 +294,293 @@ fn stops(tree: &Tree, chain: &[usize], style: &Style) -> Vec<Stop> {
     out
 }
 
-/// §14.3's `<clipPath>`, as one outline in the scene's space.
+/// A `<clipPath>` read for one element: the union of its shapes, and the
+/// text that a silhouette has to be drawn for.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipSource {
+    /// The `<clipPath>` element.
+    pub at: usize,
+    /// Its shapes, and the shapes its `<use>` children name, as one outline.
+    pub clip: Clip,
+    /// Its `<text>` children, and the `<text>` its `<use>` children name:
+    /// each as the element to walk, the matrix to walk it under, and the
+    /// element whose style it inherits — the `<clipPath>`, or the `<use>`.
+    ///
+    /// A glyph's outline is a font's, which this crate does not have
+    /// (ruling 8), so text cannot join [`ClipSource::clip`]'s outline here; the
+    /// walk draws it as a silhouette instead.
+    pub text: Vec<(usize, [f64; 6], usize)>,
+    /// Whether a child was something §14.3.5 does not let a clipping path
+    /// hold — a `<g>`, an `<image>`, or a `<use>` naming anything but a shape
+    /// or text — and contributed nothing.
+    pub ignored: bool,
+}
+
+/// Whether the `<clipPath>` a reference names holds text, directly or
+/// through a `<use>` — which decides whether it can be an outline at all.
+#[must_use]
+pub fn clip_holds_text(tree: &Tree, name: &str) -> bool {
+    let Some(at) = tree
+        .by_id(name)
+        .filter(|at| tree.nodes[*at].is_svg() && tree.nodes[*at].name == "clipPath")
+    else {
+        return false;
+    };
+    tree.element_children(at).any(|child| {
+        let node = &tree.nodes[child];
+        node.is_svg()
+            && (node.name == "text"
+                || (node.name == "use"
+                    && use_target(tree, node)
+                        .is_some_and(|target| tree.nodes[target].name == "text")))
+    })
+}
+
+/// Whether the `<clipPath>` a reference names is in `objectBoundingBox` units,
+/// so that resolving it needs the clipped element's box.
+#[must_use]
+pub fn clip_measures_box(tree: &Tree, name: &str) -> bool {
+    tree.by_id(name)
+        .map(|at| &tree.nodes[at])
+        .filter(|node| node.is_svg() && node.name == "clipPath")
+        .and_then(|node| node.attr("clipPathUnits"))
+        .is_some_and(|units| units.trim() == "objectBoundingBox")
+}
+
+/// The SVG element a `<use>` names, if any.
+fn use_target(tree: &Tree, node: &Node) -> Option<usize> {
+    node.href()
+        .map(str::trim)
+        .and_then(|href| href.strip_prefix('#'))
+        .and_then(|id| tree.by_id(id))
+        .filter(|target| tree.nodes[*target].is_svg())
+}
+
+/// An element's own `transform`, applied inside `outer`.
+fn own_matrix(node: &Node, outer: [f64; 6]) -> [f64; 6] {
+    node.attr("transform")
+        .and_then(transform::list)
+        .map_or(outer, |own| transform::concat(own, outer))
+}
+
+/// §14.3's `<clipPath>`, as one outline in the scene's space and the text it
+/// holds.
 ///
 /// `matrix` and `bounds` mean what they mean for a gradient: the referencing
 /// element's own matrix, and its bounding box in its own user space for
 /// `clipPathUnits="objectBoundingBox"`.
 ///
-/// `None` when the reference names no `<clipPath>` at all. An **empty**
+/// §14.3.5's content model is shapes, `<text>` and `<use>`, and a `<use>` there
+/// *"must directly reference 'path', 'text' or basic shapes elements"*. One
+/// that does is that element, placed as §5.6 places it — the `<use>`'s
+/// `transform`, then its `x` and `y` — and one that does not, or a child of
+/// another kind, contributes nothing and is [`ClipSource::ignored`].
+///
+/// Every segment of the outline is spent from `segments`, the walk's budget:
+/// a clip is rebuilt for each element that names it, and a `<use>` makes one
+/// element's geometry count as often as the clips that name it are used.
+///
+/// `Ok(None)` when the reference names no `<clipPath>` at all. An **empty**
 /// `<clipPath>` is `Some` with an empty outline, and the difference matters:
 /// §14.3.5 says a clipping path with nothing in it clips everything away, so a
 /// build that returned `None` for both would draw the element unclipped.
-#[must_use]
+///
+/// # Errors
+///
+/// [`Refusal::TooManySegments`] when the outline would pass `segments`.
 pub fn clip(
     tree: &Tree,
     name: &str,
     matrix: [f64; 6],
     bounds: [f64; 4],
     style: &Style,
-) -> Option<Clip> {
-    let at = tree.by_id(name)?;
+    segments: &mut usize,
+) -> Result<Option<ClipSource>, Refusal> {
+    let Some(at) = tree.by_id(name) else {
+        return Ok(None);
+    };
     let node = &tree.nodes[at];
     if !node.is_svg() || node.name != "clipPath" {
-        return None;
+        return Ok(None);
     }
+    let mut source = ClipSource {
+        at,
+        clip: Clip {
+            outline: Outline::default(),
+            rule: style.clip_rule,
+        },
+        text: Vec::new(),
+        ignored: false,
+    };
     let [min_x, min_y, max_x, max_y] = bounds;
     let (width, height) = (max_x - min_x, max_y - min_y);
     let base = match node.attr("clipPathUnits").map(str::trim) {
         Some("objectBoundingBox") => {
             if !(width > 0.0 && height > 0.0) {
-                return Some(Clip {
-                    outline: Outline::default(),
-                    rule: style.clip_rule,
-                });
+                return Ok(Some(source));
             }
             transform::concat([width, 0.0, 0.0, height, min_x, min_y], matrix)
         }
         // §14.3.4's initial value.
         _ => matrix,
     };
-    let own = node
-        .attr("transform")
-        .and_then(transform::list)
-        .unwrap_or(IDENTITY);
-    let base = transform::concat(own, base);
+    let base = own_matrix(node, base);
 
-    let mut outline = Outline::default();
     for child in tree.element_children(at) {
-        let child = &tree.nodes[child];
-        let mut degraded = Vec::new();
+        let element = &tree.nodes[child];
+        if !element.is_svg() {
+            continue;
+        }
         // The viewport a percentage inside a clip path resolves against is the
         // bounding box under `objectBoundingBox` and the user space otherwise;
         // both are already in `base`, so the numbers here are plain.
-        let Some(Shape::Outline(shape)) = shape::outline(child, (width, height), &mut degraded)
-        else {
-            continue;
+        let (shape_at, placed) = match element.name.as_str() {
+            // Descriptive and animation elements are in the content model and
+            // draw nothing — not ignored, because nothing was asked for.
+            "title" | "desc" | "metadata" | "animate" | "animateColor" | "animateMotion"
+            | "animateTransform" | "set" => continue,
+            "text" => {
+                source.text.push((child, base, at));
+                continue;
+            }
+            "use" => {
+                let Some(target) = use_target(tree, element) else {
+                    source.ignored = true;
+                    continue;
+                };
+                let length = |name: &str, basis: f64| {
+                    element
+                        .attr(name)
+                        .and_then(|text| document::length(text, Some(basis)))
+                        .unwrap_or(0.0)
+                };
+                // §5.6: the `<use>`'s own `transform`, then a translation by
+                // its `x` and `y`, then the referenced element's `transform`.
+                let placed = transform::concat(
+                    [1.0, 0.0, 0.0, 1.0, length("x", width), length("y", height)],
+                    own_matrix(element, base),
+                );
+                if tree.nodes[target].name == "text" {
+                    source.text.push((target, placed, child));
+                    continue;
+                }
+                (target, placed)
+            }
+            _ => (child, base),
         };
-        let child_matrix = child
-            .attr("transform")
-            .and_then(transform::list)
-            .map_or(base, |own| transform::concat(own, base));
-        outline
-            .segments
-            .extend(shape.transformed(child_matrix).segments);
+        let mut degraded = Vec::new();
+        let shape_node = &tree.nodes[shape_at];
+        match shape::outline(shape_node, (width, height), &mut degraded) {
+            Some(Shape::Outline(shape)) => {
+                let count = shape.segments.len();
+                if count > *segments {
+                    return Err(Refusal::TooManySegments);
+                }
+                *segments -= count;
+                source
+                    .clip
+                    .outline
+                    .segments
+                    .extend(shape.transformed(own_matrix(shape_node, placed)).segments);
+            }
+            // A shape with nothing to draw, or an attribute it could not read,
+            // is a shape that adds no silhouette: the walk names an unreadable
+            // one where it is drawn, and a clip is not where it is drawn.
+            Some(Shape::Nothing | Shape::Unreadable(_)) => {}
+            None => source.ignored = true,
+        }
     }
-    Some(Clip {
-        outline,
-        rule: style.clip_rule,
+    Ok(Some(source))
+}
+
+/// §7.11's bounding box of a **container**, from what it drew.
+///
+/// The nodes are already in the scene's space, so `inverse` — the inverse of
+/// the container's own matrix — brings every point back into the container's
+/// user space, which is what `objectBoundingBox` on a `<g>` is a fraction of.
+/// Text is not measured here: its extent is a font metric this crate does not
+/// have (ruling 8), so a group of text alone has the empty box. That is
+/// **not** §13.2.3's zero-area answer — the text has an extent, this crate
+/// cannot take it — so a caller asks [`nodes_hold_text`] as well, and a
+/// bounding-box mask, clip or paint on text is not resolved against nothing
+/// but named (`Warning::TextBoxUnmeasured`) — unless the walk's caller
+/// measured the runs, whose cells then come in through [`nodes_bounds_with`].
+///
+/// Markers are not in §7.11's box either, and a container's nodes do not say
+/// which of them a marker drew: a group holding a marked path measures the
+/// markers with it. A shape's own `mask` or text-holding `clip-path` is
+/// measured from the shape's geometry alone, where the walk has it.
+#[must_use]
+pub fn nodes_bounds(nodes: &[crate::Node], inverse: [f64; 6]) -> [f64; 4] {
+    nodes_bounds_with(nodes, &[], inverse)
+}
+
+/// [`nodes_bounds`], with `cells` — points in the scene's space, the corners
+/// of text runs a caller measured — counted with the nodes' own.
+#[must_use]
+pub fn nodes_bounds_with(nodes: &[crate::Node], cells: &[[f64; 2]], inverse: [f64; 6]) -> [f64; 4] {
+    let mut points: Vec<[f64; 2]> = cells.to_vec();
+    gather(nodes, &mut points);
+    let mut out = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+    let mut seen = false;
+    for point in points {
+        let [x, y] = transform::apply(inverse, point);
+        if !(x.is_finite() && y.is_finite()) {
+            continue;
+        }
+        seen = true;
+        out[0] = out[0].min(x);
+        out[1] = out[1].min(y);
+        out[2] = out[2].max(x);
+        out[3] = out[3].max(y);
+    }
+    if seen {
+        out
+    } else {
+        [0.0, 0.0, 0.0, 0.0]
+    }
+}
+
+/// Whether a list of nodes draws text that [`nodes_bounds`] left out of its
+/// box — at any depth of group, as the box itself is gathered.
+#[must_use]
+pub fn nodes_hold_text(nodes: &[crate::Node]) -> bool {
+    nodes.iter().any(|node| match node {
+        crate::Node::Text { .. } => true,
+        crate::Node::Group { nodes, .. } => nodes_hold_text(nodes),
+        crate::Node::Path { .. } | crate::Node::Image { .. } => false,
     })
+}
+
+/// Every point a list of nodes visits, in the scene's space.
+fn gather(nodes: &[crate::Node], points: &mut Vec<[f64; 2]>) {
+    use crate::path::Segment;
+    for node in nodes {
+        match node {
+            crate::Node::Path { outline, .. } => {
+                for segment in &outline.segments {
+                    match *segment {
+                        Segment::Move(p) | Segment::Line(p) => points.push(p),
+                        Segment::Cubic(a, b, c) => points.extend([a, b, c]),
+                        Segment::Close => {}
+                    }
+                }
+            }
+            crate::Node::Image { rect, matrix, .. } => {
+                let [x, y, width, height] = *rect;
+                for corner in [
+                    [x, y],
+                    [x + width, y],
+                    [x, y + height],
+                    [x + width, y + height],
+                ] {
+                    points.push(transform::apply(*matrix, corner));
+                }
+            }
+            crate::Node::Group { nodes, .. } => gather(nodes, points),
+            crate::Node::Text { .. } => {}
+        }
+    }
 }
 
 /// The bounding box of an outline in its own space, as `[min_x, min_y, max_x,

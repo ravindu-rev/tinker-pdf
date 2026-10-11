@@ -61,9 +61,51 @@
 //! [`TiffError`] names all of it. The pattern is `png.rs`'s: damage that costs
 //! *pixels* is a [`Warning`] and leaves a partial raster (ruling 2), and
 //! anything that would make this module produce a plausible picture of the
-//! wrong thing is an error. A `PhotometricInterpretation` of 5 (CMYK) decoded
-//! as RGB is not a degraded image, it is a different one.
+//! wrong thing is an error. A CIELab image decoded as RGB is not a degraded
+//! image, it is a different one.
+//!
+//! # What the archive row added, and the two display mappings it had to choose
+//!
+//! - **CMYK** (`PhotometricInterpretation` 5 with `InkSet` 1, §16) is read
+//!   and handed back as [`TiffColour::Cmyk`]: the samples as the file holds
+//!   them, ink amounts with zero as no ink, which is exactly what PDF's
+//!   `/DeviceCMYK` means by a component (ISO 32000-2 8.6.4.4). No conversion
+//!   happens here; the embedder names the space. An `InkSet` of 2 is not CMYK
+//!   and is refused by name.
+//! - **BigTIFF** — the magic 43 header, eight-byte offsets and counts, the
+//!   twenty-byte directory entry and the `LONG8`/`IFD8` types — is read by the
+//!   same walk as the classic layout, with the widths chosen once at the
+//!   header.
+//! - **`Compression` 34712**, JPEG 2000: each strip or tile is a codestream
+//!   and is decoded by `jpx`, the decoder `/JPXDecode` already has.
+//! - **CIE `L*a*b*`** (`PhotometricInterpretation` 8, §23; 4 October 2026)
+//!   at 8 and 16 bits, handed back as [`TiffColour::Lab`] with `a*` and `b*`
+//!   turned from the file's two's complement into offset binary by flipping
+//!   their top bit — exact, and a number line PDF's `/Lab` reads as it stands
+//!   over the right `/Range`, which is how the embed door writes it. No colour
+//!   is converted here, for CMYK's reason.
+//! - **Directories after the first**: [`tiff_scan_directory`] scans any
+//!   directory on the `NextIFD` chain, and [`TiffScan::subfile`] carries
+//!   `NewSubfileType` so a caller paging a multi-page file can tell a page from
+//!   a thumbnail or a mask.
+//! - **`SampleFormat` 2 and 3 and `Predictor` 3.** A signed or floating-point
+//!   sample is a number, and a picture needs an intensity, so the mapping
+//!   between them is a decision — taken once, in [`TiffSampleRange`], and
+//!   stated rather than left to be inferred. TIFF 6.0 §19 (p.80) gives it for
+//!   an integer: `SMinSampleValue` and `SMaxSampleValue` bound the samples,
+//!   and "the default for SMinSampleValue and SMaxSampleValue is the full
+//!   range of the data type" — so a signed sample is mapped linearly from its
+//!   type's range, which is an offset by half of it. For IEEE floats "the full
+//!   range of the data type" is ±3.4 x 10^38 and maps every photograph to
+//!   mid-grey, so the default there is **[0, 1]**: the range ISO 32000-2
+//!   8.6.4 gives a device colour component, where a float image's samples are
+//!   read as the component itself and clamped outside it. An explicit
+//!   `SMinSampleValue`/`SMaxSampleValue` overrides either default. `Predictor`
+//!   3 is Adobe's floating-point predictor (Photoshop TIFF Technical Note 3):
+//!   each row's samples split into byte planes most significant first, then
+//!   differenced byte by byte with a stride of one pixel.
 
+use crate::jpx;
 use crate::{
     ccitt, inflate, jpeg, lzw, packbits, predictors, CcittParams, Limits, PredictorParams, Warning,
     Warnings,
@@ -104,7 +146,19 @@ pub const MAX_TIFF_SAMPLES: u64 = 1 << 26;
 /// files: the guard catches an IFD that points at itself or at an earlier one,
 /// and this catches a long descending chain that never repeats. Sixteen would
 /// cover every multi-page fax anyone has sent; 64 is the round number above
-/// it, and both are far below the point where the walk costs anything.
+/// it, and both are far below the point where the *walk* costs anything.
+///
+/// *Corrected 2 October 2026, on review.* That last clause is true of the walk
+/// and was not true of what a caller does with it. Since a comic page is one
+/// per directory (`tinker_pdf::cbz`), this is also the most pages one TIFF
+/// entry becomes, and so a multiplier on the work and the memory of a single
+/// entry: sixty-four directories over one 16 MiB strip are sixty-four
+/// decodes or copies of it. What bounds that is the caller's caps, not this
+/// one — `cbz` charges each directory against `MAX_CBZ_PAGES` and
+/// `MAX_SYNTHESISED_PDF` as it is built, before the next is decoded, so the
+/// most a TIFF entry holds is what those caps admit plus the one directory in
+/// hand. It is not a `bounds_ledger.rs` row for that reason: a page count
+/// those two caps already bound, under a second name.
 const MAX_TIFF_IFDS: usize = 64;
 
 /// Strips or tiles in one image.
@@ -132,11 +186,13 @@ const BIG_ENDIAN: [u8; 2] = *b"MM";
 /// p.13's "arbitrary but carefully chosen number (42)".
 const TIFF_MAGIC: u16 = 42;
 
-/// BigTIFF's magic, which is not TIFF 6.0's and is refused by name.
+/// BigTIFF's magic: the same two order bytes, eight-byte offsets after them.
 const BIGTIFF_MAGIC: u16 = 43;
 
 // --- the tags -----------------------------------------------------------
 
+const TAG_NEW_SUBFILE_TYPE: u16 = 254;
+const TAG_SUBFILE_TYPE: u16 = 255;
 const TAG_IMAGE_WIDTH: u16 = 256;
 const TAG_IMAGE_LENGTH: u16 = 257;
 const TAG_BITS_PER_SAMPLE: u16 = 258;
@@ -158,8 +214,11 @@ const TAG_TILE_WIDTH: u16 = 322;
 const TAG_TILE_LENGTH: u16 = 323;
 const TAG_TILE_OFFSETS: u16 = 324;
 const TAG_TILE_BYTE_COUNTS: u16 = 325;
+const TAG_INK_SET: u16 = 332;
 const TAG_EXTRA_SAMPLES: u16 = 338;
 const TAG_SAMPLE_FORMAT: u16 = 339;
+const TAG_S_MIN_SAMPLE_VALUE: u16 = 340;
+const TAG_S_MAX_SAMPLE_VALUE: u16 = 341;
 const TAG_JPEG_TABLES: u16 = 347;
 
 // --- the refusals -------------------------------------------------------
@@ -175,9 +234,9 @@ const TAG_JPEG_TABLES: u16 = 347;
 pub enum TiffError {
     /// The first four bytes are neither `II*\0` nor `MM\0*`.
     NotTiff,
-    /// The magic number was 43: BigTIFF, whose offsets are eight bytes wide
-    /// and whose directory layout is a different format wearing the same two
-    /// order bytes.
+    /// The magic number was 43 — BigTIFF — and the header did not say its
+    /// offsets are eight bytes wide with a zero after, which is the only
+    /// BigTIFF there is.
     BigTiff,
     /// The first directory's offset does not land inside the file, or the
     /// directory is cut off inside its own entry array.
@@ -187,23 +246,34 @@ pub enum TiffError {
     /// A zero width or height, or a product past `u32`.
     BadDimensions { width: u32, height: u32 },
     /// A `Compression` value this build does not decode — 6 (old-style JPEG,
-    /// withdrawn by TIFF Technical Note 2), 34712 (JPEG 2000) and the rest.
+    /// which TIFF Technical Note 2 replaced with 7, and which is owed on the
+    /// ROADMAP for the files whose `JPEGInterchangeFormat` points at a whole
+    /// JPEG stream) and the rest.
     UnsupportedCompression(u16),
-    /// A `PhotometricInterpretation` outside {0, 1, 2, 3} — and 6, which is
-    /// read only when `Compression` is 7 and the JPEG has already undone it.
+    /// A `PhotometricInterpretation` outside {0, 1, 2, 3, 5, 8} — and 6, which
+    /// is read only when `Compression` is 7 and the JPEG has already undone it.
+    /// 4 (a transparency mask for another image) and 32803 (a colour filter
+    /// array) are permanent refusals: the first is not a picture and the
+    /// second needs a demosaicing choice no file adjudicates.
     UnsupportedPhotometric(u16),
-    /// A `BitsPerSample` outside {1, 2, 4, 8, 16}.
+    /// `PhotometricInterpretation` 5 with an `InkSet` other than 1: separated
+    /// inks that are not cyan, magenta, yellow and black, which no device
+    /// space names.
+    UnsupportedInkSet(u16),
+    /// A `BitsPerSample` its `SampleFormat` cannot carry: unsigned outside
+    /// {1, 2, 4, 8, 16, 32}, signed outside {8, 16, 32}, floating point
+    /// outside {16, 32, 64}, or a palette index past sixteen bits.
     UnsupportedBitDepth(u16),
     /// `BitsPerSample` gave different depths for different samples. TIFF 6.0
     /// permits it; nothing in this decoder's sample path carries two depths at
     /// once, and half-expanding one would be worse than saying so.
     UnequalBitDepths,
-    /// `SampleFormat` other than 1 (unsigned integer). Two's-complement and
-    /// IEEE floating-point samples are a different number line, and reading
-    /// them as unsigned produces a picture rather than a refusal.
+    /// A `SampleFormat` outside {1, 2, 3, 4}, two formats in one image, or a
+    /// signed or floating-point sample on a palette or a fax coding.
     UnsupportedSampleFormat(u16),
-    /// `Predictor` other than 1 or 2. Value 3 is floating-point predictor
-    /// (TIFF Technical Note 3), which travels with float samples.
+    /// `Predictor` other than 1, 2 or 3 — or 3, the floating-point predictor
+    /// of Photoshop TIFF Technical Note 3, on samples that are not floating
+    /// point.
     UnsupportedPredictor(u16),
     /// `PlanarConfiguration` other than 1 or 2.
     UnsupportedPlanarConfiguration(u16),
@@ -234,7 +304,7 @@ impl core::fmt::Display for TiffError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NotTiff => f.write_str("not a TIFF: no II*\\0 or MM\\0* header"),
-            Self::BigTiff => f.write_str("BigTIFF (magic 43), which is a different format"),
+            Self::BigTiff => f.write_str("a BigTIFF header whose offsets are not eight bytes"),
             Self::UnreadableDirectory => f.write_str("no readable image file directory"),
             Self::MissingTag(t) => write!(f, "tag {t} is absent and has no default"),
             Self::BadDimensions { width, height } => {
@@ -242,6 +312,7 @@ impl core::fmt::Display for TiffError {
             }
             Self::UnsupportedCompression(c) => write!(f, "Compression {c}"),
             Self::UnsupportedPhotometric(p) => write!(f, "PhotometricInterpretation {p}"),
+            Self::UnsupportedInkSet(i) => write!(f, "InkSet {i}"),
             Self::UnsupportedBitDepth(b) => write!(f, "BitsPerSample {b}"),
             Self::UnequalBitDepths => f.write_str("BitsPerSample gave two depths for one image"),
             Self::UnsupportedSampleFormat(s) => write!(f, "SampleFormat {s}"),
@@ -295,6 +366,9 @@ pub enum TiffCompression {
     Deflate,
     /// 32773: PackBits (§9).
     PackBits,
+    /// 34712: each strip or tile a JPEG 2000 codestream, decoded by the
+    /// decoder `/JPXDecode` already has.
+    Jpeg2000,
 }
 
 impl TiffCompression {
@@ -308,6 +382,7 @@ impl TiffCompression {
             7 => Self::Jpeg,
             8 | 32946 => Self::Deflate,
             32773 => Self::PackBits,
+            34712 => Self::Jpeg2000,
             _ => return None,
         })
     }
@@ -333,11 +408,22 @@ pub enum TiffPhotometric {
     Rgb,
     /// 3: the sample is an index into `ColorMap`.
     Palette,
+    /// 5 with `InkSet` 1: cyan, magenta, yellow and black ink amounts (§16),
+    /// zero being no ink.
+    Separated,
     /// 6: YCbCr — **only** with `Compression` 7, where T.81's own colour
     /// transform has already run by the time this module sees a sample. TIFF
     /// 6.0 §21's subsampled YCbCr over any other compression is refused, since
     /// nothing here would undo the subsampling.
     YCbCr,
+    /// 8: CIE L*a*b* (§23) — `L*` unsigned over 0..100, `a*` and `b*` signed
+    /// two's complement — at 8 or 16 bits, unsigned `SampleFormat`, and a
+    /// compression whose samples are the file's own (none, LZW, deflate,
+    /// PackBits). Handed back as [`TiffColour::Lab`] with `a*` and `b*`
+    /// **offset by half their range** — the top bit flipped, which turns two's
+    /// complement into offset binary exactly — so that every channel is an
+    /// unsigned number like every other colour this module returns.
+    CieLab,
 }
 
 /// `PlanarConfiguration` (tag 284).
@@ -365,13 +451,28 @@ pub enum TiffLayout {
 }
 
 /// The channel layout of [`TiffImage::data`] — [`crate::PngColour`]'s four,
-/// deliberately, so a consumer that splits an alpha channel learns one shape.
+/// deliberately, so a consumer that splits an alpha channel learns one shape,
+/// and the two CMYK ones `PhotometricInterpretation` 5 adds, and the two
+/// CIE L*a*b* ones 8 adds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TiffColour {
     Grey,
     GreyAlpha,
     Rgb,
     Rgba,
+    /// Cyan, magenta, yellow, black: ink amounts, zero being none.
+    Cmyk,
+    /// The same, and an opacity last.
+    CmykAlpha,
+    /// CIE `L*`, `a*`, `b*` (§23), each an unsigned sample at the output
+    /// depth: `L*` is `100 s / max`, and `a*` and `b*` are offset binary,
+    /// `256 (s / (max + 1)) - 128` — the file's two's complement with its top
+    /// bit flipped, so `128` (or `32768`) is zero chroma. That is exactly a
+    /// PDF `/Lab` sample over `/Range [-128, 128 - 256/2^bits]` (8.6.5.4,
+    /// Table 90), which is how it is embedded.
+    Lab,
+    /// The same, and an opacity last.
+    LabAlpha,
 }
 
 impl TiffColour {
@@ -380,17 +481,59 @@ impl TiffColour {
         match self {
             Self::Grey => 1,
             Self::GreyAlpha => 2,
-            Self::Rgb => 3,
-            Self::Rgba => 4,
+            Self::Rgb | Self::Lab => 3,
+            Self::Rgba | Self::Cmyk | Self::LabAlpha => 4,
+            Self::CmykAlpha => 5,
         }
     }
 
     /// Whether the last component is an opacity rather than a colour.
     #[must_use]
     pub const fn has_alpha(self) -> bool {
-        matches!(self, Self::GreyAlpha | Self::Rgba)
+        matches!(
+            self,
+            Self::GreyAlpha | Self::Rgba | Self::CmykAlpha | Self::LabAlpha
+        )
     }
 }
+
+/// `SampleFormat` (tag 339, TIFF 6.0 §19), for the values this build reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TiffSampleFormat {
+    /// 1, and 4 ("undefined"), which p.80 says a reader treats as absent.
+    Unsigned,
+    /// 2: two's complement.
+    Signed,
+    /// 3: IEEE 754 binary16, binary32 or binary64.
+    Float,
+}
+
+/// The sample values one channel's darkest and brightest intensities stand
+/// for — `SMinSampleValue` and `SMaxSampleValue` (§19), or their defaults.
+///
+/// For an integer format the default is §19's own, "the full range of the
+/// data type": a signed eight-bit sample runs from -128 to 127 and is mapped
+/// onto 0 to 255 by adding 128. For IEEE floats the default is [0, 1], for the
+/// reason the module note gives. A sample is mapped linearly, rounded to
+/// nearest and clamped; the integer case is computed exactly in integers, the
+/// float case in IEEE double arithmetic, which is identical on every target
+/// (ruling 4).
+///
+/// Equality compares the two numbers bit for bit, which is what "the file said
+/// the same thing" means for a float and what lets [`TiffScan`] stay `Eq`.
+#[derive(Clone, Copy, Debug)]
+pub struct TiffSampleRange {
+    pub min: f64,
+    pub max: f64,
+}
+
+impl PartialEq for TiffSampleRange {
+    fn eq(&self, other: &Self) -> bool {
+        self.min.to_bits() == other.min.to_bits() && self.max.to_bits() == other.max.to_bits()
+    }
+}
+
+impl Eq for TiffSampleRange {}
 
 /// `XResolution` / `YResolution` (282, 283) and `ResolutionUnit` (296).
 ///
@@ -431,12 +574,17 @@ pub struct TiffScan<'a> {
     pub height: u32,
     /// One depth for every sample; [`TiffError::UnequalBitDepths`] otherwise.
     pub bits_per_sample: u16,
+    /// How a sample of that depth is a number.
+    pub sample_format: TiffSampleFormat,
+    /// Per sample, the values the darkest and brightest intensities stand
+    /// for. Consulted only for signed and floating-point samples.
+    pub sample_ranges: Vec<TiffSampleRange>,
     /// `SamplesPerPixel`, colour channels **and** extras.
     pub samples_per_pixel: u16,
     pub compression: TiffCompression,
     pub photometric: TiffPhotometric,
     pub planar: TiffPlanar,
-    /// 1 or 2; anything else is refused.
+    /// 1, 2, or 3 on floating-point samples; anything else is refused.
     pub predictor: u16,
     /// 1 MSB-first, 2 LSB-first (p.32). Honoured for bit-oriented codings and
     /// reported and ignored for the rest — see the module note.
@@ -463,8 +611,13 @@ pub struct TiffScan<'a> {
     /// file's own order and leave in big-endian.
     pub little_endian: bool,
     /// Directories on the `NextIFD` chain, bounded by [`MAX_TIFF_IFDS`] and by
-    /// the cycle guard. Only the first is decoded.
+    /// the cycle guard. [`tiff_scan`] reads the first; [`tiff_scan_directory`]
+    /// reads any of them.
     pub pages: u32,
+    /// `NewSubfileType` (254): bit 0 a reduced-resolution copy of another
+    /// image, bit 1 one page of several, bit 2 a transparency mask. The old
+    /// `SubfileType` (255) value 2 is read as bit 0 and 3 as bit 1.
+    pub subfile: u32,
     /// Typed leniency records (ruling 10), deduplicated.
     pub warnings: Vec<Warning>,
 }
@@ -500,12 +653,48 @@ pub fn tiff_decode(bytes: &[u8], limits: &Limits) -> Result<TiffImage, TiffError
 /// Reads the header and the first image file directory, and finds every strip
 /// or tile, **without decompressing any of them**.
 ///
+/// A file with more than one directory says so with
+/// [`Warning::TiffExtraPagesIgnored`]: this door is for a caller that places
+/// one picture per file, and [`tiff_scan_directory`] is the one for a caller
+/// that pages.
+///
 /// # Errors
 /// Every [`TiffError`] except [`TiffError::ExceedsOutputLimit`], which belongs
 /// to a ceiling this half never reaches.
 pub fn tiff_scan(bytes: &[u8]) -> Result<TiffScan<'_>, TiffError> {
     let mut w = Warnings::default();
+    let (file, first) = open(bytes)?;
+    let fields = read_directory(&file, first).ok_or(TiffError::UnreadableDirectory)?;
+    let chain = directory_chain(&file, first, &mut w);
+    let pages = chain.len() as u32;
+    if pages > 1 {
+        w.push(Warning::TiffExtraPagesIgnored);
+    }
+    build_scan(&file, &fields, pages, w)
+}
 
+/// Scans directory `index` of the `NextIFD` chain, counting from zero, and
+/// finds its strips or tiles without decompressing any of them.
+///
+/// The chain is walked with [`tiff_scan`]'s cycle guard and depth bound, so
+/// an index past either is the same refusal as a directory that is not there.
+/// Nothing warns about the other directories: a caller asking for one by
+/// number is reading them.
+///
+/// # Errors
+/// [`TiffError::UnreadableDirectory`] for an index the chain does not reach,
+/// and every refusal [`tiff_scan`] names.
+pub fn tiff_scan_directory(bytes: &[u8], index: usize) -> Result<TiffScan<'_>, TiffError> {
+    let mut w = Warnings::default();
+    let (file, first) = open(bytes)?;
+    let chain = directory_chain(&file, first, &mut w);
+    let at = *chain.get(index).ok_or(TiffError::UnreadableDirectory)?;
+    let fields = read_directory(&file, at).ok_or(TiffError::UnreadableDirectory)?;
+    build_scan(&file, &fields, chain.len() as u32, w)
+}
+
+/// The header: byte order, magic, and where the first directory is.
+fn open(bytes: &[u8]) -> Result<(Cursor<'_>, usize), TiffError> {
     let order = bytes.get(..2).ok_or(TiffError::NotTiff)?;
     let little = if order == LITTLE_ENDIAN {
         true
@@ -514,21 +703,29 @@ pub fn tiff_scan(bytes: &[u8]) -> Result<TiffScan<'_>, TiffError> {
     } else {
         return Err(TiffError::NotTiff);
     };
-    let file = Cursor {
+    let mut file = Cursor {
         bytes,
         little_endian: little,
+        big: false,
     };
     match file.u16_at(2) {
-        Some(TIFF_MAGIC) => {}
-        Some(BIGTIFF_MAGIC) => return Err(TiffError::BigTiff),
-        _ => return Err(TiffError::NotTiff),
+        Some(TIFF_MAGIC) => {
+            let first = file.u32_at(4).ok_or(TiffError::UnreadableDirectory)?;
+            Ok((file, first as usize))
+        }
+        Some(BIGTIFF_MAGIC) => {
+            // BigTIFF: bytes 4-5 are the offset size, which is 8, and 6-7 are
+            // zero; the first directory's offset follows as eight bytes.
+            if file.u16_at(4) != Some(8) || file.u16_at(6) != Some(0) {
+                return Err(TiffError::BigTiff);
+            }
+            file.big = true;
+            let first = file.u64_at(8).ok_or(TiffError::UnreadableDirectory)?;
+            let first = usize::try_from(first).map_err(|_| TiffError::UnreadableDirectory)?;
+            Ok((file, first))
+        }
+        _ => Err(TiffError::NotTiff),
     }
-    let first = file.u32_at(4).ok_or(TiffError::UnreadableDirectory)? as usize;
-
-    let fields = read_directory(&file, first).ok_or(TiffError::UnreadableDirectory)?;
-    let pages = count_directories(&file, first, &mut w);
-
-    build_scan(&file, &fields, pages, w)
 }
 
 impl TiffScan<'_> {
@@ -545,7 +742,10 @@ impl TiffScan<'_> {
         }
 
         let colour = self.colour();
-        let out_depth: u8 = if self.bits_per_sample == 16 && self.photometric.is_direct() {
+        // Anything wider than eight bits leaves at sixteen, which is the most a
+        // PDF image sample carries (Table 89): a 32-bit integer or a float is
+        // mapped onto that range rather than truncated to eight.
+        let out_depth: u8 = if self.bits_per_sample > 8 && self.photometric.is_direct() {
             16
         } else {
             8
@@ -604,6 +804,10 @@ impl TiffScan<'_> {
             (TiffPhotometric::WhiteIsZero | TiffPhotometric::BlackIsZero, true) => {
                 TiffColour::GreyAlpha
             }
+            (TiffPhotometric::Separated, false) => TiffColour::Cmyk,
+            (TiffPhotometric::Separated, true) => TiffColour::CmykAlpha,
+            (TiffPhotometric::CieLab, false) => TiffColour::Lab,
+            (TiffPhotometric::CieLab, true) => TiffColour::LabAlpha,
             (_, false) => TiffColour::Rgb,
             (_, true) => TiffColour::Rgba,
         }
@@ -781,6 +985,10 @@ impl TiffScan<'_> {
                 Some((data, samples)) => (data, true, samples),
                 None => return false,
             },
+            TiffCompression::Jpeg2000 => match self.jpx_segment(coded, expected, w) {
+                Some((data, samples)) => (data, true, samples),
+                None => return false,
+            },
             _ => (
                 self.byte_segment(coded, place, expected, &segment_limits, w),
                 true,
@@ -791,17 +999,40 @@ impl TiffScan<'_> {
             ok = false;
         }
 
-        // TIFF 6.0 p.64: `Predictor` 2 differences horizontally, across the
-        // samples of a row, in the file's own sample order. Sixteen-bit
-        // samples are swapped to big-endian first, which makes the shared
-        // `/Predictor 2` implementation — big-endian, because PDF is — the
-        // right arithmetic for both byte orders rather than only for `MM`.
-        if self.bits_per_sample == 16 && self.little_endian {
-            for pair in packed.chunks_exact_mut(2) {
-                pair.swap(0, 1);
+        let coder_made = matches!(
+            self.compression,
+            TiffCompression::Jpeg | TiffCompression::Jpeg2000
+        );
+        let width = usize::from(self.bits_per_sample / 8);
+        if self.predictor == 3 {
+            // Technical Note 3's floating-point predictor works on byte planes
+            // most significant first and so ends in big-endian samples
+            // whatever the file's own order — libtiff's `fpAcc` for the same
+            // reason turns its post-decode swap off. Undone row by row.
+            for row in packed.chunks_mut(row_bytes.max(1)) {
+                float_unpredict(row, samples_here, width);
+            }
+        } else {
+            // TIFF 6.0 p.64: `Predictor` 2 differences horizontally, across the
+            // samples of a row, in the file's own sample order. Samples wider
+            // than a byte are swapped to big-endian first, which makes the
+            // shared `/Predictor 2` implementation — big-endian, because PDF
+            // is — the right arithmetic for both byte orders rather than only
+            // for `MM`. A JPEG or JPEG 2000 coder already produced big-endian
+            // samples of its own.
+            if width > 1 && self.little_endian && !coder_made {
+                for sample in packed.chunks_exact_mut(width) {
+                    sample.reverse();
+                }
             }
         }
-        if self.predictor == 2 && self.compression != TiffCompression::Jpeg {
+        if self.predictor == 2 && !coder_made && self.bits_per_sample > 16 {
+            // 7.4.4.4's predictor stops at sixteen bits; TIFF's does not, and a
+            // 32-bit difference is the same wrapping addition one word wide.
+            for row in packed.chunks_mut(row_bytes.max(1)) {
+                wide_unpredict(row, samples_here, width);
+            }
+        } else if self.predictor == 2 && !coder_made {
             let params = PredictorParams {
                 predictor: 2,
                 colors: samples_here as u32,
@@ -885,7 +1116,7 @@ impl TiffScan<'_> {
                 data
             }
             // Returned above.
-            TiffCompression::Jpeg => Vec::new(),
+            TiffCompression::Jpeg | TiffCompression::Jpeg2000 => Vec::new(),
         }
     }
 
@@ -929,13 +1160,58 @@ impl TiffScan<'_> {
                 for warning in image.warnings {
                     w.push(warning);
                 }
-                Some((image.data, components))
+                let mut data = image.data;
+                // Adobe's APP14 inverted CMYK: the samples are 255 less the
+                // ink, and a separated TIFF's are the ink itself (§16).
+                if image.color == jpeg::JpegColor::CmykInverted {
+                    for b in &mut data {
+                        *b = 255 - *b;
+                    }
+                }
+                Some((data, components))
             }
             Err(_) => {
                 w.push(Warning::TiffSegmentUndecodable);
                 None
             }
         }
+    }
+
+    /// `Compression` 34712: the segment is a JPEG 2000 codestream, decoded by
+    /// the decoder `/JPXDecode` already has.
+    ///
+    /// Returns samples at the directory's own depth — a codestream at a
+    /// precision the directory did not declare is narrowed or widened to it,
+    /// since `BitsPerSample` is what the rest of the path reads — and how many
+    /// components each pixel carries, which is the codestream's to say.
+    fn jpx_segment(
+        &self,
+        coded: &[u8],
+        expected: usize,
+        w: &mut Warnings,
+    ) -> Option<(Vec<u8>, usize)> {
+        let mut warnings = Vec::new();
+        let limits = Limits::new(expected.max(1).saturating_mul(4));
+        let image = match jpx::jpx_decode(coded, &limits, &mut warnings) {
+            Ok(image) => image,
+            Err(_) => {
+                for warning in warnings {
+                    w.push(warning);
+                }
+                w.push(Warning::TiffSegmentUndecodable);
+                return None;
+            }
+        };
+        for warning in warnings {
+            w.push(warning);
+        }
+        let components = usize::from(image.components);
+        let data = match (image.precision, self.bits_per_sample) {
+            (16, 8) => image.samples.chunks_exact(2).map(|p| p[0]).collect(),
+            (8, 16) => image.samples.iter().flat_map(|&b| [b, b]).collect(),
+            _ => image.samples,
+        };
+        Some((data, components))
     }
 
     /// Reads one segment's samples out of its packed rows and into the raster.
@@ -976,7 +1252,7 @@ impl TiffScan<'_> {
                     };
                     if let Some((index, _)) = alpha {
                         if channel == index {
-                            let a = self.normalise(raw, raster.unit, false);
+                            let a = self.intensity(raw, channel, raster.unit, false);
                             raster.put(x, y, out_components - 1, a);
                             continue;
                         }
@@ -988,14 +1264,26 @@ impl TiffScan<'_> {
                         continue;
                     }
                     if self.photometric == TiffPhotometric::Palette {
-                        let base = (raw as usize).saturating_mul(3);
+                        let base = usize::try_from(raw).unwrap_or(usize::MAX).saturating_mul(3);
                         for c in 0..3usize {
                             let v = self.color_map.get(base + c).copied().unwrap_or(0);
                             raster.put(x, y, c, u32::from(v));
                         }
                     } else {
-                        let v = self.normalise(
+                        // §23: `a*` and `b*` are two's complement. Flipping the
+                        // top bit is offset binary, the same number line moved
+                        // up by half its length, and it is exact — so the
+                        // channel becomes an unsigned sample like every other.
+                        let raw = if self.photometric == TiffPhotometric::CieLab
+                            && (channel == 1 || channel == 2)
+                        {
+                            raw ^ (1u64 << (depth.clamp(1, 64) - 1))
+                        } else {
+                            raw
+                        };
+                        let v = self.intensity(
                             raw,
+                            channel,
                             raster.unit,
                             self.photometric == TiffPhotometric::WhiteIsZero,
                         );
@@ -1013,21 +1301,39 @@ impl TiffScan<'_> {
         }
     }
 
-    /// Scales a raw sample to the output depth, and inverts it for
-    /// `WhiteIsZero`.
+    /// Maps a raw sample of channel `channel` to an output intensity, and
+    /// inverts it for `WhiteIsZero`.
     ///
-    /// 1, 2 and 4 bits are scaled by multiplication, which is exactly the
-    /// division 255/1, 255/3 and 255/15 reduce to — 255, 85 and 17.
-    fn normalise(&self, raw: u32, unit: usize, invert: bool) -> u32 {
+    /// Unsigned samples up to sixteen bits are scaled as they always were;
+    /// 1, 2 and 4 bits by multiplication, which is exactly the division
+    /// 255/1, 255/3 and 255/15 reduce to — 255, 85 and 17. Everything else —
+    /// signed, floating point, and unsigned at 32 bits — goes through
+    /// [`TiffSampleRange`], the mapping the module note argues for.
+    fn intensity(&self, raw: u64, channel: usize, unit: usize, invert: bool) -> u32 {
         let max = if unit == 2 { 0xFFFFu32 } else { 0xFFu32 };
-        let scaled = match (self.bits_per_sample, unit) {
-            (16, 2) | (8, 1) => raw,
-            (16, 1) => raw >> 8,
-            (8, 2) => raw * 257,
-            (4, _) => raw * 17 * if unit == 2 { 257 } else { 1 },
-            (2, _) => raw * 85 * if unit == 2 { 257 } else { 1 },
-            // 1 bit.
-            (_, _) => raw * max,
+        let scaled = match (self.sample_format, self.bits_per_sample) {
+            (TiffSampleFormat::Unsigned, bits) if bits <= 16 => {
+                // At most sixteen bits wide, so the sample fits a `u32`.
+                let raw = raw as u32;
+                match (bits, unit) {
+                    (16, 2) | (8, 1) => raw,
+                    (16, 1) => raw >> 8,
+                    (8, 2) => raw * 257,
+                    (4, _) => raw * 17 * if unit == 2 { 257 } else { 1 },
+                    (2, _) => raw * 85 * if unit == 2 { 257 } else { 1 },
+                    // 1 bit.
+                    (_, _) => raw * max,
+                }
+            }
+            (format, bits) => {
+                let range = self
+                    .sample_ranges
+                    .get(channel)
+                    .or(self.sample_ranges.last())
+                    .copied()
+                    .unwrap_or(TiffSampleRange { min: 0.0, max: 1.0 });
+                map_sample(raw, format, bits, range, max)
+            }
         };
         let scaled = scaled.min(max);
         if invert {
@@ -1045,7 +1351,9 @@ impl TiffPhotometric {
             1 => Self::BlackIsZero,
             2 => Self::Rgb,
             3 => Self::Palette,
+            5 => Self::Separated,
             6 => Self::YCbCr,
+            8 => Self::CieLab,
             _ => return None,
         })
     }
@@ -1055,7 +1363,8 @@ impl TiffPhotometric {
     pub const fn colour_channels(self) -> u32 {
         match self {
             Self::WhiteIsZero | Self::BlackIsZero | Self::Palette => 1,
-            Self::Rgb | Self::YCbCr => 3,
+            Self::Rgb | Self::YCbCr | Self::CieLab => 3,
+            Self::Separated => 4,
         }
     }
 
@@ -1151,16 +1460,17 @@ fn write_component(pixel: &mut [u8], index: usize, unit: usize, value: u32) {
     }
 }
 
-/// One sample out of a packed row, most significant bit first.
-fn sample_at(row: &[u8], index: usize, bits: u16) -> Option<u32> {
+/// One sample out of a packed row, most significant bit first — and, for the
+/// wide ones, most significant byte first, which every sample is by the time
+/// it is read here.
+fn sample_at(row: &[u8], index: usize, bits: u16) -> Option<u64> {
     match bits {
-        8 => row.get(index).map(|&b| u32::from(b)),
-        16 => {
-            let at = index.checked_mul(2)?;
-            match (row.get(at), row.get(at + 1)) {
-                (Some(&h), Some(&l)) => Some(u32::from(u16::from_be_bytes([h, l]))),
-                _ => None,
-            }
+        8 => row.get(index).map(|&b| u64::from(b)),
+        16 | 32 | 64 => {
+            let n = usize::from(bits / 8);
+            let at = index.checked_mul(n)?;
+            let bytes = row.get(at..at.checked_add(n)?)?;
+            Some(bytes.iter().fold(0u64, |acc, &b| (acc << 8) | u64::from(b)))
         }
         // 1, 2 and 4. p.29: "the bits are packed into bytes, high-order bit
         // first", and a row is padded out to a byte.
@@ -1168,22 +1478,176 @@ fn sample_at(row: &[u8], index: usize, bits: u16) -> Option<u32> {
             let bit = index.checked_mul(usize::from(b))?;
             let byte = row.get(bit / 8)?;
             let shift = 8 - (bit % 8) - usize::from(b);
-            let mask = (1u32 << b) - 1;
-            Some((u32::from(*byte) >> shift) & mask)
+            let mask = (1u64 << b) - 1;
+            Some((u64::from(*byte) >> shift) & mask)
         }
         _ => None,
     }
 }
 
+/// A signed, floating-point or 32-bit unsigned sample, mapped linearly from
+/// `range` onto `0..=max` and clamped — [`TiffSampleRange`]'s contract.
+///
+/// Integers against their default range are mapped in exact integer
+/// arithmetic, which for eight and sixteen bits is the plain offset §19's
+/// default amounts to; everything else in IEEE double arithmetic, whose four
+/// operations and `floor` are correctly rounded on every target (ruling 4).
+/// A NaN is black.
+fn map_sample(
+    raw: u64,
+    format: TiffSampleFormat,
+    bits: u16,
+    range: TiffSampleRange,
+    max: u32,
+) -> u32 {
+    let value: f64 = match format {
+        TiffSampleFormat::Unsigned | TiffSampleFormat::Signed => {
+            let span_bits = u32::from(bits.clamp(1, 32));
+            let signed = format == TiffSampleFormat::Signed;
+            let full = if signed {
+                let half = (1u64 << (span_bits - 1)) as f64;
+                TiffSampleRange {
+                    min: -half,
+                    max: half - 1.0,
+                }
+            } else {
+                TiffSampleRange {
+                    min: 0.0,
+                    max: ((1u64 << span_bits) - 1) as f64,
+                }
+            };
+            // The value as an offset from the bottom of the type's range.
+            let offset = if signed {
+                raw ^ (1u64 << (span_bits - 1))
+            } else {
+                raw
+            } & ((1u64 << span_bits) - 1);
+            if range == full {
+                let top = (1u128 << span_bits) - 1;
+                let out = (u128::from(offset) * u128::from(max) + top / 2) / top;
+                return u32::try_from(out).unwrap_or(max);
+            }
+            if signed {
+                offset as f64 + full.min
+            } else {
+                offset as f64
+            }
+        }
+        TiffSampleFormat::Float => match bits {
+            16 => half_to_f64(raw as u16),
+            32 => f64::from(f32::from_bits(raw as u32)),
+            _ => f64::from_bits(raw),
+        },
+    };
+    if value.is_nan() {
+        return 0;
+    }
+    let unit = ((value - range.min) / (range.max - range.min)).clamp(0.0, 1.0);
+    let out = (unit * f64::from(max) + 0.5).floor();
+    // In `0..=max` by the clamp above.
+    out as u32
+}
+
+/// IEEE 754 binary16 to a double, exactly: every half is a double.
+fn half_to_f64(h: u16) -> f64 {
+    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exponent = i32::from((h >> 10) & 0x1F);
+    let fraction = f64::from(h & 0x3FF);
+    // 2^-24, the value of the least significant bit of a subnormal half.
+    const TINY: f64 = 1.0 / 16_777_216.0;
+    match exponent {
+        0 => sign * fraction * TINY,
+        0x1F if fraction == 0.0 => sign * f64::INFINITY,
+        0x1F => f64::NAN,
+        e => {
+            // (1024 + fraction) x 2^(e - 25), with the power built from bits.
+            let scale = f64::from_bits(((e - 25 + 1023) as u64) << 52);
+            sign * (1024.0 + fraction) * scale
+        }
+    }
+}
+
+/// Undoes Photoshop TIFF Technical Note 3's floating-point predictor on one
+/// row, in place.
+///
+/// The encoder split each sample's bytes into planes — every sample's most
+/// significant byte first, then every sample's next — and differenced the
+/// whole shuffled row byte by byte with a stride of one pixel. So the row is
+/// accumulated first and un-shuffled second, and comes out big-endian.
+fn float_unpredict(row: &mut [u8], samples: usize, width: usize) {
+    let stride = samples.max(1);
+    for i in stride..row.len() {
+        row[i] = row[i].wrapping_add(row[i - stride]);
+    }
+    let words = row.len() / width.max(1);
+    let planes = row.to_vec();
+    for word in 0..words {
+        for byte in 0..width {
+            if let (Some(slot), Some(&b)) = (
+                row.get_mut(word * width + byte),
+                planes.get(byte * words + word),
+            ) {
+                *slot = b;
+            }
+        }
+    }
+}
+
+/// TIFF 6.0 p.64's horizontal differencing at 32 and 64 bits: each sample is
+/// the wrapping sum of its own difference and the same sample of the pixel to
+/// its left, over big-endian words.
+fn wide_unpredict(row: &mut [u8], samples: usize, width: usize) {
+    let step = samples.max(1) * width;
+    let mut at = step;
+    while at + width <= row.len() {
+        let (left, this) = row.split_at_mut(at);
+        let (Some(prev), Some(cur)) = (
+            left.get(at - step..at - step + width),
+            this.get_mut(..width),
+        ) else {
+            break;
+        };
+        let mut carry = 0u16;
+        for k in (0..width).rev() {
+            let sum = u16::from(cur[k]) + u16::from(prev[k]) + carry;
+            cur[k] = sum as u8;
+            carry = sum >> 8;
+        }
+        at += width;
+    }
+}
+
 // --- reading the file ---------------------------------------------------
 
-/// The file, plus which end of a number comes first.
+/// The file, plus which end of a number comes first and how wide an offset is.
 struct Cursor<'a> {
     bytes: &'a [u8],
     little_endian: bool,
+    /// BigTIFF: eight-byte offsets and counts, twenty-byte directory entries.
+    big: bool,
 }
 
 impl<'a> Cursor<'a> {
+    fn u64_at(&self, at: usize) -> Option<u64> {
+        let s = self.bytes.get(at..at.checked_add(8)?)?;
+        let mut eight = [0u8; 8];
+        eight.copy_from_slice(s);
+        Some(if self.little_endian {
+            u64::from_le_bytes(eight)
+        } else {
+            u64::from_be_bytes(eight)
+        })
+    }
+
+    /// An offset or a count: four bytes in a classic file, eight in a BigTIFF.
+    fn word_at(&self, at: usize) -> Option<u64> {
+        if self.big {
+            self.u64_at(at)
+        } else {
+            self.u32_at(at).map(u64::from)
+        }
+    }
+
     fn u16_at(&self, at: usize) -> Option<u16> {
         let s = self.bytes.get(at..at.checked_add(2)?)?;
         let pair = [*s.first()?, *s.get(1)?];
@@ -1214,39 +1678,63 @@ impl<'a> Cursor<'a> {
 struct Field {
     tag: u16,
     kind: u16,
-    count: u32,
+    /// A `LONG` in a classic file, a `LONG8` in a BigTIFF.
+    count: u64,
     /// Where the values are: the entry's own bytes 8..12 when they fit there,
     /// and the offset those four bytes hold otherwise.
     at: usize,
 }
 
-/// TIFF 6.0 p.15's Table 2, by type code. `None` is a type this build has
-/// never heard of, which p.16 says to skip.
+/// TIFF 6.0 p.15's Table 2, by type code, with TIFF-EP's `IFD` (13) and
+/// BigTIFF's `LONG8`, `SLONG8` and `IFD8` (16 to 18). `None` is a type this
+/// build has never heard of, which p.16 says to skip.
 const fn type_size(kind: u16) -> Option<usize> {
     Some(match kind {
         1 | 2 | 6 | 7 => 1,
         3 | 8 => 2,
-        4 | 9 | 11 => 4,
-        5 | 10 | 12 => 8,
+        4 | 9 | 11 | 13 => 4,
+        5 | 10 | 12 | 16 | 17 | 18 => 8,
         _ => return None,
     })
 }
 
+/// Bytes in the count before a directory's entries, bytes in one entry, and
+/// bytes a value may occupy inside its entry: 2, 12 and 4 for TIFF 6.0 p.14;
+/// 8, 20 and 8 for BigTIFF.
+const fn directory_shape(big: bool) -> (usize, usize, usize) {
+    if big {
+        (8, 20, 8)
+    } else {
+        (2, 12, 4)
+    }
+}
+
+/// How many entries a directory declares.
+fn entry_count(file: &Cursor<'_>, at: usize) -> Option<usize> {
+    if file.big {
+        usize::try_from(file.u64_at(at)?).ok()
+    } else {
+        file.u16_at(at).map(usize::from)
+    }
+}
+
 /// Reads one directory's entries. `None` means the directory is not there.
 fn read_directory(file: &Cursor<'_>, at: usize) -> Option<Vec<Field>> {
-    let count = usize::from(file.u16_at(at)?);
-    // Every entry has to be inside the file for the directory to be one.
-    let bytes = count.checked_mul(12)?;
-    let first = at.checked_add(2)?;
+    let (head, entry_len, inline) = directory_shape(file.big);
+    let count = entry_count(file, at)?;
+    // Every entry has to be inside the file for the directory to be one —
+    // which is also what bounds a BigTIFF's 64-bit count before the loop.
+    let bytes = count.checked_mul(entry_len)?;
+    let first = at.checked_add(head)?;
     file.slice(first, bytes)?;
 
     let mut fields = Vec::with_capacity(count.min(4096));
     for index in 0..count {
-        let entry = first + index * 12;
+        let entry = first + index * entry_len;
         let (Some(tag), Some(kind), Some(n)) = (
             file.u16_at(entry),
             file.u16_at(entry + 2),
-            file.u32_at(entry + 4),
+            file.word_at(entry + 4),
         ) else {
             break;
         };
@@ -1254,17 +1742,21 @@ fn read_directory(file: &Cursor<'_>, at: usize) -> Option<Vec<Field>> {
             // p.16: "a field whose type is unknown should be skipped".
             continue;
         };
-        let Some(span) = (n as usize).checked_mul(size) else {
+        let Some(span) = usize::try_from(n).ok().and_then(|n| n.checked_mul(size)) else {
             continue;
         };
-        let values_at = if span <= 4 {
+        let value_field = entry + entry_len - inline;
+        let values_at = if span <= inline {
             // p.15: a value that fits is stored in the entry itself, and is
             // left-justified — it begins at the offset field's first byte
             // whatever the byte order is.
-            entry + 8
+            value_field
         } else {
-            match file.u32_at(entry + 8) {
-                Some(offset) => offset as usize,
+            match file
+                .word_at(value_field)
+                .and_then(|o| usize::try_from(o).ok())
+            {
+                Some(offset) => offset,
                 None => continue,
             }
         };
@@ -1284,52 +1776,60 @@ fn read_directory(file: &Cursor<'_>, at: usize) -> Option<Vec<Field>> {
     Some(fields)
 }
 
-/// Follows the `NextIFD` chain, and is the reason this file has a cycle guard.
+/// Follows the `NextIFD` chain and returns every directory's offset on it,
+/// first first — and is the reason this file has a cycle guard.
 ///
 /// A directory whose next pointer is its own offset is one twelve-byte edit
 /// away from any real file, and the chain is walked before any of it is
 /// trusted.
-fn count_directories(file: &Cursor<'_>, first: usize, w: &mut Warnings) -> u32 {
+fn directory_chain(file: &Cursor<'_>, first: usize, w: &mut Warnings) -> Vec<usize> {
+    let (head, entry_len, _) = directory_shape(file.big);
     let mut seen: Vec<usize> = Vec::with_capacity(8);
     let mut at = first;
-    let mut pages = 0u32;
-    while (pages as usize) < MAX_TIFF_IFDS {
+    while seen.len() < MAX_TIFF_IFDS {
         if seen.contains(&at) {
             w.push(Warning::TiffDirectoryCycle);
             break;
         }
-        seen.push(at);
-        let Some(count) = file.u16_at(at) else {
+        let Some(count) = entry_count(file, at) else {
             break;
         };
-        pages = pages.saturating_add(1);
-        let next_at = match usize::from(count)
-            .checked_mul(12)
-            .and_then(|n| at.checked_add(2 + n))
+        seen.push(at);
+        let next_at = match count
+            .checked_mul(entry_len)
+            .and_then(|n| at.checked_add(head)?.checked_add(n))
         {
             Some(v) => v,
             None => break,
         };
-        match file.u32_at(next_at) {
+        match file.word_at(next_at) {
             Some(0) | None => break,
-            Some(next) => at = next as usize,
+            Some(next) => match usize::try_from(next) {
+                Ok(next) => at = next,
+                Err(_) => break,
+            },
         }
     }
-    if pages as usize >= MAX_TIFF_IFDS {
+    if seen.len() >= MAX_TIFF_IFDS {
         w.push(Warning::TiffDirectoryCycle);
     }
-    pages
+    seen
 }
 
-/// The values of one field, as unsigned integers.
-fn integers(file: &Cursor<'_>, field: &Field) -> Vec<u32> {
-    let n = (field.count as usize).min(MAX_TIFF_TAG_VALUES);
+/// The values of one field, as unsigned integers. Signed types are read as
+/// their bit patterns, which is what every tag that is not a sample range
+/// means by them.
+fn integers(file: &Cursor<'_>, field: &Field) -> Vec<u64> {
+    let n = usize::try_from(field.count)
+        .unwrap_or(usize::MAX)
+        .min(MAX_TIFF_TAG_VALUES);
     let mut out = Vec::with_capacity(n.min(4096));
     for index in 0..n {
         let value = match field.kind {
-            1 | 2 | 6 | 7 => file.bytes.get(field.at + index).map(|&b| u32::from(b)),
-            3 | 8 => file.u16_at(field.at + index * 2).map(u32::from),
-            4 | 9 => file.u32_at(field.at + index * 4),
+            1 | 2 | 6 | 7 => file.bytes.get(field.at + index).map(|&b| u64::from(b)),
+            3 | 8 => file.u16_at(field.at + index * 2).map(u64::from),
+            4 | 9 | 13 => file.u32_at(field.at + index * 4).map(u64::from),
+            16..=18 => file.u64_at(field.at + index * 8),
             _ => None,
         };
         match value {
@@ -1340,9 +1840,64 @@ fn integers(file: &Cursor<'_>, field: &Field) -> Vec<u32> {
     out
 }
 
+/// A field's first value, saturated to 32 bits: every tag read this way is a
+/// dimension, a code or a count whose own refusal already fires far below
+/// `u32::MAX`.
 fn first_integer(fields: &[Field], file: &Cursor<'_>, tag: u16) -> Option<u32> {
     let field = fields.iter().find(|f| f.tag == tag)?;
-    integers(file, field).first().copied()
+    integers(file, field)
+        .first()
+        .map(|&v| u32::try_from(v).unwrap_or(u32::MAX))
+}
+
+/// A field's values as numbers, whatever their type — for
+/// `SMinSampleValue` and `SMaxSampleValue`, which §19 types as "the field
+/// type that best matches the sample data" and so may be any of them.
+fn numbers(file: &Cursor<'_>, field: &Field) -> Vec<f64> {
+    let n = usize::try_from(field.count).unwrap_or(0).min(64);
+    let mut out = Vec::with_capacity(n);
+    for index in 0..n {
+        let value = match field.kind {
+            1 => file.bytes.get(field.at + index).map(|&b| f64::from(b)),
+            6 => file
+                .bytes
+                .get(field.at + index)
+                .map(|&b| f64::from(b as i8)),
+            3 => file.u16_at(field.at + index * 2).map(f64::from),
+            8 => file
+                .u16_at(field.at + index * 2)
+                .map(|v| f64::from(v as i16)),
+            4 => file.u32_at(field.at + index * 4).map(f64::from),
+            9 => file
+                .u32_at(field.at + index * 4)
+                .map(|v| f64::from(v as i32)),
+            11 => file
+                .u32_at(field.at + index * 4)
+                .map(|v| f64::from(f32::from_bits(v))),
+            12 => file.u64_at(field.at + index * 8).map(f64::from_bits),
+            // 64-bit integers wider than a double's mantissa round, which no
+            // intensity range can tell apart.
+            16 => file.u64_at(field.at + index * 8).map(|v| v as f64),
+            17 => file.u64_at(field.at + index * 8).map(|v| v as i64 as f64),
+            5 | 10 => {
+                let at = field.at + index * 8;
+                match (file.u32_at(at), file.u32_at(at + 4)) {
+                    (Some(num), Some(den)) if den != 0 => Some(if field.kind == 10 {
+                        f64::from(num as i32) / f64::from(den as i32)
+                    } else {
+                        f64::from(num) / f64::from(den)
+                    }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        match value {
+            Some(v) => out.push(v),
+            None => break,
+        }
+    }
+    out
 }
 
 fn rational(fields: &[Field], file: &Cursor<'_>, tag: u16) -> Option<(u32, u32)> {
@@ -1391,6 +1946,31 @@ fn build_scan<'a>(
         // Under compression 7 the JPEG has already done all of it.
         return Err(TiffError::UnsupportedPhotometric(6));
     }
+    if photometric == TiffPhotometric::CieLab
+        && !matches!(
+            compression,
+            TiffCompression::None
+                | TiffCompression::Lzw
+                | TiffCompression::Deflate
+                | TiffCompression::PackBits
+        )
+    {
+        // A JPEG or JPEG 2000 coder hands back samples of its own colour
+        // model, and §23's signed `a*` and `b*` are not among them.
+        return Err(TiffError::UnsupportedCompression(
+            compression_code.min(u32::from(u16::MAX)) as u16,
+        ));
+    }
+    if photometric == TiffPhotometric::Separated {
+        // §16: "InkSet ... 1 = CMYK ... Default is 1". Any other set of inks
+        // is not a device space, and reading it as CMYK draws other colours.
+        let ink_set = first_integer(fields, file, TAG_INK_SET).unwrap_or(1);
+        if ink_set != 1 {
+            return Err(TiffError::UnsupportedInkSet(
+                ink_set.min(u32::from(u16::MAX)) as u16,
+            ));
+        }
+    }
 
     let samples_per_pixel =
         u16::try_from(first_integer(fields, file, TAG_SAMPLES_PER_PIXEL).unwrap_or(1)).unwrap_or(1);
@@ -1412,7 +1992,7 @@ fn build_scan<'a>(
         .map(|f| integers(file, f))
         .unwrap_or_default();
     let bits_per_sample = match depths.first().copied() {
-        None => 1u32,
+        None => 1u64,
         Some(first) => {
             if depths
                 .iter()
@@ -1425,27 +2005,63 @@ fn build_scan<'a>(
         }
     };
     let bits_per_sample = u16::try_from(bits_per_sample).unwrap_or(0);
-    if !matches!(bits_per_sample, 1 | 2 | 4 | 8 | 16) {
+
+    // p.80: 1 unsigned, 2 two's complement, 3 IEEE float, 4 undefined — which
+    // "a reader would typically treat ... as if the field were not present".
+    let sample_format = sample_format(fields, file, samples_per_pixel)?;
+    let depth_ok = match sample_format {
+        TiffSampleFormat::Unsigned => matches!(bits_per_sample, 1 | 2 | 4 | 8 | 16 | 32),
+        TiffSampleFormat::Signed => matches!(bits_per_sample, 8 | 16 | 32),
+        TiffSampleFormat::Float => matches!(bits_per_sample, 16 | 32 | 64),
+    };
+    if !depth_ok
+        || (photometric == TiffPhotometric::Palette && bits_per_sample > 16)
+        || (photometric == TiffPhotometric::CieLab && !matches!(bits_per_sample, 8 | 16))
+    {
+        // §23 defines `L*a*b*` at 8 and 16 bits and no other depth.
         return Err(TiffError::UnsupportedBitDepth(bits_per_sample));
     }
-
-    // p.80: 1 unsigned, 2 two's complement, 3 IEEE float, 4 undefined.
-    if let Some(field) = fields.iter().find(|f| f.tag == TAG_SAMPLE_FORMAT) {
-        for value in integers(file, field)
-            .into_iter()
-            .take(usize::from(samples_per_pixel))
-        {
-            if value != 1 && value != 4 {
-                return Err(TiffError::UnsupportedSampleFormat(
-                    value.min(u32::from(u16::MAX)) as u16,
-                ));
-            }
-        }
+    // A number line other than the unsigned one means nothing to an index, to
+    // a fax coding's black and white, or to a JPEG or JPEG 2000 coder, which
+    // produce unsigned samples whatever the tag says.
+    if sample_format != TiffSampleFormat::Unsigned
+        && (photometric == TiffPhotometric::Palette
+            // §23 fixes `L*a*b*`'s number lines itself: `L*` unsigned and
+            // `a*`, `b*` signed whatever `SampleFormat` says, and one tag for
+            // three channels cannot say both.
+            || photometric == TiffPhotometric::CieLab
+            || !matches!(
+                compression,
+                TiffCompression::None
+                    | TiffCompression::Lzw
+                    | TiffCompression::Deflate
+                    | TiffCompression::PackBits
+            ))
+    {
+        return Err(TiffError::UnsupportedSampleFormat(match sample_format {
+            TiffSampleFormat::Signed => 2,
+            _ => 3,
+        }));
     }
+    let sample_ranges = sample_ranges(
+        fields,
+        file,
+        samples_per_pixel,
+        sample_format,
+        bits_per_sample,
+    );
 
     let predictor =
         u16::try_from(first_integer(fields, file, TAG_PREDICTOR).unwrap_or(1)).unwrap_or(u16::MAX);
-    if predictor != 1 && predictor != 2 {
+    // Technical Note 3's floating-point predictor is defined for floating
+    // point and nothing else, and 2 differences integers.
+    let predictor_ok = match predictor {
+        1 => true,
+        2 => sample_format != TiffSampleFormat::Float,
+        3 => sample_format == TiffSampleFormat::Float,
+        _ => false,
+    };
+    if !predictor_ok {
         return Err(TiffError::UnsupportedPredictor(predictor));
     }
 
@@ -1491,7 +2107,7 @@ fn build_scan<'a>(
     let jpeg_tables = fields
         .iter()
         .find(|f| f.tag == TAG_JPEG_TABLES)
-        .and_then(|f| file.slice(f.at, f.count as usize));
+        .and_then(|f| file.slice(f.at, usize::try_from(f.count).ok()?));
 
     let (layout, segments) = read_segments(file, fields, width, height, samples_per_pixel, planar)?;
 
@@ -1518,14 +2134,22 @@ fn build_scan<'a>(
         });
     }
 
-    if pages > 1 {
-        w.push(Warning::TiffExtraPagesIgnored);
-    }
+    // `NewSubfileType`, or the `SubfileType` it replaced (p.40): 2 was a
+    // reduced-resolution image and 3 a single page of several.
+    let subfile = first_integer(fields, file, TAG_NEW_SUBFILE_TYPE).unwrap_or_else(|| {
+        match first_integer(fields, file, TAG_SUBFILE_TYPE) {
+            Some(2) => 1,
+            Some(3) => 2,
+            _ => 0,
+        }
+    });
 
     Ok(TiffScan {
         width,
         height,
         bits_per_sample,
+        sample_format,
+        sample_ranges,
         samples_per_pixel,
         compression,
         photometric,
@@ -1541,8 +2165,101 @@ fn build_scan<'a>(
         segments,
         little_endian: file.little_endian,
         pages,
+        subfile,
         warnings: w.into_vec(),
     })
+}
+
+/// `SampleFormat` for the whole image. §19 gives one value per sample and
+/// nothing in the sample path carries two number lines at once, so a file
+/// that states two is refused by the first that differs.
+fn sample_format(
+    fields: &[Field],
+    file: &Cursor<'_>,
+    samples_per_pixel: u16,
+) -> Result<TiffSampleFormat, TiffError> {
+    let Some(field) = fields.iter().find(|f| f.tag == TAG_SAMPLE_FORMAT) else {
+        return Ok(TiffSampleFormat::Unsigned);
+    };
+    let mut found: Option<TiffSampleFormat> = None;
+    for value in integers(file, field)
+        .into_iter()
+        .take(usize::from(samples_per_pixel))
+    {
+        let format = match value {
+            1 | 4 => TiffSampleFormat::Unsigned,
+            2 => TiffSampleFormat::Signed,
+            3 => TiffSampleFormat::Float,
+            other => {
+                return Err(TiffError::UnsupportedSampleFormat(
+                    other.min(u64::from(u16::MAX)) as u16,
+                ))
+            }
+        };
+        match found {
+            None => found = Some(format),
+            Some(seen) if seen != format => {
+                return Err(TiffError::UnsupportedSampleFormat(
+                    value.min(u64::from(u16::MAX)) as u16,
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(found.unwrap_or(TiffSampleFormat::Unsigned))
+}
+
+/// Per sample, the values the darkest and brightest intensities stand for:
+/// `SMinSampleValue` and `SMaxSampleValue` where the file gives them, §19's
+/// "full range of the data type" for an integer where it does not, and
+/// [0, 1] for a float — see [`TiffSampleRange`].
+///
+/// A range the file gives that is empty or not finite is ignored for the
+/// default, which is the only range that can be drawn at all.
+fn sample_ranges(
+    fields: &[Field],
+    file: &Cursor<'_>,
+    samples_per_pixel: u16,
+    format: TiffSampleFormat,
+    bits: u16,
+) -> Vec<TiffSampleRange> {
+    let default = match format {
+        TiffSampleFormat::Float => TiffSampleRange { min: 0.0, max: 1.0 },
+        // Powers of two below 2^64, which a double holds exactly — a shift,
+        // so no platform `powi` is anywhere near a pixel (ruling 4).
+        TiffSampleFormat::Signed => {
+            let half = (1u64 << bits.clamp(1, 63).saturating_sub(1)) as f64;
+            TiffSampleRange {
+                min: -half,
+                max: half - 1.0,
+            }
+        }
+        TiffSampleFormat::Unsigned => TiffSampleRange {
+            min: 0.0,
+            max: ((1u64 << bits.clamp(1, 63)) - 1) as f64,
+        },
+    };
+    let read = |tag: u16| {
+        fields
+            .iter()
+            .find(|f| f.tag == tag)
+            .map(|f| numbers(file, f))
+            .unwrap_or_default()
+    };
+    let (mins, maxs) = (read(TAG_S_MIN_SAMPLE_VALUE), read(TAG_S_MAX_SAMPLE_VALUE));
+    (0..usize::from(samples_per_pixel))
+        .map(|i| {
+            // One value for every sample is what §19 asks; a file giving one
+            // for all of them is read as meaning that.
+            let min = mins.get(i).or(mins.last()).copied().unwrap_or(default.min);
+            let max = maxs.get(i).or(maxs.last()).copied().unwrap_or(default.max);
+            if min.is_finite() && max.is_finite() && max > min {
+                TiffSampleRange { min, max }
+            } else {
+                default
+            }
+        })
+        .collect()
 }
 
 /// `T4Options` (292) and `T6Options` (293), turned into the two things the
@@ -1677,7 +2394,7 @@ fn read_segments<'a>(
         .iter()
         .find(|f| f.tag == offsets_tag)
         .ok_or(TiffError::NoImageData)?;
-    let declared = u64::from(offsets_field.count);
+    let declared = offsets_field.count;
     if declared > MAX_TIFF_SEGMENTS as u64 {
         return Err(TiffError::TooManySegments {
             segments: declared,
@@ -1719,10 +2436,14 @@ fn read_segments<'a>(
 
     let mut segments = Vec::with_capacity(offsets.len().min(4096));
     for (index, &offset) in offsets.iter().enumerate() {
-        let len = counts.get(index).copied().unwrap_or(0) as usize;
+        let len = counts.get(index).copied().unwrap_or(0);
         // A strip that is not inside the file is an empty one, not a refusal:
         // the rows it would have carried stay at zero and `complete` says so.
-        segments.push(file.slice(offset as usize, len).unwrap_or(&[]));
+        let slice = match (usize::try_from(offset), usize::try_from(len)) {
+            (Ok(offset), Ok(len)) => file.slice(offset, len),
+            _ => None,
+        };
+        segments.push(slice.unwrap_or(&[]));
     }
     Ok((layout, segments))
 }

@@ -48,6 +48,7 @@
 
 use tinker_pdf_css::selector::UiState;
 use tinker_pdf_css::Element as CssElement;
+use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
 use tinker_pdf_xml::{Doctype, Error as XmlError, Event, Limits as XmlLimits, Source};
 
 /// The XHTML namespace, which is what tells an `<image>` from an `<img>`.
@@ -87,6 +88,18 @@ pub struct Node {
     /// `style=""`, unparsed. The cascade parses it, because the declarations it
     /// yields do not outlive the call that matched them.
     pub style: Option<String>,
+    /// HTML's **auto directionality** (§3.2.6.4, *the `dir` attribute*), for
+    /// an element whose `dir` is in the auto state — `dir="auto"`, or a
+    /// `<bdi>` with no valid `dir` — and `None` for every other element.
+    ///
+    /// `Some(true)` where the first character of type `L`, `R` or `AL` in the
+    /// element's text — skipping every `bdi`, `script`, `style` and
+    /// `textarea` inside it and every element with a `dir` of its own — is
+    /// `R` or `AL`; `Some(false)` otherwise, including where there is no such
+    /// character, which HTML resolves to `ltr`. Worked out once the whole
+    /// tree is read ([`read`]), since it is a fact about the element's
+    /// content.
+    pub auto_rtl: Option<bool>,
 }
 
 /// What sits inside an element.
@@ -157,6 +170,39 @@ impl CssElement for Node {
         self.style.as_deref()
     }
 
+    /// HTML §15.3.8's list numbering and §15.3.5's bidirectional text, as
+    /// the presentational hints they state.
+    ///
+    /// `<ol start="n">` is `counter-reset: list-item n−1` and `<li value="n">`
+    /// is `counter-set: list-item n`, parsed by HTML's *rules for parsing
+    /// integers* — leading white space, an optional sign, digits, and anything
+    /// after them ignored. `<ol reversed>` is `counter-reset:
+    /// reversed(list-item)`, which this build refuses by value: the parser
+    /// counts it against `counter-reset` on the element, rather than the list
+    /// being numbered upwards with nothing to say so.
+    ///
+    /// The bidirectional half is [`bidi_hints`]'s.
+    fn presentational_hints(&self) -> Option<String> {
+        let list = match self.name.as_str() {
+            "ol" if self.attr("reversed").is_some() => {
+                Some("counter-reset: reversed(list-item)".to_owned())
+            }
+            "ol" => self
+                .attr("start")
+                .and_then(html_integer)
+                .map(|start| format!("counter-reset: list-item {}", start.saturating_sub(1))),
+            "li" => self
+                .attr("value")
+                .and_then(html_integer)
+                .map(|value| format!("counter-set: list-item {value}")),
+            _ => None,
+        };
+        match (list, bidi_hints(self)) {
+            (Some(list), Some(bidi)) => Some(format!("{list}; {bidi}")),
+            (list, bidi) => list.or_else(|| bidi.map(str::to_owned)),
+        }
+    }
+
     /// `selectors-4` §6.6.3's `:empty`.
     ///
     /// **Character data that is only white space is not content**, so
@@ -195,9 +241,10 @@ impl CssElement for Node {
     ///
     /// The value is passed through rather than resolved, `auto` included:
     /// HTML's `dir="auto"` means *work it out from the first strong character
-    /// of the content*, which this build does not do — so it reaches `:dir()`
-    /// as `auto`, matches neither keyword, and stops the inheritance, rather
-    /// than being guessed at as one of the two.
+    /// of the content*, which this build does for the `direction` it gives the
+    /// element ([`Node::auto_rtl`], [`bidi_hints`]) and not yet for `:dir()` —
+    /// so it reaches `:dir()` as `auto`, matches neither keyword, and stops
+    /// the inheritance, rather than being guessed at as one of the two.
     ///
     /// The document element with nothing declared is `ltr`, which is HTML's
     /// own default and is the one place a default belongs: an element deeper
@@ -278,6 +325,34 @@ fn is_document_white_space(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{000C}')
 }
 
+/// HTML §2.3.4.1's *rules for parsing integers*: leading ASCII white space, an
+/// optional `-` or `+`, at least one digit, and nothing after the digits read.
+///
+/// `None` where there is no digit, which HTML calls an error and which leaves
+/// the attribute without effect — `start="x"` numbers from one, as it does in
+/// a browser. A value past `i32`'s range is clamped, `css-values-4` §5.1's rule
+/// for the integer the hint becomes.
+fn html_integer(raw: &str) -> Option<i32> {
+    let text = raw.trim_start_matches(is_document_white_space);
+    let (negative, digits) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let digits: &str = &digits[..digits
+        .bytes()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(digits.len())];
+    if digits.is_empty() {
+        return None;
+    }
+    let magnitude = digits.bytes().fold(0i64, |acc, b| {
+        (acc * 10 + i64::from(b - b'0')).min(i64::from(i32::MAX) + 1)
+    });
+    let value = if negative { -magnitude } else { magnitude };
+    Some(value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+}
+
 /// What could not be read about a content document.
 ///
 /// Separate from [`crate::epub::SpineDefect`] because these are recoverable:
@@ -294,6 +369,89 @@ pub enum MarkupDefect {
     Truncated,
     /// The document has no element at all.
     Empty,
+    /// The XML reader refused the document and HTML's own parser (WHATWG
+    /// §13.2), which reads every input to its end, read it instead: a loose
+    /// HTML file, or HTML handed to `DocumentBuilder::from_html`. Refused for
+    /// its syntax — it is not well-formed — or, beside
+    /// [`MarkupDefect::EncodingNotDecoded`], for an encoding XML's reader does
+    /// not decode. Never said of an EPUB chapter, which is XHTML by its media
+    /// type.
+    NotXml,
+    /// Bytes the decoder in front of HTML's parser could not map — malformed
+    /// UTF-8 or UTF-16 after its byte order mark, or a byte the single-byte
+    /// table a `<meta>` or an XML declaration named leaves unmapped, as
+    /// windows-1253 leaves 0xAA — each read as U+FFFD. Never windows-1252,
+    /// HTML's default, whose table maps all 256 bytes.
+    Undecodable,
+    /// A `<meta charset>` or an XML declaration named an encoding this build
+    /// does not decode — one of the multi-byte legacy encodings — and the
+    /// bytes were read as UTF-8 where they are UTF-8 and as windows-1252 where
+    /// they are not, or, where a byte order mark or UTF-16's shape had decided
+    /// before the declaration was read, as that said. Beside
+    /// [`MarkupDefect::NotXml`] when the XML reader refused a well-formed file
+    /// for its declaration.
+    EncodingNotDecoded,
+    /// Elements HTML's tree builder nested past the XML reader's depth cap,
+    /// which it can do by nesting the adoption agency's clones: their text is
+    /// kept, in the deepest element the cap allows, and their structure is
+    /// not.
+    TooDeep,
+}
+
+/// HTML §15.3.5's bidirectional rendering, as the declarations an element's
+/// `dir` attribute and its name make.
+///
+/// HTML writes these as user-agent rules keyed on `[dir]` and `:dir()`; they
+/// are hints here, at the start of the author sheet rather than in
+/// `ua.css`, because a rule keyed on an attribute alone is tried against
+/// every element of every book and a hint is asked of each element once —
+/// and an author rule beats both alike. The value is HTML's enumerated
+/// attribute, ASCII case-insensitive, and a value that is none of the three
+/// is no `dir` at all.
+///
+/// - `dir="ltr"` and `dir="rtl"` set `direction` and open an isolate, as
+///   §15.3.5's `[dir]:dir(ltr) { direction: ltr }` and `[dir] {
+///   unicode-bidi: isolate }` do;
+/// - `dir="auto"`, and a `<bdi>` with no `dir`, are the same isolate, with
+///   the `direction` HTML's auto directionality gives the element
+///   ([`Node::auto_rtl`]) — computed once from its content and **inherited**
+///   by everything inside it, a block child's paragraphs included;
+/// - **only `<pre dir="auto">` and `<textarea dir="auto">` are `unicode-bidi:
+///   plaintext`**, §15.3.5's one rule for it, so that each paragraph of
+///   preformatted text takes its own direction after every preserved
+///   newline or `<br>`, each a forced break of bidi type B (a U+2028 is not
+///   one; `epub::read::push_newline`). A `<p dir="auto">` was mapped to
+///   `plaintext` too, which re-decided the direction after every one of
+///   them and left its block descendants the parent's `ltr` (review of lane
+///   8C);
+/// - `<bdo>` is `unicode-bidi: isolate-override`, which this build refuses
+///   by value, so each `<bdo>` is counted rather than read as honoured.
+fn bidi_hints(node: &Node) -> Option<&'static str> {
+    if !node.is_html() {
+        return None;
+    }
+    let declared = match dir_keyword(node) {
+        Some("auto") => node.auto_rtl.map(|rtl| if rtl { "rtl" } else { "ltr" }),
+        None if node.name == "bdi" => node.auto_rtl.map(|rtl| if rtl { "rtl" } else { "ltr" }),
+        other => other,
+    };
+    let plaintext =
+        dir_keyword(node) == Some("auto") && matches!(node.name.as_str(), "pre" | "textarea");
+    Some(match (declared, node.name == "bdo", plaintext) {
+        (Some("ltr"), true, _) => "direction: ltr; unicode-bidi: isolate-override",
+        (Some("rtl"), true, _) => "direction: rtl; unicode-bidi: isolate-override",
+        (_, true, _) => "unicode-bidi: isolate-override",
+        (Some("ltr"), false, true) => "direction: ltr; unicode-bidi: plaintext",
+        (Some("rtl"), false, true) => "direction: rtl; unicode-bidi: plaintext",
+        (Some("ltr"), false, false) => "direction: ltr; unicode-bidi: isolate",
+        (Some("rtl"), false, false) => "direction: rtl; unicode-bidi: isolate",
+        // An element in the auto state whose content was never resolved —
+        // one built by hand rather than by [`read`] — is the isolate HTML
+        // gives every `[dir]`, its direction inherited.
+        (Some(_), false, _) => "unicode-bidi: isolate",
+        (None, false, _) if node.name == "bdi" => "unicode-bidi: isolate",
+        (None, false, _) => return None,
+    })
 }
 
 /// EPUB 3.3 §8.2.2.6's viewport dimensions, in CSS pixels.
@@ -396,6 +554,33 @@ impl Dom {
         })
     }
 
+    /// The document's `<title>`, white space collapsed, or `None` when it has
+    /// none or the element is empty.
+    ///
+    /// HTML's own definition — the first `title` element in the HTML
+    /// namespace, in tree order — which is why an SVG `<title>` inside the body
+    /// is never it. A book's title comes from its package document instead;
+    /// this is for a content document that is the whole document.
+    #[must_use]
+    pub fn title(&self) -> Option<String> {
+        let node = self
+            .nodes
+            .iter()
+            .find(|node| node.is_html() && node.name == "title")?;
+        let mut text = String::new();
+        for child in &node.children {
+            if let Child::Text(chunk) = child {
+                text.push_str(chunk);
+            }
+        }
+        let title = text
+            .split(is_document_white_space)
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        (!title.is_empty()).then_some(title)
+    }
+
     /// The `<body>`, or the document element when there is none.
     ///
     /// A content document without a `<body>` is not well-formed XHTML and is
@@ -426,6 +611,12 @@ impl Dom {
 /// half way has still said most of a chapter.
 pub fn read(bytes: &[u8], limits: &XmlLimits) -> Result<Dom, XmlError> {
     let source = Source::new(bytes)?;
+    Ok(read_reporting(&source, limits).0)
+}
+
+/// [`read`] of a decoded source, and the refusal that truncated the tree, if
+/// one did — which is what [`read_markup_or_html`] decides on.
+fn read_reporting(source: &Source<'_>, limits: &XmlLimits) -> (Dom, Option<XmlError>) {
     let mut dom = Dom {
         warnings: source.warnings().to_vec(),
         ..Dom::default()
@@ -433,12 +624,14 @@ pub fn read(bytes: &[u8], limits: &XmlLimits) -> Result<Dom, XmlError> {
     let mut reader = source.reader_with(limits, Doctype::SkipExternalId);
     // The indices of the elements that are open, innermost last.
     let mut open: Vec<usize> = Vec::new();
+    let mut refusal = None;
 
     for event in &mut reader {
         let event = match event {
             Ok(event) => event,
-            Err(_) => {
+            Err(error) => {
                 dom.defects.push(MarkupDefect::Truncated);
+                refusal = Some(error);
                 break;
             }
         };
@@ -456,6 +649,7 @@ pub fn read(bytes: &[u8], limits: &XmlLimits) -> Result<Dom, XmlError> {
                     next: None,
                     children: Vec::new(),
                     style: None,
+                    auto_rtl: None,
                 };
                 for attribute in element.attributes() {
                     let name = attribute.name().qualified();
@@ -529,5 +723,293 @@ pub fn read(bytes: &[u8], limits: &XmlLimits) -> Result<Dom, XmlError> {
     if dom.nodes.is_empty() {
         dom.defects.push(MarkupDefect::Empty);
     }
-    Ok(dom)
+    resolve_auto_directions(&mut dom.nodes);
+    (dom, refusal)
+}
+
+/// Reads a document that is HTML **or** XHTML: as XML first, and — when the
+/// XML reader refuses it for anything but one of its caps — by HTML's own
+/// parser (`tinker_pdf_xml::html`, WHATWG §13.2), with
+/// [`MarkupDefect::NotXml`] saying so.
+///
+/// **XML first**, because a loose file that is well-formed XHTML is read
+/// exactly as an EPUB's chapter is, and `tests/standalone.rs` holds the two
+/// pixel-equal; HTML's parser reads `<div/>` as an open `<div>` and would
+/// break that for every such file. **HTML when XML refuses**, because a file
+/// that is not well-formed XML is HTML — a `<p>` left open, an attribute
+/// unquoted, a `&nbsp` without its semicolon — and HTML's parser reads every
+/// input to the end where the XML reader stopped at the first of them. A
+/// refusal at a cap is not a question of syntax, and reading the document
+/// again would meet the same cap, so the XML reader's tree stands.
+///
+/// **In the encoding its declaration names**, single-byte ones included, by
+/// any of the Encoding Standard's labels that is an XML `EncName`
+/// ([`Source::with_declared_encoding`]):
+/// a loose file is not an EPUB chapter, which EPUB 3.3 holds to UTF-8 or
+/// UTF-16, and an XHTML file whose declaration says `windows-1251` is
+/// well-formed XML in windows-1251. Read by
+/// [`Source::new`] it was refused for its encoding and handed to HTML's
+/// parser, which then read no XML declaration and set the page in
+/// windows-1252's letters.
+///
+/// **One file, one encoding, well-formed or not.** A file the XML reader
+/// decoded — by its byte order mark, its UTF-16 shape, the encoding its
+/// declaration names, or as UTF-8, which bytes that are UTF-8 are — and then
+/// refused goes to HTML's parser as those characters, with
+/// [`MarkupDefect::Undecodable`] if a single-byte table left a byte unmapped:
+/// a `<br>` left open does not change which letters the page is in, and a
+/// UTF-16 file with no mark is not read again as bytes HTML's decoder has no
+/// rule for. That includes a file refused at its declaration for naming an
+/// encoding this build does not decode — Shift_JIS over bytes that are ASCII
+/// or UTF-8, or behind a byte order mark — which says so with
+/// [`MarkupDefect::EncodingNotDecoded`], whether or not the rest of it is
+/// well-formed. Only a file the XML reader could not decode at all —
+/// malformed bytes, among them a multi-byte encoding's that are not UTF-8, a
+/// UTF-32 byte order mark, or a character XML does not admit, such as a form
+/// feed — is decoded by HTML's own §13.2.3
+/// (`tinker_pdf_xml::html::parse_bytes`), whose prescan reads a `<meta>` and
+/// then the same XML declaration, and names an encoding this build does not
+/// decode as [`MarkupDefect::EncodingNotDecoded`] too.
+#[must_use]
+pub fn read_markup_or_html(bytes: &[u8], limits: &XmlLimits) -> Dom {
+    let Ok(source) = Source::with_declared_encoding(bytes) else {
+        return from_html(&tinker_pdf_xml::html::parse_bytes(bytes, limits), limits);
+    };
+    let refusal = match read_reporting(&source, limits) {
+        (dom, None) => return dom,
+        (
+            dom,
+            Some(
+                XmlError::DepthCap
+                | XmlError::AttributeCap
+                | XmlError::NameCap
+                | XmlError::TokenCap,
+            ),
+        ) => return dom,
+        (_, Some(refusal)) => refusal,
+    };
+    let mut dom = from_html(&tinker_pdf_xml::html::parse(source.text(), limits), limits);
+    // The reader's one refusal of a Source it decoded that is about the
+    // encoding rather than the syntax: its declaration names one this build
+    // does not decode, over bytes that are UTF-8 or that a byte order mark or
+    // UTF-16's shape decided. (A UTF-32 mark is refused before there is a
+    // Source.) A file that is well-formed says why it is not XML.
+    if refusal == XmlError::UnsupportedEncoding {
+        dom.defects.push(MarkupDefect::EncodingNotDecoded);
+    }
+    if source
+        .warnings()
+        .contains(&tinker_pdf_xml::Warning::UnmappedByte)
+    {
+        dom.defects.push(MarkupDefect::Undecodable);
+    }
+    dom
+}
+
+/// The tree HTML's parser built, as this reader's tree.
+///
+/// Elements in document order, parents first, every element in the namespace
+/// the parser put it in — so an `<svg>` inside a `<p>` is an SVG element here
+/// as it is in an XHTML file that declares it. Comments, the DOCTYPE and a
+/// `<template>`'s content (which is not among its children, and is inert) are
+/// dropped, as [`read`] drops what is not content.
+///
+/// **One bound is kept here and not in the parser.** HTML's tree builder can
+/// make the tree deeper than its own stack of open elements, because the
+/// adoption agency nests clones inside the blocks it moves; every reader past
+/// this one was written against `tinker_pdf_xml::limits::MAX_XML_DEPTH`
+/// standing in front of it. An element past `limits.max_depth` is not made: its
+/// text is kept, in the deepest element the cap allows, and
+/// [`MarkupDefect::TooDeep`] says so.
+#[must_use]
+pub fn from_html(document: &tinker_pdf_xml::html::Document, limits: &XmlLimits) -> Dom {
+    use tinker_pdf_xml::html::NodeData;
+
+    let mut dom = Dom {
+        defects: vec![MarkupDefect::NotXml],
+        ..Dom::default()
+    };
+    if document.stopped().is_some() {
+        dom.defects.push(MarkupDefect::Truncated);
+    }
+    if document.encoding().is_some_and(|d| d.not_decoded.is_some()) {
+        dom.defects.push(MarkupDefect::EncodingNotDecoded);
+    }
+    if document.encoding().is_some_and(|d| d.replaced > 0) {
+        dom.defects.push(MarkupDefect::Undecodable);
+    }
+    let Some(root) = document.document_element() else {
+        dom.defects.push(MarkupDefect::Empty);
+        return dom;
+    };
+    let mut too_deep = false;
+    // (node in the HTML tree, the element it goes inside, its depth)
+    let mut stack: Vec<(usize, Option<usize>, usize)> = vec![(root, None, 1)];
+    while let Some((at, parent, depth)) = stack.pop() {
+        let Some(node) = document.node(at) else {
+            continue;
+        };
+        match &node.data {
+            NodeData::Text(text) => {
+                if let Some(parent) = parent.and_then(|p| dom.nodes.get_mut(p)) {
+                    parent.children.push(Child::Text(text.clone()));
+                }
+            }
+            NodeData::Element(element) => {
+                if depth > limits.max_depth {
+                    // The element is not made; what it holds goes on into the
+                    // deepest one that was.
+                    too_deep = true;
+                    for &child in node.children.iter().rev() {
+                        stack.push((child, parent, depth));
+                    }
+                    continue;
+                }
+                let index = dom.nodes.len();
+                let mut made = Node {
+                    name: element.name.clone(),
+                    namespace: Some(element.namespace.uri().to_owned()),
+                    id: None,
+                    classes: Vec::new(),
+                    attributes: Vec::with_capacity(element.attributes.len()),
+                    parent,
+                    previous: None,
+                    next: None,
+                    children: Vec::new(),
+                    style: None,
+                    auto_rtl: None,
+                };
+                for attribute in &element.attributes {
+                    let name = attribute.qualified();
+                    match name.as_str() {
+                        "id" => made.id = Some(attribute.value.clone()),
+                        "class" => {
+                            made.classes = attribute
+                                .value
+                                .split_whitespace()
+                                .map(str::to_owned)
+                                .collect();
+                        }
+                        "style" => made.style = Some(attribute.value.clone()),
+                        _ => {}
+                    }
+                    made.attributes.push((name, attribute.value.clone()));
+                }
+                if let Some(parent_index) = parent {
+                    let previous = dom.nodes.get(parent_index).and_then(|p| {
+                        p.children.iter().rev().find_map(|child| match child {
+                            Child::Element(at) => Some(*at),
+                            Child::Text(_) => None,
+                        })
+                    });
+                    made.previous = previous;
+                    if let Some(previous) = previous.and_then(|p| dom.nodes.get_mut(p)) {
+                        previous.next = Some(index);
+                    }
+                    if let Some(p) = dom.nodes.get_mut(parent_index) {
+                        p.children.push(Child::Element(index));
+                    }
+                } else if dom.root.is_none() {
+                    dom.root = Some(index);
+                }
+                dom.nodes.push(made);
+                for &child in node.children.iter().rev() {
+                    stack.push((child, Some(index), depth + 1));
+                }
+            }
+            NodeData::Document
+            | NodeData::Fragment
+            | NodeData::Doctype { .. }
+            | NodeData::Comment(_) => {}
+        }
+    }
+    if too_deep {
+        dom.defects.push(MarkupDefect::TooDeep);
+    }
+    if dom.nodes.is_empty() {
+        dom.defects.push(MarkupDefect::Empty);
+    }
+    resolve_auto_directions(&mut dom.nodes);
+    dom
+}
+
+/// The `dir` keyword an HTML element declares — HTML's enumerated attribute,
+/// ASCII case-insensitive — or `None` for no `dir` or a value that is none of
+/// the three, which is no `dir` at all (the *undefined* state).
+fn dir_keyword(node: &Node) -> Option<&'static str> {
+    if !node.is_html() {
+        return None;
+    }
+    node.attr("dir").and_then(|value| {
+        ["ltr", "rtl", "auto"]
+            .into_iter()
+            .find(|keyword| value.eq_ignore_ascii_case(keyword))
+    })
+}
+
+/// Whether an element's `dir` is in HTML's auto state: `dir="auto"`, or a
+/// `<bdi>` whose `dir` is undefined.
+fn in_auto_state(node: &Node) -> bool {
+    match dir_keyword(node) {
+        Some(keyword) => keyword == "auto",
+        None => node.is_html() && node.name == "bdi",
+    }
+}
+
+/// Fills [`Node::auto_rtl`] for every element in the auto state: HTML's
+/// *auto directionality*, the first strong character of the element's text
+/// in tree order.
+///
+/// HTML's walk skips every `bdi`, `script`, `style` and `textarea`
+/// descendant and every descendant with a `dir` of its own, with all they
+/// hold. So the stretches two elements in the auto state walk are disjoint —
+/// an inner one has a `dir`, or is a `bdi`, and the outer one skips it — and
+/// the whole pass reads each node at most once, however the elements nest.
+/// The walk is a stack, not recursion, because the tree's depth is the
+/// document's to choose.
+fn resolve_auto_directions(nodes: &mut [Node]) {
+    let skipped = |node: &Node| {
+        node.is_html()
+            && (matches!(node.name.as_str(), "bdi" | "script" | "style" | "textarea")
+                || dir_keyword(node).is_some())
+    };
+    for at in 0..nodes.len() {
+        if !in_auto_state(&nodes[at]) {
+            continue;
+        }
+        let mut found = None;
+        // Each child with the index of the element holding it.
+        let mut stack: Vec<(usize, &Child)> = nodes[at]
+            .children
+            .iter()
+            .rev()
+            .map(|child| (at, child))
+            .collect();
+        while let Some((parent, child)) = stack.pop() {
+            match child {
+                Child::Text(text) => {
+                    found = text.chars().find_map(|c| match bidi_class(c) {
+                        BidiClass::L => Some(false),
+                        BidiClass::R | BidiClass::AL => Some(true),
+                        _ => None,
+                    });
+                    if found.is_some() {
+                        break;
+                    }
+                }
+                Child::Element(index) => {
+                    // A child's index is above its parent's — [`read`] builds
+                    // the tree in document order — so an index that is not
+                    // is no child of this tree's, and is passed over rather
+                    // than followed: every step goes up, and the walk ends.
+                    if let Some(node) = nodes.get(*index).filter(|_| *index > parent) {
+                        if !skipped(node) {
+                            stack.extend(node.children.iter().rev().map(|child| (*index, child)));
+                        }
+                    }
+                }
+            }
+        }
+        nodes[at].auto_rtl = Some(found.unwrap_or(false));
+    }
 }

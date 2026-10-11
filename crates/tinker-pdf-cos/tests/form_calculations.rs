@@ -532,6 +532,79 @@ trailer
     assert_eq!(value_of(&editor, "code"), "ok");
 }
 
+/// The calculation door refuses a check box and a radio group, ReadOnly or
+/// not, and the user's door still sets the one that is not ReadOnly.
+///
+/// `fill::accepts_value` accepts no button, which is what kept the calculated
+/// path off them; when `fill_field` learned to take a button's state, the
+/// button branch ran before the writer was asked, and `set_calculated_values`
+/// ticked both — the ReadOnly box included, which 12.7.4.1 Table 227 keeps
+/// from the user and nothing in this build computes. The review of the
+/// field-creation row found it against `testdata/form-fields.pdf`.
+#[test]
+fn a_calculation_does_not_set_a_button() {
+    let doc = normalize(
+        b"%PDF-1.7
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [10 0 R 20 0 R] >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [10 0 R 21 0 R] >>
+endobj
+5 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 20 20] /Length 15 >>
+stream
+2 2 16 16 re f
+endstream
+endobj
+6 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 20 20] /Length 0 >>
+stream
+
+endstream
+endobj
+10 0 obj
+<< /FT /Btn /T (agree) /Ff 1 /V /Off /AS /Off /Rect [10 150 30 170]
+   /AP << /N << /On 5 0 R /Off 6 0 R >> >> /Subtype /Widget /Type /Annot >>
+endobj
+20 0 obj
+<< /FT /Btn /T (colour) /Ff 32768 /V /Off /Kids [21 0 R] >>
+endobj
+21 0 obj
+<< /Parent 20 0 R /AS /Off /Rect [10 120 30 140]
+   /AP << /N << /blue 5 0 R /Off 6 0 R >> >> /Subtype /Widget /Type /Annot >>
+endobj
+trailer
+<< /Size 22 /Root 1 0 R >>
+%%EOF
+"
+        .to_vec(),
+    );
+
+    let mut editor = DocumentEditor::new(doc);
+    for (name, state) in [("agree", "On"), ("colour", "blue")] {
+        let rejection = editor
+            .set_calculated_values(&[(name, state)])
+            .expect_err("a calculation sets no button");
+        assert_eq!(rejection.field, name);
+        assert_eq!(rejection.reason, FillError::ValueRefused);
+        assert_eq!(value_of(&editor, name), "Off", "{name} was not written");
+        assert!(!editor.is_dirty());
+    }
+
+    // The user's door: the ReadOnly box is refused there too, and the radio
+    // group, which is not ReadOnly, takes the state a widget offers.
+    assert_eq!(
+        editor.fill_field("agree", "On"),
+        Err(FillError::ValueRefused)
+    );
+    assert_eq!(editor.fill_field("colour", "blue"), Ok(Vec::new()));
+    assert_eq!(value_of(&editor, "colour"), "blue");
+}
+
 /// A widget with no `/Rect` is reported, not refused (ruling 2 degrades,
 /// ruling 10 names) — so a calculation over a damaged file still computes, and
 /// still says what it could not draw.

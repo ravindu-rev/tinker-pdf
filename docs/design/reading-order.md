@@ -81,6 +81,9 @@ inferred" for the untagged majority. This design does not touch that path.
   [design/pdfua.md](pdfua.md)'s verdicts. content-and-text.md refuses "a tree
   guessed from geometry presented as the file's own statement", and the
   refusal stands.
+  *Narrowed, 9 October 2026*: auto-tagging is [ROADMAP](../ROADMAP.md) row SD-07 — a
+  tree written into a new document as that document's statement, never
+  presented as the input's own.
 - **Changing the default.** `plain_text()`, `search()` and selection quads
   do not change by a byte; the fingerprint suite pins that, and every
   milestone's exit repeats the pin.
@@ -147,12 +150,13 @@ corrected when milestone 3 lands; the design here follows the first sentence.
 What the recorder does **not** give: line and block assembly, which stays
 `TextDevice`'s — one assembler, or the structured and flat views drift; page
 boxes and page count, which are the page's; anything across pages, since a
-transcript is one interpretation of one page; and a replay. The retained-page
-row's exit criterion is a replay of a transcript into a device, and "nothing
-replays it yet". Until it does, the inference costs a second interpretation
-of the page — `TextDevice` for the lines and `RecordingDevice` for the rest —
-which ruling 4 makes identical and which is a cost, not a correctness
-question. When the replay lands, one interpretation feeds both.
+transcript is one interpretation of one page; and — until September 2026 — a
+replay. The retained-page row landed then, and `tinker_pdf_content::replay`
+hands a transcript to any device, the `TextDevice` included. Before it did,
+the inference was costed at a second interpretation of the page —
+`TextDevice` for the lines and `RecordingDevice` for the rest — which ruling
+4 makes identical and which is a cost, not a correctness question. Now one
+interpretation feeds both.
 
 ### The three inferences
 
@@ -276,8 +280,9 @@ the column-crossings score is computed over the rest.
 - **`TextDevice` and `TextPage`** — the one assembler. Exists; unchanged.
 - **`RecordingDevice`** — exists; needs `structure: true`, not `GLYPHS`,
   and its module doc corrected to say so.
-- **A replay of a transcript into a device** — does not exist; the
-  retained-page row's deliverable. Two interpretations per page until then.
+- **A replay of a transcript into a device** — exists since September
+  2026 (`tinker_pdf_content::replay`, the retained-page row's deliverable);
+  one interpretation per page.
 - **`StructureTree::text_for_page`** — the claimed-character join the
   scores are computed over. Exists.
 - **`corpus/ratchet.json` and `xtask/src/ratchet.rs`** — a sixth axis with
@@ -303,8 +308,225 @@ the column-crossings score is computed over the rest.
 
 ## As built
 
-*Filled in as milestones land.* Nothing has landed; the roadmap row is not
-scheduled. What the commit that added this document changed is the roadmap
-row's evidence sentence and its tagged-file count, and the one sentence in
-[features/content-and-text.md](../features/content-and-text.md) that called
-today's order geometric.
+**Milestones 1 and 2 (3 October 2026): the names and the instrument, before
+the guess.** `crates/tinker-pdf/src/reading_order.rs` holds `ReadingOrder`
+(`Stream`, `Stated`, `Inferred`), `OrderedText` — the answer labelled by the
+order it *is*, so a request for `Inferred` on a tagged page comes back
+`Stated` — `Page::text_in(ReadingOrder)`, and `InferredOrder` with its
+permutation from stream order, its `InferredBlock`s and their `Role`s.
+`Page::inferred_order` and `Document::inferred_order` decline:
+`DeclineReason::TreePresent` on a tagged document unless
+`InferenceOptions::hide_structure` is set, and `DeclineReason::NotImplemented`
+everywhere else, with the stream's blocks unmoved and every one `Unplaced`.
+`Page::text()`, `plain_text()` and `search()` are not touched: the new
+surface is a sibling of `text_with`, never a field on it.
+
+The inference reads the page through **one interpretation into a tee**
+(`crates/tinker-pdf/src/observe.rs`): a device that hands
+`TextDevice` exactly the four calls it implements and answers the
+interpreter's three questions with `TextDevice`'s own answers, so the page it
+builds is `Page::text()`'s character for character — held over every
+committed untagged document by `the_inference_reads_the_same_page_text_reads`
+rather than argued. With the tree hidden it reads `/Artifact` scopes as
+content, because an inference measured against a tree has to find a running
+head without the producer's artifact mark telling it to.
+
+The harness is `crates/tinker-pdf/tests/reading_order_support/mod.rs`: pair
+agreement counted as inversions by a merge sort (held to arithmetic by
+`the_pair_score_counts_inversions`), column crossings, and a role score for
+milestones 4 and 5; characters are matched across the two extractions by
+origin and text, the k-th repeat to the k-th. `reading_order_census.rs` is
+the corpus census, `#[ignore]`d, in `corpus.yml`'s census step, printing
+`RAN`/`SKIPPED`; it splits the population by corpus name (pdfjs and SafeDocs
+the ratchet population, veraPDF where nothing may move) and asserts what
+holds whatever the corpus holds — every inferred order a permutation, a
+floor only on the ratchet population, and, since the review of this lane,
+**zero characters moved on veraPDF**, milestone 3's exit, which the census
+printed and did not hold until then; running-head and footnote precision are
+scored over every page of a file that marks any, not only the pages that
+do. **The corpus baseline is owed:** the fetched
+corpora were not reachable where this landed, so `INFERRED_FLOORS` is empty
+and no `ratchet.json` axis was added; the first nightly run's figures are
+the floors.
+
+What was measured, first-party: the content stream agrees with the tree on
+every pair of every committed EPUB book (11 439 397 pairs over nine books —
+the EPUB writer draws in the order it tags), so the books are in the set
+where nothing may move; the headline two-column fixture, drawn line by line
+across both columns and tagged column by column, scores 0.7603 for the
+stream (2 036 440 of 2 678 455 pairs); and a seeded shuffle of a one-column
+page drops the stream from 1 to 0.4139, which is the instrument seeing
+disorder (`the_score_sees_a_shuffled_page`).
+
+**Milestone 3 (3 October 2026): columns and block order.** The inference
+cuts each line into fragments at internal whitespace of at least a column gap,
+cuts the body into elementary intervals at the fragments' edges, and finds
+every gap in one pass (three columns are two gaps, not a recursion): a run of
+intervals covered by text over at most 40 % of the body's height, at least
+`COLUMN_GAP_EMS` wide, with a column of text at least `COLUMN_MIN_WIDTH_EMS`
+wide on both sides. A line that runs across a gap without touching it — a
+producer drawing both columns' lines at once — is cut in two; a line whose
+glyph boxes hold the cut is a spanner, and a run of spanners ends one band
+of the page and heads the next (`InferredBlock::section`), so a heading over
+two columns reads before them and a paragraph set across the page between two
+column sets reads between them. Inside a column, the text device's blocks are
+kept as units, ordered by their tops, with the stream's order wherever two
+stand level (`ROW_TOLERANCE_EMS`). Columns run right to left when most lines
+carry `TextLine::rtl`. Rotated and vertical lines go last as `Unplaced`, and a
+page that is mostly either is declined. The reading is still the one
+interpretation into the tee, not the recorder the milestone named.
+
+**Three departures from the design, each with its fixture.** (1)
+`COLUMN_GAP_EMS` is **0.8**, not 1.5: `css-multicol-1`'s `column-gap: normal`
+is 1em and LaTeX's `\columnsep` is 10 pt in a 10 pt document, a justified
+column ends exactly at its edge, and at 1.5 em — or at exactly 1 em, where the
+gap is met to the last bit of a sum of advances — a justified two-column book
+reads as one column, interleaved (`a_two_column_book_reads_down_its_columns`;
+both injections fire). (2) `COLUMN_MIN_WIDTH_EMS` (8) is new: labels beside
+their values are a gap by width and height, and reading every label before
+any value is the one order nobody wants
+(`labels_beside_their_values_are_one_column`). (3) A whitespace run that
+reaches the outermost edge of the text is a margin, never a gap, so a ragged
+right edge is not a near miss (`a_ragged_edge_is_a_margin_and_not_a_gap`).
+
+Measured, first-party (`crates/tinker-pdf/tests/reading_order.rs`, 23
+tests): the headline two-column fixture, the spanning fixture, three columns
+and right-to-left columns each score 1 against the tree with zero crossings
+where the stream scores 0.7603, 0.5068, below 1 and 0.4995; every one-column
+fixture, every committed `testdata` page and every page of the nine committed
+books moves no character; the two-column EPUB book is found as two columns on
+every page set in two, with no crossings; and the same book **redrawn as a
+line-by-line producer would draw it** — every line where the layout put it,
+drawn down the page by baseline across both columns, tagged with its place in
+the book's own tree — scores 0.7573 for the stream and 1.0000 for the
+inference over 3 915 671 pairs
+(`the_two_column_book_redrawn_across_the_page_reads_in_the_authors_order`).
+The census now prints column crossings over the files the stream does not
+already read; **the corpus figures — crossings against the baseline, pair
+agreement per corpus, and veraPDF's moved count — are owed**, as above.
+
+**Milestone 4 (3 October 2026): running heads, running feet and page
+numbers.** A line lying wholly in the top or foot `MARGIN_BAND` (12 % of the
+crop box) is a page number when a neighbouring page carries, in the same band
+at the same height to within an em, the numeral its own value plus the
+offset between the two pages — decimal or canonical roman, with dashes,
+bars, brackets and a full stop around it — and a running head or foot when
+`RUNNING_REPEATS` (two) neighbours carry its text, digits masked so "Page 3
+of 9" recurs, at the same place to within an em. Both are taken out of the
+body before columns are looked for, so a head across the page is never a
+spanner, and are read first and last with their roles. **The window is the
+pages around the page, not the first K of the document**: `RUNNING_WINDOW`
+(16) pages, half before and half after, because page 300's running head names
+its chapter and is not on pages 1 to 16. `Document::inferred_orders` reads
+each page's margins once for a whole range; `Page::inferred_order`,
+`Document::inferred_order` and it give the same answer, asserted role for
+role. With fewer than two other pages to compare — a one-page document — a
+block wholly in a band is `Unplaced` where it stands and
+`InferenceWarning::NoCrossPageEvidence` says why; nothing is called a running
+head on no evidence. Each neighbour is asked as a sweep along the lines'
+heights, the lines within an em held in an ordered set by edge, and not line
+against line: the review of this lane found every margin line compared with
+every margin line of sixteen neighbours, quadratic in lines a stream draws
+for a few bytes each, and a page of sixteen thousand one-glyph lines beside
+sixteen neighbours of the same went from 73 seconds unoptimised to under one
+(`margin_lines_are_judged_in_bounded_work`, in `reading_order.rs`).
+
+Measured, first-party: a six-page builder book with a verso and a recto head,
+a numbered foot and two interleaved columns between them, its furniture
+drawn as `/Artifact /Pagination` and its stream drawing the number first and
+the head last — every page reads head first, number last and body between
+at full pair agreement, and against the producer's artifact marks, read with
+the tree hidden, 12 of 12 blocks called furniture were marked and 129 of 129
+marked characters were found, where the stream calls nothing furniture. A
+same word set at a different place on every page's top band stays body; a
+`Page # of #` head and a roman page number are found. **No EPUB fixture
+carries this milestone**: the EPUB path draws no running head (no
+`css-page-3` margin boxes), so the design's "reftest book with a running
+head" is the builder book. The census prints running-head precision and
+recall per corpus over the artifacts each producer drew in the margin bands
+— by position, because the device seam carries a property list's `/MCID` and
+14.9's entries but not an artifact's `/Type`, so `/Pagination` cannot be told
+from `/Layout` by name — and **the corpus figure is owed**.
+
+**Milestone 5 (3 October 2026): footnotes.** In the page's last band, the
+run of blocks at the foot of each column — and below the columns, across the
+page — whose every line is set at most `FOOTNOTE_SIZE_RATIO` (0.9) of the
+body's median size is a run of notes when a horizontal rule at least
+`SEPARATOR_SHARE` (a third) of the column wide stands between it and the body
+above, or when it opens with a raised glyph. A glyph is raised when its origin
+stands `RAISE_EMS` (a fifth) of its line's size above the line's baseline,
+which the text device's `TextChar::origin` keeps — `Glyph::baseline` joins a
+raised glyph to its line, and the risen origin is where the ink is — and the
+rules come from the same one interpretation the tables read. A run is cut into
+one note at every line that opens with a raised marker; each note's marker is
+its leading raised glyphs, or a short numeral or note symbol on its baseline.
+Notes are read after the body, before the running feet, in the order of their
+reference marks — the raised glyph with the same text in the body, by its
+place in the order read — and in the order they stand where no mark was
+found. They leave the body before the margin bands are judged, so a note in
+the foot band is a note and not an unplaced margin block. The design's
+`Capture { structure: true }` recorder is not needed: the tee carries both.
+
+Measured, first-party (`crates/tinker-pdf/tests/reading_order.rs`): a page of
+body text with two raised reference marks and two notes under a separator
+rule, drawn note 2, body, note 1 and tagged body then `/Note`s, reads every
+pair the tree's way (the stream 0.9407); against the producer's `/Note`
+elements, two of two blocks called footnotes were notes and 102 of 102 note
+characters were found, where the stream finds none; a rule over notes marked
+on the baseline, and raised markers without a rule, each make two notes, and
+neither makes none; note 2 set above note 1 still reads after it, and with no
+marks in the body the notes read in the order they stand; two notes drawn as
+one block of the text device's are cut at their markers; and **a rise of zero
+everywhere changes nothing** — the same page with nothing raised and no rule
+calls nothing a footnote and reads its foot where the columns put it. The
+census scores footnote precision against `/Note` per corpus; **that figure is
+owed**.
+
+**Milestone 6 (3 October 2026): the surface, and the table handoff.** Tables
+first, then order: the page's ruled tables — the sibling design's
+`Page::inferred_tables`, over the same one interpretation — claim their
+characters before anything else is decided, and each is read as one block
+of a role the design did not list, `Role::Table`: its lines a cell at a time,
+row by row in the table's direction, in exactly the order of the table's own
+permutation. The page says so (`InferenceWarning::TableSuspected { tables }`).
+A table's lines are not looked at for columns, running heads or footnotes:
+its frame stands over the column finder's coverage as a block of text would
+— the whole frame, rules and the white of its cells, because a column holding
+a paragraph and a table is not open space — and it is placed in the column
+that holds its frame, or across the columns as a spanner where its frame
+crosses a gap, heading the band under it. Its own rules are no footnote
+separator, and a block of the text device's that runs from a line just above
+a table to one just below is cut where the table stands. **Only ruled tables
+are handed off**: an aligned table is weaker evidence — nothing the page drew
+bounds it — and its lines are read as lines (the labels-beside-values fixture
+finds one and keeps its `ColumnsAmbiguous` reading). A page more than half of
+whose characters are in tables is declined (`DeclineReason::Table`), as a
+page mostly of vertical or rotated lines is: its order is the tables', not a
+reading order's. `Role::Caption`, which the design listed and nothing
+produced — a caption needs the figure the observer does not record — was
+taken out rather than left as a promise; the enum is non-exhaustive, so it
+can come back with the inference that produces it. `tpdf text --order
+stream|stated|inferred` prints the order asked for, and on standard error
+which order each page got and what an inference tolerated; `--order stated`
+of an untagged document is refused.
+
+Measured, first-party (`crates/tinker-pdf/tests/reading_order.rs`): a page of
+two paragraphs around a ruled table whose first-column cells hold two lines,
+drawn baseline by baseline across the page and tagged cell by cell, reads
+every pair the tree's way where the stream does not (0.9971 over 96 580
+pairs — the paragraphs' pairs dominate; the table is where it is wrong),
+with the table one `Table` block equal to the table inference's permutation
+and nothing outside it moved, whether the paragraphs stand two lines off the
+table or one; the same set in the left column of two reads 1.0000 where the
+stream reads 0.8512, the table in column 0; a table across two column sets
+reads between them (0.8899 streamed, 1.0000 inferred), a spanner heading the
+second band; a page mostly table is declined with nothing moved; a small
+source line under a table's bottom rule is body, not a footnote; and a book's
+bordered table, which the EPUB writer draws in the order it tags, moves
+nothing and is one `Table` block. Every `InferenceWarning` variant is reached
+by a fixture — `VerticalWriting` and `Declined { VerticalWriting }` by a
+hand-assembled `/Identity-V` page, since the document builder writes no
+vertical font. **The roadmap row stays, narrowed**: its exit is the corpus
+census, which has not run where this was written; the corpus agreement,
+column crossings, veraPDF moved count and running-head and footnote
+precision are owed, and no ratchet axis was added for a figure not measured.

@@ -34,7 +34,9 @@
 
 mod epub_support;
 
-use epub_support::layout::{column, document, fits, lay_out, written, Line, MONO_ADVANCE};
+use epub_support::layout::{
+    column, document, fits, lay_out, lay_out_markup, lines, written, Line, MONO_ADVANCE,
+};
 
 /// The measure every test below lays out at, with `body { margin: 0 }` so the
 /// flow's content edge is the page's.
@@ -309,6 +311,304 @@ fn a_float_shortens_the_lines_beside_it_and_not_the_ones_below() {
         rest,
         greedy(&wanted, MEASURE, 20.0).join(" "),
         "the lines below the float are broken to the full measure"
+    );
+}
+
+// ---- the forced line break --------------------------------------------------
+//
+// HTML §15.3.4 (Rendering, *Phrasing content*) is `br { display-outside:
+// newline; }`, and the newline is the one a preserved line feed is:
+// `css-text-3` §5.1 makes it a forced line break. Every expectation below is
+// that sentence and §10.8's `line-height`, with the advances [`greedy`] uses.
+
+/// Each line of a column as one string, with where it starts and its
+/// baseline: the runs that share a baseline, joined in reading order, since a
+/// line holding two elements' text is two runs.
+fn joined(lines: &[Line]) -> Vec<(String, f64, f64)> {
+    let mut out: Vec<(String, f64, f64)> = Vec::new();
+    for line in lines {
+        match out.last_mut() {
+            Some((text, _, y)) if (*y - line.y).abs() < 1e-9 => text.push_str(&line.text),
+            _ => out.push((line.text.clone(), line.x, line.y)),
+        }
+    }
+    out
+}
+
+/// **A `<br>` ends its line, and the next starts one `line-height` down at
+/// the start edge.**
+///
+/// `aaaa bbbbbb cc` is fourteen advances and the measure is twenty, so
+/// [`greedy`] sets it on one line: the break is the `<br>`'s and not a wrap.
+/// Nothing is set for the `<br>` itself — the first line is its four
+/// advances, and no run holds a line feed — and the spaces either side of it
+/// are gone: the one before it ends its line (`css-text-3` §4.1.2) and the
+/// one after it starts the next (§4.1.1). The same paragraph as HTML's parser
+/// reads it — a void `<br>`, no end tag — is the same two lines, since both
+/// readers build the one element tree the boxes are made from.
+#[test]
+fn a_br_ends_its_line_and_the_next_starts_one_line_height_down() {
+    assert_eq!(greedy("aaaa bbbbbb cc", MEASURE, 20.0), ["aaaa bbbbbb cc"]);
+    let style = sheet("p { font-size: 20px; line-height: 30px }");
+    let laid = column(&document("<p>aaaa <br/> bbbbbb cc</p>"), &style, MEASURE);
+    assert_eq!(texts(&laid), ["aaaa", "bbbbbb cc"], "{laid:?}");
+    close(laid[0].x, 0.0, "the first line starts at the edge");
+    close(laid[1].x, 0.0, "and so does the line after the break");
+    close(
+        gaps(&laid)[0],
+        30.0,
+        "the second line is one line-height down",
+    );
+    let advance = MONO_ADVANCE * 20.0;
+    close(
+        laid[0].width,
+        4.0 * advance,
+        "four advances, and none for the br",
+    );
+    close(
+        laid[1].width,
+        9.0 * advance,
+        "nine advances on the line after it",
+    );
+    let soup = lines(
+        &lay_out_markup(
+            "<!DOCTYPE html><body><p>aaaa <br> bbbbbb cc",
+            &style,
+            MEASURE,
+            100_000.0,
+        )
+        .2,
+    );
+    assert_eq!(soup, laid, "HTML's parser's tree lays out the same lines");
+}
+
+/// **A `<br>` inside an inline box breaks the line the box is in**, and the
+/// box goes on after it: `aa <span>bbb<br/>ccc</span> dd` is `aa bbb` over
+/// `ccc dd`, a run three advances after its line's start where it follows
+/// three characters, the second line one `line-height` down.
+#[test]
+fn a_br_inside_an_inline_box_breaks_the_line_the_box_is_in() {
+    let laid = column(
+        &document("<p>aa <span>bbb<br/>ccc</span> dd</p>"),
+        &sheet("p { font-size: 20px; line-height: 30px }"),
+        MEASURE,
+    );
+    let advance = MONO_ADVANCE * 20.0;
+    let top = laid.first().map_or(0.0, |line| line.y);
+    let runs: Vec<(&str, f64, f64)> = laid
+        .iter()
+        .map(|line| (line.text.as_str(), line.x, line.y - top))
+        .collect();
+    let wanted = [
+        ("aa ", 0.0, 0.0),
+        ("bbb", 3.0 * advance, 0.0),
+        ("ccc", 0.0, 30.0),
+        (" dd", 3.0 * advance, 30.0),
+    ];
+    assert_eq!(runs.len(), wanted.len(), "{runs:?}");
+    for ((text, x, y), (want, wx, wy)) in runs.iter().zip(wanted) {
+        assert_eq!(*text, want, "{runs:?}");
+        close(*x, wx, &format!("where `{want}` starts"));
+        close(*y, wy, &format!("the baseline `{want}` is on"));
+    }
+    let both: Vec<String> = joined(&laid).into_iter().map(|(text, _, _)| text).collect();
+    assert_eq!(both, ["aa bbb", "ccc dd"]);
+}
+
+/// **Two `<br>`s in a row leave an empty line, a trailing one leaves none,
+/// and one alone is a line** — CSS 2.2 §9.4.2: a line box with no text and
+/// no other content is zero-height *unless it ends in a preserved newline*.
+/// Between two breaks the line ends in the second, so it is a `line-height`
+/// tall and the text after it is two down; after a trailing break the line
+/// ends in nothing and has no height, so the next paragraph is where it is
+/// without the break; and a paragraph that is one break is one line tall.
+#[test]
+fn two_brs_leave_an_empty_line_and_a_trailing_one_leaves_none() {
+    let style = sheet("p { font-size: 20px; line-height: 30px }");
+    let laid = |body: &str| column(&document(body), &style, MEASURE);
+
+    let two = laid("<p>aaa<br/><br/>bbb</p>");
+    assert_eq!(texts(&two), ["aaa", "bbb"]);
+    close(gaps(&two)[0], 60.0, "two breaks: an empty line between");
+
+    let trailing = laid("<p>aaa<br/></p><p>bbb</p>");
+    let plain = laid("<p>aaa</p><p>bbb</p>");
+    assert_eq!(texts(&trailing), ["aaa", "bbb"]);
+    close(gaps(&trailing)[0], 30.0, "a trailing break adds no line");
+    close(gaps(&plain)[0], 30.0, "as the paragraph without it");
+
+    let alone = laid("<p><br/></p><p>bbb</p>");
+    let empty = laid("<p></p><p>bbb</p>");
+    assert_eq!(texts(&alone), ["bbb"], "nothing is set for the break");
+    close(
+        alone[0].y - empty[0].y,
+        30.0,
+        "a paragraph of one break is one line tall",
+    );
+}
+
+/// **A `<br>` breaks the line under `white-space: pre` and under `nowrap`.**
+///
+/// `pre` keeps the spaces either side of it, so `a  ` and `  b` are each
+/// three advances from the edge; and a preserved line feed before it ends a
+/// line of its own, so the text after both is two `line-height`s down.
+/// `nowrap` takes every soft wrap away and not the forced one: at ten
+/// advances [`greedy`] wraps `aaaa bbbb cccc dd ee` after `bbbb`, and
+/// `nowrap` sets it on the two lines the `<br>` makes, the first past the
+/// measure.
+#[test]
+fn a_br_breaks_the_line_under_pre_and_under_nowrap() {
+    let advance = MONO_ADVANCE * 20.0;
+    let pre_style = sheet("pre { margin: 0; font-size: 20px; line-height: 30px }");
+    let pre = column(&document("<pre>a  <br/>  b</pre>"), &pre_style, MEASURE);
+    assert_eq!(texts(&pre), ["a  ", "  b"], "{pre:?}");
+    for line in &pre {
+        close(line.x, 0.0, "a pre line starts at the edge");
+        close(line.width, 3.0 * advance, "with its spaces kept");
+    }
+    close(gaps(&pre)[0], 30.0, "one line-height down");
+    let newline = column(&document("<pre>aaa\n<br/>bbb</pre>"), &pre_style, MEASURE);
+    assert_eq!(texts(&newline), ["aaa", "bbb"]);
+    close(gaps(&newline)[0], 60.0, "a line feed and then a br");
+
+    let narrow = 10.0 * advance;
+    assert_eq!(
+        greedy("aaaa bbbb cccc dd ee", narrow, 20.0),
+        ["aaaa bbbb", "cccc dd ee"]
+    );
+    let nowrap = column(
+        &document("<p>aaaa bbbb cccc<br/>dd ee</p>"),
+        &sheet("p { white-space: nowrap; font-size: 20px; line-height: 30px }"),
+        narrow,
+    );
+    assert_eq!(texts(&nowrap), ["aaaa bbbb cccc", "dd ee"], "{nowrap:?}");
+    close(gaps(&nowrap)[0], 30.0, "one line-height down");
+    close(
+        nowrap[0].width,
+        14.0 * advance,
+        "the unwrapped line, past the measure",
+    );
+}
+
+/// **A `<br>` in a table cell breaks the cell's line, and the cell is as
+/// wide as its widest line** (`css2` §17.5.2.2's automatic layout gives a
+/// column its cells' maximum width where the table has room): `aaa` over
+/// `bbb` is three advances, so the next cell starts three advances in — not
+/// the six `aaabbb` would take — on the first line's baseline.
+#[test]
+fn a_br_in_a_table_cell_breaks_the_cells_line() {
+    let advance = MONO_ADVANCE * 20.0;
+    let laid = column(
+        &document("<table><tr><td>aaa<br/>bbb</td><td>cc</td></tr></table>"),
+        &sheet(
+            "table { border-spacing: 0 } \
+             td { padding: 0; vertical-align: top; font-size: 20px; line-height: 30px }",
+        ),
+        MEASURE,
+    );
+    assert_eq!(texts(&laid), ["aaa", "bbb", "cc"], "{laid:?}");
+    close(laid[0].x, 0.0, "the cell's first line starts at its edge");
+    close(laid[1].x, 0.0, "and so does the line after the break");
+    close(laid[1].y - laid[0].y, 30.0, "one line-height down");
+    close(
+        laid[2].x,
+        3.0 * advance,
+        "the next cell starts after three advances",
+    );
+    close(laid[2].y, laid[0].y, "on the first line's baseline");
+}
+
+/// **A `<br>` that is a flex container's child is a flex item of its own.**
+///
+/// `css-flexbox-1` §4: *"Each in-flow child of a flex container becomes a flex
+/// item, and each child text sequence is wrapped in an anonymous block
+/// container flex item"*. A `<br>` is an element and not a text node, so it is
+/// in neither text sequence beside it: `aaa<br/>bbb` in a row is three items
+/// packed from the start edge — `aaa`, three advances wide; the `<br>`'s, no
+/// wider than a line feed, which sets nothing; and `bbb`, three advances in,
+/// on `aaa`'s baseline. One anonymous item round all three would set `bbb` a
+/// line down at the edge.
+///
+/// The `<br>`'s item is what the element is everywhere else, a box holding a
+/// forced line break, blockified (§4, `css-display-3` §2.7): a block whose one
+/// line ends in a preserved newline, which CSS 2.2 §9.4.2 does not make
+/// zero-height. So a flex container holding a lone `<br>` is one
+/// `line-height` tall, where a text sequence of white space alone is *"not
+/// rendered"* (§4) and would leave it none; and in a column the item is that
+/// line between `aaa` and `bbb`.
+#[test]
+fn a_br_in_a_flex_container_is_a_flex_item_of_its_own() {
+    let advance = MONO_ADVANCE * 20.0;
+    let style = sheet("div { font-size: 20px; line-height: 30px }");
+    let laid = |body: &str| column(&document(body), &style, MEASURE);
+
+    let row = laid(r#"<div style="display: flex">aaa<br/>bbb</div>"#);
+    assert_eq!(texts(&row), ["aaa", "bbb"], "{row:?}");
+    close(row[0].x, 0.0, "the first item starts at the edge");
+    close(row[0].width, 3.0 * advance, "three advances");
+    close(
+        row[1].x,
+        3.0 * advance,
+        "the third item after the first two",
+    );
+    close(row[1].y, row[0].y, "all three on the flex line's baseline");
+
+    let alone = laid(r#"<div style="display: flex"><br/></div><p>bbb</p>"#);
+    let empty = laid(r#"<div style="display: flex"></div><p>bbb</p>"#);
+    assert_eq!(texts(&alone), ["bbb"], "nothing is set for the break");
+    close(
+        alone[0].y - empty[0].y,
+        30.0,
+        "a flex container of one br is one line tall",
+    );
+
+    let stacked = laid(r#"<div style="display: flex; flex-direction: column">aaa<br/>bbb</div>"#);
+    assert_eq!(texts(&stacked), ["aaa", "bbb"], "{stacked:?}");
+    close(stacked[1].x, 0.0, "a column item starts at the edge");
+    close(gaps(&stacked)[0], 60.0, "the br's item is a line between");
+}
+
+/// **A `<br>` that is a table's or a row group's child is a row of its own,
+/// and is not dropped as white space.**
+///
+/// `css-tables-3` §2.2.1's fix-up (CSS 2.2 §17.2.1's, restated) discards
+/// *"anonymous inline boxes which contain only white space"* between or beside
+/// table boxes (steps 1.3 and 1.4). A `<br>` is an element, so its box is not
+/// anonymous and is not discarded: step 2.1 (2.2 in a row group) wraps it in
+/// an anonymous row and 2.3 that in an anonymous cell, whose one line ends in
+/// the break and is one `line-height` tall (CSS 2.2 §9.4.2). With no spacing
+/// and no padding, `b` is then two lines below `a` rather than the one it is
+/// without the `<br>`, and a table holding only a `<br>` is one line tall
+/// where an empty one is none.
+/// The XML reader's tree only: HTML's parser moves a `<br>` written inside a
+/// `<table>` out in front of it (HTML §13.2.6.4.9, *foster parenting*).
+#[test]
+fn a_br_between_table_rows_is_a_row_of_its_own() {
+    let style = sheet(
+        "table { border-spacing: 0; font-size: 20px; line-height: 30px } \
+         td { padding: 0 }",
+    );
+    let laid = |body: &str| column(&document(body), &style, MEASURE);
+
+    let plain = laid("<table><tr><td>a</td></tr><tr><td>b</td></tr></table>");
+    assert_eq!(texts(&plain), ["a", "b"]);
+    close(gaps(&plain)[0], 30.0, "two rows of one line each");
+    for body in [
+        "<table><tr><td>a</td></tr><br/><tr><td>b</td></tr></table>",
+        "<table><tbody><tr><td>a</td></tr><br/><tr><td>b</td></tr></tbody></table>",
+    ] {
+        let broken = laid(body);
+        assert_eq!(texts(&broken), ["a", "b"], "{body}: {broken:?}");
+        close(gaps(&broken)[0], 60.0, &format!("{body}: a row between"));
+    }
+
+    let alone = laid("<table><br/></table><p>bbb</p>");
+    let empty = laid("<table></table><p>bbb</p>");
+    assert_eq!(texts(&alone), ["bbb"], "nothing is set for the break");
+    close(
+        alone[0].y - empty[0].y,
+        30.0,
+        "a table of one br is one line tall",
     );
 }
 

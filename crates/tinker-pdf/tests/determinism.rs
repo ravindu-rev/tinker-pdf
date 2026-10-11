@@ -1754,6 +1754,38 @@ fn epub_book() -> Vec<u8> {
 /// dictionary. That is what closed the float reading-order row -- Beowulf
 /// conserves exactly in logical order where content order still shows 2 182 --
 /// and it changes which objects the file holds without changing one glyph.
+///
+/// *October 2026, the tagged-writing row.* They moved a **third** time, in the
+/// same three places and again with no raster movement, when the EPUB path
+/// began writing the book's `dc:language` as the catalog's `/Lang` (14.9.2):
+/// `dcd5912d…` became `1517adfb…` and `51748067…` became `36a2c5e1…`. That one
+/// entry is the whole of the move, and it was measured rather than argued:
+/// with only the `set_language` call removed, the three hashes are the old
+/// ones exactly. The book's chapters declare `lang="en"`, which is the book's
+/// own language, so no element carries a `/Lang` of its own, and the book's
+/// only picture is an SVG cover this build refuses, so no `/Figure` is drawn.
+///
+/// And a **fourth** time, the same way, when each `<a>` holding an annotation
+/// became a `/Link` element with an `/OBJR` to it and the annotation a
+/// `/StructParent`: `1517adfb…` became `e0f94b04…` and `36a2c5e1…` became
+/// `df84fe61…`. The book's eight annotations are unchanged — counted as
+/// `/Subtype /Link`, since the bare name also counts the seven `/S /Link`
+/// elements that hold them and their marked content — and no raster hash
+/// moved.
+///
+/// And a **fifth**, when the EPUB path began writing an element's XHTML name
+/// where its standard type would lose it (`/S /section`, `/S /em`), with a
+/// `/RoleMap` saying what each is: `e0f94b04…` became `bcc9bb59…` and
+/// `df84fe61…` became `3b288a03…`. Measured as the third was: with only the
+/// role registration disabled, the hashes are the fourth move's exactly.
+///
+/// The CSS and shaping work merged beside it in the same wave — paint
+/// effects, counters, `text-transform`, right-to-left lines, CID-keyed
+/// fallback text — moved neither hash: the merged tree produces the fifth
+/// move's two values exactly, because this book uses none of those properties
+/// and none of its text is right-to-left or outside WinAnsi. The new values
+/// were produced on `x86_64-unknown-linux-gnu` and reproduced under
+/// `wasm32-wasip1` before they were committed.
 const GOLDEN: &[Fixture] = &[
     // The floors are about half of what each page paints today: 1486, 2363,
     // 9600, 3600 and 3230 pixels.
@@ -2003,9 +2035,21 @@ fn rendering_is_stable_across_targets() {
             "text",
             "82510bb48a364a4bc92729cfcdcd1e14aa99fe817a323a78e48cfb51f76a181d",
         ),
+        // Moved September 2026, deliberately, and not because two targets
+        // disagreed. The fixture's red triangle is `20 20 m 60 75 l 100 25 l
+        // f` -- an **open** subpath, filled -- and until then the filler built
+        // only the two edges the path states, so the third side of the
+        // triangle was missing and the old hash had that defect baked in.
+        // ISO 32000-1 8.5.3.1 closes every open subpath before a fill (8.5.4
+        // before a clip); `an_open_subpath_is_closed_before_it_is_filled_or_clipped`
+        // in `tinker-pdf-render` holds the new behaviour by half-plane
+        // arithmetic, and the new value agreed on x86_64 and wasm32-wasip1.
+        // No other fingerprint here moved, and instrumenting the filler over
+        // all nineteen pages -- tiling cells included -- found this triangle
+        // the only open subpath any of them fills or clips.
         (
             "curves",
-            "48b65e520b0649c6d19deb779f0213f4ba5cb6fbbc9ca546b35b1c603050f380",
+            "414e3f05ee05718fc243993506458dcb0f8aca243cdff7bf21bd059a6f1e9f55",
         ),
         (
             "shading",
@@ -2475,6 +2519,78 @@ fn rendering_is_stable_within_one_process() {
     }
 }
 
+/// **A retained page is the page**: every fingerprinted page, recorded once
+/// with `Page::display_list` and replayed at the fingerprints' own scale and
+/// at three others, is byte-equal to a direct render — pixels, size, format
+/// and warnings — with and without its annotations.
+///
+/// Added with the retained-page row, September 2026, and **not a new
+/// fingerprint**: the table above is untouched, and a hash here would be
+/// wrong in kind. This is an equality between two paths through the same
+/// renderer, which is `streaming_determinism.rs`'s shape, and it sits here
+/// rather than there because the row's exit criterion names these pages —
+/// every operator family this file has ever enrolled, groups, soft masks,
+/// tiling cells, meshes, both image codecs and all three synthesised formats.
+/// One recording serves all four scales, which is the property the row is
+/// about: nothing recorded is a pixel.
+#[test]
+fn a_display_list_replays_every_fingerprinted_page_byte_for_byte() {
+    for fixture in GOLDEN {
+        let (document, at) = match fixture.open {
+            Open::Closed => (Document::open((fixture.build)()).expect("it opens"), 0),
+            Open::Book { page, at } => (
+                Document::open_with(
+                    (fixture.build)(),
+                    &OpenOptions::at_page(page.0, page.1).with_fonts(book_face()),
+                )
+                .expect("it opens"),
+                at,
+            ),
+        };
+        let page = document.page(at).expect("a page");
+        let list = page.display_list();
+        assert!(
+            !list.is_empty(),
+            "{}: the page recorded no calls",
+            fixture.name
+        );
+        // 1.0 is the scale every fingerprint above is taken at.
+        for scale in [1.0, 0.5, 1.5, 2.25] {
+            for annotations in [true, false] {
+                let options = RenderOptions {
+                    scale,
+                    annotations,
+                    ..RenderOptions::default()
+                };
+                let direct = page.render(&options);
+                let replayed = list.render(&options);
+                let what = format!("{} at {scale}x, annotations {annotations}", fixture.name);
+                assert_eq!(
+                    (replayed.width, replayed.height, replayed.format),
+                    (direct.width, direct.height, direct.format),
+                    "{what}: a different bitmap shape"
+                );
+                if replayed.data != direct.data {
+                    let differing = replayed
+                        .data
+                        .iter()
+                        .zip(direct.data.iter())
+                        .filter(|(a, b)| a != b)
+                        .count();
+                    panic!(
+                        "{what}: the replay is not the page -- {differing} of {} bytes differ",
+                        direct.data.len()
+                    );
+                }
+                assert_eq!(
+                    replayed.warnings, direct.warnings,
+                    "{what}: the replay reported differently"
+                );
+            }
+        }
+    }
+}
+
 /// The bytes the EPUB reader hands `CosDocument::open`, hashed.
 ///
 /// *Added August 2026, with gap 31 milestone 13,* in the pair gap 29's
@@ -2559,17 +2675,24 @@ fn the_synthesised_book_is_the_same_bytes_on_every_target() {
             cost.layout_work,
             cost.pages,
         ],
-        [8, 5, 8_296, 276, 582, 1_211, 326, 3_845, 0, 7],
+        [8, 5, 8_344, 279, 585, 1_240, 326, 3_845, 0, 7],
         "the book did not cost what this hash was taken over"
     );
 
     // The structure only a byte hash pins, named entry by entry so a failure
-    // says which half moved.
+    // says which half moved. The annotations are counted by their subtype:
+    // since the book is tagged, `/Link` is also a structure type and the
+    // marked-content tag of its sequences, and a bare `/Link` counted those.
     for (needle, count, what) in [
         (
-            &b"/Link"[..],
+            &b"/Subtype /Link"[..],
             8,
             "milestone 5's annotations, on no rendered page",
+        ),
+        (
+            b"/S /Link",
+            7,
+            "the `<a>` elements holding them, as /Link structure elements",
         ),
         (b"/Outlines", 2, "the navigation document, as an outline"),
         (
@@ -2592,7 +2715,7 @@ fn the_synthesised_book_is_the_same_bytes_on_every_target() {
     let hash = sha(&pdf);
     assert_eq!(
         hash,
-        "dcd5912d597f051b8be162410ccdee9e7ea754cdd301acbb8c86251a85d8c7e7",
+        "bcc9bb59d4898bcf5ff43fab0578945473a5c3ac80325a0fb220f63e7be82868",
         "the synthesised book is not the bytes it was; see this test's doc \
          comment for what that means and how to tell it apart from a rendering \
          change. The document is {} bytes.",
@@ -2678,12 +2801,12 @@ fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
     assert_eq!(sha(&other), sha(&other_again), "600 x 800 is not stable");
     assert_eq!(
         sha(&first),
-        "dcd5912d597f051b8be162410ccdee9e7ea754cdd301acbb8c86251a85d8c7e7",
+        "bcc9bb59d4898bcf5ff43fab0578945473a5c3ac80325a0fb220f63e7be82868",
         "the book at 432 x 648 is not the bytes it was"
     );
     assert_eq!(
         sha(&other),
-        "51748067f1d7534bebe50bf891a591e2fc36618f3b76e0daaf149774ad1f9901",
+        "3b288a033d40d0fd80d010901c4a79dbd8c45c68e3f79ffd5974e21678f19f9d",
         "the book at 600 x 800 is not the bytes it was"
     );
 
@@ -2713,7 +2836,8 @@ fn a_book_is_stable_at_each_page_box_and_the_two_boxes_differ() {
         Some(OTHER_BOOK_BOX),
         "and so does the other"
     );
-    let links = |pdf: &[u8]| pdf.windows(5).filter(|w| *w == b"/Link").count();
+    // By subtype, for the reason the needle above gives.
+    let links = |pdf: &[u8]| pdf.windows(14).filter(|w| *w == b"/Subtype /Link").count();
     assert_eq!(
         (links(&first), links(&other)),
         (8, 7),

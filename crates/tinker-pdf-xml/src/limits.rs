@@ -16,14 +16,17 @@
 //! Every constant here carries three numbers — the most any fixture in this
 //! repository spends, the most a plausible real document spends, and the
 //! constant — and each is proved to fire in a test **by its own refusal, never
-//! by a clock**. All four fire at the shipped default rather than at a lowered
-//! one, because an input that reaches any of them is a few kilobytes of markup.
+//! by a clock**. All six fire at the shipped default rather than at a lowered
+//! one, because an input that reaches any of them is a few kilobytes of markup
+//! — or, for [`MAX_HTML_CLONE_BYTES`], a hundred.
 //!
 //! The yardstick for the second number is gap 30's, named in its bounds
 //! section: **a 200-page fixed document at roughly 2 000 drawable elements and
 //! 40 000 path segments a page**, which is a dense report or a technical
-//! drawing rather than a letter. These four bound **one part**, and a part is
-//! one page of that document.
+//! drawing rather than a letter. The first four bound **one part**, and a part
+//! is one page of that document. The last two bound only [`crate::html`], whose
+//! tree builder keeps a list the XML reader does not and makes elements no
+//! token asked for; no fixed document is HTML, so their yardstick is tag soup.
 //!
 //! # The bomb these caps do not defend against
 //!
@@ -45,8 +48,13 @@
 //! # There is deliberately no cap on value length, and none on namespace count
 //!
 //! An attribute value, a text run and a namespace URI are each bounded by the
-//! part they are in, by the paragraph above, and none of them is copied more
-//! than once. A constant over any of them could never fire before the input
+//! part they are in, by the paragraph above, and in this reader none of them
+//! is copied more than once. **HTML's tree builder is the exception**, and it
+//! has a cap of its own: a clone of a formatting element carries a copy of
+//! every attribute its start tag had, made as often as the input reopens it,
+//! so [`MAX_HTML_CLONE_BYTES`] bounds the bytes those copies hold. Everything
+//! else in an HTML tree was read from the input once. A constant over any of
+//! the three could never fire before the input
 //! ran out — gap 18a milestone 8's failure reached from the other direction,
 //! which is the same argument `tinker-pdf-zip` makes for not bounding path
 //! depth. The count of namespace declarations in scope is bounded by
@@ -125,6 +133,22 @@ pub const MAX_XML_NAME_LEN: usize = 1024;
 
 /// **The work cap.** Events one part may produce, spent and never refunded.
 ///
+/// **For [`crate::html`] it is tokens and nodes together.** HTML's tree
+/// builder makes elements no token asked for — it reopens the formatting
+/// elements a block closed, before every run of text after it, and clones them
+/// in the adoption agency — so eight bytes of `<p>x</p>` after two hundred
+/// open `<b>`s make two hundred elements. Every node created spends one beside
+/// every token, and a clone spends one more for each attribute it copies, so
+/// the count of nodes and of copied attributes is inside this one number;
+/// `reopened_formatting_elements_are_spent_against_the_token_cap` crosses it
+/// at the shipped value with fifty kilobytes, and
+/// `attributes_copied_onto_clones_are_spent_against_the_token_cap` with
+/// thirty-four. How long the copies are is [`MAX_HTML_CLONE_BYTES`]'s. The
+/// other three caps bound the HTML parser as they bound this reader: its
+/// stack of open elements, an element's attributes — a tag's, and the
+/// `<html>` or `<body>` a later tag's attributes are merged into — and a tag,
+/// attribute or DOCTYPE name.
+///
 /// A per-element cap times an element count the file chose is not a bound, and
 /// this is the number that is. Every event costs one — a start tag, an end tag,
 /// a text run, a CDATA section, a comment, a processing instruction — so an
@@ -147,3 +171,57 @@ pub const MAX_XML_NAME_LEN: usize = 1024;
 /// because a work cap proved only against a lowered limit is a work cap nobody
 /// has checked the shipped number of.
 pub const MAX_XML_TOKENS: usize = 1 << 20;
+
+/// The most entries HTML's list of active formatting elements may hold,
+/// markers included. **[`crate::html`] only**: the XML reader keeps no such
+/// list.
+///
+/// §13.2.4.3's list is where a formatting element waits to be reopened after a
+/// block closed it, and the tree builder walks it — Noah's Ark on every
+/// formatting start tag, the adoption agency on every misnested end tag.
+/// **[`MAX_XML_DEPTH`] does not bound it.** A table cell is a marker, and
+/// behind each marker the cell may leave a stack's worth of formatting
+/// elements that a `</p>` closed and nothing has reopened yet; nested cells
+/// cost the stack four entries each (`table`, `tbody`, `tr`, `td`), so a list
+/// can hold many times the stack that holds its cells. Past the cap the parse
+/// stops with [`crate::Error::FormattingCap`], and the tree built so far is
+/// kept.
+///
+/// | | Entries |
+/// | --- | --- |
+/// | The most any fixture here spends | 1 024 |
+/// | Tag soup at its worst plausible: a `<font>`, a `<b>` and an `<i>` left open in every cell of tables nested eight deep, and a marker for each cell | 32 |
+/// | **This cap** | **1 024** |
+///
+/// Reachable: thirty-two cells nested one inside another, each leaving a
+/// hundred `<b>`s behind its marker, hold 3 232 entries and are never more
+/// than 231 elements deep; `the_list_of_active_formatting_elements_stops_at_its_cap`
+/// builds six cells of two hundred, eleven kilobytes.
+pub const MAX_HTML_ACTIVE_FORMATTING: usize = 1024;
+
+/// The most bytes of attribute names and values HTML's tree builder may copy
+/// onto clones of formatting elements, across one parse. **[`crate::html`]
+/// only.**
+///
+/// A clone is the one place an HTML tree is bigger than its input. §13.2.4.3
+/// reopens every formatting element a block closed before the next text after
+/// it, and the adoption agency clones them too, each with every attribute its
+/// start tag had — so eight bytes of `<p>x</p>` after a `<b>` whose `title`
+/// is a hundred kilobytes long is a hundred kilobytes more. The review of the
+/// tier-5 formats lane measured 116 kB of markup holding 200 MB of attribute
+/// values, and about 100 GB inside the token cap. [`MAX_XML_TOKENS`] bounds how
+/// many copies there are, one unit for each attribute a clone copies; this
+/// bounds how long they are. Past it the clone is not made, the parse stops
+/// with [`crate::Error::CloneCap`], and the tree built so far is kept.
+///
+/// | | Bytes |
+/// | --- | --- |
+/// | The most any fixture here spends | 64 MiB |
+/// | Tag soup at its worst plausible: three `<font face=… color=… size=…>`s of 100 bytes each reopened in every one of 20 000 paragraphs | 6 000 000 |
+/// | **This cap** | **64 MiB** |
+///
+/// Reachable: a value half a one-megabyte input long, reopened by the
+/// `<p>x</p>`s in its other half, asks for 2^35 bytes, 512 times
+/// this cap; `attribute_bytes_copied_onto_clones_stop_at_their_cap` crosses
+/// it with a hundred kilobytes.
+pub const MAX_HTML_CLONE_BYTES: usize = 64 << 20;

@@ -180,12 +180,29 @@ fn exercise(bytes: Vec<u8>) {
     let _ = doc.validate_pdfa();
     let _ = doc.validate_pdfa_with(tinker_pdf::PdfACoverage::SYNTAX);
     let _ = doc.validate_pdfa_with(tinker_pdf::PdfACoverage::METADATA);
+    // PDF/UA's validator reads the same packet through its own identification
+    // reader and walks the structure tree and the fonts again, so it is a
+    // second set of readers over the same hostile bytes (docs/design/pdfua.md
+    // milestone 1 puts the call here before the rules grow).
+    let _ = doc.validate_pdfua();
+    let _ = doc.validate_pdfua_with(tinker_pdf::PdfUaCoverage::STRUCTURE);
+    // PDF/X's reads `/Info`, the page tree's boxes and every annotation's
+    // rectangle on its own (docs/design/pdfx.md milestone 1 puts the call
+    // here). A hostile file rarely claims a PDF/X level, so the rules behind
+    // the claim run here only when it does; `pdfx_rules.rs` holds them.
+    let _ = doc.validate_pdfx();
+    let _ = doc.validate_pdfx_with(tinker_pdf::PdfXCoverage::SYNTAX);
     let _ = doc.metadata();
     let _ = doc.pdf_version();
     let _ = doc.page_count();
     let _ = doc.outline();
     let _ = doc.page_labels();
+    let _ = doc.viewer_preferences();
     let _ = doc.form_fields();
+    // ISO 32000-2's catalog listings: arrays the file sizes, entries it may
+    // share, strings each entry copies within its listing's budget.
+    let _ = doc.associated_files();
+    let _ = doc.output_intents();
     // 14.7: `/K` is a graph with no promise of acyclicity and `/RoleMap` is a
     // rewriting system the file writes for itself, so the structure walk is
     // one of the few readers here whose *input shape* is chosen by the
@@ -196,6 +213,9 @@ fn exercise(bytes: Vec<u8>) {
         let _ = tree.content_count();
         let _ = tree.object_count();
         let _ = tree.elements().len();
+        // `/A` is read per element now (14.7.6.1): an attribute object or an
+        // array of them, dictionaries or streams, with values the file chose.
+        let _ = tree.element_by_id(b"x");
     }
     // The signature reader indexes the raw file buffer with offsets the
     // document supplies, which is the shape ruling 1 exists for. Digesting
@@ -204,6 +224,12 @@ fn exercise(bytes: Vec<u8>) {
         let _ = signature.digest(&doc, tinker_pdf::DigestAlgorithm::Sha256);
         let _ = signature.digest(&doc, tinker_pdf::DigestAlgorithm::Sha1);
         let _ = signature.covers_whole_file();
+        let _ = signature.validation_key();
+    }
+    // The security store's arrays and `/VRI` are shaped by the file.
+    if let Some(store) = doc.security_store() {
+        let _ = store.entries.len();
+        let _ = store.warnings.len();
     }
     let _ = doc.permissions();
     let _ = doc.is_encrypted();
@@ -221,13 +247,41 @@ fn exercise(bytes: Vec<u8>) {
         let _ = page.size();
         let _ = page.media_box();
         let _ = page.crop_box();
+        let _ = page.bleed_box();
+        let _ = page.trim_box();
+        let _ = page.art_box();
         let _ = page.rotation();
+        // A page's own `/AF` and (PDF 2.0) `/OutputIntents`.
+        let _ = page.associated_files();
+        let _ = page.output_intents();
 
         let text = page.text();
         let _ = text.plain_text();
         let _ = text.search("e");
         let _ = text.lines();
         let _ = text.blocks.len();
+        // UAX #29 over whatever a mutated font decoded to, and the search
+        // options, which fold and segment the same text.
+        for line in text.lines() {
+            let _ = line.words();
+        }
+        let _ = text.search_with(
+            "e",
+            &tinker_pdf::SearchOptions {
+                case_sensitive: false,
+                whole_word: true,
+                diacritic_insensitive: true,
+            },
+        );
+        // And the three serialisations, whose escaping is what a hostile
+        // `/ToUnicode` or `/BaseFont` attacks.
+        for format in [
+            tinker_pdf::TextFormat::Json,
+            tinker_pdf::TextFormat::Xml,
+            tinker_pdf::TextFormat::Html,
+        ] {
+            let _ = text.serialize(format, &page.text_frame());
+        }
 
         // The join, over the same `TextPage`. Reached through the tree bound
         // above rather than through `Page::structured_text` so the walk is
@@ -239,6 +293,33 @@ fn exercise(bytes: Vec<u8>) {
             let _ = joined.orphans;
             let _ = joined.unmarked;
         }
+
+        // The inferred reading order: geometry the file chose, read with the
+        // tree hidden so the artifacts and the tagged page are both inferred
+        // over. On the first page only — the order reads a window of
+        // neighbouring pages, and a mutated file may claim a thousand.
+        if index == 0 {
+            let order = page.inferred_order(&tinker_pdf::InferenceOptions {
+                hide_structure: true,
+            });
+            let _ = order.plain_text();
+            let _ = order.moved();
+            // The stated tables: a grid placed by spans the file states,
+            // which may claim any number of rows and columns.
+            for table in page.stated_tables() {
+                let _ = (table.rows, table.columns, table.cells.len());
+            }
+            // And the inferred ones: a lattice of rules the file drew.
+            let inferred = page.inferred_tables(&tinker_pdf::TableOptions {
+                hide_structure: true,
+            });
+            let _ = (inferred.tables.len(), inferred.rules.len());
+        }
+
+        // Image extraction describes every image dictionary the page reaches
+        // — its space, palette, masks and samples — which the renderer reads
+        // only as far as drawing needs.
+        let _ = page.images();
 
         // Deliberately coarse: a mutated file may claim a vast page box, and
         // the interesting failures are in the operators rather than in how
@@ -473,5 +554,713 @@ trailer\n<< /Size 2 /Root 1 0 R >>\n%%EOF\n",
     for (name, bytes) in cases {
         let _guard = Guard(name);
         exercise(bytes.to_vec());
+    }
+}
+
+/// FDF and XFDF (`tinker_pdf::form_data`), damaged the same way.
+///
+/// The four hand-authored fixtures in `tests/form_data/`, put through the
+/// sweep above: both readers see every mutation — the two formats announce
+/// themselves, so a damaged FDF is a hostile XFDF too — and whatever either
+/// reads is written back out in both formats and read again, because the
+/// writers take names and values a hostile file chose.
+/// `fuzz/fuzz_targets/form_data.rs` is the deep version of this; this is the
+/// one that runs on every commit.
+#[test]
+fn mutated_form_data_never_panics() {
+    use tinker_pdf::form_data::{read_fdf, read_xfdf, FormData};
+
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/form_data");
+    let mut inputs: Vec<(String, Vec<u8>)> = Vec::new();
+    for name in [
+        "form-fields.fdf",
+        "hierarchy.fdf",
+        "form-fields.xfdf",
+        "hierarchy.xfdf",
+    ] {
+        let bytes = std::fs::read(dir.join(name)).unwrap_or_default();
+        assert!(
+            !bytes.is_empty(),
+            "{name} is missing, so this proves nothing"
+        );
+        inputs.push((name.to_string(), bytes));
+    }
+
+    let rewrite = |data: &FormData| {
+        let _ = read_fdf(&data.to_fdf());
+        if let Ok(xml) = data.to_xfdf() {
+            let _ = read_xfdf(xml.as_bytes());
+        }
+    };
+    for (name, original) in &inputs {
+        let mut rng = Rng(0xF0F0_1207_8000_0001 ^ name.len() as u64);
+        for case in 0..sweep(2000) {
+            let mutated = mutate(original, &mut rng);
+            let label = format!("{name} case {case}");
+            let _guard = Guard(&label);
+            if let Ok(data) = read_fdf(&mutated) {
+                rewrite(&data);
+            }
+            if let Ok(data) = read_xfdf(&mutated) {
+                rewrite(&data);
+            }
+        }
+    }
+}
+
+/// What the form data readers hand back stays inside `MAX_FORM_DATA_BYTES`,
+/// on every shape that once multiplied a small file into a large allocation,
+/// at every scale from small to past the budget.
+///
+/// Each shape repeats one thing the file says once: a field's 32 KiB name in
+/// every warning met inside it, in FDF and in XFDF; one indirect `/T` in every
+/// name beneath it, down a chain of nested field objects; one indirect `/V`
+/// in every field; a 32 KiB inline name in every kid's. Before the budget the
+/// largest of these asked for 184 MB, more than 1 GB, 394 MB, 128 MiB and
+/// 148 MB, from under 150 KiB each. At every scale a read either refuses the
+/// file whole (`FormDataError::TooLarge`) or hands back no more than the
+/// budget — counted from what it handed back, so a copy the accounting forgot
+/// shows here — and the largest scale of every shape is refused. A `/Kids`
+/// array whose entries name it as their own `/Kids` is here too: it was
+/// walked `2^256` times, and now returns.
+#[test]
+fn form_data_hands_back_no_more_than_its_budget() {
+    use std::mem::size_of;
+    use tinker_pdf::form_data::{
+        read_fdf, read_xfdf, FieldData, FormData, FormDataError, FormDataWarning,
+        MAX_FORM_DATA_BYTES,
+    };
+    use tinker_pdf::FieldValue;
+
+    type Shape<'a> = (
+        &'a str,
+        bool,
+        Box<dyn Fn(usize) -> Vec<u8> + 'a>,
+        [usize; 5],
+    );
+
+    fn fdf(fields: &str, objects: &str) -> Vec<u8> {
+        format!(
+            "%FDF-1.2\n1 0 obj\n<< /FDF << /Fields [ {fields} ] >> >>\nendobj\n{objects}\
+             trailer\n<< /Root 1 0 R >>\n%%EOF\n"
+        )
+        .into_bytes()
+    }
+    /// What `data` holds, counted the way the budget counts it.
+    fn held(data: &FormData) -> usize {
+        let value = |value: &FieldValue| match value {
+            FieldValue::Text(text) | FieldValue::State(text) => text.len(),
+            FieldValue::Many(values) => values.iter().map(|v| size_of::<String>() + v.len()).sum(),
+            _ => 0,
+        };
+        let fields: usize = data
+            .fields
+            .iter()
+            .map(|f| size_of::<FieldData>() + f.name.len() + value(&f.value))
+            .sum();
+        let warnings: usize = data
+            .warnings
+            .iter()
+            .map(|w| {
+                size_of::<FormDataWarning>()
+                    + match w {
+                        FormDataWarning::NotRead { what, field } => what.len() + field.len(),
+                        FormDataWarning::ValueUnreadable { field }
+                        | FormDataWarning::TreeCut { field } => field.len(),
+                        _ => 0,
+                    }
+            })
+            .sum();
+        fields + warnings + data.source.as_ref().map_or(0, String::len)
+    }
+
+    let name = "n".repeat(32 * 1024);
+    let shared = format!("2 0 obj\n({})\nendobj\n", "s".repeat(16 * 1024));
+    let shapes: Vec<Shape<'_>> = vec![
+        (
+            "unread keys in a long-named field",
+            false,
+            Box::new(|n| {
+                let keys: String = (0..n).map(|i| format!("/K{i} 1 ")).collect();
+                fdf(&format!("<< /T ({name}) /V (x) {keys} >>"), "")
+            }),
+            [250, 500, 1000, 2000, 4000],
+        ),
+        (
+            "one indirect /T down a chain of field objects",
+            false,
+            Box::new(|n| {
+                let mut objects = shared.clone();
+                for level in 0..n {
+                    let kids = if level + 1 == n {
+                        String::new()
+                    } else {
+                        format!("/Kids [ {} 0 R ]", level + 11)
+                    };
+                    objects.push_str(&format!(
+                        "{} 0 obj\n<< /T 2 0 R /V (x) {kids} >>\nendobj\n",
+                        level + 10
+                    ));
+                }
+                fdf("10 0 R", &objects)
+            }),
+            [16, 32, 64, 128, 256],
+        ),
+        (
+            "one indirect /V in every field",
+            false,
+            Box::new(|n| {
+                let fields: String = (0..n)
+                    .map(|i| format!("<< /T (f{i}) /V 2 0 R >> "))
+                    .collect();
+                fdf(&fields, &shared)
+            }),
+            [300, 600, 1200, 2400, 5000],
+        ),
+        (
+            "kids beneath a long inline name",
+            false,
+            Box::new(|n| {
+                let kids = "<< /T (a) /V (v) >> ".repeat(n);
+                fdf(&format!("<< /T ({name}) /Kids [ {kids} ] >>"), "")
+            }),
+            [250, 500, 1000, 2000, 4000],
+        ),
+        (
+            "unread XFDF elements in a long-named field",
+            true,
+            Box::new(|n| {
+                format!(
+                    "<xfdf><fields><field name=\"{name}\">{}<value>v</value></field></fields></xfdf>",
+                    "<x/>".repeat(n)
+                )
+                .into_bytes()
+            }),
+            [250, 500, 1000, 2000, 4000],
+        ),
+    ];
+
+    for (label, xml, build, scales) in &shapes {
+        for (at, &scale) in scales.iter().enumerate() {
+            let bytes = build(scale);
+            assert!(
+                bytes.len() < 150 * 1024,
+                "{label} at {scale}: the input is small"
+            );
+            let read = if *xml {
+                read_xfdf(&bytes)
+            } else {
+                read_fdf(&bytes)
+            };
+            match read {
+                Ok(data) => {
+                    assert!(
+                        held(&data) <= MAX_FORM_DATA_BYTES,
+                        "{label} at {scale}: {} bytes handed back",
+                        held(&data)
+                    );
+                    assert!(at + 1 < scales.len(), "{label}: the largest is read");
+                }
+                Err(error) => assert_eq!(error, FormDataError::TooLarge, "{label} at {scale}"),
+            }
+        }
+    }
+
+    let doubling = fdf(
+        "<< /T (r) /Kids 5 0 R >>",
+        "5 0 obj\n[ << /T (a) /Kids 5 0 R >> << /T (b) /Kids 5 0 R >> ]\nendobj\n",
+    );
+    let data = read_fdf(&doubling).expect("a self-naming /Kids array reads, and returns");
+    assert!(held(&data) < 1024);
+}
+
+/// One-file documents that are not PDFs (tier 5's formats row), damaged the
+/// same way: a standalone SVG, a loose XHTML file, tag soup, and a PNG, JPEG and
+/// TIFF each opened bare. The sniff, the XML prolog walk, the `data:` URL and
+/// base64 readers, the cascade and the image embedders all see hostile bytes
+/// here, buffered and streamed. `fuzz/fuzz_targets/standalone.rs` is the deep
+/// version.
+#[test]
+fn mutated_standalone_documents_never_panic() {
+    let png = {
+        let mut out = b"\x89PNG\r\n\x1A\n\0\0\0\rIHDR\0\0\0\x02\0\0\0\x02\x08\x02\0\0\0".to_vec();
+        out.extend_from_slice(
+            b"\xFD\xD4\x9A\x73\0\0\0\x0CIDATx\x9Cc\xF8\xCF\xC0\0\0\x03\x01\x01\0",
+        );
+        out.extend_from_slice(b"\xC9\xFE\x92\xEF\0\0\0\0IEND\xAEB`\x82");
+        out
+    };
+    let inputs: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "svg",
+            concat!(
+                r##"<?xml version="1.0"?><!-- a comment --><svg xmlns="http://www.w3.org/2000/svg" "##,
+                r##"xmlns:xlink="http://www.w3.org/1999/xlink" width="40" height="20" viewBox="0 0 40 20">"##,
+                r##"<rect width="20" height="20" fill="#f00"/><circle cx="30" cy="10" r="5"/>"##,
+                r##"<text x="2" y="15" font-size="8">Hi</text>"##,
+                r##"<image width="4" height="4" xlink:href="data:image/png;base64,iVBORw0KGgo="/></svg>"##
+            )
+            .as_bytes()
+            .to_vec(),
+        ),
+        (
+            "xhtml",
+            concat!(
+                r#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml">"#,
+                r#"<head><title>t</title><style>p { margin: 1em; font-size: 14px } h1 { color: red }</style>"#,
+                r#"<link rel="stylesheet" href="a.css"/></head><body><h1 id="a">Head</h1>"#,
+                r##"<p>one <b>two</b> <a href="#a">three</a></p><ul><li>x</li></ul>"##,
+                r#"<table><tr><td>c</td></tr></table><img src="data:,abc"/></body></html>"#
+            )
+            .as_bytes()
+            .to_vec(),
+        ),
+        (
+            "soup",
+            b"<!DOCTYPE html><html><body><p>a<p>b<br><img src=x></body>".to_vec(),
+        ),
+        (
+            "fb2",
+            concat!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?><FictionBook ",
+                "xmlns=\"http://www.gribuser.ru/xml/fictionbook/2.0\" ",
+                "xmlns:l=\"http://www.w3.org/1999/xlink\"><description><title-info>",
+                "<author><first-name>A</first-name></author><book-title>T</book-title>",
+                "<coverpage><image l:href=\"#c\"/></coverpage></title-info></description>",
+                "<body><title><p>T</p></title><section id=\"s\"><title><p>One</p></title>",
+                "<p>a <emphasis>b</emphasis> <a l:href=\"#n\" type=\"note\">1</a></p>",
+                "<poem><stanza><v>v</v></stanza></poem><image l:href=\"#c\"/>",
+                "<table><tr><td>c</td></tr></table></section></body>",
+                "<body name=\"notes\"><section id=\"n\"><p>note</p></section></body>",
+                "<binary id=\"c\" content-type=\"image/png\">iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC</binary>",
+                "</FictionBook>"
+            )
+            .as_bytes()
+            .to_vec(),
+        ),
+        ("png", png),
+        (
+            "jpeg",
+            b"\xFF\xD8\xFF\xC0\0\x0B\x08\0\x08\0\x08\x01\x01\x11\0\xFF\xD9".to_vec(),
+        ),
+        (
+            "tiff",
+            b"II\x2A\0\x08\0\0\0\x03\0\0\x01\x03\0\x01\0\0\0\x02\0\0\0\x01\x01\x03\0\x01\0\0\0\x02\0\0\0\x11\x01\x04\0\x01\0\0\0\x30\0\0\0\0\0\0\0\xFF\x00\xFF\x00"
+                .to_vec(),
+        ),
+    ];
+    for (name, original) in &inputs {
+        assert!(
+            tinker_pdf::standalone::sniff(original).is_some(),
+            "{name} is not sniffed, so its sweep would test the PDF parser"
+        );
+        let mut rng = Rng(0x0005_7A4D_A10E ^ name.len() as u64);
+        for case in 0..sweep(400) {
+            let mutated = mutate(original, &mut rng);
+            let label = format!("{name} case {case}");
+            let _guard = Guard(&label);
+            exercise(mutated.clone());
+            // The FB2 translation writes every element it opens and closes it,
+            // so what it hands the reader is XML wherever the FB2 was — the
+            // property `fuzz/fuzz_targets/fb2.rs` holds deeply.
+            if *name == "fb2" {
+                if let Some(xhtml) = tinker_pdf::fb2::to_xhtml(&mutated) {
+                    let dom = tinker_pdf::epub::read::markup(
+                        xhtml.as_bytes(),
+                        &tinker_pdf_xml::Limits::DEFAULT,
+                    );
+                    assert!(
+                        dom.defects.is_empty(),
+                        "{label}: the translation is not XML: {:?}",
+                        dom.defects
+                    );
+                }
+            }
+            // The creation call reads the same markup through the same reader
+            // with a stylesheet of the caller's in front, and what it builds is
+            // finished and opened like anything else.
+            if matches!(*name, "xhtml" | "soup") {
+                use tinker_pdf::{DocumentBuilder, FromHtml, PageBox};
+                if let Ok((builder, _)) = DocumentBuilder::from_html(
+                    &mutated,
+                    "p { margin: 1em } h1 { font-size: 2em } @import url(x.css);",
+                    PageBox::new(300.0, 200.0),
+                ) {
+                    exercise(builder.finish());
+                }
+            }
+            if case % 4 == 0 {
+                exercise_streamed(mutated);
+            }
+        }
+    }
+}
+
+/// HTML's tokenizer and tree builder (`tinker_pdf_xml::html`, tier 5's formats
+/// row) over mutated tag soup: the foster-parenting, adoption-agency,
+/// foreign-content, template and text-state seeds the fuzz target starts
+/// from, under the shipped limits and under tight ones. Each tree must be a
+/// tree — every node reached once, every child naming its parent — and the
+/// EPUB tree the facade builds from it no deeper than the XML reader's cap.
+/// `fuzz/fuzz_targets/html.rs` is the deep version.
+#[test]
+fn mutated_tag_soup_never_panics_the_html_parser() {
+    use tinker_pdf_xml::html::{self, Document, Namespace};
+    use tinker_pdf_xml::Limits;
+
+    fn check(document: &Document, limits: &Limits, label: &str) {
+        let nodes = document.nodes();
+        assert!(
+            nodes.len() <= limits.max_tokens + 16,
+            "{label}: past the cap"
+        );
+        let mut seen = vec![false; nodes.len()];
+        let mut stack = vec![0usize];
+        while let Some(at) = stack.pop() {
+            assert!(!seen[at], "{label}: node {at} reached twice");
+            seen[at] = true;
+            for &child in &nodes[at].children {
+                assert_eq!(nodes[child].parent, Some(at), "{label}: a child's parent");
+                stack.push(child);
+            }
+            if let Some(contents) = nodes[at].element().and_then(|e| e.template_contents) {
+                stack.push(contents);
+            }
+        }
+    }
+
+    let seeds: [&[u8]; 8] = [
+        b"<!DOCTYPE html><html><body><p>one<p>two<br><li>three &amp four &nbsp five</body>",
+        b"<table><b><tr><td>cell</td>text<td>x</table>after",
+        b"<p><b>1<i>2</b>3</i>4<a href=x>5<div>6</a>7</div>",
+        b"<svg viewbox=\"0 0 1 1\"><foreignobject><p>html</p></foreignobject></svg>\
+          <math><mi>x</mi><annotation-xml encoding=\"text/html\"><b>y</b></annotation-xml></math>",
+        b"<template><td>a</td><tr></tr></template><select><option>1<optgroup><option selected>2</select>",
+        b"<title>t &lt; <b></title><textarea>\nkept</textarea><script><!--<script>x</script>--></script>",
+        b"<meta charset=windows-1251><p>\xcf\xf0\xe8 &#x80; &#0; &notit; &CounterClockwiseContourIntegral;",
+        b"<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\"><p><table><caption>c<col>",
+    ];
+    let contexts = [
+        (Namespace::Html, "body"),
+        (Namespace::Html, "td"),
+        (Namespace::Html, "template"),
+        (Namespace::Svg, "svg"),
+    ];
+    let tight = Limits {
+        max_depth: 8,
+        max_attributes: 2,
+        max_name_len: 8,
+        max_tokens: 64,
+    };
+    for (index, seed) in seeds.iter().enumerate() {
+        let mut rng = Rng(0x0048_544D_4C00 ^ index as u64);
+        for case in 0..sweep(300) {
+            let mutated = mutate(seed, &mut rng);
+            let label = format!("html seed {index} case {case}");
+            let _guard = Guard(&label);
+            for limits in [Limits::DEFAULT, tight] {
+                let document = html::parse_bytes(&mutated, &limits);
+                check(&document, &limits, &label);
+                let dom = tinker_pdf::epub::xhtml::from_html(&document, &limits);
+                for (at, node) in dom.nodes.iter().enumerate() {
+                    assert!(node.parent.is_none_or(|p| p < at), "{label}: order");
+                }
+                let (text, _) = html::decode(&mutated);
+                let context = contexts[case % contexts.len()];
+                check(
+                    &html::parse_fragment(&text, context, &limits),
+                    &limits,
+                    &label,
+                );
+            }
+        }
+    }
+}
+
+/// An SVG `<style>` element's at-rules (the SVG-in-the-spine row), mutated:
+/// `@media` blocks nested and damaged, `@font-face` rules cut short, and
+/// `@import`s answered with the document itself under the name asked for —
+/// so a mutation that leaves an `@import` at the top of the file makes the
+/// file its own stylesheet, and a repeated name is a cycle. Every read must
+/// hold the bytes every import shares to `MAX_CSS_BYTES` and one sheet past
+/// it, and the loose SVG must open, its `data:` imports read.
+/// `fuzz/fuzz_targets/svg.rs` is the deep version.
+#[test]
+fn mutated_svg_style_sheets_never_panic_and_hold_their_bytes() {
+    use std::cell::Cell;
+    use tinker_pdf_css::ImportResolver;
+
+    struct Itself<'a> {
+        body: &'a [u8],
+        bytes: Cell<usize>,
+    }
+    impl ImportResolver for Itself<'_> {
+        fn resolve(&self, href: &str, _: Option<&str>) -> Option<(String, Vec<u8>)> {
+            self.bytes.set(self.bytes.get() + self.body.len());
+            Some((href.to_owned(), self.body.to_vec()))
+        }
+    }
+
+    let seed = concat!(
+        "<!-- ;@import 'n'; @import 'o' print; --><svg xmlns=\"http://www.w3.org/2000/svg\" ",
+        "width=\"10\" height=\"10\"><style>@import 'm'; @import url(n) all and (min-width: 5px);",
+        "@import url('data:text/css,rect%7Bfill%3Ared%7D');",
+        "@media print { rect { fill: lime } @media (orientation: portrait) { circle { fill: blue } } }",
+        "@font-face { font-family: F; src: url(data:font/ttf;base64,AAEAAA==) format('truetype') }",
+        "@keyframes k { from { opacity: 0 } } rect { stroke: black } @import 'late';</style>",
+        "<rect width=\"5\" height=\"5\"/><circle cx=\"7\" cy=\"7\" r=\"2\"/>",
+        "<text x=\"1\" y=\"9\" font-family=\"F\">x</text></svg>"
+    )
+    .as_bytes();
+    let cap = tinker_pdf_css::limits::MAX_CSS_BYTES;
+    let mut rng = Rng(0x0053_5647_4053);
+    for case in 0..sweep(600) {
+        let mutated = mutate(seed, &mut rng);
+        let label = format!("svg style case {case}");
+        let _guard = Guard(&label);
+        let itself = Itself {
+            body: &mutated,
+            bytes: Cell::new(0),
+        };
+        let _ = tinker_pdf_svg::read_with(
+            &mutated,
+            Some((100.0, 100.0)),
+            &tinker_pdf_svg::Limits::DEFAULT,
+            &tinker_pdf_svg::Context::new(&itself),
+        );
+        assert!(
+            itself.bytes.get() <= cap + mutated.len(),
+            "{label}: {} bytes imported past {cap}",
+            itself.bytes.get()
+        );
+        if case % 4 == 0 {
+            exercise(mutated);
+        }
+    }
+}
+
+/// An SVG's text measured for its box (the SVG-in-the-spine row): a run's
+/// bounding-box paint waits for its `<text>`'s box as a mark in its place, so
+/// the leaf is read here with a measurer over a drawing of every bounding-box
+/// effect on text — a gradient, a pattern, a mask and a clip, on a `<text>`,
+/// a `<tspan>` and a group, anchored, rotated and shifted — mutated, and no
+/// mark may reach the caller as a colour; every fourth case is opened as a
+/// loose file, whose facade reads it a second time with its own metrics.
+/// `fuzz/fuzz_targets/svg.rs` is the deep version.
+#[test]
+fn mutated_svg_text_boxes_never_panic_and_leak_no_mark() {
+    use tinker_pdf_svg::{MeasureText, Node, Paint, RunMetrics, TextStyle};
+
+    struct Halves;
+    impl MeasureText for Halves {
+        fn measure(&self, text: &str, font: &TextStyle) -> RunMetrics {
+            #[allow(clippy::cast_precision_loss)]
+            let count = text.chars().count() as f64;
+            RunMetrics {
+                advance: 0.5 * font.size * count,
+                ascent: 0.8 * font.size,
+                descent: 0.2 * font.size,
+            }
+        }
+    }
+    fn colours(nodes: &[Node], label: &str) {
+        let paint = |paint: &Paint| match paint {
+            Paint::Solid(colour) => assert!(
+                colour.rgb.iter().all(|c| (0.0..=1.0).contains(c)),
+                "{label}: a colour no document states: {colour:?}"
+            ),
+            Paint::Pattern(tile) => colours(&tile.nodes, label),
+            _ => {}
+        };
+        for node in nodes {
+            match node {
+                Node::Path { fill, stroke, .. } | Node::Text { fill, stroke, .. } => {
+                    paint(fill);
+                    if let Some(stroke) = stroke {
+                        paint(&stroke.paint);
+                    }
+                }
+                Node::Group { nodes, mask, .. } => {
+                    colours(nodes, label);
+                    if let Some(mask) = mask {
+                        colours(&mask.nodes, label);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let seed = concat!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\">",
+        "<linearGradient id=\"g\"><stop offset=\"0\" stop-color=\"red\"/>",
+        "<stop offset=\"1\" stop-color=\"blue\"/></linearGradient>",
+        "<pattern id=\"p\" width=\"0.5\" height=\"0.5\"><rect width=\"5\" height=\"5\"/>",
+        "<text fill=\"url(#g)\">t</text></pattern>",
+        "<mask id=\"m\"><rect width=\"100\" height=\"100\" fill=\"white\"/></mask>",
+        "<clipPath id=\"c\" clipPathUnits=\"objectBoundingBox\"><rect width=\".5\" height=\"1\"/></clipPath>",
+        "<text x=\"10\" y=\"20\" text-anchor=\"middle\" fill=\"url(#g) red\" stroke=\"url(#p)\" ",
+        "mask=\"url(#m)\">AB<tspan dy=\"5\" fill=\"url(#p)\">CD</tspan><tspan y=\"40\" ",
+        "rotate=\"30\" clip-path=\"url(#c)\">EF</tspan></text>",
+        "<g clip-path=\"url(#c)\"><rect width=\"9\" height=\"9\"/>",
+        "<text x=\"5\" y=\"60\" transform=\"scale(2)\" fill=\"url(#p)\">GH</text></g></svg>"
+    )
+    .as_bytes();
+    let mut rng = Rng(0x0054_4558_5442);
+    for case in 0..sweep(600) {
+        let mutated = mutate(seed, &mut rng);
+        let label = format!("svg text box case {case}");
+        let _guard = Guard(&label);
+        let limits = tinker_pdf_svg::Limits::DEFAULT;
+        let measured = tinker_pdf_svg::read_with(
+            &mutated,
+            Some((100.0, 100.0)),
+            &limits,
+            &tinker_pdf_svg::Context::NONE.with_measure(&Halves),
+        );
+        if let Ok(scene) = &measured {
+            colours(&scene.nodes, &label);
+        }
+        // Only a paint that would be `TextBoxUnmeasured` waits for a box, so
+        // a document that names none reads the same with a measurer.
+        if let Ok(plain) = tinker_pdf_svg::read(&mutated, Some((100.0, 100.0)), &limits) {
+            if !plain
+                .warnings
+                .contains(&tinker_pdf_svg::Warning::TextBoxUnmeasured)
+                && plain.warnings.len() < limits.max_warnings
+            {
+                assert!(
+                    measured.as_ref() == Ok(&plain),
+                    "{label}: nothing to measure, and it read differently"
+                );
+            }
+        }
+        if case % 4 == 0 {
+            exercise(mutated);
+        }
+    }
+}
+
+/// Markdown is read from any bytes by a caller who says it is Markdown, so
+/// every byte sequence is an input (tier 5's Markdown row). Two halves: the
+/// shapes that make a CommonMark reader quadratic — a run of openers with no
+/// closer, a line of a hundred thousand `>`, a paragraph of definitions, links
+/// after a run of `[` — each written out at a size where a quadratic would be
+/// minutes, and a real document mutated. Over both, the XHTML the translation
+/// hands the reader must be **well-formed XML**, every time: raw HTML is
+/// escaped, nothing else is passed through, and an inline that would nest past
+/// the reader's depth cap is set without its element, so a `Truncated` of any
+/// kind is a defect here. (Until the lane's review this accepted the depth cap
+/// "by design", which is how three hundred nested `<em>` losing every block
+/// after them went unflagged.)
+/// `fuzz/fuzz_targets/markdown.rs` is the deep version.
+#[test]
+fn markdown_never_panics_hangs_or_hands_the_reader_bad_xml() {
+    use tinker_pdf::epub::read::markup;
+    use tinker_pdf::markdown::{to_html, to_xhtml};
+    use tinker_pdf::OpenOptions;
+
+    let n = 20_000;
+    let mut shapes: Vec<(&str, String)> = vec![
+        ("stars", "*a ".repeat(n)),
+        (
+            "nested emphasis",
+            "*a ".repeat(n / 40) + "x" + &" a*".repeat(n / 40) + "\n\nafter\n",
+        ),
+        ("underscores", "_".repeat(n)),
+        (
+            "alternating",
+            "_*".repeat(n / 2) + "x" + &"*_".repeat(n / 2),
+        ),
+        ("brackets", "[".repeat(n) + &"]".repeat(n)),
+        ("images", "![".repeat(n / 2) + "x"),
+        (
+            "links after brackets",
+            "[".repeat(n / 4) + &"[a](b) ".repeat(n / 4),
+        ),
+        ("open destinations", "[a](".repeat(n / 4)),
+        (
+            "nested parentheses",
+            "[a](".to_owned() + &"(".repeat(n) + ")",
+        ),
+        ("comments", "<!--".repeat(n / 4)),
+        ("instructions", "<?".repeat(n / 2)),
+        ("cdata", "<![CDATA[".repeat(n / 8)),
+        ("declarations", "<!X".repeat(n / 3)),
+        ("open tags", "<a x=\"".repeat(n / 6)),
+        (
+            "entities",
+            "&#".repeat(n / 2) + "&amp" + &"&x".repeat(n / 2),
+        ),
+        ("quotes", ">".repeat(5 * n) + "\n" + &"a\n".repeat(n / 10)),
+        (
+            "lists",
+            (0..300)
+                .map(|i| format!("{}- x\n", "  ".repeat(i)))
+                .collect(),
+        ),
+        ("definitions", "[a]: /u\n".repeat(n / 8) + "text [a]"),
+        (
+            "references that multiply",
+            format!("[a]: /{}\n\n{}", "d".repeat(n / 2), "[a]".repeat(n / 6)),
+        ),
+        ("tabs", "\t>\t-\t".repeat(n / 5)),
+        ("fences", "```\n".repeat(n / 4)),
+        (
+            "controls",
+            (0u8..32).map(char::from).collect::<String>().repeat(50),
+        ),
+    ];
+    let mut ticks = String::new();
+    for k in (1..=150).rev() {
+        ticks.push_str(&"`".repeat(k));
+        ticks.push('x');
+    }
+    shapes.push(("tick runs", ticks));
+
+    let check = |name: &str, text: &str| {
+        let _ = to_html(text);
+        let (xhtml, _) = to_xhtml(text);
+        let dom = markup(xhtml.as_bytes(), &tinker_pdf_xml::Limits::DEFAULT);
+        assert!(
+            dom.defects.is_empty(),
+            "{name}: the XHTML did not read as XML: {:?}",
+            dom.defects
+        );
+    };
+    for (name, text) in &shapes {
+        let _guard = Guard(name);
+        check(name, text);
+        if let Ok(doc) = Document::open_markdown(text.clone().into_bytes(), &OpenOptions::default())
+        {
+            let _ = doc.page_count();
+            if let Some(page) = doc.page(0) {
+                let _ = page.text();
+            }
+        }
+    }
+
+    let note = "# Title\n\nSome *emphasis*, `code`, [a link](http://x.org \"t\") and ![pic](p.png).\n\n\
+                > - quoted list\n>   continued\n\n1. one\n2. two\n\n    indented\n\n```\nfenced\n```\n\n\
+                <div>raw</div>\n\n[ref]: /url\n";
+    let mut rng = Rng(0x4D41_524B_444F_574E);
+    for case in 0..sweep(2000) {
+        let mutated = mutate(note.as_bytes(), &mut rng);
+        let label = format!("markdown case {case}");
+        let _guard = Guard(&label);
+        let text = String::from_utf8_lossy(&mutated).into_owned();
+        check(&label, &text);
+        if case % 8 == 0 {
+            if let Ok(doc) = Document::open_markdown(mutated, &OpenOptions::default()) {
+                let _ = doc.page_count();
+                if let Some(page) = doc.page(0) {
+                    let _ = page.text();
+                    let _ = page.render(&RenderOptions {
+                        scale: 0.25,
+                        ..RenderOptions::default()
+                    });
+                }
+            }
+        }
     }
 }

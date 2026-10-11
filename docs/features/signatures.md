@@ -11,8 +11,9 @@ the private key held by a caller-supplied callback so key material never
 enters the engine.
 
 Every primitive is the project's own: DER, X.509 and CMS in the
-`tinker-pdf-pki` leaf crate, and big-integer arithmetic, RSASSA-PKCS1-v1_5 and
-ECDSA in `tinker-pdf-crypto` beside the ciphers ([encryption](encryption.md)).
+`tinker-pdf-pki` leaf crate, and big-integer arithmetic, RSASSA-PKCS1-v1_5,
+RSASSA-PSS and ECDSA in `tinker-pdf-crypto` beside the ciphers
+([encryption](encryption.md)).
 
 **There is no boolean.** A verdict answers four questions separately, because
 they come apart in practice: four documents in the fetched corpora carry a
@@ -62,11 +63,14 @@ where a signature covers the bytes as stored.
 
 **CMS and certificates.** `tinker-pdf-pki` reads RFC 5652 `SignedData`: both
 `SignerIdentifier` shapes, signed and unsigned attributes, `contentType`,
-`messageDigest`, `signingTime`, ESS `signingCertificateV2`, and RFC 3161
-timestamp tokens — surfaced, never evaluated. RFC 5652 §5.4's re-encoding (the
-stored `[0] IMPLICIT` tag replaced by `SET OF` before digesting) lives in one
-function and is **adjudicated by data**: 19 real signatures from six producers
-verify with the substitution and not one verifies without it.
+`messageDigest`, `signingTime`, ESS `signingCertificate` and
+`signingCertificateV2`, and RFC 3161 timestamp tokens — whose `TSTInfo`
+`tinker_pdf_pki::tsp` reads — and, for an RSASSA-PSS signer or certificate,
+the `RSASSA-PSS-params` that say how to verify it. RFC 5652
+§5.4's re-encoding (the stored `[0] IMPLICIT` tag replaced by `SET OF` before
+digesting) lives in one function and is **adjudicated by data**: 19 real
+signatures from six producers verify with the substitution and not one
+verifies without it.
 
 `SignedData` is read as BER, which RFC 5652 §5.1 permits and a fifth of the
 corpus's signed documents need — Acrobat Distiller, Adobe LiveCycle and
@@ -78,6 +82,18 @@ regardless, because that is what gets digested.
 
 All 71 X.509 certificates in the corpus parse.
 
+**`GeneralNames` are decoded** (RFC 5280 §4.2.1.6), wherever a certificate or
+an attribute names something other than by distinguished name: the
+`subjectAltName` and `issuerAltName` extensions, `authorityKeyIdentifier`'s
+`authorityCertIssuer`, and an ESS `signingCertificateV2`'s `issuerSerial`,
+which `IssuerSerial::identifies` holds to the certificate it names. Six of
+the nine alternatives decode — mailbox, DNS name and URI held to ASCII, the
+address held to four or sixteen octets, the registered OID, and the directory
+name, whose `[4]` is explicit because `Name` is a `CHOICE` — and `otherName`
+decodes as far as its type and its value's encoding; `x400Address` and
+`ediPartyName` are carried. Each is read on request, so a name this build
+cannot read refuses that accessor rather than the certificate.
+
 **The verdict.** `Document::verify_signatures(&anchors, at)` returns one
 `Verdict` per signature: the coverage, whether the CMS could be read, whether
 the `messageDigest` equals a digest recomputed over the covered bytes, whether
@@ -85,6 +101,51 @@ the signature verifies against the signer's key, how far the chain reached,
 and the weaknesses accepted along the way. Every check that did not run says
 *why* rather than reporting a failure — "we did not look" and "we looked and
 it was wrong" are the two answers a caller must never confuse.
+
+**Timestamps are validated.** Every RFC 3161 token in a signer's unsigned
+attributes gets a `TimestampVerdict` in `Verdict::timestamps`, asking the same
+separate questions a signature gets and two of its own: whether the
+`messageImprint` is the digest of the signature octets it countersigns (RFC
+3161 Appendix A); whether the authority's key signed this `TSTInfo` — the
+signature verifies *and* its `messageDigest` is the `TSTInfo`'s own, which is
+what catches a time rewritten after stamping, and a token whose signed
+attributes carry no `messageDigest` at all has signed no `TSTInfo` and reads
+`NotChecked(NoMessageDigest)`; whether the authority's
+certificate is `Fit` — `id-kp-timeStamping` as its only extended key usage,
+critical (§2.3), and named by the token's ESS `signingCertificate` or
+`signingCertificateV2` (§2.4.1, RFC 5816); and how far its chain reaches,
+judged at the token's own `genTime`, which is the token's claim rather than a
+clock. `genTime` is read with RFC 3161's fractional seconds; the `tsa` hint is
+a `GeneralName`. A timestamp's verdict never changes its signature's — a bad
+token is a token that proves nothing, not a signature that does.
+
+A signer with **no signed attributes** is checked rather than refused. RFC
+5652 §5.4 then puts the signature over the content's own digest — for a
+detached signature, the digest of the covered bytes — so there is no
+`messageDigest` to compare and questions 2 and 3 are one question: a signature
+that verifies answers both, and the digest reads `Matches`; one that does not
+cannot say whether the bytes changed or the signature was never theirs, and
+the digest stays `NotChecked(NoSignedAttributes)` rather than borrowing the
+signature's answer. Signed attributes *without* a `messageDigest` are another
+shape, which RFC 5652 §5.3 forbids: the signature is over attributes that
+name no content, so it may verify and still bind nothing, and the digest
+reads `NotChecked(NoMessageDigest)`.
+
+**`adbe.pkcs7.sha1`** (12.8.3.3.1), the legacy subfilter ISO 32000-2
+deprecates, is verified too. Its `SignedData` *encapsulates* the SHA-1 of the
+covered bytes rather than standing detached from them, so the document digest
+is two links where a detached signature has one: the twenty octets the message
+carries must be the covered bytes' SHA-1, and the signer's `messageDigest`
+must be the digest of those twenty octets under the signer's own algorithm. A
+reader that checked only the first would accept a document and its
+encapsulated digest replaced together — the signature over the attributes
+still verifies. Every such verdict carries `Weakness::Sha1Digest`, because the
+subfilter fixes the document digest at SHA-1, and a message under it that is
+detached is `NotChecked(ContentNotEncapsulated)` — even where it has no signed
+attributes and its signature verifies over the covered bytes, because that is
+not the shape the subfilter names. Signed attributes with no `messageDigest`
+are `NotChecked(NoMessageDigest)` here too: the message then carries the right
+digest and nothing signs it.
 
 **Modification detection.** `Signature::modifications()` lists every object a
 revision after the signed bytes wrote, classifies it, and marks it against the
@@ -98,8 +159,65 @@ value diff would report every object of an encrypted document as changed.
 finishes the file, patches `/ByteRange` to describe what it finished, digests
 the covered spans and hands the digest to a `Signer` that returns finished CMS
 bytes. It can certify the document at any of 12.8.2.2's three levels and lock
-fields per 12.8.2.4. The writer and the reader share one `digest_spans`, so
-what is signed and what is checked cannot drift.
+fields per 12.8.2.4; a certifying save writes the catalog's `/Perms /DocMDP`
+(12.8.4), which until September 2026 it computed after the update's objects
+had been gathered and so never wrote. The writer and the reader share one
+`digest_spans`, so what is signed and what is checked cannot drift.
+
+**A document timestamp.** `DocumentEditor::save_timestamped` adds ISO
+32000-2 12.8.5's `/Type /DocTimeStamp` with `/SubFilter /ETSI.RFC3161`, through
+the same reservation, layout and patching as a signature, so it covers every
+byte but its own `/Contents` — every signature already in the file included,
+which is what one is for. The engine performs no I/O and cannot ask an
+authority anything, so a `Timestamper` the host implements does: it is handed
+the digest of the covered bytes and returns the RFC 3161 token, which goes
+into `/Contents` as it is. The dictionary carries none of a signer's claims —
+no `/M`, `/Name` or `/Reason`; the time is the authority's. A timestamp is
+never drawn (`SignError::VisibleTimestamp`). Reading one, the verdict's four
+answers describe the token — the imprint against the covered bytes, the
+authority's signature over its `TSTInfo`, its chain at `genTime` — and the
+token's own `TimestampVerdict`, with its time and its certificate's fitness,
+rides in `timestamps`; `Verdict::is_trusted` requires that one too.
+
+**Long-term validation material.** `DocumentEditor::add_validation_data`
+writes ISO 32000-2 12.8.4.3's document security store from bytes the host
+gathered — certificates, CRLs and OCSP responses, as DER — into the catalog's
+`/DSS`: `/Certs`, `/CRLs` and `/OCSPs` arrays of streams, and a `/VRI` entry
+for each signature named, keyed by `Signature::validation_key` (the SHA-1 of
+its `/Contents` as uppercase hexadecimal, ETSI EN 319 142-1 §5.4.2.2) and
+listing exactly that material, with `/TU` where the host says when it gathered
+it. It is an ordinary edit saved incrementally, so it lands after every
+signature's `/ByteRange` and breaks none of them, and a later document
+timestamp covers it. A store already there is extended rather than replaced,
+and a stream whose bytes are already listed is not written twice. A document
+below 2.0 gains the `/ESIC` developer extension a 1.7 file declares the store
+with. `Document::security_store` reads one back — as references to its
+streams, by the attachments precedent, so listing a store costs nothing like
+decoding it — and names what it skipped: a member that is not a stream, an
+entry that is not an array, a `/VRI` or a `/DSS` that is not a dictionary, a
+`/TU` that is not a date, each a `SecurityStoreWarning`. Nothing parses a CRL or an OCSP
+response, and the verdict does not consult the store: whether revocation data
+is fresh is a question with a clock in it.
+
+**A visible seal.** `SigningTarget::NewVisibleField { name, page, rect,
+appearance }` adds a signature field whose widget draws: a normal appearance
+built by `appearance::signature`, beside the synthesis every other annotation
+appearance comes from, showing who signed, when, why and where — taken from
+the request's own `name`, `signed_at`, `reason` and `location`, so the seal
+cannot say something the signature dictionary does not — and an optional
+`SignatureImage` (a JPEG placed as it is, or eight-bit grey or RGB samples) in
+the left two-fifths of the box, aspect kept. The date is written as a person
+reads it, in the zone `/M` states. The text is Helvetica in `WinAnsiEncoding`
+carried in the appearance's own resources; a character above the single-byte
+range is drawn as `?` and named against the widget as
+`FieldCharacterUnrepresentable`, the rule a filled field's value follows. The
+seal is an object of the same incremental update as the signature, so the
+`/ByteRange` covers it: changing what it draws afterwards is a modification
+the signature detects. The page, the rectangle and the image are checked
+before anything is written (`SignError::NoSuchPage`, `RectUnusable`,
+`ImageUnusable`). The invisible field is unchanged: a zero `/Rect` and
+`/F 132`, which is Print and Locked — the comment beside it had called it
+the NoView bit, which is 32.
 
 ## API
 
@@ -123,41 +241,100 @@ for verdict in document.verify_signatures(&anchors, Some(now)) {
     verdict.signature;                  // Verified | Failed | NotChecked(why)
     verdict.chain;                      // AnchoredTo | SelfSigned | Incomplete | …
     verdict.weaknesses;                 // SHA-1, short keys, coverage
+    for stamp in &verdict.timestamps {  // RFC 3161 tokens, each its own verdict
+        stamp.time;                     // genTime, the authority's claim
+        stamp.imprint;                  // over what it stamps
+        stamp.authority_certificate;    // Fit | NotForTimestamping | NotBound | …
+        stamp.is_trusted();
+    }
 }
 ```
 
 Signing takes a `Signer` the host implements — two calls, `digest_algorithm`
 and `sign(&[u8]) -> Result<Vec<u8>, SignRefused>` — and a `SigningRequest`
 naming where the signature goes, how much space to reserve, and what to
-certify.
+certify. Where it goes is a `SigningTarget`: an existing empty field, a new
+invisible one, or a new visible one on a page and in a `Rect` with a
+`SignatureAppearance` (`new()` for text alone, `with_image(SignatureImage)`
+for a picture beside it). `SigningTarget` and `SignError` became
+`#[non_exhaustive]` with that variant, and `SigningTarget` lost `Eq`, since
+the rectangle is four `f64`s — one break, taken once.
+
+```rust
+let mut request = SigningRequest::new(
+    SigningTarget::NewVisibleField {
+        name: "Seal".into(),
+        page: 0,
+        rect: Rect { x0: 300.0, y0: 100.0, x1: 540.0, y1: 180.0 },
+        appearance: SignatureAppearance::with_image(SignatureImage::Jpeg(logo)),
+    },
+    &signer,
+);
+request.name = Some("Ada Lovelace".into());
+request.reason = Some("I approve this document".into());
+request.signed_at = Some(date); // supplied, never read from a clock
+let signed = document.editor().save_signed(&options, &request)?;
+```
+
+A document timestamp takes a `Timestamper` — `digest_algorithm` and
+`timestamp(&[u8]) -> Result<Vec<u8>, SignRefused>`, the token over the digest
+— and a `TimestampRequest` (`#[non_exhaustive]`, built with `new` and its
+16 KiB reservation adjusted in place):
+
+```rust
+let request = TimestampRequest::new(
+    SigningTarget::NewInvisibleField { name: "DocumentTimestamp".into() },
+    &authority, // the host's: it posts a TimeStampReq, the engine does not
+);
+let stamped = Document::open(signed)?.editor().save_timestamped(&options, &request)?;
+```
+
+Long-term validation material is a `ValidationData` (`#[non_exhaustive]`,
+built with `new`) of DER the host fetched, and comes back as a
+`SecurityStore` of stream references:
+
+```rust
+let mut data = ValidationData::new();
+data.crls = vec![crl_der];                    // fetched by the host
+data.ocsp_responses = vec![ocsp_der];
+data.signatures = vec![signature.contents.clone()];
+let mut editor = document.editor();
+editor.add_validation_data(&data);            // false only without a catalog
+let saved = editor.save(&incremental);
+
+let store = Document::open(saved)?.security_store().expect("a /DSS");
+let entry = store.entry_for(&signature);      // its /VRI entry
+let crl = document.cos().stream_decoded(store.crls[0]);
+```
 
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| Private-key operations of any kind | none offered — `Signer` returns finished CMS | no key parsing, no key generation, no signing arithmetic; the engine never holds key material | [design](../design/signatures.md) |
-| A bundled root store | `Chain::NoAnchors` when the caller supplies none | which certificates to trust is a policy, and a library that ships one has made the caller's decision for them | this page |
+| Private-key operations of any kind | none offered — `Signer` returns finished CMS | no key parsing, no key generation, no signing arithmetic yet, so the engine holds no key material; signing with a private key in the engine is in scope since the owner's parity decision of 9 October 2026 | [ROADMAP](../ROADMAP.md) SG-01…SG-09, SG-23 |
+| A bundled root store | `Chain::NoAnchors` when the caller supplies none | which certificates to trust is a policy, and a library that ships one has made the caller's decision for them; trust lists the host supplies are a roadmap row, and bundling one is the owner's decision | [ROADMAP](../ROADMAP.md) SG-14 |
 | Deciding whether a certificate is expired, unasked | validity reported; judged only against a caller-supplied instant | ruling 4 bans a clock, and "expired" is a claim about *now* — a library that invents one answers differently on different days | [rulings](../rulings.md) ruling 4 |
-| CRL and OCSP fetching | embedded revocation data surfaced, never evaluated | the engine performs no I/O; freshness is the host's call | [design](../design/signatures.md) |
-| Validating an RFC 3161 timestamp | `SignerDescription::timestamped` says one is there | validating a token means validating the authority's own chain, which is a later tier | [design](../design/signatures.md) |
-| An elliptic curve that is not P-256 or P-384 | `Unchecked::UnsupportedKey`, naming the curve's OID | each curve needs its own constants and its own vectors; a curve nobody has produced a PDF signature on is a liability rather than a feature | RFC 5480 §2.1.1 |
-| A compressed elliptic-curve point | `Unchecked::UnsupportedKey`, naming the form octet | recovering `y` means a square root in the field and guessing its sign, which would produce a different key half the time; no corpus certificate carries one | SEC 1 §2.3.3 |
-| RSASSA-PSS | `SignatureAlgorithm::RsaPss`, named and not decoded | its parameters live in a structure this build does not read, so a caller meeting one knows what it is and knows nothing here has checked it | RFC 8017 |
-| `adbe.pkcs7.sha1` (12.8.3.3.1) | `Unchecked::LegacySha1SubFilter` | deprecated in ISO 32000-2; one corpus file has it and that file is a fuzzer's output, so it is named rather than implemented on a sample of one | 12.8.3.3.1 |
+| CRL and OCSP fetching | embedded revocation data surfaced, not yet evaluated | the engine performs no I/O, so fetching stays the host's; parsing and evaluating what the host supplies is a roadmap row | [ROADMAP](../ROADMAP.md) SG-10 |
+| An elliptic curve that is not P-256 or P-384 | `Unchecked::UnsupportedKey`, naming the curve's OID | each curve needs its own constants and its own vectors; P-521, the Brainpool curves and EdDSA are in scope since the owner's parity decision of 9 October 2026 | RFC 5480 §2.1.1; [ROADMAP](../ROADMAP.md) SG-02…SG-04 |
+| A compressed elliptic-curve point | `Unchecked::UnsupportedKey`, naming the form octet | recovering `y` means a square root in the field and guessing its sign, which would produce a different key half the time; no corpus certificate carries one | SEC 1 §2.3.3; [ROADMAP](../ROADMAP.md) SG-02 |
 | An indefinite length inside `signedAttrs` | `CmsError::IndefiniteSignedAttributes` | RFC 5652 §5.4 requires those bytes to be DER and they are what gets digested; BER is read everywhere else in a `SignedData`, and only here is it refused | RFC 5652 §5.4 |
-| A signature with no signed attributes | `Unchecked::NoSignedAttributes` | the signature is then over the content directly, and guessing at what that content is would be a verdict about the wrong bytes | RFC 5652 §5.4 |
-| Visible signature appearance generation | none — a signed field keeps whatever appearance the caller set | drawing seals is not signature work | [forms](forms.md) |
 
 ## Verified
 
 **Published vectors gate the arithmetic**, as they gate every other primitive
-in this tree ([encryption](encryption.md)). **520 of them ran**: 360 NIST CAVP
+in this tree ([encryption](encryption.md)). **940 of them ran**: 360 NIST CAVP
 `SigVer15` for RSA (60 valid and 300 that must be refused, moduli of 1 024 to
 4 096 bits crossed with SHA-1/256/384/512, of which 150 are forged paddings),
-120 CAVP ECDSA `SigVer` and 24 `PKV` for P-256 and P-384, and 16 from RFC
-6979. CAVP's exponents are all large, so it never tests the low-exponent
+360 CAVP `SigVerPSS` for RSASSA-PSS (60 valid and 300 refused, NIST's five
+negative kinds sixty apiece), RSA Laboratories' 60 PSS signatures from
+`pss-vect.txt` with four spoilings each, 120 CAVP ECDSA `SigVer` and 24 `PKV`
+for P-256 and P-384, and 16 from RFC 6979. CAVP's exponents are all large, so it never tests the low-exponent
 forgery; hand-built negatives cover it by choosing a modulus that makes the
-verifier recover any chosen block without a private key.
+verifier recover any chosen block without a private key. Four more PSS signatures, which no
+published set has, are OpenSSL's: an MGF1 hash other than the message hash —
+SHA-256 under MGF1-SHA-1 among them — each verified under its own parameters
+and refused when unmasked with the message hash
+(`tinker-pdf-crypto/tests/data/openssl/pss-mgf1.txt`).
 
 **One bug those vectors did not catch**, recorded because of how it hid:
 Montgomery multiplication's conditional subtraction borrowed against the full
@@ -202,6 +379,111 @@ spoiling the file, insist the answer is not `Verified`. The one link only this
 repository vouches for is the `/ByteRange` spans, because the generator and
 the reader are the same reading of 12.8.1 — the fixtures' own README says so,
 and `tests/ecdsa_verdict.rs` says it again at the top.
+
+**RSASSA-PSS is verified, on the same terms.** The corpus has no PSS signer
+either, so the arm is wired against the two published vector sets above and
+one fixture OpenSSL 3.0.13 built on 2 October 2026
+(`tests/signature_support/rsa-pss.pdf`): a PSS-signed CMS whose signer key is
+an `id-RSASSA-PSS` key restricted to SHA-256 and a salt of at least 32, under
+a root that signs certificates with PSS too. `tinker_pdf_pki::pss::parameters`
+reads RFC 4055 §3.1's `RSASSA-PSS-params` — every field defaulted, explicit
+tags, MGF1 the only mask generator, `trailerFieldBC` the only trailer — and the
+verifier takes the hash, the mask hash and the salt length from them and never
+from the recovered block. RFC 4056 §3's key restrictions are enforced: a
+signature with a salt shorter than its key permits is `Failed` even where the
+arithmetic would accept it. So is RFC 4055 §1.2's restriction of the key
+itself: an `id-RSASSA-PSS` key made no PKCS#1 v1.5 signature, so one is
+`Failed` as a signer's and `Broken` as a chain link's, and the sealing writer
+encrypts nothing to it. Eight tests in `tests/signature_shapes.rs` take the
+fixture to an anchored chain over a PSS link and refuse it five ways. Two of
+EMSA-PSS-VERIFY's checks — the bits above `emBits` and the `0xbc` trailer —
+are reached by no published vector at all, because a signer cannot produce a
+block that breaks either while keeping `H` right; a counted injection measured
+both at zero, and a block recovered from RSA Laboratories' own 1 026-bit
+example and then spoiled now holds them up.
+
+**The first signature this engine wrote that it also verifies.** Every
+signing test before September 2026 used a stub that returned bytes, so the
+round trip ended at "the digest the signer saw is the digest the reader
+recomputes". `crates/tinker-pdf/tests/visible_signature.rs` signs for real: a
+throwaway 2048-bit RSA key and self-signed certificate OpenSSL generated once
+(`tests/signature_support/README.md`), a CMS `SignedData` the test assembles,
+and the private exponent applied with `tinker_pdf_crypto::bignum`. Over a
+document carrying a drawn seal the verdict is `WholeFile`, `Matches`,
+`Verified` and anchored to that certificate; the seal's object sits inside a
+covered span, and flipping one bit of what it draws turns the digest to
+`Differs`. Seven tests, and six reintroduced defects each firing — one of
+them only after the assertion was changed to look for the picture's own two
+greys, because a missing image draws ruling 2's placeholder and the first
+version counted ink. Both halves of the arithmetic are this repository's, so
+the evidence is the vectors that already gate `bignum` and the OpenSSL-made
+key and certificate, not a second verifier.
+
+**A signature with no signed attributes** is held to one OpenSSL 3.0.13
+fixture (`tests/signature_support/no-signed-attributes.pdf`, `cms -sign
+-noattr`), and to five tests in `tests/signature_shapes.rs`: it verifies and
+anchors; a changed byte or a flipped signature bit fails it and leaves the
+digest unanswered; and naming SHA-384 in the signer's unsigned
+`digestAlgorithm` fails it, because the digest is the signer's to name. The
+corpus has exactly one such signer, `bug854315.pdf`'s, and its first verdict
+under this code has not been measured: `tests/verdicts.rs` tallies it apart
+and prints it, and asserts only that it is no longer unchecked.
+
+**`adbe.pkcs7.sha1`** is held to two OpenSSL 3.0.13 fixtures
+(`tests/signature_support/pkcs7-sha1.pdf` and `pkcs7-sha1-no-attributes.pdf`,
+`cms -sign -nodetach` over the covered bytes' SHA-1, the signer digesting with
+SHA-256 so that the two digests cannot be confused) and five tests in
+`tests/signature_shapes.rs`, the one that matters being a document and its
+encapsulated digest replaced together. The corpus's one such file,
+`poppler-395-0-fuzzed.pdf`, is a fuzzer's mutation whose `/ByteRange` does not
+bracket its `/Contents`, so it reaches no CMS parser and its verdict does not
+move.
+
+**`GeneralNames`** are held to RFC 5280 Appendix C.2's own `subjectAltName`,
+octet for octet, and to a CAdES signature OpenSSL 3.0.13 made
+(`tests/signature_support/cades-general-names.pdf`, `cms -sign -cades`): its
+signer's certificate carries eight of the nine alternatives, an
+`issuerAltName` and an `authorityCertIssuer`, and its `signingCertificateV2`
+names that certificate by issuer and serial. `tests/signature_shapes.rs`
+reads every one back and checks the `issuerSerial` names the signer and not
+the root.
+
+**Timestamps** are held to a real RFC 3161 token. OpenSSL 3.0.13's own TSA
+(`openssl ts -reply`) stamped the signature of
+`tests/signature_support/signature-timestamp.pdf` on 2 October 2026, with a
+certificate whose only purpose is `timeStamping`, critical, under a root of
+its own, and the token was spliced into the signer's unsigned attributes.
+Eight tests in `tests/signature_shapes.rs` read it as OpenSSL printed it and
+validate it end to end, and refuse it six ways: an authority nobody anchored,
+a token over a different signature, a flipped bit in the token's signature, a
+`genTime` rewritten under an intact signature, an extended key usage made
+non-critical, and an ESS hash naming another certificate. The corpus carries
+seven tokens (`cms_census.rs`); what this code makes of them has not been
+measured, because the corpora could not be fetched where it was written.
+
+**Document timestamps** are held to two real tokens from the same OpenSSL
+TSA. One stamps a document the fixture script laid out
+(`tests/signature_support/document-timestamp.pdf`); the other stamps a document
+**this engine wrote** — `save_timestamped` over the signed
+`no-signed-attributes.pdf`, its digest handed to OpenSSL once and the token
+committed (`engine-timestamp-token.der`). The writer is deterministic, so the
+digest is the same on every run, and `tests/document_timestamp.rs` says so
+first, in as many words, if a writer change ever moves it. Over the engine's
+output the earlier signature reads `Revision` and still verifies, and the
+timestamp reads `WholeFile`, `Matches`, `Verified`, anchored and `Fit`; the
+strict validator finds nothing the update added. Nine tests.
+
+**The document security store** is held to a CRL and an OCSP response
+OpenSSL 3.0.13 issued for the `no-signed-attributes.pdf` signer from the CA
+that issued it (`openssl ca -gencrl`, `openssl ocsp -index`). Eight tests in
+`tests/security_store.rs`: the four kinds of material come back byte for byte;
+they are filed under the key SHA-1 of the stored `/Contents` gives, written
+out a second way; the signature still verifies, now over a revision; the
+`/ESIC` extension is declared; a second round extends the store and writes
+nothing twice; a store built malformed by hand is read leniently with each
+skip named; and the strict validator finds nothing the update added. No
+corpus measurement: a census of `/DSS` across the fetched corpora is not
+taken here.
 
 Fixtures cover what the corpus cannot: a signature over a revision, a merged
 field dictionary, both `/Contents` gap conventions, all four digest

@@ -1,0 +1,485 @@
+//! Compiles the vendored XHTML 1.0 entity sets into one sorted table, and the
+//! WHATWG Encoding Standard's single-byte indexes and labels into two more.
+//!
+//! THIRDPARTY.md's promise about vendored data is that *"the raw files never
+//! reach a released binary"*, and this is the half of it that keeps the
+//! promise: three `.ent` files in, one `.rs` out — and the indexes in, a second
+//! — and nothing under `data/` is opened at run time. `tinker-pdf-layout/build.rs` does the same for the UCD
+//! and this file is deliberately in its register.
+//!
+//! # What is read, and what would fail the build
+//!
+//! Each file is a run of `<!ENTITY name "value" >` declarations between SGML
+//! comments. The comments are stripped first — every file's header carries an
+//! `<!ENTITY % … >` *example* inside one — and then every declaration left is a
+//! general entity whose value is one character reference: `&#160;` in the
+//! Latin-1 and symbol sets, and `&#38;#60;` for four of the five XML already
+//! predefines, which is `&` written as a reference so the replacement text is
+//! itself a reference (XML 1.0 §4.6's own advice for redeclaring them).
+//!
+//! Anything else stops the build rather than being skipped, because a table
+//! that silently lost a row is a table whose absence nobody would see:
+//!
+//! - a declaration whose value is not one reference to one code point — which
+//!   is what keeps a lookup from ever *expanding*: one name, one `char`;
+//! - a code point XML 1.0 §2.2 does not admit as a character;
+//! - a name declared twice, within a file or across the three;
+//! - a total other than 253 — 96 Latin-1, 124 symbol, 33 special;
+//! - **a name whose character is longer, in UTF-8, than `&name;` itself.**
+//!   That is the crate's standing invariant — decoded text is never longer
+//!   than its source — checked here for every row rather than argued once.
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::path::PathBuf;
+
+/// The three sets, and how many declarations each must hold.
+const SETS: [(&str, usize); 3] = [
+    ("xhtml-lat1.ent", 96),
+    ("xhtml-symbol.ent", 124),
+    ("xhtml-special.ent", 33),
+];
+
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    xhtml_entities();
+    single_byte_encodings();
+    html_entities();
+}
+
+/// `data/html-entities/entities.json` into `html_entities.rs`: HTML's 2 231
+/// named character references, for the HTML tokenizer and nothing else.
+///
+/// Read by its shape, one entry a line — `"&name": { "codepoints": [n, m],
+/// "characters": "…" },` — and what stops the build:
+///
+/// - a line that names an entry and is not that shape;
+/// - a name that is not ASCII alphanumerics with an optional final `;`, or
+///   one given twice;
+/// - a reference of anything but one or two code points, or one that is a
+///   surrogate or past U+10FFFF;
+/// - **a reference whose UTF-8 is more than six fifths of its source**, the
+///   bound `src/html/entities.rs` states: `&nGt;` is five bytes for six, the
+///   most any name asks;
+/// - a total other than 2 231.
+fn html_entities() {
+    let path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this"))
+        .join("data")
+        .join("html-entities")
+        .join("entities.json");
+    println!("cargo:rerun-if-changed=data/html-entities/entities.json");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let mut table: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("\"&") else {
+            continue;
+        };
+        let (name, rest) = rest
+            .split_once('"')
+            .unwrap_or_else(|| panic!("`{line}` names no entity"));
+        let body = name.strip_suffix(';').unwrap_or(name);
+        assert!(
+            !body.is_empty() && body.bytes().all(|b| b.is_ascii_alphanumeric()),
+            "`{name}` is not a reference's name"
+        );
+        let open = rest
+            .find("\"codepoints\": [")
+            .unwrap_or_else(|| panic!("&{name} has no code points"));
+        let list = &rest[open + "\"codepoints\": [".len()..];
+        let close = list.find(']').expect("a code point list closes");
+        let points: Vec<u32> = list[..close]
+            .split(',')
+            .map(|n| {
+                n.trim()
+                    .parse()
+                    .unwrap_or_else(|_| panic!("&{name}: `{n}` is not a number"))
+            })
+            .collect();
+        let (first, second) = match points.as_slice() {
+            [one] => (*one, 0),
+            [one, two] => (*one, *two),
+            _ => panic!("&{name} is {} code points", points.len()),
+        };
+        let mut utf8 = 0;
+        for scalar in [first, second].into_iter().filter(|&s| s != 0) {
+            let c = char::from_u32(scalar)
+                .unwrap_or_else(|| panic!("&{name}: U+{scalar:X} is not a scalar value"));
+            utf8 += c.len_utf8();
+        }
+        let source = name.len() + 1;
+        assert!(
+            5 * utf8 <= 6 * source,
+            "&{name} decodes to {utf8} bytes from {source}, past six fifths"
+        );
+        assert!(
+            table.insert(name.to_string(), (first, second)).is_none(),
+            "&{name} is given twice"
+        );
+    }
+    assert_eq!(table.len(), 2231, "HTML names 2 231 character references");
+
+    let mut out = String::new();
+    out.push_str("// Generated by build.rs from data/html-entities. Do not edit.\n");
+    out.push_str(
+        "/// HTML's named character references, sorted by name: the name after its \
+         `&`, the first code point, and the second or 0.\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub(crate) static HTML_ENTITIES: [(&str, u32, u32); {}] = [",
+        table.len()
+    );
+    for (name, (first, second)) in &table {
+        let _ = writeln!(out, "    ({name:?}, 0x{first:X}, 0x{second:X}),");
+    }
+    out.push_str("];\n");
+    let target =
+        PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets this")).join("html_entities.rs");
+    std::fs::write(&target, out).unwrap_or_else(|e| panic!("{}: {e}", target.display()));
+}
+
+/// `data/xhtml-entities` into `xhtml_entities.rs`.
+fn xhtml_entities() {
+    let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this"))
+        .join("data")
+        .join("xhtml-entities");
+    for (file, _) in SETS {
+        println!("cargo:rerun-if-changed=data/xhtml-entities/{file}");
+    }
+
+    let mut table: BTreeMap<String, u32> = BTreeMap::new();
+    for (file, expected) in SETS {
+        let path = dir.join(file);
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let declared = declarations(&without_comments(&text), file);
+        assert_eq!(
+            declared.len(),
+            expected,
+            "{file} declares {} entities where the set holds {expected}",
+            declared.len()
+        );
+        for (name, scalar) in declared {
+            let c = char::from_u32(scalar)
+                .unwrap_or_else(|| panic!("{file}: &{name}; is not a scalar value"));
+            assert!(is_xml_char(c), "{file}: &{name}; is not an XML Char");
+            assert!(
+                c.len_utf8() <= name.len() + 2,
+                "{file}: &{name}; decodes longer than its own reference"
+            );
+            assert!(
+                table.insert(name.clone(), scalar).is_none(),
+                "&{name}; is declared twice"
+            );
+        }
+    }
+    assert_eq!(table.len(), 253, "the three XHTML 1.0 sets hold 253 names");
+
+    // Sorted by the name's bytes, which is what `BTreeMap<String, _>` iterates
+    // in and what the lookup's binary search compares with.
+    let mut out = String::new();
+    out.push_str("// Generated by build.rs from data/xhtml-entities. Do not edit.\n");
+    out.push_str(
+        "/// The 253 names XHTML 1.0's three entity sets declare, sorted by name, \
+         each with the one character it is.\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub(crate) static XHTML_ENTITIES: [(&str, char); {}] = [",
+        table.len()
+    );
+    for (name, scalar) in &table {
+        let _ = writeln!(out, "    ({name:?}, '\\u{{{scalar:X}}}'),");
+    }
+    out.push_str("];\n");
+
+    let target =
+        PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets this")).join("xhtml_entities.rs");
+    std::fs::write(&target, out).unwrap_or_else(|e| panic!("{}: {e}", target.display()));
+}
+
+/// The text with every `<!-- … -->` removed.
+fn without_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find("<!--") {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 4..];
+        let close = after
+            .find("-->")
+            .expect("an SGML comment that never closes");
+        rest = &after[close + 3..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Every `<!ENTITY name "&#N;" >`, as the name and the code point.
+fn declarations(text: &str, file: &str) -> Vec<(String, u32)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("<!ENTITY") {
+        let after = &rest[at + "<!ENTITY".len()..];
+        let end = after
+            .find('>')
+            .unwrap_or_else(|| panic!("{file}: a declaration that never closes"));
+        let body = after[..end].trim();
+        rest = &after[end + 1..];
+
+        let (name, value) = body
+            .split_once(char::is_whitespace)
+            .unwrap_or_else(|| panic!("{file}: `{body}` is not a name and a value"));
+        assert!(
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric()),
+            "{file}: `{name}` is not a general entity's name"
+        );
+        let value = value.trim();
+        let literal = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("{file}: &{name};'s value `{value}` is not one literal"));
+        // `&#38;#60;` is the reference `&#60;` with its ampersand escaped.
+        let digits = literal
+            .strip_prefix("&#38;#")
+            .or_else(|| literal.strip_prefix("&#"))
+            .and_then(|r| r.strip_suffix(';'))
+            .filter(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+            .unwrap_or_else(|| {
+                panic!("{file}: &{name}; is `{literal}`, not one decimal character reference")
+            });
+        let scalar: u32 = digits
+            .parse()
+            .unwrap_or_else(|_| panic!("{file}: &{name}; names no number"));
+        out.push((name.to_string(), scalar));
+    }
+    out
+}
+
+/// XML 1.0 §2.2, the `Char` production — `text::is_xml_char`, restated
+/// because a build script cannot reach the crate it builds.
+const fn is_xml_char(c: char) -> bool {
+    matches!(c,
+        '\u{9}' | '\u{A}' | '\u{D}'
+        | '\u{20}'..='\u{D7FF}'
+        | '\u{E000}'..='\u{FFFD}'
+        | '\u{10000}'..='\u{10FFFF}')
+}
+
+// ---- The WHATWG Encoding Standard's single-byte indexes ----------------------
+
+/// The Encoding Standard's single-byte encodings, by the name it gives each,
+/// and the index file that is its table. ISO-8859-8-I has no file of its own:
+/// it is ISO-8859-8's table read in logical order, which is a bidi question and
+/// not a decoding one, so the standard points both names at one index.
+const SINGLE_BYTE: [(&str, &str); 28] = [
+    ("IBM866", "index-ibm866.txt"),
+    ("ISO-8859-2", "index-iso-8859-2.txt"),
+    ("ISO-8859-3", "index-iso-8859-3.txt"),
+    ("ISO-8859-4", "index-iso-8859-4.txt"),
+    ("ISO-8859-5", "index-iso-8859-5.txt"),
+    ("ISO-8859-6", "index-iso-8859-6.txt"),
+    ("ISO-8859-7", "index-iso-8859-7.txt"),
+    ("ISO-8859-8", "index-iso-8859-8.txt"),
+    ("ISO-8859-8-I", "index-iso-8859-8.txt"),
+    ("ISO-8859-10", "index-iso-8859-10.txt"),
+    ("ISO-8859-13", "index-iso-8859-13.txt"),
+    ("ISO-8859-14", "index-iso-8859-14.txt"),
+    ("ISO-8859-15", "index-iso-8859-15.txt"),
+    ("ISO-8859-16", "index-iso-8859-16.txt"),
+    ("KOI8-R", "index-koi8-r.txt"),
+    ("KOI8-U", "index-koi8-u.txt"),
+    ("macintosh", "index-macintosh.txt"),
+    ("windows-874", "index-windows-874.txt"),
+    ("windows-1250", "index-windows-1250.txt"),
+    ("windows-1251", "index-windows-1251.txt"),
+    ("windows-1252", "index-windows-1252.txt"),
+    ("windows-1253", "index-windows-1253.txt"),
+    ("windows-1254", "index-windows-1254.txt"),
+    ("windows-1255", "index-windows-1255.txt"),
+    ("windows-1256", "index-windows-1256.txt"),
+    ("windows-1257", "index-windows-1257.txt"),
+    ("windows-1258", "index-windows-1258.txt"),
+    ("x-mac-cyrillic", "index-x-mac-cyrillic.txt"),
+];
+
+/// `data/encoding-indexes` into `single_byte.rs`: one 128-entry table per
+/// encoding above, and every label `encodings.json` gives any encoding.
+///
+/// What stops the build rather than being skipped, for the reason the XHTML
+/// half gives — a table that silently lost a row is one nobody would see:
+///
+/// - a line that is not `pointer TAB 0xHEX TAB …` once comments are stripped;
+/// - a pointer past 127, or one given twice;
+/// - a code point outside the Basic Multilingual Plane, or a surrogate — no
+///   single-byte index holds either, and the table's `u16` relies on it;
+/// - `encodings.json`'s *Legacy single-byte encodings* naming an encoding this
+///   list does not, or this list naming one it does not;
+/// - a label given twice.
+fn single_byte_encodings() {
+    let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this"))
+        .join("data")
+        .join("encoding-indexes");
+    println!("cargo:rerun-if-changed=data/encoding-indexes");
+
+    let mut out = String::new();
+    out.push_str("// Generated by build.rs from data/encoding-indexes. Do not edit.\n");
+    out.push_str(
+        "/// Each single-byte encoding's bytes 0x80 to 0xFF, by its Encoding Standard \
+         name; 0 is a pointer the index leaves unmapped.\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub(crate) static SINGLE_BYTE_TABLES: [(&str, [u16; 128]); {}] = [",
+        SINGLE_BYTE.len()
+    );
+    for (name, file) in SINGLE_BYTE {
+        let path = dir.join(file);
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let mut table = [0u16; 128];
+        let mut seen = [false; 128];
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut fields = line.split('\t');
+            let pointer: usize = fields
+                .next()
+                .and_then(|p| p.trim().parse().ok())
+                .unwrap_or_else(|| panic!("{file}: `{line}` has no pointer"));
+            let scalar = fields
+                .next()
+                .and_then(|c| c.trim().strip_prefix("0x"))
+                .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                .unwrap_or_else(|| panic!("{file}: `{line}` has no code point"));
+            assert!(
+                pointer < 128,
+                "{file}: pointer {pointer} is past a byte's upper half"
+            );
+            assert!(!seen[pointer], "{file}: pointer {pointer} is given twice");
+            assert!(
+                scalar != 0 && scalar <= 0xFFFF && !(0xD800..=0xDFFF).contains(&scalar),
+                "{file}: pointer {pointer} maps to U+{scalar:04X}, which a u16 table cannot hold"
+            );
+            seen[pointer] = true;
+            table[pointer] = scalar as u16;
+        }
+        // ISO-8859-6, the sparsest, maps 83 of the 128.
+        assert!(
+            seen.iter().filter(|&&s| s).count() >= 80,
+            "{file}: fewer than 80 pointers mapped; this is not a single-byte index"
+        );
+        let _ = write!(out, "    ({name:?}, [");
+        for (at, value) in table.iter().enumerate() {
+            if at > 0 {
+                out.push_str(", ");
+            }
+            let _ = write!(out, "0x{value:04X}");
+        }
+        out.push_str("]),\n");
+    }
+    out.push_str("];\n");
+
+    let json = dir.join("encodings.json");
+    let text = std::fs::read_to_string(&json).unwrap_or_else(|e| panic!("{}: {e}", json.display()));
+    let groups = encoding_groups(&text);
+    let single: Vec<&str> = groups
+        .iter()
+        .filter(|(heading, _, _)| heading == "Legacy single-byte encodings")
+        .map(|(_, name, _)| name.as_str())
+        .collect();
+    let ours: Vec<&str> = SINGLE_BYTE.iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        single, ours,
+        "encodings.json's single-byte encodings are not the list build.rs compiles"
+    );
+    let mut labels: BTreeMap<String, String> = BTreeMap::new();
+    for (_, name, group_labels) in &groups {
+        for label in group_labels {
+            assert!(
+                labels.insert(label.clone(), name.clone()).is_none(),
+                "the label {label:?} is given twice"
+            );
+        }
+    }
+    out.push_str(
+        "/// Every label the Encoding Standard gives an encoding, lowercase and sorted, \
+         with the name of the encoding it is.\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub(crate) static ENCODING_LABELS: [(&str, &str); {}] = [",
+        labels.len()
+    );
+    for (label, name) in &labels {
+        let _ = writeln!(out, "    ({label:?}, {name:?}),");
+    }
+    out.push_str("];\n");
+
+    let target =
+        PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets this")).join("single_byte.rs");
+    std::fs::write(&target, out).unwrap_or_else(|e| panic!("{}: {e}", target.display()));
+}
+
+/// `encodings.json` as `(heading, name, labels)` rows, read by the shape the
+/// file has rather than by a JSON parser: a `"labels": [ … ]` list of strings
+/// followed by its `"name": "…"`, the group's `"heading": "…"` after its
+/// encodings. A file that strays from that shape fails here, by an assert,
+/// rather than yielding fewer rows.
+fn encoding_groups(text: &str) -> Vec<(String, String, Vec<String>)> {
+    let mut out = Vec::new();
+    let mut pending: Vec<(String, Vec<String>)> = Vec::new();
+    let mut rest = text;
+    loop {
+        let labels_at = rest.find("\"labels\"");
+        let heading_at = rest.find("\"heading\"");
+        match (labels_at, heading_at) {
+            (Some(l), h) if h.is_none_or(|h| l < h) => {
+                let after = &rest[l..];
+                let open = after.find('[').expect("a labels list opens");
+                let close = after.find(']').expect("a labels list closes");
+                let labels: Vec<String> = after[open + 1..close]
+                    .split(',')
+                    .map(|label| label.trim().trim_matches('"').to_string())
+                    .filter(|label| !label.is_empty())
+                    .collect();
+                let rest_after = &after[close..];
+                let name_at = rest_after.find("\"name\"").expect("an encoding has a name");
+                let name = quoted_value(&rest_after[name_at + "\"name\"".len()..]);
+                assert!(
+                    labels
+                        .iter()
+                        .all(|l| l.bytes().all(|b| !b.is_ascii_uppercase())),
+                    "{name}: a label that is not lowercase"
+                );
+                pending.push((name, labels));
+                rest = &rest_after[name_at + "\"name\"".len()..];
+            }
+            (_, Some(h)) => {
+                let heading = quoted_value(&rest[h + "\"heading\"".len()..]);
+                for (name, labels) in pending.drain(..) {
+                    out.push((heading.clone(), name, labels));
+                }
+                rest = &rest[h + "\"heading\"".len()..];
+            }
+            (_, None) => break,
+        }
+    }
+    assert!(pending.is_empty(), "encodings.json ends inside a group");
+    assert!(
+        out.len() >= 40,
+        "encodings.json names {} encodings",
+        out.len()
+    );
+    out
+}
+
+/// The string after `: "`, up to its closing quote.
+fn quoted_value(after_key: &str) -> String {
+    let open = after_key.find('"').expect("a quoted value");
+    let body = &after_key[open + 1..];
+    let close = body.find('"').expect("a quoted value closes");
+    body[..close].to_string()
+}

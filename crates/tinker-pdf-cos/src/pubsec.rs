@@ -297,6 +297,207 @@ fn derive(
     Ok(hasher.finish()[..bytes].to_vec())
 }
 
+/// A document's file key, sealed to its recipients (ISO 32000-2 7.6.5): what a
+/// public-key encrypted save writes, made before the save so that the save
+/// itself cannot fail.
+///
+/// [`PublicKeyEncryption::seal`] draws a twenty-byte seed, seals it with the
+/// permissions to every certificate in one CMS `EnvelopedData`
+/// (`tinker_pdf_pki::seal`, the shape OpenSSL writes), and derives the file
+/// key exactly as [`authenticate`] does on the way back in — SHA-256 over the
+/// seed and the envelope, the whole of it, for `/V 5` and AES-256.
+/// [`crate::DocumentEditor::save_sealed`] writes it.
+///
+/// **Every recipient gets the same document and the same permissions**: one
+/// envelope, one `/Recipients` entry. 7.6.5 allows one envelope per group of
+/// recipients with different permissions; that is a later shape, not this
+/// one.
+#[derive(Clone)]
+pub struct PublicKeyEncryption {
+    recipients: Vec<Vec<u8>>,
+    file_key: [u8; 32],
+    permissions: i32,
+    identifier_entropy: [u8; 48],
+}
+
+impl core::fmt::Debug for PublicKeyEncryption {
+    /// The file key is not printed: a `Debug` line in a log is a place keys
+    /// are found in.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PublicKeyEncryption")
+            .field("recipients", &self.recipients.len())
+            .field("permissions", &self.permissions)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why a file key could not be sealed, or a sealed save not made.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SealError {
+    /// No certificates: a document nobody could open.
+    NoRecipients,
+    /// A recipient's certificate would not parse.
+    Certificate {
+        /// Which recipient, counting from zero.
+        index: usize,
+        /// The parser's reason.
+        reason: String,
+    },
+    /// A recipient's key is not RSA, the only key transport 7.6.5's handlers
+    /// use.
+    NotRsa {
+        /// Which recipient.
+        index: usize,
+    },
+    /// A recipient's RSA key cannot carry the content key.
+    KeyUnusable {
+        /// Which recipient.
+        index: usize,
+    },
+    /// A recipient's RSA key is published under `id-RSASSA-PSS`, which
+    /// restricts it to signing (RFC 4055 §1.2), so nothing is sealed to it.
+    KeyRestricted {
+        /// Which recipient.
+        index: usize,
+    },
+    /// The entropy source could not supply the seed, the content key, the IV
+    /// or a recipient's padding.
+    NoEntropy,
+    /// [`crate::DocumentEditor::save_sealed`] was asked for an incremental
+    /// save. An update appends into a file whose `/Encrypt` still stands, and
+    /// cannot change who it is sealed to.
+    NotRewrite,
+    /// [`crate::WriteOptions::encryption`] asked for a password as well. A
+    /// document has one security handler.
+    PasswordAlsoRequested,
+}
+
+impl core::fmt::Display for SealError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SealError::NoRecipients => f.write_str("no recipients to seal the document to"),
+            SealError::Certificate { index, reason } => {
+                write!(f, "recipient {index}'s certificate: {reason}")
+            }
+            SealError::NotRsa { index } => write!(f, "recipient {index}'s key is not RSA"),
+            SealError::KeyUnusable { index } => {
+                write!(
+                    f,
+                    "recipient {index}'s RSA key cannot carry the content key"
+                )
+            }
+            SealError::KeyRestricted { index } => {
+                write!(
+                    f,
+                    "recipient {index}'s RSA key is restricted to RSASSA-PSS signatures"
+                )
+            }
+            SealError::NoEntropy => f.write_str("the entropy source declined"),
+            SealError::NotRewrite => {
+                f.write_str("a public-key encrypted save rewrites; it cannot be incremental")
+            }
+            SealError::PasswordAlsoRequested => {
+                f.write_str("a password and recipients were both asked for")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SealError {}
+
+impl PublicKeyEncryption {
+    /// Seals a fresh file key to `certificates` (each a DER X.509
+    /// certificate), every one of whose holders can open the document, under
+    /// the permission bits `permissions` (`/P`, Table 22).
+    ///
+    /// # Errors
+    ///
+    /// [`SealError`] — a certificate that does not parse, whose key is not
+    /// usable RSA, or whose RSA key is restricted to signing, checked before
+    /// any entropy is spent; or a source that cannot fill.
+    pub fn seal(
+        certificates: &[Vec<u8>],
+        permissions: i32,
+        entropy: &mut dyn tinker_pdf_crypto::EntropySource,
+    ) -> Result<PublicKeyEncryption, SealError> {
+        use tinker_pdf_pki::seal::SealError as Envelope;
+
+        let mut seed = [0u8; 20];
+        let mut identifier_entropy = [0u8; 48];
+        let recipients: Vec<&[u8]> = certificates.iter().map(Vec::as_slice).collect();
+        // The envelope first, so that a bad certificate is refused before the
+        // seed is drawn; then the seed is sealed in a second pass.
+        if let Err(error) = tinker_pdf_pki::seal::seal(&[0; 24], &recipients, &mut Refuse) {
+            match error {
+                Envelope::NoEntropy => {}
+                Envelope::NoRecipients => return Err(SealError::NoRecipients),
+                Envelope::Certificate { index, reason } => {
+                    return Err(SealError::Certificate { index, reason })
+                }
+                Envelope::NotRsa { index } => return Err(SealError::NotRsa { index }),
+                Envelope::KeyUnusable { index } => return Err(SealError::KeyUnusable { index }),
+                Envelope::KeyRestricted { index } => {
+                    return Err(SealError::KeyRestricted { index })
+                }
+                _ => return Err(SealError::NoEntropy),
+            }
+        }
+        if !entropy.fill(&mut seed) || !entropy.fill(&mut identifier_entropy) {
+            return Err(SealError::NoEntropy);
+        }
+        // 7.6.5: the seed, then the four permission bytes, most significant
+        // first — the order the open implementations write. This reader does
+        // not apply them (`docs/design/pubsec.md`), and they are sealed so
+        // that a reader that does finds the document's own.
+        let mut content = Vec::with_capacity(24);
+        content.extend_from_slice(&seed);
+        content.extend_from_slice(&permissions.to_be_bytes());
+        let envelope = tinker_pdf_pki::seal::seal(&content, &recipients, entropy)
+            .map_err(|_| SealError::NoEntropy)?;
+        let recipients = vec![envelope];
+        let derived = derive(&seed, &recipients, true, 5, 256).map_err(|_| SealError::NoEntropy)?;
+        let mut file_key = [0u8; 32];
+        file_key.copy_from_slice(derived.get(..32).ok_or(SealError::NoEntropy)?);
+        Ok(PublicKeyEncryption {
+            recipients,
+            file_key,
+            permissions,
+            identifier_entropy,
+        })
+    }
+
+    /// The `/Recipients` strings, in the order they are written and digested.
+    #[must_use]
+    pub fn recipients(&self) -> &[Vec<u8>] {
+        &self.recipients
+    }
+
+    /// The permission bits sealed and written as `/P`.
+    #[must_use]
+    pub fn permissions(&self) -> i32 {
+        self.permissions
+    }
+
+    pub(crate) fn file_key(&self) -> [u8; 32] {
+        self.file_key
+    }
+
+    pub(crate) fn identifier_entropy(&self) -> &[u8; 48] {
+        &self.identifier_entropy
+    }
+}
+
+/// An entropy source that never fills, for the dry run that checks the
+/// certificates before any real randomness is drawn.
+struct Refuse;
+
+impl tinker_pdf_crypto::EntropySource for Refuse {
+    fn fill(&mut self, _: &mut [u8]) -> bool {
+        false
+    }
+}
+
 /// Which cipher the crypt filters say to use, translated for the key.
 fn methods(params: &EncryptParams) -> (CryptMethod, CryptMethod) {
     if params.v.unwrap_or(0) >= 4 {

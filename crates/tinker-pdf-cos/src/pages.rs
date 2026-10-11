@@ -95,6 +95,58 @@ impl Rect {
     }
 }
 
+/// One of the five page boundaries of 14.11.2, by the key a page dictionary
+/// stores it under (7.7.3.3 Table 30).
+///
+/// The same five names are what a viewer preference's `/ViewArea`,
+/// `/ViewClip`, `/PrintArea` and `/PrintClip` hold (12.2 Table 147), which is
+/// why one type serves both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PageBoundary {
+    /// `/MediaBox`: the physical medium.
+    MediaBox,
+    /// `/CropBox`: what a viewer shows and prints.
+    CropBox,
+    /// `/BleedBox`: where content is clipped in a production environment.
+    BleedBox,
+    /// `/TrimBox`: the finished page after trimming.
+    TrimBox,
+    /// `/ArtBox`: the page's meaningful content, as its creator intended.
+    ArtBox,
+}
+
+impl PageBoundary {
+    /// Every boundary, outermost first.
+    pub const ALL: [PageBoundary; 5] = [
+        PageBoundary::MediaBox,
+        PageBoundary::CropBox,
+        PageBoundary::BleedBox,
+        PageBoundary::TrimBox,
+        PageBoundary::ArtBox,
+    ];
+
+    /// The key the boundary is stored under, and the name a viewer preference
+    /// spells it with.
+    #[must_use]
+    pub fn key(self) -> &'static [u8] {
+        match self {
+            PageBoundary::MediaBox => b"MediaBox",
+            PageBoundary::CropBox => b"CropBox",
+            PageBoundary::BleedBox => b"BleedBox",
+            PageBoundary::TrimBox => b"TrimBox",
+            PageBoundary::ArtBox => b"ArtBox",
+        }
+    }
+
+    /// The boundary a key names, or `None` for any other name.
+    #[must_use]
+    pub fn from_key(bytes: &[u8]) -> Option<PageBoundary> {
+        PageBoundary::ALL
+            .into_iter()
+            .find(|boundary| boundary.key() == bytes)
+    }
+}
+
 /// One page, with its inherited attributes resolved.
 #[derive(Clone, Debug)]
 pub struct Page {
@@ -106,6 +158,21 @@ pub struct Page {
     pub media_box: Rect,
     /// `/CropBox` clipped to `/MediaBox`; equal to it when absent (7.7.3.3).
     pub crop_box: Rect,
+    /// `/BleedBox` (14.11.2): the page's own, clipped to the media box, and
+    /// the crop box when it has none.
+    ///
+    /// **Not inherited.** 7.7.3.3 Table 30 marks four page attributes
+    /// inheritable — `/Resources`, `/MediaBox`, `/CropBox`, `/Rotate` — and
+    /// the bleed, trim and art boxes are not among them, so a value on a
+    /// `/Pages` node describes no page. Table 30 defaults each to the crop
+    /// box, and 14.11.2.1 reduces each to its intersection with the media
+    /// box; one that misses the media box altogether reads as the crop box,
+    /// the way a crop box that misses it reads as the media box.
+    pub bleed_box: Rect,
+    /// `/TrimBox` (14.11.2), under the same rules as [`Page::bleed_box`].
+    pub trim_box: Rect,
+    /// `/ArtBox` (14.11.2), under the same rules as [`Page::bleed_box`].
+    pub art_box: Rect,
     /// `/Rotate` normalized to 0, 90, 180 or 270.
     pub rotation: u16,
     /// `/Resources`, inherited and already resolved.
@@ -118,6 +185,18 @@ pub struct Page {
 }
 
 impl Page {
+    /// One of the five boundaries, as this page resolves it.
+    #[must_use]
+    pub fn boundary(&self, boundary: PageBoundary) -> Rect {
+        match boundary {
+            PageBoundary::MediaBox => self.media_box,
+            PageBoundary::CropBox => self.crop_box,
+            PageBoundary::BleedBox => self.bleed_box,
+            PageBoundary::TrimBox => self.trim_box,
+            PageBoundary::ArtBox => self.art_box,
+        }
+    }
+
     /// The page's size after rotation, which is what a viewer lays out.
     #[must_use]
     pub fn display_size(&self) -> (f64, f64) {
@@ -130,13 +209,18 @@ impl Page {
     }
 }
 
-/// Attributes that descend the tree (7.7.3.4).
+/// Attributes that descend the tree (7.7.3.4), and three that do not.
 #[derive(Clone, Debug, Default)]
 struct Inherited {
     media_box: Option<Rect>,
     crop_box: Option<Rect>,
     rotation: Option<i64>,
     resources: Option<Dict>,
+    /// `/BleedBox`, `/TrimBox` and `/ArtBox` **of the last node extended
+    /// over, alone**: `extend` replaces them rather than falling back to the
+    /// parent's, so what reaches a leaf is the leaf's own (Table 30 does not
+    /// make them inheritable).
+    own_boxes: [Option<Rect>; 3],
 }
 
 impl Inherited {
@@ -159,6 +243,12 @@ impl Inherited {
             crop_box: rect(doc.crop_box_name()).or(self.crop_box),
             rotation: dict.get_int(doc.rotate_name()).or(self.rotation),
             resources,
+            own_boxes: [
+                PageBoundary::BleedBox,
+                PageBoundary::TrimBox,
+                PageBoundary::ArtBox,
+            ]
+            .map(|boundary| rect(doc.intern(boundary.key()))),
         }
     }
 }
@@ -276,11 +366,21 @@ fn leaf(reference: ObjRef, index: u32, inherited: Inherited, doc: &CosDocument) 
         .and_then(|c| c.intersect(&media_box))
         .unwrap_or(media_box);
 
+    // 14.11.2.1 and Table 30: each defaults to the crop box and is reduced to
+    // its intersection with the media box.
+    let [bleed_box, trim_box, art_box] = inherited.own_boxes.map(|own| {
+        own.and_then(|r| r.intersect(&media_box))
+            .unwrap_or(crop_box)
+    });
+
     Page {
         reference,
         index,
         media_box,
         crop_box,
+        bleed_box,
+        trim_box,
+        art_box,
         rotation: normalize_rotation(inherited.rotation.unwrap_or(0)),
         resources: inherited.resources,
     }
@@ -503,6 +603,9 @@ mod tests {
             index: 0,
             media_box: Rect::US_LETTER,
             crop_box: Rect::US_LETTER,
+            bleed_box: Rect::US_LETTER,
+            trim_box: Rect::US_LETTER,
+            art_box: Rect::US_LETTER,
             rotation: 0,
             resources: None,
         };
@@ -567,5 +670,73 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n";
             .as_ref()
             .expect("inherited from the parent node");
         assert!(resources.get(doc.intern(b"Font")).is_some());
+    }
+
+    fn corners(r: Rect) -> (f64, f64, f64, f64) {
+        (r.x0, r.y0, r.x1, r.y1)
+    }
+
+    /// Table 30: the bleed, trim and art boxes are the page's own. A value on
+    /// the `/Pages` node above it describes no page, and a page without one
+    /// reads its crop box.
+    #[test]
+    fn the_production_boxes_are_not_inherited() {
+        let bytes = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 2 /Kids [3 0 R 4 0 R] /MediaBox [0 0 200 100]\n\
+   /CropBox [10 10 190 90] /TrimBox [20 20 180 80] /ArtBox [30 30 170 70] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n\
+4 0 obj\n<< /Type /Page /Parent 2 0 R /TrimBox [25 25 175 75] >>\nendobj\n\
+trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n";
+
+        let doc = CosDocument::open(&bytes[..]).expect("it opens");
+        let pages = collect(&doc);
+        assert_eq!(pages.len(), 2);
+        let crop = (10.0, 10.0, 190.0, 90.0);
+        assert_eq!(
+            corners(pages[0].crop_box),
+            crop,
+            "the crop box does inherit"
+        );
+        for boundary in [
+            PageBoundary::BleedBox,
+            PageBoundary::TrimBox,
+            PageBoundary::ArtBox,
+        ] {
+            assert_eq!(
+                corners(pages[0].boundary(boundary)),
+                crop,
+                "{boundary:?} comes from the page or defaults to the crop box"
+            );
+        }
+        assert_eq!(corners(pages[1].trim_box), (25.0, 25.0, 175.0, 75.0));
+        assert_eq!(corners(pages[1].art_box), crop, "the parent's is not taken");
+    }
+
+    /// 14.11.2.1: a box reaching past the media box is its intersection with
+    /// it; one that misses the media box entirely is the crop box, and the
+    /// corners are ordered however the file wrote them.
+    #[test]
+    fn a_production_box_is_clipped_to_the_media_box() {
+        let bytes = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
+   /BleedBox [-5 -5 205 105] /TrimBox [180 90 20 10] /ArtBox [300 300 400 400] >>\nendobj\n\
+trailer\n<< /Size 4 /Root 1 0 R >>\n%%EOF\n";
+
+        let doc = CosDocument::open(&bytes[..]).expect("it opens");
+        let page = &collect(&doc)[0];
+        assert_eq!(corners(page.bleed_box), (0.0, 0.0, 200.0, 100.0));
+        assert_eq!(corners(page.trim_box), (20.0, 10.0, 180.0, 90.0));
+        assert_eq!(corners(page.art_box), corners(page.crop_box));
+    }
+
+    #[test]
+    fn a_boundary_names_itself_both_ways() {
+        for boundary in PageBoundary::ALL {
+            assert_eq!(PageBoundary::from_key(boundary.key()), Some(boundary));
+        }
+        assert_eq!(PageBoundary::from_key(b"Trimbox"), None, "names are bytes");
     }
 }

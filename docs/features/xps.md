@@ -35,13 +35,23 @@ attributes (`ImageSource`, `FontUri`) as well as relationship targets,
 because XPS 1.0 writes them absolute and OpenXPS writes them relative. The
 spine is `FixedDocumentSequence → FixedDocument → FixedPage`, pages in
 markup order (12.3.1 defines no other), each payload resolved by media type
-rather than by extension.
+rather than by extension. **Interleaved packages are read** (OPC 7.2.4): a part
+written as `…/[0].piece` through `…/[n].last.piece` — `[Content_Types].xml`
+included — is joined in piece-number order into one part, held as a whole to the
+archive's per-entry cap before a piece is read, with every piece checksummed and
+charged as an entry is. Pieces that do not determine a part — a gap, a repeat, no
+`.last` or one that is not the highest, a leading zero, a part stored both whole
+and in pieces — refuse the package by name.
 
 **The XML parser** is a leaf crate, `tinker-pdf-xml`: a pull parser that
 refuses `<!DOCTYPE` with an internal subset *by name* before reading one
 byte past it — entity expansion is a refusal, not a budget — with a
 two-valued doctype mode that [EPUB](epub.md) uses for `<!DOCTYPE html>`.
 Every parse is bounded by `Limits` (depth, attribute count, text length).
+An XPS part is read in the strict mode, `Doctype::Refuse` (ECMA-388 9.3.2
+[M2.71] forbids DTD content outright), so the XHTML named-reference table the
+relaxed mode consults for an EPUB never applies to one: `&nbsp;` in a fixed
+page is `Error::UnknownEntity` exactly as before.
 
 **Markup to content stream** (`markup`, `geometry`, `brush`, `paint`). One
 XPS unit is 1/96 inch (18.1) against PDF's 1/72, so a page opens with one
@@ -55,7 +65,11 @@ chain is bounded the same two ways and read in a pass before the drawing
 walk; 15.2.5's `ContextColor`, whose ICC profile is embedded **verbatim**
 as an `/ICCBased` colour space and whose components reach the content
 stream unchanged, so the reader does the colour management and this build
-converts nothing; section 15's brushes — `SolidColorBrush`, `LinearGradientBrush`,
+converts nothing — and, for an `nCLR` profile `/ICCBased` cannot carry
+(`2CLR`, and `5CLR` to `8CLR`; `3CLR` and `4CLR` have counts Table 66 admits
+and are `/ICCBased` like any other three- or four-channel profile), a
+`/DeviceN` of the same components whose tint transform is the profile
+evaluated over a grid; section 15's brushes — `SolidColorBrush`, `LinearGradientBrush`,
 `RadialGradientBrush`, `ImageBrush` and `VisualBrush` with `TileMode`
 (through a PDF tiling pattern, whose cell is a picture for the one and a
 **drawing** for the other) — with colours in both the eight- and
@@ -66,7 +80,12 @@ outline is one. 14.3's `OpacityMask` is a brush used as an **alpha
 channel**, and the three brushes it can be are three constructions: a
 uniform alpha is 11.6.4.4's `/ca`, a gradient whose stops' alphas differ is
 painted as a grey for a `/Luminosity` soft mask, and a picture's own alpha
-is read by an `/Alpha` one. `ContentBox` and `BleedBox` (10.3) survive as
+is read by an `/Alpha` one. A gradient **fill or stroke** whose stops' alphas
+differ is the same grey under the colours, in a group of its own (18.3.2
+interpolates colour and alpha separately, which is what a mask over a ramp
+composes to). `ColorInterpolationMode`'s `ScRgbLinearInterpolation` blends
+each interval in linear light, written as a sampled function of the sRGB it
+comes to; the default, `SRgbLinearInterpolation`, is the shading's own. `ContentBox` and `BleedBox` (10.3) survive as
 `/CropBox` and `/BleedBox`.
 
 **Glyphs** (`glyphs`, `font`). A `<Glyphs>` run carries `Indices` (12.1.3)
@@ -86,8 +105,14 @@ the visual order that comes back, with the origin at the run's right edge.
 The algorithm rather than a reversal, because European digits inside a
 Hebrew or Arabic run rise to an even level of their own and are drawn left
 to right inside a run drawn right to left — a reversal renders every price
-backwards. Bold and italic simulation (`StyleSimulations`) is reported,
-not applied.
+backwards. 12.1.5's `StyleSimulations` is **drawn**, from the clause:
+emboldening strokes every outline at 2% of the em in the fill's own paint
+(Table 106's mode 2, round joins), widens every advance the font supplies —
+and no advance the markup states — by 2% of the em, and moves the glyphs up
+and right by 1% (S5.6); italicising shears the text matrix 20° along the
+advance, which serves a sideways run too once its axes are exchanged. A
+translucent emboldened run is drawn into a transparency group so the band
+where stroke and fill overlap is composited once.
 
 **Images** pass through. A PNG or JPEG resource part reaches the page as
 the bytes it is ([creation](creation.md), `ImageData::Compressed`); a page
@@ -128,18 +153,18 @@ the page synthesis.
 
 | What | Typed variant | Why | See |
 | --- | --- | --- | --- |
-| A `ContextColor` whose profile takes a channel count `/ICCBased` cannot state | `XpsElementDefect::ColourProfileChannels` | Table 66 permits **1, 3 or 4** components and ICC.1's `nCLR` family runs to fifteen; `/DeviceN` would need a tint transform only *evaluating* the profile could supply, which is the colour engine this build does not have. **Painted grey**, rather than in a colour picked by dropping components | [colour](colour.md) |
-| A `ContextColor` whose profile part is missing, is not a profile, or names a data space ICC.1 does not | `XpsElementDefect::ColourProfileUnresolved` | **Still painted**, in 8.6.5.5's default-`/Alternate` reading of the components — one channel grey, three RGB, four CMYK. Not an invention: that is what a reader does with an `/ICCBased` stream it cannot use, and the numbers are the file's | [colour](colour.md) |
-| A `ContextColor` in a **gradient stop** | `XpsElementDefect::BrushApproximated` | 8.7.4.5's shading names one colour space for the whole function, so a stop cannot carry one of its own; it takes the same alternate reading and the brush says it reached the page and not exactly | — |
+| A `ContextColor` whose `nCLR` profile has more than eight channels, or no table this build evaluates | `XpsElementDefect::ColourProfileChannels` | ECMA-388 15.2.5 names `2CLR` through `8CLR`, and a `/DeviceN`'s tint transform is the profile evaluated, which needs a table to evaluate. **Painted grey**, rather than in a colour picked by dropping components. **The `nCLR` profiles `/ICCBased` cannot state left this row** on 3 October 2026 — `2CLR`, and `5CLR` to `8CLR`; `3CLR` and `4CLR` were never on it, being `/ICCBased` under `/N 3` and `/N 4` (`a_three_or_four_channel_n_clr_profile_stays_icc_based`, *corrected on review* where this said two to eight): each is an 8.6.6.5 `/DeviceN` of one colorant a channel, named for the profile (`6CLR.1` …), its tint transform `tinker-pdf-color`'s transform run over a grid as fine as 16 384 points allow and written as a sampled function into `/DeviceRGB`, the components reaching `scn` unchanged; `tests/xps_rows/wpf-n-channel.xps` is in the conservation sweep (5 facts of 5) | [ICC](../design/icc.md) |
+| A `ContextColor` whose profile part is missing, is not a profile, or names a data space ICC.1 does not | `XpsElementDefect::ColourProfileUnresolved` | **Still painted**, in 8.6.5.5's default-`/Alternate` reading of the components — one channel grey, three RGB, four CMYK. Not an invention: that is what a reader does with an `/ICCBased` stream it cannot use, and the numbers are the file's | [ICC](../design/icc.md) |
+| A `ContextColor` **gradient stop** whose profile this build cannot evaluate | `XpsElementDefect::BrushApproximated` | 8.7.4.5's shading names one colour space for the whole function, so a stop cannot carry one of its own; it takes 8.6.5.5's alternate reading and the brush says it reached the page and not exactly. **A stop whose profile evaluates left this row** on 3 October 2026: it is converted to sRGB through `tinker-pdf-color`'s transform — 18.3.1.2's *"convert the color values to sRGB first"*, and this build's choice where no stop is sRGB, since no print ticket is read — and blended in the brush's mode; `tests/xps_rows/wpf-context-stops.xps` is in the conservation sweep (3 facts of 3) | — |
 | An image part no rule identifies | `XpsElementDefect::ImageFormatUnsupported` | a part neither the content type nor the magic bytes name is not one to guess at. **JPEG XR left this row**: 9.1.5.1's format now decodes and draws, so all four of 9.1.5's formats reach the page and the pre-emptive refusal loop that used to sit in front of both identification rules is gone | [filters](filters.md) |
 | A content type and magic bytes that disagree about two formats this build draws | `XpsElementDefect::ImageMediaTypeMismatch` | **the picture is drawn**, from the format its bytes name, because a decoder reads bytes — so this is a leniency and not a refusal, and what is lost is the producer's statement about the part. It rides the *success* side, on `Image::lenience`, because `Images::get` returns a `Result` whose `Err` is a refusal and a refusal here would lose a picture the package plainly holds; `State::tile` pushes it into `paint.rs`'s `defects`, where `warn` deduplicates it — set once per part, read once per use. Silence from one rule is not disagreement with it, so a part with no content type or no recognised signature owes nothing. Neither does one whose bytes then fail to decode: that is `ImageUnreadable`. Pinned by `a_content_type_that_disagrees_with_the_bytes_is_drawn_from_the_bytes_and_named` and, for the deduplication, `one_mis_declared_part_used_twice_is_named_once` | [rulings](../rulings.md) ruling 10 |
-| A wrapper around an `ImageSource` that is **not** `{ColorConvertedBitmap picture profile}` | `XpsElementDefect::ImageProfileUnsupported` | the references inside a wrapper cannot be told apart: one with three of them is not this wrapper, and reading its first two would draw a picture in a profile the file never paired it with. `{ColorConvertedBitmap …}` itself is **read** — the picture drawn, the profile embedded as the `/ICCBased` space its samples are values in | [colour](colour.md) |
-| `StyleSimulations` | `XpsElementDefect::GlyphsStyleSimulated` | reported; glyphs drawn unsimulated | — |
-| Gradient stops with differing alphas; a `ColorInterpolationMode` this build does not interpolate in | `XpsElementDefect::BrushApproximated` | the brush reached the page and not exactly — one constant alpha cannot express per-stop alphas — and the approximation is named | — |
+| A wrapper around an `ImageSource` that is **not** `{ColorConvertedBitmap picture profile}` | `XpsElementDefect::ImageProfileUnsupported` | the references inside a wrapper cannot be told apart: one with three of them is not this wrapper, and reading its first two would draw a picture in a profile the file never paired it with. `{ColorConvertedBitmap …}` itself is **read** — the picture drawn, the profile embedded as the `/ICCBased` space its samples are values in | [ICC](../design/icc.md) |
+| A `StyleSimulations` value 12.1.5 does not name | `XpsElementDefect::GlyphsStyleSimulated` | reported; the run is drawn as designed. **The four values 12.1.5 names left this row** on 3 October 2026, once ECMA-388's text was read: each is drawn as the clause states it, and `tests/xps_rows/wpf-style-simulations.xps` is in the conservation sweep (5 facts of 5) | [ROADMAP](../ROADMAP.md) |
+| A `ColorInterpolationMode` value 18.3.1.2 does not name | `XpsElementDefect::BrushApproximated` | blended as the default, in sRGB, and named. **`ScRgbLinearInterpolation` left this row** on 3 October 2026: each interval is the stops' linear light blended and re-encoded, written as a 256-sample type 0 function of the sRGB it comes to (within 0.0018 of the curve, under half an eight-bit step), with the alpha left linear, and `tests/xps_rows/wpf-colour-interpolation.xps` is in the conservation sweep (6 facts of 6). **Gradient stops with differing alphas left this row** on 3 October 2026: the alphas are a second `/DeviceGray` shading over the colours' own geometry, read back as a `/Luminosity` soft mask inside a transparency group of its own — so an element's `OpacityMask` composes with it rather than being replaced — and `tests/xps_rows/wpf-stop-alphas.xps` is in the conservation sweep (4 facts of 4) | — |
 | Unknown element | `XpsElementDefect::ElementUnknown` | drawn around, never silently skipped | — |
-| Broken fixed representation, interleaved parts, invalid or ambiguous part names, no fixed pages | `ArchiveRefusal::{UnreadablePackage, Interleaved, InvalidPartName, AmbiguousPartNames, NoFixedPages}` | a package that *is* an XPS and is broken is refused, not paged as a comic | [cbz](cbz.md) |
+| Broken fixed representation, interleaved pieces that do not assemble into a part, invalid or ambiguous part names, no fixed pages | `ArchiveRefusal::{UnreadablePackage, Interleaved, InvalidPartName, AmbiguousPartNames, NoFixedPages}` | a package that *is* an XPS and is broken is refused, not paged as a comic. **Interleaving itself left this row**: pieces that assemble are joined, and `wpf-image-and-text-pieces.xps` is in the conservation sweep | [cbz](cbz.md) |
 | Page-level defects | `XpsPageDefect::{SourceUnresolved, DocumentUnresolved, Unreadable, ContentUnreadable, SizeUnusable, MediaTypeMismatch, PageBoxUnusable}` | the page becomes a placeholder that keeps its number | — |
-| Signatures, print tickets, 3D, story fragments | not read | parts the spine does not reach are ignored | — |
+| Signatures, print tickets, 3D, story fragments | not read | parts the spine does not reach are ignored | [ROADMAP](../ROADMAP.md) CD-13 |
 
 ### Decoded but unadjudicated
 
@@ -227,7 +252,10 @@ on 14 September 2026** when that wrapper was read.
   this reader parses with, not the image decoders that give a picture its pixel
   count, not `geometry`'s reader of 11.2.3, and not 18.1's scale and flip,
   written out from the clause. **All thirteen packages conserve every fact** and
-  the census is recorded in `tests/xps/CONSERVATION.tsv`. Twelve did until 14
+  the census is recorded in `tests/xps/CONSERVATION.tsv`, with a fourteenth
+  row for `tests/xps_interleaved/wpf-image-and-text-pieces.xps` — one of the
+  thirteen cut into OPC pieces, whose census and rendered page must equal its
+  source's; the harness joins its pieces by its own reading of 7.2.4. Twelve did until 14
   September 2026: `gs-images.xps` stated two pictures this build refused at the
   element, and its divergence was pinned by a test of its own until the
   `{ColorConvertedBitmap}` wrapper was read. Bringing it in needed two fixes to

@@ -248,17 +248,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --manifest-path bindings/python/Cargo.toml
       - run: cargo check --manifest-path bindings/js/Cargo.toml
+      # The committed C header is what cbindgen makes of `src/` today. The
+      # crate's `tests/header.rs` holds the *names* in step without spawning
+      # anything; this holds the signatures, which a name check cannot see.
+      # The version is pinned so a cbindgen release cannot move the bytes.
+      - name: The committed C header is the generated one
+        run: |
+          cargo install cbindgen --locked --version 0.29.4
+          cbindgen --config crates/tinker-pdf-ffi/cbindgen.toml --crate tinker-pdf-ffi \
+            --output crates/tinker-pdf-ffi/include/tinker_pdf.h
+          git diff --exit-code crates/tinker-pdf-ffi/include/tinker_pdf.h
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0'
       - run: dotnet build bindings/dotnet/TinkerPdf.csproj
 
   bindings-parity:
-    # Gap 32: the four write surfaces must produce byte-identical output, which
+    # Gap 32: every binding surface must produce byte-identical output, which
     # is what makes ruling 11 ("a binding adds no logic of its own") a check
     # rather than a claim. `--require-all` is what turns a missing artefact
     # from a quiet skip into a failure here — the task prints SKIPPED with a
-    # reason either way, but a CI job that skipped three of four and went green
+    # reason either way, but a CI job that skipped six of seven and went green
     # would be exactly the silent pass it exists to prevent.
     runs-on: ubuntu-latest
     steps:
@@ -271,6 +281,20 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0'
+      # The three bindings over the C ABI. Java is pinned to 21, where
+      # java.lang.foreign is a preview API, because that is the release the
+      # binding was verified on; bindings-parity picks the flags from the
+      # JDK it finds, and from 22 there are none.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
       - run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core
       # The wheel, installed rather than imported from the source tree.
       - run: pip install maturin
@@ -294,12 +318,41 @@ jobs:
       - run: cargo build -p tinker-pdf-ffi --release
       - run: cargo run -p xtask -- nuget-stage
       - run: dotnet pack bindings/dotnet/TinkerPdf.csproj -c Release -o target/nuget
-      - name: All four surfaces, byte-identical
+      - name: Every surface, byte-identical
         run: |
           set -o pipefail
           cargo run -p xtask -- bindings-parity --require-all 2>&1 | tee parity.log
-          grep -q 'bindings-parity: all four surfaces wrote the same bytes' parity.log
+          grep -q 'bindings-parity: every surface agrees' parity.log
           grep -q 'SKIPPED 0 (none)' parity.log
+      # Each smoke renders blank without a face and inked with one, then calls
+      # every declaration the parity program does not, once. Each prints its
+      # RAN line only when every check passed, and the grep is what fails the
+      # step on a program that exited 0 having checked nothing.
+      - name: Go, vetted and smoked
+        working-directory: bindings/go
+        run: |
+          set -o pipefail
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go run ./cmd/smoke ../../testdata/simple-text.pdf \
+            /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf 2>&1 | tee go-smoke.log
+          grep -q 'GO-SMOKE: RAN' go-smoke.log
+      - name: Ruby, smoked
+        working-directory: bindings/ruby
+        run: |
+          set -o pipefail
+          ruby -Ilib test/smoke.rb ../../testdata/simple-text.pdf \
+            /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf 2>&1 | tee ruby-smoke.log
+          grep -q 'RUBY-SMOKE: RAN' ruby-smoke.log
+      - name: Java, compiled warning-free and smoked
+        run: |
+          set -o pipefail
+          javac --enable-preview --release 21 -Xlint:all,-preview -Werror -d target/java-smoke \
+            $(find bindings/java/src bindings/java/test -name '*.java')
+          java --enable-preview --enable-native-access=ALL-UNNAMED \
+            -Dtinkerpdf.library=target/release/libtinker_pdf_ffi.so -cp target/java-smoke \
+            Smoke testdata/simple-text.pdf /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf 2>&1 | tee java-smoke.log
+          grep -q 'JAVA-SMOKE: RAN' java-smoke.log
 
   wasm:
     # wasm32-unknown-unknown is a first-class target from day one. The ffi crate
@@ -444,6 +497,79 @@ jobs:
           fi
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' epub-corpus.log
           grep -q 'epub-corpus: RAN' epub-corpus.log
+
+  vp8-vectors:
+    # The lossy WebP decoder's only expected answers from outside this
+    # repository: the WebM project's test vectors, every key frame's I420
+    # planes against the MD5 published beside it. Ruling 13 keeps libwebp's
+    # own output out of every test, so without this job nothing in CI holds
+    # the VP8 planes to anything but this repository's reading of RFC 6386.
+    #
+    # The vectors carry no licence, so they cannot be committed. The fetch
+    # pins them twice -- to the repository's last commit and to the SHA-256
+    # of every file in `tests/vp8-vectors/SHA256SUMS` -- into the runner's
+    # temporary directory, not `target/`: rust-cache saves and restores
+    # `target/`, and what it restored there was a non-empty directory that
+    # was no longer the pinned checkout, which `fetch.sh` refuses (it never
+    # deletes). The first run on a branch passed and every cached run after
+    # it failed.
+    # And the job greps its own output, for epub-corpus's reason: a skip
+    # exits 0 and reads exactly like a pass.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch the VP8 test vectors that cannot be committed
+        run: sh crates/tinker-pdf-filters/tests/vp8-vectors/fetch.sh "$RUNNER_TEMP/vp8-test-vectors"
+      - name: Decode every key frame and compare its MD5
+        env:
+          TINKER_VP8_VECTORS: ${{ runner.temp }}/vp8-test-vectors
+          # Absence is a failure rather than a skip, and so is any set that
+          # is not the pinned commit's 61 files and 182 key frames.
+          TINKER_VP8_VECTORS_REQUIRED: "1"
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf-filters --lib vp8_test_vectors -- --nocapture \
+            2>&1 | tee vp8-vectors.log
+          if grep -q 'vp8-test-vectors: SKIPPED' vp8-vectors.log; then
+            echo "::error::the VP8 test vectors were not read, so the" \
+                 "lossy decoder's check SKIPPED rather than passed"
+            exit 1
+          fi
+          grep -Eq 'test result: ok\. 1 passed' vp8-vectors.log
+          grep -q 'vp8-test-vectors: RAN 182 key frames from 61 files, 0 failed' \
+            vp8-vectors.log
+
+  commonmark-spec:
+    # Tier 5's Markdown row: the reader held to CommonMark 0.31.2's own 652
+    # examples. `spec.txt` is CC-BY-SA 4.0, which `deny.toml` bars from the
+    # repository exactly as it bars `epub3-samples` above, so it is fetched
+    # into `target/` at a pinned tag, its SHA-256 checked by the script and by
+    # the test, read, and thrown away with `target/`. The banner grep is the
+    # same as the job above's and for the same reason: a skip exits 0.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch the specification that cannot be committed
+        run: sh crates/tinker-pdf/tests/commonmark/fetch-spec.sh
+      - name: Hold the reader to its examples
+        env:
+          TINKER_COMMONMARK_SPEC: ${{ github.workspace }}/target/commonmark-spec/spec.txt
+          TINKER_COMMONMARK_SPEC_REQUIRED: "1"
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --test commonmark_spec -- --nocapture \
+            2>&1 | tee commonmark.log
+          if grep -q 'commonmark-spec: SKIPPED' commonmark.log; then
+            echo "::error::the CommonMark examples were not read, so the" \
+                 "floor SKIPPED rather than held"
+            exit 1
+          fi
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' commonmark.log
+          grep -q 'commonmark-spec: RAN' commonmark.log
 
   licenses:
     runs-on: ubuntu-latest

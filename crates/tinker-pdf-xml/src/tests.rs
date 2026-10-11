@@ -671,78 +671,282 @@ fn the_near_misses_keep_their_own_names_in_the_relaxed_mode() {
     }
 }
 
-/// **Skipping the DTD does not declare what the DTD would have declared.**
-///
-/// This is the decision gap 31's milestone 1 settled against this plan's own
-/// working assumption: **zero** uses of a named character reference across all
-/// 270 content documents of both corpora, against 83 240 literal non-ASCII
-/// characters — so the ~250-entry table is not built, and an undeclared name is
-/// [`Error::UnknownEntity`] per XML 1.0 in **both** modes. A reader that
-/// acquired a table along with the relaxed mode would pass every other test in
-/// this file.
-#[test]
-fn an_undeclared_named_reference_is_refused_by_name_in_both_modes() {
-    for name in [
-        "nbsp", "mdash", "ndash", "hellip", "eacute", "aacute", "alpha", "beta", "larr", "rarr",
-        "bull", "dagger", "lsquo", "rsquo", "ldquo", "rdquo", "trade", "hearts", "euro", "middot",
-    ] {
-        let plain = format!("<p>&{name};</p>");
-        assert_eq!(
-            refusal_as(plain.as_bytes(), Doctype::Refuse),
-            Error::UnknownEntity,
-            "&{name};",
-        );
-        assert_eq!(
-            refusal_as(plain.as_bytes(), Doctype::SkipExternalId),
-            Error::UnknownEntity,
-            "&{name};",
-        );
-        // And with the declaration that declares it in front of it, skipped.
-        let declared = format!("{XHTML11_DOUBLE}<p>&{name};</p>");
-        assert_eq!(
-            refusal_as(declared.as_bytes(), Doctype::SkipExternalId),
-            Error::UnknownEntity,
-            "&{name}; was resolved by a DTD this reader discarded",
-        );
+/// The twenty names the entity census sampled across the Latin-1, special and
+/// symbol blocks, with the character XHTML 1.0's sets declare for each.
+const SAMPLED: [(&str, char); 20] = [
+    ("nbsp", '\u{A0}'),
+    ("mdash", '\u{2014}'),
+    ("ndash", '\u{2013}'),
+    ("hellip", '\u{2026}'),
+    ("eacute", '\u{E9}'),
+    ("aacute", '\u{E1}'),
+    ("alpha", '\u{3B1}'),
+    ("beta", '\u{3B2}'),
+    ("larr", '\u{2190}'),
+    ("rarr", '\u{2192}'),
+    ("bull", '\u{2022}'),
+    ("dagger", '\u{2020}'),
+    ("lsquo", '\u{2018}'),
+    ("rsquo", '\u{2019}'),
+    ("ldquo", '\u{201C}'),
+    ("rdquo", '\u{201D}'),
+    ("trade", '\u{2122}'),
+    ("hearts", '\u{2665}'),
+    ("euro", '\u{20AC}'),
+    ("middot", '\u{B7}'),
+];
+
+/// The text a document decoded to under a stated mode, or its refusal.
+fn text_as(bytes: &[u8], doctype: Doctype) -> Result<String, Error> {
+    let source = Source::new(bytes).expect("decodes");
+    let mut out = String::new();
+    for event in source.reader_with(&Limits::DEFAULT, doctype) {
+        match event? {
+            Event::Text(text) | Event::Cdata(text) => out.push_str(&text),
+            _ => {}
+        }
     }
-    // The five that are predefined are still the five, in the relaxed mode.
-    let document = format!("{HTML5}<p>&lt;&gt;&amp;&apos;&quot;</p>");
-    read_as(document.as_bytes(), Doctype::SkipExternalId, |events, _| {
-        let text: String = events
-            .iter()
-            .filter_map(|event| match event {
-                Event::Text(run) => Some(run.as_ref()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(text, "<>&'\"");
-    });
+    Ok(out)
 }
 
-/// No entity table and no expander exists in either mode, **asserted against
-/// this crate's own source** rather than against a reading of the diff.
+/// **A named reference resolves exactly when the document's declaration names
+/// an XHTML DTD, and is refused by name everywhere else.**
 ///
-/// Prose cannot enforce it and the compiler will not: a `static ENTITIES` beside
-/// `text::reference` would compile perfectly and every behavioural test above
-/// would keep passing, because a table that is present and unused is invisible
-/// from outside. So the code — comments stripped, since the comments discuss
-/// the very names the code may not hold — is read back out and checked.
+/// This test asserted the opposite until tier 3's XML row: gap 31's milestone
+/// 1 counted zero named references across 270 content documents and chose no
+/// table. The table arrived anyway, for the reason the census could not see —
+/// an XHTML 1.x document that writes `&nbsp;` is well formed under the DTD it
+/// names, and refusing it lost the chapter's text from the refusal onward.
+/// What did not change is everything around that one case, and each is
+/// asserted here: no declaration, the strict mode, `<!DOCTYPE html>`, and an
+/// identifier that is not XHTML's all still refuse `&nbsp;` as
+/// [`Error::UnknownEntity`].
 #[test]
-fn neither_mode_holds_an_entity_table_or_an_expander() {
+fn a_named_reference_resolves_under_an_xhtml_declaration_and_nowhere_else() {
+    let svg = "<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"svg.dtd\">";
+    for (name, want) in SAMPLED {
+        let plain = format!("<p>&{name};</p>");
+        assert_eq!(
+            text_as(plain.as_bytes(), Doctype::Refuse),
+            Err(Error::UnknownEntity),
+            "&{name}; with no declaration, strict mode",
+        );
+        assert_eq!(
+            text_as(plain.as_bytes(), Doctype::SkipExternalId),
+            Err(Error::UnknownEntity),
+            "&{name}; with no declaration, relaxed mode",
+        );
+        for other in [HTML5, svg] {
+            let document = format!("{other}<p>&{name};</p>");
+            assert_eq!(
+                text_as(document.as_bytes(), Doctype::SkipExternalId),
+                Err(Error::UnknownEntity),
+                "&{name}; under {other}, whose DTD declares no such name",
+            );
+        }
+        // Both quote styles the census found, and in an attribute value too.
+        for declaration in [XHTML11_DOUBLE, XHTML11_SINGLE] {
+            let document = format!("{declaration}<p title=\"&{name};\">a&{name};b</p>");
+            read_as(
+                document.as_bytes(),
+                Doctype::SkipExternalId,
+                |events, reader| {
+                    assert!(reader.resolves_xhtml_entities());
+                    let text: String = events
+                        .iter()
+                        .filter_map(|event| match event {
+                            Event::Text(run) => Some(run.as_ref()),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(text, format!("a{want}b"), "&{name}; in character data");
+                    let title = events
+                        .iter()
+                        .find_map(|event| match event {
+                            Event::Start(element) => element.attribute(None, "title"),
+                            _ => None,
+                        })
+                        .expect("the attribute");
+                    assert_eq!(title, want.to_string(), "&{name}; in an attribute value");
+                },
+            );
+        }
+        // The strict mode never reads the declaration, so it never gets as far.
+        let declared = format!("{XHTML11_DOUBLE}<p>&{name};</p>");
+        assert_eq!(
+            text_as(declared.as_bytes(), Doctype::Refuse),
+            Err(Error::DoctypeUnsupported),
+        );
+    }
+    // The five that are predefined are still the five, with and without it.
+    for declaration in [HTML5, XHTML11_DOUBLE] {
+        let document = format!("{declaration}<p>&lt;&gt;&amp;&apos;&quot;</p>");
+        assert_eq!(
+            text_as(document.as_bytes(), Doctype::SkipExternalId).as_deref(),
+            Ok("<>&'\""),
+        );
+    }
+}
+
+/// **Every one of the 253 names the vendored sets declare decodes to its code
+/// point, read out of the `.ent` files independently of the table.**
+///
+/// `build.rs` compiles the three files into `XHTML_ENTITIES`, and a test that
+/// iterated that array would be asking the table about itself. So this reads
+/// the same three files with a parser of its own — every `<!ENTITY name "&#N;"`
+/// outside a comment, `&#38;#N;` included — and drives each name through a
+/// real document under an XHTML 1.0 Strict declaration. A row the build
+/// dropped, a code point it mis-parsed, a sort the binary search disagrees
+/// with: each is a name here that does not decode to its number.
+///
+/// `&lang;` and `&rang;` are pinned by value as well, because they are the two
+/// where the HTML living standard now disagrees: XHTML 1.0 declares U+2329 and
+/// U+232A, HTML's table U+27E8 and U+27E9. This reader resolves what the DTD
+/// the document names declares, and the disagreement is recorded in
+/// `data/xhtml-entities` rather than resolved in HTML's favour.
+#[test]
+fn every_vendored_name_decodes_to_the_code_point_its_set_declares() {
+    const SETS: [(&str, &str, usize); 3] = [
+        (
+            "xhtml-lat1.ent",
+            include_str!("../data/xhtml-entities/xhtml-lat1.ent"),
+            96,
+        ),
+        (
+            "xhtml-symbol.ent",
+            include_str!("../data/xhtml-entities/xhtml-symbol.ent"),
+            124,
+        ),
+        (
+            "xhtml-special.ent",
+            include_str!("../data/xhtml-entities/xhtml-special.ent"),
+            33,
+        ),
+    ];
+    const STRICT: &str = "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \
+                          \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\">";
+
+    let mut all: Vec<(String, u32)> = Vec::new();
+    for (file, text, expected) in SETS {
+        // Comments out, since each file's header carries an `<!ENTITY %`
+        // example inside one.
+        let mut code = String::new();
+        let mut rest = text;
+        while let Some(open) = rest.find("<!--") {
+            code.push_str(&rest[..open]);
+            let close = rest[open..].find("-->").expect("a closed comment");
+            rest = &rest[open + close + 3..];
+        }
+        code.push_str(rest);
+
+        let mut found = 0usize;
+        for declaration in code.split("<!ENTITY").skip(1) {
+            let mut words = declaration.split_whitespace();
+            let name = words.next().expect("a name").to_string();
+            let value = words.next().expect("a value");
+            let digits: String = value
+                .trim_matches('"')
+                .trim_start_matches("&#38;")
+                .trim_start_matches("&#")
+                .trim_start_matches('#')
+                .trim_end_matches(';')
+                .to_string();
+            let scalar: u32 = digits.parse().unwrap_or_else(|_| panic!("{file}: {name}"));
+            all.push((name, scalar));
+            found += 1;
+        }
+        assert_eq!(found, expected, "{file}");
+    }
+    assert_eq!(all.len(), 253, "XHTML 1.0's three sets declare 253 names");
+
+    for (name, scalar) in &all {
+        let want = char::from_u32(*scalar).expect("a scalar value");
+        let document = format!("{STRICT}<p>&{name};</p>");
+        assert_eq!(
+            text_as(document.as_bytes(), Doctype::SkipExternalId),
+            Ok(want.to_string()),
+            "&{name}; is U+{scalar:04X} in the vendored set",
+        );
+        // And never longer than its own reference, which is the crate's
+        // standing invariant rather than a property of these particular names.
+        assert!(want.len_utf8() <= name.len() + 2, "&{name};");
+    }
+    assert_eq!(crate::text::xhtml_entity("lang"), Some('\u{2329}'));
+    assert_eq!(crate::text::xhtml_entity("rang"), Some('\u{232A}'));
+}
+
+/// **A lookup that misses is still refused by name**, under a declaration that
+/// makes the table live.
+///
+/// The near misses are the ones a table invites: a name from the HTML living
+/// standard's larger list that XHTML 1.0 never declared (`&nGt;` is two code
+/// points there, which is why that list is not this one), one of HTML's
+/// semicolon-less legacy upper-case spellings, a case fold of a real name, a
+/// prefix and an extension of one, and a name that is a real *parameter*
+/// entity of the DTD rather than a general one.
+#[test]
+fn a_name_the_vendored_sets_do_not_declare_is_refused_by_name() {
+    for miss in [
+        "nGt",
+        "NotEqualTilde",
+        "NBSP",
+        "Nbsp",
+        "COPY",
+        "nbs",
+        "nbspx",
+        "xhtml-lat1",
+        "",
+        "hellip2",
+        "euro ",
+    ] {
+        let document = format!("{XHTML11_DOUBLE}<p>&{miss};</p>");
+        assert_eq!(
+            text_as(document.as_bytes(), Doctype::SkipExternalId),
+            Err(Error::UnknownEntity),
+            "&{miss}; is not an XHTML 1.0 name",
+        );
+    }
+    assert_eq!(crate::text::xhtml_entity("nGt"), None);
+    assert_eq!(crate::text::xhtml_entity("NBSP"), None);
+    // The first and last names in byte order, which are where an off-by-one in
+    // a binary search shows.
+    assert_eq!(crate::text::xhtml_entity("AElig"), Some('\u{C6}'));
+    assert_eq!(crate::text::xhtml_entity("zwnj"), Some('\u{200C}'));
+    // And the public lookup the facade's Markdown reader resolves through is
+    // the same table, not a second one.
+    for name in ["AElig", "zwnj", "copy", "nGt", "NBSP", "HilbertSpace"] {
+        assert_eq!(crate::xhtml_entity(name), crate::text::xhtml_entity(name));
+    }
+    assert_eq!(crate::xhtml_entity("copy"), Some('\u{A9}'));
+}
+
+/// **One table, compiled from the vendored files, and nothing that expands.**
+///
+/// This test used to assert that no table existed at all. What it guards now is
+/// the shape of the one that does, **against this crate's own source** rather
+/// than a reading of the diff, because a hand-written `static` beside
+/// `text::reference` would compile perfectly and every behavioural test would
+/// keep passing:
+///
+/// - no entity name appears as a string literal in the code — the table is
+///   `build.rs`'s output, included once, and nothing is spelled by hand;
+/// - nothing shaped like a second table or an expander exists — no map type,
+///   no `phf`, no function that expands;
+/// - the one table's element type is `(&str, char)`, so a name maps to exactly
+///   one character and cannot map to text that would itself be parsed;
+/// - the five predefined names are still declared exactly once, in the one
+///   `match` that declares them.
+#[test]
+fn the_one_entity_table_is_the_vendored_one_and_cannot_expand() {
     const SOURCES: [(&str, &str); 4] = [
         ("lib.rs", include_str!("lib.rs")),
         ("limits.rs", include_str!("limits.rs")),
         ("scan.rs", include_str!("scan.rs")),
         ("text.rs", include_str!("text.rs")),
     ];
-    /// The names option 2 would have vendored, sampled across the Latin-1,
-    /// special and symbol blocks.
-    const NAMED: [&str; 20] = [
-        "nbsp", "mdash", "ndash", "hellip", "eacute", "aacute", "alpha", "beta", "larr", "rarr",
-        "bull", "dagger", "lsquo", "rsquo", "ldquo", "rdquo", "trade", "hearts", "euro", "middot",
-    ];
 
     let mut checked = 0usize;
+    let mut included = 0usize;
     for (file, source) in SOURCES {
         let code: String = source
             .lines()
@@ -750,25 +954,32 @@ fn neither_mode_holds_an_entity_table_or_an_expander() {
             .collect::<Vec<_>>()
             .join("\n");
         checked += code.lines().count();
-        for name in NAMED {
-            // As a string literal, which is the only shape a table could hold
-            // one in — `is_ascii_alphabetic` is not a declaration of `alpha`.
+        for (name, _) in SAMPLED {
             let quoted = format!("\"{name}\"");
             assert!(
                 !code.contains(&quoted),
-                "{quoted} appears in {file}'s code, so a table is being built",
+                "{quoted} appears in {file}'s code, so a table is being written by hand",
             );
         }
-        // Nothing shaped like one, either.
-        for shape in ["HashMap", "BTreeMap", "phf", "ENTITIES", "entity_table"] {
+        for shape in ["HashMap", "BTreeMap", "phf", "entity_table", "fn expand"] {
             assert!(
                 !code.contains(shape),
-                "`{shape}` appears in {file}, which is what a table looks like",
+                "`{shape}` appears in {file}, which is what a second table looks like",
             );
         }
+        included += code.matches("xhtml_entities.rs").count();
     }
-    // The filter did not strip the file: the five that *are* declared are still
-    // visible, each exactly once, in the one `match` that declares them.
+    assert_eq!(included, 1, "the generated table is included exactly once");
+
+    let table: &[(&str, char)] = &crate::text::XHTML_ENTITIES;
+    assert_eq!(table.len(), 253);
+    assert!(
+        table
+            .windows(2)
+            .all(|w| w[0].0.as_bytes() < w[1].0.as_bytes()),
+        "sorted and without duplicates, which the binary search relies on"
+    );
+
     let text = SOURCES[3].1;
     for name in ["\"amp\"", "\"lt\"", "\"gt\"", "\"apos\"", "\"quot\""] {
         assert_eq!(
@@ -1057,6 +1268,321 @@ fn an_encoding_this_reader_does_not_decode_is_refused_by_name() {
         refusal(b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><page/>"),
         Error::UnsupportedEncoding
     );
+}
+
+/// The text of every event, joined: what a declared encoding has to get right.
+fn declared_text(bytes: &[u8]) -> (String, Encoding, Vec<Warning>) {
+    let source = Source::with_declared_encoding(bytes).expect("decodes");
+    let mut reader = source.reader(&Limits::DEFAULT);
+    let mut text = String::new();
+    for event in &mut reader {
+        match event.expect("reads") {
+            Event::Text(t) => text.push_str(&t),
+            Event::Start(element) => {
+                for attribute in element.attributes() {
+                    text.push_str(attribute.value());
+                }
+            }
+            _ => {}
+        }
+    }
+    (text, source.encoding(), reader.warnings().to_vec())
+}
+
+/// **A declared single-byte encoding is read by its table** — the row FB2's
+/// `windows-1251` and `koi8-r` books needed — and the same document through
+/// [`Source::new`] is still refused, because a format such as XPS forbids it.
+#[test]
+fn a_declared_single_byte_encoding_is_read_by_its_table() {
+    use crate::encoding::SingleByte;
+    // *Привет*, by hand from each code chart, in text and in an attribute.
+    let windows: &[u8] = b"<?xml version=\"1.0\" encoding=\"windows-1251\"?>\
+        <p title=\"\xCF\xF0\xE8\xE2\xE5\xF2\">\xCF\xF0\xE8\xE2\xE5\xF2</p>";
+    let koi: &[u8] = b"<?xml version='1.0' encoding = 'KOI8-R' ?>\
+        <p title=\"\xF0\xD2\xC9\xD7\xC5\xD4\">\xF0\xD2\xC9\xD7\xC5\xD4</p>";
+    assert_eq!(
+        declared_text(windows),
+        (
+            "ПриветПривет".to_owned(),
+            Encoding::SingleByte(SingleByte::Windows1251),
+            Vec::new()
+        )
+    );
+    assert_eq!(
+        declared_text(koi),
+        (
+            "ПриветПривет".to_owned(),
+            Encoding::SingleByte(SingleByte::Koi8R),
+            Vec::new()
+        )
+    );
+    // `Source::new` refuses both, as it did before the constructor existed:
+    // the windows-1251 bytes are not UTF-8 at all.
+    assert_eq!(Source::new(windows).err(), Some(Error::NotUtf8));
+    assert_eq!(
+        refusal(b"<?xml version=\"1.0\" encoding=\"windows-1251\"?><p/>"),
+        Error::UnsupportedEncoding,
+        "ASCII bytes under a single-byte declaration, through Source::new"
+    );
+}
+
+#[test]
+fn a_declared_encoding_names_its_holes_and_yields_to_a_byte_order_mark() {
+    use crate::encoding::SingleByte;
+    // windows-1253 leaves 0xAA unmapped.
+    let (text, encoding, warnings) =
+        declared_text(b"<?xml version=\"1.0\" encoding=\"windows-1253\"?><p>a\xAAb</p>");
+    assert_eq!(text, "a\u{FFFD}b");
+    assert_eq!(encoding, Encoding::SingleByte(SingleByte::Windows1253));
+    assert_eq!(warnings, [Warning::UnmappedByte]);
+    // A UTF-8 signature is evidence and the declaration a claim.
+    let (text, encoding, warnings) =
+        declared_text("\u{FEFF}<?xml version=\"1.0\" encoding=\"koi8-r\"?><p>é</p>".as_bytes());
+    assert_eq!(
+        (text.as_str(), encoding),
+        ("é", Encoding::Utf8),
+        "the mark wins"
+    );
+    assert_eq!(warnings, [Warning::EncodingDeclarationIgnored]);
+    // A multi-byte encoding is not decoded by either constructor.
+    let shift_jis = b"<?xml version=\"1.0\" encoding=\"Shift_JIS\"?><p/>";
+    assert_eq!(
+        Source::with_declared_encoding(shift_jis)
+            .expect("ASCII decodes")
+            .reader(&Limits::DEFAULT)
+            .find_map(Result::err),
+        Some(Error::UnsupportedEncoding)
+    );
+    // `encodingX` is not the pseudo-attribute, and a declaration with none
+    // is UTF-8's.
+    assert_eq!(
+        Source::with_declared_encoding(b"<?xml version=\"1.0\"?><p>\xCF</p>").err(),
+        Some(Error::NotUtf8)
+    );
+}
+
+/// **The Encoding Standard's other labels for UTF-8 and UTF-16 name those
+/// encodings** under [`Source::with_declared_encoding`], which decodes both:
+/// `unicode-1-1-utf-8`, `UCS-2`, and `ISO-10646-UCS-2` — the name XML 1.0
+/// §4.3.3 itself recommends for UCS-2. Each agrees with bytes in the encoding
+/// it names and is overruled, with a warning, by bytes in another, as `UTF-16`
+/// is; [`Source::new`] refuses each as it always did, because a format such as
+/// XPS allows only `UTF-8` and `UTF-16` there.
+#[test]
+fn the_encoding_standards_other_labels_for_utf_8_and_utf_16_name_them() {
+    let declare =
+        |label: &str| format!("<?xml version=\"1.0\" encoding=\"{label}\"?><p>Привет</p>");
+    let wide = |label: &str, big_endian: bool| -> Vec<u8> {
+        let mark: [u8; 2] = if big_endian {
+            [0xFE, 0xFF]
+        } else {
+            [0xFF, 0xFE]
+        };
+        mark.into_iter()
+            .chain(declare(label).encode_utf16().flat_map(|unit| {
+                if big_endian {
+                    unit.to_be_bytes()
+                } else {
+                    unit.to_le_bytes()
+                }
+            }))
+            .collect()
+    };
+    let read = |text: &str, encoding: Encoding, warnings: &[Warning]| {
+        (text.to_owned(), encoding, warnings.to_vec())
+    };
+    let ignored = [Warning::EncodingDeclarationIgnored];
+
+    for label in [
+        "unicode-1-1-utf-8",
+        "UNICODE11UTF8",
+        "unicode20utf8",
+        "x-unicode20utf8",
+    ] {
+        let bytes = declare(label);
+        assert_eq!(
+            declared_text(bytes.as_bytes()),
+            read("Привет", Encoding::Utf8, &[]),
+            "{label}"
+        );
+        assert_eq!(
+            declared_text(&wide(label, false)),
+            read("Привет", Encoding::Utf16LittleEndian, &ignored),
+            "{label} behind a UTF-16 mark"
+        );
+        assert_eq!(
+            refusal(bytes.as_bytes()),
+            Error::UnsupportedEncoding,
+            "{label} through Source::new"
+        );
+    }
+    // UCS-2's names give no byte order, as `UTF-16` gives none, and Appendix
+    // F reads either order as ISO-10646-UCS-2: each agrees with both marks.
+    for label in ["ISO-10646-UCS-2", "UCS-2", "unicode", "csUnicode"] {
+        assert_eq!(
+            declared_text(&wide(label, false)),
+            read("Привет", Encoding::Utf16LittleEndian, &[]),
+            "{label}"
+        );
+        assert_eq!(
+            declared_text(&wide(label, true)),
+            read("Привет", Encoding::Utf16BigEndian, &[]),
+            "{label}, big-endian"
+        );
+        assert_eq!(
+            declared_text(declare(label).as_bytes()),
+            read("Привет", Encoding::Utf8, &ignored),
+            "{label} over UTF-8"
+        );
+        assert_eq!(
+            refusal(&wide(label, false)),
+            Error::UnsupportedEncoding,
+            "{label} through Source::new"
+        );
+    }
+    // Two labels do give an order, by the mark each is named after.
+    assert_eq!(
+        declared_text(&wide("unicodeFEFF", false)),
+        read("Привет", Encoding::Utf16LittleEndian, &[])
+    );
+    assert_eq!(
+        declared_text(&wide("unicodeFEFF", true)),
+        read("Привет", Encoding::Utf16BigEndian, &ignored)
+    );
+    assert_eq!(
+        declared_text(&wide("unicodeFFFE", true)),
+        read("Привет", Encoding::Utf16BigEndian, &[])
+    );
+    assert_eq!(
+        declared_text(&wide("unicodeFFFE", false)),
+        read("Привет", Encoding::Utf16LittleEndian, &ignored)
+    );
+}
+
+/// The text a document reads to through one constructor or the other, or the
+/// first refusal — the constructor's or the reader's — so the two constructors
+/// can be compared on one input.
+fn read_through(bytes: &[u8], declared: bool) -> Result<(String, Encoding, Vec<Warning>), Error> {
+    let source = if declared {
+        Source::with_declared_encoding(bytes)?
+    } else {
+        Source::new(bytes)?
+    };
+    let mut reader = source.reader(&Limits::DEFAULT);
+    let mut text = String::new();
+    for event in &mut reader {
+        if let Event::Text(t) = event? {
+            text.push_str(&t);
+        }
+    }
+    Ok((text, source.encoding(), reader.warnings().to_vec()))
+}
+
+/// **An `encoding` that is not an `EncName` is a malformed declaration, from
+/// both constructors.** XML 1.0 [81] is `[A-Za-z] ([A-Za-z0-9._] | '-')*`. The
+/// Encoding Standard's *get an encoding* trims white space first, and its
+/// table holds labels such as `iso_8859-1:1987` and `866`, so a declared
+/// source that looked every label up read ` utf-8`, `windows-1251 ` and
+/// `\tutf-16` with no warning where [`Source::new`] refused them — and read
+/// `\tutf-16` as strict UTF-16LE, which a big-endian file then "disagreed"
+/// with. The standard's labels that are `EncName`s are still read.
+#[test]
+fn a_declared_encoding_that_is_not_an_enc_name_is_malformed_from_both_constructors() {
+    use crate::encoding::SingleByte;
+    let declare = |label: &str| format!("<?xml version=\"1.0\" encoding=\"{label}\"?><p>x</p>");
+    let wide = |label: &str, big_endian: bool| -> Vec<u8> {
+        let mark: [u8; 2] = if big_endian {
+            [0xFE, 0xFF]
+        } else {
+            [0xFF, 0xFE]
+        };
+        mark.into_iter()
+            .chain(declare(label).encode_utf16().flat_map(|unit| {
+                if big_endian {
+                    unit.to_be_bytes()
+                } else {
+                    unit.to_le_bytes()
+                }
+            }))
+            .collect()
+    };
+    for label in [
+        " utf-8",
+        "utf-8 ",
+        "\tUTF-8",
+        "utf-8\r\n",
+        " unicode-1-1-utf-8",
+        " windows-1251",
+        "koi8-r\n",
+        " ucs-2",
+        "\tutf-16",
+        "iso_8859-1:1987",
+        "iso_8859-2:1987",
+        "866",
+        "utf 8",
+        "-utf-8",
+        "_utf-8",
+        "utf&#45;8",
+        "",
+    ] {
+        let mut inputs = vec![(declare(label).into_bytes(), "ASCII")];
+        inputs.push((wide(label, false), "behind a UTF-16LE mark"));
+        inputs.push((wide(label, true), "behind a UTF-16BE mark"));
+        for (bytes, how) in &inputs {
+            for declared in [true, false] {
+                assert_eq!(
+                    read_through(bytes, declared),
+                    Err(Error::MalformedDeclaration),
+                    "{label:?} {how}, declared: {declared}"
+                );
+            }
+        }
+    }
+    // A single-byte label is not read by its table either: these bytes are
+    // windows-1251's П, and not UTF-8, which is what both constructors say.
+    let cyrillic = b"<?xml version=\"1.0\" encoding=\" windows-1251\"?><p>\xCF</p>";
+    for declared in [true, false] {
+        assert_eq!(
+            read_through(cyrillic, declared),
+            Err(Error::NotUtf8),
+            "declared: {declared}"
+        );
+    }
+
+    // The standard's labels that are `EncName`s — `_` and `.` among their
+    // characters — are read as they were, and refused by `Source::new` as an
+    // encoding it does not decode, as they were.
+    for (label, byte, text, single) in [
+        ("ansi_x3.4-1968", 0xE9, "é", SingleByte::Windows1252),
+        ("ISO_8859-1", 0xE9, "é", SingleByte::Windows1252),
+        ("iso_8859-2", 0xA1, "Ą", SingleByte::Iso8859_2),
+        ("cp866", 0x80, "А", SingleByte::Ibm866),
+    ] {
+        let mut bytes = format!("<?xml version=\"1.0\" encoding=\"{label}\"?><p>").into_bytes();
+        bytes.push(byte);
+        bytes.extend_from_slice(b"</p>");
+        assert_eq!(
+            read_through(&bytes, true),
+            Ok((text.to_owned(), Encoding::SingleByte(single), Vec::new())),
+            "{label}"
+        );
+        assert_eq!(
+            read_through(declare(label).as_bytes(), false),
+            Err(Error::UnsupportedEncoding),
+            "{label} through Source::new"
+        );
+    }
+    for (bytes, encoding) in [
+        (declare("unicode-1-1-utf-8").into_bytes(), Encoding::Utf8),
+        (wide("utf-16", true), Encoding::Utf16BigEndian),
+        (wide("csUnicode", true), Encoding::Utf16BigEndian),
+        (wide("ISO-10646-UCS-2", false), Encoding::Utf16LittleEndian),
+    ] {
+        assert_eq!(
+            read_through(&bytes, true),
+            Ok(("x".to_owned(), encoding, Vec::new()))
+        );
+    }
 }
 
 #[test]
@@ -1751,11 +2277,16 @@ fn the_token_cap_is_a_total_and_not_a_per_element_cap() {
 /// would mean the leaf had learned what it is for.
 #[test]
 fn no_public_item_names_a_pdf_or_an_xps_concept() {
-    const SOURCES: [&str; 4] = [
+    const SOURCES: [&str; 9] = [
         include_str!("lib.rs"),
         include_str!("limits.rs"),
         include_str!("scan.rs"),
         include_str!("text.rs"),
+        include_str!("encoding.rs"),
+        include_str!("html/mod.rs"),
+        include_str!("html/tokenizer.rs"),
+        include_str!("html/tree.rs"),
+        include_str!("html/entities.rs"),
     ];
     const FORBIDDEN: [&str; 12] = [
         "Pdf",
@@ -1893,4 +2424,32 @@ fn a_second_byte_order_mark_is_text_and_is_refused_where_it_stands() {
     // And it is not text the prolog admits.
     let mut reader = source.reader(&Limits::DEFAULT);
     assert_eq!(reader.next(), Some(Err(Error::TextBeforeRoot)));
+}
+
+/// The `xml` fuzz target's named-entity seed reaches the table, replayed on
+/// stable, so the seed that exists to drive `text::xhtml_entity` is known to
+/// get there rather than to stop at the declaration.
+#[test]
+fn the_named_entity_fuzz_seed_reaches_the_table() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fuzz/corpus/xml/doctype-xhtml1-named-entities");
+    let Ok(seed) = std::fs::read(&path) else {
+        println!("xml-seed: SKIPPED (no fuzz/corpus/xml)");
+        return;
+    };
+    // The target's first byte is its knobs; the rest is the document.
+    let body = seed.get(1..).expect("a seed with a body");
+    read_as(body, Doctype::SkipExternalId, |events, reader| {
+        assert!(reader.resolves_xhtml_entities());
+        let text: String = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Text(run) => Some(run.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.starts_with("caf\u{E9}\u{A0}\u{2014} \u{2026}\u{2329}x\u{232A}"));
+        assert!(text.ends_with("\u{C6}\u{200C}\u{20AC}\u{3B1}\u{3A9}\u{3D1}\u{2660}"));
+    });
+    println!("RAN xml-seed: the named-entity seed reached the table");
 }

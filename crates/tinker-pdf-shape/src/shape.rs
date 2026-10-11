@@ -258,6 +258,10 @@ pub struct Shaper<'a> {
     /// caller who said exactly what they wanted, and is taken at their word.
     gsub_features: Option<&'a [Tag]>,
     gpos_features: Option<&'a [Tag]>,
+    /// Features turned on or off **over** the plan, by a caller who wants
+    /// the default plan with changes rather than a plan of their own. See
+    /// [`Shaper::with_settings`].
+    settings: &'a [(Tag, u32)],
 }
 
 impl<'a> Shaper<'a> {
@@ -271,6 +275,7 @@ impl<'a> Shaper<'a> {
             limits: None,
             gsub_features: None,
             gpos_features: None,
+            settings: &[],
         }
     }
 
@@ -292,6 +297,99 @@ impl<'a> Shaper<'a> {
         self.gsub_features = Some(gsub);
         self.gpos_features = Some(gpos);
         self
+    }
+
+    /// Features switched on or off **over** whatever plan the run gets:
+    /// `css-fonts-4` §6.12's `font-feature-settings`, and §6.4's
+    /// `font-kerning: none` as `kern` off.
+    ///
+    /// # Why this is not [`Shaper::with_features`]
+    ///
+    /// That one *replaces* the plan, and a replaced plan is one stage: a
+    /// joining run that asked for `smcp` would lose the staging of
+    /// [`JOINING_GSUB_STAGES`] and with it the forms its letters take. A
+    /// setting is a change to the plan: a feature set to `0` is taken out of
+    /// every stage it is in and out of the positioning list, and one set to
+    /// anything else that the plan does not already apply is added to the
+    /// plan's **last** substitution stage and to the positioning list — both,
+    /// because a tag says nothing about which table its lookups are in, and a
+    /// table that does not declare the feature finds no lookups for it. The
+    /// stages keep their number and their order, so a staged plan's
+    /// reordering pause still falls where it does.
+    ///
+    /// Where one tag is set twice the last setting wins, which is §6.12's
+    /// rule for a list that repeats a feature. The value is an on or off and
+    /// nothing more: an alternate index above one is a parameter this crate's
+    /// alternate substitution does not carry (it takes the first, see
+    /// `gsub.rs`), so a caller that needs one must refuse it rather than pass
+    /// it here.
+    #[must_use]
+    pub const fn with_settings(mut self, settings: &'a [(Tag, u32)]) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// The effective setting of one tag, the last one written.
+    fn setting(&self, tag: Tag) -> Option<u32> {
+        self.settings
+            .iter()
+            .rev()
+            .find(|(t, _)| *t == tag)
+            .map(|(_, value)| *value)
+    }
+
+    /// The tags [`Shaper::with_settings`] turns on, each once, in the order
+    /// they were first written.
+    fn turned_on(&self) -> Vec<Tag> {
+        let mut on: Vec<Tag> = Vec::new();
+        for (tag, _) in self.settings {
+            if self.setting(*tag).is_some_and(|value| value > 0) && !on.contains(tag) {
+                on.push(*tag);
+            }
+        }
+        on
+    }
+
+    /// The plan's substitution stages with the settings applied.
+    fn gsub_plan(&self, stages: Vec<&[Tag]>) -> Vec<Vec<Tag>> {
+        let mut out: Vec<Vec<Tag>> = stages
+            .iter()
+            .map(|stage| {
+                stage
+                    .iter()
+                    .copied()
+                    .filter(|tag| self.setting(*tag) != Some(0))
+                    .collect()
+            })
+            .collect();
+        let planned: Vec<Tag> = stages
+            .iter()
+            .flat_map(|stage| stage.iter().copied())
+            .collect();
+        if let Some(last) = out.last_mut() {
+            for tag in self.turned_on() {
+                if !planned.contains(&tag) {
+                    last.push(tag);
+                }
+            }
+        }
+        out
+    }
+
+    /// The positioning features with the settings applied.
+    fn gpos_plan(&self) -> Vec<Tag> {
+        let base = self.gpos_features.unwrap_or(DEFAULT_GPOS_FEATURES);
+        let mut out: Vec<Tag> = base
+            .iter()
+            .copied()
+            .filter(|tag| self.setting(*tag) != Some(0))
+            .collect();
+        for tag in self.turned_on() {
+            if !out.contains(&tag) {
+                out.push(tag);
+            }
+        }
+        out
     }
 
     /// The OpenType language system to ask for, such as `TRK ` for Turkish.
@@ -366,7 +464,8 @@ impl<'a> Shaper<'a> {
         let mut warnings = Vec::new();
         if let Some(gsub) = self.layout.gsub() {
             let script = self.script_tag(gsub, run.script);
-            for (index, stage) in plan.gsub_stages(self.gsub_features).iter().enumerate() {
+            let stages = self.gsub_plan(plan.gsub_stages(self.gsub_features));
+            for (index, stage) in stages.iter().enumerate() {
                 // The pair `rphf` was offered has to still be a pair. See
                 // [`withdraw_broken_repha_pairs`].
                 if plan == Plan::Universal && index == USE_RPHF_STAGE {
@@ -420,10 +519,9 @@ impl<'a> Shaper<'a> {
         if let Some(gpos) = self.layout.gpos() {
             let script = self.script_tag(gpos, run.script);
             let wanted: Vec<(Tag, u32)> = self
-                .gpos_features
-                .unwrap_or(DEFAULT_GPOS_FEATURES)
-                .iter()
-                .map(|tag| (*tag, Buffer::GLOBAL))
+                .gpos_plan()
+                .into_iter()
+                .map(|tag| (tag, Buffer::GLOBAL))
                 .collect();
             let lookups = gpos.lookups_for_masked(script, self.language, &wanted);
             warnings.extend(self.layout.position_masked(

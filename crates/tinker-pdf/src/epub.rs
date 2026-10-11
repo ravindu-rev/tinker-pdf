@@ -93,8 +93,11 @@ pub mod package;
 pub mod paint;
 pub mod read;
 pub mod svg;
+mod tagging;
 pub mod typeface;
 pub mod xhtml;
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use tinker_pdf_cos::build::{ImageData, OutlineEntry, Target};
 use tinker_pdf_cos::dest::is_writable_uri;
@@ -118,7 +121,7 @@ use crate::cbz::{
 };
 use ocf::resolve_reference;
 use package::{FallbackDefect, Package, RenditionLayout};
-use paint::{draw_page, page_target, run_rect, BookMetrics, Fonts, Frame};
+use paint::{draw_page_tagged, page_target, run_rect, BookMetrics, Fonts, Frame};
 use typeface::{FaceDefect, FaceSet};
 
 /// Every `@font-face` that did not become a face, deduplicated by family and
@@ -488,6 +491,11 @@ pub enum BookOptionDefect {
     /// The base font size is not finite, is not positive, or is larger than the
     /// page it would be set on.
     FontSize,
+    /// The margin a creation call asked for is not finite, is negative, or
+    /// leaves the page no content area (tier 5's formats row,
+    /// [`crate::FromHtml`]). A book's margin is [`PAGE_MARGIN`] and is never
+    /// the caller's, so no book reports this.
+    Margin,
 }
 
 impl BookLayout {
@@ -844,6 +852,8 @@ pub fn synthesise(
     let initial = initial_style(layout.font_size);
     let context = read::Context {
         ua: &ua,
+        // A book's sheets are all its own, named by its content documents.
+        author: &[],
         limits,
         css_limits: &limits.css,
         media: &media,
@@ -856,44 +866,16 @@ pub fn synthesise(
     // ---- pass 1: read and cascade ------------------------------------------
     let mut census = read::Census::default();
     let mut chapters: Vec<Chapter> = Vec::with_capacity(package.spine().len());
-    let mut layout_warnings: Vec<(LayoutWarning, usize)> = Vec::new();
     let mut declared: Vec<FontFace> = Vec::new();
+    // Each SVG chapter whose text needs a box, and its bytes, for
+    // `measure_svg` once the faces are loaded.
+    let mut unmeasured: Vec<(usize, Vec<u8>)> = Vec::new();
     for itemref in package.spine() {
         let (name, path, mut defect, is_svg) = plan_page(book, package, &itemref.idref);
         let fixed = itemref.layout(book_layout) == RenditionLayout::PrePaginated;
         let mut reading = None;
         let mut scene = None;
-        if defect.is_none() && is_svg {
-            // §6.2's other content-document language. The viewport handed in is
-            // the caller's page **in CSS pixels**, because that is the unit an
-            // SVG's own lengths are in — a root that says `width="100%"` is
-            // asking for the box it was placed in, and this is that box.
-            let source = path.clone().unwrap_or_default();
-            let bytes = book
-                .index_of(&source)
-                .and_then(|index| book.read(index).ok().map(<[u8]>::to_vec));
-            match bytes {
-                None => defect = Some(SpineDefect::ResourceMissing),
-                Some(bytes) => {
-                    let box_ = (
-                        layout.page.0 / read::PX_TO_PT,
-                        layout.page.1 / read::PX_TO_PT,
-                    );
-                    match tinker_pdf_svg::read(&bytes, Some(box_), &limits.svg) {
-                        Err(refusal) => defect = Some(SpineDefect::SvgUnreadable(refusal)),
-                        Ok(read) => {
-                            for warning in &read.warnings {
-                                warnings.push(ArchiveWarning::Svg {
-                                    item: name.clone(),
-                                    warning: warning.clone(),
-                                });
-                            }
-                            scene = Some(read);
-                        }
-                    }
-                }
-            }
-        } else if defect.is_none() {
+        if defect.is_none() {
             let source = path.clone().unwrap_or_default();
             let bytes = book
                 .index_of(&source)
@@ -904,80 +886,53 @@ pub fn synthesise(
                 // *inflate* is a different failure from one that is not there,
                 // and reporting it as the second would be a lie about the book.
                 None => defect = Some(SpineDefect::ResourceMissing),
+                Some(bytes) if is_svg => {
+                    match read_svg(
+                        book,
+                        &source,
+                        &bytes,
+                        layout.page,
+                        &name,
+                        limits,
+                        &mut declared,
+                        &mut warnings,
+                    ) {
+                        Ok(read) => {
+                            if svg::unmeasured(&read) {
+                                unmeasured.push((chapters.len(), bytes));
+                            }
+                            scene = Some(read);
+                        }
+                        Err(why) => defect = Some(why),
+                    }
+                }
                 Some(bytes) => {
                     let context = read::Context {
                         pre_paginated: fixed,
                         ..context
                     };
-                    match read::read_document(book, &source, &bytes, &context, &mut css_budget) {
-                        Err(_) => defect = Some(SpineDefect::NotStyled),
-                        Ok(document) => {
-                            for markup in &document.dom.defects {
-                                warnings.push(ArchiveWarning::Markup {
-                                    item: name.clone(),
-                                    defect: *markup,
-                                });
-                            }
-                            census.absorb(&document.census);
-                            // Deduplicated across the spine, because a book's
-                            // chapters share one stylesheet: thirteen chapters
-                            // that all `<link>` the same sheet declare the same
-                            // face thirteen times, and a build that loaded each
-                            // one would report every failure thirteen times.
-                            //
-                            // **This catches the linked sheet and not the
-                            // `<style>` element.** A linked sheet's faces carry
-                            // that sheet's own address, so thirteen chapters
-                            // produce thirteen equal rules; a `<style>`
-                            // element's carry the content document's, which is
-                            // a different string per chapter, so they are not
-                            // equal here and cannot be. `typeface::load`
-                            // deduplicates those against the **resolved
-                            // container path**, which is the only place the two
-                            // are the same thing.
-                            for face in document.font_faces.iter() {
-                                if !declared.contains(face) {
-                                    declared.push(face.clone());
-                                }
-                            }
-                            reading = Some(document);
-                        }
-                    }
-                }
-            }
-        }
-        // §8.2.2.6's viewport decides a fixed-layout chapter's page box, and a
-        // pre-paginated item that states none is named rather than silently
-        // laid into the caller's.
-        let mut frame = reflowable_frame;
-        // An SVG **is** its own viewport (§7.2), so a pre-paginated one never
-        // reaches `FixedLayoutWithoutViewport`: there is no `<meta>` to look
-        // for and nothing was left unsaid. Its page is the size its root
-        // states, in points.
-        if let Some(read) = &scene {
-            if fixed {
-                frame = Frame {
-                    page: (read.size.0 * read::PX_TO_PT, read.size.1 * read::PX_TO_PT),
-                    margin: 0.0,
-                };
-            }
-        } else if fixed {
-            match reading.as_ref().and_then(|read| read.viewport) {
-                Some(view) => {
-                    frame = Frame {
-                        page: (view.width * read::PX_TO_PT, view.height * read::PX_TO_PT),
-                        margin: 0.0,
+                    let dom = read::markup(&bytes, &limits.xml);
+                    let mut pass = PassOne {
+                        css_budget: &mut css_budget,
+                        census: &mut census,
+                        declared: &mut declared,
+                        warnings: &mut warnings,
                     };
-                }
-                None => {
-                    if defect.is_none() {
-                        warnings.push(ArchiveWarning::FixedLayoutWithoutViewport {
-                            item: name.clone(),
-                        });
+                    match read_markup(book, &source, &name, dom, &context, &mut pass) {
+                        Ok(document) => reading = Some(document),
+                        Err(why) => defect = Some(why),
                     }
                 }
             }
         }
+        let frame = chapter_frame(
+            reflowable_frame,
+            fixed,
+            scene.as_ref(),
+            reading.as_ref(),
+            defect.is_none().then_some(name.as_str()),
+            &mut warnings,
+        );
         chapters.push(Chapter {
             frame,
             fixed,
@@ -1014,11 +969,613 @@ pub fn synthesise(
             rules,
         });
     }
-
-    // ---- pass 3: lay every chapter out -------------------------------------
+    // An SVG's text, measured with the faces it is set in, where a
+    // bounding-box effect on it needed its box.
     let metrics = BookMetrics::with(&faces);
+    for (at, bytes) in unmeasured {
+        let Some(chapter) = chapters.get_mut(at) else {
+            continue;
+        };
+        if let (Some(scene), Some(path)) = (chapter.svg.as_mut(), chapter.path.as_deref()) {
+            measure_svg(
+                book,
+                path,
+                &bytes,
+                layout.page,
+                &chapter.name,
+                limits,
+                &metrics,
+                scene,
+                &mut warnings,
+            );
+        }
+    }
+
+    // ---- passes 3 and 4, and the pages ------------------------------------
+    let mut builder = DocumentBuilder::new();
+    // §5.5.3.1's metadata, reaching the document it describes. Without this the
+    // three required elements would be parsed and thrown away, which is exactly
+    // the failure gap 31 is organised around — one level up from a CSS property.
+    if let Some(title) = package.title() {
+        builder.set_info(b"Title", title);
+    }
+    if let Some(creator) = package.creator() {
+        builder.set_info(b"Author", creator);
+    }
+    // §5.5.3.1's first `dc:language`, as the catalog's `/Lang` (14.9.2): the
+    // language of everything no element states one for. A value that is not
+    // shaped like a language tag is not written, and is named.
+    let language = match package.language() {
+        Some(language) if tinker_pdf_cos::is_language_tag(language) => {
+            builder.set_language(language);
+            Some(language)
+        }
+        Some(_) => {
+            warnings.push(ArchiveWarning::LanguageTagIgnored {
+                item: package.path().to_owned(),
+                tags: 1,
+            });
+            None
+        }
+        None => None,
+    };
+    let (pages, total_pages) = write_chapters(
+        book,
+        &mut builder,
+        &mut chapters,
+        &faces,
+        &census,
+        &options,
+        layout.page,
+        limits,
+        &mut layout_budget,
+        &mut warnings,
+        language,
+    );
+
+    let entries = outline(book, package, &chapters, limits, total_pages);
+    if !entries.is_empty() && !builder.set_outline(entries) {
+        warnings.push(ArchiveWarning::OutlineUnwritable);
+    }
+
+    // Taken after every read, because reading is what most of them come from.
+    for warning in book.archive().warnings() {
+        warnings.push(ArchiveWarning::Zip(*warning));
+    }
+
+    let pdf = builder.finish();
+    if pdf.len() > limits.max_synthesised {
+        return Err(ArchiveRefusal::TooLarge);
+    }
+    let synthesised_bytes = pdf.len();
+    // Taken after the last charge and before anything is returned, so the
+    // figures are what the whole book cost rather than what one pass did.
+    let cost = BookCost {
+        manifest_items: package.items().len(),
+        spine_items: package.spine().len(),
+        css_tokens: css_budget.tokens(),
+        css_rules: css_budget.rules(),
+        css_declarations: css_budget.declarations(),
+        selector_matches: css_budget.matches(),
+        boxes: layout_budget.boxes(),
+        break_work: layout_budget.breaks(),
+        layout_work: layout_budget.layout(),
+        pages: total_pages,
+    };
+    Ok((
+        pdf,
+        ArchiveReport::book(warnings, pages, synthesised_bytes, *layout, cost),
+    ))
+}
+
+/// What pass 1 accumulates across a spine, borrowed by each chapter's reading.
+///
+/// A struct because the four travel together everywhere a content document is
+/// read: one CSS budget and one census for the whole book, the `@font-face`
+/// rules every chapter declared, and the warnings — and a loose document is a
+/// book whose spine is one item long, so it fills the same four.
+struct PassOne<'a> {
+    css_budget: &'a mut CssBudget,
+    census: &'a mut read::Census,
+    declared: &'a mut Vec<FontFace>,
+    warnings: &'a mut Vec<ArchiveWarning>,
+}
+
+/// §6.2's other content-document language, read into a scene, or the reason
+/// its page is a placeholder.
+///
+/// The viewport handed in is the caller's page **in CSS pixels**, because that
+/// is the unit an SVG's own lengths are in — a root that says `width="100%"`
+/// is asking for the box it was placed in, and this is that box.
+///
+/// `path` is the document's place in `resources`: an `@import` in one of its
+/// `<style>` elements is fetched against it, and each `@font-face` it declares
+/// joins `declared` with it as the base, for `typeface::load` to load beside
+/// the book's own — which is how a run naming that family is set in it.
+#[allow(clippy::too_many_arguments)]
+fn read_svg<R: read::Resources + ?Sized>(
+    resources: &mut R,
+    path: &str,
+    bytes: &[u8],
+    page: (f64, f64),
+    name: &str,
+    limits: &Limits,
+    declared: &mut Vec<FontFace>,
+    warnings: &mut Vec<ArchiveWarning>,
+) -> Result<tinker_pdf_svg::Scene, SpineDefect> {
+    let box_ = (page.0 / read::PX_TO_PT, page.1 / read::PX_TO_PT);
+    let imports = SvgImports {
+        imports: read::Imports::new(resources, *limits),
+        path,
+    };
+    let read = tinker_pdf_svg::read_with(
+        bytes,
+        Some(box_),
+        &limits.svg,
+        &tinker_pdf_svg::Context::new(&imports),
+    )
+    .map_err(SpineDefect::SvgUnreadable)?;
+    for warning in &read.warnings {
+        warnings.push(ArchiveWarning::Svg {
+            item: name.to_owned(),
+            warning: warning.clone(),
+        });
+    }
+    // `read_markup`'s two rules: a `<style>` element's face takes the
+    // document's address as its base, and an equal rule is declared once.
+    for face in &read.font_faces {
+        let mut face = face.clone();
+        if face.base.is_none() {
+            face.base = Some(path.to_owned());
+        }
+        if !declared.contains(&face) {
+            declared.push(face);
+        }
+    }
+    Ok(read)
+}
+
+/// An SVG whose text needed a box, read a second time with the faces its
+/// runs are set in measuring them.
+///
+/// Pass 1 reads an SVG before any face is loaded — its own `@font-face`
+/// rules are among what pass 2 loads — so a `mask`, a `clip-path` or a paint
+/// in `objectBoundingBox` units on its text has no measurement then, and the
+/// leaf names it `TextBoxUnmeasured` ([`svg::unmeasured`]). Here, with the
+/// metrics the page will place the runs by, the document is read again
+/// through [`tinker_pdf_svg::Context::with_measure`] and that scene replaces
+/// the first. Only a scene that named it is read twice, so every other is
+/// exactly what pass 1 made; and a second read the leaf refuses — a measured
+/// box can walk a tile the first read did not, past a cap — keeps the first,
+/// which is a picture (ruling 2).
+///
+/// The report follows the scene: a warning the first read raised and the
+/// second did not leaves the item's warnings, and one the second raised that
+/// the first did not joins them, after the item's last.
+#[allow(clippy::too_many_arguments)]
+fn measure_svg<R: read::Resources + ?Sized>(
+    resources: &mut R,
+    path: &str,
+    bytes: &[u8],
+    page: (f64, f64),
+    name: &str,
+    limits: &Limits,
+    metrics: &BookMetrics<'_>,
+    scene: &mut tinker_pdf_svg::Scene,
+    warnings: &mut Vec<ArchiveWarning>,
+) {
+    let box_ = (page.0 / read::PX_TO_PT, page.1 / read::PX_TO_PT);
+    let imports = SvgImports {
+        imports: read::Imports::new(resources, *limits),
+        path,
+    };
+    let Ok(measured) = tinker_pdf_svg::read_with(
+        bytes,
+        Some(box_),
+        &limits.svg,
+        &tinker_pdf_svg::Context::new(&imports).with_measure(metrics),
+    ) else {
+        return;
+    };
+    fn of_item<'w>(warning: &'w ArchiveWarning, name: &str) -> Option<&'w tinker_pdf_svg::Warning> {
+        match warning {
+            ArchiveWarning::Svg { item, warning } if item == name => Some(warning),
+            _ => None,
+        }
+    }
+    for gone in scene
+        .warnings
+        .iter()
+        .filter(|warning| !measured.warnings.contains(warning))
+    {
+        if let Some(at) = warnings.iter().position(|w| of_item(w, name) == Some(gone)) {
+            warnings.remove(at);
+        }
+    }
+    let after = warnings
+        .iter()
+        .rposition(|warning| of_item(warning, name).is_some())
+        .map_or(warnings.len(), |at| at + 1);
+    let new: Vec<ArchiveWarning> = measured
+        .warnings
+        .iter()
+        .filter(|warning| !scene.warnings.contains(warning))
+        .map(|warning| ArchiveWarning::Svg {
+            item: name.to_owned(),
+            warning: warning.clone(),
+        })
+        .collect();
+    warnings.splice(after..after, new);
+    *scene = measured;
+}
+
+/// An SVG's `@import`s, fetched from the container it came out of.
+///
+/// [`read::Imports`] drops an import with no base, because a sheet with no
+/// address of its own is a `<style>` element and the XHTML reader hands the
+/// document's path in for it. The SVG leaf has no path to hand in (ruling 8),
+/// so this fills it in: a `<style>` element's base is the document's.
+struct SvgImports<'b, R: ?Sized> {
+    imports: read::Imports<'b, R>,
+    path: &'b str,
+}
+
+impl<R: read::Resources + ?Sized> tinker_pdf_css::ImportResolver for SvgImports<'_, R> {
+    fn resolve(&self, href: &str, base: Option<&str>) -> Option<(String, Vec<u8>)> {
+        self.imports.resolve(href, Some(base.unwrap_or(self.path)))
+    }
+}
+
+/// One XHTML content document's tree, cascaded and turned into boxes, or the
+/// reason its page is a placeholder.
+///
+/// `path` is what the document's own references resolve against and `name` is
+/// what a warning about it says; for a book they are the same container path.
+fn read_markup<R: read::Resources + ?Sized>(
+    resources: &mut R,
+    path: &str,
+    name: &str,
+    dom: xhtml::Dom,
+    context: &read::Context<'_>,
+    pass: &mut PassOne<'_>,
+) -> Result<read::Reading, SpineDefect> {
+    let document = read::read_dom(resources, path, dom, context, pass.css_budget)
+        .map_err(|_| SpineDefect::NotStyled)?;
+    for markup in &document.dom.defects {
+        pass.warnings.push(ArchiveWarning::Markup {
+            item: name.to_owned(),
+            defect: *markup,
+        });
+    }
+    if document.unresolved_sheets > 0 {
+        pass.warnings.push(ArchiveWarning::StylesheetUnresolved {
+            item: name.to_owned(),
+            sheets: document.unresolved_sheets,
+        });
+    }
+    pass.census.absorb(&document.census);
+    // Deduplicated across the spine, because a book's chapters share one
+    // stylesheet: thirteen chapters that all `<link>` the same sheet declare the
+    // same face thirteen times, and a build that loaded each one would report
+    // every failure thirteen times.
+    //
+    // **This catches the linked sheet and not the `<style>` element.** A linked
+    // sheet's faces carry that sheet's own address, so thirteen chapters produce
+    // thirteen equal rules; a `<style>` element's carry the content document's,
+    // which is a different string per chapter, so they are not equal here and
+    // cannot be. `typeface::load` deduplicates those against the **resolved
+    // container path**, which is the only place the two are the same thing.
+    for face in document.font_faces.iter() {
+        if !pass.declared.contains(face) {
+            pass.declared.push(face.clone());
+        }
+    }
+    Ok(document)
+}
+
+/// The page box one chapter is laid into.
+///
+/// §8.2.2.6's viewport decides a fixed-layout chapter's page box, and a
+/// pre-paginated item that states none is named rather than silently laid into
+/// the caller's — unless it is already a placeholder, which `unwarned` says by
+/// being `None`, because a page with nothing on it has no size to get wrong.
+fn chapter_frame(
+    reflowable: Frame,
+    fixed: bool,
+    scene: Option<&tinker_pdf_svg::Scene>,
+    reading: Option<&read::Reading>,
+    unwarned: Option<&str>,
+    warnings: &mut Vec<ArchiveWarning>,
+) -> Frame {
+    if !fixed {
+        return reflowable;
+    }
+    // An SVG **is** its own viewport (§7.2), so a pre-paginated one never
+    // reaches `FixedLayoutWithoutViewport`: there is no `<meta>` to look for
+    // and nothing was left unsaid. Its page is the size its root states, in
+    // points.
+    if let Some(read) = scene {
+        return Frame {
+            page: (read.size.0 * read::PX_TO_PT, read.size.1 * read::PX_TO_PT),
+            margin: 0.0,
+        };
+    }
+    match reading.and_then(|read| read.viewport) {
+        Some(view) => Frame {
+            page: (view.width * read::PX_TO_PT, view.height * read::PX_TO_PT),
+            margin: 0.0,
+        },
+        None => {
+            if let Some(item) = unwarned {
+                warnings.push(ArchiveWarning::FixedLayoutWithoutViewport {
+                    item: item.to_owned(),
+                });
+            }
+            reflowable
+        }
+    }
+}
+
+// ---- One content document, as a book of one chapter -------------------------
+
+/// What a loose content document is written in (tier 5's formats rows).
+pub(crate) enum Loose<'a> {
+    /// An element tree: XHTML read as XML, or a translation of another markup
+    /// language into the same tree.
+    Markup(xhtml::Dom),
+    /// SVG bytes. Laid out as EPUB 3.3 §8.2's pre-paginated, because a
+    /// standalone picture's page is the size its root states.
+    Svg(&'a [u8]),
+}
+
+/// What laying one loose content document out wrote and tolerated.
+pub(crate) struct Laid {
+    /// Everything tolerated, in the order it happened.
+    pub warnings: Vec<ArchiveWarning>,
+    /// Where each page came from.
+    pub pages: Vec<PageOrigin>,
+    /// What the document spent against the caps that bound it.
+    pub cost: BookCost,
+    /// Why the document is a placeholder page rather than itself, if it is.
+    pub defect: Option<SpineDefect>,
+}
+
+/// One content document, read and laid out as a book whose spine is one item
+/// long, and written into `builder`.
+///
+/// **The same three passes as [`synthesise`] and the same functions**, and that
+/// is the whole design: a loose XHTML file, markup handed to a creation call,
+/// an FB2 and a Markdown file are all one chapter, and a second reader for them
+/// would be a second cascade and a second painter that disagreed with the
+/// book's about the first thing either changed. What differs is only what a
+/// book decides from its package — which chapters there are, which are
+/// pre-paginated, what the document information says — and here the caller
+/// decides it.
+///
+/// `name` is both the path the document's own references resolve against and
+/// the item every warning about it names. `author` is a stylesheet the caller
+/// supplies, applied ahead of every sheet the document links (see
+/// [`read::Context::author`]); `margin` is the margin inside `layout.page` for
+/// a reflowable document, and ignored for an SVG, which is its own page.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
+    resources: &mut R,
+    builder: &mut DocumentBuilder,
+    name: &str,
+    content: Loose<'_>,
+    author: &str,
+    margin: f64,
+    limits: &Limits,
+    layout: &BookLayout,
+) -> Laid {
+    let mut warnings: Vec<ArchiveWarning> = Vec::new();
+    let reflowable = Frame {
+        page: layout.page,
+        margin,
+    };
+    let (content_width, content_height) = reflowable.content_px();
+    let media = MediaContext::screen(content_width, content_height);
+    let options = LayoutOptions::new(content_width, content_height);
+    let mut css_budget = CssBudget::new(&limits.css);
+    let mut layout_budget = LayoutBudget::new(&limits.layout);
+    let ua = ua_sheet(&media, &limits.css, &mut css_budget);
+    let initial = initial_style(layout.font_size);
+    // The caller's sheet has no address of its own, so an `@import` in it is
+    // resolved against the document it is applied to — what a `<style>`
+    // element's would be.
+    //
+    // A sheet the parser refuses at one of `tinker-pdf-css`'s caps refuses the
+    // document, as the cascade refusing it would: laying the markup out
+    // without the sheet its caller handed over would be pages nobody asked for
+    // with a report saying nothing (ruling 10). Only `from_html`'s caller can
+    // reach this: a loose file opened by `Document::open` is laid out with an
+    // empty sheet or the committed `fb2::STYLESHEET`.
+    let (given, sheet_refused) = {
+        let resolver = read::Imports::new(resources, *limits);
+        match css_parse(
+            author.as_bytes(),
+            Some(name),
+            &resolver,
+            &media,
+            &limits.css,
+            &mut css_budget,
+        ) {
+            Ok(sheet) => (vec![sheet], false),
+            Err(_) => (Vec::new(), true),
+        }
+    };
+    let context = read::Context {
+        ua: &ua,
+        author: &given,
+        limits,
+        css_limits: &limits.css,
+        media: &media,
+        pre_paginated: false,
+        initial: &initial,
+    };
+
+    let mut census = read::Census::default();
+    let mut declared: Vec<FontFace> = Vec::new();
+    let svg_bytes = match &content {
+        Loose::Svg(bytes) => Some(*bytes),
+        Loose::Markup(_) => None,
+    };
+    let (fixed, reading, scene, defect) = match content {
+        Loose::Svg(bytes) => match read_svg(
+            resources,
+            name,
+            bytes,
+            layout.page,
+            name,
+            limits,
+            &mut declared,
+            &mut warnings,
+        ) {
+            Ok(scene) => (true, None, Some(scene), None),
+            Err(why) => (true, None, None, Some(why)),
+        },
+        Loose::Markup(_) if sheet_refused => (false, None, None, Some(SpineDefect::NotStyled)),
+        Loose::Markup(dom) => {
+            let mut pass = PassOne {
+                css_budget: &mut css_budget,
+                census: &mut census,
+                declared: &mut declared,
+                warnings: &mut warnings,
+            };
+            match read_markup(resources, name, name, dom, &context, &mut pass) {
+                Ok(reading) => (false, Some(reading), None, None),
+                Err(why) => (false, None, None, Some(why)),
+            }
+        }
+    };
+    let frame = chapter_frame(
+        reflowable,
+        fixed,
+        scene.as_ref(),
+        reading.as_ref(),
+        defect.is_none().then_some(name),
+        &mut warnings,
+    );
+    let mut chapters = vec![Chapter {
+        frame,
+        fixed,
+        name: name.to_owned(),
+        path: Some(name.to_owned()),
+        defect,
+        reading,
+        svg: scene,
+        pages: Vec::new(),
+        first_page: 0,
+    }];
+
+    // A loose document has no package, so no `unique-identifier` to derive an
+    // obfuscation key from and no `encryption.xml` to name what is obfuscated.
+    let faces = typeface::load(
+        resources,
+        &declared,
+        None,
+        &ocf::Encryption::default(),
+        limits,
+    );
+    for (family, defect, rules) in ranked_face_defects(&faces) {
+        warnings.push(ArchiveWarning::FontFace {
+            family,
+            defect,
+            rules,
+        });
+    }
+    // `synthesise`'s second read of an SVG, for the same reason.
+    if let (Some(bytes), Some(scene)) = (
+        svg_bytes,
+        chapters
+            .first_mut()
+            .and_then(|chapter| chapter.svg.as_mut())
+            .filter(|scene| svg::unmeasured(scene)),
+    ) {
+        measure_svg(
+            resources,
+            name,
+            bytes,
+            layout.page,
+            name,
+            limits,
+            &BookMetrics::with(&faces),
+            scene,
+            &mut warnings,
+        );
+    }
+
+    let (pages, total_pages) = write_chapters(
+        resources,
+        builder,
+        &mut chapters,
+        &faces,
+        &census,
+        &options,
+        layout.page,
+        limits,
+        &mut layout_budget,
+        &mut warnings,
+        // A loose document has no package to state a document language: its
+        // own `<html lang>` reaches the elements at its top instead.
+        None,
+    );
+    let cost = BookCost {
+        manifest_items: 0,
+        spine_items: 1,
+        css_tokens: css_budget.tokens(),
+        css_rules: css_budget.rules(),
+        css_declarations: css_budget.declarations(),
+        selector_matches: css_budget.matches(),
+        boxes: layout_budget.boxes(),
+        break_work: layout_budget.breaks(),
+        layout_work: layout_budget.layout(),
+        pages: total_pages,
+    };
+    Laid {
+        warnings,
+        pages,
+        cost,
+        defect: chapters.first().and_then(|chapter| chapter.defect),
+    }
+}
+
+/// Passes 3 and 4 of [`synthesise`], and the writing: every chapter laid out,
+/// every character given a code, the caller told what the book cost, and the
+/// pages written into `builder`.
+///
+/// **One function for a book and for a single content document**, which is
+/// tier 5's formats row's reason for it existing at all. A loose XHTML file and
+/// a creation call handed markup are a book of one chapter; a second copy of
+/// this pass for them would be a second painter, and the two would disagree
+/// about the first thing either of them changed. What differs between the
+/// callers is decided before this runs — which chapters there are, which
+/// faces were declared, what the document information says — and after it —
+/// an outline, the container's own warnings.
+///
+/// `builder` arrives with whatever document information the caller has already
+/// set, and leaves holding every page; `page` is the box a placeholder page is
+/// drawn at. Returns where each page came from and how many there are.
+/// `language` is what the catalog's `/Lang` says, when the caller set one.
+#[allow(clippy::too_many_arguments)]
+fn write_chapters<R: read::Resources + ?Sized>(
+    resources: &mut R,
+    builder: &mut DocumentBuilder,
+    chapters: &mut [Chapter],
+    faces: &FaceSet,
+    census: &read::Census,
+    options: &LayoutOptions,
+    page: (f64, f64),
+    limits: &Limits,
+    layout_budget: &mut LayoutBudget,
+    warnings: &mut Vec<ArchiveWarning>,
+    language: Option<&str>,
+) -> (Vec<PageOrigin>, usize) {
+    let mut layout_warnings: Vec<(LayoutWarning, usize)> = Vec::new();
+    // ---- pass 3: lay every chapter out -------------------------------------
+    let metrics = BookMetrics::with(faces);
     let mut clipped: Vec<(String, usize)> = Vec::new();
-    for chapter in &mut chapters {
+    for chapter in chapters.iter_mut() {
         let Some(reading) = &chapter.reading else {
             continue;
         };
@@ -1041,14 +1598,14 @@ pub fn synthesise(
             // `epub_fixed_layout.rs`.
             LayoutOptions::new(chapter_width, chapter_height).unpaginated()
         } else {
-            options
+            *options
         };
         match layout_with(
             &reading.tree,
             &metrics,
             &chapter_options,
             &limits.layout,
-            &mut layout_budget,
+            layout_budget,
         ) {
             Err(_) => chapter.defect = Some(SpineDefect::NotFragmented),
             Ok(mut laid) => {
@@ -1087,27 +1644,61 @@ pub fn synthesise(
                     }
                 }
                 chapter.pages = laid.pages;
+                // The text each run draws first — its soft hyphens gone, and
+                // a hyphen where its line breaks at one (`paint::hyphenate`)
+                // — and then UAX #9 across each visual line of styled spans,
+                // before anything reads a run's position: drawing, links and
+                // tags all see one placement. A run that mixes directions is cut
+                // at the line's level boundaries first, so every run L2 moves
+                // is at one level (`paint::split_at_levels`,
+                // `paint::visual_lines`).
+                // The levels are each bidi paragraph's, resolved over every
+                // line of it, so the chapter's pages are cut together.
+                for page in &mut chapter.pages {
+                    paint::hyphenate(&mut page.runs);
+                }
+                paint::split_at_levels(&mut chapter.pages, &metrics);
+                for page in &mut chapter.pages {
+                    paint::visual_lines(&mut page.runs);
+                }
             }
         }
     }
 
     let mut at = 0usize;
-    for chapter in &mut chapters {
+    for chapter in chapters.iter_mut() {
         chapter.first_page = at;
         at += chapter.page_count();
     }
     let total_pages = at;
 
     // ---- pass 4: every face, and every character that needs a code ---------
-    let mut fonts = Fonts::new(&faces);
-    for chapter in &chapters {
+    let mut fonts = Fonts::new(faces);
+    // `font-kerning: normal` and an on `font-feature-settings` asked of text
+    // set in a face this build does not shape, by element: what the cascade
+    // could not count, since which face a character is set in is decided
+    // here (`Fonts::unshaped_settings`).
+    let mut unshaped: [usize; 2] = [0, 0];
+    for chapter in chapters.iter() {
+        let mut asked: [std::collections::BTreeSet<u32>; 2] = Default::default();
         for page in &chapter.pages {
             for run in &page.runs {
                 if run.painted {
                     fonts.note(run);
+                    let (kerning, features) = fonts.unshaped_settings(run);
+                    if let Some(anchor) = run.anchor.filter(|_| !run.generated) {
+                        if kerning {
+                            asked[0].insert(anchor);
+                        }
+                        if features {
+                            asked[1].insert(anchor);
+                        }
+                    }
                 }
             }
         }
+        unshaped[0] += asked[0].len();
+        unshaped[1] += asked[1].len();
         // An SVG's characters need codes on the same terms and in the same
         // pass: a PDF's font resources belong to the document rather than to a
         // page, and a character outside `WinAnsiEncoding` needs a code chosen
@@ -1119,6 +1710,18 @@ pub fn synthesise(
     }
 
     // ---- what the caller is told, before any of it is drawn ----------------
+    let mut census = census.clone();
+    let counted: Vec<(&'static str, usize)> = [
+        ("font-kerning", unshaped[0]),
+        ("font-feature-settings", unshaped[1]),
+    ]
+    .into_iter()
+    .filter(|(_, elements)| *elements > 0)
+    .collect();
+    census.absorb(&read::Census {
+        unsupported: counted,
+        ..read::Census::default()
+    });
     for (property, elements) in census.ranked() {
         warnings.push(ArchiveWarning::UnimplementedProperty { property, elements });
     }
@@ -1136,9 +1739,9 @@ pub fn synthesise(
     }
     // Ruling 10 for the `<img>` this build could not put on a page, and the
     // reason it is counted per item and per defect rather than per element is
-    // `UnimplementedProperty`'s: a comic whose forty pictures are all WebP is
+    // `UnimplementedProperty`'s: a comic whose forty pictures are all AVIF is
     // one sentence a host can act on and forty identical warnings is not.
-    for chapter in &chapters {
+    for chapter in chapters.iter() {
         let Some(reading) = &chapter.reading else {
             continue;
         };
@@ -1168,26 +1771,33 @@ pub fn synthesise(
             characters: fonts.uncovered(),
         });
     }
-
-    // ---- pass 3: write it --------------------------------------------------
-    let (width, height) = layout.page;
-    let mut builder = DocumentBuilder::new();
-    // §5.5.3.1's metadata, reaching the document it describes. Without this the
-    // three required elements would be parsed and thrown away, which is exactly
-    // the failure gap 31 is organised around — one level up from a CSS property.
-    if let Some(title) = package.title() {
-        builder.set_info(b"Title", title);
+    // Ruling 10 for a `/Lang` this build did not write: an `xml:lang` or
+    // `lang` not shaped like a language tag, counted per content document.
+    for chapter in chapters.iter() {
+        let Some(reading) = &chapter.reading else {
+            continue;
+        };
+        let tags = tagging::malformed_language_tags(&reading.dom);
+        if tags > 0 {
+            warnings.push(ArchiveWarning::LanguageTagIgnored {
+                item: chapter.name.clone(),
+                tags,
+            });
+        }
     }
-    if let Some(creator) = package.creator() {
-        builder.set_info(b"Author", creator);
-    }
-    fonts.register(&mut builder);
-    let pictures = register_pictures(&mut builder, &chapters, &mut warnings);
 
-    let links = cross_references(&chapters, limits, total_pages);
+    // ---- write it ----------------------------------------------------------
+    let (width, height) = page;
+    fonts.register(builder);
+    let pictures = register_pictures(builder, chapters, warnings);
+    let backgrounds = register_backgrounds(resources, builder, chapters, limits, warnings);
+    let mut patterns = 0usize;
+
+    let links = cross_references(chapters, limits, total_pages);
 
     let mut pages: Vec<PageOrigin> = Vec::with_capacity(total_pages);
     let mut unwritable_runs = 0usize;
+    let mut refused_effects = paint::Refused::default();
     for (spine_at, chapter) in chapters.iter().enumerate() {
         if let Some(defect) = chapter.defect {
             let page = u32::try_from(chapter.first_page).unwrap_or(u32::MAX);
@@ -1217,25 +1827,20 @@ pub fn synthesise(
             // invisible to the page that names it — the operator is written,
             // the reader cannot resolve the name, and the gradient, the
             // transparency or the photograph is silently gone while every solid
-            // stroke still draws. `svg::Registry` is that ordering as a type.
-            let registry = svg::register(&mut builder, scene, placement, |href: &str| {
-                // §5.7's reference, resolved against the container the document
-                // was read from — the caller's job, and the reason the leaf
-                // crate carries the href unread.
-                let target = resolve_reference(&source, href.split('#').next()?, limits).ok()?;
-                let index = book.index_of(&target)?;
-                book.read(index).ok().map(<[u8]>::to_vec)
-            });
+            // stroke still draws. `svg::Registry` is that ordering as a type,
+            // and since §14.5's groups it holds the page's operators whole.
+            let registry =
+                svg::register(builder, scene, placement, &fonts, &metrics, |href: &str| {
+                    // §5.7's reference, resolved against the container the
+                    // document was read from — the caller's job, and the reason
+                    // the leaf crate carries the href unread.
+                    resources
+                        .fetch(&source, href, limits)
+                        .ok()
+                        .map(|(_, bytes)| bytes)
+                });
             let mut page = builder.begin_page(page_width, page_height);
-            let drawn = svg::draw(
-                &mut builder,
-                &mut page,
-                scene,
-                &registry,
-                placement,
-                &fonts,
-                &metrics,
-            );
+            let drawn = svg::draw(&mut page, &registry);
             unwritable_runs += drawn.refused;
             if drawn.images_unresolved > 0 {
                 warnings.push(ArchiveWarning::SvgImageUnresolved {
@@ -1262,6 +1867,81 @@ pub fn synthesise(
             });
             continue;
         }
+        // What the painter applies per element, and the resources it names,
+        // registered before the chapter's first page begins — `begin_page`
+        // snapshots the resource set, so an `/ExtGState` added after it is
+        // invisible to the page that names it.
+        let mut effects = chapter
+            .reading
+            .as_ref()
+            .map(|reading| paint::Effects::of(&reading.dom, &reading.styles, &chapter.pages))
+            .unwrap_or_default();
+        // A relative `url()` in a `style=""` attribute is relative to the
+        // document, which is the base a reference with none falls back to.
+        let document = chapter.path.as_deref().unwrap_or("");
+        effects.plan_backgrounds(
+            builder,
+            &chapter.pages,
+            &chapter.frame,
+            |image| backgrounds.find(image.base.as_deref().unwrap_or(document), &image.href),
+            &mut patterns,
+        );
+        let refused = effects.register(builder);
+        refused_effects.opacity += refused.opacity;
+        refused_effects.box_shadow += refused.box_shadow;
+        refused_effects.text_shadow += refused.text_shadow;
+        refused_effects.transform += refused.transform;
+        refused_effects.background_image += refused.background_image;
+        // Where each picture reads among the text, over the whole chapter
+        // rather than per page: a picture's neighbours in reading order may be
+        // on the page before.
+        let figures = chapter
+            .reading
+            .as_ref()
+            .map(|reading| tagging::figure_orders(&reading.dom, &chapter.pages))
+            .unwrap_or_default();
+        // Every `<a>` of this chapter that will hold a link annotation, which
+        // is what makes it a `/Link` rather than a `/Span`: 14.8.4.4.2 gives a
+        // `/Link` an `/OBJR` to its annotation, and one with none would claim
+        // an association the file does not contain. Decided over the whole
+        // chapter so both halves of a link broken over a page are one type.
+        let linked: std::collections::BTreeSet<usize> = (0..chapter.pages.len())
+            .filter_map(|offset| links.get(chapter.first_page + offset))
+            .flatten()
+            .filter(|(rect, _, _)| tagging::is_link_rect(*rect))
+            .map(|(_, _, element)| *element)
+            .collect();
+        let cells = chapter
+            .reading
+            .as_ref()
+            .map(|reading| tagging::table_cells(&reading.dom, &chapter.pages, &pictures[spine_at]))
+            .unwrap_or_default();
+        let path = chapter.path.as_deref().unwrap_or(chapter.name.as_str());
+        let (roles, unmapped) = chapter
+            .reading
+            .as_ref()
+            .map(|reading| tagging::register_roles(builder, &reading.dom))
+            .unwrap_or_default();
+        if unmapped > 0 {
+            warnings.push(ArchiveWarning::ElementNamesUnmapped {
+                item: chapter.name.clone(),
+                names: unmapped,
+            });
+        }
+        let structure = chapter.reading.as_ref().map(|reading| tagging::Tagging {
+            dom: &reading.dom,
+            // **A base per content document.** Both an element index and a
+            // reading-order stamp restart at every spine item, so two
+            // chapters would otherwise name the same element and sort into
+            // each other.
+            chapter: (spine_at as u64) << 32,
+            document_language: language,
+            figures: &figures,
+            links: &linked,
+            path,
+            cells: &cells,
+            roles: &roles,
+        });
         for (offset, laid) in chapter.pages.iter().enumerate() {
             let index = chapter.first_page + offset;
             let on_page = links.get(index).map_or(&[][..], Vec::as_slice);
@@ -1284,25 +1964,33 @@ pub fn synthesise(
             if clip {
                 page.raw(format!("q 0 0 {page_width} {page_height} re W n").as_bytes());
             }
-            unwritable_runs += draw_page(
-                &mut builder,
+            unwritable_runs += draw_page_tagged(
+                builder,
                 &mut page,
                 laid,
                 &chapter_frame,
                 &fonts,
                 &pictures[spine_at],
-                chapter.reading.as_ref().map(|reading| &reading.dom),
-                // **A base per content document.** Both an element index and a
-                // reading-order stamp restart at every spine item, so two
-                // chapters would otherwise name the same element and sort into
-                // each other.
-                (spine_at as u64) << 32,
+                structure.as_ref(),
+                &effects.on(laid, &chapter_frame, offset),
             );
             if clip {
                 page.raw(b"Q");
             }
-            for (rect, target) in on_page {
-                page.link(rect.0, rect.1, rect.2, rect.3, target);
+            // Each annotation is the content item of its `<a>`'s `/Link`,
+            // found at `finish` by the element's key whichever page holds it.
+            for (rect, target, element) in on_page {
+                match &structure {
+                    Some(structure) => page.link_for(
+                        structure.key(*element),
+                        rect.0,
+                        rect.1,
+                        rect.2,
+                        rect.3,
+                        target,
+                    ),
+                    None => page.link(rect.0, rect.1, rect.2, rect.3, target),
+                };
             }
             builder.push_page(page);
             pages.push(PageOrigin {
@@ -1317,40 +2005,25 @@ pub fn synthesise(
             runs: unwritable_runs,
         });
     }
-
-    let entries = outline(book, package, &chapters, limits, total_pages);
-    if !entries.is_empty() && !builder.set_outline(entries) {
-        warnings.push(ArchiveWarning::OutlineUnwritable);
+    // An alpha the writer refused — a profile that forbids transparency — is an
+    // `opacity`, or a translucent shadow colour, this document does not
+    // honour, counted by element as the cascade counts every other one; a
+    // link under a transform keeps its untransformed active area; and a
+    // gradient whose numbers are not finite, or whose shading the writer
+    // refused, is not drawn.
+    for (property, elements) in [
+        ("opacity", refused_effects.opacity),
+        ("box-shadow", refused_effects.box_shadow),
+        ("text-shadow", refused_effects.text_shadow),
+        ("transform", refused_effects.transform),
+        ("background-image", refused_effects.background_image),
+    ] {
+        if elements > 0 {
+            warnings.push(ArchiveWarning::UnimplementedProperty { property, elements });
+        }
     }
 
-    // Taken after every read, because reading is what most of them come from.
-    for warning in book.archive().warnings() {
-        warnings.push(ArchiveWarning::Zip(*warning));
-    }
-
-    let pdf = builder.finish();
-    if pdf.len() > limits.max_synthesised {
-        return Err(ArchiveRefusal::TooLarge);
-    }
-    let synthesised_bytes = pdf.len();
-    // Taken after the last charge and before anything is returned, so the
-    // figures are what the whole book cost rather than what one pass did.
-    let cost = BookCost {
-        manifest_items: package.items().len(),
-        spine_items: package.spine().len(),
-        css_tokens: css_budget.tokens(),
-        css_rules: css_budget.rules(),
-        css_declarations: css_budget.declarations(),
-        selector_matches: css_budget.matches(),
-        boxes: layout_budget.boxes(),
-        break_work: layout_budget.breaks(),
-        layout_work: layout_budget.layout(),
-        pages: total_pages,
-    };
-    Ok((
-        pdf,
-        ArchiveReport::book(warnings, pages, synthesised_bytes, *layout, cost),
-    ))
+    (pages, total_pages)
 }
 
 /// Where one reference points, once the spine has been paginated.
@@ -1481,6 +2154,7 @@ fn register_pictures(
             let registered = match &picture.data {
                 read::PictureData::Jpeg(bytes) => builder.add_image(&name, &ImageData::Jpeg(bytes)),
                 read::PictureData::Png(png) => builder.add_image(&name, &png.image()),
+                read::PictureData::Raster(raster) => builder.add_image(&name, &raster.image()),
             };
             if registered {
                 out[at].push((anchor, name));
@@ -1506,9 +2180,151 @@ fn register_pictures(
     out
 }
 
-/// One page's link annotations: a rectangle in the page's own points, and
-/// where it goes.
-type PageLinks = Vec<((f64, f64, f64, f64), Target)>;
+/// What one `background-image` reference came to: the registered image and
+/// its size in CSS pixels, or why it is not on the page.
+type BackgroundImage = Result<(Vec<u8>, (f64, f64)), ImageDefect>;
+
+/// Every `background-image` the book's pages draw, read and registered once
+/// per reference.
+///
+/// After layout and not before it, which is the difference from
+/// [`register_pictures`]'s `<img>`: a background moves no box, so nothing needs
+/// its size until the painter, and reading it only for the fragments that
+/// reached a page means a book's unused texture — a rule for a class no element
+/// carries, a box under `display: none` — costs nothing at all.
+///
+/// **Keyed, not searched.** Every fragment that carries a layer looks its
+/// reference up here twice — once to register it and once to plan it — and a
+/// chapter may give every one of its elements a reference of its own, so a
+/// list scanned per fragment was quadratic in the references: twenty thousand
+/// boxes each naming a missing image of its own took eight seconds in a debug
+/// build where one shared name took one and a half.
+#[derive(Debug, Default)]
+struct Backgrounds {
+    /// What each reference came to, by the `base` the stylesheet wrote it
+    /// against and then by its `href`.
+    images: BTreeMap<String, BTreeMap<String, BackgroundImage>>,
+}
+
+impl Backgrounds {
+    /// What a reference written against `base` came to, if it was read.
+    fn get(&self, base: &str, href: &str) -> Option<&BackgroundImage> {
+        self.images.get(base).and_then(|named| named.get(href))
+    }
+
+    /// The registered image a reference written against `base` names.
+    fn find(&self, base: &str, href: &str) -> Option<(&[u8], (f64, f64))> {
+        self.get(base, href)
+            .and_then(|found| found.as_ref().ok())
+            .map(|(name, size)| (name.as_slice(), *size))
+    }
+}
+
+/// Reads, decodes and registers every background image a laid-out fragment
+/// names, and says by element which ones did not reach the page.
+fn register_backgrounds<R: read::Resources + ?Sized>(
+    resources: &mut R,
+    builder: &mut DocumentBuilder,
+    chapters: &[Chapter],
+    limits: &Limits,
+    warnings: &mut Vec<ArchiveWarning>,
+) -> Backgrounds {
+    let mut out = Backgrounds::default();
+    // One resource per resolved entry, so two spellings of one file — or one
+    // texture named by two sheets — are one image in the document.
+    let mut by_path: BTreeMap<String, BackgroundImage> = BTreeMap::new();
+    for chapter in chapters {
+        let document = chapter.path.as_deref().unwrap_or("");
+        // A defect is one of a handful, so its list is searched; the elements
+        // under one are as many as the chapter has, so they are a set.
+        let mut failed: Vec<(ImageDefect, BTreeSet<u32>)> = Vec::new();
+        for page in &chapter.pages {
+            for fragment in &page.boxes {
+                // A gradient is drawn from its own geometry and needs no
+                // resource read.
+                let Some(tinker_pdf_css::property::Image::Url(image)) =
+                    fragment.image.as_ref().map(|layer| &layer.image)
+                else {
+                    continue;
+                };
+                let base = image.base.as_deref().unwrap_or(document);
+                let href = &image.href;
+                let defect = match out.get(base, href) {
+                    Some(found) => found.as_ref().err().copied(),
+                    None => {
+                        let found =
+                            read_background(resources, builder, (base, href), limits, &mut by_path);
+                        let defect = found.as_ref().err().copied();
+                        out.images
+                            .entry(base.to_owned())
+                            .or_default()
+                            .insert(href.clone(), found);
+                        defect
+                    }
+                };
+                // Counted by element and by defect: a book's forty boxes on one
+                // missing texture are one sentence.
+                if let Some(defect) = defect {
+                    let anchor = fragment.anchor.unwrap_or(u32::MAX);
+                    match failed.iter_mut().find(|(seen, _)| *seen == defect) {
+                        Some((_, elements)) => {
+                            elements.insert(anchor);
+                        }
+                        None => failed.push((defect, BTreeSet::from([anchor]))),
+                    }
+                }
+            }
+        }
+        failed.sort_by_key(|(_, elements)| std::cmp::Reverse(elements.len()));
+        for (defect, elements) in failed {
+            warnings.push(ArchiveWarning::BackgroundImageNotDrawn {
+                item: chapter.name.clone(),
+                defect,
+                elements: elements.len(),
+            });
+        }
+    }
+    out
+}
+
+/// One background reference, fetched against the sheet that wrote it, read by
+/// the same reader an `<img>` takes, and registered — once per entry.
+fn read_background<R: read::Resources + ?Sized>(
+    resources: &mut R,
+    builder: &mut DocumentBuilder,
+    (base, href): (&str, &str),
+    limits: &Limits,
+    by_path: &mut BTreeMap<String, BackgroundImage>,
+) -> BackgroundImage {
+    let (path, bytes) = resources
+        .fetch(base, href, limits)
+        .map_err(|_| ImageDefect::Unresolved)?;
+    if let Some(found) = by_path.get(&path) {
+        return found.clone();
+    }
+    let found = read::picture_data(bytes).and_then(|(size, data)| {
+        let name = format!("Bg{}", by_path.len()).into_bytes();
+        let registered = match &data {
+            read::PictureData::Jpeg(bytes) => builder.add_image(&name, &ImageData::Jpeg(bytes)),
+            read::PictureData::Png(png) => builder.add_image(&name, &png.image()),
+            read::PictureData::Raster(raster) => builder.add_image(&name, &raster.image()),
+        };
+        // The writer refusing the bytes after they read is
+        // `register_pictures`' one case of the same, and named the same way.
+        if registered {
+            Ok((name, size))
+        } else {
+            Err(ImageDefect::Undecodable)
+        }
+    });
+    by_path.insert(path, found.clone());
+    found
+}
+
+/// One page's link annotations: a rectangle in the page's own points, where
+/// it goes, and the `<a>` element it is for — whose `/Link` structure element
+/// holds the annotation (14.8.4.4.2).
+type PageLinks = Vec<((f64, f64, f64, f64), Target, usize)>;
 
 /// Every `<a href>` in the book, as a rectangle on a page and a target.
 ///
@@ -1546,7 +2362,7 @@ fn cross_references(chapters: &[Chapter], limits: &Limits, total_pages: usize) -
                         continue;
                     }
                     if let Some(slot) = out.get_mut(at) {
-                        slot.push((run_rect(run, &chapter.frame), target.clone()));
+                        slot.push((run_rect(run, &chapter.frame), target.clone(), index));
                     }
                 }
             }

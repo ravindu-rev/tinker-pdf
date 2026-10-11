@@ -19,6 +19,11 @@
 
 use tinker_pdf::{Document, FindingKind, PdfACoverage};
 
+// A face with real `cmap`, `glyf` and `hmtx` tables, for the width rule,
+// which has to reach a glyph through the program's own mapping.
+#[path = "epub_support/mod.rs"]
+mod epub_support;
+
 // ---- building a document at the edge of a clause --------------------------
 
 /// A real `sfnt` header: the version tag, one table, and a directory entry.
@@ -686,7 +691,10 @@ fn composite() -> Fixture {
 /// clean verdict claims.
 #[test]
 fn every_staged_font_rule_is_named_with_its_clause_and_its_reason() {
-    for clause in ["6.3.2", "6.3.3.3", "6.3.6", "6.3.9"] {
+    // `6.3.3` was `6.3.3.3` until the CMap rules ran: what is left of the
+    // composite-font clauses is 6.3.3.1's relationship for a predefined CMap,
+    // and the entry is filed under the clause both sit in.
+    for clause in ["6.3.2", "6.3.3", "6.3.6", "6.3.9"] {
         let found = tinker_pdf::PDFA_STAGED
             .iter()
             .find(|rule| rule.clause == clause)
@@ -713,4 +721,267 @@ impl Fixture {
             extra: self.extra.clone(),
         }
     }
+}
+
+// ---- 6.3.3.1 / 6.3.3.3: the encoding CMap of a composite font ----------------
+//
+// Each sentence is veraPDF's published statement of the rule (wiki at
+// `109b482`): part 1's 6.3.3.1-1, 6.3.3.3-1 and -2, parts 2 and 3's
+// 6.2.11.3.1-1 and 6.2.11.3.3-1 to -3. **Part 1 is stricter in one direction
+// and laxer in two**, and every test below that crosses the parts asserts
+// which.
+
+/// Every finding a full validation reports, as `(clause, kind)`.
+fn clauses_of(fixture: &Fixture) -> Vec<(String, FindingKind)> {
+    Document::open(fixture.build())
+        .expect("the fixture opens")
+        .validate_pdfa()
+        .findings
+        .into_iter()
+        .map(|finding| (finding.clause.0, finding.kind))
+        .collect()
+}
+
+/// [`composite`] under `part`, with its `/Encoding` replaced by `encoding`.
+fn composite_in(part: &str, encoding: &str) -> Fixture {
+    let mut fixture = composite();
+    fixture.part = part.to_string();
+    fixture.font = fixture.font.replace("/Identity-H", encoding);
+    fixture
+}
+
+/// A CMap stream, object 11: `dict` in its dictionary, an identity mapping,
+/// and `program_extra` in its program.
+fn embedded_cmap(fixture: &mut Fixture, dict: &str, program_extra: &str) {
+    let program = format!(
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+         {program_extra}\n/CMapName /Acme-H def\n\
+         1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
+         1 begincidrange <0000> <FFFF> 0 endcidrange\n\
+         endcmap CMapName currentdict /CMap defineresource pop end end"
+    );
+    fixture.font = fixture.font.replace("/Identity-H", "11 0 R");
+    fixture.extra.push((
+        11,
+        stream(
+            &format!("/Type /CMap /CMapName /Acme-H {dict}"),
+            program.as_bytes(),
+        ),
+    ));
+}
+
+const IDENTITY: &str = "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>";
+
+/// 6.3.3.3-1, part 1: "All CMaps used within a conforming file, except
+/// Identity-H and Identity-V, shall be embedded" — a predefined CMap of
+/// Table 118 too. Parts 2 and 3 admit Table 118 (6.2.11.3.3-1), so the same
+/// bytes claiming part 2 are the twin; a name nobody predefines is a finding
+/// under both.
+#[test]
+fn a_predefined_cmap_must_be_embedded_under_part_one_only() {
+    let predefined = |part: &str| composite_in(part, "/UniJIS-UCS2-H");
+    assert_eq!(
+        clauses_of(&predefined("1")),
+        [(
+            "6.3.3.3".to_string(),
+            FindingKind::CMapNotEmbedded {
+                name: "UniJIS-UCS2-H".to_string()
+            }
+        )]
+    );
+    assert_eq!(clauses_of(&predefined("2")), []);
+    assert_eq!(
+        clauses_of(&composite_in("2", "/Acme-H")),
+        [(
+            "6.2.11.3.3".to_string(),
+            FindingKind::CMapNotEmbedded {
+                name: "Acme-H".to_string()
+            }
+        )]
+    );
+    // `Identity-H`, the baseline's, is admitted under every part.
+    assert_eq!(clauses_of(&composite_in("1", "/Identity-H")), []);
+}
+
+/// 6.3.3.3-2 / 6.2.11.3.3-2: an embedded CMap's dictionary `/WMode` is
+/// identical to its program's. The twin writes 1 in both.
+#[test]
+fn an_embedded_cmaps_writing_modes_agree() {
+    let mut disagreeing = composite_in("1", "/Identity-H");
+    embedded_cmap(&mut disagreeing, &format!("{IDENTITY} /WMode 1"), "");
+    assert_eq!(
+        clauses_of(&disagreeing),
+        [(
+            "6.3.3.3".to_string(),
+            FindingKind::CMapWritingModeMismatch {
+                dictionary: 1,
+                program: 0
+            }
+        )]
+    );
+    let mut agreeing = composite_in("1", "/Identity-H");
+    embedded_cmap(
+        &mut agreeing,
+        &format!("{IDENTITY} /WMode 1"),
+        "/WMode 1 def",
+    );
+    assert_eq!(clauses_of(&agreeing), []);
+}
+
+/// 6.2.11.3.3-3: "A CMap shall not reference any other CMap except those
+/// listed in … Table 118". Part 1 states no such rule, so the same bytes
+/// claiming part 1 are the twin.
+#[test]
+fn a_cmap_referencing_one_off_the_list_is_a_part_two_finding() {
+    let using = |part: &str| {
+        let mut fixture = composite_in(part, "/Identity-H");
+        embedded_cmap(&mut fixture, &format!("{IDENTITY} /UseCMap /Acme-Base"), "");
+        fixture
+    };
+    assert_eq!(
+        clauses_of(&using("2")),
+        [(
+            "6.2.11.3.3".to_string(),
+            FindingKind::CMapReferenceNotStandard {
+                name: "Acme-Base".to_string()
+            }
+        )]
+    );
+    assert_eq!(clauses_of(&using("1")), []);
+}
+
+/// 6.3.3.1-1 / 6.2.11.3.1-1: the CIDFont's collection is the CMap's.
+/// `/Registry` and `/Ordering` under both readings; `/Supplement` not
+/// exceeding the CMap's only under parts 2 to 4, part 1's sentence having no
+/// word on it — so a newer CIDFont supplement is a part 2 finding and the
+/// part 1 twin.
+#[test]
+fn an_embedded_cmaps_collection_is_the_cidfonts() {
+    let mut other = composite_in("1", "/Identity-H");
+    embedded_cmap(
+        &mut other,
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 2 >>",
+        "",
+    );
+    assert_eq!(
+        clauses_of(&other),
+        [(
+            "6.3.3.1".to_string(),
+            FindingKind::CidSystemInfoMismatch {
+                key: "Ordering".to_string()
+            }
+        )]
+    );
+    let older_cmap = |part: &str| {
+        let mut fixture = composite_in(part, "/Identity-H");
+        // Object 8, the descendant, one supplement ahead of the CMap.
+        fixture.extra[0].1 = String::from_utf8_lossy(&fixture.extra[0].1)
+            .replace("/Supplement 0", "/Supplement 3")
+            .into_bytes();
+        embedded_cmap(&mut fixture, IDENTITY, "");
+        fixture
+    };
+    assert_eq!(
+        clauses_of(&older_cmap("2")),
+        [(
+            "6.2.11.3.1".to_string(),
+            FindingKind::CidSystemInfoMismatch {
+                key: "Supplement".to_string()
+            }
+        )]
+    );
+    assert_eq!(clauses_of(&older_cmap("1")), []);
+}
+
+// ---- 6.3.6 / 6.2.11.5 / 6.2.10.5: font metrics ------------------------------
+
+/// [`conforming`]'s TrueType font with a real program: one face covering `A`
+/// at 1000 units per em, its `A` `advance` units wide, and `widths` as the
+/// dictionary's `/Widths` for code 65.
+fn measured(part: &str, advance: u16, widths: &str) -> Fixture {
+    let mut fixture = Fixture::new(part, Some("B"));
+    let program = epub_support::typeface::Face::new("Acme", "A")
+        .with_advance(advance)
+        .build();
+    fixture.program = Some((String::new(), program));
+    fixture.font = fixture
+        .font
+        .replace("/Widths [500]", &format!("/Widths [{widths}]"));
+    fixture
+}
+
+/// Every finding as `(clause, kind)`.
+fn widths_of(fixture: &Fixture) -> Vec<(String, FindingKind)> {
+    Document::open(fixture.build())
+        .expect("the fixture opens")
+        .validate_pdfa()
+        .findings
+        .into_iter()
+        .map(|finding| (finding.clause.0, finding.kind))
+        .collect()
+}
+
+/// ISO 19005-2 6.2.11.5, in veraPDF's statement of rule 6.2.11.5-1: "the
+/// glyph width information in the font dictionary and in the embedded font
+/// program shall be consistent", with the published test's tolerance of one
+/// thousandth of an em. The program's advance is reached through the glyph
+/// the engine itself draws for the code — the `cmap`, here — and both parts'
+/// numbers are asserted.
+#[test]
+fn a_width_the_program_disagrees_with_is_a_finding() {
+    for (part, clause) in [("1", "6.3.6"), ("2", "6.2.11.5")] {
+        assert_eq!(
+            widths_of(&measured(part, 600, "500")),
+            [(
+                clause.to_string(),
+                FindingKind::GlyphWidthInconsistent {
+                    code: 65,
+                    dictionary: 500,
+                    program: 600
+                }
+            )],
+            "part {part}"
+        );
+    }
+}
+
+/// The twins: the same width, a width within the tolerance, and the
+/// disagreeing font drawn only at rendering mode 3 — veraPDF's test exempts
+/// `renderingMode == 3`, and the clause is about fonts used for rendering.
+#[test]
+fn a_width_within_a_thousandth_or_never_painted_is_not_a_finding() {
+    assert_eq!(widths_of(&measured("2", 600, "600")), []);
+    assert_eq!(widths_of(&measured("2", 600, "599.5")), []);
+    let mut invisible = measured("2", 600, "500");
+    invisible.content = "BT 3 Tr /F1 12 Tf 10 10 Td (A) Tj ET".to_string();
+    assert_eq!(widths_of(&invisible), []);
+}
+
+/// A code the program reaches only by 9.6.6.4's closing guess is not judged:
+/// `Z` is not in this face's `cmap`, so the glyph a reader draws for it is
+/// whichever its own guess picks, and a width compared against a guess is a
+/// width compared against nothing the font said.
+#[test]
+fn a_code_reached_by_guess_is_not_judged() {
+    // Code 1: no character the `cmap` maps, so the engine's last resort reads
+    // the code as the glyph index — glyph 1, which exists and is 600 wide.
+    let mut guessed = measured("2", 600, "500");
+    guessed.font = guessed
+        .font
+        .replace("/FirstChar 65 /LastChar 65", "/FirstChar 1 /LastChar 1");
+    guessed.content = "BT /F1 12 Tf 10 10 Td <01> Tj ET".to_string();
+    assert_eq!(widths_of(&guessed), []);
+
+    // And a width the dictionary does not state — `B` past `/LastChar`,
+    // which falls to `/MissingWidth` — is not compared either: veraPDF's
+    // `widthFromDictionary == null` exempts it.
+    let mut unstated = measured("2", 600, "600");
+    unstated.program = Some((
+        String::new(),
+        epub_support::typeface::Face::new("Acme", "AB")
+            .with_advance(600)
+            .build(),
+    ));
+    unstated.content = "BT /F1 12 Tf 10 10 Td (AB) Tj ET".to_string();
+    assert_eq!(widths_of(&unstated), []);
 }

@@ -2,7 +2,7 @@
 //!
 //! THIRDPARTY.md's promise about vendored data is that *"the raw files never
 //! reach a released binary"*, and this is the half of it that keeps the
-//! promise: five text files in, one `.rs` out, and nothing under `data/` is
+//! promise: seven text files in, one `.rs` out, and nothing under `data/` is
 //! opened at run time. `tinker-pdf-font/build.rs` does the same thing for
 //! Adobe's CMap registry and this file is deliberately in its register.
 //!
@@ -18,7 +18,7 @@
 //! later UCD therefore breaks the build until somebody reads the new class,
 //! which is the correct outcome.
 //!
-//! # What the four property files are each for
+//! # What the seven property files are each for
 //!
 //! - `LineBreak.txt` is the Line_Break property, which is the algorithm.
 //! - `EastAsianWidth.txt` is needed by UAX #14 itself, not by measurement:
@@ -30,6 +30,17 @@
 //!   LB30b's second clause is about **unassigned** pictographs, so `Cn` is
 //!   needed to know which those are.
 //! - `emoji-data.txt` is `Extended_Pictographic`, LB30b's other half.
+//!
+//! And three that are not about line breaking at all, for `css-text-3` §2.1's
+//! `text-transform`, which is laid out here because a transformed run is
+//! measured as the characters it becomes:
+//!
+//! - `UnicodeData.txt`'s fields 12 to 14 are the simple case mappings;
+//! - `SpecialCasing.txt` is where a full mapping is longer than one character
+//!   (`ß` to `SS`) and the one language-independent conditional, Final_Sigma;
+//! - `DerivedCoreProperties.txt` supplies `Cased` and `Case_Ignorable`, which
+//!   are Final_Sigma's definition in Unicode §3.13, and `Lowercase`, which is
+//!   `capitalize`'s *"if lowercase"*.
 //!
 //! `LineBreakTest.txt` is not read here. It is the conformance oracle and it
 //! is read by a test, because a table compiled from its own test data would
@@ -48,6 +59,9 @@ fn main() {
         "EastAsianWidth.txt",
         "DerivedGeneralCategory.txt",
         "emoji-data.txt",
+        "UnicodeData.txt",
+        "SpecialCasing.txt",
+        "DerivedCoreProperties.txt",
     ] {
         println!("cargo:rerun-if-changed=data/ucd/{file}");
     }
@@ -87,6 +101,24 @@ fn main() {
         &mut out,
     );
     combining(&data, &mut out);
+    punctuation_or_symbol(&data, &mut out);
+    // `css-text-3` §2.1's `text-transform`, which is Unicode §3.13's *full*
+    // case mapping and not `char::to_uppercase` — the second is the standard
+    // library's table, a Unicode version this repository does not pin.
+    case_mappings(&data, &mut out);
+    for (property, name) in [
+        ("Cased", "CASED"),
+        ("Case_Ignorable", "CASE_IGNORABLE"),
+        ("Lowercase", "LOWERCASE"),
+    ] {
+        binary_property(
+            &data.join("DerivedCoreProperties.txt"),
+            Some(property),
+            name,
+            &mut out,
+        );
+    }
+    letter_or_number(&data, &mut out);
 
     let target = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets this")).join("ucd.rs");
     std::fs::write(&target, out).expect("the generated table could not be written");
@@ -225,6 +257,185 @@ fn combining(data: &Path, out: &mut String) {
         out,
         "/// General_Category Mn or Mc, for LB1's SA resolution.\n\
          pub static COMBINING: &[(u32, u32)] = &[\n{body}];",
+    );
+}
+
+/// Every `P` and `S` general category together — CommonMark 0.31's *Unicode
+/// punctuation character*, which decides whether a run of `*` or `_` can open
+/// or close emphasis. A consumer outside line breaking, and the reason it is
+/// here rather than in a second copy of this file's reader: the category file
+/// is vendored once.
+fn punctuation_or_symbol(data: &Path, out: &mut String) {
+    let mut map: BTreeMap<u32, String> = BTreeMap::new();
+    for (first, last, value) in rows(&data.join("DerivedGeneralCategory.txt")) {
+        if !value.starts_with('P') && !value.starts_with('S') {
+            continue;
+        }
+        for code in first..=last {
+            map.insert(code, String::new());
+        }
+    }
+    let merged = ranges(&map);
+    let mut body = String::new();
+    for (first, last, _) in &merged {
+        let _ = writeln!(body, "    ({first:#x}, {last:#x}),");
+    }
+    let _ = writeln!(
+        out,
+        "/// General_Category P* or S*, for CommonMark's punctuation.\n\
+         pub static PUNCTUATION_OR_SYMBOL: &[(u32, u32)] = &[\n{body}];",
+    );
+}
+
+/// General_Category `L*` or `N*`: what `text-transform: capitalize` counts as
+/// the first *typographic letter unit* of a word (`css-text-3` §2.1), so that
+/// the `(` of `(hello` is passed over and the `h` is the letter.
+fn letter_or_number(data: &Path, out: &mut String) {
+    let mut map: BTreeMap<u32, String> = BTreeMap::new();
+    for (first, last, value) in rows(&data.join("DerivedGeneralCategory.txt")) {
+        if !value.starts_with('L') && !value.starts_with('N') {
+            continue;
+        }
+        for code in first..=last {
+            map.insert(code, String::new());
+        }
+    }
+    let merged = ranges(&map);
+    let mut body = String::new();
+    for (first, last, _) in &merged {
+        let _ = writeln!(body, "    ({first:#x}, {last:#x}),");
+    }
+    let _ = writeln!(
+        out,
+        "/// General_Category L* or N*, for capitalize's first letter unit.\n\
+         pub static LETTER_OR_NUMBER: &[(u32, u32)] = &[\n{body}];",
+    );
+}
+
+/// Unicode §3.13's full case mappings, as three sorted `(code, mapped)` tables.
+///
+/// # Two files, and the second overrides the first
+///
+/// `UnicodeData.txt` fields 12, 13 and 14 are the **simple** mappings — one
+/// code point to one — and `SpecialCasing.txt` is the list of characters whose
+/// full mapping is something else: `ß` uppercases to `SS`, `ŉ` to `ʼN`, the
+/// `ﬁ` ligature to `FI`, and a Greek letter with a breathing and an accent to
+/// three characters because Greek capitals carry no precomposed form for it.
+/// A build with only the first file gets every one of those wrong while
+/// passing every English test.
+///
+/// An empty field 14 means *"the same as the uppercase mapping"*, which is
+/// `UnicodeData.txt`'s own convention and the one place the three columns are
+/// not independent.
+///
+/// # The conditional rows
+///
+/// `SpecialCasing.txt`'s rows with a fifth field are conditional. **One** is
+/// language-independent — `Final_Sigma`, Σ lowercasing to ς at the end of a
+/// word — and `crate::case` implements it, so its row is checked here and not
+/// tabled. Every other conditional row names a language (`lt`, `tr`, `az`),
+/// and this crate is never told a run's language, so they are counted and not
+/// applied; a conditional row naming a context this file does not know
+/// **fails the build**, for the reason `Class` names its variants.
+fn case_mappings(data: &Path, out: &mut String) {
+    let path = data.join("UnicodeData.txt");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("the vendored UCD is missing: {} ({e})", path.display()));
+    let mut upper: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    let mut lower: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    let mut title: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.trim_end_matches('\r').split(';').collect();
+        if fields.len() < 15 {
+            continue;
+        }
+        let code = hex(fields[0]);
+        let simple = |field: &str| -> Option<Vec<u32>> {
+            let field = field.trim();
+            (!field.is_empty()).then(|| vec![hex(field)])
+        };
+        let up = simple(fields[12]);
+        if let Some(mapped) = &up {
+            upper.insert(code, mapped.clone());
+        }
+        if let Some(mapped) = simple(fields[13]) {
+            lower.insert(code, mapped);
+        }
+        if let Some(mapped) = simple(fields[14]).or(up) {
+            title.insert(code, mapped);
+        }
+    }
+
+    let special = std::fs::read_to_string(data.join("SpecialCasing.txt"))
+        .unwrap_or_else(|e| panic!("the vendored UCD is missing SpecialCasing.txt ({e})"));
+    let mut language_rows = 0usize;
+    let mut final_sigma = false;
+    for line in special.lines() {
+        let line = line.trim_end_matches('\r');
+        let body = match line.find('#') {
+            Some(0) => continue,
+            Some(at) => &line[..at],
+            None => line,
+        };
+        let fields: Vec<&str> = body.split(';').map(str::trim).collect();
+        if fields.len() < 4 || fields[0].is_empty() {
+            continue;
+        }
+        let code = hex(fields[0]);
+        let mapping = |field: &str| -> Vec<u32> { field.split_whitespace().map(hex).collect() };
+        let condition = fields.get(4).copied().unwrap_or("");
+        if !condition.is_empty() {
+            let first = condition.split_whitespace().next().unwrap_or("");
+            match first {
+                "Final_Sigma" => {
+                    assert!(
+                        code == 0x3a3 && mapping(fields[1]) == [0x3c2],
+                        "a Final_Sigma row this build does not implement: {line}"
+                    );
+                    final_sigma = true;
+                }
+                "lt" | "tr" | "az" => language_rows += 1,
+                other => {
+                    panic!("SpecialCasing.txt names a condition this build does not know: {other}")
+                }
+            }
+            continue;
+        }
+        lower.insert(code, mapping(fields[1]));
+        title.insert(code, mapping(fields[2]));
+        upper.insert(code, mapping(fields[3]));
+    }
+    assert!(final_sigma, "SpecialCasing.txt lost its Final_Sigma row");
+
+    let table = |name: &str, map: &BTreeMap<u32, Vec<u32>>, out: &mut String| {
+        let mut body = String::new();
+        let mut rows = 0usize;
+        for (code, mapped) in map {
+            // An identity mapping is no mapping: the lookup's default is the
+            // character itself.
+            if mapped.as_slice() == [*code] {
+                continue;
+            }
+            let mut literal = String::new();
+            for c in mapped {
+                let _ = write!(literal, "\\u{{{c:x}}}");
+            }
+            let _ = writeln!(body, "    ({code:#x}, \"{literal}\"),");
+            rows += 1;
+        }
+        let _ = writeln!(
+            out,
+            "/// {rows} full {name} mappings, from the vendored UnicodeData.txt and \
+             SpecialCasing.txt.\npub static {name}_MAP: &[(u32, &str)] = &[\n{body}];"
+        );
+    };
+    table("UPPER", &upper, out);
+    table("LOWER", &lower, out);
+    table("TITLE", &title, out);
+    let _ = writeln!(
+        out,
+        "/// SpecialCasing.txt's language-conditional rows, counted and not applied.\n\
+         pub const LANGUAGE_CASING_ROWS: usize = {language_rows};"
     );
 }
 

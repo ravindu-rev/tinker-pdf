@@ -65,9 +65,9 @@ pub struct Colour {
 /// is a property of the **operator that sets a colour**, not of a number. A
 /// gradient *stop* cannot have one at all: 8.7.4.5's shading states one space
 /// for the whole function and a stop is not free to pick its own. So a stop
-/// reads [`Colour::rgb`] — the default-`/Alternate` reading — and the gradient
-/// says it approximated, while a `SolidColorBrush` carries the components
-/// verbatim through here and loses nothing.
+/// is converted to sRGB through its profile — 18.3.1.2's own rule — while a
+/// `SolidColorBrush` carries the components verbatim through here and loses
+/// nothing.
 ///
 /// The part is carried unresolved for [`Paint::Image`]'s reason: reading it
 /// needs the package, and this module is pure.
@@ -126,6 +126,18 @@ pub enum Paint {
         shading: Shading,
         /// Shading space into the space the element draws in.
         matrix: [f64; 6],
+        /// The stops' **alphas**, where they differ, as a second shading over
+        /// the same geometry and the same `matrix`: one output, the alpha, in
+        /// `/DeviceGray`.
+        ///
+        /// 8.7.4.5's shading carries colour and no alpha, so a gradient whose
+        /// stops are not all equally opaque is two shadings — the colours, and
+        /// the alphas painted as a grey for 11.6.5.2's `/Luminosity` soft mask
+        /// to read back over the colours. 18.3.2 interpolates colour and alpha
+        /// separately, each between its enclosing stops, which is exactly what
+        /// a mask over a ramp composes to. `None` where every stop carries one
+        /// alpha, which [`Brush::alpha`] states instead.
+        alphas: Option<Box<Shading>>,
     },
     /// An `ImageBrush` (15.3), which becomes a PDF tiling pattern.
     ///
@@ -247,9 +259,10 @@ pub struct Brush {
     /// brush's `Opacity` multiplied together.
     pub alpha: f64,
     /// Whether something about the brush reached the page **approximately**:
-    /// gradient stops whose alphas differ from each other, which one constant
-    /// alpha cannot express, or a `ColorInterpolationMode` this build does not
-    /// interpolate in. Reported by name rather than left silent.
+    /// a `ContextColor` stop, or a `ColorInterpolationMode` this build does not
+    /// interpolate in. Reported by name rather than left silent. Stops whose
+    /// alphas differ are **not** among them since they became a soft mask —
+    /// see [`Paint::Gradient::alphas`].
     pub approximated: bool,
 }
 
@@ -340,9 +353,9 @@ pub fn colour(text: &str) -> Result<Colour, BrushError> {
 /// says such a space falls back to `/Alternate`, and that `/Alternate`
 /// defaults by component count to `DeviceGray`, `DeviceRGB` or `DeviceCMYK`.
 /// So the fallback is not invented here either — it is the one PDF already
-/// specifies for exactly this situation, and it is only ever reached where a
-/// colour space cannot be named at all (a gradient stop) or where the part is
-/// missing.
+/// specifies for exactly this situation, and it is only ever reached where the
+/// part is missing, or where a gradient stop — which cannot name a colour
+/// space at all — has a profile this build cannot evaluate.
 pub fn context_colour(rest: &str) -> Result<(Colour, ContextColour), BrushError> {
     // A profile URI has to be separated from the keyword by whitespace;
     // `ContextColorx` is not a `ContextColor` and `#ContextColor` is not a
@@ -385,10 +398,11 @@ pub fn context_colour(rest: &str) -> Result<(Colour, ContextColour), BrushError>
 /// evaluated.
 ///
 /// This is what a PDF reader does with a profile it cannot use, and it is
-/// reached here for the two cases where an `/ICCBased` space cannot be named:
-/// a gradient stop, and a profile part that is not in the package. Nothing
-/// about it is this build's invention — the *rule* is PDF's and the numbers
-/// are the file's.
+/// reached here for the two cases where neither an `/ICCBased` space nor the
+/// profile's own answer is to be had: a gradient stop whose profile cannot be
+/// evaluated, and a profile part that is not in the package. Nothing about it
+/// is this build's invention — the *rule* is PDF's and the numbers are the
+/// file's.
 ///
 /// A component count that is none of one, three or four has no default
 /// alternate at all, and PDF has no colour space for it that does not need a
@@ -435,6 +449,16 @@ fn sc_rgb(values: &str) -> Result<Colour, BrushError> {
         rgb: components.map(srgb_transfer),
         alpha,
     })
+}
+
+/// IEC 61966-2-1's transfer function inverted: sRGB to linear light.
+fn srgb_decode(encoded: f64) -> f64 {
+    let value = encoded.clamp(0.0, 1.0);
+    if value <= 0.040_45 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// IEC 61966-2-1's transfer function, linear light to sRGB.
@@ -492,6 +516,19 @@ fn tinted(text: &str) -> Result<Brush, BrushError> {
 /// Every failure is [`BrushError::Syntax`]: there is no brush in section 15
 /// this build declines to paint.
 pub fn from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushError> {
+    from_node_resolving(node, bbox, &unresolved)
+}
+
+/// [`from_node`], with the profiles a `ContextColor` gradient stop is
+/// converted through.
+///
+/// # Errors
+/// As [`from_node`].
+pub fn from_node_resolving(
+    node: &Node,
+    bbox: Option<[f64; 4]>,
+    resolve: Resolve<'_>,
+) -> Result<Brush, BrushError> {
     if !node.xps {
         return Err(BrushError::Syntax);
     }
@@ -501,7 +538,9 @@ pub fn from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Brush, BrushErro
             brush.alpha *= opacity_of(node)?;
             Ok(brush)
         }
-        "LinearGradientBrush" | "RadialGradientBrush" => gradient(node, bbox, Channel::Colour),
+        "LinearGradientBrush" | "RadialGradientBrush" => {
+            gradient(node, bbox, Channel::Colour, resolve)
+        }
         "ImageBrush" => image_brush(node, bbox),
         "VisualBrush" => visual_brush(node, bbox),
         _ => Err(BrushError::Syntax),
@@ -598,7 +637,9 @@ pub fn mask_from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Mask, Brush
             Ok(Mask::Uniform(colour.alpha * opacity_of(node)?))
         }
         "LinearGradientBrush" | "RadialGradientBrush" => {
-            let stops = stops_of(node)?;
+            // The alphas are all a mask reads, and a stop's alpha is the
+            // markup's whatever its profile says about its colour.
+            let stops = stops_of(node, &unresolved)?;
             let opacity = opacity_of(node)?;
             // Every stop carrying one alpha is a gradient that does not vary
             // where a mask reads it, whatever it does with colour — so it is
@@ -610,9 +651,11 @@ pub fn mask_from_node(node: &Node, bbox: Option<[f64; 4]>) -> Result<Mask, Brush
             {
                 return Ok(Mask::Uniform(stops[0].colour.alpha * opacity));
             }
-            let brush = gradient(node, bbox, Channel::Alpha)?;
+            let brush = gradient(node, bbox, Channel::Alpha, &unresolved)?;
             match brush.paint {
-                Paint::Gradient { shading, matrix } => Ok(Mask::Luminosity {
+                Paint::Gradient {
+                    shading, matrix, ..
+                } => Ok(Mask::Luminosity {
                     shading,
                     matrix,
                     opacity,
@@ -808,19 +851,41 @@ fn spread_of(node: &Node) -> Result<Spread, BrushError> {
 struct Stop {
     offset: f64,
     colour: Colour,
-    /// Whether the stop stated a `ContextColor`.
+    /// Whether the stop stated a `ContextColor` its profile could not convert.
     ///
     /// 8.7.4.5's shading names **one** colour space for the whole function, so
-    /// a stop cannot carry a space of its own the way a solid fill can: it
-    /// takes 8.6.5.5's default-`/Alternate` reading and the gradient says it
-    /// approximated. Recorded here rather than inferred from the colour,
-    /// because the reading is a perfectly ordinary RGB triple once it is made
-    /// and nothing about the number remembers where it came from.
+    /// a stop cannot carry a space of its own the way a solid fill can: it is
+    /// converted to sRGB through its profile (18.3.1.2), and where that cannot
+    /// be done it takes 8.6.5.5's default-`/Alternate` reading and the
+    /// gradient says it approximated. Recorded here rather than inferred from
+    /// the colour, because the reading is a perfectly ordinary RGB triple once
+    /// it is made and nothing about the number remembers where it came from.
     contextual: bool,
 }
 
+/// What turns a `ContextColor` into the sRGB its profile says it is: the
+/// painter's profiles, evaluated. `None` where the profile is not there or
+/// cannot be evaluated.
+///
+/// A parameter rather than a lookup this module does, because the profiles
+/// are the package's and this module is pure.
+pub type Resolve<'a> = &'a dyn Fn(&ContextColour) -> Option<[f64; 3]>;
+
+/// A [`Resolve`] that resolves nothing, for a caller with no profiles.
+#[must_use]
+pub fn unresolved(_: &ContextColour) -> Option<[f64; 3]> {
+    None
+}
+
 /// 15.4.2's stop list, from either spelling of the property element.
-fn stops_of(node: &Node) -> Result<Vec<Stop>, BrushError> {
+///
+/// A `ContextColor` stop is converted to sRGB through `resolve` — 18.3.1.2's
+/// own first step, *"convert the color values to sRGB first"*, which applies
+/// wherever a stop is sRGB or scRGB and is this build's choice where none is,
+/// since no print ticket's blending space is read. A stop `resolve` cannot
+/// convert keeps 8.6.5.5's default-`/Alternate` reading and the gradient says
+/// it approximated.
+fn stops_of(node: &Node, resolve: Resolve<'_>) -> Result<Vec<Stop>, BrushError> {
     let property = format!("{}.GradientStops", node.local);
     let mut out = Vec::new();
     let mut push = |stop: &Node| -> Result<(), BrushError> {
@@ -828,13 +893,21 @@ fn stops_of(node: &Node) -> Result<Vec<Stop>, BrushError> {
             return Ok(());
         }
         let text = stop.attr("Color").ok_or(BrushError::Syntax)?;
-        let colour = colour(text)?;
+        let mut colour = colour(text)?;
         let offset = markup::number(stop.attr("Offset").ok_or(BrushError::Syntax)?)
             .ok_or(BrushError::Syntax)?;
+        let mut contextual = false;
+        if let Some(rest) = text.trim().strip_prefix("ContextColor") {
+            let (_, tint) = context_colour(rest)?;
+            match resolve(&tint) {
+                Some(rgb) => colour.rgb = rgb,
+                None => contextual = true,
+            }
+        }
         out.push(Stop {
             offset: offset.clamp(0.0, 1.0),
             colour,
-            contextual: text.trim_start().starts_with("ContextColor"),
+            contextual,
         });
         Ok(())
     };
@@ -857,25 +930,47 @@ fn stops_of(node: &Node) -> Result<Vec<Stop>, BrushError> {
     Ok(out)
 }
 
-fn gradient(node: &Node, bbox: Option<[f64; 4]>, channel: Channel) -> Result<Brush, BrushError> {
-    let stops = stops_of(node)?;
+fn gradient(
+    node: &Node,
+    bbox: Option<[f64; 4]>,
+    channel: Channel,
+    resolve: Resolve<'_>,
+) -> Result<Brush, BrushError> {
+    let stops = stops_of(node, resolve)?;
     let spread = spread_of(node)?;
-    let approximated = stops
-        .iter()
-        .any(|stop| stop.colour.alpha != stops[0].colour.alpha)
-        // A `ContextColor` stop, which cannot carry its own colour space into
-        // a shading — see `Stop::contextual`. Named rather than left silent,
-        // because the same colour on a solid fill *is* exact and a reader
-        // comparing the two is entitled to know which one lost something.
-        || stops.iter().any(|stop| stop.contextual)
-        // 15.4's `ScRgbLinearInterpolation` interpolates in linear light and
-        // this writer interpolates in the shading's own `/DeviceRGB`, which is
-        // sRGB. The endpoints are right and the middle is not, so it is
-        // reported as approximate rather than either refused or left silent.
-        || node
-            .attr("ColorInterpolationMode")
-            .is_some_and(|mode| mode.trim() == "ScRgbLinearInterpolation");
-    let alpha = stops[0].colour.alpha * opacity_of(node)?;
+    // Stops whose alphas differ vary across the element, which one constant
+    // alpha cannot say: they become a second shading, of the alphas, which the
+    // painter reads back as a soft mask over the colours.
+    let varying = channel == Channel::Colour
+        && stops
+            .iter()
+            .any(|stop| stop.colour.alpha != stops[0].colour.alpha);
+    // A `ContextColor` stop, which cannot carry its own colour space into
+    // a shading — see `Stop::contextual`. Named rather than left silent,
+    // because the same colour on a solid fill *is* exact and a reader
+    // comparing the two is entitled to know which one lost something.
+    //
+    // 18.3.1.2's `ScRgbLinearInterpolation`: the stops converted to scRGB —
+    // linear light — and interpolated there. The shading's `/DeviceRGB` is
+    // sRGB, so each interval is written as a sampled function of the sRGB
+    // the linear blend comes to; `SRgbLinearInterpolation`, the default, is
+    // the shading's own interpolation and needs nothing. A value that is
+    // neither is blended as the default, and named.
+    let mode = node.attr("ColorInterpolationMode").map(str::trim);
+    let linear_light = mode == Some("ScRgbLinearInterpolation");
+    let approximated = stops.iter().any(|stop| stop.contextual)
+        || !matches!(
+            mode,
+            None | Some("SRgbLinearInterpolation" | "ScRgbLinearInterpolation")
+        );
+    // A varying alpha is the soft mask's to state, so the constant is the
+    // brush's own `Opacity` alone; a uniform one is that times the stops' one
+    // alpha.
+    let alpha = if varying {
+        opacity_of(node)?
+    } else {
+        stops[0].colour.alpha * opacity_of(node)?
+    };
 
     let relative = match node.attr("MappingMode") {
         None | Some("Absolute") => false,
@@ -898,9 +993,17 @@ fn gradient(node: &Node, bbox: Option<[f64; 4]>, channel: Channel) -> Result<Bru
         .map_err(|_| BrushError::Syntax)?
         .unwrap_or(markup::IDENTITY);
 
-    let (shading, inner) = match node.local.as_str() {
-        "LinearGradientBrush" => linear(node, &stops, spread, channel)?,
-        _ => radial(node, &stops, spread, channel)?,
+    let shade = |channel: Channel| match node.local.as_str() {
+        "LinearGradientBrush" => linear(node, &stops, spread, channel, linear_light),
+        _ => radial(node, &stops, spread, channel, linear_light),
+    };
+    let (shading, inner) = shade(channel)?;
+    // The same geometry and the same matrix, so the mask lies exactly over
+    // the colours it fades.
+    let alphas = if varying {
+        Some(Box::new(shade(Channel::Alpha)?.0))
+    } else {
+        None
     };
     let matrix = markup::concat(inner, markup::concat(unit, brush_transform));
     if !matrix.iter().all(|v| markup::usable(*v)) {
@@ -908,7 +1011,11 @@ fn gradient(node: &Node, bbox: Option<[f64; 4]>, channel: Channel) -> Result<Bru
     }
 
     Ok(Brush {
-        paint: Paint::Gradient { shading, matrix },
+        paint: Paint::Gradient {
+            shading,
+            matrix,
+            alphas,
+        },
         alpha,
         approximated,
     })
@@ -920,6 +1027,7 @@ fn linear(
     stops: &[Stop],
     spread: Spread,
     channel: Channel,
+    linear_light: bool,
 ) -> Result<(Shading, [f64; 6]), BrushError> {
     let start = node
         .attr("StartPoint")
@@ -933,7 +1041,7 @@ fn linear(
         return Err(BrushError::Syntax);
     }
 
-    let base = ramp(stops, channel);
+    let base = ramp(stops, channel, linear_light);
     let (function, coords) = match spread {
         Spread::Pad => (base, [start.0, start.1, end.0, end.1]),
         _ => {
@@ -987,6 +1095,7 @@ fn radial(
     stops: &[Stop],
     spread: Spread,
     channel: Channel,
+    linear_light: bool,
 ) -> Result<(Shading, [f64; 6]), BrushError> {
     let centre = node
         .attr("Center")
@@ -1023,7 +1132,7 @@ fn radial(
         ),
     );
 
-    let base = ramp(stops, channel);
+    let base = ramp(stops, channel, linear_light);
     let (function, coords) = match spread {
         Spread::Pad => (base, [focal.0, focal.1, 0.0, centre.0, centre.1, rx]),
         _ => {
@@ -1056,12 +1165,47 @@ fn radial(
     ))
 }
 
+/// How many samples one stop interval of a linear-light ramp is written as.
+///
+/// Not a bound — nothing is refused at it — but a resolution: the sRGB a
+/// linear blend comes to is concave, steepest near black, and 7.10.2's
+/// interpolation between 256 samples of it stays within 0.0018 of the curve
+/// there — measured over every interval, under half the step an eight-bit
+/// output can show — and far closer elsewhere.
+const LINEAR_LIGHT_SAMPLES: u32 = 256;
+
+/// One stop interval interpolated in linear light, as 7.10.2's sampled
+/// function of the sRGB it comes to: 18.3.1.2's `ScRgbLinearInterpolation`.
+fn linear_light_piece(from: &[f64], to: &[f64]) -> Function {
+    let last = f64::from(LINEAR_LIGHT_SAMPLES - 1);
+    let from: Vec<f64> = from.iter().map(|c| srgb_decode(*c)).collect();
+    let to: Vec<f64> = to.iter().map(|c| srgb_decode(*c)).collect();
+    let mut samples = Vec::with_capacity(LINEAR_LIGHT_SAMPLES as usize * from.len());
+    for index in 0..LINEAR_LIGHT_SAMPLES {
+        let s = f64::from(index) / last;
+        for (a, b) in from.iter().zip(&to) {
+            let encoded = srgb_transfer(a + s * (b - a));
+            samples.push((encoded * 65535.0).round() as u16);
+        }
+    }
+    Function::Sampled {
+        domain: vec![[0.0, 1.0]],
+        range: vec![[0.0, 1.0]; from.len()],
+        size: vec![LINEAR_LIGHT_SAMPLES],
+        samples,
+    }
+}
+
 /// One period of the gradient, as a function over `[0, 1]`.
 ///
 /// Stops that do not reach the ends are extended flat, because 15.4.2 makes
 /// the colour before the first stop and after the last one that stop's own —
 /// which is a statement about the gradient and not about `/Extend`.
-fn ramp(stops: &[Stop], channel: Channel) -> Function {
+///
+/// `linear_light` is 18.3.1.2's `ScRgbLinearInterpolation`, which changes
+/// how the **colours** are blended between stops and not the alpha: an alpha
+/// is a coverage, not a light level.
+fn ramp(stops: &[Stop], channel: Channel, linear_light: bool) -> Function {
     let mut offsets: Vec<f64> = Vec::with_capacity(stops.len() + 2);
     let mut colours: Vec<Vec<f64>> = Vec::with_capacity(stops.len() + 2);
     if stops[0].offset > 0.0 {
@@ -1094,11 +1238,15 @@ fn ramp(stops: &[Stop], channel: Channel) -> Function {
     let mut pieces: Vec<Function> = Vec::new();
     let mut bounds: Vec<f64> = Vec::new();
     for at in 1..offsets.len() {
-        pieces.push(Function::Exponential {
-            domain: [0.0, 1.0],
-            c0: colours[at - 1].clone(),
-            c1: colours[at].clone(),
-            n: 1.0,
+        pieces.push(if linear_light && channel == Channel::Colour {
+            linear_light_piece(&colours[at - 1], &colours[at])
+        } else {
+            Function::Exponential {
+                domain: [0.0, 1.0],
+                c0: colours[at - 1].clone(),
+                c1: colours[at].clone(),
+                n: 1.0,
+            }
         });
         if at + 1 < offsets.len() {
             bounds.push(offsets[at]);

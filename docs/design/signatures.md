@@ -9,7 +9,8 @@ private key held by a caller-supplied signer callback so key material never ente
 **All of that now happens.** Milestones 1 and 3 through 8 have landed, with milestone 2's
 crate under them. `Document::signatures()` finds every signature and classifies what its
 `/ByteRange` covers; `tinker-pdf-pki` reads DER, X.509 and CMS `SignedData`;
-`tinker-pdf-crypto` verifies RSA and ECDSA against 520 published vectors;
+`tinker-pdf-crypto` verifies RSA — PKCS#1 v1.5 and PSS — and ECDSA against 940 published
+vectors;
 `Document::verify_signatures()` assembles the four answers, reaching both algorithms; `Signature::modifications()`
 measures later revisions against `/DocMDP`; and `DocumentEditor::save_signed` produces
 signatures of its own, certifying and locking fields, with the key held by the caller. What
@@ -279,6 +280,147 @@ one returning a *positive* verdict is a forgery accepted. Both tests that catch 
 "verified" from "reached the arm", and neither can a fixture that only ever expects
 `NotChecked`.
 
+### RSASSA-PSS, and the two checks no vector reaches
+
+Wired 2 October 2026. `tinker_pdf_pki::pss` reads RFC 4055 §3.1's `RSASSA-PSS-params` out
+of a signer's `signatureAlgorithm`, a certificate's, or an `id-RSASSA-PSS` key's own
+restrictions; `RsaPublicKey::verify_pss` is RFC 8017 §8.1.2 with EMSA-PSS-VERIFY and MGF1;
+the verdict's PSS arm and the chain walk's PSS link take every length from the parameters
+and enforce RFC 4056 §3's key restrictions. The evidence is the same three-way split the
+ECDSA arm has: 360 CAVP `SigVerPSS` vectors and RSA Laboratories' 60 for the arithmetic —
+the second set is there for its 1 025- to 1 031-bit keys, where `emLen` is one octet short
+of the signature and NIST's whole-octet moduli never go — OpenSSL 3.0.13's CMS and
+certificates in `tests/signature_support/rsa-pss.pdf`, and this repository's `/ByteRange`
+on both sides.
+
+Counted injections, `cargo test --no-fail-fast` over `tinker-pdf-crypto`'s `rsa` tests for
+the first five and over `tinker-pdf-pki` plus the facade's four signature suites for the
+rest:
+
+| # | Defect reintroduced | Caught by |
+|---|---------------------|-----------|
+| 1 | `emLen` taken as `k`, the signature's length, rather than `ceil((modBits − 1) / 8)` | 1 |
+| 2 | step 6 skipped: bits above `emBits` not checked before unmasking | **0 → 1** |
+| 3 | step 4 skipped: the `0xbc` trailer not checked | **0 → 1** |
+| 4 | the salt length inferred from where the padding ends, not the parameters | 1 |
+| 5 | MGF1's counter starting at 1 | 4 |
+| 6 | `saltLength` read and discarded, so every signature is read at the default 20 | 7 |
+| 7 | an `id-RSASSA-PSS` key reported as unrecognised, not as `RSAPublicKey` | 8 |
+| 8 | RFC 4056 §3's salt minimum not enforced | 1 |
+| 9 | the PSS arm answering `Verified` without calling the arithmetic | **1 → 2** |
+| 10 | the chain walk's PSS link never verified | 2 |
+| 11 | `maskedDB` unmasked with the message hash rather than MGF1's own | **0 → 1** |
+
+**Rows 2 and 3 are the finding.** A signer following EMSA-PSS-ENCODE cannot produce a
+block that breaks either check while keeping `H` right, so no published vector — not one
+of 420 — reaches them, and a verifier without them passed everything. Neither is a
+forgery on its own; both are a verifier accepting an encoding the standard does not have.
+`a_block_a_signer_could_not_have_written_is_refused_even_where_h_matches` recovers RSA
+Laboratories' example 3 `EM` with the public key and spoils it seven ways and four ways.
+
+**Row 11 was found in review**, and for the same reason as rows 2 and 3: NIST's and RSA
+Laboratories' vectors, and the OpenSSL fixture, all mask with the message hash, so step 8's
+choice of hash was never exercised. `pss-mgf1.txt` in `tinker-pdf-crypto`'s test data is four
+signatures OpenSSL 3.0.13 made on 3 October 2026 with the two hashes apart, in both
+directions of output length; each must verify under its own parameters and be refused under
+the message hash as the mask hash.
+
+**Row 9 found a test that was not testing what it said.** Declaring the fixture's 32-octet
+salt as 31 was meant to prove the salt length is read from the parameters; it was refused
+by the key's salt minimum before the arithmetic ran, so the injection that skipped the
+arithmetic left it passing. It declares 33 now, a salt the key permits.
+
+**RFC 5652 §5.4's other case**, wired the same day: a signer with no signed attributes is
+verified over the content's own digest — the covered bytes, for a detached signature — and
+the verdict says the two questions are then one (`Unchecked::NoSignedAttributes` is the
+digest's reason only when the signature failed). Injections over the facade's signature
+suites: the covered bytes always digested with SHA-1 fires 1, the digest never upgraded to
+`Matches` fires 1, upgraded even when the signature failed fires 2, and the old by-name
+refusal restored fires 4.
+
+**`adbe.pkcs7.sha1`**, the same day: the document digest is two links — the encapsulated
+twenty octets against the covered bytes' SHA-1, and the signer's `messageDigest` against
+those octets — and `a_document_and_its_encapsulated_digest_replaced_together_are_caught` is
+the test the second link exists for. Injections: the second link skipped fires 1; the
+document digested under the signer's algorithm rather than SHA-1 fires 2; the
+`messageDigest` taken under SHA-1 rather than the signer's algorithm fires 1; the `eContent`
+ignored when there are no signed attributes fires 2; the old by-name refusal restored
+fires 3. `Unchecked::LegacySha1SubFilter` is gone and `ContentNotEncapsulated` names the
+one refusal left, a message under the subfilter that is detached.
+
+**`GeneralNames`**, the same day: `tinker_pdf_pki::general_name` reads RFC 5280 §4.2.1.6's
+choice, decoded on request in the alternative-name extensions, `authorityCertIssuer` and an
+ESS `issuerSerial`, against RFC 5280 C.2's mailbox and an OpenSSL CAdES fixture carrying
+eight of the nine alternatives. The one thing easy to get wrong is that `[4]` is explicit —
+`Name` is a `CHOICE`, and X.680 §31.2.7 makes a tag on one explicit whatever the module
+says — and reading it implicitly is the injection that fires most: 6. The others: a
+mailbox read as UTF-8 rather than IA5 fires 1; an empty `GeneralNames` accepted fires 1;
+an address of any length accepted fires 1; `IssuerSerial::identifies` ignoring the serial
+fires 1; `authorityCertIssuer` read as a SEQUENCE rather than an implicit one's content
+fires 1. `subjectAltName` stays out of what `unrecognised_critical` counts as recognised:
+decoding a name is not identifying a subject by it, and nothing here does the latter.
+
+**RFC 3161 signature timestamps**, the same day. `tinker_pdf_pki::tsp` reads a
+`TimeStampToken` — the envelope through `cms`, the `TSTInfo` with RFC 3161 §2.4.2's
+fractional `genTime` and its explicitly tagged `tsa` `GeneralName` — and `cms` gained RFC
+2634's first-version `signingCertificate`, whose `ESSCertID`s are SHA-1 with no algorithm
+field, because that is what RFC 3161 §2.4.1 names and what OpenSSL's TSA writes by
+default. The verdict asks five things of each token: the imprint against the signature
+octets, the token's signature, its `messageDigest` against the `TSTInfo` (a time rewritten
+under an intact signature fails here and nowhere else), §2.3's critical
+`timeStamping`-only extended key usage with §2.4.1's ESS binding, and the chain, judged at
+`genTime`. The evidence is one token OpenSSL 3.0.13's TSA made. Injections: the imprint
+taken over the whole `SignerInfo` fires 2; the `TSTInfo` digest unchecked fires 1; the
+EKU's criticality unchecked fires 1; the ESS binding unchecked fires 1; `tsa` read
+implicitly fires 9; a fraction with a trailing zero accepted fires 1. No corpus token has
+been validated by this code: the seven `cms_census.rs` counts are unread here.
+
+**Review of 3 October 2026 found three verdicts that said more than they had checked**,
+each a shape OpenSSL will not sign, so `signature_shapes.rs` now assembles them with the
+committed throwaway key, a control beside each. Signed attributes with no `messageDigest`
+(RFC 5652 §5.3 forbids it) bound nothing and were read as binding: a token's signature
+read `Verified` for whatever `TSTInfo` sat beside it, and an `adbe.pkcs7.sha1` message
+carrying the right digest read `Matches` and trusted with no signature over it. Both
+are `NotChecked(NoMessageDigest)` now, as is the detached digest, which read
+`NoSignedAttributes` for a signer that had some. A detached `adbe.pkcs7.sha1` message with
+no signed attributes borrowed its signature's answer as an ordinary detached one does; it
+stays `ContentNotEncapsulated`, as this page and the variant always said. And an
+`id-RSASSA-PSS` key, read as RSA since PSS landed, was used for PKCS#1 v1.5 signatures and
+links and sealed to; RFC 4055 §1.2 restricts it to RSASSA-PSS, and the OID is now asked at
+each use. Injections, one at a time over `tinker-pdf-pki` and the facade's signature
+suites: each of the six put back fires 1, and the sealing check fires 1 in each of
+`enveloped.rs` and `pubsec_write.rs`.
+
+**Document timestamps**, the same day: a `Timestamper` seam the shape of `Signer` —
+the engine hands over a digest and receives a token, and never speaks to an authority
+itself — and `DocumentEditor::save_timestamped`, which shares the reservation and the seal
+with `save_signed` through one `seal_update`; `Reserved::build`'s hard-coded `/Type /Sig`
+became `Reserved::build` and `Reserved::document_timestamp` over one `finish`. The reader
+gives an `ETSI.RFC3161` dictionary the token path: the imprint against the covered bytes,
+and `Verdict::is_trusted` requiring the document timestamp's own `TimestampVerdict`.
+Injections: the subfilter read as a detached signature fires 4; the imprint taken over the
+token rather than the covered bytes fires 3; `is_trusted` ignoring the document stamp
+fires 1; the dictionary typed `/Sig` fires 2; a visible target drawn as an invisible one
+fires 1; the adapter's digest ignored fires 1.
+
+**The document security store**, the same day. `add_validation_data` writes the catalog's
+`/DSS` — `/Certs`, `/CRLs` and `/OCSPs` as arrays of streams, one `/VRI` entry per named
+signature keyed by the SHA-1 of its `/Contents` (ETSI EN 319 142-1 §5.4.2.2) through one
+`validation_key` the reader shares — extending a store already there rather than replacing
+it, never writing a stream twice, and declaring `/ESIC` on a document below 2.0. The
+reader hands back references, not bytes, by the attachments precedent: a store may name
+thousands of streams and listing them should not cost decoding them. The evidence is a CRL
+and an OCSP response OpenSSL issued for a fixture's signer, held to coming back byte for
+byte, filed under the right key, with the signature still verifying over its revision.
+Injections: the `/VRI` key taken over the trimmed CMS rather than the stored `/Contents`
+fires 2; the duplicate check removed fires 1; a store already there replaced rather than
+extended fires 1; a non-stream member kept fires 1; `/ESIC` never declared fires 1.
+Review on 3 October 2026 found the reader silent about members of the wrong *type*: an
+entry that is not an array, a `/VRI` that is not a dictionary and an unreadable `/TU` read
+as nothing, and a `/DSS` that is not a dictionary as no store. Each is a typed
+`SecurityStoreWarning` now (ruling 10), and a null `/DSS` — absent, or a reference to no
+object, 7.3.10 — is still `None`. Each of the four warnings removed fires 1.
+
 ## Scope
 
 - **Read: byte-range digesting (12.8.1).** Parse the signature dictionary — `/ByteRange`,
@@ -293,8 +435,8 @@ one returning a *positive* verdict is a forgery accepted. Both tests that catch 
   `adbe.pkcs7.detached` and `adbe.pkcs7.sha1` (ISO 32000-1 12.8.3.3) plus
   `ETSI.CAdES.detached` (ISO 32000-2, CAdES subfilter clause); `adbe.x509.rsa_sha1` parsed
   and reported, verified only if the corpus says it still matters (ruling 3).
-- **Read: signature verification, hand-rolled, verify-only.** RSASSA-PKCS1-v1_5 (RFC 8017)
-  and ECDSA over P-256/P-384 (FIPS 186-4) verification in `tinker-pdf-crypto`, gated on
+- **Read: signature verification, hand-rolled, verify-only.** RSASSA-PKCS1-v1_5 and
+  RSASSA-PSS (RFC 8017) and ECDSA over P-256/P-384 (FIPS 186-4) verification in `tinker-pdf-crypto`, gated on
   published vectors exactly as the existing AES/SHA code is. Digests are the crate's existing
   `sha256`/`sha384`/`sha512` (RFC 5754 names them for CMS); SHA-1 accepted for legacy
   signatures and flagged as weak in the verdict.
@@ -320,24 +462,47 @@ one returning a *positive* verdict is a forgery accepted. Both tests that catch 
 
 - **Signing keys in the engine.** No key parsing (PKCS#8, PKCS#12), no key generation, no
   RSA/ECDSA *signing* arithmetic. The `Signer` callback returns finished CMS bytes.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: the owner's parity decision puts signing with a private
+  key in the engine, as [ROADMAP](../ROADMAP.md) rows SG-01 to SG-09 and SG-23. The sentence above
+  is what the build does until SG-01 lands, and the `Signer` seam stays beside in-engine
+  keys for keys the engine never sees.
 - **Revocation fetching.** No CRL or OCSP network traffic — the engine performs no I/O.
-  Embedded revocation data (PAdES DSS/VRI, ISO 32000-2 12.8.4.3) is parsed and surfaced;
-  evaluating freshness is the host's call.
-- **Timestamp validation.** RFC 3161 tokens inside CMS are parsed and reported (present,
-  TSA name, time); validating the TSA's own chain is a later tier, not this design.
+  Embedded revocation data is surfaced, and evaluating freshness is the host's call.
+  *Corrected 2 October 2026*: this bullet used to say the document security store (PAdES
+  DSS/VRI, ISO 32000-2 12.8.4.3) "is parsed and surfaced", and **nothing in the tree read
+  `/DSS` at all** — the only revocation data surfaced was a CMS blob's own `crls` field,
+  through `SignedData::crls`. It is true from that date: `Document::security_store` reads
+  the store back as references to its streams, with its `/VRI` entries keyed to
+  signatures, and `DocumentEditor::add_validation_data` writes one from host-supplied
+  certificates, CRLs and OCSP responses. Still surfaced, never evaluated: nothing parses a
+  CRL or an OCSP response, and the verdict does not consult the store.
+  *Narrowed, 9 October 2026*: parsing and evaluating CRLs and OCSP responses, building the
+  requests a host sends, and consulting the store are [ROADMAP](../ROADMAP.md) row SG-10; the
+  fetching itself stays the host's, because the engine performs no I/O.
+- ~~**Timestamp validation.** RFC 3161 tokens inside CMS are parsed and reported (present,
+  TSA name, time); validating the TSA's own chain is a later tier, not this design.~~ *No
+  longer a non-goal, 2 October 2026*: `Verdict::timestamps` validates each token's imprint,
+  signature, `TSTInfo` digest, authority certificate and chain (see the section on RFC 3161
+  above).
 - **Long-term validation profiles.** PAdES-LTA conformance levels are out; the verdict
   reports what is embedded, nothing more.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: the PAdES baseline levels with a level detector are
+  [ROADMAP](../ROADMAP.md) row SG-07, and validation per EN 319 102-1 is SG-12.
 - **The public-key security handler** (`/Filter /Adobe.PPKLite` encryption, 7.6.5) — related
   ASN.1, different feature.
-- **Visible signature appearance generation.** A signed field keeps whatever appearance the
-  caller set via the existing forms path; drawing seals is not signature work.
+- ~~**Visible signature appearance generation.** A signed field keeps whatever appearance the
+  caller set via the existing forms path; drawing seals is not signature work.~~ *No longer a
+  non-goal, 26 September 2026.* The reason given was a scope choice rather than a limit, and
+  the roadmap made it a row; it closed as `SigningTarget::NewVisibleField`, whose appearance is
+  built beside the annotation synthesis and is covered by the `/ByteRange` like everything else
+  the update writes ([features/signatures.md](../features/signatures.md)).
 
 ## Design
 
 **What already exists, and is load-bearing.** Three seams built earlier were built for this.
 First: `incremental_update` (`crates/tinker-pdf-cos/src/write.rs`) appends after the
 original bytes, adding a newline only when the base lacks one, and the test
-`an_incremental_save_keeps_the_original_bytes` (`crates/tinker-pdf-cos/src/edit.rs`) asserts
+`an_incremental_save_keeps_the_original_bytes` (`crates/tinker-pdf-cos/src/edit/tests.rs`) asserts
 `starts_with(original)` — "the signable prefix must survive an edit" is already a committed
 assertion, so the byte-identical prefix a signature needs is not new work. A second, older
 assertion of the same invariant sits in `write.rs` as
@@ -592,7 +757,7 @@ failure mode a chain walk should have.
 ## Dependencies
 
 - **Existing:** `incremental_update` and the `starts_with(original)` invariant
-  (`tinker-pdf-cos/src/write.rs`, `edit.rs`); `Revision.byte_range` from open
+  (`tinker-pdf-cos/src/write.rs`, `edit/save.rs`); `Revision.byte_range` from open
   (`xref.rs`, [opening](../features/opening.md)); `FieldKind::Signature` and field
   classification (`form.rs`); SHA-2 digests and the published-vector convention
   (`tinker-pdf-crypto`); the strict structural validator

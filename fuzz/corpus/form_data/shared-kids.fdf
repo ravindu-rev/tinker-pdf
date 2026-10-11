@@ -1,0 +1,10 @@
+%FDF-1.2
+1 0 obj
+<< /FDF << /Fields [ << /T (r) /Kids 5 0 R >> ] >> >>
+endobj
+5 0 obj
+[ << /T (a) /Kids 5 0 R >> << /T (b) /Kids 5 0 R >> ]
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF

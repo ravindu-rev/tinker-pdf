@@ -32,6 +32,26 @@
 //! | `Indices` names the glyph | `UnicodeString` names what it stands for, and the two are independent |
 //! | a run draws | the same run **extracts**, through a different reader |
 //! | an even `BidiLevel` draws | an odd one is refused by name |
+//!
+//! # Counted injection, 12.1.5's simulations
+//!
+//! Counted over this file and `xps_conservation.rs`, whose sweep holds
+//! `tests/xps_rows/wpf-style-simulations.xps`.
+//!
+//! | Defect injected | Tests that failed |
+//! | --- | ---: |
+//! | emboldening fills and does not stroke | 4 |
+//! | the widening stroke is 1% of the em, not 2% | 2 |
+//! | the stroke is not set in the fill's paint | 1 |
+//! | a font-supplied advance is not widened | 1 |
+//! | a stated advance is widened too | 2 |
+//! | S5.6's offset is not applied | 3 |
+//! | the italic shear is not applied | 3 |
+//! | the shear is applied in user space rather than text space | 2 |
+//! | the shear is applied before the offset | 1 |
+//! | a translucent emboldened run is not grouped | 1 |
+//! | a value 12.1.5 does not name is not named | 1 |
+//! | simulations are not drawn at all, as before | 7 |
 
 mod xps_support;
 
@@ -1216,33 +1236,220 @@ fn an_odd_bidi_levels_origin_is_the_runs_right_edge() {
     );
 }
 
-/// **A `StyleSimulations` is named and the run still draws**, which is the one
-/// of 12.1's three that is not a refusal.
+// ---- 12.1.5, StyleSimulations ------------------------------------------
+
+/// The `Tm` a stream sets, as its six numbers.
+fn text_matrix(stream: &str) -> Vec<f64> {
+    let line = stream
+        .lines()
+        .find(|line| line.trim_end().ends_with(" Tm"))
+        .unwrap_or_else(|| panic!("a Tm in {stream}"));
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let at = words.len() - 7;
+    words[at..at + 6]
+        .iter()
+        .map(|word| word.parse().expect("a number"))
+        .collect()
+}
+
+fn near_all(got: &[f64], wanted: &[f64]) -> bool {
+    got.len() == wanted.len() && got.iter().zip(wanted).all(|(a, b)| (a - b).abs() < 1e-4)
+}
+
+/// **12.1.5's emboldening**: the outline stroked at 2% of the em in the fill's
+/// own colour — mode 2, fill then stroke, round-joined so a corner grows by
+/// the 1% and no more — and the glyph moved up and right by 1% (S5.6).
 ///
-/// The glyphs, their widths and the text they stand for are all exactly what
-/// the file says; only the synthetic slant or weight is missing. That is the
-/// *paint* side of gap 30's asymmetry — the shape and its place are known and
-/// only its appearance is approximate — and dropping a page of text to avoid
-/// drawing it unslanted would lose far more than it saved.
+/// The em is a hundred units, so 2% is a line width of 2 and the move is one
+/// unit each way: `OriginX="10" OriginY="100"` becomes a text origin of
+/// (11, 99) in the page's y-down space.
 #[test]
-fn a_style_simulation_is_named_and_the_run_still_draws() {
-    for simulation in ["ItalicSimulation", "BoldSimulation", "BoldItalicSimulation"] {
-        let body = format!(r#"StyleSimulations="{simulation}" UnicodeString="A""#);
-        assert_eq!(
-            run_defects(&body),
-            [XpsElementDefect::GlyphsStyleSimulated],
-            "{simulation}"
-        );
-        assert_eq!(
-            array(&drawn(&body)),
-            "[<0001>]",
-            "{simulation}: the run still draws"
-        );
+fn bold_simulation_strokes_the_outline_at_two_percent_of_the_em() {
+    let body = r#"StyleSimulations="BoldSimulation" UnicodeString="A""#;
+    assert_eq!(run_defects(body), [], "drawn, so nothing to name");
+    let stream = drawn(body);
+    for operator in ["0 0 0 rg", "0 0 0 RG", "2 w", "1 j", "2 Tr"] {
+        assert!(stream.contains(operator), "{operator} in {stream}");
     }
+    assert!(
+        near_all(&text_matrix(&stream), &[1.0, 0.0, 0.0, -1.0, 11.0, 99.0]),
+        "{stream}"
+    );
+    let plain = drawn(r#"UnicodeString="A""#);
+    assert!(
+        !plain.contains(" Tr"),
+        "and a plain run states no mode: {plain}"
+    );
+    assert!(near_all(
+        &text_matrix(&plain),
+        &[1.0, 0.0, 0.0, -1.0, 10.0, 100.0]
+    ));
+}
+
+/// M5.13: every advance the **font** supplies grows by 2% of the em under
+/// emboldening, and an advance the markup states does not — it is the
+/// producer's layout, which M5.12 says already allowed for the widening.
+///
+/// Two glyphs at a hundred-unit em: the second sits two units further along,
+/// which a `TJ` states as −20 thousandths of the em.
+#[test]
+fn bold_simulation_widens_every_advance_the_font_supplies_and_no_other() {
+    let plain = array(&drawn(r#"UnicodeString="AA""#));
+    let bold = array(&drawn(
+        r#"StyleSimulations="BoldSimulation" UnicodeString="AA""#,
+    ));
+    assert_eq!(plain, "[<0001><0001>]");
+    assert_eq!(bold, "[<0001> -20 <0001>]");
+
+    let stated = r#"UnicodeString="AA" Indices=",80;,80""#;
+    assert_eq!(
+        array(&drawn(&format!(
+            r#"StyleSimulations="BoldSimulation" {stated}"#
+        ))),
+        array(&drawn(stated)),
+        "a stated advance is the producer's, emboldened or not"
+    );
+}
+
+/// **12.1.5's italic**: the top edge of the alignment box skewed 20° to the
+/// right of the baseline — the text matrix's second axis leaning by
+/// `tan 20°` along the first — with the advance unchanged.
+///
+/// A sideways run gets the same shear in text space, which is 12.1.5's
+/// "right edge skewed down" once the two axes are exchanged.
+#[test]
+fn italic_simulation_shears_the_text_matrix_twenty_degrees() {
+    let shear = 20.0f64.to_radians().tan();
+    let italic = drawn(r#"StyleSimulations="ItalicSimulation" UnicodeString="AA""#);
+    assert!(
+        near_all(&text_matrix(&italic), &[1.0, 0.0, shear, -1.0, 10.0, 100.0]),
+        "{italic}"
+    );
+    assert!(!italic.contains(" Tr"), "no stroke: {italic}");
+    assert_eq!(array(&italic), "[<0001><0001>]", "the advance is unchanged");
+
+    let sideways =
+        drawn(r#"IsSideways="true" StyleSimulations="ItalicSimulation" UnicodeString="A""#);
+    assert!(
+        near_all(
+            &text_matrix(&sideways),
+            &[0.0, 1.0, 1.0, shear, 10.0, 100.0]
+        ),
+        "{sideways}"
+    );
+
+    let both = drawn(r#"StyleSimulations="BoldItalicSimulation" UnicodeString="A""#);
+    assert!(
+        near_all(&text_matrix(&both), &[1.0, 0.0, shear, -1.0, 11.0, 99.0]),
+        "both, the move then the shear: {both}"
+    );
+    assert!(both.contains("2 Tr"), "{both}");
+}
+
+/// A value 12.1.5 does not name is named, and the run is drawn as designed.
+#[test]
+fn a_style_simulation_12_1_5_does_not_name_is_named_and_drawn_plain() {
+    let body = r#"StyleSimulations="Oblique" UnicodeString="AA""#;
+    assert_eq!(run_defects(body), [XpsElementDefect::GlyphsStyleSimulated]);
+    let stream = drawn(body);
+    assert!(!stream.contains(" Tr"), "{stream}");
+    assert_eq!(array(&stream), "[<0001><0001>]");
     assert_eq!(
         run_defects(r#"StyleSimulations="None" UnicodeString="A""#),
         [],
         "and the default says nothing"
+    );
+}
+
+/// A **translucent** emboldened run is drawn into a transparency group with
+/// the alpha applied once, because half the widening stroke lies inside the
+/// fill and a constant alpha would composite that band twice.
+#[test]
+fn a_translucent_emboldened_run_is_composited_once() {
+    let stream = drawn(r#"StyleSimulations="BoldSimulation" Opacity="0.5" UnicodeString="A""#);
+    assert!(stream.contains(" Do"), "the run is a form: {stream}");
+    assert!(!stream.contains("2 Tr"), "drawn inside it: {stream}");
+    let opaque = drawn(r#"StyleSimulations="BoldSimulation" UnicodeString="A""#);
+    assert!(
+        !opaque.contains(" Do"),
+        "and an opaque one is not: {opaque}"
+    );
+}
+
+/// A run filled by a gradient whose stops differ in alpha is drawn **through
+/// the mask of its alphas**, and an emboldened one is drawn inside that same
+/// group — one form, so the widening's overlap is composited once there too.
+#[test]
+fn a_run_whose_gradient_stops_differ_in_alpha_is_masked() {
+    let body = format!(
+        r##"<Glyphs OriginX="10" OriginY="100" FontRenderingEmSize="100" FontUri="{}" UnicodeString="A" StyleSimulations="BoldSimulation">
+              <Glyphs.Fill>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="100,0" MappingMode="Absolute">
+                  <LinearGradientBrush.GradientStops>
+                    <GradientStop Color="#FF000000" Offset="0" />
+                    <GradientStop Color="#00000000" Offset="1" />
+                  </LinearGradientBrush.GradientStops>
+                </LinearGradientBrush>
+              </Glyphs.Fill>
+            </Glyphs>"##,
+        font_uri("odttf")
+    );
+    let bytes = obfuscated(&body);
+    assert_eq!(defects(&bytes), []);
+    let page = stream(&open(&bytes).expect("an XPS"));
+    assert!(page.contains(" Do"), "{page}");
+    assert!(!page.contains("2 Tr"), "drawn inside the group: {page}");
+}
+
+/// **What the simulations look like**, in the real WPF font: the fixture in
+/// `tests/xps_rows` sets "Page one" four times at a 48-unit em — plain, bold,
+/// italic, both — a hundred units apart.
+///
+/// Emboldened ink is more ink, and italic ink leans: the dark pixels of the
+/// band near the top of the x-height sit to the right of those near the
+/// baseline by about `tan 20°` times the height between the two bands.
+#[test]
+fn the_simulations_draw_heavier_and_leaning_ink_in_a_real_font() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/xps_rows/wpf-style-simulations.xps");
+    let bytes = std::fs::read(&path).expect("the fixture");
+    let bitmap = render(&bytes);
+    // Dark pixels in XPS rows `from..to` (units), as (count, mean x).
+    let band = |from: f64, to: f64| {
+        let (mut count, mut sum) = (0usize, 0.0f64);
+        let rows = ((from * 0.75) as u32)..((to * 0.75) as u32);
+        for py in rows {
+            for px in 0..bitmap.width {
+                let base = (py as usize) * bitmap.stride + (px as usize) * bitmap.components();
+                if bitmap.data.get(base).is_some_and(|v| *v < 128) {
+                    count += 1;
+                    sum += f64::from(px);
+                }
+            }
+        }
+        (count, if count == 0 { 0.0 } else { sum / count as f64 })
+    };
+    let (plain, _) = band(150.0, 215.0);
+    let (bold, _) = band(250.0, 315.0);
+    assert!(plain > 0, "the plain run draws");
+    assert!(
+        bold as f64 > plain as f64 * 1.08,
+        "emboldened ink is heavier: {bold} against {plain}"
+    );
+
+    // The x-height of this face at 48 units is about 25; bands near its top
+    // and near the baseline, eighteen units apart.
+    let lean = |baseline: f64| {
+        let (_, top) = band(baseline - 22.0, baseline - 16.0);
+        let (_, bottom) = band(baseline - 4.0, baseline + 2.0);
+        (top - bottom) / 0.75
+    };
+    let upright = lean(200.0);
+    let italic = lean(400.0);
+    let expected = 20.0f64.to_radians().tan() * 18.0;
+    assert!(
+        (italic - upright - expected).abs() < expected * 0.5,
+        "the italic run leans by about {expected} units: {italic} against {upright}"
     );
 }
 

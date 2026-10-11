@@ -143,10 +143,68 @@ pub struct ComputedStyle {
     pub white_space: WhiteSpace,
     /// `list-style-type`
     pub list_style_type: ListStyleType,
+    /// `list-style-position`
+    pub list_style_position: ListStylePosition,
+    /// `counter-reset`, `css-lists-3` §4.2. Read by [`crate::counter`], which
+    /// walks the counter tree after the cascade; nothing downstream lays it
+    /// out.
+    pub counter_reset: Vec<CounterChange>,
+    /// `counter-increment`, §4.3.
+    pub counter_increment: Vec<CounterChange>,
+    /// `counter-set`, §4.4.
+    pub counter_set: Vec<CounterChange>,
+    /// `quotes`, `css-content-3` §3.2. Read by [`crate::counter`], which
+    /// resolves the quote keywords where it resolves `counter()`.
+    pub quotes: Quotes,
+    /// `opacity`, `css-color-4` §15.1, clamped to `[0, 1]`.
+    pub opacity: f64,
+    /// `transform`, `css-transforms-1` §5: the list, leftmost outermost; empty
+    /// for `none`.
+    pub transform: Vec<Transform>,
+    /// `transform-origin`, §6.
+    pub transform_origin: TransformOrigin,
+    /// `border-*-*-radius`, `css-backgrounds-3` §5.1, in [`Corner::ALL`]'s
+    /// order.
+    pub border_radius: [Radius; 4],
+    /// `outline-width`, `css-ui-4` §5.2, in CSS pixels.
+    pub outline_width: f64,
+    /// `outline-style`, §5.3.
+    pub outline_style: OutlineStyle,
+    /// `outline-color`, §5.4; `None` is `currentColor`, which is `color`.
+    pub outline_color: Option<Color>,
+    /// `outline-offset`, §5.5, in CSS pixels.
+    pub outline_offset: f64,
+    /// `overflow-x`, `css-overflow-3` §3.1, **computed**: §3.1's rule that
+    /// `visible` and `clip` become `auto` and `hidden` beside a scrolling
+    /// axis has been applied (see [`computed_overflow`]).
+    pub overflow_x: Overflow,
+    /// `overflow-y`, likewise.
+    pub overflow_y: Overflow,
     /// `visibility`
     pub visibility: Visibility,
     /// `text-decoration`
     pub text_decoration: TextDecoration,
+    /// `text-shadow`, `css-text-decor-3` §4, first on top.
+    pub text_shadow: Vec<Shadow>,
+    /// `box-shadow`, `css-backgrounds-3` §7.1, first on top.
+    pub box_shadow: Vec<Shadow>,
+    /// `text-transform`, `css-text-3` §2.1.
+    pub text_transform: TextTransform,
+    /// `color-scheme`, `css-color-adjust-1` §2.1: what a printed page reads
+    /// of it, which is whether the scheme is the light one (see
+    /// [`ColorScheme`]).
+    pub color_scheme: ColorScheme,
+    /// `font-kerning`, `css-fonts-4` §6.4.
+    pub font_kerning: FontKerning,
+    /// `font-feature-settings`, §6.12, in the order written; empty for
+    /// `normal`.
+    pub font_feature_settings: Vec<FeatureSetting>,
+    /// `direction`, `css-writing-modes-3` §2.1.
+    pub direction: Direction,
+    /// `unicode-bidi`, §2.2.
+    pub unicode_bidi: UnicodeBidi,
+    /// `hyphens`, `css-text-3` §5.4.
+    pub hyphens: Hyphens,
     /// `display`
     pub display: Display,
     /// `float`
@@ -171,6 +229,16 @@ pub struct ComputedStyle {
     pub border_color: Sides<Color>,
     /// `background-color`
     pub background_color: Color,
+    /// `background-image`, `css-backgrounds-3` §2.2: the one layer this build
+    /// draws — a URL unresolved (see [`ImageRef`]), or a gradient with `em`
+    /// resolved.
+    pub background_image: Option<Image>,
+    /// `background-repeat`, §2.3.
+    pub background_repeat: BackgroundRepeat,
+    /// `background-position`, §2.6, `em` resolved.
+    pub background_position: BackgroundPosition,
+    /// `background-size`, §2.4, `em` resolved.
+    pub background_size: BackgroundSize,
     /// `page-break-before`
     pub page_break_before: PageBreak,
     /// `page-break-after`
@@ -272,12 +340,37 @@ impl ComputedStyle {
             line_height: LineHeight::Normal,
             letter_spacing: Spacing::Normal,
             word_spacing: Spacing::Normal,
-            text_align: TextAlign::Left,
+            text_align: TextAlign::Start,
             text_indent: LengthPercentage::ZERO,
             white_space: WhiteSpace::Normal,
             list_style_type: ListStyleType::Disc,
+            list_style_position: ListStylePosition::Outside,
+            counter_reset: Vec::new(),
+            counter_increment: Vec::new(),
+            counter_set: Vec::new(),
+            quotes: Quotes::Auto,
+            opacity: 1.0,
+            transform: Vec::new(),
+            transform_origin: TransformOrigin::INITIAL,
+            border_radius: [Radius::ZERO; 4],
+            // §5.2's `medium`, which is `border-width`'s three pixels.
+            outline_width: 3.0,
+            outline_style: OutlineStyle::Border(BorderStyle::None),
+            outline_color: None,
+            outline_offset: 0.0,
+            overflow_x: Overflow::Visible,
+            overflow_y: Overflow::Visible,
             visibility: Visibility::Visible,
             text_decoration: TextDecoration::None,
+            text_shadow: Vec::new(),
+            box_shadow: Vec::new(),
+            text_transform: TextTransform::None,
+            color_scheme: ColorScheme::Normal,
+            font_kerning: FontKerning::Auto,
+            font_feature_settings: Vec::new(),
+            direction: Direction::Ltr,
+            unicode_bidi: UnicodeBidi::Normal,
+            hyphens: Hyphens::Manual,
             display: Display::Inline,
             float: Float::None,
             clear: Clear::None,
@@ -290,6 +383,10 @@ impl ComputedStyle {
             border_style: Sides::all(BorderStyle::None),
             border_color: Sides::all(Color::BLACK),
             background_color: Color::TRANSPARENT,
+            background_image: None,
+            background_repeat: BackgroundRepeat::REPEAT,
+            background_position: BackgroundPosition::INITIAL,
+            background_size: BackgroundSize::AUTO,
             page_break_before: PageBreak::Auto,
             page_break_after: PageBreak::Auto,
             page_break_inside: PageBreakInside::Auto,
@@ -371,7 +468,15 @@ impl ComputedStyle {
         style.text_align = parent.text_align;
         style.text_indent = parent.text_indent;
         style.white_space = parent.white_space;
+        style.text_transform = parent.text_transform;
+        style.color_scheme = parent.color_scheme;
+        style.font_kerning = parent.font_kerning;
+        style.font_feature_settings = parent.font_feature_settings.clone();
+        style.direction = parent.direction;
+        style.hyphens = parent.hyphens;
         style.list_style_type = parent.list_style_type;
+        style.list_style_position = parent.list_style_position;
+        style.quotes = parent.quotes.clone();
         style.visibility = parent.visibility;
         style.orphans = parent.orphans;
         style.widows = parent.widows;
@@ -380,6 +485,7 @@ impl ComputedStyle {
         style.word_break = parent.word_break;
         style.border_collapse = parent.border_collapse;
         style.border_spacing = parent.border_spacing;
+        style.text_shadow = parent.text_shadow.clone();
         style
     }
 }
@@ -446,8 +552,66 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::TextAlign(value) => style.text_align = *value,
         Property::TextIndent(value) => style.text_indent = value.compute(font_size, root_font_size),
         Property::TextDecoration(value) => style.text_decoration = *value,
+        Property::TextShadow(list) => {
+            style.text_shadow = computed_shadows(list, font_size, root_font_size);
+        }
+        Property::BoxShadow(list) => {
+            style.box_shadow = computed_shadows(list, font_size, root_font_size);
+        }
+        Property::TextTransform(value) => style.text_transform = *value,
+        Property::ColorScheme(value) => style.color_scheme = *value,
+        Property::FontKerning(value) => style.font_kerning = *value,
+        Property::FontFeatureSettings(value) => style.font_feature_settings = value.clone(),
+        Property::Direction(value) => style.direction = *value,
+        Property::UnicodeBidi(value) => style.unicode_bidi = *value,
+        Property::Hyphens(value) => style.hyphens = *value,
         Property::WhiteSpace(value) => style.white_space = *value,
         Property::ListStyleType(value) => style.list_style_type = *value,
+        Property::ListStylePosition(value) => style.list_style_position = *value,
+        Property::CounterReset(value) => style.counter_reset = value.clone(),
+        Property::CounterIncrement(value) => style.counter_increment = value.clone(),
+        Property::CounterSet(value) => style.counter_set = value.clone(),
+        Property::Quotes(value) => style.quotes = value.clone(),
+        // §15.1: *"any values outside the range 0.0 to 1.0 are clamped"*, at
+        // computed-value time — so `opacity: 2` is valid CSS and is one.
+        Property::Opacity(value) => style.opacity = value.clamp(0.0, 1.0),
+        Property::Transform(list) => {
+            style.transform = list
+                .iter()
+                .map(|function| match *function {
+                    SpecifiedTransform::Matrix(m) => Transform::Matrix(m),
+                    SpecifiedTransform::Translate(x, y) => Transform::Translate(
+                        x.compute(font_size, root_font_size),
+                        y.compute(font_size, root_font_size),
+                    ),
+                    SpecifiedTransform::Scale(x, y) => Transform::Scale(x, y),
+                    SpecifiedTransform::Rotate(degrees) => Transform::Rotate(degrees),
+                    SpecifiedTransform::Skew(x, y) => Transform::Skew(x, y),
+                })
+                .collect();
+        }
+        Property::TransformOrigin(origin) => {
+            style.transform_origin = TransformOrigin {
+                x: origin.x.compute(font_size, root_font_size),
+                y: origin.y.compute(font_size, root_font_size),
+            };
+        }
+        Property::BorderRadius(corner, value) => {
+            style.border_radius[corner.index()] = Radius {
+                horizontal: value.horizontal.compute(font_size, root_font_size),
+                vertical: value.vertical.compute(font_size, root_font_size),
+            };
+        }
+        Property::OutlineWidth(value) => {
+            style.outline_width = px(*value, font_size, root_font_size).max(0.0);
+        }
+        Property::OutlineStyle(value) => style.outline_style = *value,
+        Property::OutlineColor(value) => style.outline_color = *value,
+        Property::OutlineOffset(value) => {
+            style.outline_offset = px(*value, font_size, root_font_size);
+        }
+        Property::OverflowX(value) => style.overflow_x = *value,
+        Property::OverflowY(value) => style.overflow_y = *value,
         Property::Visibility(value) => style.visibility = *value,
         Property::Display(value) => style.display = *value,
         Property::Float(value) => style.float = *value,
@@ -491,6 +655,32 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
         Property::BorderStyle(side, value) => style.border_style.set(*side, *value),
         Property::BorderColor(side, value) => style.border_color.set(*side, *value),
         Property::BackgroundColor(value) => style.background_color = *value,
+        Property::BackgroundImage(value) => {
+            style.background_image = value
+                .as_ref()
+                .map(|image| image.compute(font_size, root_font_size));
+        }
+        Property::BackgroundRepeat(value) => style.background_repeat = *value,
+        Property::BackgroundPosition(value) => {
+            let axis = |offset: PositionOffset| ComputedOffset {
+                from_end: offset.from_end,
+                offset: offset.offset.compute(font_size, root_font_size),
+            };
+            style.background_position = BackgroundPosition {
+                x: axis(value.x),
+                y: axis(value.y),
+            };
+        }
+        Property::BackgroundSize(value) => {
+            let length = |len: Option<Len>| len.map(|len| len.compute(font_size, root_font_size));
+            style.background_size = match value {
+                SpecifiedBackgroundSize::Cover => BackgroundSize::Cover,
+                SpecifiedBackgroundSize::Contain => BackgroundSize::Contain,
+                SpecifiedBackgroundSize::Explicit(width, height) => {
+                    BackgroundSize::Explicit(length(*width), length(*height))
+                }
+            };
+        }
         Property::PageBreakBefore(value) => style.page_break_before = *value,
         Property::PageBreakAfter(value) => style.page_break_after = *value,
         Property::PageBreakInside(value) => style.page_break_inside = *value,
@@ -622,6 +812,20 @@ pub fn apply(property: &Property, style: &mut ComputedStyle, root_font_size: f64
 /// in it at all, so the `Len::Percent` arm is unreachable from the parser and
 /// resolves to zero rather than panicking: a computed style is not the place to
 /// discover that a grammar changed.
+/// A shadow list with its lengths in CSS pixels.
+fn computed_shadows(list: &[SpecifiedShadow], font_size: f64, root_font_size: f64) -> Vec<Shadow> {
+    list.iter()
+        .map(|shadow| Shadow {
+            color: shadow.color,
+            x: px(shadow.x, font_size, root_font_size),
+            y: px(shadow.y, font_size, root_font_size),
+            blur: px(shadow.blur, font_size, root_font_size),
+            spread: px(shadow.spread, font_size, root_font_size),
+            inset: shadow.inset,
+        })
+        .collect()
+}
+
 fn px(len: Len, font_size: f64, root_font_size: f64) -> f64 {
     match len.compute(font_size, root_font_size) {
         LengthPercentage::Px(value) => value,
@@ -696,32 +900,46 @@ pub struct StyleTree {
     /// Parallel rather than sparse because the consumer walks the element tree
     /// and asks about every element it reaches; a map would turn a hot loop
     /// into a lookup for the sake of a book that has none. `Generated::default`
-    /// is two `None`s and costs two words.
+    /// is three `None`s.
     pub generated: Vec<Generated>,
 }
 
 impl StyleTree {
+    /// A list item's marker text, or `None` for an element that is not one.
+    ///
+    /// The second door, beside [`StyleTree::pseudo`], and for the same reason:
+    /// the marker's number is the `list-item` counter, a counter is a walk of
+    /// the whole tree in document order, and `tinker-pdf-layout` sees one box
+    /// at a time.
+    #[must_use]
+    pub fn marker(&self, element: usize) -> Option<&str> {
+        self.generated.get(element)?.marker.as_deref()
+    }
+
     /// The box `which` generated for `element`, if any rule generated one.
     ///
-    /// **This is the whole door between the cascade and box generation, and
-    /// there is deliberately only one.** `tinker-pdf-layout` has no selector
+    /// **This and [`StyleTree::marker`] are the whole door between the
+    /// cascade and box generation.** `tinker-pdf-layout` has no selector
     /// engine and is never going to have one -- it takes a box tree and lays it
     /// out -- so the box has to exist before layout sees anything, which means
     /// `epub::read::build` has to be able to ask this question while it walks
     /// the DOM. Everything a generated box needs is on the far side of this
     /// call: the style, already inherited from the originating element, and the
-    /// text, with `attr()` already resolved.
+    /// text, with `attr()` and `counter()` already resolved.
     ///
-    /// Returns `None` for `::first-line` and `::first-letter`, which generate
-    /// nothing here and are counted by
-    /// [`crate::Warning::PseudoElementUnsupported`].
+    /// Returns `None` for `::first-line`, which generates nothing here and is
+    /// counted by [`crate::Warning::PseudoElementUnsupported`].
+    /// `::first-letter`'s box has a style and no text of its own: the text is
+    /// the originating element's first letter, which `epub::read` finds in the
+    /// box tree it builds.
     #[must_use]
     pub fn pseudo(&self, element: usize, which: PseudoElement) -> Option<&PseudoBox> {
         let generated = self.generated.get(element)?;
         match which {
             PseudoElement::Before => generated.before.as_ref(),
             PseudoElement::After => generated.after.as_ref(),
-            PseudoElement::FirstLine | PseudoElement::FirstLetter => None,
+            PseudoElement::FirstLetter => generated.first_letter.as_ref(),
+            PseudoElement::FirstLine => None,
         }
     }
 }
@@ -750,13 +968,18 @@ pub struct PseudoBox {
     /// The generated box's own computed style. Inherited from the
     /// **originating element**, per §12.1, and not from its parent.
     pub style: ComputedStyle,
-    /// The text to lay out, with every `attr()` already resolved.
+    /// The text to lay out, with every `attr()`, `counter()` and
+    /// `counters()` already resolved.
     ///
     /// A `String` and not a value tree: `attr()` needs the originating element
-    /// and the cascade is the last place that has one, so resolving it here is
-    /// what keeps `epub::read` from needing a DOM lookup it has no business
-    /// doing.
+    /// and `counter()` the counter tree, the cascade is the last place that has
+    /// either, and resolving them here is what keeps `epub::read` from needing
+    /// a DOM lookup it has no business doing.
     pub text: String,
+    /// The `content` items the text was made from, kept because a counter's
+    /// value is not known until [`crate::counter`] has walked the whole tree
+    /// up to this box.
+    pub content: Vec<ContentItem>,
 }
 
 /// The two pseudo-elements an element can generate a box for.
@@ -766,6 +989,16 @@ pub struct Generated {
     pub before: Option<PseudoBox>,
     /// `::after`, laid out behind them.
     pub after: Option<PseudoBox>,
+    /// `::first-letter`, `css-pseudo-4` §2.2: a style for the element's first
+    /// typographic letter unit, where any rule names one. Its `text` and
+    /// `content` are empty: the letter is the document's, and it is found in
+    /// the box tree rather than generated.
+    pub first_letter: Option<PseudoBox>,
+    /// A `display: list-item`'s marker text, `css-lists-3` §3: its
+    /// `list-item` counter in its `list-style-type`, with the style's `.`
+    /// suffix and without its space. `None` on anything that is not a list
+    /// item or generates no box.
+    pub marker: Option<String>,
 }
 
 /// One sheet and where in the cascade it sits.
@@ -834,6 +1067,7 @@ pub fn cascade_from<E: Element>(
     let mut styles: Vec<ComputedStyle> = Vec::with_capacity(elements.len());
     let mut generated: Vec<Generated> = Vec::with_capacity(elements.len());
     let mut root_font_size = initial.font_size;
+    let mut language_of: Vec<Option<usize>> = Vec::with_capacity(elements.len());
 
     for index in 0..elements.len() {
         let mut style = match elements[index].parent() {
@@ -862,6 +1096,7 @@ pub fn cascade_from<E: Element>(
             root_font_size,
         };
         generated.push(Generated {
+            marker: None,
             before: matcher.pseudo_winners(
                 elements,
                 index,
@@ -878,15 +1113,331 @@ pub fn cascade_from<E: Element>(
                 &mut report,
                 budget,
             )?,
+            first_letter: matcher.pseudo_winners(
+                elements,
+                index,
+                PseudoElement::FirstLetter,
+                &generating,
+                &mut report,
+                budget,
+            )?,
         });
+        // `selectors-4` §6.5.1's inheritance of a language, kept as the index
+        // of the nearest element that declares one so that it is one word per
+        // element rather than a walk per element.
+        let declares = elements[index].language().map(|_| index);
+        let speaks = declares.or_else(|| {
+            elements[index]
+                .parent()
+                .and_then(|parent| language_of.get(parent).copied().flatten())
+        });
+        language_of.push(speaks);
+        if style.text_transform != TextTransform::None {
+            let language = speaks.and_then(|at| elements[at].language()).unwrap_or("");
+            if casing_needs_language(language) {
+                note(&mut report.unsupported, "text-transform");
+            }
+        }
         styles.push(style);
     }
+
+    // `css-lists-3` §4.5, over the finished styles. See [`crate::counter`]
+    // for why it is a walk of its own.
+    crate::counter::resolve(elements, &styles, &mut generated, &mut report, budget)?;
+    note_flattened_opacity(elements, &styles, &mut report);
+    note_unturned_direction(elements, &styles, &mut report);
+    note_fixed_under_transform(elements, &styles, &mut report);
 
     Ok(StyleTree {
         styles,
         report,
         generated,
     })
+}
+
+/// Whether a language is one whose casing `SpecialCasing.txt` conditions on
+/// it: Lithuanian, Turkish and Azeri, by primary subtag.
+///
+/// **`text-transform` is honoured everywhere else and not here**, and this is
+/// what makes the difference a number rather than a silence. `css-text-3` §2.1
+/// requires the language-specific mappings *"if (and only if) the content
+/// language of the element is ... known"*; the layout crate that applies the
+/// transform is handed computed styles and never a language, so an element in
+/// one of these three with a casing transform is counted as `text-transform`
+/// unimplemented — a Turkish heading set in capitals with an English `I` is
+/// the plausible wrong page this exists to name.
+fn casing_needs_language(language: &str) -> bool {
+    let primary = language.split('-').next().unwrap_or("");
+    ["lt", "tr", "az"]
+        .iter()
+        .any(|named| primary.eq_ignore_ascii_case(named))
+}
+
+/// Counts every element whose layout a right-to-left `direction` turns where
+/// this build sets it left to right.
+///
+/// `direction` is honoured where it decides a paragraph — the base level of
+/// its lines, which side `start` aligns to and `text-indent` is taken from,
+/// and the side an outside list marker stands on — and through
+/// `unicode-bidi`'s embeddings. CSS 2.2 §9.10 gives it more jobs this layout
+/// does not do, and each is counted against `direction` by element, so a
+/// table read mirror-wise is not read as honoured:
+///
+/// - **an element's own direction** runs a table's columns from the right
+///   (§17.5), a flex row's main axis (`css-flexbox-1` §2) and a multi-column
+///   container's columns (`css-multicol-1` §3);
+/// - **its containing block's direction** decides which margin of an
+///   over-constrained block-level box in normal flow gives way — a block, a
+///   list item, a table or a flex container, with a definite `width` and
+///   neither margin `auto` — the right one under `ltr` and the left one
+///   under `rtl` (§10.3.3; a table's margins are its wrapper box's, §17.4).
+///   A width is definite when it is stated; when §10.4 runs §10.3.3 again
+///   with a `max-width` that narrows the box or a `min-width` that widens it
+///   as its `width`, which depends on the containing block's width and is
+///   counted wherever it may ([`may_narrow`], [`may_widen`]); and when the
+///   box is replaced — a block-level `<img>`, whose used width §10.3.4 takes
+///   from the picture and never leaves `auto` (review of lane 8C).
+///   The box's own `direction` is not asked: a right-to-left
+///   `<div style="width: 50%">` in a left-to-right body gives up its right
+///   margin, which is what this layout does, and a left-to-right one inside
+///   a right-to-left block gives up its left, which it does not (review of
+///   lane 8C). Without a `width` — or a `min-width` or `max-width` that may
+///   clamp one — a flex container fills its line, and so does a table in
+///   this layout, so neither gives up a margin. A box with an `auto` margin
+///   whose width and other margin are wider than its containing block is
+///   over-constrained as well, the `auto` taken as zero, and is not counted:
+///   whether it is wider is the containing block's width to say, and
+///   counting every `auto` margin beside a width would count every centred
+///   block; the layout's `ContentOverflowedPage` names it where the box
+///   itself is wider than its containing block;
+/// - the same direction decides which inset of a relatively positioned box
+///   wins when `left` and `right` are both stated — `left` under `ltr`,
+///   `right` under `rtl` (§9.4.3) — and this layout applies `left`, so a box
+///   it offsets (any but an inline box, which it does not offset at all;
+///   `sticky` is offset as `relative`) is counted in a right-to-left
+///   containing block (review of lane 8C);
+/// - and the same for an absolutely positioned or fixed box (§10.3.7):
+///   placed by `left` with `left`, `width` and `right` all stated in a
+///   right-to-left containing block, and at its static position's left edge
+///   with both insets `auto` in a right-to-left block, where the section puts
+///   `right` there.
+///
+/// The containing block of a box in normal flow — relatively positioned or
+/// not — is its nearest block container ancestor's content box, of an
+/// absolutely positioned one its nearest positioned — or transformed —
+/// ancestor's, and of a fixed one, as of the root, the initial containing
+/// block, whose direction is the root's (§10.1).
+fn note_unturned_direction<E: Element>(
+    elements: &[E],
+    styles: &[ComputedStyle],
+    report: &mut Report,
+) {
+    // Per element, whether the containing block it gives an in-flow block
+    // descendant reads right to left, and the same for an absolutely
+    // positioned one. Parents first: every parent's index is below its
+    // child's, so both are final before a child reads them.
+    let mut flow_rtl = vec![false; elements.len()];
+    let mut positioned_rtl = vec![false; elements.len()];
+    let mut root_rtl = false;
+    for (at, element) in elements.iter().enumerate() {
+        let Some(style) = styles.get(at) else {
+            continue;
+        };
+        let rtl = style.direction == Direction::Rtl;
+        let parent = element.parent();
+        if parent.is_none() {
+            root_rtl = rtl;
+        }
+        let (flow_cb, positioned_cb) = parent.map_or((rtl, rtl), |parent| {
+            (
+                flow_rtl.get(parent).copied().unwrap_or(root_rtl),
+                positioned_rtl.get(parent).copied().unwrap_or(root_rtl),
+            )
+        });
+        flow_rtl[at] = if style.display == Display::Inline {
+            flow_cb
+        } else {
+            rtl
+        };
+        positioned_rtl[at] = if style.position != Position::Static || !style.transform.is_empty() {
+            rtl
+        } else {
+            positioned_cb
+        };
+        if style.display == Display::None {
+            continue;
+        }
+        let laid_left_to_right = rtl
+            && (matches!(
+                style.display,
+                Display::Table | Display::Flex | Display::InlineFlex
+            ) || style.column_count != ColumnCount::Auto
+                || style.column_width != ColumnWidth::Auto);
+        let placed_from_the_left = match style.position {
+            Position::Absolute | Position::Fixed => {
+                let containing = if style.position == Position::Fixed {
+                    root_rtl
+                } else {
+                    positioned_cb
+                };
+                match (style.inset.get(Side::Left), style.inset.get(Side::Right)) {
+                    (Inset::Auto, Inset::Auto) => flow_cb,
+                    (Inset::Length(_), Inset::Length(_)) => containing && style.width != Size::Auto,
+                    _ => false,
+                }
+            }
+            _ => {
+                // §10.3.4: a block-level replaced box's used width is never
+                // `auto`. The cascade cannot see whether an `<img>`'s picture
+                // resolves, so an unresolved one — an empty box, not a
+                // replaced one — is counted too.
+                let replaced = element.local_name() == "img";
+                let definite =
+                    style.width != Size::Auto || replaced || may_narrow(style) || may_widen(style);
+                let over_constrained = style.float == Float::None
+                    && matches!(
+                        style.display,
+                        Display::Block | Display::ListItem | Display::Table | Display::Flex
+                    )
+                    && definite
+                    && style.margin.left != MarginValue::Auto
+                    && style.margin.right != MarginValue::Auto;
+                let both_offsets = matches!(style.position, Position::Relative | Position::Sticky)
+                    && style.display != Display::Inline
+                    && matches!(style.inset.get(Side::Left), Inset::Length(_))
+                    && matches!(style.inset.get(Side::Right), Inset::Length(_));
+                flow_cb && (over_constrained || both_offsets)
+            }
+        };
+        if laid_left_to_right || placed_from_the_left {
+            report.note_unsupported("direction");
+        }
+    }
+}
+
+/// Whether §10.4 may run §10.3.3 again with `max-width` as a box's `width`:
+/// whether its `max-width` may be below the width it would otherwise fill.
+///
+/// The containing block's width decides, and it is not known before layout,
+/// so every `max-width` but `none` may — except a percentage of 100% or more
+/// over margins neither of which is negative: the room an `auto` width fills
+/// is the containing block less the margins, padding and border, and such a
+/// maximum is never below it, measured as content or as border box.
+fn may_narrow(style: &ComputedStyle) -> bool {
+    let not_negative = |margin: MarginValue| match margin {
+        MarginValue::Auto => true,
+        MarginValue::Length(LengthPercentage::Px(v) | LengthPercentage::Percent(v)) => v >= 0.0,
+    };
+    match style.max_width {
+        MaxSize::None => false,
+        MaxSize::Length(LengthPercentage::Percent(p)) => {
+            !(p >= 100.0 && not_negative(style.margin.left) && not_negative(style.margin.right))
+        }
+        MaxSize::Length(LengthPercentage::Px(_)) => true,
+    }
+}
+
+/// Whether §10.4 may run §10.3.3 again with `min-width` as a box's `width`:
+/// whether its `min-width` may be above the width it would otherwise fill —
+/// which any `min-width` above zero may, against a narrow enough containing
+/// block.
+fn may_widen(style: &ComputedStyle) -> bool {
+    match style.min_width {
+        MinSize::Auto => false,
+        MinSize::Length(LengthPercentage::Px(v) | LengthPercentage::Percent(v)) => v > 0.0,
+    }
+}
+
+/// Counts every element whose `opacity` the painter applies **per fragment**
+/// where `css-color-4` §15.1 composites a **group**.
+///
+/// The two are the same picture wherever nothing inside the element paints
+/// over anything else inside it — a paragraph's glyphs at half alpha are a
+/// paragraph at half alpha — and different wherever something does: text over
+/// its own box's background, at half alpha each, shows the background through
+/// the text, where the group would not. The painter writes `/ca` per fragment
+/// because the alternative, a transparency-group form XObject, would carry the
+/// element's tagged text into a form the structure writer does not reach. So
+/// the elements where the two differ are counted against `opacity`, by
+/// element, and the rest are exact: an element with `opacity` below one whose
+/// subtree holds a box that paints a background or a border **and** has
+/// content inside it.
+fn note_flattened_opacity<E: Element>(
+    elements: &[E],
+    styles: &[ComputedStyle],
+    report: &mut Report,
+) {
+    let painted = |style: &ComputedStyle| {
+        style.display != Display::None
+            && (style.background_color.a != 0
+                || [Side::Top, Side::Right, Side::Bottom, Side::Left]
+                    .iter()
+                    .any(|side| {
+                        style.border_width.get(*side) > 0.0
+                            && !matches!(
+                                style.border_style.get(*side),
+                                BorderStyle::None | BorderStyle::Hidden
+                            )
+                    }))
+    };
+    // Reverse document order: every child has an index greater than its
+    // parent's, so a child's answer is final before its parent reads it.
+    let mut covered = vec![false; elements.len()];
+    for at in (0..elements.len()).rev() {
+        let Some(style) = styles.get(at) else {
+            continue;
+        };
+        let here = covered[at] || (painted(style) && !elements[at].is_empty());
+        covered[at] = here;
+        if let Some(parent) = elements[at].parent() {
+            if let Some(slot) = covered.get_mut(parent) {
+                *slot |= here;
+            }
+        }
+    }
+    for (at, style) in styles.iter().enumerate() {
+        if style.opacity < 1.0 && style.display != Display::None && covered[at] {
+            report.note_unsupported("opacity");
+        }
+    }
+}
+
+/// Counts every `position: fixed` element with a transformed ancestor against
+/// `transform`.
+///
+/// `css-transforms-1` §2: a transformed element *"establishes a containing
+/// block for all descendants"*, fixed ones included — so a fixed box inside a
+/// rotated figure is positioned against the figure and turns with it. The
+/// layout this build hands it places a fixed box against the page box and
+/// repeats it on every page (CSS 2.2 §9.6.1's paged answer), which is a
+/// different picture; the painter still turns it with its ancestor. The
+/// ancestor's absolutely positioned descendants are exact: the layout makes a
+/// transformed box their containing block, as it does a positioned one.
+fn note_fixed_under_transform<E: Element>(
+    elements: &[E],
+    styles: &[ComputedStyle],
+    report: &mut Report,
+) {
+    // Parents first: every parent's index is below its child's.
+    let mut under = vec![false; elements.len()];
+    for (at, element) in elements.iter().enumerate() {
+        let inherited = element
+            .parent()
+            .and_then(|parent| {
+                let transformed = styles
+                    .get(parent)
+                    .is_some_and(|style| !style.transform.is_empty());
+                under.get(parent).map(|above| *above || transformed)
+            })
+            .unwrap_or(false);
+        under[at] = inherited;
+        let Some(style) = styles.get(at) else {
+            continue;
+        };
+        if inherited && style.position == Position::Fixed && style.display != Display::None {
+            report.note_unsupported("transform");
+        }
+    }
 }
 
 /// What the cascade decided for one property, before it is written down.
@@ -942,6 +1493,29 @@ fn apply_winners(
             apply_winner(winner, style, parent, initial, root_font_size);
         }
     }
+    computed_overflow(style);
+}
+
+/// `css-overflow-3` §3.1's computed value: *"as specified, except with
+/// `visible`/`clip` computing to `auto`/`hidden` (respectively) if one of
+/// `overflow-x` or `overflow-y` is neither `visible` nor `clip`"*.
+///
+/// So `overflow-x: auto` alone makes a box that clips in **both** axes — the
+/// one a book writes on a wide table — because a scroll container cannot
+/// scroll one axis and spill the other. Applied once per element, after every
+/// winner, so the order the two longhands were declared in cannot matter.
+fn computed_overflow(style: &mut ComputedStyle) {
+    let open = |value: Overflow| matches!(value, Overflow::Visible | Overflow::Clip);
+    if open(style.overflow_x) && open(style.overflow_y) {
+        return;
+    }
+    let scrolling = |value: Overflow| match value {
+        Overflow::Visible => Overflow::Auto,
+        Overflow::Clip => Overflow::Hidden,
+        other => other,
+    };
+    style.overflow_x = scrolling(style.overflow_x);
+    style.overflow_y = scrolling(style.overflow_y);
 }
 
 /// One winner, written into the style.
@@ -1326,24 +1900,20 @@ impl<'a> Matcher<'a> {
                 content = Some(value);
             }
         }
-        let items = match content {
-            Some(ContentValue::Items(items)) => items,
-            // No `content` at all, or `content: none`. §12.2: no box.
-            _ => return Ok(None),
-        };
-
-        let mut text = String::new();
-        for item in items {
-            match item {
-                ContentItem::Text(literal) => text.push_str(literal),
-                // §2.4: an attribute the element does not carry contributes the
-                // empty string, which is the specification's own answer and not
-                // a fallback invented here.
-                ContentItem::Attr(name) => {
-                    text.push_str(elements[at].attribute(name).unwrap_or(""));
-                }
+        // `::first-letter` takes no `content`: its box exists wherever a rule
+        // matches, around a letter the document wrote.
+        let content = if which == PseudoElement::FirstLetter {
+            Vec::new()
+        } else {
+            match content {
+                // The text is written by `crate::counter::resolve`, once the
+                // walk has reached this box: a `counter()` in it has no value
+                // before then.
+                Some(ContentValue::Items(items)) => items.clone(),
+                // No `content` at all, or `content: none`. §12.2: no box.
+                _ => return Ok(None),
             }
-        }
+        };
 
         let mut winners: Vec<(Longhand, usize)> = Vec::new();
         for (index, (_, _, declared)) in matched.iter().enumerate() {
@@ -1374,7 +1944,11 @@ impl<'a> Matcher<'a> {
             from.initial,
             from.root_font_size,
         );
-        Ok(Some(PseudoBox { style, text }))
+        Ok(Some(PseudoBox {
+            style,
+            text: String::new(),
+            content,
+        }))
     }
 
     fn winners<E: Element>(
@@ -1384,7 +1958,31 @@ impl<'a> Matcher<'a> {
         report: &mut Report,
         budget: &mut Budget,
     ) -> Result<Vec<Winner>, Refusal> {
+        // The document language's presentational hints — HTML §15.1: author
+        // level, specificity zero, *"at the start of the author style sheet"*.
+        // Pushed first and keyed at the weakest layer and the first position,
+        // so that every author rule that matches beats them on a tie as well
+        // as on specificity: an `<ol start="3">` styled `ol { counter-reset:
+        // list-item }` by its book numbers from one, which is what the author's
+        // rule says.
+        let hint_owned: Vec<Declared> = match elements[at].presentational_hints() {
+            Some(source) => parse_attached(&source, report, budget)?,
+            None => Vec::new(),
+        };
         let mut matched: Vec<(CascadeKey, Origin, &Declared)> = Vec::new();
+        for declared in &hint_owned {
+            matched.push((
+                CascadeKey {
+                    rank: rank(Origin::Author, declared.important),
+                    attached: false,
+                    layer: 0,
+                    specificity: Specificity::ZERO,
+                    order: 0,
+                },
+                Origin::Author,
+                declared,
+            ));
+        }
         for handle in self.index.candidates(&elements[at]) {
             let (rule_at, selector_at) = self.selectors[handle];
             let placed = &self.rules[rule_at];
@@ -1415,7 +2013,7 @@ impl<'a> Matcher<'a> {
         // at open, because they belong to the element and not to a sheet, and
         // because a book with no `style=""` should pay nothing for the feature.
         let inline_owned: Vec<Declared> = match elements[at].inline_style() {
-            Some(source) => crate::parse_inline(source, report, budget)?,
+            Some(source) => parse_attached(source, report, budget)?,
             None => Vec::new(),
         };
         for declared in &inline_owned {
@@ -1474,6 +2072,28 @@ impl<'a> Matcher<'a> {
             .map(|(longhand, index)| resolve_rollbacks(longhand, index, &matched))
             .collect())
     }
+}
+
+/// Parses the declarations an element carries itself — its presentational
+/// hints and its `style=""` — for [`Matcher::winners`].
+///
+/// What the parse discards and warns about goes to `report`; what it refuses
+/// or does not know does not, because the walk over the element's matched
+/// declarations counts each of those where it reached an element, and the
+/// element is this one. Parsed straight into `report`, as both used to be,
+/// a `style="filter: none"` was charged to the census twice for one element,
+/// and so was every `<ol reversed>`.
+fn parse_attached(
+    source: &str,
+    report: &mut Report,
+    budget: &mut Budget,
+) -> Result<Vec<Declared>, Refusal> {
+    let mut parsed = Report::default();
+    let declared = crate::parse_inline(source, &mut parsed, budget)?;
+    parsed.unsupported.clear();
+    parsed.unknown.clear();
+    report.absorb(parsed);
+    Ok(declared)
 }
 
 /// Records that `index` is the strongest declaration seen so far for
@@ -1688,8 +2308,37 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
         Longhand::TextAlign => into.text_align = from.text_align,
         Longhand::TextIndent => into.text_indent = from.text_indent,
         Longhand::TextDecoration => into.text_decoration = from.text_decoration,
+        Longhand::TextShadow => into.text_shadow = from.text_shadow.clone(),
+        Longhand::BoxShadow => into.box_shadow = from.box_shadow.clone(),
+        Longhand::TextTransform => into.text_transform = from.text_transform,
+        Longhand::ColorScheme => into.color_scheme = from.color_scheme,
+        Longhand::FontKerning => into.font_kerning = from.font_kerning,
+        Longhand::FontFeatureSettings => {
+            into.font_feature_settings = from.font_feature_settings.clone();
+        }
+        Longhand::Direction => into.direction = from.direction,
+        Longhand::UnicodeBidi => into.unicode_bidi = from.unicode_bidi,
+        Longhand::Hyphens => into.hyphens = from.hyphens,
         Longhand::WhiteSpace => into.white_space = from.white_space,
         Longhand::ListStyleType => into.list_style_type = from.list_style_type,
+        Longhand::ListStylePosition => into.list_style_position = from.list_style_position,
+        Longhand::CounterReset => into.counter_reset = from.counter_reset.clone(),
+        Longhand::CounterIncrement => into.counter_increment = from.counter_increment.clone(),
+        Longhand::CounterSet => into.counter_set = from.counter_set.clone(),
+        Longhand::Quotes => into.quotes = from.quotes.clone(),
+        Longhand::Opacity => into.opacity = from.opacity,
+        Longhand::Transform => into.transform = from.transform.clone(),
+        Longhand::TransformOrigin => into.transform_origin = from.transform_origin,
+        Longhand::BorderTopLeftRadius => into.border_radius[0] = from.border_radius[0],
+        Longhand::BorderTopRightRadius => into.border_radius[1] = from.border_radius[1],
+        Longhand::BorderBottomRightRadius => into.border_radius[2] = from.border_radius[2],
+        Longhand::BorderBottomLeftRadius => into.border_radius[3] = from.border_radius[3],
+        Longhand::OutlineWidth => into.outline_width = from.outline_width,
+        Longhand::OutlineStyle => into.outline_style = from.outline_style,
+        Longhand::OutlineColor => into.outline_color = from.outline_color,
+        Longhand::OutlineOffset => into.outline_offset = from.outline_offset,
+        Longhand::OverflowX => into.overflow_x = from.overflow_x,
+        Longhand::OverflowY => into.overflow_y = from.overflow_y,
         Longhand::Visibility => into.visibility = from.visibility,
         Longhand::Display => into.display = from.display,
         Longhand::Float => into.float = from.float,
@@ -1744,6 +2393,10 @@ fn copy_computed(longhand: Longhand, from: &ComputedStyle, into: &mut ComputedSt
             .border_color
             .set(Side::Left, from.border_color.get(Side::Left)),
         Longhand::BackgroundColor => into.background_color = from.background_color,
+        Longhand::BackgroundImage => into.background_image = from.background_image.clone(),
+        Longhand::BackgroundRepeat => into.background_repeat = from.background_repeat,
+        Longhand::BackgroundPosition => into.background_position = from.background_position,
+        Longhand::BackgroundSize => into.background_size = from.background_size,
         Longhand::PageBreakBefore => into.page_break_before = from.page_break_before,
         Longhand::PageBreakAfter => into.page_break_after = from.page_break_after,
         Longhand::PageBreakInside => into.page_break_inside = from.page_break_inside,

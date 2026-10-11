@@ -23,13 +23,14 @@
 //!   committed corpus. Guessing `"` is wrong in every language that does not
 //!   use it.
 //!
-//! `::first-line` and `::first-letter` still generate nothing and are still
-//! counted by `Warning::PseudoElementUnsupported`. Neither is generated
-//! content: both select part of an *already laid out* box, so honouring either
-//! means a second layout pass. `::marker`, `::placeholder` and `::selection`
-//! are not parsed at all — `::selection` for the reason row 142 already gives
-//! for the seven pseudo-classes, that it names a state of a reading session
-//! and a paginated document has none.
+//! `::first-line` still generates nothing and is still counted by
+//! `Warning::PseudoElementUnsupported`: it is not generated content but selects
+//! the part of an *already laid out* box on its first line, so honouring it
+//! means a second layout pass. `::first-letter` is a box round its letter
+//! (`epub_reftest.rs`) and generates no content of its own. `::marker`,
+//! `::placeholder` and `::selection` are not parsed at all — `::selection` for
+//! the reason row 142 already gives for the seven pseudo-classes, that it
+//! names a state of a reading session and a paginated document has none.
 //!
 //! # Generated content is not conserved text, and the harness is right
 //!
@@ -240,20 +241,26 @@ fn the_paragraph_is_not_styled_by_its_own_pseudo_element_rule() {
 
 // ---- what is refused, by name ------------------------------------------------
 
-/// The three families of `content` value this build does not read, each
-/// counted as a gap in `content` rather than silently producing an empty box.
+/// The `content` values this build does not read, each counted as a gap in
+/// `content` rather than silently producing an empty box.
+///
+/// **`counter()` and `counters()` left this list on 3 October 2026** with
+/// `css-lists-3`'s counters, and what stays of them is a counter in a
+/// `<counter-style>` this build does not format: a Greek list numbered in
+/// Latin digits would be a plausible wrong page.
+/// [`counter_and_counters_number_the_generated_boxes`] is their positive half.
+///
+/// **The four quote keywords left it the same day** with `quotes`, and what is
+/// left of them is counted against `quotes` rather than `content`:
+/// [`a_quote_keyword_under_quotes_auto_is_a_gap_in_quotes`].
 #[test]
-fn the_three_refused_content_families_are_named() {
+fn the_refused_content_families_are_named() {
     use tinker_pdf::ArchiveWarning;
     let mut refused = 0usize;
     for value in [
         "url(a.png)",
-        "counter(chapter)",
-        "counters(section, \".\")",
-        "open-quote",
-        "close-quote",
-        "no-open-quote",
-        "no-close-quote",
+        "counter(chapter, lower-greek)",
+        "counters(section, \".\", armenian)",
     ] {
         let source = format!("p::before {{ content: {value} }}");
         let doc = Document::open(book(&source, "<p>body</p>")).expect("a book");
@@ -275,12 +282,53 @@ fn the_three_refused_content_families_are_named() {
         assert_eq!(text, "body", "{value} put something on the page");
         refused += 1;
     }
-    assert_eq!(refused, 7, "three families, seven spellings");
+    assert_eq!(refused, 3, "an image, and two counters by their style");
 }
 
-/// `::first-line` and `::first-letter` still generate nothing.
+/// **`quotes: auto` is the one value of `quotes` this build does not
+/// resolve**, and a quote keyword that meets it is counted against `quotes`
+/// and draws nothing — the marks are a per-language table this build does not
+/// carry, and English marks in a French book are a plausible wrong page.
+#[test]
+fn a_quote_keyword_under_quotes_auto_is_a_gap_in_quotes() {
+    use tinker_pdf::ArchiveWarning;
+    let doc = Document::open(book("p { margin: 0 }", "<p><q>body</q></p>")).expect("a book");
+    let warnings = doc.archive().expect("a report").warnings().to_vec();
+    assert!(
+        warnings.iter().any(|w| matches!(
+            w,
+            ArchiveWarning::UnimplementedProperty { property, elements: 2 } if *property == "quotes"
+        )),
+        "a `<q>`'s two marks under `auto` were not counted against `quotes`: {warnings:?}"
+    );
+    assert_eq!(text_of("p { margin: 0 }", "<p><q>body</q></p>"), "body");
+    // A book that says which marks it wants gets them.
+    assert_eq!(
+        text_of("q { quotes: \"\u{ab}\" \"\u{bb}\" }", "<p><q>body</q></p>"),
+        "\u{ab}body\u{bb}"
+    );
+}
+
+/// **`counter()` and `counters()` read `css-lists-3` §4's counter tree**, on
+/// the page: a heading counter incremented by its own `::before`, and a nested
+/// one reset per section and joined with `counters()`.
+#[test]
+fn counter_and_counters_number_the_generated_boxes() {
+    let sheet = "body { counter-reset: chapter } \
+                 h1::before { counter-increment: chapter; content: counter(chapter, upper-roman) \". \" } \
+                 div { counter-reset: part } \
+                 p::before { counter-increment: part; content: counters(part, \"-\") \" \" }";
+    let body = "<h1>One</h1><div><p>a</p><div><p>b</p><p>c</p></div></div><h1>Two</h1>";
+    let text = text_of(sheet, body);
+    assert_eq!(text, "I. One1 a1-1 b1-2 cII. Two");
+}
+
+/// `::first-line` and `::first-letter` generate no content: `content` on
+/// either puts nothing on the page. (`::first-letter` is a box round the
+/// letter, which `epub_reftest.rs` holds; `content` is not one of the
+/// properties that apply to it.)
 ///
-/// That they are still **named** is asserted in
+/// That `::first-line` is still **named** is asserted in
 /// `tinker-pdf-css`'s `tests/selector.rs`, where the warning lives: a
 /// `Warning::PseudoElementUnsupported` is a stylesheet's report and does not
 /// travel out through `ArchiveWarning`, so this side can only assert the

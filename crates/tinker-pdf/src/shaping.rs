@@ -38,7 +38,8 @@
 
 use tinker_pdf_cos::build::{DocumentBuilder, Glyph, PlacedGlyph};
 use tinker_pdf_font::Sfnt;
-use tinker_pdf_shape::bidi::BaseDirection;
+use tinker_pdf_shape::bidi::{reorder, BaseDirection, Paragraph};
+use tinker_pdf_shape::shape::itemize;
 use tinker_pdf_shape::{ShapedRun, Shaper};
 
 /// One glyph of a shaped run, ready to be written.
@@ -166,10 +167,21 @@ pub struct Run<'a> {
     pub direction: BaseDirection,
 }
 
-/// Shapes a run and writes it as one composite-font text object.
+/// Shapes a run and writes it as one composite-font text object, **as one
+/// line in visual order**.
 ///
 /// The whole of milestone 7 in one call, for a caller that has a face, a
 /// string and a content stream.
+///
+/// The text is one line, so UAX #9's rule L2 is applied here: the bidi runs
+/// are drawn in the order L2 gives their levels and a right-to-left run's
+/// glyphs from its last cluster to its first, which is what
+/// `epub/paint.rs`'s `shaped_glyphs` does for a line of a book. Until ruling
+/// 14 this wrote every run in logical order from left to right — a
+/// right-to-left word drawn backwards on the page — and the milestone's round
+/// trip passed *because* extraction read content-stream order; with
+/// extraction in logical order (`docs/rulings.md`), a round trip only holds
+/// for a page that is drawn right.
 ///
 /// Returns false, having written nothing, for the reasons
 /// [`DocumentBuilder::glyph_run`] returns false, and for text that shaped to no
@@ -184,22 +196,41 @@ pub fn write_run(builder: &mut DocumentBuilder, out: &mut Vec<u8>, run: &Run<'_>
         direction,
     } = run;
     let shaper = Shaper::new(face);
-    let (_, runs) = shaper.shape_text(text, direction);
+    let paragraph = Paragraph::new(text, direction);
+    let items = itemize(text, &paragraph);
+    let levels: Vec<_> = items.iter().map(|item| item.level).collect();
     let mut placed: Vec<Placed> = Vec::new();
-    for run in &runs {
-        placed.extend(place(text, run, size));
-    }
-    // Each run's positions are its own, so the runs are laid end to end: a
-    // paragraph of mixed script is one pen, not one per script.
+    // One pen across the whole line, advancing in **draw** order: L2 over the
+    // runs, and a backward run's glyphs walked from the end. A glyph's text is
+    // still worked out in logical order by `place`, because that is the order
+    // clusters are monotonic in; only the drawing is reversed.
     let mut pen = 0.0f64;
-    let mut at = 0usize;
-    for run in &runs {
-        let width = f64::from(run.advance()) * size / f64::from(run.units_per_em().max(1));
-        for slot in placed.iter_mut().skip(at).take(run.glyphs().len()) {
-            slot.x += pen;
+    for index in reorder(&levels) {
+        let Some(item) = items.get(index) else {
+            continue;
+        };
+        let run = shaper.shape(text, item);
+        let units = f64::from(run.units_per_em().max(1));
+        let scale = |value: i32| f64::from(value) * size / units;
+        let logical = place(text, &run, size);
+        let glyphs = run.glyphs();
+        let order: Vec<usize> = if run.direction().is_forward() {
+            (0..glyphs.len()).collect()
+        } else {
+            (0..glyphs.len()).rev().collect()
+        };
+        for at in order {
+            let (Some(glyph), Some(slot)) = (glyphs.get(at), logical.get(at)) else {
+                continue;
+            };
+            placed.push(Placed {
+                id: slot.id,
+                text: slot.text.clone(),
+                x: pen + scale(glyph.x_offset),
+                rise: slot.rise,
+            });
+            pen += scale(glyph.x_advance);
         }
-        at += run.glyphs().len();
-        pen += width;
     }
     if placed.is_empty() {
         return false;

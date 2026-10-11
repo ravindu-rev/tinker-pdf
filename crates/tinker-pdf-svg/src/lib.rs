@@ -26,7 +26,7 @@
 //!
 //! # What is refused, and why the list is short on purpose
 //!
-//! An SVG renderer is unbounded if you let it be. Filters, masks, SMIL
+//! An SVG renderer is unbounded if you let it be. Filters, SMIL
 //! animation, scripting and `<foreignObject>` are each a whole subsystem, and
 //! every one of them is refused **by name and counted** rather than skipped —
 //! so a caller learns that a picture was incomplete rather than being handed a
@@ -40,6 +40,7 @@
 
 pub mod document;
 pub mod gradient;
+pub mod marker;
 pub mod path;
 pub mod scene;
 pub mod shape;
@@ -59,8 +60,102 @@ mod tests;
 /// [`Refusal`], whose six variants are the whole of what produces no picture
 /// at all. Everything else is a [`Scene`] with [`Scene::warnings`] on it.
 pub fn read(bytes: &[u8], viewport: Option<(f64, f64)>, limits: &Limits) -> Result<Scene, Refusal> {
+    read_with(bytes, viewport, limits, &Context::NONE)
+}
+
+/// [`read`], with the document's references reaching what `context` names —
+/// an `@import` in a `<style>` element fetched through the caller's
+/// container, and a run of text measured by the caller's fonts.
+///
+/// # Errors
+/// [`read`]'s.
+pub fn read_with(
+    bytes: &[u8],
+    viewport: Option<(f64, f64)>,
+    limits: &Limits,
+    context: &Context<'_>,
+) -> Result<Scene, Refusal> {
     let tree = document::read(bytes, limits)?;
-    scene::build(&tree, viewport, limits)
+    scene::build_with(&tree, viewport, limits, context)
+}
+
+/// What a document reaches beyond its own bytes, which this crate does not
+/// have and its caller does (ruling 8): the container an `@import` is fetched
+/// from, and the fonts a run of text is measured by.
+///
+/// `#[non_exhaustive]`, made by [`Context::new`] or [`Context::NONE`] and
+/// [`Context::with_measure`], so a reach added later is not a break.
+#[derive(Clone, Copy)]
+#[non_exhaustive]
+pub struct Context<'a> {
+    /// What `@import` is resolved through — `tinker-pdf-css`'s trait, the
+    /// one the EPUB cascade's imports go through, so one adapter answers
+    /// both.
+    pub imports: &'a dyn tinker_pdf_css::ImportResolver,
+    /// What a run of text measures, where the caller can say: the box a
+    /// `mask`, a `clip-path` or a paint server in `objectBoundingBox` units
+    /// takes a fraction of. `None` leaves text with no box, and such an
+    /// effect on it is drawn without the effect and named
+    /// [`Warning::TextBoxUnmeasured`].
+    pub measure: Option<&'a dyn MeasureText>,
+}
+
+impl<'a> Context<'a> {
+    /// Nothing beside the document: every `@import` unresolved, and no run
+    /// measured.
+    pub const NONE: Context<'static> = Context {
+        imports: &tinker_pdf_css::NoImports,
+        measure: None,
+    };
+
+    /// `@import` resolved through `imports`.
+    #[must_use]
+    pub fn new(imports: &'a dyn tinker_pdf_css::ImportResolver) -> Self {
+        Context {
+            imports,
+            measure: None,
+        }
+    }
+
+    /// The same reach, with every run of text measured by `measure`.
+    #[must_use]
+    pub fn with_measure(self, measure: &'a dyn MeasureText) -> Self {
+        Context {
+            measure: Some(measure),
+            ..self
+        }
+    }
+}
+
+/// One run's measurement, in the run's own user units: what its glyph cells
+/// are made of.
+///
+/// §7.11 makes the box of text the union of its glyphs' **cells**, and SVG 2
+/// §8.10 says what a cell is for horizontal text: the glyph's advance along
+/// the baseline, by the font's full ascent above it and descent below it —
+/// three numbers a font has and this crate does not (ruling 8).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RunMetrics {
+    /// The run's advance along its baseline: where the next run begins.
+    pub advance: f64,
+    /// How far the font reaches above the baseline, as a positive length.
+    pub ascent: f64,
+    /// How far it reaches below, as a positive length.
+    pub descent: f64,
+}
+
+/// A caller's measurement of a run of text, with the fonts it sets it in.
+///
+/// The box a run is given is the box of the ink the caller draws only if this
+/// is the **same** measurement the caller places the run with: the walk
+/// places each run as a caller must — a run with no position of its own
+/// beginning where the one before it ended, and a chunk's `text-anchor`
+/// applied to the whole chunk's width ([`Node::Text`]) — from these advances.
+/// The facade's is the `BookMetrics` its pages are set with.
+pub trait MeasureText {
+    /// `text`, in `font`. A number that is not finite is no measurement, and
+    /// the text is left with no box, as it is without a measurer.
+    fn measure(&self, text: &str, font: &TextStyle) -> RunMetrics;
 }
 
 /// How much work one document may cost.
@@ -133,7 +228,8 @@ pub enum Refusal {
     TooManyNodes,
     /// Past [`Limits::max_segments`].
     TooManySegments,
-    /// Past [`Limits::max_uses`], or a `<use>` that reaches itself.
+    /// Past [`Limits::max_uses`], or a `<use>` — or a `<marker>` — that
+    /// reaches itself.
     TooManyUses,
     /// Selector matching crossed `tinker-pdf-css`'s own budget.
     ///
@@ -155,28 +251,64 @@ pub enum Warning {
     /// `<filter>` and every `filter=` that names one. A filter is a raster
     /// pipeline and this crate produces geometry.
     FilterUnsupported,
-    /// `<mask>` and `mask=`.
-    MaskUnsupported,
-    /// A `clip-path` naming something this build cannot turn into an outline.
+    /// A `mask` naming no `<mask>`.
     ///
-    /// **Not the element**: a `<clipPath>` full of shapes is drawn as a clip
-    /// since milestone 4. This is the reference that names no `<clipPath>` at
-    /// all, or one whose children are `<use>` or `<text>` — geometry that
-    /// exists somewhere else. The element is drawn **unclipped**, which is
-    /// ruling 2's answer and the one that keeps a picture rather than losing
-    /// it; the alternative reading of §14.3.1 would clip everything away.
+    /// §14.4's `<mask>` is **drawn** since it left the refusal list — its
+    /// content as a luminance mask over its region — so this is the reference
+    /// that went nowhere, and the element is drawn unmasked: ruling 2's
+    /// answer, and `clip-path`'s.
+    MaskUnresolved,
+    /// A `clip-path` naming no `<clipPath>`.
+    ///
+    /// **Not the element**: a `<clipPath>` of shapes is drawn as a clip since
+    /// milestone 4, and one holding `<use>` or `<text>` since those left the
+    /// refusal list. This is the reference that went nowhere. The element is
+    /// drawn **unclipped**, which is ruling 2's answer and the one that keeps
+    /// a picture rather than losing it; the alternative reading of §14.3.1
+    /// would clip everything away.
     ClipPathUnsupported,
-    /// `<pattern>` used as a paint.
-    PatternUnsupported,
-    /// `<marker>`, and the three properties that name one.
+    /// A `<clipPath>` child §14.3.5's content model does not admit — a `<g>`,
+    /// an `<image>`, or a `<use>` naming anything but a shape or `<text>`
+    /// (*"indirect references are an error"*) — which adds nothing to the
+    /// clip. The rest of the clip applies.
+    ClipChildIgnored,
+    /// A `mask`, a `clip-path`, a `fill` or a `stroke` whose
+    /// `objectBoundingBox` units needed the box of **text** — a `<text>`, or a
+    /// group that holds one — and no measurement of it was had.
     ///
-    /// §11.6's vertex decorations: an arrowhead is a whole second rendering of
-    /// a referenced subtree at every vertex, rotated to the path's tangent
-    /// there. Named rather than folded into [`Warning::ElementUnknown`],
-    /// because a `<marker>` is SVG this build declines rather than a
-    /// vocabulary it does not read — and thirty-two of them are in the fetched
-    /// corpus, every one on a path that also fills.
-    MarkerUnsupported,
+    /// §7.11's box of a run is its glyph cells, and a glyph's extent is a font
+    /// metric this crate does not have (ruling 8): a caller that has one hands
+    /// it in through [`Context::with_measure`], and the box is then measured.
+    /// It is not measured through [`read`], which has no measurer; from a
+    /// measurer whose numbers are not finite, or a cell past a double's
+    /// range; or for a `mask` or `clip-path` on a `<tspan>`,
+    /// which SVG 2 §11.2 resolves against the box of the **whole** `<text>`,
+    /// a box not known until its last run is placed. There the text has no
+    /// box, and a fraction of nothing would take the ink away: the element is
+    /// drawn **unmasked** or **unclipped**, and a paint server's own fallback
+    /// stands — `none` where the value stated none — which is ruling 2's
+    /// answer. Where shapes or pictures sit beside unmeasured text, theirs is
+    /// the box used, smaller than §7.11's by whatever the text reaches past
+    /// it.
+    TextBoxUnmeasured,
+    /// Something whose coordinates, once every transform above it was
+    /// composed, are past a double's range — `scale(1e300)` inside
+    /// `scale(1e300)`, or a `markerWidth` of `1e308` under a view box.
+    ///
+    /// Every number in the document was finite where it was read; their
+    /// product is not, and an infinity in a coordinate is a rasterizer with
+    /// nothing to draw. The node is **not drawn**, and named: the alternative,
+    /// clamping, would put the shape somewhere the file did not.
+    GeometryOverflow,
+    /// A `marker-start`, `marker-mid` or `marker-end` naming no `<marker>`.
+    ///
+    /// §11.6.2 makes a reference to nothing an error; the path is drawn
+    /// without the decoration, which is ruling 2's answer. A `<marker>` itself
+    /// is **drawn** since it left the refusal list — at every vertex §11.6.2
+    /// names, turned by `orient`, scaled by `markerUnits` and clipped to its
+    /// own viewport — so this is the reference that went nowhere and not the
+    /// element.
+    MarkerUnresolved,
     /// `<foreignObject>`, whose content is a different document language.
     ForeignObjectUnsupported,
     /// SMIL — `<animate>`, `<set>`, `<animateTransform>` and relatives. A
@@ -198,38 +330,21 @@ pub enum Warning {
     /// paint with. The paint's own fallback stands, or `none` when it stated
     /// none — which is §13.2's answer and not an invention here.
     PaintServerUnresolved,
-    /// A non-unit `opacity` on something that draws more than once.
-    ///
-    /// §14.5 makes `opacity` a **group** operation: the subtree is composited
-    /// once and the result is faded. This build multiplies it into each
-    /// descendant's own fill and stroke alpha instead, which is *exact* for a
-    /// single shape painted one way and **too dark where two of them overlap**.
-    /// Reported only where it is observable — a lone filled shape at 60 % is
-    /// not a warning, because there is nothing wrong with it.
-    GroupOpacityFlattened,
-    /// An at-rule in a `<style>` element — `@media`, `@import`, `@font-face`.
-    /// Skipped by the CSS specification's own recovery, and named.
+    /// An at-rule in a `<style>` element this build does not read — anything
+    /// but `@media`, `@import`, `@font-face` and `@charset` — or one of those
+    /// that was invalid or past a bound: an `@import` after a rule, into a
+    /// cascade layer, nested past `MAX_CSS_IMPORT_DEPTH`, importing its own
+    /// ancestor, or past the token budget or `MAX_CSS_BYTES` that every
+    /// import shares; a `@font-face` with no family or no source. Skipped by
+    /// the CSS specification's own recovery, and named.
     AtRuleIgnored,
-    /// §10.4's per-glyph positioning: an `x`, `y`, `dx`, `dy` or `rotate`
-    /// with **more than one number** in it.
-    ///
-    /// The first is used and the rest are dropped, which sets the run as one
-    /// piece at the right place instead of spreading its letters. Naming it is
-    /// the point: a build that took the first number silently would set a
-    /// deliberately-spaced line as an ordinary one and look entirely correct.
-    TextPositionListIgnored,
+    /// An `@import` whose sheet the caller's container did not hand back —
+    /// or any `@import` at all, through [`read`], which has no container. The
+    /// rules after it apply; its own do not.
+    ImportUnresolved,
     /// `<textPath>`, `<tref>` and `<altGlyph>` — §10.13's text on a path and
     /// its two relatives. Each is a second layout engine.
     TextLayoutUnsupported,
-    /// §13.2.3's `spreadMethod` of `reflect` or `repeat`.
-    ///
-    /// `pad` is drawn instead, which is the initial value and the one every
-    /// gradient in the fetched corpus uses. The other two tile the stop list
-    /// outside the axis, and doing it honestly means a stitching function over
-    /// a repeated domain rather than a wider axis with more stops on it — an
-    /// approximation with a chosen number of repeats would be a gradient that
-    /// is right in the middle and wrong at the edges.
-    SpreadMethodUnsupported,
 }
 
 /// A colour, as three components in `[0, 1]`.
@@ -241,6 +356,18 @@ pub enum Warning {
 pub struct Colour {
     /// Red, green, blue, each in `[0, 1]`.
     pub rgb: [f64; 3],
+}
+
+/// §13.2.3's `spreadMethod`: what a gradient does past the ends of its axis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Spread {
+    /// `pad`, the initial value: the end stops' colours, out to infinity.
+    #[default]
+    Pad,
+    /// `reflect`: the ramp again, backwards, then forwards, and so on.
+    Reflect,
+    /// `repeat`: the ramp again from its start, every period.
+    Repeat,
 }
 
 /// One stop of a gradient.
@@ -281,6 +408,8 @@ pub enum Paint {
         matrix: [f64; 6],
         /// Stops, in ascending offset order.
         stops: Vec<Stop>,
+        /// What happens past the axis's ends.
+        spread: Spread,
     },
     /// `<radialGradient>`, on the same terms.
     ///
@@ -299,7 +428,30 @@ pub enum Paint {
         matrix: [f64; 6],
         /// Stops, in ascending offset order.
         stops: Vec<Stop>,
+        /// What happens past the circle.
+        spread: Spread,
     },
+    /// §13.3's `<pattern>`: a tile of nodes, repeated.
+    Pattern(Box<Tile>),
+}
+
+/// §13.3's pattern tile, which is 8.7.3's tiling pattern by another name.
+///
+/// The content is in **pattern space** — the referencing element's user
+/// space with `patternTransform` applied — so a consumer draws `nodes` once,
+/// clips them to `cell`, and repeats the result at every multiple of the
+/// cell's width and height, all through `matrix`. A tile carries no matrix
+/// of its own inside it for the reason a scene carries none: every transform
+/// below pattern space is composed into the nodes already.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tile {
+    /// The tile's content, in pattern space.
+    pub nodes: Vec<Node>,
+    /// The tile, as `x y width height` in pattern space, which is also the
+    /// spacing: §13.3's tiles abut.
+    pub cell: [f64; 4],
+    /// Pattern space to the scene's.
+    pub matrix: [f64; 6],
 }
 
 /// §10.9's `text-anchor`.
@@ -355,6 +507,31 @@ pub struct Clip {
     pub rule: FillRule,
 }
 
+/// §14.4's mask: a second picture whose **luminance** is the first one's
+/// alpha.
+///
+/// Its nodes are drawn like any others — in the scene's space, with every
+/// transform composed — and then read for how light they are: white keeps
+/// the masked picture, black removes it, and a grey fades it. Outside
+/// `region`, the mask is black. The luminance is CSS Masking 1's, which every
+/// reading system computes and which `color-interpolation`'s initial `sRGB`
+/// makes the plain weighted sum of the colour's channels; SVG 1.1's own text
+/// asked for linearRGB first, and nothing that renders an SVG today does.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mask {
+    /// The mask's content, in paint order, in the scene's space.
+    pub nodes: Vec<Node>,
+    /// The mask region — `x`, `y`, `width` and `height` of the `<mask>` — as
+    /// an outline in the scene's space. Empty for a region with no area,
+    /// which masks everything away.
+    ///
+    /// `None` for a mask with no region of its own: a `<clipPath>` that holds
+    /// text, drawn as the mask of its silhouettes — its shapes and its glyphs
+    /// in white — because a glyph's outline is a font's (ruling 8) and a
+    /// union of a path and glyphs is not something one clip can say.
+    pub region: Option<path::Outline>,
+}
+
 /// SVG 1.1 §11.3's `fill-rule`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FillRule {
@@ -408,6 +585,20 @@ pub struct Stroke {
     pub dash_offset: f64,
     /// `stroke-opacity`, in `[0, 1]`.
     pub opacity: f64,
+    /// The matrix from the user space `width`, `dashes` and `dash_offset`
+    /// are measured in — the stroked element's own — into the space its
+    /// node's geometry is in.
+    ///
+    /// §11.4 strokes in the element's user space, so `stroke-width="2"`
+    /// inside `scale(3)` is six units of the scene wide, and a root `viewBox`
+    /// that maps ten units onto a hundred makes every stroke ten times its
+    /// number. A [`Node::Path`]'s outline has this matrix composed in already
+    /// and its stroke does not: a consumer strokes under it — a `cm` around
+    /// the path, its points taken back through the inverse — and a
+    /// non-uniform one strokes anisotropically, as §11.4 does. For a
+    /// [`Node::Text`] it is the run's own `matrix`, which a consumer sets the
+    /// glyphs under anyway.
+    pub matrix: [f64; 6],
 }
 
 /// One drawable thing.
@@ -474,18 +665,76 @@ pub enum Node {
         /// already applied.
         text: String,
         /// Where this run starts, in the space `matrix` maps out of, or `None`
-        /// to continue from where the previous run ended.
+        /// to continue from where the previous run ended. `Some` opens a
+        /// §10.9 chunk.
         anchor: Option<[f64; 2]>,
+        /// Whether the anchor's `x` is an **offset** from where the previous
+        /// run ended rather than a position.
+        ///
+        /// §10.5's rule (b): a character with a `y` and no `x` anywhere above
+        /// it opens a chunk at that `y` and at the `x` the previous glyph left
+        /// the pen at — which is a metric, so it is the caller's, and what
+        /// this crate supplies is the `dx` to add to it.
+        continues_x: bool,
+        /// §10.5's supplemental rotation of every glyph in the run, in
+        /// degrees, about the run's own origin — clockwise, in the downward
+        /// space `matrix` maps out of. A run with a rotation is one
+        /// character, because each glyph turns about its own origin.
+        rotate: f64,
         /// The matrix from that space into the scene's.
         matrix: [f64; 6],
         /// The font properties, resolved but not matched.
         font: TextStyle,
         /// How the glyphs are filled.
         fill: Paint,
-        /// `fill-opacity` times every `opacity` above it.
+        /// `fill-opacity`, and the run's own `opacity` where that was folded
+        /// in (see [`Node::Group`]).
         fill_opacity: f64,
         /// How the glyphs are outlined, if at all.
         stroke: Option<Box<Stroke>>,
+        /// §11.5's `visibility: hidden`: the run is **laid out and not
+        /// painted**. SVG 2's *Controlling visibility* has a hidden element
+        /// still affect text layout and count in a bounding box, so the run
+        /// is here — its advance moves the pen for the text after it, a chunk
+        /// it opens opens there, and its cells are in its `<text>`'s box —
+        /// with `fill` none and no `stroke`, and a consumer draws nothing for
+        /// it: not a glyph, not an invisible one a reader would extract, and
+        /// not a clip's silhouette.
+        hidden: bool,
+    },
+    /// §14.5's group: nodes composited **together**, and then faded and
+    /// clipped as one.
+    ///
+    /// # Why a node holds nodes, when nothing else here nests
+    ///
+    /// §14.5 makes `opacity` a property of a *rendering*: the subtree is drawn
+    /// into an offscreen image, and that image is composited once at the
+    /// stated alpha. Multiplying the alpha into every descendant is the same
+    /// picture only where nothing in the subtree overlaps anything else in it
+    /// — and a fill and its own stroke always overlap, so a flattened group is
+    /// too dark along every edge it has. A `clip-path` on a container is the
+    /// same shape of problem: §14.3.5 clips the *group's* rendering, and a
+    /// descendant with a clip of its own has no per-node spelling of the two.
+    ///
+    /// So paint order stays a list, and a group is a list inside it. Every
+    /// point under a group is still in the scene's own space — a group carries
+    /// no matrix, which is the rule `scene`'s header gives for the whole crate.
+    ///
+    /// A group is made only where it changes the picture. A subtree at full
+    /// opacity with no clip is its nodes, inline; and a group of **one** node
+    /// that paints once — a fill with no stroke, a stroke with no fill, a run
+    /// of text that is only filled — has its opacity folded into that node's
+    /// own alpha, because one paint composited at `a` is exactly one paint at
+    /// alpha `a`.
+    Group {
+        /// What the group holds, in paint order, in the scene's own space.
+        nodes: Vec<Node>,
+        /// §14.5's `opacity`, applied once to the composite, in `[0, 1]`.
+        opacity: f64,
+        /// §14.3's clip of the element that made the group, or `None`.
+        clip: Option<Clip>,
+        /// §14.4's mask of the element that made the group, or `None`.
+        mask: Option<Box<Mask>>,
     },
     /// An `<image>`, carried **unresolved**.
     ///
@@ -526,4 +775,9 @@ pub struct Scene {
     pub nodes: Vec<Node>,
     /// Everything the picture asked for that this build did not draw.
     pub warnings: Vec<Warning>,
+    /// Every `@font-face` its `<style>` elements and their imports declared,
+    /// in source order, for the caller to load through its container: a face
+    /// is a font program, which this crate has no vocabulary for (ruling 8),
+    /// and a run naming its family is matched against it there.
+    pub font_faces: Vec<tinker_pdf_css::font_face::FontFace>,
 }

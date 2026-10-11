@@ -5,12 +5,15 @@
 //! positioned is this crate's business, and composing paragraphs is not.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 
 use tinker_pdf_filters::CcittParams;
 
 use crate::dest::DestKind;
 use crate::name::{Name, NameTable};
 use crate::object::{Dict, ObjRef, Object, PdfString};
+use crate::text_string::encode_text_string;
 use crate::write::{rewrite, ObjectSet, StreamData, WriteOptions};
 
 /// Image data to embed.
@@ -74,7 +77,8 @@ pub enum ImageData<'a> {
 /// A device colour space, which is all an `/Indexed` base may be here.
 ///
 /// 8.6.6.3 forbids an `/Indexed` whose base is itself `/Indexed`, and this
-/// writer emits no CIE-based, `/Separation` or `/DeviceN` space — so the three
+/// writer writes an `/Indexed` over a device space only — its CIE-based,
+/// `/Separation` and `/DeviceN` spaces are not offered as bases — so the three
 /// device families are the whole of it, and the restriction is the
 /// specification's rather than an invention.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -98,7 +102,7 @@ impl DeviceSpace {
         }
     }
 
-    const fn pdf_name(self) -> &'static [u8] {
+    pub(crate) const fn pdf_name(self) -> &'static [u8] {
         match self {
             DeviceSpace::Gray => b"DeviceGray",
             DeviceSpace::Rgb => b"DeviceRGB",
@@ -119,19 +123,73 @@ pub enum ImageColorSpace<'a> {
     /// A registered `/ICCBased` space, by the resource name
     /// [`DocumentBuilder::add_icc_color_space`] gave it (8.6.5.5).
     ///
-    /// An image's `/ColorSpace` may name a resource rather than state a space
-    /// inline (8.9.5.4), which is what lets one embedded profile serve a page's
-    /// operators and its images alike instead of being copied into each. The
-    /// channel count comes from the registered space's `/N`, so this variant
-    /// carries no count of its own — and an image whose samples disagree with
-    /// that count is a defect this writer cannot see, exactly as it cannot see
-    /// inside the profile.
+    /// The image's `/ColorSpace` is written as a reference to the registered
+    /// space's own `[/ICCBased stream]` array, which is what lets one embedded
+    /// profile serve a page's operators and its images alike instead of being
+    /// copied into each. **Not as the resource name**: Table 89 makes an
+    /// image's `/ColorSpace` a colour space, and only a content stream's `cs`
+    /// looks a name up in `/Resources` (8.6.3). Until September 2026 the name
+    /// was written, and this repository's reader drew the samples as grey. An
+    /// image naming a resource no `/ICCBased` space was registered under is
+    /// refused, and so is one whose `components` is not the `/N` the space
+    /// was registered with: the builder knows it, and an image written with
+    /// a different count has rows of the wrong width. Whether the samples
+    /// are values in that profile is what this writer cannot see, exactly as
+    /// it cannot see inside the profile.
     Icc {
         /// The resource name the space was registered under.
         resource: &'a [u8],
         /// How many channels a sample has, which must be the space's `/N`.
         components: u8,
     },
+    /// A registered `/Separation` or `/DeviceN` space, by the resource name
+    /// [`DocumentBuilder::add_separation_color_space`] or
+    /// [`DocumentBuilder::add_device_n_color_space`] gave it (8.6.6.4,
+    /// 8.6.6.5): each sample is one tint per colorant.
+    ///
+    /// The count is checked as [`Self::Icc`]'s is: the builder knows how many
+    /// colorants the space it registered names, so an image whose `components`
+    /// disagree is refused rather than written with rows of the wrong width.
+    Tint {
+        /// The resource name the space was registered under.
+        resource: &'a [u8],
+        /// Tints per sample: one for a `/Separation`, the colorant count for
+        /// a `/DeviceN`.
+        components: u8,
+    },
+    /// A registered CIE-based space — `/CalGray`, `/CalRGB` or `/Lab` — by
+    /// the resource name [`DocumentBuilder::add_cie_color_space`] gave it
+    /// (8.6.5.2–8.6.5.4), written as a reference to the space's own array as
+    /// [`Self::Icc`] is, and refused on the same terms: a name no CIE space
+    /// was registered under, or a `components` that is not the space's own
+    /// count, one for `/CalGray` and three for the others.
+    ///
+    /// The samples are Table 90's: with no `/Decode`, a `/CalGray` or
+    /// `/CalRGB` sample spans 0 to 1 and a `/Lab` one spans `0..100` for
+    /// `L*` and the space's `/Range` for `a*` and `b*`, linearly over the
+    /// sample's bits.
+    Cie {
+        /// The resource name the space was registered under.
+        resource: &'a [u8],
+        /// Channels per sample, which must be the space's component count.
+        components: u8,
+    },
+    /// CIE `L*a*b*` samples in **offset binary**, written inline as
+    /// `[/Lab << /WhitePoint [0.9642 1 0.8249] /Range [-128 m -128 m] >>]`
+    /// with `m = 128 - 256 / 2^bits` (8.6.5.4), and no `/Decode`.
+    ///
+    /// Table 90 then reads a sample `s` of `bits` bits as `L* = 100 s /
+    /// (2^bits - 1)` and `a* = 256 s / 2^bits - 128`, so a signed `a*` with
+    /// its top bit flipped — 128 for zero chroma at 8 bits, 32768 at 16 — is
+    /// its own value: **exactly** at 8 bits, `[-128 127]`, and at 16 to the
+    /// writer's six decimal places, `127.99609375` written as `127.996094`,
+    /// which is 4 × 10⁻⁷ of a unit of `a*` from exact. That is the
+    /// encoding TIFF's `PhotometricInterpretation` 8 decodes to
+    /// (`tinker_pdf_filters::TiffColour::Lab`), and it needs no registered
+    /// space: the array says everything. The white point is D50, the ICC
+    /// connection space's — a TIFF's §23 samples are relative to a white the
+    /// file does not otherwise name.
+    Lab,
     /// `[/Indexed base hival lookup]` (8.6.6.3).
     Indexed {
         /// The space each table entry is expressed in.
@@ -155,10 +213,140 @@ impl ImageColorSpace<'_> {
     pub const fn components(&self) -> u32 {
         match self {
             ImageColorSpace::DeviceGray | ImageColorSpace::Indexed { .. } => 1,
-            ImageColorSpace::DeviceRgb => 3,
+            ImageColorSpace::DeviceRgb | ImageColorSpace::Lab => 3,
             ImageColorSpace::DeviceCmyk => 4,
-            ImageColorSpace::Icc { components, .. } => *components as u32,
+            ImageColorSpace::Icc { components, .. }
+            | ImageColorSpace::Tint { components, .. }
+            | ImageColorSpace::Cie { components, .. } => *components as u32,
         }
+    }
+}
+
+/// A CIE-based colour space, as [`DocumentBuilder::add_cie_color_space`]
+/// writes it (ISO 32000-1 8.6.5.2–8.6.5.4).
+///
+/// Each is a two-element array, the family name and a dictionary of the
+/// parameters below, and each is device-independent: its components are
+/// colours relative to `white`, the diffuse white point, rather than amounts
+/// of a device's light or ink. `white` is required by Tables 63–65 — `X` and
+/// `Z` positive and `Y` exactly 1 — and `black`, the diffuse black point, is
+/// optional with a default of `[0 0 0]`; every other parameter defaults as
+/// its table says, and a parameter equal to its default is not written, as
+/// [`DocumentBuilder::add_icc_color_space`] leaves `/Alternate` unwritten.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum CieSpace {
+    /// `[/CalGray << ... >>]` (8.6.5.2, Table 63): one component `A`, and
+    /// `X = XW·A^G`, `Y = YW·A^G`, `Z = ZW·A^G`.
+    CalGray {
+        /// `/WhitePoint`.
+        white: [f64; 3],
+        /// `/BlackPoint`.
+        black: [f64; 3],
+        /// `/Gamma`, positive; 1 by default.
+        gamma: f64,
+    },
+    /// `[/CalRGB << ... >>]` (8.6.5.3, Table 64): three components, each
+    /// through its own gamma and then into XYZ by `matrix`.
+    CalRgb {
+        /// `/WhitePoint`.
+        white: [f64; 3],
+        /// `/BlackPoint`.
+        black: [f64; 3],
+        /// `/Gamma`, one positive number per component; `[1 1 1]` by default.
+        gamma: [f64; 3],
+        /// `/Matrix`, `[XA YA ZA XB YB ZB XC YC ZC]` — **column by column**,
+        /// as Table 64 writes it; the identity by default.
+        matrix: [f64; 9],
+    },
+    /// `[/Lab << ... >>]` (8.6.5.4, Table 65): `L*` from 0 to 100, and `a*`
+    /// and `b*` within `range`.
+    Lab {
+        /// `/WhitePoint`.
+        white: [f64; 3],
+        /// `/BlackPoint`.
+        black: [f64; 3],
+        /// `/Range`, `[amin amax bmin bmax]`; `[-100 100 -100 100]` by
+        /// default.
+        range: [f64; 4],
+    },
+}
+
+impl CieSpace {
+    /// Components a colour in this space has: one for `/CalGray`, three for
+    /// the others.
+    #[must_use]
+    pub const fn components(&self) -> usize {
+        match self {
+            CieSpace::CalGray { .. } => 1,
+            CieSpace::CalRgb { .. } | CieSpace::Lab { .. } => 3,
+        }
+    }
+
+    /// Whether every parameter is one Tables 63–65 allow: a white point with
+    /// `X` and `Z` positive and `Y` equal to 1, a black point of non-negative
+    /// numbers, positive gammas, a finite matrix, and a range whose minimums
+    /// are below its maximums.
+    ///
+    /// Held **as the file will say them**: the writer prints a real to six
+    /// decimal places, so a white `X` or `Z` or a gamma under half a
+    /// millionth would be written as `0`, and a `/Range` pair closer than
+    /// that as one number twice — each a file the tables forbid, which is
+    /// refused here rather than written.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        let (white, black) = match self {
+            CieSpace::CalGray { white, black, .. }
+            | CieSpace::CalRgb { white, black, .. }
+            | CieSpace::Lab { white, black, .. } => (white, black),
+        };
+        let finite = |values: &[f64]| values.iter().all(|v| v.is_finite());
+        let written = crate::write::written_real;
+        let positive = |v: f64| v.is_finite() && written(v) > 0.0;
+        let points = finite(white)
+            && positive(white[0])
+            && white[1] == 1.0
+            && positive(white[2])
+            && finite(black)
+            && black.iter().all(|v| *v >= 0.0);
+        points
+            && match self {
+                CieSpace::CalGray { gamma, .. } => positive(*gamma),
+                CieSpace::CalRgb { gamma, matrix, .. } => {
+                    gamma.iter().all(|g| positive(*g)) && finite(matrix)
+                }
+                CieSpace::Lab { range, .. } => {
+                    finite(range)
+                        && written(range[0]) < written(range[1])
+                        && written(range[2]) < written(range[3])
+                }
+            }
+    }
+
+    /// A colour's components clamped to the space's own ranges: `[0, 1]` for
+    /// `/CalGray` and `/CalRGB` (8.6.5.2, 8.6.5.3), `L*` to `[0, 100]` and
+    /// `a*`, `b*` to `/Range` for `/Lab` (8.6.5.4), missing ones as zero —
+    /// which is black in all three — and a NaN as zero too.
+    fn clamp(&self, components: &[f64]) -> Vec<f64> {
+        let bounds: Vec<(f64, f64)> = match self {
+            CieSpace::CalGray { .. } => vec![(0.0, 1.0)],
+            CieSpace::CalRgb { .. } => vec![(0.0, 1.0); 3],
+            CieSpace::Lab { range, .. } => {
+                vec![(0.0, 100.0), (range[0], range[1]), (range[2], range[3])]
+            }
+        };
+        bounds
+            .iter()
+            .enumerate()
+            .map(|(at, &(lo, hi))| {
+                let value = components.get(at).copied().unwrap_or(0.0);
+                if value.is_nan() {
+                    0.0_f64.clamp(lo, hi)
+                } else {
+                    value.clamp(lo, hi)
+                }
+            })
+            .collect()
     }
 }
 
@@ -231,6 +419,23 @@ pub enum ImageFilter {
     /// image's - is exactly the disagreement that produces a page with the
     /// right dictionary and the wrong picture.
     CcittFax(CcittParams),
+    /// `/JPXDecode` (7.4.9): a JPEG 2000 file, as a bare codestream or in its
+    /// JP2 wrapper, placed as it is.
+    ///
+    /// **The image dictionary carries no `/BitsPerComponent` and no
+    /// `/ColorSpace`.** Table 89 makes both optional for this filter and for
+    /// no other, and the codestream's own precision and colour specification
+    /// then apply. Writing them would not be harmless: a `/ColorSpace` present
+    /// overrides the file's `colr` box, so a JP2 carrying an ICC profile or an
+    /// sYCC declaration would be re-labelled with whatever device space a
+    /// caller guessed, and `/BitsPerComponent` cannot even state a 12-bit
+    /// codestream. So [`CompressedImage::bits_per_component`] and
+    /// [`CompressedImage::color_space`] are *descriptions* for this filter —
+    /// what a decode produces, checked as for any image, and **not written** —
+    /// and a colour-key [`CompressedImage::color_key_mask`] is refused, since
+    /// 8.9.6.4's ranges are raw sample values at a `/BitsPerComponent` this
+    /// dictionary does not state.
+    Jpx,
 }
 
 /// Per-sample opacity, as the `/DeviceGray` sub-image 11.6.5.3 asks for.
@@ -513,11 +718,17 @@ pub struct FormXObject<'a> {
     pub content: &'a [u8],
 }
 
-/// A PDF function (7.10), in the two types a gradient is built from.
+/// A PDF function (7.10): the two types a gradient is built from, the
+/// calculator a hand-written `/DeviceN` tint transform needs, and the sampled
+/// table one taken from a profile is.
 ///
-/// **`#[non_exhaustive]`**: 7.10 defines four types and this writer emits two.
-/// Sampled (type 0) and PostScript calculator (type 4) functions are additions
-/// a later gap can make without breaking a caller that matched with a wildcard.
+/// **`#[non_exhaustive]`**, though 7.10 defines four types and this writer now
+/// emits all four: a variant a later change adds — a sampled table of another
+/// sample width, say — breaks no caller that matched with a wildcard. The
+/// sampled type arrived last, once this repository's reader interpolated a
+/// table across **every** input rather than its first alone (3 October 2026),
+/// since a multi-input table is the kind a `/DeviceN` wants and would have
+/// been written and then read back wrong.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Function {
@@ -551,6 +762,311 @@ pub enum Function {
         /// onto the domain that sub-function itself wants.
         encode: Vec<[f64; 2]>,
     },
+    /// Type 4, a PostScript calculator (7.10.5): any number of inputs, any
+    /// number of outputs, and a program over Table 42's operators.
+    ///
+    /// This is what a hand-written `/DeviceN` tint transform is made of: one of
+    /// the two types that take more than one input — [`Function::Sampled`] is
+    /// the other, for a transform known only at grid points — and the one
+    /// that states a formula exactly. The program is a **value**, not text: there
+    /// is nothing to parse, and [`DocumentBuilder`] checks before writing it
+    /// that every operator is one Table 42 names, that no operator is reached
+    /// with too few operands, that both arms of an `ifelse` leave the stack
+    /// the same depth and an `if` leaves it where it found it, and that the
+    /// program ends with exactly one value per output on the stack.
+    Calculator {
+        /// `/Domain`: one `[lo hi]` per input.
+        domain: Vec<[f64; 2]>,
+        /// `/Range`: one `[lo hi]` per output. Required for this type
+        /// (7.10.5), and what a reader clips each output to.
+        range: Vec<[f64; 2]>,
+        /// The program, which runs with the inputs on the stack, first input
+        /// deepest.
+        program: Vec<CalculatorOp>,
+    },
+    /// Type 0, a sampled table (7.10.2), sixteen bits a sample and 7.10.2's
+    /// default multilinear interpolation (`/Order 1`) between them.
+    ///
+    /// What a function no closed form states is made of: a gradient
+    /// interpolated in a space the shading's is not, or a `/DeviceN` tint
+    /// transform taken from evaluating an ICC profile at a grid of points.
+    /// `/Encode` and `/Decode` are 7.10.2's defaults — the inputs across the
+    /// whole table, and the samples across `range` — so a sample of `0` is
+    /// the bottom of its output's range and `65535` the top.
+    ///
+    /// Several inputs since this repository's reader learnt to interpolate
+    /// across all of them (3 October 2026); before that it read a table along
+    /// its first input alone, and this variant took one.
+    Sampled {
+        /// `/Domain`: one `[lo hi]` per input.
+        domain: Vec<[f64; 2]>,
+        /// `/Range`: one `[lo hi]` per output.
+        range: Vec<[f64; 2]>,
+        /// `/Size`: how many samples along each input, each at least two.
+        size: Vec<u32>,
+        /// The samples, the first input varying fastest (7.10.2), each
+        /// output's value for one grid point together, written big-endian.
+        samples: Vec<u16>,
+    },
+}
+
+/// One instruction of a [`Function::Calculator`] program (7.10.5).
+#[derive(Clone, Debug, PartialEq)]
+pub enum CalculatorOp {
+    /// A number, pushed onto the stack.
+    Number(f64),
+    /// One of Table 42's operators by name — `add`, `mul`, `exch`, `index`,
+    /// `roll`, `true`, … — other than `if` and `ifelse`, which are the two
+    /// variants below.
+    ///
+    /// `copy`, `index` and `roll` take their counts from the stack, so a
+    /// program using one has to have pushed the count as a [`Self::Number`]
+    /// where the check can see it; a count computed at run time is refused,
+    /// since the depth after it cannot be known before the program runs.
+    Operator(&'static str),
+    /// `{ … } if`: the block runs when the value on top of the stack is true.
+    /// It must leave the stack as deep as it found it.
+    If(Vec<CalculatorOp>),
+    /// `{ … } { … } ifelse`: the first block runs when the value on top of
+    /// the stack is true, the second otherwise. Both must leave the stack
+    /// equally deep.
+    IfElse(Vec<CalculatorOp>, Vec<CalculatorOp>),
+}
+
+/// Table 42's operators, with how many operands each takes and leaves,
+/// **except** the three whose counts come from the stack and the two
+/// conditionals, which [`check_calculator`] reads separately.
+const CALCULATOR_OPERATORS: [(&str, usize, usize); 36] = [
+    ("abs", 1, 1),
+    ("add", 2, 1),
+    ("atan", 2, 1),
+    ("ceiling", 1, 1),
+    ("cos", 1, 1),
+    ("cvi", 1, 1),
+    ("cvr", 1, 1),
+    ("div", 2, 1),
+    ("exp", 2, 1),
+    ("floor", 1, 1),
+    ("idiv", 2, 1),
+    ("ln", 1, 1),
+    ("log", 1, 1),
+    ("mod", 2, 1),
+    ("mul", 2, 1),
+    ("neg", 1, 1),
+    ("round", 1, 1),
+    ("sin", 1, 1),
+    ("sqrt", 1, 1),
+    ("sub", 2, 1),
+    ("truncate", 1, 1),
+    ("and", 2, 1),
+    ("bitshift", 2, 1),
+    ("eq", 2, 1),
+    ("false", 0, 1),
+    ("ge", 2, 1),
+    ("gt", 2, 1),
+    ("le", 2, 1),
+    ("lt", 2, 1),
+    ("ne", 2, 1),
+    ("not", 1, 1),
+    ("or", 2, 1),
+    ("true", 0, 1),
+    ("xor", 2, 1),
+    ("dup", 1, 2),
+    ("exch", 2, 2),
+];
+
+/// How deeply a calculator's `if` and `ifelse` blocks may nest.
+///
+/// A compatibility limit rather than a resource bound, for
+/// [`MAX_FUNCTION_DEPTH`]'s reason: this repository's reader stops parsing a
+/// program's braces past depth 32, so a writer nesting deeper would write a
+/// function its own reader truncates. Sixteen is half that, which no tint
+/// transform approaches.
+const MAX_CALCULATOR_NESTING: u32 = 16;
+
+/// The deepest a calculator's operand stack may get: 7.10.5's own limit of
+/// 100, which the reader enforces by truncating.
+const MAX_CALCULATOR_STACK: usize = 100;
+
+/// How many tokens a calculator program may run to, braces included: the
+/// reader stops tokenising at 65 536.
+const MAX_CALCULATOR_TOKENS: usize = 1 << 16;
+
+/// Whether a calculator program is one this writer can promise a reader
+/// evaluates: see [`Function::Calculator`] for the checks.
+///
+/// The stack is modelled as a list of values that are either a number the
+/// program pushed as a literal or unknown, which is what lets `copy`, `index`
+/// and `roll` be checked when their counts are literals and refused when they
+/// are not. Recursion is over `if` blocks and bounded by
+/// [`MAX_CALCULATOR_NESTING`].
+fn check_calculator(
+    program: &[CalculatorOp],
+    stack: &mut Vec<Option<f64>>,
+    nesting: u32,
+    tokens: &mut usize,
+) -> bool {
+    if nesting > MAX_CALCULATOR_NESTING {
+        return false;
+    }
+    // A count operand: a literal non-negative integer the stack can supply.
+    fn count(value: Option<Option<f64>>) -> Option<usize> {
+        let value = value.flatten()?;
+        (value.fract() == 0.0 && (0.0..=MAX_CALCULATOR_STACK as f64).contains(&value))
+            .then_some(value as usize)
+    }
+    for op in program {
+        *tokens += 1;
+        match op {
+            CalculatorOp::Number(value) => {
+                if !value.is_finite() {
+                    return false;
+                }
+                stack.push(Some(*value));
+            }
+            CalculatorOp::Operator(name) => match *name {
+                "copy" => {
+                    let Some(n) = count(stack.pop()) else {
+                        return false;
+                    };
+                    let Some(from) = stack.len().checked_sub(n) else {
+                        return false;
+                    };
+                    let copied: Vec<Option<f64>> = stack[from..].to_vec();
+                    stack.extend(copied);
+                }
+                "index" => {
+                    let Some(n) = count(stack.pop()) else {
+                        return false;
+                    };
+                    let Some(at) = stack.len().checked_sub(n + 1) else {
+                        return false;
+                    };
+                    let value = stack[at];
+                    stack.push(value);
+                }
+                "roll" => {
+                    let shift = stack.pop().flatten();
+                    let Some(n) = count(stack.pop()) else {
+                        return false;
+                    };
+                    let Some(shift) = shift.filter(|j| j.fract() == 0.0 && j.abs() <= 1e6) else {
+                        return false;
+                    };
+                    let Some(from) = stack.len().checked_sub(n) else {
+                        return false;
+                    };
+                    if n > 0 {
+                        let by = (shift as i64).rem_euclid(n as i64) as usize;
+                        stack[from..].rotate_right(by);
+                    }
+                }
+                "pop" => {
+                    if stack.pop().is_none() {
+                        return false;
+                    }
+                }
+                other => {
+                    let Some(&(_, takes, leaves)) = CALCULATOR_OPERATORS
+                        .iter()
+                        .find(|(name, ..)| *name == other)
+                    else {
+                        return false;
+                    };
+                    let Some(from) = stack.len().checked_sub(takes) else {
+                        return false;
+                    };
+                    let taken: Vec<Option<f64>> = stack.drain(from..).collect();
+                    match other {
+                        "dup" => stack.extend([taken[0], taken[0]]),
+                        "exch" => stack.extend([taken[1], taken[0]]),
+                        _ => stack.extend(std::iter::repeat_n(None, leaves)),
+                    }
+                }
+            },
+            CalculatorOp::If(block) => {
+                // `{`, `}` and `if`.
+                *tokens += 3;
+                if stack.pop().is_none() {
+                    return false;
+                }
+                let mut taken = stack.clone();
+                if !check_calculator(block, &mut taken, nesting + 1, tokens) {
+                    return false;
+                }
+                if !merge_arms(stack, &taken) {
+                    return false;
+                }
+            }
+            CalculatorOp::IfElse(yes, no) => {
+                // Two pairs of braces and `ifelse`.
+                *tokens += 5;
+                if stack.pop().is_none() {
+                    return false;
+                }
+                let mut first = stack.clone();
+                let mut second = stack.clone();
+                if !check_calculator(yes, &mut first, nesting + 1, tokens)
+                    || !check_calculator(no, &mut second, nesting + 1, tokens)
+                {
+                    return false;
+                }
+                if !merge_arms(&mut first, &second) {
+                    return false;
+                }
+                *stack = first;
+            }
+        }
+        if stack.len() > MAX_CALCULATOR_STACK || *tokens > MAX_CALCULATOR_TOKENS {
+            return false;
+        }
+    }
+    true
+}
+
+/// Joins the stacks two paths through a conditional leave, keeping a literal
+/// only where both paths agree on it. False when the depths differ, which is
+/// a program whose output count depends on its input.
+fn merge_arms(into: &mut [Option<f64>], other: &[Option<f64>]) -> bool {
+    if into.len() != other.len() {
+        return false;
+    }
+    for (a, b) in into.iter_mut().zip(other) {
+        if *a != *b {
+            *a = None;
+        }
+    }
+    true
+}
+
+/// A calculator program as the text 7.10.5 puts in the function's stream.
+///
+/// Numbers are written with Rust's shortest round-trip form, which never uses
+/// an exponent: a constant in a tint transform is arithmetic, and the
+/// four-place rounding content streams use would change the answer.
+fn calculator_text(program: &[CalculatorOp], out: &mut Vec<u8>) {
+    out.push(b'{');
+    for op in program {
+        out.push(b' ');
+        match op {
+            CalculatorOp::Number(value) => {
+                let value = if *value == 0.0 { 0.0 } else { *value };
+                out.extend_from_slice(format!("{value}").as_bytes());
+            }
+            CalculatorOp::Operator(name) => out.extend_from_slice(name.as_bytes()),
+            CalculatorOp::If(block) => {
+                calculator_text(block, out);
+                out.extend_from_slice(b" if");
+            }
+            CalculatorOp::IfElse(yes, no) => {
+                calculator_text(yes, out);
+                out.push(b' ');
+                calculator_text(no, out);
+                out.extend_from_slice(b" ifelse");
+            }
+        }
+    }
+    out.extend_from_slice(b" }");
 }
 
 /// A shading (8.7.4.5), in the two gradient types.
@@ -588,6 +1104,65 @@ pub enum Shading {
         /// `/Extend`, beyond the first and second circle.
         extend: (bool, bool),
     },
+}
+
+/// An optional content group (8.11.2.1) a [`DocumentBuilder`] registered —
+/// a layer — for [`PageBuilder::optional`] to draw into.
+///
+/// A handle rather than a name the caller picks, because the name an `/OC`
+/// sequence uses is a key in the page's `/Properties` that no caller has any
+/// reason to spell, and a handle cannot be misspelled.
+///
+/// It is meaningful only to the builder that made it, and **carries which
+/// builder that was**: every builder's first layer is its zeroth, so a
+/// handle that was only the index would let another builder's layer draw
+/// into whichever of this one's shares the position — a hidden one, say.
+/// [`PageBuilder::optional`] refuses a handle from any other builder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LayerId {
+    /// The [`DocumentBuilder`] that registered it: see [`BuilderSerial`].
+    builder: BuilderSerial,
+    /// Its position among that builder's layers.
+    index: u32,
+}
+
+impl LayerId {
+    /// The key this layer is registered under in `/Properties`.
+    fn resource(self) -> Vec<u8> {
+        format!("OC{}", self.index).into_bytes()
+    }
+}
+
+/// Which [`DocumentBuilder`] a handle came from: a number no other builder
+/// in this process was given.
+///
+/// **Never written to a file.** Two runs building the same document number
+/// their builders differently, and the bytes they write are the same
+/// (ruling 4), because what reaches the file is the layer's index alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct BuilderSerial(u64);
+
+impl BuilderSerial {
+    /// The next serial. 64 bits do not wrap at any rate builders can be made.
+    fn next() -> BuilderSerial {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        BuilderSerial(NEXT.fetch_add(1, AtomicOrdering::Relaxed))
+    }
+}
+
+/// What a `/DeviceN` space's attributes dictionary says (8.6.6.5, Table 71),
+/// as far as this writer emits one.
+///
+/// `/Subtype` is left at its default, `/DeviceN`: an `/NChannel` space owes a
+/// `/Process` dictionary and per-colorant rules this writer has no API for,
+/// and claiming the subtype without them is a space a reader would reject.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeviceNAttributes<'a> {
+    /// `/Colorants`: `/Separation` spaces registered with
+    /// [`DocumentBuilder::add_separation_color_space`], by resource name. Each
+    /// is written under its own colorant name, which is how Table 71 keys the
+    /// dictionary.
+    pub colorants: &'a [&'a [u8]],
 }
 
 /// `/TilingType` (Table 75): how a reader may adjust a cell's spacing.
@@ -674,6 +1249,35 @@ pub struct Glyph<'a> {
     pub text: &'a str,
 }
 
+/// What one piece of a [`PageBuilder::text_pieces`] text object shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PieceText<'a> {
+    /// Codes in a simple font and the characters they stand for, as
+    /// [`PageBuilder::encoded_text`] takes them.
+    Codes {
+        /// The codes, written and not interpreted.
+        codes: &'a [u8],
+        /// What they stand for, recorded and not written.
+        characters: &'a str,
+    },
+    /// Glyphs of a composite font, as [`PageBuilder::glyphs`] takes them.
+    Glyphs(&'a [Glyph<'a>]),
+}
+
+/// One piece of a [`PageBuilder::text_pieces`] text object: a font, where
+/// along the baseline the piece starts, in points from the page's left, and
+/// what it shows from there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextPiece<'a> {
+    /// The font resource, registered with the document as
+    /// [`PageBuilder::encoded_text`] or [`PageBuilder::glyphs`] needs it.
+    pub font: &'a [u8],
+    /// Where the piece's first glyph is drawn.
+    pub x: f64,
+    /// What it draws.
+    pub text: PieceText<'a>,
+}
+
 /// One glyph of a run the **caller** laid out, for
 /// [`DocumentBuilder::glyph_run`] (gap 30, milestone 7).
 ///
@@ -714,6 +1318,10 @@ struct ResourceSet {
     shadings: Vec<(Vec<u8>, ObjRef)>,
     patterns: Vec<(Vec<u8>, ObjRef)>,
     color_spaces: Vec<(Vec<u8>, ObjRef)>,
+    /// `/Properties` (14.6.2): the optional content groups
+    /// [`DocumentBuilder::add_layer`] registered, under the names an `/OC`
+    /// marked-content sequence uses for them (8.11.3.2).
+    properties: Vec<(Vec<u8>, ObjRef)>,
     /// `/N` for each registered `/ICCBased` space, by resource name.
     ///
     /// Carried beside `color_spaces` rather than inside it because the
@@ -722,6 +1330,16 @@ struct ResourceSet {
     /// [`PageBuilder::set_fill_icc`] can write **exactly** the operand count
     /// 8.6.5.5 declares, instead of trusting a caller to count to `/N`.
     icc_channels: BTreeMap<Vec<u8>, u8>,
+    /// How many tint components each registered `/Separation` (one) or
+    /// `/DeviceN` (one per colorant) space takes, by resource name — the
+    /// operand count of `scn` in that space (8.6.6.4, 8.6.6.5), kept for
+    /// [`PageBuilder::set_fill_tint`]'s reason `icc_channels` is kept for
+    /// [`PageBuilder::set_fill_icc`]'s.
+    tints: BTreeMap<Vec<u8>, usize>,
+    /// Each registered CIE-based space, by resource name, for
+    /// [`PageBuilder::set_fill_cie`]: its component count, and the ranges it
+    /// clamps to, which for `/Lab` are the space's own `/Range`.
+    cie: BTreeMap<Vec<u8>, CieSpace>,
 }
 
 impl ResourceSet {
@@ -746,6 +1364,7 @@ impl ResourceSet {
             (b"Shading", &self.shadings),
             (b"Pattern", &self.patterns),
             (b"ColorSpace", &self.color_spaces),
+            (b"Properties", &self.properties),
         ] {
             if entries.is_empty() {
                 continue;
@@ -773,7 +1392,7 @@ fn holds(entries: &[(Vec<u8>, ObjRef)], resource: &[u8]) -> bool {
 /// A `NaN` or an infinity would reach the file as `NaN` or `inf`, which is not
 /// a PDF number at all — so it is refused at the door rather than serialised
 /// into a token no reader can lex.
-fn all_finite(values: &[f64]) -> bool {
+pub(crate) fn all_finite(values: &[f64]) -> bool {
     values.iter().all(|v| v.is_finite())
 }
 
@@ -787,7 +1406,7 @@ fn is_alpha(value: f64) -> bool {
 }
 
 /// Whether a rectangle encloses an area, in the order `[x0 y0 x1 y1]`.
-fn is_box(rect: &[f64; 4]) -> bool {
+pub(crate) fn is_box(rect: &[f64; 4]) -> bool {
     all_finite(rect) && rect[2] > rect[0] && rect[3] > rect[1]
 }
 
@@ -821,6 +1440,19 @@ fn normalised(rect: [f64; 4]) -> [f64; 4] {
 /// a thousand deep is refused rather than overflowing a stack finding out.
 const MAX_FUNCTION_DEPTH: u32 = 8;
 
+/// The most colorants a `/DeviceN` space may name.
+///
+/// Not a resource bound either, for [`MAX_FUNCTION_DEPTH`]'s reason: it
+/// limits a value the caller built. It is ISO 32000-1 Annex C's implementation
+/// limit, which is the number a conforming reader is entitled to stop at, and
+/// a writer emitting more would be writing a space some readers cannot open.
+const MAX_DEVICE_N_COLORANTS: usize = 32;
+
+/// DeviceCMYK's four process colorants (8.6.6.4), which a `/DeviceN` may
+/// name without being a spot colour — the colorants ISO 19005-2 6.2.4.4 asks
+/// a `/Colorants` entry of are the others, `/None` aside.
+const PROCESS_COLORANTS: [&[u8]; 4] = [b"Cyan", b"Magenta", b"Yellow", b"Black"];
+
 /// The most `<code> <text>` pairs one `beginbfchar` section may hold.
 ///
 /// The CMap specification's own limit, and not a resource bound either: a
@@ -829,20 +1461,29 @@ const MAX_FUNCTION_DEPTH: u32 = 8;
 const BFCHAR_PER_SECTION: usize = 100;
 
 impl Function {
-    /// Whether this is a function a reader can evaluate, given how many output
-    /// components it has to produce.
+    /// Whether this is a function a reader can evaluate, given how many inputs
+    /// it is handed and how many output components it has to produce.
+    ///
+    /// A gradient hands its function one input; a `/Separation` tint transform
+    /// one; a `/DeviceN` one per colorant. Types 2 and 3 take exactly one
+    /// (7.10.3, 7.10.4), so they are refused for anything else rather than
+    /// written where a reader would evaluate them on the first input and
+    /// ignore the rest.
     ///
     /// Checked without recursion. The tree is the caller's own value and its
     /// depth is the caller's choice, so a recursive validator would be a stack
     /// overflow reachable from a `Vec` push.
-    fn is_valid(&self, outputs: usize) -> bool {
-        let mut stack = vec![(self, 0u32)];
-        while let Some((function, depth)) = stack.pop() {
+    fn is_valid(&self, inputs: usize, outputs: usize) -> bool {
+        let mut stack = vec![(self, 0u32, inputs)];
+        while let Some((function, depth, inputs)) = stack.pop() {
             if depth > MAX_FUNCTION_DEPTH {
                 return false;
             }
             match function {
                 Function::Exponential { domain, c0, c1, n } => {
+                    if inputs != 1 {
+                        return false;
+                    }
                     if !all_finite(domain) || domain[1] <= domain[0] {
                         return false;
                     }
@@ -870,6 +1511,9 @@ impl Function {
                     bounds,
                     encode,
                 } => {
+                    if inputs != 1 {
+                        return false;
+                    }
                     if !all_finite(domain) || domain[1] <= domain[0] {
                         return false;
                     }
@@ -899,7 +1543,71 @@ impl Function {
                         return false;
                     }
                     for sub in functions {
-                        stack.push((sub, depth + 1));
+                        stack.push((sub, depth + 1, 1));
+                    }
+                }
+                Function::Sampled {
+                    domain,
+                    range,
+                    size,
+                    samples,
+                } => {
+                    // 7.10.2 makes `/Domain`, `/Range` and `/Size` required,
+                    // one entry per input or output.
+                    if domain.len() != inputs
+                        || size.len() != inputs
+                        || range.len() != outputs
+                        || inputs == 0
+                        || outputs == 0
+                    {
+                        return false;
+                    }
+                    let ordered = |pair: &[f64; 2]| all_finite(pair) && pair[0] <= pair[1];
+                    if !domain.iter().all(|pair| ordered(pair) && pair[0] < pair[1])
+                        || !range.iter().all(ordered)
+                    {
+                        return false;
+                    }
+                    // Two samples an axis at least: one is a table with nothing
+                    // to interpolate between, which 7.10.2's `/Encode` default
+                    // would map the whole domain onto.
+                    if size.iter().any(|count| *count < 2) {
+                        return false;
+                    }
+                    let points = size.iter().try_fold(1usize, |total, count| {
+                        usize::try_from(*count)
+                            .ok()
+                            .and_then(|c| total.checked_mul(c))
+                    });
+                    if points.and_then(|p| p.checked_mul(outputs)) != Some(samples.len()) {
+                        return false;
+                    }
+                }
+                Function::Calculator {
+                    domain,
+                    range,
+                    program,
+                } => {
+                    // 7.10.1: `/Domain` is 2 x m and `/Range` 2 x n, and 7.10.5
+                    // makes `/Range` required for this type.
+                    if domain.len() != inputs || range.len() != outputs || inputs == 0 {
+                        return false;
+                    }
+                    let ordered = |pair: &[f64; 2]| all_finite(pair) && pair[0] <= pair[1];
+                    if !domain.iter().all(ordered) || !range.iter().all(ordered) {
+                        return false;
+                    }
+                    let mut model = vec![None; inputs];
+                    // The two outer braces are tokens too.
+                    let mut tokens = 2;
+                    if !check_calculator(program, &mut model, 0, &mut tokens) {
+                        return false;
+                    }
+                    // Exactly one value per output. A reader takes the last
+                    // `n` values, so a program leaving more writes outputs
+                    // nobody meant, and one leaving fewer invents the rest.
+                    if model.len() != outputs {
+                        return false;
                     }
                 }
             }
@@ -970,11 +1678,17 @@ pub fn subset_tag(program: &[u8]) -> Vec<u8> {
     tag
 }
 
-/// `/W` for the glyphs a document drew, from the font's own `hmtx` (9.7.4.3).
+/// `/W` for the codes a document drew, from the font's own `hmtx` (9.7.4.3).
 ///
 /// Table 116's `c [w1 w2 ...]` form, one run per stretch of consecutive CIDs,
-/// so a document drawing glyphs 5, 6, 7 and 40 writes two runs rather than
+/// so a document drawing CIDs 5, 6, 7 and 40 writes two runs rather than
 /// four singletons.
+///
+/// Keyed by the **code** — the CID, under `/Identity-H` — and measured at the
+/// glyph that code selects, which [`FontProgram::glyph_for_code`] says. For
+/// every program but a CID-keyed CFF the two are one number; for that one the
+/// charset stands between them, and a `/W` keyed by glyph index would hand
+/// each CID the width of whichever glyph shares its number.
 ///
 /// `None` when the font states no advances at all — no `hmtx`, or an `hhea`
 /// claiming no metrics. That is the one case where a width array would have to
@@ -985,7 +1699,7 @@ pub fn subset_tag(program: &[u8]) -> Vec<u8> {
 fn width_array(program: &FontProgram<'_>, ids: impl Iterator<Item = u16>) -> Option<Vec<Object>> {
     let mut runs: Vec<(u16, Vec<Object>)> = Vec::new();
     for id in ids {
-        let width = program.width(id)?.round();
+        let width = program.width(program.glyph_for_code(id))?.round();
         match runs.last_mut() {
             // `ids` arrives from a `BTreeMap`'s keys, so it is sorted and
             // duplicate-free; a run therefore continues exactly when the next
@@ -1042,12 +1756,54 @@ impl<'a> FontProgram<'a> {
         tinker_pdf_font::Cff::parse(program).map(FontProgram::Bare)
     }
 
-    /// Whether the program is a CID-keyed CFF, whose charset maps a CID onto a
-    /// glyph rather than the two being the same number.
-    fn is_cid_keyed(&self) -> bool {
+    /// The CID-keyed CFF whose charset stands between a composite font's CID
+    /// and its glyph, when there is one (9.7.4.2).
+    ///
+    /// A CID-keyed program, bare or the `CFF ` table of an OpenType face,
+    /// under the CIDFontType0 both are written as. Every other shape makes
+    /// the CID the glyph index — `/CIDToGIDMap /Identity` over a TrueType,
+    /// and a CFF that is not CID-keyed under 9.7.4.2's own rule — so there
+    /// is nothing to translate.
+    fn cid_keyed(&self) -> Option<&tinker_pdf_font::Cff<'a>> {
         match self {
-            FontProgram::TrueType(_) => false,
-            FontProgram::OpenType(_, cff) | FontProgram::Bare(cff) => cff.is_cid(),
+            FontProgram::OpenType(_, cff) | FontProgram::Bare(cff) if cff.is_cid() => Some(cff),
+            _ => None,
+        }
+    }
+
+    /// The code a composite font over this program writes for each glyph.
+    ///
+    /// `None` when a CID-keyed charset is not **one-to-one**: two glyphs
+    /// claiming one CID, a glyph after `.notdef` claiming CID 0, or a charset
+    /// that stops short of the glyph count. 9.7.4.2 reads a CID through the
+    /// charset, so a glyph whose CID another glyph also claims is one no code
+    /// can reach — writing its CID would draw the other glyph — and the font
+    /// is refused whole rather than drawing some of its glyphs as their
+    /// neighbours.
+    fn codes(&self) -> Option<Codes> {
+        let Some(cff) = self.cid_keyed() else {
+            return Some(Codes::default());
+        };
+        let mut cids = Vec::with_capacity(cff.glyph_count());
+        for glyph in 0..cff.glyph_count() {
+            let glyph = u16::try_from(glyph).ok()?;
+            let cid = cff.cid_for_gid(glyph)?;
+            if cff.gid_for_cid(u32::from(cid)) != Some(glyph) {
+                return None;
+            }
+            cids.push(cid);
+        }
+        Some(Codes {
+            cids: Some(cids.into()),
+        })
+    }
+
+    /// The glyph a code selects: [`FontProgram::codes`] read backwards, and
+    /// `.notdef` for a CID the charset does not carry.
+    fn glyph_for_code(&self, code: u16) -> u16 {
+        match self.cid_keyed() {
+            Some(cff) => cff.gid_for_cid(u32::from(code)).unwrap_or(0),
+            None => code,
         }
     }
 
@@ -1112,11 +1868,63 @@ impl<'a> FontProgram<'a> {
 
     /// The `/Subtype` of a **descendant** CIDFont built on this program
     /// (9.7.4.1). `/CIDToGIDMap` belongs only to the first of the two.
+    ///
+    /// Decided by the **outlines**, not the wrapper. 9.7.4.1 makes a
+    /// CIDFontType2 the one "based on TrueType font technology" and a
+    /// CIDFontType0 the one "based on the Compact Font Format", and 9.9
+    /// Table 126's note on `/FontFile3 /Subtype /OpenType` says the same thing
+    /// from the other side: such a program may sit under a CIDFontType2 only
+    /// "if the embedded font program contains a `glyf` table", and under a
+    /// CIDFontType0 when it contains a `CFF ` table. Until October 2026 an
+    /// `OpenType/CFF` face went out as a CIDFontType2 with `/CIDToGIDMap
+    /// /Identity` — the pairing Table 126 rules out, and one whose `glyf`
+    /// a reader goes looking for and does not find.
     fn descendant_subtype(&self) -> &'static [u8] {
         match self {
-            FontProgram::TrueType(_) | FontProgram::OpenType(_, _) => b"CIDFontType2",
-            FontProgram::Bare(_) => b"CIDFontType0",
+            FontProgram::TrueType(_) => b"CIDFontType2",
+            FontProgram::OpenType(_, _) | FontProgram::Bare(_) => b"CIDFontType0",
         }
+    }
+}
+
+/// How a composite font's two-byte code is reached from the glyph a caller
+/// names (9.7.4.2).
+///
+/// Under `/Identity-H` the code **is** the CID, and what the CID then selects
+/// is the descendant's business. A CIDFontType2's `/CIDToGIDMap /Identity`,
+/// and a CIDFontType0 over a CFF that is not CID-keyed, both make it the
+/// glyph index, so the code is the glyph and this is the identity. A
+/// CID-keyed CFF selects through its charset instead, and there the code a
+/// glyph needs is the CID the charset gives it — a different number, which is
+/// what `cids` holds.
+///
+/// Computed once, when the font is registered, and copied into every page:
+/// [`PageBuilder::glyphs`] has no handle on the program and needs none.
+#[derive(Clone, Debug, Default)]
+struct Codes {
+    /// Glyph index to CID, for a CID-keyed CFF; `None` for the identity.
+    cids: Option<Arc<[u16]>>,
+}
+
+impl Codes {
+    /// The code that draws `glyph`.
+    ///
+    /// A glyph past the end of a CID-keyed font is one the font does not
+    /// have, and its code is CID 0 — `.notdef`, which is what an index past a
+    /// TrueType font's last glyph draws too — rather than its own number,
+    /// which the charset may give to a glyph that exists.
+    fn code(&self, glyph: u16) -> u16 {
+        match &self.cids {
+            Some(cids) => cids.get(usize::from(glyph)).copied().unwrap_or(0),
+            None => glyph,
+        }
+    }
+
+    /// The glyphs of one run, as the hex digits of the string that draws them.
+    fn hex(&self, glyphs: impl Iterator<Item = u16>) -> String {
+        glyphs
+            .map(|glyph| format!("{:04X}", self.code(glyph)))
+            .collect()
     }
 }
 
@@ -1261,6 +2069,23 @@ fn to_unicode_cmap(mapping: &BTreeMap<u16, String>) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Writes `codes` as the inside of a literal string (7.3.4.2): the three
+/// bytes that must be escaped, and the two a viewer would read as an
+/// end-of-line inside a literal and fold away.
+fn literal_codes(out: &mut Vec<u8>, codes: &[u8]) {
+    for byte in codes {
+        match byte {
+            b'(' | b')' | b'\\' => {
+                out.push(b'\\');
+                out.push(*byte);
+            }
+            b'\r' => out.extend_from_slice(b"\\r"),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            _ => out.push(*byte),
+        }
+    }
+}
+
 /// One number, as 7.3.3 spells it, rounded to a ten-thousandth.
 ///
 /// A PDF real has no exponent form, which `f64`'s own `Display` already
@@ -1293,8 +2118,9 @@ pub struct PageBuilder {
     /// was added.
     resources: ResourceSet,
     /// Which font resources are composite, so [`PageBuilder::glyphs`] can tell
-    /// a font whose codes are two bytes from one whose codes are one.
-    composite: BTreeSet<Vec<u8>>,
+    /// a font whose codes are two bytes from one whose codes are one — and
+    /// which code each glyph of one is drawn by.
+    composite: BTreeMap<Vec<u8>, Codes>,
     /// Characters drawn with each font resource, for subsetting.
     used: BTreeMap<Vec<u8>, BTreeSet<char>>,
     /// Glyphs drawn with each composite font resource, and the text each
@@ -1326,6 +2152,15 @@ pub struct PageBuilder {
     /// sequence has had anything drawn into it. See [`Self::close_marked`].
     opened: Option<usize>,
     opened_end: usize,
+    /// How many [`PageBuilder::open_tag`] calls past [`MAX_TAG_DEPTH`] are
+    /// still unclosed. They opened nothing, so their [`PageBuilder::close_tag`]
+    /// must close nothing either.
+    refused_opens: usize,
+    /// How many elements on [`Self::tag_stack`], and how many refused opens,
+    /// were open when the innermost `tagged_with` or `optional` closure still
+    /// running began. [`PageBuilder::close_tag`] does not reach below either:
+    /// an element opened outside a closure is not the closure's to close.
+    floor: (usize, usize),
     /// The device colour space an [`ArchivalProfile`]'s destination profile
     /// admits, when the document is being written under one.
     ///
@@ -1337,6 +2172,32 @@ pub struct PageBuilder {
     archival_space: Option<DeviceSpace>,
     /// Refusals made while drawing, merged into the document's at push.
     refusals: Vec<ArchivalRefusal>,
+    /// How many [`PageBuilder::optional`] and
+    /// [`PageBuilder::with_associated_files`] scopes are open.
+    optional_depth: usize,
+    /// The builder this page was begun on, whose [`LayerId`]s alone it
+    /// takes.
+    builder: BuilderSerial,
+    /// Whether [`PageBuilder::output_intent`] may write: the document
+    /// declares 2.0 or later and no archival profile writes its own intent.
+    /// Copied at [`DocumentBuilder::begin_page`], as `archival_space` is.
+    page_intents: bool,
+    /// The page's own `/OutputIntents`, in the order given.
+    output_intents: Vec<NewOutputIntent>,
+    /// Whether the document may carry associated files; see
+    /// [`DocumentBuilder::associate_file`]. Copied at
+    /// [`DocumentBuilder::begin_page`].
+    associated_allowed: bool,
+    /// The page's `/AF`, in the order given.
+    associated: Vec<NewAssociatedFile>,
+    /// Each [`PageBuilder::with_associated_files`] sequence that drew
+    /// something: its property list's resource name and the files its
+    /// `/MCAF` names, written into the page's `/Properties` at `finish`.
+    marked_files: Vec<(Vec<u8>, Vec<NewAssociatedFile>)>,
+    /// The number the next such sequence's resource name takes: `AF0`,
+    /// `AF1`, ... Taken when the sequence opens, so a sequence its closure
+    /// opens inside it is named after it and never with it.
+    next_marked_file: usize,
 }
 
 /// One structure element under construction, and what it claims.
@@ -1356,7 +2217,7 @@ struct TaggedNode {
     /// whose box was drawn a page away from where it reads -- and are merged
     /// at `finish`. `None` is an anonymous element, which never merges with
     /// anything and is what [`PageBuilder::tagged`] produces.
-    key: Option<u64>,
+    key: Option<NodeKey>,
     /// Where this element reads, which is **not** its key.
     ///
     /// The two are separate because they answer different questions and cannot
@@ -1366,15 +2227,167 @@ struct TaggedNode {
     /// met again on a later page keeps the **earliest** position it was given,
     /// because that is where it reads.
     order: u64,
+    /// What the element says about itself beyond its type (14.9, and the
+    /// attributes of 14.8.5). Boxed and optional because almost no element
+    /// carries any of it, and a book is tagged run by run.
+    props: Option<Box<ElementProps>>,
+    /// Kept even when it claims nothing. See [`Tag::keep_empty`].
+    keep: bool,
+    /// Changed only through [`TaggedNode::push_kid`] and
+    /// [`TaggedNode::remove_kid`], which keep `reach` in step.
     kids: Vec<TaggedKid>,
+    /// `reach[i]` is the greatest order among `kids[..=i]`, so where the
+    /// kids reach is the last entry rather than a walk over every kid. An
+    /// element is appended to once per resumption and per link, and the walk
+    /// made an element of n kids cost n squared: lane 8C's fixer measured an
+    /// EPUB paragraph of 10 000 / 20 000 / 40 000 `<span>`s at 3.8 / 13.1 /
+    /// 48.7 s to open, all of it there. A prefix rather than one running
+    /// maximum because a kid can be taken back ([`PageBuilder::close_marked`]),
+    /// and the greatest of the rest is then the entry before it.
+    reach: Vec<u64>,
 }
 
-/// What a structure element holds: marked content on its own page, or a
-/// nested element.
+impl TaggedNode {
+    /// Whether this element is written at all.
+    ///
+    /// An element that claims nothing **and says nothing** is dropped: it can
+    /// only arise from a `tagged` whose closure drew nothing, and a structure
+    /// element with no content, no children and no properties is a node the
+    /// reader would report and nobody asked for. One that carries an `/Alt`, a
+    /// `/Lang`, an identifier or table attributes is a statement in its own
+    /// right — an empty `/Figure` described by its `/Alt`, an empty table cell
+    /// that keeps a row's columns in step — and is kept, as is one the caller
+    /// asked to keep.
+    fn is_kept(&self) -> bool {
+        !self.kids.is_empty()
+            || self
+                .props
+                .as_ref()
+                .is_some_and(|props| props.says_something())
+            || self.keep
+    }
+
+    /// An element with no kids yet.
+    fn new(
+        tag: Vec<u8>,
+        key: Option<NodeKey>,
+        order: u64,
+        props: Option<Box<ElementProps>>,
+        keep: bool,
+    ) -> TaggedNode {
+        TaggedNode {
+            tag,
+            key,
+            order,
+            props,
+            keep,
+            kids: Vec::new(),
+            reach: Vec::new(),
+        }
+    }
+
+    /// The order a kid appended now takes: past every kid already here, so a
+    /// stable sort leaves it after them.
+    fn next_order(&self) -> u64 {
+        self.reach.last().copied().unwrap_or(0)
+    }
+
+    /// Appends `kid`, and where the kids now reach.
+    fn push_kid(&mut self, kid: TaggedKid) {
+        let order = kid.order();
+        let reach = self.reach.last().map_or(order, |&before| before.max(order));
+        self.kids.push(kid);
+        self.reach.push(reach);
+    }
+
+    /// Takes back the kid at `at`, working out again where the kids after it
+    /// reach — which the removal from the vector already walks, so it costs
+    /// no more than that did.
+    fn remove_kid(&mut self, at: usize) {
+        if at >= self.kids.len() {
+            return;
+        }
+        self.kids.remove(at);
+        self.reach.truncate(at);
+        let mut reach = self.reach.last().copied();
+        for kid in self.kids.get(at..).unwrap_or_default() {
+            let order = kid.order();
+            let here = reach.map_or(order, |before| before.max(order));
+            self.reach.push(here);
+            reach = Some(here);
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`look_at_kid`]'s count, on this thread.
+    static KIDS_LOOKED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// One kid or element of the structure tree looked at: a kid's order read
+/// ([`TaggedKid::order`], [`MergedKid::order`]) or an element's key compared
+/// (`NodeKey`'s equality).
 ///
-/// Two variants and never one, for the reason the reader's `StructKid` keeps
-/// them apart: a marked-content id is a span of this page's content stream and
-/// a child element is a subtree, and a writer that flattened them would have
+/// **Counted in the accessors, not in the loops**, because a count only the
+/// new code calls cannot see the old code come back: it first sat in the
+/// loops that replaced the walks, and the walks put back as they were
+/// written passed every guard. Finding where an element's kids reach reads
+/// their orders, and finding the element that carries a key compares keys,
+/// however either is written, so here a walk is counted whoever writes it.
+/// Counted only under `cfg(test)`, where a test holds the total to a small
+/// multiple of the kids, so that a walk over every kid or sibling at every
+/// append **fails** rather than runs slowly. Everywhere else it is nothing.
+#[inline]
+fn look_at_kid() {
+    #[cfg(test)]
+    KIDS_LOOKED.with(|looked| looked.set(looked.get().saturating_add(1)));
+}
+
+/// A key that merges the halves of one element across pages.
+///
+/// Two spaces rather than one number, so that an element
+/// [`PageBuilder::open_tag`] left open over a page break — which takes a key
+/// of the builder's choosing — can never collide with one a caller of
+/// [`PageBuilder::tagged_keyed`] chose for its own reasons.
+#[derive(Clone, Copy, Debug, Eq, PartialOrd, Ord)]
+enum NodeKey {
+    /// The caller's.
+    Caller(u64),
+    /// The builder's, for an element carried over a page break.
+    Carried(u64),
+}
+
+/// The derived order's equality, **counted** ([`look_at_kid`]): a search for
+/// the element carrying a key, among its siblings or through the whole tree,
+/// compares one key per element it looks at, and this is where a guard sees
+/// it. The indexes `finish` keeps descend by [`Ord`] instead, which is not
+/// counted: a lookup there is a logarithm, not a walk.
+impl PartialEq for NodeKey {
+    fn eq(&self, other: &NodeKey) -> bool {
+        look_at_kid();
+        self.cmp(other) == core::cmp::Ordering::Equal
+    }
+}
+
+/// An element left open when its page was pushed, reopened on the next page
+/// begun. See [`PageBuilder::open_tag`].
+#[derive(Clone)]
+struct CarriedTag {
+    tag: Vec<u8>,
+    key: NodeKey,
+    order: u64,
+    props: Option<Box<ElementProps>>,
+    keep: bool,
+}
+
+/// What a structure element holds: marked content on its own page, a nested
+/// element, or a whole annotation.
+///
+/// Three variants and never one, for the reason the reader's `StructKid` keeps
+/// them apart: a marked-content id is a span of this page's content stream, a
+/// child element is a subtree, and an object reference is an annotation with
+/// no glyphs in any content stream — a writer that flattened them would have
 /// to guess which it meant on the way back.
 enum TaggedKid {
     /// A marked-content sequence on the page that opened it, and where it
@@ -1390,6 +2403,25 @@ enum TaggedKid {
         order: u64,
     },
     Element(TaggedNode),
+    /// A link annotation of this page, by its index in the page's links —
+    /// written as an `/OBJR` (14.7.4.3), with the annotation's
+    /// `/StructParent` naming this element back (14.7.4.4).
+    Object {
+        link: usize,
+        order: u64,
+    },
+}
+
+impl TaggedKid {
+    /// Where this kid reads. Counted ([`look_at_kid`]): it is what a walk for
+    /// where an element's kids reach reads at every kid.
+    fn order(&self) -> u64 {
+        look_at_kid();
+        match self {
+            TaggedKid::Content { order, .. } | TaggedKid::Object { order, .. } => *order,
+            TaggedKid::Element(child) => child.order,
+        }
+    }
 }
 
 /// How deep [`PageBuilder::tagged`] will nest before it stops opening
@@ -1398,7 +2430,489 @@ enum TaggedKid {
 /// The reader caps its own walk at [`crate::limits::MAX_NEST_DEPTH`], so a
 /// writer that nested past it would produce a file this engine could not read
 /// back — which is the one thing a writer must not do.
-const MAX_TAG_DEPTH: usize = crate::limits::MAX_NEST_DEPTH as usize;
+///
+/// **One less than the reader's cap, because `finish` adds a level**: every
+/// page's elements are written under one `/Document`, so a page nesting
+/// `MAX_NEST_DEPTH` elements put its innermost at the depth whose kids the
+/// reader refuses, and its text was orphaned with a `DepthCapped` warning. This
+/// constant used to be the reader's cap itself; the depth-cap test written
+/// with `open_tag` found it.
+const MAX_TAG_DEPTH: usize = crate::limits::MAX_NEST_DEPTH as usize - 1;
+
+/// The standard structure types of ISO 32000-1 (14.8.4).
+///
+/// **One list for the writer's role map and the PDF/A validator's level A
+/// rule**, which is why it lives here rather than in either: a type the writer
+/// refuses to remap and a type the validator accepts as standard are one
+/// question, and two lists would be two answers the day one was edited. It
+/// used to be the validator's alone.
+///
+/// `H1` to `H6` and no further. The open-ended `Hn`, and the types PDF 2.0
+/// added (`Strong` among them, ISO 32000-2 Table 368), belong to 2.0's own
+/// namespace (14.8.6), and in a document that names no namespace they are
+/// custom types like any other.
+pub const STANDARD_STRUCTURE_TYPES: &[&str] = &[
+    // 14.8.4.2, grouping elements.
+    "Document",
+    "Part",
+    "Art",
+    "Sect",
+    "Div",
+    "BlockQuote",
+    "Caption",
+    "TOC",
+    "TOCI",
+    "Index",
+    "NonStruct",
+    "Private",
+    // 14.8.4.3, block-level: paragraphlike.
+    "P",
+    "H",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5",
+    "H6",
+    // 14.8.4.3, block-level: lists.
+    "L",
+    "LI",
+    "Lbl",
+    "LBody",
+    // 14.8.4.3, block-level: tables.
+    "Table",
+    "TR",
+    "TH",
+    "TD",
+    "THead",
+    "TBody",
+    "TFoot",
+    // 14.8.4.4, inline-level.
+    "Span",
+    "Quote",
+    "Note",
+    "Reference",
+    "BibEntry",
+    "Code",
+    "Link",
+    "Annot",
+    "Ruby",
+    "RB",
+    "RT",
+    "RP",
+    "Warichu",
+    "WT",
+    "WP",
+    // 14.8.4.5, illustrations.
+    "Figure",
+    "Formula",
+    "Form",
+];
+
+/// Whether `kind` is one of [`STANDARD_STRUCTURE_TYPES`].
+#[must_use]
+pub fn is_standard_structure_type(kind: &[u8]) -> bool {
+    STANDARD_STRUCTURE_TYPES
+        .iter()
+        .any(|standard| standard.as_bytes() == kind)
+}
+
+/// ISO 32000-2's default standard structure namespace, the one ISO 32000-1's
+/// standard types are in (14.8.6.1, as the PDF Association's approved errata
+/// quote it): an element naming no `/NS` is read in it, after role mapping.
+pub const PDF_1_7_NAMESPACE: &str = "http://iso.org/pdf/ssn";
+
+/// ISO 32000-2's own standard structure namespace (14.8.6.1). Not quoted in
+/// the errata; the URI is the one veraPDF's published PDF/UA-2 rule 8.2.5.2
+/// tests a document's root element against.
+pub const PDF_2_0_NAMESPACE: &str = "http://iso.org/pdf2/ssn";
+
+/// MathML's namespace, the one domain-specific namespace ISO 32000-2 defines
+/// (14.8.6.3; 14.7.4.2's NOTE 1 as the errata quote it).
+pub const MATHML_NAMESPACE: &str = "http://www.w3.org/1998/Math/MathML";
+
+/// Whether `uri` names one of ISO 32000-2's two *standard structure
+/// namespaces* (14.8.6.1: "either of the two namespaces defined above").
+#[must_use]
+pub fn is_standard_namespace(uri: &str) -> bool {
+    uri == PDF_1_7_NAMESPACE || uri == PDF_2_0_NAMESPACE
+}
+
+/// A structure namespace (ISO 32000-2 14.7.4) a [`DocumentBuilder`]
+/// registered with [`DocumentBuilder::add_namespace`], for [`Tag::namespace`]
+/// to put an element in and [`DocumentBuilder::map_role_in`] to map between.
+///
+/// A handle rather than the URI, for the reason [`LayerId`] is one: it is
+/// written as a reference to the namespace's dictionary, which exists only
+/// once `finish` writes it. It carries which builder made it, and a handle
+/// from another builder is not written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NamespaceId {
+    /// The [`DocumentBuilder`] that registered it: see [`BuilderSerial`].
+    builder: BuilderSerial,
+    /// Its position among that builder's namespaces.
+    index: u32,
+}
+
+/// A namespace as [`DocumentBuilder::add_namespace`] registered it.
+#[derive(Clone, Debug)]
+struct StructNamespace {
+    /// `/NS` (Table 356), the namespace's name.
+    uri: String,
+    /// `/RoleMapNS`: each type of this namespace, and the type and namespace
+    /// (by index) it maps to.
+    role_map: BTreeMap<Vec<u8>, (Vec<u8>, u32)>,
+}
+
+/// A structure element to open: its type, and what it says about itself
+/// (14.7.2 Table 323, 14.9, 14.8.5).
+///
+/// Built by chaining — `Tag::new(b"Figure").alt("A cat asleep on a mat")` —
+/// and handed to [`PageBuilder::tagged_with`] or [`PageBuilder::open_tag`].
+/// Every property is optional and each is written only when stated, so a
+/// `Tag` naming nothing but its type writes exactly what
+/// [`PageBuilder::tagged`] always has.
+///
+/// The text properties are **text strings** (7.9.2.2), encoded for the
+/// version the document declares, as `/Info` and outline titles are.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tag {
+    kind: Vec<u8>,
+    key: Option<u64>,
+    order: u64,
+    props: ElementProps,
+    keep: bool,
+}
+
+/// The properties a [`Tag`] carries apart from its type.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ElementProps {
+    /// `/T`.
+    title: Option<String>,
+    /// `/Lang` (14.9.2).
+    lang: Option<String>,
+    /// `/Alt` (14.9.3).
+    alt: Option<String>,
+    /// `/ActualText` (14.9.4).
+    actual_text: Option<String>,
+    /// `/E` (14.9.5).
+    expansion: Option<String>,
+    /// `/ID`, and the `/IDTree` entry that finds it.
+    id: Option<Vec<u8>>,
+    /// The `/Table` owner's attributes (14.8.5.7).
+    table: Option<TableAttributes>,
+    /// `/NS` (ISO 32000-2 Table 355): the namespace the element's type is in.
+    namespace: Option<NamespaceId>,
+    /// `/AF` (ISO 32000-2 14.13): files associated with the element.
+    files: Vec<NewAssociatedFile>,
+}
+
+impl ElementProps {
+    /// For a merged element: every property `other` states that `self` does
+    /// not. Where both halves made a statement, the first half's stands.
+    fn fill_from(&mut self, other: &ElementProps) {
+        let ElementProps {
+            title,
+            lang,
+            alt,
+            actual_text,
+            expansion,
+            id,
+            table,
+            namespace,
+            files,
+        } = other;
+        if self.files.is_empty() {
+            self.files.clone_from(files);
+        }
+        fill(&mut self.title, title);
+        fill(&mut self.lang, lang);
+        fill(&mut self.alt, alt);
+        fill(&mut self.actual_text, actual_text);
+        fill(&mut self.expansion, expansion);
+        fill(&mut self.id, id);
+        fill(&mut self.table, table);
+        fill(&mut self.namespace, namespace);
+    }
+
+    /// Whether these say something about the element's content, which keeps
+    /// an element that drew nothing. A namespace does not: it says what the
+    /// element's *type* means, and an empty `/section` in a namespace is as
+    /// empty as an empty `/Span` in none.
+    fn says_something(&self) -> bool {
+        let ElementProps {
+            title,
+            lang,
+            alt,
+            actual_text,
+            expansion,
+            id,
+            table,
+            namespace: _,
+            files,
+        } = self;
+        title.is_some()
+            || lang.is_some()
+            || alt.is_some()
+            || actual_text.is_some()
+            || expansion.is_some()
+            || id.is_some()
+            || table.is_some()
+            || !files.is_empty()
+    }
+}
+
+fn fill<T: Clone>(slot: &mut Option<T>, other: &Option<T>) {
+    if slot.is_none() {
+        slot.clone_from(other);
+    }
+}
+
+impl Tag {
+    /// An element of structure type `kind` — `P`, `H1`, `Figure`, `Span`, or
+    /// a type of the caller's own that [`DocumentBuilder::map_role`] maps to
+    /// one of them.
+    #[must_use]
+    pub fn new(kind: &[u8]) -> Tag {
+        Tag {
+            kind: kind.to_vec(),
+            key: None,
+            order: 0,
+            props: ElementProps::default(),
+            keep: false,
+        }
+    }
+
+    /// Names the element, so that its halves drawn on different pages are
+    /// one element — the [`Tag`] form of [`PageBuilder::tagged_keyed`], whose
+    /// documentation says what `key` and `order` each answer.
+    #[must_use]
+    pub fn keyed(mut self, key: u64, order: u64) -> Tag {
+        self.key = Some(key);
+        self.order = order;
+        self
+    }
+
+    /// `/T`, a title for the element (14.7.2 Table 323).
+    #[must_use]
+    pub fn title(mut self, text: &str) -> Tag {
+        self.props.title = Some(text.to_owned());
+        self
+    }
+
+    /// `/Lang`, the natural language of the element's content (14.9.2).
+    ///
+    /// A language tag as BCP 47 spells one (`en`, `fr-CA`, `zh-Hant`), or the
+    /// empty string for a language that is not known. It is the caller's
+    /// statement and is written as given; [`is_language_tag`] is the check a
+    /// caller holding text from a document it did not write makes first.
+    #[must_use]
+    pub fn lang(mut self, tag: &str) -> Tag {
+        self.props.lang = Some(tag.to_owned());
+        self
+    }
+
+    /// `/Alt`, a description of content that is not text (14.9.3) — what a
+    /// `/Figure` is a picture *of*.
+    #[must_use]
+    pub fn alt(mut self, text: &str) -> Tag {
+        self.props.alt = Some(text.to_owned());
+        self
+    }
+
+    /// `/ActualText`, what the content *is* where the glyphs drawn do not say
+    /// it (14.9.4): a drop capital drawn as a picture, a ligature, a word
+    /// hyphenated across a line.
+    #[must_use]
+    pub fn actual_text(mut self, text: &str) -> Tag {
+        self.props.actual_text = Some(text.to_owned());
+        self
+    }
+
+    /// `/E`, the expansion of an abbreviation or acronym (14.9.5).
+    #[must_use]
+    pub fn expansion(mut self, text: &str) -> Tag {
+        self.props.expansion = Some(text.to_owned());
+        self
+    }
+
+    /// `/ID`, the element's identifier (14.7.2 Table 323), which the
+    /// structure tree root's `/IDTree` maps back to it and which a table
+    /// cell's [`TableAttributes::headers`] names.
+    ///
+    /// Identifiers are unique in a document. The first element in the tree's
+    /// order to carry one keeps it; a later one is written without it, and
+    /// [`DocumentBuilder::duplicate_element_ids`] says which before the
+    /// document is finished.
+    #[must_use]
+    pub fn id(mut self, id: &[u8]) -> Tag {
+        self.props.id = Some(id.to_vec());
+        self
+    }
+
+    /// The attributes of the `/Table` owner (14.8.5.7): which header cells
+    /// head this cell, which way a header cell's heading runs, a table's
+    /// summary, and a cell's spans. Written only when they state something.
+    #[must_use]
+    pub fn table(mut self, attributes: TableAttributes) -> Tag {
+        self.props.table = Some(attributes);
+        self
+    }
+
+    /// `/NS` (ISO 32000-2 Table 355): puts the element's type in `namespace`,
+    /// so that `/S /section` means the `section` of that namespace — which
+    /// [`DocumentBuilder::map_role_in`] can then map to what it stands for.
+    ///
+    /// An element naming no namespace is in ISO 32000-2's default standard
+    /// structure namespace, after the `/RoleMap` is applied (14.8.6.1, as the
+    /// approved errata state it), which is what every element this builder
+    /// wrote before namespaces existed is.
+    ///
+    /// A handle from another builder is not written: the element is written
+    /// in no namespace, as if this had not been called.
+    #[must_use]
+    pub fn namespace(mut self, namespace: NamespaceId) -> Tag {
+        self.props.namespace = Some(namespace);
+        self
+    }
+
+    /// `/AF` (ISO 32000-2 14.13): associates `file` with the element — the
+    /// data a table was drawn from, the source a formula was typeset from.
+    /// Each call adds one, in order.
+    ///
+    /// A file [`NewAssociatedFile::is_writable`] refuses is not added. In a
+    /// document that may not carry associated files — see
+    /// [`DocumentBuilder::associate_file`] — the element is opened without
+    /// them, and under an archival profile [`PageBuilder::open_tag`] records
+    /// [`ArchivalRefusal::AssociatedFile`].
+    #[must_use]
+    pub fn associated_file(mut self, file: NewAssociatedFile) -> Tag {
+        if file.is_writable() {
+            self.props.files.push(file);
+        }
+        self
+    }
+
+    /// Writes the element even if nothing is drawn inside it.
+    ///
+    /// An element carrying any property but a namespace is kept anyway; this
+    /// is for one that carries none and still means something by being there
+    /// empty — a table cell with nothing in it, which keeps the cells after
+    /// it in their columns.
+    #[must_use]
+    pub fn keep_empty(mut self) -> Tag {
+        self.keep = true;
+        self
+    }
+
+    /// The structure type.
+    #[must_use]
+    pub fn kind(&self) -> &[u8] {
+        &self.kind
+    }
+
+    fn boxed_props(&self) -> Option<Box<ElementProps>> {
+        (self.props != ElementProps::default()).then(|| Box::new(self.props.clone()))
+    }
+}
+
+/// The standard attributes of a table or a table cell (ISO 32000-1 14.8.5.7,
+/// Table 349), written as an attribute object whose owner `/O` is `/Table`.
+///
+/// The same type the reader hands back (`StructElement::table` on the
+/// facade), so a write followed by a read is an equality rather than a
+/// translation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TableAttributes {
+    /// `/Headers` (PDF 1.5): the identifiers ([`Tag::id`]) of the header
+    /// cells that head this one, in the order given.
+    ///
+    /// Written as given. An identifier no element carries is a reference into
+    /// nothing, which a writer cannot repair and should not be handed.
+    pub headers: Vec<Vec<u8>>,
+    /// `/Scope` (PDF 1.5): which cells a header cell heads.
+    pub scope: Option<TableScope>,
+    /// `/Summary` (PDF 1.7): what the table is for, for a reader who cannot
+    /// see it. A text string.
+    pub summary: Option<String>,
+    /// `/RowSpan`: how many rows the cell spans. Table 349's default is one,
+    /// and a span of zero is not a span: it is not written.
+    pub row_span: Option<u32>,
+    /// `/ColSpan`: how many columns.
+    pub col_span: Option<u32>,
+}
+
+impl TableAttributes {
+    /// Whether this would write nothing at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.headers.is_empty()
+            && self.scope.is_none()
+            && self.summary.is_none()
+            && self.row_span.unwrap_or(0) == 0
+            && self.col_span.unwrap_or(0) == 0
+    }
+}
+
+/// Table 349's `/Scope`: whether a header cell heads its row, its column, or
+/// both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableScope {
+    /// `/Row`.
+    Row,
+    /// `/Column`.
+    Column,
+    /// `/Both`.
+    Both,
+}
+
+impl TableScope {
+    /// The name Table 349 spells it with.
+    #[must_use]
+    pub fn name(self) -> &'static [u8] {
+        match self {
+            TableScope::Row => b"Row",
+            TableScope::Column => b"Column",
+            TableScope::Both => b"Both",
+        }
+    }
+
+    /// The scope a name spells, if it is one of Table 349's three.
+    #[must_use]
+    pub fn from_name(name: &[u8]) -> Option<TableScope> {
+        match name {
+            b"Row" => Some(TableScope::Row),
+            b"Column" => Some(TableScope::Column),
+            b"Both" => Some(TableScope::Both),
+            _ => None,
+        }
+    }
+}
+
+/// Whether `text` has the shape of a language tag (14.9.2.2).
+///
+/// ISO 32000-1 14.9.2 defines the value by RFC 3066 and ISO 32000-2 by BCP 47,
+/// and both build a tag out of subtags of one to eight letters and digits
+/// joined by hyphens, the first of them letters only. This checks that shape
+/// and consults no registry — the check that can be made without one, and the
+/// grammar the facade's PDF/A validator holds parts 2 and 3 to. The empty
+/// string is accepted: it says the language is unknown, which is a statement
+/// rather than an omission, and ISO 19005's conforming fixtures write it.
+#[must_use]
+pub fn is_language_tag(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    text.split('-').enumerate().all(|(at, subtag)| {
+        (1..=8).contains(&subtag.len())
+            && if at == 0 {
+                subtag.bytes().all(|b| b.is_ascii_alphabetic())
+            } else {
+                subtag.bytes().all(|b| b.is_ascii_alphanumeric())
+            }
+    })
+}
 
 impl PageBuilder {
     /// Sets `/CropBox`, as `[x0 y0 x1 y1]` in points from the bottom-left.
@@ -1450,7 +2964,7 @@ impl PageBuilder {
         // An anonymous element has no position of its own; a stable sort
         // then leaves every one of them exactly where it was drawn, which
         // is what a caller that names nothing had before any of this.
-        self.tag_with(tag, None, 0, draw);
+        self.tagged_with(&Tag::new(tag), draw);
     }
 
     /// The same, for an element the caller can **name**.
@@ -1474,81 +2988,510 @@ impl PageBuilder {
         order: u64,
         draw: impl FnOnce(&mut PageBuilder),
     ) {
-        self.tag_with(tag, Some(key), order, draw);
+        self.tagged_with(&Tag::new(tag).keyed(key, order), draw);
     }
 
-    /// Where the two forms meet.
-    fn tag_with(
-        &mut self,
-        tag: &[u8],
-        key: Option<u64>,
-        order: u64,
-        draw: impl FnOnce(&mut PageBuilder),
-    ) {
-        if self.tag_stack.len() >= MAX_TAG_DEPTH {
-            draw(self);
-            return;
+    /// Draws inside the structure element `tag` describes — its type, and
+    /// whatever of `/Alt`, `/ActualText`, `/E`, `/Lang` and `/T` it states
+    /// (14.9) — recording an element that claims exactly what was drawn.
+    ///
+    /// The closure form of [`PageBuilder::open_tag`] and
+    /// [`PageBuilder::close_tag`], and the one that cannot be misnested: the
+    /// element is closed when the closure returns, along with anything the
+    /// closure opened with `open_tag` and left open, and a `close_tag` inside
+    /// the closure cannot close the closure's own element or anything around
+    /// it.
+    ///
+    /// An element that draws nothing is kept when it says something — see
+    /// [`Tag::keep_empty`] — and dropped when it does not, which is what
+    /// [`PageBuilder::tagged`] has always done.
+    pub fn tagged_with(&mut self, tag: &Tag, draw: impl FnOnce(&mut PageBuilder)) {
+        let opened = self.open_tag(tag);
+        self.scoped(draw);
+        if opened {
+            self.close_top();
+        } else {
+            self.refused_opens = self.refused_opens.saturating_sub(1);
+        }
+    }
+
+    /// Runs `draw` as a scope for [`PageBuilder::open_tag`] and
+    /// [`PageBuilder::close_tag`]: a `close_tag` inside it reaches nothing
+    /// opened before it, and whatever it opens and leaves open is closed when
+    /// it returns.
+    ///
+    /// What makes a closure's own marked-content sequence safe to close when
+    /// it returns — a `tagged_with` element's or a layer's — because the `EMC`
+    /// that closes it closes whichever sequence is innermost.
+    fn scoped(&mut self, draw: impl FnOnce(&mut PageBuilder)) {
+        let floor = std::mem::replace(&mut self.floor, (self.tag_stack.len(), self.refused_opens));
+        draw(self);
+        // What the closure opened and did not close, innermost first. A
+        // refused open is always innermost — nothing can be opened while one
+        // is outstanding, because the stack is still at the cap — so the
+        // count is simply put back.
+        self.refused_opens = self.refused_opens.min(self.floor.1);
+        while self.tag_stack.len() > self.floor.0 {
+            self.close_top();
+        }
+        self.floor = floor;
+    }
+
+    /// Opens the structure element `tag` describes, so that everything drawn
+    /// until the matching [`PageBuilder::close_tag`] belongs to it — across
+    /// any number of drawing calls, and **across pages**.
+    ///
+    /// The explicit form of [`PageBuilder::tagged_with`], for a caller whose
+    /// drawing is not shaped like a closure: a layout engine that meets the
+    /// start of a paragraph in one call and its end several calls later, or
+    /// on a later page.
+    ///
+    /// # Across a page break
+    ///
+    /// An element still open when its page is handed to
+    /// [`DocumentBuilder::push_page`] is closed on that page and **reopened on
+    /// the next page begun**, with everything open around it, as the same
+    /// element: 14.7.2 Table 323 lets an element's kids name different pages,
+    /// and `finish` writes the two halves as one element whose kids on its
+    /// second page are `/MCR` dictionaries carrying their own `/Pg`. So a
+    /// paragraph opened on page 3 and closed on page 4 is one `/P`. Nothing is
+    /// carried to a page begun *before* the push — [`DocumentBuilder::begin_page`]
+    /// takes what the last push left, as it takes the resources.
+    ///
+    /// Returns false, opening nothing, past [`MAX_TAG_DEPTH`] nested elements
+    /// — the depth this crate's reader walks to — and what is drawn is then
+    /// drawn into the element around it (ruling 2). The matching `close_tag`
+    /// is still owed, and closes nothing.
+    pub fn open_tag(&mut self, tag: &Tag) -> bool {
+        if self.tag_stack.len() >= MAX_TAG_DEPTH || self.refused_opens > 0 {
+            self.refused_opens += 1;
+            return false;
         }
 
         // The parent's sequence closes before the child's opens: 14.7.4.2
         // scopes content to the innermost sequence, and leaving the parent's
         // open would make the child's content belong to both.
-        let resume = self.tag_stack.last().map(|parent| parent.tag.clone());
-        if resume.is_some() {
+        if !self.tag_stack.is_empty() {
             self.close_marked();
         }
 
-        let mcid = self.open_marked(tag);
-        self.tag_stack.push(TaggedNode {
-            tag: tag.to_vec(),
-            key,
-            order,
-            // **The element's own first sequence is seeded from `order`**, and
-            // that is why no separate "say where this content sits" call is
-            // needed: `tagged_keyed` is called once per page, with the position
-            // of the first run drawn on *that* page, so a merged element's text
-            // already carries where it was written rather than which page it
-            // landed on. A `mark_order` method existed here and was deleted
-            // when its counted injection fired zero twice, against a fixture
-            // written specifically to catch it.
-            kids: vec![TaggedKid::Content { mcid, order }],
-        });
-        draw(self);
-        self.close_marked();
+        // Associated files where the document may not carry them are dropped
+        // here, where a profile's refusal can still be recorded.
+        let mut props = tag.boxed_props();
+        if let Some(held) = props.as_mut() {
+            if !held.files.is_empty() && !self.associated_allowed {
+                held.files.clear();
+                if self.archival_space.is_some() {
+                    self.refusals.push(ArchivalRefusal::AssociatedFile);
+                }
+            }
+        }
+        let props = props.filter(|held| **held != ElementProps::default());
 
-        let node = self.tag_stack.pop().expect("pushed immediately above");
-        // An element that claims nothing at all is dropped. It can only arise
-        // from a `tagged` whose closure drew nothing, and a structure element
-        // with no content and no children is a node the reader would report
-        // and nobody asked for. `/Alt` on an empty `Figure` is the case that
-        // would want one, and this builder cannot write `/Alt` yet.
-        if !node.kids.is_empty() {
+        let mcid = self.open_marked(&tag.kind);
+        let mut node = TaggedNode::new(
+            tag.kind.clone(),
+            tag.key.map(NodeKey::Caller),
+            tag.order,
+            props,
+            tag.keep,
+        );
+        // **The element's own first sequence is seeded from `order`**, and
+        // that is why no separate "say where this content sits" call is
+        // needed: `tagged_keyed` is called once per page, with the position
+        // of the first run drawn on *that* page, so a merged element's text
+        // already carries where it was written rather than which page it
+        // landed on. A `mark_order` method existed here and was deleted
+        // when its counted injection fired zero twice, against a fixture
+        // written specifically to catch it.
+        node.push_kid(TaggedKid::Content {
+            mcid,
+            order: tag.order,
+        });
+        self.tag_stack.push(node);
+        true
+    }
+
+    /// Closes the innermost element [`PageBuilder::open_tag`] opened.
+    ///
+    /// Returns false, closing nothing, when there is nothing this call may
+    /// close: no element open, or only elements opened outside a running
+    /// [`PageBuilder::tagged_with`] or [`PageBuilder::optional`] closure this
+    /// call is inside, which are not the closure's to close. A close matching
+    /// a refused `open_tag` is accepted and closes nothing.
+    pub fn close_tag(&mut self) -> bool {
+        if self.refused_opens > 0 {
+            if self.refused_opens <= self.floor.1 {
+                return false;
+            }
+            self.refused_opens -= 1;
+            return true;
+        }
+        if self.tag_stack.len() <= self.floor.0 {
+            return false;
+        }
+        self.close_top();
+        true
+    }
+
+    /// Continues the innermost open element in a **fresh** marked-content
+    /// sequence that reads at `order`.
+    ///
+    /// For a caller whose element has something drawn elsewhere reading in
+    /// the middle of it: an EPUB paragraph whose picture is drawn before its
+    /// text, in painting order, and reads between two of its words. The text
+    /// before this call and the text after it become two sequences, and
+    /// `finish` sorts the picture's element between them by `order` — which
+    /// one sequence spanning both could not express.
+    ///
+    /// A sequence with nothing drawn in it is taken back as usual, so a call
+    /// that splits nothing writes nothing. Returns false, doing nothing, when
+    /// no element is open or an open was refused past the depth cap.
+    pub fn continue_at(&mut self, order: u64) -> bool {
+        if self.refused_opens > 0 {
+            return false;
+        }
+        let Some(tag) = self.tag_stack.last().map(|node| node.tag.clone()) else {
+            return false;
+        };
+        self.close_marked();
+        let mcid = self.open_marked(&tag);
+        if let Some(node) = self.tag_stack.last_mut() {
+            node.push_kid(TaggedKid::Content { mcid, order });
+        }
+        true
+    }
+
+    /// Closes the innermost open element and hands it to its parent, or to
+    /// the page's roots.
+    fn close_top(&mut self) {
+        self.close_marked();
+        let Some(node) = self.tag_stack.pop() else {
+            return;
+        };
+        if node.is_kept() {
             match self.tag_stack.last_mut() {
-                Some(parent) => parent.kids.push(TaggedKid::Element(node)),
+                Some(parent) => parent.push_kid(TaggedKid::Element(node)),
                 None => self.tag_roots.push(node),
             }
         }
-
         // Reopen the parent so anything drawn after this child still belongs
         // to it. If nothing is, `close_marked` takes the reopening back.
-        if let Some(tag) = resume {
-            let mcid = self.open_marked(&tag);
-            let parent = self.tag_stack.last_mut().expect("resume implies a parent");
-            // The resumption reads **after** the child that interrupted it, so
-            // it takes an order past the child's rather than the parent's own.
-            // Without this a paragraph's second half sorts back in front of the
-            // span that split it.
-            let order = parent
-                .kids
-                .iter()
-                .map(|kid| match kid {
-                    TaggedKid::Content { order, .. } => *order,
-                    TaggedKid::Element(child) => child.order,
-                })
-                .max()
-                .unwrap_or(0);
-            parent.kids.push(TaggedKid::Content { mcid, order });
+        self.resume_parent();
+    }
+
+    /// Closes every element still open, giving each one that has none a key
+    /// so its continuation on the next page merges with it, and says what to
+    /// reopen there. See [`PageBuilder::open_tag`].
+    fn carry_over(&mut self, next_key: &mut u64) -> (Vec<CarriedTag>, usize) {
+        let mut carried = Vec::with_capacity(self.tag_stack.len());
+        for node in &mut self.tag_stack {
+            let key = match node.key {
+                Some(key) => key,
+                None => {
+                    let key = NodeKey::Carried(*next_key);
+                    *next_key = next_key.saturating_add(1);
+                    node.key = Some(key);
+                    key
+                }
+            };
+            carried.push(CarriedTag {
+                tag: node.tag.clone(),
+                key,
+                order: node.order,
+                props: node.props.clone(),
+                keep: node.keep,
+            });
         }
+        self.floor = (0, 0);
+        while !self.tag_stack.is_empty() {
+            self.close_top();
+        }
+        (carried, std::mem::take(&mut self.refused_opens))
+    }
+
+    /// Reopens what the previous page carried over, outermost first, and the
+    /// innermost one's sequence so what is drawn first belongs to it.
+    fn reopen(&mut self, carried: &[CarriedTag], refused: usize) {
+        for tag in carried {
+            self.tag_stack.push(TaggedNode::new(
+                tag.tag.clone(),
+                Some(tag.key),
+                tag.order,
+                tag.props.clone(),
+                tag.keep,
+            ));
+        }
+        self.refused_opens = refused;
+        self.resume_parent();
+    }
+
+    /// Opens a fresh marked-content sequence for the innermost open structure
+    /// element, if there is one, so what is drawn next belongs to it.
+    ///
+    /// The one way a sequence is reopened, whether a nested element or an
+    /// optional-content scope interrupted it.
+    fn resume_parent(&mut self) {
+        let Some(tag) = self.tag_stack.last().map(|parent| parent.tag.clone()) else {
+            return;
+        };
+        let mcid = self.open_marked(&tag);
+        let Some(parent) = self.tag_stack.last_mut() else {
+            return;
+        };
+        // The resumption reads **after** whatever interrupted it, so it takes
+        // an order past its siblings' rather than the parent's own. Without
+        // this a paragraph's second half sorts back in front of the span that
+        // split it.
+        let order = parent.next_order();
+        parent.push_kid(TaggedKid::Content { mcid, order });
+    }
+
+    /// Associates `file` with this page: the page's `/AF` (ISO 32000-2
+    /// 14.13; the Arlington model lists the page among `/AF`'s holders).
+    ///
+    /// Returns false, adding nothing, where [`DocumentBuilder::associate_file`]
+    /// would, and for the same reasons; under a profile that refuses it the
+    /// refusal is recorded as [`ArchivalRefusal::AssociatedFile`].
+    pub fn associate_file(&mut self, file: NewAssociatedFile) -> bool {
+        if !self.associated_allowed {
+            if self.archival_space.is_some() {
+                self.refusals.push(ArchivalRefusal::AssociatedFile);
+            }
+            return false;
+        }
+        if !file.is_writable() {
+            return false;
+        }
+        self.associated.push(file);
+        true
+    }
+
+    /// Gives this page an output intent of its own — the page's
+    /// `/OutputIntents` (ISO 32000-2's PageObject entry, per the Arlington
+    /// model), which a reader takes over the catalog's for this page.
+    ///
+    /// Each call adds one entry, written as a direct dictionary in the
+    /// array, the shape of the PDF Association's PDF 2.0 example. A
+    /// destination profile is written once however many pages name the same
+    /// bytes, so pages that share a condition share its stream.
+    ///
+    /// Returns false, adding nothing, when:
+    ///
+    /// - the document declares a version before 2.0, where a page has no
+    ///   such entry ([`DocumentBuilder::with_version`]);
+    /// - the document is written under an [`ArchivalProfile`], which writes
+    ///   the catalog's intent itself and refuses every device colour against
+    ///   that one profile — a page naming another would be a combination
+    ///   this writer does not check;
+    /// - `/S` or the required `/OutputConditionIdentifier` is empty, or a
+    ///   destination profile is given with no bytes.
+    pub fn output_intent(&mut self, intent: NewOutputIntent) -> bool {
+        if !self.page_intents
+            || intent.subtype.is_empty()
+            || intent.output_condition_identifier.is_empty()
+            || intent
+                .destination_profile
+                .as_ref()
+                .is_some_and(|(bytes, _)| bytes.is_empty())
+        {
+            return false;
+        }
+        self.output_intents.push(intent);
+        true
+    }
+
+    /// Draws inside an optional content group — `/OC /name BDC … EMC`
+    /// (8.11.3.2) — so what is drawn shows or hides with the layer
+    /// [`DocumentBuilder::add_layer`] returned.
+    ///
+    /// # Nesting with tagged content
+    ///
+    /// A layer and a structure element are both marked-content sequences, and
+    /// `EMC` closes whichever is innermost. [`PageBuilder::tagged`] keeps the
+    /// sequence carrying an element's `/MCID` innermost at all times — it
+    /// closes the parent's before a child's opens and reopens it after — and
+    /// a layer opened between the two would break that: the parent's `EMC`
+    /// would close the layer, and the layer's the parent. So a layer opened
+    /// inside an element **splits** the element's sequence around itself: the
+    /// open sequence is closed, the layer opened, and a fresh sequence for the
+    /// same element opened inside the layer, with the mirror image on the way
+    /// out. Every `/MCID` sequence stays innermost, the element claims every
+    /// piece in reading order, and the layer contains exactly what the
+    /// closure drew. An element opened inside a layer nests inside it with no
+    /// splitting at all.
+    ///
+    /// **The closure is a scope**, as a [`PageBuilder::tagged_with`] closure
+    /// is, and for the same reason: the layer's `EMC` closes whatever sequence
+    /// is innermost. So a [`PageBuilder::close_tag`] inside it cannot close an
+    /// element opened outside it — that would end the element's sequence
+    /// inside the layer and leave the layer's own close one `EMC` too many —
+    /// and an element [`PageBuilder::open_tag`] opens inside it and leaves
+    /// open is closed when it returns, where otherwise the layer's `EMC` would
+    /// end the element's sequence and leave everything drawn afterwards
+    /// inside the layer.
+    ///
+    /// A layer whose closure drew nothing writes nothing, for the reason an
+    /// empty `tagged` writes nothing.
+    ///
+    /// Returns false, drawing **nothing**, for a layer this page cannot name —
+    /// one registered after the page was begun, or on another builder — and
+    /// past [`crate::limits::MAX_NEST_DEPTH`] nested layers. Nothing rather
+    /// than the content unmarked, because content drawn outside the layer its
+    /// caller put it in shows when the layer is hidden, and hiding it was the
+    /// point.
+    pub fn optional(&mut self, layer: LayerId, draw: impl FnOnce(&mut PageBuilder)) -> bool {
+        let resource = layer.resource();
+        if layer.builder != self.builder || !holds(&self.resources.properties, &resource) {
+            return false;
+        }
+        if self.optional_depth >= crate::limits::MAX_NEST_DEPTH as usize {
+            return false;
+        }
+        self.marked_scope(b"/OC ", &resource, draw);
+        true
+    }
+
+    /// Draws `draw` inside `tag resource BDC … EMC`, keeping every `/MCID`
+    /// sequence innermost as [`PageBuilder::optional`] describes, and returns
+    /// whether anything was drawn — a scope that drew nothing is unwritten.
+    ///
+    /// `tag` is the tag already spelled as a name token with its trailing
+    /// space (`/OC `, `/AF `); `resource` is escaped on the way out.
+    fn marked_scope(
+        &mut self,
+        tag: &[u8],
+        resource: &[u8],
+        draw: impl FnOnce(&mut PageBuilder),
+    ) -> bool {
+        let tagged = !self.tag_stack.is_empty();
+        if tagged {
+            self.close_marked();
+        }
+        let start = self.content.len();
+        self.content.extend_from_slice(tag);
+        self.resource_name(resource);
+        self.content.extend_from_slice(b" BDC\n");
+        let opened = self.content.len();
+        if tagged {
+            self.resume_parent();
+        }
+
+        self.optional_depth += 1;
+        self.scoped(draw);
+        self.optional_depth -= 1;
+
+        if tagged {
+            self.close_marked();
+        }
+        let drew = self.content.len() != opened;
+        if drew {
+            self.content.extend_from_slice(b"EMC\n");
+        } else {
+            // Nothing was drawn since the `BDC`, so the bytes from `start`
+            // are exactly the ones written above.
+            self.content.truncate(start);
+        }
+        if tagged {
+            self.resume_parent();
+        }
+        drew
+    }
+
+    /// Draws a marked-content sequence associated with files: `/AF /AFn BDC
+    /// … EMC` (ISO 32000-2 14.13.5), whose named property list carries the
+    /// files in an `/MCAF` array, as the approved errata amend the clause —
+    /// Table 409a: *"An array of one or more file specification dictionaries
+    /// (7.11.3, "File specification dictionaries") which denote the
+    /// associated files for this marked-content sequence. Each file
+    /// specification dictionary in the array shall have an AFRelationship
+    /// entry."*
+    ///
+    /// The property list is a named resource in the page's `/Properties`,
+    /// never inline. The errata's NOTE 4 says why — a file specification
+    /// names its embedded file stream by indirect reference, which a content
+    /// stream cannot write, so *"named property resources are always used"* —
+    /// and the clause's last paragraph connects a sequence to files *"only if
+    /// the tag is AF and the named property list is defined according to
+    /// Table 409a"*. `BDC`, and never `DP` or `MP`, which the clause forbids
+    /// with this tag because they mark a point and not a sequence.
+    ///
+    /// Nesting with tagged content and with layers is
+    /// [`PageBuilder::optional`]'s, and so is the closure being a scope: a
+    /// structure element open around the call has its sequence split around
+    /// this one, every `/MCID` sequence stays innermost, and an element the
+    /// closure opens and leaves open is closed when it returns. A sequence
+    /// whose closure drew nothing writes nothing, its files included.
+    ///
+    /// Returns false — and the closure **still runs**, drawing outside any
+    /// such sequence, as an element [`Tag::associated_file`] could not give
+    /// its file to is still opened — when:
+    ///
+    /// - the document may not carry associated files, for
+    ///   [`DocumentBuilder::associate_file`]'s reasons (under a profile that
+    ///   refuses them the refusal is recorded as
+    ///   [`ArchivalRefusal::AssociatedFile`]);
+    /// - no file is given, or [`NewAssociatedFile::is_writable`] refuses one —
+    ///   Table 409a asks for one or more, and a sequence associated with
+    ///   fewer files than the caller named is not the one asked for;
+    /// - [`crate::limits::MAX_NEST_DEPTH`] layers and associated sequences are
+    ///   already open, or the page's `/Properties` would pass
+    ///   [`crate::limits::MAX_DICT_ENTRIES`], the most entries this crate's
+    ///   reader keeps of one dictionary.
+    pub fn with_associated_files(
+        &mut self,
+        files: Vec<NewAssociatedFile>,
+        draw: impl FnOnce(&mut PageBuilder),
+    ) -> bool {
+        if !self.associated_allowed {
+            if self.archival_space.is_some() {
+                self.refusals.push(ArchivalRefusal::AssociatedFile);
+            }
+            self.scoped(draw);
+            return false;
+        }
+        let properties = self.resources.properties.len() + self.marked_files.len();
+        if files.is_empty()
+            || files.len() > crate::limits::MAX_ARRAY_LEN
+            || !files.iter().all(NewAssociatedFile::is_writable)
+            || self.optional_depth >= crate::limits::MAX_NEST_DEPTH as usize
+            || properties >= crate::limits::MAX_DICT_ENTRIES
+        {
+            self.scoped(draw);
+            return false;
+        }
+        // Named and listed before the closure runs: a sequence it opens is
+        // then named after this one and counted against `/Properties` with
+        // it. Named from `marked_files.len()` once the closure had returned,
+        // a nested sequence took the same name as the one around it, the
+        // outer's list overwrote the inner's at `finish`, and the inner's
+        // files were written with nothing naming them. A sequence that drew
+        // nothing is taken out again and its number left unused.
+        let resource = format!("AF{}", self.next_marked_file).into_bytes();
+        self.next_marked_file += 1;
+        let at = self.marked_files.len();
+        self.marked_files.push((resource.clone(), files));
+        if !self.marked_scope(b"/AF ", &resource, draw) {
+            // Everything a nested call pushed sits after `at`, and a nested
+            // sequence that drew something made this one draw something, so
+            // the entry at `at` is this call's own.
+            self.marked_files.truncate(at);
+        }
+        true
+    }
+
+    /// Writes a resource name into the content stream as a name token.
+    ///
+    /// **Every name an operator here takes goes through this**, and through
+    /// the same escaper the writer uses for dictionary keys. 7.3.5 makes a
+    /// delimiter, white space, `#` and any byte outside `!`..`~` a `#xx`
+    /// escape; written raw, `/Fm B Do` is the name `/Fm` and an operand `B`,
+    /// so the page names a resource its `/Resources` does not carry and draws
+    /// nothing — while the dictionary, which was always escaped, holds the
+    /// resource under the whole name. One escaper for both sides is what
+    /// makes the name a page uses and the name it registered the same bytes.
+    fn resource_name(&mut self, resource: &[u8]) {
+        crate::write::write_name(&mut self.content, resource);
     }
 
     /// Writes `/Tag <</MCID n>> BDC` and returns the id it handed out.
@@ -1587,8 +3530,19 @@ impl PageBuilder {
         }
         self.content.truncate(at);
         self.next_mcid -= 1;
+        // The kid that named this id, which is not always the last one: a
+        // link annotation associated while the sequence was open sits after
+        // it, and popping that instead would leave the element claiming an id
+        // this page no longer has and dropping the annotation's `/OBJR`.
+        let mcid = self.next_mcid;
         if let Some(node) = self.tag_stack.last_mut() {
-            node.kids.pop();
+            if let Some(at) = node
+                .kids
+                .iter()
+                .rposition(|kid| matches!(kid, TaggedKid::Content { mcid: m, .. } if *m == mcid))
+            {
+                node.remove_kid(at);
+            }
         }
     }
 
@@ -1610,8 +3564,8 @@ impl PageBuilder {
             .or_default()
             .extend(text.chars());
 
-        self.content.extend_from_slice(b"BT /");
-        self.content.extend_from_slice(font);
+        self.content.extend_from_slice(b"BT ");
+        self.resource_name(font);
         self.content
             .extend_from_slice(format!(" {size} Tf {x} {y} Td (").as_bytes());
 
@@ -1657,25 +3611,158 @@ impl PageBuilder {
             .extend(characters.chars());
 
         let (character_spacing, word_spacing) = spacing;
-        self.content.extend_from_slice(b"BT /");
-        self.content.extend_from_slice(font);
+        self.content.extend_from_slice(b"BT ");
+        self.resource_name(font);
         self.content.extend_from_slice(
             format!(" {size} Tf {character_spacing} Tc {word_spacing} Tw {x} {y} Td (").as_bytes(),
         );
-        for byte in codes {
-            // 7.3.4.2's three, plus the two that a viewer would read as an
-            // end-of-line inside a literal string and fold away.
-            match byte {
-                b'(' | b')' | b'\\' => {
-                    self.content.push(b'\\');
-                    self.content.push(*byte);
+        literal_codes(&mut self.content, codes);
+        self.content.extend_from_slice(b") Tj ET\n");
+    }
+
+    /// Writes several pieces of text on one baseline, each in its own font
+    /// and at its own position, as **one** text object (9.4).
+    ///
+    /// [`PageBuilder::encoded_text`] and [`PageBuilder::glyphs`] each write a
+    /// text object of their own, one string from one position, and let the
+    /// font's advances and `Tc` place every glyph after the first. That
+    /// cannot state a position for one glyph in the middle of a run — a mark
+    /// drawn back over the letter before it — and two text objects in a row
+    /// are not one line to a reader that finds lines in a content stream:
+    /// the end of a text object puts the pen down, and this crate's own
+    /// `tinker-pdf-content` resumes a line after one only where the next
+    /// glyph starts within half an em of where the last glyph ended. A mark
+    /// drawn inside its letter ended short of where the next glyph started,
+    /// by every `letter-spacing` in between, and a word set wide enough came
+    /// back a line a letter. Here the pieces are moved between with `Td`
+    /// inside one `BT`/`ET` pair, so nothing between them ends a text object.
+    ///
+    /// `size` is every piece's, `y` the baseline, in points from the bottom;
+    /// `spacing` is the character and the word spacing, written once as
+    /// [`PageBuilder::encoded_text`] writes them. A composite font's piece is
+    /// drawn with a word spacing of zero, as [`PageBuilder::glyphs`]'s callers
+    /// arrange: 9.3.3 applies `Tw` to a single-byte code 32 only, and a
+    /// reader that applied it to a two-byte one would move every glyph after
+    /// a glyph whose index is 32.
+    ///
+    /// Each piece's characters or glyphs are recorded exactly as the
+    /// single-piece writers record them, so subsetting, `/W` and `/ToUnicode`
+    /// see what the page drew.
+    ///
+    /// A piece of glyphs whose font is not a registered composite font is
+    /// not drawn — the refusal [`PageBuilder::glyphs`] makes of its whole
+    /// run, made here of that piece alone, so the rest of the line is still
+    /// drawn where it was placed (ruling 2). Returns whether every piece was
+    /// drawn: false for any piece left out so, and — having written nothing
+    /// — for no pieces, for a size, a spacing or a position that is not a
+    /// finite number, and for two pieces drawn one after the other whose
+    /// distance apart is not one (two positions of opposite sign past half
+    /// of `f64::MAX`), since the move between them is written as that
+    /// distance.
+    pub fn text_pieces(
+        &mut self,
+        size: f64,
+        y: f64,
+        spacing: (f64, f64),
+        pieces: &[TextPiece<'_>],
+    ) -> bool {
+        let (character_spacing, word_spacing) = spacing;
+        if ![size, y, character_spacing, word_spacing]
+            .iter()
+            .chain(pieces.iter().map(|piece| &piece.x))
+            .all(|value| value.is_finite())
+        {
+            return false;
+        }
+        let drawable: Vec<&TextPiece<'_>> = pieces
+            .iter()
+            .filter(|piece| match piece.text {
+                PieceText::Codes { .. } => true,
+                PieceText::Glyphs(_) => self.composite.contains_key(piece.font),
+            })
+            .collect();
+        if drawable.is_empty() {
+            return false;
+        }
+        // Each move is written as the difference of two drawn pieces'
+        // positions, and two finite positions of opposite sign past half of
+        // `f64::MAX` differ by an infinity, which 7.3.3 has no spelling for
+        // (`inf 0 Td`): refused as a position that is not finite is.
+        if drawable
+            .windows(2)
+            .any(|pair| matches!(pair, [from, to] if !(to.x - from.x).is_finite()))
+        {
+            return false;
+        }
+
+        self.content.extend_from_slice(b"BT");
+        let mut font: Option<&[u8]> = None;
+        let mut spaced: Option<f64> = None;
+        let mut at: Option<f64> = None;
+        for piece in &drawable {
+            if font != Some(piece.font) {
+                self.content.push(b' ');
+                self.resource_name(piece.font);
+                self.content
+                    .extend_from_slice(format!(" {size} Tf").as_bytes());
+                font = Some(piece.font);
+            }
+            if at.is_none() {
+                self.content
+                    .extend_from_slice(format!(" {character_spacing} Tc").as_bytes());
+            }
+            let words = match piece.text {
+                PieceText::Codes { .. } => word_spacing,
+                PieceText::Glyphs(_) => 0.0,
+            };
+            if spaced != Some(words) {
+                self.content
+                    .extend_from_slice(format!(" {words} Tw").as_bytes());
+                spaced = Some(words);
+            }
+            // 9.4.2: `Td` moves from the start of the current line, which is
+            // where the last `Td` put it, not from where the last glyph left
+            // the pen — so the move is from piece to piece.
+            match at {
+                None => self
+                    .content
+                    .extend_from_slice(format!(" {} {y} Td", piece.x).as_bytes()),
+                Some(from) => self
+                    .content
+                    .extend_from_slice(format!(" {} 0 Td", piece.x - from).as_bytes()),
+            }
+            at = Some(piece.x);
+            match piece.text {
+                PieceText::Codes { codes, characters } => {
+                    self.used
+                        .entry(piece.font.to_vec())
+                        .or_default()
+                        .extend(characters.chars());
+                    self.content.extend_from_slice(b" (");
+                    literal_codes(&mut self.content, codes);
+                    self.content.extend_from_slice(b") Tj");
                 }
-                b'\r' => self.content.extend_from_slice(b"\\r"),
-                b'\n' => self.content.extend_from_slice(b"\\n"),
-                _ => self.content.push(*byte),
+                PieceText::Glyphs(glyphs) => {
+                    let hex = self
+                        .composite
+                        .get(piece.font)
+                        .map(|codes| codes.hex(glyphs.iter().map(|glyph| glyph.id)))
+                        .unwrap_or_default();
+                    let mapping = self.drawn.entry(piece.font.to_vec()).or_default();
+                    for glyph in glyphs {
+                        let text = mapping.entry(glyph.id).or_default();
+                        if text.is_empty() && !glyph.text.is_empty() {
+                            *text = glyph.text.to_string();
+                        }
+                    }
+                    self.content.extend_from_slice(b" <");
+                    self.content.extend_from_slice(hex.as_bytes());
+                    self.content.extend_from_slice(b"> Tj");
+                }
             }
         }
-        self.content.extend_from_slice(b") Tj ET\n");
+        self.content.extend_from_slice(b" ET\n");
+        drawable.len() == pieces.len()
     }
 
     /// Fills a rectangle in device grey, from black (0) to white (1).
@@ -1691,8 +3778,8 @@ impl PageBuilder {
     /// a matter of the transform — which is what this writes.
     pub fn image(&mut self, resource: &[u8], x: f64, y: f64, w: f64, h: f64) {
         self.content
-            .extend_from_slice(format!("q {w} 0 0 {h} {x} {y} cm /").as_bytes());
-        self.content.extend_from_slice(resource);
+            .extend_from_slice(format!("q {w} 0 0 {h} {x} {y} cm ").as_bytes());
+        self.resource_name(resource);
         self.content.extend_from_slice(b" Do Q\n");
     }
 
@@ -1746,12 +3833,101 @@ impl PageBuilder {
         let Some(channels) = self.resources.icc_channels.get(resource).copied() else {
             return false;
         };
-        self.content.push(b'/');
-        self.content.extend_from_slice(resource);
+        self.resource_name(resource);
         self.content
             .extend_from_slice(if stroking { b" CS\n" } else { b" cs\n" });
         for at in 0..usize::from(channels) {
             let value = components.get(at).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+            self.content
+                .extend_from_slice(format!("{value} ").as_bytes());
+        }
+        self.content
+            .extend_from_slice(if stroking { b"SCN\n" } else { b"scn\n" });
+        true
+    }
+
+    /// Sets the non-stroking colour in a registered CIE-based space:
+    /// `/Name cs c1 … cn sc` (8.6.8, Table 74).
+    ///
+    /// The space must have been registered with
+    /// [`DocumentBuilder::add_cie_color_space`]. **The operand count and the
+    /// ranges come from the space**, as they do for
+    /// [`PageBuilder::set_fill_icc`]: one component for `/CalGray`, three for
+    /// `/CalRGB` and `/Lab`, extra values dropped and missing ones written as
+    /// zero, which is black in all three. Each is clamped to the space's own
+    /// range — 0 to 1 for `/CalGray` and `/CalRGB` (8.6.5.2, 8.6.5.3), and
+    /// for `/Lab` (8.6.5.4) `L*` to 0..100 and `a*` and `b*` to the space's
+    /// `/Range`, which is what a `/Lab` colour's components are and why they
+    /// cannot share the 0..1 clamp every other setter applies.
+    ///
+    /// Returns false for a name no CIE-based space was registered under.
+    pub fn set_fill_cie(&mut self, resource: &[u8], components: &[f64]) -> bool {
+        self.set_cie(resource, components, false)
+    }
+
+    /// The same for the **stroking** colour: `CS` and `SC`.
+    pub fn set_stroke_cie(&mut self, resource: &[u8], components: &[f64]) -> bool {
+        self.set_cie(resource, components, true)
+    }
+
+    /// Both of the above. `stroking` picks Table 74's case.
+    fn set_cie(&mut self, resource: &[u8], components: &[f64], stroking: bool) -> bool {
+        let Some(space) = self.resources.cie.get(resource).copied() else {
+            return false;
+        };
+        self.resource_name(resource);
+        self.content
+            .extend_from_slice(if stroking { b" CS\n" } else { b" cs\n" });
+        for value in space.clamp(components) {
+            self.content
+                .extend_from_slice(format!("{value} ").as_bytes());
+        }
+        self.content
+            .extend_from_slice(if stroking { b"SC\n" } else { b"sc\n" });
+        true
+    }
+
+    /// Sets the non-stroking colour in a registered `/Separation` or
+    /// `/DeviceN` space: `/Name cs t1 … tn scn` (8.6.8, Table 74).
+    ///
+    /// The space must have been registered with
+    /// [`DocumentBuilder::add_separation_color_space`] or
+    /// [`DocumentBuilder::add_device_n_color_space`]. `tints` are the colorants'
+    /// tints in the order the space names them, each clamped to `[0, 1]`
+    /// (8.6.6.4: zero is no ink, one is the ink at full strength).
+    ///
+    /// **The operand count comes from the space**, as it does for
+    /// [`PageBuilder::set_fill_icc`] and for the same reason: a `/Separation`
+    /// takes one tint and a `/DeviceN` one per colorant, so extra values are
+    /// dropped and missing ones written as zero — no ink — rather than left
+    /// for a reader to guess about.
+    ///
+    /// Returns false for a name no such space was registered under.
+    pub fn set_fill_tint(&mut self, resource: &[u8], tints: &[f64]) -> bool {
+        self.set_tint(resource, tints, false)
+    }
+
+    /// The same for the **stroking** colour: `CS` and `SCN`.
+    pub fn set_stroke_tint(&mut self, resource: &[u8], tints: &[f64]) -> bool {
+        self.set_tint(resource, tints, true)
+    }
+
+    /// Both of the above. `stroking` picks Table 74's case.
+    fn set_tint(&mut self, resource: &[u8], tints: &[f64], stroking: bool) -> bool {
+        let Some(count) = self.resources.tints.get(resource).copied() else {
+            return false;
+        };
+        self.resource_name(resource);
+        self.content
+            .extend_from_slice(if stroking { b" CS\n" } else { b" cs\n" });
+        for at in 0..count {
+            let value = tints.get(at).copied().unwrap_or(0.0);
+            // A NaN clamps to NaN, which is not a PDF number: it is no ink.
+            let value = if value.is_nan() {
+                0.0
+            } else {
+                value.clamp(0.0, 1.0)
+            };
             self.content
                 .extend_from_slice(format!("{value} ").as_bytes());
         }
@@ -1806,8 +3982,7 @@ impl PageBuilder {
         if !holds(&self.resources.ext_gstates, resource) {
             return false;
         }
-        self.content.push(b'/');
-        self.content.extend_from_slice(resource);
+        self.resource_name(resource);
         self.content.extend_from_slice(b" gs\n");
         true
     }
@@ -1821,8 +3996,7 @@ impl PageBuilder {
         if !holds(&self.resources.forms, resource) {
             return false;
         }
-        self.content.push(b'/');
-        self.content.extend_from_slice(resource);
+        self.resource_name(resource);
         self.content.extend_from_slice(b" Do\n");
         true
     }
@@ -1838,8 +4012,7 @@ impl PageBuilder {
         if !holds(&self.resources.shadings, resource) {
             return false;
         }
-        self.content.push(b'/');
-        self.content.extend_from_slice(resource);
+        self.resource_name(resource);
         self.content.extend_from_slice(b" sh\n");
         true
     }
@@ -1855,8 +4028,8 @@ impl PageBuilder {
         if !holds(&self.resources.patterns, resource) {
             return false;
         }
-        self.content.extend_from_slice(b"/Pattern cs /");
-        self.content.extend_from_slice(resource);
+        self.content.extend_from_slice(b"/Pattern cs ");
+        self.resource_name(resource);
         self.content.extend_from_slice(b" scn\n");
         true
     }
@@ -1866,8 +4039,8 @@ impl PageBuilder {
         if !holds(&self.resources.patterns, resource) {
             return false;
         }
-        self.content.extend_from_slice(b"/Pattern CS /");
-        self.content.extend_from_slice(resource);
+        self.content.extend_from_slice(b"/Pattern CS ");
+        self.resource_name(resource);
         self.content.extend_from_slice(b" SCN\n");
         true
     }
@@ -1876,18 +4049,23 @@ impl PageBuilder {
     /// [`DocumentBuilder::add_cid_font`].
     ///
     /// The string is two bytes a glyph, big-endian, because `/Identity-H`
-    /// makes the code the CID and `/CIDToGIDMap /Identity` makes the CID the
-    /// glyph index. Written as a hex string rather than a literal: a glyph
-    /// index is arbitrary bytes and hex needs no escaping decisions at all.
+    /// makes the code the CID. Under a TrueType program `/CIDToGIDMap
+    /// /Identity` then makes the CID the glyph index, and under a CFF that is
+    /// not CID-keyed 9.7.4.2's own rule does, so the code is the index the
+    /// caller named; a **CID-keyed** CFF turns a CID into a glyph through its
+    /// charset instead (9.7.4.2), so the code written is the CID the charset
+    /// gives that glyph. Written as a hex string rather than a literal: a
+    /// code is arbitrary bytes and hex needs no escaping decisions at all.
     ///
     /// Returns false when `resource` is not a registered **composite** font,
     /// rather than writing two-byte codes into a font whose codes are one byte
     /// — which would draw the wrong glyphs at the wrong widths and look like a
     /// font problem rather than an encoding one.
     pub fn glyphs(&mut self, font: &[u8], size: f64, x: f64, y: f64, glyphs: &[Glyph<'_>]) -> bool {
-        if !self.composite.contains(font) {
+        let Some(codes) = self.composite.get(font) else {
             return false;
-        }
+        };
+        let hex = codes.hex(glyphs.iter().map(|glyph| glyph.id));
 
         // Recorded so `finish` can write `/W` from the font's own `hmtx` for
         // the glyphs the document drew, and a `/ToUnicode` from the text they
@@ -1903,14 +4081,11 @@ impl PageBuilder {
             }
         }
 
-        self.content.extend_from_slice(b"BT /");
-        self.content.extend_from_slice(font);
+        self.content.extend_from_slice(b"BT ");
+        self.resource_name(font);
         self.content
             .extend_from_slice(format!(" {size} Tf {x} {y} Td <").as_bytes());
-        for glyph in glyphs {
-            self.content
-                .extend_from_slice(format!("{:04X}", glyph.id).as_bytes());
-        }
+        self.content.extend_from_slice(hex.as_bytes());
         self.content.extend_from_slice(b"> Tj ET\n");
         true
     }
@@ -1949,7 +4124,61 @@ impl PageBuilder {
     /// - a page already carrying [`crate::limits::MAX_ARRAY_LEN`] links, which
     ///   is where this repository's own reader stops walking an `/Annots`
     ///   array.
+    ///
+    /// # Inside a structure element
+    ///
+    /// Called while an element is open — inside [`PageBuilder::tagged_with`]
+    /// or between [`PageBuilder::open_tag`] and its close — the annotation
+    /// becomes a **content item of that element**: the element's `/K` gains an
+    /// `/OBJR` naming it (14.7.4.3) and the annotation a `/StructParent` whose
+    /// `/ParentTree` entry names the element back (14.7.4.4). That is the
+    /// shape 14.8.4.4.2 gives a `/Link` element — the text it encloses and an
+    /// object reference to the annotation that makes it go somewhere — and
+    /// what ISO 14289-1 asks of every annotation in a tagged file. Outside any
+    /// element the annotation is written as it always was, in no structure.
     pub fn link(&mut self, x0: f64, y0: f64, x1: f64, y1: f64, target: &Target) -> bool {
+        if !self.push_link(x0, y0, x1, y1, target, None) {
+            return false;
+        }
+        let link = self.links.len() - 1;
+        if let Some(node) = self.tag_stack.last_mut() {
+            let order = node.next_order();
+            node.push_kid(TaggedKid::Object { link, order });
+        }
+        true
+    }
+
+    /// A link annotation that belongs to the structure element named `key`
+    /// — one opened with [`PageBuilder::tagged_keyed`] or [`Tag::keyed`] —
+    /// on this page or any other, whether or not it is open now.
+    ///
+    /// For a caller that knows which element a link is for and draws the two
+    /// apart: a layout whose link rectangles are measured after the text is
+    /// drawn, as an EPUB's are. `finish` finds the element by its key and
+    /// writes the association [`PageBuilder::link`] describes; an annotation
+    /// whose key names no element is written in no structure, as an
+    /// untagged one is. Refused for the same reasons `link` refuses.
+    pub fn link_for(
+        &mut self,
+        key: u64,
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+        target: &Target,
+    ) -> bool {
+        self.push_link(x0, y0, x1, y1, target, Some(key))
+    }
+
+    fn push_link(
+        &mut self,
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+        target: &Target,
+        owner: Option<u64>,
+    ) -> bool {
         if !all_finite(&[x0, y0, x1, y1]) {
             return false;
         }
@@ -1966,8 +4195,41 @@ impl PageBuilder {
         self.links.push(LinkAnnotation {
             rect,
             target: target.clone(),
+            owner,
+            files: Vec::new(),
         });
         true
+    }
+
+    /// Associates `file` with one of this page's link annotations: the
+    /// annotation's `/AF` (ISO 32000-2 14.13; the Arlington model lists every
+    /// annotation subtype among `/AF`'s holders). `link` counts the links
+    /// [`PageBuilder::link`] and [`PageBuilder::link_for`] accepted on this
+    /// page, from zero, in the order they were added — the order they reach
+    /// `/Annots`.
+    ///
+    /// Returns false, adding nothing, for a `link` this page does not have,
+    /// and where [`PageBuilder::associate_file`] would, for the same reasons.
+    pub fn associate_file_with_link(&mut self, link: usize, file: NewAssociatedFile) -> bool {
+        if link >= self.links.len() {
+            return false;
+        }
+        if !self.associated_allowed {
+            if self.archival_space.is_some() {
+                self.refusals.push(ArchivalRefusal::AssociatedFile);
+            }
+            return false;
+        }
+        if !file.is_writable() {
+            return false;
+        }
+        match self.links.get_mut(link) {
+            Some(annotation) if annotation.files.len() < crate::limits::MAX_ARRAY_LEN => {
+                annotation.files.push(file);
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -2018,14 +4280,14 @@ pub fn jpeg_shape(data: &[u8]) -> Option<(u32, u32, u8)> {
 
 /// Where a link annotation or an outline entry goes.
 ///
-/// **Two kinds and not three**, which is the writing side of the distinction
+/// **Three kinds**, which is the writing side of the distinction
 /// [`crate::dest::Destination`] draws on the reading side (ruling 6): a page in
-/// this document, and a URI that leaves it altogether. A *named* destination —
-/// the third thing a `/Dest` may be — is deliberately absent, because a name
-/// is only a destination once the catalog carries a `/Names /Dests` tree to
-/// look it up in, and this builder writes no name tree. Offering a name with
-/// nowhere to resolve it would produce exactly the dead link the header of
-/// `dest.rs` exists to describe.
+/// this document, a *name* the document's own `/Names /Dests` tree resolves to
+/// a page, and a URI that leaves it altogether. None is ever written as
+/// another. A named destination is written as the name and stays one when it
+/// is read back — it is never flattened to the explicit array it stands for,
+/// because the name is the part a later edit can repoint without touching a
+/// single link.
 ///
 /// A [`Target::Page`] naming an index past the end of the document is **not**
 /// an error and is not repaired. Nothing here knows how many pages there will
@@ -2037,6 +4299,18 @@ pub fn jpeg_shape(data: &[u8]) -> Option<(u32, u32, u8)> {
 /// entry with no destination, which is the shape 12.3.3 gives a heading. The
 /// alternative is a link to whichever page happened to be last, which is the
 /// plausible-and-wrong answer this repository refuses everywhere else.
+///
+/// A [`Target::Named`] follows the same rule for the same reason, one step
+/// removed: the name may be registered after the link that uses it, so it is
+/// judged at `finish`. A name that by then is not registered with
+/// [`DocumentBuilder::add_named_destination`], or whose page never arrived, is
+/// **dangling**, and a dangling name is refused rather than written: a link
+/// naming one is not written at all — a rectangle that goes nowhere is a
+/// defect the strict validator reports, where a missing link is not — and an
+/// outline entry naming one is written with no destination, which is the
+/// shape 12.3.3 gives a heading. [`DocumentBuilder::dangling_destinations`]
+/// names every such name before the document is finished, so the refusal is
+/// not silent.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Target {
@@ -2052,14 +4326,32 @@ pub enum Target {
     /// 7-bit ASCII, per that clause; see [`crate::dest::is_writable_uri`] for
     /// what is refused and why.
     Uri(String),
+    /// A named destination (12.3.2.3), written as a byte string `/Dest` and
+    /// resolved through the catalog's `/Names /Dests` tree, which `finish`
+    /// writes from [`DocumentBuilder::add_named_destination`].
+    ///
+    /// The name is bytes, not text: 7.9.6 compares name-tree keys byte for
+    /// byte, so a name is matched literally, never after a decoding that might
+    /// normalise it. An empty name is refused — it cannot be told apart from
+    /// a destination nobody named.
+    Named(Vec<u8>),
 }
 
 impl Target {
     /// Whether this target can be written.
-    fn is_writable(&self) -> bool {
+    pub(crate) fn is_writable(&self) -> bool {
         match self {
             Target::Page { view, .. } => view.is_writable(),
             Target::Uri(uri) => crate::dest::is_writable_uri(uri),
+            Target::Named(name) => !name.is_empty(),
+        }
+    }
+
+    /// The name this target resolves through, if it is a named one.
+    fn name(&self) -> Option<&[u8]> {
+        match self {
+            Target::Named(name) => Some(name),
+            Target::Page { .. } | Target::Uri(_) => None,
         }
     }
 
@@ -2070,7 +4362,17 @@ impl Target {
     /// exactly one is inserted, never both — and which one is decided by the
     /// kind of target rather than by a flag, so the malformed shape is not
     /// expressible.
-    fn write(&self, names: &NameTable, pages: &[ObjRef], dict: &mut Dict) {
+    ///
+    /// `live` is the set of names the document's `/Dests` tree holds. A name
+    /// outside it is dangling and writes nothing, for the reason the type's
+    /// own documentation gives.
+    pub(crate) fn write(
+        &self,
+        names: &NameTable,
+        pages: &[ObjRef],
+        live: &BTreeMap<Vec<u8>, (u32, DestKind)>,
+        dict: &mut Dict,
+    ) {
         match self {
             Target::Page { index, view } => {
                 // An index past the end writes nothing; see the type's own
@@ -2088,6 +4390,18 @@ impl Target {
                     Object::Dict(crate::dest::uri_action(names, uri)),
                 );
             }
+            // 12.3.2.3: in PDF 1.2 and later a name in `/Dest` is a byte
+            // string, looked up in the `/Names /Dests` tree, whose keys are
+            // strings. A name *object* is the pre-1.2 `/Dests` dictionary's
+            // spelling, which this writer does not emit.
+            Target::Named(name) => {
+                if live.contains_key(name) {
+                    dict.insert(
+                        names.intern(b"Dest"),
+                        Object::String(PdfString::literal(name.clone())),
+                    );
+                }
+            }
         }
     }
 }
@@ -2098,6 +4412,11 @@ struct LinkAnnotation {
     rect: [f64; 4],
     /// Where it goes.
     target: Target,
+    /// The key of the structure element it belongs to, for one added by
+    /// [`PageBuilder::link_for`].
+    owner: Option<u64>,
+    /// Its `/AF`, from [`PageBuilder::associate_file_with_link`].
+    files: Vec<NewAssociatedFile>,
 }
 
 /// One outline entry to write (12.3.3).
@@ -2141,7 +4460,7 @@ pub struct OutlineEntry {
 /// A writer whose output its own reader silently truncates is not a writer.
 /// The walk is **iterative**, so a caller handing over a tree a thousand deep
 /// is refused rather than overflowing a stack finding out.
-fn outline_is_writable(entries: &[OutlineEntry]) -> bool {
+pub(crate) fn outline_is_writable(entries: &[OutlineEntry]) -> bool {
     let mut stack: Vec<(&[OutlineEntry], u32)> = vec![(entries, 0)];
     while let Some((level, depth)) = stack.pop() {
         if depth > crate::limits::MAX_NEST_DEPTH {
@@ -2165,6 +4484,234 @@ fn outline_is_writable(entries: &[OutlineEntry]) -> bool {
 }
 
 // ---- the archival profile (ISO 19005) -------------------------------------
+
+/// An output intent (ISO 32000-1 14.11.5 Table 365) for
+/// [`PageBuilder::output_intent`]: the output device or condition a page's
+/// colours are meant for.
+///
+/// PDF 2.0 lets a **page** carry its own `/OutputIntents`, which the PDF
+/// Association's example file for it describes as able to *"override the
+/// output intent for the document in the catalog"*; the Arlington model lists
+/// the page entry as 2.0's. Built by chaining from [`NewOutputIntent::new`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NewOutputIntent {
+    /// `/S`: `GTS_PDFX`, `GTS_PDFA1`, `ISO_PDFE1`, or another a reader
+    /// knows. Written as a name.
+    pub subtype: Vec<u8>,
+    /// `/OutputConditionIdentifier`, the one entry Table 365 requires: a
+    /// registered condition's name, or `Custom`.
+    pub output_condition_identifier: String,
+    /// `/OutputCondition`: the condition, for a person.
+    pub output_condition: Option<String>,
+    /// `/RegistryName`: the registry the identifier is in.
+    pub registry_name: Option<String>,
+    /// `/Info`.
+    pub info: Option<String>,
+    /// `/DestOutputProfile`: an ICC profile's bytes and the kind of device
+    /// it characterises, which gives the stream's `/N` — declared, not read
+    /// out of the bytes, for the reason [`ArchivalProfile::destination_space`]
+    /// gives.
+    pub destination_profile: Option<(Vec<u8>, DeviceSpace)>,
+}
+
+impl NewOutputIntent {
+    /// An intent of subtype `subtype` naming the condition `identifier`.
+    #[must_use]
+    pub fn new(subtype: &[u8], identifier: &str) -> NewOutputIntent {
+        NewOutputIntent {
+            subtype: subtype.to_vec(),
+            output_condition_identifier: identifier.to_owned(),
+            output_condition: None,
+            registry_name: None,
+            info: None,
+            destination_profile: None,
+        }
+    }
+
+    /// `/OutputCondition`.
+    #[must_use]
+    pub fn condition(mut self, text: &str) -> NewOutputIntent {
+        self.output_condition = Some(text.to_owned());
+        self
+    }
+
+    /// `/RegistryName`.
+    #[must_use]
+    pub fn registry(mut self, text: &str) -> NewOutputIntent {
+        self.registry_name = Some(text.to_owned());
+        self
+    }
+
+    /// `/Info`.
+    #[must_use]
+    pub fn info(mut self, text: &str) -> NewOutputIntent {
+        self.info = Some(text.to_owned());
+        self
+    }
+
+    /// `/DestOutputProfile`: `bytes` is an ICC profile of a `space` device.
+    #[must_use]
+    pub fn profile(mut self, bytes: Vec<u8>, space: DeviceSpace) -> NewOutputIntent {
+        self.destination_profile = Some((bytes, space));
+        self
+    }
+}
+
+/// What an associated file is to the object it is associated with: ISO
+/// 32000-2 7.11.3's `/AFRelationship` (14.13).
+///
+/// The values the Arlington model lists for the key, the first four since
+/// ISO 19005-3 carried them on 1.7 and the next three since 2.0. The approved
+/// errata quote the entry's definition and leave the list to the 2.0 text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FileRelationship {
+    /// `/Source`: the file the content was made from.
+    Source,
+    /// `/Data`: the data the content presents — a table's spreadsheet.
+    Data,
+    /// `/Alternative`: another rendition of the content.
+    Alternative,
+    /// `/Supplement`: material that adds to the content.
+    Supplement,
+    /// `/EncryptedPayload` (2.0): an encrypted payload document. Read, and
+    /// never written: such a specification also needs an `/EP` dictionary
+    /// this writer has no API for.
+    EncryptedPayload,
+    /// `/FormData` (2.0): the data of a form.
+    FormData,
+    /// `/Schema` (2.0): a schema for the content.
+    Schema,
+    /// `/Unspecified`: a relationship the producer does not state, and the
+    /// Arlington model's default for the key.
+    Unspecified,
+}
+
+impl FileRelationship {
+    /// Every value, in the Arlington model's order.
+    pub const ALL: [FileRelationship; 8] = [
+        FileRelationship::Source,
+        FileRelationship::Data,
+        FileRelationship::Alternative,
+        FileRelationship::Supplement,
+        FileRelationship::EncryptedPayload,
+        FileRelationship::FormData,
+        FileRelationship::Schema,
+        FileRelationship::Unspecified,
+    ];
+
+    /// The name the value is written as.
+    #[must_use]
+    pub const fn name(self) -> &'static [u8] {
+        match self {
+            FileRelationship::Source => b"Source",
+            FileRelationship::Data => b"Data",
+            FileRelationship::Alternative => b"Alternative",
+            FileRelationship::Supplement => b"Supplement",
+            FileRelationship::EncryptedPayload => b"EncryptedPayload",
+            FileRelationship::FormData => b"FormData",
+            FileRelationship::Schema => b"Schema",
+            FileRelationship::Unspecified => b"Unspecified",
+        }
+    }
+
+    /// The value a name spells, or `None` for one the list does not hold.
+    #[must_use]
+    pub fn from_name(name: &[u8]) -> Option<FileRelationship> {
+        FileRelationship::ALL
+            .into_iter()
+            .find(|relationship| relationship.name() == name)
+    }
+}
+
+/// A file to associate with the document, a page or a structure element
+/// (ISO 32000-2 14.13): embedded, and connected to its holder by the holder's
+/// `/AF` array.
+///
+/// Written as a file specification dictionary carrying `/F`, `/UF`, `/Desc`,
+/// `/AFRelationship` and an `/EF` naming one embedded file stream, whose
+/// `/Subtype` is the MIME type — which the errata's Table 44 requires of a
+/// stream used as an associated file — and whose `/Params` hold `/Size` and
+/// the MD5 `/CheckSum`, as `DocumentEditor::attach_file` writes them. Not
+/// filed in `/Names /EmbeddedFiles`: the errata say that is "not required
+/// unless stated otherwise".
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NewAssociatedFile {
+    /// The name to offer when the file is saved out: `/UF` as a text string,
+    /// and `/F` beside it with every byte outside printable ASCII replaced.
+    pub filename: String,
+    /// The embedded file stream's `/Subtype`, a MIME type such as `text/csv`.
+    pub mime_type: String,
+    /// `/AFRelationship`.
+    pub relationship: FileRelationship,
+    /// `/Desc`.
+    pub description: Option<String>,
+    /// The file's bytes.
+    pub data: Vec<u8>,
+}
+
+impl NewAssociatedFile {
+    /// `data`, offered as `filename`, of type `mime_type`, standing to its
+    /// holder as `relationship` says.
+    #[must_use]
+    pub fn new(
+        filename: &str,
+        mime_type: &str,
+        relationship: FileRelationship,
+        data: Vec<u8>,
+    ) -> NewAssociatedFile {
+        NewAssociatedFile {
+            filename: filename.to_owned(),
+            mime_type: mime_type.to_owned(),
+            relationship,
+            description: None,
+            data,
+        }
+    }
+
+    /// `/Desc`.
+    #[must_use]
+    pub fn description(mut self, text: &str) -> NewAssociatedFile {
+        self.description = Some(text.to_owned());
+        self
+    }
+
+    /// Whether this can be written: a file name, a MIME type of the shape
+    /// veraPDF's published PDF/A rules 6.8-1 (part 3) and 6.9-1 (part 4)
+    /// test — `^[-\w+\.]+\/[-\w+\.]+$`, so one `/` between two runs of
+    /// letters, digits, `_`, `-`, `+` and `.`, which also keeps out the
+    /// `;`, `=` and `#` the errata's Table 44 forbids — and not
+    /// [`FileRelationship::EncryptedPayload`], which needs an `/EP`
+    /// dictionary this writer does not write.
+    #[must_use]
+    pub fn is_writable(&self) -> bool {
+        let token = |part: &str| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'+' | b'.'))
+        };
+        let mime = self
+            .mime_type
+            .split_once('/')
+            .is_some_and(|(kind, sub)| token(kind) && token(sub));
+        !self.filename.is_empty() && mime && self.relationship != FileRelationship::EncryptedPayload
+    }
+}
+
+/// `/F` beside `/UF` (7.11.3): the name in bytes, every character outside
+/// printable ASCII replaced by `_` — the rule `DocumentEditor::attach_file`
+/// follows, restated here because that one is private to the editor.
+fn byte_file_name(name: &str) -> Vec<u8> {
+    name.chars()
+        .map(|c| match u8::try_from(c) {
+            Ok(b) if (0x20..0x7f).contains(&b) => b,
+            _ => b'_',
+        })
+        .collect()
+}
 
 /// Which part of ISO 19005 a document is written under.
 ///
@@ -2349,6 +4896,32 @@ pub enum ArchivalRefusal {
     LanguageMissing,
     /// A profile with no destination profile bytes.
     DestinationProfileMissing,
+    /// Optional content in a part 1 document, which forbids it outright: the
+    /// catalog of such a file may not carry `/OCProperties`.
+    OptionalContent,
+    /// A `/DeviceN` naming a spot colour its `/Colorants` does not describe,
+    /// under parts 2 to 4: ISO 19005-2 6.2.4.4 requires an entry for every
+    /// spot colour a `/DeviceN` uses.
+    UndescribedColorant {
+        /// The first colorant without an entry.
+        colorant: Vec<u8>,
+    },
+    /// A `/Separation` for a colorant an earlier one already names, with a
+    /// different alternate or tint transform, under parts 2 to 4: ISO
+    /// 19005-2 6.2.4.4 requires every `/Separation` array of one name in a
+    /// file to agree on both.
+    InconsistentSeparation {
+        /// The colorant both name.
+        colorant: Vec<u8>,
+    },
+    /// An associated file (ISO 32000-2 14.13) under a part that admits no
+    /// embedded file this writer can vouch for. Part 1 forbids embedded files
+    /// outright; part 2, and part 4 without level F, require the embedded
+    /// file itself to conform (veraPDF's published rules 6.8-5 and 6.9-3),
+    /// which nothing here can check of a caller's bytes; and part 4 level F
+    /// requires an `/EmbeddedFiles` name tree (6.9-5) this writer does not
+    /// keep. Part 3 admits them, and they are written.
+    AssociatedFile,
 }
 
 impl ArchivalRefusal {
@@ -2357,7 +4930,8 @@ impl ArchivalRefusal {
     /// Part 1's numbering, once, for every part — the same choice
     /// `tinker_pdf::StagedRule` makes and for the same reason: a refusal is
     /// about a rule, and the rule is one thing however many numbers the parts
-    /// give it.
+    /// give it. The two spot-colour rules have no part 1 counterpart, and
+    /// are cited as parts 2 to 4 number them, 6.2.4.4.
     #[must_use]
     pub const fn clause(&self) -> &'static str {
         match self {
@@ -2370,6 +4944,10 @@ impl ArchivalRefusal {
             | ArchivalRefusal::LanguageMissing => "6.7.11",
             ArchivalRefusal::UntaggedPage { .. } => "6.8.2",
             ArchivalRefusal::DestinationProfileMissing => "6.2.2",
+            ArchivalRefusal::OptionalContent => "6.1.13",
+            ArchivalRefusal::UndescribedColorant { .. }
+            | ArchivalRefusal::InconsistentSeparation { .. } => "6.2.4.4",
+            ArchivalRefusal::AssociatedFile => "6.1.11",
         }
     }
 }
@@ -2414,6 +4992,26 @@ impl core::fmt::Display for ArchivalRefusal {
             ArchivalRefusal::DestinationProfileMissing => {
                 f.write_str("an output intent needs an ICC destination profile")
             }
+            ArchivalRefusal::OptionalContent => f.write_str(
+                "part 1 admits no optional content, and a layer is an optional \
+                 content group",
+            ),
+            ArchivalRefusal::UndescribedColorant { colorant } => write!(
+                f,
+                "the DeviceN space names the spot colour /{} and its \
+                 /Colorants has no entry for it",
+                String::from_utf8_lossy(colorant)
+            ),
+            ArchivalRefusal::InconsistentSeparation { colorant } => write!(
+                f,
+                "a Separation space for /{} is already written with another \
+                 alternate or tint transform, and every one of that name must agree",
+                String::from_utf8_lossy(colorant)
+            ),
+            ArchivalRefusal::AssociatedFile => f.write_str(
+                "this part admits no embedded file this writer can vouch for, and an \
+                 associated file is one",
+            ),
         }
     }
 }
@@ -2429,8 +5027,9 @@ pub struct DocumentBuilder {
     /// Which form resources carry a `/Group`, so an `/SMask` naming one that
     /// does not can be refused (11.6.5.2).
     groups: BTreeSet<Vec<u8>>,
-    /// Which font resources are composite.
-    composite: BTreeSet<Vec<u8>>,
+    /// Which font resources are composite, and the code each one's glyphs are
+    /// drawn by.
+    composite: BTreeMap<Vec<u8>, Codes>,
     /// Fonts whose programs are embedded, written at `finish` once the
     /// characters they are asked to draw are known.
     embedded: Vec<Embedded>,
@@ -2447,10 +5046,58 @@ pub struct DocumentBuilder {
     embedded_whole: Vec<EmbeddedWhole>,
     info: Dict,
     outline: Vec<OutlineEntry>,
+    /// Named destinations (12.3.2.3): each name, the zero-based page it
+    /// resolves to and the view. Written at `finish` as the catalog's
+    /// `/Names /Dests` tree, because a page index resolves to a reference only
+    /// once every page exists.
+    ///
+    /// A `BTreeMap`, so the tree's entries are in one order however they were
+    /// registered — which is also the byte order 7.9.6 sorts keys in.
+    destinations: BTreeMap<Vec<u8>, (u32, DestKind)>,
+    /// Each registered `/Separation` space by resource name: its colorant
+    /// and the space's own object, for a `/DeviceN`'s `/Colorants` to name.
+    separations: BTreeMap<Vec<u8>, (Vec<u8>, ObjRef)>,
+    /// Every colorant a `/Separation` array has been written for, with the
+    /// alternate and tint transform the first one gave it. Never forgotten
+    /// when a resource name is reused, because a page begun before still
+    /// names the earlier array and it is still in the file — which is what
+    /// ISO 19005-2 6.2.4.4 holds every later array of that name to.
+    inks: BTreeMap<Vec<u8>, (DeviceSpace, Function)>,
+    /// Optional content groups (8.11.2.1), in the order they were added —
+    /// the order `/OCGs` and `/Order` list them in — and whether the default
+    /// configuration shows each.
+    layers: Vec<(ObjRef, bool)>,
+    /// The version the header declares when no profile decides it. Fixed at
+    /// construction, because text strings are encoded for it as they arrive
+    /// (see [`DocumentBuilder::with_version`]).
+    version: (u8, u8),
     /// The ISO 19005 profile this document is written under, if any.
     profile: Option<ArchivalProfile>,
     /// Every call that profile refused, in the order they were made.
     refusals: Vec<ArchivalRefusal>,
+    /// Which builder this is, for the handles it gives out to carry.
+    serial: BuilderSerial,
+    /// Structure elements the last pushed page left open, which the next page
+    /// begun reopens, and how many refused opens were outstanding with them.
+    /// See [`PageBuilder::open_tag`].
+    carried: Vec<CarriedTag>,
+    carried_refused: usize,
+    /// The next key an element carried over a page break takes.
+    next_carry: u64,
+    /// The catalog's `/Lang`. See [`DocumentBuilder::set_language`].
+    language: Option<String>,
+    /// The structure tree root's `/RoleMap` (14.7.3), custom type to the type
+    /// it stands for. See [`DocumentBuilder::map_role`].
+    role_map: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// Structure namespaces (ISO 32000-2 14.7.4), in the order they were
+    /// registered, which is the order `/Namespaces` lists them in. See
+    /// [`DocumentBuilder::add_namespace`].
+    namespaces: Vec<StructNamespace>,
+    /// The catalog's `/AF`. See [`DocumentBuilder::associate_file`].
+    associated: Vec<NewAssociatedFile>,
+    /// The structure tree root's `/AF`. See
+    /// [`DocumentBuilder::associate_file_with_structure`].
+    structure_associated: Vec<NewAssociatedFile>,
 }
 
 impl Default for DocumentBuilder {
@@ -2471,7 +5118,7 @@ impl DocumentBuilder {
             pages: Vec::new(),
             resources: ResourceSet::default(),
             groups: BTreeSet::new(),
-            composite: BTreeSet::new(),
+            composite: BTreeMap::new(),
             embedded: Vec::new(),
             cid_fonts: Vec::new(),
             drawn: BTreeMap::new(),
@@ -2479,9 +5126,392 @@ impl DocumentBuilder {
             embedded_whole: Vec::new(),
             info: Dict::new(),
             outline: Vec::new(),
+            destinations: BTreeMap::new(),
+            separations: BTreeMap::new(),
+            inks: BTreeMap::new(),
+            layers: Vec::new(),
+            version: WriteOptions::default().version,
             profile: None,
             refusals: Vec::new(),
+            serial: BuilderSerial::next(),
+            carried: Vec::new(),
+            carried_refused: 0,
+            next_carry: 0,
+            language: None,
+            role_map: BTreeMap::new(),
+            namespaces: Vec::new(),
+            associated: Vec::new(),
+            structure_associated: Vec::new(),
         }
+    }
+
+    /// Maps a structure type of the caller's own to the type it stands for,
+    /// in the structure tree root's `/RoleMap` (14.7.3).
+    ///
+    /// This is what lets a producer keep its own vocabulary — an EPUB's
+    /// `section` or `em` — and still say what each name *is* to a reader that
+    /// knows only the standard set: the element is written as `/S /section`
+    /// and read as a `/Sect`. A mapping may go through another custom type,
+    /// and ISO 14289-1 7.1 asks only that it end at a standard one.
+    ///
+    /// Returns false, mapping nothing, when the mapping would be one a reader
+    /// cannot use:
+    ///
+    /// - `custom` is itself one of [`STANDARD_STRUCTURE_TYPES`] — ISO 14289-1
+    ///   7.1: *"Standard tags defined in ISO 32000-1:2008, 14.8.4, shall not
+    ///   be remapped"*, and a `/P` that means something else is a paragraph
+    ///   to every reader that skips the map;
+    /// - either name is empty, or the two are the same name;
+    /// - `custom` is already mapped to something else — the first statement
+    ///   stands, and mapping it again to the same type is accepted;
+    /// - the mapping would close a loop, which a reader can only cut
+    ///   somewhere arbitrary (this crate's reports `RoleMapLoop`);
+    /// - [`crate::limits::MAX_DICT_ENTRIES`] types are mapped already — the
+    ///   most entries of one dictionary this crate's parser keeps, so a
+    ///   `/RoleMap` past it would be written and partly dropped on read, and
+    ///   an element of a dropped type would read as non-standard in a
+    ///   document claiming `/Marked true`.
+    ///
+    /// Written only when the document has a structure tree to hold it.
+    pub fn map_role(&mut self, custom: &[u8], standard: &[u8]) -> bool {
+        if custom.is_empty()
+            || standard.is_empty()
+            || custom == standard
+            || is_standard_structure_type(custom)
+        {
+            return false;
+        }
+        if let Some(existing) = self.role_map.get(custom) {
+            return existing == standard;
+        }
+        if self.role_map.len() >= crate::limits::MAX_DICT_ENTRIES {
+            return false;
+        }
+        // Follow the target's own mappings: a chain that comes back to
+        // `custom` is a loop. Bounded by the map's size, since an acyclic
+        // chain visits each entry once.
+        let mut at = standard;
+        for _ in 0..=self.role_map.len() {
+            if at == custom {
+                return false;
+            }
+            match self.role_map.get(at) {
+                Some(next) => at = next,
+                None => break,
+            }
+        }
+        self.role_map.insert(custom.to_vec(), standard.to_vec());
+        true
+    }
+
+    /// Registers a structure namespace (ISO 32000-2 14.7.4), named by `uri`,
+    /// for [`Tag::namespace`] to put elements in.
+    ///
+    /// A namespace says which vocabulary an element's type is from, so that
+    /// a producer's `section` and another's are not the same word by
+    /// accident, and gives that vocabulary its own role map
+    /// ([`DocumentBuilder::map_role_in`]). [`PDF_1_7_NAMESPACE`],
+    /// [`PDF_2_0_NAMESPACE`] and [`MATHML_NAMESPACE`] are the namespaces ISO
+    /// 32000-2 names; any other URI is a namespace of the caller's own.
+    ///
+    /// Written as a namespace dictionary (Table 356) listed in the structure
+    /// tree root's `/Namespaces` (Table 354), whether or not an element ends
+    /// up in it — the errata make every `/NS` an entry of that array, and a
+    /// namespace registered and unused costs one small object.
+    ///
+    /// The same URI twice is one namespace, and the second call hands back
+    /// the first's handle. Returns `None`, registering nothing, when:
+    ///
+    /// - the document declares a version before 2.0 — `/NS` and
+    ///   `/Namespaces` are PDF 2.0 keys, and a 1.7 reader is owed nothing it
+    ///   can read (see [`DocumentBuilder::with_version`]);
+    /// - `uri` is empty, which Table 356's required `/NS` cannot be;
+    /// - as many namespaces are registered as [`crate::limits::MAX_ARRAY_LEN`],
+    ///   the most `/Namespaces` entries this crate's reader keeps.
+    pub fn add_namespace(&mut self, uri: &str) -> Option<NamespaceId> {
+        if self.declared_version() < (2, 0) || uri.is_empty() {
+            return None;
+        }
+        let index = match self.namespaces.iter().position(|ns| ns.uri == uri) {
+            Some(at) => at,
+            None => {
+                if self.namespaces.len() >= crate::limits::MAX_ARRAY_LEN {
+                    return None;
+                }
+                self.namespaces.push(StructNamespace {
+                    uri: uri.to_owned(),
+                    role_map: BTreeMap::new(),
+                });
+                self.namespaces.len() - 1
+            }
+        };
+        Some(NamespaceId {
+            builder: self.serial,
+            index: u32::try_from(index).ok()?,
+        })
+    }
+
+    /// Associates `file` with the document as a whole: the catalog's `/AF`
+    /// (ISO 32000-2 14.13.1 as the approved errata quote it — *"an AF entry
+    /// that shall be an array of file specification dictionaries … that
+    /// contain an AFRelationship entry"*). Each call adds one, in order.
+    ///
+    /// Associated files are a PDF 2.0 feature that ISO 19005-3 carried on 1.7
+    /// first, and the Arlington model gives `/AF` both origins. So returns
+    /// false, adding nothing, when:
+    ///
+    /// - the document declares a version before 2.0 and is not written under
+    ///   ISO 19005-3 ([`ArchivalPart::Three`]);
+    /// - it is written under any other part, which records
+    ///   [`ArchivalRefusal::AssociatedFile`];
+    /// - [`NewAssociatedFile::is_writable`] refuses the file.
+    pub fn associate_file(&mut self, file: NewAssociatedFile) -> bool {
+        if !self.associated_files_allowed() {
+            if self.profile.is_some() {
+                self.refuse(ArchivalRefusal::AssociatedFile);
+            }
+            return false;
+        }
+        if !file.is_writable() {
+            return false;
+        }
+        self.associated.push(file);
+        true
+    }
+
+    /// Associates `file` with the document's logical structure as a whole:
+    /// the structure tree root's `/AF` (ISO 32000-2 14.13; the Arlington
+    /// model lists `StructTreeRoot` among `/AF`'s holders). Each call adds
+    /// one, in order.
+    ///
+    /// **Written only with the tree.** A document whose pages tag nothing has
+    /// no structure tree root, and writing one to hold these would claim a
+    /// logical structure the document does not have — `/MarkInfo /Marked
+    /// true` comes with the root — so the files are then not written at all.
+    /// Tag something, or associate the file with the document
+    /// ([`DocumentBuilder::associate_file`]).
+    ///
+    /// Returns false, adding nothing, where
+    /// [`DocumentBuilder::associate_file`] would, for the same reasons.
+    pub fn associate_file_with_structure(&mut self, file: NewAssociatedFile) -> bool {
+        if !self.associated_files_allowed() {
+            if self.profile.is_some() {
+                self.refuse(ArchivalRefusal::AssociatedFile);
+            }
+            return false;
+        }
+        if !file.is_writable() || self.structure_associated.len() >= crate::limits::MAX_ARRAY_LEN {
+            return false;
+        }
+        self.structure_associated.push(file);
+        true
+    }
+
+    /// Whether this document may carry associated files: one declaring 2.0
+    /// or later with no profile, or one under ISO 19005-3.
+    fn associated_files_allowed(&self) -> bool {
+        match &self.profile {
+            None => self.declared_version() >= (2, 0),
+            Some(profile) => profile.part == ArchivalPart::Three,
+        }
+    }
+
+    /// Writes one associated file — its embedded file stream, then its file
+    /// specification — and returns the specification, for an `/AF` array.
+    fn write_associated_file(&mut self, file: &NewAssociatedFile) -> ObjRef {
+        let version = self.declared_version();
+        let mut params = Dict::new();
+        params.insert(
+            self.names.intern(b"Size"),
+            Object::Int(i64::try_from(file.data.len()).unwrap_or(i64::MAX)),
+        );
+        params.insert(
+            self.names.intern(b"CheckSum"),
+            Object::String(PdfString::hex(
+                tinker_pdf_crypto::md5::md5(&file.data).to_vec(),
+            )),
+        );
+        let mut stream = Dict::new();
+        stream.insert(Name::TYPE, Object::Name(self.names.intern(b"EmbeddedFile")));
+        stream.insert(
+            self.names.intern(b"Subtype"),
+            Object::Name(self.names.intern(file.mime_type.as_bytes())),
+        );
+        stream.insert(self.names.intern(b"Params"), Object::Dict(params));
+        let stream_ref = self.allocate();
+        self.objects.insert_stream(
+            stream_ref.num,
+            StreamData {
+                dict: stream,
+                data: file.data.clone(),
+            },
+        );
+
+        let mut ef = Dict::new();
+        ef.insert(self.names.intern(b"F"), Object::Ref(stream_ref));
+        ef.insert(self.names.intern(b"UF"), Object::Ref(stream_ref));
+        let mut spec = Dict::new();
+        spec.insert(Name::TYPE, Object::Name(self.names.intern(b"Filespec")));
+        spec.insert(
+            self.names.intern(b"F"),
+            Object::String(PdfString::literal(byte_file_name(&file.filename))),
+        );
+        spec.insert(
+            self.names.intern(b"UF"),
+            Object::String(encode_text_string(&file.filename, version)),
+        );
+        if let Some(description) = &file.description {
+            spec.insert(
+                self.names.intern(b"Desc"),
+                Object::String(encode_text_string(description, version)),
+            );
+        }
+        spec.insert(self.names.intern(b"EF"), Object::Dict(ef));
+        spec.insert(
+            self.names.intern(b"AFRelationship"),
+            Object::Name(self.names.intern(file.relationship.name())),
+        );
+        let spec_ref = self.allocate();
+        self.objects.insert(spec_ref.num, Object::Dict(spec));
+        spec_ref
+    }
+
+    /// Writes `files` and returns the `/AF` array naming them.
+    fn write_associated_files(&mut self, files: &[NewAssociatedFile]) -> Object {
+        Object::Array(
+            files
+                .iter()
+                .map(|file| Object::Ref(self.write_associated_file(file)))
+                .collect(),
+        )
+    }
+
+    /// The index of a namespace this builder registered.
+    fn own_namespace(&self, namespace: NamespaceId) -> Option<usize> {
+        let index = namespace.index as usize;
+        (namespace.builder == self.serial && index < self.namespaces.len()).then_some(index)
+    }
+
+    /// Maps the type `custom` of `namespace` to the type `target` of
+    /// `target_namespace`, in `namespace`'s `/RoleMapNS` (ISO 32000-2 Table
+    /// 356) — the namespaced form of [`DocumentBuilder::map_role`], written as
+    /// the `[/target ns]` pair the errata's 14.8.6.2 EXAMPLE 1 shows.
+    ///
+    /// Returns false, mapping nothing, when the mapping is one a reader
+    /// cannot use or a conforming document may not contain:
+    ///
+    /// - either handle is from another builder, or either name is empty;
+    /// - the two namespaces are one — *"Within a given explicitly provided
+    ///   namespace, structure types shall not be role mapped to other
+    ///   structure types in the same namespace"*, as veraPDF's published rule
+    ///   8.2.4-3 quotes ISO 14289-2;
+    /// - `namespace` is a standard structure namespace and `target_namespace`
+    ///   is not — veraPDF's rule 8.2.4-4 permits mapping a standard type only
+    ///   *"to another standard namespace"*;
+    /// - `target_namespace` is [`PDF_1_7_NAMESPACE`] and `target` is not one
+    ///   of the [`STANDARD_STRUCTURE_TYPES`] that namespace defines;
+    /// - `custom` is already mapped in `namespace` to something else — the
+    ///   first statement stands, and the same mapping again is accepted;
+    /// - the mapping would close a loop through any namespace's map;
+    /// - `namespace`'s map holds [`crate::limits::MAX_DICT_ENTRIES`] types
+    ///   already, the most entries of one dictionary this crate's parser
+    ///   keeps — [`DocumentBuilder::map_role`]'s reason.
+    pub fn map_role_in(
+        &mut self,
+        namespace: NamespaceId,
+        custom: &[u8],
+        target: &[u8],
+        target_namespace: NamespaceId,
+    ) -> bool {
+        let (Some(from), Some(to)) = (
+            self.own_namespace(namespace),
+            self.own_namespace(target_namespace),
+        ) else {
+            return false;
+        };
+        if custom.is_empty() || target.is_empty() || from == to {
+            return false;
+        }
+        let standard = |at: usize| is_standard_namespace(&self.namespaces[at].uri);
+        if standard(from) && !standard(to) {
+            return false;
+        }
+        if self.namespaces[to].uri == PDF_1_7_NAMESPACE && !is_standard_structure_type(target) {
+            return false;
+        }
+        let Ok(to_index) = u32::try_from(to) else {
+            return false;
+        };
+        if let Some(existing) = self.namespaces[from].role_map.get(custom) {
+            return existing.0 == target && existing.1 == to_index;
+        }
+        if self.namespaces[from].role_map.len() >= crate::limits::MAX_DICT_ENTRIES {
+            return false;
+        }
+        // Follow the target's own mappings, across namespaces: one that comes
+        // back to `custom` in `namespace` is a loop. Bounded by the number of
+        // entries in every map, since an acyclic chain visits each once.
+        let entries: usize = self.namespaces.iter().map(|ns| ns.role_map.len()).sum();
+        let mut at = (target, to);
+        for _ in 0..=entries {
+            if at.0 == custom && at.1 == from {
+                return false;
+            }
+            match self.namespaces[at.1].role_map.get(at.0) {
+                Some((next, ns)) => at = (next.as_slice(), *ns as usize),
+                None => break,
+            }
+        }
+        self.namespaces[from]
+            .role_map
+            .insert(custom.to_vec(), (target.to_vec(), to_index));
+        true
+    }
+
+    /// The document's natural language, written as the catalog's `/Lang`
+    /// (14.9.2.3 in ISO 32000-1's numbering): the language of every piece of
+    /// text that no structure element or marked-content sequence states one
+    /// for.
+    ///
+    /// A language tag, or the empty string for a language that is not known —
+    /// see [`is_language_tag`]. It is the caller's statement and is written as
+    /// given. Under an [`ArchivalProfile`] that states its own language, the
+    /// profile's is written instead, since that is the one its level A claim
+    /// was checked against.
+    pub fn set_language(&mut self, language: &str) {
+        self.language = Some(language.to_owned());
+    }
+
+    /// An empty document whose header declares PDF `major.minor` (7.5.2).
+    ///
+    /// [`DocumentBuilder::new`] declares the writer's default, 1.7. The
+    /// version is fixed here rather than settable later because it decides how
+    /// text is encoded (7.9.2.2): a document declaring 2.0 or later may carry
+    /// a text string as UTF-8, and one declaring less may not, so an `/Info`
+    /// entry set before a change of version would be encoded for the wrong
+    /// one.
+    ///
+    /// Declaring a version is not conforming to it. Nothing this builder
+    /// writes is refused by 2.0, but 2.0 deprecates some of it — `/Info`
+    /// beyond the two dates (14.3.3), an unembedded standard font (9.6.2.2)
+    /// — and those are still written when asked for.
+    ///
+    /// An [`ArchivalProfile`] decides the version itself, because each part
+    /// of ISO 19005 names one; [`DocumentBuilder::archival`] ignores this.
+    #[must_use]
+    pub fn with_version(major: u8, minor: u8) -> DocumentBuilder {
+        DocumentBuilder {
+            version: (major, minor),
+            ..DocumentBuilder::new()
+        }
+    }
+
+    /// The version the header will declare: the profile's part's, or the one
+    /// this builder was made with.
+    fn declared_version(&self) -> (u8, u8) {
+        self.profile
+            .as_ref()
+            .map_or(self.version, |profile| profile.part.version())
     }
 
     fn allocate(&mut self) -> ObjRef {
@@ -2659,10 +5689,15 @@ impl DocumentBuilder {
 
     /// Registers a **composite** font, embedding its program (9.7).
     ///
-    /// A Type0 font over a CIDFontType2 descendant, with `/Encoding
-    /// /Identity-H` and `/CIDToGIDMap /Identity` — which together make the
-    /// two-byte code in a string the CID and the CID the glyph index, so
-    /// [`PageBuilder::glyphs`] can address a glyph directly. That is the whole
+    /// A Type0 font with `/Encoding /Identity-H`, which makes the two-byte code
+    /// in a string the CID. Over a TrueType program the descendant is a
+    /// CIDFontType2 with `/CIDToGIDMap /Identity`, which makes the CID the
+    /// glyph index; over a CFF — bare, or the `CFF ` table of an OpenType
+    /// face — it is a CIDFontType0, which reads the CID as the glyph index
+    /// when the program is not CID-keyed and through its charset when it is
+    /// (9.7.4.2), and then the code each glyph is written as is the CID its
+    /// charset gives it. Either way [`PageBuilder::glyphs`] addresses a glyph
+    /// by its index and the font says which code that is. That is the whole
     /// difference from [`DocumentBuilder::add_embedded_font`], and it is not a
     /// convenience: a simple font with `/WinAnsiEncoding` has no way to name a
     /// glyph the font's `cmap` does not reach from a character, and no way at
@@ -2674,21 +5709,17 @@ impl DocumentBuilder {
     /// drawing.
     ///
     /// Returns false when the bytes are not a font this can read, for
-    /// [`DocumentBuilder::add_embedded_font`]'s reason.
+    /// [`DocumentBuilder::add_embedded_font`]'s reason, and for a CID-keyed
+    /// CFF whose charset is not one-to-one: a glyph whose CID another glyph
+    /// also claims is one no code reaches.
     pub fn add_cid_font(&mut self, resource: &[u8], base_font: &[u8], program: &[u8]) -> bool {
-        // A **CID-keyed** bare CFF is refused rather than embedded. Its
-        // charset maps a CID onto a glyph, and the two are different numbers;
-        // `PageBuilder::glyphs` addresses glyphs, and `/Identity-H` would make
-        // every one of those numbers a CID. Accepting it would silently draw
-        // whichever glyph the charset happened to put at that CID — the
-        // failure this whole path exists to prevent (9.7.4.2).
-        match FontProgram::parse(program) {
-            None => return false,
-            Some(kind) if kind.is_cid_keyed() && !matches!(kind, FontProgram::OpenType(_, _)) => {
-                return false
-            }
-            Some(_) => {}
-        }
+        // The codes are worked out now, from the charset, so that a page —
+        // which never sees the program — writes the CID a glyph answers to
+        // rather than its index. Until October 2026 a CID-keyed CFF was
+        // refused here instead, because the index was all a page could write.
+        let Some(codes) = FontProgram::parse(program).and_then(|kind| kind.codes()) else {
+            return false;
+        };
 
         let file_ref = self.allocate();
         let descriptor_ref = self.allocate();
@@ -2707,7 +5738,7 @@ impl DocumentBuilder {
             to_unicode_ref,
         });
         self.resources.fonts.push((resource.to_vec(), font_ref));
-        self.composite.insert(resource.to_vec());
+        self.composite.insert(resource.to_vec(), codes);
         true
     }
 
@@ -2753,7 +5784,10 @@ impl DocumentBuilder {
         matrix: [f64; 6],
         glyphs: &[PlacedGlyph<'_>],
     ) -> bool {
-        if !self.composite.contains(font) || glyphs.is_empty() {
+        let Some(codes) = self.composite.get(font).cloned() else {
+            return false;
+        };
+        if glyphs.is_empty() {
             return false;
         }
         if !size.is_finite() || size <= 0.0 || !matrix.iter().all(|v| v.is_finite()) {
@@ -2773,11 +5807,13 @@ impl DocumentBuilder {
             .find(|f| f.resource == font)
             .map(|f| f.program.clone());
         let kind = program.as_deref().and_then(FontProgram::parse);
-        let advance = |id: u16| -> f64 {
+        // By code, as `/W` is: the width of the glyph the code selects, which
+        // for a glyph a CID-keyed font does not carry is `.notdef`'s.
+        let advance = |code: u16| -> f64 {
             // 9.7.4.3: a CID with no `/W` entry takes `/DW`, which this writer
             // states as 1000 — one em.
             kind.as_ref()
-                .and_then(|kind| kind.width(id))
+                .and_then(|kind| kind.width(kind.glyph_for_code(code)))
                 .map_or(1.0, |width| width.round() / 1000.0)
         };
 
@@ -2789,8 +5825,8 @@ impl DocumentBuilder {
             }
         }
 
-        out.extend_from_slice(b"BT /");
-        out.extend_from_slice(font);
+        out.extend_from_slice(b"BT ");
+        crate::write::write_name(out, font);
         out.extend_from_slice(format!(" {} Tf ", number(size)).as_bytes());
         for value in matrix {
             out.extend_from_slice(number(value).as_bytes());
@@ -2833,8 +5869,9 @@ impl DocumentBuilder {
                 out.extend_from_slice(number(adjust).as_bytes());
                 out.push(b' ');
             }
-            out.extend_from_slice(format!("<{:04X}>", placed.glyph.id).as_bytes());
-            pen = placed.x + advance(placed.glyph.id) * size;
+            let code = codes.code(placed.glyph.id);
+            out.extend_from_slice(format!("<{code:04X}>").as_bytes());
+            pen = placed.x + advance(code) * size;
         }
         close_array(out, &mut open);
         if rise != 0.0 {
@@ -2968,8 +6005,43 @@ impl DocumentBuilder {
     ///
     /// Returns false for a degenerate `/BBox` or a non-finite `/Matrix`.
     pub fn add_form(&mut self, resource: &[u8], form: &FormXObject<'_>) -> bool {
+        self.add_form_with_files(resource, form, &[])
+    }
+
+    /// [`DocumentBuilder::add_form`], with `files` associated with the form:
+    /// its `/AF` (ISO 32000-2 14.13; the Arlington model lists the form
+    /// XObject among `/AF`'s holders), each written once, in order. No files
+    /// is `add_form` exactly.
+    ///
+    /// Refuses everything `add_form` refuses, and — registering nothing,
+    /// because a form registered without the files the caller asked for is
+    /// not the form they asked for — files in a document that may not carry
+    /// associated files, for [`DocumentBuilder::associate_file`]'s reasons
+    /// (under a profile that refuses them, recorded as
+    /// [`ArchivalRefusal::AssociatedFile`]), a file
+    /// [`NewAssociatedFile::is_writable`] refuses, or more files than
+    /// [`crate::limits::MAX_ARRAY_LEN`].
+    pub fn add_form_with_files(
+        &mut self,
+        resource: &[u8],
+        form: &FormXObject<'_>,
+        files: &[NewAssociatedFile],
+    ) -> bool {
         if !is_box(&form.bbox) {
             return false;
+        }
+        if !files.is_empty() {
+            if !self.associated_files_allowed() {
+                if self.profile.is_some() {
+                    self.refuse(ArchivalRefusal::AssociatedFile);
+                }
+                return false;
+            }
+            if files.len() > crate::limits::MAX_ARRAY_LEN
+                || !files.iter().all(NewAssociatedFile::is_writable)
+            {
+                return false;
+            }
         }
         // ISO 19005-1 6.4: a transparency group is transparency, and part 1
         // has none. The form itself is unobjectionable, so only the `/Group`
@@ -3025,6 +6097,12 @@ impl DocumentBuilder {
         }
         let resources = self.resources.dict(&self.names);
         dict.insert(Name::RESOURCES, Object::Dict(resources));
+        // ISO 32000-2 14.13: the files associated with the form, written
+        // before it and only when there are some.
+        if !files.is_empty() {
+            let af = self.write_associated_files(files);
+            dict.insert(self.names.intern(b"AF"), af);
+        }
 
         let reference = self.allocate();
         self.objects.insert_stream(
@@ -3134,7 +6212,7 @@ impl DocumentBuilder {
             }
         };
 
-        if !function.is_valid(space.components() as usize) {
+        if !function.is_valid(1, space.components() as usize) {
             return None;
         }
 
@@ -3277,7 +6355,288 @@ impl DocumentBuilder {
         self.resources
             .icc_channels
             .insert(resource.to_vec(), components);
+        // The name now means this space; a tint or CIE space registered
+        // under it earlier no longer does.
+        self.resources.tints.remove(resource);
+        self.resources.cie.remove(resource);
+        self.separations.remove(resource);
         true
+    }
+
+    /// Registers a CIE-based colour space — `/CalGray`, `/CalRGB` or `/Lab`
+    /// (8.6.5.2–8.6.5.4) — under a resource name.
+    ///
+    /// The space is `[/CalGray dict]`, `[/CalRGB dict]` or `[/Lab dict]`,
+    /// written as an indirect array so one space serves every page and image
+    /// that names it, as [`DocumentBuilder::add_icc_color_space`]'s does. The
+    /// dictionary carries `/WhitePoint` always and each other parameter only
+    /// where it differs from Tables 63–65's default. A page names it with
+    /// [`PageBuilder::set_fill_cie`] and [`PageBuilder::set_stroke_cie`], and
+    /// an image with [`ImageColorSpace::Cie`].
+    ///
+    /// A CIE-based space is device-independent, so no [`ArchivalProfile`]
+    /// refuses one: 6.2.3.3's question is about device colour.
+    ///
+    /// Returns false, registering nothing, for parameters
+    /// [`CieSpace::is_valid`] refuses.
+    pub fn add_cie_color_space(&mut self, resource: &[u8], space: &CieSpace) -> bool {
+        if !space.is_valid() {
+            return false;
+        }
+        let numbers =
+            |values: &[f64]| Object::Array(values.iter().map(|v| Object::Real(*v)).collect());
+        let mut dict = Dict::new();
+        let (family, white, black): (&[u8], &[f64; 3], &[f64; 3]) = match space {
+            CieSpace::CalGray { white, black, .. } => (b"CalGray", white, black),
+            CieSpace::CalRgb { white, black, .. } => (b"CalRGB", white, black),
+            CieSpace::Lab { white, black, .. } => (b"Lab", white, black),
+        };
+        dict.insert(self.names.intern(b"WhitePoint"), numbers(white));
+        if black.iter().any(|v| *v != 0.0) {
+            dict.insert(self.names.intern(b"BlackPoint"), numbers(black));
+        }
+        match space {
+            CieSpace::CalGray { gamma, .. } => {
+                if *gamma != 1.0 {
+                    dict.insert(self.names.intern(b"Gamma"), Object::Real(*gamma));
+                }
+            }
+            CieSpace::CalRgb { gamma, matrix, .. } => {
+                if *gamma != [1.0; 3] {
+                    dict.insert(self.names.intern(b"Gamma"), numbers(gamma));
+                }
+                if *matrix != [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] {
+                    dict.insert(self.names.intern(b"Matrix"), numbers(matrix));
+                }
+            }
+            CieSpace::Lab { range, .. } => {
+                if *range != [-100.0, 100.0, -100.0, 100.0] {
+                    dict.insert(self.names.intern(b"Range"), numbers(range));
+                }
+            }
+        }
+        let reference = self.allocate();
+        self.objects.insert(
+            reference.num,
+            Object::Array(vec![
+                Object::Name(self.names.intern(family)),
+                Object::Dict(dict),
+            ]),
+        );
+        self.resources
+            .color_spaces
+            .push((resource.to_vec(), reference));
+        self.resources.cie.insert(resource.to_vec(), *space);
+        // The name now means this space and nothing registered before it.
+        self.resources.icc_channels.remove(resource);
+        self.resources.tints.remove(resource);
+        self.separations.remove(resource);
+        true
+    }
+
+    /// Registers a `/Separation` colour space under a resource name
+    /// (8.6.6.4): one colorant, `colorant`, whose tint is turned into a colour
+    /// in `alternate` by `tint`.
+    ///
+    /// The space is `[/Separation /colorant /Alternate tint]`, written as an
+    /// indirect array so one space serves every page and every image that
+    /// names it; the tint transform is written as its own object. A
+    /// [`Function::Exponential`] from `[0 1]` is the ordinary transform — at
+    /// tint 0 its `c0` (no ink), at tint 1 its `c1` (the ink at full
+    /// strength) — and any one-input function is accepted.
+    ///
+    /// `/All` and `/None` are 8.6.6.4's two special colorant names and are
+    /// written like any other: marking every separation, and marking none.
+    ///
+    /// **Refused under an [`ArchivalProfile`]** whose destination profile does
+    /// not admit `alternate`: the alternate is what a reader without the ink
+    /// paints, which makes it a device colour in 6.2.3.3's sense. Under parts
+    /// 2 to 4 it is refused too when a `/Separation` for the same colorant was
+    /// written before with another alternate or another transform, with
+    /// [`ArchivalRefusal::InconsistentSeparation`]: ISO 19005-2 6.2.4.4 makes
+    /// every `/Separation` array of one name in a file agree on both,
+    /// compared as the objects written — so the same ramp spelled the same
+    /// way is admitted under any resource name, and re-registering a name with
+    /// a different one is not, since a page begun before still draws with the
+    /// first.
+    ///
+    /// Returns false, registering nothing, for an empty colorant name, a
+    /// transform that is not a function of one input producing one value per
+    /// `alternate` component, or the archival refusals above.
+    pub fn add_separation_color_space(
+        &mut self,
+        resource: &[u8],
+        colorant: &[u8],
+        alternate: DeviceSpace,
+        tint: &Function,
+    ) -> bool {
+        if colorant.is_empty() || !tint.is_valid(1, alternate.components() as usize) {
+            return false;
+        }
+        if !DocumentBuilder::admits_device_space(self.profile.as_ref(), alternate) {
+            self.refuse(ArchivalRefusal::DeviceColour { space: alternate });
+            return false;
+        }
+        // 6.2.4.4 compares the PDF objects. Two `Function` values that are
+        // equal are written as the same object, and two that differ are not
+        // (`write_function` is a pure function of the value).
+        let disagrees = self
+            .inks
+            .get(colorant)
+            .is_some_and(|(space, transform)| *space != alternate || transform != tint);
+        if disagrees && self.binds_spot_rules() {
+            self.refuse(ArchivalRefusal::InconsistentSeparation {
+                colorant: colorant.to_vec(),
+            });
+            return false;
+        }
+        self.inks
+            .entry(colorant.to_vec())
+            .or_insert_with(|| (alternate, tint.clone()));
+        let function = self.write_function(tint);
+        let space = self.allocate();
+        self.objects.insert(
+            space.num,
+            Object::Array(vec![
+                Object::Name(self.names.intern(b"Separation")),
+                Object::Name(self.names.intern(colorant)),
+                Object::Name(self.names.intern(alternate.pdf_name())),
+                Object::Ref(function),
+            ]),
+        );
+        self.register_tint_space(resource, space, 1);
+        self.separations
+            .insert(resource.to_vec(), (colorant.to_vec(), space));
+        true
+    }
+
+    /// Registers a `/DeviceN` colour space under a resource name (8.6.6.5):
+    /// `colorants.len()` colorants, whose tints `tint` turns into a colour in
+    /// `alternate`.
+    ///
+    /// The space is `[/DeviceN [/c1 … /cn] /Alternate tint attributes?]`,
+    /// written as an indirect array. `tint` takes one input per colorant, in
+    /// the order `colorants` names them, and produces one value per
+    /// `alternate` component — which only [`Function::Calculator`] can, of the
+    /// types this writer emits. `attributes`, when given, writes Table 71's
+    /// `/Colorants` dictionary from `/Separation` spaces registered earlier
+    /// with [`DocumentBuilder::add_separation_color_space`], each under its
+    /// own colorant name, so a reader that renders one ink alone knows what
+    /// that ink looks like.
+    ///
+    /// Refused under an [`ArchivalProfile`] on
+    /// [`DocumentBuilder::add_separation_color_space`]'s terms, and under
+    /// parts 2 to 4 also when a spot colour the space names has no entry in
+    /// `attributes`' `/Colorants`, with
+    /// [`ArchivalRefusal::UndescribedColorant`] (ISO 19005-2 6.2.4.4). A spot
+    /// colour is any colorant but `/None` and DeviceCMYK's four process
+    /// colorants, `/Cyan`, `/Magenta`, `/Yellow` and `/Black`, so a space of
+    /// spot inks needs `attributes`, and one of process inks does not.
+    ///
+    /// Returns false, registering nothing, for no colorants or more than 32
+    /// (Annex C's limit, and so what a reader is entitled to stop at), an
+    /// empty colorant name, `/All` (8.6.6.5 reserves it for `/Separation`), a
+    /// name given twice
+    /// (8.6.6.5 allows only `/None` to repeat), a transform that does not map
+    /// `colorants.len()` inputs to the alternate's components, an attribute
+    /// naming a resource that is not a registered `/Separation`, or the
+    /// archival refusal.
+    pub fn add_device_n_color_space(
+        &mut self,
+        resource: &[u8],
+        colorants: &[&[u8]],
+        alternate: DeviceSpace,
+        tint: &Function,
+        attributes: Option<&DeviceNAttributes<'_>>,
+    ) -> bool {
+        if colorants.is_empty() || colorants.len() > MAX_DEVICE_N_COLORANTS {
+            return false;
+        }
+        let mut seen = BTreeSet::new();
+        for colorant in colorants {
+            if colorant.is_empty()
+                || *colorant == b"All"
+                || (*colorant != b"None" && !seen.insert(*colorant))
+            {
+                return false;
+            }
+        }
+        if !tint.is_valid(colorants.len(), alternate.components() as usize) {
+            return false;
+        }
+        let mut described = Vec::new();
+        if let Some(attributes) = attributes {
+            for named in attributes.colorants {
+                let Some((colorant, space)) = self.separations.get(*named) else {
+                    return false;
+                };
+                described.push((colorant.clone(), *space));
+            }
+        }
+        if !DocumentBuilder::admits_device_space(self.profile.as_ref(), alternate) {
+            self.refuse(ArchivalRefusal::DeviceColour { space: alternate });
+            return false;
+        }
+        if self.binds_spot_rules() {
+            let undescribed = colorants.iter().find(|colorant| {
+                **colorant != b"None"
+                    && !PROCESS_COLORANTS.contains(*colorant)
+                    && !described.iter().any(|(name, _)| name == *colorant)
+            });
+            if let Some(colorant) = undescribed {
+                self.refuse(ArchivalRefusal::UndescribedColorant {
+                    colorant: colorant.to_vec(),
+                });
+                return false;
+            }
+        }
+
+        let function = self.write_function(tint);
+        let mut space = vec![
+            Object::Name(self.names.intern(b"DeviceN")),
+            Object::Array(
+                colorants
+                    .iter()
+                    .map(|colorant| Object::Name(self.names.intern(colorant)))
+                    .collect(),
+            ),
+            Object::Name(self.names.intern(alternate.pdf_name())),
+            Object::Ref(function),
+        ];
+        if attributes.is_some() {
+            let mut table = Dict::new();
+            for (colorant, reference) in described {
+                table.insert(self.names.intern(&colorant), Object::Ref(reference));
+            }
+            let mut dict = Dict::new();
+            dict.insert(self.names.intern(b"Colorants"), Object::Dict(table));
+            space.push(Object::Dict(dict));
+        }
+        let reference = self.allocate();
+        self.objects.insert(reference.num, Object::Array(space));
+        self.register_tint_space(resource, reference, colorants.len());
+        self.separations.remove(resource);
+        true
+    }
+
+    /// Puts a `/Separation` or `/DeviceN` space into `/ColorSpace` under
+    /// `resource`, with how many tints it takes.
+    fn register_tint_space(&mut self, resource: &[u8], space: ObjRef, components: usize) {
+        self.resources.color_spaces.push((resource.to_vec(), space));
+        self.resources.tints.insert(resource.to_vec(), components);
+        self.resources.icc_channels.remove(resource);
+        self.resources.cie.remove(resource);
+    }
+
+    /// The indirect colour space registered under `resource`, the latest
+    /// registration winning as it does in `/Resources`.
+    fn color_space_ref(&self, resource: &[u8]) -> Option<ObjRef> {
+        self.resources
+            .color_spaces
+            .iter()
+            .rev()
+            .find(|(name, _)| name == resource)
+            .map(|(_, reference)| *reference)
     }
 
     /// Writes a function as an indirect object, returning its reference.
@@ -3335,6 +6694,61 @@ impl DocumentBuilder {
                             .collect(),
                     ),
                 );
+            }
+            Function::Sampled {
+                domain,
+                range,
+                size,
+                samples,
+            } => {
+                // 7.10.2: a type 0 function is a **stream**, its samples the
+                // stream's data.
+                let pairs = |values: &[[f64; 2]]| {
+                    Object::Array(
+                        values
+                            .iter()
+                            .flat_map(|pair| [Object::Real(pair[0]), Object::Real(pair[1])])
+                            .collect(),
+                    )
+                };
+                dict.insert(self.names.intern(b"FunctionType"), Object::Int(0));
+                dict.insert(self.names.intern(b"Domain"), pairs(domain));
+                dict.insert(self.names.intern(b"Range"), pairs(range));
+                dict.insert(
+                    self.names.intern(b"Size"),
+                    Object::Array(size.iter().map(|n| Object::Int(i64::from(*n))).collect()),
+                );
+                dict.insert(self.names.intern(b"BitsPerSample"), Object::Int(16));
+                let data: Vec<u8> = samples.iter().flat_map(|s| s.to_be_bytes()).collect();
+                let reference = self.allocate();
+                self.objects
+                    .insert_stream(reference.num, StreamData { dict, data });
+                return reference;
+            }
+            Function::Calculator {
+                domain,
+                range,
+                program,
+            } => {
+                // 7.10.5: a type 4 function is a **stream**, its program the
+                // stream's data.
+                let pairs = |values: &[[f64; 2]]| {
+                    Object::Array(
+                        values
+                            .iter()
+                            .flat_map(|pair| [Object::Real(pair[0]), Object::Real(pair[1])])
+                            .collect(),
+                    )
+                };
+                dict.insert(self.names.intern(b"FunctionType"), Object::Int(4));
+                dict.insert(self.names.intern(b"Domain"), pairs(domain));
+                dict.insert(self.names.intern(b"Range"), pairs(range));
+                let mut data = Vec::new();
+                calculator_text(program, &mut data);
+                let reference = self.allocate();
+                self.objects
+                    .insert_stream(reference.num, StreamData { dict, data });
+                return reference;
             }
         }
 
@@ -3595,6 +7009,21 @@ impl DocumentBuilder {
         let Some(kind) = FontProgram::parse(&font.program) else {
             return;
         };
+        let Some(codes) = kind.codes() else {
+            return;
+        };
+        // `/W` and `/ToUnicode` are functions of the **code**, and `drawn` is
+        // keyed by glyph. The two are one number except under a CID-keyed
+        // CFF, whose charset maps each glyph to its own CID; there the record
+        // is rekeyed here, under the first-non-empty-text rule `drawn` was
+        // gathered by, so the merge cannot depend on which number it ran on.
+        let mut by_code: BTreeMap<u16, String> = BTreeMap::new();
+        for (glyph, text) in mapping {
+            let entry = by_code.entry(codes.code(*glyph)).or_default();
+            if entry.is_empty() && !text.is_empty() {
+                entry.clone_from(text);
+            }
+        }
 
         let (file_key, file_subtype) = kind.file_entry(true);
         let mut file_dict = Dict::new();
@@ -3686,7 +7115,7 @@ impl DocumentBuilder {
         // so the absence of a `/W` entry has a stated answer rather than one a
         // reader has to know the default of.
         descendant.insert(self.names.intern(b"DW"), Object::Int(1000));
-        if let Some(widths) = width_array(&kind, mapping.keys().copied()) {
+        if let Some(widths) = width_array(&kind, by_code.keys().copied()) {
             descendant.insert(self.names.intern(b"W"), Object::Array(widths));
         }
         // 9.7.4.2: `/Identity` makes the CID the glyph index. This is the
@@ -3726,7 +7155,7 @@ impl DocumentBuilder {
         // No `/ToUnicode` at all when no glyph stood for anything: 9.10.3's
         // CMap grammar has no zero-entry `beginbfchar` section, so the only
         // alternatives are a stream that says something and no stream.
-        if let Some(cmap) = to_unicode_cmap(mapping) {
+        if let Some(cmap) = to_unicode_cmap(&by_code) {
             self.objects.insert_stream(
                 font.to_unicode_ref.num,
                 StreamData {
@@ -3895,6 +7324,14 @@ impl DocumentBuilder {
             }
         }
 
+        // Table 89: a `/JPXDecode` image states neither its depth nor its
+        // space, so a colour-key mask would be ranges over samples of a width
+        // the dictionary does not say. Refused rather than written.
+        let jpx = image.filter == Some(ImageFilter::Jpx);
+        if jpx && image.color_key_mask.is_some() {
+            return None;
+        }
+
         if let Some(ranges) = image.color_key_mask {
             // 8.9.6.4: 2 x n integers, "each in the range 0 to
             // 2^BitsPerComponent - 1", and a min above its max names an empty
@@ -3931,18 +7368,83 @@ impl DocumentBuilder {
             self.names.intern(b"Height"),
             Object::Int(i64::from(image.height)),
         );
+        // `ImageFilter::Jpx` says why these two are not written for it: the
+        // codestream states both, and a `/ColorSpace` here would override it.
+        if jpx {
+            self.insert_filter(dict, ImageFilter::Jpx);
+            return self.soft_mask_then_data(dict, image);
+        }
         dict.insert(
             self.names.intern(b"BitsPerComponent"),
             Object::Int(i64::from(image.bits_per_component)),
         );
+        // A registered space is written as a **reference to its own array**,
+        // so one profile or one tint transform serves every image and page
+        // that names it. Not as the resource name: Table 89's `/ColorSpace`
+        // is a colour space, and only a content stream's `cs` looks a name up
+        // in `/Resources` (8.6.3) — an image XObject naming `/CS0` names a
+        // space no reader is obliged to find, and until September 2026 this
+        // repository's own reader did not find it and drew the samples as
+        // grey. Checked here, before the soft mask below writes anything.
+        let registered = match image.color_space {
+            ImageColorSpace::Icc {
+                resource,
+                components,
+            } => {
+                if self.resources.icc_channels.get(resource) != Some(&components) {
+                    return None;
+                }
+                Some(self.color_space_ref(resource)?)
+            }
+            ImageColorSpace::Tint {
+                resource,
+                components,
+            } => {
+                if self.resources.tints.get(resource) != Some(&usize::from(components)) {
+                    return None;
+                }
+                Some(self.color_space_ref(resource)?)
+            }
+            ImageColorSpace::Cie {
+                resource,
+                components,
+            } => {
+                let space = self.resources.cie.get(resource)?;
+                if space.components() != usize::from(components) {
+                    return None;
+                }
+                Some(self.color_space_ref(resource)?)
+            }
+            _ => None,
+        };
         let space = match image.color_space {
             ImageColorSpace::DeviceGray => Object::Name(self.names.intern(b"DeviceGray")),
             ImageColorSpace::DeviceRgb => Object::Name(self.names.intern(b"DeviceRGB")),
             ImageColorSpace::DeviceCmyk => Object::Name(self.names.intern(b"DeviceCMYK")),
-            // 8.9.5.4: a name, resolved through the page's `/Resources
-            // /ColorSpace`. Written as a bare name rather than as the array
-            // itself so one profile stream serves every image that names it.
-            ImageColorSpace::Icc { resource, .. } => Object::Name(self.names.intern(resource)),
+            // `registered` is never `None` here: both arms above returned
+            // `None` or set it.
+            ImageColorSpace::Icc { .. }
+            | ImageColorSpace::Tint { .. }
+            | ImageColorSpace::Cie { .. } => Object::Ref(registered?),
+            ImageColorSpace::Lab => {
+                let step = 256.0 / f64::from(1u32 << image.bits_per_component.clamp(1, 16));
+                let numbers = |values: &[f64]| {
+                    Object::Array(values.iter().map(|v| Object::Real(*v)).collect())
+                };
+                let mut dict = Dict::new();
+                dict.insert(
+                    self.names.intern(b"WhitePoint"),
+                    numbers(&[0.9642, 1.0, 0.8249]),
+                );
+                dict.insert(
+                    self.names.intern(b"Range"),
+                    numbers(&[-128.0, 128.0 - step, -128.0, 128.0 - step]),
+                );
+                Object::Array(vec![
+                    Object::Name(self.names.intern(b"Lab")),
+                    Object::Dict(dict),
+                ])
+            }
             ImageColorSpace::Indexed { base, lookup } => Object::Array(vec![
                 Object::Name(self.names.intern(b"Indexed")),
                 Object::Name(self.names.intern(base.pdf_name())),
@@ -3970,6 +7472,16 @@ impl DocumentBuilder {
                 ),
             );
         }
+        self.soft_mask_then_data(dict, image)
+    }
+
+    /// The `/SMask`, if any, then the image's own bytes — the tail every
+    /// compressed image shares, `/JPXDecode` included.
+    fn soft_mask_then_data(
+        &mut self,
+        dict: &mut Dict,
+        image: &CompressedImage<'_>,
+    ) -> Option<Vec<u8>> {
         if let Some(mask) = &image.soft_mask {
             let reference = self.allocate();
             let mut md = Dict::new();
@@ -4023,6 +7535,7 @@ impl DocumentBuilder {
             | ImageFilter::FlateTiffPredictor { .. } => b"FlateDecode",
             ImageFilter::Lzw | ImageFilter::LzwTiffPredictor { .. } => b"LZWDecode",
             ImageFilter::CcittFax(_) => b"CCITTFaxDecode",
+            ImageFilter::Jpx => b"JPXDecode",
         };
         dict.insert(Name::FILTER, Object::Name(self.names.intern(name)));
 
@@ -4128,7 +7641,7 @@ impl DocumentBuilder {
     /// handle.
     #[must_use]
     pub fn begin_page(&self, width: f64, height: f64) -> PageBuilder {
-        PageBuilder {
+        let mut page = PageBuilder {
             width,
             height,
             content: Vec::new(),
@@ -4144,9 +7657,21 @@ impl DocumentBuilder {
             tag_stack: Vec::new(),
             opened: None,
             opened_end: 0,
+            refused_opens: 0,
+            floor: (0, 0),
             archival_space: self.profile.as_ref().map(|p| p.destination_space),
             refusals: Vec::new(),
-        }
+            optional_depth: 0,
+            builder: self.serial,
+            page_intents: self.declared_version() >= (2, 0) && self.profile.is_none(),
+            output_intents: Vec::new(),
+            associated_allowed: self.associated_files_allowed(),
+            associated: Vec::new(),
+            marked_files: Vec::new(),
+            next_marked_file: 0,
+        };
+        page.reopen(&self.carried, self.carried_refused);
+        page
     }
 
     /// Adds a page the caller has finished drawing.
@@ -4163,10 +7688,22 @@ impl DocumentBuilder {
     /// written with the names it was drawn with.
     pub fn push_page(&mut self, mut page: PageBuilder) {
         self.refusals.append(&mut page.refusals);
+        // Structure elements still open are closed on this page and carried
+        // to the next one begun; see `PageBuilder::open_tag`.
+        let (carried, refused) = page.carry_over(&mut self.next_carry);
+        self.carried = carried;
+        self.carried_refused = refused;
         self.pages.push(page);
     }
 
     /// Sets an `/Info` field.
+    ///
+    /// The value is a text string (14.3.3 Table 349), written by
+    /// [`crate::text_string::encode_text_string`] for the version this
+    /// document declares, so it reads back through
+    /// [`crate::outline::metadata`] as the text it was given. It used to be
+    /// written as its UTF-8 bytes with no byte-order mark, which every reader
+    /// decodes as PDFDocEncoding: "Ä" came back as "Ã—".
     ///
     /// **Under a part 4 [`ArchivalProfile`]** ISO 19005-4 6.1.3 admits a
     /// document information dictionary only where a `/PieceInfo` justifies it,
@@ -4199,10 +7736,8 @@ impl DocumentBuilder {
             return false;
         }
         let name = self.names.intern(key);
-        self.info.insert(
-            name,
-            Object::String(PdfString::literal(value.as_bytes().to_vec())),
-        );
+        let value = encode_text_string(value, self.declared_version());
+        self.info.insert(name, Object::String(value));
         true
     }
 
@@ -4226,6 +7761,119 @@ impl DocumentBuilder {
         true
     }
 
+    /// Registers a named destination (12.3.2.3): `name` resolves to the page
+    /// at zero-based `index`, positioned as `view` says.
+    ///
+    /// Written at `finish` as the catalog's `/Names /Dests` name tree (7.9.6)
+    /// through the same tree writer the editor uses, and read back by
+    /// [`crate::dest::Resolver::resolve_named`] — while a link or outline entry
+    /// naming it with [`Target::Named`] keeps the *name* and never the array it
+    /// stands for (ruling 6).
+    ///
+    /// The page index is judged at `finish`, as [`Target::Page`]'s is: a
+    /// destination registered for a page that never arrives is not written,
+    /// and whatever names it is dangling — see
+    /// [`DocumentBuilder::dangling_destinations`].
+    ///
+    /// Returns false, registering nothing, for an empty name, a name already
+    /// registered (7.9.6 maps each key to one value, and which of two the
+    /// caller meant is not this builder's to guess), a view that cannot be
+    /// written ([`DestKind::is_writable`]), or a tree already holding
+    /// [`crate::limits::MAX_TREE_ENTRIES`] names — past which this repository's
+    /// own reader stops walking one.
+    pub fn add_named_destination(&mut self, name: &[u8], index: u32, view: DestKind) -> bool {
+        if name.is_empty() || !view.is_writable() || self.destinations.contains_key(name) {
+            return false;
+        }
+        if self.destinations.len() >= crate::limits::MAX_TREE_ENTRIES {
+            return false;
+        }
+        self.destinations.insert(name.to_vec(), (index, view));
+        true
+    }
+
+    /// Adds a layer: an optional content group (8.11.2.1) named `name`, shown
+    /// by the document's default configuration when `visible` is true and
+    /// hidden when it is false.
+    ///
+    /// The group is written now as `<< /Type /OCG /Name (name) >>`; `finish`
+    /// writes the catalog's `/OCProperties` (8.11.4.2) — `/OCGs` listing every
+    /// group, and a default configuration `/D` whose `/Order` lists them in the
+    /// order they were added, which is the order a layer panel shows, and
+    /// whose `/OFF` names the hidden ones. `/D` carries a `/Name` too: ISO
+    /// 19005-2 6.9 requires one of every configuration, and a reader that
+    /// shows configurations by name has one to show.
+    ///
+    /// Pages begun after this call can draw into the layer with
+    /// [`PageBuilder::optional`]; the group lands in their `/Properties` the
+    /// way a font lands in `/Font`. `name` is a text string, encoded for the
+    /// version this document declares.
+    ///
+    /// Returns `None`, adding nothing, **under a part 1 [`ArchivalProfile`]**:
+    /// ISO 19005-1 6.1.13 forbids `/OCProperties` outright, and
+    /// [`Self::refusals`] records [`ArchivalRefusal::OptionalContent`]. Parts
+    /// 2 to 4 admit optional content, and a document built under one keeps
+    /// its layers.
+    pub fn add_layer(&mut self, name: &str, visible: bool) -> Option<LayerId> {
+        if self
+            .profile
+            .as_ref()
+            .is_some_and(|profile| profile.part == ArchivalPart::One)
+        {
+            self.refuse(ArchivalRefusal::OptionalContent);
+            return None;
+        }
+        let id = LayerId {
+            builder: self.serial,
+            index: u32::try_from(self.layers.len()).ok()?,
+        };
+        let reference = self.allocate();
+        let mut group = Dict::new();
+        group.insert(Name::TYPE, Object::Name(self.names.intern(b"OCG")));
+        group.insert(
+            self.names.intern(b"Name"),
+            Object::String(encode_text_string(name, self.declared_version())),
+        );
+        self.objects.insert(reference.num, Object::Dict(group));
+        self.layers.push((reference, visible));
+        self.resources.properties.push((id.resource(), reference));
+        Some(id)
+    }
+
+    /// Every name a link or outline entry uses that `finish` would refuse as
+    /// dangling if it were called now: a name never registered with
+    /// [`DocumentBuilder::add_named_destination`], or one registered for a
+    /// page index past the pages pushed so far.
+    ///
+    /// Sorted, and each name once. Empty is the answer a finished document
+    /// wants; a caller that is still adding pages may see a name here that a
+    /// later page resolves, which is why this reports rather than refuses.
+    #[must_use]
+    pub fn dangling_destinations(&self) -> Vec<Vec<u8>> {
+        let resolves = |name: &[u8]| {
+            self.destinations
+                .get(name)
+                .is_some_and(|(index, _)| (*index as usize) < self.pages.len())
+        };
+        let mut used: Vec<&[u8]> = Vec::new();
+        for page in &self.pages {
+            used.extend(page.links.iter().filter_map(|link| link.target.name()));
+        }
+        let mut stack: Vec<&[OutlineEntry]> = vec![&self.outline];
+        while let Some(level) = stack.pop() {
+            for entry in level {
+                used.extend(entry.target.as_ref().and_then(Target::name));
+                stack.push(&entry.children);
+            }
+        }
+        let dangling: BTreeSet<Vec<u8>> = used
+            .into_iter()
+            .filter(|name| !resolves(name))
+            .map(<[u8]>::to_vec)
+            .collect();
+        dangling.into_iter().collect()
+    }
+
     /// Writes the merged structure elements and returns the refs a parent
     /// should list as its kids.
     ///
@@ -4241,13 +7889,16 @@ impl DocumentBuilder {
     /// kid — and a kid on any other page is written as an `/MCR` dictionary
     /// carrying its own `/Pg`. An element with no content of its own inherits
     /// nothing and states no `/Pg`, because it has no default to give.
+    ///
+    /// A link annotation the element holds is an `/OBJR` (14.7.4.3) naming
+    /// the annotation and its page, and `walk.objects` records which element
+    /// holds it so the annotation's `/ParentTree` entry can name it back.
     fn write_struct_elements(
         &mut self,
         arena: &[Merged],
         kids_of: &[MergedKid],
         parent: ObjRef,
-        pages: &[ObjRef],
-        claims: &mut [Vec<Option<ObjRef>>],
+        walk: &mut StructWalk<'_>,
     ) -> Vec<Object> {
         let mut out = Vec::new();
         for kid in kids_of {
@@ -4256,6 +7907,20 @@ impl DocumentBuilder {
             };
             let node = &arena[*at];
             let reference = self.allocate();
+            // An identifier is claimed **before** the element's kids are
+            // written, so "the first element to carry it" means the first in
+            // reading order, an element before its descendants.
+            let id = node
+                .props
+                .as_ref()
+                .and_then(|props| props.id.as_ref())
+                .filter(|id| match walk.ids.entry((*id).clone()) {
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(reference);
+                        true
+                    }
+                    std::collections::btree_map::Entry::Occupied(_) => false,
+                });
             // The default page: the first content this element holds anywhere
             // under it, in the order the sort left them.
             let default = default_page(arena, *at);
@@ -4263,7 +7928,7 @@ impl DocumentBuilder {
             for kid in &node.kids {
                 match kid {
                     MergedKid::Content { page, mcid, .. } => {
-                        if let Some(slots) = claims.get_mut(*page) {
+                        if let Some(slots) = walk.claims.get_mut(*page) {
                             if let Some(slot) = slots.get_mut(*mcid as usize) {
                                 *slot = Some(reference);
                             }
@@ -4273,18 +7938,39 @@ impl DocumentBuilder {
                         } else {
                             let mut mcr = Dict::new();
                             mcr.insert(Name::TYPE, Object::Name(self.names.intern(b"MCR")));
-                            mcr.insert(self.names.intern(b"Pg"), Object::Ref(pages[*page]));
+                            mcr.insert(self.names.intern(b"Pg"), Object::Ref(walk.pages[*page]));
                             mcr.insert(self.names.intern(b"MCID"), Object::Int(i64::from(*mcid)));
                             written.push(Object::Dict(mcr));
                         }
+                    }
+                    MergedKid::Object { page, link, .. } => {
+                        // An annotation `finish` did not write — a link naming
+                        // a dangling destination — has nothing to refer to.
+                        let Some(annotation) = walk
+                            .annotations
+                            .get(*page)
+                            .and_then(|links| links.get(*link))
+                            .copied()
+                            .flatten()
+                        else {
+                            continue;
+                        };
+                        walk.objects.insert((*page, *link), reference);
+                        // `/Pg` always: Table 325 makes it the page the object
+                        // is rendered on, and an element holding nothing but
+                        // the annotation has no default page to lend it.
+                        let mut objr = Dict::new();
+                        objr.insert(Name::TYPE, Object::Name(self.names.intern(b"OBJR")));
+                        objr.insert(self.names.intern(b"Pg"), Object::Ref(walk.pages[*page]));
+                        objr.insert(self.names.intern(b"Obj"), Object::Ref(annotation));
+                        written.push(Object::Dict(objr));
                     }
                     MergedKid::Element(_) => {
                         written.extend(self.write_struct_elements(
                             arena,
                             std::slice::from_ref(kid),
                             reference,
-                            pages,
-                            claims,
+                            walk,
                         ));
                     }
                 }
@@ -4298,13 +7984,173 @@ impl DocumentBuilder {
             );
             element.insert(self.names.intern(b"P"), Object::Ref(parent));
             if let Some(page) = default {
-                element.insert(self.names.intern(b"Pg"), Object::Ref(pages[page]));
+                element.insert(self.names.intern(b"Pg"), Object::Ref(walk.pages[page]));
             }
-            element.insert(self.names.intern(b"K"), Object::Array(written));
+            // `/K` is optional (Table 323) and an element kept empty states
+            // none, rather than an empty array that says the same thing in
+            // more bytes.
+            if !written.is_empty() {
+                element.insert(self.names.intern(b"K"), Object::Array(written));
+            }
+            if let Some(id) = id {
+                element.insert(
+                    self.names.intern(b"ID"),
+                    Object::String(PdfString::literal(id.clone())),
+                );
+            }
+            if let Some(props) = &node.props {
+                self.write_element_props(&mut element, props, &walk.namespaces);
+                // ISO 32000-2 14.13: the files associated with the element,
+                // numbered after everything under it.
+                if !props.files.is_empty() {
+                    let af = self.write_associated_files(&props.files);
+                    element.insert(self.names.intern(b"AF"), af);
+                }
+            }
             self.objects.insert(reference.num, Object::Dict(element));
             out.push(Object::Ref(reference));
         }
         out
+    }
+
+    /// The entries of Table 323 a [`Tag`] states, each only when stated —
+    /// all but `/ID`, which is the walk's to decide.
+    ///
+    /// The five 14.9 entries are text strings (7.9.2.2), encoded for the
+    /// version the document declares — so UTF-8 in a 2.0 document and
+    /// PDFDocEncoding or UTF-16BE below it, as `/Info` is.
+    fn write_element_props(&self, element: &mut Dict, props: &ElementProps, namespaces: &[ObjRef]) {
+        let version = self.declared_version();
+        let ElementProps {
+            title,
+            lang,
+            alt,
+            actual_text,
+            expansion,
+            id: _,
+            table,
+            namespace,
+            files: _,
+        } = props;
+        // ISO 32000-2 Table 355: an indirect reference to the namespace's
+        // dictionary — which is why a handle this builder did not make, and so
+        // has no dictionary here, is not written.
+        if let Some(reference) = namespace
+            .and_then(|namespace| self.own_namespace(namespace))
+            .and_then(|at| namespaces.get(at))
+        {
+            element.insert(self.names.intern(b"NS"), Object::Ref(*reference));
+        }
+        if let Some(table) = table.as_ref().filter(|table| !table.is_empty()) {
+            element.insert(
+                self.names.intern(b"A"),
+                Object::Dict(self.table_attributes(table, version)),
+            );
+        }
+        for (key, value) in [
+            (&b"T"[..], title),
+            (b"Lang", lang),
+            (b"Alt", alt),
+            (b"ActualText", actual_text),
+            (b"E", expansion),
+        ] {
+            if let Some(text) = value {
+                element.insert(
+                    self.names.intern(key),
+                    Object::String(encode_text_string(text, version)),
+                );
+            }
+        }
+    }
+
+    /// One attribute object whose owner is `/Table` (14.7.6.1, 14.8.5.7).
+    ///
+    /// Written directly in the element's `/A` rather than as an object of its
+    /// own: an attribute object belongs to the one element that names it, and
+    /// nothing else refers to it.
+    fn table_attributes(&self, table: &TableAttributes, version: (u8, u8)) -> Dict {
+        let mut owner = Dict::new();
+        owner.insert(
+            self.names.intern(b"O"),
+            Object::Name(self.names.intern(b"Table")),
+        );
+        if !table.headers.is_empty() {
+            owner.insert(
+                self.names.intern(b"Headers"),
+                Object::Array(
+                    table
+                        .headers
+                        .iter()
+                        .map(|id| Object::String(PdfString::literal(id.clone())))
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(scope) = table.scope {
+            owner.insert(
+                self.names.intern(b"Scope"),
+                Object::Name(self.names.intern(scope.name())),
+            );
+        }
+        if let Some(summary) = &table.summary {
+            owner.insert(
+                self.names.intern(b"Summary"),
+                Object::String(encode_text_string(summary, version)),
+            );
+        }
+        for (key, span) in [
+            (&b"RowSpan"[..], table.row_span),
+            (b"ColSpan", table.col_span),
+        ] {
+            if let Some(span) = span.filter(|span| *span > 0) {
+                owner.insert(self.names.intern(key), Object::Int(i64::from(span)));
+            }
+        }
+        owner
+    }
+
+    /// The identifiers [`Tag::id`] gave more than one element, which `finish`
+    /// writes on the first of them only (14.7.2: `/IDTree` maps each
+    /// identifier to one element).
+    ///
+    /// The two halves of one element — a keyed element drawn on two pages, or
+    /// one carried over a page break — are one element and count once. Asked
+    /// of the pages pushed so far, so it is the answer `finish` would act on
+    /// if the document ended now.
+    #[must_use]
+    pub fn duplicate_element_ids(&self) -> Vec<Vec<u8>> {
+        // Each identifier, with the elements carrying it: a key where the
+        // element has one, so halves count once, and a fresh number where it
+        // does not.
+        let mut seen: BTreeMap<Vec<u8>, BTreeSet<(u8, u64)>> = BTreeMap::new();
+        let mut anonymous = 0u64;
+        let mut stack: Vec<&TaggedNode> = self
+            .pages
+            .iter()
+            .flat_map(|page| page.tag_roots.iter())
+            .collect();
+        while let Some(node) = stack.pop() {
+            if let Some(id) = node.props.as_ref().and_then(|props| props.id.as_ref()) {
+                let identity = match node.key {
+                    Some(NodeKey::Caller(key)) => (0, key),
+                    Some(NodeKey::Carried(key)) => (1, key),
+                    None => {
+                        anonymous += 1;
+                        (2, anonymous)
+                    }
+                };
+                seen.entry(id.clone()).or_default().insert(identity);
+            }
+            for kid in &node.kids {
+                if let TaggedKid::Element(child) = kid {
+                    stack.push(child);
+                }
+            }
+        }
+        seen.into_iter()
+            .filter(|(_, elements)| elements.len() > 1)
+            .map(|(id, _)| id)
+            .collect()
     }
 
     /// Serializes the document.
@@ -4327,6 +8173,14 @@ impl DocumentBuilder {
         let pages_ref = ObjRef::new(2, 0);
 
         let pages = std::mem::take(&mut self.pages);
+
+        // The named destinations whose page arrived. Anything naming one that
+        // is not here is dangling and is written with no destination at all
+        // (see `Target`), the rule an index past the last page already follows.
+        let live: BTreeMap<Vec<u8>, (u32, DestKind)> = std::mem::take(&mut self.destinations)
+            .into_iter()
+            .filter(|(_, (index, _))| (*index as usize) < page_refs.len())
+            .collect();
 
         // Every character every page drew, per font resource. Gathered before
         // anything is written because the embedded programs are subset to it.
@@ -4371,6 +8225,55 @@ impl DocumentBuilder {
         // here is their `/StructParents` key.
         let mut tagged_pages: Vec<usize> = Vec::new();
 
+        // A link whose named destination dangles is not written (see
+        // `Target`), and nothing may refer to it.
+        let writable = |at: usize, link: usize| {
+            pages
+                .get(at)
+                .and_then(|page| page.links.get(link))
+                .is_some_and(|link| {
+                    link.target
+                        .name()
+                        .is_none_or(|name| live.contains_key(name))
+                })
+        };
+        // **The document's tree, folded before any page is written**, because
+        // a link annotation that is a content item of an element carries a
+        // `/StructParent` key of its own (14.7.4.4), and which annotations those
+        // are is a fact about the merged tree. Merging allocates nothing, so
+        // a document with no annotation in its tree is numbered as before.
+        let (arena, roots) = match struct_root {
+            Some(_) => merge_tree(&pages, &writable),
+            None => (Vec::new(), Vec::new()),
+        };
+        // The annotations' keys come after every page's: a page with marked
+        // content takes the next key in page order, so their count is known
+        // here, and an annotation's key is that count plus its place in page
+        // and link order.
+        let page_keys = pages.iter().filter(|page| page.next_mcid > 0).count();
+        let mut held: BTreeSet<(usize, usize)> = BTreeSet::new();
+        for merged in &arena {
+            for kid in &merged.kids {
+                if let MergedKid::Object { page, link, .. } = kid {
+                    if writable(*page, *link) {
+                        held.insert((*page, *link));
+                    }
+                }
+            }
+        }
+        let annotation_keys: BTreeMap<(usize, usize), i64> = held
+            .iter()
+            .enumerate()
+            .map(|(at, held)| (*held, (page_keys + at) as i64))
+            .collect();
+        let mut annotations: Vec<Vec<Option<ObjRef>>> = pages
+            .iter()
+            .map(|page| vec![None; page.links.len()])
+            .collect();
+
+        // Each page-level destination profile written, by its bytes and
+        // components, so pages naming one condition share one stream.
+        let mut intent_profiles: BTreeMap<(&[u8], u32), ObjRef> = BTreeMap::new();
         for (at, (page, reference)) in pages.iter().zip(page_refs.iter()).enumerate() {
             let content_ref = self.allocate();
             self.objects.insert_stream(
@@ -4381,7 +8284,24 @@ impl DocumentBuilder {
                 },
             );
 
-            let resources = page.resources.dict(&self.names);
+            let mut resources = page.resources.dict(&self.names);
+            // ISO 32000-2 14.13.5, Table 409a: each associated sequence's
+            // property list, a direct `<< /MCAF [...] >>` beside the layers in
+            // `/Properties`, as the errata's EXAMPLE writes it.
+            if !page.marked_files.is_empty() {
+                let key = self.names.intern(b"Properties");
+                let mut table = match resources.get(key) {
+                    Some(Object::Dict(table)) => table.clone(),
+                    _ => Dict::new(),
+                };
+                for (name, files) in &page.marked_files {
+                    let af = self.write_associated_files(files);
+                    let mut list = Dict::new();
+                    list.insert(self.names.intern(b"MCAF"), af);
+                    table.insert(self.names.intern(name), Object::Dict(list));
+                }
+                resources.insert(key, Object::Dict(table));
+            }
 
             let mut dict = Dict::new();
             dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Page")));
@@ -4414,12 +8334,86 @@ impl DocumentBuilder {
             dict.insert(Name::RESOURCES, Object::Dict(resources));
             dict.insert(Name::CONTENTS, Object::Ref(content_ref));
 
+            // PDF 2.0: the page's own output intents, written only when it
+            // has some. A profile is numbered the first time a page names it.
+            if !page.output_intents.is_empty() {
+                let version = self.declared_version();
+                let mut listed = Vec::with_capacity(page.output_intents.len());
+                for intent in &page.output_intents {
+                    let mut entry = Dict::new();
+                    entry.insert(Name::TYPE, Object::Name(self.names.intern(b"OutputIntent")));
+                    entry.insert(
+                        self.names.intern(b"S"),
+                        Object::Name(self.names.intern(&intent.subtype)),
+                    );
+                    for (key, value) in [
+                        (&b"OutputCondition"[..], &intent.output_condition),
+                        (b"RegistryName", &intent.registry_name),
+                        (b"Info", &intent.info),
+                    ] {
+                        if let Some(text) = value {
+                            entry.insert(
+                                self.names.intern(key),
+                                Object::String(encode_text_string(text, version)),
+                            );
+                        }
+                    }
+                    entry.insert(
+                        self.names.intern(b"OutputConditionIdentifier"),
+                        Object::String(encode_text_string(
+                            &intent.output_condition_identifier,
+                            version,
+                        )),
+                    );
+                    if let Some((bytes, space)) = &intent.destination_profile {
+                        let components = space.components();
+                        let reference = match intent_profiles.get(&(bytes.as_slice(), components)) {
+                            Some(reference) => *reference,
+                            None => {
+                                let reference = self.allocate();
+                                let mut stream = Dict::new();
+                                // Table 366: the profile stream's `/N`, as an
+                                // `ICCBased` stream carries it.
+                                stream.insert(
+                                    self.names.intern(b"N"),
+                                    Object::Int(i64::from(components)),
+                                );
+                                self.objects.insert_stream(
+                                    reference.num,
+                                    StreamData {
+                                        dict: stream,
+                                        data: bytes.clone(),
+                                    },
+                                );
+                                intent_profiles.insert((bytes.as_slice(), components), reference);
+                                reference
+                            }
+                        };
+                        entry.insert(
+                            self.names.intern(b"DestOutputProfile"),
+                            Object::Ref(reference),
+                        );
+                    }
+                    listed.push(Object::Dict(entry));
+                }
+                dict.insert(self.names.intern(b"OutputIntents"), Object::Array(listed));
+            }
+            // ISO 32000-2 14.13: the files associated with this page.
+            if !page.associated.is_empty() {
+                let af = self.write_associated_files(&page.associated);
+                dict.insert(self.names.intern(b"AF"), af);
+            }
+
             // 12.5.2: the page's annotations, each an indirect object. `/Annots`
             // is written only when there are some — an empty array is a
             // statement where its absence is not, the same rule `/CropBox`
             // above follows.
             let mut annots = Vec::with_capacity(page.links.len());
-            for link in &page.links {
+            for (index, link) in page.links.iter().enumerate() {
+                // A dangling name is refused whole: see `Target`.
+                if !writable(at, index) {
+                    continue;
+                }
                 let mut annot = Dict::new();
                 annot.insert(Name::TYPE, Object::Name(self.names.intern(b"Annot")));
                 annot.insert(
@@ -4435,11 +8429,28 @@ impl DocumentBuilder {
                 // screen and not on paper, which is `edit::annot`'s rule for
                 // every annotation it builds and is this one's too.
                 annot.insert(self.names.intern(b"F"), Object::Int(4));
-                link.target.write(&self.names, &page_refs, &mut annot);
+                link.target
+                    .write(&self.names, &page_refs, &live, &mut annot);
+                // 14.7.4.4: an annotation that is a content item in its own
+                // right finds its element through its own key.
+                if let Some(key) = annotation_keys.get(&(at, index)) {
+                    annot.insert(self.names.intern(b"StructParent"), Object::Int(*key));
+                }
+                // ISO 32000-2 14.13: the files associated with the annotation.
+                if !link.files.is_empty() {
+                    let af = self.write_associated_files(&link.files);
+                    annot.insert(self.names.intern(b"AF"), af);
+                }
 
                 let annot_ref = self.allocate();
                 self.objects.insert(annot_ref.num, Object::Dict(annot));
                 annots.push(Object::Ref(annot_ref));
+                if let Some(slot) = annotations
+                    .get_mut(at)
+                    .and_then(|links| links.get_mut(index))
+                {
+                    *slot = Some(annot_ref);
+                }
             }
             if !annots.is_empty() {
                 dict.insert(self.names.intern(b"Annots"), Object::Array(annots));
@@ -4452,7 +8463,12 @@ impl DocumentBuilder {
             // **The key only.** The elements themselves are written after
             // every page has one, because an element may now hold content from
             // more than one page and cannot be written until they all exist.
-            if struct_root.is_some() && !page.tag_roots.is_empty() {
+            //
+            // Keyed on whether the page wrote a sequence rather than on whether
+            // it holds an element: an element kept empty is an element with no
+            // marked content, and a page holding only such elements has no
+            // sequence for a `/ParentTree` array to index.
+            if struct_root.is_some() && page.next_mcid > 0 {
                 let key = tagged_pages.len() as i64;
                 tagged_pages.push(at);
                 dict.insert(self.names.intern(b"StructParents"), Object::Int(key));
@@ -4550,6 +8566,24 @@ impl DocumentBuilder {
                 );
             }
         }
+        // The caller's own statement of the document's language, where a
+        // profile has not already made one.
+        if let Some(language) = &self.language {
+            let key = self.names.intern(b"Lang");
+            if catalog.get(key).is_none() {
+                catalog.insert(
+                    key,
+                    Object::String(encode_text_string(language, self.declared_version())),
+                );
+            }
+        }
+        // ISO 32000-2 14.13: the files associated with the document as a
+        // whole. Numbered here only when there are some.
+        let associated = std::mem::take(&mut self.associated);
+        if !associated.is_empty() {
+            let af = self.write_associated_files(&associated);
+            catalog.insert(self.names.intern(b"AF"), af);
+        }
 
         // 14.7.2: the structure tree, when any page tagged anything. One
         // `/Document` element holds every page's roots, which is the shape
@@ -4558,47 +8592,66 @@ impl DocumentBuilder {
         if let Some(root) = struct_root {
             let document = self.allocate();
 
-            // **One tree for the document, folded out of the pages' nodes.**
-            // Elements the caller named are merged across every page they were
-            // opened on, then every kid list is put into the caller's order —
-            // which is the source document's, and is not page order the moment
-            // anything was drawn on a page other than the one it reads on.
-            let mut arena: Vec<Merged> = Vec::new();
-            let mut roots: Vec<MergedKid> = Vec::new();
-            for (at, page) in pages.iter().enumerate() {
-                for node in &page.tag_roots {
-                    absorb(&mut arena, &mut roots, node, at);
-                }
-            }
-            order_kids(&mut arena);
-            roots.sort_by_key(|kid| kid.order(&arena));
-
+            // **One tree for the document, folded out of the pages' nodes**
+            // above. Elements the caller named are merged across every page
+            // they were opened on, then every kid list is put into the
+            // caller's order — which is the source document's, and is not page
+            // order the moment anything was drawn on a page other than the one
+            // it reads on.
+            //
             // One claims array per **page**, not per element: `/ParentTree` is
             // indexed by the page's `/StructParents` key and then by the id,
             // and an id now belongs to an element that may be owned anywhere.
-            let mut claims: Vec<Vec<Option<ObjRef>>> = pages
-                .iter()
-                .map(|page| vec![None; page.next_mcid as usize])
-                .collect();
-            let struct_kids =
-                self.write_struct_elements(&arena, &roots, document, &page_refs, &mut claims);
-            let parent_tree: Vec<Vec<Object>> = tagged_pages
+            let mut walk = StructWalk {
+                pages: &page_refs,
+                annotations: &annotations,
+                claims: pages
+                    .iter()
+                    .map(|page| vec![None; page.next_mcid as usize])
+                    .collect(),
+                objects: BTreeMap::new(),
+                ids: BTreeMap::new(),
+                // Numbered before any element, so every `/NS` has a
+                // reference to name. None for a document with no namespace,
+                // which therefore numbers its objects as it always has.
+                namespaces: (0..self.namespaces.len())
+                    .map(|_| self.allocate())
+                    .collect(),
+            };
+            let struct_kids = self.write_struct_elements(&arena, &roots, document, &mut walk);
+            let mut parent_tree: Vec<Object> = tagged_pages
                 .iter()
                 .map(|at| {
-                    claims[*at]
-                        .iter()
-                        .map(|claim| match claim {
-                            Some(reference) => Object::Ref(*reference),
-                            // An id no element claims cannot happen from this
-                            // builder — `tagged` opens both together — so a
-                            // null here is a defect in this writer rather than
-                            // in the caller's document. It is written rather
-                            // than skipped so the array stays indexed by id.
-                            None => Object::Null,
-                        })
-                        .collect()
+                    Object::Array(
+                        walk.claims[*at]
+                            .iter()
+                            .map(|claim| match claim {
+                                Some(reference) => Object::Ref(*reference),
+                                // An id no element claims cannot happen from
+                                // this builder — `tagged` opens both together —
+                                // so a null here is a defect in this writer
+                                // rather than in the caller's document. It is
+                                // written rather than skipped so the array
+                                // stays indexed by id.
+                                None => Object::Null,
+                            })
+                            .collect(),
+                    )
                 })
                 .collect();
+            // Then each annotation's entry, in key order: for an object that
+            // is a content item in its own right the value is a reference to
+            // its parent element, not an array (14.7.4.4).
+            for held in annotation_keys.keys() {
+                // Every held annotation was written and is reached by the walk,
+                // so the lookup answers; were it not to, the entry is null
+                // rather than absent, keeping the keys contiguous.
+                parent_tree.push(
+                    walk.objects
+                        .get(held)
+                        .map_or(Object::Null, |element| Object::Ref(*element)),
+                );
+            }
 
             let mut element = Dict::new();
             element.insert(Name::TYPE, Object::Name(self.names.intern(b"StructElem")));
@@ -4615,19 +8668,43 @@ impl DocumentBuilder {
             element.insert(self.names.intern(b"K"), Object::Array(struct_kids));
             self.objects.insert(document.num, Object::Dict(element));
 
-            // 7.9.7: a number tree whose root is also its only leaf, which is
-            // what `/Nums` on the root node means. Legal at any size, and a
-            // document this builder produced has one entry per tagged page —
-            // splitting into `/Kids` would buy a lookup nothing here performs.
-            let mut nums = Vec::with_capacity(parent_tree.len() * 2);
-            for (key, claims) in parent_tree.iter().enumerate() {
-                nums.push(Object::Int(key as i64));
-                nums.push(Object::Array(claims.clone()));
-            }
-            let tree_ref = self.allocate();
-            let mut tree = Dict::new();
-            tree.insert(self.names.intern(b"Nums"), Object::Array(nums));
-            self.objects.insert(tree_ref.num, Object::Dict(tree));
+            // 7.9.7, through the tree writer the `/IDTree` and the named
+            // destinations use: a root that is its only leaf while the keys
+            // fit one — the bytes a small document has always had — and a
+            // balanced tree of leaves past that, so a reader's lookup of one
+            // page's key is not a scan of every page's. The keys are one per
+            // tagged page and one per held annotation, and the tree writer
+            // refuses more than this crate's reader keeps; past that the one
+            // leaf is written whole, still legal at any size, and a reader of
+            // this crate reports `TreeTruncated` on it rather than nothing.
+            let parent_tree_len = parent_tree.len();
+            let entries: Vec<(i64, Object)> = parent_tree
+                .into_iter()
+                .enumerate()
+                .map(|(key, value)| (i64::try_from(key).unwrap_or(i64::MAX), value))
+                .collect();
+            let next = &mut self.next;
+            let objects = &mut self.objects;
+            let written = crate::trees::write_number_tree(entries.clone(), &self.names, |node| {
+                let reference = ObjRef::new(*next, 0);
+                *next = next.saturating_add(1);
+                objects.insert(reference.num, node);
+                reference
+            });
+            let tree_ref = match written {
+                Ok(tree) => tree,
+                Err(_) => {
+                    let nums = entries
+                        .into_iter()
+                        .flat_map(|(key, value)| [Object::Int(key), value])
+                        .collect();
+                    let tree_ref = self.allocate();
+                    let mut tree = Dict::new();
+                    tree.insert(self.names.intern(b"Nums"), Object::Array(nums));
+                    self.objects.insert(tree_ref.num, Object::Dict(tree));
+                    tree_ref
+                }
+            };
 
             let mut dict = Dict::new();
             dict.insert(
@@ -4644,8 +8721,83 @@ impl DocumentBuilder {
             // page takes no key.
             dict.insert(
                 self.names.intern(b"ParentTreeNextKey"),
-                Object::Int(parent_tree.len() as i64),
+                Object::Int(i64::try_from(parent_tree_len).unwrap_or(i64::MAX)),
             );
+            // 14.7.2 Table 322: required when any element has an identifier —
+            // a name tree from each identifier to its element, through the same
+            // tree writer the named destinations use. Its one refusal is a tree
+            // past the reader's cap; a tree refused is left out whole rather
+            // than half written.
+            if !walk.ids.is_empty() {
+                let entries: Vec<(Vec<u8>, Object)> = std::mem::take(&mut walk.ids)
+                    .into_iter()
+                    .map(|(id, element)| (id, Object::Ref(element)))
+                    .collect();
+                let next = &mut self.next;
+                let objects = &mut self.objects;
+                let tree = crate::trees::write_name_tree(entries, &self.names, |node| {
+                    let reference = ObjRef::new(*next, 0);
+                    *next = next.saturating_add(1);
+                    objects.insert(reference.num, node);
+                    reference
+                });
+                if let Ok(tree) = tree {
+                    dict.insert(self.names.intern(b"IDTree"), Object::Ref(tree));
+                }
+            }
+            // 14.7.3: a name to a name, for every custom type the caller
+            // mapped. A `BTreeMap`, so the entries are in one order however
+            // they were registered.
+            if !self.role_map.is_empty() {
+                let mut role_map = Dict::new();
+                for (custom, standard) in &self.role_map {
+                    role_map.insert(
+                        self.names.intern(custom),
+                        Object::Name(self.names.intern(standard)),
+                    );
+                }
+                dict.insert(self.names.intern(b"RoleMap"), Object::Dict(role_map));
+            }
+            // ISO 32000-2 Table 354: every namespace, in the order registered,
+            // each a Table 356 dictionary whose `/RoleMapNS` writes each
+            // mapping as the errata's EXAMPLE 1 does, `[/type ns]`.
+            if !self.namespaces.is_empty() {
+                let mut listed = Vec::with_capacity(self.namespaces.len());
+                for (namespace, reference) in self.namespaces.iter().zip(&walk.namespaces) {
+                    let mut entry = Dict::new();
+                    entry.insert(Name::TYPE, Object::Name(self.names.intern(b"Namespace")));
+                    entry.insert(
+                        self.names.intern(b"NS"),
+                        Object::String(encode_text_string(&namespace.uri, self.declared_version())),
+                    );
+                    if !namespace.role_map.is_empty() {
+                        let mut map = Dict::new();
+                        for (custom, (target, at)) in &namespace.role_map {
+                            let Some(target_ref) = walk.namespaces.get(*at as usize) else {
+                                continue;
+                            };
+                            map.insert(
+                                self.names.intern(custom),
+                                Object::Array(vec![
+                                    Object::Name(self.names.intern(target)),
+                                    Object::Ref(*target_ref),
+                                ]),
+                            );
+                        }
+                        entry.insert(self.names.intern(b"RoleMapNS"), Object::Dict(map));
+                    }
+                    self.objects.insert(reference.num, Object::Dict(entry));
+                    listed.push(Object::Ref(*reference));
+                }
+                dict.insert(self.names.intern(b"Namespaces"), Object::Array(listed));
+            }
+            // ISO 32000-2 14.13: the files associated with the structure as a
+            // whole.
+            let files = std::mem::take(&mut self.structure_associated);
+            if !files.is_empty() {
+                let af = self.write_associated_files(&files);
+                dict.insert(self.names.intern(b"AF"), af);
+            }
             self.objects.insert(root.num, Object::Dict(dict));
             catalog.insert(self.names.intern(b"StructTreeRoot"), Object::Ref(root));
 
@@ -4661,7 +8813,7 @@ impl DocumentBuilder {
         let outline = std::mem::take(&mut self.outline);
         if !outline.is_empty() {
             let root = self.allocate();
-            let children = self.write_outline(&outline, &page_refs, root);
+            let children = self.write_outline(&outline, &page_refs, &live, root);
             let mut dict = Dict::new();
             dict.insert(Name::TYPE, Object::Name(self.names.intern(b"Outlines")));
             if let Some((first, last, visible)) = children {
@@ -4676,6 +8828,68 @@ impl DocumentBuilder {
             self.objects.insert(root.num, Object::Dict(dict));
             catalog.insert(self.names.intern(b"Outlines"), Object::Ref(root));
         }
+
+        // 8.11.4.2: the optional content properties, when any layer was
+        // added. `/OCGs` lists every group; `/D` is the configuration a reader
+        // applies when it opens the file, and its `/BaseState` is left at the
+        // default `/ON` so that `/OFF` alone names what is hidden.
+        if !self.layers.is_empty() {
+            let every: Vec<Object> = self.layers.iter().map(|(r, _)| Object::Ref(*r)).collect();
+            let hidden: Vec<Object> = self
+                .layers
+                .iter()
+                .filter(|(_, visible)| !visible)
+                .map(|(r, _)| Object::Ref(*r))
+                .collect();
+            let mut configuration = Dict::new();
+            configuration.insert(
+                self.names.intern(b"Name"),
+                Object::String(encode_text_string("Default", self.declared_version())),
+            );
+            configuration.insert(self.names.intern(b"Order"), Object::Array(every.clone()));
+            if !hidden.is_empty() {
+                configuration.insert(self.names.intern(b"OFF"), Object::Array(hidden));
+            }
+            let mut properties = Dict::new();
+            properties.insert(self.names.intern(b"OCGs"), Object::Array(every));
+            properties.insert(self.names.intern(b"D"), Object::Dict(configuration));
+            catalog.insert(self.names.intern(b"OCProperties"), Object::Dict(properties));
+        }
+
+        // 12.3.2.3 and 7.7.4: the named destinations, as the catalog's
+        // `/Names /Dests` tree, each value the explicit array the name stands
+        // for. Written only when there are some — a `/Names` dictionary with
+        // nothing in it is a statement where its absence is not.
+        if !live.is_empty() {
+            let entries: Vec<(Vec<u8>, Object)> = live
+                .iter()
+                .filter_map(|(name, (index, view))| {
+                    let page = page_refs.get(*index as usize)?;
+                    Some((
+                        name.clone(),
+                        crate::dest::destination_array(&self.names, *page, view),
+                    ))
+                })
+                .collect();
+            let next = &mut self.next;
+            let objects = &mut self.objects;
+            let tree = crate::trees::write_name_tree(entries, &self.names, |node| {
+                let reference = ObjRef::new(*next, 0);
+                *next = next.saturating_add(1);
+                objects.insert(reference.num, node);
+                reference
+            });
+            // Neither refusal is reachable: `add_named_destination` refused a
+            // second registration of a name and a tree past the reader's cap,
+            // which are the only two things the tree writer refuses. A tree
+            // that was somehow refused is left out whole rather than half
+            // written, and the names pointing at it dangle.
+            if let Ok(tree) = tree {
+                let mut names = Dict::new();
+                names.insert(self.names.intern(b"Dests"), Object::Ref(tree));
+                catalog.insert(self.names.intern(b"Names"), Object::Dict(names));
+            }
+        }
         self.objects.insert(1, Object::Dict(catalog));
 
         let mut trailer = Dict::new();
@@ -4688,12 +8902,14 @@ impl DocumentBuilder {
         }
 
         // 6.1.2: each part is defined on a version of PDF and requires the
-        // header to say which. An unprofiled document keeps the writer's
-        // default, so nothing that was byte-stable before this moved.
-        let mut options = WriteOptions::default();
-        if let Some(profile) = &self.profile {
-            options.version = profile.part.version();
-        }
+        // header to say which. An unprofiled document declares the version it
+        // was built with, which is the writer's default unless
+        // `with_version` said otherwise, so nothing that was byte-stable
+        // before this moved.
+        let options = WriteOptions {
+            version: self.declared_version(),
+            ..WriteOptions::default()
+        };
         let bytes = rewrite(&self.objects, &trailer, &options, &self.names);
         (bytes, std::mem::take(&mut self.embedded_whole))
     }
@@ -4714,6 +8930,7 @@ impl DocumentBuilder {
         &mut self,
         entries: &[OutlineEntry],
         pages: &[ObjRef],
+        live: &BTreeMap<Vec<u8>, (u32, DestKind)>,
         parent: ObjRef,
     ) -> Option<(ObjRef, ObjRef, i64)> {
         if entries.is_empty() {
@@ -4727,20 +8944,22 @@ impl DocumentBuilder {
             let Some(&reference) = refs.get(index) else {
                 continue;
             };
-            let children = self.write_outline(&entry.children, pages, reference);
+            let children = self.write_outline(&entry.children, pages, live, reference);
 
             let mut dict = Dict::new();
-            dict.insert(
-                self.names.intern(b"Title"),
-                Object::String(PdfString::literal(entry.title.as_bytes().to_vec())),
-            );
+            // 12.3.3 Table 153: `/Title` is a text string, encoded as `/Info`'s
+            // entries are and for the same reason.
+            let title = encode_text_string(&entry.title, self.declared_version());
+            dict.insert(self.names.intern(b"Title"), Object::String(title));
             dict.insert(Name::PARENT, Object::Ref(parent));
 
-            // Ruling 6: an explicit destination, never a name that looks like
-            // one. This is the writer side of the defect that made the engine
-            // being replaced turn "#page=2" into a dead named destination.
+            // Ruling 6: each kind of destination as itself — an explicit one
+            // never written as a name that looks like one, and a name never
+            // flattened into the array it resolves to. This is the writer side
+            // of the defect that made the engine being replaced turn "#page=2"
+            // into a dead named destination.
             if let Some(target) = &entry.target {
-                target.write(&self.names, pages, &mut dict);
+                target.write(&self.names, pages, live, &mut dict);
             }
 
             if let Some(&previous) = index.checked_sub(1).and_then(|i| refs.get(i)) {
@@ -4894,6 +9113,14 @@ impl DocumentBuilder {
     /// `DeviceGray` is admitted under any destination — a grey value is a
     /// value on the neutral axis of whatever device the intent names — and
     /// `DeviceRGB` and `DeviceCMYK` need their own kind.
+    /// Whether ISO 19005-2 6.2.4.4's spot-colour rules bind this document:
+    /// parts 2 to 4 share the clause, and part 1 has no counterpart.
+    fn binds_spot_rules(&self) -> bool {
+        self.profile
+            .as_ref()
+            .is_some_and(|profile| profile.part != ArchivalPart::One)
+    }
+
     fn admits_device_space(profile: Option<&ArchivalProfile>, space: DeviceSpace) -> bool {
         let Some(profile) = profile else {
             return true;
@@ -4920,6 +9147,9 @@ fn image_device_space(image: &ImageData<'_>) -> Option<DeviceSpace> {
         // it before the call that owns it. It is left to the validator, and
         // `super::STAGED`'s neighbour in the writer is this comment.
         ImageData::Jpeg(_) => None,
+        // A JPEG 2000 image's colour is its codestream's, exactly as a JPEG's
+        // is its SOF marker's, and the dictionary names no space to judge.
+        ImageData::Compressed(image) if image.filter == Some(ImageFilter::Jpx) => None,
         ImageData::Compressed(image) => match image.color_space {
             ImageColorSpace::DeviceGray => Some(DeviceSpace::Gray),
             ImageColorSpace::DeviceRgb => Some(DeviceSpace::Rgb),
@@ -4929,6 +9159,11 @@ fn image_device_space(image: &ImageData<'_>) -> Option<DeviceSpace> {
             // device its values are for, which is exactly what 6.2.3.3 asks a
             // device space to have an output intent for. Nothing to refuse.
             ImageColorSpace::Icc { .. } => None,
+            // A tint space's alternate was judged when the space was
+            // registered, which is the one place its device colour is named.
+            ImageColorSpace::Tint { .. } => None,
+            // CIE-based: device-independent, so not 6.2.3.3's question.
+            ImageColorSpace::Cie { .. } | ImageColorSpace::Lab => None,
         },
     }
 }
@@ -5105,47 +9340,172 @@ fn archival_packet(profile: &ArchivalProfile, info: &Dict, names: &NameTable) ->
 /// because merging appends to a node already in the tree.
 struct Merged {
     tag: Vec<u8>,
-    key: Option<u64>,
+    key: Option<NodeKey>,
     /// The **earliest** position any of its halves was given.
     order: u64,
+    /// What its halves said about it, the first half's statement standing
+    /// where two disagree.
+    props: Option<Box<ElementProps>>,
     kids: Vec<MergedKid>,
 }
 
-/// A merged element's kid: a sequence on a **named** page, or a child.
+/// What the walk writing the structure elements reads and fills.
+struct StructWalk<'a> {
+    /// Every page's object.
+    pages: &'a [ObjRef],
+    /// Every page's link annotations as written, by index; `None` for one
+    /// `finish` did not write.
+    annotations: &'a [Vec<Option<ObjRef>>],
+    /// Per page, per marked-content id: the element that claims it.
+    claims: Vec<Vec<Option<ObjRef>>>,
+    /// Per `(page, link)`: the element that holds the annotation.
+    objects: BTreeMap<(usize, usize), ObjRef>,
+    /// Each identifier, and the first element in reading order to carry it —
+    /// the `/IDTree` (14.7.2).
+    ids: BTreeMap<Vec<u8>, ObjRef>,
+    /// Each registered namespace's dictionary, by index (ISO 32000-2 14.7.4).
+    namespaces: Vec<ObjRef>,
+}
+
+/// A merged element's kid: a sequence on a **named** page, a child, or a link
+/// annotation of a named page by its index in that page's links.
 enum MergedKid {
-    Content { page: usize, mcid: u32, order: u64 },
+    Content {
+        page: usize,
+        mcid: u32,
+        order: u64,
+    },
     Element(usize),
+    Object {
+        page: usize,
+        link: usize,
+        order: u64,
+    },
 }
 
 impl MergedKid {
-    /// Where this kid reads, which is what the sort below orders by.
+    /// Where this kid reads, which is what the sort below orders by. Counted
+    /// ([`look_at_kid`]), as [`TaggedKid::order`] is.
     fn order(&self, arena: &[Merged]) -> u64 {
+        look_at_kid();
         match self {
-            MergedKid::Content { order, .. } => *order,
+            MergedKid::Content { order, .. } | MergedKid::Object { order, .. } => *order,
             MergedKid::Element(at) => arena[*at].order,
         }
     }
 }
 
+/// The document-level tree folded out of every page's elements, in the
+/// caller's order, with each [`PageBuilder::link_for`] annotation appended to
+/// the element its key names.
+///
+/// `writable` says whether a page's link at an index will be written at all —
+/// a link naming a dangling destination is not, and an `/OBJR` to it would be
+/// a reference into nothing.
+///
+/// **Linear in the elements and links**, which it was not: a keyed element
+/// looked for its sibling, and a keyed link for its element and for where
+/// that element's kids reach, by walking them, and an EPUB keys every
+/// element and attaches every link by key — so a paragraph of n `<span>`s
+/// cost n squared here. Each is now an index built as the tree is.
+fn merge_tree(
+    pages: &[PageBuilder],
+    writable: &dyn Fn(usize, usize) -> bool,
+) -> (Vec<Merged>, Vec<MergedKid>) {
+    let mut arena: Vec<Merged> = Vec::new();
+    let mut roots: Vec<MergedKid> = Vec::new();
+    let mut keyed = BTreeMap::new();
+    for (at, page) in pages.iter().enumerate() {
+        for node in &page.tag_roots {
+            absorb(&mut arena, &mut roots, None, &mut keyed, node, at);
+        }
+    }
+    order_kids(&mut arena);
+    roots.sort_by_key(|kid| kid.order(&arena));
+
+    // The first element in the arena's order carrying each caller's key,
+    // which is the one a caller naming each element once means.
+    let mut first_with: BTreeMap<u64, usize> = BTreeMap::new();
+    for (at, merged) in arena.iter().enumerate() {
+        if let Some(NodeKey::Caller(key)) = merged.key {
+            first_with.entry(key).or_insert(at);
+        }
+    }
+    // Where each element's kids reach, worked out the first time a link
+    // asks. An annotation appended takes exactly that order, so it never
+    // moves the answer for the next one.
+    let mut reach: Vec<Option<u64>> = vec![None; arena.len()];
+    for (at, page) in pages.iter().enumerate() {
+        for (link, annotation) in page.links.iter().enumerate() {
+            let Some(key) = annotation.owner else {
+                continue;
+            };
+            if !writable(at, link) {
+                continue;
+            }
+            let Some(&element) = first_with.get(&key) else {
+                continue;
+            };
+            // After everything already there: an annotation is not a piece
+            // of the text the element reads, and putting it last keeps every
+            // sequence where the sort left it.
+            let order = match reach.get(element).copied().flatten() {
+                Some(order) => order,
+                None => arena[element]
+                    .kids
+                    .iter()
+                    .map(|kid| kid.order(&arena))
+                    .max()
+                    .unwrap_or(arena[element].order),
+            };
+            if let Some(slot) = reach.get_mut(element) {
+                *slot = Some(order);
+            }
+            arena[element].kids.push(MergedKid::Object {
+                page: at,
+                link,
+                order,
+            });
+        }
+    }
+    (arena, roots)
+}
+
+/// Each keyed element of the tree by the element it is a kid of (`None` for
+/// a root) and its key: the sibling [`absorb`] merges a keyed node into,
+/// found without walking the siblings.
+type KeyedSiblings = BTreeMap<(Option<usize>, NodeKey), usize>;
+
 /// Folds one page's nodes into the document tree.
 ///
 /// `siblings` is the kid list the nodes join — the root list, or a merged
-/// element's own kids. A node with a key finds the sibling that shares it and
-/// appends to it; a node without one is always new, which is what keeps
+/// element's own kids — and `parent` the element whose kids they are. A node
+/// with a key finds the sibling that shares it, through `keyed`, and appends
+/// to it; a node without one is always new, which is what keeps
 /// [`PageBuilder::tagged`]'s anonymous elements per page.
-fn absorb(arena: &mut Vec<Merged>, siblings: &mut Vec<MergedKid>, node: &TaggedNode, page: usize) {
-    let existing = node.key.and_then(|key| {
-        siblings.iter().find_map(|kid| match kid {
-            MergedKid::Element(at) if arena[*at].key == Some(key) => Some(*at),
-            _ => None,
-        })
-    });
+fn absorb(
+    arena: &mut Vec<Merged>,
+    siblings: &mut Vec<MergedKid>,
+    parent: Option<usize>,
+    keyed: &mut KeyedSiblings,
+    node: &TaggedNode,
+    page: usize,
+) {
+    // Only this function adds an element to a kid list, and it records each
+    // keyed one here as it does, so the entry is the first sibling with the
+    // key: the one a walk over the siblings would have stopped at.
+    let existing = node.key.and_then(|key| keyed.get(&(parent, key)).copied());
     let at = match existing {
         Some(at) => {
             // The element reads where its **first** half did: a paragraph
             // continued onto a later page did not move, and a float met early
             // and drawn late did not either.
             arena[at].order = arena[at].order.min(node.order);
+            match (&mut arena[at].props, &node.props) {
+                (Some(mine), Some(theirs)) => mine.fill_from(theirs),
+                (slot @ None, Some(theirs)) => *slot = Some(theirs.clone()),
+                (_, None) => {}
+            }
             at
         }
         None => {
@@ -5153,10 +9513,14 @@ fn absorb(arena: &mut Vec<Merged>, siblings: &mut Vec<MergedKid>, node: &TaggedN
                 tag: node.tag.clone(),
                 key: node.key,
                 order: node.order,
+                props: node.props.clone(),
                 kids: Vec::new(),
             });
             let at = arena.len() - 1;
             siblings.push(MergedKid::Element(at));
+            if let Some(key) = node.key {
+                keyed.insert((parent, key), at);
+            }
             at
         }
     };
@@ -5174,8 +9538,15 @@ fn absorb(arena: &mut Vec<Merged>, siblings: &mut Vec<MergedKid>, node: &TaggedN
                 // borrowed at once. Nothing else can reach this node in
                 // between: `absorb` is the only walker.
                 let mut kids = std::mem::take(&mut arena[at].kids);
-                absorb(arena, &mut kids, child, page);
+                absorb(arena, &mut kids, Some(at), keyed, child, page);
                 arena[at].kids = kids;
+            }
+            TaggedKid::Object { link, order } => {
+                arena[at].kids.push(MergedKid::Object {
+                    page,
+                    link: *link,
+                    order: *order,
+                });
             }
         }
     }
@@ -5192,6 +9563,9 @@ fn default_page(arena: &[Merged], at: usize) -> Option<usize> {
     for kid in &arena[at].kids {
         match kid {
             MergedKid::Content { page, .. } => return Some(*page),
+            // An annotation is not marked content: an `/OBJR` carries its own
+            // `/Pg`, and the default is for the integer kids that do not.
+            MergedKid::Object { .. } => {}
             MergedKid::Element(child) => {
                 if let Some(page) = default_page(arena, *child) {
                     return Some(page);
@@ -5220,6 +9594,199 @@ fn order_kids(arena: &mut [Merged]) {
 mod tests {
     use super::*;
     use crate::CosDocument;
+
+    /// **Appending to a structure element costs the same however many kids
+    /// it already has.** Every append that reads after its siblings — a
+    /// resumption after a child, a link — asks where the element's kids
+    /// reach, and the first way the builder answered walked all of them. So
+    /// an element of n kids cost n squared: lane 8C's fixer measured an EPUB
+    /// paragraph of 10 000 / 20 000 / 40 000 inline `<span>`s at 3.8 / 13.1 /
+    /// 48.7 s to open, all of it in that walk.
+    ///
+    /// One `/P` of `SPANS` `/Span`s drawn back to back, so each resumption of
+    /// the paragraph between two of them is taken back empty, with a link
+    /// after every eighth and a `continue_at` after every sixteenth: every
+    /// way a kid joins or leaves an element. Held by count, not by a clock:
+    /// every kid's order read, by whatever code reads it ([`look_at_kid`]),
+    /// is at most eight per span. The walk as it was first written, put back
+    /// word for word, reads 10 632 705.
+    #[test]
+    fn an_element_of_many_kids_costs_its_kids() {
+        const SPANS: usize = 4096;
+        let target = Target::Uri("https://example.org/".to_string());
+        let mut builder = DocumentBuilder::new();
+        KIDS_LOOKED.with(|looked| looked.set(0));
+        builder.add_page(200.0, 200.0, |page| {
+            page.tagged(b"P", |page| {
+                for at in 0..SPANS {
+                    page.tagged(b"Span", |page| page.raw(b"0 0 1 1 re f"));
+                    if at % 8 == 0 {
+                        assert!(page.link(0.0, 0.0, 1.0, 1.0, &target));
+                    }
+                    if at % 16 == 0 {
+                        assert!(page.continue_at(u64::try_from(at).unwrap_or(0)));
+                    }
+                }
+            });
+        });
+        let looked = KIDS_LOOKED.with(core::cell::Cell::get);
+        assert!(
+            looked <= 8 * SPANS,
+            "a paragraph of {SPANS} spans looked at {looked} kids to place them"
+        );
+
+        let doc = CosDocument::open(builder.finish()).expect("the built document opens");
+        let page = crate::pages::at(&doc, 0).expect("a page");
+        let content =
+            String::from_utf8_lossy(&crate::pages::content_bytes(&doc, &page)).into_owned();
+        assert_eq!(content.matches("/Span <<").count(), SPANS);
+    }
+
+    /// **Folding the pages' elements into one tree costs the same however many
+    /// siblings an element has.** `finish` merges every page's elements by
+    /// key, and attaches each `link_for` annotation to the element its key
+    /// names after everything already there. The first way it did both
+    /// walked: a keyed element looked for the sibling sharing its key through
+    /// every sibling, and a keyed link looked for its element through the
+    /// whole tree and then for where that element's kids reach through every
+    /// kid. An EPUB keys every element and attaches its links by key, so a
+    /// paragraph of n `<span>`s was n squared again once `next_order` was
+    /// not: 1.82 / 5.40 / 17.66 s to open 10 000 / 20 000 / 40 000.
+    ///
+    /// One keyed `/P` of `SPANS` keyed `/Span`s, a `link_for` naming the
+    /// paragraph after every eighth span and one naming a span four later,
+    /// built **and finished** under the count of every kid's order read and
+    /// every key compared ([`look_at_kid`]): at most eight per span. Each of
+    /// the three walks put back word for word fails it: the siblings'
+    /// 8 411 647, the tree's 1 074 687, the kids' 2 248 959.
+    #[test]
+    fn a_tree_of_many_keyed_elements_costs_its_elements() {
+        const SPANS: u64 = 4096;
+        let target = Target::Uri("https://example.org/".to_string());
+        let mut builder = DocumentBuilder::new();
+        KIDS_LOOKED.with(|looked| looked.set(0));
+        builder.add_page(200.0, 200.0, |page| {
+            page.tagged_keyed(b"P", 0, 0, |page| {
+                for key in 1..=SPANS {
+                    page.tagged_keyed(b"Span", key, key, |page| page.raw(b"0 0 1 1 re f"));
+                    if key % 8 == 0 {
+                        assert!(page.link_for(0, 0.0, 0.0, 1.0, 1.0, &target));
+                    }
+                    if key % 8 == 4 {
+                        assert!(page.link_for(key, 0.0, 0.0, 1.0, 1.0, &target));
+                    }
+                }
+            });
+        });
+        let bytes = builder.finish();
+        let looked = KIDS_LOOKED.with(core::cell::Cell::get);
+        let spans = usize::try_from(SPANS).unwrap_or(usize::MAX);
+        assert!(
+            looked <= 8 * spans,
+            "a paragraph of {SPANS} keyed spans looked at {looked} kids and elements \
+             to build and finish"
+        );
+
+        let doc = CosDocument::open(bytes).expect("the built document opens");
+        let page = crate::pages::at(&doc, 0).expect("a page");
+        let content =
+            String::from_utf8_lossy(&crate::pages::content_bytes(&doc, &page)).into_owned();
+        assert_eq!(content.matches("/Span <<").count(), spans);
+    }
+
+    /// **A key merges an element with its own siblings only, and a keyed
+    /// link goes to the first element in the tree carrying the key** — what
+    /// the walks the indexes replaced answered. `Span` 7 is written under
+    /// `P` 1 on the first and third pages and under `Div` 2 on the second,
+    /// which links to key 7: the two `P`s and their spans merge, the `Div`'s
+    /// span stays its own, and the link joins the `P`'s span, the first in
+    /// the tree, after both of its sequences.
+    #[test]
+    fn a_key_merges_among_siblings_and_a_keyed_link_finds_the_first() {
+        let target = Target::Uri("https://example.org/".to_string());
+        let builder = DocumentBuilder::new();
+        let page_with = |parent: &[u8], key: u64, order: u64| {
+            let mut page = builder.begin_page(200.0, 200.0);
+            page.tagged_keyed(parent, key, order, |page| {
+                page.tagged_keyed(b"Span", 7, order + 1, |page| page.raw(b"0 0 1 1 re f"));
+            });
+            page
+        };
+        let first = page_with(b"P", 1, 0);
+        let mut second = page_with(b"Div", 2, 10);
+        assert!(second.link_for(7, 0.0, 0.0, 1.0, 1.0, &target));
+        let third = page_with(b"P", 1, 20);
+
+        let (arena, roots) = merge_tree(&[first, second, third], &|_, _| true);
+        let tags: Vec<&[u8]> = arena.iter().map(|merged| merged.tag.as_slice()).collect();
+        assert_eq!(tags, [&b"P"[..], b"Span", b"Div", b"Span"]);
+        assert!(matches!(
+            roots.as_slice(),
+            [MergedKid::Element(0), MergedKid::Element(2)]
+        ));
+        let kids = |at: usize| -> Vec<(usize, Option<u32>)> {
+            arena[at]
+                .kids
+                .iter()
+                .map(|kid| match kid {
+                    MergedKid::Content { page, mcid, .. } => (*page, Some(*mcid)),
+                    MergedKid::Object { page, .. } => (*page, None),
+                    MergedKid::Element(_) => (usize::MAX, None),
+                })
+                .collect()
+        };
+        // Each span's sequence is its page's first id: the paragraph's own
+        // sequences around it drew nothing and were taken back.
+        assert_eq!(kids(1), [(0, Some(0)), (2, Some(0)), (1, None)]);
+        assert_eq!(kids(3), [(1, Some(0))]);
+    }
+
+    /// **Where an element's kids reach is the greatest of their orders,
+    /// whatever joined and left.** A fixed pseudo-random script over one
+    /// page — draw, open and close an element (keyed at an arbitrary order
+    /// or not), `continue_at` an arbitrary order, a link, an empty and a
+    /// drawn layer — and after every step, every open element's
+    /// `next_order` is the maximum over its kids, worked out the slow way.
+    #[test]
+    fn next_order_is_the_greatest_order_among_the_kids() {
+        let target = Target::Uri("https://example.org/".to_string());
+        let mut builder = DocumentBuilder::new();
+        let layer = builder.add_layer("Notes", true).expect("a layer");
+        let mut page = builder.begin_page(200.0, 200.0);
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move |below: u64| {
+            // A 64-bit linear congruential step (Knuth's MMIX constants).
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % below
+        };
+        assert!(page.open_tag(&Tag::new(b"P")));
+        for _ in 0..4096 {
+            match next(8) {
+                0 | 1 => page.raw(b"0 0 1 1 re f"),
+                2 if page.tag_stack.len() < 6 => {
+                    let tag = match next(2) {
+                        0 => Tag::new(b"Span"),
+                        _ => Tag::new(b"Span").keyed(next(1 << 20), next(100)),
+                    };
+                    assert!(page.open_tag(&tag));
+                }
+                3 if page.tag_stack.len() > 1 => assert!(page.close_tag()),
+                4 => assert!(page.continue_at(next(100))),
+                5 => assert!(page.link(0.0, 0.0, 1.0, 1.0, &target)),
+                6 => assert!(page.optional(layer, |_| {})),
+                7 => assert!(page.optional(layer, |page| page.raw(b"1 1 1 1 re f"))),
+                _ => {}
+            }
+            for node in &page.tag_stack {
+                let slow = node.kids.iter().map(TaggedKid::order).max().unwrap_or(0);
+                assert_eq!(node.next_order(), slow);
+            }
+        }
+        builder.push_page(page);
+        CosDocument::open(builder.finish()).expect("the built document opens");
+    }
 
     /// 7.3.4.2's three escapes, on the operator a caller writes its **own**
     /// codes through.
@@ -5581,6 +10148,70 @@ mod image_tests {
         assert!(
             bytes.windows(jpeg.len()).any(|w| w == jpeg),
             "the JPEG data is embedded byte for byte"
+        );
+    }
+
+    /// A JPEG 2000 file is placed as `/JPXDecode` with its own bytes, and
+    /// the dictionary states neither a depth nor a space (Table 89).
+    ///
+    /// Read back through the parser rather than searched for as text, so the
+    /// absence of `/ColorSpace` is a fact about the image dictionary and not
+    /// about the file: a `/DeviceGray` elsewhere in the document would
+    /// satisfy a text search for the wrong reason.
+    #[test]
+    fn a_jpx_image_is_placed_without_a_depth_or_a_space() {
+        // Not a codestream: this writer never reads the bytes it places, and
+        // the test is about the dictionary around them.
+        const BODY: &[u8] = b"\xFF\x4F\xFF\x51 a JPEG 2000 codestream";
+        let jpx = || CompressedImage {
+            width: 1,
+            height: 9,
+            bits_per_component: 8,
+            color_space: ImageColorSpace::DeviceGray,
+            filter: Some(ImageFilter::Jpx),
+            data: BODY,
+            color_key_mask: None,
+            soft_mask: None,
+        };
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_image(b"Im", &ImageData::Compressed(jpx())));
+        builder.add_page(1.0, 9.0, |page| page.image(b"Im", 0.0, 0.0, 1.0, 9.0));
+        let bytes = builder.finish();
+        assert!(
+            bytes.windows(BODY.len()).any(|w| w == BODY),
+            "the bytes are placed as they are"
+        );
+
+        let doc = CosDocument::open(bytes).expect("the writer's own output parses");
+        let dict = (1..20u32)
+            .filter_map(|num| doc.get(ObjRef::new(num, 0)).ok())
+            .filter_map(|o| o.as_dict().cloned())
+            .find(|d| {
+                d.get_name(Name::FILTER)
+                    .and_then(|n| doc.name_bytes(n))
+                    .is_some_and(|n| &*n == b"JPXDecode")
+            })
+            .expect("an image dictionary naming /JPXDecode");
+        assert_eq!(dict.get_int(doc.intern(b"Width")), Some(1));
+        assert_eq!(dict.get_int(doc.intern(b"Height")), Some(9));
+        assert!(
+            !dict.contains_key(doc.intern(b"BitsPerComponent")),
+            "the codestream's precision applies"
+        );
+        assert!(
+            !dict.contains_key(doc.intern(b"ColorSpace")),
+            "the codestream's colour specification applies, unoverridden"
+        );
+        assert!(!dict.contains_key(Name::DECODE_PARMS));
+
+        // A colour-key mask has no depth to be ranges over.
+        let keyed = CompressedImage {
+            color_key_mask: Some(&[(0, 0)]),
+            ..jpx()
+        };
+        assert!(
+            !DocumentBuilder::new().add_image(b"Im", &ImageData::Compressed(keyed)),
+            "a colour-key mask over a /JPXDecode image is refused"
         );
     }
 
@@ -7703,6 +12334,137 @@ mod graphics_tests {
         assert!(text.contains("2 beginbfchar"), "{text}");
     }
 
+    /// **`text_pieces` writes its pieces as one text object**, moving from
+    /// one to the next with `Td` and changing font with `Tf` inside it, and
+    /// records each piece as the single-piece writers do.
+    ///
+    /// One object is the point: the end of a text object puts a reader's pen
+    /// down, and a line resumes after it only near where the last glyph
+    /// ended, so a glyph drawn back over the one before it — a mark on its
+    /// letter — and the glyph after it, in two objects, read as two lines
+    /// once the spacing between them passed half an em. `Td` moves from the
+    /// last `Td`, so each move is the difference between two pieces'
+    /// positions; a composite piece is drawn at a word spacing of zero, the
+    /// simple ones at the caller's.
+    ///
+    /// A piece in a font that is not composite is left out alone, as
+    /// [`PageBuilder::glyphs`] refuses its run, and the rest are drawn where
+    /// they were put; a number a content stream cannot carry writes nothing.
+    #[test]
+    fn text_pieces_are_one_text_object_moved_between_with_td() {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        assert!(builder.add_cid_font(b"C0", b"Metric", &metric_font(1000, true)));
+        builder.add_page(200.0, 200.0, |page| {
+            assert!(page.text_pieces(
+                12.0,
+                100.0,
+                (0.5, 2.0),
+                &[
+                    TextPiece {
+                        font: b"F0",
+                        x: 10.0,
+                        text: PieceText::Codes {
+                            codes: b"a(",
+                            characters: "a(",
+                        },
+                    },
+                    TextPiece {
+                        font: b"C0",
+                        x: 9.5,
+                        text: PieceText::Glyphs(&[Glyph {
+                            id: 2,
+                            text: "\u{301}",
+                        }]),
+                    },
+                    TextPiece {
+                        font: b"F0",
+                        x: 20.0,
+                        text: PieceText::Codes {
+                            codes: b"b c",
+                            characters: "b c",
+                        },
+                    },
+                ]
+            ));
+            assert!(!page.text_pieces(
+                12.0,
+                80.0,
+                (0.0, 0.0),
+                &[
+                    TextPiece {
+                        font: b"F0",
+                        x: 10.0,
+                        text: PieceText::Codes {
+                            codes: b"d",
+                            characters: "d",
+                        },
+                    },
+                    TextPiece {
+                        font: b"F0",
+                        x: 20.0,
+                        text: PieceText::Glyphs(&[Glyph { id: 3, text: "e" }]),
+                    },
+                ]
+            ));
+            let one = [TextPiece {
+                font: b"F0",
+                x: 10.0,
+                text: PieceText::Codes {
+                    codes: b"f",
+                    characters: "f",
+                },
+            }];
+            assert!(!page.text_pieces(f64::NAN, 60.0, (0.0, 0.0), &one));
+            assert!(!page.text_pieces(12.0, 60.0, (f64::INFINITY, 0.0), &one));
+            assert!(!page.text_pieces(12.0, 60.0, (0.0, 0.0), &[]));
+            // Two finite positions whose difference is not finite: the move
+            // between them would be written `inf 0 Td`.
+            let far = |x: f64| TextPiece {
+                font: b"F0",
+                x,
+                text: PieceText::Codes {
+                    codes: b"g",
+                    characters: "g",
+                },
+            };
+            assert!(!page.text_pieces(12.0, 60.0, (0.0, 0.0), &[far(-1.0e308), far(1.0e308)]));
+        });
+        let doc = opened(builder);
+        let content = content(&doc);
+        assert!(
+            content.contains(
+                "BT /F0 12 Tf 0.5 Tc 2 Tw 10 100 Td (a\\() Tj /C0 12 Tf 0 Tw -0.5 0 Td <0002> Tj \
+                 /F0 12 Tf 2 Tw 10.5 0 Td (b c) Tj ET\n"
+            ),
+            "the pieces are not one text object: {content}"
+        );
+        assert!(
+            content.contains("BT /F0 12 Tf 0 Tc 0 Tw 10 80 Td (d) Tj ET\n"),
+            "the piece in a simple font was not drawn beside the one left out: {content}"
+        );
+        assert_eq!(
+            content.matches("BT").count(),
+            2,
+            "a refused call wrote something: {content}"
+        );
+
+        let font = resource(&doc, b"Font", b"C0");
+        let stream = font
+            .get_ref(doc.intern(b"ToUnicode"))
+            .expect("a /ToUnicode stream");
+        let cmap = doc.stream_decoded(stream).expect("it decodes");
+        let text = String::from_utf8_lossy(&cmap).into_owned();
+        assert!(
+            text.contains("<0002> <0301>"),
+            "the composite piece's glyph was not recorded: {text}"
+        );
+        assert!(
+            !text.contains("<0003>"),
+            "the piece left out was recorded: {text}"
+        );
+    }
+
     /// `/ToUnicode` takes many glyphs to one character **and** one glyph to
     /// several, which is the mapping a simple font's `/Encoding` cannot hold.
     #[test]
@@ -7943,6 +12705,1109 @@ mod graphics_tests {
         assert!(
             form.contains_key(Name::FILTER),
             "the writer compressed the form's content stream"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tint_tests {
+    //! `/Separation` and `/DeviceN` on write (8.6.6.4, 8.6.6.5): what the
+    //! builder puts in the file and what it refuses. What the file *draws* is
+    //! `crates/tinker-pdf/tests/writer_tints.rs`, which has a renderer.
+
+    use super::*;
+    use crate::CosDocument;
+
+    fn opened(builder: DocumentBuilder) -> CosDocument {
+        CosDocument::open(builder.finish()).expect("the built document opens")
+    }
+
+    /// The colour space registered under `name` on the first page, resolved.
+    fn space(doc: &CosDocument, name: &[u8]) -> Vec<Object> {
+        let pages = crate::pages::collect(doc);
+        let page = pages.first().expect("a page");
+        let resources = page.resources.as_ref().expect("resources");
+        let table = doc.resolve_key(resources, doc.intern(b"ColorSpace"));
+        let entry = table
+            .as_dict()
+            .and_then(|t| t.get(doc.intern(name)))
+            .cloned()
+            .expect("the space is registered");
+        assert!(
+            entry.as_objref().is_some(),
+            "the space is one indirect object every page shares"
+        );
+        doc.resolve(&entry)
+            .as_array()
+            .map(<[Object]>::to_vec)
+            .expect("a colour space array")
+    }
+
+    fn name(doc: &CosDocument, object: &Object) -> Vec<u8> {
+        doc.resolve(object)
+            .as_name()
+            .and_then(|n| doc.name_bytes(n))
+            .map(|b| b.to_vec())
+            .expect("a name")
+    }
+
+    fn content(doc: &CosDocument) -> String {
+        let pages = crate::pages::collect(doc);
+        let bytes = crate::pages::content_bytes(doc, pages.first().expect("a page"));
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn ramp(c1: [f64; 3]) -> Function {
+        Function::Exponential {
+            domain: [0.0, 1.0],
+            c0: vec![1.0, 1.0, 1.0],
+            c1: c1.to_vec(),
+            n: 1.0,
+        }
+    }
+
+    /// Two inks into RGB: `R = 1 - a`, `G = 1 - b`, `B = 1 - (a + b) / 2`.
+    fn two_inks() -> Function {
+        use CalculatorOp::{Number as N, Operator as Op};
+        Function::Calculator {
+            domain: vec![[0.0, 1.0], [0.0, 1.0]],
+            range: vec![[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]],
+            program: vec![
+                N(1.0),
+                Op("index"),
+                N(1.0),
+                Op("exch"),
+                Op("sub"),
+                N(1.0),
+                Op("index"),
+                N(1.0),
+                Op("exch"),
+                Op("sub"),
+                N(3.0),
+                Op("index"),
+                N(3.0),
+                Op("index"),
+                Op("add"),
+                N(0.5),
+                Op("mul"),
+                N(1.0),
+                Op("exch"),
+                Op("sub"),
+                N(5.0),
+                N(3.0),
+                Op("roll"),
+                Op("pop"),
+                Op("pop"),
+            ],
+        }
+    }
+
+    /// 8.6.6.4: `[/Separation /name /Alternate tint]`, the transform its own
+    /// object, and `scn` with exactly one operand whatever the caller passed.
+    #[test]
+    fn a_separation_is_its_colorant_its_alternate_and_its_transform() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_separation_color_space(
+            b"CS0",
+            b"PANTONE 300 C",
+            DeviceSpace::Rgb,
+            &ramp([0.0, 0.37, 0.72]),
+        ));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.set_fill_tint(b"CS0", &[0.5, 0.9]));
+            assert!(page.set_stroke_tint(b"CS0", &[]));
+        });
+        let doc = opened(builder);
+
+        let array = space(&doc, b"CS0");
+        assert_eq!(array.len(), 4);
+        assert_eq!(name(&doc, &array[0]), b"Separation");
+        assert_eq!(name(&doc, &array[1]), b"PANTONE 300 C");
+        assert_eq!(name(&doc, &array[2]), b"DeviceRGB");
+        let function = doc.resolve(&array[3]);
+        let function = function.as_dict().expect("a type 2 dictionary");
+        assert_eq!(function.get_int(doc.intern(b"FunctionType")), Some(2));
+
+        let text = content(&doc);
+        assert!(
+            text.contains("/CS0 cs\n0.5 scn"),
+            "one tint, the first: {text}"
+        );
+        assert!(
+            text.contains("/CS0 CS\n0 SCN"),
+            "a missing tint is no ink: {text}"
+        );
+    }
+
+    /// 8.6.6.5: `[/DeviceN [/a /b] /Alternate tint]`, a type 4 stream whose
+    /// program is the caller's, and two operands to `scn`.
+    #[test]
+    fn a_device_n_is_its_colorants_and_a_calculator_stream() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_device_n_color_space(
+            b"CS1",
+            &[b"Spot A", b"Spot B"],
+            DeviceSpace::Rgb,
+            &two_inks(),
+            None,
+        ));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.set_fill_tint(b"CS1", &[0.25, 0.75, 1.0]));
+        });
+        let doc = opened(builder);
+
+        let array = space(&doc, b"CS1");
+        assert_eq!(array.len(), 4, "no attributes were asked for");
+        assert_eq!(name(&doc, &array[0]), b"DeviceN");
+        let names: Vec<Vec<u8>> = doc
+            .resolve(&array[1])
+            .as_array()
+            .expect("the colorant names")
+            .iter()
+            .map(|n| name(&doc, n))
+            .collect();
+        assert_eq!(names, [b"Spot A".to_vec(), b"Spot B".to_vec()]);
+        assert_eq!(name(&doc, &array[2]), b"DeviceRGB");
+
+        let reference = array[3].as_objref().expect("the transform is indirect");
+        let object = doc.get(reference).expect("it resolves");
+        let dict = object.as_dict().expect("a stream dictionary");
+        assert_eq!(dict.get_int(doc.intern(b"FunctionType")), Some(4));
+        let program = doc.stream_decoded(reference).expect("the program");
+        assert_eq!(
+            String::from_utf8_lossy(&program),
+            "{ 1 index 1 exch sub 1 index 1 exch sub 3 index 3 index add 0.5 mul 1 exch sub \
+             5 3 roll pop pop }"
+        );
+
+        let text = content(&doc);
+        assert!(text.contains("/CS1 cs\n0.25 0.75 scn"), "{text}");
+    }
+
+    /// Table 71's `/Colorants`: each named `/Separation` under its own
+    /// colorant, pointing at the space registered for it.
+    #[test]
+    fn device_n_attributes_name_the_separations_they_describe() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_separation_color_space(
+            b"SA",
+            b"Spot A",
+            DeviceSpace::Rgb,
+            &ramp([1.0, 0.0, 0.0]),
+        ));
+        assert!(!builder.add_device_n_color_space(
+            b"CS1",
+            &[b"Spot A", b"Spot B"],
+            DeviceSpace::Rgb,
+            &two_inks(),
+            Some(&DeviceNAttributes {
+                colorants: &[b"SA", b"nothing registered"],
+            }),
+        ));
+        assert!(builder.add_device_n_color_space(
+            b"CS1",
+            &[b"Spot A", b"Spot B"],
+            DeviceSpace::Rgb,
+            &two_inks(),
+            Some(&DeviceNAttributes {
+                colorants: &[b"SA"]
+            }),
+        ));
+        builder.add_page(20.0, 20.0, |_| {});
+        let doc = opened(builder);
+        let array = space(&doc, b"CS1");
+        let attributes = doc.resolve(&array[4]);
+        let colorants = doc.resolve_key(
+            attributes.as_dict().expect("an attributes dictionary"),
+            doc.intern(b"Colorants"),
+        );
+        let entry = colorants
+            .as_dict()
+            .and_then(|c| c.get(doc.intern(b"Spot A")))
+            .cloned()
+            .expect("Spot A is described");
+        let separation = doc.resolve(&entry);
+        let separation = separation.as_array().expect("a separation array");
+        assert_eq!(name(&doc, &separation[0]), b"Separation");
+        assert_eq!(name(&doc, &separation[1]), b"Spot A");
+    }
+
+    /// Everything a tint space can be wrong about is refused, and a refusal
+    /// registers nothing.
+    #[test]
+    fn a_tint_space_that_cannot_be_one_is_refused() {
+        let mut builder = DocumentBuilder::new();
+        // An empty colorant.
+        assert!(!builder.add_separation_color_space(
+            b"X",
+            b"",
+            DeviceSpace::Rgb,
+            &ramp([0.0, 0.0, 0.0])
+        ));
+        // A transform producing two values for a three-component alternate.
+        assert!(!builder.add_separation_color_space(
+            b"X",
+            b"Ink",
+            DeviceSpace::Rgb,
+            &Function::Exponential {
+                domain: [0.0, 1.0],
+                c0: vec![1.0, 1.0],
+                c1: vec![0.0, 0.0],
+                n: 1.0,
+            },
+        ));
+        // A type 2 function cannot take the two inputs a two-ink DeviceN has.
+        assert!(!builder.add_device_n_color_space(
+            b"X",
+            &[b"A", b"B"],
+            DeviceSpace::Rgb,
+            &ramp([0.0, 0.0, 0.0]),
+            None,
+        ));
+        // A colorant named twice; `/None` alone may repeat.
+        assert!(!builder.add_device_n_color_space(
+            b"X",
+            &[b"A", b"A"],
+            DeviceSpace::Rgb,
+            &two_inks(),
+            None,
+        ));
+        assert!(builder.add_device_n_color_space(
+            b"Y",
+            &[b"None", b"None"],
+            DeviceSpace::Rgb,
+            &two_inks(),
+            None,
+        ));
+        // Past Annex C's thirty-two colorants.
+        let many: Vec<Vec<u8>> = (0..33).map(|i| format!("Ink{i}").into_bytes()).collect();
+        let many: Vec<&[u8]> = many.iter().map(Vec::as_slice).collect();
+        assert!(!builder.add_device_n_color_space(
+            b"X",
+            &many,
+            DeviceSpace::Gray,
+            &two_inks(),
+            None
+        ));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(!page.set_fill_tint(b"X", &[1.0]), "nothing is under X");
+            assert!(page.set_fill_tint(b"Y", &[1.0, 1.0]));
+        });
+    }
+
+    /// 8.6.6.5: `/All` is a `/Separation`'s special name and shall not be
+    /// used in a `/DeviceN` names array; a `/Separation` of `/All` is still
+    /// written.
+    #[test]
+    fn a_device_n_naming_all_is_refused() {
+        let mut builder = DocumentBuilder::new();
+        for names in [[&b"All"[..], b"B"], [b"A", b"All"]] {
+            assert!(
+                !builder.add_device_n_color_space(
+                    b"X",
+                    &names,
+                    DeviceSpace::Rgb,
+                    &two_inks(),
+                    None
+                ),
+                "{names:?}"
+            );
+        }
+        assert!(builder.add_separation_color_space(
+            b"Y",
+            b"All",
+            DeviceSpace::Rgb,
+            &ramp([0.0, 0.0, 0.0])
+        ));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(!page.set_fill_tint(b"X", &[1.0, 1.0]), "nothing is under X");
+        });
+    }
+
+    /// An image in a registered `/ICCBased` space whose `components` is not
+    /// the space's `/N` is refused, as a tint image with the wrong count is:
+    /// one channel against a three-channel profile is rows a third as wide as
+    /// a reader reads them.
+    #[test]
+    fn an_icc_image_whose_components_are_not_the_spaces_n_is_refused() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_icc_color_space(b"CS0", b"not read here", 3));
+        let image = |components: u8, data: &'static [u8]| {
+            ImageData::Compressed(CompressedImage {
+                width: 1,
+                height: 1,
+                bits_per_component: 8,
+                color_space: ImageColorSpace::Icc {
+                    resource: b"CS0",
+                    components,
+                },
+                filter: None,
+                data,
+                color_key_mask: None,
+                soft_mask: None,
+            })
+        };
+        assert!(!builder.add_image(b"Im0", &image(1, &[0])));
+        assert!(!builder.add_image(b"Im0", &image(4, &[0, 0, 0, 0])));
+        assert!(builder.add_image(b"Im1", &image(3, &[0, 0, 0])));
+        let registered: Vec<&[u8]> = builder
+            .resources
+            .images
+            .iter()
+            .map(|(name, _)| name.as_slice())
+            .collect();
+        assert_eq!(registered, [&b"Im1"[..]], "nothing was registered as Im0");
+    }
+
+    /// **7.10.2's sampled function**: written as a stream of sixteen-bit
+    /// samples under `/Size` and `/BitsPerSample 16`, and refused where its
+    /// table does not add up — a sample short, an axis of one point, a domain
+    /// of no width, or an arity that is not the caller's.
+    #[test]
+    fn a_sampled_function_writes_its_table_and_refuses_one_that_does_not_add_up() {
+        let table = |size: Vec<u32>, samples: Vec<u16>| Function::Sampled {
+            domain: vec![[0.0, 1.0]; size.len()],
+            range: vec![[0.0, 1.0]; 3],
+            size,
+            samples,
+        };
+        // One input at six points, three outputs each: eighteen samples.
+        let good = table(vec![6], (0..18).collect());
+        assert!(good.is_valid(1, 3));
+        assert!(!good.is_valid(2, 3), "one input, not two");
+        assert!(!good.is_valid(1, 1), "three outputs, not one");
+        assert!(
+            !table(vec![6], (0..17).collect()).is_valid(1, 3),
+            "a sample short"
+        );
+        assert!(
+            !table(vec![1], (0..3).collect()).is_valid(1, 3),
+            "one point"
+        );
+        let two = table(vec![2, 3], (0..18).collect());
+        assert!(two.is_valid(2, 3), "two inputs at 2 x 3 points");
+        assert!(!table(vec![2, 3], (0..17).collect()).is_valid(2, 3));
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_device_n_color_space(
+            b"N",
+            &[b"A", b"B"],
+            DeviceSpace::Rgb,
+            &two,
+            None
+        ));
+        assert!(
+            !Function::Sampled {
+                domain: vec![[1.0, 1.0]],
+                range: vec![[0.0, 1.0]; 3],
+                size: vec![6],
+                samples: (0..18).collect(),
+            }
+            .is_valid(1, 3),
+            "a domain of no width"
+        );
+
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_separation_color_space(b"S", b"A", DeviceSpace::Rgb, &good));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.set_fill_tint(b"S", &[0.5]));
+        });
+        let bytes = builder.finish();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("/FunctionType 0"), "{text}");
+        assert!(text.contains("/BitsPerSample 16"), "{text}");
+        assert!(text.contains("/Size [6]"), "{text}");
+        // The samples, big-endian: 0, 1, 2 … as 00 00 00 01 00 02.
+        let at = bytes
+            .windows(6)
+            .position(|w| w == [0, 0, 0, 1, 0, 2])
+            .expect("the samples are the stream's data");
+        assert_eq!(
+            &bytes[at + 34..at + 36],
+            &[0, 17],
+            "and all eighteen of them"
+        );
+    }
+
+    /// The calculator checks, one refusal at a time.
+    #[test]
+    fn a_calculator_that_cannot_be_evaluated_as_written_is_refused() {
+        use CalculatorOp::{If, IfElse, Number as N, Operator as Op};
+        let one_to_one = |program: Vec<CalculatorOp>| Function::Calculator {
+            domain: vec![[0.0, 1.0]],
+            range: vec![[0.0, 1.0]],
+            program,
+        };
+        let valid = |f: &Function| f.is_valid(1, 1);
+
+        assert!(valid(&one_to_one(vec![N(1.0), Op("exch"), Op("sub")])));
+        assert!(
+            !valid(&one_to_one(vec![Op("frobnicate")])),
+            "not a Table 42 operator"
+        );
+        assert!(
+            !valid(&one_to_one(vec![Op("if")])),
+            "if is a variant, not an operator"
+        );
+        assert!(!valid(&one_to_one(vec![Op("add")])), "one operand for two");
+        assert!(!valid(&one_to_one(vec![N(2.0)])), "two outputs for one");
+        assert!(!valid(&one_to_one(vec![Op("pop")])), "no output at all");
+        assert!(!valid(&one_to_one(vec![N(f64::NAN), Op("add")])));
+        // A count the check cannot see is refused; the same count as a literal
+        // is not.
+        assert!(!valid(&one_to_one(vec![Op("dup"), Op("copy"), Op("pop"),])));
+        assert!(valid(&one_to_one(vec![
+            Op("dup"),
+            N(1.0),
+            Op("copy"),
+            Op("pop"),
+            Op("pop"),
+        ])));
+        // `if` must leave the stack where it found it; `ifelse`'s arms must
+        // agree with each other.
+        assert!(valid(&one_to_one(vec![
+            Op("dup"),
+            N(0.5),
+            Op("gt"),
+            If(vec![N(0.5), Op("mul")]),
+        ])));
+        assert!(!valid(&one_to_one(vec![
+            Op("dup"),
+            N(0.5),
+            Op("gt"),
+            If(vec![Op("pop")]),
+        ])));
+        assert!(valid(&one_to_one(vec![
+            Op("dup"),
+            N(0.5),
+            Op("gt"),
+            IfElse(vec![N(1.0), Op("sub")], vec![N(2.0), Op("mul")]),
+        ])));
+        assert!(!valid(&one_to_one(vec![
+            Op("dup"),
+            N(0.5),
+            Op("gt"),
+            // The first arm alone would end one deep, which is the right
+            // count; the second ends two deep, so the output count depends on
+            // the input.
+            IfElse(vec![N(1.0), Op("add")], vec![N(2.0)]),
+        ])));
+        // A domain that does not match the inputs, and a reversed interval.
+        let mut wrong = one_to_one(vec![]);
+        if let Function::Calculator { domain, .. } = &mut wrong {
+            domain.push([0.0, 1.0]);
+        }
+        assert!(!valid(&wrong));
+        let mut reversed = one_to_one(vec![]);
+        if let Function::Calculator { range, .. } = &mut reversed {
+            range[0] = [1.0, 0.0];
+        }
+        assert!(!valid(&reversed));
+        // Nested past the reader's reach, and just inside it.
+        let nest = |levels: u32| {
+            let mut body = vec![N(1.0), Op("mul")];
+            for _ in 0..levels {
+                body = vec![Op("dup"), N(0.0), Op("gt"), If(body)];
+                // `dup 0 gt` leaves a boolean under the value, and the `if`
+                // consumes it; the block leaves the value where it was.
+            }
+            one_to_one(body)
+        };
+        assert!(valid(&nest(MAX_CALCULATOR_NESTING)));
+        assert!(!valid(&nest(MAX_CALCULATOR_NESTING + 1)));
+    }
+
+    /// The operand count of `scn` is the space's, whatever the caller passed,
+    /// and out-of-range tints are clamped rather than written.
+    #[test]
+    fn tints_are_counted_by_the_space_and_clamped() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_device_n_color_space(
+            b"CS1",
+            &[b"A", b"B"],
+            DeviceSpace::Rgb,
+            &two_inks(),
+            None,
+        ));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.set_fill_tint(b"CS1", &[1.5]));
+            assert!(page.set_stroke_tint(b"CS1", &[-1.0, f64::NAN, 0.5]));
+        });
+        let text = content(&opened(builder));
+        assert!(text.contains("/CS1 cs\n1 0 scn"), "{text}");
+        assert!(text.contains("/CS1 CS\n0 0 SCN"), "{text}");
+    }
+
+    /// An image in a tint space names the space's own object, and one whose
+    /// component count disagrees with the space is refused.
+    #[test]
+    fn an_image_in_a_tint_space_names_the_space_object() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_separation_color_space(
+            b"CS0",
+            b"Ink",
+            DeviceSpace::Rgb,
+            &ramp([0.0, 0.0, 0.0]),
+        ));
+        let image = |components: u8, resource: &'static [u8]| {
+            ImageData::Compressed(CompressedImage {
+                width: 2,
+                height: 1,
+                bits_per_component: 8,
+                color_space: ImageColorSpace::Tint {
+                    resource,
+                    components,
+                },
+                filter: None,
+                data: &[0, 255, 0, 255],
+                color_key_mask: None,
+                soft_mask: None,
+            })
+        };
+        assert!(!builder.add_image(b"Bad", &image(2, b"CS0")));
+        assert!(!builder.add_image(b"Bad", &image(1, b"unregistered")));
+        assert!(builder.add_image(b"Im0", &image(1, b"CS0")));
+        builder.add_page(20.0, 20.0, |page| page.image(b"Im0", 0.0, 0.0, 20.0, 20.0));
+        let doc = opened(builder);
+
+        let pages = crate::pages::collect(&doc);
+        let resources = pages[0].resources.as_ref().expect("resources");
+        let xobjects = doc.resolve_key(resources, doc.intern(b"XObject"));
+        let xobjects = xobjects.as_dict().expect("an /XObject dictionary");
+        assert!(xobjects.get(doc.intern(b"Bad")).is_none());
+        let image = doc.resolve_key(xobjects, doc.intern(b"Im0"));
+        let image = image.as_dict().expect("the image");
+        let named = image.get(doc.intern(b"ColorSpace")).expect("a /ColorSpace");
+        let spaces = doc.resolve_key(resources, doc.intern(b"ColorSpace"));
+        let registered = spaces
+            .as_dict()
+            .and_then(|s| s.get(doc.intern(b"CS0")))
+            .cloned()
+            .expect("CS0");
+        assert_eq!(named, &registered, "the image names the space's object");
+    }
+}
+
+#[cfg(test)]
+mod layer_tests {
+    //! Optional content on write (8.11): what the builder puts in the file.
+    //! What the file *draws*, and what the reader lists, is
+    //! `crates/tinker-pdf/tests/writer_layers.rs`.
+
+    use super::*;
+    use crate::CosDocument;
+
+    fn opened(builder: DocumentBuilder) -> CosDocument {
+        CosDocument::open(builder.finish()).expect("the built document opens")
+    }
+
+    fn content(doc: &CosDocument) -> String {
+        let pages = crate::pages::collect(doc);
+        let bytes = crate::pages::content_bytes(doc, pages.first().expect("a page"));
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn refs(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Vec<u32> {
+        doc.resolve_key(dict, doc.intern(key))
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Object::as_objref)
+                    .map(|r| r.num)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// `BDC` and `EMC` balance, and never close more than is open.
+    fn balanced(text: &str) -> bool {
+        let mut depth = 0i32;
+        for token in text.split_whitespace() {
+            match token {
+                "BDC" | "BMC" => depth += 1,
+                "EMC" => depth -= 1,
+                _ => {}
+            }
+            if depth < 0 {
+                return false;
+            }
+        }
+        depth == 0
+    }
+
+    /// 8.11.2.1 and 8.11.4.2: each layer an `/OCG` with its `/Name`, the
+    /// catalog listing every one in `/OCGs` and in `/D /Order` in the order
+    /// they were added, `/D /OFF` naming the hidden one, and each page
+    /// carrying them in `/Properties` for its `/OC` sequences.
+    #[test]
+    fn a_layer_is_a_group_the_catalog_lists_with_its_default() {
+        let mut builder = DocumentBuilder::new();
+        let shown = builder.add_layer("Shown", true).expect("a layer");
+        let hidden = builder.add_layer("Hidden", false).expect("a layer");
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.optional(shown, |page| page.fill_rect(0.0, 0.0, 5.0, 5.0, 0.0)));
+            assert!(page.optional(hidden, |page| page.fill_rect(5.0, 5.0, 5.0, 5.0, 0.0)));
+        });
+        let doc = opened(builder);
+
+        let catalog = doc.catalog().expect("a catalog");
+        let properties = doc.resolve_key(&catalog, doc.intern(b"OCProperties"));
+        let properties = properties.as_dict().expect("/OCProperties");
+        let groups = refs(&doc, properties, b"OCGs");
+        assert_eq!(groups.len(), 2);
+        let configuration = doc.resolve_key(properties, doc.intern(b"D"));
+        let configuration = configuration.as_dict().expect("/D");
+        assert_eq!(refs(&doc, configuration, b"Order"), groups);
+        assert_eq!(refs(&doc, configuration, b"OFF"), vec![groups[1]]);
+        assert!(configuration.get(doc.intern(b"ON")).is_none());
+        assert!(configuration.get(doc.intern(b"Name")).is_some());
+
+        for (at, name) in [(0, "Shown"), (1, "Hidden")] {
+            let group = doc
+                .get(ObjRef::new(groups[at], 0))
+                .expect("the group resolves");
+            let group = group.as_dict().expect("a group dictionary");
+            assert_eq!(
+                group
+                    .get_name(Name::TYPE)
+                    .and_then(|n| doc.name_bytes(n))
+                    .as_deref(),
+                Some(&b"OCG"[..])
+            );
+            let text = doc
+                .resolve_key(group, doc.intern(b"Name"))
+                .as_string()
+                .map(|s| crate::decode_text_string(&s.bytes));
+            assert_eq!(text.as_deref(), Some(name));
+        }
+
+        let pages = crate::pages::collect(&doc);
+        let resources = pages[0].resources.as_ref().expect("resources");
+        let table = doc.resolve_key(resources, doc.intern(b"Properties"));
+        let table = table.as_dict().expect("/Properties");
+        assert_eq!(
+            table.get_ref(doc.intern(b"OC0")).map(|r| r.num),
+            Some(groups[0])
+        );
+        assert_eq!(
+            table.get_ref(doc.intern(b"OC1")).map(|r| r.num),
+            Some(groups[1])
+        );
+        let text = content(&doc);
+        assert!(text.contains("/OC /OC0 BDC\n"), "{text}");
+        assert!(text.contains("/OC /OC1 BDC\n"), "{text}");
+        assert!(balanced(&text), "{text}");
+    }
+
+    /// A document with no layer has no `/OCProperties` and no `/Properties`,
+    /// and a layer whose closure drew nothing writes nothing.
+    #[test]
+    fn nothing_is_written_that_was_not_asked_for() {
+        let mut plain = DocumentBuilder::new();
+        plain.add_page(20.0, 20.0, |page| page.fill_rect(0.0, 0.0, 1.0, 1.0, 0.0));
+        let doc = opened(plain);
+        let catalog = doc.catalog().expect("a catalog");
+        assert!(catalog.get(doc.intern(b"OCProperties")).is_none());
+
+        let mut builder = DocumentBuilder::new();
+        let layer = builder.add_layer("Empty", true).expect("a layer");
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.optional(layer, |_| {}));
+            page.tagged(b"P", |page| {
+                assert!(page.optional(layer, |_| {}));
+                page.fill_rect(0.0, 0.0, 1.0, 1.0, 0.0);
+            });
+        });
+        let text = content(&opened(builder));
+        assert!(
+            !text.contains("/OC"),
+            "an empty layer wrote nothing: {text}"
+        );
+        assert_eq!(
+            text.matches("BDC").count(),
+            1,
+            "and it did not split the element it sat in: {text}"
+        );
+    }
+
+    /// A layer inside a structure element splits the element's sequence
+    /// around itself, so every `/MCID` sequence stays innermost and each `EMC`
+    /// closes what it should.
+    #[test]
+    fn a_layer_inside_an_element_splits_the_elements_sequence() {
+        let mut builder = DocumentBuilder::new();
+        let layer = builder.add_layer("Notes", true).expect("a layer");
+        builder.add_page(20.0, 20.0, |page| {
+            page.tagged(b"P", |page| {
+                page.raw(b"1 0 0 1 0 0 cm");
+                assert!(page.optional(layer, |page| page.raw(b"0 0 1 1 re f")));
+                page.raw(b"2 0 0 2 0 0 cm");
+            });
+        });
+        let text = content(&opened(builder));
+        assert_eq!(
+            text,
+            "/P <</MCID 0>> BDC\n1 0 0 1 0 0 cm\nEMC\n\
+             /OC /OC0 BDC\n/P <</MCID 1>> BDC\n0 0 1 1 re f\nEMC\nEMC\n\
+             /P <</MCID 2>> BDC\n2 0 0 2 0 0 cm\nEMC\n\n"
+        );
+    }
+
+    /// An element inside a layer nests inside it; an element inside a layer
+    /// inside an element is the child element, inside the layer, with the
+    /// parent's empty pieces taken back.
+    #[test]
+    fn an_element_inside_a_layer_nests_inside_it() {
+        let mut builder = DocumentBuilder::new();
+        let layer = builder.add_layer("Notes", true).expect("a layer");
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.optional(layer, |page| {
+                page.tagged(b"P", |page| page.raw(b"0 0 1 1 re f"));
+            }));
+            page.tagged(b"Div", |page| {
+                assert!(page.optional(layer, |page| {
+                    page.tagged(b"Span", |page| page.raw(b"1 1 1 1 re f"));
+                }));
+            });
+        });
+        let doc = opened(builder);
+        let text = content(&doc);
+        assert_eq!(
+            text,
+            "/OC /OC0 BDC\n/P <</MCID 0>> BDC\n0 0 1 1 re f\nEMC\nEMC\n\
+             /OC /OC0 BDC\n/Span <</MCID 1>> BDC\n1 1 1 1 re f\nEMC\nEMC\n\n"
+        );
+        assert!(balanced(&text));
+    }
+
+    /// A layer a page cannot name is refused, and its closure is not run —
+    /// content drawn outside the layer it was meant for would show when the
+    /// layer is hidden.
+    #[test]
+    fn a_layer_the_page_cannot_name_is_refused_and_draws_nothing() {
+        let mut other = DocumentBuilder::new();
+        let _ = other.add_layer("A", true);
+        let foreign = other.add_layer("B", true).expect("a layer");
+
+        let mut builder = DocumentBuilder::new();
+        let early = builder.begin_page(20.0, 20.0);
+        let late = builder.add_layer("Late", true).expect("a layer");
+        let mut page = early;
+        let mut ran = false;
+        assert!(!page.optional(late, |_| ran = true));
+        assert!(!ran, "the closure of a refused layer is not run");
+        builder.push_page(page);
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(!page.optional(foreign, |page| page.raw(b"0 0 1 1 re f")));
+        });
+        let doc = opened(builder);
+        let pages = crate::pages::collect(&doc);
+        let text =
+            String::from_utf8_lossy(&crate::pages::content_bytes(&doc, &pages[1])).into_owned();
+        assert!(!text.contains("re f"), "{text}");
+    }
+
+    /// A layer from another builder is refused **even where this builder
+    /// holds a layer at the same position** — each builder's first layer is
+    /// its zeroth, so a handle that was only an index would draw the content
+    /// into whichever of this builder's layers shares it, here a hidden one.
+    #[test]
+    fn a_layer_from_another_builder_is_refused_at_an_index_this_one_holds() {
+        let mut other = DocumentBuilder::new();
+        let foreign = other.add_layer("Foreign", true).expect("a layer");
+        let mut builder = DocumentBuilder::new();
+        let mine = builder.add_layer("Mine", false).expect("a layer");
+        assert_ne!(foreign, mine, "two builders' first layers are two layers");
+        builder.add_page(20.0, 20.0, |page| {
+            let mut ran = false;
+            assert!(!page.optional(foreign, |_| ran = true));
+            assert!(!ran, "the closure of a refused layer is not run");
+            assert!(page.optional(mine, |page| page.raw(b"0 0 1 1 re f")));
+        });
+        let doc = opened(builder);
+        assert_eq!(content(&doc), "/OC /OC0 BDC\n0 0 1 1 re f\nEMC\n\n");
+        // And the handle still works on the builder that made it.
+        other.add_page(20.0, 20.0, |page| {
+            assert!(page.optional(foreign, |page| page.raw(b"0 0 1 1 re f")));
+        });
+    }
+
+    /// ISO 19005-1 6.1.13: a part 1 document has no optional content, and a
+    /// layer is refused by that clause.
+    #[test]
+    fn a_part_one_document_refuses_a_layer() {
+        let mut builder = DocumentBuilder::archival(ArchivalProfile {
+            part: ArchivalPart::One,
+            level: Some(ArchivalLevel::B),
+            destination_profile: vec![0; 128],
+            destination_space: DeviceSpace::Rgb,
+            output_condition: "sRGB".to_string(),
+            language: None,
+        });
+        assert_eq!(builder.add_layer("Refused", true), None);
+        assert_eq!(builder.refusals(), &[ArchivalRefusal::OptionalContent]);
+        assert_eq!(ArchivalRefusal::OptionalContent.clause(), "6.1.13");
+    }
+}
+
+#[cfg(test)]
+mod cie_tests {
+    //! CIE-based spaces on write (8.6.5.2–8.6.5.4): what the builder puts in
+    //! the file. What the file *draws*, and what the reader reads back, is
+    //! `crates/tinker-pdf/tests/writer_cie.rs`.
+
+    use super::*;
+    use crate::CosDocument;
+
+    const D50: [f64; 3] = [0.9642, 1.0, 0.8249];
+
+    /// A dictionary key and the numbers under it.
+    type Entry = (Vec<u8>, Vec<f64>);
+
+    fn opened(builder: DocumentBuilder) -> CosDocument {
+        CosDocument::open(builder.finish()).expect("the built document opens")
+    }
+
+    fn content(doc: &CosDocument) -> String {
+        let pages = crate::pages::collect(doc);
+        let bytes = crate::pages::content_bytes(doc, pages.first().expect("a page"));
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// The space page 0's `/ColorSpace` names `name`: its family, and each
+    /// key of its dictionary with the numbers under it, sorted by key.
+    fn space(doc: &CosDocument, name: &[u8]) -> (Vec<u8>, Vec<Entry>) {
+        let pages = crate::pages::collect(doc);
+        let resources = pages[0].resources.as_ref().expect("resources");
+        let table = doc.resolve_key(resources, doc.intern(b"ColorSpace"));
+        let entry = doc.resolve_key(table.as_dict().expect("/ColorSpace"), doc.intern(name));
+        let items = entry.as_array().expect("a space array");
+        assert_eq!(items.len(), 2, "the family and its dictionary");
+        let family = items[0]
+            .as_name()
+            .and_then(|n| doc.name_bytes(n))
+            .expect("a family name")
+            .to_vec();
+        let dict = doc.resolve(&items[1]);
+        let mut keys: Vec<Entry> = dict
+            .as_dict()
+            .expect("a parameter dictionary")
+            .iter()
+            .map(|(key, value)| {
+                let numbers = match doc.resolve(value).as_array() {
+                    Some(items) => items.iter().filter_map(Object::as_number).collect(),
+                    None => value.as_number().into_iter().collect(),
+                };
+                (doc.name_bytes(*key).expect("a key").to_vec(), numbers)
+            })
+            .collect();
+        keys.sort_by(|a, b| a.0.cmp(&b.0));
+        (family, keys)
+    }
+
+    /// Each family with `/WhitePoint` always and every other parameter only
+    /// where it is not Table 63–65's default — so a space at its defaults
+    /// says its white and nothing more, and one that is not says each
+    /// parameter that differs.
+    #[test]
+    fn a_cie_space_writes_its_white_and_what_differs_from_the_defaults() {
+        let mut builder = DocumentBuilder::new();
+        let plain = [
+            CieSpace::CalGray {
+                white: D50,
+                black: [0.0; 3],
+                gamma: 1.0,
+            },
+            CieSpace::CalRgb {
+                white: D50,
+                black: [0.0; 3],
+                gamma: [1.0; 3],
+                matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            },
+            CieSpace::Lab {
+                white: D50,
+                black: [0.0; 3],
+                range: [-100.0, 100.0, -100.0, 100.0],
+            },
+        ];
+        let full = [
+            CieSpace::CalGray {
+                white: D50,
+                black: [0.01, 0.01, 0.01],
+                gamma: 2.2,
+            },
+            CieSpace::CalRgb {
+                white: D50,
+                black: [0.0; 3],
+                gamma: [1.8, 2.0, 2.2],
+                matrix: [0.4, 0.2, 0.0, 0.4, 0.7, 0.1, 0.2, 0.1, 0.7],
+            },
+            CieSpace::Lab {
+                white: D50,
+                black: [0.0; 3],
+                range: [-128.0, 127.0, -128.0, 127.0],
+            },
+        ];
+        let names: [&[u8]; 6] = [b"G0", b"R0", b"L0", b"G1", b"R1", b"L1"];
+        for (name, space) in names.iter().zip(plain.iter().chain(full.iter())) {
+            assert!(builder.add_cie_color_space(name, space), "{space:?}");
+        }
+        builder.add_page(20.0, 20.0, |page| {
+            for name in names {
+                assert!(page.set_fill_cie(name, &[]));
+            }
+        });
+        let doc = opened(builder);
+        let white = (b"WhitePoint".to_vec(), D50.to_vec());
+        assert_eq!(
+            space(&doc, b"G0"),
+            (b"CalGray".to_vec(), vec![white.clone()])
+        );
+        assert_eq!(
+            space(&doc, b"R0"),
+            (b"CalRGB".to_vec(), vec![white.clone()])
+        );
+        assert_eq!(space(&doc, b"L0"), (b"Lab".to_vec(), vec![white.clone()]));
+        assert_eq!(
+            space(&doc, b"G1"),
+            (
+                b"CalGray".to_vec(),
+                vec![
+                    (b"BlackPoint".to_vec(), vec![0.01; 3]),
+                    (b"Gamma".to_vec(), vec![2.2]),
+                    white.clone(),
+                ]
+            )
+        );
+        assert_eq!(
+            space(&doc, b"R1"),
+            (
+                b"CalRGB".to_vec(),
+                vec![
+                    (b"Gamma".to_vec(), vec![1.8, 2.0, 2.2]),
+                    (
+                        b"Matrix".to_vec(),
+                        vec![0.4, 0.2, 0.0, 0.4, 0.7, 0.1, 0.2, 0.1, 0.7]
+                    ),
+                    white.clone(),
+                ]
+            )
+        );
+        assert_eq!(
+            space(&doc, b"L1"),
+            (
+                b"Lab".to_vec(),
+                vec![
+                    (b"Range".to_vec(), vec![-128.0, 127.0, -128.0, 127.0]),
+                    white,
+                ]
+            )
+        );
+    }
+
+    /// The setters write the space's own operand count, each component
+    /// clamped to the space's own range: 0..1 for `/CalGray` and `/CalRGB`,
+    /// and for `/Lab` `L*` to 0..100 and `a*`, `b*` to its `/Range` — not
+    /// 0..1, which would turn every `/Lab` colour into near-black. Missing
+    /// components are zero, extra ones dropped, and the stroking setter uses
+    /// Table 74's capitals.
+    #[test]
+    fn a_cie_colour_is_written_with_the_spaces_count_and_ranges() {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_cie_color_space(
+            b"G",
+            &CieSpace::CalGray {
+                white: D50,
+                black: [0.0; 3],
+                gamma: 1.0,
+            }
+        ));
+        assert!(builder.add_cie_color_space(
+            b"L",
+            &CieSpace::Lab {
+                white: D50,
+                black: [0.0; 3],
+                range: [-128.0, 127.0, -50.0, 50.0],
+            }
+        ));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.set_fill_cie(b"G", &[1.5, 0.3]));
+            assert!(page.set_stroke_cie(b"L", &[150.0, -200.0, 20.0, 9.0]));
+            assert!(page.set_fill_cie(b"L", &[f64::NAN]));
+            assert!(!page.set_fill_cie(b"X", &[0.5]), "nothing is under X");
+        });
+        let text = content(&opened(builder));
+        assert!(text.contains("/G cs\n1 sc\n"), "{text}");
+        assert!(text.contains("/L CS\n100 -128 20 SC\n"), "{text}");
+        assert!(text.contains("/L cs\n0 0 0 sc\n"), "{text}");
+    }
+
+    /// Re-registering a name as another kind of space forgets the first:
+    /// a CIE space under a name an ICC profile held takes the setters and the
+    /// images it does, and an ICC profile under a CIE name takes them back.
+    #[test]
+    fn a_name_means_the_space_registered_under_it_last() {
+        let mut builder = DocumentBuilder::new();
+        let gray = CieSpace::CalGray {
+            white: D50,
+            black: [0.0; 3],
+            gamma: 1.0,
+        };
+        assert!(builder.add_icc_color_space(b"CS", b"not read here", 3));
+        assert!(builder.add_cie_color_space(b"CS", &gray));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(!page.set_fill_icc(b"CS", &[0.5, 0.5, 0.5]));
+            assert!(page.set_fill_cie(b"CS", &[0.5]));
+        });
+        assert!(builder.add_icc_color_space(b"CS", b"not read here", 3));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(!page.set_fill_cie(b"CS", &[0.5]));
+            assert!(page.set_fill_icc(b"CS", &[0.5, 0.5, 0.5]));
+        });
+    }
+
+    /// The tables are held to what the file **says**, not to the numbers
+    /// handed over: the writer prints a real to six places, so a white `X`
+    /// or `Z` or a gamma under half a millionth is written as 0, which Tables
+    /// 63–65 forbid, and a `/Range` pair a ten-millionth apart is written as
+    /// one number twice. Each is refused; the same values a printable
+    /// distance from those edges register, and are written as themselves.
+    #[test]
+    fn a_value_the_file_would_write_as_forbidden_is_refused() {
+        let gray = |white: [f64; 3], gamma: f64| CieSpace::CalGray {
+            white,
+            black: [0.0; 3],
+            gamma,
+        };
+        let lab = |range: [f64; 4]| CieSpace::Lab {
+            white: D50,
+            black: [0.0; 3],
+            range,
+        };
+        assert!(!gray([1e-7, 1.0, 0.8249], 1.0).is_valid(), "white X");
+        assert!(!gray([0.9642, 1.0, 4e-7], 1.0).is_valid(), "white Z");
+        assert!(!gray(D50, 1e-7).is_valid(), "gamma");
+        assert!(!lab([0.1, 0.100_000_01, -1.0, 1.0]).is_valid(), "a* range");
+        assert!(!CieSpace::CalRgb {
+            white: D50,
+            black: [0.0; 3],
+            gamma: [1.0, 2e-7, 1.0],
+            matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        }
+        .is_valid());
+
+        let mut builder = DocumentBuilder::new();
+        let small = gray([0.000_005, 1.0, 0.000_007], 0.000_003);
+        assert!(small.is_valid());
+        assert!(builder.add_cie_color_space(b"CS", &small));
+        builder.add_page(20.0, 20.0, |page| {
+            assert!(page.set_fill_cie(b"CS", &[0.5]));
+        });
+        let (_, keys) = space(&opened(builder), b"CS");
+        assert!(
+            keys.contains(&(b"Gamma".to_vec(), vec![0.000_003]))
+                && keys.contains(&(b"WhitePoint".to_vec(), vec![0.000_005, 1.0, 0.000_007])),
+            "{keys:?}"
         );
     }
 }

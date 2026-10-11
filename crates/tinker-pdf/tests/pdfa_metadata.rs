@@ -1862,3 +1862,141 @@ fn the_three_array_containers_are_told_apart() {
         Vec::new()
     );
 }
+
+// ---- 6.7.5 / 6.6.2.1 / 6.7.2.1: the packet header ---------------------------
+//
+// "The bytes attribute shall not be used in the header of an XMP packet" and
+// "The encoding attribute shall not be used in the header of an XMP packet",
+// in the words veraPDF's published rules give all three numberings (6.7.5-1
+// and -2, 6.6.2.1-2 and -3, 6.7.2.1-2 and -3; wiki at `109b482`). The
+// corpus's `6-6-2-1-t01-fail-b` and `-fail-c` name the two attributes in
+// their own outlines; these fixtures stand in for them where the corpus is
+// not reachable.
+
+/// `claiming(part, level)` with `extra` written into the packet header.
+fn with_header(part: &str, level: &str, extra: &str) -> Vec<u8> {
+    let packet = claiming(part, level).replacen(
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>"#,
+        &format!(r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"{extra}?>"#),
+        1,
+    );
+    document(&packet, None)
+}
+
+/// Every finding as `(clause, kind)`.
+fn numbered(bytes: Vec<u8>) -> Vec<(String, FindingKind)> {
+    Document::open(bytes)
+        .expect("the fixture opens")
+        .validate_pdfa()
+        .findings
+        .into_iter()
+        .map(|finding| (finding.clause.0, finding.kind))
+        .collect()
+}
+
+#[test]
+fn the_packet_headers_bytes_and_encoding_attributes_are_findings_in_every_part() {
+    for (part, level, clause) in [("1", "B", "6.7.5"), ("2", "B", "6.6.2.1")] {
+        for attribute in ["bytes", "encoding"] {
+            let value = if attribute == "bytes" {
+                "2048"
+            } else {
+                "UTF-8"
+            };
+            assert_eq!(
+                numbered(with_header(
+                    part,
+                    level,
+                    &format!(r#" {attribute}="{value}""#)
+                )),
+                [(
+                    clause.to_string(),
+                    FindingKind::XmpPacketHeaderAttribute {
+                        attribute: attribute.to_string()
+                    }
+                )],
+                "part {part}, {attribute}"
+            );
+        }
+    }
+    // Part 4 numbers the clause 6.7.2.1. Its packet is `claiming`'s, which
+    // writes the `pdfaid:rev` part 4 asks for.
+    let part_four = numbered(with_header("4", "", r#" bytes="2048""#));
+    assert!(
+        part_four.contains(&(
+            "6.7.2.1".to_string(),
+            FindingKind::XmpPacketHeaderAttribute {
+                attribute: "bytes".to_string()
+            }
+        )),
+        "{part_four:#?}"
+    );
+}
+
+/// The twins: the baseline header, a header written in single quotes, and an
+/// `id` whose value spells the forbidden names — the attribute is a name, not
+/// a substring.
+#[test]
+fn a_header_without_either_attribute_is_not_a_finding() {
+    assert_eq!(numbered(with_header("2", "B", "")), []);
+    let single_quoted = claiming("2", "B").replacen(
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>"#,
+        "<?xpacket begin='' id='W5M0MpCehiHzreSzNTczkc9d'?>",
+        1,
+    );
+    assert_eq!(numbered(document(&single_quoted, None)), []);
+    let spelled = claiming("2", "B").replacen(
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>"#,
+        r#"<?xpacket begin="" id="bytes=1 encoding=2"?>"#,
+        1,
+    );
+    assert_eq!(numbered(document(&spelled, None)), []);
+    // An instruction with no `begin` is not a header, whatever it carries:
+    // the trailer's attributes are not the clause's.
+    let trailer_first = claiming("2", "B").replacen(
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>"#,
+        r#"<?xpacket end="w" bytes="2048"?>"#,
+        1,
+    );
+    assert_eq!(numbered(document(&trailer_first, None)), []);
+}
+
+/// XML's attribute style admits either quote, and so does the header's.
+#[test]
+fn a_single_quoted_attribute_is_read_like_a_double_quoted_one() {
+    let single_quoted = claiming("2", "B").replacen(
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>"#,
+        "<?xpacket begin='' id='W5M0MpCehiHzreSzNTczkc9d' bytes='2048'?>",
+        1,
+    );
+    assert_eq!(
+        numbered(document(&single_quoted, None)),
+        [(
+            "6.6.2.1".to_string(),
+            FindingKind::XmpPacketHeaderAttribute {
+                attribute: "bytes".to_string()
+            }
+        )]
+    );
+}
+
+/// The rule holds for a page's own packet, and names the page (ruling 10).
+#[test]
+fn a_pages_packet_header_is_judged_too() {
+    let page = claiming("2", "B").replacen(
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>"#,
+        r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d" encoding="UTF-8"?>"#,
+        1,
+    );
+    let findings = Document::open(document_with_page_metadata(&claiming("2", "B"), &page))
+        .expect("opens")
+        .validate_pdfa()
+        .findings;
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert_eq!(findings[0].clause.0, "6.6.2.1");
+    assert_eq!(
+        findings[0].object.map(|r| r.num),
+        Some(3),
+        "the page, which is how a reader reaches its packet"
+    );
+}

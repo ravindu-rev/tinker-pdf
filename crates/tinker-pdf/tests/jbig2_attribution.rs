@@ -196,6 +196,7 @@ fn every_refused_jbig2_file_is_attributed() {
                 globals,
                 width: *width,
                 height: *height,
+                work_ceiling: None,
             };
             let mut found = Vec::new();
             let _ = jbig2_decode_attributed(data, &params, CEILING, &mut found);
@@ -308,6 +309,7 @@ fn one_file_image_by_image() {
             globals,
             width: *width,
             height: *height,
+            work_ceiling: None,
         };
         let mut found = Vec::new();
         let out = jbig2_decode_attributed(data, &params, CEILING, &mut found);

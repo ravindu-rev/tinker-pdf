@@ -11,8 +11,9 @@ to a structure bar: counts of elements found, MCIDs matched and orphans left
 are ratcheted in `corpus/ratchet.json`, and the PDF/UA (ISO 14289-1) cases in
 that corpus are measured against the checks this design implements. This was the
 roadmap's "Tagged PDF and accessibility" row; it has left
-[../ROADMAP.md](../ROADMAP.md), which now carries only the writing gaps this
-design names as future work.
+[../ROADMAP.md](../ROADMAP.md), and so, in October 2026, has the
+tagged-writing row that carried the writing gaps this design named as future
+work — see "The writer, as built".
 
 ## Scope
 
@@ -46,16 +47,25 @@ design names as future work.
   design measures the structure clauses it implements, nothing more.
 - **Auto-tagging.** No structure is inferred for untagged documents; an
   untagged file reports "no structure tree", not a guess.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SD-07, writing a
+  new document's tree; reading still reports what the file states.
 - **The basic layout model** (14.8.3) and structure attributes (14.8.5):
   `/Placement`, `/BBox`, table row/column spans are parsed no further than
   storage requires.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SD-08.
 - **Writing complete tagged structure.** `DocumentBuilder` gains
   `/StructParents` allocation and a minimal element tree for its own output;
-  a general tagging API is future work.
+  a general tagging API is future work. *Amended October 2026: the general
+  API landed after this design closed, as the tagged-writing row — see
+  "The writer, as built" below.*
 - **PDF 2.0 namespaces** (ISO 32000-2's namespaced structure types); noted
-  in `docs/pdf20-deltas.md` when read support lands.
+  in `docs/pdf20-deltas.md` when read support lands. *Amended October 2026:
+  read and written by the roadmap's PDF 2.0 row — see "The writer, as
+  built".*
 - **Assistive-technology integration.** This is bytes-to-values reading; a
   screen-reader bridge belongs to an embedder.
+  *Narrowed, 9 October 2026*: the accessibility tree a bridge consumes is
+  [ROADMAP](../ROADMAP.md) row SD-09.
 
 ## Design
 
@@ -208,6 +218,125 @@ reader hears, and that outline is the headings in reading order (14.8)
 regardless of what contains them — so the level carries across siblings and
 out of containers. The corpus found that; the unit tests, all of which used
 flat siblings, could not have.
+
+## The writer, as built
+
+Milestone 6's builder wrote a type and the content it claimed, and nothing
+else. The roadmap's tagged-writing row grew it into a tagging API; what it
+writes, family by family:
+
+- **14.9's properties and the general API.** `Tag` carries a structure type
+  and, each only when stated, `/Alt`, `/ActualText`, `/E`, `/Lang` and `/T`,
+  written as text strings for the declared version.
+  `PageBuilder::tagged_with(&Tag, …)` is the closure form;
+  `open_tag(&Tag)`/`close_tag()` the explicit one, which spans drawing calls
+  and pages — an element open when its page is pushed is closed there and
+  reopened on the next page begun under a key of the builder's own, and the
+  halves merge at `finish` the way `tagged_keyed`'s always have. An element
+  that draws nothing is kept when it carries a property or
+  `Tag::keep_empty()`, and dropped when it says nothing, which is what the
+  first writer did with every empty element. `DocumentBuilder::set_language`
+  writes the catalog's `/Lang`. The page-level nesting cap is one below the
+  reader's, because `/Document` is a level of its own; it used to equal the
+  reader's, and the deepest element's text came back orphaned.
+- **`/RoleMap`.** `DocumentBuilder::map_role` maps a custom type to a
+  standard one, possibly through another custom type, and refuses to remap a
+  standard type (ISO 14289-1 7.1), an identity, a second target, a loop, and
+  — since the row's review — an entry past the 4 096 one dictionary carries
+  to this crate's reader, which used to be written and dropped on read.
+  The standard list moved from the PDF/A validator into the writer's crate so
+  the two cannot disagree about what "standard" means.
+- **`/Link` with its `/OBJR`.** A `link` call made while an element is open
+  makes the annotation a content item of it; `link_for(key, …)` does so by
+  `tagged_keyed`'s key, for links measured after drawing. `finish` folds the
+  document tree *before* writing the pages — merging allocates nothing, so
+  documents without such a link are numbered exactly as before — because an
+  annotation in the tree needs its own `/StructParent` key, after every
+  page's, whose `/ParentTree` value is a reference to its element rather than
+  an array. Writing it found that `close_marked`'s take-back of an empty
+  sequence removed the element's *last* kid, which after a `link` call is the
+  annotation's; it now removes the kid that named the id.
+- **Table attributes and identifiers.** `Tag::id` writes `/ID`, claimed in
+  reading order before an element's kids are written so the first element
+  to carry one keeps it, and `finish` writes the `/IDTree` through the name
+  tree writer the named destinations use — and, since the row's review, the
+  `/ParentTree` through its number-tree twin, one leaf while the keys fit
+  and a balanced tree past sixty-four, where it had been one flat `/Nums`
+  however many pages and held annotations it keyed. **Still open:** past the
+  2^18 identifiers the tree writer keeps, the `/IDTree` is left out while
+  every element keeps its `/ID`, which Table 322 does not allow; it needs
+  more elements than the reader's own element cap reads, so the coherent
+  fix is a document-wide element bound on the writer rather than an
+  identifier one. `Tag::table(TableAttributes)`
+  writes one attribute object owned by `/Table` directly in `/A`. The reader
+  reads `/A` (a dictionary, a stream, or an array with revision numbers) for
+  the `/Table` owner into the same `TableAttributes` type, and `/C` classes
+  are not read.
+- **The EPUB's pictures and languages.** The structure emission moved out of
+  `epub/paint.rs` into `epub/tagging.rs`. `<img alt>` is a `/Figure`'s
+  `/Alt`, an empty `alt` an artifact; a picture is drawn in painting order
+  and placed in reading order by a position recovered from the element tree,
+  since the layout stamps none on a replaced box, with the paragraph around
+  it split by `PageBuilder::continue_at` where the picture falls between two
+  of its runs. `dc:language` is the catalog's `/Lang`, `xml:lang`/`lang` an
+  element's, and the elements at a chapter's top carry the chapter's own
+  language where it differs from the book's.
+- **The EPUB's links.** Each link annotation is added with `link_for` under
+  its `<a>`'s key, and an `<a>` is a `/Link` exactly when the chapter holds
+  at least one annotation for it — decided over the whole chapter, so both
+  halves of a link broken over a page are one type.
+- **The EPUB's tables.** `summary`, `scope`, `headers`, `colspan` and
+  `rowspan` become Table 349's attributes, and a cell's `id` its `/ID`,
+  qualified by its content document's path so identifiers stay unique across
+  chapters. A `headers` id naming no cell is dropped rather than written as a
+  reference into nothing.
+- **The EPUB's role map.** Every element name whose standard type is not its
+  own spelling is registered with `map_role` before a chapter's pages are
+  drawn and written as itself; `sub` stopped being the non-standard `/Sub`.
+  A name `map_role` refuses because the map is full is written as its
+  standard type and counted by `ArchiveWarning::ElementNamesUnmapped`.
+- **The census over this engine's own output.** `pdfua.rs` runs milestone 5's
+  rules over an EPUB this engine converted and over a document built with the
+  tagging API, and asserts exactly what still fires: `no-pdfuaid-part` (no
+  PDF/UA claim is written, and none should be until the PDF/UA design's
+  ledger says so) and `font-not-embedded` (both are set in the unembedded
+  standard 14). Before this row the EPUB output also stated no language.
+- **PDF 2.0 namespaces**, from the roadmap's PDF 2.0 row rather than this
+  one. `DocumentBuilder::add_namespace` (2.0 only), `Tag::namespace` and
+  `map_role_in` write `/NS`, the root's `/Namespaces` and each namespace's
+  `/RoleMapNS`, from what the PDF Association's approved errata to ISO
+  32000-2 quote (Tables 354 and 355, 14.8.6.1, 14.8.6.2's EXAMPLE 1) and
+  veraPDF's published PDF/UA-2 rules 8.2.4-3 and 8.2.4-4 for what a mapping
+  may not do. Namespace dictionaries are numbered at `finish` before any
+  element, so a document with none is numbered as before. The reader follows
+  `/RoleMapNS` and reports the namespace each type landed in, or `None` where
+  nothing quoted says; whether the global `/RoleMap` is withheld from an
+  element that names a namespace is not quoted either, so it is still
+  applied there, as 1.7 always did. The 2.0 namespace's own type list is not
+  in a source this build could read, so the writer checks a target only in
+  the 1.7 namespace.
+- **Associated files on elements**, from the same row. `Tag::associated_file`
+  writes the element's `/AF`; the file is a property the element states, so
+  an element holding nothing else is kept, and two halves of one element
+  hold the first half's files once. The reader's
+  `StructElement::associated_files` shares one walk-wide budget with
+  `/Headers` and `/A` (`MAX_STRUCTURE_VALUES`, 2^20 entries,
+  `StructureWarning::ValuesCapped`): writing the reader for `/AF` found that
+  the tagged-writing row's `/Headers` reading was bounded per array and not
+  across elements, so one shared array was read once per element, and the
+  row's review found `/A` the same. The review also found every string the
+  walk copies — namespace URIs, `/ID`, `/Headers` ids, files' names — copied
+  once per mention, now within `MAX_STRUCTURE_BYTES`
+  (`StructureWarning::BytesCapped`), and each namespace's `/RoleMapNS` copied
+  once per namespace dictionary however many shared it, now looked up a type
+  at a time and never copied.
+
+What the row leaves, each named in a refusal table rather than absent: a
+link wrapped across lines is one annotation per rectangle rather than ISO
+32000-2 erratum 133's one annotation with `/QuadPoints`
+([content-and-text](../features/content-and-text.md)); attributes reached
+through `/C` and the `/ClassMap` are not read (the same); an empty EPUB table
+cell is not in the tree ([epub](../features/epub.md)).
 
 ## Dependencies
 

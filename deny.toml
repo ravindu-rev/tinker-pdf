@@ -27,6 +27,7 @@ allow = [
   "CC0-1.0",
   "Unicode-3.0",
   "Unlicense",
+  "W3C",            # XHTML 1.0's entity sets, vendored as data in tinker-pdf-xml (THIRDPARTY.md)
   "Zlib",
   # OFL-1.1 for the Liberation family, an asset rather than code. It left this
   # list once, when an audit found it describing faces that did not exist —
@@ -174,6 +175,29 @@ deny = [
   { name = "liblzma" },
   { name = "compress-tools" },
   { name = "libarchive" },
+  # bzip2, denied in the milestone that writes its decoder, for the reason
+  # above. `bzip2` binds libbzip2 and `bzip2-rs` and `libbz2-rs-sys` are pure
+  # Rust ports of it -- the last one is excellent, and would have passed every
+  # other check in this file.
+  { name = "bzip2" },
+  { name = "bzip2-sys" },
+  { name = "bzip2-rs" },
+  { name = "libbz2-rs-sys" },
+  # PPMd, for the same reason in the milestone that writes its model. The one
+  # pure-Rust port is of the same public-domain 7-Zip code this repository
+  # transcribed, which is exactly why reaching for it would be the temptation.
+  { name = "ppmd-rust" },
+  { name = "ppmd-sys" },
+  # Zstandard, in the milestone that writes its decoder. `zstd`, `zstd-safe`
+  # and `zstd-sys` bind libzstd; `ruzstd` is a pure-Rust decoder of the whole
+  # format and the one that would have passed every other check here; and
+  # `xxhash-rust` and `twox-hash` are the content checksum on its own.
+  { name = "zstd" },
+  { name = "zstd-safe" },
+  { name = "zstd-sys" },
+  { name = "ruzstd" },
+  { name = "xxhash-rust" },
+  { name = "twox-hash" },
   { name = "crc32fast" },
   { name = "crc" },
   { name = "crc-any" },

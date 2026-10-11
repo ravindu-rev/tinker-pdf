@@ -342,6 +342,24 @@ impl<'a> Cff<'a> {
         self.gid_for_sid(cid)
     }
 
+    /// The CID a glyph carries: the charset read forwards, which is
+    /// [`Cff::gid_for_cid`]'s inverse wherever the charset is one-to-one.
+    ///
+    /// A writer needs this direction. A composite font addresses a CID-keyed
+    /// program by CID (ISO 32000-1 9.7.4.2), so a caller holding a glyph index
+    /// — from a shaper, or a document that states glyphs — has to say which
+    /// CID that glyph answers to before the code can be written at all.
+    ///
+    /// `None` when the font is not CID-keyed, whose charset holds names, or
+    /// when the glyph is past the end of the charset.
+    #[must_use]
+    pub fn cid_for_gid(&self, glyph: u16) -> Option<u16> {
+        if !self.is_cid {
+            return None;
+        }
+        self.charset.get(usize::from(glyph)).copied()
+    }
+
     /// The glyph the font's *own* encoding gives a code.
     ///
     /// This is the built-in encoding of the font program, which 9.6.6 makes

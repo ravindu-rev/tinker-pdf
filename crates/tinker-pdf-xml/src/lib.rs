@@ -1,6 +1,12 @@
 //! XML 1.0 with namespaces: bytes in, events out, and no PDF vocabulary
 //! anywhere — nor any XPS vocabulary, which is the same rule read twice.
 //!
+//! **And HTML, which is not XML** ([`html`]): the WHATWG standard's tokenizer
+//! and tree builder, bytes in and a document tree out, for the loose `.html`
+//! file the XML reader stops at in its first line. It shares this crate's
+//! [`Limits`] and nothing else of the XML reader; the module comment says
+//! why it lives here.
+//!
 //! Feature documentation: `docs/features/xps.md`.
 //!
 //! The eighth leaf. It exists because three different parts of an OPC package
@@ -41,12 +47,22 @@
 //! What is left cannot expand, in either mode. The five predefined entities and
 //! both radixes of numeric character reference each produce exactly one
 //! character from at least four bytes of source, so decoded text is never
-//! longer than the text it came from — and there is no sixth name, because
-//! there is no table to look one up in. Gap 31's milestone 1 counted **zero**
-//! uses of `&nbsp;` and its relatives across 270 real content documents, so a
-//! table would be a data commitment nobody's book needs;
-//! [`Error::UnknownEntity`] is the answer in both modes and the absence of a
-//! table is asserted against this crate's own source.
+//! longer than the text it came from.
+//!
+//! **One table of names exists, and it is a table and not an expander.** A
+//! document whose declaration names one of XHTML 1.x's DTDs
+//! ([`XHTML_PUBLIC_IDENTIFIERS`]) has, by that DTD, the 253 names of XHTML
+//! 1.0's three entity sets declared — `&nbsp;`, `&mdash;`, `&eacute;` — and
+//! under [`Doctype::SkipExternalId`] this reader resolves them from those
+//! three `.ent` files, vendored verbatim from the W3C and compiled by
+//! `build.rs` into one sorted `(name, char)` array. Every value is a single
+//! code point, so a lookup is still one character out of at least four bytes
+//! in, and `build.rs` checks that for all 253 rather than trusting it; a name
+//! the table does not hold is [`Error::UnknownEntity`] exactly as before, and
+//! so is every name in a document that names no XHTML DTD. The HTML living
+//! standard's own list is deliberately **not** the table: it declares names
+//! that expand to two code points (`&nGt;` is U+226B U+20D2), which would end
+//! the invariant above, and it is not what an XHTML DTD declares.
 //!
 //! **It is a pull parser, and an empty-element tag produces two events.**
 //! `<a/>` is [`Event::Start`] followed by [`Event::End`], so a caller matching
@@ -70,6 +86,12 @@
 //! byte order mark would refuse every OpenXPS file Windows writes; one that
 //! required its absence would refuse every XPS file it writes.
 //! [`Source::new`] takes both, and UTF-16 in both byte orders.
+//! [`Source::with_declared_encoding`] also takes the WHATWG Encoding Standard's
+//! single-byte encodings when the declaration names one — FictionBook's
+//! `windows-1251` and `koi8-r` — from tables vendored in [`encoding`], and the
+//! standard's other labels for UTF-8 and UTF-16 (`ISO-10646-UCS-2`,
+//! `unicode-1-1-utf-8`) in the declaration; it is a second constructor because
+//! XPS forbids what XML allows there.
 //!
 //! # Using it
 //!
@@ -89,12 +111,28 @@
 
 #![forbid(unsafe_code)]
 
+pub mod encoding;
+pub mod html;
 pub mod limits;
 mod scan;
 mod text;
 
 #[cfg(test)]
 mod tests;
+
+/// The character XHTML 1.0's three entity sets declare for `name`, or `None`.
+///
+/// The same vendored table a document declaring an XHTML 1.x DTD has its
+/// named references resolved from, for a caller that meets a named reference
+/// in text that is not XML — the facade's Markdown reader, where CommonMark
+/// §2.5 resolves `&copy;` in a paragraph. Case-sensitive, as XML names are:
+/// `&Eacute;` and `&eacute;` are two entries and `&NBSP;` is none. HTML's own
+/// larger list is not here, for the reason the entity sets' THIRDPARTY.md
+/// section gives.
+#[must_use]
+pub fn xhtml_entity(name: &str) -> Option<char> {
+    text::xhtml_entity(name)
+}
 
 use std::borrow::Cow;
 use std::fmt;
@@ -167,6 +205,7 @@ impl Default for Limits {
 /// | `<!DOCTYPE html PUBLIC "…" "…">` | [`Error::DoctypeUnsupported`] | the two literals read and discarded |
 /// | `<!DOCTYPE html SYSTEM "…">` | [`Error::DoctypeUnsupported`] | the literal read and discarded |
 /// | an identifier outside [`ALLOWED_PUBLIC_IDENTIFIERS`] | [`Error::DoctypeUnsupported`] | discarded, and [`Warning::ExternalIdentifierNotAllowed`] |
+/// | an identifier in [`XHTML_PUBLIC_IDENTIFIERS`] | [`Error::DoctypeUnsupported`] | discarded and warned as above, **and** XHTML 1.0's 253 named references resolve from then on |
 /// | `<!DOCTYPE html [ … ]>` | [`Error::DoctypeUnsupported`] | [`Error::InternalSubset`] |
 /// | one of the four bombs | [`Error::DoctypeUnsupported`] | [`Error::InternalSubset`] |
 ///
@@ -179,11 +218,13 @@ impl Default for Limits {
 /// read as two strings and thrown away, and this engine performs no I/O, so it
 /// names a file that will never be opened.
 ///
-/// **Neither mode parses a declaration.** There is no entity table in either,
-/// no expander, and no code path one refactor away from resolving an external
-/// entity: `SkipExternalId` reads the external identifier's two literals *as
-/// literals* — so a `>` inside one does not end the declaration — and refuses
-/// at `[`.
+/// **Neither mode parses a declaration.** There is no expander in either and
+/// no code path one refactor away from resolving an external entity:
+/// `SkipExternalId` reads the external identifier's two literals *as literals*
+/// — so a `>` inside one does not end the declaration — and refuses at `[`.
+/// The one table it consults is compiled in, is the one [`XHTML_PUBLIC_IDENTIFIERS`]'s
+/// DTDs all declare, and maps a name to exactly one character; the identifier
+/// chooses whether it is consulted and never *what* is in it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Doctype {
     /// Refused before one byte past `<!DOCTYPE` is read, wherever it appears.
@@ -220,6 +261,43 @@ pub const ALLOWED_PUBLIC_IDENTIFIERS: [&str; 3] = [
     "-//NISO//DTD ncx 2005-1//EN",
 ];
 
+/// The public identifiers whose DTDs declare XHTML 1.0's three entity sets,
+/// against which [`Doctype::SkipExternalId`] decides whether named character
+/// references resolve.
+///
+/// Six, and each is here because its DTD, as the W3C publishes it, pulls in
+/// exactly `xhtml-lat1.ent`, `xhtml-symbol.ent` and `xhtml-special.ent` and no
+/// other entity set: XHTML 1.0's three DTDs directly, and XHTML 1.1 and both
+/// XHTML Basic DTDs through XHTML Modularization's framework module, which
+/// includes `xhtml-charent-1.mod`, which includes the three. The variants that
+/// add MathML or SVG are **not** here — their DTDs declare hundreds of MathML
+/// names this table does not hold, and resolving the XHTML names in such a
+/// document while refusing the MathML ones would be half an answer that looks
+/// like a whole one.
+///
+/// Compared after XML 1.0 §4.2.2's normalisation — runs of white space as one
+/// space, none at either end — which is how a public identifier is matched.
+///
+/// **Not the same set as [`ALLOWED_PUBLIC_IDENTIFIERS`], and the two answer
+/// different questions.** That one is what EPUB 3.3 permits and decides a
+/// warning; this one is what a DTD declares and decides a lookup. XHTML 1.1's
+/// identifier is in this set and not that one: EPUB 3 banned it, and every EPUB
+/// 2 content document of one measured producer carries it anyway.
+pub const XHTML_PUBLIC_IDENTIFIERS: [&str; 6] = [
+    "-//W3C//DTD XHTML 1.0 Strict//EN",
+    "-//W3C//DTD XHTML 1.0 Transitional//EN",
+    "-//W3C//DTD XHTML 1.0 Frameset//EN",
+    "-//W3C//DTD XHTML 1.1//EN",
+    "-//W3C//DTD XHTML Basic 1.0//EN",
+    "-//W3C//DTD XHTML Basic 1.1//EN",
+];
+
+/// XML 1.0 §4.2.2: two public identifiers are the same when they match after
+/// every run of white space is one space and none is left at either end.
+fn same_public_identifier(a: &str, b: &str) -> bool {
+    a.split_ascii_whitespace().eq(b.split_ascii_whitespace())
+}
+
 /// The external identifier a skipped declaration named, as two strings that
 /// were read and discarded.
 ///
@@ -255,8 +333,22 @@ impl<'a> ExternalId<'a> {
     /// form, so warning about it costs a book nothing.
     #[must_use]
     pub fn is_allowed(&self) -> bool {
-        self.public
-            .is_some_and(|public| ALLOWED_PUBLIC_IDENTIFIERS.contains(&public))
+        self.public.is_some_and(|public| {
+            ALLOWED_PUBLIC_IDENTIFIERS
+                .iter()
+                .any(|allowed| same_public_identifier(public, allowed))
+        })
+    }
+
+    /// Whether this names one of the DTDs [`XHTML_PUBLIC_IDENTIFIERS`] holds,
+    /// and so declares XHTML 1.0's 253 named character references.
+    #[must_use]
+    pub fn declares_xhtml_entities(&self) -> bool {
+        self.public.is_some_and(|public| {
+            XHTML_PUBLIC_IDENTIFIERS
+                .iter()
+                .any(|xhtml| same_public_identifier(public, xhtml))
+        })
     }
 }
 
@@ -268,6 +360,10 @@ pub enum Encoding {
     Utf8,
     Utf16LittleEndian,
     Utf16BigEndian,
+    /// One of the Encoding Standard's single-byte encodings, which the XML
+    /// declaration named — read only by [`Source::with_declared_encoding`],
+    /// since a declaration is the one thing that can say a file is in one.
+    SingleByte(encoding::SingleByte),
 }
 
 /// Which construct ran off the end of the input.
@@ -379,7 +475,10 @@ pub enum Error {
     /// type declaration, which is the only place any of them may appear.
     MarkupDeclaration,
     /// The XML declaration is not `<?xml version="1.0" …?>`: a pseudo-attribute
-    /// out of order, one that is not one of the three, or a missing `?>`.
+    /// out of order, one that is not one of the three, or a missing `?>` — or
+    /// an `encoding` that is not an `EncName` (XML 1.0 [81]: a letter, then
+    /// letters, digits, `.`, `_` and `-`), such as ` utf-8` with white space
+    /// in it, or the Encoding Standard's `866`.
     MalformedDeclaration,
     /// A processing instruction whose target is `xml` in any case, which XML
     /// reserves.
@@ -410,9 +509,11 @@ pub enum Error {
     /// anything but the XML namespace, any other prefix bound to the XML or
     /// xmlns namespace, or `xmlns` used as a prefix in a name.
     ReservedNamespace,
-    /// A reference to an entity that is not one of the five predefined ones.
-    /// There is no table to look a sixth up in, because building one would mean
-    /// having parsed a DTD.
+    /// A reference to an entity nothing declared: not one of the five
+    /// predefined ones, and — in a document whose declaration names an XHTML
+    /// 1.x DTD ([`XHTML_PUBLIC_IDENTIFIERS`]) — not one of the 253 that DTD
+    /// declares either. Refused rather than guessed at, by a name that says
+    /// the entity was never declared rather than that the markup is broken.
     UnknownEntity,
     /// A numeric character reference naming a surrogate, a value past
     /// `U+10FFFF`, or a scalar §2.2 does not admit.
@@ -433,6 +534,12 @@ pub enum Error {
     NameCap,
     /// [`Limits::max_tokens`]. **The total**, which a per-item cap is not.
     TokenCap,
+    /// [`limits::MAX_HTML_ACTIVE_FORMATTING`]: HTML's list of active
+    /// formatting elements, which only [`html`]'s tree builder keeps.
+    FormattingCap,
+    /// [`limits::MAX_HTML_CLONE_BYTES`]: the attribute bytes [`html`]'s tree
+    /// builder copies onto clones of formatting elements. A total, per parse.
+    CloneCap,
 }
 
 impl fmt::Display for Error {
@@ -475,6 +582,12 @@ impl fmt::Display for Error {
             Self::AttributeCap => f.write_str("more attributes on one element than the cap allows"),
             Self::NameCap => f.write_str("a name past the length cap"),
             Self::TokenCap => f.write_str("more events than the part's cap allows"),
+            Self::FormattingCap => {
+                f.write_str("more active formatting elements than the cap allows")
+            }
+            Self::CloneCap => f.write_str(
+                "more attribute bytes copied onto reopened formatting elements than the cap allows",
+            ),
         }
     }
 }
@@ -521,6 +634,14 @@ pub enum Warning {
     /// and accepting silently would lose the fact. Ruling 10's shape: the mode
     /// reports rather than merely tolerates.
     ExternalIdentifierNotAllowed,
+    /// A byte the declared single-byte encoding leaves unmapped, read as
+    /// U+FFFD — the Encoding Standard's own *replacement* error mode.
+    /// windows-1252 has none: the standard's index maps the five bytes
+    /// Windows leaves undefined to the C1 controls they would be. Eight of the
+    /// twenty-eight have some — windows-874, -1253, -1255 and -1257, and
+    /// ISO 8859-3, -6, -7 and -8 — from windows-1257's two to ISO 8859-6's
+    /// forty-five; windows-1253's 0xAA is one.
+    UnmappedByte,
 }
 
 impl fmt::Display for Warning {
@@ -534,6 +655,7 @@ impl fmt::Display for Warning {
             Self::ExternalIdentifierNotAllowed => {
                 "an external identifier outside the set EPUB 3.3 Appendix B allows"
             }
+            Self::UnmappedByte => "a byte the declared encoding maps to no character",
         })
     }
 }
@@ -735,6 +857,13 @@ pub struct Source<'a> {
     text: Cow<'a, str>,
     encoding: Encoding,
     warnings: Vec<Warning>,
+    /// Whether this source was made by [`Source::with_declared_encoding`], which
+    /// decides how a declaration giving any `EncName` but `UTF-8`, `UTF8`,
+    /// `UTF-16`, `UTF-16LE` or `UTF-16BE` is answered: by the Encoding
+    /// Standard's table of labels there — a warning when the label names an
+    /// encoding the bytes were not read in — and [`Error::UnsupportedEncoding`]
+    /// from [`Source::new`], exactly as before that constructor existed.
+    declared: bool,
 }
 
 impl<'a> Source<'a> {
@@ -760,7 +889,60 @@ impl<'a> Source<'a> {
             text,
             encoding,
             warnings: warning.into_iter().collect(),
+            declared: false,
         })
+    }
+
+    /// [`Source::new`], and also the Encoding Standard's single-byte encodings
+    /// when the XML declaration names one — `windows-1251`, `koi8-r`,
+    /// `iso-8859-2` and their siblings ([`encoding::SingleByte`]).
+    ///
+    /// §4.3.3 lets a processor read encodings beyond the two it must, and
+    /// Appendix F says how one is found: with no byte order mark and no UTF-16
+    /// shape, the declaration is ASCII whatever the encoding is, so its
+    /// `encoding` pseudo-attribute can be read before a byte past it is
+    /// decoded. A label the standard gives a single-byte encoding decodes the
+    /// whole input by that encoding's table; every other case is
+    /// [`Source::new`]'s. A byte the table leaves unmapped is U+FFFD and
+    /// [`Warning::UnmappedByte`]. The declaration may also give any of the
+    /// standard's labels for UTF-8 and UTF-16 — `unicode-1-1-utf-8`, `UCS-2`,
+    /// and `ISO-10646-UCS-2`, which §4.3.3 itself recommends — and is checked
+    /// against the bytes as `UTF-8` and `UTF-16` are, UCS-2's names giving no
+    /// byte order. Only a label that is an XML `EncName` is looked up: the
+    /// standard trims white space from a label and lists a few that are not
+    /// names (`866`, `iso_8859-1:1987`), and a declaration giving any of those
+    /// is [`Error::MalformedDeclaration`] here as it is from [`Source::new`].
+    ///
+    /// **A separate constructor rather than [`Source::new`]'s new behaviour**,
+    /// because a format can forbid what XML allows: ECMA-388 requires an XPS
+    /// part to be UTF-8 or UTF-16, and that reader keeps refusing a declared
+    /// `windows-1252` as [`Error::UnsupportedEncoding`] by calling the other
+    /// one. A multi-byte encoding — Shift_JIS, GBK, Big5 — is that same error
+    /// from both.
+    ///
+    /// # Errors
+    ///
+    /// [`Source::new`]'s.
+    pub fn with_declared_encoding(bytes: &'a [u8]) -> Result<Self, Error> {
+        if let Some(single) = text::declared_single_byte(bytes) {
+            let (decoded, unmapped) = single.decode(bytes);
+            if text::illegal_character(&decoded).is_some() {
+                return Err(Error::IllegalCharacter);
+            }
+            return Ok(Source {
+                text: Cow::Owned(decoded),
+                encoding: Encoding::SingleByte(single),
+                warnings: if unmapped > 0 {
+                    vec![Warning::UnmappedByte]
+                } else {
+                    Vec::new()
+                },
+                declared: true,
+            });
+        }
+        let mut source = Source::new(bytes)?;
+        source.declared = true;
+        Ok(source)
     }
 
     /// The decoded characters, with the byte order mark removed.
@@ -809,6 +991,8 @@ impl<'a> Source<'a> {
             warnings: self.warnings.clone(),
             external_id: None,
             saw_doctype: false,
+            xhtml_entities: false,
+            declared: self.declared,
         }
     }
 }
@@ -856,6 +1040,12 @@ pub struct Reader<'a> {
     /// makes a second one [`Error::MisplacedDoctype`] rather than a second
     /// skip.
     saw_doctype: bool,
+    /// Whether the declaration named an XHTML 1.x DTD, so that XHTML 1.0's
+    /// named references resolve. Set once, in the prolog, before any element
+    /// has been read — which is the only place a declaration may stand.
+    xhtml_entities: bool,
+    /// [`Source::declared`], carried over.
+    declared: bool,
 }
 
 impl<'a> Iterator for Reader<'a> {
@@ -917,6 +1107,19 @@ impl<'a> Reader<'a> {
     #[must_use]
     pub fn external_identifier(&self) -> Option<ExternalId<'a>> {
         self.external_id
+    }
+
+    /// Whether XHTML 1.0's 253 named character references resolve in this
+    /// document: under [`Doctype::SkipExternalId`], when its declaration named
+    /// one of [`XHTML_PUBLIC_IDENTIFIERS`]. Always false under
+    /// [`Doctype::Refuse`], which reads no declaration.
+    ///
+    /// Public for [`Reader::external_identifier`]'s reason: a `&nbsp;` that
+    /// became U+00A0 in one document and [`Error::UnknownEntity`] in another
+    /// should be a difference a caller can see the cause of.
+    #[must_use]
+    pub fn resolves_xhtml_entities(&self) -> bool {
+        self.xhtml_entities
     }
 
     fn warn(&mut self, warning: Warning) {
@@ -1025,25 +1228,68 @@ impl<'a> Reader<'a> {
     /// `UTF-8` across one corpus from one vendor. A name this crate does not
     /// decode is refused by name; a name it decodes that disagrees with the
     /// bytes is a warning, because a byte order mark is evidence and a
-    /// declaration is a claim.
+    /// declaration is a claim. A value that is not an `EncName` (XML 1.0 [81])
+    /// is [`Error::MalformedDeclaration`] from either constructor, before any
+    /// name is looked up: the Encoding Standard's lookup trims white space and
+    /// holds labels such as `866` and `iso_8859-1:1987`, none of which a
+    /// declaration may give.
     fn check_encoding(&mut self, declared: &str) -> Result<(), Error> {
+        if !text::is_enc_name(declared) {
+            return Err(Error::MalformedDeclaration);
+        }
         let lower = declared.to_ascii_lowercase();
         let named = match lower.as_str() {
             "utf-8" | "utf8" => Encoding::Utf8,
-            "utf-16" => match self.encoding {
-                // Unmarked `UTF-16` names neither byte order, so it agrees with
-                // whichever one the bytes turned out to be.
-                Encoding::Utf16LittleEndian | Encoding::Utf16BigEndian => self.encoding,
-                Encoding::Utf8 => Encoding::Utf16BigEndian,
-            },
+            "utf-16" => self.utf16_in_either_order(),
             "utf-16le" => Encoding::Utf16LittleEndian,
             "utf-16be" => Encoding::Utf16BigEndian,
-            _ => return Err(Error::UnsupportedEncoding),
+            // From `Source::new` every other name is what it always was: an
+            // encoding that constructor does not decode, because a format
+            // such as XPS allows only the names above.
+            _ if !self.declared => return Err(Error::UnsupportedEncoding),
+            // The Encoding Standard's labels, as `Source::with_declared_encoding`
+            // read the bytes by them. A single-byte label agrees with the
+            // bytes when that constructor decoded them by its table, and is
+            // the claim a byte order mark overruled when it did not; UTF-8's
+            // and UTF-16's other labels (`unicode-1-1-utf-8`, `ucs-2`, ...)
+            // name encodings every `Source` decodes.
+            other => match encoding::lookup(other) {
+                Some(encoding::Label::SingleByte(single)) => Encoding::SingleByte(single),
+                Some(encoding::Label::Utf8) => Encoding::Utf8,
+                // UCS-2's names give no byte order, as `UTF-16` gives none:
+                // Appendix F reads either order as ISO-10646-UCS-2. The
+                // standard's table gives them to UTF-16LE, but here a byte
+                // order mark or UTF-16's shape decided the order before the
+                // declaration was read.
+                // `other` is an `EncName`, so it has no white space for the
+                // lookup to have trimmed: the name it found is this one.
+                Some(encoding::Label::Utf16LittleEndian)
+                    if matches!(other, "iso-10646-ucs-2" | "ucs-2" | "unicode" | "csunicode") =>
+                {
+                    self.utf16_in_either_order()
+                }
+                // `unicodefeff` and `unicodefffe`, named after a mark's bytes.
+                Some(encoding::Label::Utf16LittleEndian) => Encoding::Utf16LittleEndian,
+                Some(encoding::Label::Utf16BigEndian) => Encoding::Utf16BigEndian,
+                Some(encoding::Label::Unsupported(_)) | None => {
+                    return Err(Error::UnsupportedEncoding)
+                }
+            },
         };
         if named != self.encoding {
             self.warn(Warning::EncodingDeclarationIgnored);
         }
         Ok(())
+    }
+
+    /// What a name for UTF-16 that gives no byte order names: whichever order
+    /// the bytes turned out to be in, and UTF-16BE — so a disagreement — when
+    /// they are not UTF-16 at all.
+    fn utf16_in_either_order(&self) -> Encoding {
+        match self.encoding {
+            Encoding::Utf16LittleEndian | Encoding::Utf16BigEndian => self.encoding,
+            Encoding::Utf8 | Encoding::SingleByte(_) => Encoding::Utf16BigEndian,
+        }
     }
 
     /// Everything before the root element: whitespace, comments and processing
@@ -1135,7 +1381,7 @@ impl<'a> Reader<'a> {
         if raw.contains("]]>") {
             self.warn(Warning::CdataCloseInContent);
         }
-        let decoded = text::value(raw, false)?;
+        let decoded = text::value(raw, false, self.xhtml_entities)?;
         self.emit(Event::Text(decoded))
     }
 
@@ -1256,6 +1502,7 @@ impl<'a> Reader<'a> {
             if !external.is_allowed() {
                 self.warn(Warning::ExternalIdentifierNotAllowed);
             }
+            self.xhtml_entities = external.declares_xhtml_entities();
             self.cursor.skip_space();
         }
 
@@ -1361,7 +1608,7 @@ impl<'a> Reader<'a> {
             }
             self.cursor.skip_space();
             let literal = self.cursor.attribute_value()?;
-            raw.push((name, text::value(literal, true)?));
+            raw.push((name, text::value(literal, true, self.xhtml_entities)?));
         }
 
         // XML 1.0's own rule, before namespaces get a look in: no element may

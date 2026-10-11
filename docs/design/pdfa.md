@@ -62,17 +62,25 @@ and Level A validation from this design and nothing else of it.
   that lives in a **content stream**: a `/Lang` in a marked-content property
   list (two fixtures), and 6.2.11.7.3's `/ActualText` per character (five).
 - **PDF/X and PDF/E.** Out entirely.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: PDF/X has its own design
+  ([pdfx.md](pdfx.md)), and PDF/E is [ROADMAP](../ROADMAP.md) row SD-13.
 - **Conversion.** No "fix this file into PDF/A" repair mode. Validation
   reports; building conforms; nothing rewrites an arbitrary document's
   colour or fonts into compliance.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: conversion with fix-ups is
+  [ROADMAP](../ROADMAP.md) row SD-02.
 - **A general RDF store.** XMP is RDF/XML, and the amendment on
   `xmp_metadata` in `crates/tinker-pdf-cos/src/outline.rs` already records
   why `tinker-pdf-cos` will not parse it. The validator reads exactly the
   XMP shapes 19005 checks — not arbitrary RDF graphs.
+  *Narrowed, 9 October 2026*: an XMP model with schemas, editing and repair is
+  [ROADMAP](../ROADMAP.md) row SD-23.
 - **Bundled typefaces.** The no-bundled-faces policy
   ([THIRDPARTY.md](../../THIRDPARTY.md)) stands: the writer profile
   requires embedding, therefore the caller must supply face bytes, and the
   API says so instead of shipping a font.
+  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: fallback faces and embedding missing
+  fonts on write are [ROADMAP](../ROADMAP.md) rows FT-01, FT-02 and FT-12.
 
 ## Design
 
@@ -987,7 +995,11 @@ rule and under the structure-type rule never being called — so the *other*
 writer fixture's zero findings at 2A are a verdict rather than a silence. It
 does not fail when the `/RoleMap` is ignored or when the four ISO 32000-1
 types are dropped, because `/Chapitre` and `/P` are on neither side of those
-readings; those two rows are held by `pdfa_logical.rs` alone.
+readings; those two rows are held by `pdfa_logical.rs` alone. *(October 2026,
+the tagged-writing row: the fixture gained a third twin, `/Chapitre` with
+`DocumentBuilder::map_role` mapping it to `/Sect`, which nothing reports — and
+a reader ignoring the `/RoleMap` now fails it, so the first of those two rows
+has a writer fixture too.)*
 
 **Five injections move the census by nothing, and each has a fixture rather
 than an excuse.** Four of the five share one cause, and it is worth naming

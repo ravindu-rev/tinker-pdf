@@ -30,6 +30,12 @@ fails the same allowlist a crate licence would.
 | `crates/tinker-pdf-shape/data/aots` | [adobe-type-tools/aots](https://github.com/adobe-type-tools/aots) at `d256691` (2025-11-29), fonts via [harfbuzz/harfbuzz](https://github.com/harfbuzz/harfbuzz) `test/shape/data/aots/fonts` at `e0d7060` (2021-08-12) | `Apache-2.0` |
 | `crates/tinker-pdf-shape/data/ucd` | [The Unicode Character Database](https://www.unicode.org/Public/17.0.0/ucd/), version 17.0.0 (2025-07-29) | `Unicode-3.0` |
 | `crates/tinker-pdf-shape/data/text-rendering-tests` | [unicode-org/text-rendering-tests](https://github.com/unicode-org/text-rendering-tests) at `26cfb96` (2026-08-24) | `Unicode-3.0` |
+| `crates/tinker-pdf-xml/data/xhtml-entities` | XHTML 1.0's three entity sets as XHTML Modularization 1.1 (2010-07-29) publishes them, from [w3c/markup-validator](https://github.com/w3c/markup-validator) `htdocs/sgml-lib/REC-xhtml-modularization-20100729/` at `724a15b` (fetched 2026-09-26) | `W3C` |
+| `crates/tinker-pdf-content/data/ucd` | The Unicode Character Database, version 17.0.0, via [unicode-org/unicodetools](https://github.com/unicode-org/unicodetools) `unicodetools/data/ucd/17.0.0` at `0509b4b` (fetched 2026-09-26) | `Unicode-3.0` |
+| `crates/tinker-pdf-archive/data/zstd-golden` | [facebook/zstd](https://github.com/facebook/zstd) `tests/golden-decompression/` and `tests/golden-decompression-errors/`, branch `dev` as served on 2026-09-26 (no commit could be resolved; pinned by SHA-256 below) | `BSD-3-Clause` |
+| `crates/tinker-pdf-xml/data/encoding-indexes` | The WHATWG Encoding Standard's single-byte indexes and label table, from [whatwg/encoding](https://github.com/whatwg/encoding) at `a985b62` (2026-05-21) | `BSD-3-Clause` |
+| `crates/tinker-pdf-xml/data/html-entities` | HTML's named character references, `entities/out/entities.json` from [whatwg/html-build](https://github.com/whatwg/html-build) at `283a353` (fetched 2026-10-03) | `BSD-3-Clause` |
+| `crates/tinker-pdf-xml/data/html5lib-tests` | [html5lib/html5lib-tests](https://github.com/html5lib/html5lib-tests) `tree-construction/`, `tokenizer/` and `encoding/` at `9329e64` (2026-06-22), the last commit holding the tree-construction tests | `MIT` |
 
 ### `crates/tinker-pdf-font/data/cmap-resources`
 
@@ -303,7 +309,7 @@ DEALINGS IN THE FONT SOFTWARE.
 ### `crates/tinker-pdf-layout/data/ucd`
 
 The Unicode Character Database, at the five files [UAX #14](https://www.unicode.org/reports/tr14/)'s
-line breaking algorithm needs. Gap 31's plan calls the alternative by name — an
+line breaking algorithm needs, and three more for `text-transform`. Gap 31's plan calls the alternative by name — an
 ASCII heuristic that breaks at spaces *"works on Project Gutenberg's entire
 catalogue, and is catastrophically wrong on CJK"* — and CONTRIBUTING rule 1 has
 no exception for a line breaker, so the third route is the one taken: published
@@ -317,6 +323,21 @@ facts about text, vendored verbatim and compiled into static tables by
 | `extracted/DerivedGeneralCategory.txt`, here as `DerivedGeneralCategory.txt` | `Mn`/`Mc` for LB1's `SA` resolution, `Cn` for LB30b's unassigned pictographs, and `Pi`/`Pf` for LB15a and LB15b |
 | `emoji/emoji-data.txt`, here as `emoji-data.txt` | `Extended_Pictographic`, LB30b's other half |
 | `auxiliary/LineBreakTest.txt`, here as `LineBreakTest.txt` | **The conformance oracle.** 19 338 cases, run by `tests/uax14_conformance.rs` against the same entry point a book goes through |
+| `UnicodeData.txt` | Fields 12 to 14, the simple case mappings, for `css-text-3` §2.1's `text-transform`. Byte for byte the copy the shaping and content trees carry (SHA-256 `2e1efc1dcb59c575eedf5ccae60f95229f706ee6d031835247d843c11d96470c`), which `tinker-pdf-shape/tests/ucd_version.rs` asserts |
+| `SpecialCasing.txt` | The full case mappings longer than one character — `ß` to `SS` — and the one language-independent conditional, Final_Sigma. SHA-256 `efc25faf19de21b92c1194c111c932e03d2a5eaf18194e33f1156e96de4c9588` |
+| `DerivedCoreProperties.txt` | `Cased` and `Case_Ignorable`, which are Final_Sigma's definition in Unicode §3.13, and `Lowercase`, which is `capitalize`'s *"if lowercase"*. SHA-256 `24c7fed1195c482faaefd5c1e7eb821c5ee1fb6de07ecdbaa64b56a99da22c08` |
+
+The last three arrived on 3 October 2026 with `text-transform`, fetched from
+the Unicode Consortium's own tools repository at the commit the content tree
+below is pinned to, since unicode.org was not reachable from where they were
+vendored:
+`https://raw.githubusercontent.com/unicode-org/unicodetools/0509b4b256ff75c65300c8aaecb9e6ec816d9520/unicodetools/data/ucd/17.0.0/<file>`.
+`SpecialCasing.txt` and `DerivedCoreProperties.txt` state `17.0.0` on their
+first lines, which `ucd_version.rs` reads. The standard library's
+`char::to_uppercase` is the same algorithm over the compiler's own Unicode
+version, and is not used for exactly that reason: three trees in this
+repository pin one version, and a casing table a version apart from the line
+breaker measuring its output is the skew that test exists to stop.
 
 The fifth is not compiled into anything and is the one worth defending. A line
 breaker's own author can only write the tests that author thought of, and gap
@@ -452,7 +473,7 @@ to compare and is pinned another way; its row below says which.
 | `extracted/DerivedJoiningType.txt`, here as `DerivedJoiningType.txt` | `Joining_Type`, which the Arabic cursive-joining state machine is written in. The derived file rather than `ArabicShaping.txt` because it lists the 386 `Transparent` ranges outright instead of leaving them to be re-derived from `General_Category`; `build.rs` says so at length |
 | `PropertyValueAliases.txt` | Each script's ISO 15924 code, which an OpenType script tag is derived from, and the long-to-short `Bidi_Class` names the `@missing` lines use |
 | `IndicSyllabicCategory.txt`, `IndicPositionalCategory.txt` | What a Brahmic character *is* and which side of its base it is drawn on. The Universal Shaping Engine's cluster model is written in the two together, and neither is enough alone: the pair is what tells a pre-base vowel, which has to be moved in front of its consonant, from an above-base one, which does not |
-| `UnicodeData.txt` | `Canonical_Decomposition_Mapping`, field 5, which the cluster model needs before it can reorder: a two-part vowel such as `U+1B40 BALINESE VOWEL SIGN TALING TEDUNG` is drawn on *both* sides of its consonant, and its left half only becomes something that can be moved once the character is `U+1B3E` and `U+1B35`. The UCD publishes no extracted file for it, and this is the one data file it publishes with **no version header** — so `tests/ucd_version.rs` pins it by a repertoire cross-check against `Scripts.txt` rather than by comparing headers, and says which direction of drift that catches |
+| `UnicodeData.txt` | `Canonical_Decomposition_Mapping`, field 5, which the cluster model needs before it can reorder: a two-part vowel such as `U+1B40 BALINESE VOWEL SIGN TALING TEDUNG` is drawn on *both* sides of its consonant, and its left half only becomes something that can be moved once the character is `U+1B3E` and `U+1B35`. And field 2's `General_Category`, of which only `Ps` and `Pi` are kept: which marks open something, which ruling 14's comma tie-break asks of a line's rightmost mark. The UCD publishes no extracted file for the decompositions, and this is the one data file it publishes with **no version header** — so `tests/ucd_version.rs` pins it by a repertoire cross-check against `Scripts.txt` rather than by comparing headers, and says which direction of drift that catches |
 | `BidiTest.txt` | **A conformance oracle.** Every combination of `Bidi_Class` values up to length four: 490 846 data lines, 770 241 resolutions |
 | `BidiCharacterTest.txt` | **The other one.** 91 707 cases of real code points, and the only one of the two that reaches bracket pairs |
 
@@ -501,6 +522,386 @@ Upstream's README states that *"the contents of this repository are governed by
 the Unicode Terms of Use and are released under LICENSE"*, and that LICENSE is
 the Unicode License v3, the same `Unicode-3.0` the UCD carries and `deny.toml`
 already allows. Its text is reproduced above.
+
+### `crates/tinker-pdf-xml/data/xhtml-entities`
+
+The three character entity sets every XHTML 1.x DTD declares — Latin-1 (96
+names), symbols (124) and special (33), **253 names**, each a single code point
+— which is what a document whose `<!DOCTYPE` names XHTML 1.0, XHTML 1.1 or
+XHTML Basic has in scope as `&nbsp;`, `&mdash;` and the rest. `tinker-pdf-xml`
+resolves them under `Doctype::SkipExternalId` when, and only when, the
+declaration names one of those DTDs; `build.rs` compiles the three files into a
+sorted `(name, char)` array, and nothing under `data/` is opened at run time.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `xhtml-lat1.ent` | 8 758 | `3535a3cf7672ab1a511e4edd094e8e1da8b5874aba8ee8851bd2861d25b0dfd9` |
+| `xhtml-symbol.ent` | 12 771 | `5b173003c47aba07879397bccdd23ef240eb7578c6345a84f3453617410b7e7d` |
+| `xhtml-special.ent` | 4 259 | `348d006519736b764a86fd24aed49ad35114f030ede0f263d3c4638f04e12107` |
+| `LICENSE` | 2 701 | `df7429635bacfb82b3e92c2fff50553949afd97389890d53a67b67cbf9fba68e` |
+
+**Where they came from.** `w3c/markup-validator` is the W3C's own repository
+for the Markup Validation Service, and `htdocs/sgml-lib` is the catalogue of
+DTDs it validates against; fetched from `raw.githubusercontent.com` at commit
+`724a15b0dd40841b03a7a8bc4abde8bdb16c0385` on 26 September 2026. The three
+files sit in its `REC-xhtml-modularization-20100729/` directory, which is where
+its own `catalog.xml` maps the public identifiers `-//W3C//ENTITIES Latin 1 for
+XHTML//EN`, `…Symbols for XHTML//EN` and `…Special for XHTML//EN` — the three
+that `xhtml1-strict.dtd`, `xhtml1-transitional.dtd` and `xhtml1-frameset.dtd`
+name directly and that XHTML 1.1 and XHTML Basic reach through
+`xhtml-framework-1.mod` → `xhtml-charent-1.mod`, each of which was read at the
+same commit to check exactly that. The files are byte-for-byte what was
+fetched; `.gitattributes` leaves them as text with LF line ends, which is what
+they were.
+
+**The licence.** The repository's README states that its contents are under
+the *W3C Software License and Notice* at
+`http://www.w3.org/Consortium/Legal/2002/copyright-software-20021231`, which is
+SPDX `W3C`; the repository carries no licence file of its own, so `LICENSE`
+here is SPDX's canonical text of that identifier, from
+[spdx/license-list-data](https://github.com/spdx/license-list-data)
+`text/W3C.txt` at `31ba1a50e5397e00a304dbadc76531740e89ee48`, verbatim. Each
+`.ent` file also carries, inside its own header comment and therefore inside
+every copy, ISO 8879's notice for the portions derived from its entity sets —
+*"Permission to copy in any form is granted for use with conforming SGML
+systems and applications as defined in ISO 8879, provided this notice is
+included in all copies"* — which the verbatim copy satisfies. `W3C` was added
+to `deny.toml`'s allowlist for this tree; it is a permissive licence the FSF
+lists as GPL-compatible and the OSI approves, and it asks for the notice to
+travel with the files, which it does.
+
+**Cross-checked against the HTML standard's list, and it disagrees in two
+places, both deliberately.** `whatwg/html-build` at
+`283a3531a61106d07d9a7d9fb3e6f3b9bfd33d70`, `entities/out/entities.json`
+(145 897 bytes, SHA-256
+`d741d877ac77c4194c4ad526b5b4a19aef8dfe411ab840a466891cdbb9f362e6`), holds all
+253 names. **251 agree** on their code point. The two that do not are `&lang;`
+and `&rang;`: XHTML 1.0 declares U+2329 and U+232A (LEFT- and RIGHT-POINTING
+ANGLE BRACKET), and the HTML standard maps them to U+27E8 and U+27E9
+(MATHEMATICAL LEFT and RIGHT ANGLE BRACKET), having changed them because
+U+2329 and U+232A are canonically equivalent to the CJK brackets U+3008 and
+U+3009. A document that names an XHTML DTD gets what that DTD declares, so the
+table keeps U+2329 and U+232A, and
+`every_vendored_name_decodes_to_the_code_point_its_set_declares` pins both.
+The cross-check was a script run once over the two files on 26 September 2026,
+recorded here as the measurement it was rather than run by any test (ruling
+13). *Amended 3 October 2026*: the HTML list is now vendored too, as
+`html-entities` below, for the HTML tokenizer alone. It is still not this
+table: its 2 125 names (2 231 entries with the semicolon-less legacy
+spellings) include ones that expand to two code points (`&nGt;` is U+226B
+U+20D2), which would end the XML reader's invariant that decoded text is never
+longer than its source, and it is not what any XHTML DTD declares — so the
+XML reader resolves from this table and the HTML tokenizer from that one, and
+neither consults the other's.
+
+### `crates/tinker-pdf-xml/data/encoding-indexes`
+
+The Encoding Standard's **single-byte indexes** — the code points each of its
+twenty-seven distinct single-byte tables gives bytes 0x80 to 0xFF, with
+ISO-8859-8-I reading ISO-8859-8's — and `encodings.json`, its table of every
+label every encoding answers to. `tinker-pdf-xml`'s `build.rs` compiles the
+indexes into `[u16; 128]` arrays and the labels into one sorted
+`(label, name)` array, and `tinker_pdf_xml::encoding` decodes by them: an FB2
+whose declaration names `windows-1251` or `koi8-r` (tier 5's FB2 row). The
+multi-byte indexes (GBK, Big5, JIS, EUC-KR, gb18030) are **not** here; nothing
+decodes those, and their labels are recognised from `encodings.json` only to
+say so.
+
+Cloned from `https://github.com/whatwg/encoding` on 3 October 2026, at commit
+`a985b62a9b45c17da3e17a9f0a0b4e30c34c4a8a` (committed 2026-05-21); every file
+is byte-for-byte that commit's. Each index carries its own `# Identifier:` hash
+and `# Date:` line in its header, and `build.rs` refuses a file whose rows are
+not `pointer TAB 0xHEX`, a pointer past 127 or given twice, a code point outside
+the BMP, and an `encodings.json` whose *Legacy single-byte encodings* group is
+not exactly the twenty-eight it compiles.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `LICENSE` | 16 315 | `85dc6f5ccb57a6fe8c33d158f9fc8fc7ee5655a5d3db2cdd131c6a3d0f48a864` |
+| `encodings.json` | 8 913 | `078212b3697f60b81225b6671bd9da2604497abff0aa8e96e4d46605c02ac9e7` |
+| `index-ibm866.txt` | 6 039 | `1796f4955dbc5c94e3951a940e9250c819580ce5dd1c9ac396ef73a26e938264` |
+| `index-iso-8859-2.txt` | 5 550 | `86a09a772c5ff8631dc47b8838f0b7751dc31d53fd2eb4262f0fc858e638468b` |
+| `index-iso-8859-3.txt` | 5 214 | `d49c03f3e8cab4fbf861b4471ce121beb937dbd56dfd3106b997326c4b97da0d` |
+| `index-iso-8859-4.txt` | 5 522 | `d93b8b6606e1a12ccf28418a629911b497cb7a354c8a740207992059c50917b3` |
+| `index-iso-8859-5.txt` | 5 162 | `b42bf0bb8d49701efbd8c0fb2bc7330985ce84c576ac51efe86aeff6b47aea5d` |
+| `index-iso-8859-6.txt` | 2 844 | `84b979a90c6a4fb2a2dffe37994647cd4836f918550b46d329b0d798f4b84d52` |
+| `index-iso-8859-7.txt` | 4 986 | `fc1d4295d73dfd0dd6e1b2c2ee3de7a52c6e94ddb09358161d02a2adb08a5151` |
+| `index-iso-8859-8.txt` | 3 077 | `25a8f4366e7935f2c5d59f34e59c400683a1df86546776e7d4e527ae7235cc9e` |
+| `index-iso-8859-10.txt` | 5 677 | `6c1863fca2ad99eed23cc77cce075fcd3cac6bd7b50a584d3067456c2180f16e` |
+| `index-iso-8859-13.txt` | 5 410 | `5c5fe48042ef633a88d1aeed72dd3a2e1fb5202b70c5b7696b53e76ac5e56752` |
+| `index-iso-8859-14.txt` | 5 818 | `310ec047fbd33d8c02de309f0bc8562e453e7d873cc2093005a5d954fc8f0032` |
+| `index-iso-8859-15.txt` | 5 357 | `1171d20bd7c98b5755e8802480d2799527a99847531284cd8d860ffda7cde449` |
+| `index-iso-8859-16.txt` | 5 704 | `e7bee177fdf60c5167b7c44351cd25f51caf9780889493c7855c0eb222a31660` |
+| `index-koi8-r.txt` | 5 978 | `482889b92f244a03fd33ceee13a248a5fd479a3d1633019cc3b21910b8824f52` |
+| `index-koi8-u.txt` | 5 899 | `3b8bfcaa2b7fb125e9790cc4964c4c9e51eee2c9c6e2a80ba7dfd8901546a2c6` |
+| `index-macintosh.txt` | 5 531 | `5e2b0aa162f3032cf6c96a119f59f698da80c16d58014080a6bd246d7ade3c38` |
+| `index-windows-874.txt` | 4 624 | `81b42398e8bef2acc004f38ed6ae2c4d162dfdc367e5ddfcb1cb752ac8814a1e` |
+| `index-windows-1250.txt` | 5 842 | `857f28be0681aae376f1671ab388d8e141cff9648a68803b53887bfdf950f464` |
+| `index-windows-1251.txt` | 5 518 | `bf29b6293d8b5f8011804c575b78a3b589a3fd6a4ace29ff788e3445157a13c0` |
+| `index-windows-1252.txt` | 5 667 | `2c5fa192d566f92b8b9e6e116255b1f94016b4ece5b9dacb3b98be70b8c60795` |
+| `index-windows-1253.txt` | 5 173 | `38390cd918ac2c78c47be62bd486598e7d129e0adceb140c8a7f0165ddbbf3f5` |
+| `index-windows-1254.txt` | 5 658 | `88b7acb81b616bec879521d371eee5766b9306eb050b814e4dce9468e0725822` |
+| `index-windows-1255.txt` | 4 388 | `4a3ca10dd8ef4ce06b929f6bf66d7ea8932ab3c06e07162b0f8a9536a692e6ac` |
+| `index-windows-1256.txt` | 4 974 | `a3e9e6fcf4c3eda90275c791d5d7dad08700374ebe67b17cabdfff1e48f984c1` |
+| `index-windows-1257.txt` | 5 478 | `7e56420f3460befff856365b37733f9eabc1342e82be5999ce34c5eb518fddda` |
+| `index-windows-1258.txt` | 5 521 | `2236cdac45f5970629881d09908d13af96965f1c67617160734cbefb54aa3176` |
+| `index-x-mac-cyrillic.txt` | 5 485 | `a01be0035d0cfbb8da0af780eeb6e7c6169ab26d748d03d15ccd4cd969c5b786` |
+
+**The licence, and why this tree is `BSD-3-Clause` and not `CC-BY-4.0`.** The
+repository's `LICENSE`, vendored here verbatim, reads: *"This work is licensed
+under a Creative Commons Attribution 4.0 International License. To the extent
+portions of it are incorporated into source code, such portions in the source
+code are licensed under the BSD 3-Clause License instead."* CC BY 4.0 is **not**
+on `deny.toml`'s allowlist, and adding it was not this tree's decision to make.
+BSD-3-Clause is, and the second sentence is what applies here: these files are
+inputs a build script compiles into the crate's source, which is the use the
+grant was written for, and the reading `encoding_rs` — the Encoding Standard's
+own editor's crate — ships its compiled tables under ("(Apache-2.0 OR MIT) AND
+BSD-3-Clause", the BSD part for the data derived from the standard). The
+notice and disclaimer travel with the files in `LICENSE`, which is what
+BSD-3-Clause's first two conditions ask. Were the reading ever judged wrong,
+the remedy is the allowlist's and not this file's: the data would leave the
+tree with the decoders that read it, and an 8-bit FB2 would be an empty page
+again.
+
+### `crates/tinker-pdf-xml/data/html-entities`
+
+HTML's **named character references** — 2 231 names, 2 125 of them with their
+semicolon and 106 the legacy spellings without it, 93 of them two code points
+— as the HTML standard's build publishes them. `tinker-pdf-xml`'s `build.rs`
+compiles them into one sorted `(name, first, second)` array for the HTML
+tokenizer (`tinker_pdf_xml::html`) and for nothing else: the XML reader keeps
+resolving XHTML 1.0's 253 from `xhtml-entities` above, under the declaration
+that names them, and never consults this table. `build.rs` refuses a name that
+is not ASCII alphanumerics and an optional `;`, a reference of more than two
+code points, a total other than 2 231, and any reference whose UTF-8 is longer
+than six fifths of its own source — `&nGt;`, five bytes for six, is the most
+any name asks, so a reference can lengthen text by a fifth and never multiply
+it.
+
+Cloned from `https://github.com/whatwg/html-build` on 3 October 2026 at commit
+`283a3531a61106d07d9a7d9fb3e6f3b9bfd33d70`: `entities/out/entities.json`, the
+generated file its own README says is checked in because it changes "very
+rarely, if ever", byte for byte — the same 145 897 bytes the XHTML section
+above cross-checked its 253 names against on 26 September — and the
+repository's `LICENSE`, which is the WHATWG's, byte for byte the one
+`encoding-indexes` carries.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `entities.json` | 145 897 | `d741d877ac77c4194c4ad526b5b4a19aef8dfe411ab840a466891cdbb9f362e6` |
+| `LICENSE` | 16 315 | `85dc6f5ccb57a6fe8c33d158f9fc8fc7ee5655a5d3db2cdd131c6a3d0f48a864` |
+
+**The licence** is the WHATWG's, read as `encoding-indexes` reads it:
+CC BY 4.0, with portions incorporated into source code licensed under
+BSD-3-Clause instead — and these are compiled into the crate's source by its
+build script. The data is derived from the W3C's `unicode.xml`
+(`w3c/xml-entities`), under the W3C licence `deny.toml` already allows for the
+XHTML sets.
+
+### `crates/tinker-pdf-xml/data/html5lib-tests`
+
+**The conformance suite the HTML parser is held to**: html5lib's
+tree-construction tests (57 files, 1 792 tests) and tokenizer tests (13 files
+of tests and one of XML-violation tests, 6 806 tests), each an input and the
+tree or tokens the WHATWG standard produces from it; and its encoding tests
+(three files, 82 tests), each an input and the encoding §13.2.3 decodes it
+in. `tests/html5lib.rs` and `src/html/suite.rs` read them at test time;
+nothing here reaches a build.
+
+Cloned from `https://github.com/html5lib/html5lib-tests` on 3 October 2026 and
+checked out at commit `9329e64694e7835d0dcff9811e22856ef6ad16f9` (committed
+2026-06-22). **That is not the repository's head, and the reason is
+upstream's**: four days later, at `224991e`, the tree-construction tests were
+removed from it — its README now says they "are now solely maintained on
+web-platform-tests" — so `9329e64` is the last commit that holds them, and the
+tokenizer tests are taken from the same commit so the two halves describe one
+standard. (The head, `c777c40` of 1 October 2026, adds tokenizer tests for the
+standard's new processing instructions, which this parser does not read; the
+module comment of `tinker_pdf_xml::html::tokenizer` says so.) The
+`tree-construction/scripted/` tests, which need a script engine, are not
+vendored, nor are `encoding/scripted/` and `encoding/chardet/`, which need a
+script engine and a frequency-analysis guesser this parser does not have. The
+three encoding files were added on 9 October 2026 from the same commit,
+fetched from `raw.githubusercontent.com` at `9329e64` and identical to the
+clone's; `tests1.dat` is not UTF-8 (one test's input is a raw 0xFE), which is
+the point of it. `LICENSE` and `AUTHORS.rst` are upstream's own; the suite is MIT,
+and the copyright line names its authors.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `LICENSE` | 1 103 | `ff512aac9ef231d504be5afaf4429005024e4b2aaf257be39524f37b8402aaf2` |
+| `AUTHORS.rst` | 460 | `ff66841d2cb8863976712fefb8c2f964b649cdca4480ec3faa31ed43c05c8eb1` |
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `tree-construction/adoption01.dat` | 6 084 | `b2aba05bd1d832f73a0c6103b3c8b151b283bab7c56887274d81f3a062c4963e` |
+| `tree-construction/adoption02.dat` | 1 035 | `b73bf9b375e8ee4b1e4364a7d6fec4eaf862930c26fdbdb59b87b75e468fd3dd` |
+| `tree-construction/blocks.dat` | 9 688 | `e3b7da1b57a4ec6991443dfc7ab3270f41d0f5959092a49be3e0edca0dae2104` |
+| `tree-construction/comments01.dat` | 3 502 | `79a7a42412b6dc48fa0c779dd8ba48d4d50033e7e9e417619288eec1e59d8db2` |
+| `tree-construction/doctype01.dat` | 9 076 | `f3a286c09d729eeed9aa63e0aec13ab12336af04590c169543e6d1e1ef4723b2` |
+| `tree-construction/domjs-unsafe.dat` | 10 356 | `eef4fb719e027ffaadfb854787d172893850fc561c29efe72d90c5bfa3c8b7ac` |
+| `tree-construction/entities01.dat` | 17 640 | `b73605caac5aed5656184ab8db3f08edff5457ac3186cb04afa28384bca955e3` |
+| `tree-construction/entities02.dat` | 4 952 | `f4e0cd461204b0184709be040c00811b776fbde1a6d002bb1c75d02056d9e54a` |
+| `tree-construction/foreign-fragment.dat` | 9 082 | `73e1785753c66420c067e5b29f89b17e7ebe1079687a512040ef19c6d42ac2c2` |
+| `tree-construction/html5test-com.dat` | 4 790 | `71d2ecbd0947599e82c876ce0300ecfc3a8cafd9d1736b33913f6a6152993bde` |
+| `tree-construction/inbody01.dat` | 836 | `cb722f2853ec9613b71ea68e8bb26f474cc450b64612930591ab2656406222fe` |
+| `tree-construction/isindex.dat` | 774 | `d152de773e276a07a1cfc91e93f01f3ce52c447c110192f2828dab51be2721b6` |
+| `tree-construction/main-element.dat` | 727 | `d56e382994e1a5228ddb2ea49a5ff51ab68487f9a8f79ad34bcad05d40dc1e8f` |
+| `tree-construction/math.dat` | 1 862 | `3c2ecc07272c175676ecfafa0cf6e18e74c3293075703702a4b7929fcb0d07bd` |
+| `tree-construction/menuitem-element.dat` | 4 015 | `08e5e25f38bbc181c840ce5c5203b2566dc03129aeaf105ca2311645d40aae4d` |
+| `tree-construction/namespace-sensitivity.dat` | 518 | `318fbc9926eddf5863524f1503c711ddaea93b55bcbd1eaab71b7e354ddfeb09` |
+| `tree-construction/noscript01.dat` | 4 619 | `e82449304a6371c14ed490384b6d814b7b1eeb1022dbc5caa2045fc8400655d7` |
+| `tree-construction/pending-spec-changes-plain-text-unsafe.dat` | 927 | `f45151f8dc7a4fe1a4b36710cf33606ff43cc98a42f1d2f085a77680683b0c99` |
+| `tree-construction/pending-spec-changes.dat` | 851 | `a6b7c4ecccabe70de2f24184245e4a73a8d12ed44ee658c3d5d25cce04c9d27f` |
+| `tree-construction/plain-text-unsafe.dat` | 9 486 | `1aef5e36b7ea04bb1d70684b33529a183938b7604283c562c698d6dad4e3878d` |
+| `tree-construction/quirks01.dat` | 1 170 | `b6717cc15d4ed573ccf6755bc9d52073e675b4d09f23bde07961e27592b9717c` |
+| `tree-construction/ruby.dat` | 4 471 | `5ae76ac4570d40e6648066798dd3ff729231bec98d3e010fdd67e0257f23a742` |
+| `tree-construction/scriptdata01.dat` | 6 624 | `e32ea3adc3d68c90e62ea50b3a41bf80369d1491958532bf00787b3509667322` |
+| `tree-construction/search-element.dat` | 741 | `30be0e9e8cbeea825e0323a7a3a518ab88f44fcada9b4f82b0cc7bbeb9334b76` |
+| `tree-construction/svg.dat` | 1 606 | `4c819b8dbdfbd98cfbce9a535a304b0a16597eb29ccc04077131a62810f309cd` |
+| `tree-construction/tables01.dat` | 7 041 | `bfd4a53246e3acc527c8bb214cc743082e19260e72365001aad3f1d8f4bd08dc` |
+| `tree-construction/template.dat` | 25 142 | `74bc8308e673589d81b63eb71411a6f8ecea6fd6af649b5802c22615b7102a03` |
+| `tree-construction/tests1.dat` | 39 802 | `8438d7948b366c77821cff1fc71826a8090759a78ac8a691a5c82a51fc7e5d57` |
+| `tree-construction/tests10.dat` | 16 458 | `2d2624a819c323661e396d864ac23440053127b5ea7adb44a5904f5ceee5fa64` |
+| `tree-construction/tests11.dat` | 17 679 | `276190e2a7b97e8fcf3bd863a4b4b5346b555a8336c00143cb1d0e8956b94a07` |
+| `tree-construction/tests12.dat` | 1 612 | `e6c506cea74979a0d6ca47f6b175c7b6177d6e57db708920a89694e31dfd8a42` |
+| `tree-construction/tests14.dat` | 1 067 | `d151b2426f38de40a5d4ae726e2a56dbc7742a9b1c95299d60c1e2e0fdad1f98` |
+| `tree-construction/tests15.dat` | 3 649 | `ef784ece74cbd760da3a6947aaf4478810246b73c753f25a04be4d11dd806b2d` |
+| `tree-construction/tests16.dat` | 46 454 | `3350be682713afc1f6dad37059f2551709497a3643c38c26e1fe36fd07d23745` |
+| `tree-construction/tests17.dat` | 2 819 | `0567680775f58a5b2ad24e234f41d53f68fb2fc3ef7809bebaec0920e2f13c89` |
+| `tree-construction/tests18.dat` | 12 119 | `5d0019ae43bb4e0b0da9f2e1d57ac0618a607bd8a1324b163ec7a23a1dc120f3` |
+| `tree-construction/tests19.dat` | 22 988 | `a9316b1eb4d2821a18e2c840394c6218bfcdb598857b92631490d9c3c1840ce4` |
+| `tree-construction/tests2.dat` | 13 193 | `9cf76b5f4890065c04fc82ae828379a55b85cbe76f584fb1ef23dcef0a77b86b` |
+| `tree-construction/tests20.dat` | 13 524 | `07f7661690c4cd7cc0bbb0f1b9c1e1d65135e07c4dde8bbf106692f687e7d33d` |
+| `tree-construction/tests21.dat` | 5 092 | `b1a67420c79a5131002fefc987084ffb6b6094a3a74b272c6f545a47df06452c` |
+| `tree-construction/tests22.dat` | 4 243 | `78488328181d0f82f34b1a5e9e456ff7c713b3ff86dab6ace1530f6f07d5370d` |
+| `tree-construction/tests23.dat` | 3 478 | `2e4752ff4ef898e4a0cf9a450e481440095163d45075a662846a062552afe148` |
+| `tree-construction/tests24.dat` | 929 | `fdd5c21f60f42235ded224a03e7182d289088328f460525adaf3c14e772a24ac` |
+| `tree-construction/tests25.dat` | 3 586 | `f2e08fda6d15a08faf9ff0001ec38560d942069cee6b4e264aeedbbacde7da8d` |
+| `tree-construction/tests26.dat` | 8 865 | `d55d24dfca2444fba759d59346cbab21f7e70340dbb14e2c7af8da3d44abd4ab` |
+| `tree-construction/tests3.dat` | 4 601 | `c4b4d8e0ea3d978c49d1e6a985d427164858b71ec980153c4526ed0c398f43b9` |
+| `tree-construction/tests4.dat` | 1 041 | `e6003a52e1cbffc361eca7c739cdd4459074ac8c59766d1eb171b9c9eb42f517` |
+| `tree-construction/tests5.dat` | 3 160 | `bf80b927082290541781844906abdcb72f091488f7a11e8b7d9ac00076dd4fce` |
+| `tree-construction/tests6.dat` | 11 065 | `be16c74d2a9862283262968439c95b9bfce6182ea61055a3c886c28d14f3e01a` |
+| `tree-construction/tests7.dat` | 7 339 | `aeb9569589c809b1a563c0b163173e8cf980a6a4028cb7c210f19c181b56999a` |
+| `tree-construction/tests8.dat` | 2 664 | `f3c8b1baece162e7e8c394540cdf9057266bb738bb0ad539a9d9b2f9d365f162` |
+| `tree-construction/tests9.dat` | 10 391 | `857820f088506a6d20ea6acefbf19c0a6c4de87a39b24988878066397516b36f` |
+| `tree-construction/tests_innerHTML_1.dat` | 11 205 | `acb9f835119e302d33204f437d54637a84ae26608ccb7bc961c6f7f44202a44c` |
+| `tree-construction/tricky01.dat` | 6 690 | `3fb6d24c5e371860d096ef07f5fff38be3ceaa85f1239bee35cce548b596198a` |
+| `tree-construction/void-in-phrasing.dat` | 1 890 | `c8855173aca8ecbd218abc26db34a631393ce0285fffebffdaf69b8bdd6224e9` |
+| `tree-construction/webkit01.dat` | 14 034 | `063ca232535a792fa238ae769eeb0ddcc9bd2ee961d3da327ca134612d35d93c` |
+| `tree-construction/webkit02.dat` | 14 921 | `03b215350d352faf110df2cc6eac23a44a7f70945b4ea962f0b17bed103459f7` |
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `tokenizer/contentModelFlags.test` | 3 055 | `77784a505a528950761cfb3c76617afade28b27c3be2a8c37dce3c3d8988391d` |
+| `tokenizer/domjs.test` | 13 430 | `3273e7861bbdb094571e4b0813ffdd934fe2bfd65864600fef62e8e3b807131a` |
+| `tokenizer/entities.test` | 19 147 | `fe17483810a00247579f5f129ca9c007fbab6755ba839523e29aa9f8875f4085` |
+| `tokenizer/escapeFlag.test` | 1 378 | `edbd2e070a14fc67f6bbc104e50207f0fe206a21891c260deea3d227b32c93c9` |
+| `tokenizer/namedEntities.test` | 1 128 317 | `a7f0e59ff7653820330548776cb3031c18e45f5fd1481a9813d9c7acee89bd6e` |
+| `tokenizer/numericEntities.test` | 49 842 | `679296c976252322ece27e2b113a5358a0aa3b0b8ecd2d6d9b365f9d1b0f9632` |
+| `tokenizer/pendingSpecChanges.test` | 162 | `6b56d81ca09afa47d8cb0f33e3fb7169010c3a64493e608ebec921ac098ff8e9` |
+| `tokenizer/test1.test` | 10 006 | `524fcfa4d561a14f0c4e72e0573549abe6341fd4dfb8e16bc2dcf59a608a7219` |
+| `tokenizer/test2.test` | 8 647 | `f6450e77760cea823258de86f8e08894a1815671dbec0d74e7fbdab075596e37` |
+| `tokenizer/test3.test` | 349 970 | `9912fa27f03344243f1baa96d9690a5c2a4a9c9426c70da5cbf5c62391d62de4` |
+| `tokenizer/test4.test` | 16 339 | `c4967118aecbf8eb2ca34d5c5306f536614acca03e58610f75fbd9efa89fbb42` |
+| `tokenizer/unicodeChars.test` | 43 771 | `22b7263a840da38179b13693bbfe72f0507dcd41951622456a0d3f5300ba42bd` |
+| `tokenizer/unicodeCharsProblematic.test` | 1 107 | `3c166d5cfa24ee60fd7310ff0f5057e4ae0c649842ec446b5949215759e19a68` |
+| `tokenizer/xmlViolation.test` | 442 | `193a2f52d81adb4df4e056e3489f3bae79b3fc65253ccf31423a0e2f9c128d5c` |
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `encoding/test-yahoo-jp.dat` | 502 | `dc353a7ceaa9428a668e7846e78efd18f7e0a09e768d6be61166c12fc223a432` |
+| `encoding/tests1.dat` | 45 380 | `ef54dd3d9c256a6830c266808c0277545a156a241b350c613c996a4cea52e5f7` |
+| `encoding/tests2.dat` | 3 113 | `5e00d81e6207307f1186ea85f85b5f58003af94f5a7c6a3e06ca19c17567f51b` |
+
+### `crates/tinker-pdf-content/data/ucd`
+
+The Unicode Character Database a third time, at the files
+[UAX #29](https://www.unicode.org/reports/tr29/)'s word boundaries need, for
+`TextLine::words` and the word boxes it returns, and the two the search
+options' diacritic folding needs, for `TextPage::search_with`. A **third** tree
+rather than a share of either existing one, for the reason the second exists:
+this crate may depend on neither `tinker-pdf-layout` nor `tinker-pdf-shape`
+(`cargo xtask dag`), and a build script cannot read across a crate boundary.
+`crates/tinker-pdf-shape/tests/ucd_version.rs` holds all three trees to one
+Unicode version, one licence text and a fixed list of files each.
+
+unicode.org itself was not reachable from where this was vendored, so the
+files were fetched from the Unicode Consortium's own tools repository, which
+carries the published release under `unicodetools/data/ucd/<version>/`, pinned
+to commit `0509b4b256ff75c65300c8aaecb9e6ec816d9520` so the URL names one set
+of bytes:
+`https://raw.githubusercontent.com/unicode-org/unicodetools/0509b4b256ff75c65300c8aaecb9e6ec816d9520/unicodetools/data/ucd/17.0.0/<path>`.
+Each file's first line states its own version — except `UnicodeData.txt`,
+which has no header anywhere — and `emoji-data.txt` and `UnicodeData.txt` are
+byte for byte the copies `crates/tinker-pdf-layout/data/ucd` and
+`crates/tinker-pdf-shape/data/ucd` already carried; `tests/ucd_version.rs`
+asserts the second, since no header can.
+
+| File | Upstream path | SHA-256 | What it is |
+| --- | --- | --- | --- |
+| `WordBreakProperty.txt` | `auxiliary/WordBreakProperty.txt` | `72274cac1e6b919507db35655c3e175aa27274668a1ece95c28d2069f2ad9852` | The `Word_Break` property, which **is** UAX #29's word algorithm |
+| `emoji-data.txt` | `emoji/emoji-data.txt` | `2cb2bb9455cda83e8481541ecf5b6dfda66a3bb89efa3fa7c5297eccf607b72b` | `Extended_Pictographic`, which rule WB3c is written in |
+| `UnicodeData.txt` | `UnicodeData.txt` | `2e1efc1dcb59c575eedf5ccae60f95229f706ee6d031835247d843c11d96470c` | Field 5's canonical decompositions — published nowhere else — and field 2's `General_Category`, for diacritic-insensitive search |
+| `PropList.txt` | `PropList.txt` | `130dcddcaadaf071008bdfce1e7743e04fdfbc910886f017d9f9ac931d8c64dd` | `Diacritic`: a nonspacing mark that is also `Diacritic` is what that search removes, so a Devanagari vowel sign, which is `Mn` and not an accent, stays |
+| `WordBreakTest.txt` | `auxiliary/WordBreakTest.txt` | `1de23a75f37904abc7d206239ee8d34f8fdf0fb4ab32a7174dfbabbde25419b2` | **The conformance oracle.** 1 944 cases, every one run by `tests/uax29_conformance.rs` against the function `TextLine::words` calls |
+| `LICENSE.txt` | — | `e7a93b009565cfce55919a381437ac4db883e9da2126fa28b91d12732bc53d96` | The Unicode License v3, byte for byte the file the other two UCD trees carry |
+
+The first four are compiled into static tables by `build.rs` and never opened
+at run time; `WordBreakTest.txt` is a test input and is not compiled into
+anything. It is here rather than fetched for the reason `LineBreakTest.txt` is:
+a skipped oracle exits 0 and reads exactly like a pass. `Unicode-3.0` is
+already on `deny.toml`'s allowlist, and its text is reproduced above.
+
+### `crates/tinker-pdf-archive/data/zstd-golden`
+
+The zstd project's own golden decompression files: seven frames that pin
+corners of RFC 8878 an encoder is careful never to write, four a decoder must
+accept and three it must refuse. `tinker-pdf-archive`'s Zstandard decoder is
+held to all seven by `the_golden_files_decode_to_what_zstd_s_own_tests_say`
+and `the_golden_error_files_are_refused_for_their_reasons`
+(`src/zstd/tests.rs`), and the expected answers are upstream's, not another
+decoder's: `tests/playTests.sh` compares `rle-first-block.zst` against a
+mebibyte of `/dev/zero` and `empty-block.zst` against an empty file; the other
+two accepted files are `zstd -t` there, and what they decode to is written in
+each as raw literals; and `tests/cli-tests/decompression/detectErrors.sh`
+requires every file in the errors directory to fail. They are test inputs,
+compiled into nothing.
+
+| File | Bytes | SHA-256 | What it pins |
+| --- | ---: | --- | --- |
+| `golden-decompression/rle-first-block.zst` | 45 | `dd31b3fa6bb8601710cbde2c625660763bf38adc5255501e3d3a681cc0e4e1a4` | An RLE block as a frame's first, which libzstd never writes because, in `playTests.sh`'s words, "older versions of zstd cli are not able to decode such corner case" |
+| `golden-decompression/empty-block.zst` | 11 | `ab5463fa31429bf81ced9f05e99b96b2fe88b1da37235a233f6bc96242332fbc` | A compressed block of no literals and no sequences |
+| `golden-decompression/zeroSeq_2B.zst` | 25 | `8505867ac00fb49eb455da1b1e44e7cba5126f03114a72fb195170f7c95f2ca7` | A sequence count of zero in its two-byte form |
+| `golden-decompression/block-128k.zst` | 131 081 | `6a226ab40e6abcfc4a36baa04bf48f7ee56f166b8a26fbe2adb8fe771dceccba` | A compressed block exactly `Block_Maximum_Size` long, as large as the format allows and larger than any encoder needs |
+| `golden-decompression-errors/zeroSeq_extraneous.zst` | 27 | `85d7b2010abde2ff96ab8e6798b422d3cb78f8dd2108f83dbdd488da7056a6db` | Bytes after a sequence count of zero |
+| `golden-decompression-errors/off0.bin.zst` | 17 | `144e2f029389c67c361bd3879ac142671592802f01f805a6c0c2b3e564d8022c` | A repeat offset of zero (the first repeat minus one, when the first is one) |
+| `golden-decompression-errors/truncated_huff_state.zst` | 19 | `c91a09d8824609d0643291803cbfb04b14213c02c890d5637bc3aed18e8a24f8` | A Huffman weight stream too short for its two initial states |
+| `LICENSE` | 1 549 | `7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8` | Upstream's root `LICENSE`, verbatim |
+
+**Where they came from, and what is not known about that.** Fetched on
+26 September 2026 from
+`https://raw.githubusercontent.com/facebook/zstd/dev/tests/<directory>/<file>`,
+byte for byte. They are **not pinned to a commit**: `dev` was fetched as
+served, because no commit could be resolved from where this was vendored —
+`api.github.com` and `github.com`'s own pages both answered 403 through the
+proxy, and that refusal was taken as final rather than routed around. The
+SHA-256s above are the pin. For the same reason **the set may be
+incomplete**: neither directory could be listed, so what is here is the four
+files upstream's own scripts name (`playTests.sh`: `rle-first-block`,
+`empty-block`, `zeroSeq_2B`, `zeroSeq_extraneous`) and three more fetched by
+the names this author knew the directories to hold (`block-128k`, `off0.bin`,
+`truncated_huff_state`). A golden file added upstream under another name is
+not here, and nothing here would notice.
+
+**The licence.** Every zstd source file offers *"both the BSD-style license
+... and the GPLv2 ... You may select, at your option, one of the
+above-listed licenses"*; this repository selects the first. `LICENSE` is that
+BSD licence — SPDX `BSD-3-Clause`, already on `deny.toml`'s allowlist for
+cmap-resources and Brotli's dictionary — fetched from the same branch on the
+same day. The golden files carry no header of their own.
 
 ### The predefined XMP schemas' property tables
 
@@ -592,6 +993,36 @@ groups were dropped and why; for the seven Triple DES files, that nothing was
 dropped at all. They are `cargo test` inputs, compiled in only under
 `#[cfg(test)]`, and are not in any built artefact.
 
+`crates/tinker-pdf-crypto/tests/data/pkcs1/pss-vect.txt` is RSA Laboratories'
+PKCS #1 v2.1 RSASSA-PSS test vectors (`pkcs-1v2-1d2-vec.zip`), which RSA no
+longer serves; it was fetched on 2 October 2026 from the verbatim mirror
+pyca/cryptography keeps at
+`https://raw.githubusercontent.com/pyca/cryptography/main/vectors/cryptography_vectors/asymmetric/RSA/pkcs-1v2-1d2-vec/pss-vect.txt`,
+SHA-256 `20a90aa5d8506b3251b5790c860df0673329cf9f4fc3e36c11a6cfcdc7258299` as
+served (CRLF line endings, which `.gitattributes` normalises here). The file
+carries no licence of its own; pyca/cryptography distributes its vector
+collection under `Apache-2.0 OR BSD-3-Clause`. Its header comment records the
+same facts, and like the CAVP files it is a `cargo test` input compiled in
+only under `#[cfg(test)]`. `rsa_sigver_pss.rsp` beside the other CAVP files
+came from the same `186-2rsatestvectors.zip` as `rsa_sigver15.rsp`.
+
+`crates/tinker-pdf-crypto/tests/data/pkcs1/pkcs1v15crypt-vectors.txt` is the
+same archive's RSAES-PKCS1-v1_5 encryption vectors: fifteen keys, twenty
+messages each, every one printed with the padding it was encrypted under. It
+was fetched on 2 October 2026 from the same mirror, at
+`https://raw.githubusercontent.com/pyca/cryptography/main/vectors/cryptography_vectors/asymmetric/RSA/pkcs1v15crypt-vectors.txt`,
+SHA-256 `56489d946ad17b0b043812a06294e282d2b7ce095fd3f5899a7e8b60eaea7cba` as
+served (CRLF, normalised here), under the same licence terms and with the same
+header comment; a `cargo test` input only.
+
+`crates/tinker-pdf-crypto/tests/data/openssl/pss-mgf1.txt` is the output of
+**OpenSSL 3.0.13**, run once on 3 October 2026 through `pss-mgf1.py` beside it
+and committed: one fresh 2048-bit public key and four RSASSA-PSS signatures
+whose MGF1 hash differs from the message hash, which neither published set
+above carries. The private key was not kept. Its header records the command;
+like the rest it is a `cargo test` input only, and OpenSSL supplied the bytes
+and adjudicates nothing (ruling 13).
+
 These sit under `tests/data/` rather than `crates/<crate>/data/` because they
 are neither vendored *into* the engine nor redistributed by it; `cargo xtask
 vendor`'s allowlist governs the latter, and this is the former.
@@ -616,6 +1047,30 @@ before the third arrived:
   any fetched corpus uses ECDSA**, so the verdict path's P-256 and P-384 arms
   had nothing real to be held to; see
   [`crates/tinker-pdf/tests/signature_support/README.md`](crates/tinker-pdf/tests/signature_support/README.md).
+- `rsa-pss.pdf` and `rsa-pss-root.der`, built 2 October 2026 by
+  `signature-fixtures.py` and **OpenSSL 3.0.13 (30 Jan 2024)** — a different
+  OpenSSL from the three above, because it is the one on the machine that
+  built them: an RSASSA-PSS-signed CMS under a PSS-restricted key and a root
+  that signs certificates with PSS, because no corpus signature uses PSS.
+- `no-signed-attributes.pdf` and its root, built the same day the same way:
+  a detached signer with no signed attributes (`cms -sign -noattr`), the
+  shape the corpus has one of.
+- `pkcs7-sha1.pdf`, `pkcs7-sha1-no-attributes.pdf` and their roots, the same
+  day the same way: ISO 32000-1 12.8.3.3.1's `adbe.pkcs7.sha1`, whose CMS
+  encapsulates the document's SHA-1 (`cms -sign -nodetach`), with and without
+  signed attributes, because the corpus's one such file never reaches a parser.
+- `cades-general-names.pdf` and its root, the same day the same way: a CAdES
+  signature (`cms -sign -cades`) whose signer certificate and
+  `signingCertificateV2` carry RFC 5280 `GeneralNames` of eight kinds.
+- `signature-timestamp.pdf` and its two roots, the same day: a signature
+  countersigned by an RFC 3161 token from OpenSSL's own timestamping
+  authority (`openssl ts -reply`), spliced into its unsigned attributes.
+- `document-timestamp.pdf`, `engine-timestamp-token.der` and their two
+  authorities' roots, the same day: ISO 32000-2 12.8.5 document timestamps,
+  the second a token over the digest of a file this engine wrote.
+- `no-signed-attributes-crl.der` and `-ocsp.der`, the same day: a CRL and an
+  OCSP response OpenSSL issued for that fixture's signer, the host-supplied
+  material a document security store is written from.
 
 The keys and certificates are generated for the fixtures and belong to nobody;
 there is no licence on any of it. Nothing re-runs OpenSSL — `cargo xtask
@@ -676,6 +1131,19 @@ not admissible: they are not freely licensed. They are inputs to tests and are
 not redistributed in any built artefact.
 
 ## What is deliberately not here
+
+**No VP8 test vectors.** The WebM project's
+[`webmproject/vp8-test-vectors`](https://github.com/webmproject/vp8-test-vectors)
+— 61 IVF files and the MD5 of every frame the reference decoder makes of each,
+which the lossy WebP decoder is held to — carries no licence file and no
+licence statement, and material with no stated terms is not redistributable.
+So it is fetched rather than committed:
+`crates/tinker-pdf-filters/tests/vp8-vectors/fetch.sh` fetches commit
+`8afcf0579a9d5221ff892dd197af21ac3d56962d` (2013-06-06, the repository's last)
+into `target/`, and checks each of the 122 files it reads against the SHA-256
+recorded in `SHA256SUMS` beside the script on 2026-10-02. CI's `vp8-vectors`
+job runs both, and nothing of the vectors reaches the tree or a built
+artefact.
 
 No typefaces beyond the twelve above. Symbol and ZapfDingbats — the two of the
 standard 14 that are not text faces — have no Liberation equivalent, and

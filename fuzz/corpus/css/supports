@@ -1,0 +1,4 @@
+ÿ@supports (display: flex) and (not (display: grid)) { p { box-shadow: 1px 2px red, inset 0 0 0 3px blue; transform: rotate(10deg) translate(5%, 2em) skewX(0.1turn); transform-origin: left 20% 0 } }
+@supports ((a: b) or (color: red)) and selector(p > a:nth-child(2n+1)) { q { text-shadow: 1px 1px } }
+@supports not (display: grid) or (x) { p { float: left } }
+@supports (transform: rotateX(1deg)) { p { float: right } }

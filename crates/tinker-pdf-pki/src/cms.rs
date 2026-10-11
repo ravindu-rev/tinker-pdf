@@ -125,9 +125,9 @@
 //! `messageDigest` against a document, evaluates a certificate, looks at a
 //! CRL, or reads a clock — [`SignerInfo::signing_time`] is the signer's
 //! unverified claim about when they signed, and a timestamp token is handed
-//! over as bytes ([`SignerInfo::timestamp_tokens`]). Timestamp validation is
-//! an explicit non-goal of `docs/design/signatures.md`; revocation data is
-//! surfaced for the host under the same document's "no I/O" rule.
+//! over as bytes ([`SignerInfo::timestamp_tokens`]) for [`crate::tsp`] to
+//! read and the facade's verdict to validate; revocation data is surfaced for
+//! the host under `docs/design/signatures.md`'s "no I/O" rule.
 
 /// The digest a CMS structure names, which is `tinker-pdf-crypto`'s own enum.
 ///
@@ -140,6 +140,7 @@
 pub use tinker_pdf_crypto::DigestAlgorithm;
 
 use crate::der::{Budget, Class, Cursor, DerError, Int, Limits, Oid, Tag, Tlv};
+use crate::general_name::{GeneralNameError, GeneralNames};
 use crate::name::Name;
 use crate::oid;
 use crate::x509::AlgorithmIdentifier;
@@ -252,10 +253,11 @@ pub enum SignatureAlgorithm {
     RsaPkcs1v15 { digest: Option<DigestAlgorithm> },
     /// ECDSA with the digest the OID names (RFC 5758 §3.2).
     Ecdsa { digest: DigestAlgorithm },
-    /// RSASSA-PSS. **Named, not decoded**: the salt length, the mask
-    /// generation function and the digest all live in an
-    /// `RSASSA-PSS-params` structure this crate does not read, so a caller
-    /// meeting one knows what it is and knows nothing here can check it.
+    /// RSASSA-PSS. The salt length, the mask generation function and the
+    /// digest live in an `RSASSA-PSS-params` structure rather than in the
+    /// OID, and [`crate::pss::parameters`] reads them out of the algorithm
+    /// identifier — [`SignerInfo::signature_algorithm_id`] for a signer,
+    /// [`crate::x509::Certificate::signature_algorithm`] for a certificate.
     RsaPss,
 }
 
@@ -657,6 +659,9 @@ pub struct EssCertId<'a> {
     hash_algorithm: Option<AlgorithmIdentifier<'a>>,
     hash: &'a [u8],
     issuer_serial: Option<&'a [u8]>,
+    /// SHA-256 for an `ESSCertIDv2` (RFC 5035 §4's DEFAULT), SHA-1 for the
+    /// first version's `ESSCertID`, which has no algorithm field at all.
+    default: DigestAlgorithm,
 }
 
 impl<'a> EssCertId<'a> {
@@ -664,7 +669,9 @@ impl<'a> EssCertId<'a> {
     ///
     /// `None` is the DEFAULT rather than an absence: RFC 5035 §4 makes
     /// `id-sha256` the default and DER omits a field at its default (X.690
-    /// §11.5), so [`EssCertId::digest`] answers `Sha256` for a `None` here.
+    /// §11.5), so [`EssCertId::digest`] answers `Sha256` for a `None` here —
+    /// and `Sha1` for the first version's `ESSCertID` (RFC 2634 §5.4.1),
+    /// which never carries one.
     #[must_use]
     pub const fn hash_algorithm(&self) -> Option<AlgorithmIdentifier<'a>> {
         self.hash_algorithm
@@ -678,7 +685,7 @@ impl<'a> EssCertId<'a> {
     /// digest for.
     pub fn digest(&self) -> Result<DigestAlgorithm, CmsError> {
         match self.hash_algorithm {
-            None => Ok(DigestAlgorithm::Sha256),
+            None => Ok(self.default),
             Some(identifier) => {
                 digest_algorithm(identifier.oid()).ok_or_else(|| CmsError::UnknownDigestAlgorithm {
                     oid: identifier.oid().to_dotted(),
@@ -693,12 +700,74 @@ impl<'a> EssCertId<'a> {
         self.hash
     }
 
-    /// `issuerSerial`, undecoded. A `GeneralNames` and a serial; nothing in
-    /// this milestone reads one, and the bytes are here so a later one need
-    /// not re-walk the attribute.
+    /// `issuerSerial`, as its complete encoding.
     #[must_use]
     pub const fn issuer_serial(&self) -> Option<&'a [u8]> {
         self.issuer_serial
+    }
+
+    /// `issuerSerial`, decoded: `IssuerSerial ::= SEQUENCE { issuer
+    /// GeneralNames, serialNumber CertificateSerialNumber }` (RFC 5035 §4,
+    /// after RFC 5755 §4.1, without the `issuerUID` RFC 5035 leaves out).
+    ///
+    /// Decoded on request, as `authorityCertIssuer` is: the attribute is the
+    /// signer's statement of which certificate it meant, and a name this
+    /// crate cannot read is a refusal about that statement rather than about
+    /// the message.
+    ///
+    /// # Errors
+    ///
+    /// [`GeneralNameError`].
+    pub fn issuer_serial_decoded(&self) -> Option<Result<IssuerSerial<'a>, GeneralNameError>> {
+        self.issuer_serial.map(IssuerSerial::parse)
+    }
+}
+
+/// An ESS `IssuerSerial` (RFC 5035 §4): the certificate an `ESSCertIDv2`
+/// names, by its issuer and serial number.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IssuerSerial<'a> {
+    issuer: GeneralNames<'a>,
+    serial: Int<'a>,
+}
+
+impl<'a> IssuerSerial<'a> {
+    fn parse(der: &'a [u8]) -> Result<Self, GeneralNameError> {
+        let budget = Budget::new(Limits::new(16, 4096));
+        let mut cursor = Cursor::new(der, &budget);
+        let sequence = cursor.expect(Tag::Sequence)?;
+        cursor.finish()?;
+        let mut fields = sequence.children(&budget)?;
+        let issuer = GeneralNames::from_node(&fields.expect(Tag::Sequence)?, &budget)?;
+        let serial = fields.expect(Tag::Integer)?.as_integer()?;
+        fields.finish()?;
+        Ok(Self { issuer, serial })
+    }
+
+    /// The issuer, as `GeneralNames` — in practice one directory name.
+    #[must_use]
+    pub fn issuer(&self) -> &GeneralNames<'a> {
+        &self.issuer
+    }
+
+    /// The serial number, as its encoding's octets.
+    #[must_use]
+    pub const fn serial(&self) -> Int<'a> {
+        self.serial
+    }
+
+    /// Whether this names `certificate`: a directory name among the issuer's
+    /// names that matches the certificate's issuer, and the same serial
+    /// octets.
+    #[must_use]
+    pub fn identifies(&self, certificate: &crate::x509::Certificate<'_>) -> bool {
+        self.serial.as_bytes() == certificate.serial().as_bytes()
+            && self.issuer.names().iter().any(|name| match name {
+                crate::general_name::GeneralName::Directory(directory) => {
+                    directory.matches(certificate.issuer())
+                }
+                _ => false,
+            })
     }
 }
 
@@ -735,8 +804,11 @@ impl<'a> SigningCertificateV2<'a> {
         self.der
     }
 
-    /// Reads a `SigningCertificateV2` value.
-    fn parse(tlv: &Tlv<'a>, budget: &Budget) -> Result<Self, DerError> {
+    /// Reads a `SigningCertificateV2` value, or with `v1` the first version's
+    /// `SigningCertificate` (RFC 2634 §5.4), whose `ESSCertID`s are a SHA-1
+    /// hash and an optional `IssuerSerial` with no algorithm field between
+    /// them.
+    fn parse(tlv: &Tlv<'a>, budget: &Budget, v1: bool) -> Result<Self, DerError> {
         tlv.require(Tag::Sequence)?;
         let mut fields = tlv.children(budget)?;
         let mut certs = Vec::new();
@@ -749,7 +821,9 @@ impl<'a> SigningCertificateV2<'a> {
             // `certHash` OCTET STRING when it is not — which is what
             // distinguishes them, since the two carry different tags.
             let hash_algorithm = match parts.peek() {
-                Some(Ok((Class::Universal, _, number))) if number == Tag::Sequence.number() => {
+                Some(Ok((Class::Universal, _, number)))
+                    if !v1 && number == Tag::Sequence.number() =>
+                {
                     Some(AlgorithmIdentifier::parse(&parts.read()?, budget)?)
                 }
                 _ => None,
@@ -761,6 +835,11 @@ impl<'a> SigningCertificateV2<'a> {
                 hash_algorithm,
                 hash,
                 issuer_serial,
+                default: if v1 {
+                    DigestAlgorithm::Sha1
+                } else {
+                    DigestAlgorithm::Sha256
+                },
             });
         }
         let policies = fields
@@ -789,6 +868,7 @@ pub struct SignerInfo<'a> {
     message_digest: Option<&'a [u8]>,
     signing_time: Option<i64>,
     signing_certificate_v2: Option<SigningCertificateV2<'a>>,
+    signing_certificate: Option<SigningCertificateV2<'a>>,
     timestamp_tokens: Vec<&'a [u8]>,
     der: &'a [u8],
 }
@@ -844,6 +924,7 @@ impl<'a> SignerInfo<'a> {
             message_digest: None,
             signing_time: None,
             signing_certificate_v2: None,
+            signing_certificate: None,
             timestamp_tokens: Vec::new(),
             der: tlv.raw(),
         };
@@ -885,7 +966,14 @@ impl<'a> SignerInfo<'a> {
             if let Some(attribute) = attributes.one(oid::AA_SIGNING_CERTIFICATE_V2)? {
                 let value = attribute.single_value()?;
                 self.signing_certificate_v2 = Some(
-                    SigningCertificateV2::parse(&value, budget)
+                    SigningCertificateV2::parse(&value, budget, false)
+                        .map_err(|error| CmsError::attribute(attribute.oid, error))?,
+                );
+            }
+            if let Some(attribute) = attributes.one(oid::AA_SIGNING_CERTIFICATE)? {
+                let value = attribute.single_value()?;
+                self.signing_certificate = Some(
+                    SigningCertificateV2::parse(&value, budget, true)
                         .map_err(|error| CmsError::attribute(attribute.oid, error))?,
                 );
             }
@@ -1076,14 +1164,22 @@ impl<'a> SignerInfo<'a> {
         self.signing_certificate_v2.as_ref()
     }
 
+    /// The signed `signingCertificate` attribute — the first version, RFC
+    /// 2634 §5.4 — read into the same type, its digests SHA-1.
+    ///
+    /// RFC 3161 §2.4.1 requires one of the two in a timestamp token, and an
+    /// authority that has not adopted RFC 5816 writes this one.
+    #[must_use]
+    pub const fn signing_certificate(&self) -> Option<&SigningCertificateV2<'a>> {
+        self.signing_certificate.as_ref()
+    }
+
     /// The RFC 3161 timestamp tokens in the unsigned attributes, as DER.
     ///
-    /// **Surfaced, never evaluated**, which `docs/design/signatures.md` makes
-    /// an explicit non-goal. Each is itself a `ContentInfo`, so
-    /// [`ContentInfo::parse`] reads one and the authority's name and claimed
-    /// time come out of the token's own `SignerInfo` and `eContent` — this
-    /// module reads a timestamp with itself, and validating the authority's
-    /// chain is a later tier.
+    /// Each is itself a `ContentInfo`, and [`crate::tsp::TimeStampToken`]
+    /// reads one: the envelope through this module, the `TSTInfo` inside it
+    /// through that one. Nothing here evaluates a token; the facade's verdict
+    /// does.
     #[must_use]
     pub fn timestamp_tokens(&self) -> &[&'a [u8]] {
         &self.timestamp_tokens

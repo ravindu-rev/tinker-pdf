@@ -12,7 +12,8 @@
 //! | `fx`/`fy` default to the initial centre, not the resolved one | 1 |
 //! | a gradient with no stops falls through to the paint's fallback | 2 |
 //! | a single stop is not doubled into a ramp | 1 |
-//! | an unsupported `spreadMethod` is silent | 1 |
+//! | `spreadMethod` is read from the element alone, not the chain | 1 |
+//! | `repeat` is read as `reflect` | 1 |
 //! | `stop-color` inherits from an ancestor | 2 |
 //! | `clip-path` inherits | 1 |
 //! | a clip path intersects its children rather than unioning them | 1 |
@@ -21,6 +22,8 @@
 //! | a `clip-path` naming nothing is silent | 1 |
 //! | `clip-rule` reads `fill-rule` | 1 |
 //! | a `<clipPath>` outside `<defs>` is drawn where it stands | 6 |
+//! | a container's `clip-path` is ignored, as it was until groups | 2 |
+//! | a group's box is measured in the scene rather than its own space | 1 |
 //!
 //! Seventeen injections and **no zeros — after three were found and fixed**,
 //! which is the whole reason the matrix is run rather than reasoned about:
@@ -36,7 +39,7 @@
 //!   terminates the walk and the repeated entries resolve identically. The
 //!   `contains` check is gone and the cap is asserted directly.
 
-use tinker_pdf_svg::{Clip, Colour, FillRule, Limits, Node, Paint, Scene, Stop, Warning};
+use tinker_pdf_svg::{Clip, Colour, FillRule, Limits, Node, Paint, Scene, Spread, Stop, Warning};
 
 const GRADIENTS: &[u8] = include_bytes!("fixtures/gradients.svg");
 const CLIPPING: &[u8] = include_bytes!("fixtures/clipping.svg");
@@ -146,6 +149,7 @@ fn a_paint_server_takes_its_stops_from_the_one_it_references() {
         to,
         matrix,
         stops,
+        ..
     } = fill(&scene, 1)
     else {
         panic!("a linear gradient: {:?}", fill(&scene, 1));
@@ -295,19 +299,48 @@ fn a_gradient_with_no_stops_and_one_with_a_single_stop() {
     near(stops[1].offset, 1.0, "and it reaches the end");
 }
 
-/// §13.2.3's `reflect` and `repeat` are refused by name and drawn as `pad`.
+/// §13.2.3's `spreadMethod` reaches the paint, along the reference chain like
+/// every other attribute — `#spread` states only the method and takes its
+/// stops and geometry from `#ramp` — and `pad` is what a file that says
+/// nothing, or something else, means.
 #[test]
-fn an_unsupported_spread_method_is_named_and_padded() {
+fn the_spread_method_reaches_the_paint() {
     let scene = scene(GRADIENTS);
-    assert!(
-        scene.warnings.contains(&Warning::SpreadMethodUnsupported),
-        "{:?}",
-        scene.warnings
+    let Paint::Linear { spread, .. } = fill(&scene, 4) else {
+        panic!("a linear gradient: {:?}", fill(&scene, 4));
+    };
+    assert_eq!(spread, Spread::Reflect);
+    let Paint::Linear { spread, .. } = fill(&scene, 0) else {
+        panic!("a linear gradient");
+    };
+    assert_eq!(spread, Spread::Pad, "the initial value");
+    let markup = br##"<svg xmlns="http://www.w3.org/2000/svg">
+      <linearGradient id="r" spreadMethod="repeat"><stop offset="0"/><stop offset="1" stop-color="#fff"/></linearGradient>
+      <radialGradient id="q" xlink:href="#r" xmlns:xlink="http://www.w3.org/1999/xlink"/>
+      <linearGradient id="w" spreadMethod="wobble" xlink:href="#r" xmlns:xlink="http://www.w3.org/1999/xlink"/>
+      <rect width="1" height="1" fill="url(#r)"/>
+      <rect width="1" height="1" fill="url(#q)"/>
+      <rect width="1" height="1" fill="url(#w)"/>
+    </svg>"##;
+    let other = tinker_pdf_svg::read(markup, None, &Limits::DEFAULT).expect("it reads");
+    let spreads: Vec<Spread> = other
+        .nodes
+        .iter()
+        .map(|node| match node {
+            Node::Path {
+                fill: Paint::Linear { spread, .. } | Paint::Radial { spread, .. },
+                ..
+            } => *spread,
+            other => panic!("a gradient fill: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        spreads,
+        [Spread::Repeat, Spread::Repeat, Spread::Pad],
+        "a radial gradient inherits a linear one's method, and a word that is \
+         not one of the three is `pad`"
     );
-    assert!(
-        matches!(fill(&scene, 4), Paint::Linear { .. }),
-        "and the gradient still draws"
-    );
+    assert!(other.warnings.is_empty(), "{:?}", other.warnings);
 }
 
 /// A `<stop>` inherits its `stop-color` from nothing above the gradient.
@@ -420,18 +453,134 @@ fn a_clip_path_outside_defs_still_draws_nothing() {
     assert_eq!(scene.nodes.len(), 6, "{:?}", scene.nodes.len());
 }
 
-/// §14.3: `clip-path` is not inherited.
+/// §14.3: `clip-path` is not inherited — **and a group's own clip is not
+/// lost**.
 ///
-/// A child of a clipped group is clipped **by the group's own rendering**, not
-/// by the same path applied again — and applying it again is the same picture
-/// until the child moves, which is why only a test catches it.
+/// A child of a clipped group is clipped **by the group's rendering**, not by
+/// the same path applied again, so the clip belongs to a [`Node::Group`] and
+/// the child carries none. Both halves are asserted because each has been
+/// wrong: applying the path again is the same picture until the child moves,
+/// and until the group became a node this build dropped the group's clip
+/// altogether — the child was drawn whole, and this test asserted only the
+/// half that held.
 #[test]
 fn clip_path_does_not_inherit() {
     let scene = scene(CLIPPING);
+    let Node::Group {
+        nodes,
+        clip,
+        opacity,
+        ..
+    } = &scene.nodes[5]
+    else {
+        panic!("a clipped group: {:?}", scene.nodes[5]);
+    };
+    let clip = clip.as_ref().expect("the group carries the clip");
+    assert_eq!(clip.outline.segments.len(), 10, "#crop's two rectangles");
+    assert!((opacity - 1.0).abs() < 1e-12, "and nothing fades it");
+    let [Node::Path { clip: inner, .. }] = &nodes[..] else {
+        panic!("one child: {nodes:?}");
+    };
     assert!(
-        clip(&scene, 5).is_none(),
+        inner.is_none(),
         "the child of a clipped group carries no clip of its own"
     );
+}
+
+/// §14.3.4's `objectBoundingBox` on a **container** is a fraction of what the
+/// container drew, in its own user space.
+///
+/// The box is the union of the children's, taken back through the group's own
+/// `transform` — so a group moved by `translate(50, 0)` around a ten-wide
+/// rectangle has a box ten wide starting at zero, and a clip of its left half
+/// lands at x = 50 to 55 in the scene.
+#[test]
+fn a_bounding_box_clip_on_a_group_is_a_fraction_of_its_children() {
+    let markup = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+      <clipPath id="half" clipPathUnits="objectBoundingBox">
+        <rect width="0.5" height="1"/>
+      </clipPath>
+      <g transform="translate(50, 0)" clip-path="url(#half)">
+        <rect width="4" height="20"/>
+        <rect x="6" width="4" height="20"/>
+      </g>
+    </svg>"#;
+    let scene = scene(markup);
+    let [Node::Group {
+        clip: Some(clip), ..
+    }] = &scene.nodes[..]
+    else {
+        panic!("one clipped group: {:?}", scene.nodes);
+    };
+    let box_ = bounds(&clip.outline);
+    near(box_[0], 50.0, "the clip's left, moved with the group");
+    near(box_[2], 55.0, "half of the children's ten");
+    near(box_[1], 0.0, "the top");
+    near(box_[3], 20.0, "the whole height");
+}
+
+// ---- text, whose box is a font's ---------------------------------------------
+
+/// A document of 100 by 100 holding `body`.
+fn page(body: &str) -> Scene {
+    scene(
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\">{body}</svg>"
+        )
+        .as_bytes(),
+    )
+}
+
+/// A `<text>`, or a group of only text, clipped in `objectBoundingBox` units
+/// has no box this crate can measure — a run's extent is a font metric
+/// (ruling 8). It is drawn unclipped and named, which is what a `clip-path`
+/// that cannot be read gets; it used to be clipped away to nothing, without a
+/// word.
+#[test]
+fn text_under_a_bounding_box_clip_draws_unclipped_and_is_named() {
+    for body in [
+        "<text x=\"10\" y=\"50\" clip-path=\"url(#half)\">Hi</text>",
+        "<g clip-path=\"url(#half)\"><text x=\"10\" y=\"50\">Hi</text></g>",
+    ] {
+        let scene = page(&format!(
+            "<clipPath id=\"half\" clipPathUnits=\"objectBoundingBox\">\
+             <rect width=\"0.5\" height=\"1\"/></clipPath>{body}"
+        ));
+        assert!(
+            matches!(&scene.nodes[..], [Node::Text { .. }]),
+            "{body}: the run, unclipped: {:?}",
+            scene.nodes
+        );
+        assert_eq!(scene.warnings, [Warning::TextBoxUnmeasured], "{body}");
+    }
+}
+
+/// Text filled or stroked with a gradient in the initial `objectBoundingBox`
+/// units takes the paint's own fallback, named, for the same reason; it used
+/// to paint `none` without a word. In user space the gradient needs no box and
+/// is the run's paint.
+#[test]
+fn text_painted_with_a_bounding_box_gradient_takes_its_fallback_and_is_named() {
+    let stops = "<stop offset=\"0\" stop-color=\"red\"/><stop offset=\"1\" stop-color=\"blue\"/>";
+    let scene = page(&format!(
+        "<linearGradient id=\"g\">{stops}</linearGradient>\
+         <text x=\"10\" y=\"50\" fill=\"url(#g) #00ff00\">Hi</text>"
+    ));
+    let [Node::Text { fill, .. }] = &scene.nodes[..] else {
+        panic!("one run: {:?}", scene.nodes);
+    };
+    assert_eq!(*fill, Paint::Solid(rgb(0, 255, 0)), "the fallback");
+    assert_eq!(scene.warnings, [Warning::TextBoxUnmeasured]);
+
+    let scene = page(&format!(
+        "<linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" x2=\"100\">{stops}\
+         </linearGradient><text x=\"10\" y=\"50\" fill=\"url(#g) #00ff00\">Hi</text>"
+    ));
+    let [Node::Text { fill, .. }] = &scene.nodes[..] else {
+        panic!("one run: {:?}", scene.nodes);
+    };
+    assert!(matches!(fill, Paint::Linear { .. }), "{fill:?}");
+    assert!(scene.warnings.is_empty(), "{:?}", scene.warnings);
 }
 
 /// Every point an outline visits.

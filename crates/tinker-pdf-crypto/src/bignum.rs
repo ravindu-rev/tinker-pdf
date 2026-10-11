@@ -35,7 +35,10 @@
 //! exponent leaking through timing — does not exist here. Accordingly
 //! [`Modulus::pow`] branches on exponent bits and skips leading zeros. The
 //! crate performs no private-key operation, and if it ever does, this module
-//! is not ready for it and this paragraph is the reason.
+//! is not ready for it and this paragraph is the reason. RSAES-PKCS1-v1_5
+//! encryption is the one caller with a secret *operand* — the content key it
+//! seals, under a public exponent — and the crate's own note says what that
+//! costs.
 //!
 //! # Never panics
 //!

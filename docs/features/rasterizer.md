@@ -34,6 +34,19 @@ choice ruling 4 pays for over analytic exact-area coverage. The sweep keeps
 an active-edge list and visits only the rows a shape reaches, so a glyph-tall
 fill on a page-tall region does the shape's work, not the paper's.
 
+*Every subpath is closed before it is filled* (8.5.3.1), and before it clips
+(8.5.4), which reaches the same `fill`: the segment from a polyline's last point
+back to its first is an edge whether or not the path said `h`. **Until
+September 2026 it was not.** `90 10 m 150 30 l 110 60 l f` painted nothing —
+both stated edges run downward, so every sub-scanline held one crossing and no
+span — and an open triangle whose edges did not happen to run the same way
+painted a wrong shape instead. The `curves` fingerprint in
+[determinism](determinism.md) had that defect baked in and moved when it was
+fixed; instrumenting the filler over all nineteen fingerprinted pages found its
+triangle the only open subpath any of them fills or clips.
+`an_open_subpath_is_closed_before_it_is_filled_or_clipped` holds the fix by
+half-plane arithmetic over `f`, `f*`, `W n` and two subpaths.
+
 *What the fixed grid costs, measured rather than asserted.* This paragraph
 used to end "and the difference stays below one 8-bit level at every edge
 angle". It does not, and never did. Measured 15 September 2026 against the
@@ -71,7 +84,64 @@ identically to a filled one. Caps are butt, round and square (8.4.3.3,
 Table 54); joins are miter with the 8.4.3.5 limit, round and bevel (8.4.3.4,
 Table 55); dashes follow 8.4.3.6, with an empty or zero-sum array meaning a
 solid line, and a width of zero drawing the thinnest device line — one
-pixel (8.4.3.2).
+pixel (8.4.3.2). A point repeated has no direction to join or cap along,
+so repeats are dropped before the joins are read — the close of a circle
+of four Béziers and an `h` ends on its start point twice, and until
+October 2026 that lost the join at the start, a notch at the point where
+every such circle begins.
+
+**A pen in another space.** `stroke_mapped` is 8.4.3.2 read literally for
+a map that is not a similarity: the path, the width and the dashes are in
+the pen's own space, the outline is built there exactly as `stroke` builds
+one, and each piece is carried through the map before its orientation is
+fixed — so a reflecting map cannot wind the pieces against each other.
+Under `scale(1, 3)` a pen two units wide is six device units across a line
+along `x` and two across one along `y`, and a dash cut square in the pen's
+space is cut along the shear on the device. Its `floor` is the device's:
+wherever the mapped pen is thinner than it, the same dashed pieces are also
+mapped first and stroked at the floor, and the union is at least that wide
+every way. Its curves are flattened in the pen's space at the device
+tolerance over the map's largest stretch, honoured however small — `flatten`'s
+floor of a millionth guards a *device* tolerance, and until the review of lane
+8A it was applied here too, so under a stretch past 200 000 a circle's four
+Béziers were flattened at 0.1 of the pen's own units and came out a diamond;
+`dash` flattens at its caller's tolerance the same way. `stretches` gives a map's two singular values, which is how a
+caller tells a similarity from anything else, and `dash` hands a caller
+the pieces a pattern leaves without stroking them — one at a time, as each
+is cut, and stops cutting when the caller answers `false`: the 100 000-step
+bound is per segment, so forty segments under `[0.01 0.01]` are two million
+pieces, and a caller writing them somewhere bounded pays only for what it
+keeps (until the review of lane 8A it collected them all first). A pattern
+whose every dash has no length — `[0 0.01]` — leaves no piece, and the walk
+now answers that without stepping along the path; until the second review of
+lane 8A it took its 100 000 steps a segment to find nothing, so a caller
+bounding the work by the pieces it is handed had none to stop on: a page of
+two hundred such segments took 1.65 s (debug) to write as SVG and render,
+and now under 10 ms (`dashes_of_no_length_cut_nothing_without_walking_the_line`).
+A dash of no length among dashes with length is taken out before the walk
+and the gaps either side of it joined (`without_empty_dashes`; an odd pattern
+is written out twice first, as the walk reads it, and turned to start at its
+first dash with length, its phase moved to match), which leaves every piece
+where it was and costs the walk no step: until the third review of lane 8A
+each entry was a step, so 250 dashes of no length padding one of 0.001 made
+a piece cost 502 steps, the per-segment bound ran out a fifth of the way
+along a thousand-long segment, and a caller bounding its work by the pieces —
+`Page::to_svg`, which has no cancel hook — paid about 21 steps a byte: 800
+segment pairs took 3.7 s (debug) to write 7.5 MB. They now write 15 MB, every
+piece of every segment, in 0.63 s — what `[0.001 2.51]` writes, at its cost
+(`a_dash_of_no_length_costs_no_step_of_the_walk`). A pattern with no dash of
+no length is walked exactly as before.
+
+**Hard edges.** `Mask::harden` turns a coverage mask into one that is whole or
+empty at every pixel: at least half becomes 255, less becomes 0. It is what
+turning anti-aliasing off means one layer up ([rendering](rendering.md)), and
+`ImageDraw::antialias` applies it to an image's unit square before the samples
+are read. A mask value is `floor(units / 16)` of the 4 096 units a pixel holds,
+so it is at least 128 exactly when the shape holds half the units; two shapes
+that split a pixel's units between them split the pixel too, except at an
+exact half, where both take it — which is the property
+`hardened_shapes_sharing_an_edge_partition_its_pixels` holds, and the reason
+the threshold is a half and not anything above it.
 
 **Clipping.** A clip is a `Mask` like any other, and a clip stack composes by
 multiplication: `Mask::intersect_in_place` multiplies coverages, which is
@@ -85,8 +155,8 @@ group covered, where the answer is the luminosity of `/BC` alone (11.6.5.2)
 throughout. `CmykA8` is the one **subtractive** format — its components are
 quantities of ink — and it exists for transparency groups that declare
 `/DeviceCMYK`, whose blends the specification says happen over ink rather than
-over light ([rendering](rendering.md)). It is not a format a page comes back
-in. The two device relations of 8.6.4.4 live here rather than in
+over light ([rendering](rendering.md)). A page comes back in it only when a
+caller asks for it twice (`RenderOptions::allow_cmyk`). The two device relations of 8.6.4.4 live here rather than in
 `tinker-pdf-color`, for the reason `Color::luma`'s coefficients do — a
 rasterizer turns stored components into light, and a leaf takes bytes and plain
 values in; a test holds the copy to the original so the two cannot drift. The
@@ -96,10 +166,34 @@ of the sixteen million colours survives the round trip.
 `BlendMode`s — the twelve separable modes of 11.3.5.2 and the four
 non-separable ones of 11.3.5.3 — with the whole operation scaled by an
 alpha, which is what the graphics state's `ca` and `CA` do (8.6.4.4).
+`fill_mask_inked` is the same with the colour's own ink beside it (and
+`blend_pixel_inked` for a caller that samples, which is how `ImageDraw::ink`
+reaches the canvas for a tinted stencil, directly or through a run's
+`Fragments::composite_region_inked`): a
+`CmykA8` canvas composites those four bytes rather than the colour turned
+back into ink, which matters because light has one ink for each colour and
+a document's rich black is four; every other format ignores them.
 `Canvas::composite` blits one canvas onto another (11.3.6), bounded by the
 source's rectangle, and a canvas can carry the initial backdrop of a
 non-isolated transparency group (11.4.4) so that 11.4.7.2's removal step has
 the alpha it needs.
+
+**A canvas is a rectangle of a page.** `Canvas::origin` is the device pixel
+its top-left is — `(0, 0)` for a canvas that is the whole page, a tile's
+corner for a tile, a group's corner for a group's buffer — and every mask,
+every sampled coordinate and every `at` the crate is handed is in **device**
+pixels of the page. Only the index into `Canvas::data` subtracts the origin,
+which is an integer subtraction and cannot round. `Mask::overlap_at`,
+`image_bounds_in`, `Fragments` and `Canvas::composite`/`extract` all read it.
+This is ruling 5's lattice ([rulings](../rulings.md)): until September 2026 a
+region was drawn in a frame of its own, the page's transform less its corner,
+and `fl(u + e)` against `fl(u + e − tx)` put a tile and the page under it an
+ulp apart wherever the exact value sat on one of this crate's grids — a
+shading's colour step, and an edge's first sub-scanline, which `fill` takes as
+`ceil(y × 16)` with nothing to absorb an ulp. One frame makes every coordinate
+one number. The image quad's snap to the 1/256 grid, below, was the earlier
+defence against the same thing and is kept: it is the reason a *cropped* page
+and the page under it agree, which is a different transform and not a region.
 
 **Images.** `draw_image` maps every destination pixel backwards through the
 inverse transform into the samples — a forward map leaves seams and
@@ -178,7 +272,9 @@ accumulation, and so is the coverage the quad contributes. The only floats left
 on the path are `sqrt`, division and `round`, which IEEE 754 pins exactly
 (ruling 4). The pyramid belongs to the caller, so an image's lifetime is
 decided where it is known. A stencil's PDF name stayed behind as
-`ImageDraw::tint` (8.9.6.2): the image says where, the caller says what.
+`ImageDraw::tint` (8.9.6.2): the image says where, the caller says what —
+and `ImageDraw::ink` what that colour is in ink, which only a `CmykA8`
+canvas reads.
 
 The trade is written down in [design/image-edges.md](../design/image-edges.md).
 
@@ -187,7 +283,13 @@ one `MeshBuffer` — coverage from a single non-zero fill over every triangle,
 colour from a barycentric walk that interpolates the vertex inputs and only
 then asks the caller's closure what colour they are. One buffer rather than
 one fill per triangle is what removes the lattice of pale seams that
-per-triangle compositing paints along every shared edge.
+per-triangle compositing paints along every shared edge. A silhouette pixel no
+triangle's interior reaches takes its colour from a neighbour, spread two
+rounds outward, so what a pixel gets depends on two pixels around it:
+`draw_mesh_over` draws the part of the mesh a caller wants widened by that
+reach and kept inside the region a render of the whole page uses, and measures
+`MAX_MESH_WORK` over the whole region, so a tile's mesh is the page's mesh
+pixel for pixel and a tile refuses exactly the meshes the page refuses.
 
 **Cost and cancellation.** A paint costs what it covers: the caller asks for
 a region per shape clipped to the clip's rectangle, every consumer walks the
@@ -223,10 +325,11 @@ canvas.fill_mask(&mask, Color::BLACK, 1.0);
 ```
 
 The crate root re-exports the working set: `Path`, `Verb`, `Point`,
-`FillRule`, `flatten`; `fill`, `Mask`; `stroke`, `StrokeStyle`, `LineCap`,
-`LineJoin`; `Canvas`, `Color`, `PixelFormat`, `MaskKind`; `BlendMode` (in
+`FillRule`, `flatten`; `fill`, `Mask`; `stroke`, `stroke_mapped`,
+`stretches`, `dash`, `StrokeStyle`, `LineCap`, `LineJoin`; `Canvas`, `Color`, `PixelFormat`, `MaskKind`; `BlendMode` (in
 `blend`); `draw_image`, `ImageDraw`, `ImageSource`, `Transform`, `Filter`,
-`Sampling`, `Pyramid`; `draw_mesh`, `MeshDraw`, `MeshBuffer`. The bridge
+`Sampling`, `Pyramid`, `image_bounds_in`; `draw_mesh`, `draw_mesh_over`,
+`MeshDraw`, `MeshBuffer`. The bridge
 from PDF vocabulary — `/BM` names to `BlendMode`, content-stream operators
 to paths — lives one layer up, in [rendering](rendering.md).
 

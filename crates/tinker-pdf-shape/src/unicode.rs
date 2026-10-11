@@ -826,6 +826,18 @@ pub fn bracket(c: char) -> Option<(char, BracketKind)> {
     Some((char::from_u32(code)?, kind))
 }
 
+/// Whether the character opens something: its `General_Category` is `Ps`, an
+/// opening bracket (every `Bidi_Paired_Bracket_Type` `Open` character is one)
+/// or a low-9 quotation mark such as `„`, or `Pi`, an initial quotation mark
+/// such as `“` or `«`.
+///
+/// From field 2 of the vendored `UnicodeData.txt`. The straight quotation
+/// marks `"` and `'` are `Po`: they open and close alike, and are not here.
+#[must_use]
+pub(crate) fn opens(c: char) -> bool {
+    OPENING_PUNCTUATION.binary_search(&(c as u32)).is_ok()
+}
+
 /// The character this one becomes when the run reads right to left (rule L4).
 ///
 /// A *character*, not a glyph: UAX #9 says the mirroring is a rendering
@@ -1000,5 +1012,30 @@ mod tests {
     #[test]
     fn an_unlisted_code_point_is_unknown() {
         assert_eq!(script('\u{E0080}'), Script::Unknown);
+    }
+
+    /// `Ps` and `Pi` from `UnicodeData.txt`: every opening bracket rule N0
+    /// pairs, and the opening quotation marks it does not, and nothing that
+    /// closes or that does both.
+    #[test]
+    fn what_opens_is_general_category_ps_and_pi() {
+        use super::{opens, BRACKETS};
+        for (code, _, kind) in BRACKETS {
+            let c = char::from_u32(*code).expect("a bracket is a character");
+            assert_eq!(opens(c), *kind == BracketKind::Open, "{c:?}");
+        }
+        // Ps: brackets and the low-9 quotation marks; Pi: the initial ones.
+        for c in [
+            '(', '[', '{', '\u{201A}', '\u{201E}', '\u{201C}', '\u{2018}', '\u{AB}', '\u{2039}',
+        ] {
+            assert!(opens(c), "{c:?}");
+        }
+        // Pe, Pf, the straight marks (Po), a dash (Pd), a comma, a bullet.
+        for c in [
+            ')', '\u{201D}', '\u{2019}', '\u{BB}', '"', '\'', '\u{2014}', '-', ',', '\u{2022}',
+            '\u{60C}',
+        ] {
+            assert!(!opens(c), "{c:?}");
+        }
     }
 }

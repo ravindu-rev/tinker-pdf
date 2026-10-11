@@ -852,8 +852,11 @@ fn a_file_that_is_not_a_tiff_is_refused_by_name() {
     );
 }
 
+/// BigTIFF is read (`tifffile`'s files in `tests/images/tiff/` carry that);
+/// what is refused by name is a magic-43 header whose next four bytes are not
+/// the "offsets are eight bytes, then zero" that is the only BigTIFF there is.
 #[test]
-fn bigtiff_is_refused_as_the_different_format_it_is() {
+fn a_bigtiff_header_that_is_not_one_is_refused_by_name() {
     let mut file = image(
         Simple {
             little: true,
@@ -868,7 +871,100 @@ fn bigtiff_is_refused_as_the_different_format_it_is() {
     );
     file[2] = 43;
     file[3] = 0;
+    // Bytes 4-7 are the classic header's first offset, 8: `08 00 00 00`,
+    // which reads as offset size 8 and a zero — so this *is* a BigTIFF
+    // header, whose eight-byte first offset then lands nowhere.
+    assert_eq!(
+        tiff_scan(&file).unwrap_err(),
+        TiffError::UnreadableDirectory
+    );
+    file[4] = 4;
     assert_eq!(tiff_scan(&file).unwrap_err(), TiffError::BigTiff);
+}
+
+/// A BigTIFF built here from the same directory: count and offsets eight
+/// bytes wide, twenty-byte entries, values up to eight bytes inline.
+#[test]
+fn a_bigtiff_reads_the_picture_its_classic_twin_does() {
+    let pixels = distinct_rgb(3, 2);
+    let classic = image(
+        Simple {
+            little: true,
+            width: 3,
+            height: 2,
+            depth: 8,
+            samples: 3,
+            photometric: 2,
+            compression: 1,
+        },
+        pixels.clone(),
+    );
+    for little in [true, false] {
+        let big = bigtiff(little, 3, 2, &pixels);
+        let a = tiff_decode(&big, &CAP).expect("the BigTIFF decodes");
+        let b = tiff_decode(&classic, &CAP).expect("the classic file decodes");
+        assert_eq!(a.data, b.data, "little {little}");
+        assert_eq!(a.data, pixels);
+    }
+}
+
+/// A one-strip 8-bit RGB BigTIFF: the header of the BigTIFF proposal
+/// (magic 43, offset size 8, zero, first-IFD offset), then an eight-byte entry
+/// count, twenty-byte entries and an eight-byte next-IFD offset.
+fn bigtiff(little: bool, width: u64, height: u64, strip: &[u8]) -> Vec<u8> {
+    let u16b = |v: u16| {
+        if little {
+            v.to_le_bytes()
+        } else {
+            v.to_be_bytes()
+        }
+    };
+    let u64b = |v: u64| {
+        if little {
+            v.to_le_bytes()
+        } else {
+            v.to_be_bytes()
+        }
+    };
+    // (tag, type, count, value): SHORT 3, LONG8 16.
+    let entries: Vec<(u16, u16, u64, u64)> = vec![
+        (256, 16, 1, width),
+        (257, 16, 1, height),
+        (258, 3, 1, 8),
+        (259, 3, 1, 1),
+        (262, 3, 1, 2),
+        (273, 16, 1, 0), // patched below
+        (277, 3, 1, 3),
+        (278, 16, 1, height),
+        (279, 16, 1, strip.len() as u64),
+    ];
+    let ifd = 16u64;
+    let strip_at = ifd + 8 + 20 * entries.len() as u64 + 8;
+    let mut out = Vec::new();
+    out.extend_from_slice(if little { b"II" } else { b"MM" });
+    out.extend_from_slice(&u16b(43));
+    out.extend_from_slice(&u16b(8));
+    out.extend_from_slice(&u16b(0));
+    out.extend_from_slice(&u64b(ifd));
+    out.extend_from_slice(&u64b(entries.len() as u64));
+    for (tag, kind, count, value) in entries {
+        let value = if tag == 273 { strip_at } else { value };
+        out.extend_from_slice(&u16b(tag));
+        out.extend_from_slice(&u16b(kind));
+        out.extend_from_slice(&u64b(count));
+        // Left-justified in the eight-byte field, as p.15 has it for four.
+        let mut field = if kind == 3 {
+            u16b(value as u16).to_vec()
+        } else {
+            u64b(value).to_vec()
+        };
+        field.resize(8, 0);
+        out.extend_from_slice(&field);
+    }
+    out.extend_from_slice(&u64b(0));
+    assert_eq!(out.len() as u64, strip_at);
+    out.extend_from_slice(strip);
+    out
 }
 
 /// A directory whose `NextIFD` points at itself. Without the guard this walks
@@ -1064,9 +1160,122 @@ fn a_palette_image_with_no_color_map_is_refused() {
     );
 }
 
+/// **8, CIE L\*a\*b\* (§23)**: `L*` unsigned, `a*` and `b*` two's complement,
+/// handed back with `a*` and `b*`'s top bit flipped — `-128`, `-1`, `0`, `1`
+/// and `127` become `0`, `127`, `128`, `129` and `255`, and `L*` is untouched —
+/// at 8 bits and at 16, where the flip is of the sixteenth bit.
+#[test]
+fn a_cielab_image_is_handed_back_in_offset_binary() {
+    let shape = |depth: u16| Simple {
+        little: true,
+        width: 5,
+        height: 1,
+        depth,
+        samples: 3,
+        photometric: 8,
+        compression: 1,
+    };
+    let signed: [i8; 5] = [-128, -1, 0, 1, 127];
+    let strip: Vec<u8> = signed
+        .iter()
+        .enumerate()
+        .flat_map(|(at, &v)| [at as u8 * 50, v as u8, v.wrapping_neg() as u8])
+        .collect();
+    let img = tiff_decode(&image(shape(8), strip), &CAP).expect("decodes");
+    assert_eq!(img.colour, TiffColour::Lab);
+    assert_eq!(img.bits_per_component, 8);
+    let want: Vec<u8> = signed
+        .iter()
+        .enumerate()
+        .flat_map(|(at, &v)| {
+            [
+                at as u8 * 50,
+                (i16::from(v) + 128) as u8,
+                (i16::from(v.wrapping_neg()) + 128) as u8,
+            ]
+        })
+        .collect();
+    assert_eq!(img.data, want);
+
+    // Sixteen bits, little-endian in the file and big-endian out.
+    let wide: [i16; 3] = [-32768, -256, 300];
+    let strip: Vec<u8> = wide
+        .iter()
+        .flat_map(|&v| {
+            let mut px = Vec::new();
+            px.extend_from_slice(&1000u16.to_le_bytes());
+            px.extend_from_slice(&v.to_le_bytes());
+            px.extend_from_slice(&0i16.to_le_bytes());
+            px
+        })
+        .collect();
+    let mut shape16 = shape(16);
+    shape16.width = 3;
+    let img = tiff_decode(&image(shape16, strip), &CAP).expect("decodes");
+    assert_eq!(img.colour, TiffColour::Lab);
+    assert_eq!(img.bits_per_component, 16);
+    let words: Vec<u16> = img
+        .data
+        .chunks_exact(2)
+        .map(|p| u16::from_be_bytes([p[0], p[1]]))
+        .collect();
+    let want: Vec<u16> = wide
+        .iter()
+        .flat_map(|&v| [1000, (i32::from(v) + 32768) as u16, 32768])
+        .collect();
+    assert_eq!(words, want);
+}
+
+/// A CIE L\*a\*b\* directory this build cannot read exactly is refused by
+/// name rather than read as something else: at a depth §23 does not define,
+/// under a `SampleFormat` (one tag cannot say §23's two number lines), and
+/// under a compression whose coder hands back samples of its own colour model.
+#[test]
+fn a_cielab_image_it_cannot_read_exactly_is_refused_by_name() {
+    let lab = |depth: u16, compression: u16| {
+        image(
+            Simple {
+                little: true,
+                width: 1,
+                height: 1,
+                depth,
+                samples: 3,
+                photometric: 8,
+                compression,
+            },
+            vec![0; 6],
+        )
+    };
+    assert_eq!(
+        tiff_decode(&lab(4, 1), &CAP).unwrap_err(),
+        TiffError::UnsupportedBitDepth(4)
+    );
+    assert_eq!(
+        tiff_decode(&lab(8, 7), &CAP).unwrap_err(),
+        TiffError::UnsupportedCompression(7)
+    );
+    let signed = TiffFile::new(true)
+        .tag(long(TAG_IMAGE_WIDTH, 1))
+        .tag(long(TAG_IMAGE_LENGTH, 1))
+        .tag(shorts(TAG_BITS_PER_SAMPLE, &[8, 8, 8]))
+        .tag(short(TAG_COMPRESSION, 1))
+        .tag(short(TAG_PHOTOMETRIC, 8))
+        .tag(short(TAG_SAMPLES_PER_PIXEL, 3))
+        .tag(long(TAG_ROWS_PER_STRIP, 1))
+        .tag(shorts(TAG_SAMPLE_FORMAT, &[2, 2, 2]))
+        .segments(vec![vec![0; 3]], false)
+        .build();
+    assert_eq!(
+        tiff_decode(&signed, &CAP).unwrap_err(),
+        TiffError::UnsupportedSampleFormat(2)
+    );
+}
+
+/// 4 is a transparency mask for another image and 32803 a colour filter array,
+/// both permanent refusals. 8, CIELab, was on this list until October 2026.
 #[test]
 fn the_photometrics_this_build_does_not_read_are_named() {
-    for code in [4u16, 5, 8, 32803] {
+    for code in [4u16, 32803] {
         let file = image(
             Simple {
                 little: true,
@@ -1214,25 +1423,282 @@ fn two_depths_in_one_image_are_refused_rather_than_half_read() {
     );
 }
 
+/// A signed or floating-point sample where a number line means nothing — an
+/// index, a fax coding — and a format §19 does not define, are refused.
 #[test]
-fn float_and_signed_samples_are_refused_rather_than_read_as_unsigned() {
-    for format in [2u16, 3] {
-        let file = TiffFile::new(true)
+fn a_sample_format_that_cannot_mean_an_intensity_is_refused() {
+    let with = |format: u16, photometric: u16, compression: u16| {
+        TiffFile::new(true)
             .tag(long(TAG_IMAGE_WIDTH, 1))
             .tag(long(TAG_IMAGE_LENGTH, 1))
-            .tag(short(TAG_BITS_PER_SAMPLE, 16))
+            .tag(short(TAG_BITS_PER_SAMPLE, 8))
+            .tag(short(TAG_COMPRESSION, compression))
+            .tag(short(TAG_PHOTOMETRIC, photometric))
+            .tag(short(TAG_SAMPLES_PER_PIXEL, 1))
+            .tag(long(TAG_ROWS_PER_STRIP, 1))
+            .tag(short(TAG_SAMPLE_FORMAT, format))
+            .tag(shorts(TAG_COLOR_MAP, &[0; 768]))
+            .segments(vec![vec![0]], false)
+            .build()
+    };
+    assert_eq!(
+        tiff_decode(&with(2, 3, 1), &CAP).unwrap_err(),
+        TiffError::UnsupportedSampleFormat(2)
+    );
+    assert_eq!(
+        tiff_decode(&with(2, 1, 7), &CAP).unwrap_err(),
+        TiffError::UnsupportedSampleFormat(2)
+    );
+    assert_eq!(
+        tiff_decode(&with(5, 1, 1), &CAP).unwrap_err(),
+        TiffError::UnsupportedSampleFormat(5)
+    );
+    // Float at eight bits is not an IEEE format.
+    assert_eq!(
+        tiff_decode(&with(3, 1, 1), &CAP).unwrap_err(),
+        TiffError::UnsupportedBitDepth(8)
+    );
+}
+
+/// §19's default range for an integer is the full range of its type, so a
+/// signed sample is its unsigned twin moved by half the range: -128 is black,
+/// 127 white, 0 is 128.
+#[test]
+fn a_signed_sample_is_offset_by_half_its_range() {
+    let file = TiffFile::new(true)
+        .tag(long(TAG_IMAGE_WIDTH, 4))
+        .tag(long(TAG_IMAGE_LENGTH, 1))
+        .tag(short(TAG_BITS_PER_SAMPLE, 8))
+        .tag(short(TAG_COMPRESSION, 1))
+        .tag(short(TAG_PHOTOMETRIC, 1))
+        .tag(short(TAG_SAMPLES_PER_PIXEL, 1))
+        .tag(long(TAG_ROWS_PER_STRIP, 1))
+        .tag(short(TAG_SAMPLE_FORMAT, 2))
+        .segments(vec![vec![0x80, 0xFF, 0x00, 0x7F]], false)
+        .build();
+    let img = tiff_decode(&file, &CAP).expect("decodes");
+    assert_eq!(img.bits_per_component, 8);
+    assert_eq!(img.data, [0, 127, 128, 255]);
+
+    // And an explicit `SMinSampleValue`/`SMaxSampleValue` replaces the
+    // default: [-10, 10] puts 0 at the middle and clamps what is outside.
+    let file = TiffFile::new(true)
+        .tag(long(TAG_IMAGE_WIDTH, 4))
+        .tag(long(TAG_IMAGE_LENGTH, 1))
+        .tag(short(TAG_BITS_PER_SAMPLE, 8))
+        .tag(short(TAG_COMPRESSION, 1))
+        .tag(short(TAG_PHOTOMETRIC, 1))
+        .tag(short(TAG_SAMPLES_PER_PIXEL, 1))
+        .tag(long(TAG_ROWS_PER_STRIP, 1))
+        .tag(short(TAG_SAMPLE_FORMAT, 2))
+        .tag(Tag {
+            tag: TAG_S_MIN_SAMPLE_VALUE,
+            kind: 6,
+            values: Values::Bytes(vec![(-10i8) as u8]),
+        })
+        .tag(Tag {
+            tag: TAG_S_MAX_SAMPLE_VALUE,
+            kind: 6,
+            values: Values::Bytes(vec![10]),
+        })
+        .segments(vec![vec![(-10i8) as u8, 0, 10, 100]], false)
+        .build();
+    let img = tiff_decode(&file, &CAP).expect("decodes");
+    // 0 is halfway: 127.5, rounded half up.
+    assert_eq!(img.data, [0, 128, 255, 255]);
+}
+
+/// A 32-bit float is read as the intensity itself on [0, 1] and clamped, and
+/// comes out at sixteen bits: 0.5 is 32 768 (32 767.5 rounded half up).
+#[test]
+fn a_float_sample_is_its_own_intensity_clamped_to_zero_and_one() {
+    let values = [0.0f32, 0.5, 1.0, -3.0, 7.0, f32::NAN];
+    let strip: Vec<u8> = values
+        .iter()
+        .flat_map(|v| v.to_bits().to_be_bytes())
+        .collect();
+    let file = TiffFile::new(false)
+        .tag(long(TAG_IMAGE_WIDTH, 6))
+        .tag(long(TAG_IMAGE_LENGTH, 1))
+        .tag(short(TAG_BITS_PER_SAMPLE, 32))
+        .tag(short(TAG_COMPRESSION, 1))
+        .tag(short(TAG_PHOTOMETRIC, 1))
+        .tag(short(TAG_SAMPLES_PER_PIXEL, 1))
+        .tag(long(TAG_ROWS_PER_STRIP, 1))
+        .tag(short(TAG_SAMPLE_FORMAT, 3))
+        .segments(vec![strip], false)
+        .build();
+    let img = tiff_decode(&file, &CAP).expect("decodes");
+    assert_eq!(img.bits_per_component, 16);
+    let got: Vec<u16> = img
+        .data
+        .chunks_exact(2)
+        .map(|p| u16::from_be_bytes([p[0], p[1]]))
+        .collect();
+    assert_eq!(got, [0, 32768, 65535, 0, 65535, 0]);
+}
+
+#[test]
+fn a_half_float_is_decoded_exactly() {
+    // 0x3800 is 0.5, 0x3C00 is 1.0, 0x0001 the smallest subnormal.
+    assert_eq!(half_to_f64(0x3800), 0.5);
+    assert_eq!(half_to_f64(0x3C00), 1.0);
+    assert_eq!(half_to_f64(0xC000), -2.0);
+    assert_eq!(half_to_f64(0x0001), 1.0 / 16_777_216.0);
+    assert_eq!(half_to_f64(0x7C00), f64::INFINITY);
+    assert!(half_to_f64(0x7E00).is_nan());
+}
+
+/// Technical Note 3's predictor, undone on a row built the way its encoder
+/// builds one: byte planes most significant first, then differenced.
+#[test]
+fn the_floating_point_predictor_is_undone_into_big_endian_samples() {
+    let values = [0.25f32, 0.5, 0.75];
+    let bytes: Vec<u8> = values
+        .iter()
+        .flat_map(|v| v.to_bits().to_be_bytes())
+        .collect();
+    // Shuffle: plane k holds byte k of every sample.
+    let mut planes = Vec::new();
+    for k in 0..4 {
+        for s in 0..3 {
+            planes.push(bytes[s * 4 + k]);
+        }
+    }
+    // Difference with a stride of one sample (one sample per pixel).
+    let mut coded = planes.clone();
+    for i in (1..coded.len()).rev() {
+        coded[i] = coded[i].wrapping_sub(coded[i - 1]);
+    }
+    for little in [true, false] {
+        let file = TiffFile::new(little)
+            .tag(long(TAG_IMAGE_WIDTH, 3))
+            .tag(long(TAG_IMAGE_LENGTH, 1))
+            .tag(short(TAG_BITS_PER_SAMPLE, 32))
             .tag(short(TAG_COMPRESSION, 1))
             .tag(short(TAG_PHOTOMETRIC, 1))
             .tag(short(TAG_SAMPLES_PER_PIXEL, 1))
             .tag(long(TAG_ROWS_PER_STRIP, 1))
-            .tag(short(TAG_SAMPLE_FORMAT, format))
-            .segments(vec![vec![0, 0]], false)
+            .tag(short(TAG_SAMPLE_FORMAT, 3))
+            .tag(short(TAG_PREDICTOR, 3))
+            .segments(vec![coded.clone()], false)
             .build();
-        assert_eq!(
-            tiff_decode(&file, &CAP).unwrap_err(),
-            TiffError::UnsupportedSampleFormat(format)
-        );
+        let img = tiff_decode(&file, &CAP).expect("decodes");
+        let got: Vec<u16> = img
+            .data
+            .chunks_exact(2)
+            .map(|p| u16::from_be_bytes([p[0], p[1]]))
+            .collect();
+        // 0.25 x 65 535 + 0.5 = 16 384.25, and so on.
+        assert_eq!(got, [16384, 32768, 49151], "little {little}");
     }
+}
+
+/// `PhotometricInterpretation` 5 is four ink amounts handed back as they are,
+/// and an `InkSet` that is not CMYK is refused by name.
+#[test]
+fn a_separated_image_is_cmyk_and_other_inks_are_refused() {
+    let cmyk = |ink_set: Option<u16>| {
+        let mut file = TiffFile::new(true)
+            .tag(long(TAG_IMAGE_WIDTH, 2))
+            .tag(long(TAG_IMAGE_LENGTH, 1))
+            .tag(shorts(TAG_BITS_PER_SAMPLE, &[8, 8, 8, 8]))
+            .tag(short(TAG_COMPRESSION, 1))
+            .tag(short(TAG_PHOTOMETRIC, 5))
+            .tag(short(TAG_SAMPLES_PER_PIXEL, 4))
+            .tag(long(TAG_ROWS_PER_STRIP, 1));
+        if let Some(set) = ink_set {
+            file = file.tag(short(TAG_INK_SET, set));
+        }
+        file.segments(vec![vec![1, 2, 3, 4, 250, 0, 9, 255]], false)
+            .build()
+    };
+    for set in [None, Some(1)] {
+        let img = tiff_decode(&cmyk(set), &CAP).expect("decodes");
+        assert_eq!(img.colour, TiffColour::Cmyk);
+        assert_eq!(img.data, [1, 2, 3, 4, 250, 0, 9, 255]);
+    }
+    assert_eq!(
+        tiff_decode(&cmyk(Some(2)), &CAP).unwrap_err(),
+        TiffError::UnsupportedInkSet(2)
+    );
+}
+
+/// `tiff_scan_directory` reaches every directory of the chain, carries each
+/// one's `NewSubfileType`, and refuses an index past the end.
+#[test]
+fn every_directory_of_the_chain_can_be_scanned() {
+    // Two one-pixel grey directories, the second a reduced-resolution copy.
+    let first = image(
+        Simple {
+            little: true,
+            width: 1,
+            height: 1,
+            depth: 8,
+            samples: 1,
+            photometric: 1,
+            compression: 1,
+        },
+        vec![7],
+    );
+    let file = chain_second_directory(first, 9, 1);
+    let a = tiff_scan_directory(&file, 0).expect("the first");
+    let b = tiff_scan_directory(&file, 1).expect("the second");
+    assert_eq!((a.pages, b.pages), (2, 2));
+    assert_eq!((a.subfile, b.subfile), (0, 1));
+    assert_eq!(a.decode(&CAP).expect("decodes").data, [7]);
+    assert_eq!(b.decode(&CAP).expect("decodes").data, [9]);
+    assert!(!a.warnings.contains(&Warning::TiffExtraPagesIgnored));
+    assert_eq!(
+        tiff_scan_directory(&file, 2).unwrap_err(),
+        TiffError::UnreadableDirectory
+    );
+    // The first-directory door still says there were more.
+    assert!(tiff_scan(&file)
+        .expect("scans")
+        .warnings
+        .contains(&Warning::TiffExtraPagesIgnored));
+}
+
+/// Appends a second one-pixel grey directory, whose one sample is `value` and
+/// whose `NewSubfileType` is `subfile`, and links the first directory to it.
+fn chain_second_directory(mut file: Vec<u8>, value: u8, subfile: u32) -> Vec<u8> {
+    // The classic little-endian layout `TiffFile` writes: the first IFD at 8,
+    // its count, its entries, then the next-IFD offset.
+    let count = u16::from_le_bytes([file[8], file[9]]) as usize;
+    let next_at = 8 + 2 + 12 * count;
+    let ifd = file.len() as u32 + (file.len() as u32 % 2);
+    if file.len() % 2 == 1 {
+        file.push(0);
+    }
+    file[next_at..next_at + 4].copy_from_slice(&ifd.to_le_bytes());
+    let entries: [(u16, u16, u32); 9] = [
+        (254, 4, subfile),
+        (256, 4, 1),
+        (257, 4, 1),
+        (258, 3, 8),
+        (259, 3, 1),
+        (262, 3, 1),
+        (273, 4, ifd + 2 + 12 * 9 + 4),
+        (277, 3, 1),
+        (279, 4, 1),
+    ];
+    file.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    for (tag, kind, value) in entries {
+        file.extend_from_slice(&tag.to_le_bytes());
+        file.extend_from_slice(&kind.to_le_bytes());
+        file.extend_from_slice(&1u32.to_le_bytes());
+        let mut four = if kind == 3 {
+            (value as u16).to_le_bytes().to_vec()
+        } else {
+            value.to_le_bytes().to_vec()
+        };
+        four.resize(4, 0);
+        file.extend_from_slice(&four);
+    }
+    file.extend_from_slice(&0u32.to_le_bytes());
+    file.push(value);
+    file
 }
 
 // ---- compressions ------------------------------------------------------
@@ -1308,9 +1774,9 @@ fn an_old_style_lzw_strip_is_detected_and_reported() {
 
 #[test]
 fn the_compressions_this_build_does_not_decode_are_named() {
-    // 6 is the old-style JPEG TIFF Technical Note 2 withdrew, 34712 is JPEG
-    // 2000, 32771 is a CCITT variant nothing writes.
-    for code in [6u16, 34712, 32771, 9, 10] {
+    // 6 is the old-style JPEG TIFF Technical Note 2 withdrew — a permanent
+    // refusal — and 32771 is a CCITT variant nothing writes.
+    for code in [6u16, 32771, 9, 10] {
         let file = image(
             Simple {
                 little: true,
@@ -1704,7 +2170,8 @@ fn a_predictor_this_build_does_not_implement_is_named() {
         .tag(short(TAG_COMPRESSION, 1))
         .tag(short(TAG_PHOTOMETRIC, 1))
         .tag(short(TAG_SAMPLES_PER_PIXEL, 1))
-        // 3 is the floating-point predictor of Technical Note 3.
+        // 3 is the floating-point predictor of Technical Note 3, and these
+        // samples are not floating point.
         .tag(short(TAG_PREDICTOR, 3))
         .tag(long(TAG_ROWS_PER_STRIP, 1))
         .segments(vec![vec![0]], false)
@@ -2194,7 +2661,7 @@ fn mutated_fixtures_never_panic() {
 
 // ---- the fuzz corpus ---------------------------------------------------
 
-/// Writes six of the seven seeds `fuzz/corpus/tiff/` carries, so the seeds and the
+/// Writes six of the thirteen seeds `fuzz/corpus/tiff/` carries, so the seeds and the
 /// fixtures here cannot drift apart.
 ///
 /// Run with `--ignored` when a fixture changes; the corpus is committed, and a

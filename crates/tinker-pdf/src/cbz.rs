@@ -32,14 +32,27 @@
 //! document's life. A JPEG is placed verbatim ([`ImageData::Jpeg`]) and a PNG
 //! goes through [`png_image`], whose default route copies the IDAT into a
 //! `/FlateDecode` stream with `/Predictor 15` and never builds a raster. A
-//! TIFF goes through [`tiff_image`], which does the same thing for four more
-//! codings: a G3 or G4 strip is a `/CCITTFaxDecode` stream, an LZW strip is a
-//! `/LZWDecode` one, a DEFLATE strip is `/FlateDecode`, and a JPEG strip is
-//! `/DCTDecode` — so a scanned comic costs its own bytes rather than its own
-//! pixels, the same as every other entry here.
+//! TIFF goes through [`tiff_image_directory`], which does the same thing for
+//! five more codings: a G3 or G4 strip is a `/CCITTFaxDecode` stream, an LZW
+//! strip is a `/LZWDecode` one, a DEFLATE strip is `/FlateDecode`, a JPEG
+//! strip is `/DCTDecode` and a JPEG 2000 strip is `/JPXDecode` — so a scanned
+//! comic costs its own bytes rather than its own pixels, the same as every
+//! other entry here. A TIFF of several directories — a scanned chapter in one
+//! file — is several pages, one per directory that is a page. A JPEG 2000
+//! file, JP2 or bare codestream, is the simplest of them: it *is* a
+//! `/JPXDecode` stream (7.4.9 takes both shapes), so its bytes are placed
+//! whole and only its header is read, for the page's size.
 //! Decoding every page instead would cost *w x h x 3* each — about 3.6 GB for
 //! a 200-page archive at 2000 x 3000 — and the failure would arrive only at
 //! the size that matters.
+//!
+//! **A BMP and a GIF are the exceptions, and they are by the format rather
+//! than by choice**: no `/Filter` reads a bottom-up pixel array padded to four
+//! bytes a row, nor either of BMP's RLE codings, nor GIF's LZW — whose root
+//! set, bit order and width rule all differ from `/LZWDecode`'s — so those
+//! pages are decoded and cost their pixels. Each is kept `/Indexed` where the
+//! file was, which is a third of the raster an expanded one would hold
+//! ([`RasterImageData`]).
 //!
 //! # Two levels of refusal, and the difference is the feature
 //!
@@ -74,9 +87,11 @@ use std::cmp::Ordering;
 
 use tinker_pdf_archive::{rar, sevenz, tar};
 use tinker_pdf_cos::{
-    png_image, tiff_image, DocumentBuilder, ImageData, PngImageData, TiffImageData,
+    bmp_image, gif_image, png_image, tiff_image_directory, webp_image, CompressedImage,
+    DocumentBuilder, ImageColorSpace, ImageData, ImageFilter, PngImageData, RasterImageData,
+    TiffImageData,
 };
-use tinker_pdf_filters::Limits as FilterLimits;
+use tinker_pdf_filters::{tiff_scan_directory, JpxHeader, Limits as FilterLimits, TiffError};
 use tinker_pdf_zip::{Archive, ArchiveError};
 
 pub use tinker_pdf_archive::tar::{
@@ -96,7 +111,7 @@ pub use tinker_pdf_archive::rar::{
 
 pub use tinker_pdf_zip::{
     limits as zip_limits, EntryError as ZipEntryError, InflateWarning, Limits as ZipLimits,
-    Warning as ZipWarning,
+    MethodFeature as ZipMethodFeature, Warning as ZipWarning,
 };
 
 pub mod comic_info;
@@ -361,12 +376,14 @@ pub enum ArchiveRefusal {
     /// a comic archive, and so is an OPC package that names no fixed
     /// representation at all.
     UnreadablePackage,
-    /// An interleaved package: OPC 7.2.4's `…/[0].piece` items.
+    /// An interleaved package whose pieces (OPC 7.2.4's `…/[0].piece` items)
+    /// do not assemble into a part: a piece number missing or repeated, no
+    /// `.last` piece or one that is not the highest, a number with a leading
+    /// zero, or a part stored both whole and in pieces.
     ///
-    /// Recognised and refused by name rather than half-assembled. Reassembling
-    /// them is a second addressing model layered on the first, and no package
-    /// in gap 30 milestone 1's corpus uses one — so the refusal is tied to
-    /// evidence rather than to taste, and the plan says what would change it.
+    /// Refused by name rather than half-assembled, because the package does
+    /// not determine the part's bytes. **An interleaved package whose pieces
+    /// do assemble is read** since tier 4's XPS row: `xps::opc` joins them.
     Interleaved,
     /// A package holding an item that is not a part name (OPC 6.2.2.2) and is
     /// not the content-types item.
@@ -481,7 +498,7 @@ impl core::fmt::Display for ArchiveRefusal {
             ArchiveRefusal::UnreadablePackage => {
                 "an XPS package whose own structure could not be read"
             }
-            ArchiveRefusal::Interleaved => "an interleaved package, which is not reassembled here",
+            ArchiveRefusal::Interleaved => "an interleaved part whose pieces do not assemble",
             ArchiveRefusal::InvalidPartName => "an item that is not a part name",
             ArchiveRefusal::AmbiguousPartNames => "two part names one package may not both hold",
             ArchiveRefusal::NoFixedPages => "a fixed payload that names no page",
@@ -519,21 +536,30 @@ pub enum ImageFormat {
     Jpeg,
     /// PNG. Read.
     Png,
-    /// GIF. Not read here.
+    /// GIF, 87a or 89a. Read — see `tinker_pdf_cos::gif_image`: the first
+    /// image, decoded, because a GIF's LZW is not `/LZWDecode`'s, and kept
+    /// `/Indexed` with its transparent index as a colour-key mask.
     Gif,
-    /// WebP. Not read here.
+    /// WebP. Read — see `tinker_pdf_cos::webp_image`: RFC 9649's lossless
+    /// bitstream or RFC 6386's lossy one with its `ALPH`, decoded, and the
+    /// first frame of an animation.
     WebP,
-    /// Windows bitmap. Not read here.
+    /// Windows bitmap. Read — see [`bmp_image`]: decoded, because no
+    /// `/Filter` reads a bottom-up, four-byte-padded pixel array or either of
+    /// its RLE codings, and kept `/Indexed` when the file was.
     Bmp,
-    /// TIFF, either byte order. Read — see [`tiff_image`], which places a
-    /// single-strip G3, G4, LZW, DEFLATE or JPEG file's own bytes and decodes
-    /// the rest.
+    /// TIFF, either byte order, classic or BigTIFF. Read — see
+    /// `tinker_pdf_cos::tiff_image`, which places a single-strip G3, G4, LZW,
+    /// DEFLATE, JPEG or JPEG 2000 file's own bytes and decodes the rest — and
+    /// paged: every directory that is a page is a page of its own.
     Tiff,
     /// AVIF. Not read here.
     Avif,
-    /// JPEG 2000, in the JP2 wrapper or as a bare codestream. Not read here —
-    /// this engine has a JPX decoder for PDF streams and no route from a
-    /// container entry to it.
+    /// JPEG 2000, in the JP2 wrapper or as a bare codestream. Read on the
+    /// comic path since tier 4's archive row: placed as a `/JPXDecode` stream
+    /// with its own bytes, its header read for the page's size. An EPUB
+    /// `<img>` still does not take it — it is not one of EPUB 3.3 §3.2's core
+    /// image media types.
     Jpeg2000,
 }
 
@@ -552,11 +578,12 @@ pub enum ImageDefect {
     /// A format recognised by its magic bytes and not placed here, named rather
     /// than collapsed.
     ///
-    /// An EPUB `<img>` reaches the page through **JPEG and PNG**, which are the
-    /// two of EPUB 3.3 §3.2's core image media types this build has a
-    /// container-to-page route for. GIF and WebP are core media types with no
-    /// decoder here; the rest are foreign resources a §3.2-conforming book may
-    /// only use behind a manifest fallback this build does not follow.
+    /// An EPUB `<img>` reaches the page through **JPEG, PNG, GIF and WebP**,
+    /// EPUB 3.3 §3.2's four core raster media types, so no core raster type
+    /// lands here any more. What does — BMP, TIFF, JPEG 2000, AVIF — are
+    /// foreign resources a §3.2-conforming book may only use behind a
+    /// manifest fallback this build does not follow, so they are named
+    /// rather than decoded even where the comic path would read them.
     UnsupportedFormat(ImageFormat),
     /// Bytes whose leading magic matches no format [`image_format`] knows.
     ///
@@ -617,9 +644,10 @@ pub enum PageDefect {
     /// stores every entry, so a decoder for it would have nothing first-party
     /// to be held to.
     RarEntryRefused(RarEntryError),
-    /// The bytes are a JPEG or a PNG and could not be made into an image —
-    /// an unreadable header, a colour type outside Table 11.1, a raster past
-    /// the ceiling.
+    /// The bytes are a JPEG, a PNG, a TIFF or a JPEG 2000 file and could not
+    /// be made into an image — an unreadable header, a colour type outside
+    /// Table 11.1, a JPEG 2000 header this build's decoder refuses, a raster
+    /// past the ceiling.
     Undecodable,
 }
 
@@ -850,6 +878,53 @@ pub enum ArchiveWarning {
         /// How many `<img>` elements in that document failed that way.
         images: usize,
     },
+    /// A `background-image` (`css-backgrounds-3` §2.2) that did not reach the
+    /// page: its `url()` named nothing the container holds, or bytes that are
+    /// no picture this build reads.
+    ///
+    /// [`ArchiveWarning::ImageNotDrawn`]'s companion for the picture a
+    /// stylesheet names, and invisible the same way: the box keeps its colour
+    /// and border and loses only the image, so the page looks finished.
+    BackgroundImageNotDrawn {
+        /// The content document whose boxes asked for the image.
+        item: String,
+        /// Why it did not reach the page.
+        defect: ImageDefect,
+        /// How many elements in that document asked for an image that failed
+        /// that way.
+        elements: usize,
+    },
+    /// A `<link rel="stylesheet">` whose `href` produced no sheet, so the
+    /// document was set **without rules its author wrote** (tier 5's formats
+    /// row).
+    ///
+    /// The companion to [`ArchiveWarning::ImageNotDrawn`] for the other
+    /// reference a content document makes, and invisible in the same way: the
+    /// page is set by the user-agent sheet and looks finished. A book names an
+    /// entry its container does not hold; a loose XHTML file opened from its
+    /// bytes alone has nothing beside it at all, so every sheet it links lands
+    /// here.
+    StylesheetUnresolved {
+        /// The content document that links the sheets.
+        item: String,
+        /// How many of its `<link>` elements did not resolve.
+        sheets: usize,
+    },
+    /// What translating a Markdown or FB2 document into the reader's tree had
+    /// to do (tier 5's formats rows), with how many times.
+    ///
+    /// Distinct from [`ArchiveWarning::Markup`], which is the XML reader
+    /// stopping: this is the step before it, deciding what of a language that
+    /// is not XHTML arrives as XHTML — and the cases where it arrives as
+    /// something else are what a host is told.
+    Translation {
+        /// The document translated (empty for one opened from bytes alone).
+        item: String,
+        /// What was done.
+        defect: crate::standalone::TranslationDefect,
+        /// How many times.
+        count: usize,
+    },
     /// A CSS property this build does not implement, and **how many elements
     /// it reached** (gap 31, milestone 8).
     ///
@@ -883,9 +958,12 @@ pub enum ArchiveWarning {
     /// Characters that could not be given a code in any font this document
     /// carries, and are therefore on no page (gap 31, milestone 8).
     ///
-    /// A simple font has 256 codes and this build has no font program to
-    /// embed, so a book with more than 224 distinct characters outside
-    /// `WinAnsiEncoding` for one face loses the excess. **Reported rather than
+    /// A simple font has 256 codes, so a book with more than 224 distinct
+    /// characters outside `WinAnsiEncoding` for one standard face loses the
+    /// excess — of the characters no embedded face covers and, in a
+    /// `bundled-fonts` build, that the face's Liberation stand-in does not
+    /// cover either: what the stand-in covers is drawn in it as a composite
+    /// font, which has a code for every glyph. **Reported rather than
     /// dropped silently**, because text that is missing from a page and
     /// missing from `Page::text()` is exactly what text conservation exists to
     /// find, and a build that lost it without saying so would be a build whose
@@ -968,6 +1046,39 @@ pub enum ArchiveWarning {
     /// outline it cannot read is worse than one written with none, and this is
     /// the sentence that says which happened.
     OutlineUnwritable,
+    /// Language declarations this build did not carry into the structure
+    /// tree as `/Lang` (ISO 32000-1 14.9.2), because they are not shaped like
+    /// a language tag — `en_US`, a stray space, a script name with no
+    /// language before it.
+    ///
+    /// Counted per document: an `xml:lang` or `lang` attribute of a content
+    /// document, or the package document's `dc:language`, which would have
+    /// been the catalog's `/Lang`. The text is still drawn and still tagged;
+    /// what it lacks is a statement of its language, which a reader then
+    /// takes from the nearest ancestor that made one.
+    LanguageTagIgnored {
+        /// The container path of the content document, or of the package
+        /// document for its `dc:language`.
+        item: String,
+        /// How many declarations were not written.
+        tags: usize,
+    },
+    /// Element names this build wrote as their standard structure type
+    /// rather than as themselves, because the document's `/RoleMap` (ISO
+    /// 32000-1 14.7.3) already held `MAX_DICT_ENTRIES` names — the most
+    /// entries of one dictionary this engine's reader keeps, so a mapping
+    /// past it would be written and then dropped on read, and its elements
+    /// would read as types no standard defines.
+    ///
+    /// Counted per content document. The elements are still tagged and still
+    /// say what they are; what they lose is the book's own name for it.
+    ElementNamesUnmapped {
+        /// The container path of the content document.
+        item: String,
+        /// How many distinct element names were written as their standard
+        /// type.
+        names: usize,
+    },
 }
 
 /// Where one page came from.
@@ -1342,6 +1453,10 @@ enum Reader<'a> {
     Tar(tar::Archive<'a>),
     SevenZip(sevenz::Archive<'a>),
     Rar(rar::Archive<'a>),
+    /// One picture with no archive around it (tier 5's formats row): a bare
+    /// image opened by [`crate::standalone`] is the comic of its one entry,
+    /// paged by this module's own body rather than by a copy of it.
+    Picture(&'a [u8]),
 }
 
 impl<'a> Reader<'a> {
@@ -1386,6 +1501,13 @@ impl<'a> Reader<'a> {
                     directory: entry.is_directory(),
                 })
                 .collect(),
+            // No stored path: a file opened from its bytes has no name, which
+            // is also what the page's `PageOrigin` reports.
+            Reader::Picture(_) => vec![Listing {
+                name: String::new(),
+                index: 0,
+                directory: false,
+            }],
         }
     }
 
@@ -1397,7 +1519,7 @@ impl<'a> Reader<'a> {
     /// hundred lines away.
     fn read(&mut self, index: usize) -> Result<Cow<'a, [u8]>, PageDefect> {
         match self {
-            Reader::Zip(archive) => archive.read(index).map_err(PageDefect::EntryRefused),
+            Reader::Zip(archive) => read_entry(archive, index).map_err(PageDefect::EntryRefused),
             Reader::Tar(archive) => archive
                 .read(index)
                 .map(Cow::Borrowed)
@@ -1414,6 +1536,9 @@ impl<'a> Reader<'a> {
             // stored entry comes back borrowed, which is every entry this
             // build reads.
             Reader::Rar(archive) => archive.read(index).map_err(PageDefect::RarEntryRefused),
+            // `listing` names one entry, at index 0, and `pages_from_reader`
+            // asks only for indices `listing` handed it.
+            Reader::Picture(bytes) => Ok(Cow::Borrowed(*bytes)),
         }
     }
 
@@ -1441,6 +1566,7 @@ impl<'a> Reader<'a> {
                 .iter()
                 .map(|w| ArchiveWarning::Rar(*w))
                 .collect(),
+            Reader::Picture(_) => Vec::new(),
         }
     }
 }
@@ -1480,7 +1606,13 @@ pub fn image_format(bytes: &[u8]) -> Option<ImageFormat> {
     if matches!(bytes.get(4..12), Some(b"ftypavif" | b"ftypavis")) {
         return Some(ImageFormat::Avif);
     }
-    if bytes.starts_with(b"II\x2A\x00") || bytes.starts_with(b"MM\x00\x2A") {
+    // TIFF 6.0's magic 42, and BigTIFF's 43 in front of the same two order
+    // bytes.
+    if bytes.starts_with(b"II\x2A\x00")
+        || bytes.starts_with(b"MM\x00\x2A")
+        || bytes.starts_with(b"II\x2B\x00")
+        || bytes.starts_with(b"MM\x00\x2B")
+    {
         return Some(ImageFormat::Tiff);
     }
     // 15444-1 I.5.1's twelve-byte JP2 signature box, and the bare SOC/SIZ pair
@@ -1551,6 +1683,12 @@ enum Content<'a> {
     Png(Box<PngImageData>),
     /// A TIFF, through the chooser that is that one's sibling.
     Tiff(Box<TiffImageData>),
+    /// A JPEG 2000 file, placed as the archive holds it, with what its header
+    /// said about the decode.
+    Jpx(Cow<'a, [u8]>, JpxHeader),
+    /// A format with no pass-through route — BMP and GIF — decoded and
+    /// arranged by `tinker_pdf_cos::raster_embed`.
+    Raster(Box<RasterImageData>),
     /// Nothing usable; the page is the neutral placeholder.
     Placeholder,
 }
@@ -1667,8 +1805,9 @@ pub fn pages_from_rar(
 ///
 /// **`UnsupportedCoder` lands on `NotAZip` and that is deliberate.** It is the
 /// refusal whose sentence is *"this build does not read that"*, which is what
-/// a `.cb7` compressed with PPMd is; calling it `Damaged` would tell a host
-/// the file is broken when it is fine and only this engine is short.
+/// a `.cb7` compressed with a coder this build does not implement is; calling
+/// it `Damaged` would tell a host the file is broken when it is fine and only
+/// this engine is short.
 pub fn open_sevenz<'a>(
     bytes: &'a [u8],
     limits: &SevenZipLimits,
@@ -1754,6 +1893,124 @@ pub fn open_archive<'a>(
     })
 }
 
+/// Reads one entry of a comic's ZIP, checked, with ZIP methods 14, 12 and 93
+/// decoded.
+///
+/// [`Archive::read`] with the three things `tinker-pdf-zip` cannot carry: an
+/// LZMA decoder, a bzip2 decoder and a Zstandard decoder. That crate may
+/// depend on `tinker-pdf-filters` and nothing else, and all three decoders
+/// live in `tinker-pdf-archive` — LZMA's written for 7z, bzip2's for 7z and
+/// ZIP alike, Zstandard's for ZIP — so the facade, which already depends on
+/// both, hands them in through
+/// [`Archive::read_coded`]. Everything that is ZIP's stays ZIP's: APPNOTE
+/// 5.8.8's header on a method-14 entry is read and checked there (a damaged
+/// one is [`ZipEntryError::LzmaHeader`]), the declared size is bounded and
+/// charged against the archive's total there, and what comes back is held to
+/// the declared length and the recorded CRC-32 there. So a decoder wrong by
+/// one byte is refused by the archive's own checksum, exactly as a `.cb7`'s
+/// is.
+///
+/// **Only the comic path takes this door.** OPC forbids every compression
+/// method but DEFLATE and OCF 3.3 §4.3.2 allows Stored and Deflated
+/// (`epub::ocf`'s header records both), so an XPS or an EPUB item compressed
+/// with LZMA, bzip2 or Zstandard is a package outside its own format, and those readers
+/// keep [`Archive::read`]'s refusal by number.
+///
+/// # Errors
+/// [`ZipEntryError`], one variant per refusal. The decoders' own failures are
+/// mapped onto the reader's vocabulary: an LZMA property byte whose `lc + lp`
+/// is past 4 is [`ZipEntryError::LzmaHeader`] — it is one of the five header
+/// bytes — a stream that runs out or ends before its declared length is
+/// [`ZipEntryError::Truncated`], a bzip2 or Zstandard stream that would decode
+/// past it is [`ZipEntryError::OversizedStream`], a feature the decoder
+/// refuses by name — a Zstandard frame naming a dictionary, a randomised
+/// bzip2 block — is [`ZipEntryError::UnsupportedFeature`] naming it, and
+/// anything else is [`ZipEntryError::Corrupt`].
+pub fn read_entry<'a>(
+    archive: &mut Archive<'a>,
+    index: usize,
+) -> Result<Cow<'a, [u8]>, ZipEntryError> {
+    archive.read_coded(index, |coded| match coded {
+        tinker_pdf_zip::Coded::Lzma(stream) => decode_lzma(stream),
+        tinker_pdf_zip::Coded::Bzip2 { stream, unpacked } => decode_bzip2(stream, *unpacked),
+        tinker_pdf_zip::Coded::Zstandard { stream, unpacked } => decode_zstd(stream, *unpacked),
+        // `Coded` is `#[non_exhaustive]`: a method the zip crate learns the
+        // framing of later is one this facade has not wired a decoder for.
+        other => Err(ZipEntryError::UnsupportedMethod(other.method())),
+    })
+}
+
+/// ZIP method 12's stream through the bzip2 decoder 7z's `040202` uses.
+fn decode_bzip2(stream: &[u8], unpacked: usize) -> Result<Vec<u8>, ZipEntryError> {
+    use tinker_pdf_archive::bzip2;
+    // The ceiling is the declared size, bounded and charged by the zip crate,
+    // exactly as for method 14.
+    let limits = bzip2::Limits {
+        max_unpacked: unpacked,
+    };
+    bzip2::decode(stream, &limits).map_err(|e| match e {
+        bzip2::Error::Truncated => ZipEntryError::Truncated,
+        bzip2::Error::TooLarge => ZipEntryError::OversizedStream {
+            declared: unpacked as u64,
+        },
+        // Refused by name, and not damage: a well-formed block of a kind
+        // nothing has written since 1999.
+        bzip2::Error::Randomised => {
+            ZipEntryError::UnsupportedFeature(ZipMethodFeature::Bzip2Randomised)
+        }
+        // `bzip2::Error` is `#[non_exhaustive]`: a bad table, a failed block
+        // or stream CRC and whatever is added later are all a stream that is
+        // not the one the entry claims.
+        _ => ZipEntryError::Corrupt,
+    })
+}
+
+/// ZIP method 93's frames through the Zstandard decoder.
+fn decode_zstd(stream: &[u8], unpacked: usize) -> Result<Vec<u8>, ZipEntryError> {
+    use tinker_pdf_archive::zstd;
+    // The ceiling is the declared size, bounded and charged by the zip crate,
+    // exactly as for methods 14 and 12.
+    let limits = zstd::Limits {
+        max_unpacked: unpacked,
+    };
+    zstd::decode(stream, &limits).map_err(|e| match e {
+        zstd::Error::Truncated => ZipEntryError::Truncated,
+        zstd::Error::TooLarge => ZipEntryError::OversizedStream {
+            declared: unpacked as u64,
+        },
+        // Refused by name, and not damage: a ZIP has nowhere to carry a
+        // dictionary, so no reader of the archive alone can decode the frame,
+        // however well formed it is.
+        zstd::Error::NeedsDictionary => {
+            ZipEntryError::UnsupportedFeature(ZipMethodFeature::ZstandardDictionary)
+        }
+        // `zstd::Error` is `#[non_exhaustive]`: a damaged section, a failed
+        // content checksum or size, and whatever is added later are all a
+        // stream that is not the one the entry claims.
+        _ => ZipEntryError::Corrupt,
+    })
+}
+
+/// ZIP method 14's stream through the decoder 7z already uses.
+fn decode_lzma(stream: &tinker_pdf_zip::LzmaStream<'_>) -> Result<Vec<u8>, ZipEntryError> {
+    use tinker_pdf_archive::lzma;
+    // The ceiling is the declared size, which `tinker-pdf-zip` has already
+    // bounded by the per-entry cap and charged against the archive's total, so
+    // the decoder may produce exactly what the archive was permitted to spend.
+    let limits = lzma::Limits {
+        max_unpacked: stream.unpacked,
+    };
+    lzma::decode(stream.stream, stream.properties, stream.unpacked, &limits).map_err(|e| match e {
+        lzma::Error::BadProperties => ZipEntryError::LzmaHeader,
+        lzma::Error::Truncated | lzma::Error::ShortOutput => ZipEntryError::Truncated,
+        lzma::Error::TooLarge => ZipEntryError::EntryTooLarge,
+        // `lzma::Error` is `#[non_exhaustive]`: a bad range-coder start, a
+        // match reaching past the output, and whatever is added later are all
+        // a stream that is not the one the entry claims to hold.
+        _ => ZipEntryError::Corrupt,
+    })
+}
+
 /// Pages an already-open archive as a comic.
 ///
 /// # Errors
@@ -1763,6 +2020,24 @@ pub fn pages_from_archive(
     limits: &Limits,
 ) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
     pages_from_reader(Reader::Zip(archive), limits)
+}
+
+/// Pages one picture with no archive around it, as the comic of that one
+/// entry (tier 5's formats row): what [`crate::Document::open`] does with a
+/// bare image.
+///
+/// The same body as every container's, so a bare GIF, WebP or multi-page TIFF
+/// is exactly the document a one-entry CBZ holding it is — the same pages,
+/// sizes, pixels and warnings — and the two cannot drift apart.
+///
+/// # Errors
+/// [`ArchiveRefusal::NoImages`] for bytes [`image_format`] does not
+/// recognise, and [`ArchiveRefusal::TooLarge`] past a bound.
+pub(crate) fn pages_from_picture(
+    bytes: &[u8],
+    limits: &Limits,
+) -> Result<(Vec<u8>, ArchiveReport), ArchiveRefusal> {
+    pages_from_reader(Reader::Picture(bytes), limits)
 }
 
 /// Pages whichever container was opened.
@@ -1802,18 +2077,24 @@ fn pages_from_reader(
         if comic_info::is_comic_info(&entry.name) {
             continue;
         }
-        let Some(plan) = plan_entry(&mut archive, position, &entry.name, limits) else {
-            continue;
-        };
-
-        if plans.len() >= limits.max_pages {
-            return Err(ArchiveRefusal::TooLarge);
-        }
-        spent = spent
-            .checked_add(plan.charge)
-            .filter(|&total| total <= limits.max_synthesised)
-            .ok_or(ArchiveRefusal::TooLarge)?;
-        plans.push(plan);
+        // Usually one plan, none for an entry that is not an image, and one
+        // per directory for a multi-page TIFF — each of which is a page, and
+        // each of which the page cap and the byte cap count as one **the
+        // moment it is planned**, before the next is decoded. A TIFF's
+        // directories are handed over one at a time for that reason: planned
+        // all at once and charged after, sixty-four directories over one
+        // 16 MiB strip held a gigabyte before the 512 MiB cap was asked.
+        plan_entry(&mut archive, position, &entry.name, limits, &mut |plan| {
+            if plans.len() >= limits.max_pages {
+                return Err(ArchiveRefusal::TooLarge);
+            }
+            spent = spent
+                .checked_add(plan.charge)
+                .filter(|&total| total <= limits.max_synthesised)
+                .ok_or(ArchiveRefusal::TooLarge)?;
+            plans.push(plan);
+            Ok(())
+        })?;
     }
 
     if plans.is_empty() {
@@ -1862,6 +2143,11 @@ fn pages_from_reader(
             Content::Jpeg(data) => builder.add_image(IMAGE_RESOURCE, &ImageData::Jpeg(data)),
             Content::Png(png) => builder.add_image(IMAGE_RESOURCE, &png.image()),
             Content::Tiff(tiff) => builder.add_image(IMAGE_RESOURCE, &tiff.image()),
+            Content::Jpx(data, header) => builder.add_image(
+                IMAGE_RESOURCE,
+                &ImageData::Compressed(jpx_image(data, header)),
+            ),
+            Content::Raster(raster) => builder.add_image(IMAGE_RESOURCE, &raster.image()),
             Content::Placeholder => false,
         };
 
@@ -1952,32 +2238,71 @@ fn read_comic_info(
 /// holds exactly one `/XObject`, and they are different objects.
 const IMAGE_RESOURCE: &[u8] = b"Im";
 
-/// Decides what one entry becomes, or `None` when it is not a page at all.
+/// What a planned page is handed to: the page cap and the byte cap, charged
+/// on it before anything else is planned, and a refusal when either is spent.
+type Admit<'p, 'a> = dyn FnMut(Plan<'a>) -> Result<(), ArchiveRefusal> + 'p;
+
+/// Decides what one entry becomes — no page (it is not an image), one page, or
+/// for a TIFF of several directories one page per directory that is one — and
+/// hands each to `admit` as it is made.
+///
+/// # Errors
+/// Whatever `admit` refuses, at the first page it refuses.
 fn plan_entry<'a>(
     archive: &mut Reader<'a>,
     index: usize,
     name: &str,
     limits: &Limits,
-) -> Option<Plan<'a>> {
-    let placeholder = |defect: PageDefect| Plan {
+    admit: &mut Admit<'_, 'a>,
+) -> Result<(), ArchiveRefusal> {
+    let data = match archive.read(index) {
+        Ok(data) => data,
+        Err(defect) => {
+            // No bytes, so no magic. See `extension_claims_image` for why the
+            // name is allowed to decide this one case and nothing else.
+            return if extension_claims_image(name) {
+                admit(placeholder_plan(name, defect))
+            } else {
+                Ok(())
+            };
+        }
+    };
+    match image_format(&data) {
+        None => Ok(()),
+        Some(ImageFormat::Tiff) => tiff_plans(
+            &data,
+            |directory| tiff_page(name, &data, directory, limits),
+            admit,
+        ),
+        Some(format) => match plan_image(format, data, name, limits) {
+            Some(plan) => admit(plan),
+            None => Ok(()),
+        },
+    }
+}
+
+/// A page of the book's size carrying the neutral grey, and why.
+fn placeholder_plan<'a>(name: &str, defect: PageDefect) -> Plan<'a> {
+    Plan {
         name: name.to_owned(),
         size: None,
         content: Content::Placeholder,
         defect: Some(defect),
         degraded: false,
         charge: PAGE_OVERHEAD,
-    };
+    }
+}
 
-    let data = match archive.read(index) {
-        Ok(data) => data,
-        Err(defect) => {
-            // No bytes, so no magic. See `extension_claims_image` for why the
-            // name is allowed to decide this one case and nothing else.
-            return extension_claims_image(name).then(|| placeholder(defect));
-        }
-    };
+/// One entry of a format that is one page, whatever it holds.
+fn plan_image<'a>(
+    format: ImageFormat,
+    data: Cow<'a, [u8]>,
+    name: &str,
+    limits: &Limits,
+) -> Option<Plan<'a>> {
+    let placeholder = |defect: PageDefect| placeholder_plan(name, defect);
 
-    match image_format(&data)? {
+    match format {
         ImageFormat::Jpeg => {
             // The same reader `add_image` uses, so the `/MediaBox` and the
             // `/Width` cannot disagree.
@@ -2021,37 +2346,200 @@ fn plan_entry<'a>(
                 charge,
             })
         }
-        ImageFormat::Tiff => {
-            // The same ceiling the PNG route takes, for the same reason: the
-            // largest entry this build will read out of an archive is the most
-            // a page's raster may be, and it is the *caller's* number, which is
-            // what `ExceedsOutputLimit` carries back.
+        // `plan_entry` sends a TIFF to `tiff_plans`, for its directories; this
+        // arm is the first directory alone, for a caller that asked for one.
+        ImageFormat::Tiff => Some(tiff_page(name, &data, 0, limits)),
+        ImageFormat::Jpeg2000 => {
+            // The header and nothing past it: the box walk, the main and
+            // tile-part headers, the budgets and Annex I's channel plan. That
+            // is everything the file *declares*, so a codestream the decoder
+            // would refuse by name is a placeholder here, before it becomes a
+            // page. Damage inside the packets is found where every PDF's JPX
+            // stream has it found, when the page is drawn.
             //
-            // It binds only the decoded route. A single-strip G4 page — the
-            // shape a scanned comic actually has — builds no raster at all, so
-            // a page far past this ceiling still opens.
-            let Ok(tiff) = tiff_image(&data, &FilterLimits::new(limits.zip.max_entry_bytes)) else {
+            // The ceiling is the PNG and TIFF routes' — the largest entry this
+            // build will read — because the raster a decode would produce is
+            // what it bounds, and a decode happens later at render time.
+            let Ok(header) = tinker_pdf_filters::jpx_header(
+                &data,
+                &FilterLimits::new(limits.zip.max_entry_bytes),
+            ) else {
                 return Some(placeholder(PageDefect::Undecodable));
             };
-            if tiff.width() == 0 || tiff.height() == 0 {
+            // What the renderer draws a JPX image from: one, three or four
+            // colour channels (`resources.rs`'s `jpx_image`). A two-channel
+            // file would open and then draw as the renderer's own grey, with
+            // the report calling it a picture.
+            if header.width == 0 || header.height == 0 || jpx_space(&header).is_none() {
                 return Some(placeholder(PageDefect::Undecodable));
             }
-            let size = (f64::from(tiff.width()), f64::from(tiff.height()));
-            let degraded = !tiff.complete();
-            let charge = PAGE_OVERHEAD.saturating_add(embedded_len(&tiff.image()));
             Some(Plan {
                 name: name.to_owned(),
-                size: Some(size),
-                content: Content::Tiff(Box::new(tiff)),
+                size: Some((f64::from(header.width), f64::from(header.height))),
+                charge: PAGE_OVERHEAD.saturating_add(data.len()),
+                // A channel `cdef` typed as opacity is dropped: a comic page
+                // is painted over nothing, and `CompressedImage` carries no
+                // `/SMaskInData`. The picture reaches the page and the report
+                // says it is not the whole of what the file held.
+                degraded: header.opacity,
+                content: Content::Jpx(data, header),
                 defect: None,
-                degraded,
-                charge,
             })
         }
+        // No pass-through route exists for a BMP, a GIF or a WebP, so the
+        // decode is the route: `raster_plan` bounds it by the same caller's
+        // ceiling the PNG and TIFF decoded routes take, and says why.
+        ImageFormat::Bmp => Some(raster_plan(
+            name,
+            bmp_image(&data, &FilterLimits::new(limits.zip.max_entry_bytes)).ok(),
+        )),
+        ImageFormat::Gif => Some(raster_plan(
+            name,
+            gif_image(&data, &FilterLimits::new(limits.zip.max_entry_bytes)).ok(),
+        )),
+        ImageFormat::WebP => Some(raster_plan(
+            name,
+            webp_image(&data, &FilterLimits::new(limits.zip.max_entry_bytes)).ok(),
+        )),
         // Recognised, named, and refused at the page level rather than the
-        // archive's: an archive of a hundred JPEGs and one GIF keeps its
-        // hundred readable pages, and the GIF keeps its page number.
+        // archive's: an archive of a hundred JPEGs and one AVIF keeps its
+        // hundred readable pages, and the AVIF keeps its page number.
         other => Some(placeholder(PageDefect::UnsupportedFormat(other))),
+    }
+}
+
+/// Every directory of a TIFF that is a page, in the order the `NextIFD` chain
+/// gives them.
+///
+/// TIFF 6.0's `NewSubfileType` says which directories are not pages: bit 0 is
+/// a reduced-resolution copy of another image — the thumbnail a scanner
+/// writes after the page — and bit 2 a transparency mask for one. Neither is
+/// drawn as a page of its own, and a directory refused as
+/// `PhotometricInterpretation` 4 is a mask whatever its subfile type said. The
+/// first directory is always a page: it is the picture a single-image reader
+/// shows, and an entry that became no page would renumber the book.
+///
+/// The chain is walked under `tiff.rs`'s cycle guard and its 64-directory
+/// bound, and each directory is built by `page` and handed to `admit` —
+/// which charges it against [`MAX_CBZ_PAGES`] and [`MAX_SYNTHESISED_PDF`] —
+/// **before the next is decoded**. That is what makes a directory cost what
+/// an entry of its own costs: an entry is charged before the next entry is
+/// read, and a directory before the next directory is built. Collecting them
+/// first and charging after kept every decoded raster and every copied
+/// strip alive at once, so sixty-four directories over one 16 MiB strip
+/// peaked at a gigabyte before the 512 MiB cap was asked.
+///
+/// `page` is a parameter rather than a call so that the order is what a test
+/// holds, not only the outcome.
+///
+/// # Errors
+/// Whatever `admit` refuses, at the first directory it refuses; nothing after
+/// that directory is built.
+fn tiff_plans<'a>(
+    data: &[u8],
+    mut page: impl FnMut(usize) -> Plan<'a>,
+    admit: &mut Admit<'_, 'a>,
+) -> Result<(), ArchiveRefusal> {
+    let directories = tiff_scan_directory(data, 0).map_or(1, |scan| scan.pages as usize);
+    admit(page(0))?;
+    for index in 1..directories {
+        match tiff_scan_directory(data, index) {
+            Ok(scan) if scan.subfile & 0b101 != 0 => continue,
+            Err(TiffError::UnsupportedPhotometric(4)) => continue,
+            _ => admit(page(index))?,
+        }
+    }
+    Ok(())
+}
+
+/// One directory of a TIFF as a page, or its placeholder.
+///
+/// The same ceiling the PNG route takes, for the same reason: the largest
+/// entry this build will read out of an archive is the most a page's raster
+/// may be, and it is the *caller's* number, which is what `ExceedsOutputLimit`
+/// carries back. It binds only the decoded route. A single-strip G4 page — the
+/// shape a scanned comic actually has — builds no raster at all, so a page far
+/// past this ceiling still opens.
+fn tiff_page<'a>(name: &str, data: &[u8], directory: usize, limits: &Limits) -> Plan<'a> {
+    let ceiling = FilterLimits::new(limits.zip.max_entry_bytes);
+    let tiff = match tiff_image_directory(data, directory, &ceiling) {
+        Ok(tiff) if tiff.width() > 0 && tiff.height() > 0 => tiff,
+        _ => return placeholder_plan(name, PageDefect::Undecodable),
+    };
+    let size = (f64::from(tiff.width()), f64::from(tiff.height()));
+    let degraded = !tiff.complete();
+    let charge = PAGE_OVERHEAD.saturating_add(embedded_len(&tiff.image()));
+    Plan {
+        name: name.to_owned(),
+        size: Some(size),
+        content: Content::Tiff(Box::new(tiff)),
+        defect: None,
+        degraded,
+        charge,
+    }
+}
+
+/// A page from a decoder with no pass-through route, or its placeholder.
+///
+/// The decode ran under the largest entry this build will read out of an
+/// archive, the PNG and TIFF decoded routes' ceiling for their reason: a page
+/// whose raster is bigger than the biggest file the archive may hold is not a
+/// comic page. **This is the one route here whose cost is `w x h x c`** rather
+/// than the entry's own bytes, and the module note's peak argument is why an
+/// indexed file is kept indexed on the way through.
+fn raster_plan<'a>(name: &str, raster: Option<RasterImageData>) -> Plan<'a> {
+    let Some(raster) = raster.filter(|r| r.width() > 0 && r.height() > 0) else {
+        return Plan {
+            name: name.to_owned(),
+            size: None,
+            content: Content::Placeholder,
+            defect: Some(PageDefect::Undecodable),
+            degraded: false,
+            charge: PAGE_OVERHEAD,
+        };
+    };
+    let size = (f64::from(raster.width()), f64::from(raster.height()));
+    let degraded = !raster.complete();
+    let charge = PAGE_OVERHEAD.saturating_add(embedded_len(&raster.image()));
+    Plan {
+        name: name.to_owned(),
+        size: Some(size),
+        content: Content::Raster(Box::new(raster)),
+        defect: None,
+        degraded,
+        charge,
+    }
+}
+
+/// The device space a JPEG 2000 file's decode lands in, by its channel count
+/// — the three counts the renderer draws — or `None` for any other.
+fn jpx_space(header: &JpxHeader) -> Option<ImageColorSpace<'static>> {
+    match header.components {
+        1 => Some(ImageColorSpace::DeviceGray),
+        3 => Some(ImageColorSpace::DeviceRgb),
+        4 => Some(ImageColorSpace::DeviceCmyk),
+        _ => None,
+    }
+}
+
+/// A JPEG 2000 page's image: the file's own bytes under `/JPXDecode`.
+///
+/// `bits_per_component` and `color_space` are the decode's description, from
+/// the header, and [`ImageFilter::Jpx`] is why neither reaches the dictionary:
+/// the codestream states both, and a `/ColorSpace` would override a JP2's own
+/// `colr` box.
+fn jpx_image<'b>(data: &'b [u8], header: &JpxHeader) -> CompressedImage<'b> {
+    CompressedImage {
+        width: header.width,
+        height: header.height,
+        bits_per_component: header.precision,
+        // `plan_entry` refused every count `jpx_space` does not map, so this
+        // default is never taken; it keeps the function total.
+        color_space: jpx_space(header).unwrap_or(ImageColorSpace::DeviceGray),
+        filter: Some(ImageFilter::Jpx),
+        data,
+        color_key_mask: None,
+        soft_mask: None,
     }
 }
 

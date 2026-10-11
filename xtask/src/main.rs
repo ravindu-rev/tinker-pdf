@@ -50,12 +50,17 @@ release options:
                                  bindings/dotnet/runtimes/<rid>/native/
 
   cargo xtask bindings-parity [options]
-                  run both write-parity scripts on all four surfaces and
-                  require byte-identical output. Non-zero on a mismatch OR on
-                  a surface that ran and printed no `WROTE sha256=` line at
-                  all, which is the failure that gets shipped. A surface whose
-                  artefact is not installed here is SKIPPED, by name and with
-                  the reason -- never silently
+                  run the thirteen parity scripts -- nine that write a
+                  document, four that write down what a sanitise reported and
+                  what the read surface, signatures and form data say -- on the
+                  facade, the wheel, the npm package, the NuGet package and
+                  the Go, Ruby and Java bindings, and require byte-identical
+                  output. Non-zero on a mismatch OR on a surface that ran and
+                  printed no `WROTE sha256=` / `READ sha256=` line for a
+                  script, which is the failure that gets shipped. A surface whose
+                  artefact or toolchain is not here is SKIPPED, by name and
+                  with the reason -- never silently. The Go, Ruby and Java
+                  surfaces load target/release's tinker_pdf_ffi
 
 bindings-parity options:
   --require-all   a skipped surface is a failure. What CI passes

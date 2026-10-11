@@ -68,7 +68,11 @@ project's own encoder and records `/FlateDecode`. Two hard rules: a stream
 that already declares a `/Filter` is handed through untouched — that is a
 contract, not an optimisation, since pass-through image data depends on its
 declared filter still describing its bytes — and a result no smaller than
-the input is discarded, so an already-compressed image never grows. The
+the input is discarded, so an already-compressed image never grows. A
+`/Type /Metadata` stream is never compressed at all: a packet scanner reads
+XMP from the raw bytes without decoding PDF filters, and ISO 19005 forbids a
+filter on one, so `compress` does not reach it — the editor's
+`set_xmp_metadata` relies on that ([editing](editing.md)). The
 object-stream container is compressed whenever compression is on at all;
 a cross-reference stream never is, because a reader finds it by offset
 before it knows anything about filters.
@@ -84,6 +88,37 @@ not returned after three minutes. The rewrite path enumerates the
 cross-reference table's own entries for the same reason, and the reader has
 been hardened against this shape since it was written
 (`limits::MAX_XREF_SLOTS`).
+
+**Stream deduplication.** `WriteOptions::deduplicate_streams` merges
+identical streams into one object on a rewrite, after garbage collection, and
+**identical means identical**: equal dictionaries — every key and value in
+order, `/Length` aside since the writer computes it — and equal content,
+compared byte for byte. SHA-256 over the content only puts streams in
+buckets worth comparing; it never decides a merge, because a wrong merge is
+not a bigger file but one font drawn with another's program and nothing in the
+output saying so. The content compared is the **decoded** bytes, so two
+encodings of one content under one dictionary merge; a decode that is not
+exact — a filter this build cannot run, an image codec the chain stops at, a
+decode that warned or hit the output cap — compares the stored bytes under a
+different tag instead, so a damaged stream that decodes to the same prefix as
+another is never taken for it. Every reference to a duplicate, the trailer's
+included, is pointed at the survivor (the lowest-numbered), and the pass
+repeats to a fixed point, since merging two images can make the two forms that
+drew them equal. Only streams are candidates, so nothing whose object number
+is its identity — a page, an annotation, an optional content group, a
+structure element, a signature dictionary — can be merged; among streams a
+cross-reference or object stream and one an `/OBJR` names (14.7.5.3) are held
+apart. Off by default, because it decodes every filtered stream to compare it;
+ignored on an incremental update, which appends and must not rewrite what a
+signature's revision covers. `DocumentEditor::import_page` still copies a
+shared resource per import, and this pass merges the copies **only where
+every object the copies' dictionaries name is a stream or is direct**. A copy
+whose dictionary names an indirect object that is not a stream — an indirect
+`/ColorSpace`, `/DecodeParms` or `[/ICCBased …]` array — has that object
+copied afresh with it per import, the two dictionaries name two different
+objects, and no pass merges a non-stream to make them equal: two imports of
+such an image stay two images, where the same image with its `/ColorSpace`
+written directly becomes one.
 
 **Encrypt-on-save.** `WriteOptions::encryption` encrypts a rewrite at R6
 (AES-256): every string and every stream (7.6.2), each under an
@@ -146,7 +181,8 @@ Everything goes through the facade (ruling 11, [rulings](../rulings.md)):
 traits in the core, because `wasm32-unknown-unknown` has no files.
 `WriteOptions` carries `mode` (`WriteMode::Rewrite` or
 `WriteMode::Incremental`), `linearize`, `version`, `object_streams`,
-`compress`, `encryption` (`Option<Encryption>`) and `garbage_collect`;
+`compress`, `encryption` (`Option<Encryption>`), `garbage_collect` and
+`deduplicate_streams`;
 the default is a plain uncompressed rewrite.
 
 ```rust
@@ -200,8 +236,9 @@ through `DocumentEditor::save` — the door this page documents — would set it
 get no subsetting, and be told nothing; and the caller who reaches for that
 flag is by definition the caller redacting something. A silent flag on the
 disclosure path is worse than no flag, so there is none: `WriteOptions` has
-seven fields, all of them about bytes on disk, and its own documentation says
-why there is no eighth. Moving the subsetting down into `tinker-pdf-cos`
+eight fields, all of them about bytes on disk and every one acted on where it
+is carried, and its own documentation says why there is no ninth. Moving the
+subsetting down into `tinker-pdf-cos`
 instead would mean moving the interpreter down or writing a second glyph
 resolver there, and a second answer to "what does this code decode to" is a
 second engine.
@@ -222,13 +259,80 @@ program written through entire carries every outline it had — including the
 ones a redaction has just removed the text of. All eight `UntouchedReason`s
 are good reasons to keep a program and none of them is a reason to tell a
 caller the disclosure is gone, so a non-empty `untouched` is `false` here
-whatever is in it. `false` is the ordinary answer rather than a failure: over
+whatever is in it — and so is a non-empty `type3_untouched`, a Type 3 font
+whose glyph procedures went through whole: since October 2026 the pass empties
+the procedures nothing shown runs ([editing](editing.md)'s "Type 3 fonts"),
+and one it leaves whole is in the file. `false` is the ordinary answer rather than a failure: over
 the fetched corpora 4 950 of 10 832 programs went through whole, 3 406 of them
 because the rebuild came out no smaller than the producer's own subset. It is
 an instruction to read the report, which names each one (ruling 10).
 `DocumentEditor::save_signed` has no facade door of its own for the same
 reason: signing is incremental by definition, so subsetting into it could never
 remove anything.
+
+**Images, on the same door, off by default.** `SaveOptions::images` is an
+`ImagePolicy`, `Keep` by default — the pass is not entered and every image
+stream is written through as the file stored it, so a default save is byte for
+byte the save this door made before the field existed. `Recode(ImageRecoding)`
+names a coding per image kind and, optionally, a resolution
+(`ImageRecoding::new(continuous, bilevel).with_max_ppi(ppi)`):
+
+- a **continuous** image (more than one bit or one component) as
+  `ContinuousCodec::Keep` (as stored, unless resampled — then deflated),
+  `Flate`, or `Jpeg(JpegTables)` — baseline T.81 with **the caller's**
+  luminance and chrominance tables in natural order and 4:4:4 unless
+  `subsampled`, eight bits and one or three components only;
+- a **bilevel** image (one bit, one component, `/ImageMask` included) as
+  `BilevelCodec::Keep`, `Flate`, `CcittG4` (`/K -1`, `BlackIs1` false, so a
+  sample's bits go through as they are) or `Jbig2Generic` (D.3's embedded
+  organisation: a page information segment, one immediate lossless generic
+  region at template 0 with TPGDON and the nominal AT pixels, an end of
+  page — the assembly the filter crate deliberately leaves to its caller —
+  with the samples inverted, because T.88 codes 1 for black);
+- `max_ppi`: an **integer box filter**, one whole factor per axis, chosen so
+  that no placement of the image is finer than that on either axis. Placements
+  come from interpreting every page, every form XObject it draws at any depth
+  (a form that draws itself is not re-entered) and every state of every
+  annotation's `/AP /N`, placed by 12.5.5's algorithm: an axis drawn `L`
+  points long shows its samples over `L / 72` inches, and the factor is
+  `ceil(finest ppi / max_ppi)`. Each output sample is its block's mean,
+  rounded half up, a partial block at the right or bottom edge the mean of
+  what it holds. An image's `/SMask` or `/Mask` is placed wherever the image
+  is.
+
+An image that is another's soft or stencil mask is coded losslessly whatever
+the continuous codec, since a quantiser's ringing on an edge of alpha is a
+halo. A recoding is kept only if it is **smaller** than the stream stored.
+`Saved::images` is an `ImageOutcome` with `SubsetOutcome`'s three shapes —
+`Kept`, `Recoded(ImageReport)` and `RecodedButTheOriginalsRemain(report)` for an
+appended save, whose prefix keeps every stored image — and the report names
+every image by object reference: `recoded` (coding, size before and after,
+bytes before and after, and `resolution_kept` when a resample was asked and
+not done) and `untouched` with an `UntouchedImageReason`.
+
+**Why the switch is not `WriteOptions::images`,** which is what the roadmap
+row first asked for: font subsetting's reason, and one of its own. A
+resolution is a property of where an image is *drawn* — one object placed as
+a thumbnail and as a page has two — and only the interpreter's walk can say
+where, which `tinker-pdf-cos` is below. And `WriteOptions` describes bytes on
+disk under a contract its writer has always kept, that it never re-encodes
+image bytes; this pass runs on the editor before that writer and the writer
+still re-encodes nothing.
+
+**A `/Decode` array never blocks it.** Every operation here preserves one: a
+lossless coding keeps the samples it applies to, and 8.9.5.2's map is affine
+per component, so a block mean of samples is the block mean of what they
+decode to and a quantiser's error is scaled by `(Dmax - Dmin) / 255`, never
+amplified. Inline images (8.9.7) live in content streams and are not
+touched.
+
+From the command line, every `tpdf` command that writes takes the policy:
+`--images keep|flate|jpeg` for the continuous kind, `--bilevel
+keep|flate|g4|jbig2` for the one-bit kind, and `--max-ppi N`, none of them
+meaning `ImagePolicy::Keep`. `--images jpeg` needs `--jpeg-tables FILE`, the
+two tables as 128 bytes in natural order, because this door takes the
+caller's tables and the CLI chooses none (ruling 11); the report is printed an
+image a line.
 
 ## Refused by name
 
@@ -238,8 +342,19 @@ remove anything.
 | Linearizing a document with no catalog or no pages | none — `linearize` returns no layout and the ordinary rewrite is emitted | there is no first page to put first, and a file claiming `/Linearized` falsely is worse than an ordinary one | Annex F |
 | `object_streams` under `linearize` | none — ignored when linearization succeeds | packing page one's objects into a container with everything else is the opposite of the layout's point | 7.5.7 |
 | Re-compressing a stream that declares a `/Filter` | none — handed through untouched, asserted in both directions | the dictionary is the only signal the bytes are already encoded; wrapping them again yields a stream no reader can undo | [filters](filters.md) |
+| Deduplicating on an incremental update | none — `deduplicate_streams` is ignored there, documented on the field (`an_incremental_update_merges_nothing`) | an update appends; merging would rewrite objects an earlier revision, and a signature over it, covers | 7.5.6 |
+| Merging two streams whose digests agree and whose bytes or dictionaries do not | never; the digest only chooses what to compare (`a_colliding_digest_never_merges_different_bytes`, `equal_bytes_under_different_decode_parameters_stay_apart`) | a wrong merge silently swaps one font's program for another's | — |
+| Comparing a stream by decoded content when the decode warned | its stored bytes are compared instead (`two_damaged_streams_that_decode_alike_stay_apart`) | a partial decode of two different streams can be equal | [filters](filters.md) |
+| Merging a cross-reference or object stream, or a stream an `/OBJR` names | held apart (`a_stream_with_identity_is_never_merged`) | the first two describe the file they came from; the third is a structure element's claim on that object, and two claims must stay two | 14.7.5.3 |
+| Compressing a `/Type /Metadata` stream | none — written unfiltered whatever `compress` says (`a_caller_supplied_packet_is_written_verbatim_and_uncompressed`) | an XMP packet is read from the raw bytes by tools that do not decode PDF, and ISO 19005 forbids a filter on one | 14.3.2 |
 | A font-subsetting switch on `WriteOptions` | none, and deliberately — the field does not exist and `WriteOptions`' own doc comment says why | the pass is driven by the interpreter, which `tinker-pdf-cos` is below; a flag the crate carrying it cannot act on would read as done and do nothing, on the one path where that is a disclosure. The switch is `tinker_pdf::write::SaveOptions::fonts` | [fonts](fonts.md) |
 | Subsetting that *removes* anything on an incremental save | `SubsetOutcome::CutButTheOriginalsRemain`, and `removed()` is false | 7.5.6: the output starts with the original bytes, the original font programs among them. The pass still runs, because the smaller programs are what a reader resolves — but nothing has left the file | 7.5.6 |
+| An image switch on `WriteOptions` | none, and deliberately; the switch is `SaveOptions::images` | a resolution is where an image is drawn, which only the interpreter's walk knows, and `WriteOptions`' writer promises never to re-encode image bytes | [ROADMAP](../ROADMAP.md) |
+| Recoding an image stored through an image codec (`DCTDecode`, `JPXDecode`, `CCITTFaxDecode`, `JBIG2Decode`), `Crypt`, an unknown filter or an external `/F` | `UntouchedImageReason::Filter { name }` | the pass reads samples through the general filters only; a codec's samples *in their own colour space* are the read side's images row, and a second decoder here would be a second answer to what those bytes mean | [ROADMAP](../ROADMAP.md) |
+| A lossy coding or a resample of an image with a colour-key `/Mask`; a resample of a `/Matte` soft mask or its image, an `/Indexed` image, one not at eight bits, a bilevel one, or one no walked stream draws | `UntouchedImageReason::ColourKeyMask`, `Matte`, `Indexed`, `Depth { bits }`, `Bilevel`, `Unplaced` — on `untouched`, or on `Recoded::resolution_kept` when a lossless coding still ran | each would change what the page shows: masked pixels decided by exact equality, a matte relation that needs equal dimensions, palette indices, grey from black and white, or a resolution with nothing to measure it by (a tiling pattern's cell, a Type 3 glyph and a soft mask's group are not walked) | 8.9.6.4, 11.6.5.3 |
+| JPEG for four components or an image that is not eight bits | `UntouchedImageReason::Components { count }`, `Depth { bits }` | baseline T.81 as `jpeg_encode` writes it: one or three components, eight bits | [filters](filters.md) |
+| A recoding no smaller than what the file stored | `UntouchedImageReason::NotSmaller` | the stored stream is both smaller and the producer's own | — |
+| Recoding into an incremental save | `ImageOutcome::RecodedButTheOriginalsRemain` | 7.5.6: every stored image stays in the prefix, so the file grows; the pass still runs, because the recoded streams are what a reader draws | 7.5.6 |
 
 ## Verified
 
@@ -310,6 +425,62 @@ is measured rather than asserted; and
 `a_program_left_whole_means_the_disclosure_is_not_out_of_the_file` pins
 `removed()` against a report with one `FieldResource` entry in it, which is
 the case where "the pass ran" and "the file is clean" come apart.
+
+Stream deduplication is held at two levels. `crates/tinker-pdf/tests/stream_dedup.rs`
+embeds the vendored Liberation Serif twice under two font dictionaries and
+shows a deduplicating rewrite carries it once — both descriptors name one
+`/FontFile2`, the file shrinks by the face — and **renders the page byte for
+byte as before**; the output passes the strict validator. The two fonts alone
+could not make that render fail on a wrong merge, since they embed one program
+and draw the same glyphs whichever each names, so the same page draws two
+images under equal dictionaries whose samples differ: a merge that did not
+compare their bytes would draw one image twice, and the test asserts they stay
+two objects besides. The render guards that class of swap — a merge that
+looked at too little — and a swap behind a colliding digest rests on
+`dedup.rs`'s injected-digest test below, since SHA-256 cannot be made to
+collide here. Beside it: equal bytes under different
+`/DecodeParms` stay two, a zlib stream of stored blocks and the encoder's
+output of the same content merge (the comparison is on decoded bytes), two
+damaged streams that decode to the same prefix stay two, an incremental
+update merges nothing, and an image `import_page` copied twice merges to one
+when its dictionary names nothing indirect and stays two when its
+`/ColorSpace` is a reference (`an_imported_image_merges_unless_its_dictionary_names_a_copied_non_stream`,
+the limit the paragraph on `import_page` above states).
+`crates/tinker-pdf-cos/src/dedup.rs`'s own tests cover
+what a real digest cannot be made to do: an injected digest that collides on
+everything, under which only true duplicates merge; the fixed point through
+two forms naming two copies of one image; the trailer redirected; and the
+`/OBJR` and cross-reference holds. Injections, counted over both suites before
+the two images and the import test were added (which adds assertions and
+removes none): bytes
+not compared under a shared digest 1, the dictionary compared as empty 2,
+`/Length` compared 1, a warned decode compared as whole 1, the `/OBJR` hold
+dropped 1, the trailer not redirected 1, one round only 1, bucketing by stored
+bytes 1, the pass never run 2 — and the dictionary dropped from the bucket key
+alone **0**, because the comparison that decides checks it again; that is the
+second layer doing its job, not a hole.
+
+The image pass is `crates/tinker-pdf/tests/image_recode.rs`, and every
+expected answer there is the generator's input or arithmetic done in the file.
+`the_default_save_leaves_every_image_as_stored` holds a default save equal,
+byte for byte, to the font pass and the serializer alone, with every image
+stream as stored. `lossless_codings_give_back_exactly_the_samples_written`
+saves eight-bit grey and RGB, four-bit grey and an indexed image deflated, and
+a one-bit grey image and a stencil mask under each of deflate, G4 and JBIG2,
+and reads back exactly the samples the test wrote and a page drawn to the same
+pixels. `downsampling_is_an_exact_box_filter_at_the_finest_placement` places
+one image twice and another only inside a form whose `/Matrix` halves it, and
+holds the factors, the dimensions and every block mean against a box filter
+written in the test. `jpeg_decodes_within_the_bound_the_callers_tables_give`
+codes a textured grey and RGB image with the caller's tables, finds exactly
+those tables in the DQT segments, and holds every sample within a bound
+computed from them: T.81 A.3.3's basis applied to half of each quantiser,
+widened by what a 1/16384 basis and a flooring integer IDCT can add, and for
+RGB carried through T.871's inverse with the encoder's rounding and the
+decoder's truncation. `what_cannot_be_kept_is_left_whole_by_name` reaches
+every `UntouchedImageReason` a page can, and
+`a_hostile_document_never_panics_the_pass` saves mutated documents under three
+policies.
 
 `crates/tinker-pdf-cos/tests/encrypt_on_save.rs` round-trips encrypted
 output ([encryption](encryption.md)); `tests/page_operations.rs` and the

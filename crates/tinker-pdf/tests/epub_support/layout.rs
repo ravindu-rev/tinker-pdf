@@ -98,6 +98,32 @@ pub fn lay_out(
     height_px: f64,
 ) -> (xhtml::Dom, StyleTree, Layout) {
     let dom = xhtml::read(document.as_bytes(), &tinker_pdf_xml::Limits::DEFAULT).expect("markup");
+    lay_out_dom(dom, author, width_px, height_px)
+}
+
+/// [`lay_out`] of markup the loose-file reader takes: XML where it is XML,
+/// and otherwise the tree HTML's own parser builds
+/// (`xhtml::read_markup_or_html`), which is the other producer of the
+/// element tree every box is built from.
+#[must_use]
+pub fn lay_out_markup(
+    markup: &str,
+    author: &str,
+    width_px: f64,
+    height_px: f64,
+) -> (xhtml::Dom, StyleTree, Layout) {
+    let dom = xhtml::read_markup_or_html(markup.as_bytes(), &tinker_pdf_xml::Limits::DEFAULT);
+    lay_out_dom(dom, author, width_px, height_px)
+}
+
+/// The cascade and the layout of a tree already read.
+#[must_use]
+pub fn lay_out_dom(
+    dom: xhtml::Dom,
+    author: &str,
+    width_px: f64,
+    height_px: f64,
+) -> (xhtml::Dom, StyleTree, Layout) {
     let media = MediaContext::screen(width_px, height_px);
     let limits = CssLimits::DEFAULT;
     let mut budget = CssBudget::new(&limits);

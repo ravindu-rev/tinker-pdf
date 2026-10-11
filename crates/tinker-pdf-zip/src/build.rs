@@ -29,6 +29,10 @@ pub(crate) struct File {
     pub raw: Option<Vec<u8>>,
     /// Method 8 rather than method 0.
     pub deflated: bool,
+    /// A method code to write in place of the one `deflated` chooses, with
+    /// `raw` as the payload. How a test builds a method-14 entry, since
+    /// nothing in this crate encodes LZMA.
+    pub method: Option<u16>,
     /// Bit 3: the sizes and CRC live in a descriptor after the data, and the
     /// local header carries zeroes.
     pub streamed: bool,
@@ -52,6 +56,7 @@ impl File {
             data: data.to_vec(),
             raw: None,
             deflated: false,
+            method: None,
             streamed: false,
             encrypted: false,
             utf8: true,
@@ -78,6 +83,14 @@ impl File {
             flags |= 1 << 11;
         }
         flags
+    }
+
+    fn method_code(&self) -> u16 {
+        match self.method {
+            Some(code) => code,
+            None if self.deflated => 8,
+            None => 0,
+        }
     }
 
     fn payload(&self) -> Vec<u8> {
@@ -127,7 +140,7 @@ pub(crate) fn archive(files: &[File], damage: Damage) -> Vec<u8> {
         out.extend_from_slice(&LOCAL_SIG);
         out.extend_from_slice(&20u16.to_le_bytes()); // version needed
         out.extend_from_slice(&file.flags().to_le_bytes());
-        out.extend_from_slice(&if file.deflated { 8u16 } else { 0 }.to_le_bytes());
+        out.extend_from_slice(&file.method_code().to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes()); // time
         out.extend_from_slice(&0u16.to_le_bytes()); // date
         out.extend_from_slice(&header_crc.to_le_bytes());
@@ -151,7 +164,7 @@ pub(crate) fn archive(files: &[File], damage: Damage) -> Vec<u8> {
         central.extend_from_slice(&20u16.to_le_bytes()); // version made by
         central.extend_from_slice(&20u16.to_le_bytes()); // version needed
         central.extend_from_slice(&file.flags().to_le_bytes());
-        central.extend_from_slice(&if file.deflated { 8u16 } else { 0 }.to_le_bytes());
+        central.extend_from_slice(&file.method_code().to_le_bytes());
         central.extend_from_slice(&0u16.to_le_bytes());
         central.extend_from_slice(&0u16.to_le_bytes());
         central.extend_from_slice(&crc.to_le_bytes());

@@ -225,6 +225,60 @@ impl From<RunError> for Trouble {
     }
 }
 
+/// 12.1.5's synthetic emboldening, as a fraction of the em: the strokes
+/// widen by 1% on each of their two boundaries, so the black box and every
+/// advance the font supplies grow by 2% (M5.12, M5.13).
+pub const BOLD_WIDENING: f64 = 0.02;
+
+/// 12.1.5's synthetic italic: the top edge of the alignment box skewed 20° to
+/// the right of the baseline, as the shear `tan 20°`.
+///
+/// Written as a constant rather than computed, because `tan` rounds
+/// differently from one platform's libm to the next and ruling 4 wants a
+/// page's bytes to be the same everywhere. `tan(20°)` is
+/// 0.36397023426620236…
+pub const ITALIC_SHEAR: f64 = 0.363_970_234_266_202_4;
+
+/// 12.1.5's `StyleSimulations`, read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Simulation {
+    /// `BoldSimulation` or `BoldItalicSimulation`.
+    pub bold: bool,
+    /// `ItalicSimulation` or `BoldItalicSimulation`.
+    pub italic: bool,
+}
+
+impl Simulation {
+    /// The attribute's value, or `None` for one 12.1.5's four do not name.
+    /// Absent is `None` the value — the glyphs as designed.
+    #[must_use]
+    pub fn parse(text: Option<&str>) -> Option<Simulation> {
+        let (bold, italic) = match text.map(str::trim) {
+            None | Some("None") => (false, false),
+            Some("BoldSimulation") => (true, false),
+            Some("ItalicSimulation") => (false, true),
+            Some("BoldItalicSimulation") => (true, true),
+            Some(_) => return None,
+        };
+        Some(Simulation { bold, italic })
+    }
+
+    /// What emboldening adds to an advance the font supplies, in the
+    /// element's units: 2% of the em, and nothing for an unemboldened run.
+    ///
+    /// An advance the markup **states** is not widened: M5.12 makes laying
+    /// out the wider advance the producer's job, and a stated advance is the
+    /// producer's layout.
+    #[must_use]
+    pub fn widening(self, em: f64) -> f64 {
+        if self.bold {
+            em * BOLD_WIDENING
+        } else {
+            0.0
+        }
+    }
+}
+
 /// Lays a `Glyphs` element's run out, in the element's own space.
 ///
 /// The origin is `(0, 0)`: the caller places the run with a matrix, so the
@@ -235,6 +289,9 @@ impl From<RunError> for Trouble {
 /// UAX #9 and puts the origin at the run's **right** edge, so an odd-level
 /// run answers displacements in `[-width, 0]` — see [`reorder`].
 ///
+/// `widening` is added to every advance the **font** supplies — 12.1.5's
+/// emboldening, [`Simulation::widening`] — and to none the markup states.
+///
 /// # Errors
 /// [`RunError::Indices`] for a run that does not describe glyphs, and
 /// [`RunError::Exhausted`] when the document's glyph total is spent.
@@ -244,6 +301,7 @@ pub fn run(
     em: f64,
     budget: &mut Budget,
     rtl: bool,
+    widening: f64,
 ) -> Result<Vec<Placed>, RunError> {
     let units = unicode_string(node.attr("UnicodeString"));
     let mappings = match node.attr("Indices") {
@@ -276,6 +334,7 @@ pub fn run(
         sfnt: sfnt.as_ref(),
         units_per_em: font.units_per_em,
         em,
+        widening,
     };
 
     let mut out: Vec<Placed> = Vec::new();
@@ -480,6 +539,8 @@ struct Metrics<'a, 'b> {
     sfnt: Option<&'a Sfnt<'b>>,
     units_per_em: f64,
     em: f64,
+    /// Added to every advance the font supplies: 12.1.5's emboldening.
+    widening: f64,
 }
 
 impl Metrics<'_, '_> {
@@ -493,6 +554,7 @@ impl Metrics<'_, '_> {
             .and_then(|sfnt| sfnt.advance(id))
             .map_or(1.0, |advance| f64::from(advance) / self.units_per_em)
             * self.em
+            + self.widening
     }
 }
 
@@ -545,13 +607,16 @@ fn place(
 /// 14.3's overlap test and a `RelativeToBoundingBox` brush each need a box
 /// for, and both of those are decisions about where a thing is rather than
 /// about which pixels it covers.
+///
+/// `widening` is [`run`]'s: an emboldened glyph occupies its wider advance.
 #[must_use]
-pub fn extent(placed: &[Placed], font: &Font, em: f64) -> (f64, f64) {
+pub fn extent(placed: &[Placed], font: &Font, em: f64, widening: f64) -> (f64, f64) {
     let sfnt = font.sfnt();
     let metrics = Metrics {
         sfnt: sfnt.as_ref(),
         units_per_em: font.units_per_em,
         em,
+        widening,
     };
     let mut low = 0.0f64;
     let mut high = 0.0f64;

@@ -1,6 +1,6 @@
 //! The committed JBIG2 fuzz seeds, replayed on stable.
 //!
-//! `fuzz/corpus/jbig2/` is twenty-three inputs a fuzzer found or a person
+//! `fuzz/corpus/jbig2/` is twenty-six inputs a fuzzer found or a person
 //! wrote,
 //! and the target that consumes them needs nightly. So the seeds were only ever
 //! exercised when somebody ran `cargo fuzz`, which is not on every commit — and
@@ -29,11 +29,31 @@
 //! cause rather than by its duration, which is the whole discipline here — a
 //! budget proved by a clock passes on a fast machine with the budget removed.
 //! `docs/verification.md` records why the total budget is not lowered instead.
+//!
+//! *Amended, October 2026.* **And the shape that bound left open came back**,
+//! as `symbol-dictionary-spun-past-its-marker`: a page of 37 by 56 is large
+//! enough for a symbol a hundred pixels wide, and 257 bytes asked for 38 730 of
+//! them. It is held the same way, by its cause:
+//! [`the_marker_spun_seed_stops_at_the_work_budget`] names the refusal and
+//! counts the symbols. It is the one seed here that spends a whole budget.
+//! `symbol-dictionary-template-0-custom-at` is the same sweep's slow unit, a
+//! dictionary of 3 072 symbols at template 0 with its adaptive pixels off the
+//! figure's places, which stays under the budget and was slow for what each
+//! pixel cost; the replay holds it to the refusal like every other seed, and
+//! `a_decoded_pixel_costs_the_reads_its_rolled_context_needs` holds the cost.
+//! The whole replay is about a second and a half in a debug build.
+//!
+//! `symbol-dictionary-export-runs-of-nothing` is the review of that budget's:
+//! twenty million export runs of zero, which the arithmetic road's loop decided
+//! uncharged and unguarded.
+//! [`the_export_run_seed_stops_at_the_turn_guard`] pins it by the guard's
+//! name and the decode's own count.
 
 use std::path::{Path, PathBuf};
 
 use tinker_pdf_filters::{
     jbig2_decode, jbig2_decode_measured, Capability, FilterError, Jbig2Params, Jbig2Refusal,
+    MAX_JBIG2_SYMBOLS, MAX_JBIG2_WORK_MULTIPLE,
 };
 
 /// The seed directory, from this crate rather than from the working directory.
@@ -102,6 +122,7 @@ fn every_committed_seed_decodes_or_refuses_by_name() {
             globals,
             width,
             height,
+            work_ceiling: None,
         };
         let ceiling = 1 << 16;
         match jbig2_decode(own, &params, ceiling, &mut warnings) {
@@ -177,6 +198,7 @@ fn the_pixel_budget_seed_is_refused_at_its_first_symbol() {
         globals,
         width,
         height,
+        work_ceiling: None,
     };
     let mut refusals = Vec::new();
     let (out, extent) = jbig2_decode_measured(own, &params, 1 << 16, &mut refusals);
@@ -200,4 +222,131 @@ fn the_pixel_budget_seed_is_refused_at_its_first_symbol() {
         "jbig2-seed-budget: RAN; refused at symbol {} of {}x{}",
         extent.symbols, extent.widest, extent.tallest
     );
+}
+
+/// **The seed the October 2026 fuzz sweep timed out on, stopped by the work
+/// budget.**
+///
+/// `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` closed the one-pixel page and nothing else:
+/// on a page of 37 by 56 a symbol may be 148 by 224, and this seed's dictionary
+/// declares a count its coded data stops describing after 945 decisions. The
+/// coder then reaches a marker and E.3.4 has it feed itself 1-bits, which it
+/// goes on deciding as symbols — **38 730 of them, 51 532 206 pixels**, from
+/// 257 bytes, under every per-dictionary bound there is, twice per fuzz input,
+/// at twenty seconds a time under the sanitizers.
+///
+/// What stops it is `MAX_JBIG2_WORK_MULTIPLE`, and that is what is pinned: the
+/// refusal by name, the decode's own count of what it spent, and the symbol
+/// count it got to — a few thousand rather than 38 730. None of it is a clock:
+/// a change that let the dictionary run on would move the symbol count and lose
+/// the refusal on any machine.
+#[test]
+fn the_marker_spun_seed_stops_at_the_work_budget() {
+    let Some(dir) = seeds() else {
+        println!("jbig2-seed-work: SKIPPED (no fuzz/corpus/jbig2)");
+        return;
+    };
+    let path = dir.join("symbol-dictionary-spun-past-its-marker");
+    let data = std::fs::read(&path).expect("the seed reads");
+    assert_eq!(data.len(), 257, "one control byte and 256 of payload");
+    let (width, height, globals, own) = knobs(&data);
+    assert_eq!(
+        (width, height),
+        (37, 56),
+        "the seed's first byte chooses a page the symbol-page bound admits a \
+         hundred-pixel symbol on, which is why that bound did not stop it"
+    );
+
+    // The fuzz target's own ceiling, and so its own budget.
+    let ceiling = 1 << 16;
+    let budget = ceiling as u64 * 8 * MAX_JBIG2_WORK_MULTIPLE;
+    for (label, globals, own) in [("straight", globals, own), ("swapped", own, globals)] {
+        let params = Jbig2Params {
+            globals,
+            width,
+            height,
+            work_ceiling: None,
+        };
+        let mut refusals = Vec::new();
+        let (out, extent) = jbig2_decode_measured(own, &params, ceiling, &mut refusals);
+        assert!(out.is_err(), "{label}: the seed decoded to a page");
+        assert!(
+            refusals.contains(&Jbig2Refusal::WorkCap),
+            "{label}: the work budget is no longer what stops this seed: \
+             {} symbols, {} units, {refusals:?}",
+            extent.symbols,
+            extent.work
+        );
+        // Past the budget — so it was the budget, and not something smaller,
+        // that stopped it — and by at most the one symbol whose charge was
+        // refused, which the symbol-page bound keeps under 148 x 224 here.
+        assert!(
+            extent.work > budget && extent.work <= budget + 148 * 224,
+            "{label}: {} units against a budget of {budget}",
+            extent.work
+        );
+        assert!(
+            extent.symbols < 38_730 / 4,
+            "{label}: the dictionary got to symbol {} of the 38 730 it asks for",
+            extent.symbols
+        );
+        println!(
+            "jbig2-seed-work: RAN {label}; stopped at symbol {} after {} units of {budget}",
+            extent.symbols, extent.work
+        );
+    }
+}
+
+/// **The input the review of the work budget timed out on, stopped at the
+/// export runs' turn guard.**
+///
+/// A two-symbol dictionary whose 6.5.10 export runs are one, then twenty
+/// million runs of zero, then one: 400 bytes, written through the decoder's own
+/// test encoder. A run of zero is legal and makes no progress, and the
+/// arithmetic road's loop was charged once after it ended and had no guard on
+/// its turns, so the fuzz build decided eighty million times before the budget
+/// heard of any of it — 12.8 s for this input, and a timeout for one five times
+/// as long. Both roads now stop at `MAX_JBIG2_SYMBOLS` turns, and the budget is
+/// settled on each of them underneath that. Pinned by the refusal's name and by
+/// the decode's own count of what it spent, both ways round.
+#[test]
+fn the_export_run_seed_stops_at_the_turn_guard() {
+    let Some(dir) = seeds() else {
+        println!("jbig2-seed-export: SKIPPED (no fuzz/corpus/jbig2)");
+        return;
+    };
+    let path = dir.join("symbol-dictionary-export-runs-of-nothing");
+    let data = std::fs::read(&path).expect("the seed reads");
+    assert_eq!(data.len(), 401, "one control byte and 400 of payload");
+    let (width, height, globals, own) = knobs(&data);
+
+    for (label, globals, own) in [("straight", globals, own), ("swapped", own, globals)] {
+        let params = Jbig2Params {
+            globals,
+            width,
+            height,
+            work_ceiling: None,
+        };
+        let mut refusals = Vec::new();
+        let (out, extent) = jbig2_decode_measured(own, &params, 1 << 16, &mut refusals);
+        assert!(out.is_err(), "{label}: the seed decoded to a page");
+        assert!(
+            refusals.contains(&Jbig2Refusal::ExportRunGuard),
+            "{label}: the turn guard is no longer what stops this seed: {} units, \
+             {refusals:?}",
+            extent.work
+        );
+        // Every turn up to the guard was charged and decided at most one
+        // integer, which A.2 reads in 38 decisions at the most.
+        let turns = u64::from(MAX_JBIG2_SYMBOLS);
+        assert!(
+            extent.work >= 4 * turns && extent.work <= 38 * (turns + 1),
+            "{label}: {} units for {turns} turns",
+            extent.work
+        );
+        println!(
+            "jbig2-seed-export: RAN {label}; stopped at the guard after {} units",
+            extent.work
+        );
+    }
 }

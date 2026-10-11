@@ -316,6 +316,31 @@ pub fn version_string(doc: &CosDocument) -> String {
     }
 }
 
+/// The version a text string written into `doc` is encoded for (7.9.2.2).
+///
+/// The same reading [`version_string`] makes — the header's version, or the
+/// catalog's when that is later — as numbers, and 1.7 when neither side
+/// states one. The fallback is the conservative direction: it withholds 2.0's
+/// UTF-8 form, and the UTF-16 form it leaves is readable by every version.
+/// No warning is emitted, because nothing was guessed that a caller will see.
+pub(crate) fn text_version(doc: &CosDocument) -> (u8, u8) {
+    text_version_of(doc.header_version(), catalog_version(doc))
+}
+
+/// [`text_version`] over versions already read, for a caller whose catalog is
+/// not the document's own — an editor that may have changed `/Version`.
+pub(crate) fn text_version_of(header: Option<String>, catalog: Option<String>) -> (u8, u8) {
+    let header = header.as_deref().and_then(version_number);
+    let catalog = catalog.as_deref().and_then(version_number);
+    let stated = match (header, catalog) {
+        (Some(h), Some(c)) => h.max(c),
+        (Some(v), None) | (None, Some(v)) => v,
+        (None, None) => return (1, 7),
+    };
+    let narrow = |part: u32| u8::try_from(part).unwrap_or(u8::MAX);
+    (narrow(stated.0), narrow(stated.1))
+}
+
 /// The catalog's `/Version` (7.7.2), as the name was written.
 fn catalog_version(doc: &CosDocument) -> Option<String> {
     let catalog = doc.catalog()?;

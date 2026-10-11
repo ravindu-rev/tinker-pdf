@@ -86,11 +86,18 @@ dotnet run --project bindings/dotnet/tests/Smoke -c Release -- \
   testdata/simple-text.pdf C:/Windows/Fonts/arial.ttf testdata/form-fields.pdf
 ```
 
-Two scripts with every input pinned — fill a form and save incrementally, and
-build a document from pages, a font and an image — printing one
-`DOTNET-SMOKE: WROTE sha256=<hex>` line each. The same two run against the
-facade in Rust, through the wheel and through the npm package, and
-`cargo xtask bindings-parity` requires all four to be byte-identical.
+Thirteen scripts with every input pinned — nine that write a document (fill a
+form and save incrementally; build a document from pages, a font and an image;
+the document operations; a sanitise; two saves with every write option set;
+form fields; the builder's graphics resources; tagged writing) and four that
+write down what a sanitise reported, what the read surface and the signature
+verdicts say, and what form data says, all listed in
+[docs/features/bindings.md](../../docs/features/bindings.md) —
+printing one
+`DOTNET-SMOKE: WROTE sha256=<hex>` or `READ sha256=<hex>` line each. The same thirteen run against the
+facade in Rust, through the wheel, the npm package and the Go, Ruby and Java
+bindings, and `cargo xtask bindings-parity` requires every one to be
+byte-identical.
 
 Six more `SafeHandle`s carry the write surface — `Editor`, `Checkpoint`,
 `Buffer`, `Builder`, `PageBuilder`, `OutlineEntry` — on exactly the pattern

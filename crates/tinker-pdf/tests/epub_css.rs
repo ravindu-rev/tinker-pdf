@@ -247,7 +247,14 @@ fn the_unsupported_census_over_the_committed_corpus() {
             "border-bottom",
             "border-top",
             "color",
-            "color-scheme",
+            // **`color-scheme` used to be here and left in October 2026's
+            // eighth wave**: pandoc's `:root { color-scheme: light dark }`, on
+            // five, five, four and five elements of the four pandoc books, is
+            // read now, and on paper it is the light scheme this build draws
+            // (`css-color-adjust-1` §2.1); a list naming `dark` and not
+            // `light` is still refused by value. The `light-dark()` above is
+            // still a value gap, though the used scheme it would choose by is
+            // now known to be light.
             // **`display` used to be here and milestone 11 removed it**, and
             // the way it left is the census earning its keep. Its whole count
             // over this corpus was calibre's six `display: table*` values, all
@@ -256,15 +263,30 @@ fn the_unsupported_census_over_the_committed_corpus() {
             // stylesheet and never reached the parser at all. A census that
             // counted names rather than asserting the set would have gone from
             // fourteen to thirteen and nobody would have known which one went.
-            "hyphens",
-            "list-style",
+            // **`hyphens` used to be here and left in October 2026's eighth
+            // wave**: pandoc's `code { hyphens: manual }`, once in each of
+            // its default sheets, is read now — `manual` breaks a word only
+            // at a soft hyphen and draws a hyphen there — and `auto`, which
+            // would need a hyphenation dictionary, is still refused by value.
+            // **`list-style` used to be here and left on 3 October 2026**,
+            // when `css-lists-3`'s shorthand was implemented with its two
+            // longhands. Its whole count was pandoc's `ul.task-list {
+            // list-style: none }`, four times over four sheets, on no element
+            // any committed book has.
             // **`max-width` used to be here and tier 4 removed it**, the same
             // way `display` left one milestone earlier: pandoc's whole count
             // over this corpus was `img { max-width: 100% }`, and CSS 2.2
             // §10.4's clamp is now applied rather than reported.
-            "overflow",
-            "overflow-x",
-            "quotes",
+            // **`overflow` and `overflow-x` used to be here and left on 3
+            // October 2026** with `css-overflow-3` §3.1: pandoc's `pre {
+            // overflow: auto }` and `table { overflow-x: auto }`, on two
+            // elements and one of each pandoc book, are scroll containers now —
+            // formatting contexts of their own, clipped where their content
+            // reaches past them, which in these books it never does.
+            // **`quotes` used to be here and left on 3 October 2026** with
+            // `css-content-3`'s quote keywords: pandoc's `q { quotes: "“" "”"
+            // "‘" "’" }`, four times, is read now — and still reaches no
+            // element, since no committed book has a `<q>`.
             // **`text-align` and `vertical-align` used to be here and tier 4
             // removed them both, in one edit, without touching either
             // property.** Both were value gaps and both were the *same* value
@@ -310,6 +332,119 @@ fn the_unsupported_census_over_the_committed_corpus() {
         "only {implemented} longhands were read out of the whole corpus"
     );
 }
+
+/// Every property name a declaration block in a sheet writes, as written.
+///
+/// Read off the token stream rather than off `parse`'s declarations, because a
+/// [`Declaration::Known`] carries the **longhand** it set and not the name the
+/// author wrote — `margin` arrives as four `margin-*`, and a census of written
+/// names counted through the parser would be a census of this build's own
+/// expansion. A block whose prelude starts with an at-keyword other than
+/// `@font-face` and `@page` holds rules and is walked again; every other block
+/// holds declarations, `@font-face`'s descriptors among them.
+fn written_names(css: &[u8], into: &mut std::collections::BTreeSet<String>) {
+    use tinker_pdf_css::parser::{component_values, BlockKind, ComponentValue};
+    use tinker_pdf_css::tokenizer::{tokenize, Token};
+
+    fn declarations(values: &[ComponentValue], into: &mut std::collections::BTreeSet<String>) {
+        for piece in values.split(|v| matches!(v, ComponentValue::Token(Token::Semicolon))) {
+            let mut significant = piece.iter().filter(|v| !v.is_whitespace());
+            if let (
+                Some(ComponentValue::Token(Token::Ident(name))),
+                Some(ComponentValue::Token(Token::Colon)),
+            ) = (significant.next(), significant.next())
+            {
+                into.insert(name.to_ascii_lowercase());
+            }
+        }
+    }
+
+    fn rules(values: &[ComponentValue], into: &mut std::collections::BTreeSet<String>) {
+        let mut prelude: Vec<&ComponentValue> = Vec::new();
+        for value in values {
+            match value {
+                ComponentValue::Block {
+                    kind: BlockKind::Curly,
+                    values: inner,
+                } => {
+                    let at = prelude.iter().find_map(|v| match v {
+                        ComponentValue::Token(Token::AtKeyword(name)) => {
+                            Some(name.to_ascii_lowercase())
+                        }
+                        _ => None,
+                    });
+                    match at.as_deref() {
+                        Some("font-face") | Some("page") | None => declarations(inner, into),
+                        Some(_) => rules(inner, into),
+                    }
+                    prelude.clear();
+                }
+                ComponentValue::Token(Token::Semicolon) => prelude.clear(),
+                other => prelude.push(other),
+            }
+        }
+    }
+
+    let text = String::from_utf8_lossy(css);
+    rules(&component_values(tokenize(&text)), into);
+}
+
+/// **How many distinct property names the committed stylesheets write.**
+///
+/// The roadmap's CSS row quoted milestone 1's census — *"84 distinct names
+/// across the fetched corpus's 53 stylesheets and 42 across the committed 8"*
+/// — and a number quoted from a census nobody can re-run is a number that
+/// cannot be checked. This re-runs the committed half, as written names over
+/// every `.css` entry, `@font-face` descriptors included, and pins it: over the
+/// eight stylesheets of the six books milestone 1 had, and over every `.css`
+/// entry of all nine committed books. The fetched half cannot be re-run in a
+/// tree that does not hold the fetched corpus, and is left to
+/// `epub_fetched.rs`'s nightly job rather than restated here.
+#[test]
+fn the_committed_stylesheets_write_this_many_distinct_property_names() {
+    const ALL: &[&str] = &[
+        "calibre-book-cover.epub",
+        "calibre-book-nocover.epub",
+        "calibre-embedded-font.epub",
+        "kcc-fixed-layout.epub",
+        "pandoc-book-cover.epub",
+        "pandoc-book-epub2.epub",
+        "pandoc-book-nocover.epub",
+        "pandoc-embedded-font.epub",
+        "pandoc-plates.epub",
+    ];
+    let mut first_six = std::collections::BTreeSet::new();
+    let mut every = std::collections::BTreeSet::new();
+    let mut sheets = 0usize;
+    for name in ALL {
+        let bytes = book(name);
+        for (_, data) in stylesheets(&bytes) {
+            sheets += 1;
+            if BOOKS.contains(name) {
+                written_names(&data, &mut first_six);
+            }
+            written_names(&data, &mut every);
+        }
+    }
+    println!("  {} names across the first six books", first_six.len());
+    println!(
+        "  {} names across {sheets} sheets of nine books",
+        every.len()
+    );
+    println!("  {every:?}");
+    assert_eq!(sheets, 12, "nine books, twelve stylesheets");
+    assert_eq!(
+        first_six.len(),
+        FIRST_SIX_NAMES,
+        "the first six books' names"
+    );
+    assert_eq!(every.len(), ALL_NINE_NAMES, "all nine books' names");
+}
+
+/// Measured by the test above; see its comment.
+const FIRST_SIX_NAMES: usize = 42;
+/// Measured by the test above; see its comment.
+const ALL_NINE_NAMES: usize = 44;
 
 /// The pseudo-classes whose meaning is XHTML's, matched through the real
 /// element tree.

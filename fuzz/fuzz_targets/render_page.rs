@@ -6,7 +6,7 @@
 //!
 //! # What this target checks, and what it does not
 //!
-//! **Only that the code did not panic, hang, or exhaust memory.** Six calls,
+//! **Only that the code did not panic, hang, or exhaust memory.** Seven calls,
 //! every one discarded. A page that rendered blank, upside down, in the wrong
 //! colours, or with the wrong glyphs passes. So a run that returned the
 //! *wrong* answer passes this target exactly as a correct one does, and a
@@ -33,7 +33,22 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    let _ = page.text().plain_text();
+    let text = page.text();
+    let _ = text.plain_text();
+    // UAX #29 over whatever the page's fonts decoded to, which a mutated
+    // `/ToUnicode` makes arbitrary.
+    for line in text.lines() {
+        let _ = line.words();
+    }
+    let _ = text.search_with(
+        "e",
+        &tinker_pdf::SearchOptions {
+            case_sensitive: false,
+            whole_word: true,
+            diacritic_insensitive: true,
+        },
+    );
+    let _ = text.serialize(tinker_pdf::TextFormat::Json, &page.text_frame());
     let _ = doc.form_fields();
     let _ = doc.outline();
     // 14.7's `/K` graph and `/RoleMap` rewriting system, both attacker-shaped
@@ -43,9 +58,27 @@ fuzz_target!(|data: &[u8]| {
         let _ = tree.element_count();
         let _ = tree.text_for_page(0, &page.text()).plain_text();
     }
+    // ISO 32000-2's listings on the catalog and the page: arrays the input
+    // sizes, each entry copying strings within its listing's budget.
+    let _ = doc.associated_files();
+    let _ = doc.output_intents();
+    let _ = page.associated_files();
+    let _ = page.output_intents();
+
+    // Image extraction: every image dictionary the page reaches, described
+    // rather than drawn, through the same sample decoders the render below
+    // uses — so a colour space, a mask or a palette the renderer never reads
+    // this way is parsed here.
+    let _ = page.images();
 
     // A low resolution on purpose: a fuzzer's inputs claim enormous page
     // boxes, and the interesting failures are in the operators rather than in
     // how many pixels they cover.
     let _ = page.render(&RenderOptions::at_dpi(12.0));
+    // The SVG writer over the same page: a second device fed from a display
+    // list, whose numbers and data URIs a hostile page shapes. Rasterised
+    // paints at the lowest scale it takes, for the reason above.
+    let mut svg = tinker_pdf::SvgOptions::default();
+    svg.raster_scale = 0.25;
+    let _ = page.to_svg(&svg);
 });

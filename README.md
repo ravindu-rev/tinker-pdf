@@ -13,7 +13,7 @@ with nothing but `rustup`, on Windows, macOS, Linux and
 ## The guarantees
 
 - **It never panics on untrusted input.** Fuzz-enforced, release-gating:
-  24 fuzz targets, 186 million recorded executions, and a 5 525-file
+  51 fuzz targets, 186 million recorded executions, and a 5 525-file
   corpus of real-world documents opened without one crash.
   [docs/verification.md](docs/verification.md).
 - **It is deterministic.** The same bytes render to bit-identical output
@@ -26,8 +26,9 @@ with nothing but `rustup`, on Windows, macOS, Linux and
   carries its own "Refused by name" table.
   [docs/rulings.md](docs/rulings.md).
 - **One public surface.** The `tinker-pdf` facade is the only crate users
-  see; the C, Python, JavaScript/wasm and .NET bindings project it 1:1 and
-  add nothing of their own.
+  see; the C, Python, JavaScript/wasm, .NET, Go, Ruby and Java bindings
+  project it 1:1 and add nothing of their own (a Swift package is source
+  nobody has compiled yet).
   [docs/features/bindings.md](docs/features/bindings.md).
 
 ## Measured, not claimed
@@ -80,7 +81,7 @@ See [crates/tinker-pdf/examples/](crates/tinker-pdf/examples/).
 | Render | [rasterizer](docs/features/rasterizer.md) · [rendering](docs/features/rendering.md) · [determinism](docs/features/determinism.md) |
 | Write | [writing](docs/features/writing.md) · [editing](docs/features/editing.md) · [forms](docs/features/forms.md) · [creation](docs/features/creation.md) |
 | Containers | [CBZ](docs/features/cbz.md) · [XPS](docs/features/xps.md) · [EPUB](docs/features/epub.md) |
-| Embed | [bindings](docs/features/bindings.md) — C, Python, JavaScript/wasm, .NET |
+| Embed | [bindings](docs/features/bindings.md) — C, Python, JavaScript/wasm, .NET, Go, Ruby, Java; Swift unverified |
 
 Two honest limits worth knowing up front: the engine bundles no font faces
 **by default** — a document that embeds none draws no text unless the host

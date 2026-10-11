@@ -1882,7 +1882,7 @@ fn parse_utc_time(data: &[u8]) -> Result<i64, DerError> {
 }
 
 /// `YYYYMMDDHHMMSSZ` — RFC 5280 §4.1.2.5.2's only admitted form.
-fn parse_generalized_time(data: &[u8]) -> Result<i64, DerError> {
+pub(crate) fn parse_generalized_time(data: &[u8]) -> Result<i64, DerError> {
     if data.len() != 15 {
         return Err(DerError::MalformedTime(TimeFault::Length));
     }

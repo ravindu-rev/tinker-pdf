@@ -159,8 +159,10 @@ public enum Weakness
 
 /// <summary>How a call went. These numbers are the ABI.</summary>
 /// <remarks>
-/// 0–7 are frozen, <see cref="NoSuchSignature"/> was appended at 8, and the
-/// write surface's five at 9–13. A unit test in <c>tinker-pdf-ffi</c> pins
+/// 0–7 are frozen, <see cref="NoSuchSignature"/> was appended at 8, the
+/// write surface's five at 9–13, and streaming's, the script policy's and the
+/// read surface's one each at 14, 15 and 16. A unit test in
+/// <c>tinker-pdf-ffi</c> pins
 /// every one of them by number, because this enum is a hand transcription and
 /// a reordered variant would compile on both sides and mean something
 /// different on each.
@@ -230,6 +232,33 @@ public enum Status
     /// you tell the bounds case apart before the call rather than after.
     /// </summary>
     EditRefused = 13,
+
+    /// <summary>
+    /// A streamed source refused a range the engine needed. Not a broken
+    /// document: fetch the range the message names and call again.
+    /// </summary>
+    SourceMiss = 14,
+
+    /// <summary>
+    /// A form script would not run, or the policy would not let it. Nothing
+    /// was written; the message says which script and why.
+    /// </summary>
+    ScriptRefused = 15,
+
+    /// <summary>
+    /// A stream the document names could not be read — an attachment whose
+    /// embedded file is not a stream, or whose filters refused it. Distinct
+    /// from a null answer, which is the document naming no stream at all.
+    /// </summary>
+    StreamUnreadable = 16,
+
+    /// <summary>
+    /// Form data the reader would not read in the format asked for, or that
+    /// the format cannot carry: not an FDF, not XFDF, an encrypted FDF, a
+    /// value XML 1.0 cannot hold, or too large. Nothing was read or written;
+    /// the message is the reader's own sentence.
+    /// </summary>
+    FormDataRefused = 17,
 }
 
 /// <summary>What is wrong with a widget an appearance could not be written for.</summary>
@@ -323,7 +352,7 @@ public sealed class PdfException : Exception
     public Status Status { get; }
 }
 
-internal static class Native
+internal static partial class Native
 {
     private const string Library = "tinker_pdf_ffi";
 
@@ -1198,7 +1227,7 @@ public sealed class Verdicts : IDisposable
 }
 
 /// <summary>An open PDF document.</summary>
-public sealed class Document : IDisposable
+public sealed partial class Document : IDisposable
 {
     private readonly DocumentHandle _handle;
 
@@ -1598,7 +1627,7 @@ public sealed class WriteOptions
 /// one instance is a data race no wrapper can prevent. One per thread, or your
 /// own lock.
 /// </remarks>
-public sealed class Editor : IDisposable
+public sealed partial class Editor : IDisposable
 {
     private readonly EditorHandle _handle;
 
@@ -1834,7 +1863,7 @@ internal static class Buffers
 /// A page begun and never pushed is simply disposed, and the document is
 /// byte-for-byte what it would have been.
 /// </remarks>
-public sealed class PageBuilder : IDisposable
+public sealed partial class PageBuilder : IDisposable
 {
     private readonly PageBuilderHandle _handle;
 
@@ -1900,6 +1929,44 @@ public sealed class PageBuilder : IDisposable
         Native.Check(Native.tpdf_page_builder_link(Raw, x0, y0, x1, y1, ref target));
     }
 
+    /// <summary>The same, with the page positioned as <paramref name="view"/>
+    /// says (12.3.2.2): any of the eight views, null numbers included.</summary>
+    public void LinkToPage(double x0, double y0, double x1, double y1, uint page, View view)
+    {
+        var target = new TargetRaw
+        {
+            Kind = 0,
+            PageIndex = page,
+            View = view.ToRaw(),
+            Uri = IntPtr.Zero,
+        };
+        Native.Check(Native.tpdf_page_builder_link(Raw, x0, y0, x1, y1, ref target));
+    }
+
+    /// <summary>Adds a link annotation over a rectangle, to a URI (12.6.4.7).
+    /// 7-bit ASCII per that clause; anything else the writer refuses rather
+    /// than mangles.</summary>
+    public void LinkToUri(double x0, double y0, double x1, double y1, string uri)
+    {
+        ArgumentNullException.ThrowIfNull(uri);
+        var bytes = Native.Utf8(uri);
+        unsafe
+        {
+            fixed (byte* pointer = bytes)
+            {
+                Native.Check(Native.tpdf_destination_init_fit(out var view));
+                var target = new TargetRaw
+                {
+                    Kind = 1,
+                    PageIndex = 0,
+                    View = view,
+                    Uri = (IntPtr)pointer,
+                };
+                Native.Check(Native.tpdf_page_builder_link(Raw, x0, y0, x1, y1, ref target));
+            }
+        }
+    }
+
     /// <summary>Releases the page. One never pushed leaves no trace.</summary>
     public void Dispose() => _handle.Dispose();
 }
@@ -1946,6 +2013,42 @@ public sealed class OutlineEntry : IDisposable
         Native.Check(Native.tpdf_outline_entry_set_target(Raw, ref target));
     }
 
+    /// <summary>Points the entry at a page, positioned as
+    /// <paramref name="view"/> says (12.3.2.2).</summary>
+    public void SetPageTarget(uint index, View view)
+    {
+        var target = new TargetRaw
+        {
+            Kind = 0,
+            PageIndex = index,
+            View = view.ToRaw(),
+            Uri = IntPtr.Zero,
+        };
+        Native.Check(Native.tpdf_outline_entry_set_target(Raw, ref target));
+    }
+
+    /// <summary>Points the entry at a URI.</summary>
+    public void SetUriTarget(string uri)
+    {
+        ArgumentNullException.ThrowIfNull(uri);
+        var bytes = Native.Utf8(uri);
+        unsafe
+        {
+            fixed (byte* pointer = bytes)
+            {
+                Native.Check(Native.tpdf_destination_init_fit(out var view));
+                var target = new TargetRaw
+                {
+                    Kind = 1,
+                    PageIndex = 0,
+                    View = view,
+                    Uri = (IntPtr)pointer,
+                };
+                Native.Check(Native.tpdf_outline_entry_set_target(Raw, ref target));
+            }
+        }
+    }
+
     /// <summary>Whether the entry is shown expanded. Ignored for an entry with
     /// no children, which 12.3.3 leaves neither open nor closed.</summary>
     public void SetOpen(bool open) =>
@@ -1963,7 +2066,7 @@ public sealed class OutlineEntry : IDisposable
 }
 
 /// <summary>Assembles a document from pages, fonts and images.</summary>
-public sealed class DocumentBuilder : IDisposable
+public sealed partial class DocumentBuilder : IDisposable
 {
     private readonly BuilderHandle _handle;
 

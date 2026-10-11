@@ -32,7 +32,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tinker_pdf_filters::{jpx_decode, Capability, FilterError, Limits};
+use tinker_pdf_filters::{jpx_decode, jpx_header, Capability, FilterError, Limits};
 
 /// The seed directory, from this crate rather than from the working directory.
 fn seeds() -> Option<PathBuf> {
@@ -105,8 +105,33 @@ fn every_committed_seed_decodes_or_refuses_by_name() {
         let limits = Limits::new(ceiling);
         for input in inputs {
             let mut warnings = Vec::new();
+            let header = jpx_header(&input, &limits);
             match jpx_decode(&input, &limits, &mut warnings) {
                 Ok(image) => {
+                    // The target's header-agreement assertion, restated.
+                    let header = header.unwrap_or_else(|e| {
+                        panic!(
+                            "{}: decodes, and its header read refused: {e:?}",
+                            path.display()
+                        )
+                    });
+                    assert_eq!(
+                        (
+                            header.width,
+                            header.height,
+                            header.components,
+                            header.precision
+                        ),
+                        (image.width, image.height, image.components, image.precision),
+                        "{}: the header read and the decode disagree",
+                        path.display()
+                    );
+                    assert_eq!(
+                        header.opacity,
+                        image.opacity.is_some(),
+                        "{}",
+                        path.display()
+                    );
                     let per = usize::from(image.precision > 8) + 1;
                     let want = (image.width as usize)
                         .checked_mul(image.height as usize)

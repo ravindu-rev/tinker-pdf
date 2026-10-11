@@ -65,7 +65,8 @@ use tinker_pdf_font::Sfnt;
 pub use tinker_pdf_font::woff::WoffError;
 
 use super::obfuscation::{deobfuscate, KeyDefect};
-use super::ocf::{resolve_reference, Encryption, Ocf};
+use super::ocf::Encryption;
+use super::read::{Resources, Unavailable};
 use super::Limits;
 
 /// `hhea`, as a big-endian table tag.
@@ -418,8 +419,8 @@ fn refused_by_hint(format: Option<&FontFormat>) -> Option<String> {
 /// a `<style>` block inflates and parses it **once**. The defect list is not
 /// collapsed with it — thirteen rules that all failed are thirteen rules, and
 /// [`super::ArchiveWarning::FontFace`]'s count is where that is said.
-pub fn load(
-    book: &mut Ocf<'_>,
+pub fn load<R: Resources + ?Sized>(
+    book: &mut R,
     faces: &[FontFace],
     identifier: Option<&str>,
     encryption: &Encryption,
@@ -462,8 +463,8 @@ pub fn load(
 /// build that stopped at the first failure would lose every book that writes
 /// `url(x.woff2) format("woff2"), url(x.otf) format("opentype")` — which is
 /// what a modern producer writes, with the entry this build cannot use first.
-fn load_one(
-    book: &mut Ocf<'_>,
+fn load_one<R: Resources + ?Sized>(
+    book: &mut R,
     rule: &FontFace,
     identifier: Option<&str>,
     encryption: &Encryption,
@@ -485,17 +486,16 @@ fn load_one(
         // A `<style>` element has no address of its own, and the content
         // document that holds it is the base the caller put in `base`.
         let base = rule.base.as_deref().unwrap_or("");
-        let Ok(path) = resolve_reference(base, url, limits) else {
-            defects.push((rule.family.clone(), FaceDefect::ResourceMissing));
-            continue;
-        };
-        let Some(index) = book.index_of(&path) else {
-            defects.push((rule.family.clone(), FaceDefect::ResourceMissing));
-            continue;
-        };
-        let Ok(bytes) = book.read(index).map(<[u8]>::to_vec) else {
-            defects.push((rule.family.clone(), FaceDefect::Unreadable));
-            continue;
+        let (path, bytes) = match book.fetch(base, url, limits) {
+            Ok(found) => found,
+            Err(Unavailable::Missing) => {
+                defects.push((rule.family.clone(), FaceDefect::ResourceMissing));
+                continue;
+            }
+            Err(Unavailable::Unreadable) => {
+                defects.push((rule.family.clone(), FaceDefect::Unreadable));
+                continue;
+            }
         };
         let mut program = bytes;
         if let Some(entry) = encryption.entries().iter().find(|e| e.path == path) {

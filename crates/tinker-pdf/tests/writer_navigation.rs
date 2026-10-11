@@ -498,3 +498,249 @@ fn an_unwritable_outline_leaves_the_previous_one_standing() {
     assert_eq!(outline.len(), 1, "the old outline is still there");
     assert_eq!(outline[0].title, "Kept");
 }
+
+// ---- named destinations ---------------------------------------------------
+
+/// Follows a name through the document's own `/Names /Dests` tree.
+fn resolve(document: &Document, name: &[u8]) -> Option<Destination> {
+    tinker_pdf_cos::dest::Resolver::new(document.cos()).resolve_named(name)
+}
+
+/// A link and an outline entry that use named destinations read back **as
+/// names** (ruling 6), and each name resolves through the tree the builder
+/// wrote to the page it was registered for.
+///
+/// Both halves are asserted because either alone is satisfied by a build that
+/// flattened the name: the link reading back as the explicit array would
+/// resolve to the right page and lose the name, and the name surviving with no
+/// tree behind it would be a dead link that still reads as a name.
+#[test]
+fn a_named_link_and_outline_entry_read_back_as_names_that_resolve() {
+    let document = round_trip(|builder| {
+        assert!(builder.add_named_destination(b"chapter-2", 1, DestKind::Fit));
+        assert!(builder.add_named_destination(
+            b"the end",
+            2,
+            DestKind::Xyz {
+                left: Some(10.0),
+                top: Some(250.0),
+                zoom: None,
+            },
+        ));
+        builder.add_page(200.0, 300.0, |page| {
+            assert!(page.link(
+                10.0,
+                10.0,
+                90.0,
+                30.0,
+                &Target::Named(b"chapter-2".to_vec()),
+            ));
+        });
+        builder.add_page(200.0, 300.0, |_| {});
+        builder.add_page(200.0, 300.0, |_| {});
+        assert!(builder.set_outline(vec![OutlineEntry {
+            title: "End".to_string(),
+            target: Some(Target::Named(b"the end".to_vec())),
+            open: true,
+            children: Vec::new(),
+        }]));
+        assert!(builder.dangling_destinations().is_empty());
+    });
+
+    let links = document.page(0).expect("the first page").links();
+    assert_eq!(links.len(), 1);
+    assert_eq!(
+        links[0].target,
+        Some(Action::GoTo(Destination::Named(b"chapter-2".to_vec()))),
+        "the link keeps its name"
+    );
+    let outline = document.outline();
+    assert_eq!(
+        outline[0].destination,
+        Some(Destination::Named(b"the end".to_vec())),
+        "the outline entry keeps its name"
+    );
+
+    match resolve(&document, b"chapter-2") {
+        Some(Destination::Explicit {
+            page_index, kind, ..
+        }) => {
+            assert_eq!(page_index, Some(1), "chapter-2 is the second page");
+            assert_eq!(kind, DestKind::Fit);
+        }
+        other => panic!("chapter-2 resolves to an explicit destination, got {other:?}"),
+    }
+    match resolve(&document, b"the end") {
+        Some(Destination::Explicit {
+            page_index, kind, ..
+        }) => {
+            assert_eq!(page_index, Some(2), "the end is the third page");
+            assert_eq!(
+                kind,
+                DestKind::Xyz {
+                    left: Some(10.0),
+                    top: Some(250.0),
+                    zoom: None,
+                }
+            );
+        }
+        other => panic!("the end resolves to an explicit destination, got {other:?}"),
+    }
+    assert!(
+        resolve(&document, b"nowhere").is_none(),
+        "and a name nobody registered resolves to nothing"
+    );
+    assert!(
+        document.validate().is_empty(),
+        "the strict validator is clean: {:?}",
+        document.validate()
+    );
+}
+
+/// A name nothing registers, and one registered for a page that never
+/// arrives, are **dangling**: `dangling_destinations` names both before the
+/// document is finished, and `finish` refuses both rather than writing a name
+/// that resolves to nothing — the link is not written, and the outline entry
+/// is written as a heading.
+#[test]
+fn a_dangling_name_is_refused_at_write_time_by_name() {
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_named_destination(b"late", 7, DestKind::Fit));
+    assert!(builder.add_named_destination(b"here", 0, DestKind::Fit));
+    builder.add_page(200.0, 300.0, |page| {
+        assert!(page.link(0.0, 0.0, 50.0, 10.0, &Target::Named(b"nowhere".to_vec())));
+        assert!(page.link(0.0, 20.0, 50.0, 30.0, &Target::Named(b"here".to_vec())));
+    });
+    assert!(builder.set_outline(vec![OutlineEntry {
+        title: "Late".to_string(),
+        target: Some(Target::Named(b"late".to_vec())),
+        open: true,
+        children: Vec::new(),
+    }]));
+
+    assert_eq!(
+        builder.dangling_destinations(),
+        vec![b"late".to_vec(), b"nowhere".to_vec()],
+        "both dangling names, sorted, and not the one that resolves"
+    );
+
+    let document = Document::open(builder.finish()).expect("it opens");
+    let links = document.page(0).expect("the page").links();
+    assert_eq!(links.len(), 1, "the dangling link is not written at all");
+    assert_eq!(
+        links[0].target,
+        Some(Action::GoTo(Destination::Named(b"here".to_vec()))),
+        "the live one keeps its name"
+    );
+    assert_eq!(links[0].rect.y0, 20.0, "and it is the live one's rectangle");
+    assert_eq!(
+        document.outline()[0].destination,
+        None,
+        "the entry whose page never arrived is a heading"
+    );
+    assert!(
+        resolve(&document, b"late").is_none(),
+        "no tree entry for it"
+    );
+    assert!(document.validate().is_empty(), "{:?}", document.validate());
+}
+
+/// A name registered twice, an empty name and an unwritable view are refused
+/// at registration, and an empty name cannot be linked to at all.
+#[test]
+fn a_name_that_cannot_be_one_is_refused() {
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_named_destination(b"once", 0, DestKind::Fit));
+    assert!(
+        !builder.add_named_destination(b"once", 0, DestKind::FitB),
+        "7.9.6 maps each key to one value"
+    );
+    assert!(!builder.add_named_destination(b"", 0, DestKind::Fit));
+    assert!(!builder.add_named_destination(
+        b"nan",
+        0,
+        DestKind::FitH {
+            top: Some(f64::NAN)
+        }
+    ));
+    builder.add_page(200.0, 300.0, |page| {
+        assert!(!page.link(0.0, 0.0, 10.0, 10.0, &Target::Named(Vec::new())));
+    });
+    let document = Document::open(builder.finish()).expect("it opens");
+    assert!(document.page(0).expect("the page").links().is_empty());
+    match resolve(&document, b"once") {
+        Some(Destination::Explicit { kind, .. }) => {
+            assert_eq!(kind, DestKind::Fit, "the first registration stands");
+        }
+        other => panic!("once resolves, got {other:?}"),
+    }
+}
+
+/// Enough names that the tree has to split into leaves under `/Kids`, and
+/// every one of them still resolves to its own page.
+#[test]
+fn a_tree_of_many_names_resolves_every_one() {
+    let document = round_trip(|builder| {
+        three_pages(builder);
+        for at in 0..200u32 {
+            let name = format!("n{at:03}");
+            assert!(builder.add_named_destination(name.as_bytes(), at % 3, DestKind::Fit));
+        }
+    });
+    for at in 0..200u32 {
+        let name = format!("n{at:03}");
+        match resolve(&document, name.as_bytes()) {
+            Some(Destination::Explicit { page_index, .. }) => {
+                assert_eq!(page_index, Some(at % 3), "{name}");
+            }
+            other => panic!("{name} resolves, got {other:?}"),
+        }
+    }
+}
+
+/// The editor adds a name to a document that has a tree, and to one that has
+/// none, and the old names survive the addition.
+#[test]
+fn the_editor_adds_a_named_destination_beside_the_ones_already_there() {
+    let mut builder = DocumentBuilder::new();
+    three_pages(&mut builder);
+    assert!(builder.add_named_destination(b"old", 2, DestKind::Fit));
+    let with_tree = builder.finish();
+
+    let mut plain = DocumentBuilder::new();
+    three_pages(&mut plain);
+    let without_tree = plain.finish();
+
+    for (bytes, had) in [(with_tree, true), (without_tree, false)] {
+        let document = Document::open(bytes).expect("it opens");
+        let mut editor = document.editor();
+        assert!(editor.add_named_destination(b"new", 1, DestKind::FitB));
+        assert!(
+            !editor.add_named_destination(b"new", 0, DestKind::Fit),
+            "a second registration of one name is refused"
+        );
+        assert!(!editor.add_named_destination(b"past", 9, DestKind::Fit));
+        let saved = editor.save(&WriteOptions {
+            mode: WriteMode::Incremental,
+            ..WriteOptions::default()
+        });
+        let reopened = Document::open(saved).expect("the update opens");
+        match resolve(&reopened, b"new") {
+            Some(Destination::Explicit {
+                page_index, kind, ..
+            }) => {
+                assert_eq!(page_index, Some(1));
+                assert_eq!(kind, DestKind::FitB);
+            }
+            other => panic!("new resolves, got {other:?}"),
+        }
+        match (had, resolve(&reopened, b"old")) {
+            (true, Some(Destination::Explicit { page_index, .. })) => {
+                assert_eq!(page_index, Some(2), "the old name survives");
+            }
+            (false, None) => {}
+            (_, other) => panic!("old: expected it only where it was, got {other:?}"),
+        }
+        assert!(reopened.validate().is_empty(), "{:?}", reopened.validate());
+    }
+}

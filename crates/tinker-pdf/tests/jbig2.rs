@@ -384,6 +384,75 @@ fn a_generic_region_beside_an_undecodable_symbol_dictionary_draws_and_reports() 
     );
 }
 
+/// **The render path measures a JBIG2 decode's work against the image, not
+/// against the 128 MiB every stream is decoded under.**
+///
+/// The decoder's work budget is sixteen units a pixel of what its caller says
+/// the decode is for. The engine used to say nothing but its output ceiling,
+/// `MAX_DECODED_STREAM`, so every image on every page had 17 179 869 184 units
+/// to spend: 2 078 bytes of sixteen spun dictionaries decoded for ten seconds
+/// in release and nothing refused them. It now says the image's own `/Width`
+/// x `/Height`, plus 8 388 608 pixels so that one shared dictionary as large as
+/// `MAX_JBIG2_SYMBOL_PIXELS` admits (2^26 pixels, at sixteen units a pixel
+/// twice over) still decodes on the smallest image that names it.
+///
+/// Held at the exact boundary, for two image sizes, so neither the page's term
+/// nor the floor can move without this failing. The work is the cheapest the
+/// decoder charges for: a page information segment that paints the page
+/// black, one unit a packed byte. At 1 024 x 1 024 the budget is
+/// 16 x (1 048 576 + 8 388 608) = 150 994 944 units, which is exactly 1 152
+/// paintings of 131 072 bytes; at 2 048 x 1 024 it is 167 772 160, exactly 640
+/// of 262 144. That many decode, black and silent; one more is refused by name
+/// and draws the placeholder. Under the old budget both decode, in a few
+/// hundred milliseconds rather than a hang.
+#[test]
+fn the_render_path_measures_a_jbig2_decode_against_its_own_image() {
+    let black_page = |width: u32, height: u32| {
+        let mut info = page_information(width, height);
+        info[16] = 0x04; // 7.4.8.5 bit 2: every pixel starts black
+        info
+    };
+    for (width, height, paintings) in [(1_024u32, 1_024u32, 1_152u32), (2_048, 1_024, 640)] {
+        let info = black_page(width, height);
+        let stream = |count: u32| -> Vec<u8> {
+            (0..count)
+                .flat_map(|number| segment(number, 48, 1, &info))
+                .collect()
+        };
+
+        let spent = render(jbig2_page(&stream(paintings), width, height, "", &[]));
+        assert!(
+            reasons(&spent).is_empty()
+                && !spent
+                    .warnings
+                    .iter()
+                    .any(|w| matches!(w, RenderWarning::UnsupportedImage { .. })),
+            "{width} x {height}: {paintings} paintings are the budget exactly, and \
+             were refused: {:?}",
+            spent.warnings
+        );
+        assert!(
+            is_black(image_pixel(&spent, 32, 28)),
+            "{width} x {height}: the page was painted"
+        );
+
+        let over = render(jbig2_page(&stream(paintings + 1), width, height, "", &[]));
+        assert!(
+            reasons(&over).contains(&"jbig2-budget-spent".to_string()),
+            "{width} x {height}: one painting past the budget was not refused by \
+             it: {:?}",
+            over.warnings
+        );
+        assert!(
+            over.warnings.contains(&RenderWarning::UnsupportedImage {
+                codec: "JBIG2Decode".to_string()
+            }),
+            "{width} x {height}: a page that drew no region is the placeholder: {:?}",
+            over.warnings
+        );
+    }
+}
+
 /// A stream that is not JBIG2 at all is refused rather than sampled.
 #[test]
 fn arbitrary_bytes_under_a_jbig2_filter_draw_the_placeholder() {

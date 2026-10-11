@@ -15,6 +15,17 @@
 //! | 5 | `/LZWDecode` (7.4.4) | nothing: §13's LZW **is** 7.4.4's, `/EarlyChange 1` included |
 //! | 7 | `/DCTDecode` (7.4.8) | nothing; `JPEGTables` is spliced in front, which is still not a raster |
 //! | 8, 32946 | `/FlateDecode` (7.4.4) | `/Predictor 2` where the file used one, which Table 10 calls TIFF horizontal differencing |
+//! | 34712 | `/JPXDecode` (7.4.9) | nothing: the strip is a JPEG 2000 codestream, which 7.4.9 takes bare, and its header is checked against the directory first |
+//!
+//! A CMYK file (`PhotometricInterpretation` 5, `InkSet` 1) takes the same
+//! routes into `/DeviceCMYK`: §16's samples are ink amounts with zero as none,
+//! which is what 8.6.4.4 means by a CMYK component, so nothing is converted.
+//!
+//! A CIE `L*a*b*` file (`PhotometricInterpretation` 8, §23) is always
+//! decoded — its `a*` and `b*` are two's complement and a PDF sample is not —
+//! and the decoder's offset binary goes into [`ImageColorSpace::Lab`], a
+//! `/Lab` array whose `/Range` makes every sample its own value exactly
+//! (8.6.5.4, Table 90): a byte transform, and no conversion of colour.
 //!
 //! So the common case copies bytes, reads a directory and never builds a
 //! raster — the same argument [`crate::png_embed`] makes for a PNG's IDAT, and
@@ -33,6 +44,7 @@
 //! | `PlanarConfiguration` 2 | PDF has no planar image; the samples have to be interleaved | decode |
 //! | `FillOrder` 2 | PDF has no equivalent, and the bytes would have to be reversed to mean anything | decode |
 //! | 16-bit samples in an `II` file | 8.9.5.2's samples are big-endian; a little-endian file's are not | decode (swapped) |
+//! | `SampleFormat` 2 or 3, or 32 bits | a signed or floating-point sample is a number, not an intensity, and Table 89 stops at 16 bits; `tiff.rs`'s `TiffSampleRange` maps it | decode |
 //! | `ExtraSamples` | PDF wants a separate `/SMask` image, so the samples have to be split | decode, split, `/SMask` |
 //! | Tiles | an edge tile is stored padded out to the tile size (p.67), so even one tile is not the raster its dictionary would declare | decode |
 //! | Everything else | — | **pass through** |
@@ -74,9 +86,9 @@
 //! looking.
 
 use tinker_pdf_filters::{
-    tiff_scan, zlib_compress, CcittParams, Limits, TiffColour, TiffCompression, TiffError,
-    TiffImage, TiffLayout, TiffPhotometric, TiffPlanar, TiffResolution, TiffScan,
-    Warning as FilterWarning,
+    jpx_header, tiff_scan, tiff_scan_directory, zlib_compress, CcittParams, Limits, TiffColour,
+    TiffCompression, TiffError, TiffImage, TiffLayout, TiffPhotometric, TiffPlanar, TiffResolution,
+    TiffSampleFormat, TiffScan, Warning as FilterWarning,
 };
 
 use crate::build::{
@@ -106,6 +118,11 @@ pub enum TiffRoute {
 enum OwnedSpace {
     Gray,
     Rgb,
+    /// `/DeviceCMYK`, for `PhotometricInterpretation` 5.
+    Cmyk,
+    /// CIE `L*a*b*`, for `PhotometricInterpretation` 8: the decoder's offset
+    /// binary, which [`ImageColorSpace::Lab`] reads exactly.
+    Lab,
     /// `[/Indexed /DeviceRGB hival lookup]`. A TIFF `ColorMap` arrives from
     /// `tiff_scan` already transposed out of p.23's three arrays and scaled to
     /// eight bits, which is exactly the layout 8.6.6.3 wants.
@@ -153,6 +170,8 @@ impl TiffImageData {
             color_space: match &self.space {
                 OwnedSpace::Gray => ImageColorSpace::DeviceGray,
                 OwnedSpace::Rgb => ImageColorSpace::DeviceRgb,
+                OwnedSpace::Cmyk => ImageColorSpace::DeviceCmyk,
+                OwnedSpace::Lab => ImageColorSpace::Lab,
                 OwnedSpace::Indexed(lookup) => ImageColorSpace::Indexed {
                     base: DeviceSpace::Rgb,
                     lookup,
@@ -255,7 +274,26 @@ impl TiffImageData {
 /// directory's own arrays cannot describe, and the rest of the refusals
 /// [`tiff_scan`] already names.
 pub fn tiff_image(bytes: &[u8], limits: &Limits) -> Result<TiffImageData, TiffError> {
-    let scan = tiff_scan(bytes)?;
+    prepare(tiff_scan(bytes)?, limits)
+}
+
+/// Directory `index` of the `NextIFD` chain, prepared exactly as
+/// [`tiff_image`] prepares the first — for a caller that pages a multi-page
+/// file, which is what a comic archive's scanned chapter is.
+///
+/// # Errors
+/// [`TiffError::UnreadableDirectory`] for an index the chain does not reach,
+/// and every refusal [`tiff_image`] names.
+pub fn tiff_image_directory(
+    bytes: &[u8],
+    index: usize,
+    limits: &Limits,
+) -> Result<TiffImageData, TiffError> {
+    prepare(tiff_scan_directory(bytes, index)?, limits)
+}
+
+/// Both doors: choose a route for one scanned directory and take it.
+fn prepare(scan: TiffScan<'_>, limits: &Limits) -> Result<TiffImageData, TiffError> {
     let mut image = match choose(&scan) {
         Some(placed) => place(&scan, placed),
         None => decode(&scan, limits)?,
@@ -280,6 +318,7 @@ struct Placed {
 enum PlacedSpace {
     Gray,
     Rgb,
+    Cmyk,
     Indexed,
 }
 
@@ -313,6 +352,11 @@ fn choose(scan: &TiffScan<'_>) -> Option<Placed> {
         return None;
     }
     if !matches!(scan.bits_per_sample, 1 | 2 | 4 | 8 | 16) {
+        return None;
+    }
+    // A signed or floating-point sample is a number that `tiff.rs` maps onto
+    // an intensity; a placed strip would hand the renderer the bits unmapped.
+    if scan.sample_format != TiffSampleFormat::Unsigned {
         return None;
     }
 
@@ -404,6 +448,7 @@ fn choose(scan: &TiffScan<'_>) -> Option<Placed> {
             let (space, colors) = match (scan.photometric, scan.samples_per_pixel) {
                 (TiffPhotometric::BlackIsZero, 1) => (PlacedSpace::Gray, 1),
                 (TiffPhotometric::Rgb, 3) => (PlacedSpace::Rgb, 3),
+                (TiffPhotometric::Separated, 4) => (PlacedSpace::Cmyk, 4),
                 // 8.6.6.3 caps `/hival` at 255, so an indexed image is at most
                 // eight bits whatever TIFF would allow.
                 (TiffPhotometric::Palette, 1) if scan.bits_per_sample <= 8 => {
@@ -414,6 +459,37 @@ fn choose(scan: &TiffScan<'_>) -> Option<Placed> {
             Some(Placed {
                 filter: predictor(colors, flate)?,
                 bits_per_component: scan.bits_per_sample as u8,
+                space,
+                tables: None,
+            })
+        }
+        TiffCompression::Jpeg2000 => {
+            // 7.4.9 takes a bare codestream, which is what a 34712 strip is. The
+            // header is read first and has to agree with the directory — the
+            // size, and one or three colour channels over 8 or 16 bits with no
+            // opacity — because a `/JPXDecode` image is drawn from its
+            // codestream and a disagreement would draw something the
+            // directory did not describe. Anything else is decoded.
+            if scan.predictor != 1 {
+                return None;
+            }
+            let strip = scan.segments.first().copied()?;
+            let header = jpx_header(strip, &Limits::new(usize::MAX)).ok()?;
+            let space = match (scan.photometric, scan.samples_per_pixel, header.components) {
+                (TiffPhotometric::BlackIsZero, 1, 1) => PlacedSpace::Gray,
+                (TiffPhotometric::Rgb, 3, 3) => PlacedSpace::Rgb,
+                _ => return None,
+            };
+            if header.width != scan.width
+                || header.height != scan.height
+                || header.opacity
+                || u16::from(header.precision) != scan.bits_per_sample
+            {
+                return None;
+            }
+            Some(Placed {
+                filter: ImageFilter::Jpx,
+                bits_per_component: header.precision,
                 space,
                 tables: None,
             })
@@ -442,6 +518,7 @@ fn place(scan: &TiffScan<'_>, placed: Placed) -> TiffImageData {
         space: match placed.space {
             PlacedSpace::Gray => OwnedSpace::Gray,
             PlacedSpace::Rgb => OwnedSpace::Rgb,
+            PlacedSpace::Cmyk => OwnedSpace::Cmyk,
             PlacedSpace::Indexed => OwnedSpace::Indexed(scan.color_map.clone()),
         },
         filter: Some(placed.filter),
@@ -506,11 +583,16 @@ fn split(image: &TiffImage) -> (OwnedSpace, Vec<u8>, Option<Vec<u8>>) {
         TiffColour::GreyAlpha => (1, true),
         TiffColour::Rgb => (3, false),
         TiffColour::Rgba => (3, true),
+        TiffColour::Cmyk => (4, false),
+        TiffColour::CmykAlpha => (4, true),
+        TiffColour::Lab => (3, false),
+        TiffColour::LabAlpha => (3, true),
     };
-    let space = if colour_components == 1 {
-        OwnedSpace::Gray
-    } else {
-        OwnedSpace::Rgb
+    let space = match (image.colour, colour_components) {
+        (TiffColour::Lab | TiffColour::LabAlpha, _) => OwnedSpace::Lab,
+        (_, 1) => OwnedSpace::Gray,
+        (_, 4) => OwnedSpace::Cmyk,
+        _ => OwnedSpace::Rgb,
     };
 
     if !has_alpha {

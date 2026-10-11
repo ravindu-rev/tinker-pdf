@@ -38,18 +38,32 @@
 //! - **A crop box offset from the media box**, because the region's translation
 //!   and the crop box's translation compose, and a sign error in either is a
 //!   plausible-looking page.
+//! - **Canvases that stand somewhere in the page**: a non-isolated group under
+//!   a blend mode, a knockout group and a luminosity soft mask; a tiling
+//!   pattern's cell; a Gouraud mesh's own buffer. Each is a buffer the size of
+//!   a rectangle of the page rather than of the page, so each is a second place
+//!   a tile's arithmetic could part from the page's — and two of them did.
 //! - **Scales other than 1.0**, because a region that is silently ignored
 //!   whenever the scale is not 1 is a defect no unscaled fixture can see.
 //!
-//! # Does it hold unconditionally? Nearly, and the exception is stated
+//! # Does it hold at every scale? For every fixture here, since September 2026
 //!
-//! **Exactly, at every scale whose arithmetic lets the two frames agree** —
-//! every fixture, every tile size, down to a one-pixel lattice, at 0.5, 1, 2
-//! and 4. At 0.75, 1.5 and 3 it is exact on **twenty-nine of the thirty**
-//! lattices, and the thirtieth differs on a single pixel by one level of 255;
-//! [`at_the_scales_where_two_frames_round_apart_the_gap_is_one_level`] measures
-//! that, bounds it at exactly what it measures, and says why the last pixel is
-//! not reachable without moving the canvas's origin into the rasterizer.
+//! Every fixture, every tile size, down to a one-pixel lattice, at 0.5, 0.75,
+//! 1, 1.5, 2, 3 and 4. Until September 2026 the scales 0.75, 1.5 and 3 carried
+//! a measured exception — one shading pixel at 3x, one level of 255 — and a
+//! stroked rectangle found elsewhere carried another at 1x, both because a tile
+//! had a frame of its own an ulp away from the page's.
+//! [`tiles_at_the_scales_where_two_frames_rounded_apart_are_byte_equal`] says
+//! why that stopped being true, and asserts equality where it used to assert a
+//! bound; [`a_stroke_whose_corners_sit_on_a_sub_scanline_tiles_exactly_at_1x`]
+//! is the stroke.
+//!
+//! **It does not hold for every page**, and the shape that parts them is
+//! geometric rather than a scale: two images that overlap outside a tile and
+//! abut inside it are one image run in the tile and two on the page.
+//! [`an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception`]
+//! pins it as measured — 40 pixels, 63 levels, at 1x — and ruling 5 and a
+//! ROADMAP row carry it until it is gone.
 //!
 //! # What this guard found
 //!
@@ -81,6 +95,24 @@
 //! removed; the one on the *start* was doing harm, and `fill.rs` says where.
 //!
 //! That is what a guard is for, and none of it is about tiles.
+//!
+//! **The canvases-in-the-page fixtures found two more, and both were about
+//! tiles**, found the day the tile stopped having a frame of its own and could
+//! therefore be wrong only by deciding something differently from the page:
+//!
+//! 3. **A tiling lattice was indexed from the tile's own rectangle.** A cell's
+//!    buffer is its box rounded outward, landed at a rounded offset, so a cell
+//!    whose box stops just short of a rectangle still puts anti-aliased edge
+//!    inside it; the page's lattice held that cell and a tile's did not. Ten
+//!    levels on one pixel at 1x.
+//! 4. **A mesh spread colour into its fringe from the tile's pixels only.** The
+//!    spread reads two pixels of neighbours, and a silhouette pixel on a tile's
+//!    edge had fewer of them than the same pixel on the page. Ten levels at 1x,
+//!    thirty at 4x.
+//!
+//! Both are now decided from rectangles the renderer keeps in the page's frame
+//! (`Bounds` in `tinker-pdf-render`), which also puts the lattice's and the
+//! mesh's budgets on the page's side of the decision.
 
 use tinker_pdf::{
     DeviceSpace, Document, DocumentBuilder, Function, ImageData, Page, PixelRegion, RenderOptions,
@@ -265,6 +297,153 @@ fn strokes_page(shape: Shape) -> Vec<u8> {
     shaped(builder.finish(), shape)
 }
 
+/// A bare one-page document around `content`, with `resources` and any further
+/// objects numbered from 5, sized to [`PAGE_W`] by [`PAGE_H`].
+///
+/// Hand-written for the fixtures below because the builder writes no group, no
+/// soft mask, no tiling pattern and no mesh.
+fn raw_page(content: &str, resources: &str, objects: &[String]) -> Vec<u8> {
+    let mut out = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_W} {PAGE_H}]\n\
+   /Resources {resources} /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n",
+        content.len()
+    );
+    for (index, object) in objects.iter().enumerate() {
+        out.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 5));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+        objects.len() + 5
+    ));
+    out.into_bytes()
+}
+
+/// A stream object with `body` as its data.
+fn stream(dict: &str, body: &str) -> String {
+    format!(
+        "<< {dict} /Length {} >>\nstream\n{body}\nendstream",
+        body.len()
+    )
+}
+
+/// Transparency: a non-isolated group under a blend mode, an isolated knockout
+/// group, and a luminosity soft mask drawn from a shading (11.4, 11.6.5).
+///
+/// **Each of the three is a canvas that stands somewhere in the page** — a
+/// group's buffer is its clip's bounding box, a mask's is its `/BBox` — and
+/// until the canvas carried its origin every one of them was drawn in a frame
+/// of its own, the page's transform less the whole pixels to its corner. So
+/// they are exactly where a tile and a page could round apart for a second
+/// reason, and none of the four fixtures above has one. The mask's box hangs
+/// past the page's top edge, and a tile below it asks about a mask whose group
+/// it never sees.
+fn transparency_page(shape: Shape) -> Vec<u8> {
+    let content = "0.2 0.7 0.4 rg 0 0 91 40 re f\n\
+                   q /GA gs /Grp Do Q\n\
+                   q /GB gs /Knock Do Q\n\
+                   q /GM gs 0.9 0.2 0.1 rg 0 58 91 66 re f Q";
+    let grouped = "/GH gs 0 0 0.9 rg 6.3 4.1 34 34 re f 0.9 0.6 0 rg 20.2 14.7 34 34 re f";
+    let knocked = "/GH gs 0.1 0.1 0.1 rg 33.4 44.2 34 34 re f 49.1 54.6 34 34 re f";
+    let mask = "q 3 58 85 90 re W n /Sh0 sh Q";
+    let resources = "<< /XObject << /Grp 5 0 R /Knock 6 0 R >> /Shading << /Sh0 9 0 R >>\n\
+         /ExtGState << /GA << /ca 0.6 /BM /Multiply >>\n\
+                       /GB << /ca 1 /BM /Normal /SMask /None >>\n\
+                       /GH << /ca 0.5 >>\n\
+                       /GM << /SMask << /S /Luminosity /G 7 0 R /TR 8 0 R >> >> >> >>";
+    let bytes = raw_page(
+        content,
+        resources,
+        &[
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 58 56] \
+                 /Group << /S /Transparency /I false /K false >>",
+                grouped,
+            ),
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [30 40 88 100] \
+                 /Group << /S /Transparency /I true /K true >>",
+                knocked,
+            ),
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [3 58 88 148] \
+                 /Group << /S /Transparency /CS /DeviceGray >>",
+                mask,
+            ),
+            "<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 2 >>".to_string(),
+            "<< /ShadingType 2 /ColorSpace /DeviceGray /Coords [5 60 86 140]\n\
+             /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >>\n\
+             /Extend [true true] >>"
+                .to_string(),
+        ],
+    );
+    shaped(bytes, shape)
+}
+
+/// A tiling pattern (8.7.3.2): a rotated lattice whose cell is rasterised once
+/// into a buffer of its own and composited at whole-pixel offsets.
+///
+/// The cell's buffer is a canvas that stands at a place in the page, like a
+/// group's, and the offsets are rounded from the lattice arithmetic; both have
+/// to come out the same in a tile as in the page.
+fn tiling_page(shape: Shape) -> Vec<u8> {
+    let content = "/Pattern cs /P0 scn 4 6 m 86 9 l 80 124 l 9 110 l h f";
+    let cell = "0.9 0.2 0.1 rg -2 -2 8 12 re f 0 0.5 0.2 rg 4 4 8 8 re f";
+    let bytes = raw_page(
+        content,
+        "<< /Pattern << /P0 5 0 R >> >>",
+        &[stream(
+            "/PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 10 10] \
+             /XStep 11 /YStep 8 /Matrix [0.9659 0.2588 -0.2588 0.9659 3 -5] \
+             /Resources << >>",
+            cell,
+        )],
+    );
+    shaped(bytes, shape)
+}
+
+/// A free-form Gouraud mesh (8.7.4.5.5), two triangles sharing an edge, which
+/// the rasterizer draws into one buffer over its own device rectangle and then
+/// spreads colour into the anti-aliased fringe of.
+fn mesh_page(shape: Shape) -> Vec<u8> {
+    // flag, x, y, r, g, b — a byte each, decoded onto the page and 0..1.
+    let vertex = |flag: u8, x: f64, y: f64, rgb: [u8; 3]| {
+        let byte = |v: f64, extent: f64| (v / extent * 255.0).round() as u8;
+        format!(
+            "{flag:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            byte(x, PAGE_W),
+            byte(y, PAGE_H),
+            rgb[0],
+            rgb[1],
+            rgb[2]
+        )
+    };
+    let data = [
+        vertex(0, 4.0, 5.0, [230, 20, 20]),
+        vertex(0, 86.0, 21.0, [20, 200, 40]),
+        vertex(0, 37.0, 119.0, [20, 40, 230]),
+        vertex(1, 88.0, 127.0, [240, 220, 30]),
+    ]
+    .concat()
+        + ">";
+    let bytes = raw_page(
+        "/Sh0 sh",
+        "<< /Shading << /Sh0 5 0 R >> >>",
+        &[stream(
+            &format!(
+                "/ShadingType 4 /ColorSpace /DeviceRGB /BitsPerCoordinate 8 \
+                 /BitsPerComponent 8 /BitsPerFlag 8 \
+                 /Decode [0 {PAGE_W} 0 {PAGE_H} 0 1 0 1 0 1] /Filter /ASCIIHexDecode"
+            ),
+            &data,
+        )],
+    );
+    shaped(bytes, shape)
+}
+
 /// Every fixture: a builder, the page dictionary entry it is built with, a
 /// name, and the least ink it must draw.
 ///
@@ -311,6 +490,19 @@ fn fixtures() -> Vec<Fixture> {
         strokes_page(Shape::cropped(90)),
         700,
     );
+    // Canvases that stand somewhere in the page: group and mask buffers, a
+    // tiling cell, a mesh's own buffer. Turned and cropped once each, so their
+    // corners are carried through the page's own translation as well.
+    add("transparency", transparency_page(Shape::PLAIN), 8_000);
+    add(
+        "transparency cropped and rotated",
+        transparency_page(Shape::cropped(90)),
+        4_500,
+    );
+    add("tiling", tiling_page(Shape::PLAIN), 6_500);
+    add("tiling rotated 270", tiling_page(Shape::turned(270)), 6_500);
+    add("mesh", mesh_page(Shape::PLAIN), 6_000);
+    add("mesh cropped", mesh_page(Shape::cropped(0)), 4_300);
     out
 }
 
@@ -385,7 +577,21 @@ fn compare(
 /// [`PixelRegion::clamped_to`], and they are where an off-by-one in the clamp
 /// or in the translation lands.
 #[track_caller]
-fn tile_divergence(page: &Page, options: &RenderOptions, tile: u32, what: &str) -> Option<Report> {
+fn tile_divergence(page: &Page, options: &RenderOptions, tile: u32, what: &str) -> Option<String> {
+    tile_divergence_through(page, options, tile, what, &|asked| page.render(asked))
+}
+
+/// [`tile_divergence`] with the tiles drawn by `draw` rather than by
+/// [`Page::render`] — a [`tinker_pdf::DisplayList`]'s replay, say — and the
+/// page they are compared with still drawn directly.
+#[track_caller]
+fn tile_divergence_through(
+    page: &Page,
+    options: &RenderOptions,
+    tile: u32,
+    what: &str,
+    draw: &dyn Fn(&RenderOptions) -> tinker_pdf::Bitmap,
+) -> Option<String> {
     assert!(options.region.is_none(), "{what}: the whole page, to tile");
     let full = page.render(options);
     let (width, height) = page.pixel_size(options);
@@ -398,10 +604,11 @@ fn tile_divergence(page: &Page, options: &RenderOptions, tile: u32, what: &str) 
     let mut covered = 0u64;
     let mut worst: Option<(Divergence, u32, u32, u64)> = None;
     let mut differing = 0u64;
+    let whole = u64::from(width) * u64::from(height);
     for top in (0..height).step_by(tile as usize) {
         for left in (0..width).step_by(tile as usize) {
             let asked = PixelRegion::new(left, top, tile, tile);
-            let bitmap = page.render(&RenderOptions {
+            let bitmap = draw(&RenderOptions {
                 region: Some(asked),
                 ..options.clone()
             });
@@ -428,17 +635,18 @@ fn tile_divergence(page: &Page, options: &RenderOptions, tile: u32, what: &str) 
     }
 
     assert_eq!(
-        covered,
-        u64::from(width) * u64::from(height),
+        covered, whole,
         "{what}: the {tile}px lattice did not cover the page exactly once"
     );
 
-    worst.map(|(d, left, top, area)| Report {
-        message: format!(
+    // The worst tile said in full, and the lattice's total beside it.
+    worst.map(|(d, left, top, area)| {
+        format!(
             "{what}: the {tile}px tile at ({left}, {top}) is not the page under \
              it -- {} of {area} pixels of that tile differ, worst component {} \
              levels, first at ({}, {}) in the tile, which is ({}, {}) on the \
-             page; every difference {} on the tile's outer ring",
+             page; every difference {} on the tile's outer ring; {differing} of \
+             the page's {whole} pixels differ across the lattice",
             d.pixels,
             d.worst,
             d.at.0,
@@ -446,33 +654,17 @@ fn tile_divergence(page: &Page, options: &RenderOptions, tile: u32, what: &str) 
             left + d.at.0,
             top + d.at.1,
             if d.all_on_the_seam { "is" } else { "is not" },
-        ),
-        worst: d.worst,
-        pixels: differing,
-        of: u64::from(width) * u64::from(height),
+        )
     })
-}
-
-/// What a whole lattice's worth of comparison came to.
-struct Report {
-    /// The worst tile, said in full.
-    message: String,
-    /// The largest difference in any component anywhere, 0 to 255.
-    worst: u8,
-    /// How many pixels of the page differed, summed over every tile.
-    pixels: u64,
-    /// How many there were.
-    of: u64,
 }
 
 /// [`tile_divergence`], asserted away: the lattice **is** the page.
 #[track_caller]
 fn tiles_are_the_page(page: &Page, options: &RenderOptions, tile: u32, what: &str) {
-    if let Some(report) = tile_divergence(page, options, tile, what) {
+    if let Some(message) = tile_divergence(page, options, tile, what) {
         panic!(
-            "{}. Ruling 5 says this is byte-equal, so this is a finding about \
-             the renderer and not a reason to add a budget.",
-            report.message
+            "{message}. Ruling 5 says this is byte-equal, so this is a finding \
+             about the renderer and not a reason to add a budget."
         );
     }
 }
@@ -532,80 +724,30 @@ fn tiles_at_other_scales_are_byte_equal_too() {
     }
 }
 
-/// **Where byte equality stops, measured rather than assumed.**
+/// **The scales where two frames used to round apart — byte-equal too.**
 ///
-/// The two guards above run at scales whose binary representation lets the page
-/// frame and the tile frame compute the same device coordinates. At other
-/// scales they do not, and this is the only honest thing to do about it: state
-/// the limit, bound it, and let it fail if it grows.
+/// The two guards above run at scales whose binary representation let a page
+/// frame and a tile frame compute the same device coordinates. At 0.75, 1.5 and
+/// 3 they did not, and until September 2026 this test was a *bound* rather than
+/// an equality: one shading pixel at 3x, one level of 255, measured and pinned.
 ///
-/// # What is actually different
+/// The cause was that a tile had a frame of its own: the page's transform with
+/// a whole number of pixels taken off `e` and `f`. That is exact as arithmetic
+/// and not as floating point — a point's device coordinate is `a·x + c·y + e`,
+/// and `fl(u + e)` and `fl(u + e − tx)` are two roundings at two magnitudes —
+/// and the last ulp reached a byte wherever the exact value sat on one of the
+/// rasterizer's grids. A shading sampler has no grid to absorb it at all, which
+/// is why the one lattice that diverged was a shading.
 ///
-/// A tile's transform is the page's with an integer number of pixels
-/// subtracted from `e` and `f` — that is ruling 5's translated viewport, and it
-/// is exact as arithmetic. It is not exact as *floating point*: a point's
-/// device coordinate is `a·x + c·y + e`, and `fl(u + e)` and `fl(u + e − tx)`
-/// are two roundings at two magnitudes. They differ in the last ulp or two,
-/// which is 1e-14 of a pixel and reaches a byte only where the exact value sits
-/// **on** one of the rasterizer's 1/256 steps — which "nice" geometry does
-/// often, and which is why the effect shows at all rather than never.
-///
-/// The fix is not a tolerance and it is not available here: the only way to
-/// make two frames agree to the bit is to compute in one of them, which means
-/// the canvas carrying an origin through the sampler, the mesh and the image
-/// run. That is a change to `tinker-pdf-raster`'s shape rather than to this
-/// row, and until it happens this bound is what the guard honestly claims.
-///
-/// # Which sampler is left, which is the useful half of the measurement
-///
-/// The two paths that *could* have carried this and do not are the ones that
-/// already defend against it, and the third is the one that does not:
-///
-/// - `fill` reduces every crossing to the nearest 1/256 unit by `+ half, >>
-///   bits`, which is a `floor` of a shifted value and therefore commutes with
-///   moving the shape a whole number of pixels;
-/// - `draw_image` snaps its quad's corners to the same 1/256 grid before
-///   rasterising, which `docs/features/rasterizer.md` records was put there for
-///   exactly this reason — a cropped page and the page under it once disagreed
-///   on 240 pixels;
-/// - **a shading sampler does neither.** It evaluates the axial parameter from
-///   `a·x + c·y + e` per pixel straight into a colour, with no grid between
-///   the affine and the byte, so the last ulp reaches the output wherever the
-///   parameter lands on a colour step.
-///
-/// The one lattice that diverges is a shading, which is what that predicts.
-///
-/// # The bound
-///
-/// Measured 15 September 2026 on this branch, over every fixture in this file
-/// at 0.75, 1.5 and 3.0, tiling at 53 — thirty lattices. **Twenty-nine are
-/// exact.** The whole of the divergence is:
-///
-/// | Fixture and scale | Pixels | Of | Worst |
-/// | --- | ---: | ---: | ---: |
-/// | `shading` at 3x | 1 | 107 289 | 1 |
-///
-/// The bound is set to exactly that and not above it. A slacker bound here
-/// would be a budget, and the header of this file says why this property does
-/// not get one: the numbers are the measurement, so if either moves the cause
-/// is found rather than the constant raised. `WORST_LEVEL` is the claim that
-/// matters most — a difference of more than one level is not two frames
-/// rounding apart and would not be this.
-///
-/// *An earlier draft of this comment carried four rows, three of them `text`.
-/// They were measured before `fill` stopped truncating, and the slope and
-/// rounding fixes removed them; the table is re-measured here rather than
-/// carried forward, which is the only reason it is a table and not a sentence.*
+/// **There is one frame now.** The page is drawn through the one transform
+/// whatever part of it is asked for, and the canvas says which pixels of that
+/// picture it holds (`Canvas::origin`); a group's buffer, a soft mask's and a
+/// mesh's stand in the same frame. Every coordinate the renderer computes is
+/// the same number in a tile as in the page, so the only arithmetic that
+/// differs is an integer subtraction where a pixel is written. So this is the
+/// same assertion as the two above: no bound, no table, no budget.
 #[test]
-fn at_the_scales_where_two_frames_round_apart_the_gap_is_one_level() {
-    /// The largest difference in any component, anywhere, at any of these
-    /// scales. One level of 255.
-    const WORST_LEVEL: u8 = 1;
-    /// How many pixels of one page's lattice may differ at all. One, which is
-    /// what is measured.
-    const MOST_PIXELS: u64 = 1;
-
-    let mut table = Vec::new();
+fn tiles_at_the_scales_where_two_frames_rounded_apart_are_byte_equal() {
     for scale in [0.75f64, 1.5, 3.0] {
         let options = RenderOptions {
             scale,
@@ -613,30 +755,153 @@ fn at_the_scales_where_two_frames_round_apart_the_gap_is_one_level() {
         };
         for fixture in fixtures() {
             with_page(&fixture, |page| {
-                let what = format!("{} at {scale}x", fixture.name);
-                let Some(report) = tile_divergence(page, &options, 53, &what) else {
-                    return;
-                };
-                table.push(format!(
-                    "  {what}: {} of {} pixels, worst {} levels",
-                    report.pixels, report.of, report.worst
-                ));
-                assert!(
-                    report.worst <= WORST_LEVEL && report.pixels <= MOST_PIXELS,
-                    "{}. Past the measured bound of {MOST_PIXELS} pixels at \
-                     {WORST_LEVEL} level: this is no longer the last ulp of an \
-                     affine evaluated twice, and the cause has to be found \
-                     rather than the bound raised.",
-                    report.message
-                );
+                tiles_are_the_page(page, &options, 53, &format!("{} at {scale}x", fixture.name));
             });
         }
     }
-    // Not an assertion about the table's contents -- the bound above is that.
-    // This is so a reader of a passing run can still see what the gap is.
-    if !table.is_empty() {
-        println!("the frames round apart here:\n{}", table.join("\n"));
+}
+
+/// A 150 x 100 page whose content strokes one rectangle four points wide, its
+/// miter corners on the filler's sixteenth-of-a-pixel grid.
+///
+/// `render_parts.rs` found this with an annotation's appearance, whose
+/// `/BBox` is fitted onto a `/Rect` at `(10, 10)`, and said the same frame
+/// in a page's own content stream shows it; this is that page.
+fn framed_page() -> Vec<u8> {
+    let content = "q 1 0 0 1 10 10 cm 1 0 0 RG 4 w 3 3 54 34 re S Q";
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 150 100] /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
+        content.len()
+    )
+    .into_bytes()
+}
+
+/// **A stroked rectangle at 1x, whose corners sit on a sub-scanline.**
+///
+/// Ruling 5 used to say `fill` was immune to the two-frames rounding, and it
+/// was — across. A crossing's `x` is reduced to the nearest 1/256 of a pixel,
+/// which absorbs an ulp; an edge's first sub-scanline is `ceil(y × 16)`, which
+/// does not. A stroker's miter corner computed in two frames came out an ulp
+/// either side of a sub-scanline, and the page and the 60 x 40 tile over this
+/// frame differed on four corner pixels by fifteen levels — one sixteenth of a
+/// pixel's coverage — **at scale 1**, where every other fixture here was exact.
+/// With one frame the corner is one number, and `ceil` takes it one way.
+///
+/// The region is the one `render_parts.rs` asked for — the annotation's
+/// `/Rect` — and then two lattices over the whole page, one of which puts a
+/// tile edge through each side of the frame.
+#[test]
+fn a_stroke_whose_corners_sit_on_a_sub_scanline_tiles_exactly_at_1x() {
+    let document = Document::open(framed_page()).expect("it opens");
+    let page = document.page(0).expect("a page");
+    let options = RenderOptions::default();
+    let full = page.render(&options);
+    let drawn = ink(&full);
+    assert!(
+        drawn > 600,
+        "the frame fixture painted {drawn} pixels, fewer than its stroke covers"
+    );
+
+    let region = PixelRegion::new(10, 50, 60, 40);
+    let tile = page.render(&RenderOptions {
+        region: Some(region),
+        ..options.clone()
+    });
+    if let Some(d) = compare(&tile, &full, region) {
+        panic!(
+            "the 60 x 40 tile over the frame is not the page under it: {} pixels \
+             differ, worst component {} levels, first at ({}, {}) in the tile",
+            d.pixels, d.worst, d.at.0, d.at.1
+        );
     }
+    for size in [60u32, 17] {
+        tiles_are_the_page(&page, &options, size, "the stroked frame at 1x");
+    }
+}
+
+/// Three one-sample black images on a 100 x 100 page. The first and the third
+/// abut along `x = 40.5` across the page's top forty rows; the third overlaps
+/// the second in rows 60 to 69, which is the bottom half of the page.
+fn image_run_page() -> Vec<u8> {
+    let content = "q 40.5 0 0 40 0 60 cm /I Do Q \
+                   q 40 0 0 40 40.5 0 cm /I Do Q \
+                   q 40 0 0 70 40.5 30 cm /I Do Q";
+    let image = "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 \
+                 /ColorSpace /DeviceGray /BitsPerComponent 8 \
+                 /Filter /ASCIIHexDecode /Length 3 >>\nstream\n00>\nendstream";
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100]\n\
+   /Resources << /XObject << /I 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n{image}\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+        content.len()
+    )
+    .into_bytes()
+}
+
+/// **Ruling 5's one named exception, pinned to what it measures.**
+///
+/// Whether an image joins the run held back so that abutting images do not
+/// conflate is decided by whether it overlaps what the run holds, and the run
+/// holds fragments over the canvas only. On the page the third image overlaps
+/// the second, so the run of the first two is composited before the third is
+/// drawn and the seam between the first and the third conflates. In the tile
+/// over the top half the second image is off the canvas, the third joins the
+/// first's run, and the seam does not conflate. Measured 2 October 2026: 40
+/// pixels — column 40, rows 0 to 39 — differ by 63 levels at 1x.
+///
+/// Pinned exactly rather than bounded, so the day this changes in either
+/// direction the test says so: if it fails because the tile *is* the page,
+/// the ROADMAP row "A tile byte-equal to the page when an image run's overlap
+/// falls outside it" is done — delete it and ruling 5's paragraph, and turn
+/// this into a byte-equality assertion.
+#[test]
+fn an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception() {
+    let document = Document::open(image_run_page()).expect("it opens");
+    let page = document.page(0).expect("a page");
+    let options = RenderOptions::default();
+    let full = page.render(&options);
+    assert!(
+        ink(&full) > 4_000,
+        "the three images cover most of the page"
+    );
+    let region = PixelRegion::new(0, 0, 100, 50);
+    let tile = page.render(&RenderOptions {
+        region: Some(region),
+        ..options
+    });
+    let d = compare(&tile, &full, region)
+        .expect("the exception is gone: delete its ROADMAP row and assert byte equality here");
+    let components = full.components();
+    let mut columns = std::collections::BTreeSet::new();
+    for y in 0..tile.height as usize {
+        for x in 0..tile.width as usize {
+            let at = y * tile.stride + x * components;
+            let theirs = y * full.stride + x * components;
+            if tile.data.get(at..at + components) != full.data.get(theirs..theirs + components) {
+                columns.insert(x);
+            }
+        }
+    }
+    assert_eq!(
+        (
+            d.pixels,
+            d.worst,
+            d.at,
+            columns.into_iter().collect::<Vec<_>>()
+        ),
+        (40, 63, (40, 0), vec![40]),
+        "the run decided in the canvas is the named seam and nothing else"
+    );
 }
 
 /// **A one-pixel lattice**, on the smallest fixture, because a tile whose
@@ -1044,4 +1309,41 @@ fn annotations_are_tiled_with_the_page() {
         "the annotation fixture painted {drawn} pixels and draws nothing else"
     );
     tiles_are_the_page(&page, &options, 29, "annotations");
+}
+
+/// **A retained page tiles as the page does.** Every fixture here and the
+/// annotated page, recorded once with [`Page::display_list`], then drawn a
+/// tile at a time *from the recording* at two scales, each tile byte-equal to
+/// its rectangle of a direct render of the whole page.
+///
+/// Two claims at once, which is the point of putting them together: the
+/// replay is the page (the retained-page row), and a region of a replay is a
+/// region of the page (ruling 5) — so a viewer that records a page once and
+/// tiles it while zooming is drawing the same pixels a direct render would.
+/// The annotated page is here because no determinism fixture draws an
+/// annotation, and a replay that forgot the appearance's resource scope would
+/// pass every other test in the tree.
+#[test]
+fn a_display_list_tiles_as_the_page_does() {
+    let annotated = Document::open(annotated_page()).expect("it opens");
+    let annotated = annotated.page(0).expect("a page");
+    let check = |page: &Page, name: &str| {
+        let list = page.display_list();
+        for scale in [1.0f64, 1.5] {
+            let options = RenderOptions {
+                scale,
+                ..RenderOptions::default()
+            };
+            let what = format!("{name} replayed at {scale}x");
+            if let Some(message) =
+                tile_divergence_through(page, &options, 37, &what, &|asked| list.render(asked))
+            {
+                panic!("{message}: a tile of the recording is not the page under it");
+            }
+        }
+    };
+    check(&annotated, "annotations");
+    for fixture in fixtures() {
+        with_page(&fixture, |page| check(page, fixture.name));
+    }
 }

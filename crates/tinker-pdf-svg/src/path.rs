@@ -96,6 +96,22 @@ pub enum PathError {
 /// `budget` is decremented by every segment produced, so one `d` cannot be the
 /// whole document.
 pub fn parse(data: &str, budget: &mut usize) -> Result<Outline, PathError> {
+    parse_commands(data, budget).map(|(outline, _)| outline)
+}
+
+/// [`parse`], and where each **command** ended.
+///
+/// The second list holds, per command, the index of the last segment it
+/// produced. Almost always that is every segment — but an elliptical arc is
+/// up to four cubics, and §11.6.2 puts a marker at a *vertex*, which is where
+/// a command ends and not where this crate happened to cut one arc into
+/// quarter turns. A `marker-mid` drawn at every segment would decorate the
+/// inside of every arc.
+///
+/// # Errors
+/// [`parse`]'s.
+pub fn parse_commands(data: &str, budget: &mut usize) -> Result<(Outline, Vec<usize>), PathError> {
+    let mut ends: Vec<usize> = Vec::new();
     let mut scan = Scan {
         bytes: data.as_bytes(),
         at: 0,
@@ -116,7 +132,7 @@ pub fn parse(data: &str, budget: &mut usize) -> Result<Outline, PathError> {
     // keep and it is a refusal rather than a short outline.
     if !matches!(scan.peek(), Some(b'M' | b'm')) {
         return if scan.at >= scan.bytes.len() {
-            Ok(out)
+            Ok((out, ends))
         } else {
             Err(PathError::Syntax)
         };
@@ -133,6 +149,13 @@ pub fn parse(data: &str, budget: &mut usize) -> Result<Outline, PathError> {
             match previous {
                 Some(b'M') => b'L',
                 Some(b'm') => b'l',
+                // A closepath takes no parameters, so nothing repeats it:
+                // what follows one that is not a command is the error, and
+                // the path up to it is what is drawn. Repeated, it read no
+                // byte and pushed a close a turn — `Z%` was a close for every
+                // segment the caller's budget allowed, and `shape::path`
+                // allows them all (CI's `fuzz-seeds`, `svg`, 10 October 2026).
+                Some(b'Z' | b'z') => break,
                 Some(other) => other,
                 None => return Err(PathError::Syntax),
             }
@@ -255,9 +278,14 @@ pub fn parse(data: &str, budget: &mut usize) -> Result<Outline, PathError> {
             }
             _ => break,
         }
+        if let Some(last) = out.segments.len().checked_sub(1) {
+            if ends.last() != Some(&last) {
+                ends.push(last);
+            }
+        }
         scan.separators();
     }
-    Ok(out)
+    Ok((out, ends))
 }
 
 /// §8.3.6's reflection: the previous control mirrored through the current

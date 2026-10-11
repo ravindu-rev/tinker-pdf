@@ -35,13 +35,14 @@
 //! `a_paragraph_does_not_pay_its_own_margin_twice` is what holds it.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 
-use tinker_pdf_cos::png_image;
+use tinker_pdf_cos::{gif_image, png_image, webp_image};
 use tinker_pdf_css::cascade::{cascade_from, ComputedStyle, Origin, PseudoBox, StyleTree};
 use tinker_pdf_css::font_face::FontFace;
 use tinker_pdf_css::media::MediaContext;
 use tinker_pdf_css::parser::Stylesheet;
-use tinker_pdf_css::property::Display;
+use tinker_pdf_css::property::{Display, Float, Overflow, Position, WhiteSpace};
 use tinker_pdf_css::selector::PseudoElement;
 use tinker_pdf_css::{
     Budget as CssBudget, ImportResolver, Limits as CssLimits, Refusal as CssRefusal,
@@ -119,31 +120,143 @@ impl Census {
     }
 }
 
+/// Why a reference a content document made did not produce bytes.
+///
+/// Two answers and not one, because they blame different parties and
+/// [`super::typeface::FaceDefect`] already tells them apart: a reference that
+/// names nothing is the document's mistake, and an entry that is there and
+/// will not inflate is the container's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Unavailable {
+    /// The reference is not one this provider can resolve, or it resolves to
+    /// nothing the provider holds.
+    Missing,
+    /// It resolves to something the provider holds, and the bytes would not
+    /// come out.
+    Unreadable,
+}
+
+/// Where a content document's references are read from: a stylesheet's
+/// `<link href>` and `@import`, an `<img src>`, an `@font-face` `url()`.
+///
+/// # Why this is a trait and not an OCF container
+///
+/// Until tier 5's formats row every one of those references was resolved
+/// against [`Ocf`], because a content document only ever arrived inside one.
+/// A loose XHTML file, a creation call handed markup and a stylesheet, and an
+/// FB2 whose pictures are `<binary>` elements in the same file are documents
+/// read by **the same cascade and the same layout** with different answers to
+/// *"what does `cover.jpg` mean here"* — and that answer is the only thing
+/// that differs. So the reader asks this, and each caller supplies its own;
+/// the EPUB path is the [`Ocf`] implementation below, which does exactly what
+/// the four call sites it replaced did.
+///
+/// The provider resolves as well as reads, and that is deliberate: a `data:`
+/// URL (RFC 2397) is a reference with no path at all, and §4.2.3's grammar,
+/// which [`resolve_reference`] enforces, refuses it by its scheme. A provider
+/// that was only handed paths could never answer one.
+pub trait Resources {
+    /// The path `reference` names when written in the document at
+    /// `referring`, and the bytes there.
+    ///
+    /// The path comes back because it is the base for anything the fetched
+    /// resource itself refers to — an `@import` inside an imported sheet — and
+    /// because two references spelled differently that name one file must be
+    /// recognisably one file ([`super::typeface::load`] deduplicates on it).
+    ///
+    /// # Errors
+    /// [`Unavailable`], naming which half failed.
+    fn fetch(
+        &mut self,
+        referring: &str,
+        reference: &str,
+        limits: &Limits,
+    ) -> Result<(String, Vec<u8>), Unavailable>;
+}
+
+/// A provider borrowed is a provider, so a caller can lend one to a reader
+/// that wraps it — [`crate::standalone::DataUrls`] in front of a creation
+/// call's — and still hold it afterwards.
+impl<R: Resources + ?Sized> Resources for &mut R {
+    fn fetch(
+        &mut self,
+        referring: &str,
+        reference: &str,
+        limits: &Limits,
+    ) -> Result<(String, Vec<u8>), Unavailable> {
+        (**self).fetch(referring, reference, limits)
+    }
+}
+
+/// An OCF container resolves a reference as §4.2.5 says: against the referring
+/// document, by [`resolve_reference`], to an entry compared case-sensitively.
+impl Resources for Ocf<'_> {
+    fn fetch(
+        &mut self,
+        referring: &str,
+        reference: &str,
+        limits: &Limits,
+    ) -> Result<(String, Vec<u8>), Unavailable> {
+        let path =
+            resolve_reference(referring, reference, limits).map_err(|_| Unavailable::Missing)?;
+        let index = self.index_of(&path).ok_or(Unavailable::Missing)?;
+        let bytes = self
+            .read(index)
+            .map_err(|_| Unavailable::Unreadable)?
+            .to_vec();
+        Ok((path, bytes))
+    }
+}
+
+/// A document with nothing beside it: every reference is missing.
+///
+/// A reference such a document makes is named as unresolved by whatever made
+/// it — [`crate::ArchiveWarning::ImageNotDrawn`] for a picture,
+/// [`super::typeface::FaceDefect::ResourceMissing`] for a face — rather than
+/// guessed at.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoResources;
+
+impl Resources for NoResources {
+    fn fetch(&mut self, _: &str, _: &str, _: &Limits) -> Result<(String, Vec<u8>), Unavailable> {
+        Err(Unavailable::Missing)
+    }
+}
+
 /// Where an `@import` in a book's stylesheet is resolved from.
 ///
 /// Milestone 6 built [`ImportResolver`] and shipped `NoImports` beside it,
 /// saying in as many words that *"a caller that has an OCF container
-/// implements this"*. This is that caller. The `RefCell` is not a shortcut:
-/// [`Ocf::read`] takes `&mut self` because inflating an entry spends the
-/// archive's budget, and the trait takes `&self` because a resolver is shared
-/// by a whole parse.
-struct Container<'a, 'b> {
-    ocf: RefCell<&'b mut Ocf<'a>>,
+/// implements this"*. This is that caller, over any [`Resources`]. The
+/// `RefCell` is not a shortcut: [`Ocf::read`] takes `&mut self` because
+/// inflating an entry spends the archive's budget, and the trait takes `&self`
+/// because a resolver is shared by a whole parse.
+pub(crate) struct Imports<'b, R: ?Sized> {
+    resources: RefCell<&'b mut R>,
     limits: Limits,
 }
 
-impl ImportResolver for Container<'_, '_> {
+impl<'b, R: Resources + ?Sized> Imports<'b, R> {
+    /// A resolver over `resources`, for one parse.
+    pub(crate) fn new(resources: &'b mut R, limits: Limits) -> Self {
+        Imports {
+            resources: RefCell::new(resources),
+            limits,
+        }
+    }
+}
+
+impl<R: Resources + ?Sized> ImportResolver for Imports<'_, R> {
     fn resolve(&self, href: &str, base: Option<&str>) -> Option<(String, Vec<u8>)> {
         // A sheet with no address of its own is a `<style>` element, and its
         // base is the document that holds it — which the caller put in `base`
         // for exactly this. With neither there is nothing to resolve against
         // and the import is dropped rather than guessed at.
         let base = base?;
-        let path = resolve_reference(base, href, &self.limits).ok()?;
-        let mut ocf = self.ocf.borrow_mut();
-        let index = ocf.index_of(&path)?;
-        let bytes = ocf.read(index).ok()?.to_vec();
-        Some((path, bytes))
+        self.resources
+            .borrow_mut()
+            .fetch(base, href, &self.limits)
+            .ok()
     }
 }
 
@@ -159,6 +272,13 @@ impl ImportResolver for Container<'_, '_> {
 pub struct Context<'a> {
     /// The parsed user-agent stylesheet, parsed once per book.
     pub ua: &'a [Stylesheet],
+    /// Author sheets the caller supplies rather than the document links, in
+    /// the order they apply, ahead of every sheet the document names.
+    ///
+    /// Empty for a book, whose sheets are all its own. A creation call handed
+    /// markup and a stylesheet separately puts the stylesheet here, which is
+    /// what a `<link>` at the top of the document's `<head>` would have done.
+    pub author: &'a [Stylesheet],
     /// The container's own ceilings, for resolving a `<link href>`.
     pub limits: &'a Limits,
     /// What the cascade may spend.
@@ -210,6 +330,14 @@ pub struct Reading {
     /// that became replaced boxes, with their bytes, and the ones that did not,
     /// with the reason.
     pub pictures: Pictures,
+    /// `<link rel="stylesheet">` elements whose `href` produced no sheet.
+    ///
+    /// Counted because the document is then set without rules its author
+    /// wrote, and nothing on the page says so: a loose XHTML file opened from
+    /// its bytes alone has nothing beside it, so every sheet it links lands
+    /// here, and a book that names an entry its container does not hold is the
+    /// same sentence about a smaller mistake.
+    pub unresolved_sheets: usize,
 }
 
 /// Reads one content document: markup, stylesheets, cascade, box tree.
@@ -227,31 +355,61 @@ pub struct Reading {
 /// walk. A markup failure is **not** an error — it is a
 /// [`super::xhtml::MarkupDefect`] on a partial tree, because a chapter that
 /// stops half way has still said most of itself.
-pub fn read_document(
-    book: &mut Ocf<'_>,
+pub fn read_document<R: Resources + ?Sized>(
+    book: &mut R,
     path: &str,
     bytes: &[u8],
     context: &Context<'_>,
     budget: &mut CssBudget,
 ) -> Result<Reading, CssRefusal> {
+    let dom = markup(bytes, &context.limits.xml);
+    read_dom(book, path, dom, context, budget)
+}
+
+/// A content document's markup, read as XML into a tree.
+///
+/// Never fails: a document the reader stops part way through is the tree it
+/// got to with [`super::xhtml::MarkupDefect::Truncated`] on it, and one it
+/// cannot begin — an encoding this build does not decode, or a character XML
+/// §2.2 forbids — is no tree at all with the same defect, so the page that
+/// results says so through its own defect rather than through this one.
+#[must_use]
+pub fn markup(bytes: &[u8], limits: &tinker_pdf_xml::Limits) -> Dom {
+    match super::xhtml::read(bytes, limits) {
+        Ok(dom) => dom,
+        Err(_) => Dom {
+            defects: vec![super::xhtml::MarkupDefect::Truncated],
+            ..Dom::default()
+        },
+    }
+}
+
+/// [`read_document`] for a tree something else already built.
+///
+/// The markup reader is the one step a content document's language decides:
+/// an EPUB's is XML, a loose `.html` file's is HTML's own tree builder, and an
+/// FB2's or a Markdown file's is a translation into this tree. Everything from
+/// the stylesheets on is the same reading of the same tree, which is why this
+/// is where [`read_document`] hands over rather than a second copy of it.
+///
+/// # Errors
+/// [`read_document`]'s.
+pub fn read_dom<R: Resources + ?Sized>(
+    book: &mut R,
+    path: &str,
+    dom: Dom,
+    context: &Context<'_>,
+    budget: &mut CssBudget,
+) -> Result<Reading, CssRefusal> {
     let Context {
         ua,
+        author: given,
         limits,
         css_limits,
         media,
         pre_paginated,
         initial,
     } = context;
-    let dom = match super::xhtml::read(bytes, &limits.xml) {
-        Ok(dom) => dom,
-        // An encoding this build does not decode, or a character XML §2.2
-        // forbids. There is no tree at all, and the page that results says so
-        // through its own defect rather than through this one.
-        Err(_) => Dom {
-            defects: vec![super::xhtml::MarkupDefect::Truncated],
-            ..Dom::default()
-        },
-    };
 
     // §8.2.2.6's viewport, and the media context that follows from it. The
     // substitution happens **here** rather than at the caller because the
@@ -267,11 +425,25 @@ pub fn read_document(
         _ => media,
     };
 
-    let author = author_sheets(book, path, &dom, limits, css_limits, budget, media);
+    let mut unresolved_sheets = 0;
+    let own = author_sheets(
+        book,
+        path,
+        &dom,
+        limits,
+        css_limits,
+        budget,
+        media,
+        &mut unresolved_sheets,
+    );
+    // A caller's sheets come first, as a `<link>` at the top of `<head>` would:
+    // §6.1's order of appearance then lets the document's own rules win a tie,
+    // which is what an author who wrote a `<style>` element meant by it.
+    let author: Vec<&Stylesheet> = given.iter().chain(own.iter()).collect();
     let mut sheets: Vec<(Origin, &Stylesheet)> =
         ua.iter().map(|sheet| (Origin::UserAgent, sheet)).collect();
     for sheet in &author {
-        sheets.push((Origin::Author, sheet));
+        sheets.push((Origin::Author, *sheet));
     }
 
     let styles = cascade_from(&sheets, &dom.nodes, css_limits, budget, initial)?;
@@ -320,6 +492,7 @@ pub fn read_document(
         viewport,
         font_faces,
         pictures,
+        unresolved_sheets,
     })
 }
 
@@ -330,14 +503,21 @@ pub fn read_document(
 /// property at the same specificity are decided by which came later, and a
 /// build that read every `<link>` before every `<style>` would get that
 /// backwards for calibre's books, which write both.
-fn author_sheets(
-    book: &mut Ocf<'_>,
+///
+/// `unresolved` counts the `<link rel="stylesheet" href>` elements whose
+/// reference produced no bytes — the one sheet a document names that this build
+/// can tell it did not apply, where a sheet that would not parse is the CSS
+/// crate's to report.
+#[allow(clippy::too_many_arguments)]
+fn author_sheets<R: Resources + ?Sized>(
+    book: &mut R,
     path: &str,
     dom: &Dom,
     limits: &Limits,
     css_limits: &CssLimits,
     budget: &mut CssBudget,
     media: &MediaContext,
+    unresolved: &mut usize,
 ) -> Vec<Stylesheet> {
     let mut out = Vec::new();
     for node in &dom.nodes {
@@ -352,19 +532,11 @@ fn author_sheets(
                 let Some(href) = node.attr("href") else {
                     continue;
                 };
-                let Ok(target) = resolve_reference(path, href, limits) else {
+                let Ok((target, bytes)) = book.fetch(path, href, limits) else {
+                    *unresolved += 1;
                     continue;
                 };
-                let Some(index) = book.index_of(&target) else {
-                    continue;
-                };
-                let Ok(bytes) = book.read(index).map(<[u8]>::to_vec) else {
-                    continue;
-                };
-                let resolver = Container {
-                    ocf: RefCell::new(book),
-                    limits: *limits,
-                };
+                let resolver = Imports::new(&mut *book, *limits);
                 if let Ok(sheet) = tinker_pdf_css::parser::parse(
                     &bytes,
                     Some(&target),
@@ -386,10 +558,7 @@ fn author_sheets(
                 if source.trim().is_empty() {
                     continue;
                 }
-                let resolver = Container {
-                    ocf: RefCell::new(book),
-                    limits: *limits,
-                };
+                let resolver = Imports::new(&mut *book, *limits);
                 // The **document's** path is the base, not `None`: a `<style>`
                 // has no address of its own and HTML resolves a relative URL in
                 // it against the document. Passing `None` would drop every
@@ -474,15 +643,24 @@ pub struct Picture {
 
 /// A picture's bytes, ready for `DocumentBuilder::add_image`.
 ///
-/// The same two routes `cbz.rs` takes and for its reasons: a JPEG is placed
+/// The same routes `cbz.rs` takes and for its reasons: a JPEG is placed
 /// verbatim because re-encoding is generational loss the caller cannot undo,
-/// and a PNG goes through the reader that decides between passing its `IDAT`
-/// through and decoding it.
+/// a PNG goes through the reader that decides between passing its `IDAT`
+/// through and decoding it, a GIF — which no `/Filter` reads — is decoded
+/// and kept `/Indexed`, and a WebP is decoded to RGB or RGBA.
+///
+/// `#[non_exhaustive]` like every other facade enum here: it grew `Raster`
+/// when GIF and WebP gained decoders, which broke any match outside this
+/// crate, and the next route a picture can take would grow it again.
+#[non_exhaustive]
 pub enum PictureData {
     /// A JPEG, placed as its own bytes.
     Jpeg(Vec<u8>),
     /// A PNG, read into whatever `tinker-pdf-cos` decided to write.
     Png(Box<tinker_pdf_cos::PngImageData>),
+    /// A GIF's first image or a WebP's picture, decoded and arranged by
+    /// `tinker-pdf-cos`.
+    Raster(Box<tinker_pdf_cos::RasterImageData>),
 }
 
 impl std::fmt::Debug for PictureData {
@@ -492,6 +670,9 @@ impl std::fmt::Debug for PictureData {
         match self {
             PictureData::Jpeg(bytes) => write!(f, "Jpeg({} bytes)", bytes.len()),
             PictureData::Png(png) => write!(f, "Png({} by {})", png.width(), png.height()),
+            PictureData::Raster(raster) => {
+                write!(f, "Raster({} by {})", raster.width(), raster.height())
+            }
         }
     }
 }
@@ -543,7 +724,12 @@ impl Pictures {
 /// `epub_conservation.rs` compares. So a refused `<img>` generates **no box**,
 /// which is the other half of §4.8.4.4's own sentence: an element is *"expected
 /// to be treated as a replaced element"* only when the image is available.
-fn pictures(book: &mut Ocf<'_>, path: &str, dom: &Dom, limits: &Limits) -> Pictures {
+fn pictures<R: Resources + ?Sized>(
+    book: &mut R,
+    path: &str,
+    dom: &Dom,
+    limits: &Limits,
+) -> Pictures {
     let mut out = Pictures::default();
     for element in 0..dom.nodes.len() {
         let node = &dom.nodes[element];
@@ -563,8 +749,8 @@ fn pictures(book: &mut Ocf<'_>, path: &str, dom: &Dom, limits: &Limits) -> Pictu
 }
 
 /// One `<img>`, resolved and read, or the reason it was not.
-fn picture(
-    book: &mut Ocf<'_>,
+fn picture<R: Resources + ?Sized>(
+    book: &mut R,
     path: &str,
     element: usize,
     dom: &Dom,
@@ -576,24 +762,34 @@ fn picture(
         .attr("src")
         .ok_or(ImageDefect::Unresolved)?
         .to_owned();
-    let target = resolve_reference(path, &href, limits).map_err(|_| ImageDefect::Unresolved)?;
-    let index = book.index_of(&target).ok_or(ImageDefect::Unresolved)?;
-    let bytes = book.read(index).map_err(|_| ImageDefect::Unresolved)?;
+    let (_, bytes) = book
+        .fetch(path, &href, limits)
+        .map_err(|_| ImageDefect::Unresolved)?;
+    picture_data(bytes)
+}
+
+/// A picture's bytes, read into its intrinsic size and the shape the writer
+/// takes — for an `<img>`, and for a `background-image`, which is the same
+/// raster reached through a stylesheet.
+///
+/// # Errors
+/// The [`ImageDefect`] that says why the bytes are no picture this build draws.
+pub(crate) fn picture_data(bytes: Vec<u8>) -> Result<((f64, f64), PictureData), ImageDefect> {
     // Classification by magic and never by extension, `cbz::image_format`'s
     // own rule: a `.jpg` that is a PNG is routine, and an extension is a claim
     // where the first bytes of a file are a fact.
-    match image_format(bytes).ok_or(ImageDefect::Unknown)? {
+    match image_format(&bytes).ok_or(ImageDefect::Unknown)? {
         ImageFormat::Jpeg => {
             // The same reader `add_image` uses, so the box and the `/Width`
             // cannot disagree.
             let (width, height, _) =
-                tinker_pdf_cos::jpeg_shape(bytes).ok_or(ImageDefect::Undecodable)?;
+                tinker_pdf_cos::jpeg_shape(&bytes).ok_or(ImageDefect::Undecodable)?;
             if width == 0 || height == 0 {
                 return Err(ImageDefect::Undecodable);
             }
             Ok((
                 (f64::from(width), f64::from(height)),
-                PictureData::Jpeg(bytes.to_vec()),
+                PictureData::Jpeg(bytes),
             ))
         }
         ImageFormat::Png => {
@@ -602,7 +798,7 @@ fn picture(
             // hold is not a picture, and the number is the *host's* rather than
             // the decoder's so a host that lowered it can tell its decision
             // from `MAX_PNG_SAMPLES`.
-            let png = png_image(bytes, &FilterLimits::new(zip_limits::MAX_ZIP_ENTRY_BYTES))
+            let png = png_image(&bytes, &FilterLimits::new(zip_limits::MAX_ZIP_ENTRY_BYTES))
                 .map_err(|_| ImageDefect::Undecodable)?;
             if png.width() == 0 || png.height() == 0 {
                 return Err(ImageDefect::Undecodable);
@@ -610,6 +806,25 @@ fn picture(
             Ok((
                 (f64::from(png.width()), f64::from(png.height())),
                 PictureData::Png(Box::new(png)),
+            ))
+        }
+        // A core media type (§3.2) with no pass-through: decoded under the
+        // same ceiling, and its first image is the picture.
+        ImageFormat::Gif => {
+            let gif = gif_image(&bytes, &FilterLimits::new(zip_limits::MAX_ZIP_ENTRY_BYTES))
+                .map_err(|_| ImageDefect::Undecodable)?;
+            Ok((
+                (f64::from(gif.width()), f64::from(gif.height())),
+                PictureData::Raster(Box::new(gif)),
+            ))
+        }
+        // The fourth core media type, the same way, lossless or lossy.
+        ImageFormat::WebP => {
+            let webp = webp_image(&bytes, &FilterLimits::new(zip_limits::MAX_ZIP_ENTRY_BYTES))
+                .map_err(|_| ImageDefect::Undecodable)?;
+            Ok((
+                (f64::from(webp.width()), f64::from(webp.height())),
+                PictureData::Raster(Box::new(webp)),
             ))
         }
         other => Err(ImageDefect::UnsupportedFormat(other)),
@@ -643,16 +858,121 @@ pub fn box_tree(dom: &Dom, styles: &StyleTree, pictures: &Pictures) -> BoxNode {
     let Some(root) = dom.root else {
         return BoxNode::element(ComputedStyle::initial(), Vec::new());
     };
-    build(dom, styles, pictures, root)
+    let mut tree = build(dom, styles, pictures, root);
+    propagate_overflow(dom, root, &mut tree);
+    tree
+}
+
+/// `css-overflow-3` §3.3: the root element's `overflow` — or, where that is
+/// `visible` and the root is HTML's `<html>`, its `<body>`'s — **belongs to
+/// the viewport**, and *"the element from which the value is propagated must
+/// then have a used overflow value of `visible`"*.
+///
+/// Here the viewport is the page, which clips already, so the value lands
+/// nowhere; what matters is the second sentence. Without it a book's `body {
+/// overflow-x: hidden }` — a web habit, written against horizontal scrolling —
+/// would make `<body>` a scroll container: its margin would stop collapsing
+/// with its first child's, and every chapter would start lower by the
+/// smaller of the two.
+fn propagate_overflow(dom: &Dom, root: usize, tree: &mut BoxNode) {
+    let open = |style: &ComputedStyle| {
+        style.overflow_x == Overflow::Visible && style.overflow_y == Overflow::Visible
+    };
+    if tree.style.display == Display::None {
+        return;
+    }
+    let make_visible = |style: &mut ComputedStyle| {
+        style.overflow_x = Overflow::Visible;
+        style.overflow_y = Overflow::Visible;
+    };
+    if !open(&tree.style) {
+        make_visible(&mut tree.style);
+        return;
+    }
+    let node = &dom.nodes[root];
+    if !(node.is_html() && node.name == "html") {
+        return;
+    }
+    let Content::Children(children) = &mut tree.content else {
+        return;
+    };
+    // *"The first such child element"*: a `<body>` whose `display` is not
+    // `none`.
+    let body = children.iter_mut().find(|child| {
+        child.style.display != Display::None
+            && child.anchor.is_some_and(|at| {
+                dom.nodes
+                    .get(at as usize)
+                    .is_some_and(|node| node.is_html() && node.name == "body")
+            })
+    });
+    if let Some(body) = body {
+        make_visible(&mut body.style);
+    }
 }
 
 fn build(dom: &Dom, styles: &StyleTree, pictures: &Pictures, at: usize) -> BoxNode {
-    let style = styles
-        .styles
-        .get(at)
-        .cloned()
-        .unwrap_or_else(ComputedStyle::initial);
-    let node: &Node = &dom.nodes[at];
+    let mut out = Vec::with_capacity(1);
+    let mut build = Build {
+        dom,
+        styles,
+        pictures,
+        lettered: HashSet::new(),
+    };
+    build_into(&mut out, &mut build, at);
+    out.pop()
+        .unwrap_or_else(|| BoxNode::element(ComputedStyle::initial(), Vec::new()))
+}
+
+/// What [`build_into`] reads, and the one record it keeps besides the tree.
+struct Build<'a> {
+    dom: &'a Dom,
+    styles: &'a StyleTree,
+    pictures: &'a Pictures,
+    /// The elements whose own `::first-letter` search has ended — it found the
+    /// letter, or found that the first line has none — so that an ancestor's
+    /// search stops at their box rather than wrapping the same letter again.
+    /// See [`first_letter`].
+    lettered: HashSet<u32>,
+}
+
+/// One element's box, pushed onto `out`.
+///
+/// **The recursion of the box tree, and its frame is kept small on purpose.**
+/// It runs once per level of the document, and an unoptimised build gives
+/// every temporary of the function its own stack slot: a computed style is a
+/// kilobyte and a box node more, and the version of this that built its text
+/// boxes, generated boxes and its own node inline held several of each per
+/// level. `hostile_input.rs`'s two hundred nested `<em>` — Markdown's own
+/// nesting cap — then overflowed a two-megabyte thread once `border-radius`,
+/// the shadows and the transform had grown the computed style. So every box
+/// is made in a helper of its own ([`push_text`], [`push_pseudo`],
+/// [`push_element`], [`push_replaced`]), whose frame is gone before the next
+/// level begins, and this one and [`build_with`] hold references and the
+/// child list.
+fn build_into(out: &mut Vec<BoxNode>, build: &mut Build<'_>, at: usize) {
+    let styles = build.styles;
+    match styles.styles.get(at) {
+        Some(style) => build_with(out, build, at, style),
+        None => build_unstyled(out, build, at),
+    }
+}
+
+/// [`build_into`] for an element the cascade gave no style, which a tree the
+/// cascade built does not have: the initial style, in a frame of its own so
+/// the recursion's carries no second computed style.
+#[inline(never)]
+fn build_unstyled(out: &mut Vec<BoxNode>, build: &mut Build<'_>, at: usize) {
+    let initial = ComputedStyle::initial();
+    build_with(out, build, at, &initial);
+}
+
+/// [`build_into`] with the element's style in hand.
+fn build_with(out: &mut Vec<BoxNode>, build: &mut Build<'_>, at: usize, style: &ComputedStyle) {
+    let (dom, styles) = (build.dom, build.styles);
+    let Some(node) = dom.nodes.get(at) else {
+        return;
+    };
     let anchor = u32::try_from(at).unwrap_or(u32::MAX);
     // CSS 2.2 §3.1's replaced element, and the only one this build has. It is
     // decided here rather than by `display`, because *being replaced* is a
@@ -666,8 +986,26 @@ fn build(dom: &Dom, styles: &StyleTree, pictures: &Pictures, at: usize) -> BoxNo
     // when the image is available, so it falls through to the branch below and
     // becomes what it is — an empty inline element, generating an empty box and
     // no ink. See [`pictures`].
-    if let Some((width, height)) = pictures.intrinsic_of(at) {
-        return BoxNode::replaced(style, Intrinsic::raster(width, height)).with_anchor(anchor);
+    if let Some(size) = build.pictures.intrinsic_of(at) {
+        push_replaced(out, style, size, anchor);
+        return;
+    }
+    // HTML §15.3.4 (Rendering, *Phrasing content*): `br { display-outside:
+    // newline; } /* this also has bidi implications */`. A `<br>` is a
+    // newline in its line, decided by the element as being replaced is, and
+    // only `display: none` takes it away. See [`push_newline`].
+    if node.is_html() && node.name == "br" && style.display != Display::None {
+        push_newline(out, style, anchor);
+        // HTML's parser never gives a `<br>` content (a void element,
+        // §13.1.2); XML can, and what it holds is laid out after the break
+        // rather than lost.
+        for child in &node.children {
+            match child {
+                Child::Element(index) => build_into(out, build, *index),
+                Child::Text(text) => push_text(out, style, text, anchor),
+            }
+        }
+        return;
     }
     let mut children = Vec::with_capacity(node.children.len());
     // CSS 2.1 §12.1: `::before` is the first child of its originating element
@@ -676,32 +1014,351 @@ fn build(dom: &Dom, styles: &StyleTree, pictures: &Pictures, at: usize) -> BoxNo
     // build that put the box next to the element would give it the parent's
     // width and its own line.
     if let Some(generated) = styles.pseudo(at, PseudoElement::Before) {
-        children.push(pseudo_box(generated, anchor));
+        push_pseudo(&mut children, generated, anchor);
     }
     for child in &node.children {
         match child {
-            Child::Element(index) => children.push(build(dom, styles, pictures, *index)),
-            Child::Text(text) => {
-                children.push(BoxNode::text(inline_box(&style), text.clone()).with_anchor(anchor));
-            }
+            Child::Element(index) => build_into(&mut children, build, *index),
+            Child::Text(text) => push_text(&mut children, style, text, anchor),
         }
     }
     if let Some(generated) = styles.pseudo(at, PseudoElement::After) {
-        children.push(pseudo_box(generated, anchor));
+        push_pseudo(&mut children, generated, anchor);
     }
+    // `css-pseudo-4` §2.2: a block container's `::first-letter` is the first
+    // typographic letter unit of its first formatted line — which, in a box
+    // tree built before line breaking, is the first letter of its first
+    // in-flow text, through inline boxes and into a first child block.
+    if let Some(letter) = styles.pseudo(at, PseudoElement::FirstLetter) {
+        if matches!(
+            style.display,
+            Display::Block
+                | Display::ListItem
+                | Display::InlineBlock
+                | Display::TableCell
+                | Display::TableCaption
+        ) && first_letter(&mut children, &letter.style, &build.lettered, 0)
+            != LetterSearch::Continue
+        {
+            build.lettered.insert(anchor);
+        }
+    }
+    push_element(out, style, children, node, anchor, styles.marker(at));
+}
+
+/// A replaced box, for [`build_into`].
+#[inline(never)]
+fn push_replaced(
+    out: &mut Vec<BoxNode>,
+    style: &ComputedStyle,
+    (width, height): (f64, f64),
+    anchor: u32,
+) {
+    out.push(
+        BoxNode::replaced(style.clone(), Intrinsic::raster(width, height)).with_anchor(anchor),
+    );
+}
+
+/// A `<br>`'s box, for [`build_into`]: one line feed, U+000A, in an inline box
+/// that is the element's own — anchored to it, inheriting from it, whatever
+/// its `display` — and whose `white-space` is `pre-line`.
+///
+/// # What HTML says, and what that is in this build
+///
+/// HTML §15.3.4 gives the element `display-outside: newline`, a value
+/// `css-display-3` does not define, with the comment *"this also has bidi
+/// implications"*. The newline is the one CSS 2.1's own sample sheet spelled
+/// `br:before { content: "\A"; white-space: pre-line }` (Appendix D), and that
+/// is what is laid out here: a preserved segment break is a forced line break
+/// (`css-text-3` §5.1), and U+000A is the character a forced line break is in
+/// the text `tinker-pdf-layout` breaks.
+///
+/// **The bidi implication is that it ends the bidi paragraph.** U+000A is
+/// Bidi_Class `B`; `css-writing-modes-3` §2.4 bounds a bidi paragraph by a
+/// block boundary or a *"bidi type B"* forced paragraph break, and UAX #9's P1
+/// splits the text there, the separator kept with the paragraph before it. So
+/// a `<br>` is not a U+2028 LINE SEPARATOR, which is `WS` and ends only its
+/// line: the text after a `<br>` is resolved as a paragraph of its own, and a
+/// `plaintext` block asks it for its own first strong direction, as a
+/// preserved newline is asked.
+///
+/// `pre-line` and not the element's own `white-space`, since under `normal`
+/// or `nowrap` a line feed is a collapsible space; it keeps the break and
+/// removes the spaces either side of it, as §4.1.1 does around a preserved
+/// one. Nothing is drawn for it: the break is what ends the line, and a line's
+/// trailing segment break is not set (`Builder::trim`). The box's style is
+/// [`inline_box`]'s, inherited from the element with none of its own, so a
+/// `float` or a `position` on a `<br>` does not take the newline out of its
+/// line, and an author's `display` other than `none` does not make it a block:
+/// no CSS value is `newline`'s, so there is nothing in the cascade for one to
+/// override. `::before` and `::after` on a `<br>` generate nothing.
+///
+/// **The newline is inside an element box, not loose text**, because a
+/// `<br>` is an element and every container that sorts its children tells the
+/// two apart (review of wave 8). `css-flexbox-1` §4 makes *"each in-flow
+/// child"* a flex item of its own and wraps only *"each child text sequence"*
+/// in an anonymous one, so a `<br>` between two runs of text is a third item
+/// beside them — its box blockified (`css-display-3` §2.7) to the block a lone
+/// `<br>` is, one line tall — and not a break inside one anonymous item round
+/// all three. `css-tables-3` §2.2.1 discards only *"anonymous inline boxes which
+/// contain only white space"*, so a `<br>` between two rows is wrapped in an
+/// anonymous row and cell and keeps its line; as a bare text box holding a
+/// line feed it was both of the things those clauses act on, and was merged in
+/// the one and dropped in the other.
+#[inline(never)]
+fn push_newline(out: &mut Vec<BoxNode>, style: &ComputedStyle, anchor: u32) {
+    let mut newline = inline_box(style);
+    newline.white_space = WhiteSpace::PreLine;
+    let text = BoxNode::text(newline.clone(), "\n").with_anchor(anchor);
+    out.push(BoxNode::element(newline, vec![text]).with_anchor(anchor));
+}
+
+/// A text box in its element's inline style, for [`build_into`].
+#[inline(never)]
+fn push_text(out: &mut Vec<BoxNode>, style: &ComputedStyle, text: &str, anchor: u32) {
+    out.push(BoxNode::text(inline_box(style), text.to_owned()).with_anchor(anchor));
+}
+
+/// A generated box, for [`build_into`].
+#[inline(never)]
+fn push_pseudo(out: &mut Vec<BoxNode>, generated: &PseudoBox, anchor: u32) {
+    out.push(pseudo_box(generated, anchor));
+}
+
+/// An element's own box round its children, for [`build_into`].
+#[inline(never)]
+fn push_element(
+    out: &mut Vec<BoxNode>,
+    style: &ComputedStyle,
+    children: Vec<BoxNode>,
+    node: &Node,
+    anchor: u32,
+    marker: Option<&str>,
+) {
     // An element with no children at all still has to be a `Children(vec![])`
     // rather than a `Text("")`: an empty `<p>` generates a block box with its
     // own margins, and one carrying an empty string would be an inline box
     // with none.
-    BoxNode {
-        style,
+    out.push(BoxNode {
+        style: style.clone(),
         content: Content::Children(children),
         anchor: Some(anchor),
-        span: cell_span(
-            node,
-            &styles.styles.get(at).map_or(Display::Inline, |s| s.display),
-        ),
+        span: cell_span(node, &style.display),
+        // `css-lists-3` §4's `list-item` counter, which the cascade walked over
+        // the whole document: an `<ol start>`, an `<li value>` and every item
+        // between are in this number, and the layout crate sees one box.
+        marker: marker.map(str::to_owned),
+    });
+}
+
+/// Where the search for a `::first-letter` stands after a list of boxes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LetterSearch {
+    /// The letter was found and wrapped — by this search, or already by a
+    /// nearer block container's own `::first-letter`.
+    Found,
+    /// The first formatted line begins with something that has no first
+    /// letter — a picture, an inline-block, a table, punctuation and then
+    /// nothing — so there is none, and the search ends.
+    Stop,
+    /// Nothing in these boxes yet: the line has not begun.
+    Continue,
+}
+
+/// Wraps the first typographic letter unit in `children` in a box carrying
+/// `letter`, `css-pseudo-4` §2.2: the text's own leading white space stays
+/// outside it, the punctuation before and after the letter goes inside it
+/// with the letter's combining marks, and the box anchors to the text's
+/// element, so extraction and the structure tree read the same characters in
+/// the same order. Inline boxes are searched through, a first in-flow block
+/// child is searched into (its first line is the container's), and floats and
+/// absolutely positioned boxes are passed over as out of the line.
+///
+/// **A block that searched for its own first letter is not searched again.**
+/// The box tree is built innermost first, so where a container and the block
+/// inside it both have a `::first-letter`, the inner one's search has already
+/// run; `lettered` holds every element whose search ended, and this one stops
+/// at such a block's box. The letter keeps the inner box only, which is the
+/// one CSS 2.1 §5.12.2's fictional tag sequence puts innermost and whose
+/// declarations the letter therefore shows. Without it every level wrapped the
+/// same letter again — a box tree twice the document's depth, refused past
+/// `MAX_BOX_DEPTH`, and a search two frames a level deep.
+///
+/// **What is approximated, and stated.** The box inherits from the
+/// originating block and not from the inline box the letter is inside, so an
+/// `<em>` round the first word does not italicise the drop cap; a letter that
+/// a leading quotation mark and an element boundary separate (`“<em>T`) is
+/// not found; `display` other than `inline` is read as `inline` unless the
+/// box floats, as §2.2 says; and of nested containers' `::first-letter`s only
+/// the innermost makes a box, so an outer one's border or background round
+/// the inner one's is not drawn.
+///
+/// **The frame is small on purpose**, as [`build_into`]'s is: this recurses
+/// once per level it searches through, and the box it makes is made in
+/// [`wrap_letter`], whose computed styles are gone before it returns.
+fn first_letter(
+    children: &mut Vec<BoxNode>,
+    letter: &ComputedStyle,
+    lettered: &HashSet<u32>,
+    depth: usize,
+) -> LetterSearch {
+    if depth > tinker_pdf_layout::limits::MAX_BOX_DEPTH {
+        return LetterSearch::Stop;
     }
+    let mut at = 0;
+    while at < children.len() {
+        let child = &mut children[at];
+        let style = &child.style;
+        if style.display == Display::None
+            || style.float != Float::None
+            || matches!(style.position, Position::Absolute | Position::Fixed)
+        {
+            at += 1;
+            continue;
+        }
+        let display = style.display;
+        let breaks = tinker_pdf_layout::text::preserves_breaks(style.white_space);
+        match &mut child.content {
+            Content::Replaced(_) => return LetterSearch::Stop,
+            Content::Text(text) => {
+                // A preserved segment break before the letter — a `<br>`'s
+                // ([`push_newline`]) or one written in a `pre` — ends the
+                // first formatted line with no letter on it, so there is none
+                // (§2.2: the letter *"on the first formatted line"*).
+                let unit = letter_unit(text);
+                let lead = unit.map_or(text.len(), |(start, _)| start);
+                if breaks
+                    && text
+                        .get(..lead)
+                        .is_some_and(|lead| lead.contains(['\n', '\r']))
+                {
+                    return LetterSearch::Stop;
+                }
+                let Some(unit) = unit else {
+                    if text.chars().all(char::is_whitespace) {
+                        at += 1;
+                        continue;
+                    }
+                    return LetterSearch::Stop;
+                };
+                wrap_letter(children, at, unit, letter);
+                return LetterSearch::Found;
+            }
+            Content::Children(inner) => match display {
+                Display::Inline => match first_letter(inner, letter, lettered, depth + 1) {
+                    LetterSearch::Continue => at += 1,
+                    done => return done,
+                },
+                Display::Block | Display::ListItem => {
+                    // An element's own box carries its anchor, and nothing
+                    // outside that box does — its text and generated boxes are
+                    // inside it — so the anchor names the block whose search
+                    // ended.
+                    if child
+                        .anchor
+                        .is_some_and(|anchor| lettered.contains(&anchor))
+                    {
+                        return LetterSearch::Found;
+                    }
+                    match first_letter(inner, letter, lettered, depth + 1) {
+                        // An empty block has no line; the first line is the next
+                        // box's.
+                        LetterSearch::Continue => at += 1,
+                        done => return done,
+                    }
+                }
+                _ => return LetterSearch::Stop,
+            },
+        }
+    }
+    LetterSearch::Continue
+}
+
+/// The text box at `children[at]` cut round `start..end`, its first letter
+/// unit, which goes into a box of its own in `letter`'s style, for
+/// [`first_letter`].
+#[inline(never)]
+fn wrap_letter(
+    children: &mut Vec<BoxNode>,
+    at: usize,
+    (start, end): (usize, usize),
+    letter: &ComputedStyle,
+) {
+    let Some(child) = children.get_mut(at) else {
+        return;
+    };
+    let Content::Text(text) = &mut child.content else {
+        return;
+    };
+    // `start..end` is `letter_unit`'s answer for this very text, so all three
+    // are character boundaries inside it and none of these is `None`.
+    let (Some(before), Some(unit), Some(after)) =
+        (text.get(..start), text.get(start..end), text.get(end..))
+    else {
+        return;
+    };
+    let (before, unit, after) = (before.to_owned(), unit.to_owned(), after.to_owned());
+    let anchor = child.anchor;
+    let text_style = child.style.clone();
+    let mut style = letter.clone();
+    if style.float == Float::None {
+        style.display = Display::Inline;
+    }
+    let mut replacement = Vec::with_capacity(3);
+    if !before.is_empty() {
+        replacement.push(text_node(text_style.clone(), &before, anchor));
+    }
+    let inner = text_node(inline_box(&style), &unit, anchor);
+    replacement.push(BoxNode {
+        style,
+        content: Content::Children(vec![inner]),
+        anchor,
+        span: CellSpan::ONE,
+        marker: None,
+    });
+    if !after.is_empty() {
+        replacement.push(text_node(text_style, &after, anchor));
+    }
+    children.splice(at..=at, replacement);
+}
+
+/// A text box anchored where the text it was cut from was.
+fn text_node(style: ComputedStyle, text: &str, anchor: Option<u32>) -> BoxNode {
+    let node = BoxNode::text(style, text);
+    match anchor {
+        Some(anchor) => node.with_anchor(anchor),
+        None => node,
+    }
+}
+
+/// The byte range of a text's first typographic letter unit, `css-pseudo-4`
+/// §2.2: any punctuation before the first letter or number, the letter, its
+/// combining marks, and any punctuation after it — `“A”` whole, `A.` with its
+/// full stop. Leading white space is before the range. `None` where the text
+/// holds no letter or number before a space or its end.
+fn letter_unit(text: &str) -> Option<(usize, usize)> {
+    use tinker_pdf_layout::unicode::{is_combining, is_letter_or_number, is_punctuation_or_symbol};
+    let punctuation = |c: char| is_punctuation_or_symbol(c) && !is_letter_or_number(c);
+    let mut chars = text
+        .char_indices()
+        .skip_while(|(_, c)| c.is_whitespace())
+        .peekable();
+    let start = chars.peek()?.0;
+    while chars.peek().is_some_and(|(_, c)| punctuation(*c)) {
+        chars.next();
+    }
+    let (_, first) = chars.next()?;
+    if !is_letter_or_number(first) {
+        return None;
+    }
+    while chars.peek().is_some_and(|(_, c)| is_combining(*c)) {
+        chars.next();
+    }
+    while chars.peek().is_some_and(|(_, c)| punctuation(*c)) {
+        chars.next();
+    }
+    let end = chars.peek().map_or(text.len(), |(at, _)| *at);
+    Some((start, end))
 }
 
 /// One `::before` or `::after` box, as `epub::read` builds every other box.
@@ -739,6 +1396,7 @@ fn pseudo_box(generated: &PseudoBox, anchor: u32) -> BoxNode {
         // A generated box is never a table cell: `cell_span` reads `colspan`
         // and `rowspan` off a source element, and this box has none.
         span: CellSpan::ONE,
+        marker: None,
     }
 }
 

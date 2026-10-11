@@ -1,8 +1,12 @@
 //! The committed `pki_der` and `pki_cms` fuzz seeds, replayed on stable.
 //!
-//! `fuzz/corpus/pki_der/` and `fuzz/corpus/pki_cms/` are twenty-three inputs —
-//! twenty-two written from the fixtures in this crate and one the first
-//! `pki_der` session found — and the targets that consume them
+//! `fuzz/corpus/pki_der/` and `fuzz/corpus/pki_cms/` are twenty-five inputs —
+//! twenty-two written from the fixtures in this crate, one the first
+//! `pki_der` session found, and two `SignedData` blobs OpenSSL 3.0.13 wrote:
+//! an RSASSA-PSS signer (`rsa-pss-signer`, the blob inside
+//! `crates/tinker-pdf/tests/signature_support/rsa-pss.pdf`) and a signer
+//! carrying a real RFC 3161 token (`rfc3161-signature-timestamp`, the blob
+//! inside `signature-timestamp.pdf`) — and the targets that consume them
 //! need nightly and a sanitizer runtime. So the seeds were only ever exercised
 //! when somebody ran `cargo fuzz`, which is not on every commit — and a seed
 //! corpus nothing reads is a corpus that stops describing the parser without
@@ -290,6 +294,8 @@ fn the_cms_seeds_parse_or_refuse_and_never_digest_ber() {
     };
     println!("RAN over {} pki_cms seeds", seeds.len());
     let mut ber_seeds = 0usize;
+    let mut pss_seeds = 0usize;
+    let mut tsp_seeds = 0usize;
 
     for (name, data) in &seeds {
         for limits in [
@@ -304,6 +310,7 @@ fn the_cms_seeds_parse_or_refuse_and_never_digest_ber() {
             assert!(inside(data, info.der()), "{name}");
             for signer in info.signed_data().signer_infos() {
                 assert!(inside(data, signer.signature()), "{name}");
+                let _ = tinker_pdf_pki::pss::parameters(&signer.signature_algorithm_id());
                 let Some(attributes) = signer.signed_attrs() else {
                     assert!(signer.signed_attrs_to_digest().is_none(), "{name}");
                     continue;
@@ -359,7 +366,36 @@ fn the_cms_seeds_parse_or_refuse_and_never_digest_ber() {
                 "{name} must be refused for its attributes, not its envelope"
             );
         }
+        // The PSS seed is OpenSSL's, and its parameter block sits eight levels
+        // inside the message — deep enough that a ceiling counted from the
+        // top of the parse refused it, which is the defect this pins.
+        if name == "rsa-pss-signer" {
+            pss_seeds += 1;
+            let info = ContentInfo::parse_with(data, CMS_WALK).expect("it parses");
+            let signer = info.signed_data().signer_infos().first().expect("a signer");
+            assert_eq!(
+                tinker_pdf_pki::pss::parameters(&signer.signature_algorithm_id()),
+                Ok(tinker_pdf_crypto::PssParameters {
+                    hash: tinker_pdf_crypto::DigestAlgorithm::Sha256,
+                    mask_hash: tinker_pdf_crypto::DigestAlgorithm::Sha256,
+                    salt_length: 32,
+                }),
+                "{name}"
+            );
+        }
+        // The token seed is OpenSSL's TSA's: its one token must read as a
+        // `TSTInfo` with the time OpenSSL printed when it made it.
+        if name == "rfc3161-signature-timestamp" {
+            tsp_seeds += 1;
+            let info = ContentInfo::parse_with(data, CMS_WALK).expect("it parses");
+            let signer = info.signed_data().signer_infos().first().expect("a signer");
+            let token = signer.timestamp_tokens().first().expect("a token");
+            let stamp = tinker_pdf_pki::TimeStampToken::parse(token).expect("{name}");
+            assert_eq!(stamp.info().time(), 1_790_934_450, "{name}");
+        }
         println!("  {name}");
     }
     assert_eq!(ber_seeds, 2, "both BER seeds are present and checked");
+    assert_eq!(pss_seeds, 1, "the RSASSA-PSS seed is present and checked");
+    assert_eq!(tsp_seeds, 1, "the RFC 3161 seed is present and checked");
 }

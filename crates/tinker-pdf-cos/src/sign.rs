@@ -165,6 +165,126 @@ pub trait Signer {
     fn sign(&self, digest: &[u8]) -> Result<Vec<u8>, SignRefused>;
 }
 
+/// The host's timestamping authority, held by the host: the [`Signer`] of a
+/// document timestamp (ISO 32000-2 12.8.5).
+///
+/// The engine performs no I/O, so it cannot ask an authority anything. It
+/// hands over the digest of the covered bytes and receives an RFC 3161
+/// `TimeStampToken` — a CMS `ContentInfo` whose `TSTInfo` stamps that digest —
+/// which goes into `/Contents` exactly as returned. How the host reached the
+/// authority (a `TimeStampReq` posted over HTTP, a local service, a fixture)
+/// is the host's, and so is whether the authority deserves trust; the reader
+/// asks that against the anchors its caller supplies, as it does for a
+/// signature.
+pub trait Timestamper {
+    /// Which digest the authority is to stamp the covered bytes under: the
+    /// `TimeStampReq`'s `messageImprint.hashAlgorithm`.
+    fn digest_algorithm(&self) -> DigestAlgorithm;
+
+    /// The token over `digest`, or the host's refusal.
+    ///
+    /// # Errors
+    /// Whatever the host decides — an authority that did not answer, a
+    /// `PKIStatus` that was not `granted` — carried verbatim.
+    fn timestamp(&self, digest: &[u8]) -> Result<Vec<u8>, SignRefused>;
+}
+
+/// What a caller supplies to add a document timestamp on save
+/// ([`crate::DocumentEditor::save_timestamped`]).
+///
+/// `#[non_exhaustive]` so that a field can join it without a break; build one
+/// with [`TimestampRequest::new`] and set what differs.
+#[non_exhaustive]
+pub struct TimestampRequest<'a> {
+    /// Where the timestamp goes: an existing empty signature field, or a new
+    /// invisible one. A document timestamp is not drawn, so
+    /// [`SigningTarget::NewVisibleField`] is refused.
+    pub target: SigningTarget,
+    /// The host's authority.
+    pub timestamper: &'a dyn Timestamper,
+    /// How many bytes to reserve for the token — the same rule as
+    /// [`SigningRequest::reserve`]: a token that does not fit is
+    /// [`SignError::ReserveTooSmall`], never a truncation.
+    pub reserve: usize,
+}
+
+impl<'a> TimestampRequest<'a> {
+    /// A request with a 16 KiB reservation, which fits a token carrying its
+    /// authority's certificate and a short chain.
+    pub fn new(target: SigningTarget, timestamper: &'a dyn Timestamper) -> TimestampRequest<'a> {
+        TimestampRequest {
+            target,
+            timestamper,
+            reserve: 16 * 1024,
+        }
+    }
+}
+
+/// A [`Timestamper`] seen as the [`Signer`] the reservation and the seal are
+/// written for: one digest in, one blob out.
+pub(crate) struct Stamp<'a>(pub(crate) &'a dyn Timestamper);
+
+impl Signer for Stamp<'_> {
+    fn digest_algorithm(&self) -> DigestAlgorithm {
+        self.0.digest_algorithm()
+    }
+
+    fn sign(&self, digest: &[u8]) -> Result<Vec<u8>, SignRefused> {
+        self.0.timestamp(digest)
+    }
+}
+
+/// Long-term validation material for a document's security store (ISO
+/// 32000-2 12.8.4.3, the `/DSS`): the certificates, CRLs and OCSP responses a
+/// host gathered, as DER, and the signatures they validate.
+///
+/// **Gathered by the host.** The engine performs no I/O, so it fetches no CRL
+/// and asks no responder; it writes what it is handed, and nothing here is
+/// parsed or judged — whether a response is fresh is a question with a clock
+/// in it. [`crate::DocumentEditor::add_validation_data`] writes it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ValidationData {
+    /// Certificates, each a DER `Certificate`: `/Certs`.
+    pub certificates: Vec<Vec<u8>>,
+    /// Certificate revocation lists, each a DER `CertificateList`: `/CRLs`.
+    pub crls: Vec<Vec<u8>>,
+    /// OCSP responses, each a DER `OCSPResponse`: `/OCSPs`.
+    pub ocsp_responses: Vec<Vec<u8>>,
+    /// The signatures this material validates, each by its `/Contents`
+    /// bytes as read. Each gets a `/VRI` entry, keyed by
+    /// [`validation_key`], naming exactly this material.
+    pub signatures: Vec<Vec<u8>>,
+    /// `/TU` on those entries: when the host gathered the material.
+    /// Supplied, never read from a clock.
+    pub gathered_at: Option<Date>,
+}
+
+impl ValidationData {
+    /// Nothing yet.
+    #[must_use]
+    pub fn new() -> ValidationData {
+        ValidationData::default()
+    }
+}
+
+/// The `/VRI` key a signature's validation material is filed under: the
+/// SHA-1 of its `/Contents` bytes as uppercase hexadecimal (ETSI EN 319 142-1
+/// §5.4.2.2).
+///
+/// Over the string exactly as stored, the reservation's zero fill included,
+/// which is what iText and PDFBox hash for a signature; iText re-encodes a
+/// document timestamp's token first and so files one under a different key.
+/// One function, used by the writer and by the reader's
+/// `Signature::validation_key`, so the two cannot disagree.
+#[must_use]
+pub fn validation_key(contents: &[u8]) -> String {
+    sha1::sha1(contents)
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect()
+}
+
 /// What a certifying signature permits afterwards (12.8.2.2, `/DocMDP` `/P`).
 ///
 /// A named enum rather than the integer the file carries, because `/P 0` and
@@ -231,21 +351,109 @@ impl FieldLock {
 }
 
 /// Where the signature goes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `#[non_exhaustive]` since [`SigningTarget::NewVisibleField`] arrived, and
+/// `Eq` gone with it: that variant carries a rectangle, which is four `f64`s.
+/// Both are breaks and were taken together, once, rather than the second
+/// waiting for the next variant.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum SigningTarget {
     /// An existing, empty `/FT /Sig` field, by its fully qualified name.
     ///
     /// Refused if the field is already signed, because overwriting a signature
     /// destroys evidence and the caller almost certainly meant to add one.
+    /// The field keeps whatever appearance it already has.
     Field(String),
     /// A new invisible signature field, added to the first page.
     ///
-    /// Invisible — a zero `/Rect` and the hidden flag — because generating a
-    /// visible appearance is a separate capability and a signature that draws
-    /// nothing is honest about that, where an empty box would not be.
+    /// Invisible because its `/Rect` is zero, for a caller that wants the
+    /// signature and not a seal on the page. Its `/F 132` is Print and
+    /// Locked (12.5.3 Table 165, bits 3 and 8) — the convention invisible
+    /// signatures carry — and not the hidden or no-view bit, which is what
+    /// this comment used to say.
     NewInvisibleField {
         /// The field's `/T`.
         name: String,
+    },
+    /// A new signature field that **draws**: a widget in `rect` on `page`
+    /// whose normal appearance shows who signed, when, why and where — the
+    /// request's own [`SigningRequest::name`], [`SigningRequest::signed_at`],
+    /// [`SigningRequest::reason`] and [`SigningRequest::location`] — and an
+    /// optional image beside them (12.7.4.5, 12.5.5).
+    ///
+    /// The text is taken from the request rather than supplied separately so
+    /// that the seal cannot say something the signature dictionary does not.
+    /// The appearance is an object of the same incremental update as the
+    /// signature, so the `/ByteRange` covers it: changing what the seal shows
+    /// afterwards is a modification the signature detects.
+    NewVisibleField {
+        /// The field's `/T`.
+        name: String,
+        /// The zero-based page the widget goes on.
+        page: u32,
+        /// Where on that page, in default user space.
+        rect: crate::pages::Rect,
+        /// What the appearance draws beyond the request's text.
+        appearance: SignatureAppearance,
+    },
+}
+
+/// What a visible signature's appearance draws beyond its text
+/// ([`SigningTarget::NewVisibleField`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SignatureAppearance {
+    /// An image — a handwritten signature, a company seal — drawn in the left
+    /// part of the box, its aspect ratio kept, with the text to its right.
+    /// `None` gives the text the whole box.
+    pub image: Option<SignatureImage>,
+}
+
+impl SignatureAppearance {
+    /// Text only.
+    #[must_use]
+    pub fn new() -> SignatureAppearance {
+        SignatureAppearance::default()
+    }
+
+    /// Text with `image` beside it.
+    #[must_use]
+    pub fn with_image(image: SignatureImage) -> SignatureAppearance {
+        SignatureAppearance { image: Some(image) }
+    }
+}
+
+/// An image for a visible signature, as the caller has it.
+///
+/// The minimal editor-side counterpart of
+/// [`crate::build::DocumentBuilder::add_image`]'s input: JPEG placed as it
+/// is, never re-encoded, and eight-bit samples written as they are. Owned
+/// rather than borrowed because it rides in a [`SigningTarget`], which has no
+/// lifetime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SignatureImage {
+    /// JPEG bytes, placed as `/DCTDecode`; the size and component count are
+    /// read from the frame header rather than taken on trust.
+    Jpeg(Vec<u8>),
+    /// Eight-bit greyscale, one byte a pixel, rows from the top.
+    Gray8 {
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+        /// The samples: at least `width * height` of them.
+        data: Vec<u8>,
+    },
+    /// Eight-bit RGB, three bytes a pixel, rows from the top.
+    Rgb8 {
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+        /// The samples: at least `width * height * 3` of them.
+        data: Vec<u8>,
     },
 }
 
@@ -309,7 +517,11 @@ impl<'a> SigningRequest<'a> {
 }
 
 /// Why a signing save produced no file.
+///
+/// `#[non_exhaustive]` from the visible-signature commit on, which added
+/// three variants and took the break once.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SignError {
     /// Signing needs [`crate::WriteMode::Incremental`]: a rewrite renumbers
     /// and relocates objects, so it cannot preserve a signature already in the
@@ -325,6 +537,17 @@ pub enum SignError {
     /// [`SigningTarget::NewInvisibleField`] on a document with no page to put
     /// the widget on.
     NoPages,
+    /// [`SigningTarget::NewVisibleField`] named a page the document does not
+    /// have.
+    NoSuchPage(u32),
+    /// [`SigningTarget::NewVisibleField`]'s rectangle has no area, or a
+    /// coordinate that is not a number: there is nowhere to draw the seal.
+    RectUnusable,
+    /// The [`SignatureImage`] does not describe an image: a JPEG whose frame
+    /// header cannot be read, a zero dimension, or fewer samples than the
+    /// dimensions promise. Refused rather than drawn as a placeholder, because
+    /// what a seal shows is part of what is signed.
+    ImageUnusable,
     /// The CMS blob the signer returned does not fit the reservation. The
     /// alternative is a truncated signature, which is a file that looks signed
     /// and is not.
@@ -336,6 +559,11 @@ pub enum SignError {
     },
     /// The host declined.
     SignerRefused(SignRefused),
+    /// A document timestamp was asked to draw: [`SigningTarget::NewVisibleField`]
+    /// on a [`TimestampRequest`]. A timestamp says when the covered bytes
+    /// existed and nothing about who signed them, so there is no seal to
+    /// draw that would not claim more than it is.
+    VisibleTimestamp,
     /// The digest could not be taken, which means the layout produced a
     /// `/ByteRange` that does not fit its own file. A bug here rather than in
     /// the document, and refusing beats signing something unknown.
@@ -350,12 +578,18 @@ impl std::fmt::Display for SignError {
             SignError::NotASignatureField(name) => write!(f, "{name:?} is not a signature field"),
             SignError::FieldAlreadySigned(name) => write!(f, "{name:?} is already signed"),
             SignError::NoPages => f.write_str("the document has no page to place a field on"),
+            SignError::NoSuchPage(page) => write!(f, "no page {page} to place the field on"),
+            SignError::RectUnusable => f.write_str("the signature's rectangle has no area"),
+            SignError::ImageUnusable => f.write_str("the signature image is not an image"),
             SignError::ReserveTooSmall { needed, reserved } => write!(
                 f,
                 "the signature needs {needed} bytes and {reserved} were reserved"
             ),
             SignError::SignerRefused(refusal) => {
                 write!(f, "the signer refused: {}", refusal.reason)
+            }
+            SignError::VisibleTimestamp => {
+                f.write_str("a document timestamp is not drawn; its field must be invisible")
             }
             SignError::RangeDoesNotFit => {
                 f.write_str("the computed byte range does not fit the file")
@@ -388,6 +622,32 @@ pub fn pdf_date(date: Date) -> String {
         }
         // An unspecified zone is legal and means local time, which is what a
         // signer who did not say meant.
+        None => {}
+    }
+    out
+}
+
+/// The same instant as a person reads it on a seal: `2026-09-26 14:05:09
+/// +01:00`, `Z` for UTC, and no zone at all where the date gives none —
+/// the same three cases [`pdf_date`] writes, so the seal and `/M` cannot
+/// disagree about which zone was meant.
+#[must_use]
+pub(crate) fn display_date(date: Date) -> String {
+    let mut out = format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        date.year, date.month, date.day, date.hour, date.minute, date.second
+    );
+    match date.utc_offset_minutes {
+        Some(0) => out.push('Z'),
+        Some(offset) => {
+            let sign = if offset < 0 { '-' } else { '+' };
+            let magnitude = offset.abs();
+            out.push_str(&format!(
+                " {sign}{:02}:{:02}",
+                magnitude / 60,
+                magnitude % 60
+            ));
+        }
         None => {}
     }
     out
@@ -542,7 +802,24 @@ impl Reserved {
             literal(&mut bytes, &pdf_date(date));
         }
         references(&mut bytes, request, catalog);
+        Reserved::finish(bytes, request.reserve)
+    }
 
+    /// A document timestamp dictionary (ISO 32000-2 12.8.5): `/Type
+    /// /DocTimeStamp` and `/SubFilter /ETSI.RFC3161`, and nothing a signer
+    /// claims — no `/M`, `/Name` or `/Reason`, because the token is the
+    /// whole of the statement and its time is the authority's.
+    pub(crate) fn document_timestamp(reserve: usize) -> Reserved {
+        let mut bytes = Vec::with_capacity(reserve * 2 + 256);
+        bytes.extend_from_slice(
+            b"<< /Type /DocTimeStamp /Filter /Adobe.PPKLite /SubFilter /ETSI.RFC3161",
+        );
+        Reserved::finish(bytes, reserve)
+    }
+
+    /// The `/ByteRange` and `/Contents` reservations both dictionaries end
+    /// with, and the offsets of each.
+    fn finish(mut bytes: Vec<u8>, reserve: usize) -> Reserved {
         bytes.extend_from_slice(b" /ByteRange ");
         let byte_range_at = bytes.len();
         bytes.extend_from_slice(BYTE_RANGE_TEMPLATE.as_bytes());
@@ -551,7 +828,7 @@ impl Reserved {
         bytes.extend_from_slice(b" /Contents ");
         let contents_at = bytes.len();
         bytes.push(b'<');
-        bytes.resize(bytes.len() + request.reserve * 2, b'0');
+        bytes.resize(bytes.len() + reserve * 2, b'0');
         bytes.push(b'>');
         let contents_len = bytes.len() - contents_at;
 

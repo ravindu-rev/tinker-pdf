@@ -60,9 +60,11 @@ use libfuzzer_sys::fuzz_target;
 
 use tinker_pdf_css::cascade::ComputedStyle;
 use tinker_pdf_css::property::{
-    BorderStyle, BoxSizing, Clear, Display, Float, LengthPercentage, LineBreakStrictness,
-    LineHeight, ListStyleType, MarginValue, OverflowWrap, PageBreak, PageBreakInside, Sides, Size,
-    TextAlign, Visibility, WhiteSpace, WordBreak,
+    BorderStyle, BoxSizing, Clear, Direction, Display, Float, Hyphens, LengthPercentage,
+    LineBreakStrictness,
+    LineHeight, ListStyleType, MarginValue, Overflow, OverflowWrap, PageBreak, PageBreakInside,
+    Sides, Size,
+    TextAlign, TextTransform, UnicodeBidi, Visibility, WhiteSpace, WordBreak,
 };
 use tinker_pdf_layout::metrics::FixedPitch;
 use tinker_pdf_layout::uax14::{opportunities, Tailoring};
@@ -76,10 +78,10 @@ use tinker_pdf_layout::{layout_with, BoxNode, Budget, Content, Limits, Options};
 /// **about** — an ideograph, a small kana whose class the tailoring decides, a
 /// no-break space, a word joiner, a zero-width space, a joiner, a soft hyphen,
 /// an opening bracket that must not end a line and a full-width one that may.
-const ALPHABET: [char; 24] = [
+const ALPHABET: [char; 25] = [
     'a', 'b', ' ', ' ', '\n', '\t', '-', '.', '0', '9', '(', ')', '\u{6771}', '\u{4eac}',
     '\u{3041}', '\u{3001}', '\u{ff08}', '\u{a0}', '\u{2060}', '\u{200b}', '\u{200d}', '\u{2010}',
-    '\u{05d0}', '\u{1f469}',
+    '\u{05d0}', '\u{1f469}', '\u{ad}',
 ];
 
 /// The bytes, one at a time, wrapping when they run out.
@@ -164,11 +166,34 @@ fn style(bytes: &mut Bytes<'_>, block: bool) -> ComputedStyle {
         1 => LineHeight::Number(1.0 + f64::from(c & 3)),
         _ => LineHeight::Px(f64::from(c & 63)),
     };
-    style.text_align = match c >> 6 {
-        0 => TextAlign::Left,
-        1 => TextAlign::Right,
-        2 => TextAlign::Center,
+    style.text_align = match (c >> 6, d & 1) {
+        (0, 0) => TextAlign::Left,
+        (0, _) => TextAlign::Start,
+        (1, 0) => TextAlign::Right,
+        (1, _) => TextAlign::End,
+        (2, _) => TextAlign::Center,
         _ => TextAlign::Justify,
+    };
+    // `direction` moves where a line starts and which side a marker stands
+    // on, and `unicode-bidi` makes an inline box an embedding every piece
+    // inside it carries: a stack the generator's nesting deepens.
+    style.direction = if (a ^ b) & 1 != 0 {
+        Direction::Rtl
+    } else {
+        Direction::Ltr
+    };
+    // A soft hyphen is a break that measures nothing until it is taken and
+    // a hyphen's width when it is, and `hyphens: none` takes it away.
+    style.hyphens = if (a ^ d) & 2 != 0 {
+        Hyphens::None
+    } else {
+        Hyphens::Manual
+    };
+    style.unicode_bidi = match (b ^ c) & 3 {
+        0 => UnicodeBidi::Normal,
+        1 => UnicodeBidi::Embed,
+        2 => UnicodeBidi::Isolate,
+        _ => UnicodeBidi::Plaintext,
     };
     style.text_indent = LengthPercentage::Px(f64::from(d as i8));
     style.white_space = match (b >> 3) & 7 {
@@ -222,6 +247,26 @@ fn style(bytes: &mut Bytes<'_>, block: bool) -> ComputedStyle {
     } else {
         Visibility::Visible
     };
+    // `text-transform` changes how many characters a run has, so every length
+    // a line breaker holds about its text can be wrong after it — the reason it
+    // is in the generator.
+    style.text_transform = match (a >> 6) & 3 {
+        0 => TextTransform::None,
+        1 => TextTransform::Uppercase,
+        2 => TextTransform::Lowercase,
+        _ => TextTransform::Capitalize,
+    };
+    // `overflow` takes what a block-axis clip cuts out of the column and keeps
+    // it as runs laid out and not painted, and makes every `hidden` box a
+    // formatting context of its own: the conservation equality below is the
+    // assertion that the clip hides the text and loses none of it.
+    let overflow = match (c ^ d) & 3 {
+        0 => Overflow::Hidden,
+        1 => Overflow::Clip,
+        _ => Overflow::Visible,
+    };
+    style.overflow_x = overflow;
+    style.overflow_y = overflow;
     style.float = match (d >> 4) & 3 {
         1 => Float::Left,
         2 => Float::Right,
@@ -410,7 +455,16 @@ fuzz_target!(|data: &[u8]| {
     // Gap 31's fourth honesty device, on trees nobody wrote.
     let mut wanted = String::new();
     expected(&tree, &mut wanted);
-    let got: String = laid.text().chars().filter(|c| !c.is_whitespace()).collect();
+    // ASCII-lowercased because `text-transform` is in the generator, and it is
+    // the one legitimate way for a character to change: `a` and `b` are the
+    // only cased letters in `ALPHABET`, so their capitals are the only thing a
+    // transform can produce, and folding them back keeps this an equality.
+    let got: String = laid
+        .text()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
     assert!(
         got == wanted,
         "text conservation failed: {} characters in, {} out",

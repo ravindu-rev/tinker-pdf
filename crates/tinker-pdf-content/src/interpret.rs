@@ -249,6 +249,18 @@ pub trait FontSource {
         0
     }
 
+    /// The named font's own name — its `/BaseFont`, as the dictionary writes
+    /// it — for [`Glyph::font_name`].
+    ///
+    /// Asked once per text-showing operator, in the scope the operator runs
+    /// in, which is the only place the resource name can be resolved
+    /// correctly. `None` — the default — where the source has no name to
+    /// give, which is also the honest answer for a font that has none.
+    fn font_name(&self, font: &[u8]) -> Option<Arc<str>> {
+        let _ = font;
+        None
+    }
+
     /// A form XObject, when the interpreter should recurse into one.
     /// Returning `None` skips it.
     fn form(&self, name: &[u8]) -> Option<Form> {
@@ -303,6 +315,33 @@ pub trait FontSource {
     fn resolve_color(&self, space: &[u8], components: &[f64]) -> Option<Rgb> {
         let _ = (space, components);
         None
+    }
+
+    /// The components themselves, as bytes, when the named space **is**
+    /// DeviceCMYK, and `None` for every other space — the default, which
+    /// keeps every colour light.
+    ///
+    /// Asked beside [`FontSource::resolve_color`] so that a device
+    /// compositing in ink can keep the document's own
+    /// ([`GraphicsState::fill_ink`]): light converted back into ink is not
+    /// the ink the file chose.
+    fn resolve_ink(&self, space: &[u8], components: &[f64]) -> Option<[u8; 4]> {
+        let _ = (space, components);
+        None
+    }
+
+    /// The colour `cs` resets a named space to (8.6.8), which each space's
+    /// own clause gives: black in every device space, which for DeviceCMYK is
+    /// `0 0 0 1` and not all zeros; a tint of 1.0 for `/Separation` (8.6.6.4)
+    /// and 1.0 in every component for `/DeviceN` (8.6.6.5); zero, or the
+    /// nearest value a `/Range` allows, for `/Lab` (8.6.5.4).
+    ///
+    /// The default is all zeros at [`FontSource::color_components`]'s count,
+    /// which is right for DeviceGray, DeviceRGB, the CIE-based and ICC
+    /// spaces and an `/Indexed` space's index, and wrong for the others
+    /// above; an implementation that can tell those apart answers for them.
+    fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
+        self.color_components(space).map(|n| vec![0.0; n])
     }
 
     /// The fill and stroke alphas an `/ExtGState` sets, if it sets them.
@@ -988,7 +1027,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                         g: value,
                         b: value,
                     };
-                    self.set_color(op == b"g", color, None);
+                    self.set_color(op == b"g", color, None, None);
                 }
             }
             b"rg" | b"RG" => {
@@ -998,14 +1037,15 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                         g: to_byte(g),
                         b: to_byte(b),
                     };
-                    self.set_color(op == b"rg", color, None);
+                    self.set_color(op == b"rg", color, None, None);
                 }
             }
             b"k" | b"K" => {
                 if let (Some(c), Some(m), Some(y), Some(k)) =
                     (self.num(3), self.num(2), self.num(1), self.num(0))
                 {
-                    self.set_color(op == b"k", cmyk_to_rgb(c, m, y, k), None);
+                    let ink = [to_byte(c), to_byte(m), to_byte(y), to_byte(k)];
+                    self.set_color(op == b"k", cmyk_to_rgb(c, m, y, k), None, Some(ink));
                 }
             }
             b"cs" | b"CS" => {
@@ -1014,13 +1054,19 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 };
                 let fill = op == b"cs";
                 // 8.6.8: selecting a space resets the colour to that space's
-                // initial value, which is black in every device space.
-                let initial = self
-                    .fonts
-                    .color_components(&space)
-                    .and_then(|n| self.fonts.resolve_color(&space, &vec![0.0; n]))
+                // initial value, which is black in every device space — and
+                // DeviceCMYK's black is `0 0 0 1`, which an all-zeros reset
+                // made white — and the whole colorant, a tint of 1.0, in a
+                // `/Separation` or `/DeviceN` one, which it made none.
+                let components = self.fonts.initial_color(&space);
+                let initial = components
+                    .as_ref()
+                    .and_then(|c| self.fonts.resolve_color(&space, c))
                     .unwrap_or(Rgb::BLACK);
-                self.set_color(fill, initial, Some(space));
+                let ink = components
+                    .as_ref()
+                    .and_then(|c| self.fonts.resolve_ink(&space, c));
+                self.set_color(fill, initial, Some(space), ink);
             }
             b"sc" | b"SC" | b"scn" | b"SCN" => {
                 let fill = op == b"sc" || op == b"scn";
@@ -1054,7 +1100,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                             .as_ref()
                             .and_then(|s| self.fonts.resolve_color(s, &components))
                         {
-                            self.set_color(fill, color, None);
+                            self.set_color(fill, color, None, None);
                         }
                     }
                     self.set_pattern(fill, name);
@@ -1064,14 +1110,23 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     return;
                 }
 
-                let resolved = match &space {
-                    Some(space) => self.fonts.resolve_color(space, &components),
+                let (resolved, ink) = match &space {
+                    Some(space) => (
+                        self.fonts.resolve_color(space, &components),
+                        self.fonts.resolve_ink(space, &components),
+                    ),
                     // Without a named space the component count is the only
-                    // clue, and it is a reliable one.
-                    None => Some(components_to_rgb(&components)),
+                    // clue, and it is a reliable one: four is DeviceCMYK.
+                    None => (
+                        Some(components_to_rgb(&components)),
+                        match components[..] {
+                            [c, m, y, k] => Some([to_byte(c), to_byte(m), to_byte(y), to_byte(k)]),
+                            _ => None,
+                        },
+                    ),
                 };
                 if let Some(color) = resolved {
-                    self.set_color(fill, color, space);
+                    self.set_color(fill, color, space, ink);
                 }
             }
 
@@ -1327,16 +1382,19 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         }
     }
 
-    /// Applies a colour to the fill or stroke slot.
-    fn set_color(&mut self, fill: bool, color: Rgb, space: Option<Vec<u8>>) {
+    /// Applies a colour to the fill or stroke slot, with its DeviceCMYK
+    /// components when it has them.
+    fn set_color(&mut self, fill: bool, color: Rgb, space: Option<Vec<u8>>, ink: Option<[u8; 4]>) {
         if fill {
             self.gs.fill_color = color;
+            self.gs.fill_ink = ink;
             self.gs.fill_pattern = None;
             if let Some(space) = space {
                 self.gs.fill_space = Some(space);
             }
         } else {
             self.gs.stroke_color = color;
+            self.gs.stroke_ink = ink;
             self.gs.stroke_pattern = None;
             if let Some(space) = space {
                 self.gs.stroke_space = Some(space);
@@ -1653,6 +1711,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         };
         let vertical = self.fonts.is_vertical(&font_name);
         let font_id = self.fonts.font_id(&font_name);
+        let font_label = self.fonts.font_name(&font_name);
 
         for (code, text, width) in self.fonts.decode(&font_name, bytes) {
             let ts = self.gs.text.clone();
@@ -1759,6 +1818,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 size: ts.size,
                 vertical,
                 font_id,
+                font_name: font_label.clone(),
             };
             self.device.show_glyph(&glyph, &self.gs);
 
@@ -1882,7 +1942,16 @@ fn is_inline_space(b: &u8) -> bool {
     b.is_ascii_whitespace() || *b == 0
 }
 
-fn skip_inline_image(rest: &[u8]) -> usize {
+/// How many bytes of `rest` — what follows a `BI` operator — the inline
+/// image takes, through its `EI` (8.9.7).
+///
+/// Public for the other reader of content streams that must not tokenize an
+/// inline image's samples: the facade's redaction, which rewrites a stream
+/// token by token and would otherwise re-serialize the samples as whatever
+/// tokens they happened to spell. One answer to where an inline image ends,
+/// so the interpreter and the rewrite cannot disagree about it.
+#[must_use]
+pub fn skip_inline_image(rest: &[u8]) -> usize {
     let mut i = 0usize;
     while i + 1 < rest.len() {
         if rest.get(i) == Some(&b'E') && rest.get(i + 1) == Some(&b'I') {
@@ -2484,6 +2553,72 @@ mod tests {
         let state = stroke_state(&d).expect("the stroke reached the device");
         assert_eq!(state.stroke_pattern, None);
         assert_eq!(state.stroke_color, Rgb { r: 0, g: 0, b: 255 });
+    }
+
+    /// Resources that know DeviceCMYK by name, as the facade's do.
+    struct CmykSpaces;
+
+    impl FontSource for CmykSpaces {
+        fn decode(&self, _font: &[u8], _bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            Vec::new()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+        fn color_components(&self, space: &[u8]) -> Option<usize> {
+            (space == b"DeviceCMYK").then_some(4)
+        }
+        fn resolve_color(&self, space: &[u8], c: &[f64]) -> Option<Rgb> {
+            match (space, c) {
+                (b"DeviceCMYK", [c, m, y, k]) => Some(cmyk_to_rgb(*c, *m, *y, *k)),
+                _ => None,
+            }
+        }
+        fn resolve_ink(&self, space: &[u8], c: &[f64]) -> Option<[u8; 4]> {
+            match (space, c) {
+                (b"DeviceCMYK", [c, m, y, k]) => {
+                    Some([to_byte(*c), to_byte(*m), to_byte(*y), to_byte(*k)])
+                }
+                _ => None,
+            }
+        }
+        fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
+            (space == b"DeviceCMYK").then(|| vec![0.0, 0.0, 0.0, 1.0])
+        }
+    }
+
+    /// A colour set in DeviceCMYK keeps its components beside its light —
+    /// `k` and `K` by the operator, `cs`/`sc` by asking the resources — and a
+    /// colour set any other way has none, so an ink device composites the
+    /// file's own ink and nothing it would have to guess at. `cs` resets to
+    /// the space's initial colour, which for DeviceCMYK is 8.6.8's `0 0 0 1`.
+    #[test]
+    fn a_device_cmyk_colour_keeps_its_components_beside_its_light() {
+        let mut d = RecordingDevice::new();
+        interpret(
+            b"1 1 1 1 k 0.2 0.4 0.6 0.1 K 0 0 m 10 10 l S \
+              1 0 0 rg 0 0 m 10 10 l S \
+              /DeviceCMYK cs 0 0 m 10 10 l S \
+              /DeviceCMYK CS 0.5 0 0 0 SC 0 0 m 10 10 l S \
+              0.5 G 0 0 m 10 10 l S",
+            Matrix::IDENTITY,
+            &mut d,
+            &CmykSpaces,
+        );
+        let states: Vec<&GraphicsState> = d
+            .of_kind(EventKind::StrokePath)
+            .filter_map(Event::state)
+            .collect();
+        assert_eq!(states.len(), 5);
+        assert_eq!(states[0].fill_ink, Some([255; 4]), "a rich black");
+        assert_eq!(states[0].fill_color, Rgb::BLACK, "whose light is black");
+        assert_eq!(states[0].stroke_ink, Some([51, 102, 153, 26]), "`K`");
+        assert_eq!(states[1].fill_ink, None, "`rg` is light and has no ink");
+        assert_eq!(states[1].stroke_ink, Some([51, 102, 153, 26]));
+        assert_eq!(states[2].fill_ink, Some([0, 0, 0, 255]), "`cs` resets");
+        assert_eq!(states[2].fill_color, Rgb::BLACK, "to black, not white");
+        assert_eq!(states[3].stroke_ink, Some([128, 0, 0, 0]), "`SC`");
+        assert_eq!(states[4].stroke_ink, None, "`G` is light");
     }
 
     // -----------------------------------------------------------------------

@@ -27,6 +27,13 @@
 //!   that the milestone which makes it succeed cannot make it succeed wrongly.
 //! - the warning set stays deduplicated, so a stream of a million bad markers
 //!   cannot turn leniency into an allocation attack.
+//! - **`jpx_header` agrees with the decode it stands in for.** The comic path
+//!   places a `.jp2` page's bytes on the strength of the header read alone, so
+//!   a decode that succeeds must have had a header read that succeeded with the
+//!   same width, height, channel count, precision and opacity — and a header
+//!   read that refuses must be a file the decode refuses too. A header read
+//!   that said yes to a file the decode refuses by a *declared* property would
+//!   put a page into a document that then draws grey.
 //! # What this target cannot find, and what covers it instead
 //!
 //! Every assertion above is **structural**: the samples are the size the
@@ -49,7 +56,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use tinker_pdf_filters::{jpx_decode, Capability, FilterError, Limits};
+use tinker_pdf_filters::{jpx_decode, jpx_header, Capability, FilterError, Limits};
 
 /// The twelve bytes a JP2 file opens with (T.800 I.5.1), and the empty
 /// `jp2h` needed to make the wrapper a walk rather than a rejection.
@@ -98,8 +105,27 @@ fuzz_target!(|data: &[u8]| {
 
     for input in inputs {
         let mut warnings = Vec::new();
+        let header = jpx_header(&input, &limits);
         match jpx_decode(&input, &limits, &mut warnings) {
             Ok(image) => {
+                let header = header.expect("a file that decodes has a header that reads");
+                assert_eq!(
+                    (
+                        header.width,
+                        header.height,
+                        header.components,
+                        header.precision,
+                        header.opacity
+                    ),
+                    (
+                        image.width,
+                        image.height,
+                        image.components,
+                        image.precision,
+                        image.opacity.is_some()
+                    ),
+                    "the header read and the decode disagree about the image"
+                );
                 let bytes = if image.precision > 8 { 2usize } else { 1 };
                 let want = (image.width as usize)
                     .checked_mul(image.height as usize)
@@ -133,6 +159,8 @@ fuzz_target!(|data: &[u8]| {
                 // A refusal that says nothing is a refusal a reader cannot
                 // act on (ruling 10).
                 assert!(!warnings.is_empty(), "a refusal left no warning");
+                // The converse is not asserted: a header that reads is
+                // allowed to belong to a file whose packets do not decode.
             }
         }
 

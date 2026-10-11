@@ -24,20 +24,40 @@
 
 mod annotations;
 mod annots;
+mod associated_files;
 pub mod cbz;
+mod copies;
+mod display;
 pub mod epub;
+pub mod fb2;
 pub mod fontlist;
 pub mod fonts;
+pub mod form_data;
+pub mod html;
+mod images;
 pub mod layers;
+pub mod markdown;
 pub mod mdp;
+mod observe;
 mod optional;
+mod output_intents;
 pub mod pdfa;
+pub mod pdfua;
+pub mod pdfx;
+mod png_read;
+pub mod reading_order;
+mod recode;
 pub mod redact;
+mod render_part;
 mod resources;
 pub mod shaping;
 pub mod signature;
+pub mod standalone;
 pub mod structure;
 pub mod subset;
+mod svg_out;
+pub mod tables;
+mod text_order;
 pub mod verdict;
 pub mod write;
 pub mod xps;
@@ -54,6 +74,14 @@ use tinker_pdf_cos::{outline as cos_outline, pages as cos_pages};
 /// owns rather than the internal ones. `fontlist`'s module comment argues the
 /// boundary once for all three.
 pub use annotations::{Annotation, AnnotationFlags, AnnotationKind};
+/// Associated files (ISO 32000-2 14.13), as `Document::associated_files`,
+/// `associated_files_of` and `structure_associated_files`,
+/// `Page::associated_files`, `annotation_associated_files` and
+/// `marked_content_associated_files`, and `StructElement::associated_files`
+/// read them.
+pub use associated_files::{
+    AssociatedFile, MarkedContentFileList, MarkedContentFiles, MAX_ASSOCIATED_FILE_BYTES,
+};
 /// Comic archives: what [`Document::open`] does with a `PK\x03\x04` at offset
 /// zero, and what it refuses by name.
 pub use cbz::{
@@ -62,15 +90,50 @@ pub use cbz::{
 };
 pub use fontlist::{DocumentFont, FontProgram};
 pub use fonts::{FontProvider, FontRequest, SimpleFontProvider};
+/// HTML and CSS to PDF as a creation API (tier 5): with [`FromHtml`] in scope,
+/// `DocumentBuilder::from_html(markup, stylesheet, page)` lays markup out
+/// through the EPUB reader's cascade, layout and painter.
+pub use html::{FromHtml, HtmlError, HtmlReport, PageBox};
 pub use layers::OptionalGroup;
 /// Digital signatures, read (12.8), behind [`Document::signatures`].
 pub use mdp::{Change, Modification, Modifications, Touched};
+/// Output intents, the catalog's and (PDF 2.0) a page's: what
+/// `Document::output_intents` and `Page::output_intents` hand back.
+pub use output_intents::{OutputIntent, MAX_OUTPUT_INTENT_BYTES};
 /// PDF/A conformance (ISO 19005), behind [`Document::validate_pdfa`].
 pub use pdfa::{
     Clause, ConformanceFinding, Coverage as PdfACoverage, FindingKind, Flavour, Level, Part,
     RuleGroup as PdfARuleGroup, StagedRule, Verdict as PdfAVerdict, STAGED as PDFA_STAGED,
 };
-pub use signature::{Anchor, Coverage, CoverageDefect, Signature, SignatureWarning, SubFilter};
+/// PDF/UA conformance (ISO 14289), behind [`Document::validate_pdfua`]: the
+/// same findings, and the clauses this build abstains on, by name.
+pub use pdfua::{
+    Abstention as PdfUaAbstention, AbstentionClass as PdfUaAbstentionClass,
+    Coverage as PdfUaCoverage, UaGap as PdfUaGap, UaPart as PdfUaPart, Verdict as PdfUaVerdict,
+    STAGED as PDFUA_STAGED, UNDECIDABLE as PDFUA_UNDECIDABLE,
+};
+/// PDF/X conformance (ISO 15930), behind [`Document::validate_pdfx`]: the
+/// 2003 levels' rules as the CGATS application notes restate them, and every
+/// clause of the claimed level this build did not read, by name.
+pub use pdfx::{
+    Abstention as PdfXAbstention, AbstentionClass as PdfXAbstentionClass, Coverage as PdfXCoverage,
+    Verdict as PdfXVerdict, XClaim as PdfXClaim, XFlavour as PdfXFlavour, XGap as PdfXGap,
+    STAGED as PDFX_STAGED, UNREAD as PDFX_UNREAD,
+};
+/// Reading order, named — the stream's, the tree's, and one inferred from
+/// geometry and labelled as such: [`Page::text_in`], [`Page::inferred_order`]
+/// (`docs/design/reading-order.md`).
+pub use reading_order::{
+    DeclineReason, InferenceOptions, InferenceWarning, InferredBlock, InferredOrder, OrderedText,
+    ReadingOrder, Role,
+};
+pub use signature::{
+    Anchor, Coverage, CoverageDefect, SecurityStore, SecurityStoreWarning, Signature,
+    SignatureWarning, SubFilter, ValidationEntry,
+};
+/// One-file documents that are not PDFs: what [`Document::open`] does with a
+/// standalone SVG, a bare image and a loose XHTML file (tier 5).
+pub use standalone::Standalone;
 /// Tagged PDF: the logical structure tree, and the reading-order view over it
 /// (14.7, 14.8).
 pub use structure::{
@@ -78,10 +141,24 @@ pub use structure::{
     TextSource,
 };
 /// Font subsetting on rewrite (9.6.4, 9.9).
-pub use subset::{SubsetReport, Subsetted, Untouched, UntouchedReason};
-pub use tinker_pdf_content::{
-    MarkedProps, Quad, TextBlock, TextChar, TextLine, TextPage, TextWarning, WritingMode,
+pub use subset::{SubsetReport, Subsetted, Type3Subsetted, Untouched, UntouchedReason};
+/// Tables, stated in the structure tree and inferred from what a page draws:
+/// [`Page::tables`], [`Page::stated_tables`], [`Page::inferred_tables`] and the
+/// rules [`Page::table_rules`] reads (`docs/design/table-reconstruction.md`).
+pub use tables::{
+    HeaderEvidence, InferredCell, InferredTable, InferredTables, PageTables, StatedCell,
+    StatedTable, TableEvidence, TableOptions, TableRule, TableRules, TableSource, TableWarning,
 };
+/// How [`Page::text_with`] orders a line: logical by default, or the content
+/// stream's own order (ruling 14).
+pub use text_order::TextOptions;
+pub use tinker_pdf_content::{
+    HyphenCounts, MarkedProps, PlainText, PlainTextOptions, Quad, SearchOptions, TextBlock,
+    TextChar, TextLine, TextPage, TextWarning, TextWord, WritingMode,
+};
+/// Structured text serialisation — JSON, XML and HTML with fonts, sizes and
+/// boxes — behind [`Page::text_frame`] and [`TextPage::serialize`].
+pub use tinker_pdf_content::{PageFrame, TextFormat, TextWriter, TEXT_FORMAT_VERSION};
 /// The strict validator's verdict (ruling 13), behind [`Document::validate`].
 ///
 /// `kind_counts` and `tier_counts` are how a report says *which* rules a file
@@ -93,8 +170,9 @@ pub use tinker_pdf_cos::{
     ScriptSummary, Trapped, Warning, WarningKind,
 };
 pub use tinker_pdf_cos::{
-    BlendMode, DeviceSpace, ExtGState, FormXObject, Function, Glyph, MaskKind, PlacedGlyph,
-    Shading, ShadingPattern, StateMask, TilingPattern, TilingType, TransparencyGroup,
+    BlendMode, CieSpace, DeviceSpace, ExtGState, FormXObject, Function, Glyph, MaskKind, PieceText,
+    PlacedGlyph, Shading, ShadingPattern, StateMask, TextPiece, TilingPattern, TilingType,
+    TransparencyGroup,
 };
 /// Streaming open: where a document's bytes come from when they are not all
 /// in hand (`docs/design/streaming-open.md`).
@@ -122,8 +200,31 @@ pub use tinker_pdf_cos::{FontKind, ProgramKey};
 /// How many bytes are read to decide whether a source holds a container.
 ///
 /// `cbz::container` tests fixed positions and reads no further than byte 262;
-/// one kilobyte is that with room, and it is one head read either way.
+/// one kilobyte is that with room, and it is one head read either way. It is
+/// also the window a PDF header is looked for in, which is what lets a streamed
+/// PDF skip [`standalone::sniff`]'s larger one.
 const CONTAINER_SNIFF: u64 = 1024;
+/// The per-family annotation payloads (12.5.6) behind [`Annotation::payload`],
+/// the types they are built from, and [`Page::annotation_list`]'s answer —
+/// every one of them a field type or a return type of the read surface, so a
+/// caller can name what it is handed (ruling 11).
+pub use annotations::{
+    AnnotationList, AnnotationPayload, Border, BorderEffect, FileSpec, Linked, RichText,
+    MAX_ANNOTATION_BYTES,
+};
+/// A page interpreted once and drawn at any scale: [`Page::display_list`].
+pub use display::DisplayList;
+/// Images a page draws, with their samples before any colour conversion and
+/// the space they are in, behind [`Page::images`].
+pub use images::{ImageMask, ImageSpace, PageImage, SampleCodec};
+/// Why [`Bitmap::from_png`] would not read a file: the decoder's own reason,
+/// named rather than collapsed, because "not a PNG" and "a colour type Table
+/// 11.1 does not permit" are different answers to show a person.
+pub use png_read::PngReadError;
+/// Why [`Page::render_form`] or [`Page::render_annotation`] drew nothing.
+pub use render_part::{NotDrawn, RenderPartError};
+/// A page written as SVG 1.1: [`Page::to_svg`], and what it could not say.
+pub use svg_out::{Rasterised, Svg, SvgOptions, SvgWarning, MAX_SVG_BYTES};
 /// Writing: creation, editing and saving.
 ///
 /// Without these on the facade a caller depending only on this crate could
@@ -168,10 +269,62 @@ const CONTAINER_SNIFF: u64 = 1024;
 /// `finish_archival` returns and what `refusals` hands back — a refusal a
 /// caller cannot name is a refusal they cannot match on, which is the thing
 /// this whole surface exists to avoid.
+///
+/// `Tag` is the argument to `PageBuilder::tagged_with` and `open_tag`, the
+/// tagging API that writes 14.9's properties; `is_language_tag` is the check
+/// its `lang` documentation sends a caller to. `NamespaceId` is what
+/// `DocumentBuilder::add_namespace` hands back and `Tag::namespace` takes, and
+/// the three namespace URIs are ISO 32000-2's, which both the writer's
+/// `add_namespace` and the reader's `StructElement::standard_namespace` speak.
+/// `NewOutputIntent` is `PageBuilder::output_intent`'s argument, and
+/// `NewAssociatedFile` the argument of every `associate_file`; the
+/// `FileRelationship` it carries is the one `AssociatedFile` reads back.
 pub use tinker_pdf_cos::{
-    ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal, DocumentBuilder, DocumentEditor,
-    EditCheckpoint, EmbeddedWhole, Encryption, FillError, FillRejection, ImageData, OutlineEntry,
-    PageBuilder, SkippedWidget, SubsetRefusal, Target, WidgetDefect, WriteMode, WriteOptions,
+    is_language_tag, is_standard_namespace, ArchivalLevel, ArchivalPart, ArchivalProfile,
+    ArchivalRefusal, DocumentBuilder, DocumentEditor, EditCheckpoint, EmbeddedWhole, Encryption,
+    FileRelationship, FillError, FillRejection, ImageData, NamespaceId, NewAssociatedFile,
+    NewOutputIntent, OutlineEntry, PageBuilder, SkippedWidget, SubsetRefusal, TableAttributes,
+    TableScope, Tag, Target, WidgetDefect, WriteMode, WriteOptions, MATHML_NAMESPACE,
+    PDF_1_7_NAMESPACE, PDF_2_0_NAMESPACE,
+};
+/// Creating form fields (12.7.3), behind [`DocumentEditor::add_field`].
+///
+/// Here for the reason `ExtGState` is: [`NewField`] is the method's argument
+/// and [`AddFieldError`] its refusal, and a method whose argument cannot be
+/// named is callable by nobody outside this workspace (ruling 11). [`Rect`]
+/// comes with them because every widget a field places is one; it is the
+/// object model's own rectangle rather than a second spelling of four
+/// numbers.
+///
+/// [`SignatureAppearance`] and [`SignatureImage`] are the payload of
+/// [`SigningTarget::NewVisibleField`], the signature that draws a seal, and
+/// are here for the same reason: a variant whose payload cannot be named is a
+/// variant nobody outside this workspace can build.
+pub use tinker_pdf_cos::{
+    AddFieldError, NewField, NewFieldKind, RadioButton, Rect, SignatureAppearance, SignatureImage,
+};
+/// Document operations on [`DocumentEditor`]: page labels, embedded files,
+/// `/Info` and XMP, viewer preferences, the production page boundaries, and
+/// sanitising.
+///
+/// Each is the argument or the answer of an editor method, so each is here for
+/// the reason `ExtGState` is above (ruling 11): a method whose argument cannot
+/// be named from outside this workspace is a method nobody outside it can
+/// call. `LabelStyle` was the reader's already and was never re-exported, so
+/// [`Document::page_labels`]' vocabulary arrives with the writer's.
+/// [`ViewerPreferences`] and [`PageBoundary`] are the reading side's types too
+/// — [`Document::viewer_preferences`] and [`Page::trim_box`] hand back the
+/// same values the editor takes, so a write followed by a read is an equality.
+/// [`SanitiseReport`] is what [`DocumentEditor::sanitise`] answers with, and
+/// every type its entries are built from comes with it, because a report whose
+/// fields cannot be named cannot be read. [`SaveRefusal`] is what
+/// [`DocumentEditor::check_save`] and [`DocumentEditor::check_decrypt`]
+/// answer with: whether a save would undo an encryption.
+pub use tinker_pdf_cos::{
+    AttachError, DeletedObject, Duplex, EmbeddedFile, EnforcedPreference, EntryHolder, LabelStyle,
+    MetadataSync, NonFullScreenPageMode, PageBoundary, PageLabelError, PageLabelRange, PathStep,
+    PrintScaling, ReadingDirection, Removal, RemovedEntry, Sanitise, SanitiseReport, SaveRefusal,
+    TreeWriteError, ViewerPreferences,
 };
 /// Form calculations: running the `/AA` calculate actions a form carries.
 ///
@@ -194,6 +347,23 @@ pub use tinker_pdf_cos::{
     CalcError, DisplayString, EventVerdict, Keystroke, Recalculation, ScriptBudget, ScriptError,
     ScriptPolicy, ScriptScope, Trigger,
 };
+/// Graphics on write and on existing pages: the tint spaces and the
+/// calculator a `/DeviceN` tint transform is written as, layers, and stamps.
+///
+/// [`CalculatorOp`] is the payload of [`Function::Calculator`] and
+/// [`DeviceNAttributes`] the argument to
+/// [`DocumentBuilder::add_device_n_color_space`], so without them here the
+/// variant cannot be built and the method cannot be called from outside this
+/// workspace — the omission the `ExtGState` paragraph above records (ruling
+/// 11).
+///
+/// [`LayerId`] is what [`DocumentBuilder::add_layer`] hands back and what
+/// [`PageBuilder::optional`] takes, so without it the two could not be joined
+/// from outside this workspace.
+///
+/// [`StampPlacement`] is the argument to [`DocumentEditor::stamp`], for the
+/// same reason.
+pub use tinker_pdf_cos::{CalculatorOp, DeviceNAttributes, LayerId, StampPlacement};
 /// Signing on an incremental save (12.8.1), behind
 /// [`DocumentEditor::save_signed`].
 ///
@@ -203,7 +373,7 @@ pub use tinker_pdf_cos::{
 /// signed and what is checked cannot drift apart.
 pub use tinker_pdf_cos::{
     Certification, DigestAlgorithm, FieldLock, SignError, SignRefused, Signer, SigningRequest,
-    SigningTarget,
+    SigningTarget, TimestampRequest, Timestamper, ValidationData,
 };
 /// The bytes-already-encoded image road: everything [`ImageData::Compressed`]
 /// is built out of.
@@ -296,7 +466,7 @@ pub use tinker_pdf_cos::{
     CosDocument, CosError, Dict, Name, ObjRef, Object, PdfString, Revision, StreamObj, XrefEntry,
     XrefTable,
 };
-pub use tinker_pdf_cos::{PubSecError, Recipient};
+pub use tinker_pdf_cos::{EntropySource, PubSecError, PublicKeyEncryption, Recipient, SealError};
 pub use tinker_pdf_crypto::Permissions;
 /// 7.4.6 Table 11's `/CCITTFaxDecode` parameters, which
 /// [`ImageFilter::CcittFax`] carries and this facade would otherwise leave
@@ -305,12 +475,13 @@ pub use tinker_pdf_crypto::Permissions;
 /// writer is how a `/Rows` that is a strip's rather than an image's gets to
 /// disagree with itself.
 pub use tinker_pdf_filters::CcittParams;
+pub use tinker_pdf_filters::PngError;
 pub use tinker_pdf_raster::canvas::PixelFormat;
 pub use tinker_pdf_render::{CancelToken, PixelRegion, RenderWarning};
 /// Signature verdicts (12.8), behind [`Document::verify_signatures`].
 pub use verdict::{
-    Chain, CmsState, DocumentDigest, SignatureCheck, SignerDescription, TrustAnchors, Unchecked,
-    Verdict, Weakness,
+    AuthorityCertificate, Chain, CmsState, DocumentDigest, SignatureCheck, SignerDescription,
+    Stamped, TimestampVerdict, TrustAnchors, Unchecked, Verdict, Weakness,
 };
 /// Saving, with the font policy attached to the save rather than left to the
 /// caller's memory.
@@ -319,7 +490,11 @@ pub use verdict::{
 /// bare `save` at the crate root next to [`tinker_pdf_cos::DocumentEditor`]'s
 /// own `save` would be two doors with one name, and which door you used is
 /// the thing this module exists to make visible.
-pub use write::{FontPolicy, SaveOptions, Saved, SubsetOutcome};
+pub use write::{
+    BilevelCodec, ContinuousCodec, FontPolicy, ImageCoding, ImageOutcome, ImagePolicy,
+    ImageRecoding, ImageReport, JpegTables, Recoded, SaveOptions, Saved, SubsetOutcome,
+    UntouchedImage, UntouchedImageReason,
+};
 /// Fixed documents: the other thing a `PK\x03\x04` can be (gap 30).
 pub use xps::{Dialect, XpsElementDefect, XpsPageDefect};
 
@@ -407,6 +582,124 @@ pub struct RenderOptions {
     /// # }
     /// ```
     pub region: Option<PixelRegion>,
+    /// Whether a page asked for in [`PixelFormat::CmykA8`] comes back in it.
+    ///
+    /// Off by default, and with it off `format: CmykA8` still returns
+    /// `Rgba8`, as it always has. A `Bitmap` says how many components it has
+    /// and nothing about what they mean, so a consumer handed five bytes of
+    /// ink and reading the first three as red, green and blue produces a
+    /// picture that looks almost right — which is why ink is not a page
+    /// format by accident. This is the caller saying they know it is ink. It
+    /// changes nothing for any other `format`.
+    ///
+    /// # What the ink is
+    ///
+    /// The page is composited **over ink** — a `/Multiply` darkens by adding
+    /// ink, 11.3.5's separable formulas applied to complemented components —
+    /// on a canvas that starts with none (`0, 0, 0, 0`, opaque), and the
+    /// buffer is handed back as it stands instead of being converted to light
+    /// at the end.
+    ///
+    /// **A DeviceCMYK colour is the document's own ink.** A fill, a stroke,
+    /// a glyph or a stencil mask (8.9.6.2's image painted in the fill colour)
+    /// whose colour was set in DeviceCMYK — `k`, `K`, or `sc`/`scn`
+    /// in a space that is DeviceCMYK, named directly or through
+    /// `/ColorSpace` — composites its own components, each
+    /// `round(255 × component)`: `1 0 0 0 k` arrives as `(255, 0, 0, 0)` and
+    /// a rich black `1 1 1 1 k` as all four inks. Every other colour is light
+    /// where its resource is read, and a CMYK buffer turns light into ink by
+    /// 8.6.4.4's relation inverted with maximum undercolour removal — `K`
+    /// takes all the grey it can — so `1 0 0 rg` arrives as `(0, 255, 255, 0)`.
+    /// That includes what is not a flat colour — an image, a shading — and
+    /// the spaces whose components are not DeviceCMYK's although they may be
+    /// ink: an ICC CMYK profile, and a `/Separation` or `/DeviceN` through its
+    /// alternate.
+    ///
+    /// **What is drawn on ink keeps its ink, wherever it is drawn.** A form
+    /// is drawn on the page. A coloured tiling pattern's cell (`/PaintType 1`)
+    /// is drawn into a buffer of the page's own format and composited
+    /// component for component, so a `k` inside it arrives as its components
+    /// and an `rg` as light turned to ink, exactly as on the page. A
+    /// transparency group does the same when it composites in ink — no `/CS`,
+    /// or `/CS /DeviceCMYK` — and composites in the space it names otherwise
+    /// (11.6.6), so a rich black inside a `/CS /DeviceRGB` group arrives as
+    /// pure `K`. An uncoloured pattern (`/PaintType 2`) paints in the colour
+    /// its `scn` operands gave, and that colour is light even over a
+    /// DeviceCMYK base: `[/Pattern /DeviceCMYK]` with `1 1 1 1 /P0 scn` is
+    /// pure `K` too.
+    ///
+    /// [`Bitmap::to_png`] writes an ink page as the light it stands for,
+    /// under colour type 6 — PNG has no CMYK. Where every partly covered or
+    /// blended pixel is one ink and black, those are exactly the bytes the
+    /// same render without this switch returns; where two inks and black
+    /// share a partial pixel they are not, because compositing is linear in
+    /// whichever components the canvas holds and 8.6.4.4 is a product — half
+    /// a pixel of rich black is a quarter of white over ink and half of it
+    /// over light.
+    pub allow_cmyk: bool,
+    /// Whether edges are anti-aliased. On by default.
+    ///
+    /// Off, **every pixel of every shape is either wholly covered or not
+    /// covered at all**: a text glyph, a filled or stroked path, a clip, an
+    /// image's edge, a mesh shading's silhouette and a tiling pattern's cell
+    /// all take one threshold — half a pixel's coverage — on the coverage the
+    /// rasterizer already measures, so a hard edge lands where the soft one is
+    /// half-way and a shape keeps its area. Two shapes sharing an edge split
+    /// its pixels between them rather than leaving a gap.
+    ///
+    /// Only coverage is hardened. A constant alpha, a soft mask, an image's own
+    /// alpha channel and the colours inside an image are the document's, and a
+    /// page that uses them still has intermediate values where it asked for
+    /// them. A stroke is at least one whole pixel wide with this off (8.4.3.2's
+    /// thinnest line, on a device that cannot draw part of one), because a
+    /// narrower line straddling two pixels would leave each less than half
+    /// covered and disappear. A feature of a glyph narrower than half a pixel
+    /// can still disappear where it straddles a pixel edge, which is the price
+    /// every threshold pays.
+    ///
+    /// A tile is still byte-equal to the page under it (ruling 5): the
+    /// threshold is a function of one pixel's coverage, and the coverage
+    /// already agreed.
+    pub antialias: bool,
+    /// Whether the page starts with nothing painted on it rather than white.
+    /// Off by default.
+    ///
+    /// Only a format with an alpha channel can hold *nothing* — `GrayA8`,
+    /// `Rgba8`, and `CmykA8` with [`RenderOptions::allow_cmyk`] — so with
+    /// `Gray8` or `Rgb8` this changes nothing, and a page comes back on white
+    /// as it always has. With one of those, a pixel nothing painted is
+    /// `(0, 0, 0, 0)`, a pixel a half-opaque fill covers has an alpha of half,
+    /// and an anti-aliased edge has the alpha its coverage gave it: the page as
+    /// a layer, for a caller who composites it over something else.
+    ///
+    /// The page is composited exactly as it is over white, against a backdrop
+    /// of nothing instead — 11.3.6's formulas with a backdrop alpha of zero,
+    /// which the canvas already computes for every transparency group, where a
+    /// group's buffer starts the same way.
+    pub transparent: bool,
+    /// Whether colour comes back **premultiplied** by alpha. Off by default.
+    ///
+    /// The canvas composites in straight alpha throughout — `tinker-pdf-raster`'s
+    /// compositing documents why, and it is the convention every blend formula
+    /// in 11.3 is written in — so this is a conversion at the very end: each
+    /// colour component `c` of a pixel with alpha `a` becomes `c·a/255`,
+    /// rounded to nearest (there is never a tie: `c·a` is an integer and 255 is
+    /// odd). [`Bitmap::premultiplied`] says which the bytes are.
+    ///
+    /// On a page composited over white every pixel is opaque, and a pixel with
+    /// an alpha of 255 is the same in both conventions — so this changes
+    /// nothing unless [`RenderOptions::transparent`] is on too, and it is only
+    /// meaningful for a format with alpha. It is kept independent of
+    /// `transparent` all the same, because a caller whose compositor takes
+    /// premultiplied input wants to say so once rather than know which pages
+    /// happen to be opaque.
+    ///
+    /// [`Bitmap::to_png`] writes straight alpha, which is the only kind PNG
+    /// has; a premultiplied bitmap is divided back out on the way. That is
+    /// exact for a pixel whose alpha is 255 and loses precision below it, the
+    /// same precision premultiplying lost: multiplying the PNG's samples by
+    /// their alpha again gives back the premultiplied bytes exactly.
+    pub premultiplied: bool,
 }
 
 impl Default for RenderOptions {
@@ -417,6 +710,10 @@ impl Default for RenderOptions {
             cancel: None,
             annotations: true,
             region: None,
+            allow_cmyk: false,
+            antialias: true,
+            transparent: false,
+            premultiplied: false,
         }
     }
 }
@@ -447,6 +744,13 @@ pub struct Bitmap {
     pub data: Vec<u8>,
     /// What the renderer could not do exactly (ruling 2).
     pub warnings: Vec<RenderWarning>,
+    /// Whether each colour component has been multiplied by its pixel's
+    /// alpha ([`RenderOptions::premultiplied`]).
+    ///
+    /// `false` for every format without alpha, where the question does not
+    /// arise, and for every bitmap [`Bitmap::from_png`] reads, because PNG's
+    /// alpha is straight.
+    pub premultiplied: bool,
 }
 
 impl Bitmap {
@@ -493,12 +797,14 @@ impl Bitmap {
     /// many components it has and **nothing about what they mean**, so a
     /// consumer reading three bytes and calling them red, green and blue is
     /// handed ink and produces a picture that looks almost right. That is why
-    /// `CmykA8` is not a page format at all. It is still constructible — the
-    /// fields are public, and a transparency group compositing over ink
+    /// `CmykA8` is a page format only for a caller who asks for it by name
+    /// *and* sets [`RenderOptions::allow_cmyk`]. It is constructible besides —
+    /// the fields are public, and a transparency group compositing over ink
     /// (11.6.6) is a real buffer of this shape — so this method has to be
-    /// total over all six rather than over the two a page comes back in, and
-    /// writing four components under colour type 6 would put cyan, magenta and
-    /// yellow into a file labelled RGB.
+    /// total over all six, and writing four components under colour type 6
+    /// would put cyan, magenta and yellow into a file labelled RGB. An ink page
+    /// written here is the light it stands for, byte for byte what the same
+    /// render without `allow_cmyk` would have returned.
     ///
     /// # Eight bits, and what the round trip is therefore at
     ///
@@ -507,6 +813,10 @@ impl Bitmap {
     /// 16-bit file would carry eight bits of information in each pair of
     /// bytes. **A 16-bit PNG read into a `Bitmap` and written back out comes
     /// back at 8-bit precision**, which is the precision the `Bitmap` had.
+    ///
+    /// [`Bitmap::from_png`] is the other direction, and for the four formats
+    /// written byte for byte it is an exact inverse: dimensions, stride and
+    /// bytes all come back as they went out.
     ///
     /// ```no_run
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -521,6 +831,12 @@ impl Bitmap {
     #[must_use]
     pub fn to_png(&self) -> Option<Vec<u8>> {
         use tinker_pdf_filters::{png_encode, PngColour, PngSource};
+
+        // PNG's alpha is straight, so premultiplied colour is divided back
+        // out first; see `RenderOptions::premultiplied` for what that keeps.
+        if self.premultiplied {
+            return self.straightened()?.to_png();
+        }
 
         // The four formats PNG already has a colour type for: no copy, and the
         // stride is handed through rather than flattened, because a padded
@@ -550,6 +866,79 @@ impl Bitmap {
             }
         };
         png_encode(&source).ok()
+    }
+
+    /// Multiplies every colour component by its pixel's alpha, in place, and
+    /// records that it has. A format without alpha, or a bitmap that already
+    /// is, is left alone.
+    ///
+    /// Row by row over `stride`, so a padded buffer's padding is not touched,
+    /// and a row the buffer is too short to hold is skipped rather than read
+    /// past (ruling 1: the fields are public).
+    fn premultiply(&mut self) {
+        if self.premultiplied || !self.format.has_alpha() {
+            return;
+        }
+        let components = self.format.components();
+        let colours = components - 1;
+        let row_bytes = (self.width as usize).saturating_mul(components);
+        for y in 0..self.height as usize {
+            let Some(row) = y
+                .checked_mul(self.stride)
+                .and_then(|at| self.data.get_mut(at..at.checked_add(row_bytes)?))
+            else {
+                break;
+            };
+            for pixel in row.chunks_exact_mut(components) {
+                // `chunks_exact_mut` hands out exactly `components` bytes, so
+                // the alpha is the one byte after the colours.
+                let (colour, alpha) = pixel.split_at_mut(colours);
+                let a = u32::from(alpha.first().copied().unwrap_or(255));
+                for c in colour {
+                    // round(c·a/255): `c·a` is an integer and 255 is odd, so
+                    // the fraction is never exactly a half.
+                    *c = ((u32::from(*c) * a + 127) / 255) as u8;
+                }
+            }
+        }
+        self.premultiplied = true;
+    }
+
+    /// A straight-alpha copy of a premultiplied bitmap, or `None` when a row
+    /// the fields promise is not in the buffer.
+    ///
+    /// `round(c·255/a)`, clamped to 255 for a component the premultiplied
+    /// convention does not allow (`c > a`), and zero where the alpha is:
+    /// nothing is painted there and there is no colour to recover.
+    fn straightened(&self) -> Option<Bitmap> {
+        let components = self.format.components();
+        let colours = components.checked_sub(1)?;
+        let row_bytes = (self.width as usize).checked_mul(components)?;
+        let mut data = Vec::with_capacity(row_bytes.checked_mul(self.height as usize)?);
+        for y in 0..self.height as usize {
+            let at = y.checked_mul(self.stride)?;
+            let row = self.data.get(at..at.checked_add(row_bytes)?)?;
+            for pixel in row.chunks_exact(components) {
+                let (colour, alpha) = pixel.split_at(colours);
+                let a = u32::from(*alpha.first()?);
+                for c in colour {
+                    let straight = (u32::from(*c) * 255 + a / 2)
+                        .checked_div(a)
+                        .map_or(0, |v| v.min(255));
+                    data.push(straight as u8);
+                }
+                data.push(a as u8);
+            }
+        }
+        Some(Bitmap {
+            width: self.width,
+            height: self.height,
+            format: self.format,
+            stride: row_bytes,
+            data,
+            warnings: Vec::new(),
+            premultiplied: false,
+        })
     }
 
     /// The two formats PNG cannot carry, as straight RGBA.
@@ -879,7 +1268,61 @@ fn open_container(
         epub::Routing::Refused(why) => return Err(why),
         epub::Routing::NotEpub(archive) => archive,
     };
+    // **FB2's own packaging, before the comic fallthrough.** An `.fb2.zip` is
+    // a ZIP of exactly one file, and that file is a FictionBook document —
+    // decided by the sniff of its bytes and never by its name, for
+    // `cbz::image_format`'s reason. Anything else, a one-image comic
+    // included, is a comic as it always was; that comic's one entry is then
+    // inflated twice, which `MAX_ZIP_ENTRY_BYTES` (128 MiB) twice over keeps
+    // well inside the archive's 1 GiB `MAX_ZIP_INFLATED`.
+    let mut archive = archive;
+    let files: Vec<usize> = archive
+        .entries()
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| !entry.name.ends_with('/'))
+        .map(|(at, _)| at)
+        .collect();
+    if let [only] = files[..] {
+        if let Ok(inner) = cbz::read_entry(&mut archive, only) {
+            if standalone::sniff(&inner) == Some(Standalone::Fb2) {
+                let (layout, unusable) =
+                    epub::BookLayout::sanitised(options.page, options.font_size);
+                let (pdf, mut report) = standalone::synthesise(Standalone::Fb2, &inner, &layout)?;
+                for warning in archive.warnings() {
+                    report.warn(ArchiveWarning::Zip(*warning));
+                }
+                for defect in unusable {
+                    report.warn(ArchiveWarning::UnusableOption(defect));
+                }
+                return Ok((pdf, report));
+            }
+        }
+    }
     cbz::pages_from_archive(archive, &comic)
+}
+
+/// The first `end` bytes of a source, or as many as it holds.
+///
+/// **A loop, because a source may answer a range in pieces** — `ByteSource`
+/// permits a short read and [`ShreddedSource`] serves exactly one byte. The
+/// container sniff used to be one `read`, and over a source that splits its
+/// answers it saw one byte of `PK\x03\x04`, so a comic archive streamed from
+/// one was "not a PDF". A source that ends early ends the loop rather than
+/// spinning on it: end of file is an answer, not a miss.
+fn filled(source: &dyn ByteSource, end: u64) -> Result<Vec<u8>, OpenError> {
+    let end = end.min(source.len());
+    let mut bytes = Vec::with_capacity(usize::try_from(end).unwrap_or(0));
+    let mut at = 0u64;
+    while at < end {
+        let got = source.read(at..end).map_err(OpenError::SourceUnavailable)?;
+        if got.is_empty() {
+            break;
+        }
+        at += got.len() as u64;
+        bytes.extend_from_slice(&got);
+    }
+    Ok(bytes)
 }
 
 impl Document {
@@ -958,20 +1401,28 @@ impl Document {
         }
 
         if let Some(container) = cbz::container(&bytes) {
-            let (pdf, report) = open_container(container, &bytes, options)
+            let synthesised = open_container(container, &bytes, options)
                 .map_err(OpenError::UnsupportedArchive)?;
-            // These bytes came out of this repository's own writer moments
-            // ago, so a parse failure is a defect here rather than a claim
-            // about the archive — but ruling 1 forbids asserting it, and
-            // `Damaged` is the honest thing to say to a caller who cannot act
-            // on the difference either way.
-            let inner = CosDocument::open(pdf)
-                .map_err(|_| OpenError::UnsupportedArchive(ArchiveRefusal::Damaged))?;
-            return Ok(Document {
-                inner: Arc::new(inner),
-                fonts: fonts::effective(options.fonts.clone()),
-                archive: Some(Arc::new(report)),
-            });
+            return Document::synthesised(synthesised, options);
+        }
+        // After the containers, because every signature there is a fixed
+        // position a one-file document cannot also hold, and before the PDF
+        // parser, because that parser's rescan would read an SVG as a damaged
+        // PDF with no objects. `sniff` answers `None` for anything with a PDF
+        // header where the COS parser looks for one, so a PDF never reaches
+        // this.
+        if let Some(kind) = standalone::sniff(&bytes) {
+            let (layout, unusable) = epub::BookLayout::sanitised(options.page, options.font_size);
+            let (pdf, mut report) = standalone::synthesise(kind, &bytes, &layout)
+                .map_err(OpenError::UnsupportedArchive)?;
+            // A bare image's page is its own pixels and never the caller's
+            // box, so a bad box is only news for a document laid out into one.
+            if report.layout().is_some() {
+                for defect in unusable {
+                    report.warn(ArchiveWarning::UnusableOption(defect));
+                }
+            }
+            return Document::synthesised((pdf, report), options);
         }
 
         let inner = CosDocument::open(bytes).map_err(|_| OpenError::NotAPdf)?;
@@ -980,6 +1431,59 @@ impl Document {
             fonts: fonts::effective(options.fonts.clone()),
             archive: None,
         })
+    }
+
+    /// A document over a PDF this crate synthesised, and the report saying
+    /// where its pages came from.
+    fn synthesised(
+        (pdf, report): (Vec<u8>, ArchiveReport),
+        options: &OpenOptions,
+    ) -> Result<Document, OpenError> {
+        // These bytes came out of this repository's own writer moments ago, so
+        // a parse failure is a defect here rather than a claim about the
+        // input — but ruling 1 forbids asserting it, and `Damaged` is the
+        // honest thing to say to a caller who cannot act on the difference
+        // either way.
+        let inner = CosDocument::open(pdf)
+            .map_err(|_| OpenError::UnsupportedArchive(ArchiveRefusal::Damaged))?;
+        Ok(Document {
+            inner: Arc::new(inner),
+            fonts: fonts::effective(options.fonts.clone()),
+            archive: Some(Arc::new(report)),
+        })
+    }
+
+    /// Opens bytes as a **Markdown** document (CommonMark 0.31.2, tier 5's
+    /// formats row), laid out as a loose XHTML file is.
+    ///
+    /// A separate entry point rather than a branch of [`Document::open`],
+    /// because Markdown has no signature: it is text, and a sniff that called
+    /// text Markdown would turn every file that is not a PDF into a document of
+    /// its own bytes — where `open` answers [`OpenError::NotAPdf`] for them,
+    /// and `tinker_parity.rs` holds it to that. The caller who knows the bytes
+    /// are Markdown says so here. See [`markdown`] for what is and is not
+    /// CommonMark, and [`standalone::TranslationDefect`] for what the report
+    /// names.
+    ///
+    /// # Errors
+    /// [`OpenError::Empty`] for no bytes, and
+    /// [`OpenError::UnsupportedArchive`]`(`[`ArchiveRefusal::TooLarge`]`)` for a
+    /// document past the synthesised-document ceiling. Nothing else refuses.
+    pub fn open_markdown(
+        bytes: impl Into<Arc<[u8]>>,
+        options: &OpenOptions,
+    ) -> Result<Document, OpenError> {
+        let bytes: Arc<[u8]> = bytes.into();
+        if bytes.is_empty() {
+            return Err(OpenError::Empty);
+        }
+        let (layout, unusable) = epub::BookLayout::sanitised(options.page, options.font_size);
+        let (pdf, mut report) =
+            standalone::markdown(&bytes, &layout).map_err(OpenError::UnsupportedArchive)?;
+        for defect in unusable {
+            report.warn(ArchiveWarning::UnusableOption(defect));
+        }
+        Document::synthesised((pdf, report), options)
     }
 
     /// Opens a document whose bytes are fetched from `source` as they are
@@ -1022,22 +1526,24 @@ impl Document {
         // The signatures are tested at a fixed position and nowhere else, so
         // one head window answers the question for every container this build
         // recognises -- `cbz::container` reads no further than byte 262.
-        let head = source
-            .read(0..CONTAINER_SNIFF)
-            .map_err(OpenError::SourceUnavailable)?;
-        if cbz::container(&head).is_some() {
+        let head = filled(&*source, CONTAINER_SNIFF)?;
+        // A one-file document is whole-file for a container's reason: an SVG's
+        // and an XHTML file's last element can be its first page's, and a bare
+        // image is one picture. Its sniff looks further in than the container
+        // one, so it is asked only when the first window holds no PDF header —
+        // which keeps a PDF whose header is in its first kilobyte to the reads
+        // it always made. One with more junk in front than that costs the read
+        // of the head window the parser searches for its header anyway, and
+        // `sniff` answers `None` for it there, as it does buffered.
+        let standalone = !head.windows(5).any(|w| w == b"%PDF-") && {
+            let wider = filled(&*source, standalone::SNIFF_WINDOW as u64)?;
+            standalone::sniff(&wider).is_some()
+        };
+        if cbz::container(&head).is_some() || standalone {
             // Whole-file by contract, and the only honest way to read one.
-            let mut bytes = Vec::with_capacity(source.len() as usize);
-            let mut at = 0u64;
-            while at < source.len() {
-                let got = source
-                    .read(at..source.len())
-                    .map_err(OpenError::SourceUnavailable)?;
-                if got.is_empty() {
-                    return Err(OpenError::NotAPdf);
-                }
-                at += got.len() as u64;
-                bytes.extend_from_slice(&got);
+            let bytes = filled(&*source, source.len())?;
+            if bytes.len() as u64 != source.len() {
+                return Err(OpenError::NotAPdf);
             }
             return Document::open_with(bytes, options);
         }
@@ -1344,6 +1850,17 @@ impl Document {
         tinker_pdf_cos::xmp_metadata(&self.inner)
     }
 
+    /// How the document asks to be shown and printed (12.2, Table 147).
+    ///
+    /// Every entry typed and every one an `Option`: `None` is the document
+    /// saying nothing, which a viewer answers with the table's default, and is
+    /// not the same file as one stating that default. Most documents state
+    /// none of them.
+    #[must_use]
+    pub fn viewer_preferences(&self) -> ViewerPreferences {
+        tinker_pdf_cos::viewer_preferences(self.inner.as_ref())
+    }
+
     /// Every font the document's pages can reach (9.5 to 9.9).
     ///
     /// Name, family, whether the program is embedded, the subset tag, and
@@ -1447,6 +1964,22 @@ impl Document {
             .collect()
     }
 
+    /// The document security store (ISO 32000-2 12.8.4.3): the long-term
+    /// validation material the catalog's `/DSS` carries, as references to its
+    /// streams, and the `/VRI` entries filing some of it under particular
+    /// signatures ([`SecurityStore::entry_for`]). `None` when there is none:
+    /// no `/DSS`, a null one, or a reference to no object (7.3.10). A `/DSS`
+    /// that is something other than a dictionary is an empty store whose
+    /// warnings say so, and every member skipped for its type is named the
+    /// same way ([`SecurityStoreWarning`]).
+    ///
+    /// Surfaced and never evaluated: nothing here reads a CRL or an OCSP
+    /// response, and the verdict does not consult the store.
+    #[must_use]
+    pub fn security_store(&self) -> Option<SecurityStore> {
+        signature::security_store(self)
+    }
+
     /// What this build makes of the document's PDF/A claim (ISO 19005).
     ///
     /// A list of findings rather than a verdict: conformance is the list being
@@ -1473,6 +2006,49 @@ impl Document {
     #[must_use]
     pub fn validate_pdfa_with(&self, groups: PdfACoverage) -> PdfAVerdict {
         pdfa::validate(self, groups)
+    }
+
+    /// What this build makes of the document's PDF/UA claim (ISO 14289).
+    ///
+    /// Findings for the clauses a reader decides, numbered by the part the
+    /// file claims, and — in the same struct — every clause this build did
+    /// not decide, as [`PdfUaVerdict::abstained`], each staged or
+    /// undecidable with its reason. An empty finding list is "nothing this
+    /// build decides was broken", never "it conforms": most of ISO 14289 is
+    /// a judgement about meaning no reader makes (`docs/design/pdfua.md`).
+    #[must_use]
+    pub fn validate_pdfua(&self) -> PdfUaVerdict {
+        pdfua::validate(self, PdfUaCoverage::IMPLEMENTED)
+    }
+
+    /// [`Document::validate_pdfua`], running only the rule groups in
+    /// `groups`; the verdict's own `coverage` says which ran.
+    #[must_use]
+    pub fn validate_pdfua_with(&self, groups: PdfUaCoverage) -> PdfUaVerdict {
+        pdfua::validate(self, groups)
+    }
+
+    /// What this build makes of the document's PDF/X claim (ISO 15930).
+    ///
+    /// The claim is `/Info`'s `GTS_PDFXVersion`, read with no XML parse.
+    /// Rules run under PDF/X-1a:2003 and PDF/X-3:2003 only — transcribed from
+    /// the CGATS application notes, the one free restatement of those levels —
+    /// and [`PdfXVerdict::abstained`] names every clause of the claimed level
+    /// this build did not decide. No annotated PDF/X corpus exists, so these
+    /// rules have a false-positive bar and no false-negative one
+    /// (`docs/design/pdfx.md`): an empty finding list is "nothing this build
+    /// looked for was broken", never "it conforms". A file claiming nothing is
+    /// not judged.
+    #[must_use]
+    pub fn validate_pdfx(&self) -> PdfXVerdict {
+        pdfx::validate(self, PdfXCoverage::IMPLEMENTED)
+    }
+
+    /// [`Document::validate_pdfx`], running only the rule groups in
+    /// `groups`; the verdict's own `coverage` says which ran.
+    #[must_use]
+    pub fn validate_pdfx_with(&self, groups: PdfXCoverage) -> PdfXVerdict {
+        pdfx::validate(self, groups)
     }
 
     /// The strictest certification any signature in this document declares
@@ -1508,10 +2084,13 @@ impl Document {
         tinker_pdf_cos::catalog_scripts(&self.inner)
     }
 
-    /// How much script this document carries, for a caller that has to say so
-    /// before it fills anything.
+    /// How much script this document's form carries — the fields' `/AA`,
+    /// `/CO`, `/Names /JavaScript` and the catalog's `/AA` — for a caller that
+    /// has to say so before it fills anything.
     ///
-    /// Reading a script runs nothing.
+    /// Not every script the document carries: `/OpenAction`, page and
+    /// annotation actions, outline actions and `/Next` chains are not counted
+    /// ([`tinker_pdf_cos::script_summary`]). Reading a script runs nothing.
     #[must_use]
     pub fn script_summary(&self) -> ScriptSummary {
         tinker_pdf_cos::script_summary(&self.inner)
@@ -1575,6 +2154,38 @@ impl Page {
         (r.x0, r.y0, r.x1, r.y1)
     }
 
+    /// `/BleedBox` (14.11.2): the page's own, clipped to the media box, and
+    /// the crop box when the page states none.
+    ///
+    /// Never inherited from the page tree: 7.7.3.3 Table 30 does not make the
+    /// three production boxes inheritable, so a value on a `/Pages` node
+    /// describes no page.
+    #[must_use]
+    pub fn bleed_box(&self) -> (f64, f64, f64, f64) {
+        self.boundary(PageBoundary::BleedBox)
+    }
+
+    /// `/TrimBox` (14.11.2): the finished page after trimming, under
+    /// [`Page::bleed_box`]'s rules.
+    #[must_use]
+    pub fn trim_box(&self) -> (f64, f64, f64, f64) {
+        self.boundary(PageBoundary::TrimBox)
+    }
+
+    /// `/ArtBox` (14.11.2): the extent of the page's meaningful content, under
+    /// [`Page::bleed_box`]'s rules.
+    #[must_use]
+    pub fn art_box(&self) -> (f64, f64, f64, f64) {
+        self.boundary(PageBoundary::ArtBox)
+    }
+
+    /// Any of the five boundaries, as `(x0, y0, x1, y1)` in points.
+    #[must_use]
+    pub fn boundary(&self, boundary: PageBoundary) -> (f64, f64, f64, f64) {
+        let r = self.inner.boundary(boundary);
+        (r.x0, r.y0, r.x1, r.y1)
+    }
+
     /// `/Rotate`, normalized to 0, 90, 180 or 270.
     #[must_use]
     pub fn rotation(&self) -> u16 {
@@ -1634,6 +2245,53 @@ impl Page {
     /// those pixels, and then the bitmap is that rectangle's size.
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
+        let content = cos_pages::content_bytes(&self.doc, &self.inner);
+        self.render_layer(options, None, |renderer, resources| {
+            interpret(&content, Matrix::IDENTITY, renderer, resources);
+            if options.annotations {
+                // After the content, because an annotation sits on top of the
+                // page rather than under it.
+                annots::draw(&self.doc, &self.inner, self.fonts.as_ref(), renderer);
+            }
+        })
+    }
+
+    /// **The one pipeline every render of this page goes through** — the page
+    /// itself, a form on it ([`Page::render_form`]) and one of its annotations
+    /// ([`Page::render_annotation`]) — differing only in what `paint` draws and
+    /// in `frame`, the rectangle of default user space that is the viewport
+    /// when `options.region` names none.
+    ///
+    /// Ruling 5 is the reason there is one: a part of a page is the page with
+    /// less in it, never a second implementation, so a part and the page under
+    /// it cannot disagree about the scale clamp, the view transform, the canvas,
+    /// the warnings or the conversion at the end.
+    pub(crate) fn render_layer(
+        &self,
+        options: &RenderOptions,
+        frame: Option<(f64, f64, f64, f64)>,
+        paint: impl FnOnce(
+            &mut tinker_pdf_render::Renderer<'_, resources::PageResources>,
+            &resources::PageResources,
+        ),
+    ) -> Bitmap {
+        let resources = resources::PageResources::new(&self.doc, &self.inner, self.fonts.as_ref());
+        self.render_layer_with(options, frame, &resources, paint)
+    }
+
+    /// [`Page::render_layer`] over resources the caller keeps — a
+    /// [`DisplayList`], whose decoded images, glyph outlines and nested
+    /// scopes outlive one render so the next one does not pay for them again.
+    pub(crate) fn render_layer_with(
+        &self,
+        options: &RenderOptions,
+        frame: Option<(f64, f64, f64, f64)>,
+        resources: &resources::PageResources,
+        paint: impl FnOnce(
+            &mut tinker_pdf_render::Renderer<'_, resources::PageResources>,
+            &resources::PageResources,
+        ),
+    ) -> Bitmap {
         let (w, h) = self.size();
         let (scale, applied) = self.scales(options);
 
@@ -1652,22 +2310,27 @@ impl Page {
         // page take one code path here as well as in the renderer, and there is
         // no un-tiled spelling left for a defect to hide in.
         let (full_width, full_height) = tinker_pdf_render::page_pixels(w, h, applied);
+        let full = PixelRegion::new(0, 0, full_width, full_height);
+        // A part's own rectangle, as the page's pixels it covers, when the
+        // caller named no region. Already trimmed to the page, so it is never
+        // "clamped" in `RegionClamped`'s sense: what lies off the page is what
+        // the page render does not show either.
+        let frame =
+            frame.map(|rect| frame_region(self.crop_box(), self.rotation(), applied, rect, full));
         let asked = options.region;
         let view = asked
-            .unwrap_or(PixelRegion::new(0, 0, full_width, full_height))
+            .or(frame)
+            .unwrap_or(full)
             .clamped_to(full_width, full_height);
 
         // The rotation and the crop-box origin belong in the transform, not
         // only in the canvas size: sizing for a rotated page and then drawing
         // it upright fills a sideways canvas with clipped, upright content.
-        // The region's own translation composes after both, which is what
-        // makes it a rectangle of the displayed picture rather than of the
-        // upright sheet.
+        // The region is *not* in the transform: the page is drawn through the
+        // one transform whatever part of it is asked for, and the canvas
+        // stands at the region's corner of the displayed picture (ruling 5).
         let crop = self.crop_box();
-        let base = tinker_pdf_render::region_view_transform(crop, self.rotation(), applied, view);
-
-        let content = cos_pages::content_bytes(&self.doc, &self.inner);
-        let resources = resources::PageResources::new(&self.doc, &self.inner, self.fonts.as_ref());
+        let base = tinker_pdf_render::page_view_transform(crop, self.rotation(), applied);
 
         // 11.4.7: the page itself may declare a transparency group, and its
         // `/CS` is the space the *whole page* composites in. Nothing invokes
@@ -1681,18 +2344,28 @@ impl Page {
         let canvas_format = page_space
             .map(tinker_pdf_render::group_format)
             .unwrap_or(options.format);
-        let canvas = tinker_pdf_render::region_canvas_in(view, canvas_format);
+        // What the caller is handed, decided before the canvas exists: a page
+        // may start with nothing on it only if the format it comes back in can
+        // say so. A transparent canvas converted to `Rgb8` at the end would
+        // drop an alpha of zero and keep the black stored under it.
+        let wanted = if options.allow_cmyk && options.format == PixelFormat::CmykA8 {
+            PixelFormat::CmykA8
+        } else {
+            tinker_pdf_render::page_format(options.format)
+        };
+        let canvas = if options.transparent && wanted.has_alpha() && canvas_format.has_alpha() {
+            tinker_pdf_render::region_canvas_clear(view, canvas_format)
+        } else {
+            tinker_pdf_render::region_canvas_in(view, canvas_format)
+        };
 
-        let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, &resources);
+        let mut renderer = tinker_pdf_render::Renderer::new(canvas, base, resources)
+            .with_page_size(full_width, full_height)
+            .with_antialias(options.antialias);
         if let Some(cancel) = &options.cancel {
             renderer = renderer.with_cancel(cancel.clone());
         }
-        interpret(&content, Matrix::IDENTITY, &mut renderer, &resources);
-        if options.annotations {
-            // After the content, because an annotation sits on top of the
-            // page rather than under it.
-            annots::draw(&self.doc, &self.inner, self.fonts.as_ref(), &mut renderer);
-        }
+        paint(&mut renderer, resources);
         let (canvas, mut warnings) = renderer.finish();
         // A glyph a font could not name is reported here rather than by the
         // renderer, which counts only the glyphs it was handed nothing for.
@@ -1710,6 +2383,14 @@ impl Page {
         // half its rows rendered identically to a scan of blank paper.
         for (name, reason) in resources.damaged_images() {
             let warning = RenderWarning::DamagedImage { name, reason };
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+        // And a colour space read with a repair, for the same reason: the
+        // colours are drawn, and "read as written" stays distinguishable.
+        for (name, reason) in resources.repaired_spaces() {
+            let warning = RenderWarning::RepairedColorSpace { name, reason };
             if !warnings.contains(&warning) {
                 warnings.push(warning);
             }
@@ -1732,22 +2413,27 @@ impl Page {
         }
 
         // Back to something a caller can read. A page group composited over
-        // ink comes back as light, which is 11.4.7's own last step.
-        let wanted = tinker_pdf_render::page_format(options.format);
+        // ink comes back as light, which is 11.4.7's own last step — unless
+        // the caller asked for ink by name *and* said they know it is ink.
         let canvas = if canvas.format == wanted {
             canvas
         } else {
-            canvas.extract((0, 0), canvas.width, canvas.height, wanted)
+            canvas.extract(canvas.origin(), canvas.width, canvas.height, wanted)
         };
 
-        Bitmap {
+        let mut bitmap = Bitmap {
             width: canvas.width,
             height: canvas.height,
             format: canvas.format,
             stride: canvas.stride,
             data: canvas.data,
             warnings,
+            premultiplied: false,
+        };
+        if options.premultiplied {
+            bitmap.premultiply();
         }
+        bitmap
     }
 
     /// The page's link annotations, in `/Annots` order (12.5.6.5).
@@ -1763,10 +2449,10 @@ impl Page {
     ///
     /// **Total by construction**, up to ruling 1's bound of 4 096 entries per
     /// page: one [`Annotation`] per array entry, however malformed. Past the
-    /// bound the list is shortened and nothing says so — a read cannot append
-    /// to [`Document::warnings`] without changing what the document reports
-    /// about itself — which is a gap the roadmap carries rather than one this
-    /// method hides. The corpus's largest page carries 122.
+    /// bound the list is shortened; [`Page::annotation_list`] is the same
+    /// read with the count of what the bound left out, which a read cannot
+    /// put on [`Document::warnings`] without changing what the document
+    /// reports about itself. The corpus's largest page carries 122.
     ///
     /// A subtype ISO 32000 does not define comes back as
     /// [`AnnotationKind::Other`] carrying the name the file used, a
@@ -1777,10 +2463,13 @@ impl Page {
     /// wondering what went missing (ruling 10).
     ///
     /// Carries 12.5.2 Table 164's common entries and Table 170's markup ones
-    /// — `/Contents`, `/T`, `/M`, `/F`, `/Rect`, `/Popup`, `/Parent` — with
-    /// 12.5.6.14's rule applied: a pop-up's text comes from its parent.
-    /// Per-subtype geometry (`/QuadPoints`, `/InkList`, `/Vertices`, `/L`)
-    /// is not here; see the roadmap.
+    /// — `/Contents`, `/T`, `/M`, `/F`, `/Rect`, `/Popup`, `/Parent`, `/C`,
+    /// `/BS` or `/Border`, `/AS`, `/NM`, `/CA`, `/RC`, `/Subj`,
+    /// `/CreationDate`, `/IRT`, `/RT`, `/IT` — with 12.5.6.14's rule applied:
+    /// a pop-up's text and colour come from its parent. The family's own
+    /// entries — `/QuadPoints`, `/InkList`, `/Vertices`, `/L`, `/DA`, `/IC`,
+    /// `/CL`, `/FS`, … — are [`Annotation::payload`], one
+    /// [`AnnotationPayload`] variant per 12.5.6 family.
     ///
     /// [`Page::links`] is the narrower navigation view over the same array
     /// and is unchanged: it returns `/Link` annotations with their targets
@@ -1788,12 +2477,60 @@ impl Page {
     /// annotations (ruling 6).
     #[must_use]
     pub fn annotations(&self) -> Vec<Annotation> {
+        self.annotation_list().annotations
+    }
+
+    /// [`Page::annotations`], with what the listing's two bounds left out
+    /// counted in the value it returns.
+    ///
+    /// [`AnnotationList::dropped`] is how many `/Annots` entries lay past the
+    /// 4 096 the listing reads, and [`AnnotationList::incomplete`] how many
+    /// annotations were read with an entry left out because the page spent
+    /// [`MAX_ANNOTATION_BYTES`] on copies. The first is zero on every page the
+    /// corpus held when it was measured, the busiest carrying 122; the census
+    /// asserts both are, and the second has not yet been measured there. The
+    /// counts are part of the answer rather than warnings,
+    /// so reading a page twice says the same thing twice and
+    /// [`Document::warnings`] is left as it was.
+    #[must_use]
+    pub fn annotation_list(&self) -> AnnotationList {
         annotations::of_page(&self.doc, self.inner.reference)
     }
 
-    /// The page's text.
+    /// The page's text, every line in **logical** order (ruling 14,
+    /// `docs/rulings.md`).
+    ///
+    /// A page draws right-to-left text in visual order, so a line holding a
+    /// right-to-left character is put back into the order it is read in:
+    /// marks kept with their base, the line sorted along its baseline, and
+    /// UAX #9's rule L2 applied to it. A line with none is exactly as the
+    /// content stream showed it. [`TextPage::plain_text`],
+    /// [`TextPage::search`], [`Page::structured_text`] and every
+    /// [`TextWriter`] format read this one extraction, so they agree.
+    ///
+    /// [`Page::text_with`] is the opt-out.
     #[must_use]
     pub fn text(&self) -> TextPage {
+        self.text_with(&TextOptions::default())
+    }
+
+    /// The page's text, ordered as `options` asks.
+    ///
+    /// With [`TextOptions::default`] this is [`Page::text`]. With
+    /// [`TextOptions::content_order`] every line's characters are in the order
+    /// the content stream showed them, which is what [`Page::text`] returned
+    /// before ruling 14.
+    #[must_use]
+    pub fn text_with(&self, options: &TextOptions) -> TextPage {
+        let mut page = self.text_in_content_order();
+        if !options.content_order {
+            text_order::into_logical_order(&mut page);
+        }
+        page
+    }
+
+    /// What the content stream showed, in the order it showed it.
+    fn text_in_content_order(&self) -> TextPage {
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
         // Text extraction needs no glyph outlines — the widths come from the
         // font dictionary — so no provider is consulted here.
@@ -1811,6 +2548,32 @@ impl Page {
             device.warn(TextWarning::UnknownFont { name });
         }
         device.finish()
+    }
+
+    /// What a serialisation of [`Page::text`] needs to know about the page:
+    /// its index, its crop box — the space the text's coordinates are in —
+    /// and its `/Rotate`, which those coordinates do not have applied.
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let bytes = std::fs::read("document.pdf")?;
+    /// use tinker_pdf::{TextFormat, TextWriter};
+    /// let doc = tinker_pdf::Document::open(bytes)?;
+    /// let mut writer = TextWriter::new(TextFormat::Json);
+    /// for page in doc.pages() {
+    ///     writer.page(&page.text_frame(), &page.text());
+    /// }
+    /// println!("{}", writer.finish());
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn text_frame(&self) -> PageFrame {
+        PageFrame {
+            index: self.index(),
+            bounds: self.crop_box(),
+            rotation: self.rotation(),
+        }
     }
 
     /// The page's text in **structure order**, joined with the document's
@@ -1831,6 +2594,48 @@ impl Page {
         let tree = structure::bind(&self.doc)?;
         Some(tree.text_for_page(self.index(), &self.text()))
     }
+}
+
+/// A rectangle of the page's default user space as the pixels of the page's
+/// own render it covers: its corners through the page's view transform — the
+/// same one `Page::render` draws with — bounded, rounded outward and trimmed to
+/// the page.
+///
+/// A rectangle with a non-finite corner is the whole page, which is what a
+/// form with no usable `/BBox` draws over; one wholly off the page is no
+/// pixels, which is what the page render shows of it.
+fn frame_region(
+    crop: (f64, f64, f64, f64),
+    rotation: u16,
+    applied: f64,
+    rect: (f64, f64, f64, f64),
+    full: PixelRegion,
+) -> PixelRegion {
+    let view = tinker_pdf_render::page_view_transform(crop, rotation, applied);
+    let (x0, y0, x1, y1) = rect;
+    let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| view.apply(x, y));
+    if corners
+        .iter()
+        .any(|(x, y)| !x.is_finite() || !y.is_finite())
+    {
+        return full;
+    }
+    let lo = |pick: fn(&(f64, f64)) -> f64| corners.iter().map(pick).fold(f64::INFINITY, f64::min);
+    let hi =
+        |pick: fn(&(f64, f64)) -> f64| corners.iter().map(pick).fold(f64::NEG_INFINITY, f64::max);
+    // `floor`, `ceil` and the clamp are all exact (ruling 4), and a clamped
+    // value is inside `0..=limit`, so the casts cannot wrap.
+    let within = |v: f64, limit: u32| v.clamp(0.0, f64::from(limit)) as u32;
+    let left = within(lo(|c| c.0).floor(), full.width);
+    let right = within(hi(|c| c.0).ceil(), full.width);
+    let top = within(lo(|c| c.1).floor(), full.height);
+    let bottom = within(hi(|c| c.1).ceil(), full.height);
+    PixelRegion::new(
+        left,
+        top,
+        right.saturating_sub(left),
+        bottom.saturating_sub(top),
+    )
 }
 
 impl core::fmt::Debug for Page {

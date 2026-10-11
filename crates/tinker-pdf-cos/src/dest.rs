@@ -268,14 +268,15 @@ impl<'d> Resolver<'d> {
     pub fn resolve_named(&self, name: &[u8]) -> Option<Destination> {
         let catalog = self.doc.catalog()?;
 
-        // The name tree first: it is where PDF 1.2 and later put them.
-        if let Some(names) = catalog.get_ref(self.names) {
-            if let Ok(dict) = self.doc.get(names) {
-                if let Some(tree) = dict.as_dict().and_then(|d| d.get_ref(self.dests)) {
-                    if let Some(found) = crate::trees::lookup_name(self.doc, tree, name) {
-                        return self.dest_from_entry(&found);
-                    }
-                }
+        // The name tree first: it is where PDF 1.2 and later put them. 7.7.2
+        // lets `/Names` be a direct dictionary as well as a reference, and
+        // only the reference used to be followed — so a tree under a direct
+        // `/Names`, which is how this crate's own builder writes one, resolved
+        // no name at all.
+        let names = self.doc.resolve_key(&catalog, self.names);
+        if let Some(tree) = names.as_dict().and_then(|d| d.get_ref(self.dests)) {
+            if let Some(found) = crate::trees::lookup_name(self.doc, tree, name) {
+                return self.dest_from_entry(&found);
             }
         }
 
@@ -697,5 +698,23 @@ trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n";
     fn a_page_with_no_annotations_has_no_links() {
         let doc = document();
         assert!(links(&doc, ObjRef::new(4, 0)).is_empty());
+    }
+
+    /// 7.7.2 lets the catalog's `/Names` be a direct dictionary, and this
+    /// fixture's is. The lookup used to follow only a reference, so every
+    /// name under a direct `/Names` resolved to nothing.
+    #[test]
+    fn a_name_under_a_direct_names_dictionary_resolves() {
+        let doc = document();
+        match Resolver::new(&doc).resolve_named(b"chapter") {
+            Some(Destination::Explicit {
+                page_index, kind, ..
+            }) => {
+                assert_eq!(page_index, Some(1), "the second page");
+                assert_eq!(kind, DestKind::Fit);
+            }
+            other => panic!("expected the tree's entry, got {other:?}"),
+        }
+        assert!(Resolver::new(&doc).resolve_named(b"absent").is_none());
     }
 }

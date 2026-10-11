@@ -26,10 +26,16 @@ These are given; this document states each boundary, not the argument.
 - **Spec baseline:** PDF 1.7 (ISO 32000-1). PDF 2.0 deltas that matter
   early are tracked in [pdf20-deltas.md](pdf20-deltas.md); full 2.0
   conformance is not a current goal.
+  *Since 9 October 2026* the owner's parity decision tracks it as
+  [ROADMAP](ROADMAP.md) row SD-18; this locked decision stands until the
+  owner amends it (H-08).
 - **Formats: PDF, and CBZ, XPS and EPUB** — the three container formats
   open as a `Document` by synthesizing a real PDF at `open`, so every
   downstream capability applies to all four ([cbz](features/cbz.md),
   [xps](features/xps.md), [epub](features/epub.md)).
+  *Since 9 October 2026* every further input format is a row of the
+  [ROADMAP](ROADMAP.md)'s formats-in tier (FI); this locked decision stands
+  until the owner amends it (H-08).
 - **API stability:** everything is 0.x; the facade freezes at 0.1.0.
   Internal crates never gain stability promises at all.
 
@@ -65,7 +71,12 @@ RFC 1951, CFF against Adobe TN 5176) without a PDF in sight.
 
 Eight leaf-to-leaf edges exist, each pointing from a higher layer down:
 `font → filters` (the CMap asset pipeline), `zip → filters` (raw DEFLATE
-and CRC-32), `archive → filters` (the same two, for the same two reasons —
+and CRC-32 — and **not** `zip → archive` for ZIP methods 14, 12 and 93:
+`Archive::read_coded` takes the decoder as a callback and the facade, which
+already depends on both, hands `tinker_pdf_archive::lzma`,
+`tinker_pdf_archive::bzip2` and `tinker_pdf_archive::zstd` in, so the methods
+that needed a second leaf's
+decoder cost an argument rather than an edge), `archive → filters` (the same two, for the same two reasons —
 7z method 040108 *is* RFC 1951, and 7z and RAR both record a per-file
 CRC-32), `layout → css` (computed styles in, boxes out),
 `pki → crypto` (RFC 5280's key identifier is a SHA-1, and DER stays out of
@@ -164,7 +175,7 @@ measurement rather than a number kept in step.
 | Crate | Role | ~LOC | Feature doc | Fuzz targets |
 | --- | --- | ---: | --- | --- |
 | `tinker-pdf` | facade; the only public surface | 24 300 | all of [features/](README.md) | `render_page` |
-| `tinker-pdf-cos` | file syntax, object store, writer, strict validator | 32 900 | [opening](features/opening.md), [document-model](features/document-model.md), [writing](features/writing.md), [forms](features/forms.md), [creation](features/creation.md) | `cos_document`, `cos_object`, `form_script` |
+| `tinker-pdf-cos` | file syntax, object store, writer, strict validator | 32 900 | [opening](features/opening.md), [document-model](features/document-model.md), [writing](features/writing.md), [forms](features/forms.md), [creation](features/creation.md) | `cos_document`, `cos_object`, `form_script`, `annotation_appearance` |
 | `tinker-pdf-filters` | stream filters + image codecs | 21 800 | [filters](features/filters.md) | `ascii_filters`, `ccitt`, `inflate`, `jbig2`, `jpeg`, `jpx`, `lzw`, `png` |
 | `tinker-pdf-crypto` | ciphers, hashes, security handlers, RSA/ECDSA verify | 6 000 | [encryption](features/encryption.md) | `crypt`, `crypt_ciphers` |
 | `tinker-pdf-pki` | DER (X.690), X.509 (RFC 5280), CMS (RFC 5652) | 6 000 | [signatures](features/signatures.md) | `pki_der`, `pki_cms` |
@@ -177,14 +188,15 @@ measurement rather than a number kept in step.
 | `tinker-pdf-math` | pinned transcendentals, `no_std` | 900 | [determinism](features/determinism.md) | — |
 | `tinker-pdf-zip` | ZIP reader | 3 000 | [cbz](features/cbz.md) | `zip_archive` |
 | `tinker-pdf-archive` | the containers that are not ZIP: tar, 7z, RAR | 4 500 | [cbz](features/cbz.md), [design/comic-archives.md](design/comic-archives.md) | `tar`, `sevenz`, `rar` |
-| `tinker-pdf-xml` | XML pull parser | 4 100 | [xps](features/xps.md) | `xml` |
+| `tinker-pdf-xml` | XML pull parser; WHATWG HTML tokenizer and tree builder; the Encoding Standard's single-byte decoders | 4 100 (August); 10 700 (October, with the HTML parser and its suite runner) | [xps](features/xps.md), [opening](features/opening.md) | `xml`, `html` |
 | `tinker-pdf-css` | CSS engine | 10 800 | [epub](features/epub.md) | `css` |
 | `tinker-pdf-svg` | SVG 1.1: markup in, a display list out | 4 900 | [epub](features/epub.md) | `svg` |
 | `tinker-pdf-layout` | box model, fragmentation, line breaking | 13 700 | [epub](features/epub.md) | `layout` |
 | `tinker-pdf-ffi` | C ABI | 900 | [bindings](features/bindings.md) | — |
 
-Tools: `tpdf` (debug CLI over the facade, whose `render` writes a `.png` a
-page through `Bitmap::to_png`) and `pdfcmp` (perceptual comparator), both
+Tools: `tpdf` (the CLI over the facade, whose `render` writes a `.png` a
+page through `Bitmap::to_png` and whose writing commands save through
+`write::save`) and `pdfcmp` (perceptual comparator), both
 described in [verification.md](verification.md) and both on the facade and
 nothing below it — `xtask`'s `TOOLS` table enforces that, so a tool exercises
 what a user gets rather than reaching past the API into a leaf. There is no
@@ -305,6 +317,9 @@ the same dozen lines in here would be code that cannot exist on wasm32 and
 that every embedder with an executor of its own would have to be talked out
 of. Ruling 11 says the facade is the only public surface; this is that
 surface staying small where the alternative is a second scheduler.
+*Since 9 October 2026* a facade pool behind `Parallelism::Serial` by default is
+[ROADMAP](ROADMAP.md) row P-15; this decision stands until the owner
+amends it (H-16).
 
 Which leaves the claim above needing something to exercise it, since a
 guarantee nothing tests is the kind this repository has caught itself
