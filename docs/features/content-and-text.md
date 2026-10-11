@@ -147,11 +147,17 @@ letter-spaced by half an em was cut where one text object met the next, so
 that `مُدَّة مُعلِّم.` in monospace at `letter-spacing: 8px` read
 `مُدَّة مُعلِّم .` (review of the K-11 fix). The pen is carried there only
 into a glyph that reads right to left by its own class — a letter of
-`Bidi_Class` `R` or `AL`, or the punctuation of the right-to-left scripts,
-the ARABIC COMMA (`CS`) among it, which a right-to-left word that ends in one
-is drawn from; not a digit, an Arabic-Indic one (`AN`) included, though it
-stands in the Arabic block (`tinker-pdf-content`'s `reads_right_to_left`,
-from the vendored `UnicodeData.txt`) — starting where the spacing put it
+`Bidi_Class` `R` or `AL`, or the ARABIC COMMA, the one `CS` of the
+right-to-left blocks, which a right-to-left word that ends in one is drawn
+from; not a digit, an Arabic-Indic one (`AN`) included, though it stands in
+the Arabic block, nor the blocks' other punctuation, whose class is `AN`,
+`ET` or `ON` — the ORNATE PARENTHESES `﴿` `﴾` are brackets like `(`, and
+taken in by their block they carried the pen out of a cut `﴿` into the word
+after it, `﴿عوامل عدّة﴾` letter-spaced reading `﴾عوامل عدّة﴿`, and the
+ARABIC PERCENT SIGN joined a justified line whole that read the sign at its
+far end (review of the third review's fix, 22 books in a default build and
+24 with `bundled-fonts`; `tinker-pdf-content`'s `reads_right_to_left`, from
+the vendored `UnicodeData.txt`) — starting where the spacing put it
 give or take a twentieth of an em, after a right-to-left word, or after
 neutrals on a line that holds a right-to-left letter **of its own** and no
 left-to-right one. Every other carry joined pieces that each read right
@@ -247,11 +253,21 @@ Hebrew draws it facing outward at its left end. Such a pair — a bracket at the
 end where a reading in the direction chosen starts, nothing of that
 direction inside — counts for neither reading where the line's letters say
 the direction chosen (more of them, and that reading pairs a bracket facing
-outward itself, or twice as many and eight more): a justified English
+outward itself, or at least twice as many and at least eight more): a
+justified English
 paragraph quoting Hebrew in brackets, fifty Latin letters to fifteen Hebrew
 on the line, was turned and read backwards until the third review of the
 K-11 fix, and no line of `BidiCharacterTest.txt` or of the reviews' wrapped
-and sentence lines reads otherwise for it. As first proposed the
+and sentence lines reads otherwise for it. And where the comma tie-break
+read a line left to right for the mark at its right end — a full stop, a
+comma, a colon, a semicolon, `!`, `?` or the ARABIC COMMA, which no soft
+wrap puts first on a line — the line opens just left of that mark, and a
+pair with a bracket there, enclosing no left-to-right letter, counts for
+neither reading: `جميل بيت كبير (نور) يوم.` with no `dir`, broken before the
+bracket, draws `موي )رون(.`, and turned it read its full stop first (review
+of the third review's fix, 32 books in a default build and 29 with
+`bundled-fonts`, and a letter-spaced line opening with `(١٬٢٣٤),` that the
+join of split lines read whole for the turn). As first proposed the
 tie-break asked neither, and read every such line backwards
 (`.and 2) close it )שלום( open the file )Step 1`; review of the K-11 fix).
 Applying L2 to levels resolved over the drawn line, which

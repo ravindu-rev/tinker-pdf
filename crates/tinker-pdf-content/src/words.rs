@@ -120,11 +120,12 @@ fn extended_pictographic(c: char) -> bool {
 }
 
 /// Whether a character reads right to left to the text device: its
-/// `Bidi_Class` is `R` or `AL`, as `UnicodeData.txt` assigns it, or it is
-/// the punctuation of a right-to-left script (`General_Category` `P*` in
-/// those scripts' blocks), the ARABIC COMMA (`CS`) among it. Not a digit, an
-/// Arabic-Indic one (`AN`) included, nor a mark. An unassigned code point is
-/// not one.
+/// `Bidi_Class` is `R` or `AL`, as `UnicodeData.txt` assigns it, or it is the
+/// ARABIC COMMA, the one common separator (`CS`) of the right-to-left
+/// scripts' blocks. Not a digit, an Arabic-Indic one (`AN`) included, nor
+/// anything else of another class those blocks hold — the ARABIC DECIMAL and
+/// THOUSANDS SEPARATORS (`AN`), the ARABIC PERCENT SIGN (`ET`), the ORNATE
+/// PARENTHESES (`ON`) — nor a mark. An unassigned code point is not one.
 pub(crate) fn reads_right_to_left(c: char) -> bool {
     member(RIGHT_TO_LEFT, u32::from(c))
 }

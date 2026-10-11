@@ -22,8 +22,9 @@
 //!   folding: field 5, `Decomposition_Mapping`, whose untagged values are the
 //!   canonical decompositions — the UCD publishes them nowhere else — and
 //!   field 2, `General_Category`, for `Mn`. And field 4, `Bidi_Class`, for
-//!   the letters the text device takes to read right to left (`R` and `AL`)
-//!   when it decides whether spacing carries the pen.
+//!   the characters the text device takes to read right to left when it
+//!   decides whether spacing carries the pen: `R` and `AL`, and the ARABIC
+//!   COMMA, the one `CS` in the right-to-left scripts' blocks.
 //! - `PropList.txt` supplies `Diacritic`, the property Unicode defines for
 //!   "linguistically modifies the meaning of another character". A nonspacing
 //!   mark that is also `Diacritic` is what diacritic-insensitive search
@@ -280,7 +281,7 @@ fn word_break(data: &Path, out: &mut String) {
 /// The right-to-left scripts' blocks: Hebrew to Arabic Extended-A, the
 /// Hebrew and Arabic presentation forms, and the supplementary planes'
 /// right-to-left blocks — the ranges `DerivedBidiClass.txt` gives `R` or `AL`
-/// by default.
+/// by default, where a common separator is one of those scripts'.
 const RIGHT_TO_LEFT_BLOCKS: [(u32, u32); 5] = [
     (0x0590, 0x08FF),
     (0xFB1D, 0xFDFF),
@@ -290,13 +291,23 @@ const RIGHT_TO_LEFT_BLOCKS: [(u32, u32); 5] = [
 ];
 
 /// Every assigned code point that reads right to left to the text device —
-/// `Bidi_Class` `R` or `AL`, field 4 of `UnicodeData.txt`, and the
-/// punctuation of the right-to-left scripts (`General_Category` `P*` in
-/// their blocks), whose class is a neutral's: the ARABIC COMMA is `CS`, and
-/// it is the glyph a right-to-left word that ends in one is drawn from — as
-/// bare ranges. Not the digits (`AN`, `EN`), marks (`NSM`) or symbols that
-/// share those blocks. A `<…, First>` and `<…, Last>` pair is the range
-/// between.
+/// `Bidi_Class` `R` or `AL`, field 4 of `UnicodeData.txt`, and the common
+/// separators (`CS`) of the right-to-left scripts' blocks, which is the
+/// ARABIC COMMA alone: the glyph a right-to-left word that ends in one is
+/// drawn from — as bare ranges. A `<…, First>` and `<…, Last>` pair is the
+/// range between.
+///
+/// Nothing else of those blocks: not the digits (`AN`, `EN`), the ARABIC
+/// DECIMAL and THOUSANDS SEPARATORS (`AN`), the per-mille, per-ten-thousand
+/// and percent signs (`ET`), the ORNATE PARENTHESES and N'Ko's and the
+/// supplementary planes' punctuation (`ON`), the marks (`NSM`) or the
+/// symbols. Taken in as every `General_Category` `P*` of the blocks, as the
+/// third review's fix had it, those 20 read right to left by their block and
+/// not their class: a `﴿` cut from its line carried the pen into the Arabic
+/// word after it, `﴿عوامل عدّة﴾` letter-spaced reading `﴾عوامل عدّة﴿`, and an
+/// ARABIC PERCENT SIGN joined a justified line whole that then read its sign
+/// at the far end (review of that fix: 22 books in a default build and 24
+/// with `bundled-fonts` that conserved at 9297d2d).
 fn right_to_left(data: &Path, out: &mut String) {
     let text = std::fs::read_to_string(data.join("UnicodeData.txt"))
         .unwrap_or_else(|e| panic!("the vendored UCD is missing: UnicodeData.txt ({e})"));
@@ -304,8 +315,7 @@ fn right_to_left(data: &Path, out: &mut String) {
     let mut first: Option<u32> = None;
     for line in text.lines() {
         let fields: Vec<&str> = line.trim_end_matches('\r').split(';').collect();
-        let (Some(code), Some(name), Some(category), Some(class)) =
-            (fields.first(), fields.get(1), fields.get(2), fields.get(4))
+        let (Some(code), Some(name), Some(class)) = (fields.first(), fields.get(1), fields.get(4))
         else {
             continue;
         };
@@ -318,11 +328,11 @@ fn right_to_left(data: &Path, out: &mut String) {
             }
             code
         };
-        let punctuation = category.starts_with('P')
+        let separator = *class == "CS"
             && RIGHT_TO_LEFT_BLOCKS
                 .iter()
                 .any(|(lo, hi)| (*lo..=*hi).contains(&code));
-        if matches!(*class, "R" | "AL") || punctuation {
+        if matches!(*class, "R" | "AL") || separator {
             for code in from..=code {
                 map.insert(code, String::new());
             }
@@ -336,7 +346,11 @@ fn right_to_left(data: &Path, out: &mut String) {
             && map.contains_key(&0x200F)
             && !map.contains_key(&0x0660)
             && !map.contains_key(&0x06F0)
-            && !map.contains_key(&0x064B),
+            && !map.contains_key(&0x064B)
+            && !map.contains_key(&0x066A)
+            && !map.contains_key(&0x066B)
+            && !map.contains_key(&0xFD3E)
+            && !map.contains_key(&0xFD3F),
         "the right-to-left characters are not the set this crate documents"
     );
     let mut body = String::new();
