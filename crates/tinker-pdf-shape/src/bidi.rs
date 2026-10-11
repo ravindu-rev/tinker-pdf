@@ -903,9 +903,9 @@ fn paired_brackets(
 /// worse; wherever the reading as chosen also pairs one facing outward, 8
 /// worse and none better, each with an unpaired bracket.
 ///
-/// And where the comma tie-break chose left to right for a line that ends in
-/// a mark no line opens with, the line opens just left of that mark
-/// ([`OpenedBefore::before_its_punctuation`]).
+/// And where the comma tie-break chose left to right for a line that ends a
+/// sentence — one stop or more, then any closing quotation marks — the line
+/// opens just left of the stops ([`OpenedBefore::before_its_punctuation`]).
 #[derive(Clone, Copy, Debug)]
 struct OpenedBefore {
     /// Where the unit at the start of the line, for the direction chosen, is
@@ -915,11 +915,46 @@ struct OpenedBefore {
     ltr: bool,
 }
 
-/// The marks [`OpenedBefore::before_its_punctuation`] reads as a line's
-/// end: UAX #14's `IS` and `EX` of the comma tie-break's classes, which no
-/// soft wrap puts at a line's start (LB13) — the full stop, the comma, the
-/// colon, the semicolon, `!`, `?` and the ARABIC COMMA.
-const ENDS_A_LINE: [char; 7] = ['.', ',', ':', ';', '!', '?', '\u{060C}'];
+/// The stops [`OpenedBefore::before_its_punctuation`] reads as a sentence's
+/// end at a line's right, one of them or a run, so `...`, `?!` and `!!` as
+/// well as `.`: those of the comma tie-break's classes (each `CS` or `ON`)
+/// that UAX #14 puts at a line's start only after a forced break, or after a
+/// space in the one case each names.
+///
+/// - Its `EX`, `!` and `?`: no line breaks before one, even after a space
+///   (LB13, `× EX`).
+/// - Its `IS`, the full stop, the comma, the colon, the semicolon and the
+///   ARABIC COMMA: none breaks before one (LB15d, `× IS`) but after a space
+///   and before a digit, where LB15c, `SP ÷ IS NU`, opens a line with `.5`.
+/// - Its `IN`, the ellipses — U+2024 ONE DOT LEADER, U+2025 TWO DOT LEADER,
+///   U+2026 HORIZONTAL ELLIPSIS and U+FE19 PRESENTATION FORM FOR VERTICAL
+///   HORIZONTAL ELLIPSIS: none breaks before one (LB22, `× IN`) but after a
+///   space, which LB18 breaks first. `IN`'s other two are no stops: U+22EF
+///   MIDLINE HORIZONTAL ELLIPSIS is a mathematical operator (`Sm`) and
+///   U+10AF6 MANICHAEAN PUNCTUATION LINE FILLER is right to left (`R`).
+///
+/// An ellipsis counts as a sentence's end by the owner's decision of 11
+/// October 2026, with its price (ruling 14): a right-to-left line that opens
+/// with one before a bracket pair, `…(W) W` after a forced break, draws what
+/// a line of a paragraph with no `dir` ending `(W) W…` draws, and reads as
+/// that.
+const ENDS_A_LINE: [char; 11] = [
+    '.', ',', ':', ';', '!', '?', '\u{060C}', '\u{2024}', '\u{2025}', '\u{2026}', '\u{FE19}',
+];
+
+/// The closing quotation marks [`OpenedBefore::before_its_punctuation`] reads
+/// past right of a line's stops, so that `."`, `.»` and `.”` end a sentence
+/// as `.` does: UAX #14's `QU` that close, each `ON` — `"` and `'`,
+/// `General_Category` `Po`, which close as often as they open, and the ten
+/// of `Pf`, U+00BB, U+2019, U+201D, U+203A, U+2E03, U+2E05, U+2E0A, U+2E0D,
+/// U+2E1D and U+2E21. No line breaks before one but after a space (LB19,
+/// `× [QU - Pi]`, which LB18 precedes), and before a `Pf` one that a space,
+/// a stop, another closing mark or the text's end follows not even then
+/// (LB15b). Never one alone, and never a closing bracket.
+const CLOSES_A_QUOTE: [char; 12] = [
+    '"', '\'', '\u{BB}', '\u{2019}', '\u{201D}', '\u{203A}', '\u{2E03}', '\u{2E05}', '\u{2E0A}',
+    '\u{2E0D}', '\u{2E1D}', '\u{2E21}',
+];
 
 impl OpenedBefore {
     /// How many more letters of the direction chosen than of the other a
@@ -960,39 +995,65 @@ impl OpenedBefore {
     }
 
     /// The line's [`OpenedBefore`] where the comma tie-break chose left to
-    /// right ([`first_strong_drawn`]) for a line that ends in a mark no line
-    /// opens with, a full stop, a comma, a colon, a semicolon, `!` or `?`
-    /// ([`ENDS_A_LINE`]) — or `None`, where [`OpenedBefore::of`] decides as
-    /// for any other line.
+    /// right ([`first_strong_drawn`]) for a line that ends a sentence: read
+    /// leftward from its right end, any closing quotation marks
+    /// ([`CLOSES_A_QUOTE`]), then one stop or more ([`ENDS_A_LINE`]) — `.`,
+    /// `...`, `?!`, `…`, `."` or `.»` — or `None`, where [`OpenedBefore::of`]
+    /// decides as for any other line.
     ///
     /// A left-to-right paragraph drew such a line as right-to-left text with
-    /// its mark after it, so the line opens where that text does, at the unit
-    /// drawn just left of the mark — the last unit that draws something but
-    /// the rightmost — and a pair with a bracket there is one N0 resolved by
-    /// the line above. The letters say nothing here, all of them right to
-    /// left; the mark does. `<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم.</p>`,
-    /// with no `dir` and broken before the bracket, draws its second line
-    /// `موي )رون(.`, and read from the right it paired `(نور)` but read its
-    /// full stop first, `.(نور) يوم` (review of the third review's fix: 32
-    /// books in a default build and 29 with `bundled-fonts` whose stop read
-    /// last at 9297d2d, and a line opening with `(١٬٢٣٤),` that the join
-    /// read whole for the turn). A right-to-left paragraph draws the same
-    /// line only where it opens with the mark, which a soft wrap never puts
-    /// first on a line (UAX #14 LB13 breaks before none of them); the line
-    /// that opens with a symbol, `⚀(א)ב` drawn `ב)א(⚀`, is still turned:
-    /// with every mark the comma tie-break takes passed over so, 215 lines of
+    /// its sentence's end after it, so the line opens where that text does,
+    /// at the first unit left of the stops that draws something, and a pair
+    /// with a bracket there is one N0 resolved by the line above. The letters
+    /// say nothing here, all of them right to left; the end does.
+    /// `<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم.</p>`, with no `dir` and
+    /// broken before the bracket, draws its second line `موي )رون(.`, and
+    /// read from the right it paired `(نور)` but read its full stop first,
+    /// `.(نور) يوم` (review of the third review's fix: 32 books in a default
+    /// build and 29 with `bundled-fonts` whose stop read last at 9297d2d, and
+    /// a line opening with `(١٬٢٣٤),` that the join read whole for the turn).
+    /// Asked only whether the rightmost unit was one of seven marks, with the
+    /// unit just left of it as the line's start, it still turned the lines
+    /// ending `...`, `?!`, `."`, `.»` and `…` (K-11 review, finding V1: 76 of
+    /// its 864 books in a default build and 82 with `bundled-fonts` that read
+    /// their marks last at 9297d2d), and a line with a second pair.
+    ///
+    /// A right-to-left paragraph draws the same line where it opens with
+    /// those marks before the pair — after a forced break, or after a space
+    /// where UAX #14 lets a soft wrap break before them ([`ENDS_A_LINE`],
+    /// [`CLOSES_A_QUOTE`]) — and that line reads as the left-to-right one:
+    /// the price ruling 14 measures, which the owner accepted for the
+    /// ellipsis on 11 October 2026. A closing quotation mark alone ends no
+    /// sentence, nor does a closing bracket, and a stop with a closing
+    /// quotation mark left of it puts the line's start at that mark
+    /// (`ב)א(”.`); the line that opens with a symbol, `⚀(א)ב` drawn
+    /// `ב)א(⚀`, is still turned: with every mark the comma tie-break takes
+    /// passed over so, a lone closing mark among them, 215 lines of
     /// `BidiCharacterTest.txt` read worse and 12 better; with these, the
-    /// file, the wrapped and the sentence lines read as without it.
+    /// file, the wrapped and the sentence lines read as without it. Linear in
+    /// the line: each unit is read once, from the right.
     fn before_its_punctuation(visual: &[&str]) -> Option<OpenedBefore> {
-        let draws = |at: &usize| visual.get(*at).and_then(|unit| first_drawn(unit)).is_some();
-        let mut drawing = (0..visual.len()).rev().filter(draws);
-        let mark = drawing.next()?;
-        let ends = visual
-            .get(mark)
-            .and_then(|unit| first_drawn(unit))
-            .is_some_and(|c| ENDS_A_LINE.contains(&c));
-        let edge = drawing.next()?;
-        ends.then_some(OpenedBefore { edge, ltr: true })
+        // The units that draw something, from the right, each by the
+        // character it draws first: one pass, each unit read once.
+        let mut drawing = (0..visual.len())
+            .rev()
+            .filter_map(|at| {
+                visual
+                    .get(at)
+                    .and_then(|unit| first_drawn(unit))
+                    .map(|c| (at, c))
+            })
+            .peekable();
+        while drawing
+            .next_if(|(_, c)| CLOSES_A_QUOTE.contains(c))
+            .is_some()
+        {}
+        let mut stops = 0usize;
+        while drawing.next_if(|(_, c)| ENDS_A_LINE.contains(c)).is_some() {
+            stops += 1;
+        }
+        let (edge, _) = drawing.next()?;
+        (stops > 0).then_some(OpenedBefore { edge, ltr: true })
     }
 
     /// Whether a pair drawn with its brackets at `open` and `close` has one
@@ -2547,6 +2608,76 @@ mod tests {
         let symbol = chars("\u{5D1})\u{5D0}(\u{2680}");
         let symbol: Vec<&str> = symbol.iter().map(String::as_str).collect();
         assert_eq!(drawn_direction(&symbol), rtl);
+    }
+
+    /// **A pair before closing quotation marks and several stops turns no
+    /// line either** — the K-11 review, finding V1.
+    ///
+    /// The full stop's line, `موي )رون(.`, with its sentence ended otherwise:
+    /// `...`, `?!`, `!!` and `!?`, whose rightmost unit is a stop but whose
+    /// unit just left of it is another, so the pair was counted; `."`, `.»`
+    /// and `.”`, whose rightmost unit is no stop; `…`, which was none; and a
+    /// line with a second pair, `)دقو(`, at its far end. Each was turned and
+    /// read its marks first; each reads them last, as the full stop's line
+    /// does, `نور) يوم(…` — the pair's level came from the line above, which
+    /// a line read alone cannot see. A right-to-left paragraph draws the same
+    /// `…` line where it opens with the ellipsis before the pair, `…(نور) يوم`
+    /// after a forced break, and that line now reads so too: the price ruling
+    /// 14 names, which the owner accepted on 11 October 2026. A closing
+    /// bracket is no closing quotation mark, a
+    /// closing quotation mark alone ends no sentence, and a stop with one
+    /// left of it puts the line's start at that mark: those lines are still
+    /// turned.
+    #[test]
+    fn a_pair_before_closing_quotes_and_several_stops_turns_no_line() {
+        let ltr = BaseDirection::LeftToRight;
+        let rtl = BaseDirection::RightToLeft;
+        let pair = "(\u{646}\u{648}\u{631})";
+        let opened = "\u{645}\u{648}\u{64A} )\u{631}\u{648}\u{646}(";
+        let two = "\u{627}\u{646}\u{62D}\u{628}\u{635}\u{623} )\u{62F}\u{642}\u{648}( \
+                   \u{644}\u{645}\u{627}\u{648}\u{639} \u{645}\u{648}\u{64A} \
+                   \u{631}\u{648}\u{646} ...\u{645}\u{648}\u{64A} \
+                   )\u{631}\u{648}\u{646}(...";
+        let mut lines: Vec<(String, &str)> = [
+            "...",
+            "?!",
+            "!!",
+            "!?",
+            ".\"",
+            ".\u{BB}",
+            ".\u{201D}",
+            "\u{2026}",
+        ]
+        .iter()
+        .map(|end| (format!("{opened}{end}"), *end))
+        .collect();
+        lines.push((two.to_owned(), "..."));
+        for (line, end) in &lines {
+            let units = chars(line);
+            let units: Vec<&str> = units.iter().map(String::as_str).collect();
+            let theirs = read_in(&units, &logical_order(&units, rtl));
+            assert!(
+                theirs.contains(pair),
+                "read from the right, the line pairs the pair: {theirs:?}"
+            );
+            let read = drawn_reading(&units);
+            assert_eq!(read.direction, ltr, "{line:?}");
+            assert!(!read.turned_by_brackets, "{line:?}");
+            let mine = read_in(&units, &read.order);
+            assert!(mine.ends_with(end), "{line:?} reads {mine:?}");
+        }
+        // A closing bracket is no closing quotation mark, a closing quotation
+        // mark alone ends no sentence, and a closing quotation mark left of
+        // the stops is where such a line opens.
+        for line in [
+            "\u{5D1})\u{5D0}(]",
+            "\u{5D1})\u{5D0}(\"",
+            "\u{5D1})\u{5D0}(\u{201D}.",
+        ] {
+            let units = chars(line);
+            let units: Vec<&str> = units.iter().map(String::as_str).collect();
+            assert_eq!(drawn_direction(&units), rtl, "{line:?}");
+        }
     }
 
     /// **[`drawn_reading`] is [`drawn_direction`] and [`logical_order`] in

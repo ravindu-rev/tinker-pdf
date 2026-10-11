@@ -527,12 +527,31 @@ living in one feature's head.
     the line's letters say the direction chosen — they outnumber the other's
     and the reading in that direction pairs a bracket facing outward of its
     own, or they are at least twice the other's and at least eight more. And
-    where the comma tie-break chose left to right for a line that ends in a
-    mark no soft wrap puts first on a line — a full stop, a comma, a colon, a
-    semicolon, `!`, `?` or the ARABIC COMMA (UAX #14's `IS` and `EX`) — a
-    left-to-right paragraph drew that line as right-to-left text with its
-    mark after it, and the line opens just left of the mark: a pair with a
-    bracket there, enclosing no left-to-right letter, is passed over too.
+    where the comma tie-break chose left to right for a line that ends a
+    sentence — read leftward from its right end, any closing quotation
+    marks, then one stop or more — a left-to-right paragraph drew that line
+    as right-to-left text with the sentence's end after it, and the line
+    opens just left of the stops: a pair with a bracket there, enclosing no
+    left-to-right letter, is passed over too. The stops are the full stop,
+    the comma, the colon, the semicolon, `!`, `?`, the ARABIC COMMA and the
+    ellipses U+2024, U+2025, U+2026 and U+FE19, one or a run (`.`, `...`,
+    `?!`); the closing quotation marks are `"`, `'` and the ten of
+    `General_Category` `Pf` (`»`, `’`, `”`, `›`, U+2E03, U+2E05, U+2E0A,
+    U+2E0D, U+2E1D and U+2E21), so that `."`, `.»` and `.”` end a sentence
+    as `.` does. A closing quotation mark alone ends none, nor does a closing
+    bracket. UAX #14 (Unicode 17.0, the `LineBreak.txt` `tinker-pdf-layout`
+    vendors) puts each of these first on a line only after a forced break or
+    after a space in the one case it names: no line breaks before `!` or
+    `?`, its `EX`, even after a space (LB13, `× EX`); before the full stop,
+    the comma, the colon, the semicolon or the ARABIC COMMA, its `IS`, only
+    after a space and before a digit (LB15c, `SP ÷ IS NU`, which opens a line
+    with `.5`; LB15d, `× IS`, refuses every other); before an ellipsis, its
+    `IN`, only after a space (LB22, `× IN`, which LB18, `SP ÷`, precedes);
+    and before a closing quotation mark, its `QU`, only after a space (LB19,
+    `× [QU - Pi]`, after LB18), and before a `Pf` one that a space, a stop,
+    another closing mark or the text's end follows not even then (LB15b).
+    That an ellipsis ends a sentence is the owner's decision, with its price
+    (below).
     `tinker_pdf_shape::bidi::drawn_direction` asks it last, of a line that
     draws a closing bracket left of an opening one and of no other, and
     `logical_order` for a given direction is untouched: `bidi_conformance.rs`
@@ -562,6 +581,16 @@ living in one feature's head.
     that the join of split lines read whole for the turn;
     `a_dirless_line_opening_with_a_bracket_pair_reads_its_full_stop_last`,
     `bidi.rs`'s `a_pair_before_a_full_stop_the_line_above_resolved_turns_no_line`).
+    And the review of that fix found the exception asked too narrowly (K-11
+    review, finding V1): only of a line whose rightmost unit was one of
+    those seven marks, with the line's start at the unit just left of it, so
+    that a line ending `...`, `?!`, `!!` or `!?` — the unit left of its last
+    stop another stop — or `."`, `.»`, `.”` or `…` was still turned and read
+    its marks first (76 of its 864 books in a default build and 82 with
+    `bundled-fonts` that read their marks last at 9297d2d, and a line with a
+    second pair;
+    `a_dirless_line_opening_with_a_bracket_pair_reads_its_closing_quotes_and_stops_last`,
+    `bidi.rs`'s `a_pair_before_closing_quotes_and_several_stops_turns_no_line`).
 
     *What it gains and what it costs, measured.* Over `BidiCharacterTest.txt`,
     each of its 91 616 drawn lines read in the direction `drawn_direction`
@@ -588,10 +617,11 @@ living in one feature's head.
     outnumber the other's it read 1 393 of them worse and 52 better (1 341
     fewer read as typed) and 2 of the sentence lines worse, asked wherever
     the reading as chosen pairs a bracket facing outward too, 8 worse and
-    none better. Passing over a pair before the comma tie-break's mark
-    changes none of them either; asked of every mark that tie-break takes,
-    it read 215 of the file's lines worse and 12 better — lines that open
-    with a symbol, `⚀(א)ב`, drawn as such a line is. **The price** is a text typed with
+    none better. Passing over a pair before a sentence's end — its stops and
+    closing quotation marks — changes none of them either; asked of every
+    mark that tie-break takes, a lone closing mark among them, it read 215 of
+    the file's lines worse and 12 better — lines that open with a symbol,
+    `⚀(א)ב`, drawn as such a line is. **The price** is a text typed with
     brackets that pair only read the other way round, each set against the
     text between them: `x)שלום(y` in a left-to-right paragraph, drawn
     `x)םולש(y`, reads `y(שלום)x`. No book above pays it, and of the lines
@@ -625,23 +655,64 @@ living in one feature's head.
     or quotation marks, which BD16 does not pair (`content-and-text.md` names
     both).
 
+    *A sentence's end, the ellipsis and the price: the owner's decision of
+    11 October 2026.* That an ellipsis ends a sentence — U+2026, U+2024,
+    U+2025, U+FE19 or a run of full stops — is the owner's decision, Ravindu
+    Wijegunawardhana's, taken with its price known: a right-to-left
+    paragraph whose line opens with an ellipsis before a bracket pair,
+    `…(نور) يوم` after a `<br/>`, draws exactly what a paragraph with no
+    `dir` draws for a line ending `(نور) يوم…`, and now reads as that one
+    does, the ellipsis last: `نور) يوم(…`, the pair the other way round as
+    well, since the line above that gave it its level is not on the line
+    (with the brackets styled apart, a book's structure tree still holds
+    their order). Of the K-11 review's 144 such books (Arabic, Hebrew and
+    pointed Hebrew, up to five kinds of bracket, twelve styles), 96 in a
+    default build and 83 with `bundled-fonts` that conserved at 56dfd93 do
+    not now; none of them conserved at 9297d2d. A probe of the price — 342
+    books for each opening, in each build: Arabic, Hebrew and pointed
+    Hebrew, three kinds of bracket, styled and not, nineteen styles — counts
+    the books that read worse than at 56dfd93, opening after a `<br/>` with
+    `…` 291 (241 with `bundled-fonts`), U+2024 297 (273), U+2025 297
+    (270), U+FE19 270 (195), `..` 288 (270) and `...` 277 (236); with `!!`
+    273 (212), `!?` 291 (231), `?!` 270 (231) and `??` 267 (192); and with
+    a closing quotation mark before stops, `".` 297 (256), `'.` 300 (285),
+    `».` 305 (239), `”.` 297 (237), `"...` 295 (257) and `”…` 315 (300) —
+    4 630 (3 925) in all, 4 618 (3 916) of which conserved there; `.`, `?`,
+    the ARABIC COMMA, `"` and `”` alone, which pay nothing more, are its
+    controls. None of those books conserved at 9297d2d, and none that read
+    whole or was found by search there fails to now; but with styled
+    brackets 667 of the closing quotation marks' (543), whose structure tree
+    read in order at 9297d2d where their page did not, lose that too: the
+    line's `".` comes back `."`. Opening after a space, where a soft wrap
+    may put `"`, `'`, `”…` or an ellipsis first on a line, 22 of the
+    probe's 1 197 books pay it (20). The owner's decision names the
+    ellipsis; the price of a run of `!` and `?` and of a closing quotation
+    mark before stops, the same picture's, came with the fix the owner
+    approved (K-11 review, finding V1), and is recorded here with it.
+
     *The tests that hold it.* `tinker-pdf-shape`'s `bidi.rs`:
     `a_pair_drawn_facing_outward_reads_in_the_direction_that_pairs_it`,
     `a_pair_drawn_facing_inward_decides_nothing`,
     `two_pairs_side_by_side_are_not_broken_for_the_bracket_between_them` (the
     pairs in all),
     `brackets_that_are_no_pair_as_typed_keep_the_lines_direction` (the
-    review's lines) and
+    review's lines),
     `brackets_typed_closing_first_against_a_word_read_as_the_other_direction_pairs_them`
-    (the price); `text_logical_order.rs`:
+    (the price),
+    `a_pair_before_a_full_stop_the_line_above_resolved_turns_no_line` and
+    `a_pair_before_closing_quotes_and_several_stops_turns_no_line` (a
+    sentence's end, and the ellipsis's price); `text_logical_order.rs`:
     `a_right_to_left_line_opening_with_a_bracketed_latin_run_reads_as_written`
     and
     `a_list_marker_and_a_wrapped_parenthesis_in_left_to_right_text_read_as_typed`;
     `epub_conservation.rs`:
     `a_bracketed_run_and_its_full_stop_in_right_to_left_text_read_as_written`,
     `a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_drawn_alike_twin`,
-    `list_markers_and_glosses_in_left_to_right_text_conserve` and
-    `a_bracket_pair_the_line_above_resolved_turns_no_line`.
+    `list_markers_and_glosses_in_left_to_right_text_conserve`,
+    `a_bracket_pair_the_line_above_resolved_turns_no_line`,
+    `a_dirless_line_opening_with_a_bracket_pair_reads_its_full_stop_last` and
+    `a_dirless_line_opening_with_a_bracket_pair_reads_its_closing_quotes_and_stops_last`
+    (a sentence's end).
 
 ## How to add a ruling
 

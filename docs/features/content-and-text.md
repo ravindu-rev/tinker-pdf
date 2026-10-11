@@ -277,15 +277,27 @@ paragraph quoting Hebrew in brackets, fifty Latin letters to fifteen Hebrew
 on the line, was turned and read backwards until the third review of the
 K-11 fix, and no line of `BidiCharacterTest.txt` or of the reviews' wrapped
 and sentence lines reads otherwise for it. And where the comma tie-break
-read a line left to right for the mark at its right end — a full stop, a
-comma, a colon, a semicolon, `!`, `?` or the ARABIC COMMA, which no soft
-wrap puts first on a line — the line opens just left of that mark, and a
-pair with a bracket there, enclosing no left-to-right letter, counts for
-neither reading: `جميل بيت كبير (نور) يوم.` with no `dir`, broken before the
-bracket, draws `موي )رون(.`, and turned it read its full stop first (review
-of the third review's fix, 32 books in a default build and 29 with
-`bundled-fonts`, and a letter-spaced line opening with `(١٬٢٣٤),` that the
-join of split lines read whole for the turn). As first proposed the
+read a line left to right for the sentence's end at its right — read
+leftward, any closing quotation marks (`"`, `'` and the `Pf` ones, `»`, `’`,
+`”` …), then one stop or more: a full stop, a comma, a colon, a semicolon,
+`!`, `?`, the ARABIC COMMA or an ellipsis, so `.`, `...`, `?!`, `…`, `."`
+and `.»` alike, each a mark UAX #14 puts first on a line only after a forced
+break or a space it names (ruling 14) — the line opens just left of the
+stops, and a pair with a bracket there, enclosing no left-to-right letter,
+counts for neither reading: `جميل بيت كبير (نور) يوم.` with no `dir`, broken
+before the bracket, draws `موي )رون(.`, and turned it read its full stop
+first (review of the third review's fix, 32 books in a default build and 29
+with `bundled-fonts`, and a letter-spaced line opening with `(١٬٢٣٤),` that
+the join of split lines read whole for the turn); asked only of the
+rightmost unit, it left `?!`, `...`, `."` and `…` to turn the line (K-11
+review, finding V1, 76 books in a default build and 82 with
+`bundled-fonts`). A closing quotation mark alone ends no sentence, nor does a
+closing bracket. That an ellipsis ends one is the owner's decision (11
+October 2026), and its price is named by ruling 14: a right-to-left line
+that opens with an ellipsis before a pair, `…(نور) يوم` after a `<br/>`,
+draws what the line with no `dir` draws and reads as that one does, its
+ellipsis last, `نور) يوم(…` (read alone, neither line can see the line above
+that gave the pair its level). As first proposed the
 tie-break asked neither, and read every such line backwards
 (`.and 2) close it )שלום( open the file )Step 1`; review of the K-11 fix).
 Applying L2 to levels resolved over the drawn line, which

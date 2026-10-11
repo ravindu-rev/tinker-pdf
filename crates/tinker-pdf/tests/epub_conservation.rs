@@ -1327,3 +1327,47 @@ fn a_dirless_line_opening_with_a_bracket_pair_reads_its_full_stop_last() {
         "content {content:?}, logical {logical:?}"
     );
 }
+
+/// **A line of a paragraph with no `dir` that opens with a bracket pair
+/// reads its closing quotation marks and its stops last** (K-11 review,
+/// finding V1).
+///
+/// The test above's pair, which the line above resolved, was passed over
+/// only where one of seven marks ended the line and the unit just left of it
+/// held the bracket: `<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم?!</p>`,
+/// broken before the bracket, draws `موي )رون(?!`, whose rightmost unit is
+/// a stop but whose unit just left of it is another, so the pair counted,
+/// the bracket tie-break turned the line and it read `!?(نور) يوم`; so did
+/// `."`, whose rightmost unit is no stop, and `…`, which was none. The line
+/// opens left of any closing quotation marks and then one stop or more, an
+/// ellipsis among them (`tinker-pdf-shape`'s
+/// `OpenedBefore::before_its_punctuation`). Each book conserved in logical
+/// order at 9297d2d and did not at 56dfd93, in the build it is written for.
+#[test]
+fn a_dirless_line_opening_with_a_bracket_pair_reads_its_closing_quotes_and_stops_last() {
+    let narrow = "p { margin: 0 42% }";
+    // The Hebrew paragraph that breaks before its bracket at this width: a
+    // longer one with `bundled-fonts`, as for the full stop above.
+    let hebrew = if cfg!(feature = "bundled-fonts") {
+        "שלום עולם ספר בית יום אור יום"
+    } else {
+        "שלום עולם ספר"
+    };
+    for end in ["?!", ".\"", "…"] {
+        for (language, body) in [
+            (
+                "ar",
+                format!("<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم{end}</p>"),
+            ),
+            (
+                "he",
+                format!("<p>{hebrew} <b>(</b>בית<b>)</b> יום{end}</p>"),
+            ),
+        ] {
+            let bytes = epub_support::book::styled_book(language, narrow, &body);
+            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+            assert!(logical.holds(), "{body}: {logical:?}");
+        }
+    }
+}
