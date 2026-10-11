@@ -63,7 +63,13 @@ spacing, &[TextPiece])` writes several such strings, each in its own font at
 its own position along one baseline, as **one** text object, moving between
 them with `Td` — what a mark drawn back over its letter, and the glyph after
 it, need to stay one line to a reader that ends a line where a text object
-ends. `glyph_run` on the
+ends. A piece is `PieceText::Codes`, `PieceText::Glyphs` (written at a word
+spacing of zero) or, since October 2026, `PieceText::UnspacedCodes`: codes in
+a simple font whose code 32 is a character and not a word space, such as a
+`/Differences` font from 32, written at a word spacing of zero too, since
+9.3.3 applies `Tw` to every single-byte code 32 whatever it draws (the EPUB
+writer's overflow font). `PieceText` is not `#[non_exhaustive]`, so a `match`
+on it outside this repository has a third arm to add. `glyph_run` on the
 builder records which glyphs a document draws, so that `set_subset_fonts`
 can embed only those.
 

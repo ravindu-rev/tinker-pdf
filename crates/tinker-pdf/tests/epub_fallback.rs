@@ -615,48 +615,58 @@ fn a_standard_14_arabic_letter_with_two_marks_keeps_both() {
     }
 }
 
-/// **A mark rides on its letter under `word-spacing` when its face's code 32
-/// is a letter of its word** — and the known limit that code 32 is, ROADMAP
-/// CD-19, pinned so that ending it is noticed.
+/// **The overflow font's letter at code 32 takes no word spacing, so nothing
+/// after it in its string moves under `word-spacing`, and a mark rides on
+/// its letter when that letter is one of its word's** (ROADMAP CD-19).
 ///
 /// `paint::OVERFLOW_FIRST` is 32, so the first character a face meets past
 /// `WinAnsiEncoding` is drawn at code 32, and 9.3.3 applies `Tw` to every
-/// single-byte code 32: in a slice with no mark, every glyph after it in its
-/// string is drawn a word spacing from where layout measured it. Unpointed,
-/// the word space moves — `مدة معلم.` at `0.5em` extracts `مدةم علم.`,
-/// present since the overflow font. (A number or a word drawn left to right
-/// inside right-to-left text is the exception since the third review of the
-/// K-11 fix: its glyph after the code 32 is a piece of its own,
-/// `a_number_in_word_spaced_right_to_left_text_is_not_drawn_over_its_bracket`.)
-/// Pointed, a mark placed from layout's pen
-/// (6d79fa4) left a letter so moved: in a bold run whose alpha is its face's
-/// code 32, `αλφα\u{301}` beside a Hebrew word read `αλφαy\u{301}` at a word
-/// spacing of `-2px`, where cd407d5, drawing the mark in its letter's string,
-/// read it whole (round 3 of the marks fix). In a slice that holds a mark
-/// the glyph after the code 32 is a piece of its own now, drawn where layout
-/// put it, so nothing in it is moved and every mark is on its letter
-/// (`a_standard_14_pointed_arabic_letter_is_not_drawn_over_the_next_under_word_spacing`
-/// for what the move did there). Writing the overflow font at `0 Tw` instead, which
-/// ends the limit, was measured on that round's probe: 25 more books
-/// conserve under word spacing and 8 fewer, 6 of them with no mark — they
-/// conserved only because the misplacement closed a word gap past half an
-/// em, which otherwise cuts a right-to-left line into pieces ruling 14 reads
-/// in the order they are drawn.
+/// single-byte code 32, whatever glyph the font draws there. Written at the
+/// run's `Tw`, as it was until October 2026, the overflow font drew every
+/// glyph after its code 32 in a string a word spacing from where layout put
+/// it: `مدة معلم.` at `0.5em` read `مدةم علم.`, present since the overflow
+/// font, and where a run ends inside a word the moved glyph was drawn on the
+/// next run's first — `x <b>αλ</b>φα аб y.` at `word-spacing: 4px` drew its
+/// λ and its φ both at `60pt` in a default build, whose overflow font draws
+/// Greek. It is written at `0 Tw` now, as a text object of its own or as a
+/// `PieceText::UnspacedCodes` piece of one, so both read as written and draw
+/// no glyph over another. Pointed, a mark placed from layout's pen (6d79fa4)
+/// left a letter so moved: in a bold run whose alpha is its face's code 32,
+/// `αλφα\u{301}` beside a Hebrew word read `αλφαy\u{301}` at a word spacing
+/// of `-2px`, where cd407d5, drawing the mark in its letter's string, read
+/// it whole (round 3 of the marks fix); it reads whole at either sign.
 #[test]
-fn a_standard_14_overflow_letter_at_code_32_takes_word_spacing() {
+fn a_standard_14_overflow_letter_at_code_32_takes_no_word_spacing() {
     let unpointed = "\u{645}\u{62F}\u{629} \u{645}\u{639}\u{644}\u{645}.";
-    let bytes = styled_book(
-        "ar",
-        "p { word-spacing: 0.5em }",
-        &format!("<p dir=\"rtl\">{unpointed}</p>"),
-    );
-    let doc = Document::open(bytes).expect("the book opens");
-    assert_eq!(
-        doc.page(0).expect("a page").text().plain_text(),
-        "\u{645}\u{62F}\u{629}\u{645} \u{639}\u{644}\u{645}.\n",
-        "the overflow font's code 32 no longer takes word spacing: \
-         drop ROADMAP CD-19 and assert the line as written"
-    );
+    let greek = "x \u{3B1}\u{3BB}\u{3C6}\u{3B1} \u{430}\u{431} y.";
+    for (language, style, body, expected) in [
+        (
+            "ar",
+            "p { word-spacing: 0.5em }",
+            format!("<p dir=\"rtl\">{unpointed}</p>"),
+            unpointed,
+        ),
+        (
+            "en",
+            "p { word-spacing: 4px }",
+            "<p>x <b>\u{3B1}\u{3BB}</b>\u{3C6}\u{3B1} \u{430}\u{431} y.</p>".to_owned(),
+            greek,
+        ),
+    ] {
+        let bytes = styled_book(language, style, &body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        assert_eq!(
+            doc.page(0).expect("a page").text().plain_text(),
+            format!("{expected}\n"),
+            "under `{style}` the overflow font's code 32 moves what follows it"
+        );
+        reads_as_written(&bytes, &doc, expected);
+        let over = overprinted(&doc);
+        assert!(
+            over.is_empty(),
+            "under `{style}`, {body:?} draws a glyph over another: {over:?}"
+        );
+    }
 
     for style in ["p { word-spacing: -2px }", "p { word-spacing: 4px }"] {
         let body = format!("<p>{HET_VAV} x <b>\u{3B1}\u{3BB}\u{3C6}\u{3B1}\u{301}</b>y z.</p>");
@@ -718,16 +728,18 @@ fn overprinted(doc: &Document) -> Vec<String> {
 /// direction** (re-review of f529a47, BLOCKING).
 ///
 /// The overflow font's code 32 — `MUDDA`'s MEM, the first character past
-/// `WinAnsiEncoding` the face meets — takes `Tw` (9.3.3; ROADMAP CD-19), so
-/// the glyph after it in its string is drawn a word spacing right of where
-/// layout put it. At cd407d5 the rest of the string moved with it and the
-/// shift ended in the word space after it, which is whitespace. A mark ends
-/// its string now and the glyph after the marked letter is a piece of its
-/// own, drawn where layout put it, so the moved LAM was drawn on the AIN
-/// after it: `مُدَّةَ مُعلِّم.` at `word-spacing: 4px` drew both at `48pt`,
-/// and a justified paragraph of the two words ten to fourteen such pairs a
-/// page. In a slice holding a mark the glyph after the overflow font's code
-/// 32 is a piece of its own too, drawn where layout put it.
+/// `WinAnsiEncoding` the face meets — took `Tw` (9.3.3) while the font was
+/// written at the run's word spacing, so the glyph after it in its string
+/// was drawn a word spacing right of where layout put it. At cd407d5 the
+/// rest of the string moved with it and the shift ended in the word space
+/// after it, which is whitespace. A mark ends its string now and the glyph
+/// after the marked letter is a piece of its own, drawn where layout put it,
+/// so the moved LAM was drawn on the AIN after it: `مُدَّةَ مُعلِّم.` at
+/// `word-spacing: 4px` drew both at `48pt`, and a justified paragraph of the
+/// two words ten to fourteen such pairs a page. The glyph after the code 32
+/// was then made a piece of its own too, drawn where layout put it; the
+/// overflow font is written at `0 Tw` now (ROADMAP CD-19), so nothing it
+/// draws moves and the glyph stays in its string.
 #[test]
 fn a_standard_14_pointed_arabic_letter_is_not_drawn_over_the_next_under_word_spacing() {
     let long: String = (0..14)
@@ -1786,19 +1798,21 @@ fn a_run_of_neutrals_its_word_spaces_part_is_drawn_as_typed() {
 }
 
 /// **A word-spaced slice whose glyph reads alike either way round is drawn
-/// with its word space first, where the overflow font's overrun falls**
-/// (ROADMAP CD-19; third review of the K-11 fix).
+/// with its word space first** (third review of the K-11 fix).
 ///
 /// In a monospace Arabic paragraph, justified, Courier draws ` #` and the
 /// overflow font the Arabic words. The overflow font's code 32 is a letter of
-/// the book's, moved by `Tw` all the same, so the last glyphs of its string
-/// are drawn up to a word spacing right of where layout put them — over what
-/// is drawn next. Drawn in its level's order, `# `, the `#` stood there: the
-/// NOON of `نعرف` and the `#` overlapped and the line read `أصبحنا ن#عرف`.
-/// Drawn as typed, as at 9297d2d, the space stands there, which draws
-/// nothing (`paint::opens_with_its_word_space`); the slice's one glyph reads
-/// the same either way. Four books in each build conserved at 9297d2d and
-/// did not with the slice in its level's order.
+/// the book's, and while the font was written at the run's `Tw` (until
+/// October 2026, ROADMAP CD-19) the last glyphs of its string were drawn up
+/// to a word spacing right of where layout put them — over what is drawn
+/// next. Drawn in its level's order, `# `, the `#` stood there: the NOON of
+/// `نعرف` and the `#` overlapped and the line read `أصبحنا ن#عرف`. Drawn as
+/// typed, as at 9297d2d, the space stood there, which draws nothing
+/// (`paint::opens_with_its_word_space`); the slice's one glyph reads the same
+/// either way. Four books in each build conserved at 9297d2d and did not with
+/// the slice in its level's order. The font is written at `0 Tw` now and
+/// nothing overruns; the book is kept for the slice's other reason, its
+/// stretched space inside its own text object.
 #[test]
 fn a_word_spaced_slice_reading_alike_is_drawn_with_its_space_first() {
     let words = [
@@ -1875,22 +1889,24 @@ fn a_word_spaced_slice_not_reading_alike_is_drawn_in_its_levels_order() {
 ///
 /// The overflow font's code 32 is a character of the book's, the first past
 /// `WinAnsiEncoding` its face met, and 9.3.3 moves every glyph after it in
-/// its string by `Tw` (ROADMAP CD-19): in a slice with no mark, a word
-/// spacing into whatever is drawn on its right. In a slice drawn left to
-/// right inside right-to-left text, what is drawn on its right is what a
-/// reader reads before it, and a glyph moved past it is read before it too:
-/// with `bundled-fonts`, whose overflow font draws a Hebrew book's
-/// Arabic-Indic digits and the ONE at code 32, `(١٢٣),` opening a justified
-/// line letter-spaced by `0.3em` drew its THREE on its `(` and read
-/// `٣(١٢),`. Such a book conserved at 9297d2d only while its lines were read
-/// word by word; K-11's carry joins them, and the number was found by no
-/// search (3 books). A number or a Greek word the book meets first, so that
-/// it opens with its face's code 32, did the same under `word-spacing` from
-/// the overflow font on. The glyph after the code 32 is a piece of its own in
-/// such a slice now, drawn where layout put it, in the slice's text object.
-/// (In a default build the justified book breaks a line after its second
-/// `(` and does not conserve, at 9297d2d as now: a bracket a line break
-/// parted, `content-and-text.md`.)
+/// its string by `Tw`: written at the run's word spacing, as it was until
+/// October 2026 (ROADMAP CD-19), in a slice with no mark it drew them a word spacing
+/// into whatever is drawn on its right. In a slice drawn left to right
+/// inside right-to-left text, what is drawn on its right is what a reader
+/// reads before it, and a glyph moved past it is read before it too: with
+/// `bundled-fonts`, whose overflow font draws a Hebrew book's Arabic-Indic
+/// digits and the ONE at code 32, `(١٢٣),` opening a justified line
+/// letter-spaced by `0.3em` drew its THREE on its `(` and read `٣(١٢),`.
+/// Such a book conserved at 9297d2d only while its lines were read word by
+/// word; K-11's carry joins them, and the number was found by no search (3
+/// books). A number or a Greek word the book meets first, so that it opens
+/// with its face's code 32, did the same under `word-spacing` from the
+/// overflow font on. The third review of the K-11 fix drew the glyph after
+/// the code 32 in such a slice as a piece of its own, where layout put it;
+/// the overflow font is written at `0 Tw` now, so nothing it draws moves, in
+/// any slice. (In a default build the justified book breaks a line after its
+/// second `(` and does not conserve, at 9297d2d as now: a bracket a line
+/// break parted, `content-and-text.md`.)
 #[test]
 fn a_number_in_word_spaced_right_to_left_text_is_not_drawn_over_its_bracket() {
     let justified = "שלום עולם מלחמה (١٢٣), ספר בית גדול אור. \
@@ -1935,6 +1951,146 @@ fn a_number_in_word_spaced_right_to_left_text_is_not_drawn_over_its_bracket() {
             over.is_empty(),
             "under `{style}`, {body:?} draws a glyph over another: {over:?}"
         );
+    }
+}
+
+/// **A word-spaced right-to-left table cell after a cell ending in a Latin
+/// word reads whole, and both its words are found** (ROADMAP CD-19).
+///
+/// `<table dir="rtl" style="border-spacing: 0; word-spacing: 1em">` whose
+/// last row is `abc | وقد | def | أصبحنا نعرف`: the last cell is drawn just
+/// left of `def`, with no white space between. The overflow font draws its
+/// Arabic, and the cell's AIN is its code 32. Written at the run's `Tw`, the
+/// font drew the NOON after it a word spacing left of the word space's far
+/// end, closing the cell's stretched word gap to 3pt, and ruling 14 rejoined
+/// the two words across it, the NOON in the wrong one: the cell read
+/// `أصبحنان عرف`, so `نعرف` was found once in the book, not twice. Written at
+/// `0 Tw`, the NOON is where layout put it and the gap is the stretched word
+/// space's whole em, which `TextDevice` carries a reader's pen across only
+/// since the cell's word no longer goes on from `def` (the commit before
+/// this one, `a_gap_no_spacing_accounts_for_ends_the_word_before_it`): before
+/// it, the cell came back in two pieces read in drawn order, as its Hebrew
+/// twin did, and the 24 books a build of the K-11 review's probe that
+/// conserved only through the moved NOON would have failed.
+#[test]
+fn a_word_spaced_right_to_left_cell_after_a_latin_word_reads_whole() {
+    let rows: String = [
+        "<td>عوامل</td><td>عدّة</td><td>وقد.</td><td>(HDAC)</td>",
+        "<td>أصبحنا نعرف</td><td>الآن</td><td>(2010)</td><td>x</td>",
+        "<td>«الموادّ»</td><td>تكبح</td><td>[عوامل]</td><td>عدّة</td>",
+        "<td>abc</td><td>وقد</td><td>def</td><td>أصبحنا نعرف</td>",
+    ]
+    .iter()
+    .map(|row| format!("<tr>{row}</tr>"))
+    .collect();
+    for style in ["", "body { font-family: sans-serif }"] {
+        for rows in [
+            rows.clone(),
+            rows.replace("<td>", "<td style=\"padding: 0\">"),
+        ] {
+            let table = format!(
+                "<table dir=\"rtl\" style=\"border-spacing: 0; word-spacing: 1em\">{rows}</table>"
+            );
+            for body in [table.clone(), unpointed(&table)] {
+                let bytes = styled_book("ar", style, &body);
+                let doc = Document::open(bytes.clone()).expect("the book opens");
+                let page = doc.page(0).expect("a page");
+                let text = page.text().plain_text();
+                for verdict in [
+                    conservation(&bytes, &doc),
+                    conservation_in_logical_order(&bytes, &doc),
+                ] {
+                    assert!(verdict.holds(), "`{style}`, {body}: {text:?} {verdict:?}");
+                }
+                for word in ["أصبحنا", "نعرف"] {
+                    assert_eq!(
+                        page.text().search(word).len(),
+                        2,
+                        "`{style}`, {body}: {word:?} is not found twice in {text:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// **A styled neutral glued to a word under `word-spacing` keeps the word
+/// searchable** (ROADMAP CD-19; H4 of the review of the third review's K-11
+/// fix).
+///
+/// `<p dir="rtl">ا <b>.</b>أصبحنا ن</p>` at `word-spacing: 0.6em`: the
+/// overflow font's code 32 is the paragraph's first ALEF, and written at the
+/// run's `Tw` the font drew the rest of `أصبحنا`'s string — NOON to
+/// ALEF-HAMZA, drawn left to right — a word spacing right of where layout put
+/// it, over the bold `.` glued to the word. K-11's carry joins the word to its
+/// line, which holds the `.`, and the line read `اأص.بحنا ن`: the word was
+/// not found (8 books in each build of the hunt's probes, found at 9297d2d,
+/// whose content streams the K-11 work did not change; 16 more in a default
+/// build of the fix-verify probe and 3 with `bundled-fonts`, Hebrew too).
+/// Written at `0 Tw`, every glyph is where layout put it and the line reads
+/// as written: the Arabic dots of the hunt's minimised book, and the Hebrew
+/// `?!` and `»,` glued to the word on both sides, `יום<b>?!</b>בראשית`.
+#[test]
+fn a_styled_neutral_glued_to_a_word_under_word_spacing_keeps_it_searchable() {
+    let hebrew = "\u{5E9}\u{5DC}\u{5D5}\u{5DD} \u{5E2}\u{5D5}\u{5DC}\u{5DD}<b>{p}</b>\
+                  \u{5DE}\u{5DC}\u{5D7}\u{5DE}\u{5D4} \u{5E1}\u{5E4}\u{5E8}. \
+                  \u{5D0}\u{5D5}\u{5E8} \u{5D9}\u{5D5}\u{5DD}<b>{p}</b>\
+                  \u{5D1}\u{5E8}\u{5D0}\u{5E9}\u{5D9}\u{5EA} \u{5D1}\u{5E8}\u{5D0}.";
+    let books = [
+        ("ar", "<p dir=\"rtl\">ا <b>.</b>أصبحنا ن</p>", vec!["أصبحنا"]),
+        (
+            "ar",
+            "<p dir=\"rtl\">ال <i>...</i> وقد <b>...</b>أصبحنا نعرف.</p>",
+            vec!["أصبحنا", "نعرف"],
+        ),
+        (
+            "he",
+            "<p dir=\"rtl\">\u{5D9}\u{5D5}\u{5DD}<b>?!</b>\u{5D1}\u{5E8}\u{5D0}\u{5E9}\u{5D9}\u{5EA}</p>",
+            vec!["\u{5D9}\u{5D5}\u{5DD}", "\u{5D1}\u{5E8}\u{5D0}\u{5E9}\u{5D9}\u{5EA}"],
+        ),
+    ];
+    let mut books: Vec<(&str, String, Vec<&str>)> = books
+        .into_iter()
+        .map(|(language, body, words)| (language, body.to_owned(), words))
+        .collect();
+    for glued in ["?!", "\u{BB},"] {
+        let text = hebrew.replace("{p}", glued);
+        for open in ["<p dir=\"rtl\">", "<p>"] {
+            books.push((
+                "he",
+                format!("{open}{text}</p>"),
+                vec![
+                    "\u{5D1}\u{5E8}\u{5D0}\u{5E9}\u{5D9}\u{5EA}",
+                    "\u{5DE}\u{5DC}\u{5D7}\u{5DE}\u{5D4}",
+                ],
+            ));
+        }
+    }
+    for spacing in ["0.5em", "0.6em", "1em"] {
+        let style = format!("p {{ word-spacing: {spacing}; margin: 0 20% }}");
+        for (language, body, words) in &books {
+            let bytes = styled_book(language, &style, body);
+            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let page = doc.page(0).expect("a page");
+            let text = page.text().plain_text();
+            for word in words {
+                assert!(
+                    !page.text().search(word).is_empty(),
+                    "`{style}`, {body}: {word:?} is not found in {text:?}"
+                );
+            }
+            for verdict in [
+                conservation(&bytes, &doc),
+                conservation_in_logical_order(&bytes, &doc),
+            ] {
+                assert!(verdict.holds(), "`{style}`, {body}: {text:?} {verdict:?}");
+            }
+            let over = overprinted(&doc);
+            assert!(
+                over.is_empty(),
+                "`{style}`, {body}: a glyph is drawn over another: {over:?}"
+            );
+        }
     }
 }
 

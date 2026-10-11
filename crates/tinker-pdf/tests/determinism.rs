@@ -1783,7 +1783,11 @@ fn epub_book() -> Vec<u8> {
 /// effects, counters, `text-transform`, right-to-left lines, CID-keyed
 /// fallback text — moved neither hash: the merged tree produces the fifth
 /// move's two values exactly, because this book uses none of those properties
-/// and none of its text is right-to-left or outside WinAnsi. The new values
+/// and none of its text is right-to-left. (Its non-breaking hyphen and its
+/// Japanese line are outside WinAnsi, and are drawn in a fallback font, but
+/// the book sets no `word-spacing` and justifies nothing, so writing the
+/// overflow font at `0 Tw` (ROADMAP CD-19, October 2026) moved neither hash
+/// either: a word spacing of zero is written as it always was.) The new values
 /// were produced on `x86_64-unknown-linux-gnu` and reproduced under
 /// `wasm32-wasip1` before they were committed.
 const GOLDEN: &[Fixture] = &[

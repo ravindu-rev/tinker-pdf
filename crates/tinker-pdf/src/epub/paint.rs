@@ -3607,6 +3607,10 @@ fn drawable(style: BorderStyle) -> bool {
 struct Segment {
     resource: Vec<u8>,
     composite: bool,
+    /// Whether it is the overflow font's ([`Face::overflow_resource`]),
+    /// whose code 32 is a character of the book's and not a word space, so
+    /// that it is written at no word spacing ([`flush`]).
+    unspaced: bool,
     codes: Vec<u8>,
     glyphs: Vec<(u16, char)>,
     characters: String,
@@ -4434,9 +4438,9 @@ fn undoes_its_levels(c: char) -> bool {
 /// - **A slice of a word-spaced run whose glyphs read alike either way
 ///   round**, ` (` or ` #`, which [`coded_order`] draws as typed itself, its
 ///   word space first ([`opens_with_its_word_space`]): what a reader reads is
-///   the same either way, and the space stands where the overflow font's
-///   string before it overruns (ROADMAP CD-19) and is stretched inside the
-///   slice's own text object.
+///   the same either way, and the space is stretched inside the slice's own
+///   text object. (It also stood where the overflow font's string before it
+///   overran, until that font was written at `0 Tw`, ROADMAP CD-19.)
 fn neutrals_drawn_as_typed(
     line: &[TextRun],
     pieces: &[Vec<(core::ops::Range<usize>, Level)>],
@@ -5735,12 +5739,10 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// from a quarter of an em of spacing (`The word ךְ\nלֶ\nמֶ\n, quoted`;
 /// review of 6d79fa4). A slice holding no mark keeps a text object per
 /// segment, and the pen moves by `advance + letter-spacing` in one sum as it
-/// always did, so a book with no mark is written byte for byte as at cd407d5
+/// always did, so a slice with no mark is written as cd407d5 wrote it
 /// (measured on the round-3 and round-4 probes' mark-free books,
-/// letter-spaced and word-spaced ones among them) — but for the overflow
-/// font's code 32 in a word-spaced slice drawn left to right inside
-/// right-to-left text, the rest of whose string is a piece of the same text
-/// object since the third review of ROADMAP K-11 (below).
+/// letter-spaced ones among them) but for the overflow font's `Tw` under
+/// `word-spacing` (below).
 ///
 /// # Where the letter a mark rides on is drawn
 ///
@@ -5763,44 +5765,38 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// 9.3.3 applies `Tw` to any single-byte code 32, and the overflow font's
 /// code 32 is a character of the book's — the first past `WinAnsiEncoding`
 /// its face met ([`OVERFLOW_FIRST`]) — not a word space, which layout did
-/// not space: in its string, every glyph after it is drawn a `word-spacing`
-/// right of where layout put it (ROADMAP CD-19). In a slice with no mark the
-/// string runs on to the next resource, so its tail moves together, a word
-/// spacing into whatever is drawn next: the gap before the next word,
-/// punctuation another resource draws right after the word (`معلم.`'s MEM on
-/// its `WinAnsiEncoding` full stop), or, where a run ends inside a word, the
-/// glyph after it (`x <b>αλ</b>φα` at `word-spacing: 4px` draws the λ on the
-/// φ in a default build, whose overflow font draws Greek). That is cd407d5's
-/// drawing, kept byte for byte — in a book that holds marks too, whose
-/// narrower pointed words can give a mark-free slice the line its mark-free
-/// twin has, and with it that twin's overprint (re-review of 0e58f5f; the
-/// owner accepted it for the October 2026 release). In a slice that holds a mark, a mark ends its
-/// string and the glyph after the marked letter is a piece of its own, drawn
-/// where layout put it, so a glyph the code 32 had moved landed on it:
-/// `مُدَّةَ مُعلِّم.` at `word-spacing: 4px` drew the LAM and the AIN both at
-/// `48pt`, and a justified paragraph of such words ten to fourteen such
-/// pairs a page (re-review of f529a47). So in such a slice the glyph after
-/// the code 32 is a piece of its own too, from the pen, and nothing in the
-/// slice is drawn where `Tw` would put it
-/// (`a_standard_14_pointed_arabic_letter_is_not_drawn_over_the_next_under_word_spacing`).
+/// not space. **So the overflow font is written at no word spacing**
+/// ([`Segment::unspaced`]): a segment of it alone at `0 Tw`, and a piece of
+/// a text object of several as [`PieceText::UnspacedCodes`], which
+/// [`PageBuilder::text_pieces`] writes at `0 Tw` between the pieces that
+/// take the run's. Every glyph of it is drawn where layout put it, under
+/// `word-spacing` and justification alike, and a book that sets neither is
+/// written as before: a word spacing that is a zero is written as it was.
 ///
-/// And so it is in a word-spaced slice with no mark drawn left to right
-/// inside right-to-left text — at an even level inside an odd one, drawn in
-/// its level's order ([`TextRun::bidi_line_rtl`]) — whose right neighbour is
-/// what a reader reads before it, so that a glyph moved past that neighbour
-/// is read before it too: with `bundled-fonts`, whose overflow font draws a
-/// Hebrew book's Arabic-Indic digits and the ONE at code 32, `(١٢٣),`
-/// opening a justified line letter-spaced by `0.3em` drew its THREE on its
-/// `(` and read `٣(١٢),` once K-11's carry read the line whole (third review
-/// of the K-11 fix;
-/// `a_number_in_word_spaced_right_to_left_text_is_not_drawn_over_its_bracket`).
-/// The rest of the string is another piece of the slice's text object, from
-/// the pen, so that a reader goes on with the line wherever the spacing puts
-/// it. A right-to-left word's string moves on into the word space before
-/// the word, and keeps cd407d5's drawing: placed where layout put it as
-/// well, a word's glyphs left a stretched gap that a reader no longer
-/// bridged between two table cells, and 24 books in each build of that
-/// review's probe that conserved at 9297d2d did not.
+/// Until October 2026 (ROADMAP CD-19) the font was written at the run's
+/// `Tw`, and in its string every glyph after the code 32 was drawn a
+/// word spacing right of where layout put it — into the gap before the next
+/// word (`مدة معلم.` at `word-spacing: 0.5em` read `مدةم علم.`), onto
+/// punctuation another resource draws right after the word (`معلم.`'s MEM
+/// on its full stop), onto the glyph after a run that ends inside a word
+/// (`x <b>αλ</b>φα` at `word-spacing: 4px` drew the λ on the φ in a default
+/// build), and onto a styled neutral glued to a right-to-left word, whose
+/// line K-11's carry then read interleaved (`<p dir="rtl">ا <b>.</b>أصبحنا
+/// ن</p>` at `0.6em` read `اأص.بحنا ن`, and search lost the word). The
+/// fixes before it each placed the glyph after the code 32 where layout put
+/// it in one kind of slice, as a piece of its own: one that holds a mark,
+/// where the moved LAM of `مُدَّةَ مُعلِّم.` was drawn on its AIN at
+/// `word-spacing: 4px` (re-review of f529a47), and one with no mark drawn left
+/// to right inside right-to-left text, where with `bundled-fonts` the THREE
+/// of `(١٢٣),` was drawn on its `(` (third review of the K-11 fix). A
+/// right-to-left word's string kept moving: placed where layout put it,
+/// table cells at `word-spacing: 1em` after a cell ending in a Latin word
+/// left a stretched word gap only the moved glyph had closed, which
+/// `tinker-pdf-content`'s `TextDevice` bridges since a gap no spacing
+/// accounts for ends the word before it. Written at `0 Tw`, the probes of
+/// ROADMAP K-11's reviews draw no glyph over another under `word-spacing` or
+/// justification; a few books that read right only because a moved glyph
+/// closed or opened a gap read otherwise now, which `epub.md` names.
 ///
 /// # Where a slice ends on a mark
 ///
@@ -5856,8 +5852,7 @@ fn draw_coded(
     // a stretch that spills into the overflow font is a piece of its own,
     // and the second's origin is wherever the first's advance left it. A
     // stretch of a new resource starts a new text object, as it always has,
-    // except in a slice that holds a mark, and the rest of a string after the
-    // overflow font's code 32 in one drawn so does not (see above).
+    // except in a slice that holds a mark (see above).
     let mut object: Vec<Segment> = Vec::new();
     // Where the last character drawn that is not a mark started, its
     // advance, and whether a reader sets it as wide as it was measured
@@ -5874,22 +5869,6 @@ fn draw_coded(
     // mark, and what follows one, is a piece of the object open, and only a
     // slice without one starts an object at a new resource.
     let whole = slice.chars().any(|c| bidi_class(c) == BidiClass::NSM);
-    // Whether the last character drawn was the overflow font's code 32 in a
-    // slice that holds a mark, or in a word-spaced slice drawn left to right
-    // inside right-to-left text: what follows it is a piece of its own, from
-    // the pen, since 9.3.3 applies `Tw` to any single-byte code 32 and
-    // layout spaced only word spaces (ROADMAP CD-19).
-    let mut after_overflow_space = false;
-    // Whether this slice places what follows the overflow font's code 32 so
-    // (see above): one that holds a mark, or a word-spaced one at an even
-    // level inside an odd one, drawn in its level's order, whose glyph on
-    // its right a reader reads before it.
-    let unspaced_code_32 = whole
-        || (run.bidi_line_rtl
-            && run.word_spacing != 0.0
-            && run
-                .bidi_level
-                .is_some_and(|level| level >= 2 && level % 2 == 0));
     let start = x;
     let order = coded_order(run, slice);
 
@@ -5928,23 +5907,12 @@ fn draw_coded(
             && order
                 .get(at + 1)
                 .is_some_and(|&(next, rides)| rides && metrics.advance(next, &font) == 0.0);
-        // The overflow font's code 32: a character of the book's, not a word
-        // space, and moved by `Tw` all the same.
-        let overflow_space = matches!(
-            (&coded, chosen),
-            (Coded::Simple { resource, code: 32 }, Chosen::Standard(face))
-                if *resource == face.overflow_resource()
-        );
         let same = object
             .last()
             .is_some_and(|open| open.resource == coded.resource());
-        let continues = !mark && !after_mark && !after_overflow_space && !alone && same;
+        let continues = !mark && !after_mark && !alone && same;
         if !continues {
-            // The rest of a string after the overflow font's code 32 is
-            // another piece of the same text object, so that a reader goes
-            // on with the line wherever the spacing puts it.
-            let one_object = whole || (after_overflow_space && same);
-            if !one_object {
+            if !whole {
                 flush(
                     page,
                     std::mem::take(&mut object),
@@ -5957,6 +5925,14 @@ fn draw_coded(
             object.push(Segment {
                 resource: coded.resource().to_vec(),
                 composite: matches!(coded, Coded::Composite { .. }),
+                // The overflow font's code 32 is a character of the book's,
+                // not a word space, and 9.3.3 moves what follows it by `Tw`
+                // all the same: the font is written at no word spacing.
+                unspaced: matches!(
+                    (&coded, chosen),
+                    (Coded::Simple { resource, .. }, Chosen::Standard(face))
+                        if *resource == face.overflow_resource()
+                ),
                 codes: Vec::new(),
                 glyphs: Vec::new(),
                 characters: String::new(),
@@ -5977,7 +5953,6 @@ fn draw_coded(
             open.characters.push(ch);
         }
         after_mark = mark;
-        after_overflow_space = unspaced_code_32 && overflow_space;
         // One sum, `advance + letter-spacing`, as before a mark took none:
         // adding the two to the pen one at a time rounds differently in the
         // last place, and a letter-spaced book with no mark in it was written
@@ -6160,15 +6135,17 @@ fn coded_order(run: &TextRun, slice: &str) -> Vec<(char, bool)> {
 /// Drawn as typed, the space is drawn first and the glyph after it, where
 /// layout put the slice's end:
 ///
-/// - **No glyph is drawn where the one before it overruns** (ROADMAP CD-19).
-///   The overflow font's code 32 is a letter of the book's and is moved by
-///   `Tw` all the same, so under `word-spacing` or justification the last
-///   glyphs of its string are drawn up to a word spacing right of where
-///   layout put them, over whatever is drawn next: drawn in its level's order
-///   the monospace `#` of `أصبحنا #نعرف`, justified, stood on the NOON the
-///   overflow font moved, and the line read `أصبحنا ن#عرف` (4 books in each
-///   build); drawn as typed, the space stands there, which draws nothing, as
-///   at 9297d2d.
+/// - **No glyph was drawn where the one before it overran** — the first
+///   reason, and history since the overflow font is written at `0 Tw`
+///   (ROADMAP CD-19). The overflow font's code
+///   32 is a letter of the book's, and while the font was written at the
+///   run's `Tw` the last glyphs of its string were drawn up to a word
+///   spacing right of where layout put them, over whatever was drawn next:
+///   drawn in its level's order the monospace `#` of `أصبحنا #نعرف`,
+///   justified, stood on the NOON the overflow font moved, and the line read
+///   `أصبحنا ن#عرف` (4 books in each build); drawn as typed, the space stood
+///   there, which draws nothing, as at 9297d2d. The font is written at
+///   `0 Tw` now and moves nothing.
 /// - **The space is stretched inside the slice's own text object**, and the
 ///   glyph meets what is drawn after it. `TextDevice` carries a reader's pen
 ///   across a gap `Tw` made into a right-to-left letter only on a line that
@@ -6234,7 +6211,10 @@ fn mark_clusters(slice: &str) -> Vec<&str> {
 /// Writes one text object [`draw_coded`] assembled: its one segment as
 /// [`PageBuilder::encoded_text`] or [`PageBuilder::glyphs`] writes it, or
 /// its several — a mark and what follows it, each at its own position — as
-/// one text object through [`PageBuilder::text_pieces`].
+/// one text object through [`PageBuilder::text_pieces`]. The overflow
+/// font's segment is written at no word spacing, alone or as a
+/// [`PieceText::UnspacedCodes`] piece ([`draw_coded`]'s *The overflow font's
+/// code 32*).
 ///
 /// # This is the caller of [`PageBuilder::glyphs`] that survived, and it is
 /// the right one
@@ -6305,6 +6285,15 @@ fn flush(
         if segment.codes.is_empty() {
             return;
         }
+        // The overflow font at no word spacing: its code 32 is a character of
+        // the book's. A zero is written as it was, either sign, so a book that
+        // sets no word spacing is written byte for byte as before.
+        let (letters, words) = spacing;
+        let spacing = if segment.unspaced && words != 0.0 {
+            (letters, 0.0)
+        } else {
+            spacing
+        };
         page.encoded_text(
             &segment.resource,
             size,
@@ -6331,6 +6320,11 @@ fn flush(
             x: frame.x(segment.x),
             text: if segment.composite {
                 PieceText::Glyphs(glyphs)
+            } else if segment.unspaced {
+                PieceText::UnspacedCodes {
+                    codes: &segment.codes,
+                    characters: &segment.characters,
+                }
             } else {
                 PieceText::Codes {
                     codes: &segment.codes,

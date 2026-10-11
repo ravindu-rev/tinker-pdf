@@ -1262,6 +1262,23 @@ pub enum PieceText<'a> {
     },
     /// Glyphs of a composite font, as [`PageBuilder::glyphs`] takes them.
     Glyphs(&'a [Glyph<'a>]),
+    /// Codes in a simple font whose code 32 is **not a word space** — one
+    /// whose encoding puts a character of the document's there, as a
+    /// `/Differences` array from 32 does ([`DocumentBuilder::add_named_font`])
+    /// — and the characters they stand for, as [`PieceText::Codes`] takes
+    /// them.
+    ///
+    /// Written at a word spacing of zero, as a composite font's piece is:
+    /// 9.3.3 applies `Tw` to every single-byte code 32, whatever glyph the
+    /// font draws there, so at the caller's word spacing every glyph after
+    /// such a code in its string would be drawn a word spacing right of where
+    /// the caller placed it.
+    UnspacedCodes {
+        /// The codes, written and not interpreted.
+        codes: &'a [u8],
+        /// What they stand for, recorded and not written.
+        characters: &'a str,
+    },
 }
 
 /// One piece of a [`PageBuilder::text_pieces`] text object: a font, where
@@ -3643,7 +3660,13 @@ impl PageBuilder {
     /// drawn with a word spacing of zero, as [`PageBuilder::glyphs`]'s callers
     /// arrange: 9.3.3 applies `Tw` to a single-byte code 32 only, and a
     /// reader that applied it to a two-byte one would move every glyph after
-    /// a glyph whose index is 32.
+    /// a glyph whose index is 32. So is a [`PieceText::UnspacedCodes`] piece,
+    /// whose code 32 is a character and not a word space, and which 9.3.3
+    /// would move by `Tw` all the same; `Tw` is written again before the next
+    /// piece that takes the word spacing, so each piece is spaced as its own
+    /// font's codes say. A word spacing that is a zero already is written as
+    /// given, of either sign, so a caller that sets none gets the bytes it got
+    /// before that variant existed.
     ///
     /// Each piece's characters or glyphs are recorded exactly as the
     /// single-piece writers record them, so subsetting, `/W` and `/ToUnicode`
@@ -3677,7 +3700,7 @@ impl PageBuilder {
         let drawable: Vec<&TextPiece<'_>> = pieces
             .iter()
             .filter(|piece| match piece.text {
-                PieceText::Codes { .. } => true,
+                PieceText::Codes { .. } | PieceText::UnspacedCodes { .. } => true,
                 PieceText::Glyphs(_) => self.composite.contains_key(piece.font),
             })
             .collect();
@@ -3714,6 +3737,10 @@ impl PageBuilder {
             let words = match piece.text {
                 PieceText::Codes { .. } => word_spacing,
                 PieceText::Glyphs(_) => 0.0,
+                // A zero of either sign as given, so that a document that sets
+                // no word spacing is written as before.
+                PieceText::UnspacedCodes { .. } if word_spacing == 0.0 => word_spacing,
+                PieceText::UnspacedCodes { .. } => 0.0,
             };
             if spaced != Some(words) {
                 self.content
@@ -3733,7 +3760,8 @@ impl PageBuilder {
             }
             at = Some(piece.x);
             match piece.text {
-                PieceText::Codes { codes, characters } => {
+                PieceText::Codes { codes, characters }
+                | PieceText::UnspacedCodes { codes, characters } => {
                     self.used
                         .entry(piece.font.to_vec())
                         .or_default()
@@ -12344,8 +12372,12 @@ mod graphics_tests {
     /// letter — and the glyph after it, in two objects, read as two lines
     /// once the spacing between them passed half an em. `Td` moves from the
     /// last `Td`, so each move is the difference between two pieces'
-    /// positions; a composite piece is drawn at a word spacing of zero, the
-    /// simple ones at the caller's.
+    /// positions; a composite piece is drawn at a word spacing of zero, and
+    /// so is a simple font's whose code 32 is a character, not a word space
+    /// ([`PieceText::UnspacedCodes`]: a `/Differences` font from 32, whose
+    /// code 32 9.3.3 would move by `Tw` all the same), the other simple ones
+    /// at the caller's, `Tw` written again for the piece after it. A word
+    /// spacing that is a zero already is written as given, its sign and all.
     ///
     /// A piece in a font that is not composite is left out alone, as
     /// [`PageBuilder::glyphs`] refuses its run, and the rest are drawn where
@@ -12355,6 +12387,13 @@ mod graphics_tests {
         let mut builder = DocumentBuilder::new();
         builder.add_base_font(b"F0", b"Helvetica");
         assert!(builder.add_cid_font(b"C0", b"Metric", &metric_font(1000, true)));
+        assert!(builder.add_named_font(
+            b"Bx0",
+            b"Helvetica",
+            32,
+            &["alpha", "lambda"],
+            &[600, 500]
+        ));
         builder.add_page(200.0, 200.0, |page| {
             assert!(page.text_pieces(
                 12.0,
@@ -12383,6 +12422,45 @@ mod graphics_tests {
                         text: PieceText::Codes {
                             codes: b"b c",
                             characters: "b c",
+                        },
+                    },
+                    TextPiece {
+                        font: b"Bx0",
+                        x: 30.0,
+                        text: PieceText::UnspacedCodes {
+                            codes: b" !",
+                            characters: "\u{3B1}\u{3BB}",
+                        },
+                    },
+                    TextPiece {
+                        font: b"F0",
+                        x: 40.0,
+                        text: PieceText::Codes {
+                            codes: b"h",
+                            characters: "h",
+                        },
+                    },
+                ]
+            ));
+            assert!(page.text_pieces(
+                12.0,
+                40.0,
+                (0.0, -0.0),
+                &[
+                    TextPiece {
+                        font: b"Bx0",
+                        x: 10.0,
+                        text: PieceText::UnspacedCodes {
+                            codes: b" ",
+                            characters: "\u{3B1}",
+                        },
+                    },
+                    TextPiece {
+                        font: b"F0",
+                        x: 20.0,
+                        text: PieceText::Codes {
+                            codes: b"i",
+                            characters: "i",
                         },
                     },
                 ]
@@ -12435,9 +12513,15 @@ mod graphics_tests {
         assert!(
             content.contains(
                 "BT /F0 12 Tf 0.5 Tc 2 Tw 10 100 Td (a\\() Tj /C0 12 Tf 0 Tw -0.5 0 Td <0002> Tj \
-                 /F0 12 Tf 2 Tw 10.5 0 Td (b c) Tj ET\n"
+                 /F0 12 Tf 2 Tw 10.5 0 Td (b c) Tj /Bx0 12 Tf 0 Tw 10 0 Td ( !) Tj \
+                 /F0 12 Tf 2 Tw 10 0 Td (h) Tj ET\n"
             ),
-            "the pieces are not one text object: {content}"
+            "the pieces are not one text object, or the code-32 letter takes `Tw`: {content}"
+        );
+        assert!(
+            content
+                .contains("BT /Bx0 12 Tf 0 Tc -0 Tw 10 40 Td ( ) Tj /F0 12 Tf 10 0 Td (i) Tj ET\n"),
+            "a word spacing of zero was not written as given: {content}"
         );
         assert!(
             content.contains("BT /F0 12 Tf 0 Tc 0 Tw 10 80 Td (d) Tj ET\n"),
@@ -12445,7 +12529,7 @@ mod graphics_tests {
         );
         assert_eq!(
             content.matches("BT").count(),
-            2,
+            3,
             "a refused call wrote something: {content}"
         );
 
