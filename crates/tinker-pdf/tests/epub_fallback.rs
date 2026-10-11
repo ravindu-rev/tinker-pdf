@@ -2094,6 +2094,55 @@ fn a_styled_neutral_glued_to_a_word_under_word_spacing_keeps_it_searchable() {
     }
 }
 
+/// **A neutral past `WinAnsiEncoding` after a word space reads with its
+/// number** (V3 of the review of the third review's K-11 fix).
+///
+/// `<p>… بيت ٥٪ <b>كبير</b> …</p>`, Arabic with no `dir`, at `word-spacing:
+/// 0.5em; margin: 0 20%`: the ARABIC PERCENT SIGN after the Arabic-Indic
+/// FIVE is a neutral (`ET`, which W5 makes a European number's only after
+/// one) that N1 puts at level 1 with the word space after it, a slice the
+/// painter draws in its level's order for a reader to undo with its line,
+/// the space at its left and the sign at its right. The sign is past
+/// `WinAnsiEncoding`, so the overflow font draws it and a standard face the
+/// space: two resources, and since 8e8e111 two text objects. The reader's
+/// pen stopped where the space's box ends, the sign started a stretched word
+/// space later, more than half an em on, and `TextDevice` carries a pen
+/// across spacing only into a right-to-left letter: the line was cut at the
+/// sign, and the sign read after the next word, `٥ \nنعرف٪`. 9297d2d drew
+/// the slice as typed and conserved. A slice `coded_order` draws for a
+/// reader to undo is one text object now, the space and the sign pieces of
+/// it, so the sign reads as a `WinAnsiEncoding` one does, a glyph of the
+/// space's string; it takes no word spacing, as the overflow font takes none
+/// anywhere.
+#[test]
+fn a_non_winansi_neutral_after_a_word_space_reads_with_its_number() {
+    let text = "مدرسة الطالب جميل بيت ٥٪ <b>كبير</b> نور بيت كبير نور يوم ٥٪ \
+                <b>عوامل</b> وقد يوم عوامل وقد أصبحنا ٥٪ <b>نعرف</b> كتاب";
+    for spacing in ["0.5em", "0.6em", "1em"] {
+        let style = format!("p {{ word-spacing: {spacing}; margin: 0 20% }}");
+        for body in [
+            format!("<p>{text}</p>"),
+            format!("<p dir=\"rtl\">{text}</p>"),
+        ] {
+            let bytes = styled_book("ar", &style, &body);
+            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let page = doc.page(0).expect("a page");
+            let read = page.text().plain_text();
+            for verdict in [
+                conservation(&bytes, &doc),
+                conservation_in_logical_order(&bytes, &doc),
+            ] {
+                assert!(verdict.holds(), "`{style}`, {body}: {read:?} {verdict:?}");
+            }
+            assert_eq!(
+                page.text().search("٥٪").len(),
+                3,
+                "`{style}`, {body}: the number and its sign are not found three times in {read:?}"
+            );
+        }
+    }
+}
+
 /// **A letter-spaced Arabic line reads its full stop with its word** (review
 /// of the K-11 fix).
 ///

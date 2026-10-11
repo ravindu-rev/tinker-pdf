@@ -250,7 +250,16 @@ written too. Until ROADMAP K-11 such a piece was written as typed on any line
 — a known limit — and in a sans-serif book whose Arabic the overflow font
 draws, the ` (` and `). ` Helvetica draws are such pieces inside an Arabic
 run: the page showed `عدة( النازعة` and read `.)وقد`, CI's
-`sample-regime-anticancer-arabic.epub` failure at character 20 963. Where
+`sample-regime-anticancer-arabic.epub` failure at character 20 963. A
+piece of neutrals so written is **one text object**, each font's stretch a
+piece of it (`paint::draw_coded`): a neutral past `WinAnsiEncoding` is the
+overflow font's and the word space beside it a standard face's, and written
+as two text objects a stretched word space cut the line between them, which
+`TextDevice` crosses only into a right-to-left letter — `٥٪ <b>W</b>` in an
+Arabic paragraph with no `dir`, at `word-spacing: 0.5em`, read its ARABIC
+PERCENT SIGN after the next word (V3 of the review of the third review's
+K-11 fix; `a_non_winansi_neutral_after_a_word_space_reads_with_its_number`,
+at `0.5em`, `0.6em` and `1em`). Where
 a reader of the page would not undo a piece's level order it is written as
 typed still (`paint::neutrals_drawn_as_typed`): one the line alone, read
 in the direction a reader reads it in, resolves at other levels than its

@@ -5742,7 +5742,27 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// always did, so a slice with no mark is written as cd407d5 wrote it
 /// (measured on the round-3 and round-4 probes' mark-free books,
 /// letter-spaced ones among them) but for the overflow font's `Tw` under
-/// `word-spacing` (below).
+/// `word-spacing` (below), and for one more kind of slice.
+///
+/// # One text object for neutrals a reader undoes
+///
+/// A slice of neutrals at a right-to-left level, on a line that holds a
+/// right-to-left character, is drawn in its level's order for a reader to
+/// undo with its line ([`coded_order`]), and is one text object too. A
+/// neutral past `WinAnsiEncoding` is the overflow font's and the word space
+/// beside it a standard face's: two resources, and drawn as two text
+/// objects, the reader's pen stopped at the space's box and the neutral
+/// started a stretched word space later. `TextDevice` carries a pen across
+/// spacing only into a right-to-left letter, so past half an em the line was
+/// cut at the neutral: `<p>… أصبحنا ٥٪ <b>نعرف</b> كتاب</p>`, Arabic with no
+/// `dir`, at `word-spacing: 0.5em`, drew its ` ٪` in level order, space
+/// first, and read `٥ \nنعرف٪` (V3 of the review of the third review's K-11
+/// fix; 9297d2d drew the slice as typed and conserved). In one text object
+/// the space and the sign are pieces of it, the space at the run's `Tw` and
+/// the sign at none ([`PieceText::UnspacedCodes`]), so the sign reads as a
+/// `WinAnsiEncoding` one does, a glyph of the space's string
+/// (`a_non_winansi_neutral_after_a_word_space_reads_with_its_number`). A
+/// slice of one resource is written as before.
 ///
 /// # Where the letter a mark rides on is drawn
 ///
@@ -5770,8 +5790,12 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// a text object of several as [`PieceText::UnspacedCodes`], which
 /// [`PageBuilder::text_pieces`] writes at `0 Tw` between the pieces that
 /// take the run's. Every glyph of it is drawn where layout put it, under
-/// `word-spacing` and justification alike, and a book that sets neither is
-/// written as before: a word spacing that is a zero is written as it was.
+/// `word-spacing` and justification alike. A word spacing that is a zero is
+/// written as it was, so a book with no mark that sets neither is written
+/// byte for byte as before; in a slice that holds a mark the glyph after the
+/// code-32 letter goes on in its string now, where it was a piece of its own
+/// at the same place, so such a book is other bytes even with no word
+/// spacing, and reads the same.
 ///
 /// Until October 2026 (ROADMAP CD-19) the font was written at the run's
 /// `Tw`, and in its string every glyph after the code 32 was drawn a
@@ -5852,7 +5876,8 @@ fn draw_coded(
     // a stretch that spills into the overflow font is a piece of its own,
     // and the second's origin is wherever the first's advance left it. A
     // stretch of a new resource starts a new text object, as it always has,
-    // except in a slice that holds a mark (see above).
+    // except in a slice that holds a mark or is neutrals a reader undoes
+    // (see above).
     let mut object: Vec<Segment> = Vec::new();
     // Where the last character drawn that is not a mark started, its
     // advance, and whether a reader sets it as wide as it was measured
@@ -5865,10 +5890,19 @@ fn draw_coded(
     // Whether the last character drawn was a mark: what follows it is a
     // piece of its own, from the pen, in the same text object.
     let mut after_mark = false;
-    // Whether the slice holds a mark, and is drawn as one text object: a
-    // mark, and what follows one, is a piece of the object open, and only a
-    // slice without one starts an object at a new resource.
+    // Whether the slice holds a mark: a mark, and what follows one, is a
+    // piece of the object open.
     let whole = slice.chars().any(|c| bidi_class(c) == BidiClass::NSM);
+    // Whether the slice is neutrals [`coded_order`] draws in their level's
+    // order for a reader to undo with their line: at a right-to-left level,
+    // on a line that holds a right-to-left character, with none of their own.
+    let undone = run.bidi_line_rtl
+        && run.bidi_level.is_some_and(|level| level % 2 == 1)
+        && !slice.chars().any(opens_right_to_left);
+    // Whether the slice is one text object, each stretch of a resource a
+    // piece of it (see above): one that holds a mark, or neutrals a reader
+    // undoes. Any other starts an object at a new resource.
+    let one_object = whole || undone;
     let start = x;
     let order = coded_order(run, slice);
 
@@ -5912,7 +5946,7 @@ fn draw_coded(
             .is_some_and(|open| open.resource == coded.resource());
         let continues = !mark && !after_mark && !alone && same;
         if !continues {
-            if !whole {
+            if !one_object {
                 flush(
                     page,
                     std::mem::take(&mut object),
@@ -6287,7 +6321,7 @@ fn flush(
         }
         // The overflow font at no word spacing: its code 32 is a character of
         // the book's. A zero is written as it was, either sign, so a book that
-        // sets no word spacing is written byte for byte as before.
+        // sets no word spacing writes the `Tw` it always wrote.
         let (letters, words) = spacing;
         let spacing = if segment.unspaced && words != 0.0 {
             (letters, 0.0)
