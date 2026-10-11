@@ -2444,11 +2444,27 @@ fn symbol_dictionary(
     // 6.5.10: the export flags are run lengths over the pool — the imported
     // symbols followed by the new ones — alternating between runs that are not
     // exported and runs that are, starting with the former.
+    //
+    // **Settled every turn, and stopped at the Huffman road's guard.** A run of
+    // zero is legal and makes no progress, and a coder whose IAEX contexts
+    // have settled on zero decides one in four decisions from almost no bytes:
+    // settled once after the loop, 1 702 bytes made 400 million decisions
+    // against a budget of 8 388 608 before the budget heard of one of them.
     let total = pool.len();
     let mut exported = Vec::new();
     let mut index = 0usize;
     let mut exporting = false;
+    let mut guard = 0u32;
     while index < total {
+        if !page.work.settle(&mut coder) {
+            note(warnings, Jbig2Refusal::WorkCap);
+            return None;
+        }
+        guard += 1;
+        if guard > MAX_JBIG2_SYMBOLS {
+            note(warnings, Jbig2Refusal::ExportRunGuard);
+            return None;
+        }
         let run = decode_int(&mut coder, &mut cx.iaex)?;
         if run < 0 {
             return None;
@@ -2471,8 +2487,7 @@ fn symbol_dictionary(
         }
     }
 
-    // The last symbol's decisions and the export runs', which no symbol after
-    // them settled.
+    // The last export run's decisions, which no turn after it settled.
     if !page.work.settle(&mut coder) {
         note(warnings, Jbig2Refusal::WorkCap);
         return None;
@@ -8090,6 +8105,78 @@ mod tests {
             "Annex H's first page was refused at its own page's ceiling: {refusals:?}"
         );
         assert!(extent.work < budget(8 * 56), "{}", extent.work);
+    }
+
+    /// **6.5.10's export runs are charged as they are decoded, and stop where
+    /// the Huffman road's stop.**
+    ///
+    /// A dictionary of two symbols whose export runs are one, then two hundred
+    /// thousand runs of zero, then one: legal, since nothing in 6.5.10 forbids
+    /// a run of nothing, and each zero is four decisions out of contexts that
+    /// soon decide almost nothing but zero. The loop used to be charged once,
+    /// after it ended, and the arithmetic road had no turn guard, so the fuzz
+    /// build spent 21 seconds on 1 702 bytes of this before the budget heard of
+    /// any of it.
+    ///
+    /// Two halves, each for one of the two fixes:
+    /// - under a ceiling of 1 KiB the budget is 131 072 units, which the runs
+    ///   pass at about the 33 000th: the refusal is named, and the decode
+    ///   asked for no more than one integer's 38 decisions past it;
+    /// - under a ceiling the runs cannot reach, [`MAX_JBIG2_SYMBOLS`] turns
+    ///   end the loop, as `ExportRunGuard` ends the Huffman road's.
+    ///
+    /// Without the per-turn charge the first half reads 800 000 units (or
+    /// stops at the guard and names no budget at all), and without the guard
+    /// the second half decodes all two hundred thousand runs and exports the
+    /// second symbol. Either way in a fraction of a second, not a hang.
+    #[test]
+    fn export_runs_of_nothing_are_charged_as_they_are_decoded() {
+        let symbol = ["#.", ".#"];
+        let class: Vec<&[&str]> = vec![&symbol[..]; 2];
+        let mut runs = vec![Some(1)];
+        runs.extend(std::iter::repeat_n(Some(0), 200_000));
+        runs.push(Some(1));
+        let dictionary = symbol_dictionary_with_exports(&[&class[..]], 0, &runs, 1);
+        let mut stream = header(0, kind::PAGE_INFORMATION, 1, &page_info(8, 8, 0));
+        stream.extend(header(1, kind::SYMBOL_DICTIONARY, 1, &dictionary));
+        let params = Jbig2Params {
+            globals: &[],
+            width: 8,
+            height: 8,
+        };
+
+        let ceiling = 1 << 10;
+        let budget = ceiling as u64 * 8 * MAX_JBIG2_WORK_MULTIPLE;
+        let mut refusals = Vec::new();
+        let (_, extent) = decode_measured(&stream, &params, ceiling, &mut refusals);
+        assert!(
+            refusals.contains(&Jbig2Refusal::WorkCap),
+            "the runs spent {} units under a budget of {budget}: {refusals:?}",
+            extent.work
+        );
+        assert!(
+            extent.work > budget && extent.work <= budget + 38,
+            "stopped after asking for {} units, and the budget is {budget}",
+            extent.work
+        );
+
+        let mut refusals = Vec::new();
+        let (_, extent) = decode_measured(&stream, &params, 1 << 24, &mut refusals);
+        assert!(
+            refusals.contains(&Jbig2Refusal::ExportRunGuard),
+            "two hundred thousand runs decoded to the end: {refusals:?}"
+        );
+        assert!(
+            !refusals.contains(&Jbig2Refusal::WorkCap),
+            "the guard, and not the budget, ended these: {refusals:?}"
+        );
+        // Every turn up to the guard is charged, and no turn past it is made.
+        let turns = u64::from(MAX_JBIG2_SYMBOLS);
+        assert!(
+            extent.work >= 4 * turns && extent.work <= 38 * (turns + 1) + 1_000,
+            "{} units for {turns} turns",
+            extent.work
+        );
     }
 
     /// One generic region's segment data, from the promoted encoder.

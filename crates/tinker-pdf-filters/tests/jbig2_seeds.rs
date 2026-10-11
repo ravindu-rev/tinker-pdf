@@ -1,6 +1,6 @@
 //! The committed JBIG2 fuzz seeds, replayed on stable.
 //!
-//! `fuzz/corpus/jbig2/` is twenty-five inputs a fuzzer found or a person
+//! `fuzz/corpus/jbig2/` is twenty-six inputs a fuzzer found or a person
 //! wrote,
 //! and the target that consumes them needs nightly. So the seeds were only ever
 //! exercised when somebody ran `cargo fuzz`, which is not on every commit — and
@@ -42,12 +42,18 @@
 //! pixel cost; the replay holds it to the refusal like every other seed, and
 //! `a_decoded_pixel_costs_the_reads_its_rolled_context_needs` holds the cost.
 //! The whole replay is about a second and a half in a debug build.
+//!
+//! `symbol-dictionary-export-runs-of-nothing` is the review of that budget's:
+//! twenty million export runs of zero, which the arithmetic road's loop decided
+//! uncharged and unguarded.
+//! [`the_export_run_seed_stops_at_the_turn_guard`] pins it by the guard's
+//! name and the decode's own count.
 
 use std::path::{Path, PathBuf};
 
 use tinker_pdf_filters::{
     jbig2_decode, jbig2_decode_measured, Capability, FilterError, Jbig2Params, Jbig2Refusal,
-    MAX_JBIG2_WORK_MULTIPLE,
+    MAX_JBIG2_SYMBOLS, MAX_JBIG2_WORK_MULTIPLE,
 };
 
 /// The seed directory, from this crate rather than from the working directory.
@@ -284,6 +290,59 @@ fn the_marker_spun_seed_stops_at_the_work_budget() {
         println!(
             "jbig2-seed-work: RAN {label}; stopped at symbol {} after {} units of {budget}",
             extent.symbols, extent.work
+        );
+    }
+}
+
+/// **The input the review of the work budget timed out on, stopped at the
+/// export runs' turn guard.**
+///
+/// A two-symbol dictionary whose 6.5.10 export runs are one, then twenty
+/// million runs of zero, then one: 400 bytes, written through the decoder's own
+/// test encoder. A run of zero is legal and makes no progress, and the
+/// arithmetic road's loop was charged once after it ended and had no guard on
+/// its turns, so the fuzz build decided eighty million times before the budget
+/// heard of any of it — 12.8 s for this input, and a timeout for one five times
+/// as long. Both roads now stop at `MAX_JBIG2_SYMBOLS` turns, and the budget is
+/// settled on each of them underneath that. Pinned by the refusal's name and by
+/// the decode's own count of what it spent, both ways round.
+#[test]
+fn the_export_run_seed_stops_at_the_turn_guard() {
+    let Some(dir) = seeds() else {
+        println!("jbig2-seed-export: SKIPPED (no fuzz/corpus/jbig2)");
+        return;
+    };
+    let path = dir.join("symbol-dictionary-export-runs-of-nothing");
+    let data = std::fs::read(&path).expect("the seed reads");
+    assert_eq!(data.len(), 401, "one control byte and 400 of payload");
+    let (width, height, globals, own) = knobs(&data);
+
+    for (label, globals, own) in [("straight", globals, own), ("swapped", own, globals)] {
+        let params = Jbig2Params {
+            globals,
+            width,
+            height,
+        };
+        let mut refusals = Vec::new();
+        let (out, extent) = jbig2_decode_measured(own, &params, 1 << 16, &mut refusals);
+        assert!(out.is_err(), "{label}: the seed decoded to a page");
+        assert!(
+            refusals.contains(&Jbig2Refusal::ExportRunGuard),
+            "{label}: the turn guard is no longer what stops this seed: {} units, \
+             {refusals:?}",
+            extent.work
+        );
+        // Every turn up to the guard was charged and decided at most one
+        // integer, which A.2 reads in 38 decisions at the most.
+        let turns = u64::from(MAX_JBIG2_SYMBOLS);
+        assert!(
+            extent.work >= 4 * turns && extent.work <= 38 * (turns + 1),
+            "{label}: {} units for {turns} turns",
+            extent.work
+        );
+        println!(
+            "jbig2-seed-export: RAN {label}; stopped at the guard after {} units",
+            extent.work
         );
     }
 }

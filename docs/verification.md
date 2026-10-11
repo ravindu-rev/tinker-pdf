@@ -562,6 +562,19 @@ did not have the same standing:
   spent on generic regions, refinement regions, placements or halftone stamps
   2.1, 4.1, 1.3 and 1.3 s, where the timeout is twenty.
 
+  **And one loop the budget did not see, found by the review of that fix.**
+  6.5.10's export runs were charged once, after their loop had ended, and the
+  arithmetic road had no turn guard: a run of zero is legal and makes no
+  progress, and a coder whose `IAEX` contexts have settled on zero decides one
+  in four decisions from almost no bytes. 1 702 bytes made 400 million decisions
+  against a budget of 8 388 608 before it heard of any, and timed the fixed
+  build out at twenty-one seconds. The loop now settles the budget on every
+  turn and stops at the Huffman road's guard, `MAX_JBIG2_SYMBOLS` turns, as
+  `ExportRunGuard`: that input stops at the guard after 400 024 units, in 2 ms
+  in release. `export_runs_of_nothing_are_charged_as_they_are_decoded` holds
+  both halves, one under a budget the runs reach and one under a budget they
+  cannot.
+
 ### What a green fuzz run does not mean
 
 **Not one of the thirty-nine targets checks that a decode is right.** They
