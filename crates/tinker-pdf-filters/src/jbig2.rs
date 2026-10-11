@@ -1012,9 +1012,17 @@ enum HuffValue {
 #[derive(Clone)]
 struct HuffTable {
     lines: Vec<HuffLine>,
-    /// The prefix code of each line, in the same order.
-    codes: Vec<u32>,
+    /// The prefix code of each line, in the same order. Wider than any prefix
+    /// [`HuffTable::decode`] reads, so that a code B.3's procedure pushes past
+    /// 32 bits — an over-subscribed table's — is kept as the number it is.
+    codes: Vec<u64>,
 }
+
+/// The longest prefix [`HuffTable::decode`] reads.
+///
+/// Annex B's own tables need nine bits at most; 32 is the width the decode
+/// loop and its `code` are built at.
+const MAX_PREFIX_BITS: u8 = 32;
 
 impl HuffTable {
     /// B.3's assignment procedure: canonical codes, shortest first, in table
@@ -1024,22 +1032,38 @@ impl HuffTable {
     /// written out rather than borrowed from `inflate.rs` because that one
     /// speaks RFC 1951's conventions and this one speaks B.3's — the two agree
     /// today and a shared helper would be a place for them to stop agreeing.
+    ///
+    /// **Assigned in 64 bits, and only up to [`MAX_PREFIX_BITS`].** A custom
+    /// table's prefix lengths are the file's (7.4.13 gives them up to eight
+    /// bits each), and so are a text region's symbol code lengths
+    /// (7.4.3.1.7). A complete code whose longest prefix is 32 bits ends B.3's
+    /// sum at exactly 2^32, which overflowed the `u32` this used to add in,
+    /// and an over-subscribed one gets there sooner. In 64 bits neither can:
+    /// the sum is at most the number of lines times 2^32. A line longer than
+    /// [`decode`](Self::decode) reads can never be matched, and B.3 assigns
+    /// the longer lengths after the shorter ones, so leaving it out of the
+    /// assignment changes no code a shorter line receives; it keeps its place
+    /// in the table and is never chosen, as it was never chosen before.
     fn new(lines: Vec<HuffLine>) -> HuffTable {
-        let max = lines.iter().map(|l| l.prefix_len).max().unwrap_or(0);
-        let mut counts = vec![0u32; usize::from(max) + 1];
-        for line in &lines {
-            if line.prefix_len > 0 {
-                counts[usize::from(line.prefix_len)] += 1;
-            }
+        let assigned = |line: &HuffLine| (1..=MAX_PREFIX_BITS).contains(&line.prefix_len);
+        let max = lines
+            .iter()
+            .filter(|line| assigned(line))
+            .map(|l| l.prefix_len)
+            .max()
+            .unwrap_or(0);
+        let mut counts = vec![0u64; usize::from(max) + 1];
+        for line in lines.iter().filter(|line| assigned(line)) {
+            counts[usize::from(line.prefix_len)] += 1;
         }
-        let mut first = vec![0u32; usize::from(max) + 2];
+        let mut first = vec![0u64; usize::from(max) + 2];
         for len in 1..=usize::from(max) {
             first[len + 1] = (first[len] + counts[len]) << 1;
         }
         let mut next = first.clone();
         let mut codes = Vec::with_capacity(lines.len());
         for line in &lines {
-            if line.prefix_len == 0 {
+            if !assigned(line) {
                 codes.push(0);
                 continue;
             }
@@ -1054,25 +1078,33 @@ impl HuffTable {
     ///
     /// Linear in the table's length per bit, which for tables of at most
     /// twenty lines is cheaper than the structure a faster search would need.
+    ///
+    /// **The offset is added in 64 bits.** A range line may carry 32 bits of
+    /// offset (B.1's last line does, and so does every lower and upper range
+    /// line), and an offset of 2^31 or more read as an `i32` is negative:
+    /// B.1's 65 808 plus `0xFFFF_FFFF` came out as 65 807, and B.3's lower
+    /// line as -256. A value outside 32 bits is not a value any field here
+    /// holds, so it ends the read like a truncation does.
     fn decode(&self, reader: &mut BitReader<'_>) -> Option<HuffValue> {
         let mut code = 0u32;
         let mut len = 0u8;
-        while len < 32 {
+        while len < MAX_PREFIX_BITS {
             code = (code << 1) | reader.bit()?;
             len += 1;
             for (line, assigned) in self.lines.iter().zip(&self.codes) {
-                if line.prefix_len != len || *assigned != code {
+                if line.prefix_len != len || *assigned != u64::from(code) {
                     continue;
                 }
+                let low = i64::from(line.range_low);
                 return Some(match line.kind {
                     LineKind::Oob => HuffValue::Oob,
                     LineKind::Lower => {
                         let offset = reader.bits(u32::from(line.range_len))?;
-                        HuffValue::Value(line.range_low.checked_sub(offset as i32)?)
+                        HuffValue::Value(i32::try_from(low - i64::from(offset)).ok()?)
                     }
                     LineKind::Normal => {
                         let offset = reader.bits(u32::from(line.range_len))?;
-                        HuffValue::Value(line.range_low.checked_add(offset as i32)?)
+                        HuffValue::Value(i32::try_from(low + i64::from(offset)).ok()?)
                     }
                 });
             }
@@ -8321,7 +8353,8 @@ mod tests {
             if offset < 0 || offset >= span {
                 continue;
             }
-            writer.bits(*code, u32::from(line.prefix_len));
+            let code = u32::try_from(*code).expect("an Annex B code is under 32 bits");
+            writer.bits(code, u32::from(line.prefix_len));
             writer.bits(offset as u32, u32::from(line.range_len));
             return;
         }
@@ -8333,7 +8366,8 @@ mod tests {
     fn write_huff_oob(writer: &mut BitWriter, table: &HuffTable) {
         for (line, code) in table.lines.iter().zip(&table.codes) {
             if line.kind == LineKind::Oob && line.prefix_len > 0 {
-                writer.bits(*code, u32::from(line.prefix_len));
+                let code = u32::try_from(*code).expect("an Annex B code is under 32 bits");
+                writer.bits(code, u32::from(line.prefix_len));
                 return;
             }
         }
@@ -10613,6 +10647,164 @@ mod tests {
             custom_table(&small).is_some(),
             "a four-value table was refused, so the cap is not what fired"
         );
+    }
+
+    /// A clause 7.4.13 table over `0..lengths.len()`, one value a line, with
+    /// these prefix lengths, `HTPS` of six bits, no lower or upper range code
+    /// and no out-of-band line.
+    fn custom_table_data(lengths: &[u32]) -> Vec<u8> {
+        let mut data = vec![5 << 1]; // HTOOB 0, HTPS 6, HTRS 1
+        data.extend_from_slice(&0i32.to_be_bytes());
+        data.extend_from_slice(&(lengths.len() as i32).to_be_bytes());
+        let mut writer = BitWriter::new();
+        for length in lengths {
+            writer.bits(*length, 6); // PREFLEN
+            writer.bits(0, 1); // RANGELEN: one value
+        }
+        writer.bits(0, 6); // the lower range line, never coded
+        writer.bits(0, 6); // the upper range line, likewise
+        data.extend(writer.finish());
+        data
+    }
+
+    /// The value `table` reads off the front of `bits`, a string of `0` and `1`.
+    fn read_value(table: &HuffTable, bits: &str) -> Option<i32> {
+        let mut writer = BitWriter::new();
+        for bit in bits.chars() {
+            writer.bit(u32::from(bit == '1'));
+        }
+        let bytes = writer.finish();
+        table.value(&mut BitReader::new(&bytes))
+    }
+
+    /// **B.3's code assignment holds a prefix of 32 bits, and one longer than
+    /// the decoder reads.**
+    ///
+    /// The fuzz build found the first in 82 bytes: one Tables segment whose
+    /// prefix lengths are 1 to 31 once each and then 32 twice. That code is
+    /// complete, so B.3's running sum reaches exactly 2^32 after the last
+    /// length, and it was added in a `u32` — "attempt to add with overflow",
+    /// ruling 1, in any build with overflow checks, and a silent wrap in
+    /// release. A table that goes on to 33 bits gets there one step later.
+    /// Both are read here: through a whole decode, the way the fuzz input
+    /// reached it, and through the table, whose two 32-bit codes are the last
+    /// two 32-bit numbers and whose 33-bit lines are never chosen.
+    #[test]
+    fn a_prefix_of_32_bits_is_assigned_without_overflowing() {
+        let mut lengths: Vec<u32> = (1..=31).collect();
+        lengths.extend([32, 32]);
+        let data = custom_table_data(&lengths);
+
+        let mut stream = header(0, kind::PAGE_INFORMATION, 1, &page_info(8, 8, 0));
+        stream.extend(header(1, kind::TABLES, 1, &data));
+        let params = Jbig2Params {
+            globals: &[],
+            width: 8,
+            height: 8,
+        };
+        // A table draws nothing, so the page is the module's refusal and only
+        // that: the table itself was read without complaint.
+        let mut refusals = Vec::new();
+        let _ = decode_measured(&stream, &params, 1 << 16, &mut refusals);
+        assert_eq!(refusals, vec![Jbig2Refusal::NoRegion]);
+
+        let table = custom_table(&data).expect("a complete code is a table");
+        assert_eq!(table.codes[30], (1 << 31) - 2, "thirty ones and a zero");
+        assert_eq!(&table.codes[31..33], &[(1 << 32) - 2, (1 << 32) - 1]);
+        assert_eq!(read_value(&table, &"1".repeat(32)), Some(32));
+        assert_eq!(
+            read_value(&table, &format!("{}0", "1".repeat(31))),
+            Some(31)
+        );
+
+        // One step further: 32 once and 33 twice is complete too, and its
+        // 33-bit lines are longer than any prefix the decoder reads.
+        let mut lengths: Vec<u32> = (1..=32).collect();
+        lengths.extend([33, 33]);
+        let table = custom_table(&custom_table_data(&lengths)).expect("a table");
+        assert_eq!(table.codes[31], (1 << 32) - 2);
+        assert_eq!(
+            read_value(&table, &format!("{}0", "1".repeat(31))),
+            Some(31)
+        );
+        assert_eq!(
+            read_value(&table, &"1".repeat(40)),
+            None,
+            "a 33-bit line was chosen by a 32-bit read"
+        );
+
+        // And lengths that would take even a 64-bit sum past its end: three
+        // of one bit, one each of 2 to 62, two of 63. Only the lines the
+        // decoder can read are assigned, and the one 32-bit line's code is
+        // kept as the 34-bit number B.3 makes it rather than cut to 32.
+        let mut lengths = vec![1u32, 1, 1];
+        lengths.extend(2..=62);
+        lengths.extend([63, 63]);
+        let table = custom_table(&custom_table_data(&lengths)).expect("a table");
+        assert_eq!(&table.codes[..3], &[0, 1, 2]);
+        assert_eq!(table.codes[33], (1 << 33) - 2, "line 33 is the 32-bit one");
+        assert_eq!(read_value(&table, "1"), Some(1));
+    }
+
+    /// **The same sum, reached through a text region's symbol code lengths.**
+    ///
+    /// 7.4.3.1.7's run-length code hands [`HuffTable::new`] one length of up to
+    /// 31 bits per symbol, and nothing in the clause makes the lengths a
+    /// complete code. Three symbols of one bit, then one each of 2 to 30, then
+    /// two of 31, take B.3's sum to 2^32 at the last length: the same overflow
+    /// as a custom table's, from a segment that is not a table at all. The
+    /// over-subscribed codes are assigned past the width they will be read at,
+    /// and are never read.
+    #[test]
+    fn over_subscribed_symbol_code_lengths_are_assigned_without_overflowing() {
+        let mut lengths = vec![1u32, 1, 1];
+        lengths.extend(2..=30);
+        lengths.extend([31, 31]);
+        // The runcode table: lengths 0 to 31 each coded in five bits, which
+        // B.3 makes the five-bit number itself; 32 to 34 absent.
+        let mut writer = BitWriter::new();
+        for index in 0..35u32 {
+            writer.bits(if index < 32 { 5 } else { 0 }, 4);
+        }
+        for length in &lengths {
+            writer.bits(*length, 5);
+        }
+        let bytes = writer.finish();
+        let table = symbol_id_codes(&mut BitReader::new(&bytes), lengths.len())
+            .expect("the lengths are all read");
+        assert_eq!(&table.codes[..2], &[0, 1]);
+        assert_eq!(
+            &table.codes[32..],
+            &[(1 << 32) - 2, (1 << 32) - 1],
+            "the two 31-bit codes are past 31 bits, not wrapped onto real ones"
+        );
+    }
+
+    /// **A 32-bit offset is the number it is.**
+    ///
+    /// B.4 adds a line's offset to its range's low end (or, on a lower range
+    /// line, subtracts it), and an offset may be 32 bits: B.1's last line
+    /// carries one, as does every table's lower and upper range line. Read as
+    /// an `i32`, an offset of 2^31 or more is negative, so B.1 decoded 65 808
+    /// plus `0xFFFF_FFFF` as 65 807 and B.3's lower line, -257 minus the same,
+    /// as -256 — a plausible wrong number rather than a refusal. A value past
+    /// 32 bits now ends the read, and every value inside them reads as before.
+    #[test]
+    fn a_32_bit_offset_is_added_in_64_bits() {
+        let b1 = table_b1();
+        let last = |offset: u32| format!("111{offset:032b}");
+        assert_eq!(read_value(&b1, &last(5)), Some(65_813));
+        assert_eq!(
+            read_value(&b1, &last(i32::MAX as u32 - 65_808)),
+            Some(i32::MAX)
+        );
+        assert_eq!(read_value(&b1, &last(i32::MAX as u32 - 65_807)), None);
+        assert_eq!(read_value(&b1, &last(u32::MAX)), None, "65 807, once");
+
+        let b3 = table_b3();
+        let lower = |offset: u32| format!("11111111{offset:032b}");
+        assert_eq!(read_value(&b3, &lower(5)), Some(-262));
+        assert_eq!(read_value(&b3, &lower(u32::MAX)), None, "-256, once");
     }
 
     /// **A page that declares itself and carries no content is blank, and a

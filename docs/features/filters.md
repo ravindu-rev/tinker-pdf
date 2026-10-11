@@ -210,6 +210,17 @@ requires every corpus file selecting one of them to draw the same picture as
 the files that do not
 ([design/jbig2-symbol-text.md](../design/jbig2-symbol-text.md)).
 
+B.3's assignment runs in 64 bits and stops at 32. The prefix lengths it is
+handed are often the file's: a clause 7.4.13 table's (up to eight bits of
+`HTPS` each), or a text region's symbol code lengths (7.4.3.1.7). A complete
+code whose longest prefix is 32 bits takes the running sum to exactly 2^32, and
+an over-subscribed one gets there sooner. In 32 bits that overflowed, and a fuzz
+build found it in 82 bytes (ruling 1). A line longer than the 32 bits the
+decoder reads is kept in its table and is never chosen, which is how it behaved
+before. A range line's offset can be 32 bits wide, and it is added in 64 now: a
+value outside `i32` ends the read rather than wrapping into a plausible wrong
+number.
+
 Polarity is returned in JBIG2's own sense (1 = black, 6.2.2); the inversion
 belongs at the PDF boundary beside `/ImageMask` and `/Decode`. A file whose
 page composited no region at all is refused rather than returned as a blank
