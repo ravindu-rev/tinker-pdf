@@ -733,8 +733,9 @@ fn unpointed(text: &str) -> String {
 ///   deacetylase).` opens a line, the `(`, the Latin words and the Arabic
 ///   are three text objects, and the join of a line's pieces asked whether
 ///   either of **two** pieces held a right-to-left character; the `(` and
-///   the Latin hold none, so the `(` was read as a line of its own. The whole
-///   chain is joined now (`text_order::rejoin_split_lines`). And justified
+///   the Latin hold none, so the `(` was read as a line of its own. The
+///   chain the pieces make is joined whole now where, read whole, the
+///   bracket tie-break turns it (`text_order::rejoin_split_lines`). And justified
 ///   at `margin: 0 35%`, an Arabic line's word spaces were stretched past half
 ///   an em, which `TextDevice` cut it at, so the words read in drawn order,
 ///   backwards; a word space stretched by `Tw` carries the pen within
@@ -936,4 +937,122 @@ fn unpointed_hebrew(text: &str) -> String {
     text.chars()
         .filter(|c| !matches!(c, '\u{0591}'..='\u{05C7}'))
         .collect()
+}
+
+/// Whether `body`, set in `language` under `style`, conserves in content
+/// and in logical order, pointed and with every mark taken out.
+fn conserves_pointed_and_not(language: &str, style: &str, body: &str) {
+    for body in [body.to_owned(), unpointed_hebrew(&unpointed(body))] {
+        let bytes = epub_support::book::styled_book(language, style, &body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let content = conservation(&bytes, &doc);
+        let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+        assert!(
+            content.holds() && logical.holds(),
+            "{style:?}, {body}: content {content:?}, logical {logical:?}"
+        );
+    }
+}
+
+/// **Spacing carries a reader's pen only within right-to-left text** —
+/// the review of the K-11 fix.
+///
+/// K-11's fix took the pen across a gap `Tw` or `Tc` made where a line closed
+/// by `ET` met the next text object, so that a justified or letter-spaced
+/// Arabic line was not cut into words read backwards. Each book here
+/// conserved at 9297d2d, which cut its line at the gap, and did not when the
+/// pen was carried across it — the line so joined, each piece of it read
+/// right alone, fell into ruling 14's limits, read by its two Hebrew ends or
+/// by its majority as a right-to-left paragraph's:
+///
+/// - carried after a right-to-left word into a neutral, the `(` or `⟨` that
+///   opens a Latin run, and into the Hebrew after `( ` in an English line;
+/// - carried after a word of neutrals, the `-` of `שָׁלוֹם - (HDAC) - עוֹלָם`,
+///   on a line that held the Latin;
+/// - carried a little further than the spacing reaches, from one table cell
+///   into the next, two Hebrew cells read as one word, `גדולספר`.
+///
+/// The pen is carried now only into a right-to-left glyph that starts where
+/// the spacing put it, on a line holding no left-to-right letter or after a
+/// right-to-left word (`tinker-pdf-content`'s `Stretch`). And the last,
+/// a right-to-left paragraph letter-spaced by half an em, whose `) (` between
+/// two Latin runs a reader read on its own (`bundled-fonts`): such a run of
+/// neutrals is drawn as typed, as it was (`paint::neutrals_drawn_as_typed`).
+#[test]
+fn spacing_carries_the_pen_only_within_right_to_left_text() {
+    let justified = "p, td { letter-spacing: 0.3em; text-align: justify; margin: 0 25% }";
+    let spaced = "p { word-spacing: 0.6em; margin: 0 20% }";
+    let cells = "p, td { letter-spacing: 0.5em }";
+    for (language, style, body) in [
+        ("he", spaced, "<p>שָׁלוֹם - (HDAC) - עוֹלָם מִלְחָמָה.</p>"),
+        ("he", justified, "<p>שָׁלוֹם - (HDAC) - עוֹלָם מִלְחָמָה.</p>"),
+        ("he", spaced, "<p>שָׁלוֹם עוֹלָם ⟨HDAC⟩. מִלְחָמָה סֵפֶר בַּיִת.</p>"),
+        (
+            "he",
+            spaced,
+            "<p>שָׁלוֹם עוֹלָם <b>(HDAC)</b>. מִלְחָמָה סֵפֶר בַּיִת.</p>",
+        ),
+        (
+            "ar",
+            justified,
+            "<p>عوامل عدّة <b>(HDAC)</b>. وقد أصبحنا نعرف.</p>",
+        ),
+        (
+            "ar",
+            justified,
+            "<p>عوامل عدّة <i>(histone deacetylase)</i>. وقد أصبحنا نعرف.</p>",
+        ),
+        (
+            "en",
+            justified,
+            "<p>Note ( שָׁלוֹם ) spaced (x) and ( עוֹלָם מִלְחָמָה ) spaced again in the line.</p>",
+        ),
+    ] {
+        conserves_pointed_and_not(language, style, body);
+    }
+    // Pointed only: these books' mark-free twins do not conserve in every
+    // build, at 9297d2d either.
+    let table = "<table style=\"border-spacing: 2px\"><tr><td>שָׁלוֹם</td><td>(HDAC)</td>\
+                 <td>עוֹלָם.</td><td>מִלְחָמָה</td></tr><tr><td>סֵפֶר בַּיִת</td>\
+                 <td>גָּדוֹל</td><td>(2010)</td><td>x</td></tr></table>";
+    let mut pointed = vec![table];
+    if cfg!(feature = "bundled-fonts") {
+        pointed.push("<p dir=\"rtl\">שָׁלוֹם עוֹלָם (HDAC) (SIRT). מִלְחָמָה סֵפֶר בַּיִת.</p>");
+    }
+    for body in pointed {
+        let bytes = epub_support::book::styled_book("he", cells, body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let content = conservation(&bytes, &doc);
+        let logical = conservation::conservation_in_logical_order(&bytes, &doc);
+        assert!(
+            content.holds() && logical.holds(),
+            "{body}: content {content:?}, logical {logical:?}"
+        );
+    }
+}
+
+/// **A line whose pieces read right apart is read in them** — the review of
+/// the K-11 fix.
+///
+/// K-11's fix joined the whole chain of pieces a line came to the reader
+/// in, wherever any piece held a right-to-left character, so that a
+/// right-to-left line opening with `(histone deacetylase).` kept its `(`
+/// for the bracket tie-break to pair. The line after it, `deacetylase).
+/// מִלְחָמָה סֵפֶר בַּיִת.`, is three pieces too, and read as two — `deacetylase`
+/// and `). מִלְחָמָה …`, as 9297d2d joined them — each reads right; joined
+/// whole it fell into the limit of a bracket a line break parted, its
+/// Latin letters as many as its Hebrew ones, and read `.מִלְחָמָה סֵפֶר בַּיִת
+/// .)deacetylase`. A chain is joined whole now only where the bracket
+/// tie-break turns it read whole (`text_order::rejoin_split_lines`), and
+/// otherwise as 9297d2d joined its pieces.
+#[test]
+fn a_line_whose_pieces_read_right_apart_is_read_in_them() {
+    let style = "body { font-family: monospace } p { margin: 0 22% }";
+    let text = "שָׁלוֹם עוֹלָם <i>(histone deacetylase)</i>. מִלְחָמָה סֵפֶר בַּיִת.";
+    for body in [
+        format!("<p dir=\"rtl\">{text}</p>"),
+        format!("<div style=\"direction: rtl\"><p>{text}</p></div>"),
+    ] {
+        conserves_pointed_and_not("he", style, &body);
+    }
 }

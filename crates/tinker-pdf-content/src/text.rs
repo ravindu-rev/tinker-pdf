@@ -139,8 +139,10 @@ pub struct TextLine {
     /// they are different properties and a vertical Japanese line is not
     /// right-to-left.
     ///
-    /// [`TextDevice`] counts letters in the Hebrew, Arabic, Syriac and Thaana
-    /// blocks against alphabetic ones. The facade's `Page::text` replaces that
+    /// [`TextDevice`] counts letters in the right-to-left scripts' blocks —
+    /// Hebrew to Arabic Extended-A, the presentation forms and the
+    /// supplementary planes' right-to-left ranges (`rtl_char`) — against
+    /// alphabetic ones. The facade's `Page::text` replaces that
     /// count, for a line holding a right-to-left character, with the paragraph
     /// direction it read the line in (ruling 14), which comes from every
     /// character's `Bidi_Class` and from which end of the line its strong
@@ -404,12 +406,18 @@ struct PendingLine {
     /// pen would be if the run continued.
     pen: f64,
     /// Where `Tc`, and after a word space `Tw`, left the pen, past
-    /// [`Self::pen`], when the last glyph ends a word of right-to-left text or
-    /// neutrals — see [`Stretch`]; `None` otherwise.
+    /// [`Self::pen`], after the last glyph of a horizontal line that holds a
+    /// word — see [`Stretch`]; `None` otherwise.
     stretched: Option<Stretch>,
+    /// Whether the line holds a left-to-right letter, counting the word a cut
+    /// on its baseline interrupted ([`Stretch`]).
+    holds_ltr: bool,
     /// The direction of the last word on the line — its glyphs since the
-    /// white space before it, taken together ([`Strong::with`]).
-    last_word: Option<Strong>,
+    /// white space before it, taken together ([`Strong::with`]) — counting
+    /// the word a cut on its baseline interrupted; `None` before the line
+    /// holds one, of anything but white space and marks with no letter
+    /// before them.
+    word: Option<Strong>,
     /// Whether the last glyph was part of a word, not white space, so that
     /// the next one that is not continues that word.
     in_word: bool,
@@ -527,8 +535,7 @@ enum Strong {
 
 impl Strong {
     /// The direction of a word holding glyphs of both directions: left to
-    /// right if either is — a word with a Latin letter in it is never one
-    /// [`Stretch`] carries the pen past — else right to left if either is.
+    /// right if either is, else right to left if either is.
     fn with(self, other: Strong) -> Strong {
         match (self, other) {
             (Strong::LeftToRight, _) | (_, Strong::LeftToRight) => Strong::LeftToRight,
@@ -560,9 +567,12 @@ fn strong(text: &str) -> Option<Strong> {
     }
 }
 
+/// How far from where spacing left the pen the next glyph may start and still
+/// be carried there ([`Stretch::carries`]), in ems: a rounding, not a gap.
+const STRETCH_ROUNDING: f64 = 0.05;
+
 /// **Where spacing left the pen** after a glyph — a word space stretched by
-/// justification, or a letter followed by `letter-spacing` — and the
-/// direction of the word the glyph ends.
+/// justification, or a letter followed by `letter-spacing`.
 ///
 /// A line closed by an `ET` is resumed only where the last glyph's box
 /// ended, give or take half an em. A glyph's box ends where its own width
@@ -580,59 +590,70 @@ fn strong(text: &str) -> Option<Strong> {
 /// draws it, was cut after the stop and read `مُدَّة مُعلِّم .` (review of the
 /// K-11 fix).
 ///
-/// **So within right-to-left text spacing carries the pen** — where neither
-/// the word the glyph ends nor the glyph after it reads left to right, and
-/// one of them reads right to left ([`Stretch::carries`]). Nowhere else,
-/// measured: carried everywhere, the stretch joined a line's pieces that each
-/// read right alone and together fell into ruling 14's limits — a
-/// right-to-left word joined to a longer Latin run (`hello world שלום`) read
-/// by its majority as a left-to-right line, and `The word` joined to a longer
-/// Arabic phrase read as a right-to-left one, 29 books of the marks probe
-/// that conserved at 9297d2d. A left-to-right page is collected exactly as
-/// before, and so is every boundary between a left-to-right word and
-/// right-to-left text.
+/// **So within right-to-left text spacing carries the pen**
+/// ([`Stretch::carries`]), and nowhere else. Every piece a carry joins is a
+/// piece that was read apart before, and read apart each was read right: a
+/// carry is worth taking only where the line it makes is right-to-left text
+/// that ruling 14 reads as such, and measured, every other carry cost books
+/// that conserved at 9297d2d:
 ///
-/// **A word is all of its glyphs since the white space before it**, and one
-/// with a left-to-right letter anywhere in it is a left-to-right word
-/// ([`Strong::with`]). As first written the word was its last glyph, so
-/// `(HDAC). ` ended a word of neutrals, the full stop: in a justified Hebrew
-/// paragraph with no `dir` the stretched space after it carried the pen to
-/// the next word, `וַיֹּאמֶר`, two pieces a `bundled-fonts` build had read
-/// apart and right became one line whose five Hebrew letters outnumber its
-/// four Latin ones, and the book stopped conserving at the bracket (review of
-/// the K-11 fix).
+/// - carried everywhere, the stretch joined a right-to-left word to a longer
+///   Latin run (`hello world שלום`), read by its majority as a left-to-right
+///   line, and `The word` to a longer Arabic phrase, read as a right-to-left
+///   one — 29 books of the marks probe;
+/// - carried after a right-to-left word into a neutral, the pen was carried
+///   into a Latin word the neutral opened — `שָׁלוֹם עוֹלָם <b>(HDAC)</b>.`,
+///   `⟨HDAC⟩`, `( עוֹלָם` after `(x) and` — and the line so joined fell into
+///   ruling 14's limits (review of the K-11 fix, 20 books of its probe);
+/// - carried after a word of neutrals, `- ` in `שָׁלוֹם - (HDAC) - עוֹלָם`
+///   with no `dir`, it joined the Hebrew after it to a line that held the
+///   Latin, read right to left as its two Hebrew ends say;
+/// - and carried a little further than the spacing reaches, it crossed from
+///   one table cell to the next: `td { letter-spacing: 0.5em }` with
+///   `border-spacing: 2px` read two Hebrew cells as one word, `גדולספר`.
+///
+/// A left-to-right page is collected exactly as before, and so is every
+/// line that holds a left-to-right letter but after a right-to-left word on
+/// it: the two words of a Hebrew gloss in an English sentence, `peace
+/// (עוֹלָם מִלְחָמָה)`, justified, are one piece of right-to-left text as
+/// they were in a right-to-left paragraph.
+///
+/// **A word cut on one baseline goes on into the next piece.** A word is all of
+/// its glyphs since the white space before it; a line the device cut inside a
+/// word holds that word's left-to-right letter, if it has one, from its first
+/// glyph: `[ŋ̊ə̃] חו`, letter-spaced by half an em and cut before its `]`, does
+/// not carry the pen from the `] ` into the Hebrew word (review of the K-11
+/// fix).
 #[derive(Clone, Copy, Debug)]
 struct Stretch {
     /// Where the pen stood after the glyph, along the baseline.
     pen: f64,
-    /// The direction of the word the glyph ends — the one it belongs to, or
-    /// for a space the word before it.
-    after: Strong,
-    /// Whether the glyph was white space, which ends its word.
-    word_space: bool,
 }
 
 impl Stretch {
-    /// Whether a glyph of direction `next` continues the line from the
-    /// stretched pen.
+    /// Whether a glyph of direction `next`, drawn at `origin` along the
+    /// baseline by a font of `size`, continues a line that holds a
+    /// left-to-right letter if `holds_ltr` and whose last word reads `word`,
+    /// from the stretched pen.
     ///
-    /// After a word space: where neither the word before the space nor `next`
-    /// — the next word's first glyph — reads left to right, and one of the two
-    /// reads right to left. After a glyph of a word, where only `Tc` moved
-    /// the pen: where the word does not read left to right and `next` reads
-    /// right to left. The glyph after a word's last letter is often its space,
-    /// a neutral that says nothing of the word after it: carried into one,
-    /// `<p>חו x …</p>` letter-spaced by half an em joined its Hebrew word to
-    /// the Latin text after it, a line whose majority read it backwards
-    /// (review of the K-11 fix).
-    fn carries(self, next: Strong) -> bool {
-        if self.word_space {
-            next != Strong::LeftToRight
-                && self.after != Strong::LeftToRight
-                && (next == Strong::RightToLeft || self.after == Strong::RightToLeft)
-        } else {
-            next == Strong::RightToLeft && self.after != Strong::LeftToRight
-        }
+    /// Three things, each of which a carry once crossed (see [`Stretch`]):
+    /// the line so far holds no left-to-right letter, or the word before the
+    /// gap is a right-to-left one; the glyph after the gap is itself right to
+    /// left — not a neutral, which says nothing of the word it opens; and it
+    /// starts where the spacing left the pen, give or take
+    /// [`STRETCH_ROUNDING`] of an em, so that a gap the spacing does not
+    /// account for, a cell's or a column's, is never carried across.
+    fn carries(
+        self,
+        holds_ltr: bool,
+        word: Option<Strong>,
+        next: Option<Strong>,
+        origin: f64,
+        size: f64,
+    ) -> bool {
+        (!holds_ltr || word == Some(Strong::RightToLeft))
+            && next == Some(Strong::RightToLeft)
+            && (origin - self.pen).abs() <= size.max(1.0) * STRETCH_ROUNDING
     }
 }
 
@@ -829,7 +850,7 @@ impl Device for TextDevice {
         let direction = (t.a, t.b);
 
         let (starts_new_line, word) = match &self.current {
-            None => (true, (None, false)),
+            None => (true, None),
             Some(line) => {
                 let same_font = line.font_id == glyph.font_id;
                 // A glyph continues the line when it runs the same way and sits
@@ -852,29 +873,32 @@ impl Device for TextDevice {
                 // column: two cells of a table row sit on one baseline and are
                 // two lines, and a paragraph that changed font mid-word is one.
                 let slack = size.max(1.0) * 0.5;
-                let pen = match line.stretched {
-                    Some(stretch)
-                        if stretch.carries(strong(&glyph.text).unwrap_or(Strong::Neither)) =>
-                    {
-                        line.pen.max(stretch.pen)
-                    }
-                    _ => line.pen,
-                };
+                let carried = wmode == WritingMode::Horizontal
+                    && line.stretched.is_some_and(|stretch| {
+                        stretch.carries(
+                            line.holds_ltr,
+                            line.word,
+                            strong(&glyph.text),
+                            origin.0,
+                            size,
+                        )
+                    });
                 let disjoint = line.closed
+                    && !carried
                     && match wmode {
-                        WritingMode::Horizontal => origin.0 > pen + slack,
-                        WritingMode::Vertical => origin.1 < pen - slack,
+                        WritingMode::Horizontal => origin.0 > line.pen + slack,
+                        WritingMode::Vertical => origin.1 < line.pen - slack,
                     };
                 let elsewhere = turned || far || backwards || (line.wmode != wmode && !same_font);
                 // A line cut only where the pen moved on along the same
                 // baseline goes on with the word its last glyph was in, unless
                 // white space ended it: `[ŋ̊ə̃]` letter-spaced by half an em
                 // and cut before its `]` is still one left-to-right word, and
-                // the `]` is not a word of neutrals of its own ([`Stretch`]).
-                let word = if elsewhere {
-                    (None, false)
+                // the `]` begins a line that holds it ([`Stretch`]).
+                let word = if elsewhere || !line.in_word {
+                    None
                 } else {
-                    (line.last_word, line.in_word)
+                    line.word
                 };
                 (elsewhere || disjoint, word)
             }
@@ -894,8 +918,9 @@ impl Device for TextDevice {
                 font_id: glyph.font_id,
                 closed: false,
                 stretched: None,
-                last_word: word.0,
-                in_word: word.1,
+                holds_ltr: word == Some(Strong::LeftToRight),
+                word,
+                in_word: word.is_some(),
             });
         }
 
@@ -909,23 +934,29 @@ impl Device for TextDevice {
                 WritingMode::Vertical => y0.min(y1),
             };
             let blank = glyph.text.chars().all(char::is_whitespace);
-            // The word this glyph ends, taken whole: `(HDAC).` is a
-            // left-to-right word for its letters, whatever its last glyph. A
-            // space, a mark or a joiner belongs to the word before it.
+            // The word this glyph is in, taken whole: `(HDAC).` holds a
+            // left-to-right letter whatever its last glyph. A space ends it; a
+            // mark or a joiner belongs to the word before it.
             if blank {
                 line.in_word = false;
             } else if let Some(own) = strong(&glyph.text) {
-                line.last_word = Some(match line.last_word {
+                line.word = Some(match line.word {
                     Some(word) if line.in_word => word.with(own),
                     _ => own,
                 });
                 line.in_word = true;
+                line.holds_ltr |= own == Strong::LeftToRight;
             }
-            line.stretched = match (wmode, line.last_word) {
+            line.stretched = match wmode {
                 // 9.4.4: `tx = (w0 × Tfs + Tc + Tw) × Th`, which is
                 // `w0 + (Tc + Tw) / Tfs` in glyph space; `Tw` only after a
-                // single-byte code 32, and only horizontally.
-                (WritingMode::Horizontal, Some(word)) if word != Strong::LeftToRight => {
+                // code 32, and only horizontally. As the interpreter moves
+                // the pen: [`crate::FontSource::decode`] does not say how
+                // many bytes a code took, so a two-byte code 32 of a Type 0
+                // font is moved by `Tw` there too, which 9.3.3 applies to a
+                // single-byte code alone — and the pen is carried to where
+                // the interpreter drew the next glyph.
+                WritingMode::Horizontal if line.word.is_some() => {
                     let tw = if glyph.code == 32 && blank {
                         state.text.word_spacing
                     } else {
@@ -933,11 +964,7 @@ impl Device for TextDevice {
                     };
                     let spacing = (state.text.char_spacing + tw) / glyph.size;
                     let at = corner(advance + spacing, 0.0).0;
-                    (at.is_finite() && at > line.pen).then_some(Stretch {
-                        pen: at,
-                        after: word,
-                        word_space: blank,
-                    })
+                    (at.is_finite() && at > line.pen).then_some(Stretch { pen: at })
                 }
                 _ => None,
             };
@@ -1233,12 +1260,46 @@ mod tests {
         assert_eq!(justified(&pieces, 8.0), ["\u{5D0}. \u{5D1}"]);
     }
 
+    /// **`Tw` is carried only after a code 32** (9.3.3; the review of the
+    /// K-11 fix). A space a font draws with another code — a Type 0 font's
+    /// CID 3, which its `/ToUnicode` names a space — is not moved by `Tw`, so
+    /// a gap after it is a gap the content stream drew, and the line is cut
+    /// there as before. (A two-byte code 32 is moved by `Tw` as the
+    /// interpreter moves it; see `show_glyph`.)
+    #[test]
+    fn word_spacing_carries_the_pen_only_after_a_code_32() {
+        let mut device = TextDevice::new();
+        let mut state = GraphicsState::new(Matrix::IDENTITY);
+        state.text.word_spacing = 8.0;
+        let mut space = glyph(" ", 5.0, 700.0, 10.0);
+        space.code = 3;
+        for shown in [
+            glyph("\u{5D0}", 0.0, 700.0, 10.0),
+            space,
+            glyph("\u{5D1}", 18.0, 700.0, 10.0),
+        ] {
+            device.show_glyph(&shown, &state);
+            device.end_text();
+        }
+        assert_eq!(device.finish().lines().len(), 2);
+    }
+
     /// The lines of a page whose text objects are `objects`, each its glyphs
     /// at their places, under `Tc` of `char_spacing`.
     fn objects(objects: &[&[(&str, f64)]], char_spacing: f64) -> Vec<String> {
+        objects_spaced(objects, char_spacing, 0.0)
+    }
+
+    /// [`objects`], under `Tw` of `word_spacing` as well.
+    fn objects_spaced(
+        objects: &[&[(&str, f64)]],
+        char_spacing: f64,
+        word_spacing: f64,
+    ) -> Vec<String> {
         let mut device = TextDevice::new();
         let mut state = GraphicsState::new(Matrix::IDENTITY);
         state.text.char_spacing = char_spacing;
+        state.text.word_spacing = word_spacing;
         for object in objects {
             for (text, x) in *object {
                 device.show_glyph(&glyph(text, *x, 700.0, 10.0), &state);
@@ -1307,6 +1368,61 @@ mod tests {
             objects(&[word, bracket, hebrew], 6.0),
             ["a", "] ", "\u{5D1}"]
         );
+    }
+
+    /// **Spacing carries the pen only into a glyph that is itself right to
+    /// left** (second review of the K-11 fix). After a right-to-left word and
+    /// a stretched space, the next text object's first glyph was a neutral —
+    /// the `(` of `<b>(HDAC)</b>`, the `⟨` of `⟨HDAC⟩` — and a neutral says
+    /// nothing of the word it opens: carried into it, a dir-less Hebrew line
+    /// was joined to its Latin run and read by its Hebrew ends as a
+    /// right-to-left paragraph's, `.מִלְחָמָה … .)HDAC( …`.
+    #[test]
+    fn spacing_carries_the_pen_only_into_a_right_to_left_glyph() {
+        for opening in ["(", "\u{27E8}", "-"] {
+            let pieces = [("\u{5D0}", 0.0), (" ", 5.0), (opening, 18.0)];
+            assert_eq!(
+                justified(&pieces, 8.0).len(),
+                2,
+                "{opening:?}: carried into a neutral"
+            );
+        }
+        let pieces = [("\u{5D0}", 0.0), (" ", 5.0), ("\u{5D1}", 18.0)];
+        assert_eq!(justified(&pieces, 8.0), ["\u{5D0} \u{5D1}"]);
+    }
+
+    /// **And only on a line holding no left-to-right letter, or after a
+    /// right-to-left word.** `שָׁלוֹם - (HDAC) - עוֹלָם` with no `dir`, its
+    /// `- (HDAC) - ` one text object: the stretched space after the second
+    /// `-` carried the pen into the Hebrew, and the line, which held the
+    /// Latin, was read by its two Hebrew ends as a right-to-left paragraph's.
+    /// After a right-to-left word the pen is carried still, on any line: the
+    /// two words of a Hebrew gloss in an English sentence, `peace (עוֹלָם
+    /// מִלְחָמָה)`, justified.
+    #[test]
+    fn spacing_carries_nothing_after_neutrals_on_a_line_that_holds_a_latin_letter() {
+        let hebrew: &[(&str, f64)] = &[("\u{5D1}", 28.0)];
+        let latin_dash: &[(&str, f64)] = &[("a", 0.0), (" ", 5.0), ("-", 10.0), (" ", 15.0)];
+        assert_eq!(objects_spaced(&[latin_dash, hebrew], 0.0, 8.0).len(), 2);
+        let hebrew_dash: &[(&str, f64)] = &[("\u{5D0}", 0.0), (" ", 5.0), ("-", 10.0), (" ", 15.0)];
+        assert_eq!(objects_spaced(&[hebrew_dash, hebrew], 0.0, 8.0).len(), 1);
+        let latin_word: &[(&str, f64)] = &[("a", 0.0), (" ", 5.0), ("\u{5D0}", 10.0), (" ", 15.0)];
+        assert_eq!(objects_spaced(&[latin_word, hebrew], 0.0, 8.0).len(), 1);
+    }
+
+    /// **And only as far as the spacing reaches**, give or take a rounding.
+    /// Two Hebrew table cells letter-spaced by half an em, `border-spacing:
+    /// 2px` apart: the second cell starts a quarter of an em past where `Tc`
+    /// left the pen, and carried there the two were read as one word,
+    /// `גדולספר` (second review of the K-11 fix).
+    #[test]
+    fn spacing_carries_the_pen_only_as_far_as_it_reaches() {
+        let first: &[(&str, f64)] = &[("\u{5D0}", 0.0)];
+        // The box ends at 5, and `Tc` leaves the pen at 11.
+        for (at, lines) in [(11.0, 1), (11.4, 1), (10.6, 1), (14.0, 2), (12.0, 2)] {
+            let second: &[(&str, f64)] = &[("\u{5D1}", at)];
+            assert_eq!(objects(&[first, second], 6.0).len(), lines, "at {at}");
+        }
     }
 
     #[test]

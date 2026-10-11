@@ -13,10 +13,12 @@
 //!    word drawn in reading order as several text objects, inside a
 //!    left-to-right line, reaches `TextDevice` as pieces on one baseline,
 //!    since a line resumes after an `ET` only where it stopped. Consecutive
-//!    lines that meet end to end on one baseline make a chain, and a chain
-//!    any piece of which holds a right-to-left character is joined whole
-//!    ([`rejoin_split_lines`]) — a bracket or a Latin run cut off between
-//!    two right-to-left pieces, which holds none itself, with the rest.
+//!    lines that meet end to end on one baseline make a chain, and in a chain
+//!    any piece of which holds a right-to-left character, a piece joins the
+//!    one before it where either holds one ([`rejoin_split_lines`]). The
+//!    chain is joined whole where the bracket tie-break turns it read so — a
+//!    `(` cut off at the right end of a right-to-left line from the Latin run
+//!    it opens, neither holding a right-to-left character, with the rest.
 //! 1. **Marks are kept with their base.** A character whose first code point
 //!    is a nonspacing mark (`Bidi_Class` `NSM`) belongs to the base glyph it
 //!    sits on — the neighbour, in content order, whose extent along the
@@ -115,7 +117,7 @@
 //! `TextDevice` collected them.
 
 use tinker_pdf_content::{Quad, TextChar, TextLine, TextPage, WritingMode};
-use tinker_pdf_shape::bidi::{drawn_direction, logical_order, BaseDirection};
+use tinker_pdf_shape::bidi::{drawn_reading, faces_outward, BaseDirection, DrawnReading};
 use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
 
 /// How [`crate::Page::text_with`] orders a page's lines.
@@ -137,9 +139,10 @@ pub struct TextOptions {
 pub(crate) fn into_logical_order(page: &mut TextPage) -> usize {
     let mut changed = 0usize;
     for block in &mut page.blocks {
-        changed += rejoin_split_lines(&mut block.lines);
-        for line in &mut block.lines {
-            if logical_line(line) {
+        let (joined, mut read) = rejoin_split_lines(&mut block.lines);
+        changed += joined;
+        for (at, line) in block.lines.iter_mut().enumerate() {
+            if logical_line(line, read.get_mut(at).and_then(Option::take)) {
                 changed += 1;
             }
         }
@@ -149,7 +152,10 @@ pub(crate) fn into_logical_order(page: &mut TextPage) -> usize {
 
 /// Joins consecutive lines of one block that the content stream's order split
 /// and that are one line on the page: on one baseline, end to end, a
-/// right-to-left character among them. Returns how many joins it made.
+/// right-to-left character among them. Returns how many joins it made, and,
+/// for each line it leaves, the reading [`drawn_reading`] found for it where
+/// choosing whether to join it read it already — so [`logical_line`] does not
+/// read it again.
 ///
 /// # Why a line drawn in reading order can arrive in pieces
 ///
@@ -172,9 +178,11 @@ pub(crate) fn into_logical_order(page: &mut TextPage) -> usize {
 /// chain is joined into one line when **any** of its pieces holds a
 /// right-to-left character. A chain with none is left exactly as it was
 /// collected — a left-to-right page is not touched — and so is a vertical
-/// line.
+/// line. Within a chain, a piece joins the one before it where either holds
+/// a right-to-left character, as at 9297d2d: those pieces are the chain's
+/// **groups**, and each is one line.
 ///
-/// # And the chain, not the pair, holds the right-to-left character
+/// # And the chain, not the pair, holds a bracket the line pairs
 ///
 /// A right-to-left paragraph's line that opens with a left-to-right run in
 /// brackets — `(histone deacetylase). وقد أصبحنا`, a paragraph narrowed so
@@ -185,9 +193,20 @@ pub(crate) fn into_logical_order(page: &mut TextPage) -> usize {
 /// the **two** lines it was joining held a right-to-left character, and the
 /// `(` and the Latin words hold none, so they stayed apart and only the Latin
 /// and the Arabic were joined: the `(` was read as a line of its own, and the
-/// rest as a line with no bracket to pair (ROADMAP K-11). What is joined now
-/// is the whole chain the pieces make on the page, and what a right-to-left
-/// character decides is whether that chain is touched.
+/// rest as a line with no bracket to pair (ROADMAP K-11). So a chain of more
+/// than one group is read whole too, and joined whole where the bracket
+/// tie-break turns it read so ([`DrawnReading::turned_by_brackets`]): a pair
+/// drawn facing outward across its groups, which only the whole chain pairs.
+/// That reading is the one handed on.
+///
+/// Only there. Joined whole wherever any piece held a right-to-left
+/// character, as the K-11 fix first had it, a chain whose groups each read
+/// right fell into other limits: the line after K-11's, `deacetylase).
+/// מִלְחָמָה סֵפֶר בַּיִת.`, is three pieces too, and two groups —
+/// `deacetylase` and `). מִלְחָמָה …` — that each read right; whole, it is
+/// a bracket a line break parted, its Latin letters as many as its Hebrew
+/// ones, and read `.מִלְחָמָה סֵפֶר בַּיִת .)deacetylase` (review of the K-11
+/// fix). A chain the tie-break does not turn is joined group by group.
 ///
 /// # And two lines on top of each other are two drawings
 ///
@@ -210,63 +229,175 @@ pub(crate) fn into_logical_order(page: &mut TextPage) -> usize {
 /// again, a line rejoined from `n` pieces cost `n²`: a right-to-left word
 /// drawn as one text object per letter or two is all a page needs to be that
 /// line, and this runs on every PDF's default extraction (review of lane 8C).
-fn rejoin_split_lines(lines: &mut Vec<TextLine>) -> usize {
-    // First, where each chain starts, and whether it holds a right-to-left
-    // character: read off the pieces where they lie, nothing moved yet.
-    let mut chains: Vec<(usize, bool)> = Vec::new();
+/// A chain of more than one group is asked for the bracket tie-break's shape
+/// ([`faces_outward`]), linear in its characters, and read only where it has
+/// it — a reading [`logical_line`] is handed where the chain is joined whole,
+/// and that a group joined on its own would have read in part anyway.
+fn rejoin_split_lines(lines: &mut Vec<TextLine>) -> (usize, Vec<Option<Read>>) {
+    // First, where each chain starts, whether it holds a right-to-left
+    // character, and where each of its groups starts: read off the pieces
+    // where they lie, nothing moved yet.
+    let mut chains: Vec<Chain> = Vec::new();
     let mut reach: Option<Reach> = None;
+    // The group being gathered: its reach, and whether it holds a
+    // right-to-left character.
+    let mut group: Option<(Reach, bool)> = None;
     for (at, line) in lines.iter().enumerate() {
         let rtl = holds_rtl(&line.chars);
-        if let (Some(reached), Some((start, holds))) = (reach.as_mut(), chains.last_mut()) {
+        if let (Some(reached), Some(chain)) = (reach.as_mut(), chains.last_mut()) {
             if let Some(along) = continues_on_page(reached, line) {
-                reached.grow(lines.get(*start..=at).unwrap_or_default(), along);
-                *holds |= rtl;
+                reached.grow(lines.get(chain.start..=at).unwrap_or_default(), along);
+                chain.holds |= rtl;
+                let from = chain.groups.last().copied().unwrap_or(chain.start);
+                let grouped = match group.as_mut() {
+                    Some((gathered, holds)) if *holds || rtl => continues_on_page(gathered, line)
+                        .is_some_and(|along| {
+                            gathered.grow(lines.get(from..=at).unwrap_or_default(), along);
+                            *holds |= rtl;
+                            true
+                        }),
+                    _ => false,
+                };
+                if !grouped {
+                    chain.groups.push(at);
+                    group = Some((Reach::of(line), rtl));
+                }
                 continue;
             }
         }
-        reach = Some(Reach::of(line));
-        chains.push((at, rtl));
+        let started = Reach::of(line);
+        group = Some((started.clone(), rtl));
+        reach = Some(started);
+        chains.push(Chain {
+            start: at,
+            holds: rtl,
+            groups: vec![at],
+        });
     }
 
     // Then each chain of more than one piece that holds a right-to-left
-    // character becomes one line; every other piece is kept as collected.
+    // character becomes one line where its groups are one, or where the
+    // bracket tie-break turns it whole; otherwise each of its groups does.
+    // Every other piece is kept as collected.
     let mut joined = 0usize;
     let mut out: Vec<TextLine> = Vec::with_capacity(chains.len());
+    let mut read: Vec<Option<Read>> = Vec::with_capacity(chains.len());
     let mut taken = std::mem::take(lines).into_iter().enumerate().peekable();
-    let mut ends = chains.iter().skip(1).map(|(start, _)| *start);
-    for (_, holds) in &chains {
+    let mut ends = chains.iter().skip(1).map(|chain| chain.start);
+    for chain in &chains {
         let end = ends.next();
-        let mut chain: Vec<TextLine> = Vec::new();
+        let mut pieces: Vec<TextLine> = Vec::new();
         while let Some((_, piece)) = taken.next_if(|(at, _)| end.is_none_or(|end| *at < end)) {
-            chain.push(piece);
+            pieces.push(piece);
         }
-        if !holds || chain.len() < 2 {
-            out.extend(chain);
+        if !chain.holds || pieces.len() < 2 {
+            read.extend(pieces.iter().map(|_| None));
+            out.extend(pieces);
             continue;
         }
-        let mut pieces = chain.into_iter();
-        let Some(mut line) = pieces.next() else {
-            continue;
+        let whole = if chain.groups.len() < 2 {
+            Some(None)
+        } else {
+            turned_whole(&pieces).map(Some)
         };
-        // A joined line's text is its characters', made from them once.
-        line.text.clear();
-        push_text(&mut line.text, &line.chars);
-        for piece in pieces {
-            push_text(&mut line.text, &piece.chars);
-            line.chars.extend(piece.chars);
-            line.size = line.size.max(piece.size);
-            line.quad = enclose(line.quad, piece.quad);
-            joined += 1;
+        if let Some(found) = whole {
+            joined += pieces.len() - 1;
+            out.push(join(pieces));
+            read.push(found);
+            continue;
         }
-        out.push(line);
+        // The groups, as the pairwise rule joined them.
+        let mut starts = chain
+            .groups
+            .iter()
+            .skip(1)
+            .map(|at| at - chain.start)
+            .peekable();
+        let mut gathered: Vec<TextLine> = Vec::new();
+        for (at, piece) in pieces.into_iter().enumerate() {
+            if starts.next_if(|start| *start == at).is_some() {
+                joined += gathered.len().saturating_sub(1);
+                out.push(join(std::mem::take(&mut gathered)));
+                read.push(None);
+            }
+            gathered.push(piece);
+        }
+        joined += gathered.len().saturating_sub(1);
+        out.push(join(gathered));
+        read.push(None);
     }
     *lines = out;
-    joined
+    (joined, read)
+}
+
+/// A chain of pieces [`rejoin_split_lines`] found where they lie: its first piece's
+/// index, whether any piece holds a right-to-left character, and where each
+/// of its groups starts — the pieces the pairwise rule joined, as at
+/// 9297d2d: a piece joined the group before it where either holds a
+/// right-to-left character.
+struct Chain {
+    start: usize,
+    holds: bool,
+    groups: Vec<usize>,
+}
+
+/// The reading of a chain's pieces joined whole, where the bracket tie-break
+/// turns it — a pair of brackets drawn facing outward across the pieces,
+/// which only the chain read whole pairs — and `None` otherwise, where the
+/// chain's groups are joined as the pairwise rule joined them. See
+/// [`rejoin_split_lines`].
+fn turned_whole(pieces: &[TextLine]) -> Option<Read> {
+    let chars: Vec<TextChar> = pieces
+        .iter()
+        .flat_map(|piece| piece.chars.iter().cloned())
+        .collect();
+    let units = drawn_units(&chars);
+    let visual: Vec<&str> = units.texts.iter().map(String::as_str).collect();
+    if !faces_outward(&visual) {
+        return None;
+    }
+    let reading = drawn_reading(&visual);
+    let turned = reading.turned_by_brackets;
+    turned.then_some(Read { units, reading })
+}
+
+/// `pieces` as one line, in their order: its text its characters', made from
+/// them once.
+fn join(pieces: Vec<TextLine>) -> TextLine {
+    let mut pieces = pieces.into_iter();
+    let Some(mut line) = pieces.next() else {
+        return TextLine {
+            chars: Vec::new(),
+            text: String::new(),
+            quad: Quad {
+                ll: (0.0, 0.0),
+                lr: (0.0, 0.0),
+                ul: (0.0, 0.0),
+                ur: (0.0, 0.0),
+            },
+            wmode: WritingMode::Horizontal,
+            rtl: false,
+            size: 0.0,
+        };
+    };
+    let Some(first) = pieces.next() else {
+        return line;
+    };
+    line.text.clear();
+    push_text(&mut line.text, &line.chars);
+    for piece in core::iter::once(first).chain(pieces) {
+        push_text(&mut line.text, &piece.chars);
+        line.chars.extend(piece.chars);
+        line.size = line.size.max(piece.size);
+        line.quad = enclose(line.quad, piece.quad);
+    }
+    line
 }
 
 /// What [`continues_on_page`] asks of the chain a piece might continue, kept
 /// as pieces join it — so that a join looks at the piece and not at the
 /// chain so far. See [`rejoin_split_lines`].
+#[derive(Clone)]
 struct Reach {
     /// The chain's [`baseline`].
     axis: (f64, f64),
@@ -477,18 +608,27 @@ fn outside(at: f64, (lo, hi): (f64, f64)) -> f64 {
     }
 }
 
-/// Puts one line into logical order. Returns whether anything moved.
-fn logical_line(line: &mut TextLine) -> bool {
-    if line.wmode == WritingMode::Vertical {
-        return false;
-    }
-    if !line.chars.iter().any(|c| c.text.chars().any(right_to_left)) {
-        return false;
-    }
-    let count = line.chars.len();
-    let axis = baseline(&line.chars);
-    let extents: Vec<(f64, f64)> = line.chars.iter().map(|c| extent(c, axis)).collect();
-    let marks: Vec<bool> = line.chars.iter().map(|c| is_mark(&c.text)).collect();
+/// A line's characters as ruling 14 reads them: each base glyph with the
+/// marks that ride on it — a cluster, as indices into the line's
+/// characters — in the order drawn, and each cluster's text.
+struct Units {
+    clusters: Vec<Vec<usize>>,
+    texts: Vec<String>,
+}
+
+/// A line's [`Units`] and how they are read, found once ([`rejoin_split_lines`]).
+struct Read {
+    units: Units,
+    reading: DrawnReading,
+}
+
+/// Steps 1 and 2 of [`logical_line`] over `chars`: each mark kept with its
+/// base, and the clusters in visual order.
+fn drawn_units(chars: &[TextChar]) -> Units {
+    let count = chars.len();
+    let axis = baseline(chars);
+    let extents: Vec<(f64, f64)> = chars.iter().map(|c| extent(c, axis)).collect();
+    let marks: Vec<bool> = chars.iter().map(|c| is_mark(&c.text)).collect();
 
     // The nearest base on each side of every position, in two linear passes —
     // a line of nothing but marks is hostile input, and a search per mark
@@ -553,26 +693,44 @@ fn logical_line(line: &mut TextLine) -> bool {
         let start = |cluster: &Vec<usize>| cluster.first().map_or(0.0, |at| extents[*at].0);
         start(a).total_cmp(&start(b))
     });
-
-    // Steps 3 and 4: the paragraph's direction, and the order the visual line
-    // is read in.
     let texts: Vec<String> = clusters
         .iter()
         .map(|cluster| {
             cluster
                 .iter()
-                .map(|at| line.chars[*at].text.as_str())
+                .filter_map(|at| chars.get(*at))
+                .map(|c| c.text.as_str())
                 .collect()
         })
         .collect();
-    let units: Vec<&str> = texts.iter().map(String::as_str).collect();
-    let direction = drawn_direction(&units);
-    line.rtl = direction == BaseDirection::RightToLeft;
-    let order = logical_order(&units, direction);
+    Units { clusters, texts }
+}
 
-    let sequence: Vec<usize> = order
+/// Puts one line into logical order, reading it as `read` says where
+/// [`rejoin_split_lines`] already read it. Returns whether anything moved.
+fn logical_line(line: &mut TextLine, read: Option<Read>) -> bool {
+    if line.wmode == WritingMode::Vertical {
+        return false;
+    }
+    if !line.chars.iter().any(|c| c.text.chars().any(right_to_left)) {
+        return false;
+    }
+    let count = line.chars.len();
+
+    // Steps 3 and 4: the paragraph's direction, and the order the visual line
+    // is read in — found together, one search in the direction chosen.
+    let Read { units, reading } = read.unwrap_or_else(|| {
+        let units = drawn_units(&line.chars);
+        let visual: Vec<&str> = units.texts.iter().map(String::as_str).collect();
+        let reading = drawn_reading(&visual);
+        Read { units, reading }
+    });
+    line.rtl = reading.direction == BaseDirection::RightToLeft;
+
+    let sequence: Vec<usize> = reading
+        .order
         .iter()
-        .filter_map(|k| clusters.get(*k))
+        .filter_map(|k| units.clusters.get(*k))
         .flat_map(|cluster| cluster.iter().copied())
         .collect();
     if sequence.len() != count || sequence.iter().enumerate().all(|(i, at)| i == *at) {
@@ -638,7 +796,7 @@ mod tests {
             vec![ch(GIMEL, 0.0, 5.0), ch(BET, 5.0, 5.0), ch(ALEF, 10.0, 5.0)],
             true,
         );
-        assert!(logical_line(&mut l));
+        assert!(logical_line(&mut l, None));
         assert_eq!(l.text, format!("{ALEF}{BET}{GIMEL}"));
     }
 
@@ -649,7 +807,7 @@ mod tests {
             vec![ch(ALEF, 10.0, 5.0), ch(BET, 5.0, 5.0), ch(GIMEL, 0.0, 5.0)],
             true,
         );
-        assert!(!logical_line(&mut l), "nothing should have moved");
+        assert!(!logical_line(&mut l, None), "nothing should have moved");
         assert_eq!(l.text, format!("{ALEF}{BET}{GIMEL}"));
     }
 
@@ -672,7 +830,7 @@ mod tests {
         ];
         for chars in [after, before] {
             let mut l = line(chars, true);
-            logical_line(&mut l);
+            logical_line(&mut l, None);
             assert_eq!(l.text, format!("{ALEF}{BET}{QAMATS}{GIMEL}"));
         }
     }
@@ -691,7 +849,7 @@ mod tests {
             ],
             true,
         );
-        logical_line(&mut l);
+        logical_line(&mut l, None);
         assert_eq!(l.text, format!("{ALEF}{BET} 12"));
     }
 
@@ -700,7 +858,7 @@ mod tests {
         // Out of order on purpose: a line with no right-to-left character is
         // left as collected, even where its geometry disagrees with its order.
         let mut l = line(vec![ch("b", 5.0, 5.0), ch("a", 0.0, 5.0)], false);
-        assert!(!logical_line(&mut l));
+        assert!(!logical_line(&mut l, None));
         assert_eq!(l.text, "ba");
     }
 
@@ -721,7 +879,7 @@ mod tests {
             ],
             true,
         );
-        assert!(logical_line(&mut l));
+        assert!(logical_line(&mut l, None));
         assert_eq!(l.text, format!("a {ALEF}{BET}{GIMEL} b"));
         assert!(!l.rtl, "the line was read left to right");
     }
@@ -742,7 +900,7 @@ mod tests {
             ],
             true,
         );
-        assert!(logical_line(&mut quoted));
+        assert!(logical_line(&mut quoted, None));
         assert_eq!(quoted.text, format!("{ALEF}{BET}{GIMEL},"));
         assert!(!quoted.rtl, "the line was read left to right");
 
@@ -755,7 +913,7 @@ mod tests {
             ],
             false,
         );
-        assert!(logical_line(&mut own));
+        assert!(logical_line(&mut own, None));
         assert_eq!(own.text, format!("{ALEF}{BET}{GIMEL},"));
         assert!(own.rtl, "the line was read right to left");
     }
@@ -770,7 +928,7 @@ mod tests {
             .map(|(i, t)| ch(t, i as f64 * 5.0, 5.0))
             .collect();
         let mut l = line(drawn, false);
-        logical_line(&mut l);
+        logical_line(&mut l, None);
         assert_eq!(l.text, typed);
         assert!(l.rtl);
     }
@@ -782,7 +940,7 @@ mod tests {
             .chain(std::iter::once(ch(ALEF, 0.0, 5.0)))
             .collect();
         let mut l = line(chars, true);
-        logical_line(&mut l);
+        logical_line(&mut l, None);
         assert_eq!(l.chars.len(), 20_001, "no character may be lost");
     }
 
@@ -832,7 +990,7 @@ mod tests {
             line(vec![ch(ALEF, 0.0, 5.0)], true),
             line(vec![ch(BET, 15.0, 5.0)], true),
         ];
-        assert_eq!(rejoin_split_lines(&mut lines), 0);
+        assert_eq!(rejoin_split_lines(&mut lines).0, 0);
         assert_eq!(lines.len(), 2);
     }
 
@@ -844,7 +1002,7 @@ mod tests {
             line(vec![ch(ALEF, 0.0, 5.0)], true),
             line(vec![lower], true),
         ];
-        assert_eq!(rejoin_split_lines(&mut lines), 0);
+        assert_eq!(rejoin_split_lines(&mut lines).0, 0);
     }
 
     /// **A line drawn twice is two lines, not one line of each letter
@@ -886,7 +1044,7 @@ mod tests {
             line(vec![ch(BET, 15.0, 5.0), ch(ALEF, 10.0, 5.0)], true),
             line(vec![ch(QAMATS, 17.0, 0.0)], true),
         ];
-        assert_eq!(rejoin_split_lines(&mut lines), 1);
+        assert_eq!(rejoin_split_lines(&mut lines).0, 1);
         assert_eq!(lines.len(), 1);
     }
 
@@ -956,10 +1114,12 @@ mod tests {
         );
     }
 
-    /// The join without [`Reach`]: everything about the chain so far read
-    /// again from its characters at every piece, and the chain joined when
-    /// any piece of it holds a right-to-left character. Quadratic, and kept
-    /// only to say what the kept reach must answer.
+    /// The join without [`Reach`]: everything about the chain so far, and
+    /// about the group so far, read again from its characters at every
+    /// piece; a chain that holds a right-to-left character joined whole where
+    /// its groups are one or the bracket tie-break turns it, and group by
+    /// group otherwise. Quadratic, and kept only to say what the kept reach
+    /// must answer.
     fn rejoin_by_rereading(lines: &mut Vec<TextLine>) -> usize {
         fn continues(previous: &TextLine, next: &TextLine) -> bool {
             if previous.wmode == WritingMode::Vertical || next.wmode == WritingMode::Vertical {
@@ -987,27 +1147,47 @@ mod tests {
             let shorter = (hi1 - lo1).min(hi2 - lo2);
             gap.is_finite() && gap <= slack && overlap <= shorter * 0.5
         }
-        // Each chain as its pieces and as the one line they make.
-        let mut chains: Vec<(Vec<TextLine>, TextLine)> = Vec::new();
+        fn grown(whole: &mut TextLine, line: &TextLine) {
+            whole.chars.extend(line.chars.iter().cloned());
+            whole.text = whole.chars.iter().map(|c| c.text.as_str()).collect();
+            whole.size = whole.size.max(line.size);
+            whole.quad = enclose(whole.quad, line.quad);
+        }
+        // Each chain as its pieces, as the one line they make, and as its
+        // groups, each the one line its pieces make and how many they are.
+        type Groups = Vec<(TextLine, usize)>;
+        let mut chains: Vec<(Vec<TextLine>, TextLine, Groups)> = Vec::new();
         for line in std::mem::take(lines) {
             match chains.last_mut() {
-                Some((pieces, whole)) if continues(whole, &line) => {
-                    whole.chars.extend(line.chars.iter().cloned());
-                    whole.text = whole.chars.iter().map(|c| c.text.as_str()).collect();
-                    whole.size = whole.size.max(line.size);
-                    whole.quad = enclose(whole.quad, line.quad);
+                Some((pieces, whole, groups)) if continues(whole, &line) => {
+                    grown(whole, &line);
+                    match groups.last_mut() {
+                        Some((group, count))
+                            if (holds_rtl(&group.chars) || holds_rtl(&line.chars))
+                                && continues(group, &line) =>
+                        {
+                            grown(group, &line);
+                            *count += 1;
+                        }
+                        _ => groups.push((line.clone(), 1)),
+                    }
                     pieces.push(line);
                 }
-                _ => chains.push((vec![line.clone()], line)),
+                _ => chains.push((vec![line.clone()], line.clone(), vec![(line, 1)])),
             }
         }
         let mut joined = 0usize;
-        for (pieces, whole) in chains {
-            if pieces.len() > 1 && pieces.iter().any(|piece| holds_rtl(&piece.chars)) {
+        for (pieces, whole, groups) in chains {
+            if pieces.len() < 2 || !pieces.iter().any(|piece| holds_rtl(&piece.chars)) {
+                lines.extend(pieces);
+            } else if groups.len() < 2 || turned_whole(&pieces).is_some() {
                 joined += pieces.len() - 1;
                 lines.push(whole);
             } else {
-                lines.extend(pieces);
+                for (group, count) in groups {
+                    joined += count - 1;
+                    lines.push(group);
+                }
             }
         }
         joined
@@ -1080,7 +1260,7 @@ mod tests {
             }
             let mut kept = lines.clone();
             let mut reread = lines;
-            let joined = rejoin_split_lines(&mut kept);
+            let joined = rejoin_split_lines(&mut kept).0;
             assert_eq!(joined, rejoin_by_rereading(&mut reread));
             assert_eq!(format!("{kept:?}"), format!("{reread:?}"));
             joins += joined;
@@ -1091,15 +1271,16 @@ mod tests {
         );
     }
 
-    /// **The chain, not the pair, holds the right-to-left character**
-    /// (ROADMAP K-11). `(ab) אב`-shaped, as an EPUB draws a right-to-left
-    /// line that opens with a bracketed Latin run: the `(` at the right end
-    /// drawn first, then the Latin, then the Hebrew and the `)` at the left —
-    /// three pieces, each meeting the next. The first two hold nothing right
-    /// to left, and a join that asked that of each pair left the `(` a line of
-    /// its own. All three are one line, read in logical order.
+    /// **The chain, not the pair, holds a bracket the line pairs** (ROADMAP
+    /// K-11). `(ab) אב`-shaped, as an EPUB draws a right-to-left line that
+    /// opens with a bracketed Latin run: the `(` at the right end drawn first,
+    /// then the Latin, then the Hebrew and the `)` at the left — three pieces,
+    /// each meeting the next. The first two hold nothing right to left, and a
+    /// join that asked that of each pair left the `(` a line of its own. Read
+    /// whole, the pair faces outward and the bracket tie-break turns the line:
+    /// all three are one line, read in logical order.
     #[test]
-    fn a_chain_holding_a_right_to_left_character_anywhere_is_joined_whole() {
+    fn a_chain_the_bracket_tie_break_turns_is_joined_whole() {
         let mut page = TextPage::default();
         page.blocks.push(tinker_pdf_content::TextBlock {
             lines: vec![
@@ -1119,6 +1300,51 @@ mod tests {
         assert!(lines[0].rtl, "and it reads right to left");
     }
 
+    /// **A chain whose groups each read right is joined group by group** —
+    /// the review of the K-11 fix. The line after K-11's, `de). אב.`-shaped:
+    /// the Latin at the right end, then the `)` left of it, then the Hebrew
+    /// and its stops — three pieces, each meeting the next, and two groups,
+    /// `de` and `). אב.`, as 9297d2d joined them. Read whole, its strong
+    /// characters' ends disagree and its Latin letters are as many as its
+    /// Hebrew ones, so it is read left to right and the `)` lands after the
+    /// Hebrew; no bracket faces outward for the tie-break to turn it. Each
+    /// group is read on its own, as before the fix.
+    #[test]
+    fn a_chain_the_bracket_tie_break_does_not_turn_is_joined_group_by_group() {
+        let pieces = vec![
+            line(vec![ch("d", 30.0, 5.0), ch("e", 35.0, 5.0)], false),
+            line(vec![ch(")", 25.0, 5.0)], false),
+            line(
+                vec![
+                    ch(".", 0.0, 5.0),
+                    ch(BET, 5.0, 5.0),
+                    ch(ALEF, 10.0, 5.0),
+                    ch(" ", 15.0, 5.0),
+                    ch(".", 20.0, 5.0),
+                ],
+                true,
+            ),
+        ];
+        let whole = join(pieces.clone());
+        let mut read_whole = whole.clone();
+        logical_line(&mut read_whole, None);
+        assert!(
+            !read_whole.text.starts_with(')'),
+            "read whole, the `)` does not open the line: {:?}",
+            read_whole.text
+        );
+        let mut page = TextPage::default();
+        page.blocks.push(tinker_pdf_content::TextBlock {
+            lines: pieces,
+            quad: whole.quad,
+        });
+        into_logical_order(&mut page);
+        let lines = &page.blocks[0].lines;
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["de".to_string(), format!("). {ALEF}{BET}.")]);
+        assert!(lines[1].rtl, "the Hebrew group reads right to left");
+    }
+
     /// And a chain with no right-to-left character anywhere is left exactly
     /// as collected, however many pieces it has.
     #[test]
@@ -1129,7 +1355,7 @@ mod tests {
             line(vec![ch("c", 5.0, 5.0), ch(")", 10.0, 5.0)], false),
         ];
         let collected = format!("{lines:?}");
-        assert_eq!(rejoin_split_lines(&mut lines), 0);
+        assert_eq!(rejoin_split_lines(&mut lines).0, 0);
         assert_eq!(format!("{lines:?}"), collected);
     }
 
@@ -1142,7 +1368,7 @@ mod tests {
             line(vec![ch("c", 10.0, 5.0)], false),
             line(vec![ch("b", 5.0, 5.0)], false),
         ];
-        assert_eq!(rejoin_split_lines(&mut lines), 0);
+        assert_eq!(rejoin_split_lines(&mut lines).0, 0);
         assert_eq!(lines.len(), 3);
     }
 }

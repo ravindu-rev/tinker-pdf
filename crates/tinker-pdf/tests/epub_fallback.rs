@@ -1622,36 +1622,112 @@ fn a_run_of_neutrals_in_an_embedding_with_no_right_to_left_letter_reads_as_typed
     }
 }
 
-/// **The price, pinned: a run of neutrals of its own that opens a
-/// right-to-left line with nothing left to right on it is drawn in its
-/// level's order, and reads after its word in the order drawn.**
+/// **A run of neutrals of its own that opens a right-to-left line with
+/// nothing left to right on it is drawn as typed, and reads as typed** — the
+/// comma tie-break's price, not widened (review of the K-11 fix).
 ///
 /// `<p dir="rtl"><i>?!</i> שלום</p>`: UAX #9 draws the `?!` at the line's
-/// right end, `?` rightmost, and that is what the page shows. The line is
-/// ruling 14's comma tie-break's shape — a right-to-left letter leftmost,
-/// closing punctuation rightmost, nothing left to right — and a
-/// left-to-right paragraph draws it too, so it is read as one, the
-/// punctuation trailing in the order drawn: `שלום !?`, which is what the same
-/// line in one run has always read. Until K-11 a run of neutrals alone was
-/// drawn as typed, so the page showed `?!` reversed and the run read `?!`
-/// within its own structure element. The comma tie-break's price, as
-/// `content-and-text.md` names it.
+/// right end, `?` rightmost. The line is ruling 14's comma tie-break's shape
+/// — a right-to-left letter leftmost, closing punctuation rightmost, nothing
+/// left to right — and a left-to-right paragraph draws it too, so it is read
+/// as one, the punctuation trailing in the order drawn. Drawn in its level's
+/// order, as K-11's fix first drew every such run on a line holding a
+/// right-to-left letter, the run read `!?`: 51 probe books that conserved in
+/// logical order at 9297d2d did not. The writer asks the reader's own
+/// question of the line it draws (`drawn_direction`), and resolves the line
+/// alone in the direction the answer gives: read left to right, the `?!` is
+/// at level 0 there, not 1, so it is drawn as typed, as before K-11, and the
+/// run reads `?!` within its own structure element. The same line in one run
+/// is a slice of a right-to-left run, drawn in L2's order, and pays the price
+/// the owner accepted, `שלום !?` (`content-and-text.md`).
 #[test]
-fn a_run_of_neutrals_opening_a_right_to_left_line_is_drawn_in_its_levels_order() {
-    for body in [
-        format!("<p dir=\"rtl\"><i>?!</i> {SHALOM}</p>"),
-        format!("<p dir=\"rtl\">?! {SHALOM}</p>"),
+fn a_run_of_neutrals_opening_a_right_to_left_line_is_drawn_as_typed() {
+    let body = format!("<p dir=\"rtl\"><i>?!</i> {SHALOM}</p>");
+    let bytes = styled_book("he", "", &body);
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let (question, bang) = (drawn_at(&doc, "?"), drawn_at(&doc, "!"));
+    assert!(
+        question < bang,
+        "{body}: the run is drawn in its level's order: ? at {question}, ! at {bang}"
+    );
+    let text = doc.page(0).expect("a page").text().plain_text();
+    assert!(text.contains(&format!("{SHALOM} ?!")), "{body}: {text:?}");
+    let logical = conservation_in_logical_order(&bytes, &doc);
+    assert!(logical.holds(), "{body}: {text:?} {logical:?}");
+
+    // In one run: the price.
+    let body = format!("<p dir=\"rtl\">?! {SHALOM}</p>");
+    let bytes = styled_book("he", "", &body);
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let (question, bang) = (drawn_at(&doc, "?"), drawn_at(&doc, "!"));
+    assert!(
+        bang < question,
+        "{body}: the run is drawn in its level's order, ? rightmost: ? at {question}, ! at {bang}"
+    );
+    let text = doc.page(0).expect("a page").text().plain_text();
+    assert!(text.contains(&format!("{SHALOM} !?")), "{body}: {text:?}");
+}
+
+/// **A run of neutrals whose level order a reader of the page cannot undo is
+/// drawn as typed, and reads as written** (review of the K-11 fix).
+///
+/// K-11's fix draws a run of nothing but neutrals at a right-to-left level
+/// in its level's order, for ruling 14 to undo. Two such runs it cannot
+/// undo, each in a book that conserved at 9297d2d, where every such run was
+/// drawn as typed, and did not with the run in its level's order:
+///
+/// - **A run its line alone resolves otherwise.** `عوامل عدّة ($1,234.56).
+///   وقد أصبحنا نعرف.` at `margin: 0 38%` breaks before the bracket. W2 makes
+///   the digits `AN` for the Arabic word on the line above, so the `$` is a
+///   neutral at the paragraph's level, drawn right of its number; ruling 14
+///   reads the line alone, with no Arabic letter before the digits, and the
+///   `$` as a European number's: `(1,234.56$)`. The line alone is resolved in
+///   the direction a reader reads it in, not its paragraph's: with no `dir`,
+///   a justified sans-serif line `… عدّة (2010). وقد …` has Arabic at both
+///   ends and is read from the right, and resolved left to right, as its
+///   paragraph is, its `). ` was a run of other levels, drawn as typed, and
+///   lost its full stop from its bracket — K-11's own failure, `Missing
+///   ").وقد…"`.
+/// - **A run of a line letter-spaced by half an em.** A reader resumes a line
+///   across a text object's end only within half an em, so such a line is
+///   read run by run, and a run of neutrals on its own in the order drawn:
+///   `שָׁלוֹם <i>?!</i> עוֹלָם` in monospace at `8px` read its `?!` on a line
+///   with the word after it, by the comma tie-break, `עוֹלָם !?`.
+#[test]
+fn a_run_of_neutrals_a_reader_cannot_undo_is_drawn_as_typed() {
+    let money = "<p dir=\"rtl\">عوامل عدّة ($1,234.56). وقد أصبحنا نعرف.</p>".to_owned();
+    let bytes = styled_book("ar", "p { margin: 0 38% }", &money);
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let text = doc.page(0).expect("a page").text().plain_text();
+    for verdict in [
+        conservation(&bytes, &doc),
+        conservation_in_logical_order(&bytes, &doc),
     ] {
-        let bytes = styled_book("he", "", &body);
-        let doc = Document::open(bytes.clone()).expect("the book opens");
-        let (question, bang) = (drawn_at(&doc, "?"), drawn_at(&doc, "!"));
-        assert!(
-            bang < question,
-            "{body}: the run is drawn in its level's order, ? rightmost: ? at {question}, ! at {bang}"
-        );
-        let text = doc.page(0).expect("a page").text().plain_text();
-        assert!(text.contains(&format!("{SHALOM} !?")), "{body}: {text:?}");
+        assert!(verdict.holds(), "{money}: {text:?} {verdict:?}");
     }
+
+    let year = "<p>إنّ الخلايا السرطانيّة تتكاثر بسرعة كبيرة، ويعتمد ذلك على عوامل عدّة \
+                (2010). وقد أصبحنا نعرف الآن أنّ بعض الموادّ تكبح الهستونات النازعة \
+                للأسيتيل، مخفّفة بذلك من نموّ الأورام.</p>";
+    let style = "body { font-family: sans-serif } p { text-align: justify; margin: 0 15% }";
+    let bytes = styled_book("ar", style, year);
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let text = doc.page(0).expect("a page").text().plain_text();
+    for verdict in [
+        conservation(&bytes, &doc),
+        conservation_in_logical_order(&bytes, &doc),
+    ] {
+        assert!(verdict.holds(), "{year}: {text:?} {verdict:?}");
+    }
+
+    let spaced = format!("<p dir=\"rtl\">{SHALOM} <i>?!</i> \u{5E2}\u{5D5}\u{5DC}\u{5DD}</p>");
+    let style = "p { font-family: monospace; letter-spacing: 8px }";
+    let bytes = styled_book("he", style, &spaced);
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let text = doc.page(0).expect("a page").text().plain_text();
+    assert!(text.contains("?!"), "{spaced}: {text:?}");
+    let logical = conservation_in_logical_order(&bytes, &doc);
+    assert!(logical.holds(), "{spaced}: {text:?} {logical:?}");
 }
 
 /// **A letter-spaced Arabic line reads its full stop with its word** (review

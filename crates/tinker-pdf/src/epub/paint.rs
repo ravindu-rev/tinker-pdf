@@ -105,7 +105,9 @@ use tinker_pdf_layout::{
     BackgroundLayer, BoxFragment, ClipFragment, Embedding, EmbeddingKind, Page as LayoutPage,
     ReplacedFragment, TextRun,
 };
-use tinker_pdf_shape::bidi::{order_units, reorder, BaseDirection, Level, Paragraph};
+use tinker_pdf_shape::bidi::{
+    drawn_direction, order_units, reorder, BaseDirection, Level, Paragraph,
+};
 use tinker_pdf_shape::shape::itemize;
 use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
 use tinker_pdf_shape::Tag;
@@ -4355,6 +4357,187 @@ fn undoes_its_levels(c: char) -> bool {
     matches!(bidi_class(c), BidiClass::R | BidiClass::AL | BidiClass::RLI)
 }
 
+/// Which pieces of a line that holds a right-to-left character — each run's
+/// [`level_pieces`], `pieces`, one list per run of `line` — are runs of
+/// nothing but neutrals at a right-to-left level drawn as typed all the same
+/// ([`TextRun::bidi_line_rtl`]), one list per run. `levels` are the line's
+/// characters'.
+///
+/// Such a piece is drawn in its level's order because a reader of the page
+/// undoes that order: ruling 14 reads a line holding a right-to-left
+/// character in the order UAX #9 draws it. Where the reader would not undo
+/// it, a piece so drawn reads back reversed, and drawn as typed, as every
+/// such piece was before ROADMAP K-11, it reads back as typed. Two kinds,
+/// each measured (review of the K-11 fix):
+///
+/// - **A piece of a run letter-spaced by half an em or more.** `TextDevice`
+///   resumes a line across a text object's end only where the next glyph
+///   starts within half an em of where the last one's box ended, and the
+///   join of the pieces it cut only within the same half em; a line is
+///   written a run at a time in reading order, each run a text object of its
+///   own. Letter-spaced by half an em a line is read run by run, and a run of
+///   neutrals alone, in the order the content stream drew it: at
+///   `letter-spacing: 0.5em`, `שָׁלוֹם עוֹלָם (HDAC) (SIRT).` drew its `) (`
+///   `( )` and read it so (`bundled-fonts`), and in monospace at `8px`
+///   `שָׁלוֹם <i>?!</i> עוֹלָם` read its `?!` on a line with the word after
+///   it, by the comma tie-break, `עוֹלָם !?`.
+/// - **A piece its line alone resolves otherwise.** Ruling 14 reads a line by
+///   itself, in the direction [`drawn_direction`] reads it in as it is drawn,
+///   and UAX #9 resolves a paragraph: where the levels the line alone gives a
+///   piece are not the ones its paragraph gave it, no reader of the page can
+///   undo the paragraph's. `عوامل عدّة ($1,234.56). وقد` broken before the
+///   bracket: W2 makes the digits `AN` for the Arabic letter before them on
+///   the line above, so the `$` is a neutral at the paragraph's level, drawn
+///   right of its number, `1,234.56$(`; resolved alone, the line has no
+///   Arabic letter before the digits, the `$` is a European number's (W5),
+///   and the line read back `(1,234.56$)`. And `<p dir="rtl"><i>?!</i>
+///   שלום</p>`, which the comma tie-break reads left to right: resolved with
+///   the line alone as a left-to-right paragraph's, its `?!` is at level 0,
+///   not 1, and drawn `!?` in its paragraph's level order it read back
+///   `שלום !?` where as typed it reads `שלום ?!` — the price the comma
+///   tie-break costs the line in one run, which ruling 14 accepted, and no
+///   more. The direction is the one
+///   the reader reads the line in, not its paragraph's: resolved in a
+///   paragraph's with no `dir` — left to right, for a line with Arabic at
+///   both ends that a reader reads from the right — the `). ` after a
+///   bracketed year is a piece of other levels too, drawn as typed, and
+///   `… عدّة (2010). وقد …` read its full stop away from its bracket — CI's
+///   K-11 failure itself, `Missing ").وقد…"` (73 probe books, 75 with
+///   `bundled-fonts`).
+fn neutrals_drawn_as_typed(
+    line: &[TextRun],
+    pieces: &[Vec<(core::ops::Range<usize>, Level)>],
+    levels: &[Level],
+) -> Vec<Vec<bool>> {
+    let mut typed: Vec<Vec<bool>> = pieces.iter().map(|own| vec![false; own.len()]).collect();
+    let strong = |c: char| matches!(bidi_class(c), BidiClass::L | BidiClass::R | BidiClass::AL);
+    // Every piece of nothing but neutrals at a right-to-left level: its run,
+    // its place among the run's pieces, and where its characters are in
+    // `levels`.
+    let mut neutral: Vec<(usize, usize, core::ops::Range<usize>)> = Vec::new();
+    let mut first = 0usize;
+    for (at, (run, own)) in line.iter().zip(pieces).enumerate() {
+        // The pieces cover the run's text in order, so each starts where the
+        // one before it ended.
+        let mut start = first;
+        for (piece, (range, level)) in own.iter().enumerate() {
+            let text = run.text.get(range.clone()).unwrap_or("");
+            let count = text.chars().count();
+            if !run.generated && level.is_rtl() && count > 0 && !text.chars().any(strong) {
+                neutral.push((at, piece, start..start + count));
+            }
+            start += count;
+        }
+        first += run.text.chars().count();
+    }
+    if neutral.is_empty() {
+        return typed;
+    }
+    let mark = |typed: &mut Vec<Vec<bool>>, at: usize, piece: usize| {
+        if let Some(slot) = typed.get_mut(at).and_then(|own| own.get_mut(piece)) {
+            *slot = true;
+        }
+    };
+    // A run letter-spaced by half an em: a reader resumes a line across a
+    // text object's end only within half an em of where it stopped, so it
+    // reads the line run by run.
+    for (at, piece, _) in &neutral {
+        if line
+            .get(*at)
+            .is_some_and(|run| run.letter_spacing >= run.font_size * 0.5)
+        {
+            mark(&mut typed, *at, *piece);
+        }
+    }
+    // The levels the line alone gives, resolved in the direction a reader
+    // reads it in as it is drawn ([`drawn_direction`]).
+    let drawn = drawn_units(line, pieces, levels, &typed);
+    let drawn: Vec<&str> = drawn.iter().map(String::as_str).collect();
+    let alone = levels_alone(line, drawn_direction(&drawn));
+    for (at, piece, chars) in &neutral {
+        if levels.get(chars.clone()) != alone.levels.get(chars.clone()) {
+            mark(&mut typed, *at, *piece);
+        }
+    }
+    typed
+}
+
+/// The units a reader of the page finds on `line`, its runs cut into
+/// `pieces` and its characters at `levels`: each character and the
+/// nonspacing marks after it, in the order UAX #9's L2 draws them — but for
+/// the pieces `typed` marks, each drawn as typed where it stands — less a
+/// generated run's, which no reader reads.
+fn drawn_units(
+    line: &[TextRun],
+    pieces: &[Vec<(core::ops::Range<usize>, Level)>],
+    levels: &[Level],
+    typed: &[Vec<bool>],
+) -> Vec<String> {
+    let mut units: Vec<String> = Vec::new();
+    let mut unit_levels: Vec<Level> = Vec::new();
+    // The piece each unit is of, as its run and its place among the run's
+    // pieces, and whether that piece is drawn as typed.
+    let mut owners: Vec<(usize, usize, bool)> = Vec::new();
+    let mut place = 0usize;
+    for (at, (run, own)) in line.iter().zip(pieces).enumerate() {
+        // The piece the character is in, walked with the characters.
+        let mut piece = 0usize;
+        for (offset, c) in run.text.char_indices() {
+            let level = levels.get(place).copied();
+            place += 1;
+            let Some(level) = level.filter(|_| !run.generated) else {
+                continue;
+            };
+            while own.get(piece).is_some_and(|(range, _)| offset >= range.end) {
+                piece += 1;
+            }
+            let as_typed = typed
+                .get(at)
+                .and_then(|own| own.get(piece))
+                .copied()
+                .unwrap_or(false);
+            if bidi_class(c) == BidiClass::NSM
+                && owners
+                    .last()
+                    .is_some_and(|(r, p, _)| (*r, *p) == (at, piece))
+            {
+                if let Some(unit) = units.last_mut() {
+                    unit.push(c);
+                    continue;
+                }
+            }
+            units.push(c.to_string());
+            unit_levels.push(level);
+            owners.push((at, piece, as_typed));
+        }
+    }
+    let mut order = reorder(&unit_levels);
+    // Where each typed piece's units stand in the drawn order: a piece is at
+    // one level, so it stands whole, and is put back as typed there.
+    let mut stands: BTreeMap<(usize, usize), (usize, usize, usize)> = BTreeMap::new();
+    for (drawn_at, unit) in order.iter().enumerate() {
+        let Some(&(at, piece, true)) = owners.get(*unit) else {
+            continue;
+        };
+        let (lo, hi, count) = stands
+            .get(&(at, piece))
+            .copied()
+            .unwrap_or((drawn_at, drawn_at, 0));
+        stands.insert((at, piece), (lo.min(drawn_at), hi.max(drawn_at), count + 1));
+    }
+    for (lo, hi, count) in stands.into_values() {
+        if hi + 1 - lo == count {
+            if let Some(whole) = order.get_mut(lo..=hi) {
+                whole.sort_unstable();
+            }
+        }
+    }
+    order
+        .iter()
+        .filter_map(|unit| units.get(*unit).cloned())
+        .collect()
+}
+
 /// [`split_at_levels`] over one line, draining `line` into `out`. `places`
 /// are the line's runs' places in their paragraph, one per run.
 fn split_line(
@@ -4379,17 +4562,41 @@ fn split_line(
     let rtl_line = line
         .iter()
         .any(|run| !run.generated && run.text.chars().any(undoes_its_levels));
-    for run in line.iter_mut() {
-        run.bidi_line_rtl = rtl_line && !run.generated;
+    // Each run's pieces, one per level; none for a generated run.
+    let mut first_char = 0usize;
+    let pieces: Vec<Vec<(core::ops::Range<usize>, Level)>> = line
+        .iter()
+        .map(|run| {
+            let count = run.text.chars().count();
+            let own = levels.get(first_char..first_char + count).unwrap_or(&[]);
+            first_char += count;
+            if run.generated {
+                Vec::new()
+            } else {
+                level_pieces(&run.text, own)
+            }
+        })
+        .collect();
+    let typed = if rtl_line {
+        neutrals_drawn_as_typed(line, &pieces, &levels)
+    } else {
+        Vec::new()
+    };
+    let reordered = |at: usize, piece: usize| {
+        rtl_line
+            && !typed
+                .get(at)
+                .and_then(|own| own.get(piece))
+                .copied()
+                .unwrap_or(false)
+    };
+    for (at, run) in line.iter_mut().enumerate() {
+        run.bidi_line_rtl = !run.generated && reordered(at, 0);
     }
     let mut cut = 0usize;
-    let mut first_char = 0usize;
     let mut placed: Vec<Vec<TextRun>> = Vec::with_capacity(line.len());
     let mut whole: Vec<Option<u8>> = Vec::with_capacity(line.len());
-    for (at, run) in line.iter().enumerate() {
-        let count = run.text.chars().count();
-        let own = levels.get(first_char..first_char + count).unwrap_or(&[]);
-        first_char += count;
+    for (at, (run, pieces)) in line.iter().zip(&pieces).enumerate() {
         if run.generated {
             // An `inside` marker — the only generated run a line holds (see
             // [`beside_the_line`]) — is one isolate at its paragraph's
@@ -4400,7 +4607,6 @@ fn split_line(
             placed.push(Vec::new());
             continue;
         }
-        let pieces = level_pieces(&run.text, own);
         if pieces.len() < 2 {
             whole.push(pieces.first().map(|(_, level)| level.number()));
             placed.push(Vec::new());
@@ -4408,7 +4614,11 @@ fn split_line(
         }
         cut += 1;
         whole.push(None);
-        placed.push(cut_run(run, &pieces, metrics, &layout_context(line, at)));
+        let mut cut_pieces = cut_run(run, pieces, metrics, &layout_context(line, at));
+        for (piece, cut_piece) in cut_pieces.iter_mut().enumerate() {
+            cut_piece.bidi_line_rtl = reordered(at, piece);
+        }
+        placed.push(cut_pieces);
     }
     // The gap before a run stands before its first piece; the pieces of one
     // run have nothing between them.
@@ -4529,6 +4739,18 @@ fn line_levels(
     if let Some(levels) = paragraph_levels(line, places, paragraphs) {
         return Some(levels);
     }
+    let direction = match base {
+        Some(true) => BaseDirection::RightToLeft,
+        Some(false) => BaseDirection::LeftToRight,
+        None => BaseDirection::Auto,
+    };
+    Some(levels_alone(line, direction))
+}
+
+/// [`line_levels`] for `line` resolved as a paragraph of its own, in
+/// `direction`: what a reader of the page, which reads a line by itself
+/// ([`neutrals_drawn_as_typed`]), resolves it as.
+fn levels_alone(line: &[TextRun], direction: BaseDirection) -> LineLevels {
     let mut text = String::new();
     let mut count = 0usize;
     // Where each character of the line's runs is in `text`, or `None` for an
@@ -4575,11 +4797,6 @@ fn line_levels(
     while let Some(e) = open.pop() {
         text.push(closer(&e));
     }
-    let direction = match base {
-        Some(true) => BaseDirection::RightToLeft,
-        Some(false) => BaseDirection::LeftToRight,
-        None => BaseDirection::Auto,
-    };
     let paragraph = Paragraph::new(&text, direction);
     let resolved = paragraph.line(0..paragraph.len());
     let all = resolved.levels();
@@ -4600,11 +4817,11 @@ fn line_levels(
     let gaps = gaps_between(&spans, |at| {
         all.get(at).copied().filter(|_| !paragraph.is_removed(at))
     });
-    Some(LineLevels {
+    LineLevels {
         levels,
         base: paragraph.base_level(),
         gaps,
-    })
+    }
 }
 
 /// [`line_levels`] from the line's paragraph, resolved whole: `None` unless
@@ -5522,7 +5739,9 @@ fn draw_coded(
 /// each bracket's hollow turned away from the dots), the first line of
 /// `?!<br/>חו`. Which of the two a slice is on is whether its **line** holds
 /// a right-to-left character, and the line says so now (`epub_fallback.rs`
-/// pins both sides).
+/// pins both sides) — but for the runs of neutrals on such a line that
+/// a reader of the page would not undo, which [`neutrals_drawn_as_typed`]
+/// names and which are drawn as typed as before (review of the K-11 fix).
 ///
 /// The units L2 orders are **a character and the nonspacing marks after
 /// it** (`Bidi_Class` `NSM`), kept together as rule L3 keeps a mark with its

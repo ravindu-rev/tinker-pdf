@@ -478,12 +478,49 @@ const LOGICAL_ORDER_ROUNDS: usize = 4;
 /// order `BidiCharacterTest.txt` states back through this function.
 #[must_use]
 pub fn logical_order(visual: &[&str], direction: BaseDirection) -> Vec<usize> {
-    let direction = match direction {
-        BaseDirection::Auto => drawn_direction(visual),
-        given => given,
-    };
-    match read_back(visual, direction) {
+    match direction {
+        BaseDirection::Auto => drawn_reading(visual).order,
+        given => match read_back(visual, given) {
+            Ok(order) | Err(order) => order,
+        },
+    }
+}
+
+/// How a drawn line is read: the paragraph direction [`drawn_direction`]
+/// reads it in, the order [`logical_order`] reads it in for that direction,
+/// and whether the bracket tie-break chose the direction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DrawnReading {
+    /// [`drawn_direction`] of the line; never [`BaseDirection::Auto`].
+    pub direction: BaseDirection,
+    /// [`logical_order`] of the line for [`Self::direction`]: the drawn
+    /// positions in the order they are read.
+    pub order: Vec<usize>,
+    /// Whether [`drawn_direction`]'s bracket tie-break turned the line from
+    /// the direction its strong characters and the comma tie-break gave it.
+    pub turned_by_brackets: bool,
+}
+
+/// [`drawn_direction`] and [`logical_order`] in one: the direction a drawn
+/// line is read in and the order, found together.
+///
+/// A line [`drawn_direction`] has to read to choose its direction — the
+/// comma tie-break's shape, and a line holding a closing bracket left of an
+/// opening one — is read in the direction chosen once, and that reading is
+/// the order returned. Asked of [`drawn_direction`] and then of
+/// [`logical_order`], such a line was searched in the direction chosen twice:
+/// three searches on every line of the bracket tie-break's shape where two
+/// do (review of the K-11 fix).
+#[must_use]
+pub fn drawn_reading(visual: &[&str]) -> DrawnReading {
+    let (direction, order, turned_by_brackets) = decide(visual);
+    let order = order.unwrap_or_else(|| match read_back(visual, direction) {
         Ok(order) | Err(order) => order,
+    });
+    DrawnReading {
+        direction,
+        order,
+        turned_by_brackets,
     }
 }
 
@@ -495,6 +532,8 @@ pub fn logical_order(visual: &[&str], direction: BaseDirection) -> Vec<usize> {
 /// [`drawn_direction`]'s comma tie-break asks the same question of a
 /// left-to-right reading, and takes it only on `Ok`.
 fn read_back(visual: &[&str], direction: BaseDirection) -> Result<Vec<usize>, Vec<usize>> {
+    #[cfg(test)]
+    tests::SEARCHES.with(|searches| searches.set(searches.get() + 1));
     let count = visual.len();
     let as_drawn = unit_levels(visual, direction);
     let backwards: Vec<&str> = visual.iter().rev().copied().collect();
@@ -647,39 +686,51 @@ fn read_back(visual: &[&str], direction: BaseDirection) -> Result<Vec<usize>, Ve
 /// only so that a reading cannot win by pairing a `)(` that faces outward
 /// and breaking the two pairs either side of it, `()()` read from the right.
 /// Ruling 14, amended 10 October 2026 a second time, records this as its
-/// bracket tie-break (a proposal until the owner accepts it); it is asked
-/// only of a line that draws a closing bracket left of an opening one, and
-/// costs that line one search in each direction.
+/// bracket tie-break (a proposal until the owner accepts it). It is asked
+/// only of a line that draws a closing bracket left of an opening one
+/// ([`faces_outward`]), and costs that line one search in each direction;
+/// [`drawn_reading`] returns the one chosen, so reading the line then costs
+/// nothing more.
 #[must_use]
 pub fn drawn_direction(visual: &[&str]) -> BaseDirection {
-    let chosen = first_strong_drawn(visual);
+    decide(visual).0
+}
+
+/// [`drawn_direction`]'s decision: the direction; the order the line is read
+/// in for it, where deciding had to read the line in that direction; and
+/// whether the bracket tie-break turned it.
+fn decide(visual: &[&str]) -> (BaseDirection, Option<Vec<usize>>, bool) {
+    let (chosen, found) = first_strong_drawn(visual);
     if !faces_outward(visual) {
-        return chosen;
+        return (chosen, found, false);
     }
     let other = match chosen {
         BaseDirection::RightToLeft => BaseDirection::LeftToRight,
         _ => BaseDirection::RightToLeft,
     };
     let Ok(theirs) = read_back(visual, other) else {
-        return chosen;
+        return (chosen, found, false);
     };
-    let mine = match read_back(visual, chosen) {
+    let mine = found.unwrap_or_else(|| match read_back(visual, chosen) {
         Ok(order) | Err(order) => order,
-    };
+    });
     let (their_outward, their_pairs) = paired_brackets(visual, &theirs);
     let (my_outward, my_pairs) = paired_brackets(visual, &mine);
     if their_outward > my_outward && their_pairs > my_pairs {
-        other
+        (other, Some(theirs), true)
     } else {
-        chosen
+        (chosen, Some(mine), false)
     }
 }
 
 /// Whether a drawn line holds a closing bracket left of an opening one of
 /// its kind: the only shape in which [`paired_brackets`] can count a pair
-/// facing outward, so the only line [`drawn_direction`] reads twice for its
-/// brackets.
-fn faces_outward(visual: &[&str]) -> bool {
+/// facing outward, so the only line [`drawn_direction`] reads in both
+/// directions for its brackets and the only one its bracket tie-break can
+/// turn ([`DrawnReading::turned_by_brackets`]). Linear in the line: it asks
+/// nothing of a unit but its first character.
+#[must_use]
+pub fn faces_outward(visual: &[&str]) -> bool {
     // The opening brackets each closing one met so far, left to right, by the
     // character an opening bracket of its kind would pair with: an opening
     // bracket right of one of them is the shape. Bounded by the brackets'
@@ -800,8 +851,9 @@ fn is_blank(unit: &str) -> bool {
 
 /// [`drawn_direction`] before its bracket tie-break: P2 read off the line's
 /// strong characters — its two ends, its majority where they disagree — and
-/// the comma tie-break.
-fn first_strong_drawn(visual: &[&str]) -> BaseDirection {
+/// the comma tie-break, with the left-to-right reading the comma tie-break
+/// found where it took one.
+fn first_strong_drawn(visual: &[&str]) -> (BaseDirection, Option<Vec<usize>>) {
     let strong = |c: char| match unicode::bidi_class(c) {
         BidiClass::L => Some(false),
         BidiClass::R | BidiClass::AL => Some(true),
@@ -822,17 +874,17 @@ fn first_strong_drawn(visual: &[&str]) -> BaseDirection {
         }
     }
     match (leftmost, rightmost) {
-        (Some(false), Some(false)) => BaseDirection::LeftToRight,
-        (Some(true), Some(true))
-            if ltr == 0
-                && trailing_punctuation(visual)
-                && read_back(visual, BaseDirection::LeftToRight).is_ok() =>
-        {
-            BaseDirection::LeftToRight
+        (Some(false), Some(false)) => (BaseDirection::LeftToRight, None),
+        (Some(true), Some(true)) => {
+            if ltr == 0 && trailing_punctuation(visual) {
+                if let Ok(order) = read_back(visual, BaseDirection::LeftToRight) {
+                    return (BaseDirection::LeftToRight, Some(order));
+                }
+            }
+            (BaseDirection::RightToLeft, None)
         }
-        (Some(true), Some(true)) => BaseDirection::RightToLeft,
-        _ if rtl > ltr => BaseDirection::RightToLeft,
-        _ => BaseDirection::LeftToRight,
+        _ if rtl > ltr => (BaseDirection::RightToLeft, None),
+        _ => (BaseDirection::LeftToRight, None),
     }
 }
 
@@ -1517,10 +1569,23 @@ pub fn mirror(c: char, level: Level) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::{
-        drawn_direction, logical_order, mirror, order_units, read_back, reorder,
+        drawn_direction, drawn_reading, logical_order, mirror, order_units, read_back, reorder,
         trailing_punctuation, BaseDirection, Level, Paragraph, BLANK_SEPARATORS,
     };
     use crate::unicode::{bidi_class, BidiClass};
+    use std::cell::Cell;
+
+    std::thread_local! {
+        /// How many times [`read_back`] searched on this thread.
+        pub(super) static SEARCHES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// How many searches `read` makes.
+    fn searches<T>(read: impl FnOnce() -> T) -> (T, usize) {
+        let before = SEARCHES.with(Cell::get);
+        let value = read();
+        (value, SEARCHES.with(Cell::get) - before)
+    }
 
     fn levels(text: &str, direction: BaseDirection) -> Vec<u8> {
         let paragraph = Paragraph::new(text, direction);
@@ -2219,6 +2284,55 @@ mod tests {
                 typed,
                 "{typed:?} drawn {line:?}, read {chosen:?}"
             );
+        }
+    }
+
+    /// **[`drawn_reading`] is [`drawn_direction`] and [`logical_order`] in
+    /// one, and reads a line no more often than choosing its direction
+    /// does** — the review of the K-11 fix. A line is searched once or, where
+    /// it draws a closing bracket left of an opening one, once in each
+    /// direction, and the order returned is the one deciding found; asked of
+    /// [`drawn_direction`] and then of [`logical_order`] for the direction
+    /// chosen, such a line was searched three times. `turned_by_brackets` is
+    /// set on the lines the bracket tie-break turns and on no other.
+    #[test]
+    fn a_line_is_read_once_in_the_direction_chosen() {
+        let k11 = "(histone deacetylase). \u{648}\u{642}\u{62F} \u{623}\u{635}\u{628}\u{62D}\u{646}\u{627}";
+        let rtl = BaseDirection::RightToLeft;
+        let ltr = BaseDirection::LeftToRight;
+        for (typed, direction, turned, outward) in [
+            (k11, rtl, true, true),
+            ("x)\u{5E9}\u{5DC}\u{5D5}\u{5DD}(y", ltr, true, true),
+            ("(a)\u{5D0}(", ltr, false, true),
+            (
+                "Great :) \u{5E9}\u{5DC}\u{5D5}\u{5DD} (yes) \u{5E2}.",
+                ltr,
+                false,
+                true,
+            ),
+            (
+                "\u{639}\u{62F}\u{629} (HDAC). \u{648}\u{642}\u{62F}",
+                ltr,
+                false,
+                false,
+            ),
+            ("\u{5D7}\u{5D5},", ltr, false, false),
+            ("\u{5E9}\u{5DC}\u{5D5}\u{5DD} abc", rtl, false, false),
+            ("abc", ltr, false, false),
+        ] {
+            let line = drawn(typed, direction);
+            let units = chars(&line);
+            let units: Vec<&str> = units.iter().map(String::as_str).collect();
+            let (reading, searched) = searches(|| drawn_reading(&units));
+            let chosen = drawn_direction(&units);
+            assert_eq!(reading.direction, chosen, "{typed:?}");
+            assert_eq!(reading.order, logical_order(&units, chosen), "{typed:?}");
+            assert_eq!(reading.turned_by_brackets, turned, "{typed:?}");
+            assert_eq!(searched, if outward { 2 } else { 1 }, "{typed:?}");
+            if outward {
+                let (_, apart) = searches(|| logical_order(&units, drawn_direction(&units)));
+                assert_eq!(apart, 3, "{typed:?}");
+            }
         }
     }
 }

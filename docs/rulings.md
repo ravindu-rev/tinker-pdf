@@ -453,7 +453,14 @@ living in one feature's head.
     Arabic-Indic digits, which are `AN` and untouched by W7, so `— ١ بند`
     reads `١ بند —`; and a number that is not next to the mark,
     `— שלום 5 חו`, which reads `שלום 5 חו —`. All of it is pinned by name,
-    so that changing the decision is a visible one.
+    so that changing the decision is a visible one. **The EPUB writer does
+    not widen it**: a run of neutrals styled apart that opens such a line,
+    `<p dir="rtl"><i>?!</i> שלום</p>`, is drawn as typed, so that it reads
+    `שלום ?!`, the mark as typed, as before ROADMAP K-11. Drawn in its level's
+    order, as K-11's fix first drew it, it read `שלום !?`, and 51 probe books
+    that conserved in logical order at 9297d2d did not (review of the K-11
+    fix; `epub_fallback.rs`'s
+    `a_run_of_neutrals_opening_a_right_to_left_line_is_drawn_as_typed`).
 
     *The tests that hold it.* `text_logical_order.rs`:
     `a_right_to_left_word_and_its_comma_alone_on_a_line_read_as_written`
@@ -534,13 +541,18 @@ living in one feature's head.
     directions, wrapped at nine widths — 101 read better and none worse, and
     of 986 more, from 30 sentences of numbered and lettered lists, code,
     brackets side by side, brackets spaced from what they enclose and
-    fragments typed closing first, 57 better and none worse; and of the books
-    K-11's probe and its review's build — 480 and 3 276 in each build — none
-    that conserved at 9297d2d fails. **The price** is a text typed with
+    fragments typed closing first, 57 better and none worse; of the second
+    review's 13 300, its sentences typed and with each bracket's mirrored
+    glyph named, 413 better and 62 worse, every one of the 62 the price below;
+    and of the books K-11's probe and its two reviews built — 480, 3 276 and
+    2 880 in each build, with 1 034, 120 and 90 more of their neighbours and
+    the marks fix's 11 646 — none that conserved, read whole or was found by
+    search at 9297d2d fails. **The price** is a text typed with
     brackets that pair only read the other way round, each set against the
     text between them: `x)שלום(y` in a left-to-right paragraph, drawn
-    `x)םולש(y`, reads `y(שלום)x`. No line or book above pays it; `bidi.rs`
-    pins it by name. **As first proposed** the tie-break asked only
+    `x)םולש(y`, reads `y(שלום)x`. No book above pays it, and of the lines
+    only the second review's fragments written in that shape, `x)שלום(y and
+    a)עולם(b`; `bidi.rs` pins it by name. **As first proposed** the tie-break asked only
     that the other reading pair more brackets facing outward and no fewer in
     all, which Unicode's file, whose lines are each a whole paragraph, priced
     at 1 250 lines typed with brackets that do not pair. The review measured

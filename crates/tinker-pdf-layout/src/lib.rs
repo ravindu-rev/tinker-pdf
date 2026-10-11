@@ -689,6 +689,12 @@ pub struct TextRun {
     /// run's own text and level cannot say which a run is on — `).` closing a
     /// bracketed Latin run at the end of an Arabic line is the same run as
     /// `?!` alone in a right-to-left paragraph.
+    ///
+    /// The caller may also leave it `false` for a run of neutrals on such a
+    /// line that a reader of the page would read in the order it was drawn
+    /// all the same — the EPUB writer does for two kinds, each measured (its
+    /// `neutrals_drawn_as_typed`) — so that run too is drawn as typed. Set
+    /// once a run is cut to one level, it is the piece's.
     pub bidi_line_rtl: bool,
     /// Whether the line breaks at a soft hyphen at this run's end, so a
     /// hyphen is drawn there (`css-text-3` §5.4, `hyphens: manual`).
