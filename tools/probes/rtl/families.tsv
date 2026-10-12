@@ -1,0 +1,82 @@
+# One row per probe the runner knows. kind: rows (data lines on stdout), lines (a line probe of
+# tinker-pdf-shape, one run for both builds), tsv (writes a TSV beside its output), timing
+# (wall-clock, never baselined), tests (a verifier's repro tests; the outcome is the data).
+family	crate	path	group	threads	kind	origin	note
+zz_k11rv_fixtures	tinker-pdf	probes/pdf/zz_k11rv_fixtures.rs	kit	2	rows	K-11 round 4 kit	
+zz_rr3m_extra	tinker-pdf	probes/pdf/zz_rr3m_extra.rs	kit	2	rows	K-11 round 4 kit	
+zz_rr3m_probe	tinker-pdf	probes/pdf/zz_rr3m_probe.rs	kit	2	rows	K-11 round 4 kit	
+zz_rr3m_tie	tinker-pdf	probes/pdf/zz_rr3m_tie.rs	kit	2	rows	K-11 round 4 kit	
+zz_vx_k11r2_extra	tinker-pdf	probes/pdf/zz_vx_k11r2_extra.rs	vx	2	rows	round-5 review (confirm)	zz_k11r2_extra with the overprint shim: the same ROW lines and a VOVX line a book
+zz_vx_k11rv2_epub	tinker-pdf	probes/pdf/zz_vx_k11rv2_epub.rs	vx	2	rows	round-5 review (confirm)	zz_k11rv2_epub with the overprint shim: the same ROW lines and a VOVX line a book
+zz_vx_k11rv3_just	tinker-pdf	probes/pdf/zz_vx_k11rv3_just.rs	vx	2	rows	round-5 review (confirm)	zz_k11rv3_just with the overprint shim: the same ROW lines and a VOVX line a book
+zz_vx_k11rv3_own	tinker-pdf	probes/pdf/zz_vx_k11rv3_own.rs	vx	2	rows	round-5 review (confirm)	zz_k11rv3_own with the overprint shim: the same ROW lines and a VOVX line a book
+zz_vx_k11rv_dirless	tinker-pdf	probes/pdf/zz_vx_k11rv_dirless.rs	vx	2	rows	round-5 review (confirm)	zz_k11rv_dirless with the overprint shim: the same ROW lines and a VOVX line a book
+zz_vx_k11rv_ext	tinker-pdf	probes/pdf/zz_vx_k11rv_ext.rs	vx	2	rows	round-5 review (confirm)	zz_k11rv_ext with the overprint shim: the same ROW lines and a VOVX line a book
+zz_vx_k11rv_neutral	tinker-pdf	probes/pdf/zz_vx_k11rv_neutral.rs	vx	2	rows	round-5 review (confirm)	zz_k11rv_neutral with the overprint shim: the same ROW lines and a VOVX line a book
+zz_vx_probe_paren	tinker-pdf	probes/pdf/zz_vx_probe_paren.rs	vx	2	rows	round-5 review (confirm)	zz_probe_paren with the overprint shim: the same ROW lines and a VOVX line a book
+zz_vx_rv4code	tinker-pdf	probes/pdf/zz_vx_rv4code.rs	vx	2	rows	round-5 review (confirm)	zz_rv4code with the overprint shim: the same ROW lines and a VOVX line a book
+zz_c1_tw	tinker-pdf	probes/pdf/zz_c1_tw.rs	tw	2	rows	round-5 review (confirm)	TWROW: code 32 and Tw of the overflow font
+zz_rr3m_hunt_brackets	tinker-pdf	probes/pdf/zz_rr3m_hunt_brackets.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_numbers	tinker-pdf	probes/pdf/zz_rr3m_hunt_numbers.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_urls	tinker-pdf	probes/pdf/zz_rr3m_hunt_urls.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_gloss	tinker-pdf	probes/pdf/zz_rr3m_hunt_gloss.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_isolates	tinker-pdf	probes/pdf/zz_rr3m_hunt_isolates.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_pointed	tinker-pdf	probes/pdf/zz_rr3m_hunt_pointed.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_scripts	tinker-pdf	probes/pdf/zz_rr3m_hunt_scripts.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_spacing	tinker-pdf	probes/pdf/zz_rr3m_hunt_spacing.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_ws	tinker-pdf	probes/pdf/zz_rr3m_hunt_ws.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_punct	tinker-pdf	probes/pdf/zz_rr3m_hunt_punct.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_code32	tinker-pdf	probes/pdf/zz_rr3m_hunt_code32.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_gaps	tinker-pdf	probes/pdf/zz_rr3m_hunt_gaps.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_cells	tinker-pdf	probes/pdf/zz_rr3m_hunt_cells.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_rtlpunct	tinker-pdf	probes/pdf/zz_rr3m_hunt_rtlpunct.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_etsweep	tinker-pdf	probes/pdf/zz_rr3m_hunt_etsweep.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_dirless	tinker-pdf	probes/pdf/zz_rr3m_hunt_dirless.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_hunt_min	tinker-pdf	probes/pdf/zz_rr3m_hunt_min.rs	hunt	1	rows	K-11 round-4 review (hunt)	
+zz_rr3m_fv_extra	tinker-pdf	probes/pdf/zz_rr3m_fv_extra.rs	fv	1	rows	56dfd93 verification	
+zz_rr3m_fv_marks	tinker-pdf	probes/pdf/zz_rr3m_fv_marks.rs	fv	1	rows	56dfd93 verification	
+zz_rr3m_laneR	tinker-pdf	probes/pdf/zz_rr3m_laneR.rs	laneR	1	rows	lane R (round 5)	holds price/ and soft/, ruling 14's price
+zz_rr3m_h1_gaps	tinker-pdf	probes/pdf/zz_rr3m_h1_gaps.rs	h1	1	rows	round-5 review (hunt)	
+zz_rr3m_h1_h4	tinker-pdf	probes/pdf/zz_rr3m_h1_h4.rs	h1	1	rows	round-5 review (hunt)	
+zz_rr3m_h1_marks	tinker-pdf	probes/pdf/zz_rr3m_h1_marks.rs	h1	1	rows	round-5 review (hunt)	
+zz_rr3m_h1_ofscripts	tinker-pdf	probes/pdf/zz_rr3m_h1_ofscripts.rs	h1	1	rows	round-5 review (hunt)	
+zz_rr3m_h1_tables	tinker-pdf	probes/pdf/zz_rr3m_h1_tables.rs	h1	1	rows	round-5 review (hunt)	
+zz_rr3m_h1_v1	tinker-pdf	probes/pdf/zz_rr3m_h1_v1.rs	h1	1	rows	round-5 review (hunt)	
+zz_rr3m_h1_v3	tinker-pdf	probes/pdf/zz_rr3m_h1_v3.rs	h1	1	rows	round-5 review (hunt)	
+zz_rr3m_h1_inline	tinker-pdf	probes/pdf/zz_rr3m_h1_inline.rs	h1	1	rows	round-5 review (hunt)	
+zz_rr3m_h1_breadth	tinker-pdf	probes/pdf/zz_rr3m_h1_breadth.rs	h1	1	rows	round-5 review (hunt)	
+zz_rr3m_h1min	tinker-pdf	probes/pdf/zz_rr3m_h1min.rs	h1	1	rows	round-5 review (hunt)	
+zz_rr3m_h1min2	tinker-pdf	probes/pdf/zz_rr3m_h1min2.rs	h1	1	rows	round-5 review (hunt)	
+zz_rr3m_h2_faces	tinker-pdf	probes/pdf/zz_rr3m_h2_faces.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_rr3m_h2_gaps2	tinker-pdf	probes/pdf/zz_rr3m_h2_gaps2.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_rr3m_h2_h4b	tinker-pdf	probes/pdf/zz_rr3m_h2_h4b.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_rr3m_h2_marks2	tinker-pdf	probes/pdf/zz_rr3m_h2_marks2.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_rr3m_h2_nested	tinker-pdf	probes/pdf/zz_rr3m_h2_nested.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_rr3m_h2_pages	tinker-pdf	probes/pdf/zz_rr3m_h2_pages.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_rr3m_h2_tables	tinker-pdf	probes/pdf/zz_rr3m_h2_tables.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_rr3m_h2_v1b	tinker-pdf	probes/pdf/zz_rr3m_h2_v1b.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_rr3m_h2_v3b	tinker-pdf	probes/pdf/zz_rr3m_h2_v3b.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_rr3m_h2_r2gloss	tinker-pdf	probes/pdf/zz_rr3m_h2_r2gloss.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_rr3m_h2_r2ibword	tinker-pdf	probes/pdf/zz_rr3m_h2_r2ibword.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_rr3m_h2_r2lvl2	tinker-pdf	probes/pdf/zz_rr3m_h2_r2lvl2.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_rr3m_h2_r2ornate	tinker-pdf	probes/pdf/zz_rr3m_h2_r2ornate.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_rr3m_h2_r2qeglue	tinker-pdf	probes/pdf/zz_rr3m_h2_r2qeglue.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_rr3m_h2_r3justgloss	tinker-pdf	probes/pdf/zz_rr3m_h2_r3justgloss.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_rr3m_h2_r3rtlgloss	tinker-pdf	probes/pdf/zz_rr3m_h2_r3rtlgloss.rs	h2	2	rows	CD-19 fix review (hunt)	
+zz_code1_neg	tinker-pdf	probes/pdf/zz_code1_neg.rs	neg	1	rows	round-5 review (code)	ZZN: negative word spacing, glyphs drawn over another
+zz_code1_tdprobe	tinker-pdf	probes/pdf/zz_code1_tdprobe.rs	td	1	tsv	round-5 review (code)	content streams built by hand, read by TextDevice and ruling 14; writes <build>/zz_code1_tdprobe.tsv
+zz_code1_scale	tinker-pdf	probes/pdf/zz_code1_scale.rs	timing	1	timing	round-5 review (code)	ZZS: wall-clock, doubling the line; no baseline
+zz_h2scale	tinker-pdf	probes/pdf/zz_h2scale.rs	timing	1	timing	CD-19 fix review (hunt)	SCALE: wall-clock, doubling the book; no baseline
+zz_k11rv_bidi	tinker-pdf-shape	probes/shape/zz_k11rv_bidi.rs	lines	2	lines	K-11 review	writes lines/bct-auto.tsv and lines/wrapped.tsv
+zz_k11rv2_sent	tinker-pdf-shape	probes/shape/zz_k11rv2_sent.rs	lines	2	lines	K-11 review	writes lines/sent.tsv
+zz_laneR_lines	tinker-pdf-shape	probes/shape/zz_laneR_lines.rs	lines	2	lines	lane R (round 5)	writes lines/laneR.tsv
+zz_fv_shape	tinker-pdf-shape	probes/shape/zz_fv_shape.rs	lines	1	lines	56dfd93 verification	LINE; does not compile before 56dfd93
+zz_code1_time	tinker-pdf-shape	probes/shape/zz_code1_time.rs	timing	1	timing	round-5 review (code)	ZZT: wall-clock of drawn_reading; no baseline
+zz_vc_verify	tinker-pdf	probes/regressions/zz_vc_verify.rs	regressions	2	tests	K-11 round-4 review, code verifier	
+zz_vc_pal	tinker-pdf	probes/regressions/zz_vc_pal.rs	regressions	2	tests	K-11 round-4 review, confirm verifier	
+zz_vh_verify	tinker-pdf	probes/regressions/zz_vh_verify.rs	regressions	2	tests	K-11 round-4 review, hunt verifier	
+zz_vc1_repro	tinker-pdf	probes/regressions/zz_vc1_repro.rs	regressions	2	tests	round-5 review, code verifier	
+zz_vc1_min	tinker-pdf	probes/regressions/zz_vc1_min.rs	regressions	2	tests	round-5 review, confirm verifier	
+zz_vfv1	tinker-pdf	probes/regressions/zz_vfv1.rs	regressions	2	tests	CD-19 fix verification, verifier	
+zz_vh1	tinker-pdf	probes/regressions/zz_vh1.rs	regressions	2	tests	round-5 review, hunt verifier	
+zz_vh2t	tinker-pdf	probes/regressions/zz_vh2t.rs	regressions	2	tests	CD-19 fix review, hunt verifier	
