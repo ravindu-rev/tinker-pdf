@@ -668,6 +668,33 @@ fn a_standard_14_overflow_letter_at_code_32_takes_no_word_spacing() {
         );
     }
 
+    // A negative word spacing at the run's `Tw` drew every glyph after the
+    // code-32 letter a word spacing to the left, onto the letter before it:
+    // at `-4px` the λ of a bold `αλφα` whose α is its face's code 32 was drawn
+    // at the α's own origin, and the LAM of `معلم` at the origin of the MEEM
+    // drawn left of it, the font's code 32 (review of CD-19's fix, 56dfd93
+    // in a default build). The font is written at `0 Tw` whatever the sign.
+    for spacing in ["-2px", "-4px", "-0.2em"] {
+        let style = format!("p {{ word-spacing: {spacing} }}");
+        for (language, body, expected) in [
+            (
+                "en",
+                "<p>x <b>\u{3B1}\u{3BB}\u{3C6}\u{3B1}</b> y.</p>".to_owned(),
+                "x \u{3B1}\u{3BB}\u{3C6}\u{3B1} y.",
+            ),
+            ("ar", format!("<p dir=\"rtl\">{unpointed}</p>"), unpointed),
+        ] {
+            let bytes = styled_book(language, &style, &body);
+            let doc = Document::open(bytes.clone()).expect("the book opens");
+            reads_as_written(&bytes, &doc, expected);
+            let over = overprinted(&doc);
+            assert!(
+                over.is_empty(),
+                "under `{style}`, {body:?} draws a glyph over another: {over:?}"
+            );
+        }
+    }
+
     for style in ["p { word-spacing: -2px }", "p { word-spacing: 4px }"] {
         let body = format!("<p>{HET_VAV} x <b>\u{3B1}\u{3BB}\u{3C6}\u{3B1}\u{301}</b>y z.</p>");
         let bytes = styled_book("en", style, &body);
@@ -1964,8 +1991,10 @@ fn a_number_in_word_spaced_right_to_left_text_is_not_drawn_over_its_bracket() {
 /// font drew the NOON after it a word spacing left of the word space's far
 /// end, closing the cell's stretched word gap to 3pt, and ruling 14 rejoined
 /// the two words across it, the NOON in the wrong one: the cell read
-/// `أصبحنان عرف`, so `نعرف` was found once in the book, not twice. Written at
-/// `0 Tw`, the NOON is where layout put it and the gap is the stretched word
+/// `أصبحنان عرف`, and so did the second row's, which follows no Latin word,
+/// so `نعرف` was found nowhere in the book (at 9297d2d and 56dfd93 alike, in
+/// either build, and in every variant below; `أصبحنا` was found twice).
+/// Written at `0 Tw`, the NOON is where layout put it and the gap is the stretched word
 /// space's whole em, which `TextDevice` carries a reader's pen across only
 /// since the cell's word no longer goes on from `def` (the commit before
 /// this one, `a_gap_no_spacing_accounts_for_ends_the_word_before_it`): before
@@ -2099,8 +2128,9 @@ fn a_styled_neutral_glued_to_a_word_under_word_spacing_keeps_it_searchable() {
 ///
 /// `<p>… بيت ٥٪ <b>كبير</b> …</p>`, Arabic with no `dir`, at `word-spacing:
 /// 0.5em; margin: 0 20%`: the ARABIC PERCENT SIGN after the Arabic-Indic
-/// FIVE is a neutral (`ET`, which W5 makes a European number's only after
-/// one) that N1 puts at level 1 with the word space after it, a slice the
+/// FIVE is a neutral (`ET`, which W5 makes a European number's only beside
+/// one, and W6 makes `ON` here) that N1 puts at level 1 with the word space
+/// after it, a slice the
 /// painter draws in its level's order for a reader to undo with its line,
 /// the space at its left and the sign at its right. The sign is past
 /// `WinAnsiEncoding`, so the overflow font draws it and a standard face the
@@ -2110,7 +2140,8 @@ fn a_styled_neutral_glued_to_a_word_under_word_spacing_keeps_it_searchable() {
 /// across spacing only into a right-to-left letter: the line was cut at the
 /// sign, and the sign read after the next word, `٥ \nنعرف٪`. 9297d2d drew
 /// the slice as typed and conserved. A slice `coded_order` draws for a
-/// reader to undo is one text object now, the space and the sign pieces of
+/// reader to undo is one text object now, under spacing that may part its
+/// objects (`paint::PARTED_FROM`), the space and the sign pieces of
 /// it, so the sign reads as a `WinAnsiEncoding` one does, a glyph of the
 /// space's string; it takes no word spacing, as the overflow font takes none
 /// anywhere.
@@ -2138,6 +2169,219 @@ fn a_non_winansi_neutral_after_a_word_space_reads_with_its_number() {
                 page.text().search("٥٪").len(),
                 3,
                 "`{style}`, {body}: the number and its sign are not found three times in {read:?}"
+            );
+        }
+    }
+}
+
+/// **The inside of a spaced slice is one text object, so a reader reads its
+/// words together** (ROADMAP CD-19; H2 and F5 of the review of CD-19's fix).
+///
+/// A slice is the stretch of one run, at one level, that one standard face
+/// draws, and it needs two font resources wherever it holds a character past
+/// `WinAnsiEncoding`: its Greek, Cyrillic, Hebrew or Arabic letters are the
+/// overflow font's and its word spaces the face's own, a text object at each
+/// change. Under `word-spacing` or `letter-spacing` each object starts a
+/// spacing past where the one before it ended, and `TextDevice` carries a
+/// reader's pen across spacing only into a right-to-left letter after
+/// right-to-left text. Written at the run's `Tw`, the glyphs after the
+/// overflow font's code-32 letter were moved over some of those gaps; written
+/// at `0 Tw` (CD-19), every gap is where layout put it, and the reader cut the
+/// slice at each of them:
+///
+/// - a Greek or Cyrillic cell of a table with no `dir`, at
+///   `word-spacing: 1em`, was cut after each word, and its last word, glued
+///   to the right-to-left cell beside it, was read with that cell, right to
+///   left by its majority: `αβ | ספרγδ` (79 books of the review's probes in a
+///   default build that conserved at 9297d2d and 56dfd93, every one of which
+///   conserves again; with `bundled-fonts` the stand-in draws the letters and
+///   none was lost);
+/// - an Arabic paragraph letter-spaced by `0.55em` and justified was cut
+///   before each word space, a text object of its own `0.55em` past its
+///   word, and its words were read in the order drawn, `نعرف | أصبحنا`.
+///
+/// The inside of such a slice, from its first glyph that is not white space
+/// to its last, is one text object now, the stretches of each resource
+/// pieces of it, and is read as one line, as a `WinAnsiEncoding` slice, one
+/// string, always was.
+#[test]
+fn the_inside_of_a_spaced_slice_is_one_text_object() {
+    let greek = "<table><tr><td>\u{3B1}\u{3B2} \u{3B3}\u{3B4}</td>\
+                 <td>\u{5E1}\u{5E4}\u{5E8}</td></tr></table>";
+    let cyrillic = "<table><tr><td>\u{43F}\u{440}\u{438}\u{432}\u{435}\u{442} \
+                    \u{43C}\u{438}\u{440}</td><td>\u{643}\u{62A}\u{627}\u{628}</td></tr></table>";
+    let arabic = "<p dir=\"rtl\">\u{639}\u{648}\u{627}\u{645}\u{644} \u{639}\u{62F}\u{651}\u{629} \
+                  \u{648}\u{642}\u{62F} <i>?! -- ?!</i> \u{623}\u{635}\u{628}\u{62D}\u{646}\u{627} \
+                  \u{646}\u{639}\u{631}\u{641} \u{627}\u{644}\u{622}\u{646} \
+                  \u{627}\u{644}\u{645}\u{648}\u{627}\u{62F}\u{651}.</p>";
+    let books = [
+        (
+            "he",
+            "td { word-spacing: 1em }",
+            greek,
+            vec!["\u{3B1}\u{3B2}", "\u{3B3}\u{3B4}", "\u{5E1}\u{5E4}\u{5E8}"],
+        ),
+        (
+            "he",
+            "td { word-spacing: 0.6em }",
+            greek,
+            vec!["\u{3B1}\u{3B2}", "\u{3B3}\u{3B4}", "\u{5E1}\u{5E4}\u{5E8}"],
+        ),
+        (
+            "ar",
+            "p, td { word-spacing: 1em }",
+            cyrillic,
+            vec!["\u{43C}\u{438}\u{440}", "\u{643}\u{62A}\u{627}\u{628}"],
+        ),
+        (
+            "ar",
+            "p { letter-spacing: 0.55em; text-align: justify; margin: 0 20% }",
+            arabic,
+            vec![
+                "\u{623}\u{635}\u{628}\u{62D}\u{646}\u{627}",
+                "\u{646}\u{639}\u{631}\u{641}",
+            ],
+        ),
+    ];
+    for (language, style, body, words) in books {
+        let bytes = styled_book(language, style, body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let page = doc.page(0).expect("a page");
+        let text = page.text().plain_text();
+        for verdict in [
+            conservation(&bytes, &doc),
+            conservation_in_logical_order(&bytes, &doc),
+        ] {
+            assert!(verdict.holds(), "`{style}`, {body}: {text:?} {verdict:?}");
+        }
+        for word in words {
+            assert!(
+                !page.text().search(word).is_empty(),
+                "`{style}`, {body}: {word:?} is not found in {text:?}"
+            );
+        }
+        let over = overprinted(&doc);
+        assert!(
+            over.is_empty(),
+            "`{style}`, {body}: a glyph is drawn over another: {over:?}"
+        );
+    }
+}
+
+/// **A spaced slice is one text object only where its line reads it whole,
+/// and a slice no spacing parts is written as before** (ROADMAP CD-19).
+///
+/// Three kinds of slice keep a text object at each change of resource, each
+/// because written whole it read worse than in its pieces, which a reader
+/// reads in the order drawn, the order written:
+///
+/// - **the white space at a slice's ends**: written with the slice, the word
+///   space after `عوامل` drew the Arabic word's line up to the URL beside it,
+///   and ruling 14, reading the two as one line whose Latin letters are the
+///   more, read `https://example.org/ عوامل`;
+/// - **a left-to-right slice inside right-to-left text**, at level 2:
+///   `Łódź Kraków ő`, whose `Ł`, `ź` and `ő` the overflow font draws, joined
+///   the Hebrew either side into such a line, read left to right;
+/// - **a slice holding an embedding or override formatting character**:
+///   with its `LEFT-TO-RIGHT OVERRIDE` on one line with the Hebrew word
+///   drawn before it, `שלום \u{202D}ab\u{202C} עולם` read the word backwards.
+///
+/// And a run whose spacing opens no gap a reader parts two objects at —
+/// under half an em, and with none at all — is written as before: one text
+/// object for each change of resource in a slice of neutrals as in any
+/// other.
+#[test]
+fn a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whole() {
+    const HE: [&str; 12] = [
+        "\u{5E9}\u{5DC}\u{5D5}\u{5DD}",
+        "\u{5E2}\u{5D5}\u{5DC}\u{5DD}",
+        "\u{5DE}\u{5DC}\u{5D7}\u{5DE}\u{5D4}",
+        "\u{5E1}\u{5E4}\u{5E8}",
+        "\u{5D1}\u{5D9}\u{5EA}",
+        "\u{5D2}\u{5D3}\u{5D5}\u{5DC}",
+        "\u{5D0}\u{5D5}\u{5E8}",
+        "\u{5D9}\u{5D5}\u{5DD}",
+        "\u{5D1}\u{5E8}\u{5D0}\u{5E9}\u{5D9}\u{5EA}",
+        "\u{5D1}\u{5E8}\u{5D0}",
+        "\u{5D0}\u{5DC}\u{5D4}\u{5D9}\u{5DD}",
+        "\u{5D4}\u{5D0}\u{5E8}\u{5E5}",
+    ];
+    let s = |i: usize| HE[i % HE.len()];
+    let five = |shape: &dyn Fn(usize) -> String| -> String {
+        (0..5).map(|k| shape(k * 3)).collect::<Vec<_>>().join(" ")
+    };
+    let latin = five(&|i| {
+        format!(
+            "{} {} \u{141}\u{F3}d\u{17A} Krak\u{F3}w \u{151} {}.",
+            s(i),
+            s(i + 1),
+            s(i + 2)
+        )
+    });
+    let url = "\u{639}\u{648}\u{627}\u{645}\u{644} https://example.org/a_(b) \
+               \u{639}\u{62F}\u{651}\u{629} \u{648}\u{642}\u{62F}.";
+    let mut conserving = vec![(
+        "he",
+        "p { word-spacing: 0.5em; margin: 0 20% }".to_owned(),
+        format!("<p dir=\"rtl\">{latin}</p>"),
+    )];
+    for style in [
+        "p { text-align: justify; margin: 0 30% }",
+        "p { word-spacing: 0.6em; margin: 0 20% }",
+        "p { letter-spacing: 0.3em; text-align: justify; margin: 0 25% }",
+    ] {
+        conserving.push(("ar", style.to_owned(), format!("<p dir=\"rtl\">{url}</p>")));
+    }
+    for (language, style, body) in &conserving {
+        let bytes = styled_book(language, style, body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let text = doc.page(0).expect("a page").text().plain_text();
+        for verdict in [
+            conservation(&bytes, &doc),
+            conservation_in_logical_order(&bytes, &doc),
+        ] {
+            assert!(verdict.holds(), "`{style}`, {body}: {text:?} {verdict:?}");
+        }
+    }
+
+    let overridden = five(&|i| {
+        format!(
+            "{} \u{202D}ab\u{202C} {} \u{202E}cd\u{202C} {}.",
+            s(i),
+            s(i + 1),
+            s(i + 2)
+        )
+    });
+    let style = "p { word-spacing: 1em; margin: 0 20% }";
+    let body = format!("<p dir=\"rtl\">{overridden}</p>");
+    let bytes = styled_book("he", style, &body);
+    let doc = Document::open(bytes).expect("the book opens");
+    let page = doc.page(0).expect("a page");
+    let text = page.text().plain_text();
+    for word in HE.iter().copied().chain(["ab", "cd"]) {
+        assert!(
+            !page.text().search(word).is_empty(),
+            "`{style}`, {body}: {word:?} is not found in {text:?}"
+        );
+    }
+
+    // No spacing, and spacing under half an em: every text object holds one
+    // resource, as it did before this.
+    let neutral = "\u{645}\u{62F}\u{631}\u{633}\u{629} \u{627}\u{644}\u{637}\u{627}\u{644}\u{628} \
+                   \u{628}\u{64A}\u{62A} \u{665}\u{66A} <b>\u{643}\u{628}\u{64A}\u{631}</b> \
+                   \u{646}\u{648}\u{631}";
+    for style in ["", "p { word-spacing: 4px }"] {
+        let bytes = styled_book("ar", style, &format!("<p>{neutral}</p>"));
+        let doc = Document::open(bytes).expect("the book opens");
+        let cos = doc.cos();
+        let pages = tinker_pdf_cos::pages::collect(cos);
+        let page = pages.first().expect("one page");
+        let content =
+            String::from_utf8_lossy(&tinker_pdf_cos::pages::content_bytes(cos, page)).into_owned();
+        for object in content.split("BT").skip(1) {
+            assert!(
+                object.matches(" Tf").count() <= 1,
+                "under `{style}` a text object holds two resources: BT{object}"
             );
         }
     }

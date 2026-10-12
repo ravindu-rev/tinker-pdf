@@ -5680,6 +5680,14 @@ pub(super) fn mark_at(start: f64, width: f64, font_size: f64, exact: bool) -> f6
 /// its own, and ruling 14's rejoin allows the same.
 const RESUMED_WITHIN: f64 = 0.5;
 
+/// How far apart, in ems, two text objects of a slice may start before a
+/// reader of the page may part them ([`draw_coded`]'s *One text object for
+/// the inside of a spaced slice*): [`RESUMED_WITHIN`], less a tenth of it so
+/// that no gap a rounding takes past half an em is left out. A run whose
+/// `letter-spacing`, and after a word space its `word-spacing` too, opens no
+/// gap that wide is written as it always was.
+const PARTED_FROM: f64 = RESUMED_WITHIN * 0.9;
+
 /// Where [`draw_coded`] draws a mark of no advance that opens a
 /// left-to-right slice and rides on nothing in it, its letter drawn by the
 /// run or face segment before — styled apart from it, or, in a sans-serif or
@@ -5742,7 +5750,8 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// always did, so a slice with no mark is written as cd407d5 wrote it
 /// (measured on the round-3 and round-4 probes' mark-free books,
 /// letter-spaced ones among them) but for the overflow font's `Tw` under
-/// `word-spacing` (below), and for one more kind of slice.
+/// `word-spacing` (below), and for two more kinds of slice, under spacing
+/// that may part their text objects ([`PARTED_FROM`]).
 ///
 /// # One text object for neutrals a reader undoes
 ///
@@ -5762,7 +5771,52 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// the sign at none ([`PieceText::UnspacedCodes`]), so the sign reads as a
 /// `WinAnsiEncoding` one does, a glyph of the space's string
 /// (`a_non_winansi_neutral_after_a_word_space_reads_with_its_number`). A
-/// slice of one resource is written as before.
+/// slice of one resource is written as before, and so is one whose run's
+/// spacing parts no two text objects: written whole under any spacing, as
+/// first fixed, a book with none was other bytes and read the same (16
+/// books of the hunt's; review of CD-19's fix). Two shapes read worse for it
+/// than at 56dfd93, and ROADMAP CD-19 keeps them: a sign after European
+/// digits before a bold word in Arabic at `word-spacing: 1em`, `25٪ <b>W</b>`,
+/// read before its number; and with `bundled-fonts` an ARABIC COMMA after a
+/// number in justified Hebrew, `N، <b>W</b>`, whose space starts at the bold
+/// word's end and draws the comma's line up to it.
+///
+/// # One text object for the inside of a spaced slice
+///
+/// A slice that holds a character past `WinAnsiEncoding` needs two
+/// resources, the overflow font for that character and the face's own for
+/// its word spaces, and each change of resource started a text object. Under
+/// spacing each starts a spacing past where the one before it ended, and a
+/// reader cut the slice wherever that passed half an em and `TextDevice`
+/// carries no pen, which is everywhere but into a right-to-left letter after
+/// right-to-left text: a Greek or Cyrillic word ended at every stretched word
+/// space, and an Arabic paragraph letter-spaced by `0.55em` and justified at
+/// every word space, a text object `0.55em` past its word. While the
+/// overflow font was written at the run's `Tw` the glyphs after its code-32
+/// letter were moved over some of those gaps (below); written at `0 Tw`
+/// every gap is where layout put it, and the pieces were read apart — the
+/// last word of a Greek table cell glued to the right-to-left cell beside
+/// it and read with that cell, `αβ | ספרγδ` (H2 of the review of CD-19's
+/// fix), and an Arabic paragraph's words in the order drawn. So **the inside
+/// of a spaced slice is one text object**, from its first unit that is not
+/// white space to its last, each change of resource a piece of it
+/// ([`PageBuilder::text_pieces`]), and is read as one line, as a slice of one
+/// resource, one string, always was
+/// (`the_inside_of_a_spaced_slice_is_one_text_object`). The white space at
+/// either end of it stays a text object of its own, and so does every change
+/// of resource of a slice [`joins_its_inside`] leaves in pieces, each read in
+/// the order drawn, the order written: written whole, the word space after a
+/// right-to-left word drew the word's line up to a Latin run beside it, and
+/// ruling 14 read the two as one line whose Latin letters were the more
+/// (`a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whole`).
+/// A run whose spacing opens no gap a reader parts two objects at
+/// ([`PARTED_FROM`]) is written as before. It costs one shape the review's
+/// probes hold: a table with no `dir` whose cell `abc (x).` touches a
+/// right-to-left cell (`border-spacing: 0; padding: 0`) read whole only
+/// because that cell was cut in two; whole, the row draws what a
+/// right-to-left paragraph draws for `أصبحنا نعرف.abc (x)`, and reads so
+/// (2 books in a default build and 4 with `bundled-fonts`, none of which
+/// conserved before; ROADMAP CD-19).
 ///
 /// # Where the letter a mark rides on is drawn
 ///
@@ -5791,11 +5845,12 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// [`PageBuilder::text_pieces`] writes at `0 Tw` between the pieces that
 /// take the run's. Every glyph of it is drawn where layout put it, under
 /// `word-spacing` and justification alike. A word spacing that is a zero is
-/// written as it was, so a book with no mark that sets neither is written
-/// byte for byte as before; in a slice that holds a mark the glyph after the
-/// code-32 letter goes on in its string now, where it was a piece of its own
-/// at the same place, so such a book is other bytes even with no word
-/// spacing, and reads the same.
+/// written as it was, so a book with no mark that sets no word spacing, and
+/// no `letter-spacing` that parts two text objects ([`PARTED_FROM`]), is
+/// written byte for byte as before; in a slice that holds a mark the glyph
+/// after the code-32 letter goes on in its string now, where it was a piece
+/// of its own at the same place, so such a book is other bytes even with no
+/// word spacing, and reads the same.
 ///
 /// Until October 2026 (ROADMAP CD-19) the font was written at the run's
 /// `Tw`, and in its string every glyph after the code 32 was drawn a
@@ -5893,18 +5948,41 @@ fn draw_coded(
     // Whether the slice holds a mark: a mark, and what follows one, is a
     // piece of the object open.
     let whole = slice.chars().any(|c| bidi_class(c) == BidiClass::NSM);
+    // Whether the run is spaced so that a reader may part two text objects
+    // of it: each starts a spacing past where the one before it ended, and
+    // `TextDevice` resumes a line across an object's end only within half an
+    // em ([`PARTED_FROM`]).
+    let spaced = run
+        .letter_spacing
+        .max(run.letter_spacing + run.word_spacing)
+        > run.font_size * PARTED_FROM;
     // Whether the slice is neutrals [`coded_order`] draws in their level's
     // order for a reader to undo with their line: at a right-to-left level,
-    // on a line that holds a right-to-left character, with none of their own.
-    let undone = run.bidi_line_rtl
+    // on a line that holds a right-to-left character, with none of their
+    // own. Only a spaced run's: under less spacing no reader parts its
+    // objects, and the slice is written as it always was.
+    let undone = spaced
+        && run.bidi_line_rtl
         && run.bidi_level.is_some_and(|level| level % 2 == 1)
         && !slice.chars().any(opens_right_to_left);
     // Whether the slice is one text object, each stretch of a resource a
     // piece of it (see above): one that holds a mark, or neutrals a reader
-    // undoes. Any other starts an object at a new resource.
+    // undoes. Any other starts an object at a new resource, but inside a
+    // spaced slice (below).
     let one_object = whole || undone;
     let start = x;
     let order = coded_order(run, slice);
+    // The inside of a spaced slice, from its first unit that is not white
+    // space to its last, is one text object where [`joins_its_inside`]; the
+    // white space at either end stays a text object of its own (see above).
+    let inside = if spaced && joins_its_inside(run, slice) {
+        order
+            .iter()
+            .position(|(c, _)| !c.is_whitespace())
+            .zip(order.iter().rposition(|(c, _)| !c.is_whitespace()))
+    } else {
+        None
+    };
 
     for (at, &(ch, rides)) in order.iter().enumerate() {
         let mark = rides || bidi_class(ch) == BidiClass::NSM;
@@ -5946,7 +6024,8 @@ fn draw_coded(
             .is_some_and(|open| open.resource == coded.resource());
         let continues = !mark && !after_mark && !alone && same;
         if !continues {
-            if !one_object {
+            let joined = one_object || inside.is_some_and(|(lo, hi)| lo < at && at <= hi);
+            if !joined {
                 flush(
                     page,
                     std::mem::take(&mut object),
@@ -6003,6 +6082,42 @@ fn draw_coded(
     }
     flush(page, object, size, baseline, run, frame);
     x
+}
+
+/// Whether the inside of a spaced `slice` of `run` is written as one text
+/// object ([`draw_coded`]'s *One text object for the inside of a spaced
+/// slice*): a slice at its paragraph's own left-to-right level or at a
+/// right-to-left level that holds no formatting character.
+///
+/// Not a left-to-right slice inside right-to-left text, at level 2 or above:
+/// read whole, `Łódź Kraków ő` in a right-to-left paragraph joined the
+/// Hebrew either side of it into a line whose Latin letters are the more,
+/// which ruling 14 reads as a left-to-right paragraph's, and the paragraph's
+/// words came back out of order; read in its pieces, each read in the order
+/// drawn, which is the order written (6 books of the K-11 review's hunt in
+/// a default build). And not a slice that holds an embedding, override or
+/// isolate formatting character (`Bidi_Class` `LRE` to `PDI`), which the
+/// overflow font draws: read whole, `שלום \u{202D}ab\u{202C} עולם
+/// \u{202E}cd\u{202C} מלחמה.` at `word-spacing: 1em` or letter-spaced and
+/// justified read its Hebrew words backwards and `ab` and `cd` were found
+/// no more, where in its pieces it read whole (4 books of the hunt).
+fn joins_its_inside(run: &TextRun, slice: &str) -> bool {
+    run.bidi_level
+        .is_none_or(|level| level == 0 || level % 2 == 1)
+        && !slice.chars().any(|c| {
+            matches!(
+                bidi_class(c),
+                BidiClass::LRE
+                    | BidiClass::RLE
+                    | BidiClass::LRO
+                    | BidiClass::RLO
+                    | BidiClass::PDF
+                    | BidiClass::LRI
+                    | BidiClass::RLI
+                    | BidiClass::FSI
+                    | BidiClass::PDI
+            )
+        })
 }
 
 /// The characters of a standard-14 `slice` of `run` in the order they are

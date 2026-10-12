@@ -259,7 +259,10 @@ as two text objects a stretched word space cut the line between them, which
 Arabic paragraph with no `dir`, at `word-spacing: 0.5em`, read its ARABIC
 PERCENT SIGN after the next word (V3 of the review of the third review's
 K-11 fix; `a_non_winansi_neutral_after_a_word_space_reads_with_its_number`,
-at `0.5em`, `0.6em` and `1em`). Where
+at `0.5em`, `0.6em` and `1em`). It is one only under spacing that may part
+two text objects (`paint::PARTED_FROM`, below): written whole under any
+spacing, as first fixed, a book with none was other bytes and read the
+same (16 of the hunt's books; review of CD-19's fix). Where
 a reader of the page would not undo a piece's level order it is written as
 typed still (`paint::neutrals_drawn_as_typed`): one the line alone, read
 in the direction a reader reads it in, resolves at other levels than its
@@ -328,46 +331,85 @@ a Latin word left a stretched word gap that only the moved glyph had closed,
 which `TextDevice` bridges since a gap no spacing accounts for ends the word
 before it ([content and text](content-and-text.md);
 `a_word_spaced_right_to_left_cell_after_a_latin_word_reads_whole`).
+**The inside of a spaced slice is one text object** (`paint::draw_coded`;
+review of CD-19's fix). A slice that holds a character past
+`WinAnsiEncoding` needs the overflow font for it and the face's own for its
+word spaces, and started a text object at each change of resource, each a
+spacing past where the one before it ended; a reader parts two objects past
+half an em, and `TextDevice` carries a pen across spacing only into a
+right-to-left letter after right-to-left text. While the overflow font was
+written at the run's `Tw` the glyphs after its code-32 letter were moved
+over some of those gaps; at `0 Tw` each gap stood where layout put it, and a
+Greek or Cyrillic table cell at `word-spacing: 1em` was cut after each word,
+its last word read with the right-to-left cell beside it, `αβ | ספרγδ` (79
+books of the review's probes in a default build that conserved at 9297d2d
+and 56dfd93), and an Arabic paragraph letter-spaced by `0.55em` and justified
+read its words in the order drawn. From its first unit that is not white
+space to its last, such a slice is one text object now, each change of
+resource a piece of it, wherever its run's spacing may part two objects —
+its `letter-spacing`, or after a word space its `letter-spacing` and
+`word-spacing` with what justification adds, past nine tenths of half an em
+(`paint::PARTED_FROM`) — at its paragraph's left-to-right level or at a
+right-to-left one, and holding no embedding, override or isolate formatting
+character (`paint::joins_its_inside`;
+`the_inside_of_a_spaced_slice_is_one_text_object`). The white space at its
+ends, a left-to-right slice inside right-to-left text and a slice holding
+such a character keep a text object at each change: written whole, each
+drew a line up to its neighbour that ruling 14 read worse
+(`a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whole`).
+It costs one shape the review's probes hold: a table with no `dir` whose
+cell `abc (x).` touches an Arabic cell (`border-spacing: 0; padding: 0`)
+at `word-spacing: 1em`, or `0.5em` with a letter-spacing of `0.1em`, read
+whole at 9297d2d and since only because the Arabic cell was cut in two;
+whole, the row draws exactly what a right-to-left paragraph draws for
+`أصبحنا نعرف.abc (x)`, and reads so (2 books in a default build, which
+conserve at none of those trees).
 **Measured, and what is left.** Over the synthetic probes of ROADMAP K-11
 and its reviews (the kit's 30 230 books a build, the hunt's 6 298, its 954
-sweeps and 12 minimised books, the code review's 2 688 and the fix-verify
-probes' 6 192 and 864; no corpus was fetched), neither build draws a glyph
-over another under `word-spacing` or justification, where 56dfd93 drew one
-so in 660 books in a default build (3 of the kit's, 179 of the hunt's, 12
-of its sweeps, both minimised books and 464 of the fix-verify probe's) and
-400 with `bundled-fonts`. Every overlap left is a negative
-`letter-spacing`'s, which layout itself sets, or, with `bundled-fonts`, a
-`U+200E`, `U+202A`, `U+202C` or `U+202D` that the stand-in draws as a glyph
-of no advance whose thousandth-of-an-em box lies on the glyph after it (8
-hunt books under word spacing and one with none, as at 9297d2d). Measured
-against the tree just before it, the font at `0 Tw` makes 66 of the kit's
-books conserve that did not (57 with `bundled-fonts`), 70 (57) of the
-hunt's, 18 (8) of the code review's and 233 (134) of the fix-verify
-probe's, and search finds 534 (464) more of the kit's books, 77 (62) more of
-the code review's — all 2 688 — and 836 (532) more of the fix-verify
-probe's. What the move had done for a few books is undone with it,
-each read right only because a moved glyph closed or widened a gap: 10
-books in a default build and 8 with `bundled-fonts` that conserved at
-56dfd93 do not — six (five) Arabic ones at `letter-spacing: 0.55em`,
-justified, whose word space, a text object of its own, starts more than
-half an em past the word before it, which the moved NOON had overrun; a
-Greek word before a Hebrew one at `word-spacing: 0.5001em` (a default
-build's), whose gap the moved λφα had closed; and three hunt books in each
-build — and one hunt book in each build that conserved and read whole at
-9297d2d too: `… <b>يوم</b> <i>?!</i> عوامل …` justified at
-`letter-spacing: 0.45em`, whose italic `?!` the writer draws as typed for a
-reader that reads it alone, now starts within three ems left of the bold
-word's last glyph, where `TextDevice` resumes a line drawn backwards, and
-reads `يوم !?` (ROADMAP CD-19 keeps these). Ruling 14's price probe (15 523
-books a build), measured with the K-11 review's sentence-end rule on top,
-finds three more in a default build and two with `bundled-fonts`, each
-letter-spaced by half an em and justified and each lost with or without
-that rule, one of which conserved at 9297d2d: `?!` before styled braces
-opening a Hebrew line, whose word after the closing brace, drawn after it
-and ending 47pt left of it, now reads as a line of its own (ROADMAP CD-19
-names them). On that probe, too, no glyph is drawn over another under
-`word-spacing` or justification, where 56dfd93 drew one so in 574 books
-(286 with `bundled-fonts`).
+sweeps and 12 minimised books, the code review's 2 688, the fix-verify
+probes' 6 192 and 864 and ruling 14's price probe's 15 523) and of the
+review of CD-19's fix (8 539 books a build across every overflow script,
+tables, glosses, marks and inline spacing, and 2 700 of word spacing and
+code 32; no corpus was fetched), neither build draws a glyph over another
+under `word-spacing` or justification, where 56dfd93 drew one so in 975
+books in a default build and 620 with `bundled-fonts` on the first six of
+those (3 of the kit's books on its probes that count overlaps and 296 on
+its others, 179 of the hunt's, 12 of its sweeps, both minimised books, 19 of
+the code review's and 464 of the fix-verify probe's; 660 (400) were counted
+at first, on the probes that counted overlaps, and the review of CD-19's
+fix counted the rest), 574 (286) on the price probe and 563 (101) on the
+review's. Every overlap left is a negative `letter-spacing`'s, which layout
+itself sets, or, with `bundled-fonts`, a `U+200E`, `U+202A`, `U+202C` or
+`U+202D` that the stand-in draws as a glyph of no advance whose
+thousandth-of-an-em box lies on the glyph after it (8 hunt books under word
+spacing and one with none, as at 9297d2d). Measured against the tree just
+before it, the font at `0 Tw` made 66 of the kit's books conserve that did
+not (57 with `bundled-fonts`), 70 (57) of the hunt's, 18 (8) of the code
+review's and 233 (134) of the fix-verify probe's, and search finds 534
+(464) more of the kit's books, 77 (62) more of the code review's — all
+2 688 — and 836 (532) more of the fix-verify probe's; and the inside of a
+spaced slice, one text object, makes 1 471 (1 580) more of the kit's books
+conserve, 207 (232) of the hunt's, 190 (215) of the code review's, 145
+(240) of the fix-verify probe's, 200 (325) of the price probe's and
+415 (449) of the review's. What the move had done for some books is undone
+with it, each read right only because a moved glyph closed or widened a
+gap, and ROADMAP CD-19 keeps them with their counts: a Hebrew paragraph
+with no `dir` that ends a number and a stop, `בראשית. אור ٦٠.` at
+`word-spacing: 0.5em` (a default build's), whose stop, alone at 9297d2d,
+now abuts the right-to-left run and is read first, since the comma
+tie-break asks for a right-to-left letter at the line's left end; italic
+or styled neutrals the writer draws for a reader that reads them alone
+where the reader resumes a line drawn backwards within three ems, among
+them `… <b>يوم</b> <i>?!</i> عوامل …` justified at `letter-spacing:
+0.45em`, which conserved and read whole at 9297d2d too and reads
+`يوم !?`, and `?!` before styled braces opening a Hebrew line, whose word
+after the closing brace, drawn after it and ending 47pt left of it, reads
+as a line of its own; a Greek word before a Hebrew one at `word-spacing:
+0.5001em` (a default build's), whose gap the moved λφα had closed and
+which K-11's carry does not cross after left-to-right text; and a sign
+after European digits, or (with `bundled-fonts`) an ARABIC COMMA after a
+number in justified Hebrew, whose slice of neutrals, one text object for a
+reader to undo, reads with the wrong neighbour.
 A slice that ends on a mark ends its text object a spacing less a millionth
 of an em from the next run, so a run that ends on a mark is not cut from
 what follows up to half an em of spacing, half an em included, and is cut
