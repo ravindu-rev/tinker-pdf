@@ -655,32 +655,36 @@ living in one feature's head.
     or quotation marks, which BD16 does not pair (`content-and-text.md` names
     both).
 
-    *A sentence's end, the ellipsis and the price: the owner's decision of
-    11 October 2026.* That an ellipsis ends a sentence — U+2026, U+2024,
-    U+2025, U+FE19 or a run of full stops — is the owner's decision, Ravindu
-    Wijegunawardhana's, taken with its price known: a right-to-left
-    paragraph whose line opens with an ellipsis before a bracket pair,
-    `…(نور) يوم` after a `<br/>`, draws exactly what a paragraph with no
-    `dir` draws for a line ending `(نور) يوم…`, and now reads as that one
-    does, the ellipsis last: `نور) يوم(…`, the pair the other way round as
-    well, since the line above that gave it its level is not on the line
-    (with the brackets styled apart, a book's structure tree still holds
-    their order). Of the K-11 review's 144 such books (Arabic, Hebrew and
-    pointed Hebrew, up to five kinds of bracket, twelve styles), 96 in a
-    default build and 83 with `bundled-fonts` that conserved at 56dfd93 do
-    not now; none of them conserved at 9297d2d. A probe of the price — 342
-    books for each opening, in each build: Arabic, Hebrew and pointed
-    Hebrew, three kinds of bracket, styled and not, nineteen styles — counts
-    the books that read worse than at 56dfd93, with the standard-14
-    overflow font written at `0 Tw` (ROADMAP CD-19) under the rule as it
-    landed, opening after a `<br/>` with `…` 291 (241 with
-    `bundled-fonts`), U+2024 297 (273), U+2025 297 (270), U+FE19 270
-    (195), `..` 288 (270) and `...` 277 (236); with `!!`
-    267 (212), `!?` 291 (231), `?!` 274 (231) and `??` 267 (192); and with
-    a closing quotation mark before stops, `".` 297 (256), `'.` 300 (285),
-    `».` 305 (239), `”.` 297 (237), `"...` 295 (257) and `”…` 315 (300) —
-    4 628 (3 925) in all, 4 613 (3 916) of which conserved there; `.`, `?`,
-    the ARABIC COMMA, `"` and `”` alone, which pay nothing more, are its
+    *A sentence's end, the ellipsis and the price: the owner's decisions of
+    11 and 12 October 2026.* That an ellipsis ends a sentence — U+2026,
+    U+2024, U+2025, U+FE19 or a run of full stops — is the owner's decision,
+    Ravindu Wijegunawardhana's, of 11 October 2026; and on 12 October 2026
+    the owner accepted **the whole price of the rule as built**, with its
+    figures known: a run of `!` and `?`, a closing quotation mark before
+    stops, and an ellipsis. A right-to-left paragraph whose line opens with
+    one of them before a bracket pair, `…(نور) يوم` or `?!(نور) يوم` after a
+    `<br/>` or a soft wrap, draws exactly what a paragraph with no `dir`
+    draws for a line ending `(نور) يوم…`, and now reads as that one does, its
+    ending last: `نور) يوم(…`, the pair the other way round as well, since
+    the line above that gave it its level is not on the line (with the
+    brackets styled apart, a book's structure tree still holds their order).
+    Measured again on the tree that carries this text, the fix of the
+    review of CD-19's fix, against 56dfd93, in a default build and (in
+    brackets) with `bundled-fonts`: of the K-11 review's 144 such books (Arabic, Hebrew and
+    pointed Hebrew, up to five kinds of bracket, twelve styles), 96 (83)
+    that conserved at 56dfd93 do not now, none of which conserved at
+    9297d2d. A probe of the price — 342 books for each opening, in each
+    build: Arabic, Hebrew and pointed Hebrew, three kinds of bracket, styled
+    and not, nineteen styles — counts the books that read worse than at
+    56dfd93, opening after a `<br/>` with `…` 291 (241), U+2024 297 (273),
+    U+2025 297 (270), U+FE19 270 (195), `..` 288 (270) and `...` 277 (236);
+    with `!!` 267 (212), `!?` 291 (231), `?!` 274 (231) and `??` 267 (192);
+    and with a closing quotation mark before stops, `".` 297 (256), `'.`
+    300 (285), `».` 305 (239), `”.` 297 (237), `"...` 295 (257) and `”…` 315
+    (300) — 4 628 (3 925) in all, 4 613 (3 916) of which conserved there:
+    1 093 (866) of the runs of `!` and `?`, 1 800 (1 565) of the closing
+    quotation marks before stops and 1 720 (1 485) of the ellipses. `.`,
+    `?`, the ARABIC COMMA, `"` and `”` alone, which pay nothing more, are its
     controls. (Measured with the rule alone on 56dfd93, `!!` was 273 and
     `?!` 270 in a default build, 4 630 in all and 4 618 conserving there:
     the font at `0 Tw` reads six `!!` books right that the rule alone did
@@ -690,25 +694,35 @@ living in one feature's head.
     styled braces opening a Hebrew line letter-spaced by half an em and
     justified, in a default build, which conserved at 9297d2d, at 56dfd93
     and with the rule alone and does not with the font at `0 Tw`, with or
-    without the rule (ROADMAP CD-19 names it). With styled brackets 667 of
+    without the rule (ROADMAP CD-19 keeps it). With styled brackets 667 of
     the closing quotation marks' (543), whose structure tree read in order
-    at 9297d2d where their page did not, lose that too: the line's `".`
-    comes back `."`; and so do three `'.` books in each build at
-    `word-spacing: 0.5em`, whose structure tree read in order at 9297d2d
-    and with the rule alone but not at 56dfd93, nor with the font at
-    `0 Tw` under the rule. Under the font at `0 Tw`, too, nine of the
-    price's books in a default build and six with `bundled-fonts` — `!?`
-    and `?!` before styled brackets at `word-spacing: 0.6em` and `1em` —
-    lose their structure tree's order, which neither the rule alone nor
-    the font at `0 Tw` alone loses. Opening after a space, where a soft
-    wrap may put `"`, `'`, `”…` or an ellipsis first on a line, 22 of the
-    probe's 1 197 books pay it (20); one more in each build, the ARABIC
-    COMMA's control letter-spaced by half an em and justified, reads worse
-    than at 56dfd93 with the font at `0 Tw`, with or without the rule
-    (ROADMAP CD-19). The owner's decision names the
-    ellipsis; the price of a run of `!` and `?` and of a closing quotation
-    mark before stops, the same picture's, came with the fix the owner
-    approved (K-11 review, finding V1), and is recorded here with it.
+    at 9297d2d and at 56dfd93 where their page did not, lose that too: the
+    line's `".` comes back `."`. Opening after a space, where a soft wrap
+    may put `"`, `'`, `”…` or an ellipsis first on a line, 22 of the probe's
+    1 197 books pay it (20): 16 (18) with a closing quotation mark and 6 (2)
+    with an ellipsis; the ARABIC COMMA's control there, letter-spaced by
+    half an em and justified, which read worse with the font at `0 Tw` until
+    that fix, reads as at 56dfd93 again. All of it is the price the owner
+    accepted.
+
+    *What the owner's decision does not cover.* The rule as built takes
+    any run of the eleven stops, so a run that mixes them, `.!` or `!…`,
+    opening a right-to-left line before a styled pair after a `<br/>`, pays
+    the same: of the review's probe of them (H6 of the review of CD-19's
+    fix), 4 (4) books with `.!` and 4 (4) with `!…` that conserved at
+    56dfd93 do not now, none of which conserved at 9297d2d, and at
+    `word-spacing: 0.6em` two of each in each build lose their structure
+    tree's order as well, as `?!` does there (below). The decision
+    names none of them, and whether they are of its price is the owner's to
+    say (ROADMAP CD-19 keeps them). Nor is a book the price that loses more
+    than the rule costs where the overflow font at `0 Tw` meets it: three
+    `'.` books in each build at `word-spacing: 0.5em`, whose structure tree
+    read in order at 9297d2d and with the rule alone but not at 56dfd93, nor
+    under both now; and nine of the price's books in a default build and six
+    with `bundled-fonts` — `!?` and `?!` before styled brackets at
+    `word-spacing: 0.6em` and `1em` — that lose their structure tree's order,
+    which neither the rule alone nor the font at `0 Tw` alone loses. ROADMAP
+    CD-19 keeps them as findings.
 
     *The tests that hold it.* `tinker-pdf-shape`'s `bidi.rs`:
     `a_pair_drawn_facing_outward_reads_in_the_direction_that_pairs_it`,

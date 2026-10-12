@@ -202,8 +202,10 @@ the pen across its stretched space as any other does, so the cell is one line
 to the device whether or not a moved glyph closes the gap: on the third
 review's probe, the right-to-left tables at `word-spacing: 1em` that conserve
 go from 20 to 42 of 48 Hebrew ones (40 with `bundled-fonts`) and from 28 to
-36 of 48 Arabic ones, and no book of K-11's probes that conserved, read
-whole or was found by search before stops doing so. `Tw` is taken after a
+36 of 48 Arabic ones, and, measured with this rule alone on 56dfd93, no
+book of K-11's probes that conserved, read whole or was found by search
+there stopped doing so (what the overflow font at `0 Tw`, written after it,
+costs is ROADMAP CD-19's to say). `Tw` is taken after a
 code 32 the font decodes to white space — a two-byte one too, as the
 interpreter moves the pen, though 9.3.3 applies it to a single-byte one
 alone — so the device is carried to where the interpreter drew the next
@@ -293,12 +295,17 @@ rightmost unit, it left `?!`, `...`, `."` and `…` to turn the line (K-11
 review, finding V1, 76 books in a default build and 82 with
 `bundled-fonts`). A closing quotation mark alone ends no sentence, nor does a
 closing bracket. That an ellipsis ends one is the owner's decision (11
-October 2026), and its price is named by ruling 14: a right-to-left line
-that opens with an ellipsis before a pair, `…(نور) يوم` after a `<br/>`,
-draws what the line with no `dir` draws and reads as that one does, its
-ellipsis last, `نور) يوم(…` (read alone, neither line can see the line above
-that gave the pair its level). As first proposed the
-tie-break asked neither, and read every such line backwards
+October 2026), and on 12 October 2026 the owner accepted the whole price of
+the rule as built, with its figures known, naming runs of `!` and `?`, a
+closing quotation mark before stops and ellipses (ruling 14 gives each
+figure): a right-to-left line that opens with one of them before a pair,
+`…(نور) يوم` or `?!(نور) يوم` after a `<br/>` or a soft wrap, draws what the
+line with no `dir` draws and reads as that one does, its ending last,
+`نور) يوم(…` (read alone, neither line can see the line above that gave the
+pair its level). A run that mixes the stops, `.!` or `!…`, which the rule
+as built takes as well, pays the same, and the owner's decision does not
+name it; ruling 14 counts it, and ROADMAP CD-19 keeps it for the owner.
+As first proposed the tie-break asked neither, and read every such line backwards
 (`.and 2) close it )שלום( open the file )Step 1`; review of the K-11 fix).
 Applying L2 to levels resolved over the drawn line, which
 is what this did first, read `نسبة 50%` back as `نسبة %50`. A visually
