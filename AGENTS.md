@@ -13,6 +13,10 @@ Read both before changing code. What to work on next is
 
 The owner is Ravindu Wijegunawardhana.
 
+**If [.claude/HANDOFF.md](.claude/HANDOFF.md) exists, read it first.** It
+says where the last session stopped, which branch the work continues on, and
+what comes next.
+
 ## Commits
 
 - Commit as **Ravindu Wijegunawardhana <ravindudenuwan.dev@gmail.com>**,
